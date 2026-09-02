@@ -21,6 +21,7 @@ exports (
     renderer_add_light, renderer_remove_light, renderer_model_count, renderer_model,
     renderer_draw_calls, renderer_instance_count,
     renderer_set_clear_color, renderer_set_fxaa, renderer_set_bloom, renderer_set_msaa,
+    renderer_set_target,
     renderer_set_bloom_params, renderer_default_program,
     renderer_load_texture, renderer_release_texture, renderer_texture_count,
     read_pixel
@@ -77,6 +78,8 @@ extern ae3d_gl_fbo_attach_depth(fbo: int, width: int, height: int) -> int
 extern ae3d_gl_renderbuffer_delete(rbo: int)
 extern ae3d_gl_fbo_complete() -> int
 extern ae3d_gl_read_pixel(x: int, y: int) -> int
+extern ae3d_offscreen_bind(target: ptr)
+extern ae3d_offscreen_unbind()
 extern ae3d_image_load(path: string) -> ptr
 extern ae3d_image_solid(width: int, height: int, r: int, g: int, b: int, a: int) -> ptr
 extern ae3d_image_free(img: ptr)
@@ -144,6 +147,7 @@ struct GLRenderer {
     textures: ptr
     frustum: ptr
     skybox: ptr
+    target: ptr
 
     default_program: int
     fxaa_program: int
@@ -489,7 +493,7 @@ load_model_textures(r: *GLRenderer, m: *Model) {
 }
 
 resolve_material_texture(r: *GLRenderer, material: *Material) {
-    if material.texture_path == "" || material.texture_id != 0 { return }
+    if core.text(material.texture_path) == "" || material.texture_id != 0 { return }
     id = renderer_load_texture(r, material.texture_path)
     if id == 0 { id = r.default_texture }
     material.texture_id = id
@@ -603,6 +607,21 @@ read_pixel(x: int, y: int) -> int {
 
 renderer_default_program(r: *GLRenderer) -> int {
     return r.default_program
+}
+
+// With a target set the renderer draws into it rather than the window's
+// framebuffer, and every place that would return to framebuffer zero returns to
+// the target instead.
+renderer_set_target(r: *GLRenderer, target: ptr) {
+    r.target = target
+}
+
+bind_output(r: *GLRenderer) {
+    if r.target != null {
+        ae3d_offscreen_bind(r.target)
+    } else {
+        ae3d_gl_fbo_bind(0)
+    }
 }
 
 renderer_set_skybox(r: *GLRenderer, skybox: ptr) {
@@ -743,6 +762,7 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
         active_light = list.get_raw(r.lights, 0) as *Light
     }
 
+    bind_output(r)
     post_active = begin_post_processing(r)
 
     set_wireframe(r, core.debug_enabled())
@@ -1033,14 +1053,14 @@ begin_post_processing(r: *GLRenderer) -> bool {
 
     ae3d_gl_fbo_bind(r.post_fbo)
     if ae3d_gl_fbo_complete() != 1 {
-        ae3d_gl_fbo_bind(0)
+        bind_output(r)
         return false
     }
     return true
 }
 
 resolve_post_processing(r: *GLRenderer) {
-    ae3d_gl_fbo_bind(0)
+    bind_output(r)
     set_depth_test(r, false)
     ae3d_gl_set_depth_mask(0)
     set_blend(r, false)

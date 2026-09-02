@@ -1,0 +1,96 @@
+// Rendering with no window at all: a hidden context, a framebuffer object, and a
+// readback. This is the path the editor's viewport takes, so it asserts the same
+// thing the windowed test does, that geometry was actually rasterised.
+
+import std.mem
+import a3d.core
+import a3d.gl
+import a3d.offscreen
+import a3d.loader
+
+const WIDTH = 320
+const HEIGHT = 240
+
+var failures = 0
+
+record_failure(reason: string) {
+    println("FAIL ${reason}")
+    failures = failures + 1
+}
+
+check_true(name: string, condition: bool) {
+    if !condition { record_failure(name) }
+}
+
+pixel_at(pixels: ptr, x: int, y: int) -> int {
+    offset = (y * WIDTH + x) * 4
+    red = mem.get_byte(pixels, offset)
+    green = mem.get_byte(pixels, offset + 1)
+    blue = mem.get_byte(pixels, offset + 2)
+    return (red << 16) | (green << 8) | blue
+}
+
+main() {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("offscreen: SKIP no OpenGL context available")
+        return
+    }
+
+    renderer = gl.renderer_new()
+    backend = gl.backend(renderer)
+    if !core.backend_init(&backend, context, WIDTH, HEIGHT) {
+        println("offscreen: FAIL the backend would not initialise")
+        return
+    }
+
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    check_true("target created", target != null)
+    if target == null { return }
+    check_true("target size", offscreen.target_width(target) == WIDTH &&
+                              offscreen.target_height(target) == HEIGHT)
+    check_true("byte size", offscreen.target_byte_size(target) == WIDTH * HEIGHT * 4)
+    gl.renderer_set_target(renderer, target)
+
+    cube = loader.cube(1.0)
+    core.model_set_scale(cube, 40.0, 40.0, 40.0)
+    core.model_matte(cube, 0.9, 0.2, 0.15)
+    core.backend_add_model(&backend, cube)
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 0.0, 120.0))
+    light = core.light_sun(core.vec3(0.0, 0.0, 1.0))
+
+    core.backend_render(&backend, cam, light)
+    pixels = offscreen.target_pixels(target)
+    check_true("readback returned pixels", pixels != null)
+    if pixels == null { return }
+
+    centre = pixel_at(pixels, WIDTH / 2, HEIGHT / 2)
+    corner = pixel_at(pixels, 2, 2)
+    check_true("centre was rasterised", centre != 0)
+    check_true("corner is the clear colour", corner == 0)
+    check_true("a draw call was issued", gl.renderer_draw_calls(renderer) >= 1)
+
+    // Resizing must keep rendering, which is what happens when a panel is dragged.
+    check_true("resized", offscreen.target_resize(target, 200, 150))
+    check_true("resized width", offscreen.target_width(target) == 200)
+    core.backend_render(&backend, cam, light)
+    check_true("still drawing after a resize", gl.renderer_draw_calls(renderer) >= 1)
+
+    println("  offscreen ${WIDTH}x${HEIGHT}: centre=${centre} corner=${corner}")
+
+    core.camera_free(cam)
+    core.light_free(light)
+    core.backend_cleanup(&backend)
+    offscreen.target_destroy(target)
+    core.model_free(cube)
+    gl.renderer_free(renderer)
+    offscreen.context_destroy(context)
+
+    if failures == 0 {
+        println("offscreen: all checks passed")
+    } else {
+        println("offscreen: ${failures} failure(s)")
+    }
+}

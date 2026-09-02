@@ -174,6 +174,18 @@ void   ae3d_gl_renderbuffer_delete(int rbo);
 int    ae3d_gl_fbo_complete(void);
 int    ae3d_gl_read_pixel(int x, int y);
 
+void  *ae3d_offscreen_context(int width, int height);
+void   ae3d_offscreen_context_destroy(void *context);
+void  *ae3d_offscreen_create(int width, int height);
+int    ae3d_offscreen_resize(void *target, int width, int height);
+void   ae3d_offscreen_bind(void *target);
+void   ae3d_offscreen_unbind(void);
+int    ae3d_offscreen_width(void *target);
+int    ae3d_offscreen_height(void *target);
+int    ae3d_offscreen_byte_size(void *target);
+void  *ae3d_offscreen_read(void *target);
+void   ae3d_offscreen_destroy(void *target);
+
 int    ae3d_meshfile_save(const char *path, void *mesh, void *instances);
 void  *ae3d_meshfile_load(const char *path);
 void  *ae3d_meshfile_mesh(void *handle);

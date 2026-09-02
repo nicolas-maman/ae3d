@@ -1,0 +1,81 @@
+// Rendering to a pixel buffer instead of a window.
+//
+// This is what lets the 3D view live inside a toolkit that owns the real window
+// and has no GPU surface of its own: the scene is drawn on the GPU into a
+// framebuffer object, read back, and handed over as RGBA rows for the toolkit to
+// composite. The readback is the cost of not having a native GPU surface
+// (aether-lang-dev/aether-ui#92); everything before it is ordinary GPU work.
+
+import a3d.core
+
+exports (
+    Target,
+    context_create, context_destroy,
+    target_create, target_destroy, target_resize,
+    target_bind, target_unbind,
+    target_width, target_height, target_byte_size, target_pixels
+)
+
+extern ae3d_offscreen_context(width: int, height: int) -> ptr
+extern ae3d_offscreen_context_destroy(context: ptr)
+extern ae3d_offscreen_create(width: int, height: int) -> ptr
+extern ae3d_offscreen_resize(target: ptr, width: int, height: int) -> int
+extern ae3d_offscreen_bind(target: ptr)
+extern ae3d_offscreen_unbind()
+extern ae3d_offscreen_width(target: ptr) -> int
+extern ae3d_offscreen_height(target: ptr) -> int
+extern ae3d_offscreen_byte_size(target: ptr) -> int
+extern ae3d_offscreen_read(target: ptr) -> ptr
+extern ae3d_offscreen_destroy(target: ptr)
+
+struct Target {
+    handle: ptr
+}
+
+// A hidden window carrying an OpenGL 4.1 core context. Nothing is ever drawn to
+// it; it exists because a context needs a surface to be created against.
+context_create(width: int, height: int) -> ptr {
+    return ae3d_offscreen_context(width, height)
+}
+
+context_destroy(context: ptr) {
+    ae3d_offscreen_context_destroy(context)
+}
+
+target_create(width: int, height: int) -> ptr {
+    return ae3d_offscreen_create(width, height)
+}
+
+target_destroy(target: ptr) {
+    ae3d_offscreen_destroy(target)
+}
+
+target_resize(target: ptr, width: int, height: int) -> bool {
+    return ae3d_offscreen_resize(target, width, height) == 1
+}
+
+target_bind(target: ptr) {
+    ae3d_offscreen_bind(target)
+}
+
+target_unbind() {
+    ae3d_offscreen_unbind()
+}
+
+target_width(target: ptr) -> int {
+    return ae3d_offscreen_width(target)
+}
+
+target_height(target: ptr) -> int {
+    return ae3d_offscreen_height(target)
+}
+
+target_byte_size(target: ptr) -> int {
+    return ae3d_offscreen_byte_size(target)
+}
+
+// Reads the frame back as top-down RGBA rows, the order every compositor wants.
+// The buffer belongs to the target and is overwritten by the next read.
+target_pixels(target: ptr) -> ptr {
+    return ae3d_offscreen_read(target)
+}
