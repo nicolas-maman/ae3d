@@ -1,0 +1,122 @@
+// Perlin terrain drawn as one instanced draw call, with a colour per voxel type.
+//
+//   ./build.sh examples/voxel_world.ae && ./build/voxel_world
+
+import a3d.core
+import a3d.platform
+import a3d.engine
+import a3d.gl
+import a3d.loader
+import a3d.noise
+import a3d.voxel
+
+extern clock_ns() -> long
+
+const WORLD_X = 192
+const WORLD_Z = 192
+const WORLD_HEIGHT = 48
+const VOXEL_SIZE = 4.0
+
+var g_world: ptr = null
+
+layer_at(height: int, y: int) -> int {
+    if y == height - 1 {
+        if height < 8 { return voxel.SAND }
+        if height > 30 { return voxel.STONE }
+        return voxel.GRASS
+    }
+    if y > height - 5 { return voxel.DIRT }
+    return voxel.STONE
+}
+
+// One noise lookup per column rather than per voxel: the terrain is a height
+// field, so sampling it once and filling downward is the whole difference
+// between a fast build and a slow one.
+build_terrain(world: *World) {
+    field = noise.perlin_new(20260902)
+    if field == null { return }
+
+    x = 0
+    while x < voxel.world_size_x(world) {
+        z = 0
+        while z < voxel.world_size_z(world) {
+            sample = noise.fbm2(field, (x * 1.0) * 0.018, (z * 1.0) * 0.018, 5, 0.5)
+            ridged = noise.ridge(field, (x * 1.0) * 0.004, 0.0, (z * 1.0) * 0.004, 3, 0.5)
+            normalised = (sample + 1.0) * 0.5
+            height = (4.0 + normalised * 26.0 + ridged * 14.0) as int
+            if height < 1 { height = 1 }
+            if height > WORLD_HEIGHT { height = WORLD_HEIGHT }
+
+            y = 0
+            while y < height {
+                voxel.world_set(world, x, y, z, layer_at(height, y))
+                y = y + 1
+            }
+            z = z + 1
+        }
+        x = x + 1
+    }
+
+    noise.perlin_free(field)
+}
+
+on_start(data: ptr) {
+    e = data as *Engine
+
+    world = voxel.world_new(WORLD_X, WORLD_Z, WORLD_HEIGHT, VOXEL_SIZE)
+    if world == null {
+        println("could not allocate the voxel world")
+        return
+    }
+
+    started = clock_ns()
+    build_terrain(world)
+    generated = clock_ns()
+
+    base = loader.cube(VOXEL_SIZE)
+    model = voxel.world_build(world, base)
+    built = clock_ns()
+
+    if model == null {
+        println("could not build the voxel model")
+        voxel.world_free(world)
+        return
+    }
+
+    println("voxels: ${voxel.world_active_count(world)} solid, ${core.model_instance_count(model)} visible")
+    println("terrain ${(generated - started) / 1000000} ms, instances ${(built - generated) / 1000000} ms")
+
+    engine.engine_add_model(e, model)
+    g_world = world as ptr
+
+    renderer = engine.engine_gl_renderer(e)
+    gl.renderer_set_clear_color(renderer, 0.45, 0.65, 0.9)
+
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(0.0 - 200.0, 320.0, 0.0 - 200.0))
+    core.camera_set_speed(cam, 400.0)
+    core.camera_set_far(cam, 20000.0)
+    core.camera_look_at(cam, core.vec3(380.0, 60.0, 380.0))
+}
+
+main() {
+    e = engine.engine_new(platform.API_GL)
+    engine.engine_set_size(e, 1280, 800)
+    engine.engine_set_title(e, "aether3d - voxel world")
+    engine.engine_set_face_culling(e, true)
+    engine.engine_set_frustum_culling(e, true)
+
+    light = core.light_sun(core.vec3(0.35, 0.85, 0.4))
+    engine.engine_set_light(e, light)
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_start(e, on_start as fn(ptr))
+
+    engine.engine_run(e, 0 - 1, 0 - 1)
+
+    println("voxel world: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${gl.renderer_draw_calls(engine.engine_gl_renderer(e))} draw calls")
+
+    world = g_world as *World
+    if world != null { voxel.world_free(world) }
+    core.light_free(light)
+    engine.engine_free(e)
+}

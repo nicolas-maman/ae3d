@@ -1,0 +1,153 @@
+// Voxel storage, palette and the exposed-face rule that decides what is drawn.
+
+import a3d.core
+import a3d.voxel
+import a3d.loader
+
+var failures = 0
+
+record_failure(reason: string) {
+    println("FAIL ${reason}")
+    failures = failures + 1
+}
+
+check_int(name: string, got: int, want: int) {
+    if got != want { record_failure("${name}: got ${got} want ${want}") }
+}
+
+check_true(name: string, condition: bool) {
+    if !condition { record_failure(name) }
+}
+
+fill_solid(w: *World, size: int) {
+    x = 0
+    while x < size {
+        y = 0
+        while y < size {
+            z = 0
+            while z < size {
+                voxel.world_set(w, x, y, z, voxel.STONE)
+                z = z + 1
+            }
+            y = y + 1
+        }
+        x = x + 1
+    }
+}
+
+test_storage() {
+    w = voxel.world_new(4, 4, 4, 1.0)
+    check_true("world allocated", w != null)
+
+    check_int("starts empty", voxel.world_active_count(w), 0)
+    check_true("empty is not solid", !voxel.world_solid(w, 1, 1, 1))
+
+    voxel.world_set(w, 1, 2, 3, voxel.GRASS)
+    check_int("one active", voxel.world_active_count(w), 1)
+    check_int("reads back", voxel.world_get(w, 1, 2, 3), voxel.GRASS)
+    check_true("is solid", voxel.world_solid(w, 1, 2, 3))
+
+    // Setting the same value again must not double-count.
+    voxel.world_set(w, 1, 2, 3, voxel.GRASS)
+    check_int("idempotent set", voxel.world_active_count(w), 1)
+
+    voxel.world_set(w, 1, 2, 3, voxel.DIRT)
+    check_int("replace keeps count", voxel.world_active_count(w), 1)
+    check_int("replaced value", voxel.world_get(w, 1, 2, 3), voxel.DIRT)
+
+    voxel.world_set(w, 1, 2, 3, voxel.EMPTY)
+    check_int("clearing decrements", voxel.world_active_count(w), 0)
+
+    // Out of bounds is ignored on write and empty on read.
+    voxel.world_set(w, 0 - 1, 0, 0, voxel.STONE)
+    voxel.world_set(w, 99, 0, 0, voxel.STONE)
+    voxel.world_set(w, 0, 99, 0, voxel.STONE)
+    check_int("out of bounds ignored", voxel.world_active_count(w), 0)
+    check_int("out of bounds reads empty", voxel.world_get(w, 0 - 5, 0, 0), voxel.EMPTY)
+    check_true("bounds check", !voxel.world_in_bounds(w, 4, 0, 0))
+    check_true("in bounds", voxel.world_in_bounds(w, 3, 3, 3))
+
+    voxel.world_fill_column(w, 2, 2, 3, voxel.SAND)
+    check_int("column filled", voxel.world_active_count(w), 3)
+    check_int("column top", voxel.world_get(w, 2, 2, 2), voxel.SAND)
+    check_true("column stops", !voxel.world_solid(w, 2, 3, 2))
+
+    voxel.world_clear(w)
+    check_int("cleared", voxel.world_active_count(w), 0)
+    check_true("cleared cells", !voxel.world_solid(w, 2, 0, 2))
+
+    voxel.world_free(w)
+}
+
+test_visibility() {
+    // A solid 3x3x3 block hides exactly its centre voxel.
+    w = voxel.world_new(3, 3, 3, 1.0)
+    fill_solid(w, 3)
+    check_int("solid block active", voxel.world_active_count(w), 27)
+    check_int("centre hidden", voxel.world_visible_count(w), 26)
+    voxel.world_free(w)
+
+    // A 5x5x5 block hides its inner 3x3x3.
+    big = voxel.world_new(5, 5, 5, 1.0)
+    fill_solid(big, 5)
+    check_int("large block active", voxel.world_active_count(big), 125)
+    check_int("interior hidden", voxel.world_visible_count(big), 125 - 27)
+    voxel.world_free(big)
+
+    // A single voxel is entirely exposed.
+    one = voxel.world_new(3, 3, 3, 1.0)
+    voxel.world_set(one, 1, 1, 1, voxel.STONE)
+    check_int("lone voxel visible", voxel.world_visible_count(one), 1)
+    voxel.world_free(one)
+}
+
+test_build() {
+    w = voxel.world_new(3, 3, 3, 2.0)
+    fill_solid(w, 3)
+
+    base = loader.cube(2.0)
+    model = voxel.world_build(w, base)
+    check_true("model built", model != null)
+    check_int("instances match visible", core.model_instance_count(model), 26)
+    check_true("model is instanced", model.is_instanced)
+
+    core.model_free(model)
+    voxel.world_free(w)
+}
+
+test_palette() {
+    w = voxel.world_new(2, 2, 2, 1.0)
+
+    grass = voxel.palette_color(w, voxel.GRASS)
+    check_true("default grass is green", grass.y > grass.x && grass.y > grass.z)
+
+    voxel.palette_set(w, voxel.GRASS, 1.0, 0.0, 0.0)
+    overridden = voxel.palette_color(w, voxel.GRASS)
+    check_true("override applied", overridden.x == 1.0 && overridden.y == 0.0)
+
+    voxel.palette_set(w, voxel.GRASS, 0.0, 0.0, 1.0)
+    replaced = voxel.palette_color(w, voxel.GRASS)
+    check_true("override replaced in place", replaced.z == 1.0)
+
+    voxel.palette_reset(w)
+    restored = voxel.palette_color(w, voxel.GRASS)
+    check_true("reset restores the default", restored.y > restored.x)
+
+    unknown = voxel.palette_color(w, 999)
+    check_true("unknown id is grey", unknown.x == unknown.y && unknown.y == unknown.z)
+
+    voxel.world_free(w)
+}
+
+main() {
+    test_storage()
+    test_visibility()
+    test_build()
+    test_palette()
+
+    if failures == 0 {
+        println("voxel: all checks passed")
+    } else {
+        println("voxel: ${failures} failure(s)")
+    }
+}

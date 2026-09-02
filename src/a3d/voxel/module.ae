@@ -1,0 +1,296 @@
+// Voxel worlds rendered as one instanced draw.
+//
+// Storage is one flat grid rather than Gopher3D's per-chunk 3D slices: the
+// instanced path builds a single model for the whole world anyway, so chunking
+// bought nothing and cost a pointer chase per voxel. Only voxels with at least
+// one exposed face become instances, which is what keeps a solid world from
+// paying for its own interior.
+//
+// The grid is a plain allocation viewed as `int[]` rather than a boxed array:
+// the exposed-face scan reads six neighbours per voxel, so on a 192x192x48 world
+// that is twenty-one million reads, and they have to be real indexed loads
+// rather than calls.
+
+import std.list
+import std.heap
+import a3d.core
+
+extern calloc(count: int, size: int) -> ptr
+extern free(block: ptr)
+extern memset(block: ptr, value: int, bytes: int) -> ptr
+
+exports (
+    World, Palette,
+    EMPTY, GRASS, DIRT, STONE, SAND, WOOD, LEAF,
+    world_new, world_free,
+    world_set, world_get, world_solid, world_in_bounds,
+    world_fill_column, world_generate, world_clear,
+    world_active_count, world_visible_count, world_build,
+    world_size_x, world_size_z, world_max_height, world_voxel_size,
+    palette_set, palette_reset, palette_color
+)
+
+const EMPTY = 0
+const GRASS = 1
+const DIRT = 2
+const STONE = 3
+const SAND = 4
+const WOOD = 5
+const LEAF = 6
+
+struct Palette {
+    id: int
+    red: float
+    green: float
+    blue: float
+}
+
+struct World {
+    voxels: ptr
+    palette: ptr
+    size_x: int
+    size_z: int
+    max_height: int
+    voxel_size: float
+    active: int
+}
+
+world_new(size_x: int, size_z: int, max_height: int, voxel_size: float) -> *World {
+    if size_x <= 0 || size_z <= 0 || max_height <= 0 { return null }
+
+    w = heap.new(World)
+    w.size_x = size_x
+    w.size_z = size_z
+    w.max_height = max_height
+    w.voxel_size = voxel_size
+    w.palette = list.new()
+    w.voxels = calloc(size_x * max_height * size_z, 4)
+    if w.voxels == null {
+        list.free(w.palette)
+        heap.free(w)
+        return null
+    }
+    return w
+}
+
+world_free(w: *World) {
+    if w == null { return }
+    if w.voxels != null { free(w.voxels) }
+    if w.palette != null {
+        count = list.size(w.palette)
+        i = 0
+        while i < count {
+            entry = list.get_raw(w.palette, i) as *Palette
+            if entry != null { heap.free(entry) }
+            i = i + 1
+        }
+        list.free(w.palette)
+    }
+    heap.free(w)
+}
+
+world_size_x(w: *World) -> int { return w.size_x }
+world_size_z(w: *World) -> int { return w.size_z }
+world_max_height(w: *World) -> int { return w.max_height }
+world_voxel_size(w: *World) -> float { return w.voxel_size }
+world_active_count(w: *World) -> int { return w.active }
+
+world_in_bounds(w: *World, x: int, y: int, z: int) -> bool {
+    return x >= 0 && y >= 0 && z >= 0 && x < w.size_x && y < w.max_height && z < w.size_z
+}
+
+// Index so that a column of constant (x, z) is contiguous: terrain generation
+// and the exposed-face scan both walk y innermost.
+voxel_index(w: *World, x: int, y: int, z: int) -> int {
+    return (x * w.size_z + z) * w.max_height + y
+}
+
+world_get(w: *World, x: int, y: int, z: int) -> int {
+    if !world_in_bounds(w, x, y, z) { return EMPTY }
+    data = w.voxels as int[]
+    return data[voxel_index(w, x, y, z)]
+}
+
+world_solid(w: *World, x: int, y: int, z: int) -> bool {
+    if !world_in_bounds(w, x, y, z) { return false }
+    data = w.voxels as int[]
+    return data[voxel_index(w, x, y, z)] != EMPTY
+}
+
+world_set(w: *World, x: int, y: int, z: int, id: int) {
+    if !world_in_bounds(w, x, y, z) { return }
+    data = w.voxels as int[]
+    index = voxel_index(w, x, y, z)
+    previous = data[index]
+    if previous == id { return }
+
+    data[index] = id
+    if previous == EMPTY && id != EMPTY { w.active = w.active + 1 }
+    if previous != EMPTY && id == EMPTY { w.active = w.active - 1 }
+}
+
+world_fill_column(w: *World, x: int, z: int, height: int, id: int) {
+    top = height
+    if top > w.max_height { top = w.max_height }
+    y = 0
+    while y < top {
+        world_set(w, x, y, z, id)
+        y = y + 1
+    }
+}
+
+world_clear(w: *World) {
+    memset(w.voxels, 0, w.size_x * w.max_height * w.size_z * 4)
+    w.active = 0
+}
+
+world_generate(w: *World, generator: fn(ptr, int, int, int) -> int, state: ptr) {
+    x = 0
+    while x < w.size_x {
+        z = 0
+        while z < w.size_z {
+            y = 0
+            while y < w.max_height {
+                world_set(w, x, y, z, generator(state, x, y, z))
+                y = y + 1
+            }
+            z = z + 1
+        }
+        x = x + 1
+    }
+}
+
+palette_set(w: *World, id: int, red: float, green: float, blue: float) {
+    count = list.size(w.palette)
+    i = 0
+    while i < count {
+        entry = list.get_raw(w.palette, i) as *Palette
+        if entry != null && entry.id == id {
+            entry.red = red
+            entry.green = green
+            entry.blue = blue
+            return
+        }
+        i = i + 1
+    }
+    entry = heap.new(Palette)
+    entry.id = id
+    entry.red = red
+    entry.green = green
+    entry.blue = blue
+    list.add_raw(w.palette, entry)
+}
+
+palette_reset(w: *World) {
+    count = list.size(w.palette)
+    i = 0
+    while i < count {
+        entry = list.get_raw(w.palette, i) as *Palette
+        if entry != null { heap.free(entry) }
+        i = i + 1
+    }
+    list.clear(w.palette)
+}
+
+palette_color(w: *World, id: int) -> Vec3 {
+    count = list.size(w.palette)
+    i = 0
+    while i < count {
+        entry = list.get_raw(w.palette, i) as *Palette
+        if entry != null && entry.id == id {
+            return core.vec3(entry.red, entry.green, entry.blue)
+        }
+        i = i + 1
+    }
+
+    if id == EMPTY { return core.vec3(0.0, 0.0, 0.0) }
+    if id == GRASS { return core.vec3(0.3, 0.7, 0.2) }
+    if id == DIRT  { return core.vec3(0.6, 0.4, 0.2) }
+    if id == STONE { return core.vec3(0.5, 0.5, 0.5) }
+    if id == SAND  { return core.vec3(0.9, 0.8, 0.5) }
+    if id == WOOD  { return core.vec3(0.4, 0.25, 0.1) }
+    if id == LEAF  { return core.vec3(0.2, 0.6, 0.2) }
+    return core.vec3(0.8, 0.8, 0.8)
+}
+
+// A voxel on the world boundary is always exposed; inside, the six neighbours
+// are fixed offsets from the voxel's own index, so the scan needs no coordinate
+// arithmetic and no bounds test per neighbour.
+exposed_at(data: int[], w: *World, x: int, y: int, z: int, index: int) -> bool {
+    if x == 0 || y == 0 || z == 0 { return true }
+    if x == w.size_x - 1 || y == w.max_height - 1 || z == w.size_z - 1 { return true }
+
+    column = w.max_height
+    plane = w.size_z * column
+
+    if data[index - plane] == EMPTY { return true }
+    if data[index + plane] == EMPTY { return true }
+    if data[index - column] == EMPTY { return true }
+    if data[index + column] == EMPTY { return true }
+    if data[index - 1] == EMPTY { return true }
+    if data[index + 1] == EMPTY { return true }
+    return false
+}
+
+world_visible_count(w: *World) -> int {
+    data = w.voxels as int[]
+    visible = 0
+    total = w.size_x * w.size_z * w.max_height
+    column = w.max_height
+    plane = w.size_z * column
+
+    index = 0
+    while index < total {
+        if data[index] != EMPTY {
+            x = index / plane
+            remainder = index - x * plane
+            z = remainder / column
+            y = remainder - z * column
+            if exposed_at(data, w, x, y, z, index) { visible = visible + 1 }
+        }
+        index = index + 1
+    }
+    return visible
+}
+
+// `base` supplies the geometry every voxel instance draws; it becomes the
+// instanced model and the world takes ownership of it.
+world_build(w: *World, base: *Model) -> *Model {
+    if base == null { return null }
+
+    visible = world_visible_count(w)
+    if visible == 0 { return base }
+
+    if !core.model_enable_instancing(base, visible) { return null }
+    if !core.model_enable_instance_colors(base) { return null }
+
+    data = w.voxels as int[]
+    total = w.size_x * w.size_z * w.max_height
+    column = w.max_height
+    plane = w.size_z * column
+
+    placed = 0
+    index = 0
+    while index < total && placed < visible {
+        kind = data[index]
+        if kind != EMPTY {
+            x = index / plane
+            remainder = index - x * plane
+            z = remainder / column
+            y = remainder - z * column
+            if exposed_at(data, w, x, y, z, index) {
+                core.model_set_instance_position(base, placed,
+                    core.vec3((x * 1.0) * w.voxel_size,
+                              (y * 1.0) * w.voxel_size,
+                              (z * 1.0) * w.voxel_size))
+                colour = palette_color(w, kind)
+                core.model_set_instance_color(base, placed, colour.x, colour.y, colour.z)
+                placed = placed + 1
+            }
+        }
+        index = index + 1
+    }
+
+    core.model_recalculate_bounds(base)
+    return base
+}

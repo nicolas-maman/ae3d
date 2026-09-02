@@ -41,6 +41,7 @@ exports (
     model_ensure_material, model_set_uniform_float, model_set_uniform_int,
     model_set_uniform_vec3, model_set_uniform_array, model_uniform_count, model_uniform,
     model_enable_instancing, model_set_instance_position, model_set_instance_color,
+    model_enable_instance_colors,
     model_instance_count, model_remove_instance, light_new, light_directional, light_point,
     light_warm, light_cool, light_sun, light_free, shader_new, shader_valid, debug_enabled,
     set_debug, frustum_culling, set_frustum_culling, face_culling, set_face_culling,
@@ -1142,9 +1143,16 @@ model_set_instance_position(m: *Model, index: int, position: Vec3) {
     m.instances_updated = true
 }
 
+// Enabling the per-instance colour buffer is a one-off allocation, so it is not
+// folded into the setter: doing that reallocates the whole buffer on every
+// instance and turns filling a voxel world into quadratic work.
+model_enable_instance_colors(m: *Model) -> bool {
+    if m.instances == null { return false }
+    return ae3d_inst_enable_colors(m.instances, ae3d_inst_count(m.instances)) == 1
+}
+
 model_set_instance_color(m: *Model, index: int, r: float, g: float, b: float) {
     if m.instances == null { return }
-    if ae3d_inst_enable_colors(m.instances, ae3d_inst_count(m.instances)) != 1 { return }
     ae3d_inst_set_color(m.instances, index, r, g, b)
 }
 
