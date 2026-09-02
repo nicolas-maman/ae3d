@@ -215,5 +215,8 @@ void   ae3d_vk_set_blend(int on);
 void   ae3d_vk_draw(int mesh, int texture, int instances, int instance_count);
 int    ae3d_vk_draw_calls(void);
 int    ae3d_vk_sample_count(void);
+void  *ae3d_vk_offscreen_pixels(void);
+int    ae3d_vk_offscreen_width(void);
+int    ae3d_vk_offscreen_height(void);
 
 #endif

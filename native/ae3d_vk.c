@@ -55,13 +55,17 @@
     X(vkGetPhysicalDeviceQueueFamilyProperties) \
     X(vkGetPhysicalDeviceMemoryProperties) \
     X(vkGetPhysicalDeviceFormatProperties) \
+    X(vkEnumerateDeviceExtensionProperties) \
+    X(vkCreateDevice) \
+    X(vkGetDeviceProcAddr)
+
+// Only present when a surface extension was enabled. An offscreen device asks
+// for none, so these are loaded but never required.
+#define AE3D_VK_SURFACE_FUNCS(X) \
     X(vkGetPhysicalDeviceSurfaceSupportKHR) \
     X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) \
     X(vkGetPhysicalDeviceSurfaceFormatsKHR) \
     X(vkGetPhysicalDeviceSurfacePresentModesKHR) \
-    X(vkEnumerateDeviceExtensionProperties) \
-    X(vkCreateDevice) \
-    X(vkGetDeviceProcAddr) \
     X(vkDestroySurfaceKHR)
 
 #define AE3D_VK_DEVICE_FUNCS(X) \
@@ -69,11 +73,6 @@
     X(vkDestroyDevice) \
     X(vkDeviceWaitIdle) \
     X(vkQueueWaitIdle) \
-    X(vkCreateSwapchainKHR) \
-    X(vkDestroySwapchainKHR) \
-    X(vkGetSwapchainImagesKHR) \
-    X(vkAcquireNextImageKHR) \
-    X(vkQueuePresentKHR) \
     X(vkCreateImage) \
     X(vkDestroyImage) \
     X(vkGetImageMemoryRequirements) \
@@ -136,10 +135,21 @@
     X(vkResetFences) \
     X(vkQueueSubmit)
 
+// Swapchain entry points come from the device extension an offscreen device
+// does not enable, so they are loaded the same way and required the same way.
+#define AE3D_VK_SWAPCHAIN_FUNCS(X) \
+    X(vkCreateSwapchainKHR) \
+    X(vkDestroySwapchainKHR) \
+    X(vkGetSwapchainImagesKHR) \
+    X(vkAcquireNextImageKHR) \
+    X(vkQueuePresentKHR)
+
 #define AE3D_VK_DECLARE(name) static PFN_##name ae3d_##name;
 AE3D_VK_GLOBAL_FUNCS(AE3D_VK_DECLARE)
 AE3D_VK_INSTANCE_FUNCS(AE3D_VK_DECLARE)
+AE3D_VK_SURFACE_FUNCS(AE3D_VK_DECLARE)
 AE3D_VK_DEVICE_FUNCS(AE3D_VK_DECLARE)
+AE3D_VK_SWAPCHAIN_FUNCS(AE3D_VK_DECLARE)
 #undef AE3D_VK_DECLARE
 
 typedef struct {
@@ -360,6 +370,16 @@ static int ae3d_vk_load_instance(void) {
     if (!ae3d_##name) return ae3d_vk_fail("missing " #name);
     AE3D_VK_INSTANCE_FUNCS(AE3D_VK_LOAD_INSTANCE)
 #undef AE3D_VK_LOAD_INSTANCE
+
+#define AE3D_VK_LOAD_SURFACE(name) ae3d_##name = (PFN_##name)gipa(vk.instance, #name);
+    AE3D_VK_SURFACE_FUNCS(AE3D_VK_LOAD_SURFACE)
+#undef AE3D_VK_LOAD_SURFACE
+
+    if (!vk.offscreen) {
+#define AE3D_VK_NEED_SURFACE(name) if (!ae3d_##name) return ae3d_vk_fail("missing " #name);
+        AE3D_VK_SURFACE_FUNCS(AE3D_VK_NEED_SURFACE)
+#undef AE3D_VK_NEED_SURFACE
+    }
     return 1;
 }
 
@@ -369,6 +389,16 @@ static int ae3d_vk_load_device(void) {
     if (!ae3d_##name) return ae3d_vk_fail("missing " #name);
     AE3D_VK_DEVICE_FUNCS(AE3D_VK_LOAD_DEVICE)
 #undef AE3D_VK_LOAD_DEVICE
+
+#define AE3D_VK_LOAD_SWAPCHAIN(name) ae3d_##name = (PFN_##name)ae3d_vkGetDeviceProcAddr(vk.device, #name);
+    AE3D_VK_SWAPCHAIN_FUNCS(AE3D_VK_LOAD_SWAPCHAIN)
+#undef AE3D_VK_LOAD_SWAPCHAIN
+
+    if (!vk.offscreen) {
+#define AE3D_VK_NEED_SWAPCHAIN(name) if (!ae3d_##name) return ae3d_vk_fail("missing " #name);
+        AE3D_VK_SWAPCHAIN_FUNCS(AE3D_VK_NEED_SWAPCHAIN)
+#undef AE3D_VK_NEED_SWAPCHAIN
+    }
     return 1;
 }
 
@@ -400,8 +430,13 @@ static int ae3d_vk_create_instance(void) {
     VkResult result;
     int portability = 0;
 
-    extensions[extension_count++] = VK_KHR_SURFACE_EXTENSION_NAME;
-    extensions[extension_count++] = AE3D_VK_PLATFORM_SURFACE_EXTENSION;
+    // An offscreen device needs no surface at all, so the platform surface
+    // extension is not requested and a machine with no window system can still
+    // render.
+    if (!vk.offscreen) {
+        extensions[extension_count++] = VK_KHR_SURFACE_EXTENSION_NAME;
+        extensions[extension_count++] = AE3D_VK_PLATFORM_SURFACE_EXTENSION;
+    }
 
     ae3d_vkEnumerateInstanceExtensionProperties(NULL, &available_count, NULL);
     if (available_count > 0) {
@@ -501,6 +536,10 @@ static int ae3d_vk_pick_device(void) {
         for (q = 0; q < family_count; q++) {
             VkBool32 supported = VK_FALSE;
             if (graphics < 0 && (families[q].queueFlags & VK_QUEUE_GRAPHICS_BIT)) graphics = (int)q;
+            if (vk.offscreen) {
+                if (present < 0 && graphics >= 0) present = graphics;
+                continue;
+            }
             ae3d_vkGetPhysicalDeviceSurfaceSupportKHR(devices[i], q, vk.surface, &supported);
             if (present < 0 && supported == VK_TRUE) present = (int)q;
         }
@@ -545,7 +584,7 @@ static int ae3d_vk_create_device(void) {
         queue_count = 2;
     }
 
-    extensions[extension_count++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+    if (!vk.offscreen) extensions[extension_count++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
 
     ae3d_vkEnumerateDeviceExtensionProperties(vk.physical, NULL, &available_count, NULL);
     if (available_count > 0) {
@@ -724,12 +763,34 @@ static void ae3d_vk_destroy_swapchain(void) {
     if (vk.depth_image) { ae3d_vkDestroyImage(vk.device, vk.depth_image, NULL); vk.depth_image = VK_NULL_HANDLE; }
     if (vk.depth_memory) { ae3d_vkFreeMemory(vk.device, vk.depth_memory, NULL); vk.depth_memory = VK_NULL_HANDLE; }
 
-    if (vk.swapchain) { ae3d_vkDestroySwapchainKHR(vk.device, vk.swapchain, NULL); vk.swapchain = VK_NULL_HANDLE; }
+    // An offscreen target's image is owned here, unlike a swapchain's, which
+    // the swapchain owns and destroys with itself.
+    if (vk.offscreen && vk.images && vk.images[0]) {
+        ae3d_vkDestroyImage(vk.device, vk.images[0], NULL);
+        vk.images[0] = VK_NULL_HANDLE;
+        if (vk.readback_memory) {
+            ae3d_vkFreeMemory(vk.device, vk.readback_memory, NULL);
+            vk.readback_memory = VK_NULL_HANDLE;
+        }
+    }
+
+    if (vk.swapchain && ae3d_vkDestroySwapchainKHR) {
+        ae3d_vkDestroySwapchainKHR(vk.device, vk.swapchain, NULL);
+        vk.swapchain = VK_NULL_HANDLE;
+    }
     vk.image_count = 0;
 }
 
 static int ae3d_vk_choose_surface_format(void) {
     VkSurfaceFormatKHR *formats;
+    if (vk.offscreen) {
+        vk.color_format = VK_FORMAT_R8G8B8A8_UNORM;
+        vk.color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+        vk.present_mode = VK_PRESENT_MODE_FIFO_KHR;
+        vk.depth_format = VK_FORMAT_D32_SFLOAT;
+        return 1;
+    }
+    {
     VkPresentModeKHR *modes;
     unsigned count = 0, i;
 
@@ -763,6 +824,7 @@ static int ae3d_vk_choose_surface_format(void) {
     }
 
     vk.depth_format = VK_FORMAT_D32_SFLOAT;
+    }
     return 1;
 }
 
@@ -815,6 +877,57 @@ static int ae3d_vk_create_depth(void) {
     result = ae3d_vkCreateImageView(vk.device, &view, NULL, &vk.depth_view);
     if (result != VK_SUCCESS) return ae3d_vk_fail_code("depth vkCreateImageView failed", result);
     return 1;
+}
+
+// The offscreen equivalent of a swapchain: one image the pass resolves into,
+// which is then copied to a host-visible buffer for the caller to read.
+static int ae3d_vk_create_offscreen_target(int width, int height) {
+    VkDeviceSize size;
+
+    if (width < 1) width = 1;
+    if (height < 1) height = 1;
+    vk.extent.width = (unsigned)width;
+    vk.extent.height = (unsigned)height;
+
+    vk.image_count = 1;
+    vk.images = (VkImage *)calloc(1, sizeof(VkImage));
+    vk.image_views = (VkImageView *)calloc(1, sizeof(VkImageView));
+    if (!vk.images || !vk.image_views) return ae3d_vk_fail("out of memory");
+
+    if (!ae3d_vk_create_image(width, height, vk.color_format, VK_SAMPLE_COUNT_1_BIT,
+                              VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                              VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_TILING_OPTIMAL,
+                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                              &vk.images[0], &vk.readback_memory, &vk.image_views[0])) {
+        return 0;
+    }
+
+    size = (VkDeviceSize)width * height * 4;
+    if (!ae3d_vk_create_buffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                               &vk.readback_buffer, &vk.readback_buffer_memory)) {
+        return 0;
+    }
+    {
+        void *mapped = NULL;
+        if (ae3d_vkMapMemory(vk.device, vk.readback_buffer_memory, 0, size, 0, &mapped) != VK_SUCCESS) {
+            return ae3d_vk_fail("readback vkMapMemory failed");
+        }
+        vk.readback_mapped = (unsigned char *)mapped;
+    }
+    vk.readback_width = width;
+    vk.readback_height = height;
+
+    if (vk.samples != VK_SAMPLE_COUNT_1_BIT) {
+        if (!ae3d_vk_create_image(width, height, vk.color_format, vk.samples,
+                                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                                  VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_TILING_OPTIMAL,
+                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                  &vk.colour_image, &vk.colour_memory, &vk.colour_view)) {
+            return 0;
+        }
+    }
+    return ae3d_vk_create_depth();
 }
 
 static int ae3d_vk_create_swapchain(int width, int height) {
@@ -1652,22 +1765,29 @@ static int ae3d_vk_create_commands(void) {
     return 1;
 }
 
+// A null window means offscreen: no surface, no swapchain, and the frame is
+// read back rather than presented. That is what lets the editor host the
+// Vulkan renderer inside a toolkit that owns the real window.
 int ae3d_vk_init(void *win, int width, int height) {
     if (vk.ready) return 1;
     if (!ae3d_vk_available()) return 0;
-    if (!win) return ae3d_vk_fail("no window");
 
     memset(&vk, 0, sizeof(vk));
+    vk.offscreen = win == NULL;
 
     if (!ae3d_vk_create_instance()) return 0;
 
-    if (!ae3d_vk_create_surface(win)) return 0;
+    if (!vk.offscreen && !ae3d_vk_create_surface(win)) return 0;
 
     if (!ae3d_vk_pick_device()) return 0;
     if (!ae3d_vk_create_device()) return 0;
     vk.samples = ae3d_vk_pick_samples();
     if (!ae3d_vk_choose_surface_format()) return 0;
-    if (!ae3d_vk_create_swapchain(width, height)) return 0;
+    if (vk.offscreen) {
+        if (!ae3d_vk_create_offscreen_target(width, height)) return 0;
+    } else {
+        if (!ae3d_vk_create_swapchain(width, height)) return 0;
+    }
     if (!ae3d_vk_create_render_pass()) return 0;
     if (!ae3d_vk_create_framebuffers()) return 0;
     if (!ae3d_vk_create_commands()) return 0;
@@ -1712,15 +1832,19 @@ int ae3d_vk_frame_begin(double r, double g, double b, double a) {
 
     ae3d_vkWaitForFences(vk.device, 1, &vk.in_flight[vk.frame], VK_TRUE, UINT64_MAX);
 
-    result = ae3d_vkAcquireNextImageKHR(vk.device, vk.swapchain, UINT64_MAX,
-                                        vk.image_available[vk.frame], VK_NULL_HANDLE,
-                                        &vk.image_index);
-    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-        if (!ae3d_vk_rebuild_swapchain((int)vk.extent.width, (int)vk.extent.height)) return 0;
-        return 0;
-    }
-    if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
-        return ae3d_vk_fail_code("vkAcquireNextImageKHR failed", result);
+    if (vk.offscreen) {
+        vk.image_index = 0;
+    } else {
+        result = ae3d_vkAcquireNextImageKHR(vk.device, vk.swapchain, UINT64_MAX,
+                                            vk.image_available[vk.frame], VK_NULL_HANDLE,
+                                            &vk.image_index);
+        if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+            if (!ae3d_vk_rebuild_swapchain((int)vk.extent.width, (int)vk.extent.height)) return 0;
+            return 0;
+        }
+        if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+            return ae3d_vk_fail_code("vkAcquireNextImageKHR failed", result);
+        }
     }
 
     ae3d_vkResetFences(vk.device, 1, &vk.in_flight[vk.frame]);
@@ -1831,22 +1955,48 @@ int ae3d_vk_frame_end(void) {
     if (!vk.recording) return 0;
 
     ae3d_vkCmdEndRenderPass(vk.command_buffers[vk.frame]);
+
+    // Offscreen resolves into an image the pass leaves in transfer-source
+    // layout, so the copy to host memory is recorded into the same submission
+    // rather than costing a second one.
+    if (vk.offscreen) {
+        VkBufferImageCopy region;
+        memset(&region, 0, sizeof(region));
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent.width = vk.extent.width;
+        region.imageExtent.height = vk.extent.height;
+        region.imageExtent.depth = 1;
+        ae3d_vkCmdCopyImageToBuffer(vk.command_buffers[vk.frame], vk.images[0],
+                                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                    vk.readback_buffer, 1, &region);
+    }
+
     ae3d_vkEndCommandBuffer(vk.command_buffers[vk.frame]);
 
     memset(&submit, 0, sizeof(submit));
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit.waitSemaphoreCount = 1;
-    submit.pWaitSemaphores = &vk.image_available[vk.frame];
-    submit.pWaitDstStageMask = &wait_stage;
+    if (!vk.offscreen) {
+        submit.waitSemaphoreCount = 1;
+        submit.pWaitSemaphores = &vk.image_available[vk.frame];
+        submit.pWaitDstStageMask = &wait_stage;
+        submit.signalSemaphoreCount = 1;
+        submit.pSignalSemaphores = &vk.render_finished[vk.frame];
+    }
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &vk.command_buffers[vk.frame];
-    submit.signalSemaphoreCount = 1;
-    submit.pSignalSemaphores = &vk.render_finished[vk.frame];
 
     result = ae3d_vkQueueSubmit(vk.graphics_queue, 1, &submit, vk.in_flight[vk.frame]);
     if (result != VK_SUCCESS) {
         vk.recording = 0;
         return ae3d_vk_fail_code("vkQueueSubmit failed", result);
+    }
+
+    if (vk.offscreen) {
+        ae3d_vkWaitForFences(vk.device, 1, &vk.in_flight[vk.frame], VK_TRUE, UINT64_MAX);
+        vk.frame = (vk.frame + 1) % AE3D_VK_FRAMES;
+        vk.recording = 0;
+        return 1;
     }
 
     memset(&present, 0, sizeof(present));
@@ -1871,6 +2021,14 @@ int ae3d_vk_frame_end(void) {
     vk.recording = 0;
     return 1;
 }
+
+void *ae3d_vk_offscreen_pixels(void) {
+    if (!vk.offscreen) return NULL;
+    return vk.readback_mapped;
+}
+
+int ae3d_vk_offscreen_width(void) { return vk.readback_width; }
+int ae3d_vk_offscreen_height(void) { return vk.readback_height; }
 
 int ae3d_vk_upload_mesh(void *mesh) {
     const float *vertices = ae3d_mesh_vertex_data(mesh);
@@ -2011,14 +2169,43 @@ void ae3d_vk_shutdown(void) {
         if (vk.render_finished[i]) ae3d_vkDestroySemaphore(vk.device, vk.render_finished[i], NULL);
         if (vk.in_flight[i]) ae3d_vkDestroyFence(vk.device, vk.in_flight[i], NULL);
     }
+    for (i = 0; i < AE3D_VK_MAX_TEXTURES; i++) {
+        ae3d_vk_texture *texture = &vk.textures[i];
+        if (!texture->in_use) continue;
+        if (texture->sampler) ae3d_vkDestroySampler(vk.device, texture->sampler, NULL);
+        if (texture->view) ae3d_vkDestroyImageView(vk.device, texture->view, NULL);
+        if (texture->image) ae3d_vkDestroyImage(vk.device, texture->image, NULL);
+        if (texture->memory) ae3d_vkFreeMemory(vk.device, texture->memory, NULL);
+        memset(texture, 0, sizeof(*texture));
+    }
+
+    for (i = 0; i < AE3D_VK_FRAMES; i++) {
+        ae3d_vk_uniform_ring *ring = &vk.uniforms[i];
+        if (ring->mapped) ae3d_vkUnmapMemory(vk.device, ring->memory);
+        if (ring->buffer) ae3d_vkDestroyBuffer(vk.device, ring->buffer, NULL);
+        if (ring->memory) ae3d_vkFreeMemory(vk.device, ring->memory, NULL);
+        memset(ring, 0, sizeof(*ring));
+    }
+
+    if (vk.identity_instance) ae3d_vkDestroyBuffer(vk.device, vk.identity_instance, NULL);
+    if (vk.identity_instance_memory) ae3d_vkFreeMemory(vk.device, vk.identity_instance_memory, NULL);
+
+    if (vk.readback_mapped) ae3d_vkUnmapMemory(vk.device, vk.readback_buffer_memory);
+    if (vk.readback_buffer) ae3d_vkDestroyBuffer(vk.device, vk.readback_buffer, NULL);
+    if (vk.readback_buffer_memory) ae3d_vkFreeMemory(vk.device, vk.readback_buffer_memory, NULL);
+
+    if (vk.descriptor_pool) ae3d_vkDestroyDescriptorPool(vk.device, vk.descriptor_pool, NULL);
+    if (vk.set_layout) ae3d_vkDestroyDescriptorSetLayout(vk.device, vk.set_layout, NULL);
+
     if (vk.command_pool) ae3d_vkDestroyCommandPool(vk.device, vk.command_pool, NULL);
     if (vk.pipeline) ae3d_vkDestroyPipeline(vk.device, vk.pipeline, NULL);
+    if (vk.pipeline_blend) ae3d_vkDestroyPipeline(vk.device, vk.pipeline_blend, NULL);
     if (vk.pipeline_layout) ae3d_vkDestroyPipelineLayout(vk.device, vk.pipeline_layout, NULL);
 
     ae3d_vk_destroy_swapchain();
     if (vk.render_pass) ae3d_vkDestroyRenderPass(vk.device, vk.render_pass, NULL);
     if (vk.device) ae3d_vkDestroyDevice(vk.device, NULL);
-    if (vk.surface) ae3d_vkDestroySurfaceKHR(vk.instance, vk.surface, NULL);
+    if (vk.surface && ae3d_vkDestroySurfaceKHR) ae3d_vkDestroySurfaceKHR(vk.instance, vk.surface, NULL);
     if (vk.instance) ae3d_vkDestroyInstance(vk.instance, NULL);
 
     memset(&vk, 0, sizeof(vk));
