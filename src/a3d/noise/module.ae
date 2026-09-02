@@ -1,0 +1,231 @@
+// Improved Perlin noise, the quintic-fade variant with the twelve edge-centre
+// gradients.
+//
+// The permutation table is shuffled from the seed, so a given seed always
+// produces the same terrain on every platform: the shuffle uses this module's
+// own generator rather than the host's.
+
+import std.heap
+import std.intarr
+import a3d.core
+
+exports (
+    Perlin,
+    perlin_new, perlin_free,
+    noise3, noise2, fbm3, fbm2, ridge, turbulence, marble, wood, clouds
+)
+
+extern floor(x: float) -> float
+
+struct Perlin {
+    perm: ptr
+    seed: long
+}
+
+const GRADIENTS = 12
+
+gradient_x(index: int) -> float {
+    if index == 0 { return 1.0 }
+    if index == 1 { return 0.0 - 1.0 }
+    if index == 2 { return 1.0 }
+    if index == 3 { return 0.0 - 1.0 }
+    if index == 4 { return 1.0 }
+    if index == 5 { return 0.0 - 1.0 }
+    if index == 6 { return 1.0 }
+    if index == 7 { return 0.0 - 1.0 }
+    return 0.0
+}
+
+gradient_y(index: int) -> float {
+    if index < 4 {
+        if index == 0 || index == 1 { return 1.0 }
+        return 0.0 - 1.0
+    }
+    if index < 8 { return 0.0 }
+    if index == 8 || index == 10 { return 1.0 }
+    return 0.0 - 1.0
+}
+
+gradient_z(index: int) -> float {
+    if index < 4 { return 0.0 }
+    if index == 4 || index == 5 { return 1.0 }
+    if index == 6 || index == 7 { return 0.0 - 1.0 }
+    if index == 8 || index == 9 { return 1.0 }
+    return 0.0 - 1.0
+}
+
+next_random(state: long) -> long {
+    return (state * 6364136223846793005 + 1442695040888963407) & 0x7FFFFFFFFFFFFFFF
+}
+
+perlin_new(seed: long) -> *Perlin {
+    p = heap.new(Perlin)
+    p.seed = seed
+    p.perm = intarr.new_raw(512)
+    if p.perm == null {
+        heap.free(p)
+        return null
+    }
+
+    i = 0
+    while i < 256 {
+        intarr.set_unchecked(p.perm, i, i)
+        i = i + 1
+    }
+
+    state = seed
+    if state == 0 { state = 1 }
+    i = 255
+    while i > 0 {
+        state = next_random(state)
+        j = (state % (i + 1)) as int
+        if j < 0 { j = 0 - j }
+        held = intarr.get_unchecked(p.perm, i)
+        intarr.set_unchecked(p.perm, i, intarr.get_unchecked(p.perm, j))
+        intarr.set_unchecked(p.perm, j, held)
+        i = i - 1
+    }
+
+    i = 0
+    while i < 256 {
+        intarr.set_unchecked(p.perm, 256 + i, intarr.get_unchecked(p.perm, i))
+        i = i + 1
+    }
+    return p
+}
+
+perlin_free(p: *Perlin) {
+    if p == null { return }
+    if p.perm != null { intarr.free(p.perm) }
+    heap.free(p)
+}
+
+fade(t: float) -> float {
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+}
+
+mix(t: float, a: float, b: float) -> float {
+    return a + t * (b - a)
+}
+
+grad(hash: int, x: float, y: float, z: float) -> float {
+    index = hash % GRADIENTS
+    if index < 0 { index = index + GRADIENTS }
+    return gradient_x(index) * x + gradient_y(index) * y + gradient_z(index) * z
+}
+
+noise3(p: *Perlin, px: float, py: float, pz: float) -> float {
+    fx = floor(px)
+    fy = floor(py)
+    fz = floor(pz)
+
+    cell_x = (fx as int) & 255
+    cell_y = (fy as int) & 255
+    cell_z = (fz as int) & 255
+
+    x = px - fx
+    y = py - fy
+    z = pz - fz
+
+    u = fade(x)
+    v = fade(y)
+    w = fade(z)
+
+    a = intarr.get_unchecked(p.perm, cell_x) + cell_y
+    aa = intarr.get_unchecked(p.perm, a) + cell_z
+    ab = intarr.get_unchecked(p.perm, a + 1) + cell_z
+    b = intarr.get_unchecked(p.perm, cell_x + 1) + cell_y
+    ba = intarr.get_unchecked(p.perm, b) + cell_z
+    bb = intarr.get_unchecked(p.perm, b + 1) + cell_z
+
+    return mix(w,
+        mix(v,
+            mix(u, grad(intarr.get_unchecked(p.perm, aa), x, y, z),
+                   grad(intarr.get_unchecked(p.perm, ba), x - 1.0, y, z)),
+            mix(u, grad(intarr.get_unchecked(p.perm, ab), x, y - 1.0, z),
+                   grad(intarr.get_unchecked(p.perm, bb), x - 1.0, y - 1.0, z))),
+        mix(v,
+            mix(u, grad(intarr.get_unchecked(p.perm, aa + 1), x, y, z - 1.0),
+                   grad(intarr.get_unchecked(p.perm, ba + 1), x - 1.0, y, z - 1.0)),
+            mix(u, grad(intarr.get_unchecked(p.perm, ab + 1), x, y - 1.0, z - 1.0),
+                   grad(intarr.get_unchecked(p.perm, bb + 1), x - 1.0, y - 1.0, z - 1.0))))
+}
+
+noise2(p: *Perlin, x: float, y: float) -> float {
+    return noise3(p, x, y, 0.0)
+}
+
+fbm3(p: *Perlin, x: float, y: float, z: float, octaves: int, persistence: float) -> float {
+    total = 0.0
+    frequency = 1.0
+    amplitude = 1.0
+    normalisation = 0.0
+
+    i = 0
+    while i < octaves {
+        total = total + noise3(p, x * frequency, y * frequency, z * frequency) * amplitude
+        normalisation = normalisation + amplitude
+        amplitude = amplitude * persistence
+        frequency = frequency * 2.0
+        i = i + 1
+    }
+    if normalisation == 0.0 { return 0.0 }
+    return total / normalisation
+}
+
+fbm2(p: *Perlin, x: float, y: float, octaves: int, persistence: float) -> float {
+    return fbm3(p, x, y, 0.0, octaves, persistence)
+}
+
+turbulence(p: *Perlin, x: float, y: float, z: float, octaves: int, persistence: float) -> float {
+    total = 0.0
+    frequency = 1.0
+    amplitude = 1.0
+    normalisation = 0.0
+
+    i = 0
+    while i < octaves {
+        total = total + core.abs_of(noise3(p, x * frequency, y * frequency, z * frequency)) * amplitude
+        normalisation = normalisation + amplitude
+        amplitude = amplitude * persistence
+        frequency = frequency * 2.0
+        i = i + 1
+    }
+    if normalisation == 0.0 { return 0.0 }
+    return total / normalisation
+}
+
+ridge(p: *Perlin, x: float, y: float, z: float, octaves: int, persistence: float) -> float {
+    total = 0.0
+    frequency = 1.0
+    amplitude = 1.0
+    normalisation = 0.0
+
+    i = 0
+    while i < octaves {
+        value = 1.0 - core.abs_of(noise3(p, x * frequency, y * frequency, z * frequency))
+        total = total + value * value * amplitude
+        normalisation = normalisation + amplitude
+        amplitude = amplitude * persistence
+        frequency = frequency * 2.0
+        i = i + 1
+    }
+    if normalisation == 0.0 { return 0.0 }
+    return total / normalisation
+}
+
+marble(p: *Perlin, x: float, y: float, z: float, frequency: float) -> float {
+    return core.sin_of((x + turbulence(p, x, y, z, 4, 0.5) * 10.0) * frequency)
+}
+
+wood(p: *Perlin, x: float, y: float, z: float, rings: float) -> float {
+    distance = core.sqrt_of(x * x + y * y) * rings + noise3(p, x, y, z) * 2.0
+    return distance - floor(distance)
+}
+
+clouds(p: *Perlin, x: float, y: float, z: float, coverage: float) -> float {
+    value = fbm3(p, x, y, z, 5, 0.5)
+    shaped = (value + 1.0) * 0.5 - coverage
+    if shaped < 0.0 { return 0.0 }
+    return shaped / (1.0 - coverage)
+}

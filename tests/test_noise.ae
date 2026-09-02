@@ -1,0 +1,97 @@
+// Perlin noise: lattice zeros, bounded range, continuity and seed determinism.
+
+import a3d.core
+import a3d.noise
+
+var failures = 0
+
+record_failure(reason: string) {
+    println("FAIL ${reason}")
+    failures = failures + 1
+}
+
+check_near(name: string, got: float, want: float, tolerance: float) {
+    if core.abs_of(got - want) > tolerance { record_failure("${name}: got ${got} want ${want}") }
+}
+
+main() {
+    p = noise.perlin_new(1337)
+    if p == null {
+        println("noise: FAIL could not allocate the permutation table")
+        return
+    }
+
+    // Classic Perlin is exactly zero at every integer lattice point.
+    check_near("lattice 0,0,0", noise.noise3(p, 0.0, 0.0, 0.0), 0.0, 0.0000001)
+    check_near("lattice 5,-3,7", noise.noise3(p, 5.0, 0.0 - 3.0, 7.0), 0.0, 0.0000001)
+    check_near("lattice 255,255,255", noise.noise3(p, 255.0, 255.0, 255.0), 0.0, 0.0000001)
+
+    // Range and variation over a coarse sweep.
+    lowest = 1.0
+    highest = 0.0 - 1.0
+    nonzero = 0
+    i = 0
+    while i < 4000 {
+        x = (i * 1.0) * 0.037
+        y = (i * 1.0) * 0.021
+        z = (i * 1.0) * 0.013
+        value = noise.noise3(p, x, y, z)
+        if value < lowest { lowest = value }
+        if value > highest { highest = value }
+        if core.abs_of(value) > 0.0001 { nonzero = nonzero + 1 }
+        i = i + 1
+    }
+    if lowest < 0.0 - 1.0 || highest > 1.0 { record_failure("range escaped [-1, 1]: ${lowest}..${highest}") }
+    if highest <= 0.0 || lowest >= 0.0 { record_failure("noise did not span both signs") }
+    if nonzero < 3000 { record_failure("noise is mostly zero: ${nonzero} of 4000") }
+
+    // Continuity: a small step in the input moves the output only a little.
+    largest_step = 0.0
+    i = 0
+    while i < 1000 {
+        x = (i * 1.0) * 0.01
+        step = core.abs_of(noise.noise3(p, x + 0.001, 0.5, 0.5) - noise.noise3(p, x, 0.5, 0.5))
+        if step > largest_step { largest_step = step }
+        i = i + 1
+    }
+    if largest_step > 0.01 { record_failure("noise is discontinuous: step ${largest_step}") }
+
+    // The same seed must reproduce the same field, a different seed must not.
+    same = noise.perlin_new(1337)
+    other = noise.perlin_new(9001)
+    matches = 0
+    differs = 0
+    i = 0
+    while i < 500 {
+        x = (i * 1.0) * 0.11
+        a = noise.noise3(p, x, 1.7, 2.3)
+        if core.abs_of(noise.noise3(same, x, 1.7, 2.3) - a) < 0.0000001 { matches = matches + 1 }
+        if core.abs_of(noise.noise3(other, x, 1.7, 2.3) - a) > 0.0000001 { differs = differs + 1 }
+        i = i + 1
+    }
+    if matches != 500 { record_failure("same seed diverged in ${500 - matches} places") }
+    if differs < 400 { record_failure("different seeds agreed too often: ${500 - differs}") }
+
+    // Derived fields stay in their documented ranges.
+    i = 0
+    while i < 500 {
+        x = (i * 1.0) * 0.07
+        r = noise.ridge(p, x, 0.3, 0.9, 4, 0.5)
+        if r < 0.0 || r > 1.0 { record_failure("ridge out of [0, 1]: ${r}") }
+        t = noise.turbulence(p, x, 0.3, 0.9, 4, 0.5)
+        if t < 0.0 || t > 1.0 { record_failure("turbulence out of [0, 1]: ${t}") }
+        c = noise.clouds(p, x, 0.3, 0.9, 0.4)
+        if c < 0.0 { record_failure("clouds went negative: ${c}") }
+        i = i + 1
+    }
+
+    noise.perlin_free(other)
+    noise.perlin_free(same)
+    noise.perlin_free(p)
+
+    if failures == 0 {
+        println("noise: all checks passed")
+    } else {
+        println("noise: ${failures} failure(s)")
+    }
+}
