@@ -1,0 +1,105 @@
+// Ray casting against spheres, triangles and meshes.
+//
+// Every test returns the hit distance along the ray, or a negative value for a
+// miss, so nothing is allocated and the caller derives the hit point with
+// `point_at` only when it needs one.
+
+import a3d.core
+
+exports (
+    MISS,
+    hit, point_at,
+    sphere, triangle, model_bounds, model_mesh,
+    screen_direction
+)
+
+const MISS = 0.0 - 1.0
+
+hit(distance: float) -> bool {
+    return distance >= 0.0
+}
+
+point_at(origin: Vec3, direction: Vec3, distance: float) -> Vec3 {
+    return core.v3_add(origin, core.v3_mul(direction, distance))
+}
+
+sphere(origin: Vec3, direction: Vec3, center: Vec3, radius: float) -> float {
+    oc = core.v3_sub(origin, center)
+    a = core.v3_dot(direction, direction)
+    if a == 0.0 { return MISS }
+    b = 2.0 * core.v3_dot(oc, direction)
+    c = core.v3_dot(oc, oc) - radius * radius
+
+    discriminant = b * b - 4.0 * a * c
+    if discriminant < 0.0 { return MISS }
+
+    root = core.sqrt_of(discriminant)
+    near = (0.0 - b - root) / (2.0 * a)
+    far = (0.0 - b + root) / (2.0 * a)
+
+    if near > 0.0 && far > 0.0 {
+        if near < far { return near }
+        return far
+    }
+    if near > 0.0 { return near }
+    if far > 0.0 { return far }
+    return MISS
+}
+
+// Moller-Trumbore.
+triangle(origin: Vec3, direction: Vec3, v0: Vec3, v1: Vec3, v2: Vec3) -> float {
+    epsilon = 0.0000001
+
+    edge1 = core.v3_sub(v1, v0)
+    edge2 = core.v3_sub(v2, v0)
+    h = core.v3_cross(direction, edge2)
+    a = core.v3_dot(edge1, h)
+    if a > 0.0 - epsilon && a < epsilon { return MISS }
+
+    f = 1.0 / a
+    s = core.v3_sub(origin, v0)
+    u = f * core.v3_dot(s, h)
+    if u < 0.0 || u > 1.0 { return MISS }
+
+    q = core.v3_cross(s, edge1)
+    v = f * core.v3_dot(direction, q)
+    if v < 0.0 || u + v > 1.0 { return MISS }
+
+    distance = f * core.v3_dot(edge2, q)
+    if distance > epsilon { return distance }
+    return MISS
+}
+
+model_bounds(origin: Vec3, direction: Vec3, m: *Model) -> float {
+    return sphere(origin, direction, m.bounding_center, m.bounding_radius)
+}
+
+// Exact test against the model's triangles, in world space. The bounding sphere
+// is tested first so a ray that cannot possibly hit never walks the index buffer.
+model_mesh(origin: Vec3, direction: Vec3, m: *Model) -> float {
+    if !hit(model_bounds(origin, direction, m)) { return MISS }
+
+    indices = core.mesh_index_count(m.mesh)
+    nearest = MISS
+    i = 0
+    while i + 2 < indices {
+        a = core.mesh_position(m.mesh, core.mesh_index_at(m.mesh, i))
+        b = core.mesh_position(m.mesh, core.mesh_index_at(m.mesh, i + 1))
+        c = core.mesh_position(m.mesh, core.mesh_index_at(m.mesh, i + 2))
+
+        distance = triangle(origin, direction,
+                            core.mat4_transform_point(m.model_matrix, a),
+                            core.mat4_transform_point(m.model_matrix, b),
+                            core.mat4_transform_point(m.model_matrix, c))
+        if hit(distance) {
+            if !hit(nearest) || distance < nearest { nearest = distance }
+        }
+        i = i + 3
+    }
+    return nearest
+}
+
+screen_direction(cam: *Camera, screen_x: float, screen_y: float,
+                 width: int, height: int) -> Vec3 {
+    return core.camera_screen_to_world(cam, screen_x, screen_y, width, height)
+}

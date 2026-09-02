@@ -1,0 +1,240 @@
+// Gerstner-wave ocean surface.
+//
+// The four wave trains live in the model's uniform arrays, so a frame update
+// writes scalars only and the wave table is uploaded once.
+
+import std.heap
+import a3d.core
+import a3d.shaders
+import a3d.loader
+
+exports (
+    Simulation, MAX_WAVES, RESOLUTION,
+    simulation_new, simulation_free, simulation_model, simulation_build,
+    simulation_update, simulation_apply,
+    simulation_set_color, simulation_set_sky_color, simulation_set_transparency,
+    simulation_set_wave_height, simulation_set_wave_speed, simulation_set_randomness,
+    simulation_set_caustics, simulation_set_specular, simulation_set_shadow,
+    simulation_set_distortion, simulation_set_normal_strength
+)
+
+extern ae3d_farr_set(arr: ptr, i: int, v: float)
+
+const MAX_WAVES = 4
+const RESOLUTION = 256
+
+struct Simulation {
+    model: ptr
+    ocean_size: float
+    base_amplitude: float
+    elapsed: float
+
+    color_r: float
+    color_g: float
+    color_b: float
+    sky_r: float
+    sky_g: float
+    sky_b: float
+
+    transparency: float
+    wave_speed_multiplier: float
+    wave_height: float
+    wave_randomness: float
+
+    caustics_enabled: bool
+    caustics_intensity: float
+    caustics_scale: float
+
+    specular_intensity: float
+    shadow_strength: float
+    distortion_strength: float
+    normal_strength: float
+}
+
+simulation_new(size: float, amplitude: float) -> *Simulation {
+    w = heap.new(Simulation)
+    w.ocean_size = size
+    w.base_amplitude = amplitude
+    w.color_r = 0.06
+    w.color_g = 0.22
+    w.color_b = 0.45
+    w.sky_r = 0.5
+    w.sky_g = 0.7
+    w.sky_b = 1.0
+    w.transparency = 0.85
+    w.wave_speed_multiplier = 1.0
+    w.wave_height = 1.0
+    w.wave_randomness = 0.0
+    w.caustics_enabled = false
+    w.caustics_intensity = 0.3
+    w.caustics_scale = 0.003
+    w.specular_intensity = 1.0
+    w.shadow_strength = 0.5
+    w.distortion_strength = 0.2
+    w.normal_strength = 1.0
+    return w
+}
+
+simulation_free(w: *Simulation) {
+    if w == null { return }
+    if w.model != null { core.model_free(w.model as *Model) }
+    heap.free(w)
+}
+
+simulation_model(w: *Simulation) -> *Model {
+    return w.model as *Model
+}
+
+simulation_set_color(w: *Simulation, red: float, green: float, blue: float) {
+    w.color_r = red
+    w.color_g = green
+    w.color_b = blue
+}
+
+simulation_set_sky_color(w: *Simulation, red: float, green: float, blue: float) {
+    w.sky_r = red
+    w.sky_g = green
+    w.sky_b = blue
+}
+
+simulation_set_transparency(w: *Simulation, value: float) { w.transparency = value }
+simulation_set_wave_height(w: *Simulation, value: float) { w.wave_height = value }
+simulation_set_wave_speed(w: *Simulation, value: float) { w.wave_speed_multiplier = value }
+simulation_set_randomness(w: *Simulation, value: float) { w.wave_randomness = value }
+
+simulation_set_caustics(w: *Simulation, enabled: bool, intensity: float, scale: float) {
+    w.caustics_enabled = enabled
+    w.caustics_intensity = intensity
+    w.caustics_scale = scale
+}
+
+simulation_set_specular(w: *Simulation, value: float) { w.specular_intensity = value }
+simulation_set_shadow(w: *Simulation, value: float) { w.shadow_strength = value }
+simulation_set_distortion(w: *Simulation, value: float) { w.distortion_strength = value }
+simulation_set_normal_strength(w: *Simulation, value: float) { w.normal_strength = value }
+
+wave_amplitude(w: *Simulation, index: int) -> float {
+    if index == 0 { return w.base_amplitude * 1.2 }
+    if index == 1 { return w.base_amplitude * 0.8 }
+    if index == 2 { return w.base_amplitude * 0.6 }
+    return w.base_amplitude * 0.4
+}
+
+wave_frequency(index: int) -> float {
+    if index == 0 { return 0.00008 }
+    if index == 1 { return 0.00015 }
+    if index == 2 { return 0.0004 }
+    return 0.0008
+}
+
+// Deep-water dispersion: a longer wave travels faster, which is what keeps four
+// superimposed trains from marching in lockstep.
+wave_speed(index: int) -> float {
+    wavelength = core.TWO_PI / wave_frequency(index)
+    return 0.002 * core.sqrt_of(wavelength)
+}
+
+upload_wave_table(w: *Simulation, m: *Model) {
+    directions = core.model_set_uniform_array(m, "waveDirections", MAX_WAVES * 3, true)
+    amplitudes = core.model_set_uniform_array(m, "waveAmplitudes", MAX_WAVES, false)
+    frequencies = core.model_set_uniform_array(m, "waveFrequencies", MAX_WAVES, false)
+    speeds = core.model_set_uniform_array(m, "waveSpeeds", MAX_WAVES, false)
+    phases = core.model_set_uniform_array(m, "wavePhases", MAX_WAVES, false)
+    steepness = core.model_set_uniform_array(m, "waveSteepness", MAX_WAVES, false)
+
+    i = 0
+    while i < MAX_WAVES {
+        angle = (i * 1.0) * core.deg_to_rad(45.0)
+        direction = core.v3_normalize(core.vec3(core.cos_of(angle), 0.0, core.sin_of(angle)))
+
+        ae3d_farr_set(directions, i * 3, direction.x)
+        ae3d_farr_set(directions, i * 3 + 1, direction.y)
+        ae3d_farr_set(directions, i * 3 + 2, direction.z)
+        ae3d_farr_set(amplitudes, i, wave_amplitude(w, i))
+        ae3d_farr_set(frequencies, i, wave_frequency(i))
+        ae3d_farr_set(speeds, i, wave_speed(i))
+        ae3d_farr_set(phases, i, (i * 1.0) * core.PI / 3.0)
+        ae3d_farr_set(steepness, i, 0.2 + (i * 1.0) * 0.1)
+        i = i + 1
+    }
+}
+
+simulation_build(w: *Simulation, resolution: int) -> *Model {
+    if w.model != null { return w.model as *Model }
+
+    steps = resolution
+    if steps <= 0 { steps = RESOLUTION }
+    m = loader.water_surface(w.ocean_size, 0.0, 0.0, steps)
+    if m == null { return null }
+
+    m.name = "water surface"
+    core.model_set_position(m, 0.0, 0.0, 0.0)
+    core.model_set_diffuse(m, w.color_r, w.color_g, w.color_b)
+    core.model_set_pbr(m, 0.0, 0.4)
+    core.model_set_exposure(m, 1.0)
+    core.model_set_alpha(m, 1.0)
+    core.model_set_shader(m, shaders.water_shader())
+
+    upload_wave_table(w, m)
+    core.model_set_uniform_int(m, "waveCount", MAX_WAVES)
+    core.model_set_uniform_float(m, "waveHeightMultiplier", w.wave_height)
+    core.model_set_uniform_float(m, "waveRandomness", w.wave_randomness)
+    core.model_set_uniform_float(m, "time", 0.0)
+
+    core.model_set_uniform_int(m, "enableShadows", 0)
+    core.model_set_uniform_int(m, "enableWaterReflection", 1)
+    core.model_set_uniform_int(m, "enableWaterRefraction", 1)
+    core.model_set_uniform_int(m, "enableWaterDistortion", 1)
+    core.model_set_uniform_int(m, "enableWaterNormalMapping", 1)
+    core.model_set_uniform_int(m, "enableHighQualityFiltering", 1)
+    core.model_set_uniform_int(m, "filteringQuality", 3)
+    core.model_set_uniform_float(m, "waterRefractionIntensity", 0.6)
+    core.model_set_uniform_float(m, "noiseIntensity", 0.0)
+    core.model_set_uniform_float(m, "noiseScale", 0.0002)
+    core.model_set_uniform_int(m, "noiseOctaves", 3)
+    core.model_set_uniform_float(m, "shadowSoftness", 0.3)
+
+    core.model_set_uniform_int(m, "enableFog", 1)
+    core.model_set_uniform_float(m, "fogStart", w.ocean_size * 0.1)
+    core.model_set_uniform_float(m, "fogEnd", w.ocean_size * 0.8)
+    core.model_set_uniform_float(m, "fogIntensity", 0.3)
+    core.model_set_uniform_vec3(m, "fogColor", core.vec3(0.5, 0.7, 0.9))
+
+    w.model = m as ptr
+    simulation_apply(w)
+    return m
+}
+
+simulation_apply(w: *Simulation) {
+    m = w.model as *Model
+    if m == null { return }
+
+    core.model_set_uniform_vec3(m, "waterBaseColor", core.vec3(w.color_r, w.color_g, w.color_b))
+    core.model_set_uniform_float(m, "waterTransparency", w.transparency)
+    core.model_set_uniform_float(m, "waveSpeedMultiplier", w.wave_speed_multiplier)
+    core.model_set_uniform_float(m, "waveHeightMultiplier", w.wave_height)
+    core.model_set_uniform_float(m, "waveRandomness", w.wave_randomness)
+
+    caustics = 0
+    if w.caustics_enabled { caustics = 1 }
+    core.model_set_uniform_int(m, "enableCaustics", caustics)
+    core.model_set_uniform_float(m, "causticsIntensity", w.caustics_intensity)
+    core.model_set_uniform_float(m, "causticsScale", w.caustics_scale)
+
+    core.model_set_uniform_float(m, "waterReflectionIntensity", w.specular_intensity)
+    core.model_set_uniform_float(m, "shadowIntensity", w.shadow_strength)
+    core.model_set_uniform_float(m, "waterDistortionIntensity", w.distortion_strength)
+    core.model_set_uniform_float(m, "waterNormalIntensity", w.normal_strength)
+
+    core.model_set_uniform_vec3(m, "skyColor", core.vec3(w.sky_r, w.sky_g, w.sky_b))
+    core.model_set_uniform_vec3(m, "horizonColor",
+                                core.vec3(w.sky_r * 0.85, w.sky_g * 0.85, w.sky_b * 0.85))
+    core.model_set_uniform_float(m, "waterPlaneHeight", m.position.y + 5.0)
+}
+
+simulation_update(w: *Simulation, delta: float) {
+    m = w.model as *Model
+    if m == null { return }
+    w.elapsed = w.elapsed + delta
+    core.model_set_uniform_float(m, "time", w.elapsed)
+}

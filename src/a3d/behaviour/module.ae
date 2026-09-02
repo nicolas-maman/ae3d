@@ -1,0 +1,364 @@
+// Game objects and components.
+//
+// A component is a vtable of lifecycle callbacks over its own state pointer,
+// which is how Aether expresses what Go did with an interface. A game object
+// keeps no transform of its own: it points at the model that already owns one,
+// so there is no per-frame copy back and forth between two copies of the same
+// position.
+
+import std.list
+import std.heap
+import std.string
+import a3d.core
+
+exports (
+    Component, GameObject, Scene,
+    KIND_MESH, KIND_SCRIPT, KIND_RENDERER, KIND_COLLIDER, KIND_LIGHT,
+    KIND_CAMERA, KIND_WATER, KIND_VOXEL, KIND_CUSTOM,
+    component_new, component_free, component_enabled, component_set_enabled,
+    component_owner, component_state,
+    object_new, object_free, object_add_component, object_component,
+    object_component_count, object_find_component, object_remove_component,
+    object_set_model, object_model, object_active, object_set_active,
+    object_position, object_set_position, object_translate,
+    object_rotation, object_set_rotation, object_scale, object_set_scale,
+    object_forward, object_up, object_right,
+    scene_new, scene_free, scene_add, scene_remove, scene_destroy_later,
+    scene_find, scene_find_by_tag, scene_count, scene_object,
+    scene_update, scene_fixed_update, scene_clear
+)
+
+const KIND_MESH = 0
+const KIND_SCRIPT = 1
+const KIND_RENDERER = 2
+const KIND_COLLIDER = 3
+const KIND_LIGHT = 4
+const KIND_CAMERA = 5
+const KIND_WATER = 6
+const KIND_VOXEL = 7
+const KIND_CUSTOM = 8
+
+struct Component {
+    state: ptr
+    owner: ptr
+    name: string
+    kind: int
+    enabled: bool
+    started: bool
+
+    awake: fn(ptr)
+    start: fn(ptr)
+    update: fn(ptr, float)
+    fixed_update: fn(ptr, float)
+    destroy: fn(ptr)
+}
+
+struct GameObject {
+    name: string
+    tag: string
+    model: ptr
+    components: ptr
+    active: bool
+    started: bool
+    owns_model: bool
+}
+
+struct Scene {
+    objects: ptr
+    pending_destroy: ptr
+}
+
+component_new(name: string, kind: int, state: ptr) -> *Component {
+    c = heap.new(Component)
+    c.name = string.copy(name)
+    c.kind = kind
+    c.state = state
+    c.enabled = true
+    return c
+}
+
+component_free(c: *Component) {
+    if c == null { return }
+    heap.free(c)
+}
+
+component_enabled(c: *Component) -> bool { return c.enabled }
+component_set_enabled(c: *Component, on: bool) { c.enabled = on }
+component_owner(c: *Component) -> *GameObject { return c.owner as *GameObject }
+component_state(c: *Component) -> ptr { return c.state }
+
+object_new(name: string) -> *GameObject {
+    o = heap.new(GameObject)
+    o.name = string.copy(name)
+    o.tag = ""
+    o.components = list.new()
+    o.active = true
+    return o
+}
+
+object_free(o: *GameObject) {
+    if o == null { return }
+    if o.components != null {
+        count = list.size(o.components)
+        i = 0
+        while i < count {
+            c = list.get_raw(o.components, i) as *Component
+            if c != null {
+                if c.destroy != null { c.destroy(c.state) }
+                component_free(c)
+            }
+            i = i + 1
+        }
+        list.free(o.components)
+    }
+    if o.owns_model && o.model != null { core.model_free(o.model as *Model) }
+    heap.free(o)
+}
+
+// An object with no model still needs somewhere to keep a transform, so it gets
+// an empty one it owns and frees. An object handed a model borrows it.
+object_set_model(o: *GameObject, m: *Model) {
+    if o.owns_model && o.model != null { core.model_free(o.model as *Model) }
+    o.model = m as ptr
+    o.owns_model = false
+}
+
+object_model(o: *GameObject) -> *Model {
+    return o.model as *Model
+}
+
+ensure_transform(o: *GameObject) -> *Model {
+    if o.model == null {
+        o.model = core.model_new() as ptr
+        o.owns_model = true
+    }
+    return o.model as *Model
+}
+
+object_active(o: *GameObject) -> bool { return o.active }
+object_set_active(o: *GameObject, on: bool) { o.active = on }
+
+object_add_component(o: *GameObject, c: *Component) {
+    c.owner = o as ptr
+    c.enabled = true
+    list.add_raw(o.components, c)
+    if c.awake != null { c.awake(c.state) }
+}
+
+object_component_count(o: *GameObject) -> int {
+    return list.size(o.components)
+}
+
+object_component(o: *GameObject, index: int) -> *Component {
+    return list.get_raw(o.components, index) as *Component
+}
+
+object_find_component(o: *GameObject, kind: int) -> *Component {
+    count = list.size(o.components)
+    i = 0
+    while i < count {
+        c = list.get_raw(o.components, i) as *Component
+        if c != null && c.kind == kind { return c }
+        i = i + 1
+    }
+    return null
+}
+
+object_remove_component(o: *GameObject, c: *Component) {
+    count = list.size(o.components)
+    i = 0
+    while i < count {
+        if list.get_raw(o.components, i) == c {
+            if c.destroy != null { c.destroy(c.state) }
+            list.remove(o.components, i)
+            component_free(c)
+            return
+        }
+        i = i + 1
+    }
+}
+
+object_position(o: *GameObject) -> Vec3 {
+    return ensure_transform(o).position
+}
+
+object_set_position(o: *GameObject, position: Vec3) {
+    m = ensure_transform(o)
+    core.model_set_position(m, position.x, position.y, position.z)
+}
+
+object_translate(o: *GameObject, delta: Vec3) {
+    m = ensure_transform(o)
+    moved = core.v3_add(m.position, delta)
+    core.model_set_position(m, moved.x, moved.y, moved.z)
+}
+
+object_rotation(o: *GameObject) -> Quat {
+    return ensure_transform(o).rotation
+}
+
+object_set_rotation(o: *GameObject, rotation: Quat) {
+    core.model_set_rotation(ensure_transform(o), rotation)
+}
+
+object_scale(o: *GameObject) -> Vec3 {
+    return ensure_transform(o).scale
+}
+
+object_set_scale(o: *GameObject, scale: Vec3) {
+    m = ensure_transform(o)
+    core.model_set_scale(m, scale.x, scale.y, scale.z)
+}
+
+object_forward(o: *GameObject) -> Vec3 {
+    return core.quat_apply(ensure_transform(o).rotation, core.vec3(0.0, 0.0, 0.0 - 1.0))
+}
+
+object_up(o: *GameObject) -> Vec3 {
+    return core.quat_apply(ensure_transform(o).rotation, core.vec3(0.0, 1.0, 0.0))
+}
+
+object_right(o: *GameObject) -> Vec3 {
+    return core.quat_apply(ensure_transform(o).rotation, core.vec3(1.0, 0.0, 0.0))
+}
+
+scene_new() -> *Scene {
+    s = heap.new(Scene)
+    s.objects = list.new()
+    s.pending_destroy = list.new()
+    return s
+}
+
+scene_free(s: *Scene) {
+    if s == null { return }
+    scene_clear(s)
+    if s.objects != null { list.free(s.objects) }
+    if s.pending_destroy != null { list.free(s.pending_destroy) }
+    heap.free(s)
+}
+
+scene_add(s: *Scene, o: *GameObject) {
+    list.add_raw(s.objects, o)
+}
+
+scene_remove(s: *Scene, o: *GameObject) {
+    count = list.size(s.objects)
+    i = 0
+    while i < count {
+        if list.get_raw(s.objects, i) == o {
+            list.remove(s.objects, i)
+            object_free(o)
+            return
+        }
+        i = i + 1
+    }
+}
+
+scene_destroy_later(s: *Scene, o: *GameObject) {
+    list.add_raw(s.pending_destroy, o)
+}
+
+scene_find(s: *Scene, name: string) -> *GameObject {
+    count = list.size(s.objects)
+    i = 0
+    while i < count {
+        o = list.get_raw(s.objects, i) as *GameObject
+        if o != null && string.equals(o.name, name) == 1 { return o }
+        i = i + 1
+    }
+    return null
+}
+
+scene_find_by_tag(s: *Scene, tag: string, out: ptr) -> int {
+    found = 0
+    count = list.size(s.objects)
+    i = 0
+    while i < count {
+        o = list.get_raw(s.objects, i) as *GameObject
+        if o != null && string.equals(o.tag, tag) == 1 {
+            list.add_raw(out, o)
+            found = found + 1
+        }
+        i = i + 1
+    }
+    return found
+}
+
+scene_count(s: *Scene) -> int {
+    return list.size(s.objects)
+}
+
+scene_object(s: *Scene, index: int) -> *GameObject {
+    return list.get_raw(s.objects, index) as *GameObject
+}
+
+drain_destroyed(s: *Scene) {
+    pending = list.size(s.pending_destroy)
+    if pending == 0 { return }
+    i = 0
+    while i < pending {
+        o = list.get_raw(s.pending_destroy, i) as *GameObject
+        if o != null { scene_remove(s, o) }
+        i = i + 1
+    }
+    list.clear(s.pending_destroy)
+}
+
+scene_update(s: *Scene, delta: float) {
+    drain_destroyed(s)
+
+    count = list.size(s.objects)
+    i = 0
+    while i < count {
+        o = list.get_raw(s.objects, i) as *GameObject
+        if o != null && o.active {
+            components = list.size(o.components)
+            j = 0
+            while j < components {
+                c = list.get_raw(o.components, j) as *Component
+                if c != null && c.enabled {
+                    if !c.started {
+                        if c.start != null { c.start(c.state) }
+                        c.started = true
+                    }
+                    if c.update != null { c.update(c.state, delta) }
+                }
+                j = j + 1
+            }
+            o.started = true
+        }
+        i = i + 1
+    }
+}
+
+scene_fixed_update(s: *Scene, delta: float) {
+    count = list.size(s.objects)
+    i = 0
+    while i < count {
+        o = list.get_raw(s.objects, i) as *GameObject
+        if o != null && o.active {
+            components = list.size(o.components)
+            j = 0
+            while j < components {
+                c = list.get_raw(o.components, j) as *Component
+                if c != null && c.enabled && c.fixed_update != null {
+                    c.fixed_update(c.state, delta)
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+scene_clear(s: *Scene) {
+    count = list.size(s.objects)
+    i = 0
+    while i < count {
+        o = list.get_raw(s.objects, i) as *GameObject
+        if o != null { object_free(o) }
+        i = i + 1
+    }
+    list.clear(s.objects)
+    list.clear(s.pending_destroy)
+}

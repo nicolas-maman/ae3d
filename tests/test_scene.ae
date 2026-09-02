@@ -1,0 +1,153 @@
+// Ray casting maths and the component lifecycle, both headless.
+
+import a3d.core
+import a3d.behaviour
+import a3d.raycast
+import a3d.loader
+
+var failures = 0
+var awake_calls = 0
+var start_calls = 0
+var update_calls = 0
+var fixed_calls = 0
+var destroy_calls = 0
+
+check(name: string, got: float, want: float) {
+    if core.abs_of(got - want) > 0.00001 {
+        println("FAIL ${name}: got ${got} want ${want}")
+        failures = failures + 1
+    }
+}
+
+check_true(name: string, condition: bool) {
+    if !condition {
+        println("FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+check_int(name: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${name}: got ${got} want ${want}")
+        failures = failures + 1
+    }
+}
+
+spin_awake(state: ptr) { awake_calls = awake_calls + 1 }
+spin_start(state: ptr) { start_calls = start_calls + 1 }
+spin_update(state: ptr, delta: float) { update_calls = update_calls + 1 }
+spin_fixed(state: ptr, delta: float) { fixed_calls = fixed_calls + 1 }
+spin_destroy(state: ptr) { destroy_calls = destroy_calls + 1 }
+
+test_raycast() {
+    origin = core.vec3(0.0, 0.0, 10.0)
+    forward = core.vec3(0.0, 0.0, 0.0 - 1.0)
+
+    // A unit sphere at the origin is first touched five units along the ray.
+    check("sphere front", raycast.sphere(origin, forward, core.vec3(0.0, 0.0, 0.0), 5.0), 5.0)
+    check_true("sphere miss",
+               !raycast.hit(raycast.sphere(origin, core.vec3(0.0, 1.0, 0.0),
+                                           core.vec3(0.0, 0.0, 0.0), 5.0)))
+
+    point = raycast.point_at(origin, forward, 5.0)
+    check("point z", point.z, 5.0)
+
+    // Triangle straddling the origin in the z = 0 plane.
+    distance = raycast.triangle(origin, forward,
+                                core.vec3(0.0 - 1.0, 0.0 - 1.0, 0.0),
+                                core.vec3(1.0, 0.0 - 1.0, 0.0),
+                                core.vec3(0.0, 1.0, 0.0))
+    check("triangle hit", distance, 10.0)
+
+    behind = raycast.triangle(core.vec3(0.0, 0.0, 0.0 - 10.0), forward,
+                              core.vec3(0.0 - 1.0, 0.0 - 1.0, 0.0),
+                              core.vec3(1.0, 0.0 - 1.0, 0.0),
+                              core.vec3(0.0, 1.0, 0.0))
+    check_true("triangle behind ray", !raycast.hit(behind))
+
+    edge = raycast.triangle(core.vec3(5.0, 5.0, 10.0), forward,
+                            core.vec3(0.0 - 1.0, 0.0 - 1.0, 0.0),
+                            core.vec3(1.0, 0.0 - 1.0, 0.0),
+                            core.vec3(0.0, 1.0, 0.0))
+    check_true("triangle outside", !raycast.hit(edge))
+
+    cube = loader.cube(2.0)
+    core.model_set_position(cube, 0.0, 0.0, 0.0)
+    check("mesh hit", raycast.model_mesh(origin, forward, cube), 9.0)
+    check_true("mesh miss",
+               !raycast.hit(raycast.model_mesh(core.vec3(50.0, 50.0, 10.0), forward, cube)))
+    core.model_free(cube)
+}
+
+test_components() {
+    scene = behaviour.scene_new()
+    object = behaviour.object_new("spinner")
+    object.tag = "actor"
+
+    component = behaviour.component_new("spin", behaviour.KIND_SCRIPT, null)
+    component.awake = spin_awake as fn(ptr)
+    component.start = spin_start as fn(ptr)
+    component.update = spin_update as fn(ptr, float)
+    component.fixed_update = spin_fixed as fn(ptr, float)
+    component.destroy = spin_destroy as fn(ptr)
+
+    behaviour.object_add_component(object, component)
+    check_int("awake on add", awake_calls, 1)
+    check_int("start deferred", start_calls, 0)
+
+    behaviour.scene_add(scene, object)
+    behaviour.scene_update(scene, 0.016)
+    check_int("start once", start_calls, 1)
+    check_int("update once", update_calls, 1)
+
+    behaviour.scene_update(scene, 0.016)
+    check_int("start still once", start_calls, 1)
+    check_int("update twice", update_calls, 2)
+
+    behaviour.scene_fixed_update(scene, 0.016)
+    check_int("fixed once", fixed_calls, 1)
+
+    behaviour.component_set_enabled(component, false)
+    behaviour.scene_update(scene, 0.016)
+    check_int("disabled component skipped", update_calls, 2)
+    behaviour.component_set_enabled(component, true)
+
+    // The transform lives on the model, so reading it back through the object
+    // must show exactly what was written, with no copy in between.
+    behaviour.object_set_position(object, core.vec3(3.0, 4.0, 5.0))
+    position = behaviour.object_position(object)
+    check("object position x", position.x, 3.0)
+    check("object position z", position.z, 5.0)
+
+    behaviour.object_translate(object, core.vec3(1.0, 0.0, 0.0))
+    check("object translate", behaviour.object_position(object).x, 4.0)
+
+    behaviour.object_set_rotation(object, core.quat_rotate(core.deg_to_rad(90.0),
+                                                           core.vec3(0.0, 1.0, 0.0)))
+    forward = behaviour.object_forward(object)
+    check("object forward x", forward.x, 0.0 - 1.0)
+
+    check_true("find by name", behaviour.scene_find(scene, "spinner") == object)
+    check_true("missing name", behaviour.scene_find(scene, "absent") == null)
+    check_true("find component",
+               behaviour.object_find_component(object, behaviour.KIND_SCRIPT) == component)
+    check_int("scene count", behaviour.scene_count(scene), 1)
+
+    behaviour.scene_destroy_later(scene, object)
+    behaviour.scene_update(scene, 0.016)
+    check_int("scene emptied", behaviour.scene_count(scene), 0)
+    check_int("destroy called", destroy_calls, 1)
+
+    behaviour.scene_free(scene)
+}
+
+main() {
+    test_raycast()
+    test_components()
+
+    if failures == 0 {
+        println("scene: all checks passed")
+    } else {
+        println("scene: ${failures} failure(s)")
+    }
+}

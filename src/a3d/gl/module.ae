@@ -15,7 +15,8 @@ import a3d.core
 import a3d.shaders
 
 exports (
-    GLRenderer, ProgramSlots, TextureEntry,
+    GLRenderer, ProgramSlots, TextureEntry, Skybox,
+    skybox_create, skybox_solid, skybox_free, skybox_set_color, skybox_texture,
     renderer_new, renderer_free, backend,
     renderer_add_light, renderer_remove_light, renderer_model_count, renderer_model,
     renderer_draw_calls, renderer_instance_count,
@@ -119,6 +120,21 @@ struct TextureEntry {
     refs: int
     width: int
     height: int
+}
+
+struct Skybox {
+    mesh: ptr
+    vao: int
+    vbo: int
+    program: int
+    texture: int
+    u_view: int
+    u_projection: int
+    u_sampler: int
+    size: float
+    red: float
+    green: float
+    blue: float
 }
 
 struct GLRenderer {
@@ -590,6 +606,125 @@ renderer_default_program(r: *GLRenderer) -> int {
 
 renderer_set_skybox(r: *GLRenderer, skybox: ptr) {
     r.skybox = skybox
+    sky = skybox as *Skybox
+    if sky != null && sky.texture == 0 {
+        renderer_set_clear_color(r, sky.red, sky.green, sky.blue)
+    }
+}
+
+// A solid sky needs no geometry: the clear colour already fills every pixel the
+// scene does not cover, so drawing a cube over it would be pure waste.
+skybox_solid(red: float, green: float, blue: float) -> *Skybox {
+    sky = heap.new(Skybox)
+    sky.red = red
+    sky.green = green
+    sky.blue = blue
+    sky.size = 10000.0
+    return sky
+}
+
+skybox_create(r: *GLRenderer, path: string) -> *Skybox {
+    if path == "" { return skybox_solid(0.5, 0.7, 1.0) }
+
+    texture = renderer_load_texture(r, path)
+    if texture == 0 {
+        println("aether3d: skybox texture unavailable, falling back to a solid sky")
+        return skybox_solid(0.5, 0.7, 1.0)
+    }
+
+    sky = skybox_solid(0.5, 0.7, 1.0)
+    sky.texture = texture
+    sky.program = compile_program(shaders.VERTEX_SKYBOX, shaders.FRAGMENT_SKYBOX, "skybox")
+    if sky.program == 0 {
+        renderer_release_texture(r, texture)
+        sky.texture = 0
+        return sky
+    }
+
+    sky.u_view = ae3d_gl_uniform_location(sky.program, "view")
+    sky.u_projection = ae3d_gl_uniform_location(sky.program, "projection")
+    sky.u_sampler = ae3d_gl_uniform_location(sky.program, "skybox")
+
+    sky.mesh = core.mesh_create()
+    push_skybox_cube(sky.mesh, sky.size)
+
+    sky.vao = ae3d_gl_vao_create()
+    ae3d_gl_vao_bind(sky.vao)
+    sky.vbo = ae3d_gl_buffer_create()
+    ae3d_gl_upload_mesh(sky.mesh, sky.vbo, 0)
+    ae3d_gl_setup_vertex_attribs()
+    ae3d_gl_vao_bind(0)
+    return sky
+}
+
+skybox_set_color(sky: *Skybox, red: float, green: float, blue: float) {
+    sky.red = red
+    sky.green = green
+    sky.blue = blue
+}
+
+skybox_texture(sky: *Skybox) -> int {
+    return sky.texture
+}
+
+skybox_free(r: *GLRenderer, sky: *Skybox) {
+    if sky == null { return }
+    if sky.vao != 0 { ae3d_gl_vao_delete(sky.vao) }
+    if sky.vbo != 0 { ae3d_gl_buffer_delete(sky.vbo) }
+    if sky.program != 0 { ae3d_gl_program_delete(sky.program) }
+    if sky.texture != 0 { renderer_release_texture(r, sky.texture) }
+    if sky.mesh != null { core.mesh_destroy(sky.mesh) }
+    heap.free(sky)
+}
+
+push_skybox_face(mesh: ptr, a: Vec3, b: Vec3, c: Vec3, d: Vec3) {
+    zero = core.vec3(0.0, 0.0, 0.0)
+    core.mesh_push_vertex(mesh, a, 0.0, 0.0, zero)
+    core.mesh_push_vertex(mesh, b, 0.0, 0.0, zero)
+    core.mesh_push_vertex(mesh, c, 0.0, 0.0, zero)
+    core.mesh_push_vertex(mesh, c, 0.0, 0.0, zero)
+    core.mesh_push_vertex(mesh, d, 0.0, 0.0, zero)
+    core.mesh_push_vertex(mesh, a, 0.0, 0.0, zero)
+}
+
+push_skybox_cube(mesh: ptr, size: float) {
+    n = 0.0 - size
+    p = size
+    core.mesh_reserve(mesh, 36, 0)
+
+    push_skybox_face(mesh, core.vec3(n, p, n), core.vec3(n, n, n), core.vec3(p, n, n), core.vec3(p, p, n))
+    push_skybox_face(mesh, core.vec3(n, n, p), core.vec3(n, n, n), core.vec3(n, p, n), core.vec3(n, p, p))
+    push_skybox_face(mesh, core.vec3(p, n, n), core.vec3(p, n, p), core.vec3(p, p, p), core.vec3(p, p, n))
+    push_skybox_face(mesh, core.vec3(n, n, p), core.vec3(n, p, p), core.vec3(p, p, p), core.vec3(p, n, p))
+    push_skybox_face(mesh, core.vec3(n, p, n), core.vec3(p, p, n), core.vec3(p, p, p), core.vec3(n, p, p))
+    push_skybox_face(mesh, core.vec3(n, n, n), core.vec3(n, n, p), core.vec3(p, n, p), core.vec3(p, n, n))
+}
+
+// The sky must sit behind everything, so its translation is stripped from the
+// view matrix and it is drawn with depth writes off.
+render_skybox(r: *GLRenderer, cam: *Camera) {
+    sky = r.skybox as *Skybox
+    if sky == null || sky.texture == 0 || sky.vao == 0 { return }
+
+    use_program(r, sky.program)
+
+    view = core.camera_view(cam)
+    view.m12 = 0.0
+    view.m13 = 0.0
+    view.m14 = 0.0
+    projection = core.camera_projection(cam)
+
+    ae3d_gl_uniform_mat4(sky.u_view, &view)
+    ae3d_gl_uniform_mat4(sky.u_projection, &projection)
+    ae3d_gl_uniform_int(sky.u_sampler, 0)
+
+    ae3d_gl_set_depth_mask(0)
+    ae3d_gl_texture_bind(0, sky.texture)
+    ae3d_gl_vao_bind(sky.vao)
+    ae3d_gl_draw_arrays(0, 36)
+    ae3d_gl_vao_bind(0)
+    ae3d_gl_set_depth_mask(1)
+    r.last_draw_calls = r.last_draw_calls + 1
 }
 
 renderer_update_viewport(r: *GLRenderer, width: int, height: int) {
@@ -615,6 +750,7 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
     ae3d_gl_clear(1, 1)
 
     set_depth_test(r, core.depth_test())
+    if r.skybox != null { render_skybox(r, cam) }
     set_blend(r, true)
     set_face_culling(r, core.face_culling())
 
@@ -975,6 +1111,7 @@ renderer_cleanup(r: *GLRenderer) {
     }
     list.clear(r.textures)
 
+    if r.skybox != null { skybox_free(r, r.skybox as *Skybox) ; r.skybox = null }
     if r.default_texture != 0 { ae3d_gl_texture_delete(r.default_texture) ; r.default_texture = 0 }
     if r.screen_vao != 0 { ae3d_gl_vao_delete(r.screen_vao) ; r.screen_vao = 0 }
     if r.screen_vbo != 0 { ae3d_gl_buffer_delete(r.screen_vbo) ; r.screen_vbo = 0 }
