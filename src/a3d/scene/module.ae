@@ -1,0 +1,285 @@
+// Saving and loading scenes.
+//
+// A scene is JSON: transforms, materials and where each model's geometry comes
+// from. A model loaded from a file records its path and is reloaded through the
+// OBJ loader; a procedural one, a voxel world or a meshed field, writes its
+// geometry to a compressed binary mesh beside the scene, because regenerating it
+// is neither cheap nor guaranteed to reproduce the same thing.
+
+import std.list
+import std.fs
+import std.json
+import std.string
+import a3d.core
+import a3d.loader
+
+exports (
+    scene_save, scene_load, scene_free, last_error
+)
+
+extern ae3d_meshfile_save(path: string, mesh: ptr, instances: ptr) -> int
+extern ae3d_meshfile_load(path: string) -> ptr
+extern ae3d_meshfile_mesh(handle: ptr) -> ptr
+extern ae3d_meshfile_instances(handle: ptr) -> ptr
+extern ae3d_meshfile_release(handle: ptr)
+extern ae3d_meshfile_error() -> string
+extern ae3d_mesh_destroy(mesh: ptr)
+extern ae3d_inst_destroy(instances: ptr)
+extern ae3d_inst_count(instances: ptr) -> int
+
+var g_error = ""
+var g_error_owned = false
+
+last_error() -> string {
+    return g_error
+}
+
+set_error(reason: string, detail: string) {
+    if g_error_owned { string.free(g_error) }
+    g_error = string.concat(reason, detail)
+    g_error_owned = true
+}
+
+vec3_json(v: Vec3) -> ptr {
+    out = json.arr()
+    json.array_add_raw(out, json.num(v.x))
+    json.array_add_raw(out, json.num(v.y))
+    json.array_add_raw(out, json.num(v.z))
+    return out
+}
+
+quat_json(q: Quat) -> ptr {
+    out = json.arr()
+    json.array_add_raw(out, json.num(q.x))
+    json.array_add_raw(out, json.num(q.y))
+    json.array_add_raw(out, json.num(q.z))
+    json.array_add_raw(out, json.num(q.w))
+    return out
+}
+
+number_at(node: ptr, index: int) -> float {
+    element = json.array_get_raw(node, index)
+    if element == null { return 0.0 }
+    return json.get_number(element)
+}
+
+vec3_of(node: ptr) -> Vec3 {
+    if node == null || json.array_size(node) < 3 { return core.vec3(0.0, 0.0, 0.0) }
+    return core.vec3(number_at(node, 0), number_at(node, 1), number_at(node, 2))
+}
+
+quat_of(node: ptr) -> Quat {
+    if node == null || json.array_size(node) < 4 { return core.quat_ident() }
+    return core.quat(number_at(node, 0), number_at(node, 1),
+                     number_at(node, 2), number_at(node, 3))
+}
+
+field_number(node: ptr, name: string, fallback: float) -> float {
+    child = json.object_get_raw(node, name)
+    if child == null { return fallback }
+    return json.get_number(child)
+}
+
+field_string(node: ptr, name: string) -> string {
+    child = json.object_get_raw(node, name)
+    if child == null { return "" }
+    return json.get_string_raw(child)
+}
+
+material_json(m: *Material) -> ptr {
+    out = json.obj()
+    json.object_set_raw(out, "diffuse", vec3_json(m.diffuse))
+    json.object_set_raw(out, "specular", vec3_json(m.specular))
+    json.object_set_raw(out, "shininess", json.num(m.shininess))
+    json.object_set_raw(out, "metallic", json.num(m.metallic))
+    json.object_set_raw(out, "roughness", json.num(m.roughness))
+    json.object_set_raw(out, "exposure", json.num(m.exposure))
+    json.object_set_raw(out, "alpha", json.num(m.alpha))
+    json.object_set_raw(out, "texture_path", json.str(m.texture_path))
+    json.object_set_raw(out, "name", json.str(m.name))
+    return out
+}
+
+apply_material(m: *Model, node: ptr) {
+    if node == null { return }
+    core.model_ensure_material(m)
+    material = m.material
+
+    material.diffuse = vec3_of(json.object_get_raw(node, "diffuse"))
+    material.specular = vec3_of(json.object_get_raw(node, "specular"))
+    material.shininess = field_number(node, "shininess", 32.0)
+    material.metallic = field_number(node, "metallic", 0.0)
+    material.roughness = field_number(node, "roughness", 0.5)
+    material.exposure = field_number(node, "exposure", 1.0)
+    material.alpha = field_number(node, "alpha", 1.0)
+
+    texture = field_string(node, "texture_path")
+    if texture != "" { material.texture_path = string.copy(texture) }
+}
+
+mesh_file_for(directory: string, index: int) -> string {
+    suffix = string.concat(string.from_int(index), ".mesh")
+    name = string.concat("model_", suffix)
+    string.free(suffix)
+    path = string.concat(directory, name)
+    string.free(name)
+    return path
+}
+
+// A model that came from a file records only its path. Anything else has its
+// geometry written out, because it cannot be reconstructed from the scene alone.
+scene_save(models: ptr, path: string, mesh_directory: string) -> bool {
+    if models == null { set_error("nothing to save to ", path) ; return false }
+
+    root = json.obj()
+    json.object_set_raw(root, "version", json.from_int(1))
+    entries = json.arr()
+
+    count = list.size(models)
+    i = 0
+    while i < count {
+        m = list.get_raw(models, i) as *Model
+        if m != null {
+            entry = json.obj()
+            json.object_set_raw(entry, "name", json.str(m.name))
+            json.object_set_raw(entry, "position", vec3_json(m.position))
+            json.object_set_raw(entry, "scale", vec3_json(m.scale))
+            json.object_set_raw(entry, "rotation", quat_json(m.rotation))
+            json.object_set_raw(entry, "instanced", json.boolean(m.is_instanced))
+            json.object_set_raw(entry, "visible", json.boolean(m.visible))
+
+            if m.material != null {
+                json.object_set_raw(entry, "material", material_json(m.material))
+            }
+
+            if m.source_path != "" {
+                json.object_set_raw(entry, "source_path", json.str(m.source_path))
+            } else {
+                mesh_path = mesh_file_for(mesh_directory, i)
+                if ae3d_meshfile_save(mesh_path, m.mesh, m.instances) != 1 {
+                    set_error("cannot write the mesh: ", ae3d_meshfile_error())
+                    string.free(mesh_path)
+                    json.free(root)
+                    return false
+                }
+                json.object_set_raw(entry, "mesh_file", json.str(mesh_path))
+                string.free(mesh_path)
+            }
+
+            json.array_add_raw(entries, entry)
+        }
+        i = i + 1
+    }
+
+    json.object_set_raw(root, "models", entries)
+
+    text = json.stringify_raw(root)
+    json.free(root)
+
+    err = fs.write(path, text)
+    string.free(text)
+    if err != "" {
+        set_error("cannot write ", path)
+        return false
+    }
+    return true
+}
+
+scene_load(path: string) -> ptr {
+    content, read_error = fs.read(path)
+    if read_error != "" {
+        set_error("cannot read ", path)
+        string.free(content)
+        return null
+    }
+
+    root = json.parse_raw(content)
+    string.free(content)
+    if root == null {
+        set_error("cannot parse ", path)
+        return null
+    }
+
+    entries = json.object_get_raw(root, "models")
+    if entries == null {
+        set_error("no models in ", path)
+        json.free(root)
+        return null
+    }
+
+    models = list.new()
+    count = json.array_size(entries)
+    i = 0
+    while i < count {
+        entry = json.array_get_raw(entries, i)
+        if entry != null {
+            m = load_entry(entry)
+            if m != null { list.add_raw(models, m) }
+        }
+        i = i + 1
+    }
+
+    json.free(root)
+    return models
+}
+
+load_entry(entry: ptr) -> *Model {
+    source = field_string(entry, "source_path")
+    mesh_file = field_string(entry, "mesh_file")
+
+    m = null as *Model
+    if source != "" {
+        m = loader.load_obj(source, false)
+        if m == null {
+            set_error("cannot reload ", source)
+            return null
+        }
+    } else if mesh_file != "" {
+        handle = ae3d_meshfile_load(mesh_file)
+        if handle == null {
+            set_error("cannot read the mesh: ", ae3d_meshfile_error())
+            return null
+        }
+        m = core.model_new()
+        ae3d_mesh_destroy(m.mesh)
+        m.mesh = ae3d_meshfile_mesh(handle)
+        m.instances = ae3d_meshfile_instances(handle)
+        if m.instances != null && ae3d_inst_count(m.instances) > 0 {
+            m.is_instanced = true
+            m.instances_updated = true
+        }
+        ae3d_meshfile_release(handle)
+    } else {
+        set_error("entry has neither a source path nor a mesh file", "")
+        return null
+    }
+
+    name = field_string(entry, "name")
+    if name != "" { m.name = string.copy(name) }
+
+    m.position = vec3_of(json.object_get_raw(entry, "position"))
+    m.scale = vec3_of(json.object_get_raw(entry, "scale"))
+    m.rotation = quat_of(json.object_get_raw(entry, "rotation"))
+
+    visible = json.object_get_raw(entry, "visible")
+    m.visible = true
+    if visible != null { m.visible = json.get_bool(visible) == 1 }
+
+    apply_material(m, json.object_get_raw(entry, "material"))
+
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    return m
+}
+
+scene_free(models: ptr) {
+    if models == null { return }
+    count = list.size(models)
+    i = 0
+    while i < count {
+        m = list.get_raw(models, i) as *Model
+        if m != null { core.model_free(m) }
+        i = i + 1
+    }
+    list.free(models)
+}

@@ -174,6 +174,13 @@ void   ae3d_gl_renderbuffer_delete(int rbo);
 int    ae3d_gl_fbo_complete(void);
 int    ae3d_gl_read_pixel(int x, int y);
 
+int    ae3d_meshfile_save(const char *path, void *mesh, void *instances);
+void  *ae3d_meshfile_load(const char *path);
+void  *ae3d_meshfile_mesh(void *handle);
+void  *ae3d_meshfile_instances(void *handle);
+void   ae3d_meshfile_release(void *handle);
+const char *ae3d_meshfile_error(void);
+
 int    ae3d_vk_available(void);
 const char *ae3d_vk_device_name(void);
 const char *ae3d_vk_last_error(void);

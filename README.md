@@ -18,7 +18,11 @@ engine, to Aether and C. See [Credits](#credits).
   Vulkan, so a program built with this backend still starts where no driver
   exists and says so.
 - **Gerstner-wave ocean**, **Perlin terrain**, **voxel worlds** drawn as a single
-  instanced call, an OBJ/MTL loader, ray casting, and a component system.
+  instanced call, **surface nets** over a signed distance field, an OBJ/MTL
+  loader, ray casting, and a component system.
+- **Scenes save and load.** Transforms and materials as JSON; geometry that came
+  from a file records its path, and geometry that did not is written to a
+  compressed binary mesh beside the scene.
 
 ## Requirements
 
@@ -80,6 +84,7 @@ src/a3d/    Aether modules
   noise       Perlin noise
   voxel       voxel worlds
   water       the ocean surface
+  scene       saving and loading scenes
   behaviour   game objects and components
   raycast     ray tests against spheres, triangles and meshes
 tests/      test suites, each a program that prints its own verdict

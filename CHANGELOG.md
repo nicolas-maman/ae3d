@@ -30,6 +30,13 @@ First working engine.
 - Game objects and components, ray casting, and a fly camera with frustum
   extraction.
 
+### Scenes
+
+- Scene save and load. A model from a file records its path and reloads through
+  the OBJ loader; a procedural one writes its geometry to a gzip-compressed
+  binary mesh, float32 stored as its IEEE-754 bit pattern in little-endian order
+  so a file written on one host reads back identically on another.
+
 ### Engine
 
 - Window, input and timing over GLFW.

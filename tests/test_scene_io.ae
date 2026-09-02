@@ -1,0 +1,147 @@
+// Scene round-trip: a file-backed model, a procedural model, and an instanced
+// one with per-instance colours.
+
+import std.list
+import std.fs
+import a3d.core
+import a3d.scene
+import a3d.loader
+import a3d.voxel
+
+var failures = 0
+
+record_failure(reason: string) {
+    println("FAIL ${reason}")
+    failures = failures + 1
+}
+
+check_true(name: string, condition: bool) {
+    if !condition { record_failure(name) }
+}
+
+check_near(name: string, got: float, want: float) {
+    if core.abs_of(got - want) > 0.0001 { record_failure("${name}: got ${got} want ${want}") }
+}
+
+check_int(name: string, got: int, want: int) {
+    if got != want { record_failure("${name}: got ${got} want ${want}") }
+}
+
+main() {
+    directory = "build/scene_roundtrip/"
+    fs.mkdir_p(directory)
+    scene_path = "build/scene_roundtrip/scene.json"
+
+    models = list.new()
+
+    // A model that came from a file records its path and reloads through the
+    // loader, so its geometry is not written out.
+    loaded = loader.load_obj("resources/obj/Cube.obj", false)
+    check_true("source model loaded", loaded != null)
+    if loaded == null { return }
+    core.model_set_position(loaded, 3.0, 4.0, 5.0)
+    core.model_set_scale(loaded, 2.0, 2.0, 2.0)
+    core.model_set_rotation(loaded, core.quat_rotate(core.deg_to_rad(30.0),
+                                                      core.vec3(0.0, 1.0, 0.0)))
+    core.model_glossy(loaded, 0.2, 0.6, 0.9)
+    core.model_set_alpha(loaded, 0.75)
+    list.add_raw(models, loaded)
+
+    // A procedural model has no source, so its geometry is written beside the
+    // scene and must come back byte for byte.
+    generated = loader.sphere(1.0, 16, 12)
+    core.model_set_position(generated, 0.0 - 7.0, 1.0, 0.0)
+    core.model_matte(generated, 0.9, 0.3, 0.1)
+    list.add_raw(models, generated)
+
+    // An instanced model carries its matrices and colours through the same file.
+    world = voxel.world_new(4, 4, 4, 2.0)
+    x = 0
+    while x < 4 {
+        y = 0
+        while y < 4 {
+            z = 0
+            while z < 4 {
+                voxel.world_set(world, x, y, z, voxel.GRASS)
+                z = z + 1
+            }
+            y = y + 1
+        }
+        x = x + 1
+    }
+    blocks = voxel.world_build(world, loader.cube(2.0))
+    check_true("instanced model built", blocks != null)
+    list.add_raw(models, blocks)
+
+    source_vertices = core.mesh_vertex_count(generated.mesh)
+    source_indices = core.mesh_index_count(generated.mesh)
+    source_instances = core.model_instance_count(blocks)
+
+    if !scene.scene_save(models, scene_path, directory) {
+        record_failure("saved: ${scene.last_error()}")
+    }
+    check_true("scene file exists", fs.exists(scene_path) == 1)
+
+    restored = scene.scene_load(scene_path)
+    check_true("loaded", restored != null)
+    if restored == null {
+        println("  ${scene.last_error()}")
+        return
+    }
+    check_int("model count", list.size(restored), 3)
+
+    back_loaded = list.get_raw(restored, 0) as *Model
+    check_near("position x", back_loaded.position.x, 3.0)
+    check_near("position z", back_loaded.position.z, 5.0)
+    check_near("scale y", back_loaded.scale.y, 2.0)
+    check_near("rotation y", back_loaded.rotation.y, loaded.rotation.y)
+    check_near("alpha", back_loaded.material.alpha, 0.75)
+    check_near("diffuse b", back_loaded.material.diffuse.z, 0.9)
+    check_true("name round-tripped", back_loaded.name == "Cube.obj")
+    check_true("reloaded from its source", core.mesh_vertex_count(back_loaded.mesh) ==
+                                            core.mesh_vertex_count(loaded.mesh))
+
+    back_generated = list.get_raw(restored, 1) as *Model
+    check_int("procedural vertices", core.mesh_vertex_count(back_generated.mesh), source_vertices)
+    check_int("procedural indices", core.mesh_index_count(back_generated.mesh), source_indices)
+    check_near("procedural position x", back_generated.position.x, 0.0 - 7.0)
+
+    // Geometry must survive the float32 round trip exactly.
+    worst = 0.0
+    i = 0
+    while i < source_vertices {
+        before = core.mesh_position(generated.mesh, i)
+        after = core.mesh_position(back_generated.mesh, i)
+        error = core.v3_len(core.v3_sub(before, after))
+        if error > worst { worst = error }
+        i = i + 1
+    }
+    check_true("procedural geometry is identical", worst == 0.0)
+
+    mismatched = 0
+    i = 0
+    while i < source_indices {
+        if core.mesh_index_at(generated.mesh, i) != core.mesh_index_at(back_generated.mesh, i) {
+            mismatched = mismatched + 1
+        }
+        i = i + 1
+    }
+    check_int("procedural indices are identical", mismatched, 0)
+
+    back_blocks = list.get_raw(restored, 2) as *Model
+    check_true("instancing survived", back_blocks.is_instanced)
+    check_int("instance count", core.model_instance_count(back_blocks), source_instances)
+
+    scene.scene_free(restored)
+    list.free(models)
+    core.model_free(loaded)
+    core.model_free(generated)
+    core.model_free(blocks)
+    voxel.world_free(world)
+
+    if failures == 0 {
+        println("scene io: all checks passed")
+    } else {
+        println("scene io: ${failures} failure(s)")
+    }
+}
