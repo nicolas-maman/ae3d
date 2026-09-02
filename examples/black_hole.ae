@@ -1,0 +1,211 @@
+// Two hundred thousand particles in orbit, integrated with Verlet and drawn as
+// two instanced calls.
+//
+// Particle state lives in plain allocations viewed as float[], and each frame
+// uploads every position in one call rather than one call per particle: at this
+// count the difference is the whole frame budget.
+//
+//   ./build.sh examples/black_hole.ae && ./build/black_hole
+
+import std.list
+import a3d.core
+import a3d.platform
+import a3d.engine
+import a3d.gl
+import a3d.loader
+
+extern calloc(count: int, size: int) -> ptr
+extern free(block: ptr)
+extern clock_ns() -> long
+
+const PER_SWARM = 100000
+const HORIZON = 50.0
+const MASS = 1400000.0
+const STEP = 0.016
+
+var g_red_model: ptr = null
+var g_blue_model: ptr = null
+var g_red_position: ptr = null
+var g_red_previous: ptr = null
+var g_blue_position: ptr = null
+var g_blue_previous: ptr = null
+var g_alive = 0
+var g_seed = 987654321
+
+next_random() -> float {
+    g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
+    return (g_seed * 1.0) / 2147483647.0
+}
+
+random_angle() -> float {
+    return next_random() * core.TWO_PI
+}
+
+// A circular orbit needs speed sqrt(GM / r) perpendicular to the radius; the
+// swarm is seeded on that so it settles into a disc instead of collapsing.
+seed_particle(position: float[], previous: float[], index: int) {
+    radius = 140.0 + next_random() * 620.0
+    angle = random_angle()
+    height = (next_random() - 0.5) * 90.0
+
+    x = radius * core.cos_of(angle)
+    z = radius * core.sin_of(angle)
+    speed = core.sqrt_of(MASS / radius)
+
+    slot = index * 3
+    position[slot] = x
+    position[slot + 1] = height
+    position[slot + 2] = z
+    previous[slot] = x + speed * core.sin_of(angle) * STEP
+    previous[slot + 1] = height
+    previous[slot + 2] = z - speed * core.cos_of(angle) * STEP
+}
+
+step_swarm(position: float[], previous: float[], delta: float) -> int {
+    total = PER_SWARM
+
+    step = delta
+    if step > 0.033 { step = 0.033 }
+    scale = step * step
+
+    alive = 0
+    i = 0
+    while i < total {
+        slot = i * 3
+        x = position[slot]
+        y = position[slot + 1]
+        z = position[slot + 2]
+
+        distance_sq = x * x + y * y + z * z
+        if distance_sq < HORIZON * HORIZON {
+            seed_particle(position, previous, i)
+            i = i + 1
+            continue
+        }
+        alive = alive + 1
+
+        distance = core.sqrt_of(distance_sq)
+        pull = 0.0 - MASS / (distance_sq * distance)
+
+        next_x = x + x - previous[slot] + x * pull * scale
+        next_y = y + y - previous[slot + 1] + y * pull * scale
+        next_z = z + z - previous[slot + 2] + z * pull * scale
+
+        previous[slot] = x
+        previous[slot + 1] = y
+        previous[slot + 2] = z
+        position[slot] = next_x
+        position[slot + 1] = next_y
+        position[slot + 2] = next_z
+
+        i = i + 1
+    }
+    return alive
+}
+
+on_start(data: ptr) {
+    e = data as *Engine
+    bytes = PER_SWARM * 3
+
+    g_red_position = calloc(bytes, 8)
+    g_red_previous = calloc(bytes, 8)
+    g_blue_position = calloc(bytes, 8)
+    g_blue_previous = calloc(bytes, 8)
+    if g_red_position == null || g_red_previous == null ||
+       g_blue_position == null || g_blue_previous == null {
+        println("could not allocate particle state")
+        return
+    }
+
+    red_position = g_red_position as float[]
+    red_previous = g_red_previous as float[]
+    blue_position = g_blue_position as float[]
+    blue_previous = g_blue_previous as float[]
+
+    i = 0
+    while i < PER_SWARM {
+        seed_particle(red_position, red_previous, i)
+        seed_particle(blue_position, blue_previous, i)
+        i = i + 1
+    }
+
+    red = loader.load_obj("resources/obj/Sphere_Low.obj", true)
+    blue = loader.load_obj("resources/obj/Sphere_Low.obj", true)
+    if red == null || blue == null {
+        println("could not load the particle mesh: ${loader.last_error()}")
+        return
+    }
+
+    core.model_set_scale(red, 1.6, 1.6, 1.6)
+    core.model_set_scale(blue, 1.6, 1.6, 1.6)
+    core.model_polished_metal(red, 1.0, 0.28, 0.05)
+    core.model_polished_metal(blue, 0.1, 0.45, 1.0)
+    core.model_set_exposure(red, 1.4)
+    core.model_set_exposure(blue, 1.4)
+
+    if !core.model_enable_instancing(red, PER_SWARM) { return }
+    if !core.model_enable_instancing(blue, PER_SWARM) { return }
+
+    engine.engine_add_model(e, red)
+    engine.engine_add_model(e, blue)
+    g_red_model = red as ptr
+    g_blue_model = blue as ptr
+
+    renderer = engine.engine_gl_renderer(e)
+    gl.renderer_set_clear_color(renderer, 0.01, 0.01, 0.02)
+    gl.renderer_set_bloom(renderer, true)
+    gl.renderer_set_bloom_params(renderer, 0.7, 0.5)
+
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(200.0, 320.0, 1100.0))
+    core.camera_set_speed(cam, 900.0)
+    core.camera_set_far(cam, 40000.0)
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+
+    println("particles: ${PER_SWARM * 2} in two instanced draws")
+}
+
+on_update(data: ptr, delta: float) {
+    red = g_red_model as *Model
+    blue = g_blue_model as *Model
+    if red == null || blue == null { return }
+
+    alive = step_swarm(g_red_position as float[], g_red_previous as float[], delta)
+    alive = alive + step_swarm(g_blue_position as float[], g_blue_previous as float[], delta)
+    g_alive = alive
+
+    core.model_set_instance_positions(red, g_red_position, PER_SWARM)
+    core.model_set_instance_positions(blue, g_blue_position, PER_SWARM)
+}
+
+main() {
+    e = engine.engine_new(platform.API_GL)
+    engine.engine_set_size(e, 1280, 800)
+    engine.engine_set_title(e, "aether3d - black hole")
+    engine.engine_set_face_culling(e, true)
+
+    light = core.light_directional(core.vec3(0.0, 0.0 - 1.0, 0.0 - 0.2),
+                                   core.vec3(1.0, 0.95, 0.8), 4.0)
+    light.ambient_strength = 0.2
+    light.temperature = 5800.0
+    engine.engine_set_light(e, light)
+
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_start(e, on_start as fn(ptr))
+    engine.engine_on_update(e, on_update as fn(ptr, float))
+
+    engine.engine_run(e, 0 - 1, 0 - 1)
+
+    println("black hole: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${g_alive} particles in orbit, ${gl.renderer_draw_calls(engine.engine_gl_renderer(e))} draw calls")
+
+    red = g_red_model as *Model
+    blue = g_blue_model as *Model
+    if red != null { core.model_free(red) }
+    if blue != null { core.model_free(blue) }
+    if g_red_position != null { free(g_red_position) }
+    if g_red_previous != null { free(g_red_previous) }
+    if g_blue_position != null { free(g_blue_position) }
+    if g_blue_previous != null { free(g_blue_previous) }
+    core.light_free(light)
+    engine.engine_free(e)
+}

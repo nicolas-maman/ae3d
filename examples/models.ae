@@ -1,0 +1,70 @@
+// Loads the OBJ models from resources/, including a multi-material one, and
+// shows them side by side.
+//
+//   ./build.sh examples/models.ae && ./build/models
+
+import a3d.core
+import a3d.platform
+import a3d.engine
+import a3d.gl
+import a3d.loader
+
+var g_spin: ptr = null
+
+place(e: *Engine, path: string, x: float, scale: float) -> *Model {
+    m = loader.load_obj(path, false)
+    if m == null {
+        println("could not load ${path}: ${loader.last_error()}")
+        return null
+    }
+    core.model_set_scale(m, scale, scale, scale)
+    core.model_set_position(m, x, 0.0, 0.0)
+    println("${path}: ${core.mesh_vertex_count(m.mesh)} vertices, ${core.model_group_count(m)} material groups")
+    engine.engine_add_model(e, m)
+    return m
+}
+
+on_start(data: ptr) {
+    e = data as *Engine
+
+    sphere = place(e, "resources/obj/Sphere.obj", 0.0 - 80.0, 1.0)
+    if sphere != null { core.model_polished_metal(sphere, 0.85, 0.55, 0.2) }
+
+    earth = place(e, "resources/obj/Earth/Earth.obj", 0.0, 26.0)
+    if earth != null { g_spin = earth as ptr }
+
+    cube = place(e, "resources/obj/Cube.obj", 80.0, 22.0)
+    if cube != null { core.model_glossy(cube, 0.2, 0.5, 0.85) }
+
+    renderer = engine.engine_gl_renderer(e)
+    gl.renderer_set_clear_color(renderer, 0.05, 0.06, 0.09)
+
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(0.0, 20.0, 190.0))
+    core.camera_set_speed(cam, 160.0)
+}
+
+on_update(data: ptr, delta: float) {
+    earth = g_spin as *Model
+    if earth == null { return }
+    core.model_rotate(earth, 0.0, 12.0 * delta, 0.0)
+}
+
+main() {
+    e = engine.engine_new(platform.API_GL)
+    engine.engine_set_size(e, 1280, 720)
+    engine.engine_set_title(e, "aether3d - models")
+
+    light = core.light_sun(core.vec3(0.3, 0.6, 0.75))
+    light.intensity = 2.0
+    engine.engine_set_light(e, light)
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_start(e, on_start as fn(ptr))
+    engine.engine_on_update(e, on_update as fn(ptr, float))
+
+    engine.engine_run(e, 0 - 1, 0 - 1)
+
+    println("models: ${engine.engine_frame_count(e)} frames, ${gl.renderer_draw_calls(engine.engine_gl_renderer(e))} draw calls")
+    core.light_free(light)
+    engine.engine_free(e)
+}

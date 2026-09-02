@@ -1,0 +1,133 @@
+// PBR material showcase: a row of spheres cycling through the material presets
+// under a light that changes type as the demo advances.
+//
+//   ./build.sh examples/lights.ae && ./build/lights
+
+import a3d.core
+import a3d.platform
+import a3d.engine
+import a3d.gl
+import a3d.loader
+import std.list
+
+const SPHERES = 5
+
+var g_spheres: ptr = null
+var g_engine: ptr = null
+var g_elapsed = 0.0
+var g_stage = 0 - 1
+
+sphere_at(index: int) -> *Model {
+    if g_spheres == null { return null }
+    return list.get_raw(g_spheres, index) as *Model
+}
+
+apply_stage(stage: int) {
+    e = g_engine as *Engine
+    light = core.light_sun(core.vec3(0.3, 0.8, 0.5))
+
+    i = 0
+    while i < SPHERES {
+        m = sphere_at(i)
+        if m != null {
+            shade = (i * 1.0) / ((SPHERES - 1) * 1.0)
+            if stage == 0 {
+                core.model_matte(m, 0.85, 0.3 + shade * 0.5, 0.25)
+            } else if stage == 1 {
+                core.model_metallic(m, 0.95, 0.85, 0.55, 0.05 + shade * 0.8)
+            } else if stage == 2 {
+                core.model_glossy(m, 0.2 + shade * 0.6, 0.35, 0.9)
+            } else if stage == 3 {
+                core.model_glass(m, 0.7, 0.85, 0.95, 0.25 + shade * 0.5)
+            } else {
+                core.model_polished_metal(m, 0.75, 0.75, 0.78)
+                core.model_set_exposure(m, 0.6 + shade * 1.2)
+            }
+        }
+        i = i + 1
+    }
+
+    if stage == 1 {
+        core.light_free(light)
+        light = core.light_point(core.vec3(0.0, 120.0, 180.0), core.vec3(1.0, 0.85, 0.6), 3.0, 600.0)
+    } else if stage == 3 {
+        core.light_free(light)
+        light = core.light_cool(core.vec3(0.0, 160.0, 220.0), 2.5)
+    }
+
+    previous = engine.engine_light(e)
+    engine.engine_set_light(e, light)
+    if previous != null { core.light_free(previous) }
+
+    if stage == 0 { println("matte dielectrics under a directional sun") }
+    if stage == 1 { println("metals, roughness rising left to right, warm point light") }
+    if stage == 2 { println("glossy plastics, hue rising left to right") }
+    if stage == 3 { println("transmissive glass under a cool light") }
+    if stage == 4 { println("polished metal, exposure rising left to right") }
+}
+
+on_start(data: ptr) {
+    e = data as *Engine
+    g_engine = e as ptr
+
+    g_spheres = list.new()
+
+    i = 0
+    while i < SPHERES {
+        m = loader.sphere(1.0, 48, 36)
+        core.model_set_scale(m, 22.0, 22.0, 22.0)
+        core.model_set_position(m, ((i - 2) * 1.0) * 60.0, 0.0, 0.0)
+        engine.engine_add_model(e, m)
+        list.add_raw(g_spheres, m)
+        i = i + 1
+    }
+
+    renderer = engine.engine_gl_renderer(e)
+    gl.renderer_set_clear_color(renderer, 0.03, 0.04, 0.06)
+    gl.renderer_set_bloom(renderer, true)
+    gl.renderer_set_bloom_params(renderer, 0.85, 0.35)
+
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(0.0, 24.0, 230.0))
+    core.camera_set_speed(cam, 220.0)
+}
+
+on_update(data: ptr, delta: float) {
+    g_elapsed = g_elapsed + delta
+    stage = ((g_elapsed / 4.0) as int) % 5
+    if stage != g_stage {
+        g_stage = stage
+        apply_stage(stage)
+    }
+
+    i = 0
+    while i < SPHERES {
+        m = sphere_at(i)
+        if m != null { core.model_rotate(m, 0.0, 14.0 * delta, 0.0) }
+        i = i + 1
+    }
+}
+
+main() {
+    e = engine.engine_new(platform.API_GL)
+    engine.engine_set_size(e, 1280, 720)
+    engine.engine_set_title(e, "aether3d - materials")
+
+    engine.engine_set_light(e, core.light_sun(core.vec3(0.3, 0.8, 0.5)))
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_start(e, on_start as fn(ptr))
+    engine.engine_on_update(e, on_update as fn(ptr, float))
+
+    engine.engine_run(e, 0 - 1, 0 - 1)
+
+    println("materials: ${engine.engine_frame_count(e)} frames, ${gl.renderer_draw_calls(engine.engine_gl_renderer(e))} draw calls")
+
+    i = 0
+    while i < SPHERES {
+        m = sphere_at(i)
+        if m != null { core.model_free(m) }
+        i = i + 1
+    }
+    if g_spheres != null { list.free(g_spheres) }
+    engine.engine_free(e)
+}
