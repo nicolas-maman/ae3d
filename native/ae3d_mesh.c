@@ -362,6 +362,60 @@ void ae3d_inst_set_trs(void *handle, int i,
     m[12] = (float)px; m[13] = (float)py; m[14] = (float)pz; m[15] = 1.0f;
 }
 
+// One call per frame instead of one per instance: a particle system that moves
+// every instance each frame would otherwise spend the frame in call overhead
+// rather than in physics.
+void ae3d_inst_set_positions(void *handle, const double *xyz, int count,
+                             double sx, double sy, double sz,
+                             double qx, double qy, double qz, double qw) {
+    ae3d_inst *inst = (ae3d_inst *)handle;
+    double xx, yy, zz, xy, xz, yz, wx, wy, wz;
+    float basis[9];
+    int i, limit;
+
+    if (!inst || !xyz || count <= 0) return;
+    limit = count < inst->count ? count : inst->count;
+
+    xx = qx * qx; yy = qy * qy; zz = qz * qz;
+    xy = qx * qy; xz = qx * qz; yz = qy * qz;
+    wx = qw * qx; wy = qw * qy; wz = qw * qz;
+
+    basis[0] = (float)((1.0 - 2.0 * (yy + zz)) * sx);
+    basis[1] = (float)((2.0 * (xy + wz)) * sx);
+    basis[2] = (float)((2.0 * (xz - wy)) * sx);
+    basis[3] = (float)((2.0 * (xy - wz)) * sy);
+    basis[4] = (float)((1.0 - 2.0 * (xx + zz)) * sy);
+    basis[5] = (float)((2.0 * (yz + wx)) * sy);
+    basis[6] = (float)((2.0 * (xz + wy)) * sz);
+    basis[7] = (float)((2.0 * (yz - wx)) * sz);
+    basis[8] = (float)((1.0 - 2.0 * (xx + yy)) * sz);
+
+    for (i = 0; i < limit; i++) {
+        float *m = inst->matrices + (size_t)i * 16;
+        m[0] = basis[0]; m[1] = basis[1]; m[2]  = basis[2]; m[3]  = 0.0f;
+        m[4] = basis[3]; m[5] = basis[4]; m[6]  = basis[5]; m[7]  = 0.0f;
+        m[8] = basis[6]; m[9] = basis[7]; m[10] = basis[8]; m[11] = 0.0f;
+        m[12] = (float)xyz[i * 3];
+        m[13] = (float)xyz[i * 3 + 1];
+        m[14] = (float)xyz[i * 3 + 2];
+        m[15] = 1.0f;
+    }
+}
+
+void ae3d_inst_set_colors(void *handle, const double *rgb, int count) {
+    ae3d_inst *inst = (ae3d_inst *)handle;
+    int i, limit;
+
+    if (!inst || !rgb || !inst->has_colors || count <= 0) return;
+    limit = count < inst->count ? count : inst->count;
+    for (i = 0; i < limit; i++) {
+        float *c = inst->colors + (size_t)i * 3;
+        c[0] = (float)rgb[i * 3];
+        c[1] = (float)rgb[i * 3 + 1];
+        c[2] = (float)rgb[i * 3 + 2];
+    }
+}
+
 void ae3d_inst_set_matrix(void *handle, int i, const double *src) {
     ae3d_inst *inst = (ae3d_inst *)handle;
     float *m;

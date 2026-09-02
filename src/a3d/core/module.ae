@@ -41,7 +41,7 @@ exports (
     model_ensure_material, model_set_uniform_float, model_set_uniform_int,
     model_set_uniform_vec3, model_set_uniform_array, model_uniform_count, model_uniform,
     model_enable_instancing, model_set_instance_position, model_set_instance_color,
-    model_enable_instance_colors,
+    model_enable_instance_colors, model_set_instance_positions, model_set_instance_colors,
     model_instance_count, model_remove_instance, light_new, light_directional, light_point,
     light_warm, light_cool, light_sun, light_free, shader_new, shader_valid, debug_enabled,
     set_debug, frustum_culling, set_frustum_culling, face_culling, set_face_culling,
@@ -159,6 +159,8 @@ extern ae3d_mesh_set_normal(mesh: ptr, i: int, x: float, y: float, z: float)
 extern ae3d_mesh_index_at(mesh: ptr, i: int) -> int
 extern ae3d_mesh_recalc_normals(mesh: ptr)
 extern ae3d_inst_has_colors(inst: ptr) -> int
+extern ae3d_inst_set_positions(inst: ptr, xyz: ptr, count: int, sx: float, sy: float, sz: float, qx: float, qy: float, qz: float, qw: float)
+extern ae3d_inst_set_colors(inst: ptr, rgb: ptr, count: int)
 
 var g_frustum_dirty = true
 
@@ -778,9 +780,11 @@ shader_valid(s: *Shader) -> bool {
     return s.vertex_source != "" && s.fragment_source != ""
 }
 
+// The name is copied, not borrowed: callers routinely pass a slice of a parse
+// buffer they free straight afterwards, and the box outlives it.
 material_new(name: string) -> *Material {
     m = heap.new(Material)
-    m.name = name
+    m.name = string.copy(name)
     m.diffuse = vec3(1.0, 1.0, 1.0)
     m.specular = vec3(1.0, 1.0, 1.0)
     m.shininess = 32.0
@@ -1154,6 +1158,22 @@ model_enable_instance_colors(m: *Model) -> bool {
 model_set_instance_color(m: *Model, index: int, r: float, g: float, b: float) {
     if m.instances == null { return }
     ae3d_inst_set_color(m.instances, index, r, g, b)
+}
+
+// Bulk upload of every instance's position from a packed xyz array. One call
+// per frame instead of one per instance, which is what a particle system that
+// moves everything each frame actually needs.
+model_set_instance_positions(m: *Model, xyz: ptr, count: int) {
+    if m.instances == null { return }
+    ae3d_inst_set_positions(m.instances, xyz, count,
+                            m.scale.x, m.scale.y, m.scale.z,
+                            m.rotation.x, m.rotation.y, m.rotation.z, m.rotation.w)
+    m.instances_updated = true
+}
+
+model_set_instance_colors(m: *Model, rgb: ptr, count: int) {
+    if m.instances == null { return }
+    ae3d_inst_set_colors(m.instances, rgb, count)
 }
 
 model_instance_count(m: *Model) -> int {

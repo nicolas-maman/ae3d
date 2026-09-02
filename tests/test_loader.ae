@@ -1,0 +1,150 @@
+// The OBJ/MTL loader against the real model files.
+
+import a3d.core
+import a3d.loader
+
+extern clock_ns() -> long
+
+var failures = 0
+
+record_failure(reason: string) {
+    println("FAIL ${reason}")
+    failures = failures + 1
+}
+
+check_true(name: string, condition: bool) {
+    if !condition { record_failure(name) }
+}
+
+load(path: string) -> *Model {
+    m = loader.load_obj(path, false)
+    if m == null { record_failure("${path}: ${loader.last_error()}") }
+    return m
+}
+
+test_triangle() {
+    m = load("resources/obj/Triangle.obj")
+    if m == null { return }
+    check_true("triangle has 3 vertices", core.mesh_vertex_count(m.mesh) == 3)
+    check_true("triangle has 3 indices", core.mesh_index_count(m.mesh) == 3)
+    core.model_free(m)
+}
+
+test_cube() {
+    m = load("resources/obj/Cube.obj")
+    if m == null { return }
+    // A cube authored with per-face normals cannot share corners across faces,
+    // so the unified buffer holds more than the eight geometric corners.
+    check_true("cube vertices", core.mesh_vertex_count(m.mesh) >= 8)
+    check_true("cube is 12 triangles", core.mesh_index_count(m.mesh) == 36)
+
+    lowest = 1000.0
+    highest = 0.0 - 1000.0
+    i = 0
+    while i < core.mesh_vertex_count(m.mesh) {
+        p = core.mesh_position(m.mesh, i)
+        if p.x < lowest { lowest = p.x }
+        if p.x > highest { highest = p.x }
+        i = i + 1
+    }
+    check_true("cube spans both signs on x", lowest < 0.0 && highest > 0.0)
+
+    // Every index must address a real vertex.
+    vertices = core.mesh_vertex_count(m.mesh)
+    bad = 0
+    i = 0
+    while i < core.mesh_index_count(m.mesh) {
+        index = core.mesh_index_at(m.mesh, i)
+        if index < 0 || index >= vertices { bad = bad + 1 }
+        i = i + 1
+    }
+    check_true("cube indices in range", bad == 0)
+
+    core.model_free(m)
+}
+
+test_sphere() {
+    started = clock_ns()
+    m = load("resources/obj/Sphere.obj")
+    if m == null { return }
+    elapsed = (clock_ns() - started) / 1000000
+
+    vertices = core.mesh_vertex_count(m.mesh)
+    indices = core.mesh_index_count(m.mesh)
+    check_true("sphere loaded geometry", vertices > 1000 && indices > 3000)
+    check_true("sphere triangulated", indices % 3 == 0)
+
+    // The model is a displaced sphere, not a perfect one, so the test is that
+    // every vertex sits in a shell around the origin rather than on one radius.
+    nearest = 100000.0
+    furthest = 0.0
+    i = 0
+    while i < vertices {
+        length = core.v3_len(core.mesh_position(m.mesh, i))
+        if length < nearest { nearest = length }
+        if length > furthest { furthest = length }
+        i = i + 1
+    }
+    check_true("sphere is hollow", nearest > furthest * 0.8)
+    check_true("sphere is centred", furthest > 1.0)
+
+    println("  Sphere.obj: ${vertices} vertices, ${indices} indices in ${elapsed} ms")
+    core.model_free(m)
+}
+
+test_earth() {
+    started = clock_ns()
+    m = load("resources/obj/Earth/Earth.obj")
+    if m == null { return }
+    elapsed = (clock_ns() - started) / 1000000
+
+    groups = core.model_group_count(m)
+    check_true("earth has material groups", groups > 1)
+
+    // The groups must tile the index buffer exactly, with no gap and no overlap.
+    covered = 0
+    previous_end = 0
+    ordered = true
+    i = 0
+    while i < groups {
+        g = core.model_group(m, i)
+        if g.index_start != previous_end { ordered = false }
+        previous_end = g.index_start + g.index_count
+        covered = covered + g.index_count
+        i = i + 1
+    }
+    check_true("groups are contiguous", ordered)
+    check_true("groups cover every index", covered == core.mesh_index_count(m.mesh))
+
+    named = 0
+    i = 0
+    while i < groups {
+        g = core.model_group(m, i)
+        if g.material != null { named = named + 1 }
+        i = i + 1
+    }
+    check_true("groups resolved their materials", named == groups)
+
+    println("  Earth.obj: ${core.mesh_vertex_count(m.mesh)} vertices, ${groups} material groups in ${elapsed} ms")
+    core.model_free(m)
+}
+
+test_missing() {
+    m = loader.load_obj("resources/obj/does_not_exist.obj", false)
+    check_true("missing file returns null", m == null)
+    check_true("missing file reports why", loader.last_error() != "")
+}
+
+main() {
+    test_triangle()
+    test_cube()
+    test_sphere()
+    test_earth()
+    test_missing()
+
+    if failures == 0 {
+        println("loader: all checks passed")
+    } else {
+        println("loader: ${failures} failure(s)")
+    }
+}
