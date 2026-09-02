@@ -54,6 +54,16 @@ First working engine.
 
 ### Measured
 
+Per-frame costs, measured headless so they are the engine's own rather than the
+GL implementation's, over two thousand iterations with zero leaked bytes and
+26MB peak:
+
+- 578us to upload 200000 instance matrices, 12.8MB a frame.
+- Under a microsecond each for a model transform, a camera and frustum rebuild,
+  and a water uniform update.
+- 19ns per Perlin sample; a 131072-cell exposed-face scan under a millisecond.
+
+
 - 256x256 ocean: 65536 vertices and 390150 indices built in 2ms.
 - 192x192x48 voxel terrain: 960464 solid voxels reduced to 93030 visible,
   generated in 9ms, instanced in 7ms, one draw call.

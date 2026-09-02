@@ -1,0 +1,148 @@
+// The per-frame work of the heaviest scenes, with no window and no driver, so
+// its cost and its allocation behaviour are the engine's own rather than the GL
+// implementation's.
+//
+//   ./build.sh benchmarks/bench_frame.ae && ./build/bench_frame
+
+import a3d.core
+import a3d.loader
+import a3d.voxel
+import a3d.water
+import a3d.noise
+
+extern clock_ns() -> long
+extern calloc(count: int, size: int) -> ptr
+extern free(block: ptr)
+
+const PARTICLES = 200000
+const FRAMES = 2000
+
+report(name: string, nanoseconds: long, frames: int) {
+    per_frame = nanoseconds / (frames * 1)
+    println("  ${name}: ${nanoseconds / 1000000} ms over ${frames} frames, ${per_frame / 1000} us per frame")
+}
+
+bench_instances() {
+    m = loader.cube(1.0)
+    if !core.model_enable_instancing(m, PARTICLES) {
+        println("  instances: could not allocate")
+        core.model_free(m)
+        return
+    }
+
+    positions = calloc(PARTICLES * 3, 8)
+    if positions == null {
+        core.model_free(m)
+        return
+    }
+    slots = positions as float[]
+    i = 0
+    while i < PARTICLES * 3 {
+        slots[i] = (i * 1.0) * 0.001
+        i = i + 1
+    }
+
+    started = clock_ns()
+    frame = 0
+    while frame < FRAMES {
+        core.model_set_instance_positions(m, positions, PARTICLES)
+        frame = frame + 1
+    }
+    report("instance upload of ${PARTICLES}", clock_ns() - started, FRAMES)
+
+    free(positions)
+    core.model_free(m)
+}
+
+bench_transforms() {
+    m = loader.sphere(1.0, 24, 18)
+    started = clock_ns()
+    frame = 0
+    while frame < FRAMES {
+        core.model_rotate(m, 0.1, 0.2, 0.0)
+        frame = frame + 1
+    }
+    report("model transform", clock_ns() - started, FRAMES)
+    core.model_free(m)
+}
+
+bench_camera() {
+    c = core.camera_new(1280, 800)
+    visible = 0
+    started = clock_ns()
+    frame = 0
+    while frame < FRAMES {
+        core.camera_process_mouse(c, 0.05, 0.02, true)
+        vp = core.camera_view_projection(c)
+        f = core.camera_frustum(c)
+        if core.frustum_intersects_sphere(&f, core.vec3(vp.m12, vp.m13, vp.m14), 10.0) {
+            visible = visible + 1
+        }
+        frame = frame + 1
+    }
+    report("camera and frustum", clock_ns() - started, FRAMES)
+    println("    ${visible} of ${FRAMES} sample points were inside the frustum")
+    core.camera_free(c)
+}
+
+bench_water() {
+    ocean = water.simulation_new(4000.0, 8.0)
+    surface = water.simulation_build(ocean, 64)
+    if surface == null {
+        water.simulation_free(ocean)
+        return
+    }
+    started = clock_ns()
+    frame = 0
+    while frame < FRAMES {
+        water.simulation_update(ocean, 0.016)
+        frame = frame + 1
+    }
+    report("water uniform update", clock_ns() - started, FRAMES)
+    water.simulation_free(ocean)
+}
+
+bench_noise() {
+    field = noise.perlin_new(11)
+    samples = 200000
+    started = clock_ns()
+    total = 0.0
+    i = 0
+    while i < samples {
+        total = total + noise.noise3(field, (i * 1.0) * 0.01, 0.5, 0.25)
+        i = i + 1
+    }
+    elapsed = clock_ns() - started
+    println("  perlin: ${samples} samples in ${elapsed / 1000000} ms, ${elapsed / samples} ns each (sum ${total})")
+    noise.perlin_free(field)
+}
+
+bench_voxels() {
+    w = voxel.world_new(64, 64, 32, 1.0)
+    x = 0
+    while x < 64 {
+        z = 0
+        while z < 64 {
+            voxel.world_fill_column(w, x, z, 16, voxel.STONE)
+            z = z + 1
+        }
+        x = x + 1
+    }
+
+    started = clock_ns()
+    visible = voxel.world_visible_count(w)
+    elapsed = clock_ns() - started
+    println("  voxel face scan: ${64 * 64 * 32} cells, ${visible} visible, ${elapsed / 1000000} ms")
+    voxel.world_free(w)
+}
+
+main() {
+    println("aether3d per-frame benchmarks")
+    bench_instances()
+    bench_transforms()
+    bench_camera()
+    bench_water()
+    bench_noise()
+    bench_voxels()
+    println("done")
+}

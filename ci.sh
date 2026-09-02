@@ -125,9 +125,32 @@ for example in examples/*.ae; do
     fi
 done
 
+step "benchmarks"
+for bench in benchmarks/bench_*.ae; do
+    [ -e "$bench" ] || continue
+    name="$(basename "$bench" .ae)"
+    if ! ./build.sh "$bench" "$name" >/tmp/ae3d_build.log 2>&1; then
+        fail "$name (build)"
+        sed 's/^/        /' /tmp/ae3d_build.log | head -20
+        continue
+    fi
+    if grep -q "warning" /tmp/ae3d_build.log; then
+        fail "$name (build warnings)"
+        continue
+    fi
+    if output="$(./build/"$name" 2>&1)"; then
+        pass "$name"
+        printf '%s\n' "$output" | sed 's/^/        /'
+    else
+        fail "$name"
+        printf '%s\n' "$output" | sed 's/^/        /' | head -20
+    fi
+done
+
 if command -v leaks >/dev/null 2>&1; then
     step "leak check, headless suites"
-    for suite in tests/test_*.ae; do
+    for suite in tests/test_*.ae benchmarks/bench_*.ae; do
+        [ -e "$suite" ] || continue
         name="$(basename "$suite" .ae)"
         grep -q "a3d.engine" "$suite" && continue
         [ -x "build/$name" ] || continue
