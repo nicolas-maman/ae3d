@@ -11,9 +11,22 @@ First working engine.
 - OpenGL 4.1 core backend: PBR materials, directional and point lights,
   instanced rendering, frustum culling, a separate transparent pass, MSAA, FXAA
   and bloom. Uniform locations resolve once per program into named slots.
-- Vulkan backend, windowed, on a loader opened at runtime with native surface
-  creation on macOS, Windows and X11. Nothing links against Vulkan, so a program
-  built with it still starts where no driver exists.
+- Vulkan backend, windowed and offscreen, on a loader opened at runtime with
+  native surface creation on macOS, Windows and X11. Nothing links against
+  Vulkan, so a program built with it still starts where no driver exists.
+- The Vulkan backend runs the same feature set as OpenGL: PBR materials,
+  mipmapped textures, per-instance rendering, a transparent pass, MSAA, the
+  skybox, and the FXAA and bloom composites. Its shaders are generated from the
+  OpenGL sources, so there is one shader source rather than two that drift, and
+  the std140 offsets the renderer writes at are checked against glslang on every
+  build.
+- Skybox and post-processing are backend capabilities rather than
+  renderer-specific calls, so switching backends does not change what a scene
+  looks like.
+- `tests/test_backend_parity` renders the same scene through both backends
+  offscreen and compares every channel across materials and textures, instancing
+  and transparency, skybox, FXAA and bloom. The two agree to within 1.4% of
+  channels.
 - All thirteen GLSL programs ported, including the PBR and Gerstner-wave
   fragment shaders.
 
