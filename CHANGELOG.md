@@ -23,6 +23,9 @@ First working engine.
 - Procedural cube, sphere, plane, quad and water-grid primitives.
 - Gerstner-wave ocean with the wave table in the model's uniform arrays.
 - Voxel worlds drawn as one instanced call, with exposed-face culling.
+- Surface nets over a signed distance field: one vertex per cell that straddles
+  the surface, placed at the average of its edge crossings, with quads around
+  every sign-changing grid edge and normals from the field gradient.
 - Improved Perlin noise with a platform-independent seeded shuffle.
 - Game objects and components, ray casting, and a fly camera with frustum
   extraction.
@@ -39,3 +42,5 @@ First working engine.
 - 192x192x48 voxel terrain: 960464 solid voxels reduced to 93030 visible,
   generated in 9ms, instanced in 7ms, one draw call.
 - 200000 particles under Verlet integration in two instanced draws at 126fps.
+- 160x160x64 field meshed by surface nets into 34241 vertices and 67590
+  triangles in 33ms, one draw call at 106fps.

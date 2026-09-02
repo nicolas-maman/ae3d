@@ -27,8 +27,14 @@ exports (
     world_fill_column, world_generate, world_clear,
     world_active_count, world_visible_count, world_build,
     world_size_x, world_size_z, world_max_height, world_voxel_size,
-    palette_set, palette_reset, palette_color
+    palette_set, palette_reset, palette_color,
+    world_sdf_enable, world_sdf_set, world_sdf_get, world_sdf_from_voxels,
+    world_build_surface
 )
+
+var g_cell_x = 0.0
+var g_cell_y = 0.0
+var g_cell_z = 0.0
 
 const EMPTY = 0
 const GRASS = 1
@@ -47,6 +53,7 @@ struct Palette {
 
 struct World {
     voxels: ptr
+    sdf: ptr
     palette: ptr
     size_x: int
     size_z: int
@@ -76,6 +83,7 @@ world_new(size_x: int, size_z: int, max_height: int, voxel_size: float) -> *Worl
 world_free(w: *World) {
     if w == null { return }
     if w.voxels != null { free(w.voxels) }
+    if w.sdf != null { free(w.sdf) }
     if w.palette != null {
         count = list.size(w.palette)
         i = 0
@@ -293,4 +301,304 @@ world_build(w: *World, base: *Model) -> *Model {
 
     core.model_recalculate_bounds(base)
     return base
+}
+
+
+// Surface nets over a signed distance field.
+//
+// Gopher3D carries the pieces of this (corner sampling, edge interpolation, the
+// gradient normal) but its surface path only ever emits a height field, so the
+// pieces are never reached. This is the algorithm they describe: one vertex per
+// cell that straddles the surface, placed at the average of the crossings on
+// that cell's edges, and a quad around every grid edge whose ends differ in
+// sign. The result is a smooth surface rather than a staircase.
+
+const SDF_OUTSIDE = 1.0
+
+world_sdf_enable(w: *World) -> bool {
+    if w.sdf != null { return true }
+    total = w.size_x * w.max_height * w.size_z
+    w.sdf = calloc(total, 8)
+    if w.sdf == null { return false }
+
+    field = w.sdf as float[]
+    i = 0
+    while i < total {
+        field[i] = SDF_OUTSIDE
+        i = i + 1
+    }
+    return true
+}
+
+world_sdf_set(w: *World, x: int, y: int, z: int, value: float) {
+    if w.sdf == null || !world_in_bounds(w, x, y, z) { return }
+    field = w.sdf as float[]
+    field[voxel_index(w, x, y, z)] = value
+}
+
+world_sdf_get(w: *World, x: int, y: int, z: int) -> float {
+    if w.sdf == null || !world_in_bounds(w, x, y, z) { return SDF_OUTSIDE }
+    field = w.sdf as float[]
+    return field[voxel_index(w, x, y, z)]
+}
+
+// A solid voxel is inside the surface and an empty one is outside, which gives a
+// coarse field good enough to smooth a blocky world.
+world_sdf_from_voxels(w: *World) -> bool {
+    if !world_sdf_enable(w) { return false }
+
+    data = w.voxels as int[]
+    field = w.sdf as float[]
+    total = w.size_x * w.max_height * w.size_z
+
+    i = 0
+    while i < total {
+        if data[i] == EMPTY {
+            field[i] = SDF_OUTSIDE
+        } else {
+            field[i] = 0.0 - SDF_OUTSIDE
+        }
+        i = i + 1
+    }
+    return true
+}
+
+inside(value: float) -> bool {
+    return value < 0.0
+}
+
+// Central differences on the field, which points away from the surface.
+surface_normal(w: *World, x: int, y: int, z: int) -> Vec3 {
+    dx = world_sdf_get(w, x + 1, y, z) - world_sdf_get(w, x - 1, y, z)
+    dy = world_sdf_get(w, x, y + 1, z) - world_sdf_get(w, x, y - 1, z)
+    dz = world_sdf_get(w, x, y, z + 1) - world_sdf_get(w, x, y, z - 1)
+
+    normal = core.vec3(dx, dy, dz)
+    if core.v3_len(normal) < 0.000001 { return core.vec3(0.0, 1.0, 0.0) }
+    return core.v3_normalize(normal)
+}
+
+crossing(a: float, b: float) -> float {
+    if a == b { return 0.5 }
+    t = a / (a - b)
+    if t < 0.0 { return 0.0 }
+    if t > 1.0 { return 1.0 }
+    return t
+}
+
+// Averages the crossings on the twelve edges of one cell. Returns false when the
+// cell does not straddle the surface.
+cell_vertex(w: *World, x: int, y: int, z: int) -> bool {
+    corner000 = world_sdf_get(w, x, y, z)
+    corner100 = world_sdf_get(w, x + 1, y, z)
+    corner010 = world_sdf_get(w, x, y + 1, z)
+    corner110 = world_sdf_get(w, x + 1, y + 1, z)
+    corner001 = world_sdf_get(w, x, y, z + 1)
+    corner101 = world_sdf_get(w, x + 1, y, z + 1)
+    corner011 = world_sdf_get(w, x, y + 1, z + 1)
+    corner111 = world_sdf_get(w, x + 1, y + 1, z + 1)
+
+    negatives = 0
+    if inside(corner000) { negatives = negatives + 1 }
+    if inside(corner100) { negatives = negatives + 1 }
+    if inside(corner010) { negatives = negatives + 1 }
+    if inside(corner110) { negatives = negatives + 1 }
+    if inside(corner001) { negatives = negatives + 1 }
+    if inside(corner101) { negatives = negatives + 1 }
+    if inside(corner011) { negatives = negatives + 1 }
+    if inside(corner111) { negatives = negatives + 1 }
+
+    if negatives == 0 || negatives == 8 { return false }
+
+    sum_x = 0.0
+    sum_y = 0.0
+    sum_z = 0.0
+    count = 0
+
+    if inside(corner000) != inside(corner100) {
+        sum_x = sum_x + crossing(corner000, corner100)
+        count = count + 1
+    }
+    if inside(corner010) != inside(corner110) {
+        sum_x = sum_x + crossing(corner010, corner110)
+        sum_y = sum_y + 1.0
+        count = count + 1
+    }
+    if inside(corner001) != inside(corner101) {
+        sum_x = sum_x + crossing(corner001, corner101)
+        sum_z = sum_z + 1.0
+        count = count + 1
+    }
+    if inside(corner011) != inside(corner111) {
+        sum_x = sum_x + crossing(corner011, corner111)
+        sum_y = sum_y + 1.0
+        sum_z = sum_z + 1.0
+        count = count + 1
+    }
+
+    if inside(corner000) != inside(corner010) {
+        sum_y = sum_y + crossing(corner000, corner010)
+        count = count + 1
+    }
+    if inside(corner100) != inside(corner110) {
+        sum_y = sum_y + crossing(corner100, corner110)
+        sum_x = sum_x + 1.0
+        count = count + 1
+    }
+    if inside(corner001) != inside(corner011) {
+        sum_y = sum_y + crossing(corner001, corner011)
+        sum_z = sum_z + 1.0
+        count = count + 1
+    }
+    if inside(corner101) != inside(corner111) {
+        sum_y = sum_y + crossing(corner101, corner111)
+        sum_x = sum_x + 1.0
+        sum_z = sum_z + 1.0
+        count = count + 1
+    }
+
+    if inside(corner000) != inside(corner001) {
+        sum_z = sum_z + crossing(corner000, corner001)
+        count = count + 1
+    }
+    if inside(corner100) != inside(corner101) {
+        sum_z = sum_z + crossing(corner100, corner101)
+        sum_x = sum_x + 1.0
+        count = count + 1
+    }
+    if inside(corner010) != inside(corner011) {
+        sum_z = sum_z + crossing(corner010, corner011)
+        sum_y = sum_y + 1.0
+        count = count + 1
+    }
+    if inside(corner110) != inside(corner111) {
+        sum_z = sum_z + crossing(corner110, corner111)
+        sum_x = sum_x + 1.0
+        sum_y = sum_y + 1.0
+        count = count + 1
+    }
+
+    if count == 0 { return false }
+
+    g_cell_x = (x * 1.0) + sum_x / (count * 1.0)
+    g_cell_y = (y * 1.0) + sum_y / (count * 1.0)
+    g_cell_z = (z * 1.0) + sum_z / (count * 1.0)
+    return true
+}
+
+world_build_surface(w: *World) -> *Model {
+    if w.sdf == null { return null }
+
+    cells_x = w.size_x - 1
+    cells_y = w.max_height - 1
+    cells_z = w.size_z - 1
+    if cells_x < 1 || cells_y < 1 || cells_z < 1 { return null }
+
+    total_cells = cells_x * cells_y * cells_z
+    lookup = calloc(total_cells, 4)
+    if lookup == null { return null }
+    cells = lookup as int[]
+
+    m = core.model_new()
+    plane = cells_y * cells_z
+
+    i = 0
+    while i < total_cells {
+        cells[i] = 0 - 1
+        i = i + 1
+    }
+
+    x = 0
+    while x < cells_x {
+        y = 0
+        while y < cells_y {
+            z = 0
+            while z < cells_z {
+                if cell_vertex(w, x, y, z) {
+                    position = core.vec3(g_cell_x * w.voxel_size,
+                                         g_cell_y * w.voxel_size,
+                                         g_cell_z * w.voxel_size)
+                    normal = core.v3_neg(surface_normal(w, x, y, z))
+                    u = (x * 1.0) / (cells_x * 1.0)
+                    v = (z * 1.0) / (cells_z * 1.0)
+                    cells[x * plane + y * cells_z + z] =
+                        core.mesh_push_vertex(m.mesh, position, u, v, normal)
+                }
+                z = z + 1
+            }
+            y = y + 1
+        }
+        x = x + 1
+    }
+
+    emit_quads(w, m, cells, cells_x, cells_y, cells_z)
+    free(lookup)
+
+    if core.mesh_vertex_count(m.mesh) == 0 {
+        core.model_free(m)
+        return null
+    }
+
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    return m
+}
+
+// Every grid edge whose ends differ in sign is surrounded by four cells, and
+// those four vertices form one quad of the surface. Each axis rings its four
+// cells in a fixed order whose natural normal is +x, -y and +z respectively, so
+// the y ring flips on the opposite condition to the other two for the whole mesh
+// to face outward.
+emit_quads(w: *World, m: *Model, cells: int[], cells_x: int, cells_y: int, cells_z: int) {
+    plane = cells_y * cells_z
+
+    x = 1
+    while x < cells_x {
+        y = 1
+        while y < cells_y {
+            z = 1
+            while z < cells_z {
+                here = world_sdf_get(w, x, y, z)
+
+                if inside(here) != inside(world_sdf_get(w, x + 1, y, z)) {
+                    a = cells[x * plane + (y - 1) * cells_z + (z - 1)]
+                    b = cells[x * plane + y * cells_z + (z - 1)]
+                    c = cells[x * plane + y * cells_z + z]
+                    d = cells[x * plane + (y - 1) * cells_z + z]
+                    push_quad(m, a, b, c, d, !inside(here))
+                }
+
+                if inside(here) != inside(world_sdf_get(w, x, y + 1, z)) {
+                    a = cells[(x - 1) * plane + y * cells_z + (z - 1)]
+                    b = cells[x * plane + y * cells_z + (z - 1)]
+                    c = cells[x * plane + y * cells_z + z]
+                    d = cells[(x - 1) * plane + y * cells_z + z]
+                    push_quad(m, a, b, c, d, inside(here))
+                }
+
+                if inside(here) != inside(world_sdf_get(w, x, y, z + 1)) {
+                    a = cells[(x - 1) * plane + (y - 1) * cells_z + z]
+                    b = cells[x * plane + (y - 1) * cells_z + z]
+                    c = cells[x * plane + y * cells_z + z]
+                    d = cells[(x - 1) * plane + y * cells_z + z]
+                    push_quad(m, a, b, c, d, !inside(here))
+                }
+
+                z = z + 1
+            }
+            y = y + 1
+        }
+        x = x + 1
+    }
+}
+
+push_quad(m: *Model, a: int, b: int, c: int, d: int, flip: bool) {
+    if a < 0 || b < 0 || c < 0 || d < 0 { return }
+    if flip {
+        core.mesh_push_triangle(m.mesh, a, d, c)
+        core.mesh_push_triangle(m.mesh, a, c, b)
+    } else {
+        core.mesh_push_triangle(m.mesh, a, b, c)
+        core.mesh_push_triangle(m.mesh, a, c, d)
+    }
 }

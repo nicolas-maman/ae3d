@@ -139,11 +139,107 @@ test_palette() {
     voxel.world_free(w)
 }
 
+// A sphere is the cleanest thing to check a surface mesher against: every
+// vertex it produces should land on the sphere it was given.
+test_surface_nets() {
+    size = 24
+    radius = 8.0
+    centre = 11.5
+
+    w = voxel.world_new(size, size, size, 1.0)
+    check_true("sdf enabled", voxel.world_sdf_enable(w))
+
+    x = 0
+    while x < size {
+        y = 0
+        while y < size {
+            z = 0
+            while z < size {
+                offset = core.vec3((x * 1.0) - centre, (y * 1.0) - centre, (z * 1.0) - centre)
+                voxel.world_sdf_set(w, x, y, z, core.v3_len(offset) - radius)
+                z = z + 1
+            }
+            y = y + 1
+        }
+        x = x + 1
+    }
+
+    m = voxel.world_build_surface(w)
+    check_true("surface built", m != null)
+    if m == null { voxel.world_free(w) ; return }
+
+    vertices = core.mesh_vertex_count(m.mesh)
+    indices = core.mesh_index_count(m.mesh)
+    check_true("surface has geometry", vertices > 200 && indices > 600)
+    check_true("surface is triangulated", indices % 3 == 0)
+
+    // Cells are offset half a step from the samples they interpolate.
+    cell_centre = centre - 0.5
+    worst = 0.0
+    i = 0
+    while i < vertices {
+        p = core.mesh_position(m.mesh, i)
+        offset = core.vec3(p.x - cell_centre, p.y - cell_centre, p.z - cell_centre)
+        error = core.abs_of(core.v3_len(offset) - radius)
+        if error > worst { worst = error }
+        i = i + 1
+    }
+    check_true("vertices lie on the sphere", worst < 1.0)
+
+    bad = 0
+    i = 0
+    while i < indices {
+        index = core.mesh_index_at(m.mesh, i)
+        if index < 0 || index >= vertices { bad = bad + 1 }
+        i = i + 1
+    }
+    check_true("surface indices in range", bad == 0)
+
+    // Normals point outward, away from the centre.
+    inward = 0
+    i = 0
+    while i < indices {
+        a = core.mesh_position(m.mesh, core.mesh_index_at(m.mesh, i))
+        b = core.mesh_position(m.mesh, core.mesh_index_at(m.mesh, i + 1))
+        c = core.mesh_position(m.mesh, core.mesh_index_at(m.mesh, i + 2))
+        face = core.v3_cross(core.v3_sub(b, a), core.v3_sub(c, a))
+        middle = core.v3_mul(core.v3_add(core.v3_add(a, b), c), 1.0 / 3.0)
+        outward = core.vec3(middle.x - cell_centre, middle.y - cell_centre, middle.z - cell_centre)
+        if core.v3_dot(face, outward) < 0.0 { inward = inward + 1 }
+        i = i + 3
+    }
+    check_true("faces wind outward", inward * 20 < indices / 3)
+
+    println("  surface nets: ${vertices} vertices, ${indices / 3} triangles, worst radial error ${worst}")
+
+    core.model_free(m)
+    voxel.world_free(w)
+}
+
+// The voxel-derived field smooths a blocky world rather than reproducing it.
+test_surface_from_voxels() {
+    w = voxel.world_new(12, 12, 12, 1.0)
+    fill_solid(w, 8)
+    check_true("field derived", voxel.world_sdf_from_voxels(w))
+    check_true("solid reads inside", voxel.world_sdf_get(w, 2, 2, 2) < 0.0)
+    check_true("empty reads outside", voxel.world_sdf_get(w, 10, 10, 10) > 0.0)
+
+    m = voxel.world_build_surface(w)
+    check_true("blocky surface built", m != null)
+    if m != null {
+        check_true("blocky surface has geometry", core.mesh_vertex_count(m.mesh) > 0)
+        core.model_free(m)
+    }
+    voxel.world_free(w)
+}
+
 main() {
     test_storage()
     test_visibility()
     test_build()
     test_palette()
+    test_surface_nets()
+    test_surface_from_voxels()
 
     if failures == 0 {
         println("voxel: all checks passed")

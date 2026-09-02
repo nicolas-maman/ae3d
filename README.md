@@ -62,6 +62,7 @@ module, and runs every test suite and every example.
 | `water.ae` | A 256x256 Gerstner-wave ocean, 65536 vertices |
 | `voxel_world.ae` | 960464 voxels of Perlin terrain, 93030 visible, one draw call |
 | `black_hole.ae` | 200000 particles under Verlet integration, two instanced draws |
+| `smooth_terrain.ae` | The same terrain meshed with surface nets, 67590 triangles |
 
 ## Layout
 
@@ -113,6 +114,10 @@ each frame uploads all positions in one call, not one call per instance.
 - **Ray tests return a distance**, negative for a miss, instead of a tuple, so a
   query allocates nothing and the caller derives a hit point only when it wants
   one.
+- **Surface nets actually runs.** Gopher3D carries the pieces of a surface
+  mesher, corner sampling, edge interpolation and a gradient normal, but its
+  surface path only ever emits a height field and the pieces are never reached.
+  Here it is the algorithm those pieces describe.
 - **Vulkan actually renders.** Gopher3D lists its Vulkan renderer as incomplete.
 
 ## Credits

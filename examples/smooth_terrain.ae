@@ -1,0 +1,115 @@
+// The same Perlin terrain as the voxel demo, meshed with surface nets instead of
+// drawn as cubes: one vertex per cell that straddles the surface, so the result
+// is smooth rather than a staircase.
+//
+//   ./build.sh examples/smooth_terrain.ae && ./build/smooth_terrain
+
+import a3d.core
+import a3d.platform
+import a3d.engine
+import a3d.gl
+import a3d.noise
+import a3d.voxel
+
+extern clock_ns() -> long
+
+const WORLD_X = 160
+const WORLD_Z = 160
+const WORLD_HEIGHT = 64
+const CELL = 6.0
+
+var g_world: ptr = null
+var g_surface: ptr = null
+
+// The field is the signed height above the terrain, so it is negative under the
+// surface and zero exactly on it, which is what the mesher interpolates against.
+build_field(world: *World) {
+    field = noise.perlin_new(4242)
+    if field == null { return }
+
+    x = 0
+    while x < WORLD_X {
+        z = 0
+        while z < WORLD_Z {
+            sample = noise.fbm2(field, (x * 1.0) * 0.022, (z * 1.0) * 0.022, 5, 0.5)
+            ridged = noise.ridge(field, (x * 1.0) * 0.006, 0.0, (z * 1.0) * 0.006, 3, 0.5)
+            height = 12.0 + (sample + 1.0) * 0.5 * 22.0 + ridged * 16.0
+
+            y = 0
+            while y < WORLD_HEIGHT {
+                voxel.world_sdf_set(world, x, y, z, (y * 1.0) - height)
+                y = y + 1
+            }
+            z = z + 1
+        }
+        x = x + 1
+    }
+
+    noise.perlin_free(field)
+}
+
+on_start(data: ptr) {
+    e = data as *Engine
+
+    world = voxel.world_new(WORLD_X, WORLD_Z, WORLD_HEIGHT, CELL)
+    if world == null || !voxel.world_sdf_enable(world) {
+        println("could not allocate the field")
+        return
+    }
+
+    started = clock_ns()
+    build_field(world)
+    filled = clock_ns()
+
+    surface = voxel.world_build_surface(world)
+    meshed = clock_ns()
+
+    if surface == null {
+        println("the field produced no surface")
+        voxel.world_free(world)
+        return
+    }
+
+    core.model_matte(surface, 0.42, 0.55, 0.32)
+    core.model_set_pbr(surface, 0.0, 0.85)
+    engine.engine_add_model(e, surface)
+
+    g_world = world as ptr
+    g_surface = surface as ptr
+
+    println("surface: ${core.mesh_vertex_count(surface.mesh)} vertices, ${core.mesh_index_count(surface.mesh) / 3} triangles")
+    println("field ${(filled - started) / 1000000} ms, mesh ${(meshed - filled) / 1000000} ms")
+
+    renderer = engine.engine_gl_renderer(e)
+    gl.renderer_set_clear_color(renderer, 0.52, 0.68, 0.85)
+    gl.renderer_set_fxaa(renderer, true)
+
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(0.0 - 240.0, 360.0, 0.0 - 240.0))
+    core.camera_set_speed(cam, 500.0)
+    core.camera_set_far(cam, 20000.0)
+    core.camera_look_at(cam, core.vec3(480.0, 90.0, 480.0))
+}
+
+main() {
+    e = engine.engine_new(platform.API_GL)
+    engine.engine_set_size(e, 1280, 800)
+    engine.engine_set_title(e, "aether3d - smooth terrain")
+    engine.engine_set_face_culling(e, true)
+
+    light = core.light_sun(core.vec3(0.4, 0.8, 0.35))
+    engine.engine_set_light(e, light)
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_start(e, on_start as fn(ptr))
+
+    engine.engine_run(e, 0 - 1, 0 - 1)
+
+    println("smooth terrain: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${gl.renderer_draw_calls(engine.engine_gl_renderer(e))} draw calls")
+
+    surface = g_surface as *Model
+    if surface != null { core.model_free(surface) }
+    world = g_world as *World
+    if world != null { voxel.world_free(world) }
+    core.light_free(light)
+    engine.engine_free(e)
+}
