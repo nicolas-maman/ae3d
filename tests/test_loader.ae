@@ -135,12 +135,86 @@ test_missing() {
     check_true("missing file reports why", loader.last_error() != "")
 }
 
+// A flat primitive whose triangles wind the wrong way is invisible under face
+// culling, so every one of them is checked for an upward normal.
+faces_up(m: *Model, name: string) {
+    indices = core.mesh_index_count(m.mesh)
+    if indices == 0 { record_failure("${name} has no triangles") ; return }
+
+    downward = 0
+    i = 0
+    while i + 2 < indices {
+        a = core.mesh_position(m.mesh, core.mesh_index_at(m.mesh, i))
+        b = core.mesh_position(m.mesh, core.mesh_index_at(m.mesh, i + 1))
+        c = core.mesh_position(m.mesh, core.mesh_index_at(m.mesh, i + 2))
+        normal = core.v3_cross(core.v3_sub(b, a), core.v3_sub(c, a))
+        if normal.y <= 0.0 { downward = downward + 1 }
+        i = i + 3
+    }
+    check_true("${name} winds upward", downward == 0)
+}
+
+test_primitive_winding() {
+    plane = loader.plane(6, 10.0)
+    faces_up(plane, "plane")
+    core.model_free(plane)
+
+    quad = loader.quad(20.0, 20.0)
+    faces_up(quad, "quad")
+    core.model_free(quad)
+
+    surface = loader.water_surface(100.0, 0.0, 0.0, 16)
+    faces_up(surface, "water surface")
+    core.model_free(surface)
+}
+
+// A closed primitive's triangles must all face away from its centre, or half of
+// it disappears under culling. A sphere's pole rings are degenerate by
+// construction, their normal is zero and they rasterise to nothing, so they are
+// counted separately rather than allowed as a tolerance.
+outward_count(m: *Model, name: string) {
+    indices = core.mesh_index_count(m.mesh)
+    inward = 0
+    degenerate = 0
+
+    i = 0
+    while i + 2 < indices {
+        a = core.mesh_position(m.mesh, core.mesh_index_at(m.mesh, i))
+        b = core.mesh_position(m.mesh, core.mesh_index_at(m.mesh, i + 1))
+        c = core.mesh_position(m.mesh, core.mesh_index_at(m.mesh, i + 2))
+        normal = core.v3_cross(core.v3_sub(b, a), core.v3_sub(c, a))
+        if core.v3_len(normal) < 0.000001 {
+            degenerate = degenerate + 1
+        } else {
+            centre = core.v3_mul(core.v3_add(core.v3_add(a, b), c), 1.0 / 3.0)
+            if core.v3_dot(normal, centre) <= 0.0 { inward = inward + 1 }
+        }
+        i = i + 3
+    }
+    check_true("${name} winds outward", inward == 0)
+    if inward != 0 {
+        println("    ${inward} inward, ${degenerate} degenerate of ${indices / 3}")
+    }
+}
+
+test_closed_winding() {
+    cube = loader.cube(2.0)
+    outward_count(cube, "cube")
+    core.model_free(cube)
+
+    sphere = loader.sphere(1.0, 24, 16)
+    outward_count(sphere, "sphere")
+    core.model_free(sphere)
+}
+
 main() {
     test_triangle()
     test_cube()
     test_sphere()
     test_earth()
     test_missing()
+    test_primitive_winding()
+    test_closed_winding()
 
     if failures == 0 {
         println("loader: all checks passed")

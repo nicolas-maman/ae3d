@@ -125,6 +125,43 @@ for example in examples/*.ae; do
     fi
 done
 
+step "editor"
+UI_ROOT="${AETHER_UI_ROOT:-$ROOT/../aether-ui}"
+if [ ! -f "$UI_ROOT/ui/module.ae" ]; then
+    skip "aether3d_editor" "aether-ui not found at $UI_ROOT"
+elif ! have_display; then
+    skip "aether3d_editor" "no display"
+else
+    if ./editor/build_editor.sh >/tmp/ae3d_build.log 2>&1; then
+        report="$(mktemp)"
+        snapshot="$(mktemp -t ae3d_shot).png"
+        # The editor cannot end its own run loop (aether-lang-dev/aether-ui#93),
+        # so a bounded run is stopped from here and judged by what it wrote.
+        AETHER3D_EDITOR_FRAMES=30 \
+        AETHER3D_EDITOR_SNAPSHOT="$snapshot" \
+        AETHER3D_EDITOR_REPORT="$report" \
+            timeout 90 ./build/aether3d_editor >/dev/null 2>&1 || true
+        if [ ! -s "$report" ]; then
+            fail "aether3d_editor (wrote no report)"
+        elif [ ! -s "$snapshot" ]; then
+            fail "aether3d_editor (wrote no viewport snapshot)"
+        elif ! grep -q '^frames 30$' "$report"; then
+            fail "aether3d_editor (did not reach 30 frames)"
+            sed 's/^/        /' "$report"
+        elif ! grep -q '^models 3$' "$report"; then
+            fail "aether3d_editor (scene did not build)"
+            sed 's/^/        /' "$report"
+        else
+            pass "aether3d_editor"
+            sed 's/^/        /' "$report"
+        fi
+        rm -f "$report" "$snapshot"
+    else
+        fail "aether3d_editor (build)"
+        sed 's/^/        /' /tmp/ae3d_build.log | head -20
+    fi
+fi
+
 step "benchmarks"
 for bench in benchmarks/bench_*.ae; do
     [ -e "$bench" ] || continue

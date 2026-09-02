@@ -24,6 +24,31 @@ engine, to Aether and C. See [Credits](#credits).
   from a file records its path, and geometry that did not is written to a
   compressed binary mesh beside the scene.
 
+## Editor
+
+![the editor viewport](docs/editor-viewport.png)
+
+`editor/` is a scene editor whose chrome is [aether-ui](https://github.com/aether-lang-dev/aether-ui):
+a hierarchy, an inspector with live transform and material controls, and a
+viewport you orbit with the mouse and click to select objects in.
+
+aether-ui owns the real window and every widget. The viewport is a GPU render:
+the scene is drawn into a framebuffer object that has no window of its own, read
+back, and blitted into an aether-ui canvas each frame. That is what lets a native
+toolkit with no GPU surface host a 3D view
+([aether-ui#92](https://github.com/aether-lang-dev/aether-ui/issues/92)); when a
+GPU surface exists, the readback is the only part that goes away.
+
+```bash
+git clone https://github.com/aether-lang-dev/aether-ui.git ../aether-ui
+./editor/build_editor.sh
+./build/aether3d_editor
+```
+
+Picking casts the cursor ray against every model's exact triangles, rejecting
+each against its bounding sphere first, so selection stays cheap with a full
+scene.
+
 ## Requirements
 
 - The [Aether toolchain](https://github.com/aether-lang-dev/aether) on `PATH`

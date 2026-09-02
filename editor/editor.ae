@@ -1,0 +1,522 @@
+// aether3d editor.
+//
+// The chrome is aether-ui, running the real window and every widget. The
+// viewport is a GPU render: the scene is drawn into a framebuffer object with no
+// window of its own, read back, and blitted into an aether-ui canvas each frame.
+// That is what lets a native toolkit with no GPU surface host a 3D view
+// (aether-lang-dev/aether-ui#92); when a GPU surface exists the readback is the
+// only part that goes away.
+//
+//   ./editor/build_editor.sh && ./build/aether3d_editor
+
+import ui
+import std.os
+import std.list
+import std.fs
+import std.string
+import a3d.core
+import a3d.gl
+import a3d.vk
+import a3d.platform
+import a3d.offscreen
+import a3d.loader
+import a3d.raycast
+import a3d.scene
+import a3d.rendering
+
+const VIEW_W = 900
+const VIEW_H = 620
+const SLOTS = 24
+const ORBIT_SPEED = 0.4
+const ZOOM_SPEED = 40.0
+
+var g_canvas = 0
+var g_window = 0
+var g_timer = 0
+
+var g_target: ptr = null
+var g_renderer: ptr = null
+var g_camera: ptr = null
+var g_light: ptr = null
+var g_models: ptr = null
+var g_selected = 0 - 1
+var g_backend_name = "opengl"
+
+var g_status = 0
+var g_selection_label = 0
+var g_slot_first = 0
+var g_inspector_first = 0
+
+var g_orbit_yaw = 0.0 - 35.0
+var g_orbit_pitch = 24.0
+var g_orbit_distance = 240.0
+var g_orbit_target_y = 20.0
+var g_dragging = false
+var g_last_x = 0.0
+var g_last_y = 0.0
+
+var g_frames = 0
+var g_frame_limit = 0
+var g_snapshot = ""
+var g_report = ""
+var g_dirty = true
+
+model_at(index: int) -> *Model {
+    if g_models == null || index < 0 || index >= list.size(g_models) { return null }
+    return list.get_raw(g_models, index) as *Model
+}
+
+selected_model() -> *Model {
+    return model_at(g_selected)
+}
+
+say(line: string) {
+    if g_status != 0 { ui.set_text(g_status, line) }
+}
+
+// The camera orbits a point rather than flying, which is what an editor viewport
+// wants: the thing being inspected stays in frame while the view moves around it.
+apply_orbit() {
+    cam = g_camera as *Camera
+    if cam == null { return }
+
+    pitch = core.clampf(g_orbit_pitch, 0.0 - 85.0, 85.0)
+    g_orbit_pitch = pitch
+    if g_orbit_distance < 10.0 { g_orbit_distance = 10.0 }
+    if g_orbit_distance > 6000.0 { g_orbit_distance = 6000.0 }
+
+    yaw = core.deg_to_rad(g_orbit_yaw)
+    pitch_radians = core.deg_to_rad(pitch)
+    horizontal = g_orbit_distance * core.cos_of(pitch_radians)
+
+    focus = core.vec3(0.0, g_orbit_target_y, 0.0)
+    eye = core.vec3(focus.x + horizontal * core.cos_of(yaw),
+                    focus.y + g_orbit_distance * core.sin_of(pitch_radians),
+                    focus.z + horizontal * core.sin_of(yaw))
+
+    core.camera_set_position(cam, eye)
+    core.camera_look_at(cam, focus)
+    g_dirty = true
+}
+
+refresh_hierarchy() {
+    count = 0
+    if g_models != null { count = list.size(g_models) }
+
+    i = 0
+    while i < SLOTS {
+        handle = g_slot_first + i
+        if i < count {
+            m = model_at(i)
+            label = core.text(m.name)
+            if label == "" { label = "object ${m.id}" }
+            marker = "   "
+            if i == g_selected { marker = " > " }
+            ui.set_button_label(handle, "${marker}${label}")
+            ui.set_hidden(handle, 0)
+        } else {
+            ui.set_hidden(handle, 1)
+        }
+        i = i + 1
+    }
+
+    if g_selection_label != 0 {
+        m = selected_model()
+        if m == null {
+            ui.set_text(g_selection_label, "nothing selected")
+        } else {
+            ui.set_text(g_selection_label, "${core.text(m.name)}  ${core.mesh_vertex_count(m.mesh)} vertices")
+        }
+    }
+    sync_inspector()
+}
+
+// The inspector reads the selected model rather than holding its own copy, so a
+// change made anywhere shows up here without a separate notification path.
+sync_inspector() {
+    m = selected_model()
+    if m == null { return }
+    ui.set_slider(g_inspector_first + 0, m.position.x)
+    ui.set_slider(g_inspector_first + 1, m.position.y)
+    ui.set_slider(g_inspector_first + 2, m.position.z)
+    ui.set_slider(g_inspector_first + 3, m.scale.x)
+    if m.material != null {
+        ui.set_slider(g_inspector_first + 4, m.material.diffuse.x)
+        ui.set_slider(g_inspector_first + 5, m.material.diffuse.y)
+        ui.set_slider(g_inspector_first + 6, m.material.diffuse.z)
+        ui.set_slider(g_inspector_first + 7, m.material.metallic)
+        ui.set_slider(g_inspector_first + 8, m.material.roughness)
+    }
+}
+
+select_object(index: int) {
+    g_selected = index
+    refresh_hierarchy()
+    g_dirty = true
+}
+
+add_model(m: *Model, name: string) {
+    if m == null { return }
+    core.model_set_name(m, name)
+    renderer = g_renderer as *GLRenderer
+    backend = gl.backend(renderer)
+    core.backend_add_model(&backend, m)
+    list.add_raw(g_models, m)
+    select_object(list.size(g_models) - 1)
+    say("added ${name}")
+}
+
+remove_selected() {
+    m = selected_model()
+    if m == null { return }
+
+    renderer = g_renderer as *GLRenderer
+    backend = gl.backend(renderer)
+    core.backend_remove_model(&backend, m)
+    list.remove(g_models, g_selected)
+    core.model_free(m)
+
+    g_selected = g_selected - 1
+    if g_selected < 0 && list.size(g_models) > 0 { g_selected = 0 }
+    if list.size(g_models) == 0 { g_selected = 0 - 1 }
+    refresh_hierarchy()
+    say("deleted")
+    g_dirty = true
+}
+
+// Picking casts the cursor ray through every model's exact triangles, nearest
+// hit wins. The bounding sphere rejects most of them before any index buffer is
+// touched, so this stays cheap with a full scene.
+pick_at(x: float, y: float) {
+    cam = g_camera as *Camera
+    if cam == null || g_models == null { return }
+
+    direction = raycast.screen_direction(cam, x, y, VIEW_W, VIEW_H)
+    nearest = raycast.MISS
+    chosen = 0 - 1
+
+    count = list.size(g_models)
+    i = 0
+    while i < count {
+        m = model_at(i)
+        if m != null {
+            distance = raycast.model_mesh(cam.position, direction, m)
+            if raycast.hit(distance) {
+                if !raycast.hit(nearest) || distance < nearest {
+                    nearest = distance
+                    chosen = i
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    if chosen >= 0 {
+        select_object(chosen)
+        say("picked ${core.text(model_at(chosen).name)}")
+    } else {
+        say("nothing under the cursor")
+    }
+}
+
+draw_frame() {
+    renderer = g_renderer as *GLRenderer
+    if renderer == null { return }
+
+    backend = gl.backend(renderer)
+    core.backend_render(&backend, g_camera as *Camera, g_light as *Light)
+
+    pixels = offscreen.target_pixels(g_target)
+    if pixels == null { return }
+
+    ui.canvas_draw_image_ptr(g_canvas, 0.0, 0.0, VIEW_W, VIEW_H,
+                             pixels, VIEW_W * VIEW_H * 4)
+    ui.canvas_redraw(g_canvas)
+    g_frames = g_frames + 1
+    g_dirty = false
+
+    if g_frame_limit > 0 && g_frames >= g_frame_limit {
+        if g_snapshot != "" {
+            ui.canvas_write_png(g_canvas, g_snapshot, VIEW_W, VIEW_H)
+            println("editor: wrote ${g_snapshot} after ${g_frames} frames")
+        }
+        ui.timer_cancel(g_timer)
+        report_state()
+        // aether-ui cannot stop its own run loop (aether-lang-dev/aether-ui#93),
+        // so a bounded run leaves the window standing and the caller ends it.
+        println("editor: bounded run complete")
+    }
+}
+
+// What a bounded run can assert without a person looking at the window: the
+// chrome was built, the scene is populated, and the viewport produced frames.
+report_state() {
+    slots = 0
+    if g_slot_first != 0 { slots = SLOTS }
+    selected = "none"
+    m = selected_model()
+    if m != null { selected = core.text(m.name) }
+
+    lines = string.concat("backend ", g_backend_name)
+    lines = string.concat(lines, "\nmodels ")
+    lines = string.concat(lines, string.from_int(list.size(g_models)))
+    lines = string.concat(lines, "\nselected ")
+    lines = string.concat(lines, selected)
+    lines = string.concat(lines, "\ncanvas ")
+    lines = string.concat(lines, string.from_int(g_canvas))
+    lines = string.concat(lines, "\nhierarchy_slots ")
+    lines = string.concat(lines, string.from_int(slots))
+    lines = string.concat(lines, "\nstatus_widget ")
+    lines = string.concat(lines, string.from_int(g_status))
+    lines = string.concat(lines, "\ninspector_first ")
+    lines = string.concat(lines, string.from_int(g_inspector_first))
+    lines = string.concat(lines, "\nframes ")
+    lines = string.concat(lines, string.from_int(g_frames))
+    lines = string.concat(lines, "\nviewport ")
+    lines = string.concat(lines, string.from_int(VIEW_W))
+    lines = string.concat(lines, "x")
+    lines = string.concat(lines, string.from_int(VIEW_H))
+    lines = string.concat(lines, "\n")
+
+    // Written to a file rather than printed: a bounded run has to be ended from
+    // outside (aether-lang-dev/aether-ui#93) and that loses buffered output.
+    if g_report != "" { fs.write(g_report, lines) }
+    string.free(lines)
+}
+
+limit_from_env() -> int {
+    setting = os.getenv("AETHER3D_EDITOR_FRAMES")
+    if setting == "" { return 0 }
+    if string.try_int(setting) == 0 { return 0 }
+    return string.get_int(setting)
+}
+
+build_scene() {
+    ground = loader.plane(24, 24.0)
+    core.model_set_position(ground, 0.0 - 276.0, 0.0 - 20.0, 0.0 - 276.0)
+    core.model_matte(ground, 0.30, 0.33, 0.36)
+    add_model(ground, "ground")
+
+    cube = loader.cube(1.0)
+    core.model_set_scale(cube, 34.0, 34.0, 34.0)
+    core.model_set_position(cube, 0.0 - 55.0, 0.0, 0.0)
+    core.model_polished_metal(cube, 0.85, 0.42, 0.18)
+    add_model(cube, "cube")
+
+    sphere = loader.sphere(1.0, 40, 30)
+    core.model_set_scale(sphere, 26.0, 26.0, 26.0)
+    core.model_set_position(sphere, 55.0, 4.0, 0.0)
+    core.model_glossy(sphere, 0.25, 0.5, 0.85)
+    add_model(sphere, "sphere")
+
+    select_object(1)
+}
+
+main() {
+    g_frame_limit = limit_from_env()
+    g_snapshot = os.getenv("AETHER3D_EDITOR_SNAPSHOT")
+    g_report = os.getenv("AETHER3D_EDITOR_REPORT")
+    g_models = list.new()
+
+    wanted = os.getenv("AETHER3D_EDITOR_BACKEND")
+    if string.equals(wanted, "vulkan") == 1 {
+        if vk.available() {
+            g_backend_name = "vulkan"
+        } else {
+            println("editor: no Vulkan driver (${vk.last_error()}), staying on OpenGL")
+        }
+    }
+
+    context = offscreen.context_create(VIEW_W, VIEW_H)
+    if context == null {
+        println("editor: no OpenGL context available")
+        return
+    }
+
+    renderer = gl.renderer_new()
+    backend = gl.backend(renderer)
+    if !core.backend_init(&backend, context, VIEW_W, VIEW_H) {
+        println("editor: the OpenGL backend would not initialise")
+        return
+    }
+    g_renderer = renderer as ptr
+
+    g_target = offscreen.target_create(VIEW_W, VIEW_H)
+    gl.renderer_set_target(renderer, g_target)
+    gl.renderer_set_clear_color(renderer, 0.10, 0.11, 0.14)
+    gl.renderer_set_fxaa(renderer, true)
+
+    g_camera = core.camera_new(VIEW_W, VIEW_H) as ptr
+    g_light = core.light_sun(core.vec3(0.35, 0.85, 0.4)) as ptr
+    core.set_face_culling(true)
+
+    ui.window("aether3d editor", VIEW_W + 520, VIEW_H + 90) {
+        ui.hstack(0) {
+            ui.vstack(4) {
+                ui.text("Scene")
+                ui.divider()
+                i = 0
+                while i < SLOTS {
+                    handle = ui.btn("") callback {
+                        select_object(ui.focused_widget() - g_slot_first)
+                    }
+                    if i == 0 { g_slot_first = handle }
+                    ui.set_hidden(handle, 1)
+                    i = i + 1
+                }
+                ui.divider()
+                ui.text("Add")
+                ui.btn("Cube") callback {
+                    m = loader.cube(1.0)
+                    core.model_set_scale(m, 30.0, 30.0, 30.0)
+                    core.model_matte(m, 0.8, 0.5, 0.3)
+                    add_model(m, "cube")
+                }
+                ui.btn("Sphere") callback {
+                    m = loader.sphere(1.0, 32, 24)
+                    core.model_set_scale(m, 24.0, 24.0, 24.0)
+                    core.model_glossy(m, 0.4, 0.7, 0.5)
+                    add_model(m, "sphere")
+                }
+                ui.btn("Plane") callback {
+                    m = loader.plane(16, 20.0)
+                    core.model_matte(m, 0.4, 0.4, 0.45)
+                    add_model(m, "plane")
+                }
+                ui.divider()
+                ui.btn("Delete") callback { remove_selected() }
+                ui.btn("Save scene") callback {
+                    if scene.scene_save(g_models, "build/editor_scene.json", "build/") {
+                        say("saved build/editor_scene.json")
+                    } else {
+                        say("save failed: ${scene.last_error()}")
+                    }
+                }
+                ui.spacer()
+            }
+
+            ui.vstack(4) {
+                g_canvas = ui.canvas_create(VIEW_W, VIEW_H)
+                ui.canvas_fill_rect(g_canvas, 0.0, 0.0, VIEW_W * 1.0, VIEW_H * 1.0,
+                                    0.10, 0.11, 0.14, 1.0)
+                ui.canvas_redraw(g_canvas)
+
+                ui.canvas_on_click(g_canvas) callback |x: float, y: float| {
+                    g_dragging = true
+                    g_last_x = x
+                    g_last_y = y
+                    pick_at(x, y)
+                }
+                ui.canvas_on_release(g_canvas) callback |x: float, y: float| {
+                    g_dragging = false
+                }
+                ui.canvas_on_move(g_canvas) callback |x: float, y: float| {
+                    if g_dragging {
+                        g_orbit_yaw = g_orbit_yaw + (x - g_last_x) * ORBIT_SPEED
+                        g_orbit_pitch = g_orbit_pitch - (y - g_last_y) * ORBIT_SPEED
+                        g_last_x = x
+                        g_last_y = y
+                        apply_orbit()
+                    }
+                }
+                ui.canvas_on_scroll(g_canvas) callback |dx: float, dy: float| {
+                    g_orbit_distance = g_orbit_distance - dy * ZOOM_SPEED
+                    apply_orbit()
+                }
+
+                g_status = ui.text("drag to orbit, scroll to zoom, click to select")
+            }
+
+            ui.vstack(4) {
+                ui.text("Inspector")
+                ui.divider()
+                g_selection_label = ui.text("nothing selected")
+                ui.divider()
+
+                ui.text("position x")
+                g_inspector_first = ui.slider(0.0 - 400.0, 400.0, 0.0) callback |v: float| {
+                    m = selected_model()
+                    if m != null {
+                        core.model_set_position(m, v, m.position.y, m.position.z)
+                        g_dirty = true
+                    }
+                }
+                ui.text("position y")
+                ui.slider(0.0 - 200.0, 400.0, 0.0) callback |v: float| {
+                    m = selected_model()
+                    if m != null {
+                        core.model_set_position(m, m.position.x, v, m.position.z)
+                        g_dirty = true
+                    }
+                }
+                ui.text("position z")
+                ui.slider(0.0 - 400.0, 400.0, 0.0) callback |v: float| {
+                    m = selected_model()
+                    if m != null {
+                        core.model_set_position(m, m.position.x, m.position.y, v)
+                        g_dirty = true
+                    }
+                }
+                ui.text("scale")
+                ui.slider(1.0, 120.0, 30.0) callback |v: float| {
+                    m = selected_model()
+                    if m != null {
+                        core.model_set_scale(m, v, v, v)
+                        g_dirty = true
+                    }
+                }
+                ui.divider()
+                ui.text("colour red")
+                ui.slider(0.0, 1.0, 0.8) callback |v: float| {
+                    m = selected_model()
+                    if m != null {
+                        core.model_set_diffuse(m, v, m.material.diffuse.y, m.material.diffuse.z)
+                        g_dirty = true
+                    }
+                }
+                ui.text("colour green")
+                ui.slider(0.0, 1.0, 0.5) callback |v: float| {
+                    m = selected_model()
+                    if m != null {
+                        core.model_set_diffuse(m, m.material.diffuse.x, v, m.material.diffuse.z)
+                        g_dirty = true
+                    }
+                }
+                ui.text("colour blue")
+                ui.slider(0.0, 1.0, 0.3) callback |v: float| {
+                    m = selected_model()
+                    if m != null {
+                        core.model_set_diffuse(m, m.material.diffuse.x, m.material.diffuse.y, v)
+                        g_dirty = true
+                    }
+                }
+                ui.text("metallic")
+                ui.slider(0.0, 1.0, 0.0) callback |v: float| {
+                    m = selected_model()
+                    if m != null {
+                        core.model_set_pbr(m, v, m.material.roughness)
+                        g_dirty = true
+                    }
+                }
+                ui.text("roughness")
+                ui.slider(0.0, 1.0, 0.5) callback |v: float| {
+                    m = selected_model()
+                    if m != null {
+                        core.model_set_pbr(m, m.material.metallic, v)
+                        g_dirty = true
+                    }
+                }
+                ui.spacer()
+            }
+        }
+
+        build_scene()
+        apply_orbit()
+
+        g_timer = ui.timer(16) callback {
+            draw_frame()
+        }
+    }
+
+    println("editor: ${g_frames} frames rendered on ${g_backend_name}")
+}
