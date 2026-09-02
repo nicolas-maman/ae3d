@@ -66,6 +66,7 @@ module, and runs every test suite and every example.
 | `water.ae` | A 256x256 Gerstner-wave ocean, 65536 vertices |
 | `voxel_world.ae` | 960464 voxels of Perlin terrain, 93030 visible, one draw call |
 | `black_hole.ae` | 200000 particles under Verlet integration, two instanced draws |
+| `sand.ae` | 250000 grains falling and settling, click to scatter them |
 | `smooth_terrain.ae` | The same terrain meshed with surface nets, 67590 triangles |
 
 ## Layout
@@ -85,6 +86,7 @@ src/a3d/    Aether modules
   voxel       voxel worlds
   water       the ocean surface
   scene       saving and loading scenes
+  rendering   presets for the shader's advanced features
   behaviour   game objects and components
   raycast     ray tests against spheres, triangles and meshes
 tests/      test suites, each a program that prints its own verdict

@@ -1,0 +1,236 @@
+// Presets for the advanced shading features the default fragment shader exposes.
+//
+// A config is a plain value: build one from a preset, adjust what you want, and
+// apply it to a model. Applying writes the model's custom uniforms, so two models
+// in the same scene can run different settings through the same program.
+
+import std.list
+import a3d.core
+
+exports (
+    Config,
+    default_config, high_quality_config, performance_config, voxel_config,
+    apply, apply_all
+)
+
+struct Config {
+    advanced_lighting: bool
+
+    clearcoat: bool
+    clearcoat_roughness: float
+    clearcoat_intensity: float
+    sheen: bool
+    sheen_r: float
+    sheen_g: float
+    sheen_b: float
+    sheen_roughness: float
+    transmission: bool
+    transmission_factor: float
+
+    multiple_scattering: bool
+    energy_conservation: bool
+    image_based_lighting: bool
+    ibl_intensity: float
+
+    perlin_noise: bool
+    noise_scale: float
+    noise_octaves: int
+    noise_intensity: float
+
+    advanced_shadows: bool
+    shadow_intensity: float
+    shadow_softness: float
+
+    volumetric_lighting: bool
+    volumetric_intensity: float
+    volumetric_steps: int
+    volumetric_scattering: float
+
+    ssao: bool
+    ssao_intensity: float
+    ssao_radius: float
+    ssao_bias: float
+    ssao_samples: int
+
+    global_illumination: bool
+    gi_intensity: float
+    gi_bounces: int
+
+    bloom: bool
+    bloom_threshold: float
+    bloom_intensity: float
+    bloom_radius: float
+
+    high_quality_filtering: bool
+    filtering_quality: int
+}
+
+default_config() -> Config {
+    return Config {
+        advanced_lighting: true,
+
+        clearcoat: false,
+        clearcoat_roughness: 0.1,
+        clearcoat_intensity: 0.5,
+        sheen: false,
+        sheen_r: 1.0,
+        sheen_g: 1.0,
+        sheen_b: 1.0,
+        sheen_roughness: 0.5,
+        transmission: false,
+        transmission_factor: 0.0,
+
+        multiple_scattering: true,
+        energy_conservation: true,
+        image_based_lighting: false,
+        ibl_intensity: 1.0,
+
+        perlin_noise: true,
+        noise_scale: 0.0002,
+        noise_octaves: 3,
+        noise_intensity: 0.05,
+
+        advanced_shadows: true,
+        shadow_intensity: 0.3,
+        shadow_softness: 0.2,
+
+        volumetric_lighting: false,
+        volumetric_intensity: 0.5,
+        volumetric_steps: 16,
+        volumetric_scattering: 0.1,
+
+        ssao: true,
+        ssao_intensity: 0.35,
+        ssao_radius: 200.0,
+        ssao_bias: 0.015,
+        ssao_samples: 12,
+
+        global_illumination: false,
+        gi_intensity: 0.5,
+        gi_bounces: 2,
+
+        bloom: true,
+        bloom_threshold: 1.0,
+        bloom_intensity: 0.3,
+        bloom_radius: 0.4,
+
+        high_quality_filtering: true,
+        filtering_quality: 2
+    }
+}
+
+high_quality_config() -> Config {
+    c = default_config()
+    c.clearcoat = true
+    c.sheen = true
+    c.image_based_lighting = true
+    c.volumetric_lighting = true
+    c.global_illumination = true
+    c.gi_bounces = 3
+    c.ssao_samples = 24
+    c.volumetric_steps = 32
+    c.filtering_quality = 3
+    c.noise_octaves = 5
+    c.shadow_softness = 0.35
+    return c
+}
+
+performance_config() -> Config {
+    c = default_config()
+    c.clearcoat = false
+    c.sheen = false
+    c.transmission = false
+    c.multiple_scattering = false
+    c.image_based_lighting = false
+    c.perlin_noise = false
+    c.advanced_shadows = false
+    c.volumetric_lighting = false
+    c.ssao = false
+    c.global_illumination = false
+    c.bloom = false
+    c.high_quality_filtering = false
+    c.filtering_quality = 1
+    return c
+}
+
+// Voxel worlds are lit flat surfaces in bulk: screen-space occlusion between
+// blocks is what sells the depth, and surface noise on a cube face only shimmers.
+voxel_config() -> Config {
+    c = default_config()
+    c.perlin_noise = false
+    c.noise_intensity = 0.0
+    c.ssao = true
+    c.ssao_intensity = 0.45
+    c.ssao_radius = 120.0
+    c.clearcoat = false
+    c.sheen = false
+    c.volumetric_lighting = false
+    c.bloom = false
+    return c
+}
+
+flag(value: bool) -> int {
+    if value { return 1 }
+    return 0
+}
+
+apply(m: *Model, c: Config) {
+    if m == null { return }
+
+    core.model_set_uniform_int(m, "enableClearcoat", flag(c.clearcoat))
+    core.model_set_uniform_float(m, "clearcoatRoughness", c.clearcoat_roughness)
+    core.model_set_uniform_float(m, "clearcoatIntensity", c.clearcoat_intensity)
+
+    core.model_set_uniform_int(m, "enableSheen", flag(c.sheen))
+    core.model_set_uniform_vec3(m, "sheenColor", core.vec3(c.sheen_r, c.sheen_g, c.sheen_b))
+    core.model_set_uniform_float(m, "sheenRoughness", c.sheen_roughness)
+
+    core.model_set_uniform_int(m, "enableTransmission", flag(c.transmission))
+    core.model_set_uniform_float(m, "transmissionFactor", c.transmission_factor)
+
+    core.model_set_uniform_int(m, "enableMultipleScattering", flag(c.multiple_scattering))
+    core.model_set_uniform_int(m, "enableEnergyConservation", flag(c.energy_conservation))
+    core.model_set_uniform_int(m, "enableImageBasedLighting", flag(c.image_based_lighting))
+    core.model_set_uniform_float(m, "iblIntensity", c.ibl_intensity)
+
+    core.model_set_uniform_int(m, "enablePerlinNoise", flag(c.perlin_noise))
+    core.model_set_uniform_float(m, "noiseScale", c.noise_scale)
+    core.model_set_uniform_int(m, "noiseOctaves", c.noise_octaves)
+    core.model_set_uniform_float(m, "noiseIntensity", c.noise_intensity)
+
+    core.model_set_uniform_int(m, "enableShadows", flag(c.advanced_shadows))
+    core.model_set_uniform_float(m, "shadowIntensity", c.shadow_intensity)
+    core.model_set_uniform_float(m, "shadowSoftness", c.shadow_softness)
+
+    core.model_set_uniform_int(m, "enableVolumetricLighting", flag(c.volumetric_lighting))
+    core.model_set_uniform_float(m, "volumetricIntensity", c.volumetric_intensity)
+    core.model_set_uniform_int(m, "volumetricSteps", c.volumetric_steps)
+    core.model_set_uniform_float(m, "volumetricScattering", c.volumetric_scattering)
+
+    core.model_set_uniform_int(m, "enableSSAO", flag(c.ssao))
+    core.model_set_uniform_float(m, "ssaoIntensity", c.ssao_intensity)
+    core.model_set_uniform_float(m, "ssaoRadius", c.ssao_radius)
+    core.model_set_uniform_float(m, "ssaoBias", c.ssao_bias)
+    core.model_set_uniform_int(m, "ssaoSampleCount", c.ssao_samples)
+
+    core.model_set_uniform_int(m, "enableGlobalIllumination", flag(c.global_illumination))
+    core.model_set_uniform_float(m, "giIntensity", c.gi_intensity)
+    core.model_set_uniform_int(m, "giBounces", c.gi_bounces)
+
+    core.model_set_uniform_int(m, "enableBloom", flag(c.bloom))
+    core.model_set_uniform_float(m, "bloomThreshold", c.bloom_threshold)
+    core.model_set_uniform_float(m, "bloomIntensity", c.bloom_intensity)
+    core.model_set_uniform_float(m, "bloomRadius", c.bloom_radius)
+
+    core.model_set_uniform_int(m, "enableHighQualityFiltering", flag(c.high_quality_filtering))
+    core.model_set_uniform_int(m, "filteringQuality", c.filtering_quality)
+}
+
+apply_all(models: ptr, c: Config) {
+    count = list.size(models)
+    i = 0
+    while i < count {
+        apply(list.get_raw(models, i) as *Model, c)
+        i = i + 1
+    }
+}

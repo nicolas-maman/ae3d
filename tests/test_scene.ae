@@ -1,9 +1,11 @@
 // Ray casting maths and the component lifecycle, both headless.
 
+import std.string
 import a3d.core
 import a3d.behaviour
 import a3d.raycast
 import a3d.loader
+import a3d.rendering
 
 var failures = 0
 var awake_calls = 0
@@ -141,9 +143,58 @@ test_components() {
     behaviour.scene_free(scene)
 }
 
+uniform_named(m: *Model, name: string) -> *Uniform {
+    count = core.model_uniform_count(m)
+    i = 0
+    while i < count {
+        u = core.model_uniform(m, i)
+        if u != null && string.equals(u.name, name) == 1 { return u }
+        i = i + 1
+    }
+    return null
+}
+
+test_rendering_config() {
+    m = loader.cube(1.0)
+
+    rendering.apply(m, rendering.default_config())
+    first_count = core.model_uniform_count(m)
+    check_true("config wrote uniforms", first_count > 20)
+
+    ssao = uniform_named(m, "enableSSAO")
+    check_true("ssao present", ssao != null)
+    check_int("ssao on by default", ssao.integer, 1)
+
+    samples = uniform_named(m, "ssaoSampleCount")
+    check_int("default sample count", samples.integer, 12)
+
+    sheen = uniform_named(m, "sheenColor")
+    check_true("sheen colour is a vector", sheen.kind == core.UNIFORM_VEC3)
+    check("sheen colour r", sheen.vector.x, 1.0)
+
+    // Applying a second config must overwrite in place, not append a duplicate
+    // set that the renderer would then upload twice.
+    rendering.apply(m, rendering.performance_config())
+    check_int("uniforms replaced not appended", core.model_uniform_count(m), first_count)
+    check_int("ssao off for performance", uniform_named(m, "enableSSAO").integer, 0)
+    check_int("bloom off for performance", uniform_named(m, "enableBloom").integer, 0)
+
+    rendering.apply(m, rendering.high_quality_config())
+    check_int("ssao back on", uniform_named(m, "enableSSAO").integer, 1)
+    check_int("high quality sample count", uniform_named(m, "ssaoSampleCount").integer, 24)
+    check_int("clearcoat on", uniform_named(m, "enableClearcoat").integer, 1)
+
+    rendering.apply(m, rendering.voxel_config())
+    check_int("voxel noise off", uniform_named(m, "enablePerlinNoise").integer, 0)
+    check("voxel occlusion raised", uniform_named(m, "ssaoIntensity").number, 0.45)
+
+    core.model_free(m)
+}
+
 main() {
     test_raycast()
     test_components()
+    test_rendering_config()
 
     if failures == 0 {
         println("scene: all checks passed")

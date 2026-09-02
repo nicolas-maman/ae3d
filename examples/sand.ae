@@ -1,0 +1,219 @@
+// Falling sand: a quarter of a million grains under gravity, settling on the
+// ground with friction, and scattering where you click.
+//
+// Left click throws the grains away from the point under the cursor; the ground
+// point comes from a ray cast through the camera.
+//
+//   ./build.sh examples/sand.ae && ./build/sand
+
+import a3d.core
+import a3d.platform
+import a3d.engine
+import a3d.gl
+import a3d.loader
+import a3d.raycast
+import a3d.rendering
+
+extern calloc(count: int, size: int) -> ptr
+extern free(block: ptr)
+
+const GRAINS = 250000
+const GRAVITY = 0.0 - 240.0
+const FRICTION = 0.86
+const BOUNCE = 0.28
+const FIELD = 900.0
+const BLAST_RADIUS = 260.0
+const BLAST_FORCE = 900.0
+
+var g_model: ptr = null
+var g_position: ptr = null
+var g_velocity: ptr = null
+var g_seed = 24681357
+var g_settled = 0
+
+next_random() -> float {
+    g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
+    return (g_seed * 1.0) / 2147483647.0
+}
+
+seed_grains() {
+    position = g_position as float[]
+    velocity = g_velocity as float[]
+
+    i = 0
+    while i < GRAINS {
+        slot = i * 3
+        position[slot] = (next_random() - 0.5) * FIELD
+        position[slot + 1] = 40.0 + next_random() * 900.0
+        position[slot + 2] = (next_random() - 0.5) * FIELD
+        velocity[slot] = 0.0
+        velocity[slot + 1] = 0.0
+        velocity[slot + 2] = 0.0
+        i = i + 1
+    }
+}
+
+// Grains stop rather than jitter: below a threshold the vertical velocity is
+// zeroed instead of bounced, which is what lets a pile actually form.
+step_grains(delta: float) {
+    position = g_position as float[]
+    velocity = g_velocity as float[]
+
+    step = delta
+    if step > 0.033 { step = 0.033 }
+
+    settled = 0
+    i = 0
+    while i < GRAINS {
+        slot = i * 3
+        vy = velocity[slot + 1] + GRAVITY * step
+
+        x = position[slot] + velocity[slot] * step
+        y = position[slot + 1] + vy * step
+        z = position[slot + 2] + velocity[slot + 2] * step
+
+        if y <= 0.0 {
+            y = 0.0
+            if vy < 0.0 - 60.0 {
+                vy = (0.0 - vy) * BOUNCE
+            } else {
+                vy = 0.0
+                settled = settled + 1
+            }
+            velocity[slot] = velocity[slot] * FRICTION
+            velocity[slot + 2] = velocity[slot + 2] * FRICTION
+        }
+
+        position[slot] = x
+        position[slot + 1] = y
+        position[slot + 2] = z
+        velocity[slot + 1] = vy
+
+        i = i + 1
+    }
+    g_settled = settled
+}
+
+blast(centre: Vec3) {
+    position = g_position as float[]
+    velocity = g_velocity as float[]
+
+    i = 0
+    while i < GRAINS {
+        slot = i * 3
+        dx = position[slot] - centre.x
+        dy = position[slot + 1] - centre.y
+        dz = position[slot + 2] - centre.z
+
+        distance_sq = dx * dx + dy * dy + dz * dz
+        if distance_sq < BLAST_RADIUS * BLAST_RADIUS {
+            distance = core.sqrt_of(distance_sq)
+            if distance < 1.0 { distance = 1.0 }
+            falloff = 1.0 - distance / BLAST_RADIUS
+            push = BLAST_FORCE * falloff / distance
+            velocity[slot] = velocity[slot] + dx * push
+            velocity[slot + 1] = velocity[slot + 1] + dy * push + BLAST_FORCE * falloff * 0.5
+            velocity[slot + 2] = velocity[slot + 2] + dz * push
+        }
+        i = i + 1
+    }
+}
+
+// Where the cursor ray meets the ground plane. Returns false when it points at
+// or above the horizon and never reaches it.
+ground_under_cursor(e: *Engine, out: *Vec3) -> bool {
+    cam = engine.engine_camera(e)
+    window = engine.engine_window(e)
+    width = platform.window_width(window)
+    height = platform.window_height(window)
+
+    direction = raycast.screen_direction(cam, engine.engine_mouse_x(e),
+                                         engine.engine_mouse_y(e), width, height)
+    if direction.y >= 0.0 - 0.0001 { return false }
+
+    distance = (0.0 - cam.position.y) / direction.y
+    if distance <= 0.0 { return false }
+
+    out.x = cam.position.x + direction.x * distance
+    out.y = 0.0
+    out.z = cam.position.z + direction.z * distance
+    return true
+}
+
+on_start(data: ptr) {
+    e = data as *Engine
+
+    g_position = calloc(GRAINS * 3, 8)
+    g_velocity = calloc(GRAINS * 3, 8)
+    if g_position == null || g_velocity == null {
+        println("could not allocate the grains")
+        return
+    }
+    seed_grains()
+
+    grain = loader.load_obj("resources/obj/Sphere_Low.obj", true)
+    if grain == null {
+        println("could not load the grain mesh: ${loader.last_error()}")
+        return
+    }
+    core.model_set_scale(grain, 2.4, 2.4, 2.4)
+    core.model_matte(grain, 0.9, 0.72, 0.45)
+    core.model_set_exposure(grain, 1.0)
+    rendering.apply(grain, rendering.performance_config())
+
+    if !core.model_enable_instancing(grain, GRAINS) { return }
+    engine.engine_add_model(e, grain)
+    g_model = grain as ptr
+
+    renderer = engine.engine_gl_renderer(e)
+    gl.renderer_set_clear_color(renderer, 0.62, 0.55, 0.44)
+
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(0.0, 320.0, 900.0))
+    core.camera_set_speed(cam, 500.0)
+    core.camera_set_far(cam, 20000.0)
+    core.camera_look_at(cam, core.vec3(0.0, 60.0, 0.0))
+
+    println("sand: ${GRAINS} grains in one instanced draw, left click to scatter")
+}
+
+on_update(data: ptr, delta: float) {
+    e = data as *Engine
+    grain = g_model as *Model
+    if grain == null { return }
+
+    step_grains(delta)
+
+    if engine.engine_mouse_down(e, platform.MOUSE_LEFT) {
+        centre = core.vec3(0.0, 0.0, 0.0)
+        if ground_under_cursor(e, &centre) { blast(centre) }
+    }
+
+    core.model_set_instance_positions(grain, g_position, GRAINS)
+}
+
+main() {
+    e = engine.engine_new(platform.API_GL)
+    engine.engine_set_size(e, 1280, 800)
+    engine.engine_set_title(e, "aether3d - sand")
+    engine.engine_set_face_culling(e, true)
+
+    light = core.light_warm(core.vec3(0.0 - 400.0, 1000.0, 0.0 - 300.0), 2.5)
+    light.ambient_strength = 0.3
+    engine.engine_set_light(e, light)
+
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_start(e, on_start as fn(ptr))
+    engine.engine_on_update(e, on_update as fn(ptr, float))
+
+    engine.engine_run(e, 0 - 1, 0 - 1)
+
+    println("sand: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${g_settled} grains settled, ${gl.renderer_draw_calls(engine.engine_gl_renderer(e))} draw calls")
+
+    grain = g_model as *Model
+    if grain != null { core.model_free(grain) }
+    if g_position != null { free(g_position) }
+    if g_velocity != null { free(g_velocity) }
+    core.light_free(light)
+    engine.engine_free(e)
+}

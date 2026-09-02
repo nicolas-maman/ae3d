@@ -37,6 +37,15 @@ First working engine.
   binary mesh, float32 stored as its IEEE-754 bit pattern in little-endian order
   so a file written on one host reads back identically on another.
 
+### Shading presets
+
+- Default, high quality, performance and voxel configurations over the advanced
+  features the fragment shader exposes: clearcoat, sheen, transmission, image
+  based lighting, procedural noise, soft shadows, volumetric lighting, screen
+  space occlusion, global illumination, bloom and filtering quality. Applying a
+  config writes a model's own uniforms, so two models in one scene can run
+  different settings through the same program.
+
 ### Engine
 
 - Window, input and timing over GLFW.
@@ -49,5 +58,7 @@ First working engine.
 - 192x192x48 voxel terrain: 960464 solid voxels reduced to 93030 visible,
   generated in 9ms, instanced in 7ms, one draw call.
 - 200000 particles under Verlet integration in two instanced draws at 126fps.
+- 250000 sand grains falling, colliding and settling in one instanced draw at
+  70fps.
 - 160x160x64 field meshed by surface nets into 34241 vertices and 67590
   triangles in 33ms, one draw call at 106fps.
