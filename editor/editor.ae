@@ -1,11 +1,11 @@
 // aether3d editor.
 //
-// The chrome is aether-ui, running the real window and every widget. The
-// viewport is a GPU render: the scene is drawn into a framebuffer object with no
-// window of its own, read back, and blitted into an aether-ui canvas each frame.
-// That is what lets a native toolkit with no GPU surface host a 3D view
-// (aether-lang-dev/aether-ui#92); when a GPU surface exists the readback is the
-// only part that goes away.
+// The chrome is aether-ui: it owns the real window, the panels, the hierarchy
+// list and every control. The viewport is a GPU render composited into an
+// aether-ui canvas, because aether-ui has no GPU surface of its own
+// (aether-lang-dev/aether-ui#92): the scene is drawn into a framebuffer object
+// with no window, read back, and blitted each frame. When a GPU surface exists,
+// the readback is the only part that goes away.
 //
 //   ./editor/build_editor.sh && ./build/aether3d_editor
 
@@ -14,44 +14,60 @@ import std.os
 import std.list
 import std.fs
 import std.string
+
+extern clock_ns() -> long
 import a3d.core
 import a3d.gl
 import a3d.vk
-import a3d.platform
 import a3d.offscreen
 import a3d.loader
 import a3d.raycast
 import a3d.scene
-import a3d.rendering
 
-const VIEW_W = 900
-const VIEW_H = 620
-const SLOTS = 24
-const ORBIT_SPEED = 0.4
-const ZOOM_SPEED = 40.0
+const PANEL_LEFT = 240
+const PANEL_RIGHT = 300
+const WINDOW_W = 1480
+const WINDOW_H = 860
+const ORBIT_SPEED = 0.35
+const ZOOM_STEP = 1.12
+const DRAG_SLOP = 3.0
 
 var g_canvas = 0
-var g_window = 0
-var g_timer = 0
+var g_view_w = 900
+var g_view_h = 620
 
 var g_target: ptr = null
 var g_renderer: ptr = null
 var g_camera: ptr = null
 var g_light: ptr = null
 var g_models: ptr = null
+var g_rows: ptr = null
+var g_hierarchy: ptr = null
 var g_selected = 0 - 1
+var g_syncing = false
 var g_backend_name = "opengl"
 
-var g_status = 0
-var g_selection_label = 0
-var g_slot_first = 0
-var g_inspector_first = 0
+var g_grid: ptr = null
+var g_outline: ptr = null
 
-var g_orbit_yaw = 0.0 - 35.0
-var g_orbit_pitch = 24.0
-var g_orbit_distance = 240.0
-var g_orbit_target_y = 20.0
-var g_dragging = false
+var g_status = 0
+var g_stats = 0
+var g_title = 0
+var g_sliders: ptr = null
+var g_readouts: ptr = null
+var g_row_count = 0
+
+var g_orbit_yaw = 0.0 - 55.0
+var g_orbit_pitch = 26.0
+var g_orbit_distance = 260.0
+var g_focus_x = 0.0
+var g_focus_y = 10.0
+var g_focus_z = 0.0
+
+var g_pressed = false
+var g_moved = false
+var g_press_x = 0.0
+var g_press_y = 0.0
 var g_last_x = 0.0
 var g_last_y = 0.0
 
@@ -59,7 +75,13 @@ var g_frames = 0
 var g_frame_limit = 0
 var g_snapshot = ""
 var g_report = ""
-var g_dirty = true
+var g_fps = 0.0
+var g_last_time = 0.0
+var g_timer = 0
+var g_stage = 0
+var g_left = 0
+var g_right = 0
+var g_layout_settled = false
 
 model_at(index: int) -> *Model {
     if g_models == null || index < 0 || index >= list.size(g_models) { return null }
@@ -70,89 +92,163 @@ selected_model() -> *Model {
     return model_at(g_selected)
 }
 
-say(line: string) {
-    if g_status != 0 { ui.set_text(g_status, line) }
+say(text: string) {
+    if g_status != 0 { ui.set_text(g_status, text) }
 }
 
-// The camera orbits a point rather than flying, which is what an editor viewport
-// wants: the thing being inspected stays in frame while the view moves around it.
+number(value: float) -> string {
+    scaled = (value * 100.0) as int
+    whole = scaled / 100
+    fraction = scaled - whole * 100
+    if fraction < 0 { fraction = 0 - fraction }
+    if fraction < 10 { return "${whole}.0${fraction}" }
+    return "${whole}.${fraction}"
+}
+
+// The camera orbits a focus point rather than flying: an editor viewport wants
+// the thing being inspected to stay in frame while the view moves around it.
 apply_orbit() {
     cam = g_camera as *Camera
     if cam == null { return }
 
-    pitch = core.clampf(g_orbit_pitch, 0.0 - 85.0, 85.0)
-    g_orbit_pitch = pitch
-    if g_orbit_distance < 10.0 { g_orbit_distance = 10.0 }
-    if g_orbit_distance > 6000.0 { g_orbit_distance = 6000.0 }
+    g_orbit_pitch = core.clampf(g_orbit_pitch, 0.0 - 85.0, 85.0)
+    if g_orbit_distance < 8.0 { g_orbit_distance = 8.0 }
+    if g_orbit_distance > 8000.0 { g_orbit_distance = 8000.0 }
 
     yaw = core.deg_to_rad(g_orbit_yaw)
-    pitch_radians = core.deg_to_rad(pitch)
-    horizontal = g_orbit_distance * core.cos_of(pitch_radians)
+    pitch = core.deg_to_rad(g_orbit_pitch)
+    horizontal = g_orbit_distance * core.cos_of(pitch)
 
-    focus = core.vec3(0.0, g_orbit_target_y, 0.0)
+    focus = core.vec3(g_focus_x, g_focus_y, g_focus_z)
     eye = core.vec3(focus.x + horizontal * core.cos_of(yaw),
-                    focus.y + g_orbit_distance * core.sin_of(pitch_radians),
+                    focus.y + g_orbit_distance * core.sin_of(pitch),
                     focus.z + horizontal * core.sin_of(yaw))
 
     core.camera_set_position(cam, eye)
     core.camera_look_at(cam, focus)
-    g_dirty = true
 }
 
-refresh_hierarchy() {
-    count = 0
-    if g_models != null { count = list.size(g_models) }
-
-    i = 0
-    while i < SLOTS {
-        handle = g_slot_first + i
-        if i < count {
-            m = model_at(i)
-            label = core.text(m.name)
-            if label == "" { label = "object ${m.id}" }
-            marker = "   "
-            if i == g_selected { marker = " > " }
-            ui.set_button_label(handle, "${marker}${label}")
-            ui.set_hidden(handle, 0)
-        } else {
-            ui.set_hidden(handle, 1)
-        }
-        i = i + 1
-    }
-
-    if g_selection_label != 0 {
-        m = selected_model()
-        if m == null {
-            ui.set_text(g_selection_label, "nothing selected")
-        } else {
-            ui.set_text(g_selection_label, "${core.text(m.name)}  ${core.mesh_vertex_count(m.mesh)} vertices")
-        }
-    }
-    sync_inspector()
-}
-
-// The inspector reads the selected model rather than holding its own copy, so a
-// change made anywhere shows up here without a separate notification path.
-sync_inspector() {
+// Frames the selection, the way pressing F does in every editor.
+focus_selection() {
     m = selected_model()
     if m == null { return }
-    ui.set_slider(g_inspector_first + 0, m.position.x)
-    ui.set_slider(g_inspector_first + 1, m.position.y)
-    ui.set_slider(g_inspector_first + 2, m.position.z)
-    ui.set_slider(g_inspector_first + 3, m.scale.x)
+    g_focus_x = m.bounding_center.x
+    g_focus_y = m.bounding_center.y
+    g_focus_z = m.bounding_center.z
+    g_orbit_distance = m.bounding_radius * 3.4
+    if g_orbit_distance < 30.0 { g_orbit_distance = 30.0 }
+    apply_orbit()
+    say("framed ${core.text(m.name)}")
+}
+
+row_label(index: int) -> string {
+    m = model_at(index)
+    if m == null { return "" }
+    name = core.text(m.name)
+    if name == "" { name = "object ${m.id}" }
+    return "  ${name}"
+}
+
+extern malloc(size: int) -> ptr
+extern calloc(count: int, size: int) -> ptr
+extern free(block: ptr)
+
+const ROWS = 9
+
+// Widget handles are not contiguous: a row creates a stack, two labels and a
+// slider, so the next row's slider is not this one's handle plus one. They are
+// kept in an array rather than derived by arithmetic, which is what made the
+// inspector write text into a slider.
+slider_handle(index: int) -> int {
+    if g_sliders == null || index < 0 || index >= ROWS { return 0 }
+    slots = g_sliders as int[]
+    return slots[index]
+}
+
+readout_handle(index: int) -> int {
+    if g_readouts == null || index < 0 || index >= ROWS { return 0 }
+    slots = g_readouts as int[]
+    return slots[index]
+}
+
+// listbox_update takes a pointer list, and the rows carry nothing but their
+// index, so each is one boxed int the list owns for as long as it holds it.
+index_handle(value: int) -> ptr {
+    slot = malloc(8) as int[]
+    slot[0] = value
+    return slot as ptr
+}
+
+release_rows() {
+    if g_rows == null { return }
+    count = list.size(g_rows)
+    i = 0
+    while i < count {
+        free(list.get_raw(g_rows, i))
+        i = i + 1
+    }
+    list.clear(g_rows)
+}
+
+rebuild_rows() {
+    if g_rows == null { g_rows = list.new() }
+    release_rows()
+    count = 0
+    if g_models != null { count = list.size(g_models) }
+    i = 0
+    while i < count {
+        list.add_raw(g_rows, index_handle(i))
+        i = i + 1
+    }
+    if g_hierarchy != null { ui.listbox_update(g_hierarchy, g_rows) }
+}
+
+// The inspector reads the selected model rather than keeping its own copy, so a
+// change made anywhere shows here without a separate notification path.
+sync_inspector() {
+    m = selected_model()
+    if m == null {
+        if g_title != 0 { ui.set_text(g_title, "nothing selected") }
+        return
+    }
+    if g_title != 0 {
+        ui.set_text(g_title, "${core.text(m.name)}   ${core.mesh_index_count(m.mesh) / 3} triangles")
+    }
+
+    show_row(0, m.position.x)
+    show_row(1, m.position.y)
+    show_row(2, m.position.z)
+    show_row(3, m.scale.x)
+
     if m.material != null {
-        ui.set_slider(g_inspector_first + 4, m.material.diffuse.x)
-        ui.set_slider(g_inspector_first + 5, m.material.diffuse.y)
-        ui.set_slider(g_inspector_first + 6, m.material.diffuse.z)
-        ui.set_slider(g_inspector_first + 7, m.material.metallic)
-        ui.set_slider(g_inspector_first + 8, m.material.roughness)
+        show_row(4, m.material.diffuse.x)
+        show_row(5, m.material.diffuse.y)
+        show_row(6, m.material.diffuse.z)
+        show_row(7, m.material.metallic)
+        show_row(8, m.material.roughness)
     }
 }
 
+show_row(index: int, value: float) {
+    handle = slider_handle(index)
+    if handle != 0 { ui.set_slider(handle, value) }
+    readout = readout_handle(index)
+    if readout != 0 { ui.set_text(readout, number(value)) }
+}
+
+// listbox_select deliberately takes the same path as a row click, callback and
+// all, so driving it from the very callback it fires would recurse until the
+// stack ran out. The guard makes the highlight follow a programmatic selection
+// without the two chasing each other.
 select_object(index: int) {
     g_selected = index
-    refresh_hierarchy()
-    g_dirty = true
+    sync_inspector()
+
+    if g_hierarchy != null && index >= 0 && !g_syncing {
+        g_syncing = true
+        ui.listbox_select(g_hierarchy, index)
+        g_syncing = false
+    }
 }
 
 add_model(m: *Model, name: string) {
@@ -162,6 +258,7 @@ add_model(m: *Model, name: string) {
     backend = gl.backend(renderer)
     core.backend_add_model(&backend, m)
     list.add_raw(g_models, m)
+    rebuild_rows()
     select_object(list.size(g_models) - 1)
     say("added ${name}")
 }
@@ -169,6 +266,7 @@ add_model(m: *Model, name: string) {
 remove_selected() {
     m = selected_model()
     if m == null { return }
+    if m == g_grid as *Model || m == g_outline as *Model { return }
 
     renderer = g_renderer as *GLRenderer
     backend = gl.backend(renderer)
@@ -179,19 +277,37 @@ remove_selected() {
     g_selected = g_selected - 1
     if g_selected < 0 && list.size(g_models) > 0 { g_selected = 0 }
     if list.size(g_models) == 0 { g_selected = 0 - 1 }
-    refresh_hierarchy()
+    rebuild_rows()
+    select_object(g_selected)
     say("deleted")
-    g_dirty = true
 }
 
-// Picking casts the cursor ray through every model's exact triangles, nearest
-// hit wins. The bounding sphere rejects most of them before any index buffer is
-// touched, so this stays cheap with a full scene.
+// The outline is one box scaled onto the selection's bounds each frame, so it
+// costs a transform rather than geometry per object.
+update_outline() {
+    outline = g_outline as *Model
+    if outline == null { return }
+
+    m = selected_model()
+    if m == null {
+        outline.visible = false
+        return
+    }
+    outline.visible = true
+    span = m.bounding_radius * 2.0
+    if span < 0.001 { span = 1.0 }
+    core.model_set_position(outline, m.bounding_center.x, m.bounding_center.y, m.bounding_center.z)
+    core.model_set_scale(outline, span, span, span)
+}
+
+// Picking casts the cursor ray at every model's exact triangles, nearest wins.
+// Each is rejected against its bounding sphere first, so this stays cheap with a
+// full scene. The grid and the outline are not pickable.
 pick_at(x: float, y: float) {
     cam = g_camera as *Camera
     if cam == null || g_models == null { return }
 
-    direction = raycast.screen_direction(cam, x, y, VIEW_W, VIEW_H)
+    direction = raycast.screen_direction(cam, x, y, g_view_w, g_view_h)
     nearest = raycast.MISS
     chosen = 0 - 1
 
@@ -199,7 +315,7 @@ pick_at(x: float, y: float) {
     i = 0
     while i < count {
         m = model_at(i)
-        if m != null {
+        if m != null && m != g_grid as *Model && m != g_outline as *Model {
             distance = raycast.model_mesh(cam.position, direction, m)
             if raycast.hit(distance) {
                 if !raycast.hit(nearest) || distance < nearest {
@@ -213,15 +329,49 @@ pick_at(x: float, y: float) {
 
     if chosen >= 0 {
         select_object(chosen)
-        say("picked ${core.text(model_at(chosen).name)}")
+        say("selected ${core.text(model_at(chosen).name)}")
     } else {
         say("nothing under the cursor")
     }
 }
 
+resize_viewport(width: int, height: int) {
+    if width < 16 || height < 16 { return }
+    if width == g_view_w && height == g_view_h { return }
+    g_view_w = width
+    g_view_h = height
+    offscreen.target_resize(g_target, width, height)
+    core.camera_set_aspect(g_camera as *Camera, (width * 1.0) / (height * 1.0))
+}
+
+// Split positions only stick once the window has been laid out, so they are
+// applied on the first frame rather than while the tree is still being built.
+// Proportional sharing across all three panes. Weighting only the viewport
+// leaves the panels at their content width, which is far too narrow for a
+// hierarchy or an inspector, and nothing else in the toolkit sets a width
+// (aether-lang-dev/aether-ui#95).
+settle_layout() {
+    if g_layout_settled || g_stage == 0 { return }
+    ui.weight(g_left, 16)
+    ui.weight(g_stage, 62)
+    ui.weight(g_right, 22)
+    g_layout_settled = true
+}
+
 draw_frame() {
     renderer = g_renderer as *GLRenderer
     if renderer == null { return }
+
+    settle_layout()
+
+    now = (clock_ns() / 1000000) * 0.001
+    if g_last_time > 0.0 {
+        delta = now - g_last_time
+        if delta > 0.0 { g_fps = g_fps * 0.9 + (1.0 / delta) * 0.1 }
+    }
+    g_last_time = now
+
+    update_outline()
 
     backend = gl.backend(renderer)
     core.backend_render(&backend, g_camera as *Camera, g_light as *Light)
@@ -229,30 +379,36 @@ draw_frame() {
     pixels = offscreen.target_pixels(g_target)
     if pixels == null { return }
 
-    ui.canvas_draw_image_ptr(g_canvas, 0.0, 0.0, VIEW_W, VIEW_H,
-                             pixels, VIEW_W * VIEW_H * 4)
+    // The canvas keeps a retained command list, so the previous frame's blit has
+    // to go before the next is added, or it grows by a full viewport each frame.
+    ui.canvas_clear(g_canvas)
+    ui.canvas_draw_image_ptr(g_canvas, 0.0, 0.0, g_view_w, g_view_h,
+                             pixels, g_view_w * g_view_h * 4)
     ui.canvas_redraw(g_canvas)
     g_frames = g_frames + 1
-    g_dirty = false
+
+    if g_stats != 0 && g_frames % 10 == 0 {
+        triangles = 0
+        count = list.size(g_models)
+        i = 0
+        while i < count {
+            m = model_at(i)
+            if m != null && m.visible { triangles = triangles + core.mesh_index_count(m.mesh) / 3 }
+            i = i + 1
+        }
+        ui.set_text(g_stats, "${g_backend_name}   ${(g_fps) as int} fps   ${gl.renderer_draw_calls(renderer)} draws   ${triangles} tris   ${g_view_w}x${g_view_h}")
+    }
 
     if g_frame_limit > 0 && g_frames >= g_frame_limit {
         if g_snapshot != "" {
-            ui.canvas_write_png(g_canvas, g_snapshot, VIEW_W, VIEW_H)
-            println("editor: wrote ${g_snapshot} after ${g_frames} frames")
+            ui.canvas_write_png(g_canvas, g_snapshot, g_view_w, g_view_h)
         }
         ui.timer_cancel(g_timer)
         report_state()
-        // aether-ui cannot stop its own run loop (aether-lang-dev/aether-ui#93),
-        // so a bounded run leaves the window standing and the caller ends it.
-        println("editor: bounded run complete")
     }
 }
 
-// What a bounded run can assert without a person looking at the window: the
-// chrome was built, the scene is populated, and the viewport produced frames.
 report_state() {
-    slots = 0
-    if g_slot_first != 0 { slots = SLOTS }
     selected = "none"
     m = selected_model()
     if m != null { selected = core.text(m.name) }
@@ -264,18 +420,12 @@ report_state() {
     lines = string.concat(lines, selected)
     lines = string.concat(lines, "\ncanvas ")
     lines = string.concat(lines, string.from_int(g_canvas))
-    lines = string.concat(lines, "\nhierarchy_slots ")
-    lines = string.concat(lines, string.from_int(slots))
-    lines = string.concat(lines, "\nstatus_widget ")
-    lines = string.concat(lines, string.from_int(g_status))
-    lines = string.concat(lines, "\ninspector_first ")
-    lines = string.concat(lines, string.from_int(g_inspector_first))
+    lines = string.concat(lines, "\nviewport ")
+    lines = string.concat(lines, string.from_int(g_view_w))
+    lines = string.concat(lines, "x")
+    lines = string.concat(lines, string.from_int(g_view_h))
     lines = string.concat(lines, "\nframes ")
     lines = string.concat(lines, string.from_int(g_frames))
-    lines = string.concat(lines, "\nviewport ")
-    lines = string.concat(lines, string.from_int(VIEW_W))
-    lines = string.concat(lines, "x")
-    lines = string.concat(lines, string.from_int(VIEW_H))
     lines = string.concat(lines, "\n")
 
     // Written to a file rather than printed: a bounded run has to be ended from
@@ -291,25 +441,123 @@ limit_from_env() -> int {
     return string.get_int(setting)
 }
 
+// One row of the inspector: a label, a slider, and a live readout. The slider
+// writes straight through to the selected model, so what is on screen and what
+// the renderer draws are never two copies of the same number.
+apply_property(index: int, value: float) {
+    m = selected_model()
+    if m == null { return }
+
+    if index == 0 { core.model_set_position(m, value, m.position.y, m.position.z) }
+    if index == 1 { core.model_set_position(m, m.position.x, value, m.position.z) }
+    if index == 2 { core.model_set_position(m, m.position.x, m.position.y, value) }
+    if index == 3 { core.model_set_scale(m, value, value, value) }
+    if index == 4 { core.model_set_diffuse(m, value, m.material.diffuse.y, m.material.diffuse.z) }
+    if index == 5 { core.model_set_diffuse(m, m.material.diffuse.x, value, m.material.diffuse.z) }
+    if index == 6 { core.model_set_diffuse(m, m.material.diffuse.x, m.material.diffuse.y, value) }
+    if index == 7 { core.model_set_pbr(m, value, m.material.roughness) }
+    if index == 8 { core.model_set_pbr(m, m.material.metallic, value) }
+
+    readout = readout_handle(index)
+    if readout != 0 { ui.set_text(readout, number(value)) }
+}
+
+inspector_row(parent: int, name: string, low: float, high: float,
+              initial: float, index: int) {
+    row = ui.hstack(parent, 8)
+    caption = ui.text(row, name)
+    ui.add_css_class(caption, "label")
+    ui.spacer(row)
+    readout = ui.text(row, number(initial))
+    ui.add_css_class(readout, "value")
+
+    slider = ui.slider(parent, low, high, initial) callback |value: float| {
+        apply_property(index, value)
+    }
+
+    sliders = g_sliders as int[]
+    readouts = g_readouts as int[]
+    sliders[index] = slider
+    readouts[index] = readout
+    g_row_count = g_row_count + 1
+}
+
+theme() -> ptr {
+    sheet = ui.create_styles()
+
+    ui.st_bg(sheet, "panel", 0x21252B)
+    ui.st_insets(sheet, "panel", 10.0, 12.0, 10.0, 12.0)
+
+    ui.st_color(sheet, "heading", 0xE6E9EF)
+    ui.st_bold(sheet, "heading")
+    ui.st_font_size(sheet, "heading", 12.0)
+
+    ui.st_color(sheet, "label", 0x8A919E)
+    ui.st_font_size(sheet, "label", 11.0)
+
+    ui.st_color(sheet, "value", 0xD7DAE0)
+    ui.st_font_size(sheet, "value", 11.0)
+
+    ui.st_color(sheet, "stats", 0x7F8896)
+    ui.st_font_size(sheet, "stats", 11.0)
+
+    ui.st_bg(sheet, "action", 0x2C313A)
+    ui.st_color(sheet, "action", 0xD7DAE0)
+    ui.st_radius(sheet, "action", 5.0)
+    ui.st_insets(sheet, "action", 7.0, 12.0, 7.0, 12.0)
+    ui.st_hover(sheet, "action", 0x3A4150)
+    ui.st_active(sheet, "action", 0x4B5263)
+
+    ui.st_bg(sheet, "primary", 0x2F6FEB)
+    ui.st_color(sheet, "primary", 0xFFFFFF)
+    ui.st_radius(sheet, "primary", 5.0)
+    ui.st_insets(sheet, "primary", 7.0, 14.0, 7.0, 14.0)
+    ui.st_hover(sheet, "primary", 0x3D7DF6)
+
+    return sheet
+}
+
+// Widget-building helpers take their parent explicitly. The block DSL's context
+// is lexical, so a widget created inside a called function is not parented by
+// the block the call sits in, and lands at the root instead.
+heading(parent: int, caption: string) -> int {
+    handle = ui.text(parent, caption)
+    ui.add_css_class(handle, "heading")
+    return handle
+}
+
+style_button(handle: int, style: string) {
+    ui.add_css_class(handle, style)
+    ui.fill_width(handle)
+}
+
 build_scene() {
-    ground = loader.plane(24, 24.0)
-    core.model_set_position(ground, 0.0 - 276.0, 0.0 - 20.0, 0.0 - 276.0)
-    core.model_matte(ground, 0.30, 0.33, 0.36)
-    add_model(ground, "ground")
+    grid = loader.grid(600.0, 30.0, 0.7)
+    core.model_matte(grid, 0.26, 0.28, 0.32)
+    core.model_set_position(grid, 0.0, 0.0 - 0.2, 0.0)
+    add_model(grid, "grid")
+    g_grid = grid as ptr
+
+    outline = loader.box_outline(0.012)
+    core.model_matte(outline, 1.0, 0.62, 0.16)
+    core.model_set_exposure(outline, 2.0)
+    add_model(outline, "selection")
+    g_outline = outline as ptr
+    outline.visible = false
 
     cube = loader.cube(1.0)
-    core.model_set_scale(cube, 34.0, 34.0, 34.0)
-    core.model_set_position(cube, 0.0 - 55.0, 0.0, 0.0)
-    core.model_polished_metal(cube, 0.85, 0.42, 0.18)
+    core.model_set_scale(cube, 40.0, 40.0, 40.0)
+    core.model_set_position(cube, 0.0 - 60.0, 20.0, 0.0)
+    core.model_polished_metal(cube, 0.82, 0.45, 0.20)
     add_model(cube, "cube")
 
-    sphere = loader.sphere(1.0, 40, 30)
-    core.model_set_scale(sphere, 26.0, 26.0, 26.0)
-    core.model_set_position(sphere, 55.0, 4.0, 0.0)
-    core.model_glossy(sphere, 0.25, 0.5, 0.85)
+    sphere = loader.sphere(1.0, 48, 36)
+    core.model_set_scale(sphere, 30.0, 30.0, 30.0)
+    core.model_set_position(sphere, 60.0, 30.0, 0.0)
+    core.model_glossy(sphere, 0.24, 0.52, 0.88)
     add_model(sphere, "sphere")
 
-    select_object(1)
+    select_object(3)
 }
 
 main() {
@@ -317,9 +565,11 @@ main() {
     g_snapshot = os.getenv("AETHER3D_EDITOR_SNAPSHOT")
     g_report = os.getenv("AETHER3D_EDITOR_REPORT")
     g_models = list.new()
+    g_rows = list.new()
+    g_sliders = calloc(ROWS, 4)
+    g_readouts = calloc(ROWS, 4)
 
-    wanted = os.getenv("AETHER3D_EDITOR_BACKEND")
-    if string.equals(wanted, "vulkan") == 1 {
+    if string.equals(os.getenv("AETHER3D_EDITOR_BACKEND"), "vulkan") == 1 {
         if vk.available() {
             g_backend_name = "vulkan"
         } else {
@@ -327,7 +577,7 @@ main() {
         }
     }
 
-    context = offscreen.context_create(VIEW_W, VIEW_H)
+    context = offscreen.context_create(g_view_w, g_view_h)
     if context == null {
         println("editor: no OpenGL context available")
         return
@@ -335,181 +585,189 @@ main() {
 
     renderer = gl.renderer_new()
     backend = gl.backend(renderer)
-    if !core.backend_init(&backend, context, VIEW_W, VIEW_H) {
+    if !core.backend_init(&backend, context, g_view_w, g_view_h) {
         println("editor: the OpenGL backend would not initialise")
         return
     }
     g_renderer = renderer as ptr
 
-    g_target = offscreen.target_create(VIEW_W, VIEW_H)
+    g_target = offscreen.target_create(g_view_w, g_view_h)
     gl.renderer_set_target(renderer, g_target)
-    gl.renderer_set_clear_color(renderer, 0.10, 0.11, 0.14)
+    gl.renderer_set_clear_color(renderer, 0.078, 0.086, 0.102)
     gl.renderer_set_fxaa(renderer, true)
 
-    g_camera = core.camera_new(VIEW_W, VIEW_H) as ptr
-    g_light = core.light_sun(core.vec3(0.35, 0.85, 0.4)) as ptr
+    g_camera = core.camera_new(g_view_w, g_view_h) as ptr
+    g_light = core.light_sun(core.vec3(0.42, 0.82, 0.38)) as ptr
     core.set_face_culling(true)
 
-    ui.window("aether3d editor", VIEW_W + 520, VIEW_H + 90) {
-        ui.hstack(0) {
-            ui.vstack(4) {
-                ui.text("Scene")
-                ui.divider()
-                i = 0
-                while i < SLOTS {
-                    handle = ui.btn("") callback {
-                        select_object(ui.focused_widget() - g_slot_first)
-                    }
-                    if i == 0 { g_slot_first = handle }
-                    ui.set_hidden(handle, 1)
-                    i = i + 1
-                }
-                ui.divider()
-                ui.text("Add")
-                ui.btn("Cube") callback {
-                    m = loader.cube(1.0)
-                    core.model_set_scale(m, 30.0, 30.0, 30.0)
-                    core.model_matte(m, 0.8, 0.5, 0.3)
-                    add_model(m, "cube")
-                }
-                ui.btn("Sphere") callback {
-                    m = loader.sphere(1.0, 32, 24)
-                    core.model_set_scale(m, 24.0, 24.0, 24.0)
-                    core.model_glossy(m, 0.4, 0.7, 0.5)
-                    add_model(m, "sphere")
-                }
-                ui.btn("Plane") callback {
-                    m = loader.plane(16, 20.0)
-                    core.model_matte(m, 0.4, 0.4, 0.45)
-                    add_model(m, "plane")
-                }
-                ui.divider()
-                ui.btn("Delete") callback { remove_selected() }
-                ui.btn("Save scene") callback {
-                    if scene.scene_save(g_models, "build/editor_scene.json", "build/") {
-                        say("saved build/editor_scene.json")
-                    } else {
-                        say("save failed: ${scene.last_error()}")
-                    }
-                }
-                ui.spacer()
-            }
+    sheet = theme()
 
-            ui.vstack(4) {
-                g_canvas = ui.canvas_create(VIEW_W, VIEW_H)
-                ui.canvas_fill_rect(g_canvas, 0.0, 0.0, VIEW_W * 1.0, VIEW_H * 1.0,
-                                    0.10, 0.11, 0.14, 1.0)
-                ui.canvas_redraw(g_canvas)
+    ui.window("aether3d editor", WINDOW_W, WINDOW_H) {
+        shell = ui.vstack(0)
 
-                ui.canvas_on_click(g_canvas) callback |x: float, y: float| {
-                    g_dragging = true
-                    g_last_x = x
-                    g_last_y = y
-                    pick_at(x, y)
-                }
-                ui.canvas_on_release(g_canvas) callback |x: float, y: float| {
-                    g_dragging = false
-                }
-                ui.canvas_on_move(g_canvas) callback |x: float, y: float| {
-                    if g_dragging {
-                        g_orbit_yaw = g_orbit_yaw + (x - g_last_x) * ORBIT_SPEED
-                        g_orbit_pitch = g_orbit_pitch - (y - g_last_y) * ORBIT_SPEED
-                        g_last_x = x
-                        g_last_y = y
-                        apply_orbit()
-                    }
-                }
-                ui.canvas_on_scroll(g_canvas) callback |dx: float, dy: float| {
-                    g_orbit_distance = g_orbit_distance - dy * ZOOM_SPEED
-                    apply_orbit()
-                }
+        bar = ui.hstack(shell, 12)
+        ui.add_css_class(bar, "bar")
+        ui.fill_width(bar)
+        g_stats = ui.text(bar, "starting")
+        ui.add_css_class(g_stats, "stats")
+        ui.spacer(bar)
 
-                g_status = ui.text("drag to orbit, scroll to zoom, click to select")
-            }
+        // An hstack with all three panes weighted, rather than nested
+        // splitviews: a splitview pins its first pane to the content width and
+        // split_set_position does not move it (aether-lang-dev/aether-ui#95),
+        // which collapsed the panels to 114 pixels.
+        body = ui.hstack(shell, 0)
+        ui.fill_height(body)
 
-            ui.vstack(4) {
-                ui.text("Inspector")
-                ui.divider()
-                g_selection_label = ui.text("nothing selected")
-                ui.divider()
+        left = ui.vstack(body, 6)
+        ui.add_css_class(left, "panel")
+        heading(left, "SCENE")
 
-                ui.text("position x")
-                g_inspector_first = ui.slider(0.0 - 400.0, 400.0, 0.0) callback |v: float| {
-                    m = selected_model()
-                    if m != null {
-                        core.model_set_position(m, v, m.position.y, m.position.z)
-                        g_dirty = true
-                    }
-                }
-                ui.text("position y")
-                ui.slider(0.0 - 200.0, 400.0, 0.0) callback |v: float| {
-                    m = selected_model()
-                    if m != null {
-                        core.model_set_position(m, m.position.x, v, m.position.z)
-                        g_dirty = true
-                    }
-                }
-                ui.text("position z")
-                ui.slider(0.0 - 400.0, 400.0, 0.0) callback |v: float| {
-                    m = selected_model()
-                    if m != null {
-                        core.model_set_position(m, m.position.x, m.position.y, v)
-                        g_dirty = true
-                    }
-                }
-                ui.text("scale")
-                ui.slider(1.0, 120.0, 30.0) callback |v: float| {
-                    m = selected_model()
-                    if m != null {
-                        core.model_set_scale(m, v, v, v)
-                        g_dirty = true
-                    }
-                }
-                ui.divider()
-                ui.text("colour red")
-                ui.slider(0.0, 1.0, 0.8) callback |v: float| {
-                    m = selected_model()
-                    if m != null {
-                        core.model_set_diffuse(m, v, m.material.diffuse.y, m.material.diffuse.z)
-                        g_dirty = true
-                    }
-                }
-                ui.text("colour green")
-                ui.slider(0.0, 1.0, 0.5) callback |v: float| {
-                    m = selected_model()
-                    if m != null {
-                        core.model_set_diffuse(m, m.material.diffuse.x, v, m.material.diffuse.z)
-                        g_dirty = true
-                    }
-                }
-                ui.text("colour blue")
-                ui.slider(0.0, 1.0, 0.3) callback |v: float| {
-                    m = selected_model()
-                    if m != null {
-                        core.model_set_diffuse(m, m.material.diffuse.x, m.material.diffuse.y, v)
-                        g_dirty = true
-                    }
-                }
-                ui.text("metallic")
-                ui.slider(0.0, 1.0, 0.0) callback |v: float| {
-                    m = selected_model()
-                    if m != null {
-                        core.model_set_pbr(m, v, m.material.roughness)
-                        g_dirty = true
-                    }
-                }
-                ui.text("roughness")
-                ui.slider(0.0, 1.0, 0.5) callback |v: float| {
-                    m = selected_model()
-                    if m != null {
-                        core.model_set_pbr(m, m.material.metallic, v)
-                        g_dirty = true
-                    }
-                }
-                ui.spacer()
-            }
+        g_hierarchy = ui.listbox(left, 4) callback |item: ptr, index: int, row: int| {
+            entry = ui.text(row, row_label(index))
+            ui.add_css_class(entry, "value")
+        }
+        ui.on_select(g_hierarchy) callback |index: int| {
+            select_object(index)
         }
 
+        ui.divider(left)
+        heading(left, "ADD")
+        cube_btn = ui.btn(left, "Cube") callback {
+            m = loader.cube(1.0)
+            core.model_set_scale(m, 34.0, 34.0, 34.0)
+            core.model_set_position(m, 0.0, 20.0, 0.0)
+            core.model_matte(m, 0.78, 0.52, 0.32)
+            add_model(m, "cube")
+        }
+        style_button(cube_btn, "action")
+
+        sphere_btn = ui.btn(left, "Sphere") callback {
+            m = loader.sphere(1.0, 40, 30)
+            core.model_set_scale(m, 28.0, 28.0, 28.0)
+            core.model_set_position(m, 0.0, 26.0, 0.0)
+            core.model_glossy(m, 0.42, 0.68, 0.50)
+            add_model(m, "sphere")
+        }
+        style_button(sphere_btn, "action")
+
+        plane_btn = ui.btn(left, "Plane") callback {
+            m = loader.plane(20, 24.0)
+            core.model_set_position(m, 0.0 - 228.0, 0.0, 0.0 - 228.0)
+            core.model_matte(m, 0.40, 0.42, 0.46)
+            add_model(m, "plane")
+        }
+        style_button(plane_btn, "action")
+
+        ui.divider(left)
+        frame_btn = ui.btn(left, "Frame selection") callback { focus_selection() }
+        style_button(frame_btn, "action")
+
+        delete_btn = ui.btn(left, "Delete") callback { remove_selected() }
+        style_button(delete_btn, "action")
+
+        save_btn = ui.btn(left, "Save scene") callback {
+            if scene.scene_save(g_models, "build/editor_scene.json", "build/") {
+                say("saved build/editor_scene.json")
+            } else {
+                say("save failed: ${scene.last_error()}")
+            }
+        }
+        style_button(save_btn, "primary")
+        ui.spacer(left)
+
+        stage = ui.vstack(body, 0)
+        ui.fill_height(stage)
+        g_canvas = ui.canvas_create(stage, g_view_w, g_view_h)
+        ui.fill_width(g_canvas)
+        ui.fill_height(g_canvas)
+        ui.canvas_fill_rect(g_canvas, 0.0, 0.0, g_view_w * 1.0, g_view_h * 1.0,
+                            0.078, 0.086, 0.102, 1.0)
+        ui.canvas_redraw(g_canvas)
+
+        // canvas_on_resize hands over integers, unlike every other canvas
+        // callback, which hands over doubles. Declaring floats here reads the
+        // wrong registers and the viewport silently never resizes.
+        ui.canvas_on_resize(g_canvas) callback |w: int, h: int| {
+            resize_viewport(w, h)
+        }
+        // A press that never moves is a selection; a press that moves is an
+        // orbit. Doing both makes the view lurch every time something is picked.
+        ui.canvas_on_click(g_canvas) callback |x: float, y: float| {
+            g_pressed = true
+            g_moved = false
+            g_press_x = x
+            g_press_y = y
+            g_last_x = x
+            g_last_y = y
+        }
+        ui.canvas_on_move(g_canvas) callback |x: float, y: float| {
+            if g_pressed {
+                if core.abs_of(x - g_press_x) > DRAG_SLOP ||
+                   core.abs_of(y - g_press_y) > DRAG_SLOP {
+                    g_moved = true
+                }
+                if g_moved {
+                    g_orbit_yaw = g_orbit_yaw + (x - g_last_x) * ORBIT_SPEED
+                    g_orbit_pitch = g_orbit_pitch - (y - g_last_y) * ORBIT_SPEED
+                    apply_orbit()
+                }
+                g_last_x = x
+                g_last_y = y
+            }
+        }
+        ui.canvas_on_release(g_canvas) callback |x: float, y: float| {
+            if g_pressed && !g_moved { pick_at(x, y) }
+            g_pressed = false
+            g_moved = false
+        }
+        ui.canvas_on_scroll(g_canvas) callback |dx: float, dy: float| {
+            if dy > 0.0 {
+                g_orbit_distance = g_orbit_distance / ZOOM_STEP
+            } else {
+                g_orbit_distance = g_orbit_distance * ZOOM_STEP
+            }
+            apply_orbit()
+        }
+
+        footer = ui.hstack(stage, 8)
+        ui.add_css_class(footer, "bar")
+        ui.fill_width(footer)
+        g_status = ui.text(footer, "drag to orbit, scroll to zoom, click to select")
+        ui.add_css_class(g_status, "label")
+        ui.spacer(footer)
+
+        right = ui.vstack(body, 6)
+        ui.add_css_class(right, "panel")
+        heading(right, "INSPECTOR")
+        g_title = ui.text(right, "nothing selected")
+        ui.add_css_class(g_title, "value")
+        ui.divider(right)
+
+        heading(right, "TRANSFORM")
+        inspector_row(right, "position x", 0.0 - 400.0, 400.0, 0.0, 0)
+        inspector_row(right, "position y", 0.0 - 100.0, 400.0, 0.0, 1)
+        inspector_row(right, "position z", 0.0 - 400.0, 400.0, 0.0, 2)
+        inspector_row(right, "scale", 1.0, 160.0, 30.0, 3)
+
+        ui.divider(right)
+        heading(right, "MATERIAL")
+        inspector_row(right, "red", 0.0, 1.0, 0.8, 4)
+        inspector_row(right, "green", 0.0, 1.0, 0.5, 5)
+        inspector_row(right, "blue", 0.0, 1.0, 0.3, 6)
+        inspector_row(right, "metallic", 0.0, 1.0, 0.0, 7)
+        inspector_row(right, "roughness", 0.0, 1.0, 0.5, 8)
+        ui.spacer(right)
+
+        g_stage = stage
+        g_left = left
+        g_right = right
+
+        if os.getenv("AETHER3D_EDITOR_DRIVER") != "" {
+            ui.enable_test_server(9222)
+        }
+
+        ui.apply_styles(0, sheet)
         build_scene()
         apply_orbit()
 
@@ -517,6 +775,4 @@ main() {
             draw_frame()
         }
     }
-
-    println("editor: ${g_frames} frames rendered on ${g_backend_name}")
 }

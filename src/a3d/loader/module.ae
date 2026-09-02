@@ -13,7 +13,7 @@ import a3d.core
 
 exports (
     load_obj, load_obj_instanced, load_mtl, materials_free,
-    cube, sphere, plane, water_surface, quad,
+    cube, sphere, plane, water_surface, quad, grid, box_outline,
     last_error
 )
 
@@ -437,6 +437,97 @@ quad(width: float, depth: float) -> *Model {
     core.model_update_matrix(m)
     core.model_recalculate_bounds(m)
     return m
+}
+
+// A reference grid built from thin quads rather than lines: a line primitive
+// has no thickness in a perspective view, so it shimmers and disappears at
+// grazing angles, while a quad behaves like the geometry it sits among.
+grid(extent: float, step: float, thickness: float) -> *Model {
+    m = core.model_new()
+    up = core.vec3(0.0, 1.0, 0.0)
+    half = thickness * 0.5
+
+    lines = ((extent * 2.0) / step) as int
+    core.mesh_reserve(m.mesh, (lines + 1) * 8, (lines + 1) * 12)
+
+    i = 0
+    while i <= lines {
+        offset = 0.0 - extent + (i * 1.0) * step
+
+        base = core.mesh_vertex_count(m.mesh)
+        core.mesh_push_vertex(m.mesh, core.vec3(0.0 - extent, 0.0, offset - half), 0.0, 0.0, up)
+        core.mesh_push_vertex(m.mesh, core.vec3(extent, 0.0, offset - half), 1.0, 0.0, up)
+        core.mesh_push_vertex(m.mesh, core.vec3(extent, 0.0, offset + half), 1.0, 1.0, up)
+        core.mesh_push_vertex(m.mesh, core.vec3(0.0 - extent, 0.0, offset + half), 0.0, 1.0, up)
+        core.mesh_push_triangle(m.mesh, base, base + 2, base + 1)
+        core.mesh_push_triangle(m.mesh, base, base + 3, base + 2)
+
+        base = core.mesh_vertex_count(m.mesh)
+        core.mesh_push_vertex(m.mesh, core.vec3(offset - half, 0.0, 0.0 - extent), 0.0, 0.0, up)
+        core.mesh_push_vertex(m.mesh, core.vec3(offset + half, 0.0, 0.0 - extent), 1.0, 0.0, up)
+        core.mesh_push_vertex(m.mesh, core.vec3(offset + half, 0.0, extent), 1.0, 1.0, up)
+        core.mesh_push_vertex(m.mesh, core.vec3(offset - half, 0.0, extent), 0.0, 1.0, up)
+        core.mesh_push_triangle(m.mesh, base, base + 2, base + 1)
+        core.mesh_push_triangle(m.mesh, base, base + 3, base + 2)
+
+        i = i + 1
+    }
+
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    return m
+}
+
+// A wireframe box built the same way, used to mark the selected object.
+box_outline(thickness: float) -> *Model {
+    m = core.model_new()
+    up = core.vec3(0.0, 1.0, 0.0)
+    h = 0.5
+    t = thickness * 0.5
+
+    edge_x(m.mesh, up, 0.0 - h, h, 0.0 - h, 0.0 - h, t)
+    edge_x(m.mesh, up, 0.0 - h, h, h, 0.0 - h, t)
+    edge_x(m.mesh, up, 0.0 - h, h, 0.0 - h, h, t)
+    edge_x(m.mesh, up, 0.0 - h, h, h, h, t)
+
+    edge_z(m.mesh, up, 0.0 - h, h, 0.0 - h, 0.0 - h, t)
+    edge_z(m.mesh, up, 0.0 - h, h, h, 0.0 - h, t)
+    edge_z(m.mesh, up, 0.0 - h, h, 0.0 - h, h, t)
+    edge_z(m.mesh, up, 0.0 - h, h, h, h, t)
+
+    edge_y(m.mesh, up, 0.0 - h, h, 0.0 - h, 0.0 - h, t)
+    edge_y(m.mesh, up, 0.0 - h, h, h, 0.0 - h, t)
+    edge_y(m.mesh, up, 0.0 - h, h, 0.0 - h, h, t)
+    edge_y(m.mesh, up, 0.0 - h, h, h, h, t)
+
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    return m
+}
+
+push_bar(mesh: ptr, up: Vec3, ax: float, ay: float, az: float,
+         bx: float, by: float, bz: float, ox: float, oy: float, oz: float) {
+    base = core.mesh_vertex_count(mesh)
+    core.mesh_push_vertex(mesh, core.vec3(ax - ox, ay - oy, az - oz), 0.0, 0.0, up)
+    core.mesh_push_vertex(mesh, core.vec3(bx - ox, by - oy, bz - oz), 1.0, 0.0, up)
+    core.mesh_push_vertex(mesh, core.vec3(bx + ox, by + oy, bz + oz), 1.0, 1.0, up)
+    core.mesh_push_vertex(mesh, core.vec3(ax + ox, ay + oy, az + oz), 0.0, 1.0, up)
+    core.mesh_push_triangle(mesh, base, base + 1, base + 2)
+    core.mesh_push_triangle(mesh, base, base + 2, base + 3)
+    core.mesh_push_triangle(mesh, base, base + 2, base + 1)
+    core.mesh_push_triangle(mesh, base, base + 3, base + 2)
+}
+
+edge_x(mesh: ptr, up: Vec3, from: float, to: float, y: float, z: float, t: float) {
+    push_bar(mesh, up, from, y, z, to, y, z, 0.0, t, 0.0)
+}
+
+edge_y(mesh: ptr, up: Vec3, from: float, to: float, x: float, z: float, t: float) {
+    push_bar(mesh, up, x, from, z, x, to, z, t, 0.0, 0.0)
+}
+
+edge_z(mesh: ptr, up: Vec3, from: float, to: float, x: float, y: float, t: float) {
+    push_bar(mesh, up, x, y, from, x, y, to, t, 0.0, 0.0)
 }
 
 cube(size: float) -> *Model {

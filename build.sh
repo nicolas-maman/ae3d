@@ -57,7 +57,7 @@ elif [ -n "${VULKAN_SDK:-}" ]; then
 fi
 
 case "$(uname -s)" in
-    Darwin) PLATFORM_LIBS="-framework Cocoa -framework IOKit -framework CoreVideo -framework QuartzCore -framework Metal" ;;
+    Darwin) PLATFORM_LIBS="-framework Cocoa -framework IOKit -framework CoreVideo -framework QuartzCore -framework Metal -framework OpenGL" ;;
     Linux)  PLATFORM_LIBS="-ldl -lm -lpthread" ;;
     *)      PLATFORM_LIBS="-lm" ;;
 esac

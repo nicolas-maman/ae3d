@@ -5,8 +5,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define GLFW_INCLUDE_NONE
-#include <GLFW/glfw3.h>
+#if defined(__APPLE__)
+// Apple's sanctioned macro for using an API the platform has deprecated but
+// still ships and still accelerates.
+#  define GL_SILENCE_DEPRECATION
+#  include <OpenGL/OpenGL.h>
+#else
+#  define GLFW_INCLUDE_NONE
+#  include <GLFW/glfw3.h>
+#endif
 
 typedef struct {
     GLuint framebuffer;
@@ -18,9 +25,55 @@ typedef struct {
     int pixel_bytes;
 } ae3d_offscreen;
 
-// A context with no visible window. The editor draws the scene here and hands
-// the pixels to whatever is compositing them, so the 3D view can live inside a
-// toolkit that owns the real window and has no GPU surface of its own.
+// A context with no window at all, so the scene can be drawn on the GPU and
+// handed to whatever is compositing it.
+//
+// On macOS this must NOT go through a window toolkit. Creating a GLFW window,
+// even a hidden one, makes GLFW take ownership of NSApplication: it installs its
+// own delegate, activation policy and menu bar. A UI toolkit in the same process
+// then cannot present its window, and the app shows up in the Dock with nothing
+// on screen. CGL creates a context with no surface and no NSApp involvement,
+// which is what an offscreen context should need.
+#if defined(__APPLE__)
+
+void *ae3d_offscreen_context(int width, int height) {
+    CGLPixelFormatAttribute attributes[] = {
+        kCGLPFAOpenGLProfile, (CGLPixelFormatAttribute)kCGLOGLPVersion_GL4_Core,
+        kCGLPFAAccelerated,
+        kCGLPFAColorSize, (CGLPixelFormatAttribute)24,
+        kCGLPFAAlphaSize, (CGLPixelFormatAttribute)8,
+        kCGLPFADepthSize, (CGLPixelFormatAttribute)24,
+        (CGLPixelFormatAttribute)0
+    };
+    CGLPixelFormatObj format = NULL;
+    CGLContextObj context = NULL;
+    GLint formats = 0;
+
+    (void)width;
+    (void)height;
+
+    if (CGLChoosePixelFormat(attributes, &format, &formats) != kCGLNoError || !format) return NULL;
+    if (CGLCreateContext(format, NULL, &context) != kCGLNoError || !context) {
+        CGLDestroyPixelFormat(format);
+        return NULL;
+    }
+    CGLDestroyPixelFormat(format);
+
+    if (CGLSetCurrentContext(context) != kCGLNoError) {
+        CGLDestroyContext(context);
+        return NULL;
+    }
+    return context;
+}
+
+void ae3d_offscreen_context_destroy(void *context) {
+    if (!context) return;
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext((CGLContextObj)context);
+}
+
+#else
+
 void *ae3d_offscreen_context(int width, int height) {
     GLFWwindow *window;
 
@@ -49,6 +102,8 @@ void ae3d_offscreen_context_destroy(void *context) {
     glfwDestroyWindow((GLFWwindow *)context);
     ae3d_platform_shutdown();
 }
+
+#endif
 
 static int ae3d_offscreen_attach(ae3d_offscreen *target, int width, int height) {
     GLenum status;
