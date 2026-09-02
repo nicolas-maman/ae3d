@@ -17,7 +17,11 @@ import a3d.loader
 
 const WIDTH = 256
 const HEIGHT = 192
+const INSTANCES = 24
 const TEXTURE = "resources/obj/Earth/Albedo.jpg"
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
 
 var failures = 0
 
@@ -43,13 +47,40 @@ build_scene(pass_backend: *Backend) -> {
     core.model_polished_metal(metal, 0.85, 0.45, 0.20)
     core.backend_add_model(pass_backend, metal)
 
+    // An instanced grid and a transparent panel: instancing takes a different
+    // vertex-input path and transparency a different pipeline, so neither is
+    // covered by drawing one opaque model.
+    grid = loader.cube(1.0)
+    core.model_set_scale(grid, 9.0, 9.0, 9.0)
+    core.model_set_diffuse(grid, 0.2, 0.8, 0.4)
+    core.model_enable_instancing(grid, INSTANCES)
+    positions = calloc(INSTANCES * 3, 8)
+    xyz = positions as float[]
+    i = 0
+    while i < INSTANCES {
+        xyz[i * 3] = ((i % 8) * 1.0) * 20.0 - 70.0
+        xyz[i * 3 + 1] = ((i / 8) * 1.0) * 22.0 - 44.0
+        xyz[i * 3 + 2] = 40.0
+        i = i + 1
+    }
+    core.model_set_instance_positions(grid, positions, INSTANCES)
+    free(positions)
+    core.backend_add_model(pass_backend, grid)
+
+    glass = loader.cube(1.0)
+    core.model_set_scale(glass, 30.0, 22.0, 0.5)
+    core.model_set_position(glass, 0.0, 18.0, 70.0)
+    core.model_set_diffuse(glass, 0.3, 0.5, 1.0)
+    core.model_set_alpha(glass, 0.45)
+    core.backend_add_model(pass_backend, glass)
+
     textured = loader.sphere(1.0, 32, 24)
     core.model_set_scale(textured, 24.0, 24.0, 24.0)
     core.model_set_position(textured, 34.0, 0.0, 0.0)
     core.model_set_texture(textured, TEXTURE)
     core.backend_add_model(pass_backend, textured)
 
-    return metal, textured
+    return metal, textured, grid, glass
 }
 
 // Every configuration is compared the same way: the two rasterisers differ in
@@ -108,6 +139,9 @@ main() {
     cam = core.camera_new(WIDTH, HEIGHT)
     core.camera_set_position(cam, core.vec3(0.0, 0.0, 110.0))
     light = core.light_sun(core.vec3(0.3, 0.6, 0.8))
+    // Enough ambient that every model is above the lit threshold, so coverage
+    // measures what is on screen rather than what happens to face the sun.
+    light.ambient_strength = 0.55
 
     context = offscreen.context_create(WIDTH, HEIGHT)
     if context == null {
@@ -121,13 +155,13 @@ main() {
     target = offscreen.target_create(WIDTH, HEIGHT)
     gl.renderer_set_target(gl_renderer, target)
     gl.renderer_set_clear_color(gl_renderer, 0.0, 0.0, 0.0)
-    gl_metal, gl_textured = build_scene(&opengl_pass)
+    gl_metal, gl_textured, gl_grid, gl_glass = build_scene(&opengl_pass)
 
     vk_renderer = vk.renderer_new()
     vulkan_pass = vk.backend(vk_renderer)
     check_true("vulkan started", core.backend_init(&vulkan_pass, null, WIDTH, HEIGHT))
     vk.renderer_set_clear_color(vk_renderer, 0.0, 0.0, 0.0)
-    vk_metal, vk_textured = build_scene(&vulkan_pass)
+    vk_metal, vk_textured, vk_grid, vk_glass = build_scene(&vulkan_pass)
 
     check_true("vulkan target size", vk.offscreen_width() == WIDTH && vk.offscreen_height() == HEIGHT)
 
@@ -138,7 +172,7 @@ main() {
     check_true("opengl produced pixels", gl_pixels != null)
     check_true("vulkan produced pixels", vk_pixels != null)
     if gl_pixels == null || vk_pixels == null { return }
-    compare("materials and textures", gl_pixels, vk_pixels)
+    compare("materials, textures, instancing and transparency", gl_pixels, vk_pixels)
 
     gl_sky = gl.skybox_create(gl_renderer, TEXTURE)
     vk_sky = vk.skybox_create(vk_renderer, TEXTURE)
@@ -169,8 +203,12 @@ main() {
 
     core.model_free(gl_metal)
     core.model_free(gl_textured)
+    core.model_free(gl_grid)
+    core.model_free(gl_glass)
     core.model_free(vk_metal)
     core.model_free(vk_textured)
+    core.model_free(vk_grid)
+    core.model_free(vk_glass)
 
     gl.renderer_free(gl_renderer)
     vk.renderer_free(vk_renderer)
