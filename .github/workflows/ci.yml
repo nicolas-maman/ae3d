@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux
+          - os: macos-latest
+            name: macos
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglfw3-dev libvulkan-dev xvfb
+
+      - name: Install dependencies (macos)
+        if: runner.os == 'macOS'
+        run: brew install glfw
+
+      - name: Install the Aether toolchain
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/aether-lang-dev/aether/main/install.sh | sh
+          echo "$HOME/.aether/bin" >> "$GITHUB_PATH"
+
+      - name: Run CI
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a ./ci.sh
+          else
+            ./ci.sh
+          fi
