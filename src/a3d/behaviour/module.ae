@@ -16,6 +16,7 @@ exports (
     KIND_MESH, KIND_SCRIPT, KIND_RENDERER, KIND_COLLIDER, KIND_LIGHT,
     KIND_CAMERA, KIND_WATER, KIND_VOXEL, KIND_CUSTOM,
     component_new, component_free, component_enabled, component_set_enabled,
+    component_set_name, object_set_name, object_set_tag,
     component_owner, component_state,
     object_new, object_free, object_add_component, object_component,
     object_component_count, object_find_component, object_remove_component,
@@ -70,15 +71,20 @@ struct Scene {
 
 component_new(name: string, kind: int, state: ptr) -> *Component {
     c = heap.new(Component)
-    c.name = string.copy(name)
+    component_set_name(c, name)
     c.kind = kind
     c.state = state
     c.enabled = true
     return c
 }
 
+component_set_name(c: *Component, name: string) {
+    c.name = core.set_owned(c.name, name)
+}
+
 component_free(c: *Component) {
     if c == null { return }
+    core.free_owned(c.name)
     heap.free(c)
 }
 
@@ -89,15 +95,24 @@ component_state(c: *Component) -> ptr { return c.state }
 
 object_new(name: string) -> *GameObject {
     o = heap.new(GameObject)
-    o.name = string.copy(name)
-    o.tag = ""
+    object_set_name(o, name)
     o.components = list.new()
     o.active = true
     return o
 }
 
+object_set_name(o: *GameObject, name: string) {
+    o.name = core.set_owned(o.name, name)
+}
+
+object_set_tag(o: *GameObject, tag: string) {
+    o.tag = core.set_owned(o.tag, tag)
+}
+
 object_free(o: *GameObject) {
     if o == null { return }
+    core.free_owned(o.name)
+    core.free_owned(o.tag)
     if o.components != null {
         count = list.size(o.components)
         i = 0

@@ -12,7 +12,7 @@ import std.string
 import a3d.core
 
 exports (
-    load_obj, load_obj_instanced, load_mtl,
+    load_obj, load_obj_instanced, load_mtl, materials_free,
     cube, sphere, plane, water_surface, quad,
     last_error
 )
@@ -192,9 +192,11 @@ load_mtl(path: string) -> ptr {
             } else if string.equals(keyword, "map_Kd") == 1 && field_count >= 2 {
                 texture = token(fields, field_count - 1)
                 if string.contains(texture, "/") == 1 || string.contains(texture, "\\") == 1 {
-                    current.texture_path = string.copy(texture)
+                    core.material_set_texture_path(current, texture)
                 } else {
-                    current.texture_path = string.concat(base, texture)
+                    joined = string.concat(base, texture)
+                    core.material_set_texture_path(current, joined)
+                    string.free(joined)
                 }
             }
         }
@@ -204,7 +206,22 @@ load_mtl(path: string) -> ptr {
 
     string.array_free(lines)
     string.free(content)
+    string.free(base)
     return materials
+}
+
+// Materials from a standalone load_mtl belong to the caller; a load_obj hands
+// them to the model instead.
+materials_free(materials: ptr) {
+    if materials == null { return }
+    count = list.size(materials)
+    i = 0
+    while i < count {
+        m = list.get_raw(materials, i) as *Material
+        if m != null { core.material_free(m) }
+        i = i + 1
+    }
+    list.free(materials)
 }
 
 load_obj(path: string, recalculate_normals: bool) -> *Model {
@@ -216,8 +233,10 @@ load_obj(path: string, recalculate_normals: bool) -> *Model {
     }
 
     m = core.model_new()
-    m.source_path = string.copy(path)
-    m.name = basename_of(path)
+    core.model_set_source_path(m, path)
+    base_name = basename_of(path)
+    core.model_set_name(m, base_name)
+    string.free(base_name)
     build = ae3d_objbuild_create()
     if build == null {
         set_error("out of memory loading ", path)
@@ -271,7 +290,9 @@ load_obj(path: string, recalculate_normals: bool) -> *Model {
         } else if string.equals(keyword, "f") == 1 && field_count >= 4 {
             emit_face(build, m.mesh, fields, field_count, positions, uvs, normals)
         } else if string.equals(keyword, "mtllib") == 1 && field_count >= 2 {
-            mtl_path = string.concat(directory_of(path), token(fields, 1))
+            base = directory_of(path)
+            mtl_path = string.concat(base, token(fields, 1))
+            string.free(base)
             loaded = load_mtl(mtl_path)
             string.free(mtl_path)
             merge_materials(materials, loaded)
@@ -300,6 +321,12 @@ load_obj(path: string, recalculate_normals: bool) -> *Model {
 
     if core.mesh_vertex_count(m.mesh) == 0 {
         set_error("no geometry in ", path)
+        stranded = list.size(materials)
+        i = 0
+        while i < stranded {
+            core.model_own_material(m, list.get_raw(materials, i) as *Material)
+            i = i + 1
+        }
         list.free(materials)
         core.model_free(m)
         return null
@@ -311,6 +338,13 @@ load_obj(path: string, recalculate_normals: bool) -> *Model {
 
     if core.model_group_count(m) == 0 && list.size(materials) > 0 {
         m.material = list.get_raw(materials, 0) as *Material
+    }
+
+    owned = list.size(materials)
+    i = 0
+    while i < owned {
+        core.model_own_material(m, list.get_raw(materials, i) as *Material)
+        i = i + 1
     }
     list.free(materials)
 

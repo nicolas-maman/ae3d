@@ -35,9 +35,12 @@ exports (
     model_set_position, model_set_scale, model_set_rotation, model_rotate,
     model_update_matrix, model_recalculate_bounds, model_mark_dirty, model_set_diffuse,
     model_set_specular, model_set_pbr, model_set_exposure, model_set_alpha,
-    model_set_texture, model_set_shader, model_metallic, model_plastic, model_rough_metal,
+    model_set_texture, model_set_shader, model_set_name, model_set_source_path,
+    material_set_texture_path, material_set_name, light_set_name, camera_set_name, text,
+    set_owned, free_owned, model_metallic, model_plastic, model_rough_metal,
     model_polished_metal, model_matte, model_glossy, model_glass, model_transparent_plastic,
     model_add_group, model_group, model_group_count, model_sort_groups_by_texture,
+    model_own_material,
     model_ensure_material, model_set_uniform_float, model_set_uniform_int,
     model_set_uniform_vec3, model_set_uniform_array, model_uniform_count, model_uniform,
     model_enable_instancing, model_set_instance_position, model_set_instance_color,
@@ -244,6 +247,7 @@ struct Model {
     mesh: ptr
     instances: ptr
     material: *Material
+    materials: ptr
     groups: ptr
     uniforms: ptr
     shader: Shader
@@ -782,9 +786,27 @@ shader_valid(s: *Shader) -> bool {
 
 // The name is copied, not borrowed: callers routinely pass a slice of a parse
 // buffer they free straight afterwards, and the box outlives it.
+// Ownership of a string field lives in exactly one place: the setter that
+// assigned it and the destructor that frees it.
+//
+// A box frees a string field itself only when the assignment happened in the
+// same function as its heap.new, and leaks it otherwise
+// (aether-lang-dev/aether#1860). Rather than track which fields fall on which
+// side, no constructor ever assigns a string directly: every one goes through a
+// setter, so the box never claims ownership and the destructor is always the
+// single release. Assigning in a constructor here means a double free.
+set_owned(previous: string, value: string) -> string {
+    if previous != null { string.free(previous) }
+    return string.copy(value)
+}
+
+free_owned(value: string) {
+    if value != null { string.free(value) }
+}
+
 material_new(name: string) -> *Material {
     m = heap.new(Material)
-    m.name = string.copy(name)
+    material_set_name(m, name)
     m.diffuse = vec3(1.0, 1.0, 1.0)
     m.specular = vec3(1.0, 1.0, 1.0)
     m.shininess = 32.0
@@ -793,7 +815,6 @@ material_new(name: string) -> *Material {
     m.exposure = 1.0
     m.alpha = 1.0
     m.texture_id = 0
-    m.texture_path = ""
     return m
 }
 
@@ -803,8 +824,8 @@ material_default() -> *Material {
 
 material_clone(src: *Material) -> *Material {
     m = heap.new(Material)
-    m.name = string.copy(src.name)
-    m.texture_path = string.copy(src.texture_path)
+    material_set_name(m, src.name)
+    material_set_texture_path(m, text(src.texture_path))
     m.diffuse = src.diffuse
     m.specular = src.specular
     m.shininess = src.shininess
@@ -818,6 +839,8 @@ material_clone(src: *Material) -> *Material {
 
 material_free(m: *Material) {
     if m == null { return }
+    free_owned(m.name)
+    free_owned(m.texture_path)
     heap.free(m)
 }
 
@@ -826,6 +849,7 @@ model_new() -> *Model {
     m.mesh = ae3d_mesh_create()
     m.groups = list.new()
     m.uniforms = list.new()
+    m.materials = list.new()
     m.position = vec3(0.0, 0.0, 0.0)
     m.scale = vec3(1.0, 1.0, 1.0)
     m.rotation = quat_ident()
@@ -834,8 +858,6 @@ model_new() -> *Model {
     m.bounding_radius = 0.0
     m.visible = true
     m.id = next_model_id()
-    m.name = ""
-    m.source_path = ""
     m.shader = shader_new("", "")
     return m
 }
@@ -864,6 +886,7 @@ model_free(m: *Model) {
             uniform = list.get_raw(m.uniforms, i) as *Uniform
             if uniform != null {
                 if uniform.array != null { ae3d_farr_destroy(uniform.array) }
+                free_owned(uniform.name)
                 heap.free(uniform)
             }
             i = i + 1
@@ -871,8 +894,29 @@ model_free(m: *Model) {
         list.free(m.uniforms)
     }
 
-    if m.material != null { material_free(m.material) }
+    free_owned(m.name)
+    free_owned(m.source_path)
+
+    if m.materials != null {
+        count = list.size(m.materials)
+        i = 0
+        while i < count {
+            material = list.get_raw(m.materials, i) as *Material
+            if material != null { material_free(material) }
+            i = i + 1
+        }
+        list.free(m.materials)
+    }
     heap.free(m)
+}
+
+// A material may be shared by several groups, so the model owns each one exactly
+// once here and the groups only point at them. Freeing per group would double
+// free anything a second `usemtl` reused.
+model_own_material(m: *Model, material: *Material) -> *Material {
+    if material == null { return null }
+    list.add_raw(m.materials, material)
+    return material
 }
 
 model_update_matrix(m: *Model) {
@@ -940,7 +984,7 @@ model_rotate(m: *Model, degrees_x: float, degrees_y: float, degrees_z: float) {
 
 model_ensure_material(m: *Model) {
     if m.material == null {
-        m.material = material_default()
+        m.material = model_own_material(m, material_default())
     }
 }
 
@@ -972,7 +1016,42 @@ model_set_alpha(m: *Model, alpha: float) {
 
 model_set_texture(m: *Model, path: string) {
     model_ensure_material(m)
-    m.material.texture_path = path
+    m.material.texture_path = set_owned(m.material.texture_path, path)
+}
+
+model_set_name(m: *Model, name: string) {
+    m.name = set_owned(m.name, name)
+}
+
+model_set_source_path(m: *Model, path: string) {
+    m.source_path = set_owned(m.source_path, path)
+}
+
+material_set_texture_path(m: *Material, path: string) {
+    m.texture_path = set_owned(m.texture_path, path)
+}
+
+material_set_name(m: *Material, name: string) {
+    m.name = set_owned(m.name, name)
+}
+
+uniform_set_name(u: *Uniform, name: string) {
+    u.name = set_owned(u.name, name)
+}
+
+light_set_name(l: *Light, name: string) {
+    l.name = set_owned(l.name, name)
+}
+
+camera_set_name(c: *Camera, name: string) {
+    c.name = set_owned(c.name, name)
+}
+
+// A string read back from a model may never have been set, in which case it is
+// null rather than empty; callers printing or comparing it want "".
+text(value: string) -> string {
+    if value == null { return "" }
+    return value
 }
 
 model_set_shader(m: *Model, s: Shader) {
@@ -1082,7 +1161,7 @@ upsert_uniform(m: *Model, name: string, kind: int) -> *Uniform {
         return existing
     }
     uniform = heap.new(Uniform)
-    uniform.name = string.copy(name)
+    uniform_set_name(uniform, name)
     uniform.kind = kind
     uniform.location = 0 - 1
     uniform.cached_program = 0
@@ -1200,12 +1279,13 @@ light_new() -> *Light {
     l.quadratic_atten = 0.0000001
     l.kind = LIGHT_DYNAMIC
     l.mode = MODE_POINT
-    l.name = "light"
+    light_set_name(l, "light")
     return l
 }
 
 light_free(l: *Light) {
     if l == null { return }
+    free_owned(l.name)
     heap.free(l)
 }
 
@@ -1275,7 +1355,7 @@ camera_new(width: int, height: int) -> *Camera {
     if height > 0 { c.aspect = (width * 1.0) / (height * 1.0) }
     c.invert_mouse = true
     c.active = true
-    c.name = "camera"
+    camera_set_name(c, "camera")
     camera_update_vectors(c)
     camera_update_projection(c)
     return c
@@ -1283,6 +1363,7 @@ camera_new(width: int, height: int) -> *Camera {
 
 camera_free(c: *Camera) {
     if c == null { return }
+    free_owned(c.name)
     heap.free(c)
 }
 

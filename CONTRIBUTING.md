@@ -24,6 +24,11 @@ warnings.
   constraint a future edit could violate.
 - **Measure before claiming.** Performance statements in commits and in the
   README come with the number and how it was obtained.
+- **No leaks.** Every headless suite is checked under `leaks` and must report
+  zero. A string field on a heap struct is owned by exactly one place: the setter
+  that assigns it and the destructor that frees it. Never assign a string in a
+  constructor directly, and never store a borrowed literal in one; see the note
+  in `a3d.core` for why.
 
 ## Where things go
 

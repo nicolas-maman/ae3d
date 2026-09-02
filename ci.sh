@@ -125,6 +125,22 @@ for example in examples/*.ae; do
     fi
 done
 
+if command -v leaks >/dev/null 2>&1; then
+    step "leak check, headless suites"
+    for suite in tests/test_*.ae; do
+        name="$(basename "$suite" .ae)"
+        grep -q "a3d.engine" "$suite" && continue
+        [ -x "build/$name" ] || continue
+        report="$(MallocStackLogging=1 leaks --atExit -- "./build/$name" 2>&1 |
+                  grep -o '[0-9]* leaks for [0-9]* total leaked bytes' | tail -1)"
+        case "$report" in
+            "0 leaks"*) pass "$name" ;;
+            "") skip "$name" "no leak report" ;;
+            *) fail "$name ($report)" ;;
+        esac
+    done
+fi
+
 printf '\n'
 if [ "$failures" -eq 0 ]; then
     printf 'ci: everything passed'

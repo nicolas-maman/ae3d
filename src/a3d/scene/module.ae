@@ -95,8 +95,8 @@ material_json(m: *Material) -> ptr {
     json.object_set_raw(out, "roughness", json.num(m.roughness))
     json.object_set_raw(out, "exposure", json.num(m.exposure))
     json.object_set_raw(out, "alpha", json.num(m.alpha))
-    json.object_set_raw(out, "texture_path", json.str(m.texture_path))
-    json.object_set_raw(out, "name", json.str(m.name))
+    json.object_set_raw(out, "texture_path", json.str(core.text(m.texture_path)))
+    json.object_set_raw(out, "name", json.str(core.text(m.name)))
     return out
 }
 
@@ -114,7 +114,7 @@ apply_material(m: *Model, node: ptr) {
     material.alpha = field_number(node, "alpha", 1.0)
 
     texture = field_string(node, "texture_path")
-    if texture != "" { material.texture_path = string.copy(texture) }
+    if texture != "" { core.material_set_texture_path(material, texture) }
 }
 
 mesh_file_for(directory: string, index: int) -> string {
@@ -141,7 +141,7 @@ scene_save(models: ptr, path: string, mesh_directory: string) -> bool {
         m = list.get_raw(models, i) as *Model
         if m != null {
             entry = json.obj()
-            json.object_set_raw(entry, "name", json.str(m.name))
+            json.object_set_raw(entry, "name", json.str(core.text(m.name)))
             json.object_set_raw(entry, "position", vec3_json(m.position))
             json.object_set_raw(entry, "scale", vec3_json(m.scale))
             json.object_set_raw(entry, "rotation", quat_json(m.rotation))
@@ -152,7 +152,7 @@ scene_save(models: ptr, path: string, mesh_directory: string) -> bool {
                 json.object_set_raw(entry, "material", material_json(m.material))
             }
 
-            if m.source_path != "" {
+            if core.text(m.source_path) != "" {
                 json.object_set_raw(entry, "source_path", json.str(m.source_path))
             } else {
                 mesh_path = mesh_file_for(mesh_directory, i)
@@ -255,7 +255,7 @@ load_entry(entry: ptr) -> *Model {
     }
 
     name = field_string(entry, "name")
-    if name != "" { m.name = string.copy(name) }
+    if name != "" { core.model_set_name(m, name) }
 
     m.position = vec3_of(json.object_get_raw(entry, "position"))
     m.scale = vec3_of(json.object_get_raw(entry, "scale"))
