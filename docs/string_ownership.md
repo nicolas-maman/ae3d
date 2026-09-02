@@ -24,7 +24,7 @@ set_path(e: *Entry, v: string) {
 Freeing the field by hand in the first case aborts with a double free. Not
 freeing it in the second case leaks. Neither pattern is safe for both, so a
 codebase that mixes them cannot write a correct destructor. Filed upstream as
-aether-lang-dev/aether#1861.
+aether-lang-dev/aether#1866.
 
 ## The rule here
 
