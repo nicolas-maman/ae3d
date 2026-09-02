@@ -148,8 +148,12 @@ else
         elif ! grep -q '^frames 30$' "$report"; then
             fail "aether3d_editor (did not reach 30 frames)"
             sed 's/^/        /' "$report"
-        elif ! grep -q '^models 3$' "$report"; then
+        elif ! grep -qE '^models [0-9]+$' "$report" || \
+             [ "$(sed -n 's/^models //p' "$report")" -lt 3 ]; then
             fail "aether3d_editor (scene did not build)"
+            sed 's/^/        /' "$report"
+        elif grep -q '^selected none$' "$report"; then
+            fail "aether3d_editor (nothing selected)"
             sed 's/^/        /' "$report"
         else
             pass "aether3d_editor"

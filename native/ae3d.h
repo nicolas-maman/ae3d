@@ -202,8 +202,18 @@ void   ae3d_vk_resize(int width, int height);
 int    ae3d_vk_frame_begin(double r, double g, double b, double a);
 int    ae3d_vk_frame_end(void);
 int    ae3d_vk_upload_mesh(void *mesh);
+int    ae3d_vk_upload_instances(void *instances);
 void   ae3d_vk_free_mesh(int handle);
-void   ae3d_vk_draw_mesh(int handle, const double *mvp,
-                         double cr, double cg, double cb);
+int    ae3d_vk_texture_create(int width, int height, const void *rgba);
+void   ae3d_vk_texture_destroy(int handle);
+void   ae3d_vk_scene_set_float(int offset, double value);
+void   ae3d_vk_scene_set_int(int offset, int value);
+void   ae3d_vk_scene_set_vec3(int offset, double x, double y, double z);
+void   ae3d_vk_scene_set_mat4(int offset, const double *m);
+void   ae3d_vk_scene_set_view_projection(const double *m);
+void   ae3d_vk_set_blend(int on);
+void   ae3d_vk_draw(int mesh, int texture, int instances, int instance_count);
+int    ae3d_vk_draw_calls(void);
+int    ae3d_vk_sample_count(void);
 
 #endif

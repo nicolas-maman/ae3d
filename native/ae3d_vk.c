@@ -1,6 +1,7 @@
 #include "ae3d.h"
 #include "ae3d_internal.h"
-#include "ae3d_vk_shaders.h"
+#include "ae3d_vk_scene_shaders.h"
+#include "ae3d_vk_uniforms.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +40,8 @@
 #endif
 
 #define AE3D_VK_FRAMES 2
+#define AE3D_VK_DRAWS_PER_FRAME 4096
+#define AE3D_VK_MAX_TEXTURES 256
 #define AE3D_VK_STRIDE (8 * (int)sizeof(float))
 
 #define AE3D_VK_GLOBAL_FUNCS(X) \
@@ -51,6 +54,7 @@
     X(vkGetPhysicalDeviceProperties) \
     X(vkGetPhysicalDeviceQueueFamilyProperties) \
     X(vkGetPhysicalDeviceMemoryProperties) \
+    X(vkGetPhysicalDeviceFormatProperties) \
     X(vkGetPhysicalDeviceSurfaceSupportKHR) \
     X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) \
     X(vkGetPhysicalDeviceSurfaceFormatsKHR) \
@@ -111,6 +115,19 @@
     X(vkCmdSetViewport) \
     X(vkCmdSetScissor) \
     X(vkCmdCopyBuffer) \
+    X(vkCreateDescriptorSetLayout) \
+    X(vkDestroyDescriptorSetLayout) \
+    X(vkCreateDescriptorPool) \
+    X(vkDestroyDescriptorPool) \
+    X(vkAllocateDescriptorSets) \
+    X(vkUpdateDescriptorSets) \
+    X(vkCmdBindDescriptorSets) \
+    X(vkCreateSampler) \
+    X(vkDestroySampler) \
+    X(vkCmdPipelineBarrier) \
+    X(vkCmdCopyBufferToImage) \
+    X(vkCmdCopyImageToBuffer) \
+    X(vkCmdBlitImage) \
     X(vkCreateSemaphore) \
     X(vkDestroySemaphore) \
     X(vkCreateFence) \
@@ -135,10 +152,23 @@ typedef struct {
 } ae3d_vk_mesh;
 
 typedef struct {
-    float mvp[16];
-    float base_color[4];
-    float light[4];
-} ae3d_vk_push;
+    VkImage image;
+    VkDeviceMemory memory;
+    VkImageView view;
+    VkSampler sampler;
+    int width;
+    int height;
+    int in_use;
+} ae3d_vk_texture;
+
+typedef struct {
+    VkBuffer buffer;
+    VkDeviceMemory memory;
+    unsigned char *mapped;
+    unsigned stride;
+    unsigned capacity;
+    unsigned used;
+} ae3d_vk_uniform_ring;
 
 static struct {
     VkInstance instance;
@@ -167,10 +197,32 @@ static struct {
     VkDeviceMemory depth_memory;
     VkImageView depth_view;
 
+    VkSampleCountFlagBits samples;
+    VkImage colour_image;
+    VkDeviceMemory colour_memory;
+    VkImageView colour_view;
+
     VkRenderPass render_pass;
     VkPipelineLayout pipeline_layout;
     VkPipeline pipeline;
+    VkPipeline pipeline_blend;
+    VkDescriptorSetLayout set_layout;
+    VkDescriptorPool descriptor_pool;
     VkCommandPool command_pool;
+
+    ae3d_vk_uniform_ring uniforms[AE3D_VK_FRAMES];
+    VkDescriptorSet sets[AE3D_VK_FRAMES][AE3D_VK_MAX_TEXTURES];
+    int set_texture[AE3D_VK_FRAMES][AE3D_VK_MAX_TEXTURES];
+    int set_count[AE3D_VK_FRAMES];
+
+    ae3d_vk_texture textures[AE3D_VK_MAX_TEXTURES];
+    int default_texture;
+
+    ae3d_vk_scene scene;
+    int blend;
+    int draw_calls;
+    VkBuffer identity_instance;
+    VkDeviceMemory identity_instance_memory;
 
     VkCommandBuffer command_buffers[AE3D_VK_FRAMES];
     VkSemaphore image_available[AE3D_VK_FRAMES];
@@ -186,6 +238,15 @@ static struct {
 
     ae3d_vk_mesh *meshes;
     int mesh_capacity;
+
+    VkImage readback_image;
+    VkDeviceMemory readback_memory;
+    VkBuffer readback_buffer;
+    VkDeviceMemory readback_buffer_memory;
+    unsigned char *readback_mapped;
+    int readback_width;
+    int readback_height;
+    int offscreen;
 
     int ready;
 } vk;
@@ -630,6 +691,12 @@ static int ae3d_vk_upload_buffer(const void *data, VkDeviceSize size,
     return 1;
 }
 
+static int ae3d_vk_create_image(int width, int height, VkFormat format,
+                                VkSampleCountFlagBits samples, VkImageUsageFlags usage,
+                                VkImageAspectFlags aspect, VkImageTiling tiling,
+                                VkMemoryPropertyFlags properties,
+                                VkImage *image, VkDeviceMemory *memory, VkImageView *view);
+
 static void ae3d_vk_destroy_swapchain(void) {
     unsigned i;
 
@@ -650,6 +717,9 @@ static void ae3d_vk_destroy_swapchain(void) {
     free(vk.images);
     vk.images = NULL;
 
+    if (vk.colour_view) { ae3d_vkDestroyImageView(vk.device, vk.colour_view, NULL); vk.colour_view = VK_NULL_HANDLE; }
+    if (vk.colour_image) { ae3d_vkDestroyImage(vk.device, vk.colour_image, NULL); vk.colour_image = VK_NULL_HANDLE; }
+    if (vk.colour_memory) { ae3d_vkFreeMemory(vk.device, vk.colour_memory, NULL); vk.colour_memory = VK_NULL_HANDLE; }
     if (vk.depth_view) { ae3d_vkDestroyImageView(vk.device, vk.depth_view, NULL); vk.depth_view = VK_NULL_HANDLE; }
     if (vk.depth_image) { ae3d_vkDestroyImage(vk.device, vk.depth_image, NULL); vk.depth_image = VK_NULL_HANDLE; }
     if (vk.depth_memory) { ae3d_vkFreeMemory(vk.device, vk.depth_memory, NULL); vk.depth_memory = VK_NULL_HANDLE; }
@@ -713,7 +783,7 @@ static int ae3d_vk_create_depth(void) {
     image.extent.depth = 1;
     image.mipLevels = 1;
     image.arrayLayers = 1;
-    image.samples = VK_SAMPLE_COUNT_1_BIT;
+    image.samples = vk.samples;
     image.tiling = VK_IMAGE_TILING_OPTIMAL;
     image.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     image.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -821,29 +891,47 @@ static int ae3d_vk_create_swapchain(int width, int height) {
         if (result != VK_SUCCESS) return ae3d_vk_fail_code("vkCreateImageView failed", result);
     }
 
+    if (vk.samples != VK_SAMPLE_COUNT_1_BIT) {
+        if (!ae3d_vk_create_image((int)vk.extent.width, (int)vk.extent.height, vk.color_format,
+                                  vk.samples, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                  VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
+                                  VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_TILING_OPTIMAL,
+                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                  &vk.colour_image, &vk.colour_memory, &vk.colour_view)) {
+            return 0;
+        }
+    }
     return ae3d_vk_create_depth();
 }
 
 static int ae3d_vk_create_render_pass(void) {
-    VkAttachmentDescription attachments[2];
-    VkAttachmentReference color_ref, depth_ref;
+    VkAttachmentDescription attachments[3];
+    VkAttachmentReference colour_ref, depth_ref, resolve_ref;
     VkSubpassDescription subpass;
     VkSubpassDependency dependency;
     VkRenderPassCreateInfo info;
-    VkResult result;
+    int multisampled = vk.samples != VK_SAMPLE_COUNT_1_BIT;
+    unsigned count = multisampled ? 3u : 2u;
+    VkImageLayout present_layout = vk.offscreen ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+                                                : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
     memset(attachments, 0, sizeof(attachments));
+
+    // Attachment 0 is what the subpass draws into: the multisampled image when
+    // MSAA is on, otherwise the presentable image itself.
     attachments[0].format = vk.color_format;
-    attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
+    attachments[0].samples = vk.samples;
     attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachments[0].storeOp = multisampled ? VK_ATTACHMENT_STORE_OP_DONT_CARE
+                                          : VK_ATTACHMENT_STORE_OP_STORE;
     attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    attachments[0].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    attachments[0].finalLayout = multisampled ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                                              : present_layout;
 
     attachments[1].format = vk.depth_format;
-    attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+    attachments[1].samples = vk.samples;
     attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
@@ -851,19 +939,33 @@ static int ae3d_vk_create_render_pass(void) {
     attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-    memset(&color_ref, 0, sizeof(color_ref));
-    color_ref.attachment = 0;
-    color_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    attachments[2].format = vk.color_format;
+    attachments[2].samples = VK_SAMPLE_COUNT_1_BIT;
+    attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachments[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachments[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachments[2].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachments[2].finalLayout = present_layout;
+
+    memset(&colour_ref, 0, sizeof(colour_ref));
+    colour_ref.attachment = 0;
+    colour_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     memset(&depth_ref, 0, sizeof(depth_ref));
     depth_ref.attachment = 1;
     depth_ref.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
+    memset(&resolve_ref, 0, sizeof(resolve_ref));
+    resolve_ref.attachment = 2;
+    resolve_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
     memset(&subpass, 0, sizeof(subpass));
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments = &color_ref;
+    subpass.pColorAttachments = &colour_ref;
     subpass.pDepthStencilAttachment = &depth_ref;
+    if (multisampled) subpass.pResolveAttachments = &resolve_ref;
 
     memset(&dependency, 0, sizeof(dependency));
     dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
@@ -877,15 +979,16 @@ static int ae3d_vk_create_render_pass(void) {
 
     memset(&info, 0, sizeof(info));
     info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    info.attachmentCount = 2;
+    info.attachmentCount = count;
     info.pAttachments = attachments;
     info.subpassCount = 1;
     info.pSubpasses = &subpass;
     info.dependencyCount = 1;
     info.pDependencies = &dependency;
 
-    result = ae3d_vkCreateRenderPass(vk.device, &info, NULL, &vk.render_pass);
-    if (result != VK_SUCCESS) return ae3d_vk_fail_code("vkCreateRenderPass failed", result);
+    if (ae3d_vkCreateRenderPass(vk.device, &info, NULL, &vk.render_pass) != VK_SUCCESS) {
+        return ae3d_vk_fail("vkCreateRenderPass failed");
+    }
     return 1;
 }
 
@@ -896,17 +999,24 @@ static int ae3d_vk_create_framebuffers(void) {
     if (!vk.framebuffers) return ae3d_vk_fail("out of memory");
 
     for (i = 0; i < vk.image_count; i++) {
-        VkImageView attachments[2];
+        VkImageView attachments[3];
         VkFramebufferCreateInfo info;
         VkResult result;
+        int multisampled = vk.samples != VK_SAMPLE_COUNT_1_BIT;
 
-        attachments[0] = vk.image_views[i];
-        attachments[1] = vk.depth_view;
+        if (multisampled) {
+            attachments[0] = vk.colour_view;
+            attachments[1] = vk.depth_view;
+            attachments[2] = vk.image_views[i];
+        } else {
+            attachments[0] = vk.image_views[i];
+            attachments[1] = vk.depth_view;
+        }
 
         memset(&info, 0, sizeof(info));
         info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         info.renderPass = vk.render_pass;
-        info.attachmentCount = 2;
+        info.attachmentCount = multisampled ? 3u : 2u;
         info.pAttachments = attachments;
         info.width = vk.extent.width;
         info.height = vk.extent.height;
@@ -930,11 +1040,389 @@ static VkShaderModule ae3d_vk_shader(const unsigned char *bytes, unsigned length
     return module;
 }
 
-static int ae3d_vk_create_pipeline(void) {
-    VkShaderModule vertex_module, fragment_module;
+
+static VkSampleCountFlagBits ae3d_vk_pick_samples(void) {
+    VkPhysicalDeviceProperties properties;
+    VkSampleCountFlags counts;
+
+    ae3d_vkGetPhysicalDeviceProperties(vk.physical, &properties);
+    counts = properties.limits.framebufferColorSampleCounts &
+             properties.limits.framebufferDepthSampleCounts;
+    if (counts & VK_SAMPLE_COUNT_4_BIT) return VK_SAMPLE_COUNT_4_BIT;
+    if (counts & VK_SAMPLE_COUNT_2_BIT) return VK_SAMPLE_COUNT_2_BIT;
+    return VK_SAMPLE_COUNT_1_BIT;
+}
+
+static int ae3d_vk_create_image(int width, int height, VkFormat format,
+                                VkSampleCountFlagBits samples, VkImageUsageFlags usage,
+                                VkImageAspectFlags aspect, VkImageTiling tiling,
+                                VkMemoryPropertyFlags properties,
+                                VkImage *image, VkDeviceMemory *memory, VkImageView *view) {
+    VkImageCreateInfo info;
+    VkMemoryRequirements requirements;
+    VkMemoryAllocateInfo allocation;
+    int type;
+
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    info.imageType = VK_IMAGE_TYPE_2D;
+    info.format = format;
+    info.extent.width = (unsigned)width;
+    info.extent.height = (unsigned)height;
+    info.extent.depth = 1;
+    info.mipLevels = 1;
+    info.arrayLayers = 1;
+    info.samples = samples;
+    info.tiling = tiling;
+    info.usage = usage;
+    info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (ae3d_vkCreateImage(vk.device, &info, NULL, image) != VK_SUCCESS) {
+        return ae3d_vk_fail("vkCreateImage failed");
+    }
+
+    ae3d_vkGetImageMemoryRequirements(vk.device, *image, &requirements);
+    type = ae3d_vk_memory_type(requirements.memoryTypeBits, properties);
+    if (type < 0) return ae3d_vk_fail("no memory type for an image");
+
+    memset(&allocation, 0, sizeof(allocation));
+    allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocation.allocationSize = requirements.size;
+    allocation.memoryTypeIndex = (unsigned)type;
+    if (ae3d_vkAllocateMemory(vk.device, &allocation, NULL, memory) != VK_SUCCESS) {
+        return ae3d_vk_fail("image vkAllocateMemory failed");
+    }
+    ae3d_vkBindImageMemory(vk.device, *image, *memory, 0);
+
+    if (view) {
+        VkImageViewCreateInfo view_info;
+        memset(&view_info, 0, sizeof(view_info));
+        view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        view_info.image = *image;
+        view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format = format;
+        view_info.subresourceRange.aspectMask = aspect;
+        view_info.subresourceRange.levelCount = 1;
+        view_info.subresourceRange.layerCount = 1;
+        if (ae3d_vkCreateImageView(vk.device, &view_info, NULL, view) != VK_SUCCESS) {
+            return ae3d_vk_fail("image vkCreateImageView failed");
+        }
+    }
+    return 1;
+}
+
+// One command buffer, submitted and waited on. Used by uploads and layout
+// transitions, which happen outside the frame loop.
+static VkCommandBuffer ae3d_vk_begin_once(void) {
+    VkCommandBufferAllocateInfo allocation;
+    VkCommandBufferBeginInfo begin;
+    VkCommandBuffer command = VK_NULL_HANDLE;
+
+    memset(&allocation, 0, sizeof(allocation));
+    allocation.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocation.commandPool = vk.command_pool;
+    allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocation.commandBufferCount = 1;
+    if (ae3d_vkAllocateCommandBuffers(vk.device, &allocation, &command) != VK_SUCCESS) return VK_NULL_HANDLE;
+
+    memset(&begin, 0, sizeof(begin));
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    ae3d_vkBeginCommandBuffer(command, &begin);
+    return command;
+}
+
+static void ae3d_vk_end_once(VkCommandBuffer command) {
+    VkSubmitInfo submit;
+    if (!command) return;
+    ae3d_vkEndCommandBuffer(command);
+    memset(&submit, 0, sizeof(submit));
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &command;
+    ae3d_vkQueueSubmit(vk.graphics_queue, 1, &submit, VK_NULL_HANDLE);
+    ae3d_vkQueueWaitIdle(vk.graphics_queue);
+    ae3d_vkFreeCommandBuffers(vk.device, vk.command_pool, 1, &command);
+}
+
+static void ae3d_vk_transition(VkCommandBuffer command, VkImage image,
+                               VkImageLayout from, VkImageLayout to,
+                               VkAccessFlags src_access, VkAccessFlags dst_access,
+                               VkPipelineStageFlags src_stage, VkPipelineStageFlags dst_stage) {
+    VkImageMemoryBarrier barrier;
+    memset(&barrier, 0, sizeof(barrier));
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = from;
+    barrier.newLayout = to;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.layerCount = 1;
+    barrier.srcAccessMask = src_access;
+    barrier.dstAccessMask = dst_access;
+    ae3d_vkCmdPipelineBarrier(command, src_stage, dst_stage, 0, 0, NULL, 0, NULL, 1, &barrier);
+}
+
+int ae3d_vk_texture_create(int width, int height, const void *rgba) {
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory staging_memory = VK_NULL_HANDLE;
+    VkCommandBuffer command;
+    VkBufferImageCopy region;
+    VkSamplerCreateInfo sampler;
+    ae3d_vk_texture *texture = NULL;
+    void *mapped = NULL;
+    VkDeviceSize size;
+    int slot, handle = 0;
+
+    if (!vk.device || width <= 0 || height <= 0 || !rgba) return 0;
+    size = (VkDeviceSize)width * height * 4;
+
+    for (slot = 0; slot < AE3D_VK_MAX_TEXTURES; slot++) {
+        if (!vk.textures[slot].in_use) { texture = &vk.textures[slot]; handle = slot + 1; break; }
+    }
+    if (!texture) { ae3d_vk_fail("texture table full"); return 0; }
+
+    if (!ae3d_vk_create_buffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                               &staging, &staging_memory)) {
+        return 0;
+    }
+    ae3d_vkMapMemory(vk.device, staging_memory, 0, size, 0, &mapped);
+    memcpy(mapped, rgba, (size_t)size);
+    ae3d_vkUnmapMemory(vk.device, staging_memory);
+
+    if (!ae3d_vk_create_image(width, height, VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_1_BIT,
+                              VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                              VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_TILING_OPTIMAL,
+                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                              &texture->image, &texture->memory, &texture->view)) {
+        ae3d_vkDestroyBuffer(vk.device, staging, NULL);
+        ae3d_vkFreeMemory(vk.device, staging_memory, NULL);
+        return 0;
+    }
+
+    command = ae3d_vk_begin_once();
+    ae3d_vk_transition(command, texture->image, VK_IMAGE_LAYOUT_UNDEFINED,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                       VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+    memset(&region, 0, sizeof(region));
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent.width = (unsigned)width;
+    region.imageExtent.height = (unsigned)height;
+    region.imageExtent.depth = 1;
+    ae3d_vkCmdCopyBufferToImage(command, staging, texture->image,
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    ae3d_vk_transition(command, texture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                       VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                       VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    ae3d_vk_end_once(command);
+
+    ae3d_vkDestroyBuffer(vk.device, staging, NULL);
+    ae3d_vkFreeMemory(vk.device, staging_memory, NULL);
+
+    memset(&sampler, 0, sizeof(sampler));
+    sampler.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sampler.magFilter = VK_FILTER_LINEAR;
+    sampler.minFilter = VK_FILTER_LINEAR;
+    sampler.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sampler.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    sampler.maxLod = 1.0f;
+    if (ae3d_vkCreateSampler(vk.device, &sampler, NULL, &texture->sampler) != VK_SUCCESS) {
+        ae3d_vk_fail("vkCreateSampler failed");
+        return 0;
+    }
+
+    texture->width = width;
+    texture->height = height;
+    texture->in_use = 1;
+    return handle;
+}
+
+void ae3d_vk_texture_destroy(int handle) {
+    ae3d_vk_texture *texture;
+    if (!vk.device || handle < 1 || handle > AE3D_VK_MAX_TEXTURES) return;
+    texture = &vk.textures[handle - 1];
+    if (!texture->in_use) return;
+    ae3d_vkDeviceWaitIdle(vk.device);
+    if (texture->sampler) ae3d_vkDestroySampler(vk.device, texture->sampler, NULL);
+    if (texture->view) ae3d_vkDestroyImageView(vk.device, texture->view, NULL);
+    if (texture->image) ae3d_vkDestroyImage(vk.device, texture->image, NULL);
+    if (texture->memory) ae3d_vkFreeMemory(vk.device, texture->memory, NULL);
+    memset(texture, 0, sizeof(*texture));
+}
+
+static int ae3d_vk_create_descriptors(void) {
+    VkDescriptorSetLayoutBinding bindings[2];
+    VkDescriptorSetLayoutCreateInfo layout;
+    VkDescriptorPoolSize sizes[2];
+    VkDescriptorPoolCreateInfo pool;
+    VkPhysicalDeviceProperties properties;
+    unsigned alignment, stride;
+    int frame;
+
+    memset(bindings, 0, sizeof(bindings));
+    bindings[0].binding = 0;
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    bindings[0].descriptorCount = 1;
+    bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[1].binding = 1;
+    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[1].descriptorCount = 1;
+    bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    memset(&layout, 0, sizeof(layout));
+    layout.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layout.bindingCount = 2;
+    layout.pBindings = bindings;
+    if (ae3d_vkCreateDescriptorSetLayout(vk.device, &layout, NULL, &vk.set_layout) != VK_SUCCESS) {
+        return ae3d_vk_fail("vkCreateDescriptorSetLayout failed");
+    }
+
+    memset(sizes, 0, sizeof(sizes));
+    sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    sizes[0].descriptorCount = AE3D_VK_FRAMES * AE3D_VK_MAX_TEXTURES;
+    sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    sizes[1].descriptorCount = AE3D_VK_FRAMES * AE3D_VK_MAX_TEXTURES;
+
+    memset(&pool, 0, sizeof(pool));
+    pool.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool.maxSets = AE3D_VK_FRAMES * AE3D_VK_MAX_TEXTURES;
+    pool.poolSizeCount = 2;
+    pool.pPoolSizes = sizes;
+    if (ae3d_vkCreateDescriptorPool(vk.device, &pool, NULL, &vk.descriptor_pool) != VK_SUCCESS) {
+        return ae3d_vk_fail("vkCreateDescriptorPool failed");
+    }
+
+    // Every draw gets its own slice of one mapped buffer, bound with a dynamic
+    // offset, so a frame's uniforms are written once and never reallocated.
+    ae3d_vkGetPhysicalDeviceProperties(vk.physical, &properties);
+    alignment = (unsigned)properties.limits.minUniformBufferOffsetAlignment;
+    if (alignment == 0) alignment = 1;
+    stride = (AE3D_VK_SCENE_SIZE + alignment - 1) / alignment * alignment;
+
+    for (frame = 0; frame < AE3D_VK_FRAMES; frame++) {
+        ae3d_vk_uniform_ring *ring = &vk.uniforms[frame];
+        void *mapped = NULL;
+        ring->stride = stride;
+        ring->capacity = AE3D_VK_DRAWS_PER_FRAME;
+        if (!ae3d_vk_create_buffer((VkDeviceSize)stride * AE3D_VK_DRAWS_PER_FRAME,
+                                   VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                   &ring->buffer, &ring->memory)) {
+            return 0;
+        }
+        if (ae3d_vkMapMemory(vk.device, ring->memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {
+            return ae3d_vk_fail("uniform vkMapMemory failed");
+        }
+        ring->mapped = (unsigned char *)mapped;
+    }
+    return 1;
+}
+
+static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle) {
+    VkDescriptorSetAllocateInfo allocation;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    VkDescriptorBufferInfo buffer;
+    VkDescriptorImageInfo image;
+    VkWriteDescriptorSet writes[2];
+    ae3d_vk_texture *texture;
+    int index;
+
+    for (index = 0; index < vk.set_count[frame]; index++) {
+        if (vk.set_texture[frame][index] == texture_handle) return vk.sets[frame][index];
+    }
+    if (vk.set_count[frame] >= AE3D_VK_MAX_TEXTURES) return VK_NULL_HANDLE;
+
+    texture = &vk.textures[texture_handle - 1];
+    if (!texture->in_use) return VK_NULL_HANDLE;
+
+    memset(&allocation, 0, sizeof(allocation));
+    allocation.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocation.descriptorPool = vk.descriptor_pool;
+    allocation.descriptorSetCount = 1;
+    allocation.pSetLayouts = &vk.set_layout;
+    if (ae3d_vkAllocateDescriptorSets(vk.device, &allocation, &set) != VK_SUCCESS) return VK_NULL_HANDLE;
+
+    memset(&buffer, 0, sizeof(buffer));
+    buffer.buffer = vk.uniforms[frame].buffer;
+    buffer.offset = 0;
+    buffer.range = AE3D_VK_SCENE_SIZE;
+
+    memset(&image, 0, sizeof(image));
+    image.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    image.imageView = texture->view;
+    image.sampler = texture->sampler;
+
+    memset(writes, 0, sizeof(writes));
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = set;
+    writes[0].dstBinding = 0;
+    writes[0].descriptorCount = 1;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    writes[0].pBufferInfo = &buffer;
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet = set;
+    writes[1].dstBinding = 1;
+    writes[1].descriptorCount = 1;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[1].pImageInfo = &image;
+    ae3d_vkUpdateDescriptorSets(vk.device, 2, writes, 0, NULL);
+
+    index = vk.set_count[frame]++;
+    vk.sets[frame][index] = set;
+    vk.set_texture[frame][index] = texture_handle;
+    return set;
+}
+
+void ae3d_vk_scene_set_float(int offset, double value) {
+    ae3d_vk_set_float(&vk.scene, offset, (float)value);
+}
+
+void ae3d_vk_scene_set_int(int offset, int value) {
+    ae3d_vk_set_int(&vk.scene, offset, value);
+}
+
+void ae3d_vk_scene_set_vec3(int offset, double x, double y, double z) {
+    ae3d_vk_set_vec3(&vk.scene, offset, x, y, z);
+}
+
+void ae3d_vk_scene_set_mat4(int offset, const double *m) {
+    if (!m) return;
+    ae3d_vk_set_mat4(&vk.scene, offset, m);
+}
+
+// Vulkan clip space puts y downward and z in [0, 1] while the engine's matrices
+// are OpenGL-shaped, so the correction is folded in here rather than making
+// every caller keep two projections.
+void ae3d_vk_scene_set_view_projection(const double *m) {
+    double corrected[16];
+    int column;
+    if (!m) return;
+    for (column = 0; column < 4; column++) {
+        corrected[column * 4 + 0] = m[column * 4 + 0];
+        corrected[column * 4 + 1] = -m[column * 4 + 1];
+        corrected[column * 4 + 2] = 0.5 * (m[column * 4 + 2] + m[column * 4 + 3]);
+        corrected[column * 4 + 3] = m[column * 4 + 3];
+    }
+    ae3d_vk_set_mat4(&vk.scene, AE3D_VK_OFF_VIEWPROJECTION, corrected);
+}
+
+void ae3d_vk_set_blend(int on) { vk.blend = on; }
+
+static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
+                                        VkShaderModule fragment_module, int blend) {
     VkPipelineShaderStageCreateInfo stages[2];
-    VkVertexInputBindingDescription binding;
-    VkVertexInputAttributeDescription attributes[3];
+    VkVertexInputBindingDescription bindings[2];
+    VkVertexInputAttributeDescription attributes[8];
     VkPipelineVertexInputStateCreateInfo vertex_input;
     VkPipelineInputAssemblyStateCreateInfo assembly;
     VkPipelineViewportStateCreateInfo viewport_state;
@@ -942,17 +1430,12 @@ static int ae3d_vk_create_pipeline(void) {
     VkPipelineMultisampleStateCreateInfo multisample;
     VkPipelineDepthStencilStateCreateInfo depth;
     VkPipelineColorBlendAttachmentState blend_attachment;
-    VkPipelineColorBlendStateCreateInfo blend;
+    VkPipelineColorBlendStateCreateInfo colour_blend;
     VkPipelineDynamicStateCreateInfo dynamic;
     VkDynamicState dynamic_states[2];
-    VkPushConstantRange push;
-    VkPipelineLayoutCreateInfo layout;
     VkGraphicsPipelineCreateInfo info;
-    VkResult result;
-
-    vertex_module = ae3d_vk_shader(ae3d_vk_scene_vert_spv, (unsigned)sizeof(ae3d_vk_scene_vert_spv));
-    fragment_module = ae3d_vk_shader(ae3d_vk_scene_frag_spv, (unsigned)sizeof(ae3d_vk_scene_frag_spv));
-    if (!vertex_module || !fragment_module) return ae3d_vk_fail("vkCreateShaderModule failed");
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    int i;
 
     memset(stages, 0, sizeof(stages));
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -964,27 +1447,45 @@ static int ae3d_vk_create_pipeline(void) {
     stages[1].module = fragment_module;
     stages[1].pName = "main";
 
-    memset(&binding, 0, sizeof(binding));
-    binding.binding = 0;
-    binding.stride = AE3D_VK_STRIDE;
-    binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    // Binding 0 is the mesh, binding 1 is the per-instance matrix and colour,
+    // the same split the OpenGL backend uses for its instanced attributes.
+    memset(bindings, 0, sizeof(bindings));
+    bindings[0].binding = 0;
+    bindings[0].stride = AE3D_VK_STRIDE;
+    bindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    bindings[1].binding = 1;
+    bindings[1].stride = 16 * (unsigned)sizeof(float) + 4 * (unsigned)sizeof(float);
+    bindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
 
     memset(attributes, 0, sizeof(attributes));
     attributes[0].location = 0;
+    attributes[0].binding = 0;
     attributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
     attributes[0].offset = 0;
     attributes[1].location = 1;
+    attributes[1].binding = 0;
     attributes[1].format = VK_FORMAT_R32G32_SFLOAT;
-    attributes[1].offset = 3 * sizeof(float);
+    attributes[1].offset = 3 * (unsigned)sizeof(float);
     attributes[2].location = 2;
+    attributes[2].binding = 0;
     attributes[2].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attributes[2].offset = 5 * sizeof(float);
+    attributes[2].offset = 5 * (unsigned)sizeof(float);
+    for (i = 0; i < 4; i++) {
+        attributes[3 + i].location = (unsigned)(3 + i);
+        attributes[3 + i].binding = 1;
+        attributes[3 + i].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        attributes[3 + i].offset = (unsigned)(i * 4 * (int)sizeof(float));
+    }
+    attributes[7].location = 7;
+    attributes[7].binding = 1;
+    attributes[7].format = VK_FORMAT_R32G32B32_SFLOAT;
+    attributes[7].offset = 16 * (unsigned)sizeof(float);
 
     memset(&vertex_input, 0, sizeof(vertex_input));
     vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vertex_input.vertexBindingDescriptionCount = 1;
-    vertex_input.pVertexBindingDescriptions = &binding;
-    vertex_input.vertexAttributeDescriptionCount = 3;
+    vertex_input.vertexBindingDescriptionCount = 2;
+    vertex_input.pVertexBindingDescriptions = bindings;
+    vertex_input.vertexAttributeDescriptionCount = 8;
     vertex_input.pVertexAttributeDescriptions = attributes;
 
     memset(&assembly, 0, sizeof(assembly));
@@ -1005,12 +1506,12 @@ static int ae3d_vk_create_pipeline(void) {
 
     memset(&multisample, 0, sizeof(multisample));
     multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    multisample.rasterizationSamples = vk.samples;
 
     memset(&depth, 0, sizeof(depth));
     depth.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depth.depthTestEnable = VK_TRUE;
-    depth.depthWriteEnable = VK_TRUE;
+    depth.depthWriteEnable = blend ? VK_FALSE : VK_TRUE;
     depth.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
     depth.maxDepthBounds = 1.0f;
 
@@ -1025,10 +1526,10 @@ static int ae3d_vk_create_pipeline(void) {
     blend_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                       VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
 
-    memset(&blend, 0, sizeof(blend));
-    blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    blend.attachmentCount = 1;
-    blend.pAttachments = &blend_attachment;
+    memset(&colour_blend, 0, sizeof(colour_blend));
+    colour_blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colour_blend.attachmentCount = 1;
+    colour_blend.pAttachments = &blend_attachment;
 
     dynamic_states[0] = VK_DYNAMIC_STATE_VIEWPORT;
     dynamic_states[1] = VK_DYNAMIC_STATE_SCISSOR;
@@ -1036,23 +1537,6 @@ static int ae3d_vk_create_pipeline(void) {
     dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
     dynamic.dynamicStateCount = 2;
     dynamic.pDynamicStates = dynamic_states;
-
-    memset(&push, 0, sizeof(push));
-    push.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    push.offset = 0;
-    push.size = sizeof(ae3d_vk_push);
-
-    memset(&layout, 0, sizeof(layout));
-    layout.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layout.pushConstantRangeCount = 1;
-    layout.pPushConstantRanges = &push;
-
-    result = ae3d_vkCreatePipelineLayout(vk.device, &layout, NULL, &vk.pipeline_layout);
-    if (result != VK_SUCCESS) {
-        ae3d_vkDestroyShaderModule(vk.device, vertex_module, NULL);
-        ae3d_vkDestroyShaderModule(vk.device, fragment_module, NULL);
-        return ae3d_vk_fail_code("vkCreatePipelineLayout failed", result);
-    }
 
     memset(&info, 0, sizeof(info));
     info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -1064,16 +1548,68 @@ static int ae3d_vk_create_pipeline(void) {
     info.pRasterizationState = &raster;
     info.pMultisampleState = &multisample;
     info.pDepthStencilState = &depth;
-    info.pColorBlendState = &blend;
+    info.pColorBlendState = &colour_blend;
     info.pDynamicState = &dynamic;
     info.layout = vk.pipeline_layout;
     info.renderPass = vk.render_pass;
     info.subpass = 0;
 
-    result = ae3d_vkCreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1, &info, NULL, &vk.pipeline);
+    if (ae3d_vkCreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1, &info, NULL, &pipeline) != VK_SUCCESS) {
+        return VK_NULL_HANDLE;
+    }
+    return pipeline;
+}
+
+static int ae3d_vk_create_pipeline(void) {
+    VkShaderModule vertex_module, fragment_module;
+    VkPipelineLayoutCreateInfo layout;
+
+    vertex_module = ae3d_vk_shader(ae3d_vk_scene_vert_spv, (unsigned)sizeof(ae3d_vk_scene_vert_spv));
+    fragment_module = ae3d_vk_shader(ae3d_vk_scene_frag_spv, (unsigned)sizeof(ae3d_vk_scene_frag_spv));
+    if (!vertex_module || !fragment_module) return ae3d_vk_fail("scene vkCreateShaderModule failed");
+
+    memset(&layout, 0, sizeof(layout));
+    layout.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layout.setLayoutCount = 1;
+    layout.pSetLayouts = &vk.set_layout;
+    if (ae3d_vkCreatePipelineLayout(vk.device, &layout, NULL, &vk.pipeline_layout) != VK_SUCCESS) {
+        ae3d_vkDestroyShaderModule(vk.device, vertex_module, NULL);
+        ae3d_vkDestroyShaderModule(vk.device, fragment_module, NULL);
+        return ae3d_vk_fail("vkCreatePipelineLayout failed");
+    }
+
+    vk.pipeline = ae3d_vk_build_pipeline(vertex_module, fragment_module, 0);
+    vk.pipeline_blend = ae3d_vk_build_pipeline(vertex_module, fragment_module, 1);
     ae3d_vkDestroyShaderModule(vk.device, vertex_module, NULL);
     ae3d_vkDestroyShaderModule(vk.device, fragment_module, NULL);
-    if (result != VK_SUCCESS) return ae3d_vk_fail_code("vkCreateGraphicsPipelines failed", result);
+
+    if (!vk.pipeline || !vk.pipeline_blend) return ae3d_vk_fail("vkCreateGraphicsPipelines failed");
+    return 1;
+}
+
+// A white pixel and one identity instance, so a draw with no texture and no
+// instance buffer still has something to bind: the shader always samples and
+// always reads an instance matrix.
+static int ae3d_vk_create_defaults(void) {
+    unsigned char white[4];
+    float identity[20];
+    int i;
+
+    white[0] = 255; white[1] = 255; white[2] = 255; white[3] = 255;
+    vk.default_texture = ae3d_vk_texture_create(1, 1, white);
+    if (!vk.default_texture) return ae3d_vk_fail("could not create the default texture");
+
+    memset(identity, 0, sizeof(identity));
+    identity[0] = 1.0f; identity[5] = 1.0f; identity[10] = 1.0f; identity[15] = 1.0f;
+    identity[16] = 1.0f; identity[17] = 1.0f; identity[18] = 1.0f;
+
+    for (i = 0; i < 16; i++) {
+        if (identity[i] != identity[i]) return ae3d_vk_fail("identity is not finite");
+    }
+    if (!ae3d_vk_upload_buffer(identity, sizeof(identity), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                               &vk.identity_instance, &vk.identity_instance_memory)) {
+        return 0;
+    }
     return 1;
 }
 
@@ -1129,12 +1665,15 @@ int ae3d_vk_init(void *win, int width, int height) {
 
     if (!ae3d_vk_pick_device()) return 0;
     if (!ae3d_vk_create_device()) return 0;
+    vk.samples = ae3d_vk_pick_samples();
     if (!ae3d_vk_choose_surface_format()) return 0;
     if (!ae3d_vk_create_swapchain(width, height)) return 0;
     if (!ae3d_vk_create_render_pass()) return 0;
     if (!ae3d_vk_create_framebuffers()) return 0;
-    if (!ae3d_vk_create_pipeline()) return 0;
     if (!ae3d_vk_create_commands()) return 0;
+    if (!ae3d_vk_create_descriptors()) return 0;
+    if (!ae3d_vk_create_defaults()) return 0;
+    if (!ae3d_vk_create_pipeline()) return 0;
 
     snprintf(g_vk_error, sizeof(g_vk_error), "%s", "");
     vk.ready = 1;
@@ -1218,51 +1757,69 @@ int ae3d_vk_frame_begin(double r, double g, double b, double a) {
     scissor.extent = vk.extent;
     ae3d_vkCmdSetScissor(vk.command_buffers[vk.frame], 0, 1, &scissor);
 
-    ae3d_vkCmdBindPipeline(vk.command_buffers[vk.frame], VK_PIPELINE_BIND_POINT_GRAPHICS, vk.pipeline);
-
+    vk.uniforms[vk.frame].used = 0;
+    vk.draw_calls = 0;
     vk.recording = 1;
     return 1;
 }
 
+int ae3d_vk_draw_calls(void) { return vk.draw_calls; }
+
+int ae3d_vk_sample_count(void) { return (int)vk.samples; }
+
 // Vulkan clip space puts y downward and z in [0, 1]; the engine's matrices are
 // OpenGL-shaped, so the correction is folded into the MVP here rather than
-// forcing every caller to keep two projection matrices.
-static void ae3d_vk_clip_correct(const double *source, float *out) {
-    int column;
-    for (column = 0; column < 4; column++) {
-        out[column * 4 + 0] = (float)source[column * 4 + 0];
-        out[column * 4 + 1] = (float)(-source[column * 4 + 1]);
-        out[column * 4 + 2] = (float)(0.5 * (source[column * 4 + 2] + source[column * 4 + 3]));
-        out[column * 4 + 3] = (float)source[column * 4 + 3];
-    }
-}
 
-void ae3d_vk_draw_mesh(int handle, const double *mvp, double cr, double cg, double cb) {
-    ae3d_vk_push push;
-    VkDeviceSize offset = 0;
+// One draw takes a slice of the frame's uniform buffer, so the scene block the
+// caller has been filling is snapshotted per draw rather than shared.
+void ae3d_vk_draw(int handle, int texture_handle, int instance_handle, int instance_count) {
+    ae3d_vk_uniform_ring *ring;
+    VkDescriptorSet set;
+    VkDeviceSize offsets[1];
     ae3d_vk_mesh *mesh;
+    unsigned slot;
+    unsigned dynamic_offset;
 
     if (!vk.recording || handle <= 0 || handle > vk.mesh_capacity) return;
     mesh = &vk.meshes[handle - 1];
     if (!mesh->in_use || mesh->index_count == 0) return;
 
-    memset(&push, 0, sizeof(push));
-    ae3d_vk_clip_correct(mvp, push.mvp);
-    push.base_color[0] = (float)cr;
-    push.base_color[1] = (float)cg;
-    push.base_color[2] = (float)cb;
-    push.base_color[3] = 1.0f;
-    push.light[0] = 0.4f;
-    push.light[1] = 0.8f;
-    push.light[2] = 0.5f;
-    push.light[3] = 0.2f;
+    if (texture_handle < 1 || texture_handle > AE3D_VK_MAX_TEXTURES) texture_handle = vk.default_texture;
+    if (!vk.textures[texture_handle - 1].in_use) texture_handle = vk.default_texture;
 
-    ae3d_vkCmdPushConstants(vk.command_buffers[vk.frame], vk.pipeline_layout,
-                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                            0, sizeof(push), &push);
-    ae3d_vkCmdBindVertexBuffers(vk.command_buffers[vk.frame], 0, 1, &mesh->vertex_buffer, &offset);
+    ring = &vk.uniforms[vk.frame];
+    if (ring->used >= ring->capacity) return;
+    slot = ring->used++;
+    dynamic_offset = slot * ring->stride;
+    memcpy(ring->mapped + dynamic_offset, vk.scene.bytes, AE3D_VK_SCENE_SIZE);
+
+    set = ae3d_vk_set_for((int)vk.frame, texture_handle);
+    if (set == VK_NULL_HANDLE) return;
+
+    ae3d_vkCmdBindPipeline(vk.command_buffers[vk.frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
+                           vk.blend ? vk.pipeline_blend : vk.pipeline);
+    ae3d_vkCmdBindDescriptorSets(vk.command_buffers[vk.frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                 vk.pipeline_layout, 0, 1, &set, 1, &dynamic_offset);
+
+    offsets[0] = 0;
+    ae3d_vkCmdBindVertexBuffers(vk.command_buffers[vk.frame], 0, 1, &mesh->vertex_buffer, offsets);
+
+    if (instance_handle > 0 && instance_handle <= vk.mesh_capacity && instance_count > 0) {
+        ae3d_vk_mesh *instances = &vk.meshes[instance_handle - 1];
+        if (instances->in_use) {
+            ae3d_vkCmdBindVertexBuffers(vk.command_buffers[vk.frame], 1, 1,
+                                        &instances->vertex_buffer, offsets);
+        }
+    } else {
+        ae3d_vkCmdBindVertexBuffers(vk.command_buffers[vk.frame], 1, 1,
+                                    &vk.identity_instance, offsets);
+        instance_count = 1;
+    }
+
     ae3d_vkCmdBindIndexBuffer(vk.command_buffers[vk.frame], mesh->index_buffer, 0, VK_INDEX_TYPE_UINT32);
-    ae3d_vkCmdDrawIndexed(vk.command_buffers[vk.frame], mesh->index_count, 1, 0, 0, 0);
+    ae3d_vkCmdDrawIndexed(vk.command_buffers[vk.frame], mesh->index_count,
+                          (unsigned)instance_count, 0, 0, 0);
+    vk.draw_calls++;
 }
 
 int ae3d_vk_frame_end(void) {
@@ -1323,7 +1880,7 @@ int ae3d_vk_upload_mesh(void *mesh) {
     ae3d_vk_mesh *slot = NULL;
     int i, handle = 0;
 
-    if (!vk.ready) { ae3d_vk_fail("vulkan not initialised"); return 0; }
+    if (!vk.device) { ae3d_vk_fail("vulkan not initialised"); return 0; }
     if (!vertices || !indices || vertex_count <= 0 || index_count <= 0) {
         ae3d_vk_fail("mesh has no geometry");
         return 0;
@@ -1358,6 +1915,60 @@ int ae3d_vk_upload_mesh(void *mesh) {
     }
 
     slot->index_count = (unsigned)index_count;
+    slot->in_use = 1;
+    return handle;
+}
+
+// The instance stream is interleaved into the layout the pipeline declares: a
+// matrix then a colour, one vertex-input binding stepping per instance.
+int ae3d_vk_upload_instances(void *instances) {
+    const float *matrices = ae3d_inst_matrix_data(instances);
+    const float *colours = ae3d_inst_color_data(instances);
+    int count = ae3d_inst_count(instances);
+    int has_colours = ae3d_inst_has_colors(instances);
+    ae3d_vk_mesh *slot = NULL;
+    float *packed;
+    int i, handle = 0;
+
+    if (!vk.device || !matrices || count <= 0) { ae3d_vk_fail("no instances"); return 0; }
+
+    for (i = 0; i < vk.mesh_capacity; i++) {
+        if (!vk.meshes[i].in_use) { slot = &vk.meshes[i]; handle = i + 1; break; }
+    }
+    if (!slot) {
+        int grown = vk.mesh_capacity ? vk.mesh_capacity * 2 : 16;
+        ae3d_vk_mesh *fresh = (ae3d_vk_mesh *)realloc(vk.meshes, (size_t)grown * sizeof(ae3d_vk_mesh));
+        if (!fresh) { ae3d_vk_fail("out of memory"); return 0; }
+        memset(fresh + vk.mesh_capacity, 0, (size_t)(grown - vk.mesh_capacity) * sizeof(ae3d_vk_mesh));
+        vk.meshes = fresh;
+        slot = &vk.meshes[vk.mesh_capacity];
+        handle = vk.mesh_capacity + 1;
+        vk.mesh_capacity = grown;
+    }
+
+    packed = (float *)malloc((size_t)count * 20 * sizeof(float));
+    if (!packed) { ae3d_vk_fail("out of memory"); return 0; }
+    for (i = 0; i < count; i++) {
+        memcpy(packed + (size_t)i * 20, matrices + (size_t)i * 16, 16 * sizeof(float));
+        if (has_colours && colours) {
+            memcpy(packed + (size_t)i * 20 + 16, colours + (size_t)i * 3, 3 * sizeof(float));
+        } else {
+            packed[i * 20 + 16] = 1.0f;
+            packed[i * 20 + 17] = 1.0f;
+            packed[i * 20 + 18] = 1.0f;
+        }
+        packed[i * 20 + 19] = 0.0f;
+    }
+
+    if (!ae3d_vk_upload_buffer(packed, (VkDeviceSize)count * 20 * sizeof(float),
+                               VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                               &slot->vertex_buffer, &slot->vertex_memory)) {
+        free(packed);
+        return 0;
+    }
+    free(packed);
+
+    slot->index_count = 0;
     slot->in_use = 1;
     return handle;
 }

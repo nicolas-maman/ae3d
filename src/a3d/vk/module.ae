@@ -1,18 +1,24 @@
 // Vulkan backend.
 //
+// Feature for feature with the OpenGL backend, and running the same lighting
+// model: the Vulkan shaders are generated from the OpenGL ones, so there is one
+// source for the PBR pass rather than two that drift.
+//
 // The loader is opened at runtime, so a program built with this backend still
-// starts on a machine with no Vulkan driver: `available()` reports false and the
-// engine says so instead of aborting.
+// starts where no driver exists: available() reports false and says why.
 
 import std.list
 import std.heap
+import std.string
 import a3d.core
+import a3d.vkscene
 
 exports (
     VKRenderer,
     renderer_new, renderer_free, backend,
     available, device_name, last_error,
-    renderer_model_count, renderer_draw_calls, renderer_set_clear_color
+    renderer_model_count, renderer_draw_calls, renderer_set_clear_color,
+    renderer_load_texture, renderer_sample_count
 )
 
 extern ae3d_vk_available() -> int
@@ -24,12 +30,40 @@ extern ae3d_vk_resize(width: int, height: int)
 extern ae3d_vk_frame_begin(r: float, g: float, b: float, a: float) -> int
 extern ae3d_vk_frame_end() -> int
 extern ae3d_vk_upload_mesh(mesh: ptr) -> int
+extern ae3d_vk_upload_instances(instances: ptr) -> int
 extern ae3d_vk_free_mesh(handle: int)
-extern ae3d_vk_draw_mesh(handle: int, mvp: ptr, cr: float, cg: float, cb: float)
+extern ae3d_vk_texture_create(width: int, height: int, rgba: ptr) -> int
+extern ae3d_vk_texture_destroy(handle: int)
+extern ae3d_vk_scene_set_float(offset: int, value: float)
+extern ae3d_vk_scene_set_int(offset: int, value: int)
+extern ae3d_vk_scene_set_vec3(offset: int, x: float, y: float, z: float)
+extern ae3d_vk_scene_set_mat4(offset: int, m: ptr)
+extern ae3d_vk_scene_set_view_projection(m: ptr)
+extern ae3d_vk_set_blend(on: int)
+extern ae3d_vk_draw(mesh: int, texture: int, instances: int, instance_count: int)
+extern ae3d_vk_draw_calls() -> int
+extern ae3d_vk_sample_count() -> int
+extern ae3d_image_load(path: string) -> ptr
+extern ae3d_image_free(img: ptr)
+extern ae3d_image_width(img: ptr) -> int
+extern ae3d_image_height(img: ptr) -> int
+extern ae3d_image_pixels(img: ptr) -> ptr
+extern ae3d_image_error() -> string
+
+// Named apart from the OpenGL backend's equivalent: struct names are global
+// across every imported module, so two backends cannot both call it the same
+// thing.
+struct VulkanTexture {
+    path: string
+    handle: int
+    refs: int
+}
 
 struct VKRenderer {
     models: ptr
-    handles: ptr
+    lights: ptr
+    textures: ptr
+    frustum: ptr
     initialized: bool
     last_draw_calls: int
     clear_r: float
@@ -49,10 +83,16 @@ last_error() -> string {
     return ae3d_vk_last_error()
 }
 
+renderer_sample_count() -> int {
+    return ae3d_vk_sample_count()
+}
+
 renderer_new() -> *VKRenderer {
     r = heap.new(VKRenderer)
     r.models = list.new()
-    r.handles = list.new()
+    r.lights = list.new()
+    r.textures = list.new()
+    r.frustum = core.frustum_new()
     return r
 }
 
@@ -60,7 +100,21 @@ renderer_free(r: *VKRenderer) {
     if r == null { return }
     if r.initialized { renderer_cleanup(r) }
     if r.models != null { list.free(r.models) }
-    if r.handles != null { list.free(r.handles) }
+    if r.lights != null { list.free(r.lights) }
+    if r.textures != null {
+        count = list.size(r.textures)
+        i = 0
+        while i < count {
+            entry = list.get_raw(r.textures, i) as *VulkanTexture
+            if entry != null {
+                core.free_owned(entry.path)
+                heap.free(entry)
+            }
+            i = i + 1
+        }
+        list.free(r.textures)
+    }
+    if r.frustum != null { core.frustum_free(r.frustum) }
     heap.free(r)
 }
 
@@ -88,28 +142,85 @@ renderer_init(r: *VKRenderer, window: ptr, width: int, height: int) -> int {
         println("aether3d: Vulkan init failed (${ae3d_vk_last_error()})")
         return 0
     }
-    println("aether3d: Vulkan on ${ae3d_vk_device_name()}")
+    println("aether3d: Vulkan on ${ae3d_vk_device_name()}, ${ae3d_vk_sample_count()}x MSAA")
     r.initialized = true
     return 1
 }
 
+renderer_load_texture(r: *VKRenderer, path: string) -> int {
+    if path == "" { return 0 }
+
+    count = list.size(r.textures)
+    i = 0
+    while i < count {
+        entry = list.get_raw(r.textures, i) as *VulkanTexture
+        if entry != null && string.equals(entry.path, path) == 1 {
+            entry.refs = entry.refs + 1
+            return entry.handle
+        }
+        i = i + 1
+    }
+
+    image = ae3d_image_load(path)
+    if image == null {
+        println("aether3d: texture load failed: ${ae3d_image_error()}")
+        return 0
+    }
+    handle = ae3d_vk_texture_create(ae3d_image_width(image), ae3d_image_height(image),
+                                    ae3d_image_pixels(image))
+    ae3d_image_free(image)
+    if handle == 0 { return 0 }
+
+    entry = heap.new(VulkanTexture)
+    entry.path = core.set_owned(null, path)
+    entry.handle = handle
+    entry.refs = 1
+    list.add_raw(r.textures, entry)
+    return handle
+}
+
 renderer_add_model(r: *VKRenderer, m: *Model) {
     if m == null || !r.initialized { return }
+
     handle = ae3d_vk_upload_mesh(m.mesh)
     if handle == 0 {
         println("aether3d: Vulkan mesh upload failed (${ae3d_vk_last_error()})")
         return
     }
     m.vbo = handle
+
+    if m.is_instanced && core.model_instance_count(m) > 0 {
+        m.instance_vbo = ae3d_vk_upload_instances(m.instances)
+    }
+
+    resolve_textures(r, m)
     list.add_raw(r.models, m)
+}
+
+resolve_textures(r: *VKRenderer, m: *Model) {
+    groups = core.model_group_count(m)
+    if groups > 0 {
+        i = 0
+        while i < groups {
+            group = core.model_group(m, i)
+            if group != null && group.material != null { resolve_one(r, group.material) }
+            i = i + 1
+        }
+        return
+    }
+    if m.material != null { resolve_one(r, m.material) }
+}
+
+resolve_one(r: *VKRenderer, material: *Material) {
+    if core.text(material.texture_path) == "" || material.texture_id != 0 { return }
+    material.texture_id = renderer_load_texture(r, material.texture_path)
 }
 
 renderer_remove_model(r: *VKRenderer, m: *Model) {
     if m == null { return }
-    if m.vbo != 0 {
-        ae3d_vk_free_mesh(m.vbo)
-        m.vbo = 0
-    }
+    if m.vbo != 0 { ae3d_vk_free_mesh(m.vbo) ; m.vbo = 0 }
+    if m.instance_vbo != 0 { ae3d_vk_free_mesh(m.instance_vbo) ; m.instance_vbo = 0 }
+
     count = list.size(r.models)
     i = 0
     while i < count {
@@ -121,36 +232,130 @@ renderer_remove_model(r: *VKRenderer, m: *Model) {
     }
 }
 
+// The same uniforms the OpenGL renderer sets, written into the block the
+// generated shader reads.
+set_scene_uniforms(m: *Model, light: *Light, cam: *Camera) {
+    ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &m.model_matrix)
+    ae3d_vk_scene_set_vec3(vkscene.OFF_VIEWPOS, cam.position.x, cam.position.y, cam.position.z)
+
+    instanced = 0
+    if m.is_instanced && core.model_instance_count(m) > 0 { instanced = 1 }
+    ae3d_vk_scene_set_int(vkscene.OFF_ISINSTANCED, instanced)
+
+    if light != null {
+        ae3d_vk_scene_set_vec3(vkscene.OFF_LIGHT_POSITION, light.position.x, light.position.y, light.position.z)
+        ae3d_vk_scene_set_vec3(vkscene.OFF_LIGHT_COLOR, light.color.x, light.color.y, light.color.z)
+        ae3d_vk_scene_set_float(vkscene.OFF_LIGHT_INTENSITY, light.intensity)
+        ae3d_vk_scene_set_float(vkscene.OFF_LIGHT_AMBIENTSTRENGTH, light.ambient_strength)
+        ae3d_vk_scene_set_float(vkscene.OFF_LIGHT_TEMPERATURE, light.temperature)
+        directional = 0
+        if light.mode == core.MODE_DIRECTIONAL { directional = 1 }
+        ae3d_vk_scene_set_int(vkscene.OFF_LIGHT_ISDIRECTIONAL, directional)
+        ae3d_vk_scene_set_vec3(vkscene.OFF_LIGHT_DIRECTION, light.direction.x, light.direction.y, light.direction.z)
+        ae3d_vk_scene_set_float(vkscene.OFF_LIGHT_CONSTANTATTEN, light.constant_atten)
+        ae3d_vk_scene_set_float(vkscene.OFF_LIGHT_LINEARATTEN, light.linear_atten)
+        ae3d_vk_scene_set_float(vkscene.OFF_LIGHT_QUADRATICATTEN, light.quadratic_atten)
+    }
+}
+
+set_material_uniforms(material: *Material) {
+    if material == null {
+        ae3d_vk_scene_set_vec3(vkscene.OFF_DIFFUSECOLOR, 1.0, 1.0, 1.0)
+        ae3d_vk_scene_set_vec3(vkscene.OFF_SPECULARCOLOR, 1.0, 1.0, 1.0)
+        ae3d_vk_scene_set_float(vkscene.OFF_SHININESS, 32.0)
+        ae3d_vk_scene_set_float(vkscene.OFF_METALLIC, 0.0)
+        ae3d_vk_scene_set_float(vkscene.OFF_ROUGHNESS, 0.5)
+        ae3d_vk_scene_set_float(vkscene.OFF_EXPOSURE, 1.0)
+        ae3d_vk_scene_set_float(vkscene.OFF_MATERIALALPHA, 1.0)
+        return
+    }
+    ae3d_vk_scene_set_vec3(vkscene.OFF_DIFFUSECOLOR, material.diffuse.x, material.diffuse.y, material.diffuse.z)
+    ae3d_vk_scene_set_vec3(vkscene.OFF_SPECULARCOLOR, material.specular.x, material.specular.y, material.specular.z)
+    ae3d_vk_scene_set_float(vkscene.OFF_SHININESS, material.shininess)
+    ae3d_vk_scene_set_float(vkscene.OFF_METALLIC, material.metallic)
+    ae3d_vk_scene_set_float(vkscene.OFF_ROUGHNESS, material.roughness)
+    ae3d_vk_scene_set_float(vkscene.OFF_EXPOSURE, material.exposure)
+    ae3d_vk_scene_set_float(vkscene.OFF_MATERIALALPHA, material.alpha)
+}
+
 renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     if !r.initialized { return }
-    r.last_draw_calls = 0
+
+    active_light = light
+    if list.size(r.lights) > 0 { active_light = list.get_raw(r.lights, 0) as *Light }
 
     if ae3d_vk_frame_begin(r.clear_r, r.clear_g, r.clear_b, 1.0) != 1 { return }
 
     view_projection = core.camera_view_projection(cam)
-    count = list.size(r.models)
-    i = 0
-    while i < count {
-        m = list.get_raw(r.models, i) as *Model
-        if m != null && m.visible && m.vbo != 0 {
-            if m.is_dirty {
-                core.model_update_matrix(m)
-                m.is_dirty = false
-            }
-            mvp = core.mat4_mul(view_projection, m.model_matrix)
-            colour = core.vec3(1.0, 1.0, 1.0)
-            if m.material != null { colour = m.material.diffuse }
-            ae3d_vk_draw_mesh(m.vbo, &mvp, colour.x, colour.y, colour.z)
-            r.last_draw_calls = r.last_draw_calls + 1
-        }
-        i = i + 1
+    ae3d_vk_scene_set_view_projection(&view_projection)
+
+    if core.frustum_culling() && core.frustum_dirty() {
+        core.camera_fill_frustum(cam, r.frustum)
+        core.clear_frustum_dirty()
     }
 
+    count = list.size(r.models)
+    pass = 0
+    while pass < 2 {
+        i = 0
+        while i < count {
+            m = list.get_raw(r.models, i) as *Model
+            draw_model(r, m, active_light, cam, pass == 1)
+            i = i + 1
+        }
+        pass = pass + 1
+    }
+
+    r.last_draw_calls = ae3d_vk_draw_calls()
     ae3d_vk_frame_end()
 }
 
-renderer_load_texture(r: *VKRenderer, path: string) -> int {
-    return 0
+draw_model(r: *VKRenderer, m: *Model, light: *Light, cam: *Camera, transparent_pass: bool) {
+    if m == null || !m.visible || m.vbo == 0 { return }
+
+    if core.frustum_culling() &&
+       !core.frustum_sphere_visible(r.frustum, m.bounding_center, m.bounding_radius) {
+        return
+    }
+
+    if m.is_dirty {
+        core.model_update_matrix(m)
+        m.is_dirty = false
+    }
+
+    instances = 0
+    if m.is_instanced { instances = core.model_instance_count(m) }
+
+    alpha = 1.0
+    if m.material != null { alpha = m.material.alpha }
+    is_transparent = alpha < 0.99
+    if is_transparent != transparent_pass { return }
+
+    set_scene_uniforms(m, light, cam)
+    blend = 0
+    if is_transparent { blend = 1 }
+    ae3d_vk_set_blend(blend)
+
+    groups = core.model_group_count(m)
+    if groups > 0 {
+        i = 0
+        while i < groups {
+            group = core.model_group(m, i)
+            if group != null {
+                set_material_uniforms(group.material)
+                texture = 0
+                if group.material != null { texture = group.material.texture_id }
+                ae3d_vk_draw(m.vbo, texture, m.instance_vbo, instances)
+            }
+            i = i + 1
+        }
+        return
+    }
+
+    set_material_uniforms(m.material)
+    texture = 0
+    if m.material != null { texture = m.material.texture_id }
+    ae3d_vk_draw(m.vbo, texture, m.instance_vbo, instances)
 }
 
 renderer_set_skybox(r: *VKRenderer, skybox: ptr) {
@@ -166,9 +371,9 @@ renderer_cleanup(r: *VKRenderer) {
     i = 0
     while i < count {
         m = list.get_raw(r.models, i) as *Model
-        if m != null && m.vbo != 0 {
-            ae3d_vk_free_mesh(m.vbo)
-            m.vbo = 0
+        if m != null {
+            if m.vbo != 0 { ae3d_vk_free_mesh(m.vbo) ; m.vbo = 0 }
+            if m.instance_vbo != 0 { ae3d_vk_free_mesh(m.instance_vbo) ; m.instance_vbo = 0 }
         }
         i = i + 1
     }
