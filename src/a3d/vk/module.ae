@@ -1,0 +1,192 @@
+// Vulkan backend.
+//
+// The loader is opened at runtime, so a program built with this backend still
+// starts on a machine with no Vulkan driver: `available()` reports false and the
+// engine says so instead of aborting.
+
+import std.list
+import std.heap
+import a3d.core
+
+exports (
+    VKRenderer,
+    renderer_new, renderer_free, backend,
+    available, device_name, last_error,
+    renderer_model_count, renderer_draw_calls, renderer_set_clear_color
+)
+
+extern ae3d_vk_available() -> int
+extern ae3d_vk_device_name() -> string
+extern ae3d_vk_last_error() -> string
+extern ae3d_vk_init(win: ptr, width: int, height: int) -> int
+extern ae3d_vk_shutdown()
+extern ae3d_vk_resize(width: int, height: int)
+extern ae3d_vk_frame_begin(r: float, g: float, b: float, a: float) -> int
+extern ae3d_vk_frame_end() -> int
+extern ae3d_vk_upload_mesh(mesh: ptr) -> int
+extern ae3d_vk_free_mesh(handle: int)
+extern ae3d_vk_draw_mesh(handle: int, mvp: ptr, cr: float, cg: float, cb: float)
+
+struct VKRenderer {
+    models: ptr
+    handles: ptr
+    initialized: bool
+    last_draw_calls: int
+    clear_r: float
+    clear_g: float
+    clear_b: float
+}
+
+available() -> bool {
+    return ae3d_vk_available() == 1
+}
+
+device_name() -> string {
+    return ae3d_vk_device_name()
+}
+
+last_error() -> string {
+    return ae3d_vk_last_error()
+}
+
+renderer_new() -> *VKRenderer {
+    r = heap.new(VKRenderer)
+    r.models = list.new()
+    r.handles = list.new()
+    return r
+}
+
+renderer_free(r: *VKRenderer) {
+    if r == null { return }
+    if r.initialized { renderer_cleanup(r) }
+    if r.models != null { list.free(r.models) }
+    if r.handles != null { list.free(r.handles) }
+    heap.free(r)
+}
+
+backend(r: *VKRenderer) -> Backend {
+    return Backend {
+        state: r,
+        name: "vulkan",
+        init: renderer_init as fn(ptr, ptr, int, int) -> int,
+        render: renderer_render as fn(ptr, ptr, ptr),
+        add_model: renderer_add_model as fn(ptr, ptr),
+        remove_model: renderer_remove_model as fn(ptr, ptr),
+        load_texture: renderer_load_texture as fn(ptr, string) -> int,
+        set_skybox: renderer_set_skybox as fn(ptr, ptr),
+        update_viewport: renderer_update_viewport as fn(ptr, int, int),
+        cleanup: renderer_cleanup as fn(ptr)
+    }
+}
+
+renderer_init(r: *VKRenderer, window: ptr, width: int, height: int) -> int {
+    if ae3d_vk_available() != 1 {
+        println("aether3d: no Vulkan driver (${ae3d_vk_last_error()})")
+        return 0
+    }
+    if ae3d_vk_init(window, width, height) != 1 {
+        println("aether3d: Vulkan init failed (${ae3d_vk_last_error()})")
+        return 0
+    }
+    println("aether3d: Vulkan on ${ae3d_vk_device_name()}")
+    r.initialized = true
+    return 1
+}
+
+renderer_add_model(r: *VKRenderer, m: *Model) {
+    if m == null || !r.initialized { return }
+    handle = ae3d_vk_upload_mesh(m.mesh)
+    if handle == 0 {
+        println("aether3d: Vulkan mesh upload failed (${ae3d_vk_last_error()})")
+        return
+    }
+    m.vbo = handle
+    list.add_raw(r.models, m)
+}
+
+renderer_remove_model(r: *VKRenderer, m: *Model) {
+    if m == null { return }
+    if m.vbo != 0 {
+        ae3d_vk_free_mesh(m.vbo)
+        m.vbo = 0
+    }
+    count = list.size(r.models)
+    i = 0
+    while i < count {
+        if list.get_raw(r.models, i) == m {
+            list.remove(r.models, i)
+            return
+        }
+        i = i + 1
+    }
+}
+
+renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
+    if !r.initialized { return }
+    r.last_draw_calls = 0
+
+    if ae3d_vk_frame_begin(r.clear_r, r.clear_g, r.clear_b, 1.0) != 1 { return }
+
+    view_projection = core.camera_view_projection(cam)
+    count = list.size(r.models)
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        if m != null && m.visible && m.vbo != 0 {
+            if m.is_dirty {
+                core.model_update_matrix(m)
+                m.is_dirty = false
+            }
+            mvp = core.mat4_mul(view_projection, m.model_matrix)
+            colour = core.vec3(1.0, 1.0, 1.0)
+            if m.material != null { colour = m.material.diffuse }
+            ae3d_vk_draw_mesh(m.vbo, &mvp, colour.x, colour.y, colour.z)
+            r.last_draw_calls = r.last_draw_calls + 1
+        }
+        i = i + 1
+    }
+
+    ae3d_vk_frame_end()
+}
+
+renderer_load_texture(r: *VKRenderer, path: string) -> int {
+    return 0
+}
+
+renderer_set_skybox(r: *VKRenderer, skybox: ptr) {
+}
+
+renderer_update_viewport(r: *VKRenderer, width: int, height: int) {
+    if r.initialized { ae3d_vk_resize(width, height) }
+}
+
+renderer_cleanup(r: *VKRenderer) {
+    if r == null || !r.initialized { return }
+    count = list.size(r.models)
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        if m != null && m.vbo != 0 {
+            ae3d_vk_free_mesh(m.vbo)
+            m.vbo = 0
+        }
+        i = i + 1
+    }
+    list.clear(r.models)
+    ae3d_vk_shutdown()
+    r.initialized = false
+}
+
+renderer_model_count(r: *VKRenderer) -> int {
+    return list.size(r.models)
+}
+
+renderer_draw_calls(r: *VKRenderer) -> int {
+    return r.last_draw_calls
+}
+
+renderer_set_clear_color(r: *VKRenderer, red: float, green: float, blue: float) {
+    r.clear_r = red
+    r.clear_g = green
+    r.clear_b = blue
+}

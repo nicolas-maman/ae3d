@@ -1,0 +1,138 @@
+import a3d.core
+
+extern fabs(x: float) -> float
+
+var failures = 0
+
+check(name: string, got: float, want: float) {
+    if fabs(got - want) > 0.000000001 {
+        println("FAIL ${name}: got ${got} want ${want}")
+        failures = failures + 1
+    }
+}
+
+check_true(name: string, condition: bool) {
+    if !condition {
+        println("FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+test_vectors() {
+    a = core.vec3(1.0, 2.0, 3.0)
+    b = core.vec3(4.0, 5.0, 6.0)
+
+    check("dot", core.v3_dot(a, b), 32.0)
+
+    c = core.v3_cross(a, b)
+    check("cross.x", c.x, 0.0 - 3.0)
+    check("cross.y", c.y, 6.0)
+    check("cross.z", c.z, 0.0 - 3.0)
+
+    check("len", core.v3_len(core.vec3(3.0, 4.0, 0.0)), 5.0)
+
+    n = core.v3_normalize(core.vec3(0.0, 0.0, 7.0))
+    check("normalize.z", n.z, 1.0)
+
+    z = core.v3_normalize(core.vec3(0.0, 0.0, 0.0))
+    check("normalize zero", core.v3_len(z), 0.0)
+
+    s = core.v3_sub(b, a)
+    check("sub.x", s.x, 3.0)
+    check("distance", core.v3_distance(core.vec3(0.0, 0.0, 0.0), core.vec3(0.0, 3.0, 4.0)), 5.0)
+}
+
+test_quaternions() {
+    q = core.quat_rotate(core.deg_to_rad(90.0), core.vec3(0.0, 1.0, 0.0))
+    rotated = core.quat_apply(q, core.vec3(1.0, 0.0, 0.0))
+    check("quat yaw90 x", rotated.x, 0.0)
+    check("quat yaw90 z", rotated.z, 0.0 - 1.0)
+
+    ident = core.quat_ident()
+    kept = core.quat_apply(ident, core.vec3(1.0, 2.0, 3.0))
+    check("quat ident y", kept.y, 2.0)
+
+    // Rotating by quat_mat4 must agree with rotating by the quaternion itself.
+    m = core.quat_mat4(q)
+    via_matrix = core.mat4_transform_point(m, core.vec3(1.0, 0.0, 0.0))
+    check("quat_mat4 x", via_matrix.x, rotated.x)
+    check("quat_mat4 z", via_matrix.z, rotated.z)
+
+    combined = core.quat_mul(q, q)
+    twice = core.quat_apply(combined, core.vec3(1.0, 0.0, 0.0))
+    check("quat 180 x", twice.x, 0.0 - 1.0)
+}
+
+test_matrices() {
+    id = core.mat4_ident()
+    t = core.mat4_translate(5.0, 6.0, 7.0)
+    p = core.mat4_transform_point(t, core.vec3(1.0, 1.0, 1.0))
+    check("translate.x", p.x, 6.0)
+    check("translate.z", p.z, 8.0)
+
+    s = core.mat4_scale(2.0, 3.0, 4.0)
+    sp = core.mat4_transform_point(s, core.vec3(1.0, 1.0, 1.0))
+    check("scale.y", sp.y, 3.0)
+
+    // Translation applied after scale: TRS ordering the renderer relies on.
+    trs = core.mat4_mul(t, s)
+    tp = core.mat4_transform_point(trs, core.vec3(1.0, 1.0, 1.0))
+    check("trs.x", tp.x, 7.0)
+    check("trs.y", tp.y, 9.0)
+    check("trs.z", tp.z, 11.0)
+
+    mi = core.mat4_mul(trs, core.mat4_inverse(trs))
+    check("inverse m0", mi.m0, 1.0)
+    check("inverse m5", mi.m5, 1.0)
+    check("inverse m10", mi.m10, 1.0)
+    check("inverse m15", mi.m15, 1.0)
+    check("inverse m12", mi.m12, 0.0)
+    check("inverse m1", mi.m1, 0.0)
+
+    identity_mul = core.mat4_mul(id, trs)
+    check("ident mul", identity_mul.m12, trs.m12)
+
+    persp = core.mat4_perspective(core.deg_to_rad(90.0), 1.0, 1.0, 101.0)
+    check("perspective m0", persp.m0, 1.0)
+    check("perspective m5", persp.m5, 1.0)
+    check("perspective m11", persp.m11, 0.0 - 1.0)
+    check("perspective m15", persp.m15, 0.0)
+    check("perspective m10", persp.m10, 102.0 / (0.0 - 100.0))
+
+    // A point on the near plane maps to NDC z = -1 after the perspective divide.
+    near_point = core.mat4_mul_v4(persp, core.vec4(0.0, 0.0, 0.0 - 1.0, 1.0))
+    check("near ndc z", near_point.z / near_point.w, 0.0 - 1.0)
+    far_point = core.mat4_mul_v4(persp, core.vec4(0.0, 0.0, 0.0 - 101.0, 1.0))
+    check("far ndc z", far_point.z / far_point.w, 1.0)
+
+    view = core.mat4_look_at(core.vec3(0.0, 0.0, 10.0),
+                              core.vec3(0.0, 0.0, 0.0),
+                              core.vec3(0.0, 1.0, 0.0))
+    eye_space = core.mat4_transform_point(view, core.vec3(0.0, 0.0, 0.0))
+    check("lookat origin z", eye_space.z, 0.0 - 10.0)
+    right = core.mat4_transform_point(view, core.vec3(1.0, 0.0, 0.0))
+    check("lookat right x", right.x, 1.0)
+
+    inverse_view = core.mat4_inverse(view)
+    back = core.mat4_transform_point(inverse_view, eye_space)
+    check("lookat roundtrip", core.v3_len(back), 0.0)
+
+    transposed = core.mat4_transpose(trs)
+    check("transpose", transposed.m3, trs.m12)
+
+    col = core.mat4_col(trs, 3)
+    check("col3.x", col.x, 5.0)
+    check_true("at == field", core.mat4_at(trs, 3, 1) == trs.m13)
+}
+
+main() {
+    test_vectors()
+    test_quaternions()
+    test_matrices()
+
+    if failures == 0 {
+        println("gmath: all checks passed")
+    } else {
+        println("gmath: ${failures} failure(s)")
+    }
+}

@@ -1,0 +1,996 @@
+// OpenGL 4.1 core backend.
+//
+// Uniform locations are resolved once per program into named slots rather than
+// looked up (or hashed) per draw: `ProgramSlots` is filled the first time a
+// program is seen and reused for every frame afterwards. Custom per-model
+// uniforms cache their own location on the `Uniform` that owns them.
+//
+// Every struct here holds primitives and raw handles only, so this module never
+// depends on another module's struct layout.
+
+import std.list
+import std.heap
+import std.string
+import a3d.core
+import a3d.shaders
+
+exports (
+    GLRenderer, ProgramSlots, TextureEntry,
+    renderer_new, renderer_free, backend,
+    renderer_add_light, renderer_remove_light, renderer_model_count, renderer_model,
+    renderer_draw_calls, renderer_instance_count,
+    renderer_set_clear_color, renderer_set_fxaa, renderer_set_bloom, renderer_set_msaa,
+    renderer_set_bloom_params, renderer_default_program,
+    renderer_load_texture, renderer_release_texture, renderer_texture_count,
+    read_pixel
+)
+
+extern ae3d_gl_load() -> int
+extern ae3d_gl_version() -> string
+extern ae3d_gl_renderer() -> string
+extern ae3d_gl_viewport(x: int, y: int, w: int, h: int)
+extern ae3d_gl_clear_color(r: float, g: float, b: float, a: float)
+extern ae3d_gl_clear(color: int, depth: int)
+extern ae3d_gl_clear_depth(d: float)
+extern ae3d_gl_set_depth_test(on: int)
+extern ae3d_gl_set_depth_mask(on: int)
+extern ae3d_gl_set_face_culling(on: int)
+extern ae3d_gl_set_blend(on: int)
+extern ae3d_gl_set_multisample(on: int)
+extern ae3d_gl_set_wireframe(on: int)
+extern ae3d_gl_viewport_width() -> int
+extern ae3d_gl_viewport_height() -> int
+extern ae3d_gl_vao_create() -> int
+extern ae3d_gl_vao_bind(vao: int)
+extern ae3d_gl_vao_delete(vao: int)
+extern ae3d_gl_buffer_create() -> int
+extern ae3d_gl_buffer_delete(buffer: int)
+extern ae3d_gl_upload_mesh(mesh: ptr, vbo: int, ebo: int)
+extern ae3d_gl_update_mesh_vertices(mesh: ptr, vbo: int)
+extern ae3d_gl_setup_vertex_attribs()
+extern ae3d_gl_setup_instance_attribs(inst: ptr, matrix_vbo: int, color_vbo: int)
+extern ae3d_gl_update_instances(inst: ptr, matrix_vbo: int, capacity_bytes: int) -> int
+extern ae3d_gl_draw_elements(count: int, byte_offset: int)
+extern ae3d_gl_draw_elements_instanced(count: int, byte_offset: int, instances: int)
+extern ae3d_gl_draw_arrays(first: int, count: int)
+extern ae3d_gl_program_create(vertex_src: string, fragment_src: string) -> int
+extern ae3d_gl_program_delete(program: int)
+extern ae3d_gl_program_use(program: int)
+extern ae3d_gl_program_log() -> string
+extern ae3d_gl_uniform_location(program: int, name: string) -> int
+extern ae3d_gl_uniform_int(loc: int, v: int)
+extern ae3d_gl_uniform_float(loc: int, v: float)
+extern ae3d_gl_uniform_vec2(loc: int, x: float, y: float)
+extern ae3d_gl_uniform_vec3(loc: int, x: float, y: float, z: float)
+extern ae3d_gl_uniform_mat4(loc: int, m: ptr)
+extern ae3d_gl_uniform_float_array(loc: int, arr: ptr)
+extern ae3d_gl_uniform_vec3_array(loc: int, arr: ptr)
+extern ae3d_gl_texture_from_image(img: ptr, srgb: int, mipmap: int) -> int
+extern ae3d_gl_texture_delete(texture: int)
+extern ae3d_gl_texture_bind(unit: int, texture: int)
+extern ae3d_gl_fbo_create() -> int
+extern ae3d_gl_fbo_bind(fbo: int)
+extern ae3d_gl_fbo_delete(fbo: int)
+extern ae3d_gl_fbo_attach_color(fbo: int, width: int, height: int, hdr: int) -> int
+extern ae3d_gl_fbo_attach_depth(fbo: int, width: int, height: int) -> int
+extern ae3d_gl_renderbuffer_delete(rbo: int)
+extern ae3d_gl_fbo_complete() -> int
+extern ae3d_gl_read_pixel(x: int, y: int) -> int
+extern ae3d_image_load(path: string) -> ptr
+extern ae3d_image_solid(width: int, height: int, r: int, g: int, b: int, a: int) -> ptr
+extern ae3d_image_free(img: ptr)
+extern ae3d_image_error() -> string
+
+const MAX_FBO_DIMENSION = 8192
+
+struct ProgramSlots {
+    program: int
+    view_projection: int
+    model: int
+    light_position: int
+    light_color: int
+    light_intensity: int
+    light_ambient: int
+    light_temperature: int
+    light_is_directional: int
+    light_direction: int
+    light_constant: int
+    light_linear: int
+    light_quadratic: int
+    compat_light_pos: int
+    compat_light_color: int
+    compat_light_intensity: int
+    compat_light_direction: int
+    view_pos: int
+    diffuse_color: int
+    specular_color: int
+    shininess: int
+    metallic: int
+    roughness: int
+    exposure: int
+    material_alpha: int
+    texture_sampler: int
+    is_instanced: int
+}
+
+struct TextureEntry {
+    path: string
+    id: int
+    refs: int
+    width: int
+    height: int
+}
+
+struct GLRenderer {
+    models: ptr
+    lights: ptr
+    programs: ptr
+    textures: ptr
+    frustum: ptr
+    skybox: ptr
+
+    default_program: int
+    fxaa_program: int
+    bloom_program: int
+    passthrough_program: int
+    current_program: int
+    default_texture: int
+
+    face_culling_state: bool
+    depth_test_state: bool
+    blend_state: bool
+    wireframe_state: bool
+    initialized: bool
+
+    last_draw_calls: int
+
+    clear_r: float
+    clear_g: float
+    clear_b: float
+
+    enable_fxaa: bool
+    enable_bloom: bool
+    enable_msaa: bool
+    bloom_threshold: float
+    bloom_intensity: float
+
+    post_fbo: int
+    post_texture: int
+    post_depth: int
+    bloom_fbo: int
+    bloom_texture: int
+    screen_vao: int
+    screen_vbo: int
+    screen_mesh: ptr
+
+    screen_width: int
+    screen_height: int
+    viewport_width: int
+    viewport_height: int
+}
+
+renderer_new() -> *GLRenderer {
+    r = heap.new(GLRenderer)
+    r.models = list.new()
+    r.lights = list.new()
+    r.programs = list.new()
+    r.textures = list.new()
+    r.frustum = core.frustum_new()
+    r.clear_r = 0.0
+    r.clear_g = 0.0
+    r.clear_b = 0.0
+    r.enable_msaa = true
+    r.bloom_threshold = 0.8
+    r.bloom_intensity = 0.4
+    r.depth_test_state = true
+    return r
+}
+
+renderer_free(r: *GLRenderer) {
+    if r == null { return }
+    renderer_cleanup(r)
+    if r.models != null { list.free(r.models) }
+    if r.lights != null { list.free(r.lights) }
+    if r.programs != null {
+        count = list.size(r.programs)
+        i = 0
+        while i < count {
+            slots = list.get_raw(r.programs, i) as *ProgramSlots
+            if slots != null { heap.free(slots) }
+            i = i + 1
+        }
+        list.free(r.programs)
+    }
+    if r.textures != null {
+        count = list.size(r.textures)
+        i = 0
+        while i < count {
+            entry = list.get_raw(r.textures, i) as *TextureEntry
+            if entry != null { heap.free(entry) }
+            i = i + 1
+        }
+        list.free(r.textures)
+    }
+    if r.frustum != null { core.frustum_free(r.frustum) }
+    if r.screen_mesh != null { core.mesh_destroy(r.screen_mesh) }
+    heap.free(r)
+}
+
+backend(r: *GLRenderer) -> Backend {
+    return Backend {
+        state: r,
+        name: "opengl",
+        init: renderer_init as fn(ptr, ptr, int, int) -> int,
+        render: renderer_render as fn(ptr, ptr, ptr),
+        add_model: renderer_add_model as fn(ptr, ptr),
+        remove_model: renderer_remove_model as fn(ptr, ptr),
+        load_texture: renderer_load_texture as fn(ptr, string) -> int,
+        set_skybox: renderer_set_skybox as fn(ptr, ptr),
+        update_viewport: renderer_update_viewport as fn(ptr, int, int),
+        cleanup: renderer_cleanup as fn(ptr)
+    }
+}
+
+compile_program(vertex_source: string, fragment_source: string, label: string) -> int {
+    program = ae3d_gl_program_create(vertex_source, fragment_source)
+    if program == 0 {
+        println("aether3d: ${label} program failed: ${ae3d_gl_program_log()}")
+    }
+    return program
+}
+
+slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
+    count = list.size(r.programs)
+    i = 0
+    while i < count {
+        existing = list.get_raw(r.programs, i) as *ProgramSlots
+        if existing != null && existing.program == program { return existing }
+        i = i + 1
+    }
+
+    s = heap.new(ProgramSlots)
+    s.program = program
+    s.view_projection = ae3d_gl_uniform_location(program, "viewProjection")
+    s.model = ae3d_gl_uniform_location(program, "model")
+    s.light_position = ae3d_gl_uniform_location(program, "light.position")
+    s.light_color = ae3d_gl_uniform_location(program, "light.color")
+    s.light_intensity = ae3d_gl_uniform_location(program, "light.intensity")
+    s.light_ambient = ae3d_gl_uniform_location(program, "light.ambientStrength")
+    s.light_temperature = ae3d_gl_uniform_location(program, "light.temperature")
+    s.light_is_directional = ae3d_gl_uniform_location(program, "light.isDirectional")
+    s.light_direction = ae3d_gl_uniform_location(program, "light.direction")
+    s.light_constant = ae3d_gl_uniform_location(program, "light.constantAtten")
+    s.light_linear = ae3d_gl_uniform_location(program, "light.linearAtten")
+    s.light_quadratic = ae3d_gl_uniform_location(program, "light.quadraticAtten")
+    s.compat_light_pos = ae3d_gl_uniform_location(program, "lightPos")
+    s.compat_light_color = ae3d_gl_uniform_location(program, "lightColor")
+    s.compat_light_intensity = ae3d_gl_uniform_location(program, "lightIntensity")
+    s.compat_light_direction = ae3d_gl_uniform_location(program, "lightDirection")
+    s.view_pos = ae3d_gl_uniform_location(program, "viewPos")
+    s.diffuse_color = ae3d_gl_uniform_location(program, "diffuseColor")
+    s.specular_color = ae3d_gl_uniform_location(program, "specularColor")
+    s.shininess = ae3d_gl_uniform_location(program, "shininess")
+    s.metallic = ae3d_gl_uniform_location(program, "metallic")
+    s.roughness = ae3d_gl_uniform_location(program, "roughness")
+    s.exposure = ae3d_gl_uniform_location(program, "exposure")
+    s.material_alpha = ae3d_gl_uniform_location(program, "materialAlpha")
+    s.texture_sampler = ae3d_gl_uniform_location(program, "textureSampler")
+    s.is_instanced = ae3d_gl_uniform_location(program, "isInstanced")
+    list.add_raw(r.programs, s)
+    return s
+}
+
+set_face_culling(r: *GLRenderer, on: bool) {
+    if r.face_culling_state == on { return }
+    flag = 0
+    if on { flag = 1 }
+    ae3d_gl_set_face_culling(flag)
+    r.face_culling_state = on
+}
+
+set_depth_test(r: *GLRenderer, on: bool) {
+    if r.depth_test_state == on { return }
+    flag = 0
+    if on { flag = 1 }
+    ae3d_gl_set_depth_test(flag)
+    r.depth_test_state = on
+}
+
+set_blend(r: *GLRenderer, on: bool) {
+    if r.blend_state == on { return }
+    flag = 0
+    if on { flag = 1 }
+    ae3d_gl_set_blend(flag)
+    r.blend_state = on
+}
+
+set_wireframe(r: *GLRenderer, on: bool) {
+    if r.wireframe_state == on { return }
+    flag = 0
+    if on { flag = 1 }
+    ae3d_gl_set_wireframe(flag)
+    r.wireframe_state = on
+}
+
+use_program(r: *GLRenderer, program: int) {
+    if r.current_program == program { return }
+    ae3d_gl_program_use(program)
+    r.current_program = program
+}
+
+renderer_init(r: *GLRenderer, window: ptr, width: int, height: int) -> int {
+    missing = ae3d_gl_load()
+    if missing != 0 {
+        println("aether3d: ${missing} OpenGL entry point(s) unavailable")
+        return 0
+    }
+
+    println("aether3d: OpenGL ${ae3d_gl_version()} on ${ae3d_gl_renderer()}")
+
+    r.screen_width = width
+    r.screen_height = height
+    r.viewport_width = width
+    r.viewport_height = height
+    ae3d_gl_viewport(0, 0, width, height)
+    ae3d_gl_clear_depth(1.0)
+
+    r.default_program = compile_program(shaders.VERTEX_DEFAULT, shaders.FRAGMENT_DEFAULT, "default")
+    if r.default_program == 0 { return 0 }
+    slots_for(r, r.default_program)
+
+    r.fxaa_program = compile_program(shaders.VERTEX_SCREEN, shaders.FRAGMENT_FXAA, "fxaa")
+    r.bloom_program = compile_program(shaders.VERTEX_SCREEN, shaders.FRAGMENT_BLOOM, "bloom")
+    r.passthrough_program = compile_program(shaders.VERTEX_SCREEN, shaders.FRAGMENT_PASSTHROUGH, "passthrough")
+
+    r.default_texture = create_default_texture(r)
+
+    ae3d_gl_set_face_culling(0)
+    r.face_culling_state = false
+    ae3d_gl_set_depth_test(1)
+    r.depth_test_state = true
+    ae3d_gl_set_blend(1)
+    r.blend_state = true
+    ae3d_gl_set_multisample(1)
+    r.enable_msaa = true
+    ae3d_gl_set_wireframe(0)
+    r.wireframe_state = false
+
+    init_post_processing(r, width, height)
+
+    r.initialized = true
+    return 1
+}
+
+create_default_texture(r: *GLRenderer) -> int {
+    image = ae3d_image_solid(2, 2, 255, 255, 255, 255)
+    if image == null {
+        println("aether3d: default texture unavailable: ${ae3d_image_error()}")
+        return 0
+    }
+    id = ae3d_gl_texture_from_image(image, 0, 0)
+    ae3d_image_free(image)
+    return id
+}
+
+renderer_load_texture(r: *GLRenderer, path: string) -> int {
+    if path == "" { return 0 }
+
+    count = list.size(r.textures)
+    i = 0
+    while i < count {
+        entry = list.get_raw(r.textures, i) as *TextureEntry
+        if entry != null && string.equals(entry.path, path) == 1 {
+            entry.refs = entry.refs + 1
+            return entry.id
+        }
+        i = i + 1
+    }
+
+    image = ae3d_image_load(path)
+    if image == null {
+        println("aether3d: texture load failed: ${ae3d_image_error()}")
+        return 0
+    }
+    id = ae3d_gl_texture_from_image(image, 0, 1)
+    ae3d_image_free(image)
+    if id == 0 { return 0 }
+
+    entry = heap.new(TextureEntry)
+    entry.path = string.copy(path)
+    entry.id = id
+    entry.refs = 1
+    list.add_raw(r.textures, entry)
+    return id
+}
+
+renderer_release_texture(r: *GLRenderer, id: int) {
+    if id == 0 { return }
+    count = list.size(r.textures)
+    i = 0
+    while i < count {
+        entry = list.get_raw(r.textures, i) as *TextureEntry
+        if entry != null && entry.id == id {
+            entry.refs = entry.refs - 1
+            if entry.refs <= 0 {
+                ae3d_gl_texture_delete(entry.id)
+                list.remove(r.textures, i)
+                heap.free(entry)
+            }
+            return
+        }
+        i = i + 1
+    }
+}
+
+renderer_texture_count(r: *GLRenderer) -> int {
+    return list.size(r.textures)
+}
+
+renderer_add_model(r: *GLRenderer, m: *Model) {
+    if m == null { return }
+
+    m.vao = ae3d_gl_vao_create()
+    ae3d_gl_vao_bind(m.vao)
+
+    m.vbo = ae3d_gl_buffer_create()
+    m.ebo = ae3d_gl_buffer_create()
+    ae3d_gl_upload_mesh(m.mesh, m.vbo, m.ebo)
+    ae3d_gl_setup_vertex_attribs()
+
+    if m.is_instanced && core.model_instance_count(m) > 0 {
+        m.instance_vbo = ae3d_gl_buffer_create()
+        if core.model_instance_has_colors(m) {
+            m.instance_color_vbo = ae3d_gl_buffer_create()
+        }
+        ae3d_gl_setup_instance_attribs(m.instances, m.instance_vbo, m.instance_color_vbo)
+        m.instance_vbo_capacity = core.model_instance_count(m) * 64
+        m.instances_updated = false
+    }
+
+    ae3d_gl_vao_bind(0)
+
+    core.model_update_matrix(m)
+    load_model_textures(r, m)
+    core.model_sort_groups_by_texture(m)
+    list.add_raw(r.models, m)
+}
+
+load_model_textures(r: *GLRenderer, m: *Model) {
+    groups = core.model_group_count(m)
+    if groups > 0 {
+        i = 0
+        while i < groups {
+            group = core.model_group(m, i)
+            if group != null && group.material != null {
+                resolve_material_texture(r, group.material)
+            }
+            i = i + 1
+        }
+        return
+    }
+    if m.material != null { resolve_material_texture(r, m.material) }
+}
+
+resolve_material_texture(r: *GLRenderer, material: *Material) {
+    if material.texture_path == "" || material.texture_id != 0 { return }
+    id = renderer_load_texture(r, material.texture_path)
+    if id == 0 { id = r.default_texture }
+    material.texture_id = id
+}
+
+renderer_remove_model(r: *GLRenderer, m: *Model) {
+    if m == null { return }
+
+    groups = core.model_group_count(m)
+    i = 0
+    while i < groups {
+        group = core.model_group(m, i)
+        if group != null && group.material != null && group.material.texture_id != 0 {
+            renderer_release_texture(r, group.material.texture_id)
+        }
+        i = i + 1
+    }
+    if m.material != null && m.material.texture_id != 0 {
+        renderer_release_texture(r, m.material.texture_id)
+    }
+
+    if m.vao != 0 { ae3d_gl_vao_delete(m.vao) ; m.vao = 0 }
+    if m.vbo != 0 { ae3d_gl_buffer_delete(m.vbo) ; m.vbo = 0 }
+    if m.ebo != 0 { ae3d_gl_buffer_delete(m.ebo) ; m.ebo = 0 }
+    if m.instance_vbo != 0 {
+        ae3d_gl_buffer_delete(m.instance_vbo)
+        m.instance_vbo = 0
+        m.instance_vbo_capacity = 0
+    }
+    if m.instance_color_vbo != 0 {
+        ae3d_gl_buffer_delete(m.instance_color_vbo)
+        m.instance_color_vbo = 0
+    }
+
+    count = list.size(r.models)
+    i = 0
+    while i < count {
+        if list.get_raw(r.models, i) == m {
+            list.remove(r.models, i)
+            return
+        }
+        i = i + 1
+    }
+}
+
+renderer_add_light(r: *GLRenderer, light: *Light) {
+    list.add_raw(r.lights, light)
+}
+
+renderer_remove_light(r: *GLRenderer, light: *Light) {
+    count = list.size(r.lights)
+    i = 0
+    while i < count {
+        if list.get_raw(r.lights, i) == light {
+            list.remove(r.lights, i)
+            return
+        }
+        i = i + 1
+    }
+}
+
+renderer_model_count(r: *GLRenderer) -> int {
+    return list.size(r.models)
+}
+
+renderer_model(r: *GLRenderer, index: int) -> *Model {
+    return list.get_raw(r.models, index) as *Model
+}
+
+renderer_draw_calls(r: *GLRenderer) -> int {
+    return r.last_draw_calls
+}
+
+renderer_instance_count(r: *GLRenderer) -> int {
+    total = 0
+    count = list.size(r.models)
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        if m != null && m.is_instanced { total = total + core.model_instance_count(m) }
+        i = i + 1
+    }
+    return total
+}
+
+renderer_set_clear_color(r: *GLRenderer, red: float, green: float, blue: float) {
+    r.clear_r = red
+    r.clear_g = green
+    r.clear_b = blue
+}
+
+renderer_set_fxaa(r: *GLRenderer, on: bool) { r.enable_fxaa = on }
+renderer_set_bloom(r: *GLRenderer, on: bool) { r.enable_bloom = on }
+
+renderer_set_bloom_params(r: *GLRenderer, threshold: float, intensity: float) {
+    r.bloom_threshold = threshold
+    r.bloom_intensity = intensity
+}
+
+renderer_set_msaa(r: *GLRenderer, on: bool) {
+    r.enable_msaa = on
+    flag = 0
+    if on { flag = 1 }
+    ae3d_gl_set_multisample(flag)
+}
+
+// Reads back one pixel of the default framebuffer as 0xRRGGBB.
+read_pixel(x: int, y: int) -> int {
+    return ae3d_gl_read_pixel(x, y)
+}
+
+renderer_default_program(r: *GLRenderer) -> int {
+    return r.default_program
+}
+
+renderer_set_skybox(r: *GLRenderer, skybox: ptr) {
+    r.skybox = skybox
+}
+
+renderer_update_viewport(r: *GLRenderer, width: int, height: int) {
+    ae3d_gl_viewport(0, 0, width, height)
+    r.viewport_width = width
+    r.viewport_height = height
+}
+
+renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
+    if !r.initialized { return }
+    r.last_draw_calls = 0
+
+    active_light = light
+    if list.size(r.lights) > 0 {
+        active_light = list.get_raw(r.lights, 0) as *Light
+    }
+
+    post_active = begin_post_processing(r)
+
+    set_wireframe(r, core.debug_enabled())
+
+    ae3d_gl_clear_color(r.clear_r, r.clear_g, r.clear_b, 1.0)
+    ae3d_gl_clear(1, 1)
+
+    set_depth_test(r, core.depth_test())
+    set_blend(r, true)
+    set_face_culling(r, core.face_culling())
+
+    if core.frustum_culling() && core.frustum_dirty() {
+        core.camera_fill_frustum(cam, r.frustum)
+        core.clear_frustum_dirty()
+    }
+
+    view_projection = core.camera_view_projection(cam)
+
+    count = list.size(r.models)
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        render_model(r, m, &view_projection, active_light, cam, false)
+        i = i + 1
+    }
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        render_model(r, m, &view_projection, active_light, cam, true)
+        i = i + 1
+    }
+
+    if post_active { resolve_post_processing(r) }
+}
+
+render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
+             light: *Light, cam: *Camera, transparent_pass: bool) {
+    if m == null || !m.visible { return }
+
+    if core.frustum_culling() &&
+       !core.frustum_sphere_visible(r.frustum, m.bounding_center, m.bounding_radius) {
+        return
+    }
+
+    if m.is_dirty {
+        core.model_update_matrix(m)
+        m.is_dirty = false
+    }
+
+    program = r.default_program
+    if core.shader_valid(&m.shader) {
+        if !m.shader.compiled {
+            m.shader.program = compile_program(m.shader.vertex_source,
+                                               m.shader.fragment_source, "model")
+            m.shader.compiled = true
+        }
+        if m.shader.program != 0 { program = m.shader.program }
+    }
+
+    slots = slots_for(r, program)
+    use_program(r, program)
+    set_common_uniforms(slots, view_projection, m, light, cam)
+    set_model_uniforms(m, program)
+
+    ae3d_gl_vao_bind(m.vao)
+
+    groups = core.model_group_count(m)
+    if groups > 0 {
+        bound_texture = 0 - 1
+        i = 0
+        while i < groups {
+            group = core.model_group(m, i)
+            alpha = 1.0
+            if group.material != null { alpha = group.material.alpha }
+            is_transparent = alpha < 0.99
+
+            if is_transparent == transparent_pass {
+                set_material_uniforms(slots, group.material)
+                apply_transparency(r, is_transparent)
+                texture = texture_for(r, group.material)
+                if texture != bound_texture {
+                    ae3d_gl_texture_bind(0, texture)
+                    ae3d_gl_uniform_int(slots.texture_sampler, 0)
+                    bound_texture = texture
+                }
+                draw(r, m, slots, group.index_count, group.index_start * 4)
+            }
+            i = i + 1
+        }
+    } else {
+        alpha = 1.0
+        if m.material != null { alpha = m.material.alpha }
+        is_transparent = alpha < 0.99
+
+        if is_transparent == transparent_pass {
+            set_material_uniforms(slots, m.material)
+            apply_transparency(r, is_transparent)
+            ae3d_gl_texture_bind(0, texture_for(r, m.material))
+            ae3d_gl_uniform_int(slots.texture_sampler, 0)
+            draw(r, m, slots, core.mesh_index_count(m.mesh), 0)
+        }
+    }
+
+    ae3d_gl_vao_bind(0)
+}
+
+texture_for(r: *GLRenderer, material: *Material) -> int {
+    if material != null && material.texture_id != 0 { return material.texture_id }
+    return r.default_texture
+}
+
+apply_transparency(r: *GLRenderer, transparent: bool) {
+    set_blend(r, true)
+    if transparent {
+        ae3d_gl_set_depth_mask(0)
+        set_face_culling(r, false)
+    } else {
+        ae3d_gl_set_depth_mask(1)
+        set_face_culling(r, core.face_culling())
+    }
+}
+
+draw(r: *GLRenderer, m: *Model, slots: *ProgramSlots, count: int, byte_offset: int) {
+    if count <= 0 { return }
+    if m.is_instanced && core.model_instance_count(m) > 0 {
+        if m.instances_updated {
+            m.instance_vbo_capacity = ae3d_gl_update_instances(m.instances, m.instance_vbo,
+                                                               m.instance_vbo_capacity)
+            m.instances_updated = false
+        }
+        ae3d_gl_uniform_int(slots.is_instanced, 1)
+        ae3d_gl_draw_elements_instanced(count, byte_offset, core.model_instance_count(m))
+    } else {
+        ae3d_gl_uniform_int(slots.is_instanced, 0)
+        ae3d_gl_draw_elements(count, byte_offset)
+    }
+    r.last_draw_calls = r.last_draw_calls + 1
+}
+
+set_common_uniforms(slots: *ProgramSlots, view_projection: *Mat4, m: *Model,
+                    light: *Light, cam: *Camera) {
+    ae3d_gl_uniform_mat4(slots.view_projection, view_projection)
+    ae3d_gl_uniform_mat4(slots.model, &m.model_matrix)
+
+    if light != null {
+        ae3d_gl_uniform_vec3(slots.light_position, light.position.x, light.position.y, light.position.z)
+        ae3d_gl_uniform_vec3(slots.light_color, light.color.x, light.color.y, light.color.z)
+        ae3d_gl_uniform_float(slots.light_intensity, light.intensity)
+        ae3d_gl_uniform_float(slots.light_ambient, light.ambient_strength)
+        ae3d_gl_uniform_float(slots.light_temperature, light.temperature)
+
+        directional = 0
+        if light.mode == core.MODE_DIRECTIONAL { directional = 1 }
+        ae3d_gl_uniform_int(slots.light_is_directional, directional)
+
+        ae3d_gl_uniform_vec3(slots.light_direction, light.direction.x, light.direction.y, light.direction.z)
+        ae3d_gl_uniform_float(slots.light_constant, light.constant_atten)
+        ae3d_gl_uniform_float(slots.light_linear, light.linear_atten)
+        ae3d_gl_uniform_float(slots.light_quadratic, light.quadratic_atten)
+
+        ae3d_gl_uniform_vec3(slots.compat_light_pos, light.position.x, light.position.y, light.position.z)
+        ae3d_gl_uniform_vec3(slots.compat_light_color, light.color.x, light.color.y, light.color.z)
+        ae3d_gl_uniform_float(slots.compat_light_intensity, light.intensity)
+        ae3d_gl_uniform_vec3(slots.compat_light_direction, light.direction.x, light.direction.y, light.direction.z)
+    }
+
+    ae3d_gl_uniform_vec3(slots.view_pos, cam.position.x, cam.position.y, cam.position.z)
+}
+
+set_material_uniforms(slots: *ProgramSlots, material: *Material) {
+    if material == null {
+        ae3d_gl_uniform_vec3(slots.diffuse_color, 1.0, 1.0, 1.0)
+        ae3d_gl_uniform_vec3(slots.specular_color, 1.0, 1.0, 1.0)
+        ae3d_gl_uniform_float(slots.shininess, 32.0)
+        ae3d_gl_uniform_float(slots.metallic, 0.0)
+        ae3d_gl_uniform_float(slots.roughness, 0.5)
+        ae3d_gl_uniform_float(slots.exposure, 1.0)
+        ae3d_gl_uniform_float(slots.material_alpha, 1.0)
+        return
+    }
+    ae3d_gl_uniform_vec3(slots.diffuse_color, material.diffuse.x, material.diffuse.y, material.diffuse.z)
+    ae3d_gl_uniform_vec3(slots.specular_color, material.specular.x, material.specular.y, material.specular.z)
+    ae3d_gl_uniform_float(slots.shininess, material.shininess)
+    ae3d_gl_uniform_float(slots.metallic, material.metallic)
+    ae3d_gl_uniform_float(slots.roughness, material.roughness)
+    ae3d_gl_uniform_float(slots.exposure, material.exposure)
+    ae3d_gl_uniform_float(slots.material_alpha, material.alpha)
+}
+
+set_model_uniforms(m: *Model, program: int) {
+    count = core.model_uniform_count(m)
+    i = 0
+    while i < count {
+        uniform = core.model_uniform(m, i)
+        if uniform != null {
+            if uniform.cached_program != program {
+                uniform.location = ae3d_gl_uniform_location(program, uniform.name)
+                if uniform.location < 0 {
+                    indexed = string.concat(uniform.name, "[0]")
+                    uniform.location = ae3d_gl_uniform_location(program, indexed)
+                    string.free(indexed)
+                }
+                uniform.cached_program = program
+            }
+            if uniform.location >= 0 {
+                if uniform.kind == core.UNIFORM_FLOAT {
+                    ae3d_gl_uniform_float(uniform.location, uniform.number)
+                } else if uniform.kind == core.UNIFORM_INT {
+                    ae3d_gl_uniform_int(uniform.location, uniform.integer)
+                } else if uniform.kind == core.UNIFORM_VEC3 {
+                    ae3d_gl_uniform_vec3(uniform.location, uniform.vector.x,
+                                         uniform.vector.y, uniform.vector.z)
+                } else if uniform.kind == core.UNIFORM_FLOAT_ARRAY {
+                    ae3d_gl_uniform_float_array(uniform.location, uniform.array)
+                } else if uniform.kind == core.UNIFORM_VEC3_ARRAY {
+                    ae3d_gl_uniform_vec3_array(uniform.location, uniform.array)
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+init_post_processing(r: *GLRenderer, width: int, height: int) {
+    r.post_fbo = ae3d_gl_fbo_create()
+    r.post_texture = ae3d_gl_fbo_attach_color(r.post_fbo, width, height, 0)
+    r.post_depth = ae3d_gl_fbo_attach_depth(r.post_fbo, width, height)
+    if ae3d_gl_fbo_complete() != 1 {
+        println("aether3d: post-processing framebuffer incomplete")
+    }
+    ae3d_gl_fbo_bind(0)
+
+    r.bloom_fbo = ae3d_gl_fbo_create()
+    r.bloom_texture = ae3d_gl_fbo_attach_color(r.bloom_fbo, width / 4, height / 4, 1)
+    if ae3d_gl_fbo_complete() != 1 {
+        println("aether3d: bloom framebuffer incomplete")
+    }
+    ae3d_gl_fbo_bind(0)
+
+    r.screen_mesh = core.mesh_create()
+    core.mesh_push_screen_quad(r.screen_mesh)
+    r.screen_vao = ae3d_gl_vao_create()
+    ae3d_gl_vao_bind(r.screen_vao)
+    r.screen_vbo = ae3d_gl_buffer_create()
+    ae3d_gl_upload_mesh(r.screen_mesh, r.screen_vbo, 0)
+    ae3d_gl_setup_vertex_attribs()
+    ae3d_gl_vao_bind(0)
+}
+
+resize_post_processing(r: *GLRenderer, width: int, height: int) {
+    clamped_width = width
+    clamped_height = height
+    if clamped_width > MAX_FBO_DIMENSION { clamped_width = MAX_FBO_DIMENSION }
+    if clamped_height > MAX_FBO_DIMENSION { clamped_height = MAX_FBO_DIMENSION }
+    if clamped_width < 1 { clamped_width = 1 }
+    if clamped_height < 1 { clamped_height = 1 }
+
+    if r.post_texture != 0 { ae3d_gl_texture_delete(r.post_texture) }
+    if r.post_depth != 0 { ae3d_gl_renderbuffer_delete(r.post_depth) }
+    if r.bloom_texture != 0 { ae3d_gl_texture_delete(r.bloom_texture) }
+
+    r.post_texture = ae3d_gl_fbo_attach_color(r.post_fbo, clamped_width, clamped_height, 0)
+    r.post_depth = ae3d_gl_fbo_attach_depth(r.post_fbo, clamped_width, clamped_height)
+    ae3d_gl_fbo_bind(0)
+
+    bloom_width = clamped_width / 4
+    bloom_height = clamped_height / 4
+    if bloom_width < 1 { bloom_width = 1 }
+    if bloom_height < 1 { bloom_height = 1 }
+    r.bloom_texture = ae3d_gl_fbo_attach_color(r.bloom_fbo, bloom_width, bloom_height, 1)
+    ae3d_gl_fbo_bind(0)
+}
+
+begin_post_processing(r: *GLRenderer) -> bool {
+    if !r.enable_fxaa && !r.enable_bloom { return false }
+    if r.post_fbo == 0 || r.post_texture == 0 || r.screen_vao == 0 { return false }
+
+    width = ae3d_gl_viewport_width()
+    height = ae3d_gl_viewport_height()
+    if width <= 0 || height <= 0 { return false }
+
+    if width != r.viewport_width || height != r.viewport_height {
+        r.viewport_width = width
+        r.viewport_height = height
+        resize_post_processing(r, width, height)
+    }
+
+    ae3d_gl_fbo_bind(r.post_fbo)
+    if ae3d_gl_fbo_complete() != 1 {
+        ae3d_gl_fbo_bind(0)
+        return false
+    }
+    return true
+}
+
+resolve_post_processing(r: *GLRenderer) {
+    ae3d_gl_fbo_bind(0)
+    set_depth_test(r, false)
+    ae3d_gl_set_depth_mask(0)
+    set_blend(r, false)
+    set_wireframe(r, false)
+
+    ae3d_gl_clear(1, 0)
+    ae3d_gl_vao_bind(r.screen_vao)
+    ae3d_gl_texture_bind(0, r.post_texture)
+
+    texel_x = 1.0 / (r.viewport_width * 1.0)
+    texel_y = 1.0 / (r.viewport_height * 1.0)
+
+    if r.enable_bloom && r.bloom_program != 0 {
+        use_program(r, r.bloom_program)
+        ae3d_gl_uniform_int(ae3d_gl_uniform_location(r.bloom_program, "screenTexture"), 0)
+        ae3d_gl_uniform_vec2(ae3d_gl_uniform_location(r.bloom_program, "texelSize"), texel_x, texel_y)
+        ae3d_gl_uniform_float(ae3d_gl_uniform_location(r.bloom_program, "bloomThreshold"), r.bloom_threshold)
+        ae3d_gl_uniform_float(ae3d_gl_uniform_location(r.bloom_program, "bloomIntensity"), r.bloom_intensity)
+    } else if r.enable_fxaa && r.fxaa_program != 0 {
+        use_program(r, r.fxaa_program)
+        ae3d_gl_uniform_int(ae3d_gl_uniform_location(r.fxaa_program, "screenTexture"), 0)
+        ae3d_gl_uniform_vec2(ae3d_gl_uniform_location(r.fxaa_program, "texelSize"), texel_x, texel_y)
+        ae3d_gl_uniform_float(ae3d_gl_uniform_location(r.fxaa_program, "edgeThreshold"), 0.125)
+        ae3d_gl_uniform_float(ae3d_gl_uniform_location(r.fxaa_program, "edgeThresholdMin"), 0.0625)
+        ae3d_gl_uniform_float(ae3d_gl_uniform_location(r.fxaa_program, "subpixelQuality"), 0.75)
+    } else {
+        use_program(r, r.passthrough_program)
+        ae3d_gl_uniform_int(ae3d_gl_uniform_location(r.passthrough_program, "screenTexture"), 0)
+    }
+
+    ae3d_gl_draw_arrays(0, 6)
+    ae3d_gl_vao_bind(0)
+
+    set_depth_test(r, true)
+    ae3d_gl_set_depth_mask(1)
+    set_blend(r, true)
+}
+
+renderer_cleanup(r: *GLRenderer) {
+    if r == null { return }
+
+    count = list.size(r.models)
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        if m != null {
+            if m.vao != 0 { ae3d_gl_vao_delete(m.vao) ; m.vao = 0 }
+            if m.vbo != 0 { ae3d_gl_buffer_delete(m.vbo) ; m.vbo = 0 }
+            if m.ebo != 0 { ae3d_gl_buffer_delete(m.ebo) ; m.ebo = 0 }
+            if m.instance_vbo != 0 { ae3d_gl_buffer_delete(m.instance_vbo) ; m.instance_vbo = 0 }
+            if m.instance_color_vbo != 0 {
+                ae3d_gl_buffer_delete(m.instance_color_vbo)
+                m.instance_color_vbo = 0
+            }
+        }
+        i = i + 1
+    }
+    list.clear(r.models)
+
+    count = list.size(r.textures)
+    i = 0
+    while i < count {
+        entry = list.get_raw(r.textures, i) as *TextureEntry
+        if entry != null {
+            ae3d_gl_texture_delete(entry.id)
+            heap.free(entry)
+        }
+        i = i + 1
+    }
+    list.clear(r.textures)
+
+    if r.default_texture != 0 { ae3d_gl_texture_delete(r.default_texture) ; r.default_texture = 0 }
+    if r.screen_vao != 0 { ae3d_gl_vao_delete(r.screen_vao) ; r.screen_vao = 0 }
+    if r.screen_vbo != 0 { ae3d_gl_buffer_delete(r.screen_vbo) ; r.screen_vbo = 0 }
+    if r.post_texture != 0 { ae3d_gl_texture_delete(r.post_texture) ; r.post_texture = 0 }
+    if r.bloom_texture != 0 { ae3d_gl_texture_delete(r.bloom_texture) ; r.bloom_texture = 0 }
+    if r.post_depth != 0 { ae3d_gl_renderbuffer_delete(r.post_depth) ; r.post_depth = 0 }
+    if r.post_fbo != 0 { ae3d_gl_fbo_delete(r.post_fbo) ; r.post_fbo = 0 }
+    if r.bloom_fbo != 0 { ae3d_gl_fbo_delete(r.bloom_fbo) ; r.bloom_fbo = 0 }
+
+    if r.default_program != 0 { ae3d_gl_program_delete(r.default_program) ; r.default_program = 0 }
+    if r.fxaa_program != 0 { ae3d_gl_program_delete(r.fxaa_program) ; r.fxaa_program = 0 }
+    if r.bloom_program != 0 { ae3d_gl_program_delete(r.bloom_program) ; r.bloom_program = 0 }
+    if r.passthrough_program != 0 {
+        ae3d_gl_program_delete(r.passthrough_program)
+        r.passthrough_program = 0
+    }
+
+    r.initialized = false
+}

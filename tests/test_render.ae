@@ -1,0 +1,74 @@
+// Proves the OpenGL backend actually rasterises geometry: it renders a lit cube
+// filling the middle of the frame, reads the centre pixel back off the
+// framebuffer, and fails if that pixel is still the clear colour.
+
+import a3d.core
+import a3d.platform
+import a3d.engine
+import a3d.gl
+import a3d.loader
+
+var g_engine: ptr = null
+var g_centre = 0
+var g_corner = 0
+var g_draw_calls = 0
+
+on_start(data: ptr) {
+    e = data as *Engine
+    cube = loader.cube(1.0)
+    core.model_set_scale(cube, 40.0, 40.0, 40.0)
+    core.model_matte(cube, 0.9, 0.2, 0.15)
+    engine.engine_add_model(e, cube)
+
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(0.0, 0.0, 120.0))
+}
+
+on_render(data: ptr, delta: float) {
+    e = data as *Engine
+    width = platform.window_fb_width(engine.engine_window(e))
+    height = platform.window_fb_height(engine.engine_window(e))
+    g_centre = gl.read_pixel(width / 2, height / 2)
+    g_corner = gl.read_pixel(2, 2)
+    g_draw_calls = gl.renderer_draw_calls(engine.engine_gl_renderer(e))
+}
+
+main() {
+    e = engine.engine_new(platform.API_GL)
+    engine.engine_set_size(e, 640, 480)
+    engine.engine_set_title(e, "aether3d render test")
+    engine.engine_set_frame_limit(e, 8)
+    engine.engine_set_camera_input(e, false)
+
+    light = core.light_sun(core.vec3(0.0, 0.0, 1.0))
+    engine.engine_set_light(e, light)
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_start(e, on_start as fn(ptr))
+    engine.engine_on_render(e, on_render as fn(ptr, float))
+
+    if !engine.engine_run(e, 0 - 1, 0 - 1) {
+        println("render: FAIL could not open a window")
+        return
+    }
+
+    failures = 0
+    if g_draw_calls < 1 {
+        println("render: FAIL no draw calls were issued")
+        failures = failures + 1
+    }
+    if g_corner != 0 {
+        println("render: FAIL background pixel is ${g_corner}, expected the clear colour")
+        failures = failures + 1
+    }
+    if g_centre == 0 {
+        println("render: FAIL centre pixel is still the clear colour, nothing was rasterised")
+        failures = failures + 1
+    }
+
+    if failures == 0 {
+        println("render: all checks passed (centre=${g_centre} draw_calls=${g_draw_calls})")
+    }
+
+    core.light_free(light)
+    engine.engine_free(e)
+}

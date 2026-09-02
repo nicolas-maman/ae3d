@@ -1,0 +1,81 @@
+// The same scene through either renderer. The backend is a constructor argument
+// and nothing else in the program changes.
+//
+//   ./build.sh examples/backend_switch.ae
+//   ./build/backend_switch           # OpenGL 4.1
+//   ./build/backend_switch vulkan    # Vulkan
+
+import std.os
+import std.string
+import a3d.core
+import a3d.platform
+import a3d.engine
+import a3d.vk
+import a3d.gl
+import a3d.loader
+
+var g_model: ptr = null
+var g_spin = 0.0
+
+on_start(data: ptr) {
+    e = data as *Engine
+    model = loader.sphere(1.0, 32, 24)
+    core.model_set_scale(model, 24.0, 24.0, 24.0)
+    core.model_polished_metal(model, 0.35, 0.62, 0.9)
+    engine.engine_add_model(e, model)
+    g_model = model as ptr
+
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(0.0, 12.0, 90.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+}
+
+on_update(data: ptr, delta: float) {
+    model = g_model as *Model
+    if model == null { return }
+    g_spin = g_spin + delta
+    core.model_rotate(model, 0.0, 40.0 * delta, 0.0)
+}
+
+draw_calls(e: *Engine) -> int {
+    if string.equals(engine.engine_backend_name(e), "vulkan") == 1 {
+        return vk.renderer_draw_calls(engine.engine_vk_renderer(e))
+    }
+    return gl.renderer_draw_calls(engine.engine_gl_renderer(e))
+}
+
+main() {
+    api = platform.API_GL
+    wanted = "opengl"
+    if os.aether_args_count() > 1 {
+        arg = os.aether_args_get(1)
+        if string.equals(arg, "vulkan") == 1 {
+            api = platform.API_VULKAN
+            wanted = "vulkan"
+        }
+    }
+
+    if api == platform.API_VULKAN && !vk.available() {
+        println("no Vulkan driver available: ${vk.last_error()}")
+        return
+    }
+
+    e = engine.engine_new(api)
+    engine.engine_set_size(e, 1024, 768)
+    engine.engine_set_title(e, "aether3d - ${wanted}")
+
+    light = core.light_sun(core.vec3(0.4, 0.8, 0.5))
+    engine.engine_set_light(e, light)
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_start(e, on_start as fn(ptr))
+    engine.engine_on_update(e, on_update as fn(ptr, float))
+
+    engine.engine_run(e, 0 - 1, 0 - 1)
+
+    println("${engine.engine_backend_name(e)}: ${engine.engine_frame_count(e)} frames, ${draw_calls(e)} draw calls in the last frame")
+
+    model = g_model as *Model
+    if model != null { core.model_free(model) }
+    core.light_free(light)
+    engine.engine_free(e)
+}

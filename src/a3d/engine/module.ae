@@ -1,0 +1,329 @@
+// Window, main loop and backend selection.
+//
+// The engine owns the window and drives one `Backend` vtable, so switching
+// between the OpenGL and Vulkan renderers is a constructor argument and nothing
+// else in a program changes.
+
+import std.heap
+import std.list
+import std.string
+import a3d.core
+import a3d.platform
+import a3d.gl
+import a3d.vk
+import std.os
+
+exports (
+    Engine,
+    engine_new, engine_free, engine_run, engine_start, engine_loop, engine_shutdown,
+    engine_stop, engine_on_start,
+    engine_add_model, engine_remove_model, engine_set_light,
+    engine_camera, engine_window, engine_backend_name,
+    engine_set_size, engine_set_title, engine_set_msaa, engine_set_decorated,
+    engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
+    engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
+    engine_set_debug, engine_set_frustum_culling, engine_set_face_culling,
+    engine_on_update, engine_on_render, engine_set_user_data, engine_user_data,
+    engine_gl_renderer, engine_vk_renderer, engine_mouse_x, engine_mouse_y, engine_mouse_down, engine_key_down
+)
+
+struct Engine {
+    window: ptr
+    camera: ptr
+    light: ptr
+    backend_state: ptr
+    gl_renderer: ptr
+    api: int
+
+    backend_init: fn(ptr, ptr, int, int) -> int
+    backend_render: fn(ptr, ptr, ptr)
+    backend_add_model: fn(ptr, ptr)
+    backend_remove_model: fn(ptr, ptr)
+    backend_load_texture: fn(ptr, string) -> int
+    backend_set_skybox: fn(ptr, ptr)
+    backend_update_viewport: fn(ptr, int, int)
+    backend_cleanup: fn(ptr)
+    backend_name: string
+
+    on_start: fn(ptr)
+    on_update: fn(ptr, float)
+    on_render: fn(ptr, float)
+    user_data: ptr
+
+    width: int
+    height: int
+    msaa: int
+    title: string
+    decorated: bool
+    vsync: int
+    camera_input: bool
+
+    fixed_step: float
+    fixed_accumulator: float
+    delta_time: float
+    frame_count: int
+    fps: float
+    fps_window: float
+    fps_frames: int
+
+    last_mouse_x: float
+    last_mouse_y: float
+    first_mouse: bool
+    running: bool
+    frame_limit: int
+}
+
+engine_new(api: int) -> *Engine {
+    e = heap.new(Engine)
+    e.api = api
+    e.width = 1024
+    e.height = 768
+    e.msaa = 4
+    e.title = "aether3d"
+    e.decorated = true
+    e.vsync = 1
+    e.camera_input = true
+    e.fixed_step = 1.0 / 60.0
+    e.first_mouse = true
+    e.frame_limit = frame_limit_from_env()
+
+    if api == platform.API_VULKAN {
+        vulkan_state = vk.renderer_new()
+        e.backend_state = vulkan_state as ptr
+        e.gl_renderer = null
+        bind_backend(e, vk.backend(vulkan_state))
+    } else {
+        opengl_state = gl.renderer_new()
+        e.backend_state = opengl_state as ptr
+        e.gl_renderer = opengl_state as ptr
+        bind_backend(e, gl.backend(opengl_state))
+    }
+    return e
+}
+
+// AETHER3D_FRAMES caps the loop so any example doubles as a smoke test that
+// terminates on its own; unset or zero means run until the window closes.
+frame_limit_from_env() -> int {
+    setting = os.getenv("AETHER3D_FRAMES")
+    if setting == "" { return 0 }
+    if string.try_int(setting) == 0 { return 0 }
+    return string.get_int(setting)
+}
+
+engine_set_frame_limit(e: *Engine, frames: int) {
+    e.frame_limit = frames
+}
+
+bind_backend(e: *Engine, b: Backend) {
+    e.backend_init = b.init
+    e.backend_render = b.render
+    e.backend_add_model = b.add_model
+    e.backend_remove_model = b.remove_model
+    e.backend_load_texture = b.load_texture
+    e.backend_set_skybox = b.set_skybox
+    e.backend_update_viewport = b.update_viewport
+    e.backend_cleanup = b.cleanup
+    e.backend_name = b.name
+}
+
+engine_free(e: *Engine) {
+    if e == null { return }
+    if e.camera != null { core.camera_free(e.camera as *Camera) }
+    if e.api == platform.API_VULKAN {
+        vk.renderer_free(e.backend_state as *VKRenderer)
+    } else {
+        gl.renderer_free(e.backend_state as *GLRenderer)
+    }
+    heap.free(e)
+}
+
+engine_set_size(e: *Engine, width: int, height: int) {
+    e.width = width
+    e.height = height
+}
+
+engine_set_title(e: *Engine, title: string) {
+    e.title = title
+    if e.window != null { platform.window_set_title(e.window, title) }
+}
+
+engine_set_msaa(e: *Engine, samples: int) { e.msaa = samples }
+engine_set_decorated(e: *Engine, decorated: bool) { e.decorated = decorated }
+engine_set_vsync(e: *Engine, interval: int) { e.vsync = interval }
+engine_set_camera_input(e: *Engine, enabled: bool) { e.camera_input = enabled }
+
+engine_set_fixed_step(e: *Engine, seconds: float) {
+    if seconds > 0.0 { e.fixed_step = seconds }
+}
+
+engine_set_debug(e: *Engine, on: bool) { core.set_debug(on) }
+engine_set_frustum_culling(e: *Engine, on: bool) { core.set_frustum_culling(on) }
+engine_set_face_culling(e: *Engine, on: bool) { core.set_face_culling(on) }
+
+engine_on_start(e: *Engine, handler: fn(ptr)) { e.on_start = handler }
+engine_on_update(e: *Engine, handler: fn(ptr, float)) { e.on_update = handler }
+engine_on_render(e: *Engine, handler: fn(ptr, float)) { e.on_render = handler }
+engine_set_user_data(e: *Engine, data: ptr) { e.user_data = data }
+engine_user_data(e: *Engine) -> ptr { return e.user_data }
+
+engine_camera(e: *Engine) -> *Camera { return e.camera as *Camera }
+engine_window(e: *Engine) -> ptr { return e.window }
+engine_backend_name(e: *Engine) -> string { return e.backend_name }
+engine_gl_renderer(e: *Engine) -> *GLRenderer { return e.gl_renderer as *GLRenderer }
+engine_vk_renderer(e: *Engine) -> *VKRenderer { return e.backend_state as *VKRenderer }
+engine_delta_time(e: *Engine) -> float { return e.delta_time }
+engine_frame_count(e: *Engine) -> int { return e.frame_count }
+engine_fps(e: *Engine) -> float { return e.fps }
+
+engine_set_light(e: *Engine, light: *Light) { e.light = light as ptr }
+
+engine_add_model(e: *Engine, m: *Model) {
+    e.backend_add_model(e.backend_state, m)
+}
+
+engine_remove_model(e: *Engine, m: *Model) {
+    e.backend_remove_model(e.backend_state, m)
+}
+
+engine_stop(e: *Engine) {
+    e.running = false
+    if e.window != null { platform.window_close(e.window) }
+}
+
+engine_mouse_x(e: *Engine) -> float { return platform.cursor_x(e.window) }
+engine_mouse_y(e: *Engine) -> float { return platform.cursor_y(e.window) }
+engine_mouse_down(e: *Engine, button: int) -> bool { return platform.mouse_down(e.window, button) }
+engine_key_down(e: *Engine, key: int) -> bool { return platform.key_down(e.window, key) }
+
+// One-call path: open the window, initialise the backend, fire `on_start`, run
+// the loop, then tear everything down. Programs that need to interleave their
+// own work can call engine_start / engine_loop / engine_shutdown directly.
+engine_run(e: *Engine, x: int, y: int) -> bool {
+    if !engine_start(e, x, y) { return false }
+    if e.on_start != null { e.on_start(e.user_data) }
+    engine_loop(e)
+    engine_shutdown(e)
+    return true
+}
+
+engine_start(e: *Engine, x: int, y: int) -> bool {
+    if !platform.init() {
+        println("aether3d: ${platform.error()}")
+        return false
+    }
+
+    e.window = platform.window_create(e.width, e.height, e.title,
+                                      e.api, e.msaa, e.decorated, 32)
+    if e.window == null {
+        println("aether3d: could not create window: ${platform.error()}")
+        platform.shutdown()
+        return false
+    }
+
+    if x < 0 || y < 0 {
+        platform.window_center(e.window)
+    } else {
+        platform.window_set_pos(e.window, x, y)
+    }
+
+    if e.api != platform.API_VULKAN { platform.window_set_vsync(e.vsync) }
+
+    if e.backend_init(e.backend_state, e.window, e.width, e.height) != 1 {
+        println("aether3d: ${e.backend_name} backend failed to initialise")
+        platform.window_destroy(e.window)
+        e.window = null
+        platform.shutdown()
+        return false
+    }
+
+    e.camera = core.camera_new(e.width, e.height) as ptr
+    platform.window_set_cursor_mode(e.window, platform.CURSOR_NORMAL)
+    e.running = true
+    return true
+}
+
+engine_shutdown(e: *Engine) {
+    if e.window == null { return }
+    e.backend_cleanup(e.backend_state)
+    platform.window_destroy(e.window)
+    e.window = null
+    platform.shutdown()
+}
+
+engine_loop(e: *Engine) {
+    cam = e.camera as *Camera
+    last_time = platform.time()
+    last_width = e.width
+    last_height = e.height
+
+    while e.running && !platform.window_should_close(e.window) {
+        now = platform.time()
+        delta = now - last_time
+        last_time = now
+        e.delta_time = delta
+
+        e.fps_window = e.fps_window + delta
+        e.fps_frames = e.fps_frames + 1
+        if e.fps_window >= 0.5 {
+            e.fps = (e.fps_frames * 1.0) / e.fps_window
+            e.fps_window = 0.0
+            e.fps_frames = 0
+        }
+
+        width = platform.window_fb_width(e.window)
+        height = platform.window_fb_height(e.window)
+        if width != last_width || height != last_height {
+            if width > 0 && height > 0 {
+                e.width = width
+                e.height = height
+                e.backend_update_viewport(e.backend_state, width, height)
+                core.camera_set_aspect(cam, (width * 1.0) / (height * 1.0))
+            }
+            last_width = width
+            last_height = height
+        }
+
+        if e.camera_input {
+            core.camera_process_keyboard(cam, e.window, delta)
+            if platform.mouse_down(e.window, platform.MOUSE_RIGHT) {
+                process_mouse_look(e, cam)
+            } else {
+                e.first_mouse = true
+            }
+        }
+
+        if e.on_update != null {
+            e.fixed_accumulator = e.fixed_accumulator + delta
+            while e.fixed_accumulator >= e.fixed_step {
+                e.fixed_accumulator = e.fixed_accumulator - e.fixed_step
+            }
+            e.on_update(e.user_data, delta)
+        }
+
+        e.backend_render(e.backend_state, cam, e.light)
+
+        if e.on_render != null { e.on_render(e.user_data, delta) }
+
+        if e.api != platform.API_VULKAN { platform.window_swap(e.window) }
+        platform.poll_events()
+        e.frame_count = e.frame_count + 1
+
+        if e.frame_limit > 0 && e.frame_count >= e.frame_limit { e.running = false }
+    }
+}
+
+process_mouse_look(e: *Engine, cam: *Camera) {
+    x = platform.cursor_x(e.window)
+    y = platform.cursor_y(e.window)
+
+    if e.first_mouse {
+        e.last_mouse_x = x
+        e.last_mouse_y = y
+        e.first_mouse = false
+        return
+    }
+
+    core.camera_process_mouse(cam, x - e.last_mouse_x, e.last_mouse_y - y, true)
+    e.last_mouse_x = x
+    e.last_mouse_y = y
+}

@@ -1,0 +1,510 @@
+// Wavefront OBJ/MTL loading and procedural primitives.
+//
+// A face vertex in OBJ is a (position, uv, normal) triplet, and the same triplet
+// may appear on many faces. Every triplet is pushed through the native
+// deduplicating emitter, so the GPU sees each distinct vertex exactly once
+// regardless of how the file is authored.
+
+import std.fs
+import std.list
+import std.heap
+import std.string
+import a3d.core
+
+exports (
+    load_obj, load_obj_instanced, load_mtl,
+    cube, sphere, plane, water_surface, quad,
+    last_error
+)
+
+extern ae3d_objbuild_create() -> ptr
+extern ae3d_objbuild_destroy(build: ptr)
+extern ae3d_objbuild_add_position(build: ptr, x: float, y: float, z: float) -> int
+extern ae3d_objbuild_add_uv(build: ptr, u: float, v: float) -> int
+extern ae3d_objbuild_add_normal(build: ptr, x: float, y: float, z: float) -> int
+extern ae3d_objbuild_emit(build: ptr, mesh: ptr, v: int, vt: int, vn: int) -> int
+
+var g_error = ""
+var g_error_owned = false
+
+last_error() -> string {
+    return g_error
+}
+
+// The message is owned and replaced in place, so a caller that never reads it
+// still costs exactly one live allocation rather than one per failed load.
+set_error(reason: string, detail: string) {
+    if g_error_owned { string.free(g_error) }
+    g_error = string.concat(reason, detail)
+    g_error_owned = true
+}
+
+parse_float(text: string) -> float {
+    if string.try_double(text) == 0 { return 0.0 }
+    return string.get_double(text)
+}
+
+// OBJ indices are 1-based and may be negative, in which case they count back
+// from the end of the list read so far.
+parse_index(text: string, present_count: int) -> int {
+    if text == "" { return 0 - 1 }
+    if string.try_int(text) == 0 { return 0 - 1 }
+    value = string.get_int(text)
+    if value > 0 { return value - 1 }
+    if value < 0 { return present_count + value }
+    return 0 - 1
+}
+
+directory_of(path: string) -> string {
+    cut = 0 - 1
+    i = 0
+    length = string.length(path)
+    while i < length {
+        c = string.char_at(path, i)
+        if c == 47 || c == 92 { cut = i }
+        i = i + 1
+    }
+    if cut < 0 { return "" }
+    return string.substring(path, 0, cut + 1)
+}
+
+find_material(materials: ptr, name: string) -> *Material {
+    count = list.size(materials)
+    i = 0
+    while i < count {
+        m = list.get_raw(materials, i) as *Material
+        if m != null && string.equals(m.name, name) == 1 { return m }
+        i = i + 1
+    }
+    return null
+}
+
+load_mtl(path: string) -> ptr {
+    materials = list.new()
+
+    content, err = fs.read(path)
+    if err != "" {
+        set_error("cannot read ", path)
+        string.free(content)
+        return materials
+    }
+
+    lines = string.split(content, "\n")
+    line_count = string.array_size(lines)
+    current = null as *Material
+    base = directory_of(path)
+
+    i = 0
+    while i < line_count {
+        raw = string.array_get(lines, i) as string
+        line = string.trim(raw)
+        i = i + 1
+        if line == "" { continue }
+        if string.char_at(line, 0) == 35 { continue }
+
+        fields = string.split(line, " ")
+        field_count = string.array_size(fields)
+        if field_count == 0 { string.array_free(fields) ; continue }
+
+        keyword = string.array_get(fields, 0) as string
+
+        if string.equals(keyword, "newmtl") == 1 && field_count >= 2 {
+            current = core.material_new(string.array_get(fields, 1) as string)
+            list.add_raw(materials, current)
+        } else if current != null {
+            if string.equals(keyword, "Kd") == 1 && field_count >= 4 {
+                current.diffuse = core.vec3(parse_float(string.array_get(fields, 1) as string),
+                                            parse_float(string.array_get(fields, 2) as string),
+                                            parse_float(string.array_get(fields, 3) as string))
+            } else if string.equals(keyword, "Ks") == 1 && field_count >= 4 {
+                current.specular = core.vec3(parse_float(string.array_get(fields, 1) as string),
+                                             parse_float(string.array_get(fields, 2) as string),
+                                             parse_float(string.array_get(fields, 3) as string))
+            } else if string.equals(keyword, "Ns") == 1 && field_count >= 2 {
+                current.shininess = parse_float(string.array_get(fields, 1) as string)
+            } else if string.equals(keyword, "d") == 1 && field_count >= 2 {
+                current.alpha = parse_float(string.array_get(fields, 1) as string)
+            } else if string.equals(keyword, "Tr") == 1 && field_count >= 2 {
+                current.alpha = 1.0 - parse_float(string.array_get(fields, 1) as string)
+            } else if string.equals(keyword, "Pm") == 1 && field_count >= 2 {
+                current.metallic = parse_float(string.array_get(fields, 1) as string)
+            } else if string.equals(keyword, "Pr") == 1 && field_count >= 2 {
+                current.roughness = parse_float(string.array_get(fields, 1) as string)
+            } else if string.equals(keyword, "map_Kd") == 1 && field_count >= 2 {
+                texture = string.array_get(fields, field_count - 1) as string
+                if string.contains(texture, "/") == 1 || string.contains(texture, "\\") == 1 {
+                    current.texture_path = string.copy(texture)
+                } else {
+                    current.texture_path = string.concat(base, texture)
+                }
+            }
+        }
+        string.array_free(fields)
+    }
+
+    string.array_free(lines)
+    string.free(content)
+    return materials
+}
+
+load_obj(path: string, recalculate_normals: bool) -> *Model {
+    content, err = fs.read(path)
+    if err != "" {
+        set_error("cannot read ", path)
+        string.free(content)
+        return null
+    }
+
+    m = core.model_new()
+    m.source_path = string.copy(path)
+    build = ae3d_objbuild_create()
+    if build == null {
+        set_error("out of memory loading ", path)
+        string.free(content)
+        core.model_free(m)
+        return null
+    }
+
+    materials = list.new()
+    positions = 0
+    uvs = 0
+    normals = 0
+    group_start = 0
+    group_material = null as *Material
+    have_group = false
+
+    lines = string.split(content, "\n")
+    line_count = string.array_size(lines)
+
+    i = 0
+    while i < line_count {
+        raw = string.array_get(lines, i) as string
+        line = string.trim(raw)
+        i = i + 1
+        if line == "" { continue }
+        if string.char_at(line, 0) == 35 { continue }
+
+        fields = string.split(line, " ")
+        field_count = string.array_size(fields)
+        if field_count == 0 { string.array_free(fields) ; continue }
+        keyword = string.array_get(fields, 0) as string
+
+        if string.equals(keyword, "v") == 1 && field_count >= 4 {
+            ae3d_objbuild_add_position(build,
+                parse_float(string.array_get(fields, 1) as string),
+                parse_float(string.array_get(fields, 2) as string),
+                parse_float(string.array_get(fields, 3) as string))
+            positions = positions + 1
+        } else if string.equals(keyword, "vt") == 1 && field_count >= 3 {
+            ae3d_objbuild_add_uv(build,
+                parse_float(string.array_get(fields, 1) as string),
+                parse_float(string.array_get(fields, 2) as string))
+            uvs = uvs + 1
+        } else if string.equals(keyword, "vn") == 1 && field_count >= 4 {
+            ae3d_objbuild_add_normal(build,
+                parse_float(string.array_get(fields, 1) as string),
+                parse_float(string.array_get(fields, 2) as string),
+                parse_float(string.array_get(fields, 3) as string))
+            normals = normals + 1
+        } else if string.equals(keyword, "f") == 1 && field_count >= 4 {
+            emit_face(build, m.mesh, fields, field_count, positions, uvs, normals)
+        } else if string.equals(keyword, "mtllib") == 1 && field_count >= 2 {
+            mtl_path = string.concat(directory_of(path), string.array_get(fields, 1) as string)
+            loaded = load_mtl(mtl_path)
+            string.free(mtl_path)
+            merge_materials(materials, loaded)
+            list.free(loaded)
+        } else if string.equals(keyword, "usemtl") == 1 && field_count >= 2 {
+            index_here = core.mesh_index_count(m.mesh)
+            if have_group && index_here > group_start {
+                core.model_add_group(m, group_material, group_start, index_here - group_start)
+            }
+            group_material = find_material(materials, string.array_get(fields, 1) as string)
+            group_start = index_here
+            have_group = true
+        }
+        string.array_free(fields)
+    }
+
+    final_count = core.mesh_index_count(m.mesh)
+    if have_group && final_count > group_start {
+        core.model_add_group(m, group_material, group_start, final_count - group_start)
+    }
+
+    string.array_free(lines)
+    string.free(content)
+    ae3d_objbuild_destroy(build)
+
+    if core.mesh_vertex_count(m.mesh) == 0 {
+        set_error("no geometry in ", path)
+        list.free(materials)
+        core.model_free(m)
+        return null
+    }
+
+    if recalculate_normals || normals == 0 {
+        core.mesh_recalculate_normals(m.mesh)
+    }
+
+    if core.model_group_count(m) == 0 && list.size(materials) > 0 {
+        m.material = list.get_raw(materials, 0) as *Material
+    }
+    list.free(materials)
+
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    return m
+}
+
+merge_materials(target: ptr, source: ptr) {
+    count = list.size(source)
+    i = 0
+    while i < count {
+        m = list.get_raw(source, i) as *Material
+        if m != null && find_material(target, m.name) == null {
+            list.add_raw(target, m)
+        }
+        i = i + 1
+    }
+}
+
+// A face with more than three vertices is triangulated as a fan, which is exact
+// for the convex polygons OBJ permits.
+emit_face(build: ptr, mesh: ptr, fields: ptr, field_count: int,
+          positions: int, uvs: int, normals: int) {
+    first = 0 - 1
+    previous = 0 - 1
+
+    slot = 1
+    while slot < field_count {
+        token = string.array_get(fields, slot) as string
+        slot = slot + 1
+        if token == "" { continue }
+
+        parts = string.split(token, "/")
+        part_count = string.array_size(parts)
+
+        v = parse_index(string.array_get(parts, 0) as string, positions)
+        vt = 0 - 1
+        vn = 0 - 1
+        if part_count > 1 { vt = parse_index(string.array_get(parts, 1) as string, uvs) }
+        if part_count > 2 { vn = parse_index(string.array_get(parts, 2) as string, normals) }
+        string.array_free(parts)
+
+        if v < 0 { continue }
+        unified = ae3d_objbuild_emit(build, mesh, v, vt, vn)
+        if unified < 0 { continue }
+
+        if first < 0 {
+            first = unified
+        } else if previous < 0 {
+            previous = unified
+        } else {
+            core.mesh_push_triangle(mesh, first, previous, unified)
+            previous = unified
+        }
+    }
+}
+
+load_obj_instanced(path: string, recalculate_normals: bool, instances: int) -> *Model {
+    m = load_obj(path, recalculate_normals)
+    if m == null { return null }
+    if !core.model_enable_instancing(m, instances) {
+        set_error("cannot allocate instances for ", path)
+        core.model_free(m)
+        return null
+    }
+    return m
+}
+
+quad(width: float, depth: float) -> *Model {
+    m = core.model_new()
+    half_w = width * 0.5
+    half_d = depth * 0.5
+    up = core.vec3(0.0, 1.0, 0.0)
+
+    core.mesh_reserve(m.mesh, 4, 6)
+    core.mesh_push_vertex(m.mesh, core.vec3(0.0 - half_w, 0.0, 0.0 - half_d), 0.0, 0.0, up)
+    core.mesh_push_vertex(m.mesh, core.vec3(half_w, 0.0, 0.0 - half_d), 1.0, 0.0, up)
+    core.mesh_push_vertex(m.mesh, core.vec3(half_w, 0.0, half_d), 1.0, 1.0, up)
+    core.mesh_push_vertex(m.mesh, core.vec3(0.0 - half_w, 0.0, half_d), 0.0, 1.0, up)
+    core.mesh_push_triangle(m.mesh, 0, 1, 2)
+    core.mesh_push_triangle(m.mesh, 0, 2, 3)
+
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    return m
+}
+
+cube(size: float) -> *Model {
+    m = core.model_new()
+    h = size * 0.5
+    core.mesh_reserve(m.mesh, 24, 36)
+
+    push_face(m.mesh, core.vec3(0.0 - h, 0.0 - h,  h), core.vec3(h, 0.0 - h,  h),
+                      core.vec3(h, h,  h), core.vec3(0.0 - h, h,  h), core.vec3(0.0, 0.0, 1.0))
+    push_face(m.mesh, core.vec3(h, 0.0 - h, 0.0 - h), core.vec3(0.0 - h, 0.0 - h, 0.0 - h),
+                      core.vec3(0.0 - h, h, 0.0 - h), core.vec3(h, h, 0.0 - h), core.vec3(0.0, 0.0, 0.0 - 1.0))
+    push_face(m.mesh, core.vec3(h, 0.0 - h,  h), core.vec3(h, 0.0 - h, 0.0 - h),
+                      core.vec3(h, h, 0.0 - h), core.vec3(h, h,  h), core.vec3(1.0, 0.0, 0.0))
+    push_face(m.mesh, core.vec3(0.0 - h, 0.0 - h, 0.0 - h), core.vec3(0.0 - h, 0.0 - h,  h),
+                      core.vec3(0.0 - h, h,  h), core.vec3(0.0 - h, h, 0.0 - h), core.vec3(0.0 - 1.0, 0.0, 0.0))
+    push_face(m.mesh, core.vec3(0.0 - h, h,  h), core.vec3(h, h,  h),
+                      core.vec3(h, h, 0.0 - h), core.vec3(0.0 - h, h, 0.0 - h), core.vec3(0.0, 1.0, 0.0))
+    push_face(m.mesh, core.vec3(0.0 - h, 0.0 - h, 0.0 - h), core.vec3(h, 0.0 - h, 0.0 - h),
+                      core.vec3(h, 0.0 - h,  h), core.vec3(0.0 - h, 0.0 - h,  h), core.vec3(0.0, 0.0 - 1.0, 0.0))
+
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    return m
+}
+
+push_face(mesh: ptr, a: Vec3, b: Vec3, c: Vec3, d: Vec3, normal: Vec3) {
+    base = core.mesh_vertex_count(mesh)
+    core.mesh_push_vertex(mesh, a, 0.0, 0.0, normal)
+    core.mesh_push_vertex(mesh, b, 1.0, 0.0, normal)
+    core.mesh_push_vertex(mesh, c, 1.0, 1.0, normal)
+    core.mesh_push_vertex(mesh, d, 0.0, 1.0, normal)
+    core.mesh_push_triangle(mesh, base, base + 1, base + 2)
+    core.mesh_push_triangle(mesh, base, base + 2, base + 3)
+}
+
+sphere(radius: float, segments: int, rings: int) -> *Model {
+    m = core.model_new()
+    columns = segments
+    rows = rings
+    if columns < 3 { columns = 3 }
+    if rows < 2 { rows = 2 }
+
+    core.mesh_reserve(m.mesh, (rows + 1) * (columns + 1), rows * columns * 6)
+
+    row = 0
+    while row <= rows {
+        phi = core.PI * (row * 1.0) / (rows * 1.0)
+        y = core.cos_of(phi)
+        ring_radius = core.sin_of(phi)
+
+        column = 0
+        while column <= columns {
+            theta = core.TWO_PI * (column * 1.0) / (columns * 1.0)
+            x = ring_radius * core.cos_of(theta)
+            z = ring_radius * core.sin_of(theta)
+            normal = core.vec3(x, y, z)
+            core.mesh_push_vertex(m.mesh, core.v3_mul(normal, radius),
+                                  (column * 1.0) / (columns * 1.0),
+                                  1.0 - (row * 1.0) / (rows * 1.0),
+                                  normal)
+            column = column + 1
+        }
+        row = row + 1
+    }
+
+    stride = columns + 1
+    row = 0
+    while row < rows {
+        column = 0
+        while column < columns {
+            top_left = row * stride + column
+            top_right = top_left + 1
+            bottom_left = top_left + stride
+            bottom_right = bottom_left + 1
+            core.mesh_push_triangle(m.mesh, top_left, bottom_left, bottom_right)
+            core.mesh_push_triangle(m.mesh, top_left, bottom_right, top_right)
+            column = column + 1
+        }
+        row = row + 1
+    }
+
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    return m
+}
+
+plane(grid_size: int, spacing: float) -> *Model {
+    size = grid_size
+    if size < 2 { size = 2 }
+
+    m = core.model_new()
+    up = core.vec3(0.0, 1.0, 0.0)
+    core.mesh_reserve(m.mesh, size * size, (size - 1) * (size - 1) * 6)
+
+    x = 0
+    while x < size {
+        z = 0
+        while z < size {
+            core.mesh_push_vertex(m.mesh,
+                core.vec3((x * 1.0) * spacing, 0.0, (z * 1.0) * spacing),
+                (x * 1.0) / ((size - 1) * 1.0),
+                (z * 1.0) / ((size - 1) * 1.0),
+                up)
+            z = z + 1
+        }
+        x = x + 1
+    }
+
+    x = 0
+    while x < size - 1 {
+        z = 0
+        while z < size - 1 {
+            top_left = x * size + z
+            top_right = top_left + 1
+            bottom_left = (x + 1) * size + z
+            bottom_right = bottom_left + 1
+            core.mesh_push_triangle(m.mesh, top_left, bottom_left, bottom_right)
+            core.mesh_push_triangle(m.mesh, top_left, bottom_right, top_right)
+            z = z + 1
+        }
+        x = x + 1
+    }
+
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    return m
+}
+
+water_surface(size: float, center_x: float, center_z: float, resolution: int) -> *Model {
+    steps = resolution
+    if steps < 16 { steps = 16 }
+    if steps > 8192 { steps = 8192 }
+
+    m = core.model_new()
+    up = core.vec3(0.0, 1.0, 0.0)
+    step_size = size / ((steps - 1) * 1.0)
+    start_x = center_x - size * 0.5
+    start_z = center_z - size * 0.5
+
+    core.mesh_reserve(m.mesh, steps * steps, (steps - 1) * (steps - 1) * 6)
+
+    x = 0
+    while x < steps {
+        z = 0
+        while z < steps {
+            core.mesh_push_vertex(m.mesh,
+                core.vec3(start_x + (x * 1.0) * step_size, 0.0, start_z + (z * 1.0) * step_size),
+                (x * 1.0) / ((steps - 1) * 1.0),
+                (z * 1.0) / ((steps - 1) * 1.0),
+                up)
+            z = z + 1
+        }
+        x = x + 1
+    }
+
+    x = 0
+    while x < steps - 1 {
+        z = 0
+        while z < steps - 1 {
+            top_left = x * steps + z
+            top_right = top_left + 1
+            bottom_left = (x + 1) * steps + z
+            bottom_right = bottom_left + 1
+            core.mesh_push_triangle(m.mesh, top_left, bottom_left, bottom_right)
+            core.mesh_push_triangle(m.mesh, top_left, bottom_right, top_right)
+            z = z + 1
+        }
+        x = x + 1
+    }
+
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    return m
+}

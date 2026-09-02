@@ -1,0 +1,49 @@
+// Minimal end-to-end scene: one lit cube spinning in front of the camera.
+// Run it to confirm the toolchain, the window and the OpenGL backend all work.
+//
+//   ./build.sh examples/spinning_cube.ae && ./build/spinning_cube
+
+import a3d.core
+import a3d.platform
+import a3d.engine
+import a3d.loader
+
+var g_cube: ptr = null
+
+on_start(data: ptr) {
+    e = data as *Engine
+    cube = loader.cube(1.0)
+    core.model_set_scale(cube, 20.0, 20.0, 20.0)
+    core.model_polished_metal(cube, 0.85, 0.35, 0.2)
+    engine.engine_add_model(e, cube)
+    g_cube = cube as ptr
+
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(0.0, 20.0, 90.0))
+}
+
+on_update(data: ptr, delta: float) {
+    cube = g_cube as *Model
+    if cube == null { return }
+    core.model_rotate(cube, 18.0 * delta, 30.0 * delta, 0.0)
+}
+
+main() {
+    e = engine.engine_new(platform.API_GL)
+    engine.engine_set_size(e, 1024, 768)
+    engine.engine_set_title(e, "aether3d - spinning cube")
+
+    light = core.light_sun(core.vec3(0.4, 0.8, 0.5))
+    engine.engine_set_light(e, light)
+
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_start(e, on_start as fn(ptr))
+    engine.engine_on_update(e, on_update as fn(ptr, float))
+
+    engine.engine_run(e, 0 - 1, 0 - 1)
+
+    cube = g_cube as *Model
+    if cube != null { core.model_free(cube) }
+    core.light_free(light)
+    engine.engine_free(e)
+}

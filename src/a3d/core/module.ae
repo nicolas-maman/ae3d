@@ -1,0 +1,1557 @@
+// aether3d core: linear algebra, scene types, camera and the backend vtable.
+//
+// Matrices are column-major and stored flat as m0..m15 with index = col * 4 + row,
+// the layout OpenGL and Vulkan both consume without transposition. A Mat4 is
+// therefore 16 contiguous doubles, so `&mat` is a valid `const double *` for the
+// native uniform and instance-matrix entry points.
+//
+// Vertex data never crosses into Aether as float32. A model owns a native mesh
+// handle (interleaved position/uv/normal, 8 floats per vertex) and, when
+// instanced, a native instance handle holding the per-instance matrices. Aether
+// drives them through `a3d.mesh`; the GPU reads them without a conversion pass.
+//
+// Math, scene and camera types share one module because a struct field typed by
+// another module's struct is emitted before that struct's definition
+// (aether-lang-dev/aether#1856). Declaration order inside a module is honoured,
+// so the math types are declared first and every by-value field resolves.
+
+import std.list
+import std.heap
+import std.string
+import a3d.platform
+
+exports (
+    Vec2, Vec3, Vec4, Quat, Mat4, vec2, vec3, vec4, quat, v3_add, v3_sub, v3_mul, v3_div,
+    v3_neg, v3_dot, v3_cross, v3_len, v3_len_sq, v3_normalize, v3_distance, v3_lerp, v3_eq,
+    v3_zero, v4_from_v3, v4_xyz, quat_ident, quat_rotate, quat_mul, quat_apply,
+    quat_normalize, quat_len, quat_is_zero, quat_from_euler, quat_mat4, mat4_ident,
+    mat4_zero, mat4_mul, mat4_mul_v4, mat4_transform_point, mat4_translate, mat4_scale,
+    mat4_perspective, mat4_ortho, mat4_look_at, mat4_inverse, mat4_transpose, mat4_col,
+    mat4_at, deg_to_rad, rad_to_deg, clampf, lerpf, PI, TWO_PI, HALF_PI, sin_of, cos_of,
+    tan_of, atan2_of, sqrt_of, abs_of, Material, MaterialGroup, Model, Light, Shader,
+    Backend, Uniform, LIGHT_STATIC, LIGHT_DYNAMIC, MODE_POINT, MODE_DIRECTIONAL, MODE_SPOT,
+    UNIFORM_FLOAT, UNIFORM_INT, UNIFORM_VEC3, UNIFORM_FLOAT_ARRAY, UNIFORM_VEC3_ARRAY,
+    material_new, material_default, material_clone, material_free, model_new, model_free,
+    model_set_position, model_set_scale, model_set_rotation, model_rotate,
+    model_update_matrix, model_recalculate_bounds, model_mark_dirty, model_set_diffuse,
+    model_set_specular, model_set_pbr, model_set_exposure, model_set_alpha,
+    model_set_texture, model_set_shader, model_metallic, model_plastic, model_rough_metal,
+    model_polished_metal, model_matte, model_glossy, model_glass, model_transparent_plastic,
+    model_add_group, model_group, model_group_count, model_sort_groups_by_texture,
+    model_ensure_material, model_set_uniform_float, model_set_uniform_int,
+    model_set_uniform_vec3, model_set_uniform_array, model_uniform_count, model_uniform,
+    model_enable_instancing, model_set_instance_position, model_set_instance_color,
+    model_instance_count, model_remove_instance, light_new, light_directional, light_point,
+    light_warm, light_cool, light_sun, light_free, shader_new, shader_valid, debug_enabled,
+    set_debug, frustum_culling, set_frustum_culling, face_culling, set_face_culling,
+    depth_test, set_depth_test, next_model_id, backend_init, backend_render,
+    backend_add_model, backend_remove_model, backend_load_texture, backend_set_skybox,
+    backend_update_viewport, backend_cleanup, Camera, Plane, Frustum, camera_new,
+    camera_free, camera_update_projection, camera_set_fov, camera_set_near, camera_set_far,
+    camera_set_aspect, camera_set_position, camera_set_speed, camera_view,
+    camera_projection, camera_view_projection, camera_process_keyboard,
+    camera_process_mouse, camera_look_at, camera_update_vectors, camera_frustum,
+    frustum_intersects_sphere, plane_distance, camera_screen_to_world, frustum_dirty,
+    mark_frustum_dirty, clear_frustum_dirty
+)
+
+extern sqrt(x: float) -> float
+extern sin(x: float) -> float
+extern cos(x: float) -> float
+extern tan(x: float) -> float
+extern atan2(y: float, x: float) -> float
+extern fabs(x: float) -> float
+const PI = 3.14159265358979323846
+const TWO_PI = 6.28318530717958647692
+const HALF_PI = 1.57079632679489661923
+
+const LIGHT_STATIC = 0
+
+const LIGHT_DYNAMIC = 1
+
+const MODE_POINT = 0
+
+const MODE_DIRECTIONAL = 1
+
+const MODE_SPOT = 2
+
+const UNIFORM_FLOAT = 0
+
+const UNIFORM_INT = 1
+
+const UNIFORM_VEC3 = 2
+
+const UNIFORM_FLOAT_ARRAY = 3
+
+const UNIFORM_VEC3_ARRAY = 4
+
+var g_debug = false
+
+var g_frustum_culling = false
+
+var g_face_culling = false
+
+var g_depth_test = true
+
+var g_next_model_id = 1
+
+extern ae3d_mesh_create() -> ptr
+
+extern ae3d_mesh_destroy(mesh: ptr)
+
+extern ae3d_mesh_vertex_count(mesh: ptr) -> int
+
+extern ae3d_mesh_index_count(mesh: ptr) -> int
+
+extern ae3d_mesh_compute_bounds(mesh: ptr, px: float, py: float, pz: float, sx: float, sy: float, sz: float, qx: float, qy: float, qz: float, qw: float)
+
+extern ae3d_mesh_bound_x(mesh: ptr) -> float
+
+extern ae3d_mesh_bound_y(mesh: ptr) -> float
+
+extern ae3d_mesh_bound_z(mesh: ptr) -> float
+
+extern ae3d_mesh_bound_radius(mesh: ptr) -> float
+
+extern ae3d_inst_create() -> ptr
+
+extern ae3d_inst_destroy(inst: ptr)
+
+extern ae3d_inst_resize(inst: ptr, count: int) -> int
+
+extern ae3d_inst_count(inst: ptr) -> int
+
+extern ae3d_inst_set_trs(inst: ptr, i: int, px: float, py: float, pz: float, sx: float, sy: float, sz: float, qx: float, qy: float, qz: float, qw: float)
+
+extern ae3d_inst_remove(inst: ptr, i: int)
+
+extern ae3d_inst_enable_colors(inst: ptr, count: int) -> int
+
+extern ae3d_inst_set_color(inst: ptr, i: int, r: float, g: float, b: float)
+
+extern ae3d_inst_compute_bounds(inst: ptr)
+
+extern ae3d_inst_bound_x(inst: ptr) -> float
+
+extern ae3d_inst_bound_y(inst: ptr) -> float
+
+extern ae3d_inst_bound_z(inst: ptr) -> float
+
+extern ae3d_inst_bound_radius(inst: ptr) -> float
+
+extern ae3d_farr_create(count: int) -> ptr
+
+extern ae3d_farr_destroy(arr: ptr)
+
+extern ae3d_farr_set(arr: ptr, i: int, v: float)
+
+extern ae3d_farr_count(arr: ptr) -> int
+extern ae3d_mesh_reserve(mesh: ptr, vertices: int, indices: int) -> int
+extern ae3d_mesh_push_vertex(mesh: ptr, px: float, py: float, pz: float, u: float, v: float, nx: float, ny: float, nz: float) -> int
+extern ae3d_mesh_push_index(mesh: ptr, index: int) -> int
+extern ae3d_mesh_pos_x(mesh: ptr, i: int) -> float
+extern ae3d_mesh_pos_y(mesh: ptr, i: int) -> float
+extern ae3d_mesh_pos_z(mesh: ptr, i: int) -> float
+extern ae3d_mesh_set_pos(mesh: ptr, i: int, x: float, y: float, z: float)
+extern ae3d_mesh_set_uv(mesh: ptr, i: int, u: float, v: float)
+extern ae3d_mesh_set_normal(mesh: ptr, i: int, x: float, y: float, z: float)
+extern ae3d_mesh_index_at(mesh: ptr, i: int) -> int
+extern ae3d_mesh_recalc_normals(mesh: ptr)
+extern ae3d_inst_has_colors(inst: ptr) -> int
+
+var g_frustum_dirty = true
+
+struct Vec2 {
+    x: float
+    y: float
+}
+
+struct Vec3 {
+    x: float
+    y: float
+    z: float
+}
+
+struct Vec4 {
+    x: float
+    y: float
+    z: float
+    w: float
+}
+
+struct Quat {
+    x: float
+    y: float
+    z: float
+    w: float
+}
+
+struct Mat4 {
+    m0:  float, m1:  float, m2:  float, m3:  float
+    m4:  float, m5:  float, m6:  float, m7:  float
+    m8:  float, m9:  float, m10: float, m11: float
+    m12: float, m13: float, m14: float, m15: float
+}
+
+struct Shader {
+    program: int
+    vertex_source: string
+    fragment_source: string
+    compiled: bool
+}
+
+struct Material {
+    diffuse: Vec3
+    specular: Vec3
+    shininess: float
+    metallic: float
+    roughness: float
+    exposure: float
+    alpha: float
+    texture_id: int
+    name: string
+    texture_path: string
+}
+
+struct MaterialGroup {
+    material: *Material
+    index_start: int
+    index_count: int
+}
+
+struct Uniform {
+    name: string
+    kind: int
+    number: float
+    integer: int
+    vector: Vec3
+    array: ptr
+    location: int
+    cached_program: int
+}
+
+struct Model {
+    model_matrix: Mat4
+    position: Vec3
+    scale: Vec3
+    rotation: Quat
+    bounding_center: Vec3
+    bounding_radius: float
+
+    mesh: ptr
+    instances: ptr
+    material: *Material
+    groups: ptr
+    uniforms: ptr
+    shader: Shader
+
+    vao: int
+    vbo: int
+    ebo: int
+    instance_vbo: int
+    instance_vbo_capacity: int
+    instance_color_vbo: int
+
+    is_dirty: bool
+    is_instanced: bool
+    instances_updated: bool
+    visible: bool
+
+    id: int
+    name: string
+    source_path: string
+}
+
+struct Light {
+    position: Vec3
+    color: Vec3
+    direction: Vec3
+    intensity: float
+    ambient_strength: float
+    temperature: float
+    constant_atten: float
+    linear_atten: float
+    quadratic_atten: float
+    kind: int
+    mode: int
+    name: string
+}
+
+struct Backend {
+    state: ptr
+    name: string
+    init:            fn(ptr, ptr, int, int) -> int
+    render:          fn(ptr, ptr, ptr)
+    add_model:       fn(ptr, ptr)
+    remove_model:    fn(ptr, ptr)
+    load_texture:    fn(ptr, string) -> int
+    set_skybox:      fn(ptr, ptr)
+    update_viewport: fn(ptr, int, int)
+    cleanup:         fn(ptr)
+}
+
+struct Camera {
+    position: Vec3
+    front: Vec3
+    up: Vec3
+    right: Vec3
+    world_up: Vec3
+    projection: Mat4
+
+    pitch: float
+    yaw: float
+    speed: float
+    sensitivity: float
+    fov: float
+    near: float
+    far: float
+    aspect: float
+
+    invert_mouse: bool
+    active: bool
+    name: string
+}
+
+struct Plane {
+    normal: Vec3
+    distance: float
+}
+
+struct Frustum {
+    left: Plane
+    right: Plane
+    bottom: Plane
+    top: Plane
+    near: Plane
+    far: Plane
+}
+
+vec2(x: float, y: float) -> Vec2 {
+    return Vec2 { x: x, y: y }
+}
+
+vec3(x: float, y: float, z: float) -> Vec3 {
+    return Vec3 { x: x, y: y, z: z }
+}
+
+vec4(x: float, y: float, z: float, w: float) -> Vec4 {
+    return Vec4 { x: x, y: y, z: z, w: w }
+}
+
+quat(x: float, y: float, z: float, w: float) -> Quat {
+    return Quat { x: x, y: y, z: z, w: w }
+}
+
+sin_of(x: float) -> float {
+    return sin(x)
+}
+
+cos_of(x: float) -> float {
+    return cos(x)
+}
+
+tan_of(x: float) -> float {
+    return tan(x)
+}
+
+atan2_of(y: float, x: float) -> float {
+    return atan2(y, x)
+}
+
+sqrt_of(x: float) -> float {
+    return sqrt(x)
+}
+
+abs_of(x: float) -> float {
+    return fabs(x)
+}
+
+deg_to_rad(degrees: float) -> float {
+    return degrees * PI / 180.0
+}
+
+rad_to_deg(radians: float) -> float {
+    return radians * 180.0 / PI
+}
+
+clampf(value: float, low: float, high: float) -> float {
+    if value < low { return low }
+    if value > high { return high }
+    return value
+}
+
+lerpf(a: float, b: float, t: float) -> float {
+    return a + (b - a) * t
+}
+
+v3_zero() -> Vec3 {
+    return Vec3 { x: 0.0, y: 0.0, z: 0.0 }
+}
+
+v3_add(a: Vec3, b: Vec3) -> Vec3 {
+    return Vec3 { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z }
+}
+
+v3_sub(a: Vec3, b: Vec3) -> Vec3 {
+    return Vec3 { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }
+}
+
+v3_mul(a: Vec3, s: float) -> Vec3 {
+    return Vec3 { x: a.x * s, y: a.y * s, z: a.z * s }
+}
+
+v3_div(a: Vec3, s: float) -> Vec3 {
+    if s == 0.0 { return v3_zero() }
+    return Vec3 { x: a.x / s, y: a.y / s, z: a.z / s }
+}
+
+v3_neg(a: Vec3) -> Vec3 {
+    return Vec3 { x: 0.0 - a.x, y: 0.0 - a.y, z: 0.0 - a.z }
+}
+
+v3_dot(a: Vec3, b: Vec3) -> float {
+    return a.x * b.x + a.y * b.y + a.z * b.z
+}
+
+v3_cross(a: Vec3, b: Vec3) -> Vec3 {
+    return Vec3 {
+        x: a.y * b.z - a.z * b.y,
+        y: a.z * b.x - a.x * b.z,
+        z: a.x * b.y - a.y * b.x
+    }
+}
+
+v3_len_sq(a: Vec3) -> float {
+    return a.x * a.x + a.y * a.y + a.z * a.z
+}
+
+v3_len(a: Vec3) -> float {
+    return sqrt(v3_len_sq(a))
+}
+
+v3_normalize(a: Vec3) -> Vec3 {
+    length = v3_len(a)
+    if length < 0.000000000001 { return v3_zero() }
+    inv = 1.0 / length
+    return Vec3 { x: a.x * inv, y: a.y * inv, z: a.z * inv }
+}
+
+v3_distance(a: Vec3, b: Vec3) -> float {
+    return v3_len(v3_sub(a, b))
+}
+
+v3_lerp(a: Vec3, b: Vec3, t: float) -> Vec3 {
+    return Vec3 {
+        x: a.x + (b.x - a.x) * t,
+        y: a.y + (b.y - a.y) * t,
+        z: a.z + (b.z - a.z) * t
+    }
+}
+
+v3_eq(a: Vec3, b: Vec3) -> bool {
+    return a.x == b.x && a.y == b.y && a.z == b.z
+}
+
+v4_from_v3(a: Vec3, w: float) -> Vec4 {
+    return Vec4 { x: a.x, y: a.y, z: a.z, w: w }
+}
+
+v4_xyz(a: Vec4) -> Vec3 {
+    return Vec3 { x: a.x, y: a.y, z: a.z }
+}
+
+quat_ident() -> Quat {
+    return Quat { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }
+}
+
+quat_is_zero(q: Quat) -> bool {
+    return q.x == 0.0 && q.y == 0.0 && q.z == 0.0 && q.w == 0.0
+}
+
+quat_len(q: Quat) -> float {
+    return sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w)
+}
+
+quat_normalize(q: Quat) -> Quat {
+    length = quat_len(q)
+    if length < 0.000000000001 { return quat_ident() }
+    inv = 1.0 / length
+    return Quat { x: q.x * inv, y: q.y * inv, z: q.z * inv, w: q.w * inv }
+}
+
+quat_rotate(angle_radians: float, axis: Vec3) -> Quat {
+    half = angle_radians * 0.5
+    s = sin(half)
+    return Quat { x: axis.x * s, y: axis.y * s, z: axis.z * s, w: cos(half) }
+}
+
+quat_mul(a: Quat, b: Quat) -> Quat {
+    av = Vec3 { x: a.x, y: a.y, z: a.z }
+    bv = Vec3 { x: b.x, y: b.y, z: b.z }
+    cross = v3_cross(av, bv)
+    v = v3_add(v3_add(cross, v3_mul(bv, a.w)), v3_mul(av, b.w))
+    return Quat { x: v.x, y: v.y, z: v.z, w: a.w * b.w - v3_dot(av, bv) }
+}
+
+quat_apply(q: Quat, v: Vec3) -> Vec3 {
+    qv = Vec3 { x: q.x, y: q.y, z: q.z }
+    cross = v3_cross(qv, v)
+    return v3_add(v3_add(v, v3_mul(cross, 2.0 * q.w)), v3_cross(v3_mul(qv, 2.0), cross))
+}
+
+quat_from_euler(pitch: float, yaw: float, roll: float) -> Quat {
+    qx = quat_rotate(pitch, Vec3 { x: 1.0, y: 0.0, z: 0.0 })
+    qy = quat_rotate(yaw, Vec3 { x: 0.0, y: 1.0, z: 0.0 })
+    qz = quat_rotate(roll, Vec3 { x: 0.0, y: 0.0, z: 1.0 })
+    return quat_mul(quat_mul(qx, qy), qz)
+}
+
+quat_mat4(q: Quat) -> Mat4 {
+    x = q.x
+    y = q.y
+    z = q.z
+    w = q.w
+    return Mat4 {
+        m0:  1.0 - 2.0 * y * y - 2.0 * z * z,
+        m1:  2.0 * x * y + 2.0 * w * z,
+        m2:  2.0 * x * z - 2.0 * w * y,
+        m3:  0.0,
+        m4:  2.0 * x * y - 2.0 * w * z,
+        m5:  1.0 - 2.0 * x * x - 2.0 * z * z,
+        m6:  2.0 * y * z + 2.0 * w * x,
+        m7:  0.0,
+        m8:  2.0 * x * z + 2.0 * w * y,
+        m9:  2.0 * y * z - 2.0 * w * x,
+        m10: 1.0 - 2.0 * x * x - 2.0 * y * y,
+        m11: 0.0,
+        m12: 0.0, m13: 0.0, m14: 0.0, m15: 1.0
+    }
+}
+
+mat4_zero() -> Mat4 {
+    return Mat4 {
+        m0:  0.0, m1:  0.0, m2:  0.0, m3:  0.0,
+        m4:  0.0, m5:  0.0, m6:  0.0, m7:  0.0,
+        m8:  0.0, m9:  0.0, m10: 0.0, m11: 0.0,
+        m12: 0.0, m13: 0.0, m14: 0.0, m15: 0.0
+    }
+}
+
+mat4_ident() -> Mat4 {
+    return Mat4 {
+        m0:  1.0, m1:  0.0, m2:  0.0, m3:  0.0,
+        m4:  0.0, m5:  1.0, m6:  0.0, m7:  0.0,
+        m8:  0.0, m9:  0.0, m10: 1.0, m11: 0.0,
+        m12: 0.0, m13: 0.0, m14: 0.0, m15: 1.0
+    }
+}
+
+mat4_at(m: Mat4, column: int, row: int) -> float {
+    index = column * 4 + row
+    if index == 0  { return m.m0 }
+    if index == 1  { return m.m1 }
+    if index == 2  { return m.m2 }
+    if index == 3  { return m.m3 }
+    if index == 4  { return m.m4 }
+    if index == 5  { return m.m5 }
+    if index == 6  { return m.m6 }
+    if index == 7  { return m.m7 }
+    if index == 8  { return m.m8 }
+    if index == 9  { return m.m9 }
+    if index == 10 { return m.m10 }
+    if index == 11 { return m.m11 }
+    if index == 12 { return m.m12 }
+    if index == 13 { return m.m13 }
+    if index == 14 { return m.m14 }
+    return m.m15
+}
+
+mat4_col(m: Mat4, column: int) -> Vec4 {
+    return Vec4 {
+        x: mat4_at(m, column, 0),
+        y: mat4_at(m, column, 1),
+        z: mat4_at(m, column, 2),
+        w: mat4_at(m, column, 3)
+    }
+}
+
+mat4_mul(a: Mat4, b: Mat4) -> Mat4 {
+    return Mat4 {
+        m0:  a.m0 * b.m0  + a.m4 * b.m1  + a.m8  * b.m2  + a.m12 * b.m3,
+        m1:  a.m1 * b.m0  + a.m5 * b.m1  + a.m9  * b.m2  + a.m13 * b.m3,
+        m2:  a.m2 * b.m0  + a.m6 * b.m1  + a.m10 * b.m2  + a.m14 * b.m3,
+        m3:  a.m3 * b.m0  + a.m7 * b.m1  + a.m11 * b.m2  + a.m15 * b.m3,
+        m4:  a.m0 * b.m4  + a.m4 * b.m5  + a.m8  * b.m6  + a.m12 * b.m7,
+        m5:  a.m1 * b.m4  + a.m5 * b.m5  + a.m9  * b.m6  + a.m13 * b.m7,
+        m6:  a.m2 * b.m4  + a.m6 * b.m5  + a.m10 * b.m6  + a.m14 * b.m7,
+        m7:  a.m3 * b.m4  + a.m7 * b.m5  + a.m11 * b.m6  + a.m15 * b.m7,
+        m8:  a.m0 * b.m8  + a.m4 * b.m9  + a.m8  * b.m10 + a.m12 * b.m11,
+        m9:  a.m1 * b.m8  + a.m5 * b.m9  + a.m9  * b.m10 + a.m13 * b.m11,
+        m10: a.m2 * b.m8  + a.m6 * b.m9  + a.m10 * b.m10 + a.m14 * b.m11,
+        m11: a.m3 * b.m8  + a.m7 * b.m9  + a.m11 * b.m10 + a.m15 * b.m11,
+        m12: a.m0 * b.m12 + a.m4 * b.m13 + a.m8  * b.m14 + a.m12 * b.m15,
+        m13: a.m1 * b.m12 + a.m5 * b.m13 + a.m9  * b.m14 + a.m13 * b.m15,
+        m14: a.m2 * b.m12 + a.m6 * b.m13 + a.m10 * b.m14 + a.m14 * b.m15,
+        m15: a.m3 * b.m12 + a.m7 * b.m13 + a.m11 * b.m14 + a.m15 * b.m15
+    }
+}
+
+mat4_mul_v4(m: Mat4, v: Vec4) -> Vec4 {
+    return Vec4 {
+        x: m.m0 * v.x + m.m4 * v.y + m.m8  * v.z + m.m12 * v.w,
+        y: m.m1 * v.x + m.m5 * v.y + m.m9  * v.z + m.m13 * v.w,
+        z: m.m2 * v.x + m.m6 * v.y + m.m10 * v.z + m.m14 * v.w,
+        w: m.m3 * v.x + m.m7 * v.y + m.m11 * v.z + m.m15 * v.w
+    }
+}
+
+mat4_transform_point(m: Mat4, p: Vec3) -> Vec3 {
+    return v4_xyz(mat4_mul_v4(m, Vec4 { x: p.x, y: p.y, z: p.z, w: 1.0 }))
+}
+
+mat4_transpose(m: Mat4) -> Mat4 {
+    return Mat4 {
+        m0:  m.m0, m1:  m.m4, m2:  m.m8,  m3:  m.m12,
+        m4:  m.m1, m5:  m.m5, m6:  m.m9,  m7:  m.m13,
+        m8:  m.m2, m9:  m.m6, m10: m.m10, m11: m.m14,
+        m12: m.m3, m13: m.m7, m14: m.m11, m15: m.m15
+    }
+}
+
+mat4_translate(x: float, y: float, z: float) -> Mat4 {
+    return Mat4 {
+        m0:  1.0, m1:  0.0, m2:  0.0, m3:  0.0,
+        m4:  0.0, m5:  1.0, m6:  0.0, m7:  0.0,
+        m8:  0.0, m9:  0.0, m10: 1.0, m11: 0.0,
+        m12: x,   m13: y,   m14: z,   m15: 1.0
+    }
+}
+
+mat4_scale(x: float, y: float, z: float) -> Mat4 {
+    return Mat4 {
+        m0:  x,   m1:  0.0, m2:  0.0, m3:  0.0,
+        m4:  0.0, m5:  y,   m6:  0.0, m7:  0.0,
+        m8:  0.0, m9:  0.0, m10: z,   m11: 0.0,
+        m12: 0.0, m13: 0.0, m14: 0.0, m15: 1.0
+    }
+}
+
+mat4_perspective(fov_radians: float, aspect: float, near: float, far: float) -> Mat4 {
+    near_minus_far = near - far
+    f = 1.0 / tan(fov_radians / 2.0)
+    return Mat4 {
+        m0:  f / aspect, m1: 0.0, m2: 0.0, m3: 0.0,
+        m4:  0.0, m5: f, m6: 0.0, m7: 0.0,
+        m8:  0.0, m9: 0.0, m10: (near + far) / near_minus_far, m11: 0.0 - 1.0,
+        m12: 0.0, m13: 0.0, m14: (2.0 * far * near) / near_minus_far, m15: 0.0
+    }
+}
+
+mat4_ortho(left: float, right: float, bottom: float, top: float,
+           near: float, far: float) -> Mat4 {
+    rml = right - left
+    tmb = top - bottom
+    fmn = far - near
+    return Mat4 {
+        m0:  2.0 / rml, m1: 0.0, m2: 0.0, m3: 0.0,
+        m4:  0.0, m5: 2.0 / tmb, m6: 0.0, m7: 0.0,
+        m8:  0.0, m9: 0.0, m10: 0.0 - 2.0 / fmn, m11: 0.0,
+        m12: 0.0 - (right + left) / rml,
+        m13: 0.0 - (top + bottom) / tmb,
+        m14: 0.0 - (far + near) / fmn,
+        m15: 1.0
+    }
+}
+
+mat4_look_at(eye: Vec3, center: Vec3, up: Vec3) -> Mat4 {
+    f = v3_normalize(v3_sub(center, eye))
+    s = v3_normalize(v3_cross(f, v3_normalize(up)))
+    u = v3_cross(s, f)
+    basis = Mat4 {
+        m0:  s.x, m1:  u.x, m2:  0.0 - f.x, m3:  0.0,
+        m4:  s.y, m5:  u.y, m6:  0.0 - f.y, m7:  0.0,
+        m8:  s.z, m9:  u.z, m10: 0.0 - f.z, m11: 0.0,
+        m12: 0.0, m13: 0.0, m14: 0.0,       m15: 1.0
+    }
+    return mat4_mul(basis, mat4_translate(0.0 - eye.x, 0.0 - eye.y, 0.0 - eye.z))
+}
+
+mat4_inverse(m: Mat4) -> Mat4 {
+    s0 = m.m0 * m.m5  - m.m4 * m.m1
+    s1 = m.m0 * m.m6  - m.m4 * m.m2
+    s2 = m.m0 * m.m7  - m.m4 * m.m3
+    s3 = m.m1 * m.m6  - m.m5 * m.m2
+    s4 = m.m1 * m.m7  - m.m5 * m.m3
+    s5 = m.m2 * m.m7  - m.m6 * m.m3
+
+    c5 = m.m10 * m.m15 - m.m14 * m.m11
+    c4 = m.m9  * m.m15 - m.m13 * m.m11
+    c3 = m.m9  * m.m14 - m.m13 * m.m10
+    c2 = m.m8  * m.m15 - m.m12 * m.m11
+    c1 = m.m8  * m.m14 - m.m12 * m.m10
+    c0 = m.m8  * m.m13 - m.m12 * m.m9
+
+    determinant = s0 * c5 - s1 * c4 + s2 * c3 + s3 * c2 - s4 * c1 + s5 * c0
+    if fabs(determinant) < 0.00000000000001 { return mat4_ident() }
+    inv = 1.0 / determinant
+
+    return Mat4 {
+        m0:  ( m.m5 * c5 - m.m6 * c4 + m.m7 * c3) * inv,
+        m1:  (0.0 - m.m1 * c5 + m.m2 * c4 - m.m3 * c3) * inv,
+        m2:  ( m.m13 * s5 - m.m14 * s4 + m.m15 * s3) * inv,
+        m3:  (0.0 - m.m9 * s5 + m.m10 * s4 - m.m11 * s3) * inv,
+        m4:  (0.0 - m.m4 * c5 + m.m6 * c2 - m.m7 * c1) * inv,
+        m5:  ( m.m0 * c5 - m.m2 * c2 + m.m3 * c1) * inv,
+        m6:  (0.0 - m.m12 * s5 + m.m14 * s2 - m.m15 * s1) * inv,
+        m7:  ( m.m8 * s5 - m.m10 * s2 + m.m11 * s1) * inv,
+        m8:  ( m.m4 * c4 - m.m5 * c2 + m.m7 * c0) * inv,
+        m9:  (0.0 - m.m0 * c4 + m.m1 * c2 - m.m3 * c0) * inv,
+        m10: ( m.m12 * s4 - m.m13 * s2 + m.m15 * s0) * inv,
+        m11: (0.0 - m.m8 * s4 + m.m9 * s2 - m.m11 * s0) * inv,
+        m12: (0.0 - m.m4 * c3 + m.m5 * c1 - m.m6 * c0) * inv,
+        m13: ( m.m0 * c3 - m.m1 * c1 + m.m2 * c0) * inv,
+        m14: (0.0 - m.m12 * s3 + m.m13 * s1 - m.m14 * s0) * inv,
+        m15: ( m.m8 * s3 - m.m9 * s1 + m.m10 * s0) * inv
+    }
+}
+
+// Typed front door onto the vtable: callers stay in Model/Camera/Light terms and
+// the `ptr` widening happens in exactly one place.
+backend_init(b: *Backend, window: ptr, width: int, height: int) -> bool {
+    return b.init(b.state, window, width, height) == 1
+}
+
+backend_render(b: *Backend, cam: *Camera, light: *Light) {
+    b.render(b.state, cam, light)
+}
+
+backend_add_model(b: *Backend, m: *Model) {
+    b.add_model(b.state, m)
+}
+
+backend_remove_model(b: *Backend, m: *Model) {
+    b.remove_model(b.state, m)
+}
+
+backend_load_texture(b: *Backend, path: string) -> int {
+    return b.load_texture(b.state, path)
+}
+
+backend_set_skybox(b: *Backend, skybox: ptr) {
+    b.set_skybox(b.state, skybox)
+}
+
+backend_update_viewport(b: *Backend, width: int, height: int) {
+    b.update_viewport(b.state, width, height)
+}
+
+backend_cleanup(b: *Backend) {
+    b.cleanup(b.state)
+}
+
+debug_enabled() -> bool { return g_debug }
+set_debug(on: bool) { g_debug = on }
+frustum_culling() -> bool { return g_frustum_culling }
+set_frustum_culling(on: bool) { g_frustum_culling = on }
+face_culling() -> bool { return g_face_culling }
+set_face_culling(on: bool) { g_face_culling = on }
+depth_test() -> bool { return g_depth_test }
+set_depth_test(on: bool) { g_depth_test = on }
+
+next_model_id() -> int {
+    id = g_next_model_id
+    g_next_model_id = g_next_model_id + 1
+    return id
+}
+
+shader_new(vertex_source: string, fragment_source: string) -> Shader {
+    return Shader {
+        program: 0,
+        vertex_source: vertex_source,
+        fragment_source: fragment_source,
+        compiled: false
+    }
+}
+
+shader_valid(s: *Shader) -> bool {
+    return s.vertex_source != "" && s.fragment_source != ""
+}
+
+material_new(name: string) -> *Material {
+    m = heap.new(Material)
+    m.name = name
+    m.diffuse = vec3(1.0, 1.0, 1.0)
+    m.specular = vec3(1.0, 1.0, 1.0)
+    m.shininess = 32.0
+    m.metallic = 0.0
+    m.roughness = 0.5
+    m.exposure = 1.0
+    m.alpha = 1.0
+    m.texture_id = 0
+    m.texture_path = ""
+    return m
+}
+
+material_default() -> *Material {
+    return material_new("default")
+}
+
+material_clone(src: *Material) -> *Material {
+    m = heap.new(Material)
+    m.name = string.copy(src.name)
+    m.texture_path = string.copy(src.texture_path)
+    m.diffuse = src.diffuse
+    m.specular = src.specular
+    m.shininess = src.shininess
+    m.metallic = src.metallic
+    m.roughness = src.roughness
+    m.exposure = src.exposure
+    m.alpha = src.alpha
+    m.texture_id = src.texture_id
+    return m
+}
+
+material_free(m: *Material) {
+    if m == null { return }
+    heap.free(m)
+}
+
+model_new() -> *Model {
+    m = heap.new(Model)
+    m.mesh = ae3d_mesh_create()
+    m.groups = list.new()
+    m.uniforms = list.new()
+    m.position = vec3(0.0, 0.0, 0.0)
+    m.scale = vec3(1.0, 1.0, 1.0)
+    m.rotation = quat_ident()
+    m.model_matrix = mat4_ident()
+    m.bounding_center = vec3(0.0, 0.0, 0.0)
+    m.bounding_radius = 0.0
+    m.visible = true
+    m.id = next_model_id()
+    m.name = ""
+    m.source_path = ""
+    m.shader = shader_new("", "")
+    return m
+}
+
+model_free(m: *Model) {
+    if m == null { return }
+
+    if m.mesh != null { ae3d_mesh_destroy(m.mesh) }
+    if m.instances != null { ae3d_inst_destroy(m.instances) }
+
+    if m.groups != null {
+        count = list.size(m.groups)
+        i = 0
+        while i < count {
+            group = list.get_raw(m.groups, i) as *MaterialGroup
+            if group != null { heap.free(group) }
+            i = i + 1
+        }
+        list.free(m.groups)
+    }
+
+    if m.uniforms != null {
+        count = list.size(m.uniforms)
+        i = 0
+        while i < count {
+            uniform = list.get_raw(m.uniforms, i) as *Uniform
+            if uniform != null {
+                if uniform.array != null { ae3d_farr_destroy(uniform.array) }
+                heap.free(uniform)
+            }
+            i = i + 1
+        }
+        list.free(m.uniforms)
+    }
+
+    if m.material != null { material_free(m.material) }
+    heap.free(m)
+}
+
+model_update_matrix(m: *Model) {
+    scale_matrix = mat4_scale(m.scale.x, m.scale.y, m.scale.z)
+    rotation_matrix = quat_mat4(m.rotation)
+    translation = mat4_translate(m.position.x, m.position.y, m.position.z)
+    m.model_matrix = mat4_mul(mat4_mul(translation, rotation_matrix), scale_matrix)
+    if g_frustum_culling { model_recalculate_bounds(m) }
+}
+
+model_recalculate_bounds(m: *Model) {
+    if m.is_instanced && m.instances != null && ae3d_inst_count(m.instances) > 0 {
+        ae3d_inst_compute_bounds(m.instances)
+        centre = vec3(ae3d_inst_bound_x(m.instances),
+                            ae3d_inst_bound_y(m.instances),
+                            ae3d_inst_bound_z(m.instances))
+        m.bounding_center = v3_add(centre, m.position)
+        m.bounding_radius = ae3d_inst_bound_radius(m.instances) + 10.0
+        return
+    }
+
+    ae3d_mesh_compute_bounds(m.mesh,
+                             m.position.x, m.position.y, m.position.z,
+                             m.scale.x, m.scale.y, m.scale.z,
+                             m.rotation.x, m.rotation.y, m.rotation.z, m.rotation.w)
+    m.bounding_center = vec3(ae3d_mesh_bound_x(m.mesh),
+                                   ae3d_mesh_bound_y(m.mesh),
+                                   ae3d_mesh_bound_z(m.mesh))
+    m.bounding_radius = ae3d_mesh_bound_radius(m.mesh)
+}
+
+model_mark_dirty(m: *Model) {
+    m.is_dirty = true
+}
+
+model_set_position(m: *Model, x: float, y: float, z: float) {
+    m.position = vec3(x, y, z)
+    model_update_matrix(m)
+    m.is_dirty = true
+    model_recalculate_bounds(m)
+}
+
+model_set_scale(m: *Model, x: float, y: float, z: float) {
+    m.scale = vec3(x, y, z)
+    model_update_matrix(m)
+    m.is_dirty = true
+    model_recalculate_bounds(m)
+}
+
+model_set_rotation(m: *Model, q: Quat) {
+    m.rotation = q
+    model_update_matrix(m)
+    m.is_dirty = true
+}
+
+model_rotate(m: *Model, degrees_x: float, degrees_y: float, degrees_z: float) {
+    if quat_is_zero(m.rotation) { m.rotation = quat_ident() }
+    rx = quat_rotate(deg_to_rad(degrees_x), vec3(1.0, 0.0, 0.0))
+    ry = quat_rotate(deg_to_rad(degrees_y), vec3(0.0, 1.0, 0.0))
+    rz = quat_rotate(deg_to_rad(degrees_z), vec3(0.0, 0.0, 1.0))
+    m.rotation = quat_mul(quat_mul(quat_mul(m.rotation, rx), ry), rz)
+    model_update_matrix(m)
+    m.is_dirty = true
+}
+
+model_ensure_material(m: *Model) {
+    if m.material == null {
+        m.material = material_default()
+    }
+}
+
+model_set_diffuse(m: *Model, r: float, g: float, b: float) {
+    model_ensure_material(m)
+    m.material.diffuse = vec3(r, g, b)
+}
+
+model_set_specular(m: *Model, r: float, g: float, b: float) {
+    model_ensure_material(m)
+    m.material.specular = vec3(r, g, b)
+}
+
+model_set_pbr(m: *Model, metallic: float, roughness: float) {
+    model_ensure_material(m)
+    m.material.metallic = metallic
+    m.material.roughness = roughness
+}
+
+model_set_exposure(m: *Model, exposure: float) {
+    model_ensure_material(m)
+    m.material.exposure = exposure
+}
+
+model_set_alpha(m: *Model, alpha: float) {
+    model_ensure_material(m)
+    m.material.alpha = alpha
+}
+
+model_set_texture(m: *Model, path: string) {
+    model_ensure_material(m)
+    m.material.texture_path = path
+}
+
+model_set_shader(m: *Model, s: Shader) {
+    m.shader = s
+}
+
+model_metallic(m: *Model, r: float, g: float, b: float, roughness: float) {
+    model_set_diffuse(m, r, g, b)
+    model_set_pbr(m, 1.0, roughness)
+}
+
+model_plastic(m: *Model, r: float, g: float, b: float, roughness: float) {
+    model_set_diffuse(m, r, g, b)
+    model_set_pbr(m, 0.0, roughness)
+}
+
+model_rough_metal(m: *Model, r: float, g: float, b: float) {
+    model_metallic(m, r, g, b, 0.8)
+}
+
+model_polished_metal(m: *Model, r: float, g: float, b: float) {
+    model_metallic(m, r, g, b, 0.1)
+}
+
+model_matte(m: *Model, r: float, g: float, b: float) {
+    model_plastic(m, r, g, b, 0.9)
+}
+
+model_glossy(m: *Model, r: float, g: float, b: float) {
+    model_plastic(m, r, g, b, 0.2)
+}
+
+model_glass(m: *Model, r: float, g: float, b: float, alpha: float) {
+    model_set_diffuse(m, r, g, b)
+    model_set_pbr(m, 0.0, 0.05)
+    model_set_alpha(m, alpha)
+    model_set_exposure(m, 1.2)
+}
+
+model_transparent_plastic(m: *Model, r: float, g: float, b: float,
+                          alpha: float, roughness: float) {
+    model_plastic(m, r, g, b, roughness)
+    model_set_alpha(m, alpha)
+}
+
+model_add_group(m: *Model, material: *Material, index_start: int, index_count: int) {
+    group = heap.new(MaterialGroup)
+    group.material = material
+    group.index_start = index_start
+    group.index_count = index_count
+    list.add_raw(m.groups, group)
+}
+
+model_group_count(m: *Model) -> int {
+    return list.size(m.groups)
+}
+
+model_group(m: *Model, index: int) -> *MaterialGroup {
+    return list.get_raw(m.groups, index) as *MaterialGroup
+}
+
+// Draw order follows texture id so the renderer rebinds a texture at most once
+// per distinct texture instead of once per group.
+model_sort_groups_by_texture(m: *Model) {
+    count = list.size(m.groups)
+    if count <= 1 { return }
+
+    i = 1
+    while i < count {
+        current = list.get_raw(m.groups, i) as *MaterialGroup
+        current_texture = 0
+        if current.material != null { current_texture = current.material.texture_id }
+
+        j = i - 1
+        while j >= 0 {
+            candidate = list.get_raw(m.groups, j) as *MaterialGroup
+            candidate_texture = 0
+            if candidate.material != null { candidate_texture = candidate.material.texture_id }
+            if candidate_texture <= current_texture { break }
+            list.set(m.groups, j + 1, candidate)
+            j = j - 1
+        }
+        list.set(m.groups, j + 1, current)
+        i = i + 1
+    }
+}
+
+find_uniform(m: *Model, name: string) -> *Uniform {
+    count = list.size(m.uniforms)
+    i = 0
+    while i < count {
+        uniform = list.get_raw(m.uniforms, i) as *Uniform
+        if uniform != null && string.equals(uniform.name, name) == 1 { return uniform }
+        i = i + 1
+    }
+    return null
+}
+
+upsert_uniform(m: *Model, name: string, kind: int) -> *Uniform {
+    existing = find_uniform(m, name)
+    if existing != null {
+        if existing.array != null && kind != UNIFORM_FLOAT_ARRAY && kind != UNIFORM_VEC3_ARRAY {
+            ae3d_farr_destroy(existing.array)
+            existing.array = null
+        }
+        existing.kind = kind
+        return existing
+    }
+    uniform = heap.new(Uniform)
+    uniform.name = string.copy(name)
+    uniform.kind = kind
+    uniform.location = 0 - 1
+    uniform.cached_program = 0
+    list.add_raw(m.uniforms, uniform)
+    return uniform
+}
+
+model_set_uniform_float(m: *Model, name: string, value: float) {
+    uniform = upsert_uniform(m, name, UNIFORM_FLOAT)
+    uniform.number = value
+}
+
+model_set_uniform_int(m: *Model, name: string, value: int) {
+    uniform = upsert_uniform(m, name, UNIFORM_INT)
+    uniform.integer = value
+}
+
+model_set_uniform_vec3(m: *Model, name: string, value: Vec3) {
+    uniform = upsert_uniform(m, name, UNIFORM_VEC3)
+    uniform.vector = value
+}
+
+// `vec3_array` selects glUniform3fv over glUniform1fv; count is the float count
+// either way, so a vec3 array of n elements passes 3 * n.
+model_set_uniform_array(m: *Model, name: string, count: int, vec3_array: bool) -> ptr {
+    kind = UNIFORM_FLOAT_ARRAY
+    if vec3_array { kind = UNIFORM_VEC3_ARRAY }
+    uniform = upsert_uniform(m, name, kind)
+    if uniform.array != null && ae3d_farr_count(uniform.array) != count {
+        ae3d_farr_destroy(uniform.array)
+        uniform.array = null
+    }
+    if uniform.array == null { uniform.array = ae3d_farr_create(count) }
+    return uniform.array
+}
+
+model_uniform_count(m: *Model) -> int {
+    return list.size(m.uniforms)
+}
+
+model_uniform(m: *Model, index: int) -> *Uniform {
+    return list.get_raw(m.uniforms, index) as *Uniform
+}
+
+model_enable_instancing(m: *Model, count: int) -> bool {
+    if m.instances == null {
+        m.instances = ae3d_inst_create()
+        if m.instances == null { return false }
+    }
+    if ae3d_inst_resize(m.instances, count) != 1 { return false }
+    m.is_instanced = true
+    m.instances_updated = true
+    return true
+}
+
+model_set_instance_position(m: *Model, index: int, position: Vec3) {
+    if m.instances == null { return }
+    ae3d_inst_set_trs(m.instances, index,
+                      position.x, position.y, position.z,
+                      m.scale.x, m.scale.y, m.scale.z,
+                      m.rotation.x, m.rotation.y, m.rotation.z, m.rotation.w)
+    m.instances_updated = true
+}
+
+model_set_instance_color(m: *Model, index: int, r: float, g: float, b: float) {
+    if m.instances == null { return }
+    if ae3d_inst_enable_colors(m.instances, ae3d_inst_count(m.instances)) != 1 { return }
+    ae3d_inst_set_color(m.instances, index, r, g, b)
+}
+
+model_instance_count(m: *Model) -> int {
+    if m.instances == null { return 0 }
+    return ae3d_inst_count(m.instances)
+}
+
+model_remove_instance(m: *Model, index: int) {
+    if m.instances == null { return }
+    ae3d_inst_remove(m.instances, index)
+    m.instances_updated = true
+}
+
+light_new() -> *Light {
+    l = heap.new(Light)
+    l.position = vec3(0.0, 1500.0, 0.0)
+    l.color = vec3(1.0, 1.0, 1.0)
+    l.direction = vec3(0.0, 0.0 - 1.0, 0.0)
+    l.intensity = 1.0
+    l.ambient_strength = 0.1
+    l.temperature = 5500.0
+    l.constant_atten = 1.0
+    l.linear_atten = 0.0001
+    l.quadratic_atten = 0.0000001
+    l.kind = LIGHT_DYNAMIC
+    l.mode = MODE_POINT
+    l.name = "light"
+    return l
+}
+
+light_free(l: *Light) {
+    if l == null { return }
+    heap.free(l)
+}
+
+light_directional(direction: Vec3, color: Vec3, intensity: float) -> *Light {
+    l = light_new()
+    l.mode = MODE_DIRECTIONAL
+    l.direction = v3_normalize(direction)
+    l.color = color
+    l.intensity = intensity
+    l.ambient_strength = 0.15
+    l.temperature = 5500.0
+    return l
+}
+
+light_point(position: Vec3, color: Vec3, intensity: float, range: float) -> *Light {
+    l = light_new()
+    l.mode = MODE_POINT
+    l.position = position
+    l.color = color
+    l.intensity = intensity
+    l.constant_atten = 1.0
+    if range > 0.0 {
+        l.linear_atten = 2.0 / range
+        l.quadratic_atten = 1.0 / (range * range)
+    }
+    return l
+}
+
+light_warm(position: Vec3, intensity: float) -> *Light {
+    l = light_point(position, vec3(1.0, 1.0, 1.0), intensity, 100.0)
+    l.temperature = 2700.0
+    return l
+}
+
+light_cool(position: Vec3, intensity: float) -> *Light {
+    l = light_point(position, vec3(1.0, 1.0, 1.0), intensity, 100.0)
+    l.temperature = 6500.0
+    return l
+}
+
+light_sun(direction: Vec3) -> *Light {
+    l = light_directional(direction, vec3(1.0, 0.95, 0.8), 1.2)
+    l.temperature = 5800.0
+    l.ambient_strength = 0.2
+    return l
+}
+
+frustum_dirty() -> bool { return g_frustum_dirty }
+mark_frustum_dirty() { g_frustum_dirty = true }
+clear_frustum_dirty() { g_frustum_dirty = false }
+
+camera_new(width: int, height: int) -> *Camera {
+    c = heap.new(Camera)
+    c.position = vec3(1.0, 0.0, 100.0)
+    c.front = vec3(0.0, 0.0, 0.0 - 1.0)
+    c.up = vec3(0.0, 1.0, 0.0)
+    c.world_up = vec3(0.0, 1.0, 0.0)
+    c.right = vec3(1.0, 0.0, 0.0)
+    c.pitch = 0.0
+    c.yaw = 0.0 - 90.0
+    c.speed = 70.0
+    c.sensitivity = 0.1
+    c.fov = 45.0
+    c.near = 0.1
+    c.far = 10000.0
+    c.aspect = 1.0
+    if height > 0 { c.aspect = (width * 1.0) / (height * 1.0) }
+    c.invert_mouse = true
+    c.active = true
+    c.name = "camera"
+    camera_update_vectors(c)
+    camera_update_projection(c)
+    return c
+}
+
+camera_free(c: *Camera) {
+    if c == null { return }
+    heap.free(c)
+}
+
+camera_update_projection(c: *Camera) {
+    c.projection = mat4_perspective(deg_to_rad(c.fov), c.aspect, c.near, c.far)
+    mark_frustum_dirty()
+}
+
+camera_set_fov(c: *Camera, fov: float) {
+    c.fov = fov
+    camera_update_projection(c)
+}
+
+camera_set_near(c: *Camera, near: float) {
+    c.near = near
+    camera_update_projection(c)
+}
+
+camera_set_far(c: *Camera, far: float) {
+    c.far = far
+    camera_update_projection(c)
+}
+
+camera_set_aspect(c: *Camera, aspect: float) {
+    if aspect <= 0.0 { return }
+    c.aspect = aspect
+    camera_update_projection(c)
+}
+
+camera_set_position(c: *Camera, position: Vec3) {
+    c.position = position
+    mark_frustum_dirty()
+}
+
+camera_set_speed(c: *Camera, speed: float) {
+    c.speed = speed
+}
+
+camera_update_vectors(c: *Camera) {
+    yaw = deg_to_rad(c.yaw)
+    pitch = deg_to_rad(c.pitch)
+    front = vec3(cos_of(yaw) * cos_of(pitch),
+                       sin_of(pitch),
+                       sin_of(yaw) * cos_of(pitch))
+    c.front = v3_normalize(front)
+    c.right = v3_normalize(v3_cross(c.front, c.world_up))
+    c.up = v3_normalize(v3_cross(c.right, c.front))
+}
+
+camera_view(c: *Camera) -> Mat4 {
+    return mat4_look_at(c.position, v3_add(c.position, c.front), c.up)
+}
+
+camera_projection(c: *Camera) -> Mat4 {
+    return c.projection
+}
+
+camera_view_projection(c: *Camera) -> Mat4 {
+    return mat4_mul(c.projection, camera_view(c))
+}
+
+camera_process_keyboard(c: *Camera, window: ptr, delta_time: float) {
+    velocity = c.speed * delta_time
+    if platform.key_down(window, platform.KEY_LEFT_SHIFT) ||
+       platform.key_down(window, platform.KEY_RIGHT_SHIFT) {
+        velocity = velocity * 2.5
+    }
+
+    moved = false
+    if platform.key_down(window, platform.KEY_W) {
+        c.position = v3_add(c.position, v3_mul(c.front, velocity))
+        moved = true
+    }
+    if platform.key_down(window, platform.KEY_S) {
+        c.position = v3_sub(c.position, v3_mul(c.front, velocity))
+        moved = true
+    }
+    if platform.key_down(window, platform.KEY_A) {
+        c.position = v3_sub(c.position, v3_mul(c.right, velocity))
+        moved = true
+    }
+    if platform.key_down(window, platform.KEY_D) {
+        c.position = v3_add(c.position, v3_mul(c.right, velocity))
+        moved = true
+    }
+    if platform.key_down(window, platform.KEY_SPACE) {
+        c.position = v3_add(c.position, v3_mul(c.world_up, velocity))
+        moved = true
+    }
+    if platform.key_down(window, platform.KEY_LEFT_CONTROL) {
+        c.position = v3_sub(c.position, v3_mul(c.world_up, velocity))
+        moved = true
+    }
+
+    if moved { mark_frustum_dirty() }
+}
+
+camera_process_mouse(c: *Camera, x_offset: float, y_offset: float, constrain_pitch: bool) {
+    dx = x_offset * c.sensitivity
+    dy = y_offset * c.sensitivity
+
+    c.yaw = c.yaw + dx
+    if c.invert_mouse {
+        c.pitch = c.pitch - dy
+    } else {
+        c.pitch = c.pitch + dy
+    }
+    if constrain_pitch {
+        c.pitch = clampf(c.pitch, 0.0 - 89.0, 89.0)
+    }
+    camera_update_vectors(c)
+    mark_frustum_dirty()
+}
+
+camera_look_at(c: *Camera, target: Vec3) {
+    direction = v3_normalize(v3_sub(target, c.position))
+    c.yaw = rad_to_deg(atan2_of(direction.z, direction.x))
+    horizontal = sqrt_of(direction.x * direction.x + direction.z * direction.z)
+    c.pitch = rad_to_deg(atan2_of(direction.y, horizontal))
+    camera_update_vectors(c)
+    mark_frustum_dirty()
+}
+
+normalize_plane(p: Plane) -> Plane {
+    length = v3_len(p.normal)
+    if length < 0.000000000001 { return p }
+    inv = 1.0 / length
+    return Plane { normal: v3_mul(p.normal, inv), distance: p.distance * inv }
+}
+
+camera_frustum(c: *Camera) -> Frustum {
+    vp = camera_view_projection(c)
+    return Frustum {
+        left: normalize_plane(Plane {
+            normal: vec3(vp.m3 + vp.m0, vp.m7 + vp.m4, vp.m11 + vp.m8),
+            distance: vp.m15 + vp.m12
+        }),
+        right: normalize_plane(Plane {
+            normal: vec3(vp.m3 - vp.m0, vp.m7 - vp.m4, vp.m11 - vp.m8),
+            distance: vp.m15 - vp.m12
+        }),
+        bottom: normalize_plane(Plane {
+            normal: vec3(vp.m3 + vp.m1, vp.m7 + vp.m5, vp.m11 + vp.m9),
+            distance: vp.m15 + vp.m13
+        }),
+        top: normalize_plane(Plane {
+            normal: vec3(vp.m3 - vp.m1, vp.m7 - vp.m5, vp.m11 - vp.m9),
+            distance: vp.m15 - vp.m13
+        }),
+        near: normalize_plane(Plane {
+            normal: vec3(vp.m3 + vp.m2, vp.m7 + vp.m6, vp.m11 + vp.m10),
+            distance: vp.m15 + vp.m14
+        }),
+        far: normalize_plane(Plane {
+            normal: vec3(vp.m3 - vp.m2, vp.m7 - vp.m6, vp.m11 - vp.m10),
+            distance: vp.m15 - vp.m14
+        })
+    }
+}
+
+plane_distance(p: *Plane, point: Vec3) -> float {
+    return v3_dot(p.normal, point) + p.distance
+}
+
+frustum_intersects_sphere(f: *Frustum, center: Vec3, radius: float) -> bool {
+    negative = 0.0 - radius
+    if plane_distance(&f.left, center) < negative { return false }
+    if plane_distance(&f.right, center) < negative { return false }
+    if plane_distance(&f.bottom, center) < negative { return false }
+    if plane_distance(&f.top, center) < negative { return false }
+    if plane_distance(&f.near, center) < negative { return false }
+    if plane_distance(&f.far, center) < negative { return false }
+    return true
+}
+
+camera_screen_to_world(c: *Camera, screen_x: float, screen_y: float,
+                       width: int, height: int) -> Vec3 {
+    if width <= 0 || height <= 0 { return c.front }
+
+    ndc_x = 2.0 * screen_x / (width * 1.0) - 1.0
+    ndc_y = 1.0 - 2.0 * screen_y / (height * 1.0)
+
+    clip = vec4(ndc_x, ndc_y, 0.0 - 1.0, 1.0)
+    eye = mat4_mul_v4(mat4_inverse(c.projection), clip)
+    eye = vec4(eye.x, eye.y, 0.0 - 1.0, 0.0)
+
+    world = mat4_mul_v4(mat4_inverse(camera_view(c)), eye)
+    return v3_normalize(vec3(world.x, world.y, world.z))
+}
+
+
+mesh_create() -> ptr {
+    return ae3d_mesh_create()
+}
+
+mesh_destroy(mesh: ptr) {
+    ae3d_mesh_destroy(mesh)
+}
+
+mesh_reserve(mesh: ptr, vertices: int, indices: int) -> bool {
+    return ae3d_mesh_reserve(mesh, vertices, indices) == 1
+}
+
+mesh_push_vertex(mesh: ptr, position: Vec3, u: float, v: float, normal: Vec3) -> int {
+    return ae3d_mesh_push_vertex(mesh, position.x, position.y, position.z,
+                                 u, v, normal.x, normal.y, normal.z)
+}
+
+mesh_push_index(mesh: ptr, index: int) -> int {
+    return ae3d_mesh_push_index(mesh, index)
+}
+
+mesh_push_triangle(mesh: ptr, a: int, b: int, c: int) {
+    ae3d_mesh_push_index(mesh, a)
+    ae3d_mesh_push_index(mesh, b)
+    ae3d_mesh_push_index(mesh, c)
+}
+
+mesh_vertex_count(mesh: ptr) -> int {
+    return ae3d_mesh_vertex_count(mesh)
+}
+
+mesh_index_count(mesh: ptr) -> int {
+    return ae3d_mesh_index_count(mesh)
+}
+
+mesh_index_at(mesh: ptr, i: int) -> int {
+    return ae3d_mesh_index_at(mesh, i)
+}
+
+mesh_position(mesh: ptr, i: int) -> Vec3 {
+    return Vec3 {
+        x: ae3d_mesh_pos_x(mesh, i),
+        y: ae3d_mesh_pos_y(mesh, i),
+        z: ae3d_mesh_pos_z(mesh, i)
+    }
+}
+
+mesh_set_position(mesh: ptr, i: int, position: Vec3) {
+    ae3d_mesh_set_pos(mesh, i, position.x, position.y, position.z)
+}
+
+mesh_set_uv(mesh: ptr, i: int, u: float, v: float) {
+    ae3d_mesh_set_uv(mesh, i, u, v)
+}
+
+mesh_set_normal(mesh: ptr, i: int, normal: Vec3) {
+    ae3d_mesh_set_normal(mesh, i, normal.x, normal.y, normal.z)
+}
+
+mesh_recalculate_normals(mesh: ptr) {
+    ae3d_mesh_recalc_normals(mesh)
+}
+
+// Fullscreen triangle pair in clip space. Position z and the normal stay zero so
+// the interleaved layout matches every other mesh and the shared attribute setup
+// works unchanged; the screen shaders read only vec2 position and vec2 uv.
+mesh_push_screen_quad(mesh: ptr) {
+    ae3d_mesh_reserve(mesh, 6, 0)
+    ae3d_mesh_push_vertex(mesh, 0.0 - 1.0,       1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+    ae3d_mesh_push_vertex(mesh, 0.0 - 1.0, 0.0 - 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    ae3d_mesh_push_vertex(mesh,       1.0, 0.0 - 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+    ae3d_mesh_push_vertex(mesh, 0.0 - 1.0,       1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+    ae3d_mesh_push_vertex(mesh,       1.0, 0.0 - 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+    ae3d_mesh_push_vertex(mesh,       1.0,       1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0)
+}
+
+model_instance_has_colors(m: *Model) -> bool {
+    if m.instances == null { return false }
+    return ae3d_inst_has_colors(m.instances) == 1
+}
+
+frustum_new() -> ptr {
+    f = heap.new(Frustum)
+    return f
+}
+
+frustum_free(f: ptr) {
+    typed = f as *Frustum
+    if typed == null { return }
+    heap.free(typed)
+}
+
+camera_fill_frustum(c: *Camera, target: ptr) {
+    f = target as *Frustum
+    if f == null { return }
+    computed = camera_frustum(c)
+    f.left = computed.left
+    f.right = computed.right
+    f.bottom = computed.bottom
+    f.top = computed.top
+    f.near = computed.near
+    f.far = computed.far
+}
+
+frustum_sphere_visible(target: ptr, center: Vec3, radius: float) -> bool {
+    f = target as *Frustum
+    if f == null { return true }
+    return frustum_intersects_sphere(f, center, radius)
+}
