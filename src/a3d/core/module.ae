@@ -21,6 +21,7 @@ import std.string
 import a3d.platform
 
 exports (
+    mesh_push_skybox_cube, skybox_solid, skybox_set_color, skybox_texture,
     Vec2, Vec3, Vec4, Quat, Mat4, vec2, vec3, vec4, quat, v3_add, v3_sub, v3_mul, v3_div,
     v3_neg, v3_dot, v3_cross, v3_len, v3_len_sq, v3_normalize, v3_distance, v3_lerp, v3_eq,
     v3_zero, v4_from_v3, v4_xyz, quat_ident, quat_rotate, quat_mul, quat_apply,
@@ -50,7 +51,7 @@ exports (
     set_debug, frustum_culling, set_frustum_culling, face_culling, set_face_culling,
     depth_test, set_depth_test, next_model_id, backend_init, backend_render,
     backend_add_model, backend_remove_model, backend_load_texture, backend_set_skybox,
-    backend_update_viewport, backend_cleanup, Camera, Plane, Frustum, camera_new,
+    backend_update_viewport, backend_set_post, backend_cleanup, Camera, Plane, Frustum, camera_new,
     camera_free, camera_update_projection, camera_set_fov, camera_set_near, camera_set_far,
     camera_set_aspect, camera_set_position, camera_set_speed, camera_view,
     camera_projection, camera_view_projection, camera_process_keyboard,
@@ -284,6 +285,21 @@ struct Light {
     name: string
 }
 
+struct Skybox {
+    mesh: ptr
+    vao: int
+    vbo: int
+    program: int
+    texture: int
+    u_view: int
+    u_projection: int
+    u_sampler: int
+    size: float
+    red: float
+    green: float
+    blue: float
+}
+
 struct Backend {
     state: ptr
     name: string
@@ -294,6 +310,7 @@ struct Backend {
     load_texture:    fn(ptr, string) -> int
     set_skybox:      fn(ptr, ptr)
     update_viewport: fn(ptr, int, int)
+    set_post:        fn(ptr, int, int, float, float)
     cleanup:         fn(ptr)
 }
 
@@ -752,6 +769,14 @@ backend_update_viewport(b: *Backend, width: int, height: int) {
     b.update_viewport(b.state, width, height)
 }
 
+backend_set_post(b: *Backend, fxaa: bool, bloom: bool, threshold: float, intensity: float) {
+    fx = 0
+    if fxaa { fx = 1 }
+    bl = 0
+    if bloom { bl = 1 }
+    b.set_post(b.state, fx, bl, threshold, intensity)
+}
+
 backend_cleanup(b: *Backend) {
     b.cleanup(b.state)
 }
@@ -795,6 +820,11 @@ shader_valid(s: *Shader) -> bool {
 // side, no constructor ever assigns a string directly: every one goes through a
 // setter, so the box never claims ownership and the destructor is always the
 // single release. Assigning in a constructor here means a double free.
+// Every string field is assigned through a setter that takes the struct
+// pointer, never inline where the struct is allocated. heap.free releases a
+// string field only when the assignment is written in the function that frees
+// it, so a field assigned this way is always the destructor's to release and
+// never freed twice. See docs/string_ownership.md.
 set_owned(previous: string, value: string) -> string {
     if previous != null { string.free(previous) }
     return string.copy(value)
@@ -1629,6 +1659,52 @@ mesh_push_screen_quad(mesh: ptr) {
     ae3d_mesh_push_vertex(mesh, 0.0 - 1.0,       1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
     ae3d_mesh_push_vertex(mesh,       1.0, 0.0 - 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
     ae3d_mesh_push_vertex(mesh,       1.0,       1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0)
+}
+
+// The sky cube is shared by both backends: its winding faces inward, so the
+// camera sitting inside it sees every face.
+// A solid sky needs no geometry: the clear colour already fills every pixel the
+// scene does not cover, so drawing a cube over it would be pure waste.
+skybox_solid(red: float, green: float, blue: float) -> *Skybox {
+    sky = heap.new(Skybox)
+    sky.red = red
+    sky.green = green
+    sky.blue = blue
+    sky.size = 10000.0
+    return sky
+}
+
+skybox_set_color(sky: *Skybox, red: float, green: float, blue: float) {
+    sky.red = red
+    sky.green = green
+    sky.blue = blue
+}
+
+skybox_texture(sky: *Skybox) -> int {
+    return sky.texture
+}
+
+mesh_push_skybox_face(mesh: ptr, a: Vec3, b: Vec3, c: Vec3, d: Vec3) {
+    zero = vec3(0.0, 0.0, 0.0)
+    mesh_push_vertex(mesh, a, 0.0, 0.0, zero)
+    mesh_push_vertex(mesh, b, 0.0, 0.0, zero)
+    mesh_push_vertex(mesh, c, 0.0, 0.0, zero)
+    mesh_push_vertex(mesh, c, 0.0, 0.0, zero)
+    mesh_push_vertex(mesh, d, 0.0, 0.0, zero)
+    mesh_push_vertex(mesh, a, 0.0, 0.0, zero)
+}
+
+mesh_push_skybox_cube(mesh: ptr, size: float) {
+    n = 0.0 - size
+    p = size
+    mesh_reserve(mesh, 36, 0)
+
+    mesh_push_skybox_face(mesh, vec3(n, p, n), vec3(n, n, n), vec3(p, n, n), vec3(p, p, n))
+    mesh_push_skybox_face(mesh, vec3(n, n, p), vec3(n, n, n), vec3(n, p, n), vec3(n, p, p))
+    mesh_push_skybox_face(mesh, vec3(p, n, n), vec3(p, n, p), vec3(p, p, p), vec3(p, p, n))
+    mesh_push_skybox_face(mesh, vec3(n, n, p), vec3(n, p, p), vec3(p, p, p), vec3(p, n, p))
+    mesh_push_skybox_face(mesh, vec3(n, p, n), vec3(p, p, n), vec3(p, p, p), vec3(n, p, p))
+    mesh_push_skybox_face(mesh, vec3(n, n, n), vec3(n, n, p), vec3(p, n, p), vec3(p, n, n))
 }
 
 model_instance_has_colors(m: *Model) -> bool {

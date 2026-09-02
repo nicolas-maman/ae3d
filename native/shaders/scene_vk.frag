@@ -60,6 +60,12 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float noiseIntensity;
     bool enableHighQualityFiltering;
     int filteringQuality;
+    mat4 projection;
+    mat4 view;
+    vec2 texelSize;
+    float edgeThreshold;
+    float edgeThresholdMin;
+    float subpixelQuality;
 };
 layout(set = 0, binding = 1) uniform sampler2D textureSampler;
 layout(location = 0) in vec2 fragTexCoord;

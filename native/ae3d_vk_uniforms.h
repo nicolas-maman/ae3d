@@ -4,12 +4,12 @@
 
 #include <string.h>
 
-#define AE3D_VK_SCENE_SIZE 448
+#define AE3D_VK_SCENE_SIZE 608
 
 /* std140 layout, offsets computed from the same declarations the shader
    block is generated from, so the two cannot disagree. */
 typedef struct {
-    unsigned char bytes[448];
+    unsigned char bytes[608];
 } ae3d_vk_scene;
 
 #define AE3D_VK_OFF_ISINSTANCED 0
@@ -70,6 +70,12 @@ typedef struct {
 #define AE3D_VK_OFF_NOISEINTENSITY 432
 #define AE3D_VK_OFF_ENABLEHIGHQUALITYFILTERING 436
 #define AE3D_VK_OFF_FILTERINGQUALITY 440
+#define AE3D_VK_OFF_PROJECTION 448
+#define AE3D_VK_OFF_VIEW 512
+#define AE3D_VK_OFF_TEXELSIZE 576
+#define AE3D_VK_OFF_EDGETHRESHOLD 584
+#define AE3D_VK_OFF_EDGETHRESHOLDMIN 588
+#define AE3D_VK_OFF_SUBPIXELQUALITY 592
 
 static inline void ae3d_vk_set_float(ae3d_vk_scene *s, int offset, float v) {
     memcpy(s->bytes + offset, &v, sizeof(v));

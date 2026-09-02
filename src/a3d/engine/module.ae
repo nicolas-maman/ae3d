@@ -19,7 +19,7 @@ exports (
     engine_stop, engine_on_start,
     engine_add_model, engine_remove_model, engine_set_light, engine_light,
     engine_camera, engine_window, engine_backend_name,
-    engine_set_size, engine_set_title, engine_set_msaa, engine_set_decorated,
+    engine_set_size, engine_set_title, engine_set_msaa, engine_set_decorated, engine_set_post,
     engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
     engine_set_debug, engine_set_frustum_culling, engine_set_face_culling,
@@ -42,6 +42,7 @@ struct Engine {
     backend_load_texture: fn(ptr, string) -> int
     backend_set_skybox: fn(ptr, ptr)
     backend_update_viewport: fn(ptr, int, int)
+    backend_set_post: fn(ptr, int, int, float, float)
     backend_cleanup: fn(ptr)
     backend_name: string
 
@@ -121,6 +122,7 @@ bind_backend(e: *Engine, b: Backend) {
     e.backend_remove_model = b.remove_model
     e.backend_load_texture = b.load_texture
     e.backend_set_skybox = b.set_skybox
+    e.backend_set_post = b.set_post
     e.backend_update_viewport = b.update_viewport
     e.backend_cleanup = b.cleanup
     e.backend_name = b.name
@@ -148,6 +150,17 @@ engine_set_title(e: *Engine, title: string) {
 }
 
 engine_set_msaa(e: *Engine, samples: int) { e.msaa = samples }
+
+// Post-processing is a backend capability rather than a renderer-specific call,
+// so switching backends does not change what a scene looks like.
+engine_set_post(e: *Engine, fxaa: bool, bloom: bool, threshold: float, intensity: float) {
+    if e.backend_state == null { return }
+    fx = 0
+    if fxaa { fx = 1 }
+    bl = 0
+    if bloom { bl = 1 }
+    e.backend_set_post(e.backend_state, fx, bl, threshold, intensity)
+}
 engine_set_decorated(e: *Engine, decorated: bool) { e.decorated = decorated }
 engine_set_vsync(e: *Engine, interval: int) { e.vsync = interval }
 engine_set_camera_input(e: *Engine, enabled: bool) { e.camera_input = enabled }

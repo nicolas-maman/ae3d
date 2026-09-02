@@ -1,9 +1,11 @@
 // The two backends must draw the same scene the same way.
 //
 // Both render the same models, camera and light offscreen at the same size, and
-// the frames are compared pixel by pixel. Anything that makes the Vulkan path a
-// different renderer rather than the same one, a wrong uniform offset, a
-// flipped clip axis, a material that does not reach the shader, moves pixels and
+// the frames are compared pixel by pixel across every feature the renderers
+// share: PBR materials, textures, the skybox, and each post-processing pass.
+// Anything that makes the Vulkan path a different renderer rather than the same
+// one, a wrong uniform offset, a flipped clip axis, a material that does not
+// reach the shader, an effect wired to the wrong pipeline, moves pixels and
 // fails here.
 
 import std.mem
@@ -15,6 +17,7 @@ import a3d.loader
 
 const WIDTH = 256
 const HEIGHT = 192
+const TEXTURE = "resources/obj/Earth/Albedo.jpg"
 
 var failures = 0
 
@@ -31,55 +34,29 @@ channel(pixels: ptr, index: int) -> int {
     return mem.get_byte(pixels, index)
 }
 
-build_scene(pass_backend: *Backend) -> *Model {
-    sphere = loader.sphere(1.0, 32, 24)
-    core.model_set_scale(sphere, 30.0, 30.0, 30.0)
-    core.model_set_position(sphere, 0.0, 0.0, 0.0)
-    core.model_polished_metal(sphere, 0.85, 0.45, 0.20)
-    core.backend_add_model(pass_backend, sphere)
-    return sphere
+// A polished metal sphere and a textured one, so one frame exercises the
+// lighting model and the sampler at the same time.
+build_scene(pass_backend: *Backend) -> {
+    metal = loader.sphere(1.0, 32, 24)
+    core.model_set_scale(metal, 24.0, 24.0, 24.0)
+    core.model_set_position(metal, 0.0 - 34.0, 0.0, 0.0)
+    core.model_polished_metal(metal, 0.85, 0.45, 0.20)
+    core.backend_add_model(pass_backend, metal)
+
+    textured = loader.sphere(1.0, 32, 24)
+    core.model_set_scale(textured, 24.0, 24.0, 24.0)
+    core.model_set_position(textured, 34.0, 0.0, 0.0)
+    core.model_set_texture(textured, TEXTURE)
+    core.backend_add_model(pass_backend, textured)
+
+    return metal, textured
 }
 
-main() {
-    if !vk.available() {
-        println("parity: SKIP no Vulkan driver (${vk.last_error()})")
-        return
-    }
-
-    cam = core.camera_new(WIDTH, HEIGHT)
-    core.camera_set_position(cam, core.vec3(0.0, 0.0, 110.0))
-    light = core.light_sun(core.vec3(0.3, 0.6, 0.8))
-
-    context = offscreen.context_create(WIDTH, HEIGHT)
-    if context == null {
-        println("parity: SKIP no OpenGL context")
-        return
-    }
-    gl_renderer = gl.renderer_new()
-    opengl_pass = gl.backend(gl_renderer)
-    check_true("opengl started", core.backend_init(&opengl_pass, context, WIDTH, HEIGHT))
-
-    target = offscreen.target_create(WIDTH, HEIGHT)
-    gl.renderer_set_target(gl_renderer, target)
-    gl.renderer_set_clear_color(gl_renderer, 0.0, 0.0, 0.0)
-    gl_model = build_scene(&opengl_pass)
-    core.backend_render(&opengl_pass, cam, light)
-    gl_pixels = offscreen.target_pixels(target)
-    check_true("opengl produced pixels", gl_pixels != null)
-
-    vk_renderer = vk.renderer_new()
-    vulkan_pass = vk.backend(vk_renderer)
-    check_true("vulkan started", core.backend_init(&vulkan_pass, null, WIDTH, HEIGHT))
-    vk.renderer_set_clear_color(vk_renderer, 0.0, 0.0, 0.0)
-    vk_model = build_scene(&vulkan_pass)
-    core.backend_render(&vulkan_pass, cam, light)
-    vk_pixels = vk.offscreen_pixels()
-    check_true("vulkan produced pixels", vk_pixels != null)
-    check_true("vulkan target size", vk.offscreen_width() == WIDTH && vk.offscreen_height() == HEIGHT)
-
-    if gl_pixels == null || vk_pixels == null { return }
-
-    // Both frames must show the object rather than an empty clear.
+// Every configuration is compared the same way: the two rasterisers differ in
+// sample positions and resolve, so exact equality is not the bar. A shared
+// lighting model and matching transforms are, and those show up as a small
+// share of differing channels and near-identical lit coverage.
+compare(name: string, gl_pixels: ptr, vk_pixels: ptr) {
     lit_gl = 0
     lit_vk = 0
     worst = 0
@@ -111,26 +88,90 @@ main() {
         y = y + 1
     }
 
-    check_true("opengl drew the sphere", lit_gl > 2000)
-    check_true("vulkan drew the sphere", lit_vk > 2000)
+    check_true("${name}: opengl drew something", lit_gl > 2000)
+    check_true("${name}: vulkan drew something", lit_vk > 2000)
 
     coverage = lit_gl - lit_vk
     if coverage < 0 { coverage = 0 - coverage }
-    check_true("both cover the same area", coverage * 20 < lit_gl)
+    check_true("${name}: both cover the same area", coverage * 20 < lit_gl)
+    check_true("${name}: frames agree", differing * 100 < total * 2)
 
-    // The two rasterisers differ in sample positions and resolve, so exact
-    // equality is not the bar; a shared lighting model and matching transforms
-    // are, and those show up as a small share of differing channels.
-    check_true("frames agree", differing * 100 < total * 3)
+    println("  ${name}: opengl lit ${lit_gl}, vulkan lit ${lit_vk}, ${differing} of ${total} channels differ, worst ${worst}")
+}
 
-    println("  ${WIDTH}x${HEIGHT}: opengl lit ${lit_gl}, vulkan lit ${lit_vk}, ${differing} of ${total} channels differ, worst ${worst}")
+main() {
+    if !vk.available() {
+        println("parity: SKIP no Vulkan driver (${vk.last_error()})")
+        return
+    }
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 0.0, 110.0))
+    light = core.light_sun(core.vec3(0.3, 0.6, 0.8))
+
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("parity: SKIP no OpenGL context")
+        return
+    }
+
+    gl_renderer = gl.renderer_new()
+    opengl_pass = gl.backend(gl_renderer)
+    check_true("opengl started", core.backend_init(&opengl_pass, context, WIDTH, HEIGHT))
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(gl_renderer, target)
+    gl.renderer_set_clear_color(gl_renderer, 0.0, 0.0, 0.0)
+    gl_metal, gl_textured = build_scene(&opengl_pass)
+
+    vk_renderer = vk.renderer_new()
+    vulkan_pass = vk.backend(vk_renderer)
+    check_true("vulkan started", core.backend_init(&vulkan_pass, null, WIDTH, HEIGHT))
+    vk.renderer_set_clear_color(vk_renderer, 0.0, 0.0, 0.0)
+    vk_metal, vk_textured = build_scene(&vulkan_pass)
+
+    check_true("vulkan target size", vk.offscreen_width() == WIDTH && vk.offscreen_height() == HEIGHT)
+
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    gl_pixels = offscreen.target_pixels(target)
+    vk_pixels = vk.offscreen_pixels()
+    check_true("opengl produced pixels", gl_pixels != null)
+    check_true("vulkan produced pixels", vk_pixels != null)
+    if gl_pixels == null || vk_pixels == null { return }
+    compare("materials and textures", gl_pixels, vk_pixels)
+
+    gl_sky = gl.skybox_create(gl_renderer, TEXTURE)
+    vk_sky = vk.skybox_create(vk_renderer, TEXTURE)
+    check_true("skybox textures loaded",
+               core.skybox_texture(gl_sky) != 0 && core.skybox_texture(vk_sky) != 0)
+    core.backend_set_skybox(&opengl_pass, gl_sky as ptr)
+    core.backend_set_skybox(&vulkan_pass, vk_sky as ptr)
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    compare("skybox", offscreen.target_pixels(target), vk.offscreen_pixels())
+
+    core.backend_set_post(&opengl_pass, true, false, 0.8, 0.4)
+    core.backend_set_post(&vulkan_pass, true, false, 0.8, 0.4)
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    compare("fxaa", offscreen.target_pixels(target), vk.offscreen_pixels())
+
+    core.backend_set_post(&opengl_pass, false, true, 0.8, 0.4)
+    core.backend_set_post(&vulkan_pass, false, true, 0.8, 0.4)
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    compare("bloom", offscreen.target_pixels(target), vk.offscreen_pixels())
 
     core.backend_cleanup(&opengl_pass)
     core.backend_cleanup(&vulkan_pass)
     offscreen.target_destroy(target)
     offscreen.context_destroy(context)
-    core.model_free(gl_model)
-    core.model_free(vk_model)
+
+    core.model_free(gl_metal)
+    core.model_free(gl_textured)
+    core.model_free(vk_metal)
+    core.model_free(vk_textured)
+
     gl.renderer_free(gl_renderer)
     vk.renderer_free(vk_renderer)
     core.camera_free(cam)

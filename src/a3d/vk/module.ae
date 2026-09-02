@@ -18,7 +18,8 @@ exports (
     renderer_new, renderer_free, backend,
     available, device_name, last_error,
     renderer_model_count, renderer_draw_calls, renderer_set_clear_color,
-    renderer_load_texture, renderer_sample_count,
+    renderer_load_texture, renderer_release_texture, renderer_sample_count, renderer_set_post,
+    skybox_create, skybox_free,
     offscreen_pixels, offscreen_width, offscreen_height
 )
 
@@ -39,9 +40,13 @@ extern ae3d_vk_scene_set_float(offset: int, value: float)
 extern ae3d_vk_scene_set_int(offset: int, value: int)
 extern ae3d_vk_scene_set_vec3(offset: int, x: float, y: float, z: float)
 extern ae3d_vk_scene_set_mat4(offset: int, m: ptr)
-extern ae3d_vk_scene_set_view_projection(m: ptr)
+extern ae3d_vk_scene_set_clip_mat4(offset: int, m: ptr)
 extern ae3d_vk_set_blend(on: int)
 extern ae3d_vk_draw(mesh: int, texture: int, instances: int, instance_count: int)
+extern ae3d_vk_draw_sky(mesh: int, texture: int)
+extern ae3d_vk_set_screen_quad(mesh: int)
+extern ae3d_vk_set_post(fxaa: int, bloom: int, threshold: float, intensity: float)
+extern ae3d_vk_post_active() -> int
 extern ae3d_vk_draw_calls() -> int
 extern ae3d_vk_sample_count() -> int
 extern ae3d_vk_offscreen_pixels() -> ptr
@@ -68,6 +73,9 @@ struct VKRenderer {
     lights: ptr
     textures: ptr
     frustum: ptr
+    skybox: ptr
+    screen_mesh: ptr
+    screen_handle: int
     initialized: bool
     last_draw_calls: int
     clear_r: float
@@ -126,7 +134,7 @@ renderer_free(r: *VKRenderer) {
             entry = list.get_raw(r.textures, i) as *VulkanTexture
             if entry != null {
                 core.free_owned(entry.path)
-                heap.free(entry)
+            heap.free(entry)
             }
             i = i + 1
         }
@@ -147,6 +155,7 @@ backend(r: *VKRenderer) -> Backend {
         load_texture: renderer_load_texture as fn(ptr, string) -> int,
         set_skybox: renderer_set_skybox as fn(ptr, ptr),
         update_viewport: renderer_update_viewport as fn(ptr, int, int),
+        set_post: renderer_set_post as fn(ptr, int, int, float, float),
         cleanup: renderer_cleanup as fn(ptr)
     }
 }
@@ -162,7 +171,66 @@ renderer_init(r: *VKRenderer, window: ptr, width: int, height: int) -> int {
     }
     println("aether3d: Vulkan on ${ae3d_vk_device_name()}, ${ae3d_vk_sample_count()}x MSAA")
     r.initialized = true
+
+    r.screen_mesh = core.mesh_create()
+    core.mesh_push_screen_quad(r.screen_mesh)
+    r.screen_handle = ae3d_vk_upload_mesh(r.screen_mesh)
+    ae3d_vk_set_screen_quad(r.screen_handle)
     return 1
+}
+
+renderer_set_post(r: *VKRenderer, fxaa: int, bloom: int, threshold: float, intensity: float) {
+    ae3d_vk_set_post(fxaa, bloom, threshold, intensity)
+}
+
+renderer_set_skybox(r: *VKRenderer, skybox: ptr) {
+    r.skybox = skybox
+    sky = skybox as *Skybox
+    if sky != null && sky.texture == 0 {
+        renderer_set_clear_color(r, sky.red, sky.green, sky.blue)
+    }
+}
+
+skybox_create(r: *VKRenderer, path: string) -> *Skybox {
+    if path == "" { return core.skybox_solid(0.5, 0.7, 1.0) }
+
+    texture = renderer_load_texture(r, path)
+    if texture == 0 {
+        println("aether3d: skybox texture unavailable, falling back to a solid sky")
+        return core.skybox_solid(0.5, 0.7, 1.0)
+    }
+
+    sky = core.skybox_solid(0.5, 0.7, 1.0)
+    sky.texture = texture
+    sky.mesh = core.mesh_create()
+    core.mesh_push_skybox_cube(sky.mesh, sky.size)
+    sky.vbo = ae3d_vk_upload_mesh(sky.mesh)
+    return sky
+}
+
+skybox_free(r: *VKRenderer, sky: *Skybox) {
+    if sky == null { return }
+    if sky.vbo != 0 { ae3d_vk_free_mesh(sky.vbo) }
+    if sky.texture != 0 { renderer_release_texture(r, sky.texture) }
+    if sky.mesh != null { core.mesh_destroy(sky.mesh) }
+    heap.free(sky)
+}
+
+// The sky sits behind everything, so the camera's translation is stripped from
+// the view matrix and the shader pushes it to the far plane.
+draw_skybox(r: *VKRenderer, cam: *Camera) {
+    sky = r.skybox as *Skybox
+    if sky == null || sky.texture == 0 || sky.vbo == 0 { return }
+
+    view = core.camera_view(cam)
+    view.m12 = 0.0
+    view.m13 = 0.0
+    view.m14 = 0.0
+    projection = core.camera_projection(cam)
+
+    ae3d_vk_scene_set_mat4(vkscene.OFF_VIEW, &view)
+    ae3d_vk_scene_set_clip_mat4(vkscene.OFF_PROJECTION, &projection)
+    ae3d_vk_draw_sky(sky.vbo, sky.texture)
 }
 
 renderer_load_texture(r: *VKRenderer, path: string) -> int {
@@ -190,11 +258,35 @@ renderer_load_texture(r: *VKRenderer, path: string) -> int {
     if handle == 0 { return 0 }
 
     entry = heap.new(VulkanTexture)
-    entry.path = core.set_owned(null, path)
+    texture_entry_set_path(entry, path)
     entry.handle = handle
     entry.refs = 1
     list.add_raw(r.textures, entry)
     return handle
+}
+
+texture_entry_set_path(entry: *VulkanTexture, path: string) {
+    entry.path = core.set_owned(entry.path, path)
+}
+
+renderer_release_texture(r: *VKRenderer, handle: int) {
+    if handle == 0 { return }
+    count = list.size(r.textures)
+    i = 0
+    while i < count {
+        entry = list.get_raw(r.textures, i) as *VulkanTexture
+        if entry != null && entry.handle == handle {
+            entry.refs = entry.refs - 1
+            if entry.refs <= 0 {
+                ae3d_vk_texture_destroy(entry.handle)
+                list.remove(r.textures, i)
+                core.free_owned(entry.path)
+            heap.free(entry)
+            }
+            return
+        }
+        i = i + 1
+    }
 }
 
 renderer_add_model(r: *VKRenderer, m: *Model) {
@@ -304,8 +396,10 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
 
     if ae3d_vk_frame_begin(r.clear_r, r.clear_g, r.clear_b, 1.0) != 1 { return }
 
+    draw_skybox(r, cam)
+
     view_projection = core.camera_view_projection(cam)
-    ae3d_vk_scene_set_view_projection(&view_projection)
+    ae3d_vk_scene_set_clip_mat4(vkscene.OFF_VIEWPROJECTION, &view_projection)
 
     if core.frustum_culling() && core.frustum_dirty() {
         core.camera_fill_frustum(cam, r.frustum)
@@ -376,15 +470,15 @@ draw_model(r: *VKRenderer, m: *Model, light: *Light, cam: *Camera, transparent_p
     ae3d_vk_draw(m.vbo, texture, m.instance_vbo, instances)
 }
 
-renderer_set_skybox(r: *VKRenderer, skybox: ptr) {
-}
-
 renderer_update_viewport(r: *VKRenderer, width: int, height: int) {
     if r.initialized { ae3d_vk_resize(width, height) }
 }
 
 renderer_cleanup(r: *VKRenderer) {
     if r == null || !r.initialized { return }
+    if r.skybox != null { skybox_free(r, r.skybox as *Skybox) ; r.skybox = null }
+    if r.screen_handle != 0 { ae3d_vk_free_mesh(r.screen_handle) ; r.screen_handle = 0 }
+    if r.screen_mesh != null { core.mesh_destroy(r.screen_mesh) ; r.screen_mesh = null }
     count = list.size(r.models)
     i = 0
     while i < count {
