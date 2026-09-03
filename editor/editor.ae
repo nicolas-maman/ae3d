@@ -87,6 +87,7 @@ var g_water_heading = 0
 var g_scripts: ptr = null
 var g_script_label = 0
 var g_script_clock = 0.0
+var g_dirty = true
 
 var g_status = 0
 var g_console: ptr = null
@@ -277,6 +278,7 @@ number(value: float) -> string {
 // The camera orbits a focus point rather than flying: an editor viewport wants
 // the thing being inspected to stay in frame while the view moves around it.
 apply_orbit() {
+    mark_dirty()
     cam = g_camera as *Camera
     if cam == null { return }
 
@@ -370,6 +372,7 @@ release_rows() {
 }
 
 rebuild_rows() {
+    mark_dirty()
     if g_rows == null { g_rows = list.new() }
     release_rows()
     count = 0
@@ -474,6 +477,7 @@ show_row(index: int, value: float) {
 // stack ran out. The guard makes the highlight follow a programmatic selection
 // without the two chasing each other.
 select_object(index: int) {
+    mark_dirty()
     g_selected = index
     sync_inspector()
 
@@ -738,6 +742,7 @@ pick_at(x: float, y: float) {
 }
 
 resize_viewport(width: int, height: int) {
+    mark_dirty()
     if width < 16 || height < 16 { return }
     if width == g_view_w && height == g_view_h { return }
     g_view_w = width
@@ -782,6 +787,14 @@ draw_frame() {
     run_scripts(delta)
     update_outline()
 
+    // A bounded run has to reach its frame count whatever is on screen, so the
+    // gate never applies to one.
+    if !g_dirty && !scene_animates() && g_frame_limit == 0 {
+        update_stats(renderer)
+        return
+    }
+    g_dirty = false
+
     backend = gl.backend(renderer)
     core.backend_render(&backend, g_camera as *Camera, g_light as *Light)
 
@@ -797,17 +810,7 @@ draw_frame() {
     ui.canvas_redraw(g_canvas)
     g_frames = g_frames + 1
 
-    if g_stats != 0 && g_frames % 10 == 0 {
-        triangles = 0
-        count = list.size(g_models)
-        i = 0
-        while i < count {
-            m = model_at(i)
-            if m != null && m.visible { triangles = triangles + core.mesh_index_count(m.mesh) / 3 }
-            i = i + 1
-        }
-        ui.set_text(g_stats, "${g_backend_name}   ${(g_fps) as int} fps   ${gl.renderer_draw_calls(renderer)} draws   ${triangles} tris   ${g_view_w}x${g_view_h}")
-    }
+    update_stats(renderer)
 
     if g_frame_limit > 0 && g_frames >= g_frame_limit && !g_reported {
         g_reported = true
@@ -823,6 +826,11 @@ draw_frame() {
 // A scripted run of the edit paths, so undo and redo are checked by exercising
 // them rather than by reading the code. Reported through the same file a
 // bounded run writes, because the run loop has to be ended from outside.
+update_stats(renderer: *GLRenderer) {
+    if g_stats == 0 || g_frames % 10 != 0 { return }
+    ui.set_text(g_stats, "${g_backend_name}   ${(g_fps) as int} fps   ${gl.renderer_draw_calls(renderer)} draws   ${scene_triangles()} tris   ${g_view_w}x${g_view_h}")
+}
+
 report_state() {
     selected = "none"
     m = selected_model()
@@ -1090,7 +1098,23 @@ apply_property(index: int, value: float) {
 // change repaints the viewport itself. A drag delivers events faster than a full
 // render and readback can answer them, so the repaint is capped rather than run
 // once per event.
+// The viewport only has to be redrawn when something in it changed. A full
+// render, a readback and a blit of the whole framebuffer sixty times a second
+// to show an identical picture is the editor's largest idle cost.
+mark_dirty() {
+    g_dirty = true
+}
+
+// Water and attached behaviours move every frame, so a scene holding either is
+// never still.
+scene_animates() -> bool {
+    if g_components == null { return false }
+    if kind_count(behaviour.KIND_WATER) > 0 { return true }
+    return scripted_count() > 0
+}
+
 paint_soon() {
+    mark_dirty()
     now = (clock_ns() / 1000000) * 0.001
     if now - g_last_paint < PAINT_INTERVAL { return }
     g_last_paint = now
@@ -1676,6 +1700,7 @@ gizmo_drag(x: float, y: float, dx: float, dy: float) {
         if g_gizmo_axis == 0 { core.model_rotate(m, step, 0.0, 0.0) }
         if g_gizmo_axis == 1 { core.model_rotate(m, 0.0, step, 0.0) }
         if g_gizmo_axis == 2 { core.model_rotate(m, 0.0, 0.0, step) }
+        mark_dirty()
         sync_inspector()
         return
     }
@@ -1685,14 +1710,17 @@ gizmo_drag(x: float, y: float, dx: float, dy: float) {
         factor = 1.0 + along / core.abs_of(gizmo_reach() + 0.0001)
         if factor < 0.02 { factor = 0.02 }
         core.model_set_scale(m, m.scale.x * factor, m.scale.y * factor, m.scale.z * factor)
+        mark_dirty()
     } else {
         moved = core.v3_add(m.position, core.v3_mul(gizmo_axis_vector(g_gizmo_axis), along))
         core.model_set_position(m, moved.x, moved.y, moved.z)
+        mark_dirty()
     }
     sync_inspector()
 }
 
 set_gizmo_mode(mode: int) {
+    mark_dirty()
     g_gizmo_mode = mode
     if mode == GIZMO_TRANSLATE { say("move: drag an axis") }
     if mode == GIZMO_ROTATE { say("rotate: drag a ring") }
@@ -1892,7 +1920,9 @@ main() {
                 g_last_y = y
                 return
             }
-            g_gizmo_hover = gizmo_pick(x, y)
+            hovered = gizmo_pick(x, y)
+            if hovered != g_gizmo_hover { mark_dirty() }
+            g_gizmo_hover = hovered
             if g_pressed {
                 if core.abs_of(x - g_press_x) > DRAG_SLOP ||
                    core.abs_of(y - g_press_y) > DRAG_SLOP {
