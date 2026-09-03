@@ -31,7 +31,7 @@ import a3d.noise
 import a3d.rendering
 
 const PANEL_LEFT = 240
-const PANEL_RIGHT = 300
+const PANEL_RIGHT = 330
 const WINDOW_W = 1480
 const WINDOW_H = 860
 const ORBIT_SPEED = 0.35
@@ -322,7 +322,8 @@ extern malloc(size: int) -> ptr
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 
-const ROWS = 17
+const ROWS = 20
+const CAMERA_FIRST_ROW = 17
 const WATER_FIRST_ROW = 11
 const WATER_LAST_ROW = 13
 const SCRIPT_NONE = 0
@@ -434,6 +435,9 @@ sync_inspector() {
     show_row(15, active_light().color.y)
     show_row(16, active_light().color.z)
 
+    show_row(17, camera_value(17))
+    show_row(18, camera_value(18))
+    show_row(19, camera_value(19))
     refresh_script_label()
 
     sim = selected_water()
@@ -585,6 +589,9 @@ set_script(index: int, script: int) {
     if g_scripts == null || index < 0 || index >= list.size(g_scripts) { return }
     slot = list.get_raw(g_scripts, index) as int[]
     slot[0] = script
+    show_row(17, camera_value(17))
+    show_row(18, camera_value(18))
+    show_row(19, camera_value(19))
     refresh_script_label()
     say("${script_name(script)} on ${core.text(model_at(index).name)}")
 }
@@ -745,11 +752,14 @@ resize_viewport(width: int, height: int) {
 // leaves the panels at their content width, which is far too narrow for a
 // hierarchy or an inspector, and nothing else in the toolkit sets a width
 // (aether-lang-dev/aether-ui#95).
+// Exact widths for the side panels and the remainder for the viewport. Weights
+// rounded each pane up independently, which left the three a pixel wider than
+// the window they had to fit in.
 settle_layout() {
     if g_layout_settled || g_stage == 0 { return }
-    ui.weight(g_left, 16)
-    ui.weight(g_stage, 62)
-    ui.weight(g_right, 22)
+    ui.set_width(g_left, PANEL_LEFT)
+    ui.set_width(g_right, PANEL_RIGHT)
+    ui.weight(g_stage, 1)
     g_layout_settled = true
 }
 
@@ -998,6 +1008,15 @@ water_value(index: int) -> float {
     if index == 11 { return sim.base_amplitude }
     if index == 12 { return sim.wave_speed_multiplier }
     if index == 13 { return sim.transparency }
+    return 0.0
+}
+
+camera_value(index: int) -> float {
+    cam = g_camera as *Camera
+    if cam == null { return 0.0 }
+    if index == 17 { return cam.fov }
+    if index == 18 { return cam.near }
+    if index == 19 { return cam.far }
     return 0.0
 }
 
@@ -1748,7 +1767,7 @@ main() {
         // The panels scroll rather than stretch: an inspector that grows a
         // section must not push the viewport past the bottom of the window.
         left_scroll = ui.scrollview(body)
-        ui.weight(left_scroll, 16)
+        ui.set_width(left_scroll, PANEL_LEFT)
         ui.fill_height(left_scroll)
         left = ui.vstack(left_scroll, 6)
         ui.add_css_class(left, "panel")
@@ -1949,7 +1968,7 @@ main() {
         ui.spacer(footer)
 
         right_scroll = ui.scrollview(body)
-        ui.weight(right_scroll, 22)
+        ui.set_width(right_scroll, PANEL_RIGHT)
         ui.fill_height(right_scroll)
         right = ui.vstack(right_scroll, 6)
         ui.add_css_class(right, "panel")
@@ -1995,6 +2014,12 @@ main() {
         inspector_row(right, "wave height", 0.0, 24.0, 6.0, 11)
         inspector_row(right, "wave speed", 0.0, 4.0, 1.0, 12)
         inspector_row(right, "transparency", 0.0, 1.0, 0.72, 13)
+
+        ui.divider(right)
+        heading(right, "CAMERA")
+        inspector_row(right, "field of view", 20.0, 110.0, 60.0, 17)
+        inspector_row(right, "near plane", 0.05, 20.0, 0.1, 18)
+        inspector_row(right, "far plane", 200.0, 8000.0, 3000.0, 19)
 
         ui.divider(right)
         heading(right, "BEHAVIOUR")
