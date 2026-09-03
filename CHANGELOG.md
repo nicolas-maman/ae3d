@@ -65,6 +65,23 @@ First working engine.
 - Main loop with a fixed-step accumulator, frame pacing and `AETHER3D_FRAMES`,
   which caps any program at a frame count so every example is also a smoke test.
 
+### Editor
+
+- A scene editor on [aether-ui](https://github.com/aether-lang-dev/aether-ui):
+  hierarchy, asset browser, console, and an inspector that changes with what is
+  selected. See [docs/editor.md](docs/editor.md).
+- A transform gizmo that moves, rotates and scales the selection along an axis,
+  dragging along the projected axis so it stays correct at any camera angle.
+- Undo and redo in `a3d.history`, a module rather than editor code, so it is
+  tested without a window. An adjustment is one step rather than one per event.
+- Objects can be meshes, water, voxel worlds or lights, each carrying a
+  component that says what it is; the inspector shows the section that belongs
+  to it. Lights are scene objects with a marker that can be picked and dragged.
+- Spin, bob and orbit behaviours attach to any object and run in the frame loop.
+- The engine's rendering presets, scene save and load, and a camera inspector.
+- The viewport is a framebuffer object read back and blitted into a canvas,
+  which is what lets a toolkit with no GPU surface host a 3D view.
+
 ### Measured
 
 Per-frame costs, measured headless so they are the engine's own rather than the
@@ -75,6 +92,11 @@ GL implementation's, over two thousand iterations with zero leaked bytes and
 - Under a microsecond each for a model transform, a camera and frustum rebuild,
   and a water uniform update.
 - 19ns per Perlin sample; a 131072-cell exposed-face scan under a millisecond.
+- 400 separate models: 806us a frame, from 1200us before the frame's uniforms
+  were hoisted out of the per-model loop.
+- Reading a 1280x720 frame back: 307us pipelined against 1625us waiting.
+- The editor idle: one sample in `draw_frame` over six seconds, from 367 before
+  it stopped redrawing an unchanged viewport.
 
 
 - 256x256 ocean: 65536 vertices and 390150 indices built in 2ms.

@@ -14,9 +14,13 @@ engine, to Aether and C. See [Credits](#credits).
 - **OpenGL 4.1 core**, the highest version macOS offers and enough everywhere
   else: PBR materials, directional and point lights, instanced rendering,
   frustum culling, a separate transparent pass, MSAA, FXAA and bloom.
-- **Vulkan**, windowed, on a loader opened at runtime. Nothing links against
-  Vulkan, so a program built with this backend still starts where no driver
-  exists and says so.
+- **Vulkan**, windowed and offscreen, on a loader opened at runtime. Nothing
+  links against Vulkan, so a program built with this backend still starts where
+  no driver exists and says so. It runs the same feature set as OpenGL, and
+  `tests/test_backend_parity` proves it: the same scene through both renderers,
+  compared channel by channel across materials and textures, instancing and
+  transparency, the skybox, FXAA and bloom. The two agree to within 1.4% of
+  channels.
 - **Gerstner-wave ocean**, **Perlin terrain**, **voxel worlds** drawn as a single
   instanced call, **surface nets** over a signed distance field, an OBJ/MTL
   loader, ray casting, and a component system.
@@ -28,9 +32,20 @@ engine, to Aether and C. See [Credits](#credits).
 
 ![the editor viewport](docs/editor-viewport.png)
 
-`editor/` is a scene editor whose chrome is [aether-ui](https://github.com/aether-lang-dev/aether-ui):
-a hierarchy, an inspector with live transform and material controls, and a
-viewport you orbit with the mouse and click to select objects in.
+`editor/` is a scene editor whose chrome is [aether-ui](https://github.com/aether-lang-dev/aether-ui).
+It has a scene hierarchy, an asset browser over the meshes in `resources/`, a
+console, an inspector that changes with what is selected, and a viewport you
+orbit with the mouse and click to select objects in. A transform gizmo moves,
+rotates and scales the selection along an axis; edits are undoable; and a
+property change repaints the viewport as you drag rather than when you let go.
+
+Objects can be meshes, water, voxel worlds or lights. Each carries a component
+recording what it is, and the inspector shows the section that belongs to it:
+wave height and speed for water, colour and intensity for a light, field of view
+and clip planes for the camera. A behaviour can be attached to any object and
+runs in the frame loop.
+
+See [docs/editor.md](docs/editor.md) for the controls.
 
 aether-ui owns the real window and every widget. The viewport is a GPU render:
 the scene is drawn into a framebuffer object that has no window of its own, read
@@ -143,6 +158,23 @@ engine rather than the GL implementation: 578us to upload two hundred thousand
 instance matrices, under a microsecond each for transforms, camera, frustum and
 water, and zero leaked bytes at 26MB peak.
 
+**The frame's uniforms go up once, not once per model.** Of the seventeen
+uniforms a draw needs, sixteen are the same for every model in the frame. They
+are uploaded once per program per frame, which took a four-hundred-model scene
+from 1200us to 806us. `benchmarks/bench_scene.ae` keeps that honest.
+
+**The viewport readback is pipelined.** Reading a frame into client memory stalls
+until the GPU has finished it; two pixel buffers mean the read is issued into one
+while the one filled last frame is mapped, so the CPU never waits. At 1280x720
+that is 1625us a frame against 307us. `benchmarks/bench_readback.ae` measures
+both paths in one process. The editor takes the pipelined read and is a frame
+behind; anything comparing what it just drew takes the waiting one.
+
+**The editor only redraws when something changed.** A camera move, an edit, a
+selection, or a scene holding water or a behaviour. Otherwise the frame already
+on screen is the right one, and rendering it again is the largest idle cost an
+editor has.
+
 ## Differences from Gopher3D
 
 - **One transform, not two.** Gopher3D's `GameObject` carries its own transform
@@ -159,6 +191,10 @@ water, and zero leaked bytes at 26MB peak.
   surface path only ever emits a height field and the pieces are never reached.
   Here it is the algorithm those pieces describe.
 - **Vulkan actually renders.** Gopher3D lists its Vulkan renderer as incomplete.
+  Here it is at parity with OpenGL and a test proves it pixel by pixel.
+- **No game export.** Gopher3D's editor builds a standalone Go binary. Saving and
+  loading a scene covers getting work out of the editor; generating a program is
+  a different job from editing one.
 
 ## Credits
 
