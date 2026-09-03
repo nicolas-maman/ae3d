@@ -13,7 +13,7 @@ exports (
     context_create, context_destroy,
     target_create, target_destroy, target_resize,
     target_bind, target_unbind,
-    target_width, target_height, target_byte_size, target_pixels
+    target_width, target_height, target_byte_size, target_pixels, target_pixels_pipelined
 )
 
 extern ae3d_offscreen_context(width: int, height: int) -> ptr
@@ -26,6 +26,8 @@ extern ae3d_offscreen_width(target: ptr) -> int
 extern ae3d_offscreen_height(target: ptr) -> int
 extern ae3d_offscreen_byte_size(target: ptr) -> int
 extern ae3d_offscreen_read(target: ptr) -> ptr
+extern ae3d_offscreen_read_pipelined(target: ptr) -> ptr
+
 extern ae3d_offscreen_destroy(target: ptr)
 
 struct Target {
@@ -78,4 +80,11 @@ target_byte_size(target: ptr) -> int {
 // The buffer belongs to the target and is overwritten by the next read.
 target_pixels(target: ptr) -> ptr {
     return ae3d_offscreen_read(target)
+}
+
+// One frame behind, but never stalls waiting for the GPU: the read is issued
+// into one pixel buffer while the one filled last frame is mapped. A viewport
+// wants this; anything comparing what it just drew wants target_pixels.
+target_pixels_pipelined(target: ptr) -> ptr {
+    return ae3d_offscreen_read_pipelined(target)
 }

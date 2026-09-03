@@ -23,7 +23,13 @@ typedef struct {
     int height;
     unsigned char *pixels;
     int pixel_bytes;
+    unsigned char *scratch;
+    GLuint pack[2];
+    int pack_index;
+    int pack_primed;
 } ae3d_offscreen;
+
+static void *ae3d_offscreen_read_sync(ae3d_offscreen *target);
 
 // A context with no window at all, so the scene can be drawn on the GPU and
 // handed to whatever is compositing it.
@@ -169,6 +175,17 @@ int ae3d_offscreen_resize(void *handle, int width, int height) {
     ae3d_offscreen *target = (ae3d_offscreen *)handle;
     if (!target) return 0;
     if (target->width == width && target->height == height) return 1;
+
+    // The scratch row and the pixel buffers are sized for the old dimensions,
+    // so they are released here rather than read at the wrong width next frame.
+    free(target->scratch);
+    target->scratch = NULL;
+    if (target->pack[0]) {
+        glDeleteBuffers(2, target->pack);
+        target->pack[0] = 0;
+        target->pack[1] = 0;
+        target->pack_primed = 0;
+    }
     return ae3d_offscreen_attach(target, width, height);
 }
 
@@ -196,36 +213,93 @@ int ae3d_offscreen_height(void *handle) {
     return target ? target->height : 0;
 }
 
+// Reads the frame just drawn, stalling until the GPU has finished it. Callers
+// that compare what they rendered need this; a viewport does not.
+void *ae3d_offscreen_read(void *handle) {
+    ae3d_offscreen *target = (ae3d_offscreen *)handle;
+    if (!target || !target->pixels) return NULL;
+    return ae3d_offscreen_read_sync(target);
+}
+
+static void *ae3d_offscreen_read_sync(ae3d_offscreen *target) {
+    int row_bytes = target->width * 4;
+    int y;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, target->framebuffer);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, target->width, target->height, GL_RGBA, GL_UNSIGNED_BYTE, target->pixels);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    if (!target->scratch) target->scratch = (unsigned char *)malloc((size_t)row_bytes);
+    if (!target->scratch) return target->pixels;
+    for (y = 0; y < target->height / 2; y++) {
+        unsigned char *top = target->pixels + (size_t)y * row_bytes;
+        unsigned char *bottom = target->pixels + (size_t)(target->height - 1 - y) * row_bytes;
+        memcpy(target->scratch, top, (size_t)row_bytes);
+        memcpy(top, bottom, (size_t)row_bytes);
+        memcpy(bottom, target->scratch, (size_t)row_bytes);
+    }
+    return target->pixels;
+}
+
 int ae3d_offscreen_byte_size(void *handle) {
     ae3d_offscreen *target = (ae3d_offscreen *)handle;
     return target ? target->width * target->height * 4 : 0;
 }
 
+// Reading straight into client memory stalls until the GPU has finished the
+// frame. Two pixel buffers avoid that: the read is issued into one and the one
+// filled last frame is mapped, so the CPU never waits on work still in flight.
+// The viewport is one frame behind, which is what every editor preview does.
+//
 // GL reports rows bottom-up while every compositor wants them top-down, so the
-// readback flips as it copies rather than leaving the caller to do it per frame.
-void *ae3d_offscreen_read(void *handle) {
+// copy out of the mapped buffer walks the rows backwards. That folds the flip
+// into a copy that had to happen anyway, instead of a second pass over the
+// image with a scratch row allocated per frame.
+void *ae3d_offscreen_read_pipelined(void *handle) {
     ae3d_offscreen *target = (ae3d_offscreen *)handle;
-    int row_bytes, y;
-    unsigned char *scratch;
+    int row_bytes, y, ready;
+    const unsigned char *mapped;
 
     if (!target || !target->pixels) return NULL;
     row_bytes = target->width * 4;
 
+    if (!target->pack[0]) {
+        glGenBuffers(2, target->pack);
+        if (!target->pack[0] || !target->pack[1]) return ae3d_offscreen_read_sync(target);
+        for (y = 0; y < 2; y++) {
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, target->pack[y]);
+            glBufferData(GL_PIXEL_PACK_BUFFER, target->pixel_bytes, NULL, GL_STREAM_READ);
+        }
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        target->pack_index = 0;
+        target->pack_primed = 0;
+    }
+
     glBindFramebuffer(GL_FRAMEBUFFER, target->framebuffer);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glReadPixels(0, 0, target->width, target->height, GL_RGBA, GL_UNSIGNED_BYTE, target->pixels);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, target->pack[target->pack_index]);
+    glReadPixels(0, 0, target->width, target->height, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+
+    ready = target->pack_primed ? (target->pack_index ^ 1) : target->pack_index;
+    if (!target->pack_primed) glFinish();
+
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, target->pack[ready]);
+    mapped = (const unsigned char *)glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+    if (mapped) {
+        for (y = 0; y < target->height; y++) {
+            memcpy(target->pixels + (size_t)y * row_bytes,
+                   mapped + (size_t)(target->height - 1 - y) * row_bytes,
+                   (size_t)row_bytes);
+        }
+        glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+    }
+
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-    scratch = (unsigned char *)malloc((size_t)row_bytes);
-    if (!scratch) return target->pixels;
-    for (y = 0; y < target->height / 2; y++) {
-        unsigned char *top = target->pixels + (size_t)y * row_bytes;
-        unsigned char *bottom = target->pixels + (size_t)(target->height - 1 - y) * row_bytes;
-        memcpy(scratch, top, (size_t)row_bytes);
-        memcpy(top, bottom, (size_t)row_bytes);
-        memcpy(bottom, scratch, (size_t)row_bytes);
-    }
-    free(scratch);
+    target->pack_index ^= 1;
+    target->pack_primed = 1;
     return target->pixels;
 }
 
@@ -235,6 +309,8 @@ void ae3d_offscreen_destroy(void *handle) {
     if (target->color) glDeleteTextures(1, &target->color);
     if (target->depth) glDeleteRenderbuffers(1, &target->depth);
     if (target->framebuffer) glDeleteFramebuffers(1, &target->framebuffer);
+    if (target->pack[0]) glDeleteBuffers(2, target->pack);
+    free(target->scratch);
     free(target->pixels);
     free(target);
 }

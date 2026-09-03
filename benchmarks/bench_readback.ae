@@ -1,0 +1,111 @@
+// What the editor's viewport actually costs.
+//
+// The scene is drawn into an offscreen target and the pixels are pulled back to
+// the CPU so a UI canvas can present them. The readback is the part that stalls:
+// it is timed separately from the draw so the two are not confused.
+
+import std.list
+import a3d.core
+import a3d.gl
+import a3d.offscreen
+import a3d.loader
+
+extern clock_ns() -> long
+
+const WIDTH = 1280
+const HEIGHT = 720
+const FRAMES = 200
+
+build_scene(pass_backend: *Backend, models: ptr) {
+    i = 0
+    while i < 24 {
+        m = loader.sphere(1.0, 24, 18)
+        core.model_set_scale(m, 8.0, 8.0, 8.0)
+        core.model_set_position(m, ((i % 6) * 1.0) * 26.0 - 65.0,
+                                12.0, ((i / 6) * 1.0) * 26.0 - 39.0)
+        core.model_polished_metal(m, 0.7, 0.5, 0.3)
+        core.backend_add_model(pass_backend, m)
+        list.add_raw(models, m)
+        i = i + 1
+    }
+}
+
+report(name: string, elapsed: long, frames: int) {
+    total = (elapsed / 1000000) as int
+    per = (elapsed / 1000) as int / frames
+    println("  ${name}: ${total} ms over ${frames} frames, ${per} us per frame")
+}
+
+main() {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("readback: SKIP no OpenGL context")
+        return
+    }
+
+    renderer = gl.renderer_new()
+    backend = gl.backend(renderer)
+    if !core.backend_init(&backend, context, WIDTH, HEIGHT) {
+        println("readback: SKIP the OpenGL backend would not initialise")
+        return
+    }
+
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    gl.renderer_set_clear_color(renderer, 0.05, 0.06, 0.08)
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 60.0, 190.0))
+    light = core.light_sun(core.vec3(0.3, 0.7, 0.4))
+    models = list.new()
+    build_scene(&backend, models)
+
+    println("aether3d readback benchmark at ${WIDTH}x${HEIGHT}")
+
+    core.backend_render(&backend, cam, light)
+    offscreen.target_pixels(target)
+
+    started = clock_ns()
+    frame = 0
+    while frame < FRAMES {
+        core.backend_render(&backend, cam, light)
+        frame = frame + 1
+    }
+    draw_only = clock_ns() - started
+    report("draw only", draw_only, FRAMES)
+
+    started = clock_ns()
+    frame = 0
+    while frame < FRAMES {
+        core.backend_render(&backend, cam, light)
+        offscreen.target_pixels(target)
+        frame = frame + 1
+    }
+    report("draw and read back, waiting for each frame", clock_ns() - started, FRAMES)
+
+    offscreen.target_pixels_pipelined(target)
+    started = clock_ns()
+    frame = 0
+    while frame < FRAMES {
+        core.backend_render(&backend, cam, light)
+        offscreen.target_pixels_pipelined(target)
+        frame = frame + 1
+    }
+    report("draw and read back, pipelined", clock_ns() - started, FRAMES)
+
+    core.backend_cleanup(&backend)
+
+    i = 0
+    while i < list.size(models) {
+        core.model_free(list.get_raw(models, i) as *Model)
+        i = i + 1
+    }
+    list.free(models)
+
+    offscreen.target_destroy(target)
+    offscreen.context_destroy(context)
+    gl.renderer_free(renderer)
+    core.camera_free(cam)
+    core.light_free(light)
+    println("done")
+}

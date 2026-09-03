@@ -72,11 +72,32 @@ main() {
     check_true("corner is the clear colour", corner == 0)
     check_true("a draw call was issued", gl.renderer_draw_calls(renderer) >= 1)
 
+    // The pipelined read trades a frame of latency for never stalling, so it
+    // has to converge on the same image the waiting read produces.
+    offscreen.target_pixels_pipelined(target)
+    core.backend_render(&backend, cam, light)
+    pipelined = offscreen.target_pixels_pipelined(target)
+    check_true("pipelined read returned a buffer", pipelined != null)
+    if pipelined != null {
+        check_true("pipelined centre matches the waiting read",
+                   pixel_at(pipelined, WIDTH / 2, HEIGHT / 2) == centre)
+        check_true("pipelined corner matches the waiting read",
+                   pixel_at(pipelined, 2, 2) == corner)
+    }
+
     // Resizing must keep rendering, which is what happens when a panel is dragged.
     check_true("resized", offscreen.target_resize(target, 200, 150))
     check_true("resized width", offscreen.target_width(target) == 200)
     core.backend_render(&backend, cam, light)
     check_true("still drawing after a resize", gl.renderer_draw_calls(renderer) >= 1)
+
+    // A resize drops the pixel buffers and the scratch row; reading at the new
+    // size must not walk off the old ones.
+    offscreen.target_pixels_pipelined(target)
+    core.backend_render(&backend, cam, light)
+    check_true("pipelined read survives a resize",
+               offscreen.target_pixels_pipelined(target) != null)
+    check_true("waiting read survives a resize", offscreen.target_pixels(target) != null)
 
     println("  offscreen ${WIDTH}x${HEIGHT}: centre=${centre} corner=${corner}")
 

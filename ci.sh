@@ -131,13 +131,17 @@ else
     if ./editor/build_editor.sh >/tmp/ae3d_build.log 2>&1; then
         report="$(mktemp)"
         snapshot="$(mktemp -t ae3d_shot).png"
-        # The editor cannot end its own run loop (aether-lang-dev/aether-ui#93),
-        # so a bounded run is stopped from here and judged by what it wrote.
+        # A bounded run ends itself; the timeout is only a backstop so a hang
+        # fails the step rather than blocking it.
         AETHER3D_EDITOR_FRAMES=30 \
+        AETHER3D_EDITOR_SCENE=components \
         AETHER3D_EDITOR_SNAPSHOT="$snapshot" \
         AETHER3D_EDITOR_REPORT="$report" \
-            timeout 90 ./build/aether3d_editor >/dev/null 2>&1 || true
-        if [ ! -s "$report" ]; then
+            timeout 90 ./build/aether3d_editor >/dev/null 2>&1
+        status=$?
+        if [ "$status" -ne 0 ]; then
+            fail "aether3d_editor (exited $status)"
+        elif [ ! -s "$report" ]; then
             fail "aether3d_editor (wrote no report)"
         elif [ ! -s "$snapshot" ]; then
             fail "aether3d_editor (wrote no viewport snapshot)"
@@ -145,8 +149,11 @@ else
             fail "aether3d_editor (did not reach 30 frames)"
             sed 's/^/        /' "$report"
         elif ! grep -qE '^models [0-9]+$' "$report" || \
-             [ "$(sed -n 's/^models //p' "$report")" -lt 2 ]; then
+             [ "$(sed -n 's/^models //p' "$report")" -lt 4 ]; then
             fail "aether3d_editor (scene did not build)"
+        elif [ "$(sed -n 's/^water //p' "$report")" != "1" ] || \
+             [ "$(sed -n 's/^voxels //p' "$report")" != "1" ]; then
+            fail "aether3d_editor (component types did not build)"
             sed 's/^/        /' "$report"
         elif grep -q '^selected none$' "$report"; then
             fail "aether3d_editor (nothing selected)"

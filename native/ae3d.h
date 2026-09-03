@@ -185,6 +185,7 @@ int    ae3d_offscreen_width(void *target);
 int    ae3d_offscreen_height(void *target);
 int    ae3d_offscreen_byte_size(void *target);
 void  *ae3d_offscreen_read(void *target);
+void  *ae3d_offscreen_read_pipelined(void *target);
 void   ae3d_offscreen_destroy(void *target);
 
 int    ae3d_meshfile_save(const char *path, void *mesh, void *instances);

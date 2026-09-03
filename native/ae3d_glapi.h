@@ -39,6 +39,10 @@ typedef ptrdiff_t     GLsizeiptr;
 #define GL_LESS     0x0201
 #define GL_EQUAL    0x0202
 #define GL_LEQUAL   0x0203
+#define GL_PACK_ALIGNMENT     0x0D05
+#define GL_PIXEL_PACK_BUFFER 0x88EB
+#define GL_STREAM_READ       0x88E1
+#define GL_READ_ONLY         0x88B8
 
 #define GL_SRC_ALPHA           0x0302
 #define GL_ONE_MINUS_SRC_ALPHA 0x0303
@@ -147,6 +151,9 @@ typedef ptrdiff_t     GLsizeiptr;
     X(void, glBufferData, (GLenum target, GLsizeiptr size, const void *data, GLenum usage)) \
     X(void, glBufferSubData, (GLenum target, GLintptr offset, GLsizeiptr size, const void *data)) \
     X(void, glDeleteBuffers, (GLsizei n, const GLuint *buffers)) \
+    X(void *, glMapBuffer, (GLenum target, GLenum access)) \
+    X(void, glFinish, (void)) \
+    X(GLboolean, glUnmapBuffer, (GLenum target)) \
     X(void, glVertexAttribPointer, (GLuint index, GLint size, GLenum type, GLboolean norm, GLsizei stride, const void *ptr)) \
     X(void, glEnableVertexAttribArray, (GLuint index)) \
     X(void, glDisableVertexAttribArray, (GLuint index)) \
@@ -226,6 +233,9 @@ int ae3d_glapi_load(void);
 #define glBufferData               ae3d_glBufferData
 #define glBufferSubData            ae3d_glBufferSubData
 #define glDeleteBuffers            ae3d_glDeleteBuffers
+#define glMapBuffer                ae3d_glMapBuffer
+#define glFinish                   ae3d_glFinish
+#define glUnmapBuffer              ae3d_glUnmapBuffer
 #define glVertexAttribPointer      ae3d_glVertexAttribPointer
 #define glEnableVertexAttribArray  ae3d_glEnableVertexAttribArray
 #define glDisableVertexAttribArray ae3d_glDisableVertexAttribArray

@@ -651,7 +651,7 @@ draw_frame() {
     backend = gl.backend(renderer)
     core.backend_render(&backend, g_camera as *Camera, g_light as *Light)
 
-    pixels = offscreen.target_pixels(g_target)
+    pixels = offscreen.target_pixels_pipelined(g_target)
     if pixels == null { return }
 
     // The canvas keeps a retained command list, so the previous frame's blit has
@@ -682,6 +682,7 @@ draw_frame() {
         }
         ui.timer_cancel(g_timer)
         report_state()
+        ui.app_quit()
     }
 }
 
@@ -719,8 +720,8 @@ report_state() {
     lines = string.concat(lines, "\n")
 
 
-    // Written to a file rather than printed: a bounded run has to be ended from
-    // outside (aether-lang-dev/aether-ui#93) and that loses buffered output.
+    // Written to a file rather than printed, so the report survives however the
+    // run ends.
     if g_report != "" { fs.write(g_report, lines) }
     string.free(lines)
 }
@@ -1620,11 +1621,8 @@ main() {
                             0.078, 0.086, 0.102, 1.0)
         ui.canvas_redraw(g_canvas)
 
-        // canvas_on_resize hands over integers, unlike every other canvas
-        // callback, which hands over doubles. Declaring floats here reads the
-        // wrong registers and the viewport silently never resizes.
-        ui.canvas_on_resize(g_canvas) callback |w: int, h: int| {
-            resize_viewport(w, h)
+        ui.canvas_on_resize(g_canvas) callback |w: float, h: float| {
+            resize_viewport(w as int, h as int)
         }
         // A press that never moves is a selection; a press that moves is an
         // orbit. Doing both makes the view lurch every time something is picked.
