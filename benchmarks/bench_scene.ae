@@ -1,0 +1,69 @@
+// What a scene of many separate models costs on the CPU.
+//
+// Each model is its own draw call with its own uniforms, which is the shape a
+// scene takes before anything is batched. It is the per-model overhead this
+// measures, not the GPU: the same scene at the same size, timed per frame.
+
+import std.list
+import a3d.core
+import a3d.gl
+import a3d.offscreen
+import a3d.loader
+
+extern clock_ns() -> long
+
+const WIDTH = 1280
+const HEIGHT = 720
+const MODELS = 400
+const FRAMES = 600
+
+main() {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null { println("scene: SKIP no OpenGL context"); return }
+    renderer = gl.renderer_new()
+    backend = gl.backend(renderer)
+    if !core.backend_init(&backend, context, WIDTH, HEIGHT) {
+        println("scene: SKIP the OpenGL backend would not initialise")
+        return
+    }
+    println("aether3d scene benchmark at ${WIDTH}x${HEIGHT}")
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+
+    models = list.new()
+    i = 0
+    while i < MODELS {
+        m = loader.sphere(1.0, 16, 12)
+        core.model_set_scale(m, 4.0, 4.0, 4.0)
+        core.model_set_position(m, ((i % 20) * 1.0) * 22.0 - 209.0, 10.0,
+                                ((i / 20) * 1.0) * 22.0 - 209.0)
+        core.model_polished_metal(m, 0.7, 0.5, 0.3)
+        core.backend_add_model(&backend, m)
+        list.add_raw(models, m)
+        i = i + 1
+    }
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 120.0, 360.0))
+    light = core.light_sun(core.vec3(0.3, 0.7, 0.4))
+
+    core.backend_render(&backend, cam, light)
+    started = clock_ns()
+    frame = 0
+    while frame < FRAMES {
+        core.backend_render(&backend, cam, light)
+        frame = frame + 1
+    }
+    elapsed = clock_ns() - started
+    println("  ${MODELS} models: ${(elapsed / 1000000) as int} ms over ${FRAMES} frames, ${(elapsed / 1000) as int / FRAMES} us per frame, ${gl.renderer_draw_calls(renderer)} draws")
+
+    core.backend_cleanup(&backend)
+    i = 0
+    while i < list.size(models) { core.model_free(list.get_raw(models, i) as *Model) ; i = i + 1 }
+    list.free(models)
+    offscreen.target_destroy(target)
+    offscreen.context_destroy(context)
+    gl.renderer_free(renderer)
+    core.camera_free(cam)
+    core.light_free(light)
+}

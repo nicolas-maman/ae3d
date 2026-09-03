@@ -89,6 +89,7 @@ const MAX_FBO_DIMENSION = 8192
 
 struct ProgramSlots {
     program: int
+    frame_stamp: int
     view_projection: int
     model: int
     light_position: int
@@ -148,6 +149,7 @@ struct GLRenderer {
     initialized: bool
 
     last_draw_calls: int
+    frame_stamp: int
 
     clear_r: float
     clear_g: float
@@ -709,6 +711,7 @@ renderer_update_viewport(r: *GLRenderer, width: int, height: int) {
 renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
     if !r.initialized { return }
     r.last_draw_calls = 0
+    r.frame_stamp = r.frame_stamp + 1
 
     active_light = light
     if list.size(r.lights) > 0 {
@@ -778,7 +781,11 @@ render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
 
     slots = slots_for(r, program)
     use_program(r, program)
-    set_common_uniforms(slots, view_projection, m, light, cam)
+    if slots.frame_stamp != r.frame_stamp {
+        set_frame_uniforms(slots, view_projection, light, cam)
+        slots.frame_stamp = r.frame_stamp
+    }
+    set_model_matrix(slots, m)
     set_model_uniforms(m, program)
 
     ae3d_gl_vao_bind(m.vao)
@@ -856,10 +863,13 @@ draw(r: *GLRenderer, m: *Model, slots: *ProgramSlots, count: int, byte_offset: i
     r.last_draw_calls = r.last_draw_calls + 1
 }
 
-set_common_uniforms(slots: *ProgramSlots, view_projection: *Mat4, m: *Model,
-                    light: *Light, cam: *Camera) {
+// The camera and the light are the same for every model in a frame, and a
+// uniform keeps its value until the program is relinked, so they are uploaded
+// once per program per frame rather than once per model. Only the model matrix
+// actually differs between draws.
+set_frame_uniforms(slots: *ProgramSlots, view_projection: *Mat4,
+                   light: *Light, cam: *Camera) {
     ae3d_gl_uniform_mat4(slots.view_projection, view_projection)
-    ae3d_gl_uniform_mat4(slots.model, &m.model_matrix)
 
     if light != null {
         ae3d_gl_uniform_vec3(slots.light_position, light.position.x, light.position.y, light.position.z)
@@ -884,6 +894,10 @@ set_common_uniforms(slots: *ProgramSlots, view_projection: *Mat4, m: *Model,
     }
 
     ae3d_gl_uniform_vec3(slots.view_pos, cam.position.x, cam.position.y, cam.position.z)
+}
+
+set_model_matrix(slots: *ProgramSlots, m: *Model) {
+    ae3d_gl_uniform_mat4(slots.model, &m.model_matrix)
 }
 
 set_material_uniforms(slots: *ProgramSlots, material: *Material) {
