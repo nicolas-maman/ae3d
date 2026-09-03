@@ -149,10 +149,11 @@ else
             fail "aether3d_editor (did not reach 30 frames)"
             sed 's/^/        /' "$report"
         elif ! grep -qE '^models [0-9]+$' "$report" || \
-             [ "$(sed -n 's/^models //p' "$report")" -lt 4 ]; then
+             [ "$(sed -n 's/^models //p' "$report")" -lt 5 ]; then
             fail "aether3d_editor (scene did not build)"
         elif [ "$(sed -n 's/^water //p' "$report")" != "1" ] || \
-             [ "$(sed -n 's/^voxels //p' "$report")" != "1" ]; then
+             [ "$(sed -n 's/^voxels //p' "$report")" != "1" ] || \
+             [ "$(sed -n 's/^lights //p' "$report")" != "1" ]; then
             fail "aether3d_editor (component types did not build)"
             sed 's/^/        /' "$report"
         elif grep -q '^selected none$' "$report"; then

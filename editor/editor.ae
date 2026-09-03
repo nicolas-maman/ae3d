@@ -28,6 +28,7 @@ import a3d.behaviour
 import a3d.water
 import a3d.voxel
 import a3d.noise
+import a3d.rendering
 
 const PANEL_LEFT = 240
 const PANEL_RIGHT = 300
@@ -219,6 +220,18 @@ clear_console() {
     render_console()
 }
 
+// The presets are the engine's own, applied to every model in the scene, which
+// is what gopher3D's advanced rendering panel does.
+apply_preset(name: string) {
+    config = rendering.default_config()
+    if string.equals(name, "performance") == 1 { config = rendering.performance_config() }
+    if string.equals(name, "quality") == 1 { config = rendering.high_quality_config() }
+
+    rendering.apply_all(g_models, config)
+    say("${name} preset applied to ${list.size(g_models)} models")
+    paint_soon()
+}
+
 apply_post() {
     renderer = g_renderer as *GLRenderer
     if renderer == null { return }
@@ -306,7 +319,9 @@ extern malloc(size: int) -> ptr
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 
-const ROWS = 14
+const ROWS = 17
+const WATER_FIRST_ROW = 11
+const WATER_LAST_ROW = 13
 
 // Widget handles are not contiguous: a row creates a stack, two labels and a
 // slider, so the next row's slider is not this one's handle plus one. They are
@@ -358,6 +373,23 @@ rebuild_rows() {
 
 // The inspector reads the selected model rather than keeping its own copy, so a
 // change made anywhere shows here without a separate notification path.
+// The marker wears the colour of the light it stands for, so a scene with
+// several lights reads at a glance.
+// A light has no geometry of its own, so it is wherever its marker is.
+follow_marker(index: int, m: *Model) {
+    c = component_at(index)
+    if c == null || c.kind != behaviour.KIND_LIGHT { return }
+    light = behaviour.component_state(c) as *Light
+    if light == null { return }
+    light.position = m.position
+}
+
+recolour_light_marker(light: *Light) {
+    m = selected_model()
+    if m == null || selected_light() != light { return }
+    core.model_set_diffuse(m, light.color.x, light.color.y, light.color.z)
+}
+
 hidden_flag(shown: bool) -> int {
     if shown { return 0 }
     return 1
@@ -365,8 +397,8 @@ hidden_flag(shown: bool) -> int {
 
 show_water_section(on: bool) {
     ui.set_hidden(g_water_heading, hidden_flag(on))
-    i = 11
-    while i < ROWS {
+    i = WATER_FIRST_ROW
+    while i <= WATER_LAST_ROW {
         slider = slider_handle(i)
         readout = readout_handle(i)
         if slider != 0 { ui.set_hidden(slider, hidden_flag(on)) }
@@ -385,6 +417,12 @@ sync_inspector() {
     if g_title != 0 {
         ui.set_text(g_title, "${core.text(m.name)}   ${core.mesh_index_count(m.mesh) / 3} triangles")
     }
+
+    show_row(9, active_light().intensity)
+    show_row(10, active_light().ambient_strength)
+    show_row(14, active_light().color.x)
+    show_row(15, active_light().color.y)
+    show_row(16, active_light().color.z)
 
     sim = selected_water()
     show_water_section(sim != null)
@@ -705,6 +743,8 @@ report_state() {
     lines = string.concat(lines, string.from_int(kind_count(behaviour.KIND_WATER)))
     lines = string.concat(lines, "\nvoxels ")
     lines = string.concat(lines, string.from_int(kind_count(behaviour.KIND_VOXEL)))
+    lines = string.concat(lines, "\nlights ")
+    lines = string.concat(lines, string.from_int(kind_count(behaviour.KIND_LIGHT)))
     lines = string.concat(lines, "\ntriangles ")
     lines = string.concat(lines, string.from_int(scene_triangles()))
     lines = string.concat(lines, "\nselected ")
@@ -874,10 +914,13 @@ water_value(index: int) -> float {
 }
 
 light_value(index: int) -> float {
-    light = g_light as *Light
+    light = active_light()
     if light == null { return 0.0 }
     if index == 9 { return light.intensity }
     if index == 10 { return light.ambient_strength }
+    if index == 14 { return light.color.x }
+    if index == 15 { return light.color.y }
+    if index == 16 { return light.color.z }
     return 0.0
 }
 
@@ -895,7 +938,7 @@ apply_property(index: int, value: float) {
         return
     }
 
-    if index >= 11 {
+    if index >= WATER_FIRST_ROW && index <= WATER_LAST_ROW {
         sim = selected_water()
         if sim != null {
             history.history_record(g_history, history.STEP_PROPERTY, sim as ptr, index,
@@ -922,6 +965,7 @@ apply_property(index: int, value: float) {
                 history.history_record(g_history, history.STEP_PROPERTY, target as ptr,
                                        index, property_value(target, index), value)
                 write_property(target, index, value)
+                follow_marker(i, target)
             }
         }
         i = i + 1
@@ -1067,9 +1111,43 @@ build_scene() {
     if env("AETHER3D_EDITOR_SCENE") == "components" {
         add_water()
         add_voxels()
+        add_light()
     }
 
     select_object(1)
+}
+
+// A light is a scene object like any other: it gets a marker so it can be
+// picked and moved, and a component so the inspector knows what it is. The
+// shader takes one light, so the selected one is the one that lights the scene,
+// which is the same single-light model gopher3D's renderer has.
+add_light() {
+    light = core.light_point(core.vec3(0.0, 90.0, 0.0), core.vec3(1.0, 0.92, 0.78), 1.6, 400.0)
+    if light == null { return }
+
+    marker = loader.sphere(1.0, 16, 12)
+    core.model_set_scale(marker, 6.0, 6.0, 6.0)
+    core.model_set_position(marker, light.position.x, light.position.y, light.position.z)
+    core.model_matte(marker, light.color.x, light.color.y, light.color.z)
+    core.model_set_exposure(marker, 3.0)
+
+    renderer = g_renderer as *GLRenderer
+    gl.renderer_add_light(renderer, light)
+    add_component_model(marker, "light", behaviour.KIND_LIGHT, light as ptr)
+}
+
+selected_light() -> *Light {
+    c = component_at(g_selected)
+    if c == null || c.kind != behaviour.KIND_LIGHT { return null }
+    return behaviour.component_state(c) as *Light
+}
+
+// The inspector's light rows follow the selection: a light object if one is
+// picked, otherwise the light the scene was built with.
+active_light() -> *Light {
+    picked = selected_light()
+    if picked != null { return picked }
+    return g_light as *Light
 }
 
 // Water and voxels are engine features the port already carries; the editor
@@ -1565,6 +1643,9 @@ main() {
         voxel_btn = ui.btn(left, "Voxels") callback { add_voxels() }
         style_button(voxel_btn, "action")
 
+        light_btn = ui.btn(left, "Light") callback { add_light() }
+        style_button(light_btn, "action")
+
         plane_btn = ui.btn(left, "Plane") callback {
             m = loader.plane(20, 24.0)
             core.model_set_position(m, 0.0 - 228.0, 0.0, 0.0 - 228.0)
@@ -1758,6 +1839,9 @@ main() {
         heading(right, "LIGHT")
         inspector_row(right, "intensity", 0.0, 4.0, 1.0, 9)
         inspector_row(right, "ambient", 0.0, 1.0, 0.2, 10)
+        inspector_row(right, "light red", 0.0, 1.0, 1.0, 14)
+        inspector_row(right, "light green", 0.0, 1.0, 1.0, 15)
+        inspector_row(right, "light blue", 0.0, 1.0, 1.0, 16)
 
         ui.divider(right)
         g_water_heading = heading(right, "WATER")
@@ -1767,6 +1851,16 @@ main() {
 
         ui.divider(right)
         heading(right, "RENDERING")
+
+        preset_row = ui.hstack(right, 6)
+        ui.add_css_class(preset_row, "row")
+        fast_btn = ui.btn(preset_row, "Fast") callback { apply_preset("performance") }
+        style_button(fast_btn, "action")
+        balanced_btn = ui.btn(preset_row, "Balanced") callback { apply_preset("balanced") }
+        style_button(balanced_btn, "action")
+        quality_btn = ui.btn(preset_row, "Quality") callback { apply_preset("quality") }
+        style_button(quality_btn, "action")
+
         fxaa_row = ui.hstack(right, 8)
         ui.add_css_class(fxaa_row, "row")
         fxaa_caption = ui.text(fxaa_row, "FXAA")
