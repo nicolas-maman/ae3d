@@ -23,6 +23,7 @@ import a3d.offscreen
 import a3d.loader
 import a3d.raycast
 import a3d.scene
+import a3d.history
 
 const PANEL_LEFT = 240
 const PANEL_RIGHT = 300
@@ -34,6 +35,7 @@ const DRAG_SLOP = 3.0
 const VALUE_COLUMN = 54
 const BUTTON_H = 28
 const CONSOLE_LINES = 7
+const PAINT_INTERVAL = 0.033
 
 const GIZMO_TRANSLATE = 0
 const GIZMO_ROTATE = 1
@@ -73,6 +75,9 @@ var g_status = 0
 var g_console: ptr = null
 var g_console_text = ""
 var g_swatch = 0
+var g_history: ptr = null
+var g_reported = false
+var g_last_paint = 0.0
 var g_fxaa = true
 var g_bloom = false
 var g_stats = 0
@@ -127,11 +132,9 @@ say(text: string) {
 // there is a single owner to free and the trim is a substring.
 log_line(text: string) {
     if g_console == null { return }
-    joined = string.concat(g_console_text, text)
-    appended = string.concat(joined, "\n")
-    string.free(joined)
-    g_console_text = core.set_owned(g_console_text, appended)
-    string.free(appended)
+    appended = string.concat(g_console_text, "${text}\n")
+    if string.length(g_console_text) > 0 { string.free(g_console_text) }
+    g_console_text = appended
     render_console()
 }
 
@@ -162,7 +165,8 @@ render_console() {
 }
 
 clear_console() {
-    g_console_text = core.set_owned(g_console_text, "")
+    if string.length(g_console_text) > 0 { string.free(g_console_text) }
+    g_console_text = ""
     render_console()
 }
 
@@ -358,6 +362,7 @@ add_model(m: *Model, name: string) {
     backend = gl.backend(renderer)
     core.backend_add_model(&backend, m)
     list.add_raw(g_models, m)
+    history.history_record(g_history, history.STEP_ADD, m as ptr, 0, 0.0, 0.0)
     rebuild_rows()
     select_object(list.size(g_models) - 1)
     say("added ${name}")
@@ -372,7 +377,7 @@ remove_selected() {
     backend = gl.backend(renderer)
     core.backend_remove_model(&backend, m)
     list.remove(g_models, g_selected)
-    core.model_free(m)
+    history.history_record(g_history, history.STEP_REMOVE, m as ptr, 0, 0.0, 0.0)
 
     g_selected = g_selected - 1
     if g_selected < 0 && list.size(g_models) > 0 { g_selected = 0 }
@@ -500,7 +505,8 @@ draw_frame() {
         ui.set_text(g_stats, "${g_backend_name}   ${(g_fps) as int} fps   ${gl.renderer_draw_calls(renderer)} draws   ${triangles} tris   ${g_view_w}x${g_view_h}")
     }
 
-    if g_frame_limit > 0 && g_frames >= g_frame_limit {
+    if g_frame_limit > 0 && g_frames >= g_frame_limit && !g_reported {
+        g_reported = true
         if g_snapshot != "" {
             ui.canvas_write_png(g_canvas, g_snapshot, g_view_w, g_view_h)
         }
@@ -509,6 +515,9 @@ draw_frame() {
     }
 }
 
+// A scripted run of the edit paths, so undo and redo are checked by exercising
+// them rather than by reading the code. Reported through the same file a
+// bounded run writes, because the run loop has to be ended from outside.
 report_state() {
     selected = "none"
     m = selected_model()
@@ -529,14 +538,22 @@ report_state() {
     lines = string.concat(lines, string.from_int(g_frames))
     lines = string.concat(lines, "\n")
 
+
     // Written to a file rather than printed: a bounded run has to be ended from
     // outside (aether-lang-dev/aether-ui#93) and that loses buffered output.
     if g_report != "" { fs.write(g_report, lines) }
     string.free(lines)
 }
 
+// os.getenv returns null for a variable that is not set, so every read goes
+// through core.text: comparing that null against "" is false, which silently
+// turned every unset switch on.
+env(name: string) -> string {
+    return core.text(os.getenv(name))
+}
+
 limit_from_env() -> int {
-    setting = os.getenv("AETHER3D_EDITOR_FRAMES")
+    setting = env("AETHER3D_EDITOR_FRAMES")
     if setting == "" { return 0 }
     if string.try_int(setting) == 0 { return 0 }
     return string.get_int(setting)
@@ -545,21 +562,134 @@ limit_from_env() -> int {
 // One row of the inspector: a label, a slider, and a live readout. The slider
 // writes straight through to the selected model, so what is on screen and what
 // the renderer draws are never two copies of the same number.
+undo() {
+    replay(history.history_undo(g_history), true)
+}
+
+redo() {
+    replay(history.history_redo(g_history), false)
+}
+
+// The history hands a step back; applying it in the right direction is the
+// editor's half, because only the editor knows what a slot means.
+replay(step: *EditStep, backwards: bool) {
+    if step == null {
+        say("nothing to undo")
+        return
+    }
+
+    history.history_begin_replay(g_history)
+    if step.kind == history.STEP_PROPERTY {
+        target = step.after
+        if backwards { target = step.before }
+        select_model_pointer(step.subject)
+        apply_property(step.slot, target)
+        show_row(step.slot, target)
+    }
+    if (step.kind == history.STEP_ADD && backwards) ||
+       (step.kind == history.STEP_REMOVE && !backwards) {
+        detach_model(step.subject as *Model)
+    }
+    if (step.kind == history.STEP_ADD && !backwards) ||
+       (step.kind == history.STEP_REMOVE && backwards) {
+        attach_model(step.subject as *Model)
+    }
+    history.history_end_replay(g_history)
+
+    if backwards { say("undo") } else { say("redo") }
+}
+
+duplicate_selected() {
+    m = selected_model()
+    if m == null { return }
+    if m == g_grid as *Model || m == g_outline as *Model { return }
+
+    copy = core.model_clone(m)
+    if copy == null { return }
+    core.model_set_position(copy, m.position.x + 20.0, m.position.y, m.position.z + 20.0)
+    add_model(copy, "${core.text(m.name)} copy")
+}
+
+attach_model(m: *Model) {
+    if m == null { return }
+    renderer = g_renderer as *GLRenderer
+    backend = gl.backend(renderer)
+    core.backend_add_model(&backend, m)
+    list.add_raw(g_models, m)
+    rebuild_rows()
+    select_object(list.size(g_models) - 1)
+}
+
+detach_model(m: *Model) {
+    if m == null { return }
+    renderer = g_renderer as *GLRenderer
+    backend = gl.backend(renderer)
+    core.backend_remove_model(&backend, m)
+    count = list.size(g_models)
+    i = 0
+    while i < count {
+        if list.get_raw(g_models, i) == m as ptr {
+            list.remove(g_models, i)
+            rebuild_rows()
+            if g_selected >= list.size(g_models) { g_selected = list.size(g_models) - 1 }
+            select_object(g_selected)
+            return
+        }
+        i = i + 1
+    }
+}
+
+select_model_pointer(m: ptr) {
+    if m == null { return }
+    count = list.size(g_models)
+    i = 0
+    while i < count {
+        if list.get_raw(g_models, i) == m {
+            if g_selected != i { select_object(i) }
+            return
+        }
+        i = i + 1
+    }
+}
+
+property_value(m: *Model, index: int) -> float {
+    if index == 0 { return m.position.x }
+    if index == 1 { return m.position.y }
+    if index == 2 { return m.position.z }
+    if index == 3 { return m.scale.x }
+    if index == 4 { return m.material.diffuse.x }
+    if index == 5 { return m.material.diffuse.y }
+    if index == 6 { return m.material.diffuse.z }
+    if index == 7 { return m.material.metallic }
+    if index == 8 { return m.material.roughness }
+    return 0.0
+}
+
+light_value(index: int) -> float {
+    light = g_light as *Light
+    if light == null { return 0.0 }
+    if index == 9 { return light.intensity }
+    if index == 10 { return light.ambient_strength }
+    return 0.0
+}
+
 apply_property(index: int, value: float) {
     if index >= 9 {
         light = g_light as *Light
         if light != null {
+            history.history_record(g_history, history.STEP_PROPERTY, null, index, light_value(index), value)
             if index == 9 { light.intensity = value }
             if index == 10 { light.ambient_strength = value }
         }
         readout = readout_handle(index)
         if readout != 0 { ui.set_text(readout, number(value)) }
-        draw_frame()
+        paint_soon()
         return
     }
 
     m = selected_model()
     if m == null { return }
+    history.history_record(g_history, history.STEP_PROPERTY, m as ptr, index, property_value(m, index), value)
 
     if index == 0 { core.model_set_position(m, value, m.position.y, m.position.z) }
     if index == 1 { core.model_set_position(m, m.position.x, value, m.position.z) }
@@ -575,10 +705,18 @@ apply_property(index: int, value: float) {
     if readout != 0 { ui.set_text(readout, number(value)) }
     refresh_swatch()
 
-    // AppKit runs a slider drag in its own tracking mode, where a timer
-    // scheduled in the default mode does not fire (aether-lang-dev/aether-ui#97),
-    // so the viewport is repainted from the change itself rather than waiting
-    // for the next tick.
+    paint_soon()
+}
+
+// AppKit runs a slider drag in its own tracking mode, where a timer scheduled in
+// the default mode does not fire (aether-lang-dev/aether-ui#97), so a property
+// change repaints the viewport itself. A drag delivers events faster than a full
+// render and readback can answer them, so the repaint is capped rather than run
+// once per event.
+paint_soon() {
+    now = (clock_ns() / 1000000) * 0.001
+    if now - g_last_paint < PAINT_INTERVAL { return }
+    g_last_paint = now
     draw_frame()
 }
 
@@ -608,15 +746,25 @@ inspector_row(parent: int, name: string, low: float, high: float,
 theme() -> ptr {
     sheet = ui.create_styles()
 
-    ui.st_bg(sheet, "panel", 0x21252B)
+    // The viewport clears to 0x14161A, so the panels sit a clear step lighter
+    // and the chrome around them a step darker: three tones, not one flat grey.
+    ui.st_bg(sheet, "panel", 0x252A33)
+    ui.st_border(sheet, "panel", 1.0, 0x30363F)
     ui.st_insets(sheet, "panel", 12.0, 14.0, 12.0, 14.0)
+
+    ui.st_bg(sheet, "sunken", 0x191D23)
+    ui.st_border(sheet, "sunken", 1.0, 0x30363F)
+    ui.st_insets(sheet, "sunken", 8.0, 14.0, 8.0, 14.0)
 
     // A container's own frame ignores st_insets while its children honour them
     // (aether-lang-dev/aether-ui#96), so a row carries the panel's horizontal
     // inset itself and its children line up with the headings above them.
     ui.st_insets(sheet, "row", 0.0, 14.0, 0.0, 14.0)
 
-    ui.st_color(sheet, "heading", 0x9AA4B2)
+    ui.st_bg(sheet, "bar", 0x1B1F25)
+    ui.st_insets(sheet, "bar", 6.0, 14.0, 6.0, 14.0)
+
+    ui.st_color(sheet, "heading", 0x8B95A5)
     ui.st_bold(sheet, "heading")
     ui.st_font_size(sheet, "heading", 10.0)
 
@@ -632,7 +780,7 @@ theme() -> ptr {
     ui.st_color(sheet, "label", 0x8A919E)
     ui.st_font_size(sheet, "label", 11.0)
 
-    ui.st_color(sheet, "value", 0xD7DAE0)
+    ui.st_color(sheet, "value", 0xDDE3EC)
     ui.st_font_size(sheet, "value", 11.0)
 
     ui.st_color(sheet, "stats", 0x7F8896)
@@ -948,15 +1096,16 @@ set_gizmo_mode(mode: int) {
 
 main() {
     g_frame_limit = limit_from_env()
-    g_snapshot = os.getenv("AETHER3D_EDITOR_SNAPSHOT")
-    g_report = os.getenv("AETHER3D_EDITOR_REPORT")
+    g_snapshot = env("AETHER3D_EDITOR_SNAPSHOT")
+    g_report = env("AETHER3D_EDITOR_REPORT")
     g_models = list.new()
     g_rows = list.new()
     g_sliders = calloc(ROWS, 4)
     g_readouts = calloc(ROWS, 4)
     g_console = calloc(CONSOLE_LINES, 4)
+    g_history = history.history_new()
 
-    if string.equals(os.getenv("AETHER3D_EDITOR_BACKEND"), "vulkan") == 1 {
+    if string.equals(env("AETHER3D_EDITOR_BACKEND"), "vulkan") == 1 {
         if vk.available() {
             g_backend_name = "vulkan"
         } else {
@@ -1047,6 +1196,18 @@ main() {
         style_button(plane_btn, "action")
 
         ui.divider(left)
+        heading(left, "EDIT")
+
+        undo_row = ui.hstack(left, 6)
+        ui.add_css_class(undo_row, "row")
+        undo_btn = ui.btn(undo_row, "Undo") callback { undo() }
+        style_button(undo_btn, "action")
+        redo_btn = ui.btn(undo_row, "Redo") callback { redo() }
+        style_button(redo_btn, "action")
+
+        duplicate_btn = ui.btn(left, "Duplicate") callback { duplicate_selected() }
+        style_button(duplicate_btn, "action")
+
         frame_btn = ui.btn(left, "Frame selection") callback { focus_selection() }
         style_button(frame_btn, "action")
 
@@ -1135,6 +1296,9 @@ main() {
             if string.equals(key, "f") == 1 { focus_selection() }
             if string.equals(key, "Delete") == 1 { remove_selected() }
             if string.equals(key, "BackSpace") == 1 { remove_selected() }
+            if string.equals(key, "z") == 1 { undo() }
+            if string.equals(key, "Z") == 1 { redo() }
+            if string.equals(key, "d") == 1 { duplicate_selected() }
         }
         ui.canvas_on_scroll(g_canvas) callback |dx: float, dy: float| {
             if dy > 0.0 {
@@ -1146,7 +1310,7 @@ main() {
         }
 
         console_panel = ui.vstack(stage, 2)
-        ui.add_css_class(console_panel, "panel")
+        ui.add_css_class(console_panel, "sunken")
         ui.fill_width(console_panel)
 
         console_bar = ui.hstack(console_panel, 8)
@@ -1240,13 +1404,14 @@ main() {
         g_left = left
         g_right = right
 
-        if os.getenv("AETHER3D_EDITOR_DRIVER") != "" {
+        if env("AETHER3D_EDITOR_DRIVER") != "" {
             ui.enable_test_server(9222)
         }
 
         ui.apply_styles(0, sheet)
         build_scene()
         apply_orbit()
+
 
         g_timer = ui.timer(16) callback {
             draw_frame()

@@ -32,6 +32,7 @@ exports (
     Backend, Uniform, LIGHT_STATIC, LIGHT_DYNAMIC, MODE_POINT, MODE_DIRECTIONAL, MODE_SPOT,
     UNIFORM_FLOAT, UNIFORM_INT, UNIFORM_VEC3, UNIFORM_FLOAT_ARRAY, UNIFORM_VEC3_ARRAY,
     material_new, material_default, material_clone, material_free, model_new, model_free,
+    model_clone,
     model_set_position, model_set_scale, model_set_rotation, model_rotate,
     model_update_matrix, model_recalculate_bounds, model_mark_dirty, model_set_diffuse,
     model_set_specular, model_set_pbr, model_set_exposure, model_set_alpha,
@@ -101,6 +102,7 @@ var g_next_model_id = 1
 
 extern ae3d_mesh_create() -> ptr
 
+extern ae3d_mesh_clone(mesh: ptr) -> ptr
 extern ae3d_mesh_destroy(mesh: ptr)
 
 extern ae3d_mesh_vertex_count(mesh: ptr) -> int
@@ -1030,6 +1032,25 @@ model_set_exposure(m: *Model, exposure: float) {
 model_set_alpha(m: *Model, alpha: float) {
     model_ensure_material(m)
     m.material.alpha = alpha
+}
+
+// The copy owns its own mesh and material: sharing either would free them twice
+// when both models go.
+model_clone(src: *Model) -> *Model {
+    if src == null { return null }
+    copy = model_new()
+    copy.mesh = ae3d_mesh_clone(src.mesh)
+    if src.material != null { copy.material = material_clone(src.material) }
+    copy.position = src.position
+    copy.scale = src.scale
+    copy.rotation = src.rotation
+    copy.visible = src.visible
+    copy.is_instanced = false
+    model_set_name(copy, text(src.name))
+    model_set_source_path(copy, text(src.source_path))
+    model_mark_dirty(copy)
+    model_recalculate_bounds(copy)
+    return copy
 }
 
 model_set_texture(m: *Model, path: string) {

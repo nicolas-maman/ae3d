@@ -39,6 +39,7 @@ double ae3d_cursor_y(void *win);
 double ae3d_scroll_delta(void *win);
 
 void  *ae3d_mesh_create(void);
+void  *ae3d_mesh_clone(void *mesh);
 void   ae3d_mesh_destroy(void *mesh);
 int    ae3d_mesh_reserve(void *mesh, int vertices, int indices);
 int    ae3d_mesh_push_vertex(void *mesh, double px, double py, double pz,

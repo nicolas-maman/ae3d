@@ -43,6 +43,40 @@ void *ae3d_mesh_create(void) {
     return calloc(1, sizeof(ae3d_mesh));
 }
 
+void *ae3d_mesh_clone(void *handle) {
+    const ae3d_mesh *src = (const ae3d_mesh *)handle;
+    ae3d_mesh *copy;
+
+    if (!src) return NULL;
+    copy = (ae3d_mesh *)calloc(1, sizeof(ae3d_mesh));
+    if (!copy) return NULL;
+
+    if (src->vertex_count > 0) {
+        size_t bytes = (size_t)src->vertex_count * AE3D_STRIDE * sizeof(float);
+        copy->vertices = (float *)malloc(bytes);
+        if (!copy->vertices) { free(copy); return NULL; }
+        memcpy(copy->vertices, src->vertices, bytes);
+        copy->vertex_count = src->vertex_count;
+        copy->vertex_capacity = src->vertex_count;
+    }
+
+    if (src->index_count > 0) {
+        size_t bytes = (size_t)src->index_count * sizeof(unsigned);
+        copy->indices = (unsigned *)malloc(bytes);
+        if (!copy->indices) { free(copy->vertices); free(copy); return NULL; }
+        memcpy(copy->indices, src->indices, bytes);
+        copy->index_count = src->index_count;
+        copy->index_capacity = src->index_count;
+    }
+
+    copy->dirty = src->dirty;
+    copy->bound[0] = src->bound[0];
+    copy->bound[1] = src->bound[1];
+    copy->bound[2] = src->bound[2];
+    copy->radius = src->radius;
+    return copy;
+}
+
 void ae3d_mesh_destroy(void *handle) {
     ae3d_mesh *m = (ae3d_mesh *)handle;
     if (!m) return;

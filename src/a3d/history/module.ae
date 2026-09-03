@@ -1,0 +1,141 @@
+// Undo and redo for editor edits.
+//
+// A step records what a value was and what it became, so travelling in either
+// direction is reading one of the two fields back out. Property edits coalesce:
+// a slider drag delivers a callback per pixel, and stepping back through those
+// one at a time would make undo useless, so consecutive edits to the same
+// property extend the step the first one opened.
+
+import std.list
+import std.heap
+
+exports (
+    EditStep, History,
+    STEP_PROPERTY, STEP_ADD, STEP_REMOVE,
+    history_new, history_free, history_record, history_undo, history_redo,
+    history_depth, history_redo_depth, history_top, history_clear,
+    history_begin_replay, history_end_replay
+)
+
+const STEP_PROPERTY = 0
+const STEP_ADD = 1
+const STEP_REMOVE = 2
+const HISTORY_LIMIT = 64
+
+struct EditStep {
+    kind: int
+    subject: ptr
+    slot: int
+    before: float
+    after: float
+}
+
+struct History {
+    undo: ptr
+    redo: ptr
+    replaying: bool
+}
+
+history_new() -> *History {
+    h = heap.new(History)
+    h.undo = list.new()
+    h.redo = list.new()
+    h.replaying = false
+    return h
+}
+
+history_free(h: *History) {
+    if h == null { return }
+    drain(h.undo)
+    drain(h.redo)
+    list.free(h.undo)
+    list.free(h.redo)
+    heap.free(h)
+}
+
+drain(stack: ptr) {
+    if stack == null { return }
+    while list.size(stack) > 0 {
+        step = list.get_raw(stack, 0) as *EditStep
+        list.remove(stack, 0)
+        heap.free(step)
+    }
+}
+
+// Applying a step must not record it again as a fresh edit.
+history_begin_replay(h: *History) {
+    if h != null { h.replaying = true }
+}
+
+history_end_replay(h: *History) {
+    if h != null { h.replaying = false }
+}
+
+history_clear(h: *History) {
+    if h == null { return }
+    drain(h.undo)
+    drain(h.redo)
+}
+
+history_depth(h: *History) -> int {
+    if h == null { return 0 }
+    return list.size(h.undo)
+}
+
+history_redo_depth(h: *History) -> int {
+    if h == null { return 0 }
+    return list.size(h.redo)
+}
+
+history_top(h: *History) -> *EditStep {
+    if h == null || list.size(h.undo) == 0 { return null }
+    return list.get_raw(h.undo, list.size(h.undo) - 1) as *EditStep
+}
+
+history_record(h: *History, kind: int, subject: ptr, slot: int,
+               before: float, after: float) {
+    if h == null || h.replaying { return }
+
+    count = list.size(h.undo)
+    if kind == STEP_PROPERTY && count > 0 {
+        top = list.get_raw(h.undo, count - 1) as *EditStep
+        if top.kind == STEP_PROPERTY && top.subject == subject && top.slot == slot {
+            top.after = after
+            return
+        }
+    }
+
+    step = heap.new(EditStep)
+    step.kind = kind
+    step.subject = subject
+    step.slot = slot
+    step.before = before
+    step.after = after
+    list.add_raw(h.undo, step)
+
+    while list.size(h.undo) > HISTORY_LIMIT {
+        stale = list.get_raw(h.undo, 0) as *EditStep
+        list.remove(h.undo, 0)
+        heap.free(stale)
+    }
+    drain(h.redo)
+}
+
+// The caller applies the step; this only moves it between the two stacks and
+// hands it over, so the history has no opinion about what a step means.
+history_undo(h: *History) -> *EditStep {
+    return transfer(h, h.undo, h.redo)
+}
+
+history_redo(h: *History) -> *EditStep {
+    return transfer(h, h.redo, h.undo)
+}
+
+transfer(h: *History, from: ptr, onto: ptr) -> *EditStep {
+    if h == null || list.size(from) == 0 { return null }
+    index = list.size(from) - 1
+    step = list.get_raw(from, index) as *EditStep
+    list.remove(from, index)
+    list.add_raw(onto, step)
+    return step
+}
