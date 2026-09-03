@@ -24,6 +24,10 @@ import a3d.loader
 import a3d.raycast
 import a3d.scene
 import a3d.history
+import a3d.behaviour
+import a3d.water
+import a3d.voxel
+import a3d.noise
 
 const PANEL_LEFT = 240
 const PANEL_RIGHT = 300
@@ -35,6 +39,8 @@ const DRAG_SLOP = 3.0
 const VALUE_COLUMN = 54
 const BUTTON_H = 28
 const CONSOLE_LINES = 7
+const VOXEL_SIZE = 4.0
+const WATER_SIZE = 700.0
 const PAINT_INTERVAL = 0.033
 
 const GIZMO_TRANSLATE = 0
@@ -74,10 +80,19 @@ var g_outlines: ptr = null
 var g_assets: ptr = null
 var g_asset_rows: ptr = null
 var g_asset_browser: ptr = null
+var g_components: ptr = null
+var g_water_rows: ptr = null
+var g_water_heading = 0
 
 var g_status = 0
 var g_console: ptr = null
-var g_console_text = ""
+var g_line0 = ""
+var g_line1 = ""
+var g_line2 = ""
+var g_line3 = ""
+var g_line4 = ""
+var g_line5 = ""
+var g_line6 = ""
 var g_swatch = 0
 var g_history: ptr = null
 var g_reported = false
@@ -128,49 +143,79 @@ selected_model() -> *Model {
 // The status line carries the newest message and the console keeps the history,
 // which is the split gopher3D's editor uses between its status bar and console.
 say(text: string) {
-    if g_status != 0 { ui.set_text(g_status, text) }
+    if g_status != 0 { ui.set_text(g_status, non_empty(text)) }
     log_line(text)
 }
 
 // The history is one newline-joined string rather than a list of strings, so
 // there is a single owner to free and the trim is a substring.
+// Each line is its own owned string rather than a slice of a history buffer:
+// the widgets are fed exactly what was logged, so nothing depends on where a
+// newline happens to fall.
+// A computed empty string reaches AppKit as a nil NSString and throws inside
+// setStringValue:, so a blank line is a space.
+non_empty(value: string) -> string {
+    if string.length(value) == 0 { return " " }
+    return value
+}
+
 log_line(text: string) {
     if g_console == null { return }
-    appended = string.concat(g_console_text, "${text}\n")
-    if string.length(g_console_text) > 0 { string.free(g_console_text) }
-    g_console_text = appended
+
+    last = CONSOLE_LINES - 1
+    stale = console_line(last)
+    if string.length(stale) > 0 { string.free(stale) }
+
+    i = last
+    while i > 0 {
+        set_console_line(i, console_line(i - 1))
+        i = i - 1
+    }
+    set_console_line(0, string.copy(non_empty(text)))
     render_console()
+}
+
+console_line(index: int) -> string {
+    if index == 0 { return g_line0 }
+    if index == 1 { return g_line1 }
+    if index == 2 { return g_line2 }
+    if index == 3 { return g_line3 }
+    if index == 4 { return g_line4 }
+    if index == 5 { return g_line5 }
+    return g_line6
+}
+
+set_console_line(index: int, value: string) {
+    if index == 0 { g_line0 = value }
+    if index == 1 { g_line1 = value }
+    if index == 2 { g_line2 = value }
+    if index == 3 { g_line3 = value }
+    if index == 4 { g_line4 = value }
+    if index == 5 { g_line5 = value }
+    if index == 6 { g_line6 = value }
 }
 
 render_console() {
     if g_console == null { return }
     handles = g_console as int[]
-    lines = string.split(g_console_text, "\n")
-    count = string.array_size(lines)
-    // The trailing newline leaves an empty final field, which is not a line.
-    if count > 0 { count = count - 1 }
-    first = 0
-    if count > CONSOLE_LINES { first = count - CONSOLE_LINES }
-
     i = 0
     while i < CONSOLE_LINES {
         handle = handles[i]
         if handle != 0 {
-            source = first + i
-            if source < count {
-                ui.set_text(handle, core.text(string.array_get(lines, source)))
-            } else {
-                ui.set_text(handle, "")
-            }
+            ui.set_text(handle, non_empty(console_line(i)))
         }
         i = i + 1
     }
-    string.array_free(lines)
 }
 
 clear_console() {
-    if string.length(g_console_text) > 0 { string.free(g_console_text) }
-    g_console_text = ""
+    i = 0
+    while i < CONSOLE_LINES {
+        stale = console_line(i)
+        if string.length(stale) > 0 { string.free(stale) }
+        set_console_line(i, "")
+        i = i + 1
+    }
     render_console()
 }
 
@@ -261,7 +306,7 @@ extern malloc(size: int) -> ptr
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 
-const ROWS = 11
+const ROWS = 14
 
 // Widget handles are not contiguous: a row creates a stack, two labels and a
 // slider, so the next row's slider is not this one's handle plus one. They are
@@ -313,14 +358,40 @@ rebuild_rows() {
 
 // The inspector reads the selected model rather than keeping its own copy, so a
 // change made anywhere shows here without a separate notification path.
+hidden_flag(shown: bool) -> int {
+    if shown { return 0 }
+    return 1
+}
+
+show_water_section(on: bool) {
+    ui.set_hidden(g_water_heading, hidden_flag(on))
+    i = 11
+    while i < ROWS {
+        slider = slider_handle(i)
+        readout = readout_handle(i)
+        if slider != 0 { ui.set_hidden(slider, hidden_flag(on)) }
+        if readout != 0 { ui.set_hidden(readout, hidden_flag(on)) }
+        i = i + 1
+    }
+}
+
 sync_inspector() {
     m = selected_model()
     if m == null {
         if g_title != 0 { ui.set_text(g_title, "nothing selected") }
+        show_water_section(false)
         return
     }
     if g_title != 0 {
         ui.set_text(g_title, "${core.text(m.name)}   ${core.mesh_index_count(m.mesh) / 3} triangles")
+    }
+
+    sim = selected_water()
+    show_water_section(sim != null)
+    if sim != null {
+        show_row(11, sim.base_amplitude)
+        show_row(12, sim.wave_speed_multiplier)
+        show_row(13, sim.transparency)
     }
 
     show_row(0, m.position.x)
@@ -360,12 +431,17 @@ select_object(index: int) {
 }
 
 add_model(m: *Model, name: string) {
+    add_component_model(m, name, behaviour.KIND_MESH, null)
+}
+
+add_component_model(m: *Model, name: string, kind: int, state: ptr) {
     if m == null { return }
     core.model_set_name(m, name)
     renderer = g_renderer as *GLRenderer
     backend = gl.backend(renderer)
     core.backend_add_model(&backend, m)
     list.add_raw(g_models, m)
+    list.add_raw(g_components, behaviour.component_new(name, kind, state))
     history.history_record(g_history, history.STEP_ADD, m as ptr, 0, 0.0, 0.0)
     rebuild_rows()
     select_object(list.size(g_models) - 1)
@@ -394,6 +470,19 @@ remove_selected() {
 // costs a transform rather than geometry per object.
 // One outline per selected object, from a pool that only ever grows to the
 // largest selection the session has made.
+update_water(delta: float) {
+    if g_components == null { return }
+    count = list.size(g_components)
+    i = 0
+    while i < count {
+        c = list.get_raw(g_components, i) as *Component
+        if c != null && c.kind == behaviour.KIND_WATER {
+            water.simulation_update(behaviour.component_state(c) as *Simulation, delta)
+        }
+        i = i + 1
+    }
+}
+
 update_outline() {
     shown = 0
     count = list.size(g_models)
@@ -430,6 +519,46 @@ update_outline() {
 // over a set, so widening this is a one-line change once that lands.
 is_selected(index: int) -> bool {
     return index == g_selected
+}
+
+kind_count(kind: int) -> int {
+    if g_components == null { return 0 }
+    total = 0
+    i = 0
+    while i < list.size(g_components) {
+        c = list.get_raw(g_components, i) as *Component
+        if c != null && c.kind == kind { total = total + 1 }
+        i = i + 1
+    }
+    return total
+}
+
+scene_triangles() -> int {
+    total = 0
+    i = 0
+    while i < list.size(g_models) {
+        m = model_at(i)
+        if m != null && m.visible { total = total + core.mesh_index_count(m.mesh) / 3 }
+        i = i + 1
+    }
+    return total
+}
+
+component_at(index: int) -> *Component {
+    if g_components == null || index < 0 || index >= list.size(g_components) { return null }
+    return list.get_raw(g_components, index) as *Component
+}
+
+selected_kind() -> int {
+    c = component_at(g_selected)
+    if c == null { return behaviour.KIND_MESH }
+    return c.kind
+}
+
+selected_water() -> *Simulation {
+    c = component_at(g_selected)
+    if c == null || c.kind != behaviour.KIND_WATER { return null }
+    return behaviour.component_state(c) as *Simulation
 }
 
 selection_count() -> int {
@@ -508,12 +637,15 @@ draw_frame() {
     settle_layout()
 
     now = (clock_ns() / 1000000) * 0.001
+    delta = 0.016
     if g_last_time > 0.0 {
-        delta = now - g_last_time
-        if delta > 0.0 { g_fps = g_fps * 0.9 + (1.0 / delta) * 0.1 }
+        elapsed = now - g_last_time
+        if elapsed > 0.0 && elapsed < 0.25 { delta = elapsed }
+        if elapsed > 0.0 { g_fps = g_fps * 0.9 + (1.0 / elapsed) * 0.1 }
     }
     g_last_time = now
 
+    update_water(delta)
     update_outline()
 
     backend = gl.backend(renderer)
@@ -568,6 +700,12 @@ report_state() {
     lines = string.concat(lines, string.from_int(asset_count()))
     lines = string.concat(lines, "\nselected_count ")
     lines = string.concat(lines, string.from_int(selection_count()))
+    lines = string.concat(lines, "\nwater ")
+    lines = string.concat(lines, string.from_int(kind_count(behaviour.KIND_WATER)))
+    lines = string.concat(lines, "\nvoxels ")
+    lines = string.concat(lines, string.from_int(kind_count(behaviour.KIND_VOXEL)))
+    lines = string.concat(lines, "\ntriangles ")
+    lines = string.concat(lines, string.from_int(scene_triangles()))
     lines = string.concat(lines, "\nselected ")
     lines = string.concat(lines, selected)
     lines = string.concat(lines, "\ncanvas ")
@@ -725,6 +863,15 @@ property_value(m: *Model, index: int) -> float {
     return 0.0
 }
 
+water_value(index: int) -> float {
+    sim = selected_water()
+    if sim == null { return 0.0 }
+    if index == 11 { return sim.base_amplitude }
+    if index == 12 { return sim.wave_speed_multiplier }
+    if index == 13 { return sim.transparency }
+    return 0.0
+}
+
 light_value(index: int) -> float {
     light = g_light as *Light
     if light == null { return 0.0 }
@@ -740,6 +887,21 @@ apply_property(index: int, value: float) {
             history.history_record(g_history, history.STEP_PROPERTY, null, index, light_value(index), value)
             if index == 9 { light.intensity = value }
             if index == 10 { light.ambient_strength = value }
+        }
+        readout = readout_handle(index)
+        if readout != 0 { ui.set_text(readout, number(value)) }
+        paint_soon()
+        return
+    }
+
+    if index >= 11 {
+        sim = selected_water()
+        if sim != null {
+            history.history_record(g_history, history.STEP_PROPERTY, sim as ptr, index,
+                                   water_value(index), value)
+            if index == 11 { water.simulation_set_wave_height(sim, value) }
+            if index == 12 { water.simulation_set_wave_speed(sim, value) }
+            if index == 13 { water.simulation_set_transparency(sim, value) }
         }
         readout = readout_handle(index)
         if readout != 0 { ui.set_text(readout, number(value)) }
@@ -899,7 +1061,82 @@ build_scene() {
     core.model_glossy(sphere, 0.24, 0.52, 0.88)
     add_model(sphere, "sphere")
 
+    // A bounded run can build the component types too, so the water and voxel
+    // paths are exercised rather than only reachable by clicking.
+    if env("AETHER3D_EDITOR_SCENE") == "components" {
+        add_water()
+        add_voxels()
+    }
+
     select_object(1)
+}
+
+// Water and voxels are engine features the port already carries; the editor
+// creates them the way gopher3D's add dialogs do.
+add_water() {
+    ocean = water.simulation_new(WATER_SIZE, 6.0)
+    water.simulation_set_color(ocean, 0.06, 0.22, 0.45)
+    water.simulation_set_sky_color(ocean, 0.5, 0.7, 1.0)
+    water.simulation_set_transparency(ocean, 0.72)
+
+    surface = water.simulation_build(ocean, 96)
+    if surface == null {
+        water.simulation_free(ocean)
+        say("water surface could not be built")
+        return
+    }
+    core.model_set_position(surface, 0.0, 0.0 - 6.0, 0.0)
+    add_component_model(surface, "water", behaviour.KIND_WATER, ocean as ptr)
+}
+
+voxel_layer(height: int, y: int) -> int {
+    if y == height - 1 {
+        if height < 6 { return voxel.SAND }
+        if height > 22 { return voxel.STONE }
+        return voxel.GRASS
+    }
+    if y > height - 4 { return voxel.DIRT }
+    return voxel.STONE
+}
+
+add_voxels() {
+    world = voxel.world_new(48, 48, 28, VOXEL_SIZE)
+    if world == null { return }
+
+    field = noise.perlin_new(20260903)
+    if field == null {
+        voxel.world_free(world)
+        return
+    }
+
+    x = 0
+    while x < voxel.world_size_x(world) {
+        z = 0
+        while z < voxel.world_size_z(world) {
+            sample = noise.fbm2(field, (x * 1.0) * 0.05, (z * 1.0) * 0.05, 4, 0.5)
+            height = (((sample + 1.0) * 0.5) * 18.0 + 4.0) as int
+            y = 0
+            while y < height {
+                voxel.world_set(world, x, y, z, voxel_layer(height, y))
+                y = y + 1
+            }
+            z = z + 1
+        }
+        x = x + 1
+    }
+    noise.perlin_free(field)
+
+    base = loader.cube(VOXEL_SIZE)
+    chunk = voxel.world_build(world, base)
+    if chunk == null {
+        voxel.world_free(world)
+        core.model_free(base)
+        say("voxel chunk could not be built")
+        return
+    }
+    core.model_set_position(chunk, 0.0 - 96.0, 0.0 - 8.0, 0.0 - 96.0)
+    add_component_model(chunk, "voxels", behaviour.KIND_VOXEL, world as ptr)
+    say("voxels: ${voxel.world_visible_count(world)} visible of ${voxel.world_active_count(world)}")
 }
 
 // Every mesh the project ships, so a model can be brought into the scene
@@ -1237,6 +1474,7 @@ main() {
     g_history = history.history_new()
     g_helpers = list.new()
     g_outlines = list.new()
+    g_components = list.new()
 
     if string.equals(env("AETHER3D_EDITOR_BACKEND"), "vulkan") == 1 {
         if vk.available() {
@@ -1319,6 +1557,12 @@ main() {
             add_model(m, "sphere")
         }
         style_button(sphere_btn, "action")
+
+        water_btn = ui.btn(left, "Water") callback { add_water() }
+        style_button(water_btn, "action")
+
+        voxel_btn = ui.btn(left, "Voxels") callback { add_voxels() }
+        style_button(voxel_btn, "action")
 
         plane_btn = ui.btn(left, "Plane") callback {
             m = loader.plane(20, 24.0)
@@ -1516,6 +1760,12 @@ main() {
         heading(right, "LIGHT")
         inspector_row(right, "intensity", 0.0, 4.0, 1.0, 9)
         inspector_row(right, "ambient", 0.0, 1.0, 0.2, 10)
+
+        ui.divider(right)
+        g_water_heading = heading(right, "WATER")
+        inspector_row(right, "wave height", 0.0, 24.0, 6.0, 11)
+        inspector_row(right, "wave speed", 0.0, 4.0, 1.0, 12)
+        inspector_row(right, "transparency", 0.0, 1.0, 0.72, 13)
 
         ui.divider(right)
         heading(right, "RENDERING")
