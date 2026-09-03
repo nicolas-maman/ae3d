@@ -84,6 +84,9 @@ var g_asset_browser: ptr = null
 var g_components: ptr = null
 var g_water_rows: ptr = null
 var g_water_heading = 0
+var g_scripts: ptr = null
+var g_script_label = 0
+var g_script_clock = 0.0
 
 var g_status = 0
 var g_console: ptr = null
@@ -322,6 +325,13 @@ extern free(block: ptr)
 const ROWS = 17
 const WATER_FIRST_ROW = 11
 const WATER_LAST_ROW = 13
+const SCRIPT_NONE = 0
+const SCRIPT_SPIN = 1
+const SCRIPT_BOB = 2
+const SCRIPT_ORBIT = 3
+const BOB_HEIGHT = 14.0
+const BOB_RATE = 1.6
+const SCENE_PATH = "build/editor_scene.json"
 
 // Widget handles are not contiguous: a row creates a stack, two labels and a
 // slider, so the next row's slider is not this one's handle plus one. They are
@@ -424,6 +434,8 @@ sync_inspector() {
     show_row(15, active_light().color.y)
     show_row(16, active_light().color.z)
 
+    refresh_script_label()
+
     sim = selected_water()
     show_water_section(sim != null)
     if sim != null {
@@ -480,6 +492,7 @@ add_component_model(m: *Model, name: string, kind: int, state: ptr) {
     core.backend_add_model(&backend, m)
     list.add_raw(g_models, m)
     list.add_raw(g_components, behaviour.component_new(name, kind, state))
+    list.add_raw(g_scripts, index_handle(SCRIPT_NONE))
     history.history_record(g_history, history.STEP_ADD, m as ptr, 0, 0.0, 0.0)
     rebuild_rows()
     select_object(list.size(g_models) - 1)
@@ -557,6 +570,78 @@ update_outline() {
 // over a set, so widening this is a one-line change once that lands.
 is_selected(index: int) -> bool {
     return index == g_selected
+}
+
+// gopher3D attaches Go scripts it compiles and hot-reloads. The part that
+// matters in an editor is attaching a behaviour and watching it run, so these
+// are built in and driven from the frame loop.
+script_at(index: int) -> int {
+    if g_scripts == null || index < 0 || index >= list.size(g_scripts) { return SCRIPT_NONE }
+    slot = list.get_raw(g_scripts, index) as int[]
+    return slot[0]
+}
+
+set_script(index: int, script: int) {
+    if g_scripts == null || index < 0 || index >= list.size(g_scripts) { return }
+    slot = list.get_raw(g_scripts, index) as int[]
+    slot[0] = script
+    refresh_script_label()
+    say("${script_name(script)} on ${core.text(model_at(index).name)}")
+}
+
+script_name(script: int) -> string {
+    if script == SCRIPT_SPIN { return "spin" }
+    if script == SCRIPT_BOB { return "bob" }
+    if script == SCRIPT_ORBIT { return "orbit" }
+    return "none"
+}
+
+refresh_script_label() {
+    if g_script_label == 0 { return }
+    ui.set_text(g_script_label, non_empty(script_name(script_at(g_selected))))
+}
+
+scripted_count() -> int {
+    total = 0
+    i = 0
+    while i < list.size(g_scripts) {
+        if script_at(i) != SCRIPT_NONE { total = total + 1 }
+        i = i + 1
+    }
+    return total
+}
+
+run_scripts(delta: float) {
+    if g_scripts == null { return }
+    g_script_clock = g_script_clock + delta
+
+    count = list.size(g_models)
+    i = 0
+    while i < count {
+        script = script_at(i)
+        if script != SCRIPT_NONE {
+            m = model_at(i)
+            if m != null {
+                if script == SCRIPT_SPIN {
+                    core.model_rotate(m, 0.0, delta * 60.0, 0.0)
+                }
+                // Moving by the derivative rather than to an absolute height, so
+                // bobbing needs no memory of where the object started.
+                if script == SCRIPT_BOB {
+                    step = core.cos_of(g_script_clock * BOB_RATE) * BOB_HEIGHT * BOB_RATE * delta
+                    core.model_set_position(m, m.position.x, m.position.y + step, m.position.z)
+                }
+                if script == SCRIPT_ORBIT {
+                    angle = g_script_clock * 0.8
+                    radius = core.sqrt_of(m.position.x * m.position.x + m.position.z * m.position.z)
+                    if radius < 1.0 { radius = 60.0 }
+                    core.model_set_position(m, core.cos_of(angle) * radius, m.position.y,
+                                            core.sin_of(angle) * radius)
+                }
+            }
+        }
+        i = i + 1
+    }
 }
 
 kind_count(kind: int) -> int {
@@ -684,6 +769,7 @@ draw_frame() {
     g_last_time = now
 
     update_water(delta)
+    run_scripts(delta)
     update_outline()
 
     backend = gl.backend(renderer)
@@ -745,6 +831,8 @@ report_state() {
     lines = string.concat(lines, string.from_int(kind_count(behaviour.KIND_VOXEL)))
     lines = string.concat(lines, "\nlights ")
     lines = string.concat(lines, string.from_int(kind_count(behaviour.KIND_LIGHT)))
+    lines = string.concat(lines, "\nscripted ")
+    lines = string.concat(lines, string.from_int(scripted_count()))
     lines = string.concat(lines, "\ntriangles ")
     lines = string.concat(lines, string.from_int(scene_triangles()))
     lines = string.concat(lines, "\nselected ")
@@ -1112,9 +1200,60 @@ build_scene() {
         add_water()
         add_voxels()
         add_light()
+        set_script(0, SCRIPT_SPIN)
     }
 
     select_object(1)
+}
+
+save_scene() {
+    if scene.scene_save(g_models, SCENE_PATH, "build/") {
+        say("saved ${SCENE_PATH}")
+    } else {
+        say("save failed: ${scene.last_error()}")
+    }
+}
+
+// Loading replaces the scene rather than merging into it, which is what a
+// scene file means, so everything currently in it goes first.
+load_scene() {
+    loaded = scene.scene_load(SCENE_PATH)
+    if loaded == null {
+        say("load failed: ${scene.last_error()}")
+        return
+    }
+
+    clear_scene()
+    count = list.size(loaded)
+    i = 0
+    while i < count {
+        m = list.get_raw(loaded, i) as *Model
+        if m != null { add_model(m, core.text(m.name)) }
+        i = i + 1
+    }
+    list.free(loaded)
+    history.history_clear(g_history)
+    say("loaded ${count} models from ${SCENE_PATH}")
+}
+
+clear_scene() {
+    renderer = g_renderer as *GLRenderer
+    backend = gl.backend(renderer)
+    while list.size(g_models) > 0 {
+        m = list.get_raw(g_models, 0) as *Model
+        core.backend_remove_model(&backend, m)
+        list.remove(g_models, 0)
+        core.model_free(m)
+
+        c = list.get_raw(g_components, 0) as *Component
+        list.remove(g_components, 0)
+        behaviour.component_free(c)
+
+        free(list.get_raw(g_scripts, 0))
+        list.remove(g_scripts, 0)
+    }
+    g_selected = 0 - 1
+    rebuild_rows()
 }
 
 // A light is a scene object like any other: it gets a marker so it can be
@@ -1554,6 +1693,7 @@ main() {
     g_helpers = list.new()
     g_outlines = list.new()
     g_components = list.new()
+    g_scripts = list.new()
 
     if string.equals(env("AETHER3D_EDITOR_BACKEND"), "vulkan") == 1 {
         if vk.available() {
@@ -1605,7 +1745,12 @@ main() {
         body = ui.hstack(shell, 0)
         ui.fill_height(body)
 
-        left = ui.vstack(body, 6)
+        // The panels scroll rather than stretch: an inspector that grows a
+        // section must not push the viewport past the bottom of the window.
+        left_scroll = ui.scrollview(body)
+        ui.weight(left_scroll, 16)
+        ui.fill_height(left_scroll)
+        left = ui.vstack(left_scroll, 6)
         ui.add_css_class(left, "panel")
         heading(left, "SCENE")
 
@@ -1683,13 +1828,12 @@ main() {
         delete_btn = ui.btn(left, "Delete") callback { remove_selected() }
         style_button(delete_btn, "action")
 
-        save_btn = ui.btn(left, "Save scene") callback {
-            if scene.scene_save(g_models, "build/editor_scene.json", "build/") {
-                say("saved build/editor_scene.json")
-            } else {
-                say("save failed: ${scene.last_error()}")
-            }
-        }
+        scene_row = ui.hstack(left, 6)
+        ui.add_css_class(scene_row, "row")
+        save_btn = ui.btn(scene_row, "Save") callback { save_scene() }
+        style_button(save_btn, "primary")
+        load_btn = ui.btn(scene_row, "Load") callback { load_scene() }
+        style_button(load_btn, "action")
         style_button(save_btn, "primary")
         ui.spacer(left)
 
@@ -1804,7 +1948,10 @@ main() {
         ui.add_css_class(g_status, "label")
         ui.spacer(footer)
 
-        right = ui.vstack(body, 6)
+        right_scroll = ui.scrollview(body)
+        ui.weight(right_scroll, 22)
+        ui.fill_height(right_scroll)
+        right = ui.vstack(right_scroll, 6)
         ui.add_css_class(right, "panel")
         heading(right, "INSPECTOR")
         g_title = ui.text(right, "nothing selected")
@@ -1850,6 +1997,29 @@ main() {
         inspector_row(right, "transparency", 0.0, 1.0, 0.72, 13)
 
         ui.divider(right)
+        heading(right, "BEHAVIOUR")
+
+        script_row = ui.hstack(right, 8)
+        ui.add_css_class(script_row, "row")
+        script_caption = ui.text(script_row, "attached")
+        ui.add_css_class(script_caption, "label")
+        ui.spacer(script_row)
+        g_script_label = ui.text(script_row, "none")
+        ui.add_css_class(g_script_label, "value")
+        ui.width(g_script_label, VALUE_COLUMN)
+
+        script_buttons = ui.hstack(right, 6)
+        ui.add_css_class(script_buttons, "row")
+        none_btn = ui.btn(script_buttons, "None") callback { set_script(g_selected, SCRIPT_NONE) }
+        style_button(none_btn, "action")
+        spin_btn = ui.btn(script_buttons, "Spin") callback { set_script(g_selected, SCRIPT_SPIN) }
+        style_button(spin_btn, "action")
+        bob_btn = ui.btn(script_buttons, "Bob") callback { set_script(g_selected, SCRIPT_BOB) }
+        style_button(bob_btn, "action")
+        orbit_btn = ui.btn(script_buttons, "Orbit") callback { set_script(g_selected, SCRIPT_ORBIT) }
+        style_button(orbit_btn, "action")
+
+        ui.divider(right)
         heading(right, "RENDERING")
 
         preset_row = ui.hstack(right, 6)
@@ -1886,8 +2056,8 @@ main() {
         ui.spacer(right)
 
         g_stage = stage
-        g_left = left
-        g_right = right
+        g_left = left_scroll
+        g_right = right_scroll
 
         if env("AETHER3D_EDITOR_DRIVER") != "" {
             ui.enable_test_server(9222)

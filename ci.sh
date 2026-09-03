@@ -153,7 +153,8 @@ else
             fail "aether3d_editor (scene did not build)"
         elif [ "$(sed -n 's/^water //p' "$report")" != "1" ] || \
              [ "$(sed -n 's/^voxels //p' "$report")" != "1" ] || \
-             [ "$(sed -n 's/^lights //p' "$report")" != "1" ]; then
+             [ "$(sed -n 's/^lights //p' "$report")" != "1" ] || \
+             [ "$(sed -n 's/^scripted //p' "$report")" != "1" ]; then
             fail "aether3d_editor (component types did not build)"
             sed 's/^/        /' "$report"
         elif grep -q '^selected none$' "$report"; then
