@@ -69,7 +69,11 @@ var g_syncing = false
 var g_backend_name = "opengl"
 
 var g_grid: ptr = null
-var g_outline: ptr = null
+var g_helpers: ptr = null
+var g_outlines: ptr = null
+var g_assets: ptr = null
+var g_asset_rows: ptr = null
+var g_asset_browser: ptr = null
 
 var g_status = 0
 var g_console: ptr = null
@@ -154,7 +158,7 @@ render_console() {
         if handle != 0 {
             source = first + i
             if source < count {
-                ui.set_text(handle, string.array_get(lines, source))
+                ui.set_text(handle, core.text(string.array_get(lines, source)))
             } else {
                 ui.set_text(handle, "")
             }
@@ -371,7 +375,6 @@ add_model(m: *Model, name: string) {
 remove_selected() {
     m = selected_model()
     if m == null { return }
-    if m == g_grid as *Model || m == g_outline as *Model { return }
 
     renderer = g_renderer as *GLRenderer
     backend = gl.backend(renderer)
@@ -389,20 +392,55 @@ remove_selected() {
 
 // The outline is one box scaled onto the selection's bounds each frame, so it
 // costs a transform rather than geometry per object.
+// One outline per selected object, from a pool that only ever grows to the
+// largest selection the session has made.
 update_outline() {
-    outline = g_outline as *Model
-    if outline == null { return }
-
-    m = selected_model()
-    if m == null {
-        outline.visible = false
-        return
+    shown = 0
+    count = list.size(g_models)
+    i = 0
+    while i < count {
+        if is_selected(i) {
+            m = model_at(i)
+            if m != null {
+                outline = outline_for(shown)
+                outline.visible = true
+                span = m.bounding_radius * 2.0
+                if span < 0.001 { span = 1.0 }
+                core.model_set_position(outline, m.bounding_center.x,
+                                        m.bounding_center.y, m.bounding_center.z)
+                core.model_set_scale(outline, span, span, span)
+                shown = shown + 1
+            }
+        }
+        i = i + 1
     }
-    outline.visible = true
-    span = m.bounding_radius * 2.0
-    if span < 0.001 { span = 1.0 }
-    core.model_set_position(outline, m.bounding_center.x, m.bounding_center.y, m.bounding_center.z)
-    core.model_set_scale(outline, span, span, span)
+
+    spare = list.size(g_outlines)
+    while shown < spare {
+        stale = list.get_raw(g_outlines, shown) as *Model
+        stale.visible = false
+        shown = shown + 1
+    }
+}
+
+// Selection is one object at a time. listbox_multi toggles rows and offers no
+// way to set or clear a row's state, and on_select reports no modifier, so a
+// plain click cannot replace the selection the way every editor expects
+// (aether-lang-dev/aether-ui#99). The property and outline paths already work
+// over a set, so widening this is a one-line change once that lands.
+is_selected(index: int) -> bool {
+    return index == g_selected
+}
+
+selection_count() -> int {
+    count = list.size(g_models)
+    total = 0
+    i = 0
+    while i < count {
+        if is_selected(i) { total = total + 1 }
+        i = i + 1
+    }
+    return total
 }
 
 // Picking casts the cursor ray at every model's exact triangles, nearest wins.
@@ -420,7 +458,7 @@ pick_at(x: float, y: float) {
     i = 0
     while i < count {
         m = model_at(i)
-        if m != null && m != g_grid as *Model && m != g_outline as *Model {
+        if m != null {
             distance = raycast.model_mesh(cam.position, direction, m)
             if raycast.hit(distance) {
                 if !raycast.hit(nearest) || distance < nearest {
@@ -526,6 +564,10 @@ report_state() {
     lines = string.concat("backend ", g_backend_name)
     lines = string.concat(lines, "\nmodels ")
     lines = string.concat(lines, string.from_int(list.size(g_models)))
+    lines = string.concat(lines, "\nassets ")
+    lines = string.concat(lines, string.from_int(asset_count()))
+    lines = string.concat(lines, "\nselected_count ")
+    lines = string.concat(lines, string.from_int(selection_count()))
     lines = string.concat(lines, "\nselected ")
     lines = string.concat(lines, selected)
     lines = string.concat(lines, "\ncanvas ")
@@ -582,9 +624,16 @@ replay(step: *EditStep, backwards: bool) {
     if step.kind == history.STEP_PROPERTY {
         target = step.after
         if backwards { target = step.before }
-        select_model_pointer(step.subject)
-        apply_property(step.slot, target)
-        show_row(step.slot, target)
+        subject = step.subject as *Model
+        if step.slot >= 9 {
+            apply_property(step.slot, target)
+        } else {
+            select_model_pointer(step.subject)
+            write_property(subject, step.slot, target)
+            show_row(step.slot, target)
+            refresh_swatch()
+            paint_soon()
+        }
     }
     if (step.kind == history.STEP_ADD && backwards) ||
        (step.kind == history.STEP_REMOVE && !backwards) {
@@ -602,7 +651,6 @@ replay(step: *EditStep, backwards: bool) {
 duplicate_selected() {
     m = selected_model()
     if m == null { return }
-    if m == g_grid as *Model || m == g_outline as *Model { return }
 
     copy = core.model_clone(m)
     if copy == null { return }
@@ -652,6 +700,18 @@ select_model_pointer(m: ptr) {
     }
 }
 
+write_property(m: *Model, index: int, value: float) {
+    if index == 0 { core.model_set_position(m, value, m.position.y, m.position.z) }
+    if index == 1 { core.model_set_position(m, m.position.x, value, m.position.z) }
+    if index == 2 { core.model_set_position(m, m.position.x, m.position.y, value) }
+    if index == 3 { core.model_set_scale(m, value, value, value) }
+    if index == 4 { core.model_set_diffuse(m, value, m.material.diffuse.y, m.material.diffuse.z) }
+    if index == 5 { core.model_set_diffuse(m, m.material.diffuse.x, value, m.material.diffuse.z) }
+    if index == 6 { core.model_set_diffuse(m, m.material.diffuse.x, m.material.diffuse.y, value) }
+    if index == 7 { core.model_set_pbr(m, value, m.material.roughness) }
+    if index == 8 { core.model_set_pbr(m, m.material.metallic, value) }
+}
+
 property_value(m: *Model, index: int) -> float {
     if index == 0 { return m.position.x }
     if index == 1 { return m.position.y }
@@ -687,19 +747,22 @@ apply_property(index: int, value: float) {
         return
     }
 
-    m = selected_model()
-    if m == null { return }
-    history.history_record(g_history, history.STEP_PROPERTY, m as ptr, index, property_value(m, index), value)
+    primary = selected_model()
+    if primary == null { return }
 
-    if index == 0 { core.model_set_position(m, value, m.position.y, m.position.z) }
-    if index == 1 { core.model_set_position(m, m.position.x, value, m.position.z) }
-    if index == 2 { core.model_set_position(m, m.position.x, m.position.y, value) }
-    if index == 3 { core.model_set_scale(m, value, value, value) }
-    if index == 4 { core.model_set_diffuse(m, value, m.material.diffuse.y, m.material.diffuse.z) }
-    if index == 5 { core.model_set_diffuse(m, m.material.diffuse.x, value, m.material.diffuse.z) }
-    if index == 6 { core.model_set_diffuse(m, m.material.diffuse.x, m.material.diffuse.y, value) }
-    if index == 7 { core.model_set_pbr(m, value, m.material.roughness) }
-    if index == 8 { core.model_set_pbr(m, m.material.metallic, value) }
+    count = list.size(g_models)
+    i = 0
+    while i < count {
+        if is_selected(i) {
+            target = model_at(i)
+            if target != null {
+                history.history_record(g_history, history.STEP_PROPERTY, target as ptr,
+                                       index, property_value(target, index), value)
+                write_property(target, index, value)
+            }
+        }
+        i = i + 1
+    }
 
     readout = readout_handle(index)
     if readout != 0 { ui.set_text(readout, number(value)) }
@@ -821,15 +884,8 @@ build_scene() {
     grid = loader.grid(600.0, 30.0, 0.7)
     core.model_matte(grid, 0.26, 0.28, 0.32)
     core.model_set_position(grid, 0.0, 0.0 - 0.2, 0.0)
-    add_model(grid, "grid")
+    add_helper(grid)
     g_grid = grid as ptr
-
-    outline = loader.box_outline(0.012)
-    core.model_matte(outline, 1.0, 0.62, 0.16)
-    core.model_set_exposure(outline, 2.0)
-    add_model(outline, "selection")
-    g_outline = outline as ptr
-    outline.visible = false
 
     cube = loader.cube(1.0)
     core.model_set_scale(cube, 40.0, 40.0, 40.0)
@@ -843,7 +899,82 @@ build_scene() {
     core.model_glossy(sphere, 0.24, 0.52, 0.88)
     add_model(sphere, "sphere")
 
-    select_object(3)
+    select_object(1)
+}
+
+// Every mesh the project ships, so a model can be brought into the scene
+// without a file dialog. gopher3D calls this its file explorer.
+scan_assets() {
+    matches, err = fs.glob("resources/obj/*.obj")
+    if err != "" || matches == null {
+        say("no assets under resources/obj")
+        return
+    }
+    g_assets = matches
+
+    if g_asset_rows == null { g_asset_rows = list.new() }
+    count = fs.dir_list_count(g_assets)
+    i = 0
+    while i < count {
+        list.add_raw(g_asset_rows, index_handle(i))
+        i = i + 1
+    }
+    if g_asset_browser != null { ui.listbox_update(g_asset_browser, g_asset_rows) }
+}
+
+asset_count() -> int {
+    if g_assets == null { return 0 }
+    return fs.dir_list_count(g_assets)
+}
+
+asset_label(index: int) -> string {
+    if g_assets == null { return "" }
+    if index < 0 || index >= fs.dir_list_count(g_assets) { return "" }
+    path = core.text(fs.dir_list_get(g_assets, index))
+    cut = 0
+    i = 0
+    while i < string.length(path) {
+        if string.equals(string.substring(path, i, i + 1), "/") == 1 { cut = i + 1 }
+        i = i + 1
+    }
+    return "  ${string.substring(path, cut, string.length(path))}"
+}
+
+load_asset(index: int) {
+    if g_assets == null { return }
+    if index < 0 || index >= fs.dir_list_count(g_assets) { return }
+    path = core.text(fs.dir_list_get(g_assets, index))
+
+    m = loader.load_obj(path, true)
+    if m == null {
+        say("could not load ${asset_label(index)}: ${loader.last_error()}")
+        return
+    }
+    core.model_set_position(m, 0.0, 30.0, 0.0)
+    add_model(m, asset_label(index))
+    focus_selection()
+}
+
+// The grid and the selection outlines belong to the editor, not the scene: the
+// renderer draws them, but they are not listed, picked, saved or undoable.
+add_helper(m: *Model) {
+    if m == null { return }
+    renderer = g_renderer as *GLRenderer
+    backend = gl.backend(renderer)
+    core.backend_add_model(&backend, m)
+    list.add_raw(g_helpers, m)
+}
+
+outline_for(index: int) -> *Model {
+    while list.size(g_outlines) <= index {
+        outline = loader.box_outline(0.012)
+        core.model_matte(outline, 1.0, 0.62, 0.16)
+        core.model_set_exposure(outline, 2.0)
+        outline.visible = false
+        add_helper(outline)
+        list.add_raw(g_outlines, outline)
+    }
+    return list.get_raw(g_outlines, index) as *Model
 }
 
 gizmo_axis_vector(axis: int) -> Vec3 {
@@ -1104,6 +1235,8 @@ main() {
     g_readouts = calloc(ROWS, 4)
     g_console = calloc(CONSOLE_LINES, 4)
     g_history = history.history_new()
+    g_helpers = list.new()
+    g_outlines = list.new()
 
     if string.equals(env("AETHER3D_EDITOR_BACKEND"), "vulkan") == 1 {
         if vk.available() {
@@ -1194,6 +1327,16 @@ main() {
             add_model(m, "plane")
         }
         style_button(plane_btn, "action")
+
+        ui.divider(left)
+        heading(left, "ASSETS")
+        g_asset_browser = ui.listbox(left, 4) callback |item: ptr, index: int, row: int| {
+            entry = ui.text(row, asset_label(index))
+            ui.add_css_class(entry, "value")
+        }
+        ui.on_select(g_asset_browser) callback |index: int| {
+            load_asset(index)
+        }
 
         ui.divider(left)
         heading(left, "EDIT")
@@ -1410,6 +1553,7 @@ main() {
 
         ui.apply_styles(0, sheet)
         build_scene()
+        scan_assets()
         apply_orbit()
 
 
