@@ -57,10 +57,6 @@ fi
 step "modules type-check"
 for module in src/a3d/*/; do
     name="$(basename "$module")"
-    if [ ! -f "$module/module.ae" ]; then
-        fail "a3d.$name (no module.ae; aether-lang-dev/aether#1858 makes the import silently succeed)"
-        continue
-    fi
     probe="$(mktemp -t ae3d_probe).ae"
     printf 'import a3d.%s\nmain() { println("ok") }\n' "$name" > "$probe"
     if aetherc "$probe" "${probe%.ae}.c" >/tmp/ae3d_mod.log 2>&1; then

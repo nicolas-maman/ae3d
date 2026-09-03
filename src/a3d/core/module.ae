@@ -10,10 +10,9 @@
 // instanced, a native instance handle holding the per-instance matrices. Aether
 // drives them through `a3d.mesh`; the GPU reads them without a conversion pass.
 //
-// Math, scene and camera types share one module because a struct field typed by
-// another module's struct is emitted before that struct's definition
-// (aether-lang-dev/aether#1856). Declaration order inside a module is honoured,
-// so the math types are declared first and every by-value field resolves.
+// Math, scene and camera types share one module: they reference each other by
+// value and every backend needs all three, which is the same grouping gopher3D
+// keeps them in.
 
 import std.list
 import std.heap
@@ -38,7 +37,7 @@ exports (
     model_set_specular, model_set_pbr, model_set_exposure, model_set_alpha,
     model_set_texture, model_set_shader, model_set_name, model_set_source_path,
     material_set_texture_path, material_set_name, light_set_name, camera_set_name, text,
-    set_owned, free_owned, model_metallic, model_plastic, model_rough_metal,
+    set_owned, model_metallic, model_plastic, model_rough_metal,
     model_polished_metal, model_matte, model_glossy, model_glass, model_transparent_plastic,
     model_add_group, model_group, model_group_count, model_sort_groups_by_texture,
     model_own_material,
@@ -54,7 +53,7 @@ exports (
     backend_update_viewport, backend_set_post, backend_cleanup, Camera, Plane, Frustum, camera_new,
     camera_free, camera_update_projection, camera_set_fov, camera_set_near, camera_set_far,
     camera_set_aspect, camera_set_position, camera_set_speed, camera_view,
-    camera_projection, camera_view_projection, camera_process_keyboard,
+    camera_projection, camera_view_projection, camera_world_to_screen, camera_process_keyboard,
     camera_process_mouse, camera_look_at, camera_update_vectors, camera_frustum,
     frustum_intersects_sphere, plane_distance, camera_screen_to_world, frustum_dirty,
     mark_frustum_dirty, clear_frustum_dirty
@@ -820,18 +819,12 @@ shader_valid(s: *Shader) -> bool {
 // side, no constructor ever assigns a string directly: every one goes through a
 // setter, so the box never claims ownership and the destructor is always the
 // single release. Assigning in a constructor here means a double free.
-// Every string field is assigned through a setter that takes the struct
-// pointer, never inline where the struct is allocated. heap.free releases a
-// string field only when the assignment is written in the function that frees
-// it, so a field assigned this way is always the destructor's to release and
-// never freed twice. See docs/string_ownership.md.
+// A struct owns its string fields: heap.free releases them, so a destructor
+// only has to free what the struct does not own. Reassignment is the one place
+// a string is released by hand, and that is what this does.
 set_owned(previous: string, value: string) -> string {
     if previous != null { string.free(previous) }
     return string.copy(value)
-}
-
-free_owned(value: string) {
-    if value != null { string.free(value) }
 }
 
 material_new(name: string) -> *Material {
@@ -869,8 +862,6 @@ material_clone(src: *Material) -> *Material {
 
 material_free(m: *Material) {
     if m == null { return }
-    free_owned(m.name)
-    free_owned(m.texture_path)
     heap.free(m)
 }
 
@@ -916,7 +907,6 @@ model_free(m: *Model) {
             uniform = list.get_raw(m.uniforms, i) as *Uniform
             if uniform != null {
                 if uniform.array != null { ae3d_farr_destroy(uniform.array) }
-                free_owned(uniform.name)
                 heap.free(uniform)
             }
             i = i + 1
@@ -924,8 +914,6 @@ model_free(m: *Model) {
         list.free(m.uniforms)
     }
 
-    free_owned(m.name)
-    free_owned(m.source_path)
 
     if m.materials != null {
         count = list.size(m.materials)
@@ -1046,7 +1034,7 @@ model_set_alpha(m: *Model, alpha: float) {
 
 model_set_texture(m: *Model, path: string) {
     model_ensure_material(m)
-    m.material.texture_path = set_owned(m.material.texture_path, path)
+    material_set_texture_path(m.material, path)
 }
 
 model_set_name(m: *Model, name: string) {
@@ -1315,7 +1303,6 @@ light_new() -> *Light {
 
 light_free(l: *Light) {
     if l == null { return }
-    free_owned(l.name)
     heap.free(l)
 }
 
@@ -1393,7 +1380,6 @@ camera_new(width: int, height: int) -> *Camera {
 
 camera_free(c: *Camera) {
     if c == null { return }
-    free_owned(c.name)
     heap.free(c)
 }
 
@@ -1522,6 +1508,20 @@ normalize_plane(p: Plane) -> Plane {
     if length < 0.000000000001 { return p }
     inv = 1.0 / length
     return Plane { normal: v3_mul(p.normal, inv), distance: p.distance * inv }
+}
+
+// Screen position of a world point, in the pixel convention the canvas uses:
+// x right, y down, origin top left. The w component carries the clip-space w so
+// a caller can reject points behind the camera, where the projection divide
+// flips the result into the visible area.
+camera_world_to_screen(c: *Camera, p: Vec3, width: int, height: int) -> Vec4 {
+    vp = camera_view_projection(c)
+    clip = mat4_mul_v4(vp, vec4(p.x, p.y, p.z, 1.0))
+    if clip.w < 0.0001 { return vec4(0.0, 0.0, 0.0, clip.w) }
+    inv = 1.0 / clip.w
+    return vec4(((clip.x * inv) * 0.5 + 0.5) * (width * 1.0),
+                (1.0 - ((clip.y * inv) * 0.5 + 0.5)) * (height * 1.0),
+                clip.z * inv, clip.w)
 }
 
 camera_frustum(c: *Camera) -> Frustum {

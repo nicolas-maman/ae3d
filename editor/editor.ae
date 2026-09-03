@@ -31,6 +31,25 @@ const WINDOW_H = 860
 const ORBIT_SPEED = 0.35
 const ZOOM_STEP = 1.12
 const DRAG_SLOP = 3.0
+const VALUE_COLUMN = 54
+const BUTTON_H = 28
+const CONSOLE_LINES = 7
+
+const GIZMO_TRANSLATE = 0
+const GIZMO_ROTATE = 1
+const GIZMO_SCALE = 2
+const GIZMO_GRAB = 9.0
+const GIZMO_REACH = 0.20
+const RING_SEGMENTS = 48
+
+var g_gizmo_mode = GIZMO_TRANSLATE
+var g_gizmo_axis = 0 - 1
+var g_gizmo_hover = 0 - 1
+var g_gizmo_dragging = false
+var g_gizmo_step = 0.0
+var g_gizmo_dir_x = 0.0
+var g_gizmo_dir_y = 0.0
+var g_gizmo_angle = 0.0
 
 var g_canvas = 0
 var g_view_w = 900
@@ -51,6 +70,11 @@ var g_grid: ptr = null
 var g_outline: ptr = null
 
 var g_status = 0
+var g_console: ptr = null
+var g_console_text = ""
+var g_swatch = 0
+var g_fxaa = true
+var g_bloom = false
 var g_stats = 0
 var g_title = 0
 var g_sliders: ptr = null
@@ -92,8 +116,84 @@ selected_model() -> *Model {
     return model_at(g_selected)
 }
 
+// The status line carries the newest message and the console keeps the history,
+// which is the split gopher3D's editor uses between its status bar and console.
 say(text: string) {
     if g_status != 0 { ui.set_text(g_status, text) }
+    log_line(text)
+}
+
+// The history is one newline-joined string rather than a list of strings, so
+// there is a single owner to free and the trim is a substring.
+log_line(text: string) {
+    if g_console == null { return }
+    joined = string.concat(g_console_text, text)
+    appended = string.concat(joined, "\n")
+    string.free(joined)
+    g_console_text = core.set_owned(g_console_text, appended)
+    string.free(appended)
+    render_console()
+}
+
+render_console() {
+    if g_console == null { return }
+    handles = g_console as int[]
+    lines = string.split(g_console_text, "\n")
+    count = string.array_size(lines)
+    // The trailing newline leaves an empty final field, which is not a line.
+    if count > 0 { count = count - 1 }
+    first = 0
+    if count > CONSOLE_LINES { first = count - CONSOLE_LINES }
+
+    i = 0
+    while i < CONSOLE_LINES {
+        handle = handles[i]
+        if handle != 0 {
+            source = first + i
+            if source < count {
+                ui.set_text(handle, string.array_get(lines, source))
+            } else {
+                ui.set_text(handle, "")
+            }
+        }
+        i = i + 1
+    }
+    string.array_free(lines)
+}
+
+clear_console() {
+    g_console_text = core.set_owned(g_console_text, "")
+    render_console()
+}
+
+apply_post() {
+    renderer = g_renderer as *GLRenderer
+    if renderer == null { return }
+    gl.renderer_set_fxaa(renderer, g_fxaa)
+    gl.renderer_set_bloom(renderer, g_bloom)
+    draw_frame()
+}
+
+// The three channel sliders never show the colour they add up to, so the hex is
+// spelled out. A colour chip would be a canvas, and a second canvas in a panel
+// collapses it (aether-lang-dev/aether-ui#98).
+refresh_swatch() {
+    if g_swatch == 0 { return }
+    m = selected_model()
+    if m == null || m.material == null {
+        ui.set_text(g_swatch, "")
+        return
+    }
+    ui.set_text(g_swatch, "#${hex_byte(m.material.diffuse.x)}${hex_byte(m.material.diffuse.y)}${hex_byte(m.material.diffuse.z)}")
+}
+
+hex_byte(value: float) -> string {
+    digits = "0123456789ABCDEF"
+    scaled = (core.clampf(value, 0.0, 1.0) * 255.0 + 0.5) as int
+    high = scaled / 16
+    low = scaled - high * 16
+    return string.concat(string.substring(digits, high, high + 1),
+                         string.substring(digits, low, low + 1))
 }
 
 number(value: float) -> string {
@@ -153,7 +253,7 @@ extern malloc(size: int) -> ptr
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 
-const ROWS = 9
+const ROWS = 11
 
 // Widget handles are not contiguous: a row creates a stack, two labels and a
 // slider, so the next row's slider is not this one's handle plus one. They are
@@ -308,7 +408,7 @@ pick_at(x: float, y: float) {
     if cam == null || g_models == null { return }
 
     direction = raycast.screen_direction(cam, x, y, g_view_w, g_view_h)
-    nearest = raycast.MISS
+    nearest = raycast.miss()
     chosen = 0 - 1
 
     count = list.size(g_models)
@@ -384,6 +484,7 @@ draw_frame() {
     ui.canvas_clear(g_canvas)
     ui.canvas_draw_image_ptr(g_canvas, 0.0, 0.0, g_view_w, g_view_h,
                              pixels, g_view_w * g_view_h * 4)
+    draw_gizmo()
     ui.canvas_redraw(g_canvas)
     g_frames = g_frames + 1
 
@@ -445,6 +546,18 @@ limit_from_env() -> int {
 // writes straight through to the selected model, so what is on screen and what
 // the renderer draws are never two copies of the same number.
 apply_property(index: int, value: float) {
+    if index >= 9 {
+        light = g_light as *Light
+        if light != null {
+            if index == 9 { light.intensity = value }
+            if index == 10 { light.ambient_strength = value }
+        }
+        readout = readout_handle(index)
+        if readout != 0 { ui.set_text(readout, number(value)) }
+        draw_frame()
+        return
+    }
+
     m = selected_model()
     if m == null { return }
 
@@ -460,20 +573,30 @@ apply_property(index: int, value: float) {
 
     readout = readout_handle(index)
     if readout != 0 { ui.set_text(readout, number(value)) }
+    refresh_swatch()
+
+    // AppKit runs a slider drag in its own tracking mode, where a timer
+    // scheduled in the default mode does not fire (aether-lang-dev/aether-ui#97),
+    // so the viewport is repainted from the change itself rather than waiting
+    // for the next tick.
+    draw_frame()
 }
 
 inspector_row(parent: int, name: string, low: float, high: float,
               initial: float, index: int) {
     row = ui.hstack(parent, 8)
+    ui.add_css_class(row, "row")
     caption = ui.text(row, name)
     ui.add_css_class(caption, "label")
     ui.spacer(row)
     readout = ui.text(row, number(initial))
     ui.add_css_class(readout, "value")
+    ui.width(readout, VALUE_COLUMN)
 
     slider = ui.slider(parent, low, high, initial) callback |value: float| {
         apply_property(index, value)
     }
+    ui.height(slider, 18)
 
     sliders = g_sliders as int[]
     readouts = g_readouts as int[]
@@ -486,11 +609,25 @@ theme() -> ptr {
     sheet = ui.create_styles()
 
     ui.st_bg(sheet, "panel", 0x21252B)
-    ui.st_insets(sheet, "panel", 10.0, 12.0, 10.0, 12.0)
+    ui.st_insets(sheet, "panel", 12.0, 14.0, 12.0, 14.0)
 
-    ui.st_color(sheet, "heading", 0xE6E9EF)
+    // A container's own frame ignores st_insets while its children honour them
+    // (aether-lang-dev/aether-ui#96), so a row carries the panel's horizontal
+    // inset itself and its children line up with the headings above them.
+    ui.st_insets(sheet, "row", 0.0, 14.0, 0.0, 14.0)
+
+    ui.st_color(sheet, "heading", 0x9AA4B2)
     ui.st_bold(sheet, "heading")
-    ui.st_font_size(sheet, "heading", 12.0)
+    ui.st_font_size(sheet, "heading", 10.0)
+
+    ui.st_color(sheet, "title", 0xE6E9EF)
+    ui.st_bold(sheet, "title")
+    ui.st_font_size(sheet, "title", 13.0)
+
+    ui.st_color(sheet, "console", 0x9FB3C8)
+    ui.st_font_family(sheet, "console", "Menlo")
+    ui.st_font_size(sheet, "console", 11.0)
+
 
     ui.st_color(sheet, "label", 0x8A919E)
     ui.st_font_size(sheet, "label", 11.0)
@@ -527,6 +664,7 @@ heading(parent: int, caption: string) -> int {
 }
 
 style_button(handle: int, style: string) {
+    ui.height(handle, BUTTON_H)
     ui.add_css_class(handle, style)
     ui.fill_width(handle)
 }
@@ -560,6 +698,254 @@ build_scene() {
     select_object(3)
 }
 
+gizmo_axis_vector(axis: int) -> Vec3 {
+    if axis == 0 { return core.vec3(1.0, 0.0, 0.0) }
+    if axis == 1 { return core.vec3(0.0, 1.0, 0.0) }
+    return core.vec3(0.0, 0.0, 1.0)
+}
+
+// The gizmo keeps the same size on screen however far the camera is, so the
+// world length of an axis is a fraction of the distance to the camera.
+gizmo_reach() -> float {
+    cam = g_camera as *Camera
+    m = selected_model()
+    if cam == null || m == null { return 0.0 }
+    return core.v3_len(core.v3_sub(cam.position, m.position)) * GIZMO_REACH
+}
+
+gizmo_project(p: Vec3) -> Vec4 {
+    return core.camera_world_to_screen(g_camera as *Camera, p, g_view_w, g_view_h)
+}
+
+// Distance from a point to a segment, the same test for hovering an axis and
+// for hovering one span of a rotation ring.
+point_to_segment(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float {
+    dx = bx - ax
+    dy = by - ay
+    length = dx * dx + dy * dy
+    if length < 0.000001 { return core.sqrt_of((px - ax) * (px - ax) + (py - ay) * (py - ay)) }
+    t = ((px - ax) * dx + (py - ay) * dy) / length
+    if t < 0.0 { t = 0.0 }
+    if t > 1.0 { t = 1.0 }
+    cx = ax + t * dx
+    cy = ay + t * dy
+    return core.sqrt_of((px - cx) * (px - cx) + (py - cy) * (py - cy))
+}
+
+axis_color(axis: int, index: int) -> float {
+    lit = g_gizmo_axis == axis || (g_gizmo_axis < 0 && g_gizmo_hover == axis)
+    dim = 0.16
+    if lit { dim = 0.62 }
+    if axis == index { return 1.0 }
+    return dim
+}
+
+// A point on the ring around `axis`, in the plane the axis is normal to.
+ring_point(centre: Vec3, axis: int, radius: float, turn: float) -> Vec3 {
+    c = core.cos_of(turn) * radius
+    s = core.sin_of(turn) * radius
+    if axis == 0 { return core.vec3(centre.x, centre.y + c, centre.z + s) }
+    if axis == 1 { return core.vec3(centre.x + c, centre.y, centre.z + s) }
+    return core.vec3(centre.x + c, centre.y + s, centre.z)
+}
+
+draw_ring(centre: Vec3, axis: int, radius: float) {
+    ui.canvas_begin_path(g_canvas)
+    started = false
+    i = 0
+    while i <= RING_SEGMENTS {
+        turn = (i * 1.0) * core.TWO_PI / (RING_SEGMENTS * 1.0)
+        screen = gizmo_project(ring_point(centre, axis, radius, turn))
+        if screen.w < 0.0001 {
+            started = false
+        } else {
+            if started {
+                ui.canvas_line_to(g_canvas, screen.x, screen.y)
+            } else {
+                ui.canvas_move_to(g_canvas, screen.x, screen.y)
+                started = true
+            }
+        }
+        i = i + 1
+    }
+    ui.canvas_stroke(g_canvas, axis_color(axis, 0), axis_color(axis, 1), axis_color(axis, 2), 1.0, 2.0)
+}
+
+draw_axis(origin: Vec4, centre: Vec3, axis: int, reach: float) {
+    tip = gizmo_project(core.v3_add(centre, core.v3_mul(gizmo_axis_vector(axis), reach)))
+    if tip.w < 0.0001 { return }
+
+    red = axis_color(axis, 0)
+    green = axis_color(axis, 1)
+    blue = axis_color(axis, 2)
+
+    ui.canvas_begin_path(g_canvas)
+    ui.canvas_move_to(g_canvas, origin.x, origin.y)
+    ui.canvas_line_to(g_canvas, tip.x, tip.y)
+    ui.canvas_stroke(g_canvas, red, green, blue, 1.0, 2.5)
+
+    dx = tip.x - origin.x
+    dy = tip.y - origin.y
+    length = core.sqrt_of(dx * dx + dy * dy)
+    if length < 0.001 { return }
+    ux = dx / length
+    uy = dy / length
+
+    if g_gizmo_mode == GIZMO_SCALE {
+        half = 5.0
+        ui.canvas_fill_rect(g_canvas, tip.x - half, tip.y - half, half * 2.0, half * 2.0,
+                            red, green, blue, 1.0)
+        return
+    }
+
+    // An arrowhead as a filled triangle: the tip, and two points stepped back
+    // along the axis and out to either side of it.
+    back = 13.0
+    wide = 5.0
+    ui.canvas_begin_path(g_canvas)
+    ui.canvas_move_to(g_canvas, tip.x, tip.y)
+    ui.canvas_line_to(g_canvas, tip.x - ux * back - uy * wide, tip.y - uy * back + ux * wide)
+    ui.canvas_line_to(g_canvas, tip.x - ux * back + uy * wide, tip.y - uy * back - ux * wide)
+    ui.canvas_close_path(g_canvas)
+    ui.canvas_fill(g_canvas, red, green, blue, 1.0, 0)
+}
+
+draw_gizmo() {
+    m = selected_model()
+    if m == null { return }
+    reach = gizmo_reach()
+    if reach <= 0.0 { return }
+
+    origin = gizmo_project(m.position)
+    if origin.w < 0.0001 { return }
+
+    if g_gizmo_mode == GIZMO_ROTATE {
+        axis = 0
+        while axis < 3 {
+            draw_ring(m.position, axis, reach)
+            axis = axis + 1
+        }
+    } else {
+        axis = 0
+        while axis < 3 {
+            draw_axis(origin, m.position, axis, reach)
+            axis = axis + 1
+        }
+    }
+
+    ui.canvas_begin_path(g_canvas)
+    ui.canvas_arc(g_canvas, origin.x, origin.y, 4.0, 0.0, core.TWO_PI)
+    ui.canvas_fill(g_canvas, 0.94, 0.94, 0.96, 1.0, 0)
+}
+
+// Which handle is under the pointer, or -1. Rotation rings are tested span by
+// span against the same projected points they are drawn from, so the test and
+// the picture cannot disagree.
+gizmo_pick(x: float, y: float) -> int {
+    m = selected_model()
+    if m == null { return 0 - 1 }
+    reach = gizmo_reach()
+    if reach <= 0.0 { return 0 - 1 }
+
+    origin = gizmo_project(m.position)
+    if origin.w < 0.0001 { return 0 - 1 }
+
+    best = 0 - 1
+    closest = GIZMO_GRAB
+
+    axis = 0
+    while axis < 3 {
+        if g_gizmo_mode == GIZMO_ROTATE {
+            i = 0
+            while i < RING_SEGMENTS {
+                a = gizmo_project(ring_point(m.position, axis, reach,
+                                             (i * 1.0) * core.TWO_PI / (RING_SEGMENTS * 1.0)))
+                b = gizmo_project(ring_point(m.position, axis, reach,
+                                             ((i + 1) * 1.0) * core.TWO_PI / (RING_SEGMENTS * 1.0)))
+                if a.w > 0.0001 && b.w > 0.0001 {
+                    away = point_to_segment(x, y, a.x, a.y, b.x, b.y)
+                    if away < closest { closest = away ; best = axis }
+                }
+                i = i + 1
+            }
+        } else {
+            tip = gizmo_project(core.v3_add(m.position, core.v3_mul(gizmo_axis_vector(axis), reach)))
+            if tip.w > 0.0001 {
+                away = point_to_segment(x, y, origin.x, origin.y, tip.x, tip.y)
+                if away < closest { closest = away ; best = axis }
+            }
+        }
+        axis = axis + 1
+    }
+    return best
+}
+
+// Dragging follows the axis as it appears on screen rather than a fixed screen
+// direction per axis, so a handle keeps moving the way it points however the
+// camera is orbited.
+gizmo_begin_drag(axis: int, x: float, y: float) {
+    m = selected_model()
+    if m == null { return }
+    reach = gizmo_reach()
+    origin = gizmo_project(m.position)
+    tip = gizmo_project(core.v3_add(m.position, core.v3_mul(gizmo_axis_vector(axis), reach)))
+
+    g_gizmo_axis = axis
+    g_gizmo_dragging = true
+    g_gizmo_angle = core.atan2_of(y - origin.y, x - origin.x)
+
+    dx = tip.x - origin.x
+    dy = tip.y - origin.y
+    length = core.sqrt_of(dx * dx + dy * dy)
+    if length < 1.0 || tip.w < 0.0001 {
+        g_gizmo_dir_x = 0.0
+        g_gizmo_dir_y = 0.0
+        g_gizmo_step = 0.0
+        return
+    }
+    g_gizmo_dir_x = dx / length
+    g_gizmo_dir_y = dy / length
+    g_gizmo_step = reach / length
+}
+
+gizmo_drag(x: float, y: float, dx: float, dy: float) {
+    m = selected_model()
+    if m == null || g_gizmo_axis < 0 { return }
+
+    if g_gizmo_mode == GIZMO_ROTATE {
+        origin = gizmo_project(m.position)
+        if origin.w < 0.0001 { return }
+        turn = core.atan2_of(y - origin.y, x - origin.x)
+        step = core.rad_to_deg(turn - g_gizmo_angle)
+        if step > 180.0 { step = step - 360.0 }
+        if step < 0.0 - 180.0 { step = step + 360.0 }
+        g_gizmo_angle = turn
+        if g_gizmo_axis == 0 { core.model_rotate(m, step, 0.0, 0.0) }
+        if g_gizmo_axis == 1 { core.model_rotate(m, 0.0, step, 0.0) }
+        if g_gizmo_axis == 2 { core.model_rotate(m, 0.0, 0.0, step) }
+        sync_inspector()
+        return
+    }
+
+    along = (dx * g_gizmo_dir_x + dy * g_gizmo_dir_y) * g_gizmo_step
+    if g_gizmo_mode == GIZMO_SCALE {
+        factor = 1.0 + along / core.abs_of(gizmo_reach() + 0.0001)
+        if factor < 0.02 { factor = 0.02 }
+        core.model_set_scale(m, m.scale.x * factor, m.scale.y * factor, m.scale.z * factor)
+    } else {
+        moved = core.v3_add(m.position, core.v3_mul(gizmo_axis_vector(g_gizmo_axis), along))
+        core.model_set_position(m, moved.x, moved.y, moved.z)
+    }
+    sync_inspector()
+}
+
+set_gizmo_mode(mode: int) {
+    g_gizmo_mode = mode
+    if mode == GIZMO_TRANSLATE { say("move: drag an axis") }
+    if mode == GIZMO_ROTATE { say("rotate: drag a ring") }
+    if mode == GIZMO_SCALE { say("scale: drag a handle") }
+}
+
 main() {
     g_frame_limit = limit_from_env()
     g_snapshot = os.getenv("AETHER3D_EDITOR_SNAPSHOT")
@@ -568,6 +954,7 @@ main() {
     g_rows = list.new()
     g_sliders = calloc(ROWS, 4)
     g_readouts = calloc(ROWS, 4)
+    g_console = calloc(CONSOLE_LINES, 4)
 
     if string.equals(os.getenv("AETHER3D_EDITOR_BACKEND"), "vulkan") == 1 {
         if vk.available() {
@@ -694,6 +1081,13 @@ main() {
         // A press that never moves is a selection; a press that moves is an
         // orbit. Doing both makes the view lurch every time something is picked.
         ui.canvas_on_click(g_canvas) callback |x: float, y: float| {
+            handle = gizmo_pick(x, y)
+            if handle >= 0 {
+                gizmo_begin_drag(handle, x, y)
+                g_last_x = x
+                g_last_y = y
+                return
+            }
             g_pressed = true
             g_moved = false
             g_press_x = x
@@ -702,6 +1096,13 @@ main() {
             g_last_y = y
         }
         ui.canvas_on_move(g_canvas) callback |x: float, y: float| {
+            if g_gizmo_dragging {
+                gizmo_drag(x, y, x - g_last_x, y - g_last_y)
+                g_last_x = x
+                g_last_y = y
+                return
+            }
+            g_gizmo_hover = gizmo_pick(x, y)
             if g_pressed {
                 if core.abs_of(x - g_press_x) > DRAG_SLOP ||
                    core.abs_of(y - g_press_y) > DRAG_SLOP {
@@ -717,9 +1118,23 @@ main() {
             }
         }
         ui.canvas_on_release(g_canvas) callback |x: float, y: float| {
+            if g_gizmo_dragging {
+                g_gizmo_dragging = false
+                g_gizmo_axis = 0 - 1
+                return
+            }
             if g_pressed && !g_moved { pick_at(x, y) }
             g_pressed = false
             g_moved = false
+        }
+        // W, E and R are what every engine editor binds these to.
+        ui.canvas_on_key(g_canvas) callback |key: string| {
+            if string.equals(key, "w") == 1 { set_gizmo_mode(GIZMO_TRANSLATE) }
+            if string.equals(key, "e") == 1 { set_gizmo_mode(GIZMO_ROTATE) }
+            if string.equals(key, "r") == 1 { set_gizmo_mode(GIZMO_SCALE) }
+            if string.equals(key, "f") == 1 { focus_selection() }
+            if string.equals(key, "Delete") == 1 { remove_selected() }
+            if string.equals(key, "BackSpace") == 1 { remove_selected() }
         }
         ui.canvas_on_scroll(g_canvas) callback |dx: float, dy: float| {
             if dy > 0.0 {
@@ -728,6 +1143,28 @@ main() {
                 g_orbit_distance = g_orbit_distance * ZOOM_STEP
             }
             apply_orbit()
+        }
+
+        console_panel = ui.vstack(stage, 2)
+        ui.add_css_class(console_panel, "panel")
+        ui.fill_width(console_panel)
+
+        console_bar = ui.hstack(console_panel, 8)
+        ui.add_css_class(console_bar, "row")
+        console_heading = ui.text(console_bar, "CONSOLE")
+        ui.add_css_class(console_heading, "heading")
+        ui.spacer(console_bar)
+        clear_btn = ui.btn(console_bar, "Clear") callback { clear_console() }
+        style_button(clear_btn, "action")
+        ui.width(clear_btn, 64)
+
+        handles = g_console as int[]
+        line = 0
+        while line < CONSOLE_LINES {
+            entry = ui.text(console_panel, "")
+            ui.add_css_class(entry, "console")
+            handles[line] = entry
+            line = line + 1
         }
 
         footer = ui.hstack(stage, 8)
@@ -752,11 +1189,51 @@ main() {
 
         ui.divider(right)
         heading(right, "MATERIAL")
+
+        swatch_row = ui.hstack(right, 8)
+        ui.add_css_class(swatch_row, "row")
+        swatch_caption = ui.text(swatch_row, "colour")
+        ui.add_css_class(swatch_caption, "label")
+        ui.spacer(swatch_row)
+        g_swatch = ui.text(swatch_row, "")
+        ui.add_css_class(g_swatch, "value")
+        ui.width(g_swatch, VALUE_COLUMN)
+
         inspector_row(right, "red", 0.0, 1.0, 0.8, 4)
         inspector_row(right, "green", 0.0, 1.0, 0.5, 5)
         inspector_row(right, "blue", 0.0, 1.0, 0.3, 6)
         inspector_row(right, "metallic", 0.0, 1.0, 0.0, 7)
         inspector_row(right, "roughness", 0.0, 1.0, 0.5, 8)
+
+        ui.divider(right)
+        heading(right, "LIGHT")
+        inspector_row(right, "intensity", 0.0, 4.0, 1.0, 9)
+        inspector_row(right, "ambient", 0.0, 1.0, 0.2, 10)
+
+        ui.divider(right)
+        heading(right, "RENDERING")
+        fxaa_row = ui.hstack(right, 8)
+        ui.add_css_class(fxaa_row, "row")
+        fxaa_caption = ui.text(fxaa_row, "FXAA")
+        ui.add_css_class(fxaa_caption, "label")
+        ui.spacer(fxaa_row)
+        fxaa_toggle = ui.toggle(fxaa_row, "") callback |on: bool| {
+            g_fxaa = on
+            apply_post()
+            say("fxaa ${on}")
+        }
+        ui.set_toggle(fxaa_toggle, 1)
+
+        bloom_row = ui.hstack(right, 8)
+        ui.add_css_class(bloom_row, "row")
+        bloom_caption = ui.text(bloom_row, "Bloom")
+        ui.add_css_class(bloom_caption, "label")
+        ui.spacer(bloom_row)
+        ui.toggle(bloom_row, "") callback |on: bool| {
+            g_bloom = on
+            apply_post()
+            say("bloom ${on}")
+        }
         ui.spacer(right)
 
         g_stage = stage

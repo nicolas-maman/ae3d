@@ -1,42 +1,37 @@
 # String fields and who frees them
 
-Aether frees a struct's `string` fields inside `heap.free`, but only for
-assignments it saw written against a *local* struct pointer. An assignment made
-through a pointer *parameter*, which is what a setter function does, is not
-tracked, and that field is not freed.
-
-The two halves of that rule pull in opposite directions:
-
-```aether
-make(v: string) -> *Entry {
-    e = heap.new(Entry)
-    e.path = string.copy(v)   // tracked: heap.free(e) releases path
-    return e
-}
-```
+A struct owns its `string` fields. `heap.free` releases them, whether the
+assignment was written against a local struct pointer or made through a setter
+that takes the pointer as a parameter.
 
 ```aether
 set_path(e: *Entry, v: string) {
-    e.path = string.copy(v)   // not tracked: heap.free(e) leaks path
+    e.path = core.set_owned(e.path, v)
 }
+
+make(v: string) -> *Entry {
+    e = heap.new(Entry)
+    set_path(e, v)
+    return e
+}
+
+heap.free(e)
 ```
 
-Freeing the field by hand in the first case aborts with a double free. Not
-freeing it in the second case leaks. Neither pattern is safe for both, so a
-codebase that mixes them cannot write a correct destructor. Filed upstream as
-aether-lang-dev/aether#1866.
+That releases `e.path`. Nothing else has to.
 
 ## The rule here
 
-**Every `string` field is assigned through a setter that takes the struct
-pointer, and every destructor releases it with `core.free_owned`.**
+**A destructor frees what the struct does not own, and nothing else.** Never
+release a `string` field by hand before `heap.free`; that is a double free.
+`core.set_owned` is the one place a string is released by hand, because
+reassignment has to drop the previous value before taking the new one.
 
-That puts every field on the untracked side of the compiler's rule, so
-ownership is uniform: the destructor frees, `heap.free` does not, and nothing is
-freed twice. `core.set_owned` releases the previous value on reassignment.
+## History
 
-Assigning a string field inline where the struct is allocated is the one thing
-that breaks it, because that assignment *is* tracked and the destructor's
-`free_owned` then becomes a double free. `renderer_load_texture` in both
-backends did exactly that, which aborted the moment a test first freed a
-renderer that still held textures.
+Until aether 0.627.0 the compiler tracked ownership only for assignments written
+against a local struct pointer, so a field assigned through a setter leaked while
+a field assigned inline double-freed. Neither pattern was safe for both, and this
+codebase carried a `free_owned` helper and hand-written destructor releases to
+work around it. That is fixed (aether-lang-dev/aether#1866) and the workaround is
+gone.
