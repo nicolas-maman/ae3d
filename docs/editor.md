@@ -3,7 +3,7 @@
 ```bash
 git clone https://github.com/aether-lang-dev/aether-ui.git ../aether-ui
 ./editor/build_editor.sh
-./build/aether3d_editor
+./build/ae3d_editor
 ```
 
 ## Controls
@@ -57,7 +57,7 @@ records a single step spanning the whole move, so undo steps back the adjustment
 rather than a pixel of it. Adding and deleting are undoable too, which means a
 deleted object stays alive as long as the step that removed it.
 
-The history is `src/a3d/history`, a module rather than editor code, so it is
+The history is `src/ae3d/history`, a module rather than editor code, so it is
 tested without a window: `tests/test_history.ae`.
 
 ## Behaviours
@@ -76,12 +76,12 @@ The editor takes a few environment variables, which is how CI drives it:
 
 | | |
 |---|---|
-| `AETHER3D_EDITOR_FRAMES=n` | stop after `n` frames and exit |
-| `AETHER3D_EDITOR_SNAPSHOT=path` | write the viewport to a PNG on the last frame |
-| `AETHER3D_EDITOR_REPORT=path` | write what the editor built to a text file |
-| `AETHER3D_EDITOR_SCENE=components` | start with water, voxels, a light and a behaviour |
-| `AETHER3D_EDITOR_DRIVER=1` | serve the widget tree on `127.0.0.1:9222` |
-| `AETHER3D_EDITOR_BACKEND=vulkan` | use the Vulkan renderer if a driver exists |
+| `AE3D_EDITOR_FRAMES=n` | stop after `n` frames and exit |
+| `AE3D_EDITOR_SNAPSHOT=path` | write the viewport to a PNG on the last frame |
+| `AE3D_EDITOR_REPORT=path` | write what the editor built to a text file |
+| `AE3D_EDITOR_SCENE=components` | start with water, voxels, a light and a behaviour |
+| `AE3D_EDITOR_DRIVER=1` | serve the widget tree on `127.0.0.1:9222` |
+| `AE3D_EDITOR_BACKEND=vulkan` | use the Vulkan renderer if a driver exists |
 
 The driver is how the layout is checked without being able to see it. aether-ui
 cannot rasterize widgets to pixels, so `GET /widgets` and its geometry is the

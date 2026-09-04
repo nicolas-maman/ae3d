@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Build the aether3d editor: aether-ui for the chrome, aether3d for the viewport.
+# Build the ae3d editor: aether-ui for the chrome, ae3d for the viewport.
 #
 # aether-ui lives in its own repository. Point AETHER_UI_ROOT at a checkout, or
 # leave it and a sibling ../aether-ui is used.
 #
 #   ./editor/build_editor.sh
-#   ./build/aether3d_editor
+#   ./build/ae3d_editor
 
 set -euo pipefail
 
@@ -14,14 +14,14 @@ cd "$ROOT"
 
 UI_ROOT="${AETHER_UI_ROOT:-$ROOT/../aether-ui}"
 SOURCE="${1:-editor/editor.ae}"
-NAME="$(basename "${2:-aether3d_editor}")"
+NAME="$(basename "${2:-ae3d_editor}")"
 OUT="build/$NAME"
 GEN="build/$NAME.c"
 OBJ_DIR="build/obj"
 
 if [ ! -f "$UI_ROOT/ui/module.ae" ]; then
     cat >&2 <<MSG
-aether3d: aether-ui not found at $UI_ROOT
+ae3d: aether-ui not found at $UI_ROOT
 
 The editor's chrome is built with aether-ui, which lives in its own repository:
 
@@ -41,7 +41,7 @@ WARN="-Wall -Wextra"
 AETHER_CFLAGS="$(ae cflags 2>/dev/null || true)"
 AETHER_LIBS="$(ae cflags --libs 2>/dev/null || true)"
 if [ -z "$AETHER_CFLAGS" ]; then
-    echo "aether3d: 'ae cflags' produced nothing; is the toolchain on PATH?" >&2
+    echo "ae3d: 'ae cflags' produced nothing; is the toolchain on PATH?" >&2
     exit 1
 fi
 AETHER_INCLUDES="$(printf '%s\n' $AETHER_CFLAGS | grep -E '^-I' | tr '\n' ' ')"
@@ -71,7 +71,7 @@ case "$OS" in
         ;;
     Linux|FreeBSD)
         if ! pkg-config --exists gtk4 2>/dev/null; then
-            echo "aether3d: GTK4 development libraries not found; aether-ui needs them on $OS" >&2
+            echo "ae3d: GTK4 development libraries not found; aether-ui needs them on $OS" >&2
             exit 1
         fi
         UI_SOURCES="$UI_ROOT/backend/aether_ui_gtk4.c $UI_ROOT/backend/aether_ui_sni.c $UI_ROOT/backend/aether_ui_test_server.c $UI_ROOT/backend/aether_ui_system_extras.c"
@@ -80,7 +80,7 @@ case "$OS" in
         NATIVE_EXTRA=""
         ;;
     *)
-        echo "aether3d: the editor has no build recipe for $OS yet" >&2
+        echo "ae3d: the editor has no build recipe for $OS yet" >&2
         exit 1
         ;;
 esac
@@ -98,7 +98,7 @@ for src in $NATIVE_SOURCES; do
     fi
 done
 
-# Both module trees on the search path: a3d.* out of src/, ui and vg.* out of
+# Both module trees on the search path: ae3d.* out of src/, ui and vg.* out of
 # the aether-ui checkout.
 export AETHER_LIB_DIR="$ROOT/src:$UI_ROOT"
 aetherc "$SOURCE" "$GEN"

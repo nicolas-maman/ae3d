@@ -62,7 +62,7 @@ First working engine.
 ### Engine
 
 - Window, input and timing over GLFW.
-- Main loop with a fixed-step accumulator, frame pacing and `AETHER3D_FRAMES`,
+- Main loop with a fixed-step accumulator, frame pacing and `AE3D_FRAMES`,
   which caps any program at a frame count so every example is also a smoke test.
 
 ### Editor
@@ -72,7 +72,7 @@ First working engine.
   selected. See [docs/editor.md](docs/editor.md).
 - A transform gizmo that moves, rotates and scales the selection along an axis,
   dragging along the projected axis so it stays correct at any camera angle.
-- Undo and redo in `a3d.history`, a module rather than editor code, so it is
+- Undo and redo in `ae3d.history`, a module rather than editor code, so it is
   tested without a window. An adjustment is one step rather than one per event.
 - Objects can be meshes, water, voxel worlds or lights, each carrying a
   component that says what it is; the inspector shows the section that belongs

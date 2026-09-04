@@ -464,9 +464,9 @@ static int ae3d_vk_create_instance(void) {
 
     memset(&app, 0, sizeof(app));
     app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    app.pApplicationName = "aether3d";
+    app.pApplicationName = "ae3d";
     app.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
-    app.pEngineName = "aether3d";
+    app.pEngineName = "ae3d";
     app.engineVersion = VK_MAKE_VERSION(1, 0, 0);
     app.apiVersion = VK_API_VERSION_1_1;
 

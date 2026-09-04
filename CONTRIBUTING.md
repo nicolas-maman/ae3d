@@ -28,7 +28,7 @@ warnings.
   zero. A string field on a heap struct is owned by exactly one place: the setter
   that assigns it and the destructor that frees it. Never assign a string in a
   constructor directly, and never store a borrowed literal in one; see the note
-  in `a3d.core` for why.
+  in `ae3d.core` for why.
 
 ## Where things go
 
@@ -39,8 +39,8 @@ here only in a way that is defensible on its own merits.
 
 ## Adding a module
 
-A module is `src/a3d/<name>/module.ae` with an `exports (...)` list. Note that a
+A module is `src/ae3d/<name>/module.ae` with an `exports (...)` list. Note that a
 struct field typed by another module's struct is emitted before that struct's
 definition (aether-lang-dev/aether#1856), which is why the math and scene types
 share one module. Keep new modules to primitives, pointers and their own structs,
-or add the type to `a3d.core`.
+or add the type to `ae3d.core`.

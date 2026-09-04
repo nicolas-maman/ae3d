@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the Vulkan shaders and their uniform block from the OpenGL sources.
 
-The OpenGL GLSL in src/a3d/shaders/module.ae is the single source of truth. The
+The OpenGL GLSL in src/ae3d/shaders/module.ae is the single source of truth. The
 Vulkan variants differ only in how uniforms are declared, so they are derived
 rather than written twice: a second copy of a seven-hundred-line lighting model
 would drift the first time either was touched.
@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SHADERS = ROOT / "src/a3d/shaders/module.ae"
+SHADERS = ROOT / "src/ae3d/shaders/module.ae"
 OUT_DIR = Path(__file__).resolve().parent
 NATIVE = ROOT / "native"
 
@@ -283,7 +283,7 @@ def main():
         (OUT_DIR / name).write_text(code)
     (NATIVE / "ae3d_vk_uniforms.h").write_text(c_struct(placed, size))
 
-    module = ROOT / "src/a3d/vkscene"
+    module = ROOT / "src/ae3d/vkscene"
     module.mkdir(parents=True, exist_ok=True)
     (module / "module.ae").write_text(aether_offsets(placed, size))
 

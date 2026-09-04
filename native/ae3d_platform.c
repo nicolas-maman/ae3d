@@ -58,7 +58,7 @@ void *ae3d_window_create(int width, int height, const char *title,
         glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
     }
 
-    win = glfwCreateWindow(width, height, title ? title : "aether3d", NULL, NULL);
+    win = glfwCreateWindow(width, height, title ? title : "ae3d", NULL, NULL);
     if (!win) return NULL;
 
     scroll = (double *)calloc(1, sizeof(double));

@@ -3,7 +3,7 @@
 # every example.
 #
 # Examples need a window, so they are driven for a bounded number of frames via
-# AETHER3D_FRAMES and are skipped where no display is available.
+# AE3D_FRAMES and are skipped where no display is available.
 #
 #   ./ci.sh
 
@@ -12,7 +12,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
-FRAMES="${AETHER3D_CI_FRAMES:-30}"
+FRAMES="${AE3D_CI_FRAMES:-30}"
 failures=0
 skipped=0
 
@@ -55,14 +55,14 @@ if [ "$(uname -s)" = "Darwin" ]; then
 fi
 
 step "modules type-check"
-for module in src/a3d/*/; do
+for module in src/ae3d/*/; do
     name="$(basename "$module")"
     probe="$(mktemp -t ae3d_probe).ae"
-    printf 'import a3d.%s\nmain() { println("ok") }\n' "$name" > "$probe"
+    printf 'import ae3d.%s\nmain() { println("ok") }\n' "$name" > "$probe"
     if aetherc "$probe" "${probe%.ae}.c" >/tmp/ae3d_mod.log 2>&1; then
-        pass "a3d.$name"
+        pass "ae3d.$name"
     else
-        fail "a3d.$name"
+        fail "ae3d.$name"
         sed 's/^/        /' /tmp/ae3d_mod.log | head -10
     fi
     rm -f "$probe" "${probe%.ae}.c"
@@ -82,12 +82,12 @@ for suite in tests/test_*.ae; do
         continue
     fi
     needs_window=0
-    grep -q "a3d.engine" "$suite" && needs_window=1
+    grep -q "ae3d.engine" "$suite" && needs_window=1
     if [ "$needs_window" = 1 ] && ! have_display; then
         skip "$name" "no display"
         continue
     fi
-    if output="$(AETHER3D_FRAMES="$FRAMES" ./build/"$name" 2>&1)" && \
+    if output="$(AE3D_FRAMES="$FRAMES" ./build/"$name" 2>&1)" && \
        printf '%s' "$output" | grep -q "all checks passed"; then
         pass "$name"
     else
@@ -113,7 +113,7 @@ for example in examples/*.ae; do
         skip "$name" "no display"
         continue
     fi
-    if AETHER3D_FRAMES="$FRAMES" ./build/"$name" >/tmp/ae3d_run.log 2>&1; then
+    if AE3D_FRAMES="$FRAMES" ./build/"$name" >/tmp/ae3d_run.log 2>&1; then
         pass "$name"
     else
         fail "$name"
@@ -124,49 +124,49 @@ done
 step "editor"
 UI_ROOT="${AETHER_UI_ROOT:-$ROOT/../aether-ui}"
 if [ ! -f "$UI_ROOT/ui/module.ae" ]; then
-    skip "aether3d_editor" "aether-ui not found at $UI_ROOT"
+    skip "ae3d_editor" "aether-ui not found at $UI_ROOT"
 elif ! have_display; then
-    skip "aether3d_editor" "no display"
+    skip "ae3d_editor" "no display"
 else
     if ./editor/build_editor.sh >/tmp/ae3d_build.log 2>&1; then
         report="$(mktemp)"
         snapshot="$(mktemp -t ae3d_shot).png"
         # A bounded run ends itself; the timeout is only a backstop so a hang
         # fails the step rather than blocking it.
-        AETHER3D_EDITOR_FRAMES=30 \
-        AETHER3D_EDITOR_SCENE=components \
-        AETHER3D_EDITOR_SNAPSHOT="$snapshot" \
-        AETHER3D_EDITOR_REPORT="$report" \
-            timeout 90 ./build/aether3d_editor >/dev/null 2>&1
+        AE3D_EDITOR_FRAMES=30 \
+        AE3D_EDITOR_SCENE=components \
+        AE3D_EDITOR_SNAPSHOT="$snapshot" \
+        AE3D_EDITOR_REPORT="$report" \
+            timeout 90 ./build/ae3d_editor >/dev/null 2>&1
         status=$?
         if [ "$status" -ne 0 ]; then
-            fail "aether3d_editor (exited $status)"
+            fail "ae3d_editor (exited $status)"
         elif [ ! -s "$report" ]; then
-            fail "aether3d_editor (wrote no report)"
+            fail "ae3d_editor (wrote no report)"
         elif [ ! -s "$snapshot" ]; then
-            fail "aether3d_editor (wrote no viewport snapshot)"
+            fail "ae3d_editor (wrote no viewport snapshot)"
         elif ! grep -q '^frames 30$' "$report"; then
-            fail "aether3d_editor (did not reach 30 frames)"
+            fail "ae3d_editor (did not reach 30 frames)"
             sed 's/^/        /' "$report"
         elif ! grep -qE '^models [0-9]+$' "$report" || \
              [ "$(sed -n 's/^models //p' "$report")" -lt 5 ]; then
-            fail "aether3d_editor (scene did not build)"
+            fail "ae3d_editor (scene did not build)"
         elif [ "$(sed -n 's/^water //p' "$report")" != "1" ] || \
              [ "$(sed -n 's/^voxels //p' "$report")" != "1" ] || \
              [ "$(sed -n 's/^lights //p' "$report")" != "1" ] || \
              [ "$(sed -n 's/^scripted //p' "$report")" != "1" ]; then
-            fail "aether3d_editor (component types did not build)"
+            fail "ae3d_editor (component types did not build)"
             sed 's/^/        /' "$report"
         elif grep -q '^selected none$' "$report"; then
-            fail "aether3d_editor (nothing selected)"
+            fail "ae3d_editor (nothing selected)"
             sed 's/^/        /' "$report"
         else
-            pass "aether3d_editor"
+            pass "ae3d_editor"
             sed 's/^/        /' "$report"
         fi
         rm -f "$report" "$snapshot"
     else
-        fail "aether3d_editor (build)"
+        fail "ae3d_editor (build)"
         sed 's/^/        /' /tmp/ae3d_build.log | head -20
     fi
 fi
@@ -198,7 +198,7 @@ if command -v leaks >/dev/null 2>&1; then
     for suite in tests/test_*.ae benchmarks/bench_*.ae; do
         [ -e "$suite" ] || continue
         name="$(basename "$suite" .ae)"
-        grep -q "a3d.engine" "$suite" && continue
+        grep -q "ae3d.engine" "$suite" && continue
         [ -x "build/$name" ] || continue
         # Only allocations this code lost count. A program that creates a GPU
         # context also produces NSXPCConnection retain cycles inside the window

@@ -147,7 +147,7 @@ void *ae3d_meshfile_load(const char *path) {
     }
     if (magic != AE3D_MESH_MAGIC) {
         gzclose(file);
-        ae3d_meshfile_fail("not an aether3d mesh file");
+        ae3d_meshfile_fail("not an ae3d mesh file");
         return NULL;
     }
     if (version != AE3D_MESH_VERSION) {

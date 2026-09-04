@@ -1,4 +1,4 @@
-# aether3d
+# ae3d
 
 A 3D rendering engine in [Aether](https://github.com/aether-lang-dev/aether), with a
 switchable OpenGL 4.1 / Vulkan backend.
@@ -57,7 +57,7 @@ GPU surface exists, the readback is the only part that goes away.
 ```bash
 git clone https://github.com/aether-lang-dev/aether-ui.git ../aether-ui
 ./editor/build_editor.sh
-./build/aether3d_editor
+./build/ae3d_editor
 ```
 
 Picking casts the cursor ray against every model's exact triangles, rejecting
@@ -89,7 +89,7 @@ sudo apt install libvulkan-dev mesa-vulkan-drivers   # optional
 ```
 
 `build.sh` compiles the native layer once, runs `aetherc` over the Aether
-sources, and links. `AETHER3D_FRAMES=<n>` caps any program at `n` frames, so
+sources, and links. `AE3D_FRAMES=<n>` caps any program at `n` frames, so
 every example doubles as a smoke test that terminates on its own.
 
 `./ci.sh` builds the native layer with warnings as errors, type-checks every
@@ -115,7 +115,7 @@ headless one reports zero leaks.
 ```
 native/     C: GLFW window and input, OpenGL entry points, Vulkan backend,
             float32 mesh and instance buffers, image decoding
-src/a3d/    Aether modules
+src/ae3d/    Aether modules
   core        vectors, quaternions, matrices, scene types, camera, frustum
   platform    window, input, timing
   shaders     the GLSL programs
@@ -139,7 +139,7 @@ examples/   runnable scenes
 
 **Aether never handles float32.** A model owns a native mesh handle holding
 interleaved position, uv and normal data, and, when instanced, a native buffer of
-per-instance matrices. Aether drives them through `a3d.core`; the GPU reads them
+per-instance matrices. Aether drives them through `ae3d.core`; the GPU reads them
 with no conversion pass in between.
 
 **Uniform locations are resolved once per program** into named slots rather than

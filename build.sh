@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Build an aether3d program.
+# Build an ae3d program.
 #
 #   ./build.sh examples/triangle.ae            -> build/triangle
 #   ./build.sh examples/triangle.ae demo       -> build/demo
 #
-# Module resolution is CWD-relative (src/a3d/<module>/module.ae), so the
+# Module resolution is CWD-relative (src/ae3d/<module>/module.ae), so the
 # compiler always runs from the repository root regardless of where the caller
 # invoked this script from.
 
@@ -27,14 +27,14 @@ CFLAGS="${CFLAGS:--O2}"
 WARN="-Wall -Wextra"
 
 if ! command -v "$AETHERC" >/dev/null 2>&1; then
-    echo "aether3d: '$AETHERC' not found; install the Aether toolchain first" >&2
+    echo "ae3d: '$AETHERC' not found; install the Aether toolchain first" >&2
     exit 1
 fi
 
 AETHER_CFLAGS="$(ae cflags 2>/dev/null || true)"
 AETHER_LIBS="$(ae cflags --libs 2>/dev/null || true)"
 if [ -z "$AETHER_CFLAGS" ]; then
-    echo "aether3d: 'ae cflags' produced nothing; is the toolchain on PATH?" >&2
+    echo "ae3d: 'ae cflags' produced nothing; is the toolchain on PATH?" >&2
     exit 1
 fi
 AETHER_INCLUDES="$(printf '%s\n' $AETHER_CFLAGS | grep -E '^-I' | tr '\n' ' ')"

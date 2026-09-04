@@ -96,7 +96,7 @@ void *ae3d_offscreen_context(int width, int height) {
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
 
     window = glfwCreateWindow(width > 0 ? width : 1, height > 0 ? height : 1,
-                              "aether3d offscreen", NULL, NULL);
+                              "ae3d offscreen", NULL, NULL);
     if (!window) return NULL;
 
     glfwMakeContextCurrent(window);

@@ -2,7 +2,7 @@
 
 ## Gopher3D
 
-aether3d is a port of Gopher3D. See [NOTICE](NOTICE) for what was taken from it.
+ae3d is a port of Gopher3D. See [NOTICE](NOTICE) for what was taken from it.
 
 ```
 MIT License
@@ -31,7 +31,7 @@ SOFTWARE.
 ## stb_image
 
 `native/stb_image.h` is vendored verbatim from https://github.com/nothings/stb.
-It is dual licensed as MIT and public domain; aether3d uses it under the MIT
+It is dual licensed as MIT and public domain; ae3d uses it under the MIT
 terms.
 
 ```
