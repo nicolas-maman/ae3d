@@ -1,0 +1,165 @@
+// What the shadow pass costs, in both backends.
+//
+// The same scene is timed with shadows off and on. The difference is the depth
+// pass: a second draw of every caster into the 2048x2048 map, plus the sampling
+// the lit pass then does. Both renderers draw the same scene at the same size,
+// so the two numbers are comparable with each other as well as against zero.
+//
+// The two states alternate block by block and each keeps its fastest block. A
+// single pair of timings is not enough: the difference here is smaller than the
+// spread between runs, so a straight before-and-after can and did come out
+// negative. Alternating cancels drift, and the fastest block is the one least
+// disturbed by everything else on the machine.
+
+import std.list
+import ae3d.core
+import ae3d.gl
+import ae3d.vk
+import ae3d.offscreen
+import ae3d.loader
+
+extern clock_ns() -> long
+
+const WIDTH = 1280
+const HEIGHT = 720
+const MODELS = 200
+const FRAMES = 200
+const BLOCKS = 6
+
+build_scene(backend: *Backend, models: ptr) {
+    i = 0
+    while i < MODELS {
+        m = loader.sphere(1.0, 16, 12)
+        core.model_set_scale(m, 4.0, 4.0, 4.0)
+        core.model_set_position(m, ((i % 20) * 1.0) * 22.0 - 209.0, 10.0,
+                                ((i / 20) * 1.0) * 22.0 - 209.0)
+        core.model_polished_metal(m, 0.7, 0.5, 0.3)
+        core.backend_add_model(backend, m)
+        list.add_raw(models, m)
+        i = i + 1
+    }
+}
+
+free_scene(models: ptr) {
+    i = 0
+    while i < list.size(models) {
+        core.model_free(list.get_raw(models, i) as *Model)
+        i = i + 1
+    }
+    list.free(models)
+}
+
+time_block(backend: *Backend, cam: *Camera, light: *Light) -> long {
+    started = clock_ns()
+    frame = 0
+    while frame < FRAMES {
+        core.backend_render(backend, cam, light)
+        frame = frame + 1
+    }
+    return clock_ns() - started
+}
+
+report(name: string, off: long, on: long) {
+    per_off = (off / 1000) as int / FRAMES
+    per_on = (on / 1000) as int / FRAMES
+    println("  ${name}: ${per_off} us per frame without shadows, ${per_on} us with, ${per_on - per_off} us for the pass")
+}
+
+bench_opengl(cam: *Camera, light: *Light) {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("  opengl: SKIP no context")
+        return
+    }
+    renderer = gl.renderer_new()
+    backend = gl.backend(renderer)
+    if !core.backend_init(&backend, context, WIDTH, HEIGHT) {
+        println("  opengl: SKIP the backend would not initialise")
+        gl.renderer_free(renderer)
+        offscreen.context_destroy(context)
+        return
+    }
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+
+    models = list.new()
+    build_scene(&backend, models)
+    long off = 0
+    long on = 0
+    block = 0
+    while block < BLOCKS {
+        gl.renderer_set_shadows(renderer, false)
+        without = time_block(&backend, cam, light)
+        gl.renderer_set_shadows(renderer, true)
+        with = time_block(&backend, cam, light)
+        if block > 0 {
+            if without < off { off = without }
+            if with < on { on = with }
+        } else {
+            off = without
+            on = with
+        }
+        block = block + 1
+    }
+    report("opengl", off, on)
+
+    core.backend_cleanup(&backend)
+    free_scene(models)
+    offscreen.target_destroy(target)
+    offscreen.context_destroy(context)
+    gl.renderer_free(renderer)
+}
+
+bench_vulkan(cam: *Camera, light: *Light) {
+    if !vk.available() {
+        println("  vulkan: SKIP no driver (${vk.last_error()})")
+        return
+    }
+    renderer = vk.renderer_new()
+    backend = vk.backend(renderer)
+    if !core.backend_init(&backend, null, WIDTH, HEIGHT) {
+        println("  vulkan: SKIP the backend would not initialise")
+        vk.renderer_free(renderer)
+        return
+    }
+
+    models = list.new()
+    build_scene(&backend, models)
+    long off = 0
+    long on = 0
+    block = 0
+    while block < BLOCKS {
+        vk.renderer_set_shadows(renderer, false)
+        without = time_block(&backend, cam, light)
+        vk.renderer_set_shadows(renderer, true)
+        with = time_block(&backend, cam, light)
+        if block > 0 {
+            if without < off { off = without }
+            if with < on { on = with }
+        } else {
+            off = without
+            on = with
+        }
+        block = block + 1
+    }
+    report("vulkan", off, on)
+
+    core.backend_cleanup(&backend)
+    free_scene(models)
+    vk.renderer_free(renderer)
+}
+
+main() {
+    println("ae3d shadow benchmark at ${WIDTH}x${HEIGHT}, ${MODELS} casters")
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 120.0, 360.0))
+    light = core.light_sun(core.vec3(0.3, 0.7, 0.4))
+
+    bench_opengl(cam, light)
+    bench_vulkan(cam, light)
+
+    core.camera_free(cam)
+    core.light_free(light)
+    println("done")
+}

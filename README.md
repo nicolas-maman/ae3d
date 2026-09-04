@@ -12,15 +12,18 @@ engine, to Aether and C. See [Credits](#credits).
   pointers that both the OpenGL and Vulkan renderers fill in, so a program picks
   its renderer with a constructor argument and nothing else changes.
 - **OpenGL 4.1 core**, the highest version macOS offers and enough everywhere
-  else: PBR materials, directional and point lights, instanced rendering,
-  frustum culling, a separate transparent pass, MSAA, FXAA and bloom.
+  else: PBR materials, up to four directional or point lights, instanced
+  rendering, frustum culling, a separate transparent pass, MSAA, FXAA and bloom.
+- **Shadow mapping** in both backends: the light draws the scene into a depth
+  map sized to the scene, and the lit pass compares against it over a 3x3
+  neighbourhood with a slope-scaled bias.
 - **Vulkan**, windowed and offscreen, on a loader opened at runtime. Nothing
   links against Vulkan, so a program built with this backend still starts where
   no driver exists and says so. It runs the same feature set as OpenGL, and
   `tests/test_backend_parity` proves it: the same scene through both renderers,
   compared channel by channel across materials and textures, instancing and
-  transparency, the skybox, FXAA and bloom. The two agree to within 1.4% of
-  channels.
+  transparency, the skybox, FXAA, bloom and shadows. The two agree to within
+  1.5% of channels.
 - **Gerstner-wave ocean**, **Perlin terrain**, **voxel worlds** drawn as a single
   instanced call, **surface nets** over a signed distance field, an OBJ/MTL
   loader, ray casting, and a component system.
@@ -94,7 +97,9 @@ every example doubles as a smoke test that terminates on its own.
 
 `./ci.sh` builds the native layer with warnings as errors, type-checks every
 module, runs every test suite, benchmark and example, and checks that every
-headless one reports zero leaks.
+headless one reports zero leaks. The leak check needs `leaks` to attach to a
+stopped process, which some sandboxes deny; `AE3D_SKIP_LEAKS=1 ./ci.sh` runs
+everything else.
 
 ## Examples
 

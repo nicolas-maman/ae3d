@@ -40,6 +40,8 @@
 #endif
 
 #define AE3D_VK_FRAMES 2
+#define AE3D_VK_SHADOW_SIZE 2048
+#define AE3D_VK_SHADOW_FORMAT VK_FORMAT_R16G16B16A16_SFLOAT
 #define AE3D_VK_DRAWS_PER_FRAME 4096
 #define AE3D_VK_MAX_TEXTURES 256
 #define AE3D_VK_STRIDE (8 * (int)sizeof(float))
@@ -215,6 +217,20 @@ static struct {
     VkRenderPass render_pass;
     VkRenderPass scene_pass;
     VkRenderPass post_pass;
+    VkRenderPass shadow_pass;
+    VkFramebuffer shadow_framebuffer;
+    VkImage shadow_image;
+    VkDeviceMemory shadow_memory;
+    VkImageView shadow_view;
+    VkImage shadow_depth_image;
+    VkDeviceMemory shadow_depth_memory;
+    VkImageView shadow_depth_view;
+    VkSampler shadow_sampler;
+    VkPipeline shadow_pipeline;
+    int shadow_enabled;
+    int pass_open;
+    int in_shadow_pass;
+    float scene_clear[4];
     VkFramebuffer scene_framebuffer;
     VkFramebuffer *post_framebuffers;
     int post_texture;
@@ -1133,6 +1149,72 @@ static int ae3d_vk_build_render_pass(VkImageLayout present_layout, VkRenderPass 
     return 1;
 }
 
+// Depth written as colour, so the main pass samples it like any other texture.
+// The attachment ends in shader-read layout, which is what lets the very next
+// pass in the same submission read it without a barrier of its own.
+static int ae3d_vk_build_shadow_pass(void) {
+    VkAttachmentDescription attachments[2];
+    VkAttachmentReference colour_ref, depth_ref;
+    VkSubpassDescription subpass;
+    VkSubpassDependency dependency;
+    VkRenderPassCreateInfo info;
+
+    memset(attachments, 0, sizeof(attachments));
+    attachments[0].format = AE3D_VK_SHADOW_FORMAT;
+    attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
+    attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachments[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    attachments[1].format = vk.depth_format;
+    attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+    attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    memset(&colour_ref, 0, sizeof(colour_ref));
+    colour_ref.attachment = 0;
+    colour_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    memset(&depth_ref, 0, sizeof(depth_ref));
+    depth_ref.attachment = 1;
+    depth_ref.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    memset(&subpass, 0, sizeof(subpass));
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &colour_ref;
+    subpass.pDepthStencilAttachment = &depth_ref;
+
+    memset(&dependency, 0, sizeof(dependency));
+    dependency.srcSubpass = 0;
+    dependency.dstSubpass = VK_SUBPASS_EXTERNAL;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependency.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    info.attachmentCount = 2;
+    info.pAttachments = attachments;
+    info.subpassCount = 1;
+    info.pSubpasses = &subpass;
+    info.dependencyCount = 1;
+    info.pDependencies = &dependency;
+
+    if (ae3d_vkCreateRenderPass(vk.device, &info, NULL, &vk.shadow_pass) != VK_SUCCESS) {
+        return ae3d_vk_fail("shadow vkCreateRenderPass failed");
+    }
+    return 1;
+}
+
 // The composite pass reads what the scene pass produced, so it takes a single
 // resolved colour attachment and no depth.
 static int ae3d_vk_build_post_pass(VkImageLayout present_layout) {
@@ -1192,12 +1274,68 @@ static int ae3d_vk_create_render_pass(void) {
                                                 : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     if (!ae3d_vk_build_render_pass(present_layout, &vk.render_pass)) return 0;
     if (!ae3d_vk_build_render_pass(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, &vk.scene_pass)) return 0;
+    if (!ae3d_vk_build_shadow_pass()) return 0;
     return ae3d_vk_build_post_pass(present_layout);
 }
 
 // The scene renders into a sampled image when post-processing is on, and the
 // composite pass reads it. It is registered as an ordinary texture so the
 // existing descriptor cache binds it with no second code path.
+// The map, its own depth buffer, and the sampler the main pass reads it with.
+static int ae3d_vk_create_shadow_target(void) {
+    VkSamplerCreateInfo sampler;
+    VkImageView attachments[2];
+    VkFramebufferCreateInfo info;
+
+    if (!ae3d_vk_create_image(AE3D_VK_SHADOW_SIZE, AE3D_VK_SHADOW_SIZE, 1,
+                              AE3D_VK_SHADOW_FORMAT, VK_SAMPLE_COUNT_1_BIT,
+                              VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                              VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_TILING_OPTIMAL,
+                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                              &vk.shadow_image, &vk.shadow_memory, &vk.shadow_view)) {
+        return 0;
+    }
+
+    if (!ae3d_vk_create_image(AE3D_VK_SHADOW_SIZE, AE3D_VK_SHADOW_SIZE, 1,
+                              vk.depth_format, VK_SAMPLE_COUNT_1_BIT,
+                              VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                              VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_TILING_OPTIMAL,
+                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                              &vk.shadow_depth_image, &vk.shadow_depth_memory,
+                              &vk.shadow_depth_view)) {
+        return 0;
+    }
+
+    memset(&sampler, 0, sizeof(sampler));
+    sampler.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sampler.magFilter = VK_FILTER_NEAREST;
+    sampler.minFilter = VK_FILTER_NEAREST;
+    sampler.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sampler.maxLod = 1.0f;
+    if (ae3d_vkCreateSampler(vk.device, &sampler, NULL, &vk.shadow_sampler) != VK_SUCCESS) {
+        return ae3d_vk_fail("shadow vkCreateSampler failed");
+    }
+
+    attachments[0] = vk.shadow_view;
+    attachments[1] = vk.shadow_depth_view;
+
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    info.renderPass = vk.shadow_pass;
+    info.attachmentCount = 2;
+    info.pAttachments = attachments;
+    info.width = AE3D_VK_SHADOW_SIZE;
+    info.height = AE3D_VK_SHADOW_SIZE;
+    info.layers = 1;
+    if (ae3d_vkCreateFramebuffer(vk.device, &info, NULL, &vk.shadow_framebuffer) != VK_SUCCESS) {
+        return ae3d_vk_fail("shadow vkCreateFramebuffer failed");
+    }
+    return 1;
+}
+
 static int ae3d_vk_create_post_target(void) {
     ae3d_vk_texture *texture = NULL;
     VkSamplerCreateInfo sampler;
@@ -1306,6 +1444,7 @@ static int ae3d_vk_create_framebuffers(void) {
         result = ae3d_vkCreateFramebuffer(vk.device, &info, NULL, &vk.framebuffers[i]);
         if (result != VK_SUCCESS) return ae3d_vk_fail_code("vkCreateFramebuffer failed", result);
     }
+    if (!ae3d_vk_create_shadow_target()) return 0;
     return ae3d_vk_create_post_target();
 }
 
@@ -1739,12 +1878,17 @@ static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle) {
     writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[1].pImageInfo = &image;
 
-    // Binding 2 is the shadow map the shader declares. Until Vulkan has a depth
-    // pass it holds the default white texture, which reads as nothing occluded.
+    // Binding 2 is the shadow map. With shadows off it holds the default white
+    // texture, which reads as nothing occluded.
     memset(&shadow, 0, sizeof(shadow));
     shadow.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    shadow.imageView = vk.textures[vk.default_texture - 1].view;
-    shadow.sampler = vk.textures[vk.default_texture - 1].sampler;
+    if (vk.shadow_enabled && vk.shadow_view) {
+        shadow.imageView = vk.shadow_view;
+        shadow.sampler = vk.shadow_sampler;
+    } else {
+        shadow.imageView = vk.textures[vk.default_texture - 1].view;
+        shadow.sampler = vk.textures[vk.default_texture - 1].sampler;
+    }
 
     writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[2].dstSet = set;
@@ -1892,8 +2036,10 @@ static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
 
     memset(&multisample, 0, sizeof(multisample));
     multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    multisample.rasterizationSamples = render_pass == vk.post_pass ? VK_SAMPLE_COUNT_1_BIT
-                                                                  : vk.samples;
+    multisample.rasterizationSamples = vk.samples;
+    if (render_pass == vk.post_pass || render_pass == vk.shadow_pass) {
+        multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    }
 
     memset(&depth, 0, sizeof(depth));
     depth.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
@@ -1969,6 +2115,9 @@ static int ae3d_vk_create_pass_pipelines(void) {
         { ae3d_vk_screen_vert_spv, sizeof(ae3d_vk_screen_vert_spv),
           ae3d_vk_bloom_frag_spv, sizeof(ae3d_vk_bloom_frag_spv),
           0, 0, 0, 0, VK_NULL_HANDLE, NULL },
+        { ae3d_vk_depth_vert_spv, sizeof(ae3d_vk_depth_vert_spv),
+          ae3d_vk_depth_frag_spv, sizeof(ae3d_vk_depth_frag_spv),
+          0, 1, 1, 1, VK_NULL_HANDLE, NULL },
     };
     unsigned i;
 
@@ -1976,6 +2125,7 @@ static int ae3d_vk_create_pass_pipelines(void) {
     builds[1].pass = vk.post_pass;   builds[1].out = &vk.post_pipelines[0];
     builds[2].pass = vk.post_pass;   builds[2].out = &vk.post_pipelines[1];
     builds[3].pass = vk.post_pass;   builds[3].out = &vk.post_pipelines[2];
+    builds[4].pass = vk.shadow_pass; builds[4].out = &vk.shadow_pipeline;
 
     for (i = 0; i < sizeof(builds) / sizeof(builds[0]); i++) {
         VkShaderModule vertex_module = ae3d_vk_shader(builds[i].vert, builds[i].vert_size);
@@ -2136,12 +2286,48 @@ void ae3d_vk_resize(int width, int height) {
     vk.pending_height = height;
 }
 
-int ae3d_vk_frame_begin(double r, double g, double b, double a) {
-    VkCommandBufferBeginInfo begin;
+// The scene pass is opened by the first scene draw rather than here, so a
+// shadow pass can be recorded into the same command buffer ahead of it. Vulkan
+// forbids nesting render passes, and a shadow map has to be finished before the
+// pass that samples it starts.
+static void ae3d_vk_open_scene_pass(void) {
     VkRenderPassBeginInfo pass;
     VkClearValue clears[2];
     VkViewport viewport;
     VkRect2D scissor;
+
+    if (vk.pass_open) return;
+
+    memset(clears, 0, sizeof(clears));
+    clears[0].color.float32[0] = vk.scene_clear[0];
+    clears[0].color.float32[1] = vk.scene_clear[1];
+    clears[0].color.float32[2] = vk.scene_clear[2];
+    clears[0].color.float32[3] = vk.scene_clear[3];
+    clears[1].depthStencil.depth = 1.0f;
+
+    memset(&pass, 0, sizeof(pass));
+    pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    pass.renderPass = vk.post_active ? vk.scene_pass : vk.render_pass;
+    pass.framebuffer = vk.post_active ? vk.scene_framebuffer : vk.framebuffers[vk.image_index];
+    pass.renderArea.extent = vk.extent;
+    pass.clearValueCount = 2;
+    pass.pClearValues = clears;
+    ae3d_vkCmdBeginRenderPass(vk.command_buffers[vk.frame], &pass, VK_SUBPASS_CONTENTS_INLINE);
+
+    memset(&viewport, 0, sizeof(viewport));
+    viewport.width = (float)vk.extent.width;
+    viewport.height = (float)vk.extent.height;
+    viewport.maxDepth = 1.0f;
+    ae3d_vkCmdSetViewport(vk.command_buffers[vk.frame], 0, 1, &viewport);
+
+    memset(&scissor, 0, sizeof(scissor));
+    scissor.extent = vk.extent;
+    ae3d_vkCmdSetScissor(vk.command_buffers[vk.frame], 0, 1, &scissor);
+    vk.pass_open = 1;
+}
+
+int ae3d_vk_frame_begin(double r, double g, double b, double a) {
+    VkCommandBufferBeginInfo begin;
     VkResult result;
 
     if (!vk.ready || vk.recording) return 0;
@@ -2175,33 +2361,14 @@ int ae3d_vk_frame_begin(double r, double g, double b, double a) {
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     ae3d_vkBeginCommandBuffer(vk.command_buffers[vk.frame], &begin);
 
-    memset(clears, 0, sizeof(clears));
-    clears[0].color.float32[0] = (float)r;
-    clears[0].color.float32[1] = (float)g;
-    clears[0].color.float32[2] = (float)b;
-    clears[0].color.float32[3] = (float)a;
-    clears[1].depthStencil.depth = 1.0f;
+    vk.scene_clear[0] = (float)r;
+    vk.scene_clear[1] = (float)g;
+    vk.scene_clear[2] = (float)b;
+    vk.scene_clear[3] = (float)a;
 
     vk.post_active = (vk.fxaa || vk.bloom) && vk.screen_quad > 0 && vk.post_texture > 0;
-
-    memset(&pass, 0, sizeof(pass));
-    pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    pass.renderPass = vk.post_active ? vk.scene_pass : vk.render_pass;
-    pass.framebuffer = vk.post_active ? vk.scene_framebuffer : vk.framebuffers[vk.image_index];
-    pass.renderArea.extent = vk.extent;
-    pass.clearValueCount = 2;
-    pass.pClearValues = clears;
-    ae3d_vkCmdBeginRenderPass(vk.command_buffers[vk.frame], &pass, VK_SUBPASS_CONTENTS_INLINE);
-
-    memset(&viewport, 0, sizeof(viewport));
-    viewport.width = (float)vk.extent.width;
-    viewport.height = (float)vk.extent.height;
-    viewport.maxDepth = 1.0f;
-    ae3d_vkCmdSetViewport(vk.command_buffers[vk.frame], 0, 1, &viewport);
-
-    memset(&scissor, 0, sizeof(scissor));
-    scissor.extent = vk.extent;
-    ae3d_vkCmdSetScissor(vk.command_buffers[vk.frame], 0, 1, &scissor);
+    vk.pass_open = 0;
+    vk.in_shadow_pass = 0;
 
     vk.uniforms[vk.frame].used = 0;
     vk.draw_calls = 0;
@@ -2228,6 +2395,7 @@ static void ae3d_vk_draw_pipeline(VkPipeline pipeline, int handle, int texture_h
     unsigned dynamic_offset;
 
     if (!vk.recording || handle <= 0 || handle > vk.mesh_capacity) return;
+    ae3d_vk_open_scene_pass();
     mesh = &vk.meshes[handle - 1];
     if (!mesh->in_use || mesh->index_count == 0) return;
 
@@ -2282,6 +2450,117 @@ void ae3d_vk_draw_sky(int mesh_handle, int texture_handle) {
 
 void ae3d_vk_set_screen_quad(int mesh_handle) { vk.screen_quad = mesh_handle; }
 
+// Descriptor sets are cached per texture, so binding 2 keeps whatever image it
+// was written with. Toggling shadows rewrites it on every set already handed
+// out, otherwise the scene would sample the previous state forever.
+void ae3d_vk_set_shadows(int on) {
+    VkDescriptorImageInfo shadow;
+    VkWriteDescriptorSet write;
+    int frame;
+    int index;
+
+    on = on ? 1 : 0;
+    if (vk.shadow_enabled == on) return;
+    vk.shadow_enabled = on;
+    if (!vk.ready) return;
+
+    ae3d_vkDeviceWaitIdle(vk.device);
+
+    memset(&shadow, 0, sizeof(shadow));
+    shadow.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (vk.shadow_enabled && vk.shadow_view) {
+        shadow.imageView = vk.shadow_view;
+        shadow.sampler = vk.shadow_sampler;
+    } else {
+        shadow.imageView = vk.textures[vk.default_texture - 1].view;
+        shadow.sampler = vk.textures[vk.default_texture - 1].sampler;
+    }
+
+    for (frame = 0; frame < AE3D_VK_FRAMES; frame++) {
+        for (index = 0; index < vk.set_count[frame]; index++) {
+            memset(&write, 0, sizeof(write));
+            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet = vk.sets[frame][index];
+            write.dstBinding = 2;
+            write.descriptorCount = 1;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            write.pImageInfo = &shadow;
+            ae3d_vkUpdateDescriptorSets(vk.device, 1, &write, 0, NULL);
+        }
+    }
+}
+
+int ae3d_vk_shadows(void) { return vk.shadow_enabled; }
+
+// The pass leaves the map in shader-read layout, so the scene pass that follows
+// in the same command buffer samples it without a barrier of its own.
+int ae3d_vk_shadow_begin(void) {
+    VkRenderPassBeginInfo pass;
+    VkClearValue clears[2];
+    VkViewport viewport;
+    VkRect2D scissor;
+
+    if (!vk.recording || !vk.shadow_enabled || !vk.shadow_framebuffer) return 0;
+    if (vk.pass_open) return 0;
+
+    memset(clears, 0, sizeof(clears));
+    clears[0].color.float32[0] = 1.0f;
+    clears[0].color.float32[1] = 1.0f;
+    clears[0].color.float32[2] = 1.0f;
+    clears[0].color.float32[3] = 1.0f;
+    clears[1].depthStencil.depth = 1.0f;
+
+    memset(&pass, 0, sizeof(pass));
+    pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    pass.renderPass = vk.shadow_pass;
+    pass.framebuffer = vk.shadow_framebuffer;
+    pass.renderArea.extent.width = AE3D_VK_SHADOW_SIZE;
+    pass.renderArea.extent.height = AE3D_VK_SHADOW_SIZE;
+    pass.clearValueCount = 2;
+    pass.pClearValues = clears;
+    ae3d_vkCmdBeginRenderPass(vk.command_buffers[vk.frame], &pass, VK_SUBPASS_CONTENTS_INLINE);
+
+    memset(&viewport, 0, sizeof(viewport));
+    viewport.width = (float)AE3D_VK_SHADOW_SIZE;
+    viewport.height = (float)AE3D_VK_SHADOW_SIZE;
+    viewport.maxDepth = 1.0f;
+    ae3d_vkCmdSetViewport(vk.command_buffers[vk.frame], 0, 1, &viewport);
+
+    memset(&scissor, 0, sizeof(scissor));
+    scissor.extent.width = AE3D_VK_SHADOW_SIZE;
+    scissor.extent.height = AE3D_VK_SHADOW_SIZE;
+    ae3d_vkCmdSetScissor(vk.command_buffers[vk.frame], 0, 1, &scissor);
+    vk.in_shadow_pass = 1;
+    vk.pass_open = 1;
+    return 1;
+}
+
+void ae3d_vk_shadow_draw(int mesh_handle, int instance_handle, int instance_count) {
+    if (!vk.shadow_pipeline || !vk.in_shadow_pass) return;
+    ae3d_vk_draw_pipeline(vk.shadow_pipeline, mesh_handle, vk.default_texture,
+                          instance_handle, instance_count);
+}
+
+void ae3d_vk_shadow_end(void) {
+    VkViewport viewport;
+    VkRect2D scissor;
+
+    if (!vk.recording || !vk.in_shadow_pass) return;
+    ae3d_vkCmdEndRenderPass(vk.command_buffers[vk.frame]);
+    vk.in_shadow_pass = 0;
+    vk.pass_open = 0;
+
+    memset(&viewport, 0, sizeof(viewport));
+    viewport.width = (float)vk.extent.width;
+    viewport.height = (float)vk.extent.height;
+    viewport.maxDepth = 1.0f;
+    ae3d_vkCmdSetViewport(vk.command_buffers[vk.frame], 0, 1, &viewport);
+
+    memset(&scissor, 0, sizeof(scissor));
+    scissor.extent = vk.extent;
+    ae3d_vkCmdSetScissor(vk.command_buffers[vk.frame], 0, 1, &scissor);
+}
+
 void ae3d_vk_set_post(int fxaa, int bloom, double threshold, double intensity) {
     vk.fxaa = fxaa;
     vk.bloom = bloom;
@@ -2320,7 +2599,9 @@ int ae3d_vk_frame_end(void) {
 
     if (!vk.recording) return 0;
 
+    ae3d_vk_open_scene_pass();
     ae3d_vkCmdEndRenderPass(vk.command_buffers[vk.frame]);
+    vk.pass_open = 0;
 
     if (vk.post_active) {
         VkRenderPassBeginInfo pass;
@@ -2333,6 +2614,7 @@ int ae3d_vk_frame_end(void) {
         pass.framebuffer = vk.post_framebuffers[vk.image_index];
         pass.renderArea.extent = vk.extent;
         ae3d_vkCmdBeginRenderPass(vk.command_buffers[vk.frame], &pass, VK_SUBPASS_CONTENTS_INLINE);
+        vk.pass_open = 1;
 
         memset(&viewport, 0, sizeof(viewport));
         viewport.width = (float)vk.extent.width;
@@ -2346,6 +2628,7 @@ int ae3d_vk_frame_end(void) {
 
         ae3d_vk_draw_post();
         ae3d_vkCmdEndRenderPass(vk.command_buffers[vk.frame]);
+        vk.pass_open = 0;
     }
 
     // Offscreen resolves into an image the pass leaves in transfer-source
@@ -2617,6 +2900,16 @@ void ae3d_vk_shutdown(void) {
     if (vk.render_pass) ae3d_vkDestroyRenderPass(vk.device, vk.render_pass, NULL);
     if (vk.scene_pass) ae3d_vkDestroyRenderPass(vk.device, vk.scene_pass, NULL);
     if (vk.post_pass) ae3d_vkDestroyRenderPass(vk.device, vk.post_pass, NULL);
+    if (vk.shadow_pass) ae3d_vkDestroyRenderPass(vk.device, vk.shadow_pass, NULL);
+    if (vk.shadow_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.shadow_pipeline, NULL);
+    if (vk.shadow_framebuffer) ae3d_vkDestroyFramebuffer(vk.device, vk.shadow_framebuffer, NULL);
+    if (vk.shadow_sampler) ae3d_vkDestroySampler(vk.device, vk.shadow_sampler, NULL);
+    if (vk.shadow_view) ae3d_vkDestroyImageView(vk.device, vk.shadow_view, NULL);
+    if (vk.shadow_image) ae3d_vkDestroyImage(vk.device, vk.shadow_image, NULL);
+    if (vk.shadow_memory) ae3d_vkFreeMemory(vk.device, vk.shadow_memory, NULL);
+    if (vk.shadow_depth_view) ae3d_vkDestroyImageView(vk.device, vk.shadow_depth_view, NULL);
+    if (vk.shadow_depth_image) ae3d_vkDestroyImage(vk.device, vk.shadow_depth_image, NULL);
+    if (vk.shadow_depth_memory) ae3d_vkFreeMemory(vk.device, vk.shadow_depth_memory, NULL);
     if (vk.device) ae3d_vkDestroyDevice(vk.device, NULL);
     if (vk.surface && ae3d_vkDestroySurfaceKHR) ae3d_vkDestroySurfaceKHR(vk.instance, vk.surface, NULL);
     if (vk.instance) ae3d_vkDestroyInstance(vk.instance, NULL);

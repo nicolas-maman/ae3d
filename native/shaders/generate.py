@@ -102,6 +102,10 @@ def to_vulkan(source, stage, members, samplers, varyings_in, varyings_out,
     text = re.sub(r"^uniform Light lights\[MAX_LIGHTS\];\n", "", text, flags=re.M)
     text = text.replace("MAX_LIGHTS", str(MAX_LIGHTS))
 
+    # OpenGL clip depth spans -1..1 and needs the half-scale; Vulkan clip depth
+    # is already the 0..1 the shadow map stores.
+    text = text.replace("return clipZ * 0.5 + 0.5;", "return clipZ;")
+
     text = re.sub(r"^uniform\s+(vec3|vec4|vec2|float|int|bool|mat4)\s+\w+\s*;.*$", "", text, flags=re.M)
     text = re.sub(r"^uniform\s+sampler2D\s+\w+\s*;.*$", "", text, flags=re.M)
 
@@ -288,6 +292,8 @@ SKY_OUT = [("vec3", "TexCoords")]
 SCREEN_OUT = [("vec2", "TexCoords")]
 
 AUXILIARY = [
+    ("depth_vk.vert", "VERTEX_DEPTH", "vert", [], [], []),
+    ("depth_vk.frag", "FRAGMENT_DEPTH", "frag", [], [], []),
     ("sky_vk.vert", "VERTEX_SKYBOX", "vert", [], [], SKY_OUT),
     ("sky_vk.frag", "FRAGMENT_SKYBOX", "frag", ["skybox"], SKY_OUT, []),
     ("screen_vk.vert", "VERTEX_SCREEN", "vert", [], [], SCREEN_OUT),

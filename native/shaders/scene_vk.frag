@@ -156,9 +156,14 @@ layout(location = 0) out vec4 FragColor;
 // Optimized color temperature to RGB conversion using lookup approximation
 // The light writes how far it can see into a colour target; this compares the
 // fragment's own distance against it. Sampling a neighbourhood softens the edge.
+float light_depth(float clipZ) {
+    return clipZ;
+}
+
 float shadow_factor() {
     vec3 projected = FragPosLightSpace.xyz / FragPosLightSpace.w;
-    projected = projected * 0.5 + 0.5;
+    projected.xy = projected.xy * 0.5 + 0.5;
+    projected.z = light_depth(projected.z);
     if (projected.z > 1.0) {
         return 1.0;
     }
