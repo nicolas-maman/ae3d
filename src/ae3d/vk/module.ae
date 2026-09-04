@@ -19,6 +19,7 @@ exports (
     available, device_name, last_error,
     renderer_model_count, renderer_draw_calls, renderer_set_clear_color,
     renderer_load_texture, renderer_release_texture, renderer_sample_count, renderer_set_post,
+    renderer_set_shadows, renderer_shadows,
     skybox_create, skybox_free,
     offscreen_pixels, offscreen_width, offscreen_height
 )
@@ -45,6 +46,11 @@ extern ae3d_vk_set_blend(on: int)
 extern ae3d_vk_draw(mesh: int, texture: int, instances: int, instance_count: int)
 extern ae3d_vk_draw_sky(mesh: int, texture: int)
 extern ae3d_vk_set_screen_quad(mesh: int)
+extern ae3d_vk_set_shadows(on: int)
+extern ae3d_vk_shadows() -> int
+extern ae3d_vk_shadow_begin() -> int
+extern ae3d_vk_shadow_draw(mesh: int, instances: int, instance_count: int)
+extern ae3d_vk_shadow_end()
 extern ae3d_vk_set_post(fxaa: int, bloom: int, threshold: float, intensity: float)
 extern ae3d_vk_post_active() -> int
 extern ae3d_vk_draw_calls() -> int
@@ -74,6 +80,7 @@ struct VKRenderer {
     textures: ptr
     frustum: ptr
     skybox: ptr
+    shadow_space: Mat4
     screen_mesh: ptr
     screen_handle: int
     initialized: bool
@@ -119,6 +126,7 @@ renderer_new() -> *VKRenderer {
     r.lights = list.new()
     r.textures = list.new()
     r.frustum = core.frustum_new()
+    r.shadow_space = core.mat4_ident()
     return r
 }
 
@@ -176,6 +184,90 @@ renderer_init(r: *VKRenderer, window: ptr, width: int, height: int) -> int {
     r.screen_handle = ae3d_vk_upload_mesh(r.screen_mesh)
     ae3d_vk_set_screen_quad(r.screen_handle)
     return 1
+}
+
+renderer_set_shadows(r: *VKRenderer, on: bool) {
+    flag = 0
+    if on { flag = 1 }
+    ae3d_vk_set_shadows(flag)
+}
+
+renderer_shadows(r: *VKRenderer) -> bool {
+    return ae3d_vk_shadows() == 1
+}
+
+// The same box the OpenGL backend builds, from the same scene, so the two
+// backends light and shadow a scene identically.
+light_space_matrix(r: *VKRenderer, light: *Light) -> Mat4 {
+    centre = core.vec3(0.0, 0.0, 0.0)
+    radius = 1.0
+    shown = 0
+
+    count = list.size(r.models)
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        if m != null && m.visible {
+            centre = core.v3_add(centre, m.bounding_center)
+            shown = shown + 1
+        }
+        i = i + 1
+    }
+    if shown > 0 { centre = core.v3_mul(centre, 1.0 / (shown * 1.0)) }
+
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        if m != null && m.visible {
+            span = core.v3_len(core.v3_sub(m.bounding_center, centre)) + m.bounding_radius
+            if span > radius { radius = span }
+        }
+        i = i + 1
+    }
+
+    direction = core.v3_normalize(light.direction)
+    if light.mode != core.MODE_DIRECTIONAL {
+        direction = core.v3_normalize(core.v3_sub(centre, light.position))
+    }
+    if core.v3_len(direction) < 0.001 { direction = core.vec3(0.0, 0.0 - 1.0, 0.0) }
+
+    eye = core.v3_sub(centre, core.v3_mul(direction, radius * 2.0))
+    up = core.vec3(0.0, 1.0, 0.0)
+    if core.abs_of(direction.y) > 0.99 { up = core.vec3(0.0, 0.0, 1.0) }
+
+    view = core.mat4_look_at(eye, centre, up)
+    projection = core.mat4_ortho(0.0 - radius, radius, 0.0 - radius, radius,
+                                 0.01, radius * 4.0)
+    return core.mat4_mul(projection, view)
+}
+
+render_shadow_pass(r: *VKRenderer, light: *Light) {
+    if light == null || ae3d_vk_shadows() != 1 { return }
+
+    r.shadow_space = light_space_matrix(r, light)
+    ae3d_vk_scene_set_clip_mat4(vkscene.OFF_LIGHTSPACEMATRIX, &r.shadow_space)
+    if ae3d_vk_shadow_begin() != 1 { return }
+
+    count = list.size(r.models)
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        if m != null && m.visible && m.casts_shadow && m.vbo != 0 {
+            if m.is_dirty {
+                core.model_update_matrix(m)
+                m.is_dirty = false
+            }
+            instances = 0
+            if m.is_instanced { instances = core.model_instance_count(m) }
+            ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &m.model_matrix)
+            instanced = 0
+            if instances > 0 { instanced = 1 }
+            ae3d_vk_scene_set_int(vkscene.OFF_ISINSTANCED, instanced)
+            ae3d_vk_shadow_draw(m.vbo, m.instance_vbo, instances)
+        }
+        i = i + 1
+    }
+    ae3d_vk_shadow_end()
 }
 
 renderer_set_post(r: *VKRenderer, fxaa: int, bloom: int, threshold: float, intensity: float) {
@@ -342,15 +434,20 @@ renderer_remove_model(r: *VKRenderer, m: *Model) {
 
 // The same uniforms the OpenGL renderer sets, written into the block the
 // generated shader reads.
-set_scene_uniforms(r: *VKRenderer, m: *Model, light: *Light, cam: *Camera) {
-    ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &m.model_matrix)
+// The staging block keeps its contents between draws, so anything the whole
+// frame shares is written once here rather than once per model.
+set_frame_uniforms(r: *VKRenderer, light: *Light, cam: *Camera) {
     ae3d_vk_scene_set_vec3(vkscene.OFF_VIEWPOS, cam.position.x, cam.position.y, cam.position.z)
+    upload_lights(r, light)
+    ae3d_vk_scene_set_clip_mat4(vkscene.OFF_LIGHTSPACEMATRIX, &r.shadow_space)
+}
+
+set_scene_uniforms(r: *VKRenderer, m: *Model) {
+    ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &m.model_matrix)
 
     instanced = 0
     if m.is_instanced && core.model_instance_count(m) > 0 { instanced = 1 }
     ae3d_vk_scene_set_int(vkscene.OFF_ISINSTANCED, instanced)
-
-    upload_lights(r, light)
 }
 
 // The same array the OpenGL backend fills, at the offsets the generator derived
@@ -419,6 +516,8 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
 
     if ae3d_vk_frame_begin(r.clear_r, r.clear_g, r.clear_b, 1.0) != 1 { return }
 
+    render_shadow_pass(r, active_light)
+    set_frame_uniforms(r, active_light, cam)
     draw_skybox(r, cam)
 
     view_projection = core.camera_view_projection(cam)
@@ -435,7 +534,7 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
         i = 0
         while i < count {
             m = list.get_raw(r.models, i) as *Model
-            draw_model(r, m, active_light, cam, pass == 1)
+            draw_model(r, m, pass == 1)
             i = i + 1
         }
         pass = pass + 1
@@ -445,7 +544,7 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     ae3d_vk_frame_end()
 }
 
-draw_model(r: *VKRenderer, m: *Model, light: *Light, cam: *Camera, transparent_pass: bool) {
+draw_model(r: *VKRenderer, m: *Model, transparent_pass: bool) {
     if m == null || !m.visible || m.vbo == 0 { return }
 
     if core.frustum_culling() &&
@@ -466,7 +565,7 @@ draw_model(r: *VKRenderer, m: *Model, light: *Light, cam: *Camera, transparent_p
     is_transparent = alpha < 0.99
     if is_transparent != transparent_pass { return }
 
-    set_scene_uniforms(r, m, light, cam)
+    set_scene_uniforms(r, m)
     blend = 0
     if is_transparent { blend = 1 }
     ae3d_vk_set_blend(blend)

@@ -193,7 +193,13 @@ for bench in benchmarks/bench_*.ae; do
     fi
 done
 
-if command -v leaks >/dev/null 2>&1; then
+# leaks stops the target and reads its heap, which needs a debugger attach that
+# some sandboxes deny: the process ends up stopped and neither side moves again.
+# AE3D_SKIP_LEAKS=1 is for those, and CI never sets it.
+if [ -n "${AE3D_SKIP_LEAKS:-}" ]; then
+    step "leak check, headless suites"
+    skip "all" "AE3D_SKIP_LEAKS is set"
+elif command -v leaks >/dev/null 2>&1; then
     step "leak check, headless suites"
     for suite in tests/test_*.ae benchmarks/bench_*.ae; do
         [ -e "$suite" ] || continue

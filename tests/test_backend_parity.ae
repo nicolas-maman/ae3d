@@ -196,6 +196,18 @@ main() {
     core.backend_render(&vulkan_pass, cam, light)
     compare("bloom", offscreen.target_pixels(target), vk.offscreen_pixels())
 
+    // Shadows are the newest thing both backends do, and the one most likely to
+    // diverge: two depth passes, two light-space matrices, two samplers.
+    core.backend_set_post(&opengl_pass, false, false, 0.8, 0.4)
+    core.backend_set_post(&vulkan_pass, false, false, 0.8, 0.4)
+    gl.renderer_set_shadows(gl_renderer, true)
+    vk.renderer_set_shadows(vk_renderer, true)
+    check_true("both backends report shadows on",
+               gl.renderer_shadows(gl_renderer) && vk.renderer_shadows(vk_renderer))
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    compare("shadows", offscreen.target_pixels(target), vk.offscreen_pixels())
+
     core.backend_cleanup(&opengl_pass)
     core.backend_cleanup(&vulkan_pass)
     offscreen.target_destroy(target)

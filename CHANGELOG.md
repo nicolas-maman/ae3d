@@ -25,8 +25,20 @@ First working engine.
   looks like.
 - `tests/test_backend_parity` renders the same scene through both backends
   offscreen and compares every channel across materials and textures, instancing
-  and transparency, skybox, FXAA and bloom. The two agree to within 1.4% of
-  channels.
+  and transparency, skybox, FXAA, bloom and shadows. The two agree to within
+  1.5% of channels.
+- Shadow mapping in both backends. The light renders the scene into a depth map
+  of its own and the lit pass compares against it, sampled over a 3x3
+  neighbourhood with a slope-scaled bias. The light's box is centred on the
+  scene and sized to it, so the map covers what the camera can see. Depth is
+  written to a colour target because this driver returns opaque white from
+  `texture()` on a depth attachment. Vulkan records its shadow pass into the
+  frame's own command buffer ahead of the scene pass, which is why the scene
+  pass now opens at the first draw rather than at the start of the frame.
+- Up to four lights per scene in both backends, directional or point, uploaded
+  into a std140 array whose stride the generator derives from the shader.
+- The Vulkan renderer writes what a whole frame shares, the view position, the
+  lights and the light-space matrix, once per frame rather than once per model.
 - All thirteen GLSL programs ported, including the PBR and Gerstner-wave
   fragment shaders.
 
@@ -95,6 +107,10 @@ GL implementation's, over two thousand iterations with zero leaked bytes and
 - 400 separate models: 806us a frame, from 1200us before the frame's uniforms
   were hoisted out of the per-model loop.
 - Reading a 1280x720 frame back: 307us pipelined against 1625us waiting.
+- The shadow pass over 200 casters at 1280x720: 248us in OpenGL and 103us in
+  Vulkan, which records it into the frame's own command buffer. Measured by
+  alternating the two states block by block and keeping each one's fastest,
+  because the difference is smaller than the spread between whole runs.
 - The editor idle: one sample in `draw_frame` over six seconds, from 367 before
   it stopped redrawing an unchanged viewport.
 
