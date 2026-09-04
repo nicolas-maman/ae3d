@@ -1,19 +1,25 @@
 #version 450
 
+struct Light {
+    vec3 position;
+    vec3 color;
+    float intensity;
+    float ambientStrength;
+    float temperature;
+    int isDirectional;
+    vec3 direction;
+    float constantAtten;
+    float linearAtten;
+    float quadraticAtten;
+};
+
 layout(std140, set = 0, binding = 0) uniform SceneBlock {
+    Light lights[4];
     bool isInstanced;
     mat4 model;
     mat4 viewProjection;
-    vec3 light_position;
-    vec3 light_color;
-    float light_intensity;
-    float light_ambientStrength;
-    float light_temperature;
-    int light_isDirectional;
-    vec3 light_direction;
-    float light_constantAtten;
-    float light_linearAtten;
-    float light_quadraticAtten;
+    mat4 lightSpaceMatrix;
+    int lightCount;
     vec3 viewPos;
     vec3 diffuseColor;
     vec3 specularColor;

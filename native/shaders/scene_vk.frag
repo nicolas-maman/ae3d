@@ -1,20 +1,26 @@
 // Modern PBR-inspired Fragment Shader
 #version 450
 
+struct Light {
+    vec3 position;
+    vec3 color;
+    float intensity;
+    float ambientStrength;
+    float temperature;
+    int isDirectional;
+    vec3 direction;
+    float constantAtten;
+    float linearAtten;
+    float quadraticAtten;
+};
+
 layout(std140, set = 0, binding = 0) uniform SceneBlock {
+    Light lights[4];
     bool isInstanced;
     mat4 model;
     mat4 viewProjection;
-    vec3 light_position;
-    vec3 light_color;
-    float light_intensity;
-    float light_ambientStrength;
-    float light_temperature;
-    int light_isDirectional;
-    vec3 light_direction;
-    float light_constantAtten;
-    float light_linearAtten;
-    float light_quadraticAtten;
+    mat4 lightSpaceMatrix;
+    int lightCount;
     vec3 viewPos;
     vec3 diffuseColor;
     vec3 specularColor;
@@ -68,10 +74,15 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float subpixelQuality;
 };
 layout(set = 0, binding = 1) uniform sampler2D textureSampler;
+layout(set = 0, binding = 2) uniform sampler2D shadowMap;
 layout(location = 0) in vec2 fragTexCoord;
 layout(location = 1) in vec3 Normal;
 layout(location = 2) in vec3 FragPos;
 layout(location = 3) in vec3 InstanceColor;
+layout(location = 4) in vec4 FragPosLightSpace;
+
+
+
 
 
 
@@ -143,6 +154,40 @@ layout(location = 0) out vec4 FragColor;
 
 // Convert color temperature (Kelvin) to RGB multiplier
 // Optimized color temperature to RGB conversion using lookup approximation
+// The light writes how far it can see into a colour target; this compares the
+// fragment's own distance against it. Sampling a neighbourhood softens the edge.
+float shadow_factor() {
+    vec3 projected = FragPosLightSpace.xyz / FragPosLightSpace.w;
+    projected = projected * 0.5 + 0.5;
+    if (projected.z > 1.0) {
+        return 1.0;
+    }
+
+    vec3 surface = normalize(Normal);
+    vec3 toLight = normalize(lights[0].position - FragPos);
+    if (lights[0].isDirectional == 1) {
+        toLight = normalize(-lights[0].direction);
+    }
+
+    // A surface nearly edge-on to the light needs a larger offset, or its own
+    // depth reads as occluding it.
+    float bias = max(0.02 * (1.0 - dot(surface, toLight)), 0.005);
+
+    vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0));
+    float radius = max(shadowSoftness, 0.0);
+    float lit = 0.0;
+    for (int sx = -1; sx <= 1; sx++) {
+        for (int sy = -1; sy <= 1; sy++) {
+            vec2 at = projected.xy + vec2(float(sx), float(sy)) * texel * radius;
+            float closest = texture(shadowMap, at).r;
+            lit += projected.z - bias > closest ? 0.0 : 1.0;
+        }
+    }
+    lit = lit / 9.0;
+
+    return mix(shadowIntensity, 1.0, lit);
+}
+
 vec3 kelvinToRGB(float kelvin) {
     kelvin = clamp(kelvin, 1000.0, 12000.0);
     
@@ -567,7 +612,70 @@ float turbulence(vec3 p, int octaves) {
     return value / maxValue;
 }
 
+// One light's contribution. Everything here depends on which light is shading;
+// anything that does not stays in main and is computed once.
+vec3 direct_light(Light L, vec3 norm, vec3 viewDir, vec3 albedo, vec3 F0,
+                  float NdotV, float adjustedRoughness) {
+    vec3 tempAdjustedLightColor = L.color * kelvinToRGB(L.temperature);
+
+    vec3 lightDir;
+    float attenuation = 1.0;
+    if (L.isDirectional == 1) {
+        lightDir = normalize(L.direction);
+    } else {
+        // High-precision point light calculation for perfect reflections
+        vec3 lightVec = L.position - FragPos;
+        float distance = length(lightVec);
+        lightDir = lightVec / distance; // More precise than normalize()
+        attenuation = 1.0 / (L.constantAtten + L.linearAtten * distance + L.quadraticAtten * distance * distance);
+    }
+
+    vec3 halfwayDir = normalize(lightDir + viewDir);
+    vec3 radiance = tempAdjustedLightColor * L.intensity * attenuation;
+
+    float NdotL_raw = dot(norm, lightDir);
+    float HdotV = clamp(dot(halfwayDir, viewDir), 0.001, 1.0); // Avoid zero division
+    float NdotL = max(NdotL_raw, 0.0);
+
+    float NDF = distributionGGX(norm, halfwayDir, adjustedRoughness);
+    float G = geometrySmith(norm, viewDir, lightDir, adjustedRoughness);
+    vec3 F = fresnelSchlick(HdotV, F0);
+
+    vec3 kS = F;
+    vec3 kD = vec3(1.0) - kS;
+    kD *= 1.0 - metallic; // Metallic surfaces don't have diffuse reflection
+
+    vec3 numerator = NDF * G * F;
+    float denominator = 4.0 * NdotV * NdotL + 0.0001;
+    vec3 specular = numerator / denominator;
+
+    // Apply view-dependent attenuation to make highlights more natural
+    float viewAttenuation = pow(NdotV, 0.6);
+    specular *= viewAttenuation * 0.5;
+
+    vec3 clearcoat = calculateClearcoat(norm, viewDir, lightDir, halfwayDir, albedo);
+    vec3 sheen = calculateSheen(norm, viewDir, lightDir, halfwayDir);
+    vec3 transmission = calculateTransmission(norm, viewDir, lightDir, albedo);
+
+    specular = compensateEnergyLoss(specular, NdotV, roughness);
+
+    // Hemisphere lighting: standard NdotL for front faces, a fill for the back
+    // so the terminator is not a hard cut.
+    float hemisphereNdotL = max(NdotL_raw, 0.0);
+    float fillLight = max(-NdotL_raw * 0.3, 0.0);
+
+    vec3 lit = applyEnergyConservation(
+        kD * albedo / 3.14159265359 * radiance * hemisphereNdotL,
+        specular * radiance * hemisphereNdotL,
+        clearcoat * radiance * hemisphereNdotL,
+        sheen * radiance * hemisphereNdotL
+    ) + transmission;
+
+    return lit + fillLight * tempAdjustedLightColor * albedo * 0.2;
+}
+
 void main() {
+
     vec4 texColor = texture(textureSampler, fragTexCoord);
     
     // Check for emissive objects first - bypass all lighting for sun-like objects
@@ -579,132 +687,65 @@ void main() {
     }
     
     // Pre-calculate expensive operations once
-    vec3 tempAdjustedLightColor = light_color * kelvinToRGB(light_temperature);
     vec3 norm = normalize(Normal);
     vec3 viewDir = normalize(viewPos - FragPos);
-    
-    // Remove early exit that was causing rendering issues
-    
-    vec3 lightDir;
-    float attenuation = 1.0;
-    
-    // Calculate light direction and attenuation based on light type
-    if (light_isDirectional == 1) {
-        lightDir = normalize(light_direction); // Use light direction as-is for proper lighting
-    } else {
-        // High-precision point light calculation for perfect reflections
-        vec3 lightVec = light_position - FragPos;
-        float distance = length(lightVec);
-        lightDir = lightVec / distance; // More precise than normalize()
-        attenuation = 1.0 / (light_constantAtten + light_linearAtten * distance + light_quadraticAtten * distance * distance);
-    }
-    
-    vec3 halfwayDir = normalize(lightDir + viewDir);
-    
+
     // Material properties
     vec3 albedo = diffuseColor * texColor.rgb * InstanceColor; // Apply per-instance color
-    
+
+    // GPU Gems Chapter 5: Apply Perlin noise for surface detail if enabled
+    if (enablePerlinNoise) {
+        vec3 noiseCoord = FragPos * noiseScale;
+        float noiseValue = turbulence(noiseCoord, noiseOctaves);
+        albedo = mix(albedo, albedo * (1.0 + noiseValue * 0.3), noiseIntensity);
+    }
+
     // Calculate F0 (surface reflection at zero incidence) with realistic values
     vec3 F0 = vec3(0.04); // Default for dielectrics
-    
+
     // Use realistic metallic F0 values based on material color
     if (metallic > 0.5) {
         // For metals, use color-based F0 values that are more realistic
         vec3 metalF0 = albedo;
-        
+
         // Enhance metallic reflectance based on color
         if (albedo.r > albedo.g && albedo.r > albedo.b) {
             // Reddish metals (copper, gold)
             metalF0 = mix(vec3(0.95, 0.64, 0.54), albedo, 0.7); // Copper-like
         } else if (albedo.g > albedo.r && albedo.g > albedo.b) {
-            // Greenish metals (rare, but handle it)
-            metalF0 = mix(vec3(0.66, 0.88, 0.71), albedo, 0.7);
+            metalF0 = mix(vec3(0.70, 0.78, 0.74), albedo, 0.7);
         } else if (albedo.b > albedo.r && albedo.b > albedo.g) {
-            // Bluish metals (rare, but handle it)
-            metalF0 = mix(vec3(0.56, 0.57, 0.58), albedo, 0.7);
+            metalF0 = mix(vec3(0.66, 0.73, 0.80), albedo, 0.7);
         } else {
-            // Neutral metals (silver, aluminum, steel)
-            metalF0 = mix(vec3(0.91, 0.92, 0.92), albedo, 0.5); // Silver-like
+            metalF0 = mix(vec3(0.95, 0.93, 0.88), albedo, 0.7); // Silver-like
         }
-        
+
         F0 = mix(F0, metalF0, metallic);
     } else {
         F0 = mix(F0, albedo, metallic);
     }
-    
-    // Calculate per-light radiance
-    vec3 radiance = tempAdjustedLightColor * light_intensity * attenuation;
-    
-    // High-precision dot products for perfect reflection calculations
+
     float NdotV = clamp(dot(norm, viewDir), 0.001, 1.0); // Avoid zero division
-    float NdotL_raw = dot(norm, lightDir); // Don't clamp yet - we need the raw value
-    float NdotL = max(NdotL_raw, 0.0); // Only clamp negative to 0 for lighting calculations
-    float HdotV = clamp(dot(halfwayDir, viewDir), 0.001, 1.0); // Avoid zero division
-    
-    // Don't early exit for back-facing surfaces - use wrap-around lighting instead
-    // This prevents the harsh "two halves" effect
-    
-    // BRDF calculations with optimized dot products
     // Ensure minimum roughness to prevent point light artifacts
     float adjustedRoughness = max(roughness, 0.08); // Balanced minimum roughness
-    float NDF = distributionGGX(norm, halfwayDir, adjustedRoughness);
-    float G = geometrySmith(norm, viewDir, lightDir, adjustedRoughness);
-    vec3 F = fresnelSchlick(HdotV, F0);
-    
-    vec3 kS = F;
-    vec3 kD = vec3(1.0) - kS;
-    kD *= 1.0 - metallic; // Metallic surfaces don't have diffuse reflection
-    
-    vec3 numerator = NDF * G * F;
-    float denominator = 4.0 * NdotV * NdotL + 0.0001; // Use pre-calculated values
-    vec3 specular = numerator / denominator;
-    
-    // Reduce specular intensity to prevent point light artifacts
-    // Apply view-dependent attenuation to make highlights more natural
-    float viewAttenuation = pow(NdotV, 0.6); // Moderate softening
-    specular *= viewAttenuation * 0.5; // Moderate specular reduction
-    
-    // Calculate modern PBR extensions
-    vec3 clearcoat = calculateClearcoat(norm, viewDir, lightDir, halfwayDir, albedo);
-    vec3 sheen = calculateSheen(norm, viewDir, lightDir, halfwayDir);
-    vec3 transmission = calculateTransmission(norm, viewDir, lightDir, albedo);
-    
-    // Apply multiple scattering compensation
-    specular = compensateEnergyLoss(specular, NdotV, roughness);
-    
-    // Hemisphere lighting - proper approach without washing out materials
-    // Use standard NdotL for front faces, ambient for back faces
-    float hemisphereNdotL = max(NdotL_raw, 0.0);
-    
-    // Add subtle fill light for back faces to avoid harsh cutoff
-    float fillLight = max(-NdotL_raw * 0.3, 0.0); // 30% fill from opposite direction
-    
-    // Base PBR calculation with hemisphere lighting
-    vec3 basePBR = (kD * albedo / 3.14159265359 + specular) * radiance * hemisphereNdotL;
-    
-    // Apply energy conservation for layered materials
-    vec3 Lo = applyEnergyConservation(
-        kD * albedo / 3.14159265359 * radiance * hemisphereNdotL,
-        specular * radiance * hemisphereNdotL,
-        clearcoat * radiance * hemisphereNdotL,
-        sheen * radiance * hemisphereNdotL
-    ) + transmission;
-    
-    // Ambient lighting with hemisphere fill light
-    // Reduced base ambient, add fill light for back faces
-    vec3 ambient = light_ambientStrength * tempAdjustedLightColor * albedo * 0.8;
-    vec3 fillLightContrib = fillLight * tempAdjustedLightColor * albedo * 0.2;
-    
-    // GPU Gems Chapter 5: Apply Perlin noise for surface detail if enabled
-    if (enablePerlinNoise) {
-        vec3 noiseCoord = FragPos * noiseScale;
-        float noiseValue = turbulence(noiseCoord, noiseOctaves);
-        
-		// Apply noise directly to albedo for visible surface detail
-		albedo = mix(albedo, albedo * (1.0 + noiseValue * 0.3), noiseIntensity);
+
+    // Every light in the scene contributes; the loop stops at lightCount, so a
+    // scene with one light costs what it did before there could be four.
+    vec3 Lo = vec3(0.0);
+    for (int i = 0; i < 4; i++) {
+        if (i >= lightCount) {
+            break;
+        }
+        Lo += direct_light(lights[i], norm, viewDir, albedo, F0, NdotV, adjustedRoughness);
     }
-    
-    // Use the properly calculated Lo from energy conservation with fill light
+
+    // Ambient belongs to the scene rather than to each light, so it comes from
+    // the key light alone; summing it per light would wash the image out as
+    // lights were added.
+    vec3 keyColor = lights[0].color * kelvinToRGB(lights[0].temperature);
+    vec3 ambient = lights[0].ambientStrength * keyColor * albedo * 0.8;
+    vec3 fillLightContrib = vec3(0.0);
+
     vec3 color = ambient + fillLightContrib + Lo;
     
 	// Calculate distance for performance scaling (CRITICAL for voxel terrain performance)
@@ -717,7 +758,7 @@ void main() {
 	color *= ssaoFactor;
     
 	// Volumetric lighting (with distance LOD built-in)
-	vec3 volumetric = calculateVolumetricLighting(FragPos, light_position, viewPos);
+	vec3 volumetric = calculateVolumetricLighting(FragPos, lights[0].position, viewPos);
 	color += volumetric;
     
 	// Global Illumination (with distance LOD built-in)
@@ -734,36 +775,7 @@ void main() {
     // HDR exposure and tone mapping for normal objects
     color = color * exposure;
     // GPU Gems Chapter 9 & 11: Apply shadows with proper sun behavior
-    if (enableShadows) {
-        float shadowFactor = 1.0;
-        
-        // For directional lights (like sun): use uniform shadow based on position
-        if (light_isDirectional == 1) {
-            // Sun shadows: uniform illumination, no distance falloff
-            // Only apply shadows in specific areas (like under objects)
-            vec3 worldPos = FragPos;
-            float shadowNoise = sin(worldPos.x * 0.0001) * sin(worldPos.z * 0.0001);
-            
-            // Very subtle shadow variation for realism, not distance-based darkening
-            shadowFactor = 1.0 - shadowIntensity * 0.1 * shadowNoise;
-        } else {
-            // Point light shadows: distance-based (for torches, lamps, etc.)
-            float lightDistance = length(light_position - FragPos);
-            if (lightDistance > 50000.0) {
-                float distanceFactor = smoothstep(50000.0, 150000.0, lightDistance);
-                shadowFactor = mix(1.0, shadowIntensity, distanceFactor);
-                
-                // Chapter 11: Add shadow edge softness
-                float shadowEdge = fract(lightDistance * 0.00001);
-                shadowFactor = mix(shadowFactor, 1.0, shadowEdge * shadowSoftness);
-            }
-        }
-        
-        // Apply shadow to lighting components (preserve ambient)
-        vec3 lightContrib = color - ambient;
-        lightContrib *= shadowFactor;
-        color = ambient + lightContrib;
-    }
+    color = color * shadow_factor();
     
     // Apply bloom effect
     if (enableBloom) {

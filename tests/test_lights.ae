@@ -1,0 +1,117 @@
+// A second light has to change the image.
+//
+// One dim key light, then a bright point light added beside the camera. If only
+// the first light reaches the shader the two frames are identical, which is what
+// this scene is shaped to catch: the second light is placed where it lights a
+// face the first one leaves dark.
+
+import std.mem
+import std.list
+import ae3d.core
+import ae3d.gl
+import ae3d.offscreen
+import ae3d.loader
+
+const WIDTH = 256
+const HEIGHT = 192
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+frame_total(pixels: ptr) -> int {
+    total = 0
+    i = 0
+    while i < WIDTH * HEIGHT {
+        index = i * 4
+        total = total + mem.get_byte(pixels, index) +
+                mem.get_byte(pixels, index + 1) +
+                mem.get_byte(pixels, index + 2)
+        i = i + 1
+    }
+    return total
+}
+
+main() {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("lights: SKIP no OpenGL context")
+        return
+    }
+
+    renderer = gl.renderer_new()
+    backend = gl.backend(renderer)
+    if !core.backend_init(&backend, context, WIDTH, HEIGHT) {
+        println("lights: SKIP the OpenGL backend would not initialise")
+        return
+    }
+
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    gl.renderer_set_clear_color(renderer, 0.0, 0.0, 0.0)
+
+    ball = loader.sphere(1.0, 32, 24)
+    core.model_set_scale(ball, 40.0, 40.0, 40.0)
+    core.model_matte(ball, 0.8, 0.8, 0.8)
+    core.backend_add_model(&backend, ball)
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 0.0, 140.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+
+    // Lighting from behind, so the face the camera sees is nearly unlit.
+    key = core.light_directional(core.vec3(0.0, 0.0, 0.0 - 1.0),
+                                 core.vec3(1.0, 1.0, 1.0), 1.0)
+    key.ambient_strength = 0.05
+    gl.renderer_add_light(renderer, key)
+
+    core.backend_render(&backend, cam, key)
+    pixels = offscreen.target_pixels(target)
+    if pixels == null { println("lights: SKIP no pixels") ; return }
+    one_light = frame_total(pixels)
+
+    // A point light on the camera's side, lighting exactly what the key misses.
+    fill = core.light_point(core.vec3(0.0, 0.0, 120.0),
+                            core.vec3(1.0, 0.9, 0.7), 3.0, 400.0)
+    fill.ambient_strength = 0.05
+    gl.renderer_add_light(renderer, fill)
+
+    core.backend_render(&backend, cam, key)
+    pixels = offscreen.target_pixels(target)
+    two_lights = frame_total(pixels)
+
+    check("one light lights the scene", one_light > 0)
+    check("a second light brightens the frame", two_lights > one_light)
+    check("the second light is not a rounding difference",
+          two_lights - one_light > one_light / 20)
+
+    // Removing it must put the frame back.
+    gl.renderer_remove_light(renderer, fill)
+    core.backend_render(&backend, cam, key)
+    pixels = offscreen.target_pixels(target)
+    check("removing the light restores the frame", frame_total(pixels) == one_light)
+
+    println("  one light ${one_light}, two lights ${two_lights}")
+
+    core.backend_cleanup(&backend)
+    offscreen.target_destroy(target)
+    offscreen.context_destroy(context)
+    core.model_free(ball)
+    gl.renderer_free(renderer)
+    core.camera_free(cam)
+    core.light_free(key)
+    core.light_free(fill)
+
+    if failures == 0 {
+        println("lights: all checks passed")
+    } else {
+        println("lights: ${failures} failure(s)")
+    }
+}

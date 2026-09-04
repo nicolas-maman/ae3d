@@ -342,7 +342,7 @@ renderer_remove_model(r: *VKRenderer, m: *Model) {
 
 // The same uniforms the OpenGL renderer sets, written into the block the
 // generated shader reads.
-set_scene_uniforms(m: *Model, light: *Light, cam: *Camera) {
+set_scene_uniforms(r: *VKRenderer, m: *Model, light: *Light, cam: *Camera) {
     ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &m.model_matrix)
     ae3d_vk_scene_set_vec3(vkscene.OFF_VIEWPOS, cam.position.x, cam.position.y, cam.position.z)
 
@@ -350,20 +350,45 @@ set_scene_uniforms(m: *Model, light: *Light, cam: *Camera) {
     if m.is_instanced && core.model_instance_count(m) > 0 { instanced = 1 }
     ae3d_vk_scene_set_int(vkscene.OFF_ISINSTANCED, instanced)
 
-    if light != null {
-        ae3d_vk_scene_set_vec3(vkscene.OFF_LIGHT_POSITION, light.position.x, light.position.y, light.position.z)
-        ae3d_vk_scene_set_vec3(vkscene.OFF_LIGHT_COLOR, light.color.x, light.color.y, light.color.z)
-        ae3d_vk_scene_set_float(vkscene.OFF_LIGHT_INTENSITY, light.intensity)
-        ae3d_vk_scene_set_float(vkscene.OFF_LIGHT_AMBIENTSTRENGTH, light.ambient_strength)
-        ae3d_vk_scene_set_float(vkscene.OFF_LIGHT_TEMPERATURE, light.temperature)
-        directional = 0
-        if light.mode == core.MODE_DIRECTIONAL { directional = 1 }
-        ae3d_vk_scene_set_int(vkscene.OFF_LIGHT_ISDIRECTIONAL, directional)
-        ae3d_vk_scene_set_vec3(vkscene.OFF_LIGHT_DIRECTION, light.direction.x, light.direction.y, light.direction.z)
-        ae3d_vk_scene_set_float(vkscene.OFF_LIGHT_CONSTANTATTEN, light.constant_atten)
-        ae3d_vk_scene_set_float(vkscene.OFF_LIGHT_LINEARATTEN, light.linear_atten)
-        ae3d_vk_scene_set_float(vkscene.OFF_LIGHT_QUADRATICATTEN, light.quadratic_atten)
+    upload_lights(r, light)
+}
+
+// The same array the OpenGL backend fills, at the offsets the generator derived
+// from the one shader source, so the two cannot disagree about the layout.
+upload_lights(r: *VKRenderer, key: *Light) {
+    count = list.size(r.lights)
+    if count > vkscene.MAX_LIGHTS { count = vkscene.MAX_LIGHTS }
+
+    i = 0
+    while i < count {
+        upload_light(i, list.get_raw(r.lights, i) as *Light)
+        i = i + 1
     }
+
+    if count == 0 && key != null {
+        upload_light(0, key)
+        count = 1
+    }
+    ae3d_vk_scene_set_int(vkscene.OFF_LIGHTCOUNT, count)
+}
+
+upload_light(index: int, l: *Light) {
+    if l == null { return }
+    base = index * vkscene.LIGHT_STRIDE
+    ae3d_vk_scene_set_vec3(base + vkscene.LIGHT_POSITION, l.position.x, l.position.y, l.position.z)
+    ae3d_vk_scene_set_vec3(base + vkscene.LIGHT_COLOR, l.color.x, l.color.y, l.color.z)
+    ae3d_vk_scene_set_float(base + vkscene.LIGHT_INTENSITY, l.intensity)
+    ae3d_vk_scene_set_float(base + vkscene.LIGHT_AMBIENTSTRENGTH, l.ambient_strength)
+    ae3d_vk_scene_set_float(base + vkscene.LIGHT_TEMPERATURE, l.temperature)
+
+    directional = 0
+    if l.mode == core.MODE_DIRECTIONAL { directional = 1 }
+    ae3d_vk_scene_set_int(base + vkscene.LIGHT_ISDIRECTIONAL, directional)
+
+    ae3d_vk_scene_set_vec3(base + vkscene.LIGHT_DIRECTION, l.direction.x, l.direction.y, l.direction.z)
+    ae3d_vk_scene_set_float(base + vkscene.LIGHT_CONSTANTATTEN, l.constant_atten)
+    ae3d_vk_scene_set_float(base + vkscene.LIGHT_LINEARATTEN, l.linear_atten)
+    ae3d_vk_scene_set_float(base + vkscene.LIGHT_QUADRATICATTEN, l.quadratic_atten)
 }
 
 set_material_uniforms(material: *Material) {
@@ -441,7 +466,7 @@ draw_model(r: *VKRenderer, m: *Model, light: *Light, cam: *Camera, transparent_p
     is_transparent = alpha < 0.99
     if is_transparent != transparent_pass { return }
 
-    set_scene_uniforms(m, light, cam)
+    set_scene_uniforms(r, m, light, cam)
     blend = 0
     if is_transparent { blend = 1 }
     ae3d_vk_set_blend(blend)

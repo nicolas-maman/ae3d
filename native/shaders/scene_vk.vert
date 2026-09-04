@@ -1,19 +1,25 @@
 #version 450
 
+struct Light {
+    vec3 position;
+    vec3 color;
+    float intensity;
+    float ambientStrength;
+    float temperature;
+    int isDirectional;
+    vec3 direction;
+    float constantAtten;
+    float linearAtten;
+    float quadraticAtten;
+};
+
 layout(std140, set = 0, binding = 0) uniform SceneBlock {
+    Light lights[4];
     bool isInstanced;
     mat4 model;
     mat4 viewProjection;
-    vec3 light_position;
-    vec3 light_color;
-    float light_intensity;
-    float light_ambientStrength;
-    float light_temperature;
-    int light_isDirectional;
-    vec3 light_direction;
-    float light_constantAtten;
-    float light_linearAtten;
-    float light_quadraticAtten;
+    mat4 lightSpaceMatrix;
+    int lightCount;
     vec3 viewPos;
     vec3 diffuseColor;
     vec3 specularColor;
@@ -77,10 +83,12 @@ layout(location = 7) in vec3 instanceColor; // Per-instance color (for voxels)
 
 
 
+
 layout(location = 0) out vec2 fragTexCoord;
 layout(location = 1) out vec3 Normal;
 layout(location = 2) out vec3 FragPos;
 layout(location = 3) out vec3 InstanceColor;
+layout(location = 4) out vec4 FragPosLightSpace;
 
 void main() {
     // Decide whether to use instanced or regular model matrix
@@ -103,6 +111,7 @@ void main() {
     InstanceColor = isInstanced ? instanceColor : vec3(1.0, 1.0, 1.0);
 
     // Final vertex position
+    FragPosLightSpace = lightSpaceMatrix * vec4(FragPos, 1.0);
     gl_Position = viewProjection * modelMatrix * vec4(inPosition, 1.0);
 }
 

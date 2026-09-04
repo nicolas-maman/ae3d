@@ -28,6 +28,8 @@ exports (
     read_pixel
 )
 
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
 extern ae3d_gl_load() -> int
 extern ae3d_gl_version() -> string
 extern ae3d_gl_renderer() -> string
@@ -89,12 +91,16 @@ extern ae3d_image_error() -> string
 
 const MAX_FBO_DIMENSION = 8192
 const SHADOW_SIZE = 2048
+const MAX_LIGHTS = 4
+const LIGHT_SLOTS = 10
 
 struct ProgramSlots {
     program: int
     frame_stamp: int
     view_projection: int
     model: int
+    light_slots: ptr
+    light_count: int
     light_position: int
     light_color: int
     light_intensity: int
@@ -214,7 +220,10 @@ renderer_free(r: *GLRenderer) {
         i = 0
         while i < count {
             slots = list.get_raw(r.programs, i) as *ProgramSlots
-            if slots != null { heap.free(slots) }
+            if slots != null {
+                free(slots.light_slots)
+                heap.free(slots)
+            }
             i = i + 1
         }
         list.free(r.programs)
@@ -271,6 +280,27 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
     s.program = program
     s.view_projection = ae3d_gl_uniform_location(program, "viewProjection")
     s.model = ae3d_gl_uniform_location(program, "model")
+    // One lookup per light per program, done once, because an array of structs
+    // gives no guarantee that element locations are contiguous.
+    s.light_slots = calloc(MAX_LIGHTS * LIGHT_SLOTS, 4)
+    slots_of = s.light_slots as int[]
+    n = 0
+    while n < MAX_LIGHTS {
+        base = n * LIGHT_SLOTS
+        slots_of[base] = ae3d_gl_uniform_location(program, "lights[${n}].position")
+        slots_of[base + 1] = ae3d_gl_uniform_location(program, "lights[${n}].color")
+        slots_of[base + 2] = ae3d_gl_uniform_location(program, "lights[${n}].intensity")
+        slots_of[base + 3] = ae3d_gl_uniform_location(program, "lights[${n}].ambientStrength")
+        slots_of[base + 4] = ae3d_gl_uniform_location(program, "lights[${n}].temperature")
+        slots_of[base + 5] = ae3d_gl_uniform_location(program, "lights[${n}].isDirectional")
+        slots_of[base + 6] = ae3d_gl_uniform_location(program, "lights[${n}].direction")
+        slots_of[base + 7] = ae3d_gl_uniform_location(program, "lights[${n}].constantAtten")
+        slots_of[base + 8] = ae3d_gl_uniform_location(program, "lights[${n}].linearAtten")
+        slots_of[base + 9] = ae3d_gl_uniform_location(program, "lights[${n}].quadraticAtten")
+        n = n + 1
+    }
+    s.light_count = ae3d_gl_uniform_location(program, "lightCount")
+
     s.light_position = ae3d_gl_uniform_location(program, "light.position")
     s.light_color = ae3d_gl_uniform_location(program, "light.color")
     s.light_intensity = ae3d_gl_uniform_location(program, "light.intensity")
@@ -918,7 +948,7 @@ render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
     slots = slots_for(r, program)
     use_program(r, program)
     if slots.frame_stamp != r.frame_stamp {
-        set_frame_uniforms(slots, view_projection, light, cam)
+        set_frame_uniforms(slots, view_projection, light, r.lights, cam)
         slots.frame_stamp = r.frame_stamp
     }
     bind_shadow_map(r, slots)
@@ -1005,32 +1035,67 @@ draw(r: *GLRenderer, m: *Model, slots: *ProgramSlots, count: int, byte_offset: i
 // once per program per frame rather than once per model. Only the model matrix
 // actually differs between draws.
 set_frame_uniforms(slots: *ProgramSlots, view_projection: *Mat4,
-                   light: *Light, cam: *Camera) {
+                   light: *Light, lights: ptr, cam: *Camera) {
     ae3d_gl_uniform_mat4(slots.view_projection, view_projection)
 
-    if light != null {
-        ae3d_gl_uniform_vec3(slots.light_position, light.position.x, light.position.y, light.position.z)
-        ae3d_gl_uniform_vec3(slots.light_color, light.color.x, light.color.y, light.color.z)
-        ae3d_gl_uniform_float(slots.light_intensity, light.intensity)
-        ae3d_gl_uniform_float(slots.light_ambient, light.ambient_strength)
-        ae3d_gl_uniform_float(slots.light_temperature, light.temperature)
-
-        directional = 0
-        if light.mode == core.MODE_DIRECTIONAL { directional = 1 }
-        ae3d_gl_uniform_int(slots.light_is_directional, directional)
-
-        ae3d_gl_uniform_vec3(slots.light_direction, light.direction.x, light.direction.y, light.direction.z)
-        ae3d_gl_uniform_float(slots.light_constant, light.constant_atten)
-        ae3d_gl_uniform_float(slots.light_linear, light.linear_atten)
-        ae3d_gl_uniform_float(slots.light_quadratic, light.quadratic_atten)
-
-        ae3d_gl_uniform_vec3(slots.compat_light_pos, light.position.x, light.position.y, light.position.z)
-        ae3d_gl_uniform_vec3(slots.compat_light_color, light.color.x, light.color.y, light.color.z)
-        ae3d_gl_uniform_float(slots.compat_light_intensity, light.intensity)
-        ae3d_gl_uniform_vec3(slots.compat_light_direction, light.direction.x, light.direction.y, light.direction.z)
-    }
+    upload_lights(slots, lights, light)
 
     ae3d_gl_uniform_vec3(slots.view_pos, cam.position.x, cam.position.y, cam.position.z)
+}
+
+// Every light the scene holds, capped at what the shader declares. The key light
+// is whichever the caller named, so a scene with one light behaves exactly as it
+// did before there could be several.
+upload_lights(slots: *ProgramSlots, lights: ptr, key: *Light) {
+    if slots.light_slots == null { return }
+    slots_of = slots.light_slots as int[]
+
+    count = 0
+    if lights != null { count = list.size(lights) }
+    if count > MAX_LIGHTS { count = MAX_LIGHTS }
+
+    i = 0
+    while i < count {
+        upload_light(slots_of, i, list.get_raw(lights, i) as *Light)
+        i = i + 1
+    }
+
+    // A caller that passed a light without registering it still gets lit.
+    if count == 0 && key != null {
+        upload_light(slots_of, 0, key)
+        count = 1
+    }
+    ae3d_gl_uniform_int(slots.light_count, count)
+
+    first = key
+    if count > 0 && lights != null && list.size(lights) > 0 {
+        first = list.get_raw(lights, 0) as *Light
+    }
+    if first != null {
+        ae3d_gl_uniform_vec3(slots.compat_light_pos, first.position.x, first.position.y, first.position.z)
+        ae3d_gl_uniform_vec3(slots.compat_light_color, first.color.x, first.color.y, first.color.z)
+        ae3d_gl_uniform_float(slots.compat_light_intensity, first.intensity)
+        ae3d_gl_uniform_vec3(slots.compat_light_direction, first.direction.x, first.direction.y, first.direction.z)
+    }
+}
+
+upload_light(slots_of: int[], index: int, l: *Light) {
+    if l == null { return }
+    base = index * LIGHT_SLOTS
+    ae3d_gl_uniform_vec3(slots_of[base], l.position.x, l.position.y, l.position.z)
+    ae3d_gl_uniform_vec3(slots_of[base + 1], l.color.x, l.color.y, l.color.z)
+    ae3d_gl_uniform_float(slots_of[base + 2], l.intensity)
+    ae3d_gl_uniform_float(slots_of[base + 3], l.ambient_strength)
+    ae3d_gl_uniform_float(slots_of[base + 4], l.temperature)
+
+    directional = 0
+    if l.mode == core.MODE_DIRECTIONAL { directional = 1 }
+    ae3d_gl_uniform_int(slots_of[base + 5], directional)
+
+    ae3d_gl_uniform_vec3(slots_of[base + 6], l.direction.x, l.direction.y, l.direction.z)
+    ae3d_gl_uniform_float(slots_of[base + 7], l.constant_atten)
+    ae3d_gl_uniform_float(slots_of[base + 8], l.linear_atten)
+    ae3d_gl_uniform_float(slots_of[base + 9], l.quadratic_atten)
 }
 
 // Unit 1, because unit 0 is the material's own texture and changes per group.

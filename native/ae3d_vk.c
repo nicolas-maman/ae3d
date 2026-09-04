@@ -1615,7 +1615,7 @@ void ae3d_vk_texture_destroy(int handle) {
 }
 
 static int ae3d_vk_create_descriptors(void) {
-    VkDescriptorSetLayoutBinding bindings[2];
+    VkDescriptorSetLayoutBinding bindings[3];
     VkDescriptorSetLayoutCreateInfo layout;
     VkDescriptorPoolSize sizes[2];
     VkDescriptorPoolCreateInfo pool;
@@ -1633,9 +1633,17 @@ static int ae3d_vk_create_descriptors(void) {
     bindings[1].descriptorCount = 1;
     bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
+    // The shadow map the fragment shader declares. OpenGL fills it from its
+    // depth pass; here it holds the default texture until Vulkan has one, which
+    // reads as fully lit and keeps the two backends agreeing.
+    bindings[2].binding = 2;
+    bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[2].descriptorCount = 1;
+    bindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
     memset(&layout, 0, sizeof(layout));
     layout.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layout.bindingCount = 2;
+    layout.bindingCount = 3;
     layout.pBindings = bindings;
     if (ae3d_vkCreateDescriptorSetLayout(vk.device, &layout, NULL, &vk.set_layout) != VK_SUCCESS) {
         return ae3d_vk_fail("vkCreateDescriptorSetLayout failed");
@@ -1645,7 +1653,7 @@ static int ae3d_vk_create_descriptors(void) {
     sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     sizes[0].descriptorCount = AE3D_VK_FRAMES * AE3D_VK_MAX_TEXTURES;
     sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    sizes[1].descriptorCount = AE3D_VK_FRAMES * AE3D_VK_MAX_TEXTURES;
+    sizes[1].descriptorCount = AE3D_VK_FRAMES * AE3D_VK_MAX_TEXTURES * 2;
 
     memset(&pool, 0, sizeof(pool));
     pool.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1687,7 +1695,8 @@ static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle) {
     VkDescriptorSet set = VK_NULL_HANDLE;
     VkDescriptorBufferInfo buffer;
     VkDescriptorImageInfo image;
-    VkWriteDescriptorSet writes[2];
+    VkDescriptorImageInfo shadow;
+    VkWriteDescriptorSet writes[3];
     ae3d_vk_texture *texture;
     int index;
 
@@ -1729,7 +1738,22 @@ static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle) {
     writes[1].descriptorCount = 1;
     writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[1].pImageInfo = &image;
-    ae3d_vkUpdateDescriptorSets(vk.device, 2, writes, 0, NULL);
+
+    // Binding 2 is the shadow map the shader declares. Until Vulkan has a depth
+    // pass it holds the default white texture, which reads as nothing occluded.
+    memset(&shadow, 0, sizeof(shadow));
+    shadow.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    shadow.imageView = vk.textures[vk.default_texture - 1].view;
+    shadow.sampler = vk.textures[vk.default_texture - 1].sampler;
+
+    writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[2].dstSet = set;
+    writes[2].dstBinding = 2;
+    writes[2].descriptorCount = 1;
+    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[2].pImageInfo = &shadow;
+
+    ae3d_vkUpdateDescriptorSets(vk.device, 3, writes, 0, NULL);
 
     index = vk.set_count[frame]++;
     vk.sets[frame][index] = set;
