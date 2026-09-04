@@ -41,6 +41,9 @@
 
 #define AE3D_VK_FRAMES 2
 #define AE3D_VK_SHADOW_SIZE 2048
+#define AE3D_VK_PROGRAM_SCENE 0
+#define AE3D_VK_PROGRAM_WATER 1
+#define AE3D_VK_PROGRAM_COUNT 2
 #define AE3D_VK_SHADOW_FORMAT VK_FORMAT_R16G16B16A16_SFLOAT
 #define AE3D_VK_DRAWS_PER_FRAME 4096
 #define AE3D_VK_MAX_TEXTURES 256
@@ -227,6 +230,9 @@ static struct {
     VkImageView shadow_depth_view;
     VkSampler shadow_sampler;
     VkPipeline shadow_pipeline;
+    VkPipeline water_pipeline;
+    VkPipeline water_pipeline_blend;
+    int program;
     int shadow_enabled;
     int pass_open;
     int in_shadow_pass;
@@ -255,7 +261,10 @@ static struct {
     ae3d_vk_texture textures[AE3D_VK_MAX_TEXTURES];
     int default_texture;
 
-    ae3d_vk_scene scene;
+    // One block per program, the way OpenGL gives every program its own uniform
+    // state. Sharing one would let a model's uniforms leak into the next draw
+    // that uses a different program, since the two blocks share member names.
+    ae3d_vk_scene scene[AE3D_VK_PROGRAM_COUNT];
     int blend;
     int draw_calls;
     float bloom_threshold;
@@ -1922,20 +1931,20 @@ static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle) {
 }
 
 void ae3d_vk_scene_set_float(int offset, double value) {
-    ae3d_vk_set_float(&vk.scene, offset, (float)value);
+    ae3d_vk_set_float(&vk.scene[vk.program], offset, (float)value);
 }
 
 void ae3d_vk_scene_set_int(int offset, int value) {
-    ae3d_vk_set_int(&vk.scene, offset, value);
+    ae3d_vk_set_int(&vk.scene[vk.program], offset, value);
 }
 
 void ae3d_vk_scene_set_vec3(int offset, double x, double y, double z) {
-    ae3d_vk_set_vec3(&vk.scene, offset, x, y, z);
+    ae3d_vk_set_vec3(&vk.scene[vk.program], offset, x, y, z);
 }
 
 void ae3d_vk_scene_set_mat4(int offset, const double *m) {
     if (!m) return;
-    ae3d_vk_set_mat4(&vk.scene, offset, m);
+    ae3d_vk_set_mat4(&vk.scene[vk.program], offset, m);
 }
 
 // Vulkan clip space puts y downward and z in [0, 1] while the engine's matrices
@@ -1953,7 +1962,7 @@ void ae3d_vk_scene_set_clip_mat4(int offset, const double *m) {
         corrected[column * 4 + 2] = 0.5 * (m[column * 4 + 2] + m[column * 4 + 3]);
         corrected[column * 4 + 3] = m[column * 4 + 3];
     }
-    ae3d_vk_set_mat4(&vk.scene, offset, corrected);
+    ae3d_vk_set_mat4(&vk.scene[vk.program], offset, corrected);
 }
 
 // A model's own uniforms arrive by name. The offset is resolved once and cached
@@ -1961,6 +1970,27 @@ void ae3d_vk_scene_set_clip_mat4(int offset, const double *m) {
 // never again.
 int ae3d_vk_scene_offset(const char *name) {
     return ae3d_vk_uniform_offset(name);
+}
+
+// std140 gives every array element a 16-byte slot whatever it holds, so a wave
+// table cannot be memcpy'd in as a flat run of floats.
+void ae3d_vk_scene_set_float_array(int offset, void *handle) {
+    int count = ae3d_farr_count(handle);
+    int i;
+    if (offset < 0 || count <= 0) return;
+    for (i = 0; i < count; i++) {
+        ae3d_vk_set_float(&vk.scene[vk.program], offset + i * 16, (float)ae3d_farr_get(handle, i));
+    }
+}
+
+void ae3d_vk_scene_set_vec3_array(int offset, void *handle) {
+    int count = ae3d_farr_count(handle) / 3;
+    int i;
+    if (offset < 0 || count <= 0) return;
+    for (i = 0; i < count; i++) {
+        ae3d_vk_set_vec3(&vk.scene[vk.program], offset + i * 16, ae3d_farr_get(handle, i * 3),
+                         ae3d_farr_get(handle, i * 3 + 1), ae3d_farr_get(handle, i * 3 + 2));
+    }
 }
 
 void ae3d_vk_set_blend(int on) { vk.blend = on; }
@@ -2141,6 +2171,12 @@ static int ae3d_vk_create_pass_pipelines(void) {
         { ae3d_vk_depth_vert_spv, sizeof(ae3d_vk_depth_vert_spv),
           ae3d_vk_depth_frag_spv, sizeof(ae3d_vk_depth_frag_spv),
           0, 1, 1, 1, VK_NULL_HANDLE, NULL },
+        { ae3d_vk_water_vert_spv, sizeof(ae3d_vk_water_vert_spv),
+          ae3d_vk_water_frag_spv, sizeof(ae3d_vk_water_frag_spv),
+          0, 1, 1, 1, VK_NULL_HANDLE, NULL },
+        { ae3d_vk_water_vert_spv, sizeof(ae3d_vk_water_vert_spv),
+          ae3d_vk_water_frag_spv, sizeof(ae3d_vk_water_frag_spv),
+          1, 1, 0, 1, VK_NULL_HANDLE, NULL },
     };
     unsigned i;
 
@@ -2149,6 +2185,8 @@ static int ae3d_vk_create_pass_pipelines(void) {
     builds[2].pass = vk.post_pass;   builds[2].out = &vk.post_pipelines[1];
     builds[3].pass = vk.post_pass;   builds[3].out = &vk.post_pipelines[2];
     builds[4].pass = vk.shadow_pass; builds[4].out = &vk.shadow_pipeline;
+    builds[5].pass = vk.render_pass; builds[5].out = &vk.water_pipeline;
+    builds[6].pass = vk.render_pass; builds[6].out = &vk.water_pipeline_blend;
 
     for (i = 0; i < sizeof(builds) / sizeof(builds[0]); i++) {
         VkShaderModule vertex_module = ae3d_vk_shader(builds[i].vert, builds[i].vert_size);
@@ -2435,7 +2473,7 @@ static void ae3d_vk_draw_pipeline(VkPipeline pipeline, int handle, int texture_h
     if (ring->used >= ring->capacity) return;
     slot = ring->used++;
     dynamic_offset = slot * ring->stride;
-    memcpy(ring->mapped + dynamic_offset, vk.scene.bytes, AE3D_VK_SCENE_SIZE);
+    memcpy(ring->mapped + dynamic_offset, vk.scene[vk.program].bytes, AE3D_VK_SCENE_SIZE);
 
     set = ae3d_vk_set_for((int)vk.frame, texture_handle);
     if (set == VK_NULL_HANDLE) return;
@@ -2465,8 +2503,24 @@ static void ae3d_vk_draw_pipeline(VkPipeline pipeline, int handle, int texture_h
     vk.draw_calls++;
 }
 
+// Which family of pipelines the next draws use. A program the backend does not
+// have falls back to the scene one, which is what the OpenGL backend does with
+// a shader that fails to compile.
+void ae3d_vk_set_program(int program) {
+    vk.program = (program >= 0 && program < AE3D_VK_PROGRAM_COUNT) ? program : AE3D_VK_PROGRAM_SCENE;
+}
+
+int ae3d_vk_program_count(void) { return AE3D_VK_PROGRAM_COUNT; }
+
 void ae3d_vk_draw(int handle, int texture_handle, int instance_handle, int instance_count) {
-    ae3d_vk_draw_pipeline(vk.blend ? vk.pipeline_blend : vk.pipeline, handle, texture_handle,
+    VkPipeline opaque = vk.pipeline;
+    VkPipeline blended = vk.pipeline_blend;
+
+    if (vk.program == AE3D_VK_PROGRAM_WATER && vk.water_pipeline && vk.water_pipeline_blend) {
+        opaque = vk.water_pipeline;
+        blended = vk.water_pipeline_blend;
+    }
+    ae3d_vk_draw_pipeline(vk.blend ? blended : opaque, handle, texture_handle,
                           instance_handle, instance_count);
 }
 
@@ -2610,12 +2664,12 @@ static void ae3d_vk_draw_post(void) {
 
     texel[0] = texel_x;
     texel[1] = texel_y;
-    memcpy(vk.scene.bytes + AE3D_VK_OFF_TEXELSIZE, texel, sizeof(texel));
-    ae3d_vk_set_float(&vk.scene, AE3D_VK_OFF_BLOOMTHRESHOLD, vk.bloom_threshold);
-    ae3d_vk_set_float(&vk.scene, AE3D_VK_OFF_BLOOMINTENSITY, vk.bloom_intensity);
-    ae3d_vk_set_float(&vk.scene, AE3D_VK_OFF_EDGETHRESHOLD, 0.125f);
-    ae3d_vk_set_float(&vk.scene, AE3D_VK_OFF_EDGETHRESHOLDMIN, 0.0625f);
-    ae3d_vk_set_float(&vk.scene, AE3D_VK_OFF_SUBPIXELQUALITY, 0.75f);
+    memcpy(vk.scene[AE3D_VK_PROGRAM_SCENE].bytes + AE3D_VK_OFF_TEXELSIZE, texel, sizeof(texel));
+    ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_BLOOMTHRESHOLD, vk.bloom_threshold);
+    ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_BLOOMINTENSITY, vk.bloom_intensity);
+    ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_EDGETHRESHOLD, 0.125f);
+    ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_EDGETHRESHOLDMIN, 0.0625f);
+    ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_SUBPIXELQUALITY, 0.75f);
 
     ae3d_vk_draw_pipeline(vk.post_pipelines[index], vk.screen_quad, vk.post_texture, 0, 1);
 }
@@ -2927,6 +2981,8 @@ void ae3d_vk_shutdown(void) {
     if (vk.post_pass) ae3d_vkDestroyRenderPass(vk.device, vk.post_pass, NULL);
     if (vk.shadow_pass) ae3d_vkDestroyRenderPass(vk.device, vk.shadow_pass, NULL);
     if (vk.shadow_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.shadow_pipeline, NULL);
+    if (vk.water_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.water_pipeline, NULL);
+    if (vk.water_pipeline_blend) ae3d_vkDestroyPipeline(vk.device, vk.water_pipeline_blend, NULL);
     if (vk.shadow_framebuffer) ae3d_vkDestroyFramebuffer(vk.device, vk.shadow_framebuffer, NULL);
     if (vk.shadow_sampler) ae3d_vkDestroySampler(vk.device, vk.shadow_sampler, NULL);
     if (vk.shadow_view) ae3d_vkDestroyImageView(vk.device, vk.shadow_view, NULL);

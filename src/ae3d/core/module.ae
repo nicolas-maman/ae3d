@@ -47,7 +47,8 @@ exports (
     model_enable_instancing, model_set_instance_position, model_set_instance_color,
     model_enable_instance_colors, model_set_instance_positions, model_set_instance_colors,
     model_instance_count, model_remove_instance, light_new, light_directional, light_point,
-    light_warm, light_cool, light_sun, light_free, shader_new, shader_valid, debug_enabled,
+    light_warm, light_cool, light_sun, light_free, shader_new, shader_named, shader_valid,
+    SHADER_CUSTOM, SHADER_WATER, debug_enabled,
     set_debug, frustum_culling, set_frustum_culling, face_culling, set_face_culling,
     depth_test, set_depth_test, next_model_id, backend_init, backend_render,
     backend_add_model, backend_remove_model, backend_load_texture, backend_set_skybox,
@@ -87,6 +88,9 @@ const UNIFORM_FLOAT = 0
 const UNIFORM_INT = 1
 
 const UNIFORM_VEC3 = 2
+
+const SHADER_CUSTOM = 0
+const SHADER_WATER = 1
 
 const UNIFORM_FLOAT_ARRAY = 3
 
@@ -205,6 +209,7 @@ struct Mat4 {
 
 struct Shader {
     program: int
+    kind: int
     vertex_source: string
     fragment_source: string
     compiled: bool
@@ -837,8 +842,15 @@ next_model_id() -> int {
 }
 
 shader_new(vertex_source: string, fragment_source: string) -> Shader {
+    return shader_named(SHADER_CUSTOM, vertex_source, fragment_source)
+}
+
+// A backend that cannot compile GLSL at runtime picks its pipeline by this
+// rather than by comparing source text.
+shader_named(kind: int, vertex_source: string, fragment_source: string) -> Shader {
     return Shader {
         program: 0,
+        kind: kind,
         vertex_source: vertex_source,
         fragment_source: fragment_source,
         compiled: false

@@ -67,13 +67,22 @@ if [ "$(uname -s)" = "Darwin" ]; then
     NATIVE_SOURCES="$NATIVE_SOURCES native/ae3d_vk_surface.m"
 fi
 
+# Every header, not a list of three. The generated ones carry the shaders and
+# the uniform offsets, so leaving them out meant regenerating the shaders and
+# linking the previous ones, with nothing to say so.
+newest_header=""
+for header in native/*.h; do
+    if [ -z "$newest_header" ] || [ "$header" -nt "$newest_header" ]; then
+        newest_header="$header"
+    fi
+done
+
 for src in $NATIVE_SOURCES; do
     base="$(basename "$src")"
     obj="$OBJ_DIR/${base%.*}.o"
     extra=""
     case "$src" in *.m) extra="-fobjc-arc" ;; esac
-    if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ] || [ native/ae3d.h -nt "$obj" ] || \
-       [ native/ae3d_glapi.h -nt "$obj" ] || [ native/ae3d_internal.h -nt "$obj" ]; then
+    if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ] || [ "$newest_header" -nt "$obj" ]; then
         "$CC" -c $CFLAGS $WARN $extra $GLFW_CFLAGS $VULKAN_CFLAGS "$src" -o "$obj"
     fi
 done
