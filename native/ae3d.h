@@ -217,6 +217,7 @@ void   ae3d_vk_set_blend(int on);
 void   ae3d_vk_draw(int mesh, int texture, int instances, int instance_count);
 void   ae3d_vk_draw_sky(int mesh, int texture);
 void   ae3d_vk_set_screen_quad(int mesh);
+int    ae3d_vk_scene_offset(const char *name);
 void   ae3d_vk_set_shadows(int on);
 int    ae3d_vk_shadows(void);
 int    ae3d_vk_shadow_begin(void);

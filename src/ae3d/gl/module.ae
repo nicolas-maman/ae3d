@@ -25,11 +25,13 @@ exports (
     renderer_set_bloom_params, renderer_set_post,
     renderer_set_shadows, renderer_shadows, renderer_default_program,
     renderer_load_texture, renderer_release_texture, renderer_texture_count,
-    read_pixel
+    renderer_frame_pixels, read_pixel
 )
 
 extern calloc(count: int, size: int) -> ptr
 extern free(p: ptr)
+extern ae3d_offscreen_resize(target: ptr, width: int, height: int) -> int
+extern ae3d_offscreen_read_pipelined(target: ptr) -> ptr
 extern ae3d_gl_load() -> int
 extern ae3d_gl_version() -> string
 extern ae3d_gl_renderer() -> string
@@ -255,6 +257,12 @@ backend(r: *GLRenderer) -> Backend {
         set_skybox: renderer_set_skybox as fn(ptr, ptr),
         update_viewport: renderer_update_viewport as fn(ptr, int, int),
         set_post: renderer_set_post as fn(ptr, int, int, float, float),
+        set_clear_color: renderer_set_clear_color as fn(ptr, float, float, float),
+        set_shadows: vtable_set_shadows as fn(ptr, int),
+        add_light: renderer_add_light as fn(ptr, ptr),
+        remove_light: renderer_remove_light as fn(ptr, ptr),
+        draw_calls: renderer_draw_calls as fn(ptr) -> int,
+        frame_pixels: renderer_frame_pixels as fn(ptr) -> ptr,
         cleanup: renderer_cleanup as fn(ptr)
     }
 }
@@ -870,6 +878,16 @@ renderer_update_viewport(r: *GLRenderer, width: int, height: int) {
     ae3d_gl_viewport(0, 0, width, height)
     r.viewport_width = width
     r.viewport_height = height
+    if r.target != null { ae3d_offscreen_resize(r.target, width, height) }
+}
+
+vtable_set_shadows(r: *GLRenderer, on: int) {
+    renderer_set_shadows(r, on == 1)
+}
+
+renderer_frame_pixels(r: *GLRenderer) -> ptr {
+    if r.target == null { return null }
+    return ae3d_offscreen_read_pipelined(r.target)
 }
 
 renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {

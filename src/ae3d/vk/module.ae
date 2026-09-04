@@ -19,7 +19,7 @@ exports (
     available, device_name, last_error,
     renderer_model_count, renderer_draw_calls, renderer_set_clear_color,
     renderer_load_texture, renderer_release_texture, renderer_sample_count, renderer_set_post,
-    renderer_set_shadows, renderer_shadows,
+    renderer_set_shadows, renderer_shadows, renderer_add_light, renderer_remove_light,
     skybox_create, skybox_free,
     offscreen_pixels, offscreen_width, offscreen_height
 )
@@ -56,6 +56,7 @@ extern ae3d_vk_post_active() -> int
 extern ae3d_vk_draw_calls() -> int
 extern ae3d_vk_sample_count() -> int
 extern ae3d_vk_offscreen_pixels() -> ptr
+extern ae3d_vk_scene_offset(name: string) -> int
 extern ae3d_vk_offscreen_width() -> int
 extern ae3d_vk_offscreen_height() -> int
 extern ae3d_image_load(path: string) -> ptr
@@ -163,6 +164,12 @@ backend(r: *VKRenderer) -> Backend {
         set_skybox: renderer_set_skybox as fn(ptr, ptr),
         update_viewport: renderer_update_viewport as fn(ptr, int, int),
         set_post: renderer_set_post as fn(ptr, int, int, float, float),
+        set_clear_color: renderer_set_clear_color as fn(ptr, float, float, float),
+        set_shadows: vtable_set_shadows as fn(ptr, int),
+        add_light: renderer_add_light as fn(ptr, ptr),
+        remove_light: renderer_remove_light as fn(ptr, ptr),
+        draw_calls: renderer_draw_calls as fn(ptr) -> int,
+        frame_pixels: vtable_frame_pixels as fn(ptr) -> ptr,
         cleanup: renderer_cleanup as fn(ptr)
     }
 }
@@ -184,6 +191,30 @@ renderer_init(r: *VKRenderer, window: ptr, width: int, height: int) -> int {
     r.screen_handle = ae3d_vk_upload_mesh(r.screen_mesh)
     ae3d_vk_set_screen_quad(r.screen_handle)
     return 1
+}
+
+renderer_add_light(r: *VKRenderer, light: *Light) {
+    list.add_raw(r.lights, light)
+}
+
+renderer_remove_light(r: *VKRenderer, light: *Light) {
+    count = list.size(r.lights)
+    i = 0
+    while i < count {
+        if list.get_raw(r.lights, i) == light {
+            list.remove(r.lights, i)
+            return
+        }
+        i = i + 1
+    }
+}
+
+vtable_set_shadows(r: *VKRenderer, on: int) {
+    renderer_set_shadows(r, on == 1)
+}
+
+vtable_frame_pixels(r: *VKRenderer) -> ptr {
+    return ae3d_vk_offscreen_pixels()
 }
 
 renderer_set_shadows(r: *VKRenderer, on: bool) {
@@ -448,6 +479,8 @@ set_scene_uniforms(r: *VKRenderer, m: *Model) {
     instanced = 0
     if m.is_instanced && core.model_instance_count(m) > 0 { instanced = 1 }
     ae3d_vk_scene_set_int(vkscene.OFF_ISINSTANCED, instanced)
+
+    set_model_uniforms(m)
 }
 
 // The same array the OpenGL backend fills, at the offsets the generator derived
@@ -486,6 +519,33 @@ upload_light(index: int, l: *Light) {
     ae3d_vk_scene_set_float(base + vkscene.LIGHT_CONSTANTATTEN, l.constant_atten)
     ae3d_vk_scene_set_float(base + vkscene.LIGHT_LINEARATTEN, l.linear_atten)
     ae3d_vk_scene_set_float(base + vkscene.LIGHT_QUADRATICATTEN, l.quadratic_atten)
+}
+
+// A model's own uniforms, written straight into the block. The offset is
+// resolved from the name once and kept on the uniform; a name the block has no
+// member for stays at -1 and is skipped for the life of the model.
+set_model_uniforms(m: *Model) {
+    count = core.model_uniform_count(m)
+    i = 0
+    while i < count {
+        uniform = core.model_uniform(m, i)
+        if uniform != null {
+            if uniform.block_offset == 0 - 2 {
+                uniform.block_offset = ae3d_vk_scene_offset(uniform.name)
+            }
+            if uniform.block_offset >= 0 {
+                if uniform.kind == core.UNIFORM_FLOAT {
+                    ae3d_vk_scene_set_float(uniform.block_offset, uniform.number)
+                } else if uniform.kind == core.UNIFORM_INT {
+                    ae3d_vk_scene_set_int(uniform.block_offset, uniform.integer)
+                } else if uniform.kind == core.UNIFORM_VEC3 {
+                    ae3d_vk_scene_set_vec3(uniform.block_offset, uniform.vector.x,
+                                           uniform.vector.y, uniform.vector.z)
+                }
+            }
+        }
+        i = i + 1
+    }
 }
 
 set_material_uniforms(material: *Material) {

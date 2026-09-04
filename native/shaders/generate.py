@@ -172,6 +172,37 @@ def c_struct(placed, size, light_placed=None, light_stride=0):
         lines.append(f"#define AE3D_VK_LIGHT_STRIDE {light_stride}")
         for name, kind, offset in light_placed:
             lines.append(f"#define AE3D_VK_LIGHT_{name.upper()} {offset}")
+    # A model carries uniforms by name, so the renderer needs the reverse of the
+    # table above. Sorted, so the lookup is a binary search rather than a walk.
+    lines += [
+        "",
+        "typedef struct {",
+        "    const char *name;",
+        "    int offset;",
+        "} ae3d_vk_uniform_slot;",
+        "",
+        "static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {",
+    ]
+    for name, kind, offset in sorted(placed, key=lambda entry: entry[0]):
+        lines.append(f'    {{ "{name}", {offset} }},')
+    lines += [
+        "};",
+        "",
+        f"#define AE3D_VK_UNIFORM_SLOT_COUNT {len(placed)}",
+        "",
+        "static inline int ae3d_vk_uniform_offset(const char *name) {",
+        "    int low = 0;",
+        "    int high = AE3D_VK_UNIFORM_SLOT_COUNT - 1;",
+        "    if (!name) return -1;",
+        "    while (low <= high) {",
+        "        int mid = (low + high) / 2;",
+        "        int order = strcmp(name, ae3d_vk_uniform_slots[mid].name);",
+        "        if (order == 0) return ae3d_vk_uniform_slots[mid].offset;",
+        "        if (order < 0) high = mid - 1; else low = mid + 1;",
+        "    }",
+        "    return -1;",
+        "}",
+    ]
     lines += [
         "",
         "static inline void ae3d_vk_set_float(ae3d_vk_scene *s, int offset, float v) {",

@@ -25,8 +25,8 @@ First working engine.
   looks like.
 - `tests/test_backend_parity` renders the same scene through both backends
   offscreen and compares every channel across materials and textures, instancing
-  and transparency, skybox, FXAA, bloom and shadows. The two agree to within
-  1.5% of channels.
+  and transparency, skybox, FXAA, bloom, shadows, two lights and a shading
+  preset. The two agree to within 1.6% of channels.
 - Shadow mapping in both backends. The light renders the scene into a depth map
   of its own and the lit pass compares against it, sampled over a 3x3
   neighbourhood with a slope-scaled bias. The light's box is centred on the
@@ -39,6 +39,17 @@ First working engine.
   into a std140 array whose stride the generator derives from the shader.
 - The Vulkan renderer writes what a whole frame shares, the view position, the
   lights and the light-space matrix, once per frame rather than once per model.
+- `Backend` covers the clear colour, shadows, lights, the draw count and the
+  frame's pixels, so a program that switches renderers no longer reaches past
+  the vtable for any of them.
+- Per-model uniforms reach the Vulkan renderer. The generator emits a
+  name-to-offset table for the block it lays out, and each uniform resolves its
+  offset once and keeps it, so shading presets and anything else set by name
+  behaves the same on both backends.
+- Lights can be added to and removed from either renderer. The Vulkan one had a
+  list nothing could fill, so only the key light ever reached it.
+- An offscreen Vulkan renderer can be resized. It took the surface path and
+  dereferenced a null surface, which is why the editor could not use it.
 - All thirteen GLSL programs ported, including the PBR and Gerstner-wave
   fragment shaders.
 

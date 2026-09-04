@@ -14,6 +14,7 @@ import ae3d.gl
 import ae3d.vk
 import ae3d.offscreen
 import ae3d.loader
+import ae3d.rendering
 
 const WIDTH = 256
 const HEIGHT = 192
@@ -74,6 +75,13 @@ build_scene(pass_backend: *Backend) -> {
     core.model_set_alpha(glass, 0.45)
     core.backend_add_model(pass_backend, glass)
 
+    // The editor's water surface: a wide, dense mesh under everything else, so
+    // it is the one model most of the frame's depth testing runs against.
+    surface = loader.water_surface(120.0, 0.0, 0.0, 32)
+    core.model_set_position(surface, 0.0, 0.0 - 26.0, 0.0)
+    core.model_set_diffuse(surface, 0.12, 0.32, 0.62)
+    core.backend_add_model(pass_backend, surface)
+
     textured = loader.sphere(1.0, 32, 24)
     core.model_set_scale(textured, 24.0, 24.0, 24.0)
     core.model_set_position(textured, 34.0, 0.0, 0.0)
@@ -87,12 +95,13 @@ build_scene(pass_backend: *Backend) -> {
 // sample positions and resolve, so exact equality is not the bar. A shared
 // lighting model and matching transforms are, and those show up as a small
 // share of differing channels and near-identical lit coverage.
-compare(name: string, gl_pixels: ptr, vk_pixels: ptr) {
+compare(name: string, gl_pixels: ptr, vk_pixels: ptr) -> int {
     lit_gl = 0
     lit_vk = 0
     worst = 0
     total = 0
     differing = 0
+    brightness = 0
 
     y = 0
     while y < HEIGHT {
@@ -107,6 +116,7 @@ compare(name: string, gl_pixels: ptr, vk_pixels: ptr) {
                 b = channel(vk_pixels, index + i)
                 if a > 12 { lit_gl = lit_gl + 1 }
                 if b > 12 { lit_vk = lit_vk + 1 }
+                brightness = brightness + b
                 difference = a - b
                 if difference < 0 { difference = 0 - difference }
                 if difference > worst { worst = difference }
@@ -128,6 +138,7 @@ compare(name: string, gl_pixels: ptr, vk_pixels: ptr) {
     check_true("${name}: frames agree", differing * 100 < total * 2)
 
     println("  ${name}: opengl lit ${lit_gl}, vulkan lit ${lit_vk}, ${differing} of ${total} channels differ, worst ${worst}")
+    return brightness
 }
 
 main() {
@@ -206,7 +217,39 @@ main() {
                gl.renderer_shadows(gl_renderer) && vk.renderer_shadows(vk_renderer))
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
-    compare("shadows", offscreen.target_pixels(target), vk.offscreen_pixels())
+    one_light = compare("shadows", offscreen.target_pixels(target), vk.offscreen_pixels())
+
+    // Lights reach a renderer through the vtable, and the Vulkan side had a
+    // list nothing could add to, so a second light changed the OpenGL frame and
+    // left the Vulkan one alone.
+    fill = core.light_point(core.vec3(0.0 - 6.0, 4.0, 8.0), core.vec3(1.0, 0.85, 0.6), 6.0, 120.0)
+    core.backend_add_light(&opengl_pass, light)
+    core.backend_add_light(&vulkan_pass, light)
+    core.backend_add_light(&opengl_pass, fill)
+    core.backend_add_light(&vulkan_pass, fill)
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    two_lights = compare("two lights", offscreen.target_pixels(target), vk.offscreen_pixels())
+    check_true("the second light reaches Vulkan", two_lights > one_light + one_light / 50)
+
+    core.backend_remove_light(&opengl_pass, fill)
+    core.backend_remove_light(&vulkan_pass, fill)
+    core.light_free(fill)
+
+    // A shading preset is nothing but per-model custom uniforms, which the
+    // Vulkan renderer used to drop on the floor.
+    preset = rendering.high_quality_config()
+    rendering.apply(gl_metal, preset)
+    rendering.apply(vk_metal, preset)
+    rendering.apply(gl_textured, preset)
+    rendering.apply(vk_textured, preset)
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    preset_lit = compare("shading preset", offscreen.target_pixels(target), vk.offscreen_pixels())
+    check_true("the preset reaches Vulkan", preset_lit != two_lights)
+
+    check_true("both backends count the same draws",
+               core.backend_draw_calls(&opengl_pass) == core.backend_draw_calls(&vulkan_pass))
 
     core.backend_cleanup(&opengl_pass)
     core.backend_cleanup(&vulkan_pass)
