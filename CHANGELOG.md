@@ -25,8 +25,9 @@ First working engine.
   looks like.
 - `tests/test_backend_parity` renders the same scene through both backends
   offscreen and compares every channel across materials and textures, instancing
-  and transparency, skybox, FXAA, bloom, shadows, two lights and a shading
-  preset. The two agree to within 1.6% of channels.
+  and transparency, skybox, FXAA, bloom, shadows, two lights, a shading preset
+  and a Gerstner ocean driven through twelve simulation steps. The two agree to
+  within 1.6% of channels.
 - Shadow mapping in both backends. The light renders the scene into a depth map
   of its own and the lit pass compares against it, sampled over a 3x3
   neighbourhood with a slope-scaled bias. The light's box is centred on the
@@ -48,6 +49,16 @@ First working engine.
   behaves the same on both backends.
 - Lights can be added to and removed from either renderer. The Vulkan one had a
   list nothing could fill, so only the key light ever reached it.
+- The Gerstner ocean runs on Vulkan. Its program is generated from the same
+  source as the OpenGL one, and the wave tables reach it as std140 arrays,
+  whose element stride is 16 bytes whatever they hold.
+- Each program keeps its own uniform block on the Vulkan side, the way OpenGL
+  gives every program its own uniform state. One shared block let a model's
+  uniforms leak into the next draw that used a different program, because the
+  two programs share member names.
+- A shader carries a name both backends understand, so a backend that cannot
+  compile GLSL at run time picks its pipeline by that rather than by comparing
+  source text.
 - An offscreen Vulkan renderer can be resized. It took the surface path and
   dereferenced a null surface, which is why the editor could not use it.
 - All thirteen GLSL programs ported, including the PBR and Gerstner-wave

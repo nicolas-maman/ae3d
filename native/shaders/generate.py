@@ -40,12 +40,25 @@ def light_bytes(light_members):
     return light_layout(light_members)[1] * MAX_LIGHTS
 
 
+ARRAY_STRIDE = 16
+
+
 def std140(members, base=0):
-    """Assign std140 offsets, returning (name, type, offset) and the total size."""
+    """Assign std140 offsets, returning (name, type, offset) and the total size.
+
+    A member may carry a count, and an array's element stride is 16 whatever the
+    element type, which is why the wave tables cannot be written as a flat run of
+    floats.
+    """
     offset = base
     placed = []
-    for kind, name in members:
+    for member in members:
+        kind, name = member[0], member[1]
+        count = member[2] if len(member) > 2 else 0
         align, size = SCALARS.get(kind) or VECTORS[kind]
+        if count:
+            align = ARRAY_STRIDE
+            size = ARRAY_STRIDE * count
         offset = (offset + align - 1) // align * align
         placed.append((name, kind, offset))
         offset += size
@@ -75,10 +88,11 @@ def light_layout(members):
 
 
 def collect_uniforms(source):
-    """Every non-sampler scalar uniform. The light array is laid out separately."""
+    """Every non-sampler uniform, arrays included. The light array is separate."""
     members = []
-    for kind, name in re.findall(r"^uniform\s+(vec3|vec4|vec2|float|int|bool|mat4)\s+(\w+)\s*;", source, re.M):
-        members.append((kind, name))
+    pattern = r"^uniform\s+(vec3|vec4|vec2|float|int|bool|mat4)\s+(\w+)\s*(\[(\d+)\])?\s*;"
+    for kind, name, _, count in re.findall(pattern, source, re.M):
+        members.append((kind, name, int(count)) if count else (kind, name))
     return members
 
 
@@ -106,7 +120,7 @@ def to_vulkan(source, stage, members, samplers, varyings_in, varyings_out,
     # is already the 0..1 the shadow map stores.
     text = text.replace("return clipZ * 0.5 + 0.5;", "return clipZ;")
 
-    text = re.sub(r"^uniform\s+(vec3|vec4|vec2|float|int|bool|mat4)\s+\w+\s*;.*$", "", text, flags=re.M)
+    text = re.sub(r"^uniform\s+(vec3|vec4|vec2|float|int|bool|mat4)\s+\w+\s*(\[\d+\])?\s*;.*$", "", text, flags=re.M)
     text = re.sub(r"^uniform\s+sampler2D\s+\w+\s*;.*$", "", text, flags=re.M)
 
     placed, size = std140(members, base=light_bytes(light_members))
@@ -122,8 +136,10 @@ def to_vulkan(source, stage, members, samplers, varyings_in, varyings_out,
     lines.append("layout(std140, set = 0, binding = 0) uniform SceneBlock {")
     if light_members:
         lines.append(f"    Light lights[{MAX_LIGHTS}];")
+    counts = {member[1]: (member[2] if len(member) > 2 else 0) for member in members}
     for name, kind, _ in placed:
-        lines.append(f"    {kind} {name};")
+        count = counts.get(name, 0)
+        lines.append(f"    {kind} {name}[{count}];" if count else f"    {kind} {name};")
     lines.append("};")
 
     # Every shader shares one descriptor set layout, so whichever sampler a
@@ -316,11 +332,14 @@ ATTRIBUTE_RENAMES = [
     (r"in vec2 aPos\s*;", "in vec3 inPosition;"),
     (r"vec4\(aPos, 0\.0, 1\.0\)", "vec4(inPosition.xy, 0.0, 1.0)"),
     (r"\baTexCoords\b", "inTexCoord"),
+    (r"\baTexCoord\b", "inTexCoord"),
+    (r"\baNormal\b", "inNormal"),
     (r"\baPos\b", "inPosition"),
 ]
 
 SKY_OUT = [("vec3", "TexCoords")]
 SCREEN_OUT = [("vec2", "TexCoords")]
+WATER_OUT = [("vec2", "fragTexCoord"), ("vec3", "fragNormal"), ("vec3", "fragPosition")]
 
 AUXILIARY = [
     ("depth_vk.vert", "VERTEX_DEPTH", "vert", [], [], []),
@@ -331,6 +350,8 @@ AUXILIARY = [
     ("passthrough_vk.frag", "FRAGMENT_PASSTHROUGH", "frag", ["screenTexture"], SCREEN_OUT, []),
     ("fxaa_vk.frag", "FRAGMENT_FXAA", "frag", ["screenTexture"], SCREEN_OUT, []),
     ("bloom_vk.frag", "FRAGMENT_BLOOM", "frag", ["screenTexture"], SCREEN_OUT, []),
+    ("water_vk.vert", "VERTEX_WATER", "vert", [], [], WATER_OUT),
+    ("water_vk.frag", "FRAGMENT_WATER", "frag", [], WATER_OUT, []),
 ]
 
 
@@ -342,12 +363,19 @@ def main():
     members = collect_uniforms(vertex) + collect_uniforms(fragment)
     for _, source, _, _, _, _ in AUXILIARY:
         members += collect_uniforms(block(source))
+    # One block serves every pipeline, so a name declared twice has to mean the
+    # same thing in both. Two shaders disagreeing about a type would lay the
+    # block out for one of them and corrupt what the other reads.
     seen = {}
     ordered = []
-    for kind, name in members:
-        if name not in seen:
-            seen[name] = kind
-            ordered.append((kind, name))
+    for member in members:
+        kind, name = member[0], member[1]
+        if name in seen:
+            if seen[name] != member[1:]:
+                raise SystemExit(f"generate: {name} declared as {seen[name]} and {member[1:]}")
+            continue
+        seen[name] = member[1:]
+        ordered.append(member)
 
     vertex_out = [("vec2", "fragTexCoord"), ("vec3", "Normal"),
                   ("vec3", "FragPos"), ("vec3", "InstanceColor"),

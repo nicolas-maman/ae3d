@@ -22,8 +22,8 @@ engine, to Aether and C. See [Credits](#credits).
   no driver exists and says so. It runs the same feature set as OpenGL, and
   `tests/test_backend_parity` proves it: the same scene through both renderers,
   compared channel by channel across materials and textures, instancing and
-  transparency, the skybox, FXAA, bloom and shadows. The two agree to within
-  1.5% of channels.
+  transparency, the skybox, FXAA, bloom, shadows, multiple lights, shading
+  presets and a Gerstner ocean. The two agree to within 1.6% of channels.
 - **Gerstner-wave ocean**, **Perlin terrain**, **voxel worlds** drawn as a single
   instanced call, **surface nets** over a signed distance field, an OBJ/MTL
   loader, ray casting, and a component system.

@@ -57,6 +57,10 @@ extern ae3d_vk_draw_calls() -> int
 extern ae3d_vk_sample_count() -> int
 extern ae3d_vk_offscreen_pixels() -> ptr
 extern ae3d_vk_scene_offset(name: string) -> int
+extern ae3d_vk_scene_set_float_array(offset: int, handle: ptr)
+extern ae3d_vk_scene_set_vec3_array(offset: int, handle: ptr)
+extern ae3d_vk_set_program(program: int)
+extern ae3d_vk_program_count() -> int
 extern ae3d_vk_offscreen_width() -> int
 extern ae3d_vk_offscreen_height() -> int
 extern ae3d_image_load(path: string) -> ptr
@@ -467,10 +471,37 @@ renderer_remove_model(r: *VKRenderer, m: *Model) {
 // generated shader reads.
 // The staging block keeps its contents between draws, so anything the whole
 // frame shares is written once here rather than once per model.
+// Every program keeps its own copy of the block, so what the whole frame shares
+// is written into each of them.
 set_frame_uniforms(r: *VKRenderer, light: *Light, cam: *Camera) {
+    programs = ae3d_vk_program_count()
+    i = 0
+    while i < programs {
+        ae3d_vk_set_program(i)
+        write_frame_uniforms(r, light, cam)
+        i = i + 1
+    }
+    ae3d_vk_set_program(core.SHADER_CUSTOM)
+}
+
+write_frame_uniforms(r: *VKRenderer, light: *Light, cam: *Camera) {
     ae3d_vk_scene_set_vec3(vkscene.OFF_VIEWPOS, cam.position.x, cam.position.y, cam.position.z)
     upload_lights(r, light)
     ae3d_vk_scene_set_clip_mat4(vkscene.OFF_LIGHTSPACEMATRIX, &r.shadow_space)
+
+    // The water program predates the light array and reads one light from flat
+    // names, the same four the OpenGL backend fills for it.
+    first = light
+    if list.size(r.lights) > 0 { first = list.get_raw(r.lights, 0) as *Light }
+    if first != null {
+        ae3d_vk_scene_set_vec3(vkscene.OFF_LIGHTPOS, first.position.x, first.position.y,
+                               first.position.z)
+        ae3d_vk_scene_set_vec3(vkscene.OFF_LIGHTCOLOR, first.color.x, first.color.y,
+                               first.color.z)
+        ae3d_vk_scene_set_float(vkscene.OFF_LIGHTINTENSITY, first.intensity)
+        ae3d_vk_scene_set_vec3(vkscene.OFF_LIGHTDIRECTION, first.direction.x,
+                               first.direction.y, first.direction.z)
+    }
 }
 
 set_scene_uniforms(r: *VKRenderer, m: *Model) {
@@ -541,6 +572,10 @@ set_model_uniforms(m: *Model) {
                 } else if uniform.kind == core.UNIFORM_VEC3 {
                     ae3d_vk_scene_set_vec3(uniform.block_offset, uniform.vector.x,
                                            uniform.vector.y, uniform.vector.z)
+                } else if uniform.kind == core.UNIFORM_FLOAT_ARRAY {
+                    ae3d_vk_scene_set_float_array(uniform.block_offset, uniform.array)
+                } else if uniform.kind == core.UNIFORM_VEC3_ARRAY {
+                    ae3d_vk_scene_set_vec3_array(uniform.block_offset, uniform.array)
                 }
             }
         }
@@ -581,7 +616,14 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     draw_skybox(r, cam)
 
     view_projection = core.camera_view_projection(cam)
-    ae3d_vk_scene_set_clip_mat4(vkscene.OFF_VIEWPROJECTION, &view_projection)
+    programs = ae3d_vk_program_count()
+    i = 0
+    while i < programs {
+        ae3d_vk_set_program(i)
+        ae3d_vk_scene_set_clip_mat4(vkscene.OFF_VIEWPROJECTION, &view_projection)
+        i = i + 1
+    }
+    ae3d_vk_set_program(core.SHADER_CUSTOM)
 
     if core.frustum_culling() && core.frustum_dirty() {
         core.camera_fill_frustum(cam, r.frustum)
@@ -624,6 +666,10 @@ draw_model(r: *VKRenderer, m: *Model, transparent_pass: bool) {
     if m.material != null { alpha = m.material.alpha }
     is_transparent = alpha < 0.99
     if is_transparent != transparent_pass { return }
+
+    program = core.SHADER_CUSTOM
+    if core.shader_valid(&m.shader) { program = m.shader.kind }
+    ae3d_vk_set_program(program)
 
     set_scene_uniforms(r, m)
     blend = 0
