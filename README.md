@@ -57,6 +57,11 @@ toolkit with no GPU surface host a 3D view
 ([aether-ui#92](https://github.com/aether-lang-dev/aether-ui/issues/92)); when a
 GPU surface exists, the readback is the only part that goes away.
 
+The editor runs on either renderer, `AE3D_EDITOR_BACKEND=vulkan` picks Vulkan
+and falls back to OpenGL when no driver is present. Everything the viewport
+needs goes through `Backend`, so the two paths differ only in which renderer the
+editor constructs.
+
 ```bash
 git clone https://github.com/aether-lang-dev/aether-ui.git ../aether-ui
 ./editor/build_editor.sh

@@ -791,6 +791,22 @@ static void ae3d_vk_destroy_swapchain(void) {
             ae3d_vkFreeMemory(vk.device, vk.readback_memory, NULL);
             vk.readback_memory = VK_NULL_HANDLE;
         }
+        // The staging buffer is sized to the extent, so it goes with the image
+        // it copies from. Leaving it would hand back a mapping of the old size.
+        if (vk.readback_mapped) {
+            ae3d_vkUnmapMemory(vk.device, vk.readback_buffer_memory);
+            vk.readback_mapped = NULL;
+        }
+        if (vk.readback_buffer) {
+            ae3d_vkDestroyBuffer(vk.device, vk.readback_buffer, NULL);
+            vk.readback_buffer = VK_NULL_HANDLE;
+        }
+        if (vk.readback_buffer_memory) {
+            ae3d_vkFreeMemory(vk.device, vk.readback_buffer_memory, NULL);
+            vk.readback_buffer_memory = VK_NULL_HANDLE;
+        }
+        vk.readback_width = 0;
+        vk.readback_height = 0;
     }
     free(vk.images);
     vk.images = NULL;
@@ -1940,6 +1956,13 @@ void ae3d_vk_scene_set_clip_mat4(int offset, const double *m) {
     ae3d_vk_set_mat4(&vk.scene, offset, corrected);
 }
 
+// A model's own uniforms arrive by name. The offset is resolved once and cached
+// on the uniform, so the strcmp walk happens the first time a name is seen and
+// never again.
+int ae3d_vk_scene_offset(const char *name) {
+    return ae3d_vk_uniform_offset(name);
+}
+
 void ae3d_vk_set_blend(int on) { vk.blend = on; }
 
 // Every pipeline shares the scene's vertex input and descriptor set layout, so
@@ -2270,10 +2293,16 @@ int ae3d_vk_init(void *win, int width, int height) {
     return 1;
 }
 
+// Offscreen has no surface, so it rebuilds the image it renders into rather
+// than a swapchain. Taking the surface path here dereferenced a null surface.
 static int ae3d_vk_rebuild_swapchain(int width, int height) {
     ae3d_vkDeviceWaitIdle(vk.device);
     ae3d_vk_destroy_swapchain();
-    if (!ae3d_vk_create_swapchain(width, height)) return 0;
+    if (vk.offscreen) {
+        if (!ae3d_vk_create_offscreen_target(width, height)) return 0;
+    } else {
+        if (!ae3d_vk_create_swapchain(width, height)) return 0;
+    }
     if (!ae3d_vk_create_framebuffers()) return 0;
     vk.needs_resize = 0;
     return 1;
@@ -2879,10 +2908,6 @@ void ae3d_vk_shutdown(void) {
 
     if (vk.identity_instance) ae3d_vkDestroyBuffer(vk.device, vk.identity_instance, NULL);
     if (vk.identity_instance_memory) ae3d_vkFreeMemory(vk.device, vk.identity_instance_memory, NULL);
-
-    if (vk.readback_mapped) ae3d_vkUnmapMemory(vk.device, vk.readback_buffer_memory);
-    if (vk.readback_buffer) ae3d_vkDestroyBuffer(vk.device, vk.readback_buffer, NULL);
-    if (vk.readback_buffer_memory) ae3d_vkFreeMemory(vk.device, vk.readback_buffer_memory, NULL);
 
     if (vk.descriptor_pool) ae3d_vkDestroyDescriptorPool(vk.device, vk.descriptor_pool, NULL);
     if (vk.set_layout) ae3d_vkDestroyDescriptorSetLayout(vk.device, vk.set_layout, NULL);

@@ -121,6 +121,59 @@ for example in examples/*.ae; do
     fi
 done
 
+# The editor runs on either renderer, so both are checked: the Vulkan option
+# used to report Vulkan and build an OpenGL renderer, which no OpenGL-only run
+# could have caught.
+check_editor_run() {
+    editor_backend="$1"
+    name="ae3d_editor ($editor_backend)"
+    report="$(mktemp)"
+    snapshot="$(mktemp -t ae3d_shot).png"
+    log="$(mktemp)"
+    # A bounded run ends itself; the timeout is only a backstop so a hang
+    # fails the step rather than blocking it.
+    AE3D_EDITOR_BACKEND="$editor_backend" \
+    AE3D_EDITOR_FRAMES=30 \
+    AE3D_EDITOR_SCENE=components \
+    AE3D_EDITOR_SNAPSHOT="$snapshot" \
+    AE3D_EDITOR_REPORT="$report" \
+        timeout 90 ./build/ae3d_editor >"$log" 2>&1
+    status=$?
+    if grep -q 'no Vulkan driver' "$log"; then
+        skip "$name" "$(sed -n 's/.*no Vulkan driver (\(.*\)),.*/\1/p' "$log" | head -1)"
+        rm -f "$report" "$snapshot" "$log"
+        return
+    fi
+    if [ "$status" -ne 0 ]; then
+        fail "$name (exited $status)"
+    elif [ ! -s "$report" ]; then
+        fail "$name (wrote no report)"
+    elif [ ! -s "$snapshot" ]; then
+        fail "$name (wrote no viewport snapshot)"
+    elif [ "$(sed -n 's/^backend //p' "$report")" != "$editor_backend" ]; then
+        fail "$name (rendered with $(sed -n 's/^backend //p' "$report"))"
+    elif ! grep -q '^frames 30$' "$report"; then
+        fail "$name (did not reach 30 frames)"
+        sed 's/^/        /' "$report"
+    elif ! grep -qE '^models [0-9]+$' "$report" || \
+         [ "$(sed -n 's/^models //p' "$report")" -lt 5 ]; then
+        fail "$name (scene did not build)"
+    elif [ "$(sed -n 's/^water //p' "$report")" != "1" ] || \
+         [ "$(sed -n 's/^voxels //p' "$report")" != "1" ] || \
+         [ "$(sed -n 's/^lights //p' "$report")" != "1" ] || \
+         [ "$(sed -n 's/^scripted //p' "$report")" != "1" ]; then
+        fail "$name (component types did not build)"
+        sed 's/^/        /' "$report"
+    elif grep -q '^selected none$' "$report"; then
+        fail "$name (nothing selected)"
+        sed 's/^/        /' "$report"
+    else
+        pass "$name"
+        sed 's/^/        /' "$report"
+    fi
+    rm -f "$report" "$snapshot" "$log"
+}
+
 step "editor"
 UI_ROOT="${AETHER_UI_ROOT:-$ROOT/../aether-ui}"
 if [ ! -f "$UI_ROOT/ui/module.ae" ]; then
@@ -129,42 +182,9 @@ elif ! have_display; then
     skip "ae3d_editor" "no display"
 else
     if ./editor/build_editor.sh >/tmp/ae3d_build.log 2>&1; then
-        report="$(mktemp)"
-        snapshot="$(mktemp -t ae3d_shot).png"
-        # A bounded run ends itself; the timeout is only a backstop so a hang
-        # fails the step rather than blocking it.
-        AE3D_EDITOR_FRAMES=30 \
-        AE3D_EDITOR_SCENE=components \
-        AE3D_EDITOR_SNAPSHOT="$snapshot" \
-        AE3D_EDITOR_REPORT="$report" \
-            timeout 90 ./build/ae3d_editor >/dev/null 2>&1
-        status=$?
-        if [ "$status" -ne 0 ]; then
-            fail "ae3d_editor (exited $status)"
-        elif [ ! -s "$report" ]; then
-            fail "ae3d_editor (wrote no report)"
-        elif [ ! -s "$snapshot" ]; then
-            fail "ae3d_editor (wrote no viewport snapshot)"
-        elif ! grep -q '^frames 30$' "$report"; then
-            fail "ae3d_editor (did not reach 30 frames)"
-            sed 's/^/        /' "$report"
-        elif ! grep -qE '^models [0-9]+$' "$report" || \
-             [ "$(sed -n 's/^models //p' "$report")" -lt 5 ]; then
-            fail "ae3d_editor (scene did not build)"
-        elif [ "$(sed -n 's/^water //p' "$report")" != "1" ] || \
-             [ "$(sed -n 's/^voxels //p' "$report")" != "1" ] || \
-             [ "$(sed -n 's/^lights //p' "$report")" != "1" ] || \
-             [ "$(sed -n 's/^scripted //p' "$report")" != "1" ]; then
-            fail "ae3d_editor (component types did not build)"
-            sed 's/^/        /' "$report"
-        elif grep -q '^selected none$' "$report"; then
-            fail "ae3d_editor (nothing selected)"
-            sed 's/^/        /' "$report"
-        else
-            pass "ae3d_editor"
-            sed 's/^/        /' "$report"
-        fi
-        rm -f "$report" "$snapshot"
+        for editor_backend in opengl vulkan; do
+            check_editor_run "$editor_backend"
+        done
     else
         fail "ae3d_editor (build)"
         sed 's/^/        /' /tmp/ae3d_build.log | head -20

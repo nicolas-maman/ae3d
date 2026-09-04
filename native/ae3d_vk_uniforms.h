@@ -82,6 +82,85 @@ typedef struct {
 #define AE3D_VK_LIGHT_LINEARATTEN 64
 #define AE3D_VK_LIGHT_QUADRATICATTEN 68
 
+typedef struct {
+    const char *name;
+    int offset;
+} ae3d_vk_uniform_slot;
+
+static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
+    { "bloomIntensity", 720 },
+    { "bloomRadius", 724 },
+    { "bloomThreshold", 716 },
+    { "clearcoatIntensity", 616 },
+    { "clearcoatRoughness", 612 },
+    { "diffuseColor", 560 },
+    { "edgeThreshold", 904 },
+    { "edgeThresholdMin", 908 },
+    { "enableBloom", 712 },
+    { "enableClearcoat", 608 },
+    { "enableEnergyConservation", 652 },
+    { "enableGlobalIllumination", 700 },
+    { "enableHighQualityFiltering", 756 },
+    { "enableImageBasedLighting", 656 },
+    { "enableMultipleScattering", 648 },
+    { "enablePerlinNoise", 740 },
+    { "enableSSAO", 680 },
+    { "enableShadows", 728 },
+    { "enableSheen", 620 },
+    { "enableTransmission", 640 },
+    { "enableVolumetricLighting", 664 },
+    { "exposure", 600 },
+    { "filteringQuality", 760 },
+    { "giBounces", 708 },
+    { "giIntensity", 704 },
+    { "iblIntensity", 660 },
+    { "isInstanced", 320 },
+    { "lightCount", 528 },
+    { "lightSpaceMatrix", 464 },
+    { "materialAlpha", 604 },
+    { "metallic", 592 },
+    { "model", 336 },
+    { "noiseIntensity", 752 },
+    { "noiseOctaves", 748 },
+    { "noiseScale", 744 },
+    { "projection", 768 },
+    { "roughness", 596 },
+    { "shadowIntensity", 732 },
+    { "shadowSoftness", 736 },
+    { "sheenColor", 624 },
+    { "sheenRoughness", 636 },
+    { "shininess", 588 },
+    { "specularColor", 576 },
+    { "ssaoBias", 692 },
+    { "ssaoIntensity", 684 },
+    { "ssaoRadius", 688 },
+    { "ssaoSampleCount", 696 },
+    { "subpixelQuality", 912 },
+    { "texelSize", 896 },
+    { "transmissionFactor", 644 },
+    { "view", 832 },
+    { "viewPos", 544 },
+    { "viewProjection", 400 },
+    { "volumetricIntensity", 668 },
+    { "volumetricScattering", 676 },
+    { "volumetricSteps", 672 },
+};
+
+#define AE3D_VK_UNIFORM_SLOT_COUNT 56
+
+static inline int ae3d_vk_uniform_offset(const char *name) {
+    int low = 0;
+    int high = AE3D_VK_UNIFORM_SLOT_COUNT - 1;
+    if (!name) return -1;
+    while (low <= high) {
+        int mid = (low + high) / 2;
+        int order = strcmp(name, ae3d_vk_uniform_slots[mid].name);
+        if (order == 0) return ae3d_vk_uniform_slots[mid].offset;
+        if (order < 0) high = mid - 1; else low = mid + 1;
+    }
+    return -1;
+}
+
 static inline void ae3d_vk_set_float(ae3d_vk_scene *s, int offset, float v) {
     memcpy(s->bytes + offset, &v, sizeof(v));
 }
