@@ -474,6 +474,29 @@ int ae3d_gl_fbo_attach_color(int fbo, int width, int height, int hdr) {
     return (int)texture;
 }
 
+// A shadow map wants different sampling from a post-processing colour buffer:
+// point sampling, because the comparison is done per texel with explicit
+// offsets, and an edge clamp so a fragment projecting outside the light's view
+// reads the cleared far value rather than wrapping.
+int ae3d_gl_fbo_attach_shadow_map(int fbo, int size) {
+    GLuint texture = 0;
+    if (size < 1) size = 1;
+
+    glGenTextures(1, &texture);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return (int)texture;
+}
+
 int ae3d_gl_fbo_attach_depth(int fbo, int width, int height) {
     GLuint rbo = 0;
     if (width < 1) width = 1;

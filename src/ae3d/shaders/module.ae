@@ -10,6 +10,7 @@ import ae3d.core
 exports (
     VERTEX_DEFAULT, FRAGMENT_DEFAULT,
     VERTEX_WATER, FRAGMENT_WATER,
+    VERTEX_DEPTH, FRAGMENT_DEPTH,
     VERTEX_SKYBOX, FRAGMENT_SKYBOX, FRAGMENT_SKYBOX_SOLID,
     VERTEX_SCREEN, FRAGMENT_FXAA, FRAGMENT_BLOOM, FRAGMENT_PASSTHROUGH,
     VERTEX_SHADOW_VOLUME, FRAGMENT_SHADOW_VOLUME,
@@ -29,11 +30,13 @@ layout(location = 7) in vec3 instanceColor; // Per-instance color (for voxels)
 uniform bool isInstanced; // Flag to differentiate instanced vs non-instanced rendering
 uniform mat4 model;       // Regular model matrix
 uniform mat4 viewProjection;
+uniform mat4 lightSpaceMatrix;
 
 out vec2 fragTexCoord;    // Pass to fragment shader
 out vec3 Normal;          // Pass normal to fragment shader
 out vec3 FragPos;         // Pass position to fragment shader
 out vec3 InstanceColor;   // Pass instance color to fragment shader
+out vec4 FragPosLightSpace;
 
 void main() {
     // Decide whether to use instanced or regular model matrix
@@ -56,6 +59,7 @@ void main() {
     InstanceColor = isInstanced ? instanceColor : vec3(1.0, 1.0, 1.0);
 
     // Final vertex position
+    FragPosLightSpace = lightSpaceMatrix * vec4(FragPos, 1.0);
     gl_Position = viewProjection * modelMatrix * vec4(inPosition, 1.0);
 }
 
@@ -68,8 +72,10 @@ in vec2 fragTexCoord;
 in vec3 Normal;
 in vec3 FragPos;
 in vec3 InstanceColor; // Per-instance color from vertex shader
+in vec4 FragPosLightSpace;
 
 uniform sampler2D textureSampler;
+uniform sampler2D shadowMap;
 uniform struct Light {
     vec3 position;
     vec3 color;
@@ -151,6 +157,40 @@ out vec4 FragColor;
 
 // Convert color temperature (Kelvin) to RGB multiplier
 // Optimized color temperature to RGB conversion using lookup approximation
+// The light writes how far it can see into a colour target; this compares the
+// fragment's own distance against it. Sampling a neighbourhood softens the edge.
+float shadow_factor() {
+    vec3 projected = FragPosLightSpace.xyz / FragPosLightSpace.w;
+    projected = projected * 0.5 + 0.5;
+    if (projected.z > 1.0) {
+        return 1.0;
+    }
+
+    vec3 surface = normalize(Normal);
+    vec3 toLight = normalize(light.position - FragPos);
+    if (light.isDirectional == 1) {
+        toLight = normalize(-light.direction);
+    }
+
+    // A surface nearly edge-on to the light needs a larger offset, or its own
+    // depth reads as occluding it.
+    float bias = max(0.02 * (1.0 - dot(surface, toLight)), 0.005);
+
+    vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0));
+    float radius = max(shadowSoftness, 0.0);
+    float lit = 0.0;
+    for (int sx = -1; sx <= 1; sx++) {
+        for (int sy = -1; sy <= 1; sy++) {
+            vec2 at = projected.xy + vec2(float(sx), float(sy)) * texel * radius;
+            float closest = texture(shadowMap, at).r;
+            lit += projected.z - bias > closest ? 0.0 : 1.0;
+        }
+    }
+    lit = lit / 9.0;
+
+    return mix(shadowIntensity, 1.0, lit);
+}
+
 vec3 kelvinToRGB(float kelvin) {
     kelvin = clamp(kelvin, 1000.0, 12000.0);
     
@@ -576,6 +616,7 @@ float turbulence(vec3 p, int octaves) {
 }
 
 void main() {
+
     vec4 texColor = texture(textureSampler, fragTexCoord);
     
     // Check for emissive objects first - bypass all lighting for sun-like objects
@@ -742,36 +783,7 @@ void main() {
     // HDR exposure and tone mapping for normal objects
     color = color * exposure;
     // GPU Gems Chapter 9 & 11: Apply shadows with proper sun behavior
-    if (enableShadows) {
-        float shadowFactor = 1.0;
-        
-        // For directional lights (like sun): use uniform shadow based on position
-        if (light.isDirectional == 1) {
-            // Sun shadows: uniform illumination, no distance falloff
-            // Only apply shadows in specific areas (like under objects)
-            vec3 worldPos = FragPos;
-            float shadowNoise = sin(worldPos.x * 0.0001) * sin(worldPos.z * 0.0001);
-            
-            // Very subtle shadow variation for realism, not distance-based darkening
-            shadowFactor = 1.0 - shadowIntensity * 0.1 * shadowNoise;
-        } else {
-            // Point light shadows: distance-based (for torches, lamps, etc.)
-            float lightDistance = length(light.position - FragPos);
-            if (lightDistance > 50000.0) {
-                float distanceFactor = smoothstep(50000.0, 150000.0, lightDistance);
-                shadowFactor = mix(1.0, shadowIntensity, distanceFactor);
-                
-                // Chapter 11: Add shadow edge softness
-                float shadowEdge = fract(lightDistance * 0.00001);
-                shadowFactor = mix(shadowFactor, 1.0, shadowEdge * shadowSoftness);
-            }
-        }
-        
-        // Apply shadow to lighting components (preserve ambient)
-        vec3 lightContrib = color - ambient;
-        lightContrib *= shadowFactor;
-        color = ambient + lightContrib;
-    }
+    color = color * shadow_factor();
     
     // Apply bloom effect
     if (enableBloom) {
@@ -1545,6 +1557,34 @@ void main() {
     alpha = clamp(alpha, 0.001, 0.98); // Allow almost complete transparency
     
     FragColor = vec4(finalColor, alpha);
+}
+GLSL_END
+
+// Depth only, from the light's point of view, written to a colour target so the
+// main pass can sample it. It shares the scene's vertex layout, so any model
+// goes through it without a second upload.
+const VERTEX_DEPTH = <<GLSL_END
+#version 330 core
+layout (location = 0) in vec3 inPosition;
+layout (location = 3) in mat4 instanceModel;
+
+uniform bool isInstanced;
+uniform mat4 model;
+uniform mat4 lightSpaceMatrix;
+
+void main() {
+    mat4 modelMatrix = isInstanced ? instanceModel : model;
+    gl_Position = lightSpaceMatrix * modelMatrix * vec4(inPosition, 1.0);
+}
+GLSL_END
+
+const FRAGMENT_DEPTH = <<GLSL_END
+#version 330 core
+
+out vec4 FragColor;
+
+void main() {
+    FragColor = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0);
 }
 GLSL_END
 

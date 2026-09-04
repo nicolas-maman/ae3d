@@ -22,7 +22,8 @@ exports (
     renderer_draw_calls, renderer_instance_count,
     renderer_set_clear_color, renderer_set_fxaa, renderer_set_bloom, renderer_set_msaa,
     renderer_set_target,
-    renderer_set_bloom_params, renderer_set_post, renderer_default_program,
+    renderer_set_bloom_params, renderer_set_post,
+    renderer_set_shadows, renderer_shadows, renderer_default_program,
     renderer_load_texture, renderer_release_texture, renderer_texture_count,
     read_pixel
 )
@@ -75,6 +76,7 @@ extern ae3d_gl_fbo_bind(fbo: int)
 extern ae3d_gl_fbo_delete(fbo: int)
 extern ae3d_gl_fbo_attach_color(fbo: int, width: int, height: int, hdr: int) -> int
 extern ae3d_gl_fbo_attach_depth(fbo: int, width: int, height: int) -> int
+extern ae3d_gl_fbo_attach_shadow_map(fbo: int, size: int) -> int
 extern ae3d_gl_renderbuffer_delete(rbo: int)
 extern ae3d_gl_fbo_complete() -> int
 extern ae3d_gl_read_pixel(x: int, y: int) -> int
@@ -86,6 +88,7 @@ extern ae3d_image_free(img: ptr)
 extern ae3d_image_error() -> string
 
 const MAX_FBO_DIMENSION = 8192
+const SHADOW_SIZE = 2048
 
 struct ProgramSlots {
     program: int
@@ -98,6 +101,8 @@ struct ProgramSlots {
     light_ambient: int
     light_temperature: int
     light_is_directional: int
+    light_space: int
+    shadow_map: int
     light_direction: int
     light_constant: int
     light_linear: int
@@ -150,6 +155,12 @@ struct GLRenderer {
 
     last_draw_calls: int
     frame_stamp: int
+    shadow_program: int
+    shadow_fbo: int
+    shadow_map: int
+    shadow_depth: int
+    shadow_enabled: bool
+    shadow_space: Mat4
 
     clear_r: float
     clear_g: float
@@ -266,6 +277,8 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
     s.light_ambient = ae3d_gl_uniform_location(program, "light.ambientStrength")
     s.light_temperature = ae3d_gl_uniform_location(program, "light.temperature")
     s.light_is_directional = ae3d_gl_uniform_location(program, "light.isDirectional")
+    s.light_space = ae3d_gl_uniform_location(program, "lightSpaceMatrix")
+    s.shadow_map = ae3d_gl_uniform_location(program, "shadowMap")
     s.light_direction = ae3d_gl_uniform_location(program, "light.direction")
     s.light_constant = ae3d_gl_uniform_location(program, "light.constantAtten")
     s.light_linear = ae3d_gl_uniform_location(program, "light.linearAtten")
@@ -346,6 +359,7 @@ renderer_init(r: *GLRenderer, window: ptr, width: int, height: int) -> int {
     if r.default_program == 0 { return 0 }
     slots_for(r, r.default_program)
 
+    r.shadow_program = compile_program(shaders.VERTEX_DEPTH, shaders.FRAGMENT_DEPTH, "depth")
     r.fxaa_program = compile_program(shaders.VERTEX_SCREEN, shaders.FRAGMENT_FXAA, "fxaa")
     r.bloom_program = compile_program(shaders.VERTEX_SCREEN, shaders.FRAGMENT_BLOOM, "bloom")
     r.passthrough_program = compile_program(shaders.VERTEX_SCREEN, shaders.FRAGMENT_PASSTHROUGH, "passthrough")
@@ -583,6 +597,126 @@ renderer_set_post(r: *GLRenderer, fxaa: int, bloom: int, threshold: float, inten
     r.bloom_intensity = intensity
 }
 
+// Depth is written to a colour target rather than a depth texture: sampling a
+// depth attachment through texture() returns opaque white on this driver
+// whatever its filter and compare state, so it cannot be read in the main pass.
+renderer_set_shadows(r: *GLRenderer, on: bool) {
+    r.shadow_enabled = on
+    if !on || r.shadow_fbo != 0 { return }
+
+    r.shadow_fbo = ae3d_gl_fbo_create()
+    r.shadow_map = ae3d_gl_fbo_attach_shadow_map(r.shadow_fbo, SHADOW_SIZE)
+    r.shadow_depth = ae3d_gl_fbo_attach_depth(r.shadow_fbo, SHADOW_SIZE, SHADOW_SIZE)
+    bind_output(r)
+    if r.shadow_map == 0 { r.shadow_enabled = false }
+}
+
+renderer_shadows(r: *GLRenderer) -> bool { return r.shadow_enabled }
+
+// The light's box has to cover what the camera can see, so it is centred on the
+// scene and sized to it rather than to the light.
+light_space_matrix(r: *GLRenderer, light: *Light) -> Mat4 {
+    centre = core.vec3(0.0, 0.0, 0.0)
+    radius = 1.0
+    shown = 0
+
+    count = list.size(r.models)
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        if m != null && m.visible {
+            centre = core.v3_add(centre, m.bounding_center)
+            shown = shown + 1
+        }
+        i = i + 1
+    }
+    if shown > 0 { centre = core.v3_mul(centre, 1.0 / (shown * 1.0)) }
+
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        if m != null && m.visible {
+            span = core.v3_len(core.v3_sub(m.bounding_center, centre)) + m.bounding_radius
+            if span > radius { radius = span }
+        }
+        i = i + 1
+    }
+
+    direction = core.v3_normalize(light.direction)
+    if light.mode != core.MODE_DIRECTIONAL {
+        direction = core.v3_normalize(core.v3_sub(centre, light.position))
+    }
+    if core.v3_len(direction) < 0.001 { direction = core.vec3(0.0, 0.0 - 1.0, 0.0) }
+
+    eye = core.v3_sub(centre, core.v3_mul(direction, radius * 2.0))
+    up = core.vec3(0.0, 1.0, 0.0)
+    if core.abs_of(direction.y) > 0.99 { up = core.vec3(0.0, 0.0, 1.0) }
+
+    view = core.mat4_look_at(eye, centre, up)
+    projection = core.mat4_ortho(0.0 - radius, radius, 0.0 - radius, radius,
+                                 0.01, radius * 4.0)
+    return core.mat4_mul(projection, view)
+}
+
+render_shadow_pass(r: *GLRenderer, light: *Light) {
+    if !r.shadow_enabled || r.shadow_fbo == 0 || r.shadow_program == 0 || light == null {
+        return
+    }
+
+    r.shadow_space = light_space_matrix(r, light)
+
+    ae3d_gl_fbo_bind(r.shadow_fbo)
+    ae3d_gl_viewport(0, 0, SHADOW_SIZE, SHADOW_SIZE)
+
+    // The post pass and the skybox both turn depth writes off, so the state they
+    // leave behind would let this pass clear the map and then write nothing.
+    set_depth_test(r, true)
+    ae3d_gl_set_depth_mask(1)
+    set_blend(r, false)
+    set_face_culling(r, false)
+    ae3d_gl_clear_color(1.0, 1.0, 1.0, 1.0)
+    ae3d_gl_clear(1, 1)
+
+    use_program(r, r.shadow_program)
+    space = ae3d_gl_uniform_location(r.shadow_program, "lightSpaceMatrix")
+    model_slot = ae3d_gl_uniform_location(r.shadow_program, "model")
+    instanced_slot = ae3d_gl_uniform_location(r.shadow_program, "isInstanced")
+    ae3d_gl_uniform_mat4(space, &r.shadow_space)
+
+    count = list.size(r.models)
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        if m != null && m.visible && m.casts_shadow {
+            if m.is_dirty {
+                core.model_update_matrix(m)
+                m.is_dirty = false
+            }
+            instanced = 0
+            if m.is_instanced && core.model_instance_count(m) > 0 { instanced = 1 }
+            ae3d_gl_uniform_int(instanced_slot, instanced)
+            ae3d_gl_uniform_mat4(model_slot, &m.model_matrix)
+            ae3d_gl_vao_bind(m.vao)
+            draw_depth(r, m, instanced)
+        }
+        i = i + 1
+    }
+    ae3d_gl_vao_bind(0)
+    bind_output(r)
+    ae3d_gl_viewport(0, 0, r.viewport_width, r.viewport_height)
+}
+
+draw_depth(r: *GLRenderer, m: *Model, instanced: int) {
+    indices = core.mesh_index_count(m.mesh)
+    if indices == 0 { return }
+    if instanced == 1 {
+        ae3d_gl_draw_elements_instanced(indices, 0, core.model_instance_count(m))
+    } else {
+        ae3d_gl_draw_elements(indices, 0)
+    }
+    r.last_draw_calls = r.last_draw_calls + 1
+}
+
 renderer_set_fxaa(r: *GLRenderer, on: bool) { r.enable_fxaa = on }
 renderer_set_bloom(r: *GLRenderer, on: bool) { r.enable_bloom = on }
 
@@ -718,6 +852,8 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
         active_light = list.get_raw(r.lights, 0) as *Light
     }
 
+    render_shadow_pass(r, active_light)
+
     bind_output(r)
     post_active = begin_post_processing(r)
 
@@ -785,6 +921,7 @@ render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
         set_frame_uniforms(slots, view_projection, light, cam)
         slots.frame_stamp = r.frame_stamp
     }
+    bind_shadow_map(r, slots)
     set_model_matrix(slots, m)
     set_model_uniforms(m, program)
 
@@ -894,6 +1031,18 @@ set_frame_uniforms(slots: *ProgramSlots, view_projection: *Mat4,
     }
 
     ae3d_gl_uniform_vec3(slots.view_pos, cam.position.x, cam.position.y, cam.position.z)
+}
+
+// Unit 1, because unit 0 is the material's own texture and changes per group.
+// The active unit is put back to 0 afterwards: the framebuffer attachment
+// helpers bind textures on whatever unit is active, so leaving it on 1 lets a
+// resize quietly replace the shadow map with a post-processing target.
+bind_shadow_map(r: *GLRenderer, slots: *ProgramSlots) {
+    if r.shadow_map == 0 { return }
+    ae3d_gl_uniform_mat4(slots.light_space, &r.shadow_space)
+    ae3d_gl_texture_bind(1, r.shadow_map)
+    ae3d_gl_uniform_int(slots.shadow_map, 1)
+    ae3d_gl_texture_bind(0, r.default_texture)
 }
 
 set_model_matrix(slots: *ProgramSlots, m: *Model) {
@@ -1108,8 +1257,12 @@ renderer_cleanup(r: *GLRenderer) {
     if r.post_depth != 0 { ae3d_gl_renderbuffer_delete(r.post_depth) ; r.post_depth = 0 }
     if r.post_fbo != 0 { ae3d_gl_fbo_delete(r.post_fbo) ; r.post_fbo = 0 }
     if r.bloom_fbo != 0 { ae3d_gl_fbo_delete(r.bloom_fbo) ; r.bloom_fbo = 0 }
+    if r.shadow_map != 0 { ae3d_gl_texture_delete(r.shadow_map) ; r.shadow_map = 0 }
+    if r.shadow_depth != 0 { ae3d_gl_renderbuffer_delete(r.shadow_depth) ; r.shadow_depth = 0 }
+    if r.shadow_fbo != 0 { ae3d_gl_fbo_delete(r.shadow_fbo) ; r.shadow_fbo = 0 }
 
     if r.default_program != 0 { ae3d_gl_program_delete(r.default_program) ; r.default_program = 0 }
+    if r.shadow_program != 0 { ae3d_gl_program_delete(r.shadow_program) ; r.shadow_program = 0 }
     if r.fxaa_program != 0 { ae3d_gl_program_delete(r.fxaa_program) ; r.fxaa_program = 0 }
     if r.bloom_program != 0 { ae3d_gl_program_delete(r.bloom_program) ; r.bloom_program = 0 }
     if r.passthrough_program != 0 {

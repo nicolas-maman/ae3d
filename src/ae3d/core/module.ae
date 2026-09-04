@@ -32,7 +32,7 @@ exports (
     Backend, Uniform, LIGHT_STATIC, LIGHT_DYNAMIC, MODE_POINT, MODE_DIRECTIONAL, MODE_SPOT,
     UNIFORM_FLOAT, UNIFORM_INT, UNIFORM_VEC3, UNIFORM_FLOAT_ARRAY, UNIFORM_VEC3_ARRAY,
     material_new, material_default, material_clone, material_free, model_new, model_free,
-    model_clone,
+    model_clone, model_set_casts_shadow,
     model_set_position, model_set_scale, model_set_rotation, model_rotate,
     model_update_matrix, model_recalculate_bounds, model_mark_dirty, model_set_diffuse,
     model_set_specular, model_set_pbr, model_set_exposure, model_set_alpha,
@@ -265,6 +265,7 @@ struct Model {
     is_instanced: bool
     instances_updated: bool
     visible: bool
+    casts_shadow: bool
 
     id: int
     name: string
@@ -880,6 +881,7 @@ model_new() -> *Model {
     m.bounding_center = vec3(0.0, 0.0, 0.0)
     m.bounding_radius = 0.0
     m.visible = true
+    m.casts_shadow = true
     m.id = next_model_id()
     m.shader = shader_new("", "")
     return m
@@ -1045,6 +1047,7 @@ model_clone(src: *Model) -> *Model {
     copy.scale = src.scale
     copy.rotation = src.rotation
     copy.visible = src.visible
+    copy.casts_shadow = src.casts_shadow
     copy.is_instanced = false
     model_set_name(copy, text(src.name))
     model_set_source_path(copy, text(src.source_path))
@@ -1726,6 +1729,12 @@ mesh_push_skybox_cube(mesh: ptr, size: float) {
     mesh_push_skybox_face(mesh, vec3(n, n, p), vec3(n, p, p), vec3(p, p, p), vec3(p, n, p))
     mesh_push_skybox_face(mesh, vec3(n, p, n), vec3(p, p, n), vec3(p, p, p), vec3(n, p, p))
     mesh_push_skybox_face(mesh, vec3(n, n, n), vec3(n, n, p), vec3(p, n, p), vec3(p, n, n))
+}
+
+// A model that should receive light without blocking it, a ground plane or a
+// water surface, can be kept out of the depth pass.
+model_set_casts_shadow(m: *Model, on: bool) {
+    m.casts_shadow = on
 }
 
 model_instance_has_colors(m: *Model) -> bool {

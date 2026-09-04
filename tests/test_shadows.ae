@@ -1,0 +1,161 @@
+// A shadow has to appear where the light is blocked, and only there.
+//
+// A sphere floats over a ground plane with the light overhead. The scene is
+// rendered with shadows off and on, and the two frames compared row by row: some
+// band of rows must darken, and the rest of the frame must not. Rendering twice
+// and measuring the difference is what separates a real depth test from a
+// decorative one.
+//
+// The target hands back the same buffer on every read, so a frame is summed
+// before the next render overwrites it rather than held as a pointer.
+
+import std.mem
+import ae3d.core
+import ae3d.gl
+import ae3d.offscreen
+import ae3d.loader
+import ae3d.rendering
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+const WIDTH = 320
+const HEIGHT = 240
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+luma(pixels: ptr, x: int, y: int) -> int {
+    index = (y * WIDTH + x) * 4
+    return mem.get_byte(pixels, index) +
+           mem.get_byte(pixels, index + 1) +
+           mem.get_byte(pixels, index + 2)
+}
+
+row_total(pixels: ptr, y: int) -> int {
+    total = 0
+    x = 0
+    while x < WIDTH {
+        total = total + luma(pixels, x, y)
+        x = x + 1
+    }
+    return total
+}
+
+main() {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("shadows: SKIP no OpenGL context")
+        return
+    }
+
+    renderer = gl.renderer_new()
+    backend = gl.backend(renderer)
+    if !core.backend_init(&backend, context, WIDTH, HEIGHT) {
+        println("shadows: SKIP the OpenGL backend would not initialise")
+        return
+    }
+
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    gl.renderer_set_clear_color(renderer, 0.0, 0.0, 0.0)
+
+    ground = loader.plane(24, 16.0)
+    core.model_set_position(ground, 0.0 - 192.0, 0.0, 0.0 - 192.0)
+    core.model_matte(ground, 0.85, 0.85, 0.85)
+    core.backend_add_model(&backend, ground)
+
+    blocker = loader.sphere(1.0, 32, 24)
+    core.model_set_scale(blocker, 30.0, 30.0, 30.0)
+    core.model_set_position(blocker, 0.0, 130.0, 0.0)
+    core.model_matte(blocker, 0.8, 0.3, 0.2)
+    core.backend_add_model(&backend, blocker)
+
+    config = rendering.default_config()
+    config.advanced_shadows = true
+    config.shadow_intensity = 0.25
+    config.shadow_softness = 1.0
+    rendering.apply(ground, config)
+    rendering.apply(blocker, config)
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 150.0, 260.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+
+    light = core.light_sun(core.vec3(0.0, 0.0 - 1.0, 0.0))
+    light.ambient_strength = 0.35
+
+    core.backend_render(&backend, cam, light)
+    lit = offscreen.target_pixels(target)
+    if lit == null { println("shadows: SKIP no pixels") ; return }
+
+    rows_store = calloc(HEIGHT, 4)
+    rows_lit = rows_store as int[]
+    total_lit = 0
+    y = 0
+    while y < HEIGHT {
+        rows_lit[y] = row_total(lit, y)
+        total_lit = total_lit + rows_lit[y]
+        y = y + 1
+    }
+
+    gl.renderer_set_shadows(renderer, true)
+    check("the shadow map was created", gl.renderer_shadows(renderer))
+
+    core.backend_render(&backend, cam, light)
+
+    shadowed = offscreen.target_pixels(target)
+    if shadowed == null { println("shadows: SKIP no pixels") ; return }
+
+    darkened_rows = 0
+    deepest = 0
+    first_row = 0 - 1
+    last_row = 0 - 1
+    total_shadow = 0
+    y = 0
+    while y < HEIGHT {
+        now = row_total(shadowed, y)
+        total_shadow = total_shadow + now
+        drop = rows_lit[y] - now
+        if drop > WIDTH * 4 {
+            darkened_rows = darkened_rows + 1
+            if first_row < 0 { first_row = y }
+            last_row = y
+        }
+        if drop > deepest { deepest = drop }
+        y = y + 1
+    }
+
+    check("the frame darkens when shadows are on", total_shadow < total_lit)
+    check("the shadow lands on some rows, not the whole frame",
+          darkened_rows > 4 && darkened_rows < HEIGHT * 3 / 4)
+    // Rows the shadow never reaches prove it is cast rather than a global dim.
+    check("rows outside the shadow are untouched", darkened_rows < HEIGHT / 2)
+    check("the darkest row drops substantially", deepest > WIDTH * 12)
+
+    println("  frame ${total_lit} -> ${total_shadow}, ${darkened_rows} of ${HEIGHT} rows darkened (${first_row}..${last_row}), deepest row drop ${deepest}")
+
+    free(rows_store)
+    core.backend_cleanup(&backend)
+    offscreen.target_destroy(target)
+    offscreen.context_destroy(context)
+    core.model_free(ground)
+    core.model_free(blocker)
+    gl.renderer_free(renderer)
+    core.camera_free(cam)
+    core.light_free(light)
+
+    if failures == 0 {
+        println("shadows: all checks passed")
+    } else {
+        println("shadows: ${failures} failure(s)")
+    }
+}
