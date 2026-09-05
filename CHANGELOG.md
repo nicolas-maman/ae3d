@@ -26,8 +26,9 @@ First working engine.
 - `tests/test_backend_parity` renders the same scene through both backends
   offscreen and compares every channel across materials and textures, instancing
   and transparency, skybox, FXAA, bloom, shadows, two lights, a shading preset
-  and a Gerstner ocean driven through twelve simulation steps. The two agree to
-  within 1.6% of channels.
+  a Gerstner ocean driven through twelve simulation steps, back-face culling,
+  the ocean through FXAA, and a resize with a composite running. The two agree
+  to within 1.6% of channels.
 - Shadow mapping in both backends. The light renders the scene into a depth map
   of its own and the lit pass compares against it, sampled over a 3x3
   neighbourhood with a slope-scaled bias. The light's box is centred on the
@@ -49,6 +50,16 @@ First working engine.
   behaves the same on both backends.
 - Lights can be added to and removed from either renderer. The Vulkan one had a
   list nothing could fill, so only the key light ever reached it.
+- A Vulkan renderer can be resized while a composite is running. Descriptor
+  sets are cached per texture and the rebuild destroys the post-processing
+  texture, so every set handed out before the resize named an image that no
+  longer existed and the frame came back as noise. The editor hit it on its
+  first frame.
+- The Vulkan renderer culls back faces when the scene asks for it. Its
+  pipelines were built with culling off whatever `core.face_culling()` said,
+  because cull mode is fixed at pipeline creation before Vulkan 1.3, so the
+  opaque pipelines now come in two variants. Transparent surfaces are never
+  culled on either backend: you see through one to its own far side.
 - The Gerstner ocean runs on Vulkan. Its program is generated from the same
   source as the OpenGL one, and the wave tables reach it as std140 arrays,
   whose element stride is 16 bytes whatever they hold.

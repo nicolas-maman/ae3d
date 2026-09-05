@@ -220,6 +220,7 @@ void   ae3d_vk_set_screen_quad(int mesh);
 int    ae3d_vk_scene_offset(const char *name);
 void   ae3d_vk_scene_set_float_array(int offset, void *handle);
 void   ae3d_vk_scene_set_vec3_array(int offset, void *handle);
+void   ae3d_vk_set_face_culling(int on);
 void   ae3d_vk_set_program(int program);
 int    ae3d_vk_program_count(void);
 void   ae3d_vk_set_shadows(int on);
