@@ -124,6 +124,7 @@
     X(vkCreateDescriptorPool) \
     X(vkDestroyDescriptorPool) \
     X(vkAllocateDescriptorSets) \
+    X(vkResetDescriptorPool) \
     X(vkUpdateDescriptorSets) \
     X(vkCmdBindDescriptorSets) \
     X(vkCreateSampler) \
@@ -230,7 +231,7 @@ static struct {
     VkImageView shadow_depth_view;
     VkSampler shadow_sampler;
     VkPipeline shadow_pipeline;
-    VkPipeline water_pipeline;
+    VkPipeline water_pipeline[2];
     VkPipeline water_pipeline_blend;
     int program;
     int shadow_enabled;
@@ -247,8 +248,12 @@ static struct {
     int bloom;
     int post_active;
     VkPipelineLayout pipeline_layout;
-    VkPipeline pipeline;
+    // Indexed by whether back faces are culled. Cull mode is fixed at pipeline
+    // creation before Vulkan 1.3 and the loader targets 1.1, so the two states
+    // are two pipelines rather than one dynamic state.
+    VkPipeline pipeline[2];
     VkPipeline pipeline_blend;
+    int cull;
     VkDescriptorSetLayout set_layout;
     VkDescriptorPool descriptor_pool;
     VkCommandPool command_pool;
@@ -2002,7 +2007,7 @@ void ae3d_vk_set_blend(int on) { vk.blend = on; }
 static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
                                         VkShaderModule fragment_module, int blend,
                                         int depth_test, int depth_write,
-                                        VkRenderPass render_pass) {
+                                        VkRenderPass render_pass, int cull) {
     VkPipelineShaderStageCreateInfo stages[2];
     VkVertexInputBindingDescription bindings[2];
     VkVertexInputAttributeDescription attributes[8];
@@ -2083,7 +2088,7 @@ static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
     memset(&raster, 0, sizeof(raster));
     raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     raster.polygonMode = VK_POLYGON_MODE_FILL;
-    raster.cullMode = VK_CULL_MODE_NONE;
+    raster.cullMode = cull ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
     raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     raster.lineWidth = 1.0f;
 
@@ -2154,29 +2159,32 @@ static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
 static int ae3d_vk_create_pass_pipelines(void) {
     struct { const unsigned char *vert; unsigned vert_size;
              const unsigned char *frag; unsigned frag_size;
-             int blend, depth_test, depth_write, required;
+             int blend, depth_test, depth_write, required, cull;
              VkRenderPass pass; VkPipeline *out; } builds[] = {
         { ae3d_vk_sky_vert_spv, sizeof(ae3d_vk_sky_vert_spv),
           ae3d_vk_sky_frag_spv, sizeof(ae3d_vk_sky_frag_spv),
-          0, 1, 0, 0, VK_NULL_HANDLE, NULL },
+          0, 1, 0, 0, 0, VK_NULL_HANDLE, NULL },
         { ae3d_vk_screen_vert_spv, sizeof(ae3d_vk_screen_vert_spv),
           ae3d_vk_passthrough_frag_spv, sizeof(ae3d_vk_passthrough_frag_spv),
-          0, 0, 0, 1, VK_NULL_HANDLE, NULL },
+          0, 0, 0, 1, 0, VK_NULL_HANDLE, NULL },
         { ae3d_vk_screen_vert_spv, sizeof(ae3d_vk_screen_vert_spv),
           ae3d_vk_fxaa_frag_spv, sizeof(ae3d_vk_fxaa_frag_spv),
-          0, 0, 0, 0, VK_NULL_HANDLE, NULL },
+          0, 0, 0, 0, 0, VK_NULL_HANDLE, NULL },
         { ae3d_vk_screen_vert_spv, sizeof(ae3d_vk_screen_vert_spv),
           ae3d_vk_bloom_frag_spv, sizeof(ae3d_vk_bloom_frag_spv),
-          0, 0, 0, 0, VK_NULL_HANDLE, NULL },
+          0, 0, 0, 0, 0, VK_NULL_HANDLE, NULL },
         { ae3d_vk_depth_vert_spv, sizeof(ae3d_vk_depth_vert_spv),
           ae3d_vk_depth_frag_spv, sizeof(ae3d_vk_depth_frag_spv),
-          0, 1, 1, 1, VK_NULL_HANDLE, NULL },
+          0, 1, 1, 1, 0, VK_NULL_HANDLE, NULL },
         { ae3d_vk_water_vert_spv, sizeof(ae3d_vk_water_vert_spv),
           ae3d_vk_water_frag_spv, sizeof(ae3d_vk_water_frag_spv),
-          0, 1, 1, 1, VK_NULL_HANDLE, NULL },
+          0, 1, 1, 1, 0, VK_NULL_HANDLE, NULL },
         { ae3d_vk_water_vert_spv, sizeof(ae3d_vk_water_vert_spv),
           ae3d_vk_water_frag_spv, sizeof(ae3d_vk_water_frag_spv),
-          1, 1, 0, 1, VK_NULL_HANDLE, NULL },
+          1, 1, 0, 1, 0, VK_NULL_HANDLE, NULL },
+        { ae3d_vk_water_vert_spv, sizeof(ae3d_vk_water_vert_spv),
+          ae3d_vk_water_frag_spv, sizeof(ae3d_vk_water_frag_spv),
+          0, 1, 1, 1, 1, VK_NULL_HANDLE, NULL },
     };
     unsigned i;
 
@@ -2185,8 +2193,9 @@ static int ae3d_vk_create_pass_pipelines(void) {
     builds[2].pass = vk.post_pass;   builds[2].out = &vk.post_pipelines[1];
     builds[3].pass = vk.post_pass;   builds[3].out = &vk.post_pipelines[2];
     builds[4].pass = vk.shadow_pass; builds[4].out = &vk.shadow_pipeline;
-    builds[5].pass = vk.render_pass; builds[5].out = &vk.water_pipeline;
+    builds[5].pass = vk.render_pass; builds[5].out = &vk.water_pipeline[0];
     builds[6].pass = vk.render_pass; builds[6].out = &vk.water_pipeline_blend;
+    builds[7].pass = vk.render_pass; builds[7].out = &vk.water_pipeline[1];
 
     for (i = 0; i < sizeof(builds) / sizeof(builds[0]); i++) {
         VkShaderModule vertex_module = ae3d_vk_shader(builds[i].vert, builds[i].vert_size);
@@ -2194,7 +2203,7 @@ static int ae3d_vk_create_pass_pipelines(void) {
         if (!vertex_module || !fragment_module) return ae3d_vk_fail("pass vkCreateShaderModule failed");
         *builds[i].out = ae3d_vk_build_pipeline(vertex_module, fragment_module, builds[i].blend,
                                                 builds[i].depth_test, builds[i].depth_write,
-                                                builds[i].pass);
+                                                builds[i].pass, builds[i].cull);
         ae3d_vkDestroyShaderModule(vk.device, vertex_module, NULL);
         ae3d_vkDestroyShaderModule(vk.device, fragment_module, NULL);
         if (!*builds[i].out && builds[i].required) {
@@ -2207,6 +2216,7 @@ static int ae3d_vk_create_pass_pipelines(void) {
 static int ae3d_vk_create_pipeline(void) {
     VkShaderModule vertex_module, fragment_module;
     VkPipelineLayoutCreateInfo layout;
+    int cull;
 
     vertex_module = ae3d_vk_shader(ae3d_vk_scene_vert_spv, (unsigned)sizeof(ae3d_vk_scene_vert_spv));
     fragment_module = ae3d_vk_shader(ae3d_vk_scene_frag_spv, (unsigned)sizeof(ae3d_vk_scene_frag_spv));
@@ -2222,12 +2232,28 @@ static int ae3d_vk_create_pipeline(void) {
         return ae3d_vk_fail("vkCreatePipelineLayout failed");
     }
 
-    vk.pipeline = ae3d_vk_build_pipeline(vertex_module, fragment_module, 1, 1, 1, vk.render_pass);
-    vk.pipeline_blend = ae3d_vk_build_pipeline(vertex_module, fragment_module, 1, 1, 0, vk.render_pass);
+    // A transparent surface is never culled: you see through it to its own far
+    // side, so removing that side removes something the frame should show. The
+    // OpenGL backend turns culling off for the transparent pass for the same
+    // reason, which is why only the opaque pipeline comes in two variants.
+    vk.pipeline_blend = ae3d_vk_build_pipeline(vertex_module, fragment_module, 1, 1, 0,
+                                               vk.render_pass, 0);
+    for (cull = 0; cull < 2; cull++) {
+        vk.pipeline[cull] = ae3d_vk_build_pipeline(vertex_module, fragment_module, 1, 1, 1,
+                                                   vk.render_pass, cull);
+        if (!vk.pipeline[cull]) {
+            ae3d_vkDestroyShaderModule(vk.device, vertex_module, NULL);
+            ae3d_vkDestroyShaderModule(vk.device, fragment_module, NULL);
+            return ae3d_vk_fail("vkCreateGraphicsPipelines failed");
+        }
+    }
+    if (!vk.pipeline_blend) {
+        ae3d_vkDestroyShaderModule(vk.device, vertex_module, NULL);
+        ae3d_vkDestroyShaderModule(vk.device, fragment_module, NULL);
+        return ae3d_vk_fail("vkCreateGraphicsPipelines failed");
+    }
     ae3d_vkDestroyShaderModule(vk.device, vertex_module, NULL);
     ae3d_vkDestroyShaderModule(vk.device, fragment_module, NULL);
-
-    if (!vk.pipeline || !vk.pipeline_blend) return ae3d_vk_fail("vkCreateGraphicsPipelines failed");
     return ae3d_vk_create_pass_pipelines();
 }
 
@@ -2334,7 +2360,16 @@ int ae3d_vk_init(void *win, int width, int height) {
 // Offscreen has no surface, so it rebuilds the image it renders into rather
 // than a swapchain. Taking the surface path here dereferenced a null surface.
 static int ae3d_vk_rebuild_swapchain(int width, int height) {
+    unsigned frame;
+
     ae3d_vkDeviceWaitIdle(vk.device);
+
+    // Descriptor sets are cached per texture and the rebuild destroys the
+    // post-processing texture, so a set handed out before the resize would name
+    // an image that no longer exists. The cache goes with the images.
+    if (vk.descriptor_pool) ae3d_vkResetDescriptorPool(vk.device, vk.descriptor_pool, 0);
+    for (frame = 0; frame < AE3D_VK_FRAMES; frame++) vk.set_count[frame] = 0;
+
     ae3d_vk_destroy_swapchain();
     if (vk.offscreen) {
         if (!ae3d_vk_create_offscreen_target(width, height)) return 0;
@@ -2512,12 +2547,15 @@ void ae3d_vk_set_program(int program) {
 
 int ae3d_vk_program_count(void) { return AE3D_VK_PROGRAM_COUNT; }
 
+void ae3d_vk_set_face_culling(int on) { vk.cull = on ? 1 : 0; }
+
 void ae3d_vk_draw(int handle, int texture_handle, int instance_handle, int instance_count) {
-    VkPipeline opaque = vk.pipeline;
+    VkPipeline opaque = vk.pipeline[vk.cull];
     VkPipeline blended = vk.pipeline_blend;
 
-    if (vk.program == AE3D_VK_PROGRAM_WATER && vk.water_pipeline && vk.water_pipeline_blend) {
-        opaque = vk.water_pipeline;
+    if (vk.program == AE3D_VK_PROGRAM_WATER && vk.water_pipeline[vk.cull]
+        && vk.water_pipeline_blend) {
+        opaque = vk.water_pipeline[vk.cull];
         blended = vk.water_pipeline_blend;
     }
     ae3d_vk_draw_pipeline(vk.blend ? blended : opaque, handle, texture_handle,
@@ -2528,6 +2566,7 @@ void ae3d_vk_draw(int handle, int texture_handle, int instance_handle, int insta
 // scene does not cover, so only a textured sky is drawn.
 void ae3d_vk_draw_sky(int mesh_handle, int texture_handle) {
     if (!vk.sky_pipeline || texture_handle <= 0) return;
+    vk.program = AE3D_VK_PROGRAM_SCENE;
     ae3d_vk_draw_pipeline(vk.sky_pipeline, mesh_handle, texture_handle, 0, 1);
 }
 
@@ -2620,6 +2659,7 @@ int ae3d_vk_shadow_begin(void) {
 
 void ae3d_vk_shadow_draw(int mesh_handle, int instance_handle, int instance_count) {
     if (!vk.shadow_pipeline || !vk.in_shadow_pass) return;
+    vk.program = AE3D_VK_PROGRAM_SCENE;
     ae3d_vk_draw_pipeline(vk.shadow_pipeline, mesh_handle, vk.default_texture,
                           instance_handle, instance_count);
 }
@@ -2656,6 +2696,9 @@ int ae3d_vk_post_active(void) { return vk.post_active; }
 // Post parameters are written here rather than by the caller because the scene
 // draws share this block and a material's own bloom settings would otherwise be
 // what the composite pass read.
+// The sky, the shadow pass and the composites all read the scene program's
+// block. Whichever program the last model selected is still current here, and a
+// composite reading the water block gets nonsense for its edge thresholds.
 static void ae3d_vk_draw_post(void) {
     float texel_x = vk.extent.width ? 1.0f / (float)vk.extent.width : 0.0f;
     float texel_y = vk.extent.height ? 1.0f / (float)vk.extent.height : 0.0f;
@@ -2670,6 +2713,7 @@ static void ae3d_vk_draw_post(void) {
     ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_EDGETHRESHOLD, 0.125f);
     ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_EDGETHRESHOLDMIN, 0.0625f);
     ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_SUBPIXELQUALITY, 0.75f);
+    vk.program = AE3D_VK_PROGRAM_SCENE;
 
     ae3d_vk_draw_pipeline(vk.post_pipelines[index], vk.screen_quad, vk.post_texture, 0, 1);
 }
@@ -2967,8 +3011,12 @@ void ae3d_vk_shutdown(void) {
     if (vk.set_layout) ae3d_vkDestroyDescriptorSetLayout(vk.device, vk.set_layout, NULL);
 
     if (vk.command_pool) ae3d_vkDestroyCommandPool(vk.device, vk.command_pool, NULL);
-    if (vk.pipeline) ae3d_vkDestroyPipeline(vk.device, vk.pipeline, NULL);
+    for (i = 0; i < 2; i++) {
+        if (vk.pipeline[i]) ae3d_vkDestroyPipeline(vk.device, vk.pipeline[i], NULL);
+        if (vk.water_pipeline[i]) ae3d_vkDestroyPipeline(vk.device, vk.water_pipeline[i], NULL);
+    }
     if (vk.pipeline_blend) ae3d_vkDestroyPipeline(vk.device, vk.pipeline_blend, NULL);
+    if (vk.water_pipeline_blend) ae3d_vkDestroyPipeline(vk.device, vk.water_pipeline_blend, NULL);
     if (vk.sky_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.sky_pipeline, NULL);
     for (i = 0; i < 3; i++) {
         if (vk.post_pipelines[i]) ae3d_vkDestroyPipeline(vk.device, vk.post_pipelines[i], NULL);
@@ -2981,8 +3029,6 @@ void ae3d_vk_shutdown(void) {
     if (vk.post_pass) ae3d_vkDestroyRenderPass(vk.device, vk.post_pass, NULL);
     if (vk.shadow_pass) ae3d_vkDestroyRenderPass(vk.device, vk.shadow_pass, NULL);
     if (vk.shadow_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.shadow_pipeline, NULL);
-    if (vk.water_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.water_pipeline, NULL);
-    if (vk.water_pipeline_blend) ae3d_vkDestroyPipeline(vk.device, vk.water_pipeline_blend, NULL);
     if (vk.shadow_framebuffer) ae3d_vkDestroyFramebuffer(vk.device, vk.shadow_framebuffer, NULL);
     if (vk.shadow_sampler) ae3d_vkDestroySampler(vk.device, vk.shadow_sampler, NULL);
     if (vk.shadow_view) ae3d_vkDestroyImageView(vk.device, vk.shadow_view, NULL);

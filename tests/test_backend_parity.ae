@@ -263,6 +263,18 @@ main() {
     preset_lit = compare("shading preset", offscreen.target_pixels(target), vk.offscreen_pixels())
     check_true("the preset reaches Vulkan", preset_lit != two_lights)
 
+    // Culling decides which triangles of every model survive, and which models
+    // are exempt: a transparent surface is never culled, because you see
+    // through it to its own far side. The Vulkan pipelines were built with
+    // culling off whatever the scene asked for, and culling the transparent
+    // pass once it was on moved 463196 units of the frame that OpenGL leaves
+    // alone. Nothing here should differ from the frame before it.
+    core.set_face_culling(true)
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    compare("back faces culled", offscreen.target_pixels(target), vk.offscreen_pixels())
+    core.set_face_culling(false)
+
     // A Gerstner ocean is its own program on both backends, driven by a wave
     // table that arrives as array uniforms. It is the one model whose geometry
     // the shader itself moves, so a frame of it has to be compared after the
@@ -286,6 +298,32 @@ main() {
     core.backend_render(&vulkan_pass, cam, light)
     ocean_lit = compare("gerstner ocean", offscreen.target_pixels(target), vk.offscreen_pixels())
     check_true("the ocean changes the frame", ocean_lit != preset_lit)
+
+    // The editor runs shadows, an ocean and FXAA together, which is the
+    // combination that put the water program's uniforms under the composite.
+    core.backend_set_post(&opengl_pass, true, false, 0.8, 0.4)
+    core.backend_set_post(&vulkan_pass, true, false, 0.8, 0.4)
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    compare("ocean through fxaa", offscreen.target_pixels(target), vk.offscreen_pixels())
+
+    // Resizing with a composite running rebuilds the Vulkan target and destroys
+    // the post-processing texture with it. Descriptor sets are cached per
+    // texture, so a set handed out before the resize named an image that no
+    // longer existed and the frame came back as noise. Resizing away and back
+    // leaves the frame comparable with the one before it.
+    core.backend_update_viewport(&opengl_pass, WIDTH / 2, HEIGHT / 2)
+    core.backend_update_viewport(&vulkan_pass, WIDTH / 2, HEIGHT / 2)
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    core.backend_update_viewport(&opengl_pass, WIDTH, HEIGHT)
+    core.backend_update_viewport(&vulkan_pass, WIDTH, HEIGHT)
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    compare("after a resize", offscreen.target_pixels(target), vk.offscreen_pixels())
+
+    core.backend_set_post(&opengl_pass, false, false, 0.8, 0.4)
+    core.backend_set_post(&vulkan_pass, false, false, 0.8, 0.4)
 
     core.backend_remove_model(&opengl_pass, gl_ocean)
     core.backend_remove_model(&vulkan_pass, vk_ocean)
