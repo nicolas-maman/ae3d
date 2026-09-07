@@ -197,6 +197,15 @@ else
     fi
 fi
 
+# A shared runner is not a machine anyone should take a timing from, and a
+# software rasteriser needs orders of magnitude longer per frame than the
+# hardware these numbers describe. On CI the benchmarks run briefly, as smoke
+# tests; AE3D_BENCH_FRAMES unset gives the counts the numbers were measured at.
+if [ -n "${CI:-}" ]; then
+    export AE3D_BENCH_FRAMES="${AE3D_BENCH_FRAMES:-10}"
+    export AE3D_BENCH_BLOCKS="${AE3D_BENCH_BLOCKS:-1}"
+fi
+
 step "benchmarks"
 for bench in benchmarks/bench_*.ae; do
     [ -e "$bench" ] || continue
