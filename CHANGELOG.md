@@ -95,7 +95,10 @@ First working engine.
 - Surface nets over a signed distance field: one vertex per cell that straddles
   the surface, placed at the average of its edge crossings, with quads around
   every sign-changing grid edge and normals from the field gradient.
-- Improved Perlin noise with a platform-independent seeded shuffle.
+- Improved Perlin noise with a seeded shuffle that is the same everywhere. It
+  drives its generator with unsigned arithmetic, because the signed overflow
+  it used to rely on is undefined in C and one compiler optimised the seed
+  away entirely, giving every seed the same field.
 - Game objects and components, ray casting, and a fly camera with frustum
   extraction.
 
@@ -114,6 +117,19 @@ First working engine.
   space occlusion, global illumination, bloom and filtering quality. Applying a
   config writes a model's own uniforms, so two models in one scene can run
   different settings through the same program.
+
+### Portability
+
+- The renderer asks the driver whether it really performs a multisample resolve
+  before relying on one. A driver that accepts the call, reports no error and
+  copies nothing used to leave every frame with an effect on it black; it now
+  gets the effect chain without multisampling, and says so once.
+- A model no longer loses its texture to the one drawn before it. Binding the
+  shadow map leaves the default texture bound, which the renderer's record of
+  what is bound was not told, so a model whose texture matched its predecessor
+  had its bind skipped.
+- Both backends free what they allocate: the geometry a renderer shares, the
+  batches it builds, and the copies it keeps to recognise geometry it has seen.
 
 ### Engine
 
