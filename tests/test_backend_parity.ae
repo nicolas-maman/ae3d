@@ -16,6 +16,8 @@ import ae3d.offscreen
 import ae3d.loader
 import ae3d.rendering
 import ae3d.water
+import ae3d.voxel
+import ae3d.noise
 
 const WIDTH = 256
 const HEIGHT = 192
@@ -83,6 +85,38 @@ build_scene(pass_backend: *Backend) -> {
     core.backend_add_model(pass_backend, textured)
 
     return metal, textured, grid, glass
+}
+
+// The editor's terrain, at a size that fits the test's frame: the same seeded
+// field, so both backends are handed identical geometry.
+build_voxels() -> *World {
+    world = voxel.world_new(24, 24, 20, 4.0)
+    if world == null { return null }
+    field = noise.perlin_new(20260903)
+    if field == null {
+        voxel.world_free(world)
+        return null
+    }
+    x = 0
+    while x < voxel.world_size_x(world) {
+        z = 0
+        while z < voxel.world_size_z(world) {
+            sample = noise.fbm2(field, (x * 1.0) * 0.05, (z * 1.0) * 0.05, 4, 0.5)
+            height = (((sample + 1.0) * 0.5) * 12.0 + 3.0) as int
+            y = 0
+            while y < height {
+                kind = voxel.STONE
+                if y == height - 1 { kind = voxel.GRASS }
+                if y > height - 4 && y != height - 1 { kind = voxel.DIRT }
+                voxel.world_set(world, x, y, z, kind)
+                y = y + 1
+            }
+            z = z + 1
+        }
+        x = x + 1
+    }
+    noise.perlin_free(field)
+    return world
 }
 
 // Every configuration is compared the same way: the two rasterisers differ in
@@ -163,7 +197,8 @@ main() {
     }
 
     cam = core.camera_new(WIDTH, HEIGHT)
-    core.camera_set_position(cam, core.vec3(0.0, 0.0, 110.0))
+    core.camera_set_position(cam, core.vec3(70.0, 60.0, 110.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
     light = core.light_sun(core.vec3(0.3, 0.6, 0.8))
     // Enough ambient that every model is above the lit threshold, so coverage
     // measures what is on screen rather than what happens to face the sun.
@@ -324,6 +359,29 @@ main() {
 
     core.backend_set_post(&opengl_pass, false, false, 0.8, 0.4)
     core.backend_set_post(&vulkan_pass, false, false, 0.8, 0.4)
+
+    // A voxel chunk: one instanced draw of thousands of cubes, each carrying its
+    // own colour in the instance buffer. It is the densest geometry the engine
+    // produces and the only thing that uses the per-instance colour attribute.
+    gl_world = build_voxels()
+    vk_world = build_voxels()
+    gl_chunk = voxel.world_build(gl_world, loader.cube(4.0))
+    vk_chunk = voxel.world_build(vk_world, loader.cube(4.0))
+    if gl_chunk != null && vk_chunk != null {
+        core.model_set_position(gl_chunk, 0.0 - 40.0, 0.0 - 40.0, 0.0 - 40.0)
+        core.model_set_position(vk_chunk, 0.0 - 40.0, 0.0 - 40.0, 0.0 - 40.0)
+        core.backend_add_model(&opengl_pass, gl_chunk)
+        core.backend_add_model(&vulkan_pass, vk_chunk)
+        core.backend_render(&opengl_pass, cam, light)
+        core.backend_render(&vulkan_pass, cam, light)
+        compare("voxel chunk", offscreen.target_pixels(target), vk.offscreen_pixels())
+        core.backend_remove_model(&opengl_pass, gl_chunk)
+        core.backend_remove_model(&vulkan_pass, vk_chunk)
+        core.model_free(gl_chunk)
+        core.model_free(vk_chunk)
+    }
+    voxel.world_free(gl_world)
+    voxel.world_free(vk_world)
 
     core.backend_remove_model(&opengl_pass, gl_ocean)
     core.backend_remove_model(&vulkan_pass, vk_ocean)

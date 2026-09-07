@@ -172,7 +172,11 @@ simulation_build(w: *Simulation, resolution: int) -> *Model {
     core.model_set_diffuse(m, w.color_r, w.color_g, w.color_b)
     core.model_set_pbr(m, 0.0, 0.4)
     core.model_set_exposure(m, 1.0)
-    core.model_set_alpha(m, 1.0)
+    // The shader writes waterTransparency into its alpha, so the model has to
+    // say the same thing: a surface that claims to be opaque is drawn in the
+    // opaque pass with depth writes on, and a translucent fragment blended
+    // there composites a number of times that depends on depth precision.
+    core.model_set_alpha(m, w.transparency)
     core.model_set_shader(m, shaders.water_shader())
 
     upload_wave_table(w, m)
@@ -211,6 +215,7 @@ simulation_apply(w: *Simulation) {
 
     core.model_set_uniform_vec3(m, "waterBaseColor", core.vec3(w.color_r, w.color_g, w.color_b))
     core.model_set_uniform_float(m, "waterTransparency", w.transparency)
+    core.model_set_alpha(m, w.transparency)
     core.model_set_uniform_float(m, "waveSpeedMultiplier", w.wave_speed_multiplier)
     core.model_set_uniform_float(m, "waveHeightMultiplier", w.wave_height)
     core.model_set_uniform_float(m, "waveRandomness", w.wave_randomness)
