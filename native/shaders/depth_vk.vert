@@ -16,6 +16,7 @@ struct Light {
 layout(std140, set = 0, binding = 0) uniform SceneBlock {
     Light lights[4];
     bool isInstanced;
+    bool useInstanceColor;
     mat4 model;
     mat4 viewProjection;
     mat4 lightSpaceMatrix;
@@ -118,6 +119,9 @@ layout (location = 3) in mat4 instanceModel;
 
 
 void main() {
-    mat4 modelMatrix = isInstanced ? instanceModel : model;
+    // The same transform the lit pass builds. Reading instanceModel alone left
+    // an instanced model casting its shadow from wherever its own transform was
+    // not applied.
+    mat4 modelMatrix = isInstanced ? (model * instanceModel) : model;
     gl_Position = lightSpaceMatrix * modelMatrix * vec4(inPosition, 1.0);
 }

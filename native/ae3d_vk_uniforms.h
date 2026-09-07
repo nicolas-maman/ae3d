@@ -13,6 +13,7 @@ typedef struct {
 } ae3d_vk_scene;
 
 #define AE3D_VK_OFF_ISINSTANCED 320
+#define AE3D_VK_OFF_USEINSTANCECOLOR 324
 #define AE3D_VK_OFF_MODEL 336
 #define AE3D_VK_OFF_VIEWPROJECTION 400
 #define AE3D_VK_OFF_LIGHTSPACEMATRIX 464
@@ -198,6 +199,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "time", 916 },
     { "transmissionFactor", 644 },
     { "transparencyBoost", 1520 },
+    { "useInstanceColor", 324 },
     { "view", 832 },
     { "viewPos", 544 },
     { "viewProjection", 400 },
@@ -222,7 +224,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "waveSteepness", 1264 },
 };
 
-#define AE3D_VK_UNIFORM_SLOT_COUNT 94
+#define AE3D_VK_UNIFORM_SLOT_COUNT 95
 
 static inline int ae3d_vk_uniform_offset(const char *name) {
     int low = 0;

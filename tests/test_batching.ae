@@ -1,0 +1,174 @@
+// Models the renderer merges have to behave exactly like models it does not.
+//
+// Merging is invisible by design: the same scene must produce the same frame
+// whether it went out as one instanced draw or as many separate ones, and a
+// model that moves, hides or changes colour has to keep doing so once it is
+// part of a batch. The instance buffer is only re-sent when the group changes,
+// which is the part most likely to go wrong.
+
+import std.mem
+import std.list
+import ae3d.core
+import ae3d.gl
+import ae3d.offscreen
+import ae3d.loader
+
+const WIDTH = 192
+const HEIGHT = 144
+const COPIES = 12
+
+var failures = 0
+
+check_true(name: string, ok: bool) {
+    if !ok {
+        println("FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+channel(pixels: ptr, index: int) -> int {
+    bytes = pixels as byte[]
+    return (bytes[index] as int) & 255
+}
+
+frame_sum(pixels: ptr) -> int {
+    total = 0
+    i = 0
+    while i < WIDTH * HEIGHT * 4 {
+        total = total + channel(pixels, i)
+        i = i + 1
+    }
+    return total
+}
+
+main() {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("batching: SKIP no OpenGL context")
+        return
+    }
+
+    renderer = gl.renderer_new()
+    backend = gl.backend(renderer)
+    if !core.backend_init(&backend, context, WIDTH, HEIGHT) {
+        println("batching: SKIP the OpenGL backend would not initialise")
+        return
+    }
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    gl.renderer_set_clear_color(renderer, 0.0, 0.0, 0.0)
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 0.0, 120.0))
+    light = core.light_sun(core.vec3(0.3, 0.7, 0.4))
+
+    models = list.new()
+    i = 0
+    while i < COPIES {
+        m = loader.sphere(1.0, 16, 12)
+        core.model_set_scale(m, 8.0, 8.0, 8.0)
+        core.model_set_position(m, ((i % 4) * 1.0) * 30.0 - 45.0,
+                                ((i / 4) * 1.0) * 30.0 - 30.0, 0.0)
+        core.model_polished_metal(m, 0.7, 0.5, 0.3)
+        core.backend_add_model(&backend, m)
+        list.add_raw(models, m)
+        i = i + 1
+    }
+
+    // Identical geometry and one material, so the whole set leaves as one draw.
+    core.backend_render(&backend, cam, light)
+    merged = frame_sum(offscreen.target_pixels(target))
+    check_true("identical models leave as one draw", gl.renderer_draw_calls(renderer) == 1)
+    check_true("the merged frame drew something", merged > 0)
+
+    // Rendering again without touching anything must not change the frame: this
+    // is the path that reuses the instance buffer instead of re-sending it.
+    core.backend_render(&backend, cam, light)
+    check_true("a still scene renders the same twice",
+               frame_sum(offscreen.target_pixels(target)) == merged)
+
+
+    // A member that moves has to move, even though nothing else about the
+    // batch changed.
+    moved_model = list.get_raw(models, 0) as *Model
+    core.model_set_position(moved_model, 45.0, 30.0, 40.0)
+    core.backend_render(&backend, cam, light)
+    moved = frame_sum(offscreen.target_pixels(target))
+    check_true("a member that moves changes the frame", moved != merged)
+
+    core.model_set_position(moved_model, 0.0 - 45.0, 0.0 - 30.0, 0.0)
+    core.backend_render(&backend, cam, light)
+    check_true("moving it back restores the frame",
+               frame_sum(offscreen.target_pixels(target)) == merged)
+
+    // Hiding one changes the membership, which the batch has to notice.
+    moved_model.visible = false
+    core.backend_render(&backend, cam, light)
+    hidden = frame_sum(offscreen.target_pixels(target))
+    check_true("hiding a member changes the frame", hidden != merged)
+    check_true("the rest still leave as one draw", gl.renderer_draw_calls(renderer) == 1)
+
+    moved_model.visible = true
+    core.backend_render(&backend, cam, light)
+    check_true("showing it again restores the frame",
+               frame_sum(offscreen.target_pixels(target)) == merged)
+
+    // A different material cannot share a draw with the others.
+    core.model_matte(moved_model, 0.1, 0.9, 0.2)
+    core.backend_render(&backend, cam, light)
+    check_true("a different material splits the draw",
+               gl.renderer_draw_calls(renderer) == 2)
+    check_true("recolouring a member changes the frame",
+               frame_sum(offscreen.target_pixels(target)) != merged)
+
+    // Removing one leaves the rest merged and drawn.
+    core.backend_remove_model(&backend, moved_model)
+    core.backend_render(&backend, cam, light)
+    check_true("what is left still leaves as one draw",
+               gl.renderer_draw_calls(renderer) == 1)
+    check_true("the remaining models still draw",
+               frame_sum(offscreen.target_pixels(target)) > 0)
+
+    // The same scene the renderer is not allowed to merge. A uniform the shader
+    // has no home for changes nothing about the picture, but it does make every
+    // model carry per-model state, which is what keeps it out of a batch. The
+    // two frames have to match: merging is an optimisation, not a look.
+    core.backend_render(&backend, cam, light)
+    before_split = frame_sum(offscreen.target_pixels(target))
+    remaining = list.size(models)
+    i = 0
+    while i < remaining {
+        m = list.get_raw(models, i) as *Model
+        if m != moved_model { core.model_set_uniform_float(m, "batchProbe", 1.0) }
+        i = i + 1
+    }
+    core.backend_render(&backend, cam, light)
+    check_true("the unmerged scene issues a draw per model",
+               gl.renderer_draw_calls(renderer) == remaining - 1)
+    // Not bit equality: a merged draw reaches its world transform as
+    // model * instanceModel where a separate one reads model directly, and two
+    // matrix multiplies in float do not always land on the same last bit.
+    unmerged = frame_sum(offscreen.target_pixels(target))
+    drift = unmerged - before_split
+    if drift < 0 { drift = 0 - drift }
+    check_true("merging does not change the picture", drift * 100000 < before_split)
+
+    core.backend_cleanup(&backend)
+    i = 0
+    while i < list.size(models) {
+        core.model_free(list.get_raw(models, i) as *Model)
+        i = i + 1
+    }
+    list.free(models)
+    offscreen.target_destroy(target)
+    offscreen.context_destroy(context)
+    gl.renderer_free(renderer)
+    core.camera_free(cam)
+    core.light_free(light)
+
+    if failures == 0 {
+        println("batching: all checks passed")
+    } else {
+        println("batching: ${failures} failure(s)")
+    }
+}

@@ -28,6 +28,7 @@ layout(location = 3) in mat4 instanceModel; // Instanced model matrix (locations
 layout(location = 7) in vec3 instanceColor; // Per-instance color (for voxels)
 
 uniform bool isInstanced; // Flag to differentiate instanced vs non-instanced rendering
+uniform bool useInstanceColor;
 uniform mat4 model;       // Regular model matrix
 uniform mat4 viewProjection;
 uniform mat4 lightSpaceMatrix;
@@ -56,7 +57,7 @@ void main() {
     fragTexCoord = inTexCoord;
     
     // Pass instance color to fragment shader (default white if not instanced)
-    InstanceColor = isInstanced ? instanceColor : vec3(1.0, 1.0, 1.0);
+    InstanceColor = (isInstanced && useInstanceColor) ? instanceColor : vec3(1.0, 1.0, 1.0);
 
     // Final vertex position
     FragPosLightSpace = lightSpaceMatrix * vec4(FragPos, 1.0);
@@ -1578,7 +1579,10 @@ uniform mat4 model;
 uniform mat4 lightSpaceMatrix;
 
 void main() {
-    mat4 modelMatrix = isInstanced ? instanceModel : model;
+    // The same transform the lit pass builds. Reading instanceModel alone left
+    // an instanced model casting its shadow from wherever its own transform was
+    // not applied.
+    mat4 modelMatrix = isInstanced ? (model * instanceModel) : model;
     gl_Position = lightSpaceMatrix * modelMatrix * vec4(inPosition, 1.0);
 }
 GLSL_END
