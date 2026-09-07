@@ -1580,6 +1580,10 @@ init_post_processing(r: *GLRenderer, width: int, height: int) {
         r.post_ms_fbo = ae3d_gl_fbo_create()
         attach_multisample_post(r, width, height)
     }
+    if r.post_samples > 0 && !multisample_resolve_works(r) {
+        println("ae3d: this driver does not resolve a multisampled framebuffer, effects will run without it")
+        drop_multisample_post(r)
+    }
 
     r.bloom_fbo = ae3d_gl_fbo_create()
     r.bloom_texture = ae3d_gl_fbo_attach_color(r.bloom_fbo, width / 4, height / 4, 1)
@@ -1654,6 +1658,31 @@ begin_post_processing(r: *GLRenderer) -> bool {
     return true
 }
 
+// Some drivers accept a multisample resolve, report no error, and copy nothing.
+// Asking once at startup, with a colour that cannot be confused for an empty
+// buffer, is the only way to know: the alternative is a black frame every time
+// an effect runs. A driver that cannot do it gets the effect chain without
+// multisampling rather than nothing at all.
+multisample_resolve_works(r: *GLRenderer) -> bool {
+    if r.post_ms_fbo == 0 || r.post_fbo == 0 { return false }
+
+    ae3d_gl_fbo_bind(r.post_ms_fbo)
+    ae3d_gl_clear_color(1.0, 0.0, 1.0, 1.0)
+    ae3d_gl_clear(1, 0)
+    refused = ae3d_gl_fbo_resolve(r.post_ms_fbo, r.post_fbo, r.post_width, r.post_height)
+    ae3d_gl_fbo_bind(r.post_fbo)
+    centre = ae3d_gl_read_pixel(r.post_width / 2, r.post_height / 2)
+    ae3d_gl_fbo_bind(0)
+    return refused == 0 && centre == 0xFF00FF
+}
+
+drop_multisample_post(r: *GLRenderer) {
+    if r.post_ms_color != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_color) ; r.post_ms_color = 0 }
+    if r.post_ms_depth != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_depth) ; r.post_ms_depth = 0 }
+    if r.post_ms_fbo != 0 { ae3d_gl_fbo_delete(r.post_ms_fbo) ; r.post_ms_fbo = 0 }
+    r.post_samples = 0
+}
+
 attach_multisample_post(r: *GLRenderer, width: int, height: int) {
     r.post_ms_color = ae3d_gl_fbo_attach_color_multisample(r.post_ms_fbo, width, height,
                                                            r.post_samples)
@@ -1691,14 +1720,6 @@ resolve_post_processing(r: *GLRenderer) {
     ae3d_gl_vao_bind(r.screen_vao)
     ae3d_gl_texture_bind(0, r.post_texture)
 
-    if !r.post_resolve_reported {
-        r.post_resolve_reported = true
-        ae3d_gl_fbo_bind(r.post_fbo)
-        post_centre = ae3d_gl_read_pixel(r.post_width / 2, r.post_height / 2)
-        bind_output(r)
-        ae3d_gl_texture_bind(0, r.post_texture)
-        println("POSTPROBE vp=${r.viewport_width}x${r.viewport_height} post=${r.post_width}x${r.post_height} samples=${r.post_samples} post_centre=${post_centre} fxaa=${r.fxaa_program} err=${ae3d_gl_error()}")
-    }
 
     texel_x = 1.0 / (r.viewport_width * 1.0)
     texel_y = 1.0 / (r.viewport_height * 1.0)
