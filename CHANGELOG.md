@@ -6,7 +6,7 @@ First working engine.
 
 ### Rendering
 
-- Models that share geometry and a material are drawn together. Identical
+- Both backends merge draws. Models that share geometry and a material are drawn together. Identical
   meshes are uploaded once and the renderer merges the models that use them
   into a single instanced draw, rebuilding the instance buffer only when the
   group changes, so a scene that has not moved re-sends nothing. The depth pass

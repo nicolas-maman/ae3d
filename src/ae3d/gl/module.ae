@@ -159,7 +159,7 @@ struct TextureEntry {
 
 // One merged draw: the geometry every member shares, the surface they all have,
 // and the matrices that tell the shader where each copy goes.
-struct Batch {
+struct GLBatch {
     vao: int
     material: ptr
     first: ptr
@@ -900,7 +900,7 @@ render_shadow_pass(r: *GLRenderer, light: *Light) {
 
     i = 0
     while i < r.shadow_batch_count {
-        b = list.get_raw(r.shadow_batches, i) as *Batch
+        b = list.get_raw(r.shadow_batches, i) as *GLBatch
         if b.count != list.size(b.members) { b.stale = true }
         if b.stale { fill_batch(r, b) }
         first = b.first as *Model
@@ -1139,10 +1139,10 @@ batchable(r: *GLRenderer, m: *Model) -> bool {
     return alpha >= 0.99
 }
 
-batch_for(r: *GLRenderer, m: *Model) -> *Batch {
+batch_for(r: *GLRenderer, m: *Model) -> *GLBatch {
     i = 0
     while i < r.batch_count {
-        b = list.get_raw(r.batches, i) as *Batch
+        b = list.get_raw(r.batches, i) as *GLBatch
         if b.vao == m.vao && core.material_equals(b.material as *Material, m.material) {
             return b
         }
@@ -1150,7 +1150,7 @@ batch_for(r: *GLRenderer, m: *Model) -> *Batch {
     }
 
     if r.batch_count >= list.size(r.batches) {
-        fresh = heap.new(Batch)
+        fresh = heap.new(GLBatch)
         fresh.instances = ae3d_inst_create()
         fresh.members = list.new()
         fresh.capacity_bytes = 0
@@ -1160,7 +1160,7 @@ batch_for(r: *GLRenderer, m: *Model) -> *Batch {
         fresh.stale = true
         list.add_raw(r.batches, fresh)
     }
-    b = list.get_raw(r.batches, r.batch_count) as *Batch
+    b = list.get_raw(r.batches, r.batch_count) as *GLBatch
     if b.vao != m.vao || b.material != m.material as ptr { b.stale = true }
     b.vao = m.vao
     b.material = m.material as ptr
@@ -1179,16 +1179,16 @@ shadow_batchable(m: *Model) -> bool {
     return !(m.is_instanced && core.model_instance_count(m) > 0)
 }
 
-shadow_batch_for(r: *GLRenderer, m: *Model) -> *Batch {
+shadow_batch_for(r: *GLRenderer, m: *Model) -> *GLBatch {
     i = 0
     while i < r.shadow_batch_count {
-        b = list.get_raw(r.shadow_batches, i) as *Batch
+        b = list.get_raw(r.shadow_batches, i) as *GLBatch
         if b.vao == m.vao { return b }
         i = i + 1
     }
 
     if r.shadow_batch_count >= list.size(r.shadow_batches) {
-        fresh = heap.new(Batch)
+        fresh = heap.new(GLBatch)
         fresh.instances = ae3d_inst_create()
         fresh.members = list.new()
         fresh.capacity_bytes = 0
@@ -1198,7 +1198,7 @@ shadow_batch_for(r: *GLRenderer, m: *Model) -> *Batch {
         fresh.stale = true
         list.add_raw(r.shadow_batches, fresh)
     }
-    b = list.get_raw(r.shadow_batches, r.shadow_batch_count) as *Batch
+    b = list.get_raw(r.shadow_batches, r.shadow_batch_count) as *GLBatch
     if b.vao != m.vao { b.stale = true }
     b.vao = m.vao
     b.first = m as ptr
@@ -1248,7 +1248,7 @@ draw_opaque(r: *GLRenderer, view_projection: *Mat4, light: *Light, cam: *Camera)
 
     i = 0
     while i < r.batch_count {
-        b = list.get_raw(r.batches, i) as *Batch
+        b = list.get_raw(r.batches, i) as *GLBatch
         if b.count != list.size(b.members) { b.stale = true }
         if b.stale { fill_batch(r, b) }
         if b.count == 1 {
@@ -1260,7 +1260,7 @@ draw_opaque(r: *GLRenderer, view_projection: *Mat4, light: *Light, cam: *Camera)
     }
 }
 
-fill_batch(r: *GLRenderer, b: *Batch) {
+fill_batch(r: *GLRenderer, b: *GLBatch) {
     while list.size(b.members) > b.count { list.remove(b.members, list.size(b.members) - 1) }
     ae3d_inst_resize(b.instances, b.count)
     i = 0
@@ -1271,7 +1271,7 @@ fill_batch(r: *GLRenderer, b: *Batch) {
     }
 }
 
-draw_batch(r: *GLRenderer, b: *Batch, view_projection: *Mat4, light: *Light, cam: *Camera) {
+draw_batch(r: *GLRenderer, b: *GLBatch, view_projection: *Mat4, light: *Light, cam: *Camera) {
     slots = slots_for(r, r.default_program)
     use_program(r, r.default_program)
     if slots.frame_stamp != r.frame_stamp {
@@ -1702,7 +1702,7 @@ free_batches(batches: ptr) {
     if batches == null { return }
     i = 0
     while i < list.size(batches) {
-        b = list.get_raw(batches, i) as *Batch
+        b = list.get_raw(batches, i) as *GLBatch
         if b != null {
             if b.instances != null { ae3d_inst_destroy(b.instances) }
             if b.members != null { list.free(b.members) }
