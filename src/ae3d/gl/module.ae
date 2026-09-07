@@ -1580,10 +1580,6 @@ init_post_processing(r: *GLRenderer, width: int, height: int) {
         r.post_ms_fbo = ae3d_gl_fbo_create()
         attach_multisample_post(r, width, height)
     }
-    if r.post_samples > 0 && !multisample_resolve_works(r) {
-        println("ae3d: this driver does not resolve a multisampled framebuffer, effects will run without it")
-        drop_multisample_post(r)
-    }
 
     r.bloom_fbo = ae3d_gl_fbo_create()
     r.bloom_texture = ae3d_gl_fbo_attach_color(r.bloom_fbo, width / 4, height / 4, 1)
@@ -1600,6 +1596,11 @@ init_post_processing(r: *GLRenderer, width: int, height: int) {
     ae3d_gl_upload_mesh(r.screen_mesh, r.screen_vbo, 0)
     ae3d_gl_setup_vertex_attribs()
     ae3d_gl_vao_bind(0)
+
+    if r.post_samples > 0 && !multisample_resolve_works(r) {
+        println("ae3d: this driver does not resolve a multisampled framebuffer, effects will run without it")
+        drop_multisample_post(r)
+    }
 }
 
 resize_post_processing(r: *GLRenderer, width: int, height: int) {
@@ -1665,15 +1666,35 @@ begin_post_processing(r: *GLRenderer) -> bool {
 // multisampling rather than nothing at all.
 multisample_resolve_works(r: *GLRenderer) -> bool {
     if r.post_ms_fbo == 0 || r.post_fbo == 0 { return false }
+    if r.screen_vao == 0 || r.passthrough_program == 0 { return false }
 
+    // Drawn, not just cleared. A driver was found that resolves a buffer it
+    // only had to clear and produces nothing from one that was drawn into,
+    // which is the case that matters and the one that was coming out black.
     ae3d_gl_fbo_bind(r.post_ms_fbo)
-    ae3d_gl_clear_color(1.0, 0.0, 1.0, 1.0)
-    ae3d_gl_clear(1, 0)
+    ae3d_gl_viewport(0, 0, r.post_width, r.post_height)
+    ae3d_gl_clear_color(0.0, 0.0, 0.0, 1.0)
+    ae3d_gl_clear(1, 1)
+    set_depth_test(r, false)
+    ae3d_gl_set_depth_mask(0)
+    set_blend(r, false)
+    use_program(r, r.passthrough_program)
+    ae3d_gl_uniform_int(ae3d_gl_uniform_location(r.passthrough_program, "screenTexture"), 0)
+    ae3d_gl_vao_bind(r.screen_vao)
+    ae3d_gl_texture_bind(0, r.default_texture)
+    r.bound_texture = r.default_texture
+    ae3d_gl_draw_arrays(0, 6)
+    ae3d_gl_vao_bind(0)
+
     refused = ae3d_gl_fbo_resolve(r.post_ms_fbo, r.post_fbo, r.post_width, r.post_height)
     ae3d_gl_fbo_bind(r.post_fbo)
     centre = ae3d_gl_read_pixel(r.post_width / 2, r.post_height / 2)
     ae3d_gl_fbo_bind(0)
-    return refused == 0 && centre == 0xFF00FF
+
+    set_depth_test(r, true)
+    ae3d_gl_set_depth_mask(1)
+    set_blend(r, true)
+    return refused == 0 && centre == 0xFFFFFF
 }
 
 drop_multisample_post(r: *GLRenderer) {
