@@ -833,12 +833,17 @@ backend_cleanup(b: *Backend) {
 // same program is a measurement on a machine that can measure and a smoke test
 // on one that cannot.
 env_int(name: string, fallback: int) -> int {
-    setting = text(os.getenv(name))
-    if setting == "" { return fallback }
-    if string.try_int(setting) == 0 { return fallback }
-    value = string.get_int(setting)
-    if value < 1 { return fallback }
-    return value
+    // The value comes back on the heap and belongs to whoever asked for it.
+    raw = os.getenv(name)
+    if raw == null { return fallback }
+
+    chosen = fallback
+    if string.try_int(raw) != 0 {
+        value = string.get_int(raw)
+        if value >= 1 { chosen = value }
+    }
+    string.free(raw)
+    return chosen
 }
 
 debug_enabled() -> bool { return g_debug }
