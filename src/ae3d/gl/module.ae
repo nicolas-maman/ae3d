@@ -184,6 +184,10 @@ struct GLRenderer {
     bloom_threshold: float
     bloom_intensity: float
 
+    bound_material: ptr
+    bound_texture: int
+    bound_instanced: int
+
     post_fbo: int
     post_texture: int
     post_ms_fbo: int
@@ -217,6 +221,9 @@ renderer_new() -> *GLRenderer {
     r.bloom_threshold = 0.8
     r.bloom_intensity = 0.4
     r.depth_test_state = true
+    r.bound_material = null
+    r.bound_texture = 0 - 1
+    r.bound_instanced = 0 - 1
     return r
 }
 
@@ -379,10 +386,36 @@ set_wireframe(r: *GLRenderer, on: bool) {
     r.wireframe_state = on
 }
 
+// Uniforms and the bound texture belong to a program, so what the renderer
+// remembers about them is only true while that program stays current.
 use_program(r: *GLRenderer, program: int) {
     if r.current_program == program { return }
     ae3d_gl_program_use(program)
     r.current_program = program
+    r.bound_material = null
+    r.bound_texture = 0 - 1
+    r.bound_instanced = 0 - 1
+}
+
+// A material is a pointer, and the same pointer means the same seven uniforms,
+// so a run of models sharing one costs a comparison instead of seven uploads.
+apply_material(r: *GLRenderer, slots: *ProgramSlots, material: *Material) {
+    if r.bound_material == material as ptr { return }
+    set_material_uniforms(slots, material)
+    r.bound_material = material as ptr
+}
+
+apply_texture(r: *GLRenderer, slots: *ProgramSlots, texture: int) {
+    if r.bound_texture == texture { return }
+    ae3d_gl_texture_bind(0, texture)
+    ae3d_gl_uniform_int(slots.texture_sampler, 0)
+    r.bound_texture = texture
+}
+
+apply_instancing(r: *GLRenderer, slots: *ProgramSlots, instanced: int) {
+    if r.bound_instanced == instanced { return }
+    ae3d_gl_uniform_int(slots.is_instanced, instanced)
+    r.bound_instanced = instanced
 }
 
 renderer_init(r: *GLRenderer, window: ptr, width: int, height: int) -> int {
@@ -902,6 +935,9 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
     if !r.initialized { return }
     r.last_draw_calls = 0
     r.frame_stamp = r.frame_stamp + 1
+    r.bound_material = null
+    r.bound_texture = 0 - 1
+    r.bound_instanced = 0 - 1
 
     active_light = light
     if list.size(r.lights) > 0 {
@@ -985,7 +1021,6 @@ render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
 
     groups = core.model_group_count(m)
     if groups > 0 {
-        bound_texture = 0 - 1
         i = 0
         while i < groups {
             group = core.model_group(m, i)
@@ -994,14 +1029,9 @@ render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
             is_transparent = alpha < 0.99
 
             if is_transparent == transparent_pass {
-                set_material_uniforms(slots, group.material)
+                apply_material(r, slots, group.material)
                 apply_transparency(r, is_transparent)
-                texture = texture_for(r, group.material)
-                if texture != bound_texture {
-                    ae3d_gl_texture_bind(0, texture)
-                    ae3d_gl_uniform_int(slots.texture_sampler, 0)
-                    bound_texture = texture
-                }
+                apply_texture(r, slots, texture_for(r, group.material))
                 draw(r, m, slots, group.index_count, group.index_start * 4)
             }
             i = i + 1
@@ -1012,10 +1042,9 @@ render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
         is_transparent = alpha < 0.99
 
         if is_transparent == transparent_pass {
-            set_material_uniforms(slots, m.material)
+            apply_material(r, slots, m.material)
             apply_transparency(r, is_transparent)
-            ae3d_gl_texture_bind(0, texture_for(r, m.material))
-            ae3d_gl_uniform_int(slots.texture_sampler, 0)
+            apply_texture(r, slots, texture_for(r, m.material))
             draw(r, m, slots, core.mesh_index_count(m.mesh), 0)
         }
     }
@@ -1047,10 +1076,10 @@ draw(r: *GLRenderer, m: *Model, slots: *ProgramSlots, count: int, byte_offset: i
                                                                m.instance_vbo_capacity)
             m.instances_updated = false
         }
-        ae3d_gl_uniform_int(slots.is_instanced, 1)
+        apply_instancing(r, slots, 1)
         ae3d_gl_draw_elements_instanced(count, byte_offset, core.model_instance_count(m))
     } else {
-        ae3d_gl_uniform_int(slots.is_instanced, 0)
+        apply_instancing(r, slots, 0)
         ae3d_gl_draw_elements(count, byte_offset)
     }
     r.last_draw_calls = r.last_draw_calls + 1

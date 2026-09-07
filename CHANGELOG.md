@@ -144,6 +144,9 @@ GL implementation's, over two thousand iterations with zero leaked bytes and
 - 19ns per Perlin sample; a 131072-cell exposed-face scan under a millisecond.
 - 400 separate models: 806us a frame, from 1200us before the frame's uniforms
   were hoisted out of the per-model loop.
+- 400 separate models: 812us a frame, from 1005us before the renderer stopped
+  re-sending state a draw already had. What is left is 72% inside the driver's
+  own `glDrawElements`, so the next gain has to come from issuing fewer draws.
 - Multisampling the offscreen target costs nothing measurable on a scene of 400
   separate models: 1005us a frame against 1010us with it off, because that scene
   is bound by its draw calls rather than by fill.
