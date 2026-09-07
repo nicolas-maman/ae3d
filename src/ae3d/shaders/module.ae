@@ -146,6 +146,7 @@ uniform float bloomRadius;
 
 // GPU Gems Chapter 9 & 11: Shadow Volume Support with Antialiasing
 uniform bool enableShadows;  // Enable shadow volume rendering
+uniform bool hasShadowMap;   // Whether the renderer bound a real shadow map
 uniform float shadowIntensity; // How dark shadows should be (0.0 = black, 1.0 = no shadow)
 uniform float shadowSoftness; // Chapter 11: Shadow edge softness for antialiasing
 
@@ -789,7 +790,12 @@ void main() {
     // HDR exposure and tone mapping for normal objects
     color = color * exposure;
     // GPU Gems Chapter 9 & 11: Apply shadows with proper sun behavior
-    color = color * shadow_factor();
+    // Without a map there is nothing to compare against, and the light-space
+    // position is meaningless: dividing it by a w of zero used to leave the
+    // whole surface darkened by whatever the sampler happened to return.
+    if (hasShadowMap) {
+        color = color * shadow_factor();
+    }
     
     // Apply bloom effect
     if (enableBloom) {

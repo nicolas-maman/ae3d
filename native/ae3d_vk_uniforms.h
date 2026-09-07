@@ -55,14 +55,15 @@ typedef struct {
 #define AE3D_VK_OFF_BLOOMINTENSITY 720
 #define AE3D_VK_OFF_BLOOMRADIUS 724
 #define AE3D_VK_OFF_ENABLESHADOWS 728
-#define AE3D_VK_OFF_SHADOWINTENSITY 732
-#define AE3D_VK_OFF_SHADOWSOFTNESS 736
-#define AE3D_VK_OFF_ENABLEPERLINNOISE 740
-#define AE3D_VK_OFF_NOISESCALE 744
-#define AE3D_VK_OFF_NOISEOCTAVES 748
-#define AE3D_VK_OFF_NOISEINTENSITY 752
-#define AE3D_VK_OFF_ENABLEHIGHQUALITYFILTERING 756
-#define AE3D_VK_OFF_FILTERINGQUALITY 760
+#define AE3D_VK_OFF_HASSHADOWMAP 732
+#define AE3D_VK_OFF_SHADOWINTENSITY 736
+#define AE3D_VK_OFF_SHADOWSOFTNESS 740
+#define AE3D_VK_OFF_ENABLEPERLINNOISE 744
+#define AE3D_VK_OFF_NOISESCALE 748
+#define AE3D_VK_OFF_NOISEOCTAVES 752
+#define AE3D_VK_OFF_NOISEINTENSITY 756
+#define AE3D_VK_OFF_ENABLEHIGHQUALITYFILTERING 760
+#define AE3D_VK_OFF_FILTERINGQUALITY 764
 #define AE3D_VK_OFF_PROJECTION 768
 #define AE3D_VK_OFF_VIEW 832
 #define AE3D_VK_OFF_TEXELSIZE 896
@@ -145,10 +146,10 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "enableEnergyConservation", 652 },
     { "enableFog", 1416 },
     { "enableGlobalIllumination", 700 },
-    { "enableHighQualityFiltering", 756 },
+    { "enableHighQualityFiltering", 760 },
     { "enableImageBasedLighting", 656 },
     { "enableMultipleScattering", 648 },
-    { "enablePerlinNoise", 740 },
+    { "enablePerlinNoise", 744 },
     { "enableSSAO", 680 },
     { "enableShadows", 728 },
     { "enableSheen", 620 },
@@ -159,13 +160,14 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "enableWaterReflection", 1484 },
     { "enableWaterRefraction", 1488 },
     { "exposure", 600 },
-    { "filteringQuality", 760 },
+    { "filteringQuality", 764 },
     { "fogColor", 1440 },
     { "fogEnd", 1424 },
     { "fogIntensity", 1452 },
     { "fogStart", 1420 },
     { "giBounces", 708 },
     { "giIntensity", 704 },
+    { "hasShadowMap", 732 },
     { "horizonColor", 1472 },
     { "iblIntensity", 660 },
     { "isInstanced", 320 },
@@ -178,13 +180,13 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "materialAlpha", 604 },
     { "metallic", 592 },
     { "model", 336 },
-    { "noiseIntensity", 752 },
-    { "noiseOctaves", 748 },
-    { "noiseScale", 744 },
+    { "noiseIntensity", 756 },
+    { "noiseOctaves", 752 },
+    { "noiseScale", 748 },
     { "projection", 768 },
     { "roughness", 596 },
-    { "shadowIntensity", 732 },
-    { "shadowSoftness", 736 },
+    { "shadowIntensity", 736 },
+    { "shadowSoftness", 740 },
     { "sheenColor", 624 },
     { "sheenRoughness", 636 },
     { "shininess", 588 },
@@ -224,7 +226,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "waveSteepness", 1264 },
 };
 
-#define AE3D_VK_UNIFORM_SLOT_COUNT 95
+#define AE3D_VK_UNIFORM_SLOT_COUNT 96
 
 static inline int ae3d_vk_uniform_offset(const char *name) {
     int low = 0;

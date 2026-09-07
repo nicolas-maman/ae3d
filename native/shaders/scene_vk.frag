@@ -59,6 +59,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float bloomIntensity;
     float bloomRadius;
     bool enableShadows;
+    bool hasShadowMap;
     float shadowIntensity;
     float shadowSoftness;
     bool enablePerlinNoise;
@@ -175,6 +176,7 @@ layout(location = 4) in vec4 FragPosLightSpace;
 
 
 // GPU Gems Chapter 9 & 11: Shadow Volume Support with Antialiasing
+
 
 
 
@@ -819,7 +821,12 @@ void main() {
     // HDR exposure and tone mapping for normal objects
     color = color * exposure;
     // GPU Gems Chapter 9 & 11: Apply shadows with proper sun behavior
-    color = color * shadow_factor();
+    // Without a map there is nothing to compare against, and the light-space
+    // position is meaningless: dividing it by a w of zero used to leave the
+    // whole surface darkened by whatever the sampler happened to return.
+    if (hasShadowMap) {
+        color = color * shadow_factor();
+    }
     
     // Apply bloom effect
     if (enableBloom) {
