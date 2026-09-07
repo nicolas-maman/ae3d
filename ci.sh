@@ -87,9 +87,15 @@ for suite in tests/test_*.ae; do
         skip "$name" "no display"
         continue
     fi
-    if output="$(AE3D_FRAMES="$FRAMES" ./build/"$name" 2>&1)" && \
-       printf '%s' "$output" | grep -q "all checks passed"; then
+    if ! output="$(AE3D_FRAMES="$FRAMES" ./build/"$name" 2>&1)"; then
+        fail "$name"
+        printf '%s\n' "$output" | sed 's/^/        /' | head -20
+    elif printf '%s' "$output" | grep -q "all checks passed"; then
         pass "$name"
+    elif printf '%s' "$output" | grep -q "SKIP" && ! printf '%s' "$output" | grep -q "FAIL"; then
+        # A suite that cannot run where it finds itself, for want of a display,
+        # a GPU or a driver, is not a suite that failed.
+        skip "$name" "$(printf '%s' "$output" | grep -m1 "SKIP" | sed 's/.*SKIP *//')"
     else
         fail "$name"
         printf '%s\n' "$output" | sed 's/^/        /' | head -20

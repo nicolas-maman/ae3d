@@ -95,7 +95,7 @@ extern ae3d_inst_set_matrix(inst: ptr, i: int, m: *Mat4)
 extern ae3d_gl_max_samples() -> int
 extern ae3d_gl_fbo_attach_color_multisample(fbo: int, width: int, height: int, samples: int) -> int
 extern ae3d_gl_fbo_attach_depth_multisample(fbo: int, width: int, height: int, samples: int) -> int
-extern ae3d_gl_fbo_resolve(source: int, destination: int, width: int, height: int)
+extern ae3d_gl_fbo_resolve(source: int, destination: int, width: int, height: int) -> int
 extern ae3d_gl_fbo_attach_shadow_map(fbo: int, size: int) -> int
 extern ae3d_gl_renderbuffer_delete(rbo: int)
 extern ae3d_gl_fbo_complete() -> int
@@ -228,6 +228,9 @@ struct GLRenderer {
     post_ms_color: int
     post_ms_depth: int
     post_samples: int
+    post_width: int
+    post_height: int
+    post_resolve_reported: bool
     post_depth: int
     bloom_fbo: int
     bloom_texture: int
@@ -1563,6 +1566,8 @@ init_post_processing(r: *GLRenderer, width: int, height: int) {
 
     // An effect otherwise runs over a frame with no antialiasing, since the
     // scene goes into this framebuffer rather than the multisampled default.
+    r.post_width = width
+    r.post_height = height
     r.post_samples = ae3d_gl_max_samples()
     if r.post_samples > 0 {
         r.post_ms_fbo = ae3d_gl_fbo_create()
@@ -1598,6 +1603,8 @@ resize_post_processing(r: *GLRenderer, width: int, height: int) {
     if r.post_depth != 0 { ae3d_gl_renderbuffer_delete(r.post_depth) }
     if r.bloom_texture != 0 { ae3d_gl_texture_delete(r.bloom_texture) }
 
+    r.post_width = clamped_width
+    r.post_height = clamped_height
     r.post_texture = ae3d_gl_fbo_attach_color(r.post_fbo, clamped_width, clamped_height, 0)
     r.post_depth = ae3d_gl_fbo_attach_depth(r.post_fbo, clamped_width, clamped_height)
     ae3d_gl_fbo_bind(0)
@@ -1657,7 +1664,15 @@ attach_multisample_post(r: *GLRenderer, width: int, height: int) {
 
 resolve_post_processing(r: *GLRenderer) {
     if r.post_samples > 0 && r.post_ms_fbo != 0 {
-        ae3d_gl_fbo_resolve(r.post_ms_fbo, r.post_fbo, r.viewport_width, r.viewport_height)
+        // The size the buffers were made at, not whatever the viewport says.
+        // A resolve of the wrong rectangle leaves the effect reading a frame
+        // nothing was written into.
+        refused = ae3d_gl_fbo_resolve(r.post_ms_fbo, r.post_fbo, r.post_width, r.post_height)
+        if refused != 0 && !r.post_resolve_reported {
+            println("ae3d: the driver refused the multisample resolve (0x${refused}), effects will run without it")
+            r.post_resolve_reported = true
+            r.post_samples = 0
+        }
     }
     bind_output(r)
     set_depth_test(r, false)
