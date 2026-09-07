@@ -159,6 +159,11 @@ GL implementation's, over two thousand iterations with zero leaked bytes and
 - Multisampling the offscreen target costs nothing measurable on a scene of 400
   separate models: 1005us a frame against 1010us with it off, because that scene
   is bound by its draw calls rather than by fill.
+- The Vulkan offscreen path no longer waits for its readback. Each frame in
+  flight copies into a staging buffer of its own and whoever asks for the
+  pixels waits then, so a program that renders without reading never stalls:
+  200 casters go from 695us a frame to 264us, and with shadows from 842us to
+  360us against OpenGL's 359us.
 - Reading a 1280x720 frame back: 307us pipelined against 1625us waiting.
 - The shadow pass over 200 casters at 1280x720: 248us in OpenGL and 103us in
   Vulkan, which records it into the frame's own command buffer. Measured by

@@ -303,9 +303,12 @@ static struct {
 
     VkImage readback_image;
     VkDeviceMemory readback_memory;
-    VkBuffer readback_buffer;
-    VkDeviceMemory readback_buffer_memory;
-    unsigned char *readback_mapped;
+    // One staging buffer per frame in flight, so a frame can be copied out
+    // while the one before it is still being read.
+    VkBuffer readback_buffer[AE3D_VK_FRAMES];
+    VkDeviceMemory readback_buffer_memory[AE3D_VK_FRAMES];
+    unsigned char *readback_mapped[AE3D_VK_FRAMES];
+    int readback_frame;
     int readback_width;
     int readback_height;
     int offscreen;
@@ -816,17 +819,22 @@ static void ae3d_vk_destroy_swapchain(void) {
         }
         // The staging buffer is sized to the extent, so it goes with the image
         // it copies from. Leaving it would hand back a mapping of the old size.
-        if (vk.readback_mapped) {
-            ae3d_vkUnmapMemory(vk.device, vk.readback_buffer_memory);
-            vk.readback_mapped = NULL;
-        }
-        if (vk.readback_buffer) {
-            ae3d_vkDestroyBuffer(vk.device, vk.readback_buffer, NULL);
-            vk.readback_buffer = VK_NULL_HANDLE;
-        }
-        if (vk.readback_buffer_memory) {
-            ae3d_vkFreeMemory(vk.device, vk.readback_buffer_memory, NULL);
-            vk.readback_buffer_memory = VK_NULL_HANDLE;
+        {
+            unsigned slot;
+            for (slot = 0; slot < AE3D_VK_FRAMES; slot++) {
+                if (vk.readback_mapped[slot]) {
+                    ae3d_vkUnmapMemory(vk.device, vk.readback_buffer_memory[slot]);
+                    vk.readback_mapped[slot] = NULL;
+                }
+                if (vk.readback_buffer[slot]) {
+                    ae3d_vkDestroyBuffer(vk.device, vk.readback_buffer[slot], NULL);
+                    vk.readback_buffer[slot] = VK_NULL_HANDLE;
+                }
+                if (vk.readback_buffer_memory[slot]) {
+                    ae3d_vkFreeMemory(vk.device, vk.readback_buffer_memory[slot], NULL);
+                    vk.readback_buffer_memory[slot] = VK_NULL_HANDLE;
+                }
+            }
         }
         vk.readback_width = 0;
         vk.readback_height = 0;
@@ -988,17 +996,23 @@ static int ae3d_vk_create_offscreen_target(int width, int height) {
     }
 
     size = (VkDeviceSize)width * height * 4;
-    if (!ae3d_vk_create_buffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                               &vk.readback_buffer, &vk.readback_buffer_memory)) {
-        return 0;
-    }
     {
-        void *mapped = NULL;
-        if (ae3d_vkMapMemory(vk.device, vk.readback_buffer_memory, 0, size, 0, &mapped) != VK_SUCCESS) {
-            return ae3d_vk_fail("readback vkMapMemory failed");
+        unsigned slot;
+        for (slot = 0; slot < AE3D_VK_FRAMES; slot++) {
+            void *mapped = NULL;
+            if (!ae3d_vk_create_buffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                           | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                       &vk.readback_buffer[slot],
+                                       &vk.readback_buffer_memory[slot])) {
+                return 0;
+            }
+            if (ae3d_vkMapMemory(vk.device, vk.readback_buffer_memory[slot], 0, size, 0,
+                                 &mapped) != VK_SUCCESS) {
+                return ae3d_vk_fail("readback vkMapMemory failed");
+            }
+            vk.readback_mapped[slot] = (unsigned char *)mapped;
         }
-        vk.readback_mapped = (unsigned char *)mapped;
     }
     vk.readback_width = width;
     vk.readback_height = height;
@@ -2340,6 +2354,7 @@ int ae3d_vk_init(void *win, int width, int height) {
 
     memset(&vk, 0, sizeof(vk));
     vk.offscreen = win == NULL;
+    vk.readback_frame = -1;
 
     if (!ae3d_vk_create_instance()) return 0;
 
@@ -2780,7 +2795,7 @@ int ae3d_vk_frame_end(void) {
         region.imageExtent.depth = 1;
         ae3d_vkCmdCopyImageToBuffer(vk.command_buffers[vk.frame], vk.images[0],
                                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                    vk.readback_buffer, 1, &region);
+                                    vk.readback_buffer[vk.frame], 1, &region);
     }
 
     ae3d_vkEndCommandBuffer(vk.command_buffers[vk.frame]);
@@ -2803,8 +2818,12 @@ int ae3d_vk_frame_end(void) {
         return ae3d_vk_fail_code("vkQueueSubmit failed", result);
     }
 
+    // Nothing waits here. The copy lands in this frame's own staging buffer, and
+    // whoever asks for the pixels waits for it then; a program that renders
+    // without reading never stalls at all. Reusing this frame's command buffer
+    // is already gated on its fence in ae3d_vk_frame_begin.
     if (vk.offscreen) {
-        ae3d_vkWaitForFences(vk.device, 1, &vk.in_flight[vk.frame], VK_TRUE, UINT64_MAX);
+        vk.readback_frame = (int)vk.frame;
         vk.frame = (vk.frame + 1) % AE3D_VK_FRAMES;
         vk.recording = 0;
         return 1;
@@ -2835,7 +2854,9 @@ int ae3d_vk_frame_end(void) {
 
 void *ae3d_vk_offscreen_pixels(void) {
     if (!vk.offscreen) return NULL;
-    return vk.readback_mapped;
+    if (vk.readback_frame < 0) return NULL;
+    ae3d_vkWaitForFences(vk.device, 1, &vk.in_flight[vk.readback_frame], VK_TRUE, UINT64_MAX);
+    return vk.readback_mapped[vk.readback_frame];
 }
 
 int ae3d_vk_offscreen_width(void) { return vk.readback_width; }
