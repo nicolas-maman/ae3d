@@ -54,7 +54,13 @@ gradient_z(index: int) -> float {
     return 0.0 - 1.0
 }
 
-next_random(state: long) -> long {
+// Unsigned on purpose. This multiply overflows every step, which is how a
+// linear congruential generator works, and signed overflow is undefined in the
+// C this compiles to: built with optimisations on one platform the seed stopped
+// reaching the shuffle at all and every seed produced the same field. Unsigned
+// wraparound is defined, and the masking keeps the sequence exactly what it was
+// where the signed version happened to behave.
+next_random(state: uint64) -> uint64 {
     return (state * 6364136223846793005 + 1442695040888963407) & 0x7FFFFFFFFFFFFFFF
 }
 
@@ -73,13 +79,12 @@ perlin_new(seed: long) -> *Perlin {
         i = i + 1
     }
 
-    state = seed
-    if state == 0 { state = 1 }
+    state = seed as uint64
+    if state == 0 { state = 1 as uint64 }
     i = 255
     while i > 0 {
         state = next_random(state)
-        j = (state % (i + 1)) as int
-        if j < 0 { j = 0 - j }
+        j = (state % ((i + 1) as uint64)) as int
         held = intarr.get_unchecked(p.perm, i)
         intarr.set_unchecked(p.perm, i, intarr.get_unchecked(p.perm, j))
         intarr.set_unchecked(p.perm, j, held)

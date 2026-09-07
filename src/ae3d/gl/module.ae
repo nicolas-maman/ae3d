@@ -1728,9 +1728,20 @@ renderer_cleanup(r: *GLRenderer) {
     while i < count {
         m = list.get_raw(r.models, i) as *Model
         if m != null {
-            if m.vao != 0 { ae3d_gl_vao_delete(m.vao) ; m.vao = 0 }
-            if m.vbo != 0 { ae3d_gl_buffer_delete(m.vbo) ; m.vbo = 0 }
-            if m.ebo != 0 { ae3d_gl_buffer_delete(m.ebo) ; m.ebo = 0 }
+            // Shared geometry belongs to the cache and is counted, so deleting
+            // it here would take a vertex array other models are still drawing
+            // from and leave the cache believing it still owns one.
+            if m.shares_geometry {
+                ae3d_gl_geometry_release(m.vao)
+                m.vao = 0
+                m.vbo = 0
+                m.ebo = 0
+                m.shares_geometry = false
+            } else {
+                if m.vao != 0 { ae3d_gl_vao_delete(m.vao) ; m.vao = 0 }
+                if m.vbo != 0 { ae3d_gl_buffer_delete(m.vbo) ; m.vbo = 0 }
+                if m.ebo != 0 { ae3d_gl_buffer_delete(m.ebo) ; m.ebo = 0 }
+            }
             if m.instance_vbo != 0 { ae3d_gl_buffer_delete(m.instance_vbo) ; m.instance_vbo = 0 }
             if m.instance_color_vbo != 0 {
                 ae3d_gl_buffer_delete(m.instance_color_vbo)
