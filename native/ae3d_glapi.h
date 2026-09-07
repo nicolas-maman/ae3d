@@ -85,6 +85,7 @@ typedef ptrdiff_t     GLsizeiptr;
 #define GL_RGB  0x1907
 #define GL_RGBA 0x1908
 #define GL_RGBA16F 0x881A
+#define GL_R32F    0x822E
 #define GL_RGB16F  0x881B
 #define GL_SRGB8_ALPHA8 0x8C43
 
