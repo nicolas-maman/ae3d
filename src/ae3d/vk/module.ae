@@ -34,6 +34,10 @@ extern ae3d_vk_frame_begin(r: float, g: float, b: float, a: float) -> int
 extern ae3d_vk_frame_end() -> int
 extern ae3d_vk_upload_mesh(mesh: ptr) -> int
 extern ae3d_vk_upload_instances(instances: ptr) -> int
+extern ae3d_inst_create() -> ptr
+extern ae3d_inst_destroy(inst: ptr)
+extern ae3d_inst_resize(inst: ptr, count: int) -> int
+extern ae3d_inst_set_matrix(inst: ptr, i: int, m: *Mat4)
 extern ae3d_vk_free_mesh(handle: int)
 extern ae3d_vk_texture_create(width: int, height: int, rgba: ptr) -> int
 extern ae3d_vk_texture_destroy(handle: int)
@@ -80,6 +84,19 @@ struct VulkanTexture {
     refs: int
 }
 
+// One merged draw: the geometry every member shares, the surface they all have,
+// and the matrices that say where each copy goes.
+struct VKBatch {
+    mesh: int
+    material: ptr
+    first: ptr
+    instances: ptr
+    members: ptr
+    handle: int
+    count: int
+    stale: bool
+}
+
 struct VKRenderer {
     models: ptr
     lights: ptr
@@ -87,6 +104,8 @@ struct VKRenderer {
     frustum: ptr
     skybox: ptr
     shadow_space: Mat4
+    batches: ptr
+    batch_count: int
     screen_mesh: ptr
     screen_handle: int
     initialized: bool
@@ -133,6 +152,8 @@ renderer_new() -> *VKRenderer {
     r.textures = list.new()
     r.frustum = core.frustum_new()
     r.shadow_space = core.mat4_ident()
+    r.batches = list.new()
+    r.batch_count = 0
     return r
 }
 
@@ -644,8 +665,10 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
         core.clear_frustum_dirty()
     }
 
+    draw_opaque(r)
+
     count = list.size(r.models)
-    pass = 0
+    pass = 1
     while pass < 2 {
         i = 0
         while i < count {
@@ -658,6 +681,134 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
 
     r.last_draw_calls = ae3d_vk_draw_calls()
     ae3d_vk_frame_end()
+}
+
+// The same rule the OpenGL backend uses: a model joins a merged draw when
+// nothing about it is per-model except where it sits. Transparency stays out,
+// since merging would fix the order those surfaces blend in.
+batchable(m: *Model) -> bool {
+    if m == null || !m.visible || m.vbo == 0 { return false }
+    if m.is_instanced && core.model_instance_count(m) > 0 { return false }
+    if core.model_group_count(m) > 0 { return false }
+    if core.model_uniform_count(m) > 0 { return false }
+    if core.shader_valid(&m.shader) { return false }
+    alpha = 1.0
+    if m.material != null { alpha = m.material.alpha }
+    return alpha >= 0.99
+}
+
+batch_for(r: *VKRenderer, m: *Model) -> *VKBatch {
+    i = 0
+    while i < r.batch_count {
+        b = list.get_raw(r.batches, i) as *VKBatch
+        if b.mesh == m.vbo && core.material_equals(b.material as *Material, m.material) {
+            return b
+        }
+        i = i + 1
+    }
+
+    if r.batch_count >= list.size(r.batches) {
+        fresh = heap.new(VKBatch)
+        fresh.instances = ae3d_inst_create()
+        fresh.members = list.new()
+        fresh.handle = 0
+        fresh.count = 0
+        fresh.mesh = 0
+        fresh.material = null
+        fresh.stale = true
+        list.add_raw(r.batches, fresh)
+    }
+    b = list.get_raw(r.batches, r.batch_count) as *VKBatch
+    if b.mesh != m.vbo || b.material != m.material as ptr { b.stale = true }
+    b.mesh = m.vbo
+    b.material = m.material as ptr
+    b.first = m as ptr
+    b.count = 0
+    r.batch_count = r.batch_count + 1
+    return b
+}
+
+draw_opaque(r: *VKRenderer) {
+    r.batch_count = 0
+
+    count = list.size(r.models)
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        if batchable(m) {
+            if core.frustum_culling() &&
+               !core.frustum_sphere_visible(r.frustum, m.bounding_center, m.bounding_radius) {
+                i = i + 1
+                continue
+            }
+            moved = m.is_dirty
+            if m.is_dirty {
+                core.model_update_matrix(m)
+                m.is_dirty = false
+            }
+            b = batch_for(r, m)
+            if b.count >= list.size(b.members) {
+                list.add_raw(b.members, m as ptr)
+                b.stale = true
+            } else if list.get_raw(b.members, b.count) != m as ptr {
+                list.set(b.members, b.count, m as ptr)
+                b.stale = true
+            }
+            if moved { b.stale = true }
+            b.count = b.count + 1
+        } else {
+            draw_model(r, m, false)
+        }
+        i = i + 1
+    }
+
+    i = 0
+    while i < r.batch_count {
+        b = list.get_raw(r.batches, i) as *VKBatch
+        if b.count != list.size(b.members) { b.stale = true }
+        if b.count == 1 {
+            draw_model(r, b.first as *Model, false)
+        } else if b.count > 1 {
+            draw_batch(r, b)
+        }
+        i = i + 1
+    }
+}
+
+// An instance stream is a buffer of its own on this backend, so a group that
+// has changed is re-uploaded and the one it replaces is released. A group that
+// has not changed keeps the buffer it already sent.
+draw_batch(r: *VKRenderer, b: *VKBatch) {
+    if b.stale {
+        while list.size(b.members) > b.count { list.remove(b.members, list.size(b.members) - 1) }
+        ae3d_inst_resize(b.instances, b.count)
+        i = 0
+        while i < b.count {
+            m = list.get_raw(b.members, i) as *Model
+            ae3d_inst_set_matrix(b.instances, i, &m.model_matrix)
+            i = i + 1
+        }
+        if b.handle != 0 { ae3d_vk_free_mesh(b.handle) }
+        b.handle = ae3d_vk_upload_instances(b.instances)
+        b.stale = false
+    }
+    if b.handle == 0 { return }
+
+    first = b.first as *Model
+    ae3d_vk_set_program(core.SHADER_CUSTOM)
+    identity = core.mat4_ident()
+    ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &identity)
+    ae3d_vk_scene_set_int(vkscene.OFF_ISINSTANCED, 1)
+    // The merged stream carries no per-instance colour, and its members already
+    // share one material, so the shader is told to leave the tint alone.
+    ae3d_vk_scene_set_int(vkscene.OFF_USEINSTANCECOLOR, 0)
+    set_material_uniforms(first.material)
+
+    texture = 0
+    if first.material != null { texture = first.material.texture_id }
+    blend = 0
+    ae3d_vk_set_blend(blend)
+    ae3d_vk_draw(b.mesh, texture, b.handle, b.count)
 }
 
 draw_model(r: *VKRenderer, m: *Model, transparent_pass: bool) {

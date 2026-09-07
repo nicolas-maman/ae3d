@@ -165,6 +165,15 @@ typedef struct {
     VkDeviceMemory index_memory;
     unsigned index_count;
     int in_use;
+    // Geometry that appears many times is uploaded once, so the models using it
+    // can be merged into a single instanced draw. The bytes it was built from
+    // are kept for an exact comparison: a hash could collide and hand back the
+    // wrong mesh. Instance streams are never shared, and carry no copy.
+    float *vertices;
+    unsigned *indices;
+    int vertex_count;
+    int shared;
+    int refs;
 } ae3d_vk_mesh;
 
 typedef struct {
@@ -2842,6 +2851,20 @@ int ae3d_vk_upload_mesh(void *mesh) {
     int i, handle = 0;
 
     if (!vk.device) { ae3d_vk_fail("vulkan not initialised"); return 0; }
+
+    for (i = 0; i < vk.mesh_capacity; i++) {
+        ae3d_vk_mesh *entry = &vk.meshes[i];
+        if (!entry->in_use || !entry->shared || entry->refs <= 0) continue;
+        if (entry->vertex_count != vertex_count) continue;
+        if (entry->index_count != (unsigned)index_count) continue;
+        if (memcmp(entry->vertices, vertices, (size_t)vertex_count * AE3D_VK_STRIDE) != 0) continue;
+        if (indices && index_count > 0 &&
+            memcmp(entry->indices, indices, (size_t)index_count * sizeof(unsigned)) != 0) {
+            continue;
+        }
+        entry->refs++;
+        return i + 1;
+    }
     if (!vertices || vertex_count <= 0) {
         ae3d_vk_fail("mesh has no geometry");
         return 0;
@@ -2888,9 +2911,25 @@ int ae3d_vk_upload_mesh(void *mesh) {
         return 0;
     }
 
-    free(sequential);
     slot->index_count = (unsigned)index_count;
     slot->in_use = 1;
+    slot->vertex_count = vertex_count;
+    slot->refs = 1;
+    slot->vertices = (float *)malloc((size_t)vertex_count * AE3D_VK_STRIDE);
+    slot->indices = (unsigned *)malloc((size_t)index_count * sizeof(unsigned));
+    if (slot->vertices && slot->indices) {
+        memcpy(slot->vertices, vertices, (size_t)vertex_count * AE3D_VK_STRIDE);
+        memcpy(slot->indices, indices, (size_t)index_count * sizeof(unsigned));
+        slot->shared = 1;
+    } else {
+        free(slot->vertices);
+        free(slot->indices);
+        slot->vertices = NULL;
+        slot->indices = NULL;
+        slot->shared = 0;
+    }
+
+    free(sequential);
     return handle;
 }
 
@@ -2954,8 +2993,11 @@ void ae3d_vk_free_mesh(int handle) {
     if (!vk.ready || handle <= 0 || handle > vk.mesh_capacity) return;
     mesh = &vk.meshes[handle - 1];
     if (!mesh->in_use) return;
+    if (mesh->shared && --mesh->refs > 0) return;
 
     ae3d_vkDeviceWaitIdle(vk.device);
+    free(mesh->vertices);
+    free(mesh->indices);
     ae3d_vkDestroyBuffer(vk.device, mesh->vertex_buffer, NULL);
     ae3d_vkFreeMemory(vk.device, mesh->vertex_memory, NULL);
     ae3d_vkDestroyBuffer(vk.device, mesh->index_buffer, NULL);
