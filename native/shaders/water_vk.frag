@@ -58,6 +58,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float bloomIntensity;
     float bloomRadius;
     bool enableShadows;
+    bool hasShadowMap;
     float shadowIntensity;
     float shadowSoftness;
     bool enablePerlinNoise;

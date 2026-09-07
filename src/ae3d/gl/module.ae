@@ -127,6 +127,7 @@ struct ProgramSlots {
     light_is_directional: int
     light_space: int
     shadow_map: int
+    has_shadow_map: int
     light_direction: int
     light_constant: int
     light_linear: int
@@ -339,6 +340,10 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
 
     s = heap.new(ProgramSlots)
     s.program = program
+    // Never a frame number. Left uninitialised, this matched the current frame
+    // often enough to skip the frame's uniforms entirely, and a program whose
+    // view-projection was still zero rasterised nothing at all.
+    s.frame_stamp = 0 - 1
     s.view_projection = ae3d_gl_uniform_location(program, "viewProjection")
     s.model = ae3d_gl_uniform_location(program, "model")
     // One lookup per light per program, done once, because an array of structs
@@ -370,6 +375,7 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
     s.light_is_directional = ae3d_gl_uniform_location(program, "light.isDirectional")
     s.light_space = ae3d_gl_uniform_location(program, "lightSpaceMatrix")
     s.shadow_map = ae3d_gl_uniform_location(program, "shadowMap")
+    s.has_shadow_map = ae3d_gl_uniform_location(program, "hasShadowMap")
     s.light_direction = ae3d_gl_uniform_location(program, "light.direction")
     s.light_constant = ae3d_gl_uniform_location(program, "light.constantAtten")
     s.light_linear = ae3d_gl_uniform_location(program, "light.linearAtten")
@@ -1140,6 +1146,9 @@ batch_for(r: *GLRenderer, m: *Model) -> *Batch {
         fresh.members = list.new()
         fresh.capacity_bytes = 0
         fresh.count = 0
+        fresh.vao = 0
+        fresh.material = null
+        fresh.stale = true
         list.add_raw(r.batches, fresh)
     }
     b = list.get_raw(r.batches, r.batch_count) as *Batch
@@ -1175,6 +1184,9 @@ shadow_batch_for(r: *GLRenderer, m: *Model) -> *Batch {
         fresh.members = list.new()
         fresh.capacity_bytes = 0
         fresh.count = 0
+        fresh.vao = 0
+        fresh.first = null
+        fresh.stale = true
         list.add_raw(r.shadow_batches, fresh)
     }
     b = list.get_raw(r.shadow_batches, r.shadow_batch_count) as *Batch
@@ -1458,8 +1470,15 @@ upload_light(slots_of: int[], index: int, l: *Light) {
 // The active unit is put back to 0 afterwards: the framebuffer attachment
 // helpers bind textures on whatever unit is active, so leaving it on 1 lets a
 // resize quietly replace the shadow map with a post-processing target.
+// Always says which of the two it is. Leaving the light-space matrix unset when
+// there is no map left it at zero, and every fragment then divided its
+// light-space position by a w of zero.
 bind_shadow_map(r: *GLRenderer, slots: *ProgramSlots) {
-    if r.shadow_map == 0 { return }
+    if r.shadow_map == 0 {
+        ae3d_gl_uniform_int(slots.has_shadow_map, 0)
+        return
+    }
+    ae3d_gl_uniform_int(slots.has_shadow_map, 1)
     ae3d_gl_uniform_mat4(slots.light_space, &r.shadow_space)
     ae3d_gl_texture_bind(1, r.shadow_map)
     ae3d_gl_uniform_int(slots.shadow_map, 1)
