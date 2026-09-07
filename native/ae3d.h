@@ -182,7 +182,7 @@ int    ae3d_gl_fbo_attach_depth(int fbo, int width, int height);
 int    ae3d_gl_max_samples(void);
 int    ae3d_gl_fbo_attach_color_multisample(int fbo, int width, int height, int samples);
 int    ae3d_gl_fbo_attach_depth_multisample(int fbo, int width, int height, int samples);
-void   ae3d_gl_fbo_resolve(int source, int destination, int width, int height);
+int    ae3d_gl_fbo_resolve(int source, int destination, int width, int height);
 void   ae3d_gl_renderbuffer_delete(int rbo);
 int    ae3d_gl_fbo_complete(void);
 int    ae3d_gl_read_pixel(int x, int y);

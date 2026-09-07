@@ -919,11 +919,19 @@ env(name: string) -> string {
     return core.text(os.getenv(name))
 }
 
+// For a read that is only compared and then thrown away. The value comes back
+// on the heap, and env() hands back a literal for an unset one, which must not
+// be freed: this keeps the two apart so neither leaks nor is freed twice.
+env_is(name: string, expected: string) -> bool {
+    raw = os.getenv(name)
+    if raw == null { return string.equals(expected, "") == 1 }
+    same = string.equals(raw, expected) == 1
+    string.free(raw)
+    return same
+}
+
 limit_from_env() -> int {
-    setting = env("AE3D_EDITOR_FRAMES")
-    if setting == "" { return 0 }
-    if string.try_int(setting) == 0 { return 0 }
-    return string.get_int(setting)
+    return core.env_int("AE3D_EDITOR_FRAMES", 0)
 }
 
 // One row of the inspector: a label, a slider, and a live readout. The slider
@@ -1277,7 +1285,7 @@ build_scene() {
 
     // A bounded run can build the component types too, so the water and voxel
     // paths are exercised rather than only reachable by clicking.
-    if env("AE3D_EDITOR_SCENE") == "components" {
+    if env_is("AE3D_EDITOR_SCENE", "components") {
         add_water()
         add_voxels()
         add_light()
@@ -1778,7 +1786,7 @@ main() {
     g_components = list.new()
     g_scripts = list.new()
 
-    if string.equals(env("AE3D_EDITOR_BACKEND"), "vulkan") == 1 {
+    if env_is("AE3D_EDITOR_BACKEND", "vulkan") {
         if vk.available() {
             g_vulkan = true
             g_backend_name = "vulkan"
@@ -2139,7 +2147,7 @@ main() {
         g_left = left_scroll
         g_right = right_scroll
 
-        if env("AE3D_EDITOR_DRIVER") != "" {
+        if !env_is("AE3D_EDITOR_DRIVER", "") {
             ui.enable_test_server(9222)
         }
 

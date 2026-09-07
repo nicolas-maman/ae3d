@@ -25,15 +25,27 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libglfw3-dev libvulkan-dev xvfb
+          # mesa-vulkan-drivers is lavapipe, a software device. Without an ICD
+          # the loader is present and reports no device, so the Vulkan half of
+          # the suite would skip rather than run.
+          sudo apt-get install -y libglfw3-dev libvulkan-dev mesa-vulkan-drivers xvfb
 
+      # The Vulkan backend opens the loader at run time but still needs the
+      # headers to compile, the same way the Linux job gets them from
+      # libvulkan-dev. Without them glfw3.h fails on the include it makes when
+      # GLFW_INCLUDE_VULKAN is defined, and nothing in the project builds.
       - name: Install dependencies (macos)
         if: runner.os == 'macOS'
-        run: brew install glfw
+        run: brew install glfw vulkan-headers
 
+      # install.sh is a bash script that changes to its own directory and builds
+      # the compiler from the tree around it. Piping it into a shell gave it
+      # neither: dash rejected its options on Linux, and on macOS it ran make in
+      # this checkout instead, which has no compiler to build.
       - name: Install the Aether toolchain
         run: |
-          curl -fsSL https://raw.githubusercontent.com/aether-lang-dev/aether/main/install.sh | sh
+          git clone --depth 1 https://github.com/aether-lang-dev/aether.git "$RUNNER_TEMP/aether"
+          (cd "$RUNNER_TEMP/aether" && ./install.sh)
           echo "$HOME/.aether/bin" >> "$GITHUB_PATH"
 
       - name: Run CI

@@ -16,6 +16,7 @@
 
 import std.list
 import std.heap
+import std.os
 import std.string
 import ae3d.platform
 
@@ -31,7 +32,7 @@ exports (
     tan_of, atan2_of, sqrt_of, abs_of, Material, MaterialGroup, Model, Light, Shader,
     Backend, Uniform, LIGHT_STATIC, LIGHT_DYNAMIC, MODE_POINT, MODE_DIRECTIONAL, MODE_SPOT,
     UNIFORM_FLOAT, UNIFORM_INT, UNIFORM_VEC3, UNIFORM_FLOAT_ARRAY, UNIFORM_VEC3_ARRAY,
-    material_new, material_default, material_clone, material_equals, material_free,
+    env_int, material_new, material_default, material_clone, material_equals, material_free,
     model_new, model_free,
     model_clone, model_set_casts_shadow,
     model_set_position, model_set_scale, model_set_rotation, model_rotate,
@@ -826,6 +827,23 @@ backend_set_post(b: *Backend, fxaa: bool, bloom: bool, threshold: float, intensi
 
 backend_cleanup(b: *Backend) {
     b.cleanup(b.state)
+}
+
+// A count a run can be asked to use instead of the one written down, so the
+// same program is a measurement on a machine that can measure and a smoke test
+// on one that cannot.
+env_int(name: string, fallback: int) -> int {
+    // The value comes back on the heap and belongs to whoever asked for it.
+    raw = os.getenv(name)
+    if raw == null { return fallback }
+
+    chosen = fallback
+    if string.try_int(raw) != 0 {
+        value = string.get_int(raw)
+        if value >= 1 { chosen = value }
+    }
+    string.free(raw)
+    return chosen
 }
 
 debug_enabled() -> bool { return g_debug }

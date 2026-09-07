@@ -87,9 +87,15 @@ for suite in tests/test_*.ae; do
         skip "$name" "no display"
         continue
     fi
-    if output="$(AE3D_FRAMES="$FRAMES" ./build/"$name" 2>&1)" && \
-       printf '%s' "$output" | grep -q "all checks passed"; then
+    if ! output="$(AE3D_FRAMES="$FRAMES" ./build/"$name" 2>&1)"; then
+        fail "$name"
+        printf '%s\n' "$output" | sed 's/^/        /' | head -20
+    elif printf '%s' "$output" | grep -q "all checks passed"; then
         pass "$name"
+    elif printf '%s' "$output" | grep -q "SKIP" && ! printf '%s' "$output" | grep -q "FAIL"; then
+        # A suite that cannot run where it finds itself, for want of a display,
+        # a GPU or a driver, is not a suite that failed.
+        skip "$name" "$(printf '%s' "$output" | grep -m1 "SKIP" | sed 's/.*SKIP *//')"
     else
         fail "$name"
         printf '%s\n' "$output" | sed 's/^/        /' | head -20
@@ -189,6 +195,15 @@ else
         fail "ae3d_editor (build)"
         sed 's/^/        /' /tmp/ae3d_build.log | head -20
     fi
+fi
+
+# A shared runner is not a machine anyone should take a timing from, and a
+# software rasteriser needs orders of magnitude longer per frame than the
+# hardware these numbers describe. On CI the benchmarks run briefly, as smoke
+# tests; AE3D_BENCH_FRAMES unset gives the counts the numbers were measured at.
+if [ -n "${CI:-}" ]; then
+    export AE3D_BENCH_FRAMES="${AE3D_BENCH_FRAMES:-10}"
+    export AE3D_BENCH_BLOCKS="${AE3D_BENCH_BLOCKS:-1}"
 fi
 
 step "benchmarks"

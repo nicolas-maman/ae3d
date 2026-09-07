@@ -660,7 +660,7 @@ int ae3d_gl_fbo_attach_color(int fbo, int width, int height, int hdr) {
 
     glGenTextures(1, &texture);
     glBindTexture(GL_TEXTURE_2D, texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, hdr ? GL_RGBA16F : GL_RGBA, width, height, 0,
+    glTexImage2D(GL_TEXTURE_2D, 0, hdr ? GL_RGBA16F : GL_RGBA8, width, height, 0,
                  GL_RGBA, hdr ? GL_FLOAT : GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -736,12 +736,28 @@ int ae3d_gl_fbo_attach_depth_multisample(int fbo, int width, int height, int sam
     return (int)rbo;
 }
 
-void ae3d_gl_fbo_resolve(int source, int destination, int width, int height) {
+// Reports what the driver made of the blit rather than leaving a rejected one
+// to show up as a black frame. A multisample resolve has more ways to be
+// refused than most calls: the two framebuffers have to agree about format and
+// size, and drivers differ in how much they will forgive.
+int ae3d_gl_fbo_resolve(int source, int destination, int width, int height) {
+    GLenum status;
+    while (glGetError() != GL_NO_ERROR) { }
+
     glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)source);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)destination);
+
+    status = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        return (int)status;
+    }
+
     glBlitFramebuffer(0, 0, width, height, 0, 0, width, height,
                       GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    status = glGetError();
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return (int)status;
 }
 
 int ae3d_gl_fbo_attach_depth(int fbo, int width, int height) {

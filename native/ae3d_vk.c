@@ -3038,6 +3038,9 @@ void ae3d_vk_shutdown(void) {
             ae3d_vkFreeMemory(vk.device, vk.meshes[i].vertex_memory, NULL);
             ae3d_vkDestroyBuffer(vk.device, vk.meshes[i].index_buffer, NULL);
             ae3d_vkFreeMemory(vk.device, vk.meshes[i].index_memory, NULL);
+            // The copy a shared mesh keeps of the bytes it was built from.
+            free(vk.meshes[i].vertices);
+            free(vk.meshes[i].indices);
         }
     }
     free(vk.meshes);
