@@ -217,6 +217,7 @@ struct GLRenderer {
     shadow_batch_count: int
 
     bound_material: ptr
+    bound_material_set: bool
     bound_texture: int
     bound_instanced: int
     bound_instance_color: int
@@ -259,6 +260,7 @@ renderer_new() -> *GLRenderer {
     r.bloom_intensity = 0.4
     r.depth_test_state = true
     r.bound_material = null
+    r.bound_material_set = false
     r.bound_texture = 0 - 1
     r.bound_instanced = 0 - 1
     r.bound_instance_color = 0 - 1
@@ -438,6 +440,7 @@ use_program(r: *GLRenderer, program: int) {
     ae3d_gl_program_use(program)
     r.current_program = program
     r.bound_material = null
+    r.bound_material_set = false
     r.bound_texture = 0 - 1
     r.bound_instanced = 0 - 1
     r.bound_instance_color = 0 - 1
@@ -445,10 +448,15 @@ use_program(r: *GLRenderer, program: int) {
 
 // A material is a pointer, and the same pointer means the same seven uniforms,
 // so a run of models sharing one costs a comparison instead of seven uploads.
+// A model with no material is a real case, and null is what it looks like, so
+// the cache cannot use null to mean nothing has been bound yet. It did, and a
+// scene whose first model had no material never had its material uniforms sent
+// at all: the surface kept an alpha of zero and never appeared.
 apply_material(r: *GLRenderer, slots: *ProgramSlots, material: *Material) {
-    if r.bound_material == material as ptr { return }
+    if r.bound_material_set && r.bound_material == material as ptr { return }
     set_material_uniforms(slots, material)
     r.bound_material = material as ptr
+    r.bound_material_set = true
 }
 
 apply_texture(r: *GLRenderer, slots: *ProgramSlots, texture: int) {
@@ -1072,6 +1080,7 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
     r.last_draw_calls = 0
     r.frame_stamp = r.frame_stamp + 1
     r.bound_material = null
+    r.bound_material_set = false
     r.bound_texture = 0 - 1
     r.bound_instanced = 0 - 1
 
