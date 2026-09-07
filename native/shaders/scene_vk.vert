@@ -16,6 +16,7 @@ struct Light {
 layout(std140, set = 0, binding = 0) uniform SceneBlock {
     Light lights[4];
     bool isInstanced;
+    bool useInstanceColor;
     mat4 model;
     mat4 viewProjection;
     mat4 lightSpaceMatrix;
@@ -122,6 +123,7 @@ layout(location = 7) in vec3 instanceColor; // Per-instance color (for voxels)
 
 
 
+
 layout(location = 0) out vec2 fragTexCoord;
 layout(location = 1) out vec3 Normal;
 layout(location = 2) out vec3 FragPos;
@@ -146,7 +148,7 @@ void main() {
     fragTexCoord = inTexCoord;
     
     // Pass instance color to fragment shader (default white if not instanced)
-    InstanceColor = isInstanced ? instanceColor : vec3(1.0, 1.0, 1.0);
+    InstanceColor = (isInstanced && useInstanceColor) ? instanceColor : vec3(1.0, 1.0, 1.0);
 
     // Final vertex position
     FragPosLightSpace = lightSpaceMatrix * vec4(FragPos, 1.0);

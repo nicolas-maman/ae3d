@@ -128,6 +128,163 @@ void ae3d_gl_buffer_delete(int buffer) {
     if (id) glDeleteBuffers(1, &id);
 }
 
+// Geometry that appears many times is uploaded once and drawn from one set of
+// buffers, which is what lets the renderer merge those models into a single
+// instanced draw. A cache entry keeps its own copy of the bytes it was built
+// from, so a match is an exact comparison rather than a hash that could collide
+// and hand back the wrong mesh.
+typedef struct {
+    float    *vertices;
+    unsigned *indices;
+    int       vertex_count;
+    int       index_count;
+    int       vao;
+    int       vbo;
+    int       ebo;
+    int       instance_vbo;
+    int       instance_capacity;
+    int       refs;
+} ae3d_gl_geometry;
+
+static ae3d_gl_geometry *g_geometry;
+static int g_geometry_count;
+static int g_geometry_capacity;
+
+static int ae3d_gl_geometry_matches(const ae3d_gl_geometry *entry, const float *vertices,
+                                    const unsigned *indices, int vertex_count, int index_count) {
+    if (entry->refs <= 0) return 0;
+    if (entry->vertex_count != vertex_count || entry->index_count != index_count) return 0;
+    if (memcmp(entry->vertices, vertices, (size_t)vertex_count * AE3D_STRIDE_BYTES) != 0) return 0;
+    return memcmp(entry->indices, indices, (size_t)index_count * sizeof(unsigned)) == 0;
+}
+
+static ae3d_gl_geometry *ae3d_gl_geometry_slot(void) {
+    int i;
+    for (i = 0; i < g_geometry_count; i++) {
+        if (g_geometry[i].refs <= 0 && g_geometry[i].vao == 0) return &g_geometry[i];
+    }
+    if (g_geometry_count == g_geometry_capacity) {
+        int grown = g_geometry_capacity ? g_geometry_capacity * 2 : 32;
+        ae3d_gl_geometry *moved = (ae3d_gl_geometry *)realloc(g_geometry,
+                                                              (size_t)grown * sizeof(*moved));
+        if (!moved) return NULL;
+        memset(moved + g_geometry_capacity, 0,
+               (size_t)(grown - g_geometry_capacity) * sizeof(*moved));
+        g_geometry = moved;
+        g_geometry_capacity = grown;
+    }
+    return &g_geometry[g_geometry_count++];
+}
+
+// Returns the VAO the caller should draw with, and reports whether the buffers
+// were already there. A miss uploads and sets the vertex attributes up once.
+int ae3d_gl_geometry_acquire(void *mesh) {
+    const float *vertices = ae3d_mesh_vertex_data(mesh);
+    const unsigned *indices = ae3d_mesh_index_data(mesh);
+    int vertex_count = ae3d_mesh_vertex_count(mesh);
+    int index_count = ae3d_mesh_index_count(mesh);
+    ae3d_gl_geometry *entry;
+    int i;
+
+    if (!vertices || !indices || vertex_count <= 0 || index_count <= 0) return 0;
+
+    for (i = 0; i < g_geometry_count; i++) {
+        if (!ae3d_gl_geometry_matches(&g_geometry[i], vertices, indices,
+                                      vertex_count, index_count)) {
+            continue;
+        }
+        g_geometry[i].refs++;
+        return g_geometry[i].vao;
+    }
+
+    entry = ae3d_gl_geometry_slot();
+    if (!entry) return 0;
+
+    entry->vertices = (float *)malloc((size_t)vertex_count * AE3D_STRIDE_BYTES);
+    entry->indices = (unsigned *)malloc((size_t)index_count * sizeof(unsigned));
+    if (!entry->vertices || !entry->indices) {
+        free(entry->vertices);
+        free(entry->indices);
+        memset(entry, 0, sizeof(*entry));
+        return 0;
+    }
+    memcpy(entry->vertices, vertices, (size_t)vertex_count * AE3D_STRIDE_BYTES);
+    memcpy(entry->indices, indices, (size_t)index_count * sizeof(unsigned));
+    entry->vertex_count = vertex_count;
+    entry->index_count = index_count;
+
+    entry->vao = ae3d_gl_vao_create();
+    entry->vbo = ae3d_gl_buffer_create();
+    entry->ebo = ae3d_gl_buffer_create();
+    entry->instance_vbo = ae3d_gl_buffer_create();
+    entry->instance_capacity = 0;
+    entry->refs = 1;
+
+    glBindVertexArray((GLuint)entry->vao);
+    ae3d_gl_upload_mesh(mesh, entry->vbo, entry->ebo);
+    ae3d_gl_setup_vertex_attribs();
+    glBindVertexArray(0);
+
+    return entry->vao;
+}
+
+int ae3d_gl_geometry_instance_vbo(int vao) {
+    int i;
+    for (i = 0; i < g_geometry_count; i++) {
+        if (g_geometry[i].vao == vao && g_geometry[i].refs > 0) return g_geometry[i].instance_vbo;
+    }
+    return 0;
+}
+
+void ae3d_gl_geometry_release(int vao) {
+    int i;
+    for (i = 0; i < g_geometry_count; i++) {
+        if (g_geometry[i].vao != vao || g_geometry[i].refs <= 0) continue;
+        if (--g_geometry[i].refs > 0) return;
+        ae3d_gl_vao_delete(g_geometry[i].vao);
+        ae3d_gl_buffer_delete(g_geometry[i].vbo);
+        ae3d_gl_buffer_delete(g_geometry[i].ebo);
+        ae3d_gl_buffer_delete(g_geometry[i].instance_vbo);
+        free(g_geometry[i].vertices);
+        free(g_geometry[i].indices);
+        memset(&g_geometry[i], 0, sizeof(g_geometry[i]));
+        return;
+    }
+}
+
+// Only when nothing is holding geometry any more, so a second renderer in the
+// same process does not lose the buffers it is still drawing from.
+void ae3d_gl_geometry_shutdown(void) {
+    int i;
+    for (i = 0; i < g_geometry_count; i++) {
+        if (g_geometry[i].refs > 0) return;
+    }
+    free(g_geometry);
+    g_geometry = NULL;
+    g_geometry_count = 0;
+    g_geometry_capacity = 0;
+}
+
+int ae3d_gl_geometry_instance_capacity(int vao) {
+    int i;
+    for (i = 0; i < g_geometry_count; i++) {
+        if (g_geometry[i].vao == vao && g_geometry[i].refs > 0) {
+            return g_geometry[i].instance_capacity;
+        }
+    }
+    return 0;
+}
+
+void ae3d_gl_geometry_set_instance_capacity(int vao, int capacity) {
+    int i;
+    for (i = 0; i < g_geometry_count; i++) {
+        if (g_geometry[i].vao == vao && g_geometry[i].refs > 0) {
+            g_geometry[i].instance_capacity = capacity;
+            return;
+        }
+    }
+}
+
 void ae3d_gl_upload_mesh(void *mesh, int vbo, int ebo) {
     const float *vertices = ae3d_mesh_vertex_data(mesh);
     const unsigned *indices = ae3d_mesh_index_data(mesh);
@@ -192,6 +349,47 @@ void ae3d_gl_setup_instance_attribs(void *inst, int matrix_vbo, int color_vbo) {
         glVertexAttribPointer(7, 3, GL_FLOAT, GL_FALSE, AE3D_COLOR_BYTES, (const void *)0);
         glVertexAttribDivisor(7, 1);
     }
+}
+
+// A batch draws through the shared VAO with the matrices of the models it
+// merged. The colour attribute stays disabled, so the generic value set at
+// startup supplies white and the shader's per-instance tint is a no-op.
+int ae3d_gl_batch_upload(int vao, int instance_vbo, void *inst, int capacity_bytes) {
+    const float *matrices = ae3d_inst_matrix_data(inst);
+    int count = ae3d_inst_count(inst);
+    GLsizeiptr wanted;
+    int i;
+
+    if (!vao || !instance_vbo || count <= 0 || !matrices) return capacity_bytes;
+
+    glBindVertexArray((GLuint)vao);
+    glBindBuffer(GL_ARRAY_BUFFER, (GLuint)instance_vbo);
+
+    wanted = (GLsizeiptr)count * AE3D_MATRIX_BYTES;
+    if ((GLsizeiptr)capacity_bytes < wanted) {
+        glBufferData(GL_ARRAY_BUFFER, wanted, matrices, GL_DYNAMIC_DRAW);
+        capacity_bytes = (int)wanted;
+    } else {
+        glBufferSubData(GL_ARRAY_BUFFER, 0, wanted, matrices);
+    }
+
+    for (i = 0; i < 4; i++) {
+        glEnableVertexAttribArray((GLuint)(3 + i));
+        glVertexAttribPointer((GLuint)(3 + i), 4, GL_FLOAT, GL_FALSE, AE3D_MATRIX_BYTES,
+                              (const void *)(size_t)(i * 4 * sizeof(float)));
+        glVertexAttribDivisor((GLuint)(3 + i), 1);
+    }
+    // Set with the batch's own vertex array bound, so it holds whether the
+    // driver treats a generic attribute value as context or per-array state.
+    glDisableVertexAttribArray(7);
+    glVertexAttrib3f(7, 1.0f, 1.0f, 1.0f);
+    return capacity_bytes;
+}
+
+// Generic attribute values are context state, so one call covers every VAO that
+// leaves the per-instance colour array disabled.
+void ae3d_gl_set_default_instance_color(void) {
+    glVertexAttrib3f(7, 1.0f, 1.0f, 1.0f);
 }
 
 int ae3d_gl_update_instances(void *inst, int matrix_vbo, int capacity_bytes) {

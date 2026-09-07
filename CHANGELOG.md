@@ -6,6 +6,12 @@ First working engine.
 
 ### Rendering
 
+- Models that share geometry and a material are drawn together. Identical
+  meshes are uploaded once and the renderer merges the models that use them
+  into a single instanced draw, rebuilding the instance buffer only when the
+  group changes, so a scene that has not moved re-sends nothing. The depth pass
+  merges on geometry alone, since a shadow does not care about materials.
+
 - `Backend`, a vtable both renderers fill in, so a program picks its renderer
   with a constructor argument and nothing else changes.
 - OpenGL 4.1 core backend: PBR materials, directional and point lights,
@@ -144,9 +150,12 @@ GL implementation's, over two thousand iterations with zero leaked bytes and
 - 19ns per Perlin sample; a 131072-cell exposed-face scan under a millisecond.
 - 400 separate models: 806us a frame, from 1200us before the frame's uniforms
   were hoisted out of the per-model loop.
-- 400 separate models: 812us a frame, from 1005us before the renderer stopped
-  re-sending state a draw already had. What is left is 72% inside the driver's
-  own `glDrawElements`, so the next gain has to come from issuing fewer draws.
+- 400 separate models: 65us a frame and one draw call, from 1005us and four
+  hundred. The renderer stopped re-sending state a draw already had (812us),
+  then stopped issuing a draw per model at all.
+- 200 shadow casters: 52us a frame unshadowed and 362us with shadows, from
+  551us and 839us. What is left of the shadow pass is fill: a 2048x2048 depth
+  map, not the draws that fill it.
 - Multisampling the offscreen target costs nothing measurable on a scene of 400
   separate models: 1005us a frame against 1010us with it off, because that scene
   is bound by its draw calls rather than by fill.

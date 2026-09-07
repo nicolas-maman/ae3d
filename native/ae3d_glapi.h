@@ -162,6 +162,7 @@ typedef ptrdiff_t     GLsizeiptr;
     X(void, glEnableVertexAttribArray, (GLuint index)) \
     X(void, glDisableVertexAttribArray, (GLuint index)) \
     X(void, glVertexAttribDivisor, (GLuint index, GLuint divisor)) \
+    X(void, glVertexAttrib3f, (GLuint index, GLfloat x, GLfloat y, GLfloat z)) \
     X(void, glDrawArrays, (GLenum mode, GLint first, GLsizei count)) \
     X(void, glDrawElements, (GLenum mode, GLsizei count, GLenum type, const void *indices)) \
     X(void, glDrawElementsInstanced, (GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei primcount)) \
@@ -246,6 +247,7 @@ int ae3d_glapi_load(void);
 #define glEnableVertexAttribArray  ae3d_glEnableVertexAttribArray
 #define glDisableVertexAttribArray ae3d_glDisableVertexAttribArray
 #define glVertexAttribDivisor      ae3d_glVertexAttribDivisor
+#define glVertexAttrib3f           ae3d_glVertexAttrib3f
 #define glDrawArrays               ae3d_glDrawArrays
 #define glDrawElements             ae3d_glDrawElements
 #define glDrawElementsInstanced    ae3d_glDrawElementsInstanced

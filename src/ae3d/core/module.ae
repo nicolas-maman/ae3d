@@ -31,7 +31,8 @@ exports (
     tan_of, atan2_of, sqrt_of, abs_of, Material, MaterialGroup, Model, Light, Shader,
     Backend, Uniform, LIGHT_STATIC, LIGHT_DYNAMIC, MODE_POINT, MODE_DIRECTIONAL, MODE_SPOT,
     UNIFORM_FLOAT, UNIFORM_INT, UNIFORM_VEC3, UNIFORM_FLOAT_ARRAY, UNIFORM_VEC3_ARRAY,
-    material_new, material_default, material_clone, material_free, model_new, model_free,
+    material_new, material_default, material_clone, material_equals, material_free,
+    model_new, model_free,
     model_clone, model_set_casts_shadow,
     model_set_position, model_set_scale, model_set_rotation, model_rotate,
     model_update_matrix, model_recalculate_bounds, model_mark_dirty, model_set_diffuse,
@@ -265,6 +266,7 @@ struct Model {
     vao: int
     vbo: int
     ebo: int
+    shares_geometry: bool
     instance_vbo: int
     instance_vbo_capacity: int
     instance_color_vbo: int
@@ -898,6 +900,24 @@ material_default() -> *Material {
     return material_new("default")
 }
 
+// Two materials that describe the same surface can share a draw, whether or not
+// they are the same object. Names and texture paths are not part of that: they
+// say where the material came from, not what it looks like.
+material_equals(a: *Material, b: *Material) -> bool {
+    if a == b { return true }
+    if a == null || b == null { return false }
+    if a.texture_id != b.texture_id { return false }
+    if a.shininess != b.shininess || a.metallic != b.metallic { return false }
+    if a.roughness != b.roughness || a.exposure != b.exposure || a.alpha != b.alpha {
+        return false
+    }
+    if a.diffuse.x != b.diffuse.x || a.diffuse.y != b.diffuse.y || a.diffuse.z != b.diffuse.z {
+        return false
+    }
+    return a.specular.x == b.specular.x && a.specular.y == b.specular.y &&
+           a.specular.z == b.specular.z
+}
+
 material_clone(src: *Material) -> *Material {
     m = heap.new(Material)
     material_set_name(m, src.name)
@@ -930,6 +950,7 @@ model_new() -> *Model {
     m.model_matrix = mat4_ident()
     m.bounding_center = vec3(0.0, 0.0, 0.0)
     m.bounding_radius = 0.0
+    m.shares_geometry = false
     m.visible = true
     m.casts_shadow = true
     m.id = next_model_id()

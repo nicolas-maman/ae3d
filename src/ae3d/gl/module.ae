@@ -80,6 +80,18 @@ extern ae3d_gl_fbo_bind(fbo: int)
 extern ae3d_gl_fbo_delete(fbo: int)
 extern ae3d_gl_fbo_attach_color(fbo: int, width: int, height: int, hdr: int) -> int
 extern ae3d_gl_fbo_attach_depth(fbo: int, width: int, height: int) -> int
+extern ae3d_gl_geometry_acquire(mesh: ptr) -> int
+extern ae3d_gl_geometry_instance_vbo(vao: int) -> int
+extern ae3d_gl_geometry_release(vao: int)
+extern ae3d_gl_geometry_shutdown()
+extern ae3d_gl_geometry_instance_capacity(vao: int) -> int
+extern ae3d_gl_geometry_set_instance_capacity(vao: int, capacity: int)
+extern ae3d_gl_batch_upload(vao: int, instance_vbo: int, inst: ptr, capacity_bytes: int) -> int
+extern ae3d_gl_set_default_instance_color()
+extern ae3d_inst_create() -> ptr
+extern ae3d_inst_destroy(inst: ptr)
+extern ae3d_inst_resize(inst: ptr, count: int) -> int
+extern ae3d_inst_set_matrix(inst: ptr, i: int, m: *Mat4)
 extern ae3d_gl_max_samples() -> int
 extern ae3d_gl_fbo_attach_color_multisample(fbo: int, width: int, height: int, samples: int) -> int
 extern ae3d_gl_fbo_attach_depth_multisample(fbo: int, width: int, height: int, samples: int) -> int
@@ -133,6 +145,7 @@ struct ProgramSlots {
     material_alpha: int
     texture_sampler: int
     is_instanced: int
+    use_instance_color: int
 }
 
 struct TextureEntry {
@@ -141,6 +154,19 @@ struct TextureEntry {
     refs: int
     width: int
     height: int
+}
+
+// One merged draw: the geometry every member shares, the surface they all have,
+// and the matrices that tell the shader where each copy goes.
+struct Batch {
+    vao: int
+    material: ptr
+    first: ptr
+    instances: ptr
+    members: ptr
+    capacity_bytes: int
+    count: int
+    stale: bool
 }
 
 struct GLRenderer {
@@ -184,9 +210,15 @@ struct GLRenderer {
     bloom_threshold: float
     bloom_intensity: float
 
+    batches: ptr
+    batch_count: int
+    shadow_batches: ptr
+    shadow_batch_count: int
+
     bound_material: ptr
     bound_texture: int
     bound_instanced: int
+    bound_instance_color: int
 
     post_fbo: int
     post_texture: int
@@ -214,6 +246,10 @@ renderer_new() -> *GLRenderer {
     r.programs = list.new()
     r.textures = list.new()
     r.frustum = core.frustum_new()
+    r.batches = list.new()
+    r.batch_count = 0
+    r.shadow_batches = list.new()
+    r.shadow_batch_count = 0
     r.clear_r = 0.0
     r.clear_g = 0.0
     r.clear_b = 0.0
@@ -224,12 +260,14 @@ renderer_new() -> *GLRenderer {
     r.bound_material = null
     r.bound_texture = 0 - 1
     r.bound_instanced = 0 - 1
+    r.bound_instance_color = 0 - 1
     return r
 }
 
 renderer_free(r: *GLRenderer) {
     if r == null { return }
     renderer_cleanup(r)
+    ae3d_gl_geometry_shutdown()
     if r.models != null { list.free(r.models) }
     if r.lights != null { list.free(r.lights) }
     if r.programs != null {
@@ -350,6 +388,7 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
     s.material_alpha = ae3d_gl_uniform_location(program, "materialAlpha")
     s.texture_sampler = ae3d_gl_uniform_location(program, "textureSampler")
     s.is_instanced = ae3d_gl_uniform_location(program, "isInstanced")
+    s.use_instance_color = ae3d_gl_uniform_location(program, "useInstanceColor")
     list.add_raw(r.programs, s)
     return s
 }
@@ -395,6 +434,7 @@ use_program(r: *GLRenderer, program: int) {
     r.bound_material = null
     r.bound_texture = 0 - 1
     r.bound_instanced = 0 - 1
+    r.bound_instance_color = 0 - 1
 }
 
 // A material is a pointer, and the same pointer means the same seven uniforms,
@@ -416,6 +456,15 @@ apply_instancing(r: *GLRenderer, slots: *ProgramSlots, instanced: int) {
     if r.bound_instanced == instanced { return }
     ae3d_gl_uniform_int(slots.is_instanced, instanced)
     r.bound_instanced = instanced
+}
+
+// A model's own instances carry a colour each; a merged draw does not, and its
+// members already share one material, so the shader is told to leave the tint
+// alone rather than read an attribute nothing filled in.
+apply_instance_color(r: *GLRenderer, slots: *ProgramSlots, on: int) {
+    if r.bound_instance_color == on { return }
+    ae3d_gl_uniform_int(slots.use_instance_color, on)
+    r.bound_instance_color = on
 }
 
 renderer_init(r: *GLRenderer, window: ptr, width: int, height: int) -> int {
@@ -444,6 +493,11 @@ renderer_init(r: *GLRenderer, window: ptr, width: int, height: int) -> int {
     r.passthrough_program = compile_program(shaders.VERTEX_SCREEN, shaders.FRAGMENT_PASSTHROUGH, "passthrough")
 
     r.default_texture = create_default_texture(r)
+
+    // A merged draw leaves the per-instance colour array disabled, so the
+    // generic value stands in for it. Without this the shader multiplies every
+    // batched surface by black.
+    ae3d_gl_set_default_instance_color()
 
     ae3d_gl_set_face_culling(0)
     r.face_culling_state = false
@@ -534,13 +588,35 @@ renderer_texture_count(r: *GLRenderer) -> int {
 renderer_add_model(r: *GLRenderer, m: *Model) {
     if m == null { return }
 
-    m.vao = ae3d_gl_vao_create()
-    ae3d_gl_vao_bind(m.vao)
-
-    m.vbo = ae3d_gl_buffer_create()
-    m.ebo = ae3d_gl_buffer_create()
-    ae3d_gl_upload_mesh(m.mesh, m.vbo, m.ebo)
-    ae3d_gl_setup_vertex_attribs()
+    // A model that carries its own instances needs a vertex array of its own,
+    // since the instance attributes are part of that state. Everything else
+    // goes through the shared cache, so identical geometry is uploaded once and
+    // can be merged into one draw later.
+    if m.is_instanced && core.model_instance_count(m) > 0 {
+        m.vao = ae3d_gl_vao_create()
+        ae3d_gl_vao_bind(m.vao)
+        m.vbo = ae3d_gl_buffer_create()
+        m.ebo = ae3d_gl_buffer_create()
+        ae3d_gl_upload_mesh(m.mesh, m.vbo, m.ebo)
+        ae3d_gl_setup_vertex_attribs()
+        m.shares_geometry = false
+    } else {
+        m.vao = ae3d_gl_geometry_acquire(m.mesh)
+        if m.vao == 0 {
+            m.vao = ae3d_gl_vao_create()
+            ae3d_gl_vao_bind(m.vao)
+            m.vbo = ae3d_gl_buffer_create()
+            m.ebo = ae3d_gl_buffer_create()
+            ae3d_gl_upload_mesh(m.mesh, m.vbo, m.ebo)
+            ae3d_gl_setup_vertex_attribs()
+            m.shares_geometry = false
+        } else {
+            m.vbo = 0
+            m.ebo = 0
+            m.shares_geometry = true
+        }
+        ae3d_gl_vao_bind(m.vao)
+    }
 
     if m.is_instanced && core.model_instance_count(m) > 0 {
         m.instance_vbo = ae3d_gl_buffer_create()
@@ -599,9 +675,17 @@ renderer_remove_model(r: *GLRenderer, m: *Model) {
         renderer_release_texture(r, m.material.texture_id)
     }
 
-    if m.vao != 0 { ae3d_gl_vao_delete(m.vao) ; m.vao = 0 }
-    if m.vbo != 0 { ae3d_gl_buffer_delete(m.vbo) ; m.vbo = 0 }
-    if m.ebo != 0 { ae3d_gl_buffer_delete(m.ebo) ; m.ebo = 0 }
+    if m.shares_geometry {
+        ae3d_gl_geometry_release(m.vao)
+        m.vao = 0
+        m.vbo = 0
+        m.ebo = 0
+        m.shares_geometry = false
+    } else {
+        if m.vao != 0 { ae3d_gl_vao_delete(m.vao) ; m.vao = 0 }
+        if m.vbo != 0 { ae3d_gl_buffer_delete(m.vbo) ; m.vbo = 0 }
+        if m.ebo != 0 { ae3d_gl_buffer_delete(m.ebo) ; m.ebo = 0 }
+    }
     if m.instance_vbo != 0 {
         ae3d_gl_buffer_delete(m.instance_vbo)
         m.instance_vbo = 0
@@ -762,21 +846,67 @@ render_shadow_pass(r: *GLRenderer, light: *Light) {
     instanced_slot = ae3d_gl_uniform_location(r.shadow_program, "isInstanced")
     ae3d_gl_uniform_mat4(space, &r.shadow_space)
 
+    r.shadow_batch_count = 0
+    identity = core.mat4_ident()
+
     count = list.size(r.models)
     i = 0
     while i < count {
         m = list.get_raw(r.models, i) as *Model
-        if m != null && m.visible && m.casts_shadow {
-            if m.is_dirty {
-                core.model_update_matrix(m)
-                m.is_dirty = false
+        if m == null || !m.visible || !m.casts_shadow {
+            i = i + 1
+            continue
+        }
+        moved = m.is_dirty
+        if m.is_dirty {
+            core.model_update_matrix(m)
+            m.is_dirty = false
+        }
+        if shadow_batchable(m) {
+            b = shadow_batch_for(r, m)
+            if b.count >= list.size(b.members) {
+                list.add_raw(b.members, m as ptr)
+                b.stale = true
+            } else if list.get_raw(b.members, b.count) != m as ptr {
+                list.set(b.members, b.count, m as ptr)
+                b.stale = true
             }
+            if moved { b.stale = true }
+            b.count = b.count + 1
+        } else {
             instanced = 0
             if m.is_instanced && core.model_instance_count(m) > 0 { instanced = 1 }
             ae3d_gl_uniform_int(instanced_slot, instanced)
             ae3d_gl_uniform_mat4(model_slot, &m.model_matrix)
             ae3d_gl_vao_bind(m.vao)
             draw_depth(r, m, instanced)
+        }
+        i = i + 1
+    }
+
+    i = 0
+    while i < r.shadow_batch_count {
+        b = list.get_raw(r.shadow_batches, i) as *Batch
+        if b.count != list.size(b.members) { b.stale = true }
+        if b.stale { fill_batch(r, b) }
+        first = b.first as *Model
+        if b.count == 1 {
+            ae3d_gl_uniform_int(instanced_slot, 0)
+            ae3d_gl_uniform_mat4(model_slot, &first.model_matrix)
+            ae3d_gl_vao_bind(first.vao)
+            draw_depth(r, first, 0)
+        } else if b.count > 1 {
+            ae3d_gl_uniform_int(instanced_slot, 1)
+            ae3d_gl_uniform_mat4(model_slot, &identity)
+            ae3d_gl_vao_bind(b.vao)
+            if b.stale {
+                b.capacity_bytes = ae3d_gl_batch_upload(b.vao,
+                                                        ae3d_gl_geometry_instance_vbo(b.vao),
+                                                        b.instances, b.capacity_bytes)
+                b.stale = false
+            }
+            ae3d_gl_draw_elements_instanced(core.mesh_index_count(first.mesh), 0, b.count)
+            r.last_draw_calls = r.last_draw_calls + 1
         }
         i = i + 1
     }
@@ -966,13 +1096,9 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
 
     view_projection = core.camera_view_projection(cam)
 
+    draw_opaque(r, &view_projection, active_light, cam)
+
     count = list.size(r.models)
-    i = 0
-    while i < count {
-        m = list.get_raw(r.models, i) as *Model
-        render_model(r, m, &view_projection, active_light, cam, false)
-        i = i + 1
-    }
     i = 0
     while i < count {
         m = list.get_raw(r.models, i) as *Model
@@ -981,6 +1107,180 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
     }
 
     if post_active { resolve_post_processing(r) }
+}
+
+// A model can join a merged draw when nothing about it is per-model except
+// where it sits: shared geometry, one material, the default program, no
+// uniforms of its own and no instances of its own. Transparency is left out on
+// purpose, since merging would fix the order those surfaces blend in.
+batchable(r: *GLRenderer, m: *Model) -> bool {
+    if m == null || !m.visible || !m.shares_geometry || m.vao == 0 { return false }
+    if m.is_instanced && core.model_instance_count(m) > 0 { return false }
+    if core.model_group_count(m) > 0 { return false }
+    if core.model_uniform_count(m) > 0 { return false }
+    if core.shader_valid(&m.shader) { return false }
+    alpha = 1.0
+    if m.material != null { alpha = m.material.alpha }
+    return alpha >= 0.99
+}
+
+batch_for(r: *GLRenderer, m: *Model) -> *Batch {
+    i = 0
+    while i < r.batch_count {
+        b = list.get_raw(r.batches, i) as *Batch
+        if b.vao == m.vao && core.material_equals(b.material as *Material, m.material) {
+            return b
+        }
+        i = i + 1
+    }
+
+    if r.batch_count >= list.size(r.batches) {
+        fresh = heap.new(Batch)
+        fresh.instances = ae3d_inst_create()
+        fresh.members = list.new()
+        fresh.capacity_bytes = 0
+        fresh.count = 0
+        list.add_raw(r.batches, fresh)
+    }
+    b = list.get_raw(r.batches, r.batch_count) as *Batch
+    if b.vao != m.vao || b.material != m.material as ptr { b.stale = true }
+    b.vao = m.vao
+    b.material = m.material as ptr
+    b.first = m as ptr
+    b.count = 0
+    r.batch_count = r.batch_count + 1
+    return b
+}
+
+// The depth pass only cares about shape, so models that share geometry merge
+// whatever their materials are. It also ignores the camera's frustum: a caster
+// off screen still throws a shadow onto something on it.
+shadow_batchable(m: *Model) -> bool {
+    if m == null || !m.visible || !m.casts_shadow || !m.shares_geometry { return false }
+    if m.vao == 0 { return false }
+    return !(m.is_instanced && core.model_instance_count(m) > 0)
+}
+
+shadow_batch_for(r: *GLRenderer, m: *Model) -> *Batch {
+    i = 0
+    while i < r.shadow_batch_count {
+        b = list.get_raw(r.shadow_batches, i) as *Batch
+        if b.vao == m.vao { return b }
+        i = i + 1
+    }
+
+    if r.shadow_batch_count >= list.size(r.shadow_batches) {
+        fresh = heap.new(Batch)
+        fresh.instances = ae3d_inst_create()
+        fresh.members = list.new()
+        fresh.capacity_bytes = 0
+        fresh.count = 0
+        list.add_raw(r.shadow_batches, fresh)
+    }
+    b = list.get_raw(r.shadow_batches, r.shadow_batch_count) as *Batch
+    if b.vao != m.vao { b.stale = true }
+    b.vao = m.vao
+    b.first = m as ptr
+    b.count = 0
+    r.shadow_batch_count = r.shadow_batch_count + 1
+    return b
+}
+
+// The opaque pass gathers what can be merged and draws each group once, then
+// draws whatever could not be merged the way it always was.
+draw_opaque(r: *GLRenderer, view_projection: *Mat4, light: *Light, cam: *Camera) {
+    r.batch_count = 0
+
+    count = list.size(r.models)
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        if batchable(r, m) {
+            if core.frustum_culling() &&
+               !core.frustum_sphere_visible(r.frustum, m.bounding_center, m.bounding_radius) {
+                i = i + 1
+                continue
+            }
+            moved = m.is_dirty
+            if m.is_dirty {
+                core.model_update_matrix(m)
+                m.is_dirty = false
+            }
+            b = batch_for(r, m)
+            // Rebuilding four hundred matrices and re-uploading them is only
+            // worth doing when the group is not what it was: a scene that has
+            // not moved keeps the buffer it already sent.
+            if b.count >= list.size(b.members) {
+                list.add_raw(b.members, m as ptr)
+                b.stale = true
+            } else if list.get_raw(b.members, b.count) != m as ptr {
+                list.set(b.members, b.count, m as ptr)
+                b.stale = true
+            }
+            if moved { b.stale = true }
+            b.count = b.count + 1
+        } else {
+            render_model(r, m, view_projection, light, cam, false)
+        }
+        i = i + 1
+    }
+
+    i = 0
+    while i < r.batch_count {
+        b = list.get_raw(r.batches, i) as *Batch
+        if b.count != list.size(b.members) { b.stale = true }
+        if b.stale { fill_batch(r, b) }
+        if b.count == 1 {
+            render_model(r, b.first as *Model, view_projection, light, cam, false)
+        } else if b.count > 1 {
+            draw_batch(r, b, view_projection, light, cam)
+        }
+        i = i + 1
+    }
+}
+
+fill_batch(r: *GLRenderer, b: *Batch) {
+    while list.size(b.members) > b.count { list.remove(b.members, list.size(b.members) - 1) }
+    ae3d_inst_resize(b.instances, b.count)
+    i = 0
+    while i < b.count {
+        m = list.get_raw(b.members, i) as *Model
+        ae3d_inst_set_matrix(b.instances, i, &m.model_matrix)
+        i = i + 1
+    }
+}
+
+draw_batch(r: *GLRenderer, b: *Batch, view_projection: *Mat4, light: *Light, cam: *Camera) {
+    slots = slots_for(r, r.default_program)
+    use_program(r, r.default_program)
+    if slots.frame_stamp != r.frame_stamp {
+        set_frame_uniforms(slots, view_projection, light, r.lights, cam)
+        slots.frame_stamp = r.frame_stamp
+    }
+    bind_shadow_map(r, slots)
+
+    material = b.material as *Material
+    apply_material(r, slots, material)
+    apply_transparency(r, false)
+    apply_texture(r, slots, texture_for(r, material))
+    apply_instancing(r, slots, 1)
+    apply_instance_color(r, slots, 0)
+
+    // The shader reads the instanced transform as model * instanceModel, so the
+    // group transform has to be identity: a batch's matrices are already the
+    // world transforms of the models it merged.
+    identity = core.mat4_ident()
+    ae3d_gl_uniform_mat4(slots.model, &identity)
+
+    ae3d_gl_vao_bind(b.vao)
+    if b.stale {
+        b.capacity_bytes = ae3d_gl_batch_upload(b.vao, ae3d_gl_geometry_instance_vbo(b.vao),
+                                                b.instances, b.capacity_bytes)
+        b.stale = false
+    }
+    ae3d_gl_draw_elements_instanced(core.mesh_index_count((b.first as *Model).mesh), 0, b.count)
+    ae3d_gl_vao_bind(0)
+    r.last_draw_calls = r.last_draw_calls + 1
 }
 
 render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
@@ -1077,6 +1377,7 @@ draw(r: *GLRenderer, m: *Model, slots: *ProgramSlots, count: int, byte_offset: i
             m.instances_updated = false
         }
         apply_instancing(r, slots, 1)
+        apply_instance_color(r, slots, 1)
         ae3d_gl_draw_elements_instanced(count, byte_offset, core.model_instance_count(m))
     } else {
         apply_instancing(r, slots, 0)
@@ -1369,8 +1670,30 @@ resolve_post_processing(r: *GLRenderer) {
     set_blend(r, true)
 }
 
+free_batches(batches: ptr) {
+    if batches == null { return }
+    i = 0
+    while i < list.size(batches) {
+        b = list.get_raw(batches, i) as *Batch
+        if b != null {
+            if b.instances != null { ae3d_inst_destroy(b.instances) }
+            if b.members != null { list.free(b.members) }
+            heap.free(b)
+        }
+        i = i + 1
+    }
+    list.free(batches)
+}
+
 renderer_cleanup(r: *GLRenderer) {
     if r == null { return }
+
+    free_batches(r.batches)
+    free_batches(r.shadow_batches)
+    r.batches = null
+    r.shadow_batches = null
+    r.batch_count = 0
+    r.shadow_batch_count = 0
 
     count = list.size(r.models)
     i = 0
