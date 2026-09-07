@@ -497,6 +497,52 @@ int ae3d_gl_fbo_attach_shadow_map(int fbo, int size) {
     return (int)texture;
 }
 
+// The scene pass renders into multisampled attachments and resolves down into
+// the single-sample texture the composite samples. Without it the one path that
+// runs an effect is also the one path with no antialiasing.
+int ae3d_gl_max_samples(void) {
+    GLint most = 0;
+    glGetIntegerv(GL_MAX_SAMPLES, &most);
+    if (most > 4) most = 4;
+    return most > 1 ? (int)most : 0;
+}
+
+int ae3d_gl_fbo_attach_color_multisample(int fbo, int width, int height, int samples) {
+    GLuint rbo = 0;
+    if (width < 1) width = 1;
+    if (height < 1) height = 1;
+
+    glGenRenderbuffers(1, &rbo);
+    glBindRenderbuffer(GL_RENDERBUFFER, rbo);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_RGBA8, width, height);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)fbo);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rbo);
+    return (int)rbo;
+}
+
+int ae3d_gl_fbo_attach_depth_multisample(int fbo, int width, int height, int samples) {
+    GLuint rbo = 0;
+    if (width < 1) width = 1;
+    if (height < 1) height = 1;
+
+    glGenRenderbuffers(1, &rbo);
+    glBindRenderbuffer(GL_RENDERBUFFER, rbo);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_DEPTH24_STENCIL8, width, height);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)fbo);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rbo);
+    return (int)rbo;
+}
+
+void ae3d_gl_fbo_resolve(int source, int destination, int width, int height) {
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)source);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)destination);
+    glBlitFramebuffer(0, 0, width, height, 0, 0, width, height,
+                      GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
 int ae3d_gl_fbo_attach_depth(int fbo, int width, int height) {
     GLuint rbo = 0;
     if (width < 1) width = 1;

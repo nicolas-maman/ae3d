@@ -118,6 +118,10 @@ typedef ptrdiff_t     GLsizeiptr;
 #define GL_INFO_LOG_LENGTH 0x8B84
 
 #define GL_FRAMEBUFFER          0x8D40
+#define GL_READ_FRAMEBUFFER     0x8CA8
+#define GL_DRAW_FRAMEBUFFER     0x8CA9
+#define GL_MAX_SAMPLES          0x8D57
+#define GL_RGBA8                0x8058
 #define GL_RENDERBUFFER         0x8D41
 #define GL_COLOR_ATTACHMENT0    0x8CE0
 #define GL_DEPTH_STENCIL_ATTACHMENT 0x821A
@@ -199,6 +203,8 @@ typedef ptrdiff_t     GLsizeiptr;
     X(void, glGenRenderbuffers, (GLsizei n, GLuint *renderbuffers)) \
     X(void, glBindRenderbuffer, (GLenum target, GLuint renderbuffer)) \
     X(void, glRenderbufferStorage, (GLenum target, GLenum internalformat, GLsizei w, GLsizei h)) \
+    X(void, glRenderbufferStorageMultisample, (GLenum target, GLsizei samples, GLenum internalformat, GLsizei w, GLsizei h)) \
+    X(void, glBlitFramebuffer, (GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLint dx0, GLint dy0, GLint dx1, GLint dy1, GLbitfield mask, GLenum filter)) \
     X(void, glFramebufferRenderbuffer, (GLenum target, GLenum attachment, GLenum rbtarget, GLuint renderbuffer)) \
     X(void, glDeleteRenderbuffers, (GLsizei n, const GLuint *renderbuffers)) \
     X(void, glReadPixels, (GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, void *pixels))
@@ -280,6 +286,8 @@ int ae3d_glapi_load(void);
 #define glDeleteFramebuffers       ae3d_glDeleteFramebuffers
 #define glGenRenderbuffers         ae3d_glGenRenderbuffers
 #define glBindRenderbuffer         ae3d_glBindRenderbuffer
+#define glRenderbufferStorageMultisample ae3d_glRenderbufferStorageMultisample
+#define glBlitFramebuffer          ae3d_glBlitFramebuffer
 #define glRenderbufferStorage      ae3d_glRenderbufferStorage
 #define glFramebufferRenderbuffer  ae3d_glFramebufferRenderbuffer
 #define glDeleteRenderbuffers      ae3d_glDeleteRenderbuffers

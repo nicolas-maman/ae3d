@@ -19,6 +19,11 @@ typedef struct {
     GLuint framebuffer;
     GLuint color;
     GLuint depth;
+    GLuint ms_framebuffer;
+    GLuint ms_color;
+    GLuint ms_depth;
+    int    samples;
+    int    resolved;
     int width;
     int height;
     unsigned char *pixels;
@@ -111,6 +116,16 @@ void ae3d_offscreen_context_destroy(void *context) {
 
 #endif
 
+// How many samples the driver will give a renderbuffer, capped at what the
+// Vulkan backend picks, so a scene drawn offscreen through either renderer is
+// antialiased the same way.
+static int ae3d_offscreen_samples(void) {
+    GLint most = 0;
+    glGetIntegerv(GL_MAX_SAMPLES, &most);
+    if (most > 4) most = 4;
+    return most > 1 ? (int)most : 0;
+}
+
 static int ae3d_offscreen_attach(ae3d_offscreen *target, int width, int height) {
     GLenum status;
 
@@ -119,8 +134,12 @@ static int ae3d_offscreen_attach(ae3d_offscreen *target, int width, int height) 
 
     if (target->color) glDeleteTextures(1, &target->color);
     if (target->depth) glDeleteRenderbuffers(1, &target->depth);
+    if (target->ms_color) glDeleteRenderbuffers(1, &target->ms_color);
+    if (target->ms_depth) glDeleteRenderbuffers(1, &target->ms_depth);
     target->color = 0;
     target->depth = 0;
+    target->ms_color = 0;
+    target->ms_depth = 0;
 
     glBindFramebuffer(GL_FRAMEBUFFER, target->framebuffer);
 
@@ -142,6 +161,40 @@ static int ae3d_offscreen_attach(ae3d_offscreen *target, int width, int height) 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     if (status != GL_FRAMEBUFFER_COMPLETE) return 0;
 
+    // The scene is drawn into a multisampled pair and resolved into the texture
+    // above before anything reads it. Without this the offscreen viewport is
+    // the one surface in the engine with no antialiasing, while the same scene
+    // through Vulkan is resolved from 4 samples.
+    target->samples = ae3d_offscreen_samples();
+    if (target->samples) {
+        if (!target->ms_framebuffer) glGenFramebuffers(1, &target->ms_framebuffer);
+        glBindFramebuffer(GL_FRAMEBUFFER, target->ms_framebuffer);
+
+        glGenRenderbuffers(1, &target->ms_color);
+        glBindRenderbuffer(GL_RENDERBUFFER, target->ms_color);
+        glRenderbufferStorageMultisample(GL_RENDERBUFFER, target->samples, GL_RGBA8, width, height);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER,
+                                  target->ms_color);
+
+        glGenRenderbuffers(1, &target->ms_depth);
+        glBindRenderbuffer(GL_RENDERBUFFER, target->ms_depth);
+        glRenderbufferStorageMultisample(GL_RENDERBUFFER, target->samples, GL_DEPTH24_STENCIL8,
+                                         width, height);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER,
+                                  target->ms_depth);
+
+        status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        if (status != GL_FRAMEBUFFER_COMPLETE) {
+            glDeleteRenderbuffers(1, &target->ms_color);
+            glDeleteRenderbuffers(1, &target->ms_depth);
+            target->ms_color = 0;
+            target->ms_depth = 0;
+            target->samples = 0;
+        }
+    }
+
+    target->resolved = 0;
     target->width = width;
     target->height = height;
 
@@ -195,8 +248,23 @@ void ae3d_offscreen_bind(void *handle) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         return;
     }
-    glBindFramebuffer(GL_FRAMEBUFFER, target->framebuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, target->samples ? target->ms_framebuffer
+                                                      : target->framebuffer);
     glViewport(0, 0, target->width, target->height);
+    target->resolved = 0;
+}
+
+// Multisampled attachments cannot be read directly, so the frame is blitted
+// down into the single-sample texture the readback and the picking path use.
+static void ae3d_offscreen_resolve(ae3d_offscreen *target) {
+    if (!target->samples || target->resolved) return;
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, target->ms_framebuffer);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, target->framebuffer);
+    glBlitFramebuffer(0, 0, target->width, target->height,
+                      0, 0, target->width, target->height,
+                      GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    target->resolved = 1;
 }
 
 void ae3d_offscreen_unbind(void) {
@@ -225,6 +293,7 @@ static void *ae3d_offscreen_read_sync(ae3d_offscreen *target) {
     int row_bytes = target->width * 4;
     int y;
 
+    ae3d_offscreen_resolve(target);
     glBindFramebuffer(GL_FRAMEBUFFER, target->framebuffer);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadPixels(0, 0, target->width, target->height, GL_RGBA, GL_UNSIGNED_BYTE, target->pixels);
@@ -276,6 +345,7 @@ void *ae3d_offscreen_read_pipelined(void *handle) {
         target->pack_primed = 0;
     }
 
+    ae3d_offscreen_resolve(target);
     glBindFramebuffer(GL_FRAMEBUFFER, target->framebuffer);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glBindBuffer(GL_PIXEL_PACK_BUFFER, target->pack[target->pack_index]);
@@ -308,7 +378,10 @@ void ae3d_offscreen_destroy(void *handle) {
     if (!target) return;
     if (target->color) glDeleteTextures(1, &target->color);
     if (target->depth) glDeleteRenderbuffers(1, &target->depth);
+    if (target->ms_color) glDeleteRenderbuffers(1, &target->ms_color);
+    if (target->ms_depth) glDeleteRenderbuffers(1, &target->ms_depth);
     if (target->framebuffer) glDeleteFramebuffers(1, &target->framebuffer);
+    if (target->ms_framebuffer) glDeleteFramebuffers(1, &target->ms_framebuffer);
     if (target->pack[0]) glDeleteBuffers(2, target->pack);
     free(target->scratch);
     free(target->pixels);

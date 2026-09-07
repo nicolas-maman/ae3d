@@ -27,8 +27,13 @@ First working engine.
   offscreen and compares every channel across materials and textures, instancing
   and transparency, skybox, FXAA, bloom, shadows, two lights, a shading preset
   a Gerstner ocean driven through twelve simulation steps, back-face culling,
-  the ocean through FXAA, and a resize with a composite running. The two agree
-  to within 1.6% of channels.
+  the ocean through FXAA, a resize with a composite running, and an instanced
+  voxel chunk. The two agree to within 0.7% of channels.
+- The offscreen path is multisampled, so a scene drawn into a framebuffer with
+  no window of its own is antialiased like every other surface. The viewport the
+  editor composites and the frames the parity suite compares were the only ones
+  in the engine drawn without it, which is most of what the two backends
+  disagreed about.
 - Shadow mapping in both backends. The light renders the scene into a depth map
   of its own and the lit pass compares against it, sampled over a 3x3
   neighbourhood with a slope-scaled bias. The light's box is centred on the
@@ -139,6 +144,9 @@ GL implementation's, over two thousand iterations with zero leaked bytes and
 - 19ns per Perlin sample; a 131072-cell exposed-face scan under a millisecond.
 - 400 separate models: 806us a frame, from 1200us before the frame's uniforms
   were hoisted out of the per-model loop.
+- Multisampling the offscreen target costs nothing measurable on a scene of 400
+  separate models: 1005us a frame against 1010us with it off, because that scene
+  is bound by its draw calls rather than by fill.
 - Reading a 1280x720 frame back: 307us pipelined against 1625us waiting.
 - The shadow pass over 200 casters at 1280x720: 248us in OpenGL and 103us in
   Vulkan, which records it into the frame's own command buffer. Measured by

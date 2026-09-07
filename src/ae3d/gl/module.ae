@@ -80,6 +80,10 @@ extern ae3d_gl_fbo_bind(fbo: int)
 extern ae3d_gl_fbo_delete(fbo: int)
 extern ae3d_gl_fbo_attach_color(fbo: int, width: int, height: int, hdr: int) -> int
 extern ae3d_gl_fbo_attach_depth(fbo: int, width: int, height: int) -> int
+extern ae3d_gl_max_samples() -> int
+extern ae3d_gl_fbo_attach_color_multisample(fbo: int, width: int, height: int, samples: int) -> int
+extern ae3d_gl_fbo_attach_depth_multisample(fbo: int, width: int, height: int, samples: int) -> int
+extern ae3d_gl_fbo_resolve(source: int, destination: int, width: int, height: int)
 extern ae3d_gl_fbo_attach_shadow_map(fbo: int, size: int) -> int
 extern ae3d_gl_renderbuffer_delete(rbo: int)
 extern ae3d_gl_fbo_complete() -> int
@@ -182,6 +186,10 @@ struct GLRenderer {
 
     post_fbo: int
     post_texture: int
+    post_ms_fbo: int
+    post_ms_color: int
+    post_ms_depth: int
+    post_samples: int
     post_depth: int
     bloom_fbo: int
     bloom_texture: int
@@ -1195,6 +1203,14 @@ init_post_processing(r: *GLRenderer, width: int, height: int) {
     }
     ae3d_gl_fbo_bind(0)
 
+    // An effect otherwise runs over a frame with no antialiasing, since the
+    // scene goes into this framebuffer rather than the multisampled default.
+    r.post_samples = ae3d_gl_max_samples()
+    if r.post_samples > 0 {
+        r.post_ms_fbo = ae3d_gl_fbo_create()
+        attach_multisample_post(r, width, height)
+    }
+
     r.bloom_fbo = ae3d_gl_fbo_create()
     r.bloom_texture = ae3d_gl_fbo_attach_color(r.bloom_fbo, width / 4, height / 4, 1)
     if ae3d_gl_fbo_complete() != 1 {
@@ -1228,6 +1244,12 @@ resize_post_processing(r: *GLRenderer, width: int, height: int) {
     r.post_depth = ae3d_gl_fbo_attach_depth(r.post_fbo, clamped_width, clamped_height)
     ae3d_gl_fbo_bind(0)
 
+    if r.post_ms_fbo != 0 {
+        if r.post_ms_color != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_color) }
+        if r.post_ms_depth != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_depth) }
+        attach_multisample_post(r, clamped_width, clamped_height)
+    }
+
     bloom_width = clamped_width / 4
     bloom_height = clamped_height / 4
     if bloom_width < 1 { bloom_width = 1 }
@@ -1250,7 +1272,9 @@ begin_post_processing(r: *GLRenderer) -> bool {
         resize_post_processing(r, width, height)
     }
 
-    ae3d_gl_fbo_bind(r.post_fbo)
+    target_fbo = r.post_fbo
+    if r.post_samples > 0 && r.post_ms_fbo != 0 { target_fbo = r.post_ms_fbo }
+    ae3d_gl_fbo_bind(target_fbo)
     if ae3d_gl_fbo_complete() != 1 {
         bind_output(r)
         return false
@@ -1258,7 +1282,25 @@ begin_post_processing(r: *GLRenderer) -> bool {
     return true
 }
 
+attach_multisample_post(r: *GLRenderer, width: int, height: int) {
+    r.post_ms_color = ae3d_gl_fbo_attach_color_multisample(r.post_ms_fbo, width, height,
+                                                           r.post_samples)
+    r.post_ms_depth = ae3d_gl_fbo_attach_depth_multisample(r.post_ms_fbo, width, height,
+                                                           r.post_samples)
+    if ae3d_gl_fbo_complete() != 1 {
+        ae3d_gl_renderbuffer_delete(r.post_ms_color)
+        ae3d_gl_renderbuffer_delete(r.post_ms_depth)
+        r.post_ms_color = 0
+        r.post_ms_depth = 0
+        r.post_samples = 0
+    }
+    ae3d_gl_fbo_bind(0)
+}
+
 resolve_post_processing(r: *GLRenderer) {
+    if r.post_samples > 0 && r.post_ms_fbo != 0 {
+        ae3d_gl_fbo_resolve(r.post_ms_fbo, r.post_fbo, r.viewport_width, r.viewport_height)
+    }
     bind_output(r)
     set_depth_test(r, false)
     ae3d_gl_set_depth_mask(0)
@@ -1338,6 +1380,9 @@ renderer_cleanup(r: *GLRenderer) {
     if r.post_texture != 0 { ae3d_gl_texture_delete(r.post_texture) ; r.post_texture = 0 }
     if r.bloom_texture != 0 { ae3d_gl_texture_delete(r.bloom_texture) ; r.bloom_texture = 0 }
     if r.post_depth != 0 { ae3d_gl_renderbuffer_delete(r.post_depth) ; r.post_depth = 0 }
+    if r.post_ms_color != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_color) ; r.post_ms_color = 0 }
+    if r.post_ms_depth != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_depth) ; r.post_ms_depth = 0 }
+    if r.post_ms_fbo != 0 { ae3d_gl_fbo_delete(r.post_ms_fbo) ; r.post_ms_fbo = 0 }
     if r.post_fbo != 0 { ae3d_gl_fbo_delete(r.post_fbo) ; r.post_fbo = 0 }
     if r.bloom_fbo != 0 { ae3d_gl_fbo_delete(r.bloom_fbo) ; r.bloom_fbo = 0 }
     if r.shadow_map != 0 { ae3d_gl_texture_delete(r.shadow_map) ; r.shadow_map = 0 }
