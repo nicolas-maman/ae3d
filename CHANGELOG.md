@@ -264,6 +264,14 @@ First working engine.
   sees a scene as its draws really are, and how the scene benchmark measures
   what the merging is worth rather than quoting a number from memory.
 
+- The post-processing checks ask whether the effect did anything. Comparing the
+  two backends says they agree, which a pass that quietly copied its input
+  through would satisfy on both sides at once, and that is exactly how the
+  multisample resolve failure hid. Turning FXAA or bloom on now has to change
+  what the frame adds up to, in both renderers. The skybox is asked the same, against a
+  frame rendered for the purpose rather than whatever the last comparison left
+  in the buffer.
+
 - An instance that moves or changes colour reaches the GPU. The buffer holding
   every instance's transform and colour was uploaded when the model was
   registered with a renderer and never again: on OpenGL the per-frame path

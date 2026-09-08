@@ -42,6 +42,20 @@ channel(pixels: ptr, index: int) -> int {
     return mem.get_byte(pixels, index)
 }
 
+// Comparing the two backends says they agree. It does not say either of them
+// did anything: a post pass that quietly copied its input through would look
+// exactly like one that worked, on both sides at once. This is what the frame
+// adds up to, so an effect can be asked to change it.
+frame_total(pixels: ptr) -> long {
+    total = 0 as long
+    i = 0
+    while i < WIDTH * HEIGHT * 4 {
+        total = total + (channel(pixels, i) as long)
+        i = i + 1
+    }
+    return total
+}
+
 // A polished metal sphere and a textured one, so one frame exercises the
 // lighting model and the sampler at the same time.
 build_scene(pass_backend: *Backend) -> {
@@ -245,23 +259,45 @@ main() {
     vk_sky = vk.skybox_create(vk_renderer, TEXTURE)
     check_true("skybox textures loaded",
                core.skybox_texture(gl_sky) != 0 && core.skybox_texture(vk_sky) != 0)
+    // Rendered here rather than read from whatever the last comparison left in
+    // the buffer, so what follows is measured against this scene and no other.
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    bare_gl = frame_total(offscreen.target_pixels(target))
+    bare_vk = frame_total(vk.offscreen_pixels())
+
     core.backend_set_skybox(&opengl_pass, gl_sky as ptr)
     core.backend_set_skybox(&vulkan_pass, vk_sky as ptr)
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
     compare("skybox", offscreen.target_pixels(target), vk.offscreen_pixels())
+    check_true("the skybox reaches the opengl frame",
+               frame_total(offscreen.target_pixels(target)) != bare_gl)
+    check_true("the skybox reaches the vulkan frame",
+               frame_total(vk.offscreen_pixels()) != bare_vk)
+
+    plain_gl = frame_total(offscreen.target_pixels(target))
+    plain_vk = frame_total(vk.offscreen_pixels())
 
     core.backend_set_post(&opengl_pass, true, false, 0.8, 0.4)
     core.backend_set_post(&vulkan_pass, true, false, 0.8, 0.4)
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
     compare("fxaa", offscreen.target_pixels(target), vk.offscreen_pixels())
+    check_true("fxaa changes the opengl frame",
+               frame_total(offscreen.target_pixels(target)) != plain_gl)
+    check_true("fxaa changes the vulkan frame",
+               frame_total(vk.offscreen_pixels()) != plain_vk)
 
     core.backend_set_post(&opengl_pass, false, true, 0.8, 0.4)
     core.backend_set_post(&vulkan_pass, false, true, 0.8, 0.4)
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
     compare("bloom", offscreen.target_pixels(target), vk.offscreen_pixels())
+    check_true("bloom changes the opengl frame",
+               frame_total(offscreen.target_pixels(target)) != plain_gl)
+    check_true("bloom changes the vulkan frame",
+               frame_total(vk.offscreen_pixels()) != plain_vk)
 
     // Shadows are the newest thing both backends do, and the one most likely to
     // diverge: two depth passes, two light-space matrices, two samplers.
