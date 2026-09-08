@@ -34,7 +34,12 @@ against its bounding sphere first, so selection stays cheap with a full scene.
 editor's own geometry: the renderer draws them, but they are not objects and do
 not appear here.
 
-**Add** creates a cube, sphere, plane, water surface, voxel world or light.
+**Add** creates a cube, sphere, plane, water surface, light, or a voxel world of
+one of five terrains: plains, mountains, desert, islands or caves. The shapes
+are `src/ae3d/terrain`, a module rather than editor code, so what each one
+produces is measured without a window in `tests/test_terrain.ae`: mountains have
+more relief than plains, a desert is smoother than both, and caves are the only
+one with rock over open space.
 
 **Assets** lists the meshes under `resources/obj`. Clicking one loads it into the
 scene and frames it.

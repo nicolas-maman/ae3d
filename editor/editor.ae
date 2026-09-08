@@ -27,7 +27,7 @@ import ae3d.history
 import ae3d.behaviour
 import ae3d.water
 import ae3d.voxel
-import ae3d.noise
+import ae3d.terrain
 import ae3d.rendering
 
 const PANEL_LEFT = 240
@@ -1834,42 +1834,19 @@ add_water() {
     add_component_model(surface, "water", behaviour.KIND_WATER, ocean as ptr)
 }
 
-voxel_layer(height: int, y: int) -> int {
-    if y == height - 1 {
-        if height < 6 { return voxel.SAND }
-        if height > 22 { return voxel.STONE }
-        return voxel.GRASS
-    }
-    if y > height - 4 { return voxel.DIRT }
-    return voxel.STONE
-}
 
 add_voxels() {
+    add_biome(terrain.PLAINS)
+}
+
+// The terrain shapes live in ae3d.terrain, so the editor asks for a biome
+// rather than carrying a copy of one generator inline where the only way to
+// check it is to look at it.
+add_biome(biome: int) {
     world = voxel.world_new(48, 48, 28, VOXEL_SIZE)
     if world == null { return }
 
-    field = noise.perlin_new(20260903)
-    if field == null {
-        voxel.world_free(world)
-        return
-    }
-
-    x = 0
-    while x < voxel.world_size_x(world) {
-        z = 0
-        while z < voxel.world_size_z(world) {
-            sample = noise.fbm2(field, (x * 1.0) * 0.05, (z * 1.0) * 0.05, 4, 0.5)
-            height = (((sample + 1.0) * 0.5) * 18.0 + 4.0) as int
-            y = 0
-            while y < height {
-                voxel.world_set(world, x, y, z, voxel_layer(height, y))
-                y = y + 1
-            }
-            z = z + 1
-        }
-        x = x + 1
-    }
-    noise.perlin_free(field)
+    terrain.fill_seeded(world, 20260903, biome)
 
     base = loader.cube(VOXEL_SIZE)
     chunk = voxel.world_build(world, base)
@@ -1880,8 +1857,8 @@ add_voxels() {
         return
     }
     core.model_set_position(chunk, 0.0 - 96.0, 0.0 - 8.0, 0.0 - 96.0)
-    add_component_model(chunk, "voxels", behaviour.KIND_VOXEL, world as ptr)
-    say("voxels: ${voxel.world_visible_count(world)} visible of ${voxel.world_active_count(world)}")
+    add_component_model(chunk, terrain.biome_name(biome), behaviour.KIND_VOXEL, world as ptr)
+    say("${terrain.biome_name(biome)}: ${voxel.world_visible_count(world)} visible of ${voxel.world_active_count(world)}")
 }
 
 // Every mesh the project ships, so a model can be brought into the scene
@@ -2330,8 +2307,19 @@ main() {
         water_btn = ui.btn(left, "Water") callback { add_water() }
         style_button(water_btn, "action")
 
-        voxel_btn = ui.btn(left, "Voxels") callback { add_voxels() }
-        style_button(voxel_btn, "action")
+        // One button per biome: five short labels are clearer than one button
+        // and a hidden mode, and every shape the terrain module can build is
+        // reachable rather than only the first.
+        plains_btn = ui.btn(left, "Plains") callback { add_biome(terrain.PLAINS) }
+        style_button(plains_btn, "action")
+        mountains_btn = ui.btn(left, "Mountains") callback { add_biome(terrain.MOUNTAINS) }
+        style_button(mountains_btn, "action")
+        desert_btn = ui.btn(left, "Desert") callback { add_biome(terrain.DESERT) }
+        style_button(desert_btn, "action")
+        islands_btn = ui.btn(left, "Islands") callback { add_biome(terrain.ISLANDS) }
+        style_button(islands_btn, "action")
+        caves_btn = ui.btn(left, "Caves") callback { add_biome(terrain.CAVES) }
+        style_button(caves_btn, "action")
 
         light_btn = ui.btn(left, "Light") callback { add_light() }
         style_button(light_btn, "action")
