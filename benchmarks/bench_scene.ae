@@ -17,6 +17,30 @@ const HEIGHT = 720
 const MODELS = 400
 var FRAMES = 600
 
+// The elapsed nanoseconds and the draws the last frame took, packed so the
+// caller can report both.
+var g_draws = 0
+
+time_scene(backend: *Backend, cam: *Camera, light: *Light, renderer: *GLRenderer,
+           merging: bool) -> long {
+    core.set_draw_merging(merging)
+    core.backend_render(backend, cam, light)
+
+    started = clock_ns()
+    frame = 0
+    while frame < FRAMES {
+        core.backend_render(backend, cam, light)
+        frame = frame + 1
+    }
+    elapsed = clock_ns() - started
+    g_draws = gl.renderer_draw_calls(renderer)
+    return elapsed
+}
+
+report(shape: string, elapsed: long, draws: int) {
+    println("  ${MODELS} models ${shape}: ${(elapsed / 1000000) as int} ms over ${FRAMES} frames, ${(elapsed / 1000) as int / FRAMES} us per frame, ${draws} draws")
+}
+
 main() {
     // A software rasteriser needs orders of magnitude longer per frame, so a
     // machine that cannot measure can still be asked to run the thing briefly.
@@ -50,15 +74,15 @@ main() {
     core.camera_set_position(cam, core.vec3(0.0, 120.0, 360.0))
     light = core.light_sun(core.vec3(0.3, 0.7, 0.4))
 
-    core.backend_render(&backend, cam, light)
-    started = clock_ns()
-    frame = 0
-    while frame < FRAMES {
-        core.backend_render(&backend, cam, light)
-        frame = frame + 1
-    }
-    elapsed = clock_ns() - started
-    println("  ${MODELS} models: ${(elapsed / 1000000) as int} ms over ${FRAMES} frames, ${(elapsed / 1000) as int / FRAMES} us per frame, ${gl.renderer_draw_calls(renderer)} draws")
+    // Both shapes of the same scene: one draw for all of it, and one draw per
+    // model. What the merging is worth is the difference, and quoting either
+    // number without the other says nothing.
+    merged = time_scene(&backend, cam, light, renderer, true)
+    merged_draws = g_draws
+    separate = time_scene(&backend, cam, light, renderer, false)
+    separate_draws = g_draws
+    report("merged", merged, merged_draws)
+    report("one draw per model", separate, separate_draws)
 
     core.backend_cleanup(&backend)
     i = 0
