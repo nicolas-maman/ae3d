@@ -86,11 +86,15 @@ run_checks(backend: *Backend, name: string) {
     core.model_matte(blocker, 0.8, 0.3, 0.2)
     core.backend_add_model(backend, blocker)
 
+    // The ground is left UNCONFIGURED on purpose. Every check below used to run
+    // on a model that had been handed a shadow_intensity, so the values a model
+    // gets when nobody configures it were never asked anything: they were zero,
+    // which is not "no shadow" but a shadow that multiplies the surface to
+    // black, and a softness of zero put all nine taps of the 3x3 on one texel.
     config = rendering.default_config()
     config.advanced_shadows = true
     config.shadow_intensity = 0.25
     config.shadow_softness = 1.0
-    rendering.apply(ground, config)
     rendering.apply(blocker, config)
 
     cam = core.camera_new(WIDTH, HEIGHT)
@@ -120,6 +124,26 @@ run_checks(backend: *Backend, name: string) {
     core.backend_render(backend, cam, light)
 
     shadowed = frame_of(backend)
+
+    // A shadow darkens what the light was reaching; it does not cut a hole in
+    // it. Counted against the unshadowed frame rather than against black,
+    // because the scene clears to black and the background is not the ground.
+    holed = 0
+    hy = 0
+    while hy < HEIGHT {
+        hx = 0
+        while hx < WIDTH {
+            if luma(lit, hx, hy) > 40 && luma(shadowed, hx, hy) < 12 {
+                holed = holed + 1
+            }
+            hx = hx + 1
+        }
+        hy = hy + 1
+    }
+    if holed > 0 {
+        println("  ${name}: ${holed} lit pixel(s) fell to black under the shadow")
+    }
+    check("${name} the shadow darkens rather than cutting a hole", holed == 0)
     if shadowed == null { println("shadows: SKIP no pixels") ; return }
 
     darkened_rows = 0
