@@ -129,6 +129,15 @@ First working engine.
 
 ### Fixes
 
+- Loading a scene that holds two models of the same shape crashed the editor.
+  Merged draws are pooled and matched to a model by vertex array id, the pool
+  outlives the models it was built from, and OpenGL hands the same id out again
+  for the next array it creates. So a batch built for geometry that had since
+  been released matched its replacement by number, decided it was unchanged,
+  skipped its upload and drew from the buffer of the array that was gone:
+  `SIGSEGV` inside `glDrawElementsInstanced`, six times out of six. Releasing
+  geometry now tells the pool to forget it.
+
 - An instanced model had its scale and rotation applied twice. Each instance's
   matrix is built from the model's own scale and rotation, and the shader
   multiplies the model matrix by the instance's, so a model scaled 2.4 drew its
