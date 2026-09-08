@@ -123,6 +123,72 @@ test_camera_speed() {
     core.camera_free(c)
 }
 
+// A number typed into an inspector field can reach values a slider's range
+// never could, and three of the camera's take part in a division inside
+// mat4_perspective: a fov of 0 or 180, a near plane at or behind the eye, and
+// a near equal to the far. Any of them fills the projection with infinities,
+// and every frame after that is empty with nothing on screen to say why. The
+// setters refuse them, and what this checks is that the camera is still usable
+// afterwards, not merely that a field did not change.
+finite(v: float) -> bool {
+    if v != v { return false }
+    return core.abs_of(v) < 1000000000.0
+}
+
+projection_is_finite(c: *Camera) -> bool {
+    p = core.camera_projection(c)
+    return finite(p.m0) && finite(p.m5) && finite(p.m10) && finite(p.m14)
+}
+
+test_camera_limits() {
+    c = core.camera_new(800, 600)
+    core.camera_set_near(c, 0.5)
+    core.camera_set_far(c, 900.0)
+
+    check_true("a sane camera projects finitely", projection_is_finite(c))
+
+    core.camera_set_near(c, 0.0)
+    check("a near plane at the eye is refused", c.near, 0.5)
+    core.camera_set_near(c, 0.0 - 4.0)
+    check("a near plane behind the eye is refused", c.near, 0.5)
+    // The one that divides by zero: near - far is the denominator, so a near
+    // equal to the far is not merely a strange camera, it is an infinite
+    // matrix. Checked here rather than at the end, because a later attempt
+    // moves the planes apart again and hides it.
+    core.camera_set_near(c, 900.0)
+    check("a near plane at the far plane is refused", c.near, 0.5)
+    check_true("a near plane at the far plane leaves the projection finite",
+               projection_is_finite(c))
+    core.camera_set_near(c, 1200.0)
+    check("a near plane beyond the far plane is refused", c.near, 0.5)
+
+    core.camera_set_far(c, 0.5)
+    check("a far plane at the near plane is refused", core.camera_far(c), 900.0)
+    core.camera_set_far(c, 0.0 - 10.0)
+    check("a far plane behind the eye is refused", core.camera_far(c), 900.0)
+
+    // Read rather than assumed: the point is that the value did not move, not
+    // what the default happens to be.
+    kept_fov = c.fov
+    core.camera_set_fov(c, 0.0)
+    check("a fov of nothing is refused", c.fov, kept_fov)
+    core.camera_set_fov(c, 180.0)
+    check("a fov of half a turn is refused", c.fov, kept_fov)
+
+    check_true("the projection survived every refusal", projection_is_finite(c))
+
+    // The guards must not have shut the door on legal values.
+    core.camera_set_near(c, 2.0)
+    check("a legal near plane still lands", c.near, 2.0)
+    core.camera_set_far(c, 4000.0)
+    check("a legal far plane still lands", core.camera_far(c), 4000.0)
+    core.camera_set_fov(c, 90.0)
+    check("a legal fov still lands", c.fov, 90.0)
+    check_true("and it still projects finitely", projection_is_finite(c))
+
+    core.camera_free(c)
+}
+
 test_components() {
     scene = behaviour.scene_new()
     object = behaviour.object_new("spinner")
@@ -306,6 +372,7 @@ test_rendering_config() {
 main() {
     test_raycast()
     test_camera_speed()
+    test_camera_limits()
     test_components()
     test_rendering_config()
 

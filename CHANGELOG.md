@@ -129,6 +129,13 @@ First working engine.
 
 ### Fixes
 
+- A camera would accept a field of view of zero or half a turn, a near plane at
+  or behind the eye, or a near plane equal to the far. All three divide inside
+  `mat4_perspective`, and the result is a projection full of infinities: every
+  frame after it is empty, with nothing on screen to say why. The three setters
+  refuse those values, the way `camera_set_aspect` already refused a zero
+  aspect. A slider could never reach them; a number field can.
+
 - Adding a component to a game object switched it back on. A component
   deliberately disabled before it was added ran anyway on the next update,
   and there was no way to add one in a disabled state. Adding a component is
@@ -419,6 +426,27 @@ First working engine.
   which caps any program at a frame count so every example is also a smoke test.
 
 ### Editor
+
+- The inspector uses a number field where a slider made no sense. Position was
+  a slider clamped to plus or minus four hundred, so an object further out than
+  that could not be typed and the control pinned; the far plane was a slider
+  from two hundred to eight thousand, where a pixel is thirty units. Position,
+  scale and the two clip planes are fields now, and the sliders that remain are
+  the ones whose range is the whole of the value: colour channels, metallic,
+  roughness, transparency, field of view.
+
+- Position is one row of three fields with coloured X, Y and Z letters instead
+  of three labelled rows, which is how the same property is drawn in Unreal,
+  Unity and Godot. It reads as one thing and costs a third of the height.
+
+- The add buttons are a grid grouped by what they make, with the five biomes
+  under their own heading, instead of ten identical full-width bars in a
+  column. Delete has its own colour, being the one button in the panel that
+  pressing again does not undo.
+
+- The editor's report counts `blind_fields`: a row that applies its value but
+  never shows it. `stuck_rows` cannot see that, because it drives the property
+  directly and never looks at the control.
 
 - A scene editor on [aether-ui](https://github.com/aether-lang-dev/aether-ui):
   hierarchy, asset browser, console, and an inspector that changes with what is

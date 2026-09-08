@@ -1606,12 +1606,20 @@ camera_update_projection(c: *Camera) {
     mark_frustum_dirty()
 }
 
+// CRITICAL: the three values below all divide in mat4_perspective, and a
+// rejected change is the only safe answer to one that would divide by zero.
+// A fov of 0 or 180 degrees, a near plane at or behind the eye, or a near
+// equal to the far all produce a matrix full of infinities, and every frame
+// after that is empty with nothing to say why. Refusing the value keeps the
+// camera the caller had, the same way camera_set_aspect already does.
 camera_set_fov(c: *Camera, fov: float) {
+    if fov <= 0.0 || fov >= 180.0 { return }
     c.fov = fov
     camera_update_projection(c)
 }
 
 camera_set_near(c: *Camera, near: float) {
+    if near <= 0.0 || near >= c.far { return }
     c.near = near
     camera_update_projection(c)
 }
@@ -1619,6 +1627,7 @@ camera_set_near(c: *Camera, near: float) {
 camera_far(c: *Camera) -> float { return c.far }
 
 camera_set_far(c: *Camera, far: float) {
+    if far <= c.near { return }
     c.far = far
     camera_update_projection(c)
 }
