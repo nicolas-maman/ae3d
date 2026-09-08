@@ -23,7 +23,8 @@ exports (
     engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
     engine_set_debug, engine_set_frustum_culling, engine_set_face_culling,
-    engine_on_update, engine_on_render, engine_set_user_data, engine_user_data,
+    engine_on_update, engine_on_fixed_update, engine_on_render,
+    engine_set_user_data, engine_user_data,
     engine_gl_renderer, engine_vk_renderer, engine_mouse_x, engine_mouse_y, engine_mouse_down, engine_key_down
 )
 
@@ -48,6 +49,7 @@ struct Engine {
 
     on_start: fn(ptr)
     on_update: fn(ptr, float)
+    on_fixed_update: fn(ptr, float)
     on_render: fn(ptr, float)
     user_data: ptr
 
@@ -161,6 +163,13 @@ engine_set_post(e: *Engine, fxaa: bool, bloom: bool, threshold: float, intensity
 engine_set_decorated(e: *Engine, decorated: bool) { e.decorated = decorated }
 engine_set_vsync(e: *Engine, interval: int) { e.vsync = interval }
 engine_set_camera_input(e: *Engine, enabled: bool) { e.camera_input = enabled }
+
+// Called as many times a frame as the fixed step fits into it, with the step
+// rather than the frame's own delta, which is what a behaviour scene's
+// fixed_update wants.
+engine_on_fixed_update(e: *Engine, handler: fn(ptr, float)) {
+    e.on_fixed_update = handler
+}
 
 engine_set_fixed_step(e: *Engine, seconds: float) {
     if seconds > 0.0 { e.fixed_step = seconds }
@@ -303,13 +312,16 @@ engine_loop(e: *Engine) {
             }
         }
 
-        if e.on_update != null {
-            e.fixed_accumulator = e.fixed_accumulator + delta
-            while e.fixed_accumulator >= e.fixed_step {
-                e.fixed_accumulator = e.fixed_accumulator - e.fixed_step
-            }
-            e.on_update(e.user_data, delta)
+        // The accumulator was drained a step at a time and nothing was called
+        // in between, so the fixed step was a number the engine subtracted from
+        // itself: a program that set one and waited for it waited forever, and
+        // a behaviour scene's fixed_update had to be driven by hand.
+        e.fixed_accumulator = e.fixed_accumulator + delta
+        while e.fixed_accumulator >= e.fixed_step {
+            e.fixed_accumulator = e.fixed_accumulator - e.fixed_step
+            if e.on_fixed_update != null { e.on_fixed_update(e.user_data, e.fixed_step) }
         }
+        if e.on_update != null { e.on_update(e.user_data, delta) }
 
         e.backend_render(e.backend_state, cam, e.light)
 

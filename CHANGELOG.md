@@ -359,6 +359,20 @@ First working engine.
   to nothing looks exactly like one that works when the only witness is a person
   watching the viewport, which is how nine rows came to do nothing at all.
 
+- A camera moves at its speed whichever way it points. Each held key was scaled
+  separately and added, so a camera holding two of them travelled at the speed
+  of both: forty one percent faster on the diagonal than along an axis, which is
+  not what a speed means. The keys are added up first and scaled once, and
+  `camera_move` is that step by itself, so a program driving its own input gets
+  the same behaviour.
+
+- The engine calls the fixed step it was counting. The accumulator was filled,
+  drained a step at a time, and nothing called in between, so `engine_set_fixed_step`
+  set a number the engine subtracted from itself: a program that wanted a fixed
+  update waited forever, and a behaviour scene's `fixed_update` had to be driven
+  by hand. `engine_on_fixed_update` is called once per step that fits in the
+  frame, with the step rather than the frame's own delta.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve

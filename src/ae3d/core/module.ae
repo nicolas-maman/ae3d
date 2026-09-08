@@ -63,7 +63,7 @@ exports (
     camera_far,
     camera_set_aspect, camera_set_position, camera_set_speed, camera_view,
     camera_projection, camera_view_projection, camera_world_to_screen, camera_process_keyboard,
-    camera_process_mouse, camera_look_at, camera_update_vectors, camera_frustum,
+    camera_process_mouse, camera_move, camera_look_at, camera_update_vectors, camera_frustum,
     frustum_intersects_sphere, plane_distance, camera_screen_to_world, frustum_dirty,
     mark_frustum_dirty, clear_frustum_dirty
 )
@@ -1655,33 +1655,28 @@ camera_process_keyboard(c: *Camera, window: ptr, delta_time: float) {
         velocity = velocity * 2.5
     }
 
-    moved = false
-    if platform.key_down(window, platform.KEY_W) {
-        c.position = v3_add(c.position, v3_mul(c.front, velocity))
-        moved = true
-    }
-    if platform.key_down(window, platform.KEY_S) {
-        c.position = v3_sub(c.position, v3_mul(c.front, velocity))
-        moved = true
-    }
-    if platform.key_down(window, platform.KEY_A) {
-        c.position = v3_sub(c.position, v3_mul(c.right, velocity))
-        moved = true
-    }
-    if platform.key_down(window, platform.KEY_D) {
-        c.position = v3_add(c.position, v3_mul(c.right, velocity))
-        moved = true
-    }
-    if platform.key_down(window, platform.KEY_SPACE) {
-        c.position = v3_add(c.position, v3_mul(c.world_up, velocity))
-        moved = true
-    }
-    if platform.key_down(window, platform.KEY_LEFT_CONTROL) {
-        c.position = v3_sub(c.position, v3_mul(c.world_up, velocity))
-        moved = true
-    }
+    // Where the keys point, added up first and scaled once. Scaling each key
+    // separately gave a camera holding two of them the speed of both at once,
+    // so travelling on the diagonal was forty one percent faster than
+    // travelling along an axis, which is not what a speed means.
+    heading = vec3(0.0, 0.0, 0.0)
+    if platform.key_down(window, platform.KEY_W) { heading = v3_add(heading, c.front) }
+    if platform.key_down(window, platform.KEY_S) { heading = v3_sub(heading, c.front) }
+    if platform.key_down(window, platform.KEY_A) { heading = v3_sub(heading, c.right) }
+    if platform.key_down(window, platform.KEY_D) { heading = v3_add(heading, c.right) }
+    if platform.key_down(window, platform.KEY_SPACE) { heading = v3_add(heading, c.world_up) }
+    if platform.key_down(window, platform.KEY_LEFT_CONTROL) { heading = v3_sub(heading, c.world_up) }
 
-    if moved { mark_frustum_dirty() }
+    camera_move(c, heading, velocity)
+}
+
+// Along a heading, at the camera's speed, however many directions the heading
+// was added up from. Opposite directions cancel, which is a heading of nothing
+// rather than a direction to normalise.
+camera_move(c: *Camera, heading: Vec3, distance: float) {
+    if v3_len(heading) < 0.0001 { return }
+    c.position = v3_add(c.position, v3_mul(v3_normalize(heading), distance))
+    mark_frustum_dirty()
 }
 
 camera_process_mouse(c: *Camera, x_offset: float, y_offset: float, constrain_pitch: bool) {
