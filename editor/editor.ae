@@ -61,6 +61,7 @@ var g_gizmo_step = 0.0
 var g_gizmo_dir_x = 0.0
 var g_gizmo_dir_y = 0.0
 var g_gizmo_angle = 0.0
+var g_gizmo_turned = 0.0
 
 var g_canvas = 0
 var g_view_w = 900
@@ -371,6 +372,10 @@ extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 
 const ROWS = 20
+// Past every inspector row, because a turn of the gizmo is not a row: it is
+// recorded as the angle the drag has turned through so far, and undone by
+// turning back through it.
+const ROTATE_FIRST_SLOT = 20
 const CAMERA_FIRST_ROW = 17
 const CAMERA_LAST_ROW = 19
 const WATER_FIRST_ROW = 11
@@ -950,6 +955,47 @@ index_of_kind(kind: int) -> int {
     return 0 - 1
 }
 
+// A drag of the gizmo used to record nothing, so the next undo stepped back
+// through whatever came before it and put that back instead. Each mode is
+// dragged, undone, and the model asked whether it is where it started.
+undone_gizmo_drags() -> int {
+    m = selected_model()
+    if m == null { return 0 }
+
+    wrong = 0
+    modes = 0
+    while modes < 3 {
+        was_mode = g_gizmo_mode
+        g_gizmo_mode = modes
+        position = m.position
+        scale = m.scale
+        rotation = m.rotation
+
+        gizmo_begin_drag(0, 40.0, 40.0)
+        gizmo_drag(90.0, 60.0, 50.0, 20.0)
+        gizmo_drag(140.0, 90.0, 50.0, 30.0)
+        g_gizmo_dragging = false
+        history.history_close(g_history)
+
+        undo()
+
+        if core.abs_of(m.position.x - position.x) > 0.01 ||
+           core.abs_of(m.position.y - position.y) > 0.01 ||
+           core.abs_of(m.position.z - position.z) > 0.01 { wrong = wrong + 1 }
+        if core.abs_of(m.scale.x - scale.x) > 0.01 { wrong = wrong + 1 }
+        if core.abs_of(m.rotation.y - rotation.y) > 0.001 ||
+           core.abs_of(m.rotation.w - rotation.w) > 0.001 { wrong = wrong + 1 }
+
+        core.model_set_position(m, position.x, position.y, position.z)
+        core.model_set_scale(m, scale.x, scale.y, scale.z)
+        core.model_set_rotation(m, rotation)
+        g_gizmo_mode = was_mode
+        modes = modes + 1
+    }
+    history.history_clear(g_history)
+    return wrong
+}
+
 rows_that_do_nothing() -> int {
     history.history_begin_replay(g_history)
     was_selected = g_selected
@@ -977,6 +1023,7 @@ report_state() {
     // run was asked for.
     frames = g_frames
     stuck = rows_that_do_nothing()
+    undrag = undone_gizmo_drags()
 
     selected = "none"
     m = selected_model()
@@ -1009,6 +1056,8 @@ report_state() {
     lines = string.concat(lines, string.from_int(g_view_h))
     lines = string.concat(lines, "\nstuck_rows ")
     lines = string.concat(lines, string.from_int(stuck))
+    lines = string.concat(lines, "\nunundone_drags ")
+    lines = string.concat(lines, string.from_int(undrag))
     lines = string.concat(lines, "\nframes ")
     lines = string.concat(lines, string.from_int(frames))
     lines = string.concat(lines, "\n")
@@ -1066,7 +1115,33 @@ replay(step: *EditStep, backwards: bool) {
         target = step.after
         if backwards { target = step.before }
         subject = step.subject as *Model
-        if step.slot >= 9 {
+        if step.slot >= ROTATE_FIRST_SLOT {
+            // A turn is undone by turning back through it, so what matters is
+            // the angle between the two ends of the step rather than either end.
+            turn = step.after - step.before
+            if backwards { turn = 0.0 - turn }
+            axis = step.slot - ROTATE_FIRST_SLOT
+            if subject != null {
+                select_model_pointer(step.subject)
+                if axis == 0 { core.model_rotate(subject, turn, 0.0, 0.0) }
+                if axis == 1 { core.model_rotate(subject, 0.0, turn, 0.0) }
+                if axis == 2 { core.model_rotate(subject, 0.0, 0.0, turn) }
+                mark_dirty()
+                sync_inspector()
+            }
+        } else if step.slot >= WATER_FIRST_ROW && step.slot <= WATER_LAST_ROW {
+            // The water rows read whichever object is selected, so replaying one
+            // has to name the water it was recorded against rather than take
+            // whatever happens to be selected now.
+            sim = step.subject as *Simulation
+            if sim != null {
+                if step.slot == 11 { water.simulation_set_amplitude(sim, target) }
+                if step.slot == 12 { water.simulation_set_wave_speed(sim, target) }
+                if step.slot == 13 { water.simulation_set_transparency(sim, target) }
+                show_row(step.slot, target)
+                paint_soon()
+            }
+        } else if step.slot >= 9 {
             apply_property(step.slot, target)
         } else {
             select_model_pointer(step.subject)
@@ -1684,6 +1759,12 @@ outline_for(index: int) -> *Model {
     return list.get_raw(g_outlines, index) as *Model
 }
 
+component_of(v: Vec3, axis: int) -> float {
+    if axis == 0 { return v.x }
+    if axis == 1 { return v.y }
+    return v.z
+}
+
 gizmo_axis_vector(axis: int) -> Vec3 {
     if axis == 0 { return core.vec3(1.0, 0.0, 0.0) }
     if axis == 1 { return core.vec3(0.0, 1.0, 0.0) }
@@ -1879,6 +1960,10 @@ gizmo_begin_drag(axis: int, x: float, y: float) {
     g_gizmo_axis = axis
     g_gizmo_dragging = true
     g_gizmo_angle = core.atan2_of(y - origin.y, x - origin.x)
+    // Each drag opens its own step, so the angle it has turned through starts
+    // from nothing however many drags came before.
+    g_gizmo_turned = 0.0
+    history.history_close(g_history)
 
     dx = tip.x - origin.x
     dy = tip.y - origin.y
@@ -1906,6 +1991,13 @@ gizmo_drag(x: float, y: float, dx: float, dy: float) {
         if step > 180.0 { step = step - 360.0 }
         if step < 0.0 - 180.0 { step = step + 360.0 }
         g_gizmo_angle = turn
+
+        history.history_record(g_history, history.STEP_PROPERTY, m as ptr,
+                               ROTATE_FIRST_SLOT + g_gizmo_axis,
+                               g_gizmo_turned, g_gizmo_turned + step)
+        g_last_edit = seconds()
+        g_gizmo_turned = g_gizmo_turned + step
+
         if g_gizmo_axis == 0 { core.model_rotate(m, step, 0.0, 0.0) }
         if g_gizmo_axis == 1 { core.model_rotate(m, 0.0, step, 0.0) }
         if g_gizmo_axis == 2 { core.model_rotate(m, 0.0, 0.0, step) }
@@ -1918,10 +2010,19 @@ gizmo_drag(x: float, y: float, dx: float, dy: float) {
     if g_gizmo_mode == GIZMO_SCALE {
         factor = 1.0 + along / core.abs_of(gizmo_reach() + 0.0001)
         if factor < 0.02 { factor = 0.02 }
+        // The same slot the scale row writes, so one undo step covers a drag of
+        // either and the row follows what the handle did.
+        history.history_record(g_history, history.STEP_PROPERTY, m as ptr, 3,
+                               m.scale.x, m.scale.x * factor)
+        g_last_edit = seconds()
         core.model_set_scale(m, m.scale.x * factor, m.scale.y * factor, m.scale.z * factor)
         mark_dirty()
     } else {
         moved = core.v3_add(m.position, core.v3_mul(gizmo_axis_vector(g_gizmo_axis), along))
+        history.history_record(g_history, history.STEP_PROPERTY, m as ptr, g_gizmo_axis,
+                               property_value(m, g_gizmo_axis),
+                               component_of(moved, g_gizmo_axis))
+        g_last_edit = seconds()
         core.model_set_position(m, moved.x, moved.y, moved.z)
         mark_dirty()
     }

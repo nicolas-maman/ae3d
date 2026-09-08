@@ -337,6 +337,15 @@ First working engine.
   camera rows are implemented, and the editor's report says how many rows
   cannot move their target so the run fails when one of them cannot.
 
+- Undo puts back what the gizmo did. Dragging an axis, a ring or a handle
+  recorded nothing at all, so the next undo stepped back through whatever came
+  before the drag and put that back instead, leaving the object where the drag
+  had left it. A move and a scale are recorded in the same slots their inspector
+  rows use; a turn is recorded as the angle the drag has turned through and
+  undone by turning back through it. Replaying a water row also names the water
+  it was recorded against, rather than whichever object happens to be selected
+  when the undo arrives.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve

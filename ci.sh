@@ -175,6 +175,11 @@ check_editor_run() {
         # like a row that works. Nine of them did that and nothing else.
         fail "$name ($(sed -n 's/^stuck_rows //p' "$report") inspector row(s) change nothing)"
         sed 's/^/        /' "$report"
+    elif [ "$(sed -n 's/^unundone_drags //p' "$report")" != "0" ]; then
+        # A drag of the gizmo that records nothing leaves the next undo to step
+        # back through whatever came before it and put that back instead.
+        fail "$name ($(sed -n 's/^unundone_drags //p' "$report") gizmo drag(s) cannot be undone)"
+        sed 's/^/        /' "$report"
     elif grep -q '^selected none$' "$report"; then
         fail "$name (nothing selected)"
         sed 's/^/        /' "$report"
