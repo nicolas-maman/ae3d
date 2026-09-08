@@ -186,6 +186,16 @@ First working engine.
   quality is sampler state rather than shading, so both are gone from the config,
   along with `advanced_lighting`, which nothing ever applied.
 
+- The water surface's settings work too. Reflection strength, distortion and
+  normal strength were each wired to a public setter and read by nothing;
+  `simulation_set_specular` is now `simulation_set_reflection`, which is what it
+  scales, and normal strength decides how far the waves tilt the surface away
+  from flat. Refraction needs a picture of what is behind the water, which this
+  shader never had, so its two uniforms are gone, as are two more that repeated
+  what transparency already said. The surface also averaged four normals offset
+  symmetrically around its own on every fragment, which cost five normalizes and
+  returned the normal it was given, because the offsets cancel.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve
