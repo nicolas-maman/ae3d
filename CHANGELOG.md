@@ -316,6 +316,12 @@ First working engine.
   its colour afterwards changed a field nothing read again. Nothing called it,
   and `skybox_solid` takes the colour it is built with.
 
+- A scene file that lists models and produces none is refused rather than
+  handed back empty. An empty list is what a scene saved with nothing in it
+  looks like, so a file whose meshes had all gone missing loaded as a success
+  with nothing in it and the reason went unread. What it can build it still
+  keeps: one model missing its mesh does not lose the rest.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve

@@ -3,6 +3,8 @@
 
 import std.list
 import std.fs
+import std.file
+import std.string
 import ae3d.core
 import ae3d.scene
 import ae3d.loader
@@ -206,6 +208,52 @@ main() {
     core.model_free(generated)
     core.model_free(blocks)
     voxel.world_free(world)
+
+    // A file that lists models and produces none did not load, whatever it says
+    // about itself: handing back an empty list looks exactly like a scene that
+    // was saved empty, and the reason would go unread.
+    broken_path = "build/scene_roundtrip/broken.json"
+    handle, open_err = file.open(broken_path, "w")
+    if handle == null {
+        record_failure("cannot write the broken scene: ${open_err}")
+    } else {
+        text = "{\"version\":1,\"models\":[{\"name\":\"gone\",\"mesh_file\":\"build/scene_roundtrip/not_here.mesh\"}]}"
+        file.file_write_raw(handle, text, string.length(text))
+        file.file_close(handle)
+        check_true("a scene whose models cannot be built is refused",
+                   scene.scene_load(broken_path) == null)
+    }
+
+    // What it can build, it keeps: one model missing its mesh does not lose the
+    // rest of the scene.
+    partial_path = "build/scene_roundtrip/partial.json"
+    original, read_err = fs.read(scene_path)
+    if read_err != "" {
+        record_failure("cannot read the saved scene: ${read_err}")
+    } else {
+        broken_entry = "{\"name\":\"gone\",\"mesh_file\":\"build/scene_roundtrip/not_here.mesh\"},"
+        with_broken = string.concat("\"models\":[", broken_entry)
+        patched = string.replace(original, "\"models\":[", with_broken)
+        string.free(with_broken)
+        write_err = fs.write(partial_path, patched)
+        string.free(patched)
+        if write_err != "" {
+            record_failure("cannot write the partial scene: ${write_err}")
+        } else {
+            partial = scene.scene_load(partial_path)
+            check_true("a scene keeps the models it can build", partial != null)
+            if partial != null {
+                check_int("partial model count", list.size(partial), 3)
+                i = 0
+                while i < list.size(partial) {
+                    core.model_free(list.get_raw(partial, i) as *Model)
+                    i = i + 1
+                }
+                list.free(partial)
+            }
+        }
+    }
+    string.free(original)
 
     if failures == 0 {
         println("scene io: all checks passed")
