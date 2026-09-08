@@ -166,6 +166,14 @@ First working engine.
   new model was born with and never handed its cloned material to anyone, so
   both leaked; a copy now frees everything it holds.
 
+- Resizing no longer leaks the Vulkan shadow target. A rebuild made a fresh
+  shadow image, its memory, two views, a depth image with its own memory, a
+  sampler and a framebuffer, and destroyed none of the previous set, because the
+  swapchain teardown never touched it. No frame ever looked different for it, and
+  the runners have no Vulkan driver on macOS, so nothing could have noticed: the
+  backend now reports how many shadow targets it holds and the parity suite
+  checks that a resize replaces one rather than adding one.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve
