@@ -15,12 +15,32 @@ var g_draw_calls = 0
 var g_fixed_calls = 0
 var g_fixed_delta = 0.0
 
+// engine_add_model does not take ownership: there is an engine_remove_model,
+// and every other suite frees the models it made. Held so main can.
+var g_cube: ptr = null
+
+// Everything main allocated, released on every way out of it rather than only
+// the one that reaches the bottom. The three early returns were each losing an
+// engine and a light, and nothing said so because the leak check skipped every
+// suite that uses ae3d.engine.
+teardown(e: *Engine, light: *Light) {
+    core.light_free(light)
+    engine.engine_free(e)
+    // After the engine, because freeing the renderer is what releases the GPU
+    // handles the model was given.
+    if g_cube != null {
+        core.model_free(g_cube as *Model)
+        g_cube = null
+    }
+}
+
 on_start(data: ptr) {
     e = data as *Engine
     cube = loader.cube(1.0)
     core.model_set_scale(cube, 40.0, 40.0, 40.0)
     core.model_matte(cube, 0.9, 0.2, 0.15)
     engine.engine_add_model(e, cube)
+    g_cube = cube as ptr
 
     cam = engine.engine_camera(e)
     core.camera_set_position(cam, core.vec3(0.0, 0.0, 120.0))
@@ -62,16 +82,19 @@ main() {
     // about where this is running, not something the renderer got wrong.
     if !engine.engine_run(e, 0 - 1, 0 - 1) {
         println("render: SKIP no window available")
+        teardown(e, light)
         return
     }
 
     failures = 0
     if g_fixed_calls < 1 {
         println("render: FAIL the fixed step was never called")
+        teardown(e, light)
         return
     }
     if core.abs_of(g_fixed_delta - 1.0 / 240.0) > 0.000001 {
         println("render: FAIL the fixed step arrived as ${g_fixed_delta}, not the step that was set")
+        teardown(e, light)
         return
     }
 
@@ -92,6 +115,5 @@ main() {
         println("render: all checks passed (centre=${g_centre} draw_calls=${g_draw_calls})")
     }
 
-    core.light_free(light)
-    engine.engine_free(e)
+    teardown(e, light)
 }
