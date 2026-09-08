@@ -1,0 +1,127 @@
+// The engine held a hook for the backend's set_skybox and load_texture and
+// called neither, so a program written against the engine surface could not
+// put a sky behind its scene or load a texture whichever backend it ran on.
+//
+// Both are checked by what reaches the frame, not by whether the call
+// compiles. A solid sky is drawn by setting the clear colour, so the corner
+// pixel is the evidence: it must change from the default clear colour to the
+// sky, and it must be the sky that was asked for rather than any change at
+// all. The default clear colour is black, so a check that only asked "did the
+// corner change" would pass on any colour the renderer happened to pick.
+
+import ae3d.core
+import ae3d.platform
+import ae3d.engine
+import ae3d.gl
+import ae3d.loader
+
+var g_corner_before = 0
+var g_corner_after = 0
+var g_missing_texture = 0
+var g_real_texture = 0
+var g_frames = 0
+
+const SKY_R = 0.25
+const SKY_G = 0.55
+const SKY_B = 0.85
+
+on_start(data: ptr) {
+    e = data as *Engine
+    cube = loader.cube(1.0)
+    core.model_set_scale(cube, 8.0, 8.0, 8.0)
+    core.model_matte(cube, 0.9, 0.2, 0.15)
+    engine.engine_add_model(e, cube)
+
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(0.0, 0.0, 120.0))
+
+    // A file that is not there must come back as 0 rather than as a texture id
+    // nothing can sample.
+    g_missing_texture = engine.engine_load_texture(e, "tests/no_such_texture.png")
+    g_real_texture = engine.engine_load_texture(e, "resources/obj/Earth/Clouds.png")
+}
+
+on_render(data: ptr, delta: float) {
+    e = data as *Engine
+    g_frames = g_frames + 1
+
+    // Frame 1 is the untouched renderer; the sky goes on after it is read, so
+    // the two readings are of the same corner under the same scene and differ
+    // only by the call under test.
+    if g_frames == 1 {
+        g_corner_before = gl.read_pixel(2, 2)
+        sky = core.skybox_solid(SKY_R, SKY_G, SKY_B)
+        engine.engine_set_skybox(e, sky as ptr)
+        return
+    }
+    g_corner_after = gl.read_pixel(2, 2)
+}
+
+channel(pixel: int, shift: int) -> int {
+    return (pixel >> shift) & 0xFF
+}
+
+// Within one step of the 8-bit value the float rounds to, either way.
+near(got: int, want: float) -> bool {
+    target = (want * 255.0) as int
+    diff = got - target
+    if diff < 0 { diff = 0 - diff }
+    return diff <= 1
+}
+
+main() {
+    e = engine.engine_new(platform.API_GL)
+    engine.engine_set_size(e, 320, 240)
+    engine.engine_set_title(e, "ae3d skybox test")
+    engine.engine_set_frame_limit(e, 6)
+    engine.engine_set_camera_input(e, false)
+
+    light = core.light_sun(core.vec3(0.0, 0.0, 1.0))
+    engine.engine_set_light(e, light)
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_start(e, on_start as fn(ptr))
+    engine.engine_on_render(e, on_render as fn(ptr, float))
+
+    if !engine.engine_run(e, 0 - 1, 0 - 1) {
+        println("engine_skybox: SKIP no window available")
+        return
+    }
+
+    failures = 0
+
+    if g_frames < 2 {
+        println("engine_skybox: FAIL only ${g_frames} frame(s) rendered, nothing to compare")
+        core.light_free(light)
+        engine.engine_free(e)
+        return
+    }
+
+    if g_corner_after == g_corner_before {
+        println("engine_skybox: FAIL the corner is still ${g_corner_before}; the skybox never reached the backend")
+        failures = failures + 1
+    }
+
+    r = channel(g_corner_after, 16)
+    g = channel(g_corner_after, 8)
+    b = channel(g_corner_after, 0)
+    if !near(r, SKY_R) || !near(g, SKY_G) || !near(b, SKY_B) {
+        println("engine_skybox: FAIL the sky is rgb(${r}, ${g}, ${b}), not the colour that was set")
+        failures = failures + 1
+    }
+
+    if g_missing_texture != 0 {
+        println("engine_skybox: FAIL a texture that does not exist loaded as id ${g_missing_texture}")
+        failures = failures + 1
+    }
+    if g_real_texture == 0 {
+        println("engine_skybox: FAIL a texture that does exist did not load")
+        failures = failures + 1
+    }
+
+    if failures == 0 {
+        println("engine_skybox: all checks passed (sky=rgb(${r}, ${g}, ${b}) texture=${g_real_texture})")
+    }
+
+    core.light_free(light)
+    engine.engine_free(e)
+}

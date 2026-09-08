@@ -13,9 +13,8 @@ exports (
     VERTEX_DEPTH, FRAGMENT_DEPTH,
     VERTEX_SKYBOX, FRAGMENT_SKYBOX, FRAGMENT_SKYBOX_SOLID,
     VERTEX_SCREEN, FRAGMENT_FXAA, FRAGMENT_BLOOM, FRAGMENT_PASSTHROUGH,
-    VERTEX_SHADOW_VOLUME, FRAGMENT_SHADOW_VOLUME,
     default_shader, water_shader, skybox_shader, solid_skybox_shader,
-    fxaa_shader, bloom_shader, passthrough_shader, shadow_volume_shader
+    fxaa_shader, bloom_shader, passthrough_shader
 )
 
 const VERTEX_DEFAULT = <<GLSL_END
@@ -1859,37 +1858,7 @@ void main() {
 }
 GLSL_END
 
-const VERTEX_SHADOW_VOLUME = <<GLSL_END
-#version 330 core
 
-layout(location = 0) in vec3 inPosition;
-layout(location = 1) in vec3 inNormal;
-
-uniform mat4 model;
-uniform mat4 view;
-uniform mat4 projection;
-uniform vec3 lightPos;
-uniform float shadowExtension;
-
-void main() {
-    vec3 worldPos = (model * vec4(inPosition, 1.0)).xyz;
-    vec3 lightToVertex = normalize(worldPos - lightPos);
-    
-    // GPU Gems Chapter 9: Extend vertex away from light for shadow volume
-    vec3 extrudedPos = worldPos + lightToVertex * shadowExtension;
-    
-    gl_Position = projection * view * vec4(extrudedPos, 1.0);
-}
-GLSL_END
-
-const FRAGMENT_SHADOW_VOLUME = <<GLSL_END
-#version 330 core
-
-void main() {
-    // Shadow volumes only modify stencil buffer
-    discard;
-}
-GLSL_END
 
 default_shader() -> Shader {
     return core.shader_new(VERTEX_DEFAULT, FRAGMENT_DEFAULT)
@@ -1919,6 +1888,3 @@ passthrough_shader() -> Shader {
     return core.shader_new(VERTEX_SCREEN, FRAGMENT_PASSTHROUGH)
 }
 
-shadow_volume_shader() -> Shader {
-    return core.shader_new(VERTEX_SHADOW_VOLUME, FRAGMENT_SHADOW_VOLUME)
-}

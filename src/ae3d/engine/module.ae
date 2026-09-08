@@ -21,6 +21,7 @@ exports (
     engine_camera, engine_window, engine_backend_name,
     engine_set_size, engine_set_title, engine_set_msaa, engine_set_decorated, engine_set_post,
     engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
+    engine_set_skybox, engine_load_texture,
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
     engine_set_debug, engine_set_frustum_culling, engine_set_face_culling,
     engine_on_update, engine_on_fixed_update, engine_on_render,
@@ -160,6 +161,26 @@ engine_set_post(e: *Engine, fxaa: bool, bloom: bool, threshold: float, intensity
     if bloom { bl = 1 }
     e.backend_set_post(e.backend_state, fx, bl, threshold, intensity)
 }
+// The two backend capabilities the engine held a hook for and never called.
+// Both backends implement them, core exports the skybox constructors, and the
+// vtable entries were copied into the Engine at bind time, so everything was
+// in place except the call: a program written against the engine surface could
+// not put a sky behind its scene or load a texture, whichever backend it ran
+// on. The Skybox itself is still made by the backend that will draw it
+// (gl.skybox_create / vk.skybox_create), the same way engine_gl_renderer is
+// already how a program reaches backend-specific construction.
+engine_set_skybox(e: *Engine, skybox: ptr) {
+    if e.backend_state == null { return }
+    e.backend_set_skybox(e.backend_state, skybox)
+}
+
+// Returns the backend's texture id, or 0 when there is no backend yet or the
+// file could not be read. The id is what core.material_set_texture wants.
+engine_load_texture(e: *Engine, path: string) -> int {
+    if e.backend_state == null { return 0 }
+    return e.backend_load_texture(e.backend_state, path)
+}
+
 engine_set_decorated(e: *Engine, decorated: bool) { e.decorated = decorated }
 engine_set_vsync(e: *Engine, interval: int) { e.vsync = interval }
 engine_set_camera_input(e: *Engine, enabled: bool) { e.camera_input = enabled }
