@@ -129,6 +129,14 @@ First working engine.
 
 ### Fixes
 
+- Removing an instance left every instance after it wearing the colour of the
+  one before. Removal shifts the colours down one exactly as it shifts the
+  matrices, but only the matrices were flagged for re-upload, and OpenGL sends
+  the two buffers separately. Vulkan re-sends both whenever either changed, so
+  it was right by accident and the difference hid the bug. Resizing an
+  instanced model had the same hole, in the other direction: new instances
+  came up wearing whatever the colour buffer last held.
+
 - A camera would accept a field of view of zero or half a turn, a near plane at
   or behind the eye, or a near plane equal to the far. All three divide inside
   `mat4_perspective`, and the result is a projection full of infinities: every

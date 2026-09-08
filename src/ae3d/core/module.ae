@@ -1445,6 +1445,9 @@ model_enable_instancing(m: *Model, count: int) -> bool {
     if ae3d_inst_resize(m.instances, count) != 1 { return false }
     m.is_instanced = true
     m.instances_updated = true
+    // Resizing adds or drops colours as well as matrices, and a backend that
+    // sends the two buffers separately needs telling about both.
+    m.instance_colors_updated = true
     return true
 }
 
@@ -1493,10 +1496,15 @@ model_instance_count(m: *Model) -> int {
     return ae3d_inst_count(m.instances)
 }
 
+// CRITICAL: removing an instance shifts every colour after it down one, the
+// same way it shifts the matrices. Flagging only the matrices leaves each
+// surviving instance wearing the colour of the one before it on any backend
+// that uploads the two buffers separately, which OpenGL does.
 model_remove_instance(m: *Model, index: int) {
     if m.instances == null { return }
     ae3d_inst_remove(m.instances, index)
     m.instances_updated = true
+    m.instance_colors_updated = true
 }
 
 light_new() -> *Light {

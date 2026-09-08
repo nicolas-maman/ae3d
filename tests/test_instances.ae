@@ -27,6 +27,13 @@ check_true(name: string, ok: bool) {
     }
 }
 
+check_int(name: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${name}: got ${got} want ${want}")
+        failures = failures + 1
+    }
+}
+
 // The OpenGL path reads back through a pair of buffers, so the frame just drawn
 // is the second read rather than the first.
 frame_total(backend: *Backend, cam: *Camera, light: *Light) -> int {
@@ -40,6 +47,26 @@ frame_total(backend: *Backend, cam: *Camera, light: *Light) -> int {
         i = i + 1
     }
     return total
+}
+
+// Pixels where red clearly beats blue. One instance is red and the rest are
+// blue, so this counts the red one and nothing else. A sum over the whole frame
+// cannot do that: a colour landing on the wrong instance moves the same bytes
+// somewhere else and the total barely shifts.
+red_pixels(backend: *Backend, cam: *Camera, light: *Light) -> int {
+    core.backend_render(backend, cam, light)
+    core.backend_frame_pixels(backend)
+    pixels = core.backend_frame_pixels(backend)
+    found = 0
+    i = 0
+    while i < WIDTH * HEIGHT {
+        offset = i * 4
+        r = mem.get_byte(pixels, offset)
+        b = mem.get_byte(pixels, offset + 2)
+        if r > 60 && r > b + 40 { found = found + 1 }
+        i = i + 1
+    }
+    return found
 }
 
 run_checks(backend: *Backend, name: string) {
@@ -85,6 +112,30 @@ run_checks(backend: *Backend, name: string) {
     // give the same frame.
     settled = frame_total(backend, cam, light)
     check_true("${name} an unchanged stream draws the same", settled == moved)
+
+    // Removing an instance shifts every colour after it down one. The matrices
+    // shift too, and only the matrices were being sent again, so on OpenGL each
+    // surviving instance kept wearing the colour of the one before it. Nothing
+    // caught it, because the instanced suites only ever added instances.
+    i = 0
+    while i < COPIES {
+        core.model_set_instance_position(cubes, i,
+            core.vec3(0.0 - 24.0 + (i * 1.0) * 16.0, 0.0, 0.0))
+        if i == 0 {
+            core.model_set_instance_color(cubes, i, 0.95, 0.05, 0.05)
+        } else {
+            core.model_set_instance_color(cubes, i, 0.05, 0.05, 0.95)
+        }
+        i = i + 1
+    }
+    check_true("${name} the one red instance is on screen",
+               red_pixels(backend, cam, light) > 0)
+
+    core.model_remove_instance(cubes, 0)
+    check_int("${name} the instance count dropped", core.model_instance_count(cubes),
+              COPIES - 1)
+    check_true("${name} removing the red instance takes its colour with it",
+               red_pixels(backend, cam, light) == 0)
 
     core.backend_remove_model(backend, cubes)
     core.model_free(cubes)
