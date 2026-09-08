@@ -30,14 +30,23 @@ main() {
     history.history_record(h, history.STEP_PROPERTY, subject, 1, 5.0, 6.0)
     check("a different property opens a new step", history.history_depth(h) == 2)
 
+    // A drag that has finished does not go on collecting whatever comes next.
+    // Without this, letting go of a slider and taking hold of it again extends
+    // the step the first drag opened, and undo steps back past both.
+    history.history_close(h)
+    history.history_record(h, history.STEP_PROPERTY, subject, 1, 3.0, 4.0)
+    check("a finished edit closes its step", history.history_depth(h) == 3)
+    history.history_record(h, history.STEP_PROPERTY, subject, 1, 4.0, 5.0)
+    check("the edit after it still coalesces", history.history_depth(h) == 3)
+
     step = history.history_undo(h)
-    check("undo hands back the newest step", step.slot == 1 && step.before == 5.0)
-    check("undo moves the step to the redo stack", history.history_depth(h) == 1)
+    check("undo hands back the newest step", step.slot == 1 && step.before == 3.0)
+    check("undo moves the step to the redo stack", history.history_depth(h) == 2)
     check("the redo stack holds it", history.history_redo_depth(h) == 1)
 
     again = history.history_redo(h)
-    check("redo hands the same step back", again.slot == 1 && again.after == 6.0)
-    check("redo returns it to the undo stack", history.history_depth(h) == 2)
+    check("redo hands the same step back", again.slot == 1 && again.after == 5.0)
+    check("redo returns it to the undo stack", history.history_depth(h) == 3)
 
     history.history_undo(h)
     history.history_record(h, history.STEP_ADD, subject, 0, 0.0, 0.0)
