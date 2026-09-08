@@ -277,14 +277,6 @@ First working engine.
   uniforms, but not the model's own shader, so a copy quietly fell back to the
   default program.
 
-<<<<<<< HEAD
-- A mesh reshaped after its model was drawn reaches the GPU. The setters that
-  move a vertex marked the mesh dirty and nothing read the flag, on either
-  backend, so anything deforming geometry on the CPU asked for something the
-  engine accepted and never did. Identical geometry is uploaded once and shared,
-  so a model whose vertices have moved stops sharing before its new shape goes
-  up, rather than reshaping everything else drawing what it used to be.
-=======
 - An instance that moves or changes colour reaches the GPU. The buffer holding
   every instance's transform and colour was uploaded when the model was
   registered with a renderer and never again: on OpenGL the per-frame path
@@ -294,7 +286,23 @@ First working engine.
   that recolours a block both asked for something the engine accepted and never
   did, on both backends, and the suites drew instanced geometry without ever
   moving it.
->>>>>>> origin/main
+
+- A mesh reshaped after its model was drawn reaches the GPU. The setters that
+  move a vertex marked the mesh dirty and nothing read the flag, on either
+  backend, so anything deforming geometry on the CPU asked for something the
+  engine accepted and never did. Identical geometry is uploaded once and shared,
+  so a model whose vertices have moved stops sharing before its new shape goes
+  up, rather than reshaping everything else drawing what it used to be.
+
+- A texture asked for after the model was registered reaches the frame. Both
+  renderers resolved a path to a texture once and skipped any material that
+  already had one, so setting a new path wrote it into the material and changed
+  nothing on screen. The material says its texture is stale, and the next draw
+  lets go of the one it was holding and takes the one it now asks for.
+
+- The workflow runs when someone starts it, rather than on every push and every
+  pull request. It was two runners a change for work `./ci.sh` does on the
+  machine the change was written on.
 
 ### Portability
 

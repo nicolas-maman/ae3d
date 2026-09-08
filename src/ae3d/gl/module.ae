@@ -698,10 +698,21 @@ load_model_textures(r: *GLRenderer, m: *Model) {
 }
 
 resolve_material_texture(r: *GLRenderer, material: *Material) {
+    material.texture_stale = false
     if core.text(material.texture_path) == "" || material.texture_id != 0 { return }
     id = renderer_load_texture(r, material.texture_path)
     if id == 0 { id = r.default_texture }
     material.texture_id = id
+}
+
+// The path was changed after this material had already been given a texture, so
+// what it is holding is the one it used to want.
+refresh_material_texture(r: *GLRenderer, material: *Material) {
+    if material.texture_id != 0 && material.texture_id != r.default_texture {
+        renderer_release_texture(r, material.texture_id)
+    }
+    material.texture_id = 0
+    resolve_material_texture(r, material)
 }
 
 renderer_remove_model(r: *GLRenderer, m: *Model) {
@@ -1421,7 +1432,9 @@ render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
 }
 
 texture_for(r: *GLRenderer, material: *Material) -> int {
-    if material != null && material.texture_id != 0 { return material.texture_id }
+    if material == null { return r.default_texture }
+    if material.texture_stale { refresh_material_texture(r, material) }
+    if material.texture_id != 0 { return material.texture_id }
     return r.default_texture
 }
 
