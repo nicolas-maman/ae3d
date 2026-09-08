@@ -129,6 +129,16 @@ First working engine.
 
 ### Fixes
 
+- Adding a component to a game object switched it back on. A component
+  deliberately disabled before it was added ran anyway on the next update,
+  and there was no way to add one in a disabled state. Adding a component is
+  no longer a decision about whether it runs.
+
+- Five shader accessors returned full-screen post passes and a skybox as if
+  they were model shaders. Nothing called them, and anything that had would
+  have compiled a screen-space program into a model's slot, where the
+  uniforms it samples are never bound. They are gone.
+
 - Handing the frame to the editor's canvas copied the whole viewport every
   frame. A profile put 61% of the frame in that `malloc` and `memcpy`, more
   than reading the frame back off the GPU and about six times the cost of

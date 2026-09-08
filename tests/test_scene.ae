@@ -1,5 +1,6 @@
 // Ray casting maths and the component lifecycle, both headless.
 
+import std.list
 import std.string
 import ae3d.core
 import ae3d.behaviour
@@ -40,6 +41,9 @@ spin_start(state: ptr) { start_calls = start_calls + 1 }
 spin_update(state: ptr, delta: float) { update_calls = update_calls + 1 }
 spin_fixed(state: ptr, delta: float) { fixed_calls = fixed_calls + 1 }
 spin_destroy(state: ptr) { destroy_calls = destroy_calls + 1 }
+
+var second_destroy_calls = 0
+second_destroy(state: ptr) { second_destroy_calls = second_destroy_calls + 1 }
 
 test_raycast() {
     origin = core.vec3(0.0, 0.0, 10.0)
@@ -172,6 +176,76 @@ test_components() {
     check_true("find component",
                behaviour.object_find_component(object, behaviour.KIND_SCRIPT) == component)
     check_int("scene count", behaviour.scene_count(scene), 1)
+
+    // The rest of the transform, read back the same way position was. up and
+    // right come out of the same rotation forward does, so a quarter turn about
+    // y leaves up alone and swings right onto -z, which is the axis forward
+    // just left: forward went to -x, and -x cross +y is -z.
+    up = behaviour.object_up(object)
+    check("object up y", up.y, 1.0)
+    right = behaviour.object_right(object)
+    check("object right z", right.z, 0.0 - 1.0)
+    check_true("up is untouched by a turn about itself",
+               core.abs_of(up.x) < 0.0001 && core.abs_of(up.z) < 0.0001)
+
+    turned = behaviour.object_rotation(object)
+    check_true("rotation reads back what was set", core.abs_of(turned.w - 0.70710678) < 0.0001)
+
+    behaviour.object_set_scale(object, core.vec3(2.0, 3.0, 4.0))
+    scaled = behaviour.object_scale(object)
+    check("object scale x", scaled.x, 2.0)
+    check("object scale z", scaled.z, 4.0)
+
+    // An inactive object is skipped whole, components and all.
+    behaviour.object_set_active(object, false)
+    check_true("active reads back", !behaviour.object_active(object))
+    before_inactive = update_calls
+    behaviour.scene_update(scene, 0.016)
+    check_int("inactive object skipped", update_calls, before_inactive)
+    behaviour.object_set_active(object, true)
+
+    check_true("component owner is the object",
+               behaviour.component_owner(component) == object)
+    check_true("component reports enabled", behaviour.component_enabled(component))
+
+    check_int("one component", behaviour.object_component_count(object), 1)
+    check_true("component by index",
+               behaviour.object_component(object, 0) == component)
+
+    // A component disabled before it is added must stay disabled. Adding one is
+    // not a decision about whether it runs.
+    quiet = behaviour.component_new("quiet", behaviour.KIND_CUSTOM, null)
+    quiet.update = spin_update as fn(ptr, float)
+    quiet.destroy = second_destroy as fn(ptr)
+    behaviour.component_set_enabled(quiet, false)
+    behaviour.object_add_component(object, quiet)
+    check_true("a component added disabled stays disabled",
+               !behaviour.component_enabled(quiet))
+
+    check_int("two components", behaviour.object_component_count(object), 2)
+    behaviour.object_remove_component(object, quiet)
+    check_int("component removed", behaviour.object_component_count(object), 1)
+    check_int("removing a component destroys it", second_destroy_calls, 1)
+
+    // The object borrows a model rather than owning one, so freeing the object
+    // must leave the model alone. The leak check is what proves the other half.
+    borrowed = core.model_new()
+    holder = behaviour.object_new("holder")
+    behaviour.object_set_model(holder, borrowed)
+    check_true("model reads back", behaviour.object_model(holder) == borrowed)
+    behaviour.object_free(holder)
+    core.model_set_position(borrowed, 1.0, 2.0, 3.0)
+    check("the borrowed model outlived its object", borrowed.position.y, 2.0)
+    core.model_free(borrowed)
+
+    check_true("scene by index", behaviour.scene_object(scene, 0) == object)
+
+    tagged = list.new()
+    check_int("find by tag", behaviour.scene_find_by_tag(scene, "actor", tagged), 1)
+    check_true("the tagged object is the one", list.get_raw(tagged, 0) == object)
+    check_int("no match for an absent tag",
+              behaviour.scene_find_by_tag(scene, "nobody", tagged), 0)
+    list.free(tagged)
 
     behaviour.scene_destroy_later(scene, object)
     behaviour.scene_update(scene, 0.016)
