@@ -19,11 +19,55 @@ jobs:
             name: linux
           - os: macos-latest
             name: macos
+          # Windows had no arm here, and every Windows-only assumption in the
+          # tree survived because of it: <dlfcn.h> included unconditionally, a
+          # zlib we call but never link, an ICD array unused under -Werror, and
+          # a constant named SIZE colliding with the typedef in windef.h. All
+          # four were found by hand on a developer's machine (#103); a runner
+          # would have caught them the day they landed.
+          #
+          # UCRT64, not MINGW64: the Aether installer's toolchain links the
+          # Universal CRT, and a UCRT libaether.a will not link against msvcrt
+          # gcc -- it fails on __imp__get_timezone and __imp__strtof_l, which
+          # look like ae3d's problem and are not.
+          - os: windows-latest
+            name: windows
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.name }}
 
+    defaults:
+      run:
+        # MSYS2 on Windows, the platform's own shell elsewhere. build.sh reads
+        # `uname -s` to pick its platform libraries, so cmd and PowerShell are
+        # not shells it can run in.
+        shell: ${{ matrix.os == 'windows-latest' && 'msys2 {0}' || 'bash' }}
+
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 (windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          # pkgconf is not optional: build.sh asks pkg-config where GLFW and
+          # zlib are, and without it falls back to a bare -lglfw with no
+          # include path, which finds nothing. vulkan-headers likewise -- the
+          # loader is opened at runtime, but glfw3.h needs the header the
+          # moment GLFW_INCLUDE_VULKAN is defined.
+          # make and bc are the Aether installer's own prerequisites, not
+          # ae3d's; it builds the compiler from source before anything here
+          # can run.
+          install: >-
+            git
+            make
+            bc
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-glfw
+            mingw-w64-ucrt-x86_64-zlib
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-vulkan-headers
 
       - name: Install dependencies (linux)
         if: runner.os == 'Linux'
@@ -50,10 +94,22 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/aether-lang-dev/aether.git "$RUNNER_TEMP/aether"
           (cd "$RUNNER_TEMP/aether" && ./install.sh)
-          echo "$HOME/.aether/bin" >> "$GITHUB_PATH"
 
       - name: Run CI
         run: |
+          # PATH is set here rather than through GITHUB_PATH. setup-msys2
+          # defaults to `path-type: minimal`, so the MSYS2 shell does not
+          # inherit the Windows PATH and never sees what GITHUB_PATH adds --
+          # install.sh put the toolchain in /home/runneradmin/.aether and every
+          # build failed with "'aetherc' not found". Exporting it in the step
+          # that needs it is the same shell that installed it, on all three
+          # platforms, so no per-OS branch is required.
+          export PATH="$HOME/.aether/bin:$PATH"
+
+          # Windows needs no special casing below. The leak step keys on `leaks`,
+          # which is macOS-only, so it self-skips on Linux and Windows alike --
+          # AE3D_SKIP_LEAKS would be redundant, and CI is documented never to
+          # set it. Only Linux needs a display server.
           if [ "$RUNNER_OS" = "Linux" ]; then
             xvfb-run -a ./ci.sh
           else

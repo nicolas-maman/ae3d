@@ -89,8 +89,15 @@ scene.
   (`ae` and `aetherc`).
 - GLFW 3.
 - A C compiler.
-- For the Vulkan backend: a Vulkan loader and driver. On macOS that is MoltenVK.
-  Neither is needed to build.
+- The Vulkan **headers**, on every platform. The loader is opened at runtime and
+  nothing links against it, but `native/ae3d_vk.c` includes GLFW with
+  `GLFW_INCLUDE_VULKAN`, so `vulkan/vulkan.h` has to be present or the build
+  stops there.
+- For actually running the Vulkan backend: a Vulkan loader and driver. On macOS
+  that is MoltenVK. Neither is needed to build.
+- `pkg-config`. `build.sh` asks it where GLFW and zlib are; without it the
+  fallback is a bare `-lglfw`/`-lz` with no include path, which does not find an
+  MSYS2 install.
 
 ```bash
 brew install glfw                      # macOS
@@ -99,15 +106,34 @@ brew install molten-vk vulkan-loader   # macOS, optional, for the Vulkan backend
 sudo apt install libglfw3-dev          # Debian and Ubuntu
 sudo apt install libvulkan-dev mesa-vulkan-drivers   # optional
 
-# Windows, from an MSYS2 MINGW64 shell
-pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-glfw mingw-w64-x86_64-zlib
-pacman -S mingw-w64-x86_64-vulkan-loader mingw-w64-x86_64-vulkan-headers  # optional
+# Windows, from an MSYS2 UCRT64 shell
+pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-glfw \
+          mingw-w64-ucrt-x86_64-zlib mingw-w64-ucrt-x86_64-pkgconf \
+          mingw-w64-ucrt-x86_64-vulkan-headers
+pacman -S mingw-w64-ucrt-x86_64-vulkan-loader   # optional, to run the Vulkan backend
 ```
 
 zlib is listed for Windows because the mesh loader includes `zlib.h` directly;
-macOS and the Debian toolchains have it already. Build from the MINGW64 shell:
-`build.sh` reads `uname -s` to pick the platform libraries, and a plain `cmd`
-or PowerShell prompt is not one of the shells it can run in.
+macOS and the Debian toolchains have it already. `vulkan-headers` is not
+optional: GLFW is included with `GLFW_INCLUDE_VULKAN`, so the build needs the
+header whether or not a driver exists. `pkgconf` is what tells `build.sh` where
+GLFW and zlib live.
+
+**Use the UCRT64 shell, and match the Aether install's C runtime.** MSYS2 ships
+two environments — UCRT64 links the Universal CRT, MINGW64 links msvcrt — and a
+`libaether.a` from one does not link against the other. Building ae3d in MINGW64
+against a UCRT Aether fails on symbols that look like ae3d's problem and are
+not:
+
+```
+undefined reference to `__imp__get_timezone'
+undefined reference to `__imp__strtof_l'
+```
+
+Those are UCRT-only. UCRT64 is the right default: it is what the Aether
+installer's own toolchain uses. Either way, build from an MSYS2 shell —
+`build.sh` reads `uname -s` to pick the platform libraries, and a plain `cmd` or
+PowerShell prompt is not one of the shells it can run in.
 
 ## Build and run
 
