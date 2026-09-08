@@ -1,0 +1,160 @@
+// A frame must not be depth-tested against the frame before it.
+//
+// glClear obeys the depth WRITE MASK: with writes off it clears the colour and
+// silently leaves the depth buffer alone. The transparent pass turns them off
+// and the frame ends there, so every frame after the first was tested against
+// the previous frame's depths. A still camera hides it, because those depths
+// are the right ones. Move, and last frame's geometry rejects this frame's:
+// holes punched through whatever was nearer a moment ago.
+//
+// The check is that the same camera gives the same frame whether or not a
+// different one was rendered before it. That is the property, and it does not
+// depend on guessing which pixels the artifact lands on.
+
+import std.mem
+import ae3d.core
+import ae3d.gl
+import ae3d.offscreen
+import ae3d.loader
+
+const WIDTH = 200
+const HEIGHT = 150
+
+var failures = 0
+
+record_failure(reason: string) {
+    println("FAIL ${reason}")
+    failures = failures + 1
+}
+
+// The target hands back its own buffer and the next read overwrites it, so a
+// frame is kept as a hash rather than a copy.
+frame_hash(pixels: ptr) -> long {
+    h = 1469598103934665603 as long
+    i = 0
+    while i < WIDTH * HEIGHT * 4 {
+        h = h ^ (mem.get_byte(pixels, i) as long)
+        h = h * 1099511628211
+        i = i + 1
+    }
+    return h
+}
+
+// Pixels that are not the clear colour, so a frame that drew nothing cannot
+// pass by matching another frame that drew nothing.
+drawn_pixels(pixels: ptr) -> int {
+    n = 0
+    i = 0
+    while i < WIDTH * HEIGHT {
+        offset = i * 4
+        if mem.get_byte(pixels, offset) != 51 ||
+           mem.get_byte(pixels, offset + 1) != 102 ||
+           mem.get_byte(pixels, offset + 2) != 178 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+place(cam: *Camera, near: bool) {
+    if near {
+        core.camera_set_position(cam, core.vec3(0.0, 60.0, 150.0))
+    } else {
+        core.camera_set_position(cam, core.vec3(0.0, 400.0, 900.0))
+    }
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+}
+
+main() {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("depth clear: SKIP no OpenGL context available")
+        return
+    }
+
+    renderer = gl.renderer_new()
+    backend = gl.backend(renderer)
+    if !core.backend_init(&backend, context, WIDTH, HEIGHT) {
+        println("depth clear: FAIL the backend would not initialise")
+        return
+    }
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    gl.renderer_set_clear_color(renderer, 0.2, 0.4, 0.7)
+
+    // Opaque ground, and a transparent sheet above it. The transparent one is
+    // what leaves the depth writes off: without it in the scene the pass never
+    // runs and there is nothing to catch.
+    ground = loader.plane(24, 40.0)
+    core.model_set_position(ground, 0.0 - 480.0, 0.0, 0.0 - 480.0)
+    core.model_set_diffuse(ground, 0.8, 0.7, 0.4)
+    core.backend_add_model(&backend, ground)
+
+    rock = loader.sphere(1.0, 20, 16)
+    core.model_set_scale(rock, 60.0, 60.0, 60.0)
+    core.model_set_position(rock, 0.0, 30.0, 0.0)
+    core.model_set_diffuse(rock, 0.4, 0.45, 0.4)
+    core.backend_add_model(&backend, rock)
+
+    sheet = loader.plane(8, 120.0)
+    core.model_set_position(sheet, 0.0 - 480.0, 200.0, 0.0 - 480.0)
+    core.model_set_diffuse(sheet, 0.2, 0.5, 0.6)
+    core.model_set_alpha(sheet, 0.5)
+    core.backend_add_model(&backend, sheet)
+
+    light = core.light_sun(core.vec3(0.2, 1.0, 0.35))
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_far(cam, 20000.0)
+
+    // The reference: this camera on a renderer that has drawn nothing else.
+    place(cam, true)
+    core.backend_render(&backend, cam, light)
+    first = offscreen.target_pixels(target)
+    if first == null {
+        record_failure("the first readback returned nothing")
+        return
+    }
+    reference = frame_hash(first)
+    drawn = drawn_pixels(first)
+
+    // A different camera in between, which is the only thing that changes.
+    place(cam, false)
+    core.backend_render(&backend, cam, light)
+    offscreen.target_pixels(target)
+
+    place(cam, true)
+    core.backend_render(&backend, cam, light)
+    again = offscreen.target_pixels(target)
+    if again == null {
+        record_failure("the third readback returned nothing")
+        return
+    }
+
+    drawn_again = drawn_pixels(again)
+    if frame_hash(again) != reference {
+        record_failure("the same camera drew a different frame after one from somewhere else (${drawn} pixels of geometry then, ${drawn_again} now)")
+    }
+
+    // The reference has to be a real frame: two empty frames match each other
+    // and prove nothing.
+    if drawn < (WIDTH * HEIGHT) / 4 {
+        record_failure("the reference frame drew only ${drawn} of ${WIDTH * HEIGHT} pixels; there is nothing to compare")
+    }
+
+    core.camera_free(cam)
+    core.light_free(light)
+    core.backend_cleanup(&backend)
+    offscreen.target_destroy(target)
+    core.model_free(ground)
+    core.model_free(rock)
+    core.model_free(sheet)
+    gl.renderer_free(renderer)
+    offscreen.context_destroy(context)
+
+    if failures == 0 {
+        println("depth clear: all checks passed (${drawn} pixels of geometry, frame reproducible)")
+    } else {
+        println("depth clear: ${failures} failure(s)")
+    }
+}

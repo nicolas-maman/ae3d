@@ -1139,6 +1139,15 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
 
     set_wireframe(r, core.debug_enabled())
 
+    // glClear obeys the depth WRITE MASK: with writes off it clears the colour
+    // and silently leaves the depth buffer alone. The transparent pass turns
+    // them off and the frame ends there, so every frame after the first was
+    // depth-tested against the PREVIOUS frame's depths. A still camera hides
+    // it, since those depths are the right ones; move, and last frame's
+    // geometry rejects this frame's, which is holes punched through whatever
+    // was nearer a moment ago. render_shadow_pass already guards its own clear
+    // for this reason.
+    ae3d_gl_set_depth_mask(1)
     ae3d_gl_clear_color(r.clear_r, r.clear_g, r.clear_b, 1.0)
     ae3d_gl_clear(1, 1)
 
