@@ -65,6 +65,13 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float noiseScale;
     int noiseOctaves;
     float noiseIntensity;
+    bool enableCaustics;
+    float causticsIntensity;
+    float causticsScale;
+    float causticsSpeed;
+    float causticsWaterLevel;
+    float causticsDepth;
+    float causticsTime;
     bool enableHighQualityFiltering;
     int filteringQuality;
     mat4 projection;
@@ -89,11 +96,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float lightIntensity;
     vec3 waterBaseColor;
     float waterTransparency;
-    bool enableCaustics;
-    float causticsIntensity;
-    float causticsScale;
     float waterPlaneHeight;
-    vec2 causticsSpeed;
     bool enableFog;
     float fogStart;
     float fogEnd;
@@ -133,7 +136,6 @@ layout(location = 2) in vec3 fragPosition;
 
 
 // GPU Gems Chapter 2: Caustics uniforms
-
 
 
 

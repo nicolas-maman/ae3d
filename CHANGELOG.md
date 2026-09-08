@@ -118,6 +118,27 @@ First working engine.
   config writes a model's own uniforms, so two models in one scene can run
   different settings through the same program.
 
+- Caustics on submerged surfaces: the moving web of light a water surface throws
+  onto whatever lies under it, on both backends. A config carries the water
+  line, the depth over which the light fades out, and the scale, speed and
+  strength of the pattern, so a scene measured in metres and one measured in
+  centimetres both look right. Off by default and free when off. The renderer
+  keeps the clock that moves the pattern, so it animates without the program
+  driving it, and `examples/caustics.ae` shows a seabed lit through an ocean.
+
+### Fixes
+
+- The shader generator checked that a uniform declared in two programs means the
+  same thing in both, and the check compared each name against itself, so it
+  could never fire. Two programs disagreeing about a type would have laid the
+  block out for one of them and corrupted what the other read. It compares types
+  now, and the one name that did disagree is gone.
+
+- The engine clock read zero until a window existed. Anything that rendered
+  without opening one, an offscreen context or a test, ran on a clock that never
+  moved. It reads a monotonic clock directly and no longer depends on the window
+  system.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve

@@ -4,6 +4,11 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
+
+#if defined(_WIN32)
+#  include <windows.h>
+#endif
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -162,7 +167,25 @@ int ae3d_monitor_height(void) {
 }
 
 void   ae3d_poll_events(void) { glfwPollEvents(); }
-double ae3d_time(void) { return glfwGetTime(); }
+// glfwGetTime reads zero until glfwInit runs, so anything that renders without
+// opening a window, an offscreen context or a test, would run on a clock that
+// never moves. This one does not depend on the window system at all.
+double ae3d_time(void) {
+#if defined(_WIN32)
+    LARGE_INTEGER freq, now;
+    if (!QueryPerformanceFrequency(&freq) || freq.QuadPart == 0) {
+        return 0.0;
+    }
+    QueryPerformanceCounter(&now);
+    return (double)now.QuadPart / (double)freq.QuadPart;
+#else
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0.0;
+    }
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+#endif
+}
 
 int ae3d_key_down(void *win, int key) {
     return win && glfwGetKey((GLFWwindow *)win, key) == GLFW_PRESS;

@@ -370,11 +370,12 @@ def main():
     ordered = []
     for member in members:
         kind, name = member[0], member[1]
+        shape = (kind,) + tuple(member[2:])
         if name in seen:
-            if seen[name] != member[1:]:
-                raise SystemExit(f"generate: {name} declared as {seen[name]} and {member[1:]}")
+            if seen[name] != shape:
+                raise SystemExit(f"generate: {name} declared as {seen[name]} and {shape}")
             continue
-        seen[name] = member[1:]
+        seen[name] = shape
         ordered.append(member)
 
     vertex_out = [("vec2", "fragTexCoord"), ("vec3", "Normal"),
