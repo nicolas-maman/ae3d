@@ -497,6 +497,17 @@ First working engine.
 
 ### Tooling
 
+- `tools/check_ui_name_collisions.py` refuses a name the editor shares with
+  something `ui` exports. A bare call to such a name binds the toolkit's
+  function inside the `ui.window` block and the editor's outside it, silently
+  and in both directions, which is how the Undo button came to step an empty
+  stack belonging to the toolkit. It comes back whenever either side gains a
+  name, so it is checked rather than remembered.
+
+- The editor driver presses Save, Load and Delete as well. A scene that never
+  reaches disk and a Load that brings back nothing both look like a working
+  editor from the inside: the buttons return and the report is unchanged.
+
 - `tools/drive_editor.py` presses the editor's real widgets. Every other check
   on the editor reads the report it writes about itself, and that report comes
   from calling the handlers directly, so a button that cannot be hit, a field

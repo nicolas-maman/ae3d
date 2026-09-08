@@ -263,6 +263,23 @@ else
         # on the way through the file shows up here as a count that fell.
         check_editor_run opengl roundtrip
 
+        # A name the editor shares with the toolkit it imports is bound
+        # differently inside the ui.window block than outside it, silently, and
+        # that is how the Undo button came to step the toolkit's empty stack.
+        if command -v python3 >/dev/null 2>&1; then
+            collide_log="$(mktemp)"
+            if AETHER_UI_ROOT="$UI_ROOT" python3 tools/check_ui_name_collisions.py \
+                    >"$collide_log" 2>&1; then
+                pass "ae3d_editor (names)"
+            else
+                fail "ae3d_editor (names)"
+                sed 's/^/        /' "$collide_log" | head -12
+            fi
+            rm -f "$collide_log"
+        else
+            skip "ae3d_editor (names)" "no python3"
+        fi
+
         # Everything above reads the report the editor writes about itself, and
         # that report comes from calling the handlers directly. A button that
         # cannot be hit, a field whose callback is not wired, a row that does
