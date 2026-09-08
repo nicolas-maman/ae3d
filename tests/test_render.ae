@@ -12,6 +12,8 @@ var g_engine: ptr = null
 var g_centre = 0
 var g_corner = 0
 var g_draw_calls = 0
+var g_fixed_calls = 0
+var g_fixed_delta = 0.0
 
 on_start(data: ptr) {
     e = data as *Engine
@@ -22,6 +24,14 @@ on_start(data: ptr) {
 
     cam = engine.engine_camera(e)
     core.camera_set_position(cam, core.vec3(0.0, 0.0, 120.0))
+}
+
+// The engine drained its fixed-step accumulator a step at a time and called
+// nothing in between, so a program that set a step and waited for it waited
+// forever.
+on_fixed(data: ptr, delta: float) {
+    g_fixed_calls = g_fixed_calls + 1
+    g_fixed_delta = delta
 }
 
 on_render(data: ptr, delta: float) {
@@ -38,6 +48,7 @@ main() {
     engine.engine_set_size(e, 640, 480)
     engine.engine_set_title(e, "ae3d render test")
     engine.engine_set_frame_limit(e, 8)
+    engine.engine_set_fixed_step(e, 1.0 / 240.0)
     engine.engine_set_camera_input(e, false)
 
     light = core.light_sun(core.vec3(0.0, 0.0, 1.0))
@@ -45,6 +56,7 @@ main() {
     engine.engine_set_user_data(e, e as ptr)
     engine.engine_on_start(e, on_start as fn(ptr))
     engine.engine_on_render(e, on_render as fn(ptr, float))
+    engine.engine_on_fixed_update(e, on_fixed as fn(ptr, float))
 
     // A machine with no display cannot be asked to open one. That is a fact
     // about where this is running, not something the renderer got wrong.
@@ -54,6 +66,15 @@ main() {
     }
 
     failures = 0
+    if g_fixed_calls < 1 {
+        println("render: FAIL the fixed step was never called")
+        return
+    }
+    if core.abs_of(g_fixed_delta - 1.0 / 240.0) > 0.000001 {
+        println("render: FAIL the fixed step arrived as ${g_fixed_delta}, not the step that was set")
+        return
+    }
+
     if g_draw_calls < 1 {
         println("render: FAIL no draw calls were issued")
         failures = failures + 1

@@ -95,6 +95,30 @@ test_raycast() {
     core.model_free(cube)
 }
 
+// A speed is a speed whichever way it points. Scaling each held key separately
+// gave a camera holding two of them the speed of both at once, so the diagonal
+// was forty one percent faster than the axis.
+test_camera_speed() {
+    c = core.camera_new(800, 600)
+    core.camera_set_position(c, core.vec3(0.0, 0.0, 0.0))
+
+    core.camera_move(c, c.front, 100.0)
+    along = core.v3_len(c.position)
+
+    core.camera_set_position(c, core.vec3(0.0, 0.0, 0.0))
+    core.camera_move(c, core.v3_add(c.front, c.right), 100.0)
+    diagonal = core.v3_len(c.position)
+
+    check("one direction", along, 100.0)
+    check("two directions at once", diagonal, 100.0)
+
+    core.camera_set_position(c, core.vec3(0.0, 0.0, 0.0))
+    core.camera_move(c, core.v3_add(c.front, core.v3_mul(c.front, 0.0 - 1.0)), 100.0)
+    check_true("opposite directions cancel", core.v3_len(c.position) < 0.0001)
+
+    core.camera_free(c)
+}
+
 test_components() {
     scene = behaviour.scene_new()
     object = behaviour.object_new("spinner")
@@ -207,6 +231,7 @@ test_rendering_config() {
 
 main() {
     test_raycast()
+    test_camera_speed()
     test_components()
     test_rendering_config()
 
