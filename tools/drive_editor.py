@@ -157,6 +157,40 @@ def main():
                 # number() writes two decimals; "-150.0" is what was typed.
                 check("what was typed reached the model", back == "-150.00",
                       repr(back))
+        # Save, Load and Delete, pressed. A scene that never reaches disk and
+        # a Load that brings back nothing both look like a working editor from
+        # inside: the buttons return, the report is unchanged.
+        scene_file = "build/editor_scene.json"
+        if os.path.exists(scene_file):
+            os.remove(scene_file)
+        save = find(widgets, "button", "Save")
+        load = find(widgets, "button", "Load")
+        delete = find(widgets, "button", "Delete")
+        if save and load and delete:
+            saved_rows = len(rows_under(tree(args.port), scene))
+            post(args.port, "/widget/%d/click" % save)
+            time.sleep(1.2)
+            check("Save writes a scene file",
+                  os.path.exists(scene_file) and os.path.getsize(scene_file) > 0)
+
+            post(args.port, "/widget/%d/click" % find(tree(args.port), "button", "Cube"))
+            time.sleep(1.0)
+            grew = len(rows_under(tree(args.port), scene))
+            post(args.port, "/widget/%d/click" % load)
+            time.sleep(1.8)
+            loaded = len(rows_under(tree(args.port), scene))
+            check("Load brings back what was saved",
+                  loaded == saved_rows and grew == saved_rows + 1,
+                  "%d saved, %d after adding, %d after loading"
+                  % (saved_rows, grew, loaded))
+
+            before_delete = len(rows_under(tree(args.port), scene))
+            post(args.port, "/widget/%d/click" % delete)
+            time.sleep(1.0)
+            after_delete = len(rows_under(tree(args.port), scene))
+            check("Delete takes an object out",
+                  after_delete == before_delete - 1,
+                  "%d rows, expected %d" % (after_delete, before_delete - 1))
     finally:
         editor.terminate()
         try:
