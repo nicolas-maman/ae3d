@@ -137,6 +137,11 @@ var g_readouts: ptr = null
 // and a number field where it is not. Both arrays are ROWS long and a row has
 // an entry in one of them.
 var g_fields: ptr = null
+// The row each control sits in, so a section can be hidden whole. Hiding the
+// control and its readout leaves the caption behind, and a caption with no
+// control under it is worse than either: the water section read as four
+// stranded words with no heading above them.
+var g_row_frames: ptr = null
 // The row whose field the user is typing in. Echoing a parsed value back into
 // the field being edited rewrites it under the caret, which is what makes a
 // numeric field impossible to type into.
@@ -511,6 +516,12 @@ slider_handle(index: int) -> int {
     return slots[index]
 }
 
+row_frame(index: int) -> int {
+    if g_row_frames == null || index < 0 || index >= ROWS { return 0 }
+    slots = g_row_frames as int[]
+    return slots[index]
+}
+
 field_handle(index: int) -> int {
     if g_fields == null || index < 0 || index >= ROWS { return 0 }
     slots = g_fields as int[]
@@ -595,9 +606,9 @@ show_water_section(on: bool) {
     while i < ROWS {
         if is_water_row(i) {
             control = row_control(i)
-            readout = readout_handle(i)
+            frame = row_frame(i)
             if control != 0 { ui.set_hidden(control, hidden_flag(on)) }
-            if readout != 0 { ui.set_hidden(readout, hidden_flag(on)) }
+            if frame != 0 { ui.set_hidden(frame, hidden_flag(on)) }
         }
         i = i + 1
     }
@@ -1750,6 +1761,8 @@ field_row(parent: int, name: string, initial: float, index: int) {
     ui.add_css_class(caption, "label")
     ui.spacer(row)
     number_field(row, index, initial, FIELD_W)
+    frames = g_row_frames as int[]
+    frames[index] = row
 }
 
 // Three fields on one line with coloured axis letters, which is how every one
@@ -1798,8 +1811,10 @@ inspector_row(parent: int, name: string, low: float, high: float,
 
     sliders = g_sliders as int[]
     readouts = g_readouts as int[]
+    frames = g_row_frames as int[]
     sliders[index] = slider
     readouts[index] = readout
+    frames[index] = row
     g_row_count = g_row_count + 1
 }
 
@@ -2564,6 +2579,7 @@ main() {
     g_sliders = calloc(ROWS, 4)
     g_readouts = calloc(ROWS, 4)
     g_fields = calloc(ROWS, 4)
+    g_row_frames = calloc(ROWS, 4)
     g_console = calloc(CONSOLE_LINES, 4)
     g_history = history.history_new()
     g_helpers = list.new()
