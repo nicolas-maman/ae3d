@@ -146,7 +146,8 @@ First working engine.
   the light, so a lit scene put its objects in their own shadow and cast nothing
   on the ground: with the sun to the right, the ground darkened by zero either
   side of the blocker. The direction points at the light, the shadow falls away
-  from it, and a test measures which side it lands on, which nothing did before.
+  from it, and a test measures which side it lands on, which nothing did before. The water surface's god rays pointed at the world origin rather than at
+  the sun, for the same reason, and now follow the light like everything else.
 
 ### Portability
 
