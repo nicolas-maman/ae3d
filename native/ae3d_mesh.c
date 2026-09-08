@@ -197,6 +197,24 @@ void ae3d_mesh_set_normal(void *handle, int i, double x, double y, double z) {
     m->dirty = 1;
 }
 
+// The twin of ae3d_mesh_set_normal. A mesh built by generated geometry, a
+// surface out of a field most of all, can only be checked for facing the right
+// way if what it wrote can be read back.
+double ae3d_mesh_norm_x(void *handle, int i) {
+    float *s = ae3d_mesh_slot((ae3d_mesh *)handle, i);
+    return s ? s[5] : 0.0;
+}
+
+double ae3d_mesh_norm_y(void *handle, int i) {
+    float *s = ae3d_mesh_slot((ae3d_mesh *)handle, i);
+    return s ? s[6] : 0.0;
+}
+
+double ae3d_mesh_norm_z(void *handle, int i) {
+    float *s = ae3d_mesh_slot((ae3d_mesh *)handle, i);
+    return s ? s[7] : 0.0;
+}
+
 int ae3d_mesh_index_at(void *handle, int i) {
     ae3d_mesh *m = (ae3d_mesh *)handle;
     if (!m || i < 0 || i >= m->index_count) return -1;

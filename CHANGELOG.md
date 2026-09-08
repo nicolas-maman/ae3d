@@ -129,6 +129,18 @@ First working engine.
 
 ### Fixes
 
+- Every surface built from a signed distance field faced into the solid. The
+  builder negated the field's gradient, which already points out of it, so a
+  terrain lit by a sun overhead gathered nothing from it and was drawn at
+  ambient only. `examples/smooth_terrain.ae` came out a flat olive with no
+  relief at all: mean luma 95 and a standard deviation of 3 across the
+  terrain, against 145 and 6 once the normals face out. Nothing caught it
+  because a normal that is exactly backwards still produces geometry, still
+  triangulates and still renders. It renders dark.
+
+- `core.mesh_normal` reads back what a mesh was given, which `mesh_set_normal`
+  could write and nothing could check.
+
 - A colour set on a model loaded from a file was silently dropped. A loaded
   model is drawn group by group, and a group carries a material only when the
   file gave it one: an OBJ whose `mtllib` line is commented out, or which names
