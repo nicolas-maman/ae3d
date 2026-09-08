@@ -3003,11 +3003,68 @@ int ae3d_vk_upload_mesh(void *mesh) {
 
 // The instance stream is interleaved into the layout the pipeline declares: a
 // matrix then a colour, one vertex-input binding stepping per instance.
-int ae3d_vk_upload_instances(void *instances) {
+// One matrix and one colour per instance, in the layout the vertex shader
+// declares. Both the first upload and every later refresh build it the same way.
+static float *ae3d_vk_pack_instances(void *instances, int count) {
     const float *matrices = ae3d_inst_matrix_data(instances);
     const float *colours = ae3d_inst_color_data(instances);
-    int count = ae3d_inst_count(instances);
     int has_colours = ae3d_inst_has_colors(instances);
+    float *packed;
+    int i;
+
+    packed = (float *)malloc((size_t)count * 20 * sizeof(float));
+    if (!packed) return NULL;
+    for (i = 0; i < count; i++) {
+        memcpy(packed + (size_t)i * 20, matrices + (size_t)i * 16, 16 * sizeof(float));
+        if (has_colours && colours) {
+            memcpy(packed + (size_t)i * 20 + 16, colours + (size_t)i * 3, 3 * sizeof(float));
+        } else {
+            packed[i * 20 + 16] = 1.0f;
+            packed[i * 20 + 17] = 1.0f;
+            packed[i * 20 + 18] = 1.0f;
+        }
+        packed[i * 20 + 19] = 0.0f;
+    }
+    return packed;
+}
+
+// An instance stream that has been moved or recoloured since it was uploaded.
+// Without this the buffer is written once, when the model is registered, and a
+// particle that moves or a block that changes colour never reaches the GPU.
+int ae3d_vk_update_instances(int handle, void *instances) {
+    ae3d_vk_mesh *slot;
+    int count = ae3d_inst_count(instances);
+    float *packed;
+
+    if (!vk.ready || handle <= 0 || handle > vk.mesh_capacity || count <= 0) return 0;
+    slot = &vk.meshes[handle - 1];
+    if (!slot->in_use) return 0;
+
+    packed = ae3d_vk_pack_instances(instances, count);
+    if (!packed) { ae3d_vk_fail("out of memory"); return 0; }
+
+    // The buffer is device-local, so the write goes through the same staging
+    // path the first upload used, and the device has to be idle before the one
+    // a frame in flight may still be reading is replaced.
+    ae3d_vkDeviceWaitIdle(vk.device);
+    if (slot->vertex_buffer) ae3d_vkDestroyBuffer(vk.device, slot->vertex_buffer, NULL);
+    if (slot->vertex_memory) ae3d_vkFreeMemory(vk.device, slot->vertex_memory, NULL);
+    slot->vertex_buffer = VK_NULL_HANDLE;
+    slot->vertex_memory = VK_NULL_HANDLE;
+
+    if (!ae3d_vk_upload_buffer(packed, (VkDeviceSize)count * 20 * sizeof(float),
+                               VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                               &slot->vertex_buffer, &slot->vertex_memory)) {
+        free(packed);
+        return 0;
+    }
+    free(packed);
+    return 1;
+}
+
+int ae3d_vk_upload_instances(void *instances) {
+    const float *matrices = ae3d_inst_matrix_data(instances);
+    int count = ae3d_inst_count(instances);
     ae3d_vk_mesh *slot = NULL;
     float *packed;
     int i, handle = 0;
@@ -3028,19 +3085,8 @@ int ae3d_vk_upload_instances(void *instances) {
         vk.mesh_capacity = grown;
     }
 
-    packed = (float *)malloc((size_t)count * 20 * sizeof(float));
+    packed = ae3d_vk_pack_instances(instances, count);
     if (!packed) { ae3d_vk_fail("out of memory"); return 0; }
-    for (i = 0; i < count; i++) {
-        memcpy(packed + (size_t)i * 20, matrices + (size_t)i * 16, 16 * sizeof(float));
-        if (has_colours && colours) {
-            memcpy(packed + (size_t)i * 20 + 16, colours + (size_t)i * 3, 3 * sizeof(float));
-        } else {
-            packed[i * 20 + 16] = 1.0f;
-            packed[i * 20 + 17] = 1.0f;
-            packed[i * 20 + 18] = 1.0f;
-        }
-        packed[i * 20 + 19] = 0.0f;
-    }
 
     if (!ae3d_vk_upload_buffer(packed, (VkDeviceSize)count * 20 * sizeof(float),
                                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,

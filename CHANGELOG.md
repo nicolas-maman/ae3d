@@ -277,6 +277,16 @@ First working engine.
   uniforms, but not the model's own shader, so a copy quietly fell back to the
   default program.
 
+- An instance that moves or changes colour reaches the GPU. The buffer holding
+  every instance's transform and colour was uploaded when the model was
+  registered with a renderer and never again: on OpenGL the per-frame path
+  re-sent the matrices alone, and neither colour setter asked for even that; on
+  Vulkan nothing re-sent anything, so an instanced model there drew its first
+  frame forever. A particle system that moves its particles and a voxel world
+  that recolours a block both asked for something the engine accepted and never
+  did, on both backends, and the suites drew instanced geometry without ever
+  moving it.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve
