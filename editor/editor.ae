@@ -955,6 +955,56 @@ index_of_kind(kind: int) -> int {
     return 0 - 1
 }
 
+// The buttons have the same shape of failure the rows had: one that dispatches
+// to nothing looks exactly like one that works, because the only witness is a
+// person watching the viewport. Each is asked for its effect and the effect is
+// looked for.
+actions_that_do_nothing() -> int {
+    if selected_model() == null { return 0 }
+    wrong = 0
+
+    before_count = list.size(g_models)
+    duplicate_selected()
+    if list.size(g_models) != before_count + 1 { wrong = wrong + 1 }
+    remove_selected()
+    if list.size(g_models) != before_count { wrong = wrong + 1 }
+
+    cam = g_camera as *Camera
+    where = cam.position
+    core.camera_set_position(cam, core.vec3(where.x + 500.0, where.y + 500.0, where.z + 500.0))
+    focus_selection()
+    if core.abs_of(cam.position.x - (where.x + 500.0)) < 0.01 &&
+       core.abs_of(cam.position.z - (where.z + 500.0)) < 0.01 { wrong = wrong + 1 }
+    core.camera_set_position(cam, where)
+
+    // Each script moves what it is attached to, so a tenth of a second of it
+    // has to leave the model somewhere else.
+    scripts = 1
+    while scripts <= SCRIPT_ORBIT {
+        m = selected_model()
+        position = m.position
+        rotation = m.rotation
+        was_script = script_at(g_selected)
+
+        set_script(g_selected, scripts)
+        run_scripts(0.1)
+        run_scripts(0.1)
+        still = core.abs_of(m.position.x - position.x) < 0.0001 &&
+                core.abs_of(m.position.y - position.y) < 0.0001 &&
+                core.abs_of(m.position.z - position.z) < 0.0001 &&
+                core.abs_of(m.rotation.y - rotation.y) < 0.000001
+        if still { wrong = wrong + 1 }
+
+        set_script(g_selected, was_script)
+        core.model_set_position(m, position.x, position.y, position.z)
+        core.model_set_rotation(m, rotation)
+        scripts = scripts + 1
+    }
+
+    history.history_clear(g_history)
+    return wrong
+}
+
 // A drag of the gizmo used to record nothing, so the next undo stepped back
 // through whatever came before it and put that back instead. Each mode is
 // dragged, undone, and the model asked whether it is where it started.
@@ -1024,6 +1074,7 @@ report_state() {
     frames = g_frames
     stuck = rows_that_do_nothing()
     undrag = undone_gizmo_drags()
+    idle = actions_that_do_nothing()
 
     selected = "none"
     m = selected_model()
@@ -1058,6 +1109,8 @@ report_state() {
     lines = string.concat(lines, string.from_int(stuck))
     lines = string.concat(lines, "\nunundone_drags ")
     lines = string.concat(lines, string.from_int(undrag))
+    lines = string.concat(lines, "\nidle_actions ")
+    lines = string.concat(lines, string.from_int(idle))
     lines = string.concat(lines, "\nframes ")
     lines = string.concat(lines, string.from_int(frames))
     lines = string.concat(lines, "\n")

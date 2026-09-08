@@ -180,6 +180,12 @@ check_editor_run() {
         # back through whatever came before it and put that back instead.
         fail "$name ($(sed -n 's/^unundone_drags //p' "$report") gizmo drag(s) cannot be undone)"
         sed 's/^/        /' "$report"
+    elif [ "$(sed -n 's/^idle_actions //p' "$report")" != "0" ]; then
+        # Duplicate, delete, frame selection and the three scripts, each asked
+        # for its effect: a button that dispatches to nothing looks exactly like
+        # one that works when the only witness is a person watching.
+        fail "$name ($(sed -n 's/^idle_actions //p' "$report") action(s) do nothing)"
+        sed 's/^/        /' "$report"
     elif grep -q '^selected none$' "$report"; then
         fail "$name (nothing selected)"
         sed 's/^/        /' "$report"
