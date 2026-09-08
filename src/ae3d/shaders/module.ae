@@ -96,6 +96,10 @@ struct Light {
 uniform Light lights[MAX_LIGHTS];
 uniform int lightCount;
 uniform vec3 viewPos;
+// How far this camera can see. Everything that fades a feature out with distance
+// measures against this rather than against a number of world units, so a scene
+// laid out in metres and one laid out in centimetres behave alike.
+uniform float viewDistance;
 uniform vec3 diffuseColor;
 uniform vec3 specularColor;
 uniform float metallic;     // Metallic factor (0.0 = dielectric, 1.0 = metallic)
@@ -343,11 +347,11 @@ float calculateSSAO(vec3 position, vec3 normal, float distanceToCamera) {
     
     // Distance-based LOD: reduce samples for close objects (voxel performance)
     int adaptiveSamples = ssaoSampleCount;
-    if (distanceToCamera < 5000.0) {
+    if (distanceToCamera < viewDistance * 0.5) {
         adaptiveSamples = max(2, ssaoSampleCount / 8); // Very few samples when close
-    } else if (distanceToCamera < 20000.0) {
+    } else if (distanceToCamera < viewDistance * 2.0) {
         adaptiveSamples = max(4, ssaoSampleCount / 4);
-    } else if (distanceToCamera < 50000.0) {
+    } else if (distanceToCamera < viewDistance * 5.0) {
         adaptiveSamples = max(6, ssaoSampleCount / 2);
     }
     
@@ -405,14 +409,17 @@ vec3 calculateVolumetricLighting(vec3 worldPos, vec3 lightPos, vec3 viewPos) {
     
     float distanceToCamera = length(worldPos - viewPos);
     
-    // Skip volumetric for very close objects - too expensive per fragment
-    if (distanceToCamera < 1000.0) return vec3(0.0);
+    // Skip volumetric for whatever is right in front of the camera, where it
+    // covers the most pixels for the least effect. A tenth of what the camera
+    // can see, rather than a thousand units, which switched the whole feature
+    // off for every scene smaller than that.
+    if (distanceToCamera < viewDistance * 0.1) return vec3(0.0);
     
     // Adaptive step count based on distance
     int adaptiveSteps = volumetricSteps;
-    if (distanceToCamera < 10000.0) {
+    if (distanceToCamera < viewDistance) {
         adaptiveSteps = max(4, volumetricSteps / 4);
-    } else if (distanceToCamera < 30000.0) {
+    } else if (distanceToCamera < viewDistance * 3.0) {
         adaptiveSteps = max(8, volumetricSteps / 2);
     }
     
@@ -447,12 +454,12 @@ vec3 calculateGlobalIllumination(vec3 position, vec3 normal, vec3 albedo, float 
     int baseSamples = giBounces * 4;
     int samples = baseSamples;
     
-    if (distanceToCamera < 5000.0) {
+    if (distanceToCamera < viewDistance * 0.5) {
         // Very close: minimal GI (too expensive for dense voxels)
         samples = max(2, baseSamples / 8);
-    } else if (distanceToCamera < 20000.0) {
+    } else if (distanceToCamera < viewDistance * 2.0) {
         samples = max(4, baseSamples / 4);
-    } else if (distanceToCamera < 50000.0) {
+    } else if (distanceToCamera < viewDistance * 5.0) {
         samples = max(6, baseSamples / 2);
     }
     
@@ -1043,6 +1050,10 @@ uniform vec3 lightDirection;  // Directional light direction for sun-like lighti
 uniform vec3 lightColor;
 uniform float lightIntensity;
 uniform vec3 viewPos;
+// How far this camera can see. Everything that fades a feature out with distance
+// measures against this rather than against a number of world units, so a scene
+// laid out in metres and one laid out in centimetres behave alike.
+uniform float viewDistance;
 uniform float time;
 
 // Water appearance
@@ -1057,6 +1068,11 @@ uniform bool enableCaustics;
 uniform float causticsIntensity;
 uniform float causticsScale;
 uniform float waterPlaneHeight;  // Height of water surface for ray intersection
+// The still level the waves rise and fall around, so a crest can be measured
+// against the water rather than against however high the world's zero happens
+// to be.
+uniform float waterLevel;
+uniform float waveAmplitudes[4];
 
 // Configurable fog parameters
 uniform bool enableFog;
@@ -1273,10 +1289,14 @@ void main() {
     // Enhanced foam system with wave-based trails
     float totalFoam = 0.0;
     
-    // Wave height foam (peaks)
-    if (waveHeight > 450.0) {
-        float heightFoam = smoothstep(450.0, 600.0, waveHeight) * 0.15;
-        totalFoam += heightFoam;
+    // Wave height foam (peaks). How high a crest has to be for foam depends on
+    // how high the waves go at all: fixed at four hundred and fifty units, it
+    // never appeared on any ocean this engine has ever drawn.
+    float tallest = (waveAmplitudes[0] + waveAmplitudes[1] +
+                     waveAmplitudes[2] + waveAmplitudes[3]) * waveHeightMultiplier;
+    if (tallest > 0.0) {
+        float crest = waveHeight - waterLevel;
+        totalFoam += smoothstep(tallest * 0.55, tallest * 0.8, crest) * 0.15;
     }
     
     // Dynamic foam trails based on wave velocity
@@ -1391,7 +1411,7 @@ void main() {
     float perspectiveCorrection = 1.0 / (1.0 + reflectionDistance * 0.000005); // Closer = sharper
     
     // Chapter 15: Dynamic LOD for massive scenes - reduce detail at distance
-    float lodFactor = smoothstep(10000.0, 100000.0, reflectionDistance); // LOD transition zone
+    float lodFactor = smoothstep(viewDistance, viewDistance * 10.0, reflectionDistance);
     float performanceFactor = mix(1.0, 0.3, lodFactor); // Reduce complexity for distant pixels
     
     // GPU Gems Chapter 14: Balanced reflection calculations for realistic sun

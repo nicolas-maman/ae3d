@@ -224,6 +224,19 @@ First working engine.
   loads scenes, so a session's work did not survive the round trip. Files
   written before this load exactly as they did.
 
+- Features that fade out with distance measure against how far the camera can
+  see, not against a count of world units. Volumetric lighting returned nothing
+  for anything closer than a thousand units, so in a scene a few hundred units
+  across it was switched on, cost nothing and showed nothing; occlusion,
+  global illumination and the water's reflection detail stepped at five, ten,
+  twenty, thirty, fifty and a hundred thousand. A scene measured in metres and
+  one measured in centimetres now behave the same, and the suite that renders
+  every setting twice makes its scene an ordinary few hundred units across to
+  say so. Foam on the wave crests went the same way: it needed a crest four
+  hundred and fifty units above the world's zero, which no ocean this engine has
+  drawn ever reached, so it appeared on none of them. A crest is now measured
+  from the water's own level against how high its waves go.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve
