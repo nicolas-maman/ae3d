@@ -147,7 +147,9 @@ First working engine.
   on the ground: with the sun to the right, the ground darkened by zero either
   side of the blocker. The direction points at the light, the shadow falls away
   from it, and a test measures which side it lands on, which nothing did before. The water surface's god rays pointed at the world origin rather than at
-  the sun, for the same reason, and now follow the light like everything else.
+  the sun, for the same reason, and now follow the light like everything else. The ocean example asked for a sun four and a half times as bright as
+  the sun, which is what it took to see anything when none of that light was
+  reaching the water; it asks for one sun now.
 
 ### Portability
 
