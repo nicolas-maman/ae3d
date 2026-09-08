@@ -193,6 +193,63 @@ check_water(backend: *Backend, cam: *Camera, bright: *Light) {
     core.light_free(light)
 }
 
+// Counts pixels where blue clearly beats red. The scene's ground and ball are
+// both warm, so a check counting red would be satisfied by what is already
+// there: the first version of this check passed with the fix removed, because
+// the ball alone cleared its threshold.
+blue_pixels(pixels: ptr) -> int {
+    found = 0
+    i = 0
+    while i < WIDTH * HEIGHT {
+        offset = i * 4
+        r = mem.get_byte(pixels, offset)
+        b = mem.get_byte(pixels, offset + 2)
+        if b > 90 && b > r + 50 { found = found + 1 }
+        i = i + 1
+    }
+    return found
+}
+
+count_blue(pass: *Backend, cam: *Camera, light: *Light) -> int {
+    core.backend_render(pass, cam, light)
+    core.backend_frame_pixels(pass)
+    return blue_pixels(core.backend_frame_pixels(pass))
+}
+
+// A model loaded from a file is drawn group by group, and a group carries a
+// material only when the file gave it one: an OBJ whose mtllib line is
+// commented out, or which names a material no mtl defines, produces groups with
+// none. Those were drawn white, and the model's own material, which is the only
+// one a caller can set from outside, was never consulted. So every colour set
+// on a loaded model was silently dropped, and the models example rendered a
+// gold sphere and a blue cube in the same cream.
+//
+// Measured as a difference rather than a total, so what is already in the scene
+// cannot answer for the model under test.
+check_group_without_material(pass: *Backend, cam: *Camera, light: *Light) {
+    before = count_blue(pass, cam, light)
+
+    m = loader.sphere(1.0, 24, 18)
+    core.model_set_scale(m, 44.0, 44.0, 44.0)
+    core.model_set_position(m, 0.0, 26.0, 0.0)
+
+    // The shape a loader leaves behind: one group covering the whole mesh, with
+    // no material of its own.
+    core.model_add_group(m, null, 0, core.mesh_index_count(m.mesh))
+    core.model_set_diffuse(m, 0.05, 0.1, 0.95)
+    core.backend_add_model(pass, m)
+
+    after = count_blue(pass, cam, light)
+
+    if after - before < 200 {
+        println("FAIL a colour set on a model whose group has no material never reaches the frame (${before} blue pixels before, ${after} after)")
+        failures = failures + 1
+    }
+
+    core.backend_remove_model(pass, m)
+    core.model_free(m)
+}
+
 main() {
     context = offscreen.context_create(WIDTH, HEIGHT)
     if context == null {
@@ -339,6 +396,8 @@ main() {
     core.model_set_specular(ball, 1.0, 1.0, 1.0)
 
     check_water(&pass, cam, light)
+
+    check_group_without_material(&pass, cam, light)
 
     core.backend_cleanup(&pass)
     offscreen.target_destroy(target)

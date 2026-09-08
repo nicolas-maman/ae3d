@@ -920,6 +920,18 @@ draw_batch(r: *VKRenderer, b: *VKBatch) {
     ae3d_vk_draw(b.mesh, texture, b.handle, b.count)
 }
 
+// What a group is made of. A group carries its own material only when the file
+// it came from gave it one: an OBJ whose mtllib line is commented out, or which
+// names a material no mtl defines, produces groups with none. Those fall back
+// to the model's own material, which is the only thing a caller can set from
+// outside, so model_set_diffuse and its friends reach a loaded model instead of
+// being silently dropped for having groups at all.
+group_material(m: *Model, group: *MaterialGroup) -> *Material {
+    if group == null { return m.material }
+    if group.material != null { return group.material }
+    return m.material
+}
+
 draw_model(r: *VKRenderer, m: *Model, transparent_pass: bool) {
     if m == null || !m.visible || m.vbo == 0 { return }
 
@@ -958,9 +970,10 @@ draw_model(r: *VKRenderer, m: *Model, transparent_pass: bool) {
         while i < groups {
             group = core.model_group(m, i)
             if group != null {
-                set_material_uniforms(group.material)
+                material = group_material(m, group)
+                set_material_uniforms(material)
                 texture = 0
-                if group.material != null { texture = texture_for(r, group.material) }
+                if material != null { texture = texture_for(r, material) }
                 ae3d_vk_draw(m.vbo, texture, m.instance_vbo, instances)
             }
             i = i + 1

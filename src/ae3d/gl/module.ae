@@ -457,6 +457,18 @@ use_program(r: *GLRenderer, program: int) {
 // the cache cannot use null to mean nothing has been bound yet. It did, and a
 // scene whose first model had no material never had its material uniforms sent
 // at all: the surface kept an alpha of zero and never appeared.
+// What a group is made of. A group carries its own material only when the file
+// it came from gave it one: an OBJ whose mtllib line is commented out, or which
+// names a material no mtl defines, produces groups with none. Those fall back
+// to the model's own material, which is the only thing a caller can set from
+// outside, so model_set_diffuse and its friends reach a loaded model instead of
+// being silently dropped for having groups at all.
+group_material(m: *Model, group: *MaterialGroup) -> *Material {
+    if group == null { return m.material }
+    if group.material != null { return group.material }
+    return m.material
+}
+
 apply_material(r: *GLRenderer, slots: *ProgramSlots, material: *Material) {
     if r.bound_material_set && r.bound_material == material as ptr { return }
     set_material_uniforms(slots, material)
@@ -1418,14 +1430,15 @@ render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
         i = 0
         while i < groups {
             group = core.model_group(m, i)
+            material = group_material(m, group)
             alpha = 1.0
-            if group.material != null { alpha = group.material.alpha }
+            if material != null { alpha = material.alpha }
             is_transparent = alpha < 0.99
 
             if is_transparent == transparent_pass {
-                apply_material(r, slots, group.material)
+                apply_material(r, slots, material)
                 apply_transparency(r, is_transparent)
-                apply_texture(r, slots, texture_for(r, group.material))
+                apply_texture(r, slots, texture_for(r, material))
                 draw(r, m, slots, group.index_count, group.index_start * 4)
             }
             i = i + 1
