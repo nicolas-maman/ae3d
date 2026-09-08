@@ -287,6 +287,16 @@ First working engine.
   did, on both backends, and the suites drew instanced geometry without ever
   moving it.
 
+- A texture asked for after the model was registered reaches the frame. Both
+  renderers resolved a path to a texture once and skipped any material that
+  already had one, so setting a new path wrote it into the material and changed
+  nothing on screen. The material says its texture is stale, and the next draw
+  lets go of the one it was holding and takes the one it now asks for.
+
+- The workflow runs when someone starts it, rather than on every push and every
+  pull request. It was two runners a change for work `./ci.sh` does on the
+  machine the change was written on.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve

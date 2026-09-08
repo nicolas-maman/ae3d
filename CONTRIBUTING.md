@@ -10,6 +10,10 @@ It builds the native layer with `-Wall -Wextra -Werror`, type-checks every
 module, and runs every test suite and every example. It must pass with no
 warnings.
 
+This is the gate. Nothing runs it for you when a pull request opens: the
+workflow is started by hand, from the Actions tab, and is there for the one
+thing a local run cannot tell you, which is whether the other platform agrees.
+
 ## What the rules are
 
 - **No warnings.** Not from the C compiler, not from `aetherc`. A warning that

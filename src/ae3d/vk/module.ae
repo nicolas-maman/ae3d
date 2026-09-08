@@ -505,8 +505,21 @@ resolve_textures(r: *VKRenderer, m: *Model) {
 }
 
 resolve_one(r: *VKRenderer, material: *Material) {
+    material.texture_stale = false
     if core.text(material.texture_path) == "" || material.texture_id != 0 { return }
     material.texture_id = renderer_load_texture(r, material.texture_path)
+}
+
+// The path was changed after this material had already been given a texture, so
+// what it is holding is the one it used to want.
+texture_for(r: *VKRenderer, material: *Material) -> int {
+    if material == null { return 0 }
+    if material.texture_stale {
+        if material.texture_id != 0 { renderer_release_texture(r, material.texture_id) }
+        material.texture_id = 0
+        resolve_one(r, material)
+    }
+    return material.texture_id
 }
 
 renderer_remove_model(r: *VKRenderer, m: *Model) {
@@ -876,7 +889,7 @@ draw_batch(r: *VKRenderer, b: *VKBatch) {
     set_material_uniforms(first.material)
 
     texture = 0
-    if first.material != null { texture = first.material.texture_id }
+    if first.material != null { texture = texture_for(r, first.material) }
     blend = 0
     ae3d_vk_set_blend(blend)
     ae3d_vk_draw(b.mesh, texture, b.handle, b.count)
@@ -921,7 +934,7 @@ draw_model(r: *VKRenderer, m: *Model, transparent_pass: bool) {
             if group != null {
                 set_material_uniforms(group.material)
                 texture = 0
-                if group.material != null { texture = group.material.texture_id }
+                if group.material != null { texture = texture_for(r, group.material) }
                 ae3d_vk_draw(m.vbo, texture, m.instance_vbo, instances)
             }
             i = i + 1
@@ -931,7 +944,7 @@ draw_model(r: *VKRenderer, m: *Model, transparent_pass: bool) {
 
     set_material_uniforms(m.material)
     texture = 0
-    if m.material != null { texture = m.material.texture_id }
+    if m.material != null { texture = texture_for(r, m.material) }
     ae3d_vk_draw(m.vbo, texture, m.instance_vbo, instances)
 }
 

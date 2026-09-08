@@ -1,0 +1,116 @@
+// A texture asked for after the model was registered has to reach the frame.
+//
+// The renderers resolve a path to a texture once, when the model is registered,
+// and both skipped any material that already had one. So setting a new path
+// wrote it into the material and changed nothing on screen: the model went on
+// drawing the texture it was given first.
+
+import std.mem
+import ae3d.core
+import ae3d.gl
+import ae3d.vk
+import ae3d.offscreen
+import ae3d.loader
+
+const WIDTH = 160
+const HEIGHT = 120
+const PIXELS = WIDTH * HEIGHT * 4
+const FIRST = "resources/obj/Earth/Albedo.jpg"
+const SECOND = "resources/obj/Earth/Clouds.png"
+
+var failures = 0
+
+check_true(name: string, ok: bool) {
+    if !ok {
+        println("FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// The OpenGL path reads back through a pair of buffers, so the frame just drawn
+// is the second read rather than the first.
+frame_total(backend: *Backend, cam: *Camera, light: *Light) -> int {
+    core.backend_render(backend, cam, light)
+    core.backend_frame_pixels(backend)
+    pixels = core.backend_frame_pixels(backend)
+    total = 0
+    i = 0
+    while i < PIXELS {
+        total = total + mem.get_byte(pixels, i)
+        i = i + 1
+    }
+    return total
+}
+
+run_checks(backend: *Backend, name: string) {
+    core.backend_set_clear_color(backend, 0.0, 0.0, 0.0)
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 0.0, 70.0))
+    light = core.light_sun(core.vec3(0.3, 0.8, 0.5))
+
+    globe = loader.sphere(1.0, 24, 18)
+    core.model_set_scale(globe, 20.0, 20.0, 20.0)
+    core.model_set_texture(globe, FIRST)
+    core.backend_add_model(backend, globe)
+
+    first = frame_total(backend, cam, light)
+    check_true("${name} the first texture was drawn", first > 0)
+
+    core.model_set_texture(globe, SECOND)
+    second = frame_total(backend, cam, light)
+    check_true("${name} a texture asked for later reaches the frame", second != first)
+
+    // And back again, so this is the path changing rather than one image being
+    // brighter than the other by luck.
+    core.model_set_texture(globe, FIRST)
+    back = frame_total(backend, cam, light)
+    check_true("${name} and changing back brings the first one back", back == first)
+
+    core.backend_remove_model(backend, globe)
+    core.model_free(globe)
+    core.camera_free(cam)
+    core.light_free(light)
+}
+
+main() {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("texture swap: SKIP no OpenGL context")
+        return
+    }
+
+    renderer = gl.renderer_new()
+    gl_pass = gl.backend(renderer)
+    if !core.backend_init(&gl_pass, context, WIDTH, HEIGHT) {
+        println("texture swap: SKIP the OpenGL backend would not initialise")
+        return
+    }
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    run_checks(&gl_pass, "opengl")
+    core.backend_cleanup(&gl_pass)
+    offscreen.target_destroy(target)
+    gl.renderer_free(renderer)
+    offscreen.context_destroy(context)
+
+    if !vk.available() {
+        println("texture swap: no Vulkan driver (${vk.last_error()}), checked OpenGL only")
+    } else {
+        vk_renderer = vk.renderer_new()
+        vk_pass = vk.backend(vk_renderer)
+        if !core.backend_init(&vk_pass, null, WIDTH, HEIGHT) {
+            println("texture swap: SKIP Vulkan would not start (${vk.last_error()})")
+        } else {
+            run_checks(&vk_pass, "vulkan")
+            core.backend_cleanup(&vk_pass)
+        }
+        vk.renderer_free(vk_renderer)
+    }
+
+    if failures == 0 {
+        println("texture swap: all checks passed")
+    } else {
+        println("texture swap: ${failures} failure(s)")
+    }
+}
