@@ -137,6 +137,18 @@ find_material(materials: ptr, name: string) -> *Material {
     return null
 }
 
+// The classic Blinn-Phong exponent, as a roughness: a mirror-sharp exponent is
+// a smooth surface, a low one is a rough surface. Kept off zero so a highlight
+// never collapses to a point the shader cannot show.
+roughness_of_exponent(exponent: float) -> float {
+    e = exponent
+    if e < 0.0 { e = 0.0 }
+    r = core.sqrt_of(2.0 / (e + 2.0))
+    if r < 0.04 { r = 0.04 }
+    if r > 1.0 { r = 1.0 }
+    return r
+}
+
 load_mtl(path: string) -> ptr {
     materials = list.new()
 
@@ -150,6 +162,9 @@ load_mtl(path: string) -> ptr {
     lines = string.split(content, "\n")
     line_count = string.array_size(lines)
     current = null as *Material
+    // A material that states its roughness outright keeps it, whatever order the
+    // file mentions the old specular exponent in.
+    stated_roughness = false
     base = directory_of(path)
 
     i = 0
@@ -170,6 +185,7 @@ load_mtl(path: string) -> ptr {
         if string.equals(keyword, "newmtl") == 1 && field_count >= 2 {
             current = core.material_new(token(fields, 1))
             list.add_raw(materials, current)
+            stated_roughness = false
         } else if current != null {
             if string.equals(keyword, "Kd") == 1 && field_count >= 4 {
                 current.diffuse = core.vec3(parse_float(token(fields, 1)),
@@ -180,7 +196,12 @@ load_mtl(path: string) -> ptr {
                                              parse_float(token(fields, 2)),
                                              parse_float(token(fields, 3)))
             } else if string.equals(keyword, "Ns") == 1 && field_count >= 2 {
-                current.shininess = parse_float(token(fields, 1))
+                // A specular exponent is the old way of saying how sharp a
+                // highlight is, and this shader asks for roughness instead. The
+                // file used to be read and thrown away.
+                if !stated_roughness {
+                    current.roughness = roughness_of_exponent(parse_float(token(fields, 1)))
+                }
             } else if string.equals(keyword, "d") == 1 && field_count >= 2 {
                 current.alpha = parse_float(token(fields, 1))
             } else if string.equals(keyword, "Tr") == 1 && field_count >= 2 {
@@ -189,6 +210,7 @@ load_mtl(path: string) -> ptr {
                 current.metallic = parse_float(token(fields, 1))
             } else if string.equals(keyword, "Pr") == 1 && field_count >= 2 {
                 current.roughness = parse_float(token(fields, 1))
+                stated_roughness = true
             } else if string.equals(keyword, "map_Kd") == 1 && field_count >= 2 {
                 texture = token(fields, field_count - 1)
                 if string.contains(texture, "/") == 1 || string.contains(texture, "\\") == 1 {

@@ -25,7 +25,6 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     vec3 viewPos;
     vec3 diffuseColor;
     vec3 specularColor;
-    float shininess;
     float metallic;
     float roughness;
     float exposure;
@@ -57,7 +56,6 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     bool enableBloom;
     float bloomThreshold;
     float bloomIntensity;
-    float bloomRadius;
     bool enableShadows;
     bool hasShadowMap;
     float shadowIntensity;
@@ -73,8 +71,6 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float causticsWaterLevel;
     float causticsDepth;
     float causticsTime;
-    bool enableHighQualityFiltering;
-    int filteringQuality;
     mat4 projection;
     mat4 view;
     vec2 texelSize;
@@ -137,7 +133,6 @@ layout(location = 4) in vec4 FragPosLightSpace;
 
 
 
-
 // Modern PBR Extensions
 
 
@@ -177,7 +172,6 @@ layout(location = 4) in vec4 FragPosLightSpace;
 
 
 
-
 // GPU Gems Chapter 9 & 11: Shadow Volume Support with Antialiasing
 
 
@@ -197,9 +191,6 @@ layout(location = 4) in vec4 FragPosLightSpace;
 
 
 
-
-
-// Additional advanced rendering uniforms
 
 
 
@@ -790,7 +781,9 @@ void main() {
     }
 
     // Calculate F0 (surface reflection at zero incidence) with realistic values
-    vec3 F0 = vec3(0.04); // Default for dielectrics
+    // A dielectric reflects about four percent of what hits it head on, tinted
+    // by the material's own specular colour, which is white unless it says so.
+    vec3 F0 = vec3(0.04) * specularColor;
 
     // Use realistic metallic F0 values based on material color
     if (metallic > 0.5) {
@@ -854,9 +847,12 @@ void main() {
 	vec3 gi = calculateGlobalIllumination(FragPos, norm, albedo, distanceToCamera);
 	color += gi;
     
-	// Environment reflections (skybox-based)
-    vec3 envReflection = calculateEnvironmentReflection(norm, viewDir, roughness, metallic);
-	color += envReflection * 0.3; // More visible reflections
+	// Environment reflections (skybox-based), which is what image based lighting
+	// means here: light arriving from the surroundings rather than from a lamp.
+    if (enableImageBasedLighting) {
+        vec3 envReflection = calculateEnvironmentReflection(norm, viewDir, roughness, metallic);
+        color += envReflection * 0.3 * iblIntensity;
+    }
     
     color += caustic_light(FragPos, norm) * albedo;
 
@@ -867,7 +863,7 @@ void main() {
     // Without a map there is nothing to compare against, and the light-space
     // position is meaningless: dividing it by a w of zero used to leave the
     // whole surface darkened by whatever the sampler happened to return.
-    if (hasShadowMap) {
+    if (hasShadowMap && enableShadows) {
         color = color * shadow_factor();
     }
     

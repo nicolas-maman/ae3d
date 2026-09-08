@@ -114,9 +114,10 @@ First working engine.
 - Default, high quality, performance and voxel configurations over the advanced
   features the fragment shader exposes: clearcoat, sheen, transmission, image
   based lighting, procedural noise, soft shadows, volumetric lighting, screen
-  space occlusion, global illumination, bloom and filtering quality. Applying a
-  config writes a model's own uniforms, so two models in one scene can run
-  different settings through the same program.
+  space occlusion, global illumination, caustics and bloom. Applying a config
+  writes a model's own uniforms, so two models in one scene can run different
+  settings through the same program. Every one of them changes the picture, and
+  a test renders the scene twice per setting to say so.
 
 - Caustics on submerged surfaces: the moving web of light a water surface throws
   onto whatever lies under it, on both backends. A config carries the water
@@ -165,6 +166,17 @@ First working engine.
   so a copy came out with everything off. It also abandoned the empty mesh the
   new model was born with and never handed its cloned material to anyone, so
   both leaked; a copy now frees everything it holds.
+
+- Eight settings that did nothing are now real or gone. `specularColor` tints
+  what a dielectric reflects, `enableShadows` decides whether a model receives
+  them, and `enableImageBasedLighting` with `iblIntensity` turn the environment
+  reflection up and down, all of which the shader declared and never read.
+  `shininess` is a specular exponent this shader has no use for, and a model
+  differing only in it was refused a merged draw; a `.mtl` file's `Ns` now
+  becomes the roughness it corresponds to, where before it was parsed and thrown
+  away. Bloom radius belongs to the post pass that has one, and filtering
+  quality is sampler state rather than shading, so both are gone from the config,
+  along with `advanced_lighting`, which nothing ever applied.
 
 ### Portability
 
