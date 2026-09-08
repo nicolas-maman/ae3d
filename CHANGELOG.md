@@ -196,6 +196,16 @@ First working engine.
   symmetrically around its own on every fragment, which cost five normalizes and
   returned the normal it was given, because the offsets cancel.
 
+- The fog colour the water is given is the fog colour it uses. A local of the
+  same name shadowed the uniform inside the fog block, so the surface faded into
+  a shade nobody chose. The time of day still decides the shade and the colour
+  now tints it.
+
+- FXAA reads five pixels rather than nine. Four corner samples were fetched,
+  turned into luma, added into two sums that were the same sum, and never looked
+  at again, so four of every nine reads a full-screen pass made were for
+  nothing. The frames are identical, and backend parity still holds.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve

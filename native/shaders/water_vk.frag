@@ -373,7 +373,6 @@ void main() {
     fresnel = mix(0.02, 0.12, fresnel); // Realistic water reflectivity range
     
     // Natural water specular highlights
-    vec3 reflectDir = reflect(-lightDir, norm);
     float roughness = 0.15; // More realistic water surface roughness
     float NdotH = max(dot(norm, normalize(lightDir + viewDir)), 0.0);
     float roughnessAlpha = roughness * roughness;
@@ -413,25 +412,27 @@ void main() {
     
     // Configurable atmospheric perspective for realistic sky-water transition
     float fogDistance = 0.0;
-    vec3 finalFogColor = fogColor;
     
     if (enableFog) {
         fogDistance = smoothstep(fogStart, fogEnd, distanceFromCamera);
         
-        // Smooth fog color transitions - NO hard conditionals
+        // Smooth fog color transitions - NO hard conditionals. The time of day
+        // decides the shade, and the colour the caller asked for tints it: a
+        // local of the same name used to hide that uniform completely.
         vec3 nightFog = vec3(0.3, 0.4, 0.5);
         vec3 duskFog = mix(vec3(0.4, 0.5, 0.6), skyColor, 0.4);
         vec3 dayFog = vec3(0.4, 0.5, 0.6);
         
-        vec3 fogColor = mix(dayFog, duskFog, duskFactor);
-        fogColor = mix(fogColor, nightFog, nightFactor);
+        vec3 timeOfDayFog = mix(dayFog, duskFog, duskFactor);
+        timeOfDayFog = mix(timeOfDayFog, nightFog, nightFactor);
+        vec3 shade = timeOfDayFog * fogColor * 2.0;
         
         // Smooth fog intensity scaling
         float nightFogScale = mix(1.0, 0.5, nightFactor);
         float duskFogScale = mix(1.0, 0.8, duskFactor);
         float adaptiveFogIntensity = fogIntensity * nightFogScale * duskFogScale;
         
-        waterColor = mix(waterColor, fogColor, fogDistance * adaptiveFogIntensity * 0.3);
+        waterColor = mix(waterColor, shade, fogDistance * adaptiveFogIntensity * 0.3);
     }
     
     // Modern PBR lighting for realistic water
