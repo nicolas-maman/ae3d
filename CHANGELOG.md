@@ -373,6 +373,14 @@ First working engine.
   by hand. `engine_on_fixed_update` is called once per step that fits in the
   frame, with the step rather than the frame's own delta.
 
+- The OpenGL post-processing buffers follow the viewport. They are resized by
+  comparing the viewport against the size recorded on the renderer, and updating
+  the viewport recorded the new size without resizing them, so that comparison
+  was always equal and they stayed as they were. With FXAA or bloom on, a
+  viewport made smaller drew the frame at the old size and stretched it over the
+  new one: a third of the pixels Vulkan lit. Every resize in the parity suite had
+  the composites switched off, which is why nothing saw it.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve

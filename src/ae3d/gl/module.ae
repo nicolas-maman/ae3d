@@ -1110,7 +1110,18 @@ renderer_update_viewport(r: *GLRenderer, width: int, height: int) {
     r.viewport_width = width
     r.viewport_height = height
     if r.target != null { ae3d_offscreen_resize(r.target, width, height) }
+
+    // The scene is drawn into the post buffers before an effect composites it,
+    // and they are resized lazily by comparing the viewport against the size
+    // recorded here. Recording the new size without resizing them left that
+    // comparison always equal, so they stayed the size they were: with FXAA or
+    // bloom on, a viewport made smaller drew the frame at the old size and
+    // stretched it over the new one, lighting a third of the pixels it should.
+    if r.post_fbo != 0 && (r.post_width != width || r.post_height != height) {
+        resize_post_processing(r, width, height)
+    }
 }
+
 
 vtable_shadows(r: *GLRenderer) -> int {
     if renderer_shadows(r) { return 1 }
