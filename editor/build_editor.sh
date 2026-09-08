@@ -44,7 +44,18 @@ if [ -z "$AETHER_CFLAGS" ]; then
     echo "ae3d: 'ae cflags' produced nothing; is the toolchain on PATH?" >&2
     exit 1
 fi
-AETHER_INCLUDES="$(printf '%s\n' $AETHER_CFLAGS | grep -E '^-I' | tr '\n' ' ')"
+# The compile half, whole, exactly as ../build.sh takes it and for the same
+# reason: $GEN is Aether's generated C, and -fwrapv is what makes its `int`
+# arithmetic wrap the way the language reference says it does. Filtering the
+# toolchain flags down to -I drops it.
+AETHER_COMPILE_FLAGS="$(ae cflags --cflags 2>/dev/null || true)"
+if [ -z "$AETHER_COMPILE_FLAGS" ]; then
+    AETHER_COMPILE_FLAGS="$(printf '%s\n' $AETHER_CFLAGS | grep -E '^-I' | tr '\n' ' ')"
+fi
+case " $AETHER_COMPILE_FLAGS " in
+    *" -fwrapv "*) ;;
+    *) AETHER_COMPILE_FLAGS="$AETHER_COMPILE_FLAGS -fwrapv" ;;
+esac
 
 if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists glfw3; then
     GLFW_CFLAGS="$(pkg-config --cflags glfw3)"
@@ -112,7 +123,7 @@ export AETHER_LIB_DIR="$ROOT/src:$UI_ROOT"
 aetherc "$SOURCE" "$GEN"
 
 "$CC" $CFLAGS $UI_FLAGS "$GEN" $UI_SOURCES $OBJ_DIR/*.o \
-    $AETHER_INCLUDES $AETHER_LIBS $GLFW_LIBS $PLATFORM_LIBS \
+    $AETHER_COMPILE_FLAGS $AETHER_LIBS $GLFW_LIBS $PLATFORM_LIBS \
     -o "$OUT"
 
 echo "built: $OUT"

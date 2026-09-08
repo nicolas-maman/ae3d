@@ -1,0 +1,209 @@
+// The bulk instance-position upload has to put every instance where it was told.
+//
+// `model_set_instance_positions` writes a whole packed xyz array into the
+// instance buffer in one call, which is what a particle system needs and what
+// examples/black_hole.ae uses for its 200,000 particles. Nothing covered it:
+// test_instances.ae drives the per-index `model_set_instance_position`, so a
+// swarm that arrived on the GPU stacked in a single spot passed CI and rendered
+// as a black window.
+//
+// That is what happened on Windows. The seeder is a textbook LCG, whose whole
+// job is to overflow:
+//
+//     g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
+//
+// Aether's `int` wraps and its constant folder wraps to match, but the C the
+// compiler emits leaves signed overflow undefined, and GCC 15.2 at -O2 folded
+// the generator down to a three-value cycle. Every particle drew the same three
+// numbers, so every instance landed on the same point. The fix is `-fwrapv` on
+// the command line that compiles the generated C (aether#1957, build.sh here);
+// this test is what notices when it goes missing again.
+//
+// Two independent checks, because the two failures look identical on screen:
+// the generator has to produce the documented sequence, and the frame has to
+// show a swarm spread across it rather than one clump.
+
+import std.mem
+import ae3d.core
+import ae3d.gl
+import ae3d.offscreen
+import ae3d.loader
+
+const WIDTH = 320
+const HEIGHT = 200
+const COUNT = 4096
+
+extern calloc(count: int, size: int) -> ptr
+extern free(block: ptr)
+
+var failures = 0
+var g_seed = 987654321
+var g_radius = 0.0
+var g_angle = 0.0
+var g_height = 0.0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+next_random() -> int {
+    g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
+    return g_seed
+}
+
+scaled() -> float {
+    return (next_random() * 1.0) / 2147483647.0
+}
+
+// Deliberately the shape the optimiser collapsed: three draws from a helper,
+// called in a loop. One draw inlined into main() is not enough to reproduce it.
+draw_particle() {
+    g_radius = 260.0 + scaled() * 420.0
+    g_angle = scaled() * core.TWO_PI
+    g_height = (scaled() - 0.5) * 90.0
+}
+
+// Lit columns of the frame, sampled on a grid. A swarm spread around the black
+// hole lights most of them; every instance stacked on one point lights a few.
+lit_columns(pixels: ptr) -> int {
+    columns = 0
+    x = 0
+    while x < WIDTH {
+        y = 0
+        lit = false
+        while y < HEIGHT {
+            index = (y * WIDTH + x) * 4
+            level = mem.get_byte(pixels, index) +
+                    mem.get_byte(pixels, index + 1) +
+                    mem.get_byte(pixels, index + 2)
+            if level > 24 { lit = true }
+            y = y + 1
+        }
+        if lit { columns = columns + 1 }
+        x = x + 1
+    }
+    return columns
+}
+
+main() {
+    // 1. The generator itself. Pinning the first draws names the failure
+    //    instead of leaving a dark frame to be explained.
+    check("the generator wraps: draw 1", next_random() == 1048490390)
+    check("the generator wraps: draw 2", next_random() == 638681367)
+    check("the generator wraps: draw 3", next_random() == 965945604)
+    g_seed = 987654321
+
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("instance_positions: SKIP no OpenGL context")
+        return
+    }
+
+    renderer = gl.renderer_new()
+    backend = gl.backend(renderer)
+    if !core.backend_init(&backend, context, WIDTH, HEIGHT) {
+        println("instance_positions: SKIP the OpenGL backend would not initialise")
+        return
+    }
+
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    gl.renderer_set_clear_color(renderer, 0.0, 0.0, 0.0)
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 520.0, 1150.0))
+    core.camera_set_far(cam, 40000.0)
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+
+    key = core.light_directional(core.vec3(0.0, 0.0 - 1.0, 0.0 - 0.3),
+                                 core.vec3(1.0, 1.0, 1.0), 3.0)
+    key.ambient_strength = 0.4
+    gl.renderer_add_light(renderer, key)
+
+    core.backend_render(&backend, cam, key)
+    empty = offscreen.target_pixels(target)
+    if empty == null {
+        println("instance_positions: SKIP no pixels")
+        return
+    }
+    empty_columns = lit_columns(empty)
+
+    swarm = loader.sphere(1.0, 8, 6)
+    core.model_set_scale(swarm, 14.0, 14.0, 14.0)
+    core.model_matte(swarm, 0.9, 0.9, 0.9)
+    if !core.model_enable_instancing(swarm, COUNT) {
+        println("instance_positions: SKIP instancing is unavailable")
+        return
+    }
+
+    positions = calloc(COUNT * 3, 8)
+    xyz = positions as float[]
+    lowest = 1000.0
+    highest = 0.0 - 1000.0
+    i = 0
+    while i < COUNT {
+        draw_particle()
+        xyz[i * 3] = g_radius * core.cos_of(g_angle)
+        xyz[i * 3 + 1] = g_height
+        xyz[i * 3 + 2] = g_radius * core.sin_of(g_angle)
+        if g_height < lowest { lowest = g_height }
+        if g_height > highest { highest = g_height }
+        i = i + 1
+    }
+
+    // The third draw of each particle is the one the collapsed generator
+    // pinned: every height came back as (12345 / 2^31 - 0.5) * 90 = -44.9995,
+    // so the whole swarm sat on one plane. Naming it here turns a dark frame
+    // into a diagnosis.
+    check("the third draw varies between particles", highest - lowest > 60.0)
+
+    // The seeded ring has to be a ring on the CPU side too, whatever the
+    // renderer later does with it.
+    spread = 0.0
+    i = 0
+    while i < COUNT {
+        dx = xyz[i * 3] - xyz[0]
+        if dx < 0.0 { dx = 0.0 - dx }
+        if dx > spread { spread = dx }
+        i = i + 1
+    }
+    check("the seeded positions span the ring", spread > 200.0)
+
+    core.model_set_instance_positions(swarm, positions, COUNT)
+    core.backend_add_model(&backend, swarm)
+
+    core.backend_render(&backend, cam, key)
+    pixels = offscreen.target_pixels(target)
+    filled_columns = lit_columns(pixels)
+
+    check("the instanced swarm reaches the frame", filled_columns > empty_columns)
+
+    // A swarm of 4096 spheres around a 260-680 unit ring covers most of the
+    // width. Every instance stacked on one point covers a handful of columns,
+    // which is the shape this test exists to reject; half the width is far
+    // above that and far below what a correct frame produces.
+    check("the swarm is spread across the frame, not stacked on one point",
+          filled_columns > WIDTH / 2)
+
+    println("  lit columns: ${filled_columns} of ${WIDTH} (empty scene: ${empty_columns})")
+
+    core.backend_cleanup(&backend)
+    offscreen.target_destroy(target)
+    offscreen.context_destroy(context)
+    core.model_free(swarm)
+    gl.renderer_free(renderer)
+    core.camera_free(cam)
+    core.light_free(key)
+    free(positions)
+
+    if failures == 0 {
+        println("instance_positions: all checks passed")
+    } else {
+        println("instance_positions: ${failures} failure(s)")
+    }
+}
