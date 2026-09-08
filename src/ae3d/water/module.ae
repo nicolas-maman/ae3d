@@ -16,7 +16,14 @@ exports (
     simulation_set_wave_height, simulation_set_amplitude, simulation_amplitude,
     simulation_set_wave_speed, simulation_set_randomness,
     simulation_set_caustics, simulation_set_reflection, simulation_set_shadow,
-    simulation_set_distortion, simulation_set_normal_strength
+    simulation_set_distortion, simulation_set_normal_strength,
+    simulation_adopt, simulation_size,
+    simulation_color_r, simulation_color_g, simulation_color_b,
+    simulation_sky_r, simulation_sky_g, simulation_sky_b,
+    simulation_transparency, simulation_wave_speed, simulation_wave_height,
+    simulation_randomness, simulation_caustics_on, simulation_caustics_intensity,
+    simulation_caustics_scale, simulation_reflection, simulation_shadow,
+    simulation_distortion, simulation_normal
 )
 
 extern ae3d_farr_set(arr: ptr, i: int, v: float)
@@ -85,6 +92,39 @@ simulation_free(w: *Simulation) {
 simulation_model(w: *Simulation) -> *Model {
     return w.model as *Model
 }
+
+// Take over a surface that already exists, instead of building one. A scene
+// loads its water as an ordinary model with the wave table and the shader it
+// was saved with, and this is what puts a simulation behind it again so it
+// animates and the editor's controls reach it.
+//
+// The surface keeps the geometry it was loaded with: rebuilding it here would
+// throw away the mesh the scene just read and replace it with one generated
+// from the same numbers, which is slower and not obviously the same thing.
+simulation_adopt(w: *Simulation, m: *Model) {
+    if w == null { return }
+    w.model = m as ptr
+    simulation_apply(w)
+}
+
+simulation_size(w: *Simulation) -> float { return w.ocean_size }
+simulation_color_r(w: *Simulation) -> float { return w.color_r }
+simulation_color_g(w: *Simulation) -> float { return w.color_g }
+simulation_color_b(w: *Simulation) -> float { return w.color_b }
+simulation_sky_r(w: *Simulation) -> float { return w.sky_r }
+simulation_sky_g(w: *Simulation) -> float { return w.sky_g }
+simulation_sky_b(w: *Simulation) -> float { return w.sky_b }
+simulation_transparency(w: *Simulation) -> float { return w.transparency }
+simulation_wave_speed(w: *Simulation) -> float { return w.wave_speed_multiplier }
+simulation_wave_height(w: *Simulation) -> float { return w.wave_height }
+simulation_randomness(w: *Simulation) -> float { return w.wave_randomness }
+simulation_caustics_on(w: *Simulation) -> bool { return w.caustics_enabled }
+simulation_caustics_intensity(w: *Simulation) -> float { return w.caustics_intensity }
+simulation_caustics_scale(w: *Simulation) -> float { return w.caustics_scale }
+simulation_reflection(w: *Simulation) -> float { return w.reflection_intensity }
+simulation_shadow(w: *Simulation) -> float { return w.shadow_strength }
+simulation_distortion(w: *Simulation) -> float { return w.distortion_strength }
+simulation_normal(w: *Simulation) -> float { return w.normal_strength }
 
 // Everything the surface is told goes into the uniforms it draws from. Left to
 // build time alone, as it was, a setting made after the surface existed changed

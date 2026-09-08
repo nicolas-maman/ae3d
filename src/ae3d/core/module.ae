@@ -932,9 +932,22 @@ shader_valid(s: *Shader) -> bool {
 // A struct owns its string fields: heap.free releases them, so a destructor
 // only has to free what the struct does not own. Reassignment is the one place
 // a string is released by hand, and that is what this does.
+// Copy BEFORE releasing, because `value` is allowed to be `previous`.
+// Assigning a field back to itself is the ordinary way that happens:
+// `model_set_name(m, core.text(m.name))`, which is how the editor re-adds
+// every model when it loads a scene. Freeing first read the bytes it had just
+// released, and the editor crashed in the widget that drew the row.
+//
+// Copying unconditionally rather than returning `previous` early when the two
+// match: the early return gives this function one path that hands back a
+// borrowed parameter and one that hands back a fresh string, and with it
+// tests/test_scene_io leaks two of the loader's strings. Measured both ways;
+// not reduced to a smaller case. One copy on self-assignment is worth more than
+// a shape whose ownership depends on which branch ran.
 set_owned(previous: string, value: string) -> string {
+    fresh = string.copy(value)
     if previous != null { string.free(previous) }
-    return string.copy(value)
+    return fresh
 }
 
 material_new(name: string) -> *Material {

@@ -7,16 +7,64 @@
 // is neither cheap nor guaranteed to reproduce the same thing.
 
 import std.list
+import std.heap
 import std.fs
 import std.json
 import std.string
 import ae3d.core
 import ae3d.loader
 import ae3d.shaders
+import ae3d.water
 
 exports (
-    scene_save, scene_load, scene_load_lights, scene_free, last_error
+    scene_save, scene_load, scene_load_lights, scene_load_attachments,
+    scene_load_view, view_defaults, View, Attachment, attachment_new,
+    attachment_model, attachment_component, attachment_script, attachment_water,
+    attachments_free, scene_free, last_error
 )
+
+// What is attached to a model besides its mesh and material: which kind of
+// thing it is, the behaviour running on it, and the water simulation driving
+// it. Gopher3D's scene file carries the same idea as a list of components with
+// a type and a category; this is that, typed, and matched to its model by the
+// model itself so the two cannot drift apart.
+//
+// One list rather than one per kind: water, scripts and light markers are all
+// "something attached to this model", and a parameter per kind is three of the
+// same thing.
+struct Attachment {
+    model: ptr
+    component: string
+    script: string
+    water: ptr
+}
+
+// What a scene records besides its models and lights: where the camera stood,
+// what the sky was, and the render settings in force. Gopher3D's scene file
+// carries all three and ae3d's carried none, so a saved scene came back framed
+// somewhere else, under a different sky, with the post chain off.
+struct View {
+    camera_x: float
+    camera_y: float
+    camera_z: float
+    yaw: float
+    pitch: float
+    fov: float
+    near: float
+    far: float
+    speed: float
+
+    sky_r: float
+    sky_g: float
+    sky_b: float
+
+    fxaa: bool
+    bloom: bool
+    bloom_threshold: float
+    bloom_intensity: float
+    face_culling: bool
+    frustum_culling: bool
+}
 
 extern ae3d_meshfile_save(path: string, mesh: ptr, instances: ptr) -> int
 extern ae3d_meshfile_load(path: string) -> ptr
@@ -105,20 +153,119 @@ load_light(node: ptr) -> *Light {
 // The lights a scene was saved with, or null where it has none. Files written
 // before scenes carried lights simply have none, and the caller keeps whatever
 // it was already lighting with.
-scene_load_lights(path: string) -> ptr {
-    text, err = fs.read(path)
-    if err != "" {
-        set_error("cannot read ", path)
-        string.free(text)
+// What was attached to the models a scene was just loaded, in the same order.
+// Read separately from scene_load for the same reason the lights are: a caller
+// that only wants models asks for models and gets them.
+//
+// One record per model that has anything attached, and none for the rest. Free
+// the list with attachments_free; the simulations in it belong to the caller.
+scene_load_attachments(path: string, models: ptr) -> ptr {
+    if models == null { return null }
+    root = read_root(path)
+    if root == null { return null }
+
+    entries = json.object_get_raw(root, "models")
+    if entries == null {
+        json.free(root)
         return null
     }
 
-    root = json.parse_raw(text)
-    string.free(text)
-    if root == null {
-        set_error("cannot parse ", path)
-        return null
+    attachments = list.new()
+    count = json.array_size(entries)
+    if count > list.size(models) { count = list.size(models) }
+    i = 0
+    while i < count {
+        entry = json.array_get_raw(entries, i)
+        m = list.get_raw(models, i) as *Model
+        component = field_string(entry, "component")
+        script = field_string(entry, "script")
+        sim = null as *Simulation
+        node = json.object_get_raw(entry, "water")
+        if node != null {
+            w = water.simulation_new(field_number(node, "ocean_size", 1000.0),
+                                     field_number(node, "base_amplitude", 1.0))
+            colour = json.object_get_raw(node, "color")
+            water.simulation_set_color(w, number_at(colour, 0),
+                                       number_at(colour, 1), number_at(colour, 2))
+            sky = json.object_get_raw(node, "sky_color")
+            water.simulation_set_sky_color(w, number_at(sky, 0),
+                                           number_at(sky, 1), number_at(sky, 2))
+            water.simulation_set_transparency(w, field_number(node, "transparency", 0.85))
+            water.simulation_set_wave_speed(w, field_number(node, "wave_speed", 1.0))
+            water.simulation_set_wave_height(w, field_number(node, "wave_height", 1.0))
+            water.simulation_set_randomness(w, field_number(node, "wave_randomness", 0.0))
+            water.simulation_set_caustics(w, field_bool(node, "caustics", false),
+                                          field_number(node, "caustics_intensity", 0.3),
+                                          field_number(node, "caustics_scale", 0.003))
+            water.simulation_set_reflection(w, field_number(node, "reflection", 1.0))
+            water.simulation_set_shadow(w, field_number(node, "shadow", 0.5))
+            water.simulation_set_distortion(w, field_number(node, "distortion", 0.2))
+            water.simulation_set_normal_strength(w, field_number(node, "normal_strength", 1.0))
+            water.simulation_adopt(w, m)
+            sim = w
+        }
+        if component != "" || script != "" || sim != null {
+            list.add_raw(attachments, attachment_new(m, component, script, sim) as ptr)
+        }
+        i = i + 1
     }
+    json.free(root)
+    return attachments
+}
+
+// Where the camera stood, what the sky was, and the render settings in force.
+// A file written before scenes carried them gets the defaults, so an old scene
+// opens the way it always did rather than at the origin under a black sky.
+scene_load_view(path: string) -> View {
+    v = view_defaults()
+    root = read_root(path)
+    if root == null { return v }
+
+    node = json.object_get_raw(root, "view")
+    if node == null {
+        json.free(root)
+        return v
+    }
+
+    position = json.object_get_raw(node, "position")
+    if position != null {
+        v.camera_x = number_at(position, 0)
+        v.camera_y = number_at(position, 1)
+        v.camera_z = number_at(position, 2)
+    }
+    v.yaw = field_number(node, "yaw", v.yaw)
+    v.pitch = field_number(node, "pitch", v.pitch)
+    v.fov = field_number(node, "fov", v.fov)
+    v.near = field_number(node, "near", v.near)
+    v.far = field_number(node, "far", v.far)
+    v.speed = field_number(node, "speed", v.speed)
+
+    sky = json.object_get_raw(node, "skybox")
+    if sky != null {
+        colour = json.object_get_raw(sky, "color")
+        if colour != null {
+            v.sky_r = number_at(colour, 0)
+            v.sky_g = number_at(colour, 1)
+            v.sky_b = number_at(colour, 2)
+        }
+    }
+
+    render = json.object_get_raw(node, "rendering")
+    if render != null {
+        v.fxaa = field_bool(render, "fxaa", v.fxaa)
+        v.bloom = field_bool(render, "bloom", v.bloom)
+        v.bloom_threshold = field_number(render, "bloom_threshold", v.bloom_threshold)
+        v.bloom_intensity = field_number(render, "bloom_intensity", v.bloom_intensity)
+        v.face_culling = field_bool(render, "face_culling", v.face_culling)
+        v.frustum_culling = field_bool(render, "frustum_culling", v.frustum_culling)
+    }
+    json.free(root)
+    return v
+}
+
+scene_load_lights(path: string) -> ptr {
+    root = read_root(path)
+    if root == null { return null }
 
     entries = json.object_get_raw(root, "lights")
     if entries == null {
@@ -136,6 +283,130 @@ scene_load_lights(path: string) -> ptr {
     }
     json.free(root)
     return lights
+}
+
+// A water surface's simulation, written onto the model entry it drives. The
+// mesh already round-trips; this is the state that decides how it moves and
+// what it looks like, and without it a loaded surface was a mesh with no
+// simulation behind it: static, and with none of the editor's controls
+// reaching it.
+water_json(w: *Simulation) -> ptr {
+    out = json.obj()
+    json.object_set_raw(out, "ocean_size", json.num(water.simulation_size(w)))
+    json.object_set_raw(out, "base_amplitude", json.num(water.simulation_amplitude(w)))
+    colour = json.arr()
+    json.array_add_raw(colour, json.num(water.simulation_color_r(w)))
+    json.array_add_raw(colour, json.num(water.simulation_color_g(w)))
+    json.array_add_raw(colour, json.num(water.simulation_color_b(w)))
+    json.object_set_raw(out, "color", colour)
+    sky = json.arr()
+    json.array_add_raw(sky, json.num(water.simulation_sky_r(w)))
+    json.array_add_raw(sky, json.num(water.simulation_sky_g(w)))
+    json.array_add_raw(sky, json.num(water.simulation_sky_b(w)))
+    json.object_set_raw(out, "sky_color", sky)
+    json.object_set_raw(out, "transparency", json.num(water.simulation_transparency(w)))
+    json.object_set_raw(out, "wave_speed", json.num(water.simulation_wave_speed(w)))
+    json.object_set_raw(out, "wave_height", json.num(water.simulation_wave_height(w)))
+    json.object_set_raw(out, "wave_randomness", json.num(water.simulation_randomness(w)))
+    json.object_set_raw(out, "caustics", json.boolean(water.simulation_caustics_on(w)))
+    json.object_set_raw(out, "caustics_intensity", json.num(water.simulation_caustics_intensity(w)))
+    json.object_set_raw(out, "caustics_scale", json.num(water.simulation_caustics_scale(w)))
+    json.object_set_raw(out, "reflection", json.num(water.simulation_reflection(w)))
+    json.object_set_raw(out, "shadow", json.num(water.simulation_shadow(w)))
+    json.object_set_raw(out, "distortion", json.num(water.simulation_distortion(w)))
+    json.object_set_raw(out, "normal_strength", json.num(water.simulation_normal(w)))
+    return out
+}
+
+// The two names are COPIED. A reader takes them from the parsed document and
+// the document is freed before the caller looks at them, so borrowing here
+// hands back two pointers into released memory.
+attachment_new(m: *Model, component: string, script: string, w: *Simulation) -> *Attachment {
+    a = heap.new(Attachment)
+    a.model = m as ptr
+    a.component = string.copy(component)
+    a.script = string.copy(script)
+    a.water = w as ptr
+    return a
+}
+
+attachment_model(a: *Attachment) -> *Model { return a.model as *Model }
+attachment_component(a: *Attachment) -> string { return a.component }
+attachment_script(a: *Attachment) -> string { return a.script }
+attachment_water(a: *Attachment) -> *Simulation { return a.water as *Simulation }
+
+// The records themselves, not what they point at: a simulation handed back by
+// scene_load_attachments belongs to the caller and outlives the list.
+attachments_free(attachments: ptr) {
+    if attachments == null { return }
+    count = list.size(attachments)
+    i = 0
+    while i < count {
+        // heap.free releases the two names with it; releasing them by hand
+        // first is the double free docs/string_ownership.md warns about.
+        heap.free(list.get_raw(attachments, i) as *Attachment)
+        i = i + 1
+    }
+    list.free(attachments)
+}
+
+// What is attached to this model, or null. Matched by the model itself rather
+// than by position in a list, so the two cannot drift apart.
+attachment_for(attachments: ptr, m: *Model) -> *Attachment {
+    if attachments == null { return null }
+    count = list.size(attachments)
+    i = 0
+    while i < count {
+        a = list.get_raw(attachments, i) as *Attachment
+        if a != null && a.model == m as ptr { return a }
+        i = i + 1
+    }
+    return null
+}
+
+view_defaults() -> View {
+    return View {
+        camera_x: 0.0, camera_y: 0.0, camera_z: 0.0,
+        yaw: 0.0 - 90.0, pitch: 0.0, fov: 45.0,
+        near: 0.1, far: 10000.0, speed: 100.0,
+        sky_r: 0.0, sky_g: 0.0, sky_b: 0.0,
+        fxaa: false, bloom: false,
+        bloom_threshold: 1.0, bloom_intensity: 1.0,
+        face_culling: false, frustum_culling: false
+    }
+}
+
+view_json(v: *View) -> ptr {
+    out = json.obj()
+    position = json.arr()
+    json.array_add_raw(position, json.num(v.camera_x))
+    json.array_add_raw(position, json.num(v.camera_y))
+    json.array_add_raw(position, json.num(v.camera_z))
+    json.object_set_raw(out, "position", position)
+    json.object_set_raw(out, "yaw", json.num(v.yaw))
+    json.object_set_raw(out, "pitch", json.num(v.pitch))
+    json.object_set_raw(out, "fov", json.num(v.fov))
+    json.object_set_raw(out, "near", json.num(v.near))
+    json.object_set_raw(out, "far", json.num(v.far))
+    json.object_set_raw(out, "speed", json.num(v.speed))
+
+    sky = json.obj()
+    colour = json.arr()
+    json.array_add_raw(colour, json.num(v.sky_r))
+    json.array_add_raw(colour, json.num(v.sky_g))
+    json.array_add_raw(colour, json.num(v.sky_b))
+    json.object_set_raw(sky, "color", colour)
+    json.object_set_raw(out, "skybox", sky)
+
+    render = json.obj()
+    json.object_set_raw(render, "fxaa", json.boolean(v.fxaa))
+    json.object_set_raw(render, "bloom", json.boolean(v.bloom))
+    json.object_set_raw(render, "bloom_threshold", json.num(v.bloom_threshold))
+    json.object_set_raw(render, "bloom_intensity", json.num(v.bloom_intensity))
+    json.object_set_raw(render, "face_culling", json.boolean(v.face_culling))
+    json.object_set_raw(render, "frustum_culling", json.boolean(v.frustum_culling))
+    json.object_set_raw(out, "rendering", render)
+    return out
 }
 
 uniforms_json(m: *Model) -> ptr {
@@ -231,6 +502,27 @@ quat_of(node: ptr) -> Quat {
                      number_at(node, 2), number_at(node, 3))
 }
 
+// Read and parse a scene file. Three readers open the same file for different
+// parts of it, and each one used to spell this out again.
+read_root(path: string) -> ptr {
+    text, err = fs.read(path)
+    if err != "" {
+        set_error("cannot read ", path)
+        string.free(text)
+        return null
+    }
+    root = json.parse_raw(text)
+    string.free(text)
+    if root == null { set_error("cannot parse ", path) }
+    return root
+}
+
+field_bool(node: ptr, name: string, fallback: bool) -> bool {
+    value = json.object_get_raw(node, name)
+    if value == null { return fallback }
+    return json.get_bool(value) == 1
+}
+
 field_number(node: ptr, name: string, fallback: float) -> float {
     child = json.object_get_raw(node, name)
     if child == null { return fallback }
@@ -289,7 +581,8 @@ mesh_file_for(directory: string, index: int) -> string {
 
 // A model that came from a file records only its path. Anything else has its
 // geometry written out, because it cannot be reconstructed from the scene alone.
-scene_save(models: ptr, lights: ptr, path: string, mesh_directory: string) -> bool {
+scene_save(models: ptr, lights: ptr, attachments: ptr, view: *View,
+           path: string, mesh_directory: string) -> bool {
     if models == null { set_error("nothing to save to ", path) ; return false }
 
     root = json.obj()
@@ -310,6 +603,17 @@ scene_save(models: ptr, lights: ptr, path: string, mesh_directory: string) -> bo
             json.object_set_raw(entry, "visible", json.boolean(m.visible))
             json.object_set_raw(entry, "casts_shadow", json.boolean(m.casts_shadow))
             json.object_set_raw(entry, "uniforms", uniforms_json(m))
+            attached = attachment_for(attachments, m)
+            if attached != null {
+                if attached.component != "" {
+                    json.object_set_raw(entry, "component", json.str(attached.component))
+                }
+                if attached.script != "" {
+                    json.object_set_raw(entry, "script", json.str(attached.script))
+                }
+                sim = attachment_water(attached)
+                if sim != null { json.object_set_raw(entry, "water", water_json(sim)) }
+            }
             // Which shader draws it, for the named ones. The source text is not
             // written: a scene is not the place to carry a copy of the GLSL, and
             // a named kind is exactly what the backend picks its pipeline by.
@@ -356,6 +660,8 @@ scene_save(models: ptr, lights: ptr, path: string, mesh_directory: string) -> bo
         }
         json.object_set_raw(root, "lights", beams)
     }
+
+    if view != null { json.object_set_raw(root, "view", view_json(view)) }
 
     text = json.stringify_raw(root)
     json.free(root)

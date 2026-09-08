@@ -70,6 +70,30 @@ Bob moves by the derivative of its own curve rather than to an absolute height,
 so it needs no memory of where the object started and still works after the
 object is dragged somewhere else.
 
+## What a scene keeps
+
+Saving writes more than the models. Each model records what is attached to it,
+which is how a water surface comes back as water rather than as a mesh with a
+wave table nothing reads:
+
+| | |
+|---|---|
+| component | `water`, `voxel`, `light` or `mesh` |
+| script | the behaviour running on it, if any |
+| water | every knob of the simulation driving it |
+
+and the file records the view: where the camera stood, its field of view and
+clip planes, and whether face and frustum culling were on.
+
+A voxel component comes back as a voxel row over the mesh it was saved as, but
+its grid is not rebuilt, so it is not editable again. That is
+[#89](https://github.com/nicolas-maman/ae3d/issues/89).
+
+`AE3D_EDITOR_SCENE=roundtrip` builds the component scene, saves it and opens it
+again before the run starts, so the report describes what came back rather than
+what was built. CI asserts the same component counts for it as for the scene
+built directly, which is what catches a component the file does not carry.
+
 ## Running it bounded
 
 The editor takes a few environment variables, which is how CI drives it:
@@ -80,6 +104,7 @@ The editor takes a few environment variables, which is how CI drives it:
 | `AE3D_EDITOR_SNAPSHOT=path` | write the viewport to a PNG on the last frame |
 | `AE3D_EDITOR_REPORT=path` | write what the editor built to a text file |
 | `AE3D_EDITOR_SCENE=components` | start with water, voxels, a light and a behaviour |
+| `AE3D_EDITOR_SCENE=roundtrip` | the same, saved and loaded again before the run |
 | `AE3D_EDITOR_DRIVER=1` | serve the widget tree on `127.0.0.1:9222` |
 | `AE3D_EDITOR_BACKEND=vulkan` | use the Vulkan renderer if a driver exists |
 

@@ -105,7 +105,7 @@ water_roundtrip() {
     check_true("the surface starts with a wave table", want_waves > 0)
     check_true("the wave table starts with a frequency", want_first != 0.0)
 
-    if !scene.scene_save(models, lights, path, directory) {
+    if !scene.scene_save(models, lights, null, null, path, directory) {
         record_failure("water scene did not save: ${scene.last_error()}")
         return
     }
@@ -132,6 +132,129 @@ water_roundtrip() {
     water.simulation_free(sim)
     list.free(models)
     list.free(lights)
+}
+
+// The simulation behind a surface, and the view the scene was framed in. A
+// scene that keeps the mesh and loses these loads back static, unlit by the
+// post chain, and pointing somewhere else.
+components_roundtrip() {
+    directory = "build/scene_components/"
+    fs.mkdir_p(directory)
+    path = "build/scene_components/scene.json"
+
+    sim = water.simulation_new(1234.0, 3.5)
+    surface = water.simulation_build(sim, 16)
+    if surface == null {
+        record_failure("water surface could not be built")
+        return
+    }
+    water.simulation_set_color(sim, 0.11, 0.22, 0.33)
+    water.simulation_set_transparency(sim, 0.61)
+    water.simulation_set_wave_height(sim, 0.77)
+    water.simulation_set_caustics(sim, true, 0.44, 0.0055)
+    water.simulation_set_shadow(sim, 0.29)
+
+    models = list.new()
+    list.add_raw(models, surface as ptr)
+    attachments = list.new()
+    list.add_raw(attachments, scene.attachment_new(surface, "water", "spin", sim) as ptr)
+    lights = list.new()
+
+    view = scene.view_defaults()
+    view.camera_x = 12.0
+    view.camera_y = 34.0
+    view.camera_z = 56.0
+    view.yaw = 0.0 - 33.0
+    view.pitch = 12.5
+    view.fov = 62.0
+    view.far = 4321.0
+    view.sky_r = 0.2
+    view.sky_g = 0.4
+    view.sky_b = 0.6
+    view.fxaa = true
+    view.bloom = true
+    view.bloom_intensity = 1.75
+    view.frustum_culling = true
+
+    if !scene.scene_save(models, lights, attachments, &view, path, directory) {
+        record_failure("component scene did not save: ${scene.last_error()}")
+        return
+    }
+    loaded = scene.scene_load(path)
+    if loaded == null {
+        record_failure("component scene did not load: ${scene.last_error()}")
+        return
+    }
+
+    restored = null as *Simulation
+    back = scene.scene_load_attachments(path, loaded)
+    check_true("the scene carries what was attached", back != null)
+    if back != null {
+        check_int("one attachment came back", list.size(back), 1)
+        if list.size(back) == 1 {
+            a = list.get_raw(back, 0) as *Attachment
+            check_true("the component kind came back",
+                       string.equals(scene.attachment_component(a), "water") == 1)
+            check_true("the script came back",
+                       string.equals(scene.attachment_script(a), "spin") == 1)
+            w = scene.attachment_water(a)
+            check_near("ocean size", water.simulation_size(w), 1234.0)
+            check_near("base amplitude", water.simulation_amplitude(w), 3.5)
+            check_near("colour red", water.simulation_color_r(w), 0.11)
+            check_near("colour blue", water.simulation_color_b(w), 0.33)
+            check_near("transparency", water.simulation_transparency(w), 0.61)
+            check_near("wave height", water.simulation_wave_height(w), 0.77)
+            check_true("caustics stayed on", water.simulation_caustics_on(w))
+            check_near("caustics intensity", water.simulation_caustics_intensity(w), 0.44)
+            check_near("caustics scale", water.simulation_caustics_scale(w), 0.0055)
+            check_near("shadow", water.simulation_shadow(w), 0.29)
+            // Bound to the surface it drives, or it animates nothing.
+            check_true("the simulation adopted the loaded surface",
+                       water.simulation_model(w) == list.get_raw(loaded, 0) as *Model)
+            // Freed last: it owns the surface it adopted, and the sweep below
+            // would otherwise release that model a second time.
+            restored = w
+        }
+        scene.attachments_free(back)
+    }
+
+    seen = scene.scene_load_view(path)
+    check_near("camera x", seen.camera_x, 12.0)
+    check_near("camera y", seen.camera_y, 34.0)
+    check_near("camera z", seen.camera_z, 56.0)
+    check_near("yaw", seen.yaw, 0.0 - 33.0)
+    check_near("pitch", seen.pitch, 12.5)
+    check_near("fov", seen.fov, 62.0)
+    check_near("far", seen.far, 4321.0)
+    check_near("sky green", seen.sky_g, 0.4)
+    check_true("fxaa stayed on", seen.fxaa)
+    check_true("bloom stayed on", seen.bloom)
+    check_near("bloom intensity", seen.bloom_intensity, 1.75)
+    check_true("frustum culling stayed on", seen.frustum_culling)
+
+    // A file with no view at all opens the way it always did, rather than at
+    // the origin under a black sky.
+    plain = scene.view_defaults()
+    older = scene.scene_load_view("build/scene_roundtrip/scene.json")
+    check_near("a scene with no view keeps the default fov", older.fov, plain.fov)
+    check_near("a scene with no view keeps the default far", older.far, plain.far)
+
+    // The restored simulation owns the surface it adopted; every other loaded
+    // model is this test's to release.
+    adopted = null as *Model
+    if restored != null { adopted = water.simulation_model(restored) }
+    i = 0
+    while i < list.size(loaded) {
+        m = list.get_raw(loaded, i) as *Model
+        if m != null && m != adopted { core.model_free(m) }
+        i = i + 1
+    }
+    if restored != null { water.simulation_free(restored) }
+    list.free(loaded)
+    list.free(models)
+    scene.attachments_free(attachments)
+    list.free(lights)
+    water.simulation_free(sim)
 }
 
 main() {
@@ -202,7 +325,7 @@ main() {
     core.light_set_name(sun, "key")
     list.add_raw(lights, sun)
 
-    if !scene.scene_save(models, lights, scene_path, directory) {
+    if !scene.scene_save(models, lights, null, null, scene_path, directory) {
         record_failure("saved: ${scene.last_error()}")
     }
     check_true("scene file exists", fs.exists(scene_path) == 1)
@@ -331,6 +454,7 @@ main() {
     string.free(original)
 
     water_roundtrip()
+    components_roundtrip()
 
     if failures == 0 {
         println("scene io: all checks passed")

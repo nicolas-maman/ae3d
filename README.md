@@ -36,7 +36,10 @@ engine, to Aether and C. See [Credits](#credits).
   loader, ray casting, and a component system.
 - **Scenes save and load.** Transforms and materials as JSON; geometry that came
   from a file records its path, and geometry that did not is written to a
-  compressed binary mesh beside the scene.
+  compressed binary mesh beside the scene. A scene also carries what is attached
+  to each model, so a water surface comes back as water with the simulation
+  driving it rather than as a mesh with a wave table nothing reads, and it
+  records the view it was framed in.
 
 ## Editor
 
