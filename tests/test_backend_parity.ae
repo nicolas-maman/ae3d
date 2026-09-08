@@ -259,11 +259,22 @@ main() {
     vk_sky = vk.skybox_create(vk_renderer, TEXTURE)
     check_true("skybox textures loaded",
                core.skybox_texture(gl_sky) != 0 && core.skybox_texture(vk_sky) != 0)
+    // Rendered here rather than read from whatever the last comparison left in
+    // the buffer, so what follows is measured against this scene and no other.
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    bare_gl = frame_total(offscreen.target_pixels(target))
+    bare_vk = frame_total(vk.offscreen_pixels())
+
     core.backend_set_skybox(&opengl_pass, gl_sky as ptr)
     core.backend_set_skybox(&vulkan_pass, vk_sky as ptr)
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
     compare("skybox", offscreen.target_pixels(target), vk.offscreen_pixels())
+    check_true("the skybox reaches the opengl frame",
+               frame_total(offscreen.target_pixels(target)) != bare_gl)
+    check_true("the skybox reaches the vulkan frame",
+               frame_total(vk.offscreen_pixels()) != bare_vk)
 
     plain_gl = frame_total(offscreen.target_pixels(target))
     plain_vk = frame_total(vk.offscreen_pixels())

@@ -256,7 +256,9 @@ First working engine.
   two backends says they agree, which a pass that quietly copied its input
   through would satisfy on both sides at once, and that is exactly how the
   multisample resolve failure hid. Turning FXAA or bloom on now has to change
-  what the frame adds up to, in both renderers.
+  what the frame adds up to, in both renderers. The skybox is asked the same, against a
+  frame rendered for the purpose rather than whatever the last comparison left
+  in the buffer.
 
 ### Portability
 
