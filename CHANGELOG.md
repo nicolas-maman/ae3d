@@ -237,6 +237,13 @@ First working engine.
   drawn ever reached, so it appeared on none of them. A crest is now measured
   from the water's own level against how high its waves go.
 
+- A saved scene keeps its lights. The file recorded models and nothing else, so
+  the editor's sun, whose intensity, ambient strength and colour it lets you
+  set, came back at its defaults after a save and a load, with nothing said
+  about it. `scene_save` takes the lights alongside the models and
+  `scene_load_lights` hands them back; a file written before this has none
+  recorded, and the scene keeps whatever it was already lighting with.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve

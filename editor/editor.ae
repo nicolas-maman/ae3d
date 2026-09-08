@@ -506,6 +506,13 @@ sync_inspector() {
     }
 }
 
+// The light rows read from the light itself, so a scene that brought its own
+// has to put what it says in front of the sliders that set it.
+refresh_light_rows() {
+    show_row(9, light_value(9))
+    show_row(10, light_value(10))
+}
+
 show_row(index: int, value: float) {
     handle = slider_handle(index)
     if handle != 0 { ui.set_slider(handle, value) }
@@ -1296,7 +1303,12 @@ build_scene() {
 }
 
 save_scene() {
-    if scene.scene_save(g_models, SCENE_PATH, "build/") {
+    lights = list.new()
+    if g_light != null { list.add_raw(lights, g_light) }
+    saved = scene.scene_save(g_models, lights, SCENE_PATH, "build/")
+    list.free(lights)
+
+    if saved {
         say("saved ${SCENE_PATH}")
     } else {
         say("save failed: ${scene.last_error()}")
@@ -1321,6 +1333,24 @@ load_scene() {
         i = i + 1
     }
     list.free(loaded)
+
+    // A file written before scenes carried lights has none, and the scene keeps
+    // the light it is already using.
+    beams = scene.scene_load_lights(SCENE_PATH)
+    if beams != null {
+        if list.size(beams) > 0 {
+            if g_light != null { core.light_free(g_light as *Light) }
+            g_light = list.get_raw(beams, 0)
+            refresh_light_rows()
+        }
+        spare = 1
+        while spare < list.size(beams) {
+            core.light_free(list.get_raw(beams, spare) as *Light)
+            spare = spare + 1
+        }
+        list.free(beams)
+    }
+
     history.history_clear(g_history)
     say("loaded ${count} models from ${SCENE_PATH}")
 }
