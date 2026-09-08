@@ -311,6 +311,11 @@ First working engine.
   strength all did nothing once the surface existed, which is why the editor's
   water sliders moved nothing at all.
 
+- `skybox_set_color` is gone. A skybox with no texture is drawn as the clear
+  colour, which is copied when the skybox is handed to a renderer, so setting
+  its colour afterwards changed a field nothing read again. Nothing called it,
+  and `skybox_solid` takes the colour it is built with.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve
