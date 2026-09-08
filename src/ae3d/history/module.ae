@@ -14,7 +14,7 @@ exports (
     STEP_PROPERTY, STEP_ADD, STEP_REMOVE,
     history_new, history_free, history_record, history_undo, history_redo,
     history_depth, history_redo_depth, history_top, history_clear,
-    history_begin_replay, history_end_replay
+    history_begin_replay, history_end_replay, history_close
 )
 
 const STEP_PROPERTY = 0
@@ -34,6 +34,7 @@ struct History {
     undo: ptr
     redo: ptr
     replaying: bool
+    open: bool
 }
 
 history_new() -> *History {
@@ -41,6 +42,7 @@ history_new() -> *History {
     h.undo = list.new()
     h.redo = list.new()
     h.replaying = false
+    h.open = false
     return h
 }
 
@@ -62,6 +64,13 @@ drain(stack: ptr) {
     }
 }
 
+// The edit that was being made has finished, so the next one starts a step of
+// its own however much it looks like the last. Without this a drag, a pause and
+// another drag of the same slider are one step, and undo steps back past both.
+history_close(h: *History) {
+    if h != null { h.open = false }
+}
+
 // Applying a step must not record it again as a fresh edit.
 history_begin_replay(h: *History) {
     if h != null { h.replaying = true }
@@ -73,6 +82,7 @@ history_end_replay(h: *History) {
 
 history_clear(h: *History) {
     if h == null { return }
+    h.open = false
     drain(h.undo)
     drain(h.redo)
 }
@@ -97,7 +107,7 @@ history_record(h: *History, kind: int, subject: ptr, slot: int,
     if h == null || h.replaying { return }
 
     count = list.size(h.undo)
-    if kind == STEP_PROPERTY && count > 0 {
+    if kind == STEP_PROPERTY && h.open && count > 0 {
         top = list.get_raw(h.undo, count - 1) as *EditStep
         if top.kind == STEP_PROPERTY && top.subject == subject && top.slot == slot {
             top.after = after
@@ -112,6 +122,7 @@ history_record(h: *History, kind: int, subject: ptr, slot: int,
     step.before = before
     step.after = after
     list.add_raw(h.undo, step)
+    h.open = kind == STEP_PROPERTY
 
     while list.size(h.undo) > HISTORY_LIMIT {
         stale = list.get_raw(h.undo, 0) as *EditStep
@@ -133,6 +144,7 @@ history_redo(h: *History) -> *EditStep {
 
 transfer(h: *History, from: ptr, onto: ptr) -> *EditStep {
     if h == null || list.size(from) == 0 { return null }
+    h.open = false
     index = list.size(from) - 1
     step = list.get_raw(from, index) as *EditStep
     list.remove(from, index)

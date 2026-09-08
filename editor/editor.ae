@@ -103,6 +103,11 @@ var g_line5 = ""
 var g_line6 = ""
 var g_swatch = 0
 var g_history: ptr = null
+// When the last property edit was recorded. A drag delivers a callback per
+// frame, so edits that stop arriving mean the adjustment is over and the undo
+// step it opened has to close, or the next drag of the same slider extends it.
+var g_last_edit = 0.0
+const EDIT_SETTLE = 0.4
 var g_reported = false
 var g_last_paint = 0.0
 var g_fxaa = true
@@ -815,6 +820,10 @@ settle_layout() {
     g_layout_settled = true
 }
 
+seconds() -> float {
+    return (clock_ns() / 1000000) * 0.001
+}
+
 draw_frame() {
     if g_renderer == null { return }
 
@@ -828,6 +837,11 @@ draw_frame() {
         if elapsed > 0.0 { g_fps = g_fps * 0.9 + (1.0 / elapsed) * 0.1 }
     }
     g_last_time = now
+
+    if g_last_edit > 0.0 && now - g_last_edit > EDIT_SETTLE {
+        history.history_close(g_history)
+        g_last_edit = 0.0
+    }
 
     update_water(delta)
     run_scripts(delta)
@@ -1097,6 +1111,7 @@ apply_property(index: int, value: float) {
         light = g_light as *Light
         if light != null {
             history.history_record(g_history, history.STEP_PROPERTY, null, index, light_value(index), value)
+            g_last_edit = seconds()
             if index == 9 { light.intensity = value }
             if index == 10 { light.ambient_strength = value }
         }
@@ -1111,6 +1126,7 @@ apply_property(index: int, value: float) {
         if sim != null {
             history.history_record(g_history, history.STEP_PROPERTY, sim as ptr, index,
                                    water_value(index), value)
+            g_last_edit = seconds()
             if index == 11 { water.simulation_set_wave_height(sim, value) }
             if index == 12 { water.simulation_set_wave_speed(sim, value) }
             if index == 13 { water.simulation_set_transparency(sim, value) }
@@ -1132,6 +1148,7 @@ apply_property(index: int, value: float) {
             if target != null {
                 history.history_record(g_history, history.STEP_PROPERTY, target as ptr,
                                        index, property_value(target, index), value)
+                g_last_edit = seconds()
                 write_property(target, index, value)
                 follow_marker(i, target)
             }
