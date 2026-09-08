@@ -217,6 +217,14 @@ First working engine.
   an uneven scale, and two thousand moves went from six milliseconds of work to
   too little to measure.
 
+- Undo steps back one adjustment, not every adjustment a slider has ever made.
+  Edits to one property coalesce so that a drag, which delivers a callback per
+  pixel, is a single step, and nothing ever closed that step: letting go and
+  taking hold of the same slider again extended the first one, however long the
+  pause, so undo jumped back to wherever the property stood before the first
+  drag. An edit that has finished now closes its step, and the editor says so
+  when the edits stop arriving.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve
