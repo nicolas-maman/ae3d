@@ -515,6 +515,11 @@ First working engine.
 
 ### Editor
 
+- The odd button out of a pair spans its row. `Light` and `Caves` each sat at
+  their own width beside a spacer, a third the size of the buttons above them,
+  which made the add grid look unfinished. Each section is now two pairs and a
+  full-width row.
+
 - The frame rate read 0 for the life of the program, and the frame delta never
   left its fallback. The editor measured time by arithmetic on `clock_ns()`,
   and in place that clock only ever changed in whole seconds: the interval
