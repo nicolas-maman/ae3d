@@ -129,6 +129,14 @@ First working engine.
 
 ### Fixes
 
+- Handing the frame to the editor's canvas copied the whole viewport every
+  frame. A profile put 61% of the frame in that `malloc` and `memcpy`, more
+  than reading the frame back off the GPU and about six times the cost of
+  rendering it. The canvas borrows the renderer's buffer now instead of
+  copying it, and the readback alternates between two buffers so the frame
+  already handed over is never the one being written. Measured over 900
+  frames: 3.74s of CPU to 3.26s, with system time down a quarter.
+
 - The shader generator checked that a uniform declared in two programs means the
   same thing in both, and the check compared each name against itself, so it
   could never fire. Two programs disagreeing about a type would have laid the
