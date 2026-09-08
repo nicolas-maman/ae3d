@@ -630,10 +630,21 @@ refresh_instances(m: *Model) {
 }
 
 set_scene_uniforms(r: *VKRenderer, m: *Model) {
-    ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &m.model_matrix)
-
     instanced = 0
     if m.is_instanced && core.model_instance_count(m) > 0 { instanced = 1 }
+
+    // CRITICAL: an instanced model's transform is already in every instance.
+    // model_set_instance_position fills each instance's matrix from the model's
+    // own scale and rotation, and the shader multiplies the model matrix by the
+    // instance's, so sending both applied the scale and the rotation twice: a
+    // model scaled 2.4 drew its instances at 5.76.
+    if instanced == 1 {
+        identity = core.mat4_ident()
+        ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &identity)
+    } else {
+        ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &m.model_matrix)
+    }
+
     ae3d_vk_scene_set_int(vkscene.OFF_ISINSTANCED, instanced)
     // This backend draws a model's own instances and nothing else, so a model
     // that has instances always has a colour for each of them.

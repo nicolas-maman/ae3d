@@ -1593,7 +1593,18 @@ bind_shadow_map(r: *GLRenderer, slots: *ProgramSlots) {
     r.bound_texture = r.default_texture
 }
 
+// CRITICAL: an instanced model's transform is already in every instance.
+// model_set_instance_position fills each instance's matrix from the model's own
+// scale and rotation, and the shader multiplies the model matrix by the
+// instance's, so sending both applied the scale and the rotation twice: a model
+// scaled 2.4 drew its instances at 5.76. The merged-batch path has always sent
+// identity here for the same reason.
 set_model_matrix(slots: *ProgramSlots, m: *Model) {
+    if m.is_instanced && core.model_instance_count(m) > 0 {
+        identity = core.mat4_ident()
+        ae3d_gl_uniform_mat4(slots.model, &identity)
+        return
+    }
     ae3d_gl_uniform_mat4(slots.model, &m.model_matrix)
 }
 

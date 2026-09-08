@@ -69,6 +69,65 @@ red_pixels(backend: *Backend, cam: *Camera, light: *Light) -> int {
     return found
 }
 
+// Pixels that are not the clear colour.
+covered(pixels: ptr) -> int {
+    n = 0
+    i = 0
+    while i < WIDTH * HEIGHT {
+        offset = i * 4
+        if mem.get_byte(pixels, offset) > 25 || mem.get_byte(pixels, offset + 1) > 25 ||
+           mem.get_byte(pixels, offset + 2) > 25 { n = n + 1 }
+        i = i + 1
+    }
+    return n
+}
+
+frame_coverage(backend: *Backend, cam: *Camera, light: *Light) -> int {
+    core.backend_render(backend, cam, light)
+    core.backend_frame_pixels(backend)
+    return covered(core.backend_frame_pixels(backend))
+}
+
+// One instance of a model, in the place the model itself would be, has to draw
+// the same picture as the model drawn without instancing.
+//
+// It did not. model_set_instance_position fills an instance's matrix from the
+// model's own scale and rotation, and the shader multiplies the model matrix by
+// the instance's, so both were applied twice: a model scaled 2.4 drew its
+// instances at 5.76, and the sand example's grains came out as flat blobs
+// because each one filled far more of the screen than it should and the visible
+// part of a hugely magnified sphere has almost no shading across it.
+//
+// Coverage rather than a hash, because the two paths differ in the last bit of
+// a few edge pixels and the question here is size, not sampling.
+check_instance_matches_model(backend: *Backend, cam: *Camera, light: *Light, name: string) {
+    plain = loader.sphere(1.0, 32, 24)
+    core.model_set_scale(plain, 30.0, 30.0, 30.0)
+    core.model_matte(plain, 0.9, 0.72, 0.45)
+    core.backend_add_model(backend, plain)
+    alone = frame_coverage(backend, cam, light)
+    core.backend_remove_model(backend, plain)
+
+    copy = loader.sphere(1.0, 32, 24)
+    core.model_set_scale(copy, 30.0, 30.0, 30.0)
+    core.model_matte(copy, 0.9, 0.72, 0.45)
+    check_true("${name} instancing is available for the comparison",
+               core.model_enable_instancing(copy, 1))
+    core.model_set_instance_position(copy, 0, core.vec3(0.0, 0.0, 0.0))
+    core.backend_add_model(backend, copy)
+    instanced = frame_coverage(backend, cam, light)
+    core.backend_remove_model(backend, copy)
+
+    check_true("${name} the model drew something to compare against", alone > 100)
+    if instanced != alone {
+        println("FAIL ${name} one instance covers ${instanced} pixels where the model covers ${alone}")
+        failures = failures + 1
+    }
+
+    core.model_free(plain)
+    core.model_free(copy)
+}
+
 run_checks(backend: *Backend, name: string) {
     core.backend_set_clear_color(backend, 0.0, 0.0, 0.0)
 
@@ -136,6 +195,8 @@ run_checks(backend: *Backend, name: string) {
               COPIES - 1)
     check_true("${name} removing the red instance takes its colour with it",
                red_pixels(backend, cam, light) == 0)
+
+    check_instance_matches_model(backend, cam, light, name)
 
     core.backend_remove_model(backend, cubes)
     core.model_free(cubes)
