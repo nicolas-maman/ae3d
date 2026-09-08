@@ -322,7 +322,7 @@ void main() {
     // Calculate light direction based on light type (directional vs point light)
     vec3 lightDir;
     if (lightDirection.x != 0.0 || lightDirection.y != 0.0 || lightDirection.z != 0.0) {
-        // Directional light (like sun) - direction is already FROM sun TO objects
+        // A directional light's direction points at the light.
         lightDir = normalize(lightDirection);
     } else {
         // Point light

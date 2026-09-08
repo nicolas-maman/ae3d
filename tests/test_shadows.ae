@@ -40,6 +40,16 @@ luma(pixels: ptr, x: int, y: int) -> int {
            mem.get_byte(pixels, index + 2)
 }
 
+column_total(pixels: ptr, x: int) -> int {
+    total = 0
+    y = 0
+    while y < HEIGHT {
+        total = total + luma(pixels, x, y)
+        y = y + 1
+    }
+    return total
+}
+
 row_total(pixels: ptr, y: int) -> int {
     total = 0
     x = 0
@@ -90,7 +100,7 @@ main() {
     core.camera_set_position(cam, core.vec3(0.0, 150.0, 260.0))
     core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
 
-    light = core.light_sun(core.vec3(0.0, 0.0 - 1.0, 0.0))
+    light = core.light_sun(core.vec3(0.0, 1.0, 0.0))
     light.ambient_strength = 0.35
 
     core.backend_render(&backend, cam, light)
@@ -143,6 +153,47 @@ main() {
 
     println("  frame ${total_lit} -> ${total_shadow}, ${darkened_rows} of ${HEIGHT} rows darkened (${first_row}..${last_row}), deepest row drop ${deepest}")
 
+    // Everything above holds just as well for a shadow cast towards the light
+    // as away from it: the same rows darken either way. A sun off to one side
+    // is what tells them apart, and it is the whole of what a shadow is for.
+    side = core.light_sun(core.vec3(1.0, 0.85, 0.0))
+    side.ambient_strength = 0.35
+
+    gl.renderer_set_shadows(renderer, false)
+    core.backend_render(&backend, cam, side)
+    side_lit = offscreen.target_pixels(target)
+    if side_lit == null { println("shadows: SKIP no pixels") ; return }
+
+    columns_store = calloc(WIDTH, 4)
+    columns_lit = columns_store as int[]
+    x = 0
+    while x < WIDTH {
+        columns_lit[x] = column_total(side_lit, x)
+        x = x + 1
+    }
+
+    gl.renderer_set_shadows(renderer, true)
+    core.backend_render(&backend, cam, side)
+    side_shadowed = offscreen.target_pixels(target)
+    if side_shadowed == null { println("shadows: SKIP no pixels") ; return }
+
+    away_drop = 0
+    towards_drop = 0
+    x = 0
+    while x < WIDTH {
+        drop = columns_lit[x] - column_total(side_shadowed, x)
+        if drop < 0 { drop = 0 }
+        if x < WIDTH / 2 { away_drop = away_drop + drop }
+        if x >= WIDTH / 2 { towards_drop = towards_drop + drop }
+        x = x + 1
+    }
+
+    check("the shadow falls away from the light, not towards it",
+          away_drop > towards_drop * 3)
+    println("  sun to the right: ${away_drop} darkened to its left, ${towards_drop} to its right")
+
+    free(columns_store)
+    core.light_free(side)
     free(rows_store)
     core.backend_cleanup(&backend)
     offscreen.target_destroy(target)

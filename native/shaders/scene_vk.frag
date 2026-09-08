@@ -212,7 +212,7 @@ float shadow_factor() {
     vec3 surface = normalize(Normal);
     vec3 toLight = normalize(lights[0].position - FragPos);
     if (lights[0].isDirectional == 1) {
-        toLight = normalize(-lights[0].direction);
+        toLight = normalize(lights[0].direction);
     }
 
     // A surface nearly edge-on to the light needs a larger offset, or its own
