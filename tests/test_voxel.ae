@@ -173,6 +173,23 @@ test_surface_nets() {
     check_true("surface has geometry", vertices > 200 && indices > 600)
     check_true("surface is triangulated", indices % 3 == 0)
 
+    // Every normal has to point out of the solid, and a sphere is the one shape
+    // where that is unambiguous: away from the centre. The builder negated the
+    // field's gradient, so every surface it made faced into the ground and was
+    // lit by nothing but ambient. Nothing caught it because a normal that is
+    // exactly backwards still produces geometry, still triangulates, and still
+    // renders: it renders dark.
+    inward = 0
+    i = 0
+    while i < vertices {
+        position = core.mesh_position(m.mesh, i)
+        normal = core.mesh_normal(m.mesh, i)
+        outward = core.vec3(position.x - centre, position.y - centre, position.z - centre)
+        if core.v3_dot(normal, outward) <= 0.0 { inward = inward + 1 }
+        i = i + 1
+    }
+    check_int("every surface normal points out of the solid", inward, 0)
+
     // Cells are offset half a step from the samples they interpolate.
     cell_centre = centre - 0.5
     worst = 0.0
