@@ -137,6 +137,25 @@ build_voxels() -> *World {
 // sample positions and resolve, so exact equality is not the bar. A shared
 // lighting model and matching transforms are, and those show up as a small
 // share of differing channels and near-identical lit coverage.
+// How many pixels each backend lit, at whatever size the frame is now: after a
+// resize the two can only be compared over the part of the buffer both filled.
+compare_size(name: string, gl_pixels: ptr, vk_pixels: ptr, width: int, height: int) {
+    lit_gl = 0
+    lit_vk = 0
+    i = 0
+    while i < width * height * 4 {
+        if channel(gl_pixels, i) > 12 { lit_gl = lit_gl + 1 }
+        if channel(vk_pixels, i) > 12 { lit_vk = lit_vk + 1 }
+        i = i + 4
+    }
+    check_true("${name}: opengl drew something", lit_gl > 200)
+    check_true("${name}: vulkan drew something", lit_vk > 200)
+    spread = lit_gl - lit_vk
+    if spread < 0 { spread = 0 - spread }
+    check_true("${name}: both cover the same area", spread * 10 < lit_gl)
+    println("  ${name}: opengl lit ${lit_gl}, vulkan lit ${lit_vk}")
+}
+
 compare(name: string, gl_pixels: ptr, vk_pixels: ptr) -> int {
     lit_gl = 0
     lit_vk = 0
@@ -398,6 +417,32 @@ main() {
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
     compare("after a resize", offscreen.target_pixels(target), vk.offscreen_pixels())
+
+    // The same resize with both composites running. The scene is drawn into
+    // buffers of its own before an effect composites it, and OpenGL left those
+    // the size they used to be: the frame came back drawn small and stretched
+    // over the viewport, which lit a third of the pixels Vulkan did. Nothing
+    // caught it because every resize here had the composites switched off.
+    core.backend_set_post(&opengl_pass, true, true, 0.8, 0.4)
+    core.backend_set_post(&vulkan_pass, true, true, 0.8, 0.4)
+    core.backend_update_viewport(&opengl_pass, WIDTH / 2, HEIGHT / 2)
+    core.backend_update_viewport(&vulkan_pass, WIDTH / 2, HEIGHT / 2)
+    offscreen.target_resize(target, WIDTH / 2, HEIGHT / 2)
+    core.camera_set_aspect(cam, (WIDTH * 0.5) / (HEIGHT * 0.5))
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    compare_size("a resize with the composites running",
+                 offscreen.target_pixels(target), vk.offscreen_pixels(),
+                 WIDTH / 2, HEIGHT / 2)
+
+    core.backend_update_viewport(&opengl_pass, WIDTH, HEIGHT)
+    core.backend_update_viewport(&vulkan_pass, WIDTH, HEIGHT)
+    offscreen.target_resize(target, WIDTH, HEIGHT)
+    core.camera_set_aspect(cam, (WIDTH * 1.0) / (HEIGHT * 1.0))
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    core.backend_set_post(&opengl_pass, false, false, 0.8, 0.4)
+    core.backend_set_post(&vulkan_pass, false, false, 0.8, 0.4)
 
     // A rebuild makes a fresh shadow target, so the one it replaced has to be
     // gone. Piling another one up leaks a whole image, its memory, two views, a
