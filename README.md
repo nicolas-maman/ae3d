@@ -94,7 +94,16 @@ brew install molten-vk vulkan-loader   # macOS, optional, for the Vulkan backend
 
 sudo apt install libglfw3-dev          # Debian and Ubuntu
 sudo apt install libvulkan-dev mesa-vulkan-drivers   # optional
+
+# Windows, from an MSYS2 MINGW64 shell
+pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-glfw mingw-w64-x86_64-zlib
+pacman -S mingw-w64-x86_64-vulkan-loader mingw-w64-x86_64-vulkan-headers  # optional
 ```
+
+zlib is listed for Windows because the mesh loader includes `zlib.h` directly;
+macOS and the Debian toolchains have it already. Build from the MINGW64 shell:
+`build.sh` reads `uname -s` to pick the platform libraries, and a plain `cmd`
+or PowerShell prompt is not one of the shells it can run in.
 
 ## Build and run
 
