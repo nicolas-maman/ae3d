@@ -66,6 +66,13 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float noiseScale;
     int noiseOctaves;
     float noiseIntensity;
+    bool enableCaustics;
+    float causticsIntensity;
+    float causticsScale;
+    float causticsSpeed;
+    float causticsWaterLevel;
+    float causticsDepth;
+    float causticsTime;
     bool enableHighQualityFiltering;
     int filteringQuality;
     mat4 projection;
@@ -90,11 +97,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float lightIntensity;
     vec3 waterBaseColor;
     float waterTransparency;
-    bool enableCaustics;
-    float causticsIntensity;
-    float causticsScale;
     float waterPlaneHeight;
-    vec2 causticsSpeed;
     bool enableFog;
     float fogStart;
     float fogEnd;
@@ -182,6 +185,15 @@ layout(location = 4) in vec4 FragPosLightSpace;
 
 
 // GPU Gems Chapter 5: Improved Perlin Noise Support
+
+
+
+
+
+// GPU Gems Chapter 2: light refracted by a water surface above the geometry
+
+
+
 
 
 
@@ -658,6 +670,37 @@ float turbulence(vec3 p, int octaves) {
     return value / maxValue;
 }
 
+// GPU Gems Chapter 2: the bright web a water surface casts on what lies under
+// it. Two noise fields drift apart and the pattern is where they cross, which
+// is what gives caustics their thin moving lines rather than smooth blobs.
+vec3 caustic_light(vec3 worldPos, vec3 norm) {
+    if (!enableCaustics) {
+        return vec3(0.0);
+    }
+
+    float depth = causticsWaterLevel - worldPos.y;
+    if (depth <= 0.0) {
+        return vec3(0.0);
+    }
+
+    vec2 uv = worldPos.xz * causticsScale;
+    vec2 drift = vec2(0.7, 0.3) * causticsSpeed * causticsTime;
+    float a = perlinNoise3D(vec3(uv + drift, causticsTime * causticsSpeed * 0.5));
+    float b = perlinNoise3D(vec3(uv * 1.7 - drift * 0.8, causticsTime * causticsSpeed * 0.4 + 5.3));
+    float web = pow(clamp(1.0 - abs(a - b) * 2.5, 0.0, 1.0), 6.0);
+
+    // The light falls from the surface straight down, so a floor catches the
+    // whole pattern, a wall catches a grazing fraction of it, and depth of
+    // water swallows what is left. How fast it is swallowed is the caller's to
+    // say: a scene measured in metres and one measured in centimetres cannot
+    // share a fixed rate.
+    float facing = clamp(norm.y, 0.0, 1.0);
+    float attenuation = exp(-depth / max(causticsDepth, 0.001));
+
+    vec3 keyColor = lights[0].color * kelvinToRGB(lights[0].temperature);
+    return keyColor * lights[0].intensity * web * facing * attenuation * causticsIntensity;
+}
+
 // One light's contribution. Everything here depends on which light is shading;
 // anything that does not stays in main and is computed once.
 vec3 direct_light(Light L, vec3 norm, vec3 viewDir, vec3 albedo, vec3 F0,
@@ -815,8 +858,8 @@ void main() {
     vec3 envReflection = calculateEnvironmentReflection(norm, viewDir, roughness, metallic);
 	color += envReflection * 0.3; // More visible reflections
     
-    // GPU Gems Chapter 2: Caustics are handled in water shader for now
-    // Future: Add caustics support to default shader with proper uniform checking
+    color += caustic_light(FragPos, norm) * albedo;
+
     
     // HDR exposure and tone mapping for normal objects
     color = color * exposure;

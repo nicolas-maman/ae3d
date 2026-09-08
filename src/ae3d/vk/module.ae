@@ -11,6 +11,7 @@ import std.list
 import std.heap
 import std.string
 import ae3d.core
+import ae3d.platform
 import ae3d.vkscene
 
 exports (
@@ -113,6 +114,8 @@ struct VKRenderer {
     clear_r: float
     clear_g: float
     clear_b: float
+    scene_start: float
+    scene_time: float
 }
 
 available() -> bool {
@@ -154,6 +157,8 @@ renderer_new() -> *VKRenderer {
     r.shadow_space = core.mat4_ident()
     r.batches = list.new()
     r.batch_count = 0
+    r.scene_start = platform.time()
+    r.scene_time = 0.0
     return r
 }
 
@@ -519,6 +524,7 @@ write_frame_uniforms(r: *VKRenderer, light: *Light, cam: *Camera) {
     upload_lights(r, light)
     ae3d_vk_scene_set_clip_mat4(vkscene.OFF_LIGHTSPACEMATRIX, &r.shadow_space)
     ae3d_vk_scene_set_int(vkscene.OFF_HASSHADOWMAP, ae3d_vk_shadows())
+    ae3d_vk_scene_set_float(vkscene.OFF_CAUSTICSTIME, r.scene_time)
 
     // The water program predates the light array and reads one light from flat
     // names, the same four the OpenGL backend fills for it.
@@ -639,6 +645,7 @@ set_material_uniforms(material: *Material) {
 
 renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     if !r.initialized { return }
+    r.scene_time = platform.time() - r.scene_start
 
     active_light = light
     if list.size(r.lights) > 0 { active_light = list.get_raw(r.lights, 0) as *Light }

@@ -1,0 +1,105 @@
+// Caustics: the moving web of light a water surface throws onto the seabed.
+//
+//   ./build.sh examples/caustics.ae && ./build/caustics
+
+import ae3d.core
+import ae3d.platform
+import ae3d.engine
+import ae3d.gl
+import ae3d.loader
+import ae3d.rendering
+import ae3d.water
+
+const REACH = 2400.0
+const SEABED = 0.0 - 260.0
+
+var g_water: ptr = null
+
+lit_by_caustics(m: *Model) {
+    config = rendering.default_config()
+    config.caustics = true
+    config.caustics_intensity = 1.4
+    config.caustics_scale = 0.012
+    config.caustics_speed = 0.5
+    config.caustics_water_level = 0.0
+    config.caustics_depth = 300.0
+    rendering.apply(m, config)
+}
+
+on_start(data: ptr) {
+    e = data as *Engine
+
+    seabed = loader.plane(48, REACH / 47.0)
+    core.model_set_position(seabed, 0.0 - REACH / 2.0, SEABED, 0.0 - REACH / 2.0)
+    core.model_set_diffuse(seabed, 0.55, 0.5, 0.38)
+    lit_by_caustics(seabed)
+    engine.engine_add_model(e, seabed)
+
+    placed = 0
+    while placed < 7 {
+        rock = loader.sphere(1.0, 20, 16)
+        span = (placed * 1.0) / 6.0
+        radius = 60.0 + span * 40.0
+        core.model_set_scale(rock, radius, radius * 0.7, radius)
+        core.model_set_position(rock,
+                                0.0 - 700.0 + span * 1400.0,
+                                SEABED + radius * 0.35,
+                                0.0 - 500.0 + span * 900.0)
+        core.model_set_diffuse(rock, 0.42, 0.44, 0.4)
+        lit_by_caustics(rock)
+        engine.engine_add_model(e, rock)
+        placed = placed + 1
+    }
+
+    ocean = water.simulation_new(REACH * 4.0, 6.0)
+    water.simulation_set_color(ocean, 0.05, 0.3, 0.42)
+    water.simulation_set_sky_color(ocean, 0.5, 0.75, 1.0)
+    water.simulation_set_transparency(ocean, 0.85)
+    water.simulation_set_wave_height(ocean, 0.4)
+
+    surface = water.simulation_build(ocean, water.RESOLUTION)
+    if surface == null {
+        println("could not build the water surface")
+        return
+    }
+    engine.engine_add_model(e, surface)
+    g_water = ocean as ptr
+
+    gl.renderer_set_clear_color(engine.engine_gl_renderer(e), 0.35, 0.6, 0.8)
+
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(0.0, 420.0, 1500.0))
+    core.camera_look_at(cam, core.vec3(0.0, SEABED, 0.0))
+    core.camera_set_speed(cam, 600.0)
+    core.camera_set_far(cam, 40000.0)
+}
+
+on_update(data: ptr, delta: float) {
+    ocean = g_water as *Simulation
+    if ocean == null { return }
+    water.simulation_update(ocean, delta)
+}
+
+main() {
+    e = engine.engine_new(platform.API_GL)
+    engine.engine_set_size(e, 1280, 800)
+    engine.engine_set_title(e, "ae3d - caustics")
+    engine.engine_set_face_culling(e, false)
+
+    light = core.light_sun(core.vec3(0.2, 1.0, 0.35))
+    light.intensity = 3.5
+    engine.engine_set_light(e, light)
+
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_start(e, on_start as fn(ptr))
+    engine.engine_on_update(e, on_update as fn(ptr, float))
+
+    engine.engine_run(e, 0 - 1, 0 - 1)
+
+    println("caustics: ${engine.engine_frame_count(e)} frames")
+
+    ocean = g_water as *Simulation
+    if ocean != null { water.simulation_free(ocean) }
+    core.light_free(light)
+    engine.engine_free(e)
+}
