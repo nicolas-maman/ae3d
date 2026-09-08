@@ -6,12 +6,19 @@
 // and measuring the difference is what separates a real depth test from a
 // decorative one.
 //
-// The target hands back the same buffer on every read, so a frame is summed
-// before the next render overwrites it rather than held as a pointer.
+// The OpenGL path reads back through a pair of buffers, so the frame just drawn
+// is the second read rather than the first. The target hands back the same
+// buffer on every read, so a frame is summed before the next render overwrites
+// it rather than held as a pointer.
+frame_of(backend: *Backend) -> ptr {
+    core.backend_frame_pixels(backend)
+    return core.backend_frame_pixels(backend)
+}
 
 import std.mem
 import ae3d.core
 import ae3d.gl
+import ae3d.vk
 import ae3d.offscreen
 import ae3d.loader
 import ae3d.rendering
@@ -60,34 +67,24 @@ row_total(pixels: ptr, y: int) -> int {
     return total
 }
 
-main() {
-    context = offscreen.context_create(WIDTH, HEIGHT)
-    if context == null {
-        println("shadows: SKIP no OpenGL context")
-        return
-    }
-
-    renderer = gl.renderer_new()
-    backend = gl.backend(renderer)
-    if !core.backend_init(&backend, context, WIDTH, HEIGHT) {
-        println("shadows: SKIP the OpenGL backend would not initialise")
-        return
-    }
-
-    target = offscreen.target_create(WIDTH, HEIGHT)
-    gl.renderer_set_target(renderer, target)
-    gl.renderer_set_clear_color(renderer, 0.0, 0.0, 0.0)
+// Everything here goes through the vtable, so the same checks run against
+// whichever renderer is handed in. Shadows are the newest thing both backends
+// do and the one most likely to diverge, and only one of them was ever asked
+// these questions directly: the other was covered by a comparison between the
+// two, which passes just as well when both are wrong in the same way.
+run_checks(backend: *Backend, name: string) {
+    core.backend_set_clear_color(backend, 0.0, 0.0, 0.0)
 
     ground = loader.plane(24, 16.0)
     core.model_set_position(ground, 0.0 - 192.0, 0.0, 0.0 - 192.0)
     core.model_matte(ground, 0.85, 0.85, 0.85)
-    core.backend_add_model(&backend, ground)
+    core.backend_add_model(backend, ground)
 
     blocker = loader.sphere(1.0, 32, 24)
     core.model_set_scale(blocker, 30.0, 30.0, 30.0)
     core.model_set_position(blocker, 0.0, 130.0, 0.0)
     core.model_matte(blocker, 0.8, 0.3, 0.2)
-    core.backend_add_model(&backend, blocker)
+    core.backend_add_model(backend, blocker)
 
     config = rendering.default_config()
     config.advanced_shadows = true
@@ -103,8 +100,8 @@ main() {
     light = core.light_sun(core.vec3(0.0, 1.0, 0.0))
     light.ambient_strength = 0.35
 
-    core.backend_render(&backend, cam, light)
-    lit = offscreen.target_pixels(target)
+    core.backend_render(backend, cam, light)
+    lit = frame_of(backend)
     if lit == null { println("shadows: SKIP no pixels") ; return }
 
     rows_store = calloc(HEIGHT, 4)
@@ -117,12 +114,12 @@ main() {
         y = y + 1
     }
 
-    gl.renderer_set_shadows(renderer, true)
-    check("the shadow map was created", gl.renderer_shadows(renderer))
+    core.backend_set_shadows(backend, true)
+    check("${name} the shadow map was created", core.backend_shadows(backend))
 
-    core.backend_render(&backend, cam, light)
+    core.backend_render(backend, cam, light)
 
-    shadowed = offscreen.target_pixels(target)
+    shadowed = frame_of(backend)
     if shadowed == null { println("shadows: SKIP no pixels") ; return }
 
     darkened_rows = 0
@@ -144,14 +141,14 @@ main() {
         y = y + 1
     }
 
-    check("the frame darkens when shadows are on", total_shadow < total_lit)
-    check("the shadow lands on some rows, not the whole frame",
+    check("${name} the frame darkens when shadows are on", total_shadow < total_lit)
+    check("${name} the shadow lands on some rows, not the whole frame",
           darkened_rows > 4 && darkened_rows < HEIGHT * 3 / 4)
     // Rows the shadow never reaches prove it is cast rather than a global dim.
-    check("rows outside the shadow are untouched", darkened_rows < HEIGHT / 2)
-    check("the darkest row drops substantially", deepest > WIDTH * 12)
+    check("${name} rows outside the shadow are untouched", darkened_rows < HEIGHT / 2)
+    check("${name} the darkest row drops substantially", deepest > WIDTH * 12)
 
-    println("  frame ${total_lit} -> ${total_shadow}, ${darkened_rows} of ${HEIGHT} rows darkened (${first_row}..${last_row}), deepest row drop ${deepest}")
+    println("  ${name}: frame ${total_lit} -> ${total_shadow}, ${darkened_rows} of ${HEIGHT} rows darkened (${first_row}..${last_row}), deepest row drop ${deepest}")
 
     // Everything above holds just as well for a shadow cast towards the light
     // as away from it: the same rows darken either way. A sun off to one side
@@ -159,9 +156,9 @@ main() {
     side = core.light_sun(core.vec3(1.0, 0.85, 0.0))
     side.ambient_strength = 0.35
 
-    gl.renderer_set_shadows(renderer, false)
-    core.backend_render(&backend, cam, side)
-    side_lit = offscreen.target_pixels(target)
+    core.backend_set_shadows(backend, false)
+    core.backend_render(backend, cam, side)
+    side_lit = frame_of(backend)
     if side_lit == null { println("shadows: SKIP no pixels") ; return }
 
     columns_store = calloc(WIDTH, 4)
@@ -172,9 +169,9 @@ main() {
         x = x + 1
     }
 
-    gl.renderer_set_shadows(renderer, true)
-    core.backend_render(&backend, cam, side)
-    side_shadowed = offscreen.target_pixels(target)
+    core.backend_set_shadows(backend, true)
+    core.backend_render(backend, cam, side)
+    side_shadowed = frame_of(backend)
     if side_shadowed == null { println("shadows: SKIP no pixels") ; return }
 
     away_drop = 0
@@ -188,21 +185,55 @@ main() {
         x = x + 1
     }
 
-    check("the shadow falls away from the light, not towards it",
+    check("${name} the shadow falls away from the light, not towards it",
           away_drop > towards_drop * 3)
-    println("  sun to the right: ${away_drop} darkened to its left, ${towards_drop} to its right")
+    println("  ${name}: sun to the right: ${away_drop} darkened to its left, ${towards_drop} to its right")
 
     free(columns_store)
     core.light_free(side)
     free(rows_store)
-    core.backend_cleanup(&backend)
-    offscreen.target_destroy(target)
-    offscreen.context_destroy(context)
+        core.backend_remove_model(backend, ground)
+    core.backend_remove_model(backend, blocker)
     core.model_free(ground)
     core.model_free(blocker)
-    gl.renderer_free(renderer)
     core.camera_free(cam)
     core.light_free(light)
+}
+
+main() {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("shadows: SKIP no OpenGL context")
+        return
+    }
+
+    renderer = gl.renderer_new()
+    gl_pass = gl.backend(renderer)
+    if !core.backend_init(&gl_pass, context, WIDTH, HEIGHT) {
+        println("shadows: SKIP the OpenGL backend would not initialise")
+        return
+    }
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    run_checks(&gl_pass, "opengl")
+    core.backend_cleanup(&gl_pass)
+    offscreen.target_destroy(target)
+    gl.renderer_free(renderer)
+    offscreen.context_destroy(context)
+
+    if !vk.available() {
+        println("shadows: no Vulkan driver (${vk.last_error()}), checked OpenGL only")
+    } else {
+        vk_renderer = vk.renderer_new()
+        vk_pass = vk.backend(vk_renderer)
+        if !core.backend_init(&vk_pass, null, WIDTH, HEIGHT) {
+            println("shadows: SKIP Vulkan would not start (${vk.last_error()})")
+        } else {
+            run_checks(&vk_pass, "vulkan")
+            core.backend_cleanup(&vk_pass)
+        }
+        vk.renderer_free(vk_renderer)
+    }
 
     if failures == 0 {
         println("shadows: all checks passed")
