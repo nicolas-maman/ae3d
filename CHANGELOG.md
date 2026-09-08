@@ -515,6 +515,21 @@ First working engine.
 
 ### Editor
 
+- The left panel ran out of colour. Its background is drawn by the stack inside
+  the scroll view, and that stack is only as tall as what it holds, so
+  everything below the last button was the toolkit's own white. The panel
+  colour is on the scroll views now as well.
+
+- The material colour chip was an empty outline. The style sheet is applied to
+  the tree after it is built, so the colour set during the first selection was
+  wiped by it, and the readback the check trusted reported the colour anyway.
+  It is painted on the first frame now, beside the split positions that are set
+  there for the same reason.
+
+- The editor's report counts `mis_styled`: a widget whose class the sheet never
+  defines styles nothing and renders in the toolkit's default, and nothing in
+  the widget tree says otherwise.
+
 - The material colour is a painted chip beside the hex, not hex alone. The
   three channel sliders never show the colour they add up to, and a chip is
   how all three of the editors this borrows from draw a colour property. It

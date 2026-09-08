@@ -213,6 +213,12 @@ check_editor_run() {
         # property directly and never looks at the control.
         fail "$name ($(sed -n 's/^blind_fields //p' "$report") number field(s) do not show their value)"
         sed 's/^/        /' "$report"
+    elif [ "$(sed -n 's/^mis_styled //p' "$report")" != "0" ]; then
+        # A class the sheet never defines styles nothing at all, and the widget
+        # renders in the toolkit's default: a button that looks like somebody
+        # meant to leave it plain. Nothing in the widget tree says otherwise.
+        fail "$name ($(sed -n 's/^mis_styled //p' "$report") styled widget(s) are not painted what the theme asks for)"
+        sed 's/^/        /' "$report"
     elif [ "$(sed -n 's/^chip_wrong //p' "$report")" != "0" ]; then
         # The three colour sliders never show the colour they add up to, so the
         # chip beside them is the only place it appears. A chip that is never
