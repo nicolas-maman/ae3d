@@ -173,7 +173,8 @@ everything else.
 | `lights.ae` | PBR material presets cycling with the light type, bloom, transparency |
 | `water.ae` | A 256x256 Gerstner-wave ocean, 65536 vertices |
 | `voxel_world.ae` | 960464 voxels of Perlin terrain, 93030 visible, one draw call |
-| `black_hole.ae` | 200000 particles under Verlet integration in one instanced draw, coloured by relativistic Doppler beaming and gravitational redshift ([picture](docs/black-hole.png)) |
+| `black_hole.ae` | Null geodesics integrated per pixel in one screen quad: the lensed far side of the disc, the shadow, Doppler beaming and gravitational redshift ([picture](docs/black-hole.png)) |
+| `particle_disc.ae` | The same scene as an N-body: 200000 particles under Verlet integration in one instanced draw, coloured per instance |
 | `sand.ae` | 250000 grains falling and settling, click to scatter them |
 | `smooth_terrain.ae` | The same terrain meshed with surface nets, 67590 triangles |
 

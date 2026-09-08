@@ -1,421 +1,386 @@
-// Two hundred thousand particles around a black hole, in ONE instanced draw.
+// A Schwarzschild black hole, drawn by following light backwards to its source.
 //
-// Everything you see -- both halves of the accretion disc and both jets -- is
-// the same low-poly sphere. What differs per particle is where it is and what
-// colour it glows, and both of those are per-instance attributes, so the whole
-// scene is a single glDrawElementsInstanced. Splitting it into a red model and
-// a blue model, as this example used to, bought nothing: the colour was never a
-// property of the mesh.
+// The previous version of this example simulated 200,000 particles on orbits and
+// drew them. It could not do the one thing a black hole is famous for: the hole
+// bends the light coming past it, so you see the FAR side of the accretion disc
+// arced over the top of the shadow and again underneath it, and a rasteriser
+// that projects points through a straight-line camera cannot produce that at any
+// particle count.
 //
-// The colours are not decoration. Each particle is coloured by what an observer
-// at the camera would actually measure:
+// So this one traces instead. Every pixel is one photon, integrated backwards
+// from the eye through curved spacetime until it lands on the disc or crosses the
+// horizon, and the whole frame is a single screen quad -- one draw call.
 //
-//   * a Shakura-Sunyaev thin disc, T proportional to r^(-3/4), so the inner
-//     edge runs blue-white and the rim runs red;
-//   * relativistic Doppler beaming, so the side of the disc rotating toward the
-//     camera is brighter and bluer than the side rotating away -- the asymmetry
-//     that dominates every real image of one;
-//   * gravitational redshift, which cools and dims whatever is deepest in the
-//     well.
+// What comes out of that rather than being painted on:
+//
+//   * the shadow, and its rim at the photon sphere, where rays that graze 1.5
+//     r_s wind round the hole before escaping;
+//   * the far side of the disc lifted over the top of the shadow and under it,
+//     because a ray that passes close crosses the disc plane twice;
+//   * relativistic Doppler beaming, so the approaching side is brighter and
+//     bluer -- with the photon direction taken at the point of emission, which
+//     is not the direction it arrives from once the path has bent;
+//   * gravitational redshift, deepest at the inner edge;
+//   * a Shakura-Sunyaev temperature profile and its r^-3 surface brightness;
+//   * two jets along the spin axis, integrated as emission along the same path.
+//
+// Lengths are in Schwarzschild radii: r_s = 1, the horizon is the unit sphere,
+// the photon sphere is 1.5, the innermost stable circular orbit is 3.
 //
 //   ./build.sh examples/black_hole.ae && ./build/black_hole
 
-import std.list
 import ae3d.core
 import ae3d.platform
 import ae3d.engine
 import ae3d.gl
 import ae3d.loader
 
-extern calloc(count: int, size: int) -> ptr
-extern free(block: ptr)
+const VERTEX_LENS = <<GLSL_END
+#version 410 core
 
-// The hole. R_S is the Schwarzschild radius; nothing inside it comes back, so a
-// particle that crosses it is re-seeded at the rim. A non-spinning hole has its
-// innermost stable circular orbit at 3 R_S, and that is where the disc ends --
-// inside it there are no orbits to occupy, which is what makes the dark centre.
-const MASS = 1400000.0
-const R_S = 50.0
-const R_ISCO = 150.0
-const R_OUT = 760.0
-const STEP = 0.016
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec2 aTexCoord;
 
-// The simulation's speed of light, fixed by the orbit rather than chosen: a
-// circular orbit at the ISCO runs at sqrt(MASS / R_ISCO) = 96.6, and for a
-// Schwarzschild hole that orbit is half the speed of light. Everything
-// relativistic below is measured against this.
-const C_SIM = 193.2
+out vec2 screenUV;
 
-// Peak disc temperature in Kelvin, and the value of the radial shape function
-// at its maximum (r = 49/36 R_ISCO) so the profile can be normalised to it.
+// The quad is loader.quad(2.0, 2.0): x and z run -1..1 in the XZ plane, which is
+// clip space already. Nothing here reads the model or view matrices -- the
+// camera arrives as a basis in the fragment shader instead, because a ray is
+// what this needs and a matrix would only have to be taken apart again to get
+// one.
+void main() {
+    screenUV = aTexCoord;
+    gl_Position = vec4(aPos.x, aPos.z, 0.0, 1.0);
+}
+GLSL_END
+
+const FRAGMENT_LENS = <<GLSL_END
+#version 410 core
+
+in vec2 screenUV;
+out vec4 FragColor;
+
+uniform vec3 camPos;
+uniform vec3 camRight;
+uniform vec3 camUp;
+uniform vec3 camFwd;
+uniform float tanHalfFov;
+uniform float aspectRatio;
+uniform float discTime;
+
+const float ISCO       = 3.0;
+const float DISC_OUT   = 13.0;
+const float ESCAPE     = 55.0;
+const float T_PEAK     = 5400.0;
+const float PEAK_SHAPE = 0.4879;
+const float DISC_GAIN  = 0.38;
+
+const int   STEPS      = 480;
+const float DPHI       = 0.031;
+
+const float JET_BASE   = 1.35;
+const float JET_LEN    = 34.0;
+const float JET_BETA   = 0.85;
+const float T_JET      = 21000.0;
+const float JET_GAIN   = 0.55;
+
+// The Planck locus in sRGB, walked in mireds -- a million over the temperature.
+// Mireds are the axis colour temperature is linear in: 2000 K to 3000 K is an
+// enormous change and 20000 K to 21000 K is invisible, and 500 -> 333 against
+// 50 -> 47.6 says exactly that.
+vec3 blackbody(float kelvin) {
+    float k = clamp(kelvin, 1000.0, 40000.0);
+    float m = 1000000.0 / k;
+
+    if (m <  50.0) return mix(vec3(0.58, 0.70, 1.00), vec3(0.63, 0.74, 1.00), (m -  25.0) /  25.0);
+    if (m <  83.3) return mix(vec3(0.63, 0.74, 1.00), vec3(0.71, 0.80, 1.00), (m -  50.0) /  33.3);
+    if (m < 125.0) return mix(vec3(0.71, 0.80, 1.00), vec3(0.82, 0.87, 1.00), (m -  83.3) /  41.7);
+    if (m < 153.8) return mix(vec3(0.82, 0.87, 1.00), vec3(1.00, 1.00, 1.00), (m - 125.0) /  28.8);
+    if (m < 200.0) return mix(vec3(1.00, 1.00, 1.00), vec3(1.00, 0.90, 0.82), (m - 153.8) /  46.2);
+    if (m < 250.0) return mix(vec3(1.00, 0.90, 0.82), vec3(1.00, 0.81, 0.64), (m - 200.0) /  50.0);
+    if (m < 333.3) return mix(vec3(1.00, 0.81, 0.64), vec3(1.00, 0.69, 0.43), (m - 250.0) /  83.3);
+    if (m < 500.0) return mix(vec3(1.00, 0.69, 0.43), vec3(1.00, 0.49, 0.16), (m - 333.3) / 166.7);
+    return           mix(vec3(1.00, 0.49, 0.16), vec3(1.00, 0.22, 0.00), (m - 500.0) / 500.0);
+}
+
+float hash21(vec2 p) {
+    vec3 q = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+    q += dot(q, q.yzx + 33.33);
+    return fract((q.x + q.y) * q.z);
+}
+
+float vnoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash21(i),                  hash21(i + vec2(1.0, 0.0)), f.x),
+               mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+
+float turbulence(vec2 p) {
+    return 0.60 * vnoise(p) + 0.28 * vnoise(p * 2.17) + 0.12 * vnoise(p * 4.51);
+}
+
+// T(r) as r^(-3/4) times the (1 - sqrt(ISCO/r))^(1/4) zero-torque inner
+// boundary, so the disc peaks a little outside the ISCO rather than at it.
+float discShape(float r) {
+    float u = ISCO / r;
+    if (u >= 1.0) return 0.0;
+    float s = sqrt(u);
+    return sqrt(u * s) * sqrt(sqrt(1.0 - s));
+}
+
+// photonDir is the direction the light TRAVELS, emitter to eye. Backwards
+// tracing walks the other way, so the caller negates the marching direction --
+// and it has to be taken here, at the emission point, because the path bends
+// between here and the camera.
+// Returns emission in rgb and how much of the ray the gas stops in a. Those are
+// the same number twice for a reason: the rim of a disc thins out rather than
+// ending at a drawn circle, and thin gas both emits less AND blocks less. Fading
+// only the brightness left a rim that was invisible and still opaque, so every
+// ray aimed just below the horizon of the frame was stopped dead by it and the
+// bright far side behind it never got drawn -- a hard horizontal seam across the
+// image, exactly where the rays stop being aimed upward.
+vec4 discSample(vec3 p, vec3 photonDir) {
+    float r = length(p.xz);
+    if (r < ISCO || r > DISC_OUT) return vec4(0.0);
+
+    float rim = 1.0 - smoothstep(DISC_OUT - 3.2, DISC_OUT, r);
+    if (rim <= 0.0) return vec4(0.0);
+
+    float temp = T_PEAK * discShape(r) / PEAK_SHAPE;
+
+    // Keplerian circular orbit, in units where r_s = 1 and c = 1:
+    // v/c = sqrt(r_s / 2r), which is 0.408 at the ISCO.
+    float beta  = sqrt(0.5 / r);
+    float gamma = 1.0 / sqrt(max(1.0 - beta * beta, 1e-4));
+    vec3  rhat  = normalize(vec3(p.x, 0.0, p.z));
+    vec3  vhat  = normalize(cross(vec3(0.0, 1.0, 0.0), rhat));
+    float dop   = 1.0 / max(gamma * (1.0 - dot(beta * vhat, photonDir)), 0.06);
+
+    // Gravitational redshift, from the emitter's depth in the well.
+    float grav  = sqrt(max(1.0 - 1.0 / r, 1e-4));
+    float shift = dop * grav;
+
+    // Stefan-Boltzmann: the local flux goes as T^4, which is what makes the
+    // inner disc outshine the rim rather than merely out-blue it. Beaming is the
+    // fourth power of the Doppler factor for an optically thick surface
+    // integrated over its spectrum.
+    float ratio = temp / T_PEAK;
+    float flux  = ratio * ratio * ratio * ratio;
+    float beam  = shift * shift * shift * shift;
+
+    // Turbulence that shears the way the disc does. Sampling a field rotated
+    // backwards by the local orbital phase is seamless in azimuth -- there is no
+    // angle coordinate to wrap -- and differential rotation stretches it into
+    // spiral banding on its own, because the inner disc winds faster.
+    float phase = -(beta / r) * discTime * 26.0;
+    float ca = cos(phase);
+    float sa = sin(phase);
+    vec2  q  = vec2(p.x * ca - p.z * sa, p.x * sa + p.z * ca);
+    float band = 0.32 + 1.35 * turbulence(q * 1.15);
+
+    return vec4(blackbody(temp * shift) * (flux * beam * band * DISC_GAIN), rim);
+}
+
+// The jets are emission spread along the path rather than a surface to land on,
+// so they are integrated over each segment instead of stopping the ray.
 //
-// 7600 K is chosen, not derived: a real disc round a hole this size runs far
-// hotter and would be a uniform blue-white here, because r^(-3/4) over the five
-// radii this disc spans is only a factor of two in temperature. Sitting the
-// peak near the white point instead puts the whole visible sweep where the
-// Doppler shift can be seen doing its work -- blue-white on the approaching
-// side, amber to red on the receding one.
+// Seen this close to edge-on they are dim, and correctly so: the outflow is very
+// nearly perpendicular to the line of sight, which leaves only transverse
+// Doppler, and that alone costs a factor of gamma^4 -- about thirteen at 0.85 c.
+// JET_GAIN buys that back for the display. It is the one number here chosen to
+// be seen rather than derived.
+vec3 jetEmission(vec3 p, vec3 photonDir) {
+    float ay = abs(p.y);
+    if (ay < JET_BASE || ay > JET_LEN) return vec3(0.0);
 
-// How much of the emissive range a particle at rest gets. The Doppler beaming
-// below multiplies it by up to 4.5 and down to 0.06, and this places that span
-// so the bright end rolls off to white through ACES instead of clipping.
-const GLOW = 0.22
-const T_PEAK = 7600.0
-const PEAK_SHAPE = 0.4879
+    float open = 0.20 + 0.075 * ay;
+    float rad  = length(p.xz);
+    if (rad > open) return vec3(0.0);
 
-// The jets, launched along the spin axis from the inner disc at 0.9 c. That
-// clears the escape velocity there (136.6, or 0.71 c), so they leave and
-// decelerate rather than falling back.
-const JET_SPEED = 173.9
-const JET_REACH = 2800.0
-const T_JET = 24000.0
+    float across  = rad / open;
+    float profile = exp(-3.2 * across * across) / (1.0 + 0.09 * ay * ay);
 
-const DISC = 176000
-const JETS = 24000
-const PARTICLES = 200000
+    // Bulk motion straight out along the axis. The near jet is beamed towards
+    // the eye and the far one away from it, which is why one is bright and its
+    // twin is nearly invisible -- in real sources as much as here.
+    float gamma = 1.0 / sqrt(1.0 - JET_BETA * JET_BETA);
+    vec3  bvec  = vec3(0.0, sign(p.y) * JET_BETA, 0.0);
+    float dop   = 1.0 / max(gamma * (1.0 - dot(bvec, photonDir)), 0.06);
+    float beam  = dop * dop * dop * dop;
 
-var g_model: ptr = null
-var g_position: ptr = null
-var g_previous: ptr = null
-var g_colour: ptr = null
-var g_alive = 0
-var g_seed = 987654321
-
-// Scratch for blackbody(), which has three results and no tuple to put them in.
-var g_cr = 0.0
-var g_cg = 0.0
-var g_cb = 0.0
-
-next_random() -> float {
-    g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
-    return (g_seed * 1.0) / 2147483647.0
+    float temp = T_JET * sqrt(JET_BASE / ay);
+    return blackbody(temp * dop) * (profile * beam * JET_GAIN);
 }
 
-mix_colour(t: float, r0: float, g0: float, b0: float,
-                     r1: float, g1: float, b1: float) {
-    g_cr = r0 + (r1 - r0) * t
-    g_cg = g0 + (g1 - g0) * t
-    g_cb = b0 + (b1 - b0) * t
-}
+void main() {
+    vec2 ndc = screenUV * 2.0 - 1.0;
+    vec3 rd  = normalize(camFwd
+                       + camRight * (ndc.x * aspectRatio * tanHalfFov)
+                       + camUp    * (ndc.y * tanHalfFov));
+    vec3 ro = camPos;
 
-// The Planck locus in sRGB, walked in mireds (a million over the temperature)
-// rather than in Kelvin. Mireds are the axis colour temperature is actually
-// linear in: 2000 K to 3000 K is an enormous change and 20000 K to 21000 K is
-// invisible, and 500 -> 333 against 50 -> 47.6 says exactly that. Anchors about
-// every half stop, straight lines between them, and no transcendental anywhere
-// -- this runs once per particle per frame.
-blackbody(kelvin: float) {
-    k = kelvin
-    if k < 1000.0 { k = 1000.0 }
-    if k > 40000.0 { k = 40000.0 }
-    m = 1000000.0 / k
-
-    if m < 50.0 {
-        mix_colour((m - 25.0) / 25.0, 0.58, 0.70, 1.00, 0.63, 0.74, 1.00)
-    } else if m < 83.3 {
-        mix_colour((m - 50.0) / 33.3, 0.63, 0.74, 1.00, 0.71, 0.80, 1.00)
-    } else if m < 125.0 {
-        mix_colour((m - 83.3) / 41.7, 0.71, 0.80, 1.00, 0.82, 0.87, 1.00)
-    } else if m < 153.8 {
-        mix_colour((m - 125.0) / 28.8, 0.82, 0.87, 1.00, 1.00, 1.00, 1.00)
-    } else if m < 200.0 {
-        mix_colour((m - 153.8) / 46.2, 1.00, 1.00, 1.00, 1.00, 0.90, 0.82)
-    } else if m < 250.0 {
-        mix_colour((m - 200.0) / 50.0, 1.00, 0.90, 0.82, 1.00, 0.81, 0.64)
-    } else if m < 333.3 {
-        mix_colour((m - 250.0) / 83.3, 1.00, 0.81, 0.64, 1.00, 0.69, 0.43)
-    } else if m < 500.0 {
-        mix_colour((m - 333.3) / 166.7, 1.00, 0.69, 0.43, 1.00, 0.49, 0.16)
-    } else {
-        mix_colour((m - 500.0) / 500.0, 1.00, 0.49, 0.16, 1.00, 0.22, 0.00)
+    // The photon's whole path lies in the plane through the origin containing
+    // the eye and the ray, so the geodesic is a one-dimensional problem: u(phi)
+    // with u = 1/r, obeying u'' = -u + 1.5 r_s u^2. Two numbers to integrate
+    // instead of a position and a momentum in three.
+    vec3  nrm = cross(ro, rd);
+    float nl  = length(nrm);
+    if (nl < 1e-6) {
+        // Dead on, or dead away: no plane, and nothing to see either way.
+        FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
     }
-}
+    nrm /= nl;
+    vec3 e1 = normalize(ro);
+    vec3 e2 = normalize(cross(nrm, e1));
 
-// T(r) proportional to r^(-3/4) * (1 - sqrt(R_ISCO/r))^(1/4). The second factor
-// is the zero-torque boundary at the inner edge: the disc cannot be hot where
-// there is nothing further in to rub against, so it peaks a little way out and
-// falls to nothing at the ISCO itself. Written in square roots because u^(3/4)
-// is sqrt(u * sqrt(u)), and pow() on 200,000 particles a frame is not free.
-disc_shape(radius: float) -> float {
-    u = R_ISCO / radius
-    if u >= 1.0 { return 0.0 }
-    root = core.sqrt_of(u)
-    return core.sqrt_of(u * root) * core.sqrt_of(core.sqrt_of(1.0 - root))
-}
+    float r0 = length(ro);
+    float u  = 1.0 / r0;
+    float du = -u * dot(rd, e1) / max(dot(rd, e2), 1e-6);
 
-seed_disc(position: float[], previous: float[], index: int) {
-    // Uniform in radius, which puts the surface density at 1/r: more particles
-    // where the disc is bright. Uniform in AREA is the other obvious choice and
-    // is worse on both counts -- it spends most of the swarm on the outer disc,
-    // which radiates as r^-3 and is nearly dark, and leaves the inner edge that
-    // the whole image is about looking speckled.
-    radius = R_ISCO + next_random() * (R_OUT - R_ISCO)
-    angle = next_random() * core.TWO_PI
+    // phi advances by a fixed step, so its cosine and sine come from turning a
+    // unit vector by that step each time rather than from two transcendentals
+    // per iteration. Over a few hundred steps the drift stays far below a pixel.
+    float cd = cos(DPHI);
+    float sd = sin(DPHI);
+    float cp = 1.0;
+    float sp = 0.0;
 
-    // A real thin disc flares: its scale height grows with radius rather than
-    // sitting in a slab of constant thickness.
-    height = (next_random() - 0.5) * radius * 0.075
+    vec3  colour   = vec3(0.0);
+    float transmit = 1.0;
+    vec3  prev     = ro;
+    float prevY    = ro.y;
 
-    x = radius * core.cos_of(angle)
-    z = radius * core.sin_of(angle)
-    speed = core.sqrt_of(MASS / radius)
+    for (int i = 0; i < STEPS; i++) {
+        // Runge-Kutta 4 on (u, du).
+        float k1u = du;
+        float k1d = -u + 1.5 * u * u;
+        float ua  = u + 0.5 * DPHI * k1u;
+        float k2u = du + 0.5 * DPHI * k1d;
+        float k2d = -ua + 1.5 * ua * ua;
+        float ub  = u + 0.5 * DPHI * k2u;
+        float k3u = du + 0.5 * DPHI * k2d;
+        float k3d = -ub + 1.5 * ub * ub;
+        float uc  = u + DPHI * k3u;
+        float k4u = du + DPHI * k3d;
+        float k4d = -uc + 1.5 * uc * uc;
 
-    slot = index * 3
-    position[slot] = x
-    position[slot + 1] = height
-    position[slot + 2] = z
-    previous[slot] = x + speed * core.sin_of(angle) * STEP
-    previous[slot + 1] = height
-    previous[slot + 2] = z - speed * core.cos_of(angle) * STEP
-}
+        u  += (DPHI / 6.0) * (k1u + 2.0 * k2u + 2.0 * k3u + k4u);
+        du += (DPHI / 6.0) * (k1d + 2.0 * k2d + 2.0 * k3d + k4d);
 
-seed_jet(position: float[], previous: float[], index: int) {
-    // Alternating poles, launched from the inner disc through a narrow opening
-    // angle, so the two cones stay collimated instead of spraying.
-    up = 1.0
-    if index % 2 == 0 { up = 0.0 - 1.0 }
+        float nc = cp * cd - sp * sd;
+        float ns = sp * cd + cp * sd;
+        cp = nc;
+        sp = ns;
 
-    angle = next_random() * core.TWO_PI
-    spread = next_random() * 26.0
-    base = R_ISCO * 0.45 + next_random() * R_ISCO * 0.35
+        if (u <= 0.0) break;              // escaped to infinity
+        float r = 1.0 / u;
+        if (r >= ESCAPE) break;           // far enough that nothing is left to hit
+        if (r <= 1.0) break;              // through the horizon: this is the shadow
 
-    x = spread * core.cos_of(angle)
-    z = spread * core.sin_of(angle)
-    y = up * base
+        vec3  p   = r * (cp * e1 + sp * e2);
+        vec3  seg = p - prev;
+        float len = length(seg);
+        if (len < 1e-8) { prev = p; prevY = p.y; continue; }
+        vec3 marchDir = seg / len;
 
-    slot = index * 3
-    position[slot] = x
-    position[slot + 1] = y
-    position[slot + 2] = z
-    // Previous position sits behind it along the launch direction: the
-    // integrator reads velocity out of the gap between the two.
-    previous[slot] = x
-    previous[slot + 1] = y - up * JET_SPEED * STEP
-    previous[slot + 2] = z
-}
+        colour += transmit * jetEmission(0.5 * (p + prev), -marchDir) * len;
 
-// One pass over the swarm: integrate, re-seed whatever left, and work out what
-// the camera would see of each particle. One pass rather than three, because at
-// this count the arrays do not fit in cache and the traversal is the cost.
-step_and_shade(position: float[], previous: float[], colour: float[],
-               delta: float, cam_x: float, cam_y: float, cam_z: float) -> int {
-    step = delta
-    if step > 0.033 { step = 0.033 }
-    if step < 0.0001 { step = 0.0001 }
-    scale = step * step
-    inv_step = 1.0 / step
-
-    alive = 0
-    i = 0
-    while i < PARTICLES {
-        slot = i * 3
-        x = position[slot]
-        y = position[slot + 1]
-        z = position[slot + 2]
-
-        distance_sq = x * x + y * y + z * z
-        gone = distance_sq < R_S * R_S
-        if i >= DISC {
-            if distance_sq > JET_REACH * JET_REACH { gone = true }
-        }
-        if gone {
-            if i < DISC {
-                seed_disc(position, previous, i)
-            } else {
-                seed_jet(position, previous, i)
+        // The disc is a plane, so a crossing is a sign change in y. Rays that
+        // pass close cross it twice, which is exactly how the far side comes to
+        // be visible above the shadow as well as below it.
+        if (prevY * p.y < 0.0) {
+            float t = prevY / (prevY - p.y);
+            vec3  x = prev + t * seg;
+            vec4  em = discSample(x, -marchDir);
+            if (em.a > 0.0) {
+                colour  += transmit * em.a * em.rgb;
+                transmit *= 1.0 - em.a;
+                // Opaque over most of its area, so most rays end here; only the
+                // thin rim lets anything through to be seen behind it.
+                if (transmit < 0.02) break;
             }
-            x = position[slot]
-            y = position[slot + 1]
-            z = position[slot + 2]
-            distance_sq = x * x + y * y + z * z
-        }
-        alive = alive + 1
-
-        distance = core.sqrt_of(distance_sq)
-        pull = 0.0 - MASS / (distance_sq * distance)
-
-        // Verlet. The same subtraction gives the velocity the Doppler factor
-        // needs, so knowing how fast this particle moves, and in which
-        // direction, costs nothing extra.
-        vx = (x - previous[slot]) * inv_step
-        vy = (y - previous[slot + 1]) * inv_step
-        vz = (z - previous[slot + 2]) * inv_step
-
-        next_x = x + x - previous[slot] + x * pull * scale
-        next_y = y + y - previous[slot + 1] + y * pull * scale
-        next_z = z + z - previous[slot + 2] + z * pull * scale
-
-        previous[slot] = x
-        previous[slot + 1] = y
-        previous[slot + 2] = z
-        position[slot] = next_x
-        position[slot + 1] = next_y
-        position[slot + 2] = next_z
-
-        // What the camera measures. Line of sight first, particle to eye.
-        dx = cam_x - x
-        dy = cam_y - y
-        dz = cam_z - z
-        reach = core.sqrt_of(dx * dx + dy * dy + dz * dz)
-        if reach < 0.0001 { reach = 0.0001 }
-        inv_reach = 1.0 / reach
-
-        // Relativistic Doppler factor, 1 / (gamma (1 - beta.n)). Approaching
-        // gives d > 1: blueshifted, and beamed forward. Receding gives d < 1.
-        beta_sq = (vx * vx + vy * vy + vz * vz) / (C_SIM * C_SIM)
-        if beta_sq > 0.95 { beta_sq = 0.95 }
-        beta_los = (vx * dx + vy * dy + vz * dz) * inv_reach / C_SIM
-        gamma = 1.0 / core.sqrt_of(1.0 - beta_sq)
-        denominator = gamma * (1.0 - beta_los)
-        if denominator < 0.08 { denominator = 0.08 }
-        doppler = 1.0 / denominator
-
-        // Gravitational redshift: light climbing out of the well arrives cooler
-        // and dimmer, by sqrt(1 - R_S/r).
-        grav = core.sqrt_of(1.0 - R_S / distance)
-
-        emitted = T_JET * core.sqrt_of(R_ISCO / distance)
-        if i < DISC {
-            emitted = T_PEAK * disc_shape(distance) / PEAK_SHAPE
         }
 
-        flux = 1.0
-        // Stefan-Boltzmann: a surface radiates as the fourth power of its
-        // temperature, so the inner disc does not merely run bluer than the rim,
-        // it outshines it by orders of magnitude. Without this every particle
-        // was equally bright and the disc ended in a drawn circle rather than
-        // fading out the way one actually does. Floored so the rim stays on the
-        // near side of visible.
-        if i < DISC {
-            ratio = emitted / T_PEAK
-            flux = ratio * ratio * ratio * ratio
-            if flux < 0.035 { flux = 0.035 }
-        } else {
-            // A jet dims as it goes, because it expands as it goes. Without
-            // this the two cones simply stopped where the recycling radius is,
-            // which reads as a cut rather than as a fade.
-            flux = R_ISCO * 3.0 / distance
-            if flux > 1.0 { flux = 1.0 }
-            if flux < 0.05 { flux = 0.05 }
-        }
-
-        shift = doppler * grav
-        blackbody(emitted * shift)
-
-        // Beaming. An optically thick surface, integrated over its spectrum,
-        // brightens as the fourth power of the Doppler factor -- which is why
-        // one side of a disc can outshine the other by an order of magnitude.
-        // Capped, because the framebuffer is eight bits a channel and an
-        // uncapped fourth power flattens every bright particle to one white.
-        beam = shift * shift * shift * shift
-        if beam > 4.5 { beam = 4.5 }
-        if beam < 0.06 { beam = 0.06 }
-
-        glow = beam * flux * GLOW
-        colour[slot] = g_cr * glow
-        colour[slot + 1] = g_cg * glow
-        colour[slot + 2] = g_cb * glow
-
-        i = i + 1
+        prev  = p;
+        prevY = p.y;
     }
-    return alive
+
+    // ACES, then sRGB -- the same tonemap the lit path uses, so the bright side
+    // of the disc rolls off to white instead of clipping channel by channel and
+    // sliding in hue on the way.
+    vec3 x = colour;
+    vec3 mapped = clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+    FragColor = vec4(pow(mapped, vec3(1.0 / 2.2)), 1.0);
 }
+GLSL_END
+
+var g_screen: ptr = null
+var g_time = 0.0
 
 on_start(data: ptr) {
     e = data as *Engine
-    values = PARTICLES * 3
 
-    g_position = calloc(values, 8)
-    g_previous = calloc(values, 8)
-    g_colour = calloc(values, 8)
-    if g_position == null || g_previous == null || g_colour == null {
-        println("could not allocate particle state")
-        return
-    }
-
-    position = g_position as float[]
-    previous = g_previous as float[]
-
-    i = 0
-    while i < PARTICLES {
-        if i < DISC {
-            seed_disc(position, previous, i)
-        } else {
-            seed_jet(position, previous, i)
-        }
-        i = i + 1
-    }
-
-    swarm = loader.load_obj("resources/obj/Sphere_Low.obj", true)
-    if swarm == null {
-        println("could not load the particle mesh: ${loader.last_error()}")
-        return
-    }
-
-    core.model_set_scale(swarm, 3.2, 3.2, 3.2)
-
-    // White, so that the per-instance colour is the colour: the shader
-    // multiplies the two, and a tint here would tint the whole spectrum.
-    core.model_matte(swarm, 1.0, 1.0, 1.0)
-
-    // Past 10 the surface is emissive -- it is the light source rather than
-    // something lit by one, which is what an accretion disc is. The value beyond
-    // that threshold is the emissive strength.
-    core.model_set_exposure(swarm, 11.0)
-
-    if !core.model_enable_instancing(swarm, PARTICLES) { return }
-    // Before the model is added: the renderer allocates the colour buffer when
-    // it registers the model, and only if the instances have colours by then.
-    if !core.model_enable_instance_colors(swarm) { return }
-
-    engine.engine_add_model(e, swarm)
-    g_model = swarm as ptr
+    // One quad, covering the frame. loader.quad puts it in the XZ plane with
+    // corners at +/-1, which the vertex shader reads straight as clip space.
+    screen = loader.quad(2.0, 2.0)
+    core.model_set_shader(screen, core.shader_new(VERTEX_LENS, FRAGMENT_LENS))
+    engine.engine_add_model(e, screen)
+    g_screen = screen as ptr
 
     renderer = engine.engine_gl_renderer(e)
-    gl.renderer_set_clear_color(renderer, 0.005, 0.005, 0.012)
+    gl.renderer_set_clear_color(renderer, 0.0, 0.0, 0.0)
     gl.renderer_set_bloom(renderer, true)
-    gl.renderer_set_bloom_params(renderer, 0.55, 0.85)
+    gl.renderer_set_bloom_params(renderer, 0.62, 0.55)
 
-    // Twenty-one degrees above the disc: shallow enough that the orbital
-    // velocity keeps a large component along the line of sight, so the beaming
-    // asymmetry is plain, and steep enough to read the disc as a disc rather
-    // than a line.
+    // Nine degrees above the disc. Nearly edge-on is where the lensing shows:
+    // steeper and the far side stops arcing over the shadow, shallower and the
+    // disc closes up into a line.
     cam = engine.engine_camera(e)
-    core.camera_set_position(cam, core.vec3(0.0, 780.0, 1960.0))
-    core.camera_set_speed(cam, 900.0)
-    core.camera_set_far(cam, 40000.0)
+    core.camera_set_position(cam, core.vec3(0.0, 4.6, 30.0))
+    core.camera_set_speed(cam, 9.0)
+    core.camera_set_near(cam, 0.05)
+    core.camera_set_far(cam, 400.0)
     core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
 
-    println("particles: ${PARTICLES} in one instanced draw (${DISC} disc, ${JETS} jet)")
+    println("black hole: one screen quad, geodesics integrated per pixel")
 }
 
 on_update(data: ptr, delta: float) {
-    swarm = g_model as *Model
-    if swarm == null { return }
+    screen = g_screen as *Model
+    if screen == null { return }
+    g_time = g_time + delta
 
     e = data as *Engine
     cam = engine.engine_camera(e)
 
-    g_alive = step_and_shade(g_position as float[], g_previous as float[],
-                             g_colour as float[], delta,
-                             cam.position.x, cam.position.y, cam.position.z)
-
-    core.model_set_instance_positions(swarm, g_position, PARTICLES)
-    core.model_set_instance_colors(swarm, g_colour, PARTICLES)
+    half_fov = core.deg_to_rad(cam.fov) * 0.5
+    core.model_set_uniform_vec3(screen, "camPos", cam.position)
+    core.model_set_uniform_vec3(screen, "camRight", cam.right)
+    core.model_set_uniform_vec3(screen, "camUp", cam.up)
+    core.model_set_uniform_vec3(screen, "camFwd", cam.front)
+    core.model_set_uniform_float(screen, "tanHalfFov",
+                                 core.sin_of(half_fov) / core.cos_of(half_fov))
+    core.model_set_uniform_float(screen, "aspectRatio", cam.aspect)
+    core.model_set_uniform_float(screen, "discTime", g_time)
 }
 
 main() {
     e = engine.engine_new(platform.API_GL)
     engine.engine_set_size(e, 1280, 800)
     engine.engine_set_title(e, "ae3d - black hole")
-    engine.engine_set_face_culling(e, true)
 
-    // The disc lights itself, so the scene light only has to exist: an emissive
-    // surface never reads it.
-    light = core.light_directional(core.vec3(0.0, 1.0, 0.2),
-                                   core.vec3(1.0, 0.95, 0.8), 1.0)
-    light.ambient_strength = 0.05
-    light.temperature = 5800.0
+    // The quad's winding is back-facing once the vertex shader has mapped it
+    // into clip space, and there is nothing else in the scene to cull.
+    engine.engine_set_face_culling(e, false)
+
+    // Nothing in the frame is lit: every pixel is emission the shader works out
+    // for itself. The light exists because the engine expects one.
+    light = core.light_directional(core.vec3(0.0, 1.0, 0.0),
+                                   core.vec3(1.0, 1.0, 1.0), 1.0)
+    light.ambient_strength = 0.0
     engine.engine_set_light(e, light)
 
     engine.engine_set_user_data(e, e as ptr)
@@ -424,13 +389,10 @@ main() {
 
     engine.engine_run(e, 0 - 1, 0 - 1)
 
-    println("black hole: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${g_alive} particles, ${gl.renderer_draw_calls(engine.engine_gl_renderer(e))} draw call(s)")
+    println("black hole: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${gl.renderer_draw_calls(engine.engine_gl_renderer(e))} draw call(s)")
 
-    swarm = g_model as *Model
-    if swarm != null { core.model_free(swarm) }
-    if g_position != null { free(g_position) }
-    if g_previous != null { free(g_previous) }
-    if g_colour != null { free(g_colour) }
+    screen = g_screen as *Model
+    if screen != null { core.model_free(screen) }
     core.light_free(light)
     engine.engine_free(e)
 }

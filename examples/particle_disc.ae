@@ -1,0 +1,439 @@
+// Two hundred thousand particles around a black hole, in ONE instanced draw.
+//
+// Everything you see -- both halves of the accretion disc and both jets -- is
+// the same low-poly sphere. What differs per particle is where it is and what
+// colour it glows, and both of those are per-instance attributes, so the whole
+// scene is a single glDrawElementsInstanced.
+//
+// This is the N-body companion to examples/black_hole.ae. That one integrates
+// light and gets the lensing; this one integrates matter and gets the orbits --
+// 200,000 of them re-integrated and re-coloured every frame, which is what the
+// instanced path is for. Neither can do the other's trick: a rasteriser cannot
+// bend the light that reaches it, and a disc traced as an analytic surface has
+// no particles in it to follow.
+//
+// The colours are what an observer at the camera would measure:
+//
+//   * a Shakura-Sunyaev thin disc, T proportional to r^(-3/4), so the inner
+//     edge runs blue-white and the rim runs red;
+//   * relativistic Doppler beaming, so the side of the disc rotating toward the
+//     camera is brighter and bluer than the side rotating away;
+//   * gravitational redshift, which cools and dims whatever is deepest in the
+//     well.
+//
+//   ./build.sh examples/particle_disc.ae && ./build/particle_disc
+
+import std.list
+import ae3d.core
+import ae3d.platform
+import ae3d.engine
+import ae3d.gl
+import ae3d.loader
+
+extern calloc(count: int, size: int) -> ptr
+extern free(block: ptr)
+
+// The hole. R_S is the Schwarzschild radius; nothing inside it comes back, so a
+// particle that crosses it is re-seeded at the rim. A non-spinning hole has its
+// innermost stable circular orbit at 3 R_S, and that is where the disc ends --
+// inside it there are no orbits to occupy, which is what makes the dark centre.
+const MASS = 1400000.0
+const R_S = 50.0
+const R_ISCO = 150.0
+const R_OUT = 760.0
+const STEP = 0.016
+
+// The simulation's speed of light, fixed by the orbit rather than chosen: a
+// circular orbit at the ISCO runs at sqrt(MASS / R_ISCO) = 96.6, and for a
+// Schwarzschild hole that orbit is half the speed of light. Everything
+// relativistic below is measured against this.
+const C_SIM = 193.2
+
+// Peak disc temperature in Kelvin, and the value of the radial shape function
+// at its maximum (r = 49/36 R_ISCO) so the profile can be normalised to it.
+//
+// 7600 K is chosen, not derived: a real disc round a hole this size runs far
+// hotter and would be a uniform blue-white here, because r^(-3/4) over the five
+// radii this disc spans is only a factor of two in temperature. Sitting the
+// peak near the white point instead puts the whole visible sweep where the
+// Doppler shift can be seen doing its work -- blue-white on the approaching
+// side, amber to red on the receding one.
+
+// How much of the emissive range a particle at rest gets. The Doppler beaming
+// below multiplies it by up to 4.5 and down to 0.06, and this places that span
+// so the bright end rolls off to white through ACES instead of clipping.
+const GLOW = 0.22
+const T_PEAK = 7600.0
+const PEAK_SHAPE = 0.4879
+
+// The jets, launched along the spin axis from the inner disc at 0.9 c. That
+// clears the escape velocity there (136.6, or 0.71 c), so they leave and
+// decelerate rather than falling back.
+const JET_SPEED = 173.9
+const JET_REACH = 2800.0
+const T_JET = 24000.0
+
+const DISC = 176000
+const JETS = 24000
+const PARTICLES = 200000
+
+var g_model: ptr = null
+var g_position: ptr = null
+var g_previous: ptr = null
+var g_colour: ptr = null
+var g_alive = 0
+var g_seed = 987654321
+
+// Scratch for blackbody(), which has three results and no tuple to put them in.
+var g_cr = 0.0
+var g_cg = 0.0
+var g_cb = 0.0
+
+next_random() -> float {
+    g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
+    return (g_seed * 1.0) / 2147483647.0
+}
+
+mix_colour(t: float, r0: float, g0: float, b0: float,
+                     r1: float, g1: float, b1: float) {
+    g_cr = r0 + (r1 - r0) * t
+    g_cg = g0 + (g1 - g0) * t
+    g_cb = b0 + (b1 - b0) * t
+}
+
+// The Planck locus in sRGB, walked in mireds (a million over the temperature)
+// rather than in Kelvin. Mireds are the axis colour temperature is actually
+// linear in: 2000 K to 3000 K is an enormous change and 20000 K to 21000 K is
+// invisible, and 500 -> 333 against 50 -> 47.6 says exactly that. Anchors about
+// every half stop, straight lines between them, and no transcendental anywhere
+// -- this runs once per particle per frame.
+blackbody(kelvin: float) {
+    k = kelvin
+    if k < 1000.0 { k = 1000.0 }
+    if k > 40000.0 { k = 40000.0 }
+    m = 1000000.0 / k
+
+    if m < 50.0 {
+        mix_colour((m - 25.0) / 25.0, 0.58, 0.70, 1.00, 0.63, 0.74, 1.00)
+    } else if m < 83.3 {
+        mix_colour((m - 50.0) / 33.3, 0.63, 0.74, 1.00, 0.71, 0.80, 1.00)
+    } else if m < 125.0 {
+        mix_colour((m - 83.3) / 41.7, 0.71, 0.80, 1.00, 0.82, 0.87, 1.00)
+    } else if m < 153.8 {
+        mix_colour((m - 125.0) / 28.8, 0.82, 0.87, 1.00, 1.00, 1.00, 1.00)
+    } else if m < 200.0 {
+        mix_colour((m - 153.8) / 46.2, 1.00, 1.00, 1.00, 1.00, 0.90, 0.82)
+    } else if m < 250.0 {
+        mix_colour((m - 200.0) / 50.0, 1.00, 0.90, 0.82, 1.00, 0.81, 0.64)
+    } else if m < 333.3 {
+        mix_colour((m - 250.0) / 83.3, 1.00, 0.81, 0.64, 1.00, 0.69, 0.43)
+    } else if m < 500.0 {
+        mix_colour((m - 333.3) / 166.7, 1.00, 0.69, 0.43, 1.00, 0.49, 0.16)
+    } else {
+        mix_colour((m - 500.0) / 500.0, 1.00, 0.49, 0.16, 1.00, 0.22, 0.00)
+    }
+}
+
+// T(r) proportional to r^(-3/4) * (1 - sqrt(R_ISCO/r))^(1/4). The second factor
+// is the zero-torque boundary at the inner edge: the disc cannot be hot where
+// there is nothing further in to rub against, so it peaks a little way out and
+// falls to nothing at the ISCO itself. Written in square roots because u^(3/4)
+// is sqrt(u * sqrt(u)), and pow() on 200,000 particles a frame is not free.
+disc_shape(radius: float) -> float {
+    u = R_ISCO / radius
+    if u >= 1.0 { return 0.0 }
+    root = core.sqrt_of(u)
+    return core.sqrt_of(u * root) * core.sqrt_of(core.sqrt_of(1.0 - root))
+}
+
+seed_disc(position: float[], previous: float[], index: int) {
+    // Uniform in radius, which puts the surface density at 1/r: more particles
+    // where the disc is bright. Uniform in AREA is the other obvious choice and
+    // is worse on both counts -- it spends most of the swarm on the outer disc,
+    // which radiates as r^-3 and is nearly dark, and leaves the inner edge that
+    // the whole image is about looking speckled.
+    radius = R_ISCO + next_random() * (R_OUT - R_ISCO)
+    angle = next_random() * core.TWO_PI
+
+    // A real thin disc flares: its scale height grows with radius rather than
+    // sitting in a slab of constant thickness.
+    height = (next_random() - 0.5) * radius * 0.075
+
+    x = radius * core.cos_of(angle)
+    z = radius * core.sin_of(angle)
+    speed = core.sqrt_of(MASS / radius)
+
+    slot = index * 3
+    position[slot] = x
+    position[slot + 1] = height
+    position[slot + 2] = z
+    previous[slot] = x + speed * core.sin_of(angle) * STEP
+    previous[slot + 1] = height
+    previous[slot + 2] = z - speed * core.cos_of(angle) * STEP
+}
+
+seed_jet(position: float[], previous: float[], index: int) {
+    // Alternating poles, launched from the inner disc through a narrow opening
+    // angle, so the two cones stay collimated instead of spraying.
+    up = 1.0
+    if index % 2 == 0 { up = 0.0 - 1.0 }
+
+    angle = next_random() * core.TWO_PI
+    spread = next_random() * 26.0
+    base = R_ISCO * 0.45 + next_random() * R_ISCO * 0.35
+
+    x = spread * core.cos_of(angle)
+    z = spread * core.sin_of(angle)
+    y = up * base
+
+    slot = index * 3
+    position[slot] = x
+    position[slot + 1] = y
+    position[slot + 2] = z
+    // Previous position sits behind it along the launch direction: the
+    // integrator reads velocity out of the gap between the two.
+    previous[slot] = x
+    previous[slot + 1] = y - up * JET_SPEED * STEP
+    previous[slot + 2] = z
+}
+
+// One pass over the swarm: integrate, re-seed whatever left, and work out what
+// the camera would see of each particle. One pass rather than three, because at
+// this count the arrays do not fit in cache and the traversal is the cost.
+step_and_shade(position: float[], previous: float[], colour: float[],
+               delta: float, cam_x: float, cam_y: float, cam_z: float) -> int {
+    step = delta
+    if step > 0.033 { step = 0.033 }
+    if step < 0.0001 { step = 0.0001 }
+    scale = step * step
+    inv_step = 1.0 / step
+
+    alive = 0
+    i = 0
+    while i < PARTICLES {
+        slot = i * 3
+        x = position[slot]
+        y = position[slot + 1]
+        z = position[slot + 2]
+
+        distance_sq = x * x + y * y + z * z
+        gone = distance_sq < R_S * R_S
+        if i >= DISC {
+            if distance_sq > JET_REACH * JET_REACH { gone = true }
+        }
+        if gone {
+            if i < DISC {
+                seed_disc(position, previous, i)
+            } else {
+                seed_jet(position, previous, i)
+            }
+            x = position[slot]
+            y = position[slot + 1]
+            z = position[slot + 2]
+            distance_sq = x * x + y * y + z * z
+        }
+        alive = alive + 1
+
+        distance = core.sqrt_of(distance_sq)
+        pull = 0.0 - MASS / (distance_sq * distance)
+
+        // Verlet. The same subtraction gives the velocity the Doppler factor
+        // needs, so knowing how fast this particle moves, and in which
+        // direction, costs nothing extra.
+        vx = (x - previous[slot]) * inv_step
+        vy = (y - previous[slot + 1]) * inv_step
+        vz = (z - previous[slot + 2]) * inv_step
+
+        next_x = x + x - previous[slot] + x * pull * scale
+        next_y = y + y - previous[slot + 1] + y * pull * scale
+        next_z = z + z - previous[slot + 2] + z * pull * scale
+
+        previous[slot] = x
+        previous[slot + 1] = y
+        previous[slot + 2] = z
+        position[slot] = next_x
+        position[slot + 1] = next_y
+        position[slot + 2] = next_z
+
+        // What the camera measures. Line of sight first, particle to eye.
+        dx = cam_x - x
+        dy = cam_y - y
+        dz = cam_z - z
+        reach = core.sqrt_of(dx * dx + dy * dy + dz * dz)
+        if reach < 0.0001 { reach = 0.0001 }
+        inv_reach = 1.0 / reach
+
+        // Relativistic Doppler factor, 1 / (gamma (1 - beta.n)). Approaching
+        // gives d > 1: blueshifted, and beamed forward. Receding gives d < 1.
+        beta_sq = (vx * vx + vy * vy + vz * vz) / (C_SIM * C_SIM)
+        if beta_sq > 0.95 { beta_sq = 0.95 }
+        beta_los = (vx * dx + vy * dy + vz * dz) * inv_reach / C_SIM
+        gamma = 1.0 / core.sqrt_of(1.0 - beta_sq)
+        denominator = gamma * (1.0 - beta_los)
+        if denominator < 0.08 { denominator = 0.08 }
+        doppler = 1.0 / denominator
+
+        // Gravitational redshift: light climbing out of the well arrives cooler
+        // and dimmer, by sqrt(1 - R_S/r).
+        grav = core.sqrt_of(1.0 - R_S / distance)
+
+        emitted = T_JET * core.sqrt_of(R_ISCO / distance)
+        if i < DISC {
+            emitted = T_PEAK * disc_shape(distance) / PEAK_SHAPE
+        }
+
+        flux = 1.0
+        // Stefan-Boltzmann: a surface radiates as the fourth power of its
+        // temperature, so the inner disc does not merely run bluer than the rim,
+        // it outshines it by orders of magnitude. Without this every particle
+        // was equally bright and the disc ended in a drawn circle rather than
+        // fading out the way one actually does. Floored so the rim stays on the
+        // near side of visible.
+        if i < DISC {
+            ratio = emitted / T_PEAK
+            flux = ratio * ratio * ratio * ratio
+            if flux < 0.035 { flux = 0.035 }
+        } else {
+            // A jet dims as it goes, because it expands as it goes. Without
+            // this the two cones simply stopped where the recycling radius is,
+            // which reads as a cut rather than as a fade.
+            flux = R_ISCO * 3.0 / distance
+            if flux > 1.0 { flux = 1.0 }
+            if flux < 0.05 { flux = 0.05 }
+        }
+
+        shift = doppler * grav
+        blackbody(emitted * shift)
+
+        // Beaming. An optically thick surface, integrated over its spectrum,
+        // brightens as the fourth power of the Doppler factor -- which is why
+        // one side of a disc can outshine the other by an order of magnitude.
+        // Capped, because the framebuffer is eight bits a channel and an
+        // uncapped fourth power flattens every bright particle to one white.
+        beam = shift * shift * shift * shift
+        if beam > 4.5 { beam = 4.5 }
+        if beam < 0.06 { beam = 0.06 }
+
+        glow = beam * flux * GLOW
+        colour[slot] = g_cr * glow
+        colour[slot + 1] = g_cg * glow
+        colour[slot + 2] = g_cb * glow
+
+        i = i + 1
+    }
+    return alive
+}
+
+on_start(data: ptr) {
+    e = data as *Engine
+    values = PARTICLES * 3
+
+    g_position = calloc(values, 8)
+    g_previous = calloc(values, 8)
+    g_colour = calloc(values, 8)
+    if g_position == null || g_previous == null || g_colour == null {
+        println("could not allocate particle state")
+        return
+    }
+
+    position = g_position as float[]
+    previous = g_previous as float[]
+
+    i = 0
+    while i < PARTICLES {
+        if i < DISC {
+            seed_disc(position, previous, i)
+        } else {
+            seed_jet(position, previous, i)
+        }
+        i = i + 1
+    }
+
+    swarm = loader.load_obj("resources/obj/Sphere_Low.obj", true)
+    if swarm == null {
+        println("could not load the particle mesh: ${loader.last_error()}")
+        return
+    }
+
+    core.model_set_scale(swarm, 3.2, 3.2, 3.2)
+
+    // White, so that the per-instance colour is the colour: the shader
+    // multiplies the two, and a tint here would tint the whole spectrum.
+    core.model_matte(swarm, 1.0, 1.0, 1.0)
+
+    // Past 10 the surface is emissive -- it is the light source rather than
+    // something lit by one, which is what an accretion disc is. The value beyond
+    // that threshold is the emissive strength.
+    core.model_set_exposure(swarm, 11.0)
+
+    if !core.model_enable_instancing(swarm, PARTICLES) { return }
+    // Before the model is added: the renderer allocates the colour buffer when
+    // it registers the model, and only if the instances have colours by then.
+    if !core.model_enable_instance_colors(swarm) { return }
+
+    engine.engine_add_model(e, swarm)
+    g_model = swarm as ptr
+
+    renderer = engine.engine_gl_renderer(e)
+    gl.renderer_set_clear_color(renderer, 0.005, 0.005, 0.012)
+    gl.renderer_set_bloom(renderer, true)
+    gl.renderer_set_bloom_params(renderer, 0.55, 0.85)
+
+    // Twenty-one degrees above the disc: shallow enough that the orbital
+    // velocity keeps a large component along the line of sight, so the beaming
+    // asymmetry is plain, and steep enough to read the disc as a disc rather
+    // than a line.
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(0.0, 780.0, 1960.0))
+    core.camera_set_speed(cam, 900.0)
+    core.camera_set_far(cam, 40000.0)
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+
+    println("particles: ${PARTICLES} in one instanced draw (${DISC} disc, ${JETS} jet)")
+}
+
+on_update(data: ptr, delta: float) {
+    swarm = g_model as *Model
+    if swarm == null { return }
+
+    e = data as *Engine
+    cam = engine.engine_camera(e)
+
+    g_alive = step_and_shade(g_position as float[], g_previous as float[],
+                             g_colour as float[], delta,
+                             cam.position.x, cam.position.y, cam.position.z)
+
+    core.model_set_instance_positions(swarm, g_position, PARTICLES)
+    core.model_set_instance_colors(swarm, g_colour, PARTICLES)
+}
+
+main() {
+    e = engine.engine_new(platform.API_GL)
+    engine.engine_set_size(e, 1280, 800)
+    engine.engine_set_title(e, "ae3d - particle disc")
+    engine.engine_set_face_culling(e, true)
+
+    // The disc lights itself, so the scene light only has to exist: an emissive
+    // surface never reads it.
+    light = core.light_directional(core.vec3(0.0, 1.0, 0.2),
+                                   core.vec3(1.0, 0.95, 0.8), 1.0)
+    light.ambient_strength = 0.05
+    light.temperature = 5800.0
+    engine.engine_set_light(e, light)
+
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_start(e, on_start as fn(ptr))
+    engine.engine_on_update(e, on_update as fn(ptr, float))
+
+    engine.engine_run(e, 0 - 1, 0 - 1)
+
+    println("particle disc: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${g_alive} particles, ${gl.renderer_draw_calls(engine.engine_gl_renderer(e))} draw call(s)")
+
+    swarm = g_model as *Model
+    if swarm != null { core.model_free(swarm) }
+    if g_position != null { free(g_position) }
+    if g_previous != null { free(g_previous) }
+    if g_colour != null { free(g_colour) }
+    core.light_free(light)
+    engine.engine_free(e)
+}
