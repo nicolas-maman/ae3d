@@ -103,6 +103,43 @@ def scene_list_id(widgets):
     return None
 
 
+def row_name(widgets, row):
+    kids = [c["text"].strip() for c in widgets.values() if c["parent"] == row["id"]]
+    return kids[0] if kids else "?"
+
+
+def water_section_visible(widgets):
+    caps = [w for w in widgets.values()
+            if w["type"] == "text" and w["text"].strip() == "wave height"]
+    if not caps:
+        return None
+    frame = widgets.get(caps[0]["parent"])
+    return frame["visible"] if frame else None
+
+
+def audit_kinds(port, scene, step):
+    """Every row has to report its own kind, whatever happened before it.
+
+    The model, the component saying what it is, and the script sit at the same
+    index in three lists. When only some of them move, every object past that
+    point answers for another one, and the way that shows is an object whose
+    inspector belongs to something else. Selecting each row and asking whether
+    the water section is open is the cheapest question that notices.
+    """
+    widgets = tree(port)
+    rows = rows_under(widgets, scene)
+    rows.sort(key=lambda w: w["id"])
+    for row in rows:
+        name = row_name(widgets, row)
+        post(port, "/widget/%d/click" % row["id"])
+        time.sleep(0.45)
+        shown = water_section_visible(tree(port))
+        if shown != (name == "water"):
+            return "after %s, the row %r reports the water section as %s" % (
+                step, name, shown)
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8791)
@@ -227,6 +264,24 @@ def main():
                 back = tree(args.port)[readout[0]["id"]]["text"].strip()
                 check("a water slider reaches the simulation", back == "17.50",
                       repr(back))
+
+        # The same operations interleaved. A check that passes on its own can
+        # fail in sequence: adding water showed its section every time until an
+        # Undo had happened earlier in the run, and that was three lists going
+        # out of step rather than anything about water.
+        ids = {w["text"].strip(): w["id"] for w in tree(args.port).values()
+               if w["type"] == "button"}
+        mismatch = None
+        for step, button, pause in (("add cube", "Cube", 1.2),
+                                    ("delete", "Delete", 1.2),
+                                    ("undo the delete", "Undo", 1.5)):
+            post(args.port, "/widget/%d/click" % ids[button])
+            time.sleep(pause)
+            mismatch = audit_kinds(args.port, scene, step)
+            if mismatch:
+                break
+        check("every row reports its own kind through a mixed sequence",
+              mismatch is None, mismatch or "")
 
         # Save, Load and Delete, pressed. A scene that never reaches disk and
         # a Load that brings back nothing both look like a working editor from
