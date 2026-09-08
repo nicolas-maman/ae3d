@@ -411,6 +411,19 @@ int ae3d_gl_update_instances(void *inst, int matrix_vbo, int capacity_bytes) {
     return capacity_bytes;
 }
 
+// The colours are uploaded when the model is registered, which is the only time
+// they ever were: a colour set afterwards sat in the instance buffer and never
+// reached the GPU.
+void ae3d_gl_update_instance_colors(void *inst, int color_vbo) {
+    const float *colors = ae3d_inst_color_data(inst);
+    int count = ae3d_inst_count(inst);
+
+    if (count <= 0 || !color_vbo || !colors || !ae3d_inst_has_colors(inst)) return;
+    glBindBuffer(GL_ARRAY_BUFFER, (GLuint)color_vbo);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)count * AE3D_COLOR_BYTES,
+                 colors, GL_DYNAMIC_DRAW);
+}
+
 void ae3d_gl_draw_elements(int count, int byte_offset) {
     glDrawElements(GL_TRIANGLES, (GLsizei)count, GL_UNSIGNED_INT,
                    (const void *)(size_t)byte_offset);

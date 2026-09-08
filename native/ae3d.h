@@ -83,6 +83,8 @@ void   ae3d_inst_set_matrix(void *inst, int i, const double *m);
 void   ae3d_inst_remove(void *inst, int i);
 int    ae3d_inst_enable_colors(void *inst, int count);
 int    ae3d_inst_has_colors(void *inst);
+void   ae3d_gl_update_instance_colors(void *inst, int color_vbo);
+int    ae3d_vk_update_instances(int handle, void *instances);
 void   ae3d_inst_set_color(void *inst, int i, double r, double g, double b);
 void   ae3d_inst_compute_bounds(void *inst);
 double ae3d_inst_bound_x(void *inst);
