@@ -94,6 +94,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     vec3 waterBaseColor;
     float waterTransparency;
     float waterPlaneHeight;
+    float waterLevel;
     bool enableFog;
     float fogStart;
     float fogEnd;
@@ -135,6 +136,11 @@ layout(location = 2) in vec3 fragPosition;
 // GPU Gems Chapter 2: Caustics uniforms
 
 
+
+
+// The still level the waves rise and fall around, so a crest can be measured
+// against the water rather than against however high the world's zero happens
+// to be.
 
 
 
@@ -353,10 +359,14 @@ void main() {
     // Enhanced foam system with wave-based trails
     float totalFoam = 0.0;
     
-    // Wave height foam (peaks)
-    if (waveHeight > 450.0) {
-        float heightFoam = smoothstep(450.0, 600.0, waveHeight) * 0.15;
-        totalFoam += heightFoam;
+    // Wave height foam (peaks). How high a crest has to be for foam depends on
+    // how high the waves go at all: fixed at four hundred and fifty units, it
+    // never appeared on any ocean this engine has ever drawn.
+    float tallest = (waveAmplitudes[0] + waveAmplitudes[1] +
+                     waveAmplitudes[2] + waveAmplitudes[3]) * waveHeightMultiplier;
+    if (tallest > 0.0) {
+        float crest = waveHeight - waterLevel;
+        totalFoam += smoothstep(tallest * 0.55, tallest * 0.8, crest) * 0.15;
     }
     
     // Dynamic foam trails based on wave velocity

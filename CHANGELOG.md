@@ -214,7 +214,10 @@ First working engine.
   twenty, thirty, fifty and a hundred thousand. A scene measured in metres and
   one measured in centimetres now behave the same, and the suite that renders
   every setting twice makes its scene an ordinary few hundred units across to
-  say so.
+  say so. Foam on the wave crests went the same way: it needed a crest four
+  hundred and fifty units above the world's zero, which no ocean this engine has
+  drawn ever reached, so it appeared on none of them. A crest is now measured
+  from the water's own level against how high its waves go.
 
 ### Portability
 

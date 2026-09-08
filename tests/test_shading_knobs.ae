@@ -115,6 +115,18 @@ check_water(backend: *Backend, cam: *Camera, bright: *Light) {
     water.simulation_set_transparency(sim, 0.85)
     settled = water_frame(backend, cam, light, sim)
 
+    // Foam sits on the crests, which are measured from the water's own level.
+    // Moving that level well above the surface leaves no crest above it, so the
+    // foam has to go: it is the only thing the level feeds.
+    core.model_set_uniform_float(surface, "waterLevel", 400.0)
+    core.backend_render(backend, cam, light)
+    core.backend_frame_pixels(backend)
+    if frame_sum(core.backend_frame_pixels(backend)) == settled {
+        println("FAIL water foam changes nothing")
+        failures = failures + 1
+    }
+    core.model_set_uniform_float(surface, "waterLevel", 0.0 - 60.0)
+
     // The fog colour reaches the fog. A local of the same name used to hide the
     // uniform, so the surface faded into a shade nobody chose.
     core.model_set_uniform_vec3(surface, "fogColor", core.vec3(1.0, 0.2, 0.05))
