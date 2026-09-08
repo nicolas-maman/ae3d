@@ -505,6 +505,14 @@ First working engine.
   the scene it is named after. zlib does the compression, which the build
   already links, so what was added is the chunk framing PNG puts around it.
 
+### Examples
+
+- `spinning_cube`, `models` and `lights` aim their cameras. All three put the
+  camera above their subject and never called `camera_look_at`, and a new
+  camera looks along -z rather than at anything in particular, so all three
+  framed their subject in the bottom third. `water` is left alone: its camera
+  looks at a horizon on purpose.
+
 ### Editor
 
 - The material colour is a painted chip beside the hex, not hex alone. The
