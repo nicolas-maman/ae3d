@@ -116,6 +116,20 @@ def main():
             check("clicking Cube adds an object", after == before + 1,
                   "%d rows before, %d after" % (before, after))
 
+        # Undo, pressed rather than called. The report's own undo check calls
+        # the editor's function from the top level; the button reaches it
+        # through a closure built inside the ui.window block, which is a
+        # different scope and was binding a different function entirely.
+        undo = find(widgets, "button", "Undo")
+        check("the Undo button is in the tree", undo is not None)
+        if undo is not None and cube is not None:
+            post(args.port, "/widget/%d/click" % undo)
+            time.sleep(1.0)
+            widgets = tree(args.port)
+            undone = len(rows_under(widgets, scene))
+            check("clicking Undo takes the object back off", undone == before,
+                  "%d rows, expected %d" % (undone, before))
+
         # A number field, typed into. The value has to reach the model, which
         # is only proved by selecting away and back: what comes back is the
         # model's own formatting, not the text that was typed.

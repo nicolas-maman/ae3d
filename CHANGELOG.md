@@ -524,6 +524,15 @@ First working engine.
 
 ### Editor
 
+- The Undo button did nothing. aether-ui exports names of its own for stepping
+  the toolkit's command stack, and inside the `ui.window` block a bare call
+  bound to those rather than to the editor's own, so the button stepped an
+  empty stack belonging to the toolkit. The editor's self-check calls the same
+  function from the top level, where its own definition wins, so it reported a
+  working undo the whole time. The editor's history stepping is called
+  `undo_step` and `redo_step` now, and the driver presses the button and checks
+  the object comes back off. Filed upstream as aether-lang-dev/aether-ui#112.
+
 - The odd button out of a pair spans its row. `Light` and `Caves` each sat at
   their own width beside a spacer, a third the size of the buttons above them,
   which made the add grid look unfinished. Each section is now two pairs and a

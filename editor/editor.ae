@@ -1250,7 +1250,7 @@ undone_gizmo_drags() -> int {
         g_gizmo_dragging = false
         history.history_close(g_history)
 
-        undo()
+        undo_step()
 
         if core.abs_of(m.position.x - position.x) > 0.01 ||
            core.abs_of(m.position.y - position.y) > 0.01 ||
@@ -1406,11 +1406,18 @@ limit_from_env() -> int {
 // One row of the inspector: a label, a slider, and a live readout. The slider
 // writes straight through to the selected model, so what is on screen and what
 // the renderer draws are never two copies of the same number.
-undo() {
+// CRITICAL: these must not be called undo and redo. aether-ui exports names of
+// its own for stepping the toolkit's command stack, and inside the ui.window
+// block a bare call to either bound to those rather than to the editor's, so
+// the Undo button stepped an empty stack belonging to the toolkit and did
+// nothing whatever. The report's check calls this from the top level, where the
+// editor's own definition wins, which is why it passed while the button was
+// dead.
+undo_step() {
     replay(history.history_undo(g_history), true)
 }
 
-redo() {
+redo_step() {
     replay(history.history_redo(g_history), false)
 }
 
@@ -2706,9 +2713,9 @@ main() {
 
         undo_row = ui.hstack(left, 6)
         ui.add_css_class(undo_row, "row")
-        undo_btn = ui.btn(undo_row, "Undo") callback { undo() }
+        undo_btn = ui.btn(undo_row, "Undo") callback { undo_step() }
         style_button(undo_btn, "action")
-        redo_btn = ui.btn(undo_row, "Redo") callback { redo() }
+        redo_btn = ui.btn(undo_row, "Redo") callback { redo_step() }
         style_button(redo_btn, "action")
 
         object_row = ui.hstack(left, 6)
@@ -2803,8 +2810,8 @@ main() {
             if string.equals(key, "f") == 1 { focus_selection() }
             if string.equals(key, "Delete") == 1 { remove_selected() }
             if string.equals(key, "BackSpace") == 1 { remove_selected() }
-            if string.equals(key, "z") == 1 { undo() }
-            if string.equals(key, "Z") == 1 { redo() }
+            if string.equals(key, "z") == 1 { undo_step() }
+            if string.equals(key, "Z") == 1 { redo_step() }
             if string.equals(key, "d") == 1 { duplicate_selected() }
         }
         ui.canvas_on_scroll(g_canvas) callback |dx: float, dy: float| {
