@@ -260,6 +260,11 @@ First working engine.
   and a floor built from a corner and turned about, which are the two cases a
   culler working from bounds gets wrong.
 
+- A copy of a model keeps the shader it was told to draw with. `model_clone`
+  carried the mesh, the material, the transform and, since the settings fix, the
+  uniforms, but not the model's own shader, so a copy quietly fell back to the
+  default program.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve
