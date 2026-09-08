@@ -183,7 +183,7 @@ from 1200us to 806us. `benchmarks/bench_scene.ae` keeps that honest.
 **The viewport readback is pipelined.** Reading a frame into client memory stalls
 until the GPU has finished it; two pixel buffers mean the read is issued into one
 while the one filled last frame is mapped, so the CPU never waits. At 1280x720
-that is 1625us a frame against 307us. `benchmarks/bench_readback.ae` measures
+that is around 1500us a frame against 374us. `benchmarks/bench_readback.ae` measures
 both paths in one process. The editor takes the pipelined read and is a frame
 behind; anything comparing what it just drew takes the waiting one.
 
