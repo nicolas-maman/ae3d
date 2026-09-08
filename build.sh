@@ -79,6 +79,15 @@ else
     ZLIB_CFLAGS=""
     ZLIB_LIBS="-lz"
 fi
+# ...but only once. Where the Aether toolchain is built against zlib its own
+# --libs already carries -lz, and naming it twice is not harmless: Apple's ld
+# warns `ignoring duplicate libraries: '-lz'`, and ci.sh counts a build warning
+# as a failure. Keep the include flags either way -- a duplicate -I is silent,
+# and the header still has to be found on the platforms where Aether does not
+# supply it.
+case " $AETHER_LIBS " in
+    *" -lz "*) ZLIB_LIBS="" ;;
+esac
 
 VULKAN_CFLAGS=""
 if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists vulkan; then

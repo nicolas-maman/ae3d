@@ -94,18 +94,19 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/aether-lang-dev/aether.git "$RUNNER_TEMP/aether"
           (cd "$RUNNER_TEMP/aether" && ./install.sh)
-          # GITHUB_PATH is read by the runner, not by the shell that writes it.
-          # Under MSYS2 $HOME is /home/runneradmin, a mount only that shell
-          # understands, so the Windows arm has to hand over the native path.
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            cygpath -w "$HOME/.aether/bin" >> "$GITHUB_PATH"
-          else
-            echo "$HOME/.aether/bin" >> "$GITHUB_PATH"
-          fi
 
       - name: Run CI
         run: |
-          # Windows needs no special casing here. The leak step keys on `leaks`,
+          # PATH is set here rather than through GITHUB_PATH. setup-msys2
+          # defaults to `path-type: minimal`, so the MSYS2 shell does not
+          # inherit the Windows PATH and never sees what GITHUB_PATH adds --
+          # install.sh put the toolchain in /home/runneradmin/.aether and every
+          # build failed with "'aetherc' not found". Exporting it in the step
+          # that needs it is the same shell that installed it, on all three
+          # platforms, so no per-OS branch is required.
+          export PATH="$HOME/.aether/bin:$PATH"
+
+          # Windows needs no special casing below. The leak step keys on `leaks`,
           # which is macOS-only, so it self-skips on Linux and Windows alike --
           # AE3D_SKIP_LEAKS would be redundant, and CI is documented never to
           # set it. Only Linux needs a display server.
