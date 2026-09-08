@@ -371,15 +371,16 @@ extern malloc(size: int) -> ptr
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 
-const ROWS = 20
+const ROWS = 21
 // Past every inspector row, because a turn of the gizmo is not a row: it is
 // recorded as the angle the drag has turned through so far, and undone by
 // turning back through it.
-const ROTATE_FIRST_SLOT = 20
+const ROTATE_FIRST_SLOT = 21
 const CAMERA_FIRST_ROW = 17
 const CAMERA_LAST_ROW = 19
-const WATER_FIRST_ROW = 11
-const WATER_LAST_ROW = 13
+// Past the camera rows, because the row indices below it are spoken for and a
+// water setting has to sit in the water section wherever its number falls.
+const FOAM_ROW = 20
 const SCRIPT_NONE = 0
 const SCRIPT_SPIN = 1
 const SCRIPT_BOB = 2
@@ -463,12 +464,14 @@ hidden_flag(shown: bool) -> int {
 
 show_water_section(on: bool) {
     ui.set_hidden(g_water_heading, hidden_flag(on))
-    i = WATER_FIRST_ROW
-    while i <= WATER_LAST_ROW {
-        slider = slider_handle(i)
-        readout = readout_handle(i)
-        if slider != 0 { ui.set_hidden(slider, hidden_flag(on)) }
-        if readout != 0 { ui.set_hidden(readout, hidden_flag(on)) }
+    i = 0
+    while i < ROWS {
+        if is_water_row(i) {
+            slider = slider_handle(i)
+            readout = readout_handle(i)
+            if slider != 0 { ui.set_hidden(slider, hidden_flag(on)) }
+            if readout != 0 { ui.set_hidden(readout, hidden_flag(on)) }
+        }
         i = i + 1
     }
 }
@@ -950,7 +953,7 @@ row_reaches_its_target(index: int) -> bool {
     cam = g_camera as *Camera
     sim = selected_water()
 
-    if index == 9 || index == 10 || index == 14 || index == 15 || index == 16 {
+    if is_light_row(index) {
         if light == null { return true }
         before = light_value(index)
         apply_property(index, before + 0.25)
@@ -959,7 +962,7 @@ row_reaches_its_target(index: int) -> bool {
         return moved
     }
 
-    if index >= WATER_FIRST_ROW && index <= WATER_LAST_ROW {
+    if is_water_row(index) {
         if sim == null { return true }
         before = water_value(index)
         apply_property(index, before + 0.5)
@@ -1098,7 +1101,7 @@ rows_that_do_nothing() -> int {
     stuck = 0
     index = 0
     while index < ROWS {
-        wants_water = index >= WATER_FIRST_ROW && index <= WATER_LAST_ROW
+        wants_water = is_water_row(index)
         if wants_water && water_index >= 0 { select_object(water_index) }
         if slider_handle(index) != 0 && !row_reaches_its_target(index) {
             stuck = stuck + 1
@@ -1226,7 +1229,7 @@ replay(step: *EditStep, backwards: bool) {
                 mark_dirty()
                 sync_inspector()
             }
-        } else if step.slot >= WATER_FIRST_ROW && step.slot <= WATER_LAST_ROW {
+        } else if is_water_row(step.slot) {
             // The water rows read whichever object is selected, so replaying one
             // has to name the water it was recorded against rather than take
             // whatever happens to be selected now.
@@ -1342,6 +1345,7 @@ water_value(index: int) -> float {
     if index == 11 { return water.simulation_amplitude(sim) }
     if index == 12 { return sim.wave_speed_multiplier }
     if index == 13 { return sim.transparency }
+    if index == FOAM_ROW { return water.simulation_foam_intensity(sim) }
     return 0.0
 }
 
@@ -1352,6 +1356,13 @@ camera_value(index: int) -> float {
     if index == 18 { return cam.near }
     if index == 19 { return cam.far }
     return 0.0
+}
+
+// The water rows are not contiguous: the light colour sits between the wave
+// settings and the foam row that follows them. A predicate rather than a range,
+// which is what is_light_row and is_camera_row already are.
+is_water_row(index: int) -> bool {
+    return index == 11 || index == 12 || index == 13 || index == FOAM_ROW
 }
 
 is_light_row(index: int) -> bool {
@@ -1411,7 +1422,7 @@ apply_property(index: int, value: float) {
         return
     }
 
-    if index >= WATER_FIRST_ROW && index <= WATER_LAST_ROW {
+    if is_water_row(index) {
         sim = selected_water()
         if sim != null {
             history.history_record(g_history, history.STEP_PROPERTY, sim as ptr, index,
@@ -1420,6 +1431,7 @@ apply_property(index: int, value: float) {
             if index == 11 { water.simulation_set_amplitude(sim, value) }
             if index == 12 { water.simulation_set_wave_speed(sim, value) }
             if index == 13 { water.simulation_set_transparency(sim, value) }
+            if index == FOAM_ROW { water.simulation_set_foam(sim, true, value) }
         }
         readout = readout_handle(index)
         if readout != 0 { ui.set_text(readout, number(value)) }
@@ -2530,6 +2542,7 @@ main() {
         inspector_row(right, "wave height", 0.0, 24.0, 6.0, 11)
         inspector_row(right, "wave speed", 0.0, 4.0, 1.0, 12)
         inspector_row(right, "transparency", 0.0, 1.0, 0.72, 13)
+        inspector_row(right, "foam", 0.0, 4.0, 1.0, FOAM_ROW)
 
         ui.divider(right)
         heading(right, "CAMERA")

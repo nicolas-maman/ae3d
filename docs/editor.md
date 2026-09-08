@@ -53,7 +53,10 @@ carries the newest.
 
 **Inspector** changes with what is selected. Transform and material are always
 there; water, light, camera, behaviour and rendering sections appear when they
-apply.
+apply. A section is the rows that belong to it rather than a run of them: the
+water rows are not contiguous, because the foam row was added after the row
+indices below it were spoken for, so which section a row is in is a question
+asked of the row and not of its number.
 
 ## Undo
 
