@@ -129,6 +129,17 @@ First working engine.
 
 ### Fixes
 
+- The leak check skipped every suite that uses `ae3d.engine`, and both of them
+  were losing the model they built in `on_start`. The exclusion existed because
+  a program that opens a window produces leaks it cannot do anything about, but
+  the check already told a system retain cycle apart from a lost allocation, so
+  it was broader than its reason. It now judges a leak by how close the frame in
+  this binary is to the allocation: something this code lost was allocated a
+  frame or two below its own call, while AppKit's stray array from window
+  teardown has ten Apple frames in between and only reaches `main` because
+  `main` called `glfwDestroyWindow`. Three of `test_render`'s exits were also
+  losing an engine and a light.
+
 - Removing an instance left every instance after it wearing the colour of the
   one before. Removal shifts the colours down one exactly as it shifts the
   matrices, but only the matrices were flagged for re-upload, and OpenGL sends

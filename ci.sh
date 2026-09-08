@@ -304,15 +304,36 @@ elif command -v leaks >/dev/null 2>&1; then
     for suite in tests/test_*.ae benchmarks/bench_*.ae; do
         [ -e "$suite" ] || continue
         name="$(basename "$suite" .ae)"
-        grep -q "ae3d.engine" "$suite" && continue
         [ -x "build/$name" ] || continue
-        # Only allocations this code lost count. A program that creates a GPU
-        # context also produces NSXPCConnection retain cycles inside the window
-        # server's own machinery, which leaks reports as ROOT CYCLE rather than
-        # ROOT LEAK and which nothing here can release.
+        # Only allocations this code lost count, judged by whose stack they are
+        # on rather than by how leaks labelled them.
+        #
+        # A program that opens a window produces two kinds of noise it cannot do
+        # anything about. NSXPCConnection retain cycles inside the window
+        # server's machinery come back as ROOT CYCLE, which is easy to exclude.
+        # But destroying the window also lets AppKit strand a stray NSArray
+        # inside its own accessibility teardown, and that arrives as a ROOT
+        # LEAK, intermittently. Counting ROOT LEAK lines would make this flaky.
+        #
+        # Asking whether the binary appears anywhere in the stack does not
+        # separate them either: AppKit stranded that array under
+        # glfwDestroyWindow, which main called, so main is in its stack too.
+        # What tells them apart is how far the binary's frame is from the
+        # allocation. Something this code lost was allocated a frame or two
+        # below its own call; AppKit's stray has ten Apple frames in between.
+        #
+        # So a leak counts when a frame within four of the allocation is in
+        # this binary. That is what lets the suites using ae3d.engine be
+        # checked at all: they were skipped wholesale for opening a window, and
+        # the exclusion was hiding a lost model in each of them.
         output="$(MallocStackLogging=1 leaks --atExit -- "./build/$name" 2>&1)"
         report="$(printf '%s' "$output" | grep -o '[0-9]* leaks for [0-9]* total leaked bytes' | tail -1)"
-        lost="$(printf '%s' "$output" | grep -c 'ROOT LEAK')"
+        lost="$(printf '%s' "$output" | awk -v bin="$name" '
+            /^STACK OF /   { inblock = (index($0, "ROOT LEAK") > 0); ours = 0; next }
+            inblock && $1 ~ /^[0-9]+$/ && $1 + 0 <= 4 && index($0, bin) { ours = 1 }
+            inblock && /^====/ { if (ours) n++; inblock = 0 }
+            END { print n + 0 }
+        ')"
         cycles="$(printf '%s' "$output" | grep -c 'ROOT CYCLE')"
         if [ -z "$report" ]; then
             skip "$name" "no leak report"

@@ -20,6 +20,9 @@ var g_corner_after = 0
 var g_missing_texture = 0
 var g_real_texture = 0
 var g_frames = 0
+// engine_add_model does not take ownership: there is an engine_remove_model,
+// and every other suite frees the models it made. Held so main can.
+var g_cube: ptr = null
 
 const SKY_R = 0.25
 const SKY_G = 0.55
@@ -31,6 +34,7 @@ on_start(data: ptr) {
     core.model_set_scale(cube, 8.0, 8.0, 8.0)
     core.model_matte(cube, 0.9, 0.2, 0.15)
     engine.engine_add_model(e, cube)
+    g_cube = cube as ptr
 
     cam = engine.engine_camera(e)
     core.camera_set_position(cam, core.vec3(0.0, 0.0, 120.0))
@@ -69,6 +73,14 @@ near(got: int, want: float) -> bool {
     return diff <= 1
 }
 
+// After the engine, because freeing the renderer is what releases the GPU
+// handles the model was given.
+release_cube() {
+    if g_cube == null { return }
+    core.model_free(g_cube as *Model)
+    g_cube = null
+}
+
 main() {
     e = engine.engine_new(platform.API_GL)
     engine.engine_set_size(e, 320, 240)
@@ -84,6 +96,9 @@ main() {
 
     if !engine.engine_run(e, 0 - 1, 0 - 1) {
         println("engine_skybox: SKIP no window available")
+        core.light_free(light)
+        engine.engine_free(e)
+        release_cube()
         return
     }
 
@@ -93,6 +108,7 @@ main() {
         println("engine_skybox: FAIL only ${g_frames} frame(s) rendered, nothing to compare")
         core.light_free(light)
         engine.engine_free(e)
+        release_cube()
         return
     }
 
@@ -124,4 +140,5 @@ main() {
 
     core.light_free(light)
     engine.engine_free(e)
+    release_cube()
 }
