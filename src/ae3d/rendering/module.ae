@@ -10,7 +10,7 @@ import ae3d.core
 exports (
     Config,
     default_config, high_quality_config, performance_config, voxel_config,
-    apply, apply_all
+    apply, apply_all, unset_config, defaults_model
 )
 
 struct Config {
@@ -245,6 +245,69 @@ apply(m: *Model, c: Config) {
 
     core.model_set_uniform_int(m, "enableHighQualityFiltering", flag(c.high_quality_filtering))
     core.model_set_uniform_int(m, "filteringQuality", c.filtering_quality)
+}
+
+// What the shader starts from with nothing set: every feature off. This is what
+// a model that asked for nothing has always looked like, and a renderer resets
+// to it so that a model which asked for nothing keeps looking that way whatever
+// the model beside it asked for.
+unset_config() -> Config {
+    c = default_config()
+    c.advanced_lighting = false
+    c.clearcoat = false
+    c.clearcoat_roughness = 0.0
+    c.clearcoat_intensity = 0.0
+    c.sheen = false
+    c.sheen_r = 0.0
+    c.sheen_g = 0.0
+    c.sheen_b = 0.0
+    c.sheen_roughness = 0.0
+    c.transmission = false
+    c.transmission_factor = 0.0
+    c.multiple_scattering = false
+    c.energy_conservation = false
+    c.image_based_lighting = false
+    c.ibl_intensity = 0.0
+    c.perlin_noise = false
+    c.noise_scale = 0.0
+    c.noise_octaves = 0
+    c.noise_intensity = 0.0
+    c.advanced_shadows = false
+    c.shadow_intensity = 0.0
+    c.shadow_softness = 0.0
+    c.volumetric_lighting = false
+    c.volumetric_intensity = 0.0
+    c.volumetric_steps = 0
+    c.volumetric_scattering = 0.0
+    c.ssao = false
+    c.ssao_intensity = 0.0
+    c.ssao_radius = 0.0
+    c.ssao_bias = 0.0
+    c.ssao_samples = 0
+    c.global_illumination = false
+    c.gi_intensity = 0.0
+    c.gi_bounces = 0
+    c.caustics = false
+    c.caustics_intensity = 0.0
+    c.caustics_scale = 0.0
+    c.caustics_speed = 0.0
+    c.caustics_water_level = 0.0
+    c.caustics_depth = 0.0
+    c.bloom = false
+    c.bloom_threshold = 0.0
+    c.bloom_intensity = 0.0
+    c.bloom_radius = 0.0
+    c.high_quality_filtering = false
+    c.filtering_quality = 0
+    return c
+}
+
+// A model carrying the unset settings and nothing else. A renderer draws it into
+// the program's uniforms to wipe what the model before it asked for.
+defaults_model() -> *Model {
+    m = core.model_new()
+    apply(m, unset_config())
+    return m
 }
 
 apply_all(models: ptr, c: Config) {

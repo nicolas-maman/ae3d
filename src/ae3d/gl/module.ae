@@ -13,6 +13,7 @@ import std.heap
 import std.string
 import ae3d.core
 import ae3d.platform
+import ae3d.rendering
 import ae3d.shaders
 
 exports (
@@ -150,6 +151,8 @@ struct ProgramSlots {
     is_instanced: int
     use_instance_color: int
     caustics_time: int
+    loaded_names: uint64
+    shading_loaded: bool
 }
 
 struct TextureEntry {
@@ -237,6 +240,7 @@ struct GLRenderer {
 
     scene_start: float
     scene_time: float
+    defaults: ptr
     post_depth: int
     bloom_fbo: int
     bloom_texture: int
@@ -275,6 +279,7 @@ renderer_new() -> *GLRenderer {
     r.bound_instance_color = 0 - 1
     r.scene_start = platform.time()
     r.scene_time = 0.0
+    r.defaults = rendering.defaults_model() as ptr
     return r
 }
 
@@ -307,6 +312,7 @@ renderer_free(r: *GLRenderer) {
         }
         list.free(r.textures)
     }
+    if r.defaults != null { core.model_free(r.defaults as *Model) }
     if r.frustum != null { core.frustum_free(r.frustum) }
     if r.screen_mesh != null { core.mesh_destroy(r.screen_mesh) }
     heap.free(r)
@@ -409,6 +415,10 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
     s.is_instanced = ae3d_gl_uniform_location(program, "isInstanced")
     s.use_instance_color = ae3d_gl_uniform_location(program, "useInstanceColor")
     s.caustics_time = ae3d_gl_uniform_location(program, "causticsTime")
+    s.loaded_names = 0 as uint64
+    // Nothing has been written into this program yet, so what it holds is
+    // whatever GLSL leaves a uniform at, which is not what a default is.
+    s.shading_loaded = false
     list.add_raw(r.programs, s)
     return s
 }
@@ -1310,6 +1320,10 @@ draw_batch(r: *GLRenderer, b: *GLBatch, view_projection: *Mat4, light: *Light, c
     identity = core.mat4_ident()
     ae3d_gl_uniform_mat4(slots.model, &identity)
 
+    // A batch's members carry no settings of their own, so the program must not
+    // still be holding the ones the model before them asked for.
+    apply_shading(r, slots, null, r.default_program)
+
     ae3d_gl_vao_bind(b.vao)
     if b.stale {
         b.capacity_bytes = ae3d_gl_batch_upload(b.vao, ae3d_gl_geometry_instance_vbo(b.vao),
@@ -1353,7 +1367,7 @@ render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
     }
     bind_shadow_map(r, slots)
     set_model_matrix(slots, m)
-    set_model_uniforms(m, program)
+    apply_shading(r, slots, m, program)
 
     ae3d_gl_vao_bind(m.vao)
 
@@ -1539,6 +1553,22 @@ set_material_uniforms(slots: *ProgramSlots, material: *Material) {
     ae3d_gl_uniform_float(slots.roughness, material.roughness)
     ae3d_gl_uniform_float(slots.exposure, material.exposure)
     ae3d_gl_uniform_float(slots.material_alpha, material.alpha)
+}
+
+// A draw has to shade with what its own model asked for and nothing else. The
+// program keeps whatever the draw before it wrote, so before a model whose set
+// of settings differs from what is loaded, the defaults go in first and wipe
+// the difference. Models configured alike agree on the set, which is the common
+// case and costs nothing.
+apply_shading(r: *GLRenderer, slots: *ProgramSlots, m: *Model, program: int) {
+    names = 0 as uint64
+    if m != null { names = core.model_uniform_names(m) }
+    if !slots.shading_loaded || slots.loaded_names != names {
+        set_model_uniforms(r.defaults as *Model, program)
+        slots.loaded_names = names
+        slots.shading_loaded = true
+    }
+    if m != null { set_model_uniforms(m, program) }
 }
 
 set_model_uniforms(m: *Model, program: int) {
