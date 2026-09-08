@@ -237,6 +237,14 @@ First working engine.
   drawn ever reached, so it appeared on none of them. A crest is now measured
   from the water's own level against how high its waves go.
 
+- Frustum culling is checked against what it is for: the frame has to come out
+  byte for byte the same whether culling is on or off, while the count of draws
+  falls. Nothing tested either half, so a culler that dropped something visible
+  and a culler that dropped nothing would both have passed. The suite includes a
+  model whose middle lies outside the view and whose near side reaches into it,
+  and a floor built from a corner and turned about, which are the two cases a
+  culler working from bounds gets wrong.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve
