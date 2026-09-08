@@ -346,6 +346,12 @@ First working engine.
   it was recorded against, rather than whichever object happens to be selected
   when the undo arrives.
 
+- The shadow suite runs on both renderers. It asked its questions of OpenGL
+  alone, and Vulkan's shadows were covered only by a comparison between the two,
+  which passes just as well when both are wrong in the same way. A backend also
+  says whether it has a shadow map, so asking for shadows can be told apart from
+  having them.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve
