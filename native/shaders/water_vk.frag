@@ -324,7 +324,7 @@ void main() {
     // Calculate light direction based on light type (directional vs point light)
     vec3 lightDir;
     if (lightDirection.x != 0.0 || lightDirection.y != 0.0 || lightDirection.z != 0.0) {
-        // Directional light (like sun) - direction is already FROM sun TO objects
+        // A directional light's direction points at the light.
         lightDir = normalize(lightDirection);
     } else {
         // Point light
@@ -682,8 +682,7 @@ void main() {
         finalColor += vec3(gpuGemsCaustics * 0.6);
         
         // God rays effect (simple volumetric light approximation)
-        vec3 toLight = normalize(lightPos - fragPosition);
-        float godRayStrength = max(0.0, dot(toLight, viewDir));
+        float godRayStrength = max(0.0, dot(lightDir, viewDir));
         godRayStrength = pow(godRayStrength, 4.0) * 0.1;
         finalColor += lightColor * godRayStrength * (1.0 - tintStrength);
     }
