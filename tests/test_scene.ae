@@ -78,6 +78,20 @@ test_raycast() {
     check("mesh hit", raycast.model_mesh(origin, forward, cube), 9.0)
     check_true("mesh miss",
                !raycast.hit(raycast.model_mesh(core.vec3(50.0, 50.0, 10.0), forward, cube)))
+
+    // A model that turns has to take its bounds with it. A mesh built around
+    // its own origin keeps the same bounding sphere however it is turned, but
+    // one built off to a side does not: a floor laid out from a corner swings
+    // its whole body across the world. The mesh test gives up early on that
+    // sphere, so bounds left behind by a rotation are a pick that silently
+    // misses, and they used to be refreshed only where culling was on.
+    floor = loader.plane(4, 10.0)
+    core.model_rotate(floor, 0.0, 90.0, 0.0)
+    check_true("a rotated model can still be picked",
+               raycast.hit(raycast.model_mesh(core.vec3(15.0, 20.0, 0.0 - 15.0),
+                                              core.vec3(0.0, 0.0 - 1.0, 0.0), floor)))
+    core.model_free(floor)
+
     core.model_free(cube)
 }
 

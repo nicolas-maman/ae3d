@@ -57,6 +57,58 @@ quat_json(q: Quat) -> ptr {
     return out
 }
 
+// A model's own uniforms are where every shading setting lives, so a scene that
+// leaves them out loads back looking nothing like the one that was saved. The
+// arrays a water surface carries are rebuilt by the simulation that owns it and
+// are not written here.
+uniforms_json(m: *Model) -> ptr {
+    out = json.arr()
+    count = core.model_uniform_count(m)
+    i = 0
+    while i < count {
+        u = core.model_uniform(m, i)
+        if u != null && u.array == null {
+            entry = json.obj()
+            json.object_set_raw(entry, "name", json.str(u.name))
+            json.object_set_raw(entry, "kind", json.from_int(u.kind))
+            if u.kind == core.UNIFORM_FLOAT {
+                json.object_set_raw(entry, "value", json.num(u.number))
+            } else if u.kind == core.UNIFORM_INT {
+                json.object_set_raw(entry, "value", json.from_int(u.integer))
+            } else if u.kind == core.UNIFORM_VEC3 {
+                json.object_set_raw(entry, "value", vec3_json(u.vector))
+            }
+            json.array_add_raw(out, entry)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+load_uniforms(m: *Model, node: ptr) {
+    if node == null { return }
+    count = json.array_size(node)
+    i = 0
+    while i < count {
+        entry = json.array_get_raw(node, i)
+        if entry != null {
+            name = field_string(entry, "name")
+            kind = field_int(entry, "kind", core.UNIFORM_FLOAT)
+            value = json.object_get_raw(entry, "value")
+            if name != "" && value != null {
+                if kind == core.UNIFORM_FLOAT {
+                    core.model_set_uniform_float(m, name, json.get_number(value))
+                } else if kind == core.UNIFORM_INT {
+                    core.model_set_uniform_int(m, name, json.get_int(value))
+                } else if kind == core.UNIFORM_VEC3 {
+                    core.model_set_uniform_vec3(m, name, vec3_of(value))
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
 number_at(node: ptr, index: int) -> float {
     element = json.array_get_raw(node, index)
     if element == null { return 0.0 }
@@ -78,6 +130,12 @@ field_number(node: ptr, name: string, fallback: float) -> float {
     child = json.object_get_raw(node, name)
     if child == null { return fallback }
     return json.get_number(child)
+}
+
+field_int(node: ptr, name: string, fallback: int) -> int {
+    child = json.object_get_raw(node, name)
+    if child == null { return fallback }
+    return json.get_int(child)
 }
 
 field_string(node: ptr, name: string) -> string {
@@ -145,6 +203,8 @@ scene_save(models: ptr, path: string, mesh_directory: string) -> bool {
             json.object_set_raw(entry, "rotation", quat_json(m.rotation))
             json.object_set_raw(entry, "instanced", json.boolean(m.is_instanced))
             json.object_set_raw(entry, "visible", json.boolean(m.visible))
+            json.object_set_raw(entry, "casts_shadow", json.boolean(m.casts_shadow))
+            json.object_set_raw(entry, "uniforms", uniforms_json(m))
 
             if m.material != null {
                 json.object_set_raw(entry, "material", material_json(m.material))
@@ -262,6 +322,12 @@ load_entry(entry: ptr) -> *Model {
     visible = json.object_get_raw(entry, "visible")
     m.visible = true
     if visible != null { m.visible = json.get_bool(visible) == 1 }
+
+    casts = json.object_get_raw(entry, "casts_shadow")
+    m.casts_shadow = true
+    if casts != null { m.casts_shadow = json.get_bool(casts) == 1 }
+
+    load_uniforms(m, json.object_get_raw(entry, "uniforms"))
 
     apply_material(m, json.object_get_raw(entry, "material"))
 
