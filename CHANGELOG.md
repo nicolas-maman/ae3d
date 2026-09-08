@@ -272,6 +272,11 @@ First working engine.
   frame rendered for the purpose rather than whatever the last comparison left
   in the buffer.
 
+- A copy of a model keeps the shader it was told to draw with. `model_clone`
+  carried the mesh, the material, the transform and, since the settings fix, the
+  uniforms, but not the model's own shader, so a copy quietly fell back to the
+  default program.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve
