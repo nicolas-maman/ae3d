@@ -497,6 +497,15 @@ First working engine.
 
 ### Tooling
 
+- `tools/drive_editor.py` presses the editor's real widgets. Every other check
+  on the editor reads the report it writes about itself, and that report comes
+  from calling the handlers directly, so a button that cannot be hit, a field
+  whose callback is not wired, or a row that does not answer a click all pass.
+  The driver clicks Cube and counts the scene list, types into a position field
+  and selects away and back: what comes back is the model's own formatting,
+  which is the only thing that proves the typed value got there. Gated in
+  `ci.sh`, skipped where there is no python3 or no display.
+
 - `AE3D_SNAPSHOT=<path>` writes the last frame of a bounded run to a PNG, so
   any program built on the engine can be looked at rather than only run.
   Running an example proves it does not crash and counting its draws proves it
