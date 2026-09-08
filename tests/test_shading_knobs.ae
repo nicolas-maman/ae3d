@@ -63,6 +63,14 @@ water_frame(backend: *Backend, cam: *Camera, light: *Light, sim: *Simulation) ->
     return frame_sum(core.backend_frame_pixels(backend))
 }
 
+// A tenth of a percent, which is a thousand times the drift between two renders
+// of the same scene and a small fraction of what any of these settings does.
+moved(after: int, before: int) -> bool {
+    drift = after - before
+    if drift < 0 { drift = 0 - drift }
+    return drift * 1000 > before
+}
+
 check_water(backend: *Backend, cam: *Camera, bright: *Light) {
     // The surface multiplies what it gathers by the light, and the scene above
     // asks for six suns: under those, every water pixel is already white and
@@ -108,6 +116,18 @@ check_water(backend: *Backend, cam: *Camera, bright: *Light) {
         failures = failures + 1
     }
     water.simulation_set_normal_strength(sim, 1.0)
+
+    // How high the waves stand, which the wave table is derived from, so it is
+    // not one uniform going out but the table being rebuilt.
+    // Not merely different: two renders of the same water differ by a hundred
+    // parts in ten million on this driver, so a setting has to move the frame
+    // by more than that to have done anything.
+    water.simulation_set_amplitude(sim, 90.0)
+    if !moved(water_frame(backend, cam, light, sim), base) {
+        println("FAIL water amplitude changes nothing")
+        failures = failures + 1
+    }
+    water.simulation_set_amplitude(sim, 20.0)
 
     water.simulation_set_transparency(sim, 0.2)
     if water_frame(backend, cam, light, sim) == base {
