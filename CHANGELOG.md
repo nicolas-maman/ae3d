@@ -129,6 +129,16 @@ First working engine.
 
 ### Fixes
 
+- An instanced model had its scale and rotation applied twice. Each instance's
+  matrix is built from the model's own scale and rotation, and the shader
+  multiplies the model matrix by the instance's, so a model scaled 2.4 drew its
+  instances at 5.76. One instance of a sphere scaled 30 covered the whole frame
+  where the model alone covered 1062 pixels, and the magnified sphere showed
+  almost no shading across the part still on screen, so `examples/sand.ae` drew
+  a handful of flat blobs instead of grains. The merged-batch path had always
+  sent identity for this reason; the per-model path now does too, in both
+  renderers.
+
 - Every surface built from a signed distance field faced into the solid. The
   builder negated the field's gradient, which already points out of it, so a
   terrain lit by a sun overhead gathered nothing from it and was drawn at
