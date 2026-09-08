@@ -160,7 +160,11 @@ done
 # could have caught.
 check_editor_run() {
     editor_backend="$1"
+    editor_scene="${2:-components}"
     name="ae3d_editor ($editor_backend)"
+    if [ "$editor_scene" != "components" ]; then
+        name="ae3d_editor ($editor_backend, $editor_scene)"
+    fi
     report="$(mktemp)"
     snapshot="$(mktemp -t ae3d_shot).png"
     log="$(mktemp)"
@@ -168,7 +172,7 @@ check_editor_run() {
     # fails the step rather than blocking it.
     AE3D_EDITOR_BACKEND="$editor_backend" \
     AE3D_EDITOR_FRAMES=30 \
-    AE3D_EDITOR_SCENE=components \
+    AE3D_EDITOR_SCENE="$editor_scene" \
     AE3D_EDITOR_SNAPSHOT="$snapshot" \
     AE3D_EDITOR_REPORT="$report" \
         timeout 90 ./build/ae3d_editor >"$log" 2>&1
@@ -235,6 +239,11 @@ else
         for editor_backend in opengl vulkan; do
             check_editor_run "$editor_backend"
         done
+        # The same scene saved and loaded again before the run starts, so the
+        # report describes what came BACK. Every component count is asserted
+        # exactly as above, which is the point: a scene that drops a component
+        # on the way through the file shows up here as a count that fell.
+        check_editor_run opengl roundtrip
     else
         fail "ae3d_editor (build)"
         sed 's/^/        /' /tmp/ae3d_build.log | head -20

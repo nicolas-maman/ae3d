@@ -554,15 +554,21 @@ add_model(m: *Model, name: string) {
 add_component_model(m: *Model, name: string, kind: int, state: ptr) {
     if m == null { return }
     core.model_set_name(m, name)
+    // Everything after this reads the model's own name, never the argument.
+    // Loading a scene calls this with `core.text(m.name)`, so the argument is
+    // the very string the setter just released, and using it again is a
+    // use-after-free: the editor crashed drawing the hierarchy row for the
+    // first model of every scene it opened.
+    named = core.text(m.name)
     backend = viewport_backend()
     core.backend_add_model(&backend, m)
     list.add_raw(g_models, m)
-    list.add_raw(g_components, behaviour.component_new(name, kind, state))
+    list.add_raw(g_components, behaviour.component_new(named, kind, state))
     list.add_raw(g_scripts, index_handle(SCRIPT_NONE))
     history.history_record(g_history, history.STEP_ADD, m as ptr, 0, 0.0, 0.0)
     rebuild_rows()
     select_object(list.size(g_models) - 1)
-    say("added ${name}")
+    say("added ${named}")
 }
 
 remove_selected() {
@@ -657,6 +663,30 @@ set_script(index: int, script: int) {
     say("${script_name(script)} on ${core.text(model_at(index).name)}")
 }
 
+// The inverse of script_name, for a scene that recorded one.
+script_from_name(name: string) -> int {
+    if string.equals(name, "spin") == 1 { return SCRIPT_SPIN }
+    if string.equals(name, "bob") == 1 { return SCRIPT_BOB }
+    if string.equals(name, "orbit") == 1 { return SCRIPT_ORBIT }
+    return SCRIPT_NONE
+}
+
+// What a component kind is called in a scene file. The editor's own constants
+// are numbers and a file outlives them.
+kind_name(kind: int) -> string {
+    if kind == behaviour.KIND_WATER { return "water" }
+    if kind == behaviour.KIND_VOXEL { return "voxel" }
+    if kind == behaviour.KIND_LIGHT { return "light" }
+    return "mesh"
+}
+
+kind_from_name(name: string) -> int {
+    if string.equals(name, "water") == 1 { return behaviour.KIND_WATER }
+    if string.equals(name, "voxel") == 1 { return behaviour.KIND_VOXEL }
+    if string.equals(name, "light") == 1 { return behaviour.KIND_LIGHT }
+    return behaviour.KIND_MESH
+}
+
 script_name(script: int) -> string {
     if script == SCRIPT_SPIN { return "spin" }
     if script == SCRIPT_BOB { return "bob" }
@@ -744,6 +774,20 @@ selected_kind() -> int {
     c = component_at(g_selected)
     if c == null { return behaviour.KIND_MESH }
     return c.kind
+}
+
+// What was attached to this model, matched by the model itself so the two
+// cannot drift apart.
+attachment_on(attachments: ptr, m: *Model) -> *Attachment {
+    if attachments == null { return null }
+    count = list.size(attachments)
+    i = 0
+    while i < count {
+        a = list.get_raw(attachments, i) as *Attachment
+        if a != null && scene.attachment_model(a) == m { return a }
+        i = i + 1
+    }
+    return null
 }
 
 selected_water() -> *Simulation {
@@ -1555,20 +1599,81 @@ build_scene() {
 
     // A bounded run can build the component types too, so the water and voxel
     // paths are exercised rather than only reachable by clicking.
-    if env_is("AE3D_EDITOR_SCENE", "components") {
+    if env_is("AE3D_EDITOR_SCENE", "components") || env_is("AE3D_EDITOR_SCENE", "roundtrip") {
         add_water()
         add_voxels()
         add_light()
         set_script(0, SCRIPT_SPIN)
     }
 
+    // Save the scene and open it again before the run starts, so the report
+    // describes what came BACK rather than what was built. A component the file
+    // does not carry shows up here as a count that dropped.
+    if env_is("AE3D_EDITOR_SCENE", "roundtrip") {
+        save_scene()
+        load_scene()
+    }
+
     select_object(1)
+}
+
+// Everything the scene is, not just its models: the simulations behind its
+// water, and where the camera stood. A scene that keeps the meshes and loses
+// these opens static and framed somewhere else.
+current_view() -> View {
+    v = scene.view_defaults()
+    cam = g_camera as *Camera
+    if cam != null {
+        v.camera_x = cam.position.x
+        v.camera_y = cam.position.y
+        v.camera_z = cam.position.z
+        v.yaw = cam.yaw
+        v.pitch = cam.pitch
+        v.fov = cam.fov
+        v.near = cam.near
+        v.far = cam.far
+        v.speed = cam.speed
+    }
+    v.face_culling = core.face_culling()
+    v.frustum_culling = core.frustum_culling()
+    return v
+}
+
+// What is attached to each model being saved: what kind of thing it is, the
+// behaviour running on it, and the simulation driving it if it is water.
+current_attachments() -> ptr {
+    attachments = list.new()
+    count = list.size(g_models)
+    i = 0
+    while i < count {
+        m = list.get_raw(g_models, i) as *Model
+        c = component_at(i)
+        kind = behaviour.KIND_MESH
+        sim = null as *Simulation
+        if c != null {
+            kind = c.kind
+            if kind == behaviour.KIND_WATER {
+                sim = behaviour.component_state(c) as *Simulation
+            }
+        }
+        script = script_name(script_at(i))
+        if string.equals(script, "none") == 1 { script = "" }
+        if kind != behaviour.KIND_MESH || script != "" || sim != null {
+            list.add_raw(attachments,
+                         scene.attachment_new(m, kind_name(kind), script, sim) as ptr)
+        }
+        i = i + 1
+    }
+    return attachments
 }
 
 save_scene() {
     lights = list.new()
     if g_light != null { list.add_raw(lights, g_light) }
-    saved = scene.scene_save(g_models, lights, SCENE_PATH, "build/")
+    attachments = current_attachments()
+    view = current_view()
+    saved = scene.scene_save(g_models, lights, attachments, &view, SCENE_PATH, "build/")
+    scene.attachments_free(attachments)
     list.free(lights)
 
     if saved {
@@ -1588,17 +1693,10 @@ load_scene() {
     }
 
     clear_scene()
-    count = list.size(loaded)
-    i = 0
-    while i < count {
-        m = list.get_raw(loaded, i) as *Model
-        if m != null { add_model(m, core.text(m.name)) }
-        i = i + 1
-    }
-    list.free(loaded)
 
-    // A file written before scenes carried lights has none, and the scene keeps
-    // the light it is already using.
+    // The lights first: a light marker's row holds the light it stands for, so
+    // it has to exist before the models are added. A file written before scenes
+    // carried lights has none, and the scene keeps the one it is already using.
     beams = scene.scene_load_lights(SCENE_PATH)
     if beams != null {
         if list.size(beams) > 0 {
@@ -1613,6 +1711,54 @@ load_scene() {
         }
         list.free(beams)
     }
+
+    // What was attached to each model, so a surface comes back as the water it
+    // is rather than as a plain mesh: a KIND_MESH row has no water section and
+    // nothing drives its waves.
+    attachments = scene.scene_load_attachments(SCENE_PATH, loaded)
+
+    count = list.size(loaded)
+    i = 0
+    while i < count {
+        m = list.get_raw(loaded, i) as *Model
+        if m != null {
+            a = attachment_on(attachments, m)
+            kind = behaviour.KIND_MESH
+            state = null as ptr
+            if a != null {
+                kind = kind_from_name(scene.attachment_component(a))
+                sim = scene.attachment_water(a)
+                if sim != null { state = sim as ptr }
+            }
+            // The light marker carries the light itself, which was read back
+            // separately: without it the row is a sphere that lights nothing.
+            if kind == behaviour.KIND_LIGHT { state = g_light }
+            add_component_model(m, core.text(m.name), kind, state)
+            if a != null {
+                set_script(list.size(g_models) - 1,
+                           script_from_name(scene.attachment_script(a)))
+            }
+        }
+        i = i + 1
+    }
+    scene.attachments_free(attachments)
+    list.free(loaded)
+
+    view = scene.scene_load_view(SCENE_PATH)
+    cam = g_camera as *Camera
+    if cam != null {
+        core.camera_set_position(cam, core.vec3(view.camera_x, view.camera_y, view.camera_z))
+        cam.yaw = view.yaw
+        cam.pitch = view.pitch
+        core.camera_update_vectors(cam)
+        core.camera_set_fov(cam, view.fov)
+        core.camera_set_near(cam, view.near)
+        core.camera_set_far(cam, view.far)
+        core.camera_set_speed(cam, view.speed)
+    }
+    core.set_face_culling(view.face_culling)
+    core.set_frustum_culling(view.frustum_culling)
+
 
     history.history_clear(g_history)
     say("loaded ${count} models from ${SCENE_PATH}")
