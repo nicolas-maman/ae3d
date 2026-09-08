@@ -44,7 +44,6 @@
 #define AE3D_VK_PROGRAM_SCENE 0
 #define AE3D_VK_PROGRAM_WATER 1
 #define AE3D_VK_PROGRAM_COUNT 2
-#define AE3D_VK_SHADOW_FORMAT VK_FORMAT_R32_SFLOAT
 #define AE3D_VK_DRAWS_PER_FRAME 4096
 #define AE3D_VK_MAX_TEXTURES 256
 #define AE3D_VK_STRIDE (8 * (int)sizeof(float))
@@ -235,9 +234,6 @@ static struct {
     VkImage shadow_image;
     VkDeviceMemory shadow_memory;
     VkImageView shadow_view;
-    VkImage shadow_depth_image;
-    VkDeviceMemory shadow_depth_memory;
-    VkImageView shadow_depth_view;
     VkSampler shadow_sampler;
     VkPipeline shadow_pipeline;
     VkPipeline water_pipeline[2];
@@ -1215,50 +1211,46 @@ static int ae3d_vk_build_shadow_pass(void) {
     VkSubpassDependency dependency;
     VkRenderPassCreateInfo info;
 
+    // Depth, and nothing else. The pass used to write gl_FragCoord.z into an
+    // R32_SFLOAT colour attachment beside a depth attachment holding that same
+    // number, and then throw the depth away: every shadow texel written twice
+    // and one of the two read. The depth image is what is sampled now.
     memset(attachments, 0, sizeof(attachments));
-    attachments[0].format = AE3D_VK_SHADOW_FORMAT;
+    attachments[0].format = vk.depth_format;
     attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
     attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    // Left in the layout the descriptor asks for. Binding 2 holds the default
+    // white texture when shadows are off, so both the shadow map and that
+    // colour image have to be readable through the same declared layout.
     attachments[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    attachments[1].format = vk.depth_format;
-    attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
-    attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
     memset(&colour_ref, 0, sizeof(colour_ref));
-    colour_ref.attachment = 0;
-    colour_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     memset(&depth_ref, 0, sizeof(depth_ref));
-    depth_ref.attachment = 1;
+    depth_ref.attachment = 0;
     depth_ref.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     memset(&subpass, 0, sizeof(subpass));
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments = &colour_ref;
+    subpass.colorAttachmentCount = 0;
     subpass.pDepthStencilAttachment = &depth_ref;
 
+    // The write to wait on is the depth store, not a colour one.
     memset(&dependency, 0, sizeof(dependency));
     dependency.srcSubpass = 0;
     dependency.dstSubpass = VK_SUBPASS_EXTERNAL;
-    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    dependency.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     dependency.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     dependency.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
     memset(&info, 0, sizeof(info));
     info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    info.attachmentCount = 2;
+    info.attachmentCount = 1;
     info.pAttachments = attachments;
     info.subpassCount = 1;
     info.pSubpasses = &subpass;
@@ -1367,18 +1359,6 @@ static void ae3d_vk_destroy_shadow_target(void) {
         ae3d_vkFreeMemory(vk.device, vk.shadow_memory, NULL);
         vk.shadow_memory = VK_NULL_HANDLE;
     }
-    if (vk.shadow_depth_view) {
-        ae3d_vkDestroyImageView(vk.device, vk.shadow_depth_view, NULL);
-        vk.shadow_depth_view = VK_NULL_HANDLE;
-    }
-    if (vk.shadow_depth_image) {
-        ae3d_vkDestroyImage(vk.device, vk.shadow_depth_image, NULL);
-        vk.shadow_depth_image = VK_NULL_HANDLE;
-    }
-    if (vk.shadow_depth_memory) {
-        ae3d_vkFreeMemory(vk.device, vk.shadow_depth_memory, NULL);
-        vk.shadow_depth_memory = VK_NULL_HANDLE;
-    }
 }
 
 static int ae3d_vk_create_shadow_target(void) {
@@ -1386,22 +1366,14 @@ static int ae3d_vk_create_shadow_target(void) {
     VkImageView attachments[2];
     VkFramebufferCreateInfo info;
 
-    if (!ae3d_vk_create_image(AE3D_VK_SHADOW_SIZE, AE3D_VK_SHADOW_SIZE, 1,
-                              AE3D_VK_SHADOW_FORMAT, VK_SAMPLE_COUNT_1_BIT,
-                              VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                              VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_TILING_OPTIMAL,
-                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                              &vk.shadow_image, &vk.shadow_memory, &vk.shadow_view)) {
-        return 0;
-    }
-
+    // One image: the depth attachment is also what the lit pass samples.
     if (!ae3d_vk_create_image(AE3D_VK_SHADOW_SIZE, AE3D_VK_SHADOW_SIZE, 1,
                               vk.depth_format, VK_SAMPLE_COUNT_1_BIT,
-                              VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                              VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                              VK_IMAGE_USAGE_SAMPLED_BIT,
                               VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_TILING_OPTIMAL,
                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                              &vk.shadow_depth_image, &vk.shadow_depth_memory,
-                              &vk.shadow_depth_view)) {
+                              &vk.shadow_image, &vk.shadow_memory, &vk.shadow_view)) {
         return 0;
     }
 
@@ -1419,12 +1391,11 @@ static int ae3d_vk_create_shadow_target(void) {
     }
 
     attachments[0] = vk.shadow_view;
-    attachments[1] = vk.shadow_depth_view;
 
     memset(&info, 0, sizeof(info));
     info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     info.renderPass = vk.shadow_pass;
-    info.attachmentCount = 2;
+    info.attachmentCount = 1;
     info.pAttachments = attachments;
     info.width = AE3D_VK_SHADOW_SIZE;
     info.height = AE3D_VK_SHADOW_SIZE;
@@ -2189,7 +2160,9 @@ static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
 
     memset(&colour_blend, 0, sizeof(colour_blend));
     colour_blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    colour_blend.attachmentCount = 1;
+    // As many blend attachments as the subpass has colour attachments, which
+    // for the shadow pass is none: it writes depth and nothing else.
+    colour_blend.attachmentCount = (render_pass == vk.shadow_pass) ? 0 : 1;
     colour_blend.pAttachments = &blend_attachment;
 
     dynamic_states[0] = VK_DYNAMIC_STATE_VIEWPORT;
@@ -2697,11 +2670,7 @@ int ae3d_vk_shadow_begin(void) {
     if (vk.pass_open) return 0;
 
     memset(clears, 0, sizeof(clears));
-    clears[0].color.float32[0] = 1.0f;
-    clears[0].color.float32[1] = 1.0f;
-    clears[0].color.float32[2] = 1.0f;
-    clears[0].color.float32[3] = 1.0f;
-    clears[1].depthStencil.depth = 1.0f;
+    clears[0].depthStencil.depth = 1.0f;
 
     memset(&pass, 0, sizeof(pass));
     pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -2709,7 +2678,7 @@ int ae3d_vk_shadow_begin(void) {
     pass.framebuffer = vk.shadow_framebuffer;
     pass.renderArea.extent.width = AE3D_VK_SHADOW_SIZE;
     pass.renderArea.extent.height = AE3D_VK_SHADOW_SIZE;
-    pass.clearValueCount = 2;
+    pass.clearValueCount = 1;
     pass.pClearValues = clears;
     ae3d_vkCmdBeginRenderPass(vk.command_buffers[vk.frame], &pass, VK_SUBPASS_CONTENTS_INLINE);
 

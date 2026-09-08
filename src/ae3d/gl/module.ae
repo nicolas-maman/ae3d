@@ -196,7 +196,6 @@ struct GLRenderer {
     shadow_program: int
     shadow_fbo: int
     shadow_map: int
-    shadow_depth: int
     shadow_enabled: bool
     shadow_space: Mat4
 
@@ -805,7 +804,6 @@ renderer_set_shadows(r: *GLRenderer, on: bool) {
 
     r.shadow_fbo = ae3d_gl_fbo_create()
     r.shadow_map = ae3d_gl_fbo_attach_shadow_map(r.shadow_fbo, SHADOW_SIZE)
-    r.shadow_depth = ae3d_gl_fbo_attach_depth(r.shadow_fbo, SHADOW_SIZE, SHADOW_SIZE)
     bind_output(r)
     if r.shadow_map == 0 { r.shadow_enabled = false }
 }
@@ -876,8 +874,9 @@ render_shadow_pass(r: *GLRenderer, light: *Light) {
     ae3d_gl_set_depth_mask(1)
     set_blend(r, false)
     set_face_culling(r, false)
-    ae3d_gl_clear_color(1.0, 1.0, 1.0, 1.0)
-    ae3d_gl_clear(1, 1)
+    // Depth only: the map has no colour attachment, and depth clears to the far
+    // value the lit pass reads as "nothing between here and the light".
+    ae3d_gl_clear(0, 1)
 
     use_program(r, r.shadow_program)
     space = ae3d_gl_uniform_location(r.shadow_program, "lightSpaceMatrix")
@@ -1954,7 +1953,6 @@ renderer_cleanup(r: *GLRenderer) {
     if r.post_fbo != 0 { ae3d_gl_fbo_delete(r.post_fbo) ; r.post_fbo = 0 }
     if r.bloom_fbo != 0 { ae3d_gl_fbo_delete(r.bloom_fbo) ; r.bloom_fbo = 0 }
     if r.shadow_map != 0 { ae3d_gl_texture_delete(r.shadow_map) ; r.shadow_map = 0 }
-    if r.shadow_depth != 0 { ae3d_gl_renderbuffer_delete(r.shadow_depth) ; r.shadow_depth = 0 }
     if r.shadow_fbo != 0 { ae3d_gl_fbo_delete(r.shadow_fbo) ; r.shadow_fbo = 0 }
 
     if r.default_program != 0 { ae3d_gl_program_delete(r.default_program) ; r.default_program = 0 }

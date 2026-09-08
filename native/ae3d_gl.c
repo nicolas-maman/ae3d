@@ -689,6 +689,13 @@ int ae3d_gl_fbo_attach_color(int fbo, int width, int height, int hdr) {
 // point sampling, because the comparison is done per texel with explicit
 // offsets, and an edge clamp so a fragment projecting outside the light's view
 // reads the cleared far value rather than wrapping.
+//
+// The DEPTH attachment, and nothing else. The pass used to write gl_FragCoord.z
+// into an R32F colour buffer beside a depth buffer holding that same number, so
+// every shadow texel was written twice and one of the two was read. With no
+// colour attachment at all the driver takes its depth-only path, and a depth
+// texture sampled with .r gives back what the colour buffer used to hold, so
+// nothing that reads the map changes.
 int ae3d_gl_fbo_attach_shadow_map(int fbo, int size) {
     GLuint texture = 0;
     if (size < 1) size = 1;
@@ -696,17 +703,25 @@ int ae3d_gl_fbo_attach_shadow_map(int fbo, int size) {
     glGenTextures(1, &texture);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, texture);
-    // One 32-bit float, not four bytes. Eight bits of depth is 256 steps across
-    // the whole light-space box, which is coarse enough that a surface shadows
-    // itself, and it did not match what the Vulkan backend stores.
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, size, size, 0, GL_RED, GL_FLOAT, NULL);
+    // 32-bit float depth. Eight bits is 256 steps across the whole light-space
+    // box, which is coarse enough that a surface shadows itself.
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, size, size, 0,
+                 GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    // Left in the default NONE compare mode: the lit pass does its own
+    // comparison with a slope-scaled bias over a 3x3 neighbourhood, so it wants
+    // the stored depth rather than a hardware pass/fail.
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
 
     glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)fbo);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, texture, 0);
+    // A framebuffer with no colour attachment is incomplete unless it is told
+    // there is no colour to draw or read.
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     return (int)texture;
 }
