@@ -52,7 +52,30 @@ if [ -z "$AETHER_CFLAGS" ]; then
     echo "ae3d: 'ae cflags' produced nothing; is the toolchain on PATH?" >&2
     exit 1
 fi
-AETHER_INCLUDES="$(printf '%s\n' $AETHER_CFLAGS | grep -E '^-I' | tr '\n' ' ')"
+# The compile half, whole. This used to keep only the flags starting with -I,
+# and drop the rest on the floor. $GEN is Aether's generated C, and compiling
+# it correctly is not only a question of finding headers -- the language's
+# semantics are on that command line too. Aether's `int` wraps; C leaves signed
+# overflow undefined; `-fwrapv` is what makes the two agree, and without it any
+# wrapping generator is miscompiled from -O2 upward.
+#
+# That is what turned examples/black_hole.ae into a black window on Windows:
+# GCC 15.2 folded the particle seeder's LCG down to a three-value cycle, so all
+# 200,000 particles were seeded to the same point and the swarm rendered as one
+# 1.3-pixel dot. macOS was fine only because Apple Clang does not make the same
+# deduction -- the program was wrong on every platform.
+#
+# `ae cflags --cflags` carries -fwrapv once the toolchain fix (aether#1957) is
+# released. Toolchains older than that do not, and ae3d still supports them, so
+# name the flag here when the toolchain has not already supplied it.
+AETHER_COMPILE_FLAGS="$(ae cflags --cflags 2>/dev/null || true)"
+if [ -z "$AETHER_COMPILE_FLAGS" ]; then
+    AETHER_COMPILE_FLAGS="$(printf '%s\n' $AETHER_CFLAGS | grep -E '^-I' | tr '\n' ' ')"
+fi
+case " $AETHER_COMPILE_FLAGS " in
+    *" -fwrapv "*) ;;
+    *) AETHER_COMPILE_FLAGS="$AETHER_COMPILE_FLAGS -fwrapv" ;;
+esac
 
 if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists glfw3; then
     GLFW_CFLAGS="$(pkg-config --cflags glfw3)"
@@ -127,7 +150,7 @@ for src in $NATIVE_SOURCES; do
 done
 
 "$AETHERC" "$SOURCE" "$GEN"
-"$CC" $CFLAGS "$GEN" $OBJ_DIR/*.o $AETHER_INCLUDES $AETHER_LIBS $GLFW_LIBS $ZLIB_LIBS $PLATFORM_LIBS -o "$OUT"
+"$CC" $CFLAGS "$GEN" $OBJ_DIR/*.o $AETHER_COMPILE_FLAGS $AETHER_LIBS $GLFW_LIBS $ZLIB_LIBS $PLATFORM_LIBS -o "$OUT"
 
 # MinGW gcc appends .exe to an output name that has no extension, so the file
 # is not at the path this asked for. Name the one that exists.
