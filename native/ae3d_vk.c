@@ -351,6 +351,14 @@ static const char *const ae3d_vk_loader_paths[] = {
     NULL
 };
 
+/* Guarded to match its only reader, ae3d_vk_hint_icd() below, which is itself
+ * `#if !defined(_WIN32)`: the Windows loader finds its ICDs through the
+ * registry and needs no hint. Without this the array is defined and never used
+ * on Windows, which -Werror rejects:
+ *
+ *   error: 'ae3d_vk_icd_paths' defined but not used
+ *          [-Werror=unused-const-variable=] */
+#if !defined(_WIN32)
 static const char *const ae3d_vk_icd_paths[] = {
 #if defined(__APPLE__)
     "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json",
@@ -359,6 +367,7 @@ static const char *const ae3d_vk_icd_paths[] = {
 #endif
     NULL
 };
+#endif
 
 #if defined(_WIN32)
 static void *ae3d_vk_dlopen(const char *path) { return (void *)LoadLibraryA(path); }
