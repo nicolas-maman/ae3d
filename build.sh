@@ -65,8 +65,9 @@ fi
 # 1.3-pixel dot. macOS was fine only because Apple Clang does not make the same
 # deduction -- the program was wrong on every platform.
 #
-# `ae cflags --cflags` carries -fwrapv from Aether 0.653.0 on. Older toolchains
-# do not and ae3d still supports them, so name it when it is missing.
+# `ae cflags --cflags` carries -fwrapv once the toolchain fix (aether#1957) is
+# released. Toolchains older than that do not, and ae3d still supports them, so
+# name the flag here when the toolchain has not already supplied it.
 AETHER_COMPILE_FLAGS="$(ae cflags --cflags 2>/dev/null || true)"
 if [ -z "$AETHER_COMPILE_FLAGS" ]; then
     AETHER_COMPILE_FLAGS="$(printf '%s\n' $AETHER_CFLAGS | grep -E '^-I' | tr '\n' ' ')"
