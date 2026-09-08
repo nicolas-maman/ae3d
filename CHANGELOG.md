@@ -206,6 +206,17 @@ First working engine.
   at again, so four of every nine reads a full-screen pass made were for
   nothing. The frames are identical, and backend parity still holds.
 
+- A model's bounds follow it wherever it goes, and cost nothing to keep. They
+  were refreshed only when frustum culling was on, which it is not by default,
+  so a rotated model kept the bounds it had before: everything that reads them
+  read the wrong thing, and picking a floor that had been turned silently
+  missed, since the mesh test gives up early on the bounding sphere. Each
+  refresh also scaled and rotated every vertex twice, which is what a move used
+  to cost. The mesh's own centre and radius are worked out once and put through
+  the model matrix, so the bounds are exact for a rotation, never too small for
+  an uneven scale, and two thousand moves went from six milliseconds of work to
+  too little to measure.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve
