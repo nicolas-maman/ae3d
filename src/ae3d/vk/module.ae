@@ -37,6 +37,7 @@ extern ae3d_vk_frame_begin(r: float, g: float, b: float, a: float) -> int
 extern ae3d_vk_frame_end() -> int
 extern ae3d_vk_upload_mesh(mesh: ptr) -> int
 extern ae3d_vk_upload_instances(instances: ptr) -> int
+extern ae3d_vk_update_instances(handle: int, instances: ptr) -> int
 extern ae3d_inst_create() -> ptr
 extern ae3d_inst_destroy(inst: ptr)
 extern ae3d_inst_resize(inst: ptr, count: int) -> int
@@ -484,6 +485,8 @@ renderer_add_model(r: *VKRenderer, m: *Model) {
 
     if m.is_instanced && core.model_instance_count(m) > 0 {
         m.instance_vbo = ae3d_vk_upload_instances(m.instances)
+        m.instances_updated = false
+        m.instance_colors_updated = false
     }
 
     resolve_textures(r, m)
@@ -594,6 +597,17 @@ refresh_geometry(m: *Model) {
     m.vbo = ae3d_vk_upload_mesh(m.mesh)
     ae3d_mesh_clear_dirty(m.mesh)
     core.model_recalculate_bounds(m)
+}
+
+// An instance stream that has moved or changed colour since it was uploaded has
+// to be sent again, or a particle system draws its first frame forever.
+refresh_instances(m: *Model) {
+    if !m.is_instanced || m.instance_vbo == 0 { return }
+    if !m.instances_updated && !m.instance_colors_updated { return }
+    if ae3d_vk_update_instances(m.instance_vbo, m.instances) == 1 {
+        m.instances_updated = false
+        m.instance_colors_updated = false
+    }
 }
 
 set_scene_uniforms(r: *VKRenderer, m: *Model) {
@@ -911,6 +925,7 @@ draw_model(r: *VKRenderer, m: *Model, transparent_pass: bool) {
 
     refresh_geometry(m)
     set_scene_uniforms(r, m)
+    refresh_instances(m)
     blend = 0
     if is_transparent { blend = 1 }
     ae3d_vk_set_blend(blend)
