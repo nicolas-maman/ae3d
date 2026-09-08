@@ -352,6 +352,13 @@ First working engine.
   says whether it has a shadow map, so asking for shadows can be told apart from
   having them.
 
+- The editor's actions are asked for their effect, the way its rows now are.
+  Duplicate has to add a model, Delete has to take one away, Frame selection has
+  to move the camera, and each of the three scripts has to leave what it is
+  attached to somewhere else after a tenth of a second. A button that dispatches
+  to nothing looks exactly like one that works when the only witness is a person
+  watching the viewport, which is how nine rows came to do nothing at all.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve
