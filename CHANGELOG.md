@@ -515,6 +515,19 @@ First working engine.
 
 ### Editor
 
+- The frame rate read 0 for the life of the program, and the frame delta never
+  left its fallback. The editor measured time by arithmetic on `clock_ns()`,
+  and in place that clock only ever changed in whole seconds: the interval
+  between two frames measured 0 for a run of ticks and then 1. It reads
+  `platform.time()` now, the same double off the monotonic clock the engine's
+  own loop uses, and the interval reads 0.033, 0.021, 0.014 with the bar at 62
+  fps. Water and behaviour scripts were advancing at a fixed step whatever the
+  machine was doing.
+
+- The status bar refreshed on a count of frames, and the viewport is not
+  redrawn while nothing changes, so the bar froze on whatever it last managed
+  to write. It is throttled by time now.
+
 - The left panel ran out of colour. Its background is drawn by the stack inside
   the scroll view, and that stack is only as tall as what it holds, so
   everything below the last button was the toolkit's own white. The panel

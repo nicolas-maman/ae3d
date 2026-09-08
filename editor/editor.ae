@@ -15,8 +15,8 @@ import std.list
 import std.fs
 import std.string
 
-extern clock_ns() -> long
 import ae3d.core
+import ae3d.platform
 import ae3d.gl
 import ae3d.vk
 import ae3d.offscreen
@@ -123,6 +123,7 @@ var g_history: ptr = null
 // frame, so edits that stop arriving mean the adjustment is over and the undo
 // step it opened has to close, or the next drag of the same slider extends it.
 var g_last_edit = 0.0
+const STATS_INTERVAL = 0.25
 const EDIT_SETTLE = 0.4
 var g_reported = false
 var g_last_paint = 0.0
@@ -161,6 +162,7 @@ var g_frame_limit = 0
 var g_snapshot = ""
 var g_report = ""
 var g_fps = 0.0
+var g_stats_written = 0.0
 var g_last_time = 0.0
 var g_timer = 0
 var g_stage = 0
@@ -1022,8 +1024,19 @@ settle_layout() {
     g_layout_settled = true
 }
 
+// CRITICAL: platform.time(), not arithmetic on clock_ns(). The editor used to
+// compute (clock_ns() / 1000000) * 0.001, and measured in place that clock only
+// ever changed in whole seconds: printing the interval between two frames gave
+// 0 for a run of ticks and then 1. So the frame rate read 0 for the life of the
+// program, and delta never left its 0.016 fallback, which meant water and
+// scripts advanced at a fixed step whatever the machine was doing. The same
+// expression on its own keeps the fraction, so the arithmetic alone is not the
+// explanation and it is not worth another guess: platform.time() is a double
+// straight off the monotonic clock, it is what the engine's own loop already
+// uses, and with it the interval reads 0.033, 0.021, 0.014 and the bar reads
+// 62 fps.
 seconds() -> float {
-    return (clock_ns() / 1000000) * 0.001
+    return platform.time()
 }
 
 draw_frame() {
@@ -1031,7 +1044,7 @@ draw_frame() {
 
     settle_layout()
 
-    now = (clock_ns() / 1000000) * 0.001
+    now = seconds()
     delta = 0.016
     if g_last_time > 0.0 {
         elapsed = now - g_last_time
@@ -1095,8 +1108,16 @@ draw_frame() {
 // A scripted run of the edit paths, so undo and redo are checked by exercising
 // them rather than by reading the code. Reported through the same file a
 // bounded run writes, because the run loop has to be ended from outside.
+// CRITICAL: throttled by time, not by a count of frames. A frame count only
+// advances when the viewport is redrawn, and the viewport is not redrawn while
+// nothing changes, so the bar froze on whatever it last managed to write. That
+// was almost always the very first sample, taken before a single interval had
+// been measured, which is why it read 0 fps for the life of the program.
 update_stats(backend: *Backend) {
-    if g_stats == 0 || g_frames % 10 != 0 { return }
+    if g_stats == 0 { return }
+    now = seconds()
+    if g_stats_written > 0.0 && now - g_stats_written < STATS_INTERVAL { return }
+    g_stats_written = now
     ui.set_text(g_stats, "${g_backend_name}   ${(g_fps) as int} fps   ${core.backend_draw_calls(backend)} draws   ${scene_triangles()} tris   ${g_view_w}x${g_view_h}")
 }
 
@@ -1680,7 +1701,7 @@ scene_animates() -> bool {
 
 paint_soon() {
     mark_dirty()
-    now = (clock_ns() / 1000000) * 0.001
+    now = seconds()
     if now - g_last_paint < PAINT_INTERVAL { return }
     g_last_paint = now
     draw_frame()
