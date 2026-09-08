@@ -14,7 +14,7 @@ exports (
     simulation_update, simulation_apply,
     simulation_set_color, simulation_set_sky_color, simulation_set_transparency,
     simulation_set_wave_height, simulation_set_wave_speed, simulation_set_randomness,
-    simulation_set_caustics, simulation_set_specular, simulation_set_shadow,
+    simulation_set_caustics, simulation_set_reflection, simulation_set_shadow,
     simulation_set_distortion, simulation_set_normal_strength
 )
 
@@ -45,7 +45,7 @@ struct Simulation {
     caustics_intensity: float
     caustics_scale: float
 
-    specular_intensity: float
+    reflection_intensity: float
     shadow_strength: float
     distortion_strength: float
     normal_strength: float
@@ -68,7 +68,7 @@ simulation_new(size: float, amplitude: float) -> *Simulation {
     w.caustics_enabled = false
     w.caustics_intensity = 0.3
     w.caustics_scale = 0.003
-    w.specular_intensity = 1.0
+    w.reflection_intensity = 1.0
     w.shadow_strength = 0.5
     w.distortion_strength = 0.2
     w.normal_strength = 1.0
@@ -108,7 +108,9 @@ simulation_set_caustics(w: *Simulation, enabled: bool, intensity: float, scale: 
     w.caustics_scale = scale
 }
 
-simulation_set_specular(w: *Simulation, value: float) { w.specular_intensity = value }
+// How much of the sky and the horizon the surface gives back. This used to be
+// called specular and set a uniform the shader never read.
+simulation_set_reflection(w: *Simulation, value: float) { w.reflection_intensity = value }
 simulation_set_shadow(w: *Simulation, value: float) { w.shadow_strength = value }
 simulation_set_distortion(w: *Simulation, value: float) { w.distortion_strength = value }
 simulation_set_normal_strength(w: *Simulation, value: float) { w.normal_strength = value }
@@ -187,12 +189,8 @@ simulation_build(w: *Simulation, resolution: int) -> *Model {
 
     core.model_set_uniform_int(m, "enableShadows", 0)
     core.model_set_uniform_int(m, "enableWaterReflection", 1)
-    core.model_set_uniform_int(m, "enableWaterRefraction", 1)
     core.model_set_uniform_int(m, "enableWaterDistortion", 1)
     core.model_set_uniform_int(m, "enableWaterNormalMapping", 1)
-    core.model_set_uniform_int(m, "enableHighQualityFiltering", 1)
-    core.model_set_uniform_int(m, "filteringQuality", 3)
-    core.model_set_uniform_float(m, "waterRefractionIntensity", 0.6)
     core.model_set_uniform_float(m, "noiseIntensity", 0.0)
     core.model_set_uniform_float(m, "noiseScale", 0.0002)
     core.model_set_uniform_int(m, "noiseOctaves", 3)
@@ -226,7 +224,7 @@ simulation_apply(w: *Simulation) {
     core.model_set_uniform_float(m, "causticsIntensity", w.caustics_intensity)
     core.model_set_uniform_float(m, "causticsScale", w.caustics_scale)
 
-    core.model_set_uniform_float(m, "waterReflectionIntensity", w.specular_intensity)
+    core.model_set_uniform_float(m, "waterReflectionIntensity", w.reflection_intensity)
     core.model_set_uniform_float(m, "shadowIntensity", w.shadow_strength)
     core.model_set_uniform_float(m, "waterDistortionIntensity", w.distortion_strength)
     core.model_set_uniform_float(m, "waterNormalIntensity", w.normal_strength)

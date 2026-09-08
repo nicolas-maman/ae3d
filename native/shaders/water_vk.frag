@@ -24,7 +24,6 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     vec3 viewPos;
     vec3 diffuseColor;
     vec3 specularColor;
-    float shininess;
     float metallic;
     float roughness;
     float exposure;
@@ -56,7 +55,6 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     bool enableBloom;
     float bloomThreshold;
     float bloomIntensity;
-    float bloomRadius;
     bool enableShadows;
     bool hasShadowMap;
     float shadowIntensity;
@@ -72,8 +70,6 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float causticsWaterLevel;
     float causticsDepth;
     float causticsTime;
-    bool enableHighQualityFiltering;
-    int filteringQuality;
     mat4 projection;
     mat4 view;
     vec2 texelSize;
@@ -105,15 +101,11 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     vec3 skyColor;
     vec3 horizonColor;
     bool enableWaterReflection;
-    bool enableWaterRefraction;
     float waterReflectionIntensity;
-    float waterRefractionIntensity;
     bool enableWaterDistortion;
     float waterDistortionIntensity;
     bool enableWaterNormalMapping;
     float waterNormalIntensity;
-    float baseAlpha;
-    float transparencyBoost;
 };
 
 layout(location = 0) in vec2 fragTexCoord;
@@ -165,11 +157,7 @@ layout(location = 2) in vec3 fragPosition;
 
 
 
-
-
 // Custom transparency control
-
-
 
 layout(location = 0) out vec4 FragColor;
 
@@ -340,23 +328,13 @@ void main() {
     float temporalPhase = time * 0.01;  // Minimal temporal movement for caustics only
     float detailScale = 1.0;            // No distance scaling - uniform
     
-    // Enhanced normal smoothing for triangle edge elimination
-    float normalStrength = mix(0.05, 0.01, smoothstep(0.0, 180.0, distanceFromCamera));
-    
-    // Multi-sample normal smoothing to hide mesh structure
-    vec3 normalSample1 = norm;
-    vec3 normalSample2 = normalize(norm + vec3(0.02, 0.0, 0.02));
-    vec3 normalSample3 = normalize(norm + vec3(-0.02, 0.0, 0.02));
-    vec3 normalSample4 = normalize(norm + vec3(0.02, 0.0, -0.02));
-    vec3 normalSample5 = normalize(norm + vec3(-0.02, 0.0, -0.02));
-    
-    // Weighted normal averaging for smoother surface
-    vec3 smoothedNormal = (normalSample1 * 0.5 + normalSample2 * 0.125 + normalSample3 * 0.125 + 
-                          normalSample4 * 0.125 + normalSample5 * 0.125);
-    
-    // Apply smoothed normal with distance-based intensity
-    float normalSmoothingIntensity = mix(0.8, 0.3, smoothstep(1000.0, 40000.0, distanceFromCamera));
-    norm = mix(norm, normalize(smoothedNormal), normalSmoothingIntensity);
+    // How far the waves are allowed to tilt the surface away from flat. Averaging
+    // four samples offset symmetrically in x and z used to stand here, which
+    // cost five normalizes a fragment and returned the normal it was given: the
+    // offsets cancel.
+    if (enableWaterNormalMapping) {
+        norm = normalize(mix(vec3(0.0, 1.0, 0.0), norm, waterNormalIntensity));
+    }
     
     // Use uniform water color
     vec3 baseOceanColor = waterBaseColor;
@@ -395,7 +373,6 @@ void main() {
     fresnel = mix(0.02, 0.12, fresnel); // Realistic water reflectivity range
     
     // Natural water specular highlights
-    vec3 reflectDir = reflect(-lightDir, norm);
     float roughness = 0.15; // More realistic water surface roughness
     float NdotH = max(dot(norm, normalize(lightDir + viewDir)), 0.0);
     float roughnessAlpha = roughness * roughness;
@@ -435,25 +412,27 @@ void main() {
     
     // Configurable atmospheric perspective for realistic sky-water transition
     float fogDistance = 0.0;
-    vec3 finalFogColor = fogColor;
     
     if (enableFog) {
         fogDistance = smoothstep(fogStart, fogEnd, distanceFromCamera);
         
-        // Smooth fog color transitions - NO hard conditionals
+        // Smooth fog color transitions - NO hard conditionals. The time of day
+        // decides the shade, and the colour the caller asked for tints it: a
+        // local of the same name used to hide that uniform completely.
         vec3 nightFog = vec3(0.3, 0.4, 0.5);
         vec3 duskFog = mix(vec3(0.4, 0.5, 0.6), skyColor, 0.4);
         vec3 dayFog = vec3(0.4, 0.5, 0.6);
         
-        vec3 fogColor = mix(dayFog, duskFog, duskFactor);
-        fogColor = mix(fogColor, nightFog, nightFactor);
+        vec3 timeOfDayFog = mix(dayFog, duskFog, duskFactor);
+        timeOfDayFog = mix(timeOfDayFog, nightFog, nightFactor);
+        vec3 shade = timeOfDayFog * fogColor * 2.0;
         
         // Smooth fog intensity scaling
         float nightFogScale = mix(1.0, 0.5, nightFactor);
         float duskFogScale = mix(1.0, 0.8, duskFactor);
         float adaptiveFogIntensity = fogIntensity * nightFogScale * duskFogScale;
         
-        waterColor = mix(waterColor, fogColor, fogDistance * adaptiveFogIntensity * 0.3);
+        waterColor = mix(waterColor, shade, fogDistance * adaptiveFogIntensity * 0.3);
     }
     
     // Modern PBR lighting for realistic water
@@ -558,6 +537,9 @@ void main() {
     float waveReflect2 = sin(fragPosition.x * 0.015 - time * 0.4) * cos(fragPosition.z * 0.012 - time * 0.25);
     float subtleWaveReflection = (waveReflect1 + waveReflect2) * 0.5 + 0.5;
     subtleWaveReflection = pow(subtleWaveReflection, 3.0) * 0.15 * fresnel;
+    if (enableWaterDistortion) {
+        subtleWaveReflection *= waterDistortionIntensity;
+    }
     vec3 waveReflectionColor = sunColor * subtleWaveReflection * NdotL;
     
     // Enhanced quality scaling for more visible reflections
@@ -607,6 +589,11 @@ void main() {
     
     // Combine sky and environment reflections
     vec3 totalReflection = skyReflection + environmentReflection;
+    if (enableWaterReflection) {
+        totalReflection *= waterReflectionIntensity;
+    } else {
+        totalReflection = vec3(0.0);
+    }
     
     vec3 finalColor = baseColor + 
                      specularLight * 0.8 +     // Reduced specular (was 1.5)

@@ -24,7 +24,6 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     vec3 viewPos;
     vec3 diffuseColor;
     vec3 specularColor;
-    float shininess;
     float metallic;
     float roughness;
     float exposure;
@@ -56,7 +55,6 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     bool enableBloom;
     float bloomThreshold;
     float bloomIntensity;
-    float bloomRadius;
     bool enableShadows;
     bool hasShadowMap;
     float shadowIntensity;
@@ -72,8 +70,6 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float causticsWaterLevel;
     float causticsDepth;
     float causticsTime;
-    bool enableHighQualityFiltering;
-    int filteringQuality;
     mat4 projection;
     mat4 view;
     vec2 texelSize;
@@ -105,15 +101,11 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     vec3 skyColor;
     vec3 horizonColor;
     bool enableWaterReflection;
-    bool enableWaterRefraction;
     float waterReflectionIntensity;
-    float waterRefractionIntensity;
     bool enableWaterDistortion;
     float waterDistortionIntensity;
     bool enableWaterNormalMapping;
     float waterNormalIntensity;
-    float baseAlpha;
-    float transparencyBoost;
 };
 layout (location = 0) in vec3 inPosition;
 

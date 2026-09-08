@@ -114,9 +114,10 @@ First working engine.
 - Default, high quality, performance and voxel configurations over the advanced
   features the fragment shader exposes: clearcoat, sheen, transmission, image
   based lighting, procedural noise, soft shadows, volumetric lighting, screen
-  space occlusion, global illumination, bloom and filtering quality. Applying a
-  config writes a model's own uniforms, so two models in one scene can run
-  different settings through the same program.
+  space occlusion, global illumination, caustics and bloom. Applying a config
+  writes a model's own uniforms, so two models in one scene can run different
+  settings through the same program. Every one of them changes the picture, and
+  a test renders the scene twice per setting to say so.
 
 - Caustics on submerged surfaces: the moving web of light a water surface throws
   onto whatever lies under it, on both backends. A config carries the water
@@ -173,6 +174,37 @@ First working engine.
   the runners have no Vulkan driver on macOS, so nothing could have noticed: the
   backend now reports how many shadow targets it holds and the parity suite
   checks that a resize replaces one rather than adding one.
+
+- Eight settings that did nothing are now real or gone. `specularColor` tints
+  what a dielectric reflects, `enableShadows` decides whether a model receives
+  them, and `enableImageBasedLighting` with `iblIntensity` turn the environment
+  reflection up and down, all of which the shader declared and never read.
+  `shininess` is a specular exponent this shader has no use for, and a model
+  differing only in it was refused a merged draw; a `.mtl` file's `Ns` now
+  becomes the roughness it corresponds to, where before it was parsed and thrown
+  away. Bloom radius belongs to the post pass that has one, and filtering
+  quality is sampler state rather than shading, so both are gone from the config,
+  along with `advanced_lighting`, which nothing ever applied.
+
+- The water surface's settings work too. Reflection strength, distortion and
+  normal strength were each wired to a public setter and read by nothing;
+  `simulation_set_specular` is now `simulation_set_reflection`, which is what it
+  scales, and normal strength decides how far the waves tilt the surface away
+  from flat. Refraction needs a picture of what is behind the water, which this
+  shader never had, so its two uniforms are gone, as are two more that repeated
+  what transparency already said. The surface also averaged four normals offset
+  symmetrically around its own on every fragment, which cost five normalizes and
+  returned the normal it was given, because the offsets cancel.
+
+- The fog colour the water is given is the fog colour it uses. A local of the
+  same name shadowed the uniform inside the fog block, so the surface faded into
+  a shade nobody chose. The time of day still decides the shade and the colour
+  now tints it.
+
+- FXAA reads five pixels rather than nine. Four corner samples were fetched,
+  turned into luma, added into two sums that were the same sum, and never looked
+  at again, so four of every nine reads a full-screen pass made were for
+  nothing. The frames are identical, and backend parity still holds.
 
 ### Portability
 

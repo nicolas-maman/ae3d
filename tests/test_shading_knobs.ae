@@ -1,0 +1,293 @@
+// Every shading setting has to change the picture.
+//
+// Settings are uploaded by name, and a name the shader does not read is a knob
+// that turns nothing: the config carried eight of them, some wired to public
+// setters, and no test could tell. Each check here renders a scene twice, once
+// with a setting at its preset value and once moved, and the two frames have to
+// differ. A setting that changes nothing is a setting that does nothing.
+
+import std.mem
+import ae3d.core
+import ae3d.gl
+import ae3d.offscreen
+import ae3d.loader
+import ae3d.rendering
+import ae3d.water
+
+const WIDTH = 200
+const HEIGHT = 150
+
+var failures = 0
+
+struct Scene {
+    backend: *Backend
+    camera: *Camera
+    light: *Light
+    ball: *Model
+    ground: *Model
+}
+
+frame_sum(pixels: ptr) -> int {
+    total = 0
+    i = 0
+    while i < WIDTH * HEIGHT * 4 {
+        total = total + mem.get_byte(pixels, i)
+        i = i + 1
+    }
+    return total
+}
+
+// The target hands back the frame before the one just drawn, so the read that
+// matters is the second one.
+render(s: *Scene, c: Config) -> int {
+    rendering.apply(s.ball, c)
+    rendering.apply(s.ground, c)
+    core.backend_render(s.backend, s.camera, s.light)
+    core.backend_frame_pixels(s.backend)
+    return frame_sum(core.backend_frame_pixels(s.backend))
+}
+
+check_changes(s: *Scene, name: string, base: int, moved: Config) {
+    after = render(s, moved)
+    if after == base {
+        println("FAIL ${name} changes nothing")
+        failures = failures + 1
+    }
+}
+
+// The water program has its own settings, and three of them were wired to a
+// public setter and read by nothing at all.
+water_frame(backend: *Backend, cam: *Camera, light: *Light, sim: *Simulation) -> int {
+    water.simulation_apply(sim)
+    core.backend_render(backend, cam, light)
+    core.backend_frame_pixels(backend)
+    return frame_sum(core.backend_frame_pixels(backend))
+}
+
+check_water(backend: *Backend, cam: *Camera, bright: *Light) {
+    // The surface multiplies what it gathers by the light, and the scene above
+    // asks for six suns: under those, every water pixel is already white and
+    // nothing anyone turns can show.
+    light = core.light_sun(core.vec3(0.6, 0.9, 0.4))
+    light.intensity = 1.0
+
+    sim = water.simulation_new(6000.0, 20.0)
+    water.simulation_set_color(sim, 0.06, 0.22, 0.45)
+    water.simulation_set_sky_color(sim, 0.5, 0.7, 1.0)
+    surface = water.simulation_build(sim, 64)
+    if surface == null {
+        println("FAIL the water surface would not build")
+        failures = failures + 1
+        return
+    }
+    core.model_set_position(surface, 0.0, 0.0 - 60.0, 0.0)
+    core.backend_add_model(backend, surface)
+
+    base = water_frame(backend, cam, light, sim)
+
+
+    water.simulation_set_reflection(sim, 6.0)
+    if water_frame(backend, cam, light, sim) == base {
+        println("FAIL water reflection changes nothing")
+        failures = failures + 1
+    }
+    water.simulation_set_reflection(sim, 1.0)
+
+    water.simulation_set_distortion(sim, 12.0)
+    if water_frame(backend, cam, light, sim) == base {
+        println("FAIL water distortion changes nothing")
+        failures = failures + 1
+    }
+    water.simulation_set_distortion(sim, 0.2)
+
+    water.simulation_set_normal_strength(sim, 0.0)
+    if water_frame(backend, cam, light, sim) == base {
+        println("FAIL water normal strength changes nothing")
+        failures = failures + 1
+    }
+    water.simulation_set_normal_strength(sim, 1.0)
+
+    water.simulation_set_transparency(sim, 0.2)
+    if water_frame(backend, cam, light, sim) == base {
+        println("FAIL water transparency changes nothing")
+        failures = failures + 1
+    }
+    water.simulation_set_transparency(sim, 0.85)
+    settled = water_frame(backend, cam, light, sim)
+
+    // The fog colour reaches the fog. A local of the same name used to hide the
+    // uniform, so the surface faded into a shade nobody chose.
+    core.model_set_uniform_vec3(surface, "fogColor", core.vec3(1.0, 0.2, 0.05))
+    core.backend_render(backend, cam, light)
+    core.backend_frame_pixels(backend)
+    if frame_sum(core.backend_frame_pixels(backend)) == settled {
+        println("FAIL water fog colour changes nothing")
+        failures = failures + 1
+    }
+
+    core.backend_remove_model(backend, surface)
+    water.simulation_free(sim)
+    core.light_free(light)
+}
+
+main() {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("shading knobs: SKIP no OpenGL context")
+        return
+    }
+
+    renderer = gl.renderer_new()
+    pass = gl.backend(renderer)
+    if !core.backend_init(&pass, context, WIDTH, HEIGHT) {
+        println("shading knobs: SKIP the OpenGL backend would not initialise")
+        return
+    }
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    gl.renderer_set_clear_color(renderer, 0.05, 0.07, 0.1)
+    core.backend_set_shadows(&pass, true)
+
+    // Far enough away that volumetric lighting is not skipped as too close to
+    // bother with, and bright enough that a surface can gather more light than
+    // it is allowed to keep, which is the only time energy conservation has
+    // anything to conserve.
+    ground = loader.plane(24, 144.0)
+    core.model_set_position(ground, 0.0 - 1656.0, 0.0 - 240.0, 0.0 - 1656.0)
+    core.model_set_diffuse(ground, 0.7, 0.68, 0.62)
+    core.backend_add_model(&pass, ground)
+
+    ball = loader.sphere(1.0, 32, 24)
+    core.model_set_scale(ball, 252.0, 252.0, 252.0)
+    core.model_set_position(ball, 0.0, 156.0, 0.0)
+    core.model_set_diffuse(ball, 0.75, 0.35, 0.3)
+    core.model_set_pbr(ball, 0.2, 0.35)
+    core.backend_add_model(&pass, ball)
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 900.0, 1560.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+    core.camera_set_far(cam, 40000.0)
+    light = core.light_sun(core.vec3(0.6, 0.9, 0.4))
+    light.intensity = 6.0
+
+    scene = Scene {
+        backend: &pass,
+        camera: cam,
+        light: light,
+        ball: ball,
+        ground: ground
+    }
+
+    base_config = rendering.default_config()
+    base = render(&scene, base_config)
+
+    c = base_config
+    c.clearcoat = true
+    c.clearcoat_intensity = 1.0
+    check_changes(&scene, "clearcoat", base, c)
+
+    c = base_config
+    c.sheen = true
+    c.sheen_r = 1.0
+    c.sheen_g = 0.4
+    c.sheen_b = 0.1
+    check_changes(&scene, "sheen", base, c)
+
+    c = base_config
+    c.transmission = true
+    c.transmission_factor = 0.9
+    check_changes(&scene, "transmission", base, c)
+
+    c = base_config
+    c.multiple_scattering = false
+    check_changes(&scene, "multiple scattering", base, c)
+
+    c = base_config
+    c.energy_conservation = false
+    check_changes(&scene, "energy conservation", base, c)
+
+    c = base_config
+    c.image_based_lighting = false
+    check_changes(&scene, "image based lighting", base, c)
+
+    c = base_config
+    c.ibl_intensity = 4.0
+    check_changes(&scene, "image based lighting strength", base, c)
+
+    c = base_config
+    c.perlin_noise = true
+    c.noise_scale = 0.05
+    c.noise_intensity = 1.0
+    check_changes(&scene, "procedural noise", base, c)
+
+    c = base_config
+    c.advanced_shadows = false
+    check_changes(&scene, "receiving shadows", base, c)
+
+    c = base_config
+    c.shadow_intensity = 1.0
+    check_changes(&scene, "shadow strength", base, c)
+
+    c = base_config
+    c.shadow_softness = 8.0
+    check_changes(&scene, "shadow softness", base, c)
+
+    c = base_config
+    c.volumetric_lighting = true
+    c.volumetric_intensity = 4.0
+    check_changes(&scene, "volumetric lighting", base, c)
+
+    c = base_config
+    c.ssao = false
+    check_changes(&scene, "screen space occlusion", base, c)
+
+    c = base_config
+    c.ssao_intensity = 1.0
+    check_changes(&scene, "occlusion strength", base, c)
+
+    c = base_config
+    c.global_illumination = true
+    c.gi_intensity = 3.0
+    check_changes(&scene, "global illumination", base, c)
+
+    c = base_config
+    c.caustics = true
+    c.caustics_water_level = 1200.0
+    c.caustics_depth = 2400.0
+    c.caustics_intensity = 2.0
+    c.caustics_scale = 0.05
+    check_changes(&scene, "caustics", base, c)
+
+    c = base_config
+    c.bloom = true
+    c.bloom_threshold = 0.1
+    c.bloom_intensity = 3.0
+    check_changes(&scene, "bloom", base, c)
+
+    // Not a config setting, but the same kind of promise: a material's specular
+    // colour is what a dielectric reflects, and it was read by nothing.
+    core.model_set_specular(ball, 0.1, 0.9, 0.2)
+    if render(&scene, base_config) == base {
+        println("FAIL specular colour changes nothing")
+        failures = failures + 1
+    }
+    core.model_set_specular(ball, 1.0, 1.0, 1.0)
+
+    check_water(&pass, cam, light)
+
+    core.backend_cleanup(&pass)
+    offscreen.target_destroy(target)
+    offscreen.context_destroy(context)
+    core.model_free(ball)
+    core.model_free(ground)
+    gl.renderer_free(renderer)
+    core.camera_free(cam)
+    core.light_free(light)
+
+    if failures == 0 {
+        println("shading knobs: all checks passed, every setting changes the picture")
+    } else {
+        println("shading knobs: ${failures} setting(s) do nothing")
+    }
+}

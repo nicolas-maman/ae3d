@@ -24,7 +24,6 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     vec3 viewPos;
     vec3 diffuseColor;
     vec3 specularColor;
-    float shininess;
     float metallic;
     float roughness;
     float exposure;
@@ -56,7 +55,6 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     bool enableBloom;
     float bloomThreshold;
     float bloomIntensity;
-    float bloomRadius;
     bool enableShadows;
     bool hasShadowMap;
     float shadowIntensity;
@@ -72,8 +70,6 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float causticsWaterLevel;
     float causticsDepth;
     float causticsTime;
-    bool enableHighQualityFiltering;
-    int filteringQuality;
     mat4 projection;
     mat4 view;
     vec2 texelSize;
@@ -105,15 +101,11 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     vec3 skyColor;
     vec3 horizonColor;
     bool enableWaterReflection;
-    bool enableWaterRefraction;
     float waterReflectionIntensity;
-    float waterRefractionIntensity;
     bool enableWaterDistortion;
     float waterDistortionIntensity;
     bool enableWaterNormalMapping;
     float waterNormalIntensity;
-    float baseAlpha;
-    float transparencyBoost;
 };
 layout(set = 0, binding = 1) uniform sampler2D screenTexture;
 
@@ -140,10 +132,9 @@ void main() {
     vec3 colorS  = texture(screenTexture, TexCoords + vec2(0.0, 1.0) * texelSize).rgb;
     vec3 colorE  = texture(screenTexture, TexCoords + vec2(1.0, 0.0) * texelSize).rgb;
     vec3 colorW  = texture(screenTexture, TexCoords + vec2(-1.0, 0.0) * texelSize).rgb;
-    vec3 colorNE = texture(screenTexture, TexCoords + vec2(1.0, -1.0) * texelSize).rgb;
-    vec3 colorNW = texture(screenTexture, TexCoords + vec2(-1.0, -1.0) * texelSize).rgb;
-    vec3 colorSE = texture(screenTexture, TexCoords + vec2(1.0, 1.0) * texelSize).rgb;
-    vec3 colorSW = texture(screenTexture, TexCoords + vec2(-1.0, 1.0) * texelSize).rgb;
+    // Four corner samples used to be fetched here as well, added into two sums
+    // that were the same sum, and never looked at again: four of every nine
+    // reads this pass made were for nothing.
     
     // Calculate luma for each sample
     float lumaCenter = dot(colorCenter, lumaCoeff);
@@ -151,11 +142,6 @@ void main() {
     float lumaS = dot(colorS, lumaCoeff);
     float lumaE = dot(colorE, lumaCoeff);
     float lumaW = dot(colorW, lumaCoeff);
-    float lumaNE = dot(colorNE, lumaCoeff);
-    float lumaNW = dot(colorNW, lumaCoeff);
-    float lumaSE = dot(colorSE, lumaCoeff);
-    float lumaSW = dot(colorSW, lumaCoeff);
-    
     // Find min/max luma
     float lumaMin = min(lumaCenter, min(min(lumaN, lumaS), min(lumaE, lumaW)));
     float lumaMax = max(lumaCenter, max(max(lumaN, lumaS), max(lumaE, lumaW)));
@@ -170,9 +156,6 @@ void main() {
     // Subpixel anti-aliasing
     float lumaDown = lumaN + lumaS;
     float lumaAcross = lumaE + lumaW;
-    
-    float lumaDownCorners = lumaNE + lumaNW + lumaSE + lumaSW;
-    float lumaAcrossCorners = lumaNE + lumaSE + lumaNW + lumaSW;
     
     float lumaTotal = lumaDown + lumaAcross;
     float lumaAvg = lumaTotal * 0.25;
@@ -197,8 +180,6 @@ void main() {
     float gradient2 = luma2 - lumaCenter;
     
     bool is1Steepest = abs(gradient1) >= abs(gradient2);
-    
-    float gradientScaled = 0.25 * max(abs(gradient1), abs(gradient2));
     
     // Calculate blend amount
     float lengthSign = is1Steepest ? sign(gradient1) : sign(gradient2);
