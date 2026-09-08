@@ -14,7 +14,7 @@ import ae3d.core
 import ae3d.loader
 
 exports (
-    scene_save, scene_load, scene_free, last_error
+    scene_save, scene_load, scene_load_lights, scene_free, last_error
 )
 
 extern ae3d_meshfile_save(path: string, mesh: ptr, instances: ptr) -> int
@@ -57,6 +57,130 @@ quat_json(q: Quat) -> ptr {
     return out
 }
 
+// A model's own uniforms are where every shading setting lives, so a scene that
+// leaves them out loads back looking nothing like the one that was saved. The
+// arrays a water surface carries are rebuilt by the simulation that owns it and
+// are not written here.
+// A scene is what the renderer draws, and half of that is how it is lit.
+light_json(l: *Light) -> ptr {
+    out = json.obj()
+    json.object_set_raw(out, "name", json.str(core.text(l.name)))
+    json.object_set_raw(out, "mode", json.from_int(l.mode))
+    json.object_set_raw(out, "kind", json.from_int(l.kind))
+    json.object_set_raw(out, "position", vec3_json(l.position))
+    json.object_set_raw(out, "direction", vec3_json(l.direction))
+    json.object_set_raw(out, "color", vec3_json(l.color))
+    json.object_set_raw(out, "intensity", json.num(l.intensity))
+    json.object_set_raw(out, "ambient", json.num(l.ambient_strength))
+    json.object_set_raw(out, "temperature", json.num(l.temperature))
+    json.object_set_raw(out, "constant", json.num(l.constant_atten))
+    json.object_set_raw(out, "linear", json.num(l.linear_atten))
+    json.object_set_raw(out, "quadratic", json.num(l.quadratic_atten))
+    return out
+}
+
+load_light(node: ptr) -> *Light {
+    if node == null { return null }
+    l = core.light_new()
+    core.light_set_name(l, field_string(node, "name"))
+    l.mode = field_int(node, "mode", core.MODE_DIRECTIONAL)
+    l.kind = field_int(node, "kind", core.LIGHT_STATIC)
+    l.position = vec3_of(json.object_get_raw(node, "position"))
+    l.direction = vec3_of(json.object_get_raw(node, "direction"))
+    l.color = vec3_of(json.object_get_raw(node, "color"))
+    l.intensity = field_number(node, "intensity", 1.0)
+    l.ambient_strength = field_number(node, "ambient", 0.15)
+    l.temperature = field_number(node, "temperature", 5500.0)
+    l.constant_atten = field_number(node, "constant", 1.0)
+    l.linear_atten = field_number(node, "linear", 0.0)
+    l.quadratic_atten = field_number(node, "quadratic", 0.0)
+    return l
+}
+
+// The lights a scene was saved with, or null where it has none. Files written
+// before scenes carried lights simply have none, and the caller keeps whatever
+// it was already lighting with.
+scene_load_lights(path: string) -> ptr {
+    text, err = fs.read(path)
+    if err != "" {
+        set_error("cannot read ", path)
+        string.free(text)
+        return null
+    }
+
+    root = json.parse_raw(text)
+    string.free(text)
+    if root == null {
+        set_error("cannot parse ", path)
+        return null
+    }
+
+    entries = json.object_get_raw(root, "lights")
+    if entries == null {
+        json.free(root)
+        return null
+    }
+
+    lights = list.new()
+    count = json.array_size(entries)
+    i = 0
+    while i < count {
+        l = load_light(json.array_get_raw(entries, i))
+        if l != null { list.add_raw(lights, l) }
+        i = i + 1
+    }
+    json.free(root)
+    return lights
+}
+
+uniforms_json(m: *Model) -> ptr {
+    out = json.arr()
+    count = core.model_uniform_count(m)
+    i = 0
+    while i < count {
+        u = core.model_uniform(m, i)
+        if u != null && u.array == null {
+            entry = json.obj()
+            json.object_set_raw(entry, "name", json.str(u.name))
+            json.object_set_raw(entry, "kind", json.from_int(u.kind))
+            if u.kind == core.UNIFORM_FLOAT {
+                json.object_set_raw(entry, "value", json.num(u.number))
+            } else if u.kind == core.UNIFORM_INT {
+                json.object_set_raw(entry, "value", json.from_int(u.integer))
+            } else if u.kind == core.UNIFORM_VEC3 {
+                json.object_set_raw(entry, "value", vec3_json(u.vector))
+            }
+            json.array_add_raw(out, entry)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+load_uniforms(m: *Model, node: ptr) {
+    if node == null { return }
+    count = json.array_size(node)
+    i = 0
+    while i < count {
+        entry = json.array_get_raw(node, i)
+        if entry != null {
+            name = field_string(entry, "name")
+            kind = field_int(entry, "kind", core.UNIFORM_FLOAT)
+            value = json.object_get_raw(entry, "value")
+            if name != "" && value != null {
+                if kind == core.UNIFORM_FLOAT {
+                    core.model_set_uniform_float(m, name, json.get_number(value))
+                } else if kind == core.UNIFORM_INT {
+                    core.model_set_uniform_int(m, name, json.get_int(value))
+                } else if kind == core.UNIFORM_VEC3 {
+                    core.model_set_uniform_vec3(m, name, vec3_of(value))
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
 number_at(node: ptr, index: int) -> float {
     element = json.array_get_raw(node, index)
     if element == null { return 0.0 }
@@ -78,6 +202,12 @@ field_number(node: ptr, name: string, fallback: float) -> float {
     child = json.object_get_raw(node, name)
     if child == null { return fallback }
     return json.get_number(child)
+}
+
+field_int(node: ptr, name: string, fallback: int) -> int {
+    child = json.object_get_raw(node, name)
+    if child == null { return fallback }
+    return json.get_int(child)
 }
 
 field_string(node: ptr, name: string) -> string {
@@ -126,7 +256,7 @@ mesh_file_for(directory: string, index: int) -> string {
 
 // A model that came from a file records only its path. Anything else has its
 // geometry written out, because it cannot be reconstructed from the scene alone.
-scene_save(models: ptr, path: string, mesh_directory: string) -> bool {
+scene_save(models: ptr, lights: ptr, path: string, mesh_directory: string) -> bool {
     if models == null { set_error("nothing to save to ", path) ; return false }
 
     root = json.obj()
@@ -145,6 +275,8 @@ scene_save(models: ptr, path: string, mesh_directory: string) -> bool {
             json.object_set_raw(entry, "rotation", quat_json(m.rotation))
             json.object_set_raw(entry, "instanced", json.boolean(m.is_instanced))
             json.object_set_raw(entry, "visible", json.boolean(m.visible))
+            json.object_set_raw(entry, "casts_shadow", json.boolean(m.casts_shadow))
+            json.object_set_raw(entry, "uniforms", uniforms_json(m))
 
             if m.material != null {
                 json.object_set_raw(entry, "material", material_json(m.material))
@@ -170,6 +302,18 @@ scene_save(models: ptr, path: string, mesh_directory: string) -> bool {
     }
 
     json.object_set_raw(root, "models", entries)
+
+    if lights != null {
+        beams = json.arr()
+        count = list.size(lights)
+        i = 0
+        while i < count {
+            l = list.get_raw(lights, i) as *Light
+            if l != null { json.array_add_raw(beams, light_json(l)) }
+            i = i + 1
+        }
+        json.object_set_raw(root, "lights", beams)
+    }
 
     text = json.stringify_raw(root)
     json.free(root)
@@ -262,6 +406,12 @@ load_entry(entry: ptr) -> *Model {
     visible = json.object_get_raw(entry, "visible")
     m.visible = true
     if visible != null { m.visible = json.get_bool(visible) == 1 }
+
+    casts = json.object_get_raw(entry, "casts_shadow")
+    m.casts_shadow = true
+    if casts != null { m.casts_shadow = json.get_bool(casts) == 1 }
+
+    load_uniforms(m, json.object_get_raw(entry, "uniforms"))
 
     apply_material(m, json.object_get_raw(entry, "material"))
 

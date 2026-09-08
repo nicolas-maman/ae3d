@@ -217,6 +217,33 @@ First working engine.
   an uneven scale, and two thousand moves went from six milliseconds of work to
   too little to measure.
 
+- A saved scene keeps its shading. Every setting lives in a model's own
+  uniforms, and the file recorded the transform, the material and the geometry
+  but none of them, so a configured scene loaded back with everything off, and
+  a model told not to cast a shadow came back casting one. The editor saves and
+  loads scenes, so a session's work did not survive the round trip. Files
+  written before this load exactly as they did.
+
+- Features that fade out with distance measure against how far the camera can
+  see, not against a count of world units. Volumetric lighting returned nothing
+  for anything closer than a thousand units, so in a scene a few hundred units
+  across it was switched on, cost nothing and showed nothing; occlusion,
+  global illumination and the water's reflection detail stepped at five, ten,
+  twenty, thirty, fifty and a hundred thousand. A scene measured in metres and
+  one measured in centimetres now behave the same, and the suite that renders
+  every setting twice makes its scene an ordinary few hundred units across to
+  say so. Foam on the wave crests went the same way: it needed a crest four
+  hundred and fifty units above the world's zero, which no ocean this engine has
+  drawn ever reached, so it appeared on none of them. A crest is now measured
+  from the water's own level against how high its waves go.
+
+- A saved scene keeps its lights. The file recorded models and nothing else, so
+  the editor's sun, whose intensity, ambient strength and colour it lets you
+  set, came back at its defaults after a save and a load, with nothing said
+  about it. `scene_save` takes the lights alongside the models and
+  `scene_load_lights` hands them back; a file written before this has none
+  recorded, and the scene keeps whatever it was already lighting with.
+
 - Undo steps back one adjustment, not every adjustment a slider has ever made.
   Edits to one property coalesce so that a drag, which delivers a callback per
   pixel, is a single step, and nothing ever closed that step: letting go and

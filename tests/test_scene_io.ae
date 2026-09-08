@@ -7,6 +7,7 @@ import ae3d.core
 import ae3d.scene
 import ae3d.loader
 import ae3d.voxel
+import ae3d.rendering
 
 var failures = 0
 
@@ -27,6 +28,35 @@ check_int(name: string, got: int, want: int) {
     if got != want { record_failure("${name}: got ${got} want ${want}") }
 }
 
+find(m: *Model, name: string) -> *Uniform {
+    count = core.model_uniform_count(m)
+    i = 0
+    while i < count {
+        u = core.model_uniform(m, i)
+        if u != null && u.name == name { return u }
+        i = i + 1
+    }
+    return null
+}
+
+uniform_number(m: *Model, name: string) -> float {
+    u = find(m, name)
+    if u == null { return 0.0 - 1.0 }
+    return u.number
+}
+
+uniform_integer(m: *Model, name: string) -> int {
+    u = find(m, name)
+    if u == null { return 0 - 1 }
+    return u.integer
+}
+
+uniform_vector(m: *Model, name: string) -> Vec3 {
+    u = find(m, name)
+    if u == null { return core.vec3(0.0, 0.0, 0.0) }
+    return u.vector
+}
+
 main() {
     directory = "build/scene_roundtrip/"
     fs.mkdir_p(directory)
@@ -45,6 +75,15 @@ main() {
                                                       core.vec3(0.0, 1.0, 0.0)))
     core.model_glossy(loaded, 0.2, 0.6, 0.9)
     core.model_set_alpha(loaded, 0.75)
+    // Every shading setting lives in a model's own uniforms, and a model told
+    // not to cast a shadow says so in a flag of its own. A scene that saves
+    // neither loads back looking nothing like the one that was saved.
+    shading = rendering.high_quality_config()
+    shading.ssao_intensity = 0.42
+    shading.caustics = true
+    shading.sheen_g = 0.25
+    rendering.apply(loaded, shading)
+    core.model_set_casts_shadow(loaded, false)
     list.add_raw(models, loaded)
 
     // A procedural model has no source, so its geometry is written beside the
@@ -77,7 +116,16 @@ main() {
     source_indices = core.mesh_index_count(generated.mesh)
     source_instances = core.model_instance_count(blocks)
 
-    if !scene.scene_save(models, scene_path, directory) {
+    // A scene is what the renderer draws, and half of that is how it is lit.
+    lights = list.new()
+    sun = core.light_sun(core.vec3(0.3, 0.8, 0.5))
+    sun.intensity = 2.75
+    sun.ambient_strength = 0.42
+    sun.color = core.vec3(0.9, 0.8, 0.6)
+    core.light_set_name(sun, "key")
+    list.add_raw(lights, sun)
+
+    if !scene.scene_save(models, lights, scene_path, directory) {
         record_failure("saved: ${scene.last_error()}")
     }
     check_true("scene file exists", fs.exists(scene_path) == 1)
@@ -90,6 +138,20 @@ main() {
     }
     check_int("model count", list.size(restored), 3)
 
+    beams = scene.scene_load_lights(scene_path)
+    check_true("the scene came back with its lights", beams != null)
+    if beams != null {
+        check_int("light count", list.size(beams), 1)
+        back_sun = list.get_raw(beams, 0) as *Light
+        check_near("light intensity", back_sun.intensity, 2.75)
+        check_near("light ambient", back_sun.ambient_strength, 0.42)
+        check_near("light colour g", back_sun.color.y, 0.8)
+        check_near("light direction y", back_sun.direction.y, sun.direction.y)
+        check_true("light name", back_sun.name == "key")
+        core.light_free(back_sun)
+        list.free(beams)
+    }
+
     back_loaded = list.get_raw(restored, 0) as *Model
     check_near("position x", back_loaded.position.x, 3.0)
     check_near("position z", back_loaded.position.z, 5.0)
@@ -98,6 +160,10 @@ main() {
     check_near("alpha", back_loaded.material.alpha, 0.75)
     check_near("diffuse b", back_loaded.material.diffuse.z, 0.9)
     check_true("name round-tripped", back_loaded.name == "Cube.obj")
+    check_near("a setting came back", uniform_number(back_loaded, "ssaoIntensity"), 0.42)
+    check_int("a switch came back", uniform_integer(back_loaded, "enableCaustics"), 1)
+    check_near("a colour came back", uniform_vector(back_loaded, "sheenColor").y, 0.25)
+    check_true("not casting a shadow came back", !back_loaded.casts_shadow)
     check_true("reloaded from its source", core.mesh_vertex_count(back_loaded.mesh) ==
                                             core.mesh_vertex_count(loaded.mesh))
 
@@ -134,6 +200,8 @@ main() {
 
     scene.scene_free(restored)
     list.free(models)
+    list.free(lights)
+    core.light_free(sun)
     core.model_free(loaded)
     core.model_free(generated)
     core.model_free(blocks)
