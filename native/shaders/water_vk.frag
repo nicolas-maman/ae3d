@@ -22,6 +22,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 lightSpaceMatrix;
     int lightCount;
     vec3 viewPos;
+    float viewDistance;
     vec3 diffuseColor;
     vec3 specularColor;
     float metallic;
@@ -117,6 +118,10 @@ layout(location = 2) in vec3 fragPosition;
 
 
 
+
+// How far this camera can see. Everything that fades a feature out with distance
+// measures against this rather than against a number of world units, so a scene
+// laid out in metres and one laid out in centimetres behave alike.
 
 
 
@@ -466,7 +471,7 @@ void main() {
     float perspectiveCorrection = 1.0 / (1.0 + reflectionDistance * 0.000005); // Closer = sharper
     
     // Chapter 15: Dynamic LOD for massive scenes - reduce detail at distance
-    float lodFactor = smoothstep(10000.0, 100000.0, reflectionDistance); // LOD transition zone
+    float lodFactor = smoothstep(viewDistance, viewDistance * 10.0, reflectionDistance);
     float performanceFactor = mix(1.0, 0.3, lodFactor); // Reduce complexity for distant pixels
     
     // GPU Gems Chapter 14: Balanced reflection calculations for realistic sun

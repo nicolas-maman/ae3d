@@ -22,6 +22,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 lightSpaceMatrix;
     int lightCount;
     vec3 viewPos;
+    float viewDistance;
     vec3 diffuseColor;
     vec3 specularColor;
     float metallic;

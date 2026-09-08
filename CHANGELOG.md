@@ -206,6 +206,16 @@ First working engine.
   at again, so four of every nine reads a full-screen pass made were for
   nothing. The frames are identical, and backend parity still holds.
 
+- Features that fade out with distance measure against how far the camera can
+  see, not against a count of world units. Volumetric lighting returned nothing
+  for anything closer than a thousand units, so in a scene a few hundred units
+  across it was switched on, cost nothing and showed nothing; occlusion,
+  global illumination and the water's reflection detail stepped at five, ten,
+  twenty, thirty, fifty and a hundred thousand. A scene measured in metres and
+  one measured in centimetres now behave the same, and the suite that renders
+  every setting twice makes its scene an ordinary few hundred units across to
+  say so.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve

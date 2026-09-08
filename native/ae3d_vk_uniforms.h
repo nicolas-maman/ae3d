@@ -19,6 +19,7 @@ typedef struct {
 #define AE3D_VK_OFF_LIGHTSPACEMATRIX 464
 #define AE3D_VK_OFF_LIGHTCOUNT 528
 #define AE3D_VK_OFF_VIEWPOS 544
+#define AE3D_VK_OFF_VIEWDISTANCE 556
 #define AE3D_VK_OFF_DIFFUSECOLOR 560
 #define AE3D_VK_OFF_SPECULARCOLOR 576
 #define AE3D_VK_OFF_METALLIC 588
@@ -194,6 +195,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "transmissionFactor", 644 },
     { "useInstanceColor", 324 },
     { "view", 848 },
+    { "viewDistance", 556 },
     { "viewPos", 544 },
     { "viewProjection", 400 },
     { "volumetricIntensity", 668 },
@@ -216,7 +218,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "waveSteepness", 1280 },
 };
 
-#define AE3D_VK_UNIFORM_SLOT_COUNT 91
+#define AE3D_VK_UNIFORM_SLOT_COUNT 92
 
 static inline int ae3d_vk_uniform_offset(const char *name) {
     int low = 0;
