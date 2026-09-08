@@ -372,6 +372,7 @@ extern free(block: ptr)
 
 const ROWS = 20
 const CAMERA_FIRST_ROW = 17
+const CAMERA_LAST_ROW = 19
 const WATER_FIRST_ROW = 11
 const WATER_LAST_ROW = 13
 const SCRIPT_NONE = 0
@@ -892,7 +893,91 @@ update_stats(backend: *Backend) {
     ui.set_text(g_stats, "${g_backend_name}   ${(g_fps) as int} fps   ${core.backend_draw_calls(backend)} draws   ${scene_triangles()} tris   ${g_view_w}x${g_view_h}")
 }
 
+// Every row is asked to move its target and the target is read back, because a
+// row that records an undo step and updates its own readout looks exactly like
+// a row that worked. Nine of them did that and nothing else.
+row_reaches_its_target(index: int) -> bool {
+    light = g_light as *Light
+    cam = g_camera as *Camera
+    sim = selected_water()
+
+    if index == 9 || index == 10 || index == 14 || index == 15 || index == 16 {
+        if light == null { return true }
+        before = light_value(index)
+        apply_property(index, before + 0.25)
+        moved = core.abs_of(light_value(index) - (before + 0.25)) < 0.001
+        apply_property(index, before)
+        return moved
+    }
+
+    if index >= WATER_FIRST_ROW && index <= WATER_LAST_ROW {
+        if sim == null { return true }
+        before = water_value(index)
+        apply_property(index, before + 0.5)
+        moved = core.abs_of(water_value(index) - (before + 0.5)) < 0.001
+        apply_property(index, before)
+        return moved
+    }
+
+    if index >= CAMERA_FIRST_ROW && index <= CAMERA_LAST_ROW {
+        if cam == null { return true }
+        before = camera_value(index)
+        apply_property(index, before + 1.0)
+        moved = core.abs_of(camera_value(index) - (before + 1.0)) < 0.001
+        apply_property(index, before)
+        return moved
+    }
+
+    m = selected_model()
+    if m == null { return true }
+    before = property_value(m, index)
+    apply_property(index, before + 0.25)
+    moved = core.abs_of(property_value(m, index) - (before + 0.25)) < 0.001
+    apply_property(index, before)
+    return moved
+}
+
+// The water rows read the selected object, so the check selects the water while
+// it runs them and puts the selection back: with a sphere selected they would
+// report nothing either way, which is how they came to be unreachable.
+index_of_kind(kind: int) -> int {
+    i = 0
+    while i < list.size(g_models) {
+        c = component_at(i)
+        if c != null && c.kind == kind { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+rows_that_do_nothing() -> int {
+    history.history_begin_replay(g_history)
+    was_selected = g_selected
+    water_index = index_of_kind(behaviour.KIND_WATER)
+
+    stuck = 0
+    index = 0
+    while index < ROWS {
+        wants_water = index >= WATER_FIRST_ROW && index <= WATER_LAST_ROW
+        if wants_water && water_index >= 0 { select_object(water_index) }
+        if slider_handle(index) != 0 && !row_reaches_its_target(index) {
+            stuck = stuck + 1
+        }
+        if wants_water && water_index >= 0 { select_object(was_selected) }
+        index = index + 1
+    }
+
+    history.history_end_replay(g_history)
+    return stuck
+}
+
 report_state() {
+    // Both are read before the row check runs: it drives the inspector, which
+    // asks for a repaint, and a frame drawn for the report is not a frame the
+    // run was asked for.
+    frames = g_frames
+    stuck = rows_that_do_nothing()
+
     selected = "none"
     m = selected_model()
     if m != null { selected = core.text(m.name) }
@@ -922,8 +1007,10 @@ report_state() {
     lines = string.concat(lines, string.from_int(g_view_w))
     lines = string.concat(lines, "x")
     lines = string.concat(lines, string.from_int(g_view_h))
+    lines = string.concat(lines, "\nstuck_rows ")
+    lines = string.concat(lines, string.from_int(stuck))
     lines = string.concat(lines, "\nframes ")
-    lines = string.concat(lines, string.from_int(g_frames))
+    lines = string.concat(lines, string.from_int(frames))
     lines = string.concat(lines, "\n")
 
 
@@ -1095,6 +1182,15 @@ camera_value(index: int) -> float {
     return 0.0
 }
 
+is_light_row(index: int) -> bool {
+    return index == 9 || index == 10 || index == 14 || index == 15 || index == 16
+}
+
+is_camera_row(index: int) -> bool {
+    return index >= CAMERA_FIRST_ROW && index <= CAMERA_LAST_ROW
+}
+
+
 light_value(index: int) -> float {
     light = active_light()
     if light == null { return 0.0 }
@@ -1107,13 +1203,35 @@ light_value(index: int) -> float {
 }
 
 apply_property(index: int, value: float) {
-    if index >= 9 {
+    // Every row from nine up used to land here and only nine and ten were
+    // written, so the water rows, the light colour and the camera all recorded
+    // an undo step, moved their readout and changed nothing at all.
+    if is_light_row(index) {
         light = g_light as *Light
         if light != null {
             history.history_record(g_history, history.STEP_PROPERTY, null, index, light_value(index), value)
             g_last_edit = seconds()
             if index == 9 { light.intensity = value }
             if index == 10 { light.ambient_strength = value }
+            if index == 14 { light.color = core.vec3(value, light.color.y, light.color.z) }
+            if index == 15 { light.color = core.vec3(light.color.x, value, light.color.z) }
+            if index == 16 { light.color = core.vec3(light.color.x, light.color.y, value) }
+        }
+        readout = readout_handle(index)
+        if readout != 0 { ui.set_text(readout, number(value)) }
+        paint_soon()
+        return
+    }
+
+    if is_camera_row(index) {
+        cam = g_camera as *Camera
+        if cam != null {
+            history.history_record(g_history, history.STEP_PROPERTY, cam as ptr, index,
+                                   camera_value(index), value)
+            g_last_edit = seconds()
+            if index == 17 { core.camera_set_fov(cam, value) }
+            if index == 18 { core.camera_set_near(cam, value) }
+            if index == 19 { core.camera_set_far(cam, value) }
         }
         readout = readout_handle(index)
         if readout != 0 { ui.set_text(readout, number(value)) }
