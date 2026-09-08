@@ -110,6 +110,14 @@ var g_line5 = ""
 var g_line6 = ""
 var g_swatch = 0
 var g_chip = 0
+// One widget of each styled kind, kept so the report can ask what the theme
+// actually put on screen. A class that is never defined, or a name that does
+// not match the sheet, styles nothing and says nothing: the widget renders in
+// the toolkit's default and looks like a widget somebody meant to leave plain.
+var g_probe_action = 0
+var g_probe_primary = 0
+var g_probe_danger = 0
+var g_probe_field = 0
 var g_history: ptr = null
 // When the last property edit was recorded. A drag delivers a callback per
 // frame, so edits that stop arriving mean the adjustment is over and the undo
@@ -339,6 +347,42 @@ refresh_swatch() {
 chip_rgb() -> int {
     if g_chip == 0 { return 0 - 1 }
     return aether_ui_styled_bg_impl(g_chip)
+}
+
+// The theme's own colours, as the sheet sets them. Written here rather than
+// read back from the sheet on purpose: a check that asks the sheet what it
+// contains agrees with itself no matter what reached the screen.
+const STYLE_ACTION = 0x2C313A
+const STYLE_PRIMARY = 0x2F6FEB
+const STYLE_DANGER = 0x38262B
+const STYLE_FIELD = 0x14171C
+
+// How many styled widgets are not painted the colour their class asks for.
+// A class the sheet never defines, or a name that does not match it, styles
+// nothing at all and the widget renders in the toolkit's default.
+mis_styled() -> int {
+    wrong = 0
+    if !painted_as(g_probe_action, STYLE_ACTION) { wrong = wrong + 1 }
+    if !painted_as(g_probe_primary, STYLE_PRIMARY) { wrong = wrong + 1 }
+    if !painted_as(g_probe_danger, STYLE_DANGER) { wrong = wrong + 1 }
+    if !painted_as(g_probe_field, STYLE_FIELD) { wrong = wrong + 1 }
+    return wrong
+}
+
+// Compared a channel at a time allowing one step, the same way the colour chip
+// is: what a widget paints comes back off a layer and through a colour space.
+painted_as(handle: int, wanted: int) -> bool {
+    if handle == 0 { return false }
+    got = aether_ui_styled_bg_impl(handle)
+    if got < 0 { return false }
+    shift = 65536
+    while shift >= 1 {
+        a = (got / shift) % 256
+        b = (wanted / shift) % 256
+        if a - b > 1 || b - a > 1 { return false }
+        shift = shift / 256
+    }
+    return true
 }
 
 // Whether the chip on screen is the material's colour. Compared a channel at a
@@ -969,6 +1013,12 @@ settle_layout() {
     ui.set_width(g_left, PANEL_LEFT)
     ui.set_width(g_right, PANEL_RIGHT)
     ui.weight(g_stage, 1)
+    // The colour chip is painted here for the same reason the widths are: the
+    // style sheet is applied to the tree after it is built, and a background
+    // set before that is wiped by it. The chip was set during the first
+    // selection, so it came out an empty outline while the readback happily
+    // reported the colour it had been given.
+    refresh_swatch()
     g_layout_settled = true
 }
 
@@ -1247,6 +1297,7 @@ report_state() {
     stuck = rows_that_do_nothing()
     blind = blind_fields()
     refresh_swatch()
+    styling = mis_styled()
     chip = chip_rgb()
     wanted = material_rgb()
     chip_off = chip_wrong()
@@ -1286,6 +1337,8 @@ report_state() {
     lines = string.concat(lines, string.from_int(stuck))
     lines = string.concat(lines, "\nblind_fields ")
     lines = string.concat(lines, string.from_int(blind))
+    lines = string.concat(lines, "\nmis_styled ")
+    lines = string.concat(lines, string.from_int(styling))
     lines = string.concat(lines, "\nchip_wrong ")
     lines = string.concat(lines, string.from_int(chip_off))
     lines = string.concat(lines, "\nchip_rgb ")
@@ -1652,6 +1705,7 @@ number_field(parent: int, index: int, initial: float, width: int) -> int {
     ui.set_text(handle, number(initial))
     fields = g_fields as int[]
     fields[index] = handle
+    if g_probe_field == 0 { g_probe_field = handle }
     g_row_count = g_row_count + 1
     return handle
 }
@@ -2533,6 +2587,11 @@ main() {
         left_scroll = ui.scrollview(body)
         ui.set_width(left_scroll, PANEL_LEFT)
         ui.fill_height(left_scroll)
+        // The panel colour goes on the scroll view as well as the stack inside
+        // it. The stack is only as tall as what it holds, and the left panel's
+        // contents stop well short of the window, so everything below the last
+        // button was the toolkit's own white.
+        ui.add_css_class(left_scroll, "panel")
         left = ui.vstack(left_scroll, 6)
         ui.add_css_class(left, "panel")
         heading(left, "SCENE")
@@ -2640,6 +2699,8 @@ main() {
         style_button(duplicate_btn, "action")
         delete_btn = ui.btn(object_row, "Delete") callback { remove_selected() }
         style_button(delete_btn, "danger")
+        g_probe_danger = delete_btn
+        g_probe_action = duplicate_btn
 
         frame_btn = ui.btn(left, "Frame selection") callback { focus_selection() }
         style_button(frame_btn, "action")
@@ -2648,6 +2709,7 @@ main() {
         ui.add_css_class(scene_row, "row")
         save_btn = ui.btn(scene_row, "Save") callback { save_scene() }
         style_button(save_btn, "primary")
+        g_probe_primary = save_btn
         load_btn = ui.btn(scene_row, "Load") callback { load_scene() }
         style_button(load_btn, "action")
         ui.spacer(left)
@@ -2768,6 +2830,7 @@ main() {
         right_scroll = ui.scrollview(body)
         ui.set_width(right_scroll, PANEL_RIGHT)
         ui.fill_height(right_scroll)
+        ui.add_css_class(right_scroll, "panel")
         right = ui.vstack(right_scroll, 6)
         ui.add_css_class(right, "panel")
         heading(right, "INSPECTOR")
@@ -2787,6 +2850,9 @@ main() {
         swatch_caption = ui.text(swatch_row, "colour")
         ui.add_css_class(swatch_caption, "label")
         ui.spacer(swatch_row)
+        // A stack, not a label. A label's layer background is set and not
+        // painted: the readback reports the colour while the panel shows
+        // through, so the chip was an empty outline.
         g_chip = ui.text(swatch_row, "")
         ui.add_css_class(g_chip, "chip")
         ui.width(g_chip, 30)
