@@ -26,7 +26,13 @@ typedef struct {
     int    resolved;
     int width;
     int height;
-    unsigned char *pixels;
+    // CRITICAL: two buffers, alternated. A caller may still be reading the
+    // frame we handed it last time while we fill the next one, and the
+    // compositor does exactly that: it borrows the pointer and paints from it
+    // on its own thread. Writing back into the buffer it is reading tears the
+    // image and puts the two threads on the same cache lines.
+    unsigned char *pixels[2];
+    int pixel_index;
     int pixel_bytes;
     unsigned char *scratch;
     GLuint pack[2];
@@ -201,9 +207,13 @@ static int ae3d_offscreen_attach(ae3d_offscreen *target, int width, int height) 
     {
         int needed = width * height * 4;
         if (needed > target->pixel_bytes) {
-            unsigned char *grown = (unsigned char *)realloc(target->pixels, (size_t)needed);
-            if (!grown) return 0;
-            target->pixels = grown;
+            int i;
+            for (i = 0; i < 2; i++) {
+                unsigned char *grown =
+                    (unsigned char *)realloc(target->pixels[i], (size_t)needed);
+                if (!grown) return 0;
+                target->pixels[i] = grown;
+            }
             target->pixel_bytes = needed;
         }
     }
@@ -217,7 +227,8 @@ void *ae3d_offscreen_create(int width, int height) {
     glGenFramebuffers(1, &target->framebuffer);
     if (!ae3d_offscreen_attach(target, width, height)) {
         glDeleteFramebuffers(1, &target->framebuffer);
-        free(target->pixels);
+        free(target->pixels[0]);
+        free(target->pixels[1]);
         free(target);
         return NULL;
     }
@@ -285,30 +296,33 @@ int ae3d_offscreen_height(void *handle) {
 // that compare what they rendered need this; a viewport does not.
 void *ae3d_offscreen_read(void *handle) {
     ae3d_offscreen *target = (ae3d_offscreen *)handle;
-    if (!target || !target->pixels) return NULL;
+    if (!target || !target->pixels[0]) return NULL;
     return ae3d_offscreen_read_sync(target);
 }
 
 static void *ae3d_offscreen_read_sync(ae3d_offscreen *target) {
     int row_bytes = target->width * 4;
+    unsigned char *dst = target->pixels[target->pixel_index];
     int y;
 
     ae3d_offscreen_resolve(target);
     glBindFramebuffer(GL_FRAMEBUFFER, target->framebuffer);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glReadPixels(0, 0, target->width, target->height, GL_RGBA, GL_UNSIGNED_BYTE, target->pixels);
+    glReadPixels(0, 0, target->width, target->height, GL_RGBA, GL_UNSIGNED_BYTE, dst);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
+    target->pixel_index ^= 1;
+
     if (!target->scratch) target->scratch = (unsigned char *)malloc((size_t)row_bytes);
-    if (!target->scratch) return target->pixels;
+    if (!target->scratch) return dst;
     for (y = 0; y < target->height / 2; y++) {
-        unsigned char *top = target->pixels + (size_t)y * row_bytes;
-        unsigned char *bottom = target->pixels + (size_t)(target->height - 1 - y) * row_bytes;
+        unsigned char *top = dst + (size_t)y * row_bytes;
+        unsigned char *bottom = dst + (size_t)(target->height - 1 - y) * row_bytes;
         memcpy(target->scratch, top, (size_t)row_bytes);
         memcpy(top, bottom, (size_t)row_bytes);
         memcpy(bottom, target->scratch, (size_t)row_bytes);
     }
-    return target->pixels;
+    return dst;
 }
 
 int ae3d_offscreen_byte_size(void *handle) {
@@ -329,8 +343,9 @@ void *ae3d_offscreen_read_pipelined(void *handle) {
     ae3d_offscreen *target = (ae3d_offscreen *)handle;
     int row_bytes, y, ready;
     const unsigned char *mapped;
+    unsigned char *destination;
 
-    if (!target || !target->pixels) return NULL;
+    if (!target || !target->pixels[0]) return NULL;
     row_bytes = target->width * 4;
 
     if (!target->pack[0]) {
@@ -345,6 +360,8 @@ void *ae3d_offscreen_read_pipelined(void *handle) {
         target->pack_primed = 0;
     }
 
+    destination = target->pixels[target->pixel_index];
+
     ae3d_offscreen_resolve(target);
     glBindFramebuffer(GL_FRAMEBUFFER, target->framebuffer);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
@@ -358,7 +375,7 @@ void *ae3d_offscreen_read_pipelined(void *handle) {
     mapped = (const unsigned char *)glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
     if (mapped) {
         for (y = 0; y < target->height; y++) {
-            memcpy(target->pixels + (size_t)y * row_bytes,
+            memcpy(destination + (size_t)y * row_bytes,
                    mapped + (size_t)(target->height - 1 - y) * row_bytes,
                    (size_t)row_bytes);
         }
@@ -370,7 +387,8 @@ void *ae3d_offscreen_read_pipelined(void *handle) {
 
     target->pack_index ^= 1;
     target->pack_primed = 1;
-    return target->pixels;
+    target->pixel_index ^= 1;
+    return destination;
 }
 
 void ae3d_offscreen_destroy(void *handle) {
@@ -384,6 +402,7 @@ void ae3d_offscreen_destroy(void *handle) {
     if (target->ms_framebuffer) glDeleteFramebuffers(1, &target->ms_framebuffer);
     if (target->pack[0]) glDeleteBuffers(2, target->pack);
     free(target->scratch);
-    free(target->pixels);
+    free(target->pixels[0]);
+    free(target->pixels[1]);
     free(target);
 }

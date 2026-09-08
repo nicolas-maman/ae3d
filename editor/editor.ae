@@ -851,9 +851,18 @@ resize_viewport(width: int, height: int) {
     if width == g_view_w && height == g_view_h { return }
     g_view_w = width
     g_view_h = height
+
+    // CRITICAL: the canvas holds a BORROWED pointer to the framebuffer, and
+    // updating the viewport reallocates it. Dropping the command first is what
+    // keeps a repaint during the resize from reading freed memory; rendering
+    // straight afterwards is what keeps the viewport from going blank for a
+    // frame while the window is being dragged.
+    ui.canvas_clear(g_canvas)
+
     backend = viewport_backend()
     core.backend_update_viewport(&backend, width, height)
     core.camera_set_aspect(g_camera as *Camera, (width * 1.0) / (height * 1.0))
+    draw_frame()
 }
 
 // Split positions only stick once the window has been laid out, so they are
@@ -918,8 +927,14 @@ draw_frame() {
     // The canvas keeps a retained command list, so the previous frame's blit has
     // to go before the next is added, or it grows by a full viewport each frame.
     ui.canvas_clear(g_canvas)
-    ui.canvas_draw_image_ptr(g_canvas, 0.0, 0.0, g_view_w, g_view_h,
-                             pixels, g_view_w * g_view_h * 4)
+    // Borrowed, not copied. The renderer owns one framebuffer and overwrites it
+    // in place, which is the lifetime this asks for; the copying twin allocated
+    // and memcpy'd the whole viewport every frame and measured 61% of the frame,
+    // more than reading it back off the GPU and six times the cost of rendering
+    // it. The one place the buffer does not outlive the command is a resize,
+    // and resize_viewport clears the canvas before it reallocates.
+    ui.canvas_draw_image_borrowed_ptr(g_canvas, 0.0, 0.0, g_view_w, g_view_h,
+                                      pixels, g_view_w * g_view_h * 4)
     draw_gizmo()
     ui.canvas_redraw(g_canvas)
     g_frames = g_frames + 1

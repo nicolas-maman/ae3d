@@ -1,0 +1,122 @@
+// A frame handed out must survive the next one being read.
+//
+// The viewport does not copy the framebuffer any more: it hands the compositor
+// the renderer's own pointer and the compositor paints from it on its own
+// thread, whenever the window system asks. That only works if reading the next
+// frame writes somewhere else, so the readback alternates between two buffers.
+//
+// Get that wrong and there is no crash and no failing pixel comparison; the
+// image tears under the compositor and the two threads fight over the same
+// cache lines. So this checks the property directly: render, keep the pointer,
+// render something visibly different, and the first frame must still be there
+// and must not be the second one.
+
+import std.mem
+import ae3d.core
+import ae3d.gl
+import ae3d.offscreen
+import ae3d.loader
+
+const WIDTH = 160
+const HEIGHT = 120
+
+var failures = 0
+
+record_failure(reason: string) {
+    println("FAIL ${reason}")
+    failures = failures + 1
+}
+
+hash_of(pixels: ptr) -> long {
+    h = 1469598103934665603 as long
+    i = 0
+    while i < WIDTH * HEIGHT * 4 {
+        h = h ^ (mem.get_byte(pixels, i) as long)
+        h = h * 1099511628211
+        i = i + 1
+    }
+    return h
+}
+
+main() {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("readback buffers: SKIP no OpenGL context available")
+        return
+    }
+
+    renderer = gl.renderer_new()
+    backend = gl.backend(renderer)
+    if !core.backend_init(&backend, context, WIDTH, HEIGHT) {
+        println("readback buffers: FAIL the backend would not initialise")
+        return
+    }
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    gl.renderer_set_clear_color(renderer, 0.05, 0.05, 0.05)
+
+    ball = loader.sphere(1.0, 24, 18)
+    core.model_set_scale(ball, 40.0, 40.0, 40.0)
+    core.model_set_diffuse(ball, 0.9, 0.3, 0.2)
+    core.backend_add_model(&backend, ball)
+
+    light = core.light_sun(core.vec3(0.3, 0.9, 0.4))
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_far(cam, 4000.0)
+
+    // Close enough to fill much of the frame, then far enough to be a speck:
+    // two frames no readback could confuse for one another.
+    //
+    // Three renders, not two, because the readback is pipelined: it asks the
+    // GPU for this frame and hands back the one it asked for last time, so the
+    // first two calls carry the same image. The third is the first one that
+    // differs, and it is the one that proves the buffers are separate.
+    core.camera_set_position(cam, core.vec3(0.0, 0.0, 90.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+    core.backend_render(&backend, cam, light)
+    core.backend_frame_pixels(&backend)
+
+    core.camera_set_position(cam, core.vec3(0.0, 0.0, 1200.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+    core.backend_render(&backend, cam, light)
+    near_frame = core.backend_frame_pixels(&backend)
+    if near_frame == null {
+        record_failure("the readback returned nothing")
+        return
+    }
+    near_hash = hash_of(near_frame)
+
+    core.backend_render(&backend, cam, light)
+    far_frame = core.backend_frame_pixels(&backend)
+    if far_frame == null {
+        record_failure("the second readback returned nothing")
+        return
+    }
+    far_hash = hash_of(far_frame)
+
+    if far_hash == near_hash {
+        record_failure("both frames hashed the same; the cameras are not far enough apart to tell the buffers apart")
+    }
+
+    if near_frame == far_frame {
+        record_failure("both readbacks returned the same pointer; a frame handed out is overwritten by the next one")
+    }
+
+    if hash_of(near_frame) != near_hash {
+        record_failure("the frame handed out changed while the next one was read")
+    }
+
+    core.camera_free(cam)
+    core.light_free(light)
+    core.backend_cleanup(&backend)
+    offscreen.target_destroy(target)
+    core.model_free(ball)
+    gl.renderer_free(renderer)
+    offscreen.context_destroy(context)
+
+    if failures == 0 {
+        println("readback buffers: all checks passed (a handed-out frame survives the next one)")
+    } else {
+        println("readback buffers: ${failures} failure(s)")
+    }
+}
