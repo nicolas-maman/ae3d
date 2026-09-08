@@ -322,6 +322,13 @@ First working engine.
   with nothing in it and the reason went unread. What it can build it still
   keeps: one model missing its mesh does not lose the rest.
 
+- The editor's wave height slider sets the wave height. It wrote the multiplier
+  the shader scales the wave table by and read back the height the table is
+  built from, two different quantities, so the readout never followed the
+  handle and an undo wrote a height into a multiplier. A simulation's wave
+  height can now be set after it is built, which rebuilds the table it is
+  derived from.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve
