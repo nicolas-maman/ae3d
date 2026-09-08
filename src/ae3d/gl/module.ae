@@ -86,6 +86,8 @@ extern ae3d_gl_fbo_attach_depth(fbo: int, width: int, height: int) -> int
 extern ae3d_gl_geometry_acquire(mesh: ptr) -> int
 extern ae3d_gl_geometry_instance_vbo(vao: int) -> int
 extern ae3d_gl_geometry_release(vao: int)
+extern ae3d_mesh_dirty(mesh: ptr) -> int
+extern ae3d_mesh_clear_dirty(mesh: ptr)
 extern ae3d_gl_geometry_shutdown()
 extern ae3d_gl_geometry_instance_capacity(vao: int) -> int
 extern ae3d_gl_geometry_set_instance_capacity(vao: int, capacity: int)
@@ -667,6 +669,11 @@ renderer_add_model(r: *GLRenderer, m: *Model) {
     }
 
     ae3d_gl_vao_bind(0)
+
+    // Building a mesh marks it dirty, and what was just uploaded is not an edit
+    // waiting to be sent: leaving it set gives every model a private buffer on
+    // its first frame and there is nothing left to merge.
+    ae3d_mesh_clear_dirty(m.mesh)
 
     core.model_update_matrix(m)
     load_model_textures(r, m)
@@ -1256,6 +1263,12 @@ draw_opaque(r: *GLRenderer, view_projection: *Mat4, light: *Light, cam: *Camera)
     count = list.size(r.models)
     i = 0
     while i < count {
+        refresh_geometry(r, list.get_raw(r.models, i) as *Model)
+        i = i + 1
+    }
+
+    i = 0
+    while i < count {
         m = list.get_raw(r.models, i) as *Model
         if batchable(r, m) {
             if core.frustum_culling() &&
@@ -1572,6 +1585,30 @@ set_material_uniforms(slots: *ProgramSlots, material: *Material) {
     ae3d_gl_uniform_float(slots.roughness, material.roughness)
     ae3d_gl_uniform_float(slots.exposure, material.exposure)
     ae3d_gl_uniform_float(slots.material_alpha, material.alpha)
+}
+
+// A mesh edited after the model was registered. The geometry cache hands the
+// same buffers to every model built from identical vertices, so a model whose
+// vertices have moved has to stop sharing before its new shape goes up, or it
+// rewrites the geometry under everything else drawing the old one.
+refresh_geometry(r: *GLRenderer, m: *Model) {
+    if m.vao == 0 || ae3d_mesh_dirty(m.mesh) != 1 { return }
+
+    if m.shares_geometry {
+        ae3d_gl_geometry_release(m.vao)
+        m.vao = ae3d_gl_vao_create()
+        ae3d_gl_vao_bind(m.vao)
+        m.vbo = ae3d_gl_buffer_create()
+        m.ebo = ae3d_gl_buffer_create()
+        ae3d_gl_upload_mesh(m.mesh, m.vbo, m.ebo)
+        ae3d_gl_setup_vertex_attribs()
+        m.shares_geometry = false
+    } else {
+        ae3d_gl_vao_bind(m.vao)
+        ae3d_gl_upload_mesh(m.mesh, m.vbo, m.ebo)
+    }
+    ae3d_mesh_clear_dirty(m.mesh)
+    core.model_recalculate_bounds(m)
 }
 
 // A draw has to shade with what its own model asked for and nothing else. The

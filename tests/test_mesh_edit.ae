@@ -1,0 +1,151 @@
+// A mesh reshaped after the model was drawn has to reach the GPU.
+//
+// Geometry is uploaded when the model is registered with a renderer, and the
+// setters that move a vertex mark the mesh dirty. Nothing read that flag on
+// either backend, so anything deforming geometry on the CPU asked for something
+// the engine accepted and never did.
+//
+// Identical geometry is uploaded once and shared by every model built from it,
+// which is the part a fix can get wrong: a model whose vertices have moved must
+// stop sharing before its new shape goes up, or it reshapes everything else
+// drawing what it used to be.
+
+import std.mem
+import ae3d.core
+import ae3d.gl
+import ae3d.vk
+import ae3d.offscreen
+import ae3d.loader
+
+const WIDTH = 176
+const HEIGHT = 132
+const PIXELS = WIDTH * HEIGHT * 4
+
+var failures = 0
+
+check_true(name: string, ok: bool) {
+    if !ok {
+        println("FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// The OpenGL path reads back through a pair of buffers, so the frame just drawn
+// is the second read rather than the first.
+half_total(backend: *Backend, cam: *Camera, light: *Light, from_x: int, to_x: int) -> int {
+    core.backend_render(backend, cam, light)
+    core.backend_frame_pixels(backend)
+    pixels = core.backend_frame_pixels(backend)
+    total = 0
+    y = 0
+    while y < HEIGHT {
+        x = from_x
+        while x < to_x {
+            index = (y * WIDTH + x) * 4
+            total = total + mem.get_byte(pixels, index) +
+                    mem.get_byte(pixels, index + 1) + mem.get_byte(pixels, index + 2)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return total
+}
+
+flatten(m: *Model) {
+    count = core.mesh_vertex_count(m.mesh)
+    i = 0
+    while i < count {
+        p = core.mesh_position(m.mesh, i)
+        // Flattened where it stands, so the silhouette keeps to its own half of
+        // the frame and what the other half shows is only the other model.
+        core.mesh_set_position(m.mesh, i, core.vec3(p.x, p.y, 0.0))
+        i = i + 1
+    }
+}
+
+run_checks(backend: *Backend, name: string) {
+    core.backend_set_clear_color(backend, 0.0, 0.0, 0.0)
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 0.0, 110.0))
+    light = core.light_sun(core.vec3(0.3, 0.8, 0.5))
+
+    // Two spheres built the same way, so the renderer uploads the geometry once
+    // and hands it to both.
+    left = loader.sphere(1.0, 20, 16)
+    core.model_set_scale(left, 16.0, 16.0, 16.0)
+    core.model_set_position(left, 0.0 - 30.0, 0.0, 0.0)
+    core.model_set_diffuse(left, 0.9, 0.4, 0.2)
+    core.backend_add_model(backend, left)
+
+    right = loader.sphere(1.0, 20, 16)
+    core.model_set_scale(right, 16.0, 16.0, 16.0)
+    core.model_set_position(right, 30.0, 0.0, 0.0)
+    core.model_set_diffuse(right, 0.2, 0.5, 0.9)
+    core.backend_add_model(backend, right)
+
+    before_left = half_total(backend, cam, light, 0, WIDTH / 2)
+    before_right = half_total(backend, cam, light, WIDTH / 2, WIDTH)
+    check_true("${name} both were drawn", before_left > 0 && before_right > 0)
+
+    flatten(left)
+    after_left = half_total(backend, cam, light, 0, WIDTH / 2)
+    after_right = half_total(backend, cam, light, WIDTH / 2, WIDTH)
+
+    check_true("${name} a reshaped mesh reaches the frame", after_left != before_left)
+    check_true("${name} and reshapes nothing else drawing the same geometry",
+               after_right == before_right)
+
+    // Nothing keeps re-sending it: a mesh left alone draws the same.
+    settled = half_total(backend, cam, light, 0, WIDTH / 2)
+    check_true("${name} an unedited mesh draws the same", settled == after_left)
+
+    core.backend_remove_model(backend, left)
+    core.backend_remove_model(backend, right)
+    core.model_free(left)
+    core.model_free(right)
+    core.camera_free(cam)
+    core.light_free(light)
+}
+
+main() {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("mesh edit: SKIP no OpenGL context")
+        return
+    }
+
+    renderer = gl.renderer_new()
+    gl_pass = gl.backend(renderer)
+    if !core.backend_init(&gl_pass, context, WIDTH, HEIGHT) {
+        println("mesh edit: SKIP the OpenGL backend would not initialise")
+        return
+    }
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    run_checks(&gl_pass, "opengl")
+    core.backend_cleanup(&gl_pass)
+    offscreen.target_destroy(target)
+    gl.renderer_free(renderer)
+    offscreen.context_destroy(context)
+
+    if !vk.available() {
+        println("mesh edit: no Vulkan driver (${vk.last_error()}), checked OpenGL only")
+    } else {
+        vk_renderer = vk.renderer_new()
+        vk_pass = vk.backend(vk_renderer)
+        if !core.backend_init(&vk_pass, null, WIDTH, HEIGHT) {
+            println("mesh edit: SKIP Vulkan would not start (${vk.last_error()})")
+        } else {
+            run_checks(&vk_pass, "vulkan")
+            core.backend_cleanup(&vk_pass)
+        }
+        vk.renderer_free(vk_renderer)
+    }
+
+    if failures == 0 {
+        println("mesh edit: all checks passed")
+    } else {
+        println("mesh edit: ${failures} failure(s)")
+    }
+}
