@@ -32,8 +32,9 @@ engine, to Aether and C. See [Credits](#credits).
   two agree to within 0.7%
   of channels.
 - **Gerstner-wave ocean**, **Perlin terrain**, **voxel worlds** drawn as a single
-  instanced call, **surface nets** over a signed distance field, an OBJ/MTL
-  loader, ray casting, and a component system.
+  instanced call in one of five terrains (plains, mountains, desert, islands,
+  caves), **surface nets** over a signed distance field, an OBJ/MTL loader, ray
+  casting, and a component system.
 - **Scenes save and load.** Transforms and materials as JSON; geometry that came
   from a file records its path, and geometry that did not is written to a
   compressed binary mesh beside the scene. A scene also carries what is attached

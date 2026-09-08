@@ -1,0 +1,161 @@
+// Terrain that fills a voxel world.
+//
+// Gopher3D's editor offers five biomes from a dialog and builds each one inline.
+// The shapes are worth having; building them inside the editor is not, because
+// then the only way to check a biome is to look at it. These are a module, so
+// `tests/test_terrain.ae` measures what each one produces without a window.
+//
+// Nothing here is new machinery. std.noise already has the fields these are
+// made of, and voxel already has the grid and the palette; a biome is a choice
+// of field, a height range and a rule for what a column is made of.
+
+import ae3d.core
+import ae3d.noise
+import ae3d.voxel
+
+exports (
+    PLAINS, MOUNTAINS, DESERT, ISLANDS, CAVES, BIOME_COUNT,
+    biome_name, fill, fill_seeded
+)
+
+const PLAINS = 0
+const MOUNTAINS = 1
+const DESERT = 2
+const ISLANDS = 3
+const CAVES = 4
+const BIOME_COUNT = 5
+
+// The height a column reaches, as a fraction of the world's height. Kept as a
+// fraction rather than a count of voxels so a biome looks the same in a world
+// of any depth: a mountain range in a 28-deep world is the same range in a
+// 64-deep one, not a flat plate.
+column_height(field: *Perlin, biome: int, x: int, z: int) -> float {
+    fx = (x * 1.0) * 0.05
+    fz = (z * 1.0) * 0.05
+
+    if biome == MOUNTAINS {
+        // Ridged noise folds the field at zero, which is what puts creases
+        // along the tops instead of the rounded lumps fbm gives.
+        return 0.15 + noise.ridge(field, fx * 0.6, 0.0, fz * 0.6, 5, 0.5) * 0.8
+    }
+    if biome == DESERT {
+        // One low-frequency octave: dunes are long and smooth, and more
+        // octaves only add detail a desert does not have.
+        return 0.18 + ((noise.fbm2(field, fx * 0.35, fz * 0.35, 2, 0.5) + 1.0) * 0.5) * 0.16
+    }
+    if biome == ISLANDS {
+        // Above the waterline only where the field is, so the world is mostly
+        // sea floor with land standing out of it.
+        raised = (noise.fbm2(field, fx * 0.7, fz * 0.7, 4, 0.5) + 1.0) * 0.5
+        if raised < 0.55 { return 0.12 }
+        return 0.12 + (raised - 0.55) * 1.7
+    }
+    if biome == CAVES {
+        // A thick slab. What makes it a cave system is carved out of it below.
+        return 0.85
+    }
+    return 0.2 + ((noise.fbm2(field, fx, fz, 4, 0.5) + 1.0) * 0.5) * 0.3
+}
+
+// What a voxel at this depth is made of. `top` is the highest filled voxel of
+// the column, so the rule is written in terms of depth below the surface rather
+// than absolute height, and a biome keeps its skin at any elevation.
+material(biome: int, top: int, y: int) -> int {
+    depth = top - y
+
+    if biome == DESERT {
+        if depth < 4 { return voxel.SAND }
+        return voxel.STONE
+    }
+    if biome == MOUNTAINS {
+        if depth == 0 && top < 12 { return voxel.GRASS }
+        return voxel.STONE
+    }
+    if biome == ISLANDS {
+        if depth == 0 {
+            if top < 6 { return voxel.SAND }
+            return voxel.GRASS
+        }
+        if depth < 3 { return voxel.SAND }
+        return voxel.STONE
+    }
+    if biome == CAVES { return voxel.STONE }
+
+    if depth == 0 {
+        if top < 6 { return voxel.SAND }
+        return voxel.GRASS
+    }
+    if depth < 4 { return voxel.DIRT }
+    return voxel.STONE
+}
+
+biome_name(biome: int) -> string {
+    if biome == MOUNTAINS { return "mountains" }
+    if biome == DESERT { return "desert" }
+    if biome == ISLANDS { return "islands" }
+    if biome == CAVES { return "caves" }
+    return "plains"
+}
+
+// Fill `w` with `biome`, using `field` for its noise. The world is cleared
+// first, so a world can be refilled with another biome without carrying the
+// last one's voxels.
+fill(w: *World, field: *Perlin, biome: int) {
+    if w == null || field == null { return }
+    voxel.world_clear(w)
+
+    depth = voxel.world_max_height(w)
+    x = 0
+    while x < voxel.world_size_x(w) {
+        z = 0
+        while z < voxel.world_size_z(w) {
+            fraction = column_height(field, biome, x, z)
+            if fraction < 0.05 { fraction = 0.05 }
+            if fraction > 1.0 { fraction = 1.0 }
+            top = (fraction * (depth * 1.0)) as int
+            if top >= depth { top = depth - 1 }
+
+            y = 0
+            while y <= top {
+                voxel.world_set(w, x, y, z, material(biome, top, y))
+                y = y + 1
+            }
+            z = z + 1
+        }
+        x = x + 1
+    }
+
+    if biome == CAVES { carve(w, field) }
+}
+
+// Hollow out the slab. A 3D field thresholded at a value that leaves most of it
+// solid: the caves are where the field runs high, which gives connected
+// passages rather than isolated bubbles, and the top two layers are left alone
+// so the surface stays walkable rather than collapsing into holes.
+carve(w: *World, field: *Perlin) {
+    depth = voxel.world_max_height(w)
+    x = 0
+    while x < voxel.world_size_x(w) {
+        z = 0
+        while z < voxel.world_size_z(w) {
+            y = 1
+            while y < depth - 2 {
+                sample = noise.noise3(field, (x * 1.0) * 0.09,
+                                      (y * 1.0) * 0.14, (z * 1.0) * 0.09)
+                if sample > 0.18 { voxel.world_set(w, x, y, z, voxel.EMPTY) }
+                y = y + 1
+            }
+            z = z + 1
+        }
+        x = x + 1
+    }
+}
+
+// The same, for a caller that has no field of its own. The field is created and
+// released here, so a seed is all it takes to get a world.
+fill_seeded(w: *World, seed: long, biome: int) {
+    field = noise.perlin_new(seed)
+    if field == null { return }
+    fill(w, field, biome)
+    noise.perlin_free(field)
+}

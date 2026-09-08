@@ -1,0 +1,142 @@
+// Each biome has to produce a world that is recognisably itself. A generator
+// that returns the same flat slab whatever it is asked for passes any check
+// that only asks "is it non-empty", so these compare the biomes against each
+// other as well as against their own description.
+
+import ae3d.core
+import ae3d.voxel
+import ae3d.terrain
+
+const SIZE = 32
+const DEPTH = 32
+
+var failures = 0
+
+record_failure(reason: string) {
+    println("FAIL ${reason}")
+    failures = failures + 1
+}
+
+check_true(name: string, condition: bool) {
+    if !condition { record_failure(name) }
+}
+
+// The highest filled voxel of each column, and how much they vary. A flat
+// biome and a mountainous one differ in exactly this.
+relief(w: *World) -> int {
+    lowest = DEPTH
+    highest = 0
+    x = 0
+    while x < SIZE {
+        z = 0
+        while z < SIZE {
+            top = 0 - 1
+            y = DEPTH - 1
+            while y >= 0 {
+                if voxel.world_solid(w, x, y, z) { top = y ; y = 0 - 1 } else { y = y - 1 }
+            }
+            if top > highest { highest = top }
+            if top < lowest { lowest = top }
+            z = z + 1
+        }
+        x = x + 1
+    }
+    return highest - lowest
+}
+
+// Empty voxels with solid rock above them: a cave, as opposed to the open sky
+// above every column, which is empty above solid and not interesting.
+enclosed(w: *World) -> int {
+    total = 0
+    x = 0
+    while x < SIZE {
+        z = 0
+        while z < SIZE {
+            roof = false
+            y = DEPTH - 1
+            while y >= 0 {
+                if voxel.world_solid(w, x, y, z) {
+                    roof = true
+                } else {
+                    if roof { total = total + 1 }
+                }
+                y = y - 1
+            }
+            z = z + 1
+        }
+        x = x + 1
+    }
+    return total
+}
+
+surface_material(w: *World) -> int {
+    y = DEPTH - 1
+    while y >= 0 {
+        if voxel.world_solid(w, SIZE / 2, y, SIZE / 2) { return voxel.world_get(w, SIZE / 2, y, SIZE / 2) }
+        y = y - 1
+    }
+    return voxel.EMPTY
+}
+
+main() {
+    world = voxel.world_new(SIZE, SIZE, DEPTH, 1.0)
+    if world == null {
+        println("terrain: FAIL no world")
+        return
+    }
+
+    // Every biome fills something, and refilling replaces rather than adds.
+    counts = 0
+    b = 0
+    while b < terrain.BIOME_COUNT {
+        terrain.fill_seeded(world, 20260908, b)
+        active = voxel.world_active_count(world)
+        check_true("${terrain.biome_name(b)} fills the world", active > 0)
+        counts = counts + active
+        b = b + 1
+    }
+    check_true("every biome filled something", counts > 0)
+
+    terrain.fill_seeded(world, 20260908, terrain.PLAINS)
+    first = voxel.world_active_count(world)
+    terrain.fill_seeded(world, 20260908, terrain.PLAINS)
+    check_true("refilling replaces rather than accumulates",
+               voxel.world_active_count(world) == first)
+
+    // Mountains are more varied than plains, and a desert is smoother than
+    // both. The point of separate biomes is that they differ.
+    terrain.fill_seeded(world, 20260908, terrain.PLAINS)
+    plains = relief(world)
+    terrain.fill_seeded(world, 20260908, terrain.MOUNTAINS)
+    mountains = relief(world)
+    terrain.fill_seeded(world, 20260908, terrain.DESERT)
+    desert = relief(world)
+    check_true("mountains have more relief than plains (${mountains} vs ${plains})",
+               mountains > plains)
+    check_true("a desert is smoother than mountains (${desert} vs ${mountains})",
+               desert < mountains)
+
+    // A desert's surface is sand, whatever height it reached.
+    check_true("a desert is sand on top", surface_material(world) == voxel.SAND)
+
+    // Caves have solid rock with space above it. Nothing else here does.
+    terrain.fill_seeded(world, 20260908, terrain.CAVES)
+    caved = enclosed(world)
+    terrain.fill_seeded(world, 20260908, terrain.PLAINS)
+    check_true("caves are hollow (${caved} enclosed voxels)", caved > 100)
+    check_true("plains are not", enclosed(world) == 0)
+
+    // A different seed is a different world, or the seed does nothing.
+    terrain.fill_seeded(world, 1, terrain.MOUNTAINS)
+    one = voxel.world_active_count(world)
+    terrain.fill_seeded(world, 2, terrain.MOUNTAINS)
+    check_true("the seed changes the world", voxel.world_active_count(world) != one)
+
+    voxel.world_free(world)
+
+    if failures == 0 {
+        println("terrain: all checks passed (plains relief ${plains}, mountains ${mountains}, desert ${desert}, ${caved} enclosed)")
+    } else {
+        println("terrain: ${failures} failure(s)")
+    }
+}
