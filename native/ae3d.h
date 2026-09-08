@@ -237,6 +237,7 @@ void   ae3d_vk_set_program(int program);
 int    ae3d_vk_program_count(void);
 void   ae3d_vk_set_shadows(int on);
 int    ae3d_vk_shadows(void);
+int    ae3d_vk_live_shadow_targets(void);
 int    ae3d_vk_shadow_begin(void);
 void   ae3d_vk_shadow_draw(int mesh, int instances, int instance_count);
 void   ae3d_vk_shadow_end(void);
