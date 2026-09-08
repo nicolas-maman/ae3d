@@ -252,6 +252,12 @@ First working engine.
   drag. An edit that has finished now closes its step, and the editor says so
   when the edits stop arriving.
 
+- The post-processing checks ask whether the effect did anything. Comparing the
+  two backends says they agree, which a pass that quietly copied its input
+  through would satisfy on both sides at once, and that is exactly how the
+  multisample resolve failure hid. Turning FXAA or bloom on now has to change
+  what the frame adds up to, in both renderers.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve
