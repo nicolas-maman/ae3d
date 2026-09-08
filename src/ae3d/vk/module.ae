@@ -12,6 +12,7 @@ import std.heap
 import std.string
 import ae3d.core
 import ae3d.platform
+import ae3d.rendering
 import ae3d.vkscene
 
 exports (
@@ -116,6 +117,9 @@ struct VKRenderer {
     clear_b: float
     scene_start: float
     scene_time: float
+    defaults: ptr
+    loaded_names: ptr
+    shading_loaded: ptr
 }
 
 available() -> bool {
@@ -159,6 +163,11 @@ renderer_new() -> *VKRenderer {
     r.batch_count = 0
     r.scene_start = platform.time()
     r.scene_time = 0.0
+    r.defaults = rendering.defaults_model() as ptr
+    r.loaded_names = calloc(ae3d_vk_program_count(), 8)
+    // Nothing has been written into these blocks yet, so what they hold is not
+    // what a default is.
+    r.shading_loaded = calloc(ae3d_vk_program_count(), 4)
     return r
 }
 
@@ -179,6 +188,9 @@ renderer_free(r: *VKRenderer) {
         }
         list.free(r.textures)
     }
+    if r.defaults != null { core.model_free(r.defaults as *Model) }
+    if r.loaded_names != null { free(r.loaded_names) }
+    if r.shading_loaded != null { free(r.shading_loaded) }
     if r.frustum != null { core.frustum_free(r.frustum) }
     heap.free(r)
 }
@@ -541,6 +553,24 @@ write_frame_uniforms(r: *VKRenderer, light: *Light, cam: *Camera) {
     }
 }
 
+// A draw has to shade with what its own model asked for and nothing else. The
+// block keeps whatever the draw before it wrote, so before a model whose set of
+// settings differs from what is loaded, the defaults go in first and wipe the
+// difference. Models configured alike agree on the set, which is the common
+// case and costs nothing.
+apply_shading(r: *VKRenderer, m: *Model, program: int) {
+    names = 0 as uint64
+    if m != null { names = core.model_uniform_names(m) }
+    loaded = r.loaded_names as uint64[]
+    ready = r.shading_loaded as int[]
+    if ready[program] == 0 || loaded[program] != names {
+        set_model_uniforms(r.defaults as *Model)
+        loaded[program] = names
+        ready[program] = 1
+    }
+    if m != null { set_model_uniforms(m) }
+}
+
 set_scene_uniforms(r: *VKRenderer, m: *Model) {
     ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &m.model_matrix)
 
@@ -551,7 +581,12 @@ set_scene_uniforms(r: *VKRenderer, m: *Model) {
     // that has instances always has a colour for each of them.
     ae3d_vk_scene_set_int(vkscene.OFF_USEINSTANCECOLOR, instanced)
 
-    set_model_uniforms(m)
+    apply_shading(r, m, active_program(m))
+}
+
+active_program(m: *Model) -> int {
+    if m != null && core.shader_valid(&m.shader) { return m.shader.kind }
+    return core.SHADER_CUSTOM
 }
 
 // The same array the OpenGL backend fills, at the offsets the generator derived
@@ -812,6 +847,10 @@ draw_batch(r: *VKRenderer, b: *VKBatch) {
     // The merged stream carries no per-instance colour, and its members already
     // share one material, so the shader is told to leave the tint alone.
     ae3d_vk_scene_set_int(vkscene.OFF_USEINSTANCECOLOR, 0)
+
+    // A batch's members carry no settings of their own, so the block must not
+    // still be holding the ones the model before them asked for.
+    apply_shading(r, null, core.SHADER_CUSTOM)
     set_material_uniforms(first.material)
 
     texture = 0
