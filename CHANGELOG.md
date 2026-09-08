@@ -535,6 +535,17 @@ First working engine.
 
 ### Editor
 
+- Deleting an object made the editor stop believing what the others were. A
+  model, its component and its script live at the same index in three lists,
+  and only the add path moved all three: delete, undo of an add and redo of one
+  each moved the model alone, so every component after that point answered for
+  the wrong object. Adding water and then deleting an unrelated cube left the
+  inspector refusing to show the water section for the water, and
+  `update_water` driving whichever object had inherited the component. Every
+  path moves all three now, and a detached model keeps its component and its
+  script so an undone delete brings back the simulation rather than a bare
+  mesh.
+
 - A section with nothing to edit hides whole. Hiding the water settings hid
   the heading, each slider and each readout, but not the rows holding their
   captions, so a scene with no water in it showed `wave height`, `wave speed`,

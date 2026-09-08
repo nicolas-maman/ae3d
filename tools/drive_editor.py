@@ -60,6 +60,24 @@ def tree(port):
     return {w["id"]: w for w in get(port, "/widgets")}
 
 
+def wait_for(port, predicate, seconds=8.0):
+    """Poll the tree until predicate(widgets) holds, or give up.
+
+    A fixed sleep is a guess about how long the editor takes to build a water
+    surface and lay the panel out again, and a guess that is usually right is
+    the worst kind: the check passes on this machine and fails on a slower one
+    for reasons that have nothing to do with the editor.
+    """
+    deadline = time.time() + seconds
+    widgets = tree(port)
+    while time.time() < deadline:
+        if predicate(widgets):
+            return widgets, True
+        time.sleep(0.25)
+        widgets = tree(port)
+    return widgets, predicate(widgets)
+
+
 def find(widgets, kind, text):
     for w in widgets.values():
         if w["type"] == kind and w["text"].strip() == text:
@@ -170,6 +188,45 @@ def main():
                   frame is not None and not frame["visible"],
                   "row %s visible=%s" % (frame["id"] if frame else "?",
                                          frame["visible"] if frame else "?"))
+
+        # And appears again when there is something to edit, with its sliders
+        # reaching the simulation rather than only their own readouts.
+        water = find(widgets, "button", "Water")
+        if water is not None and captions:
+            post(args.port, "/widget/%d/click" % water)
+
+            def section_open(ws):
+                caps = [w for w in ws.values() if w["type"] == "text"
+                        and w["text"].strip() == "wave height"]
+                if not caps:
+                    return False
+                frame = ws.get(caps[0]["parent"])
+                return frame is not None and frame["visible"]
+
+            widgets, ok = wait_for(args.port, section_open)
+            check("adding water shows the section", ok)
+            caption = [w for w in widgets.values()
+                       if w["type"] == "text" and w["text"].strip() == "wave height"][0]
+
+            readout = [w for w in widgets.values()
+                       if w["parent"] == caption["parent"] and w["type"] == "text"
+                       and w["id"] != caption["id"]]
+            later = sorted([w for w in widgets.values()
+                            if w["type"] == "slider" and w["id"] > caption["parent"]],
+                           key=lambda w: w["id"])
+            if readout and later:
+                post(args.port, "/widget/%d/set_value?v=17.5" % later[0]["id"])
+                time.sleep(1.0)
+                # Away and back, so what is read comes from the simulation.
+                scene_rows = rows_under(tree(args.port), scene)
+                scene_rows.sort(key=lambda w: w["id"])
+                post(args.port, "/widget/%d/click" % scene_rows[0]["id"])
+                time.sleep(0.7)
+                post(args.port, "/widget/%d/click" % scene_rows[-1]["id"])
+                time.sleep(0.7)
+                back = tree(args.port)[readout[0]["id"]]["text"].strip()
+                check("a water slider reaches the simulation", back == "17.50",
+                      repr(back))
 
         # Save, Load and Delete, pressed. A scene that never reaches disk and
         # a Load that brings back nothing both look like a working editor from
