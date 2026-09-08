@@ -427,6 +427,17 @@ First working engine.
 
 ### Editor
 
+- The material colour is a painted chip beside the hex, not hex alone. The
+  three channel sliders never show the colour they add up to, and a chip is
+  how all three of the editors this borrows from draw a colour property. It
+  is a fixed-size label with a background colour rather than a canvas, since
+  a second canvas in a panel collapses it.
+
+- The editor's report counts `chip_wrong`: the colour actually painted on the
+  chip, read back off the widget, against the colour the material holds. A
+  chip that is never painted looks exactly like a chip showing a very dark
+  material, and nothing else in the tree can tell them apart.
+
 - The inspector uses a number field where a slider made no sense. Position was
   a slider clamped to plus or minus four hundred, so an object further out than
   that could not be typed and the control pinned; the far plane was a slider

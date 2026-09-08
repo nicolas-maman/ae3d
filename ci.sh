@@ -213,6 +213,12 @@ check_editor_run() {
         # property directly and never looks at the control.
         fail "$name ($(sed -n 's/^blind_fields //p' "$report") number field(s) do not show their value)"
         sed 's/^/        /' "$report"
+    elif [ "$(sed -n 's/^chip_wrong //p' "$report")" != "0" ]; then
+        # The three colour sliders never show the colour they add up to, so the
+        # chip beside them is the only place it appears. A chip that is never
+        # painted looks exactly like one showing a dark material.
+        fail "$name (the colour chip is not the material's colour)"
+        sed 's/^/        /' "$report"
     elif [ "$(sed -n 's/^unundone_drags //p' "$report")" != "0" ]; then
         # A drag of the gizmo that records nothing leaves the next undo to step
         # back through whatever came before it and put that back instead.

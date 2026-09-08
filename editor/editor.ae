@@ -109,6 +109,7 @@ var g_line4 = ""
 var g_line5 = ""
 var g_line6 = ""
 var g_swatch = 0
+var g_chip = 0
 var g_history: ptr = null
 // When the last property edit was recorded. A drag delivers a callback per
 // frame, so edits that stop arriving mean the adjustment is over and the undo
@@ -305,17 +306,68 @@ apply_post() {
     draw_frame()
 }
 
-// The three channel sliders never show the colour they add up to, so the hex is
-// spelled out. A colour chip would be a canvas, and a second canvas in a panel
-// collapses it (aether-lang-dev/aether-ui#98).
+// The three channel sliders never show the colour they add up to, so the
+// inspector shows it twice: a chip painted with it and the hex spelled out
+// beside it, which is how all three of the editors this borrows from draw a
+// colour property. The chip is a fixed-size label with a background colour,
+// not a canvas: a second canvas in a panel collapses it
+// (aether-lang-dev/aether-ui#98), and a background is all a chip needs.
+//
+// Implemented on all four aether-ui backends, but with no binding in ui/module
+// yet (aether-lang-dev/aether-ui#109), so it is declared here. It answers from
+// the layer that actually paints rather than from the value that was set,
+// which is what makes it worth checking against.
+extern aether_ui_styled_bg_impl(handle: int) -> int
 refresh_swatch() {
     if g_swatch == 0 { return }
     m = selected_model()
     if m == null || m.material == null {
         ui.set_text(g_swatch, "")
+        if g_chip != 0 { ui.style_bg_color(g_chip, 0.09, 0.10, 0.12, 1.0) }
         return
     }
     ui.set_text(g_swatch, "#${hex_byte(m.material.diffuse.x)}${hex_byte(m.material.diffuse.y)}${hex_byte(m.material.diffuse.z)}")
+    if g_chip != 0 {
+        ui.style_bg_color(g_chip, core.clampf(m.material.diffuse.x, 0.0, 1.0),
+                                  core.clampf(m.material.diffuse.y, 0.0, 1.0),
+                                  core.clampf(m.material.diffuse.z, 0.0, 1.0), 1.0)
+    }
+}
+
+// What the chip is actually painted, read back off the widget rather than from
+// the value it was handed.
+chip_rgb() -> int {
+    if g_chip == 0 { return 0 - 1 }
+    return aether_ui_styled_bg_impl(g_chip)
+}
+
+// Whether the chip on screen is the material's colour. Compared a channel at a
+// time and allowing one step, because the colour goes out as a float and comes
+// back off a CGColor: an exact comparison of the packed values would make this
+// depend on a rounding nobody controls.
+chip_wrong() -> int {
+    got = chip_rgb()
+    want = material_rgb()
+    if want < 0 { return 0 }
+    if got < 0 { return 1 }
+    shift = 65536
+    while shift >= 1 {
+        a = (got / shift) % 256
+        b = (want / shift) % 256
+        if a - b > 1 || b - a > 1 { return 1 }
+        shift = shift / 256
+    }
+    return 0
+}
+
+// The colour the selected material should be showing, packed the same way.
+material_rgb() -> int {
+    m = selected_model()
+    if m == null || m.material == null { return 0 - 1 }
+    r = (core.clampf(m.material.diffuse.x, 0.0, 1.0) * 255.0) as int
+    g = (core.clampf(m.material.diffuse.y, 0.0, 1.0) * 255.0) as int
+    b = (core.clampf(m.material.diffuse.z, 0.0, 1.0) * 255.0) as int
+    return (r * 65536) + (g * 256) + b
 }
 
 hex_byte(value: float) -> string {
@@ -1194,6 +1246,10 @@ report_state() {
     frames = g_frames
     stuck = rows_that_do_nothing()
     blind = blind_fields()
+    refresh_swatch()
+    chip = chip_rgb()
+    wanted = material_rgb()
+    chip_off = chip_wrong()
     undrag = undone_gizmo_drags()
     idle = actions_that_do_nothing()
 
@@ -1230,6 +1286,12 @@ report_state() {
     lines = string.concat(lines, string.from_int(stuck))
     lines = string.concat(lines, "\nblind_fields ")
     lines = string.concat(lines, string.from_int(blind))
+    lines = string.concat(lines, "\nchip_wrong ")
+    lines = string.concat(lines, string.from_int(chip_off))
+    lines = string.concat(lines, "\nchip_rgb ")
+    lines = string.concat(lines, string.from_int(chip))
+    lines = string.concat(lines, "\nchip_wanted ")
+    lines = string.concat(lines, string.from_int(wanted))
     lines = string.concat(lines, "\nunundone_drags ")
     lines = string.concat(lines, string.from_int(undrag))
     lines = string.concat(lines, "\nidle_actions ")
@@ -1701,6 +1763,9 @@ theme() -> ptr {
 
     ui.st_color(sheet, "stats", 0x7F8896)
     ui.st_font_size(sheet, "stats", 11.0)
+
+    ui.st_border(sheet, "chip", 1.0, 0x0E1013)
+    ui.st_radius(sheet, "chip", 3.0)
 
     // A field is sunk into the panel rather than raised off it, so it reads as
     // something to type into next to a button that reads as something to press.
@@ -2722,6 +2787,10 @@ main() {
         swatch_caption = ui.text(swatch_row, "colour")
         ui.add_css_class(swatch_caption, "label")
         ui.spacer(swatch_row)
+        g_chip = ui.text(swatch_row, "")
+        ui.add_css_class(g_chip, "chip")
+        ui.width(g_chip, 30)
+        ui.height(g_chip, 14)
         g_swatch = ui.text(swatch_row, "")
         ui.add_css_class(g_swatch, "value")
         ui.width(g_swatch, VALUE_COLUMN)
