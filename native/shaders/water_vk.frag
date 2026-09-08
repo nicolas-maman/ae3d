@@ -93,6 +93,8 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float lightIntensity;
     vec3 waterBaseColor;
     float waterTransparency;
+    bool enableFoam;
+    float foamIntensity;
     float waterPlaneHeight;
     float waterLevel;
     bool enableFog;
@@ -135,6 +137,11 @@ layout(location = 2) in vec3 fragPosition;
 
 // GPU Gems Chapter 2: Caustics uniforms
 
+
+
+// Foam on the crests and in the wave trails. Its strength was three constants
+// buried in the shading, so a caller could not turn it down for a still lake or
+// up for a rough sea.
 
 
 
@@ -359,28 +366,39 @@ void main() {
     // Enhanced foam system with wave-based trails
     float totalFoam = 0.0;
     
-    // Wave height foam (peaks). How high a crest has to be for foam depends on
-    // how high the waves go at all: fixed at four hundred and fifty units, it
-    // never appeared on any ocean this engine has ever drawn.
-    float tallest = (waveAmplitudes[0] + waveAmplitudes[1] +
-                     waveAmplitudes[2] + waveAmplitudes[3]) * waveHeightMultiplier;
-    if (tallest > 0.0) {
-        float crest = waveHeight - waterLevel;
-        totalFoam += smoothstep(tallest * 0.55, tallest * 0.8, crest) * 0.15;
+    if (enableFoam) {
+        // Wave height foam (peaks). How high a crest has to be for foam depends
+        // on how high the waves go at all: fixed at four hundred and fifty
+        // units, it never appeared on any ocean this engine has ever drawn.
+        //
+        // The sum of the amplitudes is what the waves reach only where all four
+        // crest together, which is rare, so measuring against a large fraction
+        // of it asked for an alignment the sea does not often make: foam thinned
+        // as the water got rougher and was gone entirely past twice the default
+        // amplitude, which is backwards. A third of the sum is a crest that
+        // actually occurs.
+        float tallest = (waveAmplitudes[0] + waveAmplitudes[1] +
+                         waveAmplitudes[2] + waveAmplitudes[3]) * waveHeightMultiplier;
+        if (tallest > 0.0) {
+            float crest = waveHeight - waterLevel;
+            totalFoam += smoothstep(tallest * 0.30, tallest * 0.55, crest) * 0.15;
+        }
+        
+        // Dynamic foam trails based on wave velocity
+        vec2 waveVelocity = vec2(dFdx(fragPosition.y), dFdy(fragPosition.y));
+        float waveSpeed = length(waveVelocity) * 100.0;
+        float velocityFoam = smoothstep(0.3, 1.0, waveSpeed) * 0.12;
+        
+        // Foam persistence using noise (foam lingers)
+        vec2 foamCoord = fragPosition.xz * 0.01 - time * 0.05;
+        float foamPersistence = ridgedNoise(foamCoord) * 0.08;
+        
+        // Combine foam types
+        totalFoam += velocityFoam * foamPersistence;
+        // The cap scales with the setting as well as the sum: at 1.0 this is
+        // the quarter it always was, and turning it up has to be able to show.
+        totalFoam = clamp(totalFoam * foamIntensity, 0.0, 0.25 * foamIntensity);
     }
-    
-    // Dynamic foam trails based on wave velocity
-    vec2 waveVelocity = vec2(dFdx(fragPosition.y), dFdy(fragPosition.y));
-    float waveSpeed = length(waveVelocity) * 100.0;
-    float velocityFoam = smoothstep(0.3, 1.0, waveSpeed) * 0.12;
-    
-    // Foam persistence using noise (foam lingers)
-    vec2 foamCoord = fragPosition.xz * 0.01 - time * 0.05;
-    float foamPersistence = ridgedNoise(foamCoord) * 0.08;
-    
-    // Combine foam types
-    totalFoam += velocityFoam * foamPersistence;
-    totalFoam = clamp(totalFoam, 0.0, 0.25);
     
     // GPU Gems Chapter 19: Physically accurate Fresnel for water
     float NdotV = max(dot(norm, viewDir), 0.0);

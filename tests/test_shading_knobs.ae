@@ -129,6 +129,35 @@ check_water(backend: *Backend, cam: *Camera, bright: *Light) {
     }
     water.simulation_set_amplitude(sim, 20.0)
 
+    // Foam was three constants in the shading with no way in, so a caller could
+    // not turn it down for a still lake or up for a rough sea.
+    foam_on = water_frame(backend, cam, light, sim)
+    water.simulation_set_foam(sim, false, 1.0)
+    if !moved(water_frame(backend, cam, light, sim), foam_on) {
+        println("FAIL water foam cannot be turned off")
+        failures = failures + 1
+    }
+    water.simulation_set_foam(sim, true, 8.0)
+    if !moved(water_frame(backend, cam, light, sim), foam_on) {
+        println("FAIL water foam intensity changes nothing")
+        failures = failures + 1
+    }
+    water.simulation_set_foam(sim, true, 1.0)
+
+    // Foam has to survive a rougher sea. It used to be measured against the sum
+    // of the wave amplitudes, which is what the water reaches only where all
+    // four crest together: past twice the default amplitude no pixel ever
+    // cleared the bar and foam disappeared entirely, which is backwards.
+    water.simulation_set_amplitude(sim, 80.0)
+    heavy_on = water_frame(backend, cam, light, sim)
+    water.simulation_set_foam(sim, false, 1.0)
+    if water_frame(backend, cam, light, sim) == heavy_on {
+        println("FAIL foam vanishes on a rough sea")
+        failures = failures + 1
+    }
+    water.simulation_set_foam(sim, true, 1.0)
+    water.simulation_set_amplitude(sim, 20.0)
+
     water.simulation_set_transparency(sim, 0.2)
     if water_frame(backend, cam, light, sim) == base {
         println("FAIL water transparency changes nothing")
