@@ -792,6 +792,8 @@ static int ae3d_vk_create_image(int width, int height, int mip_levels, VkFormat 
                                 VkImage *image, VkDeviceMemory *memory, VkImageView *view);
 void ae3d_vk_texture_destroy(int handle);
 
+static void ae3d_vk_destroy_shadow_target(void);
+
 static void ae3d_vk_destroy_swapchain(void) {
     unsigned i;
 
@@ -851,6 +853,7 @@ static void ae3d_vk_destroy_swapchain(void) {
         free(vk.post_framebuffers);
         vk.post_framebuffers = NULL;
     }
+    ae3d_vk_destroy_shadow_target();
     if (vk.scene_framebuffer) {
         ae3d_vkDestroyFramebuffer(vk.device, vk.scene_framebuffer, NULL);
         vk.scene_framebuffer = VK_NULL_HANDLE;
@@ -1335,6 +1338,49 @@ static int ae3d_vk_create_render_pass(void) {
 // composite pass reads it. It is registered as an ordinary texture so the
 // existing descriptor cache binds it with no second code path.
 // The map, its own depth buffer, and the sampler the main pass reads it with.
+// How many shadow targets the backend is holding. A rebuild makes a fresh one,
+// so the old one has to go with the swapchain it was built alongside; this is
+// what a test can watch to know that it did.
+static int g_shadow_targets;
+
+int ae3d_vk_live_shadow_targets(void) { return g_shadow_targets; }
+
+static void ae3d_vk_destroy_shadow_target(void) {
+    if (vk.shadow_framebuffer || vk.shadow_image) g_shadow_targets--;
+    if (vk.shadow_framebuffer) {
+        ae3d_vkDestroyFramebuffer(vk.device, vk.shadow_framebuffer, NULL);
+        vk.shadow_framebuffer = VK_NULL_HANDLE;
+    }
+    if (vk.shadow_sampler) {
+        ae3d_vkDestroySampler(vk.device, vk.shadow_sampler, NULL);
+        vk.shadow_sampler = VK_NULL_HANDLE;
+    }
+    if (vk.shadow_view) {
+        ae3d_vkDestroyImageView(vk.device, vk.shadow_view, NULL);
+        vk.shadow_view = VK_NULL_HANDLE;
+    }
+    if (vk.shadow_image) {
+        ae3d_vkDestroyImage(vk.device, vk.shadow_image, NULL);
+        vk.shadow_image = VK_NULL_HANDLE;
+    }
+    if (vk.shadow_memory) {
+        ae3d_vkFreeMemory(vk.device, vk.shadow_memory, NULL);
+        vk.shadow_memory = VK_NULL_HANDLE;
+    }
+    if (vk.shadow_depth_view) {
+        ae3d_vkDestroyImageView(vk.device, vk.shadow_depth_view, NULL);
+        vk.shadow_depth_view = VK_NULL_HANDLE;
+    }
+    if (vk.shadow_depth_image) {
+        ae3d_vkDestroyImage(vk.device, vk.shadow_depth_image, NULL);
+        vk.shadow_depth_image = VK_NULL_HANDLE;
+    }
+    if (vk.shadow_depth_memory) {
+        ae3d_vkFreeMemory(vk.device, vk.shadow_depth_memory, NULL);
+        vk.shadow_depth_memory = VK_NULL_HANDLE;
+    }
+}
+
 static int ae3d_vk_create_shadow_target(void) {
     VkSamplerCreateInfo sampler;
     VkImageView attachments[2];
@@ -1386,6 +1432,7 @@ static int ae3d_vk_create_shadow_target(void) {
     if (ae3d_vkCreateFramebuffer(vk.device, &info, NULL, &vk.shadow_framebuffer) != VK_SUCCESS) {
         return ae3d_vk_fail("shadow vkCreateFramebuffer failed");
     }
+    g_shadow_targets++;
     return 1;
 }
 
@@ -3095,14 +3142,7 @@ void ae3d_vk_shutdown(void) {
     if (vk.post_pass) ae3d_vkDestroyRenderPass(vk.device, vk.post_pass, NULL);
     if (vk.shadow_pass) ae3d_vkDestroyRenderPass(vk.device, vk.shadow_pass, NULL);
     if (vk.shadow_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.shadow_pipeline, NULL);
-    if (vk.shadow_framebuffer) ae3d_vkDestroyFramebuffer(vk.device, vk.shadow_framebuffer, NULL);
-    if (vk.shadow_sampler) ae3d_vkDestroySampler(vk.device, vk.shadow_sampler, NULL);
-    if (vk.shadow_view) ae3d_vkDestroyImageView(vk.device, vk.shadow_view, NULL);
-    if (vk.shadow_image) ae3d_vkDestroyImage(vk.device, vk.shadow_image, NULL);
-    if (vk.shadow_memory) ae3d_vkFreeMemory(vk.device, vk.shadow_memory, NULL);
-    if (vk.shadow_depth_view) ae3d_vkDestroyImageView(vk.device, vk.shadow_depth_view, NULL);
-    if (vk.shadow_depth_image) ae3d_vkDestroyImage(vk.device, vk.shadow_depth_image, NULL);
-    if (vk.shadow_depth_memory) ae3d_vkFreeMemory(vk.device, vk.shadow_depth_memory, NULL);
+    ae3d_vk_destroy_shadow_target();
     if (vk.device) ae3d_vkDestroyDevice(vk.device, NULL);
     if (vk.surface && ae3d_vkDestroySurfaceKHR) ae3d_vkDestroySurfaceKHR(vk.instance, vk.surface, NULL);
     if (vk.instance) ae3d_vkDestroyInstance(vk.instance, NULL);
