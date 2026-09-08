@@ -217,6 +217,13 @@ First working engine.
   an uneven scale, and two thousand moves went from six milliseconds of work to
   too little to measure.
 
+- A saved scene keeps its shading. Every setting lives in a model's own
+  uniforms, and the file recorded the transform, the material and the geometry
+  but none of them, so a configured scene loaded back with everything off, and
+  a model told not to cast a shadow came back casting one. The editor saves and
+  loads scenes, so a session's work did not survive the round trip. Files
+  written before this load exactly as they did.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve
