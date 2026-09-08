@@ -262,6 +262,26 @@ else
         # exactly as above, which is the point: a scene that drops a component
         # on the way through the file shows up here as a count that fell.
         check_editor_run opengl roundtrip
+
+        # Everything above reads the report the editor writes about itself, and
+        # that report comes from calling the handlers directly. A button that
+        # cannot be hit, a field whose callback is not wired, a row that does
+        # not respond to a click: all of them pass. So this presses the real
+        # widgets through aether-ui's driver and asks the tree what changed.
+        if ! command -v python3 >/dev/null 2>&1; then
+            skip "ae3d_editor (driver)" "no python3"
+        elif ! have_display; then
+            skip "ae3d_editor (driver)" "no display"
+        else
+            driver_log="$(mktemp)"
+            if python3 tools/drive_editor.py >"$driver_log" 2>&1; then
+                pass "ae3d_editor (driver)"
+            else
+                fail "ae3d_editor (driver)"
+                sed 's/^/        /' "$driver_log" | head -20
+            fi
+            rm -f "$driver_log"
+        fi
     else
         fail "ae3d_editor (build)"
         sed 's/^/        /' /tmp/ae3d_build.log | head -20

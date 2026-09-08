@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""Drive the editor through its own widgets and check what happens.
+
+Every other check on the editor reads the report it writes about itself, and
+that report is produced by calling the handlers directly. A button that is
+never hit-tested, a field whose callback is not wired, a row that cannot be
+clicked: all of them pass those checks, because none of them go anywhere near
+a widget.
+
+aether-ui's driver does. It answers /widgets with the live tree and takes
+clicks and keystrokes on any of it, so this presses the real buttons and types
+into the real fields, then asks the tree what changed.
+
+    tools/drive_editor.py [--port N] [--binary build/ae3d_editor]
+
+Exits non-zero with a line saying what failed.
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+FAILURES = []
+
+
+def check(name, ok, detail=""):
+    if ok:
+        print("   ok    %s" % name)
+    else:
+        print("   FAIL  %s%s" % (name, (" (%s)" % detail) if detail else ""))
+        FAILURES.append(name)
+
+
+def get(port, path, tries=40):
+    last = None
+    for _ in range(tries):
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:%d%s" % (port, path),
+                                        timeout=3) as r:
+                return json.loads(r.read().decode())
+        except Exception as e:            # the window takes a moment to exist
+            last = e
+            time.sleep(0.5)
+    raise SystemExit("editor driver never answered %s: %s" % (path, last))
+
+
+def post(port, path):
+    req = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path),
+                                 data=b"", method="POST")
+    with urllib.request.urlopen(req, timeout=3) as r:
+        return r.read()
+
+
+def tree(port):
+    return {w["id"]: w for w in get(port, "/widgets")}
+
+
+def find(widgets, kind, text):
+    for w in widgets.values():
+        if w["type"] == kind and w["text"].strip() == text:
+            return w["id"]
+    return None
+
+
+def rows_under(widgets, parent_id):
+    return [w for w in widgets.values() if w["parent"] == parent_id]
+
+
+def scene_list_id(widgets):
+    # The hierarchy sits directly under the SCENE heading, and the heading and
+    # the list share a parent. Found by structure rather than by a fixed id,
+    # because ids move whenever the panel gains a widget.
+    for w in widgets.values():
+        if w["type"] == "text" and w["text"].strip() == "SCENE":
+            siblings = [s for s in widgets.values() if s["parent"] == w["parent"]]
+            after = [s for s in siblings if s["id"] > w["id"]]
+            for s in sorted(after, key=lambda s: s["id"]):
+                if s["type"] in ("vstack", "listbox"):
+                    return s["id"]
+    return None
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--port", type=int, default=8791)
+    ap.add_argument("--binary", default="build/ae3d_editor")
+    args = ap.parse_args()
+
+    env = dict(os.environ)
+    env["AETHER_UI_TEST_PORT"] = str(args.port)
+    # Long enough that the run outlives this script; it is killed at the end.
+    env["AE3D_EDITOR_FRAMES"] = "100000"
+    editor = subprocess.Popen([args.binary], env=env,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        widgets = tree(args.port)
+
+        scene = scene_list_id(widgets)
+        if scene is None:
+            raise SystemExit("could not find the scene list in the widget tree")
+        before = len(rows_under(widgets, scene))
+
+        # A button, pressed where a person would press it.
+        cube = find(widgets, "button", "Cube")
+        check("the Cube button is in the tree", cube is not None)
+        if cube is not None:
+            post(args.port, "/widget/%d/click" % cube)
+            time.sleep(1.0)
+            widgets = tree(args.port)
+            after = len(rows_under(widgets, scene))
+            check("clicking Cube adds an object", after == before + 1,
+                  "%d rows before, %d after" % (before, after))
+
+        # A number field, typed into. The value has to reach the model, which
+        # is only proved by selecting away and back: what comes back is the
+        # model's own formatting, not the text that was typed.
+        fields = sorted([w for w in widgets.values() if w["type"] == "textfield"],
+                        key=lambda w: (w["y"], w["x"]))
+        check("the inspector has number fields", len(fields) >= 4)
+        if fields:
+            x_field = fields[0]["id"]
+            post(args.port, "/widget/%d/set_text?v=-150.0" % x_field)
+            time.sleep(0.6)
+            typed = tree(args.port)[x_field]["text"]
+            check("the field takes what is typed", typed == "-150.0", repr(typed))
+
+            rows = sorted(rows_under(tree(args.port), scene), key=lambda w: w["id"])
+            if len(rows) >= 2:
+                post(args.port, "/widget/%d/click" % rows[0]["id"])
+                time.sleep(0.6)
+                other = tree(args.port)[x_field]["text"]
+                check("selecting another object rereads the field",
+                      other != "-150.0", repr(other))
+
+                post(args.port, "/widget/%d/click" % rows[-1]["id"])
+                time.sleep(0.6)
+                back = tree(args.port)[x_field]["text"]
+                # number() writes two decimals; "-150.0" is what was typed.
+                check("what was typed reached the model", back == "-150.00",
+                      repr(back))
+    finally:
+        editor.terminate()
+        try:
+            editor.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            editor.kill()
+
+    if FAILURES:
+        print("editor driver: %d failure(s)" % len(FAILURES))
+        return 1
+    print("editor driver: all checks passed")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
