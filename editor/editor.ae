@@ -142,6 +142,19 @@ var g_fields: ptr = null
 // control under it is worse than either: the water section read as four
 // stranded words with no heading above them.
 var g_row_frames: ptr = null
+// CRITICAL: a model, its component and its script live at the same index in
+// three lists, and anything that moves a model has to move all three. Removing
+// one from the models alone leaves every component after it answering for the
+// wrong object: deleting a cube made the editor stop believing its water was
+// water, so the inspector hid the water section and update_water drove the
+// wrong simulation.
+//
+// What a detached model takes with it is kept rather than dropped, because an
+// undone delete has to bring back the object's simulation and its script, not
+// a bare mesh.
+var g_detached_models: ptr = null
+var g_detached_components: ptr = null
+var g_detached_scripts: ptr = null
 // The row whose field the user is typing in. Echoing a parsed value back into
 // the field being edited rewrites it under the caret, which is what makes a
 // numeric field impossible to type into.
@@ -727,7 +740,7 @@ remove_selected() {
 
     backend = viewport_backend()
     core.backend_remove_model(&backend, m)
-    list.remove(g_models, g_selected)
+    detach_at(g_selected)
     history.history_record(g_history, history.STEP_REMOVE, m as ptr, 0, 0.0, 0.0)
 
     g_selected = g_selected - 1
@@ -1508,9 +1521,46 @@ attach_model(m: *Model) {
     if m == null { return }
     backend = viewport_backend()
     core.backend_add_model(&backend, m)
-    list.add_raw(g_models, m)
+    if !reattach(m as ptr) {
+        list.add_raw(g_models, m)
+        list.add_raw(g_components,
+                     behaviour.component_new(core.text(m.name), behaviour.KIND_MESH, null))
+        list.add_raw(g_scripts, index_handle(SCRIPT_NONE))
+    }
     rebuild_rows()
     select_object(list.size(g_models) - 1)
+}
+
+// Takes the model out of all three lists at once and sets aside what it was
+// carrying, so putting it back is possible.
+detach_at(index: int) {
+    if index < 0 || index >= list.size(g_models) { return }
+    list.add_raw(g_detached_models, list.get_raw(g_models, index))
+    list.add_raw(g_detached_components, list.get_raw(g_components, index))
+    list.add_raw(g_detached_scripts, list.get_raw(g_scripts, index))
+    list.remove(g_models, index)
+    list.remove(g_components, index)
+    list.remove(g_scripts, index)
+}
+
+// Puts back what detach_at set aside. False when the model was never detached,
+// which is a model the caller has to give a component of its own.
+reattach(m: ptr) -> bool {
+    count = list.size(g_detached_models)
+    i = 0
+    while i < count {
+        if list.get_raw(g_detached_models, i) == m {
+            list.add_raw(g_models, m)
+            list.add_raw(g_components, list.get_raw(g_detached_components, i))
+            list.add_raw(g_scripts, list.get_raw(g_detached_scripts, i))
+            list.remove(g_detached_models, i)
+            list.remove(g_detached_components, i)
+            list.remove(g_detached_scripts, i)
+            return true
+        }
+        i = i + 1
+    }
+    return false
 }
 
 detach_model(m: *Model) {
@@ -1521,7 +1571,7 @@ detach_model(m: *Model) {
     i = 0
     while i < count {
         if list.get_raw(g_models, i) == m as ptr {
-            list.remove(g_models, i)
+            detach_at(i)
             rebuild_rows()
             if g_selected >= list.size(g_models) { g_selected = list.size(g_models) - 1 }
             select_object(g_selected)
@@ -2132,6 +2182,15 @@ clear_scene() {
         free(list.get_raw(g_scripts, 0))
         list.remove(g_scripts, 0)
     }
+    // Anything undo was still holding on to goes with the scene it belonged to.
+    while list.size(g_detached_models) > 0 {
+        core.model_free(list.get_raw(g_detached_models, 0) as *Model)
+        list.remove(g_detached_models, 0)
+        behaviour.component_free(list.get_raw(g_detached_components, 0) as *Component)
+        list.remove(g_detached_components, 0)
+        free(list.get_raw(g_detached_scripts, 0))
+        list.remove(g_detached_scripts, 0)
+    }
     g_selected = 0 - 1
     rebuild_rows()
 }
@@ -2580,6 +2639,9 @@ main() {
     g_readouts = calloc(ROWS, 4)
     g_fields = calloc(ROWS, 4)
     g_row_frames = calloc(ROWS, 4)
+    g_detached_models = list.new()
+    g_detached_components = list.new()
+    g_detached_scripts = list.new()
     g_console = calloc(CONSOLE_LINES, 4)
     g_history = history.history_new()
     g_helpers = list.new()
