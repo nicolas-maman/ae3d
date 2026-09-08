@@ -329,6 +329,14 @@ First working engine.
   height can now be set after it is built, which rebuilds the table it is
   derived from.
 
+- Nine inspector rows do something. Every row from nine up was caught by the
+  light branch, which wrote only intensity and ambient, so wave height, wave
+  speed, transparency, the light's three colour channels and the camera's field
+  of view, near and far plane all recorded an undo step, moved their own
+  readout, and changed nothing. They are dispatched by what they control, the
+  camera rows are implemented, and the editor's report says how many rows
+  cannot move their target so the run fails when one of them cannot.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve

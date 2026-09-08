@@ -170,6 +170,11 @@ check_editor_run() {
          [ "$(sed -n 's/^scripted //p' "$report")" != "1" ]; then
         fail "$name (component types did not build)"
         sed 's/^/        /' "$report"
+    elif [ "$(sed -n 's/^stuck_rows //p' "$report")" != "0" ]; then
+        # A row that records an undo step and moves its own readout looks exactly
+        # like a row that works. Nine of them did that and nothing else.
+        fail "$name ($(sed -n 's/^stuck_rows //p' "$report") inspector row(s) change nothing)"
+        sed 's/^/        /' "$report"
     elif grep -q '^selected none$' "$report"; then
         fail "$name (nothing selected)"
         sed 's/^/        /' "$report"
