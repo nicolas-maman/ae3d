@@ -12,6 +12,7 @@ import std.json
 import std.string
 import ae3d.core
 import ae3d.loader
+import ae3d.shaders
 
 exports (
     scene_save, scene_load, scene_load_lights, scene_free, last_error
@@ -26,6 +27,9 @@ extern ae3d_meshfile_error() -> string
 extern ae3d_mesh_destroy(mesh: ptr)
 extern ae3d_inst_destroy(instances: ptr)
 extern ae3d_inst_count(instances: ptr) -> int
+extern ae3d_farr_count(arr: ptr) -> int
+extern ae3d_farr_get(arr: ptr, i: int) -> float
+extern ae3d_farr_set(arr: ptr, i: int, v: float)
 
 var g_error = ""
 var g_error_owned = false
@@ -59,8 +63,9 @@ quat_json(q: Quat) -> ptr {
 
 // A model's own uniforms are where every shading setting lives, so a scene that
 // leaves them out loads back looking nothing like the one that was saved. The
-// arrays a water surface carries are rebuilt by the simulation that owns it and
-// are not written here.
+// array uniforms go too: they were skipped on the reasoning that the simulation
+// that owns them rebuilds them, but a loaded scene has no simulation, so a
+// water surface came back with no wave table at all.
 // A scene is what the renderer draws, and half of that is how it is lit.
 light_json(l: *Light) -> ptr {
     out = json.obj()
@@ -139,11 +144,20 @@ uniforms_json(m: *Model) -> ptr {
     i = 0
     while i < count {
         u = core.model_uniform(m, i)
-        if u != null && u.array == null {
+        if u != null {
             entry = json.obj()
             json.object_set_raw(entry, "name", json.str(u.name))
             json.object_set_raw(entry, "kind", json.from_int(u.kind))
-            if u.kind == core.UNIFORM_FLOAT {
+            if u.array != null {
+                values = json.arr()
+                n = ae3d_farr_count(u.array)
+                k = 0
+                while k < n {
+                    json.array_add_raw(values, json.num(ae3d_farr_get(u.array, k)))
+                    k = k + 1
+                }
+                json.object_set_raw(entry, "values", values)
+            } else if u.kind == core.UNIFORM_FLOAT {
                 json.object_set_raw(entry, "value", json.num(u.number))
             } else if u.kind == core.UNIFORM_INT {
                 json.object_set_raw(entry, "value", json.from_int(u.integer))
@@ -157,6 +171,15 @@ uniforms_json(m: *Model) -> ptr {
     return out
 }
 
+// A named shader rebuilt from the kind the scene recorded. An unknown kind
+// gets no shader rather than a wrong one: a file written by a newer version
+// names a shader this build does not have, and drawing it with something else
+// would be a silent substitution.
+shader_for(kind: int) -> Shader {
+    if kind == core.SHADER_WATER { return shaders.water_shader() }
+    return core.shader_new("", "")
+}
+
 load_uniforms(m: *Model, node: ptr) {
     if node == null { return }
     count = json.array_size(node)
@@ -166,8 +189,18 @@ load_uniforms(m: *Model, node: ptr) {
         if entry != null {
             name = field_string(entry, "name")
             kind = field_int(entry, "kind", core.UNIFORM_FLOAT)
+            values = json.object_get_raw(entry, "values")
             value = json.object_get_raw(entry, "value")
-            if name != "" && value != null {
+            if name != "" && values != null {
+                n = json.array_size(values)
+                into = core.model_set_uniform_array(m, name, n,
+                                                    kind == core.UNIFORM_VEC3_ARRAY)
+                k = 0
+                while k < n {
+                    ae3d_farr_set(into, k, number_at(values, k))
+                    k = k + 1
+                }
+            } else if name != "" && value != null {
                 if kind == core.UNIFORM_FLOAT {
                     core.model_set_uniform_float(m, name, json.get_number(value))
                 } else if kind == core.UNIFORM_INT {
@@ -277,6 +310,15 @@ scene_save(models: ptr, lights: ptr, path: string, mesh_directory: string) -> bo
             json.object_set_raw(entry, "visible", json.boolean(m.visible))
             json.object_set_raw(entry, "casts_shadow", json.boolean(m.casts_shadow))
             json.object_set_raw(entry, "uniforms", uniforms_json(m))
+            // Which shader draws it, for the named ones. The source text is not
+            // written: a scene is not the place to carry a copy of the GLSL, and
+            // a named kind is exactly what the backend picks its pipeline by.
+            // Without this a water surface loaded back as an ordinary mesh, so
+            // it was drawn by the default shader with the whole wave table sat
+            // on it unread.
+            if core.shader_valid(&m.shader) && m.shader.kind != core.SHADER_CUSTOM {
+                json.object_set_raw(entry, "shader", json.from_int(m.shader.kind))
+            }
 
             if m.material != null {
                 json.object_set_raw(entry, "material", material_json(m.material))
@@ -421,6 +463,10 @@ load_entry(entry: ptr) -> *Model {
     if casts != null { m.casts_shadow = json.get_bool(casts) == 1 }
 
     load_uniforms(m, json.object_get_raw(entry, "uniforms"))
+    shader_kind = json.object_get_raw(entry, "shader")
+    if shader_kind != null {
+        core.model_set_shader(m, shader_for(json.get_int(shader_kind)))
+    }
 
     apply_material(m, json.object_get_raw(entry, "material"))
 
