@@ -478,6 +478,9 @@ renderer_add_model(r: *VKRenderer, m: *Model) {
         return
     }
     m.vbo = handle
+    // Building a mesh marks it dirty, and what was just uploaded is not an edit
+    // waiting to be sent.
+    ae3d_mesh_clear_dirty(m.mesh)
 
     if m.is_instanced && core.model_instance_count(m) > 0 {
         m.instance_vbo = ae3d_vk_upload_instances(m.instances)
@@ -578,6 +581,19 @@ apply_shading(r: *VKRenderer, m: *Model, program: int) {
         ready[program] = 1
     }
     if m != null { set_model_uniforms(m) }
+}
+
+// A mesh edited after the model was registered. Identical geometry is uploaded
+// once and shared by everything built from it, so the old handle is let go and
+// the new shape uploaded on its own: writing over the shared one would reshape
+// every other model drawing what this one used to be.
+refresh_geometry(m: *Model) {
+    if m.vbo == 0 || ae3d_mesh_dirty(m.mesh) != 1 { return }
+
+    ae3d_vk_free_mesh(m.vbo)
+    m.vbo = ae3d_vk_upload_mesh(m.mesh)
+    ae3d_mesh_clear_dirty(m.mesh)
+    core.model_recalculate_bounds(m)
 }
 
 set_scene_uniforms(r: *VKRenderer, m: *Model) {
@@ -893,6 +909,7 @@ draw_model(r: *VKRenderer, m: *Model, transparent_pass: bool) {
     if core.shader_valid(&m.shader) { program = m.shader.kind }
     ae3d_vk_set_program(program)
 
+    refresh_geometry(m)
     set_scene_uniforms(r, m)
     blend = 0
     if is_transparent { blend = 1 }

@@ -277,6 +277,13 @@ First working engine.
   uniforms, but not the model's own shader, so a copy quietly fell back to the
   default program.
 
+- A mesh reshaped after its model was drawn reaches the GPU. The setters that
+  move a vertex marked the mesh dirty and nothing read the flag, on either
+  backend, so anything deforming geometry on the CPU asked for something the
+  engine accepted and never did. Identical geometry is uploaded once and shared,
+  so a model whose vertices have moved stops sharing before its new shape goes
+  up, rather than reshaping everything else drawing what it used to be.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve
