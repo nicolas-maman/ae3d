@@ -129,6 +129,16 @@ First working engine.
 
 ### Fixes
 
+- A colour set on a model loaded from a file was silently dropped. A loaded
+  model is drawn group by group, and a group carries a material only when the
+  file gave it one: an OBJ whose `mtllib` line is commented out, or which names
+  a material no `.mtl` defines, produces groups with none. Those were drawn
+  white and the model's own material, the only one a caller can set from
+  outside, was never consulted, so `model_set_diffuse`, `model_polished_metal`
+  and the rest did nothing on anything loaded from disk. A group without a
+  material of its own now uses the model's. `examples/models.ae` set a gold
+  metal and a blue and rendered both in the same cream.
+
 - The water's `transparency` was its opacity: the number went straight into the
   surface's alpha, where 1.0 hides what is behind it. Every caller that set it
   high to see through the water was making the water opaque, and the caustics
