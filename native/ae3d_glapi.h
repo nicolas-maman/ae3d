@@ -128,6 +128,11 @@ typedef ptrdiff_t     GLsizeiptr;
 #define GL_DEPTH_STENCIL_ATTACHMENT 0x821A
 #define GL_DEPTH24_STENCIL8     0x88F0
 #define GL_FRAMEBUFFER_COMPLETE 0x8CD5
+#define GL_DEPTH_ATTACHMENT     0x8D00
+#define GL_DEPTH_COMPONENT      0x1902
+#define GL_DEPTH_COMPONENT32F   0x8CAC
+#define GL_TEXTURE_COMPARE_MODE 0x884C
+#define GL_NONE                 0
 
 #define GL_DEPTH_CLAMP 0x864F
 
@@ -209,7 +214,9 @@ typedef ptrdiff_t     GLsizeiptr;
     X(void, glBlitFramebuffer, (GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLint dx0, GLint dy0, GLint dx1, GLint dy1, GLbitfield mask, GLenum filter)) \
     X(void, glFramebufferRenderbuffer, (GLenum target, GLenum attachment, GLenum rbtarget, GLuint renderbuffer)) \
     X(void, glDeleteRenderbuffers, (GLsizei n, const GLuint *renderbuffers)) \
-    X(void, glReadPixels, (GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, void *pixels))
+    X(void, glReadPixels, (GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, void *pixels)) \
+    X(void, glDrawBuffer, (GLenum buf)) \
+    X(void, glReadBuffer, (GLenum src))
 
 #define AE3D_GL_DECL(ret, name, args) typedef ret (*ae3d_pfn_##name) args; extern ae3d_pfn_##name ae3d_##name;
 AE3D_GL_FUNCS(AE3D_GL_DECL)
@@ -295,5 +302,7 @@ int ae3d_glapi_load(void);
 #define glFramebufferRenderbuffer  ae3d_glFramebufferRenderbuffer
 #define glDeleteRenderbuffers      ae3d_glDeleteRenderbuffers
 #define glReadPixels               ae3d_glReadPixels
+#define glDrawBuffer               ae3d_glDrawBuffer
+#define glReadBuffer               ae3d_glReadBuffer
 
 #endif
