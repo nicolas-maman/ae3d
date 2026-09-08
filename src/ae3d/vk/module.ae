@@ -761,10 +761,13 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     }
     ae3d_vk_set_program(core.SHADER_CUSTOM)
 
-    if core.frustum_culling() && core.frustum_dirty() {
-        core.camera_fill_frustum(cam, r.frustum)
-        core.clear_frustum_dirty()
-    }
+    // Filled from this camera every frame rather than cached behind a flag. The
+    // flag was one boolean for the whole program while the frustum it guarded
+    // belongs to a renderer, so a second camera drawing after a first was culled
+    // against the first camera's frustum: the flag was already clear and nothing
+    // refilled. A minimap, a reflection or a second viewport is exactly that.
+    // Six planes out of one matrix multiply is not worth a cache.
+    if core.frustum_culling() { core.camera_fill_frustum(cam, r.frustum) }
 
     draw_opaque(r)
 
