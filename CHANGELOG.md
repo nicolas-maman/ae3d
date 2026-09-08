@@ -224,6 +224,13 @@ First working engine.
   loads scenes, so a session's work did not survive the round trip. Files
   written before this load exactly as they did.
 
+- A saved scene keeps its lights. The file recorded models and nothing else, so
+  the editor's sun, whose intensity, ambient strength and colour it lets you
+  set, came back at its defaults after a save and a load, with nothing said
+  about it. `scene_save` takes the lights alongside the models and
+  `scene_load_lights` hands them back; a file written before this has none
+  recorded, and the scene keeps whatever it was already lighting with.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve

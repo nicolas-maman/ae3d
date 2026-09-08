@@ -116,7 +116,16 @@ main() {
     source_indices = core.mesh_index_count(generated.mesh)
     source_instances = core.model_instance_count(blocks)
 
-    if !scene.scene_save(models, scene_path, directory) {
+    // A scene is what the renderer draws, and half of that is how it is lit.
+    lights = list.new()
+    sun = core.light_sun(core.vec3(0.3, 0.8, 0.5))
+    sun.intensity = 2.75
+    sun.ambient_strength = 0.42
+    sun.color = core.vec3(0.9, 0.8, 0.6)
+    core.light_set_name(sun, "key")
+    list.add_raw(lights, sun)
+
+    if !scene.scene_save(models, lights, scene_path, directory) {
         record_failure("saved: ${scene.last_error()}")
     }
     check_true("scene file exists", fs.exists(scene_path) == 1)
@@ -128,6 +137,20 @@ main() {
         return
     }
     check_int("model count", list.size(restored), 3)
+
+    beams = scene.scene_load_lights(scene_path)
+    check_true("the scene came back with its lights", beams != null)
+    if beams != null {
+        check_int("light count", list.size(beams), 1)
+        back_sun = list.get_raw(beams, 0) as *Light
+        check_near("light intensity", back_sun.intensity, 2.75)
+        check_near("light ambient", back_sun.ambient_strength, 0.42)
+        check_near("light colour g", back_sun.color.y, 0.8)
+        check_near("light direction y", back_sun.direction.y, sun.direction.y)
+        check_true("light name", back_sun.name == "key")
+        core.light_free(back_sun)
+        list.free(beams)
+    }
 
     back_loaded = list.get_raw(restored, 0) as *Model
     check_near("position x", back_loaded.position.x, 3.0)
@@ -177,6 +200,8 @@ main() {
 
     scene.scene_free(restored)
     list.free(models)
+    list.free(lights)
+    core.light_free(sun)
     core.model_free(loaded)
     core.model_free(generated)
     core.model_free(blocks)
