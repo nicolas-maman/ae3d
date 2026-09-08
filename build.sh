@@ -21,7 +21,22 @@ OBJ_DIR="build/obj"
 
 mkdir -p build "$OBJ_DIR"
 
+# `cc` first, then the names a Windows toolchain actually ships. MSYS2's
+# mingw64 has a `cc`; WinLibs, which the Aether installer downloads onto a
+# Windows box with no compiler, does not, so defaulting to `cc` alone failed
+# before reaching the link with a message about the wrong thing.
+if [ -n "${CC:-}" ]; then
+    :
+else
+    for candidate in cc gcc clang; do
+        if command -v "$candidate" >/dev/null 2>&1; then CC="$candidate"; break; fi
+    done
+fi
 CC="${CC:-cc}"
+if ! command -v "$CC" >/dev/null 2>&1; then
+    echo "ae3d: no C compiler found (tried \$CC, cc, gcc, clang)" >&2
+    exit 1
+fi
 AETHERC="${AETHERC:-aetherc}"
 CFLAGS="${CFLAGS:--O2}"
 WARN="-Wall -Wextra"
@@ -56,11 +71,8 @@ elif [ -n "${VULKAN_SDK:-}" ]; then
     VULKAN_CFLAGS="-I$VULKAN_SDK/include"
 fi
 
-case "$(uname -s)" in
-    Darwin) PLATFORM_LIBS="-framework Cocoa -framework IOKit -framework CoreVideo -framework QuartzCore -framework Metal -framework OpenGL" ;;
-    Linux)  PLATFORM_LIBS="-ldl -lm -lpthread" ;;
-    *)      PLATFORM_LIBS="-lm" ;;
-esac
+. "$ROOT/scripts/platform.sh"
+PLATFORM_LIBS="$(ae3d_platform_libs "$(uname -s)")"
 
 NATIVE_SOURCES="native/ae3d_glapi.c native/ae3d_platform.c native/ae3d_mesh.c native/ae3d_meshfile.c native/ae3d_image.c native/ae3d_gl.c native/ae3d_offscreen.c native/ae3d_vk.c"
 if [ "$(uname -s)" = "Darwin" ]; then
@@ -89,5 +101,11 @@ done
 
 "$AETHERC" "$SOURCE" "$GEN"
 "$CC" $CFLAGS "$GEN" $OBJ_DIR/*.o $AETHER_INCLUDES $AETHER_LIBS $GLFW_LIBS $PLATFORM_LIBS -o "$OUT"
+
+# MinGW gcc appends .exe to an output name that has no extension, so the file
+# is not at the path this asked for. Name the one that exists.
+if [ ! -f "$OUT" ] && [ -f "$OUT.exe" ]; then
+    OUT="$OUT.exe"
+fi
 
 echo "built: $OUT"

@@ -24,11 +24,39 @@ skip() { printf '   skip  %s (%s)\n' "$1" "$2"; skipped=$((skipped + 1)); }
 have_display() {
     case "$(uname -s)" in
         Darwin) return 0 ;;
+        MINGW*|MSYS*|CYGWIN*|Windows_NT) return 0 ;;
         *) [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ] ;;
     esac
 }
 
+step "platform link libraries"
+# Every host this can be built on, checked from any host. Windows had no arm
+# at all and the catch-all's -lm cannot link an OpenGL program, so ae3d could
+# not be linked there however complete the install was (#80). A missing arm is
+# invisible from the machine that does not need it, which is why this runs
+# everywhere rather than only where it applies.
+. "$ROOT/scripts/platform.sh"
+check_platform() {   # check_platform <uname> <library that must be there>
+    libs="$(ae3d_platform_libs "$1")"
+    case "$libs" in
+        *"$2"*) pass "uname=$1 links $2" ;;
+        *)      fail "uname=$1 does not link $2 (got: $libs)" ;;
+    esac
+}
+check_platform Darwin            "-framework OpenGL"
+check_platform Linux             "-ldl"
+check_platform MINGW64_NT-10.0   "-lopengl32"
+check_platform MINGW64_NT-10.0   "-lgdi32"
+check_platform MSYS_NT-10.0      "-lopengl32"
+check_platform Windows_NT        "-lopengl32"
+
 step "native layer, warnings as errors"
+# Same compiler search as build.sh: a Windows toolchain need not ship `cc`.
+if [ -z "${CC:-}" ]; then
+    for candidate in cc gcc clang; do
+        if command -v "$candidate" >/dev/null 2>&1; then CC="$candidate"; break; fi
+    done
+fi
 CC="${CC:-cc}"
 GLFW_CFLAGS="$(pkg-config --cflags glfw3 2>/dev/null || true)"
 VULKAN_CFLAGS=""
