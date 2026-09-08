@@ -304,6 +304,13 @@ First working engine.
   pull request. It was two runners a change for work `./ci.sh` does on the
   machine the change was written on.
 
+- A water setting takes effect when it is set. Every one of them wrote a field
+  that only `simulation_apply` copied into the uniforms the shader reads, and
+  that ran once, from `simulation_build`: colour, transparency, wave height,
+  wave speed, randomness, caustics, reflection, shadow, distortion and normal
+  strength all did nothing once the surface existed, which is why the editor's
+  water sliders moved nothing at all.
+
 ### Portability
 
 - The renderer asks the driver whether it really performs a multisample resolve
