@@ -818,3 +818,36 @@ int ae3d_gl_read_pixel(int x, int y) {
 int ae3d_gl_fbo_complete(void) {
     return glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
 }
+
+// The frame on screen, written out as a PNG.
+//
+// Read from whatever framebuffer is bound, which for a windowed program between
+// its last draw and its buffer swap is the finished frame. GL hands back rows
+// bottom-up and every image format wants them the other way, so the copy out
+// walks them backwards; it had to be copied anyway to add the row filter bytes.
+int ae3d_gl_snapshot(const char *path, int width, int height) {
+    unsigned char *pixels = NULL;
+    unsigned char *flipped = NULL;
+    size_t row_bytes;
+    int y, ok;
+
+    if (!path || width <= 0 || height <= 0) return 0;
+    row_bytes = (size_t)width * 4;
+
+    pixels = (unsigned char *)malloc(row_bytes * (size_t)height);
+    if (!pixels) return 0;
+    flipped = (unsigned char *)malloc(row_bytes * (size_t)height);
+    if (!flipped) { free(pixels); return 0; }
+
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    for (y = 0; y < height; y++) {
+        memcpy(flipped + row_bytes * (size_t)y,
+               pixels + row_bytes * (size_t)(height - 1 - y), row_bytes);
+    }
+
+    ok = ae3d_png_write(path, flipped, width, height);
+    free(flipped);
+    free(pixels);
+    return ok;
+}

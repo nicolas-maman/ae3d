@@ -463,6 +463,16 @@ First working engine.
 - Main loop with a fixed-step accumulator, frame pacing and `AE3D_FRAMES`,
   which caps any program at a frame count so every example is also a smoke test.
 
+### Tooling
+
+- `AE3D_SNAPSHOT=<path>` writes the last frame of a bounded run to a PNG, so
+  any program built on the engine can be looked at rather than only run.
+  Running an example proves it does not crash and counting its draws proves it
+  asked for something; neither says what came out, and an example rendering a
+  flat wash of one colour exits zero with the same draw count as one rendering
+  the scene it is named after. zlib does the compression, which the build
+  already links, so what was added is the chunk framing PNG puts around it.
+
 ### Editor
 
 - The material colour is a painted chip beside the hex, not hex alone. The
