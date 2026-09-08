@@ -90,11 +90,13 @@ typedef struct {
 #define AE3D_VK_OFF_LIGHTINTENSITY 1388
 #define AE3D_VK_OFF_WATERBASECOLOR 1392
 #define AE3D_VK_OFF_WATERTRANSPARENCY 1404
-#define AE3D_VK_OFF_WATERPLANEHEIGHT 1408
-#define AE3D_VK_OFF_WATERLEVEL 1412
-#define AE3D_VK_OFF_ENABLEFOG 1416
-#define AE3D_VK_OFF_FOGSTART 1420
-#define AE3D_VK_OFF_FOGEND 1424
+#define AE3D_VK_OFF_ENABLEFOAM 1408
+#define AE3D_VK_OFF_FOAMINTENSITY 1412
+#define AE3D_VK_OFF_WATERPLANEHEIGHT 1416
+#define AE3D_VK_OFF_WATERLEVEL 1420
+#define AE3D_VK_OFF_ENABLEFOG 1424
+#define AE3D_VK_OFF_FOGSTART 1428
+#define AE3D_VK_OFF_FOGEND 1432
 #define AE3D_VK_OFF_FOGCOLOR 1440
 #define AE3D_VK_OFF_FOGINTENSITY 1452
 #define AE3D_VK_OFF_SKYCOLOR 1456
@@ -142,7 +144,8 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "enableCaustics", 756 },
     { "enableClearcoat", 604 },
     { "enableEnergyConservation", 652 },
-    { "enableFog", 1416 },
+    { "enableFoam", 1408 },
+    { "enableFog", 1424 },
     { "enableGlobalIllumination", 700 },
     { "enableImageBasedLighting", 656 },
     { "enableMultipleScattering", 648 },
@@ -156,10 +159,11 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "enableWaterNormalMapping", 1500 },
     { "enableWaterReflection", 1484 },
     { "exposure", 596 },
+    { "foamIntensity", 1412 },
     { "fogColor", 1440 },
-    { "fogEnd", 1424 },
+    { "fogEnd", 1432 },
     { "fogIntensity", 1452 },
-    { "fogStart", 1420 },
+    { "fogStart", 1428 },
     { "giBounces", 708 },
     { "giIntensity", 704 },
     { "hasShadowMap", 728 },
@@ -204,9 +208,9 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "volumetricSteps", 672 },
     { "waterBaseColor", 1392 },
     { "waterDistortionIntensity", 1496 },
-    { "waterLevel", 1412 },
+    { "waterLevel", 1420 },
     { "waterNormalIntensity", 1504 },
-    { "waterPlaneHeight", 1408 },
+    { "waterPlaneHeight", 1416 },
     { "waterReflectionIntensity", 1488 },
     { "waterTransparency", 1404 },
     { "waveAmplitudes", 1024 },
@@ -220,7 +224,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "waveSteepness", 1280 },
 };
 
-#define AE3D_VK_UNIFORM_SLOT_COUNT 93
+#define AE3D_VK_UNIFORM_SLOT_COUNT 95
 
 static inline int ae3d_vk_uniform_offset(const char *name) {
     int low = 0;

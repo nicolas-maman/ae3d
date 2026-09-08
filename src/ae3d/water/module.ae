@@ -15,14 +15,15 @@ exports (
     simulation_set_color, simulation_set_sky_color, simulation_set_transparency,
     simulation_set_wave_height, simulation_set_amplitude, simulation_amplitude,
     simulation_set_wave_speed, simulation_set_randomness,
-    simulation_set_caustics, simulation_set_reflection, simulation_set_shadow,
+    simulation_set_caustics, simulation_set_foam, simulation_set_reflection, simulation_set_shadow,
     simulation_set_distortion, simulation_set_normal_strength,
     simulation_adopt, simulation_size,
     simulation_color_r, simulation_color_g, simulation_color_b,
     simulation_sky_r, simulation_sky_g, simulation_sky_b,
     simulation_transparency, simulation_wave_speed, simulation_wave_height,
     simulation_randomness, simulation_caustics_on, simulation_caustics_intensity,
-    simulation_caustics_scale, simulation_reflection, simulation_shadow,
+    simulation_caustics_scale, simulation_foam_on, simulation_foam_intensity,
+    simulation_reflection, simulation_shadow,
     simulation_distortion, simulation_normal
 )
 
@@ -53,6 +54,9 @@ struct Simulation {
     caustics_intensity: float
     caustics_scale: float
 
+    foam_enabled: bool
+    foam_intensity: float
+
     reflection_intensity: float
     shadow_strength: float
     distortion_strength: float
@@ -76,6 +80,10 @@ simulation_new(size: float, amplitude: float) -> *Simulation {
     w.caustics_enabled = false
     w.caustics_intensity = 0.3
     w.caustics_scale = 0.003
+    // On at the strength it was hard-coded to, so an ocean written before this
+    // looks the way it did.
+    w.foam_enabled = true
+    w.foam_intensity = 1.0
     w.reflection_intensity = 1.0
     w.shadow_strength = 0.5
     w.distortion_strength = 0.2
@@ -180,6 +188,15 @@ simulation_set_randomness(w: *Simulation, value: float) {
     w.wave_randomness = value
     settled(w)
 }
+
+simulation_set_foam(w: *Simulation, enabled: bool, intensity: float) {
+    w.foam_enabled = enabled
+    w.foam_intensity = intensity
+    settled(w)
+}
+
+simulation_foam_on(w: *Simulation) -> bool { return w.foam_enabled }
+simulation_foam_intensity(w: *Simulation) -> float { return w.foam_intensity }
 
 simulation_set_caustics(w: *Simulation, enabled: bool, intensity: float, scale: float) {
     w.caustics_enabled = enabled
@@ -312,6 +329,11 @@ simulation_apply(w: *Simulation) {
     core.model_set_uniform_float(m, "waveSpeedMultiplier", w.wave_speed_multiplier)
     core.model_set_uniform_float(m, "waveHeightMultiplier", w.wave_height)
     core.model_set_uniform_float(m, "waveRandomness", w.wave_randomness)
+
+    foam = 0
+    if w.foam_enabled { foam = 1 }
+    core.model_set_uniform_int(m, "enableFoam", foam)
+    core.model_set_uniform_float(m, "foamIntensity", w.foam_intensity)
 
     caustics = 0
     if w.caustics_enabled { caustics = 1 }
