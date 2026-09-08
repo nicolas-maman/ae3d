@@ -92,7 +92,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     vec3 lightColor;
     float lightIntensity;
     vec3 waterBaseColor;
-    float waterTransparency;
+    float waterOpacity;
     bool enableFoam;
     float foamIntensity;
     float waterPlaneHeight;
@@ -112,8 +112,8 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float waterNormalIntensity;
 };
 
-layout(location = 0) out vec4 FragColor;
-
+// Nothing to write. The depth attachment takes gl_FragCoord.z on its own, and
+// this used to put the same number into a colour buffer beside it: a second
+// full-resolution write per shadow texel that nothing read.
 void main() {
-    FragColor = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0);
 }

@@ -12,7 +12,7 @@ exports (
     Simulation, MAX_WAVES, RESOLUTION,
     simulation_new, simulation_free, simulation_model, simulation_build,
     simulation_update, simulation_apply,
-    simulation_set_color, simulation_set_sky_color, simulation_set_transparency,
+    simulation_set_color, simulation_set_sky_color, simulation_set_opacity,
     simulation_set_wave_height, simulation_set_amplitude, simulation_amplitude,
     simulation_set_wave_speed, simulation_set_randomness,
     simulation_set_caustics, simulation_set_foam, simulation_set_reflection, simulation_set_shadow,
@@ -20,7 +20,7 @@ exports (
     simulation_adopt, simulation_size,
     simulation_color_r, simulation_color_g, simulation_color_b,
     simulation_sky_r, simulation_sky_g, simulation_sky_b,
-    simulation_transparency, simulation_wave_speed, simulation_wave_height,
+    simulation_opacity, simulation_wave_speed, simulation_wave_height,
     simulation_randomness, simulation_caustics_on, simulation_caustics_intensity,
     simulation_caustics_scale, simulation_foam_on, simulation_foam_intensity,
     simulation_reflection, simulation_shadow,
@@ -45,7 +45,7 @@ struct Simulation {
     sky_g: float
     sky_b: float
 
-    transparency: float
+    opacity: float
     wave_speed_multiplier: float
     wave_height: float
     wave_randomness: float
@@ -73,7 +73,7 @@ simulation_new(size: float, amplitude: float) -> *Simulation {
     w.sky_r = 0.5
     w.sky_g = 0.7
     w.sky_b = 1.0
-    w.transparency = 0.85
+    w.opacity = 0.85
     w.wave_speed_multiplier = 1.0
     w.wave_height = 1.0
     w.wave_randomness = 0.0
@@ -122,7 +122,7 @@ simulation_color_b(w: *Simulation) -> float { return w.color_b }
 simulation_sky_r(w: *Simulation) -> float { return w.sky_r }
 simulation_sky_g(w: *Simulation) -> float { return w.sky_g }
 simulation_sky_b(w: *Simulation) -> float { return w.sky_b }
-simulation_transparency(w: *Simulation) -> float { return w.transparency }
+simulation_opacity(w: *Simulation) -> float { return w.opacity }
 simulation_wave_speed(w: *Simulation) -> float { return w.wave_speed_multiplier }
 simulation_wave_height(w: *Simulation) -> float { return w.wave_height }
 simulation_randomness(w: *Simulation) -> float { return w.wave_randomness }
@@ -136,7 +136,7 @@ simulation_normal(w: *Simulation) -> float { return w.normal_strength }
 
 // Everything the surface is told goes into the uniforms it draws from. Left to
 // build time alone, as it was, a setting made after the surface existed changed
-// a field nothing read again: the editor's wave, transparency and colour
+// a field nothing read again: the editor's wave, opacity and colour
 // controls moved nothing at all. Applying is a handful of uniform writes and
 // happens only when something is actually set.
 settled(w: *Simulation) {
@@ -157,8 +157,12 @@ simulation_set_sky_color(w: *Simulation, red: float, green: float, blue: float) 
     settled(w)
 }
 
-simulation_set_transparency(w: *Simulation, value: float) {
-    w.transparency = value
+// How much of the water is water rather than what is behind it: 1.0 hides
+// the bottom, 0.0 is glass. It goes straight into the surface's alpha, and it
+// was called transparency, which is the same number read backwards. Every
+// caller that set it high to see through the water was making it opaque.
+simulation_set_opacity(w: *Simulation, value: float) {
+    w.opacity = value
     settled(w)
 }
 
@@ -286,11 +290,11 @@ simulation_build(w: *Simulation, resolution: int) -> *Model {
     core.model_set_diffuse(m, w.color_r, w.color_g, w.color_b)
     core.model_set_pbr(m, 0.0, 0.4)
     core.model_set_exposure(m, 1.0)
-    // The shader writes waterTransparency into its alpha, so the model has to
+    // The shader writes waterOpacity into its alpha, so the model has to
     // say the same thing: a surface that claims to be opaque is drawn in the
     // opaque pass with depth writes on, and a translucent fragment blended
     // there composites a number of times that depends on depth precision.
-    core.model_set_alpha(m, w.transparency)
+    core.model_set_alpha(m, w.opacity)
     core.model_set_shader(m, shaders.water_shader())
 
     upload_wave_table(w, m)
@@ -324,8 +328,8 @@ simulation_apply(w: *Simulation) {
     if m == null { return }
 
     core.model_set_uniform_vec3(m, "waterBaseColor", core.vec3(w.color_r, w.color_g, w.color_b))
-    core.model_set_uniform_float(m, "waterTransparency", w.transparency)
-    core.model_set_alpha(m, w.transparency)
+    core.model_set_uniform_float(m, "waterOpacity", w.opacity)
+    core.model_set_alpha(m, w.opacity)
     core.model_set_uniform_float(m, "waveSpeedMultiplier", w.wave_speed_multiplier)
     core.model_set_uniform_float(m, "waveHeightMultiplier", w.wave_height)
     core.model_set_uniform_float(m, "waveRandomness", w.wave_randomness)

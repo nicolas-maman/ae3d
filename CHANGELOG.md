@@ -129,6 +129,15 @@ First working engine.
 
 ### Fixes
 
+- The water's `transparency` was its opacity: the number went straight into the
+  surface's alpha, where 1.0 hides what is behind it. Every caller that set it
+  high to see through the water was making the water opaque, and the caustics
+  example was one of them, so the example about what a surface throws onto a
+  seabed did not show its seabed. The knob is `opacity` now, from
+  `simulation_set_opacity` through the scene field and the editor row down to
+  the `waterOpacity` uniform in both backends' shaders, and the example asks
+  for clear water.
+
 - A second camera was culled against the first camera's frustum. The dirty flag
   guarding the cached frustum was one boolean for the whole program, while the
   frustum it guarded belongs to a renderer, so the first render of a frame
