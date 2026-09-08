@@ -31,13 +31,19 @@ import ae3d.terrain
 import ae3d.rendering
 
 const PANEL_LEFT = 240
-const PANEL_RIGHT = 330
+const PANEL_RIGHT = 360
 const WINDOW_W = 1480
 const WINDOW_H = 860
 const ORBIT_SPEED = 0.35
 const ZOOM_STEP = 1.12
 const DRAG_SLOP = 3.0
 const VALUE_COLUMN = 54
+// A numeric field, and the coloured axis letter that labels one inside a
+// vector row. Three of them plus their letters and gaps are what sets the
+// inspector's width.
+const FIELD_W = 78
+const VECTOR_FIELD_W = 66
+const AXIS_W = 10
 const BLOOM_THRESHOLD = 0.8
 const BLOOM_INTENSITY = 0.4
 const BUTTON_H = 28
@@ -117,6 +123,14 @@ var g_stats = 0
 var g_title = 0
 var g_sliders: ptr = null
 var g_readouts: ptr = null
+// A row is driven by exactly one control: a slider where the value is bounded
+// and a number field where it is not. Both arrays are ROWS long and a row has
+// an entry in one of them.
+var g_fields: ptr = null
+// The row whose field the user is typing in. Echoing a parsed value back into
+// the field being edited rewrites it under the caret, which is what makes a
+// numeric field impossible to type into.
+var g_typing_row = 0 - 1
 var g_row_count = 0
 
 var g_orbit_yaw = 0.0 - 55.0
@@ -399,6 +413,21 @@ slider_handle(index: int) -> int {
     return slots[index]
 }
 
+field_handle(index: int) -> int {
+    if g_fields == null || index < 0 || index >= ROWS { return 0 }
+    slots = g_fields as int[]
+    return slots[index]
+}
+
+// Whichever control this row has. A row with neither is a row that was never
+// built, which is how the self-check tells the difference between a row that
+// does nothing and a row that is not there.
+row_control(index: int) -> int {
+    handle = slider_handle(index)
+    if handle != 0 { return handle }
+    return field_handle(index)
+}
+
 readout_handle(index: int) -> int {
     if g_readouts == null || index < 0 || index >= ROWS { return 0 }
     slots = g_readouts as int[]
@@ -467,9 +496,9 @@ show_water_section(on: bool) {
     i = 0
     while i < ROWS {
         if is_water_row(i) {
-            slider = slider_handle(i)
+            control = row_control(i)
             readout = readout_handle(i)
-            if slider != 0 { ui.set_hidden(slider, hidden_flag(on)) }
+            if control != 0 { ui.set_hidden(control, hidden_flag(on)) }
             if readout != 0 { ui.set_hidden(readout, hidden_flag(on)) }
         }
         i = i + 1
@@ -530,8 +559,17 @@ refresh_light_rows() {
 show_row(index: int, value: float) {
     handle = slider_handle(index)
     if handle != 0 { ui.set_slider(handle, value) }
+    echo_row(index, value)
+}
+
+// Put a value in front of the user without moving the control it came from.
+// A slider row has a separate readout; a field row is its own readout, and is
+// left alone while it is being typed in.
+echo_row(index: int, value: float) {
     readout = readout_handle(index)
     if readout != 0 { ui.set_text(readout, number(value)) }
+    field = field_handle(index)
+    if field != 0 && index != g_typing_row { ui.set_text(field, number(value)) }
 }
 
 // listbox_select deliberately takes the same path as a row click, callback and
@@ -1118,7 +1156,7 @@ rows_that_do_nothing() -> int {
     while index < ROWS {
         wants_water = is_water_row(index)
         if wants_water && water_index >= 0 { select_object(water_index) }
-        if slider_handle(index) != 0 && !row_reaches_its_target(index) {
+        if row_control(index) != 0 && !row_reaches_its_target(index) {
             stuck = stuck + 1
         }
         if wants_water && water_index >= 0 { select_object(was_selected) }
@@ -1129,12 +1167,33 @@ rows_that_do_nothing() -> int {
     return stuck
 }
 
+// A row that applies its value but never shows it is a row the user cannot
+// read, and stuck_rows cannot see the difference: it drives apply_property
+// directly and never looks at the widget. So each field is written through the
+// same path the inspector uses and read straight back out of the control.
+blind_fields() -> int {
+    blind = 0
+    index = 0
+    while index < ROWS {
+        handle = field_handle(index)
+        if handle != 0 {
+            was = ui.get_text(handle)
+            show_row(index, 12.25)
+            if string.equals(ui.get_text(handle), "12.25") != 1 { blind = blind + 1 }
+            ui.set_text(handle, was)
+        }
+        index = index + 1
+    }
+    return blind
+}
+
 report_state() {
     // Both are read before the row check runs: it drives the inspector, which
     // asks for a repaint, and a frame drawn for the report is not a frame the
     // run was asked for.
     frames = g_frames
     stuck = rows_that_do_nothing()
+    blind = blind_fields()
     undrag = undone_gizmo_drags()
     idle = actions_that_do_nothing()
 
@@ -1169,6 +1228,8 @@ report_state() {
     lines = string.concat(lines, string.from_int(g_view_h))
     lines = string.concat(lines, "\nstuck_rows ")
     lines = string.concat(lines, string.from_int(stuck))
+    lines = string.concat(lines, "\nblind_fields ")
+    lines = string.concat(lines, string.from_int(blind))
     lines = string.concat(lines, "\nunundone_drags ")
     lines = string.concat(lines, string.from_int(undrag))
     lines = string.concat(lines, "\nidle_actions ")
@@ -1415,8 +1476,7 @@ apply_property(index: int, value: float) {
             if index == 15 { light.color = core.vec3(light.color.x, value, light.color.z) }
             if index == 16 { light.color = core.vec3(light.color.x, light.color.y, value) }
         }
-        readout = readout_handle(index)
-        if readout != 0 { ui.set_text(readout, number(value)) }
+        echo_row(index, value)
         paint_soon()
         return
     }
@@ -1430,9 +1490,14 @@ apply_property(index: int, value: float) {
             if index == 17 { core.camera_set_fov(cam, value) }
             if index == 18 { core.camera_set_near(cam, value) }
             if index == 19 { core.camera_set_far(cam, value) }
+            // A camera setter refuses a value that would divide by zero in the
+            // projection, so the row shows what the camera kept, not what it
+            // was asked for.
+            echo_row(index, camera_value(index))
+            paint_soon()
+            return
         }
-        readout = readout_handle(index)
-        if readout != 0 { ui.set_text(readout, number(value)) }
+        echo_row(index, value)
         paint_soon()
         return
     }
@@ -1448,8 +1513,7 @@ apply_property(index: int, value: float) {
             if index == 13 { water.simulation_set_transparency(sim, value) }
             if index == FOAM_ROW { water.simulation_set_foam(sim, true, value) }
         }
-        readout = readout_handle(index)
-        if readout != 0 { ui.set_text(readout, number(value)) }
+        echo_row(index, value)
         paint_soon()
         return
     }
@@ -1473,8 +1537,7 @@ apply_property(index: int, value: float) {
         i = i + 1
     }
 
-    readout = readout_handle(index)
-    if readout != 0 { ui.set_text(readout, number(value)) }
+    echo_row(index, value)
     refresh_swatch()
 
     paint_soon()
@@ -1508,6 +1571,71 @@ paint_soon() {
     draw_frame()
 }
 
+// A number typed into a field. Anything that is not a number is ignored
+// rather than read as zero, so a half-typed "-" or "1." does not slam the
+// value to nothing on the way to being finished.
+commit_field(index: int, text: string) {
+    if string.string_try_float(text) == 0 { return }
+    g_typing_row = index
+    apply_property(index, string.string_get_float(text))
+    g_typing_row = 0 - 1
+}
+
+number_field(parent: int, index: int, initial: float, width: int) -> int {
+    handle = ui.textfield(parent, "0.00") callback |text: string| {
+        commit_field(index, text)
+    }
+    ui.add_css_class(handle, "field")
+    ui.width(handle, width)
+    ui.set_text(handle, number(initial))
+    fields = g_fields as int[]
+    fields[index] = handle
+    g_row_count = g_row_count + 1
+    return handle
+}
+
+// A value with no natural end to it: a position hundreds of units out, a far
+// plane in the thousands. A slider over a range like that is a guess about how
+// far the user will ever go and a pixel is worth several units, so these get a
+// field to type into instead. Unreal, Unity and Godot all draw this control the
+// same way, and for the same reason.
+field_row(parent: int, name: string, initial: float, index: int) {
+    row = ui.hstack(parent, 8)
+    ui.add_css_class(row, "row")
+    caption = ui.text(row, name)
+    ui.add_css_class(caption, "label")
+    ui.spacer(row)
+    number_field(row, index, initial, FIELD_W)
+}
+
+// Three fields on one line with coloured axis letters, which is how every one
+// of the three editors draws a vector: it reads as one property rather than
+// three, and it costs a third of the height three labelled rows do.
+vector_row(parent: int, name: string, first: int) {
+    row = ui.hstack(parent, 4)
+    ui.add_css_class(row, "row")
+    caption = ui.text(row, name)
+    ui.add_css_class(caption, "label")
+    ui.spacer(row)
+
+    x_axis = ui.text(row, "X")
+    ui.add_css_class(x_axis, "axis-x")
+    ui.width(x_axis, AXIS_W)
+    number_field(row, first, 0.0, VECTOR_FIELD_W)
+
+    y_axis = ui.text(row, "Y")
+    ui.add_css_class(y_axis, "axis-y")
+    ui.width(y_axis, AXIS_W)
+    number_field(row, first + 1, 0.0, VECTOR_FIELD_W)
+
+    z_axis = ui.text(row, "Z")
+    ui.add_css_class(z_axis, "axis-z")
+    ui.width(z_axis, AXIS_W)
+    number_field(row, first + 2, 0.0, VECTOR_FIELD_W)
+}
+
+// A bounded value, where the whole range is meaningful and dragging across it
+// is the point: a colour channel, a roughness, a field of view.
 inspector_row(parent: int, name: string, low: float, high: float,
               initial: float, index: int) {
     row = ui.hstack(parent, 8)
@@ -1574,12 +1702,42 @@ theme() -> ptr {
     ui.st_color(sheet, "stats", 0x7F8896)
     ui.st_font_size(sheet, "stats", 11.0)
 
+    // A field is sunk into the panel rather than raised off it, so it reads as
+    // something to type into next to a button that reads as something to press.
+    ui.st_bg(sheet, "field", 0x14171C)
+    ui.st_color(sheet, "field", 0xE6E9EF)
+    ui.st_border(sheet, "field", 1.0, 0x3A4150)
+    ui.st_radius(sheet, "field", 4.0)
+    ui.st_font_family(sheet, "field", "Menlo")
+    ui.st_font_size(sheet, "field", 11.0)
+    ui.st_insets(sheet, "field", 4.0, 6.0, 4.0, 6.0)
+    ui.st_hover(sheet, "field", 0x1B1F26)
+
+    // The axis colours every 3D editor uses, so a vector row is read without
+    // looking at the letters.
+    ui.st_color(sheet, "axis-x", 0xE05252)
+    ui.st_color(sheet, "axis-y", 0x77C043)
+    ui.st_color(sheet, "axis-z", 0x4A90E2)
+    ui.st_bold(sheet, "axis-x")
+    ui.st_bold(sheet, "axis-y")
+    ui.st_bold(sheet, "axis-z")
+    ui.st_font_size(sheet, "axis-x", 10.0)
+    ui.st_font_size(sheet, "axis-y", 10.0)
+    ui.st_font_size(sheet, "axis-z", 10.0)
+
     ui.st_bg(sheet, "action", 0x2C313A)
     ui.st_color(sheet, "action", 0xD7DAE0)
     ui.st_radius(sheet, "action", 5.0)
     ui.st_insets(sheet, "action", 7.0, 12.0, 7.0, 12.0)
     ui.st_hover(sheet, "action", 0x3A4150)
     ui.st_active(sheet, "action", 0x4B5263)
+
+    ui.st_bg(sheet, "danger", 0x38262B)
+    ui.st_color(sheet, "danger", 0xE79A9A)
+    ui.st_radius(sheet, "danger", 5.0)
+    ui.st_insets(sheet, "danger", 7.0, 12.0, 7.0, 12.0)
+    ui.st_hover(sheet, "danger", 0x4C2F35)
+    ui.st_active(sheet, "danger", 0x5E383F)
 
     ui.st_bg(sheet, "primary", 0x2F6FEB)
     ui.st_color(sheet, "primary", 0xFFFFFF)
@@ -2258,6 +2416,7 @@ main() {
     g_rows = list.new()
     g_sliders = calloc(ROWS, 4)
     g_readouts = calloc(ROWS, 4)
+    g_fields = calloc(ROWS, 4)
     g_console = calloc(CONSOLE_LINES, 4)
     g_history = history.history_new()
     g_helpers = list.new()
@@ -2323,7 +2482,14 @@ main() {
 
         ui.divider(left)
         heading(left, "ADD")
-        cube_btn = ui.btn(left, "Cube") callback {
+
+        // Two to a row, grouped by what they make. Ten buttons each taking the
+        // full width of the panel is a column of identical bars you have to
+        // read top to bottom to find anything in; a grid is scanned, and the
+        // grouping is what tells you a biome is not a primitive.
+        primitives = ui.hstack(left, 6)
+        ui.add_css_class(primitives, "row")
+        cube_btn = ui.btn(primitives, "Cube") callback {
             m = loader.cube(1.0)
             core.model_set_scale(m, 34.0, 34.0, 34.0)
             core.model_set_position(m, 0.0, 20.0, 0.0)
@@ -2331,8 +2497,7 @@ main() {
             add_model(m, "cube")
         }
         style_button(cube_btn, "action")
-
-        sphere_btn = ui.btn(left, "Sphere") callback {
+        sphere_btn = ui.btn(primitives, "Sphere") callback {
             m = loader.sphere(1.0, 40, 30)
             core.model_set_scale(m, 28.0, 28.0, 28.0)
             core.model_set_position(m, 0.0, 26.0, 0.0)
@@ -2341,33 +2506,48 @@ main() {
         }
         style_button(sphere_btn, "action")
 
-        water_btn = ui.btn(left, "Water") callback { add_water() }
-        style_button(water_btn, "action")
-
-        // One button per biome: five short labels are clearer than one button
-        // and a hidden mode, and every shape the terrain module can build is
-        // reachable rather than only the first.
-        plains_btn = ui.btn(left, "Plains") callback { add_biome(terrain.PLAINS) }
-        style_button(plains_btn, "action")
-        mountains_btn = ui.btn(left, "Mountains") callback { add_biome(terrain.MOUNTAINS) }
-        style_button(mountains_btn, "action")
-        desert_btn = ui.btn(left, "Desert") callback { add_biome(terrain.DESERT) }
-        style_button(desert_btn, "action")
-        islands_btn = ui.btn(left, "Islands") callback { add_biome(terrain.ISLANDS) }
-        style_button(islands_btn, "action")
-        caves_btn = ui.btn(left, "Caves") callback { add_biome(terrain.CAVES) }
-        style_button(caves_btn, "action")
-
-        light_btn = ui.btn(left, "Light") callback { add_light() }
-        style_button(light_btn, "action")
-
-        plane_btn = ui.btn(left, "Plane") callback {
+        surfaces = ui.hstack(left, 6)
+        ui.add_css_class(surfaces, "row")
+        plane_btn = ui.btn(surfaces, "Plane") callback {
             m = loader.plane(20, 24.0)
             core.model_set_position(m, 0.0 - 228.0, 0.0, 0.0 - 228.0)
             core.model_matte(m, 0.40, 0.42, 0.46)
             add_model(m, "plane")
         }
         style_button(plane_btn, "action")
+        water_btn = ui.btn(surfaces, "Water") callback { add_water() }
+        style_button(water_btn, "action")
+
+        emitters = ui.hstack(left, 6)
+        ui.add_css_class(emitters, "row")
+        light_btn = ui.btn(emitters, "Light") callback { add_light() }
+        style_button(light_btn, "action")
+        ui.spacer(emitters)
+
+        heading(left, "TERRAIN")
+
+        // One button per biome: five short labels are clearer than one button
+        // and a hidden mode, and every shape the terrain module can build is
+        // reachable rather than only the first.
+        biomes_top = ui.hstack(left, 6)
+        ui.add_css_class(biomes_top, "row")
+        plains_btn = ui.btn(biomes_top, "Plains") callback { add_biome(terrain.PLAINS) }
+        style_button(plains_btn, "action")
+        mountains_btn = ui.btn(biomes_top, "Mountains") callback { add_biome(terrain.MOUNTAINS) }
+        style_button(mountains_btn, "action")
+
+        biomes_mid = ui.hstack(left, 6)
+        ui.add_css_class(biomes_mid, "row")
+        desert_btn = ui.btn(biomes_mid, "Desert") callback { add_biome(terrain.DESERT) }
+        style_button(desert_btn, "action")
+        islands_btn = ui.btn(biomes_mid, "Islands") callback { add_biome(terrain.ISLANDS) }
+        style_button(islands_btn, "action")
+
+        biomes_end = ui.hstack(left, 6)
+        ui.add_css_class(biomes_end, "row")
+        caves_btn = ui.btn(biomes_end, "Caves") callback { add_biome(terrain.CAVES) }
+        style_button(caves_btn, "action")
+        ui.spacer(biomes_end)
 
         ui.divider(left)
         heading(left, "ASSETS")
@@ -2389,14 +2569,15 @@ main() {
         redo_btn = ui.btn(undo_row, "Redo") callback { redo() }
         style_button(redo_btn, "action")
 
-        duplicate_btn = ui.btn(left, "Duplicate") callback { duplicate_selected() }
+        object_row = ui.hstack(left, 6)
+        ui.add_css_class(object_row, "row")
+        duplicate_btn = ui.btn(object_row, "Duplicate") callback { duplicate_selected() }
         style_button(duplicate_btn, "action")
+        delete_btn = ui.btn(object_row, "Delete") callback { remove_selected() }
+        style_button(delete_btn, "danger")
 
         frame_btn = ui.btn(left, "Frame selection") callback { focus_selection() }
         style_button(frame_btn, "action")
-
-        delete_btn = ui.btn(left, "Delete") callback { remove_selected() }
-        style_button(delete_btn, "action")
 
         scene_row = ui.hstack(left, 6)
         ui.add_css_class(scene_row, "row")
@@ -2404,7 +2585,6 @@ main() {
         style_button(save_btn, "primary")
         load_btn = ui.btn(scene_row, "Load") callback { load_scene() }
         style_button(load_btn, "action")
-        style_button(save_btn, "primary")
         ui.spacer(left)
 
         stage = ui.vstack(body, 0)
@@ -2531,10 +2711,8 @@ main() {
         ui.divider(right)
 
         heading(right, "TRANSFORM")
-        inspector_row(right, "position x", 0.0 - 400.0, 400.0, 0.0, 0)
-        inspector_row(right, "position y", 0.0 - 100.0, 400.0, 0.0, 1)
-        inspector_row(right, "position z", 0.0 - 400.0, 400.0, 0.0, 2)
-        inspector_row(right, "scale", 1.0, 160.0, 30.0, 3)
+        vector_row(right, "position", 0)
+        field_row(right, "scale", 30.0, 3)
 
         ui.divider(right)
         heading(right, "MATERIAL")
@@ -2572,8 +2750,8 @@ main() {
         ui.divider(right)
         heading(right, "CAMERA")
         inspector_row(right, "field of view", 20.0, 110.0, 60.0, 17)
-        inspector_row(right, "near plane", 0.05, 20.0, 0.1, 18)
-        inspector_row(right, "far plane", 200.0, 8000.0, 3000.0, 19)
+        field_row(right, "near plane", 0.1, 18)
+        field_row(right, "far plane", 3000.0, 19)
 
         ui.divider(right)
         heading(right, "BEHAVIOUR")

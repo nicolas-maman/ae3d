@@ -207,6 +207,12 @@ check_editor_run() {
         # like a row that works. Nine of them did that and nothing else.
         fail "$name ($(sed -n 's/^stuck_rows //p' "$report") inspector row(s) change nothing)"
         sed 's/^/        /' "$report"
+    elif [ "$(sed -n 's/^blind_fields //p' "$report")" != "0" ]; then
+        # A number field that applies its value but never shows it is a row the
+        # user cannot read, and stuck_rows cannot see it: that check drives the
+        # property directly and never looks at the control.
+        fail "$name ($(sed -n 's/^blind_fields //p' "$report") number field(s) do not show their value)"
+        sed 's/^/        /' "$report"
     elif [ "$(sed -n 's/^unundone_drags //p' "$report")" != "0" ]; then
         # A drag of the gizmo that records nothing leaves the next undo to step
         # back through whatever came before it and put that back instead.
