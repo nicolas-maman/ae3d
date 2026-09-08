@@ -62,6 +62,24 @@ else
     GLFW_LIBS="-lglfw"
 fi
 
+# native/ae3d_meshfile.c includes <zlib.h> and calls gzopen/gzread/gzclose, so
+# zlib is ours to link and always has been. It was never named here: on Linux
+# `ae cflags --libs` happens to carry -lz, because the Aether toolchain there is
+# built against zlib, and that transitive flag covered for us. A Windows Aether
+# built without zlib emits no -lz, and the link fails on every gz* call:
+#
+#   ae3d_meshfile.o: undefined reference to `gzclose'
+#
+# Depending on another project's link line for a library we use directly is the
+# actual bug; the platform only decided when it surfaced.
+if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists zlib; then
+    ZLIB_CFLAGS="$(pkg-config --cflags zlib)"
+    ZLIB_LIBS="$(pkg-config --libs zlib)"
+else
+    ZLIB_CFLAGS=""
+    ZLIB_LIBS="-lz"
+fi
+
 VULKAN_CFLAGS=""
 if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists vulkan; then
     VULKAN_CFLAGS="$(pkg-config --cflags vulkan)"
@@ -95,12 +113,12 @@ for src in $NATIVE_SOURCES; do
     extra=""
     case "$src" in *.m) extra="-fobjc-arc" ;; esac
     if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ] || [ "$newest_header" -nt "$obj" ]; then
-        "$CC" -c $CFLAGS $WARN $extra $GLFW_CFLAGS $VULKAN_CFLAGS "$src" -o "$obj"
+        "$CC" -c $CFLAGS $WARN $extra $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o "$obj"
     fi
 done
 
 "$AETHERC" "$SOURCE" "$GEN"
-"$CC" $CFLAGS "$GEN" $OBJ_DIR/*.o $AETHER_INCLUDES $AETHER_LIBS $GLFW_LIBS $PLATFORM_LIBS -o "$OUT"
+"$CC" $CFLAGS "$GEN" $OBJ_DIR/*.o $AETHER_INCLUDES $AETHER_LIBS $GLFW_LIBS $ZLIB_LIBS $PLATFORM_LIBS -o "$OUT"
 
 # MinGW gcc appends .exe to an output name that has no extension, so the file
 # is not at the path this asked for. Name the one that exists.
