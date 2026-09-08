@@ -157,6 +157,20 @@ def main():
                 # number() writes two decimals; "-150.0" is what was typed.
                 check("what was typed reached the model", back == "-150.00",
                       repr(back))
+        # A section with nothing to edit hides whole. Hiding a control and its
+        # readout but not the row leaves the caption behind, and the water
+        # settings read as four stranded words with no heading over them.
+        widgets = tree(args.port)
+        captions = [w for w in widgets.values()
+                    if w["type"] == "text" and w["text"].strip() == "wave height"]
+        check("the water section is in the tree", len(captions) == 1)
+        if captions:
+            frame = widgets.get(captions[0]["parent"])
+            check("with no water, its rows are hidden and not just their controls",
+                  frame is not None and not frame["visible"],
+                  "row %s visible=%s" % (frame["id"] if frame else "?",
+                                         frame["visible"] if frame else "?"))
+
         # Save, Load and Delete, pressed. A scene that never reaches disk and
         # a Load that brings back nothing both look like a working editor from
         # inside: the buttons return, the report is unchanged.

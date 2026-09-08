@@ -535,6 +535,12 @@ First working engine.
 
 ### Editor
 
+- A section with nothing to edit hides whole. Hiding the water settings hid
+  the heading, each slider and each readout, but not the rows holding their
+  captions, so a scene with no water in it showed `wave height`, `wave speed`,
+  `opacity` and `foam` as four stranded words with no heading above them and
+  no controls under them.
+
 - The Undo button did nothing. aether-ui exports names of its own for stepping
   the toolkit's command stack, and inside the `ui.window` block a bare call
   bound to those rather than to the editor's own, so the button stepped an
