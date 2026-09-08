@@ -89,7 +89,7 @@ typedef struct {
 #define AE3D_VK_OFF_LIGHTCOLOR 1376
 #define AE3D_VK_OFF_LIGHTINTENSITY 1388
 #define AE3D_VK_OFF_WATERBASECOLOR 1392
-#define AE3D_VK_OFF_WATERTRANSPARENCY 1404
+#define AE3D_VK_OFF_WATEROPACITY 1404
 #define AE3D_VK_OFF_ENABLEFOAM 1408
 #define AE3D_VK_OFF_FOAMINTENSITY 1412
 #define AE3D_VK_OFF_WATERPLANEHEIGHT 1416
@@ -210,9 +210,9 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "waterDistortionIntensity", 1496 },
     { "waterLevel", 1420 },
     { "waterNormalIntensity", 1504 },
+    { "waterOpacity", 1404 },
     { "waterPlaneHeight", 1416 },
     { "waterReflectionIntensity", 1488 },
-    { "waterTransparency", 1404 },
     { "waveAmplitudes", 1024 },
     { "waveDirections", 960 },
     { "waveFrequencies", 1088 },

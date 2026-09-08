@@ -93,7 +93,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     vec3 lightColor;
     float lightIntensity;
     vec3 waterBaseColor;
-    float waterTransparency;
+    float waterOpacity;
     bool enableFoam;
     float foamIntensity;
     float waterPlaneHeight;
@@ -227,7 +227,10 @@ float shadow_factor() {
     float bias = max(0.02 * (1.0 - dot(surface, toLight)), 0.005);
 
     vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0));
-    float radius = max(shadowSoftness, 0.0);
+    // At least one texel between taps. Below that the nine samples of the 3x3
+    // land on the same texel and cost nine lookups to produce what one would,
+    // and the edge is as hard as no filtering at all.
+    float radius = max(shadowSoftness, 1.0);
     float lit = 0.0;
     for (int sx = -1; sx <= 1; sx++) {
         for (int sy = -1; sy <= 1; sy++) {
