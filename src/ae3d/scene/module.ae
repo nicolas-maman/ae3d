@@ -15,11 +15,14 @@ import ae3d.core
 import ae3d.loader
 import ae3d.shaders
 import ae3d.water
+import ae3d.voxel
+import ae3d.terrain
 
 exports (
     scene_save, scene_load, scene_load_lights, scene_load_attachments,
     scene_load_view, view_defaults, View, Attachment, attachment_new,
     attachment_model, attachment_component, attachment_script, attachment_water,
+    attachment_world,
     attachments_free, scene_free, last_error
 )
 
@@ -37,6 +40,7 @@ struct Attachment {
     component: string
     script: string
     water: ptr
+    world: ptr
 }
 
 // What a scene records besides its models and lights: where the camera stood,
@@ -206,8 +210,22 @@ scene_load_attachments(path: string, models: ptr) -> ptr {
             water.simulation_adopt(w, m)
             sim = w
         }
-        if component != "" || script != "" || sim != null {
-            list.add_raw(attachments, attachment_new(m, component, script, sim) as ptr)
+        world = null as *World
+        vox = json.object_get_raw(entry, "voxel")
+        if vox != null {
+            world = voxel.world_new(field_int(vox, "size_x", 48),
+                                    field_int(vox, "size_z", 48),
+                                    field_int(vox, "max_height", 28),
+                                    field_number(vox, "voxel_size", 4.0))
+            if world != null {
+                terrain.fill_seeded(world, field_int(vox, "seed", 0) as long,
+                                    field_int(vox, "biome", terrain.PLAINS))
+            }
+        }
+
+        if component != "" || script != "" || sim != null || world != null {
+            list.add_raw(attachments,
+                         attachment_new(m, component, script, sim, world) as ptr)
         }
         i = i + 1
     }
@@ -287,6 +305,25 @@ scene_load_lights(path: string) -> ptr {
     return lights
 }
 
+// A voxel world as what it takes to fill one again, rather than as its grid.
+// The mesh is already written beside the scene, so this is what makes the world
+// EDITABLE again: six numbers reproduce it exactly, where the grid they replace
+// is a megabyte and a half for a world of any size.
+//
+// That holds while every world comes from a generator. The day voxels can be
+// edited by hand, a world that was edited is no longer what its seed makes, and
+// the grid has to be written instead.
+world_json(w: *World) -> ptr {
+    out = json.obj()
+    json.object_set_raw(out, "size_x", json.from_int(voxel.world_size_x(w)))
+    json.object_set_raw(out, "size_z", json.from_int(voxel.world_size_z(w)))
+    json.object_set_raw(out, "max_height", json.from_int(voxel.world_max_height(w)))
+    json.object_set_raw(out, "voxel_size", json.num(voxel.world_voxel_size(w)))
+    json.object_set_raw(out, "seed", json.from_int(voxel.world_origin_seed(w) as int))
+    json.object_set_raw(out, "biome", json.from_int(voxel.world_origin_kind(w)))
+    return out
+}
+
 // A water surface's simulation, written onto the model entry it drives. The
 // mesh already round-trips; this is the state that decides how it moves and
 // what it looks like, and without it a loaded surface was a mesh with no
@@ -325,12 +362,14 @@ water_json(w: *Simulation) -> ptr {
 // The two names are COPIED. A reader takes them from the parsed document and
 // the document is freed before the caller looks at them, so borrowing here
 // hands back two pointers into released memory.
-attachment_new(m: *Model, component: string, script: string, w: *Simulation) -> *Attachment {
+attachment_new(m: *Model, component: string, script: string,
+               w: *Simulation, world: *World) -> *Attachment {
     a = heap.new(Attachment)
     a.model = m as ptr
     a.component = string.copy(component)
     a.script = string.copy(script)
     a.water = w as ptr
+    a.world = world as ptr
     return a
 }
 
@@ -338,6 +377,7 @@ attachment_model(a: *Attachment) -> *Model { return a.model as *Model }
 attachment_component(a: *Attachment) -> string { return a.component }
 attachment_script(a: *Attachment) -> string { return a.script }
 attachment_water(a: *Attachment) -> *Simulation { return a.water as *Simulation }
+attachment_world(a: *Attachment) -> *World { return a.world as *World }
 
 // The records themselves, not what they point at: a simulation handed back by
 // scene_load_attachments belongs to the caller and outlives the list.
@@ -617,6 +657,8 @@ scene_save(models: ptr, lights: ptr, attachments: ptr, view: *View,
                 }
                 sim = attachment_water(attached)
                 if sim != null { json.object_set_raw(entry, "water", water_json(sim)) }
+                world = attachment_world(attached)
+                if world != null { json.object_set_raw(entry, "voxel", world_json(world)) }
             }
             // Which shader draws it, for the named ones. The source text is not
             // written: a scene is not the place to carry a copy of the GLSL, and

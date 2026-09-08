@@ -11,6 +11,7 @@ import ae3d.loader
 import ae3d.voxel
 import ae3d.rendering
 import ae3d.water
+import ae3d.terrain
 
 extern ae3d_farr_count(arr: ptr) -> int
 extern ae3d_farr_get(arr: ptr, i: int) -> float
@@ -158,7 +159,7 @@ components_roundtrip() {
     models = list.new()
     list.add_raw(models, surface as ptr)
     attachments = list.new()
-    list.add_raw(attachments, scene.attachment_new(surface, "water", "spin", sim) as ptr)
+    list.add_raw(attachments, scene.attachment_new(surface, "water", "spin", sim, null) as ptr)
     lights = list.new()
 
     view = scene.view_defaults()
@@ -258,6 +259,84 @@ components_roundtrip() {
     scene.attachments_free(attachments)
     list.free(lights)
     water.simulation_free(sim)
+}
+
+// A voxel world is carried as what it takes to fill one again, so the world
+// that comes back has to be the SAME world, voxel for voxel, and not merely a
+// world of the same size.
+voxel_roundtrip() {
+    directory = "build/scene_voxel/"
+    fs.mkdir_p(directory)
+    path = "build/scene_voxel/scene.json"
+
+    world = voxel.world_new(24, 24, 20, 3.5)
+    if world == null {
+        record_failure("no voxel world")
+        return
+    }
+    terrain.fill_seeded(world, 4242, terrain.MOUNTAINS)
+    before = voxel.world_active_count(world)
+    before_visible = voxel.world_visible_count(world)
+
+    base = loader.cube(3.5)
+    chunk = voxel.world_build(world, base)
+    if chunk == null {
+        record_failure("voxel chunk would not build")
+        return
+    }
+
+    models = list.new()
+    list.add_raw(models, chunk as ptr)
+    attachments = list.new()
+    list.add_raw(attachments,
+                 scene.attachment_new(chunk, "voxel", "", null, world) as ptr)
+    lights = list.new()
+    view = scene.view_defaults()
+
+    if !scene.scene_save(models, lights, attachments, &view, path, directory) {
+        record_failure("voxel scene did not save: ${scene.last_error()}")
+        return
+    }
+    loaded = scene.scene_load(path)
+    if loaded == null {
+        record_failure("voxel scene did not load: ${scene.last_error()}")
+        return
+    }
+
+    back = scene.scene_load_attachments(path, loaded)
+    check_true("the scene carries its voxel world", back != null)
+    if back != null && list.size(back) == 1 {
+        a = list.get_raw(back, 0) as *Attachment
+        w = scene.attachment_world(a)
+        check_true("a world came back", w != null)
+        if w != null {
+            check_int("size x", voxel.world_size_x(w), 24)
+            check_int("size z", voxel.world_size_z(w), 24)
+            check_int("height", voxel.world_max_height(w), 20)
+            check_near("voxel size", voxel.world_voxel_size(w), 3.5)
+            // The same seed and the same biome, so the same voxels: a world
+            // rebuilt from the wrong ones has a plausible count and is a
+            // different landscape.
+            check_int("the same voxels came back", voxel.world_active_count(w), before)
+            check_int("the same faces are exposed", voxel.world_visible_count(w), before_visible)
+            check_int("it remembers its biome", voxel.world_origin_kind(w), terrain.MOUNTAINS)
+            voxel.world_free(w)
+        }
+        scene.attachments_free(back)
+    }
+
+    i = 0
+    while i < list.size(loaded) {
+        m = list.get_raw(loaded, i) as *Model
+        if m != null { core.model_free(m) }
+        i = i + 1
+    }
+    list.free(loaded)
+    core.model_free(chunk)
+    voxel.world_free(world)
+    list.free(models)
+    scene.attachments_free(attachments)
+    list.free(lights)
 }
 
 main() {
@@ -458,6 +537,7 @@ main() {
 
     water_roundtrip()
     components_roundtrip()
+    voxel_roundtrip()
 
     if failures == 0 {
         println("scene io: all checks passed")

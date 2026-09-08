@@ -93,9 +93,12 @@ wave table nothing reads:
 and the file records the view: where the camera stood, its field of view and
 clip planes, and whether face and frustum culling were on.
 
-A voxel component comes back as a voxel row over the mesh it was saved as, but
-its grid is not rebuilt, so it is not editable again. That is
-[#89](https://github.com/nicolas-maman/ae3d/issues/89).
+A voxel world is written as what it takes to fill one again, its size and its
+seed and its terrain, rather than as its grid: six numbers reproduce it exactly,
+where the grid they replace is a megabyte and a half. That holds while every
+world comes from a generator, and the day voxels can be edited by hand a world
+that was edited is no longer what its seed makes, so the grid has to be written
+instead.
 
 `AE3D_EDITOR_SCENE=roundtrip` builds the component scene, saves it and opens it
 again before the run starts, so the report describes what came back rather than

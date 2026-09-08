@@ -27,6 +27,7 @@ exports (
     world_fill_column, world_generate, world_clear,
     world_active_count, world_visible_count, world_build,
     world_size_x, world_size_z, world_max_height, world_voxel_size,
+    world_set_origin, world_origin_seed, world_origin_kind,
     palette_set, palette_reset, palette_color,
     world_sdf_enable, world_sdf_set, world_sdf_get, world_sdf_from_voxels,
     world_build_surface
@@ -60,6 +61,12 @@ struct World {
     max_height: int
     voxel_size: float
     active: int
+
+    // How this world was filled, recorded rather than interpreted: whoever
+    // filled it says so, and a scene writes it down so the world can be filled
+    // the same way again instead of storing a grid it can reproduce.
+    origin_seed: long
+    origin_kind: int
 }
 
 world_new(size_x: int, size_z: int, max_height: int, voxel_size: float) -> *World {
@@ -167,6 +174,16 @@ world_generate(w: *World, generator: fn(ptr, int, int, int) -> int, state: ptr) 
         x = x + 1
     }
 }
+
+// Recorded by whatever filled the world, and read back by whatever wants to
+// fill another one the same way. The voxel module does not act on either.
+world_set_origin(w: *World, seed: long, kind: int) {
+    w.origin_seed = seed
+    w.origin_kind = kind
+}
+
+world_origin_seed(w: *World) -> long { return w.origin_seed }
+world_origin_kind(w: *World) -> int { return w.origin_kind }
 
 palette_set(w: *World, id: int, red: float, green: float, blue: float) {
     count = list.size(w.palette)
