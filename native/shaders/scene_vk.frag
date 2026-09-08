@@ -23,6 +23,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 lightSpaceMatrix;
     int lightCount;
     vec3 viewPos;
+    float viewDistance;
     vec3 diffuseColor;
     vec3 specularColor;
     float metallic;
@@ -94,6 +95,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     vec3 waterBaseColor;
     float waterTransparency;
     float waterPlaneHeight;
+    float waterLevel;
     bool enableFog;
     float fogStart;
     float fogEnd;
@@ -121,6 +123,10 @@ layout(location = 4) in vec4 FragPosLightSpace;
 
 
 
+
+// How far this camera can see. Everything that fades a feature out with distance
+// measures against this rather than against a number of world units, so a scene
+// laid out in metres and one laid out in centimetres behave alike.
 
 
 
@@ -369,11 +375,11 @@ float calculateSSAO(vec3 position, vec3 normal, float distanceToCamera) {
     
     // Distance-based LOD: reduce samples for close objects (voxel performance)
     int adaptiveSamples = ssaoSampleCount;
-    if (distanceToCamera < 5000.0) {
+    if (distanceToCamera < viewDistance * 0.5) {
         adaptiveSamples = max(2, ssaoSampleCount / 8); // Very few samples when close
-    } else if (distanceToCamera < 20000.0) {
+    } else if (distanceToCamera < viewDistance * 2.0) {
         adaptiveSamples = max(4, ssaoSampleCount / 4);
-    } else if (distanceToCamera < 50000.0) {
+    } else if (distanceToCamera < viewDistance * 5.0) {
         adaptiveSamples = max(6, ssaoSampleCount / 2);
     }
     
@@ -431,14 +437,17 @@ vec3 calculateVolumetricLighting(vec3 worldPos, vec3 lightPos, vec3 viewPos) {
     
     float distanceToCamera = length(worldPos - viewPos);
     
-    // Skip volumetric for very close objects - too expensive per fragment
-    if (distanceToCamera < 1000.0) return vec3(0.0);
+    // Skip volumetric for whatever is right in front of the camera, where it
+    // covers the most pixels for the least effect. A tenth of what the camera
+    // can see, rather than a thousand units, which switched the whole feature
+    // off for every scene smaller than that.
+    if (distanceToCamera < viewDistance * 0.1) return vec3(0.0);
     
     // Adaptive step count based on distance
     int adaptiveSteps = volumetricSteps;
-    if (distanceToCamera < 10000.0) {
+    if (distanceToCamera < viewDistance) {
         adaptiveSteps = max(4, volumetricSteps / 4);
-    } else if (distanceToCamera < 30000.0) {
+    } else if (distanceToCamera < viewDistance * 3.0) {
         adaptiveSteps = max(8, volumetricSteps / 2);
     }
     
@@ -473,12 +482,12 @@ vec3 calculateGlobalIllumination(vec3 position, vec3 normal, vec3 albedo, float 
     int baseSamples = giBounces * 4;
     int samples = baseSamples;
     
-    if (distanceToCamera < 5000.0) {
+    if (distanceToCamera < viewDistance * 0.5) {
         // Very close: minimal GI (too expensive for dense voxels)
         samples = max(2, baseSamples / 8);
-    } else if (distanceToCamera < 20000.0) {
+    } else if (distanceToCamera < viewDistance * 2.0) {
         samples = max(4, baseSamples / 4);
-    } else if (distanceToCamera < 50000.0) {
+    } else if (distanceToCamera < viewDistance * 5.0) {
         samples = max(6, baseSamples / 2);
     }
     
