@@ -101,7 +101,7 @@ fi
 . "$ROOT/scripts/platform.sh"
 PLATFORM_LIBS="$(ae3d_platform_libs "$(uname -s)")"
 
-NATIVE_SOURCES="native/ae3d_glapi.c native/ae3d_platform.c native/ae3d_mesh.c native/ae3d_meshfile.c native/ae3d_image.c native/ae3d_gl.c native/ae3d_offscreen.c native/ae3d_vk.c"
+NATIVE_SOURCES="native/ae3d_glapi.c native/ae3d_platform.c native/ae3d_mesh.c native/ae3d_meshfile.c native/ae3d_image.c native/ae3d_png.c native/ae3d_gl.c native/ae3d_offscreen.c native/ae3d_vk.c"
 if [ "$(uname -s)" = "Darwin" ]; then
     NATIVE_SOURCES="$NATIVE_SOURCES native/ae3d_vk_surface.m"
 fi

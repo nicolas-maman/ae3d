@@ -111,6 +111,33 @@ frame_limit_from_env() -> int {
     return core.env_int("AE3D_FRAMES", 0)
 }
 
+// AE3D_SNAPSHOT writes the last frame of a bounded run to a PNG.
+//
+// Running an example proves it does not crash and counting its draws proves it
+// asked for something. Neither says what came out, and that is the difference
+// between an example that renders the scene it is named after and one that
+// renders a flat wash of a single colour: both exit zero with the same number
+// of draws. The only way to tell them apart is to look at the frame.
+snapshot_path(e: *Engine) -> string {
+    return core.text(os.getenv("AE3D_SNAPSHOT"))
+}
+
+// Taken between the last draw and the buffer swap, which is the only moment a
+// windowed program's finished frame is still readable.
+write_snapshot(e: *Engine) {
+    path = snapshot_path(e)
+    if path == "" { return }
+    if e.api == platform.API_VULKAN {
+        println("ae3d: AE3D_SNAPSHOT needs the OpenGL backend")
+        return
+    }
+    width = platform.window_fb_width(e.window)
+    height = platform.window_fb_height(e.window)
+    if !gl.snapshot(path, width, height) {
+        println("ae3d: could not write ${path}")
+    }
+}
+
 engine_set_frame_limit(e: *Engine, frames: int) {
     e.frame_limit = frames
 }
@@ -347,6 +374,12 @@ engine_loop(e: *Engine) {
         e.backend_render(e.backend_state, cam, e.light)
 
         if e.on_render != null { e.on_render(e.user_data, delta) }
+
+        // Before the swap, because after it the back buffer holds nothing this
+        // frame put there.
+        if e.frame_limit > 0 && e.frame_count + 1 >= e.frame_limit {
+            write_snapshot(e)
+        }
 
         if e.api != platform.API_VULKAN { platform.window_swap(e.window) }
         platform.poll_events()

@@ -144,7 +144,18 @@ PowerShell prompt is not one of the shells it can run in.
 
 `build.sh` compiles the native layer once, runs `aetherc` over the Aether
 sources, and links. `AE3D_FRAMES=<n>` caps any program at `n` frames, so
-every example doubles as a smoke test that terminates on its own.
+every example doubles as a smoke test that terminates on its own, and
+`AE3D_SNAPSHOT=<path>` writes that last frame out as a PNG:
+
+```sh
+AE3D_FRAMES=40 AE3D_SNAPSHOT=/tmp/caustics.png ./build/caustics
+```
+
+Running a program proves it does not crash and counting its draws proves it
+asked for something. Neither says what came out, and an example that renders
+a flat wash of one colour exits zero with the same number of draws as one
+that renders the scene it is named after. Looking at the frame is what tells
+them apart. Needs the OpenGL backend, which is what every example uses.
 
 `./ci.sh` builds the native layer with warnings as errors, type-checks every
 module, runs every test suite, benchmark and example, and checks that every
