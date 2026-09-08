@@ -260,6 +260,18 @@ First working engine.
   and a floor built from a corner and turned about, which are the two cases a
   culler working from bounds gets wrong.
 
+- `core.set_draw_merging` turns automatic merging off, which is how a program
+  sees a scene as its draws really are, and how the scene benchmark measures
+  what the merging is worth rather than quoting a number from memory.
+
+- The post-processing checks ask whether the effect did anything. Comparing the
+  two backends says they agree, which a pass that quietly copied its input
+  through would satisfy on both sides at once, and that is exactly how the
+  multisample resolve failure hid. Turning FXAA or bloom on now has to change
+  what the frame adds up to, in both renderers. The skybox is asked the same, against a
+  frame rendered for the purpose rather than whatever the last comparison left
+  in the buffer.
+
 - A copy of a model keeps the shader it was told to draw with. `model_clone`
   carried the mesh, the material, the transform and, since the settings fix, the
   uniforms, but not the model's own shader, so a copy quietly fell back to the
@@ -313,9 +325,11 @@ GL implementation's, over two thousand iterations with zero leaked bytes and
 - 19ns per Perlin sample; a 131072-cell exposed-face scan under a millisecond.
 - 400 separate models: 806us a frame, from 1200us before the frame's uniforms
   were hoisted out of the per-model loop.
-- 400 separate models: 65us a frame and one draw call, from 1005us and four
-  hundred. The renderer stopped re-sending state a draw already had (812us),
-  then stopped issuing a draw per model at all.
+- 400 separate models: 87us a frame and one draw call, against 1363us and four
+  hundred with merging switched off. The renderer stopped re-sending state a
+  draw already had (812us), then stopped issuing a draw per model at all. The
+  scene benchmark measures the same scene both ways rather than quoting one
+  number without the other.
 - 200 shadow casters: 52us a frame unshadowed and 362us with shadows, from
   551us and 839us. What is left of the shadow pass is fill: a 2048x2048 depth
   map, not the draws that fill it.

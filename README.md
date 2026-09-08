@@ -16,7 +16,9 @@ engine, to Aether and C. See [Credits](#credits).
   rendering, frustum culling, a separate transparent pass, MSAA, FXAA and bloom.
 - **Draws are merged automatically.** Identical geometry is uploaded once, and
   models that share it and a material go out as one instanced draw: 400 separate
-  models cost 65us a frame in one call, against 1005us in four hundred.
+  models cost 87us a frame in one call, against 1363us in four hundred.
+  `core.set_draw_merging(false)` turns it off, which is how those two numbers
+  are measured.
 - **Shadow mapping** in both backends: the light draws the scene into a depth
   map sized to the scene, and the lit pass compares against it over a 3x3
   neighbourhood with a slope-scaled bias.
@@ -181,7 +183,7 @@ from 1200us to 806us. `benchmarks/bench_scene.ae` keeps that honest.
 **The viewport readback is pipelined.** Reading a frame into client memory stalls
 until the GPU has finished it; two pixel buffers mean the read is issued into one
 while the one filled last frame is mapped, so the CPU never waits. At 1280x720
-that is 1625us a frame against 307us. `benchmarks/bench_readback.ae` measures
+that is around 1500us a frame against 374us. `benchmarks/bench_readback.ae` measures
 both paths in one process. The editor takes the pipelined read and is a frame
 behind; anything comparing what it just drew takes the waiting one.
 
