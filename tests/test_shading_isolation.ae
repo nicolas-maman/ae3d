@@ -1,0 +1,169 @@
+// A model shades with what it asked for, whatever the model beside it asked for.
+//
+// Shading settings are uploaded per model and the program keeps whatever the
+// last draw wrote, so a model that asks for nothing used to inherit its
+// neighbour's occlusion, noise and everything else. The checks here reconfigure
+// one model and measure the other, which never changed and must not move.
+
+import std.mem
+import ae3d.core
+import ae3d.gl
+import ae3d.vk
+import ae3d.offscreen
+import ae3d.loader
+import ae3d.rendering
+
+const WIDTH = 240
+const HEIGHT = 180
+
+var failures = 0
+
+check_true(name: string, ok: bool) {
+    if !ok {
+        println("FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+half_sum(pixels: ptr, from_x: int, to_x: int) -> int {
+    total = 0
+    y = 0
+    while y < HEIGHT {
+        x = from_x
+        while x < to_x {
+            index = (y * WIDTH + x) * 4
+            total = total + mem.get_byte(pixels, index) +
+                    mem.get_byte(pixels, index + 1) + mem.get_byte(pixels, index + 2)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return total
+}
+
+// The OpenGL path reads back through a pair of buffers, so the frame just drawn
+// is the second read rather than the first.
+right_half(backend: *Backend, cam: *Camera, light: *Light) -> int {
+    core.backend_render(backend, cam, light)
+    core.backend_frame_pixels(backend)
+    return half_sum(core.backend_frame_pixels(backend), WIDTH / 2, WIDTH)
+}
+
+loud_config() -> Config {
+    c = rendering.default_config()
+    c.perlin_noise = true
+    c.noise_scale = 0.08
+    c.noise_intensity = 1.0
+    c.noise_octaves = 4
+    c.ssao = false
+    c.global_illumination = true
+    c.gi_intensity = 2.0
+    return c
+}
+
+run_checks(backend: *Backend, name: string) {
+    core.backend_set_clear_color(backend, 0.0, 0.0, 0.0)
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 0.0, 170.0))
+    light = core.light_sun(core.vec3(0.3, 0.8, 0.5))
+
+    left = loader.sphere(1.0, 24, 18)
+    core.model_set_scale(left, 30.0, 30.0, 30.0)
+    core.model_set_position(left, 0.0 - 45.0, 0.0, 0.0)
+    core.model_set_diffuse(left, 0.6, 0.6, 0.6)
+    core.backend_add_model(backend, left)
+
+    // Never configured, and a different colour so the two cannot be merged into
+    // one draw: the point is a draw of its own that has to stand on its own.
+    right = loader.sphere(1.0, 24, 18)
+    core.model_set_scale(right, 30.0, 30.0, 30.0)
+    core.model_set_position(right, 45.0, 0.0, 0.0)
+    core.model_set_diffuse(right, 0.6, 0.6, 0.61)
+    core.backend_add_model(backend, right)
+
+    rendering.apply(left, loud_config())
+    with_loud = right_half(backend, cam, light)
+
+    rendering.apply(left, rendering.default_config())
+    with_quiet = right_half(backend, cam, light)
+
+    check_true("${name} a model is not shaded by its neighbour's settings",
+               with_loud == with_quiet)
+
+    // A model that asked for nothing is shaded with everything off, which is
+    // what it looked like before any of this existed, rather than with whatever
+    // the last draw wrote.
+    rendering.apply(right, rendering.unset_config())
+    configured = right_half(backend, cam, light)
+    check_true("${name} asking for nothing is asking for everything off",
+               configured == with_quiet)
+
+    // A copy shades like what it was copied from, which it cannot do if its
+    // settings were left behind.
+    rendering.apply(left, loud_config())
+    twin = core.model_clone(left)
+    core.model_set_position(twin, 45.0, 0.0, 0.0)
+    core.model_set_diffuse(twin, 0.6, 0.6, 0.61)
+    core.backend_remove_model(backend, right)
+    core.backend_add_model(backend, twin)
+    cloned = right_half(backend, cam, light)
+
+    core.backend_remove_model(backend, twin)
+    core.backend_add_model(backend, right)
+    rendering.apply(right, loud_config())
+    configured_loud = right_half(backend, cam, light)
+
+    check_true("${name} a copy keeps the settings it was copied with",
+               cloned == configured_loud)
+    core.model_free(twin)
+
+    core.backend_remove_model(backend, left)
+    core.backend_remove_model(backend, right)
+    core.model_free(left)
+    core.model_free(right)
+    core.camera_free(cam)
+    core.light_free(light)
+}
+
+main() {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("shading isolation: SKIP no OpenGL context")
+        return
+    }
+
+    renderer = gl.renderer_new()
+    gl_pass = gl.backend(renderer)
+    if !core.backend_init(&gl_pass, context, WIDTH, HEIGHT) {
+        println("shading isolation: SKIP the OpenGL backend would not initialise")
+        return
+    }
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    run_checks(&gl_pass, "opengl")
+    core.backend_cleanup(&gl_pass)
+    offscreen.target_destroy(target)
+    gl.renderer_free(renderer)
+    offscreen.context_destroy(context)
+
+    if !vk.available() {
+        println("shading isolation: no Vulkan driver (${vk.last_error()}), checked OpenGL only")
+    } else {
+        vk_renderer = vk.renderer_new()
+        vk_pass = vk.backend(vk_renderer)
+        if !core.backend_init(&vk_pass, null, WIDTH, HEIGHT) {
+            println("shading isolation: SKIP Vulkan would not start (${vk.last_error()})")
+        } else {
+            run_checks(&vk_pass, "vulkan")
+            core.backend_cleanup(&vk_pass)
+        }
+        vk.renderer_free(vk_renderer)
+    }
+
+    if failures == 0 {
+        println("shading isolation: all checks passed")
+    } else {
+        println("shading isolation: ${failures} failure(s)")
+    }
+}

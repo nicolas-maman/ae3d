@@ -45,7 +45,7 @@ exports (
     model_add_group, model_group, model_group_count, model_sort_groups_by_texture,
     model_own_material,
     model_ensure_material, model_set_uniform_float, model_set_uniform_int,
-    model_set_uniform_vec3, model_set_uniform_array, model_uniform_count, model_uniform,
+    model_set_uniform_vec3, model_set_uniform_array, model_uniform_count, model_uniform, model_uniform_names,
     model_enable_instancing, model_set_instance_position, model_set_instance_color,
     model_enable_instance_colors, model_set_instance_positions, model_set_instance_colors,
     model_instance_count, model_remove_instance, light_new, light_directional, light_point,
@@ -160,6 +160,7 @@ extern ae3d_farr_destroy(arr: ptr)
 extern ae3d_farr_set(arr: ptr, i: int, v: float)
 
 extern ae3d_farr_count(arr: ptr) -> int
+extern ae3d_farr_get(arr: ptr, i: int) -> float
 extern ae3d_mesh_reserve(mesh: ptr, vertices: int, indices: int) -> int
 extern ae3d_mesh_push_vertex(mesh: ptr, px: float, py: float, pz: float, u: float, v: float, nx: float, ny: float, nz: float) -> int
 extern ae3d_mesh_push_index(mesh: ptr, index: int) -> int
@@ -236,6 +237,21 @@ struct MaterialGroup {
     index_count: int
 }
 
+// Which uniform NAMES a model carries, order independent, so two models
+// configured the same way agree and a renderer can tell that one draw's
+// settings completely cover the next one's.
+name_hash(name: string) -> uint64 {
+    h = 1469598103934665603 as uint64
+    n = string.length(name)
+    i = 0
+    while i < n {
+        h = h ^ (string.char_at(name, i) as uint64)
+        h = h * 1099511628211
+        i = i + 1
+    }
+    return h
+}
+
 struct Uniform {
     name: string
     kind: int
@@ -262,6 +278,7 @@ struct Model {
     materials: ptr
     groups: ptr
     uniforms: ptr
+    uniform_names: uint64
     shader: Shader
 
     vao: int
@@ -961,6 +978,7 @@ model_new() -> *Model {
     m.mesh = ae3d_mesh_create()
     m.groups = list.new()
     m.uniforms = list.new()
+    m.uniform_names = 0 as uint64
     m.materials = list.new()
     m.position = vec3(0.0, 0.0, 0.0)
     m.scale = vec3(1.0, 1.0, 1.0)
@@ -1130,8 +1148,14 @@ model_set_alpha(m: *Model, alpha: float) {
 model_clone(src: *Model) -> *Model {
     if src == null { return null }
     copy = model_new()
+    // model_new already made an empty one, and it has to go before its place is
+    // taken or nothing will ever free it.
+    if copy.mesh != null { ae3d_mesh_destroy(copy.mesh) }
     copy.mesh = ae3d_mesh_clone(src.mesh)
-    if src.material != null { copy.material = material_clone(src.material) }
+    // Owned by the copy, or nothing will ever free it.
+    if src.material != null {
+        copy.material = model_own_material(copy, material_clone(src.material))
+    }
     copy.position = src.position
     copy.scale = src.scale
     copy.rotation = src.rotation
@@ -1140,9 +1164,39 @@ model_clone(src: *Model) -> *Model {
     copy.is_instanced = false
     model_set_name(copy, text(src.name))
     model_set_source_path(copy, text(src.source_path))
+    copy_uniforms(copy, src)
     model_mark_dirty(copy)
     model_recalculate_bounds(copy)
     return copy
+}
+
+// A copy of a model shades like the model it was copied from. Its settings live
+// in its uniforms, so a copy without them renders with the defaults instead.
+copy_uniforms(copy: *Model, src: *Model) {
+    count = list.size(src.uniforms)
+    i = 0
+    while i < count {
+        u = list.get_raw(src.uniforms, i) as *Uniform
+        if u != null {
+            if u.kind == UNIFORM_FLOAT {
+                model_set_uniform_float(copy, u.name, u.number)
+            } else if u.kind == UNIFORM_INT {
+                model_set_uniform_int(copy, u.name, u.integer)
+            } else if u.kind == UNIFORM_VEC3 {
+                model_set_uniform_vec3(copy, u.name, u.vector)
+            } else if u.array != null {
+                values = ae3d_farr_count(u.array)
+                into = model_set_uniform_array(copy, u.name, values,
+                                               u.kind == UNIFORM_VEC3_ARRAY)
+                n = 0
+                while n < values {
+                    ae3d_farr_set(into, n, ae3d_farr_get(u.array, n))
+                    n = n + 1
+                }
+            }
+        }
+        i = i + 1
+    }
 }
 
 model_set_texture(m: *Model, path: string) {
@@ -1298,7 +1352,13 @@ upsert_uniform(m: *Model, name: string, kind: int) -> *Uniform {
     uniform.cached_program = 0
     uniform.block_offset = 0 - 2
     list.add_raw(m.uniforms, uniform)
+    m.uniform_names = m.uniform_names ^ name_hash(name)
     return uniform
+}
+
+// Zero when a model carries no uniforms of its own.
+model_uniform_names(m: *Model) -> uint64 {
+    return m.uniform_names
 }
 
 model_set_uniform_float(m: *Model, name: string, value: float) {

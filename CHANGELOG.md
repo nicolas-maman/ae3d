@@ -151,6 +151,21 @@ First working engine.
   the sun, which is what it took to see anything when none of that light was
   reaching the water; it asks for one sun now.
 
+- A model is shaded by what it asked for and nothing else. Settings are uploaded
+  per model and the program keeps whatever the last draw wrote, so a model that
+  asked for nothing picked up its neighbour's occlusion, noise and the rest:
+  configuring one sphere took more than half the light off the untouched sphere
+  beside it. Before a draw whose set of settings differs from what is loaded, the
+  unset values go in first and wipe the difference. Models configured alike agree
+  on the set, which is the common case and costs nothing: the scene and shadow
+  benchmarks are unchanged.
+
+- A copy of a model shades like the model it was copied from. `model_clone`
+  copied the mesh, the material and the transform but left the settings behind,
+  so a copy came out with everything off. It also abandoned the empty mesh the
+  new model was born with and never handed its cloned material to anyone, so
+  both leaked; a copy now frees everything it holds.
+
 - Resizing no longer leaks the Vulkan shadow target. A rebuild made a fresh
   shadow image, its memory, two views, a depth image with its own memory, a
   sampler and a framebuffer, and destroyed none of the previous set, because the
