@@ -129,6 +129,16 @@ First working engine.
 
 ### Fixes
 
+- A second camera was culled against the first camera's frustum. The dirty flag
+  guarding the cached frustum was one boolean for the whole program, while the
+  frustum it guarded belongs to a renderer, so the first render of a frame
+  filled its frustum and cleared the flag and every later render reused it.
+  Anything that draws the same scene from two cameras, a minimap, a reflection,
+  a second viewport, culled the second view against the first. The flag is gone
+  and the frustum is filled from the camera being drawn: six planes out of one
+  matrix multiply measures below the benchmark's resolution, 0 ms over 400
+  frames, which is not worth a cache that can be wrong.
+
 - The leak check skipped every suite that uses `ae3d.engine`, and both of them
   were losing the model they built in `on_start`. The exclusion existed because
   a program that opens a window produces leaks it cannot do anything about, but

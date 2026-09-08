@@ -64,8 +64,7 @@ exports (
     camera_set_aspect, camera_set_position, camera_set_speed, camera_view,
     camera_projection, camera_view_projection, camera_world_to_screen, camera_process_keyboard,
     camera_process_mouse, camera_move, camera_look_at, camera_update_vectors, camera_frustum,
-    frustum_intersects_sphere, plane_distance, camera_screen_to_world, frustum_dirty,
-    mark_frustum_dirty, clear_frustum_dirty
+    frustum_intersects_sphere, plane_distance, camera_screen_to_world
 )
 
 extern sqrt(x: float) -> float
@@ -180,7 +179,6 @@ extern ae3d_inst_has_colors(inst: ptr) -> int
 extern ae3d_inst_set_positions(inst: ptr, xyz: ptr, count: int, sx: float, sy: float, sz: float, qx: float, qy: float, qz: float, qw: float)
 extern ae3d_inst_set_colors(inst: ptr, rgb: ptr, count: int)
 
-var g_frustum_dirty = true
 
 struct Vec2 {
     x: float
@@ -1576,9 +1574,6 @@ light_sun(direction: Vec3) -> *Light {
     return l
 }
 
-frustum_dirty() -> bool { return g_frustum_dirty }
-mark_frustum_dirty() { g_frustum_dirty = true }
-clear_frustum_dirty() { g_frustum_dirty = false }
 
 camera_new(width: int, height: int) -> *Camera {
     c = heap.new(Camera)
@@ -1611,7 +1606,6 @@ camera_free(c: *Camera) {
 
 camera_update_projection(c: *Camera) {
     c.projection = mat4_perspective(deg_to_rad(c.fov), c.aspect, c.near, c.far)
-    mark_frustum_dirty()
 }
 
 // CRITICAL: the three values below all divide in mat4_perspective, and a
@@ -1648,7 +1642,6 @@ camera_set_aspect(c: *Camera, aspect: float) {
 
 camera_set_position(c: *Camera, position: Vec3) {
     c.position = position
-    mark_frustum_dirty()
 }
 
 camera_set_speed(c: *Camera, speed: float) {
@@ -1706,7 +1699,6 @@ camera_process_keyboard(c: *Camera, window: ptr, delta_time: float) {
 camera_move(c: *Camera, heading: Vec3, distance: float) {
     if v3_len(heading) < 0.0001 { return }
     c.position = v3_add(c.position, v3_mul(v3_normalize(heading), distance))
-    mark_frustum_dirty()
 }
 
 camera_process_mouse(c: *Camera, x_offset: float, y_offset: float, constrain_pitch: bool) {
@@ -1723,7 +1715,6 @@ camera_process_mouse(c: *Camera, x_offset: float, y_offset: float, constrain_pit
         c.pitch = clampf(c.pitch, 0.0 - 89.0, 89.0)
     }
     camera_update_vectors(c)
-    mark_frustum_dirty()
 }
 
 camera_look_at(c: *Camera, target: Vec3) {
@@ -1732,7 +1723,6 @@ camera_look_at(c: *Camera, target: Vec3) {
     horizontal = sqrt_of(direction.x * direction.x + direction.z * direction.z)
     c.pitch = rad_to_deg(atan2_of(direction.y, horizontal))
     camera_update_vectors(c)
-    mark_frustum_dirty()
 }
 
 normalize_plane(p: Plane) -> Plane {

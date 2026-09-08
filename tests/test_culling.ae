@@ -120,6 +120,41 @@ run_checks(backend: *Backend, name: string) {
                differing_bytes(open, culled) == 0)
     check_true("${name} and something is still culled", turned_culled < turned_open)
 
+    // Two cameras in one program, which is what a minimap, a reflection or a
+    // second viewport is. Neither is moved between the renders: the whole point
+    // is that a camera that has not changed still has to be culled against its
+    // own frustum, not against whichever camera drew last.
+    //
+    // Checked by the same property as everything above, applied to the second
+    // camera: culling must not change what it sees. Counting its draws is not
+    // enough, because the objects the first camera's frustum keeps are in the
+    // second camera's view as well, so a frame culled against the wrong
+    // frustum is still not an empty one.
+    other = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_far(other, 4000.0)
+    core.camera_set_position(other, core.vec3(0.0, 0.0, 1100.0))
+    core.camera_look_at(other, core.vec3(0.0, 0.0, 900.0))
+
+    // `cam` is still turned to face the far object from the check above, so
+    // point it back at the origin. Neither camera is touched after this.
+    core.camera_set_position(cam, core.vec3(0.0, 0.0, 150.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+
+    core.set_frustum_culling(true)
+    capture(backend, cam, light, culled)
+    second_culled = capture(backend, other, light, culled)
+
+    core.set_frustum_culling(false)
+    second_open = capture(backend, other, light, open)
+
+    check_true("${name} the second camera draws something", second_open > 0)
+    check_true("${name} a second camera is culled against its own frustum",
+               differing_bytes(open, culled) == 0)
+    check_true("${name} and its own frustum still culls something",
+               second_culled < second_open)
+
+    core.camera_free(other)
+
     free(open)
     free(culled)
 
