@@ -16,6 +16,9 @@ typedef struct {
     int      dirty;
     float    bound[3];
     float    radius;
+    float    local_bound[3];
+    float    local_radius;
+    int      local_known;
 } ae3d_mesh;
 
 typedef struct {
@@ -129,6 +132,7 @@ int ae3d_mesh_push_vertex(void *handle, double px, double py, double pz,
     slot[3] = (float)u;  slot[4] = (float)v;
     slot[5] = (float)nx; slot[6] = (float)ny; slot[7] = (float)nz;
     m->dirty = 1;
+    m->local_known = 0;
     return m->vertex_count++;
 }
 
@@ -248,13 +252,54 @@ void ae3d_mesh_recalc_normals(void *handle) {
     m->dirty = 1;
 }
 
+// The mesh's own centre and the furthest vertex from it, worked out once. A
+// transform cannot change what this says, so it survives every move the model
+// makes and is redone only when the vertices themselves change.
+static void ae3d_mesh_local_bounds(ae3d_mesh *m) {
+    double cx = 0.0, cy = 0.0, cz = 0.0, worst = 0.0;
+    int i;
+
+    if (m->local_known) return;
+    m->local_known = 1;
+
+    if (m->vertex_count == 0) {
+        m->local_bound[0] = 0.0f;
+        m->local_bound[1] = 0.0f;
+        m->local_bound[2] = 0.0f;
+        m->local_radius = 0.0f;
+        return;
+    }
+
+    for (i = 0; i < m->vertex_count; i++) {
+        const float *s = m->vertices + (size_t)i * AE3D_STRIDE;
+        cx += s[0]; cy += s[1]; cz += s[2];
+    }
+    cx /= m->vertex_count; cy /= m->vertex_count; cz /= m->vertex_count;
+
+    for (i = 0; i < m->vertex_count; i++) {
+        const float *s = m->vertices + (size_t)i * AE3D_STRIDE;
+        double dx = s[0] - cx, dy = s[1] - cy, dz = s[2] - cz;
+        double distance = dx * dx + dy * dy + dz * dz;
+        if (distance > worst) worst = distance;
+    }
+
+    m->local_bound[0] = (float)cx;
+    m->local_bound[1] = (float)cy;
+    m->local_bound[2] = (float)cz;
+    m->local_radius = (float)sqrt(worst);
+}
+
+// An affine transform commutes with averaging, so the world centre is the local
+// centre put through the same transform. Rotation moves every vertex the same
+// distance around that centre, so only scale can change the radius, and the
+// largest scale factor is the one that has to fit.
 void ae3d_mesh_compute_bounds(void *handle,
                               double px, double py, double pz,
                               double sx, double sy, double sz,
                               double qx, double qy, double qz, double qw) {
     ae3d_mesh *m = (ae3d_mesh *)handle;
-    double quat[4], cx = 0.0, cy = 0.0, cz = 0.0, worst = 0.0;
-    int i;
+    double quat[4], largest;
+    float scaled[3], rotated[3];
 
     if (!m) return;
     if (m->vertex_count == 0) {
@@ -263,38 +308,22 @@ void ae3d_mesh_compute_bounds(void *handle,
         return;
     }
 
+    ae3d_mesh_local_bounds(m);
+
     quat[0] = qx; quat[1] = qy; quat[2] = qz; quat[3] = qw;
+    scaled[0] = (float)(m->local_bound[0] * sx);
+    scaled[1] = (float)(m->local_bound[1] * sy);
+    scaled[2] = (float)(m->local_bound[2] * sz);
+    ae3d_quat_rotate(quat, scaled, rotated);
 
-    for (i = 0; i < m->vertex_count; i++) {
-        const float *s = m->vertices + (size_t)i * AE3D_STRIDE;
-        float scaled[3], rotated[3];
-        scaled[0] = (float)(s[0] * sx);
-        scaled[1] = (float)(s[1] * sy);
-        scaled[2] = (float)(s[2] * sz);
-        ae3d_quat_rotate(quat, scaled, rotated);
-        cx += rotated[0] + px;
-        cy += rotated[1] + py;
-        cz += rotated[2] + pz;
-    }
-    cx /= m->vertex_count; cy /= m->vertex_count; cz /= m->vertex_count;
+    m->bound[0] = (float)(rotated[0] + px);
+    m->bound[1] = (float)(rotated[1] + py);
+    m->bound[2] = (float)(rotated[2] + pz);
 
-    for (i = 0; i < m->vertex_count; i++) {
-        const float *s = m->vertices + (size_t)i * AE3D_STRIDE;
-        float scaled[3], rotated[3];
-        double dx, dy, dz, distance;
-        scaled[0] = (float)(s[0] * sx);
-        scaled[1] = (float)(s[1] * sy);
-        scaled[2] = (float)(s[2] * sz);
-        ae3d_quat_rotate(quat, scaled, rotated);
-        dx = rotated[0] + px - cx;
-        dy = rotated[1] + py - cy;
-        dz = rotated[2] + pz - cz;
-        distance = dx * dx + dy * dy + dz * dz;
-        if (distance > worst) worst = distance;
-    }
-
-    m->bound[0] = (float)cx; m->bound[1] = (float)cy; m->bound[2] = (float)cz;
-    m->radius = (float)sqrt(worst);
+    largest = fabs(sx);
+    if (fabs(sy) > largest) largest = fabs(sy);
+    if (fabs(sz) > largest) largest = fabs(sz);
+    m->radius = (float)(m->local_radius * largest);
 }
 
 double ae3d_mesh_bound_x(void *handle) { ae3d_mesh *m = handle; return m ? m->bound[0] : 0.0; }
