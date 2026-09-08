@@ -1,0 +1,162 @@
+// Caustics: the light a water surface throws onto whatever lies under it.
+//
+// The pattern is generated in the fragment shader from the scene clock, so the
+// checks here are about the three things that can silently stop working: it has
+// to brighten submerged surfaces, it has to leave everything at or above the
+// water line untouched, and it has to move. A still pattern means the renderer
+// stopped feeding the clock, which no still frame would ever reveal.
+
+import std.mem
+import ae3d.core
+import ae3d.gl
+import ae3d.vk
+import ae3d.offscreen
+import ae3d.loader
+import ae3d.rendering
+import ae3d.platform
+
+const WIDTH = 192
+const HEIGHT = 144
+const PIXELS = WIDTH * HEIGHT * 4
+
+var failures = 0
+
+check_true(name: string, ok: bool) {
+    if !ok {
+        println("FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// The OpenGL path reads back through a pair of buffers so no frame is ever
+// waited on, and each read returns what the read before it asked for. Asking
+// twice returns the frame that was wanted.
+capture(backend: *Backend, cam: *Camera, light: *Light, into: ptr) -> int {
+    core.backend_render(backend, cam, light)
+    core.backend_frame_pixels(backend)
+    pixels = core.backend_frame_pixels(backend)
+    total = 0
+    i = 0
+    while i < PIXELS {
+        value = mem.get_byte(pixels, i)
+        mem.set_byte(into, i, value)
+        total = total + value
+        i = i + 1
+    }
+    return total
+}
+
+differing_bytes(a: ptr, b: ptr) -> int {
+    count = 0
+    i = 0
+    while i < PIXELS {
+        if mem.get_byte(a, i) != mem.get_byte(b, i) { count = count + 1 }
+        i = i + 1
+    }
+    return count
+}
+
+// The clock is wall time, so a pattern that moves needs wall time to pass.
+wait_for(seconds: float) {
+    deadline = platform.time() + seconds
+    while platform.time() < deadline { }
+}
+
+run_checks(backend: *Backend, name: string) {
+    core.backend_set_clear_color(backend, 0.0, 0.0, 0.0)
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 90.0, 90.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0 - 5.0, 0.0))
+    light = core.light_sun(core.vec3(0.2, 0.9, 0.3))
+
+    floor = loader.plane(24, 10.0)
+    core.model_set_position(floor, 0.0 - 115.0, 0.0 - 5.0, 0.0 - 115.0)
+    core.model_set_diffuse(floor, 0.35, 0.35, 0.4)
+    core.backend_add_model(backend, floor)
+
+    config = rendering.default_config()
+    config.caustics = false
+    rendering.apply(floor, config)
+
+    dark = calloc(PIXELS, 1)
+    lit = calloc(PIXELS, 1)
+    later = calloc(PIXELS, 1)
+    above = calloc(PIXELS, 1)
+
+    without = capture(backend, cam, light, dark)
+
+    config.caustics = true
+    config.caustics_water_level = 0.0
+    rendering.apply(floor, config)
+    with = capture(backend, cam, light, lit)
+
+    check_true("${name} caustics brighten what is under the water line", with > without)
+    check_true("${name} caustics reach a good part of the floor",
+               differing_bytes(dark, lit) > PIXELS / 100)
+
+    wait_for(0.35)
+    capture(backend, cam, light, later)
+    check_true("${name} the pattern moves with the scene clock",
+               differing_bytes(lit, later) > PIXELS / 200)
+
+    // Same switch, same intensity, water line moved below the floor: nothing is
+    // submerged any more, so the frame has to be the one with caustics off.
+    config.caustics_water_level = 0.0 - 40.0
+    rendering.apply(floor, config)
+    capture(backend, cam, light, above)
+    check_true("${name} nothing above the water line is touched",
+               differing_bytes(dark, above) == 0)
+
+    free(dark)
+    free(lit)
+    free(later)
+    free(above)
+
+    core.backend_remove_model(backend, floor)
+    core.model_free(floor)
+    core.camera_free(cam)
+    core.light_free(light)
+}
+
+main() {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("caustics: SKIP no OpenGL context")
+        return
+    }
+
+    renderer = gl.renderer_new()
+    gl_pass = gl.backend(renderer)
+    if !core.backend_init(&gl_pass, context, WIDTH, HEIGHT) {
+        println("caustics: SKIP the OpenGL backend would not initialise")
+        return
+    }
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    run_checks(&gl_pass, "opengl")
+    core.backend_cleanup(&gl_pass)
+    offscreen.target_destroy(target)
+    gl.renderer_free(renderer)
+    offscreen.context_destroy(context)
+
+    if !vk.available() {
+        println("caustics: no Vulkan driver (${vk.last_error()}), checked OpenGL only")
+    } else {
+        vk_renderer = vk.renderer_new()
+        vk_pass = vk.backend(vk_renderer)
+        if !core.backend_init(&vk_pass, null, WIDTH, HEIGHT) {
+            println("caustics: SKIP Vulkan would not start (${vk.last_error()})")
+        } else {
+            run_checks(&vk_pass, "vulkan")
+            core.backend_cleanup(&vk_pass)
+        }
+        vk.renderer_free(vk_renderer)
+    }
+
+    if failures == 0 {
+        println("caustics: all checks passed")
+    } else {
+        println("caustics: ${failures} failure(s)")
+    }
+}
