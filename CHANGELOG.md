@@ -559,6 +559,11 @@ First working engine.
 
 ### Editor
 
+- The console's caption lines up with its lines. A section bar and a caption
+  that shares a row with a button are different things, and using the bar for
+  both gave the caption the bar's padding on top of the panel's own, sitting
+  it fourteen pixels right of everything beneath it.
+
 - The viewport's ground is a dark blue grey rather than near black. A scene on
   black looks like it is floating in a void rather than standing in a room, and
   an empty one is the first thing the editor shows.
