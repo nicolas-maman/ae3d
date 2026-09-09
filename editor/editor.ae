@@ -200,6 +200,15 @@ var g_script_buttons: ptr = null
 var g_script_files: ptr = null
 var g_script_libs: ptr = null
 var g_script_count = 1
+// When each script's library was last written. A script rebuilt while the
+// editor is open is reopened rather than ignored, which is what makes editing
+// one worth doing without restarting.
+var g_script_stamps: ptr = null
+// The stamp seen on the previous look. A library is reopened once it has
+// stopped changing rather than the moment it changes, so a build caught
+// half-written is left alone until the next look, by which time it is whole.
+var g_script_pending: ptr = null
+var g_reload_checked = 0.0
 var g_preset_buttons: ptr = null
 var g_preset = PRESET_BALANCED
 // The shading features, as the preset left them and as they were changed after.
@@ -893,6 +902,10 @@ const SCRIPT_NONE_ID = 0
 // CRITICAL: room for the scripts a project has, checked when they are scanned.
 // One past the end would write off the end of the arrays that hold them.
 const MAX_SCRIPTS = 32
+// How often the libraries are looked at. A rebuild takes longer than this, so
+// noticing one is immediate to a person, and a stat of a handful of paths four
+// times a second costs nothing next to a frame.
+const RELOAD_INTERVAL = 0.25
 const BOB_HEIGHT = 14.0
 const BOB_RATE = 1.6
 const SCENE_PATH = "build/editor_scene.json"
@@ -1273,6 +1286,10 @@ set_script(index: int, script: int) {
         history.history_close(g_history)
     }
     slot[0] = script
+    // Once, when it is attached, and only when the attachment changed: a
+    // script that sets something up wants to do it on the object it was just
+    // given, not every time the panel is refreshed.
+    if m != null && was != script { script.script_start(script_library(script), m) }
     refresh_script_buttons()
     say("${script_name(script)} on ${core.text(model_at(index).name)}")
 }
@@ -1333,6 +1350,9 @@ scan_scripts() {
     g_script_files = matches
     g_script_libs = list.new()
     list.add_raw(g_script_libs, null)
+    g_script_stamps = calloc(MAX_SCRIPTS, 8)
+    g_script_pending = calloc(MAX_SCRIPTS, 8)
+    stamps = g_script_stamps as int[]
 
     found = fs.dir_list_count(g_script_files)
     if found > MAX_SCRIPTS - 1 { found = MAX_SCRIPTS - 1 }
@@ -1350,9 +1370,117 @@ scan_scripts() {
             say("${name} did not load: ${script.last_error()}")
         }
         list.add_raw(g_script_libs, loaded as ptr)
+        stamp, stamp_err = fs.mtime(path)
+        if stamp_err == "" { stamps[id] = stamp }
         id = id + 1
     }
     say("${found} script(s) available")
+}
+
+// Reopen any script whose library has been written since it was opened.
+//
+// The editor does not compile anything: a script is rebuilt by the same step
+// that built it the first time, and this notices. Watching the library rather
+// than the source is what makes that honest, because a source saved with a
+// syntax error in it leaves the last good library in place and the object
+// keeps behaving the way it did.
+reload_changed_scripts() {
+    if g_script_stamps == null { return }
+    now = seconds()
+    if now - g_reload_checked < RELOAD_INTERVAL { return }
+    g_reload_checked = now
+
+    stamps = g_script_stamps as int[]
+    id = 1
+    while id < g_script_count {
+        path = script.library_path("build/scripts/", script_name(id))
+        stamp, err = fs.mtime(path)
+        if err == "" && stamp != stamps[id] {
+            pending = g_script_pending as int[]
+            if stamp != pending[id] {
+                // Changed since the last look, so wait for it to settle.
+                pending[id] = stamp
+                id = id + 1
+                continue
+            }
+            was = stamps[id]
+            stamps[id] = stamp
+            // Not on the first look: the stamp starts at whatever the library
+            // had when it was opened, so a zero here is a script that was
+            // missing then and has arrived since.
+            if was != 0 {
+                replaced = script.script_open(path)
+                if replaced == null {
+                    say("${script_name(id)} would not reload: ${script.last_error()}")
+                } else {
+                    previous = script_library(id)
+                    list.set(g_script_libs, id, replaced as ptr)
+                    if previous != null { script.script_close(previous) }
+                    restart_script(id)
+                    say("reloaded ${script_name(id)}")
+                }
+            }
+        }
+        id = id + 1
+    }
+}
+
+// A reloaded script starts again on everything carrying it, because the copy
+// that ran start on those objects is the one that was just closed.
+restart_script(id: int) {
+    i = 0
+    while i < list.size(g_models) {
+        if script_at(i) == id { script.script_start(script_library(id), model_at(i)) }
+        i = i + 1
+    }
+}
+
+// A new script, ready to edit. Unity and Godot both offer this, and the point
+// is the same: the shape of a script is a thing to be given rather than
+// remembered, and a first one written from an empty file is mostly a guess at
+// what the two functions are called.
+//
+// The file is written and nothing else happens. Compiling it is the build step
+// that compiles every other script, and the editor picks the library up when
+// it appears, so the path from here is the same one an existing script takes.
+new_script() {
+    name = unused_script_name()
+    path = "resources/scripts/${name}.ae"
+    err = fs.write(path, script_template(name))
+    if err != "" {
+        say("could not write ${path}: ${err}")
+        return
+    }
+    say("wrote ${path}: build it with scripts/build_script.sh")
+}
+
+// A name nothing is using yet, so pressing the button twice does not overwrite
+// the file the first press made and the work someone did in it.
+unused_script_name() -> string {
+    attempt = 1
+    while attempt < 100 {
+        candidate = "script${attempt}"
+        if !fs.file_exists("resources/scripts/${candidate}.ae") { return candidate }
+        attempt = attempt + 1
+    }
+    return "script"
+}
+
+script_template(name: string) -> string {
+    // Built up rather than written as one literal: the template is source
+    // code, and a single string of it in here would be a wall of escapes that
+    // nobody could read or change.
+    body = "// ${name}\n"
+    body = string.concat(body, "//\n")
+    body = string.concat(body, "// Attached to an object in the editor, this runs on it every frame.\n")
+    body = string.concat(body, "// script_start is optional and runs once, when it is attached.\n\n")
+    body = string.concat(body, "import ae3d.core\n\n")
+    body = string.concat(body, "exports (script_start, script_update)\n\n")
+    body = string.concat(body, "script_start(m: *Model) {\n}\n\n")
+    body = string.concat(body, "script_update(m: *Model, delta: float) {\n")
+    body = string.concat(body, "    core.model_rotate(m, 0.0, delta * 30.0, 0.0)\n")
+    body = string.concat(body, "}\n")
+    return body
 }
 
 script_library(id: int) -> *Script {
@@ -1592,6 +1720,11 @@ draw_frame() {
     held = false
     if g_agent_on { held = agent.is_paused(g_agent_ctx as *Context) }
 
+    // Outside the held check: a frame the agent is holding is exactly when
+    // someone is looking at one object and rebuilding the script on it, and a
+    // reload that only happens while time is running would never arrive.
+    reload_changed_scripts()
+
     if !held {
         update_water(delta)
         run_scripts(delta)
@@ -1778,19 +1911,31 @@ actions_that_do_nothing() -> int {
         m = selected_model()
         position = m.position
         rotation = m.rotation
+        scale = m.scale
         was_script = script_at(g_selected)
 
         set_script(g_selected, scripts)
         run_scripts(0.1)
         run_scripts(0.1)
+        // Every way a script can move something, not just the two the editor
+        // used to know about. A script that scales was reported as doing
+        // nothing, because the check was written when the only behaviours were
+        // the three this file used to contain.
         still = core.abs_of(m.position.x - position.x) < 0.0001 &&
                 core.abs_of(m.position.y - position.y) < 0.0001 &&
                 core.abs_of(m.position.z - position.z) < 0.0001 &&
-                core.abs_of(m.rotation.y - rotation.y) < 0.000001
+                core.abs_of(m.scale.x - scale.x) < 0.0001 &&
+                core.abs_of(m.scale.y - scale.y) < 0.0001 &&
+                core.abs_of(m.scale.z - scale.z) < 0.0001 &&
+                core.abs_of(m.rotation.x - rotation.x) < 0.000001 &&
+                core.abs_of(m.rotation.y - rotation.y) < 0.000001 &&
+                core.abs_of(m.rotation.z - rotation.z) < 0.000001 &&
+                core.abs_of(m.rotation.w - rotation.w) < 0.000001
         if still { wrong = wrong + 1 }
 
         set_script(g_selected, was_script)
         core.model_set_position(m, position.x, position.y, position.z)
+        core.model_set_scale(m, scale.x, scale.y, scale.z)
         core.model_set_rotation(m, rotation)
         scripts = scripts + 1
     }
@@ -4207,6 +4352,13 @@ main() {
         none_btn = ui.btn(script_row, "None") callback { set_script(g_selected, SCRIPT_NONE) }
         style_button(none_btn, "action")
         scripts[SCRIPT_NONE] = none_btn
+
+        // Writing one is the other half of assigning one. The button leaves a
+        // file to edit and says where it is; building it is the same step that
+        // builds every script, and the editor picks the library up when it
+        // appears.
+        new_btn = ui.btn(panel_row(behaviour_body), "New script") callback { new_script() }
+        style_button(new_btn, "action")
 
         slot = 1
         while slot < g_script_count {

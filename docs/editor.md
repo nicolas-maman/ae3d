@@ -79,6 +79,15 @@ the section are the files in that directory, so adding a behaviour is adding a
 file and the editor does not have to be taught what it does. A script may also
 export `script_start`, which runs once when it is attached.
 
+**New script** writes a template into `resources/scripts` and says where it
+went. Building it is the same step that builds every other script, and the
+editor picks the library up when it appears.
+
+A script rebuilt while the editor is open is reopened without restarting it,
+and starts again on everything carrying it. The editor compiles nothing: it
+watches the library rather than the source, so a source saved with an error in
+it leaves the last good behaviour running until the build succeeds.
+
 The scene records the script by name, so a project that still has the file gets
 the assignment back when it loads. A scene naming a script the project does not
 have gets none rather than a wrong one.
