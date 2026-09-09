@@ -578,6 +578,17 @@ First working engine.
 
 ### Editor
 
+- A model added after the shading was chosen carries it. `apply_all` walks the
+  models that exist when it runs, so a cube added afterwards was lit by
+  whatever the shader defaults to while the panel said otherwise, and pressing
+  Quality then adding an object gave an object that was not at quality. In the
+  components scene the panel and the models disagreed on 29 settings.
+
+- A loaded scene's shading is what the switches show. The file carries each
+  model's uniforms, so a scene brings its own shading with it; the panel knew
+  nothing about it, and the next switch pressed applied the panel's answer to
+  every model and threw the loaded one away.
+
 - Attaching a behaviour can be undone. It recorded nothing, so undo after
   choosing Spin stepped back through whatever came before it and put that back
   instead, which is the same fault the gizmo drag had and the same one the

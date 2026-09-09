@@ -258,6 +258,13 @@ check_editor_run() {
         # driver can ask, the average has climbed to something plausible.
         fail "$name (the bar opened on $(sed -n 's/^first_fps //p' "$report") fps)"
         sed 's/^/        /' "$report"
+    elif [ "$(sed -n 's/^shading_disagrees //p' "$report")" != "0" ]; then
+        # The switches are a scene-wide control over per-model uniforms, so the
+        # two drift apart in both directions: a model added after a switch was
+        # flipped never got it, and a loaded scene brings settings the panel
+        # knows nothing about.
+        fail "$name ($(sed -n 's/^shading_disagrees //p' "$report") model setting(s) disagree with the shading panel)"
+        sed 's/^/        /' "$report"
     elif [ "$(sed -n 's/^unreached_shading //p' "$report")" != "0" ]; then
         # A shading switch that sets a global and reaches no model looks
         # exactly like one that works: the only witness is a frame nobody
