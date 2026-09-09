@@ -1,0 +1,436 @@
+// Keyframe animation: clips, channels, samplers and playback.
+//
+// ae3d had none. The loader reads OBJ, which cannot carry animation, and the
+// MESH container stores static geometry with optional instance matrices and has
+// nowhere to put a keyframe. So the thing #181 has to trace through the pipeline
+// did not exist to be traced, and the Blender half of #180 had nothing to export
+// into. This is that thing.
+//
+// The shape is the one every interchange format agrees on, because it is the one
+// glTF settled on and Blender exports: a clip is a set of channels, a channel
+// drives one property of one target from a list of keyframes, and a sampler
+// turns a time into a value. Matching it means the exporter is a translation
+// rather than an interpretation.
+//
+// Rigid transform channels only -- translation, rotation, scale. Skinning is a
+// different problem with a different cost, and it needs the renderer to grow
+// bone matrices before any of it is visible; the pipeline is worth proving end
+// to end on what the engine can already draw.
+
+import std.heap
+import std.list
+import std.string
+import ae3d.core
+
+exports (
+    Key, Channel, Clip, Player,
+    TRANSLATION, ROTATION, SCALE,
+    STEP, LINEAR,
+    clip_new, clip_free, clip_add_channel, clip_channel_count, clip_channel,
+    clip_name, clip_duration,
+    channel_new, channel_free, channel_add_key, channel_key_count, channel_key,
+    channel_target, channel_interpolation, channel_duration,
+    sample_vec3, sample_quat,
+    player_new, player_free, player_clip, player_time, player_set_time,
+    player_speed, player_set_speed, player_looping, player_set_looping,
+    player_playing, player_play, player_pause, player_rewind,
+    advance, apply, last_error
+)
+
+// What a channel drives.
+const TRANSLATION = 0
+const ROTATION    = 1
+const SCALE       = 2
+
+// How a value between two keys is found.
+const STEP   = 0
+const LINEAR = 1
+
+// One keyframe. Four components because a rotation needs four and a vector
+// ignores the fourth; a key per type would double the code to save four bytes
+// on a structure there are thousands of, not millions.
+struct Key {
+    time: float
+    x: float
+    y: float
+    z: float
+    w: float
+}
+
+struct Channel {
+    target: int
+    interpolation: int
+    duration: float
+    keys: ptr
+}
+
+struct Clip {
+    name: string
+    channels: ptr
+}
+
+struct Player {
+    clip: *Clip
+    time: float
+    speed: float
+    looping: bool
+    playing: bool
+}
+
+var g_error = ""
+var g_error_owned = false
+
+last_error() -> string { return g_error }
+
+set_error(reason: string, detail: string) {
+    if g_error_owned { string.free(g_error) }
+    g_error = string.concat(reason, detail)
+    g_error_owned = true
+}
+
+// --- channels -----------------------------------------------------------
+
+channel_new(target: int, interpolation: int) -> *Channel {
+    c = heap.new(Channel)
+    c.target = target
+    c.interpolation = interpolation
+    c.duration = 0.0
+    c.keys = list.new()
+    return c
+}
+
+channel_free(c: *Channel) {
+    if c == null { return }
+    if c.keys != null {
+        i = 0
+        count = list.size(c.keys)
+        while i < count {
+            key = list.get_raw(c.keys, i) as *Key
+            if key != null { heap.free(key) }
+            i = i + 1
+        }
+        list.free(c.keys)
+    }
+    heap.free(c)
+}
+
+// Keys go in in ascending time and are rejected otherwise. The sampler is a
+// walk that assumes order, and an unordered key does not produce a wrong
+// picture so much as a silently missing one -- better to refuse it at the door
+// than to sort behind the caller's back and hide an exporter bug.
+channel_add_key(c: *Channel, time: float, x: float, y: float, z: float, w: float) -> bool {
+    if c == null { return false }
+    count = list.size(c.keys)
+    if count > 0 {
+        previous = list.get_raw(c.keys, count - 1) as *Key
+        if time < previous.time {
+            set_error("keyframes must be added in ascending time order, near t=", "")
+            return false
+        }
+    }
+    key = heap.new(Key)
+    key.time = time
+    key.x = x
+    key.y = y
+    key.z = z
+    key.w = w
+    list.add_raw(c.keys, key as ptr)
+    if time > c.duration { c.duration = time }
+    return true
+}
+
+channel_key_count(c: *Channel) -> int {
+    if c == null { return 0 }
+    return list.size(c.keys)
+}
+
+channel_key(c: *Channel, index: int) -> *Key {
+    if c == null { return null }
+    if index < 0 || index >= list.size(c.keys) { return null }
+    return list.get_raw(c.keys, index) as *Key
+}
+
+channel_target(c: *Channel) -> int {
+    if c == null { return TRANSLATION }
+    return c.target
+}
+
+channel_interpolation(c: *Channel) -> int {
+    if c == null { return LINEAR }
+    return c.interpolation
+}
+
+channel_duration(c: *Channel) -> float {
+    if c == null { return 0.0 }
+    return c.duration
+}
+
+// --- clips --------------------------------------------------------------
+
+clip_new(name: string) -> *Clip {
+    c = heap.new(Clip)
+    c.name = name
+    c.channels = list.new()
+    return c
+}
+
+clip_free(c: *Clip) {
+    if c == null { return }
+    if c.channels != null {
+        i = 0
+        count = list.size(c.channels)
+        while i < count {
+            channel_free(list.get_raw(c.channels, i) as *Channel)
+            i = i + 1
+        }
+        list.free(c.channels)
+    }
+    heap.free(c)
+}
+
+clip_add_channel(c: *Clip, channel: *Channel) {
+    if c == null || channel == null { return }
+    list.add_raw(c.channels, channel as ptr)
+}
+
+clip_channel_count(c: *Clip) -> int {
+    if c == null { return 0 }
+    return list.size(c.channels)
+}
+
+clip_channel(c: *Clip, index: int) -> *Channel {
+    if c == null { return null }
+    if index < 0 || index >= list.size(c.channels) { return null }
+    return list.get_raw(c.channels, index) as *Channel
+}
+
+clip_name(c: *Clip) -> string {
+    if c == null { return "" }
+    return c.name
+}
+
+// The longest channel. Computed rather than stored because a channel may gain
+// keys after it was added to the clip, and a duration that was right when the
+// clip was assembled and wrong afterwards is worse than one that costs a walk
+// over a handful of channels.
+clip_duration(c: *Clip) -> float {
+    if c == null { return 0.0 }
+    longest = 0.0
+    i = 0
+    count = list.size(c.channels)
+    while i < count {
+        channel = list.get_raw(c.channels, i) as *Channel
+        if channel != null && channel.duration > longest { longest = channel.duration }
+        i = i + 1
+    }
+    return longest
+}
+
+// --- sampling -----------------------------------------------------------
+
+// The key at or before t, as an index. -1 when the channel has no keys.
+//
+// A linear walk. Clips here have keys in the tens, and a binary search over ten
+// elements is slower than the walk and harder to be sure of.
+span_at(c: *Channel, t: float) -> int {
+    count = list.size(c.keys)
+    if count == 0 { return -1 }
+    i = count - 1
+    while i > 0 {
+        key = list.get_raw(c.keys, i) as *Key
+        if key.time <= t { return i }
+        i = i - 1
+    }
+    return 0
+}
+
+// Where t sits between key i and key i+1, as 0..1. Zero when there is no next
+// key or the two share a time, which is what makes a duplicated timestamp hold
+// its value rather than divide by zero.
+blend_at(c: *Channel, index: int, t: float) -> float {
+    count = list.size(c.keys)
+    if index < 0 || index + 1 >= count { return 0.0 }
+    a = list.get_raw(c.keys, index) as *Key
+    b = list.get_raw(c.keys, index + 1) as *Key
+    span = b.time - a.time
+    if span <= 0.0 { return 0.0 }
+    u = (t - a.time) / span
+    if u < 0.0 { return 0.0 }
+    if u > 1.0 { return 1.0 }
+    return u
+}
+
+sample_vec3(c: *Channel, t: float) -> Vec3 {
+    if c == null { return core.vec3(0.0, 0.0, 0.0) }
+    index = span_at(c, t)
+    if index < 0 { return core.vec3(0.0, 0.0, 0.0) }
+
+    a = list.get_raw(c.keys, index) as *Key
+    if c.interpolation == STEP { return core.vec3(a.x, a.y, a.z) }
+    if index + 1 >= list.size(c.keys) { return core.vec3(a.x, a.y, a.z) }
+
+    b = list.get_raw(c.keys, index + 1) as *Key
+    u = blend_at(c, index, t)
+    return core.v3_lerp(core.vec3(a.x, a.y, a.z), core.vec3(b.x, b.y, b.z), u)
+}
+
+sample_quat(c: *Channel, t: float) -> Quat {
+    if c == null { return core.quat_ident() }
+    index = span_at(c, t)
+    if index < 0 { return core.quat_ident() }
+
+    a = list.get_raw(c.keys, index) as *Key
+    if c.interpolation == STEP { return Quat { x: a.x, y: a.y, z: a.z, w: a.w } }
+    if index + 1 >= list.size(c.keys) { return Quat { x: a.x, y: a.y, z: a.z, w: a.w } }
+
+    b = list.get_raw(c.keys, index + 1) as *Key
+    u = blend_at(c, index, t)
+
+    // Normalised lerp along the shorter arc. q and -q are the same rotation, so
+    // without the sign check a pair that happens to be stored on opposite sides
+    // of the hypersphere takes the long way round: a turn that should be a few
+    // degrees spins most of the way instead. Cheaper than slerp and identical
+    // at the end points, which is what a keyframe cares about.
+    bx = b.x
+    by = b.y
+    bz = b.z
+    bw = b.w
+    if (a.x * bx + a.y * by + a.z * bz + a.w * bw) < 0.0 {
+        bx = -bx
+        by = -by
+        bz = -bz
+        bw = -bw
+    }
+    blended = Quat {
+        x: a.x + (bx - a.x) * u,
+        y: a.y + (by - a.y) * u,
+        z: a.z + (bz - a.z) * u,
+        w: a.w + (bw - a.w) * u
+    }
+    return core.quat_normalize(blended)
+}
+
+// --- playback -----------------------------------------------------------
+
+player_new(clip: *Clip) -> *Player {
+    p = heap.new(Player)
+    p.clip = clip
+    p.time = 0.0
+    p.speed = 1.0
+    p.looping = true
+    p.playing = true
+    return p
+}
+
+// The clip is not the player's to free. One clip drives many players, which is
+// the point of separating them.
+player_free(p: *Player) {
+    if p != null { heap.free(p) }
+}
+
+player_clip(p: *Player) -> *Clip {
+    if p == null { return null }
+    return p.clip
+}
+
+player_time(p: *Player) -> float {
+    if p == null { return 0.0 }
+    return p.time
+}
+
+player_set_time(p: *Player, t: float) {
+    if p == null { return }
+    p.time = t
+}
+
+player_speed(p: *Player) -> float {
+    if p == null { return 0.0 }
+    return p.speed
+}
+
+player_set_speed(p: *Player, speed: float) {
+    if p == null { return }
+    p.speed = speed
+}
+
+player_looping(p: *Player) -> bool {
+    if p == null { return false }
+    return p.looping
+}
+
+player_set_looping(p: *Player, looping: bool) {
+    if p == null { return }
+    p.looping = looping
+}
+
+player_playing(p: *Player) -> bool {
+    if p == null { return false }
+    return p.playing
+}
+
+player_play(p: *Player) {
+    if p == null { return }
+    p.playing = true
+}
+
+player_pause(p: *Player) {
+    if p == null { return }
+    p.playing = false
+}
+
+player_rewind(p: *Player) {
+    if p == null { return }
+    p.time = 0.0
+}
+
+// Moves the playhead. A clip with no duration holds at zero rather than
+// dividing by it, and a non-looping clip stops at its end and reports that it
+// is no longer playing, so a caller can tell "finished" from "paused".
+advance(p: *Player, delta: float) {
+    if p == null || !p.playing || p.clip == null { return }
+    duration = clip_duration(p.clip)
+    if duration <= 0.0 {
+        p.time = 0.0
+        return
+    }
+    p.time = p.time + delta * p.speed
+    if p.looping {
+        while p.time > duration { p.time = p.time - duration }
+        while p.time < 0.0 { p.time = p.time + duration }
+        return
+    }
+    if p.time >= duration {
+        p.time = duration
+        p.playing = false
+    }
+    if p.time < 0.0 {
+        p.time = 0.0
+        p.playing = false
+    }
+}
+
+// Writes the sampled transform onto the model. Only the properties the clip
+// actually drives: a clip with a rotation channel and nothing else leaves the
+// model where it was put rather than snapping it to the origin.
+apply(p: *Player, m: *Model) {
+    if p == null || m == null || p.clip == null { return }
+    i = 0
+    count = clip_channel_count(p.clip)
+    while i < count {
+        c = clip_channel(p.clip, i)
+        if c != null && channel_key_count(c) > 0 {
+            if c.target == TRANSLATION {
+                v = sample_vec3(c, p.time)
+                core.model_set_position(m, v.x, v.y, v.z)
+            }
+            if c.target == SCALE {
+                v = sample_vec3(c, p.time)
+                core.model_set_scale(m, v.x, v.y, v.z)
+            }
+            if c.target == ROTATION {
+                core.model_set_rotation(m, sample_quat(c, p.time))
+            }
+        }
+        i = i + 1
+    }
+}
