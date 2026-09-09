@@ -664,6 +664,18 @@ First working engine.
   framed their subject in the bottom third. `water` is left alone: its camera
   looks at a horizon on purpose.
 
+### Ownership
+
+- The engine borrows a model, a player borrows its clip, and the assets module
+  keeps a record of where each loaded model came from. That last one kept every
+  model it had ever described reachable, which hid the fact that nothing was
+  freeing them: `assets.provenance_release` ends the table, `provenance_forget`
+  drops one record when its model dies, and the suites and examples that load a
+  manifest now release what they made. The leak check reads the same on this
+  branch as on main.
+- `agent.context_free` frees the queue of reads still waiting on a frame. A
+  program that stopped mid-exchange lost the queue and everything in it.
+
 ### Editor
 
 - A script can set itself up. `script_start` runs once when a script is

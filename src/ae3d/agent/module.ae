@@ -215,7 +215,20 @@ answer_one_read(c: *Context, d: *Deferred) {
 }
 
 context_free(c: *Context) {
-    if c != null { heap.free(c) }
+    if c == null { return }
+    // A read waiting on a frame that never arrived is still in the queue: the
+    // context outlives the answer only when the program stops mid-exchange.
+    if c.deferred != null {
+        count = list.size(c.deferred)
+        i = 0
+        while i < count {
+            d = list.get_raw(c.deferred, i) as *Deferred
+            if d != null { heap.free(d) }
+            i = i + 1
+        }
+        list.free(c.deferred)
+    }
+    heap.free(c)
 }
 
 start() -> bool {
