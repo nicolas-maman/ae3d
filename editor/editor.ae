@@ -37,7 +37,12 @@ const WINDOW_H = 860
 const ORBIT_SPEED = 0.35
 const ZOOM_STEP = 1.12
 const DRAG_SLOP = 3.0
-const VALUE_COLUMN = 54
+const VALUE_COLUMN = 46
+// The label column, so every row's control starts at the same x whatever the
+// caption says. Ragged control edges are most of what makes a panel look
+// unfinished.
+const LABEL_COLUMN = 92
+const HEX_COLUMN = 64
 // A numeric field, and the coloured axis letter that labels one inside a
 // vector row. Three of them plus their letters and gaps are what sets the
 // inspector's width.
@@ -118,6 +123,13 @@ var g_probe_action = 0
 var g_probe_primary = 0
 var g_probe_danger = 0
 var g_probe_field = 0
+// The transform-mode buttons on the viewport. The mode was reachable only by
+// pressing W, E or R, which is the convention but not a thing a panel can show
+// you, so nothing on screen said which one was live.
+var g_mode_move = 0
+var g_mode_rotate = 0
+var g_mode_scale = 0
+var g_mode_hint = 0
 var g_history: ptr = null
 // When the last property edit was recorded. A drag delivers a callback per
 // frame, so edits that stop arriving mean the adjustment is over and the undo
@@ -1045,6 +1057,7 @@ settle_layout() {
     // selection, so it came out an empty outline while the readback happily
     // reported the colour it had been given.
     refresh_swatch()
+    refresh_mode_buttons()
     g_layout_settled = true
 }
 
@@ -1843,21 +1856,27 @@ vector_row(parent: int, name: string, first: int) {
 
 // A bounded value, where the whole range is meaningful and dragging across it
 // is the point: a colour channel, a roughness, a field of view.
+// Label, control and value on one line, which is how all three of the editors
+// this borrows from draw a bounded setting. Stacking the slider under its own
+// caption cost two lines a row and read like a page of preferences rather than
+// an inspector: eleven settings filled the panel twice over.
 inspector_row(parent: int, name: string, low: float, high: float,
               initial: float, index: int) {
     row = ui.hstack(parent, 8)
     ui.add_css_class(row, "row")
     caption = ui.text(row, name)
     ui.add_css_class(caption, "label")
-    ui.spacer(row)
+    ui.width(caption, LABEL_COLUMN)
+
+    slider = ui.slider(row, low, high, initial) callback |value: float| {
+        apply_property(index, value)
+    }
+    ui.height(slider, 16)
+    ui.fill_width(slider)
+
     readout = ui.text(row, number(initial))
     ui.add_css_class(readout, "value")
     ui.width(readout, VALUE_COLUMN)
-
-    slider = ui.slider(parent, low, high, initial) callback |value: float| {
-        apply_property(index, value)
-    }
-    ui.height(slider, 18)
 
     sliders = g_sliders as int[]
     readouts = g_readouts as int[]
@@ -2621,9 +2640,35 @@ gizmo_drag(x: float, y: float, dx: float, dy: float) {
     sync_inspector()
 }
 
+style_mode_button(handle: int) {
+    ui.height(handle, 22)
+    ui.width(handle, 66)
+    ui.add_css_class(handle, "action")
+}
+
+// The live mode wears the accent. Set as a colour rather than by adding a
+// class: the sheet styles a widget when it is created, and a class added
+// afterwards does not repaint it, which left all three buttons looking the
+// same whatever the mode was.
+paint_mode_button(handle: int, active: bool) {
+    if handle == 0 { return }
+    if active {
+        ui.style_bg_color(handle, 0.184, 0.435, 0.922, 1.0)
+    } else {
+        ui.style_bg_color(handle, 0.173, 0.192, 0.227, 1.0)
+    }
+}
+
+refresh_mode_buttons() {
+    paint_mode_button(g_mode_move, g_gizmo_mode == GIZMO_TRANSLATE)
+    paint_mode_button(g_mode_rotate, g_gizmo_mode == GIZMO_ROTATE)
+    paint_mode_button(g_mode_scale, g_gizmo_mode == GIZMO_SCALE)
+}
+
 set_gizmo_mode(mode: int) {
     mark_dirty()
     g_gizmo_mode = mode
+    refresh_mode_buttons()
     if mode == GIZMO_TRANSLATE { say("move: drag an axis") }
     if mode == GIZMO_ROTATE { say("rotate: drag a ring") }
     if mode == GIZMO_SCALE { say("scale: drag a handle") }
@@ -2819,6 +2864,23 @@ main() {
 
         stage = ui.vstack(body, 0)
         ui.fill_height(stage)
+
+        // A strip over the viewport carrying the transform modes, the way
+        // every editor this borrows from does. The keys still work; this is
+        // what makes the live one visible.
+        viewport_bar = ui.hstack(stage, 6)
+        ui.add_css_class(viewport_bar, "bar")
+        ui.fill_width(viewport_bar)
+        g_mode_move = ui.btn(viewport_bar, "Move") callback { set_gizmo_mode(GIZMO_TRANSLATE) }
+        style_mode_button(g_mode_move)
+        g_mode_rotate = ui.btn(viewport_bar, "Rotate") callback { set_gizmo_mode(GIZMO_ROTATE) }
+        style_mode_button(g_mode_rotate)
+        g_mode_scale = ui.btn(viewport_bar, "Scale") callback { set_gizmo_mode(GIZMO_SCALE) }
+        style_mode_button(g_mode_scale)
+        ui.spacer(viewport_bar)
+        g_mode_hint = ui.text(viewport_bar, "W move   E rotate   R scale   F frame")
+        ui.add_css_class(g_mode_hint, "stats")
+
         g_canvas = ui.canvas_create(stage, g_view_w, g_view_h)
         ui.fill_width(g_canvas)
         ui.fill_height(g_canvas)
@@ -2962,7 +3024,9 @@ main() {
         ui.height(g_chip, 14)
         g_swatch = ui.text(swatch_row, "")
         ui.add_css_class(g_swatch, "value")
-        ui.width(g_swatch, VALUE_COLUMN)
+        // Wider than a number's column: a hex colour is seven characters and
+        // the value column is sized for four, so it came out cut off.
+        ui.width(g_swatch, HEX_COLUMN)
 
         inspector_row(right, "red", 0.0, 1.0, 0.8, 4)
         inspector_row(right, "green", 0.0, 1.0, 0.5, 5)
