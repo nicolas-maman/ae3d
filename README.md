@@ -173,9 +173,26 @@ everything else.
 | `lights.ae` | PBR material presets cycling with the light type, bloom, transparency |
 | `water.ae` | A 256x256 Gerstner-wave ocean, 65536 vertices |
 | `voxel_world.ae` | 960464 voxels of Perlin terrain, 93030 visible, one draw call |
-| `black_hole.ae` | 200000 particles under Verlet integration, two instanced draws |
+| `black_hole.ae` | Kerr geodesics integrated per pixel in one screen quad: a spinning hole, its asymmetric shadow, a lensed disc and a lensed sky. The heaviest scene here, and the one with answers to check against — [docs/black-hole.md](docs/black-hole.md) |
+| `particle_disc.ae` | The same scene as an N-body: 200000 particles under Verlet integration in one instanced draw, coloured per instance |
 | `sand.ae` | 250000 grains falling and settling, click to scatter them |
 | `smooth_terrain.ae` | The same terrain meshed with surface nets, 67590 triangles |
+
+### Examples as instruments
+
+The bigger examples are not only scenes. Each is picked to push one part of the
+engine harder than anything else does, and to have an answer of its own that can
+be checked rather than admired, so that a regression shows up as a number and
+not as a picture somebody has to notice.
+
+`black_hole.ae` is the furthest along. It has a benchmark
+(`benchmarks/bench_black_hole.ae`) that reports what a frame costs and where,
+because a windowed run is pinned to the display's refresh and hides everything
+under 6.9 ms; and a test (`tests/test_blackhole.ae`) that measures the shadow
+against `sqrt(27) M`, which general relativity fixes and this renderer does not
+get a say in. What that has already found in the engine — an emissive surface
+that could not carry a colour, a bulk instancing path with no test behind it —
+is written up in [docs/black-hole.md](docs/black-hole.md).
 
 ## Layout
 
@@ -200,6 +217,9 @@ src/ae3d/    Aether modules
 tests/      test suites, each a program that prints its own verdict
 benchmarks/ per-frame cost measured without a window
 examples/   runnable scenes
+  lib/        code shared between an example, its benchmark and its test.
+              Not engine surface: a black hole renderer is a tech demo, and
+              putting it in src/ae3d would have claimed otherwise
 ```
 
 ## How it is put together

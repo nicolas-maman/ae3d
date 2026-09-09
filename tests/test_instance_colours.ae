@@ -1,0 +1,183 @@
+// Per-instance colour, and the one draw call it buys.
+//
+// Two swarms that differ only in colour are one model, not two: the colour is a
+// per-instance attribute, so a red half and a blue half go to the GPU in a
+// single glDrawElementsInstanced. examples/black_hole.ae used to spend a draw
+// call per colour for exactly this shape.
+//
+// Also pins the emissive path. A material with exposure past 10 bypasses
+// shading -- it is the light source rather than something lit by one -- and
+// that branch used to return hardcoded white, which discarded diffuseColor, the
+// texture and the per-instance tint alike. An emissive model was the one thing
+// in the engine that could not be given a colour, which is what an accretion
+// disc coloured by its own temperature needs most.
+
+import std.mem
+import ae3d.core
+import ae3d.gl
+import ae3d.offscreen
+import ae3d.loader
+
+const WIDTH = 320
+const HEIGHT = 200
+const COUNT = 512
+const SPREAD = 260.0
+
+extern calloc(count: int, size: int) -> ptr
+extern free(block: ptr)
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// Total red and total blue over one half of the frame. The two swarms sit on
+// opposite sides of the origin, so which half is redder says whether the
+// per-instance colour reached the shader at all.
+var g_red = 0
+var g_blue = 0
+
+measure_half(pixels: ptr, from_x: int, to_x: int) {
+    g_red = 0
+    g_blue = 0
+    y = 0
+    while y < HEIGHT {
+        x = from_x
+        while x < to_x {
+            index = (y * WIDTH + x) * 4
+            g_red = g_red + mem.get_byte(pixels, index)
+            g_blue = g_blue + mem.get_byte(pixels, index + 2)
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+main() {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("instance_colours: SKIP no OpenGL context")
+        return
+    }
+
+    renderer = gl.renderer_new()
+    backend = gl.backend(renderer)
+    if !core.backend_init(&backend, context, WIDTH, HEIGHT) {
+        println("instance_colours: SKIP the OpenGL backend would not initialise")
+        return
+    }
+
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    gl.renderer_set_clear_color(renderer, 0.0, 0.0, 0.0)
+
+    swarm = loader.sphere(1.0, 10, 8)
+    core.model_set_scale(swarm, 9.0, 9.0, 9.0)
+    core.model_matte(swarm, 1.0, 1.0, 1.0)
+    // Past 10: emissive, so the frame is the instance colours themselves rather
+    // than the instance colours filtered through whatever the light is doing.
+    core.model_set_exposure(swarm, 14.0)
+
+    if !core.model_enable_instancing(swarm, COUNT) {
+        println("instance_colours: SKIP instancing is unavailable")
+        return
+    }
+    if !core.model_enable_instance_colors(swarm) {
+        println("instance_colours: SKIP per-instance colours are unavailable")
+        return
+    }
+
+    positions = calloc(COUNT * 3, 8)
+    colours = calloc(COUNT * 3, 8)
+    xyz = positions as float[]
+    rgb = colours as float[]
+
+    // Left of the origin: red. Right of it: blue. One model, both colours.
+    i = 0
+    while i < COUNT {
+        side = 0.0 - 1.0
+        if i % 2 == 0 { side = 1.0 }
+        row = (i / 2) % 16
+        column = (i / 32) % 16
+
+        xyz[i * 3] = side * (60.0 + (column * SPREAD) / 16.0)
+        xyz[i * 3 + 1] = (row - 8) * 15.0
+        xyz[i * 3 + 2] = 0.0
+
+        if side < 0.0 {
+            rgb[i * 3] = 1.0
+            rgb[i * 3 + 1] = 0.05
+            rgb[i * 3 + 2] = 0.05
+        } else {
+            rgb[i * 3] = 0.05
+            rgb[i * 3 + 1] = 0.05
+            rgb[i * 3 + 2] = 1.0
+        }
+        i = i + 1
+    }
+
+    core.model_set_instance_positions(swarm, positions, COUNT)
+    core.model_set_instance_colors(swarm, colours, COUNT)
+    core.backend_add_model(&backend, swarm)
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 0.0, 620.0))
+    core.camera_set_far(cam, 40000.0)
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+
+    key = core.light_directional(core.vec3(0.0, 0.0, 0.0 - 1.0),
+                                 core.vec3(1.0, 1.0, 1.0), 1.0)
+    key.ambient_strength = 0.3
+    gl.renderer_add_light(renderer, key)
+
+    core.backend_render(&backend, cam, key)
+    pixels = offscreen.target_pixels(target)
+    if pixels == null {
+        println("instance_colours: SKIP no pixels")
+        return
+    }
+
+    // The whole point: two colours, one draw.
+    check("both swarms go out in one draw call", gl.renderer_draw_calls(renderer) == 1)
+
+    measure_half(pixels, 0, WIDTH / 2)
+    left_red = g_red
+    left_blue = g_blue
+    measure_half(pixels, WIDTH / 2, WIDTH)
+    right_red = g_red
+    right_blue = g_blue
+
+    check("something was drawn", left_red + left_blue + right_red + right_blue > 0)
+    check("the left swarm is red", left_red > left_blue * 3)
+    check("the right swarm is blue", right_blue > right_red * 3)
+
+    // An emissive surface that ignored its colour would render both halves the
+    // same, so a frame that is red on one side and blue on the other is the
+    // proof that the emissive branch honours diffuseColor and InstanceColor.
+    check("emissive keeps the per-instance colour rather than going white",
+          left_red > right_red * 2 && right_blue > left_blue * 2)
+
+    println("  left r=${left_red} b=${left_blue}, right r=${right_red} b=${right_blue}")
+
+    core.backend_cleanup(&backend)
+    offscreen.target_destroy(target)
+    offscreen.context_destroy(context)
+    core.model_free(swarm)
+    gl.renderer_free(renderer)
+    core.camera_free(cam)
+    core.light_free(key)
+    free(positions)
+    free(colours)
+
+    if failures == 0 {
+        println("instance_colours: all checks passed")
+    } else {
+        println("instance_colours: ${failures} failure(s)")
+    }
+}

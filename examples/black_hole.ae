@@ -1,192 +1,205 @@
-// Two hundred thousand particles in orbit, integrated with Verlet and drawn as
-// two instanced calls.
+// A spinning black hole, drawn by following light backwards to its source.
 //
-// Particle state lives in plain allocations viewed as float[], and each frame
-// uploads every position in one call rather than one call per particle: at this
-// count the difference is the whole frame budget.
+// Every pixel is one photon, integrated backwards from the eye through curved
+// spacetime until it reaches the accretion disc, crosses the horizon, or escapes
+// to the sky. The whole frame is a single screen quad -- one draw call.
+//
+// The rendering itself lives in ae3d.blackhole, because three callers want it:
+// this example draws it, benchmarks/bench_black_hole.ae times it, and
+// tests/test_blackhole.ae checks its shadow against the radius general
+// relativity says it should have. What is left here is the scene: where the
+// camera goes, and what the keys do.
+//
+// The camera orbits by default. The lensing changes character with inclination
+// -- steeper and the far side stops arcing over the shadow, nearly edge-on and
+// it closes towards a ring -- and a still camera shows one slice of that.
 //
 //   ./build.sh examples/black_hole.ae && ./build/black_hole
+//
+//   SPACE   hand the camera over to WASD and the mouse, and back
+//   1 .. 6  quality, 1 highest. Also takes it off the frame-time guard.
+//           Rays per pixel first, then the scale the scene is drawn at
 
-import std.list
 import ae3d.core
 import ae3d.platform
 import ae3d.engine
 import ae3d.gl
-import ae3d.loader
+import blackhole
 
-extern calloc(count: int, size: int) -> ptr
-extern free(block: ptr)
+// 0 is Schwarzschild, 0.998 the Thorne limit that accretion holds a real hole
+// to. The horizon, the innermost stable orbit, the orbital speeds, the disc's
+// temperature and the shape of the shadow all follow from it.
+const SPIN = 0.9
 
-const PER_SWARM = 100000
-const HORIZON = 50.0
-const MASS = 1400000.0
-const STEP = 0.016
+const ORBIT_RADIUS = 58.0
+const ORBIT_HEIGHT = 11.0
+const ORBIT_PERIOD = 75.0
 
-var g_red_model: ptr = null
-var g_blue_model: ptr = null
-var g_red_position: ptr = null
-var g_red_previous: ptr = null
-var g_blue_position: ptr = null
-var g_blue_previous: ptr = null
-var g_alive = 0
-var g_seed = 987654321
+var g_screen: ptr = null
+var g_time = 0.0
+var g_free = false
+var g_space_was_down = false
+// Quality is a ladder rather than two loose knobs, because the two do not trade
+// off against each other evenly. Rays per pixel buys edges; render scale buys
+// everything, since cost is dominated by pixels shaded and half scale is a
+// quarter of the work. So the ladder spends rays first and only then starts
+// drawing the scene smaller than the window.
+//
+// The bottom rung is meant for hardware that has no business running a per-pixel
+// geodesic integration at all, and it still runs.
+const LEVELS = 6
 
-next_random() -> float {
-    g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
-    return (g_seed * 1.0) / 2147483647.0
+var g_level = 0
+var g_taps = 4
+var g_steps = 400
+
+level_taps(level: int) -> int {
+    if level <= 0 { return 4 }
+    if level == 1 { return 2 }
+    return 1
 }
 
-random_angle() -> float {
-    return next_random() * core.TWO_PI
+level_steps(level: int) -> int {
+    if level <= 2 { return 400 }
+    if level == 3 { return 300 }
+    if level == 4 { return 220 }
+    return 140
 }
 
-// A circular orbit needs speed sqrt(GM / r) perpendicular to the radius; the
-// swarm is seeded on that so it settles into a disc instead of collapsing.
-seed_particle(position: float[], previous: float[], index: int) {
-    radius = 140.0 + next_random() * 620.0
-    angle = random_angle()
-    height = (next_random() - 0.5) * 90.0
-
-    x = radius * core.cos_of(angle)
-    z = radius * core.sin_of(angle)
-    speed = core.sqrt_of(MASS / radius)
-
-    slot = index * 3
-    position[slot] = x
-    position[slot + 1] = height
-    position[slot + 2] = z
-    previous[slot] = x + speed * core.sin_of(angle) * STEP
-    previous[slot + 1] = height
-    previous[slot + 2] = z - speed * core.cos_of(angle) * STEP
+level_scale(level: int) -> float {
+    if level <= 2 { return 1.0 }
+    if level == 3 { return 0.75 }
+    if level == 4 { return 0.5 }
+    return 0.35
 }
 
-step_swarm(position: float[], previous: float[], delta: float) -> int {
-    total = PER_SWARM
+// Falls back on its own when the frame runs long, and never climbs again by
+// itself. Climbing needs an estimate of what one ray costs, and under vsync
+// there is none to be had -- the frame time is quantised to the refresh, so one
+// ray and two can measure identical and the arithmetic reaches the wrong
+// conclusion. The number keys take over instead.
+//
+// The first frame is judged on its own, because on a slow machine it is the
+// expensive one and the point is not to render a second like it.
+var g_auto = true
+var g_watched = 0
+var g_elapsed = 0.0
+const BUDGET = 0.024
+const HOPELESS = 0.1
 
-    step = delta
-    if step > 0.033 { step = 0.033 }
-    scale = step * step
-
-    alive = 0
-    i = 0
-    while i < total {
-        slot = i * 3
-        x = position[slot]
-        y = position[slot + 1]
-        z = position[slot + 2]
-
-        distance_sq = x * x + y * y + z * z
-        if distance_sq < HORIZON * HORIZON {
-            seed_particle(position, previous, i)
-            i = i + 1
-            continue
-        }
-        alive = alive + 1
-
-        distance = core.sqrt_of(distance_sq)
-        pull = 0.0 - MASS / (distance_sq * distance)
-
-        next_x = x + x - previous[slot] + x * pull * scale
-        next_y = y + y - previous[slot + 1] + y * pull * scale
-        next_z = z + z - previous[slot + 2] + z * pull * scale
-
-        previous[slot] = x
-        previous[slot + 1] = y
-        previous[slot + 2] = z
-        position[slot] = next_x
-        position[slot + 1] = next_y
-        position[slot + 2] = next_z
-
-        i = i + 1
-    }
-    return alive
+apply_level(e: *Engine, screen: *Model, level: int) {
+    wanted = level
+    if wanted < 0 { wanted = 0 }
+    if wanted > LEVELS - 1 { wanted = LEVELS - 1 }
+    g_level = wanted
+    g_taps = level_taps(g_level)
+    g_steps = level_steps(g_level)
+    blackhole.set_quality(screen, g_taps, g_steps)
+    gl.renderer_set_render_scale(engine.engine_gl_renderer(e), level_scale(g_level))
+    println("  level ${g_level}: ${g_taps} ray(s), ${g_steps} steps, scale ${level_scale(g_level)}")
 }
 
 on_start(data: ptr) {
     e = data as *Engine
-    bytes = PER_SWARM * 3
 
-    g_red_position = calloc(bytes, 8)
-    g_red_previous = calloc(bytes, 8)
-    g_blue_position = calloc(bytes, 8)
-    g_blue_previous = calloc(bytes, 8)
-    if g_red_position == null || g_red_previous == null ||
-       g_blue_position == null || g_blue_previous == null {
-        println("could not allocate particle state")
-        return
-    }
-
-    red_position = g_red_position as float[]
-    red_previous = g_red_previous as float[]
-    blue_position = g_blue_position as float[]
-    blue_previous = g_blue_previous as float[]
-
-    i = 0
-    while i < PER_SWARM {
-        seed_particle(red_position, red_previous, i)
-        seed_particle(blue_position, blue_previous, i)
-        i = i + 1
-    }
-
-    red = loader.load_obj("resources/obj/Sphere_Low.obj", true)
-    blue = loader.load_obj("resources/obj/Sphere_Low.obj", true)
-    if red == null || blue == null {
-        println("could not load the particle mesh: ${loader.last_error()}")
-        return
-    }
-
-    core.model_set_scale(red, 1.6, 1.6, 1.6)
-    core.model_set_scale(blue, 1.6, 1.6, 1.6)
-    core.model_polished_metal(red, 1.0, 0.28, 0.05)
-    core.model_polished_metal(blue, 0.1, 0.45, 1.0)
-    core.model_set_exposure(red, 1.4)
-    core.model_set_exposure(blue, 1.4)
-
-    if !core.model_enable_instancing(red, PER_SWARM) { return }
-    if !core.model_enable_instancing(blue, PER_SWARM) { return }
-
-    engine.engine_add_model(e, red)
-    engine.engine_add_model(e, blue)
-    g_red_model = red as ptr
-    g_blue_model = blue as ptr
+    screen = blackhole.screen_new()
+    blackhole.set_spin(screen, SPIN)
+    engine.engine_add_model(e, screen)
+    g_screen = screen as ptr
 
     renderer = engine.engine_gl_renderer(e)
-    gl.renderer_set_clear_color(renderer, 0.01, 0.01, 0.02)
+    gl.renderer_set_clear_color(renderer, 0.0, 0.0, 0.0)
     gl.renderer_set_bloom(renderer, true)
-    gl.renderer_set_bloom_params(renderer, 0.7, 0.5)
+    gl.renderer_set_bloom_params(renderer, 0.62, 0.55)
 
     cam = engine.engine_camera(e)
-    core.camera_set_position(cam, core.vec3(200.0, 320.0, 1100.0))
-    core.camera_set_speed(cam, 900.0)
-    core.camera_set_far(cam, 40000.0)
-    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+    core.camera_set_speed(cam, 18.0)
+    core.camera_set_near(cam, 0.05)
+    core.camera_set_far(cam, 800.0)
 
-    println("particles: ${PER_SWARM * 2} in two instanced draws")
+    // The orbit drives the camera, so the built-in controls stay off until the
+    // space bar asks for them.
+    engine.engine_set_camera_input(e, false)
+
+    apply_level(e, screen, 0)
+    println("black hole: Kerr geodesics per pixel, spin a = ${SPIN}")
+    println("  SPACE free camera, 1-6 quality (1 highest)")
+    println("  quality falls back on its own if the frame runs long")
 }
 
 on_update(data: ptr, delta: float) {
-    red = g_red_model as *Model
-    blue = g_blue_model as *Model
-    if red == null || blue == null { return }
+    screen = g_screen as *Model
+    if screen == null { return }
 
-    alive = step_swarm(g_red_position as float[], g_red_previous as float[], delta)
-    alive = alive + step_swarm(g_blue_position as float[], g_blue_previous as float[], delta)
-    g_alive = alive
+    e = data as *Engine
+    cam = engine.engine_camera(e)
+    g_time = g_time + delta
 
-    core.model_set_instance_positions(red, g_red_position, PER_SWARM)
-    core.model_set_instance_positions(blue, g_blue_position, PER_SWARM)
+    // Edge-triggered: key_down is a level, and reading it every frame would
+    // toggle the camera dozens of times per press.
+    space_down = engine.engine_key_down(e, platform.KEY_SPACE)
+    if space_down && !g_space_was_down {
+        g_free = !g_free
+        engine.engine_set_camera_input(e, g_free)
+    }
+    g_space_was_down = space_down
+
+    if g_auto {
+        g_watched = g_watched + 1
+        g_elapsed = g_elapsed + delta
+        if g_watched == 1 && delta > HOPELESS {
+            // Nothing about this machine says it can afford the top of the
+            // ladder, so do not spend a second frame finding that out slowly.
+            println("  ${delta} s for the first frame")
+            apply_level(e, screen, LEVELS - 1)
+            g_elapsed = 0.0
+        } else if g_watched >= 30 {
+            if g_elapsed / (g_watched * 1.0) > BUDGET && g_level < LEVELS - 1 {
+                apply_level(e, screen, g_level + 1)
+            }
+            g_watched = 0
+            g_elapsed = 0.0
+        }
+    }
+
+    picked = 0 - 1
+    if engine.engine_key_down(e, platform.KEY_1) { picked = 0 }
+    if engine.engine_key_down(e, platform.KEY_2) { picked = 1 }
+    if engine.engine_key_down(e, platform.KEY_3) { picked = 2 }
+    if engine.engine_key_down(e, platform.KEY_4) { picked = 3 }
+    if engine.engine_key_down(e, platform.KEY_5) { picked = 4 }
+    if engine.engine_key_down(e, platform.KEY_6) { picked = 5 }
+    if picked >= 0 && picked != g_level {
+        g_auto = false
+        apply_level(e, screen, picked)
+    }
+
+    if !g_free {
+        angle = g_time * core.TWO_PI / ORBIT_PERIOD
+        core.camera_set_position(cam, core.vec3(ORBIT_RADIUS * core.sin_of(angle),
+                                                ORBIT_HEIGHT,
+                                                ORBIT_RADIUS * core.cos_of(angle)))
+        core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+    }
+
+    blackhole.set_view(screen, cam)
+    blackhole.set_time(screen, g_time)
 }
 
 main() {
     e = engine.engine_new(platform.API_GL)
     engine.engine_set_size(e, 1280, 800)
     engine.engine_set_title(e, "ae3d - black hole")
-    engine.engine_set_face_culling(e, true)
 
-    light = core.light_directional(core.vec3(0.0, 1.0, 0.2),
-                                   core.vec3(1.0, 0.95, 0.8), 4.0)
-    light.ambient_strength = 0.2
-    light.temperature = 5800.0
+    // The screen quad's winding is back-facing once the vertex shader has
+    // mapped it into clip space, and there is nothing else in the scene to cull.
+    engine.engine_set_face_culling(e, false)
+
+    // Nothing in the frame is lit: every pixel is emission the shader works out
+    // for itself. The light exists because the engine expects one.
+    light = core.light_directional(core.vec3(0.0, 1.0, 0.0),
+                                   core.vec3(1.0, 1.0, 1.0), 1.0)
+    light.ambient_strength = 0.0
     engine.engine_set_light(e, light)
 
     engine.engine_set_user_data(e, e as ptr)
@@ -195,16 +208,10 @@ main() {
 
     engine.engine_run(e, 0 - 1, 0 - 1)
 
-    println("black hole: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${g_alive} particles in orbit, ${gl.renderer_draw_calls(engine.engine_gl_renderer(e))} draw calls")
+    println("black hole: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${gl.renderer_draw_calls(engine.engine_gl_renderer(e))} draw call(s)")
 
-    red = g_red_model as *Model
-    blue = g_blue_model as *Model
-    if red != null { core.model_free(red) }
-    if blue != null { core.model_free(blue) }
-    if g_red_position != null { free(g_red_position) }
-    if g_red_previous != null { free(g_red_previous) }
-    if g_blue_position != null { free(g_blue_position) }
-    if g_blue_previous != null { free(g_blue_previous) }
+    screen = g_screen as *Model
+    if screen != null { core.model_free(screen) }
     core.light_free(light)
     engine.engine_free(e)
 }

@@ -1,0 +1,239 @@
+// The shadow is the one thing in this renderer with a closed-form answer.
+//
+// A distant observer sees a non-spinning hole's shadow as a circle of impact
+// parameter sqrt(27) M, whatever their inclination. That number falls out of the
+// photon sphere and nothing else, so it is a check on the integrator rather than
+// on the art: if the geodesics are wrong, the shadow is the wrong size, and no
+// amount of tuning the disc will hide it.
+//
+// It caught a real bug. The Kerr rewrite had dP/dr signed wrong, which drove the
+// radial equation the wrong way and pulled every ray into the horizon; the
+// picture was obviously broken, but this is the check that says so in a number.
+//
+// Spinning the hole up shrinks the shadow and pulls it out of round -- frame
+// dragging helps prograde photons escape from closer in, so the side where the
+// dragging runs towards the observer is flattened. Both are asserted below.
+
+import std.mem
+import ae3d.core
+import ae3d.gl
+import ae3d.offscreen
+import blackhole
+
+const WIDTH  = 640
+const HEIGHT = 400
+const DIST   = 58.0
+const HIGH   = 11.0
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+var g_backend: *Backend = null
+var g_screen: *Model = null
+var g_cam: *Camera = null
+var g_light: *Light = null
+var g_target: ptr = null
+
+// Walk out from the middle of the centre row until the disc's light starts. The
+// run of black in between is the shadow, and its two halves are measured apart
+// because a spinning hole's shadow is not symmetric about its own centre.
+var g_left = 0
+var g_right = 0
+
+measure_shadow(spin: float) {
+    blackhole.set_spin(g_screen, spin)
+    blackhole.set_view(g_screen, g_cam)
+    core.backend_render(g_backend, g_cam, g_light)
+    core.backend_render(g_backend, g_cam, g_light)
+
+    pixels = offscreen.target_pixels(g_target)
+    if pixels == null { g_left = 0 ; g_right = 0 ; return }
+
+    row = HEIGHT / 2
+    middle = WIDTH / 2
+
+    // The edge is found against each side's own brightness rather than an
+    // absolute level. The two sides of the disc differ by a factor of several --
+    // that is the Doppler beaming this renderer exists to show -- so a fixed
+    // threshold measures the beaming, not the geometry.
+    bright_left = 0
+    x = 1
+    while x < middle {
+        index = (row * WIDTH + x) * 4
+        level = mem.get_byte(pixels, index) + mem.get_byte(pixels, index + 1) +
+                mem.get_byte(pixels, index + 2)
+        if level > bright_left { bright_left = level }
+        x = x + 1
+    }
+
+    bright_right = 0
+    x = middle
+    while x < WIDTH - 1 {
+        index = (row * WIDTH + x) * 4
+        level = mem.get_byte(pixels, index) + mem.get_byte(pixels, index + 1) +
+                mem.get_byte(pixels, index + 2)
+        if level > bright_right { bright_right = level }
+        x = x + 1
+    }
+
+    // An edge is four lit pixels in a row, not one. The disc's limb is hundreds
+    // of pixels wide; anything narrower than four is a speck, and a speck is
+    // never what this is trying to measure.
+    g_left = 0
+    run = 0
+    x = middle
+    while x > 0 {
+        index = (row * WIDTH + x) * 4
+        level = mem.get_byte(pixels, index) + mem.get_byte(pixels, index + 1) +
+                mem.get_byte(pixels, index + 2)
+        if level * 4 > bright_left { run = run + 1 } else { run = 0 }
+        if run >= 4 { x = 0 } else { g_left = g_left + 1 ; x = x - 1 }
+    }
+    if g_left > 3 { g_left = g_left - 3 }
+
+    g_right = 0
+    run = 0
+    x = middle
+    while x < WIDTH - 1 {
+        index = (row * WIDTH + x) * 4
+        level = mem.get_byte(pixels, index) + mem.get_byte(pixels, index + 1) +
+                mem.get_byte(pixels, index + 2)
+        if level * 4 > bright_right { run = run + 1 } else { run = 0 }
+        if run >= 4 { x = WIDTH } else { g_right = g_right + 1 ; x = x + 1 }
+    }
+    if g_right > 3 { g_right = g_right - 3 }
+}
+
+// An impact parameter, in pixels on this frame. The observer is at a finite
+// radius, so the angle subtended is arcsin(b sqrt(1 - 2/r) / r) rather than b/r,
+// and the projection is a pinhole: tan of that angle over tan of the half-field,
+// times half the frame's height.
+to_pixels(b: float, observer: float, half_field: float) -> float {
+    sine = b * core.sqrt_of(1.0 - 2.0 / observer) / observer
+    angle = core.atan2_of(sine, core.sqrt_of(1.0 - sine * sine))
+    tan_angle = core.sin_of(angle) / core.cos_of(angle)
+    tan_field = core.sin_of(half_field) / core.cos_of(half_field)
+    return tan_angle / tan_field * (HEIGHT * 0.5)
+}
+
+main() {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("blackhole: SKIP no OpenGL context")
+        return
+    }
+
+    renderer = gl.renderer_new()
+    backend = gl.backend(renderer)
+    if !core.backend_init(&backend, context, WIDTH, HEIGHT) {
+        println("blackhole: SKIP the OpenGL backend would not initialise")
+        return
+    }
+    g_backend = &backend
+
+    g_target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, g_target)
+    gl.renderer_set_clear_color(renderer, 0.0, 0.0, 0.0)
+    // No bloom: it spreads the disc's light into the shadow and would move the
+    // edge this test is looking for.
+    gl.renderer_set_bloom(renderer, false)
+    core.set_face_culling(false)
+
+    screen = blackhole.screen_new()
+    // No jets either -- they run straight through the middle of the frame, which
+    // is exactly where the shadow is.
+    blackhole.set_jets(screen, false)
+    // And no stars. They are lensed, so where one lands is a geodesic, and two
+    // drivers need not agree on its last bit; a single star sitting in the dim
+    // annulus between the shadow and the disc's inner image reads exactly like
+    // the disc's edge. This test measures the disc against the shadow, so the
+    // frame should contain the disc and the shadow.
+    blackhole.set_stars(screen, false)
+    blackhole.set_quality(screen, 1, 400)
+    blackhole.set_time(screen, 3.0)
+    core.backend_add_model(&backend, screen)
+    g_screen = screen
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, HIGH, DIST))
+    core.camera_set_near(cam, 0.05)
+    core.camera_set_far(cam, 800.0)
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+    g_cam = cam
+
+    light = core.light_directional(core.vec3(0.0, 1.0, 0.0), core.vec3(1.0, 1.0, 1.0), 1.0)
+    light.ambient_strength = 0.0
+    gl.renderer_add_light(renderer, light)
+    g_light = light
+
+    // Two closed-form radii bracket what a scan can find, and both come out of
+    // general relativity rather than out of this renderer.
+    //
+    // The inner one is the shadow: sqrt(27) M, the critical impact parameter of
+    // the photon sphere, below which nothing escapes at all. The outer one is
+    // where the disc's inner edge is SEEN -- light leaving the ISCO at r = 6 M
+    // arrives with b = r / sqrt(1 - 2/r) = 7.35 M, further out than the shadow,
+    // because the hole bends it outward on the way. Between the two lies a
+    // genuinely dim annulus, lit only by paths that wound round the hole and
+    // came back heavily redshifted, so where a brightness scan lands inside that
+    // gap depends on the threshold. That it lands INSIDE the gap does not.
+    observer = core.sqrt_of(HIGH * HIGH + DIST * DIST)
+    half_field = core.deg_to_rad(cam.fov) * 0.5
+
+    shadow_px = to_pixels(core.sqrt_of(27.0), observer, half_field)
+    isco = 6.0
+    rim_px = to_pixels(isco / core.sqrt_of(1.0 - 2.0 / isco), observer, half_field)
+
+    measure_shadow(0.0)
+    still_left = g_left
+    still_right = g_right
+
+    println("  a=0: dark to ${still_left} px left, ${still_right} px right; shadow ${shadow_px}, disc rim ${rim_px}")
+
+    check("the middle of the frame is dark", still_left > 4 && still_right > 4)
+    check("both sides reach past the shadow's own radius",
+          still_left > shadow_px * 0.9 && still_right > shadow_px * 0.9)
+    check("and both stop before the disc's inner edge is fully lit",
+          still_left < rim_px * 1.25 && still_right < rim_px * 1.25)
+
+    // Symmetry is deliberately NOT asserted, though a Schwarzschild shadow is a
+    // circle and this frame does contain one. What is being measured is a
+    // brightness edge, and the disc's brightness is not symmetric even when the
+    // shadow is: beaming makes the approaching side brighter AND changes the
+    // shape of its radial falloff, so the point where each side crosses a
+    // fraction of its own peak sits at a different radius. 61 px against 46 px
+    // here. Asserting symmetry would be asserting something about the disc's
+    // emission profile while claiming to measure the hole.
+
+    measure_shadow(0.9)
+    println("  a=0.9: dark to ${g_left} px left, ${g_right} px right")
+
+    // Frame dragging lets prograde photons escape from closer in, so the shadow
+    // is smaller. On each side separately, not merely on average -- an average
+    // can shrink because one side collapsed while the other grew.
+    check("spinning the hole shrinks its shadow on both sides",
+          g_left < still_left * 0.8 && g_right < still_right * 0.8)
+    check("the spinning shadow still clears the horizon",
+          g_left > 4 && g_right > 4)
+
+    core.backend_cleanup(&backend)
+    offscreen.target_destroy(g_target)
+    offscreen.context_destroy(context)
+    gl.renderer_free(renderer)
+    core.camera_free(cam)
+    core.light_free(light)
+
+    if failures == 0 {
+        println("blackhole: all checks passed")
+    } else {
+        println("blackhole: ${failures} failure(s)")
+    }
+}

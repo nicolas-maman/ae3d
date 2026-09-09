@@ -23,6 +23,7 @@ exports (
     renderer_add_light, renderer_remove_light, renderer_model_count, renderer_model,
     renderer_draw_calls, renderer_instance_count,
     renderer_set_clear_color, renderer_set_fxaa, renderer_set_bloom, renderer_set_msaa,
+    renderer_set_render_scale, renderer_render_scale,
     renderer_set_target,
     renderer_set_bloom_params, renderer_set_post,
     renderer_set_shadows, renderer_shadows, renderer_default_program,
@@ -229,6 +230,7 @@ struct GLRenderer {
     post_samples: int
     post_width: int
     post_height: int
+    render_scale: float
     post_resolve_reported: bool
 
     scene_start: float
@@ -262,6 +264,7 @@ renderer_new() -> *GLRenderer {
     r.clear_g = 0.0
     r.clear_b = 0.0
     r.enable_msaa = true
+    r.render_scale = 1.0
     r.bloom_threshold = 0.8
     r.bloom_intensity = 0.4
     r.depth_test_state = true
@@ -982,6 +985,24 @@ draw_depth(r: *GLRenderer, m: *Model, instanced: int) {
 renderer_set_fxaa(r: *GLRenderer, on: bool) { r.enable_fxaa = on }
 renderer_set_bloom(r: *GLRenderer, on: bool) { r.enable_bloom = on }
 
+// Draw the scene at a fraction of the window and let the composite upscale it.
+// Cost per frame is dominated by pixels shaded, so 0.5 is a quarter of the work
+// -- the difference between a scene a weak GPU can run and one it cannot. The
+// window, the depth of field of the projection and the composite are unchanged;
+// only the pass that pays per pixel gets smaller.
+renderer_set_render_scale(r: *GLRenderer, scale: float) {
+    wanted = scale
+    if wanted < 0.25 { wanted = 0.25 }
+    if wanted > 1.0 { wanted = 1.0 }
+    if wanted == r.render_scale { return }
+    r.render_scale = wanted
+    if r.post_fbo != 0 && r.viewport_width > 0 {
+        resize_post_processing(r, r.viewport_width, r.viewport_height)
+    }
+}
+
+renderer_render_scale(r: *GLRenderer) -> float { return r.render_scale }
+
 renderer_set_bloom_params(r: *GLRenderer, threshold: float, intensity: float) {
     r.bloom_threshold = threshold
     r.bloom_intensity = intensity
@@ -1117,7 +1138,8 @@ renderer_update_viewport(r: *GLRenderer, width: int, height: int) {
     // comparison always equal, so they stayed the size they were: with FXAA or
     // bloom on, a viewport made smaller drew the frame at the old size and
     // stretched it over the new one, lighting a third of the pixels it should.
-    if r.post_fbo != 0 && (r.post_width != width || r.post_height != height) {
+    if r.post_fbo != 0 &&
+       (r.post_width != scaled_extent(r, width) || r.post_height != scaled_extent(r, height)) {
         resize_post_processing(r, width, height)
     }
 }
@@ -1780,13 +1802,20 @@ init_post_processing(r: *GLRenderer, width: int, height: int) {
     }
 }
 
+// The size the scene is actually drawn at, which is the viewport times the
+// render scale. Everything downstream of the scene pass -- the composite, the
+// window -- stays at full size; only the pass that costs per pixel shrinks.
+scaled_extent(r: *GLRenderer, value: int) -> int {
+    out = (value * r.render_scale) as int
+    if out < 1 { out = 1 }
+    return out
+}
+
 resize_post_processing(r: *GLRenderer, width: int, height: int) {
-    clamped_width = width
-    clamped_height = height
+    clamped_width = scaled_extent(r, width)
+    clamped_height = scaled_extent(r, height)
     if clamped_width > MAX_FBO_DIMENSION { clamped_width = MAX_FBO_DIMENSION }
     if clamped_height > MAX_FBO_DIMENSION { clamped_height = MAX_FBO_DIMENSION }
-    if clamped_width < 1 { clamped_width = 1 }
-    if clamped_height < 1 { clamped_height = 1 }
 
     if r.post_texture != 0 { ae3d_gl_texture_delete(r.post_texture) }
     if r.post_depth != 0 { ae3d_gl_renderbuffer_delete(r.post_depth) }
@@ -1813,7 +1842,10 @@ resize_post_processing(r: *GLRenderer, width: int, height: int) {
 }
 
 begin_post_processing(r: *GLRenderer) -> bool {
-    if !r.enable_fxaa && !r.enable_bloom { return false }
+    // A render scale below 1 is on its own a reason to draw into the offscreen
+    // buffer, with or without an effect to run afterwards: resolve_post_processing
+    // falls back to the passthrough program, so the composite becomes the upscale.
+    if !r.enable_fxaa && !r.enable_bloom && r.render_scale > 0.999 { return false }
     if r.post_fbo == 0 || r.post_texture == 0 || r.screen_vao == 0 { return false }
 
     width = ae3d_gl_viewport_width()
@@ -1833,6 +1865,9 @@ begin_post_processing(r: *GLRenderer) -> bool {
         bind_output(r)
         return false
     }
+    // The scene is drawn at the buffer's size, which is the viewport's only when
+    // the render scale is 1. resolve_post_processing puts the viewport back.
+    ae3d_gl_viewport(0, 0, r.post_width, r.post_height)
     return true
 }
 
@@ -1909,6 +1944,9 @@ resolve_post_processing(r: *GLRenderer) {
         }
     }
     bind_output(r)
+    // Back to the full frame for the composite: the scene pass may have been
+    // drawn smaller, and this is the step that puts it back on the window.
+    ae3d_gl_viewport(0, 0, r.viewport_width, r.viewport_height)
     set_depth_test(r, false)
     ae3d_gl_set_depth_mask(0)
     set_blend(r, false)
@@ -1919,8 +1957,10 @@ resolve_post_processing(r: *GLRenderer) {
     ae3d_gl_texture_bind(0, r.post_texture)
 
 
-    texel_x = 1.0 / (r.viewport_width * 1.0)
-    texel_y = 1.0 / (r.viewport_height * 1.0)
+    // A texel of the texture being sampled, which is the post buffer, not the
+    // window. The two are the same size only at a render scale of 1.
+    texel_x = 1.0 / (r.post_width * 1.0)
+    texel_y = 1.0 / (r.post_height * 1.0)
 
     if r.enable_bloom && r.bloom_program != 0 {
         use_program(r, r.bloom_program)
