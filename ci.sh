@@ -253,7 +253,16 @@ if [ ! -f "$UI_ROOT/ui/module.ae" ]; then
 elif ! have_display; then
     skip "ae3d_editor" "no display"
 else
-    if ./editor/build_editor.sh >/tmp/ae3d_build.log 2>&1; then
+    if ! ./editor/build_editor.sh >/tmp/ae3d_build.log 2>&1; then
+        fail "ae3d_editor (build)"
+        sed 's/^/        /' /tmp/ae3d_build.log | head -20
+    elif grep -q "warning" /tmp/ae3d_build.log; then
+        # Every other build in this file is gated on warnings and this one was
+        # not, so an unused variable in the largest Aether source in the repo
+        # went through ci without a word.
+        fail "ae3d_editor (build warnings)"
+        grep "warning" /tmp/ae3d_build.log | sed 's/^/        /' | head -10
+    else
         for editor_backend in opengl vulkan; do
             check_editor_run "$editor_backend"
         done
@@ -306,9 +315,6 @@ else
                 rm -f "$driver_log"
             done
         fi
-    else
-        fail "ae3d_editor (build)"
-        sed 's/^/        /' /tmp/ae3d_build.log | head -20
     fi
 fi
 

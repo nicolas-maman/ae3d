@@ -559,6 +559,16 @@ First working engine.
 
 ### Editor
 
+- The water section hides its rule along with itself. With no water in the
+  scene the rule above its heading stayed, so the panel drew two lines one
+  after another with nothing between them.
+
+### Tooling
+
+- `ci.sh` gates the editor build on warnings. Every other build in the file
+  was already gated, so an unused variable in the largest Aether source in the
+  repo went through without a word.
+
 - Every button in the left panel shares an edge. A pair of buttons sat in a row
   that added its own inset over the panel's, so it started fourteen pixels
   right of the full-width buttons above and below it and ended fourteen short
