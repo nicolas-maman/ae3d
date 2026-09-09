@@ -36,7 +36,8 @@ import ae3d.scene
 
 exports (
     Context, context_new, context_free,
-    start, active, port, stop, pump, answer_step, answer_snapshot, is_paused,
+    start, active, port, stop, pump, answer_step, answer_snapshot, answer_capture,
+    capture_release, capture_frame, answer_pending_trace, is_paused,
     schema_json, last_error
 )
 
@@ -47,6 +48,18 @@ extern ae3d_agent_next_request() -> string
 extern ae3d_agent_respond(line: string)
 extern ae3d_agent_stop()
 extern ae3d_agent_error() -> string
+
+extern ae3d_capture_frame(width: int, height: int) -> int
+extern ae3d_capture_width() -> int
+extern ae3d_capture_height() -> int
+extern ae3d_capture_pixel(x: int, y: int, out: ptr) -> int
+extern ae3d_capture_region(x: int, y: int, width: int, height: int, background: int, tolerance: int, out: ptr) -> int
+extern ae3d_capture_hold_reference() -> int
+extern ae3d_capture_diff(tolerance: int, out: ptr) -> int
+extern ae3d_capture_release()
+extern ae3d_capture_slot(block: ptr, index: int) -> float
+extern calloc(count: int, size: int) -> ptr
+extern free(block: ptr)
 
 // What the engine shows the channel each frame, and what it reads back after.
 //
@@ -82,6 +95,10 @@ struct Context {
     // they asked for has not happened yet. -1 when nothing is owed.
     pending_step_id: int
     pending_snapshot_id: int
+    pending_capture_id: int
+    pending_trace_id: int
+    pending_trace_model: ptr
+    want_capture: bool
     step_from: int
     paused: bool
 }
@@ -96,6 +113,8 @@ context_new() -> *Context {
     c.want_snapshot = ""
     c.pending_step_id = -1
     c.pending_snapshot_id = -1
+    c.pending_capture_id = -1
+    c.pending_trace_id = -1
     return c
 }
 
@@ -214,6 +233,16 @@ help_result() -> ptr {
         "Write the scene to JSON, with generated geometry beside it."))
     json.array_add_raw(ops, describe("scene.load", "path",
         "Replace the scene with one from a file, and reframe the camera as it was saved."))
+    json.array_add_raw(ops, describe("frame.capture", "",
+        "Read the finished frame into the engine. Answers with its size once it is there."))
+    json.array_add_raw(ops, describe("frame.pixel", "x, y",
+        "One pixel of the captured frame as r, g, b, a and hex."))
+    json.array_add_raw(ops, describe("frame.region", "x, y, width, height, [background], [tolerance]",
+        "Mean colour and coverage over a rectangle, summarised in the engine rather than shipped as pixels."))
+    json.array_add_raw(ops, describe("frame.hold", "",
+        "Keep the captured frame as the reference frame.diff compares against."))
+    json.array_add_raw(ops, describe("frame.diff", "[tolerance]",
+        "Changed pixel count, fraction and largest channel delta against the held reference."))
     json.array_add_raw(ops, describe("trace.model", "id | object | index",
         "Follow one model from its Blender object to the pixels: source, asset, mesh, node, animation, visibility. Names the stage it stopped being right at."))
     json.array_add_raw(ops, describe("anim.list", "",
@@ -541,6 +570,75 @@ load_scene(c: *Context, path: string) -> int {
     return count
 }
 
+// --- pixels ---------------------------------------------------------------
+
+const CAPTURE_SLOTS = 8
+
+capture_doubles() -> ptr {
+    return calloc(CAPTURE_SLOTS, 8)
+}
+
+read_double(block: ptr, index: int) -> float {
+    return ae3d_capture_slot(block, index)
+}
+
+colour_json(block: ptr) -> ptr {
+    red = json.get_int(json.num(read_double(block, 0)))
+    green = json.get_int(json.num(read_double(block, 1)))
+    blue = json.get_int(json.num(read_double(block, 2)))
+    out = json.obj()
+    json.object_set_raw(out, "r", json.from_int(red))
+    json.object_set_raw(out, "g", json.from_int(green))
+    json.object_set_raw(out, "b", json.from_int(blue))
+    json.object_set_raw(out, "a", json.from_int(json.get_int(json.num(read_double(block, 3)))))
+    json.object_set_raw(out, "hex", json.from_int(red * 65536 + green * 256 + blue))
+    return out
+}
+
+region_result(x: int, y: int, width: int, height: int,
+              background: int, tolerance: int) -> ptr {
+    block = capture_doubles()
+    out = json.obj()
+    if ae3d_capture_region(x, y, width, height, background, tolerance, block) == 0 {
+        free(block)
+        return null
+    }
+    json.object_set_raw(out, "x", json.from_int(x))
+    json.object_set_raw(out, "y", json.from_int(y))
+    json.object_set_raw(out, "width", json.from_int(width))
+    json.object_set_raw(out, "height", json.from_int(height))
+    json.object_set_raw(out, "mean", vec3_json(read_double(block, 0),
+                                               read_double(block, 1),
+                                               read_double(block, 2)))
+    json.object_set_raw(out, "mean_alpha", json.num(read_double(block, 3)))
+    json.object_set_raw(out, "coverage", json.num(read_double(block, 4)))
+    json.object_set_raw(out, "pixels", json.num(read_double(block, 5)))
+    free(block)
+    return out
+}
+
+// The model's own screen rectangle, from the bounding sphere. Used by the trace
+// to look at the pixels a model should have produced rather than at the whole
+// frame.
+model_screen_box(c: *Context, m: *Model, box: *Vec4) -> bool {
+    if c.camera == null { return false }
+    cam = c.camera as *Camera
+    centre = core.camera_world_to_screen(cam, m.bounding_center, c.width, c.height)
+    if centre.w <= 0.0001 { return false }
+
+    edge = core.v3_add(m.bounding_center, core.v3_mul(cam.right, m.bounding_radius))
+    projected = core.camera_world_to_screen(cam, edge, c.width, c.height)
+    radius = projected.x - centre.x
+    if radius < 0.0 { radius = 0.0 - radius }
+    if radius < 1.0 { radius = 1.0 }
+
+    box.x = centre.x - radius
+    box.y = centre.y - radius
+    box.z = radius * 2.0
+    box.w = radius * 2.0
+    return true
+}
+
 // --- animation ----------------------------------------------------------
 
 // Everything an agent needs to answer "is this thing animating, and where in
@@ -822,11 +920,37 @@ trace_result(c: *Context, m: *Model, p: *Provenance) -> ptr {
     json.array_add_raw(stages, stage("animation", animation_ok, animation))
     if !animation_ok && broke_at == "" { broke_at = "animation" }
 
-    // 6. whether the camera can see it at all
     visible = json.obj()
     visible_ok = visibility_detail(c, m, visible)
     json.array_add_raw(stages, stage("visibility", visible_ok, visible))
     if !visible_ok && broke_at == "" { broke_at = "visibility" }
+
+    pixels = json.obj()
+    pixels_ok = false
+    box = Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 0.0 }
+    if ae3d_capture_width() == 0 {
+        json.object_set_raw(pixels, "note", json.str("the frame could not be read"))
+        json.array_add_raw(stages, not_applicable("pixels", pixels))
+    } else if !model_screen_box(c, m, &box) {
+        json.object_set_raw(pixels, "note",
+            json.str("the model does not project to the screen, so it covers no pixels"))
+        json.array_add_raw(stages, stage("pixels", false, pixels))
+        if broke_at == "" { broke_at = "pixels" }
+    } else {
+        measured = region_result(box.x as int, box.y as int,
+                                 box.z as int, box.w as int, 0, 8)
+        if measured != null {
+            json.object_set_raw(pixels, "region", measured)
+            found = json.object_get_raw(measured, "coverage")
+            if found != null { pixels_ok = json.get_number(found) > 0.0 }
+        }
+        if !pixels_ok {
+            json.object_set_raw(pixels, "note",
+                json.str("the model projects here and nothing was drawn in it"))
+        }
+        json.array_add_raw(stages, stage("pixels", pixels_ok, pixels))
+        if !pixels_ok && broke_at == "" { broke_at = "pixels" }
+    }
 
     out = json.obj()
     json.object_set_raw(out, "name", json.str(core.text(m.name)))
@@ -947,6 +1071,78 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
         return false
     }
 
+    if op == "frame.capture" {
+        c.want_capture = true
+        c.pending_capture_id = id
+        return true
+    }
+
+    if op == "frame.pixel" {
+        px = json.get_int(json.object_get_raw(request, "x"))
+        py = json.get_int(json.object_get_raw(request, "y"))
+        block = capture_doubles()
+        if ae3d_capture_pixel(px, py, block) == 0 {
+            free(block)
+            fail(id, "no captured frame, or the point is outside it; send frame.capture first")
+            return false
+        }
+        out = colour_json(block)
+        free(block)
+        json.object_set_raw(out, "x", json.from_int(px))
+        json.object_set_raw(out, "y", json.from_int(py))
+        answer(id, out)
+        return false
+    }
+
+    if op == "frame.region" {
+        rx = json.get_int(json.object_get_raw(request, "x"))
+        ry = json.get_int(json.object_get_raw(request, "y"))
+        rw = json.get_int(json.object_get_raw(request, "width"))
+        rh = json.get_int(json.object_get_raw(request, "height"))
+        background = 0
+        tolerance = 8
+        node = json.object_get_raw(request, "background")
+        if node != null { background = json.get_int(node) }
+        node = json.object_get_raw(request, "tolerance")
+        if node != null { tolerance = json.get_int(node) }
+        out = region_result(rx, ry, rw, rh, background, tolerance)
+        if out == null {
+            fail(id, "no captured frame; send frame.capture first")
+            return false
+        }
+        answer(id, out)
+        return false
+    }
+
+    if op == "frame.hold" {
+        if ae3d_capture_hold_reference() == 0 {
+            fail(id, "no captured frame to hold; send frame.capture first")
+            return false
+        }
+        answer(id, json.obj())
+        return false
+    }
+
+    if op == "frame.diff" {
+        tolerance = 8
+        node = json.object_get_raw(request, "tolerance")
+        if node != null { tolerance = json.get_int(node) }
+        block = capture_doubles()
+        if ae3d_capture_diff(tolerance, block) == 0 {
+            free(block)
+            fail(id, "need a held reference and a captured frame of the same size")
+            return false
+        }
+        out = json.obj()
+        json.object_set_raw(out, "changed", json.num(read_double(block, 0)))
+        json.object_set_raw(out, "fraction", json.num(read_double(block, 1)))
+        json.object_set_raw(out, "max_delta", json.num(read_double(block, 2)))
+        json.object_set_raw(out, "pixels", json.num(read_double(block, 3)))
+        free(block)
+        answer(id, out)
+        return false
+    }
+
     if op == "trace.model" {
         m = null
         p = null
@@ -968,8 +1164,10 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
             fail(id, "no model by that id, object or index")
             return false
         }
-        answer(id, trace_result(c, m, p))
-        return false
+        c.want_capture = true
+        c.pending_trace_id = id
+        c.pending_trace_model = m as ptr
+        return true
     }
 
     if op == "anim.list" { answer(id, anim_list_result(c)) return false }
@@ -1117,6 +1315,19 @@ answer_step(c: *Context) {
 }
 
 // The answer to a snapshot, once the file is on disk.
+answer_capture(c: *Context, ok: bool) {
+    if ok {
+        out = json.obj()
+        json.object_set_raw(out, "width", json.from_int(ae3d_capture_width()))
+        json.object_set_raw(out, "height", json.from_int(ae3d_capture_height()))
+        json.object_set_raw(out, "frame", json.from_int(c.frame_count))
+        answer(c.pending_capture_id, out)
+    } else {
+        fail(c.pending_capture_id, "could not read the frame")
+    }
+    c.pending_capture_id = -1
+}
+
 answer_snapshot(c: *Context, path: string, written: bool) {
     if written {
         out = json.obj()
@@ -1134,3 +1345,17 @@ answer_snapshot(c: *Context, path: string, written: bool) {
 // advance and the frame counter does not move -- so two queries either side of
 // an inspection describe the same frame.
 is_paused(c: *Context) -> bool { return c.paused }
+
+capture_release() { ae3d_capture_release() }
+
+capture_frame(width: int, height: int) -> bool {
+    return ae3d_capture_frame(width, height) == 1
+}
+
+answer_pending_trace(c: *Context) {
+    if c.pending_trace_id < 0 { return }
+    m = c.pending_trace_model as *Model
+    answer(c.pending_trace_id, trace_result(c, m, assets.provenance_for(m)))
+    c.pending_trace_id = -1
+    c.pending_trace_model = null
+}

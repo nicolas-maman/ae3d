@@ -268,4 +268,15 @@ void        ae3d_agent_respond(const char *line);
 void        ae3d_agent_stop(void);
 const char *ae3d_agent_error(void);
 
+int  ae3d_capture_frame(int width, int height);
+int  ae3d_capture_width(void);
+int  ae3d_capture_height(void);
+int  ae3d_capture_pixel(int x, int y, double *out);
+int  ae3d_capture_region(int x, int y, int width, int height,
+                         int background, int tolerance, double *out);
+int  ae3d_capture_hold_reference(void);
+int  ae3d_capture_diff(int tolerance, double *out);
+void ae3d_capture_release(void);
+double ae3d_capture_slot(const double *block, int index);
+
 #endif

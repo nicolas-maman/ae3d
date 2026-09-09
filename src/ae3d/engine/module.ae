@@ -411,6 +411,21 @@ pump_agent(e: *Engine) {
 // Called from there, which is why the agent's snapshot is not taken where the
 // rest of its work happens: after the swap the back buffer holds nothing this
 // frame put in it, and the file came out empty with an "ok" already sent.
+service_agent_capture(e: *Engine) {
+    c = e.agent_ctx as *Context
+    if !c.want_capture { return }
+    c.want_capture = false
+    if e.api == platform.API_VULKAN {
+        agent.answer_capture(c, false)
+        return
+    }
+    width = platform.window_fb_width(e.window)
+    height = platform.window_fb_height(e.window)
+    captured = agent.capture_frame(width, height)
+    if c.pending_capture_id >= 0 { agent.answer_capture(c, captured) }
+    agent.answer_pending_trace(c)
+}
+
 service_agent_snapshot(e: *Engine) {
     c = e.agent_ctx as *Context
     if c.pending_snapshot_id < 0 { return }
@@ -430,6 +445,7 @@ service_agent_snapshot(e: *Engine) {
 
 engine_shutdown(e: *Engine) {
     if e.agent_on {
+        agent.capture_release()
         agent.stop()
         agent.context_free(e.agent_ctx as *Context)
         e.agent_ctx = null
@@ -518,7 +534,10 @@ engine_loop(e: *Engine) {
         if e.frame_limit > 0 && e.frame_count + 1 >= e.frame_limit {
             write_snapshot(e)
         }
-        if e.agent_on { service_agent_snapshot(e) }
+        if e.agent_on {
+            service_agent_capture(e)
+            service_agent_snapshot(e)
+        }
 
         if e.api != platform.API_VULKAN { platform.window_swap(e.window) }
         platform.poll_events()
