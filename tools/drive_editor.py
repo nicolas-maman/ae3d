@@ -75,13 +75,23 @@ def wait_rows(port, scene, count, seconds=8.0):
     return len(rows_under(widgets, scene))
 
 
-def wait_file(path, seconds=8.0):
+def wait_file(path, seconds=8.0, newer_than=None):
+    """Wait for a file to exist, or to have been written again since.
+
+    Existence alone is not enough for a second save: the file is already there
+    from the first one, so the wait returns at once and a Load that follows can
+    read what was on disk before rather than what was just asked for. That is a
+    race that passes almost every time and fails on a busy machine, which is
+    the worst kind to have in a suite.
+    """
     deadline = time.time() + seconds
     while time.time() < deadline:
         if os.path.exists(path) and os.path.getsize(path) > 0:
-            return True
-        time.sleep(0.25)
-    return os.path.exists(path) and os.path.getsize(path) > 0
+            if newer_than is None or os.path.getmtime(path) > newer_than:
+                return True
+        time.sleep(0.1)
+    return (os.path.exists(path) and os.path.getsize(path) > 0
+            and (newer_than is None or os.path.getmtime(path) > newer_than))
 
 
 def wait_for(port, predicate, seconds=8.0):
@@ -663,8 +673,9 @@ def main():
                             break
                     post(args.port, "/widget/%d/set_value?v=9.25" % later[0]["id"])
                     time.sleep(0.9)
+                    stamped = os.path.getmtime(scene_file)
                     post(args.port, "/widget/%d/click" % save)
-                    wait_file(scene_file)
+                    wait_file(scene_file, newer_than=stamped)
                     post(args.port, "/widget/%d/set_value?v=3.0" % later[0]["id"])
                     time.sleep(0.9)
                     moved = tree(args.port)[readout[0]["id"]]["text"].strip()
@@ -682,6 +693,35 @@ def main():
                     check("a setting survives the scene file",
                           moved == "3.00" and restored == "9.25",
                           "changed to %s, came back as %s" % (moved, restored))
+
+        # The post chain survives the file. It is written into the scene by
+        # the same record that carries the camera, and the editor filled none
+        # of it: every scene it saved recorded the defaults, so a scene saved
+        # with bloom on came back with it off.
+        widgets = tree(args.port)
+        bloom = [w for w in widgets.values()
+                 if w["type"] == "text" and w["text"].strip() == "Bloom"]
+        save_btn = save
+        load_btn = load
+        if bloom and save_btn and load_btn:
+            switch = [w for w in widgets.values()
+                      if w["parent"] == bloom[0]["parent"] and w["type"] == "toggle"]
+            if switch:
+                def bloom_on(ws):
+                    return bool(ws[switch[0]["id"]].get("active"))
+
+                post(args.port, "/widget/%d/click" % switch[0]["id"])
+                widgets, on = wait_for(args.port, bloom_on)
+                check("the bloom switch turns on", on)
+                written = os.path.getmtime(scene_file)
+                post(args.port, "/widget/%d/click" % save_btn)
+                check("the scene is written again",
+                      wait_file(scene_file, newer_than=written))
+                post(args.port, "/widget/%d/click" % switch[0]["id"])
+                wait_for(args.port, lambda ws: not bloom_on(ws))
+                post(args.port, "/widget/%d/click" % load_btn)
+                widgets, back = wait_for(args.port, bloom_on)
+                check("and the post chain comes back with the scene", back)
 
             before_delete = len(rows_under(tree(args.port), scene))
             post(args.port, "/widget/%d/click" % delete)
