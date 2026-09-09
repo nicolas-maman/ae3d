@@ -144,10 +144,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8791)
     ap.add_argument("--binary", default="build/ae3d_editor")
+    ap.add_argument("--backend", default="",
+                    help="opengl or vulkan; the editor's default when unset")
     args = ap.parse_args()
 
     env = dict(os.environ)
     env["AETHER_UI_TEST_PORT"] = str(args.port)
+    if args.backend:
+        env["AE3D_EDITOR_BACKEND"] = args.backend
     # Long enough that the run outlives this script; it is killed at the end.
     env["AE3D_EDITOR_FRAMES"] = "100000"
     editor = subprocess.Popen([args.binary], env=env,

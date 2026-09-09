@@ -506,6 +506,11 @@ First working engine.
 
 ### Tooling
 
+- The editor driver runs on both backends. The report checks have always run on
+  each, but nothing had ever pressed a widget on the Vulkan one, and the
+  editor's controls reach the renderer through a vtable that only a real click
+  exercises.
+
 - The editor driver checks that a setting survives the scene file, not just
   that the row count does. The value is changed after saving on purpose:
   left alone it would come back whatever loading did, and the check would be
