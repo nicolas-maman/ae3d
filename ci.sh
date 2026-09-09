@@ -265,6 +265,17 @@ check_editor_run() {
 }
 
 step "editor"
+# A print left in from working something out ships silently: it goes to the
+# editor's own console, where it looks like a message the editor meant to
+# write, and nothing else in this file reads that console. One did ship, and
+# was found in a screenshot taken for another reason.
+if grep -n "DBG" editor/editor.ae >/tmp/ae3d_debug.log; then
+    fail "ae3d_editor (debug prints)"
+    sed 's/^/        /' /tmp/ae3d_debug.log | head -5
+else
+    pass "ae3d_editor (debug prints)"
+fi
+
 UI_ROOT="${AETHER_UI_ROOT:-$ROOT/../aether-ui}"
 if [ ! -f "$UI_ROOT/ui/module.ae" ]; then
     skip "ae3d_editor" "aether-ui not found at $UI_ROOT"
