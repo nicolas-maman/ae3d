@@ -565,11 +565,25 @@ First working engine.
 
 ### Editor
 
+- Every bounded setting has a number box beside its slider. A slider is worth
+  several hundredths of a value per pixel, so there was no way to ask for
+  exactly 0.5 metallic or a field of view of 45, and the number printed beside
+  it was dead text that looked like something to click. Typing moves the slider
+  and dragging writes the box, and every value in the inspector is now entered
+  the same way. Undo moves the slider back with it, which it did not do before:
+  a replayed property change only rewrote the number.
+
 - The water section hides its rule along with itself. With no water in the
   scene the rule above its heading stayed, so the panel drew two lines one
   after another with nothing between them.
 
 ### Tooling
+
+- The editor driver reads visibility up the parent chain. A section is hidden
+  by hiding its rows, and a hidden row's children still report themselves
+  visible with whatever geometry they last had, so the water settings sat at
+  the top of the inspector by their coordinates while being nowhere on it and
+  the driver typed into one of those instead of the position it meant.
 
 - `ci.sh` gates the editor build on warnings. Every other build in the file
   was already gated, so an unused variable in the largest Aether source in the

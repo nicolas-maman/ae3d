@@ -174,6 +174,21 @@ def audit_kinds(port, scene, step):
     return None
 
 
+def on_screen(widgets, w):
+    """Whether a widget and every container above it is showing."""
+    while w is not None:
+        if not w.get("visible"):
+            return False
+        w = widgets.get(w["parent"])
+    return True
+
+
+def row_box(widgets, caption):
+    """The number box on an inspector row, given the row's caption."""
+    return [w for w in widgets.values()
+            if w["parent"] == caption["parent"] and w["type"] == "textfield"]
+
+
 def layout_faults(widgets):
     """Things a panel gets wrong that a person reads past.
 
@@ -282,7 +297,13 @@ def main():
         # A number field, typed into. The value has to reach the model, which
         # is only proved by selecting away and back: what comes back is the
         # model's own formatting, not the text that was typed.
-        fields = sorted([w for w in widgets.values() if w["type"] == "textfield"],
+        # Only the ones actually on screen. A section is hidden by hiding the
+        # rows, and a hidden row's children still report visible along with
+        # whatever geometry they last had, so the water settings sit at the top
+        # of the panel by their coordinates while being nowhere on it: sorting
+        # by position picked one of those to type into.
+        fields = sorted([w for w in widgets.values() if w["type"] == "textfield"
+                         and on_screen(widgets, w)],
                         key=lambda w: (w["y"], w["x"]))
         check("the inspector has number fields", len(fields) >= 4)
         if fields:
@@ -306,6 +327,37 @@ def main():
                 # number() writes two decimals; "-150.0" is what was typed.
                 check("what was typed reached the model", back == "-150.00",
                       repr(back))
+        # A bounded row is two ways into one value. Typing an exact number is
+        # the half a slider cannot do, and the slider beside it has to follow,
+        # or the panel shows the same setting as two different numbers.
+        widgets = tree(args.port)
+        caps = [w for w in widgets.values()
+                if w["type"] == "text" and w["text"].strip() == "roughness"]
+        check("the material rows are in the tree", len(caps) == 1)
+        if caps:
+            box = row_box(widgets, caps[0])
+            bar = [w for w in widgets.values()
+                   if w["parent"] == caps[0]["parent"] and w["type"] == "slider"]
+            check("roughness has both a slider and a box",
+                  len(box) == 1 and len(bar) == 1)
+            if box and bar:
+                post(args.port, "/widget/%d/set_text?v=0.75" % box[0]["id"])
+
+                def slider_followed(ws):
+                    return abs(ws[bar[0]["id"]]["value"] - 0.75) < 0.001
+
+                widgets, ok = wait_for(args.port, slider_followed)
+                check("typing a value moves the slider beside it", ok,
+                      "slider at %s" % widgets[bar[0]["id"]]["value"])
+
+                # And the other way: dragging writes the number in the box.
+                post(args.port, "/widget/%d/set_value?v=0.20" % bar[0]["id"])
+                widgets, ok = wait_for(
+                    args.port,
+                    lambda ws: ws[box[0]["id"]]["text"].strip() == "0.20")
+                check("dragging the slider writes the box", ok,
+                      repr(widgets[box[0]["id"]]["text"]))
+
         # A section with nothing to edit hides whole. Hiding a control and its
         # readout but not the row leaves the caption behind, and the water
         # settings read as four stranded words with no heading over them.
@@ -339,9 +391,7 @@ def main():
             caption = [w for w in widgets.values()
                        if w["type"] == "text" and w["text"].strip() == "wave height"][0]
 
-            readout = [w for w in widgets.values()
-                       if w["parent"] == caption["parent"] and w["type"] == "text"
-                       and w["id"] != caption["id"]]
+            readout = row_box(widgets, caption)
             later = sorted([w for w in widgets.values()
                             if w["type"] == "slider" and w["id"] > caption["parent"]],
                            key=lambda w: w["id"])
@@ -417,9 +467,7 @@ def main():
             caps = [w for w in tree(args.port).values()
                     if w["type"] == "text" and w["text"].strip() == "wave height"]
             if caps:
-                readout = [w for w in tree(args.port).values()
-                           if w["parent"] == caps[0]["parent"] and w["type"] == "text"
-                           and w["id"] != caps[0]["id"]]
+                readout = row_box(tree(args.port), caps[0])
                 later = sorted([w for w in tree(args.port).values()
                                 if w["type"] == "slider" and w["id"] > caps[0]["parent"]],
                                key=lambda w: w["id"])
