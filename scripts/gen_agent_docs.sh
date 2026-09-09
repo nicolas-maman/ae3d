@@ -14,8 +14,11 @@ cd "$ROOT"
 
 PYTHON="${PYTHON:-}"
 if [ -z "$PYTHON" ]; then
-    for candidate in python3 python; do
-        if command -v "$candidate" >/dev/null 2>&1; then PYTHON="$candidate"; break; fi
+    # Run each candidate rather than just finding it: Windows ships a python3
+    # on PATH that exists only to open the Microsoft Store, and it answers
+    # command -v exactly like an interpreter would.
+    for candidate in python3 python "py -3"; do
+        if $candidate -c "" >/dev/null 2>&1; then PYTHON="$candidate"; break; fi
     done
 fi
 # 2 means "could not check", distinct from 0 "current" and 1 "out of date".
@@ -35,7 +38,7 @@ fi
 }
 
 generated="$(mktemp)"
-./build/agent_schema | "$PYTHON" tools/ae3d_agent.py --docs > "$generated" || {
+./build/agent_schema | $PYTHON tools/ae3d_agent.py --docs > "$generated" || {
     echo "gen_agent_docs: the generator failed" >&2
     rm -f "$generated"
     exit 2

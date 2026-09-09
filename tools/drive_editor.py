@@ -374,6 +374,19 @@ def layout_faults(widgets):
     return faults
 
 
+def editor_binary(path):
+    """The built editor, whatever the platform calls it, as an absolute path.
+
+    Two Windows details, both of which fail as a file-not-found naming nothing
+    useful: the binary is called .exe, and CreateProcess will not take a
+    relative path written with forward slashes.
+    """
+    for candidate in (path, path + ".exe"):
+        if os.path.exists(candidate):
+            return os.path.abspath(candidate)
+    raise SystemExit("no editor at %s: build it with editor/build_editor.sh" % path)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8791)
@@ -401,7 +414,7 @@ def main():
     editor_log = tempfile.NamedTemporaryFile(prefix="ae3d_editor_", suffix=".log",
                                              delete=False)
     EDITOR_LOG[0] = editor_log.name
-    editor = subprocess.Popen([args.binary], env=env,
+    editor = subprocess.Popen([editor_binary(args.binary)], env=env,
                               stdout=editor_log, stderr=subprocess.STDOUT)
     EDITOR_PROC[0] = editor
     try:

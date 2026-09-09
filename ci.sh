@@ -21,6 +21,14 @@ pass() { printf '   ok    %s\n' "$1"; }
 fail() { printf '   FAIL  %s\n' "$1"; failures=$((failures + 1)); }
 skip() { printf '   skip  %s (%s)\n' "$1" "$2"; skipped=$((skipped + 1)); }
 
+# Windows ships a python3 on PATH whose only purpose is to open the Microsoft
+# Store, and it answers command -v exactly like an interpreter would. Asking it
+# to run something is the only way to tell them apart.
+PYTHON=""
+for candidate in python3 python "py -3"; do
+    if $candidate -c "" >/dev/null 2>&1; then PYTHON="$candidate"; break; fi
+done
+
 have_display() {
     case "$(uname -s)" in
         Darwin) return 0 ;;
@@ -162,7 +170,7 @@ fi
 step "modules type-check"
 for module in src/ae3d/*/; do
     name="$(basename "$module")"
-    probe="$(mktemp -t ae3d_probe).ae"
+    probe="$(mktemp -t ae3d_probe.XXXXXX).ae"
     printf 'import ae3d.%s\nmain() { println("ok") }\n' "$name" > "$probe"
     if aetherc "$probe" "${probe%.ae}.c" >/tmp/ae3d_mod.log 2>&1; then
         pass "ae3d.$name"
@@ -180,7 +188,7 @@ done
 for module in examples/lib/*/; do
     [ -e "$module" ] || continue
     name="$(basename "$module")"
-    probe="$(mktemp -t ae3d_probe).ae"
+    probe="$(mktemp -t ae3d_probe.XXXXXX).ae"
     printf 'import %s\nmain() { println("ok") }\n' "$name" > "$probe"
     if AETHER_LIB_DIR="$PWD/src:$PWD/examples/lib" aetherc "$probe" "${probe%.ae}.c" >/tmp/ae3d_mod.log 2>&1; then
         pass "examples/lib/$name"
@@ -261,7 +269,7 @@ check_editor_run() {
         name="ae3d_editor ($editor_backend, $editor_scene)"
     fi
     report="$(mktemp)"
-    snapshot="$(mktemp -t ae3d_shot).png"
+    snapshot="$(mktemp -t ae3d_shot.XXXXXX).png"
     log="$(mktemp)"
     # A bounded run ends itself; the timeout is only a backstop so a hang
     # fails the step rather than blocking it.
@@ -436,9 +444,9 @@ else
         # A name the editor shares with the toolkit it imports is bound
         # differently inside the ui.window block than outside it, silently, and
         # that is how the Undo button came to step the toolkit's empty stack.
-        if command -v python3 >/dev/null 2>&1; then
+        if [ -n "$PYTHON" ]; then
             collide_log="$(mktemp)"
-            if AETHER_UI_ROOT="$UI_ROOT" python3 tools/check_ui_name_collisions.py \
+            if AETHER_UI_ROOT="$UI_ROOT" $PYTHON tools/check_ui_name_collisions.py \
                     >"$collide_log" 2>&1; then
                 pass "ae3d_editor (names)"
             else
@@ -455,7 +463,7 @@ else
         # cannot be hit, a field whose callback is not wired, a row that does
         # not respond to a click: all of them pass. So this presses the real
         # widgets through aether-ui's driver and asks the tree what changed.
-        if ! command -v python3 >/dev/null 2>&1; then
+        if [ -z "$PYTHON" ]; then
             skip "ae3d_editor (driver)" "no python3"
         elif ! have_display; then
             skip "ae3d_editor (driver)" "no display"
@@ -466,7 +474,7 @@ else
             # a real click exercises.
             for driver_backend in opengl vulkan; do
                 driver_log="$(mktemp)"
-                if python3 tools/drive_editor.py --backend "$driver_backend" \
+                if $PYTHON tools/drive_editor.py --backend "$driver_backend" \
                         --port 8797 >"$driver_log" 2>&1; then
                     pass "ae3d_editor (driver, $driver_backend)"
                 else

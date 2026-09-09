@@ -217,6 +217,22 @@ def build_zombie(parts, surfaces):
     jaw.location = (0.02, 0.0, 0.015)
     parts["Zombie_Jaw"] = jaw
 
+    # A blank box reads as the back of a head from every angle. Sockets and a
+    # mouth are what make it the front.
+    gore = surfaces["gore"]
+    mouth = block("Zombie_Mouth", (-0.02, -0.055, -0.045), (0.02, 0.055, 0.0),
+                  gore, repeats=8.0)
+    mouth.parent = head
+    mouth.location = (0.10, 0.0, 0.02)
+    parts["Zombie_Mouth"] = mouth
+
+    for side, y in (("L", 0.048), ("R", -0.048)):
+        socket = block("Zombie_Eye" + side, (-0.03, -0.025, -0.022),
+                       (0.012, 0.025, 0.022), gore, repeats=10.0)
+        socket.parent = head
+        socket.location = (0.105, y, 0.115)
+        parts["Zombie_Eye" + side] = socket
+
     for side, y in (("L", 0.235), ("R", -0.235)):
         upper = block("Zombie_ArmUpper" + side,
                       (-0.058, -0.058, -0.30), (0.058, 0.058, 0.06),
@@ -364,6 +380,7 @@ def main(argv):
         "metal": material("LampMetal", textures.metal(), roughness=0.4, metallic=0.8),
         "lamp": material("LampGlow", None, emission=(1.0, 0.72, 0.36)),
         "skin": material("ZombieSkin", textures.skin(), roughness=0.85),
+        "gore": material("ZombieGore", textures.gore(), roughness=0.55),
         "cloth": material("ZombieCloth", textures.cloth(), roughness=0.96),
     }
 

@@ -2883,11 +2883,35 @@ int ae3d_vk_frame_end(void) {
     return 1;
 }
 
+/* The finished frame, at an address that does not move.
+
+   Readback is double buffered, so the mapped memory the frame landed in
+   alternates: handing that out means the caller is given a different pointer
+   every frame for what is, to it, the same image. Anything that keeps work
+   against the buffer it was given -- a canvas that uploads the image it is
+   drawing, say -- then redoes that work on every frame and on every buffer,
+   and never hits what it cached. Copying two megabytes costs a fifth of a
+   millisecond; in ae3d's own editor, not copying cost a hundred and fifty. */
+static unsigned char *g_readback_copy = NULL;
+static size_t g_readback_copy_size = 0;
+
 void *ae3d_vk_offscreen_pixels(void) {
+    size_t needed;
+
     if (!vk.offscreen) return NULL;
     if (vk.readback_frame < 0) return NULL;
     ae3d_vkWaitForFences(vk.device, 1, &vk.in_flight[vk.readback_frame], VK_TRUE, UINT64_MAX);
-    return vk.readback_mapped[vk.readback_frame];
+
+    needed = (size_t)vk.readback_width * (size_t)vk.readback_height * 4u;
+    if (needed > g_readback_copy_size) {
+        free(g_readback_copy);
+        g_readback_copy = (unsigned char *)malloc(needed);
+        g_readback_copy_size = g_readback_copy ? needed : 0;
+    }
+    if (!g_readback_copy) return vk.readback_mapped[vk.readback_frame];
+
+    memcpy(g_readback_copy, vk.readback_mapped[vk.readback_frame], needed);
+    return g_readback_copy;
 }
 
 int ae3d_vk_offscreen_width(void) { return vk.readback_width; }
@@ -3105,6 +3129,10 @@ void ae3d_vk_free_mesh(int handle) {
 
 void ae3d_vk_shutdown(void) {
     unsigned i;
+
+    free(g_readback_copy);
+    g_readback_copy = NULL;
+    g_readback_copy_size = 0;
 
     if (!vk.ready) return;
     ae3d_vkDeviceWaitIdle(vk.device);

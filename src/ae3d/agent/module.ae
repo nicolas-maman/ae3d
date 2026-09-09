@@ -331,8 +331,8 @@ help_result() -> ptr {
         "Every animation bound to a model: clip, playhead, duration, speed and the pose it produced."))
     json.array_add_raw(ops, describe("anim.get", "name | index",
         "One animation in full, including the transform its playhead currently produces."))
-    json.array_add_raw(ops, describe("anim.set", "name | index, [time], [speed], [playing], [looping]",
-        "Drive an animation. Setting time seeks and reposes at once, so a snapshot after it shows that pose."))
+    json.array_add_raw(ops, describe("anim.set", "[name | index], [time], [speed], [playing], [looping]",
+        "Drive an animation, or every animation at once when no name or index is given. Setting time seeks and reposes together, so a snapshot after it shows that pose."))
     json.array_add_raw(ops, describe("snapshot", "path",
         "Write the next completed frame to a PNG. Answers once the file exists."))
     json.array_add_raw(ops, describe("frame.pause", "",
@@ -884,6 +884,42 @@ anim_list_result(c: *Context) -> ptr {
     return out
 }
 
+// Applies whatever the request carries to every binding, and answers with how
+// many were driven and where they ended up.
+drive_all(c: *Context, request: ptr) -> ptr {
+    registry = c.animations as *Registry
+    count = anim.registry_count(registry)
+    i = 0
+    while i < count {
+        drive_binding(anim.registry_binding(registry, i), request)
+        i = i + 1
+    }
+    out = json.obj()
+    json.object_set_raw(out, "animations", json.from_int(count))
+    node = json.object_get_raw(request, "time")
+    if node != null { json.object_set_raw(out, "time", json.num(json.get_number(node))) }
+    return out
+}
+
+drive_binding(b: *Binding, request: ptr) {
+    if b == null { return }
+    p = anim.binding_player(b)
+
+    node = json.object_get_raw(request, "time")
+    if node != null {
+        anim.player_set_time(p, json.get_number(node))
+        anim.apply(p, anim.binding_model(b))
+    }
+    node = json.object_get_raw(request, "speed")
+    if node != null { anim.player_set_speed(p, json.get_number(node)) }
+    node = json.object_get_raw(request, "looping")
+    if node != null { anim.player_set_looping(p, json.get_bool(node) == 1) }
+    node = json.object_get_raw(request, "playing")
+    if node != null {
+        if json.get_bool(node) == 1 { anim.player_play(p) } else { anim.player_pause(p) }
+    }
+}
+
 binding_from(c: *Context, request: ptr) -> int {
     registry = c.animations as *Registry
     named = json.object_get_raw(request, "name")
@@ -1303,27 +1339,22 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
     }
 
     if op == "anim.set" {
+        // A rig is many clips, one per part, and seeking one of them poses one
+        // limb of a figure whose other fifteen are still where they were. With
+        // no name and no index, this drives all of them: a character is the
+        // thing an agent means when it asks to see a moment.
+        if json.object_get_raw(request, "name") == null &&
+           json.object_get_raw(request, "index") == null {
+            answer(id, drive_all(c, request))
+            return false
+        }
         index = binding_from(c, request)
         b = anim.registry_binding(c.animations as *Registry, index)
         if b == null {
             fail(id, "no animation by that name or index")
             return false
         }
-        p = anim.binding_player(b)
-
-        node = json.object_get_raw(request, "time")
-        if node != null {
-            anim.player_set_time(p, json.get_number(node))
-            anim.apply(p, anim.binding_model(b))
-        }
-        node = json.object_get_raw(request, "speed")
-        if node != null { anim.player_set_speed(p, json.get_number(node)) }
-        node = json.object_get_raw(request, "looping")
-        if node != null { anim.player_set_looping(p, json.get_bool(node) == 1) }
-        node = json.object_get_raw(request, "playing")
-        if node != null {
-            if json.get_bool(node) == 1 { anim.player_play(p) } else { anim.player_pause(p) }
-        }
+        drive_binding(b, request)
         answer(id, binding_result(b, index))
         return false
     }

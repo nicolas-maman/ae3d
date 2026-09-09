@@ -63,7 +63,7 @@ interleaved with the first.
 | `trace.model` | `id \| object \| index` | Follow one model from its Blender object to the pixels: source, asset, mesh, node, animation, visibility. Names the stage it stopped being right at. |
 | `anim.list` |  | Every animation bound to a model: clip, playhead, duration, speed and the pose it produced. |
 | `anim.get` | `name \| index` | One animation in full, including the transform its playhead currently produces. |
-| `anim.set` | `name \| index, [time], [speed], [playing], [looping]` | Drive an animation. Setting time seeks and reposes at once, so a snapshot after it shows that pose. |
+| `anim.set` | `[name \| index], [time], [speed], [playing], [looping]` | Drive an animation, or every animation at once when no name or index is given. Setting time seeks and reposes together, so a snapshot after it shows that pose. |
 | `snapshot` | `path` | Write the next completed frame to a PNG. Answers once the file exists. |
 | `frame.pause` |  | Hold the simulation still. The scene still renders and can be queried; time and the frame counter stop. |
 | `frame.resume` |  | Let the simulation run again. |

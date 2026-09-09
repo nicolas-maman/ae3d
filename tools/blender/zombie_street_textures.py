@@ -62,6 +62,45 @@ def _tint(base, shade, amount):
         numpy.array(shade, dtype=numpy.float32)[None, None, :] * field
 
 
+def _windows(rgb, size, rng, sill):
+    """Two courses of two windows, so a wall repeats every four of them.
+
+    Windows are what makes a wall read as a building rather than a slab, and at
+    a third of a repeat per metre one texture tile is about three metres, which
+    is one storey. A few are lit: a street at dusk is not a street where
+    everybody is out.
+    """
+    lit = [(1.00, 0.78, 0.44), None, None, (0.86, 0.62, 0.30)]
+    rng.shuffle(lit)
+    pane = numpy.array((0.045, 0.050, 0.065), dtype=numpy.float32)
+    frame = numpy.array(sill, dtype=numpy.float32)
+
+    half = size // 2
+    width = int(size * 0.20)
+    height = int(size * 0.24)
+    edge = max(1, size // 128)
+
+    for row in range(2):
+        for column in range(2):
+            glow = lit[row * 2 + column]
+            cx = column * half + half // 2
+            cy = row * half + half // 2
+            x0, x1 = cx - width // 2, cx + width // 2
+            y0, y1 = cy - height // 2, cy + height // 2
+            rgb[y0 - edge:y1 + edge, x0 - edge:x1 + edge] = frame
+            if glow is None:
+                rgb[y0:y1, x0:x1] = pane
+            else:
+                colour = numpy.array(glow, dtype=numpy.float32)
+                # Brighter towards the top, the way a room lit from its ceiling
+                # falls off towards the sill.
+                ramp = numpy.linspace(0.55, 1.0, y1 - y0, dtype=numpy.float32)
+                rgb[y0:y1, x0:x1] = colour[None, None, :] * ramp[:, None, None]
+            # A glazing bar down the middle.
+            rgb[y0:y1, cx - edge // 2 - 1:cx + edge // 2 + 1] = frame
+    return rgb
+
+
 def brick(size=256, seed=11):
     """Courses of brick, offset every other row, with mortar between."""
     rng = random.Random(seed)
@@ -91,6 +130,7 @@ def brick(size=256, seed=11):
     joint_colour = numpy.array((0.52, 0.50, 0.47), dtype=numpy.float32)
     rgb = face[None, None, :] * (1.0 + shade[:, :, None] + (grain[:, :, None] - 0.5) * 0.35)
     rgb = rgb * (1.0 - field[:, :, None]) + joint_colour[None, None, :] * field[:, :, None]
+    rgb = _windows(rgb, size, rng, (0.30, 0.29, 0.27))
     return _image("BrickWall", size, _rgba(rgb))
 
 
@@ -101,6 +141,7 @@ def concrete(size=256, seed=23):
     stain = numpy.clip((streak - 0.5) * 2.0, 0.0, 1.0)
     rgb = _tint((0.40, 0.40, 0.39), (0.21, 0.21, 0.22), stain * 0.8)
     rgb *= (0.84 + grain[:, :, None] * 0.32)
+    rgb = _windows(rgb, size, rng, (0.26, 0.26, 0.25))
     return _image("ConcreteWall", size, _rgba(rgb))
 
 
@@ -162,6 +203,14 @@ def cloth(size=128, seed=89):
     rgb = _tint((0.20, 0.19, 0.22), (0.09, 0.09, 0.11), numpy.clip(grime * 1.3 - 0.25, 0.0, 1.0))
     rgb *= (0.88 + weave[:, :, None] * 0.14)
     return _image("ZombieCloth", size, _rgba(rgb))
+
+
+def gore(size=64, seed=101):
+    """What is behind the eye sockets and the mouth: dark, wet, not much of it."""
+    rng = random.Random(seed)
+    wet = _noise(rng, size, 4, 4)
+    rgb = _tint((0.14, 0.035, 0.035), (0.045, 0.012, 0.018), wet)
+    return _image("ZombieGore", size, _rgba(rgb))
 
 
 def metal(size=128, seed=97):
