@@ -646,34 +646,57 @@ def main():
                 check("smoothing one gives it a surface of its own", ok,
                       "%d triangles then %d" % (blocky, triangles(widgets)))
 
+        # A behaviour is a script the project has, not a case in the editor.
+        # The buttons are the files in resources/scripts, so this reads the
+        # names off disk rather than expecting any particular one: adding a
+        # script is adding a file, and this check should not need editing when
+        # someone does.
+        on_disk = sorted(name[:-3] for name in os.listdir("resources/scripts")
+                         if name.endswith(".ae"))
+        widgets = tree(args.port)
+        buttons = {w["text"].strip() for w in widgets.values() if w["type"] == "button"}
+        check("every script in the project has a button",
+              all(name in buttons for name in on_disk),
+              "on disk %s, missing %s" % (on_disk, [n for n in on_disk
+                                                    if n not in buttons]))
+
         # A row of choices says which one is on. Read as "the accent moved"
         # rather than "this button is blue", which is the stronger claim: a
         # fixed colour is a constant the editor could satisfy while the
         # highlight never follows the choice.
         widgets = tree(args.port)
+        choices = ["None"] + on_disk
         segments = {w["text"]: w for w in widgets.values()
-                    if w["type"] == "button"
-                    and w["text"] in ("None", "Spin", "Bob", "Orbit")}
-        check("the behaviour row has all four choices", len(segments) == 4)
-        if len(segments) == 4:
+                    if w["type"] == "button" and w["text"] in choices}
+        check("the behaviour row offers none and every script",
+              len(segments) == len(choices),
+              "have %s, want %s" % (sorted(segments), choices))
+        if len(segments) == len(choices):
             lit = [t for t, w in segments.items() if w.get("bg") == ACCENT]
             check("exactly one behaviour is lit, and it is the one in effect",
                   lit == ["None"], "lit: %s" % lit)
 
-            post(args.port, "/widget/%d/click" % segments["Spin"]["id"])
+            wanted = on_disk[0]
+            post(args.port, "/widget/%d/click" % segments[wanted]["id"])
 
             def moved(ws):
                 return [w["text"] for w in ws.values()
-                        if w["type"] == "button"
-                        and w["text"] in ("None", "Spin", "Bob", "Orbit")
-                        and w.get("bg") == ACCENT] == ["Spin"]
+                        if w["type"] == "button" and w["text"] in choices
+                        and w.get("bg") == ACCENT] == [wanted]
 
             widgets, ok = wait_for(args.port, moved)
             check("choosing a behaviour moves the highlight to it", ok,
                   "lit: %s" % [w["text"] for w in widgets.values()
-                               if w["type"] == "button"
-                               and w["text"] in ("None", "Spin", "Bob", "Orbit")
+                               if w["type"] == "button" and w["text"] in choices
                                and w.get("bg") == ACCENT])
+
+            # That the script then moves the object is not checked here. The
+            # inspector shows a position and a scale, and a script is free to
+            # move neither: spin only turns. The editor's own report drives
+            # every script it has and asserts the model ended up somewhere
+            # else, which is the check that does not depend on what a
+            # particular script happens to do.
+
             post(args.port, "/widget/%d/click" % segments["None"]["id"])
             wait_for(args.port, lambda ws: not moved(ws))
 
@@ -855,6 +878,60 @@ def main():
                     check("a setting survives the scene file",
                           moved == "3.00" and restored == "9.25",
                           "changed to %s, came back as %s" % (moved, restored))
+
+        # A scene remembers which script each object was given, by name. That
+        # is what makes an assignment worth making: the editor knows nothing
+        # about what the script does, so the name is the whole of what it can
+        # record, and a project with the script still in it gets it back.
+        widgets = tree(args.port)
+        ids = {w["text"].strip(): w["id"] for w in widgets.values()
+               if w["type"] == "button"}
+        if on_disk and on_disk[-1] in ids:
+            chosen = on_disk[-1]
+            # Which object is being given the script. A load puts the selection
+            # back at the start, and the lit button is the selected object's
+            # script, so without re-selecting this one afterwards the check
+            # reads a different object and calls the assignment lost.
+            carrier = None
+            for row in sorted(rows_under(widgets, scene), key=lambda w: w["id"]):
+                if row.get("classes", "").find("selected") >= 0:
+                    carrier = row_name(widgets, row)
+            if carrier is None:
+                rows_now = sorted(rows_under(widgets, scene), key=lambda w: w["id"])
+                if rows_now:
+                    carrier = row_name(widgets, rows_now[-1])
+                    post(args.port, "/widget/%d/click" % rows_now[-1]["id"])
+            post(args.port, "/widget/%d/click" % ids[chosen])
+            wait_for(args.port,
+                     lambda ws: ws[ids[chosen]].get("bg") == ACCENT)
+            stamped = os.path.getmtime(scene_file)
+            post(args.port, "/widget/%d/click" % save)
+            wait_file(scene_file, newer_than=stamped)
+
+            with open(scene_file) as f:
+                saved_scene = json.load(f)
+            recorded = [m.get("script") for m in saved_scene.get("models", [])
+                        if m.get("script")]
+            check("the scene records the script by name", chosen in recorded,
+                  "recorded %s" % recorded)
+
+            post(args.port, "/widget/%d/click" % ids["None"])
+            wait_for(args.port, lambda ws: ws[ids["None"]].get("bg") == ACCENT)
+            post(args.port, "/widget/%d/click" % load)
+            wait_for(args.port, lambda ws: len(rows_under(ws, scene)) > 0)
+
+            # Back to the object that was given the script, because the button
+            # says what the selected object carries.
+            for row in sorted(rows_under(tree(args.port), scene),
+                              key=lambda w: w["id"]):
+                if row_name(tree(args.port), row) == carrier:
+                    post(args.port, "/widget/%d/click" % row["id"])
+                    break
+            widgets, back = wait_for(
+                args.port, lambda ws: ws[ids[chosen]].get("bg") == ACCENT,
+                seconds=12.0)
+            check("and gives it back when the scene is loaded", back,
+                  "on %s" % carrier)
 
         # The sky survives the file, and the renderer clears to it. The scene
         # format has always carried a sky and the editor had no control over

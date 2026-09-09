@@ -1,0 +1,98 @@
+// Scripts you can assign to an object.
+//
+// A script is an ordinary Aether source file with two functions in it:
+//
+//     script_start(m: *Model)                 once, when it is attached
+//     script_update(m: *Model, delta: float)  every frame
+//
+// It is compiled into a shared library and opened at runtime, so attaching one
+// is a matter of remembering which library answers for which object. That is
+// how a behaviour works in Unity and in Godot, and what gopher3D's script
+// manager was reaching for.
+//
+// CRITICAL: a script is compiled from the same sources as the host and reaches
+// back into it for the runtime, so the two agree about what a Model is only
+// while they are built from the same tree. Build scripts with the binary that
+// will run them.
+
+import std.list
+import std.heap
+import std.string
+import ae3d.core
+
+exports (
+    Script,
+    script_open, script_close, script_start, script_update,
+    script_path, script_has_start, library_path, last_error
+)
+
+extern ae3d_script_open(path: string) -> ptr
+extern ae3d_script_has_start(script: ptr) -> int
+extern ae3d_script_start(script: ptr, model: ptr)
+extern ae3d_script_update(script: ptr, model: ptr, delta: float)
+extern ae3d_script_close(script: ptr)
+extern ae3d_script_error() -> string
+extern ae3d_script_suffix() -> string
+
+struct Script {
+    handle: ptr
+    path: string
+}
+
+var g_error = ""
+
+last_error() -> string { return g_error }
+
+// Where the library for a named script lives. The suffix is the platform's,
+// and knowing which belongs here rather than in every caller that wants to
+// open one.
+library_path(directory: string, name: string) -> string {
+    return string.concat(directory, string.concat(name, ae3d_script_suffix()))
+}
+
+// Open a compiled script. Answers null and says why rather than half a script:
+// a library with no script_update in it is a file that is not a script, and a
+// caller that gets one back would call into nothing every frame.
+script_open(path: string) -> *Script {
+    handle = ae3d_script_open(path)
+    if handle == null {
+        g_error = ae3d_script_error()
+        return null
+    }
+    s = heap.new(Script)
+    s.handle = handle
+    s.path = path
+    return s
+}
+
+// CRITICAL: the path is not freed here. A struct owns its string fields and
+// heap.free releases them, so freeing it as well is a double free, and this
+// aborted on the first script it closed. See docs/string_ownership.md.
+script_close(s: *Script) {
+    if s == null { return }
+    if s.handle != null { ae3d_script_close(s.handle) }
+    heap.free(s)
+}
+
+script_path(s: *Script) -> string {
+    if s == null { return "" }
+    return s.path
+}
+
+// Whether it has anything to do when it is attached. A script that only moves
+// something has no setup, and calling a function it does not have would be a
+// crash rather than a no-op.
+script_has_start(s: *Script) -> bool {
+    if s == null { return false }
+    return ae3d_script_has_start(s.handle) == 1
+}
+
+script_start(s: *Script, m: *Model) {
+    if s == null || m == null { return }
+    ae3d_script_start(s.handle, m as ptr)
+}
+
+script_update(s: *Script, m: *Model, delta: float) {
+    if s == null || m == null { return }
+    ae3d_script_update(s.handle, m as ptr, delta)
+}
