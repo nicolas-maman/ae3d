@@ -1,0 +1,266 @@
+// The animation samplers, against values worked out by hand.
+//
+// A sampler that returns something plausible for every input is the easy thing
+// to write and the hard thing to trust, so the numbers here are exact ones
+// rather than "did it move": the midpoint of a 0-to-90-degree turn about Y is
+// the 45-degree turn about Y, and nothing else is.
+//
+// No window and no driver.
+
+import ae3d.core
+import ae3d.anim
+import ae3d.loader
+
+const EPSILON = 0.0001
+
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, condition: bool) {
+    g_checks = g_checks + 1
+    if !condition {
+        g_failures = g_failures + 1
+        println("FAIL ${name}")
+    }
+}
+
+near(a: float, b: float) -> bool {
+    d = a - b
+    if d < 0.0 { d = -d }
+    return d < EPSILON
+}
+
+check_near(name: string, got: float, want: float) {
+    g_checks = g_checks + 1
+    if !near(got, want) {
+        g_failures = g_failures + 1
+        println("FAIL ${name}: got ${got}, want ${want}")
+    }
+}
+
+check_vec3(name: string, got: Vec3, x: float, y: float, z: float) {
+    check_near("${name} x", got.x, x)
+    check_near("${name} y", got.y, y)
+    check_near("${name} z", got.z, z)
+}
+
+test_empty_and_single() {
+    empty = anim.channel_new(anim.TRANSLATION, anim.LINEAR)
+    check_vec3("an empty channel samples to zero", anim.sample_vec3(empty, 0.5), 0.0, 0.0, 0.0)
+    check("an empty channel has no duration", near(anim.channel_duration(empty), 0.0))
+
+    single = anim.channel_new(anim.TRANSLATION, anim.LINEAR)
+    anim.channel_add_key(single, 1.0, 3.0, 4.0, 5.0, 0.0)
+    // One key is a constant, at every time, including before it.
+    check_vec3("one key holds before itself", anim.sample_vec3(single, 0.0), 3.0, 4.0, 5.0)
+    check_vec3("one key holds after itself", anim.sample_vec3(single, 99.0), 3.0, 4.0, 5.0)
+
+    anim.channel_free(empty)
+    anim.channel_free(single)
+}
+
+test_linear_vec3() {
+    c = anim.channel_new(anim.TRANSLATION, anim.LINEAR)
+    anim.channel_add_key(c, 0.0, 0.0, 0.0, 0.0, 0.0)
+    anim.channel_add_key(c, 2.0, 10.0, 20.0, 30.0, 0.0)
+
+    check_vec3("at the first key", anim.sample_vec3(c, 0.0), 0.0, 0.0, 0.0)
+    check_vec3("halfway", anim.sample_vec3(c, 1.0), 5.0, 10.0, 15.0)
+    check_vec3("three quarters", anim.sample_vec3(c, 1.5), 7.5, 15.0, 22.5)
+    check_vec3("at the last key", anim.sample_vec3(c, 2.0), 10.0, 20.0, 30.0)
+    // Outside the clip the ends hold, rather than extrapolating off to infinity.
+    check_vec3("before the start", anim.sample_vec3(c, -5.0), 0.0, 0.0, 0.0)
+    check_vec3("after the end", anim.sample_vec3(c, 50.0), 10.0, 20.0, 30.0)
+    check_near("duration is the last key", anim.channel_duration(c), 2.0)
+
+    anim.channel_free(c)
+}
+
+test_step_vec3() {
+    c = anim.channel_new(anim.TRANSLATION, anim.STEP)
+    anim.channel_add_key(c, 0.0, 1.0, 1.0, 1.0, 0.0)
+    anim.channel_add_key(c, 2.0, 9.0, 9.0, 9.0, 0.0)
+
+    // The whole difference from LINEAR: halfway is still the first value.
+    check_vec3("step holds the value", anim.sample_vec3(c, 1.9), 1.0, 1.0, 1.0)
+    check_vec3("step takes the next key on time", anim.sample_vec3(c, 2.0), 9.0, 9.0, 9.0)
+
+    anim.channel_free(c)
+}
+
+// A 90-degree turn about Y is (0, sin45, 0, cos45). Normalised-lerped from the
+// identity, its midpoint is (0, sin22.5, 0, cos22.5) -- the 45-degree turn.
+// That is the value, not an approximation of it.
+test_quaternion_midpoint() {
+    c = anim.channel_new(anim.ROTATION, anim.LINEAR)
+    anim.channel_add_key(c, 0.0, 0.0, 0.0, 0.0, 1.0)
+    anim.channel_add_key(c, 1.0, 0.0, 0.70710678, 0.0, 0.70710678)
+
+    q = anim.sample_quat(c, 0.5)
+    check_near("midpoint rotation x", q.x, 0.0)
+    check_near("midpoint rotation y", q.y, 0.38268343)
+    check_near("midpoint rotation z", q.z, 0.0)
+    check_near("midpoint rotation w", q.w, 0.92387953)
+
+    ends = anim.sample_quat(c, 0.0)
+    check_near("the first key is the identity", ends.w, 1.0)
+
+    anim.channel_free(c)
+}
+
+// q and -q are the same rotation. Stored on opposite sides of the hypersphere,
+// a lerp that does not check the sign takes the long way round: this same
+// midpoint comes out as a rotation most of the way around instead of 45
+// degrees. The check is that both spellings of the target agree.
+test_quaternion_shorter_arc() {
+    c = anim.channel_new(anim.ROTATION, anim.LINEAR)
+    anim.channel_add_key(c, 0.0, 0.0, 0.0, 0.0, 1.0)
+    anim.channel_add_key(c, 1.0, 0.0, -0.70710678, 0.0, -0.70710678)
+
+    q = anim.sample_quat(c, 0.5)
+    // Same rotation as the un-negated pair, up to the sign of the whole
+    // quaternion, so compare magnitudes.
+    y = q.y
+    w = q.w
+    if w < 0.0 {
+        y = -y
+        w = -w
+    }
+    check_near("the negated target takes the short arc, y", y, 0.38268343)
+    check_near("the negated target takes the short arc, w", w, 0.92387953)
+
+    anim.channel_free(c)
+}
+
+test_duplicate_timestamps() {
+    c = anim.channel_new(anim.TRANSLATION, anim.LINEAR)
+    anim.channel_add_key(c, 0.0, 1.0, 0.0, 0.0, 0.0)
+    anim.channel_add_key(c, 0.0, 7.0, 0.0, 0.0, 0.0)
+    // Two keys at the same instant is a zero-length span. It must hold a value
+    // rather than divide by it.
+    v = anim.sample_vec3(c, 0.0)
+    check("a zero-length span produces a number", v.x == 1.0 || v.x == 7.0)
+    anim.channel_free(c)
+}
+
+test_out_of_order_is_refused() {
+    c = anim.channel_new(anim.TRANSLATION, anim.LINEAR)
+    check("an in-order key is accepted", anim.channel_add_key(c, 1.0, 0.0, 0.0, 0.0, 0.0))
+    check("a key that goes backwards is refused",
+          !anim.channel_add_key(c, 0.5, 0.0, 0.0, 0.0, 0.0))
+    check("the refused key was not stored", anim.channel_key_count(c) == 1)
+    anim.channel_free(c)
+}
+
+test_player() {
+    clip = anim.clip_new("spin")
+    c = anim.channel_new(anim.TRANSLATION, anim.LINEAR)
+    anim.channel_add_key(c, 0.0, 0.0, 0.0, 0.0, 0.0)
+    anim.channel_add_key(c, 2.0, 20.0, 0.0, 0.0, 0.0)
+    anim.clip_add_channel(clip, c)
+
+    check_near("the clip is as long as its longest channel", anim.clip_duration(clip), 2.0)
+    check("the clip keeps its name", anim.clip_name(clip) == "spin")
+    check("the clip holds its channel", anim.clip_channel_count(clip) == 1)
+
+    p = anim.player_new(clip)
+    anim.advance(p, 0.5)
+    check_near("the playhead moves", anim.player_time(p), 0.5)
+
+    anim.player_set_speed(p, 2.0)
+    anim.advance(p, 0.5)
+    check_near("speed scales the advance", anim.player_time(p), 1.5)
+
+    // Looping wraps rather than clamping, and keeps the remainder.
+    anim.player_set_speed(p, 1.0)
+    anim.advance(p, 1.0)
+    check_near("looping wraps and keeps the remainder", anim.player_time(p), 0.5)
+    check("a looping player is still playing", anim.player_playing(p))
+
+    // Not looping: stop at the end and say so, so a caller can tell a finished
+    // clip from a paused one.
+    anim.player_set_looping(p, false)
+    anim.advance(p, 10.0)
+    check_near("a one-shot stops at its end", anim.player_time(p), 2.0)
+    check("a one-shot reports that it finished", !anim.player_playing(p))
+
+    anim.player_rewind(p)
+    anim.player_play(p)
+    check_near("rewind goes back to the start", anim.player_time(p), 0.0)
+
+    anim.player_free(p)
+    anim.clip_free(clip)
+}
+
+// A clip drives only what it has channels for. A rotation clip must not move a
+// model to the origin on the way past.
+test_apply_touches_only_what_it_drives() {
+    m = loader.cube(1.0)
+    core.model_set_position(m, 5.0, 6.0, 7.0)
+    core.model_set_scale(m, 3.0, 3.0, 3.0)
+
+    clip = anim.clip_new("turn")
+    c = anim.channel_new(anim.ROTATION, anim.LINEAR)
+    anim.channel_add_key(c, 0.0, 0.0, 0.0, 0.0, 1.0)
+    anim.channel_add_key(c, 1.0, 0.0, 0.70710678, 0.0, 0.70710678)
+    anim.clip_add_channel(clip, c)
+
+    p = anim.player_new(clip)
+    anim.player_set_time(p, 0.5)
+    anim.apply(p, m)
+
+    check_near("a rotation clip leaves x alone", m.position.x, 5.0)
+    check_near("a rotation clip leaves y alone", m.position.y, 6.0)
+    check_near("a rotation clip leaves z alone", m.position.z, 7.0)
+    check_near("a rotation clip leaves scale alone", m.scale.x, 3.0)
+    check_near("a rotation clip rotates", m.rotation.y, 0.38268343)
+
+    anim.player_free(p)
+    anim.clip_free(clip)
+    core.model_free(m)
+}
+
+test_apply_moves_and_scales() {
+    m = loader.cube(1.0)
+    clip = anim.clip_new("move")
+
+    t = anim.channel_new(anim.TRANSLATION, anim.LINEAR)
+    anim.channel_add_key(t, 0.0, 0.0, 0.0, 0.0, 0.0)
+    anim.channel_add_key(t, 1.0, 10.0, 0.0, 0.0, 0.0)
+    anim.clip_add_channel(clip, t)
+
+    s = anim.channel_new(anim.SCALE, anim.LINEAR)
+    anim.channel_add_key(s, 0.0, 1.0, 1.0, 1.0, 0.0)
+    anim.channel_add_key(s, 1.0, 3.0, 3.0, 3.0, 0.0)
+    anim.clip_add_channel(clip, s)
+
+    p = anim.player_new(clip)
+    anim.player_set_time(p, 0.5)
+    anim.apply(p, m)
+
+    check_near("translation reaches the model", m.position.x, 5.0)
+    check_near("scale reaches the model", m.scale.x, 2.0)
+
+    anim.player_free(p)
+    anim.clip_free(clip)
+    core.model_free(m)
+}
+
+main() {
+    test_empty_and_single()
+    test_linear_vec3()
+    test_step_vec3()
+    test_quaternion_midpoint()
+    test_quaternion_shorter_arc()
+    test_duplicate_timestamps()
+    test_out_of_order_is_refused()
+    test_player()
+    test_apply_touches_only_what_it_drives()
+    test_apply_moves_and_scales()
+
+    if g_failures == 0 {
+        println("test_anim: all checks passed (${g_checks})")
+        return
+    }
+    println("test_anim: ${g_failures} failure(s) of ${g_checks}")
+}

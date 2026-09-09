@@ -57,7 +57,14 @@ case " $AETHER_COMPILE_FLAGS " in
     *) AETHER_COMPILE_FLAGS="$AETHER_COMPILE_FLAGS -fwrapv" ;;
 esac
 
-if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists glfw3; then
+# Same precedence as build.sh: named flags win, then pkg-config, then a bare
+# -lglfw. A Windows checkout outside MSYS2 has no pkg-config and a prefix of
+# its own, and the two scripts disagreeing about how to find GLFW is how one of
+# them ends up unbuildable.
+if [ -n "${GLFW_CFLAGS:-}" ] || [ -n "${GLFW_LIBS:-}" ]; then
+    GLFW_CFLAGS="${GLFW_CFLAGS:-}"
+    GLFW_LIBS="${GLFW_LIBS:-}"
+elif command -v pkg-config >/dev/null 2>&1 && pkg-config --exists glfw3; then
     GLFW_CFLAGS="$(pkg-config --cflags glfw3)"
     GLFW_LIBS="$(pkg-config --libs glfw3)"
 else
@@ -65,11 +72,35 @@ else
     GLFW_LIBS="-lglfw"
 fi
 
+if [ -n "${ZLIB_CFLAGS:-}" ] || [ -n "${ZLIB_LIBS:-}" ]; then
+    ZLIB_CFLAGS="${ZLIB_CFLAGS:-}"
+    ZLIB_LIBS="${ZLIB_LIBS:-}"
+elif command -v pkg-config >/dev/null 2>&1 && pkg-config --exists zlib; then
+    ZLIB_CFLAGS="$(pkg-config --cflags zlib)"
+    ZLIB_LIBS="$(pkg-config --libs zlib)"
+else
+    ZLIB_CFLAGS=""
+    ZLIB_LIBS="-lz"
+fi
+case " $AETHER_LIBS " in
+    *" -lz "*) ZLIB_LIBS="" ;;
+esac
+
 VULKAN_CFLAGS=""
 if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists vulkan; then
     VULKAN_CFLAGS="$(pkg-config --cflags vulkan)"
 elif [ -d /opt/homebrew/include/vulkan ]; then
     VULKAN_CFLAGS="-I/opt/homebrew/include"
+elif [ -n "${VULKAN_SDK:-}" ]; then
+    # As build.sh does. GLFW is included with GLFW_INCLUDE_VULKAN, so
+    # vulkan.h has to be found even though nothing links against the loader,
+    # and the LunarG SDK on Windows spells the directory Include.
+    for ae3d_vk_inc in "${VULKAN_SDK}/include" "${VULKAN_SDK}/Include"; do
+        if [ -d "$ae3d_vk_inc" ]; then
+            VULKAN_CFLAGS="-I$ae3d_vk_inc"
+            break
+        fi
+    done
 fi
 
 OS="$(uname -s)"
@@ -90,13 +121,29 @@ case "$OS" in
         PLATFORM_LIBS="$(pkg-config --libs gtk4) -ldl -lm -lpthread"
         NATIVE_EXTRA=""
         ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT)
+        # aether-ui has had a Win32 backend for some time; this script did not
+        # know about it, so the editor was unbuildable on Windows for want of a
+        # case in a shell script rather than for want of any code.
+        #
+        # The library list is aether-ui's own (its build.sh, Windows branch),
+        # not a guess: MinGW does not honour #pragma comment(lib), so the win32
+        # backend documents what it needs at the top of the file and every
+        # caller has to name it.
+        UI_SOURCES="$UI_ROOT/backend/aether_ui_win32.c $UI_ROOT/backend/aether_ui_test_server.c $UI_ROOT/backend/aether_ui_system_extras.c"
+        UI_FLAGS=""
+        PLATFORM_LIBS="-luser32 -lgdi32 -lgdiplus -lmsimg32 -lcomctl32 -lcomdlg32 \
+-lshell32 -lole32 -loleaut32 -luuid -loleacc -ldwmapi -luxtheme \
+-lopengl32 -lws2_32 -lbcrypt -lm"
+        NATIVE_EXTRA=""
+        ;;
     *)
         echo "ae3d: the editor has no build recipe for $OS yet" >&2
         exit 1
         ;;
 esac
 
-NATIVE_SOURCES="native/ae3d_glapi.c native/ae3d_platform.c native/ae3d_mesh.c native/ae3d_meshfile.c native/ae3d_image.c native/ae3d_gl.c native/ae3d_offscreen.c native/ae3d_vk.c $NATIVE_EXTRA"
+NATIVE_SOURCES="native/ae3d_agent.c native/ae3d_capture.c native/ae3d_png.c native/ae3d_glapi.c native/ae3d_platform.c native/ae3d_mesh.c native/ae3d_meshfile.c native/ae3d_image.c native/ae3d_gl.c native/ae3d_offscreen.c native/ae3d_vk.c $NATIVE_EXTRA"
 
 # Every header, not a list of three: the generated ones carry the shaders and
 # the uniform offsets, so leaving them out linked the previous shaders.
@@ -113,7 +160,7 @@ for src in $NATIVE_SOURCES; do
     extra=""
     case "$src" in *.m) extra="-fobjc-arc" ;; esac
     if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ] || [ "$newest_header" -nt "$obj" ]; then
-        "$CC" -c $CFLAGS $WARN $extra $GLFW_CFLAGS $VULKAN_CFLAGS "$src" -o "$obj"
+        "$CC" -c $CFLAGS $WARN $extra $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o "$obj"
     fi
 done
 
@@ -123,7 +170,7 @@ export AETHER_LIB_DIR="$ROOT/src:$UI_ROOT"
 aetherc "$SOURCE" "$GEN"
 
 "$CC" $CFLAGS $UI_FLAGS "$GEN" $UI_SOURCES $OBJ_DIR/*.o \
-    $AETHER_COMPILE_FLAGS $AETHER_LIBS $GLFW_LIBS $PLATFORM_LIBS \
+    $AETHER_COMPILE_FLAGS $AETHER_LIBS $GLFW_LIBS $ZLIB_LIBS $PLATFORM_LIBS \
     -o "$OUT"
 
 echo "built: $OUT"

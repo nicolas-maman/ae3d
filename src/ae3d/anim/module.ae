@@ -1,0 +1,522 @@
+// Keyframe animation: clips, channels, samplers and playback.
+//
+// The shape is glTF's, which is what Blender exports. Rigid transform
+// channels only; skinning is ae3d#192.
+
+import std.heap
+import std.list
+import std.string
+import ae3d.core
+
+exports (
+    Key, AnimChannel, Clip, Player,
+    TRANSLATION, ROTATION, SCALE,
+    STEP, LINEAR, CUBIC,
+    clip_new, clip_free, clip_add_channel, clip_channel_count, clip_channel,
+    clip_name, clip_duration,
+    channel_new, channel_free, channel_add_key, channel_key_count, channel_target, channel_duration, channel_add_cubic_key,
+    sample_vec3, sample_quat,
+    player_new, player_free, player_clip, player_time, player_set_time,
+    player_speed, player_set_speed, player_looping, player_set_looping,
+    player_playing, player_play, player_pause, player_rewind,
+    advance, apply, last_error,
+    Binding, Registry, registry_new, registry_free, registry_add, registry_count,
+    registry_binding, registry_find, registry_advance,
+    binding_name, binding_player, binding_model
+)
+
+const TRANSLATION = 0
+const ROTATION    = 1
+const SCALE       = 2
+
+const STEP   = 0
+const LINEAR = 1
+const CUBIC  = 2
+
+struct Key {
+    time: float
+    x: float
+    y: float
+    z: float
+    w: float
+    in_x: float
+    in_y: float
+    in_z: float
+    in_w: float
+    out_x: float
+    out_y: float
+    out_z: float
+    out_w: float
+}
+
+struct AnimChannel {
+    target: int
+    interpolation: int
+    duration: float
+    keys: ptr
+}
+
+struct Clip {
+    name: string
+    channels: ptr
+}
+
+struct Player {
+    clip: *Clip
+    time: float
+    speed: float
+    looping: bool
+    playing: bool
+}
+
+var g_error = ""
+var g_error_owned = false
+
+last_error() -> string { return g_error }
+
+set_error(reason: string, detail: string) {
+    if g_error_owned { string.free(g_error) }
+    g_error = string.concat(reason, detail)
+    g_error_owned = true
+}
+
+channel_new(target: int, interpolation: int) -> *AnimChannel {
+    c = heap.new(AnimChannel)
+    c.target = target
+    c.interpolation = interpolation
+    c.duration = 0.0
+    c.keys = list.new()
+    return c
+}
+
+channel_free(c: *AnimChannel) {
+    if c == null { return }
+    if c.keys != null {
+        i = 0
+        count = list.size(c.keys)
+        while i < count {
+            key = list.get_raw(c.keys, i) as *Key
+            if key != null { heap.free(key) }
+            i = i + 1
+        }
+        list.free(c.keys)
+    }
+    heap.free(c)
+}
+
+channel_add_key(c: *AnimChannel, time: float, x: float, y: float, z: float, w: float) -> bool {
+    if c == null { return false }
+    count = list.size(c.keys)
+    if count > 0 {
+        previous = list.get_raw(c.keys, count - 1) as *Key
+        if time < previous.time {
+            set_error("keyframes must be added in ascending time order, near t=", "")
+            return false
+        }
+    }
+    key = heap.new(Key)
+    key.time = time
+    key.x = x
+    key.y = y
+    key.z = z
+    key.w = w
+    list.add_raw(c.keys, key as ptr)
+    if time > c.duration { c.duration = time }
+    return true
+}
+
+channel_add_cubic_key(c: *AnimChannel, time: float,
+                      x: float, y: float, z: float, w: float,
+                      ix: float, iy: float, iz: float, iw: float,
+                      ox: float, oy: float, oz: float, ow: float) -> bool {
+    if !channel_add_key(c, time, x, y, z, w) { return false }
+    key = list.get_raw(c.keys, list.size(c.keys) - 1) as *Key
+    key.in_x = ix
+    key.in_y = iy
+    key.in_z = iz
+    key.in_w = iw
+    key.out_x = ox
+    key.out_y = oy
+    key.out_z = oz
+    key.out_w = ow
+    return true
+}
+
+channel_key_count(c: *AnimChannel) -> int {
+    if c == null { return 0 }
+    return list.size(c.keys)
+}
+
+
+channel_target(c: *AnimChannel) -> int {
+    if c == null { return TRANSLATION }
+    return c.target
+}
+
+
+channel_duration(c: *AnimChannel) -> float {
+    if c == null { return 0.0 }
+    return c.duration
+}
+
+clip_new(name: string) -> *Clip {
+    c = heap.new(Clip)
+    c.name = string.copy(name)
+    c.channels = list.new()
+    return c
+}
+
+clip_free(c: *Clip) {
+    if c == null { return }
+    if c.channels != null {
+        i = 0
+        count = list.size(c.channels)
+        while i < count {
+            channel_free(list.get_raw(c.channels, i) as *AnimChannel)
+            i = i + 1
+        }
+        list.free(c.channels)
+    }
+    heap.free(c)
+}
+
+clip_add_channel(c: *Clip, track: *AnimChannel) {
+    if c == null || track == null { return }
+    list.add_raw(c.channels, track as ptr)
+}
+
+clip_channel_count(c: *Clip) -> int {
+    if c == null { return 0 }
+    return list.size(c.channels)
+}
+
+clip_channel(c: *Clip, index: int) -> *AnimChannel {
+    if c == null { return null }
+    if index < 0 || index >= list.size(c.channels) { return null }
+    return list.get_raw(c.channels, index) as *AnimChannel
+}
+
+clip_name(c: *Clip) -> string {
+    if c == null { return "" }
+    return c.name
+}
+
+clip_duration(c: *Clip) -> float {
+    if c == null { return 0.0 }
+    longest = 0.0
+    i = 0
+    count = list.size(c.channels)
+    while i < count {
+        entry = list.get_raw(c.channels, i) as *AnimChannel
+        if entry != null && entry.duration > longest { longest = entry.duration }
+        i = i + 1
+    }
+    return longest
+}
+
+span_at(c: *AnimChannel, t: float) -> int {
+    count = list.size(c.keys)
+    if count == 0 { return -1 }
+    i = count - 1
+    while i > 0 {
+        key = list.get_raw(c.keys, i) as *Key
+        if key.time <= t { return i }
+        i = i - 1
+    }
+    return 0
+}
+
+blend_at(c: *AnimChannel, index: int, t: float) -> float {
+    count = list.size(c.keys)
+    if index < 0 || index + 1 >= count { return 0.0 }
+    a = list.get_raw(c.keys, index) as *Key
+    b = list.get_raw(c.keys, index + 1) as *Key
+    span = b.time - a.time
+    if span <= 0.0 { return 0.0 }
+    u = (t - a.time) / span
+    if u < 0.0 { return 0.0 }
+    if u > 1.0 { return 1.0 }
+    return u
+}
+
+hermite(p0: float, m0: float, p1: float, m1: float, u: float, span: float) -> float {
+    uu = u * u
+    uuu = uu * u
+    h00 = 2.0 * uuu - 3.0 * uu + 1.0
+    h10 = uuu - 2.0 * uu + u
+    h01 = 0.0 - 2.0 * uuu + 3.0 * uu
+    h11 = uuu - uu
+    return h00 * p0 + h10 * span * m0 + h01 * p1 + h11 * span * m1
+}
+
+sample_vec3(c: *AnimChannel, t: float) -> Vec3 {
+    if c == null { return core.vec3(0.0, 0.0, 0.0) }
+    index = span_at(c, t)
+    if index < 0 { return core.vec3(0.0, 0.0, 0.0) }
+
+    a = list.get_raw(c.keys, index) as *Key
+    if c.interpolation == STEP { return core.vec3(a.x, a.y, a.z) }
+    if index + 1 >= list.size(c.keys) { return core.vec3(a.x, a.y, a.z) }
+
+    b = list.get_raw(c.keys, index + 1) as *Key
+    u = blend_at(c, index, t)
+    if c.interpolation == CUBIC {
+        span = b.time - a.time
+        return core.vec3(hermite(a.x, a.out_x, b.x, b.in_x, u, span),
+                         hermite(a.y, a.out_y, b.y, b.in_y, u, span),
+                         hermite(a.z, a.out_z, b.z, b.in_z, u, span))
+    }
+    return core.v3_lerp(core.vec3(a.x, a.y, a.z), core.vec3(b.x, b.y, b.z), u)
+}
+
+sample_quat(c: *AnimChannel, t: float) -> Quat {
+    if c == null { return core.quat_ident() }
+    index = span_at(c, t)
+    if index < 0 { return core.quat_ident() }
+
+    a = list.get_raw(c.keys, index) as *Key
+    if c.interpolation == STEP { return Quat { x: a.x, y: a.y, z: a.z, w: a.w } }
+    if index + 1 >= list.size(c.keys) { return Quat { x: a.x, y: a.y, z: a.z, w: a.w } }
+
+    b = list.get_raw(c.keys, index + 1) as *Key
+    u = blend_at(c, index, t)
+
+    if c.interpolation == CUBIC {
+        span = b.time - a.time
+        return core.quat_normalize(Quat {
+            x: hermite(a.x, a.out_x, b.x, b.in_x, u, span),
+            y: hermite(a.y, a.out_y, b.y, b.in_y, u, span),
+            z: hermite(a.z, a.out_z, b.z, b.in_z, u, span),
+            w: hermite(a.w, a.out_w, b.w, b.in_w, u, span)
+        })
+    }
+
+    bx = b.x
+    by = b.y
+    bz = b.z
+    bw = b.w
+    if (a.x * bx + a.y * by + a.z * bz + a.w * bw) < 0.0 {
+        bx = -bx
+        by = -by
+        bz = -bz
+        bw = -bw
+    }
+    blended = Quat {
+        x: a.x + (bx - a.x) * u,
+        y: a.y + (by - a.y) * u,
+        z: a.z + (bz - a.z) * u,
+        w: a.w + (bw - a.w) * u
+    }
+    return core.quat_normalize(blended)
+}
+
+player_new(clip: *Clip) -> *Player {
+    p = heap.new(Player)
+    p.clip = clip
+    p.time = 0.0
+    p.speed = 1.0
+    p.looping = true
+    p.playing = true
+    return p
+}
+
+player_free(p: *Player) {
+    if p != null { heap.free(p) }
+}
+
+player_clip(p: *Player) -> *Clip {
+    if p == null { return null }
+    return p.clip
+}
+
+player_time(p: *Player) -> float {
+    if p == null { return 0.0 }
+    return p.time
+}
+
+player_set_time(p: *Player, t: float) {
+    if p == null { return }
+    p.time = t
+}
+
+player_speed(p: *Player) -> float {
+    if p == null { return 0.0 }
+    return p.speed
+}
+
+player_set_speed(p: *Player, speed: float) {
+    if p == null { return }
+    p.speed = speed
+}
+
+player_looping(p: *Player) -> bool {
+    if p == null { return false }
+    return p.looping
+}
+
+player_set_looping(p: *Player, looping: bool) {
+    if p == null { return }
+    p.looping = looping
+}
+
+player_playing(p: *Player) -> bool {
+    if p == null { return false }
+    return p.playing
+}
+
+player_play(p: *Player) {
+    if p == null { return }
+    p.playing = true
+}
+
+player_pause(p: *Player) {
+    if p == null { return }
+    p.playing = false
+}
+
+player_rewind(p: *Player) {
+    if p == null { return }
+    p.time = 0.0
+}
+
+advance(p: *Player, delta: float) {
+    if p == null || !p.playing || p.clip == null { return }
+    duration = clip_duration(p.clip)
+    if duration <= 0.0 {
+        p.time = 0.0
+        return
+    }
+    p.time = p.time + delta * p.speed
+    if p.looping {
+        while p.time > duration { p.time = p.time - duration }
+        while p.time < 0.0 { p.time = p.time + duration }
+        return
+    }
+    if p.time >= duration {
+        p.time = duration
+        p.playing = false
+    }
+    if p.time < 0.0 {
+        p.time = 0.0
+        p.playing = false
+    }
+}
+
+apply(p: *Player, m: *Model) {
+    if p == null || m == null || p.clip == null { return }
+    i = 0
+    count = clip_channel_count(p.clip)
+    while i < count {
+        c = clip_channel(p.clip, i)
+        if c != null && channel_key_count(c) > 0 {
+            if c.target == TRANSLATION {
+                v = sample_vec3(c, p.time)
+                core.model_set_position(m, v.x, v.y, v.z)
+            }
+            if c.target == SCALE {
+                v = sample_vec3(c, p.time)
+                core.model_set_scale(m, v.x, v.y, v.z)
+            }
+            if c.target == ROTATION {
+                core.model_set_rotation(m, sample_quat(c, p.time))
+            }
+        }
+        i = i + 1
+    }
+}
+
+struct Binding {
+    name: string
+    player: *Player
+    model: *Model
+}
+
+struct Registry {
+    bindings: ptr
+}
+
+registry_new() -> *Registry {
+    r = heap.new(Registry)
+    r.bindings = list.new()
+    return r
+}
+
+registry_free(r: *Registry) {
+    if r == null { return }
+    if r.bindings != null {
+        i = 0
+        count = list.size(r.bindings)
+        while i < count {
+            b = list.get_raw(r.bindings, i) as *Binding
+            if b != null {
+                player_free(b.player)
+                heap.free(b)
+            }
+            i = i + 1
+        }
+        list.free(r.bindings)
+    }
+    heap.free(r)
+}
+
+registry_add(r: *Registry, name: string, p: *Player, m: *Model) -> int {
+    if r == null || p == null { return -1 }
+    b = heap.new(Binding)
+    b.name = name
+    b.player = p
+    b.model = m
+    list.add_raw(r.bindings, b as ptr)
+    return list.size(r.bindings) - 1
+}
+
+registry_count(r: *Registry) -> int {
+    if r == null { return 0 }
+    return list.size(r.bindings)
+}
+
+registry_binding(r: *Registry, index: int) -> *Binding {
+    if r == null { return null }
+    if index < 0 || index >= list.size(r.bindings) { return null }
+    return list.get_raw(r.bindings, index) as *Binding
+}
+
+registry_find(r: *Registry, name: string) -> int {
+    if r == null { return -1 }
+    i = 0
+    count = list.size(r.bindings)
+    while i < count {
+        b = list.get_raw(r.bindings, i) as *Binding
+        if b != null && b.name == name { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+binding_name(b: *Binding) -> string {
+    if b == null { return "" }
+    return b.name
+}
+
+binding_player(b: *Binding) -> *Player {
+    if b == null { return null }
+    return b.player
+}
+
+binding_model(b: *Binding) -> *Model {
+    if b == null { return null }
+    return b.model
+}
+
+registry_advance(r: *Registry, delta: float) {
+    if r == null { return }
+    i = 0
+    count = list.size(r.bindings)
+    while i < count {
+        b = list.get_raw(r.bindings, i) as *Binding
+        if b != null {
+            advance(b.player, delta)
+            apply(b.player, b.model)
+        }
+        i = i + 1
+    }
+}

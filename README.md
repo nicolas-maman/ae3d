@@ -41,6 +41,86 @@ engine, to Aether and C. See [Credits](#credits).
   to each model, so a water surface comes back as water with the simulation
   driving it rather than as a mesh with a wave table nothing reads, and it
   records the view it was framed in.
+- **Keyframe animation.** Clips, channels and samplers in glTF's shape, with
+  step, linear and cubic interpolation, so what Blender exports is what plays.
+- **A channel a program can drive.** `AE3D_AGENT=<port>` opens a JSON protocol
+  on loopback: read the scene, change it, hold a frame still, read the pixels
+  it produced, and ask why a model is not on screen. Costs one load of a global
+  per frame when it is not asked for. See [docs/agent.md](docs/agent.md).
+
+## Driving it from a program
+
+An engine started with `AE3D_AGENT` answers questions about itself:
+
+```bash
+AE3D_AGENT=7911 ./build/spinning_cube &
+python3 tools/ae3d_agent.py --port 7911 trace.model index=0
+```
+
+```
+ok=True  broke_at=-
+  source      n/a  this model was not loaded from a manifest
+  asset       n/a  no manifest entry, so there are no exported files to check
+  mesh        ok   {"triangles": 12}
+  node        ok   {"index": 0, "visible_flag": true}
+  animation   ok   {"bound": false}
+  visibility  ok   {"in_frustum": true, "on_screen": true}
+  pixels      ok   {"coverage": 0.56}
+```
+
+`trace.model` follows one model from the Blender object it was authored as to
+the pixels it produced and names the first stage where it stopped being right,
+which separates half a dozen bugs that otherwise share the symptom "I cannot
+see it". The last stage reads the frame rather than reasoning about it.
+
+The same protocol runs inside Blender
+(`tools/blender/ae3d_agent_server.py`), so one client drives the modelling tool
+and the engine.
+
+## The Blender pipeline
+
+```bash
+blender --background scene.blend --python tools/blender/ae3d_export.py -- --out build/assets
+```
+
+Geometry, materials and animation per object, with a manifest recording the
+source file's hash and a stable id for each object.
+
+The export is deterministic, and Blender is not: regenerating a scene gives the
+same vertices in the same order but a different triangulation and polygon
+order. The exporter makes its output a function of the geometry instead --
+canonical quad diagonals, canonical winding, sorted triangles and sorted vertex
+tables -- so two `.blend` files generated separately from the same script
+export to identical geometry, animation and materials.
+
+Blender keys with Bezier easing by default; the exporter converts it to cubic
+segments the engine samples, and records what Blender itself evaluated the
+curve to so `tests/test_assets` can hold the engine to it. It currently agrees
+to 1.4e-4.
+
+`examples/blender_pipeline.ae` is the whole path in one program: a turning,
+rising orb modelled and keyed in Blender, exported, loaded from its manifest,
+and played.
+
+```bash
+./scripts/export_assets.sh          # regenerates every asset the repo ships
+./build.sh examples/blender_pipeline.ae && ./build/blender_pipeline
+```
+
+```
+blender_pipeline: showcase.blend exported by Blender 5.2.1 LTS
+blender_pipeline: playing 'OrbAction', 1.95833s, 2 channels
+```
+
+Started with `AE3D_AGENT` it can be driven while it runs, which is how the
+easing above is checked against the curve rather than against a screenshot:
+
+```
+clip        -> OrbAction  1.958s  2 channels
+  t=0.0  y=1.500  rot_y=0.000
+  t=0.5  y=2.405  rot_y=0.511
+  t=1.0  y=3.191  rot_y=0.995
+```
 
 ## Editor
 
@@ -176,6 +256,7 @@ everything else.
 | `black_hole.ae` | Kerr geodesics integrated per pixel in one screen quad: a spinning hole, its asymmetric shadow, a lensed disc and a lensed sky. The heaviest scene here, and the one with answers to check against — [docs/black-hole.md](docs/black-hole.md) |
 | `particle_disc.ae` | The same scene as an N-body: 200000 particles under Verlet integration in one instanced draw, coloured per instance |
 | `sand.ae` | 250000 grains falling and settling, click to scatter them |
+| `blender_pipeline.ae` | A model authored and keyed in Blender, exported, loaded and played |
 | `smooth_terrain.ae` | The same terrain meshed with surface nets, 67590 triangles |
 
 ### Examples as instruments
@@ -198,7 +279,8 @@ is written up in [docs/black-hole.md](docs/black-hole.md).
 
 ```
 native/     C: GLFW window and input, OpenGL entry points, Vulkan backend,
-            float32 mesh and instance buffers, image decoding
+            float32 mesh and instance buffers, image decoding, the agent
+            channel's socket, framebuffer capture
 src/ae3d/    Aether modules
   core        vectors, quaternions, matrices, scene types, camera, frustum
   platform    window, input, timing
@@ -214,6 +296,11 @@ src/ae3d/    Aether modules
   rendering   presets for the shader's advanced features
   behaviour   game objects and components
   raycast     ray tests against spheres, triangles and meshes
+  anim        clips, channels, samplers and playback
+  assets      manifests and exported clips, and what a model came from
+  agent       the control channel: what a request means
+tools/      ae3d_agent.py, a client; agent_schema.ae, the protocol's schema
+  blender/    ae3d_export.py, and an agent channel that runs inside Blender
 tests/      test suites, each a program that prints its own verdict
 benchmarks/ per-frame cost measured without a window
 examples/   runnable scenes

@@ -1,0 +1,355 @@
+// The agent channel, driven over a real socket by the program it is attached to.
+//
+// Everything here was checked by hand first, which is how the three bugs in
+// fcf1802 were found. By hand is not a thing CI can do, so this does it: the
+// test opens a client connection to its own engine's channel and drives the
+// protocol a request at a time.
+//
+// One request per frame, and the answer is read on the frame after. That is not
+// a delay for its own sake -- the engine answers in pump, which runs at the end
+// of the frame on this same thread, so a send that waited for its own reply in
+// the same callback would be waiting for a thread that is waiting for it.
+//
+// Driven from on_render rather than on_update, because on_update is one of the
+// things a held frame stops calling and half of what is checked here happens
+// while the engine is paused.
+//
+// What this does not check: that the snapshot is taken before the buffer swap.
+// Moving it after does not fail here, because the driver on the machine this
+// was written on leaves the back buffer readable afterwards. The call stays
+// where write_snapshot has always been -- after a swap the back buffer holds
+// nothing this frame put there, and a driver is not obliged to be kind about
+// it -- but that placement is reasoning, not something this suite proves.
+
+import std.os
+import std.tcp
+import std.json
+import std.string
+import std.fs
+import ae3d.core
+import ae3d.platform
+import ae3d.engine
+import ae3d.agent
+import ae3d.loader
+import ae3d.anim
+
+const SHOT = "build/test_agent_snapshot.png"
+
+var g_sock: ptr = null
+var g_stage = 0
+var g_checks = 0
+var g_failures = 0
+var g_pending = ""
+
+// Carried between stages.
+var g_paused_frame = 0
+var g_step_from = 0
+var g_resume_frame = 0
+
+check(name: string, condition: bool) {
+    g_checks = g_checks + 1
+    if !condition {
+        g_failures = g_failures + 1
+        println("FAIL ${name}")
+    }
+}
+
+ask_send(line: string) {
+    if g_sock == null { return }
+    tcp.tcp_send_raw(g_sock, string.concat(line, "\n"))
+}
+
+// One answer, as a parsed document, or null when nothing arrived. Answers are
+// whole lines and one request is outstanding at a time, so anything past the
+// first newline would be a protocol violation rather than a case to handle.
+ask_receive() -> ptr {
+    if g_sock == null { return null }
+    // Polled, never blocked. The engine answers in pump, at the end of this
+    // same frame on this same thread, so a read that waited would be waiting
+    // for the thread it is running on.
+    if tcp.tcp_poll_raw(g_sock, 0) <= 0 { return null }
+    text = tcp.tcp_receive_raw(g_sock, 65536)
+    if text == null { return null }
+    return json.parse_raw(text)
+}
+
+result_of(doc: ptr) -> ptr {
+    if doc == null { return null }
+    return json.object_get_raw(doc, "result")
+}
+
+ok_of(doc: ptr) -> bool {
+    if doc == null { return false }
+    node = json.object_get_raw(doc, "ok")
+    if node == null { return false }
+    return json.get_bool(node) == 1
+}
+
+// The x of the pose an animation result reports. -1 stands for "absent",
+// which no check here expects, so a missing field fails rather than passing by
+// comparing equal to something.
+model_x_is(r: ptr, want: float) -> bool {
+    if r == null { return false }
+    pos = json.object_get_raw(r, "model_position")
+    if pos == null { return false }
+    if json.array_size(pos) < 3 { return false }
+    got = json.get_number(json.array_get_raw(pos, 0))
+    d = got - want
+    if d < 0.0 { d = -d }
+    return d < 0.001
+}
+
+int_field(node: ptr, name: string) -> int {
+    if node == null { return -1 }
+    found = json.object_get_raw(node, name)
+    if found == null { return -1 }
+    return json.get_int(found)
+}
+
+// The channel has to be asked for before the engine starts, and this suite is
+// the thing asking. Set here rather than left to the runner so the test is one
+// command wherever it runs.
+main() {
+    // "auto" rather than a number: a fixed port is a suite that fails when
+    // something else on the machine got there first, or when two of these run
+    // at once on a CI host. The channel reports back what it was given.
+    os.setenv("AE3D_AGENT", "auto")
+
+    e = engine.engine_new(platform.API_GL)
+    engine.engine_set_size(e, 320, 240)
+    engine.engine_set_title(e, "ae3d agent test")
+    engine.engine_set_camera_input(e, false)
+    engine.engine_set_frame_limit(e, 240)
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_start(e, on_start)
+    engine.engine_on_render(e, on_render)
+
+    if !engine.engine_run(e, -1, -1) {
+        println("SKIP no window")
+        engine.engine_free(e)
+        return
+    }
+    engine.engine_free(e)
+
+    if g_stage < 17 {
+        println("FAIL the exchange did not finish (stopped at stage ${g_stage})")
+        g_failures = g_failures + 1
+    }
+    if g_failures == 0 {
+        println("test_agent: all checks passed (${g_checks})")
+        return
+    }
+    println("test_agent: ${g_failures} failure(s) of ${g_checks}")
+}
+
+on_start(data: ptr) {
+    e = data as *Engine
+    cube = loader.cube(1.0)
+    core.model_set_name(cube, "probe")
+    core.model_set_scale(cube, 4.0, 4.0, 4.0)
+    core.model_matte(cube, 0.8, 0.3, 0.2)
+    engine.engine_add_model(e, cube)
+
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(0.0, 0.0, 30.0))
+
+    // Something for the anim ops to have an opinion about. Two seconds, a
+    // straight run along x, so a seek to a known time has a known answer.
+    clip = anim.clip_new("slide")
+    ch = anim.channel_new(anim.TRANSLATION, anim.LINEAR)
+    anim.channel_add_key(ch, 0.0, 0.0, 0.0, 0.0, 0.0)
+    anim.channel_add_key(ch, 2.0, 20.0, 0.0, 0.0, 0.0)
+    anim.clip_add_channel(clip, ch)
+    engine.engine_add_animation(e, "probe_slide", anim.player_new(clip), cube)
+}
+
+on_render(data: ptr, delta: float) {
+    // A few frames of headroom first: the channel's listener has to have
+    // accepted before there is anything to talk to.
+    if g_stage == 0 {
+        check("channel is active", agent.active())
+        check("channel reports its port", agent.port() > 0)
+        sock, _err = tcp.connect("127.0.0.1", agent.port())
+        check("client connects", sock != null)
+        g_sock = sock
+        g_stage = 1
+        return
+    }
+
+    if g_sock == null { return }
+
+    if g_stage == 1 {
+        ask_send("{\"id\":1,\"op\":\"help\"}")
+        g_stage = 2
+        return
+    }
+    if g_stage == 2 {
+        doc = ask_receive()
+        if doc == null { return }
+        check("help answers", ok_of(doc))
+        r = result_of(doc)
+        check("help names the protocol", r != null && json.object_get_raw(r, "protocol") != null)
+        ops = null
+        if r != null { ops = json.object_get_raw(r, "ops") }
+        check("help lists its ops", ops != null && json.array_size(ops) > 0)
+        if doc != null { json.free(doc) }
+        ask_send("{\"id\":2,\"op\":\"scene.tree\"}")
+        g_stage = 3
+        return
+    }
+    if g_stage == 3 {
+        doc = ask_receive()
+        if doc == null { return }
+        r = result_of(doc)
+        check("scene.tree sees the one model", int_field(r, "count") == 1)
+        if doc != null { json.free(doc) }
+        ask_send("{\"id\":3,\"op\":\"model.get\",\"index\":0}")
+        g_stage = 4
+        return
+    }
+    if g_stage == 4 {
+        doc = ask_receive()
+        if doc == null { return }
+        r = result_of(doc)
+        // A cube is 24 vertices and 36 indices. Reporting zero is the failure
+        // this has to catch, so the check is a number rather than "not null".
+        check("model.get reports the mesh", int_field(r, "vertex_count") == 24)
+        check("model.get reports the indices", int_field(r, "index_count") == 36)
+        if doc != null { json.free(doc) }
+        ask_send("{\"id\":4,\"op\":\"no.such.op\"}")
+        g_stage = 5
+        return
+    }
+    if g_stage == 5 {
+        doc = ask_receive()
+        if doc == null { return }
+        check("an unknown op fails rather than hangs", doc != null && !ok_of(doc))
+        check("a failure says why", doc != null && json.object_get_raw(doc, "error") != null)
+        if doc != null { json.free(doc) }
+        ask_send("{\"id\":5,\"op\":\"frame.pause\"}")
+        g_stage = 6
+        return
+    }
+    if g_stage == 6 {
+        doc = ask_receive()
+        if doc == null { return }
+        check("pause is acknowledged", ok_of(doc))
+        if doc != null { json.free(doc) }
+        ask_send("{\"id\":6,\"op\":\"frame.stats\"}")
+        g_stage = 7
+        return
+    }
+    if g_stage == 7 {
+        doc = ask_receive()
+        if doc == null { return }
+        r = result_of(doc)
+        g_paused_frame = int_field(r, "frame")
+        check("stats say the engine is held", r != null && json.get_bool(json.object_get_raw(r, "paused")) == 1)
+        if doc != null { json.free(doc) }
+        ask_send("{\"id\":7,\"op\":\"frame.stats\"}")
+        g_stage = 8
+        return
+    }
+    if g_stage == 8 {
+        doc = ask_receive()
+        if doc == null { return }
+        r = result_of(doc)
+        // The point of pausing: read the same frame twice, get the same answer.
+        check("a held frame does not advance", int_field(r, "frame") == g_paused_frame)
+        if doc != null { json.free(doc) }
+        ask_send("{\"id\":8,\"op\":\"frame.step\",\"count\":5}")
+        g_stage = 9
+        return
+    }
+    if g_stage == 9 {
+        doc = ask_receive()
+        if doc == null { return }
+        r = result_of(doc)
+        if r != null {
+            g_step_from = int_field(r, "stepped_from")
+            check("a step advances exactly what was asked", int_field(r, "stepped") == 5)
+            check("a step ends where it started plus the count",
+                  int_field(r, "frame") == g_step_from + 5)
+            check("a step leaves the engine held", json.get_bool(json.object_get_raw(r, "paused")) == 1)
+        } else {
+            check("frame.step answers", false)
+        }
+        if doc != null { json.free(doc) }
+        fs.delete(SHOT)
+        ask_send("{\"id\":9,\"op\":\"snapshot\",\"path\":\"build/test_agent_snapshot.png\"}")
+        g_stage = 10
+        return
+    }
+    if g_stage == 10 {
+        doc = ask_receive()
+        if doc == null { return }
+        check("snapshot answers ok", ok_of(doc))
+        // The answer is not allowed to arrive before the file does. That was
+        // the bug: an ok for a snapshot that had written nothing.
+        check("the file is there when the answer is", fs.exists(SHOT))
+        if doc != null { json.free(doc) }
+        ask_send("{\"id\":10,\"op\":\"frame.resume\"}")
+        g_stage = 11
+        return
+    }
+    if g_stage == 11 {
+        doc = ask_receive()
+        if doc == null { return }
+        check("resume is acknowledged", ok_of(doc))
+        if doc != null { json.free(doc) }
+        g_resume_frame = g_step_from + 5
+        g_stage = 12
+        return
+    }
+    if g_stage == 12 {
+        ask_send("{\"id\":11,\"op\":\"frame.stats\"}")
+        g_stage = 13
+        return
+    }
+    if g_stage == 13 {
+        doc = ask_receive()
+        if doc == null { return }
+        r = result_of(doc)
+        check("resuming lets the frames run again", int_field(r, "frame") > g_resume_frame)
+        if doc != null { json.free(doc) }
+        ask_send("{\"id\":12,\"op\":\"anim.list\"}")
+        g_stage = 14
+        return
+    }
+    if g_stage == 14 {
+        doc = ask_receive()
+        if doc == null { return }
+        r = result_of(doc)
+        check("anim.list sees the one animation", int_field(r, "count") == 1)
+        if doc != null { json.free(doc) }
+        // By name, not index. A name is what survives the scene changing shape.
+        ask_send("{\"id\":13,\"op\":\"anim.set\",\"name\":\"probe_slide\",\"time\":1.0,\"playing\":false}")
+        g_stage = 15
+        return
+    }
+    if g_stage == 15 {
+        doc = ask_receive()
+        if doc == null { return }
+        r = result_of(doc)
+        check("anim.set finds it by name", ok_of(doc))
+        // Halfway along a 0..20 run over two seconds. Seeking must repose the
+        // model there and then, not on some later frame.
+        check("seeking reposes the model at once", model_x_is(r, 10.0))
+        check("anim.set can stop the playhead", r != null && !json.get_bool(json.object_get_raw(r, "playing")) == 1)
+        if doc != null { json.free(doc) }
+        ask_send("{\"id\":14,\"op\":\"anim.get\",\"name\":\"nope\"}")
+        g_stage = 16
+        return
+    }
+    if g_stage == 16 {
+        doc = ask_receive()
+        if doc == null { return }
+        check("an unknown animation name fails", !ok_of(doc))
+        if doc != null { json.free(doc) }
+        tcp.tcp_close(g_sock)
+        g_sock = null
+        g_stage = 17
+        engine.engine_stop(data as *Engine)
+        return
+    }
+}

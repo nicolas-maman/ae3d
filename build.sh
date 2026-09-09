@@ -77,7 +77,17 @@ case " $AETHER_COMPILE_FLAGS " in
     *) AETHER_COMPILE_FLAGS="$AETHER_COMPILE_FLAGS -fwrapv" ;;
 esac
 
-if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists glfw3; then
+# GLFW_CFLAGS and GLFW_LIBS in the environment win, the convention every
+# autotools build follows. pkg-config is the right answer where there is one,
+# but a Windows checkout outside MSYS2 has no pkg-config and a hand-built GLFW
+# in a prefix of its own, and the fallback below -- a bare -lglfw with no
+# include path -- cannot find it. Naming the flags is then the only way in, and
+# not having one meant the build could not be done at all rather than done
+# awkwardly.
+if [ -n "${GLFW_CFLAGS:-}" ] || [ -n "${GLFW_LIBS:-}" ]; then
+    GLFW_CFLAGS="${GLFW_CFLAGS:-}"
+    GLFW_LIBS="${GLFW_LIBS:-}"
+elif command -v pkg-config >/dev/null 2>&1 && pkg-config --exists glfw3; then
     GLFW_CFLAGS="$(pkg-config --cflags glfw3)"
     GLFW_LIBS="$(pkg-config --libs glfw3)"
 else
@@ -95,7 +105,11 @@ fi
 #
 # Depending on another project's link line for a library we use directly is the
 # actual bug; the platform only decided when it surfaced.
-if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists zlib; then
+# Overridable from the environment for the same reason as GLFW above.
+if [ -n "${ZLIB_CFLAGS:-}" ] || [ -n "${ZLIB_LIBS:-}" ]; then
+    ZLIB_CFLAGS="${ZLIB_CFLAGS:-}"
+    ZLIB_LIBS="${ZLIB_LIBS:-}"
+elif command -v pkg-config >/dev/null 2>&1 && pkg-config --exists zlib; then
     ZLIB_CFLAGS="$(pkg-config --cflags zlib)"
     ZLIB_LIBS="$(pkg-config --libs zlib)"
 else
@@ -124,7 +138,7 @@ fi
 . "$ROOT/scripts/platform.sh"
 PLATFORM_LIBS="$(ae3d_platform_libs "$(uname -s)")"
 
-NATIVE_SOURCES="native/ae3d_glapi.c native/ae3d_platform.c native/ae3d_mesh.c native/ae3d_meshfile.c native/ae3d_image.c native/ae3d_png.c native/ae3d_gl.c native/ae3d_offscreen.c native/ae3d_vk.c"
+NATIVE_SOURCES="native/ae3d_agent.c native/ae3d_capture.c native/ae3d_glapi.c native/ae3d_platform.c native/ae3d_mesh.c native/ae3d_meshfile.c native/ae3d_image.c native/ae3d_png.c native/ae3d_gl.c native/ae3d_offscreen.c native/ae3d_vk.c"
 if [ "$(uname -s)" = "Darwin" ]; then
     NATIVE_SOURCES="$NATIVE_SOURCES native/ae3d_vk_surface.m"
 fi

@@ -1,0 +1,277 @@
+// trace.model, checked by breaking things on purpose.
+//
+// A trace that reports six green stages for a working model proves very little.
+// What it has to do is name the stage where a broken one stopped being right,
+// so this builds four models that are each wrong in exactly one way and checks
+// that the trace blames the right stage for each:
+//
+//   loaded but never added   -> node
+//   added but marked hidden  -> node
+//   put behind the camera    -> visibility
+//   loaded from the manifest -> ok, all seven stages
+//
+// One model per fault, because a model broken two ways cannot show that the
+// trace picks the earliest stage rather than the loudest.
+//
+// Driven over the channel rather than by calling the trace directly: the thing
+// under test is what an agent receives, not what the function returns.
+
+import std.os
+import std.tcp
+import std.json
+import std.string
+import ae3d.core
+import ae3d.platform
+import ae3d.engine
+import ae3d.agent
+import ae3d.assets
+import ae3d.anim
+import ae3d.loader
+
+const MANIFEST = "tests/fixtures/exported/manifest.json"
+
+var g_sock: ptr = null
+var g_stage = 0
+var g_checks = 0
+var g_failures = 0
+var g_hidden: ptr = null
+var g_behind: ptr = null
+
+check(name: string, condition: bool) {
+    g_checks = g_checks + 1
+    if !condition {
+        g_failures = g_failures + 1
+        println("FAIL ${name}")
+    }
+}
+
+ask_send(line: string) {
+    if g_sock == null { return }
+    tcp.tcp_send_raw(g_sock, string.concat(line, "\n"))
+}
+
+ask_receive() -> ptr {
+    if g_sock == null { return null }
+    if tcp.tcp_poll_raw(g_sock, 0) <= 0 { return null }
+    text = tcp.tcp_receive_raw(g_sock, 65536)
+    if text == null { return null }
+    return json.parse_raw(text)
+}
+
+result_of(doc: ptr) -> ptr {
+    if doc == null { return null }
+    return json.object_get_raw(doc, "result")
+}
+
+// What the trace blamed, or "" when it said the model was fine.
+broke_at(r: ptr) -> string {
+    if r == null { return "<no result>" }
+    node = json.object_get_raw(r, "broke_at")
+    if node == null { return "" }
+    return json.get_string_raw(node)
+}
+
+stage_count(r: ptr) -> int {
+    if r == null { return 0 }
+    stages = json.object_get_raw(r, "stages")
+    if stages == null { return 0 }
+    return json.array_size(stages)
+}
+
+check_blame(name: string, r: ptr, want: string) {
+    got = broke_at(r)
+    g_checks = g_checks + 1
+    if got != want {
+        g_failures = g_failures + 1
+        println("FAIL ${name}: blamed '${got}', expected '${want}'")
+    }
+}
+
+main() {
+    os.setenv("AE3D_AGENT", "auto")
+
+    e = engine.engine_new(platform.API_GL)
+    engine.engine_set_size(e, 320, 240)
+    engine.engine_set_title(e, "ae3d trace test")
+    engine.engine_set_camera_input(e, false)
+    engine.engine_set_frame_limit(e, 300)
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_start(e, on_start)
+    engine.engine_on_render(e, on_render)
+
+    if !engine.engine_run(e, -1, -1) {
+        println("SKIP no window")
+        engine.engine_free(e)
+        return
+    }
+    engine.engine_free(e)
+
+    if g_stage < 9 {
+        println("FAIL the exchange did not finish (stopped at stage ${g_stage})")
+        g_failures = g_failures + 1
+    }
+    if g_failures == 0 {
+        println("test_trace: all checks passed (${g_checks})")
+        return
+    }
+    println("test_trace: ${g_failures} failure(s) of ${g_checks}")
+}
+
+on_start(data: ptr) {
+    e = data as *Engine
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(0.0, 0.0, 30.0))
+
+    m = assets.manifest_load(MANIFEST)
+    if m == null { return }
+
+    // A model that is entirely fine, loaded the way the pipeline intends.
+    good_entry = assets.manifest_find_by_object(m, "Spinner")
+    good = assets.entry_load_model(m, good_entry)
+    if good != null {
+        engine.engine_add_model(e, good)
+        clip = assets.entry_load_clip(m, good_entry)
+        if clip != null {
+            engine.engine_add_animation(e, "spinner", anim.player_new(clip), good)
+        }
+    }
+
+    // Loaded from the manifest and never handed to the renderer. This is the
+    // failure that looks like nothing at all: no error, no warning, no model.
+    assets.entry_load_model(m, good_entry)
+
+    // In the scene, but switched off.
+    hidden = loader.cube(1.0)
+    core.model_set_name(hidden, "hidden")
+    hidden.visible = false
+    engine.engine_add_model(e, hidden)
+    g_hidden = hidden as ptr
+
+    // In the scene, visible, and behind the camera.
+    behind = loader.cube(1.0)
+    core.model_set_name(behind, "behind")
+    core.model_set_position(behind, 0.0, 0.0, 400.0)
+    engine.engine_add_model(e, behind)
+    g_behind = behind as ptr
+
+    assets.manifest_free(m)
+}
+
+on_render(data: ptr, delta: float) {
+    if g_stage == 0 {
+        sock, _err = tcp.connect("127.0.0.1", agent.port())
+        check("client connects", sock != null)
+        g_sock = sock
+        g_stage = 1
+        return
+    }
+    if g_sock == null { return }
+
+    if g_stage == 1 {
+        ask_send("{\"id\":1,\"op\":\"trace.model\",\"object\":\"Spinner\"}")
+        g_stage = 2
+        return
+    }
+    if g_stage == 2 {
+        doc = ask_receive()
+        if doc == null { return }
+        r = result_of(doc)
+        check("the trace walks every stage", stage_count(r) == 7)
+        check_blame("a model loaded the intended way is not blamed", r, "")
+        if doc != null { json.free(doc) }
+        // The second copy was loaded and never added. It shares an object name
+        // with the first, so it is reached by index instead: it is the one the
+        // renderer does not have.
+        ask_send("{\"id\":2,\"op\":\"scene.tree\"}")
+        g_stage = 3
+        return
+    }
+    if g_stage == 3 {
+        doc = ask_receive()
+        if doc == null { return }
+        r = result_of(doc)
+        // Spinner, hidden, behind. The fourth model was never added, which is
+        // the point.
+        check("only the added models are in the scene", json.get_int(json.object_get_raw(r, "count")) == 3)
+        if doc != null { json.free(doc) }
+        ask_send("{\"id\":3,\"op\":\"trace.model\",\"index\":1}")
+        g_stage = 4
+        return
+    }
+    if g_stage == 4 {
+        doc = ask_receive()
+        if doc == null { return }
+        check_blame("a model marked invisible is blamed on the node", result_of(doc), "node")
+        if doc != null { json.free(doc) }
+        ask_send("{\"id\":4,\"op\":\"trace.model\",\"index\":2}")
+        g_stage = 5
+        return
+    }
+    if g_stage == 5 {
+        doc = ask_receive()
+        if doc == null { return }
+        r = result_of(doc)
+        check_blame("a model behind the camera is blamed on visibility", r, "visibility")
+        if doc != null { json.free(doc) }
+        ask_send("{\"id\":5,\"op\":\"trace.model\",\"index\":99}")
+        g_stage = 6
+        return
+    }
+    if g_stage == 6 {
+        doc = ask_receive()
+        if doc == null { return }
+        ok = json.object_get_raw(doc, "ok")
+        check("tracing a model that is not there fails", ok != null && json.get_bool(ok) == 0)
+        if doc != null { json.free(doc) }
+        // A model with no provenance at all: the hidden cube was built by the
+        // loader, not the manifest, so its source is unknown rather than good.
+        ask_send("{\"id\":6,\"op\":\"trace.model\",\"index\":1}")
+        g_stage = 7
+        return
+    }
+    if g_stage == 7 {
+        doc = ask_receive()
+        if doc == null { return }
+        r = result_of(doc)
+        stages = json.object_get_raw(r, "stages")
+        source = json.array_get_raw(stages, 0)
+        reached = json.object_get_raw(source, "reached")
+        applicable = json.object_get_raw(source, "applicable")
+        // Not a failure and not a pass. A cube built by loader.cube has no
+        // Blender object behind it and never will, so the stage does not
+        // apply -- blaming it would send an agent looking for an export that
+        // was never meant to exist.
+        check("a model with no manifest has a source stage that does not apply",
+              applicable != null && json.get_bool(applicable) == 0)
+        check("and that stage is not counted as reached",
+              reached != null && json.get_bool(reached) == 0)
+        if doc != null { json.free(doc) }
+        ask_send("{\"id\":7,\"op\":\"trace.model\",\"object\":\"Spinner\"}")
+        g_stage = 8
+        return
+    }
+    if g_stage == 8 {
+        doc = ask_receive()
+        if doc == null { return }
+        r = result_of(doc)
+        stages = json.object_get_raw(r, "stages")
+        // The animation stage has to see the clip the export carried.
+        animation = json.array_get_raw(stages, 4)
+        detail = json.object_get_raw(animation, "detail")
+        bound = json.object_get_raw(detail, "bound")
+        check("the trace sees the animation driving it",
+              bound != null && json.get_bool(bound) == 1)
+        mesh = json.array_get_raw(stages, 2)
+        mesh_detail = json.object_get_raw(mesh, "detail")
+        matches = json.object_get_raw(mesh_detail, "matches_export")
+        // The number the exporter wrote and the number the loader produced.
+        check("the loaded mesh matches what the exporter claimed",
+              matches != null && json.get_bool(matches) == 1)
+        if doc != null { json.free(doc) }
+        tcp.tcp_close(g_sock)
+        g_sock = null
+        g_stage = 9
+        engine.engine_stop(data as *Engine)
+        return
+    }
+}

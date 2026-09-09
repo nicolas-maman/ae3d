@@ -1,0 +1,70 @@
+// A model authored in Blender, exported, loaded and played.
+//
+// The assets under resources/blender/showcase are produced by
+// scripts/export_assets.sh from a .blend that make_showcase.py generates.
+
+import ae3d.core
+import ae3d.platform
+import ae3d.engine
+import ae3d.assets
+import ae3d.anim
+import ae3d.loader
+
+const MANIFEST = "resources/blender/showcase/manifest.json"
+
+var g_orb: ptr = null
+
+main() {
+    e = engine.engine_new(platform.API_GL)
+    engine.engine_set_size(e, 1024, 768)
+    engine.engine_set_title(e, "ae3d: the Blender pipeline")
+    engine.engine_set_camera_input(e, true)
+    engine.engine_set_post(e, true, true, 1.0, 0.6)
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_start(e, on_start)
+
+    if !engine.engine_run(e, -1, -1) {
+        println("blender_pipeline: no window")
+        engine.engine_free(e)
+        return
+    }
+    engine.engine_free(e)
+}
+
+on_start(data: ptr) {
+    e = data as *Engine
+
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(0.0, 3.0, 9.0))
+    core.camera_look_at(cam, core.vec3(0.0, 1.6, 0.0))
+
+    light = core.light_directional(core.vec3(0.0 - 0.4, 0.0 - 1.0, 0.0 - 0.35),
+                                   core.vec3(1.0, 0.96, 0.9), 2.6)
+    engine.engine_set_light(e, light)
+
+    m = assets.manifest_load(MANIFEST)
+    if m == null {
+        println("blender_pipeline: ${assets.last_error()}")
+        println("blender_pipeline: run ./scripts/export_assets.sh to build the assets")
+        return
+    }
+
+    println("blender_pipeline: ${assets.manifest_source(m)} exported by Blender ${assets.manifest_blender(m)}")
+
+    orb_entry = assets.manifest_find_by_object(m, "Orb")
+    orb = assets.entry_load_model(m, orb_entry)
+    if orb != null {
+        engine.engine_add_model(e, orb)
+        g_orb = orb as ptr
+        clip = assets.entry_load_clip(m, orb_entry)
+        if clip != null {
+            engine.engine_add_animation(e, "orb", anim.player_new(clip), orb)
+            println("blender_pipeline: playing '${anim.clip_name(clip)}', ${anim.clip_duration(clip)}s, ${anim.clip_channel_count(clip)} channels")
+        }
+    }
+
+    plinth = assets.entry_load_model(m, assets.manifest_find_by_object(m, "Plinth"))
+    if plinth != null { engine.engine_add_model(e, plinth) }
+
+    assets.manifest_free(m)
+}

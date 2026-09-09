@@ -257,4 +257,27 @@ void  *ae3d_vk_offscreen_pixels(void);
 int    ae3d_vk_offscreen_width(void);
 int    ae3d_vk_offscreen_height(void);
 
+// The agent channel: a localhost NDJSON socket an agent drives the engine
+// through. ae3d_agent_active() is what every hot path tests, and it is zero
+// until AE3D_AGENT asks for the channel. See native/ae3d_agent.c.
+int         ae3d_agent_start(void);
+int         ae3d_agent_active(void);
+int         ae3d_agent_port(void);
+const char *ae3d_agent_next_request(void);
+void        ae3d_agent_respond(const char *line);
+void        ae3d_agent_stop(void);
+const char *ae3d_agent_error(void);
+
+int  ae3d_capture_frame(int width, int height);
+int  ae3d_capture_width(void);
+int  ae3d_capture_height(void);
+int  ae3d_capture_pixel(int x, int y, double *out);
+int  ae3d_capture_region(int x, int y, int width, int height,
+                         int background, int tolerance, double *out);
+int  ae3d_capture_hold_reference(void);
+int  ae3d_capture_diff(int tolerance, double *out);
+void ae3d_capture_release(void);
+int  ae3d_capture_adopt(const unsigned char *pixels, int width, int height);
+double ae3d_capture_slot(const double *block, int index);
+
 #endif
