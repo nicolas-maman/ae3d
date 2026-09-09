@@ -554,6 +554,24 @@ First working engine.
 
 ### Editor
 
+- A bounded setting is one line: label, slider and value across a row, the way
+  all three of the editors this borrows from draw one. The slider used to sit
+  under its own caption, which cost two lines a setting and read like a page of
+  preferences rather than an inspector; eleven of them filled the panel twice
+  over. Transform, material, light, camera and behaviour now all fit at once
+  where material alone used to reach the bottom.
+
+- Captions share a column, so every control starts at the same place. Ragged
+  control edges are most of what makes a panel look unfinished.
+
+- The transform modes are on the viewport. Move, rotate and scale were reachable
+  only by pressing W, E or R, which is the convention but not something a panel
+  can show you: nothing on screen said which was live. The live one wears the
+  accent, and the keys still work.
+
+- The colour's hex was cut off. The value column is sized for a number and a
+  hex colour is seven characters.
+
 - Deleting an object made the editor stop believing what the others were. A
   model, its component and its script live at the same index in three lists,
   and only the add path moved all three: delete, undo of an add and redo of one
