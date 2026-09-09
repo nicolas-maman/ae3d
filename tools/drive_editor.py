@@ -112,14 +112,45 @@ def rows_under(widgets, parent_id):
     return [w for w in widgets.values() if w["parent"] == parent_id]
 
 
+def descendants(widgets, parent_id):
+    """Every widget under one, nearest first."""
+    out = []
+    queue = [w for w in widgets.values() if w["parent"] == parent_id]
+    while queue:
+        w = queue.pop(0)
+        out.append(w)
+        queue.extend(k for k in widgets.values() if k["parent"] == w["id"])
+    return out
+
+
+def in_panel(widgets, w):
+    """The ancestor of a widget that sits directly in a panel's stack.
+
+    A section caption is nested inside its bar, so it is not a sibling of the
+    thing the section holds. Found by climbing rather than by depth, because
+    the depth is a detail of how the bar is built.
+    """
+    while w is not None:
+        parent = widgets.get(w["parent"])
+        if parent is None:
+            return None
+        if "panel-body" in (parent.get("classes") or ""):
+            return w
+        w = parent
+    return None
+
+
 def scene_list_id(widgets):
-    # The hierarchy sits directly under the SCENE heading, and the heading and
-    # the list share a parent. Found by structure rather than by a fixed id,
-    # because ids move whenever the panel gains a widget.
+    # The hierarchy is what follows the SCENE bar in the panel. Found by
+    # structure rather than by a fixed id, because ids move whenever the panel
+    # gains a widget.
     for w in widgets.values():
         if w["type"] == "text" and w["text"].strip() == "SCENE":
-            siblings = [s for s in widgets.values() if s["parent"] == w["parent"]]
-            after = [s for s in siblings if s["id"] > w["id"]]
+            bar = in_panel(widgets, w)
+            if bar is None:
+                continue
+            after = [s for s in widgets.values()
+                     if s["parent"] == bar["parent"] and s["id"] > bar["id"]]
             for s in sorted(after, key=lambda s: s["id"]):
                 if s["type"] in ("vstack", "listbox"):
                     return s["id"]
@@ -133,7 +164,8 @@ def row_name(widgets, row):
     selected. A check that compared the whole label against "water" was
     reading the presentation, and broke the moment the presentation improved.
     """
-    kids = [c["text"].strip() for c in widgets.values() if c["parent"] == row["id"]]
+    kids = [c["text"].strip() for c in descendants(widgets, row["id"])
+            if c["text"].strip()]
     if not kids:
         return "?"
     parts = kids[0].split(None, 1)

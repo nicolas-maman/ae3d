@@ -565,6 +565,14 @@ First working engine.
 
 ### Editor
 
+- Section bars and rules reach both edges of their panel. A section header was
+  a bar inset fourteen pixels each side, which reads as a chip laid on a card
+  rather than as the header of a docked panel, and it is not what any of the
+  three editors this borrows from draws. The gutter moved from a panel inset to
+  a margin on the rows, so the bars and the rules span the column while
+  everything in them still lines up, and the scene list highlights the selected
+  object edge to edge.
+
 - A panel is one frame, not two. The stack inside the scroll view carried the
   same border as the scroll view around it, and a stack is only as tall as what
   it holds: the left column drew a rule across itself under the last button
@@ -584,6 +592,10 @@ First working engine.
   after another with nothing between them.
 
 ### Tooling
+
+- The driver finds a section by climbing to the widget that sits in the panel
+  rather than by assuming the caption is a sibling of what the section holds,
+  and reads a list row's name from anywhere under the row.
 
 - The layout audit refuses a frame drawn inside a frame of the same colour.
   The inner one is shorter than the panel around it, so its bottom edge lands
