@@ -30,6 +30,7 @@ import std.list
 import ae3d.core
 import ae3d.gl
 import ae3d.vk
+import ae3d.anim
 
 exports (
     Context, context_new, context_free,
@@ -55,6 +56,7 @@ struct Context {
     camera: ptr
     light: ptr
     gl_renderer: ptr
+    animations: ptr
     vk_renderer: ptr
     backend: string
 
@@ -186,6 +188,12 @@ help_result() -> ptr {
         "Every model the renderer holds: index, name, position and visibility."))
     json.array_add_raw(ops, describe("model.get", "index",
         "One model in full: transform, bounds, material and mesh counts."))
+    json.array_add_raw(ops, describe("anim.list", "",
+        "Every animation bound to a model: clip, playhead, duration, speed and the pose it produced."))
+    json.array_add_raw(ops, describe("anim.get", "name | index",
+        "One animation in full, including the transform its playhead currently produces."))
+    json.array_add_raw(ops, describe("anim.set", "name | index, [time], [speed], [playing], [looping]",
+        "Drive an animation. Setting time seeks and reposes at once, so a snapshot after it shows that pose."))
     json.array_add_raw(ops, describe("snapshot", "path",
         "Write the next completed frame to a PNG. Answers once the file exists."))
     json.array_add_raw(ops, describe("frame.pause", "",
@@ -293,6 +301,70 @@ model_result(m: *Model, index: int) -> ptr {
     return out
 }
 
+// --- animation ----------------------------------------------------------
+
+// Everything an agent needs to answer "is this thing animating, and where in
+// its clip is it". The sampled transform is included because the point of
+// asking is usually that the model is not where it was expected: the playhead
+// and the pose it produces are two different things to be wrong about.
+binding_result(b: *Binding, index: int) -> ptr {
+    out = json.obj()
+    json.object_set_raw(out, "index", json.from_int(index))
+    json.object_set_raw(out, "name", json.str(core.text(anim.binding_name(b))))
+
+    p = anim.binding_player(b)
+    clip = anim.player_clip(p)
+    json.object_set_raw(out, "clip", json.str(core.text(anim.clip_name(clip))))
+    json.object_set_raw(out, "time", json.num(anim.player_time(p)))
+    json.object_set_raw(out, "duration", json.num(anim.clip_duration(clip)))
+    json.object_set_raw(out, "speed", json.num(anim.player_speed(p)))
+    json.object_set_raw(out, "playing", json.boolean(anim.player_playing(p)))
+    json.object_set_raw(out, "looping", json.boolean(anim.player_looping(p)))
+    json.object_set_raw(out, "channels", json.from_int(anim.clip_channel_count(clip)))
+
+    m = anim.binding_model(b)
+    if m != null {
+        json.object_set_raw(out, "model_position",
+            vec3_json(m.position.x, m.position.y, m.position.z))
+        json.object_set_raw(out, "model_rotation",
+            quat_json(m.rotation.x, m.rotation.y, m.rotation.z, m.rotation.w))
+        json.object_set_raw(out, "model_scale",
+            vec3_json(m.scale.x, m.scale.y, m.scale.z))
+    } else {
+        // A binding with no model drives nothing, which is a state worth being
+        // able to see rather than one to render as an absent field.
+        json.object_set_raw(out, "model", json.boolean(false))
+    }
+    return out
+}
+
+anim_list_result(c: *Context) -> ptr {
+    items = json.arr()
+    registry = c.animations as *Registry
+    count = anim.registry_count(registry)
+    i = 0
+    while i < count {
+        b = anim.registry_binding(registry, i)
+        if b != null { json.array_add_raw(items, binding_result(b, i)) }
+        i = i + 1
+    }
+    out = json.obj()
+    json.object_set_raw(out, "count", json.from_int(count))
+    json.object_set_raw(out, "animations", items)
+    return out
+}
+
+// An animation named, or by index. Names survive a scene changing shape and
+// indices do not, so a client that knows what it is looking for should use one.
+binding_from(c: *Context, request: ptr) -> int {
+    registry = c.animations as *Registry
+    named = json.object_get_raw(request, "name")
+    if named != null { return anim.registry_find(registry, json.get_string_raw(named)) }
+    indexed = json.object_get_raw(request, "index")
+    if indexed != null { return json.get_int(indexed) }
+    return -1
+}
+
 // --- dispatch -----------------------------------------------------------
 
 handle(c: *Context, op: string, id: int, request: ptr) -> bool {
@@ -315,6 +387,48 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
             return false
         }
         answer(id, model_result(m, index))
+        return false
+    }
+
+    if op == "anim.list" { answer(id, anim_list_result(c)) return false }
+
+    if op == "anim.get" {
+        index = binding_from(c, request)
+        b = anim.registry_binding(c.animations as *Registry, index)
+        if b == null {
+            fail(id, "no animation by that name or index")
+            return false
+        }
+        answer(id, binding_result(b, index))
+        return false
+    }
+
+    if op == "anim.set" {
+        index = binding_from(c, request)
+        b = anim.registry_binding(c.animations as *Registry, index)
+        if b == null {
+            fail(id, "no animation by that name or index")
+            return false
+        }
+        p = anim.binding_player(b)
+
+        node = json.object_get_raw(request, "time")
+        if node != null {
+            anim.player_set_time(p, json.get_number(node))
+            // Applied here rather than waiting for the next advance, so a
+            // client that seeks and then snapshots sees the pose it asked for
+            // instead of the one from the frame before.
+            anim.apply(p, anim.binding_model(b))
+        }
+        node = json.object_get_raw(request, "speed")
+        if node != null { anim.player_set_speed(p, json.get_number(node)) }
+        node = json.object_get_raw(request, "looping")
+        if node != null { anim.player_set_looping(p, json.get_bool(node) == 1) }
+        node = json.object_get_raw(request, "playing")
+        if node != null {
+            if json.get_bool(node) == 1 { anim.player_play(p) } else { anim.player_pause(p) }
+        }
+        answer(id, binding_result(b, index))
         return false
     }
 

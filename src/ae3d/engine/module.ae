@@ -12,6 +12,7 @@ import ae3d.platform
 import ae3d.gl
 import ae3d.vk
 import ae3d.agent
+import ae3d.anim
 import std.os
 
 exports (
@@ -27,6 +28,7 @@ exports (
     engine_set_debug, engine_set_frustum_culling, engine_set_face_culling,
     engine_on_update, engine_on_fixed_update, engine_on_render,
     engine_set_user_data, engine_user_data,
+    engine_add_animation, engine_animations,
     engine_gl_renderer, engine_vk_renderer, engine_mouse_x, engine_mouse_y, engine_mouse_down, engine_key_down
 )
 
@@ -80,6 +82,7 @@ struct Engine {
     // build that did not ask for the channel, which is what keeps it free.
     agent_on: bool
     agent_ctx: ptr
+    animations: ptr
     agent_steps_left: int
     frame_limit: int
 }
@@ -97,6 +100,7 @@ engine_new(api: int) -> *Engine {
     e.fixed_step = 1.0 / 60.0
     e.first_mouse = true
     e.frame_limit = frame_limit_from_env()
+    e.animations = anim.registry_new() as ptr
 
     if api == platform.API_VULKAN {
         vulkan_state = vk.renderer_new()
@@ -149,6 +153,20 @@ engine_set_frame_limit(e: *Engine, frames: int) {
     e.frame_limit = frames
 }
 
+// Binds a player to a model and takes ownership of the player. The clip is not
+// taken: one clip drives many players, and freeing it here would pull it out
+// from under the others.
+//
+// The name is what an agent asks for over the channel. An index shifts when the
+// scene changes; a name does not.
+engine_add_animation(e: *Engine, name: string, p: *Player, m: *Model) -> int {
+    return anim.registry_add(e.animations as *Registry, name, p, m)
+}
+
+engine_animations(e: *Engine) -> ptr {
+    return e.animations
+}
+
 bind_backend(e: *Engine, b: Backend) {
     e.backend_init = b.init
     e.backend_render = b.render
@@ -164,6 +182,10 @@ bind_backend(e: *Engine, b: Backend) {
 
 engine_free(e: *Engine) {
     if e == null { return }
+    if e.animations != null {
+        anim.registry_free(e.animations as *Registry)
+        e.animations = null
+    }
     if e.camera != null { core.camera_free(e.camera as *Camera) }
     if e.api == platform.API_VULKAN {
         vk.renderer_free(e.backend_state as *VKRenderer)
@@ -338,6 +360,7 @@ pump_agent(e: *Engine) {
     c.camera = e.camera
     c.light = e.light
     c.gl_renderer = e.gl_renderer
+    c.animations = e.animations
     c.vk_renderer = null
     if e.api == platform.API_VULKAN { c.vk_renderer = e.backend_state }
     c.backend = e.backend_name
@@ -479,6 +502,10 @@ engine_loop(e: *Engine) {
                 e.fixed_accumulator = e.fixed_accumulator - e.fixed_step
                 if e.on_fixed_update != null { e.on_fixed_update(e.user_data, e.fixed_step) }
             }
+            // With the simulation, not beside it: a held frame freezes the
+            // playheads too, or an agent that paused to look at a pose would
+            // find a different one each time it asked.
+            anim.registry_advance(e.animations as *Registry, delta)
             if e.on_update != null { e.on_update(e.user_data, delta) }
         }
 

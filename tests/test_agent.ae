@@ -31,6 +31,7 @@ import ae3d.platform
 import ae3d.engine
 import ae3d.agent
 import ae3d.loader
+import ae3d.anim
 
 const SHOT = "build/test_agent_snapshot.png"
 
@@ -81,7 +82,21 @@ ok_of(doc: ptr) -> bool {
     if doc == null { return false }
     node = json.object_get_raw(doc, "ok")
     if node == null { return false }
-    return json.get_bool(node)
+    return json.get_bool(node) == 1
+}
+
+// The x of the pose an animation result reports. -1 stands for "absent",
+// which no check here expects, so a missing field fails rather than passing by
+// comparing equal to something.
+model_x_is(r: ptr, want: float) -> bool {
+    if r == null { return false }
+    pos = json.object_get_raw(r, "model_position")
+    if pos == null { return false }
+    if json.array_size(pos) < 3 { return false }
+    got = json.get_number(json.array_get_raw(pos, 0))
+    d = got - want
+    if d < 0.0 { d = -d }
+    return d < 0.001
 }
 
 int_field(node: ptr, name: string) -> int {
@@ -116,7 +131,7 @@ main() {
     }
     engine.engine_free(e)
 
-    if g_stage < 12 {
+    if g_stage < 17 {
         println("FAIL the exchange did not finish (stopped at stage ${g_stage})")
         g_failures = g_failures + 1
     }
@@ -137,6 +152,15 @@ on_start(data: ptr) {
 
     cam = engine.engine_camera(e)
     core.camera_set_position(cam, core.vec3(0.0, 0.0, 30.0))
+
+    // Something for the anim ops to have an opinion about. Two seconds, a
+    // straight run along x, so a seek to a known time has a known answer.
+    clip = anim.clip_new("slide")
+    ch = anim.channel_new(anim.TRANSLATION, anim.LINEAR)
+    anim.channel_add_key(ch, 0.0, 0.0, 0.0, 0.0, 0.0)
+    anim.channel_add_key(ch, 2.0, 20.0, 0.0, 0.0, 0.0)
+    anim.clip_add_channel(clip, ch)
+    engine.engine_add_animation(e, "probe_slide", anim.player_new(clip), cube)
 }
 
 on_render(data: ptr, delta: float) {
@@ -220,7 +244,7 @@ on_render(data: ptr, delta: float) {
         if doc == null { return }
         r = result_of(doc)
         g_paused_frame = int_field(r, "frame")
-        check("stats say the engine is held", r != null && json.get_bool(json.object_get_raw(r, "paused")))
+        check("stats say the engine is held", r != null && json.get_bool(json.object_get_raw(r, "paused")) == 1)
         if doc != null { json.free(doc) }
         ask_send("{\"id\":7,\"op\":\"frame.stats\"}")
         g_stage = 8
@@ -246,7 +270,7 @@ on_render(data: ptr, delta: float) {
             check("a step advances exactly what was asked", int_field(r, "stepped") == 5)
             check("a step ends where it started plus the count",
                   int_field(r, "frame") == g_step_from + 5)
-            check("a step leaves the engine held", json.get_bool(json.object_get_raw(r, "paused")))
+            check("a step leaves the engine held", json.get_bool(json.object_get_raw(r, "paused")) == 1)
         } else {
             check("frame.step answers", false)
         }
@@ -288,9 +312,43 @@ on_render(data: ptr, delta: float) {
         r = result_of(doc)
         check("resuming lets the frames run again", int_field(r, "frame") > g_resume_frame)
         if doc != null { json.free(doc) }
+        ask_send("{\"id\":12,\"op\":\"anim.list\"}")
+        g_stage = 14
+        return
+    }
+    if g_stage == 14 {
+        doc = ask_receive()
+        if doc == null { return }
+        r = result_of(doc)
+        check("anim.list sees the one animation", int_field(r, "count") == 1)
+        if doc != null { json.free(doc) }
+        // By name, not index. A name is what survives the scene changing shape.
+        ask_send("{\"id\":13,\"op\":\"anim.set\",\"name\":\"probe_slide\",\"time\":1.0,\"playing\":false}")
+        g_stage = 15
+        return
+    }
+    if g_stage == 15 {
+        doc = ask_receive()
+        if doc == null { return }
+        r = result_of(doc)
+        check("anim.set finds it by name", ok_of(doc))
+        // Halfway along a 0..20 run over two seconds. Seeking must repose the
+        // model there and then, not on some later frame.
+        check("seeking reposes the model at once", model_x_is(r, 10.0))
+        check("anim.set can stop the playhead", r != null && !json.get_bool(json.object_get_raw(r, "playing")) == 1)
+        if doc != null { json.free(doc) }
+        ask_send("{\"id\":14,\"op\":\"anim.get\",\"name\":\"nope\"}")
+        g_stage = 16
+        return
+    }
+    if g_stage == 16 {
+        doc = ask_receive()
+        if doc == null { return }
+        check("an unknown animation name fails", !ok_of(doc))
+        if doc != null { json.free(doc) }
         tcp.tcp_close(g_sock)
         g_sock = null
-        g_stage = 14
+        g_stage = 17
         engine.engine_stop(data as *Engine)
         return
     }

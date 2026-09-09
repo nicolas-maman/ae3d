@@ -34,7 +34,10 @@ exports (
     player_new, player_free, player_clip, player_time, player_set_time,
     player_speed, player_set_speed, player_looping, player_set_looping,
     player_playing, player_play, player_pause, player_rewind,
-    advance, apply, last_error
+    advance, apply, last_error,
+    Binding, Registry, registry_new, registry_free, registry_add, registry_count,
+    registry_binding, registry_find, registry_advance,
+    binding_name, binding_player, binding_model
 )
 
 // What a channel drives.
@@ -430,6 +433,119 @@ apply(p: *Player, m: *Model) {
             if c.target == ROTATION {
                 core.model_set_rotation(m, sample_quat(c, p.time))
             }
+        }
+        i = i + 1
+    }
+}
+
+// --- the registry -------------------------------------------------------
+//
+// What the frame loop advances and what the agent channel enumerates. It lives
+// here rather than in engine because both need to see it and the dependency has
+// to run one way: engine imports anim, agent imports anim, and anim imports
+// neither.
+//
+// A binding is a player pointed at a model. The same clip can drive many models
+// through many players, and each binding carries a name so an agent can ask for
+// one by something other than an index that shifts when the scene changes.
+
+struct Binding {
+    name: string
+    player: *Player
+    model: *Model
+}
+
+struct Registry {
+    bindings: ptr
+}
+
+registry_new() -> *Registry {
+    r = heap.new(Registry)
+    r.bindings = list.new()
+    return r
+}
+
+// Frees the bindings and the players it was handed, not the clips or the
+// models: a clip outlives the players driving it, and a model belongs to the
+// renderer that was given it.
+registry_free(r: *Registry) {
+    if r == null { return }
+    if r.bindings != null {
+        i = 0
+        count = list.size(r.bindings)
+        while i < count {
+            b = list.get_raw(r.bindings, i) as *Binding
+            if b != null {
+                player_free(b.player)
+                heap.free(b)
+            }
+            i = i + 1
+        }
+        list.free(r.bindings)
+    }
+    heap.free(r)
+}
+
+registry_add(r: *Registry, name: string, p: *Player, m: *Model) -> int {
+    if r == null || p == null { return -1 }
+    b = heap.new(Binding)
+    b.name = name
+    b.player = p
+    b.model = m
+    list.add_raw(r.bindings, b as ptr)
+    return list.size(r.bindings) - 1
+}
+
+registry_count(r: *Registry) -> int {
+    if r == null { return 0 }
+    return list.size(r.bindings)
+}
+
+registry_binding(r: *Registry, index: int) -> *Binding {
+    if r == null { return null }
+    if index < 0 || index >= list.size(r.bindings) { return null }
+    return list.get_raw(r.bindings, index) as *Binding
+}
+
+registry_find(r: *Registry, name: string) -> int {
+    if r == null { return -1 }
+    i = 0
+    count = list.size(r.bindings)
+    while i < count {
+        b = list.get_raw(r.bindings, i) as *Binding
+        if b != null && b.name == name { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+binding_name(b: *Binding) -> string {
+    if b == null { return "" }
+    return b.name
+}
+
+binding_player(b: *Binding) -> *Player {
+    if b == null { return null }
+    return b.player
+}
+
+binding_model(b: *Binding) -> *Model {
+    if b == null { return null }
+    return b.model
+}
+
+// One pass: move every playhead, then write every sampled transform. Costs a
+// size check when nothing is registered, which is what an engine with no
+// animation pays.
+registry_advance(r: *Registry, delta: float) {
+    if r == null { return }
+    i = 0
+    count = list.size(r.bindings)
+    while i < count {
+        b = list.get_raw(r.bindings, i) as *Binding
+        if b != null {
+            advance(b.player, delta)
+            apply(b.player, b.model)
         }
         i = i + 1
     }
