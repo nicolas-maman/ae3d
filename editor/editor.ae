@@ -193,6 +193,10 @@ var g_detached_scripts: ptr = null
 // The row whose field the user is typing in. Echoing a parsed value back into
 // the field being edited rewrites it under the caret, which is what makes a
 // numeric field impossible to type into.
+// Drags that moved nothing, counted while the undo check runs. See
+// undone_gizmo_drags: without it, a gizmo that never picks and a history that
+// never restores report the same number.
+var g_silent_drags = 0
 var g_typing_row = 0 - 1
 // The row whose slider is being dragged. A slider that is written to during its
 // own tracking loop fights the drag, so it is the one control a change is not
@@ -1346,8 +1350,19 @@ actions_that_do_nothing() -> int {
 // A drag of the gizmo used to record nothing, so the next undo stepped back
 // through whatever came before it and put that back instead. Each mode is
 // dragged, undone, and the model asked whether it is where it started.
+//
+// Two different faults land in the same count, which is why this also records
+// how many drags moved nothing at all. A drag that never reaches the model
+// leaves the model where it started, and the undo after it steps back through
+// whatever came before and moves it away: the count of drags that did not come
+// back is then the count of drags that never happened. Told apart, the first
+// number says the gizmo did not pick or the drag arithmetic gave nothing, and
+// the second says the history did not put it back, which are not the same bug
+// and are not in the same file. Asked for on Windows, where the count is three
+// and nobody can say which of the two it is (#198).
 undone_gizmo_drags() -> int {
     m = selected_model()
+    g_silent_drags = 0
     if m == null { return 0 }
 
     wrong = 0
@@ -1364,6 +1379,22 @@ undone_gizmo_drags() -> int {
         gizmo_drag(140.0, 90.0, 50.0, 30.0)
         g_gizmo_dragging = false
         history.history_close(g_history)
+
+        // Before the undo, so a drag that reached nothing is named as that
+        // rather than as an undo that failed. Every component of the rotation,
+        // because this drag turns about x: comparing y alone, as the undo check
+        // below does, called a rotation that plainly happened no movement at
+        // all and reported one silent drag on a machine with none.
+        if core.abs_of(m.position.x - position.x) < 0.0001 &&
+           core.abs_of(m.position.y - position.y) < 0.0001 &&
+           core.abs_of(m.position.z - position.z) < 0.0001 &&
+           core.abs_of(m.scale.x - scale.x) < 0.0001 &&
+           core.abs_of(m.rotation.x - rotation.x) < 0.000001 &&
+           core.abs_of(m.rotation.y - rotation.y) < 0.000001 &&
+           core.abs_of(m.rotation.z - rotation.z) < 0.000001 &&
+           core.abs_of(m.rotation.w - rotation.w) < 0.000001 {
+            g_silent_drags = g_silent_drags + 1
+        }
 
         undo_step()
 
@@ -1486,6 +1517,8 @@ report_state() {
     lines = string.concat(lines, string.from_int(wanted))
     lines = string.concat(lines, "\nunundone_drags ")
     lines = string.concat(lines, string.from_int(undrag))
+    lines = string.concat(lines, "\nsilent_drags ")
+    lines = string.concat(lines, string.from_int(g_silent_drags))
     lines = string.concat(lines, "\nidle_actions ")
     lines = string.concat(lines, string.from_int(idle))
     lines = string.concat(lines, "\nframes ")

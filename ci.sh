@@ -243,6 +243,14 @@ check_editor_run() {
         # painted looks exactly like one showing a dark material.
         fail "$name (the colour chip is not the material's colour)"
         sed 's/^/        /' "$report"
+    elif [ "$(sed -n 's/^silent_drags //p' "$report")" != "0" ]; then
+        # Checked before the undo count, because it is the other explanation
+        # for it: a drag that never reaches the model leaves the model where it
+        # started, and the undo after it steps back through whatever came
+        # before and moves it away. Reported apart so a failure names the gizmo
+        # or the history rather than leaving the reader to guess (#198).
+        fail "$name ($(sed -n 's/^silent_drags //p' "$report") gizmo drag(s) moved nothing)"
+        sed 's/^/        /' "$report"
     elif [ "$(sed -n 's/^unundone_drags //p' "$report")" != "0" ]; then
         # A drag of the gizmo that records nothing leaves the next undo to step
         # back through whatever came before it and put that back instead.

@@ -565,6 +565,14 @@ First working engine.
 
 ### Editor
 
+- The gizmo self-check counts drags that moved nothing apart from drags that
+  could not be undone. A drag that never reaches the model leaves the model
+  where it started, and the undo after it steps back through whatever came
+  before and moves it away, so the count of drags that did not come back was
+  also the count of drags that never happened. Told apart, one number says the
+  gizmo did not pick or the drag arithmetic gave nothing and the other says the
+  history did not put it back, which are different bugs in different files.
+
 - The kind of each object in the scene list is a glyph that looks like the
   thing rather than punctuation. A pipe, a tilde, a hash and an asterisk say
   nothing about what they stand for and read as stray keystrokes down the edge
