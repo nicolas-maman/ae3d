@@ -70,7 +70,6 @@ const CONSOLE_LINES = 7
 const DEFAULT_SEED = 20260903
 const VOXEL_SIZE = 4.0
 const WATER_SIZE = 700.0
-const PAINT_INTERVAL = 0.033
 
 // CRITICAL: these sit above the globals rather than beside the other section
 // constants below, because a global initialised from one is emitted in file
@@ -124,6 +123,12 @@ var g_light: ptr = null
 var g_models: ptr = null
 var g_rows: ptr = null
 var g_hierarchy: ptr = null
+// What ui.modifiers() reports for the keys held right now.
+const MOD_SHIFT = 1
+const MOD_COMMAND = 8
+
+// The last object clicked. The inspector answers for this one; an edit reaches
+// everything selected, which is how Unreal, Unity and Godot all behave.
 var g_selected = 0 - 1
 var g_syncing = false
 var g_backend_name = "opengl"
@@ -237,7 +242,6 @@ var g_last_edit = 0.0
 const STATS_INTERVAL = 0.25
 const EDIT_SETTLE = 0.4
 var g_reported = false
-var g_last_paint = 0.0
 // The scene's sky. It starts as the editor's own ground: near black makes a
 // scene look like it is floating in a void rather than standing in a room, and
 // an empty one is the first thing the editor shows.
@@ -943,9 +947,18 @@ row_control(index: int) -> int {
 
 // listbox_update takes a pointer list, and the rows carry nothing but their
 // index, so each is one boxed int the list owns for as long as it holds it.
+// One slot per object, holding what is attached to it and whether it is
+// selected. Both live here rather than in lists of their own: a model, its
+// component and its script already have to be moved together, and a fourth
+// list beside them would be a fourth thing to keep in step. The allocation
+// held one int and had room for two.
+//
+//   slot[0]  the script attached, or SCRIPT_NONE
+//   slot[1]  1 when the object is in the selection
 index_handle(value: int) -> ptr {
     slot = malloc(8) as int[]
     slot[0] = value
+    slot[1] = 0
     return slot as ptr
 }
 
@@ -1150,8 +1163,46 @@ row_text(index: int, value: float) -> string {
 // all, so driving it from the very callback it fires would recurse until the
 // stack ran out. The guard makes the highlight follow a programmatic selection
 // without the two chasing each other.
+// A click on a row. Whether it adds to the selection or replaces it is read
+// here, at the edge, and passed on: a routine that reads the keyboard itself
+// cannot be asked to do the other thing, and this one is driven by the
+// editor's own checks as well as by a person.
 select_object(index: int) {
+    // The row callback, which fires for a person's click and also when the
+    // editor moves the highlight itself. Only the first is a decision about
+    // what is selected: the second would read no modifier held and replace the
+    // selection the editor had just made.
+    if g_syncing { return }
+    holding = ui.modifiers()
+    adding = holding == MOD_SHIFT || holding == MOD_COMMAND ||
+             holding == MOD_SHIFT + MOD_COMMAND
+    select_object_adding(index, adding)
+}
+
+select_object_adding(index: int, adding: bool) {
     mark_dirty()
+    if index >= 0 {
+        if adding {
+            set_selected(index, !is_selected(index))
+            // The last one clicked is the one the inspector answers for, and a
+            // click that took something out of the selection cannot leave it
+            // pointing there.
+            if !is_selected(index) {
+                fallback = 0 - 1
+                i = 0
+                while i < list.size(g_scripts) {
+                    if is_selected(i) { fallback = i }
+                    i = i + 1
+                }
+                index = fallback
+            }
+        } else {
+            clear_selection()
+            set_selected(index, true)
+        }
+    } else {
+        clear_selection()
+    }
     g_selected = index
     paint_selection()
     sync_inspector()
@@ -1251,13 +1302,30 @@ update_outline() {
     }
 }
 
-// Selection is one object at a time. listbox_multi toggles rows and offers no
-// way to set or clear a row's state, and on_select reports no modifier, so a
-// plain click cannot replace the selection the way every editor expects
-// (aether-lang-dev/aether-ui#99). The property and outline paths already work
-// over a set, so widening this is a one-line change once that lands.
+// Whether an object is in the selection. The property and outline paths have
+// always read this rather than comparing against the one selected index, so
+// widening the selection was a matter of answering for more than one.
 is_selected(index: int) -> bool {
-    return index == g_selected
+    if g_scripts == null || index < 0 || index >= list.size(g_scripts) { return false }
+    slot = list.get_raw(g_scripts, index) as int[]
+    return slot[1] == 1
+}
+
+set_selected(index: int, on: bool) {
+    if g_scripts == null || index < 0 || index >= list.size(g_scripts) { return }
+    slot = list.get_raw(g_scripts, index) as int[]
+    value = 0
+    if on { value = 1 }
+    slot[1] = value
+}
+
+clear_selection() {
+    if g_scripts == null { return }
+    i = 0
+    while i < list.size(g_scripts) {
+        set_selected(i, false)
+        i = i + 1
+    }
 }
 
 // gopher3D attaches Go scripts it compiles and hot-reloads. The part that
@@ -1944,6 +2012,42 @@ actions_that_do_nothing() -> int {
     return wrong
 }
 
+// Two objects selected, and an edit reaching both. The property paths have
+// always written to everything selected; what was missing was a way to put
+// more than one thing in the selection, so nothing had ever checked that the
+// second one is written to.
+unreached_by_edit() -> int {
+    if list.size(g_models) < 2 { return 0 }
+    was = g_selected
+
+    select_object_adding(0, false)
+    select_object_adding(1, true)
+    if selection_count() != 2 {
+        select_object_adding(was, false)
+        return 1
+    }
+
+    first = model_at(0)
+    second = model_at(1)
+    start_first = first.position.y
+    start_second = second.position.y
+
+    // A row states a value rather than nudging one, so both objects end up at
+    // it: that is what typing 12 into a field with two things selected means,
+    // and it is what Unity does with the same gesture.
+    apply_property(1, 12.0)
+
+    wrong = 0
+    if core.abs_of(first.position.y - 12.0) > 0.01 { wrong = wrong + 1 }
+    if core.abs_of(second.position.y - 12.0) > 0.01 { wrong = wrong + 1 }
+
+    core.model_set_position(first, first.position.x, start_first, first.position.z)
+    core.model_set_position(second, second.position.x, start_second, second.position.z)
+    select_object_adding(was, false)
+    history.history_clear(g_history)
+    return wrong
+}
+
 // Attaching a behaviour used to record nothing, so the next undo stepped back
 // through whatever came before it. Each behaviour is set, undone, and the model
 // asked whether it carries the one it had.
@@ -2148,6 +2252,8 @@ report_state() {
     lines = string.concat(lines, string.from_int(undrag))
     lines = string.concat(lines, "\nsilent_drags ")
     lines = string.concat(lines, string.from_int(g_silent_drags))
+    lines = string.concat(lines, "\nunreached_by_edit ")
+    lines = string.concat(lines, string.from_int(unreached_by_edit()))
     lines = string.concat(lines, "\nunundone_scripts ")
     lines = string.concat(lines, string.from_int(unundone_scripts()))
     lines = string.concat(lines, "\nfirst_fps ")
@@ -2606,12 +2712,16 @@ scene_animates() -> bool {
     return scripted_count() > 0
 }
 
+// Marking it dirty is the whole of it. The frame timer draws, including
+// during a drag: AppKit runs one in its own tracking mode, and a timer
+// scheduled in the default mode did not fire there, so a property change had
+// to repaint the viewport itself and cap how often it did
+// (aether-lang-dev/aether-ui#97, fixed upstream). Painting from the callback
+// as well as from the timer meant a drag drew twice as often as the frame
+// rate, and the cap existed to make that bearable rather than because
+// anything wanted it.
 paint_soon() {
     mark_dirty()
-    now = seconds()
-    if now - g_last_paint < PAINT_INTERVAL { return }
-    g_last_paint = now
-    draw_frame()
 }
 
 // A number typed into a field. Anything that is not a number is ignored

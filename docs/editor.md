@@ -30,7 +30,10 @@ against its bounding sphere first, so selection stays cheap with a full scene.
 
 ## Panels
 
-**Scene** lists what is in the scene. The grid and the selection outlines are the
+**Scene** lists what is in the scene. A click selects one object; holding shift
+or command adds to the selection. The inspector shows the last object clicked
+and an edit reaches everything selected, so typing a height with three objects
+selected puts all three at that height. The grid and the selection outlines are the
 editor's own geometry: the renderer draws them, but they are not objects and do
 not appear here.
 
