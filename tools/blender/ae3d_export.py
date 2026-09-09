@@ -95,10 +95,7 @@ def frame_origin(scene):
     return scene.frame_start
 
 
-# CONSTANT and LINEAR map straight across. BEZIER does not: ae3d has STEP and
-# LINEAR only (#192), so a Bezier curve is resampled and the manifest says so
-# rather than quietly losing the easing.
-INTERPOLATION = {"CONSTANT": "STEP", "LINEAR": "LINEAR", "BEZIER": "LINEAR"}
+INTERPOLATION = {"CONSTANT": "STEP", "LINEAR": "LINEAR", "BEZIER": "CUBIC"}
 
 
 def channel_from_fcurves(target, curves, spf, component_count, warnings, object_name):
@@ -124,30 +121,127 @@ def channel_from_fcurves(target, curves, spf, component_count, warnings, object_
             modes.add(mode)
             if mode not in INTERPOLATION:
                 warnings.append(
-                    "%s: %s uses %s interpolation, exported as LINEAR"
+                    "%s: %s uses %s interpolation, exported as CUBIC"
                     % (object_name, target, mode)
                 )
-    if "BEZIER" in modes:
-        warnings.append(
-            "%s: %s was keyed with Bezier easing and ae3d has no cubic sampler; "
-            "exported as LINEAR (see ae3d#192)" % (object_name, target)
-        )
 
-    # One mode for the channel. Mixed modes within a channel cannot be
-    # represented, so the least lossy wins and the warning above already said
-    # what happened.
-    interpolation = "LINEAR"
     if modes == {"CONSTANT"}:
         interpolation = "STEP"
+    elif modes == {"LINEAR"}:
+        interpolation = "LINEAR"
+    else:
+        interpolation = "CUBIC"
 
+    ordered = sorted(times)
+    if interpolation == "CUBIC":
+        ordered = subdivide(ordered, CUBIC_SUBDIVISIONS)
     keys = []
-    for frame in sorted(times):
+    for frame in ordered:
         values = []
+        incoming = []
+        outgoing = []
         for index in range(component_count):
             curve = curves.get(index)
-            values.append(curve.evaluate(frame) if curve else 0.0)
-        keys.append((frame, values))
+            if curve is None:
+                values.append(0.0)
+                incoming.append(0.0)
+                outgoing.append(0.0)
+                continue
+            values.append(curve.evaluate(frame))
+            before, after = tangents_at(curve, frame, spf)
+            incoming.append(before)
+            outgoing.append(after)
+        keys.append((frame, values, incoming, outgoing))
     return {"target": target, "interpolation": interpolation, "keys": keys, "spf": spf}
+
+
+TANGENT_STEP = 0.01
+
+# Hermite reconstructs a Bezier segment exactly only where the curve is
+# uniformly parameterised in time, which Blender's auto-clamped handles are
+# not. Splitting each span costs keys in the asset and nothing at run time.
+CUBIC_SUBDIVISIONS = 8
+
+
+def tangents_at(curve, frame, spf):
+    here = curve.evaluate(frame)
+    before = curve.evaluate(frame - TANGENT_STEP)
+    after = curve.evaluate(frame + TANGENT_STEP)
+    scale = 1.0 / (TANGENT_STEP * spf)
+    return (here - before) * scale, (after - here) * scale
+
+
+def subdivide(ordered, subdivisions):
+    if subdivisions < 2 or len(ordered) < 2:
+        return ordered
+    dense = []
+    for index in range(len(ordered) - 1):
+        start = ordered[index]
+        end = ordered[index + 1]
+        for step in range(subdivisions):
+            dense.append(start + (end - start) * step / float(subdivisions))
+    dense.append(ordered[-1])
+    return dense
+
+
+SAMPLE_COUNT = 33
+
+
+def sample_reference(grouped, scene, spf, origin, duration):
+    """What Blender itself says the curves evaluate to, at even intervals.
+
+    Carried in the asset so the engine's sampler can be checked against the
+    thing it is meant to reproduce, rather than against another implementation
+    of the same guess.
+    """
+    if duration <= 0.0:
+        return None
+    paths = {"location": "translation", "scale": "scale",
+             "rotation_quaternion": "rotation", "rotation_euler": "rotation"}
+    out = {}
+    for path, target in paths.items():
+        curves = grouped.get(path)
+        if not curves or target in out:
+            continue
+        rows = []
+        for step in range(SAMPLE_COUNT):
+            t = duration * step / float(SAMPLE_COUNT - 1)
+            frame = origin + t / spf
+            if path == "rotation_euler":
+                import mathutils
+                angles = [curves[i].evaluate(frame) if i in curves else 0.0 for i in range(3)]
+                mode = "XYZ"
+                q = mathutils.Euler(tuple(angles), mode).to_quaternion()
+                qx, qy, qz = to_y_up(q.x, q.y, q.z)
+                rows.append({"t": rounded(t), "v": [rounded(qx), rounded(qy), rounded(qz), rounded(q.w)]})
+            elif path == "rotation_quaternion":
+                w, x, y, z = [curves[i].evaluate(frame) if i in curves else 0.0 for i in range(4)]
+                qx, qy, qz = to_y_up(x, y, z)
+                rows.append({"t": rounded(t), "v": [rounded(qx), rounded(qy), rounded(qz), rounded(w)]})
+            else:
+                a, b, c = [curves[i].evaluate(frame) if i in curves else 0.0 for i in range(3)]
+                if path == "scale":
+                    vx, vy, vz = a, c, b
+                else:
+                    vx, vy, vz = to_y_up(a, b, c)
+                rows.append({"t": rounded(t), "v": [rounded(vx), rounded(vy), rounded(vz)]})
+        out[target] = rows
+    return out or None
+
+
+def euler_quaternion(curves, frame, mode):
+    import mathutils
+    angles = [curves[i].evaluate(frame) if i in curves else 0.0 for i in range(3)]
+    q = mathutils.Euler(tuple(angles), mode).to_quaternion()
+    return [q.x, q.y, q.z, q.w]
+
+
+def align(q, reference):
+    """q and -q are the same rotation; a finite difference across a sign flip is
+    not a tangent but a leap across the hypersphere."""
+    if sum(q[i] * reference[i] for i in range(4)) < 0.0:
+        return [-value for value in q]
+    return q
 
 
 def build_clip(obj, scene, warnings):
@@ -170,10 +264,14 @@ def build_clip(obj, scene, warnings):
         built = channel_from_fcurves("translation", location, spf, 3, warnings, obj.name)
         if built:
             keys = []
-            for frame, values in built["keys"]:
+            for frame, values, incoming, outgoing in built["keys"]:
                 x, y, z = to_y_up(values[0], values[1], values[2])
+                ix, iy, iz = to_y_up(incoming[0], incoming[1], incoming[2])
+                ox, oy, oz = to_y_up(outgoing[0], outgoing[1], outgoing[2])
                 keys.append({"t": rounded((frame - origin) * spf),
-                             "v": [rounded(x), rounded(y), rounded(z)]})
+                             "v": [rounded(x), rounded(y), rounded(z)],
+                             "in": [rounded(ix), rounded(iy), rounded(iz)],
+                             "out": [rounded(ox), rounded(oy), rounded(oz)]})
             channels.append({"target": "translation",
                              "interpolation": built["interpolation"],
                              "keys": keys})
@@ -183,13 +281,11 @@ def build_clip(obj, scene, warnings):
         built = channel_from_fcurves("scale", scale, spf, 3, warnings, obj.name)
         if built:
             keys = []
-            for frame, values in built["keys"]:
-                # Scale is a magnitude per axis, so it is reordered like a
-                # position but never negated: the -y of the axis change would
-                # turn a scale into a mirror.
+            for frame, values, incoming, outgoing in built["keys"]:
                 keys.append({"t": rounded((frame - origin) * spf),
-                             "v": [rounded(values[0]), rounded(values[2]),
-                                   rounded(values[1])]})
+                             "v": [rounded(values[0]), rounded(values[2]), rounded(values[1])],
+                             "in": [rounded(incoming[0]), rounded(incoming[2]), rounded(incoming[1])],
+                             "out": [rounded(outgoing[0]), rounded(outgoing[2]), rounded(outgoing[1])]})
             channels.append({"target": "scale",
                              "interpolation": built["interpolation"],
                              "keys": keys})
@@ -200,12 +296,17 @@ def build_clip(obj, scene, warnings):
         built = channel_from_fcurves("rotation", quat, spf, 4, warnings, obj.name)
         if built:
             keys = []
-            for frame, values in built["keys"]:
-                # Blender stores quaternions w-first.
+            for frame, values, incoming, outgoing in built["keys"]:
                 w, x, y, z = values
                 qx, qy, qz = to_y_up(x, y, z)
+                iw, ix, iy, iz = incoming
+                ow, ox, oy, oz = outgoing
+                qix, qiy, qiz = to_y_up(ix, iy, iz)
+                qox, qoy, qoz = to_y_up(ox, oy, oz)
                 keys.append({"t": rounded((frame - origin) * spf),
-                             "v": [rounded(qx), rounded(qy), rounded(qz), rounded(w)]})
+                             "v": [rounded(qx), rounded(qy), rounded(qz), rounded(w)],
+                             "in": [rounded(qix), rounded(qiy), rounded(qiz), rounded(iw)],
+                             "out": [rounded(qox), rounded(qoy), rounded(qoz), rounded(ow)]})
             channels.append({"target": "rotation",
                              "interpolation": built["interpolation"], "keys": keys})
     elif euler:
@@ -215,11 +316,21 @@ def build_clip(obj, scene, warnings):
             keys = []
             mode = obj.rotation_mode if obj.rotation_mode in {
                 "XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"} else "XYZ"
-            for frame, values in built["keys"]:
-                q = mathutils.Euler((values[0], values[1], values[2]), mode).to_quaternion()
-                qx, qy, qz = to_y_up(q.x, q.y, q.z)
+            step = 0.01
+            for frame, values, _incoming, _outgoing in built["keys"]:
+                here = euler_quaternion(euler, frame, mode)
+                before = align(euler_quaternion(euler, frame - step, mode), here)
+                after = align(euler_quaternion(euler, frame + step, mode), here)
+                scale_factor = 1.0 / (step * spf)
+                incoming = [(here[i] - before[i]) * scale_factor for i in range(4)]
+                outgoing = [(after[i] - here[i]) * scale_factor for i in range(4)]
+                qx, qy, qz = to_y_up(here[0], here[1], here[2])
+                ix, iy, iz = to_y_up(incoming[0], incoming[1], incoming[2])
+                ox, oy, oz = to_y_up(outgoing[0], outgoing[1], outgoing[2])
                 keys.append({"t": rounded((frame - origin) * spf),
-                             "v": [rounded(qx), rounded(qy), rounded(qz), rounded(q.w)]})
+                             "v": [rounded(qx), rounded(qy), rounded(qz), rounded(here[3])],
+                             "in": [rounded(ix), rounded(iy), rounded(iz), rounded(incoming[3])],
+                             "out": [rounded(ox), rounded(oy), rounded(oz), rounded(outgoing[3])]})
             channels.append({"target": "rotation",
                              "interpolation": built["interpolation"], "keys": keys})
 
@@ -230,7 +341,12 @@ def build_clip(obj, scene, warnings):
     for channel in channels:
         for key in channel["keys"]:
             duration = max(duration, key["t"])
-    return {"name": action.name, "duration": rounded(duration), "channels": channels}
+
+    clip = {"name": action.name, "duration": rounded(duration), "channels": channels}
+    reference = sample_reference(grouped, scene, spf, origin, duration)
+    if reference:
+        clip["reference"] = reference
+    return clip
 
 
 def write_obj(obj, depsgraph, path, material_name):
@@ -295,26 +411,93 @@ def write_obj(obj, depsgraph, path, material_name):
         evaluated.to_mesh_clear()
 
 
-def write_mtl(material, path):
-    diffuse = (0.8, 0.8, 0.8)
-    if material and material.use_nodes:
-        for node in material.node_tree.nodes:
-            if node.type == "BSDF_PRINCIPLED":
-                base = node.inputs.get("Base Color")
-                if base is not None:
-                    diffuse = tuple(base.default_value[:3])
-                break
-    elif material:
-        diffuse = tuple(material.diffuse_color[:3])
+def linked_image(socket):
+    if not socket or not socket.is_linked:
+        return None
+    node = socket.links[0].from_node
+    if node.type != "TEX_IMAGE" or not node.image:
+        return None
+    return node.image
+
+
+def principled_surface(material):
+    """Base colour, metallic, roughness and the base-colour image, if any."""
+    surface = {"diffuse": (0.8, 0.8, 0.8), "metallic": 0.0,
+               "roughness": 0.5, "texture": None}
+    if not material:
+        return surface
+    if not getattr(material, "node_tree", None):
+        surface["diffuse"] = tuple(material.diffuse_color[:3])
+        return surface
+
+    for node in material.node_tree.nodes:
+        if node.type != "BSDF_PRINCIPLED":
+            continue
+        base = node.inputs.get("Base Color")
+        if base is not None:
+            surface["diffuse"] = tuple(base.default_value[:3])
+            surface["texture"] = linked_image(base)
+        for name, key in (("Metallic", "metallic"), ("Roughness", "roughness")):
+            socket = node.inputs.get(name)
+            if socket is not None:
+                surface[key] = float(socket.default_value)
+        break
+    return surface
+
+
+def write_mtl(material, path, out_directory):
+    surface = principled_surface(material)
 
     lines = ["# exported by ae3d_export.py v%d" % EXPORTER_VERSION,
              "newmtl %s" % material.name,
-             "Kd %.6f %.6f %.6f" % tuple(rounded(c) for c in diffuse),
+             "Kd %.6f %.6f %.6f" % tuple(rounded(c) for c in surface["diffuse"]),
              "Ka 0.000000 0.000000 0.000000",
              "Ks 0.500000 0.500000 0.500000",
-             "Ns 50.000000"]
+             "Ns 50.000000",
+             "Pm %.6f" % rounded(surface["metallic"]),
+             "Pr %.6f" % rounded(surface["roughness"])]
+
+    texture = surface["texture"]
+    written_texture = None
+    if texture is not None:
+        written_texture = export_image(texture, out_directory)
+        if written_texture:
+            lines.append("map_Kd %s" % written_texture)
+
     with open(path, "w", newline="\n") as handle:
         handle.write("\n".join(lines) + "\n")
+    return written_texture
+
+
+def export_image(image, out_directory):
+    """Copies the image beside the material under a name the MTL can name.
+
+    Packed and generated images are written out; a file on disk is copied. An
+    image that cannot be resolved is skipped rather than named, because an MTL
+    pointing at a file that is not there loads as an untextured material with
+    no explanation.
+    """
+    name = os.path.basename(image.filepath_from_user()) if image.filepath else ""
+    if not name:
+        name = "%s.png" % image.name
+    if not os.path.splitext(name)[1]:
+        name += ".png"
+    destination = os.path.join(out_directory, name)
+
+    try:
+        if image.packed_file or not image.filepath:
+            image.file_format = "PNG"
+            image.save_render(destination)
+        else:
+            source = bpy.path.abspath(image.filepath_from_user())
+            if not os.path.exists(source):
+                return None
+            if os.path.abspath(source) != os.path.abspath(destination):
+                with open(source, "rb") as src, open(destination, "wb") as dst:
+                    dst.write(src.read())
+    except RuntimeError:
+        return None
+    return os.path.basename(destination)
 
 
 def file_hash(path):
@@ -370,8 +553,10 @@ def main(argv):
         files = {"mesh": os.path.basename(obj_path)}
         if material:
             mtl_path = os.path.join(args.out, stem + ".mtl")
-            write_mtl(material, mtl_path)
+            texture = write_mtl(material, mtl_path, args.out)
             files["material"] = os.path.basename(mtl_path)
+            if texture:
+                files["texture"] = texture
 
         clip = build_clip(obj, scene, warnings)
         if clip:

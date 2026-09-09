@@ -55,10 +55,7 @@ main() {
     check("the manifest records its source", assets.manifest_source(m) == "spin.blend")
     check("the manifest records the Blender it came from", assets.manifest_blender(m) != "")
 
-    // The exporter resampled Bezier easing and said so. That warning is a fact
-    // about the asset, and it has to survive into whatever loads it rather than
-    // ending in a console someone did not keep.
-    check("the exporter's warnings came through", assets.manifest_warning_count(m) > 0)
+    check("a faithful export has nothing to warn about", assets.manifest_warning_count(m) == 0)
 
     spinner = assets.manifest_find_by_object(m, "Spinner")
     check("the animated object is in the manifest", spinner != null)
@@ -99,11 +96,18 @@ main() {
               core.mesh_index_count(model.mesh) == assets.entry_triangles(spinner) * 3)
     }
 
-    // --- the clip -------------------------------------------------------
     clip = assets.entry_load_clip(m, spinner)
     check("the clip loads", clip != null)
     if clip != null {
         check("both channels came through", anim.clip_channel_count(clip) == 2)
+
+        // The exporter recorded what Blender itself evaluates the curves to.
+        // Reproducing those values is the whole claim of the animation half of
+        // the pipeline, and Blender keys with Bezier easing by default.
+        error = assets.clip_reference_error("tests/fixtures/exported/Spinner.anim.json", clip)
+        check("the asset carries Blender's own samples", error >= 0.0)
+        check("the engine reproduces Blender's curve to within 0.0005", error < 0.0005)
+        println("   reference error: ${error}")
         check_near("the clip is one second long", anim.clip_duration(clip), 1.0)
 
         rotation = null

@@ -30,11 +30,11 @@ exports (
     // made their calls resolve to a constructor and stop compiling.
     Key, AnimChannel, Clip, Player,
     TRANSLATION, ROTATION, SCALE,
-    STEP, LINEAR,
+    STEP, LINEAR, CUBIC,
     clip_new, clip_free, clip_add_channel, clip_channel_count, clip_channel,
     clip_name, clip_duration,
     channel_new, channel_free, channel_add_key, channel_key_count, channel_key,
-    channel_target, channel_interpolation, channel_duration,
+    channel_target, channel_interpolation, channel_duration, channel_add_cubic_key,
     sample_vec3, sample_quat,
     player_new, player_free, player_clip, player_time, player_set_time,
     player_speed, player_set_speed, player_looping, player_set_looping,
@@ -53,6 +53,7 @@ const SCALE       = 2
 // How a value between two keys is found.
 const STEP   = 0
 const LINEAR = 1
+const CUBIC  = 2
 
 // One keyframe. Four components because a rotation needs four and a vector
 // ignores the fourth; a key per type would double the code to save four bytes
@@ -63,6 +64,14 @@ struct Key {
     y: float
     z: float
     w: float
+    in_x: float
+    in_y: float
+    in_z: float
+    in_w: float
+    out_x: float
+    out_y: float
+    out_z: float
+    out_w: float
 }
 
 struct AnimChannel {
@@ -144,6 +153,23 @@ channel_add_key(c: *AnimChannel, time: float, x: float, y: float, z: float, w: f
     key.w = w
     list.add_raw(c.keys, key as ptr)
     if time > c.duration { c.duration = time }
+    return true
+}
+
+channel_add_cubic_key(c: *AnimChannel, time: float,
+                      x: float, y: float, z: float, w: float,
+                      ix: float, iy: float, iz: float, iw: float,
+                      ox: float, oy: float, oz: float, ow: float) -> bool {
+    if !channel_add_key(c, time, x, y, z, w) { return false }
+    key = list.get_raw(c.keys, list.size(c.keys) - 1) as *Key
+    key.in_x = ix
+    key.in_y = iy
+    key.in_z = iz
+    key.in_w = iw
+    key.out_x = ox
+    key.out_y = oy
+    key.out_z = oz
+    key.out_w = ow
     return true
 }
 
@@ -278,6 +304,18 @@ blend_at(c: *AnimChannel, index: int, t: float) -> float {
     return u
 }
 
+// Cubic Hermite. h00 and h01 weight the endpoints, h10 and h11 the tangents,
+// which are slopes in value per second and so are scaled by the span.
+hermite(p0: float, m0: float, p1: float, m1: float, u: float, span: float) -> float {
+    uu = u * u
+    uuu = uu * u
+    h00 = 2.0 * uuu - 3.0 * uu + 1.0
+    h10 = uuu - 2.0 * uu + u
+    h01 = 0.0 - 2.0 * uuu + 3.0 * uu
+    h11 = uuu - uu
+    return h00 * p0 + h10 * span * m0 + h01 * p1 + h11 * span * m1
+}
+
 sample_vec3(c: *AnimChannel, t: float) -> Vec3 {
     if c == null { return core.vec3(0.0, 0.0, 0.0) }
     index = span_at(c, t)
@@ -289,6 +327,12 @@ sample_vec3(c: *AnimChannel, t: float) -> Vec3 {
 
     b = list.get_raw(c.keys, index + 1) as *Key
     u = blend_at(c, index, t)
+    if c.interpolation == CUBIC {
+        span = b.time - a.time
+        return core.vec3(hermite(a.x, a.out_x, b.x, b.in_x, u, span),
+                         hermite(a.y, a.out_y, b.y, b.in_y, u, span),
+                         hermite(a.z, a.out_z, b.z, b.in_z, u, span))
+    }
     return core.v3_lerp(core.vec3(a.x, a.y, a.z), core.vec3(b.x, b.y, b.z), u)
 }
 
@@ -303,6 +347,16 @@ sample_quat(c: *AnimChannel, t: float) -> Quat {
 
     b = list.get_raw(c.keys, index + 1) as *Key
     u = blend_at(c, index, t)
+
+    if c.interpolation == CUBIC {
+        span = b.time - a.time
+        return core.quat_normalize(Quat {
+            x: hermite(a.x, a.out_x, b.x, b.in_x, u, span),
+            y: hermite(a.y, a.out_y, b.y, b.in_y, u, span),
+            z: hermite(a.z, a.out_z, b.z, b.in_z, u, span),
+            w: hermite(a.w, a.out_w, b.w, b.in_w, u, span)
+        })
+    }
 
     // Normalised lerp along the shorter arc. q and -q are the same rotation, so
     // without the sign check a pair that happens to be stored on opposite sides

@@ -29,7 +29,7 @@ exports (
     entry_id, entry_object, entry_mesh, entry_material, entry_animation,
     entry_vertices, entry_triangles,
     entry_load_model, entry_load_clip,
-    clip_load, last_error,
+    clip_load, clip_reference_error, last_error,
     Provenance, provenance_record, provenance_for, provenance_by_id,
     provenance_by_object, provenance_count, provenance_at, provenance_model,
     provenance_id, provenance_object, provenance_source, provenance_mesh_file,
@@ -349,7 +349,14 @@ target_of(name: string) -> int {
 
 interpolation_of(name: string) -> int {
     if name == "STEP" { return anim.STEP }
+    if name == "CUBIC" { return anim.CUBIC }
     return anim.LINEAR
+}
+
+component(values: ptr, index: int) -> float {
+    if values == null { return 0.0 }
+    if index >= json.array_size(values) { return 0.0 }
+    return json.get_number(json.array_get_raw(values, index))
 }
 
 // The first clip in the file. The format carries a list because Blender can
@@ -393,18 +400,15 @@ clip_load(path: string) -> *Clip {
                     key = json.array_get_raw(keys, k)
                     t = json.get_number(json.object_get_raw(key, "t"))
                     values = json.object_get_raw(key, "v")
-                    x = 0.0
-                    y = 0.0
-                    z = 0.0
-                    w = 0.0
-                    if values != null {
-                        size = json.array_size(values)
-                        if size > 0 { x = json.get_number(json.array_get_raw(values, 0)) }
-                        if size > 1 { y = json.get_number(json.array_get_raw(values, 1)) }
-                        if size > 2 { z = json.get_number(json.array_get_raw(values, 2)) }
-                        if size > 3 { w = json.get_number(json.array_get_raw(values, 3)) }
-                    }
-                    anim.channel_add_key(track, t, x, y, z, w)
+                    incoming = json.object_get_raw(key, "in")
+                    outgoing = json.object_get_raw(key, "out")
+                    anim.channel_add_cubic_key(track, t,
+                        component(values, 0), component(values, 1),
+                        component(values, 2), component(values, 3),
+                        component(incoming, 0), component(incoming, 1),
+                        component(incoming, 2), component(incoming, 3),
+                        component(outgoing, 0), component(outgoing, 1),
+                        component(outgoing, 2), component(outgoing, 3))
                     k = k + 1
                 }
             }
@@ -553,4 +557,68 @@ provenance_expected_vertices(p: *Provenance) -> int {
 provenance_expected_triangles(p: *Provenance) -> int {
     if p == null { return 0 }
     return p.expected_triangles
+}
+
+// Largest disagreement between the engine's sampler and the values Blender
+// itself produced, which the exporter recorded alongside the keys. Negative
+// when the asset carries no reference to check against.
+clip_reference_error(path: string, clip: *Clip) -> float {
+    root = read_json(path)
+    if root == null { return 0.0 - 1.0 }
+
+    clips = json.object_get_raw(root, "clips")
+    if clips == null || json.array_size(clips) == 0 {
+        json.free(root)
+        return 0.0 - 1.0
+    }
+    reference = json.object_get_raw(json.array_get_raw(clips, 0), "reference")
+    if reference == null {
+        json.free(root)
+        return 0.0 - 1.0
+    }
+
+    worst = 0.0
+    channels = anim.clip_channel_count(clip)
+    i = 0
+    while i < channels {
+        track = anim.clip_channel(clip, i)
+        rows = json.object_get_raw(reference, target_name(anim.channel_target(track)))
+        if rows != null {
+            r = 0
+            count = json.array_size(rows)
+            while r < count {
+                row = json.array_get_raw(rows, r)
+                t = json.get_number(json.object_get_raw(row, "t"))
+                want = json.object_get_raw(row, "v")
+                if anim.channel_target(track) == anim.ROTATION {
+                    turn = anim.sample_quat(track, t)
+                    worst = widest(worst, turn.x - component(want, 0))
+                    worst = widest(worst, turn.y - component(want, 1))
+                    worst = widest(worst, turn.z - component(want, 2))
+                    worst = widest(worst, turn.w - component(want, 3))
+                } else {
+                    shift = anim.sample_vec3(track, t)
+                    worst = widest(worst, shift.x - component(want, 0))
+                    worst = widest(worst, shift.y - component(want, 1))
+                    worst = widest(worst, shift.z - component(want, 2))
+                }
+                r = r + 1
+            }
+        }
+        i = i + 1
+    }
+    json.free(root)
+    return worst
+}
+
+widest(worst: float, delta: float) -> float {
+    if delta < 0.0 { delta = 0.0 - delta }
+    if delta > worst { return delta }
+    return worst
+}
+
+target_name(target: int) -> string {
+    if target == anim.ROTATION { return "rotation" }
+    if target == anim.SCALE { return "scale" }
+    return "translation"
 }
