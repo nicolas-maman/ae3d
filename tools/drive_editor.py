@@ -310,6 +310,52 @@ def main():
                   "%d saved, %d after adding, %d after loading"
                   % (saved_rows, grew, loaded))
 
+            # A value has to survive the file, not just the row count. It is
+            # changed after saving on purpose: left alone, it would come back
+            # whatever load did, and the check would only be proving that
+            # memory keeps its contents.
+            caps = [w for w in tree(args.port).values()
+                    if w["type"] == "text" and w["text"].strip() == "wave height"]
+            if caps:
+                readout = [w for w in tree(args.port).values()
+                           if w["parent"] == caps[0]["parent"] and w["type"] == "text"
+                           and w["id"] != caps[0]["id"]]
+                later = sorted([w for w in tree(args.port).values()
+                                if w["type"] == "slider" and w["id"] > caps[0]["parent"]],
+                               key=lambda w: w["id"])
+                if readout and later:
+                    # Select the water first. A water row applies to whichever
+                    # water is selected, and after a load the selection is
+                    # elsewhere: moving the slider then updates the readout and
+                    # reaches no simulation at all, which is exactly how the
+                    # first version of this check fooled itself.
+                    for row in sorted(rows_under(tree(args.port), scene),
+                                      key=lambda w: w["id"]):
+                        if row_name(tree(args.port), row) == "water":
+                            post(args.port, "/widget/%d/click" % row["id"])
+                            time.sleep(0.8)
+                            break
+                    post(args.port, "/widget/%d/set_value?v=9.25" % later[0]["id"])
+                    time.sleep(0.9)
+                    post(args.port, "/widget/%d/click" % save)
+                    time.sleep(1.5)
+                    post(args.port, "/widget/%d/set_value?v=3.0" % later[0]["id"])
+                    time.sleep(0.9)
+                    moved = tree(args.port)[readout[0]["id"]]["text"].strip()
+                    post(args.port, "/widget/%d/click" % load)
+                    time.sleep(2.5)
+                    water_rows = rows_under(tree(args.port), scene)
+                    water_rows.sort(key=lambda w: w["id"])
+                    for row in water_rows:
+                        if row_name(tree(args.port), row) == "water":
+                            post(args.port, "/widget/%d/click" % row["id"])
+                            time.sleep(0.9)
+                            break
+                    restored = tree(args.port)[readout[0]["id"]]["text"].strip()
+                    check("a setting survives the scene file",
+                          moved == "3.00" and restored == "9.25",
+                          "changed to %s, came back as %s" % (moved, restored))
+
             before_delete = len(rows_under(tree(args.port), scene))
             post(args.port, "/widget/%d/click" % delete)
             time.sleep(1.0)
