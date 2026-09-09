@@ -37,7 +37,7 @@ exports (
     model_clone, model_set_casts_shadow,
     model_set_position, model_set_scale, model_set_rotation, model_rotate,
     model_update_matrix, model_recalculate_bounds, model_mark_dirty, model_set_diffuse,
-    model_set_mesh,
+    model_set_mesh, model_disable_instancing,
     model_set_specular, model_set_pbr, model_set_exposure, model_set_alpha,
     model_set_texture, model_set_shader, model_set_name, model_set_source_path,
     material_set_texture_path, material_set_name, light_set_name, camera_set_name, text,
@@ -1107,6 +1107,25 @@ model_update_matrix(m: *Model) {
     // Whether a model's bounds match where it is cannot depend on a rendering
     // option: picking reads them too, and a rotation used to leave them behind
     // wherever culling was off.
+    model_recalculate_bounds(m)
+}
+
+// Stop a model being instanced, releasing the instance store with it. The
+// counterpart of model_enable_instancing, for a model that had many copies of
+// one mesh and now has a single mesh of its own: a terrain that was blocks and
+// is now a surface.
+//
+// CRITICAL: same rule as model_set_mesh. The renderers give an instanced model
+// a vertex array of its own and a shared one otherwise, decided when the model
+// is added, so a model that changes between the two while it is in a scene has
+// to be removed from the backend and added again around this.
+model_disable_instancing(m: *Model) {
+    if m == null || !m.is_instanced { return }
+    if m.instances != null { ae3d_inst_destroy(m.instances) }
+    m.instances = null
+    m.is_instanced = false
+    m.instances_updated = true
+    m.instance_colors_updated = true
     model_recalculate_bounds(m)
 }
 

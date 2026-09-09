@@ -45,9 +45,17 @@ produces is measured without a window in `tests/test_terrain.ae`: hills have
 more relief than plains, a desert is smoother than both, and caves are the only
 one with rock over open space.
 
-Changing the shape or the seed fills the same world again and rebuilds the
-instances on the model that is already there, so the object keeps its place in
-the scene and its place in the undo history.
+A terrain is drawn as **blocks** or as a **smooth** surface. Blocks are a cube
+per filled cell; smooth meshes the same field into one surface. Voxels are one
+way of meshing a terrain rather than what a terrain is, and both come from the
+same world, the same seed and the same five shapes.
+
+Changing the shape, the seed or the style fills the same world again and gives
+the model that is already there its new geometry, so the object keeps its place
+in the scene and its place in the undo history. The renderers decide a model's
+buffers when it is added, so the model leaves the backend and comes back around
+the change; `core.model_set_mesh` and `core.model_disable_instancing` say so
+where they are defined.
 
 **Assets** lists the meshes under `resources/obj`. Clicking one loads it into the
 scene and frames it.
