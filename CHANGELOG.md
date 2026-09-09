@@ -678,6 +678,28 @@ First working engine.
 
 ### Editor
 
+- More than one object can be selected. A click selects one, shift or command
+  adds to the selection, and an edit reaches everything in it: the property
+  paths have always written to the set, and what was missing was any way to put
+  a second thing in it. The toolkit could not report a modifier until
+  aether-lang-dev/aether-ui#99, so a plain click could not replace a selection
+  the way every editor expects.
+
+  The selected flag lives in the slot that already holds each object's script.
+  A fourth list beside the models, the components and the scripts would be a
+  fourth thing to keep in step, and those three going out of step has already
+  caused one bug.
+
+- The row callback no longer fights the editor. It fires both for a person's
+  click and for the editor moving the highlight itself, and the second case
+  read no modifier held and replaced the selection that had just been made.
+
+- The viewport is drawn by the frame timer alone. A property change repainted
+  it by hand, rate-capped, because a timer scheduled in the default mode did
+  not fire during a drag (aether-lang-dev/aether-ui#97, fixed upstream): the
+  viewport stopped the moment you grabbed the control meant to move it.
+  Measured through a rapid drag, 62 fps before and after.
+
 - A script can set itself up. `script_start` runs once when a script is
   attached, on the object it was given, which is what a script that needs to
   know the size or place it started from has to have: measuring it every frame

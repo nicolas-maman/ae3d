@@ -367,6 +367,13 @@ check_editor_run() {
         # painted looks exactly like one showing a dark material.
         fail "$name (the colour chip is not the material's colour)"
         sed 's/^/        /' "$report"
+    elif [ "$(sed -n 's/^unreached_by_edit //p' "$report")" != "0" ]; then
+        # An edit reaches everything selected, not just the row the inspector
+        # happens to be showing. The property paths always wrote to the set;
+        # nothing could put two things in it until the toolkit could report a
+        # modifier, so nothing had ever checked the second one was written to.
+        fail "$name (an edit did not reach every selected object)"
+        sed 's/^/        /' "$report"
     elif [ "$(sed -n 's/^unundone_scripts //p' "$report")" != "0" ]; then
         # Attaching a behaviour that records nothing leaves the next undo to
         # step back through whatever came before it, the same fault the gizmo
