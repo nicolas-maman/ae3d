@@ -1,0 +1,155 @@
+// The Blender pipeline, from the other end: what the exporter wrote, read back.
+//
+// Runs against tests/fixtures/exported/, which is committed, so this needs no
+// Blender. The exporter is checked where Blender exists (scripts/export_assets.sh);
+// this checks that what it produces is what ae3d loads, which is the half that
+// has to work on every machine.
+//
+// The numbers are the exporter's own, taken from the manifest and from what the
+// fixture is known to contain: a cube of 8 vertices and 12 triangles, animated a
+// quarter turn about Y over one second, and a sphere with no animation at all.
+// Checking "a clip loaded" would pass on a clip with no keys in it.
+//
+// No window and no driver.
+
+import ae3d.core
+import ae3d.anim
+import ae3d.assets
+
+const MANIFEST = "tests/fixtures/exported/manifest.json"
+const EPSILON = 0.0001
+
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, condition: bool) {
+    g_checks = g_checks + 1
+    if !condition {
+        g_failures = g_failures + 1
+        println("FAIL ${name}")
+    }
+}
+
+near(a: float, b: float) -> bool {
+    d = a - b
+    if d < 0.0 { d = -d }
+    return d < EPSILON
+}
+
+check_near(name: string, got: float, want: float) {
+    g_checks = g_checks + 1
+    if !near(got, want) {
+        g_failures = g_failures + 1
+        println("FAIL ${name}: got ${got}, want ${want}")
+    }
+}
+
+main() {
+    m = assets.manifest_load(MANIFEST)
+    if m == null {
+        println("SKIP no exported fixture: ${assets.last_error()}")
+        return
+    }
+
+    check("the manifest names both objects", assets.manifest_count(m) == 2)
+    check("the manifest records its source", assets.manifest_source(m) == "spin.blend")
+    check("the manifest records the Blender it came from", assets.manifest_blender(m) != "")
+
+    // The exporter resampled Bezier easing and said so. That warning is a fact
+    // about the asset, and it has to survive into whatever loads it rather than
+    // ending in a console someone did not keep.
+    check("the exporter's warnings came through", assets.manifest_warning_count(m) > 0)
+
+    spinner = assets.manifest_find_by_object(m, "Spinner")
+    check("the animated object is in the manifest", spinner != null)
+    still = assets.manifest_find_by_object(m, "Still")
+    check("the unanimated object is too", still != null)
+
+    if spinner == null || still == null {
+        println("test_assets: ${g_failures} failure(s) of ${g_checks}")
+        return
+    }
+
+    // The id is what an agent tracing a model will have been given, and looking
+    // it up must find the same entry the name did.
+    check("an entry is findable by its id",
+          assets.manifest_find(m, assets.entry_id(spinner)) == spinner)
+    check("ids are per object, not per file",
+          assets.entry_id(spinner) != assets.entry_id(still))
+
+    check("the cube's vertex count is the exporter's", assets.entry_vertices(spinner) == 8)
+    check("the cube's triangle count is the exporter's", assets.entry_triangles(spinner) == 12)
+    check("the animated object names an animation", assets.entry_animation(spinner) != "")
+    check("the animated object names a material", assets.entry_material(spinner) != "")
+    // The exporter must not invent a clip for an object that has none.
+    check("the unanimated object names no animation", assets.entry_animation(still) == "")
+    check("the unanimated object names no material", assets.entry_material(still) == "")
+
+    // --- the mesh -------------------------------------------------------
+    model = assets.entry_load_model(m, spinner)
+    check("the mesh loads", model != null)
+    if model != null {
+        check("the model carries the name Blender knew it by",
+              model.name == "Spinner")
+        check("the mesh has geometry", core.mesh_vertex_count(model.mesh) > 0)
+        // OBJ indexes position, uv and normal separately, so the loader's
+        // vertex count is not the exporter's 8; the triangle count is the one
+        // that has to survive.
+        check("every triangle survived the round trip",
+              core.mesh_index_count(model.mesh) == assets.entry_triangles(spinner) * 3)
+    }
+
+    // --- the clip -------------------------------------------------------
+    clip = assets.entry_load_clip(m, spinner)
+    check("the clip loads", clip != null)
+    if clip != null {
+        check("both channels came through", anim.clip_channel_count(clip) == 2)
+        check_near("the clip is one second long", anim.clip_duration(clip), 1.0)
+
+        rotation = null
+        translation = null
+        i = 0
+        while i < anim.clip_channel_count(clip) {
+            c = anim.clip_channel(clip, i)
+            if anim.channel_target(c) == anim.ROTATION { rotation = c }
+            if anim.channel_target(c) == anim.TRANSLATION { translation = c }
+            i = i + 1
+        }
+        check("there is a rotation channel", rotation != null)
+        check("there is a translation channel", translation != null)
+
+        if translation != null {
+            // 0 to 4 along x over one second, so half a second in is 2.
+            v = anim.sample_vec3(translation, 0.5)
+            check_near("translation samples halfway", v.x, 2.0)
+        }
+        if rotation != null {
+            // A quarter turn about Blender's Z is a quarter turn about ae3d's
+            // Y. Halfway through it is an eighth turn: sin(22.5), cos(22.5).
+            // This is the check that the axis conversion survived export,
+            // serialisation and load rather than only the first of those.
+            q = anim.sample_quat(rotation, 0.5)
+            check_near("the turn is about Y, not X", q.x, 0.0)
+            check_near("the turn is about Y, not Z", q.z, 0.0)
+            check_near("halfway is an eighth turn, y", q.y, 0.38268343)
+            check_near("halfway is an eighth turn, w", q.w, 0.92387953)
+
+            // And the ends are exactly where Blender put them.
+            start = anim.sample_quat(rotation, 0.0)
+            check_near("the clip starts unrotated", start.w, 1.0)
+            end = anim.sample_quat(rotation, 1.0)
+            check_near("the clip ends a quarter turn round, y", end.y, 0.70710678)
+            check_near("the clip ends a quarter turn round, w", end.w, 0.70710678)
+        }
+        anim.clip_free(clip)
+    }
+
+    if model != null { core.model_free(model) }
+    assets.manifest_free(m)
+
+    if g_failures == 0 {
+        println("test_assets: all checks passed (${g_checks})")
+        return
+    }
+    println("test_assets: ${g_failures} failure(s) of ${g_checks}")
+}

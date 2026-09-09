@@ -1,0 +1,409 @@
+// The engine end of the Blender pipeline: manifests, exported clips, and the
+// identity that ties them to what the exporter wrote.
+//
+// tools/blender/ae3d_export.py writes an OBJ, an MTL and a .anim.json per
+// object, plus one manifest naming them all. This reads that side. The two
+// halves are deliberately a file format apart rather than a shared library:
+// Blender's Python and ae3d's Aether cannot link, and a documented file is a
+// thing both can be tested against on its own.
+//
+// The manifest is the first link of the chain #181 has to follow. Every entry
+// carries the id the exporter derived from the source file and the object name,
+// so a model in a running scene can be matched back to the Blender object it
+// came from -- and, when it is wrong, the stage it stopped being right at.
+
+import std.heap
+import std.list
+import std.string
+import std.json
+import std.fs
+import ae3d.core
+import ae3d.anim
+import ae3d.loader
+
+exports (
+    Entry, Manifest,
+    manifest_load, manifest_free, manifest_count, manifest_entry,
+    manifest_find, manifest_find_by_object, manifest_source, manifest_blender,
+    manifest_warning_count, manifest_warning,
+    entry_id, entry_object, entry_mesh, entry_material, entry_animation,
+    entry_vertices, entry_triangles,
+    entry_load_model, entry_load_clip,
+    clip_load, last_error
+)
+
+// One exported object, as the manifest describes it.
+//
+// The counts are the exporter's own, recorded so a loader can be checked
+// against them: a mesh that arrives with a different triangle count than the
+// manifest claims has lost something between the two, which is exactly the kind
+// of break #181 exists to localise.
+struct Entry {
+    id: string
+    object: string
+    mesh: string
+    material: string
+    animation: string
+    vertices: int
+    triangles: int
+}
+
+// A warning needs a box: list.add_raw takes a ptr and a string is not one.
+struct Warning {
+    text: string
+}
+
+struct Manifest {
+    directory: string
+    source: string
+    blender: string
+    entries: ptr
+    warnings: ptr
+}
+
+var g_error = ""
+var g_error_owned = false
+
+last_error() -> string { return g_error }
+
+set_error(reason: string, detail: string) {
+    if g_error_owned { string.free(g_error) }
+    g_error = string.concat(reason, detail)
+    g_error_owned = true
+}
+
+read_json(path: string) -> ptr {
+    text, err = fs.read(path)
+    if err != "" {
+        set_error("cannot read ", path)
+        string.free(text)
+        return null
+    }
+    root = json.parse_raw(text)
+    string.free(text)
+    if root == null { set_error("cannot parse ", path) }
+    return root
+}
+
+// A string field, copied. get_string_raw points into the document, and the
+// document is freed before any of this is read again.
+text_field(node: ptr, name: string) -> string {
+    if node == null { return "" }
+    found = json.object_get_raw(node, name)
+    if found == null { return "" }
+    return string.copy(json.get_string_raw(found))
+}
+
+int_field(node: ptr, name: string, fallback: int) -> int {
+    if node == null { return fallback }
+    found = json.object_get_raw(node, name)
+    if found == null { return fallback }
+    return json.get_int(found)
+}
+
+// The directory a path sits in, so files named in a manifest resolve relative
+// to the manifest rather than to wherever the program happens to be running.
+// char_at gives a code point, not a one-character string: 47 is '/' and 92 is
+// '\'. Same shape as loader.directory_of, deliberately -- two spellings of one
+// rule is how they drift.
+directory_of(path: string) -> string {
+    cut = 0 - 1
+    i = 0
+    length = string.length(path)
+    while i < length {
+        c = string.char_at(path, i)
+        if c == 47 || c == 92 { cut = i }
+        i = i + 1
+    }
+    if cut < 0 { return "" }
+    return string.substring(path, 0, cut + 1)
+}
+
+join(directory: string, name: string) -> string {
+    if directory == "" { return string.copy(name) }
+    return string.concat(directory, name)
+}
+
+// --- the manifest -------------------------------------------------------
+
+manifest_load(path: string) -> *Manifest {
+    root = read_json(path)
+    if root == null { return null }
+
+    m = heap.new(Manifest)
+    m.directory = directory_of(path)
+    m.entries = list.new()
+    m.warnings = list.new()
+    m.blender = text_field(root, "blender")
+    m.source = ""
+
+    source = json.object_get_raw(root, "source")
+    if source != null { m.source = text_field(source, "name") }
+
+    // Every warning the exporter recorded, carried through rather than left in
+    // a console nobody kept. A clip that was resampled from Bezier is a fact
+    // about the asset, and the place to find it is beside the asset.
+    warnings = json.object_get_raw(root, "warnings")
+    if warnings != null {
+        i = 0
+        count = json.array_size(warnings)
+        while i < count {
+            w = heap.new(Warning)
+            w.text = string.copy(json.get_string_raw(json.array_get_raw(warnings, i)))
+            list.add_raw(m.warnings, w as ptr)
+            i = i + 1
+        }
+    }
+
+    objects = json.object_get_raw(root, "objects")
+    if objects != null {
+        i = 0
+        count = json.array_size(objects)
+        while i < count {
+            node = json.array_get_raw(objects, i)
+            e = heap.new(Entry)
+            e.id = text_field(node, "id")
+            e.object = text_field(node, "object")
+            e.vertices = int_field(node, "vertices", 0)
+            e.triangles = int_field(node, "triangles", 0)
+            e.mesh = ""
+            e.material = ""
+            e.animation = ""
+            files = json.object_get_raw(node, "files")
+            if files != null {
+                e.mesh = text_field(files, "mesh")
+                e.material = text_field(files, "material")
+                e.animation = text_field(files, "animation")
+            }
+            list.add_raw(m.entries, e as ptr)
+            i = i + 1
+        }
+    }
+
+    json.free(root)
+    return m
+}
+
+manifest_free(m: *Manifest) {
+    if m == null { return }
+    if m.entries != null {
+        i = 0
+        count = list.size(m.entries)
+        while i < count {
+            e = list.get_raw(m.entries, i) as *Entry
+            if e != null { heap.free(e) }
+            i = i + 1
+        }
+        list.free(m.entries)
+    }
+    if m.warnings != null {
+        i = 0
+        count = list.size(m.warnings)
+        while i < count {
+            w = list.get_raw(m.warnings, i) as *Warning
+            if w != null { heap.free(w) }
+            i = i + 1
+        }
+        list.free(m.warnings)
+    }
+    heap.free(m)
+}
+
+manifest_count(m: *Manifest) -> int {
+    if m == null { return 0 }
+    return list.size(m.entries)
+}
+
+manifest_entry(m: *Manifest, index: int) -> *Entry {
+    if m == null { return null }
+    if index < 0 || index >= list.size(m.entries) { return null }
+    return list.get_raw(m.entries, index) as *Entry
+}
+
+// By the id the exporter derived from the source file and the object name. That
+// id is what survives a rename of the file on disk, and what an agent tracing a
+// model will have been given.
+manifest_find(m: *Manifest, id: string) -> *Entry {
+    if m == null { return null }
+    i = 0
+    count = list.size(m.entries)
+    while i < count {
+        e = list.get_raw(m.entries, i) as *Entry
+        if e != null && e.id == id { return e }
+        i = i + 1
+    }
+    return null
+}
+
+manifest_find_by_object(m: *Manifest, name: string) -> *Entry {
+    if m == null { return null }
+    i = 0
+    count = list.size(m.entries)
+    while i < count {
+        e = list.get_raw(m.entries, i) as *Entry
+        if e != null && e.object == name { return e }
+        i = i + 1
+    }
+    return null
+}
+
+manifest_source(m: *Manifest) -> string {
+    if m == null { return "" }
+    return m.source
+}
+
+manifest_blender(m: *Manifest) -> string {
+    if m == null { return "" }
+    return m.blender
+}
+
+manifest_warning_count(m: *Manifest) -> int {
+    if m == null { return 0 }
+    return list.size(m.warnings)
+}
+
+manifest_warning(m: *Manifest, index: int) -> string {
+    if m == null { return "" }
+    if index < 0 || index >= list.size(m.warnings) { return "" }
+    w = list.get_raw(m.warnings, index) as *Warning
+    return w.text
+}
+
+entry_id(e: *Entry) -> string {
+    if e == null { return "" }
+    return e.id
+}
+
+entry_object(e: *Entry) -> string {
+    if e == null { return "" }
+    return e.object
+}
+
+entry_mesh(e: *Entry) -> string {
+    if e == null { return "" }
+    return e.mesh
+}
+
+entry_material(e: *Entry) -> string {
+    if e == null { return "" }
+    return e.material
+}
+
+entry_animation(e: *Entry) -> string {
+    if e == null { return "" }
+    return e.animation
+}
+
+entry_vertices(e: *Entry) -> int {
+    if e == null { return 0 }
+    return e.vertices
+}
+
+entry_triangles(e: *Entry) -> int {
+    if e == null { return 0 }
+    return e.triangles
+}
+
+// --- loading what an entry names ----------------------------------------
+
+entry_load_model(m: *Manifest, e: *Entry) -> *Model {
+    if m == null || e == null || e.mesh == "" {
+        set_error("no mesh named for ", "that entry")
+        return null
+    }
+    path = join(m.directory, e.mesh)
+    model = loader.load_obj(path, false)
+    string.free(path)
+    if model == null {
+        set_error("cannot load ", e.mesh)
+        return null
+    }
+    // The name the exporter knew it by, so a scene walked over the channel
+    // reports something a person can match to Blender.
+    core.model_set_name(model, e.object)
+    return model
+}
+
+entry_load_clip(m: *Manifest, e: *Entry) -> *Clip {
+    if m == null || e == null || e.animation == "" { return null }
+    path = join(m.directory, e.animation)
+    clip = clip_load(path)
+    string.free(path)
+    return clip
+}
+
+// --- exported clips -----------------------------------------------------
+
+target_of(name: string) -> int {
+    if name == "rotation" { return anim.ROTATION }
+    if name == "scale" { return anim.SCALE }
+    return anim.TRANSLATION
+}
+
+interpolation_of(name: string) -> int {
+    if name == "STEP" { return anim.STEP }
+    return anim.LINEAR
+}
+
+// The first clip in the file. The format carries a list because Blender can
+// hold several actions per object, and nothing here needs the others yet;
+// reading one and ignoring the rest silently would be the wrong shape to grow
+// from, so the list stays in the format and this takes its head.
+clip_load(path: string) -> *Clip {
+    root = read_json(path)
+    if root == null { return null }
+
+    clips = json.object_get_raw(root, "clips")
+    if clips == null || json.array_size(clips) == 0 {
+        set_error("no clips in ", path)
+        json.free(root)
+        return null
+    }
+
+    node = json.array_get_raw(clips, 0)
+    name = text_field(node, "name")
+    clip = anim.clip_new(name)
+
+    channels = json.object_get_raw(node, "channels")
+    if channels != null {
+        i = 0
+        count = json.array_size(channels)
+        while i < count {
+            channel_node = json.array_get_raw(channels, i)
+            target = text_field(channel_node, "target")
+            mode = text_field(channel_node, "interpolation")
+            channel = anim.channel_new(target_of(target), interpolation_of(mode))
+            string.free(target)
+            string.free(mode)
+
+            keys = json.object_get_raw(channel_node, "keys")
+            if keys != null {
+                k = 0
+                key_count = json.array_size(keys)
+                while k < key_count {
+                    key = json.array_get_raw(keys, k)
+                    t = json.get_number(json.object_get_raw(key, "t"))
+                    values = json.object_get_raw(key, "v")
+                    x = 0.0
+                    y = 0.0
+                    z = 0.0
+                    w = 0.0
+                    if values != null {
+                        size = json.array_size(values)
+                        if size > 0 { x = json.get_number(json.array_get_raw(values, 0)) }
+                        if size > 1 { y = json.get_number(json.array_get_raw(values, 1)) }
+                        if size > 2 { z = json.get_number(json.array_get_raw(values, 2)) }
+                        if size > 3 { w = json.get_number(json.array_get_raw(values, 3)) }
+                    }
+                    anim.channel_add_key(channel, t, x, y, z, w)
+                    k = k + 1
+                }
+            }
+            anim.clip_add_channel(clip, channel)
+            i = i + 1
+        }
+    }
+
+    json.free(root)
+    return clip
+}

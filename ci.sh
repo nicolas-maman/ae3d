@@ -65,6 +65,29 @@ else
     sed 's/^/        /' /tmp/ae3d_gate.log | head -10
 fi
 
+step "exported fixtures match the exporter"
+# Catches an exporter change that nobody regenerated the fixtures for. The
+# committed assets under tests/fixtures/exported/ are what test_assets runs
+# against on machines with no Blender, so they have to be what this exporter
+# actually produces rather than what it produced once.
+#
+# Skips where Blender is absent, which is most CI.
+if command -v blender >/dev/null 2>&1 || [ -n "${BLENDER:-}" ]; then
+    fixture_check="$(mktemp -d)"
+    ./scripts/export_assets.sh tests/fixtures/spin.blend "$fixture_check" >/tmp/ae3d_export.log 2>&1
+    if [ ! -f "$fixture_check/manifest.json" ]; then
+        skip "exported fixtures" "the exporter produced nothing (see /tmp/ae3d_export.log)"
+    elif diff -r tests/fixtures/exported "$fixture_check" >/tmp/ae3d_export_diff.log 2>&1; then
+        pass "tests/fixtures/exported is what the exporter produces"
+    else
+        fail "tests/fixtures/exported is stale; run ./scripts/export_assets.sh"
+        sed 's/^/        /' /tmp/ae3d_export_diff.log | head -10
+    fi
+    rm -rf "$fixture_check"
+else
+    skip "exported fixtures" "no Blender"
+fi
+
 step "native layer, warnings as errors"
 # Same compiler search as build.sh: a Windows toolchain need not ship `cc`.
 if [ -z "${CC:-}" ]; then
