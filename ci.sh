@@ -280,6 +280,50 @@ else
         # exactly as above, which is the point: a scene that drops a component
         # on the way through the file shows up here as a count that fell.
         check_editor_run opengl roundtrip
+
+        # A name the editor shares with the toolkit it imports is bound
+        # differently inside the ui.window block than outside it, silently, and
+        # that is how the Undo button came to step the toolkit's empty stack.
+        if command -v python3 >/dev/null 2>&1; then
+            collide_log="$(mktemp)"
+            if AETHER_UI_ROOT="$UI_ROOT" python3 tools/check_ui_name_collisions.py \
+                    >"$collide_log" 2>&1; then
+                pass "ae3d_editor (names)"
+            else
+                fail "ae3d_editor (names)"
+                sed 's/^/        /' "$collide_log" | head -12
+            fi
+            rm -f "$collide_log"
+        else
+            skip "ae3d_editor (names)" "no python3"
+        fi
+
+        # Everything above reads the report the editor writes about itself, and
+        # that report comes from calling the handlers directly. A button that
+        # cannot be hit, a field whose callback is not wired, a row that does
+        # not respond to a click: all of them pass. So this presses the real
+        # widgets through aether-ui's driver and asks the tree what changed.
+        if ! command -v python3 >/dev/null 2>&1; then
+            skip "ae3d_editor (driver)" "no python3"
+        elif ! have_display; then
+            skip "ae3d_editor (driver)" "no display"
+        else
+            # Both backends. The report checks have always run on each, but
+            # nothing had ever pressed a widget on the Vulkan one, and the
+            # editor's controls reach the renderer through a vtable that only
+            # a real click exercises.
+            for driver_backend in opengl vulkan; do
+                driver_log="$(mktemp)"
+                if python3 tools/drive_editor.py --backend "$driver_backend" \
+                        --port 8797 >"$driver_log" 2>&1; then
+                    pass "ae3d_editor (driver, $driver_backend)"
+                else
+                    fail "ae3d_editor (driver, $driver_backend)"
+                    sed 's/^/        /' "$driver_log" | head -20
+                fi
+                rm -f "$driver_log"
+            done
+        fi
     else
         fail "ae3d_editor (build)"
         sed 's/^/        /' /tmp/ae3d_build.log | head -20

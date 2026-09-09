@@ -15,8 +15,8 @@ import std.list
 import std.fs
 import std.string
 
-extern clock_ns() -> long
 import ae3d.core
+import ae3d.platform
 import ae3d.gl
 import ae3d.vk
 import ae3d.offscreen
@@ -37,7 +37,12 @@ const WINDOW_H = 860
 const ORBIT_SPEED = 0.35
 const ZOOM_STEP = 1.12
 const DRAG_SLOP = 3.0
-const VALUE_COLUMN = 54
+const VALUE_COLUMN = 46
+// The label column, so every row's control starts at the same x whatever the
+// caption says. Ragged control edges are most of what makes a panel look
+// unfinished.
+const LABEL_COLUMN = 92
+const HEX_COLUMN = 64
 // A numeric field, and the coloured axis letter that labels one inside a
 // vector row. Three of them plus their letters and gaps are what sets the
 // inspector's width.
@@ -46,7 +51,17 @@ const VECTOR_FIELD_W = 66
 const AXIS_W = 10
 const BLOOM_THRESHOLD = 0.8
 const BLOOM_INTENSITY = 0.4
-const BUTTON_H = 28
+// Tool buttons, not page buttons. At 28 with the panel's spacing the add and
+// terrain grids took more of the left column than the outliner did, and an
+// editor's panel should give its room to the scene rather than to ten actions
+// that are pressed once each.
+// The viewport's ground. Near black makes a scene look like it is floating in
+// a void rather than standing in a room, and an empty one is the first thing
+// the editor shows.
+const VIEWPORT_R = 0.137
+const VIEWPORT_G = 0.149
+const VIEWPORT_B = 0.176
+const BUTTON_H = 23
 const CONSOLE_LINES = 7
 const VOXEL_SIZE = 4.0
 const WATER_SIZE = 700.0
@@ -118,11 +133,23 @@ var g_probe_action = 0
 var g_probe_primary = 0
 var g_probe_danger = 0
 var g_probe_field = 0
+// The transform-mode buttons on the viewport. The mode was reachable only by
+// pressing W, E or R, which is the convention but not a thing a panel can show
+// you, so nothing on screen said which one was live.
+var g_mode_move = 0
+var g_mode_rotate = 0
+var g_mode_scale = 0
+var g_mode_hint = 0
+// The row widget behind each hierarchy entry, so the selected one can be lit.
+// A list with nothing marked is the same list whatever is selected, and the
+// inspector was the only thing that said which object it was describing.
+var g_hier_rows: ptr = null
 var g_history: ptr = null
 // When the last property edit was recorded. A drag delivers a callback per
 // frame, so edits that stop arriving mean the adjustment is over and the undo
 // step it opened has to close, or the next drag of the same slider extends it.
 var g_last_edit = 0.0
+const STATS_INTERVAL = 0.25
 const EDIT_SETTLE = 0.4
 var g_reported = false
 var g_last_paint = 0.0
@@ -136,6 +163,24 @@ var g_readouts: ptr = null
 // and a number field where it is not. Both arrays are ROWS long and a row has
 // an entry in one of them.
 var g_fields: ptr = null
+// The row each control sits in, so a section can be hidden whole. Hiding the
+// control and its readout leaves the caption behind, and a caption with no
+// control under it is worse than either: the water section read as four
+// stranded words with no heading above them.
+var g_row_frames: ptr = null
+// CRITICAL: a model, its component and its script live at the same index in
+// three lists, and anything that moves a model has to move all three. Removing
+// one from the models alone leaves every component after it answering for the
+// wrong object: deleting a cube made the editor stop believing its water was
+// water, so the inspector hid the water section and update_water drove the
+// wrong simulation.
+//
+// What a detached model takes with it is kept rather than dropped, because an
+// undone delete has to bring back the object's simulation and its script, not
+// a bare mesh.
+var g_detached_models: ptr = null
+var g_detached_components: ptr = null
+var g_detached_scripts: ptr = null
 // The row whose field the user is typing in. Echoing a parsed value back into
 // the field being edited rewrites it under the caret, which is what makes a
 // numeric field impossible to type into.
@@ -161,6 +206,7 @@ var g_frame_limit = 0
 var g_snapshot = ""
 var g_report = ""
 var g_fps = 0.0
+var g_stats_written = 0.0
 var g_last_time = 0.0
 var g_timer = 0
 var g_stage = 0
@@ -469,12 +515,26 @@ focus_selection() {
     say("framed ${core.text(m.name)}")
 }
 
+// What kind of thing a row is, in one character. An editor's outliner says
+// what an object is before you select it; this list said nothing at all, so a
+// water surface and a cube were two words in the same grey.
+row_marker(index: int) -> string {
+    if g_components == null { return "|" }
+    if index < 0 || index >= list.size(g_components) { return "|" }
+    c = list.get_raw(g_components, index) as *Component
+    if c == null { return "|" }
+    if c.kind == behaviour.KIND_WATER { return "~" }
+    if c.kind == behaviour.KIND_VOXEL { return "#" }
+    if c.kind == behaviour.KIND_LIGHT { return "*" }
+    return "|"
+}
+
 row_label(index: int) -> string {
     m = model_at(index)
     if m == null { return "" }
     name = core.text(m.name)
     if name == "" { name = "object ${m.id}" }
-    return "  ${name}"
+    return " ${row_marker(index)}  ${name}"
 }
 
 extern malloc(size: int) -> ptr
@@ -506,6 +566,12 @@ const SCENE_PATH = "build/editor_scene.json"
 slider_handle(index: int) -> int {
     if g_sliders == null || index < 0 || index >= ROWS { return 0 }
     slots = g_sliders as int[]
+    return slots[index]
+}
+
+row_frame(index: int) -> int {
+    if g_row_frames == null || index < 0 || index >= ROWS { return 0 }
+    slots = g_row_frames as int[]
     return slots[index]
 }
 
@@ -549,10 +615,41 @@ release_rows() {
     list.clear(g_rows)
 }
 
+// The selected row carries the accent, the rest the panel's own colour. Set as
+// a colour rather than a class, because the sheet paints a widget when it is
+// built and a class added later does not repaint it.
+paint_selection() {
+    if g_hier_rows == null { return }
+    count = list.size(g_hier_rows)
+    i = 0
+    while i < count {
+        slot = list.get_raw(g_hier_rows, i) as int[]
+        handle = slot[0]
+        if i == g_selected {
+            ui.style_bg_color(handle, 0.153, 0.310, 0.573, 1.0)
+        } else {
+            ui.style_bg_color(handle, 0.145, 0.165, 0.200, 1.0)
+        }
+        i = i + 1
+    }
+}
+
+release_hier_rows() {
+    if g_hier_rows == null { return }
+    count = list.size(g_hier_rows)
+    i = 0
+    while i < count {
+        free(list.get_raw(g_hier_rows, i))
+        i = i + 1
+    }
+    list.clear(g_hier_rows)
+}
+
 rebuild_rows() {
     mark_dirty()
     if g_rows == null { g_rows = list.new() }
     release_rows()
+    release_hier_rows()
     count = 0
     if g_models != null { count = list.size(g_models) }
     i = 0
@@ -561,6 +658,7 @@ rebuild_rows() {
         i = i + 1
     }
     if g_hierarchy != null { ui.listbox_update(g_hierarchy, g_rows) }
+    paint_selection()
 }
 
 // The inspector reads the selected model rather than keeping its own copy, so a
@@ -593,9 +691,9 @@ show_water_section(on: bool) {
     while i < ROWS {
         if is_water_row(i) {
             control = row_control(i)
-            readout = readout_handle(i)
+            frame = row_frame(i)
             if control != 0 { ui.set_hidden(control, hidden_flag(on)) }
-            if readout != 0 { ui.set_hidden(readout, hidden_flag(on)) }
+            if frame != 0 { ui.set_hidden(frame, hidden_flag(on)) }
         }
         i = i + 1
     }
@@ -675,6 +773,7 @@ echo_row(index: int, value: float) {
 select_object(index: int) {
     mark_dirty()
     g_selected = index
+    paint_selection()
     sync_inspector()
 
     if g_hierarchy != null && index >= 0 && !g_syncing {
@@ -714,7 +813,7 @@ remove_selected() {
 
     backend = viewport_backend()
     core.backend_remove_model(&backend, m)
-    list.remove(g_models, g_selected)
+    detach_at(g_selected)
     history.history_record(g_history, history.STEP_REMOVE, m as ptr, 0, 0.0, 0.0)
 
     g_selected = g_selected - 1
@@ -1019,11 +1118,23 @@ settle_layout() {
     // selection, so it came out an empty outline while the readback happily
     // reported the colour it had been given.
     refresh_swatch()
+    refresh_mode_buttons()
     g_layout_settled = true
 }
 
+// CRITICAL: platform.time(), not arithmetic on clock_ns(). The editor used to
+// compute (clock_ns() / 1000000) * 0.001, and measured in place that clock only
+// ever changed in whole seconds: printing the interval between two frames gave
+// 0 for a run of ticks and then 1. So the frame rate read 0 for the life of the
+// program, and delta never left its 0.016 fallback, which meant water and
+// scripts advanced at a fixed step whatever the machine was doing. The same
+// expression on its own keeps the fraction, so the arithmetic alone is not the
+// explanation and it is not worth another guess: platform.time() is a double
+// straight off the monotonic clock, it is what the engine's own loop already
+// uses, and with it the interval reads 0.033, 0.021, 0.014 and the bar reads
+// 62 fps.
 seconds() -> float {
-    return (clock_ns() / 1000000) * 0.001
+    return platform.time()
 }
 
 draw_frame() {
@@ -1031,7 +1142,7 @@ draw_frame() {
 
     settle_layout()
 
-    now = (clock_ns() / 1000000) * 0.001
+    now = seconds()
     delta = 0.016
     if g_last_time > 0.0 {
         elapsed = now - g_last_time
@@ -1095,8 +1206,16 @@ draw_frame() {
 // A scripted run of the edit paths, so undo and redo are checked by exercising
 // them rather than by reading the code. Reported through the same file a
 // bounded run writes, because the run loop has to be ended from outside.
+// CRITICAL: throttled by time, not by a count of frames. A frame count only
+// advances when the viewport is redrawn, and the viewport is not redrawn while
+// nothing changes, so the bar froze on whatever it last managed to write. That
+// was almost always the very first sample, taken before a single interval had
+// been measured, which is why it read 0 fps for the life of the program.
 update_stats(backend: *Backend) {
-    if g_stats == 0 || g_frames % 10 != 0 { return }
+    if g_stats == 0 { return }
+    now = seconds()
+    if g_stats_written > 0.0 && now - g_stats_written < STATS_INTERVAL { return }
+    g_stats_written = now
     ui.set_text(g_stats, "${g_backend_name}   ${(g_fps) as int} fps   ${core.backend_draw_calls(backend)} draws   ${scene_triangles()} tris   ${g_view_w}x${g_view_h}")
 }
 
@@ -1229,7 +1348,7 @@ undone_gizmo_drags() -> int {
         g_gizmo_dragging = false
         history.history_close(g_history)
 
-        undo()
+        undo_step()
 
         if core.abs_of(m.position.x - position.x) > 0.01 ||
            core.abs_of(m.position.y - position.y) > 0.01 ||
@@ -1385,11 +1504,18 @@ limit_from_env() -> int {
 // One row of the inspector: a label, a slider, and a live readout. The slider
 // writes straight through to the selected model, so what is on screen and what
 // the renderer draws are never two copies of the same number.
-undo() {
+// CRITICAL: these must not be called undo and redo. aether-ui exports names of
+// its own for stepping the toolkit's command stack, and inside the ui.window
+// block a bare call to either bound to those rather than to the editor's, so
+// the Undo button stepped an empty stack belonging to the toolkit and did
+// nothing whatever. The report's check calls this from the top level, where the
+// editor's own definition wins, which is why it passed while the button was
+// dead.
+undo_step() {
     replay(history.history_undo(g_history), true)
 }
 
-redo() {
+redo_step() {
     replay(history.history_redo(g_history), false)
 }
 
@@ -1469,9 +1595,46 @@ attach_model(m: *Model) {
     if m == null { return }
     backend = viewport_backend()
     core.backend_add_model(&backend, m)
-    list.add_raw(g_models, m)
+    if !reattach(m as ptr) {
+        list.add_raw(g_models, m)
+        list.add_raw(g_components,
+                     behaviour.component_new(core.text(m.name), behaviour.KIND_MESH, null))
+        list.add_raw(g_scripts, index_handle(SCRIPT_NONE))
+    }
     rebuild_rows()
     select_object(list.size(g_models) - 1)
+}
+
+// Takes the model out of all three lists at once and sets aside what it was
+// carrying, so putting it back is possible.
+detach_at(index: int) {
+    if index < 0 || index >= list.size(g_models) { return }
+    list.add_raw(g_detached_models, list.get_raw(g_models, index))
+    list.add_raw(g_detached_components, list.get_raw(g_components, index))
+    list.add_raw(g_detached_scripts, list.get_raw(g_scripts, index))
+    list.remove(g_models, index)
+    list.remove(g_components, index)
+    list.remove(g_scripts, index)
+}
+
+// Puts back what detach_at set aside. False when the model was never detached,
+// which is a model the caller has to give a component of its own.
+reattach(m: ptr) -> bool {
+    count = list.size(g_detached_models)
+    i = 0
+    while i < count {
+        if list.get_raw(g_detached_models, i) == m {
+            list.add_raw(g_models, m)
+            list.add_raw(g_components, list.get_raw(g_detached_components, i))
+            list.add_raw(g_scripts, list.get_raw(g_detached_scripts, i))
+            list.remove(g_detached_models, i)
+            list.remove(g_detached_components, i)
+            list.remove(g_detached_scripts, i)
+            return true
+        }
+        i = i + 1
+    }
+    return false
 }
 
 detach_model(m: *Model) {
@@ -1482,7 +1645,7 @@ detach_model(m: *Model) {
     i = 0
     while i < count {
         if list.get_raw(g_models, i) == m as ptr {
-            list.remove(g_models, i)
+            detach_at(i)
             rebuild_rows()
             if g_selected >= list.size(g_models) { g_selected = list.size(g_models) - 1 }
             select_object(g_selected)
@@ -1680,7 +1843,7 @@ scene_animates() -> bool {
 
 paint_soon() {
     mark_dirty()
-    now = (clock_ns() / 1000000) * 0.001
+    now = seconds()
     if now - g_last_paint < PAINT_INTERVAL { return }
     g_last_paint = now
     draw_frame()
@@ -1722,6 +1885,8 @@ field_row(parent: int, name: string, initial: float, index: int) {
     ui.add_css_class(caption, "label")
     ui.spacer(row)
     number_field(row, index, initial, FIELD_W)
+    frames = g_row_frames as int[]
+    frames[index] = row
 }
 
 // Three fields on one line with coloured axis letters, which is how every one
@@ -1752,26 +1917,34 @@ vector_row(parent: int, name: string, first: int) {
 
 // A bounded value, where the whole range is meaningful and dragging across it
 // is the point: a colour channel, a roughness, a field of view.
+// Label, control and value on one line, which is how all three of the editors
+// this borrows from draw a bounded setting. Stacking the slider under its own
+// caption cost two lines a row and read like a page of preferences rather than
+// an inspector: eleven settings filled the panel twice over.
 inspector_row(parent: int, name: string, low: float, high: float,
               initial: float, index: int) {
     row = ui.hstack(parent, 8)
     ui.add_css_class(row, "row")
     caption = ui.text(row, name)
     ui.add_css_class(caption, "label")
-    ui.spacer(row)
+    ui.width(caption, LABEL_COLUMN)
+
+    slider = ui.slider(row, low, high, initial) callback |value: float| {
+        apply_property(index, value)
+    }
+    ui.height(slider, 16)
+    ui.fill_width(slider)
+
     readout = ui.text(row, number(initial))
     ui.add_css_class(readout, "value")
     ui.width(readout, VALUE_COLUMN)
 
-    slider = ui.slider(parent, low, high, initial) callback |value: float| {
-        apply_property(index, value)
-    }
-    ui.height(slider, 18)
-
     sliders = g_sliders as int[]
     readouts = g_readouts as int[]
+    frames = g_row_frames as int[]
     sliders[index] = slider
     readouts[index] = readout
+    frames[index] = row
     g_row_count = g_row_count + 1
 }
 
@@ -1796,9 +1969,11 @@ theme() -> ptr {
     ui.st_bg(sheet, "bar", 0x1B1F25)
     ui.st_insets(sheet, "bar", 6.0, 14.0, 6.0, 14.0)
 
-    ui.st_color(sheet, "heading", 0x8B95A5)
+    ui.st_color(sheet, "heading", 0x9AA5B5)
     ui.st_bold(sheet, "heading")
     ui.st_font_size(sheet, "heading", 10.0)
+    ui.st_bg(sheet, "heading", 0x1C2027)
+    ui.st_insets(sheet, "heading", 5.0, 14.0, 5.0, 14.0)
 
     ui.st_color(sheet, "title", 0xE6E9EF)
     ui.st_bold(sheet, "title")
@@ -1847,21 +2022,21 @@ theme() -> ptr {
     ui.st_bg(sheet, "action", 0x2C313A)
     ui.st_color(sheet, "action", 0xD7DAE0)
     ui.st_radius(sheet, "action", 5.0)
-    ui.st_insets(sheet, "action", 7.0, 12.0, 7.0, 12.0)
+    ui.st_insets(sheet, "action", 4.0, 10.0, 4.0, 10.0)
     ui.st_hover(sheet, "action", 0x3A4150)
     ui.st_active(sheet, "action", 0x4B5263)
 
     ui.st_bg(sheet, "danger", 0x38262B)
     ui.st_color(sheet, "danger", 0xE79A9A)
     ui.st_radius(sheet, "danger", 5.0)
-    ui.st_insets(sheet, "danger", 7.0, 12.0, 7.0, 12.0)
+    ui.st_insets(sheet, "danger", 4.0, 10.0, 4.0, 10.0)
     ui.st_hover(sheet, "danger", 0x4C2F35)
     ui.st_active(sheet, "danger", 0x5E383F)
 
     ui.st_bg(sheet, "primary", 0x2F6FEB)
     ui.st_color(sheet, "primary", 0xFFFFFF)
     ui.st_radius(sheet, "primary", 5.0)
-    ui.st_insets(sheet, "primary", 7.0, 14.0, 7.0, 14.0)
+    ui.st_insets(sheet, "primary", 4.0, 12.0, 4.0, 12.0)
     ui.st_hover(sheet, "primary", 0x3D7DF6)
 
     return sheet
@@ -1870,9 +2045,14 @@ theme() -> ptr {
 // Widget-building helpers take their parent explicitly. The block DSL's context
 // is lexical, so a widget created inside a called function is not parented by
 // the block the call sits in, and lands at the root instead.
+// A section header is a bar across the panel, not a word floating above the
+// rows. Without one the panel reads as a single column of everything: the
+// headings were the same weight as the labels under them and carried no
+// horizontal rule, so nothing said where one group ended and the next began.
 heading(parent: int, caption: string) -> int {
     handle = ui.text(parent, caption)
     ui.add_css_class(handle, "heading")
+    ui.fill_width(handle)
     return handle
 }
 
@@ -1882,12 +2062,33 @@ style_button(handle: int, style: string) {
     ui.fill_width(handle)
 }
 
+// The two axes through the origin, in the colours every 3D editor uses for
+// them and the same ones the gizmo already uses: red along x, blue along z.
+// A grid of identical lines says how big things are and nothing about where
+// they are, so a scene with nothing selected gave no way to tell which way
+// round it was.
+add_axis(length: float, thickness: float, along_x: bool, r: float, g: float, b: float) {
+    axis = loader.cube(1.0)
+    if along_x {
+        core.model_set_scale(axis, length, 0.4, thickness)
+    } else {
+        core.model_set_scale(axis, thickness, 0.4, length)
+    }
+    // Just above the grid, so the two do not fight over the same depth.
+    core.model_set_position(axis, 0.0, 0.0 - 0.12, 0.0)
+    core.model_matte(axis, r, g, b)
+    add_helper(axis)
+}
+
 build_scene() {
     grid = loader.grid(600.0, 30.0, 0.7)
     core.model_matte(grid, 0.26, 0.28, 0.32)
     core.model_set_position(grid, 0.0, 0.0 - 0.2, 0.0)
     add_helper(grid)
     g_grid = grid as ptr
+
+    add_axis(1200.0, 1.6, true, 0.62, 0.24, 0.26)
+    add_axis(1200.0, 1.6, false, 0.24, 0.36, 0.62)
 
     cube = loader.cube(1.0)
     core.model_set_scale(cube, 40.0, 40.0, 40.0)
@@ -2088,6 +2289,15 @@ clear_scene() {
 
         free(list.get_raw(g_scripts, 0))
         list.remove(g_scripts, 0)
+    }
+    // Anything undo was still holding on to goes with the scene it belonged to.
+    while list.size(g_detached_models) > 0 {
+        core.model_free(list.get_raw(g_detached_models, 0) as *Model)
+        list.remove(g_detached_models, 0)
+        behaviour.component_free(list.get_raw(g_detached_components, 0) as *Component)
+        list.remove(g_detached_components, 0)
+        free(list.get_raw(g_detached_scripts, 0))
+        list.remove(g_detached_scripts, 0)
     }
     g_selected = 0 - 1
     rebuild_rows()
@@ -2519,9 +2729,35 @@ gizmo_drag(x: float, y: float, dx: float, dy: float) {
     sync_inspector()
 }
 
+style_mode_button(handle: int) {
+    ui.height(handle, 22)
+    ui.width(handle, 66)
+    ui.add_css_class(handle, "action")
+}
+
+// The live mode wears the accent. Set as a colour rather than by adding a
+// class: the sheet styles a widget when it is created, and a class added
+// afterwards does not repaint it, which left all three buttons looking the
+// same whatever the mode was.
+paint_mode_button(handle: int, active: bool) {
+    if handle == 0 { return }
+    if active {
+        ui.style_bg_color(handle, 0.184, 0.435, 0.922, 1.0)
+    } else {
+        ui.style_bg_color(handle, 0.173, 0.192, 0.227, 1.0)
+    }
+}
+
+refresh_mode_buttons() {
+    paint_mode_button(g_mode_move, g_gizmo_mode == GIZMO_TRANSLATE)
+    paint_mode_button(g_mode_rotate, g_gizmo_mode == GIZMO_ROTATE)
+    paint_mode_button(g_mode_scale, g_gizmo_mode == GIZMO_SCALE)
+}
+
 set_gizmo_mode(mode: int) {
     mark_dirty()
     g_gizmo_mode = mode
+    refresh_mode_buttons()
     if mode == GIZMO_TRANSLATE { say("move: drag an axis") }
     if mode == GIZMO_ROTATE { say("rotate: drag a ring") }
     if mode == GIZMO_SCALE { say("scale: drag a handle") }
@@ -2536,6 +2772,11 @@ main() {
     g_sliders = calloc(ROWS, 4)
     g_readouts = calloc(ROWS, 4)
     g_fields = calloc(ROWS, 4)
+    g_row_frames = calloc(ROWS, 4)
+    g_detached_models = list.new()
+    g_detached_components = list.new()
+    g_detached_scripts = list.new()
+    g_hier_rows = list.new()
     g_console = calloc(CONSOLE_LINES, 4)
     g_history = history.history_new()
     g_helpers = list.new()
@@ -2555,7 +2796,10 @@ main() {
     if !start_renderer() { return }
 
     backend = viewport_backend()
-    core.backend_set_clear_color(&backend, 0.078, 0.086, 0.102)
+    // CRITICAL to keep in step with the canvas fill below: the canvas is painted
+// this colour before the first frame arrives, and a mismatch shows as the
+// viewport changing shade on startup.
+    core.backend_set_clear_color(&backend, VIEWPORT_R, VIEWPORT_G, VIEWPORT_B)
     core.backend_set_post(&backend, g_fxaa, g_bloom, BLOOM_THRESHOLD, BLOOM_INTENSITY)
     core.backend_set_shadows(&backend, true)
 
@@ -2592,13 +2836,14 @@ main() {
         // contents stop well short of the window, so everything below the last
         // button was the toolkit's own white.
         ui.add_css_class(left_scroll, "panel")
-        left = ui.vstack(left_scroll, 6)
+        left = ui.vstack(left_scroll, 4)
         ui.add_css_class(left, "panel")
         heading(left, "SCENE")
 
         g_hierarchy = ui.listbox(left, 4) callback |item: ptr, index: int, row: int| {
             entry = ui.text(row, row_label(index))
             ui.add_css_class(entry, "value")
+            list.add_raw(g_hier_rows, index_handle(row))
         }
         ui.on_select(g_hierarchy) callback |index: int| {
             select_object(index)
@@ -2642,11 +2887,11 @@ main() {
         water_btn = ui.btn(surfaces, "Water") callback { add_water() }
         style_button(water_btn, "action")
 
-        emitters = ui.hstack(left, 6)
-        ui.add_css_class(emitters, "row")
-        light_btn = ui.btn(emitters, "Light") callback { add_light() }
+        // The odd one out of a pair spans the row rather than sitting at its
+        // own width beside a spacer, which left it a third the size of the
+        // buttons above it and made the grid look unfinished.
+        light_btn = ui.btn(left, "Light") callback { add_light() }
         style_button(light_btn, "action")
-        ui.spacer(emitters)
 
         heading(left, "TERRAIN")
 
@@ -2667,11 +2912,8 @@ main() {
         islands_btn = ui.btn(biomes_mid, "Islands") callback { add_biome(terrain.ISLANDS) }
         style_button(islands_btn, "action")
 
-        biomes_end = ui.hstack(left, 6)
-        ui.add_css_class(biomes_end, "row")
-        caves_btn = ui.btn(biomes_end, "Caves") callback { add_biome(terrain.CAVES) }
+        caves_btn = ui.btn(left, "Caves") callback { add_biome(terrain.CAVES) }
         style_button(caves_btn, "action")
-        ui.spacer(biomes_end)
 
         ui.divider(left)
         heading(left, "ASSETS")
@@ -2688,9 +2930,9 @@ main() {
 
         undo_row = ui.hstack(left, 6)
         ui.add_css_class(undo_row, "row")
-        undo_btn = ui.btn(undo_row, "Undo") callback { undo() }
+        undo_btn = ui.btn(undo_row, "Undo") callback { undo_step() }
         style_button(undo_btn, "action")
-        redo_btn = ui.btn(undo_row, "Redo") callback { redo() }
+        redo_btn = ui.btn(undo_row, "Redo") callback { redo_step() }
         style_button(redo_btn, "action")
 
         object_row = ui.hstack(left, 6)
@@ -2716,11 +2958,28 @@ main() {
 
         stage = ui.vstack(body, 0)
         ui.fill_height(stage)
+
+        // A strip over the viewport carrying the transform modes, the way
+        // every editor this borrows from does. The keys still work; this is
+        // what makes the live one visible.
+        viewport_bar = ui.hstack(stage, 6)
+        ui.add_css_class(viewport_bar, "bar")
+        ui.fill_width(viewport_bar)
+        g_mode_move = ui.btn(viewport_bar, "Move") callback { set_gizmo_mode(GIZMO_TRANSLATE) }
+        style_mode_button(g_mode_move)
+        g_mode_rotate = ui.btn(viewport_bar, "Rotate") callback { set_gizmo_mode(GIZMO_ROTATE) }
+        style_mode_button(g_mode_rotate)
+        g_mode_scale = ui.btn(viewport_bar, "Scale") callback { set_gizmo_mode(GIZMO_SCALE) }
+        style_mode_button(g_mode_scale)
+        ui.spacer(viewport_bar)
+        g_mode_hint = ui.text(viewport_bar, "W move   E rotate   R scale   F frame")
+        ui.add_css_class(g_mode_hint, "stats")
+
         g_canvas = ui.canvas_create(stage, g_view_w, g_view_h)
         ui.fill_width(g_canvas)
         ui.fill_height(g_canvas)
         ui.canvas_fill_rect(g_canvas, 0.0, 0.0, g_view_w * 1.0, g_view_h * 1.0,
-                            0.078, 0.086, 0.102, 1.0)
+                            VIEWPORT_R, VIEWPORT_G, VIEWPORT_B, 1.0)
         ui.canvas_redraw(g_canvas)
 
         ui.canvas_on_resize(g_canvas) callback |w: float, h: float| {
@@ -2785,8 +3044,8 @@ main() {
             if string.equals(key, "f") == 1 { focus_selection() }
             if string.equals(key, "Delete") == 1 { remove_selected() }
             if string.equals(key, "BackSpace") == 1 { remove_selected() }
-            if string.equals(key, "z") == 1 { undo() }
-            if string.equals(key, "Z") == 1 { redo() }
+            if string.equals(key, "z") == 1 { undo_step() }
+            if string.equals(key, "Z") == 1 { redo_step() }
             if string.equals(key, "d") == 1 { duplicate_selected() }
         }
         ui.canvas_on_scroll(g_canvas) callback |dx: float, dy: float| {
@@ -2859,7 +3118,9 @@ main() {
         ui.height(g_chip, 14)
         g_swatch = ui.text(swatch_row, "")
         ui.add_css_class(g_swatch, "value")
-        ui.width(g_swatch, VALUE_COLUMN)
+        // Wider than a number's column: a hex colour is seven characters and
+        // the value column is sized for four, so it came out cut off.
+        ui.width(g_swatch, HEX_COLUMN)
 
         inspector_row(right, "red", 0.0, 1.0, 0.8, 4)
         inspector_row(right, "green", 0.0, 1.0, 0.5, 5)

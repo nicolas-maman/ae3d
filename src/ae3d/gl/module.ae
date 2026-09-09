@@ -724,12 +724,14 @@ renderer_remove_model(r: *GLRenderer, m: *Model) {
     }
 
     if m.shares_geometry {
+        forget_batches(r, m.vao)
         ae3d_gl_geometry_release(m.vao)
         m.vao = 0
         m.vbo = 0
         m.ebo = 0
         m.shares_geometry = false
     } else {
+        forget_batches(r, m.vao)
         if m.vao != 0 { ae3d_gl_vao_delete(m.vao) ; m.vao = 0 }
         if m.vbo != 0 { ae3d_gl_buffer_delete(m.vbo) ; m.vbo = 0 }
         if m.ebo != 0 { ae3d_gl_buffer_delete(m.ebo) ; m.ebo = 0 }
@@ -1212,6 +1214,43 @@ batchable(r: *GLRenderer, m: *Model) -> bool {
     alpha = 1.0
     if m.material != null { alpha = m.material.alpha }
     return alpha >= 0.99
+}
+
+// CRITICAL: a pooled batch has to forget a vertex array before it is deleted.
+// The pool outlives the models it was built from, it matches a batch to a model
+// by comparing vertex array ids, and OpenGL hands the same id out again for the
+// next array it creates. So a batch built for geometry that has since been
+// released matched its replacement by number, decided it was unchanged, skipped
+// the upload and drew from the buffer of the array that is gone. Loading a
+// scene holding two models of the same shape crashed inside
+// glDrawElementsInstanced every time.
+forget_batches(r: *GLRenderer, vao: int) {
+    if vao == 0 { return }
+    count = list.size(r.batches)
+    i = 0
+    while i < count {
+        b = list.get_raw(r.batches, i) as *GLBatch
+        if b != null && b.vao == vao {
+            b.vao = 0
+            b.material = null
+            b.count = 0
+            b.capacity_bytes = 0
+            b.stale = true
+        }
+        i = i + 1
+    }
+    count = list.size(r.shadow_batches)
+    i = 0
+    while i < count {
+        b = list.get_raw(r.shadow_batches, i) as *GLBatch
+        if b != null && b.vao == vao {
+            b.vao = 0
+            b.count = 0
+            b.capacity_bytes = 0
+            b.stale = true
+        }
+        i = i + 1
+    }
 }
 
 batch_for(r: *GLRenderer, m: *Model) -> *GLBatch {

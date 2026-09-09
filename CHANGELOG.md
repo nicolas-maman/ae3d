@@ -129,6 +129,15 @@ First working engine.
 
 ### Fixes
 
+- Loading a scene that holds two models of the same shape crashed the editor.
+  Merged draws are pooled and matched to a model by vertex array id, the pool
+  outlives the models it was built from, and OpenGL hands the same id out again
+  for the next array it creates. So a batch built for geometry that had since
+  been released matched its replacement by number, decided it was unchanged,
+  skipped its upload and drew from the buffer of the array that was gone:
+  `SIGSEGV` inside `glDrawElementsInstanced`, six times out of six. Releasing
+  geometry now tells the pool to forget it.
+
 - An instanced model had its scale and rotation applied twice. Each instance's
   matrix is built from the model's own scale and rotation, and the shader
   multiplies the model matrix by the instance's, so a model scaled 2.4 drew its
@@ -497,6 +506,41 @@ First working engine.
 
 ### Tooling
 
+- The editor driver waits for what it is about to assert rather than sleeping
+  first. Every count it checks follows an action the editor performs in its own
+  time, and a sleep long enough on an idle machine fails inside a full run,
+  naming the check rather than the timing assumption behind it.
+
+- The editor driver runs on both backends. The report checks have always run on
+  each, but nothing had ever pressed a widget on the Vulkan one, and the
+  editor's controls reach the renderer through a vtable that only a real click
+  exercises.
+
+- The editor driver checks that a setting survives the scene file, not just
+  that the row count does. The value is changed after saving on purpose:
+  left alone it would come back whatever loading did, and the check would be
+  proving that memory keeps its contents.
+
+- `tools/check_ui_name_collisions.py` refuses a name the editor shares with
+  something `ui` exports. A bare call to such a name binds the toolkit's
+  function inside the `ui.window` block and the editor's outside it, silently
+  and in both directions, which is how the Undo button came to step an empty
+  stack belonging to the toolkit. It comes back whenever either side gains a
+  name, so it is checked rather than remembered.
+
+- The editor driver presses Save, Load and Delete as well. A scene that never
+  reaches disk and a Load that brings back nothing both look like a working
+  editor from the inside: the buttons return and the report is unchanged.
+
+- `tools/drive_editor.py` presses the editor's real widgets. Every other check
+  on the editor reads the report it writes about itself, and that report comes
+  from calling the handlers directly, so a button that cannot be hit, a field
+  whose callback is not wired, or a row that does not answer a click all pass.
+  The driver clicks Cube and counts the scene list, types into a position field
+  and selects away and back: what comes back is the model's own formatting,
+  which is the only thing that proves the typed value got there. Gated in
+  `ci.sh`, skipped where there is no python3 or no display.
+
 - `AE3D_SNAPSHOT=<path>` writes the last frame of a bounded run to a PNG, so
   any program built on the engine can be looked at rather than only run.
   Running an example proves it does not crash and counting its draws proves it
@@ -514,6 +558,91 @@ First working engine.
   looks at a horizon on purpose.
 
 ### Editor
+
+- The viewport's ground is a dark blue grey rather than near black. A scene on
+  black looks like it is floating in a void rather than standing in a room, and
+  an empty one is the first thing the editor shows.
+
+- The grid has its axes. A grid of identical lines says how big things are and
+  nothing about where they are, so a scene with nothing selected gave no way to
+  tell which way round it was. Red along x and blue along z, the colours the
+  gizmo already uses, muted so they do not compete with it.
+
+- A section header is a bar across the panel rather than a word floating over
+  the rows. The headings were the same weight as the labels beneath them and
+  carried no rule, so scene, add, terrain, assets and edit read as one
+  undifferentiated column.
+
+- The tool buttons are the size of tools. At their old height the add and
+  terrain grids took more of the left column than the outliner did, which is
+  the wrong way round for ten actions that are pressed once each.
+
+- The hierarchy says what each object is and which one is selected. Every row
+  was the same grey word, so a water surface and a cube looked alike and the
+  inspector was the only thing that said what was being edited. Each row now
+  carries a one-character marker for its kind and the selected one is lit.
+
+- A bounded setting is one line: label, slider and value across a row, the way
+  all three of the editors this borrows from draw one. The slider used to sit
+  under its own caption, which cost two lines a setting and read like a page of
+  preferences rather than an inspector; eleven of them filled the panel twice
+  over. Transform, material, light, camera and behaviour now all fit at once
+  where material alone used to reach the bottom.
+
+- Captions share a column, so every control starts at the same place. Ragged
+  control edges are most of what makes a panel look unfinished.
+
+- The transform modes are on the viewport. Move, rotate and scale were reachable
+  only by pressing W, E or R, which is the convention but not something a panel
+  can show you: nothing on screen said which was live. The live one wears the
+  accent, and the keys still work.
+
+- The colour's hex was cut off. The value column is sized for a number and a
+  hex colour is seven characters.
+
+- Deleting an object made the editor stop believing what the others were. A
+  model, its component and its script live at the same index in three lists,
+  and only the add path moved all three: delete, undo of an add and redo of one
+  each moved the model alone, so every component after that point answered for
+  the wrong object. Adding water and then deleting an unrelated cube left the
+  inspector refusing to show the water section for the water, and
+  `update_water` driving whichever object had inherited the component. Every
+  path moves all three now, and a detached model keeps its component and its
+  script so an undone delete brings back the simulation rather than a bare
+  mesh.
+
+- A section with nothing to edit hides whole. Hiding the water settings hid
+  the heading, each slider and each readout, but not the rows holding their
+  captions, so a scene with no water in it showed `wave height`, `wave speed`,
+  `opacity` and `foam` as four stranded words with no heading above them and
+  no controls under them.
+
+- The Undo button did nothing. aether-ui exports names of its own for stepping
+  the toolkit's command stack, and inside the `ui.window` block a bare call
+  bound to those rather than to the editor's own, so the button stepped an
+  empty stack belonging to the toolkit. The editor's self-check calls the same
+  function from the top level, where its own definition wins, so it reported a
+  working undo the whole time. The editor's history stepping is called
+  `undo_step` and `redo_step` now, and the driver presses the button and checks
+  the object comes back off. Filed upstream as aether-lang-dev/aether-ui#112.
+
+- The odd button out of a pair spans its row. `Light` and `Caves` each sat at
+  their own width beside a spacer, a third the size of the buttons above them,
+  which made the add grid look unfinished. Each section is now two pairs and a
+  full-width row.
+
+- The frame rate read 0 for the life of the program, and the frame delta never
+  left its fallback. The editor measured time by arithmetic on `clock_ns()`,
+  and in place that clock only ever changed in whole seconds: the interval
+  between two frames measured 0 for a run of ticks and then 1. It reads
+  `platform.time()` now, the same double off the monotonic clock the engine's
+  own loop uses, and the interval reads 0.033, 0.021, 0.014 with the bar at 62
+  fps. Water and behaviour scripts were advancing at a fixed step whatever the
+  machine was doing.
+
+- The status bar refreshed on a count of frames, and the viewport is not
+  redrawn while nothing changes, so the bar froze on whatever it last managed
+  to write. It is throttled by time now.
 
 - The left panel ran out of colour. Its background is drawn by the stack inside
   the scroll view, and that stack is only as tall as what it holds, so
