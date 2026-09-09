@@ -208,6 +208,8 @@ const EDIT_SETTLE = 0.4
 var g_reported = false
 var g_last_paint = 0.0
 var g_fxaa = true
+var g_fxaa_toggle = 0
+var g_bloom_toggle = 0
 var g_bloom = false
 // The first frame rate the bar ever showed. A driver cannot see it: by the
 // time anything can ask, the average has climbed to something plausible and a
@@ -1342,7 +1344,13 @@ draw_frame() {
         // climbing, and what it shows on the way is a rate the editor is not
         // running at: the bar opened on 2 fps while the frames were arriving
         // sixty times a second.
-        if elapsed > 0.0 {
+        //
+        // And a gap longer than a quarter second is a stall rather than a
+        // frame, which is the same rule the simulation step above uses and for
+        // the same reason. The first gap of a run that opens a scene spans
+        // reading it off disk, so the bar opened on 4 fps in a roundtrip run
+        // while the editor was drawing at sixty.
+        if elapsed > 0.0 && elapsed < 0.25 {
             if g_fps <= 0.0 {
                 g_fps = 1.0 / elapsed
             } else {
@@ -1420,7 +1428,12 @@ draw_frame() {
 // something.
 update_stats(backend: *Backend) {
     if g_stats == 0 { return }
-    if g_frames < 2 { return }
+    // Until an interval has been measured, not until a second frame has been
+    // drawn. Those were the same thing before a gap longer than a quarter
+    // second stopped counting as a frame: a run that opens a scene can draw
+    // its first frames further apart than that, and the bar then wrote the
+    // zero the average still held.
+    if g_fps <= 0.0 { return }
     now = seconds()
     if g_stats_written > 0.0 && now - g_stats_written < STATS_INTERVAL { return }
     g_stats_written = now
@@ -2624,6 +2637,14 @@ current_view() -> View {
     }
     v.face_culling = core.face_culling()
     v.frustum_culling = core.frustum_culling()
+    // The scene file has carried the post chain since it carried anything, and
+    // the editor filled none of it: every scene it saved recorded the defaults,
+    // so a scene saved with bloom on came back with it off whatever the file
+    // was for.
+    v.fxaa = g_fxaa
+    v.bloom = g_bloom
+    v.bloom_threshold = BLOOM_THRESHOLD
+    v.bloom_intensity = BLOOM_INTENSITY
     return v
 }
 
@@ -2752,6 +2773,11 @@ load_scene() {
     }
     core.set_face_culling(view.face_culling)
     core.set_frustum_culling(view.frustum_culling)
+    g_fxaa = view.fxaa
+    g_bloom = view.bloom
+    if g_fxaa_toggle != 0 { ui.set_toggle(g_fxaa_toggle, flag_of(g_fxaa)) }
+    if g_bloom_toggle != 0 { ui.set_toggle(g_bloom_toggle, flag_of(g_bloom)) }
+    apply_post()
 
 
     // The file carried each model's uniforms, so the switches say what was
@@ -3723,19 +3749,19 @@ main() {
         fxaa_caption = ui.text(fxaa_row, "FXAA")
         ui.add_css_class(fxaa_caption, "label")
         ui.spacer(fxaa_row)
-        fxaa_toggle = ui.toggle(fxaa_row, "") callback |on: bool| {
+        g_fxaa_toggle = ui.toggle(fxaa_row, "") callback |on: bool| {
             g_fxaa = on
             apply_post()
             say("fxaa ${on}")
         }
-        ui.set_toggle(fxaa_toggle, 1)
+        ui.set_toggle(g_fxaa_toggle, 1)
 
         bloom_row = ui.hstack(shading_body, 8)
         as_row(bloom_row)
         bloom_caption = ui.text(bloom_row, "Bloom")
         ui.add_css_class(bloom_caption, "label")
         ui.spacer(bloom_row)
-        ui.toggle(bloom_row, "") callback |on: bool| {
+        g_bloom_toggle = ui.toggle(bloom_row, "") callback |on: bool| {
             g_bloom = on
             apply_post()
             say("bloom ${on}")

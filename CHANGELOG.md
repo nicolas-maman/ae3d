@@ -578,6 +578,24 @@ First working engine.
 
 ### Editor
 
+- The bar waits for a measurement rather than for a second frame. Those were
+  the same thing until a gap longer than a quarter second stopped counting as a
+  frame: a run that opens a scene can draw its first frames further apart than
+  that, and the bar then wrote the zero the average still held.
+
+- A gap longer than a quarter second is a stall, not a frame rate. The
+  simulation step already ignored one for the same reason; the frame counter
+  did not, so the first gap of a run that opens a scene spans reading it off
+  disk and the bar opened on 4 fps while the editor was drawing at sixty. Found
+  by the check on the first rate shown, on the leg that saves and loads before
+  it runs.
+
+- A scene remembers its post chain. The scene file has carried fxaa, bloom and
+  the bloom parameters since it carried anything, and the editor filled none of
+  them and read none of them back: every scene it saved recorded the defaults,
+  so a scene saved with bloom on came back with it off, which is what the file
+  had those fields for.
+
 - A model added after the shading was chosen carries it. `apply_all` walks the
   models that exist when it runs, so a cube added afterwards was lit by
   whatever the shader defaults to while the panel said otherwise, and pressing
@@ -696,6 +714,17 @@ First working engine.
   after another with nothing between them.
 
 ### Tooling
+
+- Waiting for a file to be saved waits for it to be written again, not for it
+  to exist. The second save in a run leaves the file already there, so the wait
+  returned at once and the Load that followed could read what was on disk
+  before rather than what had just been asked for. It passed almost every time
+  and failed once inside a full run, which is the worst kind of check to have.
+
+- `ci.sh` prints the driver's failing lines rather than the first twenty of its
+  log. The driver runs more checks than that now, so a failure two thirds of
+  the way down was reported as a wall of ok with no reason in it, and the run
+  that found the race above could not say what had gone wrong.
 
 - The report records the first frame rate the bar ever showed, and `ci.sh`
   refuses an implausible one. A driver cannot check this: by the time anything
