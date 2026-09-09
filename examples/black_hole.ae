@@ -17,8 +17,8 @@
 //   ./build.sh examples/black_hole.ae && ./build/black_hole
 //
 //   SPACE   hand the camera over to WASD and the mouse, and back
-//   1 2 3 4 rays per pixel, and hands quality over from the frame-time guard
-//   9 0     step budget, 220 or 400
+//   1 .. 6  quality, 1 highest. Also takes it off the frame-time guard.
+//           Rays per pixel first, then the scale the scene is drawn at
 
 import ae3d.core
 import ae3d.platform
@@ -39,30 +39,71 @@ var g_screen: ptr = null
 var g_time = 0.0
 var g_free = false
 var g_space_was_down = false
+// Quality is a ladder rather than two loose knobs, because the two do not trade
+// off against each other evenly. Rays per pixel buys edges; render scale buys
+// everything, since cost is dominated by pixels shaded and half scale is a
+// quarter of the work. So the ladder spends rays first and only then starts
+// drawing the scene smaller than the window.
+//
+// The bottom rung is meant for hardware that has no business running a per-pixel
+// geodesic integration at all, and it still runs.
+const LEVELS = 6
+
+var g_level = 0
 var g_taps = 4
 var g_steps = 400
 
-// Quality falls back on its own when the machine cannot keep up, and never
-// climbs again by itself. Climbing needs an estimate of what a ray costs, and
-// under vsync there is no such estimate to be had -- the frame time is quantised
-// to the refresh, so one ray and two rays can measure identical and the
-// arithmetic concludes the wrong thing. Pressing 1 to 4 takes over.
+level_taps(level: int) -> int {
+    if level <= 0 { return 4 }
+    if level == 1 { return 2 }
+    return 1
+}
+
+level_steps(level: int) -> int {
+    if level <= 2 { return 400 }
+    if level == 3 { return 300 }
+    if level == 4 { return 220 }
+    return 140
+}
+
+level_scale(level: int) -> float {
+    if level <= 2 { return 1.0 }
+    if level == 3 { return 0.75 }
+    if level == 4 { return 0.5 }
+    return 0.35
+}
+
+// Falls back on its own when the frame runs long, and never climbs again by
+// itself. Climbing needs an estimate of what one ray costs, and under vsync
+// there is none to be had -- the frame time is quantised to the refresh, so one
+// ray and two can measure identical and the arithmetic reaches the wrong
+// conclusion. The number keys take over instead.
 //
-// The first frame is judged on its own because it is the expensive one: a
-// software rasteriser renders it in seconds, and the point is not to render a
-// second like it.
+// The first frame is judged on its own, because on a slow machine it is the
+// expensive one and the point is not to render a second like it.
 var g_auto = true
 var g_watched = 0
 var g_elapsed = 0.0
 const BUDGET = 0.024
 const HOPELESS = 0.1
 
+apply_level(e: *Engine, screen: *Model, level: int) {
+    wanted = level
+    if wanted < 0 { wanted = 0 }
+    if wanted > LEVELS - 1 { wanted = LEVELS - 1 }
+    g_level = wanted
+    g_taps = level_taps(g_level)
+    g_steps = level_steps(g_level)
+    blackhole.set_quality(screen, g_taps, g_steps)
+    gl.renderer_set_render_scale(engine.engine_gl_renderer(e), level_scale(g_level))
+    println("  level ${g_level}: ${g_taps} ray(s), ${g_steps} steps, scale ${level_scale(g_level)}")
+}
+
 on_start(data: ptr) {
     e = data as *Engine
 
     screen = blackhole.screen_new()
     blackhole.set_spin(screen, SPIN)
-    blackhole.set_quality(screen, g_taps, g_steps)
     engine.engine_add_model(e, screen)
     g_screen = screen as ptr
 
@@ -80,8 +121,9 @@ on_start(data: ptr) {
     // space bar asks for them.
     engine.engine_set_camera_input(e, false)
 
+    apply_level(e, screen, 0)
     println("black hole: Kerr geodesics per pixel, spin a = ${SPIN}")
-    println("  SPACE free camera, 1-4 rays per pixel, 9/0 step budget")
+    println("  SPACE free camera, 1-6 quality (1 highest)")
     println("  quality falls back on its own if the frame runs long")
 }
 
@@ -106,38 +148,30 @@ on_update(data: ptr, delta: float) {
         g_watched = g_watched + 1
         g_elapsed = g_elapsed + delta
         if g_watched == 1 && delta > HOPELESS {
-            g_taps = 1
-            g_steps = 220
-            blackhole.set_quality(screen, g_taps, g_steps)
-            println("  ${delta} s for the first frame: dropping to 1 ray and ${g_steps} steps")
+            // Nothing about this machine says it can afford the top of the
+            // ladder, so do not spend a second frame finding that out slowly.
+            println("  ${delta} s for the first frame")
+            apply_level(e, screen, LEVELS - 1)
             g_elapsed = 0.0
         } else if g_watched >= 30 {
-            if g_elapsed / (g_watched * 1.0) > BUDGET && g_taps > 1 {
-                g_taps = g_taps - 1
-                blackhole.set_quality(screen, g_taps, g_steps)
-                println("  ${g_taps} ray(s) per pixel, to keep the frame under ${BUDGET} s")
+            if g_elapsed / (g_watched * 1.0) > BUDGET && g_level < LEVELS - 1 {
+                apply_level(e, screen, g_level + 1)
             }
             g_watched = 0
             g_elapsed = 0.0
         }
     }
 
-    taps = g_taps
-    if engine.engine_key_down(e, platform.KEY_1) { taps = 1 }
-    if engine.engine_key_down(e, platform.KEY_2) { taps = 2 }
-    if engine.engine_key_down(e, platform.KEY_3) { taps = 3 }
-    if engine.engine_key_down(e, platform.KEY_4) { taps = 4 }
-
-    steps = g_steps
-    if engine.engine_key_down(e, platform.KEY_9) { steps = 220 }
-    if engine.engine_key_down(e, platform.KEY_0) { steps = 400 }
-
-    if taps != g_taps || steps != g_steps {
+    picked = 0 - 1
+    if engine.engine_key_down(e, platform.KEY_1) { picked = 0 }
+    if engine.engine_key_down(e, platform.KEY_2) { picked = 1 }
+    if engine.engine_key_down(e, platform.KEY_3) { picked = 2 }
+    if engine.engine_key_down(e, platform.KEY_4) { picked = 3 }
+    if engine.engine_key_down(e, platform.KEY_5) { picked = 4 }
+    if engine.engine_key_down(e, platform.KEY_6) { picked = 5 }
+    if picked >= 0 && picked != g_level {
         g_auto = false
-        g_taps = taps
-        g_steps = steps
-        blackhole.set_quality(screen, g_taps, g_steps)
-        println("  ${g_taps} ray(s) per pixel, ${g_steps} steps")
+        apply_level(e, screen, picked)
     }
 
     if !g_free {

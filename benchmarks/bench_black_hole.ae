@@ -32,6 +32,7 @@ var FRAMES = 90
 // frame decides whether this machine is worth timing at all.
 const SLOW_FRAME_MS = 250
 
+var g_renderer: ptr = null
 var g_backend: *Backend = null
 var g_screen: *Model = null
 var g_cam: *Camera = null
@@ -40,6 +41,13 @@ var g_light: *Light = null
 // A frame's worth of work, timed. The first frames of any configuration pay for
 // shader specialisation and a cold cache, so a warm-up runs before the clock.
 measure(label: string, taps: int, steps: int) {
+    measure_at(label, taps, steps, 1.0)
+}
+
+// Render scale is the other axis, and the one that matters on weak hardware:
+// cost is dominated by pixels shaded, so half scale is a quarter of the work.
+measure_at(label: string, taps: int, steps: int, scale: float) {
+    gl.renderer_set_render_scale(g_renderer as *GLRenderer, scale)
     blackhole.set_quality(g_screen, taps, steps)
 
     warm = 0
@@ -84,6 +92,7 @@ main() {
     }
 
     renderer = gl.renderer_new()
+    g_renderer = renderer as ptr
     backend = gl.backend(renderer)
     if !core.backend_init(&backend, context, WIDTH, HEIGHT) {
         println("black hole: SKIP the OpenGL backend would not initialise")
@@ -142,6 +151,11 @@ main() {
     measure("4 rays 300 steps", 4, 300)
     measure("4 rays 220 steps", 4, 220)
     measure("4 rays 140 steps", 4, 140)
+
+    measure_at("4 rays 400 steps, half scale   ", 4, 400, 0.5)
+    measure_at("4 rays 400 steps, quarter scale", 4, 400, 0.25)
+    measure_at("2 rays 220 steps, half scale   ", 2, 220, 0.5)
+    gl.renderer_set_render_scale(renderer, 1.0)
 
     // Schwarzschild costs what Kerr costs: the integrator carries the same five
     // numbers either way, and a is a coefficient rather than a branch.

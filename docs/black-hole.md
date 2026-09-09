@@ -15,8 +15,7 @@ somebody else derived, so it can be checked rather than admired.
 | key | |
 |---|---|
 | `SPACE` | hand the camera to WASD and the mouse, and back |
-| `1` `2` `3` `4` | rays per pixel |
-| `9` `0` | step budget, 220 or 400 |
+| `1` … `6` | quality, 1 highest — also takes it off the frame-time guard |
 
 The camera orbits by default. The lensing changes character with inclination —
 steeper and the far side stops arcing over the shadow, nearly edge-on and it
@@ -135,6 +134,34 @@ approaching side's 46.
 
 Setting `SPIN` to 0 turns the metric back into Schwarzschild. That limit has a
 known answer, so it is the check the Kerr integrator was built against.
+
+## Running it on a potato
+
+Quality is a ladder rather than two loose knobs, because the two do not trade off
+evenly. Rays per pixel buys edges. Render scale buys everything, because cost is
+dominated by pixels shaded and half scale is a quarter of the work. So the ladder
+spends rays first, and only then starts drawing the scene smaller than the window
+it lands on.
+
+| level | rays | steps | scale | RTX 4070 Ti |
+|---|---|---|---|---|
+| 1 | 4 | 400 | 1.0 | 63 fps |
+| 2 | 2 | 400 | 1.0 | 130 fps |
+| 3 | 1 | 400 | 1.0 | 257 fps |
+| 5 | 1 | 220 | 0.5 | — |
+| 6 | 1 | 140 | 0.35 | — |
+
+For scale, `4 rays / 400 steps` costs 15662 µs at full size and 5469 µs at half —
+2.9x for a change nothing in the frame's content notices. `2 rays / 220 steps` at
+half scale runs at 411 fps, about a sixth of the top rung's cost.
+
+`renderer_set_render_scale` is an engine feature rather than something this demo
+does to itself: the scene is drawn into the post-processing buffer at a fraction
+of the window, and the composite that was already there upscales it. Any scene
+gets it. `tests/test_render_scale.ae` holds it to the part that matters — that a
+scale of 1 is exactly a no-op, that half scale is the same picture rather than a
+different one, and that the result fills the frame instead of sitting in a corner
+at half size.
 
 ## What a frame costs
 
