@@ -593,10 +593,39 @@ def main():
                 # terrain was regenerated rather than that a button lit up.
                 widgets, ok = wait_for(
                     args.port,
-                    lambda ws: any(w["type"] == "text" and "desert:" in w["text"]
+                    lambda ws: any(w["type"] == "text" and "desert " in w["text"]
                                    for w in ws.values()),
                     seconds=12.0)
                 check("choosing a shape rebuilds the terrain", ok)
+
+            # Voxels are one way of meshing a terrain, not what a terrain is.
+            # The same object, the same place in the scene, meshed as a surface
+            # instead of a cube per cell.
+            styles = {n: w for n, w in
+                      ((w["text"].strip(), w) for w in widgets.values()
+                       if w["type"] == "button")
+                      if n in ("Blocks", "Smooth")}
+            check("a terrain can be blocks or smooth", len(styles) == 2)
+            if len(styles) == 2:
+                lit = [n for n, w in styles.items() if w.get("bg") == ACCENT]
+                check("and starts as blocks", lit == ["Blocks"], "lit: %s" % lit)
+
+                def triangles(ws):
+                    for w in ws.values():
+                        if w["type"] == "text" and "triangles" in w["text"]:
+                            return int(w["text"].split()[-2])
+                    return 0
+
+                blocky = triangles(widgets)
+                post(args.port, "/widget/%d/click" % styles["Smooth"]["id"])
+                # The title counts the geometry the model actually holds, so
+                # this reads that the mesh was replaced rather than that a
+                # second button lit up.
+                widgets, ok = wait_for(args.port,
+                                       lambda ws: triangles(ws) > blocky * 10,
+                                       seconds=20.0)
+                check("smoothing one gives it a surface of its own", ok,
+                      "%d triangles then %d" % (blocky, triangles(widgets)))
 
         # A row of choices says which one is on. Read as "the accent moved",
         # not "this button is blue": the tree reports the colour a widget was

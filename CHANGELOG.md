@@ -590,6 +590,29 @@ First working engine.
 
 ### Editor
 
+- A terrain is blocks or smooth, and voxels are one of the two rather than what
+  a terrain is. Blocks draw a cube per filled cell; smooth meshes the same
+  field into one surface, which the engine has been able to do since
+  `world_build_surface` was written and the editor could not reach. Switching
+  keeps the same object: the model leaves the backend, changes its geometry and
+  comes back, so its place in the scene, its selection and its undo history are
+  all where they were.
+
+  Which style a terrain has is read off the model rather than remembered beside
+  it. Blocks are instanced and smooth is not, so the style is a fact about the
+  model; a fourth list beside the models, the components and the scripts would
+  be a fourth thing to keep in step, and those three going out of step has
+  already caused one bug.
+
+- The title says what the selection is now. A terrain that changes shape keeps
+  its name and changes its geometry underneath, and the title was written once
+  on selection: it read twelve triangles while the model held five thousand.
+
+- The colour swatch follows the selection. Nothing refreshed it when the
+  selection changed, so the three sliders under it moved to the new object and
+  the colour above them stayed on the old one: selecting a terrain left the
+  sphere's blue sitting over an object with no material at all.
+
 - A seed is spelled as a whole number. Every row writes two decimals, which
   reads well for a measurement and put two digits of nothing on the end of a
   seed, pushing it out of its box.

@@ -179,6 +179,7 @@ var g_probe_field = 0
 // The lit segment of each row of choices, so a row of buttons says which one
 // is on rather than only what could be chosen.
 var g_biome_buttons: ptr = null
+var g_style_buttons: ptr = null
 var g_terrain_bar = 0
 var g_terrain_body = 0
 var g_terrain_divider = 0
@@ -556,6 +557,20 @@ apply_post() {
 // the layer that actually paints rather than from the value that was set,
 // which is what makes it worth checking against.
 extern aether_ui_styled_bg_impl(handle: int) -> int
+// What the selection is and how big it is. Read from the model each time it is
+// asked for, because a terrain that changes shape keeps its name and changes
+// its geometry underneath: the title said twelve triangles while the model had
+// eight thousand.
+refresh_title() {
+    if g_title == 0 { return }
+    m = selected_model()
+    if m == null {
+        ui.set_text(g_title, "nothing selected")
+        return
+    }
+    ui.set_text(g_title, "${core.text(m.name)}   ${core.mesh_index_count(m.mesh) / 3} triangles")
+}
+
 refresh_swatch() {
     if g_swatch == 0 { return }
     m = selected_model()
@@ -743,6 +758,13 @@ const SCRIPT_SLOT = 28
 // A terrain's shape. A choice rather than a number, so it travels the way a
 // behaviour does rather than as a row.
 const TERRAIN_BIOME_SLOT = 29
+// A terrain's style. Blocks are voxels drawn one cube per cell; smooth meshes
+// the same field into one surface. Voxels are a kind of terrain rather than
+// what terrain is.
+const TERRAIN_STYLE_SLOT = 30
+const STYLE_BLOCKS = 0
+const STYLE_SMOOTH = 1
+const STYLE_KINDS = 2
 const CAMERA_FIRST_ROW = 17
 const CAMERA_LAST_ROW = 19
 // Past the camera rows, because the row indices below it are spoken for and a
@@ -922,9 +944,13 @@ sync_inspector() {
         show_terrain_section(false)
         return
     }
-    if g_title != 0 {
-        ui.set_text(g_title, "${core.text(m.name)}   ${core.mesh_index_count(m.mesh) / 3} triangles")
-    }
+    refresh_title()
+    // The chip and the hex beside it are the material too, and nothing was
+    // refreshing them when the selection changed: the three sliders under them
+    // moved to the new object and the colour above stayed on the old one, so
+    // selecting a terrain left the sphere's blue sitting over a terrain that
+    // has no material at all.
+    refresh_swatch()
 
     show_row(9, active_light().intensity)
     show_row(10, active_light().ambient_strength)
@@ -1892,9 +1918,13 @@ replay(step: *EditStep, backwards: bool) {
         target = step.after
         if backwards { target = step.before }
         subject = step.subject as *Model
-        if step.slot == TERRAIN_BIOME_SLOT {
+        if step.slot == TERRAIN_STYLE_SLOT {
             select_model_pointer(step.subject)
-            regenerate_terrain(terrain_seed(), (target) as int)
+            regenerate_terrain(terrain_seed(), terrain_biome(), (target) as int)
+            refresh_terrain_section()
+        } else if step.slot == TERRAIN_BIOME_SLOT {
+            select_model_pointer(step.subject)
+            regenerate_terrain(terrain_seed(), (target) as int, terrain_style())
             refresh_terrain_section()
         } else if step.slot == SCRIPT_SLOT {
             select_model_pointer(step.subject)
@@ -2194,7 +2224,7 @@ apply_property(index: int, value: float) {
                                TERRAIN_SEED_ROW, was, value)
         history.history_close(g_history)
         g_last_edit = seconds()
-        regenerate_terrain((value) as long, terrain_biome())
+        regenerate_terrain((value) as long, terrain_biome(), terrain_style())
         show_row(index, value)
         return
     }
@@ -3087,24 +3117,86 @@ selected_world() -> *World {
 // model_enable_instancing resizes and flags both buffers, so the renderer is
 // told; replacing the object instead would take the selection with it and
 // leave two undo steps behind for one change.
-regenerate_terrain(seed: long, biome: int) {
+regenerate_terrain(seed: long, biome: int, style: int) {
     w = selected_world()
     m = selected_model()
     if w == null || m == null { return }
     terrain.fill_seeded(w, seed, biome)
-    if voxel.world_build(w, m) == null {
+
+    // The renderers decide a model's buffers when it is added, and both halves
+    // of this change them: blocks give a model its own vertex array for the
+    // instance attributes, smooth gives it a mesh of its own. So the model
+    // leaves the backend and comes back, keeping its pointer and with it the
+    // selection, the component beside it and its place in the history.
+    backend = viewport_backend()
+    core.backend_remove_model(&backend, m)
+
+    built = true
+    if style == STYLE_SMOOTH {
+        core.model_disable_instancing(m)
+        if voxel.world_sdf_enable(w) {
+            voxel.world_sdf_from_voxels(w)
+            surface = voxel.world_build_surface(w)
+            if surface == null {
+                built = false
+            } else {
+                // The surface is built as a model; only its mesh is wanted,
+                // and a mesh has one owner, so the husk is released without it.
+                handed = surface.mesh
+                surface.mesh = null
+                core.model_free(surface)
+                core.model_set_mesh(m, handed)
+            }
+        } else {
+            built = false
+        }
+    } else {
+        if voxel.world_build(w, m) == null { built = false }
+    }
+
+    core.backend_add_model(&backend, m)
+    if !built {
         say("terrain could not be rebuilt")
         return
     }
+
+    refresh_title()
+    refresh_swatch()
     mark_dirty()
     paint_soon()
-    say("${terrain.biome_name(biome)}: ${voxel.world_visible_count(w)} visible of ${voxel.world_active_count(w)}")
+    say("${terrain.biome_name(biome)} ${style_name(style)}: ${voxel.world_visible_count(w)} visible of ${voxel.world_active_count(w)}")
+}
+
+style_name(style: int) -> string {
+    if style == STYLE_SMOOTH { return "smooth" }
+    return "blocks"
+}
+
+set_terrain_style(style: int) {
+    w = selected_world()
+    if w == null || style == terrain_style() { return }
+    history.history_record(g_history, history.STEP_PROPERTY, selected_model() as ptr,
+                           TERRAIN_STYLE_SLOT, (terrain_style()) as float, (style) as float)
+    history.history_close(g_history)
+    regenerate_terrain(terrain_seed(), terrain_biome(), style)
+    refresh_terrain_section()
 }
 
 terrain_seed() -> long {
     w = selected_world()
     if w == null { return DEFAULT_SEED }
     return voxel.world_origin_seed(w)
+}
+
+// Read off the model rather than remembered beside it. Blocks are one cube
+// drawn many times and smooth is a single surface, so a terrain's style is
+// exactly whether its model is instanced: a fourth list beside the models,
+// the components and the scripts would be a fourth thing to keep in step, and
+// those three going out of step has already caused one bug.
+terrain_style() -> int {
+    m = selected_model()
+    if m == null || m.is_instanced { return STYLE_BLOCKS }
+    return STYLE_SMOOTH
 }
 
 terrain_biome() -> int {
@@ -3119,11 +3211,12 @@ set_terrain_biome(biome: int) {
     history.history_record(g_history, history.STEP_PROPERTY, selected_model() as ptr,
                            TERRAIN_BIOME_SLOT, (terrain_biome()) as float, (biome) as float)
     history.history_close(g_history)
-    regenerate_terrain(terrain_seed(), biome)
+    regenerate_terrain(terrain_seed(), biome, terrain_style())
     refresh_terrain_section()
 }
 
 refresh_terrain_section() {
+    paint_segments(g_style_buttons, STYLE_KINDS, terrain_style())
     paint_segments(g_biome_buttons, terrain.BIOME_COUNT, terrain_biome())
     show_row(TERRAIN_SEED_ROW, (terrain_seed()) as float)
 }
@@ -3543,6 +3636,7 @@ main() {
     g_section_open = calloc(SECTIONS, 4)
     g_shade_toggles = calloc(SHADE_KINDS, 4)
     g_biome_buttons = calloc(terrain.BIOME_COUNT, 4)
+    g_style_buttons = calloc(STYLE_KINDS, 4)
     g_script_buttons = calloc(SCRIPT_KINDS, 4)
     g_preset_buttons = calloc(PRESET_KINDS, 4)
     g_sliders = calloc(ROWS, 4)
@@ -3908,6 +4002,16 @@ main() {
         style_button(caves_btn, "action")
         biomes[terrain.ISLANDS] = islands_btn
         biomes[terrain.CAVES] = caves_btn
+
+        style_row = ui.hstack(g_terrain_body, 6)
+        as_row(style_row)
+        styles = g_style_buttons as int[]
+        blocks_btn = ui.btn(style_row, "Blocks") callback { set_terrain_style(STYLE_BLOCKS) }
+        style_button(blocks_btn, "action")
+        smooth_btn = ui.btn(style_row, "Smooth") callback { set_terrain_style(STYLE_SMOOTH) }
+        style_button(smooth_btn, "action")
+        styles[STYLE_BLOCKS] = blocks_btn
+        styles[STYLE_SMOOTH] = smooth_btn
 
         field_row(g_terrain_body, "seed", (DEFAULT_SEED) as float, TERRAIN_SEED_ROW)
 
