@@ -84,11 +84,14 @@ blender --background scene.blend --python tools/blender/ae3d_export.py -- --out 
 ```
 
 Geometry, materials and animation per object, with a manifest recording the
-source file's hash and a stable id for each object. Exporting the same `.blend`
-twice produces identical bytes, which is why the `.blend` files are committed:
-Blender does not save reproducible files, and a regenerated one exports to a
-different vertex order. `tools/blender/make_fixture.py` and `make_showcase.py`
-are how those files are authored, not something to run before an export.
+source file's hash and a stable id for each object.
+
+The export is deterministic, and Blender is not: regenerating a scene gives the
+same vertices in the same order but a different triangulation and polygon
+order. The exporter makes its output a function of the geometry instead --
+canonical quad diagonals, canonical winding, sorted triangles and sorted vertex
+tables -- so two `.blend` files generated separately from the same script
+export to identical geometry, animation and materials.
 
 Blender keys with Bezier easing by default; the exporter converts it to cubic
 segments the engine samples, and records what Blender itself evaluated the

@@ -13,10 +13,20 @@ and one manifest.json for the lot. The manifest is the first link in the chain
 the source and a stable id per object, so a mesh that arrives wrong in the
 engine can be traced back to the object it was exported from.
 
-Determinism is a requirement, not a nicety. Exporting the same .blend twice
-gives byte-identical output, so a diff means something changed rather than
-that the exporter ran again: objects are sorted by name, floats are formatted
-to a fixed precision, JSON keys are sorted, and nothing records a timestamp.
+Determinism is a requirement, not a nicety, and Blender does not offer it: the
+same scene, generated twice, comes back with the same vertices in the same
+order but a different triangulation and a different polygon order. So the
+output is made a function of the geometry rather than of Blender's internal
+layout. Quads split along their shorter diagonal, each triangle is rotated so
+its smallest corner leads, the triangle list is sorted, and the vertex, uv and
+normal tables are sorted and indexed from that. Objects are sorted by name,
+floats are written to a fixed precision, JSON keys are sorted, and nothing
+records a timestamp.
+
+Two .blend files generated separately from the same script export to identical
+geometry, animation and materials. The only field that moves is the source
+file's own sha256, which is a fact about a file Blender cannot write
+reproducibly.
 
 ## The Blender 5 action API
 
@@ -349,45 +359,103 @@ def build_clip(obj, scene, warnings):
     return clip
 
 
-def write_obj(obj, depsgraph, path, material_name):
+def canonical_winding(corners):
+    """The same triangle written the same way, whichever corner Blender began at.
+
+    Rotated so the smallest corner leads. Rotation is cyclic, so the winding --
+    and therefore the facing -- is unchanged.
+    """
+    first = min(range(3), key=lambda i: corners[i])
+    return tuple(corners[(first + i) % 3] for i in range(3))
+
+
+def triangulate(mesh, warnings, object_name):
+    """Loop-index triangles, chosen the same way on every run.
+
+    Blender's own calc_loop_triangles picks a different diagonal for the same
+    quad between processes: the vertex data is identical run to run and the
+    triangulation is not, which is enough to make an export unreproducible.
+    Vertices and loops are stable, so the split is decided here from geometry
+    alone.
+
+    A quad splits along its shorter diagonal, which is also the better-shaped
+    of the two. Larger polygons fan from their first loop, correct while the
+    polygon is convex; one that is not says so rather than exporting a fold
+    nobody would see until it was rendered.
+    """
+    out = []
+    for polygon in mesh.polygons:
+        loops = list(polygon.loop_indices)
+        count = len(loops)
+        if count < 3:
+            continue
+        if count == 3:
+            out.append((loops[0], loops[1], loops[2]))
+            continue
+        if count == 4:
+            a, b, c, d = (mesh.vertices[mesh.loops[i].vertex_index].co for i in loops)
+            if (a - c).length_squared <= (b - d).length_squared:
+                out.append((loops[0], loops[1], loops[2]))
+                out.append((loops[0], loops[2], loops[3]))
+            else:
+                out.append((loops[1], loops[2], loops[3]))
+                out.append((loops[1], loops[3], loops[0]))
+            continue
+        if not is_convex(mesh, loops, polygon.normal):
+            warnings.append(
+                "%s: a %d-sided face is not convex and was fanned; triangulate it "
+                "in Blender for an exact result" % (object_name, count)
+            )
+        for index in range(1, count - 1):
+            out.append((loops[0], loops[index], loops[index + 1]))
+    return out
+
+
+def is_convex(mesh, loops, normal):
+    count = len(loops)
+    for index in range(count):
+        a = mesh.vertices[mesh.loops[loops[index]].vertex_index].co
+        b = mesh.vertices[mesh.loops[loops[(index + 1) % count]].vertex_index].co
+        c = mesh.vertices[mesh.loops[loops[(index + 2) % count]].vertex_index].co
+        if (b - a).cross(c - b).dot(normal) < 0.0:
+            return False
+    return True
+
+
+def write_obj(obj, depsgraph, path, material_name, warnings):
     """Triangulated geometry, in the OBJ ae3d's loader already reads."""
     evaluated = obj.evaluated_get(depsgraph)
     mesh = evaluated.to_mesh()
     try:
-        mesh.calc_loop_triangles()
         uv_layer = mesh.uv_layers.active.data if mesh.uv_layers.active else None
 
-        # Positions, normals and UVs are deduplicated by value so the file does
-        # not repeat a vertex once per triangle that touches it.
-        positions, normals, uvs = [], [], []
-        position_index, normal_index, uv_index = {}, {}, {}
-        faces = []
-
-        def intern(store, index_of, key):
-            found = index_of.get(key)
-            if found is None:
-                store.append(key)
-                found = len(store)
-                index_of[key] = found
-            return found
-
-        for tri in mesh.loop_triangles:
+        corner_triangles = []
+        for triangle in triangulate(mesh, warnings, obj.name):
             corners = []
-            for loop_index, vertex_index in zip(tri.loops, tri.vertices):
-                vertex = mesh.vertices[vertex_index]
+            for loop_index in triangle:
+                vertex = mesh.vertices[mesh.loops[loop_index].vertex_index]
                 px, py, pz = to_y_up(*vertex.co)
                 nx, ny, nz = to_y_up(*mesh.loops[loop_index].normal)
-                p = intern(positions, position_index,
-                           (rounded(px), rounded(py), rounded(pz)))
-                n = intern(normals, normal_index,
-                           (rounded(nx), rounded(ny), rounded(nz)))
-                if uv_layer:
-                    uv = uv_layer[loop_index].uv
-                    t = intern(uvs, uv_index, (rounded(uv[0]), rounded(uv[1])))
-                else:
-                    t = intern(uvs, uv_index, (0.0, 0.0))
-                corners.append((p, t, n))
-            faces.append(corners)
+                uv = uv_layer[loop_index].uv if uv_layer else (0.0, 0.0)
+                corners.append((
+                    (rounded(px), rounded(py), rounded(pz)),
+                    (rounded(uv[0]), rounded(uv[1])),
+                    (rounded(nx), rounded(ny), rounded(nz)),
+                ))
+            corner_triangles.append(canonical_winding(corners))
+        corner_triangles.sort()
+
+        positions = sorted({corner[0] for tri in corner_triangles for corner in tri})
+        uvs = sorted({corner[1] for tri in corner_triangles for corner in tri})
+        normals = sorted({corner[2] for tri in corner_triangles for corner in tri})
+        position_index = {key: n + 1 for n, key in enumerate(positions)}
+        uv_index = {key: n + 1 for n, key in enumerate(uvs)}
+        normal_index = {key: n + 1 for n, key in enumerate(normals)}
+
+        faces = [
+            [(position_index[c[0]], uv_index[c[1]], normal_index[c[2]]) for c in tri]
+            for tri in corner_triangles
+        ]
 
         lines = ["# exported by ae3d_export.py v%d" % EXPORTER_VERSION,
                  "# object: %s" % obj.name]
@@ -548,7 +616,7 @@ def main(argv):
         material = obj.data.materials[0] if obj.data.materials else None
         material_name = material.name if material else None
 
-        vertices, triangles = write_obj(obj, depsgraph, obj_path, material_name)
+        vertices, triangles = write_obj(obj, depsgraph, obj_path, material_name, warnings)
 
         files = {"mesh": os.path.basename(obj_path)}
         if material:
