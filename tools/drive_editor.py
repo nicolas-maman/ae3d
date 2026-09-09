@@ -318,8 +318,13 @@ def main():
             time.sleep(1.0)
             grew = len(rows_under(tree(args.port), scene))
             post(args.port, "/widget/%d/click" % load)
-            time.sleep(1.8)
-            loaded = len(rows_under(tree(args.port), scene))
+            # Polled, not slept on. Reading a scene back off disk takes as long
+            # as the machine takes, and a sleep that is long enough here is a
+            # guess that fails on a busier one: this check passed alone and
+            # failed inside a full ci run, which is exactly that.
+            widgets, _ = wait_for(args.port,
+                                  lambda ws: len(rows_under(ws, scene)) == saved_rows)
+            loaded = len(rows_under(widgets, scene))
             check("Load brings back what was saved",
                   loaded == saved_rows and grew == saved_rows + 1,
                   "%d saved, %d after adding, %d after loading"
@@ -358,7 +363,8 @@ def main():
                     time.sleep(0.9)
                     moved = tree(args.port)[readout[0]["id"]]["text"].strip()
                     post(args.port, "/widget/%d/click" % load)
-                    time.sleep(2.5)
+                    wait_for(args.port,
+                             lambda ws: len(rows_under(ws, scene)) == saved_rows)
                     water_rows = rows_under(tree(args.port), scene)
                     water_rows.sort(key=lambda w: w["id"])
                     for row in water_rows:

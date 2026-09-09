@@ -554,6 +554,10 @@ First working engine.
 
 ### Editor
 
+- The viewport's ground is a dark blue grey rather than near black. A scene on
+  black looks like it is floating in a void rather than standing in a room, and
+  an empty one is the first thing the editor shows.
+
 - The grid has its axes. A grid of identical lines says how big things are and
   nothing about where they are, so a scene with nothing selected gave no way to
   tell which way round it was. Red along x and blue along z, the colours the
