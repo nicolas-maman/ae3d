@@ -130,6 +130,10 @@ var g_mode_move = 0
 var g_mode_rotate = 0
 var g_mode_scale = 0
 var g_mode_hint = 0
+// The row widget behind each hierarchy entry, so the selected one can be lit.
+// A list with nothing marked is the same list whatever is selected, and the
+// inspector was the only thing that said which object it was describing.
+var g_hier_rows: ptr = null
 var g_history: ptr = null
 // When the last property edit was recorded. A drag delivers a callback per
 // frame, so edits that stop arriving mean the adjustment is over and the undo
@@ -501,12 +505,26 @@ focus_selection() {
     say("framed ${core.text(m.name)}")
 }
 
+// What kind of thing a row is, in one character. An editor's outliner says
+// what an object is before you select it; this list said nothing at all, so a
+// water surface and a cube were two words in the same grey.
+row_marker(index: int) -> string {
+    if g_components == null { return "|" }
+    if index < 0 || index >= list.size(g_components) { return "|" }
+    c = list.get_raw(g_components, index) as *Component
+    if c == null { return "|" }
+    if c.kind == behaviour.KIND_WATER { return "~" }
+    if c.kind == behaviour.KIND_VOXEL { return "#" }
+    if c.kind == behaviour.KIND_LIGHT { return "*" }
+    return "|"
+}
+
 row_label(index: int) -> string {
     m = model_at(index)
     if m == null { return "" }
     name = core.text(m.name)
     if name == "" { name = "object ${m.id}" }
-    return "  ${name}"
+    return " ${row_marker(index)}  ${name}"
 }
 
 extern malloc(size: int) -> ptr
@@ -587,10 +605,41 @@ release_rows() {
     list.clear(g_rows)
 }
 
+// The selected row carries the accent, the rest the panel's own colour. Set as
+// a colour rather than a class, because the sheet paints a widget when it is
+// built and a class added later does not repaint it.
+paint_selection() {
+    if g_hier_rows == null { return }
+    count = list.size(g_hier_rows)
+    i = 0
+    while i < count {
+        slot = list.get_raw(g_hier_rows, i) as int[]
+        handle = slot[0]
+        if i == g_selected {
+            ui.style_bg_color(handle, 0.153, 0.310, 0.573, 1.0)
+        } else {
+            ui.style_bg_color(handle, 0.145, 0.165, 0.200, 1.0)
+        }
+        i = i + 1
+    }
+}
+
+release_hier_rows() {
+    if g_hier_rows == null { return }
+    count = list.size(g_hier_rows)
+    i = 0
+    while i < count {
+        free(list.get_raw(g_hier_rows, i))
+        i = i + 1
+    }
+    list.clear(g_hier_rows)
+}
+
 rebuild_rows() {
     mark_dirty()
     if g_rows == null { g_rows = list.new() }
     release_rows()
+    release_hier_rows()
     count = 0
     if g_models != null { count = list.size(g_models) }
     i = 0
@@ -599,6 +648,7 @@ rebuild_rows() {
         i = i + 1
     }
     if g_hierarchy != null { ui.listbox_update(g_hierarchy, g_rows) }
+    paint_selection()
 }
 
 // The inspector reads the selected model rather than keeping its own copy, so a
@@ -713,6 +763,7 @@ echo_row(index: int, value: float) {
 select_object(index: int) {
     mark_dirty()
     g_selected = index
+    paint_selection()
     sync_inspector()
 
     if g_hierarchy != null && index >= 0 && !g_syncing {
@@ -2687,6 +2738,7 @@ main() {
     g_detached_models = list.new()
     g_detached_components = list.new()
     g_detached_scripts = list.new()
+    g_hier_rows = list.new()
     g_console = calloc(CONSOLE_LINES, 4)
     g_history = history.history_new()
     g_helpers = list.new()
@@ -2750,6 +2802,7 @@ main() {
         g_hierarchy = ui.listbox(left, 4) callback |item: ptr, index: int, row: int| {
             entry = ui.text(row, row_label(index))
             ui.add_css_class(entry, "value")
+            list.add_raw(g_hier_rows, index_handle(row))
         }
         ui.on_select(g_hierarchy) callback |index: int| {
             select_object(index)
