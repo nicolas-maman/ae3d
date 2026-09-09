@@ -1,42 +1,44 @@
 # The agent channel
 
-An ae3d program with `AE3D_AGENT` set opens a line-oriented JSON channel on
-loopback, and an agent drives the engine through it: query the scene, seek an
-animation, hold a frame still, take a snapshot of a known frame, or ask why a
-model is not on screen.
+An ae3d program started with `AE3D_AGENT` opens a line-oriented JSON channel on
+loopback. Through it an agent reads the scene, changes it, holds a frame still,
+reads the pixels that frame produced, and asks why a model is not on screen.
 
     AE3D_AGENT=7911 ./build/spinning_cube          # a fixed port
     AE3D_AGENT=auto ./build/spinning_cube          # one the system picks
 
 `auto` prints the port it was given and writes it to `AE3D_AGENT_PORT_FILE`
-when that is set, which is how a script finds it.
+when that variable is set, which is how a script finds it.
 
-Nothing is open unless `AE3D_AGENT` asks for it. A build without it pays one
-load of a global per frame; `tests/test_agent_cost` measures the rest.
+Nothing is opened unless `AE3D_AGENT` asks for it. A run without it pays one
+load of a global per frame; `tests/test_agent_cost` measures what an open
+channel costs.
 
-## Talking to it
+## The protocol
 
-One JSON object per line, in and out. Every answer carries back the `id` of the
-request it answers, so a client may pipeline:
+One JSON object per line, in both directions. Every answer carries back the
+`id` of the request it answers, so a client may pipeline:
 
     {"id": 1, "op": "scene.tree"}
     {"id": 1, "ok": true, "result": {"count": 1, "models": [...]}}
 
-A failure is an answer too, never a dropped connection:
+A failure is an answer, not a dropped connection:
 
     {"id": 2, "ok": false, "error": "no model at that index"}
 
-There is a client in `tools/ae3d_agent.py`:
+`tools/ae3d_agent.py` is a client:
 
     python3 tools/ae3d_agent.py --port 7911 scene.tree
+    python3 tools/ae3d_agent.py --port 7911 model.set index=0 position='[2,0,0]'
     python3 tools/ae3d_agent.py --port 7911 trace.model object=Spinner
-    python3 tools/ae3d_agent.py --port 7911 anim.set name=spin time=0.5 playing=false
 
-One client at a time. A second is told so rather than silently interleaved with
-the first.
+Arguments are `key=value`, read as JSON where they parse as JSON. The client
+exits non-zero when the engine answers `ok: false`.
+
+One client at a time. A second is refused with a message rather than
+interleaved with the first.
 
 ## Ops
-
 
 | op | arguments | what it does |
 |---|---|---|
@@ -70,53 +72,107 @@ the first.
 
 ## Frames an agent can trust
 
-A query against a free-running engine races it: the answer describes whichever
-frame happened to be in flight. `frame.pause` stops that. A held frame still
-draws, so the scene stays queryable and snapshottable, but time and the frame
-counter stop -- read the same frame twice and get the same answer.
+A query against a running engine races it: the answer describes whichever frame
+was in flight. `frame.pause` stops that. A held frame still draws, so the scene
+stays queryable and can still be captured, but time and the frame counter stop.
+Read the same frame twice and the answer is the same.
 
     frame.pause
     frame.step count=10      -> {"stepped_from": 411, "stepped": 10}
     snapshot path=/tmp/x.png -> answered once the file exists
     frame.resume
 
-`frame.step` pauses first for the same reason. Counting frames off a loop that
-is still running measures the round trip as much as the request.
+`frame.step` pauses first for the same reason: counting frames off a running
+loop measures the round trip as much as the request.
 
 `snapshot` answers when the file is on disk, not when the request was accepted.
-An `ok` before that would be a claim about a file the client would then fail to
-open.
 
-## Finding out why something is not on screen
+## Reading pixels
 
-`trace.model` follows one model through every stage between the Blender object
-it was authored as and the pixels it should have produced, and names the first
-stage where it stopped being right:
+`frame.capture` reads the finished frame into the engine; `frame.pixel` and
+`frame.region` answer questions about it. Regions are summarised where the
+pixels are, so a 1280x720 rectangle costs an answer of about twenty bytes
+rather than 3.7MB.
+
+    frame.capture                          -> {"width": 1024, "height": 768}
+    frame.pixel x=512 y=384                -> {"r": 133, "g": 85, "b": 70}
+    frame.region x=412 y=284 width=200 height=200
+                                           -> {"coverage": 0.991, "mean": [...]}
+
+`frame.hold` keeps the current capture as a reference and `frame.diff` reports
+what changed against it, which turns "did that command do anything" into a
+number:
+
+    model.set index=0 visible=false
+    frame.step count=2
+    frame.capture
+    frame.diff  -> {"changed": 67263, "fraction": 0.086}
+
+Capture needs a frame it can read. The OpenGL backend and the editor both
+provide one; a windowed Vulkan engine has no swapchain readback and says so.
+
+## Why a model is not on screen
+
+`trace.model` follows one model from the Blender object it was authored as to
+the pixels it produced, and names the first stage where it stopped being right:
 
     $ python3 tools/ae3d_agent.py --port 7911 trace.model object=Spinner
-    ok: True   broke_at: -
-      source      n/a  no manifest entry, so it has no Blender source
-      asset       n/a  no exported files to check
-      mesh        ok   {"triangles": 12}
+    ok=True  broke_at=-
+      source      ok   {"object": "Spinner", "blend": "spin.blend"}
+      asset       ok   {"exported_triangles": 12}
+      mesh        ok   {"triangles": 12, "matches_export": true}
       node        ok   {"index": 0, "visible_flag": true}
-      animation   ok   {"bound": false}
+      animation   ok   {"bound": true, "clip": "SpinnerAction"}
       visibility  ok   {"in_frustum": true, "on_screen": true}
+      pixels      ok   {"coverage": 0.557}
 
-The six stages are `source`, `asset`, `mesh`, `node`, `animation` and
-`visibility`. A stage carries `applicable: false` where it does not apply --
-a cube built by `loader.cube` has no Blender object behind it and never will,
-and that is not a fault.
+The seven stages are `source`, `asset`, `mesh`, `node`, `animation`,
+`visibility` and `pixels`. Visibility says a model should be on screen; pixels
+says whether anything was drawn where it projects. Only the second is evidence.
 
-The distinction the trace exists to make is between bugs that share one
-symptom. A model that is not visible was exported empty, or loaded and never
-added, or added and hidden, or behind the camera, or on screen and a third of
-a pixel across. Those are five different things to fix.
+A stage carries `applicable: false` where it does not apply: a cube built by
+`loader.cube` has no Blender object behind it, and that is not a fault.
+
+The trace exists to separate bugs that share one symptom. A model that cannot
+be seen was exported empty, or loaded and never added, or added and hidden, or
+bound to a clip with no channels, or behind the camera, or drawn at a third of
+a pixel. Those are six different repairs.
+
+## The whole scene at once
+
+`world` returns every entity and the relations between them, so an agent does
+not join `scene.tree`, `anim.list` and `trace.model` by hand:
+
+    blend:c8eb41af  --exported_to--> asset:c8eb41af
+    asset:c8eb41af  --loaded_as-->   model:0
+    model:0         --has_mesh-->    mesh:0
+    clip:spin       --drives-->      model:0
+    camera          --sees-->        model:0
+
+## Blender
+
+`tools/blender/ae3d_agent_server.py` opens the same protocol inside a running
+Blender, so the client above drives both:
+
+    blender --background scene.blend --python tools/blender/ae3d_agent_server.py -- --port 7800 --serve 60
+
+    python3 tools/ae3d_agent.py --port 7800 file.info
+    python3 tools/ae3d_agent.py --port 7800 frame.set frame=13
+    python3 tools/ae3d_agent.py --port 7800 object.get name=Spinner
+    python3 tools/ae3d_agent.py --port 7800 export out=build/assets
+
+Reads after `frame.set` are of the evaluated pose, so an agent can seek and
+look rather than reason about what a curve would produce. `export` runs
+`ae3d_export.py` against the open file in the same process.
+
+Requests are served on Blender's own thread. `bpy` is not thread-safe, so the
+reader thread only queues lines and the main thread drains them. Background
+Blender runs no timers, which is what `--serve` is for.
 
 ---
 
-Generated from the engine's own command table by
+This page is generated from the engine's own command table:
 
-    ./build/agent_schema | python3 tools/ae3d_agent.py --docs > docs/agent.md
+    ./scripts/gen_agent_docs.sh
 
-so this page and the `help` an engine answers with cannot describe different
-engines. Do not edit it by hand.
+`ci.sh` checks it is current. Do not edit it by hand.
