@@ -34,8 +34,24 @@ var g_sock: ptr = null
 var g_stage = 0
 var g_checks = 0
 var g_failures = 0
+// The three models this suite hands the engine. engine_add_model borrows, so
+// main frees them after the engine, which is what releases their GPU handles.
+var g_good: ptr = null
 var g_hidden: ptr = null
 var g_behind: ptr = null
+// The model the pipeline loaded and nobody added. It is the subject of one of
+// these checks, so it has to outlive on_start; the engine never sees it, so
+// nothing else will free it.
+var g_orphan: ptr = null
+// The clip the player reads. A player borrows its clip, so this outlives the
+// engine and is released after it.
+var g_clip: ptr = null
+
+free_model(handle: ptr) {
+    if handle == null { return }
+    assets.provenance_forget(handle as *Model)
+    core.model_free(handle as *Model)
+}
 
 check(name: string, condition: bool) {
     g_checks = g_checks + 1
@@ -53,8 +69,12 @@ ask_send(line: string) {
 ask_receive() -> ptr {
     if g_sock == null { return null }
     if tcp.tcp_poll_raw(g_sock, 0) <= 0 { return null }
-    text = tcp.tcp_receive_raw(g_sock, 65536)
-    if text == null { return null }
+    // tcp_receive_n_raw, not tcp_receive_raw: the buffer is the caller's, and
+    // only this one says so. The plain call returns an owned string typed as a
+    // borrowed one, so nothing frees it and every answer read here left eighty
+    // kilobytes behind. Filed upstream.
+    text, _length, err = tcp.tcp_receive_n_raw(g_sock, 65536)
+    if err != "" || text == null { return null }
     return json.parse_raw(text)
 }
 
@@ -105,6 +125,15 @@ main() {
         return
     }
     engine.engine_free(e)
+    // After the engine, because freeing the renderer is what releases the GPU
+    // handles these were given. The orphan the engine never saw goes with them.
+    free_model(g_good)
+    free_model(g_hidden)
+    free_model(g_behind)
+    free_model(g_orphan)
+    if g_clip != null { anim.clip_free(g_clip as *Clip) }
+    // The records outlive the manifest on purpose, so they end here.
+    assets.provenance_release()
 
     if g_stage < 9 {
         println("FAIL the exchange did not finish (stopped at stage ${g_stage})")
@@ -130,15 +159,17 @@ on_start(data: ptr) {
     good = assets.entry_load_model(m, good_entry)
     if good != null {
         engine.engine_add_model(e, good)
+        g_good = good as ptr
         clip = assets.entry_load_clip(m, good_entry)
         if clip != null {
+            g_clip = clip as ptr
             engine.engine_add_animation(e, "spinner", anim.player_new(clip), good)
         }
     }
 
     // Loaded from the manifest and never handed to the renderer. This is the
     // failure that looks like nothing at all: no error, no warning, no model.
-    assets.entry_load_model(m, good_entry)
+    g_orphan = assets.entry_load_model(m, good_entry) as ptr
 
     // In the scene, but switched off.
     hidden = loader.cube(1.0)

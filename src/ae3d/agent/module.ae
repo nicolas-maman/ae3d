@@ -215,7 +215,20 @@ answer_one_read(c: *Context, d: *Deferred) {
 }
 
 context_free(c: *Context) {
-    if c != null { heap.free(c) }
+    if c == null { return }
+    // A read waiting on a frame that never arrived is still in the queue: the
+    // context outlives the answer only when the program stops mid-exchange.
+    if c.deferred != null {
+        count = list.size(c.deferred)
+        i = 0
+        while i < count {
+            d = list.get_raw(c.deferred, i) as *Deferred
+            if d != null { heap.free(d) }
+            i = i + 1
+        }
+        list.free(c.deferred)
+    }
+    heap.free(c)
 }
 
 start() -> bool {
@@ -1209,9 +1222,14 @@ trace_result(c: *Context, m: *Model, p: *Provenance) -> ptr {
         measured = region_result(box.x as int, box.y as int,
                                  box.z as int, box.w as int, 0, 8)
         if measured != null {
-            json.object_set_raw(pixels, "region", measured)
+            // Read before handing it over. The object takes ownership of what
+            // is set on it, and reading the child back out afterwards found
+            // nothing: the trace blamed the pixels stage of a model that was
+            // plainly drawn, with the coverage it had just measured sitting in
+            // the answer it printed.
             found = json.object_get_raw(measured, "coverage")
             if found != null { pixels_ok = json.get_number(found) > 0.0 }
+            json.object_set_raw(pixels, "region", measured)
         }
         if !pixels_ok {
             json.object_set_raw(pixels, "note",

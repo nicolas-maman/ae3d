@@ -24,7 +24,7 @@ exports (
     provenance_by_object, provenance_model,
     provenance_id, provenance_object, provenance_source, provenance_mesh_file,
     provenance_animation_file, provenance_expected_vertices,
-    provenance_expected_triangles
+    provenance_expected_triangles, provenance_forget, provenance_release
 )
 
 struct Entry {
@@ -465,11 +465,44 @@ struct Provenance {
     expected_triangles: int
 }
 
+// A record outlives the manifest it came from: every caller frees the manifest
+// as soon as it has its models, and the trace runs long after. So the records
+// live here rather than in the Manifest, and the program that loaded them says
+// when they are done with `provenance_release`. A program that never loads a
+// manifest never allocates the table.
 var g_provenance: ptr = null
 
 provenance_table() -> ptr {
     if g_provenance == null { g_provenance = list.new() }
     return g_provenance
+}
+
+provenance_forget(m: *Model) {
+    if m == null || g_provenance == null { return }
+    i = 0
+    count = list.size(g_provenance)
+    while i < count {
+        p = list.get_raw(g_provenance, i) as *Provenance
+        if p != null && p.model == m {
+            list.remove(g_provenance, i)
+            heap.free(p)
+            return
+        }
+        i = i + 1
+    }
+}
+
+provenance_release() {
+    if g_provenance == null { return }
+    i = 0
+    count = list.size(g_provenance)
+    while i < count {
+        p = list.get_raw(g_provenance, i) as *Provenance
+        if p != null { heap.free(p) }
+        i = i + 1
+    }
+    list.free(g_provenance)
+    g_provenance = null
 }
 
 provenance_record(m: *Model, id: string, object: string, source: string,

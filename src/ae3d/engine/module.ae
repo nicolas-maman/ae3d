@@ -238,22 +238,17 @@ engine_set_post(e: *Engine, fxaa: bool, bloom: bool, threshold: float, intensity
     if bloom { bl = 1 }
     e.backend_set_post(e.backend_state, fx, bl, threshold, intensity)
 }
-// Draw the scene smaller than the window. The answer is the scale the backend
-// adopted rather than the one asked for, so a program stepping down a quality
-// ladder is told which rungs exist on the renderer it happens to have got.
 // Shadows are a property of the scene rather than of the moment a program
 // happens to ask for them, so this is remembered and applied once the backend
-// has a device to build the map on. Both backends drop renderer state at init
-// -- the OpenGL map needs a live context and the Vulkan one is wired into
-// descriptor sets that init recreates -- so a program that configured its
-// engine before engine_run was talking to nothing.
+// has a device to build the map on. Both backends drop renderer state at init,
+// since the OpenGL map needs a live context and the Vulkan one is wired into
+// descriptor sets that init recreates, so a program that configured its engine
+// before engine_run was talking to nothing.
 engine_set_shadows(e: *Engine, on: bool) {
     e.shadows = on
     if e.running { apply_shadows(e) }
 }
 
-// What the backend managed rather than what was asked for: a device that could
-// not build the map reports false here.
 // The air the scene is seen through. Kept here rather than set straight
 // through, for the same reason shadows are: a backend has no device to hold it
 // on until the window is open.
@@ -274,6 +269,8 @@ engine_set_shadow_distance(e: *Engine, metres: float) {
 
 engine_shadow_distance(e: *Engine) -> float { return e.shadow_distance }
 
+// What the backend managed rather than what was asked for: a device that could
+// not build the map reports false here.
 engine_shadows(e: *Engine) -> bool {
     if !e.running { return e.shadows }
     return e.backend_shadows(e.backend_state) == 1
@@ -285,6 +282,9 @@ apply_shadows(e: *Engine) {
     e.backend_set_shadows(e.backend_state, flag)
 }
 
+// Draw the scene smaller than the window. The answer is the scale the backend
+// adopted rather than the one asked for, so a program stepping down a quality
+// ladder is told which rungs exist on the renderer it happens to have got.
 engine_set_render_scale(e: *Engine, scale: float) -> float {
     if e.backend_state == null { return 1.0 }
     return e.backend_set_render_scale(e.backend_state, scale)
@@ -359,6 +359,10 @@ engine_remove_light(e: *Engine, light: *Light) {
 }
 engine_light(e: *Engine) -> *Light { return e.light as *Light }
 
+// The engine BORROWS a model: it draws it and forgets it when it shuts down,
+// and never frees it. Whoever built it frees it, after the engine is gone. The
+// renderer releases the list it kept them in and nothing else, which is what
+// lets the same model be handed to two backends.
 engine_add_model(e: *Engine, m: *Model) {
     e.backend_add_model(e.backend_state, m)
 }

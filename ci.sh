@@ -232,6 +232,21 @@ for module in examples/lib/*/; do
     rm -f "$probe" "${probe%.ae}.c"
 done
 
+# The scripts an object can be given. They are built before the suites because
+# a script is a separate library the test opens at runtime rather than
+# something linked into it, which is the whole point of one.
+step "scripts"
+for script_source in resources/scripts/*.ae; do
+    [ -e "$script_source" ] || continue
+    script_name="$(basename "$script_source" .ae)"
+    if ./scripts/build_script.sh "$script_source" >/tmp/ae3d_script.log 2>&1; then
+        pass "script $script_name"
+    else
+        fail "script $script_name"
+        sed 's/^/        /' /tmp/ae3d_script.log | head -10
+    fi
+done
+
 step "test suites"
 for suite in tests/test_*.ae; do
     name="$(basename "$suite" .ae)"
@@ -319,12 +334,6 @@ check_editor_run() {
     # backend per scene and took the keyboard with it, which makes it unusable
     # beside anything else. The window still exists and still answers the test
     # server; it is only never ordered to the front.
-    #
-    # These bounded runs only. The driver leg cannot use it: under headless the
-    # editor stops answering part way through, stuck in a CoreAnimation layer
-    # display that never returns (aether-lang-dev/aether-ui#123). A bounded run
-    # finishes headless in two seconds, so the six windows this file used to
-    # open are down to the two the driver needs.
     AETHER_UI_HEADLESS=1 \
     AE3D_EDITOR_BACKEND="$editor_backend" \
     AE3D_EDITOR_FRAMES=30 \
