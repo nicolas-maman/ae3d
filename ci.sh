@@ -243,6 +243,15 @@ check_editor_run() {
         # painted looks exactly like one showing a dark material.
         fail "$name (the colour chip is not the material's colour)"
         sed 's/^/        /' "$report"
+    elif [ "$(sed -n 's/^first_fps //p' "$report")" -lt 5 ]; then
+        # The first frame rate the bar ever shows. It opened on 0 and climbed
+        # through 1 and 2, because nothing was written until an interval had
+        # been measured and the running average started from nothing: the first
+        # thing the editor told anyone was that it managed two frames a second.
+        # The editor writes down what it showed first, because by the time a
+        # driver can ask, the average has climbed to something plausible.
+        fail "$name (the bar opened on $(sed -n 's/^first_fps //p' "$report") fps)"
+        sed 's/^/        /' "$report"
     elif [ "$(sed -n 's/^unreached_shading //p' "$report")" != "0" ]; then
         # A shading switch that sets a global and reaches no model looks
         # exactly like one that works: the only witness is a frame nobody

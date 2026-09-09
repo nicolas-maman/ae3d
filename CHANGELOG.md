@@ -578,6 +578,14 @@ First working engine.
 
 ### Editor
 
+- The status bar does not open on a rate the editor is not running at. It wrote
+  its first sample before a single frame interval had been measured, and the
+  running average it reports started from nothing, so the first thing the
+  editor told anyone was 0 fps and then 1 and then 2 while frames were arriving
+  sixty times a second. Nothing is written until there is something true to
+  write, and the average is seeded with its first measurement rather than
+  climbing to it.
+
 - Sections fold. The inspector is eleven of them in one column, which is more
   than fits in the window, and a person working on a material should not have
   to scroll past a camera to reach the next one. Clicking a header folds what
@@ -667,6 +675,12 @@ First working engine.
   after another with nothing between them.
 
 ### Tooling
+
+- The report records the first frame rate the bar ever showed, and `ci.sh`
+  refuses an implausible one. A driver cannot check this: by the time anything
+  can ask, the average has climbed to something plausible, and a check on what
+  the bar says now passes against a bar that opened on nothing. The first
+  version of the check did exactly that and passed its own sabotage.
 
 - The report says how many shading switches reach no model, and the driver
   presses one. A switch that sets a global and reaches nothing looks exactly
