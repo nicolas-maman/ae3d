@@ -20,6 +20,7 @@ exports (
     engine_add_model, engine_remove_model, engine_set_light, engine_light,
     engine_camera, engine_window, engine_backend_name,
     engine_set_size, engine_set_title, engine_set_msaa, engine_set_decorated, engine_set_post,
+    engine_set_render_scale,
     engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
     engine_set_skybox, engine_load_texture,
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
@@ -45,6 +46,7 @@ struct Engine {
     backend_set_skybox: fn(ptr, ptr)
     backend_update_viewport: fn(ptr, int, int)
     backend_set_post: fn(ptr, int, int, float, float)
+    backend_set_render_scale: fn(ptr, float) -> float
     backend_cleanup: fn(ptr)
     backend_name: string
 
@@ -150,6 +152,7 @@ bind_backend(e: *Engine, b: Backend) {
     e.backend_load_texture = b.load_texture
     e.backend_set_skybox = b.set_skybox
     e.backend_set_post = b.set_post
+    e.backend_set_render_scale = b.set_render_scale
     e.backend_update_viewport = b.update_viewport
     e.backend_cleanup = b.cleanup
     e.backend_name = b.name
@@ -188,6 +191,14 @@ engine_set_post(e: *Engine, fxaa: bool, bloom: bool, threshold: float, intensity
     if bloom { bl = 1 }
     e.backend_set_post(e.backend_state, fx, bl, threshold, intensity)
 }
+// Draw the scene smaller than the window. The answer is the scale the backend
+// adopted rather than the one asked for, so a program stepping down a quality
+// ladder is told which rungs exist on the renderer it happens to have got.
+engine_set_render_scale(e: *Engine, scale: float) -> float {
+    if e.backend_state == null { return 1.0 }
+    return e.backend_set_render_scale(e.backend_state, scale)
+}
+
 // The two backend capabilities the engine held a hook for and never called.
 // Both backends implement them, core exports the skybox constructors, and the
 // vtable entries were copied into the Engine at bind time, so everything was

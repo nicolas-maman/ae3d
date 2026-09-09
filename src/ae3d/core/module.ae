@@ -56,6 +56,7 @@ exports (
     depth_test, set_depth_test, next_model_id, backend_init, backend_render,
     backend_add_model, backend_remove_model, backend_load_texture, backend_set_skybox,
     backend_update_viewport, backend_set_post, backend_set_clear_color, backend_set_shadows,
+    backend_set_render_scale,
     backend_shadows,
     backend_add_light, backend_remove_light, backend_draw_calls, backend_frame_pixels,
     backend_cleanup, Camera, Plane, Frustum, camera_new,
@@ -349,6 +350,12 @@ struct Backend {
     set_skybox:      fn(ptr, ptr)
     update_viewport: fn(ptr, int, int)
     set_post:        fn(ptr, int, int, float, float)
+    // Returns the scale actually adopted, not the one asked for. A backend
+    // that cannot draw smaller than its window returns 1.0, and one that can
+    // returns what it clamped to. A caller stepping down a quality ladder can
+    // then tell a rung that helped from one that did nothing, and spend its
+    // next step somewhere that will.
+    set_render_scale: fn(ptr, float) -> float
     set_clear_color: fn(ptr, float, float, float)
     set_shadows:     fn(ptr, int)
     shadows:         fn(ptr) -> int
@@ -847,6 +854,15 @@ backend_draw_calls(b: *Backend) -> int {
 // out without the caller knowing which renderer produced it.
 backend_frame_pixels(b: *Backend) -> ptr {
     return b.frame_pixels(b.state)
+}
+
+// Draw the scene smaller than the window and let the composite upscale it.
+// Cost per frame is dominated by pixels shaded, so half the width is a quarter
+// of the work. The answer is what the backend adopted: a silent no-op would
+// have a caller believe a rung of its quality ladder helped when it changed
+// nothing, and stop stepping.
+backend_set_render_scale(b: *Backend, scale: float) -> float {
+    return b.set_render_scale(b.state, scale)
 }
 
 backend_set_post(b: *Backend, fxaa: bool, bloom: bool, threshold: float, intensity: float) {

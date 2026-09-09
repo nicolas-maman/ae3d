@@ -143,6 +143,20 @@ main() {
     gl.renderer_set_render_scale(renderer, 4.0)
     check("a scale above 1 is clamped", gl.renderer_render_scale(renderer) == 1.0)
 
+    // Through the vtable, which is how a scene that does not know its renderer
+    // reaches this. The answer is the scale adopted rather than the one asked
+    // for: a backend that cannot draw smaller than its window answers 1.0, and
+    // a caller stepping down a quality ladder needs to be able to tell a rung
+    // that helped from one that did nothing at all.
+    adopted = core.backend_set_render_scale(&backend, 0.5)
+    check("the backend reports the scale it adopted", adopted == 0.5)
+    check("and the renderer agrees with what the backend reported",
+          gl.renderer_render_scale(renderer) == adopted)
+
+    impossible = core.backend_set_render_scale(&backend, 8.0)
+    check("an impossible request comes back as what was really used",
+          impossible == 1.0 && gl.renderer_render_scale(renderer) == 1.0)
+
     core.backend_cleanup(&backend)
     offscreen.target_destroy(target)
     offscreen.context_destroy(context)
