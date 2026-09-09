@@ -108,6 +108,25 @@ else
     skip "exported fixtures" "no Blender"
 fi
 
+step "no two surfaces share a plane"
+# Z-fighting is two faces in one plane close enough in depth that rounding
+# decides which is in front. Looked for on screen it depends on where the
+# camera happens to be; looked for in the geometry, either two faces share a
+# plane and overlap or they do not. Runs against the committed export, so it
+# needs no Blender.
+if [ -n "$PYTHON" ]; then
+    for exported in resources/blender/zombie_street resources/blender/showcase; do
+        if $PYTHON tools/blender/check_coplanar.py "$exported" >/tmp/ae3d_coplanar.log 2>&1; then
+            pass "$exported has no coplanar overlaps"
+        else
+            fail "$exported has surfaces that would fight over the same depth"
+            sed 's/^/        /' /tmp/ae3d_coplanar.log | head -12
+        fi
+    done
+else
+    skip "coplanar surfaces" "no python3"
+fi
+
 step "docs/agent.md matches the engine's command table"
 # A doc written by hand beside a protocol is a doc that describes last month's
 # protocol. This one is generated from the same table `help` answers with, so

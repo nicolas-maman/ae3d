@@ -124,7 +124,7 @@ def build_street(parts, surfaces):
     # Nothing here shares a plane with anything else: the road sinks into the
     # ground and the kerbs sink into the road, so no two faces are coplanar and
     # the depth test never has to choose between them.
-    ground = block("Street_Ground", (-46.0, -34.0, -0.55), (46.0, 34.0, -0.25),
+    ground = block("Street_Ground", (-46.0, -34.0, -0.92), (46.0, 34.0, -0.25),
                    surfaces["tarmac"], repeats=0.12)
     ground.location = (6.0, 0.0, 0.0)
     parts["Street_Ground"] = ground
@@ -134,9 +134,13 @@ def build_street(parts, surfaces):
     road.location = (6.0, 0.0, 0.0)
     parts["Street_Road"] = road
 
-    for side, y in (("L", 4.95), ("R", -4.95)):
+    # Longer than the road and wider than the gap it fills, so its ends and its
+    # far edge run past what they meet rather than stopping level with it: two
+    # faces that stop in the same plane are two faces the depth test has to
+    # choose between.
+    for side, y in (("L", 5.0), ("R", -5.0)):
         kerb = block("Street_Path" + side,
-                     (-34.0, -1.55, -0.45), (34.0, 1.55, 0.15),
+                     (-35.0, -1.6, -0.45), (35.0, 1.6, 0.15),
                      surfaces["paving"], repeats=0.75, bevel=0.02)
         kerb.location = (6.0, y, 0.0)
         parts["Street_Path" + side] = kerb
@@ -146,20 +150,26 @@ def build_street(parts, surfaces):
     far = ((-22.0, 7.0, 12.5, "brick"), (-9.0, 8.0, 9.0, "concrete"),
            (2.0, 6.5, 13.5, "brick"), (13.0, 7.5, 10.0, "concrete"),
            (25.0, 7.0, 15.0, "brick"))
+    # Each is sunk to a depth of its own. Buildings founded at the same level
+    # share the plane of their own footings wherever two of them touch, and one
+    # sitting exactly on the ground shares that.
     for index, (x, depth, height, surface) in enumerate(far):
         wall = block("Street_BlockL%d" % index,
-                     (-5.6, 0.0, 0.0), (5.6, depth, height),
+                     (-5.6, 0.0, -0.4 - index * 0.03), (5.6, depth, height),
                      surfaces[surface], repeats=0.35)
-        wall.location = (x, 6.5, 0.0)
+        # A terrace is not machined: each front sets back a few centimetres
+        # from its neighbour, which is also what keeps two of them from sharing
+        # the plane they face the street in.
+        wall.location = (x, 6.55 + index * 0.04, 0.0)
         parts["Street_BlockL%d" % index] = wall
 
     near = ((-16.0, 8.0, 11.0, "concrete"), (2.0, 9.0, 14.0, "brick"),
             (20.0, 8.0, 12.0, "concrete"))
     for index, (x, depth, height, surface) in enumerate(near):
         wall = block("Street_BlockR%d" % index,
-                     (-6.5, -depth, 0.0), (6.5, 0.0, height),
+                     (-6.5, -depth, -0.55 - index * 0.03), (6.5, 0.0, height),
                      surfaces[surface], repeats=0.35)
-        wall.location = (x, -7.5, 0.0)
+        wall.location = (x, -7.55 - index * 0.04, 0.0)
         parts["Street_BlockR%d" % index] = wall
 
     for index, x in enumerate((-14.0, 0.0, 14.0)):

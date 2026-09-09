@@ -700,11 +700,37 @@ region_result(x: int, y: int, width: int, height: int,
     return out
 }
 
+// A loaded mesh carries its materials in its groups rather than in the single
+// slot a primitive uses, and the first group is what the model is surfaced
+// with wherever it has only one.
+model_surface(m: *Model) -> *Material {
+    if m.material != null { return m.material }
+    if core.model_group_count(m) > 0 {
+        group = core.model_group(m, 0)
+        if group != null { return group.material }
+    }
+    return null
+}
+
+// Where on screen to look for a model, clipped to the frame.
+//
+// A road sixty metres long has its centre behind the camera while it fills the
+// bottom of the picture, so projecting the centre and asking whether that point
+// landed in the frame answers no for something plainly there. What can be said
+// about such a model is that part of it is in view, and the part of the frame
+// to sample is all of it.
 model_screen_box(c: *Context, m: *Model, box: *Vec4) -> bool {
     if c.camera == null { return false }
     cam = c.camera as *Camera
+
     centre = core.camera_world_to_screen(cam, m.bounding_center, c.width, c.height)
-    if centre.w <= 0.0001 { return false }
+    if centre.w <= 0.0001 {
+        box.x = 0.0
+        box.y = 0.0
+        box.z = c.width * 1.0
+        box.w = c.height * 1.0
+        return true
+    }
 
     edge = core.v3_add(m.bounding_center, core.v3_mul(cam.right, m.bounding_radius))
     projected = core.camera_world_to_screen(cam, edge, c.width, c.height)
@@ -712,10 +738,20 @@ model_screen_box(c: *Context, m: *Model, box: *Vec4) -> bool {
     if radius < 0.0 { radius = 0.0 - radius }
     if radius < 1.0 { radius = 1.0 }
 
-    box.x = centre.x - radius
-    box.y = centre.y - radius
-    box.z = radius * 2.0
-    box.w = radius * 2.0
+    left = centre.x - radius
+    top = centre.y - radius
+    right = centre.x + radius
+    bottom = centre.y + radius
+    if left < 0.0 { left = 0.0 }
+    if top < 0.0 { top = 0.0 }
+    if right > c.width * 1.0 { right = c.width * 1.0 }
+    if bottom > c.height * 1.0 { bottom = c.height * 1.0 }
+    if right <= left || bottom <= top { return false }
+
+    box.x = left
+    box.y = top
+    box.z = right - left
+    box.w = bottom - top
     return true
 }
 
@@ -991,12 +1027,28 @@ visibility_detail(c: *Context, m: *Model, reached: ptr) -> bool {
     if in_front {
         json.object_set_raw(reached, "screen_x", json.num(screen.x))
         json.object_set_raw(reached, "screen_y", json.num(screen.y))
-        on_screen = screen.x >= 0.0 && screen.y >= 0.0 &&
-                    screen.x <= (c.width * 1.0) && screen.y <= (c.height * 1.0)
-        json.object_set_raw(reached, "on_screen", json.boolean(on_screen))
-        return inside && on_screen
     }
-    return false
+
+    // Whether any of it is in the frame, rather than whether its centre is: a
+    // model larger than the view has its centre wherever the geometry averages
+    // out, which for a road is behind the camera driving down it.
+    box = core.vec4(0.0, 0.0, 0.0, 0.0)
+    covered = model_screen_box(c, m, &box)
+    json.object_set_raw(reached, "on_screen", json.boolean(inside && covered))
+    if covered {
+        json.object_set_raw(reached, "screen_region",
+                            region_json(box.x, box.y, box.z, box.w))
+    }
+    return inside && covered
+}
+
+region_json(x: float, y: float, width: float, height: float) -> ptr {
+    out = json.obj()
+    json.object_set_raw(out, "x", json.from_int(x as int))
+    json.object_set_raw(out, "y", json.from_int(y as int))
+    json.object_set_raw(out, "width", json.from_int(width as int))
+    json.object_set_raw(out, "height", json.from_int(height as int))
+    return out
 }
 
 trace_result(c: *Context, m: *Model, p: *Provenance) -> ptr {
@@ -1069,6 +1121,35 @@ trace_result(c: *Context, m: *Model, p: *Provenance) -> ptr {
     json.object_set_raw(node, "visible_flag", json.boolean(m.visible))
     json.object_set_raw(node, "position", vec3_json(m.position.x, m.position.y, m.position.z))
     json.object_set_raw(node, "scale", vec3_json(m.scale.x, m.scale.y, m.scale.z))
+    parent = core.model_parent(m)
+    if parent != null {
+        json.object_set_raw(node, "parent", json.str(core.text(parent.name)))
+        world = core.model_world_position(m)
+        json.object_set_raw(node, "world_position", vec3_json(world.x, world.y, world.z))
+    }
+
+    // What it is surfaced with, and whether the renderer resolved the image the
+    // material names. A model drawn in flat white because its texture never
+    // loaded looks, from every other stage, exactly like one that did.
+    surface = model_surface(m)
+    if surface != null {
+        material = json.obj()
+        json.object_set_raw(material, "name", json.str(core.text(surface.name)))
+        json.object_set_raw(material, "diffuse",
+                            vec3_json(surface.diffuse.x, surface.diffuse.y, surface.diffuse.z))
+        json.object_set_raw(material, "groups",
+                            json.from_int(core.model_group_count(m)))
+        path = core.text(surface.texture_path)
+        json.object_set_raw(material, "texture", json.str(path))
+        json.object_set_raw(material, "texture_loaded",
+                            json.boolean(surface.texture_id != 0))
+        if path != "" && surface.texture_id == 0 {
+            node_ok = false
+            json.object_set_raw(node, "note",
+                json.str("the material names a texture the renderer never loaded"))
+        }
+        json.object_set_raw(node, "material", material)
+    }
     if !node_ok {
         json.object_set_raw(node, "note",
             json.str("the renderer has never been given this model; engine_add_model was not called"))
