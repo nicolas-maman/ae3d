@@ -29,6 +29,20 @@ for candidate in python3 python "py -3"; do
     if $candidate -c "" >/dev/null 2>&1; then PYTHON="$candidate"; break; fi
 done
 
+# A backstop, so a suite that hangs fails its own step instead of the run: the
+# Linux leg has sat in one for hours with nothing to say which. GNU coreutils
+# calls it timeout and Homebrew's calls it gtimeout; where there is neither
+# there is no backstop, which is what there was before.
+BOUND=""
+for candidate in timeout gtimeout; do
+    if command -v "$candidate" >/dev/null 2>&1; then BOUND="$candidate"; break; fi
+done
+bounded() {   # bounded <seconds> <command> [args...]
+    seconds="$1"
+    shift
+    if [ -n "$BOUND" ]; then "$BOUND" "$seconds" "$@"; else "$@"; fi
+}
+
 have_display() {
     case "$(uname -s)" in
         Darwin) return 0 ;;
@@ -237,7 +251,11 @@ for suite in tests/test_*.ae; do
         skip "$name" "no display"
         continue
     fi
-    if ! output="$(AE3D_FRAMES="$FRAMES" ./build/"$name" 2>&1)"; then
+    output="$(AE3D_FRAMES="$FRAMES" bounded 300 ./build/"$name" 2>&1)"
+    suite_status=$?
+    if [ "$suite_status" -eq 124 ]; then
+        fail "$name (still running after 300s)"
+    elif [ "$suite_status" -ne 0 ]; then
         fail "$name"
         printf '%s\n' "$output" | sed 's/^/        /' | head -20
     elif printf '%s' "$output" | grep -q "all checks passed"; then
@@ -269,7 +287,12 @@ for example in examples/*.ae; do
         skip "$name" "no display"
         continue
     fi
-    if AE3D_FRAMES="$FRAMES" ./build/"$name" >/tmp/ae3d_run.log 2>&1; then
+    AE3D_FRAMES="$FRAMES" bounded 300 ./build/"$name" >/tmp/ae3d_run.log 2>&1
+    example_status=$?
+    if [ "$example_status" -eq 124 ]; then
+        fail "$name (still running after 300s)"
+        sed 's/^/        /' /tmp/ae3d_run.log | tail -10
+    elif [ "$example_status" -eq 0 ]; then
         pass "$name"
     else
         fail "$name"
@@ -308,7 +331,7 @@ check_editor_run() {
     AE3D_EDITOR_SCENE="$editor_scene" \
     AE3D_EDITOR_SNAPSHOT="$snapshot" \
     AE3D_EDITOR_REPORT="$report" \
-        timeout 90 ./build/ae3d_editor >"$log" 2>&1
+        bounded 90 ./build/ae3d_editor >"$log" 2>&1
     status=$?
     if grep -q 'no Vulkan driver' "$log"; then
         skip "$name" "$(sed -n 's/.*no Vulkan driver (\(.*\)),.*/\1/p' "$log" | head -1)"
@@ -534,7 +557,11 @@ for bench in benchmarks/bench_*.ae; do
         fail "$name (build warnings)"
         continue
     fi
-    if output="$(./build/"$name" 2>&1)"; then
+    output="$(bounded 600 ./build/"$name" 2>&1)"
+    bench_status=$?
+    if [ "$bench_status" -eq 124 ]; then
+        fail "$name (still running after 600s)"
+    elif [ "$bench_status" -eq 0 ]; then
         pass "$name"
         printf '%s\n' "$output" | sed 's/^/        /'
     else
