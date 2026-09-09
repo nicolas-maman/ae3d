@@ -115,22 +115,35 @@ redshifted. Where a brightness scan lands inside that gap depends on the
 threshold; that it lands inside it at all does not.
 
 ```
-  a=0:   dark to 47 px left, 46 px right; shadow 41.9 px, disc rim 59.5 px
+  a=0:   dark to 61 px left, 46 px right; shadow 41.9 px, disc rim 59.5 px
   a=0.9: dark to 24 px left, 32 px right
 ```
 
-At `a = 0` the two halves agree, because a Schwarzschild shadow is a circle. At
-`a = 0.9` the shadow shrinks and stops being symmetric, because frame dragging
-lets prograde photons escape from closer in.
+Symmetry is deliberately not asserted, though a Schwarzschild shadow is a circle
+and the frame contains one. What the test measures is a *brightness* edge, and
+the disc's brightness is not symmetric even when the shadow is: beaming makes the
+approaching side brighter and changes the shape of its radial falloff, so each
+side crosses a fraction of its own peak at a different radius. Asserting symmetry
+would be asserting something about the disc's emission while claiming to measure
+the hole.
 
-Two details of that test are worth copying into any other one of its kind. It
-runs with bloom off, because bloom spreads disc light into the shadow and moves
-the edge being measured. And it finds the edge against **each side's own** peak
-brightness rather than an absolute level: the two sides of the disc differ by a
-factor of several — that is the beaming the renderer exists to show — so a fixed
-threshold measures the beaming instead of the geometry. The first version of the
-test made exactly that mistake and read the receding side as 319 px against the
-approaching side's 46.
+Three details of that test are worth copying into any other of its kind, and all
+three came from getting it wrong first.
+
+It runs with **bloom off**, because bloom spreads disc light into the shadow and
+moves the edge being measured.
+
+It runs with **the stars off**. Stars are lensed, so where one lands is a
+geodesic, and two drivers need not agree on its last bit. A single star sitting
+in the dim annulus reads exactly like the disc's edge — which is what failed the
+test on Mesa's llvmpipe while passing on an NVIDIA card, and, once the stars were
+removed, turned out to have been happening on the NVIDIA card too.
+
+It finds the edge against **each side's own** peak brightness, and requires
+**four lit pixels in a row** rather than one. The two sides differ by a factor of
+several, so a fixed threshold measures the beaming instead of the geometry; the
+first version of this test did exactly that and read the receding side as 319 px
+against the approaching side's 46.
 
 Setting `SPIN` to 0 turns the metric back into Schwarzschild. That limit has a
 known answer, so it is the check the Kerr integrator was built against.

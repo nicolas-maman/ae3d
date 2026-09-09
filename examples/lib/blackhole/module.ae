@@ -21,7 +21,7 @@
 
 exports (
     VERTEX_SOURCE, FRAGMENT_SOURCE,
-    screen_new, set_view, set_spin, set_time, set_quality, set_jets
+    screen_new, set_view, set_spin, set_time, set_quality, set_jets, set_stars
 )
 
 import ae3d.core
@@ -63,6 +63,7 @@ uniform float spin;
 uniform int   aaSamples;
 uniform int   maxSteps;
 uniform int   jetsOn;
+uniform int   starsOn;
 
 const float DISC_OUT   = 22.0;
 const float ESCAPE     = 130.0;
@@ -111,6 +112,7 @@ float hash31(vec3 p) {
 // star the hole has moved is drawn where the geodesic says it now is, and the
 // arcs around the shadow are the same integration as everything else.
 vec3 starfield(vec3 dir) {
+    if (starsOn == 0) return vec3(0.0);
     vec3 q  = dir * 260.0;
     vec3 id = floor(q);
     vec3 f  = fract(q) - 0.5;
@@ -541,6 +543,7 @@ screen_new() -> *Model {
     m = loader.quad(2.0, 2.0)
     core.model_set_shader(m, core.shader_new(VERTEX_SOURCE, FRAGMENT_SOURCE))
     set_jets(m, true)
+    set_stars(m, true)
     set_quality(m, 4, 400)
     return m
 }
@@ -577,6 +580,16 @@ set_jets(m: *Model, enabled: bool) {
     on = 0
     if enabled { on = 1 }
     core.model_set_uniform_int(m, "jetsOn", on)
+}
+
+// Stars are lensed, so where any one of them lands depends on a geodesic, and
+// two drivers do not have to agree on the last bit of that. Anything measuring
+// the disc against the shadow wants a frame with only those two things in it --
+// a single star inside the dim annulus reads as the disc's edge otherwise.
+set_stars(m: *Model, enabled: bool) {
+    on = 0
+    if enabled { on = 1 }
+    core.model_set_uniform_int(m, "starsOn", on)
 }
 
 // Rays per pixel (1 to 4) and the step budget for each. Both are uniforms rather
