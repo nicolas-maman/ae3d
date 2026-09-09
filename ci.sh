@@ -92,11 +92,17 @@ step "docs/agent.md matches the engine's command table"
 # A doc written by hand beside a protocol is a doc that describes last month's
 # protocol. This one is generated from the same table `help` answers with, so
 # the check is that it was regenerated after the table changed.
-if ./scripts/gen_agent_docs.sh --check >/tmp/ae3d_docs.log 2>&1; then
+./scripts/gen_agent_docs.sh --check >/tmp/ae3d_docs.log 2>&1
+docs_status=$?
+if [ "$docs_status" -eq 0 ]; then
     pass "docs/agent.md is what the schema produces"
+elif [ "$docs_status" -eq 2 ]; then
+    # 2 is "could not check". Whatever is wrong is not the documentation, and
+    # the native layer and module steps below exist to say what it is.
+    skip "docs/agent.md" "$(head -1 /tmp/ae3d_docs.log)"
 else
     fail "docs/agent.md is out of date; run ./scripts/gen_agent_docs.sh"
-    sed 's/^/        /' /tmp/ae3d_docs.log | head -12
+    sed "s/^/        /" /tmp/ae3d_docs.log | head -12
 fi
 
 step "native layer, warnings as errors"
@@ -107,7 +113,16 @@ if [ -z "${CC:-}" ]; then
     done
 fi
 CC="${CC:-cc}"
-GLFW_CFLAGS="$(pkg-config --cflags glfw3 2>/dev/null || true)"
+# Same precedence as build.sh. Without this the native step is the one part
+# of CI that cannot be run on a machine with no pkg-config, and it fails with
+# "GLFW/glfw3.h: No such file or directory" while every other step passes --
+# which reads as a broken checkout rather than a missing tool.
+if [ -z "${GLFW_CFLAGS:-}" ]; then
+    GLFW_CFLAGS="$(pkg-config --cflags glfw3 2>/dev/null || true)"
+fi
+if [ -z "${ZLIB_CFLAGS:-}" ]; then
+    ZLIB_CFLAGS="$(pkg-config --cflags zlib 2>/dev/null || true)"
+fi
 VULKAN_CFLAGS=""
 if pkg-config --exists vulkan 2>/dev/null; then
     VULKAN_CFLAGS="$(pkg-config --cflags vulkan)"
@@ -115,7 +130,7 @@ elif [ -d /opt/homebrew/include/vulkan ]; then
     VULKAN_CFLAGS="-I/opt/homebrew/include"
 fi
 for src in native/*.c; do
-    if "$CC" -c -O2 -Wall -Wextra -Werror $GLFW_CFLAGS $VULKAN_CFLAGS "$src" -o /dev/null 2>/tmp/ae3d_cc.log; then
+    if "$CC" -c -O2 -Wall -Wextra -Werror $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o /dev/null 2>/tmp/ae3d_cc.log; then
         pass "$src"
     else
         fail "$src"

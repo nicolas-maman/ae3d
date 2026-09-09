@@ -21,7 +21,14 @@ find_blender() {
     for base in "/c/Program Files/Blender Foundation" "/d/Program Files/Blender Foundation" \
                 "/Applications/Blender.app/Contents/MacOS"; do
         [ -d "$base" ] || continue
-        found="$(find "$base" -maxdepth 2 -name 'blender.exe' -o -maxdepth 2 -name 'Blender' 2>/dev/null | sort | tail -1)"
+        # The name tests are grouped: -maxdepth is an option rather than a
+        # test, so writing it on both sides of -o applies it to neither and
+        # GNU find says so. Depth 3 because a Windows install is
+        # "Blender Foundation/Blender 5.2/blender.exe" and a macOS one is
+        # "Blender.app/Contents/MacOS/Blender".
+        found="$(find "$base" -maxdepth 3 -type f \
+                     \( -name 'blender.exe' -o -name 'Blender' -o -name 'blender' \) \
+                     2>/dev/null | sort | tail -1)"
         if [ -n "$found" ]; then printf '%s' "$found"; return 0; fi
     done
     return 1

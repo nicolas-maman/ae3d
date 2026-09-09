@@ -23,7 +23,12 @@ import std.string
 import ae3d.core
 
 exports (
-    Key, Channel, Clip, Player,
+    // The type is AnimChannel, not Channel. A struct type claims the
+    // lowercase spelling of its name for the whole program -- modules are
+    // merged into one unit, so unexporting it does not help -- and three test
+    // suites already had a helper called channel(). Naming the type Channel
+    // made their calls resolve to a constructor and stop compiling.
+    Key, AnimChannel, Clip, Player,
     TRANSLATION, ROTATION, SCALE,
     STEP, LINEAR,
     clip_new, clip_free, clip_add_channel, clip_channel_count, clip_channel,
@@ -60,7 +65,7 @@ struct Key {
     w: float
 }
 
-struct Channel {
+struct AnimChannel {
     target: int
     interpolation: int
     duration: float
@@ -93,8 +98,8 @@ set_error(reason: string, detail: string) {
 
 // --- channels -----------------------------------------------------------
 
-channel_new(target: int, interpolation: int) -> *Channel {
-    c = heap.new(Channel)
+channel_new(target: int, interpolation: int) -> *AnimChannel {
+    c = heap.new(AnimChannel)
     c.target = target
     c.interpolation = interpolation
     c.duration = 0.0
@@ -102,7 +107,7 @@ channel_new(target: int, interpolation: int) -> *Channel {
     return c
 }
 
-channel_free(c: *Channel) {
+channel_free(c: *AnimChannel) {
     if c == null { return }
     if c.keys != null {
         i = 0
@@ -121,7 +126,7 @@ channel_free(c: *Channel) {
 // walk that assumes order, and an unordered key does not produce a wrong
 // picture so much as a silently missing one -- better to refuse it at the door
 // than to sort behind the caller's back and hide an exporter bug.
-channel_add_key(c: *Channel, time: float, x: float, y: float, z: float, w: float) -> bool {
+channel_add_key(c: *AnimChannel, time: float, x: float, y: float, z: float, w: float) -> bool {
     if c == null { return false }
     count = list.size(c.keys)
     if count > 0 {
@@ -142,28 +147,28 @@ channel_add_key(c: *Channel, time: float, x: float, y: float, z: float, w: float
     return true
 }
 
-channel_key_count(c: *Channel) -> int {
+channel_key_count(c: *AnimChannel) -> int {
     if c == null { return 0 }
     return list.size(c.keys)
 }
 
-channel_key(c: *Channel, index: int) -> *Key {
+channel_key(c: *AnimChannel, index: int) -> *Key {
     if c == null { return null }
     if index < 0 || index >= list.size(c.keys) { return null }
     return list.get_raw(c.keys, index) as *Key
 }
 
-channel_target(c: *Channel) -> int {
+channel_target(c: *AnimChannel) -> int {
     if c == null { return TRANSLATION }
     return c.target
 }
 
-channel_interpolation(c: *Channel) -> int {
+channel_interpolation(c: *AnimChannel) -> int {
     if c == null { return LINEAR }
     return c.interpolation
 }
 
-channel_duration(c: *Channel) -> float {
+channel_duration(c: *AnimChannel) -> float {
     if c == null { return 0.0 }
     return c.duration
 }
@@ -183,7 +188,7 @@ clip_free(c: *Clip) {
         i = 0
         count = list.size(c.channels)
         while i < count {
-            channel_free(list.get_raw(c.channels, i) as *Channel)
+            channel_free(list.get_raw(c.channels, i) as *AnimChannel)
             i = i + 1
         }
         list.free(c.channels)
@@ -191,9 +196,9 @@ clip_free(c: *Clip) {
     heap.free(c)
 }
 
-clip_add_channel(c: *Clip, channel: *Channel) {
-    if c == null || channel == null { return }
-    list.add_raw(c.channels, channel as ptr)
+clip_add_channel(c: *Clip, track: *AnimChannel) {
+    if c == null || track == null { return }
+    list.add_raw(c.channels, track as ptr)
 }
 
 clip_channel_count(c: *Clip) -> int {
@@ -201,10 +206,10 @@ clip_channel_count(c: *Clip) -> int {
     return list.size(c.channels)
 }
 
-clip_channel(c: *Clip, index: int) -> *Channel {
+clip_channel(c: *Clip, index: int) -> *AnimChannel {
     if c == null { return null }
     if index < 0 || index >= list.size(c.channels) { return null }
-    return list.get_raw(c.channels, index) as *Channel
+    return list.get_raw(c.channels, index) as *AnimChannel
 }
 
 clip_name(c: *Clip) -> string {
@@ -222,8 +227,8 @@ clip_duration(c: *Clip) -> float {
     i = 0
     count = list.size(c.channels)
     while i < count {
-        channel = list.get_raw(c.channels, i) as *Channel
-        if channel != null && channel.duration > longest { longest = channel.duration }
+        entry = list.get_raw(c.channels, i) as *AnimChannel
+        if entry != null && entry.duration > longest { longest = entry.duration }
         i = i + 1
     }
     return longest
@@ -235,7 +240,7 @@ clip_duration(c: *Clip) -> float {
 //
 // A linear walk. Clips here have keys in the tens, and a binary search over ten
 // elements is slower than the walk and harder to be sure of.
-span_at(c: *Channel, t: float) -> int {
+span_at(c: *AnimChannel, t: float) -> int {
     count = list.size(c.keys)
     if count == 0 { return -1 }
     i = count - 1
@@ -250,7 +255,7 @@ span_at(c: *Channel, t: float) -> int {
 // Where t sits between key i and key i+1, as 0..1. Zero when there is no next
 // key or the two share a time, which is what makes a duplicated timestamp hold
 // its value rather than divide by zero.
-blend_at(c: *Channel, index: int, t: float) -> float {
+blend_at(c: *AnimChannel, index: int, t: float) -> float {
     count = list.size(c.keys)
     if index < 0 || index + 1 >= count { return 0.0 }
     a = list.get_raw(c.keys, index) as *Key
@@ -263,7 +268,7 @@ blend_at(c: *Channel, index: int, t: float) -> float {
     return u
 }
 
-sample_vec3(c: *Channel, t: float) -> Vec3 {
+sample_vec3(c: *AnimChannel, t: float) -> Vec3 {
     if c == null { return core.vec3(0.0, 0.0, 0.0) }
     index = span_at(c, t)
     if index < 0 { return core.vec3(0.0, 0.0, 0.0) }
@@ -277,7 +282,7 @@ sample_vec3(c: *Channel, t: float) -> Vec3 {
     return core.v3_lerp(core.vec3(a.x, a.y, a.z), core.vec3(b.x, b.y, b.z), u)
 }
 
-sample_quat(c: *Channel, t: float) -> Quat {
+sample_quat(c: *AnimChannel, t: float) -> Quat {
     if c == null { return core.quat_ident() }
     index = span_at(c, t)
     if index < 0 { return core.quat_ident() }

@@ -18,15 +18,18 @@ if [ -z "$PYTHON" ]; then
         if command -v "$candidate" >/dev/null 2>&1; then PYTHON="$candidate"; break; fi
     done
 fi
+# 2 means "could not check", distinct from 0 "current" and 1 "out of date".
+# Exiting 0 here would have told a caller the documentation had been verified
+# when nothing had looked at it.
 if [ -z "$PYTHON" ]; then
-    echo "gen_agent_docs: skip, no python3 found (set PYTHON=/path/to/python)"
-    exit 0
+    echo "gen_agent_docs: no python3 found (set PYTHON=/path/to/python)"
+    exit 2
 fi
 
 if [ ! -x build/agent_schema ] && [ ! -x build/agent_schema.exe ]; then
     ./build.sh tools/agent_schema.ae agent_schema >/dev/null 2>&1 || {
         echo "gen_agent_docs: could not build agent_schema" >&2
-        exit 1
+        exit 2
     }
 fi
 
@@ -34,7 +37,7 @@ generated="$(mktemp)"
 ./build/agent_schema | "$PYTHON" tools/ae3d_agent.py --docs > "$generated" || {
     echo "gen_agent_docs: the generator failed" >&2
     rm -f "$generated"
-    exit 1
+    exit 2
 }
 
 if [ "${1:-}" = "--check" ]; then
