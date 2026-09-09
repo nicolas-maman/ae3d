@@ -290,14 +290,21 @@ else
         elif ! have_display; then
             skip "ae3d_editor (driver)" "no display"
         else
-            driver_log="$(mktemp)"
-            if python3 tools/drive_editor.py >"$driver_log" 2>&1; then
-                pass "ae3d_editor (driver)"
-            else
-                fail "ae3d_editor (driver)"
-                sed 's/^/        /' "$driver_log" | head -20
-            fi
-            rm -f "$driver_log"
+            # Both backends. The report checks have always run on each, but
+            # nothing had ever pressed a widget on the Vulkan one, and the
+            # editor's controls reach the renderer through a vtable that only
+            # a real click exercises.
+            for driver_backend in opengl vulkan; do
+                driver_log="$(mktemp)"
+                if python3 tools/drive_editor.py --backend "$driver_backend" \
+                        --port 8797 >"$driver_log" 2>&1; then
+                    pass "ae3d_editor (driver, $driver_backend)"
+                else
+                    fail "ae3d_editor (driver, $driver_backend)"
+                    sed 's/^/        /' "$driver_log" | head -20
+                fi
+                rm -f "$driver_log"
+            done
         fi
     else
         fail "ae3d_editor (build)"
