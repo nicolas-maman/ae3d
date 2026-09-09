@@ -21,6 +21,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -47,7 +48,67 @@ def get(port, path, tries=40):
         except Exception as e:            # the window takes a moment to exist
             last = e
             time.sleep(0.5)
-    raise SystemExit("editor driver never answered %s: %s" % (path, last))
+    raise SystemExit("editor driver never answered %s: %s%s"
+                     % (path, last, editor_output()))
+
+
+EDITOR_LOG = [None]
+EDITOR_PROC = [None]
+
+
+def editor_sample(pid):
+    """Where the editor is stuck, from the platform sampler if there is one."""
+    try:
+        out = subprocess.run(["sample", str(pid), "1", "-mayDie"],
+                             capture_output=True, text=True, timeout=30).stdout
+    except Exception:
+        return ""
+    if not out.strip():
+        return ""
+    kept = tempfile.NamedTemporaryFile(prefix="ae3d_sample_", suffix=".txt",
+                                       delete=False, mode="w")
+    kept.write(out)
+    kept.close()
+
+    # The main thread, which is the one that stopped answering. Its block
+    # starts at the line naming it and runs to the next blank line.
+    frames = []
+    started = False
+    for line in out.splitlines():
+        if not started:
+            started = "com.apple.main-thread" in line
+            if started:
+                frames.append(line.rstrip())
+            continue
+        if not line.strip():
+            break
+        frames.append(line.rstrip())
+    body = "\n  stuck at:\n    " + "\n    ".join(frames[:24]) if frames else ""
+    return body + "\n  full sample: " + kept.name
+
+
+def editor_output():
+    """What the editor said before it stopped answering, if anything."""
+    note = ""
+    proc = EDITOR_PROC[0]
+    if proc is not None:
+        code = proc.poll()
+        if code is None:
+            # Still there and not answering, which is a blocked main thread
+            # rather than a crash. Sampled here because this is the only
+            # moment it can be: the process is killed on the way out of this
+            # script, and by the time anything outside can look it is gone.
+            note = "\n  the editor is still running" + editor_sample(proc.pid)
+        else:
+            note = "\n  the editor had already exited, status %s" % code
+    path = EDITOR_LOG[0]
+    if not path or not os.path.exists(path):
+        return note
+    with open(path) as f:
+        tail = f.read().strip().splitlines()[-12:]
+    if not tail:
+        return note + "\n  (the editor said nothing)"
+    return note + "\n  editor said:\n    " + "\n    ".join(tail)
 
 
 def post(port, path):
@@ -323,12 +384,26 @@ def main():
 
     env = dict(os.environ)
     env["AETHER_UI_TEST_PORT"] = str(args.port)
+    # NOT headless, though it should be: this run wants no window in front of
+    # whoever is using the machine, and AETHER_UI_HEADLESS gives exactly that
+    # everywhere else. Under it the editor stops answering part way through a
+    # run, stuck inside a CoreAnimation layer display that never returns, with
+    # vImage reporting a destination buffer too small for what it was asked to
+    # composite. Same driver and same binary: headless hangs, visible passes.
+    # Filed as aether-lang-dev/aether-ui#123.
     if args.backend:
         env["AE3D_EDITOR_BACKEND"] = args.backend
     # Long enough that the run outlives this script; it is killed at the end.
     env["AE3D_EDITOR_FRAMES"] = "100000"
+    # Kept, not discarded. When the editor stops answering, its own output is
+    # the only account of why, and this threw it away: a run that died mid-way
+    # reported "never answered /widgets" and nothing else.
+    editor_log = tempfile.NamedTemporaryFile(prefix="ae3d_editor_", suffix=".log",
+                                             delete=False)
+    EDITOR_LOG[0] = editor_log.name
     editor = subprocess.Popen([args.binary], env=env,
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                              stdout=editor_log, stderr=subprocess.STDOUT)
+    EDITOR_PROC[0] = editor
     try:
         widgets = tree(args.port)
 
@@ -415,7 +490,7 @@ def main():
                 listed[item.split("  ")[0]] = menu["handle"]
         wanted = ["Save Scene", "Load Scene", "Undo", "Redo", "Duplicate",
                   "Delete", "Cube", "Sphere", "Plane", "Water", "Light",
-                  "Plains", "Mountains", "Desert", "Islands", "Caves",
+                  "Terrain",
                   "Move", "Rotate", "Scale", "Frame Selection",
                   "Fast", "Balanced", "Quality"]
         missing = [w for w in wanted if w not in listed]
@@ -482,6 +557,46 @@ def main():
                                    for w in ws.values()))
                 check("pressing one is heard by the editor", ok)
                 post(args.port, "/widget/%d/click" % switch[0]["id"])
+
+        # A terrain is one object whose shape is a property of it, rather than
+        # five buttons in the panel that each add a different thing. The panel
+        # says a terrain is a thing you can have; which shape it takes is
+        # chosen on the object, the way Unreal and Unity both do it.
+        widgets = tree(args.port)
+        add = find(widgets, "button", "Terrain")
+        check("the panel offers a terrain, not a list of biomes", add is not None)
+        if add is not None:
+            post(args.port, "/widget/%d/click" % add)
+
+            def terrain_shown(ws):
+                caps = [w for w in ws.values() if w["type"] == "text"
+                        and w["text"].strip() == "TERRAIN"]
+                return bool(caps) and on_screen(ws, caps[0])
+
+            widgets, ok = wait_for(args.port, terrain_shown)
+            check("adding one shows its own section", ok)
+
+            shapes = {n: w for n, w in
+                      ((w["text"].strip(), w) for w in widgets.values()
+                       if w["type"] == "button")
+                      if n in ("Plains", "Hills", "Desert", "Islands", "Caves")}
+            check("the section offers every shape terrain can build",
+                  len(shapes) == 5, sorted(shapes))
+            if len(shapes) == 5:
+                lit = [n for n, w in shapes.items() if w.get("bg") == ACCENT]
+                check("and says which one this terrain is", lit == ["Plains"],
+                      "lit: %s" % lit)
+
+                post(args.port, "/widget/%d/click" % shapes["Desert"]["id"])
+
+                # The console says what was built, so this reads that the
+                # terrain was regenerated rather than that a button lit up.
+                widgets, ok = wait_for(
+                    args.port,
+                    lambda ws: any(w["type"] == "text" and "desert:" in w["text"]
+                                   for w in ws.values()),
+                    seconds=12.0)
+                check("choosing a shape rebuilds the terrain", ok)
 
         # A row of choices says which one is on. Read as "the accent moved",
         # not "this button is blue": the tree reports the colour a widget was
@@ -693,6 +808,43 @@ def main():
                     check("a setting survives the scene file",
                           moved == "3.00" and restored == "9.25",
                           "changed to %s, came back as %s" % (moved, restored))
+
+        # The sky survives the file, and the renderer clears to it. The scene
+        # format has always carried a sky and the editor had no control over
+        # one, so every scene it saved recorded a colour nobody could choose.
+        widgets = tree(args.port)
+        sky = [w for w in widgets.values()
+               if w["type"] == "text" and w["text"].strip() == "SKY"]
+        if sky:
+            bar = widgets[widgets[sky[0]["parent"]]["parent"]]
+            body = sorted([w for w in widgets.values()
+                           if w["parent"] == bar["parent"] and w["id"] > bar["id"]],
+                          key=lambda w: w["id"])[0]
+            channels = [w for r in widgets.values() if r["parent"] == body["id"]
+                        for w in widgets.values()
+                        if w["parent"] == r["id"] and w["type"] == "slider"]
+            check("the sky has a channel for each colour", len(channels) == 3,
+                  "%d" % len(channels))
+            if len(channels) == 3:
+                for channel in channels:
+                    post(args.port, "/widget/%d/set_value?v=0.75" % channel["id"])
+
+                def sky_at(ws, want):
+                    return all(abs(ws[c["id"]]["value"] - want) < 0.01
+                               for c in channels)
+
+                widgets, ok = wait_for(args.port, lambda ws: sky_at(ws, 0.75))
+                check("setting the sky moves all three channels", ok)
+
+                stamp = os.path.getmtime(scene_file)
+                post(args.port, "/widget/%d/click" % save)
+                wait_file(scene_file, newer_than=stamp)
+                for channel in channels:
+                    post(args.port, "/widget/%d/set_value?v=0.10" % channel["id"])
+                wait_for(args.port, lambda ws: sky_at(ws, 0.10))
+                post(args.port, "/widget/%d/click" % load)
+                widgets, back = wait_for(args.port, lambda ws: sky_at(ws, 0.75))
+                check("and the sky comes back with the scene", back)
 
         # The post chain survives the file. It is written into the scene by
         # the same record that carries the camera, and the editor filled none

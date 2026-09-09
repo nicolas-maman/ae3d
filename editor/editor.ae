@@ -65,6 +65,7 @@ const VIEWPORT_G = 0.149
 const VIEWPORT_B = 0.176
 const BUTTON_H = 23
 const CONSOLE_LINES = 7
+const DEFAULT_SEED = 20260903
 const VOXEL_SIZE = 4.0
 const WATER_SIZE = 700.0
 const PAINT_INTERVAL = 0.033
@@ -177,6 +178,10 @@ var g_probe_field = 0
 // you, so nothing on screen said which one was live.
 // The lit segment of each row of choices, so a row of buttons says which one
 // is on rather than only what could be chosen.
+var g_biome_buttons: ptr = null
+var g_terrain_bar = 0
+var g_terrain_body = 0
+var g_terrain_divider = 0
 var g_script_buttons: ptr = null
 var g_preset_buttons: ptr = null
 var g_preset = PRESET_BALANCED
@@ -207,6 +212,12 @@ const STATS_INTERVAL = 0.25
 const EDIT_SETTLE = 0.4
 var g_reported = false
 var g_last_paint = 0.0
+// The scene's sky. It starts as the editor's own ground: near black makes a
+// scene look like it is floating in a void rather than standing in a room, and
+// an empty one is the first thing the editor shows.
+var g_sky_r = VIEWPORT_R
+var g_sky_g = VIEWPORT_G
+var g_sky_b = VIEWPORT_B
 var g_fxaa = true
 var g_fxaa_toggle = 0
 var g_bloom_toggle = 0
@@ -720,20 +731,30 @@ extern malloc(size: int) -> ptr
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 
-const ROWS = 21
+const ROWS = 25
 // Past every inspector row, because a turn of the gizmo is not a row: it is
 // recorded as the angle the drag has turned through so far, and undone by
 // turning back through it.
-const ROTATE_FIRST_SLOT = 21
+const ROTATE_FIRST_SLOT = 25
 // Past the rotation axes, which take 21 through 23. A behaviour is a property
 // of a model like any other as far as undo is concerned, so it travels as a
 // property step in a slot no row uses.
-const SCRIPT_SLOT = 24
+const SCRIPT_SLOT = 28
+// A terrain's shape. A choice rather than a number, so it travels the way a
+// behaviour does rather than as a row.
+const TERRAIN_BIOME_SLOT = 29
 const CAMERA_FIRST_ROW = 17
 const CAMERA_LAST_ROW = 19
 // Past the camera rows, because the row indices below it are spoken for and a
 // water setting has to sit in the water section wherever its number falls.
 const FOAM_ROW = 20
+// The scene's sky, which the scene file has always carried and the editor had
+// no control over: every scene it saved recorded a colour nobody could choose
+// and every scene it opened was drawn on the editor's own grey.
+const SKY_FIRST_ROW = 21
+const SKY_LAST_ROW = 23
+// A terrain's seed. Unbounded, so it is a field rather than a slider.
+const TERRAIN_SEED_ROW = 24
 const SCRIPT_NONE = 0
 const SCRIPT_SPIN = 1
 const SCRIPT_BOB = 2
@@ -867,6 +888,16 @@ hidden_flag(shown: bool) -> int {
 // stack under it. Hiding the controls and leaving the caption behind is worse
 // than either, and the rule sits in the panel rather than in the body so that
 // it has to be named here.
+show_terrain_section(on: bool) {
+    if g_terrain_bar != 0 { ui.set_hidden(g_terrain_bar, hidden_flag(on)) }
+    if g_terrain_body != 0 { ui.set_hidden(g_terrain_body, hidden_flag(on)) }
+    if g_terrain_divider != 0 { ui.set_hidden(g_terrain_divider, hidden_flag(on)) }
+    frame = row_frame(TERRAIN_SEED_ROW)
+    control = row_control(TERRAIN_SEED_ROW)
+    if control != 0 { ui.set_hidden(control, hidden_flag(on)) }
+    if frame != 0 { ui.set_hidden(frame, hidden_flag(on)) }
+}
+
 show_water_section(on: bool) {
     if g_water_bar != 0 { ui.set_hidden(g_water_bar, hidden_flag(on)) }
     if g_water_body != 0 { ui.set_hidden(g_water_body, hidden_flag(on)) }
@@ -888,6 +919,7 @@ sync_inspector() {
     if m == null {
         if g_title != 0 { ui.set_text(g_title, "nothing selected") }
         show_water_section(false)
+        show_terrain_section(false)
         return
     }
     if g_title != 0 {
@@ -903,7 +935,13 @@ sync_inspector() {
     show_row(17, camera_value(17))
     show_row(18, camera_value(18))
     show_row(19, camera_value(19))
+
+    refresh_sky_rows()
     refresh_script_buttons()
+
+    ground = selected_world()
+    show_terrain_section(ground != null)
+    if ground != null { refresh_terrain_section() }
 
     sim = selected_water()
     show_water_section(sim != null)
@@ -1467,6 +1505,26 @@ row_reaches_its_target(index: int) -> bool {
         return moved
     }
 
+    if index == TERRAIN_SEED_ROW {
+        // A seed is a whole number and regenerating is the whole of what it
+        // does, so it moves by one rather than by the quarter every other row
+        // uses: a quarter of a seed is the same seed.
+        if selected_world() == null { return true }
+        before = (terrain_seed()) as float
+        apply_property(index, before + 1.0)
+        moved = core.abs_of((terrain_seed()) as float - (before + 1.0)) < 0.5
+        apply_property(index, before)
+        return moved
+    }
+
+    if is_sky_row(index) {
+        before = sky_value(index)
+        apply_property(index, before + 0.25)
+        moved = core.abs_of(sky_value(index) - (before + 0.25)) < 0.001
+        apply_property(index, before)
+        return moved
+    }
+
     if index >= CAMERA_FIRST_ROW && index <= CAMERA_LAST_ROW {
         if cam == null { return true }
         before = camera_value(index)
@@ -1642,16 +1700,21 @@ rows_that_do_nothing() -> int {
     history.history_begin_replay(g_history)
     was_selected = g_selected
     water_index = index_of_kind(behaviour.KIND_WATER)
+    ground_index = index_of_kind(behaviour.KIND_VOXEL)
 
     stuck = 0
     index = 0
     while index < ROWS {
-        wants_water = is_water_row(index)
-        if wants_water && water_index >= 0 { select_object(water_index) }
+        // A row that reads the selected object has to be asked while that kind
+        // of object is selected, or it reports nothing either way.
+        wants = 0 - 1
+        if is_water_row(index) { wants = water_index }
+        if index == TERRAIN_SEED_ROW { wants = ground_index }
+        if wants >= 0 { select_object(wants) }
         if row_control(index) != 0 && !row_reaches_its_target(index) {
             stuck = stuck + 1
         }
-        if wants_water && water_index >= 0 { select_object(was_selected) }
+        if wants >= 0 { select_object(was_selected) }
         index = index + 1
     }
 
@@ -1816,7 +1879,11 @@ replay(step: *EditStep, backwards: bool) {
         target = step.after
         if backwards { target = step.before }
         subject = step.subject as *Model
-        if step.slot == SCRIPT_SLOT {
+        if step.slot == TERRAIN_BIOME_SLOT {
+            select_model_pointer(step.subject)
+            regenerate_terrain(terrain_seed(), (target) as int)
+            refresh_terrain_section()
+        } else if step.slot == SCRIPT_SLOT {
             select_model_pointer(step.subject)
             if g_selected >= 0 { set_script(g_selected, (target) as int) }
         } else if step.slot >= ROTATE_FIRST_SLOT {
@@ -1955,7 +2022,14 @@ select_model_pointer(m: ptr) {
     }
 }
 
+// CRITICAL: the material rows dereference m.material, and a model is not
+// obliged to have one. A voxel terrain is built out of a bare cube and carries
+// its colour per instance, so moving the roughness slider with one selected
+// read through a null pointer and took the editor down. Every model the
+// inspector writes to gets a material first; core makes one with the same
+// defaults a loader would.
 write_property(m: *Model, index: int, value: float) {
+    if index >= 4 && index <= 8 { core.model_ensure_material(m) }
     if index == 0 { core.model_set_position(m, value, m.position.y, m.position.z) }
     if index == 1 { core.model_set_position(m, m.position.x, value, m.position.z) }
     if index == 2 { core.model_set_position(m, m.position.x, m.position.y, value) }
@@ -1968,6 +2042,7 @@ write_property(m: *Model, index: int, value: float) {
 }
 
 property_value(m: *Model, index: int) -> float {
+    if index >= 4 && index <= 8 && m.material == null { return 0.0 }
     if index == 0 { return m.position.x }
     if index == 1 { return m.position.y }
     if index == 2 { return m.position.z }
@@ -2012,6 +2087,36 @@ is_light_row(index: int) -> bool {
 
 is_camera_row(index: int) -> bool {
     return index >= CAMERA_FIRST_ROW && index <= CAMERA_LAST_ROW
+}
+
+is_sky_row(index: int) -> bool {
+    return index >= SKY_FIRST_ROW && index <= SKY_LAST_ROW
+}
+
+sky_value(index: int) -> float {
+    if index == SKY_FIRST_ROW { return g_sky_r }
+    if index == SKY_FIRST_ROW + 1 { return g_sky_g }
+    return g_sky_b
+}
+
+// The rows, wherever the sky came from. sync_inspector runs when a selection
+// changes, and a load changes the sky after the selection has already been
+// made: without this the renderer cleared to the loaded colour while the three
+// sliders still showed the one before it.
+refresh_sky_rows() {
+    show_row(SKY_FIRST_ROW, g_sky_r)
+    show_row(SKY_FIRST_ROW + 1, g_sky_g)
+    show_row(SKY_LAST_ROW, g_sky_b)
+}
+
+// The renderer clears to this, so the sky is what the scene is drawn on rather
+// than a colour behind it.
+apply_sky() {
+    if g_renderer == null { return }
+    backend = viewport_backend()
+    core.backend_set_clear_color(&backend, g_sky_r, g_sky_g, g_sky_b)
+    mark_dirty()
+    paint_soon()
 }
 
 
@@ -2064,6 +2169,32 @@ apply_property(index: int, value: float) {
         }
         show_row(index, value)
         paint_soon()
+        return
+    }
+
+    if index == TERRAIN_SEED_ROW {
+        w = selected_world()
+        if w == null { return }
+        was = (terrain_seed()) as float
+        if core.abs_of(value - was) < 0.5 { return }
+        history.history_record(g_history, history.STEP_PROPERTY, selected_model() as ptr,
+                               TERRAIN_SEED_ROW, was, value)
+        history.history_close(g_history)
+        g_last_edit = seconds()
+        regenerate_terrain((value) as long, terrain_biome())
+        show_row(index, value)
+        return
+    }
+
+    if is_sky_row(index) {
+        history.history_record(g_history, history.STEP_PROPERTY, null, index,
+                               sky_value(index), value)
+        g_last_edit = seconds()
+        if index == SKY_FIRST_ROW { g_sky_r = value }
+        if index == SKY_FIRST_ROW + 1 { g_sky_g = value }
+        if index == SKY_LAST_ROW { g_sky_b = value }
+        apply_sky()
+        show_row(index, value)
         return
     }
 
@@ -2641,6 +2772,9 @@ current_view() -> View {
     // the editor filled none of it: every scene it saved recorded the defaults,
     // so a scene saved with bloom on came back with it off whatever the file
     // was for.
+    v.sky_r = g_sky_r
+    v.sky_g = g_sky_g
+    v.sky_b = g_sky_b
     v.fxaa = g_fxaa
     v.bloom = g_bloom
     v.bloom_threshold = BLOOM_THRESHOLD
@@ -2773,6 +2907,11 @@ load_scene() {
     }
     core.set_face_culling(view.face_culling)
     core.set_frustum_culling(view.frustum_culling)
+    g_sky_r = view.sky_r
+    g_sky_g = view.sky_g
+    g_sky_b = view.sky_b
+    apply_sky()
+    refresh_sky_rows()
     g_fxaa = view.fxaa
     g_bloom = view.bloom
     if g_fxaa_toggle != 0 { ui.set_toggle(g_fxaa_toggle, flag_of(g_fxaa)) }
@@ -2894,29 +3033,86 @@ add_water() {
 
 
 add_voxels() {
-    add_biome(terrain.PLAINS)
+    add_terrain()
 }
 
 // The terrain shapes live in ae3d.terrain, so the editor asks for a biome
 // rather than carrying a copy of one generator inline where the only way to
 // check it is to look at it.
-add_biome(biome: int) {
+// One terrain object. Which shape it has is a property of it, edited in the
+// inspector like everything else about an object, rather than five buttons in
+// the panel that each add a different thing: the editor's job is to put a
+// terrain in the scene, and terrain's job is to know what a plain looks like.
+// Unreal and Unity both do it this way, and neither has a Desert button.
+add_terrain() {
     world = voxel.world_new(48, 48, 28, VOXEL_SIZE)
     if world == null { return }
 
-    terrain.fill_seeded(world, 20260903, biome)
+    terrain.fill_seeded(world, DEFAULT_SEED, terrain.PLAINS)
 
     base = loader.cube(VOXEL_SIZE)
     chunk = voxel.world_build(world, base)
     if chunk == null {
         voxel.world_free(world)
         core.model_free(base)
-        say("voxel chunk could not be built")
+        say("terrain could not be built")
         return
     }
     core.model_set_position(chunk, 0.0 - 96.0, 0.0 - 8.0, 0.0 - 96.0)
-    add_component_model(chunk, terrain.biome_name(biome), behaviour.KIND_VOXEL, world as ptr)
-    say("${terrain.biome_name(biome)}: ${voxel.world_visible_count(world)} visible of ${voxel.world_active_count(world)}")
+    add_component_model(chunk, "terrain", behaviour.KIND_VOXEL, world as ptr)
+    say("terrain: ${voxel.world_visible_count(world)} visible of ${voxel.world_active_count(world)}")
+}
+
+// The world behind the selected object, or null where it is not a terrain.
+selected_world() -> *World {
+    c = component_at(g_selected)
+    if c == null || c.kind != behaviour.KIND_VOXEL { return null }
+    return behaviour.component_state(c) as *World
+}
+
+// Fill it again and rebuild the instances on the model that is already there.
+// model_enable_instancing resizes and flags both buffers, so the renderer is
+// told; replacing the object instead would take the selection with it and
+// leave two undo steps behind for one change.
+regenerate_terrain(seed: long, biome: int) {
+    w = selected_world()
+    m = selected_model()
+    if w == null || m == null { return }
+    terrain.fill_seeded(w, seed, biome)
+    if voxel.world_build(w, m) == null {
+        say("terrain could not be rebuilt")
+        return
+    }
+    mark_dirty()
+    paint_soon()
+    say("${terrain.biome_name(biome)}: ${voxel.world_visible_count(w)} visible of ${voxel.world_active_count(w)}")
+}
+
+terrain_seed() -> long {
+    w = selected_world()
+    if w == null { return DEFAULT_SEED }
+    return voxel.world_origin_seed(w)
+}
+
+terrain_biome() -> int {
+    w = selected_world()
+    if w == null { return terrain.PLAINS }
+    return voxel.world_origin_kind(w)
+}
+
+set_terrain_biome(biome: int) {
+    w = selected_world()
+    if w == null || biome == terrain_biome() { return }
+    history.history_record(g_history, history.STEP_PROPERTY, selected_model() as ptr,
+                           TERRAIN_BIOME_SLOT, (terrain_biome()) as float, (biome) as float)
+    history.history_close(g_history)
+    regenerate_terrain(terrain_seed(), biome)
+    refresh_terrain_section()
+}
+
+refresh_terrain_section() {
+    paint_segments(g_biome_buttons, terrain.BIOME_COUNT, terrain_biome())
+    show_row(TERRAIN_SEED_ROW, (terrain_seed()) as float)
 }
 
 // Every mesh the project ships, so a model can be brought into the scene
@@ -3333,6 +3529,7 @@ main() {
     g_section_carets = calloc(SECTIONS, 4)
     g_section_open = calloc(SECTIONS, 4)
     g_shade_toggles = calloc(SHADE_KINDS, 4)
+    g_biome_buttons = calloc(terrain.BIOME_COUNT, 4)
     g_script_buttons = calloc(SCRIPT_KINDS, 4)
     g_preset_buttons = calloc(PRESET_KINDS, 4)
     g_sliders = calloc(ROWS, 4)
@@ -3442,27 +3639,11 @@ main() {
         light_btn = ui.btn(panel_row(add_body), "Light") callback { add_light() }
         style_button(light_btn, "action")
 
-        terrain_body = fold_section(left, "TERRAIN")
-
-        // One button per biome: five short labels are clearer than one button
-        // and a hidden mode, and every shape the terrain module can build is
-        // reachable rather than only the first.
-        biomes_top = ui.hstack(terrain_body, 6)
-        as_row(biomes_top)
-        plains_btn = ui.btn(biomes_top, "Plains") callback { add_biome(terrain.PLAINS) }
-        style_button(plains_btn, "action")
-        mountains_btn = ui.btn(biomes_top, "Mountains") callback { add_biome(terrain.MOUNTAINS) }
-        style_button(mountains_btn, "action")
-
-        biomes_mid = ui.hstack(terrain_body, 6)
-        as_row(biomes_mid)
-        desert_btn = ui.btn(biomes_mid, "Desert") callback { add_biome(terrain.DESERT) }
-        style_button(desert_btn, "action")
-        islands_btn = ui.btn(biomes_mid, "Islands") callback { add_biome(terrain.ISLANDS) }
-        style_button(islands_btn, "action")
-
-        caves_btn = ui.btn(panel_row(terrain_body), "Caves") callback { add_biome(terrain.CAVES) }
-        style_button(caves_btn, "action")
+        // One terrain, not five biomes. What shape it takes is a property of
+        // the object, edited in the inspector; five buttons in the panel made
+        // the editor responsible for knowing what a desert is.
+        terrain_btn = ui.btn(panel_row(add_body), "Terrain") callback { add_terrain() }
+        style_button(terrain_btn, "action")
 
         ui.divider(left)
         assets_body = fold_section(left, "ASSETS")
@@ -3685,6 +3866,38 @@ main() {
         inspector_row(light_body, "light green", 0.0, 1.0, 1.0, 15)
         inspector_row(light_body, "light blue", 0.0, 1.0, 1.0, 16)
 
+        // A terrain's own settings, beside the object rather than in the panel
+        // that made it. Unreal and Unity both put the shape of a landscape on
+        // the landscape; the editor's ADD list only has to say that a terrain
+        // is a thing you can have.
+        g_terrain_divider = ui.divider(right)
+        g_terrain_body = fold_section(right, "TERRAIN")
+        g_terrain_bar = section_bar(g_section_count - 1)
+
+        biome_row = ui.hstack(g_terrain_body, 6)
+        as_row(biome_row)
+        biomes = g_biome_buttons as int[]
+        plains_btn = ui.btn(biome_row, "Plains") callback { set_terrain_biome(terrain.PLAINS) }
+        style_button(plains_btn, "action")
+        mountains_btn = ui.btn(biome_row, "Hills") callback { set_terrain_biome(terrain.MOUNTAINS) }
+        style_button(mountains_btn, "action")
+        desert_btn = ui.btn(biome_row, "Desert") callback { set_terrain_biome(terrain.DESERT) }
+        style_button(desert_btn, "action")
+        biomes[terrain.PLAINS] = plains_btn
+        biomes[terrain.MOUNTAINS] = mountains_btn
+        biomes[terrain.DESERT] = desert_btn
+
+        biome_row_two = ui.hstack(g_terrain_body, 6)
+        as_row(biome_row_two)
+        islands_btn = ui.btn(biome_row_two, "Islands") callback { set_terrain_biome(terrain.ISLANDS) }
+        style_button(islands_btn, "action")
+        caves_btn = ui.btn(biome_row_two, "Caves") callback { set_terrain_biome(terrain.CAVES) }
+        style_button(caves_btn, "action")
+        biomes[terrain.ISLANDS] = islands_btn
+        biomes[terrain.CAVES] = caves_btn
+
+        field_row(g_terrain_body, "seed", (DEFAULT_SEED) as float, TERRAIN_SEED_ROW)
+
         g_water_divider = ui.divider(right)
         g_water_body = fold_section(right, "WATER")
         g_water_bar = section_bar(g_section_count - 1)
@@ -3717,6 +3930,12 @@ main() {
         scripts[SCRIPT_SPIN] = spin_btn
         scripts[SCRIPT_BOB] = bob_btn
         scripts[SCRIPT_ORBIT] = orbit_btn
+
+        ui.divider(right)
+        sky_body = fold_section(right, "SKY")
+        inspector_row(sky_body, "red", 0.0, 1.0, VIEWPORT_R, SKY_FIRST_ROW)
+        inspector_row(sky_body, "green", 0.0, 1.0, VIEWPORT_G, SKY_FIRST_ROW + 1)
+        inspector_row(sky_body, "blue", 0.0, 1.0, VIEWPORT_B, SKY_LAST_ROW)
 
         ui.divider(right)
         rendering_body = fold_section(right, "RENDERING")
@@ -3820,12 +4039,7 @@ build_menus() {
     ui.menu_item(add_menu, "Plane") callback { add_plane() }
     ui.menu_item(add_menu, "Water") callback { add_water() }
     ui.menu_item(add_menu, "Light") callback { add_light() }
-    ui.menu_separator(add_menu)
-    ui.menu_item(add_menu, "Plains") callback { add_biome(terrain.PLAINS) }
-    ui.menu_item(add_menu, "Mountains") callback { add_biome(terrain.MOUNTAINS) }
-    ui.menu_item(add_menu, "Desert") callback { add_biome(terrain.DESERT) }
-    ui.menu_item(add_menu, "Islands") callback { add_biome(terrain.ISLANDS) }
-    ui.menu_item(add_menu, "Caves") callback { add_biome(terrain.CAVES) }
+    ui.menu_item(add_menu, "Terrain") callback { add_terrain() }
     ui.menu_bar_add(bar, add_menu)
 
     // The transform modes carry no accelerator here: W, E, R and F already
