@@ -42,12 +42,25 @@ generated="$(mktemp)"
 }
 
 if [ "${1:-}" = "--check" ]; then
-    if diff -u docs/agent.md "$generated" >/dev/null 2>&1; then
+    # Compared with the Python that generated it rather than with diff, which a
+    # minimal MSYS2 does not ship: a missing tool read as "out of date" and
+    # reported a documentation change nobody had made.
+    if $PYTHON - "docs/agent.md" "$generated" <<'PYTHON'
+import difflib, io, sys
+current = io.open(sys.argv[1], encoding="utf-8").read()
+fresh = io.open(sys.argv[2], encoding="utf-8").read()
+if current == fresh:
+    sys.exit(0)
+sys.stderr.writelines(list(difflib.unified_diff(
+    current.splitlines(True), fresh.splitlines(True),
+    "docs/agent.md", "generated"))[:20])
+sys.exit(1)
+PYTHON
+    then
         rm -f "$generated"
         exit 0
     fi
     echo "gen_agent_docs: docs/agent.md is out of date; run ./scripts/gen_agent_docs.sh" >&2
-    diff -u docs/agent.md "$generated" | head -20 >&2
     rm -f "$generated"
     exit 1
 fi
