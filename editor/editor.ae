@@ -110,6 +110,7 @@ var g_vulkan = false
 // nothing.
 var g_agent_on = false
 var g_agent_ctx: ptr = null
+var g_agent_steps_left = 0
 
 var g_grid: ptr = null
 var g_helpers: ptr = null
@@ -407,7 +408,40 @@ pump_agent() {
         c.draw_calls = gl.renderer_draw_calls(g_renderer as *GLRenderer)
     }
 
+    if g_agent_steps_left > 0 {
+        g_agent_steps_left = g_agent_steps_left - 1
+        if g_agent_steps_left == 0 {
+            c.paused = true
+            agent.answer_step(c)
+        }
+        return
+    }
+
     agent.pump(c)
+
+    if c.want_capture {
+        c.want_capture = false
+        pixels = gl.renderer_frame_pixels(g_renderer as *GLRenderer)
+        captured = false
+        if !g_vulkan && pixels != null {
+            captured = agent.capture_adopt(pixels, g_view_w, g_view_h)
+        }
+        if c.pending_capture_id >= 0 { agent.answer_capture(c, captured) }
+        agent.answer_pending_trace(c)
+    }
+    if c.want_pause {
+        c.want_pause = false
+        c.paused = true
+    }
+    if c.want_resume {
+        c.want_resume = false
+        c.paused = false
+    }
+    if c.want_steps > 0 {
+        c.paused = false
+        g_agent_steps_left = c.want_steps
+        c.want_steps = 0
+    }
 
     if c.want_snapshot != "" {
         // The canvas, not the framebuffer. What an agent means by a snapshot of
@@ -1233,15 +1267,23 @@ draw_frame() {
         g_last_edit = 0.0
     }
 
-    update_water(delta)
-    run_scripts(delta)
+    // Held means the simulation does not advance. The editor redraws anyway,
+    // because an editor that only redraws on change would otherwise stop
+    // producing the frames an agent is holding it still in order to look at.
+    held = false
+    if g_agent_on { held = agent.is_paused(g_agent_ctx as *Context) }
+
+    if !held {
+        update_water(delta)
+        run_scripts(delta)
+    }
     update_outline()
 
     // A bounded run has to reach its frame count whatever is on screen, so the
     // gate never applies to one.
     backend = viewport_backend()
 
-    if !g_dirty && !scene_animates() && g_frame_limit == 0 {
+    if !held && !g_dirty && !scene_animates() && g_frame_limit == 0 {
         update_stats(&backend)
         return
     }
@@ -1265,7 +1307,7 @@ draw_frame() {
                                       pixels, g_view_w * g_view_h * 4)
     draw_gizmo()
     ui.canvas_redraw(g_canvas)
-    g_frames = g_frames + 1
+    if !held { g_frames = g_frames + 1 }
 
     update_stats(&backend)
 

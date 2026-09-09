@@ -177,3 +177,10 @@ double ae3d_capture_slot(const double *block, int index) {
     if (!block || index < 0 || index >= 8) return 0.0;
     return block[index];
 }
+
+int ae3d_capture_adopt(const unsigned char *pixels, int width, int height) {
+    if (!pixels) return 0;
+    if (!ae3d_capture_reserve(&g_frame, width, height)) return 0;
+    memcpy(g_frame.pixels, pixels, (size_t)width * (size_t)height * 4u);
+    return 1;
+}
