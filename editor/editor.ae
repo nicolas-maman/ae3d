@@ -673,6 +673,10 @@ const ROWS = 21
 // recorded as the angle the drag has turned through so far, and undone by
 // turning back through it.
 const ROTATE_FIRST_SLOT = 21
+// Past the rotation axes, which take 21 through 23. A behaviour is a property
+// of a model like any other as far as undo is concerned, so it travels as a
+// property step in a slot no row uses.
+const SCRIPT_SLOT = 24
 const CAMERA_FIRST_ROW = 17
 const CAMERA_LAST_ROW = 19
 // Past the camera rows, because the row indices below it are spoken for and a
@@ -1019,10 +1023,20 @@ script_at(index: int) -> int {
 set_script(index: int, script: int) {
     if g_scripts == null || index < 0 || index >= list.size(g_scripts) { return }
     slot = list.get_raw(g_scripts, index) as int[]
+    was = slot[0]
+    // Attaching a behaviour changes the scene, so it goes on the undo stack
+    // like every other change. Without this, undo after attaching one steps
+    // back through whatever came before it and puts that back instead, which
+    // is the same fault the gizmo drag had.
+    m = model_at(index)
+    if m != null && was != script {
+        history.history_record(g_history, history.STEP_PROPERTY, m as ptr,
+                               SCRIPT_SLOT, (was) as float, (script) as float)
+        // Each press is its own step: two of them are two decisions, not one
+        // drag, and collapsing them would make the first unreachable.
+        history.history_close(g_history)
+    }
     slot[0] = script
-    show_row(17, camera_value(17))
-    show_row(18, camera_value(18))
-    show_row(19, camera_value(19))
     refresh_script_buttons()
     say("${script_name(script)} on ${core.text(model_at(index).name)}")
 }
@@ -1470,6 +1484,28 @@ actions_that_do_nothing() -> int {
     return wrong
 }
 
+// Attaching a behaviour used to record nothing, so the next undo stepped back
+// through whatever came before it. Each behaviour is set, undone, and the model
+// asked whether it carries the one it had.
+unundone_scripts() -> int {
+    if g_selected < 0 { return 0 }
+    was = script_at(g_selected)
+
+    wrong = 0
+    kind = 0
+    while kind < SCRIPT_KINDS {
+        if kind != was {
+            set_script(g_selected, kind)
+            undo_step()
+            if script_at(g_selected) != was { wrong = wrong + 1 }
+            set_script(g_selected, was)
+            history.history_clear(g_history)
+        }
+        kind = kind + 1
+    }
+    return wrong
+}
+
 // A drag of the gizmo used to record nothing, so the next undo stepped back
 // through whatever came before it and put that back instead. Each mode is
 // dragged, undone, and the model asked whether it is where it started.
@@ -1642,6 +1678,8 @@ report_state() {
     lines = string.concat(lines, string.from_int(undrag))
     lines = string.concat(lines, "\nsilent_drags ")
     lines = string.concat(lines, string.from_int(g_silent_drags))
+    lines = string.concat(lines, "\nunundone_scripts ")
+    lines = string.concat(lines, string.from_int(unundone_scripts()))
     lines = string.concat(lines, "\nfirst_fps ")
     lines = string.concat(lines, string.from_int(g_first_fps))
     lines = string.concat(lines, "\nunreached_shading ")
@@ -1712,7 +1750,10 @@ replay(step: *EditStep, backwards: bool) {
         target = step.after
         if backwards { target = step.before }
         subject = step.subject as *Model
-        if step.slot >= ROTATE_FIRST_SLOT {
+        if step.slot == SCRIPT_SLOT {
+            select_model_pointer(step.subject)
+            if g_selected >= 0 { set_script(g_selected, (target) as int) }
+        } else if step.slot >= ROTATE_FIRST_SLOT {
             // A turn is undone by turning back through it, so what matters is
             // the angle between the two ends of the step rather than either end.
             turn = step.after - step.before

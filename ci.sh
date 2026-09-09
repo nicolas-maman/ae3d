@@ -243,6 +243,12 @@ check_editor_run() {
         # painted looks exactly like one showing a dark material.
         fail "$name (the colour chip is not the material's colour)"
         sed 's/^/        /' "$report"
+    elif [ "$(sed -n 's/^unundone_scripts //p' "$report")" != "0" ]; then
+        # Attaching a behaviour that records nothing leaves the next undo to
+        # step back through whatever came before it, the same fault the gizmo
+        # drag had.
+        fail "$name ($(sed -n 's/^unundone_scripts //p' "$report") behaviour(s) cannot be undone)"
+        sed 's/^/        /' "$report"
     elif [ "$(sed -n 's/^first_fps //p' "$report")" -lt 5 ]; then
         # The first frame rate the bar ever shows. It opened on 0 and climbed
         # through 1 and 2, because nothing was written until an interval had

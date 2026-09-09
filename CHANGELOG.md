@@ -578,6 +578,16 @@ First working engine.
 
 ### Editor
 
+- Attaching a behaviour can be undone. It recorded nothing, so undo after
+  choosing Spin stepped back through whatever came before it and put that back
+  instead, which is the same fault the gizmo drag had and the same one the
+  water rows had. A behaviour is a property of a model as far as undo is
+  concerned, and travels as a property step in a slot no row uses.
+
+- Setting a behaviour no longer refreshes the camera rows. Field of view, near
+  plane and far plane have nothing to do with which script a model carries; the
+  three calls were left over from something else.
+
 - The status bar does not open on a rate the editor is not running at. It wrote
   its first sample before a single frame interval had been measured, and the
   running average it reports started from nothing, so the first thing the
