@@ -548,6 +548,7 @@ renderer_init(r: *GLRenderer, window: ptr, width: int, height: int) -> int {
     init_post_processing(r, width, height)
 
     r.initialized = true
+    if r.shadow_enabled { renderer_set_shadows(r, true) }
     return 1
 }
 
@@ -826,9 +827,14 @@ renderer_set_post(r: *GLRenderer, fxaa: int, bloom: int, threshold: float, inten
 // Depth is written to a colour target rather than a depth texture: sampling a
 // depth attachment through texture() returns opaque white on this driver
 // whatever its filter and compare state, so it cannot be read in the main pass.
+//
+// Asking for shadows is a setting; building the map is GPU work. Keeping them
+// apart lets a program configure the renderer before the context exists, which
+// is the order the engine hands its settings down in: renderer_init builds the
+// map for whatever was asked for by then.
 renderer_set_shadows(r: *GLRenderer, on: bool) {
     r.shadow_enabled = on
-    if !on || r.shadow_fbo != 0 { return }
+    if !on || !r.initialized || r.shadow_fbo != 0 { return }
 
     r.shadow_fbo = ae3d_gl_fbo_create()
     r.shadow_map = ae3d_gl_fbo_attach_shadow_map(r.shadow_fbo, SHADOW_SIZE)
@@ -1655,8 +1661,12 @@ upload_light(slots_of: int[], index: int, l: *Light) {
 // Always says which of the two it is. Leaving the light-space matrix unset when
 // there is no map left it at zero, and every fragment then divided its
 // light-space position by a w of zero.
+// The map outlives the setting: turning shadows off leaves the texture where it
+// was, and a pass that only asked whether one exists went on sampling the last
+// one drawn. Vulkan rewrites the binding to its white texture on the way off,
+// so this is also what keeps the two backends showing the same scene.
 bind_shadow_map(r: *GLRenderer, slots: *ProgramSlots) {
-    if r.shadow_map == 0 {
+    if !r.shadow_enabled || r.shadow_map == 0 {
         ae3d_gl_uniform_int(slots.has_shadow_map, 0)
         return
     }

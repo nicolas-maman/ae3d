@@ -2378,10 +2378,16 @@ static int ae3d_vk_create_commands(void) {
 // read back rather than presented. That is what lets the editor host the
 // Vulkan renderer inside a toolkit that owns the real window.
 int ae3d_vk_init(void *win, int width, int height) {
+    // Whether shadows are wanted is a setting rather than device state, and
+    // descriptor sets written later in init read it. Clearing it here would
+    // discard anything asked for before the device existed.
+    int shadows = vk.shadow_enabled;
+
     if (vk.ready) return 1;
     if (!ae3d_vk_available()) return 0;
 
     memset(&vk, 0, sizeof(vk));
+    vk.shadow_enabled = shadows;
     vk.offscreen = win == NULL;
     vk.readback_frame = -1;
 
