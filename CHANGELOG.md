@@ -578,6 +578,18 @@ First working engine.
 
 ### Editor
 
+- The inspector has a SHADING section. The engine's shader has carried
+  clearcoat, sheen, ambient occlusion, volumetric light, global illumination
+  and soft shadows since it was written, and the editor offered no way to reach
+  any of them: the whole advanced half of the renderer was three preset buttons
+  wide. Each is a switch, and a preset loads its own answers into them, so a
+  preset is where the settings start rather than a mode the scene is locked
+  into.
+
+  They apply to every model, the way the presets already do. Giving each model
+  its own would mean a fourth list beside the models, the components and the
+  scripts, all of which have to move together.
+
 - The gizmo self-check counts drags that moved nothing apart from drags that
   could not be undone. A drag that never reaches the model leaves the model
   where it started, and the undo after it steps back through whatever came
@@ -648,6 +660,10 @@ First working engine.
   after another with nothing between them.
 
 ### Tooling
+
+- The report says how many shading switches reach no model, and the driver
+  presses one. A switch that sets a global and reaches nothing looks exactly
+  like one that works, because the only witness is a frame nobody compares.
 
 - The driver checks that choosing a behaviour moves the highlight, rather than
   that a particular button is blue. The tree reports the colour a widget was

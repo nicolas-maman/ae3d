@@ -69,6 +69,23 @@ const VOXEL_SIZE = 4.0
 const WATER_SIZE = 700.0
 const PAINT_INTERVAL = 0.033
 
+// CRITICAL: these sit above the globals rather than beside the other section
+// constants below, because a global initialised from one is emitted in file
+// order and a const declared after it is not in scope yet.
+const PRESET_FAST = 0
+const PRESET_BALANCED = 1
+const PRESET_QUALITY = 2
+const PRESET_KINDS = 3
+
+// The shading features the section offers, in the order they are drawn.
+const SHADE_CLEARCOAT = 0
+const SHADE_SHEEN = 1
+const SHADE_SSAO = 2
+const SHADE_VOLUMETRIC = 3
+const SHADE_GI = 4
+const SHADE_SHADOWS = 5
+const SHADE_KINDS = 6
+
 const GIZMO_TRANSLATE = 0
 const GIZMO_ROTATE = 1
 const GIZMO_SCALE = 2
@@ -145,7 +162,17 @@ var g_probe_field = 0
 // is on rather than only what could be chosen.
 var g_script_buttons: ptr = null
 var g_preset_buttons: ptr = null
-var g_preset = 1
+var g_preset = PRESET_BALANCED
+// The shading features, as the preset left them and as they were changed after.
+// The engine's config carries a dozen more; these are the six the presets
+// themselves disagree about, which is what makes them worth a control.
+var g_shade_clearcoat = false
+var g_shade_sheen = false
+var g_shade_ssao = false
+var g_shade_volumetric = false
+var g_shade_gi = false
+var g_shade_shadows = false
+var g_shade_toggles: ptr = null
 var g_mode_move = 0
 var g_mode_rotate = 0
 var g_mode_scale = 0
@@ -318,21 +345,72 @@ clear_console() {
     render_console()
 }
 
+// The preset behind the shading section. A preset is where the answers start,
+// not a mode the scene is locked into.
+preset_config() -> Config {
+    if g_preset == PRESET_FAST { return rendering.performance_config() }
+    if g_preset == PRESET_QUALITY { return rendering.high_quality_config() }
+    return rendering.default_config()
+}
+
+// The preset's answers, loaded into the toggles so the section shows what the
+// preset chose rather than whatever was last set by hand.
+load_shading() {
+    c = preset_config()
+    g_shade_clearcoat = c.clearcoat
+    g_shade_sheen = c.sheen
+    g_shade_ssao = c.ssao
+    g_shade_volumetric = c.volumetric_lighting
+    g_shade_gi = c.global_illumination
+    g_shade_shadows = c.advanced_shadows
+    refresh_shading_toggles()
+}
+
+// The preset plus whatever was changed after it. Written to every model, the
+// way the presets already are: the config is a scene setting here, and giving
+// each model its own would mean a fourth list beside the models, the components
+// and the scripts, all of which have to move together.
+apply_shading() {
+    c = preset_config()
+    c.clearcoat = g_shade_clearcoat
+    c.sheen = g_shade_sheen
+    c.ssao = g_shade_ssao
+    c.volumetric_lighting = g_shade_volumetric
+    c.global_illumination = g_shade_gi
+    c.advanced_shadows = g_shade_shadows
+    rendering.apply_all(g_models, c)
+    paint_soon()
+}
+
+refresh_shading_toggles() {
+    set_shading_toggle(SHADE_CLEARCOAT, g_shade_clearcoat)
+    set_shading_toggle(SHADE_SHEEN, g_shade_sheen)
+    set_shading_toggle(SHADE_SSAO, g_shade_ssao)
+    set_shading_toggle(SHADE_VOLUMETRIC, g_shade_volumetric)
+    set_shading_toggle(SHADE_GI, g_shade_gi)
+    set_shading_toggle(SHADE_SHADOWS, g_shade_shadows)
+}
+
+set_shading_toggle(slot: int, on: bool) {
+    if g_shade_toggles == null { return }
+    handles = g_shade_toggles as int[]
+    if handles[slot] == 0 { return }
+    value = 0
+    if on { value = 1 }
+    ui.set_toggle(handles[slot], value)
+}
+
 // The presets are the engine's own, applied to every model in the scene, which
 // is what gopher3D's advanced rendering panel does.
 apply_preset(name: string) {
-    if string.equals(name, "performance") == 1 { g_preset = 0 }
-    if string.equals(name, "balanced") == 1 { g_preset = 1 }
-    if string.equals(name, "quality") == 1 { g_preset = 2 }
+    if string.equals(name, "performance") == 1 { g_preset = PRESET_FAST }
+    if string.equals(name, "balanced") == 1 { g_preset = PRESET_BALANCED }
+    if string.equals(name, "quality") == 1 { g_preset = PRESET_QUALITY }
     refresh_preset_buttons()
 
-    config = rendering.default_config()
-    if string.equals(name, "performance") == 1 { config = rendering.performance_config() }
-    if string.equals(name, "quality") == 1 { config = rendering.high_quality_config() }
-
-    rendering.apply_all(g_models, config)
+    load_shading()
+    apply_shading()
     say("${name} preset applied to ${list.size(g_models)} models")
-    paint_soon()
 }
 
 // Vulkan renders offscreen on its own; OpenGL needs a context and a target to
@@ -583,7 +661,6 @@ const SCRIPT_SPIN = 1
 const SCRIPT_BOB = 2
 const SCRIPT_ORBIT = 3
 const SCRIPT_KINDS = 4
-const PRESET_KINDS = 3
 const BOB_HEIGHT = 14.0
 const BOB_RATE = 1.6
 const SCENE_PATH = "build/editor_scene.json"
@@ -1519,6 +1596,8 @@ report_state() {
     lines = string.concat(lines, string.from_int(undrag))
     lines = string.concat(lines, "\nsilent_drags ")
     lines = string.concat(lines, string.from_int(g_silent_drags))
+    lines = string.concat(lines, "\nunreached_shading ")
+    lines = string.concat(lines, string.from_int(unreached_shading()))
     lines = string.concat(lines, "\nidle_actions ")
     lines = string.concat(lines, string.from_int(idle))
     lines = string.concat(lines, "\nframes ")
@@ -1999,6 +2078,102 @@ inspector_row(parent: int, name: string, low: float, high: float,
     frames = g_row_frames as int[]
     sliders[index] = slider
     frames[index] = row
+}
+
+// One shading feature: a caption and a switch, the same shape as the FXAA and
+// bloom rows below them. The engine's shader has carried these since it was
+// written and the editor offered no way to reach any of them, so the whole
+// advanced half of the renderer was three preset buttons wide.
+shading_row(parent: int, name: string, slot: int) {
+    row = ui.hstack(parent, 8)
+    as_row(row)
+    caption = ui.text(row, name)
+    ui.add_css_class(caption, "label")
+    ui.spacer(row)
+    handle = ui.toggle(row, "") callback |on: bool| {
+        set_shading(slot, on)
+    }
+    handles = g_shade_toggles as int[]
+    handles[slot] = handle
+}
+
+set_shading(slot: int, on: bool) {
+    if slot == SHADE_CLEARCOAT { g_shade_clearcoat = on }
+    if slot == SHADE_SHEEN { g_shade_sheen = on }
+    if slot == SHADE_SSAO { g_shade_ssao = on }
+    if slot == SHADE_VOLUMETRIC { g_shade_volumetric = on }
+    if slot == SHADE_GI { g_shade_gi = on }
+    if slot == SHADE_SHADOWS { g_shade_shadows = on }
+    apply_shading()
+    say("${shading_name(slot)} ${on}")
+}
+
+shading_name(slot: int) -> string {
+    if slot == SHADE_CLEARCOAT { return "clearcoat" }
+    if slot == SHADE_SHEEN { return "sheen" }
+    if slot == SHADE_SSAO { return "ambient occlusion" }
+    if slot == SHADE_VOLUMETRIC { return "volumetric light" }
+    if slot == SHADE_GI { return "global illumination" }
+    return "soft shadows"
+}
+
+// The uniform each switch writes, so the self-check can ask a model what it was
+// actually told rather than trust that the switch was wired to anything.
+shading_uniform(slot: int) -> string {
+    if slot == SHADE_CLEARCOAT { return "enableClearcoat" }
+    if slot == SHADE_SHEEN { return "enableSheen" }
+    if slot == SHADE_SSAO { return "enableSSAO" }
+    if slot == SHADE_VOLUMETRIC { return "enableVolumetricLighting" }
+    if slot == SHADE_GI { return "enableGlobalIllumination" }
+    return "enableShadows"
+}
+
+// Whether the model was told what the switch says. A switch that sets a global
+// and reaches no model looks exactly like one that works, because the only
+// witness is a frame nobody compares. Each is flipped, the model asked what
+// uniform it now carries, and the switch put back.
+unreached_shading() -> int {
+    m = selected_model()
+    if m == null { return 0 }
+
+    wrong = 0
+    slot = 0
+    while slot < SHADE_KINDS {
+        was = shading_state(slot)
+        set_shading(slot, !was)
+        if model_flag(m, shading_uniform(slot)) == flag_of(was) { wrong = wrong + 1 }
+        set_shading(slot, was)
+        slot = slot + 1
+    }
+    return wrong
+}
+
+shading_state(slot: int) -> bool {
+    if slot == SHADE_CLEARCOAT { return g_shade_clearcoat }
+    if slot == SHADE_SHEEN { return g_shade_sheen }
+    if slot == SHADE_SSAO { return g_shade_ssao }
+    if slot == SHADE_VOLUMETRIC { return g_shade_volumetric }
+    if slot == SHADE_GI { return g_shade_gi }
+    return g_shade_shadows
+}
+
+flag_of(value: bool) -> int {
+    if value { return 1 }
+    return 0
+}
+
+// What a model currently carries for a named uniform, or -1 if it carries none
+// of that name. The renderer reads these off the model, so this is the same
+// value the shader will be handed.
+model_flag(m: *Model, name: string) -> int {
+    count = core.model_uniform_count(m)
+    i = 0
+    while i < count {
+        u = core.model_uniform(m, i)
+        if u != null && string.equals(core.text(u.name), name) == 1 { return u.integer }
+        i = i + 1
+    }
+    return 0 - 1
 }
 
 theme() -> ptr {
@@ -2917,6 +3092,7 @@ main() {
     g_report = env("AE3D_EDITOR_REPORT")
     g_models = list.new()
     g_rows = list.new()
+    g_shade_toggles = calloc(SHADE_KINDS, 4)
     g_script_buttons = calloc(SCRIPT_KINDS, 4)
     g_preset_buttons = calloc(PRESET_KINDS, 4)
     g_sliders = calloc(ROWS, 4)
@@ -3316,6 +3492,16 @@ main() {
         presets[0] = fast_btn
         presets[1] = balanced_btn
         presets[2] = quality_btn
+
+        ui.divider(right)
+        heading(right, "SHADING")
+
+        shading_row(right, "Clearcoat", SHADE_CLEARCOAT)
+        shading_row(right, "Sheen", SHADE_SHEEN)
+        shading_row(right, "Ambient occlusion", SHADE_SSAO)
+        shading_row(right, "Volumetric light", SHADE_VOLUMETRIC)
+        shading_row(right, "Global illumination", SHADE_GI)
+        shading_row(right, "Soft shadows", SHADE_SHADOWS)
 
         fxaa_row = ui.hstack(right, 8)
         as_row(fxaa_row)

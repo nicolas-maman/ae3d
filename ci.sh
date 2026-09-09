@@ -243,6 +243,12 @@ check_editor_run() {
         # painted looks exactly like one showing a dark material.
         fail "$name (the colour chip is not the material's colour)"
         sed 's/^/        /' "$report"
+    elif [ "$(sed -n 's/^unreached_shading //p' "$report")" != "0" ]; then
+        # A shading switch that sets a global and reaches no model looks
+        # exactly like one that works: the only witness is a frame nobody
+        # compares. Each is flipped and the model asked what it now carries.
+        fail "$name ($(sed -n 's/^unreached_shading //p' "$report") shading switch(es) reach no model)"
+        sed 's/^/        /' "$report"
     elif [ "$(sed -n 's/^silent_drags //p' "$report")" != "0" ]; then
         # Checked before the undo count, because it is the other explanation
         # for it: a drag that never reaches the model leaves the model where it

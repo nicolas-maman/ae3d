@@ -403,6 +403,32 @@ def main():
               len(menus) == 4 and not missing,
               "%d menus, missing %s" % (len(menus), missing[:4]))
 
+        # The shading switches, pressed rather than called. The report's own
+        # check flips them through set_shading; this is the half that proves a
+        # switch on the screen is wired to that at all.
+        widgets = tree(args.port)
+        wanted = ["Clearcoat", "Sheen", "Ambient occlusion", "Volumetric light",
+                  "Global illumination", "Soft shadows"]
+        captions = {w["text"].strip(): w for w in widgets.values()
+                    if w["type"] == "text" and w["text"].strip() in wanted}
+        check("the shading section offers every feature the presets disagree on",
+              len(captions) == len(wanted),
+              "missing %s" % [n for n in wanted if n not in captions])
+        if "Ambient occlusion" in captions:
+            switch = [w for w in widgets.values()
+                      if w["parent"] == captions["Ambient occlusion"]["parent"]
+                      and w["type"] == "toggle"]
+            check("and each has a switch", len(switch) == 1)
+            if switch:
+                post(args.port, "/widget/%d/click" % switch[0]["id"])
+                widgets, ok = wait_for(
+                    args.port,
+                    lambda ws: any(w["type"] == "text"
+                                   and "ambient occlusion" in w["text"]
+                                   for w in ws.values()))
+                check("pressing one is heard by the editor", ok)
+                post(args.port, "/widget/%d/click" % switch[0]["id"])
+
         # A row of choices says which one is on. Read as "the accent moved",
         # not "this button is blue": the tree reports the colour a widget was
         # given rather than the colour it has (aether-lang-dev/aether-ui#111),
