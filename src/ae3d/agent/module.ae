@@ -21,7 +21,8 @@ import ae3d.scene
 exports (
     Context, context_new, context_free,
     start, active, port, stop, pump, answer_step, answer_snapshot, answer_capture,
-    capture_release, capture_frame, capture_adopt, answer_pending_trace, is_paused,
+    capture_release, capture_frame, capture_adopt, answer_pending_trace,
+    answer_capture_unsupported, is_paused,
     schema_json, last_error
 )
 
@@ -1351,4 +1352,17 @@ answer_pending_trace(c: *Context) {
 
 capture_adopt(pixels: ptr, width: int, height: int) -> bool {
     return ae3d_capture_adopt(pixels, width, height) == 1
+}
+
+answer_capture_unsupported(c: *Context, reason: string) {
+    if c.pending_capture_id >= 0 {
+        fail(c.pending_capture_id, reason)
+        c.pending_capture_id = -1
+    }
+    if c.pending_trace_id >= 0 {
+        m = c.pending_trace_model as *Model
+        answer(c.pending_trace_id, trace_result(c, m, assets.provenance_for(m)))
+        c.pending_trace_id = -1
+        c.pending_trace_model = null
+    }
 }

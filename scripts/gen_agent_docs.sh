@@ -26,12 +26,13 @@ if [ -z "$PYTHON" ]; then
     exit 2
 fi
 
-if [ ! -x build/agent_schema ] && [ ! -x build/agent_schema.exe ]; then
-    ./build.sh tools/agent_schema.ae agent_schema >/dev/null 2>&1 || {
-        echo "gen_agent_docs: could not build agent_schema" >&2
-        exit 2
-    }
-fi
+# Always rebuilt. Reusing whatever binary was lying around let the check pass
+# against a schema older than the source it is meant to describe, which is the
+# one failure mode a documentation check must not have.
+./build.sh tools/agent_schema.ae agent_schema >/dev/null 2>&1 || {
+    echo "gen_agent_docs: could not build agent_schema" >&2
+    exit 2
+}
 
 generated="$(mktemp)"
 ./build/agent_schema | "$PYTHON" tools/ae3d_agent.py --docs > "$generated" || {

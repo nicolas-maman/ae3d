@@ -46,6 +46,18 @@ the first.
 | `camera.get` |  | Camera position, orientation, field of view and clip planes. |
 | `scene.tree` |  | Every model the renderer holds: index, name, position and visibility. |
 | `model.get` | `index` | One model in full: transform, bounds, material and mesh counts. |
+| `light.list` |  | Every light: kind, position, direction, colour, intensity and ambient. |
+| `model.set` | `index, [position], [rotation], [scale], [diffuse], [metallic], [roughness], [alpha], [visible], [casts_shadow], [name]` | Change a model. Only the fields present are written; answers with the model as it now is. |
+| `camera.set` | `[position], [look_at], [fov], [near], [far]` | Move or reframe the camera. |
+| `light.set` | `[index], [position], [direction], [color], [intensity], [ambient]` | Change a light. |
+| `scene.save` | `path, [mesh_directory]` | Write the scene to JSON, with generated geometry beside it. |
+| `scene.load` | `path` | Replace the scene with one from a file, and reframe the camera as it was saved. |
+| `frame.capture` |  | Read the finished frame into the engine. Answers with its size once it is there. |
+| `frame.pixel` | `x, y` | One pixel of the captured frame as r, g, b, a and hex. |
+| `frame.region` | `x, y, width, height, [background], [tolerance]` | Mean colour and coverage over a rectangle, summarised in the engine rather than shipped as pixels. |
+| `frame.hold` |  | Keep the captured frame as the reference frame.diff compares against. |
+| `frame.diff` | `[tolerance]` | Changed pixel count, fraction and largest channel delta against the held reference. |
+| `world` |  | Every entity and the relations between them: blend object, asset, model, mesh, clip, light, camera. One query instead of joining four. |
 | `trace.model` | `id \| object \| index` | Follow one model from its Blender object to the pixels: source, asset, mesh, node, animation, visibility. Names the stage it stopped being right at. |
 | `anim.list` |  | Every animation bound to a model: clip, playhead, duration, speed and the pose it produced. |
 | `anim.get` | `name \| index` | One animation in full, including the transform its playhead currently produces. |
