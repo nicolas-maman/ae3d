@@ -37,6 +37,18 @@ have_display() {
     esac
 }
 
+# A suite, example or benchmark that hangs should fail this step by name rather
+# than stall the job until the runner's own six-hour limit: one did, on Linux,
+# for three and a half hours, and the log said nothing at all. Not every
+# platform ships coreutils' timeout, so where it is missing the run is
+# unguarded, exactly as it was before.
+if command -v timeout >/dev/null 2>&1; then
+    bounded() { timeout "$@"; }
+else
+    bounded() { shift; "$@"; }
+fi
+RUN_LIMIT="${AE3D_CI_RUN_LIMIT:-300}"
+
 step "platform link libraries"
 # Every host this can be built on, checked from any host. Windows had no arm
 # at all and the catch-all's -lm cannot link an OpenGL program, so ae3d could
@@ -252,7 +264,7 @@ for suite in tests/test_*.ae; do
         skip "$name" "no display"
         continue
     fi
-    if ! output="$(AE3D_FRAMES="$FRAMES" ./build/"$name" 2>&1)"; then
+    if ! output="$(AE3D_FRAMES="$FRAMES" bounded "$RUN_LIMIT" ./build/"$name" 2>&1)"; then
         fail "$name"
         printf '%s\n' "$output" | sed 's/^/        /' | head -20
     elif printf '%s' "$output" | grep -q "all checks passed"; then
@@ -284,7 +296,7 @@ for example in examples/*.ae; do
         skip "$name" "no display"
         continue
     fi
-    if AE3D_FRAMES="$FRAMES" ./build/"$name" >/tmp/ae3d_run.log 2>&1; then
+    if AE3D_FRAMES="$FRAMES" bounded "$RUN_LIMIT" ./build/"$name" >/tmp/ae3d_run.log 2>&1; then
         pass "$name"
     else
         fail "$name"
@@ -550,7 +562,7 @@ for bench in benchmarks/bench_*.ae; do
         fail "$name (build warnings)"
         continue
     fi
-    if output="$(./build/"$name" 2>&1)"; then
+    if output="$(bounded "$RUN_LIMIT" ./build/"$name" 2>&1)"; then
         pass "$name"
         printf '%s\n' "$output" | sed 's/^/        /'
     else
@@ -592,7 +604,7 @@ elif command -v leaks >/dev/null 2>&1; then
         # this binary. That is what lets the suites using ae3d.engine be
         # checked at all: they were skipped wholesale for opening a window, and
         # the exclusion was hiding a lost model in each of them.
-        output="$(MallocStackLogging=1 leaks --atExit -- "./build/$name" 2>&1)"
+        output="$(MallocStackLogging=1 bounded "$RUN_LIMIT" leaks --atExit -- "./build/$name" 2>&1)"
         report="$(printf '%s' "$output" | grep -o '[0-9]* leaks for [0-9]* total leaked bytes' | tail -1)"
         lost="$(printf '%s' "$output" | awk -v bin="$name" '
             /^STACK OF /   { inblock = (index($0, "ROOT LEAK") > 0); ours = 0; next }
