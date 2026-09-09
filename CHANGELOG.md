@@ -559,6 +559,12 @@ First working engine.
 
 ### Editor
 
+- Every button in the left panel shares an edge. A pair of buttons sat in a row
+  that added its own inset over the panel's, so it started fourteen pixels
+  right of the full-width buttons above and below it and ended fourteen short
+  of the panel on the other side. The same control had two edges depending on
+  whether it had a neighbour.
+
 - The console's caption lines up with its lines. A section bar and a caption
   that shares a row with a button are different things, and using the bar for
   both gave the caption the bar's padding on top of the panel's own, sitting
