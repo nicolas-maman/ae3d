@@ -296,6 +296,10 @@ var g_report = ""
 var g_fps = 0.0
 var g_stats_written = 0.0
 var g_last_time = 0.0
+// The interval the last frame actually took. The agent channel reports it, and
+// it was answering a constant while the editor had measured the real thing a
+// few lines earlier.
+var g_delta = 0.016
 var g_timer = 0
 var g_stage = 0
 var g_left = 0
@@ -566,7 +570,7 @@ pump_agent() {
     }
     c.frame_count = g_frames
     c.fps = g_fps
-    c.delta = 0.016
+    c.delta = g_delta
     c.width = g_view_w
     c.height = g_view_h
     c.draw_calls = 0
@@ -651,11 +655,8 @@ apply_post() {
 // not a canvas: a second canvas in a panel collapses it
 // (aether-lang-dev/aether-ui#98), and a background is all a chip needs.
 //
-// Implemented on all four aether-ui backends, but with no binding in ui/module
-// yet (aether-lang-dev/aether-ui#109), so it is declared here. It answers from
-// the layer that actually paints rather than from the value that was set,
-// which is what makes it worth checking against.
-extern aether_ui_styled_bg_impl(handle: int) -> int
+// ui.styled_bg answers from the layer that actually paints rather than from
+// the value that was set, which is what makes it worth checking against.
 // What the selection is and how big it is. Read from the model each time it is
 // asked for, because a terrain that changes shape keeps its name and changes
 // its geometry underneath: the title said twelve triangles while the model had
@@ -690,7 +691,7 @@ refresh_swatch() {
 // the value it was handed.
 chip_rgb() -> int {
     if g_chip == 0 { return 0 - 1 }
-    return aether_ui_styled_bg_impl(g_chip)
+    return ui.styled_bg(g_chip)
 }
 
 // The theme's own colours, as the sheet sets them. Written here rather than
@@ -717,7 +718,7 @@ mis_styled() -> int {
 // is: what a widget paints comes back off a layer and through a colour space.
 painted_as(handle: int, wanted: int) -> bool {
     if handle == 0 { return false }
-    got = aether_ui_styled_bg_impl(handle)
+    got = ui.styled_bg(handle)
     if got < 0 { return false }
     shift = 65536
     while shift >= 1 {
@@ -1510,6 +1511,7 @@ draw_frame() {
     if g_last_time > 0.0 {
         elapsed = now - g_last_time
         if elapsed > 0.0 && elapsed < 0.25 { delta = elapsed }
+        g_delta = delta
         // Seeded with the first measurement rather than smoothed up from
         // zero. A running average that starts at nothing spends a second
         // climbing, and what it shows on the way is a rate the editor is not
