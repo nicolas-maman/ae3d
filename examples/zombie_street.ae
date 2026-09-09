@@ -1,0 +1,86 @@
+// A zombie walking up a street, and attacking.
+//
+// Authored in Blender by tools/blender/make_zombie_street.py, exported through
+// tools/blender/ae3d_export.py, and loaded here straight from the manifest.
+//
+// The zombie is rigid parts, not a skinned mesh: ae3d has no skinning
+// (ae3d#192), so each limb carries its own world-space clip. One clip in three
+// phases -- walking to 3.0s, the lunge to 4.0s, then walking again.
+//
+//   AE3D_AGENT=7911 ./build/zombie_street
+//   python3 tools/ae3d_agent.py --port 7911 anim.set name=Zombie_HandL time=3.5
+
+import ae3d.core
+import ae3d.platform
+import ae3d.engine
+import ae3d.gl
+import ae3d.assets
+import ae3d.anim
+
+const MANIFEST = "resources/blender/zombie_street/manifest.json"
+
+main() {
+    e = engine.engine_new(platform.API_GL)
+    engine.engine_set_size(e, 1280, 720)
+    engine.engine_set_title(e, "ae3d: a zombie, on a street")
+    engine.engine_set_camera_input(e, true)
+    engine.engine_set_post(e, true, true, 1.1, 0.45)
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_start(e, on_start)
+
+    if !engine.engine_run(e, -1, -1) {
+        println("zombie_street: no window")
+        engine.engine_free(e)
+        return
+    }
+    engine.engine_free(e)
+}
+
+on_start(data: ptr) {
+    e = data as *Engine
+
+    // Blender is Z-up and ae3d is Y-up, so the street's Blender Y became ae3d
+    // -Z: the buildings sit at z = -8 and z = +8 and the road is the corridor
+    // between them. The camera stands on the road looking back down it.
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(7.8, 1.9, 5.1))
+    core.camera_look_at(cam, core.vec3(3.9, 1.15, 0.0))
+
+    dusk = core.light_directional(core.vec3(0.0 - 0.45, 0.0 - 1.0, 0.0 - 0.30),
+                                  core.vec3(0.95, 0.88, 0.78), 2.4)
+    dusk.ambient_strength = 0.45
+    engine.engine_set_light(e, dusk)
+
+    renderer = engine.engine_gl_renderer(e)
+    if renderer != null {
+        gl.renderer_set_clear_color(renderer as *GLRenderer, 0.07, 0.08, 0.12)
+    }
+
+    m = assets.manifest_load(MANIFEST)
+    if m == null {
+        println("zombie_street: ${assets.last_error()}")
+        println("zombie_street: run ./scripts/export_assets.sh to build the assets")
+        return
+    }
+
+    animated = 0
+    count = assets.manifest_count(m)
+    i = 0
+    while i < count {
+        entry = assets.manifest_entry(m, i)
+        model = assets.entry_load_model(m, entry)
+        if model != null {
+            engine.engine_add_model(e, model)
+            clip = assets.entry_load_clip(m, entry)
+            if clip != null {
+                engine.engine_add_animation(e, assets.entry_id(entry),
+                                            anim.player_new(clip), model)
+                animated = animated + 1
+            }
+        }
+        i = i + 1
+    }
+
+    println("zombie_street: ${count} objects from ${assets.manifest_source(m)}, ${animated} animated")
+    assets.manifest_free(m)
+}

@@ -112,6 +112,23 @@ blender_pipeline: showcase.blend exported by Blender 5.2.1 LTS
 blender_pipeline: playing 'OrbAction', 1.95833s, 2 channels
 ```
 
+`examples/zombie_street.ae` is the same pipeline at scale: a street and a
+zombie, 31 objects out of one `.blend`, eleven of them animated. The zombie is
+rigid parts rather than a skinned mesh, because ae3d has no skinning
+(ae3d#192), so each limb carries its own world-space clip and the walk and the
+lunge are keyframed maths.
+
+Seeking every part to the same time and reading the transforms back shows the
+attack as numbers rather than as an impression:
+
+```
+phase        torso_x  hand_x  hand_y
+walk 1.0s      1.100   1.800   1.462
+walk 2.5s      2.750   3.450   1.378
+STRIKE 3.5s    3.931   4.968   0.833     <- lunges forward, hand swings down
+recover 4.5s   4.750   5.450   1.378
+```
+
 Started with `AE3D_AGENT` it can be driven while it runs, which is how the
 easing above is checked against the curve rather than against a screenshot:
 
@@ -257,6 +274,7 @@ everything else.
 | `particle_disc.ae` | The same scene as an N-body: 200000 particles under Verlet integration in one instanced draw, coloured per instance |
 | `sand.ae` | 250000 grains falling and settling, click to scatter them |
 | `blender_pipeline.ae` | A model authored and keyed in Blender, exported, loaded and played |
+| `zombie_street.ae` | A zombie walking a street and attacking, 31 objects from one .blend |
 | `smooth_terrain.ae` | The same terrain meshed with surface nets, 67590 triangles |
 
 ### Examples as instruments

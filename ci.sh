@@ -95,6 +95,7 @@ if command -v blender >/dev/null 2>&1 || [ -n "${BLENDER:-}" ]; then
     }
     check_exported tests/fixtures/spin.blend tests/fixtures/exported
     check_exported resources/blender/showcase.blend resources/blender/showcase
+    check_exported resources/blender/zombie_street.blend resources/blender/zombie_street
 else
     skip "exported fixtures" "no Blender"
 fi
