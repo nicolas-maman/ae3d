@@ -565,6 +565,12 @@ First working engine.
 
 ### Editor
 
+- The kind of each object in the scene list is a glyph that looks like the
+  thing rather than punctuation. A pipe, a tilde, a hash and an asterisk say
+  nothing about what they stand for and read as stray keystrokes down the edge
+  of the list. Every editor this borrows from puts a small icon there, and a
+  diamond, waves, a grid and a star are the nearest a text list gets.
+
 - Buttons carry an edge. A flat fill on a panel one step darker reads as a soft
   block rather than as something to press, and a panel of ten of them had no
   lines in it at all. The fields beside them already had a border, so the two
