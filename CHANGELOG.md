@@ -565,6 +565,12 @@ First working engine.
 
 ### Editor
 
+- A row of choices says which one is on. The behaviour buttons and the
+  rendering presets were four and three identical bars: they showed what could
+  be chosen and never what was, so the only way to find out which preset was
+  running was to remember pressing it. The one in effect now wears the accent,
+  the way the transform modes over the viewport already did.
+
 - The window has a menu bar: File, Edit, Add and View, with accelerators on the
   ones a person expects to press. Every editor this borrows from has one, and a
   window of panels with no menu reads as a demonstration of a toolkit rather
@@ -602,6 +608,11 @@ First working engine.
   after another with nothing between them.
 
 ### Tooling
+
+- The driver checks that choosing a behaviour moves the highlight, rather than
+  that a particular button is blue. The tree reports the colour a widget was
+  given and not the colour it has (aether-lang-dev/aether-ui#111), so a reading
+  that never changes would pass against a highlight painted nowhere.
 
 - The driver checks that every action is on a menu. It does not activate one:
   the driver runs a menu item's closure on its own HTTP thread rather than

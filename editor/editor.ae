@@ -143,6 +143,11 @@ var g_probe_field = 0
 // The transform-mode buttons on the viewport. The mode was reachable only by
 // pressing W, E or R, which is the convention but not a thing a panel can show
 // you, so nothing on screen said which one was live.
+// The lit segment of each row of choices, so a row of buttons says which one
+// is on rather than only what could be chosen.
+var g_script_buttons: ptr = null
+var g_preset_buttons: ptr = null
+var g_preset = 1
 var g_mode_move = 0
 var g_mode_rotate = 0
 var g_mode_scale = 0
@@ -314,6 +319,11 @@ clear_console() {
 // The presets are the engine's own, applied to every model in the scene, which
 // is what gopher3D's advanced rendering panel does.
 apply_preset(name: string) {
+    if string.equals(name, "performance") == 1 { g_preset = 0 }
+    if string.equals(name, "balanced") == 1 { g_preset = 1 }
+    if string.equals(name, "quality") == 1 { g_preset = 2 }
+    refresh_preset_buttons()
+
     config = rendering.default_config()
     if string.equals(name, "performance") == 1 { config = rendering.performance_config() }
     if string.equals(name, "quality") == 1 { config = rendering.high_quality_config() }
@@ -564,6 +574,8 @@ const SCRIPT_NONE = 0
 const SCRIPT_SPIN = 1
 const SCRIPT_BOB = 2
 const SCRIPT_ORBIT = 3
+const SCRIPT_KINDS = 4
+const PRESET_KINDS = 3
 const BOB_HEIGHT = 14.0
 const BOB_RATE = 1.6
 const SCENE_PATH = "build/editor_scene.json"
@@ -935,6 +947,7 @@ script_name(script: int) -> string {
 }
 
 refresh_script_label() {
+    refresh_script_buttons()
     if g_script_label == 0 { return }
     ui.set_text(g_script_label, non_empty(script_name(script_at(g_selected))))
 }
@@ -1123,6 +1136,8 @@ settle_layout() {
     // reported the colour it had been given.
     refresh_swatch()
     refresh_mode_buttons()
+    refresh_preset_buttons()
+    refresh_script_buttons()
     g_layout_settled = true
 }
 
@@ -2829,6 +2844,29 @@ refresh_mode_buttons() {
     paint_mode_button(g_mode_scale, g_gizmo_mode == GIZMO_SCALE)
 }
 
+// A row of choices where exactly one is on: light the one that is, the way the
+// transform modes over the viewport already do. A row where every button looks
+// the same shows what can be chosen and never what was.
+paint_segments(store: ptr, count: int, active: int) {
+    if store == null { say("DBG store null") return }
+    dbg = store as int[]
+    say("DBG segs ${dbg[0]} ${dbg[1]} active ${active}")
+    buttons = store as int[]
+    i = 0
+    while i < count {
+        paint_mode_button(buttons[i], i == active)
+        i = i + 1
+    }
+}
+
+refresh_script_buttons() {
+    paint_segments(g_script_buttons, SCRIPT_KINDS, script_at(g_selected))
+}
+
+refresh_preset_buttons() {
+    paint_segments(g_preset_buttons, PRESET_KINDS, g_preset)
+}
+
 set_gizmo_mode(mode: int) {
     mark_dirty()
     g_gizmo_mode = mode
@@ -2844,6 +2882,8 @@ main() {
     g_report = env("AE3D_EDITOR_REPORT")
     g_models = list.new()
     g_rows = list.new()
+    g_script_buttons = calloc(SCRIPT_KINDS, 4)
+    g_preset_buttons = calloc(PRESET_KINDS, 4)
     g_sliders = calloc(ROWS, 4)
     g_fields = calloc(ROWS, 4)
     g_row_frames = calloc(ROWS, 4)
@@ -3229,6 +3269,11 @@ main() {
         style_button(bob_btn, "action")
         orbit_btn = ui.btn(script_buttons, "Orbit") callback { set_script(g_selected, SCRIPT_ORBIT) }
         style_button(orbit_btn, "action")
+        scripts = g_script_buttons as int[]
+        scripts[SCRIPT_NONE] = none_btn
+        scripts[SCRIPT_SPIN] = spin_btn
+        scripts[SCRIPT_BOB] = bob_btn
+        scripts[SCRIPT_ORBIT] = orbit_btn
 
         ui.divider(right)
         heading(right, "RENDERING")
@@ -3241,6 +3286,10 @@ main() {
         style_button(balanced_btn, "action")
         quality_btn = ui.btn(preset_row, "Quality") callback { apply_preset("quality") }
         style_button(quality_btn, "action")
+        presets = g_preset_buttons as int[]
+        presets[0] = fast_btn
+        presets[1] = balanced_btn
+        presets[2] = quality_btn
 
         fxaa_row = ui.hstack(right, 8)
         as_row(fxaa_row)
@@ -3278,6 +3327,11 @@ main() {
         build_scene()
         scan_assets()
         apply_orbit()
+        // After the sheet is applied: a class repaints over a runtime colour,
+        // so a lit segment set while the tree was being built is painted back
+        // to the class's own background before anyone sees it.
+        refresh_preset_buttons()
+        refresh_script_buttons()
 
 
         g_timer = ui.timer(16) callback {
