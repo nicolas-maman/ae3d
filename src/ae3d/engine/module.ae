@@ -80,7 +80,6 @@ struct Engine {
     // build that did not ask for the channel, which is what keeps it free.
     agent_on: bool
     agent_ctx: ptr
-    agent_step_id: int
     agent_steps_left: int
     frame_limit: int
 }
@@ -305,7 +304,6 @@ engine_start(e: *Engine, x: int, y: int) -> bool {
     // AE3D_AGENT is the only thing that turns this on. Unset, agent.start()
     // opens nothing, agent_on stays false, and the frame loop never reaches the
     // channel at all.
-    e.agent_step_id = -1
     e.agent_on = agent.start()
     if e.agent_on {
         e.agent_ctx = agent.context_new()
@@ -356,26 +354,27 @@ pump_agent(e: *Engine) {
     if e.agent_steps_left > 0 {
         e.agent_steps_left = e.agent_steps_left - 1
         if e.agent_steps_left == 0 {
-            agent.answer_step(e.agent_step_id, c)
-            e.agent_step_id = -1
+            // Back to held, which is where the step started. An agent that
+            // stepped asked to look at a particular frame, not to be handed
+            // back a running engine.
+            c.paused = true
+            agent.answer_step(c)
         }
         return
     }
 
-    pending = agent.pump(c)
+    agent.pump(c)
 
-    if c.want_snapshot != "" {
-        if e.api == platform.API_VULKAN {
-            println("ae3d: the agent's snapshot needs the OpenGL backend")
-        } else {
-            width = platform.window_fb_width(e.window)
-            height = platform.window_fb_height(e.window)
-            gl.snapshot(c.want_snapshot, width, height)
-        }
-        c.want_snapshot = ""
+    if c.want_pause {
+        c.want_pause = false
+        c.paused = true
+    }
+    if c.want_resume {
+        c.want_resume = false
+        c.paused = false
     }
     if c.want_steps > 0 {
-        e.agent_step_id = pending
+        c.paused = false
         e.agent_steps_left = c.want_steps
         c.want_steps = 0
     }
@@ -383,6 +382,27 @@ pump_agent(e: *Engine) {
         c.want_stop = false
         engine_stop(e)
     }
+}
+
+// A finished frame is only readable between the last draw and the buffer swap.
+// Called from there, which is why the agent's snapshot is not taken where the
+// rest of its work happens: after the swap the back buffer holds nothing this
+// frame put in it, and the file came out empty with an "ok" already sent.
+service_agent_snapshot(e: *Engine) {
+    c = e.agent_ctx as *Context
+    if c.pending_snapshot_id < 0 { return }
+
+    path = c.want_snapshot
+    c.want_snapshot = ""
+    if e.api == platform.API_VULKAN {
+        agent.answer_snapshot(c, path, false)
+        string.free(path)
+        return
+    }
+    width = platform.window_fb_width(e.window)
+    height = platform.window_fb_height(e.window)
+    agent.answer_snapshot(c, path, gl.snapshot(path, width, height))
+    string.free(path)
 }
 
 engine_shutdown(e: *Engine) {
@@ -409,6 +429,14 @@ engine_loop(e: *Engine) {
         now = platform.time()
         delta = now - last_time
         last_time = now
+
+        // A held frame still draws, so the window stays alive and the scene can
+        // be queried and snapshotted; it just does not advance. Time stops and
+        // the counter stops with it, which is what lets an agent read the same
+        // frame twice and get the same answer.
+        held = false
+        if e.agent_on { held = agent.is_paused(e.agent_ctx as *Context) }
+        if held { delta = 0.0 }
         e.delta_time = delta
 
         e.fps_window = e.fps_window + delta
@@ -445,12 +473,14 @@ engine_loop(e: *Engine) {
         // in between, so the fixed step was a number the engine subtracted from
         // itself: a program that set one and waited for it waited forever, and
         // a behaviour scene's fixed_update had to be driven by hand.
-        e.fixed_accumulator = e.fixed_accumulator + delta
-        while e.fixed_accumulator >= e.fixed_step {
-            e.fixed_accumulator = e.fixed_accumulator - e.fixed_step
-            if e.on_fixed_update != null { e.on_fixed_update(e.user_data, e.fixed_step) }
+        if !held {
+            e.fixed_accumulator = e.fixed_accumulator + delta
+            while e.fixed_accumulator >= e.fixed_step {
+                e.fixed_accumulator = e.fixed_accumulator - e.fixed_step
+                if e.on_fixed_update != null { e.on_fixed_update(e.user_data, e.fixed_step) }
+            }
+            if e.on_update != null { e.on_update(e.user_data, delta) }
         }
-        if e.on_update != null { e.on_update(e.user_data, delta) }
 
         e.backend_render(e.backend_state, cam, e.light)
 
@@ -461,10 +491,11 @@ engine_loop(e: *Engine) {
         if e.frame_limit > 0 && e.frame_count + 1 >= e.frame_limit {
             write_snapshot(e)
         }
+        if e.agent_on { service_agent_snapshot(e) }
 
         if e.api != platform.API_VULKAN { platform.window_swap(e.window) }
         platform.poll_events()
-        e.frame_count = e.frame_count + 1
+        if !held { e.frame_count = e.frame_count + 1 }
 
         // Last thing in the frame: the numbers a query reports are the finished
         // frame's, and a snapshot taken now is of a frame that exists.

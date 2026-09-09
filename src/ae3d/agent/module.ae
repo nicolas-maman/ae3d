@@ -33,7 +33,7 @@ import ae3d.vk
 
 exports (
     Context, context_new, context_free,
-    start, active, port, stop, pump, answer_step, last_error
+    start, active, port, stop, pump, answer_step, answer_snapshot, is_paused, last_error
 )
 
 extern ae3d_agent_start() -> int
@@ -70,6 +70,15 @@ struct Context {
     want_stop: bool
     want_snapshot: string
     want_steps: int
+    want_pause: bool
+    want_resume: bool
+
+    // Requests that cannot be answered on the frame they arrived, because what
+    // they asked for has not happened yet. -1 when nothing is owed.
+    pending_step_id: int
+    pending_snapshot_id: int
+    step_from: int
+    paused: bool
 }
 
 var g_error = ""
@@ -80,6 +89,8 @@ context_new() -> *Context {
     c = heap.new(Context)
     c.backend = ""
     c.want_snapshot = ""
+    c.pending_step_id = -1
+    c.pending_snapshot_id = -1
     return c
 }
 
@@ -176,9 +187,13 @@ help_result() -> ptr {
     json.array_add_raw(ops, describe("model.get", "index",
         "One model in full: transform, bounds, material and mesh counts."))
     json.array_add_raw(ops, describe("snapshot", "path",
-        "Write the next completed frame to a PNG at path."))
+        "Write the next completed frame to a PNG. Answers once the file exists."))
+    json.array_add_raw(ops, describe("frame.pause", "",
+        "Hold the simulation still. The scene still renders and can be queried; time and the frame counter stop."))
+    json.array_add_raw(ops, describe("frame.resume", "",
+        "Let the simulation run again."))
     json.array_add_raw(ops, describe("frame.step", "count",
-        "Let exactly count frames run, then answer. A snapshot after this is of a known frame."))
+        "Pause, run exactly count frames, pause again. Answers with stepped_from and stepped."))
     json.array_add_raw(ops, describe("quit", "",
         "Stop the engine's loop and let it shut down normally."))
 
@@ -200,6 +215,7 @@ stats_result(c: *Context) -> ptr {
     json.object_set_raw(out, "backend", json.str(c.backend))
     json.object_set_raw(out, "draw_calls", json.from_int(c.draw_calls))
     json.object_set_raw(out, "instances", json.from_int(c.instances))
+    json.object_set_raw(out, "paused", json.boolean(c.paused))
     return out
 }
 
@@ -308,7 +324,28 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
             fail(id, "snapshot needs a path")
             return false
         }
-        c.want_snapshot = json.get_string_raw(node)
+        // Copied, not borrowed. get_string_raw points into the request
+        // document, which is freed at the end of this drain, and the snapshot
+        // is not taken until the next frame reaches the point before the swap.
+        // Holding the borrowed pointer left a freed path to open, which failed
+        // in a way that looked like the snapshot was the broken part.
+        c.want_snapshot = string.copy(json.get_string_raw(node))
+        c.pending_snapshot_id = id
+        // Not answered here. A finished frame is only readable between the last
+        // draw and the buffer swap, so the engine takes it there and answers
+        // once the file exists -- an "ok" before that would be a claim about a
+        // file the client would then fail to open.
+        return true
+    }
+
+    if op == "frame.pause" {
+        c.want_pause = true
+        answer(id, json.obj())
+        return false
+    }
+
+    if op == "frame.resume" {
+        c.want_resume = true
         answer(id, json.obj())
         return false
     }
@@ -319,9 +356,12 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
         if node != null { count = json.get_int(node) }
         if count < 1 { count = 1 }
         c.want_steps = count
-        // Answered by the engine once the frames have actually run, which is
-        // the whole point: a client that steps and then snapshots is looking at
-        // the frame it asked for rather than whichever one was in flight.
+        c.pending_step_id = id
+        c.step_from = c.frame_count
+        // Answered by the engine once the frames have actually run. Stepping
+        // implies pausing: counting frames off a loop that is still free-running
+        // measures the network round trip as much as the request, which is how
+        // a step of ten first advanced eleven.
         return true
     }
 
@@ -339,12 +379,12 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
 // the channel is on: the engine caches that flag, so a build with the channel
 // off never reaches this function at all.
 //
-// Returns the id of a request that is waiting on frames to elapse, or -1 when
-// nothing is pending, so the engine knows whether it owes a deferred answer.
-pump(c: *Context) -> int {
+// A request that cannot be answered yet leaves its id on the Context and stops
+// the drain, so ops queued behind it stay in order.
+pump(c: *Context) {
     while true {
         line = ae3d_agent_next_request()
-        if line == null { return -1 }
+        if line == null { return }
 
         request = json.parse_raw(line)
         if request == null {
@@ -365,12 +405,36 @@ pump(c: *Context) -> int {
 
         deferred = handle(c, json.get_string_raw(op_node), id, request)
         json.free(request)
-        if deferred { return id }
+        if deferred { return }
     }
-    return -1
 }
 
-// The answer to a frame.step, once the frames have run.
-answer_step(id: int, c: *Context) {
-    answer(id, stats_result(c))
+// The answer to a frame.step, once the frames have actually run. Reports where
+// the step started as well as where it ended, so a client can check it got the
+// advance it asked for rather than trusting that it did.
+answer_step(c: *Context) {
+    out = stats_result(c)
+    json.object_set_raw(out, "stepped_from", json.from_int(c.step_from))
+    json.object_set_raw(out, "stepped", json.from_int(c.frame_count - c.step_from))
+    answer(c.pending_step_id, out)
+    c.pending_step_id = -1
 }
+
+// The answer to a snapshot, once the file is on disk.
+answer_snapshot(c: *Context, path: string, written: bool) {
+    if written {
+        out = json.obj()
+        json.object_set_raw(out, "path", json.str(path))
+        json.object_set_raw(out, "frame", json.from_int(c.frame_count))
+        answer(c.pending_snapshot_id, out)
+    } else {
+        fail(c.pending_snapshot_id, "could not write the snapshot")
+    }
+    c.pending_snapshot_id = -1
+}
+
+// Whether the engine should hold this frame's simulation still. Paused means
+// the scene is rendered and can be queried and snapshotted, but time does not
+// advance and the frame counter does not move -- so two queries either side of
+// an inspection describe the same frame.
+is_paused(c: *Context) -> bool { return c.paused }

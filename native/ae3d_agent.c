@@ -407,7 +407,25 @@ void ae3d_agent_stop(void) {
     client = g_client;
     g_client = AE3D_INVALID_SOCKET;
     ae3d_agent_unlock();
-    if (client != AE3D_INVALID_SOCKET) ae3d_close_socket(client);
+    if (client != AE3D_INVALID_SOCKET) {
+        // Closed politely: half-close, then read what is still in flight until
+        // the peer closes too. Closing outright with unread bytes in the
+        // receive buffer makes the stack send a reset, and a reset throws away
+        // whatever has not been read yet -- which is exactly the answer to the
+        // `quit` that got us here. A client asking the engine to stop was
+        // getting a connection error instead of its acknowledgement.
+        char discard[256];
+        int drained = 0;
+#if defined(_WIN32)
+        shutdown(client, SD_SEND);
+#else
+        shutdown(client, SHUT_WR);
+#endif
+        while (drained < 64 && recv(client, discard, (int)sizeof(discard), 0) > 0) {
+            drained++;
+        }
+        ae3d_close_socket(client);
+    }
 
 #if defined(_WIN32)
     if (g_thread) {
