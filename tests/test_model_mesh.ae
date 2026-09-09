@@ -1,0 +1,144 @@
+// Giving a model different geometry.
+//
+// A terrain that changes shape wants to keep being the same object: the same
+// pointer, the same place in the scene, the same entry in the undo history.
+// Replacing the model instead moves the selection and turns one change into
+// two steps, so the mesh has to be replaceable under it.
+//
+// The renderers build their GPU state when a model is added and key it off the
+// mesh, so the sequence a caller uses is remove, set, add. That is what this
+// checks: that the frame afterwards is the new geometry and not the old, and
+// that nothing is left behind.
+
+import std.mem
+import ae3d.core
+import ae3d.gl
+import ae3d.offscreen
+import ae3d.loader
+
+const WIDTH = 200
+const HEIGHT = 150
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// How much of the frame the model covers, as a count of pixels that are not
+// the background. A bigger mesh covers more of it, which is the whole of what
+// "the geometry changed" has to mean here.
+covered(pixels: ptr) -> int {
+    total = 0
+    i = 0
+    while i < WIDTH * HEIGHT {
+        index = i * 4
+        if mem.get_byte(pixels, index) > 40 || mem.get_byte(pixels, index + 1) > 40 {
+            total = total + 1
+        }
+        i = i + 1
+    }
+    return total
+}
+
+main() {
+    // The setter on its own, with no renderer anywhere near it. Adding a model
+    // to a backend recomputes its bounds as a side effect, so a check that
+    // goes through remove-set-add cannot tell whether the setter did its own
+    // half: the first version of this test passed with the recompute taken
+    // out of it.
+    lone = loader.cube(6.0)
+    was = lone.bounding_radius
+    // The donor is built, its mesh handed over, and the husk freed. A mesh has
+    // one owner and the model that had it has been told it does not any more,
+    // so the donor is released without it: freeing the donor whole would take
+    // the mesh the other model is now holding.
+    donor = loader.cube(24.0)
+    handed = donor.mesh
+    donor.mesh = null
+    core.model_free(donor)
+    core.model_set_mesh(lone, handed)
+    check("setting a mesh moves the model's bounds with it",
+          lone.bounding_radius > was * 2.0)
+    println("  reach ${was} then ${lone.bounding_radius}")
+    core.model_free(lone)
+
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("render: no offscreen context")
+        return
+    }
+    renderer = gl.renderer_new()
+    backend = gl.backend(renderer)
+    // CRITICAL: the context, not null. A backend initialised without one
+    // leaves its entry points unloaded and the first call through the vtable
+    // jumps to address zero.
+    if !core.backend_init(&backend, context, WIDTH, HEIGHT) {
+        println("model_mesh: SKIP the OpenGL backend would not initialise")
+        return
+    }
+
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    gl.renderer_set_clear_color(renderer, 0.0, 0.0, 0.0)
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 0.0, 60.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+
+    key = core.light_directional(core.vec3(0.0, 0.0, 0.0 - 1.0),
+                                 core.vec3(1.0, 1.0, 1.0), 2.5)
+    key.ambient_strength = 0.3
+    core.backend_add_light(&backend, key)
+
+    m = loader.cube(6.0)
+    core.model_matte(m, 0.9, 0.5, 0.3)
+    core.backend_add_model(&backend, m)
+
+    core.backend_render(&backend, cam, key)
+    small = covered(offscreen.target_pixels(target))
+    reach = m.bounding_radius
+
+    // Remove, set, add: the renderer drops what it built for the old geometry
+    // and builds again for the new.
+    big = loader.cube(24.0)
+    core.backend_remove_model(&backend, m)
+    core.model_set_mesh(m, big.mesh)
+    // The donor kept its own pointer to that mesh, and a mesh has one owner.
+    big.mesh = null
+    core.model_free(big)
+    core.backend_add_model(&backend, m)
+
+    core.backend_render(&backend, cam, key)
+    grown = covered(offscreen.target_pixels(target))
+
+    check("the model is the same object", m != null)
+    check("a bigger mesh covers more of the frame", grown > small * 2)
+    // Culling and picking read the bounds, not the frame, so a mesh swapped
+    // under a model that keeps the old bounds is a model that disappears at
+    // the wrong angle and cannot be clicked at the right one. Checked here
+    // because the picture alone cannot see it: the first version of this test
+    // passed with the recompute taken out.
+    check("and the model in the scene reaches further too",
+          m.bounding_radius > reach * 2.0)
+    println("  ${small} px before, ${grown} px after")
+
+    core.backend_cleanup(&backend)
+    offscreen.target_destroy(target)
+    offscreen.context_destroy(context)
+    core.model_free(m)
+    gl.renderer_free(renderer)
+    core.camera_free(cam)
+    core.light_free(key)
+
+    if failures == 0 {
+        println("model_mesh: all checks passed")
+    } else {
+        println("model_mesh: ${failures} failure(s)")
+    }
+}

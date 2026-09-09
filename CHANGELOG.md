@@ -500,6 +500,18 @@ First working engine.
 
 ### Engine
 
+- `model_set_mesh` gives a model different geometry. A terrain that changes
+  shape wants to stay the same object: the same pointer, the same place in the
+  scene, the same entry in the undo history. Replacing the model instead moves
+  the selection and turns one change into two steps. The mesh a model was
+  holding is destroyed and the new one adopted, so a model still owns its mesh
+  and there is never more than one owner.
+
+  The renderers build their GPU state when a model is added and key it off the
+  mesh, and core does not know which backend is holding a model, so the caller
+  removes, sets and adds. That is written next to the function, and
+  `tests/test_model_mesh.ae` drives that sequence and the setter on its own.
+
 - Render scale is a backend capability. It landed on the OpenGL renderer only,
   so a scene that used it was silently OpenGL-only, the Vulkan path had no way
   to say whether it supported it, and the black hole's quality ladder reached

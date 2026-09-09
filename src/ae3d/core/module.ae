@@ -37,6 +37,7 @@ exports (
     model_clone, model_set_casts_shadow,
     model_set_position, model_set_scale, model_set_rotation, model_rotate,
     model_update_matrix, model_recalculate_bounds, model_mark_dirty, model_set_diffuse,
+    model_set_mesh,
     model_set_specular, model_set_pbr, model_set_exposure, model_set_alpha,
     model_set_texture, model_set_shader, model_set_name, model_set_source_path,
     material_set_texture_path, material_set_name, light_set_name, camera_set_name, text,
@@ -1106,6 +1107,22 @@ model_update_matrix(m: *Model) {
     // Whether a model's bounds match where it is cannot depend on a rendering
     // option: picking reads them too, and a rotation used to leave them behind
     // wherever culling was off.
+    model_recalculate_bounds(m)
+}
+
+// Give a model different geometry. The mesh it was holding is destroyed and
+// the new one is adopted, so ownership is unchanged: a model owns its mesh and
+// frees it, and handing one over here does not make two owners of anything.
+//
+// CRITICAL: the renderers build their GPU state for a model when it is added
+// and key it off the mesh, so a model whose mesh changes while it is in a
+// scene must be removed from the backend and added again around this. Nothing
+// here can do that: core does not know which backend, if any, is holding the
+// model. Callers do, and the sequence is remove, set, add.
+model_set_mesh(m: *Model, mesh: ptr) {
+    if m == null || mesh == null || m.mesh == mesh { return }
+    if m.mesh != null { ae3d_mesh_destroy(m.mesh) }
+    m.mesh = mesh
     model_recalculate_bounds(m)
 }
 
