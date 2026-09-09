@@ -80,17 +80,21 @@ step "exported fixtures match the exporter"
 #
 # Skips where Blender is absent, which is most CI.
 if command -v blender >/dev/null 2>&1 || [ -n "${BLENDER:-}" ]; then
-    fixture_check="$(mktemp -d)"
-    ./scripts/export_assets.sh tests/fixtures/spin.blend "$fixture_check" >/tmp/ae3d_export.log 2>&1
-    if [ ! -f "$fixture_check/manifest.json" ]; then
-        skip "exported fixtures" "the exporter produced nothing (see /tmp/ae3d_export.log)"
-    elif diff -r tests/fixtures/exported "$fixture_check" >/tmp/ae3d_export_diff.log 2>&1; then
-        pass "tests/fixtures/exported is what the exporter produces"
-    else
-        fail "tests/fixtures/exported is stale; run ./scripts/export_assets.sh"
-        sed 's/^/        /' /tmp/ae3d_export_diff.log | head -10
-    fi
-    rm -rf "$fixture_check"
+    check_exported() {   # check_exported <blend> <committed directory>
+        fresh="$(mktemp -d)"
+        ./scripts/export_assets.sh "$1" "$fresh" >/tmp/ae3d_export.log 2>&1
+        if [ ! -f "$fresh/manifest.json" ]; then
+            skip "$2" "the exporter produced nothing (see /tmp/ae3d_export.log)"
+        elif diff -r "$2" "$fresh" >/tmp/ae3d_export_diff.log 2>&1; then
+            pass "$2 is what the exporter produces"
+        else
+            fail "$2 is stale; run ./scripts/export_assets.sh"
+            sed 's/^/        /' /tmp/ae3d_export_diff.log | head -10
+        fi
+        rm -rf "$fresh"
+    }
+    check_exported tests/fixtures/spin.blend tests/fixtures/exported
+    check_exported resources/blender/showcase.blend resources/blender/showcase
 else
     skip "exported fixtures" "no Blender"
 fi

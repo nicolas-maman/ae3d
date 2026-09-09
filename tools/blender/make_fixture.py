@@ -2,10 +2,11 @@
 
     blender --background --factory-startup --python tools/blender/make_fixture.py -- --out tests/fixtures/spin.blend
 
-Generated rather than committed as a binary: a .blend in the repository is a
-file nobody can review, that no one can regenerate when Blender changes it, and
-that says nothing about what it is meant to contain. This says exactly that, in
-thirty lines.
+The .blend it writes is committed. Blender does not save reproducible files --
+two runs of this script produce different bytes and, more to the point, a
+different vertex order -- so the exported assets can only be regenerated from
+the same .blend. This script is how that file is authored and refreshed, not
+something to run before every export.
 
 Two objects, deliberately different:
 

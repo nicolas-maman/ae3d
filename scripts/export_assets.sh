@@ -40,15 +40,31 @@ BLENDER_BIN="$(find_blender)" || {
 }
 echo "export_assets: using $BLENDER_BIN"
 
-SOURCE="${1:-tests/fixtures/spin.blend}"
-OUT="${2:-tests/fixtures/exported}"
+# With no arguments, regenerate everything the repository ships: the test
+# fixture and the showcase examples/blender_pipeline loads.
+if [ $# -eq 0 ]; then
+    "$0" tests/fixtures/spin.blend tests/fixtures/exported || exit 1
+    "$0" resources/blender/showcase.blend resources/blender/showcase || exit 1
+    exit 0
+fi
 
-# The fixture is generated, not committed: a .blend is a file nobody can review.
-if [ ! -f "$SOURCE" ] && [ "$SOURCE" = "tests/fixtures/spin.blend" ]; then
-    echo "export_assets: building the fixture first"
-    "$BLENDER_BIN" --background --factory-startup \
-        --python tools/blender/make_fixture.py -- --out "$SOURCE" \
-        2>&1 | grep -E "make_fixture|Error" || true
+SOURCE="$1"
+OUT="${2:?usage: export_assets.sh [<file.blend> <out-directory>]}"
+
+# The .blend files are generated, not committed: a .blend is a file nobody can
+# review and nobody can regenerate when Blender changes it.
+if [ ! -f "$SOURCE" ]; then
+    case "$SOURCE" in
+        tests/fixtures/spin.blend)        builder=tools/blender/make_fixture.py ;;
+        resources/blender/showcase.blend) builder=tools/blender/make_showcase.py ;;
+        *)                                builder="" ;;
+    esac
+    if [ -n "$builder" ]; then
+        echo "export_assets: building $SOURCE first"
+        "$BLENDER_BIN" --background --factory-startup \
+            --python "$builder" -- --out "$SOURCE" \
+            2>&1 | grep -E "make_|Error" || true
+    fi
 fi
 
 "$BLENDER_BIN" --background "$SOURCE" \

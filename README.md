@@ -84,13 +84,40 @@ blender --background scene.blend --python tools/blender/ae3d_export.py -- --out 
 ```
 
 Geometry, materials and animation per object, with a manifest recording the
-source file's hash and a stable id for each object. Exporting the same file
-twice produces identical bytes.
+source file's hash and a stable id for each object. Exporting the same `.blend`
+twice produces identical bytes, which is why the `.blend` files are committed:
+Blender does not save reproducible files, and a regenerated one exports to a
+different vertex order. `tools/blender/make_fixture.py` and `make_showcase.py`
+are how those files are authored, not something to run before an export.
 
 Blender keys with Bezier easing by default; the exporter converts it to cubic
 segments the engine samples, and records what Blender itself evaluated the
 curve to so `tests/test_assets` can hold the engine to it. It currently agrees
 to 1.4e-4.
+
+`examples/blender_pipeline.ae` is the whole path in one program: a turning,
+rising orb modelled and keyed in Blender, exported, loaded from its manifest,
+and played.
+
+```bash
+./scripts/export_assets.sh          # regenerates every asset the repo ships
+./build.sh examples/blender_pipeline.ae && ./build/blender_pipeline
+```
+
+```
+blender_pipeline: showcase.blend exported by Blender 5.2.1 LTS
+blender_pipeline: playing 'OrbAction', 1.95833s, 2 channels
+```
+
+Started with `AE3D_AGENT` it can be driven while it runs, which is how the
+easing above is checked against the curve rather than against a screenshot:
+
+```
+clip        -> OrbAction  1.958s  2 channels
+  t=0.0  y=1.500  rot_y=0.000
+  t=0.5  y=2.405  rot_y=0.511
+  t=1.0  y=3.191  rot_y=0.995
+```
 
 ## Editor
 
@@ -226,6 +253,7 @@ everything else.
 | `black_hole.ae` | Kerr geodesics integrated per pixel in one screen quad: a spinning hole, its asymmetric shadow, a lensed disc and a lensed sky. The heaviest scene here, and the one with answers to check against — [docs/black-hole.md](docs/black-hole.md) |
 | `particle_disc.ae` | The same scene as an N-body: 200000 particles under Verlet integration in one instanced draw, coloured per instance |
 | `sand.ae` | 250000 grains falling and settling, click to scatter them |
+| `blender_pipeline.ae` | A model authored and keyed in Blender, exported, loaded and played |
 | `smooth_terrain.ae` | The same terrain meshed with surface nets, 67590 triangles |
 
 ### Examples as instruments
