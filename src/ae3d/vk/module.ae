@@ -204,6 +204,15 @@ renderer_free(r: *VKRenderer) {
     heap.free(r)
 }
 
+// Always 1.0, and honestly so. The attachments in native/ae3d_vk.c are built
+// against the swapchain extent, and sizing the scene independently of the
+// window needs a second set of images, their own render pass and a blit. Until
+// that exists, a caller asking for half size is told it got full size, which is
+// what lets it stop asking rather than believe a frame got cheaper.
+vtable_set_render_scale(r: *VKRenderer, scale: float) -> float {
+    return 1.0
+}
+
 backend(r: *VKRenderer) -> Backend {
     return Backend {
         state: r,
@@ -216,6 +225,7 @@ backend(r: *VKRenderer) -> Backend {
         set_skybox: renderer_set_skybox as fn(ptr, ptr),
         update_viewport: renderer_update_viewport as fn(ptr, int, int),
         set_post: renderer_set_post as fn(ptr, int, int, float, float),
+        set_render_scale: vtable_set_render_scale as fn(ptr, float) -> float,
         set_clear_color: renderer_set_clear_color as fn(ptr, float, float, float),
         set_shadows: vtable_set_shadows as fn(ptr, int),
         shadows: vtable_shadows as fn(ptr) -> int,

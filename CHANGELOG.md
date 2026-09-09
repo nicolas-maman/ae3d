@@ -500,6 +500,19 @@ First working engine.
 
 ### Engine
 
+- Render scale is a backend capability. It landed on the OpenGL renderer only,
+  so a scene that used it was silently OpenGL-only, the Vulkan path had no way
+  to say whether it supported it, and the black hole's quality ladder reached
+  past the abstraction to get at it. `set_render_scale` is in the vtable now,
+  with `engine_set_render_scale` forwarding it.
+
+  It answers the scale actually adopted rather than the one asked for. Vulkan
+  builds its attachments against the swapchain extent and cannot yet draw the
+  scene smaller than the window, so it answers 1.0 and says so: a silent no-op
+  would have a caller believe a rung of its quality ladder helped when nothing
+  changed, and stop stepping. The black hole prints what the backend really
+  did.
+
 - Window, input and timing over GLFW.
 - Main loop with a fixed-step accumulator, frame pacing and `AE3D_FRAMES`,
   which caps any program at a frame count so every example is also a smoke test.
