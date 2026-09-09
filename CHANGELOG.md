@@ -2,6 +2,20 @@
 
 ## [current]
 
+### The agent channel
+
+- A program with the agent channel open now exits on Linux. Stopping it closed
+  the listening socket and then waited for the thread that was blocked in
+  `accept` on it, which macOS and Windows wake and Linux does not: the thread
+  stayed blocked, the join never returned, and the process hung at exit having
+  done all of its work and printed all of its output. Three suites hung there
+  for three and a half hours per CI run, with nothing in the log to name them.
+
+  Every wait in the agent thread is bounded now, so the thread notices the stop
+  itself, closes the client it was serving and returns; the sockets are closed
+  after it has gone rather than underneath it. An idle channel wakes ten times a
+  second instead of never, and a stop is noticed within a tenth of a second.
+
 First working engine.
 
 ### Rendering

@@ -44,7 +44,7 @@ static int  g_active;
 static ae3d_socket g_listener = AE3D_INVALID_SOCKET;
 static ae3d_socket g_client   = AE3D_INVALID_SOCKET;
 static int   g_port;
-static int   g_stopping;
+static volatile int g_stopping;
 static char  g_error[256];
 
 static ae3d_lock g_lock;
@@ -176,16 +176,54 @@ void ae3d_agent_respond(const char *line) {
     send(client, "\n", 1, 0);
 }
 
+// Wait for one socket to have something on it, or for the wait to run out.
+//
+// CRITICAL: this is what lets the agent thread be stopped. Closing a socket
+// another thread is blocked in accept() or recv() on wakes that thread on macOS
+// and on Windows, and does not on Linux: the thread stays blocked, the join in
+// ae3d_agent_stop never returns, and the process hangs at exit having done all
+// of its work. Every wait is bounded instead, and the thread notices g_stopping
+// on its own.
+static int ae3d_agent_wait_readable(ae3d_socket socket_fd, int milliseconds) {
+    struct timeval limit;
+    fd_set         readable;
+
+    if (socket_fd == AE3D_INVALID_SOCKET) return -1;
+#if !defined(_WIN32)
+    // select cannot see a descriptor at or past its table size, and answering
+    // "readable" would spin the caller on a socket that is not.
+    if (socket_fd >= FD_SETSIZE) return -1;
+#endif
+
+    FD_ZERO(&readable);
+    FD_SET(socket_fd, &readable);
+    limit.tv_sec = milliseconds / 1000;
+    limit.tv_usec = (milliseconds % 1000) * 1000;
+
+    return select((int)socket_fd + 1, &readable, NULL, NULL, &limit);
+}
+
+// How long a wait is, and so how long a stop takes to be noticed. Short enough
+// that nothing waits on the agent at exit, long enough that an idle channel
+// wakes ten times a second rather than continuously.
+#define AE3D_AGENT_WAIT_MS 100
+
 static void ae3d_agent_serve(ae3d_socket client) {
     char   chunk[4096];
     char  *buffer = NULL;
     size_t used = 0, capacity = 0;
 
     for (;;) {
-        int got = (int)recv(client, chunk, (int)sizeof(chunk), 0);
+        int ready = ae3d_agent_wait_readable(client, AE3D_AGENT_WAIT_MS);
+        int got;
         size_t start;
         size_t i;
 
+        if (g_stopping) break;
+        if (ready < 0) break;
+        if (ready == 0) continue;
+
+        got = (int)recv(client, chunk, (int)sizeof(chunk), 0);
         if (got <= 0) break;
 
         if (used + (size_t)got + 1 > capacity) {
@@ -220,11 +258,40 @@ static void ae3d_agent_serve(ae3d_socket client) {
     free(buffer);
 }
 
+// Let the other end read what was already sent before the socket goes. A close
+// with unread data still in the receive queue sends a reset, and the client
+// loses the answer to the request it just made.
+//
+// The thread that was serving the socket does this, not the thread stopping it:
+// two threads on one socket is a use-after-close waiting for a slow scheduler.
+static void ae3d_agent_close_gracefully(ae3d_socket client) {
+    char discard[256];
+    int  drained = 0;
+
+    if (client == AE3D_INVALID_SOCKET) return;
+#if defined(_WIN32)
+    shutdown(client, SD_SEND);
+#else
+    shutdown(client, SHUT_WR);
+#endif
+    while (drained < 64 && ae3d_agent_wait_readable(client, AE3D_AGENT_WAIT_MS) > 0) {
+        if (recv(client, discard, (int)sizeof(discard), 0) <= 0) break;
+        drained++;
+    }
+    ae3d_close_socket(client);
+}
+
 static void ae3d_agent_accept_loop(void) {
     for (;;) {
-        ae3d_socket client = accept(g_listener, NULL, NULL);
+        ae3d_socket client;
+        int ready = ae3d_agent_wait_readable(g_listener, AE3D_AGENT_WAIT_MS);
         int flag = 1;
 
+        if (g_stopping) return;
+        if (ready < 0) return;
+        if (ready == 0) continue;
+
+        client = accept(g_listener, NULL, NULL);
         if (g_stopping) {
             if (client != AE3D_INVALID_SOCKET) ae3d_close_socket(client);
             return;
@@ -248,7 +315,8 @@ static void ae3d_agent_accept_loop(void) {
         ae3d_agent_lock();
         g_client = AE3D_INVALID_SOCKET;
         ae3d_agent_unlock();
-        ae3d_close_socket(client);
+        ae3d_agent_close_gracefully(client);
+        if (g_stopping) return;
     }
 }
 
@@ -356,34 +424,14 @@ int ae3d_agent_start(void) {
 }
 
 void ae3d_agent_stop(void) {
-    ae3d_socket client;
-
     if (!g_active) return;
     g_active = 0;
     g_stopping = 1;
 
-    if (g_listener != AE3D_INVALID_SOCKET) {
-        ae3d_close_socket(g_listener);
-        g_listener = AE3D_INVALID_SOCKET;
-    }
-    ae3d_agent_lock();
-    client = g_client;
-    g_client = AE3D_INVALID_SOCKET;
-    ae3d_agent_unlock();
-    if (client != AE3D_INVALID_SOCKET) {
-        char discard[256];
-        int drained = 0;
-#if defined(_WIN32)
-        shutdown(client, SD_SEND);
-#else
-        shutdown(client, SHUT_WR);
-#endif
-        while (drained < 64 && recv(client, discard, (int)sizeof(discard), 0) > 0) {
-            drained++;
-        }
-        ae3d_close_socket(client);
-    }
-
+    // Ask, then wait, then close. The thread sees g_stopping within one wait,
+    // closes the client it was serving and returns; nothing is pulled out from
+    // under it. Closing first and joining afterwards is what hung on Linux,
+    // where closing a socket does not wake the thread blocked on it.
 #if defined(_WIN32)
     if (g_thread) {
         WaitForSingleObject(g_thread, 2000);
@@ -396,6 +444,12 @@ void ae3d_agent_stop(void) {
         g_thread_ready = 0;
     }
 #endif
+
+    if (g_listener != AE3D_INVALID_SOCKET) {
+        ae3d_close_socket(g_listener);
+        g_listener = AE3D_INVALID_SOCKET;
+    }
+    g_client = AE3D_INVALID_SOCKET;
 
     ae3d_agent_drain_queue();
     free(g_current);
