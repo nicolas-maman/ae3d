@@ -1,27 +1,11 @@
 // The agent channel, engine side: what a request means.
 //
-// native/ae3d_agent.c owns the socket and hands over whole lines. This turns a
-// line into an answer. The two halves are split there because the transport has
-// no business knowing what a scene is, and this has no business knowing what a
-// socket is.
+// native/ae3d_agent.c owns the socket and hands over whole lines. Every
+// request is one JSON object on one line and every answer is another,
+// carrying back the id it answers. `help` returns the op table as data.
 //
-// Every request is one JSON object on one line:
-//
-//     {"id": 1, "op": "frame.stats"}
-//     {"id": 2, "op": "model.get", "index": 3}
-//
-// and every answer is one JSON object on one line, carrying back the id it
-// answers so a client may pipeline:
-//
-//     {"id": 1, "ok": true, "result": {...}}
-//     {"id": 2, "ok": false, "error": "no model at index 3"}
-//
-// `help` returns the whole command table as data. An agent should be able to
-// discover what it can ask for without reading this file.
-//
-// This module knows about core, gl and vk, and deliberately not about engine:
-// engine imports it, and the dependency has to run one way. What it needs from
-// a frame arrives in a Context the engine fills before each pump.
+// Imports core, gl and vk but never engine: engine imports this, and the
+// dependency runs one way. What it needs from a frame arrives in a Context.
 
 import std.heap
 import std.json
@@ -62,13 +46,6 @@ extern ae3d_capture_adopt(pixels: ptr, width: int, height: int) -> int
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 
-// What the engine shows the channel each frame, and what it reads back after.
-//
-// The read half is filled before pump and is a plain copy of numbers the engine
-// already has, so assembling it costs nothing a frame would notice. The write
-// half is how a command reaches the engine: nothing here touches the renderer
-// or the window, because pump runs on the engine's thread at one known point
-// and the command still has to be applied where the engine decides.
 struct Context {
     camera: ptr
     light: ptr
@@ -85,15 +62,12 @@ struct Context {
     draw_calls: int
     instances: int
 
-    // Set by a command, acted on by the engine after pump returns.
     want_stop: bool
     want_snapshot: string
     want_steps: int
     want_pause: bool
     want_resume: bool
 
-    // Requests that cannot be answered on the frame they arrived, because what
-    // they asked for has not happened yet. -1 when nothing is owed.
     pending_step_id: int
     pending_snapshot_id: int
     pending_capture_id: int
@@ -123,9 +97,6 @@ context_free(c: *Context) {
     if c != null { heap.free(c) }
 }
 
-// Opening the channel is what AE3D_AGENT asks for, and nothing else here runs
-// until it has. A failure to open is reported and is not fatal: an engine that
-// could not get its debug port should still render.
 start() -> bool {
     if ae3d_agent_start() != 0 { return true }
     g_error = ae3d_agent_error()
@@ -137,8 +108,6 @@ active() -> bool { return ae3d_agent_active() != 0 }
 port() -> int { return ae3d_agent_port() }
 
 stop() { ae3d_agent_stop() }
-
-// --- answers ------------------------------------------------------------
 
 ok_envelope(id: int, result: ptr) -> ptr {
     out = json.obj()
@@ -173,8 +142,6 @@ vec3_json(x: float, y: float, z: float) -> ptr {
     return out
 }
 
-// A model's rotation is a quaternion, and reporting three of its four numbers
-// would be a value a client could not use.
 quat_json(x: float, y: float, z: float, w: float) -> ptr {
     out = json.arr()
     json.array_add_raw(out, json.num(x))
@@ -184,11 +151,6 @@ quat_json(x: float, y: float, z: float, w: float) -> ptr {
     return out
 }
 
-// --- the command table --------------------------------------------------
-
-// One entry per op, and `help` renders it. Kept as data rather than prose so
-// the schema an agent reads and the dispatch below cannot describe different
-// engines.
 describe(name: string, args: string, summary: string) -> ptr {
     out = json.obj()
     json.object_set_raw(out, "op", json.str(name))
@@ -197,10 +159,6 @@ describe(name: string, args: string, summary: string) -> ptr {
     return out
 }
 
-// The command table as a string, for anything that wants the schema without
-// opening a socket: the documentation generator, a client that wants to check
-// an op exists before sending it, a test. Same table `help` answers with, so a
-// doc built from this cannot describe an engine this one is not.
 schema_json() -> string {
     out = help_result()
     text = json.stringify_raw(out)
@@ -270,8 +228,6 @@ help_result() -> ptr {
     json.object_set_raw(out, "ops", ops)
     return out
 }
-
-// --- reads --------------------------------------------------------------
 
 stats_result(c: *Context) -> ptr {
     out = json.obj()
@@ -350,8 +306,6 @@ model_result(m: *Model, index: int) -> ptr {
         vec3_json(m.bounding_center.x, m.bounding_center.y, m.bounding_center.z))
     json.object_set_raw(out, "bounding_radius", json.num(m.bounding_radius))
 
-    // A model whose mesh went missing is exactly the failure #181 has to be
-    // able to name, so the counts are reported as absent rather than as zero.
     if m.mesh != null {
         json.object_set_raw(out, "vertex_count", json.from_int(core.mesh_vertex_count(m.mesh)))
         json.object_set_raw(out, "index_count", json.from_int(core.mesh_index_count(m.mesh)))
@@ -361,11 +315,6 @@ model_result(m: *Model, index: int) -> ptr {
     return out
 }
 
-// --- writes -------------------------------------------------------------
-
-// The engine holds one light of its own and the renderer holds the rest, so a
-// client addressing lights by index would otherwise see only half of them.
-// Index 0 is the engine's when it has one, and the renderer's list follows.
 extra_light_count(c: *Context) -> int {
     if c.gl_renderer != null { return gl.renderer_light_count(c.gl_renderer) }
     if c.vk_renderer != null { return vk.renderer_light_count(c.vk_renderer) }
@@ -573,8 +522,6 @@ load_scene(c: *Context, path: string) -> int {
     return count
 }
 
-// --- pixels ---------------------------------------------------------------
-
 const CAPTURE_SLOTS = 8
 
 capture_doubles() -> ptr {
@@ -620,9 +567,6 @@ region_result(x: int, y: int, width: int, height: int,
     return out
 }
 
-// The model's own screen rectangle, from the bounding sphere. Used by the trace
-// to look at the pixels a model should have produced rather than at the whole
-// frame.
 model_screen_box(c: *Context, m: *Model, box: *Vec4) -> bool {
     if c.camera == null { return false }
     cam = c.camera as *Camera
@@ -641,17 +585,6 @@ model_screen_box(c: *Context, m: *Model, box: *Vec4) -> bool {
     box.w = radius * 2.0
     return true
 }
-
-// --- the world ------------------------------------------------------------
-//
-// Entities and the relations between them, in one answer. The shape is a graph
-// because the thing being described is one: a Blender object exports to an
-// asset, which loads as a model, which holds a mesh, which a clip drives and a
-// camera sees. It is not a graph database. There are hundreds of entities, not
-// millions; they already live in memory in typed structures; and the queries an
-// agent asks are "what is next to this" rather than anything a query planner
-// would earn its keep on. Serving the whole graph costs one walk of the scene
-// and saves the client from joining four other ops by hand.
 
 entity(id: string, kind: string, name: string, attrs: ptr) -> ptr {
     out = json.obj()
@@ -773,12 +706,6 @@ world_result(c: *Context) -> ptr {
     return out
 }
 
-// --- animation ----------------------------------------------------------
-
-// Everything an agent needs to answer "is this thing animating, and where in
-// its clip is it". The sampled transform is included because the point of
-// asking is usually that the model is not where it was expected: the playhead
-// and the pose it produces are two different things to be wrong about.
 binding_result(b: *Binding, index: int) -> ptr {
     out = json.obj()
     json.object_set_raw(out, "index", json.from_int(index))
@@ -803,8 +730,6 @@ binding_result(b: *Binding, index: int) -> ptr {
         json.object_set_raw(out, "model_scale",
             vec3_json(m.scale.x, m.scale.y, m.scale.z))
     } else {
-        // A binding with no model drives nothing, which is a state worth being
-        // able to see rather than one to render as an absent field.
         json.object_set_raw(out, "model", json.boolean(false))
     }
     return out
@@ -826,8 +751,6 @@ anim_list_result(c: *Context) -> ptr {
     return out
 }
 
-// An animation named, or by index. Names survive a scene changing shape and
-// indices do not, so a client that knows what it is looking for should use one.
 binding_from(c: *Context, request: ptr) -> int {
     registry = c.animations as *Registry
     named = json.object_get_raw(request, "name")
@@ -836,17 +759,6 @@ binding_from(c: *Context, request: ptr) -> int {
     if indexed != null { return json.get_int(indexed) }
     return -1
 }
-
-// --- the trace ----------------------------------------------------------
-//
-// One model, followed through every stage between the .blend it was authored
-// in and the pixels it should have produced. The point is not to report that
-// something is wrong -- the client already knows that, which is why it asked --
-// but to name the stage at which it stopped being right.
-//
-// Every stage reports `reached`, and the first one that is not is the answer.
-// A stage that cannot be judged says so rather than claiming to pass: a model
-// with no provenance has an unknown source, not a good one.
 
 stage(name: string, reached: bool, detail: ptr) -> ptr {
     out = json.obj()
@@ -857,10 +769,6 @@ stage(name: string, reached: bool, detail: ptr) -> ptr {
     return out
 }
 
-// A stage that does not apply to this model. Not a pass and not a failure: a
-// cube built by loader.cube has no Blender object behind it and never will,
-// and blaming its "source" would send an agent looking for an export that was
-// never meant to exist.
 not_applicable(name: string, detail: ptr) -> ptr {
     out = json.obj()
     json.object_set_raw(out, "stage", json.str(name))
@@ -870,9 +778,6 @@ not_applicable(name: string, detail: ptr) -> ptr {
     return out
 }
 
-// Where the model sits in the renderer's list, or -1 when the renderer has
-// never been given it. A model that was loaded and never added is invisible for
-// a reason no amount of looking at the scene will show.
 node_index_of(c: *Context, m: *Model) -> int {
     count = model_count(c)
     i = 0
@@ -895,10 +800,6 @@ binding_index_of(c: *Context, m: *Model) -> int {
     return 0 - 1
 }
 
-// What the camera can and cannot see of this model, computed here rather than
-// read from the renderer. The renderer knows whether it drew something; it does
-// not know why it did not, and "behind the camera" and "outside the frustum"
-// and "on screen but a third of a pixel across" are three different bugs.
 visibility_detail(c: *Context, m: *Model, reached: ptr) -> bool {
     if c.camera == null {
         json.object_set_raw(reached, "camera", json.boolean(false))
@@ -913,9 +814,6 @@ visibility_detail(c: *Context, m: *Model, reached: ptr) -> bool {
     core.frustum_free(frustum)
 
     screen = core.camera_world_to_screen(cam, m.bounding_center, c.width, c.height)
-    // w is the clip-space depth: at or behind the eye there is no projection to
-    // speak of, and the x and y would be meaningless numbers rather than absent
-    // ones.
     in_front = screen.w > 0.0001
 
     json.object_set_raw(reached, "in_frustum", json.boolean(inside))
@@ -936,7 +834,6 @@ trace_result(c: *Context, m: *Model, p: *Provenance) -> ptr {
     stages = json.arr()
     broke_at = ""
 
-    // 1. the Blender object it was authored as
     source = json.obj()
     source_ok = p != null
     if source_ok {
@@ -953,7 +850,6 @@ trace_result(c: *Context, m: *Model, p: *Provenance) -> ptr {
         json.array_add_raw(stages, not_applicable("source", source))
     }
 
-    // 2. the files the exporter wrote for it
     asset = json.obj()
     asset_ok = true
     if p != null {
@@ -968,8 +864,6 @@ trace_result(c: *Context, m: *Model, p: *Provenance) -> ptr {
     } else {
         asset_ok = false
     }
-    // Only judged when there is an export to judge it against. An asset stage
-    // that fails for a model that never had one is noise.
     if p == null {
         json.object_set_raw(asset, "note",
             json.str("no manifest entry, so there are no exported files to check"))
@@ -979,7 +873,6 @@ trace_result(c: *Context, m: *Model, p: *Provenance) -> ptr {
         if !asset_ok && broke_at == "" { broke_at = "asset" }
     }
 
-    // 3. the mesh that was actually loaded, against what the exporter claimed
     mesh = json.obj()
     mesh_ok = m.mesh != null
     if mesh_ok {
@@ -989,9 +882,6 @@ trace_result(c: *Context, m: *Model, p: *Provenance) -> ptr {
         json.object_set_raw(mesh, "index_count", json.from_int(indices))
         json.object_set_raw(mesh, "triangles", json.from_int(indices / 3))
         mesh_ok = vertices > 0 && indices > 0
-        // The exporter's triangle count is the one number that must survive
-        // the round trip. OBJ re-indexes vertices, so those legitimately
-        // differ; triangles do not.
         if p != null && assets.provenance_expected_triangles(p) > 0 {
             agreed = (indices / 3) == assets.provenance_expected_triangles(p)
             json.object_set_raw(mesh, "matches_export", json.boolean(agreed))
@@ -1003,7 +893,6 @@ trace_result(c: *Context, m: *Model, p: *Provenance) -> ptr {
     json.array_add_raw(stages, stage("mesh", mesh_ok, mesh))
     if !mesh_ok && broke_at == "" { broke_at = "mesh" }
 
-    // 4. whether the renderer was ever given it
     node = json.obj()
     index = node_index_of(c, m)
     node_ok = index >= 0
@@ -1022,7 +911,6 @@ trace_result(c: *Context, m: *Model, p: *Provenance) -> ptr {
     json.array_add_raw(stages, stage("node", node_ok, node))
     if !node_ok && broke_at == "" { broke_at = "node" }
 
-    // 5. the animation driving it, if any
     animation = json.obj()
     binding = binding_index_of(c, m)
     animated = binding >= 0
@@ -1038,15 +926,12 @@ trace_result(c: *Context, m: *Model, p: *Provenance) -> ptr {
         json.object_set_raw(animation, "duration", json.num(anim.clip_duration(clip)))
         json.object_set_raw(animation, "playing", json.boolean(anim.player_playing(player)))
         json.object_set_raw(animation, "channels", json.from_int(anim.clip_channel_count(clip)))
-        // A clip with no channels drives nothing, which looks exactly like a
-        // model that is not animated except that something meant it to be.
         if anim.clip_channel_count(clip) == 0 {
             animation_ok = false
             json.object_set_raw(animation, "note",
                 json.str("bound to a clip with no channels, so it drives nothing"))
         }
     } else if p != null && assets.provenance_animation_file(p) != "" {
-        // The export produced a clip and nothing in the scene is playing it.
         animation_ok = false
         json.object_set_raw(animation, "note",
             json.str("the export carries an animation for this object but nothing is playing it"))
@@ -1097,8 +982,6 @@ trace_result(c: *Context, m: *Model, p: *Provenance) -> ptr {
     }
     return out
 }
-
-// --- dispatch -----------------------------------------------------------
 
 handle(c: *Context, op: string, id: int, request: ptr) -> bool {
     if op == "help"        { answer(id, help_result()) return false }
@@ -1331,9 +1214,6 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
         node = json.object_get_raw(request, "time")
         if node != null {
             anim.player_set_time(p, json.get_number(node))
-            // Applied here rather than waiting for the next advance, so a
-            // client that seeks and then snapshots sees the pose it asked for
-            // instead of the one from the frame before.
             anim.apply(p, anim.binding_model(b))
         }
         node = json.object_get_raw(request, "speed")
@@ -1354,17 +1234,8 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
             fail(id, "snapshot needs a path")
             return false
         }
-        // Copied, not borrowed. get_string_raw points into the request
-        // document, which is freed at the end of this drain, and the snapshot
-        // is not taken until the next frame reaches the point before the swap.
-        // Holding the borrowed pointer left a freed path to open, which failed
-        // in a way that looked like the snapshot was the broken part.
         c.want_snapshot = string.copy(json.get_string_raw(node))
         c.pending_snapshot_id = id
-        // Not answered here. A finished frame is only readable between the last
-        // draw and the buffer swap, so the engine takes it there and answers
-        // once the file exists -- an "ok" before that would be a claim about a
-        // file the client would then fail to open.
         return true
     }
 
@@ -1388,10 +1259,6 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
         c.want_steps = count
         c.pending_step_id = id
         c.step_from = c.frame_count
-        // Answered by the engine once the frames have actually run. Stepping
-        // implies pausing: counting frames off a loop that is still free-running
-        // measures the network round trip as much as the request, which is how
-        // a step of ten first advanced eleven.
         return true
     }
 
@@ -1405,12 +1272,6 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
     return false
 }
 
-// Drain everything queued and answer it. Called once per frame, and only when
-// the channel is on: the engine caches that flag, so a build with the channel
-// off never reaches this function at all.
-//
-// A request that cannot be answered yet leaves its id on the Context and stops
-// the drain, so ops queued behind it stay in order.
 pump(c: *Context) {
     while true {
         line = ae3d_agent_next_request()
@@ -1439,9 +1300,6 @@ pump(c: *Context) {
     }
 }
 
-// The answer to a frame.step, once the frames have actually run. Reports where
-// the step started as well as where it ended, so a client can check it got the
-// advance it asked for rather than trusting that it did.
 answer_step(c: *Context) {
     out = stats_result(c)
     json.object_set_raw(out, "stepped_from", json.from_int(c.step_from))
@@ -1450,7 +1308,6 @@ answer_step(c: *Context) {
     c.pending_step_id = -1
 }
 
-// The answer to a snapshot, once the file is on disk.
 answer_capture(c: *Context, ok: bool) {
     if ok {
         out = json.obj()
@@ -1476,10 +1333,6 @@ answer_snapshot(c: *Context, path: string, written: bool) {
     c.pending_snapshot_id = -1
 }
 
-// Whether the engine should hold this frame's simulation still. Paused means
-// the scene is rendered and can be queried and snapshotted, but time does not
-// advance and the frame counter does not move -- so two queries either side of
-// an inspection describe the same frame.
 is_paused(c: *Context) -> bool { return c.paused }
 
 capture_release() { ae3d_capture_release() }

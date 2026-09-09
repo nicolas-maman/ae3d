@@ -1,21 +1,7 @@
 // Keyframe animation: clips, channels, samplers and playback.
 //
-// ae3d had none. The loader reads OBJ, which cannot carry animation, and the
-// MESH container stores static geometry with optional instance matrices and has
-// nowhere to put a keyframe. So the thing #181 has to trace through the pipeline
-// did not exist to be traced, and the Blender half of #180 had nothing to export
-// into. This is that thing.
-//
-// The shape is the one every interchange format agrees on, because it is the one
-// glTF settled on and Blender exports: a clip is a set of channels, a channel
-// drives one property of one target from a list of keyframes, and a sampler
-// turns a time into a value. Matching it means the exporter is a translation
-// rather than an interpretation.
-//
-// Rigid transform channels only -- translation, rotation, scale. Skinning is a
-// different problem with a different cost, and it needs the renderer to grow
-// bone matrices before any of it is visible; the pipeline is worth proving end
-// to end on what the engine can already draw.
+// The shape is glTF's, which is what Blender exports. Rigid transform
+// channels only; skinning is ae3d#192.
 
 import std.heap
 import std.list
@@ -23,11 +9,6 @@ import std.string
 import ae3d.core
 
 exports (
-    // The type is AnimChannel, not Channel. A struct type claims the
-    // lowercase spelling of its name for the whole program -- modules are
-    // merged into one unit, so unexporting it does not help -- and three test
-    // suites already had a helper called channel(). Naming the type Channel
-    // made their calls resolve to a constructor and stop compiling.
     Key, AnimChannel, Clip, Player,
     TRANSLATION, ROTATION, SCALE,
     STEP, LINEAR, CUBIC,
@@ -45,19 +26,14 @@ exports (
     binding_name, binding_player, binding_model
 )
 
-// What a channel drives.
 const TRANSLATION = 0
 const ROTATION    = 1
 const SCALE       = 2
 
-// How a value between two keys is found.
 const STEP   = 0
 const LINEAR = 1
 const CUBIC  = 2
 
-// One keyframe. Four components because a rotation needs four and a vector
-// ignores the fourth; a key per type would double the code to save four bytes
-// on a structure there are thousands of, not millions.
 struct Key {
     time: float
     x: float
@@ -105,8 +81,6 @@ set_error(reason: string, detail: string) {
     g_error_owned = true
 }
 
-// --- channels -----------------------------------------------------------
-
 channel_new(target: int, interpolation: int) -> *AnimChannel {
     c = heap.new(AnimChannel)
     c.target = target
@@ -131,10 +105,6 @@ channel_free(c: *AnimChannel) {
     heap.free(c)
 }
 
-// Keys go in in ascending time and are rejected otherwise. The sampler is a
-// walk that assumes order, and an unordered key does not produce a wrong
-// picture so much as a silently missing one -- better to refuse it at the door
-// than to sort behind the caller's back and hide an exporter bug.
 channel_add_key(c: *AnimChannel, time: float, x: float, y: float, z: float, w: float) -> bool {
     if c == null { return false }
     count = list.size(c.keys)
@@ -199,15 +169,6 @@ channel_duration(c: *AnimChannel) -> float {
     return c.duration
 }
 
-// --- clips --------------------------------------------------------------
-
-// The clip owns a copy of its name, so the caller keeps whatever it passed and
-// clip_free has something it is allowed to release. Holding the caller's string
-// leaked every name that was not a literal: a clip loaded from an export got
-// its name from the JSON document, and nothing ever freed it.
-//
-//   test_assets: 2 leaks for 80 total leaked bytes
-//     1 (32 bytes) ... length: 13  "SpinnerAction"
 clip_new(name: string) -> *Clip {
     c = heap.new(Clip)
     c.name = string.copy(name)
@@ -226,9 +187,6 @@ clip_free(c: *Clip) {
         }
         list.free(c.channels)
     }
-    // No explicit free of c.name. Assigning a copy marks the field heap-owned,
-    // and the generated Clip_destroy releases it -- freeing it here as well is
-    // a double free that takes the process down with no output at all.
     heap.free(c)
 }
 
@@ -253,10 +211,6 @@ clip_name(c: *Clip) -> string {
     return c.name
 }
 
-// The longest channel. Computed rather than stored because a channel may gain
-// keys after it was added to the clip, and a duration that was right when the
-// clip was assembled and wrong afterwards is worse than one that costs a walk
-// over a handful of channels.
 clip_duration(c: *Clip) -> float {
     if c == null { return 0.0 }
     longest = 0.0
@@ -270,12 +224,6 @@ clip_duration(c: *Clip) -> float {
     return longest
 }
 
-// --- sampling -----------------------------------------------------------
-
-// The key at or before t, as an index. -1 when the channel has no keys.
-//
-// A linear walk. Clips here have keys in the tens, and a binary search over ten
-// elements is slower than the walk and harder to be sure of.
 span_at(c: *AnimChannel, t: float) -> int {
     count = list.size(c.keys)
     if count == 0 { return -1 }
@@ -288,9 +236,6 @@ span_at(c: *AnimChannel, t: float) -> int {
     return 0
 }
 
-// Where t sits between key i and key i+1, as 0..1. Zero when there is no next
-// key or the two share a time, which is what makes a duplicated timestamp hold
-// its value rather than divide by zero.
 blend_at(c: *AnimChannel, index: int, t: float) -> float {
     count = list.size(c.keys)
     if index < 0 || index + 1 >= count { return 0.0 }
@@ -304,8 +249,6 @@ blend_at(c: *AnimChannel, index: int, t: float) -> float {
     return u
 }
 
-// Cubic Hermite. h00 and h01 weight the endpoints, h10 and h11 the tangents,
-// which are slopes in value per second and so are scaled by the span.
 hermite(p0: float, m0: float, p1: float, m1: float, u: float, span: float) -> float {
     uu = u * u
     uuu = uu * u
@@ -358,11 +301,6 @@ sample_quat(c: *AnimChannel, t: float) -> Quat {
         })
     }
 
-    // Normalised lerp along the shorter arc. q and -q are the same rotation, so
-    // without the sign check a pair that happens to be stored on opposite sides
-    // of the hypersphere takes the long way round: a turn that should be a few
-    // degrees spins most of the way instead. Cheaper than slerp and identical
-    // at the end points, which is what a keyframe cares about.
     bx = b.x
     by = b.y
     bz = b.z
@@ -382,8 +320,6 @@ sample_quat(c: *AnimChannel, t: float) -> Quat {
     return core.quat_normalize(blended)
 }
 
-// --- playback -----------------------------------------------------------
-
 player_new(clip: *Clip) -> *Player {
     p = heap.new(Player)
     p.clip = clip
@@ -394,8 +330,6 @@ player_new(clip: *Clip) -> *Player {
     return p
 }
 
-// The clip is not the player's to free. One clip drives many players, which is
-// the point of separating them.
 player_free(p: *Player) {
     if p != null { heap.free(p) }
 }
@@ -455,9 +389,6 @@ player_rewind(p: *Player) {
     p.time = 0.0
 }
 
-// Moves the playhead. A clip with no duration holds at zero rather than
-// dividing by it, and a non-looping clip stops at its end and reports that it
-// is no longer playing, so a caller can tell "finished" from "paused".
 advance(p: *Player, delta: float) {
     if p == null || !p.playing || p.clip == null { return }
     duration = clip_duration(p.clip)
@@ -481,9 +412,6 @@ advance(p: *Player, delta: float) {
     }
 }
 
-// Writes the sampled transform onto the model. Only the properties the clip
-// actually drives: a clip with a rotation channel and nothing else leaves the
-// model where it was put rather than snapping it to the origin.
 apply(p: *Player, m: *Model) {
     if p == null || m == null || p.clip == null { return }
     i = 0
@@ -507,17 +435,6 @@ apply(p: *Player, m: *Model) {
     }
 }
 
-// --- the registry -------------------------------------------------------
-//
-// What the frame loop advances and what the agent channel enumerates. It lives
-// here rather than in engine because both need to see it and the dependency has
-// to run one way: engine imports anim, agent imports anim, and anim imports
-// neither.
-//
-// A binding is a player pointed at a model. The same clip can drive many models
-// through many players, and each binding carries a name so an agent can ask for
-// one by something other than an index that shifts when the scene changes.
-
 struct Binding {
     name: string
     player: *Player
@@ -534,9 +451,6 @@ registry_new() -> *Registry {
     return r
 }
 
-// Frees the bindings and the players it was handed, not the clips or the
-// models: a clip outlives the players driving it, and a model belongs to the
-// renderer that was given it.
 registry_free(r: *Registry) {
     if r == null { return }
     if r.bindings != null {
@@ -603,9 +517,6 @@ binding_model(b: *Binding) -> *Model {
     return b.model
 }
 
-// One pass: move every playhead, then write every sampled transform. Costs a
-// size check when nothing is registered, which is what an engine with no
-// animation pays.
 registry_advance(r: *Registry, delta: float) {
     if r == null { return }
     i = 0

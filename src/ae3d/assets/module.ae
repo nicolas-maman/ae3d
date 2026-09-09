@@ -1,16 +1,8 @@
-// The engine end of the Blender pipeline: manifests, exported clips, and the
-// identity that ties them to what the exporter wrote.
+// The engine end of the Blender pipeline: manifests, exported clips and the
+// identity that ties a model in a scene back to the object it came from.
 //
-// tools/blender/ae3d_export.py writes an OBJ, an MTL and a .anim.json per
-// object, plus one manifest naming them all. This reads that side. The two
-// halves are deliberately a file format apart rather than a shared library:
-// Blender's Python and ae3d's Aether cannot link, and a documented file is a
-// thing both can be tested against on its own.
-//
-// The manifest is the first link of the chain #181 has to follow. Every entry
-// carries the id the exporter derived from the source file and the object name,
-// so a model in a running scene can be matched back to the Blender object it
-// came from -- and, when it is wrong, the stage it stopped being right at.
+// The two halves are a file format apart rather than a shared library,
+// because Blender's Python and ae3d's Aether cannot link.
 
 import std.heap
 import std.list
@@ -37,12 +29,6 @@ exports (
     provenance_expected_triangles
 )
 
-// One exported object, as the manifest describes it.
-//
-// The counts are the exporter's own, recorded so a loader can be checked
-// against them: a mesh that arrives with a different triangle count than the
-// manifest claims has lost something between the two, which is exactly the kind
-// of break #181 exists to localise.
 struct Entry {
     id: string
     object: string
@@ -53,7 +39,6 @@ struct Entry {
     triangles: int
 }
 
-// A warning needs a box: list.add_raw takes a ptr and a string is not one.
 struct Warning {
     text: string
 }
@@ -90,8 +75,6 @@ read_json(path: string) -> ptr {
     return root
 }
 
-// A string field, copied. get_string_raw points into the document, and the
-// document is freed before any of this is read again.
 text_field(node: ptr, name: string) -> string {
     if node == null { return "" }
     found = json.object_get_raw(node, name)
@@ -106,11 +89,6 @@ int_field(node: ptr, name: string, fallback: int) -> int {
     return json.get_int(found)
 }
 
-// The directory a path sits in, so files named in a manifest resolve relative
-// to the manifest rather than to wherever the program happens to be running.
-// char_at gives a code point, not a one-character string: 47 is '/' and 92 is
-// '\'. Same shape as loader.directory_of, deliberately -- two spellings of one
-// rule is how they drift.
 directory_of(path: string) -> string {
     cut = 0 - 1
     i = 0
@@ -129,8 +107,6 @@ join(directory: string, name: string) -> string {
     return string.concat(directory, name)
 }
 
-// --- the manifest -------------------------------------------------------
-
 manifest_load(path: string) -> *Manifest {
     root = read_json(path)
     if root == null { return null }
@@ -145,9 +121,6 @@ manifest_load(path: string) -> *Manifest {
     source = json.object_get_raw(root, "source")
     if source != null { m.source = text_field(source, "name") }
 
-    // Every warning the exporter recorded, carried through rather than left in
-    // a console nobody kept. A clip that was resampled from Bezier is a fact
-    // about the asset, and the place to find it is beside the asset.
     warnings = json.object_get_raw(root, "warnings")
     if warnings != null {
         i = 0
@@ -225,9 +198,6 @@ manifest_entry(m: *Manifest, index: int) -> *Entry {
     return list.get_raw(m.entries, index) as *Entry
 }
 
-// By the id the exporter derived from the source file and the object name. That
-// id is what survives a rename of the file on disk, and what an agent tracing a
-// model will have been given.
 manifest_find(m: *Manifest, id: string) -> *Entry {
     if m == null { return null }
     i = 0
@@ -309,8 +279,6 @@ entry_triangles(e: *Entry) -> int {
     return e.triangles
 }
 
-// --- loading what an entry names ----------------------------------------
-
 entry_load_model(m: *Manifest, e: *Entry) -> *Model {
     if m == null || e == null || e.mesh == "" {
         set_error("no mesh named for ", "that entry")
@@ -323,8 +291,6 @@ entry_load_model(m: *Manifest, e: *Entry) -> *Model {
         set_error("cannot load ", e.mesh)
         return null
     }
-    // The name the exporter knew it by, so a scene walked over the channel
-    // reports something a person can match to Blender.
     core.model_set_name(model, e.object)
     provenance_record(model, e.id, e.object, m.source, e.mesh, e.animation,
                       e.vertices, e.triangles)
@@ -338,8 +304,6 @@ entry_load_clip(m: *Manifest, e: *Entry) -> *Clip {
     string.free(path)
     return clip
 }
-
-// --- exported clips -----------------------------------------------------
 
 target_of(name: string) -> int {
     if name == "rotation" { return anim.ROTATION }
@@ -359,10 +323,6 @@ component(values: ptr, index: int) -> float {
     return json.get_number(json.array_get_raw(values, index))
 }
 
-// The first clip in the file. The format carries a list because Blender can
-// hold several actions per object, and nothing here needs the others yet;
-// reading one and ignoring the rest silently would be the wrong shape to grow
-// from, so the list stays in the format and this takes its head.
 clip_load(path: string) -> *Clip {
     root = read_json(path)
     if root == null { return null }
@@ -377,7 +337,6 @@ clip_load(path: string) -> *Clip {
     node = json.array_get_raw(clips, 0)
     name = text_field(node, "name")
     clip = anim.clip_new(name)
-    // clip_new copied it; this was ours.
     string.free(name)
 
     channels = json.object_get_raw(node, "channels")
@@ -421,16 +380,6 @@ clip_load(path: string) -> *Clip {
     return clip
 }
 
-// --- provenance ---------------------------------------------------------
-//
-// What a model in a running scene came from. Recorded when it is loaded and
-// looked up by the trace, which is the only reason any of it exists: without
-// this, a model in the renderer is a mesh and a transform with no way back to
-// the Blender object that was meant to produce it.
-//
-// A flat list keyed on the model pointer. Scenes hold hundreds of models, not
-// millions, and this is walked when an agent asks rather than per frame.
-
 struct Provenance {
     model: *Model
     id: string
@@ -449,15 +398,10 @@ provenance_table() -> ptr {
     return g_provenance
 }
 
-// Called by entry_load_model. Also public, so a program that builds a model
-// some other way can still say where it came from.
 provenance_record(m: *Model, id: string, object: string, source: string,
                   mesh_file: string, animation_file: string,
                   vertices: int, triangles: int) {
     if m == null { return }
-    // Copied, not borrowed. These arrive as an Entry's fields, and freeing a
-    // heap struct runs a destructor that frees the heap strings in it, so a
-    // manifest_free after loading left every one of these dangling.
     p = heap.new(Provenance)
     p.model = m
     p.id = string.copy(id)
@@ -483,8 +427,6 @@ provenance_for(m: *Model) -> *Provenance {
     return null
 }
 
-// By the id the exporter derived. This is the handle an agent is given when it
-// is asked to find out why a particular Blender object is not on screen.
 provenance_by_id(id: string) -> *Provenance {
     table = provenance_table()
     i = 0
@@ -559,9 +501,6 @@ provenance_expected_triangles(p: *Provenance) -> int {
     return p.expected_triangles
 }
 
-// Largest disagreement between the engine's sampler and the values Blender
-// itself produced, which the exporter recorded alongside the keys. Negative
-// when the asset carries no reference to check against.
 clip_reference_error(path: string, clip: *Clip) -> float {
     root = read_json(path)
     if root == null { return 0.0 - 1.0 }

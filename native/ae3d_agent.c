@@ -1,15 +1,10 @@
-// The agent channel's transport: a localhost socket, newline-delimited JSON in
-// both directions, and the switch that keeps all of it out of a frame that did
-// not ask for it.
+// The agent channel's transport: a loopback socket, newline-delimited JSON
+// both ways, and the switch that keeps all of it out of a frame that did not
+// ask for it.
 //
-// What lives here is only the pipe. Requests arrive on a thread of their own,
-// are split into whole lines, and wait in a queue; the engine drains that queue
-// at one point in its frame and writes answers back. Nothing here knows what a
-// request means -- that belongs to src/ae3d/agent, where the scene is.
-//
-// The cost when AE3D_AGENT is unset is one load of g_active per frame. No
-// thread is created, no socket is opened, no buffer is allocated, and no
-// request queue exists to walk.
+// Requests arrive on a thread of their own and wait in a queue; the engine
+// drains it at one point in its frame. Nothing here knows what a request
+// means -- that belongs in src/ae3d/agent, where the scene is.
 
 #include "ae3d.h"
 
@@ -39,15 +34,11 @@ typedef pthread_mutex_t ae3d_lock;
 #  define ae3d_close_socket close
 #endif
 
-// A queued request line. Owned by the queue until the engine takes it.
 typedef struct ae3d_agent_line {
     char *text;
     struct ae3d_agent_line *next;
 } ae3d_agent_line;
 
-// Read once per frame by the engine and never written after start, so the
-// common case is a load of a value that has been in cache since the process
-// began. Everything else in here is only reached once this is non-zero.
 static int  g_active;
 
 static ae3d_socket g_listener = AE3D_INVALID_SOCKET;
@@ -107,8 +98,6 @@ const char *ae3d_agent_error(void) { return g_error; }
 int ae3d_agent_active(void) { return g_active; }
 int ae3d_agent_port(void) { return g_port; }
 
-// --- the request queue --------------------------------------------------
-
 static void ae3d_agent_push(const char *text, size_t length) {
     ae3d_agent_line *node = (ae3d_agent_line *)calloc(1, sizeof(*node));
     if (!node) return;
@@ -127,8 +116,6 @@ static void ae3d_agent_push(const char *text, size_t length) {
     ae3d_agent_unlock();
 }
 
-// The line belongs to the caller only until it asks again, which keeps the
-// engine side free of a free() it would have to remember to make.
 const char *ae3d_agent_next_request(void) {
     ae3d_agent_line *node;
 
@@ -166,11 +153,6 @@ static void ae3d_agent_drain_queue(void) {
     }
 }
 
-// --- writing back -------------------------------------------------------
-
-// Called from the engine's thread, with the socket in blocking mode: a client
-// that stops reading stalls the engine it is debugging, which is the honest
-// behaviour for a channel someone switched on deliberately.
 void ae3d_agent_respond(const char *line) {
     size_t remaining;
     const char *cursor;
@@ -194,8 +176,6 @@ void ae3d_agent_respond(const char *line) {
     send(client, "\n", 1, 0);
 }
 
-// --- the listener thread ------------------------------------------------
-
 static void ae3d_agent_serve(ae3d_socket client) {
     char   chunk[4096];
     char  *buffer = NULL;
@@ -212,9 +192,6 @@ static void ae3d_agent_serve(ae3d_socket client) {
             size_t wanted = (capacity ? capacity * 2 : 8192);
             char  *grown;
             while (wanted < used + (size_t)got + 1) wanted *= 2;
-            // A single request is not a stream. Anything past this is a client
-            // that has lost its framing, and growing to meet it turns a bad
-            // line into an out-of-memory.
             if (wanted > (size_t)1 << 22) break;
             grown = (char *)realloc(buffer, wanted);
             if (!grown) break;
@@ -229,8 +206,6 @@ static void ae3d_agent_serve(ae3d_socket client) {
             if (buffer[i] != '\n') continue;
             {
                 size_t length = i - start;
-                // Tolerate CRLF, so a client on Windows that opened the socket
-                // in text mode is not a mystery.
                 if (length > 0 && buffer[start + length - 1] == '\r') length--;
                 if (length > 0) ae3d_agent_push(buffer + start, length);
             }
@@ -256,13 +231,10 @@ static void ae3d_agent_accept_loop(void) {
         }
         if (client == AE3D_INVALID_SOCKET) return;
 
-        // Answers are small and latency matters more than packing them.
         setsockopt(client, IPPROTO_TCP, TCP_NODELAY, (const char *)&flag, sizeof(flag));
 
         ae3d_agent_lock();
         if (g_client != AE3D_INVALID_SOCKET) {
-            // One driver at a time. A second is told so rather than silently
-            // interleaved with the first.
             ae3d_agent_unlock();
             send(client, "{\"ok\":false,\"error\":\"another client is attached\"}\n", 50, 0);
             ae3d_close_socket(client);
@@ -297,11 +269,6 @@ static pthread_t g_thread;
 static int       g_thread_ready;
 #endif
 
-// --- start and stop -----------------------------------------------------
-
-// AE3D_AGENT is a port, or "auto" for one the system picks. The chosen port is
-// printed and written to AE3D_AGENT_PORT_FILE when that is set, so a caller
-// that asked for "auto" has somewhere to read it from without scraping output.
 int ae3d_agent_start(void) {
     const char *spec = getenv("AE3D_AGENT");
     const char *port_file;
@@ -334,8 +301,6 @@ int ae3d_agent_start(void) {
 
     memset(&address, 0, sizeof(address));
     address.sin_family = AF_INET;
-    // Loopback only. This channel can move a camera and write files; it is not
-    // something to offer the network.
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     address.sin_port = htons((unsigned short)requested);
 
@@ -397,8 +362,6 @@ void ae3d_agent_stop(void) {
     g_active = 0;
     g_stopping = 1;
 
-    // Closing both ends is what wakes the thread: accept and recv return, the
-    // loop sees g_stopping and unwinds.
     if (g_listener != AE3D_INVALID_SOCKET) {
         ae3d_close_socket(g_listener);
         g_listener = AE3D_INVALID_SOCKET;
@@ -408,12 +371,6 @@ void ae3d_agent_stop(void) {
     g_client = AE3D_INVALID_SOCKET;
     ae3d_agent_unlock();
     if (client != AE3D_INVALID_SOCKET) {
-        // Closed politely: half-close, then read what is still in flight until
-        // the peer closes too. Closing outright with unread bytes in the
-        // receive buffer makes the stack send a reset, and a reset throws away
-        // whatever has not been read yet -- which is exactly the answer to the
-        // `quit` that got us here. A client asking the engine to stop was
-        // getting a connection error instead of its acknowledgement.
         char discard[256];
         int drained = 0;
 #if defined(_WIN32)
