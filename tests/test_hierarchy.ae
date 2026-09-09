@@ -1,0 +1,194 @@
+// A model built from parts has to hold together when a part turns.
+//
+// ae3d#230: a model had a position, a rotation and a scale and no parent, so a
+// figure assembled from separate meshes had to have every world transform
+// computed for it, frame by frame, including the arc a rotating parent carries
+// its children through. Nothing composed, so nothing held together: the
+// zombie's elbow opened a gap every time it swung.
+//
+// The arithmetic half runs anywhere. The rendered half needs a context and
+// proves the renderer draws what the composition says: moving a parent alone
+// moves the pixels of a child nobody touched.
+
+import std.mem
+import ae3d.core
+import ae3d.gl
+import ae3d.offscreen
+import ae3d.loader
+
+const WIDTH = 240
+const HEIGHT = 180
+const EPSILON = 0.0005
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+near(a: float, b: float) -> bool {
+    d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    return d < EPSILON
+}
+
+at(m: *Model, x: float, y: float, z: float) -> bool {
+    p = core.model_world_position(m)
+    return near(p.x, x) && near(p.y, y) && near(p.z, z)
+}
+
+transform_checks() {
+    torso = loader.cube(1.0)
+    arm = loader.cube(1.0)
+    hand = loader.cube(1.0)
+
+    core.model_set_position(torso, 10.0, 0.0, 0.0)
+    core.model_set_position(arm, 0.0, 2.0, 0.0)
+    core.model_set_position(hand, 0.0, 3.0, 0.0)
+
+    check("a model with no parent is where it was put", at(torso, 10.0, 0.0, 0.0))
+
+    core.model_set_parent(arm, torso)
+    core.model_set_parent(hand, arm)
+    check("a child is placed relative to its parent", at(arm, 10.0, 2.0, 0.0))
+    check("and a grandchild through the whole chain", at(hand, 10.0, 5.0, 0.0))
+
+    // The arm swings 90 degrees about Z. Its own tip goes with it, and so does
+    // everything below the elbow: this is the arc that had to be written out by
+    // hand before, and getting it wrong is what opened the gaps.
+    core.model_set_rotation(arm, core.quat_rotate(core.deg_to_rad(90.0),
+                                                  core.vec3(0.0, 0.0, 1.0)))
+    check("a rotating parent carries its child around the arc",
+          at(hand, 7.0, 2.0, 0.0))
+
+    core.model_set_position(torso, 10.0, 4.0, 0.0)
+    check("moving a parent moves everything under it", at(hand, 7.0, 6.0, 0.0))
+
+    core.model_set_rotation(arm, core.quat_ident())
+    core.model_set_scale(torso, 2.0, 2.0, 2.0)
+    check("a parent's scale scales the offsets under it", at(hand, 10.0, 14.0, 0.0))
+
+    // Bounds are what culling and picking read, so they have to follow too.
+    core.model_sync_transform(hand)
+    check("a child's bounds follow it",
+          near(hand.bounding_center.x, 10.0) && near(hand.bounding_center.y, 14.0))
+
+    check("a model cannot be its own parent", !core.model_set_parent(torso, torso))
+    check("nor a parent of something it already hangs from",
+          !core.model_set_parent(torso, hand))
+    check("the refused parent is not adopted", core.model_parent(torso) == null)
+
+    core.model_set_parent(hand, null)
+    check("detaching leaves a model where it stood", at(hand, 0.0, 3.0, 0.0))
+
+    core.model_free(torso)
+    core.model_free(arm)
+    core.model_free(hand)
+}
+
+// Sum of the frame, and of its left half. A model that moves left brightens the
+// left half without changing the total by much.
+brightness(pixels: ptr, from_x: int, to_x: int) -> int {
+    total = 0
+    y = 0
+    while y < HEIGHT {
+        x = from_x
+        while x < to_x {
+            index = (y * WIDTH + x) * 4
+            total = total + mem.get_byte(pixels, index) +
+                    mem.get_byte(pixels, index + 1) +
+                    mem.get_byte(pixels, index + 2)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return total
+}
+
+frame_of(backend: *Backend) -> ptr {
+    core.backend_frame_pixels(backend)
+    return core.backend_frame_pixels(backend)
+}
+
+render_checks(backend: *Backend) {
+    core.backend_set_clear_color(backend, 0.0, 0.0, 0.0)
+
+    torso = loader.cube(40.0)
+    core.model_set_position(torso, 0.0, 0.0, 0.0)
+    core.model_matte(torso, 0.85, 0.85, 0.85)
+    core.backend_add_model(backend, torso)
+
+    // Far enough out that it is unmistakably a second thing on screen, and
+    // never told where it is in the world: only that it hangs off the torso.
+    limb = loader.cube(28.0)
+    core.model_set_position(limb, 0.0, 46.0, 0.0)
+    core.model_matte(limb, 0.9, 0.35, 0.2)
+    core.model_set_parent(limb, torso)
+    core.backend_add_model(backend, limb)
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 20.0, 220.0))
+    core.camera_look_at(cam, core.vec3(0.0, 20.0, 0.0))
+    light = core.light_sun(core.vec3(0.3, 1.0, 0.6))
+    light.ambient_strength = 0.5
+
+    core.backend_render(backend, cam, light)
+    before = frame_of(backend)
+    if before == null { println("hierarchy: SKIP no pixels") ; return }
+    upright_left = brightness(before, 0, WIDTH / 2)
+    upright_right = brightness(before, WIDTH / 2, WIDTH)
+
+    // Only the parent is touched. The limb is never given a new transform.
+    core.model_set_rotation(torso, core.quat_rotate(core.deg_to_rad(50.0),
+                                                    core.vec3(0.0, 0.0, 1.0)))
+    core.backend_render(backend, cam, light)
+    after = frame_of(backend)
+    if after == null { println("hierarchy: SKIP no pixels") ; return }
+    turned_left = brightness(after, 0, WIDTH / 2)
+    turned_right = brightness(after, WIDTH / 2, WIDTH)
+
+    println("  left half ${upright_left} -> ${turned_left}, right half ${upright_right} -> ${turned_right}")
+    check("turning the parent swings the child across the frame",
+          turned_left > upright_left * 11 / 10 && turned_right < upright_right)
+
+    core.backend_remove_model(backend, limb)
+    core.backend_remove_model(backend, torso)
+    core.model_free(limb)
+    core.model_free(torso)
+    core.camera_free(cam)
+    core.light_free(light)
+}
+
+main() {
+    transform_checks()
+
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("hierarchy: SKIP no OpenGL context")
+        return
+    }
+    renderer = gl.renderer_new()
+    pass = gl.backend(renderer)
+    if !core.backend_init(&pass, context, WIDTH, HEIGHT) {
+        println("hierarchy: SKIP the OpenGL backend would not initialise")
+        return
+    }
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    render_checks(&pass)
+    core.backend_cleanup(&pass)
+    offscreen.target_destroy(target)
+    gl.renderer_free(renderer)
+    offscreen.context_destroy(context)
+
+    if failures == 0 {
+        println("hierarchy: all checks passed")
+    } else {
+        println("hierarchy: ${failures} failure(s)")
+    }
+}

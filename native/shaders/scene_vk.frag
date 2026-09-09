@@ -57,6 +57,11 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     bool enableBloom;
     float bloomThreshold;
     float bloomIntensity;
+    bool enableFog;
+    float fogStart;
+    float fogEnd;
+    vec3 fogColor;
+    float fogIntensity;
     bool enableShadows;
     bool hasShadowMap;
     float shadowIntensity;
@@ -98,11 +103,6 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float foamIntensity;
     float waterPlaneHeight;
     float waterLevel;
-    bool enableFog;
-    float fogStart;
-    float fogEnd;
-    vec3 fogColor;
-    float fogIntensity;
     vec3 skyColor;
     vec3 horizonColor;
     bool enableWaterReflection;
@@ -172,6 +172,15 @@ layout(location = 4) in vec4 FragPosLightSpace;
 
 
 // Bloom and HDR
+
+
+
+
+// Distance haze. The same four names the water shader uses, because one scene
+// has one atmosphere: a street that fades into the dark has to fade the water
+// running down it by the same amount.
+
+
 
 
 
@@ -768,12 +777,26 @@ void main() {
 
     vec4 texColor = texture(textureSampler, fragTexCoord);
     
-    // Check for emissive objects first - bypass all lighting for sun-like objects
+    // An emissive surface is its own light source, so it skips shading. It does
+    // not skip having a colour: this returned a hardcoded white, which made an
+    // emissive model the one thing in the engine that could not be coloured --
+    // diffuseColor, the texture and the per-instance tint were all discarded.
+    // An accretion disc whose whole point is that its inner edge is blue-white
+    // and its rim is red came out uniformly white.
+    //
+    // It also skipped tone mapping and gamma, so an emissive surface sat in a
+    // different colour space from every lit surface beside it. Both now run,
+    // which is also what lets a colour brighter than 1.0 (an instance colour is
+    // a float attribute, so it can carry one) roll off to white through ACES
+    // instead of clipping per channel and shifting hue on the way.
+    //
+    // exposure is the emissive strength, scaled so the 10.0 that opens this
+    // branch means 1x. Below that the surface is lit normally.
     if (exposure > 10.0) {
-        // For emissive objects like sun spheres - MAXIMUM brightness emission
-        vec3 emissiveColor = vec3(1.0, 1.0, 1.0); // Pure white
-        FragColor = vec4(emissiveColor, 1.0); // Full opacity, no tone mapping
-        return; // Skip all lighting calculations
+        vec3 emissive = diffuseColor * texColor.rgb * InstanceColor * (exposure * 0.1);
+        emissive = ACESFilm(emissive);
+        FragColor = vec4(pow(emissive, vec3(1.0 / 2.2)), 1.0);
+        return;
     }
     
     // Pre-calculate expensive operations once
@@ -895,6 +918,14 @@ void main() {
     // Gamma correction (sRGB)
     color = pow(color, vec3(1.0/2.2));
     
+    // The air between the eye and the surface. After tone mapping and gamma,
+    // because fog is what is seen rather than another light in the scene: put
+    // in before them and the tone curve pulls the horizon back out again.
+    if (enableFog) {
+        float haze = smoothstep(fogStart, fogEnd, distanceToCamera) * fogIntensity;
+        color = mix(color, fogColor, clamp(haze, 0.0, 1.0));
+    }
+
     // Use material alpha for transparency
     float finalAlpha = texColor.a * materialAlpha;
     

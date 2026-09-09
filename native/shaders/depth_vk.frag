@@ -56,6 +56,11 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     bool enableBloom;
     float bloomThreshold;
     float bloomIntensity;
+    bool enableFog;
+    float fogStart;
+    float fogEnd;
+    vec3 fogColor;
+    float fogIntensity;
     bool enableShadows;
     bool hasShadowMap;
     float shadowIntensity;
@@ -97,11 +102,6 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float foamIntensity;
     float waterPlaneHeight;
     float waterLevel;
-    bool enableFog;
-    float fogStart;
-    float fogEnd;
-    vec3 fogColor;
-    float fogIntensity;
     vec3 skyColor;
     vec3 horizonColor;
     bool enableWaterReflection;

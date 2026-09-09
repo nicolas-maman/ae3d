@@ -1,0 +1,147 @@
+// Distance has to be visible.
+//
+// A street that recedes into the dark needs the far end to be darker than the
+// near end for reasons that have nothing to do with the lights in it. Fog is
+// that: a colour the picture fades into with distance, set once for the scene
+// and applied by both backends from the same four numbers.
+//
+// The ground runs away from the camera, so the far half of it is further off
+// than the near half by a wide margin. Fogging towards a strong blue moves the
+// far half and leaves the near half where it was.
+
+import std.mem
+import ae3d.core
+import ae3d.gl
+import ae3d.vk
+import ae3d.offscreen
+import ae3d.loader
+
+const WIDTH = 240
+const HEIGHT = 180
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// How blue a band of the frame is, against its own red. Fog towards blue moves
+// this; a light that merely brightens the scene moves both channels together.
+blueness(pixels: ptr, from_y: int, to_y: int) -> int {
+    total = 0
+    y = from_y
+    while y < to_y {
+        x = 0
+        while x < WIDTH {
+            index = (y * WIDTH + x) * 4
+            total = total + mem.get_byte(pixels, index + 2) - mem.get_byte(pixels, index)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return total
+}
+
+frame_of(backend: *Backend) -> ptr {
+    core.backend_frame_pixels(backend)
+    return core.backend_frame_pixels(backend)
+}
+
+run_checks(backend: *Backend, name: string) {
+    core.backend_set_clear_color(backend, 0.0, 0.0, 0.0)
+
+    // Long enough that its far end is ten times further off than its near end.
+    ground = loader.plane(48, 24.0)
+    core.model_set_position(ground, 0.0 - 576.0, 0.0, 0.0 - 1100.0)
+    core.model_matte(ground, 0.75, 0.75, 0.75)
+    core.backend_add_model(backend, ground)
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 90.0, 40.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0 - 520.0))
+    light = core.light_sun(core.vec3(0.2, 1.0, 0.4))
+    light.ambient_strength = 0.4
+
+    core.backend_render(backend, cam, light)
+    clear = frame_of(backend)
+    if clear == null { println("fog: SKIP no pixels") ; return }
+    near_clear = blueness(clear, HEIGHT * 3 / 4, HEIGHT)
+    far_clear = blueness(clear, HEIGHT / 3, HEIGHT / 2)
+
+    air = core.fog_distance(120.0, 900.0, core.vec3(0.06, 0.16, 0.85), 1.0)
+    core.backend_set_fog(backend, &air)
+    core.backend_render(backend, cam, light)
+    hazy = frame_of(backend)
+    if hazy == null { println("fog: SKIP no pixels") ; return }
+    near_hazy = blueness(hazy, HEIGHT * 3 / 4, HEIGHT)
+    far_hazy = blueness(hazy, HEIGHT / 3, HEIGHT / 2)
+
+    near_shift = near_hazy - near_clear
+    far_shift = far_hazy - far_clear
+    println("  ${name}: near ${near_clear} -> ${near_hazy}, far ${far_clear} -> ${far_hazy}")
+
+    check("${name} the far ground takes the colour of the air", far_shift > WIDTH * 8)
+    check("${name} the near ground keeps its own", far_shift > near_shift * 4)
+
+    // Off again, and the picture is the one it started as: fog is a setting,
+    // not a state the scene falls into.
+    clear_air = core.fog_none()
+    core.backend_set_fog(backend, &clear_air)
+    core.backend_render(backend, cam, light)
+    cleared = frame_of(backend)
+    if cleared == null { println("fog: SKIP no pixels") ; return }
+    check("${name} turning it off clears the air",
+          blueness(cleared, HEIGHT / 3, HEIGHT / 2) == far_clear)
+
+    core.backend_remove_model(backend, ground)
+    core.model_free(ground)
+    core.camera_free(cam)
+    core.light_free(light)
+}
+
+main() {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("fog: SKIP no OpenGL context")
+        return
+    }
+
+    renderer = gl.renderer_new()
+    pass = gl.backend(renderer)
+    if !core.backend_init(&pass, context, WIDTH, HEIGHT) {
+        println("fog: SKIP the OpenGL backend would not initialise")
+        return
+    }
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    run_checks(&pass, "opengl")
+    core.backend_cleanup(&pass)
+    offscreen.target_destroy(target)
+    gl.renderer_free(renderer)
+    offscreen.context_destroy(context)
+
+    if !vk.available() {
+        println("fog: no Vulkan driver (${vk.last_error()}), checked OpenGL only")
+    } else {
+        vk_renderer = vk.renderer_new()
+        vk_pass = vk.backend(vk_renderer)
+        if !core.backend_init(&vk_pass, null, WIDTH, HEIGHT) {
+            println("fog: SKIP Vulkan would not start (${vk.last_error()})")
+        } else {
+            run_checks(&vk_pass, "vulkan")
+            core.backend_cleanup(&vk_pass)
+        }
+        vk.renderer_free(vk_renderer)
+    }
+
+    if failures == 0 {
+        println("fog: all checks passed")
+    } else {
+        println("fog: ${failures} failure(s)")
+    }
+}

@@ -37,6 +37,7 @@ exports (
     model_clone, model_set_casts_shadow,
     model_set_position, model_set_scale, model_set_rotation, model_rotate,
     model_update_matrix, model_recalculate_bounds, model_mark_dirty, model_set_diffuse,
+    model_set_parent, model_parent, model_sync_transform, model_world_position,
     model_set_mesh, model_disable_instancing,
     model_set_specular, model_set_pbr, model_set_exposure, model_set_alpha,
     model_set_texture, model_set_shader, model_set_name, model_set_source_path,
@@ -57,6 +58,7 @@ exports (
     depth_test, set_depth_test, next_model_id, backend_init, backend_render,
     backend_add_model, backend_remove_model, backend_load_texture, backend_set_skybox,
     backend_update_viewport, backend_set_post, backend_set_clear_color, backend_set_shadows,
+    backend_set_fog, Fog, fog_none, fog_distance,
     backend_set_render_scale,
     backend_shadows,
     backend_add_light, backend_remove_light, backend_draw_calls, backend_frame_pixels,
@@ -281,6 +283,18 @@ struct Model {
     bounding_center: Vec3
     bounding_radius: float
 
+    // Where the parents put it. position/scale/rotation stay the model's own,
+    // so an animation writes the same numbers whether or not anything is
+    // parented to anything.
+    parent: ptr
+    world_position: Vec3
+    world_scale: Vec3
+    world_rotation: Quat
+    world_stamp: int
+    parent_stamp: int
+    draw_stamp: int
+    shadow_stamp: int
+
     mesh: ptr
     instances: ptr
     material: *Material
@@ -340,6 +354,27 @@ struct Skybox {
     blue: float
 }
 
+// Distance haze: what a scene fades into, and where the fading begins and
+// ends. The colour is the one the eye sees, applied after tone mapping, so it
+// is the colour of the horizon rather than a light in the scene.
+struct Fog {
+    color: Vec3
+    start: float
+    end: float
+    intensity: float
+    enabled: bool
+}
+
+fog_none() -> Fog {
+    return Fog { color: vec3(0.0, 0.0, 0.0), start: 0.0, end: 1.0,
+                 intensity: 0.0, enabled: false }
+}
+
+fog_distance(start: float, end: float, color: Vec3, intensity: float) -> Fog {
+    return Fog { color: color, start: start, end: end,
+                 intensity: intensity, enabled: true }
+}
+
 struct Backend {
     state: ptr
     name: string
@@ -358,6 +393,7 @@ struct Backend {
     // next step somewhere that will.
     set_render_scale: fn(ptr, float) -> float
     set_clear_color: fn(ptr, float, float, float)
+    set_fog:         fn(ptr, ptr)
     set_shadows:     fn(ptr, int)
     shadows:         fn(ptr) -> int
     add_light:       fn(ptr, ptr)
@@ -832,6 +868,12 @@ backend_shadows(b: *Backend) -> bool {
     return b.shadows(b.state) == 1
 }
 
+// Fog belongs to the scene rather than to any model in it, so it is set once
+// and every surface drawn afterwards is behind the same air.
+backend_set_fog(b: *Backend, f: *Fog) {
+    b.set_fog(b.state, f as ptr)
+}
+
 backend_set_shadows(b: *Backend, on: bool) {
     flag = 0
     if on { flag = 1 }
@@ -1034,6 +1076,12 @@ model_new() -> *Model {
     m.position = vec3(0.0, 0.0, 0.0)
     m.scale = vec3(1.0, 1.0, 1.0)
     m.rotation = quat_ident()
+    m.world_position = m.position
+    m.world_scale = m.scale
+    m.world_rotation = m.rotation
+    m.parent_stamp = 0 - 1
+    m.draw_stamp = 0 - 1
+    m.shadow_stamp = 0 - 1
     m.model_matrix = mat4_ident()
     m.bounding_center = vec3(0.0, 0.0, 0.0)
     m.bounding_radius = 0.0
@@ -1099,15 +1147,79 @@ model_own_material(m: *Model, material: *Material) -> *Material {
     return material
 }
 
+// Rebuilds where this model is in the world, from its own transform and its
+// parents'. The parent's world transform is composed rather than its matrix
+// alone, so a child keeps a rotation and a scale of its own to be animated by
+// and its bounds stay a sphere rather than becoming a decomposition problem.
+// Shear is the one thing this cannot represent, which is a parent scaled
+// unevenly under a rotated child; Blender's own parenting has the same edge.
 model_update_matrix(m: *Model) {
-    scale_matrix = mat4_scale(m.scale.x, m.scale.y, m.scale.z)
-    rotation_matrix = quat_mat4(m.rotation)
-    translation = mat4_translate(m.position.x, m.position.y, m.position.z)
+    if m.parent != null {
+        p = m.parent as *Model
+        m.world_position = mat4_transform_point(p.model_matrix, m.position)
+        m.world_rotation = quat_mul(p.world_rotation, m.rotation)
+        m.world_scale = vec3(p.world_scale.x * m.scale.x,
+                             p.world_scale.y * m.scale.y,
+                             p.world_scale.z * m.scale.z)
+        m.parent_stamp = p.world_stamp
+    } else {
+        m.world_position = m.position
+        m.world_rotation = m.rotation
+        m.world_scale = m.scale
+    }
+
+    scale_matrix = mat4_scale(m.world_scale.x, m.world_scale.y, m.world_scale.z)
+    rotation_matrix = quat_mat4(m.world_rotation)
+    translation = mat4_translate(m.world_position.x, m.world_position.y, m.world_position.z)
     m.model_matrix = mat4_mul(mat4_mul(translation, rotation_matrix), scale_matrix)
+    m.world_stamp = m.world_stamp + 1
+    m.is_dirty = false
     // Whether a model's bounds match where it is cannot depend on a rendering
     // option: picking reads them too, and a rotation used to leave them behind
     // wherever culling was off.
     model_recalculate_bounds(m)
+}
+
+// Brings a model's world transform up to date, and its parents' first. A child
+// finds out its parent moved by the stamp the parent bumps on every rebuild,
+// so the two can be updated in either order and neither has to know what hangs
+// off it. Renderers call this once per model per frame; on a scene where
+// nothing moved it is a pointer read and two comparisons per model.
+model_sync_transform(m: *Model) {
+    if m == null { return }
+    if m.parent == null {
+        if m.is_dirty { model_update_matrix(m) }
+        return
+    }
+    p = m.parent as *Model
+    model_sync_transform(p)
+    if m.is_dirty || m.parent_stamp != p.world_stamp { model_update_matrix(m) }
+}
+
+// A cycle would be a transform that depends on itself, so the chain is walked
+// before it is joined rather than guarded against on every frame afterwards.
+model_set_parent(m: *Model, parent: *Model) -> bool {
+    if m == null { return false }
+    walk = parent
+    while walk != null {
+        if walk == m { return false }
+        walk = walk.parent as *Model
+    }
+    m.parent = parent as ptr
+    m.parent_stamp = 0 - 1
+    model_update_matrix(m)
+    return true
+}
+
+model_parent(m: *Model) -> *Model {
+    if m == null { return null }
+    return m.parent as *Model
+}
+
+model_world_position(m: *Model) -> Vec3 {
+    if m == null { return vec3(0.0, 0.0, 0.0) }
+    model_sync_transform(m)
+    return m.world_position
 }
 
 // Stop a model being instanced, releasing the instance store with it. The
@@ -1151,15 +1263,16 @@ model_recalculate_bounds(m: *Model) {
         centre = vec3(ae3d_inst_bound_x(m.instances),
                             ae3d_inst_bound_y(m.instances),
                             ae3d_inst_bound_z(m.instances))
-        m.bounding_center = v3_add(centre, m.position)
+        m.bounding_center = v3_add(centre, m.world_position)
         m.bounding_radius = ae3d_inst_bound_radius(m.instances) + 10.0
         return
     }
 
     ae3d_mesh_compute_bounds(m.mesh,
-                             m.position.x, m.position.y, m.position.z,
-                             m.scale.x, m.scale.y, m.scale.z,
-                             m.rotation.x, m.rotation.y, m.rotation.z, m.rotation.w)
+                             m.world_position.x, m.world_position.y, m.world_position.z,
+                             m.world_scale.x, m.world_scale.y, m.world_scale.z,
+                             m.world_rotation.x, m.world_rotation.y,
+                             m.world_rotation.z, m.world_rotation.w)
     m.bounding_center = vec3(ae3d_mesh_bound_x(m.mesh),
                                    ae3d_mesh_bound_y(m.mesh),
                                    ae3d_mesh_bound_z(m.mesh))
@@ -1173,19 +1286,16 @@ model_mark_dirty(m: *Model) {
 model_set_position(m: *Model, x: float, y: float, z: float) {
     m.position = vec3(x, y, z)
     model_update_matrix(m)
-    m.is_dirty = true
 }
 
 model_set_scale(m: *Model, x: float, y: float, z: float) {
     m.scale = vec3(x, y, z)
     model_update_matrix(m)
-    m.is_dirty = true
 }
 
 model_set_rotation(m: *Model, q: Quat) {
     m.rotation = q
     model_update_matrix(m)
-    m.is_dirty = true
 }
 
 model_rotate(m: *Model, degrees_x: float, degrees_y: float, degrees_z: float) {
@@ -1195,7 +1305,6 @@ model_rotate(m: *Model, degrees_x: float, degrees_y: float, degrees_z: float) {
     rz = quat_rotate(deg_to_rad(degrees_z), vec3(0.0, 0.0, 1.0))
     m.rotation = quat_mul(quat_mul(quat_mul(m.rotation, rx), ry), rz)
     model_update_matrix(m)
-    m.is_dirty = true
 }
 
 model_ensure_material(m: *Model) {
@@ -1256,8 +1365,7 @@ model_clone(src: *Model) -> *Model {
     model_set_name(copy, text(src.name))
     model_set_source_path(copy, text(src.source_path))
     copy_uniforms(copy, src)
-    model_mark_dirty(copy)
-    model_recalculate_bounds(copy)
+    model_update_matrix(copy)
     return copy
 }
 

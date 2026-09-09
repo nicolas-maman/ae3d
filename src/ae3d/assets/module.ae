@@ -18,7 +18,7 @@ exports (
     manifest_load, manifest_free, manifest_count, manifest_entry, manifest_find, manifest_find_by_object, manifest_source, manifest_blender,
     manifest_warning_count, entry_id, entry_material, entry_animation,
     entry_vertices, entry_triangles,
-    entry_load_model, entry_load_clip,
+    entry_load_model, entry_load_clip, entry_parent, manifest_load_scene,
     clip_load, clip_reference_error, last_error,
     Provenance, provenance_record, provenance_for, provenance_by_id,
     provenance_by_object, provenance_model,
@@ -30,11 +30,15 @@ exports (
 struct Entry {
     id: string
     object: string
+    parent: string
     mesh: string
     material: string
     animation: string
     vertices: int
     triangles: int
+    position: Vec3
+    rotation: Quat
+    scale: Vec3
 }
 
 struct Warning {
@@ -142,9 +146,31 @@ manifest_load(path: string) -> *Manifest {
             e.object = text_field(node, "object")
             e.vertices = int_field(node, "vertices", 0)
             e.triangles = int_field(node, "triangles", 0)
+            e.parent = text_field(node, "parent")
             e.mesh = ""
             e.material = ""
             e.animation = ""
+            e.position = core.vec3(0.0, 0.0, 0.0)
+            e.rotation = core.quat_ident()
+            e.scale = core.vec3(1.0, 1.0, 1.0)
+            transform = json.object_get_raw(node, "transform")
+            if transform != null {
+                location = json.object_get_raw(transform, "location")
+                rotation = json.object_get_raw(transform, "rotation")
+                scale = json.object_get_raw(transform, "scale")
+                if location != null {
+                    e.position = core.vec3(component(location, 0), component(location, 1),
+                                           component(location, 2))
+                }
+                if rotation != null {
+                    e.rotation = core.quat(component(rotation, 0), component(rotation, 1),
+                                           component(rotation, 2), component(rotation, 3))
+                }
+                if scale != null {
+                    e.scale = core.vec3(component(scale, 0), component(scale, 1),
+                                        component(scale, 2))
+                }
+            }
             files = json.object_get_raw(node, "files")
             if files != null {
                 e.mesh = text_field(files, "mesh")
@@ -277,9 +303,65 @@ entry_load_model(m: *Manifest, e: *Entry) -> *Model {
         return null
     }
     core.model_set_name(model, e.object)
+    // The mesh is written in its own space, so this is where the object stops
+    // being a shape and becomes a thing standing somewhere.
+    core.model_set_position(model, e.position.x, e.position.y, e.position.z)
+    core.model_set_rotation(model, e.rotation)
+    core.model_set_scale(model, e.scale.x, e.scale.y, e.scale.z)
     provenance_record(model, e.id, e.object, m.source, e.mesh, e.animation,
                       e.vertices, e.triangles)
     return model
+}
+
+entry_parent(e: *Entry) -> string {
+    if e == null { return "" }
+    return e.parent
+}
+
+// Every object in the manifest, loaded, placed, and hung off whatever it was
+// hung off in Blender. The answer is in manifest order, so the caller can walk
+// the entries and the models together to bind the clips.
+//
+// Parenting is a second pass because a child can be named before its parent
+// is: the manifest is sorted by object name, not by depth.
+manifest_load_scene(m: *Manifest) -> ptr {
+    models = list.new()
+    if m == null { return models }
+
+    count = list.size(m.entries)
+    i = 0
+    while i < count {
+        e = list.get_raw(m.entries, i) as *Entry
+        list.add_raw(models, entry_load_model(m, e) as ptr)
+        i = i + 1
+    }
+
+    i = 0
+    while i < count {
+        e = list.get_raw(m.entries, i) as *Entry
+        model = list.get_raw(models, i) as *Model
+        if model != null && e.parent != "" {
+            parent = find_model(m, models, e.parent)
+            if parent == null {
+                set_error("no parent called ", e.parent)
+            } else {
+                core.model_set_parent(model, parent)
+            }
+        }
+        i = i + 1
+    }
+    return models
+}
+
+find_model(m: *Manifest, models: ptr, name: string) -> *Model {
+    count = list.size(m.entries)
+    i = 0
+    while i < count {
+        e = list.get_raw(m.entries, i) as *Entry
+        if e.object == name { return list.get_raw(models, i) as *Model }
+        i = i + 1
+    }
+    return null
 }
 
 entry_load_clip(m: *Manifest, e: *Entry) -> *Clip {

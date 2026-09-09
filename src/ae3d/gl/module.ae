@@ -25,7 +25,7 @@ exports (
     renderer_set_clear_color, renderer_set_fxaa, renderer_set_bloom, renderer_set_msaa,
     renderer_set_render_scale, renderer_render_scale,
     renderer_set_target,
-    renderer_set_bloom_params, renderer_set_post,
+    renderer_set_bloom_params, renderer_set_post, renderer_set_fog, renderer_fog,
     renderer_set_shadows, renderer_shadows, renderer_default_program,
     renderer_load_texture, renderer_release_texture, renderer_texture_count,
     renderer_frame_pixels, read_pixel, snapshot
@@ -146,6 +146,11 @@ struct ProgramSlots {
     is_instanced: int
     use_instance_color: int
     caustics_time: int
+    fog_enabled: int
+    fog_start: int
+    fog_end: int
+    fog_color: int
+    fog_intensity: int
     loaded_names: uint64
     shading_loaded: bool
 }
@@ -200,6 +205,7 @@ struct GLRenderer {
     shadow_map: int
     shadow_enabled: bool
     shadow_space: Mat4
+    fog: Fog
 
     clear_r: float
     clear_g: float
@@ -260,6 +266,7 @@ renderer_new() -> *GLRenderer {
     r.batch_count = 0
     r.shadow_batches = list.new()
     r.shadow_batch_count = 0
+    r.fog = core.fog_none()
     r.clear_r = 0.0
     r.clear_g = 0.0
     r.clear_b = 0.0
@@ -328,6 +335,7 @@ backend(r: *GLRenderer) -> Backend {
         set_post: renderer_set_post as fn(ptr, int, int, float, float),
         set_render_scale: vtable_set_render_scale as fn(ptr, float) -> float,
         set_clear_color: renderer_set_clear_color as fn(ptr, float, float, float),
+        set_fog: renderer_set_fog as fn(ptr, ptr),
         set_shadows: vtable_set_shadows as fn(ptr, int),
         shadows: vtable_shadows as fn(ptr) -> int,
         add_light: renderer_add_light as fn(ptr, ptr),
@@ -402,6 +410,11 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
     s.is_instanced = ae3d_gl_uniform_location(program, "isInstanced")
     s.use_instance_color = ae3d_gl_uniform_location(program, "useInstanceColor")
     s.caustics_time = ae3d_gl_uniform_location(program, "causticsTime")
+    s.fog_enabled = ae3d_gl_uniform_location(program, "enableFog")
+    s.fog_start = ae3d_gl_uniform_location(program, "fogStart")
+    s.fog_end = ae3d_gl_uniform_location(program, "fogEnd")
+    s.fog_color = ae3d_gl_uniform_location(program, "fogColor")
+    s.fog_intensity = ae3d_gl_uniform_location(program, "fogIntensity")
     s.loaded_names = 0 as uint64
     // Nothing has been written into this program yet, so what it holds is
     // whatever GLSL leaves a uniform at, which is not what a default is.
@@ -817,6 +830,17 @@ renderer_set_clear_color(r: *GLRenderer, red: float, green: float, blue: float) 
     r.clear_b = blue
 }
 
+renderer_set_fog(r: *GLRenderer, f: *Fog) {
+    if f == null { r.fog = core.fog_none() ; return }
+    r.fog.color = f.color
+    r.fog.start = f.start
+    r.fog.end = f.end
+    r.fog.intensity = f.intensity
+    r.fog.enabled = f.enabled
+}
+
+renderer_fog(r: *GLRenderer) -> Fog { return r.fog }
+
 renderer_set_post(r: *GLRenderer, fxaa: int, bloom: int, threshold: float, intensity: float) {
     r.enable_fxaa = fxaa == 1
     r.enable_bloom = bloom == 1
@@ -929,11 +953,9 @@ render_shadow_pass(r: *GLRenderer, light: *Light) {
             i = i + 1
             continue
         }
-        moved = m.is_dirty
-        if m.is_dirty {
-            core.model_update_matrix(m)
-            m.is_dirty = false
-        }
+        core.model_sync_transform(m)
+        moved = m.shadow_stamp != m.world_stamp
+        m.shadow_stamp = m.world_stamp
         if shadow_batchable(m) {
             b = shadow_batch_for(r, m)
             if b.count >= list.size(b.members) {
@@ -1383,16 +1405,17 @@ draw_opaque(r: *GLRenderer, view_projection: *Mat4, light: *Light, cam: *Camera)
     while i < count {
         m = list.get_raw(r.models, i) as *Model
         if batchable(r, m) {
+            core.model_sync_transform(m)
             if core.frustum_culling() &&
                !core.frustum_sphere_visible(r.frustum, m.bounding_center, m.bounding_radius) {
                 i = i + 1
                 continue
             }
-            moved = m.is_dirty
-            if m.is_dirty {
-                core.model_update_matrix(m)
-                m.is_dirty = false
-            }
+            // Each pass keeps its own mark: the shadow pass runs first and used
+            // to clear the flag both of them read, so a model that moved was
+            // rebuilt into the shadow batch and left stale in this one.
+            moved = m.draw_stamp != m.world_stamp
+            m.draw_stamp = m.world_stamp
             b = batch_for(r, m)
             // Rebuilding four hundred matrices and re-uploading them is only
             // worth doing when the group is not what it was: a scene that has
@@ -1478,14 +1501,10 @@ render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
              light: *Light, cam: *Camera, transparent_pass: bool) {
     if m == null || !m.visible { return }
 
+    core.model_sync_transform(m)
     if core.frustum_culling() &&
        !core.frustum_sphere_visible(r.frustum, m.bounding_center, m.bounding_radius) {
         return
-    }
-
-    if m.is_dirty {
-        core.model_update_matrix(m)
-        m.is_dirty = false
     }
 
     program = r.default_program
@@ -1597,6 +1616,14 @@ set_frame_uniforms(r: *GLRenderer, slots: *ProgramSlots, view_projection: *Mat4,
     ae3d_gl_uniform_vec3(slots.view_pos, cam.position.x, cam.position.y, cam.position.z)
     ae3d_gl_uniform_float(slots.view_distance, core.camera_far(cam))
     ae3d_gl_uniform_float(slots.caustics_time, r.scene_time)
+
+    enabled = 0
+    if r.fog.enabled { enabled = 1 }
+    ae3d_gl_uniform_int(slots.fog_enabled, enabled)
+    ae3d_gl_uniform_float(slots.fog_start, r.fog.start)
+    ae3d_gl_uniform_float(slots.fog_end, r.fog.end)
+    ae3d_gl_uniform_vec3(slots.fog_color, r.fog.color.x, r.fog.color.y, r.fog.color.z)
+    ae3d_gl_uniform_float(slots.fog_intensity, r.fog.intensity)
 }
 
 // Every light the scene holds, capped at what the shader declares. The key light

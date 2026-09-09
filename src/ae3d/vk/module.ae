@@ -22,6 +22,7 @@ exports (
     renderer_model_count, renderer_model, renderer_light_count, renderer_light, renderer_draw_calls, renderer_set_clear_color,
     renderer_load_texture, renderer_release_texture, renderer_sample_count, renderer_set_post,
     renderer_set_shadows, renderer_shadows, renderer_add_light, renderer_remove_light,
+    renderer_set_fog, renderer_fog,
     skybox_create, skybox_free,
     offscreen_pixels, offscreen_width, offscreen_height,
     live_shadow_targets
@@ -118,6 +119,7 @@ struct VKRenderer {
     clear_r: float
     clear_g: float
     clear_b: float
+    fog: Fog
     scene_start: float
     scene_time: float
     defaults: ptr
@@ -170,6 +172,7 @@ renderer_new() -> *VKRenderer {
     r.shadow_space = core.mat4_ident()
     r.batches = list.new()
     r.batch_count = 0
+    r.fog = core.fog_none()
     r.scene_start = platform.time()
     r.scene_time = 0.0
     r.defaults = rendering.defaults_model() as ptr
@@ -227,6 +230,7 @@ backend(r: *VKRenderer) -> Backend {
         set_post: renderer_set_post as fn(ptr, int, int, float, float),
         set_render_scale: vtable_set_render_scale as fn(ptr, float) -> float,
         set_clear_color: renderer_set_clear_color as fn(ptr, float, float, float),
+        set_fog: renderer_set_fog as fn(ptr, ptr),
         set_shadows: vtable_set_shadows as fn(ptr, int),
         shadows: vtable_shadows as fn(ptr) -> int,
         add_light: renderer_add_light as fn(ptr, ptr),
@@ -369,10 +373,7 @@ render_shadow_pass(r: *VKRenderer, light: *Light) {
     while i < count {
         m = list.get_raw(r.models, i) as *Model
         if m != null && m.visible && m.casts_shadow && m.vbo != 0 {
-            if m.is_dirty {
-                core.model_update_matrix(m)
-                m.is_dirty = false
-            }
+            core.model_sync_transform(m)
             instances = 0
             if m.is_instanced { instances = core.model_instance_count(m) }
             ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &m.model_matrix)
@@ -590,6 +591,14 @@ write_frame_uniforms(r: *VKRenderer, light: *Light, cam: *Camera) {
     ae3d_vk_scene_set_clip_mat4(vkscene.OFF_LIGHTSPACEMATRIX, &r.shadow_space)
     ae3d_vk_scene_set_int(vkscene.OFF_HASSHADOWMAP, ae3d_vk_shadows())
     ae3d_vk_scene_set_float(vkscene.OFF_CAUSTICSTIME, r.scene_time)
+
+    fog_on = 0
+    if r.fog.enabled { fog_on = 1 }
+    ae3d_vk_scene_set_int(vkscene.OFF_ENABLEFOG, fog_on)
+    ae3d_vk_scene_set_float(vkscene.OFF_FOGSTART, r.fog.start)
+    ae3d_vk_scene_set_float(vkscene.OFF_FOGEND, r.fog.end)
+    ae3d_vk_scene_set_vec3(vkscene.OFF_FOGCOLOR, r.fog.color.x, r.fog.color.y, r.fog.color.z)
+    ae3d_vk_scene_set_float(vkscene.OFF_FOGINTENSITY, r.fog.intensity)
 
     // The water program predates the light array and reads one light from flat
     // names, the same four the OpenGL backend fills for it.
@@ -871,16 +880,14 @@ draw_opaque(r: *VKRenderer) {
     while i < count {
         m = list.get_raw(r.models, i) as *Model
         if batchable(m) {
+            core.model_sync_transform(m)
             if core.frustum_culling() &&
                !core.frustum_sphere_visible(r.frustum, m.bounding_center, m.bounding_radius) {
                 i = i + 1
                 continue
             }
-            moved = m.is_dirty
-            if m.is_dirty {
-                core.model_update_matrix(m)
-                m.is_dirty = false
-            }
+            moved = m.draw_stamp != m.world_stamp
+            m.draw_stamp = m.world_stamp
             b = batch_for(r, m)
             if b.count >= list.size(b.members) {
                 list.add_raw(b.members, m as ptr)
@@ -965,14 +972,10 @@ group_material(m: *Model, group: *MaterialGroup) -> *Material {
 draw_model(r: *VKRenderer, m: *Model, transparent_pass: bool) {
     if m == null || !m.visible || m.vbo == 0 { return }
 
+    core.model_sync_transform(m)
     if core.frustum_culling() &&
        !core.frustum_sphere_visible(r.frustum, m.bounding_center, m.bounding_radius) {
         return
-    }
-
-    if m.is_dirty {
-        core.model_update_matrix(m)
-        m.is_dirty = false
     }
 
     instances = 0
@@ -1075,6 +1078,17 @@ renderer_model(r: *VKRenderer, index: int) -> *Model {
 renderer_draw_calls(r: *VKRenderer) -> int {
     return r.last_draw_calls
 }
+
+renderer_set_fog(r: *VKRenderer, f: *Fog) {
+    if f == null { r.fog = core.fog_none() ; return }
+    r.fog.color = f.color
+    r.fog.start = f.start
+    r.fog.end = f.end
+    r.fog.intensity = f.intensity
+    r.fog.enabled = f.enabled
+}
+
+renderer_fog(r: *VKRenderer) -> Fog { return r.fog }
 
 renderer_set_clear_color(r: *VKRenderer, red: float, green: float, blue: float) {
     r.clear_r = red

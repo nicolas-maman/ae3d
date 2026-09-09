@@ -22,7 +22,7 @@ exports (
     engine_add_model, engine_remove_model, engine_set_light, engine_light,
     engine_camera, engine_window, engine_backend_name,
     engine_set_size, engine_set_title, engine_set_msaa, engine_set_decorated, engine_set_post,
-    engine_set_render_scale, engine_set_shadows, engine_shadows,
+    engine_set_render_scale, engine_set_shadows, engine_shadows, engine_set_fog, engine_fog,
     engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
     engine_set_skybox, engine_load_texture,
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
@@ -50,6 +50,7 @@ struct Engine {
     backend_update_viewport: fn(ptr, int, int)
     backend_set_post: fn(ptr, int, int, float, float)
     backend_set_shadows: fn(ptr, int)
+    backend_set_fog: fn(ptr, ptr)
     backend_shadows: fn(ptr) -> int
     backend_set_render_scale: fn(ptr, float) -> float
     backend_cleanup: fn(ptr)
@@ -69,6 +70,7 @@ struct Engine {
     vsync: int
     camera_input: bool
     shadows: bool
+    fog: Fog
 
     fixed_step: float
     fixed_accumulator: float
@@ -103,6 +105,7 @@ engine_new(api: int) -> *Engine {
     e.vsync = 1
     e.camera_input = true
     e.shadows = true
+    e.fog = core.fog_none()
     e.fixed_step = 1.0 / 60.0
     e.first_mouse = true
     e.frame_limit = frame_limit_from_env()
@@ -182,6 +185,7 @@ bind_backend(e: *Engine, b: Backend) {
     e.backend_set_skybox = b.set_skybox
     e.backend_set_post = b.set_post
     e.backend_set_shadows = b.set_shadows
+    e.backend_set_fog = b.set_fog
     e.backend_shadows = b.shadows
     e.backend_set_render_scale = b.set_render_scale
     e.backend_update_viewport = b.update_viewport
@@ -242,6 +246,16 @@ engine_set_shadows(e: *Engine, on: bool) {
 
 // What the backend managed rather than what was asked for: a device that could
 // not build the map reports false here.
+// The air the scene is seen through. Kept here rather than set straight
+// through, for the same reason shadows are: a backend has no device to hold it
+// on until the window is open.
+engine_set_fog(e: *Engine, f: Fog) {
+    e.fog = f
+    if e.running { e.backend_set_fog(e.backend_state, &e.fog) }
+}
+
+engine_fog(e: *Engine) -> Fog { return e.fog }
+
 engine_shadows(e: *Engine) -> bool {
     if !e.running { return e.shadows }
     return e.backend_shadows(e.backend_state) == 1
@@ -385,6 +399,7 @@ engine_start(e: *Engine, x: int, y: int) -> bool {
     }
 
     apply_shadows(e)
+    e.backend_set_fog(e.backend_state, &e.fog)
     e.camera = core.camera_new(e.width, e.height) as ptr
     platform.window_set_cursor_mode(e.window, platform.CURSOR_NORMAL)
     e.running = true

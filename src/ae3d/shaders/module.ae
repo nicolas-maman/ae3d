@@ -144,6 +144,15 @@ uniform bool enableBloom;
 uniform float bloomThreshold;
 uniform float bloomIntensity;
 
+// Distance haze. The same four names the water shader uses, because one scene
+// has one atmosphere: a street that fades into the dark has to fade the water
+// running down it by the same amount.
+uniform bool enableFog;
+uniform float fogStart;
+uniform float fogEnd;
+uniform vec3 fogColor;
+uniform float fogIntensity;
+
 // GPU Gems Chapter 9 & 11: Shadow Volume Support with Antialiasing
 uniform bool enableShadows;  // Enable shadow volume rendering
 uniform bool hasShadowMap;   // Whether the renderer bound a real shadow map
@@ -877,6 +886,14 @@ void main() {
     // Gamma correction (sRGB)
     color = pow(color, vec3(1.0/2.2));
     
+    // The air between the eye and the surface. After tone mapping and gamma,
+    // because fog is what is seen rather than another light in the scene: put
+    // in before them and the tone curve pulls the horizon back out again.
+    if (enableFog) {
+        float haze = smoothstep(fogStart, fogEnd, distanceToCamera) * fogIntensity;
+        color = mix(color, fogColor, clamp(haze, 0.0, 1.0));
+    }
+
     // Use material alpha for transparency
     float finalAlpha = texColor.a * materialAlpha;
     

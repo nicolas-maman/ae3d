@@ -47,13 +47,42 @@ import json
 import os
 import sys
 
-EXPORTER_VERSION = 1
+EXPORTER_VERSION = 2
 
 # Blender is Z-up, ae3d is Y-up. Every position, normal and translation key
 # goes through this, and it is the one conversion that has to be applied
 # consistently or a model arrives lying on its side.
 def to_y_up(x, y, z):
     return (x, z, -y)
+
+
+def local_transform(obj, exported_names):
+    """Where the object sits, relative to its parent, in ae3d's axes.
+
+    The mesh is written in its own local space, so without this every static
+    object arrives at the origin and a scene of thirty props is thirty props in
+    one pile. Blender's matrix_local is already relative to the parent and
+    already carries the parent inverse, so the decomposition is the transform
+    ae3d needs and nothing has to be undone afterwards.
+
+    A parent that is not itself exported cannot be composed onto, so the child
+    keeps its world transform instead of an offset from something absent.
+    """
+    parent = obj.parent
+    if parent is not None and parent.name in exported_names:
+        matrix = obj.matrix_local
+    else:
+        parent = None
+        matrix = obj.matrix_world
+
+    location, rotation, scale = matrix.decompose()
+    x, y, z = to_y_up(location.x, location.y, location.z)
+    qx, qy, qz = to_y_up(rotation.x, rotation.y, rotation.z)
+    return parent, {
+        "location": [rounded(x), rounded(y), rounded(z)],
+        "rotation": [rounded(qx), rounded(qy), rounded(qz), rounded(rotation.w)],
+        "scale": [rounded(scale.x), rounded(scale.z), rounded(scale.y)],
+    }
 
 
 def rounded(value, digits=6):
@@ -606,10 +635,13 @@ def main(argv):
 
     # Sorted, so the manifest is the same on every run and on every machine.
     meshes = sorted((o for o in scene.objects if o.type == "MESH"), key=lambda o: o.name)
-    for obj in meshes:
-        if args.only and obj.name != args.only:
-            continue
+    # Exporting one object exports one object: nothing else is there to be a
+    # parent of it.
+    if args.only:
+        meshes = [o for o in meshes if o.name == args.only]
+    exported_names = {o.name for o in meshes}
 
+    for obj in meshes:
         stem = obj.name
         obj_path = os.path.join(args.out, stem + ".obj")
         material = obj.data.materials[0] if obj.data.materials else None
@@ -633,9 +665,13 @@ def main(argv):
                 handle.write("\n")
             files["animation"] = os.path.basename(anim_path)
 
+        parent, transform = local_transform(obj, exported_names)
+
         records.append({
             "id": asset_id(source_name, obj.name),
             "object": obj.name,
+            "parent": parent.name if parent else "",
+            "transform": transform,
             "files": files,
             "vertices": vertices,
             "triangles": triangles,
