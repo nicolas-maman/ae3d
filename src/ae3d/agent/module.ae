@@ -243,6 +243,8 @@ help_result() -> ptr {
         "Keep the captured frame as the reference frame.diff compares against."))
     json.array_add_raw(ops, describe("frame.diff", "[tolerance]",
         "Changed pixel count, fraction and largest channel delta against the held reference."))
+    json.array_add_raw(ops, describe("world", "",
+        "Every entity and the relations between them: blend object, asset, model, mesh, clip, light, camera. One query instead of joining four."))
     json.array_add_raw(ops, describe("trace.model", "id | object | index",
         "Follow one model from its Blender object to the pixels: source, asset, mesh, node, animation, visibility. Names the stage it stopped being right at."))
     json.array_add_raw(ops, describe("anim.list", "",
@@ -637,6 +639,137 @@ model_screen_box(c: *Context, m: *Model, box: *Vec4) -> bool {
     box.z = radius * 2.0
     box.w = radius * 2.0
     return true
+}
+
+// --- the world ------------------------------------------------------------
+//
+// Entities and the relations between them, in one answer. The shape is a graph
+// because the thing being described is one: a Blender object exports to an
+// asset, which loads as a model, which holds a mesh, which a clip drives and a
+// camera sees. It is not a graph database. There are hundreds of entities, not
+// millions; they already live in memory in typed structures; and the queries an
+// agent asks are "what is next to this" rather than anything a query planner
+// would earn its keep on. Serving the whole graph costs one walk of the scene
+// and saves the client from joining four other ops by hand.
+
+entity(id: string, kind: string, name: string, attrs: ptr) -> ptr {
+    out = json.obj()
+    json.object_set_raw(out, "id", json.str(id))
+    json.object_set_raw(out, "kind", json.str(kind))
+    json.object_set_raw(out, "name", json.str(name))
+    if attrs != null { json.object_set_raw(out, "attrs", attrs) }
+    return out
+}
+
+relation(from: string, kind: string, to: string) -> ptr {
+    out = json.obj()
+    json.object_set_raw(out, "from", json.str(from))
+    json.object_set_raw(out, "rel", json.str(kind))
+    json.object_set_raw(out, "to", json.str(to))
+    return out
+}
+
+model_id(index: int) -> string {
+    return string.concat("model:", string.from_int(index))
+}
+
+world_result(c: *Context) -> ptr {
+    entities = json.arr()
+    relations = json.arr()
+
+    if c.camera != null {
+        cam = c.camera as *Camera
+        attrs = json.obj()
+        json.object_set_raw(attrs, "position", vec3_json(cam.position.x, cam.position.y, cam.position.z))
+        json.object_set_raw(attrs, "fov", json.num(cam.fov))
+        json.array_add_raw(entities, entity("camera", "camera", "camera", attrs))
+    }
+
+    count = model_count(c)
+    i = 0
+    while i < count {
+        m = model_at(c, i)
+        if m != null {
+            id = model_id(i)
+            attrs = json.obj()
+            json.object_set_raw(attrs, "position", vec3_json(m.position.x, m.position.y, m.position.z))
+            json.object_set_raw(attrs, "visible", json.boolean(m.visible))
+            json.array_add_raw(entities, entity(id, "model", core.text(m.name), attrs))
+
+            if m.mesh != null {
+                mesh_id = string.concat("mesh:", string.from_int(i))
+                mesh_attrs = json.obj()
+                json.object_set_raw(mesh_attrs, "vertices", json.from_int(core.mesh_vertex_count(m.mesh)))
+                json.object_set_raw(mesh_attrs, "triangles", json.from_int(core.mesh_index_count(m.mesh) / 3))
+                json.array_add_raw(entities, entity(mesh_id, "mesh", "", mesh_attrs))
+                json.array_add_raw(relations, relation(id, "has_mesh", mesh_id))
+            }
+            if c.camera != null { json.array_add_raw(relations, relation("camera", "sees", id)) }
+
+            p = assets.provenance_for(m)
+            if p != null {
+                blend_id = string.concat("blend:", assets.provenance_id(p))
+                asset_id = string.concat("asset:", assets.provenance_id(p))
+                blend_attrs = json.obj()
+                json.object_set_raw(blend_attrs, "source", json.str(core.text(assets.provenance_source(p))))
+                json.array_add_raw(entities,
+                    entity(blend_id, "blend_object", core.text(assets.provenance_object(p)), blend_attrs))
+                asset_attrs = json.obj()
+                json.object_set_raw(asset_attrs, "mesh", json.str(core.text(assets.provenance_mesh_file(p))))
+                json.object_set_raw(asset_attrs, "animation", json.str(core.text(assets.provenance_animation_file(p))))
+                json.object_set_raw(asset_attrs, "triangles", json.from_int(assets.provenance_expected_triangles(p)))
+                json.array_add_raw(entities, entity(asset_id, "asset", "", asset_attrs))
+                json.array_add_raw(relations, relation(blend_id, "exported_to", asset_id))
+                json.array_add_raw(relations, relation(asset_id, "loaded_as", id))
+            }
+        }
+        i = i + 1
+    }
+
+    registry = c.animations as *Registry
+    count = anim.registry_count(registry)
+    i = 0
+    while i < count {
+        b = anim.registry_binding(registry, i)
+        if b != null {
+            player = anim.binding_player(b)
+            clip = anim.player_clip(player)
+            clip_id = string.concat("clip:", core.text(anim.binding_name(b)))
+            attrs = json.obj()
+            json.object_set_raw(attrs, "clip", json.str(core.text(anim.clip_name(clip))))
+            json.object_set_raw(attrs, "time", json.num(anim.player_time(player)))
+            json.object_set_raw(attrs, "duration", json.num(anim.clip_duration(clip)))
+            json.object_set_raw(attrs, "playing", json.boolean(anim.player_playing(player)))
+            json.array_add_raw(entities,
+                entity(clip_id, "clip", core.text(anim.binding_name(b)), attrs))
+
+            driven = anim.binding_model(b)
+            target = node_index_of(c, driven)
+            if target >= 0 { json.array_add_raw(relations, relation(clip_id, "drives", model_id(target))) }
+        }
+        i = i + 1
+    }
+
+    count = light_count(c)
+    i = 0
+    while i < count {
+        l = light_at(c, i)
+        if l != null {
+            id = string.concat("light:", string.from_int(i))
+            attrs = json.obj()
+            json.object_set_raw(attrs, "color", vec3_json(l.color.x, l.color.y, l.color.z))
+            json.object_set_raw(attrs, "intensity", json.num(l.intensity))
+            json.array_add_raw(entities, entity(id, "light", core.text(l.name), attrs))
+            json.array_add_raw(relations, relation(id, "lights", "camera"))
+        }
+        i = i + 1
+    }
+
+    out = json.obj()
+    json.object_set_raw(out, "frame", json.from_int(c.frame_count))
+    json.object_set_raw(out, "entities", entities)
+    json.object_set_raw(out, "relations", relations)
+    return out
 }
 
 // --- animation ----------------------------------------------------------
@@ -1142,6 +1275,8 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
         answer(id, out)
         return false
     }
+
+    if op == "world" { answer(id, world_result(c)) return false }
 
     if op == "trace.model" {
         m = null
