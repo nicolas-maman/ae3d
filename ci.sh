@@ -190,6 +190,21 @@ for module in examples/lib/*/; do
     rm -f "$probe" "${probe%.ae}.c"
 done
 
+# The scripts an object can be given. They are built before the suites because
+# a script is a separate library the test opens at runtime rather than
+# something linked into it, which is the whole point of one.
+step "scripts"
+for script_source in resources/scripts/*.ae; do
+    [ -e "$script_source" ] || continue
+    script_name="$(basename "$script_source" .ae)"
+    if ./scripts/build_script.sh "$script_source" >/tmp/ae3d_script.log 2>&1; then
+        pass "script $script_name"
+    else
+        fail "script $script_name"
+        sed 's/^/        /' /tmp/ae3d_script.log | head -10
+    fi
+done
+
 step "test suites"
 for suite in tests/test_*.ae; do
     name="$(basename "$suite" .ae)"

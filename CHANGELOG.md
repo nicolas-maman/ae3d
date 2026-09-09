@@ -647,6 +647,19 @@ First working engine.
 
 ### Editor
 
+- A behaviour is a script you assign, not a case in the editor. It was four
+  hardcoded ones, so the editor knew how to spin, bob and orbit and a project
+  could have no others. A script is now an ordinary Aether source file in
+  `resources/scripts` with `script_update` in it, compiled into a shared
+  library and opened at runtime, and the buttons in the BEHAVIOUR section are
+  the files that are there: adding a behaviour is adding a file. Spin, bob and
+  orbit moved out of the editor into scripts of their own, so the editor no
+  longer contains any behaviour code.
+
+  The scene records the assignment by name and gives it back on load, and a
+  scene naming a script the project does not have gets none rather than a wrong
+  one.
+
 - A terrain is blocks or smooth, and voxels are one of the two rather than what
   a terrain is. Blocks draw a cube per filled cell; smooth meshes the same
   field into one surface, which the engine has been able to do since
