@@ -29,7 +29,7 @@ import urllib.request
 
 ACCENT = "#2e6eeb"
 # What a loadable library is called here, which the editor asks the loader for.
-LIB_SUFFIX = ".dylib" if sys.platform == "darwin" else ".so"
+LIB_SUFFIX = {"darwin": ".dylib", "win32": ".dll"}.get(sys.platform, ".so")
 FAILURES = []
 
 
@@ -913,8 +913,11 @@ def main():
             made = sorted(written(None))
             check("pressing it leaves a file to edit", bool(made), str(made))
             if made:
+                # Through bash by name: Windows will not execute a shell
+                # script as a program, and reports it as a file that is not a
+                # Win32 application, which is true and unhelpful.
                 built = subprocess.run(
-                    ["./scripts/build_script.sh",
+                    ["bash", "scripts/build_script.sh",
                      os.path.join(scripts_dir, made[0])],
                     capture_output=True, text=True)
                 check("and what it wrote compiles", built.returncode == 0,

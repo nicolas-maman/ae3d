@@ -3,6 +3,11 @@
 #
 #   ./build.sh examples/triangle.ae            -> build/triangle
 #   ./build.sh examples/triangle.ae demo       -> build/demo
+#   ./build.sh --natives                       -> build/obj only
+#
+# --natives compiles the C half and stops. A Windows script library has to be
+# linked against those objects rather than left to find them in its host, and
+# it cannot be the first thing built if they are not there yet.
 #
 # Module resolution is CWD-relative (src/ae3d/<module>/module.ae), so the
 # compiler always runs from the repository root regardless of where the caller
@@ -12,6 +17,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
+
+NATIVES_ONLY=0
+if [ "${1:-}" = "--natives" ]; then
+    NATIVES_ONLY=1
+    shift
+    set -- "build.sh" ""
+fi
 
 SOURCE="${1:?usage: build.sh <source.ae> [output-name]}"
 NAME="$(basename "${2:-$(basename "$SOURCE" .ae)}")"
@@ -162,6 +174,11 @@ for src in $NATIVE_SOURCES; do
         "$CC" -c $CFLAGS $WARN $extra $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o "$obj"
     fi
 done
+
+if [ "$NATIVES_ONLY" = 1 ]; then
+    echo "built: $OBJ_DIR"
+    exit 0
+fi
 
 # Two module trees. ae3d.* is the engine, under src/. examples/lib/ is shared
 # code belonging to the examples themselves -- a black hole renderer is a tech
