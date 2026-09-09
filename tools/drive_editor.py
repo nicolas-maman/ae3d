@@ -662,6 +662,12 @@ def main():
                 check("smoothing one gives it a surface of its own", ok,
                       "%d triangles then %d" % (blocky, triangles(widgets)))
 
+        # Two objects selected at once is checked by the editor's own report,
+        # not here: the test server clicks without modifiers and ui.modifiers()
+        # reads the real keyboard, so a shift-click cannot be driven over HTTP.
+        # The report calls the selection routine directly with the intent a
+        # modifier would have carried, and asserts an edit reaches both.
+
         # A behaviour is a script the project has, not a case in the editor.
         # The buttons are the files in resources/scripts, so this reads the
         # names off disk rather than expecting any particular one: adding a

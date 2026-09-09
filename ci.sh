@@ -29,20 +29,6 @@ for candidate in python3 python "py -3"; do
     if $candidate -c "" >/dev/null 2>&1; then PYTHON="$candidate"; break; fi
 done
 
-# A backstop, so a suite that hangs fails its own step instead of the run: the
-# Linux leg has sat in one for hours with nothing to say which. GNU coreutils
-# calls it timeout and Homebrew's calls it gtimeout; where there is neither
-# there is no backstop, which is what there was before.
-BOUND=""
-for candidate in timeout gtimeout; do
-    if command -v "$candidate" >/dev/null 2>&1; then BOUND="$candidate"; break; fi
-done
-bounded() {   # bounded <seconds> <command> [args...]
-    seconds="$1"
-    shift
-    if [ -n "$BOUND" ]; then "$BOUND" "$seconds" "$@"; else "$@"; fi
-}
-
 have_display() {
     case "$(uname -s)" in
         Darwin) return 0 ;;
@@ -50,6 +36,18 @@ have_display() {
         *) [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ] ;;
     esac
 }
+
+# A suite, example or benchmark that hangs should fail this step by name rather
+# than stall the job until the runner's own six-hour limit: one did, on Linux,
+# for three and a half hours, and the log said nothing at all. Not every
+# platform ships coreutils' timeout, so where it is missing the run is
+# unguarded, exactly as it was before.
+if command -v timeout >/dev/null 2>&1; then
+    bounded() { timeout "$@"; }
+else
+    bounded() { shift; "$@"; }
+fi
+RUN_LIMIT="${AE3D_CI_RUN_LIMIT:-300}"
 
 step "platform link libraries"
 # Every host this can be built on, checked from any host. Windows had no arm
@@ -266,10 +264,11 @@ for suite in tests/test_*.ae; do
         skip "$name" "no display"
         continue
     fi
-    output="$(AE3D_FRAMES="$FRAMES" bounded 300 ./build/"$name" 2>&1)"
+    output="$(AE3D_FRAMES="$FRAMES" bounded "$RUN_LIMIT" ./build/"$name" 2>&1)"
     suite_status=$?
     if [ "$suite_status" -eq 124 ]; then
-        fail "$name (still running after 300s)"
+        fail "$name (still running after ${RUN_LIMIT}s)"
+        printf '%s\n' "$output" | sed 's/^/        /' | tail -10
     elif [ "$suite_status" -ne 0 ]; then
         fail "$name"
         printf '%s\n' "$output" | sed 's/^/        /' | head -20
@@ -302,10 +301,10 @@ for example in examples/*.ae; do
         skip "$name" "no display"
         continue
     fi
-    AE3D_FRAMES="$FRAMES" bounded 300 ./build/"$name" >/tmp/ae3d_run.log 2>&1
+    AE3D_FRAMES="$FRAMES" bounded "$RUN_LIMIT" ./build/"$name" >/tmp/ae3d_run.log 2>&1
     example_status=$?
     if [ "$example_status" -eq 124 ]; then
-        fail "$name (still running after 300s)"
+        fail "$name (still running after ${RUN_LIMIT}s)"
         sed 's/^/        /' /tmp/ae3d_run.log | tail -10
     elif [ "$example_status" -eq 0 ]; then
         pass "$name"
@@ -340,7 +339,7 @@ check_editor_run() {
     AE3D_EDITOR_SCENE="$editor_scene" \
     AE3D_EDITOR_SNAPSHOT="$snapshot" \
     AE3D_EDITOR_REPORT="$report" \
-        bounded 90 ./build/ae3d_editor >"$log" 2>&1
+        timeout 90 ./build/ae3d_editor >"$log" 2>&1
     status=$?
     if grep -q 'no Vulkan driver' "$log"; then
         skip "$name" "$(sed -n 's/.*no Vulkan driver (\(.*\)),.*/\1/p' "$log" | head -1)"
@@ -389,6 +388,13 @@ check_editor_run() {
         # chip beside them is the only place it appears. A chip that is never
         # painted looks exactly like one showing a dark material.
         fail "$name (the colour chip is not the material's colour)"
+        sed 's/^/        /' "$report"
+    elif [ "$(sed -n 's/^unreached_by_edit //p' "$report")" != "0" ]; then
+        # An edit reaches everything selected, not just the row the inspector
+        # happens to be showing. The property paths always wrote to the set;
+        # nothing could put two things in it until the toolkit could report a
+        # modifier, so nothing had ever checked the second one was written to.
+        fail "$name (an edit did not reach every selected object)"
         sed 's/^/        /' "$report"
     elif [ "$(sed -n 's/^unundone_scripts //p' "$report")" != "0" ]; then
         # Attaching a behaviour that records nothing leaves the next undo to
@@ -566,11 +572,7 @@ for bench in benchmarks/bench_*.ae; do
         fail "$name (build warnings)"
         continue
     fi
-    output="$(bounded 600 ./build/"$name" 2>&1)"
-    bench_status=$?
-    if [ "$bench_status" -eq 124 ]; then
-        fail "$name (still running after 600s)"
-    elif [ "$bench_status" -eq 0 ]; then
+    if output="$(bounded "$RUN_LIMIT" ./build/"$name" 2>&1)"; then
         pass "$name"
         printf '%s\n' "$output" | sed 's/^/        /'
     else
@@ -612,7 +614,7 @@ elif command -v leaks >/dev/null 2>&1; then
         # this binary. That is what lets the suites using ae3d.engine be
         # checked at all: they were skipped wholesale for opening a window, and
         # the exclusion was hiding a lost model in each of them.
-        output="$(MallocStackLogging=1 leaks --atExit -- "./build/$name" 2>&1)"
+        output="$(MallocStackLogging=1 bounded "$RUN_LIMIT" leaks --atExit -- "./build/$name" 2>&1)"
         report="$(printf '%s' "$output" | grep -o '[0-9]* leaks for [0-9]* total leaked bytes' | tail -1)"
         lost="$(printf '%s' "$output" | awk -v bin="$name" '
             /^STACK OF /   { inblock = (index($0, "ROOT LEAK") > 0); ours = 0; next }
