@@ -20,8 +20,20 @@ engine, to Aether and C. See [Credits](#credits).
   `core.set_draw_merging(false)` turns it off, which is how those two numbers
   are measured.
 - **Shadow mapping** in both backends: the light draws the scene into a depth
-  map sized to the scene, and the lit pass compares against it over a 3x3
-  neighbourhood with a slope-scaled bias.
+  map, and the lit pass compares against it over a 3x3 neighbourhood, offset
+  along the surface by the width of one texel rather than pushed into the
+  depth -- enough depth bias to stop a grazing wall striping itself is enough
+  to lift every shadow off the ground with it. The map is fitted to the scene,
+  or to `engine_set_shadow_distance` metres around the camera: a ground plane
+  ninety metres across spreads a scene-fitted map until nothing standing on it
+  casts anything.
+- **Models hang off each other.** A model keeps its own position, rotation and
+  scale and composes them onto its parent's, so a figure built from parts bends
+  at its joints instead of coming apart. Bounds follow, so culling and picking
+  follow a child that moved because something above it did.
+- **Fog** belongs to the scene rather than to each model: a colour and the
+  distance over which the picture fades into it, applied after tone mapping so
+  the colour asked for is the colour that arrives.
 - **Vulkan**, windowed and offscreen, on a loader opened at runtime. Nothing
   links against Vulkan, so a program built with this backend still starts where
   no driver exists and says so. It runs the same feature set as OpenGL, and
@@ -112,22 +124,32 @@ blender_pipeline: showcase.blend exported by Blender 5.2.1 LTS
 blender_pipeline: playing 'OrbAction', 1.95833s, 2 channels
 ```
 
-`examples/zombie_street.ae` is the same pipeline at scale: a street and a
-zombie, 31 objects out of one `.blend`, eleven of them animated. The zombie is
-rigid parts rather than a skinned mesh, because ae3d has no skinning
-(ae3d#192), so each limb carries its own world-space clip and the walk and the
-lunge are keyframed maths.
+`examples/zombie_street.ae` is the same pipeline at scale: a night street and
+a zombie, 40 objects out of one `.blend`, sixteen of them animated, every
+surface carrying an image authored beside it. The zombie is rigid parts rather
+than a skinned mesh, because ae3d has no skinning (ae3d#192); the parts hang
+off each other, so a clip is a rotation about a joint and the hierarchy carries
+each limb through the arc of the one above it.
 
-Seeking every part to the same time and reading the transforms back shows the
-attack as numbers rather than as an impression:
+`scripts/measure_scene.py` drives a running scene over the agent channel and
+says what it found, which is how the picture is checked rather than looked at:
 
 ```
-phase        torso_x  hand_x  hand_y
-walk 1.0s      1.100   1.800   1.462
-walk 2.5s      2.750   3.450   1.378
-STRIKE 3.5s    3.931   4.968   0.833     <- lunges forward, hand swings down
-recover 4.5s   4.750   5.450   1.378
+opengl, 66 draws, shadows True, fog True, 3 lights
+  ok   every model in view traces through to pixels (37 of 40)
+  ok   every image a material names was loaded (37 textured materials)
+  brick     WallBrick    r=0.344 g=0.234 b=0.192  r/g=1.47  covers 48%
+  concrete  WallConcrete r=0.455 g=0.385 b=0.326  r/g=1.18  covers 53%
+  skin      ZombieSkin   r=0.329 g=0.296 b=0.179  g/b=1.65  covers 62%
+  ok   the same camera draws the same frame (0 pixels of 921600)
+  ok   half a millimetre sideways moves almost nothing (0.000% of the frame)
+  ok   seeking changes the picture (4.29%), and the hand moves 151 pixels
 ```
+
+Two faces in one plane are what z-fighting is, so
+`tools/blender/check_coplanar.py` reads the exported scene back with the
+transforms the manifest recorded and asks whether any pair shares a plane and
+overlaps there. `ci.sh` asks it of every exported scene.
 
 Started with `AE3D_AGENT` it can be driven while it runs, which is how the
 easing above is checked against the curve rather than against a screenshot:
@@ -274,7 +296,7 @@ everything else.
 | `particle_disc.ae` | The same scene as an N-body: 200000 particles under Verlet integration in one instanced draw, coloured per instance |
 | `sand.ae` | 250000 grains falling and settling, click to scatter them |
 | `blender_pipeline.ae` | A model authored and keyed in Blender, exported, loaded and played |
-| `zombie_street.ae` | A zombie walking a street and attacking, 31 objects from one .blend |
+| `zombie_street.ae` | A zombie walking a night street and attacking, 40 textured objects from one .blend |
 | `smooth_terrain.ae` | The same terrain meshed with surface nets, 67590 triangles |
 
 ### Examples as instruments
