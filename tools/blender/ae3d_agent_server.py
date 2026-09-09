@@ -81,7 +81,8 @@ def object_brief(obj):
         "rotation_mode": obj.rotation_mode,
         "scale": list(obj.scale),
         "animated": bool(obj.animation_data and obj.animation_data.action),
-        "hidden": not obj.visible_get() if obj.name in bpy.context.view_layer.objects else None,
+        "hide_viewport": obj.hide_viewport,
+        "hide_render": obj.hide_render,
     }
 
 

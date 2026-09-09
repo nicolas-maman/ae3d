@@ -44,7 +44,6 @@ import bpy
 import argparse
 import hashlib
 import json
-import math
 import os
 import sys
 
