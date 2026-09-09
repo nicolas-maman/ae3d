@@ -647,6 +647,27 @@ First working engine.
 
 ### Editor
 
+- A script can set itself up. `script_start` runs once when a script is
+  attached, on the object it was given, which is what a script that needs to
+  know the size or place it started from has to have: measuring it every frame
+  measures its own last answer. `resources/scripts/pulse.ae` uses it.
+
+- A script rebuilt while the editor is open is picked up. The editor compiles
+  nothing; it watches the library the build step writes, waits for it to stop
+  changing so a half-written one is never opened, and starts the script again
+  on everything carrying it. Watching the library rather than the source is
+  what leaves the last good behaviour running when a save has an error in it.
+
+- **New script** writes a template into `resources/scripts` and says where it
+  went. The shape of a script is a thing to be given rather than remembered,
+  and the driver builds whatever the button writes, because a starter template
+  that does not compile is worse than none.
+
+- The check that a script moves what it is attached to counts every way a
+  script can move something. It compared position and one component of the
+  rotation, both of which a script that scales leaves alone, so `pulse` was
+  reported as doing nothing at all.
+
 - A behaviour is a script you assign, not a case in the editor. It was four
   hardcoded ones, so the editor knew how to spin, bob and orbit and a project
   could have no others. A script is now an ordinary Aether source file in

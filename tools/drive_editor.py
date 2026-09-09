@@ -17,6 +17,7 @@ Exits non-zero with a line saying what failed.
 """
 
 import argparse
+import glob
 import json
 import os
 import subprocess
@@ -27,6 +28,8 @@ import urllib.error
 import urllib.request
 
 ACCENT = "#2e6eeb"
+# What a loadable library is called here, which the editor asks the loader for.
+LIB_SUFFIX = ".dylib" if sys.platform == "darwin" else ".so"
 FAILURES = []
 
 
@@ -651,7 +654,8 @@ def main():
         # names off disk rather than expecting any particular one: adding a
         # script is adding a file, and this check should not need editing when
         # someone does.
-        on_disk = sorted(name[:-3] for name in os.listdir("resources/scripts")
+        scripts_dir = "resources/scripts"
+        on_disk = sorted(name[:-3] for name in os.listdir(scripts_dir)
                          if name.endswith(".ae"))
         widgets = tree(args.port)
         buttons = {w["text"].strip() for w in widgets.values() if w["type"] == "button"}
@@ -878,6 +882,49 @@ def main():
                     check("a setting survives the scene file",
                           moved == "3.00" and restored == "9.25",
                           "changed to %s, came back as %s" % (moved, restored))
+
+        # New script writes a file that compiles. A template that does not is
+        # worse than none: the first thing anyone does with it is build it, and
+        # a first script is mostly a guess at what the two functions are called.
+        widgets = tree(args.port)
+        new_button = find(widgets, "button", "New script")
+        check("the editor can write a new script", new_button is not None)
+        if new_button is not None:
+            before_files = set(os.listdir(scripts_dir))
+            post(args.port, "/widget/%d/click" % new_button)
+
+            def written(_ws):
+                return set(os.listdir(scripts_dir)) - before_files
+
+            widgets, ok = wait_for(args.port, written)
+            made = sorted(written(None))
+            check("pressing it leaves a file to edit", bool(made), str(made))
+            if made:
+                built = subprocess.run(
+                    ["./scripts/build_script.sh",
+                     os.path.join(scripts_dir, made[0])],
+                    capture_output=True, text=True)
+                check("and what it wrote compiles", built.returncode == 0,
+                      built.stderr.strip().splitlines()[-1:] or "")
+                os.remove(os.path.join(scripts_dir, made[0]))
+                for leftover in glob.glob("build/scripts/%s.*" % made[0][:-3]):
+                    os.remove(leftover)
+
+        # A script rebuilt while the editor is open is picked up without
+        # restarting it. The editor compiles nothing: the same step that built
+        # the script builds it again, and the editor notices the library.
+        widgets = tree(args.port)
+        if on_disk:
+            target = os.path.join("build", "scripts", on_disk[0] + LIB_SUFFIX)
+            if os.path.exists(target):
+                os.utime(target, None)
+
+                def reloaded(ws):
+                    return any(w["type"] == "text" and "reloaded" in w["text"]
+                               for w in ws.values())
+
+                widgets, saw = wait_for(args.port, reloaded, seconds=15.0)
+                check("a rebuilt script is picked up while the editor runs", saw)
 
         # A scene remembers which script each object was given, by name. That
         # is what makes an assignment worth making: the editor knows nothing
