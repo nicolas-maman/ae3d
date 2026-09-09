@@ -29,7 +29,12 @@ exports (
     entry_id, entry_object, entry_mesh, entry_material, entry_animation,
     entry_vertices, entry_triangles,
     entry_load_model, entry_load_clip,
-    clip_load, last_error
+    clip_load, last_error,
+    Provenance, provenance_record, provenance_for, provenance_by_id,
+    provenance_by_object, provenance_count, provenance_at, provenance_model,
+    provenance_id, provenance_object, provenance_source, provenance_mesh_file,
+    provenance_animation_file, provenance_expected_vertices,
+    provenance_expected_triangles
 )
 
 // One exported object, as the manifest describes it.
@@ -321,6 +326,8 @@ entry_load_model(m: *Manifest, e: *Entry) -> *Model {
     // The name the exporter knew it by, so a scene walked over the channel
     // reports something a person can match to Blender.
     core.model_set_name(model, e.object)
+    provenance_record(model, e.id, e.object, m.source, e.mesh, e.animation,
+                      e.vertices, e.triangles)
     return model
 }
 
@@ -406,4 +413,142 @@ clip_load(path: string) -> *Clip {
 
     json.free(root)
     return clip
+}
+
+// --- provenance ---------------------------------------------------------
+//
+// What a model in a running scene came from. Recorded when it is loaded and
+// looked up by the trace, which is the only reason any of it exists: without
+// this, a model in the renderer is a mesh and a transform with no way back to
+// the Blender object that was meant to produce it.
+//
+// A flat list keyed on the model pointer. Scenes hold hundreds of models, not
+// millions, and this is walked when an agent asks rather than per frame.
+
+struct Provenance {
+    model: *Model
+    id: string
+    object: string
+    source: string
+    mesh_file: string
+    animation_file: string
+    expected_vertices: int
+    expected_triangles: int
+}
+
+var g_provenance: ptr = null
+
+provenance_table() -> ptr {
+    if g_provenance == null { g_provenance = list.new() }
+    return g_provenance
+}
+
+// Called by entry_load_model. Also public, so a program that builds a model
+// some other way can still say where it came from.
+provenance_record(m: *Model, id: string, object: string, source: string,
+                  mesh_file: string, animation_file: string,
+                  vertices: int, triangles: int) {
+    if m == null { return }
+    // Copied, not borrowed. These arrive as an Entry's fields, and freeing a
+    // heap struct runs a destructor that frees the heap strings in it, so a
+    // manifest_free after loading left every one of these dangling.
+    p = heap.new(Provenance)
+    p.model = m
+    p.id = string.copy(id)
+    p.object = string.copy(object)
+    p.source = string.copy(source)
+    p.mesh_file = string.copy(mesh_file)
+    p.animation_file = string.copy(animation_file)
+    p.expected_vertices = vertices
+    p.expected_triangles = triangles
+    list.add_raw(provenance_table(), p as ptr)
+}
+
+provenance_for(m: *Model) -> *Provenance {
+    if m == null { return null }
+    table = provenance_table()
+    i = 0
+    count = list.size(table)
+    while i < count {
+        p = list.get_raw(table, i) as *Provenance
+        if p != null && p.model == m { return p }
+        i = i + 1
+    }
+    return null
+}
+
+// By the id the exporter derived. This is the handle an agent is given when it
+// is asked to find out why a particular Blender object is not on screen.
+provenance_by_id(id: string) -> *Provenance {
+    table = provenance_table()
+    i = 0
+    count = list.size(table)
+    while i < count {
+        p = list.get_raw(table, i) as *Provenance
+        if p != null && p.id == id { return p }
+        i = i + 1
+    }
+    return null
+}
+
+provenance_by_object(name: string) -> *Provenance {
+    table = provenance_table()
+    i = 0
+    count = list.size(table)
+    while i < count {
+        p = list.get_raw(table, i) as *Provenance
+        if p != null && p.object == name { return p }
+        i = i + 1
+    }
+    return null
+}
+
+provenance_count() -> int {
+    return list.size(provenance_table())
+}
+
+provenance_at(index: int) -> *Provenance {
+    table = provenance_table()
+    if index < 0 || index >= list.size(table) { return null }
+    return list.get_raw(table, index) as *Provenance
+}
+
+provenance_model(p: *Provenance) -> *Model {
+    if p == null { return null }
+    return p.model
+}
+
+provenance_id(p: *Provenance) -> string {
+    if p == null { return "" }
+    return p.id
+}
+
+provenance_object(p: *Provenance) -> string {
+    if p == null { return "" }
+    return p.object
+}
+
+provenance_source(p: *Provenance) -> string {
+    if p == null { return "" }
+    return p.source
+}
+
+provenance_mesh_file(p: *Provenance) -> string {
+    if p == null { return "" }
+    return p.mesh_file
+}
+
+provenance_animation_file(p: *Provenance) -> string {
+    if p == null { return "" }
+    return p.animation_file
+}
+
+provenance_expected_vertices(p: *Provenance) -> int {
+    if p == null { return 0 }
+    return p.expected_vertices
+}
+
+provenance_expected_triangles(p: *Provenance) -> int {
+    if p == null { return 0 }
+    return p.expected_triangles
 }

@@ -31,6 +31,7 @@ import ae3d.core
 import ae3d.gl
 import ae3d.vk
 import ae3d.anim
+import ae3d.assets
 
 exports (
     Context, context_new, context_free,
@@ -188,6 +189,8 @@ help_result() -> ptr {
         "Every model the renderer holds: index, name, position and visibility."))
     json.array_add_raw(ops, describe("model.get", "index",
         "One model in full: transform, bounds, material and mesh counts."))
+    json.array_add_raw(ops, describe("trace.model", "id | object | index",
+        "Follow one model from its Blender object to the pixels: source, asset, mesh, node, animation, visibility. Names the stage it stopped being right at."))
     json.array_add_raw(ops, describe("anim.list", "",
         "Every animation bound to a model: clip, playhead, duration, speed and the pose it produced."))
     json.array_add_raw(ops, describe("anim.get", "name | index",
@@ -365,6 +368,241 @@ binding_from(c: *Context, request: ptr) -> int {
     return -1
 }
 
+// --- the trace ----------------------------------------------------------
+//
+// One model, followed through every stage between the .blend it was authored
+// in and the pixels it should have produced. The point is not to report that
+// something is wrong -- the client already knows that, which is why it asked --
+// but to name the stage at which it stopped being right.
+//
+// Every stage reports `reached`, and the first one that is not is the answer.
+// A stage that cannot be judged says so rather than claiming to pass: a model
+// with no provenance has an unknown source, not a good one.
+
+stage(name: string, reached: bool, detail: ptr) -> ptr {
+    out = json.obj()
+    json.object_set_raw(out, "stage", json.str(name))
+    json.object_set_raw(out, "reached", json.boolean(reached))
+    json.object_set_raw(out, "applicable", json.boolean(true))
+    if detail != null { json.object_set_raw(out, "detail", detail) }
+    return out
+}
+
+// A stage that does not apply to this model. Not a pass and not a failure: a
+// cube built by loader.cube has no Blender object behind it and never will,
+// and blaming its "source" would send an agent looking for an export that was
+// never meant to exist.
+not_applicable(name: string, detail: ptr) -> ptr {
+    out = json.obj()
+    json.object_set_raw(out, "stage", json.str(name))
+    json.object_set_raw(out, "reached", json.boolean(false))
+    json.object_set_raw(out, "applicable", json.boolean(false))
+    if detail != null { json.object_set_raw(out, "detail", detail) }
+    return out
+}
+
+// Where the model sits in the renderer's list, or -1 when the renderer has
+// never been given it. A model that was loaded and never added is invisible for
+// a reason no amount of looking at the scene will show.
+node_index_of(c: *Context, m: *Model) -> int {
+    count = model_count(c)
+    i = 0
+    while i < count {
+        if model_at(c, i) == m { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+binding_index_of(c: *Context, m: *Model) -> int {
+    registry = c.animations as *Registry
+    count = anim.registry_count(registry)
+    i = 0
+    while i < count {
+        b = anim.registry_binding(registry, i)
+        if b != null && anim.binding_model(b) == m { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// What the camera can and cannot see of this model, computed here rather than
+// read from the renderer. The renderer knows whether it drew something; it does
+// not know why it did not, and "behind the camera" and "outside the frustum"
+// and "on screen but a third of a pixel across" are three different bugs.
+visibility_detail(c: *Context, m: *Model, reached: ptr) -> bool {
+    if c.camera == null {
+        json.object_set_raw(reached, "camera", json.boolean(false))
+        return false
+    }
+    cam = c.camera as *Camera
+
+    frustum = core.frustum_new()
+    core.camera_fill_frustum(cam, frustum)
+    inside = core.frustum_intersects_sphere(frustum as *Frustum,
+                                            m.bounding_center, m.bounding_radius)
+    core.frustum_free(frustum)
+
+    screen = core.camera_world_to_screen(cam, m.bounding_center, c.width, c.height)
+    // w is the clip-space depth: at or behind the eye there is no projection to
+    // speak of, and the x and y would be meaningless numbers rather than absent
+    // ones.
+    in_front = screen.w > 0.0001
+
+    json.object_set_raw(reached, "in_frustum", json.boolean(inside))
+    json.object_set_raw(reached, "in_front_of_camera", json.boolean(in_front))
+    json.object_set_raw(reached, "bounding_radius", json.num(m.bounding_radius))
+    if in_front {
+        json.object_set_raw(reached, "screen_x", json.num(screen.x))
+        json.object_set_raw(reached, "screen_y", json.num(screen.y))
+        on_screen = screen.x >= 0.0 && screen.y >= 0.0 &&
+                    screen.x <= (c.width * 1.0) && screen.y <= (c.height * 1.0)
+        json.object_set_raw(reached, "on_screen", json.boolean(on_screen))
+        return inside && on_screen
+    }
+    return false
+}
+
+trace_result(c: *Context, m: *Model, p: *Provenance) -> ptr {
+    stages = json.arr()
+    broke_at = ""
+
+    // 1. the Blender object it was authored as
+    source = json.obj()
+    source_ok = p != null
+    if source_ok {
+        json.object_set_raw(source, "id", json.str(core.text(assets.provenance_id(p))))
+        json.object_set_raw(source, "object", json.str(core.text(assets.provenance_object(p))))
+        json.object_set_raw(source, "blend", json.str(core.text(assets.provenance_source(p))))
+    } else {
+        json.object_set_raw(source, "note",
+            json.str("this model was not loaded from a manifest, so it has no Blender source"))
+    }
+    if source_ok {
+        json.array_add_raw(stages, stage("source", true, source))
+    } else {
+        json.array_add_raw(stages, not_applicable("source", source))
+    }
+
+    // 2. the files the exporter wrote for it
+    asset = json.obj()
+    asset_ok = true
+    if p != null {
+        json.object_set_raw(asset, "mesh_file", json.str(core.text(assets.provenance_mesh_file(p))))
+        json.object_set_raw(asset, "animation_file",
+            json.str(core.text(assets.provenance_animation_file(p))))
+        json.object_set_raw(asset, "exported_vertices",
+            json.from_int(assets.provenance_expected_vertices(p)))
+        json.object_set_raw(asset, "exported_triangles",
+            json.from_int(assets.provenance_expected_triangles(p)))
+        asset_ok = assets.provenance_mesh_file(p) != ""
+    } else {
+        asset_ok = false
+    }
+    // Only judged when there is an export to judge it against. An asset stage
+    // that fails for a model that never had one is noise.
+    if p == null {
+        json.object_set_raw(asset, "note",
+            json.str("no manifest entry, so there are no exported files to check"))
+        json.array_add_raw(stages, not_applicable("asset", asset))
+    } else {
+        json.array_add_raw(stages, stage("asset", asset_ok, asset))
+        if !asset_ok && broke_at == "" { broke_at = "asset" }
+    }
+
+    // 3. the mesh that was actually loaded, against what the exporter claimed
+    mesh = json.obj()
+    mesh_ok = m.mesh != null
+    if mesh_ok {
+        vertices = core.mesh_vertex_count(m.mesh)
+        indices = core.mesh_index_count(m.mesh)
+        json.object_set_raw(mesh, "vertex_count", json.from_int(vertices))
+        json.object_set_raw(mesh, "index_count", json.from_int(indices))
+        json.object_set_raw(mesh, "triangles", json.from_int(indices / 3))
+        mesh_ok = vertices > 0 && indices > 0
+        // The exporter's triangle count is the one number that must survive
+        // the round trip. OBJ re-indexes vertices, so those legitimately
+        // differ; triangles do not.
+        if p != null && assets.provenance_expected_triangles(p) > 0 {
+            agreed = (indices / 3) == assets.provenance_expected_triangles(p)
+            json.object_set_raw(mesh, "matches_export", json.boolean(agreed))
+            if !agreed { mesh_ok = false }
+        }
+    } else {
+        json.object_set_raw(mesh, "note", json.str("the model holds no mesh"))
+    }
+    json.array_add_raw(stages, stage("mesh", mesh_ok, mesh))
+    if !mesh_ok && broke_at == "" { broke_at = "mesh" }
+
+    // 4. whether the renderer was ever given it
+    node = json.obj()
+    index = node_index_of(c, m)
+    node_ok = index >= 0
+    json.object_set_raw(node, "index", json.from_int(index))
+    json.object_set_raw(node, "visible_flag", json.boolean(m.visible))
+    json.object_set_raw(node, "position", vec3_json(m.position.x, m.position.y, m.position.z))
+    json.object_set_raw(node, "scale", vec3_json(m.scale.x, m.scale.y, m.scale.z))
+    if !node_ok {
+        json.object_set_raw(node, "note",
+            json.str("the renderer has never been given this model; engine_add_model was not called"))
+    }
+    if node_ok && !m.visible {
+        node_ok = false
+        json.object_set_raw(node, "note", json.str("the model is in the scene but marked invisible"))
+    }
+    json.array_add_raw(stages, stage("node", node_ok, node))
+    if !node_ok && broke_at == "" { broke_at = "node" }
+
+    // 5. the animation driving it, if any
+    animation = json.obj()
+    binding = binding_index_of(c, m)
+    animated = binding >= 0
+    animation_ok = true
+    json.object_set_raw(animation, "bound", json.boolean(animated))
+    if animated {
+        b = anim.registry_binding(c.animations as *Registry, binding)
+        player = anim.binding_player(b)
+        clip = anim.player_clip(player)
+        json.object_set_raw(animation, "name", json.str(core.text(anim.binding_name(b))))
+        json.object_set_raw(animation, "clip", json.str(core.text(anim.clip_name(clip))))
+        json.object_set_raw(animation, "time", json.num(anim.player_time(player)))
+        json.object_set_raw(animation, "duration", json.num(anim.clip_duration(clip)))
+        json.object_set_raw(animation, "playing", json.boolean(anim.player_playing(player)))
+        json.object_set_raw(animation, "channels", json.from_int(anim.clip_channel_count(clip)))
+        // A clip with no channels drives nothing, which looks exactly like a
+        // model that is not animated except that something meant it to be.
+        if anim.clip_channel_count(clip) == 0 {
+            animation_ok = false
+            json.object_set_raw(animation, "note",
+                json.str("bound to a clip with no channels, so it drives nothing"))
+        }
+    } else if p != null && assets.provenance_animation_file(p) != "" {
+        // The export produced a clip and nothing in the scene is playing it.
+        animation_ok = false
+        json.object_set_raw(animation, "note",
+            json.str("the export carries an animation for this object but nothing is playing it"))
+    }
+    json.array_add_raw(stages, stage("animation", animation_ok, animation))
+    if !animation_ok && broke_at == "" { broke_at = "animation" }
+
+    // 6. whether the camera can see it at all
+    visible = json.obj()
+    visible_ok = visibility_detail(c, m, visible)
+    json.array_add_raw(stages, stage("visibility", visible_ok, visible))
+    if !visible_ok && broke_at == "" { broke_at = "visibility" }
+
+    out = json.obj()
+    json.object_set_raw(out, "name", json.str(core.text(m.name)))
+    json.object_set_raw(out, "stages", stages)
+    if broke_at == "" {
+        json.object_set_raw(out, "ok", json.boolean(true))
+    } else {
+        json.object_set_raw(out, "ok", json.boolean(false))
+        json.object_set_raw(out, "broke_at", json.str(broke_at))
+    }
+    return out
+}
+
 // --- dispatch -----------------------------------------------------------
 
 handle(c: *Context, op: string, id: int, request: ptr) -> bool {
@@ -387,6 +625,31 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
             return false
         }
         answer(id, model_result(m, index))
+        return false
+    }
+
+    if op == "trace.model" {
+        m = null
+        p = null
+        named = json.object_get_raw(request, "id")
+        if named != null { p = assets.provenance_by_id(json.get_string_raw(named)) }
+        if p == null {
+            named = json.object_get_raw(request, "object")
+            if named != null { p = assets.provenance_by_object(json.get_string_raw(named)) }
+        }
+        if p != null { m = assets.provenance_model(p) }
+        if m == null {
+            indexed = json.object_get_raw(request, "index")
+            if indexed != null {
+                m = model_at(c, json.get_int(indexed))
+                if m != null { p = assets.provenance_for(m) }
+            }
+        }
+        if m == null {
+            fail(id, "no model by that id, object or index")
+            return false
+        }
+        answer(id, trace_result(c, m, p))
         return false
     }
 
