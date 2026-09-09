@@ -239,7 +239,7 @@ header whether or not a driver exists. `pkgconf` is what tells `build.sh` where
 GLFW and zlib live.
 
 **Use the UCRT64 shell, and match the Aether install's C runtime.** MSYS2 ships
-two environments — UCRT64 links the Universal CRT, MINGW64 links msvcrt — and a
+two environments, UCRT64 linking the Universal CRT and MINGW64 linking msvcrt, and a
 `libaether.a` from one does not link against the other. Building ae3d in MINGW64
 against a UCRT Aether fails on symbols that look like ae3d's problem and are
 not:
@@ -250,7 +250,7 @@ undefined reference to `__imp__strtof_l'
 ```
 
 Those are UCRT-only. UCRT64 is the right default: it is what the Aether
-installer's own toolchain uses. Either way, build from an MSYS2 shell —
+installer's own toolchain uses. Either way, build from an MSYS2 shell,
 `build.sh` reads `uname -s` to pick the platform libraries, and a plain `cmd` or
 PowerShell prompt is not one of the shells it can run in.
 
@@ -292,7 +292,7 @@ everything else.
 | `lights.ae` | PBR material presets cycling with the light type, bloom, transparency |
 | `water.ae` | A 256x256 Gerstner-wave ocean, 65536 vertices |
 | `voxel_world.ae` | 960464 voxels of Perlin terrain, 93030 visible, one draw call |
-| `black_hole.ae` | Kerr geodesics integrated per pixel in one screen quad: a spinning hole, its asymmetric shadow, a lensed disc and a lensed sky. The heaviest scene here, and the one with answers to check against — [docs/black-hole.md](docs/black-hole.md) |
+| `black_hole.ae` | Kerr geodesics integrated per pixel in one screen quad: a spinning hole, its asymmetric shadow, a lensed disc and a lensed sky. The heaviest scene here, and the one with answers to check against. [docs/black-hole.md](docs/black-hole.md) |
 | `particle_disc.ae` | The same scene as an N-body: 200000 particles under Verlet integration in one instanced draw, coloured per instance |
 | `sand.ae` | 250000 grains falling and settling, click to scatter them |
 | `blender_pipeline.ae` | A model authored and keyed in Blender, exported, loaded and played |
@@ -311,8 +311,8 @@ not as a picture somebody has to notice.
 because a windowed run is pinned to the display's refresh and hides everything
 under 6.9 ms; and a test (`tests/test_blackhole.ae`) that measures the shadow
 against `sqrt(27) M`, which general relativity fixes and this renderer does not
-get a say in. What that has already found in the engine — an emissive surface
-that could not carry a colour, a bulk instancing path with no test behind it —
+get a say in. What that has already found in the engine, an emissive surface
+that could not carry a colour, a bulk instancing path with no test behind it,
 is written up in [docs/black-hole.md](docs/black-hole.md).
 
 ## Layout
