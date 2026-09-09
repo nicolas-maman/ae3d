@@ -506,6 +506,12 @@ First working engine.
 
 ### Tooling
 
+- The editor driver checks the panels are laid out on one grid: no two rules
+  with nothing between them, every stack's button rows starting at the same
+  edge, and no visible control without a size. Both faults these describe were
+  found by measuring the widget tree by hand and neither by looking at
+  screenshots, over several passes across the same panels.
+
 - The editor driver waits for what it is about to assert rather than sleeping
   first. Every count it checks follows an action the editor performs in its own
   time, and a sleep long enough on an idle machine fails inside a full run,

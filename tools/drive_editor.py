@@ -174,6 +174,64 @@ def audit_kinds(port, scene, step):
     return None
 
 
+def layout_faults(widgets):
+    """Things a panel gets wrong that a person reads past.
+
+    Both of these were found by measuring the tree by hand and neither by
+    looking at screenshots, across several passes over the same panels. They
+    are mechanical properties, so they are checked rather than remembered.
+    """
+    faults = []
+    children = {}
+    for w in widgets.values():
+        children.setdefault(w["parent"], []).append(w)
+
+    for parent, kids in children.items():
+        shown = sorted([k for k in kids if k.get("visible") and k["h"] > 0],
+                       key=lambda k: k["y"])
+
+        # Two rules with nothing between them. A section that hides its heading
+        # and its rows and keeps its rule leaves one stacked against the next
+        # section's, which is what the water settings did.
+        previous = None
+        for kid in shown:
+            if previous is not None and previous["type"] == "divider" \
+                    and kid["type"] == "divider":
+                faults.append("two rules with nothing between them at y=%d and y=%d"
+                              % (previous["y"], kid["y"]))
+            previous = kid
+
+        # Rows of buttons in one stack start at one x. A row that carries its
+        # own inset over the panel's starts further in than the full-width
+        # buttons above and below it: the same control with two edges.
+        #
+        # Only where the children are stacked vertically. Two buttons side by
+        # side in a row have different left edges because that is what a row
+        # is, and the first version of this check flagged every pair in the
+        # panel for it.
+        container = widgets.get(parent)
+        if container is None or container["type"] != "vstack":
+            continue
+        starts = {}
+        for kid in shown:
+            buttons = [w for w in widgets.values()
+                       if w["type"] == "button" and w.get("visible") and w["w"] > 0
+                       and (w["id"] == kid["id"] or w["parent"] == kid["id"])]
+            if buttons:
+                starts[kid["id"]] = min(b["x"] for b in buttons)
+        edges = sorted(set(starts.values()))
+        if len(edges) > 1:
+            faults.append("button rows in one stack start at %s" % edges)
+
+    # A control with no size is a control nobody can use, and the tree is the
+    # only place it shows.
+    for w in widgets.values():
+        if w.get("visible") and w["type"] in ("button", "textfield") \
+                and (w["w"] <= 0 or w["h"] <= 0):
+            faults.append("%s %r has no size" % (w["type"], w["text"][:20]))
+    return faults
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8791)
@@ -318,6 +376,10 @@ def main():
                 break
         check("every row reports its own kind through a mixed sequence",
               mismatch is None, mismatch or "")
+
+        faults = layout_faults(tree(args.port))
+        check("the panels are laid out on one grid", not faults,
+              "; ".join(faults[:3]))
 
         # Save, Load and Delete, pressed. A scene that never reaches disk and
         # a Load that brings back nothing both look like a working editor from
