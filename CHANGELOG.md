@@ -578,6 +578,32 @@ First working engine.
 
 ### Editor
 
+- The material rows no longer read through a null pointer. They dereference a
+  model's material, and a model is not obliged to have one: a voxel terrain is
+  built out of a bare cube and carries its colour per instance, so moving the
+  roughness slider with one selected took the editor down. Nothing had ever
+  selected a model without a material before, which is why it had not been
+  seen. Every model the inspector writes to gets a material first.
+
+- A terrain is one object whose shape is a property of it. The panel had five
+  buttons, one per biome, which made the editor responsible for knowing what a
+  desert is and put five entries in a list that should have one. There is a
+  Terrain entry now, and a TERRAIN section on the object with the five shapes
+  and its seed, which is where Unreal and Unity both put a landscape's
+  settings. Changing either fills the same world again and rebuilds the
+  instances on the model that is already there, so the object keeps its place
+  in the scene and one change is one undo step.
+
+- A scene has a sky, and the editor can set it. The scene format has carried
+  one since it carried anything and the editor had no control over it, so every
+  scene it saved recorded a colour nobody could choose and every scene it
+  opened was drawn on the editor's own grey. Three channels in a SKY section,
+  written into the file and read back out of it, and the renderer clears to it.
+
+  A scene saved before this opens black, because that is the sky it recorded:
+  the editor wrote the format's default into every file it ever saved. Setting
+  it takes three clicks and is then remembered.
+
 - The bar waits for a measurement rather than for a second frame. Those were
   the same thing until a gap longer than a quarter second stopped counting as a
   frame: a run that opens a scene can draw its first frames further apart than

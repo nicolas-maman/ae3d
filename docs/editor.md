@@ -34,12 +34,20 @@ against its bounding sphere first, so selection stays cheap with a full scene.
 editor's own geometry: the renderer draws them, but they are not objects and do
 not appear here.
 
-**Add** creates a cube, sphere, plane, water surface, light, or a voxel world of
-one of five terrains: plains, mountains, desert, islands or caves. The shapes
-are `src/ae3d/terrain`, a module rather than editor code, so what each one
-produces is measured without a window in `tests/test_terrain.ae`: mountains have
+**Add** creates a cube, sphere, plane, water surface, light or terrain.
+
+One terrain, not five. Which shape a terrain takes is a property of the terrain,
+chosen in its own inspector section and changed there afterwards, the way a
+landscape works in Unreal and in Unity. The panel's job is to say that a terrain
+is a thing a scene can have; knowing what a desert looks like is
+`src/ae3d/terrain`, a module rather than editor code, so what each shape
+produces is measured without a window in `tests/test_terrain.ae`: hills have
 more relief than plains, a desert is smoother than both, and caves are the only
 one with rock over open space.
+
+Changing the shape or the seed fills the same world again and rebuilds the
+instances on the model that is already there, so the object keeps its place in
+the scene and its place in the undo history.
 
 **Assets** lists the meshes under `resources/obj`. Clicking one loads it into the
 scene and frames it.
