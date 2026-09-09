@@ -568,10 +568,11 @@ First working engine.
 - Section bars and rules reach both edges of their panel. A section header was
   a bar inset fourteen pixels each side, which reads as a chip laid on a card
   rather than as the header of a docked panel, and it is not what any of the
-  three editors this borrows from draws. The gutter moved from a panel inset to
-  a margin on the rows, so the bars and the rules span the column while
-  everything in them still lines up, and the scene list highlights the selected
-  object edge to edge.
+  three editors this borrows from draws. The gutter moved from the panel's stack
+  to the rows, so the bars and the rules span the column while everything in
+  them still lines up, and the scene list highlights the selected object edge to
+  edge. A caption sits in a row of its own, because a text widget insets its
+  children and not itself.
 
 - A panel is one frame, not two. The stack inside the scroll view carried the
   same border as the scroll view around it, and a stack is only as tall as what
