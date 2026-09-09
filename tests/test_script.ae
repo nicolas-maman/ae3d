@@ -1,0 +1,62 @@
+// A script attached to an object runs on it.
+//
+// The whole point is that the file was not compiled into the editor: it is
+// built separately, opened at runtime, and handed the object it is attached
+// to. So this loads the library the build step produced and checks that the
+// model it is given actually moves, which is the only thing an attached script
+// is for.
+
+import std.string
+import ae3d.core
+import ae3d.loader
+import ae3d.script
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+main() {
+    path = "build/scripts/spin.dylib"
+    s = script.script_open(path)
+    if s == null {
+        // Not a skip: the build step runs before this and a script that will
+        // not open is the failure this test exists to catch.
+        println("  FAIL the script would not open: ${script.last_error()}")
+        println("script: 1 failure(s)")
+        return
+    }
+    check("a built script opens", true)
+
+    m = loader.cube(1.0)
+    before = m.rotation.y
+
+    // A second of it, a sixtieth at a time, which is what the editor does.
+    step = 0
+    while step < 60 {
+        script.script_update(s, m, 1.0 / 60.0)
+        step = step + 1
+    }
+
+    check("and moves the object it was given", core.abs_of(m.rotation.y - before) > 0.01)
+    println("  rotation ${before} then ${m.rotation.y}")
+
+    // A script with no script_start is a script that has nothing to set up,
+    // and calling one it does not have would be a jump to nothing.
+    check("a script without a start is known to have none", !script.script_has_start(s))
+
+    core.model_free(m)
+    script.script_close(s)
+
+    if failures == 0 {
+        println("script: all checks passed")
+    } else {
+        println("script: ${failures} failure(s)")
+    }
+}

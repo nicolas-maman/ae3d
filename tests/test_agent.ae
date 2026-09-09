@@ -68,8 +68,12 @@ ask_receive() -> ptr {
     // same frame on this same thread, so a read that waited would be waiting
     // for the thread it is running on.
     if tcp.tcp_poll_raw(g_sock, 0) <= 0 { return null }
-    text = tcp.tcp_receive_raw(g_sock, 65536)
-    if text == null { return null }
+    // tcp_receive_n_raw, not tcp_receive_raw: the buffer is the caller's, and
+    // only this one says so. The plain call returns an owned string typed as a
+    // borrowed one, so nothing frees it and every answer read here left eighty
+    // kilobytes behind. Filed upstream.
+    text, _length, err = tcp.tcp_receive_n_raw(g_sock, 65536)
+    if err != "" || text == null { return null }
     return json.parse_raw(text)
 }
 
@@ -130,6 +134,9 @@ main() {
         return
     }
     engine.engine_free(e)
+    // The engine frees the players it was given; a player borrows its clip.
+    if g_clip != null { anim.clip_free(g_clip as *Clip) }
+    if g_cube != null { core.model_free(g_cube as *Model) }
 
     if g_stage < 17 {
         println("FAIL the exchange did not finish (stopped at stage ${g_stage})")
@@ -142,12 +149,19 @@ main() {
     println("test_agent: ${g_failures} failure(s) of ${g_checks}")
 }
 
+// The clip the player reads. A player borrows its clip, so this outlives the
+// engine and is released after it.
+var g_clip: ptr = null
+// The engine borrows a model, so this one is freed here after it is gone.
+var g_cube: ptr = null
+
 on_start(data: ptr) {
     e = data as *Engine
     cube = loader.cube(1.0)
     core.model_set_name(cube, "probe")
     core.model_set_scale(cube, 4.0, 4.0, 4.0)
     core.model_matte(cube, 0.8, 0.3, 0.2)
+    g_cube = cube as ptr
     engine.engine_add_model(e, cube)
 
     cam = engine.engine_camera(e)
@@ -160,6 +174,7 @@ on_start(data: ptr) {
     anim.channel_add_key(ch, 0.0, 0.0, 0.0, 0.0, 0.0)
     anim.channel_add_key(ch, 2.0, 20.0, 0.0, 0.0, 0.0)
     anim.clip_add_channel(clip, ch)
+    g_clip = clip as ptr
     engine.engine_add_animation(e, "probe_slide", anim.player_new(clip), cube)
 }
 

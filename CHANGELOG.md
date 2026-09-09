@@ -186,6 +186,25 @@ First working engine.
 
 ### Fixes
 
+- The agent's trace blamed a model that was plainly drawn. The pixels stage
+  read its coverage out of the region node after handing that node to the
+  object that answers, and got nothing back: the trace reported the model
+  broke at pixels and printed the coverage it had just ignored in the same
+  answer. Read first, hand over second.
+
+- Reading an answer off a socket leaked the whole buffer. `std.net`'s
+  `tcp_receive_raw` returns an owned buffer typed as a borrowed one, so nothing
+  frees it and calling `string.free` on it changes nothing, which is the part
+  that makes it hard to find. Filed as aether-lang-dev/aether#1987; the two
+  tests that read answers use `tcp_receive_n_raw`, which says who owns what.
+  595K and 1.17M of leaked bytes down to 12K and 16K.
+
+- A player borrows its clip and the engine borrows a model, and neither said
+  so. Both contracts are written where they are defined now, and the two tests
+  that relied on guessing them free what they built. `test_trace` also never
+  freed the model it deliberately orphans, which is the object that check
+  exists to trace.
+
 - Loading a scene that holds two models of the same shape crashed the editor.
   Merged draws are pooled and matched to a model by vertex array id, the pool
   outlives the models it was built from, and OpenGL hands the same id out again
@@ -647,6 +666,40 @@ First working engine.
 
 ### Editor
 
+- A script can set itself up. `script_start` runs once when a script is
+  attached, on the object it was given, which is what a script that needs to
+  know the size or place it started from has to have: measuring it every frame
+  measures its own last answer. `resources/scripts/pulse.ae` uses it.
+
+- A script rebuilt while the editor is open is picked up. The editor compiles
+  nothing; it watches the library the build step writes, waits for it to stop
+  changing so a half-written one is never opened, and starts the script again
+  on everything carrying it. Watching the library rather than the source is
+  what leaves the last good behaviour running when a save has an error in it.
+
+- **New script** writes a template into `resources/scripts` and says where it
+  went. The shape of a script is a thing to be given rather than remembered,
+  and the driver builds whatever the button writes, because a starter template
+  that does not compile is worse than none.
+
+- The check that a script moves what it is attached to counts every way a
+  script can move something. It compared position and one component of the
+  rotation, both of which a script that scales leaves alone, so `pulse` was
+  reported as doing nothing at all.
+
+- A behaviour is a script you assign, not a case in the editor. It was four
+  hardcoded ones, so the editor knew how to spin, bob and orbit and a project
+  could have no others. A script is now an ordinary Aether source file in
+  `resources/scripts` with `script_update` in it, compiled into a shared
+  library and opened at runtime, and the buttons in the BEHAVIOUR section are
+  the files that are there: adding a behaviour is adding a file. Spin, bob and
+  orbit moved out of the editor into scripts of their own, so the editor no
+  longer contains any behaviour code.
+
+  The scene records the assignment by name and gives it back on load, and a
+  scene naming a script the project does not have gets none rather than a wrong
+  one.
+
 - A terrain is blocks or smooth, and voxels are one of the two rather than what
   a terrain is. Blocks draw a cube per filled cell; smooth meshes the same
   field into one surface, which the engine has been able to do since
@@ -836,6 +889,23 @@ First working engine.
   after another with nothing between them.
 
 ### Tooling
+
+- Every editor run is headless again, so a run of `ci.sh` opens no windows at
+  all. It hung part way through under the flag, which was
+  aether-lang-dev/aether-ui#123 and is fixed upstream.
+
+- The driver presses menu items. It could not before: the closure ran on its
+  own HTTP thread rather than the main queue, so an item that adds a model
+  touched the GL context off-thread and took the editor down
+  (aether-lang-dev/aether-ui#116, fixed upstream).
+
+- A driver route that answers 404 is a note rather than the end of the run. One
+  unreachable route aborted the script and took the twenty checks after it.
+
+- The colour chip's readback is the toolkit's `ui.styled_bg` rather than a
+  local declaration of the same entry point (aether-lang-dev/aether-ui#109,
+  fixed upstream). It now reports the colour the layer paints, so the chip
+  check catches a chip that is never painted; it did not before.
 
 - Waiting for a file to be saved waits for it to be written again, not for it
   to exist. The second save in a run leaves the file already there, so the wait

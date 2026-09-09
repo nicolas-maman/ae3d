@@ -28,6 +28,7 @@ import ae3d.history
 import ae3d.behaviour
 import ae3d.water
 import ae3d.voxel
+import ae3d.script
 import ae3d.terrain
 import ae3d.rendering
 
@@ -199,6 +200,21 @@ var g_terrain_bar = 0
 var g_terrain_body = 0
 var g_terrain_divider = 0
 var g_script_buttons: ptr = null
+// The scripts this project has: the source files that were found, and the
+// libraries they were compiled into. Index 0 is none, so a script's id is its
+// place here and id 1 is the first file found.
+var g_script_files: ptr = null
+var g_script_libs: ptr = null
+var g_script_count = 1
+// When each script's library was last written. A script rebuilt while the
+// editor is open is reopened rather than ignored, which is what makes editing
+// one worth doing without restarting.
+var g_script_stamps: ptr = null
+// The stamp seen on the previous look. A library is reopened once it has
+// stopped changing rather than the moment it changes, so a build caught
+// half-written is left alone until the next look, by which time it is whole.
+var g_script_pending: ptr = null
+var g_reload_checked = 0.0
 var g_preset_buttons: ptr = null
 var g_preset = PRESET_BALANCED
 // The shading features, as the preset left them and as they were changed after.
@@ -302,6 +318,10 @@ var g_report = ""
 var g_fps = 0.0
 var g_stats_written = 0.0
 var g_last_time = 0.0
+// The interval the last frame actually took. The agent channel reports it, and
+// it was answering a constant while the editor had measured the real thing a
+// few lines earlier.
+var g_delta = 0.016
 var g_timer = 0
 var g_stage = 0
 var g_left = 0
@@ -572,7 +592,7 @@ pump_agent() {
     }
     c.frame_count = g_frames
     c.fps = g_fps
-    c.delta = 0.016
+    c.delta = g_delta
     c.width = g_view_w
     c.height = g_view_h
     c.draw_calls = 0
@@ -658,11 +678,8 @@ apply_post() {
 // not a canvas: a second canvas in a panel collapses it
 // (aether-lang-dev/aether-ui#98), and a background is all a chip needs.
 //
-// Implemented on all four aether-ui backends, but with no binding in ui/module
-// yet (aether-lang-dev/aether-ui#109), so it is declared here. It answers from
-// the layer that actually paints rather than from the value that was set,
-// which is what makes it worth checking against.
-extern aether_ui_styled_bg_impl(handle: int) -> int
+// ui.styled_bg answers from the layer that actually paints rather than from
+// the value that was set, which is what makes it worth checking against.
 // What the selection is and how big it is. Read from the model each time it is
 // asked for, because a terrain that changes shape keeps its name and changes
 // its geometry underneath: the title said twelve triangles while the model had
@@ -697,7 +714,7 @@ refresh_swatch() {
 // the value it was handed.
 chip_rgb() -> int {
     if g_chip == 0 { return 0 - 1 }
-    return aether_ui_styled_bg_impl(g_chip)
+    return ui.styled_bg(g_chip)
 }
 
 // The theme's own colours, as the sheet sets them. Written here rather than
@@ -724,7 +741,7 @@ mis_styled() -> int {
 // is: what a widget paints comes back off a layer and through a colour space.
 painted_as(handle: int, wanted: int) -> bool {
     if handle == 0 { return false }
-    got = aether_ui_styled_bg_impl(handle)
+    got = ui.styled_bg(handle)
     if got < 0 { return false }
     shift = 65536
     while shift >= 1 {
@@ -884,10 +901,18 @@ const SKY_LAST_ROW = 23
 // A terrain's seed. Unbounded, so it is a field rather than a slider.
 const TERRAIN_SEED_ROW = 24
 const SCRIPT_NONE = 0
-const SCRIPT_SPIN = 1
-const SCRIPT_BOB = 2
-const SCRIPT_ORBIT = 3
-const SCRIPT_KINDS = 4
+// A behaviour is a script found on disk, not a case in this file. Zero is
+// always "none"; the rest are whatever resources/scripts holds, in the order
+// they were found.
+const SCRIPT_NONE_ID = 0
+
+// CRITICAL: room for the scripts a project has, checked when they are scanned.
+// One past the end would write off the end of the arrays that hold them.
+const MAX_SCRIPTS = 32
+// How often the libraries are looked at. A rebuild takes longer than this, so
+// noticing one is immediate to a person, and a stat of a handful of paths four
+// times a second costs nothing next to a frame.
+const RELOAD_INTERVAL = 0.25
 const BOB_HEIGHT = 14.0
 const BOB_RATE = 1.6
 const SCENE_PATH = "build/editor_scene.json"
@@ -1268,15 +1293,23 @@ set_script(index: int, script: int) {
         history.history_close(g_history)
     }
     slot[0] = script
+    // Once, when it is attached, and only when the attachment changed: a
+    // script that sets something up wants to do it on the object it was just
+    // given, not every time the panel is refreshed.
+    if m != null && was != script { script.script_start(script_library(script), m) }
     refresh_script_buttons()
     say("${script_name(script)} on ${core.text(model_at(index).name)}")
 }
 
-// The inverse of script_name, for a scene that recorded one.
+// The inverse of script_name, for a scene that recorded one. A scene naming a
+// script this project does not have gets none rather than a wrong one: the
+// file said what it wanted and the answer is that it is not here.
 script_from_name(name: string) -> int {
-    if string.equals(name, "spin") == 1 { return SCRIPT_SPIN }
-    if string.equals(name, "bob") == 1 { return SCRIPT_BOB }
-    if string.equals(name, "orbit") == 1 { return SCRIPT_ORBIT }
+    id = 1
+    while id < g_script_count {
+        if string.equals(script_name(id), name) == 1 { return id }
+        id = id + 1
+    }
     return SCRIPT_NONE
 }
 
@@ -1296,11 +1329,170 @@ kind_from_name(name: string) -> int {
     return behaviour.KIND_MESH
 }
 
+// A script's name is its file's, without the directory or the suffix, which is
+// what a scene records and what the button says.
 script_name(script: int) -> string {
-    if script == SCRIPT_SPIN { return "spin" }
-    if script == SCRIPT_BOB { return "bob" }
-    if script == SCRIPT_ORBIT { return "orbit" }
-    return "none"
+    if g_script_files == null || script < 1 || script >= g_script_count { return "none" }
+    path = core.text(fs.dir_list_get(g_script_files, script - 1))
+    start = 0
+    i = 0
+    while i < string.length(path) {
+        if string.equals(string.substring(path, i, i + 1), "/") == 1 { start = i + 1 }
+        i = i + 1
+    }
+    stop = string.length(path)
+    if stop - 3 > start && string.equals(string.substring(path, stop - 3, stop), ".ae") == 1 {
+        stop = stop - 3
+    }
+    return string.substring(path, start, stop)
+}
+
+// The scripts a project has, found rather than listed. A behaviour is a file
+// in resources/scripts compiled into a library beside it, so what the editor
+// offers is whatever is there: adding one is adding a file, and the editor
+// does not have to be taught what it does.
+scan_scripts() {
+    matches, err = fs.glob("resources/scripts/*.ae")
+    if err != "" || matches == null { return }
+    g_script_files = matches
+    g_script_libs = list.new()
+    list.add_raw(g_script_libs, null)
+    g_script_stamps = calloc(MAX_SCRIPTS, 8)
+    g_script_pending = calloc(MAX_SCRIPTS, 8)
+    stamps = g_script_stamps as int[]
+
+    found = fs.dir_list_count(g_script_files)
+    if found > MAX_SCRIPTS - 1 { found = MAX_SCRIPTS - 1 }
+
+    id = 1
+    while id <= found {
+        g_script_count = id + 1
+        name = script_name(id)
+        path = script.library_path("build/scripts/", name)
+        loaded = script.script_open(path)
+        if loaded == null {
+            // Named, and honestly unusable. The button still appears, because
+            // a script that will not load is a thing to fix rather than a
+            // thing to hide, and the console says which and why.
+            say("${name} did not load: ${script.last_error()}")
+        }
+        list.add_raw(g_script_libs, loaded as ptr)
+        stamp, stamp_err = fs.mtime(path)
+        if stamp_err == "" { stamps[id] = stamp }
+        id = id + 1
+    }
+    say("${found} script(s) available")
+}
+
+// Reopen any script whose library has been written since it was opened.
+//
+// The editor does not compile anything: a script is rebuilt by the same step
+// that built it the first time, and this notices. Watching the library rather
+// than the source is what makes that honest, because a source saved with a
+// syntax error in it leaves the last good library in place and the object
+// keeps behaving the way it did.
+reload_changed_scripts() {
+    if g_script_stamps == null { return }
+    now = seconds()
+    if now - g_reload_checked < RELOAD_INTERVAL { return }
+    g_reload_checked = now
+
+    stamps = g_script_stamps as int[]
+    id = 1
+    while id < g_script_count {
+        path = script.library_path("build/scripts/", script_name(id))
+        stamp, err = fs.mtime(path)
+        if err == "" && stamp != stamps[id] {
+            pending = g_script_pending as int[]
+            if stamp != pending[id] {
+                // Changed since the last look, so wait for it to settle.
+                pending[id] = stamp
+                id = id + 1
+                continue
+            }
+            was = stamps[id]
+            stamps[id] = stamp
+            // Not on the first look: the stamp starts at whatever the library
+            // had when it was opened, so a zero here is a script that was
+            // missing then and has arrived since.
+            if was != 0 {
+                replaced = script.script_open(path)
+                if replaced == null {
+                    say("${script_name(id)} would not reload: ${script.last_error()}")
+                } else {
+                    previous = script_library(id)
+                    list.set(g_script_libs, id, replaced as ptr)
+                    if previous != null { script.script_close(previous) }
+                    restart_script(id)
+                    say("reloaded ${script_name(id)}")
+                }
+            }
+        }
+        id = id + 1
+    }
+}
+
+// A reloaded script starts again on everything carrying it, because the copy
+// that ran start on those objects is the one that was just closed.
+restart_script(id: int) {
+    i = 0
+    while i < list.size(g_models) {
+        if script_at(i) == id { script.script_start(script_library(id), model_at(i)) }
+        i = i + 1
+    }
+}
+
+// A new script, ready to edit. Unity and Godot both offer this, and the point
+// is the same: the shape of a script is a thing to be given rather than
+// remembered, and a first one written from an empty file is mostly a guess at
+// what the two functions are called.
+//
+// The file is written and nothing else happens. Compiling it is the build step
+// that compiles every other script, and the editor picks the library up when
+// it appears, so the path from here is the same one an existing script takes.
+new_script() {
+    name = unused_script_name()
+    path = "resources/scripts/${name}.ae"
+    err = fs.write(path, script_template(name))
+    if err != "" {
+        say("could not write ${path}: ${err}")
+        return
+    }
+    say("wrote ${path}: build it with scripts/build_script.sh")
+}
+
+// A name nothing is using yet, so pressing the button twice does not overwrite
+// the file the first press made and the work someone did in it.
+unused_script_name() -> string {
+    attempt = 1
+    while attempt < 100 {
+        candidate = "script${attempt}"
+        if !fs.file_exists("resources/scripts/${candidate}.ae") { return candidate }
+        attempt = attempt + 1
+    }
+    return "script"
+}
+
+script_template(name: string) -> string {
+    // Built up rather than written as one literal: the template is source
+    // code, and a single string of it in here would be a wall of escapes that
+    // nobody could read or change.
+    body = "// ${name}\n"
+    body = string.concat(body, "//\n")
+    body = string.concat(body, "// Attached to an object in the editor, this runs on it every frame.\n")
+    body = string.concat(body, "// script_start is optional and runs once, when it is attached.\n\n")
+    body = string.concat(body, "import ae3d.core\n\n")
+    body = string.concat(body, "exports (script_start, script_update)\n\n")
+    body = string.concat(body, "script_start(m: *Model) {\n}\n\n")
+    body = string.concat(body, "script_update(m: *Model, delta: float) {\n")
+    body = string.concat(body, "    core.model_rotate(m, 0.0, delta * 30.0, 0.0)\n")
+    body = string.concat(body, "}\n")
+    return body
+}
+
+script_library(id: int) -> *Script {
+    if g_script_libs == null || id < 1 || id >= list.size(g_script_libs) { return null }
+    return list.get_raw(g_script_libs, id) as *Script
 }
 
 scripted_count() -> int {
@@ -1323,24 +1515,9 @@ run_scripts(delta: float) {
         script = script_at(i)
         if script != SCRIPT_NONE {
             m = model_at(i)
-            if m != null {
-                if script == SCRIPT_SPIN {
-                    core.model_rotate(m, 0.0, delta * 60.0, 0.0)
-                }
-                // Moving by the derivative rather than to an absolute height, so
-                // bobbing needs no memory of where the object started.
-                if script == SCRIPT_BOB {
-                    step = core.cos_of(g_script_clock * BOB_RATE) * BOB_HEIGHT * BOB_RATE * delta
-                    core.model_set_position(m, m.position.x, m.position.y + step, m.position.z)
-                }
-                if script == SCRIPT_ORBIT {
-                    angle = g_script_clock * 0.8
-                    radius = core.sqrt_of(m.position.x * m.position.x + m.position.z * m.position.z)
-                    if radius < 1.0 { radius = 60.0 }
-                    core.model_set_position(m, core.cos_of(angle) * radius, m.position.y,
-                                            core.sin_of(angle) * radius)
-                }
-            }
+            // What the script does is the script's business. The editor knows
+            // which object it is attached to and how long the frame was.
+            if m != null { script.script_update(script_library(script), m, delta) }
         }
         i = i + 1
     }
@@ -1517,6 +1694,7 @@ draw_frame() {
     if g_last_time > 0.0 {
         elapsed = now - g_last_time
         if elapsed > 0.0 && elapsed < 0.25 { delta = elapsed }
+        g_delta = delta
         // Seeded with the first measurement rather than smoothed up from
         // zero. A running average that starts at nothing spends a second
         // climbing, and what it shows on the way is a rate the editor is not
@@ -1548,6 +1726,11 @@ draw_frame() {
     // producing the frames an agent is holding it still in order to look at.
     held = false
     if g_agent_on { held = agent.is_paused(g_agent_ctx as *Context) }
+
+    // Outside the held check: a frame the agent is holding is exactly when
+    // someone is looking at one object and rebuilding the script on it, and a
+    // reload that only happens while time is running would never arrive.
+    reload_changed_scripts()
 
     if !held {
         update_water(delta)
@@ -1731,23 +1914,35 @@ actions_that_do_nothing() -> int {
     // Each script moves what it is attached to, so a tenth of a second of it
     // has to leave the model somewhere else.
     scripts = 1
-    while scripts <= SCRIPT_ORBIT {
+    while scripts < g_script_count {
         m = selected_model()
         position = m.position
         rotation = m.rotation
+        scale = m.scale
         was_script = script_at(g_selected)
 
         set_script(g_selected, scripts)
         run_scripts(0.1)
         run_scripts(0.1)
+        // Every way a script can move something, not just the two the editor
+        // used to know about. A script that scales was reported as doing
+        // nothing, because the check was written when the only behaviours were
+        // the three this file used to contain.
         still = core.abs_of(m.position.x - position.x) < 0.0001 &&
                 core.abs_of(m.position.y - position.y) < 0.0001 &&
                 core.abs_of(m.position.z - position.z) < 0.0001 &&
-                core.abs_of(m.rotation.y - rotation.y) < 0.000001
+                core.abs_of(m.scale.x - scale.x) < 0.0001 &&
+                core.abs_of(m.scale.y - scale.y) < 0.0001 &&
+                core.abs_of(m.scale.z - scale.z) < 0.0001 &&
+                core.abs_of(m.rotation.x - rotation.x) < 0.000001 &&
+                core.abs_of(m.rotation.y - rotation.y) < 0.000001 &&
+                core.abs_of(m.rotation.z - rotation.z) < 0.000001 &&
+                core.abs_of(m.rotation.w - rotation.w) < 0.000001
         if still { wrong = wrong + 1 }
 
         set_script(g_selected, was_script)
         core.model_set_position(m, position.x, position.y, position.z)
+        core.model_set_scale(m, scale.x, scale.y, scale.z)
         core.model_set_rotation(m, rotation)
         scripts = scripts + 1
     }
@@ -1765,7 +1960,7 @@ unundone_scripts() -> int {
 
     wrong = 0
     kind = 0
-    while kind < SCRIPT_KINDS {
+    while kind < g_script_count {
         if kind != was {
             set_script(g_selected, kind)
             undo_step()
@@ -2896,7 +3091,7 @@ build_scene() {
         add_water()
         add_voxels()
         add_light()
-        set_script(0, SCRIPT_SPIN)
+        set_script(0, script_from_name("spin"))
     }
 
     // Save the scene and open it again before the run starts, so the report
@@ -3726,7 +3921,7 @@ paint_segments(store: ptr, count: int, active: int) {
 }
 
 refresh_script_buttons() {
-    paint_segments(g_script_buttons, SCRIPT_KINDS, script_at(g_selected))
+    paint_segments(g_script_buttons, g_script_count, script_at(g_selected))
 }
 
 refresh_preset_buttons() {
@@ -3759,7 +3954,10 @@ main() {
     g_shade_toggles = calloc(SHADE_KINDS, 4)
     g_biome_buttons = calloc(terrain.BIOME_COUNT, 4)
     g_style_buttons = calloc(STYLE_KINDS, 4)
-    g_script_buttons = calloc(SCRIPT_KINDS, 4)
+    g_script_buttons = calloc(MAX_SCRIPTS, 4)
+    // Before the panel is built, because the panel is built out of what this
+    // finds: a button per script, and none of them known to this file.
+    scan_scripts()
     g_preset_buttons = calloc(PRESET_KINDS, 4)
     g_sliders = calloc(ROWS, 4)
     g_fields = calloc(ROWS, 4)
@@ -4154,21 +4352,34 @@ main() {
         ui.divider(right)
         behaviour_body = fold_section(right, "BEHAVIOUR")
 
-        script_buttons = ui.hstack(behaviour_body, 6)
-        as_row(script_buttons)
-        none_btn = ui.btn(script_buttons, "None") callback { set_script(g_selected, SCRIPT_NONE) }
-        style_button(none_btn, "action")
-        spin_btn = ui.btn(script_buttons, "Spin") callback { set_script(g_selected, SCRIPT_SPIN) }
-        style_button(spin_btn, "action")
-        bob_btn = ui.btn(script_buttons, "Bob") callback { set_script(g_selected, SCRIPT_BOB) }
-        style_button(bob_btn, "action")
-        orbit_btn = ui.btn(script_buttons, "Orbit") callback { set_script(g_selected, SCRIPT_ORBIT) }
-        style_button(orbit_btn, "action")
+        // One button per script the project has, built from what was found on
+        // disk rather than from a list in this file. Four to a row, so a
+        // project with a dozen scripts reads as a grid rather than as one line
+        // running off the panel.
         scripts = g_script_buttons as int[]
+        script_row = as_row(ui.hstack(behaviour_body, 6))
+        none_btn = ui.btn(script_row, "None") callback { set_script(g_selected, SCRIPT_NONE) }
+        style_button(none_btn, "action")
         scripts[SCRIPT_NONE] = none_btn
-        scripts[SCRIPT_SPIN] = spin_btn
-        scripts[SCRIPT_BOB] = bob_btn
-        scripts[SCRIPT_ORBIT] = orbit_btn
+
+        // Writing one is the other half of assigning one. The button leaves a
+        // file to edit and says where it is; building it is the same step that
+        // builds every script, and the editor picks the library up when it
+        // appears.
+        new_btn = ui.btn(panel_row(behaviour_body), "New script") callback { new_script() }
+        style_button(new_btn, "action")
+
+        slot = 1
+        while slot < g_script_count {
+            if slot % 4 == 0 { script_row = as_row(ui.hstack(behaviour_body, 6)) }
+            id = slot
+            button = ui.btn(script_row, script_name(id)) callback {
+                set_script(g_selected, id)
+            }
+            style_button(button, "action")
+            scripts[id] = button
+            slot = slot + 1
+        }
 
         ui.divider(right)
         sky_body = fold_section(right, "SKY")

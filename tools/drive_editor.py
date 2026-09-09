@@ -17,6 +17,7 @@ Exits non-zero with a line saying what failed.
 """
 
 import argparse
+import glob
 import json
 import os
 import subprocess
@@ -27,6 +28,8 @@ import urllib.error
 import urllib.request
 
 ACCENT = "#2e6eeb"
+# What a loadable library is called here, which the editor asks the loader for.
+LIB_SUFFIX = ".dylib" if sys.platform == "darwin" else ".so"
 FAILURES = []
 
 
@@ -112,10 +115,19 @@ def editor_output():
 
 
 def post(port, path):
+    """POST to the driver. A route that answers 404 is a check that failed, not
+    a run that ends: one unreachable route used to abort the script and take
+    the twenty checks after it with it."""
     req = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path),
                                  data=b"", method="POST")
-    with urllib.request.urlopen(req, timeout=3) as r:
-        return r.read()
+    try:
+        with urllib.request.urlopen(req, timeout=3) as r:
+            return r.read()
+    except urllib.error.HTTPError as e:
+        print("   note  %s answered %d" % (path, e.code))
+        return b""
+
+
 
 
 def tree(port):
@@ -397,13 +409,10 @@ def main():
 
     env = dict(os.environ)
     env["AETHER_UI_TEST_PORT"] = str(args.port)
-    # NOT headless, though it should be: this run wants no window in front of
-    # whoever is using the machine, and AETHER_UI_HEADLESS gives exactly that
-    # everywhere else. Under it the editor stops answering part way through a
-    # run, stuck inside a CoreAnimation layer display that never returns, with
-    # vImage reporting a destination buffer too small for what it was asked to
-    # composite. Same driver and same binary: headless hangs, visible passes.
-    # Filed as aether-lang-dev/aether-ui#123.
+    # Never onto the desktop. The driver presses widgets over HTTP and reads
+    # the tree back, none of which needs the window in front of whoever is
+    # using the machine.
+    env.setdefault("AETHER_UI_HEADLESS", "1")
     if args.backend:
         env["AE3D_EDITOR_BACKEND"] = args.backend
     # Long enough that the run outlives this script; it is killed at the end.
@@ -481,21 +490,12 @@ def main():
                 # number() writes two decimals; "-150.0" is what was typed.
                 check("what was typed reached the model", back == "-150.00",
                       repr(back))
-        # The menus, and only what the driver can actually answer for.
-        #
-        # Their items are not activated: the driver runs a menu item's closure
-        # on its own HTTP thread rather than bouncing it to the main queue the
-        # way it does every widget route (aether-lang-dev/aether-ui#116), and
-        # an item that adds a model touches the GL context and segfaults. Each
-        # item calls the same function its button does, and the buttons are
-        # pressed above.
-        #
-        # Nor is attachment checked, though the name of this check said so
-        # until it was sabotaged: /menus reports every menu that was built,
-        # with no record of which ones reached the bar, so dropping the
+        # The menus. Attachment is not checked, though the name of this check
+        # said so until it was sabotaged: /menus reports every menu that was
+        # built, with no record of which ones reached the bar, so dropping the
         # menu_bar_add for a whole menu left it green. What it does catch is an
-        # action going missing from the menus, which is the regression that
-        # happens when an action is added or renamed.
+        # action going missing, which is the regression that happens when one
+        # is added or renamed.
         menus = get(args.port, "/menus")
         listed = {}
         for menu in menus:
@@ -510,6 +510,28 @@ def main():
         check("every action the editor has is on a menu",
               len(menus) == 4 and not missing,
               "%d menus, missing %s" % (len(menus), missing[:4]))
+
+        # And a menu item does what its button does. The driver used to be
+        # unable to press one: it ran the closure on its own HTTP thread rather
+        # than the main queue, so an item that adds a model touched the GL
+        # context off-thread and took the editor down. Fixed upstream, so the
+        # menus are driven like everything else now.
+        add_menu = listed.get("Cube")
+        if add_menu is not None:
+            before_menu = len(rows_under(tree(args.port), scene))
+            post(args.port, "/menu/%d/activate?label=Cube" % add_menu)
+            after_menu = wait_rows(args.port, scene, before_menu + 1)
+            check("a menu item adds an object the way its button does",
+                  after_menu == before_menu + 1,
+                  "%d rows before, %d after" % (before_menu, after_menu))
+            # Put it back with the button rather than the Undo menu item: that
+            # item's label carries its accelerator, and the driver matches a
+            # menu item by its exact label without decoding what the query
+            # escaped, so asking for it by name is a 404.
+            undo_now = find(tree(args.port), "button", "Undo")
+            if undo_now is not None:
+                post(args.port, "/widget/%d/click" % undo_now)
+                wait_rows(args.port, scene, before_menu)
 
         # A section folds when its bar is clicked. Read as the body going away
         # and the caret turning, not as one row disappearing: a hidden row's
@@ -640,35 +662,58 @@ def main():
                 check("smoothing one gives it a surface of its own", ok,
                       "%d triangles then %d" % (blocky, triangles(widgets)))
 
-        # A row of choices says which one is on. Read as "the accent moved",
-        # not "this button is blue": the tree reports the colour a widget was
-        # given rather than the colour it has (aether-lang-dev/aether-ui#111),
-        # and a reading that never changes would pass against a highlight that
-        # is painted nowhere.
+        # A behaviour is a script the project has, not a case in the editor.
+        # The buttons are the files in resources/scripts, so this reads the
+        # names off disk rather than expecting any particular one: adding a
+        # script is adding a file, and this check should not need editing when
+        # someone does.
+        scripts_dir = "resources/scripts"
+        on_disk = sorted(name[:-3] for name in os.listdir(scripts_dir)
+                         if name.endswith(".ae"))
         widgets = tree(args.port)
+        buttons = {w["text"].strip() for w in widgets.values() if w["type"] == "button"}
+        check("every script in the project has a button",
+              all(name in buttons for name in on_disk),
+              "on disk %s, missing %s" % (on_disk, [n for n in on_disk
+                                                    if n not in buttons]))
+
+        # A row of choices says which one is on. Read as "the accent moved"
+        # rather than "this button is blue", which is the stronger claim: a
+        # fixed colour is a constant the editor could satisfy while the
+        # highlight never follows the choice.
+        widgets = tree(args.port)
+        choices = ["None"] + on_disk
         segments = {w["text"]: w for w in widgets.values()
-                    if w["type"] == "button"
-                    and w["text"] in ("None", "Spin", "Bob", "Orbit")}
-        check("the behaviour row has all four choices", len(segments) == 4)
-        if len(segments) == 4:
+                    if w["type"] == "button" and w["text"] in choices}
+        check("the behaviour row offers none and every script",
+              len(segments) == len(choices),
+              "have %s, want %s" % (sorted(segments), choices))
+        if len(segments) == len(choices):
             lit = [t for t, w in segments.items() if w.get("bg") == ACCENT]
             check("exactly one behaviour is lit, and it is the one in effect",
                   lit == ["None"], "lit: %s" % lit)
 
-            post(args.port, "/widget/%d/click" % segments["Spin"]["id"])
+            wanted = on_disk[0]
+            post(args.port, "/widget/%d/click" % segments[wanted]["id"])
 
             def moved(ws):
                 return [w["text"] for w in ws.values()
-                        if w["type"] == "button"
-                        and w["text"] in ("None", "Spin", "Bob", "Orbit")
-                        and w.get("bg") == ACCENT] == ["Spin"]
+                        if w["type"] == "button" and w["text"] in choices
+                        and w.get("bg") == ACCENT] == [wanted]
 
             widgets, ok = wait_for(args.port, moved)
             check("choosing a behaviour moves the highlight to it", ok,
                   "lit: %s" % [w["text"] for w in widgets.values()
-                               if w["type"] == "button"
-                               and w["text"] in ("None", "Spin", "Bob", "Orbit")
+                               if w["type"] == "button" and w["text"] in choices
                                and w.get("bg") == ACCENT])
+
+            # That the script then moves the object is not checked here. The
+            # inspector shows a position and a scale, and a script is free to
+            # move neither: spin only turns. The editor's own report drives
+            # every script it has and asserts the model ended up somewhere
+            # else, which is the check that does not depend on what a
+            # particular script happens to do.
+
             post(args.port, "/widget/%d/click" % segments["None"]["id"])
             wait_for(args.port, lambda ws: not moved(ws))
 
@@ -850,6 +895,103 @@ def main():
                     check("a setting survives the scene file",
                           moved == "3.00" and restored == "9.25",
                           "changed to %s, came back as %s" % (moved, restored))
+
+        # New script writes a file that compiles. A template that does not is
+        # worse than none: the first thing anyone does with it is build it, and
+        # a first script is mostly a guess at what the two functions are called.
+        widgets = tree(args.port)
+        new_button = find(widgets, "button", "New script")
+        check("the editor can write a new script", new_button is not None)
+        if new_button is not None:
+            before_files = set(os.listdir(scripts_dir))
+            post(args.port, "/widget/%d/click" % new_button)
+
+            def written(_ws):
+                return set(os.listdir(scripts_dir)) - before_files
+
+            widgets, ok = wait_for(args.port, written)
+            made = sorted(written(None))
+            check("pressing it leaves a file to edit", bool(made), str(made))
+            if made:
+                built = subprocess.run(
+                    ["./scripts/build_script.sh",
+                     os.path.join(scripts_dir, made[0])],
+                    capture_output=True, text=True)
+                check("and what it wrote compiles", built.returncode == 0,
+                      built.stderr.strip().splitlines()[-1:] or "")
+                os.remove(os.path.join(scripts_dir, made[0]))
+                for leftover in glob.glob("build/scripts/%s.*" % made[0][:-3]):
+                    os.remove(leftover)
+
+        # A script rebuilt while the editor is open is picked up without
+        # restarting it. The editor compiles nothing: the same step that built
+        # the script builds it again, and the editor notices the library.
+        widgets = tree(args.port)
+        if on_disk:
+            target = os.path.join("build", "scripts", on_disk[0] + LIB_SUFFIX)
+            if os.path.exists(target):
+                os.utime(target, None)
+
+                def reloaded(ws):
+                    return any(w["type"] == "text" and "reloaded" in w["text"]
+                               for w in ws.values())
+
+                widgets, saw = wait_for(args.port, reloaded, seconds=15.0)
+                check("a rebuilt script is picked up while the editor runs", saw)
+
+        # A scene remembers which script each object was given, by name. That
+        # is what makes an assignment worth making: the editor knows nothing
+        # about what the script does, so the name is the whole of what it can
+        # record, and a project with the script still in it gets it back.
+        widgets = tree(args.port)
+        ids = {w["text"].strip(): w["id"] for w in widgets.values()
+               if w["type"] == "button"}
+        if on_disk and on_disk[-1] in ids:
+            chosen = on_disk[-1]
+            # Which object is being given the script. A load puts the selection
+            # back at the start, and the lit button is the selected object's
+            # script, so without re-selecting this one afterwards the check
+            # reads a different object and calls the assignment lost.
+            carrier = None
+            for row in sorted(rows_under(widgets, scene), key=lambda w: w["id"]):
+                if row.get("classes", "").find("selected") >= 0:
+                    carrier = row_name(widgets, row)
+            if carrier is None:
+                rows_now = sorted(rows_under(widgets, scene), key=lambda w: w["id"])
+                if rows_now:
+                    carrier = row_name(widgets, rows_now[-1])
+                    post(args.port, "/widget/%d/click" % rows_now[-1]["id"])
+            post(args.port, "/widget/%d/click" % ids[chosen])
+            wait_for(args.port,
+                     lambda ws: ws[ids[chosen]].get("bg") == ACCENT)
+            stamped = os.path.getmtime(scene_file)
+            post(args.port, "/widget/%d/click" % save)
+            wait_file(scene_file, newer_than=stamped)
+
+            with open(scene_file) as f:
+                saved_scene = json.load(f)
+            recorded = [m.get("script") for m in saved_scene.get("models", [])
+                        if m.get("script")]
+            check("the scene records the script by name", chosen in recorded,
+                  "recorded %s" % recorded)
+
+            post(args.port, "/widget/%d/click" % ids["None"])
+            wait_for(args.port, lambda ws: ws[ids["None"]].get("bg") == ACCENT)
+            post(args.port, "/widget/%d/click" % load)
+            wait_for(args.port, lambda ws: len(rows_under(ws, scene)) > 0)
+
+            # Back to the object that was given the script, because the button
+            # says what the selected object carries.
+            for row in sorted(rows_under(tree(args.port), scene),
+                              key=lambda w: w["id"]):
+                if row_name(tree(args.port), row) == carrier:
+                    post(args.port, "/widget/%d/click" % row["id"])
+                    break
+            widgets, back = wait_for(
+                args.port, lambda ws: ws[ids[chosen]].get("bg") == ACCENT,
+                seconds=12.0)
+            check("and gives it back when the scene is loaded", back,
+                  "on %s" % carrier)
 
         # The sky survives the file, and the renderer clears to it. The scene
         # format has always carried a sky and the editor had no control over

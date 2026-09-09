@@ -60,6 +60,43 @@ where they are defined.
 **Assets** lists the meshes under `resources/obj`. Clicking one loads it into the
 scene and frames it.
 
+**Behaviour** attaches a script to the selected object. A script is an ordinary
+Aether source file in `resources/scripts`:
+
+```aether
+import ae3d.core
+
+exports (script_update)
+
+script_update(m: *Model, delta: float) {
+    core.model_rotate(m, 0.0, delta * 60.0, 0.0)
+}
+```
+
+`scripts/build_script.sh resources/scripts/spin.ae` compiles it into a shared
+library beside the editor, and the editor opens what it finds: the buttons in
+the section are the files in that directory, so adding a behaviour is adding a
+file and the editor does not have to be taught what it does. A script may also
+export `script_start`, which runs once when it is attached.
+
+**New script** writes a template into `resources/scripts` and says where it
+went. Building it is the same step that builds every other script, and the
+editor picks the library up when it appears.
+
+A script rebuilt while the editor is open is reopened without restarting it,
+and starts again on everything carrying it. The editor compiles nothing: it
+watches the library rather than the source, so a source saved with an error in
+it leaves the last good behaviour running until the build succeeds.
+
+The scene records the script by name, so a project that still has the file gets
+the assignment back when it loads. A scene naming a script the project does not
+have gets none rather than a wrong one.
+
+CRITICAL: build a script with the tree that will run it. A script carries its
+own copy of what it imported and reaches back into the host for the runtime, so
+the two agree about what a `Model` is only while both were built from the same
+sources.
+
 **Edit** is undo, redo, duplicate, frame, delete, and saving or loading the scene
 as `build/editor_scene.json`. Loading replaces the scene rather than merging into
 it, and clears the history, since the steps in it refer to models that are gone.
