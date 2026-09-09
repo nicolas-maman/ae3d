@@ -186,6 +186,25 @@ First working engine.
 
 ### Fixes
 
+- The agent's trace blamed a model that was plainly drawn. The pixels stage
+  read its coverage out of the region node after handing that node to the
+  object that answers, and got nothing back: the trace reported the model
+  broke at pixels and printed the coverage it had just ignored in the same
+  answer. Read first, hand over second.
+
+- Reading an answer off a socket leaked the whole buffer. `std.net`'s
+  `tcp_receive_raw` returns an owned buffer typed as a borrowed one, so nothing
+  frees it and calling `string.free` on it changes nothing, which is the part
+  that makes it hard to find. Filed as aether-lang-dev/aether#1987; the two
+  tests that read answers use `tcp_receive_n_raw`, which says who owns what.
+  595K and 1.17M of leaked bytes down to 12K and 16K.
+
+- A player borrows its clip and the engine borrows a model, and neither said
+  so. Both contracts are written where they are defined now, and the two tests
+  that relied on guessing them free what they built. `test_trace` also never
+  freed the model it deliberately orphans, which is the object that check
+  exists to trace.
+
 - Loading a scene that holds two models of the same shape crashed the editor.
   Merged draws are pooled and matched to a model by vertex array id, the pool
   outlives the models it was built from, and OpenGL hands the same id out again
