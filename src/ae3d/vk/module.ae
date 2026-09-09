@@ -22,7 +22,7 @@ exports (
     renderer_model_count, renderer_model, renderer_light_count, renderer_light, renderer_draw_calls, renderer_set_clear_color,
     renderer_load_texture, renderer_release_texture, renderer_sample_count, renderer_set_post,
     renderer_set_shadows, renderer_shadows, renderer_add_light, renderer_remove_light,
-    renderer_set_fog, renderer_fog,
+    renderer_set_fog, renderer_fog, renderer_set_shadow_distance, renderer_shadow_distance,
     skybox_create, skybox_free,
     offscreen_pixels, offscreen_width, offscreen_height,
     live_shadow_targets
@@ -58,6 +58,9 @@ extern ae3d_vk_set_screen_quad(mesh: int)
 extern ae3d_vk_set_shadows(on: int)
 extern ae3d_vk_shadows() -> int
 extern ae3d_vk_live_shadow_targets() -> int
+// The size ae3d_vk.c builds the shadow image at.
+const SHADOW_SIZE = 2048
+
 extern ae3d_vk_shadow_begin() -> int
 extern ae3d_vk_shadow_draw(mesh: int, instances: int, instance_count: int)
 extern ae3d_vk_shadow_end()
@@ -120,6 +123,9 @@ struct VKRenderer {
     clear_g: float
     clear_b: float
     fog: Fog
+    shadow_distance: float
+    shadow_direction: Vec3
+    shadow_texel_world: float
     scene_start: float
     scene_time: float
     defaults: ptr
@@ -231,6 +237,7 @@ backend(r: *VKRenderer) -> Backend {
         set_render_scale: vtable_set_render_scale as fn(ptr, float) -> float,
         set_clear_color: renderer_set_clear_color as fn(ptr, float, float, float),
         set_fog: renderer_set_fog as fn(ptr, ptr),
+        set_shadow_distance: renderer_set_shadow_distance as fn(ptr, float),
         set_shadows: vtable_set_shadows as fn(ptr, int),
         shadows: vtable_shadows as fn(ptr) -> int,
         add_light: renderer_add_light as fn(ptr, ptr),
@@ -310,7 +317,7 @@ renderer_shadows(r: *VKRenderer) -> bool {
 
 // The same box the OpenGL backend builds, from the same scene, so the two
 // backends light and shadow a scene identically.
-light_space_matrix(r: *VKRenderer, light: *Light) -> Mat4 {
+light_space_matrix(r: *VKRenderer, light: *Light, cam: *Camera) -> Mat4 {
     centre = core.vec3(0.0, 0.0, 0.0)
     radius = 1.0
     shown = 0
@@ -327,6 +334,18 @@ light_space_matrix(r: *VKRenderer, light: *Light) -> Mat4 {
     }
     if shown > 0 { centre = core.v3_mul(centre, 1.0 / (shown * 1.0)) }
 
+    // A map fitted to the whole world is a map with nothing left for the things
+    // in it: a ground plane ninety metres across pushes the box out until the
+    // depth range swallows a figure two metres tall, and the shadow disappears
+    // with no error anywhere. A shadow distance fits the box to what the camera
+    // can see instead, so how sharp a shadow is stops depending on how big the
+    // world is.
+    if r.shadow_distance > 0.0 && cam != null {
+        centre = core.v3_add(cam.position,
+                             core.v3_mul(cam.front, r.shadow_distance * 0.5))
+        return light_box(r, light, centre, r.shadow_distance)
+    }
+
     i = 0
     while i < count {
         m = list.get_raw(r.models, i) as *Model
@@ -337,14 +356,20 @@ light_space_matrix(r: *VKRenderer, light: *Light) -> Mat4 {
         i = i + 1
     }
 
-    // A light's direction points at the light, the way the shading does it, so
-    // the way the light travels is the other way about. A point light travels
-    // from where it is towards what it lights.
+    return light_box(r, light, centre, radius)
+}
+
+// A light's direction points at the light, the way the shading does it, so the
+// way the light travels is the other way about. A point light travels from
+// where it is towards what it lights.
+light_box(r: *VKRenderer, light: *Light, centre: Vec3, radius: float) -> Mat4 {
     direction = core.v3_mul(core.v3_normalize(light.direction), 0.0 - 1.0)
     if light.mode != core.MODE_DIRECTIONAL {
         direction = core.v3_normalize(core.v3_sub(centre, light.position))
     }
     if core.v3_len(direction) < 0.001 { direction = core.vec3(0.0, 0.0 - 1.0, 0.0) }
+    r.shadow_direction = direction
+    r.shadow_texel_world = radius * 2.0 / (SHADOW_SIZE * 1.0)
 
     eye = core.v3_sub(centre, core.v3_mul(direction, radius * 2.0))
     up = core.vec3(0.0, 1.0, 0.0)
@@ -356,7 +381,7 @@ light_space_matrix(r: *VKRenderer, light: *Light) -> Mat4 {
     return core.mat4_mul(projection, view)
 }
 
-render_shadow_pass(r: *VKRenderer, light: *Light) {
+render_shadow_pass(r: *VKRenderer, light: *Light, cam: *Camera) {
     if light == null || ae3d_vk_shadows() != 1 { return }
 
     // The depth pass has a block of its own to write into, and which one that
@@ -364,7 +389,7 @@ render_shadow_pass(r: *VKRenderer, light: *Light) {
     // frame happened to leave selected.
     ae3d_vk_set_program(core.SHADER_CUSTOM)
 
-    r.shadow_space = light_space_matrix(r, light)
+    r.shadow_space = light_space_matrix(r, light, cam)
     ae3d_vk_scene_set_clip_mat4(vkscene.OFF_LIGHTSPACEMATRIX, &r.shadow_space)
     if ae3d_vk_shadow_begin() != 1 { return }
 
@@ -589,6 +614,9 @@ write_frame_uniforms(r: *VKRenderer, light: *Light, cam: *Camera) {
     ae3d_vk_scene_set_float(vkscene.OFF_VIEWDISTANCE, core.camera_far(cam))
     upload_lights(r, light)
     ae3d_vk_scene_set_clip_mat4(vkscene.OFF_LIGHTSPACEMATRIX, &r.shadow_space)
+    ae3d_vk_scene_set_vec3(vkscene.OFF_SHADOWDIRECTION, r.shadow_direction.x,
+                           r.shadow_direction.y, r.shadow_direction.z)
+    ae3d_vk_scene_set_float(vkscene.OFF_SHADOWTEXELWORLD, r.shadow_texel_world)
     ae3d_vk_scene_set_int(vkscene.OFF_HASSHADOWMAP, ae3d_vk_shadows())
     ae3d_vk_scene_set_float(vkscene.OFF_CAUSTICSTIME, r.scene_time)
 
@@ -688,21 +716,33 @@ active_program(m: *Model) -> int {
 
 // The same array the OpenGL backend fills, at the offsets the generator derived
 // from the one shader source, so the two cannot disagree about the layout.
+// The key light takes slot zero and the registered ones fill what is left, the
+// same order the OpenGL backend uploads them in: the two have to agree about
+// which light a scene is shadowed by.
 upload_lights(r: *VKRenderer, key: *Light) {
-    count = list.size(r.lights)
-    if count > vkscene.MAX_LIGHTS { count = vkscene.MAX_LIGHTS }
-
-    i = 0
-    while i < count {
-        upload_light(i, list.get_raw(r.lights, i) as *Light)
-        i = i + 1
-    }
-
-    if count == 0 && key != null {
+    count = 0
+    if key != null {
         upload_light(0, key)
         count = 1
     }
+
+    held = list.size(r.lights)
+    i = 0
+    while i < held && count < vkscene.MAX_LIGHTS {
+        l = list.get_raw(r.lights, i) as *Light
+        if l != key {
+            upload_light(count, l)
+            count = count + 1
+        }
+        i = i + 1
+    }
     ae3d_vk_scene_set_int(vkscene.OFF_LIGHTCOUNT, count)
+}
+
+key_light(r: *VKRenderer, key: *Light) -> *Light {
+    if key != null { return key }
+    if list.size(r.lights) > 0 { return list.get_raw(r.lights, 0) as *Light }
+    return null
 }
 
 upload_light(index: int, l: *Light) {
@@ -777,12 +817,11 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     if !r.initialized { return }
     r.scene_time = platform.time() - r.scene_start
 
-    active_light = light
-    if list.size(r.lights) > 0 { active_light = list.get_raw(r.lights, 0) as *Light }
+    active_light = key_light(r, light)
 
     if ae3d_vk_frame_begin(r.clear_r, r.clear_g, r.clear_b, 1.0) != 1 { return }
 
-    render_shadow_pass(r, active_light)
+    render_shadow_pass(r, active_light, cam)
     set_frame_uniforms(r, active_light, cam)
 
     culling = 0
@@ -1089,6 +1128,14 @@ renderer_set_fog(r: *VKRenderer, f: *Fog) {
 }
 
 renderer_fog(r: *VKRenderer) -> Fog { return r.fog }
+
+// The same bound the OpenGL backend keeps: zero fits the map to the scene,
+// anything else fits it to what the camera can see.
+renderer_set_shadow_distance(r: *VKRenderer, metres: float) {
+    r.shadow_distance = metres
+}
+
+renderer_shadow_distance(r: *VKRenderer) -> float { return r.shadow_distance }
 
 renderer_set_clear_color(r: *VKRenderer, red: float, green: float, blue: float) {
     r.clear_r = red

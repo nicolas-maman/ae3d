@@ -26,7 +26,8 @@ exports (
     renderer_set_render_scale, renderer_render_scale,
     renderer_set_target,
     renderer_set_bloom_params, renderer_set_post, renderer_set_fog, renderer_fog,
-    renderer_set_shadows, renderer_shadows, renderer_default_program,
+    renderer_set_shadows, renderer_shadows, renderer_shadow_map, renderer_default_program,
+    renderer_set_shadow_distance, renderer_shadow_distance,
     renderer_load_texture, renderer_release_texture, renderer_texture_count,
     renderer_frame_pixels, read_pixel, snapshot
 )
@@ -147,6 +148,8 @@ struct ProgramSlots {
     use_instance_color: int
     caustics_time: int
     fog_enabled: int
+    shadow_direction: int
+    shadow_texel_world: int
     fog_start: int
     fog_end: int
     fog_color: int
@@ -204,7 +207,10 @@ struct GLRenderer {
     shadow_fbo: int
     shadow_map: int
     shadow_enabled: bool
+    shadow_distance: float
     shadow_space: Mat4
+    shadow_direction: Vec3
+    shadow_texel_world: float
     fog: Fog
 
     clear_r: float
@@ -336,6 +342,7 @@ backend(r: *GLRenderer) -> Backend {
         set_render_scale: vtable_set_render_scale as fn(ptr, float) -> float,
         set_clear_color: renderer_set_clear_color as fn(ptr, float, float, float),
         set_fog: renderer_set_fog as fn(ptr, ptr),
+        set_shadow_distance: renderer_set_shadow_distance as fn(ptr, float),
         set_shadows: vtable_set_shadows as fn(ptr, int),
         shadows: vtable_shadows as fn(ptr) -> int,
         add_light: renderer_add_light as fn(ptr, ptr),
@@ -410,6 +417,8 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
     s.is_instanced = ae3d_gl_uniform_location(program, "isInstanced")
     s.use_instance_color = ae3d_gl_uniform_location(program, "useInstanceColor")
     s.caustics_time = ae3d_gl_uniform_location(program, "causticsTime")
+    s.shadow_direction = ae3d_gl_uniform_location(program, "shadowDirection")
+    s.shadow_texel_world = ae3d_gl_uniform_location(program, "shadowTexelWorld")
     s.fog_enabled = ae3d_gl_uniform_location(program, "enableFog")
     s.fog_start = ae3d_gl_uniform_location(program, "fogStart")
     s.fog_end = ae3d_gl_uniform_location(program, "fogEnd")
@@ -868,9 +877,22 @@ renderer_set_shadows(r: *GLRenderer, on: bool) {
 
 renderer_shadows(r: *GLRenderer) -> bool { return r.shadow_enabled }
 
+// The map itself, so a caller can tell "shadows are off" from "shadows are on
+// and the map was never built".
+renderer_shadow_map(r: *GLRenderer) -> int { return r.shadow_map }
+
+// How far from the camera shadows are drawn. Zero fits the map to the whole
+// scene, which is right for a scene that is all of one size and wrong for a
+// street: past this, a shadow is not drawn at all rather than drawn badly.
+renderer_set_shadow_distance(r: *GLRenderer, metres: float) {
+    r.shadow_distance = metres
+}
+
+renderer_shadow_distance(r: *GLRenderer) -> float { return r.shadow_distance }
+
 // The light's box has to cover what the camera can see, so it is centred on the
 // scene and sized to it rather than to the light.
-light_space_matrix(r: *GLRenderer, light: *Light) -> Mat4 {
+light_space_matrix(r: *GLRenderer, light: *Light, cam: *Camera) -> Mat4 {
     centre = core.vec3(0.0, 0.0, 0.0)
     radius = 1.0
     shown = 0
@@ -887,6 +909,18 @@ light_space_matrix(r: *GLRenderer, light: *Light) -> Mat4 {
     }
     if shown > 0 { centre = core.v3_mul(centre, 1.0 / (shown * 1.0)) }
 
+    // A map fitted to the whole world is a map with nothing left for the things
+    // in it: a ground plane ninety metres across pushes the box out until the
+    // depth range swallows a figure two metres tall, and the shadow disappears
+    // with no error anywhere. A shadow distance fits the box to what the camera
+    // can see instead, so how sharp a shadow is stops depending on how big the
+    // world is.
+    if r.shadow_distance > 0.0 && cam != null {
+        centre = core.v3_add(cam.position,
+                             core.v3_mul(cam.front, r.shadow_distance * 0.5))
+        return light_box(r, light, centre, r.shadow_distance)
+    }
+
     i = 0
     while i < count {
         m = list.get_raw(r.models, i) as *Model
@@ -897,14 +931,20 @@ light_space_matrix(r: *GLRenderer, light: *Light) -> Mat4 {
         i = i + 1
     }
 
-    // A light's direction points at the light, the way the shading does it, so
-    // the way the light travels is the other way about. A point light travels
-    // from where it is towards what it lights.
+    return light_box(r, light, centre, radius)
+}
+
+// A light's direction points at the light, the way the shading does it, so the
+// way the light travels is the other way about. A point light travels from
+// where it is towards what it lights.
+light_box(r: *GLRenderer, light: *Light, centre: Vec3, radius: float) -> Mat4 {
     direction = core.v3_mul(core.v3_normalize(light.direction), 0.0 - 1.0)
     if light.mode != core.MODE_DIRECTIONAL {
         direction = core.v3_normalize(core.v3_sub(centre, light.position))
     }
     if core.v3_len(direction) < 0.001 { direction = core.vec3(0.0, 0.0 - 1.0, 0.0) }
+    r.shadow_direction = direction
+    r.shadow_texel_world = radius * 2.0 / (SHADOW_SIZE * 1.0)
 
     eye = core.v3_sub(centre, core.v3_mul(direction, radius * 2.0))
     up = core.vec3(0.0, 1.0, 0.0)
@@ -916,12 +956,12 @@ light_space_matrix(r: *GLRenderer, light: *Light) -> Mat4 {
     return core.mat4_mul(projection, view)
 }
 
-render_shadow_pass(r: *GLRenderer, light: *Light) {
+render_shadow_pass(r: *GLRenderer, light: *Light, cam: *Camera) {
     if !r.shadow_enabled || r.shadow_fbo == 0 || r.shadow_program == 0 || light == null {
         return
     }
 
-    r.shadow_space = light_space_matrix(r, light)
+    r.shadow_space = light_space_matrix(r, light, cam)
 
     ae3d_gl_fbo_bind(r.shadow_fbo)
     ae3d_gl_viewport(0, 0, SHADOW_SIZE, SHADOW_SIZE)
@@ -1216,12 +1256,9 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
     r.bound_instanced = 0 - 1
     r.bound_instance_color = 0 - 1
 
-    active_light = light
-    if list.size(r.lights) > 0 {
-        active_light = list.get_raw(r.lights, 0) as *Light
-    }
+    active_light = key_light(r.lights, light)
 
-    render_shadow_pass(r, active_light)
+    render_shadow_pass(r, active_light, cam)
 
     bind_output(r)
     post_active = begin_post_processing(r)
@@ -1626,40 +1663,51 @@ set_frame_uniforms(r: *GLRenderer, slots: *ProgramSlots, view_projection: *Mat4,
     ae3d_gl_uniform_float(slots.fog_intensity, r.fog.intensity)
 }
 
-// Every light the scene holds, capped at what the shader declares. The key light
-// is whichever the caller named, so a scene with one light behaves exactly as it
-// did before there could be several.
+// Every light the scene holds, capped at what the shader declares.
+//
+// The key light goes in slot zero and the registered ones fill what is left.
+// It is the one the scene is shadowed by and the one the ambient term comes
+// from, so a program that named a key light and then registered a few lamps
+// used to lose its key light entirely: the sun went out the moment a street
+// lamp was added.
 upload_lights(slots: *ProgramSlots, lights: ptr, key: *Light) {
     if slots.light_slots == null { return }
     slots_of = slots.light_slots as int[]
 
     count = 0
-    if lights != null { count = list.size(lights) }
-    if count > MAX_LIGHTS { count = MAX_LIGHTS }
-
-    i = 0
-    while i < count {
-        upload_light(slots_of, i, list.get_raw(lights, i) as *Light)
-        i = i + 1
-    }
-
-    // A caller that passed a light without registering it still gets lit.
-    if count == 0 && key != null {
+    if key != null {
         upload_light(slots_of, 0, key)
         count = 1
     }
+
+    held = 0
+    if lights != null { held = list.size(lights) }
+    i = 0
+    while i < held && count < MAX_LIGHTS {
+        l = list.get_raw(lights, i) as *Light
+        if l != key {
+            upload_light(slots_of, count, l)
+            count = count + 1
+        }
+        i = i + 1
+    }
     ae3d_gl_uniform_int(slots.light_count, count)
 
-    first = key
-    if count > 0 && lights != null && list.size(lights) > 0 {
-        first = list.get_raw(lights, 0) as *Light
-    }
+    first = key_light(lights, key)
     if first != null {
         ae3d_gl_uniform_vec3(slots.compat_light_pos, first.position.x, first.position.y, first.position.z)
         ae3d_gl_uniform_vec3(slots.compat_light_color, first.color.x, first.color.y, first.color.z)
         ae3d_gl_uniform_float(slots.compat_light_intensity, first.intensity)
         ae3d_gl_uniform_vec3(slots.compat_light_direction, first.direction.x, first.direction.y, first.direction.z)
     }
+}
+
+// Whichever light the scene is shadowed and shaded by: the one the caller
+// named, or the first it registered when it named none.
+key_light(lights: ptr, key: *Light) -> *Light {
+    if key != null { return key }
+    if lights != null && list.size(lights) > 0 { return list.get_raw(lights, 0) as *Light }
+    return null
 }
 
 upload_light(slots_of: int[], index: int, l: *Light) {
@@ -1699,6 +1747,9 @@ bind_shadow_map(r: *GLRenderer, slots: *ProgramSlots) {
     }
     ae3d_gl_uniform_int(slots.has_shadow_map, 1)
     ae3d_gl_uniform_mat4(slots.light_space, &r.shadow_space)
+    ae3d_gl_uniform_vec3(slots.shadow_direction, r.shadow_direction.x,
+                         r.shadow_direction.y, r.shadow_direction.z)
+    ae3d_gl_uniform_float(slots.shadow_texel_world, r.shadow_texel_world)
     ae3d_gl_texture_bind(1, r.shadow_map)
     ae3d_gl_uniform_int(slots.shadow_map, 1)
     // Leaves unit zero on the default texture, so the cache that decides

@@ -66,6 +66,8 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     bool hasShadowMap;
     float shadowIntensity;
     float shadowSoftness;
+    vec3 shadowDirection;
+    float shadowTexelWorld;
     bool enablePerlinNoise;
     float noiseScale;
     int noiseOctaves;
@@ -190,6 +192,17 @@ layout(location = 4) in vec4 FragPosLightSpace;
 
 
 
+// The way the light travelled when the map was drawn. The map is orthographic
+// whatever kind of light cast it, so for a point light this is not the
+// direction from the surface to the lamp: the offset a surface needs depends on
+// the angle it makes with the map, and using the wrong one of the two striped
+// every wall the map happened to graze.
+
+// How much of the world one shadow-map texel covers. Everything about the map
+// scales with the box it was fitted to, and this is the number that says by how
+// much.
+
+
 
 // GPU Gems Chapter 5: Improved Perlin Noise Support
 
@@ -218,28 +231,48 @@ float light_depth(float clipZ) {
 }
 
 float shadow_factor() {
-    vec3 projected = FragPosLightSpace.xyz / FragPosLightSpace.w;
+    vec3 surface = normalize(Normal);
+    vec3 toLight = normalize(-shadowDirection);
+
+    // How much depth one texel spans is the tangent of the angle between the
+    // surface and the map, which runs away at grazing incidence: a wall lit
+    // along its length spans many texels of depth and a floor lit from
+    // overhead spans almost none. Bounded, because the tangent is not.
+    float facing = max(dot(surface, toLight), 0.0);
+    float slope = min(sqrt(1.0 - facing * facing) / max(facing, 0.02), 32.0);
+
+    // Offset along the surface rather than into the depth. Pushing the
+    // comparison deeper is what a depth bias does, and enough of it to stop a
+    // grazing wall striping itself is enough to lift every shadow off the
+    // ground with it. Moving the sample sideways by the width of a texel costs
+    // the same and detaches nothing.
+    vec4 lightSpace = lightSpaceMatrix *
+        vec4(FragPos + surface * shadowTexelWorld * (1.0 + slope), 1.0);
+    vec3 projected = lightSpace.xyz / lightSpace.w;
     projected.xy = projected.xy * 0.5 + 0.5;
     projected.z = light_depth(projected.z);
     if (projected.z > 1.0) {
         return 1.0;
     }
 
-    vec3 surface = normalize(Normal);
-    vec3 toLight = normalize(lights[0].position - FragPos);
-    if (lights[0].isDirectional == 1) {
-        toLight = normalize(lights[0].direction);
-    }
-
-    // A surface nearly edge-on to the light needs a larger offset, or its own
-    // depth reads as occluding it.
-    float bias = max(0.02 * (1.0 - dot(surface, toLight)), 0.005);
-
     vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0));
     // At least one texel between taps. Below that the nine samples of the 3x3
     // land on the same texel and cost nine lookups to produce what one would,
     // and the edge is as hard as no filtering at all.
     float radius = max(shadowSoftness, 1.0);
+
+    // The offset a surface needs in order not to shadow itself is the depth one
+    // shadow texel spans, and a texel is worth the same fraction of the light
+    // box however large the box is: the texel and the depth range scale
+    // together. A constant in normalised depth does not, so it was sized for
+    // one scene and swallowed whole figures in a larger one -- a street ninety
+    // metres long left nothing standing in it casting anything at all. A
+    // surface nearly edge-on to the light spans more depth across that texel,
+    // which is what the slope term is for.
+    // What is left for the depth comparison is the texel the sample landed in,
+    // which the offset above has already taken the slope out of.
+    float bias = 2.0 * radius / (2.0 * float(textureSize(shadowMap, 0).x));
+
     float lit = 0.0;
     for (int sx = -1; sx <= 1; sx++) {
         for (int sy = -1; sy <= 1; sy++) {

@@ -1,173 +1,348 @@
-"""Build the zombie-on-a-street scene the zombie_street example loads.
+"""Build the street the zombie_street example loads.
 
     blender --background --factory-startup --python tools/blender/make_zombie_street.py -- --out resources/blender/zombie_street.blend
 
-The zombie is rigid parts rather than a skinned mesh, because ae3d has no
-skinning (ae3d#192). Every part carries its own world-space animation, so the
-walk and the attack are keyframed maths rather than a rig.
+The zombie is rigid parts on a parent chain rather than a skinned mesh, because
+ae3d has no skinning (ae3d#192). Every joint is the origin of the part below it
+and every part overlaps the one above, so a bent elbow bends rather than coming
+apart: the transform hierarchy carries each limb through the arc of its parent
+(ae3d#230).
+
+Everything is textured from generated images (zombie_street_textures) with UVs
+projected per face at a fixed number of repeats per metre, so a wall and a kerb
+carry brick and paving of the same size whatever their own size.
 
 The timeline is one clip in three phases at 24fps:
 
-    frames   1- 72   walking up the street
-    frames  73- 96   the lunge and the swipe
-    frames  97-120   recovering, still walking
+    frames   1- 64   walking up the street
+    frames  65- 92   the lunge and the swipe
+    frames  93-120   recovering, still walking
 
-Seek to 3.0s over the agent channel and the zombie is mid-attack.
+Seek to 3.2s over the agent channel and the zombie is mid-attack.
 """
 
 import bpy
+import bmesh
 import argparse
 import math
 import os
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import zombie_street_textures as textures
+
 FPS = 24
-WALK_END = 72
-ATTACK_END = 96
+WALK_END = 64
+ATTACK_END = 92
 TOTAL = 120
 
-STRIDE = 0.55
-CADENCE = 24.0
+STRIDE_RATE = 1.9
+WALK_SPEED = 0.9
+WALK_START_X = -6.4
 
 
-def material(name, colour, roughness=0.85, metallic=0.0):
+def material(name, image, roughness=0.9, metallic=0.0, emission=None):
     made = bpy.data.materials.new(name)
     made.use_nodes = True
-    for node in made.node_tree.nodes:
-        if node.type == "BSDF_PRINCIPLED":
-            node.inputs["Base Color"].default_value = colour
-            node.inputs["Roughness"].default_value = roughness
-            node.inputs["Metallic"].default_value = metallic
+    tree = made.node_tree
+    principled = next(n for n in tree.nodes if n.type == "BSDF_PRINCIPLED")
+    principled.inputs["Roughness"].default_value = roughness
+    principled.inputs["Metallic"].default_value = metallic
+    if emission is not None:
+        principled.inputs["Emission Color"].default_value = emission + (1.0,)
+        principled.inputs["Emission Strength"].default_value = 4.0
+        principled.inputs["Base Color"].default_value = emission + (1.0,)
+        return made
+
+    node = tree.nodes.new("ShaderNodeTexImage")
+    node.image = image
+    node.location = (-320.0, 200.0)
+    tree.links.new(node.outputs["Color"], principled.inputs["Base Color"])
+    # The exported MTL carries the image and a base colour. Keeping the colour
+    # white means a renderer that samples the texture is not also tinting it by
+    # whatever the swatch happened to be.
+    principled.inputs["Base Color"].default_value = (1.0, 1.0, 1.0, 1.0)
     return made
 
 
-def box(name, size, location, surface):
-    bpy.ops.mesh.primitive_cube_add(size=1.0, location=location)
-    obj = bpy.context.active_object
-    obj.name = name
-    obj.scale = size
-    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
-    obj.data.materials.append(surface)
+def project_uvs(bm, repeats_per_metre):
+    """Box projection: every face takes its two axes from its own normal.
+
+    A wall and a kerb of different sizes then carry brick of the same size,
+    which is the whole reason to do this in the builder rather than leave the
+    mesh unwrapped.
+    """
+    layer = bm.loops.layers.uv.verify()
+    for face in bm.faces:
+        normal = face.normal
+        axis = max(range(3), key=lambda i: abs(normal[i]))
+        if axis == 0:
+            first, second = 1, 2
+        elif axis == 1:
+            first, second = 0, 2
+        else:
+            first, second = 0, 1
+        for loop in face.loops:
+            position = loop.vert.co
+            loop[layer].uv = (position[first] * repeats_per_metre,
+                              position[second] * repeats_per_metre)
+
+
+def block(name, low, high, surface, repeats=0.5, bevel=0.0):
+    """A box between two corners, in the space of the object that carries it."""
+    bm = bmesh.new()
+    corners = [
+        (low[0], low[1], low[2]), (high[0], low[1], low[2]),
+        (high[0], high[1], low[2]), (low[0], high[1], low[2]),
+        (low[0], low[1], high[2]), (high[0], low[1], high[2]),
+        (high[0], high[1], high[2]), (low[0], high[1], high[2]),
+    ]
+    verts = [bm.verts.new(corner) for corner in corners]
+    for indices in ((0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4),
+                    (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)):
+        bm.faces.new([verts[i] for i in indices])
+    bm.normal_update()
+
+    if bevel > 0.0:
+        bmesh.ops.bevel(bm, geom=list(bm.verts) + list(bm.edges), offset=bevel,
+                        segments=2, profile=0.5, affect="EDGES", clamp_overlap=True)
+        bm.normal_update()
+
+    project_uvs(bm, repeats)
+
+    mesh = bpy.data.meshes.new(name)
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.materials.append(surface)
+
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.scene.collection.objects.link(obj)
     return obj
 
 
-def key(obj, frame, location, rotation):
-    obj.location = location
-    obj.rotation_euler = rotation
-    obj.keyframe_insert(data_path="location", frame=frame)
-    obj.keyframe_insert(data_path="rotation_euler", frame=frame)
+def build_street(parts, surfaces):
+    # Nothing here shares a plane with anything else: the road sinks into the
+    # ground and the kerbs sink into the road, so no two faces are coplanar and
+    # the depth test never has to choose between them.
+    ground = block("Street_Ground", (-46.0, -34.0, -0.55), (46.0, 34.0, -0.25),
+                   surfaces["tarmac"], repeats=0.12)
+    ground.location = (6.0, 0.0, 0.0)
+    parts["Street_Ground"] = ground
+
+    road = block("Street_Road", (-34.0, -3.5, -0.30), (34.0, 3.5, 0.0),
+                 surfaces["tarmac"], repeats=0.55)
+    road.location = (6.0, 0.0, 0.0)
+    parts["Street_Road"] = road
+
+    for side, y in (("L", 4.95), ("R", -4.95)):
+        kerb = block("Street_Path" + side,
+                     (-34.0, -1.55, -0.45), (34.0, 1.55, 0.15),
+                     surfaces["paving"], repeats=0.75, bevel=0.02)
+        kerb.location = (6.0, y, 0.0)
+        parts["Street_Path" + side] = kerb
+
+    # The far terrace runs unbroken; the near side is set back, so the street
+    # reads as a corridor rather than a trench. Blender Y becomes ae3d -Z.
+    far = ((-22.0, 7.0, 12.5, "brick"), (-9.0, 8.0, 9.0, "concrete"),
+           (2.0, 6.5, 13.5, "brick"), (13.0, 7.5, 10.0, "concrete"),
+           (25.0, 7.0, 15.0, "brick"))
+    for index, (x, depth, height, surface) in enumerate(far):
+        wall = block("Street_BlockL%d" % index,
+                     (-5.6, 0.0, 0.0), (5.6, depth, height),
+                     surfaces[surface], repeats=0.35)
+        wall.location = (x, 6.5, 0.0)
+        parts["Street_BlockL%d" % index] = wall
+
+    near = ((-16.0, 8.0, 11.0, "concrete"), (2.0, 9.0, 14.0, "brick"),
+            (20.0, 8.0, 12.0, "concrete"))
+    for index, (x, depth, height, surface) in enumerate(near):
+        wall = block("Street_BlockR%d" % index,
+                     (-6.5, -depth, 0.0), (6.5, 0.0, height),
+                     surfaces[surface], repeats=0.35)
+        wall.location = (x, -7.5, 0.0)
+        parts["Street_BlockR%d" % index] = wall
+
+    for index, x in enumerate((-14.0, 0.0, 14.0)):
+        post = block("Street_Lamp%d" % index,
+                     (-0.075, -0.075, 0.0), (0.075, 0.075, 4.4),
+                     surfaces["metal"], repeats=1.2, bevel=0.015)
+        post.location = (x, 4.1, 0.1)
+        parts["Street_Lamp%d" % index] = post
+
+        arm = block("Street_LampArm%d" % index,
+                    (-0.06, -1.15, -0.06), (0.06, 0.0, 0.06),
+                    surfaces["metal"], repeats=1.2, bevel=0.02)
+        arm.parent = post
+        arm.location = (0.0, -0.04, 4.35)
+        parts["Street_LampArm%d" % index] = arm
+
+        head = block("Street_LampHead%d" % index,
+                     (-0.17, -0.28, -0.16), (0.17, 0.28, 0.0),
+                     surfaces["lamp"], repeats=1.0, bevel=0.03)
+        head.parent = arm
+        head.location = (0.0, -1.12, -0.05)
+        parts["Street_LampHead%d" % index] = head
 
 
-def walk_phase(frame):
-    return (frame - 1) / CADENCE * math.tau
+def build_zombie(parts, surfaces):
+    """Every limb is a box whose joint is its own origin.
+
+    Each one extends downwards past its child joint and upwards past its own,
+    so consecutive parts overlap: the overlap is what closes the seam when a
+    joint bends.
+    """
+    skin = surfaces["skin"]
+    cloth = surfaces["cloth"]
+
+    hips = block("Zombie_Hips", (-0.16, -0.17, -0.11), (0.16, 0.17, 0.15),
+                 cloth, repeats=3.0, bevel=0.03)
+    hips.location = (WALK_START_X, 0.0, 0.95)
+    parts["Zombie_Hips"] = hips
+
+    spine = block("Zombie_Spine", (-0.19, -0.145, -0.06), (0.19, 0.145, 0.46),
+                  cloth, repeats=3.0, bevel=0.04)
+    spine.parent = hips
+    spine.location = (0.0, 0.0, 0.12)
+    parts["Zombie_Spine"] = spine
+
+    head = block("Zombie_Head", (-0.115, -0.10, -0.04), (0.115, 0.10, 0.21),
+                 skin, repeats=4.0, bevel=0.045)
+    head.parent = spine
+    head.location = (0.0, 0.0, 0.48)
+    parts["Zombie_Head"] = head
+
+    jaw = block("Zombie_Jaw", (-0.10, -0.075, -0.06), (0.12, 0.075, 0.0),
+                skin, repeats=5.0, bevel=0.02)
+    jaw.parent = head
+    jaw.location = (0.02, 0.0, 0.015)
+    parts["Zombie_Jaw"] = jaw
+
+    for side, y in (("L", 0.235), ("R", -0.235)):
+        upper = block("Zombie_ArmUpper" + side,
+                      (-0.058, -0.058, -0.30), (0.058, 0.058, 0.06),
+                      cloth, repeats=4.0, bevel=0.025)
+        upper.parent = spine
+        upper.location = (0.0, y, 0.37)
+        parts["Zombie_ArmUpper" + side] = upper
+
+        lower = block("Zombie_ArmLower" + side,
+                      (-0.05, -0.05, -0.27), (0.05, 0.05, 0.055),
+                      skin, repeats=4.5, bevel=0.022)
+        lower.parent = upper
+        lower.location = (0.0, 0.0, -0.29)
+        parts["Zombie_ArmLower" + side] = lower
+
+        hand = block("Zombie_Hand" + side,
+                     (-0.058, -0.035, -0.15), (0.058, 0.035, 0.04),
+                     skin, repeats=6.0, bevel=0.02)
+        hand.parent = lower
+        hand.location = (0.0, 0.0, -0.26)
+        parts["Zombie_Hand" + side] = hand
+
+    for side, y in (("L", 0.105), ("R", -0.105)):
+        thigh = block("Zombie_LegUpper" + side,
+                      (-0.078, -0.078, -0.40), (0.078, 0.078, 0.07),
+                      cloth, repeats=3.5, bevel=0.03)
+        thigh.parent = hips
+        thigh.location = (0.0, y, -0.06)
+        parts["Zombie_LegUpper" + side] = thigh
+
+        shin = block("Zombie_LegLower" + side,
+                     (-0.066, -0.066, -0.39), (0.066, 0.066, 0.06),
+                     cloth, repeats=3.5, bevel=0.028)
+        shin.parent = thigh
+        shin.location = (0.0, 0.0, -0.39)
+        parts["Zombie_LegLower" + side] = shin
+
+        foot = block("Zombie_Foot" + side,
+                     (-0.075, -0.072, -0.09), (0.185, 0.072, 0.035),
+                     cloth, repeats=4.0, bevel=0.025)
+        foot.parent = shin
+        foot.location = (0.0, 0.0, -0.38)
+        parts["Zombie_Foot" + side] = foot
 
 
-def advance(frame):
-    """How far up the street the zombie has walked by this frame."""
-    if frame <= WALK_END:
-        return (frame - 1) / CADENCE * STRIDE * 2.0
-    walked = (WALK_END - 1) / CADENCE * STRIDE * 2.0
-    if frame <= ATTACK_END:
-        lunge = (frame - WALK_END) / float(ATTACK_END - WALK_END)
-        return walked + 0.9 * math.sin(lunge * math.pi * 0.5)
-    resumed = (frame - ATTACK_END) / CADENCE * STRIDE * 2.0
-    return walked + 0.9 + resumed
+def key(obj, frame, location=None, rotation=None):
+    if location is not None:
+        obj.location = location
+        obj.keyframe_insert(data_path="location", frame=frame)
+    if rotation is not None:
+        obj.rotation_euler = rotation
+        obj.keyframe_insert(data_path="rotation_euler", frame=frame)
 
 
-def attack_weight(frame):
-    """0 outside the lunge, rising to 1 at the strike and easing back."""
+def phase(frame):
+    """The angle the walk cycle has reached at this frame."""
+    return (frame - 1) / FPS * STRIDE_RATE * math.tau
+
+
+def strike(frame):
+    """0 outside the lunge, 1 at the moment of the swipe."""
     if frame <= WALK_END or frame > ATTACK_END:
         return 0.0
     t = (frame - WALK_END) / float(ATTACK_END - WALK_END)
-    return math.sin(t * math.pi)
+    return math.sin(t * math.pi) ** 1.4
 
 
-def build_zombie(parts):
-    skin = material("ZombieSkin", (0.42, 0.52, 0.33, 1.0), 0.9)
-    cloth = material("ZombieCloth", (0.20, 0.19, 0.24, 1.0), 0.95)
-    bone = material("ZombieBone", (0.78, 0.75, 0.62, 1.0), 0.7)
-
-    parts["Zombie_Torso"] = box("Zombie_Torso", (0.52, 0.30, 0.78), (0.0, 0.0, 1.18), cloth)
-    parts["Zombie_Head"] = box("Zombie_Head", (0.34, 0.32, 0.36), (0.0, 0.0, 1.76), skin)
-    parts["Zombie_Jaw"] = box("Zombie_Jaw", (0.26, 0.22, 0.10), (0.10, 0.0, 1.62), bone)
-
-    for side, y in (("L", 0.36), ("R", -0.36)):
-        parts["Zombie_Arm" + side] = box(
-            "Zombie_Arm" + side, (0.46, 0.18, 0.18), (0.28, y, 1.42), cloth)
-        parts["Zombie_Hand" + side] = box(
-            "Zombie_Hand" + side, (0.34, 0.16, 0.16), (0.70, y, 1.42), skin)
-        parts["Zombie_Thigh" + side] = box(
-            "Zombie_Thigh" + side, (0.22, 0.22, 0.52), (0.0, y * 0.5, 0.66), cloth)
-        parts["Zombie_Shin" + side] = box(
-            "Zombie_Shin" + side, (0.19, 0.19, 0.48), (0.0, y * 0.5, 0.24), cloth)
+def advance(frame):
+    """How far up the street the hips have travelled by this frame."""
+    walked = min(frame, WALK_END + 1) - 1
+    distance = walked / FPS * WALK_SPEED
+    if frame > WALK_END:
+        lunge = min(frame, ATTACK_END) - WALK_END
+        span = float(ATTACK_END - WALK_END)
+        distance += 0.75 * math.sin(lunge / span * math.pi * 0.5)
+    if frame > ATTACK_END:
+        distance += (frame - ATTACK_END) / FPS * WALK_SPEED * 0.8
+    return distance
 
 
-def animate_zombie(parts):
+def animate(parts):
     for frame in range(1, TOTAL + 1, 2):
-        phase = walk_phase(frame)
-        strike = attack_weight(frame)
-        x = advance(frame)
-        bob = 0.04 * abs(math.sin(phase))
-        lean = 0.16 + 0.35 * strike
+        step = phase(frame)
+        hit = strike(frame)
+        settled = 1.0 - hit
+        x = WALK_START_X + advance(frame)
 
-        key(parts["Zombie_Torso"], frame, (x, 0.0, 1.18 + bob), (0.0, lean, 0.0))
-        key(parts["Zombie_Head"], frame, (x + 0.06 * strike, 0.0, 1.76 + bob),
-            (0.10 * math.sin(phase * 0.5), 0.22 + 0.30 * strike, 0.0))
-        key(parts["Zombie_Jaw"], frame, (x + 0.12, 0.0, 1.62 + bob),
-            (0.0, 0.30 + 0.55 * strike, 0.0))
+        # A zombie does not so much walk as fall forwards and catch itself.
+        bob = 0.035 * math.cos(step * 2.0) - 0.02 * hit
+        lean = 0.13 + 0.30 * hit
+        sway = 0.06 * math.sin(step)
 
-        for side, y, swing in (("L", 0.36, 1.0), ("R", -0.36, -1.0)):
-            reach = 0.28 + 0.34 * strike
-            drop = -0.55 * strike + 0.05 * math.sin(phase + swing)
-            key(parts["Zombie_Arm" + side], frame,
-                (x + reach, y, 1.42 + bob + drop * 0.35),
-                (0.0, -0.15 + 1.15 * strike, 0.10 * swing))
+        key(parts["Zombie_Hips"], frame,
+            location=(x, 0.0, 0.95 + bob),
+            rotation=(sway * 0.4, lean * 0.35, sway))
+        key(parts["Zombie_Spine"], frame,
+            rotation=(0.0, 0.16 + 0.22 * hit, 0.10 * math.sin(step) - 0.12 * hit))
+        key(parts["Zombie_Head"], frame,
+            rotation=(0.13 * math.sin(step * 0.5) + 0.10 * hit,
+                      0.10 - 0.30 * hit, 0.16 * math.sin(step * 0.5)))
+        key(parts["Zombie_Jaw"], frame, rotation=(0.0, 0.22 + 0.55 * hit, 0.0))
+
+        for side, sign in (("L", 1.0), ("R", -1.0)):
+            swing = math.sin(step + (0.0 if sign > 0.0 else math.pi))
+
+            # Both arms are held out in front; the right one does the swiping.
+            reach = -1.15 - 0.12 * swing * settled
+            elbow = 0.55 - 0.15 * swing * settled
+            if sign < 0.0:
+                reach -= 1.05 * hit
+                elbow -= 0.40 * hit
+            else:
+                reach -= 0.35 * hit
+            key(parts["Zombie_ArmUpper" + side], frame,
+                rotation=(0.10 * sign, reach, 0.16 * sign))
+            key(parts["Zombie_ArmLower" + side], frame, rotation=(0.0, elbow, 0.0))
             key(parts["Zombie_Hand" + side], frame,
-                (x + reach + 0.42, y, 1.42 + bob + drop),
-                (0.0, -0.15 + 1.35 * strike, 0.10 * swing))
+                rotation=(0.0, 0.35 - 0.30 * hit, 0.0))
 
-            step = math.sin(phase + (0.0 if swing > 0 else math.pi))
-            planted = 1.0 - strike
-            key(parts["Zombie_Thigh" + side], frame,
-                (x + 0.22 * step * planted, y * 0.5, 0.66 + bob),
-                (0.0, 0.45 * step * planted, 0.0))
-            key(parts["Zombie_Shin" + side], frame,
-                (x + 0.30 * step * planted, y * 0.5, 0.24 + 0.10 * max(step, 0.0) * planted),
-                (0.0, 0.30 * step * planted, 0.0))
-
-
-def build_street(parts):
-    tarmac = material("StreetTarmac", (0.09, 0.09, 0.10, 1.0), 0.95)
-    kerb = material("StreetKerb", (0.44, 0.43, 0.41, 1.0), 0.9)
-    brick = material("StreetBrick", (0.30, 0.16, 0.13, 1.0), 0.92)
-    concrete = material("StreetConcrete", (0.36, 0.35, 0.34, 1.0), 0.9)
-    lamp = material("StreetLamp", (0.16, 0.17, 0.18, 1.0), 0.35, 0.85)
-
-    ground = material("StreetGround", (0.13, 0.13, 0.14, 1.0), 0.95)
-    parts["Street_Ground"] = box("Street_Ground", (90.0, 70.0, 0.20), (10.0, 0.0, -0.30), ground)
-    parts["Street_Road"] = box("Street_Road", (34.0, 7.0, 0.12), (10.0, 0.0, -0.06), tarmac)
-    for side, y in (("L", 4.3), ("R", -4.3)):
-        parts["Street_Path" + side] = box(
-            "Street_Path" + side, (34.0, 2.4, 0.30), (10.0, y, 0.15), kerb)
-    # The far side is a terrace; the near side is set well back so the camera
-    # has somewhere to stand and the street reads as a corridor rather than a
-    # wall. Blender Y becomes ae3d -Z, so these are the two sides of the road.
-    for index, (bx, depth, height, surface) in enumerate((
-            (-4.0, 5.0, 6.5, brick), (3.0, 4.4, 9.5, concrete),
-            (10.0, 5.2, 5.5, brick), (17.0, 4.6, 8.0, concrete),
-            (24.0, 5.0, 7.0, brick))):
-        parts["Street_BlockL%d" % index] = box(
-            "Street_BlockL%d" % index, (6.4, depth, height),
-            (bx, 9.5, height * 0.5), surface)
-    for index, (bx, height) in enumerate(((-2.0, 5.0), (8.0, 6.5), (18.0, 5.5))):
-        parts["Street_BlockR%d" % index] = box(
-            "Street_BlockR%d" % index, (7.0, 5.0, height),
-            (bx, -15.0, height * 0.5), concrete if index % 2 else brick)
-    for index, lx in enumerate((-1.0, 8.0, 17.0, 26.0)):
-        parts["Street_Lamp%d" % index] = box(
-            "Street_Lamp%d" % index, (0.18, 0.18, 4.6), (lx, 5.0, 2.3), lamp)
-        parts["Street_LampArm%d" % index] = box(
-            "Street_LampArm%d" % index, (1.3, 0.14, 0.14), (lx - 0.6, 5.0, 4.5), lamp)
+            # The legs keep walking through the lunge, on a shorter stride.
+            gait = 0.55 * swing * (1.0 - 0.55 * hit)
+            knee = max(0.0, -0.9 * swing) * (1.0 - 0.5 * hit) + 0.12
+            key(parts["Zombie_LegUpper" + side], frame, rotation=(0.0, gait, 0.0))
+            key(parts["Zombie_LegLower" + side], frame, rotation=(0.0, knee, 0.0))
+            key(parts["Zombie_Foot" + side], frame,
+                rotation=(0.0, -0.35 * gait - 0.10, 0.0))
 
 
 def main(argv):
@@ -181,10 +356,21 @@ def main(argv):
     scene.frame_start = 1
     scene.frame_end = TOTAL
 
+    surfaces = {
+        "brick": material("WallBrick", textures.brick(), roughness=0.95),
+        "concrete": material("WallConcrete", textures.concrete(), roughness=0.92),
+        "tarmac": material("RoadTarmac", textures.tarmac(), roughness=0.88),
+        "paving": material("PathPaving", textures.paving(), roughness=0.9),
+        "metal": material("LampMetal", textures.metal(), roughness=0.4, metallic=0.8),
+        "lamp": material("LampGlow", None, emission=(1.0, 0.72, 0.36)),
+        "skin": material("ZombieSkin", textures.skin(), roughness=0.85),
+        "cloth": material("ZombieCloth", textures.cloth(), roughness=0.96),
+    }
+
     parts = {}
-    build_street(parts)
-    build_zombie(parts)
-    animate_zombie(parts)
+    build_street(parts, surfaces)
+    build_zombie(parts, surfaces)
+    animate(parts)
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=os.path.abspath(args.out))

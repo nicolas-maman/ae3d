@@ -21,7 +21,7 @@ import ae3d.scene
 exports (
     Context, context_new, context_free,
     start, active, port, stop, pump, answer_step, answer_snapshot, answer_capture,
-    capture_release, capture_frame, capture_adopt, answer_pending_trace,
+    capture_release, capture_frame, capture_adopt, answer_pending_trace, answer_deferred,
     answer_capture_unsupported, is_paused,
     schema_json, last_error
 )
@@ -46,6 +46,28 @@ extern ae3d_capture_slot(block: ptr, index: int) -> float
 extern ae3d_capture_adopt(pixels: ptr, width: int, height: int) -> int
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
+
+// A frame can only be read between the last draw and the buffer swap, and
+// requests are drained after it. Everything that reads pixels is therefore
+// answered a frame late, from the frame that was on screen when the request
+// arrived: reading whatever happened to be in the capture buffer answers a
+// question about a picture that is no longer there, which is worse than not
+// answering at all.
+const READ_PIXEL = 0
+const READ_REGION = 1
+const READ_HOLD = 2
+const READ_DIFF = 3
+
+struct Deferred {
+    kind: int
+    id: int
+    x: int
+    y: int
+    width: int
+    height: int
+    background: int
+    tolerance: int
+}
 
 struct Context {
     camera: ptr
@@ -77,6 +99,13 @@ struct Context {
     want_capture: bool
     step_from: int
     paused: bool
+    shadows: bool
+    shadow_map: int
+    light_count: int
+    fog_enabled: bool
+
+    deferred: ptr
+    reference_frame: int
 }
 
 var g_error = ""
@@ -91,7 +120,98 @@ context_new() -> *Context {
     c.pending_snapshot_id = -1
     c.pending_capture_id = -1
     c.pending_trace_id = -1
+    c.deferred = list.new()
+    c.reference_frame = -1
     return c
+}
+
+defer_read(c: *Context, kind: int, id: int, x: int, y: int, width: int, height: int,
+           background: int, tolerance: int) -> bool {
+    d = heap.new(Deferred)
+    d.kind = kind
+    d.id = id
+    d.x = x
+    d.y = y
+    d.width = width
+    d.height = height
+    d.background = background
+    d.tolerance = tolerance
+    list.add_raw(c.deferred, d as ptr)
+    c.want_capture = true
+    return true
+}
+
+// Called once the frame has been read back, in the order the requests arrived.
+answer_deferred(c: *Context) {
+    count = list.size(c.deferred)
+    i = 0
+    while i < count {
+        d = list.get_raw(c.deferred, i) as *Deferred
+        answer_one_read(c, d)
+        heap.free(d)
+        i = i + 1
+    }
+    list.clear(c.deferred)
+}
+
+answer_one_read(c: *Context, d: *Deferred) {
+    if d.kind == READ_PIXEL {
+        block = capture_doubles()
+        if ae3d_capture_pixel(d.x, d.y, block) == 0 {
+            free(block)
+            fail(d.id, "the point is outside the frame")
+            return
+        }
+        out = colour_json(block)
+        free(block)
+        json.object_set_raw(out, "x", json.from_int(d.x))
+        json.object_set_raw(out, "y", json.from_int(d.y))
+        json.object_set_raw(out, "frame", json.from_int(c.frame_count))
+        answer(d.id, out)
+        return
+    }
+
+    if d.kind == READ_REGION {
+        out = region_result(d.x, d.y, d.width, d.height, d.background, d.tolerance)
+        if out == null {
+            fail(d.id, "the region is outside the frame")
+            return
+        }
+        json.object_set_raw(out, "frame", json.from_int(c.frame_count))
+        answer(d.id, out)
+        return
+    }
+
+    if d.kind == READ_HOLD {
+        if ae3d_capture_hold_reference() == 0 {
+            fail(d.id, "the frame could not be read")
+            return
+        }
+        c.reference_frame = c.frame_count
+        out = json.obj()
+        json.object_set_raw(out, "frame", json.from_int(c.frame_count))
+        answer(d.id, out)
+        return
+    }
+
+    block = capture_doubles()
+    if ae3d_capture_diff(d.tolerance, block) == 0 {
+        free(block)
+        fail(d.id, "no held reference, or the frame is a different size than it was")
+        return
+    }
+    out = json.obj()
+    json.object_set_raw(out, "changed", json.num(read_double(block, 0)))
+    json.object_set_raw(out, "fraction", json.num(read_double(block, 1)))
+    json.object_set_raw(out, "max_delta", json.num(read_double(block, 2)))
+    json.object_set_raw(out, "pixels", json.num(read_double(block, 3)))
+    free(block)
+    // Which two frames these are. A hold and a diff sent together are one
+    // frame compared with itself, and the answer says so rather than reading
+    // as "nothing you did had any effect".
+    json.object_set_raw(out, "reference_frame", json.from_int(c.reference_frame))
+    json.object_set_raw(out, "frame", json.from_int(c.frame_count))
+    answer(d.id, out)
 }
 
 context_free(c: *Context) {
@@ -241,6 +361,16 @@ stats_result(c: *Context) -> ptr {
     json.object_set_raw(out, "draw_calls", json.from_int(c.draw_calls))
     json.object_set_raw(out, "instances", json.from_int(c.instances))
     json.object_set_raw(out, "paused", json.boolean(c.paused))
+
+    // What the renderer is doing, rather than what the program asked for. A
+    // scene with no shadows in it and a scene whose shadow map was never built
+    // look the same from outside, and this is the difference.
+    render = json.obj()
+    json.object_set_raw(render, "shadows", json.boolean(c.shadows))
+    json.object_set_raw(render, "shadow_map", json.from_int(c.shadow_map))
+    json.object_set_raw(render, "lights", json.from_int(c.light_count))
+    json.object_set_raw(render, "fog", json.boolean(c.fog_enabled))
+    json.object_set_raw(out, "render", render)
     return out
 }
 
@@ -1098,69 +1228,36 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
     }
 
     if op == "frame.pixel" {
-        px = json.get_int(json.object_get_raw(request, "x"))
-        py = json.get_int(json.object_get_raw(request, "y"))
-        block = capture_doubles()
-        if ae3d_capture_pixel(px, py, block) == 0 {
-            free(block)
-            fail(id, "no captured frame, or the point is outside it; send frame.capture first")
-            return false
-        }
-        out = colour_json(block)
-        free(block)
-        json.object_set_raw(out, "x", json.from_int(px))
-        json.object_set_raw(out, "y", json.from_int(py))
-        answer(id, out)
-        return false
+        return defer_read(c, READ_PIXEL, id,
+                          json.get_int(json.object_get_raw(request, "x")),
+                          json.get_int(json.object_get_raw(request, "y")),
+                          0, 0, 0, 0)
     }
 
     if op == "frame.region" {
-        rx = json.get_int(json.object_get_raw(request, "x"))
-        ry = json.get_int(json.object_get_raw(request, "y"))
-        rw = json.get_int(json.object_get_raw(request, "width"))
-        rh = json.get_int(json.object_get_raw(request, "height"))
         background = 0
         tolerance = 8
         node = json.object_get_raw(request, "background")
         if node != null { background = json.get_int(node) }
         node = json.object_get_raw(request, "tolerance")
         if node != null { tolerance = json.get_int(node) }
-        out = region_result(rx, ry, rw, rh, background, tolerance)
-        if out == null {
-            fail(id, "no captured frame; send frame.capture first")
-            return false
-        }
-        answer(id, out)
-        return false
+        return defer_read(c, READ_REGION, id,
+                          json.get_int(json.object_get_raw(request, "x")),
+                          json.get_int(json.object_get_raw(request, "y")),
+                          json.get_int(json.object_get_raw(request, "width")),
+                          json.get_int(json.object_get_raw(request, "height")),
+                          background, tolerance)
     }
 
     if op == "frame.hold" {
-        if ae3d_capture_hold_reference() == 0 {
-            fail(id, "no captured frame to hold; send frame.capture first")
-            return false
-        }
-        answer(id, json.obj())
-        return false
+        return defer_read(c, READ_HOLD, id, 0, 0, 0, 0, 0, 0)
     }
 
     if op == "frame.diff" {
         tolerance = 8
         node = json.object_get_raw(request, "tolerance")
         if node != null { tolerance = json.get_int(node) }
-        block = capture_doubles()
-        if ae3d_capture_diff(tolerance, block) == 0 {
-            free(block)
-            fail(id, "need a held reference and a captured frame of the same size")
-            return false
-        }
-        out = json.obj()
-        json.object_set_raw(out, "changed", json.num(read_double(block, 0)))
-        json.object_set_raw(out, "fraction", json.num(read_double(block, 1)))
-        json.object_set_raw(out, "max_delta", json.num(read_double(block, 2)))
-        json.object_set_raw(out, "pixels", json.num(read_double(block, 3)))
-        free(block)
-        answer(id, out)
-        return false
+        return defer_read(c, READ_DIFF, id, 0, 0, 0, 0, 0, tolerance)
     }
 
     if op == "world" { answer(id, world_result(c)) return false }
@@ -1357,6 +1454,16 @@ capture_adopt(pixels: ptr, width: int, height: int) -> bool {
 }
 
 answer_capture_unsupported(c: *Context, reason: string) {
+    count = list.size(c.deferred)
+    i = 0
+    while i < count {
+        d = list.get_raw(c.deferred, i) as *Deferred
+        fail(d.id, reason)
+        heap.free(d)
+        i = i + 1
+    }
+    list.clear(c.deferred)
+
     if c.pending_capture_id >= 0 {
         fail(c.pending_capture_id, reason)
         c.pending_capture_id = -1

@@ -65,6 +65,8 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     bool hasShadowMap;
     float shadowIntensity;
     float shadowSoftness;
+    vec3 shadowDirection;
+    float shadowTexelWorld;
     bool enablePerlinNoise;
     float noiseScale;
     int noiseOctaves;

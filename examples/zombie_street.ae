@@ -1,15 +1,19 @@
-// A zombie walking up a street, and attacking.
+// A zombie walking up a street at dusk, and attacking.
 //
 // Authored in Blender by tools/blender/make_zombie_street.py, exported through
-// tools/blender/ae3d_export.py, and loaded here straight from the manifest.
+// tools/blender/ae3d_export.py, and loaded here straight from the manifest:
+// meshes, textures, placement, the parent chain and one animation clip per
+// moving part.
 //
-// The zombie is rigid parts, not a skinned mesh: ae3d has no skinning
-// (ae3d#192), so each limb carries its own world-space clip. One clip in three
-// phases -- walking to 3.0s, the lunge to 4.0s, then walking again.
+// The zombie is rigid parts on a parent chain, not a skinned mesh: ae3d has no
+// skinning (ae3d#192), so the hierarchy is what holds the joints together.
+// Every clip is a local rotation about a joint, exactly as it was keyed.
 //
 //   AE3D_AGENT=7911 ./build/zombie_street
-//   python3 tools/ae3d_agent.py --port 7911 anim.set name=Zombie_HandL time=3.5
+//   python3 tools/ae3d_agent.py --port 7911 anim.set name=Zombie_ArmUpperR time=3.2
+//   python3 tools/ae3d_agent.py --port 7911 trace.model name=Zombie_Head
 
+import std.list
 import ae3d.core
 import ae3d.platform
 import ae3d.engine
@@ -19,12 +23,28 @@ import ae3d.anim
 
 const MANIFEST = "resources/blender/zombie_street/manifest.json"
 
+// Blender is Z-up and ae3d is Y-up, so the street's Blender Y became ae3d -Z:
+// the far terrace stands at negative z, the near one at positive, and the road
+// is the corridor between them.
+const SKY_R = 0.055
+const SKY_G = 0.065
+const SKY_B = 0.095
+
+var g_lamps: ptr = null
+var g_key: *Light = null
+
 main() {
     e = engine.engine_new(platform.API_GL)
     engine.engine_set_size(e, 1280, 720)
     engine.engine_set_title(e, "ae3d: a zombie, on a street")
     engine.engine_set_camera_input(e, true)
-    engine.engine_set_post(e, true, true, 1.1, 0.45)
+    engine.engine_set_post(e, true, true, 1.35, 0.4)
+    engine.engine_set_fog(e, core.fog_distance(6.0, 54.0,
+                                               core.vec3(SKY_R, SKY_G, SKY_B), 0.95))
+    // The street runs ninety metres and the zombie is under two. Fitting the
+    // shadow map to the whole of it leaves nothing for the figure standing in
+    // the middle, so the map is fitted to what the camera can see instead.
+    engine.engine_set_shadow_distance(e, 18.0)
     engine.engine_set_user_data(e, e as ptr)
     engine.engine_on_start(e, on_start)
 
@@ -34,26 +54,38 @@ main() {
         return
     }
     engine.engine_free(e)
+    free_lamps()
 }
 
 on_start(data: ptr) {
     e = data as *Engine
 
-    // Blender is Z-up and ae3d is Y-up, so the street's Blender Y became ae3d
-    // -Z: the buildings sit at z = -8 and z = +8 and the road is the corridor
-    // between them. The camera stands on the road looking back down it.
     cam = engine.engine_camera(e)
-    core.camera_set_position(cam, core.vec3(7.8, 1.9, 5.1))
-    core.camera_look_at(cam, core.vec3(3.9, 1.15, 0.0))
+    core.camera_set_position(cam, core.vec3(0.0 - 0.4, 1.42, 2.75))
+    core.camera_look_at(cam, core.vec3(0.0 - 3.6, 1.02, 0.0 - 0.1))
 
-    dusk = core.light_directional(core.vec3(0.0 - 0.45, 0.0 - 1.0, 0.0 - 0.30),
-                                  core.vec3(0.95, 0.88, 0.78), 2.4)
-    dusk.ambient_strength = 0.45
-    engine.engine_set_light(e, dusk)
+    // A street this narrow is in the shade of its own terrace long before dusk
+    // is over, so the light that shapes it is the lamp overhead rather than
+    // what is left of the sun. The key light is the one the scene is shadowed
+    // by, so the lamp is the key light and the sun is a fill: the shadow the
+    // zombie throws is the one cast up the road by the lamp it is walking
+    // under.
+    g_lamps = list.new()
+    g_key = lamp_at(0.0)
+    g_key.ambient_strength = 0.12
+    engine.engine_set_light(e, g_key)
+
+    dusk = core.light_directional(core.vec3(0.0 - 0.30, 0.62, 0.72),
+                                  core.vec3(0.34, 0.42, 0.68), 0.55)
+    engine.engine_add_light(e, dusk)
+    list.add_raw(g_lamps, dusk as ptr)
+
+    engine.engine_add_light(e, lamp_at(0.0 - 14.0))
+    engine.engine_add_light(e, lamp_at(14.0))
 
     renderer = engine.engine_gl_renderer(e)
     if renderer != null {
-        gl.renderer_set_clear_color(renderer as *GLRenderer, 0.07, 0.08, 0.12)
+        gl.renderer_set_clear_color(renderer as *GLRenderer, SKY_R, SKY_G, SKY_B)
     }
 
     m = assets.manifest_load(MANIFEST)
@@ -63,24 +95,47 @@ on_start(data: ptr) {
         return
     }
 
+    models = assets.manifest_load_scene(m)
     animated = 0
     count = assets.manifest_count(m)
     i = 0
     while i < count {
-        entry = assets.manifest_entry(m, i)
-        model = assets.entry_load_model(m, entry)
+        model = list.get_raw(models, i) as *Model
         if model != null {
             engine.engine_add_model(e, model)
+            entry = assets.manifest_entry(m, i)
             clip = assets.entry_load_clip(m, entry)
             if clip != null {
-                engine.engine_add_animation(e, assets.entry_id(entry),
+                engine.engine_add_animation(e, assets.entry_object(entry),
                                             anim.player_new(clip), model)
                 animated = animated + 1
             }
         }
         i = i + 1
     }
+    list.free(models)
 
     println("zombie_street: ${count} objects from ${assets.manifest_source(m)}, ${animated} animated")
     assets.manifest_free(m)
+}
+
+// Sodium light, under the lamp head the exported scene put at this x. Its range
+// is short enough that the pools of light on the road stay separate.
+lamp_at(x: float) -> *Light {
+    lamp = core.light_point(core.vec3(x, 4.25, 0.0 - 2.94),
+                            core.vec3(1.0, 0.74, 0.44), 1.35, 12.0)
+    list.add_raw(g_lamps, lamp as ptr)
+    return lamp
+}
+
+free_lamps() {
+    if g_lamps == null { return }
+    i = 0
+    count = list.size(g_lamps)
+    while i < count {
+        core.light_free(list.get_raw(g_lamps, i) as *Light)
+        i = i + 1
+    }
+    list.free(g_lamps)
+    g_lamps = null
 }
