@@ -25,6 +25,7 @@ import time
 import urllib.error
 import urllib.request
 
+ACCENT = "#2e6eeb"
 FAILURES = []
 
 
@@ -401,6 +402,38 @@ def main():
         check("every action the editor has is on a menu",
               len(menus) == 4 and not missing,
               "%d menus, missing %s" % (len(menus), missing[:4]))
+
+        # A row of choices says which one is on. Read as "the accent moved",
+        # not "this button is blue": the tree reports the colour a widget was
+        # given rather than the colour it has (aether-lang-dev/aether-ui#111),
+        # and a reading that never changes would pass against a highlight that
+        # is painted nowhere.
+        widgets = tree(args.port)
+        segments = {w["text"]: w for w in widgets.values()
+                    if w["type"] == "button"
+                    and w["text"] in ("None", "Spin", "Bob", "Orbit")}
+        check("the behaviour row has all four choices", len(segments) == 4)
+        if len(segments) == 4:
+            lit = [t for t, w in segments.items() if w.get("bg") == ACCENT]
+            check("exactly one behaviour is lit, and it is the one in effect",
+                  lit == ["None"], "lit: %s" % lit)
+
+            post(args.port, "/widget/%d/click" % segments["Spin"]["id"])
+
+            def moved(ws):
+                return [w["text"] for w in ws.values()
+                        if w["type"] == "button"
+                        and w["text"] in ("None", "Spin", "Bob", "Orbit")
+                        and w.get("bg") == ACCENT] == ["Spin"]
+
+            widgets, ok = wait_for(args.port, moved)
+            check("choosing a behaviour moves the highlight to it", ok,
+                  "lit: %s" % [w["text"] for w in widgets.values()
+                               if w["type"] == "button"
+                               and w["text"] in ("None", "Spin", "Bob", "Orbit")
+                               and w.get("bg") == ACCENT])
+            post(args.port, "/widget/%d/click" % segments["None"]["id"])
+            wait_for(args.port, lambda ws: not moved(ws))
 
         # A bounded row is two ways into one value. Typing an exact number is
         # the half a slider cannot do, and the slider beside it has to follow,
