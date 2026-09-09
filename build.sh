@@ -149,6 +149,13 @@ for src in $NATIVE_SOURCES; do
     fi
 done
 
+# Two module trees. ae3d.* is the engine, under src/. examples/lib/ is shared
+# code belonging to the examples themselves -- a black hole renderer is a tech
+# demo, not an engine feature, and putting it under src/ would have told everyone
+# who looked otherwise. It is factored out of the example rather than left inside
+# it because three callers want the same renderer: the example draws it, the
+# benchmark times it, and the test checks it against general relativity.
+export AETHER_LIB_DIR="$ROOT/src:$ROOT/examples/lib"
 "$AETHERC" "$SOURCE" "$GEN"
 "$CC" $CFLAGS "$GEN" $OBJ_DIR/*.o $AETHER_COMPILE_FLAGS $AETHER_LIBS $GLFW_LIBS $ZLIB_LIBS $PLATFORM_LIBS -o "$OUT"
 
