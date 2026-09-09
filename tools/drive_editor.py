@@ -244,6 +244,19 @@ def layout_faults(widgets):
         if w.get("visible") and w["type"] in ("button", "textfield") \
                 and (w["w"] <= 0 or w["h"] <= 0):
             faults.append("%s %r has no size" % (w["type"], w["text"][:20]))
+
+    # A frame inside a frame of the same colour, shorter than the one around
+    # it, has its bottom edge somewhere in the middle: a line drawn across the
+    # panel with nothing under it, and the column reads as a card that stopped
+    # short of the window.
+    for w in widgets.values():
+        parent = widgets.get(w["parent"])
+        if parent is None or not w.get("visible") or not w.get("borderWidth"):
+            continue
+        if parent.get("borderColor") == w.get("borderColor") \
+                and w["h"] < parent["h"]:
+            faults.append("%s %d is framed inside its parent's frame and stops "
+                          "at y=%d" % (w["type"], w["id"], w["y"] + w["h"]))
     return faults
 
 
