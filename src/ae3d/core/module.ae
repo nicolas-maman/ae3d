@@ -25,11 +25,12 @@ exports (
     Vec2, Vec3, Vec4, Quat, Mat4, vec2, vec3, vec4, quat, v3_add, v3_sub, v3_mul, v3_div,
     v3_neg, v3_dot, v3_cross, v3_len, v3_len_sq, v3_normalize, v3_distance, v3_lerp, v3_eq,
     v3_zero, v4_from_v3, v4_xyz, quat_ident, quat_rotate, quat_mul, quat_apply,
-    quat_normalize, quat_len, quat_is_zero, quat_from_euler, quat_mat4, mat4_ident,
+    quat_normalize, quat_len, quat_is_zero, quat_from_euler, quat_mat4,
+    quat_conjugate, quat_from_to, mat4_ident,
     mat4_zero, mat4_mul, mat4_mul_v4, mat4_transform_point, mat4_translate, mat4_scale,
     mat4_perspective, mat4_ortho, mat4_look_at, mat4_inverse, mat4_transpose, mat4_col,
     mat4_at, deg_to_rad, rad_to_deg, clampf, lerpf, PI, TWO_PI, HALF_PI, sin_of, cos_of,
-    tan_of, atan2_of, sqrt_of, abs_of, Material, MaterialGroup, Model, Light, Shader,
+    tan_of, atan2_of, acos_of, sqrt_of, abs_of, Material, MaterialGroup, Model, Light, Shader,
     Backend, Uniform, LIGHT_STATIC, LIGHT_DYNAMIC, MODE_POINT, MODE_DIRECTIONAL, MODE_SPOT,
     UNIFORM_FLOAT, UNIFORM_INT, UNIFORM_VEC3, UNIFORM_FLOAT_ARRAY, UNIFORM_VEC3_ARRAY,
     env_int, material_new, material_default, material_clone, material_equals, material_free,
@@ -76,6 +77,7 @@ extern sin(x: float) -> float
 extern cos(x: float) -> float
 extern tan(x: float) -> float
 extern atan2(y: float, x: float) -> float
+extern acos(x: float) -> float
 extern fabs(x: float) -> float
 const PI = 3.14159265358979323846
 const TWO_PI = 6.28318530717958647692
@@ -472,6 +474,14 @@ atan2_of(y: float, x: float) -> float {
     return atan2(y, x)
 }
 
+// Clamped before it is asked. A dot product of two unit vectors is a cosine
+// until rounding makes it 1.0000001, and acos of that is not a number.
+acos_of(x: float) -> float {
+    if x <= 0.0 - 1.0 { return PI }
+    if x >= 1.0 { return 0.0 }
+    return acos(x)
+}
+
 sqrt_of(x: float) -> float {
     return sqrt(x)
 }
@@ -605,6 +615,29 @@ quat_mul(a: Quat, b: Quat) -> Quat {
     cross = v3_cross(av, bv)
     v = v3_add(v3_add(cross, v3_mul(bv, a.w)), v3_mul(av, b.w))
     return Quat { x: v.x, y: v.y, z: v.z, w: a.w * b.w - v3_dot(av, bv) }
+}
+
+// The rotation that undoes this one. Unit quaternions only, which is every
+// quaternion this engine builds.
+quat_conjugate(q: Quat) -> Quat {
+    return Quat { x: 0.0 - q.x, y: 0.0 - q.y, z: 0.0 - q.z, w: q.w }
+}
+
+// The shortest rotation taking one direction to another. Opposite directions
+// have no shortest rotation, so one perpendicular axis is picked and the turn
+// is half a circle about it.
+quat_from_to(from: Vec3, to: Vec3) -> Quat {
+    a = v3_normalize(from)
+    b = v3_normalize(to)
+    facing = v3_dot(a, b)
+    if facing > 0.999999 { return quat_ident() }
+    if facing < 0.0 - 0.999999 {
+        axis = v3_cross(vec3(1.0, 0.0, 0.0), a)
+        if v3_len(axis) < 0.000001 { axis = v3_cross(vec3(0.0, 1.0, 0.0), a) }
+        return quat_rotate(PI, v3_normalize(axis))
+    }
+    axis = v3_cross(a, b)
+    return quat_normalize(Quat { x: axis.x, y: axis.y, z: axis.z, w: 1.0 + facing })
 }
 
 quat_apply(q: Quat, v: Vec3) -> Vec3 {

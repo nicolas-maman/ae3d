@@ -13,6 +13,7 @@
 //   python3 tools/ae3d_agent.py --port 7911 anim.set name=Zombie_ArmUpperR time=3.2
 //   python3 tools/ae3d_agent.py --port 7911 trace.model name=Zombie_Head
 
+import std.heap
 import std.list
 import ae3d.core
 import ae3d.platform
@@ -20,6 +21,7 @@ import ae3d.engine
 import ae3d.gl
 import ae3d.assets
 import ae3d.anim
+import ae3d.ik
 
 const MANIFEST = "resources/blender/zombie_street/manifest.json"
 
@@ -32,6 +34,33 @@ const SKY_B = 0.095
 
 var g_lamps: ptr = null
 var g_key: *Light = null
+
+// The limbs the solve runs on, and what the clips leave for it to correct.
+// Filled at load: a file-scope value has to be a constant here.
+var g_leg_l: *Limb = null
+var g_leg_r: *Limb = null
+var g_arm_r: *Limb = null
+
+// The road, and how far the ankle sits above the sole standing on it.
+const GROUND = 0.0
+const ANKLE = 0.085
+// How much of its own lift a foot has to give up before it stops being planted.
+const STEP_BAND = 0.07
+const SAMPLES = 96
+
+// What the zombie is walking at. Out of reach for most of the street, which is
+// what keeps the arm straight and pointing; inside it at the end of the lunge,
+// where the hand closes on it exactly.
+const VICTIM_X = 0.0 - 2.72
+const VICTIM_Y = 1.2
+const VICTIM_Z = 0.33
+
+struct Limb {
+    root: *Model
+    mid: *Model
+    tip: *Model
+    lowest: float
+}
 
 // engine_add_model borrows, and a Player borrows its clip: both outlive the
 // engine and are released after it.
@@ -152,8 +181,118 @@ on_start(data: ptr) {
         i = i + 1
     }
 
+    g_leg_l = limb_of(e, models, m, "Zombie_LegUpperL", "Zombie_LegLowerL", "Zombie_FootL")
+    g_leg_r = limb_of(e, models, m, "Zombie_LegUpperR", "Zombie_LegLowerR", "Zombie_FootR")
+    g_arm_r = limb_of(e, models, m, "Zombie_ArmUpperR", "Zombie_ArmLowerR", "Zombie_HandR")
+    engine.engine_on_pose(e, solve_pose)
+
     println("zombie_street: ${count} objects from ${assets.manifest_source(m)}, ${animated} animated")
+    println("zombie_street: the clips leave the feet at ${g_leg_l.lowest} and ${g_leg_r.lowest} above the road")
     assets.manifest_free(m)
+}
+
+limb_of(e: *Engine, models: ptr, m: *Manifest, root: string, mid: string,
+        tip: string) -> *Limb {
+    limb = heap.new(Limb)
+    limb.root = model_named(models, m, root)
+    limb.mid = model_named(models, m, mid)
+    limb.tip = model_named(models, m, tip)
+    limb.lowest = lowest_of(e, limb.tip)
+    return limb
+}
+
+model_named(models: ptr, m: *Manifest, name: string) -> *Model {
+    count = assets.manifest_count(m)
+    i = 0
+    while i < count {
+        if assets.entry_object(assets.manifest_entry(m, i)) == name {
+            return list.get_raw(models, i) as *Model
+        }
+        i = i + 1
+    }
+    return null
+}
+
+// The lowest the clips ever put this part, which is where its own step touches
+// down. Read off the animation rather than assumed: a clip is a set of angles,
+// and the floor it was drawn against is not in them.
+lowest_of(e: *Engine, part: *Model) -> float {
+    if part == null { return 0.0 }
+    registry = engine.engine_animations(e) as *Registry
+    if registry == null { return 0.0 }
+
+    duration = 0.0
+    bound = anim.registry_count(registry)
+    i = 0
+    while i < bound {
+        length = anim.clip_duration(anim.player_clip(
+            anim.binding_player(anim.registry_binding(registry, i))))
+        if length > duration { duration = length }
+        i = i + 1
+    }
+    if duration <= 0.0 { return core.model_world_position(part).y }
+
+    lowest = core.model_world_position(part).y
+    step = 0
+    while step <= SAMPLES {
+        pose_at(registry, duration * (step * 1.0) / (SAMPLES * 1.0))
+        height = core.model_world_position(part).y
+        if height < lowest { lowest = height }
+        step = step + 1
+    }
+    pose_at(registry, 0.0)
+    return lowest
+}
+
+pose_at(registry: *Registry, time: float) {
+    count = anim.registry_count(registry)
+    i = 0
+    while i < count {
+        binding = anim.registry_binding(registry, i)
+        player = anim.binding_player(binding)
+        anim.player_set_time(player, time)
+        anim.apply(player, anim.binding_model(binding))
+        i = i + 1
+    }
+}
+
+// What the clips leave out. A walk is a set of angles that happened to look
+// right against the floor it was drawn on; on this road the feet float a
+// hand's width above it and wander up and down by half that again as the hips
+// bob. The solve puts each foot on the road for the part of the stride it is
+// standing on, and leaves the swing alone.
+//
+// The arm is the other direction the question runs in: it reaches for
+// something at a place, and the solver says whether it got there. Out of range
+// it straightens towards it, which is the shape of a zombie walking at you;
+// in range the hand lands on it.
+solve_pose(data: ptr) {
+    victim = core.vec3(VICTIM_X, VICTIM_Y, VICTIM_Z)
+    plant(g_leg_l)
+    plant(g_leg_r)
+    reach(g_arm_r, victim)
+}
+
+plant(limb: *Limb) {
+    if limb == null { return }
+    if limb.root == null || limb.mid == null || limb.tip == null { return }
+    at = core.model_world_position(limb.tip)
+    lift = at.y - limb.lowest
+    if lift > STEP_BAND { return }
+
+    planted = 1.0 - lift / STEP_BAND
+    on_road = core.vec3(at.x, GROUND + ANKLE, at.z)
+    target = core.v3_lerp(at, on_road, planted)
+    knee = core.v3_add(core.model_world_position(limb.mid), core.vec3(2.0, 0.0, 0.0))
+    ik.solve_two_bone(limb.root, limb.mid, limb.tip, target, knee)
+}
+
+reach(limb: *Limb, target: Vec3) {
+    if limb == null { return }
+    if limb.root == null || limb.mid == null || limb.tip == null { return }
+    shoulder = core.model_world_position(limb.root)
+    elbow = core.v3_add(shoulder, core.vec3(0.0 - 1.0, 0.0 - 1.2, 1.6))
+    ik.solve_two_bone(limb.root, limb.mid, limb.tip, target, elbow)
 }
 
 // Sodium light, under the lamp head the exported scene put at this x. Its range

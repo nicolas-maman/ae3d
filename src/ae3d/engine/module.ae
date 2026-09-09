@@ -28,7 +28,7 @@ exports (
     engine_set_skybox, engine_load_texture,
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
     engine_set_debug, engine_set_frustum_culling, engine_set_face_culling,
-    engine_on_update, engine_on_fixed_update, engine_on_render,
+    engine_on_update, engine_on_fixed_update, engine_on_render, engine_on_pose,
     engine_set_user_data, engine_user_data,
     engine_add_animation, engine_animations,
     engine_gl_renderer, engine_vk_renderer, engine_mouse_x, engine_mouse_y, engine_mouse_down, engine_key_down
@@ -64,6 +64,7 @@ struct Engine {
     on_update: fn(ptr, float)
     on_fixed_update: fn(ptr, float)
     on_render: fn(ptr, float)
+    on_pose: fn(ptr)
     user_data: ptr
 
     width: int
@@ -332,6 +333,15 @@ engine_set_face_culling(e: *Engine, on: bool) { core.set_face_culling(on) }
 engine_on_start(e: *Engine, handler: fn(ptr)) { e.on_start = handler }
 engine_on_update(e: *Engine, handler: fn(ptr, float)) { e.on_update = handler }
 engine_on_render(e: *Engine, handler: fn(ptr, float)) { e.on_render = handler }
+
+// Called once the clips have been applied and before anything is drawn, on
+// every frame including the ones an agent is holding still: a pose an agent
+// seeks to is a pose it wants solved, or it is looking at half an answer.
+//
+// This is where inverse kinematics goes. A clip is an angle at every joint and
+// wherever the foot lands is where it lands; the solve afterwards is what puts
+// it on the ground it is actually standing on.
+engine_on_pose(e: *Engine, handler: fn(ptr)) { e.on_pose = handler }
 engine_set_user_data(e: *Engine, data: ptr) { e.user_data = data }
 engine_user_data(e: *Engine) -> ptr { return e.user_data }
 
@@ -626,6 +636,8 @@ engine_loop(e: *Engine) {
             anim.registry_advance(e.animations as *Registry, delta)
             if e.on_update != null { e.on_update(e.user_data, delta) }
         }
+
+        if e.on_pose != null { e.on_pose(e.user_data) }
 
         e.backend_render(e.backend_state, cam, e.light)
 
