@@ -112,10 +112,19 @@ def editor_output():
 
 
 def post(port, path):
+    """POST to the driver. A route that answers 404 is a check that failed, not
+    a run that ends: one unreachable route used to abort the script and take
+    the twenty checks after it with it."""
     req = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path),
                                  data=b"", method="POST")
-    with urllib.request.urlopen(req, timeout=3) as r:
-        return r.read()
+    try:
+        with urllib.request.urlopen(req, timeout=3) as r:
+            return r.read()
+    except urllib.error.HTTPError as e:
+        print("   note  %s answered %d" % (path, e.code))
+        return b""
+
+
 
 
 def tree(port):
@@ -384,13 +393,10 @@ def main():
 
     env = dict(os.environ)
     env["AETHER_UI_TEST_PORT"] = str(args.port)
-    # NOT headless, though it should be: this run wants no window in front of
-    # whoever is using the machine, and AETHER_UI_HEADLESS gives exactly that
-    # everywhere else. Under it the editor stops answering part way through a
-    # run, stuck inside a CoreAnimation layer display that never returns, with
-    # vImage reporting a destination buffer too small for what it was asked to
-    # composite. Same driver and same binary: headless hangs, visible passes.
-    # Filed as aether-lang-dev/aether-ui#123.
+    # Never onto the desktop. The driver presses widgets over HTTP and reads
+    # the tree back, none of which needs the window in front of whoever is
+    # using the machine.
+    env.setdefault("AETHER_UI_HEADLESS", "1")
     if args.backend:
         env["AE3D_EDITOR_BACKEND"] = args.backend
     # Long enough that the run outlives this script; it is killed at the end.
@@ -468,21 +474,12 @@ def main():
                 # number() writes two decimals; "-150.0" is what was typed.
                 check("what was typed reached the model", back == "-150.00",
                       repr(back))
-        # The menus, and only what the driver can actually answer for.
-        #
-        # Their items are not activated: the driver runs a menu item's closure
-        # on its own HTTP thread rather than bouncing it to the main queue the
-        # way it does every widget route (aether-lang-dev/aether-ui#116), and
-        # an item that adds a model touches the GL context and segfaults. Each
-        # item calls the same function its button does, and the buttons are
-        # pressed above.
-        #
-        # Nor is attachment checked, though the name of this check said so
-        # until it was sabotaged: /menus reports every menu that was built,
-        # with no record of which ones reached the bar, so dropping the
+        # The menus. Attachment is not checked, though the name of this check
+        # said so until it was sabotaged: /menus reports every menu that was
+        # built, with no record of which ones reached the bar, so dropping the
         # menu_bar_add for a whole menu left it green. What it does catch is an
-        # action going missing from the menus, which is the regression that
-        # happens when an action is added or renamed.
+        # action going missing, which is the regression that happens when one
+        # is added or renamed.
         menus = get(args.port, "/menus")
         listed = {}
         for menu in menus:
@@ -497,6 +494,28 @@ def main():
         check("every action the editor has is on a menu",
               len(menus) == 4 and not missing,
               "%d menus, missing %s" % (len(menus), missing[:4]))
+
+        # And a menu item does what its button does. The driver used to be
+        # unable to press one: it ran the closure on its own HTTP thread rather
+        # than the main queue, so an item that adds a model touched the GL
+        # context off-thread and took the editor down. Fixed upstream, so the
+        # menus are driven like everything else now.
+        add_menu = listed.get("Cube")
+        if add_menu is not None:
+            before_menu = len(rows_under(tree(args.port), scene))
+            post(args.port, "/menu/%d/activate?label=Cube" % add_menu)
+            after_menu = wait_rows(args.port, scene, before_menu + 1)
+            check("a menu item adds an object the way its button does",
+                  after_menu == before_menu + 1,
+                  "%d rows before, %d after" % (before_menu, after_menu))
+            # Put it back with the button rather than the Undo menu item: that
+            # item's label carries its accelerator, and the driver matches a
+            # menu item by its exact label without decoding what the query
+            # escaped, so asking for it by name is a 404.
+            undo_now = find(tree(args.port), "button", "Undo")
+            if undo_now is not None:
+                post(args.port, "/widget/%d/click" % undo_now)
+                wait_rows(args.port, scene, before_menu)
 
         # A section folds when its bar is clicked. Read as the body going away
         # and the caret turning, not as one row disappearing: a hidden row's
@@ -627,11 +646,10 @@ def main():
                 check("smoothing one gives it a surface of its own", ok,
                       "%d triangles then %d" % (blocky, triangles(widgets)))
 
-        # A row of choices says which one is on. Read as "the accent moved",
-        # not "this button is blue": the tree reports the colour a widget was
-        # given rather than the colour it has (aether-lang-dev/aether-ui#111),
-        # and a reading that never changes would pass against a highlight that
-        # is painted nowhere.
+        # A row of choices says which one is on. Read as "the accent moved"
+        # rather than "this button is blue", which is the stronger claim: a
+        # fixed colour is a constant the editor could satisfy while the
+        # highlight never follows the choice.
         widgets = tree(args.port)
         segments = {w["text"]: w for w in widgets.values()
                     if w["type"] == "button"

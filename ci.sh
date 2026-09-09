@@ -192,12 +192,6 @@ check_editor_run() {
     # backend per scene and took the keyboard with it, which makes it unusable
     # beside anything else. The window still exists and still answers the test
     # server; it is only never ordered to the front.
-    #
-    # These bounded runs only. The driver leg cannot use it: under headless the
-    # editor stops answering part way through, stuck in a CoreAnimation layer
-    # display that never returns (aether-lang-dev/aether-ui#123). A bounded run
-    # finishes headless in two seconds, so the six windows this file used to
-    # open are down to the two the driver needs.
     AETHER_UI_HEADLESS=1 \
     AE3D_EDITOR_BACKEND="$editor_backend" \
     AE3D_EDITOR_FRAMES=30 \

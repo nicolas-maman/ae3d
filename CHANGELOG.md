@@ -780,6 +780,23 @@ First working engine.
 
 ### Tooling
 
+- Every editor run is headless again, so a run of `ci.sh` opens no windows at
+  all. It hung part way through under the flag, which was
+  aether-lang-dev/aether-ui#123 and is fixed upstream.
+
+- The driver presses menu items. It could not before: the closure ran on its
+  own HTTP thread rather than the main queue, so an item that adds a model
+  touched the GL context off-thread and took the editor down
+  (aether-lang-dev/aether-ui#116, fixed upstream).
+
+- A driver route that answers 404 is a note rather than the end of the run. One
+  unreachable route aborted the script and took the twenty checks after it.
+
+- The colour chip's readback is the toolkit's `ui.styled_bg` rather than a
+  local declaration of the same entry point (aether-lang-dev/aether-ui#109,
+  fixed upstream). It now reports the colour the layer paints, so the chip
+  check catches a chip that is never painted; it did not before.
+
 - Waiting for a file to be saved waits for it to be written again, not for it
   to exist. The second save in a run leaves the file already there, so the wait
   returned at once and the Load that followed could read what was on disk
