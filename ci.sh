@@ -88,6 +88,17 @@ else
     skip "exported fixtures" "no Blender"
 fi
 
+step "docs/agent.md matches the engine's command table"
+# A doc written by hand beside a protocol is a doc that describes last month's
+# protocol. This one is generated from the same table `help` answers with, so
+# the check is that it was regenerated after the table changed.
+if ./scripts/gen_agent_docs.sh --check >/tmp/ae3d_docs.log 2>&1; then
+    pass "docs/agent.md is what the schema produces"
+else
+    fail "docs/agent.md is out of date; run ./scripts/gen_agent_docs.sh"
+    sed 's/^/        /' /tmp/ae3d_docs.log | head -12
+fi
+
 step "native layer, warnings as errors"
 # Same compiler search as build.sh: a Windows toolchain need not ship `cc`.
 if [ -z "${CC:-}" ]; then
