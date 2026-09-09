@@ -554,6 +554,11 @@ First working engine.
 
 ### Editor
 
+- The grid has its axes. A grid of identical lines says how big things are and
+  nothing about where they are, so a scene with nothing selected gave no way to
+  tell which way round it was. Red along x and blue along z, the colours the
+  gizmo already uses, muted so they do not compete with it.
+
 - A section header is a bar across the panel rather than a word floating over
   the rows. The headings were the same weight as the labels beneath them and
   carried no rule, so scene, add, terrain, assets and edit read as one
