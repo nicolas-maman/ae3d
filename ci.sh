@@ -54,6 +54,17 @@ check_platform Windows_NT        "-lopengl32"
 check_platform Linux             "-lpthread"
 check_platform MINGW64_NT-10.0   "-lws2_32"
 
+step "the agent channel stays behind its gate"
+# The one property the channel's whole design rests on, and the one thing a
+# timing test cannot check: an ungated hook is a change to the source, not a
+# state at run time. See scripts/check_agent_gating.sh.
+if ./scripts/check_agent_gating.sh 2>/tmp/ae3d_gate.log; then
+    pass "engine_loop reaches the agent only through e.agent_on"
+else
+    fail "engine_loop reaches the agent outside the gate"
+    sed 's/^/        /' /tmp/ae3d_gate.log | head -10
+fi
+
 step "native layer, warnings as errors"
 # Same compiler search as build.sh: a Windows toolchain need not ship `cc`.
 if [ -z "${CC:-}" ]; then
