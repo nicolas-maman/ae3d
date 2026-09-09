@@ -1,0 +1,178 @@
+# The agent channel
+
+An ae3d program started with `AE3D_AGENT` opens a line-oriented JSON channel on
+loopback. Through it an agent reads the scene, changes it, holds a frame still,
+reads the pixels that frame produced, and asks why a model is not on screen.
+
+    AE3D_AGENT=7911 ./build/spinning_cube          # a fixed port
+    AE3D_AGENT=auto ./build/spinning_cube          # one the system picks
+
+`auto` prints the port it was given and writes it to `AE3D_AGENT_PORT_FILE`
+when that variable is set, which is how a script finds it.
+
+Nothing is opened unless `AE3D_AGENT` asks for it. A run without it pays one
+load of a global per frame; `tests/test_agent_cost` measures what an open
+channel costs.
+
+## The protocol
+
+One JSON object per line, in both directions. Every answer carries back the
+`id` of the request it answers, so a client may pipeline:
+
+    {"id": 1, "op": "scene.tree"}
+    {"id": 1, "ok": true, "result": {"count": 1, "models": [...]}}
+
+A failure is an answer, not a dropped connection:
+
+    {"id": 2, "ok": false, "error": "no model at that index"}
+
+`tools/ae3d_agent.py` is a client:
+
+    python3 tools/ae3d_agent.py --port 7911 scene.tree
+    python3 tools/ae3d_agent.py --port 7911 model.set index=0 position='[2,0,0]'
+    python3 tools/ae3d_agent.py --port 7911 trace.model object=Spinner
+
+Arguments are `key=value`, read as JSON where they parse as JSON. The client
+exits non-zero when the engine answers `ok: false`.
+
+One client at a time. A second is refused with a message rather than
+interleaved with the first.
+
+## Ops
+
+| op | arguments | what it does |
+|---|---|---|
+| `help` |  | This table. Every op, its arguments and what it answers. |
+| `ping` |  | Liveness. Answers immediately, on the frame it was drained. |
+| `frame.stats` |  | frame, fps, delta, viewport, draw calls and instances for the last frame. |
+| `camera.get` |  | Camera position, orientation, field of view and clip planes. |
+| `scene.tree` |  | Every model the renderer holds: index, name, position and visibility. |
+| `model.get` | `index` | One model in full: transform, bounds, material and mesh counts. |
+| `light.list` |  | Every light: kind, position, direction, colour, intensity and ambient. |
+| `model.set` | `index, [position], [rotation], [scale], [diffuse], [metallic], [roughness], [alpha], [visible], [casts_shadow], [name]` | Change a model. Only the fields present are written; answers with the model as it now is. |
+| `camera.set` | `[position], [look_at], [fov], [near], [far]` | Move or reframe the camera. |
+| `light.set` | `[index], [position], [direction], [color], [intensity], [ambient]` | Change a light. |
+| `scene.save` | `path, [mesh_directory]` | Write the scene to JSON, with generated geometry beside it. |
+| `scene.load` | `path` | Replace the scene with one from a file, and reframe the camera as it was saved. |
+| `frame.capture` |  | Read the finished frame into the engine. Answers with its size once it is there. |
+| `frame.pixel` | `x, y` | One pixel of the captured frame as r, g, b, a and hex. |
+| `frame.region` | `x, y, width, height, [background], [tolerance]` | Mean colour and coverage over a rectangle, summarised in the engine rather than shipped as pixels. |
+| `frame.hold` |  | Keep the captured frame as the reference frame.diff compares against. |
+| `frame.diff` | `[tolerance]` | Changed pixel count, fraction and largest channel delta against the held reference. |
+| `world` |  | Every entity and the relations between them: blend object, asset, model, mesh, clip, light, camera. One query instead of joining four. |
+| `trace.model` | `id \| object \| index` | Follow one model from its Blender object to the pixels: source, asset, mesh, node, animation, visibility. Names the stage it stopped being right at. |
+| `anim.list` |  | Every animation bound to a model: clip, playhead, duration, speed and the pose it produced. |
+| `anim.get` | `name \| index` | One animation in full, including the transform its playhead currently produces. |
+| `anim.set` | `name \| index, [time], [speed], [playing], [looping]` | Drive an animation. Setting time seeks and reposes at once, so a snapshot after it shows that pose. |
+| `snapshot` | `path` | Write the next completed frame to a PNG. Answers once the file exists. |
+| `frame.pause` |  | Hold the simulation still. The scene still renders and can be queried; time and the frame counter stop. |
+| `frame.resume` |  | Let the simulation run again. |
+| `frame.step` | `count` | Pause, run exactly count frames, pause again. Answers with stepped_from and stepped. |
+| `quit` |  | Stop the engine's loop and let it shut down normally. |
+
+## Frames an agent can trust
+
+A query against a running engine races it: the answer describes whichever frame
+was in flight. `frame.pause` stops that. A held frame still draws, so the scene
+stays queryable and can still be captured, but time and the frame counter stop.
+Read the same frame twice and the answer is the same.
+
+    frame.pause
+    frame.step count=10      -> {"stepped_from": 411, "stepped": 10}
+    snapshot path=/tmp/x.png -> answered once the file exists
+    frame.resume
+
+`frame.step` pauses first for the same reason: counting frames off a running
+loop measures the round trip as much as the request.
+
+`snapshot` answers when the file is on disk, not when the request was accepted.
+
+## Reading pixels
+
+`frame.capture` reads the finished frame into the engine; `frame.pixel` and
+`frame.region` answer questions about it. Regions are summarised where the
+pixels are, so a 1280x720 rectangle costs an answer of about twenty bytes
+rather than 3.7MB.
+
+    frame.capture                          -> {"width": 1024, "height": 768}
+    frame.pixel x=512 y=384                -> {"r": 133, "g": 85, "b": 70}
+    frame.region x=412 y=284 width=200 height=200
+                                           -> {"coverage": 0.991, "mean": [...]}
+
+`frame.hold` keeps the current capture as a reference and `frame.diff` reports
+what changed against it, which turns "did that command do anything" into a
+number:
+
+    model.set index=0 visible=false
+    frame.step count=2
+    frame.capture
+    frame.diff  -> {"changed": 67263, "fraction": 0.086}
+
+Capture needs a frame it can read. The OpenGL backend and the editor both
+provide one; a windowed Vulkan engine has no swapchain readback and says so.
+
+## Why a model is not on screen
+
+`trace.model` follows one model from the Blender object it was authored as to
+the pixels it produced, and names the first stage where it stopped being right:
+
+    $ python3 tools/ae3d_agent.py --port 7911 trace.model object=Spinner
+    ok=True  broke_at=-
+      source      ok   {"object": "Spinner", "blend": "spin.blend"}
+      asset       ok   {"exported_triangles": 12}
+      mesh        ok   {"triangles": 12, "matches_export": true}
+      node        ok   {"index": 0, "visible_flag": true}
+      animation   ok   {"bound": true, "clip": "SpinnerAction"}
+      visibility  ok   {"in_frustum": true, "on_screen": true}
+      pixels      ok   {"coverage": 0.557}
+
+The seven stages are `source`, `asset`, `mesh`, `node`, `animation`,
+`visibility` and `pixels`. Visibility says a model should be on screen; pixels
+says whether anything was drawn where it projects. Only the second is evidence.
+
+A stage carries `applicable: false` where it does not apply: a cube built by
+`loader.cube` has no Blender object behind it, and that is not a fault.
+
+The trace exists to separate bugs that share one symptom. A model that cannot
+be seen was exported empty, or loaded and never added, or added and hidden, or
+bound to a clip with no channels, or behind the camera, or drawn at a third of
+a pixel. Those are six different repairs.
+
+## The whole scene at once
+
+`world` returns every entity and the relations between them, so an agent does
+not join `scene.tree`, `anim.list` and `trace.model` by hand:
+
+    blend:c8eb41af  --exported_to--> asset:c8eb41af
+    asset:c8eb41af  --loaded_as-->   model:0
+    model:0         --has_mesh-->    mesh:0
+    clip:spin       --drives-->      model:0
+    camera          --sees-->        model:0
+
+## Blender
+
+`tools/blender/ae3d_agent_server.py` opens the same protocol inside a running
+Blender, so the client above drives both:
+
+    blender --background scene.blend --python tools/blender/ae3d_agent_server.py -- --port 7800 --serve 60
+
+    python3 tools/ae3d_agent.py --port 7800 file.info
+    python3 tools/ae3d_agent.py --port 7800 frame.set frame=13
+    python3 tools/ae3d_agent.py --port 7800 object.get name=Spinner
+    python3 tools/ae3d_agent.py --port 7800 export out=build/assets
+
+Reads after `frame.set` are of the evaluated pose, so an agent can seek and
+look rather than reason about what a curve would produce. `export` runs
+`ae3d_export.py` against the open file in the same process.
+
+Requests are served on Blender's own thread. `bpy` is not thread-safe, so the
+reader thread only queues lines and the main thread drains them. Background
+Blender runs no timers, which is what `--serve` is for.
+
+---
+
+This page is generated from the engine's own command table:
+
+    ./scripts/gen_agent_docs.sh
+
+`ci.sh` checks it is current. Do not edit it by hand.

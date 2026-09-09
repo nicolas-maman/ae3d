@@ -20,6 +20,7 @@ import ae3d.platform
 import ae3d.gl
 import ae3d.vk
 import ae3d.offscreen
+import ae3d.agent
 import ae3d.loader
 import ae3d.raycast
 import ae3d.scene
@@ -126,6 +127,14 @@ var g_selected = 0 - 1
 var g_syncing = false
 var g_backend_name = "opengl"
 var g_vulkan = false
+
+// The agent channel. Off unless AE3D_AGENT asks for it, exactly as in the
+// engine: the editor drives its own loop rather than engine_loop, so it has to
+// pump the channel itself or AE3D_AGENT would open a port that answered
+// nothing.
+var g_agent_on = false
+var g_agent_ctx: ptr = null
+var g_agent_steps_left = 0
 
 var g_grid: ptr = null
 var g_helpers: ptr = null
@@ -533,6 +542,96 @@ start_renderer() -> bool {
 
 // Either renderer, reached the same way. The editor holds the renderer as a
 // bare pointer, so this is the only place that knows which one it is.
+// The channel, from inside the editor's own loop.
+//
+// The editor is not the engine: it renders into a framebuffer with no window of
+// its own and blits the result into an aether-ui canvas, so a snapshot is the
+// canvas rather than a GL back buffer, and there is no swap for it to be taken
+// before. Everything else an agent asks for -- the scene, the models, the
+// camera, the animations, the trace -- is the same code answering, because the
+// Context is what the ops read and the editor can fill one as well as the
+// engine can.
+pump_agent() {
+    c = g_agent_ctx as *Context
+
+    c.camera = g_camera
+    c.gl_renderer = null
+    c.vk_renderer = null
+    c.backend = "opengl"
+    if g_vulkan {
+        c.vk_renderer = g_renderer
+        c.backend = "vulkan"
+    } else {
+        c.gl_renderer = g_renderer
+    }
+    c.frame_count = g_frames
+    c.fps = g_fps
+    c.delta = 0.016
+    c.width = g_view_w
+    c.height = g_view_h
+    c.draw_calls = 0
+    if !g_vulkan && g_renderer != null {
+        c.draw_calls = gl.renderer_draw_calls(g_renderer as *GLRenderer)
+    }
+
+    if g_agent_steps_left > 0 {
+        g_agent_steps_left = g_agent_steps_left - 1
+        if g_agent_steps_left == 0 {
+            c.paused = true
+            agent.answer_step(c)
+        }
+        return
+    }
+
+    agent.pump(c)
+
+    if c.want_capture {
+        c.want_capture = false
+        captured = false
+        if g_vulkan {
+            pixels = vk.offscreen_pixels()
+            if pixels != null {
+                captured = agent.capture_adopt(pixels, vk.offscreen_width(), vk.offscreen_height())
+            }
+        } else {
+            pixels = gl.renderer_frame_pixels(g_renderer as *GLRenderer)
+            if pixels != null {
+                captured = agent.capture_adopt(pixels, g_view_w, g_view_h)
+            }
+        }
+        if c.pending_capture_id >= 0 { agent.answer_capture(c, captured) }
+        agent.answer_pending_trace(c)
+    }
+    if c.want_pause {
+        c.want_pause = false
+        c.paused = true
+    }
+    if c.want_resume {
+        c.want_resume = false
+        c.paused = false
+    }
+    if c.want_steps > 0 {
+        c.paused = false
+        g_agent_steps_left = c.want_steps
+        c.want_steps = 0
+    }
+
+    if c.want_snapshot != "" {
+        // The canvas, not the framebuffer. What an agent means by a snapshot of
+        // the editor is what the editor is showing, which is what was blitted
+        // rather than whatever the renderer last produced.
+        ui.canvas_write_png(g_canvas, c.want_snapshot, g_view_w, g_view_h)
+        agent.answer_snapshot(c, c.want_snapshot, true)
+        c.want_snapshot = ""
+    }
+    if c.want_stop {
+        c.want_stop = false
+        ui.timer_cancel(g_timer)
+        report_state()
+        ui.app_quit()
+    }
+}
+
 viewport_backend() -> Backend {
     if g_vulkan { return vk.backend(g_renderer as *VKRenderer) }
     return gl.backend(g_renderer as *GLRenderer)
@@ -1434,15 +1533,23 @@ draw_frame() {
         g_last_edit = 0.0
     }
 
-    update_water(delta)
-    run_scripts(delta)
+    // Held means the simulation does not advance. The editor redraws anyway,
+    // because an editor that only redraws on change would otherwise stop
+    // producing the frames an agent is holding it still in order to look at.
+    held = false
+    if g_agent_on { held = agent.is_paused(g_agent_ctx as *Context) }
+
+    if !held {
+        update_water(delta)
+        run_scripts(delta)
+    }
     update_outline()
 
     // A bounded run has to reach its frame count whatever is on screen, so the
     // gate never applies to one.
     backend = viewport_backend()
 
-    if !g_dirty && !scene_animates() && g_frame_limit == 0 {
+    if !held && !g_dirty && !scene_animates() && g_frame_limit == 0 {
         update_stats(&backend)
         return
     }
@@ -1466,9 +1573,11 @@ draw_frame() {
                                       pixels, g_view_w * g_view_h * 4)
     draw_gizmo()
     ui.canvas_redraw(g_canvas)
-    g_frames = g_frames + 1
+    if !held { g_frames = g_frames + 1 }
 
     update_stats(&backend)
+
+    if g_agent_on { pump_agent() }
 
     if g_frame_limit > 0 && g_frames >= g_frame_limit && !g_reported {
         g_reported = true
@@ -3623,6 +3732,10 @@ set_gizmo_mode(mode: int) {
 
 main() {
     g_frame_limit = limit_from_env()
+    // Same switch as the engine, same cost when it is not set.
+    g_agent_on = agent.start()
+    if g_agent_on { g_agent_ctx = agent.context_new() as ptr }
+
     g_snapshot = env("AE3D_EDITOR_SNAPSHOT")
     g_report = env("AE3D_EDITOR_REPORT")
     g_models = list.new()

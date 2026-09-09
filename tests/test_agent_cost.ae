@@ -1,0 +1,117 @@
+// What the agent channel costs a frame, measured rather than asserted.
+//
+// The promise in #175 is that a build which did not ask for the channel pays
+// nothing for it. A promise with no test is a wish, so this measures the two
+// costs that exist and puts a bound on each:
+//
+//   inactive  the drain when AE3D_AGENT was never set. This is what every
+//             ordinary run pays, and only because the benchmark calls it
+//             directly -- the engine reaches it through `if e.agent_on`, which
+//             is false, so a real frame does not call it at all.
+//
+//   idle      the drain when the channel is open and no client is asking. This
+//             is what a debugging session pays per frame for having the channel
+//             there. It takes the queue lock, finds nothing, and returns.
+//
+// Both are per frame, not per model. A frame at 60Hz has 16,666,000ns in it;
+// the bounds below are three orders of magnitude under that, and are set to
+// catch a syscall or an allocation creeping into the drain rather than to
+// measure the machine. CI runs on hardware nobody should take a timing from,
+// which is why the bounds are generous: they are there to catch a syscall or an
+// allocation appearing in the drain, not to grade the hardware. The inactive
+// drain doubles as the floor -- it is a call that does nothing, so anything the
+// idle drain costs above it is the queue lock and nothing else.
+//
+// No window and no driver. This is the engine's own cost, and it runs where
+// there is no display.
+
+import std.os
+import ae3d.agent
+import ae3d.core
+
+extern clock_ns() -> long
+
+const ITERATIONS = 200000
+
+// Generous by design. A drain that takes the lock, looks at a null head and
+// returns is tens of nanoseconds; a drain that allocates or makes a syscall is
+// hundreds or thousands. The bound sits between those, not near either.
+const IDLE_BOUND_NS = 2000
+const INACTIVE_BOUND_NS = 2000
+
+// Reported in picoseconds, as integers. A call under a nanosecond divides to 0
+// in nanoseconds, which reads as "not measured" rather than "very small", and
+// the float route is not available here: a long is not promoted by a float
+// literal, so (total * 1.0) / (n * 1.0) silently truncates to zero
+// (aether-lang-dev/aether#1965). Picoseconds keep it exact and integral.
+picoseconds_each(total: long) -> long {
+    return (total * 1000) / ITERATIONS
+}
+
+report(name: string, total: long) {
+    println("  ${name}: ${total} ns over ${ITERATIONS} calls, ${picoseconds_each(total)} ps each")
+}
+
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, condition: bool) {
+    g_checks = g_checks + 1
+    if !condition {
+        g_failures = g_failures + 1
+        println("FAIL ${name}")
+    }
+}
+
+measure_pump(c: *Context) -> long {
+    start = clock_ns()
+    i = 0
+    while i < ITERATIONS {
+        agent.pump(c)
+        i = i + 1
+    }
+    stop = clock_ns()
+    return stop - start
+}
+
+main() {
+    println("agent channel, cost per frame")
+
+    c = agent.context_new()
+
+    // Before start: AE3D_AGENT was never asked for, so the channel is inactive
+    // and the drain returns without touching a lock.
+    check("the channel starts inactive", !agent.active())
+    inactive = measure_pump(c)
+    report("drain, inactive", inactive)
+
+    os.setenv("AE3D_AGENT", "auto")
+    if !agent.start() {
+        println("SKIP could not open the channel: ${agent.last_error()}")
+        agent.context_free(c)
+        return
+    }
+    check("the channel is active once asked for", agent.active())
+    check("an open channel reports its port", agent.port() > 0)
+
+    idle = measure_pump(c)
+    report("drain, idle", idle)
+
+    agent.stop()
+    agent.context_free(c)
+
+    inactive_each = picoseconds_each(inactive)
+    idle_each = picoseconds_each(idle)
+    check("an inactive drain stays under ${INACTIVE_BOUND_NS} ns", inactive_each < INACTIVE_BOUND_NS * 1000)
+    check("an idle drain stays under ${IDLE_BOUND_NS} ns", idle_each < IDLE_BOUND_NS * 1000)
+
+    // The point of the whole design: the cost is per frame, so even the open
+    // channel is a rounding error against a 60Hz budget.
+    println("  at 60Hz an open channel costs ${(idle_each * 60) / 1000} ns of each second")
+
+    if g_failures == 0 {
+        println("test_agent_cost: all checks passed (${g_checks})")
+        return
+    }
+    println("test_agent_cost: ${g_failures} failure(s) of ${g_checks}")
+}

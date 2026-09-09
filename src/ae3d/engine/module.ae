@@ -11,6 +11,8 @@ import ae3d.core
 import ae3d.platform
 import ae3d.gl
 import ae3d.vk
+import ae3d.agent
+import ae3d.anim
 import std.os
 
 exports (
@@ -27,6 +29,7 @@ exports (
     engine_set_debug, engine_set_frustum_culling, engine_set_face_culling,
     engine_on_update, engine_on_fixed_update, engine_on_render,
     engine_set_user_data, engine_user_data,
+    engine_add_animation, engine_animations,
     engine_gl_renderer, engine_vk_renderer, engine_mouse_x, engine_mouse_y, engine_mouse_down, engine_key_down
 )
 
@@ -76,6 +79,13 @@ struct Engine {
     last_mouse_y: float
     first_mouse: bool
     running: bool
+
+    // The agent channel. agent_on is read once a frame and is false in every
+    // build that did not ask for the channel, which is what keeps it free.
+    agent_on: bool
+    agent_ctx: ptr
+    animations: ptr
+    agent_steps_left: int
     frame_limit: int
 }
 
@@ -92,6 +102,7 @@ engine_new(api: int) -> *Engine {
     e.fixed_step = 1.0 / 60.0
     e.first_mouse = true
     e.frame_limit = frame_limit_from_env()
+    e.animations = anim.registry_new() as ptr
 
     if api == platform.API_VULKAN {
         vulkan_state = vk.renderer_new()
@@ -144,6 +155,20 @@ engine_set_frame_limit(e: *Engine, frames: int) {
     e.frame_limit = frames
 }
 
+// Binds a player to a model and takes ownership of the player. The clip is not
+// taken: one clip drives many players, and freeing it here would pull it out
+// from under the others.
+//
+// The name is what an agent asks for over the channel. An index shifts when the
+// scene changes; a name does not.
+engine_add_animation(e: *Engine, name: string, p: *Player, m: *Model) -> int {
+    return anim.registry_add(e.animations as *Registry, name, p, m)
+}
+
+engine_animations(e: *Engine) -> ptr {
+    return e.animations
+}
+
 bind_backend(e: *Engine, b: Backend) {
     e.backend_init = b.init
     e.backend_render = b.render
@@ -160,6 +185,10 @@ bind_backend(e: *Engine, b: Backend) {
 
 engine_free(e: *Engine) {
     if e == null { return }
+    if e.animations != null {
+        anim.registry_free(e.animations as *Registry)
+        e.animations = null
+    }
     if e.camera != null { core.camera_free(e.camera as *Camera) }
     if e.api == platform.API_VULKAN {
         vk.renderer_free(e.backend_state as *VKRenderer)
@@ -305,6 +334,16 @@ engine_start(e: *Engine, x: int, y: int) -> bool {
         platform.window_set_pos(e.window, x, y)
     }
 
+    // AE3D_AGENT is the only thing that turns this on. Unset, agent.start()
+    // opens nothing, agent_on stays false, and the frame loop never reaches the
+    // channel at all.
+    e.agent_on = agent.start()
+    if e.agent_on {
+        e.agent_ctx = agent.context_new()
+    } else {
+        if agent.last_error() != "" { println("ae3d: agent channel: ${agent.last_error()}") }
+    }
+
     if e.api != platform.API_VULKAN { platform.window_set_vsync(e.vsync) }
 
     if e.backend_init(e.backend_state, e.window, e.width, e.height) != 1 {
@@ -321,7 +360,109 @@ engine_start(e: *Engine, x: int, y: int) -> bool {
     return true
 }
 
+// Fills the channel's view of this frame and answers whatever is queued.
+//
+// Only ever reached when the channel is on. Everything it reads is a number the
+// engine already had, so the work is assembling an answer for a client that
+// asked, not gathering anything a frame would otherwise not have gathered.
+pump_agent(e: *Engine) {
+    c = e.agent_ctx as *Context
+
+    c.camera = e.camera
+    c.light = e.light
+    c.gl_renderer = e.gl_renderer
+    c.animations = e.animations
+    c.vk_renderer = null
+    if e.api == platform.API_VULKAN { c.vk_renderer = e.backend_state }
+    c.backend = e.backend_name
+    c.frame_count = e.frame_count
+    c.fps = e.fps
+    c.delta = e.delta_time
+    c.width = e.width
+    c.height = e.height
+    c.draw_calls = 0
+    if e.gl_renderer != null { c.draw_calls = gl.renderer_draw_calls(e.gl_renderer) }
+
+    // A step still owed from an earlier frame is settled before anything new is
+    // drained, so a client that pipelined a step and a query gets them in order.
+    if e.agent_steps_left > 0 {
+        e.agent_steps_left = e.agent_steps_left - 1
+        if e.agent_steps_left == 0 {
+            // Back to held, which is where the step started. An agent that
+            // stepped asked to look at a particular frame, not to be handed
+            // back a running engine.
+            c.paused = true
+            agent.answer_step(c)
+        }
+        return
+    }
+
+    agent.pump(c)
+
+    if c.want_pause {
+        c.want_pause = false
+        c.paused = true
+    }
+    if c.want_resume {
+        c.want_resume = false
+        c.paused = false
+    }
+    if c.want_steps > 0 {
+        c.paused = false
+        e.agent_steps_left = c.want_steps
+        c.want_steps = 0
+    }
+    if c.want_stop {
+        c.want_stop = false
+        engine_stop(e)
+    }
+}
+
+// A finished frame is only readable between the last draw and the buffer swap.
+// Called from there, which is why the agent's snapshot is not taken where the
+// rest of its work happens: after the swap the back buffer holds nothing this
+// frame put in it, and the file came out empty with an "ok" already sent.
+service_agent_capture(e: *Engine) {
+    c = e.agent_ctx as *Context
+    if !c.want_capture { return }
+    c.want_capture = false
+    if e.api == platform.API_VULKAN {
+        agent.answer_capture_unsupported(c,
+            "the windowed Vulkan backend has no swapchain readback; use the OpenGL backend, or the editor, which renders offscreen")
+        return
+    }
+    width = platform.window_fb_width(e.window)
+    height = platform.window_fb_height(e.window)
+    captured = agent.capture_frame(width, height)
+    if c.pending_capture_id >= 0 { agent.answer_capture(c, captured) }
+    agent.answer_pending_trace(c)
+}
+
+service_agent_snapshot(e: *Engine) {
+    c = e.agent_ctx as *Context
+    if c.pending_snapshot_id < 0 { return }
+
+    path = c.want_snapshot
+    c.want_snapshot = ""
+    if e.api == platform.API_VULKAN {
+        agent.answer_snapshot(c, path, false)
+        string.free(path)
+        return
+    }
+    width = platform.window_fb_width(e.window)
+    height = platform.window_fb_height(e.window)
+    agent.answer_snapshot(c, path, gl.snapshot(path, width, height))
+    string.free(path)
+}
+
 engine_shutdown(e: *Engine) {
+    if e.agent_on {
+        agent.capture_release()
+        agent.stop()
+        agent.context_free(e.agent_ctx as *Context)
+        e.agent_ctx = null
+        e.agent_on = false
+    }
     if e.window == null { return }
     e.backend_cleanup(e.backend_state)
     platform.window_destroy(e.window)
@@ -339,6 +480,14 @@ engine_loop(e: *Engine) {
         now = platform.time()
         delta = now - last_time
         last_time = now
+
+        // A held frame still draws, so the window stays alive and the scene can
+        // be queried and snapshotted; it just does not advance. Time stops and
+        // the counter stops with it, which is what lets an agent read the same
+        // frame twice and get the same answer.
+        held = false
+        if e.agent_on { held = agent.is_paused(e.agent_ctx as *Context) }
+        if held { delta = 0.0 }
         e.delta_time = delta
 
         e.fps_window = e.fps_window + delta
@@ -375,12 +524,18 @@ engine_loop(e: *Engine) {
         // in between, so the fixed step was a number the engine subtracted from
         // itself: a program that set one and waited for it waited forever, and
         // a behaviour scene's fixed_update had to be driven by hand.
-        e.fixed_accumulator = e.fixed_accumulator + delta
-        while e.fixed_accumulator >= e.fixed_step {
-            e.fixed_accumulator = e.fixed_accumulator - e.fixed_step
-            if e.on_fixed_update != null { e.on_fixed_update(e.user_data, e.fixed_step) }
+        if !held {
+            e.fixed_accumulator = e.fixed_accumulator + delta
+            while e.fixed_accumulator >= e.fixed_step {
+                e.fixed_accumulator = e.fixed_accumulator - e.fixed_step
+                if e.on_fixed_update != null { e.on_fixed_update(e.user_data, e.fixed_step) }
+            }
+            // With the simulation, not beside it: a held frame freezes the
+            // playheads too, or an agent that paused to look at a pose would
+            // find a different one each time it asked.
+            anim.registry_advance(e.animations as *Registry, delta)
+            if e.on_update != null { e.on_update(e.user_data, delta) }
         }
-        if e.on_update != null { e.on_update(e.user_data, delta) }
 
         e.backend_render(e.backend_state, cam, e.light)
 
@@ -391,10 +546,18 @@ engine_loop(e: *Engine) {
         if e.frame_limit > 0 && e.frame_count + 1 >= e.frame_limit {
             write_snapshot(e)
         }
+        if e.agent_on {
+            service_agent_capture(e)
+            service_agent_snapshot(e)
+        }
 
         if e.api != platform.API_VULKAN { platform.window_swap(e.window) }
         platform.poll_events()
-        e.frame_count = e.frame_count + 1
+        if !held { e.frame_count = e.frame_count + 1 }
+
+        // Last thing in the frame: the numbers a query reports are the finished
+        // frame's, and a snapshot taken now is of a frame that exists.
+        if e.agent_on { pump_agent(e) }
 
         if e.frame_limit > 0 && e.frame_count >= e.frame_limit { e.running = false }
     }

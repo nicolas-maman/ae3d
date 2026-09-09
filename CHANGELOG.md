@@ -102,6 +102,63 @@ First working engine.
 - Game objects and components, ray casting, and a fly camera with frustum
   extraction.
 
+### The agent channel
+
+- A control and telemetry channel a program drives. `AE3D_AGENT=<port|auto>`
+  opens newline-delimited JSON on loopback; every answer carries back the id of
+  the request it answers. Reads the scene, models, materials, lights, camera and
+  animations; writes transforms, materials, lights and the camera; loads and
+  saves scenes; holds a frame still, steps an exact number, and captures one.
+  Unset, it opens no socket, starts no thread and allocates nothing: the frame
+  pays one load of a global. `tests/test_agent_cost` measures the open channel
+  at 11ns a frame against an inactive drain of 0.6ns, and
+  `scripts/check_agent_gating.sh` fails a build that reaches the agent from the
+  frame loop outside that gate.
+
+- Pixels as data. `frame.capture` reads the finished frame into the engine and
+  `frame.pixel`, `frame.region`, `frame.hold` and `frame.diff` answer questions
+  about it, summarised where the pixels are rather than shipped as JSON.
+
+- `trace.model` follows one model from the Blender object it was authored as to
+  the pixels it produced -- source, asset, mesh, node, animation, visibility,
+  pixels -- and names the first stage where it stopped being right. Visibility
+  says a model should be on screen; pixels says whether anything was drawn where
+  it projects.
+
+- `world` returns every entity and the relations between them in one answer, so
+  a client stops joining four ops by hand on indices that shift.
+
+- The editor answers the same channel from its own loop. A held frame there does
+  not advance the simulation but still redraws, since an editor that skips
+  unchanged frames would otherwise stop producing the frames an agent held it
+  still to look at.
+
+### Animation
+
+- Clips, channels, samplers and playback, in glTF's shape because that is what
+  Blender exports. Translation, rotation and scale channels; step, linear and
+  cubic interpolation. Rotations lerp along the shorter arc, so a pair stored on
+  opposite sides of the hypersphere turns the short way.
+
+### The Blender pipeline
+
+- `tools/blender/ae3d_export.py` exports geometry, materials and animation from
+  the command line, with a manifest recording the source hash and a stable id
+  per object. The same file exports to identical bytes twice.
+
+- Bezier easing, which Blender uses by default, is carried as cubic segments
+  rather than flattened to linear. Each clip records what Blender itself
+  evaluated the curve to, and `tests/test_assets` holds the engine's sampler to
+  those values: it agrees to 1.4e-4.
+
+- Materials carry metallic, roughness and the base-colour texture. The MTL
+  loader had read `Pm`, `Pr` and `map_Kd` all along and the exporter wrote none
+  of them.
+
+- `tools/blender/ae3d_agent_server.py` opens the engine's protocol inside a
+  running Blender, so one client drives the modelling tool and the engine. Reads
+  after a seek are of the evaluated pose.
+
 ### Scenes
 
 - Scene save and load. A model from a file records its path and reloads through

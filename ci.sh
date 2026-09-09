@@ -49,6 +49,73 @@ check_platform MINGW64_NT-10.0   "-lopengl32"
 check_platform MINGW64_NT-10.0   "-lgdi32"
 check_platform MSYS_NT-10.0      "-lopengl32"
 check_platform Windows_NT        "-lopengl32"
+# The agent channel's own dependencies, named rather than borrowed from whatever
+# the Aether toolchain happens to link.
+check_platform Linux             "-lpthread"
+check_platform MINGW64_NT-10.0   "-lws2_32"
+
+step "the agent channel stays behind its gate"
+# The one property the channel's whole design rests on, and the one thing a
+# timing test cannot check: an ungated hook is a change to the source, not a
+# state at run time. See scripts/check_agent_gating.sh.
+./scripts/check_agent_gating.sh 2>/tmp/ae3d_gate.log
+gate_status=$?
+if [ "$gate_status" -eq 0 ]; then
+    pass "engine_loop reaches the agent only through e.agent_on"
+elif [ "$gate_status" -eq 1 ]; then
+    fail "engine_loop reaches the agent outside the gate"
+    sed "s/^/        /" /tmp/ae3d_gate.log | head -10
+else
+    # 126 is "not executable", 127 is "not found". Reporting either as an
+    # ungated hook names a bug that is not there and hides the one that is.
+    fail "check_agent_gating.sh could not run (exit $gate_status)"
+    sed "s/^/        /" /tmp/ae3d_gate.log | head -5
+fi
+
+step "exported fixtures match the exporter"
+# Catches an exporter change that nobody regenerated the fixtures for. The
+# committed assets under tests/fixtures/exported/ are what test_assets runs
+# against on machines with no Blender, so they have to be what this exporter
+# actually produces rather than what it produced once.
+#
+# Skips where Blender is absent, which is most CI.
+if command -v blender >/dev/null 2>&1 || [ -n "${BLENDER:-}" ]; then
+    check_exported() {   # check_exported <blend> <committed directory>
+        fresh="$(mktemp -d)"
+        ./scripts/export_assets.sh "$1" "$fresh" >/tmp/ae3d_export.log 2>&1
+        if [ ! -f "$fresh/manifest.json" ]; then
+            skip "$2" "the exporter produced nothing (see /tmp/ae3d_export.log)"
+        elif diff -r "$2" "$fresh" >/tmp/ae3d_export_diff.log 2>&1; then
+            pass "$2 is what the exporter produces"
+        else
+            fail "$2 is stale; run ./scripts/export_assets.sh"
+            sed 's/^/        /' /tmp/ae3d_export_diff.log | head -10
+        fi
+        rm -rf "$fresh"
+    }
+    check_exported tests/fixtures/spin.blend tests/fixtures/exported
+    check_exported resources/blender/showcase.blend resources/blender/showcase
+else
+    skip "exported fixtures" "no Blender"
+fi
+
+step "docs/agent.md matches the engine's command table"
+# A doc written by hand beside a protocol is a doc that describes last month's
+# protocol. This one is generated from the same table `help` answers with, so
+# the check is that it was regenerated after the table changed.
+./scripts/gen_agent_docs.sh --check >/tmp/ae3d_docs.log 2>&1
+docs_status=$?
+if [ "$docs_status" -eq 0 ]; then
+    pass "docs/agent.md is what the schema produces"
+elif [ "$docs_status" -ne 1 ]; then
+    # Anything but 1 is "could not check": 2 from the script itself, 126 when
+    # it is not executable, 127 when it is not there. Only 1 means the page
+    # and the schema actually disagree.
+    skip "docs/agent.md" "$(head -1 /tmp/ae3d_docs.log)"
+else
+    fail "docs/agent.md is out of date; run ./scripts/gen_agent_docs.sh"
+    sed "s/^/        /" /tmp/ae3d_docs.log | head -12
+fi
 
 step "native layer, warnings as errors"
 # Same compiler search as build.sh: a Windows toolchain need not ship `cc`.
@@ -58,7 +125,16 @@ if [ -z "${CC:-}" ]; then
     done
 fi
 CC="${CC:-cc}"
-GLFW_CFLAGS="$(pkg-config --cflags glfw3 2>/dev/null || true)"
+# Same precedence as build.sh. Without this the native step is the one part
+# of CI that cannot be run on a machine with no pkg-config, and it fails with
+# "GLFW/glfw3.h: No such file or directory" while every other step passes --
+# which reads as a broken checkout rather than a missing tool.
+if [ -z "${GLFW_CFLAGS:-}" ]; then
+    GLFW_CFLAGS="$(pkg-config --cflags glfw3 2>/dev/null || true)"
+fi
+if [ -z "${ZLIB_CFLAGS:-}" ]; then
+    ZLIB_CFLAGS="$(pkg-config --cflags zlib 2>/dev/null || true)"
+fi
 VULKAN_CFLAGS=""
 if pkg-config --exists vulkan 2>/dev/null; then
     VULKAN_CFLAGS="$(pkg-config --cflags vulkan)"
@@ -66,7 +142,7 @@ elif [ -d /opt/homebrew/include/vulkan ]; then
     VULKAN_CFLAGS="-I/opt/homebrew/include"
 fi
 for src in native/*.c; do
-    if "$CC" -c -O2 -Wall -Wextra -Werror $GLFW_CFLAGS $VULKAN_CFLAGS "$src" -o /dev/null 2>/tmp/ae3d_cc.log; then
+    if "$CC" -c -O2 -Wall -Wextra -Werror $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o /dev/null 2>/tmp/ae3d_cc.log; then
         pass "$src"
     else
         fail "$src"
