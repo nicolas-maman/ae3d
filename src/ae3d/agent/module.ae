@@ -32,6 +32,7 @@ import ae3d.gl
 import ae3d.vk
 import ae3d.anim
 import ae3d.assets
+import ae3d.scene
 
 exports (
     Context, context_new, context_free,
@@ -201,6 +202,18 @@ help_result() -> ptr {
         "Every model the renderer holds: index, name, position and visibility."))
     json.array_add_raw(ops, describe("model.get", "index",
         "One model in full: transform, bounds, material and mesh counts."))
+    json.array_add_raw(ops, describe("light.list", "",
+        "Every light: kind, position, direction, colour, intensity and ambient."))
+    json.array_add_raw(ops, describe("model.set", "index, [position], [rotation], [scale], [diffuse], [metallic], [roughness], [alpha], [visible], [casts_shadow], [name]",
+        "Change a model. Only the fields present are written; answers with the model as it now is."))
+    json.array_add_raw(ops, describe("camera.set", "[position], [look_at], [fov], [near], [far]",
+        "Move or reframe the camera."))
+    json.array_add_raw(ops, describe("light.set", "[index], [position], [direction], [color], [intensity], [ambient]",
+        "Change a light."))
+    json.array_add_raw(ops, describe("scene.save", "path, [mesh_directory]",
+        "Write the scene to JSON, with generated geometry beside it."))
+    json.array_add_raw(ops, describe("scene.load", "path",
+        "Replace the scene with one from a file, and reframe the camera as it was saved."))
     json.array_add_raw(ops, describe("trace.model", "id | object | index",
         "Follow one model from its Blender object to the pixels: source, asset, mesh, node, animation, visibility. Names the stage it stopped being right at."))
     json.array_add_raw(ops, describe("anim.list", "",
@@ -314,6 +327,218 @@ model_result(m: *Model, index: int) -> ptr {
         json.object_set_raw(out, "mesh", json.boolean(false))
     }
     return out
+}
+
+// --- writes -------------------------------------------------------------
+
+// The engine holds one light of its own and the renderer holds the rest, so a
+// client addressing lights by index would otherwise see only half of them.
+// Index 0 is the engine's when it has one, and the renderer's list follows.
+extra_light_count(c: *Context) -> int {
+    if c.gl_renderer != null { return gl.renderer_light_count(c.gl_renderer) }
+    if c.vk_renderer != null { return vk.renderer_light_count(c.vk_renderer) }
+    return 0
+}
+
+extra_light_at(c: *Context, index: int) -> *Light {
+    if c.gl_renderer != null { return gl.renderer_light(c.gl_renderer, index) }
+    if c.vk_renderer != null { return vk.renderer_light(c.vk_renderer, index) }
+    return null
+}
+
+light_count(c: *Context) -> int {
+    base = 0
+    if c.light != null { base = 1 }
+    return base + extra_light_count(c)
+}
+
+light_at(c: *Context, index: int) -> *Light {
+    if index < 0 { return null }
+    if c.light != null {
+        if index == 0 { return c.light as *Light }
+        return extra_light_at(c, index - 1)
+    }
+    return extra_light_at(c, index)
+}
+
+light_result(l: *Light, index: int) -> ptr {
+    out = json.obj()
+    json.object_set_raw(out, "index", json.from_int(index))
+    json.object_set_raw(out, "name", json.str(core.text(l.name)))
+    json.object_set_raw(out, "kind", json.from_int(l.kind))
+    json.object_set_raw(out, "position", vec3_json(l.position.x, l.position.y, l.position.z))
+    json.object_set_raw(out, "direction", vec3_json(l.direction.x, l.direction.y, l.direction.z))
+    json.object_set_raw(out, "color", vec3_json(l.color.x, l.color.y, l.color.z))
+    json.object_set_raw(out, "intensity", json.num(l.intensity))
+    json.object_set_raw(out, "ambient", json.num(l.ambient_strength))
+    return out
+}
+
+lights_result(c: *Context) -> ptr {
+    items = json.arr()
+    count = light_count(c)
+    i = 0
+    while i < count {
+        l = light_at(c, i)
+        if l != null { json.array_add_raw(items, light_result(l, i)) }
+        i = i + 1
+    }
+    out = json.obj()
+    json.object_set_raw(out, "count", json.from_int(count))
+    json.object_set_raw(out, "lights", items)
+    return out
+}
+
+number_at(node: ptr, name: string, fallback: float) -> float {
+    found = json.object_get_raw(node, name)
+    if found == null { return fallback }
+    return json.get_number(found)
+}
+
+has_field(node: ptr, name: string) -> bool {
+    return json.object_get_raw(node, name) != null
+}
+
+read_vec3(node: ptr, name: string, into: *Vec3) -> bool {
+    found = json.object_get_raw(node, name)
+    if found == null { return false }
+    if json.array_size(found) < 3 { return false }
+    into.x = json.get_number(json.array_get_raw(found, 0))
+    into.y = json.get_number(json.array_get_raw(found, 1))
+    into.z = json.get_number(json.array_get_raw(found, 2))
+    return true
+}
+
+apply_model_write(m: *Model, request: ptr) {
+    v = core.vec3(0.0, 0.0, 0.0)
+    if read_vec3(request, "position", &v) { core.model_set_position(m, v.x, v.y, v.z) }
+    if read_vec3(request, "scale", &v) { core.model_set_scale(m, v.x, v.y, v.z) }
+
+    found = json.object_get_raw(request, "rotation")
+    if found != null && json.array_size(found) >= 4 {
+        core.model_set_rotation(m, Quat {
+            x: json.get_number(json.array_get_raw(found, 0)),
+            y: json.get_number(json.array_get_raw(found, 1)),
+            z: json.get_number(json.array_get_raw(found, 2)),
+            w: json.get_number(json.array_get_raw(found, 3))
+        })
+    }
+    if read_vec3(request, "diffuse", &v) { core.model_set_diffuse(m, v.x, v.y, v.z) }
+    if has_field(request, "metallic") || has_field(request, "roughness") {
+        core.model_set_pbr(m,
+            number_at(request, "metallic", 0.0),
+            number_at(request, "roughness", 0.5))
+    }
+    if has_field(request, "alpha") { core.model_set_alpha(m, number_at(request, "alpha", 1.0)) }
+    if has_field(request, "visible") {
+        m.visible = json.get_bool(json.object_get_raw(request, "visible")) == 1
+    }
+    if has_field(request, "casts_shadow") {
+        core.model_set_casts_shadow(m,
+            json.get_bool(json.object_get_raw(request, "casts_shadow")) == 1)
+    }
+    if has_field(request, "name") {
+        core.model_set_name(m, json.get_string_raw(json.object_get_raw(request, "name")))
+    }
+}
+
+apply_camera_write(cam: *Camera, request: ptr) {
+    v = core.vec3(0.0, 0.0, 0.0)
+    if read_vec3(request, "position", &v) { core.camera_set_position(cam, v) }
+    if read_vec3(request, "look_at", &v) { core.camera_look_at(cam, v) }
+    if has_field(request, "fov") { core.camera_set_fov(cam, number_at(request, "fov", 45.0)) }
+    if has_field(request, "near") { core.camera_set_near(cam, number_at(request, "near", 0.1)) }
+    if has_field(request, "far") { core.camera_set_far(cam, number_at(request, "far", 10000.0)) }
+}
+
+apply_light_write(l: *Light, request: ptr) {
+    v = core.vec3(0.0, 0.0, 0.0)
+    if read_vec3(request, "position", &v) { l.position = v }
+    if read_vec3(request, "direction", &v) { l.direction = v }
+    if read_vec3(request, "color", &v) { l.color = v }
+    if has_field(request, "intensity") { l.intensity = number_at(request, "intensity", 1.0) }
+    if has_field(request, "ambient") { l.ambient_strength = number_at(request, "ambient", 0.1) }
+}
+
+remove_model_from_renderer(c: *Context, m: *Model) {
+    if c.gl_renderer != null { gl.renderer_remove_model(c.gl_renderer, m) }
+    if c.vk_renderer != null { vk.renderer_remove_model(c.vk_renderer, m) }
+}
+
+add_model_to_renderer(c: *Context, m: *Model) {
+    if c.gl_renderer != null { gl.renderer_add_model(c.gl_renderer, m) }
+    if c.vk_renderer != null { vk.renderer_add_model(c.vk_renderer, m) }
+}
+
+view_from_camera(c: *Context) -> View {
+    v = scene.view_defaults()
+    if c.camera == null { return v }
+    cam = c.camera as *Camera
+    v.camera_x = cam.position.x
+    v.camera_y = cam.position.y
+    v.camera_z = cam.position.z
+    v.yaw = cam.yaw
+    v.pitch = cam.pitch
+    v.fov = cam.fov
+    v.near = cam.near
+    v.far = cam.far
+    return v
+}
+
+save_scene(c: *Context, path: string, mesh_directory: string) -> bool {
+    models = list.new()
+    i = 0
+    count = model_count(c)
+    while i < count {
+        m = model_at(c, i)
+        if m != null { list.add_raw(models, m as ptr) }
+        i = i + 1
+    }
+
+    lights = list.new()
+    i = 0
+    count = light_count(c)
+    while i < count {
+        l = light_at(c, i)
+        if l != null { list.add_raw(lights, l as ptr) }
+        i = i + 1
+    }
+
+    view = view_from_camera(c)
+    ok = scene.scene_save(models, lights, null, &view, path, mesh_directory)
+    list.free(models)
+    list.free(lights)
+    return ok
+}
+
+load_scene(c: *Context, path: string) -> int {
+    loaded = scene.scene_load(path)
+    if loaded == null { return 0 - 1 }
+
+    while model_count(c) > 0 {
+        m = model_at(c, 0)
+        if m == null { break }
+        remove_model_from_renderer(c, m)
+        core.model_free(m)
+    }
+
+    i = 0
+    count = list.size(loaded)
+    while i < count {
+        add_model_to_renderer(c, list.get_raw(loaded, i) as *Model)
+        i = i + 1
+    }
+    list.free(loaded)
+
+    if c.camera != null {
+        view = scene.scene_load_view(path)
+        cam = c.camera as *Camera
+        core.camera_set_position(cam, core.vec3(view.camera_x, view.camera_y, view.camera_z))
+        core.camera_set_fov(cam, view.fov)
+        core.camera_set_near(cam, view.near)
+        core.camera_set_far(cam, view.far)
+    }
+    return count
 }
 
 // --- animation ----------------------------------------------------------
@@ -637,6 +862,88 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
             return false
         }
         answer(id, model_result(m, index))
+        return false
+    }
+
+    if op == "light.list" { answer(id, lights_result(c)) return false }
+
+    if op == "model.set" {
+        node = json.object_get_raw(request, "index")
+        if node == null {
+            fail(id, "model.set needs an index")
+            return false
+        }
+        index = json.get_int(node)
+        m = model_at(c, index)
+        if m == null {
+            fail(id, "no model at that index")
+            return false
+        }
+        apply_model_write(m, request)
+        answer(id, model_result(m, index))
+        return false
+    }
+
+    if op == "camera.set" {
+        if c.camera == null {
+            fail(id, "there is no camera")
+            return false
+        }
+        apply_camera_write(c.camera as *Camera, request)
+        answer(id, camera_result(c))
+        return false
+    }
+
+    if op == "light.set" {
+        node = json.object_get_raw(request, "index")
+        index = 0
+        if node != null { index = json.get_int(node) }
+        l = light_at(c, index)
+        if l == null {
+            fail(id, "no light at that index")
+            return false
+        }
+        apply_light_write(l, request)
+        answer(id, light_result(l, index))
+        return false
+    }
+
+    if op == "scene.save" {
+        node = json.object_get_raw(request, "path")
+        if node == null {
+            fail(id, "scene.save needs a path")
+            return false
+        }
+        path = json.get_string_raw(node)
+        directory = "build/"
+        where = json.object_get_raw(request, "mesh_directory")
+        if where != null { directory = json.get_string_raw(where) }
+        if !save_scene(c, path, directory) {
+            fail(id, scene.last_error())
+            return false
+        }
+        out = json.obj()
+        json.object_set_raw(out, "path", json.str(path))
+        json.object_set_raw(out, "models", json.from_int(model_count(c)))
+        json.object_set_raw(out, "lights", json.from_int(light_count(c)))
+        answer(id, out)
+        return false
+    }
+
+    if op == "scene.load" {
+        node = json.object_get_raw(request, "path")
+        if node == null {
+            fail(id, "scene.load needs a path")
+            return false
+        }
+        loaded = load_scene(c, json.get_string_raw(node))
+        if loaded < 0 {
+            fail(id, scene.last_error())
+            return false
+        }
+        out = json.obj()
+        json.object_set_raw(out, "models", json.from_int(loaded))
+        answer(id, out)
         return false
     }
 
