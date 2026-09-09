@@ -25,6 +25,12 @@
 //     emitter's clock runs against the observer's;
 //   * a disc with thickness, marched through rather than crossed, so it
 //     obscures itself and its silhouette is soft;
+//   * the Novikov-Thorne flux -- the solution of the relativistic thin-disc
+//     equations in this metric, not a Newtonian profile with a boundary factor
+//     bolted on. It depends on the spin, so the temperature is not pinned: spin
+//     the hole up and the inner disc genuinely runs hotter and bluer;
+//   * limb darkening, because a scattering atmosphere is brighter looked into
+//     than grazed;
 //   * two jets along the spin axis, integrated as emission along the same path.
 //
 // Lengths are in units of M, the gravitational radius. The horizon sits at
@@ -35,10 +41,23 @@
 // circle. That is the test this was built against -- an a = 0 run has a known
 // answer, and a Kerr integrator that cannot reproduce it is wrong somewhere.
 //
-// Still not modelled: the disc is Keplerian and geometrically thin (H/r =
-// 0.015) rather than a solution of anything, the jets are a shape rather than a
-// magnetohydrodynamic result, and there is no self-illumination -- the disc
-// does not light itself, and the hole does not light it either.
+// Four rays a pixel, on a rotated grid. The whole output is hard edges over
+// smooth backgrounds -- the rim of the shadow, the star field -- which is
+// exactly what one sample a pixel gets wrong. It costs four times the work and
+// is the difference between a picture and a demonstration.
+//
+// Still not modelled, and each for a reason rather than an oversight:
+//
+//   * RETURNING RADIATION. Light the disc emits, that the hole bends back onto
+//     the disc, and that is then re-radiated. It is a real contribution and a
+//     large one near the inner edge at this spin, and it cannot be had from a
+//     single backwards trace: every point on the disc would need its own
+//     integration over the sky to find what is shining on it.
+//   * THE JETS AS PHYSICS. They are a shape with a Lorentz factor, not a
+//     magnetohydrodynamic result. A jet is launched by magnetic fields threading
+//     the horizon, which is a simulation, not a closed form.
+//   * The gas is on circular orbits with no radial drift, and the disc is cut
+//     off at the ISCO rather than continuing as a plunging inflow.
 //
 //   ./build.sh examples/black_hole.ae && ./build/black_hole
 
@@ -89,9 +108,8 @@ uniform float spin;
 
 const float DISC_OUT   = 22.0;
 const float ESCAPE     = 130.0;
-const float T_PEAK     = 5400.0;
-const float PEAK_SHAPE = 0.4879;
-const float DISC_GAIN  = 0.78;
+const float T_SCALE    = 22000.0;
+const float DISC_GAIN  = 330.0;
 const float DISC_H     = 0.015;
 const float DISC_K     = 70.0;
 
@@ -189,11 +207,42 @@ float iscoRadius(float a) {
     return 3.0 + z2 - sqrt(max((3.0 - z1) * (3.0 + z1 + 2.0 * z2), 0.0));
 }
 
-float discShape(float r, float isco) {
-    float u = isco / r;
-    if (u >= 1.0) return 0.0;
-    float s = sqrt(u);
-    return sqrt(u * s) * sqrt(sqrt(1.0 - s));
+// Page and Thorne (1974): the flux radiated by a relativistic thin disc round a
+// Kerr hole. This is the solution of the thin-disc equations in this metric, not
+// the Newtonian r^(-3/4) with a boundary factor bolted onto it -- and the
+// difference is largest exactly where the picture is brightest, just outside the
+// inner edge. It also depends on the spin, which the Newtonian profile cannot
+// express at all: it only knew where the disc ended, not what dragging did to
+// the gas that got there.
+//
+// The three logarithmic terms are indexed by the roots of x^3 - 3x + 2a, which
+// have a closed form. The middle root passes through zero as a does, taking its
+// own numerator with it, so that term is 0/0 in the limit and is dropped rather
+// than evaluated.
+float ntFlux(float r, float a, float isco) {
+    if (r <= isco) return 0.0;
+
+    float x  = sqrt(r);
+    float x0 = sqrt(isco);
+
+    float ac = acos(clamp(a, -1.0, 1.0)) / 3.0;
+    float x1 =  2.0 * cos(ac - 1.0471975512);
+    float x2 =  2.0 * cos(ac + 1.0471975512);
+    float x3 = -2.0 * cos(ac);
+
+    float f = x - x0 - 1.5 * a * log(x / x0);
+    if (abs(x1) > 1e-3)
+        f -= 3.0 * (x1 - a) * (x1 - a) / (x1 * (x1 - x2) * (x1 - x3))
+                 * log(abs((x - x1) / (x0 - x1)));
+    if (abs(x2) > 1e-3)
+        f -= 3.0 * (x2 - a) * (x2 - a) / (x2 * (x2 - x1) * (x2 - x3))
+                 * log(abs((x - x2) / (x0 - x2)));
+    if (abs(x3) > 1e-3)
+        f -= 3.0 * (x3 - a) * (x3 - a) / (x3 * (x3 - x1) * (x3 - x2))
+                 * log(abs((x - x3) / (x0 - x3)));
+
+    float den = x * x * x * x * (x * x * x - 3.0 * x + 2.0 * a);
+    return max(f, 0.0) / max(den, 1e-6);
 }
 
 // Boyer-Lindquist to world. The spin axis is world +Y, so BL's z is world y.
@@ -289,16 +338,24 @@ float discDensity(float r, float worldY, float isco) {
     return exp(-z * z) * (1.0 - smoothstep(DISC_OUT - 5.0, DISC_OUT, r));
 }
 
-vec3 discEmission(float r, vec3 world, float a, float L, float isco) {
-    float temp  = T_PEAK * discShape(r, isco) / PEAK_SHAPE;
+vec3 discEmission(float r, vec3 world, float a, float L, float isco,
+                  vec3 photonDir) {
+    // The flux is the physics; the temperature follows from it by
+    // Stefan-Boltzmann rather than being assumed and then raised to the fourth.
+    // T_SCALE stands in for the accretion rate, so the peak temperature is not
+    // pinned: spin the hole up and the inner disc genuinely runs hotter, which
+    // is a real effect a fixed peak would have hidden.
+    float flux  = ntFlux(r, a, isco);
+    float temp  = T_SCALE * sqrt(sqrt(flux));
     float shift = redshift(r, a, L);
-
-    // Stefan-Boltzmann for what the gas radiates, and the fourth power of the
-    // shift for what survives the trip: specific intensity over frequency cubed
-    // is the invariant, so a bolometric intensity scales as g^4.
-    float ratio = temp / T_PEAK;
-    float flux  = ratio * ratio * ratio * ratio;
     float beam  = shift * shift * shift * shift;
+
+    // Limb darkening. A scattering atmosphere is brighter looked into than
+    // grazed, by Chandrasekhar's (1 + 2.06 mu)/3.06 for a semi-infinite
+    // electron-scattering surface. mu is taken against the coordinate normal
+    // rather than the fluid frame's, which is the one approximation here.
+    float mu   = clamp(abs(photonDir.y), 0.0, 1.0);
+    float limb = (1.0 + 2.06 * mu) / 3.06;
 
     // Turbulence sheared by the flow. Sampling a field rotated backwards by the
     // local orbital phase is seamless in azimuth -- there is no angle coordinate
@@ -311,7 +368,7 @@ vec3 discEmission(float r, vec3 world, float a, float L, float isco) {
     vec2  q  = vec2(world.x * ca - world.z * sa, world.x * sa + world.z * ca);
     float band = 0.32 + 1.35 * turbulence(q * 0.66);
 
-    return blackbody(temp * shift) * (flux * beam * band * DISC_GAIN);
+    return blackbody(temp * shift) * (flux * beam * band * limb * DISC_GAIN);
 }
 
 // The jets are emission spread along the path rather than a surface to land on,
@@ -341,16 +398,7 @@ vec3 jetEmission(vec3 p, vec3 photonDir) {
     return blackbody(temp * dop) * (profile * beam * JET_GAIN);
 }
 
-void main() {
-    float a    = clamp(spin, 0.0, 0.998);
-    float rh   = 1.0 + sqrt(max(1.0 - a * a, 0.0));
-    float isco = iscoRadius(a);
-
-    vec2 ndc = screenUV * 2.0 - 1.0;
-    vec3 rd  = normalize(camFwd
-                       + camRight * (ndc.x * aspectRatio * tanHalfFov)
-                       + camUp    * (ndc.y * tanHalfFov));
-
+vec3 traceRay(vec3 rd, float a, float rh, float isco) {
     // The camera sits far enough out that the coordinate basis is nearly
     // orthonormal, so the ray's components in it are the photon's momenta up to
     // the metric factors. Whatever error that leaves is taken back below by
@@ -450,7 +498,7 @@ void main() {
                 if (dens > 0.0008) {
                     float dtau   = DISC_K * dens * len * 0.125;
                     float absorb = 1.0 - exp(-dtau);
-                    colour   += transmit * absorb * discEmission(sr, sp, a, L, isco);
+                    colour   += transmit * absorb * discEmission(sr, sp, a, L, isco, -marchDir);
                     transmit *= 1.0 - absorb;
                 }
             }
@@ -460,13 +508,39 @@ void main() {
         prev = world;
     }
 
+    return colour;
+}
+
+void main() {
+    float a    = clamp(spin, 0.0, 0.998);
+    float rh   = 1.0 + sqrt(max(1.0 - a * a, 0.0));
+    float isco = iscoRadius(a);
+
+    // Four rays per pixel on a rotated grid. The rim of the shadow and the star
+    // field are both hard edges over a smooth background, which is exactly where
+    // one sample per pixel shows, and this is a renderer whose whole output is
+    // edges of that kind. The pixel's size comes from the screen-space
+    // derivative of the interpolated coordinate, so nothing here has to be told
+    // the resolution.
+    vec2 duv = vec2(dFdx(screenUV.x), dFdy(screenUV.y));
+    vec2 jitter[4] = vec2[4](vec2(-0.375, -0.125), vec2( 0.125, -0.375),
+                             vec2( 0.375,  0.125), vec2(-0.125,  0.375));
+
+    vec3 sum = vec3(0.0);
+    for (int i = 0; i < 4; i++) {
+        vec2 ndc = (screenUV + duv * jitter[i]) * 2.0 - 1.0;
+        vec3 rd  = normalize(camFwd
+                           + camRight * (ndc.x * aspectRatio * tanHalfFov)
+                           + camUp    * (ndc.y * tanHalfFov));
+        sum += traceRay(rd, a, rh, isco);
+    }
+
     // ACES, then sRGB -- the same tonemap the lit path uses, so the bright side
     // of the disc rolls off to white instead of clipping channel by channel and
-    // sliding in hue on the way.
-    // ACES, then sRGB -- the same tonemap the lit path uses, so the bright side
-    // of the disc rolls off to white instead of clipping channel by channel and
-    // sliding in hue on the way.
-    vec3 v = colour;
+    // sliding in hue on the way. Averaging happens before the tonemap, which is
+    // the right order: the curve is not linear, so averaging after it would
+    // darken every edge it touched.
+    vec3 v = sum * 0.25;
     vec3 mapped = clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), 0.0, 1.0);
     FragColor = vec4(pow(mapped, vec3(1.0 / 2.2)), 1.0);
 }
