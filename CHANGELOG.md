@@ -565,6 +565,12 @@ First working engine.
 
 ### Editor
 
+- A panel is one frame, not two. The stack inside the scroll view carried the
+  same border as the scroll view around it, and a stack is only as tall as what
+  it holds: the left column drew a rule across itself under the last button
+  with nothing under it, so the panel read as a card that stopped short of the
+  window. The frame belongs to the scroll view, which is the full height.
+
 - Every bounded setting has a number box beside its slider. A slider is worth
   several hundredths of a value per pixel, so there was no way to ask for
   exactly 0.5 metallic or a field of view of 45, and the number printed beside
@@ -578,6 +584,10 @@ First working engine.
   after another with nothing between them.
 
 ### Tooling
+
+- The layout audit refuses a frame drawn inside a frame of the same colour.
+  The inner one is shorter than the panel around it, so its bottom edge lands
+  in the middle of the column as a rule with nothing under it.
 
 - The editor driver reads visibility up the parent chain. A section is hidden
   by hiding its rows, and a hidden row's children still report themselves
