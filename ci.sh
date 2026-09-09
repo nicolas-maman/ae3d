@@ -29,6 +29,8 @@ have_display() {
     esac
 }
 
+. "$PWD/scripts/native.sh"
+
 step "platform link libraries"
 # Every host this can be built on, checked from any host. Windows had no arm
 # at all and the catch-all's -lm cannot link an OpenGL program, so ae3d could
@@ -197,12 +199,24 @@ step "scripts"
 for script_source in resources/scripts/*.ae; do
     [ -e "$script_source" ] || continue
     script_name="$(basename "$script_source" .ae)"
-    if ./scripts/build_script.sh "$script_source" >/tmp/ae3d_script.log 2>&1; then
-        pass "script $script_name"
-    else
+    if ! ./scripts/build_script.sh "$script_source" >/tmp/ae3d_script.log 2>&1; then
         fail "script $script_name"
         sed 's/^/        /' /tmp/ae3d_script.log | head -10
+        continue
     fi
+    # A script reaches into the engine the host is running, never a copy of its
+    # own: two copies of the GL loader means a script drawing through function
+    # pointers nothing ever filled in. It links the same library the host does,
+    # and the proof is that it defines none of the engine's C itself.
+    script_lib="build/scripts/$script_name$(ae3d_native_suffix)"
+    if command -v nm >/dev/null 2>&1 && [ -f "$script_lib" ]; then
+        own="$(nm -g "$script_lib" 2>/dev/null | grep -c ' T _\{0,1\}ae3d_' || true)"
+        if [ "${own:-0}" -ne 0 ]; then
+            fail "script $script_name (carries its own copy of $own engine calls)"
+            continue
+        fi
+    fi
+    pass "script $script_name"
 done
 
 step "test suites"

@@ -2,6 +2,22 @@
 
 ## [current]
 
+### Scripts
+
+- The engine's C is built once into `build/libae3d_native`, and every program
+  and every script links it. A script used to leave the engine's calls
+  undefined for the host to resolve, which macOS and Linux allow and Windows
+  does not: a DLL cannot, so a script that reached into the engine could not be
+  linked on Windows at all. Linking the same library from both sides is what
+  the platform offers, and doing it everywhere means one copy of the GL
+  loader's state at run time rather than one per script. `ci.sh` checks that a
+  built script defines none of the engine's C itself.
+- `tests/test_script` looked for a `.dylib` on every platform. It asks the
+  loader what a library is called here, which is what the editor already did.
+- `script.library_path` built its answer from two nested concatenations and
+  dropped the middle one; the editor leaked one per script per scan, and per
+  reload check. It builds the path in one piece, and both callers free it.
+
 First working engine.
 
 ### Rendering

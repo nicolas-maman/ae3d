@@ -103,6 +103,10 @@ elif [ -n "${VULKAN_SDK:-}" ]; then
     done
 fi
 
+. "$ROOT/scripts/platform.sh"
+. "$ROOT/scripts/native.sh"
+PIC="$(ae3d_native_pic_flag)"
+
 OS="$(uname -s)"
 case "$OS" in
     Darwin)
@@ -160,17 +164,21 @@ for src in $NATIVE_SOURCES; do
     extra=""
     case "$src" in *.m) extra="-fobjc-arc" ;; esac
     if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ] || [ "$newest_header" -nt "$obj" ]; then
-        "$CC" -c $CFLAGS $WARN $extra $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o "$obj"
+        "$CC" -c $CFLAGS $WARN $PIC $extra $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o "$obj"
     fi
 done
+
+ae3d_native_build "$CC" "$OBJ_DIR" "$CFLAGS" "$GLFW_LIBS $ZLIB_LIBS"
 
 # Both module trees on the search path: ae3d.* out of src/, ui and vg.* out of
 # the aether-ui checkout.
 export AETHER_LIB_DIR="$ROOT/src:$UI_ROOT"
 aetherc "$SOURCE" "$GEN"
 
-"$CC" $CFLAGS $UI_FLAGS "$GEN" $UI_SOURCES $OBJ_DIR/*.o \
-    $AETHER_COMPILE_FLAGS $AETHER_LIBS $GLFW_LIBS $ZLIB_LIBS $PLATFORM_LIBS \
+# GLFW and zlib belong to the engine, which is a library of its own now and
+# names them on its own link line. PLATFORM_LIBS here is aether-ui's.
+"$CC" $CFLAGS $UI_FLAGS "$GEN" $UI_SOURCES $(ae3d_native_link_flags) \
+    $AETHER_COMPILE_FLAGS $AETHER_LIBS $PLATFORM_LIBS \
     -o "$OUT"
 
 echo "built: $OUT"

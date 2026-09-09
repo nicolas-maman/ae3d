@@ -116,16 +116,6 @@ else
     ZLIB_CFLAGS=""
     ZLIB_LIBS="-lz"
 fi
-# ...but only once. Where the Aether toolchain is built against zlib its own
-# --libs already carries -lz, and naming it twice is not harmless: Apple's ld
-# warns `ignoring duplicate libraries: '-lz'`, and ci.sh counts a build warning
-# as a failure. Keep the include flags either way -- a duplicate -I is silent,
-# and the header still has to be found on the platforms where Aether does not
-# supply it.
-case " $AETHER_LIBS " in
-    *" -lz "*) ZLIB_LIBS="" ;;
-esac
-
 VULKAN_CFLAGS=""
 if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists vulkan; then
     VULKAN_CFLAGS="$(pkg-config --cflags vulkan)"
@@ -136,7 +126,9 @@ elif [ -n "${VULKAN_SDK:-}" ]; then
 fi
 
 . "$ROOT/scripts/platform.sh"
+. "$ROOT/scripts/native.sh"
 PLATFORM_LIBS="$(ae3d_platform_libs "$(uname -s)")"
+PIC="$(ae3d_native_pic_flag)"
 
 NATIVE_SOURCES="native/ae3d_agent.c native/ae3d_script.c native/ae3d_capture.c native/ae3d_glapi.c native/ae3d_platform.c native/ae3d_mesh.c native/ae3d_meshfile.c native/ae3d_image.c native/ae3d_png.c native/ae3d_gl.c native/ae3d_offscreen.c native/ae3d_vk.c"
 if [ "$(uname -s)" = "Darwin" ]; then
@@ -159,9 +151,11 @@ for src in $NATIVE_SOURCES; do
     extra=""
     case "$src" in *.m) extra="-fobjc-arc" ;; esac
     if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ] || [ "$newest_header" -nt "$obj" ]; then
-        "$CC" -c $CFLAGS $WARN $extra $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o "$obj"
+        "$CC" -c $CFLAGS $WARN $PIC $extra $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o "$obj"
     fi
 done
+
+ae3d_native_build "$CC" "$OBJ_DIR" "$CFLAGS" "$GLFW_LIBS $ZLIB_LIBS"
 
 # Two module trees. ae3d.* is the engine, under src/. examples/lib/ is shared
 # code belonging to the examples themselves -- a black hole renderer is a tech
@@ -171,7 +165,12 @@ done
 # benchmark times it, and the test checks it against general relativity.
 export AETHER_LIB_DIR="$ROOT/src:$ROOT/examples/lib"
 "$AETHERC" "$SOURCE" "$GEN"
-"$CC" $CFLAGS "$GEN" $OBJ_DIR/*.o $AETHER_COMPILE_FLAGS $AETHER_LIBS $GLFW_LIBS $ZLIB_LIBS $PLATFORM_LIBS -o "$OUT"
+# GLFW and zlib are the engine's, and the engine is now a library of its own
+# that names them on its own link line. Naming them again here is not harmless:
+# where the Aether toolchain is built against zlib its --libs already carries
+# -lz, Apple's ld warns `ignoring duplicate libraries`, and ci.sh reads a
+# warning in a build log as a failure.
+"$CC" $CFLAGS "$GEN" $(ae3d_native_link_flags) $AETHER_COMPILE_FLAGS $AETHER_LIBS $PLATFORM_LIBS -o "$OUT"
 
 # MinGW gcc appends .exe to an output name that has no extension, so the file
 # is not at the path this asked for. Name the one that exists.
