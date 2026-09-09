@@ -1,0 +1,376 @@
+// The agent channel, engine side: what a request means.
+//
+// native/ae3d_agent.c owns the socket and hands over whole lines. This turns a
+// line into an answer. The two halves are split there because the transport has
+// no business knowing what a scene is, and this has no business knowing what a
+// socket is.
+//
+// Every request is one JSON object on one line:
+//
+//     {"id": 1, "op": "frame.stats"}
+//     {"id": 2, "op": "model.get", "index": 3}
+//
+// and every answer is one JSON object on one line, carrying back the id it
+// answers so a client may pipeline:
+//
+//     {"id": 1, "ok": true, "result": {...}}
+//     {"id": 2, "ok": false, "error": "no model at index 3"}
+//
+// `help` returns the whole command table as data. An agent should be able to
+// discover what it can ask for without reading this file.
+//
+// This module knows about core, gl and vk, and deliberately not about engine:
+// engine imports it, and the dependency has to run one way. What it needs from
+// a frame arrives in a Context the engine fills before each pump.
+
+import std.heap
+import std.json
+import std.string
+import std.list
+import ae3d.core
+import ae3d.gl
+import ae3d.vk
+
+exports (
+    Context, context_new, context_free,
+    start, active, port, stop, pump, answer_step, last_error
+)
+
+extern ae3d_agent_start() -> int
+extern ae3d_agent_active() -> int
+extern ae3d_agent_port() -> int
+extern ae3d_agent_next_request() -> string
+extern ae3d_agent_respond(line: string)
+extern ae3d_agent_stop()
+extern ae3d_agent_error() -> string
+
+// What the engine shows the channel each frame, and what it reads back after.
+//
+// The read half is filled before pump and is a plain copy of numbers the engine
+// already has, so assembling it costs nothing a frame would notice. The write
+// half is how a command reaches the engine: nothing here touches the renderer
+// or the window, because pump runs on the engine's thread at one known point
+// and the command still has to be applied where the engine decides.
+struct Context {
+    camera: ptr
+    light: ptr
+    gl_renderer: ptr
+    vk_renderer: ptr
+    backend: string
+
+    frame_count: int
+    fps: float
+    delta: float
+    width: int
+    height: int
+    draw_calls: int
+    instances: int
+
+    // Set by a command, acted on by the engine after pump returns.
+    want_stop: bool
+    want_snapshot: string
+    want_steps: int
+}
+
+var g_error = ""
+
+last_error() -> string { return g_error }
+
+context_new() -> *Context {
+    c = heap.new(Context)
+    c.backend = ""
+    c.want_snapshot = ""
+    return c
+}
+
+context_free(c: *Context) {
+    if c != null { heap.free(c) }
+}
+
+// Opening the channel is what AE3D_AGENT asks for, and nothing else here runs
+// until it has. A failure to open is reported and is not fatal: an engine that
+// could not get its debug port should still render.
+start() -> bool {
+    if ae3d_agent_start() != 0 { return true }
+    g_error = ae3d_agent_error()
+    return false
+}
+
+active() -> bool { return ae3d_agent_active() != 0 }
+
+port() -> int { return ae3d_agent_port() }
+
+stop() { ae3d_agent_stop() }
+
+// --- answers ------------------------------------------------------------
+
+ok_envelope(id: int, result: ptr) -> ptr {
+    out = json.obj()
+    json.object_set_raw(out, "id", json.from_int(id))
+    json.object_set_raw(out, "ok", json.boolean(true))
+    json.object_set_raw(out, "result", result)
+    return out
+}
+
+fail(id: int, reason: string) {
+    out = json.obj()
+    json.object_set_raw(out, "id", json.from_int(id))
+    json.object_set_raw(out, "ok", json.boolean(false))
+    json.object_set_raw(out, "error", json.str(reason))
+    text = json.stringify_raw(out)
+    ae3d_agent_respond(text)
+    json.free(out)
+}
+
+answer(id: int, result: ptr) {
+    out = ok_envelope(id, result)
+    text = json.stringify_raw(out)
+    ae3d_agent_respond(text)
+    json.free(out)
+}
+
+vec3_json(x: float, y: float, z: float) -> ptr {
+    out = json.arr()
+    json.array_add_raw(out, json.num(x))
+    json.array_add_raw(out, json.num(y))
+    json.array_add_raw(out, json.num(z))
+    return out
+}
+
+// A model's rotation is a quaternion, and reporting three of its four numbers
+// would be a value a client could not use.
+quat_json(x: float, y: float, z: float, w: float) -> ptr {
+    out = json.arr()
+    json.array_add_raw(out, json.num(x))
+    json.array_add_raw(out, json.num(y))
+    json.array_add_raw(out, json.num(z))
+    json.array_add_raw(out, json.num(w))
+    return out
+}
+
+// --- the command table --------------------------------------------------
+
+// One entry per op, and `help` renders it. Kept as data rather than prose so
+// the schema an agent reads and the dispatch below cannot describe different
+// engines.
+describe(name: string, args: string, summary: string) -> ptr {
+    out = json.obj()
+    json.object_set_raw(out, "op", json.str(name))
+    json.object_set_raw(out, "args", json.str(args))
+    json.object_set_raw(out, "summary", json.str(summary))
+    return out
+}
+
+help_result() -> ptr {
+    ops = json.arr()
+    json.array_add_raw(ops, describe("help", "",
+        "This table. Every op, its arguments and what it answers."))
+    json.array_add_raw(ops, describe("ping", "",
+        "Liveness. Answers immediately, on the frame it was drained."))
+    json.array_add_raw(ops, describe("frame.stats", "",
+        "frame, fps, delta, viewport, draw calls and instances for the last frame."))
+    json.array_add_raw(ops, describe("camera.get", "",
+        "Camera position, orientation, field of view and clip planes."))
+    json.array_add_raw(ops, describe("scene.tree", "",
+        "Every model the renderer holds: index, name, position and visibility."))
+    json.array_add_raw(ops, describe("model.get", "index",
+        "One model in full: transform, bounds, material and mesh counts."))
+    json.array_add_raw(ops, describe("snapshot", "path",
+        "Write the next completed frame to a PNG at path."))
+    json.array_add_raw(ops, describe("frame.step", "count",
+        "Let exactly count frames run, then answer. A snapshot after this is of a known frame."))
+    json.array_add_raw(ops, describe("quit", "",
+        "Stop the engine's loop and let it shut down normally."))
+
+    out = json.obj()
+    json.object_set_raw(out, "protocol", json.str("ae3d-agent/1"))
+    json.object_set_raw(out, "ops", ops)
+    return out
+}
+
+// --- reads --------------------------------------------------------------
+
+stats_result(c: *Context) -> ptr {
+    out = json.obj()
+    json.object_set_raw(out, "frame", json.from_int(c.frame_count))
+    json.object_set_raw(out, "fps", json.num(c.fps))
+    json.object_set_raw(out, "delta", json.num(c.delta))
+    json.object_set_raw(out, "width", json.from_int(c.width))
+    json.object_set_raw(out, "height", json.from_int(c.height))
+    json.object_set_raw(out, "backend", json.str(c.backend))
+    json.object_set_raw(out, "draw_calls", json.from_int(c.draw_calls))
+    json.object_set_raw(out, "instances", json.from_int(c.instances))
+    return out
+}
+
+camera_result(c: *Context) -> ptr {
+    out = json.obj()
+    if c.camera == null { return out }
+    cam = c.camera as *Camera
+    json.object_set_raw(out, "position", vec3_json(cam.position.x, cam.position.y, cam.position.z))
+    json.object_set_raw(out, "front", vec3_json(cam.front.x, cam.front.y, cam.front.z))
+    json.object_set_raw(out, "yaw", json.num(cam.yaw))
+    json.object_set_raw(out, "pitch", json.num(cam.pitch))
+    json.object_set_raw(out, "fov", json.num(cam.fov))
+    json.object_set_raw(out, "near", json.num(cam.near))
+    json.object_set_raw(out, "far", json.num(cam.far))
+    return out
+}
+
+model_count(c: *Context) -> int {
+    if c.gl_renderer != null { return gl.renderer_model_count(c.gl_renderer) }
+    if c.vk_renderer != null { return vk.renderer_model_count(c.vk_renderer) }
+    return 0
+}
+
+model_at(c: *Context, index: int) -> *Model {
+    if c.gl_renderer != null { return gl.renderer_model(c.gl_renderer, index) }
+    if c.vk_renderer != null { return vk.renderer_model(c.vk_renderer, index) }
+    return null
+}
+
+model_brief(m: *Model, index: int) -> ptr {
+    out = json.obj()
+    json.object_set_raw(out, "index", json.from_int(index))
+    json.object_set_raw(out, "name", json.str(core.text(m.name)))
+    json.object_set_raw(out, "position", vec3_json(m.position.x, m.position.y, m.position.z))
+    json.object_set_raw(out, "visible", json.boolean(m.visible))
+    return out
+}
+
+tree_result(c: *Context) -> ptr {
+    models = json.arr()
+    count = model_count(c)
+    i = 0
+    while i < count {
+        m = model_at(c, i)
+        if m != null { json.array_add_raw(models, model_brief(m, i)) }
+        i = i + 1
+    }
+    out = json.obj()
+    json.object_set_raw(out, "count", json.from_int(count))
+    json.object_set_raw(out, "models", models)
+    return out
+}
+
+model_result(m: *Model, index: int) -> ptr {
+    out = model_brief(m, index)
+    json.object_set_raw(out, "scale", vec3_json(m.scale.x, m.scale.y, m.scale.z))
+    json.object_set_raw(out, "rotation", quat_json(m.rotation.x, m.rotation.y, m.rotation.z, m.rotation.w))
+    json.object_set_raw(out, "casts_shadow", json.boolean(m.casts_shadow))
+    json.object_set_raw(out, "instance_count", json.from_int(core.model_instance_count(m)))
+    json.object_set_raw(out, "instanced", json.boolean(m.is_instanced))
+    json.object_set_raw(out, "shares_geometry", json.boolean(m.shares_geometry))
+    json.object_set_raw(out, "source_path", json.str(core.text(m.source_path)))
+    json.object_set_raw(out, "bounding_center",
+        vec3_json(m.bounding_center.x, m.bounding_center.y, m.bounding_center.z))
+    json.object_set_raw(out, "bounding_radius", json.num(m.bounding_radius))
+
+    // A model whose mesh went missing is exactly the failure #181 has to be
+    // able to name, so the counts are reported as absent rather than as zero.
+    if m.mesh != null {
+        json.object_set_raw(out, "vertex_count", json.from_int(core.mesh_vertex_count(m.mesh)))
+        json.object_set_raw(out, "index_count", json.from_int(core.mesh_index_count(m.mesh)))
+    } else {
+        json.object_set_raw(out, "mesh", json.boolean(false))
+    }
+    return out
+}
+
+// --- dispatch -----------------------------------------------------------
+
+handle(c: *Context, op: string, id: int, request: ptr) -> bool {
+    if op == "help"        { answer(id, help_result()) return false }
+    if op == "ping"        { answer(id, json.obj()) return false }
+    if op == "frame.stats" { answer(id, stats_result(c)) return false }
+    if op == "camera.get"  { answer(id, camera_result(c)) return false }
+    if op == "scene.tree"  { answer(id, tree_result(c)) return false }
+
+    if op == "model.get" {
+        node = json.object_get_raw(request, "index")
+        if node == null {
+            fail(id, "model.get needs an index")
+            return false
+        }
+        index = json.get_int(node)
+        m = model_at(c, index)
+        if m == null {
+            fail(id, "no model at that index")
+            return false
+        }
+        answer(id, model_result(m, index))
+        return false
+    }
+
+    if op == "snapshot" {
+        node = json.object_get_raw(request, "path")
+        if node == null {
+            fail(id, "snapshot needs a path")
+            return false
+        }
+        c.want_snapshot = json.get_string_raw(node)
+        answer(id, json.obj())
+        return false
+    }
+
+    if op == "frame.step" {
+        count = 1
+        node = json.object_get_raw(request, "count")
+        if node != null { count = json.get_int(node) }
+        if count < 1 { count = 1 }
+        c.want_steps = count
+        // Answered by the engine once the frames have actually run, which is
+        // the whole point: a client that steps and then snapshots is looking at
+        // the frame it asked for rather than whichever one was in flight.
+        return true
+    }
+
+    if op == "quit" {
+        c.want_stop = true
+        answer(id, json.obj())
+        return false
+    }
+
+    fail(id, "unknown op; send {\"op\":\"help\"} for the table")
+    return false
+}
+
+// Drain everything queued and answer it. Called once per frame, and only when
+// the channel is on: the engine caches that flag, so a build with the channel
+// off never reaches this function at all.
+//
+// Returns the id of a request that is waiting on frames to elapse, or -1 when
+// nothing is pending, so the engine knows whether it owes a deferred answer.
+pump(c: *Context) -> int {
+    while true {
+        line = ae3d_agent_next_request()
+        if line == null { return -1 }
+
+        request = json.parse_raw(line)
+        if request == null {
+            fail(0, "not JSON")
+            continue
+        }
+
+        id = 0
+        id_node = json.object_get_raw(request, "id")
+        if id_node != null { id = json.get_int(id_node) }
+
+        op_node = json.object_get_raw(request, "op")
+        if op_node == null {
+            fail(id, "every request needs an op")
+            json.free(request)
+            continue
+        }
+
+        deferred = handle(c, json.get_string_raw(op_node), id, request)
+        json.free(request)
+        if deferred { return id }
+    }
+    return -1
+}
+
+// The answer to a frame.step, once the frames have run.
+answer_step(id: int, c: *Context) {
+    answer(id, stats_result(c))
+}
