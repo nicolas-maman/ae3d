@@ -104,8 +104,19 @@ def scene_list_id(widgets):
 
 
 def row_name(widgets, row):
+    """The object's name, past the one-character kind marker the row carries.
+
+    The list draws " ~  water" so the kind is readable before anything is
+    selected. A check that compared the whole label against "water" was
+    reading the presentation, and broke the moment the presentation improved.
+    """
     kids = [c["text"].strip() for c in widgets.values() if c["parent"] == row["id"]]
-    return kids[0] if kids else "?"
+    if not kids:
+        return "?"
+    parts = kids[0].split(None, 1)
+    if len(parts) == 2 and len(parts[0]) == 1:
+        return parts[1].strip()
+    return kids[0]
 
 
 def water_section_visible(widgets):

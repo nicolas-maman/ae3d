@@ -554,6 +554,11 @@ First working engine.
 
 ### Editor
 
+- The hierarchy says what each object is and which one is selected. Every row
+  was the same grey word, so a water surface and a cube looked alike and the
+  inspector was the only thing that said what was being edited. Each row now
+  carries a one-character marker for its kind and the selected one is lit.
+
 - A bounded setting is one line: label, slider and value across a row, the way
   all three of the editors this borrows from draw one. The slider used to sit
   under its own caption, which cost two lines a setting and read like a page of
