@@ -60,6 +60,29 @@ def tree(port):
     return {w["id"]: w for w in get(port, "/widgets")}
 
 
+def wait_rows(port, scene, count, seconds=8.0):
+    """Wait for the scene list to hold `count` rows, then report what it holds.
+
+    Every count in here is asserted after an action the editor performs in its
+    own time. Sleeping first and asserting second passes on an idle machine and
+    fails inside a full ci run, and the failure names the check rather than the
+    machine, which is the worst way to learn about a timing assumption.
+    """
+    widgets, _ = wait_for(port,
+                          lambda ws: len(rows_under(ws, scene)) == count,
+                          seconds)
+    return len(rows_under(widgets, scene))
+
+
+def wait_file(path, seconds=8.0):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            return True
+        time.sleep(0.25)
+    return os.path.exists(path) and os.path.getsize(path) > 0
+
+
 def wait_for(port, predicate, seconds=8.0):
     """Poll the tree until predicate(widgets) holds, or give up.
 
@@ -180,9 +203,8 @@ def main():
         check("the Cube button is in the tree", cube is not None)
         if cube is not None:
             post(args.port, "/widget/%d/click" % cube)
-            time.sleep(1.0)
+            after = wait_rows(args.port, scene, before + 1)
             widgets = tree(args.port)
-            after = len(rows_under(widgets, scene))
             check("clicking Cube adds an object", after == before + 1,
                   "%d rows before, %d after" % (before, after))
 
@@ -194,9 +216,8 @@ def main():
         check("the Undo button is in the tree", undo is not None)
         if undo is not None and cube is not None:
             post(args.port, "/widget/%d/click" % undo)
-            time.sleep(1.0)
+            undone = wait_rows(args.port, scene, before)
             widgets = tree(args.port)
-            undone = len(rows_under(widgets, scene))
             check("clicking Undo takes the object back off", undone == before,
                   "%d rows, expected %d" % (undone, before))
 
@@ -310,13 +331,10 @@ def main():
         if save and load and delete:
             saved_rows = len(rows_under(tree(args.port), scene))
             post(args.port, "/widget/%d/click" % save)
-            time.sleep(1.2)
-            check("Save writes a scene file",
-                  os.path.exists(scene_file) and os.path.getsize(scene_file) > 0)
+            check("Save writes a scene file", wait_file(scene_file))
 
             post(args.port, "/widget/%d/click" % find(tree(args.port), "button", "Cube"))
-            time.sleep(1.0)
-            grew = len(rows_under(tree(args.port), scene))
+            grew = wait_rows(args.port, scene, saved_rows + 1)
             post(args.port, "/widget/%d/click" % load)
             # Polled, not slept on. Reading a scene back off disk takes as long
             # as the machine takes, and a sleep that is long enough here is a
@@ -358,7 +376,7 @@ def main():
                     post(args.port, "/widget/%d/set_value?v=9.25" % later[0]["id"])
                     time.sleep(0.9)
                     post(args.port, "/widget/%d/click" % save)
-                    time.sleep(1.5)
+                    wait_file(scene_file)
                     post(args.port, "/widget/%d/set_value?v=3.0" % later[0]["id"])
                     time.sleep(0.9)
                     moved = tree(args.port)[readout[0]["id"]]["text"].strip()
@@ -379,8 +397,7 @@ def main():
 
             before_delete = len(rows_under(tree(args.port), scene))
             post(args.port, "/widget/%d/click" % delete)
-            time.sleep(1.0)
-            after_delete = len(rows_under(tree(args.port), scene))
+            after_delete = wait_rows(args.port, scene, before_delete - 1)
             check("Delete takes an object out",
                   after_delete == before_delete - 1,
                   "%d rows, expected %d" % (after_delete, before_delete - 1))

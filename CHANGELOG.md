@@ -506,6 +506,11 @@ First working engine.
 
 ### Tooling
 
+- The editor driver waits for what it is about to assert rather than sleeping
+  first. Every count it checks follows an action the editor performs in its own
+  time, and a sleep long enough on an idle machine fails inside a full run,
+  naming the check rather than the timing assumption behind it.
+
 - The editor driver runs on both backends. The report checks have always run on
   each, but nothing had ever pressed a widget on the Vulkan one, and the
   editor's controls reach the renderer through a vtable that only a real click
