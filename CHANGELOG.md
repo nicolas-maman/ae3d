@@ -578,6 +578,13 @@ First working engine.
 
 ### Editor
 
+- Sections fold. The inspector is eleven of them in one column, which is more
+  than fits in the window, and a person working on a material should not have
+  to scroll past a camera to reach the next one. Clicking a header folds what
+  is under it and turns the caret, which is how all three of the editors this
+  borrows from do it. The water section, which is hidden whole when a scene has
+  no water, is now hidden as a section rather than a row at a time.
+
 - The inspector has a SHADING section. The engine's shader has carried
   clearcoat, sheen, ambient occlusion, volumetric light, global illumination
   and soft shadows since it was written, and the editor offered no way to reach

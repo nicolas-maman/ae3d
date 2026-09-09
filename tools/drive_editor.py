@@ -142,19 +142,29 @@ def in_panel(widgets, w):
 
 
 def scene_list_id(widgets):
-    # The hierarchy is what follows the SCENE bar in the panel. Found by
-    # structure rather than by a fixed id, because ids move whenever the panel
-    # gains a widget.
+    # The list inside the SCENE section. Found by structure rather than by a
+    # fixed id, because ids move whenever the panel gains a widget, and by
+    # looking for the list itself rather than for whatever follows the bar: the
+    # section's body is a stack, so "the next container" is the body and the
+    # rows are a level further down.
     for w in widgets.values():
         if w["type"] == "text" and w["text"].strip() == "SCENE":
             bar = in_panel(widgets, w)
             if bar is None:
                 continue
-            after = [s for s in widgets.values()
-                     if s["parent"] == bar["parent"] and s["id"] > bar["id"]]
-            for s in sorted(after, key=lambda s: s["id"]):
-                if s["type"] in ("vstack", "listbox"):
-                    return s["id"]
+            after = sorted([s for s in widgets.values()
+                            if s["parent"] == bar["parent"] and s["id"] > bar["id"]],
+                           key=lambda s: s["id"])
+            for body in after:
+                # The section's body, and the list is the first container in
+                # it. The toolkit reports a listbox as a stack, so this cannot
+                # ask for the type by name and has to take the first one.
+                for kid in sorted([k for k in widgets.values()
+                                   if k["parent"] == body["id"]],
+                                  key=lambda k: k["id"]):
+                    if kid["type"] in ("vstack", "listbox"):
+                        return kid["id"]
+                break
     return None
 
 
@@ -402,6 +412,40 @@ def main():
         check("every action the editor has is on a menu",
               len(menus) == 4 and not missing,
               "%d menus, missing %s" % (len(menus), missing[:4]))
+
+        # A section folds when its bar is clicked. Read as the body going away
+        # and the caret turning, not as one row disappearing: a hidden row's
+        # own visible flag stays true, which is why on_screen walks upward.
+        widgets = tree(args.port)
+        caps = [w for w in widgets.values()
+                if w["type"] == "text" and w["text"].strip() == "MATERIAL"]
+        check("the inspector's sections have headers", len(caps) == 1)
+        if caps:
+            strip = widgets[caps[0]["parent"]]
+            bar = widgets[strip["parent"]]
+            caret = [w for w in widgets.values()
+                     if w["parent"] == strip["id"] and w["type"] == "text"
+                     and w["id"] < caps[0]["id"]]
+            red = [w for w in widgets.values()
+                   if w["type"] == "text" and w["text"].strip() == "red"]
+            check("and a caret that says which way the section is",
+                  len(caret) == 1 and caret[0]["text"].strip() == "\u25be",
+                  repr(caret[0]["text"]) if caret else "none")
+            if red and caret:
+                post(args.port, "/widget/%d/click" % bar["id"])
+                widgets, ok = wait_for(
+                    args.port,
+                    lambda ws: not on_screen(ws, ws[red[0]["id"]]))
+                check("clicking a section header folds it away", ok)
+                check("and the caret turns with it",
+                      widgets[caret[0]["id"]]["text"].strip() == "\u25b8",
+                      repr(widgets[caret[0]["id"]]["text"]))
+
+                post(args.port, "/widget/%d/click" % bar["id"])
+                widgets, ok = wait_for(
+                    args.port,
+                    lambda ws: on_screen(ws, ws[red[0]["id"]]))
+                check("and clicking it again brings it back", ok)
 
         # The shading switches, pressed rather than called. The report's own
         # check flips them through set_shading; this is the half that proves a
