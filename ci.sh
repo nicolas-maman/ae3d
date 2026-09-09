@@ -58,11 +58,18 @@ step "the agent channel stays behind its gate"
 # The one property the channel's whole design rests on, and the one thing a
 # timing test cannot check: an ungated hook is a change to the source, not a
 # state at run time. See scripts/check_agent_gating.sh.
-if ./scripts/check_agent_gating.sh 2>/tmp/ae3d_gate.log; then
+./scripts/check_agent_gating.sh 2>/tmp/ae3d_gate.log
+gate_status=$?
+if [ "$gate_status" -eq 0 ]; then
     pass "engine_loop reaches the agent only through e.agent_on"
-else
+elif [ "$gate_status" -eq 1 ]; then
     fail "engine_loop reaches the agent outside the gate"
-    sed 's/^/        /' /tmp/ae3d_gate.log | head -10
+    sed "s/^/        /" /tmp/ae3d_gate.log | head -10
+else
+    # 126 is "not executable", 127 is "not found". Reporting either as an
+    # ungated hook names a bug that is not there and hides the one that is.
+    fail "check_agent_gating.sh could not run (exit $gate_status)"
+    sed "s/^/        /" /tmp/ae3d_gate.log | head -5
 fi
 
 step "exported fixtures match the exporter"
@@ -96,9 +103,10 @@ step "docs/agent.md matches the engine's command table"
 docs_status=$?
 if [ "$docs_status" -eq 0 ]; then
     pass "docs/agent.md is what the schema produces"
-elif [ "$docs_status" -eq 2 ]; then
-    # 2 is "could not check". Whatever is wrong is not the documentation, and
-    # the native layer and module steps below exist to say what it is.
+elif [ "$docs_status" -ne 1 ]; then
+    # Anything but 1 is "could not check": 2 from the script itself, 126 when
+    # it is not executable, 127 when it is not there. Only 1 means the page
+    # and the schema actually disagree.
     skip "docs/agent.md" "$(head -1 /tmp/ae3d_docs.log)"
 else
     fail "docs/agent.md is out of date; run ./scripts/gen_agent_docs.sh"

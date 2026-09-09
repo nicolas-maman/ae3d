@@ -175,9 +175,16 @@ channel_duration(c: *AnimChannel) -> float {
 
 // --- clips --------------------------------------------------------------
 
+// The clip owns a copy of its name, so the caller keeps whatever it passed and
+// clip_free has something it is allowed to release. Holding the caller's string
+// leaked every name that was not a literal: a clip loaded from an export got
+// its name from the JSON document, and nothing ever freed it.
+//
+//   test_assets: 2 leaks for 80 total leaked bytes
+//     1 (32 bytes) ... length: 13  "SpinnerAction"
 clip_new(name: string) -> *Clip {
     c = heap.new(Clip)
-    c.name = name
+    c.name = string.copy(name)
     c.channels = list.new()
     return c
 }
@@ -193,6 +200,9 @@ clip_free(c: *Clip) {
         }
         list.free(c.channels)
     }
+    // No explicit free of c.name. Assigning a copy marks the field heap-owned,
+    // and the generated Clip_destroy releases it -- freeing it here as well is
+    // a double free that takes the process down with no output at all.
     heap.free(c)
 }
 
