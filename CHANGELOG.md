@@ -565,6 +565,19 @@ First working engine.
 
 ### Editor
 
+- Buttons carry an edge. A flat fill on a panel one step darker reads as a soft
+  block rather than as something to press, and a panel of ten of them had no
+  lines in it at all. The fields beside them already had a border, so the two
+  kinds of control now agree.
+
+- The behaviour row is its own readout. It carried a caption and a word above
+  four identical buttons, which said the same thing twice as soon as the
+  buttons could say it once.
+
+- A debug print shipped, in paint_segments, writing to the editor's console
+  where it looked like a message the editor meant to write. It is gone, and
+  `ci.sh` now refuses one.
+
 - A row of choices says which one is on. The behaviour buttons and the
   rendering presets were four and three identical bars: they showed what could
   be chosen and never what was, so the only way to find out which preset was

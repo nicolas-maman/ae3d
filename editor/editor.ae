@@ -37,7 +37,6 @@ const WINDOW_H = 860
 const ORBIT_SPEED = 0.35
 const ZOOM_STEP = 1.12
 const DRAG_SLOP = 3.0
-const VALUE_COLUMN = 46
 // A slider's box. Wide enough for the longest value any bounded row shows,
 // which is a field of view at 110.00.
 const READOUT_W = 58
@@ -117,7 +116,6 @@ var g_water_heading = 0
 // panel shows two lines with nothing between them.
 var g_water_divider = 0
 var g_scripts: ptr = null
-var g_script_label = 0
 var g_script_clock = 0.0
 var g_dirty = true
 
@@ -735,7 +733,7 @@ sync_inspector() {
     show_row(17, camera_value(17))
     show_row(18, camera_value(18))
     show_row(19, camera_value(19))
-    refresh_script_label()
+    refresh_script_buttons()
 
     sim = selected_water()
     show_water_section(sim != null)
@@ -911,7 +909,7 @@ set_script(index: int, script: int) {
     show_row(17, camera_value(17))
     show_row(18, camera_value(18))
     show_row(19, camera_value(19))
-    refresh_script_label()
+    refresh_script_buttons()
     say("${script_name(script)} on ${core.text(model_at(index).name)}")
 }
 
@@ -944,12 +942,6 @@ script_name(script: int) -> string {
     if script == SCRIPT_BOB { return "bob" }
     if script == SCRIPT_ORBIT { return "orbit" }
     return "none"
-}
-
-refresh_script_label() {
-    refresh_script_buttons()
-    if g_script_label == 0 { return }
-    ui.set_text(g_script_label, non_empty(script_name(script_at(g_selected))))
 }
 
 scripted_count() -> int {
@@ -2058,7 +2050,11 @@ theme() -> ptr {
     ui.st_font_size(sheet, "axis-y", 10.0)
     ui.st_font_size(sheet, "axis-z", 10.0)
 
+    // Buttons carry an edge for the same reason the fields do. A flat fill on
+    // a panel one step darker reads as a soft block rather than as something
+    // to press, and a panel of them had no lines in it at all.
     ui.st_bg(sheet, "action", 0x2C313A)
+    ui.st_border(sheet, "action", 1.0, 0x3D4453)
     ui.st_color(sheet, "action", 0xD7DAE0)
     ui.st_radius(sheet, "action", 5.0)
     ui.st_insets(sheet, "action", 4.0, 10.0, 4.0, 10.0)
@@ -2066,6 +2062,7 @@ theme() -> ptr {
     ui.st_active(sheet, "action", 0x4B5263)
 
     ui.st_bg(sheet, "danger", 0x38262B)
+    ui.st_border(sheet, "danger", 1.0, 0x5A3B42)
     ui.st_color(sheet, "danger", 0xE79A9A)
     ui.st_radius(sheet, "danger", 5.0)
     ui.st_insets(sheet, "danger", 4.0, 10.0, 4.0, 10.0)
@@ -2073,6 +2070,7 @@ theme() -> ptr {
     ui.st_active(sheet, "danger", 0x5E383F)
 
     ui.st_bg(sheet, "primary", 0x2F6FEB)
+    ui.st_border(sheet, "primary", 1.0, 0x1F55C4)
     ui.st_color(sheet, "primary", 0xFFFFFF)
     ui.st_radius(sheet, "primary", 5.0)
     ui.st_insets(sheet, "primary", 4.0, 12.0, 4.0, 12.0)
@@ -2848,9 +2846,7 @@ refresh_mode_buttons() {
 // transform modes over the viewport already do. A row where every button looks
 // the same shows what can be chosen and never what was.
 paint_segments(store: ptr, count: int, active: int) {
-    if store == null { say("DBG store null") return }
-    dbg = store as int[]
-    say("DBG segs ${dbg[0]} ${dbg[1]} active ${active}")
+    if store == null { return }
     buttons = store as int[]
     i = 0
     while i < count {
@@ -3250,15 +3246,6 @@ main() {
         ui.divider(right)
         heading(right, "BEHAVIOUR")
 
-        script_row = ui.hstack(right, 8)
-        as_row(script_row)
-        script_caption = ui.text(script_row, "attached")
-        ui.add_css_class(script_caption, "label")
-        ui.spacer(script_row)
-        g_script_label = ui.text(script_row, "none")
-        ui.add_css_class(g_script_label, "value")
-        ui.width(g_script_label, VALUE_COLUMN)
-
         script_buttons = ui.hstack(right, 6)
         as_row(script_buttons)
         none_btn = ui.btn(script_buttons, "None") callback { set_script(g_selected, SCRIPT_NONE) }
@@ -3327,12 +3314,6 @@ main() {
         build_scene()
         scan_assets()
         apply_orbit()
-        // After the sheet is applied: a class repaints over a runtime colour,
-        // so a lit segment set while the tree was being built is painted back
-        // to the class's own background before anyone sees it.
-        refresh_preset_buttons()
-        refresh_script_buttons()
-
 
         g_timer = ui.timer(16) callback {
             draw_frame()
