@@ -554,6 +554,15 @@ First working engine.
 
 ### Editor
 
+- A section header is a bar across the panel rather than a word floating over
+  the rows. The headings were the same weight as the labels beneath them and
+  carried no rule, so scene, add, terrain, assets and edit read as one
+  undifferentiated column.
+
+- The tool buttons are the size of tools. At their old height the add and
+  terrain grids took more of the left column than the outliner did, which is
+  the wrong way round for ten actions that are pressed once each.
+
 - The hierarchy says what each object is and which one is selected. Every row
   was the same grey word, so a water surface and a cube looked alike and the
   inspector was the only thing that said what was being edited. Each row now
