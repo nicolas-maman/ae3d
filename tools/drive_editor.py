@@ -372,6 +372,36 @@ def main():
                 # number() writes two decimals; "-150.0" is what was typed.
                 check("what was typed reached the model", back == "-150.00",
                       repr(back))
+        # The menus, and only what the driver can actually answer for.
+        #
+        # Their items are not activated: the driver runs a menu item's closure
+        # on its own HTTP thread rather than bouncing it to the main queue the
+        # way it does every widget route (aether-lang-dev/aether-ui#116), and
+        # an item that adds a model touches the GL context and segfaults. Each
+        # item calls the same function its button does, and the buttons are
+        # pressed above.
+        #
+        # Nor is attachment checked, though the name of this check said so
+        # until it was sabotaged: /menus reports every menu that was built,
+        # with no record of which ones reached the bar, so dropping the
+        # menu_bar_add for a whole menu left it green. What it does catch is an
+        # action going missing from the menus, which is the regression that
+        # happens when an action is added or renamed.
+        menus = get(args.port, "/menus")
+        listed = {}
+        for menu in menus:
+            for item in menu["items"]:
+                listed[item.split("  ")[0]] = menu["handle"]
+        wanted = ["Save Scene", "Load Scene", "Undo", "Redo", "Duplicate",
+                  "Delete", "Cube", "Sphere", "Plane", "Water", "Light",
+                  "Plains", "Mountains", "Desert", "Islands", "Caves",
+                  "Move", "Rotate", "Scale", "Frame Selection",
+                  "Fast", "Balanced", "Quality"]
+        missing = [w for w in wanted if w not in listed]
+        check("every action the editor has is on a menu",
+              len(menus) == 4 and not missing,
+              "%d menus, missing %s" % (len(menus), missing[:4]))
+
         # A bounded row is two ways into one value. Typing an exact number is
         # the half a slider cannot do, and the slider beside it has to follow,
         # or the panel shows the same setting as two different numbers.

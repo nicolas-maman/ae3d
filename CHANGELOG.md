@@ -565,6 +565,15 @@ First working engine.
 
 ### Editor
 
+- The window has a menu bar: File, Edit, Add and View, with accelerators on the
+  ones a person expects to press. Every editor this borrows from has one, and a
+  window of panels with no menu reads as a demonstration of a toolkit rather
+  than as an application: the menu bar is where someone looks first to find out
+  what a program can do. Each item calls the same function its button does, so
+  the three primitive builders moved out of their button closures and there is
+  one action behind two ways of reaching it. The transform modes carry no
+  accelerator, because the viewport already answers W, E, R and F.
+
 - Section bars and rules reach both edges of their panel. A section header was
   a bar inset fourteen pixels each side, which reads as a chip laid on a card
   rather than as the header of a docked panel, and it is not what any of the
@@ -593,6 +602,12 @@ First working engine.
   after another with nothing between them.
 
 ### Tooling
+
+- The driver checks that every action is on a menu. It does not activate one:
+  the driver runs a menu item's closure on its own HTTP thread rather than
+  bouncing it to the main queue the way it does every widget route
+  (aether-lang-dev/aether-ui#116), so an item that adds a model touches the GL
+  context and segfaults.
 
 - The driver finds a section by climbing to the widget that sits in the panel
   rather than by assuming the caption is a sibling of what the section holds,

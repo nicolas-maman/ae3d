@@ -2359,6 +2359,29 @@ clear_scene() {
 // picked and moved, and a component so the inspector knows what it is. The
 // shader takes one light, so the selected one is the one that lights the scene,
 // which is the same single-light model gopher3D's renderer has.
+add_cube() {
+    m = loader.cube(1.0)
+    core.model_set_scale(m, 34.0, 34.0, 34.0)
+    core.model_set_position(m, 0.0, 20.0, 0.0)
+    core.model_matte(m, 0.78, 0.52, 0.32)
+    add_model(m, "cube")
+}
+
+add_sphere() {
+    m = loader.sphere(1.0, 40, 30)
+    core.model_set_scale(m, 28.0, 28.0, 28.0)
+    core.model_set_position(m, 0.0, 26.0, 0.0)
+    core.model_glossy(m, 0.42, 0.68, 0.50)
+    add_model(m, "sphere")
+}
+
+add_plane() {
+    m = loader.plane(20, 24.0)
+    core.model_set_position(m, 0.0 - 228.0, 0.0, 0.0 - 228.0)
+    core.model_matte(m, 0.40, 0.42, 0.46)
+    add_model(m, "plane")
+}
+
 add_light() {
     light = core.light_point(core.vec3(0.0, 90.0, 0.0), core.vec3(1.0, 0.92, 0.78), 1.6, 400.0)
     if light == null { return }
@@ -2910,31 +2933,14 @@ main() {
         // grouping is what tells you a biome is not a primitive.
         primitives = ui.hstack(left, 6)
         as_row(primitives)
-        cube_btn = ui.btn(primitives, "Cube") callback {
-            m = loader.cube(1.0)
-            core.model_set_scale(m, 34.0, 34.0, 34.0)
-            core.model_set_position(m, 0.0, 20.0, 0.0)
-            core.model_matte(m, 0.78, 0.52, 0.32)
-            add_model(m, "cube")
-        }
+        cube_btn = ui.btn(primitives, "Cube") callback { add_cube() }
         style_button(cube_btn, "action")
-        sphere_btn = ui.btn(primitives, "Sphere") callback {
-            m = loader.sphere(1.0, 40, 30)
-            core.model_set_scale(m, 28.0, 28.0, 28.0)
-            core.model_set_position(m, 0.0, 26.0, 0.0)
-            core.model_glossy(m, 0.42, 0.68, 0.50)
-            add_model(m, "sphere")
-        }
+        sphere_btn = ui.btn(primitives, "Sphere") callback { add_sphere() }
         style_button(sphere_btn, "action")
 
         surfaces = ui.hstack(left, 6)
         as_row(surfaces)
-        plane_btn = ui.btn(surfaces, "Plane") callback {
-            m = loader.plane(20, 24.0)
-            core.model_set_position(m, 0.0 - 228.0, 0.0, 0.0 - 228.0)
-            core.model_matte(m, 0.40, 0.42, 0.46)
-            add_model(m, "plane")
-        }
+        plane_btn = ui.btn(surfaces, "Plane") callback { add_plane() }
         style_button(plane_btn, "action")
         water_btn = ui.btn(surfaces, "Water") callback { add_water() }
         style_button(water_btn, "action")
@@ -3277,5 +3283,64 @@ main() {
         g_timer = ui.timer(16) callback {
             draw_frame()
         }
+
+        build_menus()
     }
+}
+
+// The window's menu bar. Every editor this borrows from has one, and a window
+// with panels and no menu reads as a demo of a toolkit rather than as an
+// application: it is where a person looks first for what a program can do, and
+// where they look to find out what a thing is called.
+//
+// Each item calls the same function its button does, so there is one action
+// behind two ways of reaching it. The accelerators are all Cmd combinations,
+// because the viewport already answers W, E, R and F and a menu accelerator
+// fires wherever the focus is, including inside a number field.
+build_menus() {
+    bar = ui.menu_bar()
+
+    file_menu = ui.menu("File")
+    ui.menu_item_accel(file_menu, "Save Scene", "Cmd+S") callback { save_scene() }
+    ui.menu_item_accel(file_menu, "Load Scene", "Cmd+O") callback { load_scene() }
+    ui.menu_bar_add(bar, file_menu)
+
+    edit_menu = ui.menu("Edit")
+    ui.menu_item_accel(edit_menu, "Undo", "Cmd+Z") callback { undo_step() }
+    ui.menu_item_accel(edit_menu, "Redo", "Shift+Cmd+Z") callback { redo_step() }
+    ui.menu_separator(edit_menu)
+    ui.menu_item_accel(edit_menu, "Duplicate", "Cmd+D") callback { duplicate_selected() }
+    ui.menu_item_accel(edit_menu, "Delete", "Cmd+Backspace") callback { remove_selected() }
+    ui.menu_bar_add(bar, edit_menu)
+
+    add_menu = ui.menu("Add")
+    ui.menu_item(add_menu, "Cube") callback { add_cube() }
+    ui.menu_item(add_menu, "Sphere") callback { add_sphere() }
+    ui.menu_item(add_menu, "Plane") callback { add_plane() }
+    ui.menu_item(add_menu, "Water") callback { add_water() }
+    ui.menu_item(add_menu, "Light") callback { add_light() }
+    ui.menu_separator(add_menu)
+    ui.menu_item(add_menu, "Plains") callback { add_biome(terrain.PLAINS) }
+    ui.menu_item(add_menu, "Mountains") callback { add_biome(terrain.MOUNTAINS) }
+    ui.menu_item(add_menu, "Desert") callback { add_biome(terrain.DESERT) }
+    ui.menu_item(add_menu, "Islands") callback { add_biome(terrain.ISLANDS) }
+    ui.menu_item(add_menu, "Caves") callback { add_biome(terrain.CAVES) }
+    ui.menu_bar_add(bar, add_menu)
+
+    // The transform modes carry no accelerator here: W, E, R and F already
+    // reach them from the viewport, and binding the same key twice would run
+    // the action twice.
+    view_menu = ui.menu("View")
+    ui.menu_item(view_menu, "Move") callback { set_gizmo_mode(GIZMO_TRANSLATE) }
+    ui.menu_item(view_menu, "Rotate") callback { set_gizmo_mode(GIZMO_ROTATE) }
+    ui.menu_item(view_menu, "Scale") callback { set_gizmo_mode(GIZMO_SCALE) }
+    ui.menu_separator(view_menu)
+    ui.menu_item_accel(view_menu, "Frame Selection", "Cmd+F") callback { focus_selection() }
+    ui.menu_separator(view_menu)
+    ui.menu_item(view_menu, "Fast") callback { apply_preset("performance") }
+    ui.menu_item(view_menu, "Balanced") callback { apply_preset("balanced") }
+    ui.menu_item(view_menu, "Quality") callback { apply_preset("quality") }
+    ui.menu_bar_add(bar, view_menu)
+
+    ui.attach_menu_bar_to_window(1, bar)
 }
