@@ -91,6 +91,16 @@ if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists vulkan; then
     VULKAN_CFLAGS="$(pkg-config --cflags vulkan)"
 elif [ -d /opt/homebrew/include/vulkan ]; then
     VULKAN_CFLAGS="-I/opt/homebrew/include"
+elif [ -n "${VULKAN_SDK:-}" ]; then
+    # As build.sh does. GLFW is included with GLFW_INCLUDE_VULKAN, so
+    # vulkan.h has to be found even though nothing links against the loader,
+    # and the LunarG SDK on Windows spells the directory Include.
+    for ae3d_vk_inc in "${VULKAN_SDK}/include" "${VULKAN_SDK}/Include"; do
+        if [ -d "$ae3d_vk_inc" ]; then
+            VULKAN_CFLAGS="-I$ae3d_vk_inc"
+            break
+        fi
+    done
 fi
 
 OS="$(uname -s)"
@@ -133,7 +143,7 @@ case "$OS" in
         ;;
 esac
 
-NATIVE_SOURCES="native/ae3d_agent.c native/ae3d_glapi.c native/ae3d_platform.c native/ae3d_mesh.c native/ae3d_meshfile.c native/ae3d_image.c native/ae3d_gl.c native/ae3d_offscreen.c native/ae3d_vk.c $NATIVE_EXTRA"
+NATIVE_SOURCES="native/ae3d_agent.c native/ae3d_png.c native/ae3d_glapi.c native/ae3d_platform.c native/ae3d_mesh.c native/ae3d_meshfile.c native/ae3d_image.c native/ae3d_gl.c native/ae3d_offscreen.c native/ae3d_vk.c $NATIVE_EXTRA"
 
 # Every header, not a list of three: the generated ones carry the shaders and
 # the uniform offsets, so leaving them out linked the previous shaders.
