@@ -985,7 +985,15 @@ show_row(index: int, value: float) {
 // back under the caret is what makes a numeric field impossible to type into.
 echo_row(index: int, value: float) {
     field = field_handle(index)
-    if field != 0 && index != g_typing_row { ui.set_text(field, number(value)) }
+    if field != 0 && index != g_typing_row { ui.set_text(field, row_text(index, value)) }
+}
+
+// How a row spells its value. Every row but one is a measurement and reads
+// better to two decimals; a seed is a whole number, and "20260903.00" is two
+// digits of nothing that push the number out of its box.
+row_text(index: int, value: float) -> string {
+    if index == TERRAIN_SEED_ROW { return string.from_int((value) as int) }
+    return number(value)
 }
 
 // listbox_select deliberately takes the same path as a row click, callback and
@@ -1733,8 +1741,13 @@ blind_fields() -> int {
         handle = field_handle(index)
         if handle != 0 {
             was = ui.get_text(handle)
+            // Compared against what the row would spell, not against a fixed
+            // string: a seed writes whole numbers, so one row would report
+            // itself unreadable for spelling 12 the way it should.
             show_row(index, 12.25)
-            if string.equals(ui.get_text(handle), "12.25") != 1 { blind = blind + 1 }
+            if string.equals(ui.get_text(handle), row_text(index, 12.25)) != 1 {
+                blind = blind + 1
+            }
             // Back through show_row rather than set_text: a bounded row has a
             // slider that moved too, and putting only the text back leaves the
             // two showing different numbers.

@@ -578,6 +578,10 @@ First working engine.
 
 ### Editor
 
+- A seed is spelled as a whole number. Every row writes two decimals, which
+  reads well for a measurement and put two digits of nothing on the end of a
+  seed, pushing it out of its box.
+
 - The material rows no longer read through a null pointer. They dereference a
   model's material, and a model is not obliged to have one: a voxel terrain is
   built out of a bare cube and carries its colour per instance, so moving the
