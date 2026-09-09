@@ -506,6 +506,11 @@ First working engine.
 
 ### Tooling
 
+- The editor driver checks that a setting survives the scene file, not just
+  that the row count does. The value is changed after saving on purpose:
+  left alone it would come back whatever loading did, and the check would be
+  proving that memory keeps its contents.
+
 - `tools/check_ui_name_collisions.py` refuses a name the editor shares with
   something `ui` exports. A bare call to such a name binds the toolkit's
   function inside the `ui.window` block and the editor's outside it, silently
