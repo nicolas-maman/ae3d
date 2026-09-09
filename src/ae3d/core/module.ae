@@ -55,7 +55,7 @@ exports (
     draw_merging, set_draw_merging,
     depth_test, set_depth_test, next_model_id, backend_init, backend_render,
     backend_add_model, backend_remove_model, backend_load_texture, backend_set_skybox,
-    backend_update_viewport, backend_set_post, backend_set_clear_color, backend_set_shadows,
+    backend_update_viewport, backend_set_post, backend_set_render_scale, backend_set_clear_color, backend_set_shadows,
     backend_shadows,
     backend_add_light, backend_remove_light, backend_draw_calls, backend_frame_pixels,
     backend_cleanup, Camera, Plane, Frustum, camera_new,
@@ -349,6 +349,11 @@ struct Backend {
     set_skybox:      fn(ptr, ptr)
     update_viewport: fn(ptr, int, int)
     set_post:        fn(ptr, int, int, float, float)
+    // Returns the scale actually adopted, which is not always the one asked
+    // for. A backend that cannot size its own attachments says so by returning
+    // 1.0 rather than by quietly rendering at full size and letting the caller
+    // believe otherwise.
+    set_render_scale: fn(ptr, float) -> float
     set_clear_color: fn(ptr, float, float, float)
     set_shadows:     fn(ptr, int)
     shadows:         fn(ptr) -> int
@@ -847,6 +852,20 @@ backend_draw_calls(b: *Backend) -> int {
 // out without the caller knowing which renderer produced it.
 backend_frame_pixels(b: *Backend) -> ptr {
     return b.frame_pixels(b.state)
+}
+
+// Draw the scene at a fraction of the window and let the composite upscale it.
+// Cost per frame is dominated by pixels shaded, so half scale is a quarter of
+// the work -- the difference between a scene a weak machine can run and one it
+// cannot.
+//
+// The return is the scale that was adopted, not the one requested. Ask for 0.5
+// on a backend that cannot do it and you are told 1.0, so a caller stepping down
+// a quality ladder knows that rung did nothing and can spend its next step
+// somewhere that works.
+backend_set_render_scale(b: *Backend, scale: float) -> float {
+    if b.set_render_scale == null { return 1.0 }
+    return b.set_render_scale(b.state, scale)
 }
 
 backend_set_post(b: *Backend, fxaa: bool, bloom: bool, threshold: float, intensity: float) {

@@ -21,6 +21,7 @@ exports (
     available, device_name, last_error,
     renderer_model_count, renderer_draw_calls, renderer_set_clear_color,
     renderer_load_texture, renderer_release_texture, renderer_sample_count, renderer_set_post,
+    renderer_set_render_scale,
     renderer_set_shadows, renderer_shadows, renderer_add_light, renderer_remove_light,
     skybox_create, skybox_free,
     offscreen_pixels, offscreen_width, offscreen_height,
@@ -216,6 +217,7 @@ backend(r: *VKRenderer) -> Backend {
         set_skybox: renderer_set_skybox as fn(ptr, ptr),
         update_viewport: renderer_update_viewport as fn(ptr, int, int),
         set_post: renderer_set_post as fn(ptr, int, int, float, float),
+        set_render_scale: renderer_set_render_scale as fn(ptr, float) -> float,
         set_clear_color: renderer_set_clear_color as fn(ptr, float, float, float),
         set_shadows: vtable_set_shadows as fn(ptr, int),
         shadows: vtable_shadows as fn(ptr) -> int,
@@ -365,6 +367,24 @@ render_shadow_pass(r: *VKRenderer, light: *Light) {
         i = i + 1
     }
     ae3d_vk_shadow_end()
+}
+
+// Vulkan draws at the size of the window and says so.
+//
+// The OpenGL renderer gets render scale for free: it already routes the scene
+// through a post-processing framebuffer it sizes itself, so making that buffer
+// smaller and letting the existing composite upscale is a change of two numbers.
+// The Vulkan path builds its attachments in native/ae3d_vk.c against the
+// swapchain extent, and sizing them independently means a second set of images,
+// their own render pass and a blit -- a real piece of work rather than a
+// forwarding call.
+//
+// So this reports 1.0 rather than pretending. A caller stepping down a quality
+// ladder is told the rung did nothing and can spend its next step on something
+// that works, which is the whole reason the vtable returns the adopted scale
+// instead of nothing.
+renderer_set_render_scale(r: *VKRenderer, scale: float) -> float {
+    return 1.0
 }
 
 renderer_set_post(r: *VKRenderer, fxaa: int, bloom: int, threshold: float, intensity: float) {

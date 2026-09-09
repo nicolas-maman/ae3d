@@ -168,8 +168,12 @@ For scale, `4 rays / 400 steps` costs 15662 µs at full size and 5469 µs at hal
 2.9x for a change nothing in the frame's content notices. `2 rays / 220 steps` at
 half scale runs at 411 fps, about a sixth of the top rung's cost.
 
-`renderer_set_render_scale` is an engine feature rather than something this demo
-does to itself: the scene is drawn into the post-processing buffer at a fraction
+Render scale reaches the scene through the backend vtable, so the ladder is not
+OpenGL-only, and `backend_set_render_scale` answers with the scale it actually
+adopted rather than the one asked for. Vulkan sizes its attachments in native
+code against the swapchain and reports 1.0 — a rung the ladder can see did
+nothing, instead of one it believes helped. `renderer_set_render_scale` is an
+engine feature rather than something this demo does to itself: the scene is drawn into the post-processing buffer at a fraction
 of the window, and the composite that was already there upscales it. Any scene
 gets it. `tests/test_render_scale.ae` holds it to the part that matters — that a
 scale of 1 is exactly a no-op, that half scale is the same picture rather than a

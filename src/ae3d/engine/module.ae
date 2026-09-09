@@ -18,7 +18,7 @@ exports (
     engine_new, engine_free, engine_run, engine_start, engine_loop, engine_shutdown,
     engine_stop, engine_on_start,
     engine_add_model, engine_remove_model, engine_set_light, engine_light,
-    engine_camera, engine_window, engine_backend_name,
+    engine_camera, engine_window, engine_backend_name, engine_set_render_scale,
     engine_set_size, engine_set_title, engine_set_msaa, engine_set_decorated, engine_set_post,
     engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
     engine_set_skybox, engine_load_texture,
@@ -45,6 +45,7 @@ struct Engine {
     backend_set_skybox: fn(ptr, ptr)
     backend_update_viewport: fn(ptr, int, int)
     backend_set_post: fn(ptr, int, int, float, float)
+    backend_set_render_scale: fn(ptr, float) -> float
     backend_cleanup: fn(ptr)
     backend_name: string
 
@@ -143,6 +144,7 @@ engine_set_frame_limit(e: *Engine, frames: int) {
 }
 
 bind_backend(e: *Engine, b: Backend) {
+    e.backend_set_render_scale = b.set_render_scale
     e.backend_init = b.init
     e.backend_render = b.render
     e.backend_add_model = b.add_model
@@ -236,6 +238,15 @@ engine_user_data(e: *Engine) -> ptr { return e.user_data }
 engine_camera(e: *Engine) -> *Camera { return e.camera as *Camera }
 engine_window(e: *Engine) -> ptr { return e.window }
 engine_backend_name(e: *Engine) -> string { return e.backend_name }
+
+// Draw the scene at a fraction of the window, whichever renderer is behind it.
+// Answers with the scale actually adopted: ask for half on a backend that cannot
+// size its own attachments and you are told 1.0, so a scene stepping down a
+// quality ladder knows that rung did nothing rather than believing it helped.
+engine_set_render_scale(e: *Engine, scale: float) -> float {
+    if e.backend_set_render_scale == null { return 1.0 }
+    return e.backend_set_render_scale(e.backend_state, scale)
+}
 engine_gl_renderer(e: *Engine) -> *GLRenderer { return e.gl_renderer as *GLRenderer }
 engine_vk_renderer(e: *Engine) -> *VKRenderer { return e.backend_state as *VKRenderer }
 engine_delta_time(e: *Engine) -> float { return e.delta_time }

@@ -143,6 +143,20 @@ main() {
     gl.renderer_set_render_scale(renderer, 4.0)
     check("a scale above 1 is clamped", gl.renderer_render_scale(renderer) == 1.0)
 
+    // Through the backend vtable, which is the way a scene that does not know
+    // which renderer it got has to ask. It answers with the scale it adopted
+    // rather than the one requested, so a caller can tell a rung that did
+    // nothing from one that worked -- Vulkan sizes its attachments in native
+    // code against the swapchain and reports 1.0.
+    adopted = core.backend_set_render_scale(&backend, 0.5)
+    check("the backend reports the scale it adopted", adopted == 0.5)
+    check("and the renderer agrees with what the backend reported",
+          gl.renderer_render_scale(renderer) == adopted)
+
+    asked_too_much = core.backend_set_render_scale(&backend, 9.0)
+    check("an impossible scale is reported back as what was really used",
+          asked_too_much == 1.0)
+
     core.backend_cleanup(&backend)
     offscreen.target_destroy(target)
     offscreen.context_destroy(context)
