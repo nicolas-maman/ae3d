@@ -1,0 +1,123 @@
+// What a frame of the black hole costs, and where the cost is.
+//
+// Offscreen, so the number is the shader's and not the compositor's: a windowed
+// run is pinned to the display's refresh and reports whatever vsync allows,
+// which on a 144 Hz panel hides everything up to 6.9 ms a frame.
+//
+// The two quality knobs are uniforms rather than compile-time constants, which
+// is what lets this sweep them. Rays per pixel scales the whole cost; the step
+// budget only bites on the rays that wind several times round the photon sphere,
+// so the two sweeps together say how much of the frame is spent near the hole
+// and how much on everything else.
+//
+//   ./build.sh benchmarks/bench_black_hole.ae && ./build/bench_black_hole
+
+import ae3d.core
+import ae3d.gl
+import ae3d.offscreen
+import ae3d.blackhole
+
+extern clock_ns() -> long
+
+const WIDTH  = 1280
+const HEIGHT = 800
+
+var FRAMES = 90
+
+var g_backend: *Backend = null
+var g_screen: *Model = null
+var g_cam: *Camera = null
+var g_light: *Light = null
+
+// A frame's worth of work, timed. The first frames of any configuration pay for
+// shader specialisation and a cold cache, so a warm-up runs before the clock.
+measure(label: string, taps: int, steps: int) {
+    blackhole.set_quality(g_screen, taps, steps)
+
+    warm = 0
+    while warm < 5 {
+        blackhole.set_time(g_screen, warm * 0.016)
+        core.backend_render(g_backend, g_cam, g_light)
+        warm = warm + 1
+    }
+
+    started = clock_ns()
+    frame = 0
+    while frame < FRAMES {
+        // The camera moves, because a still one lets the driver reuse work that
+        // a moving one cannot, and the example's camera orbits.
+        angle = (frame * 1.0) * 0.004
+        core.camera_set_position(g_cam, core.vec3(58.0 * core.sin_of(angle), 11.0,
+                                                  58.0 * core.cos_of(angle)))
+        core.camera_look_at(g_cam, core.vec3(0.0, 0.0, 0.0))
+        blackhole.set_view(g_screen, g_cam)
+        blackhole.set_time(g_screen, (frame * 1.0) * 0.016)
+        core.backend_render(g_backend, g_cam, g_light)
+        frame = frame + 1
+    }
+    // The readback is the sync point: without it the timer measures how fast
+    // commands can be queued, which is not what anyone means by a frame time.
+    offscreen.target_pixels(gl_target)
+    elapsed = clock_ns() - started
+
+    per_frame = elapsed / FRAMES
+    long fps = 0
+    if per_frame > 0 { fps = 1000000000 / per_frame }
+    println("  ${label}: ${per_frame / 1000} us per frame, ${fps} fps")
+}
+
+var gl_target: ptr = null
+
+main() {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("black hole: SKIP no OpenGL context")
+        return
+    }
+
+    renderer = gl.renderer_new()
+    backend = gl.backend(renderer)
+    if !core.backend_init(&backend, context, WIDTH, HEIGHT) {
+        println("black hole: SKIP the OpenGL backend would not initialise")
+        return
+    }
+    g_backend = &backend
+
+    gl_target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, gl_target)
+    gl.renderer_set_clear_color(renderer, 0.0, 0.0, 0.0)
+    gl.renderer_set_bloom(renderer, true)
+    gl.renderer_set_bloom_params(renderer, 0.62, 0.55)
+    core.set_face_culling(false)
+
+    screen = blackhole.screen_new()
+    blackhole.set_spin(screen, 0.9)
+    core.backend_add_model(&backend, screen)
+    g_screen = screen
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_near(cam, 0.05)
+    core.camera_set_far(cam, 800.0)
+    g_cam = cam
+
+    light = core.light_directional(core.vec3(0.0, 1.0, 0.0), core.vec3(1.0, 1.0, 1.0), 1.0)
+    light.ambient_strength = 0.0
+    gl.renderer_add_light(renderer, light)
+    g_light = light
+
+    println("ae3d black hole benchmark at ${WIDTH}x${HEIGHT}, Kerr a = 0.9")
+
+    measure("1 ray  400 steps", 1, 400)
+    measure("2 rays 400 steps", 2, 400)
+    measure("4 rays 400 steps", 4, 400)
+    measure("4 rays 300 steps", 4, 300)
+    measure("4 rays 220 steps", 4, 220)
+    measure("4 rays 140 steps", 4, 140)
+
+    // Schwarzschild costs what Kerr costs: the integrator carries the same five
+    // numbers either way, and a is a coefficient rather than a branch.
+    blackhole.set_spin(screen, 0.0)
+    measure("4 rays 400 steps, a=0", 4, 400)
+
+    println("done")
+}

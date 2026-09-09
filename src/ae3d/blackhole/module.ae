@@ -1,0 +1,579 @@
+// A Kerr black hole, rendered by integrating null geodesics per pixel.
+//
+// The whole thing is one screen-space pass: a quad with a fragment shader that
+// follows each pixel's photon backwards through curved spacetime until it
+// reaches the accretion disc, crosses the horizon, or escapes to the sky. It
+// lives here rather than inside an example because three callers want it -- the
+// example draws it, the benchmark times it, and the test checks its shadow
+// against the radius general relativity says it should have.
+//
+// Lengths are in units of M, the gravitational radius. The horizon is at
+// 1 + sqrt(1 - a^2): 2 for a still hole, 1 for a maximally spinning one.
+
+exports (
+    VERTEX_SOURCE, FRAGMENT_SOURCE,
+    screen_new, set_view, set_spin, set_time, set_quality, set_jets
+)
+
+import ae3d.core
+import ae3d.loader
+
+const VERTEX_SOURCE = <<GLSL_END
+#version 410 core
+
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec2 aTexCoord;
+
+out vec2 screenUV;
+
+// The quad is loader.quad(2.0, 2.0): x and z run -1..1 in the XZ plane, which is
+// clip space already. Nothing here reads the model or view matrices -- the
+// camera arrives as a basis in the fragment shader instead, because a ray is
+// what this needs and a matrix would only have to be taken apart again to get
+// one.
+void main() {
+    screenUV = aTexCoord;
+    gl_Position = vec4(aPos.x, aPos.z, 0.0, 1.0);
+}
+GLSL_END
+
+const FRAGMENT_SOURCE = <<GLSL_END
+#version 410 core
+
+in vec2 screenUV;
+out vec4 FragColor;
+
+uniform vec3 camPos;
+uniform vec3 camRight;
+uniform vec3 camUp;
+uniform vec3 camFwd;
+uniform float tanHalfFov;
+uniform float aspectRatio;
+uniform float discTime;
+uniform float spin;
+uniform int   aaSamples;
+uniform int   maxSteps;
+uniform int   jetsOn;
+
+const float DISC_OUT   = 22.0;
+const float ESCAPE     = 130.0;
+const float T_SCALE    = 22000.0;
+const float DISC_GAIN  = 330.0;
+const float DISC_H     = 0.015;
+const float DISC_K     = 70.0;
+
+const float STEP_ARC   = 0.026;
+
+const float JET_BASE   = 2.7;
+const float JET_LEN    = 60.0;
+const float JET_BETA   = 0.85;
+const float T_JET      = 21000.0;
+const float JET_GAIN   = 0.9;
+
+const float STAR_GAIN  = 1.25;
+
+// The Planck locus in sRGB, walked in mireds -- a million over the temperature.
+// Mireds are the axis colour temperature is linear in: 2000 K to 3000 K is an
+// enormous change and 20000 K to 21000 K is invisible, and 500 -> 333 against
+// 50 -> 47.6 says exactly that.
+vec3 blackbody(float kelvin) {
+    float k = clamp(kelvin, 1000.0, 40000.0);
+    float m = 1000000.0 / k;
+
+    if (m <  50.0) return mix(vec3(0.58, 0.70, 1.00), vec3(0.63, 0.74, 1.00), (m -  25.0) /  25.0);
+    if (m <  83.3) return mix(vec3(0.63, 0.74, 1.00), vec3(0.71, 0.80, 1.00), (m -  50.0) /  33.3);
+    if (m < 125.0) return mix(vec3(0.71, 0.80, 1.00), vec3(0.82, 0.87, 1.00), (m -  83.3) /  41.7);
+    if (m < 153.8) return mix(vec3(0.82, 0.87, 1.00), vec3(1.00, 1.00, 1.00), (m - 125.0) /  28.8);
+    if (m < 200.0) return mix(vec3(1.00, 1.00, 1.00), vec3(1.00, 0.90, 0.82), (m - 153.8) /  46.2);
+    if (m < 250.0) return mix(vec3(1.00, 0.90, 0.82), vec3(1.00, 0.81, 0.64), (m - 200.0) /  50.0);
+    if (m < 333.3) return mix(vec3(1.00, 0.81, 0.64), vec3(1.00, 0.69, 0.43), (m - 250.0) /  83.3);
+    if (m < 500.0) return mix(vec3(1.00, 0.69, 0.43), vec3(1.00, 0.49, 0.16), (m - 333.3) / 166.7);
+    return           mix(vec3(1.00, 0.49, 0.16), vec3(1.00, 0.22, 0.00), (m - 500.0) / 500.0);
+}
+
+float hash31(vec3 p) {
+    p = fract(p * 0.1031);
+    p += dot(p, p.zyx + 31.32);
+    return fract((p.x + p.y) * p.z);
+}
+
+// Stars, as a function of the direction a ray finally leaves in. Nothing here is
+// a texture lookup: the sky is generated from the escape direction, so every
+// star the hole has moved is drawn where the geodesic says it now is, and the
+// arcs around the shadow are the same integration as everything else.
+vec3 starfield(vec3 dir) {
+    vec3 q  = dir * 260.0;
+    vec3 id = floor(q);
+    vec3 f  = fract(q) - 0.5;
+
+    float pick = hash31(id);
+    if (pick < 0.955) return vec3(0.0);
+
+    vec3 off = vec3(hash31(id + 11.0), hash31(id + 23.0), hash31(id + 37.0));
+    off = (off - 0.5) * 0.5;
+
+    vec3  d   = f - off;
+    float dsq = dot(d, d);
+    float mag = (pick - 0.955) / 0.045;
+
+    // The falloff has to be set against the cell, not against nothing: at this
+    // scale one cell is about four pixels across, and a tighter exponent put
+    // every star inside a fifth of a pixel, where it either aliased away or
+    // flickered. This leaves a dot of roughly a pixel and a half.
+    float glow = exp(-dsq * 26.0) * mag * mag;
+    if (glow < 0.004) return vec3(0.0);
+
+    float t = hash31(id + 53.0);
+    return blackbody(2600.0 + 15000.0 * t * t) * (glow * STAR_GAIN);
+}
+
+float hash21(vec2 p) {
+    vec3 q = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+    q += dot(q, q.yzx + 33.33);
+    return fract((q.x + q.y) * q.z);
+}
+
+float vnoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash21(i),                  hash21(i + vec2(1.0, 0.0)), f.x),
+               mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+
+float turbulence(vec2 p) {
+    return 0.60 * vnoise(p) + 0.28 * vnoise(p * 2.17) + 0.12 * vnoise(p * 4.51);
+}
+
+// The three roots of x^3 - 3x + 2a, in closed form. They index the logarithmic
+// terms of the Novikov-Thorne flux and depend only on the spin.
+vec3 ntRoots(float a) {
+    float ac = acos(clamp(a, -1.0, 1.0)) / 3.0;
+    return vec3( 2.0 * cos(ac - 1.0471975512),
+                 2.0 * cos(ac + 1.0471975512),
+                -2.0 * cos(ac));
+}
+
+// Prograde innermost stable circular orbit. 6 M with no spin, falling to 1 M as
+// a approaches 1: the disc's inner edge, and with it everything hot, moves in as
+// the hole spins faster.
+float iscoRadius(float a) {
+    float z1 = 1.0 + pow(1.0 - a * a, 1.0 / 3.0)
+                   * (pow(1.0 + a, 1.0 / 3.0) + pow(1.0 - a, 1.0 / 3.0));
+    float z2 = sqrt(3.0 * a * a + z1 * z1);
+    return 3.0 + z2 - sqrt(max((3.0 - z1) * (3.0 + z1 + 2.0 * z2), 0.0));
+}
+
+// Page and Thorne (1974): the flux radiated by a relativistic thin disc round a
+// Kerr hole. This is the solution of the thin-disc equations in this metric, not
+// the Newtonian r^(-3/4) with a boundary factor bolted onto it -- and the
+// difference is largest exactly where the picture is brightest, just outside the
+// inner edge. It also depends on the spin, which the Newtonian profile cannot
+// express at all: it only knew where the disc ended, not what dragging did to
+// the gas that got there.
+//
+// The three logarithmic terms are indexed by the roots of x^3 - 3x + 2a, which
+// have a closed form. The middle root passes through zero as a does, taking its
+// own numerator with it, so that term is 0/0 in the limit and is dropped rather
+// than evaluated.
+//
+// The roots and x0 depend only on the spin, so they are worked out once per
+// pixel and handed in. They used to be recomputed inside this function, which
+// put an acos and three cosines on every sub-sample of every step that touched
+// the disc -- for a value that does not change over the whole frame.
+float ntFlux(float r, float a, float x0, vec3 root) {
+    if (r * r <= x0 * x0 * x0 * x0) return 0.0;
+
+    float x  = sqrt(r);
+    float x1 = root.x;
+    float x2 = root.y;
+    float x3 = root.z;
+
+    float f = x - x0 - 1.5 * a * log(x / x0);
+    if (abs(x1) > 1e-3)
+        f -= 3.0 * (x1 - a) * (x1 - a) / (x1 * (x1 - x2) * (x1 - x3))
+                 * log(abs((x - x1) / (x0 - x1)));
+    if (abs(x2) > 1e-3)
+        f -= 3.0 * (x2 - a) * (x2 - a) / (x2 * (x2 - x1) * (x2 - x3))
+                 * log(abs((x - x2) / (x0 - x2)));
+    if (abs(x3) > 1e-3)
+        f -= 3.0 * (x3 - a) * (x3 - a) / (x3 * (x3 - x1) * (x3 - x2))
+                 * log(abs((x - x3) / (x0 - x3)));
+
+    float den = x * x * x * x * (x * x * x - 3.0 * x + 2.0 * a);
+    return max(f, 0.0) / max(den, 1e-6);
+}
+
+// Boyer-Lindquist to world. The spin axis is world +Y, so BL's z is world y.
+// The radial coordinate is oblate: surfaces of constant r are ellipsoids, not
+// spheres, which is why sqrt(r^2 + a^2) appears instead of r.
+vec3 blToWorld(float r, float th, float ph, float a) {
+    float s  = sin(th);
+    float rr = sqrt(r * r + a * a);
+    return vec3(rr * s * cos(ph), r * cos(th), rr * s * sin(ph));
+}
+
+// Just the radial coordinate, which is all the disc needs and avoids an acos
+// and an atan2 on every sub-sample.
+float blRadius(vec3 w, float a) {
+    float t = dot(w, w) - a * a;
+    return sqrt(max(0.5 * (t + sqrt(max(t * t + 4.0 * a * a * w.y * w.y, 0.0))), 1e-8));
+}
+
+vec3 worldToBL(vec3 w, float a) {
+    float rho2 = dot(w, w);
+    float t    = rho2 - a * a;
+    float r2   = 0.5 * (t + sqrt(max(t * t + 4.0 * a * a * w.y * w.y, 0.0)));
+    float r    = sqrt(max(r2, 1e-8));
+    return vec3(r, acos(clamp(w.y / r, -1.0, 1.0)), atan(w.z, w.x));
+}
+
+// The geodesic, as Hamilton's equations for a null ray. Writing
+//
+//     Sigma * 2H = Delta pr^2 + pth^2 - P^2/Delta + Q^2
+//
+// with P = (r^2+a^2) pt + a L and Q = a sin(th) pt + L/sin(th), the whole system
+// is derivatives of that one expression. Two of the four momenta are constants
+// of the motion -- pt is the energy and L is the angular momentum -- so only pr
+// and pth have to be carried.
+//
+// H is zero along the path, which is what lets the dSigma terms be dropped from
+// the r and theta derivatives: they are multiplied by H.
+void deriv(vec3 x, vec2 p, float a, float L, out vec3 dx, out vec2 dp) {
+    float r = x.x;
+    float s = sin(x.y);
+    if (abs(s) < 1e-4) s = s < 0.0 ? -1e-4 : 1e-4;
+    float c = cos(x.y);
+
+    float sig = r * r + a * a * c * c;
+    float del = r * r - 2.0 * r + a * a;
+    if (abs(del) < 1e-6) del = 1e-6;
+    float isig = 1.0 / sig;
+
+    float P = -(r * r + a * a) + a * L;   // pt = -1
+    float Q = -a * s + L / s;
+
+    dx.x = del * p.x * isig;
+    dx.y = p.y * isig;
+    dx.z = (-a * P / del + Q / s) * isig;
+
+    // dP/dr is -2r, not +2r: P = -(r^2+a^2) + aL. Differentiating -P^2/Delta
+    // gives -2 P P'/Delta + P^2 Delta'/Delta^2, and with P' = -2r that first
+    // term is +4rP/Delta. Getting its sign wrong does not merely bend the ray
+    // slightly -- it drives the radial equation the wrong way, and every ray in
+    // the frame spirals into the horizon regardless of how much angular
+    // momentum it has.
+    float dpr = (2.0 * r - 2.0);
+    float dFdr = dpr * p.x * p.x + 4.0 * r * P / del + P * P * dpr / (del * del);
+    dp.x = -0.5 * dFdr * isig;
+
+    float dQ = -a * c - L * c / (s * s);
+    dp.y = -0.5 * (2.0 * Q * dQ) * isig;
+}
+
+// Everything about how the disc looks at a point, in one number: the ratio of
+// the frequency the observer receives to the frequency the gas emitted.
+//
+//   g = 1 / ( u^t (1 - omega L) )
+//
+// u^t is how fast the orbiting gas's clock runs against a distant one, which is
+// the gravitational part; omega L is the projection of its motion onto the
+// photon, which is the Doppler part; and omega itself is 1/(r^3/2 + a), where
+// the a is frame dragging. One expression, because they are one effect.
+float redshift(float r, float a, float L) {
+    float om  = 1.0 / (r * sqrt(r) + a);
+    float gtt = -(1.0 - 2.0 / r);
+    float gtp = -2.0 * a / r;
+    float gpp = r * r + a * a + 2.0 * a * a / r;
+    float den = -(gtt + 2.0 * om * gtp + om * om * gpp);
+    float ut  = 1.0 / sqrt(max(den, 1e-5));
+    return 1.0 / max(ut * (1.0 - om * L), 1e-3);
+}
+
+float discDensity(float r, float worldY, float isco) {
+    if (r < isco || r > DISC_OUT) return 0.0;
+    float h = DISC_H * r;
+    float z = worldY / h;
+    return exp(-z * z) * (1.0 - smoothstep(DISC_OUT - 5.0, DISC_OUT, r));
+}
+
+vec3 discEmission(float r, vec3 world, float a, float L, float x0, vec3 root,
+                  vec3 photonDir) {
+    // The flux is the physics; the temperature follows from it by
+    // Stefan-Boltzmann rather than being assumed and then raised to the fourth.
+    // T_SCALE stands in for the accretion rate, so the peak temperature is not
+    // pinned: spin the hole up and the inner disc genuinely runs hotter, which
+    // is a real effect a fixed peak would have hidden.
+    float flux  = ntFlux(r, a, x0, root);
+    float temp  = T_SCALE * sqrt(sqrt(flux));
+    float shift = redshift(r, a, L);
+    float beam  = shift * shift * shift * shift;
+
+    // Limb darkening. A scattering atmosphere is brighter looked into than
+    // grazed, by Chandrasekhar's (1 + 2.06 mu)/3.06 for a semi-infinite
+    // electron-scattering surface. mu is taken against the coordinate normal
+    // rather than the fluid frame's, which is the one approximation here.
+    float mu   = clamp(abs(photonDir.y), 0.0, 1.0);
+    float limb = (1.0 + 2.06 * mu) / 3.06;
+
+    // Turbulence sheared by the flow. Sampling a field rotated backwards by the
+    // local orbital phase is seamless in azimuth -- there is no angle coordinate
+    // to wrap -- and differential rotation stretches it into spiral banding on
+    // its own, because the inner disc winds faster.
+    float om    = 1.0 / (r * sqrt(r) + a);
+    float phase = -om * discTime * 90.0;
+    float ca = cos(phase);
+    float sa = sin(phase);
+    vec2  q  = vec2(world.x * ca - world.z * sa, world.x * sa + world.z * ca);
+    float band = 0.32 + 1.35 * turbulence(q * 0.66);
+
+    return blackbody(temp * shift) * (flux * beam * band * limb * DISC_GAIN);
+}
+
+// The jets are emission spread along the path rather than a surface to land on,
+// so they are integrated over each segment instead of stopping the ray.
+//
+// Seen this close to edge-on they are dim, and correctly so: the outflow is very
+// nearly perpendicular to the line of sight, which leaves only transverse
+// Doppler, and that alone costs a factor of gamma^4. JET_GAIN buys that back for
+// the display. It is the one number here chosen to be seen rather than derived.
+vec3 jetEmission(vec3 p, vec3 photonDir) {
+    float ay = abs(p.y);
+    if (ay < JET_BASE || ay > JET_LEN) return vec3(0.0);
+
+    float open = 0.4 + 0.075 * ay;
+    float rad  = length(p.xz);
+    if (rad > open) return vec3(0.0);
+
+    float across  = rad / open;
+    float profile = exp(-3.2 * across * across) / (1.0 + 0.02 * ay * ay);
+
+    float gamma = 1.0 / sqrt(1.0 - JET_BETA * JET_BETA);
+    vec3  bvec  = vec3(0.0, sign(p.y) * JET_BETA, 0.0);
+    float dop   = 1.0 / max(gamma * (1.0 - dot(bvec, photonDir)), 0.06);
+    float beam  = dop * dop * dop * dop;
+
+    float temp = T_JET * sqrt(JET_BASE / ay);
+    return blackbody(temp * dop) * (profile * beam * JET_GAIN);
+}
+
+vec3 traceRay(vec3 rd, float a, float rh, float isco, float x0, vec3 root) {
+    // The camera sits far enough out that the coordinate basis is nearly
+    // orthonormal, so the ray's components in it are the photon's momenta up to
+    // the metric factors. Whatever error that leaves is taken back below by
+    // solving the null condition exactly for the radial momentum.
+    vec3  bl = worldToBL(camPos, a);
+    float r  = bl.x;
+    float th = bl.y;
+    float ph = bl.z;
+
+    float s  = max(sin(th), 1e-5);
+    float c  = cos(th);
+    float rr = sqrt(r * r + a * a);
+
+    vec3 er  = normalize(vec3(r / rr * s * cos(ph), c, r / rr * s * sin(ph)));
+    vec3 eth = normalize(vec3(rr * c * cos(ph), -r * s, rr * c * sin(ph)));
+    vec3 eph = normalize(vec3(-sin(ph), 0.0, cos(ph)));
+
+    float sig = r * r + a * a * c * c;
+    float del = r * r - 2.0 * r + a * a;
+    float gpp = (r * r + a * a + 2.0 * a * a * r * s * s / sig) * s * s;
+
+    float nr  = dot(rd, er);
+    float nth = dot(rd, eth);
+    float nph = dot(rd, eph);
+
+    float pth = nth * sqrt(sig);
+    float L   = nph * sqrt(max(gpp, 1e-8));
+
+    // The null condition, solved rather than assumed: Delta pr^2 = P^2/Delta -
+    // pth^2 - Q^2. Any small error in the basis above lands here and is removed,
+    // so the ray that gets integrated is exactly a light ray.
+    float P0 = -(r * r + a * a) + a * L;
+    float Q0 = -a * s + L / s;
+    float pr2 = (P0 * P0 / del - pth * pth - Q0 * Q0) / del;
+    float pr  = sign(nr) * sqrt(max(pr2, 0.0));
+
+    vec3 x = vec3(r, th, ph);
+    vec2 p = vec2(pr, pth);
+
+    vec3  colour   = vec3(0.0);
+    float transmit = 1.0;
+    vec3  prev     = camPos;
+    vec3  lastDir  = rd;
+
+    for (int i = 0; i < maxSteps; i++) {
+        vec3 dx1; vec2 dp1;
+        deriv(x, p, a, L, dx1, dp1);
+
+        // Step by arc length rather than by parameter: coarse where the path is
+        // straight and the hole is far, fine where it bends. A fixed step either
+        // wastes hundreds of iterations in empty space or steps clean over the
+        // photon sphere, and this ray has to survive both.
+        float sth   = max(sin(x.y), 1e-5);
+        float speed = length(vec3(dx1.x, x.x * dx1.y, x.x * sth * dx1.z));
+        // Beyond the disc there is nothing to hit and the path is nearly
+        // straight -- the curvature radius of a null geodesic goes as r^3 -- so
+        // the step is allowed to grow with radius out there instead of staying
+        // proportional to it. Inside the disc the boost is exactly 1 and the
+        // step law is unchanged, because that is where accuracy is spent.
+        float reach = max(1.0, x.x / DISC_OUT);
+        float h     = clamp(STEP_ARC * (x.x - rh + 0.75) * reach / max(speed, 1e-5),
+                            0.001, 18.0);
+
+        vec3 dx2; vec2 dp2;
+        deriv(x + 0.5 * h * dx1, p + 0.5 * h * dp1, a, L, dx2, dp2);
+        vec3 dx3; vec2 dp3;
+        deriv(x + 0.5 * h * dx2, p + 0.5 * h * dp2, a, L, dx3, dp3);
+        vec3 dx4; vec2 dp4;
+        deriv(x + h * dx3, p + h * dp3, a, L, dx4, dp4);
+
+        x += (h / 6.0) * (dx1 + 2.0 * dx2 + 2.0 * dx3 + dx4);
+        p += (h / 6.0) * (dp1 + 2.0 * dp2 + 2.0 * dp3 + dp4);
+
+        if (x.x <= rh * 1.002) break;          // through the horizon: the shadow
+
+        vec3  world = blToWorld(x.x, x.y, x.z, a);
+        vec3  seg   = world - prev;
+        float len   = length(seg);
+        if (len < 1e-9) { prev = world; continue; }
+        vec3 marchDir = seg / len;
+        lastDir = marchDir;
+
+        if (x.x >= ESCAPE) { colour += transmit * starfield(marchDir); break; }
+
+        // One conservative test for the whole segment before sub-sampling it.
+        // The jet is a narrow cone about the axis and the overwhelming majority
+        // of steps are nowhere near it, so without this every ray in the frame
+        // paid for four cone tests on every step it took.
+        float jetY = max(abs(prev.y), abs(world.y));
+        // jetsOn lets the shadow be measured against the disc alone: the jets
+        // cross the middle of the frame, which is exactly where the shadow is.
+        float jetR = min(length(prev.xz), length(world.xz));
+        if (jetsOn != 0 && jetY > JET_BASE - len && jetR < 0.4 + 0.075 * jetY + len) {
+            // Sub-sampled like the disc, and for the same reason: the step out
+            // here is wide against a narrow cone, so one sample per segment drew
+            // the jet as a dotted line.
+            for (int k = 0; k < 4; k++) {
+                vec3 jp = prev + seg * ((float(k) + 0.5) * 0.25);
+                colour += transmit * jetEmission(jp, -marchDir) * (len * 0.25);
+            }
+        }
+
+        // Through the disc rather than across it, so it obscures itself and its
+        // edge is soft. The step is set by the bend in the path, which near the
+        // disc is far coarser than the disc is thin, so the optical depth is
+        // sub-sampled along the chord -- locally straight, and paid for only on
+        // the few steps that are anywhere near the gas.
+        vec3  mid   = 0.5 * (world + prev);
+        if (abs(mid.y) < 4.0 * DISC_H * DISC_OUT + len && x.x < DISC_OUT + len) {
+            for (int k = 0; k < 8; k++) {
+                vec3  sp   = prev + seg * ((float(k) + 0.5) * 0.125);
+                float sr   = blRadius(sp, a);
+                float dens = discDensity(sr, sp.y, isco);
+                if (dens > 0.0008) {
+                    float dtau   = DISC_K * dens * len * 0.125;
+                    float absorb = 1.0 - exp(-dtau);
+                    colour   += transmit * absorb * discEmission(sr, sp, a, L, x0, root, -marchDir);
+                    transmit *= 1.0 - absorb;
+                }
+            }
+            if (transmit < 0.01) break;
+        }
+
+        prev = world;
+    }
+
+    return colour;
+}
+
+void main() {
+    float a    = clamp(spin, 0.0, 0.998);
+    float rh   = 1.0 + sqrt(max(1.0 - a * a, 0.0));
+    float isco = iscoRadius(a);
+    float x0   = sqrt(isco);
+    vec3  root = ntRoots(a);
+
+    // Four rays per pixel on a rotated grid. The rim of the shadow and the star
+    // field are both hard edges over a smooth background, which is exactly where
+    // one sample per pixel shows, and this is a renderer whose whole output is
+    // edges of that kind. The pixel's size comes from the screen-space
+    // derivative of the interpolated coordinate, so nothing here has to be told
+    // the resolution.
+    vec2 duv = vec2(dFdx(screenUV.x), dFdy(screenUV.y));
+    vec2 jitter[4] = vec2[4](vec2(-0.375, -0.125), vec2( 0.125, -0.375),
+                             vec2( 0.375,  0.125), vec2(-0.125,  0.375));
+
+    int  taps = clamp(aaSamples, 1, 4);
+    vec3 sum  = vec3(0.0);
+    for (int i = 0; i < taps; i++) {
+        vec2 ndc = (screenUV + duv * jitter[i]) * 2.0 - 1.0;
+        vec3 rd  = normalize(camFwd
+                           + camRight * (ndc.x * aspectRatio * tanHalfFov)
+                           + camUp    * (ndc.y * tanHalfFov));
+        sum += traceRay(rd, a, rh, isco, x0, root);
+    }
+
+    // ACES, then sRGB -- the same tonemap the lit path uses, so the bright side
+    // of the disc rolls off to white instead of clipping channel by channel and
+    // sliding in hue on the way. Averaging happens before the tonemap, which is
+    // the right order: the curve is not linear, so averaging after it would
+    // darken every edge it touched.
+    vec3 v = sum / float(taps);
+    vec3 mapped = clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), 0.0, 1.0);
+    FragColor = vec4(pow(mapped, vec3(1.0 / 2.2)), 1.0);
+}
+GLSL_END
+
+// The quad covers the frame: loader.quad puts it in the XZ plane with corners at
+// +/-1, which the vertex shader reads straight as clip space. Face culling has
+// to be off for it -- its winding is back-facing once mapped there.
+screen_new() -> *Model {
+    m = loader.quad(2.0, 2.0)
+    core.model_set_shader(m, core.shader_new(VERTEX_SOURCE, FRAGMENT_SOURCE))
+    set_jets(m, true)
+    set_quality(m, 4, 400)
+    return m
+}
+
+// The camera reaches the shader as a basis rather than a matrix, because a ray
+// is what the integrator needs and a matrix would only have to be taken apart
+// again to get one.
+set_view(m: *Model, cam: *Camera) {
+    half_fov = core.deg_to_rad(cam.fov) * 0.5
+    core.model_set_uniform_vec3(m, "camPos", cam.position)
+    core.model_set_uniform_vec3(m, "camRight", cam.right)
+    core.model_set_uniform_vec3(m, "camUp", cam.up)
+    core.model_set_uniform_vec3(m, "camFwd", cam.front)
+    core.model_set_uniform_float(m, "tanHalfFov",
+                                 core.sin_of(half_fov) / core.cos_of(half_fov))
+    core.model_set_uniform_float(m, "aspectRatio", cam.aspect)
+}
+
+// 0 is Schwarzschild; 0.998 is the Thorne limit accretion holds a real hole to.
+// The horizon, the innermost stable orbit, the orbital speeds, the disc's
+// temperature and the shape of the shadow all follow from this one number.
+set_spin(m: *Model, a: float) {
+    core.model_set_uniform_float(m, "spin", a)
+}
+
+set_time(m: *Model, seconds: float) {
+    core.model_set_uniform_float(m, "discTime", seconds)
+}
+
+// The jets cross the middle of the frame, which is where the shadow is, so
+// anything measuring the shadow wants them out of the way. Real sources are seen
+// both ways round: plenty of accreting holes show no jet at all.
+set_jets(m: *Model, enabled: bool) {
+    on = 0
+    if enabled { on = 1 }
+    core.model_set_uniform_int(m, "jetsOn", on)
+}
+
+// Rays per pixel (1 to 4) and the step budget for each. Both are uniforms rather
+// than compile-time constants so that a benchmark can sweep them and a slower
+// machine can turn them down without rebuilding a shader.
+set_quality(m: *Model, samples: int, steps: int) {
+    core.model_set_uniform_int(m, "aaSamples", samples)
+    core.model_set_uniform_int(m, "maxSteps", steps)
+}
