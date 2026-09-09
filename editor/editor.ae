@@ -38,6 +38,9 @@ const ORBIT_SPEED = 0.35
 const ZOOM_STEP = 1.12
 const DRAG_SLOP = 3.0
 const VALUE_COLUMN = 46
+// A slider's box. Wide enough for the longest value any bounded row shows,
+// which is a field of view at 110.00.
+const READOUT_W = 58
 // The label column, so every row's control starts at the same x whatever the
 // caption says. Ragged control edges are most of what makes a panel look
 // unfinished.
@@ -162,13 +165,12 @@ var g_bloom = false
 var g_stats = 0
 var g_title = 0
 var g_sliders: ptr = null
-var g_readouts: ptr = null
-// A row is driven by exactly one control: a slider where the value is bounded
-// and a number field where it is not. Both arrays are ROWS long and a row has
-// an entry in one of them.
+// Every row has a number box. A bounded row has a slider beside it as well:
+// dragging and typing are two ways into the same value, which is how all three
+// of Unreal, Unity and Godot draw a bounded setting. Both arrays are ROWS long.
 var g_fields: ptr = null
 // The row each control sits in, so a section can be hidden whole. Hiding the
-// control and its readout leaves the caption behind, and a caption with no
+// control and its box leaves the caption behind, and a caption with no
 // control under it is worse than either: the water section read as four
 // stranded words with no heading above them.
 var g_row_frames: ptr = null
@@ -189,7 +191,10 @@ var g_detached_scripts: ptr = null
 // the field being edited rewrites it under the caret, which is what makes a
 // numeric field impossible to type into.
 var g_typing_row = 0 - 1
-var g_row_count = 0
+// The row whose slider is being dragged. A slider that is written to during its
+// own tracking loop fights the drag, so it is the one control a change is not
+// echoed back into.
+var g_sliding_row = 0 - 1
 
 var g_orbit_yaw = 0.0 - 55.0
 var g_orbit_pitch = 26.0
@@ -594,12 +599,6 @@ row_control(index: int) -> int {
     return field_handle(index)
 }
 
-readout_handle(index: int) -> int {
-    if g_readouts == null || index < 0 || index >= ROWS { return 0 }
-    slots = g_readouts as int[]
-    return slots[index]
-}
-
 // listbox_update takes a pointer list, and the rows carry nothing but their
 // index, so each is one boxed int the list owns for as long as it holds it.
 index_handle(value: int) -> ptr {
@@ -756,17 +755,17 @@ refresh_light_rows() {
 }
 
 show_row(index: int, value: float) {
-    handle = slider_handle(index)
-    if handle != 0 { ui.set_slider(handle, value) }
+    if index != g_sliding_row {
+        handle = slider_handle(index)
+        if handle != 0 { ui.set_slider(handle, value) }
+    }
     echo_row(index, value)
 }
 
 // Put a value in front of the user without moving the control it came from.
-// A slider row has a separate readout; a field row is its own readout, and is
-// left alone while it is being typed in.
+// The box is left alone while it is being typed in: rewriting a parsed value
+// back under the caret is what makes a numeric field impossible to type into.
 echo_row(index: int, value: float) {
-    readout = readout_handle(index)
-    if readout != 0 { ui.set_text(readout, number(value)) }
     field = field_handle(index)
     if field != 0 && index != g_typing_row { ui.set_text(field, number(value)) }
 }
@@ -1406,7 +1405,10 @@ blind_fields() -> int {
             was = ui.get_text(handle)
             show_row(index, 12.25)
             if string.equals(ui.get_text(handle), "12.25") != 1 { blind = blind + 1 }
-            ui.set_text(handle, was)
+            // Back through show_row rather than set_text: a bounded row has a
+            // slider that moved too, and putting only the text back leaves the
+            // two showing different numbers.
+            show_row(index, string.string_get_float(was))
         }
         index = index + 1
     }
@@ -1506,9 +1508,9 @@ limit_from_env() -> int {
     return core.env_int("AE3D_EDITOR_FRAMES", 0)
 }
 
-// One row of the inspector: a label, a slider, and a live readout. The slider
-// writes straight through to the selected model, so what is on screen and what
-// the renderer draws are never two copies of the same number.
+// One row of the inspector: a label, a slider and a number box. Both write
+// straight through to the selected model, so what is on screen and what the
+// renderer draws are never two copies of the same number.
 // CRITICAL: these must not be called undo and redo. aether-ui exports names of
 // its own for stepping the toolkit's command stack, and inside the ui.window
 // block a bare call to either bound to those rather than to the editor's, so
@@ -1759,7 +1761,7 @@ apply_property(index: int, value: float) {
             if index == 15 { light.color = core.vec3(light.color.x, value, light.color.z) }
             if index == 16 { light.color = core.vec3(light.color.x, light.color.y, value) }
         }
-        echo_row(index, value)
+        show_row(index, value)
         paint_soon()
         return
     }
@@ -1776,11 +1778,11 @@ apply_property(index: int, value: float) {
             // A camera setter refuses a value that would divide by zero in the
             // projection, so the row shows what the camera kept, not what it
             // was asked for.
-            echo_row(index, camera_value(index))
+            show_row(index, camera_value(index))
             paint_soon()
             return
         }
-        echo_row(index, value)
+        show_row(index, value)
         paint_soon()
         return
     }
@@ -1796,7 +1798,7 @@ apply_property(index: int, value: float) {
             if index == 13 { water.simulation_set_opacity(sim, value) }
             if index == FOAM_ROW { water.simulation_set_foam(sim, true, value) }
         }
-        echo_row(index, value)
+        show_row(index, value)
         paint_soon()
         return
     }
@@ -1820,7 +1822,7 @@ apply_property(index: int, value: float) {
         i = i + 1
     }
 
-    echo_row(index, value)
+    show_row(index, value)
     refresh_swatch()
 
     paint_soon()
@@ -1874,7 +1876,6 @@ number_field(parent: int, index: int, initial: float, width: int) -> int {
     fields = g_fields as int[]
     fields[index] = handle
     if g_probe_field == 0 { g_probe_field = handle }
-    g_row_count = g_row_count + 1
     return handle
 }
 
@@ -1922,10 +1923,14 @@ vector_row(parent: int, name: string, first: int) {
 
 // A bounded value, where the whole range is meaningful and dragging across it
 // is the point: a colour channel, a roughness, a field of view.
-// Label, control and value on one line, which is how all three of the editors
-// this borrows from draw a bounded setting. Stacking the slider under its own
-// caption cost two lines a row and read like a page of preferences rather than
-// an inspector: eleven settings filled the panel twice over.
+//
+// Label, slider and a box on one line, which is how all three of the editors
+// this borrows from draw a bounded setting. The box is the half that was
+// missing: a slider is a pixel per several hundredths, so there was no way to
+// ask for exactly 0.5 metallic, and the number beside it was dead text that
+// looked like something to click. Stacking the slider under its own caption
+// cost two lines a row and read like a page of preferences rather than an
+// inspector: eleven settings filled the panel twice over.
 inspector_row(parent: int, name: string, low: float, high: float,
               initial: float, index: int) {
     row = ui.hstack(parent, 8)
@@ -1935,22 +1940,19 @@ inspector_row(parent: int, name: string, low: float, high: float,
     ui.width(caption, LABEL_COLUMN)
 
     slider = ui.slider(row, low, high, initial) callback |value: float| {
+        g_sliding_row = index
         apply_property(index, value)
+        g_sliding_row = 0 - 1
     }
     ui.height(slider, 16)
     ui.fill_width(slider)
 
-    readout = ui.text(row, number(initial))
-    ui.add_css_class(readout, "value")
-    ui.width(readout, VALUE_COLUMN)
+    number_field(row, index, initial, READOUT_W)
 
     sliders = g_sliders as int[]
-    readouts = g_readouts as int[]
     frames = g_row_frames as int[]
     sliders[index] = slider
-    readouts[index] = readout
     frames[index] = row
-    g_row_count = g_row_count + 1
 }
 
 theme() -> ptr {
@@ -2789,7 +2791,6 @@ main() {
     g_models = list.new()
     g_rows = list.new()
     g_sliders = calloc(ROWS, 4)
-    g_readouts = calloc(ROWS, 4)
     g_fields = calloc(ROWS, 4)
     g_row_frames = calloc(ROWS, 4)
     g_detached_models = list.new()
