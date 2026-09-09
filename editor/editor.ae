@@ -392,7 +392,7 @@ load_shading() {
 // way the presets already are: the config is a scene setting here, and giving
 // each model its own would mean a fourth list beside the models, the components
 // and the scripts, all of which have to move together.
-apply_shading() {
+shading_config() -> Config {
     c = preset_config()
     c.clearcoat = g_shade_clearcoat
     c.sheen = g_shade_sheen
@@ -400,8 +400,58 @@ apply_shading() {
     c.volumetric_lighting = g_shade_volumetric
     c.global_illumination = g_shade_gi
     c.advanced_shadows = g_shade_shadows
-    rendering.apply_all(g_models, c)
+    return c
+}
+
+apply_shading() {
+    rendering.apply_all(g_models, shading_config())
     paint_soon()
+}
+
+// A model that arrives after the shading was chosen has none of it: apply_all
+// walks the models that exist when it runs, so a cube added later was lit by
+// whatever the shader defaults to while the panel said otherwise.
+apply_shading_to(m: *Model) {
+    if m == null { return }
+    rendering.apply(m, shading_config())
+}
+
+// The scene file carries each model's uniforms, so a loaded scene brings its
+// own shading with it and the panel has to say what was loaded rather than
+// what was last set by hand. Read off the first model, since the switches are
+// a scene-wide control and that is what they were applied to.
+read_shading() {
+    m = model_at(0)
+    if m == null { return }
+    g_shade_clearcoat = model_flag(m, shading_uniform(SHADE_CLEARCOAT)) == 1
+    g_shade_sheen = model_flag(m, shading_uniform(SHADE_SHEEN)) == 1
+    g_shade_ssao = model_flag(m, shading_uniform(SHADE_SSAO)) == 1
+    g_shade_volumetric = model_flag(m, shading_uniform(SHADE_VOLUMETRIC)) == 1
+    g_shade_gi = model_flag(m, shading_uniform(SHADE_GI)) == 1
+    g_shade_shadows = model_flag(m, shading_uniform(SHADE_SHADOWS)) == 1
+    refresh_shading_toggles()
+}
+
+// Whether the switches say what the models carry. The panel is a scene-wide
+// control over per-model uniforms, so the two can drift apart in both
+// directions: a model added after a switch was flipped never got it, and a
+// loaded scene brought its own settings the panel knew nothing about.
+shading_disagrees() -> int {
+    wrong = 0
+    slot = 0
+    while slot < SHADE_KINDS {
+        want = flag_of(shading_state(slot))
+        i = 0
+        while i < list.size(g_models) {
+            m = model_at(i)
+            if m != null && model_flag(m, shading_uniform(slot)) != want {
+                wrong = wrong + 1
+            }
+            i = i + 1
+        }
+        slot = slot + 1
+    }
+    return wrong
 }
 
 refresh_shading_toggles() {
@@ -934,6 +984,7 @@ add_component_model(m: *Model, name: string, kind: int, state: ptr) {
     list.add_raw(g_components, behaviour.component_new(named, kind, state))
     list.add_raw(g_scripts, index_handle(SCRIPT_NONE))
     history.history_record(g_history, history.STEP_ADD, m as ptr, 0, 0.0, 0.0)
+    apply_shading_to(m)
     rebuild_rows()
     select_object(list.size(g_models) - 1)
     say("added ${named}")
@@ -1682,6 +1733,8 @@ report_state() {
     lines = string.concat(lines, string.from_int(unundone_scripts()))
     lines = string.concat(lines, "\nfirst_fps ")
     lines = string.concat(lines, string.from_int(g_first_fps))
+    lines = string.concat(lines, "\nshading_disagrees ")
+    lines = string.concat(lines, string.from_int(shading_disagrees()))
     lines = string.concat(lines, "\nunreached_shading ")
     lines = string.concat(lines, string.from_int(unreached_shading()))
     lines = string.concat(lines, "\nidle_actions ")
@@ -2700,6 +2753,12 @@ load_scene() {
     core.set_face_culling(view.face_culling)
     core.set_frustum_culling(view.frustum_culling)
 
+
+    // The file carried each model's uniforms, so the switches say what was
+    // loaded rather than what was last set by hand. Without this the panel
+    // disagreed with the scene, and the next switch pressed applied the panel's
+    // answer to every model and threw the loaded one away.
+    read_shading()
 
     history.history_clear(g_history)
     say("loaded ${count} models from ${SCENE_PATH}")
