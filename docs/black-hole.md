@@ -152,6 +152,21 @@ RTX 4070 Ti, 1280×800, `a = 0.9`:
   4 rays 140 steps: 12281 us per frame,  81 fps
 ```
 
+The benchmark honours `AE3D_BENCH_FRAMES` like the rest of the suite, and probes
+one cheap frame before the sweep: a per-pixel geodesic integration is orders of
+magnitude more work than anything else here, and a software rasteriser needs
+seconds where this needs milliseconds. If the probe is slow the sweep is skipped
+with a line saying why, because a timing taken from llvmpipe would not describe
+anything.
+
+The example guards itself the same way from the other side. Quality falls back
+when the frame runs long — the first frame is judged on its own, since that is
+the expensive one on a slow machine and the point is not to render a second like
+it. It never climbs back by itself: climbing needs an estimate of what one ray
+costs, and under vsync there is none to be had, because the frame time is
+quantised to the refresh and one ray and two can measure identical. The number
+keys take over.
+
 The step budget is not where the time goes — halving it saves under 10%. Cost
 scales with rays per pixel and with the work done per step, which is why both
 are uniforms rather than compile-time constants: the benchmark sweeps them, and

@@ -24,6 +24,14 @@ const HEIGHT = 800
 
 var FRAMES = 90
 
+// A frame here is a per-pixel geodesic integration, which is orders of
+// magnitude more work than the other benchmarks do and the only one in the tree
+// that a software rasteriser cannot get through in a sensible time. Two guards,
+// both borrowed from what the rest of the suite already does rather than
+// invented here: the frame count comes from AE3D_BENCH_FRAMES, and a probe
+// frame decides whether this machine is worth timing at all.
+const SLOW_FRAME_MS = 250
+
 var g_backend: *Backend = null
 var g_screen: *Model = null
 var g_cam: *Camera = null
@@ -35,7 +43,7 @@ measure(label: string, taps: int, steps: int) {
     blackhole.set_quality(g_screen, taps, steps)
 
     warm = 0
-    while warm < 5 {
+    while warm < 3 {
         blackhole.set_time(g_screen, warm * 0.016)
         core.backend_render(g_backend, g_cam, g_light)
         warm = warm + 1
@@ -105,7 +113,28 @@ main() {
     gl.renderer_add_light(renderer, light)
     g_light = light
 
-    println("ae3d black hole benchmark at ${WIDTH}x${HEIGHT}, Kerr a = 0.9")
+    FRAMES = core.env_int("AE3D_BENCH_FRAMES", FRAMES)
+
+    // One cheap frame, to find out what kind of machine this is. A shared CI
+    // runner on llvmpipe takes seconds per frame where the hardware these
+    // numbers describe takes milliseconds, and a sweep at that rate is neither
+    // a measurement nor something CI should sit through.
+    blackhole.set_quality(screen, 1, 140)
+    blackhole.set_view(screen, cam)
+    core.backend_render(&backend, cam, light)
+    probe_started = clock_ns()
+    core.backend_render(&backend, cam, light)
+    offscreen.target_pixels(gl_target)
+    probe_ms = (clock_ns() - probe_started) / 1000000
+
+    if probe_ms > SLOW_FRAME_MS {
+        println("black hole: SKIP one ray at 140 steps took ${probe_ms} ms")
+        println("  no hardware renderer here, and a timing from a software one")
+        println("  would not describe anything. Run it on a GPU.")
+        return
+    }
+
+    println("ae3d black hole benchmark at ${WIDTH}x${HEIGHT}, Kerr a = 0.9, ${FRAMES} frames")
 
     measure("1 ray  400 steps", 1, 400)
     measure("2 rays 400 steps", 2, 400)
