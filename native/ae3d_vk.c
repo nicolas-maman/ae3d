@@ -40,6 +40,9 @@
 #endif
 
 #define AE3D_VK_FRAMES 2
+/* A cached descriptor set whose texture has been destroyed. Not zero: zero is
+   a texture handle nothing uses, and not -1 alone, which reads as an error. */
+#define AE3D_VK_SET_FREE (-2)
 #define AE3D_VK_SHADOW_SIZE 2048
 #define AE3D_VK_PROGRAM_SCENE 0
 #define AE3D_VK_PROGRAM_WATER 1
@@ -1822,10 +1825,26 @@ int ae3d_vk_texture_create(int width, int height, const void *rgba) {
 
 void ae3d_vk_texture_destroy(int handle) {
     ae3d_vk_texture *texture;
+    int frame, index;
+
     if (!vk.device || handle < 1 || handle > AE3D_VK_MAX_TEXTURES) return;
     texture = &vk.textures[handle - 1];
     if (!texture->in_use) return;
     ae3d_vkDeviceWaitIdle(vk.device);
+
+    /* Descriptor sets are cached against the texture handle, and handles are
+       reused: a set written for the image being destroyed here would be handed
+       to whichever texture is created in this slot next, naming an image view
+       that no longer exists. A hardware driver has usually survived reading
+       one; lavapipe dereferences it, which is where this was found. The sets
+       go back on the free list and are written again when they are claimed. */
+    for (frame = 0; frame < AE3D_VK_FRAMES; frame++) {
+        for (index = 0; index < vk.set_count[frame]; index++) {
+            if (vk.set_texture[frame][index] == handle) {
+                vk.set_texture[frame][index] = AE3D_VK_SET_FREE;
+            }
+        }
+    }
     if (texture->sampler) ae3d_vkDestroySampler(vk.device, texture->sampler, NULL);
     if (texture->view) ae3d_vkDestroyImageView(vk.device, texture->view, NULL);
     if (texture->image) ae3d_vkDestroyImage(vk.device, texture->image, NULL);
@@ -1919,20 +1938,32 @@ static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle) {
     ae3d_vk_texture *texture;
     int index;
 
+    int reuse = -1;
+
     for (index = 0; index < vk.set_count[frame]; index++) {
         if (vk.set_texture[frame][index] == texture_handle) return vk.sets[frame][index];
+        /* Left behind by a texture that was destroyed. The set is still
+           allocated and can be written again, which is what keeps a scene that
+           swaps textures from exhausting the pool. */
+        if (vk.set_texture[frame][index] == AE3D_VK_SET_FREE && reuse < 0) reuse = index;
     }
-    if (vk.set_count[frame] >= AE3D_VK_MAX_TEXTURES) return VK_NULL_HANDLE;
+    if (reuse < 0 && vk.set_count[frame] >= AE3D_VK_MAX_TEXTURES) return VK_NULL_HANDLE;
 
     texture = &vk.textures[texture_handle - 1];
     if (!texture->in_use) return VK_NULL_HANDLE;
 
-    memset(&allocation, 0, sizeof(allocation));
-    allocation.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocation.descriptorPool = vk.descriptor_pool;
-    allocation.descriptorSetCount = 1;
-    allocation.pSetLayouts = &vk.set_layout;
-    if (ae3d_vkAllocateDescriptorSets(vk.device, &allocation, &set) != VK_SUCCESS) return VK_NULL_HANDLE;
+    if (reuse >= 0) {
+        set = vk.sets[frame][reuse];
+    } else {
+        memset(&allocation, 0, sizeof(allocation));
+        allocation.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocation.descriptorPool = vk.descriptor_pool;
+        allocation.descriptorSetCount = 1;
+        allocation.pSetLayouts = &vk.set_layout;
+        if (ae3d_vkAllocateDescriptorSets(vk.device, &allocation, &set) != VK_SUCCESS) {
+            return VK_NULL_HANDLE;
+        }
+    }
 
     memset(&buffer, 0, sizeof(buffer));
     buffer.buffer = vk.uniforms[frame].buffer;
@@ -1979,7 +2010,7 @@ static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle) {
 
     ae3d_vkUpdateDescriptorSets(vk.device, 3, writes, 0, NULL);
 
-    index = vk.set_count[frame]++;
+    index = reuse >= 0 ? reuse : vk.set_count[frame]++;
     vk.sets[frame][index] = set;
     vk.set_texture[frame][index] = texture_handle;
     return set;
