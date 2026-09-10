@@ -57,6 +57,8 @@ died_on() {   # died_on <status>
     fi
 }
 
+. "$PWD/scripts/native.sh"
+
 step "platform link libraries"
 # Every host this can be built on, checked from any host. Windows had no arm
 # at all and the catch-all's -lm cannot link an OpenGL program, so ae3d could
@@ -245,12 +247,42 @@ step "scripts"
 for script_source in resources/scripts/*.ae; do
     [ -e "$script_source" ] || continue
     script_name="$(basename "$script_source" .ae)"
-    if ./scripts/build_script.sh "$script_source" >/tmp/ae3d_script.log 2>&1; then
-        pass "script $script_name"
-    else
+    if ! ./scripts/build_script.sh "$script_source" >/tmp/ae3d_script.log 2>&1; then
         fail "script $script_name"
         sed 's/^/        /' /tmp/ae3d_script.log | head -10
+        continue
     fi
+    # A script reaches into the engine the host is running, never a copy of its
+    # own: two copies of the GL loader means a script drawing through function
+    # pointers nothing ever filled in. It links the same library the host does,
+    # and this is where that is checked rather than trusted.
+    script_lib="build/scripts/$script_name$(ae3d_native_suffix)"
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*|Windows_NT)
+            # nm cannot answer it here. Linking against an import library leaves
+            # a thunk in .text under the imported name, and a DLL that exports
+            # nothing explicitly exports those too, so every imported call reads
+            # as a definition. The import table is what settles it.
+            if command -v objdump >/dev/null 2>&1 && [ -f "$script_lib" ]; then
+                if ! objdump -p "$script_lib" 2>/dev/null | grep -q "libae3d_native.dll"; then
+                    fail "script $script_name (does not import the engine library)"
+                    continue
+                fi
+            fi
+            ;;
+        *)
+            # Where there are no thunks, the sharper question: it defines none
+            # of the engine's C itself.
+            if command -v nm >/dev/null 2>&1 && [ -f "$script_lib" ]; then
+                own="$(nm -g "$script_lib" 2>/dev/null | grep -c ' T _\{0,1\}ae3d_' || true)"
+                if [ "${own:-0}" -ne 0 ]; then
+                    fail "script $script_name (carries its own copy of $own engine calls)"
+                    continue
+                fi
+            fi
+            ;;
+    esac
+    pass "script $script_name"
 done
 
 step "test suites"
