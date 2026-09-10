@@ -26,6 +26,7 @@ import ae3d.core
 exports (
     Skeleton, Bone, skeleton_new, skeleton_free, skeleton_add, skeleton_bind,
     skeleton_count, skeleton_bone, skeleton_find, skeleton_palette,
+    skeleton_fit, skeleton_reach,
     skeleton_update, MAX_BONES
 )
 
@@ -48,6 +49,10 @@ struct Bone {
 struct Skeleton {
     bones: ptr
     palette: ptr
+    // How far the bones spread from their own middle when the mesh was bound
+    // to them. Subtracted from the mesh's bind radius, what is left is the
+    // thickness of the surface, which is the part a pose does not change.
+    bind_spread: float
 }
 
 skeleton_new() -> *Skeleton {
@@ -104,6 +109,8 @@ skeleton_bind(s: *Skeleton) {
         i = i + 1
     }
     skeleton_update(s)
+    centre = core.vec3(0.0, 0.0, 0.0)
+    s.bind_spread = skeleton_reach(s, &centre)
 }
 
 skeleton_count(s: *Skeleton) -> int {
@@ -159,4 +166,54 @@ skeleton_update(s: *Skeleton) {
 skeleton_palette(s: *Skeleton) -> ptr {
     if s == null { return null }
     return s.palette
+}
+
+// The middle of the bones and how far they reach from it, as they are now.
+skeleton_reach(s: *Skeleton, centre: *Vec3) -> float {
+    count = list.size(s.bones)
+    middle = core.vec3(0.0, 0.0, 0.0)
+    i = 0
+    while i < count {
+        bone = skeleton_bone(s, i)
+        if bone != null {
+            core.model_sync_transform(bone)
+            middle = core.v3_add(middle, core.model_world_position(bone))
+        }
+        i = i + 1
+    }
+    middle = core.v3_mul(middle, 1.0 / (count * 1.0))
+    reach = 0.0
+    i = 0
+    while i < count {
+        bone = skeleton_bone(s, i)
+        if bone != null {
+            away = core.v3_distance(middle, core.model_world_position(bone))
+            if away > reach { reach = away }
+        }
+        i = i + 1
+    }
+    centre.x = middle.x
+    centre.y = middle.y
+    centre.z = middle.z
+    return reach
+}
+
+// Where a skinned model actually is.
+//
+// A skinned mesh is written in its bind pose and stays there: its vertices do
+// not move, its bones do, and the shader puts the two together. So the model's
+// own bounds describe a figure standing at the origin however far up the
+// street it has walked -- which culls it when it is on screen, keeps it when it
+// is not, and answers the wrong rectangle to anything that asks where it
+// landed. This is the bounds it should have had, and it is the skeleton that
+// knows them.
+skeleton_fit(s: *Skeleton, m: *Model) {
+    if s == null || m == null || list.size(s.bones) == 0 { return }
+    skeleton_update(s)
+    centre = core.vec3(0.0, 0.0, 0.0)
+    reach = skeleton_reach(s, &centre)
+    thickness = m.skin_reach - s.bind_spread
+    if thickness < 0.0 { thickness = 0.0 }
+    m.bounding_center = centre
+    m.bounding_radius = reach + thickness
 }

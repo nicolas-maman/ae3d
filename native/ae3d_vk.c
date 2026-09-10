@@ -246,6 +246,7 @@ static struct {
     VkImageView shadow_view;
     VkSampler shadow_sampler;
     VkPipeline shadow_pipeline;
+    int normal_map;
     VkPipeline skinned_shadow_pipeline;
     VkPipeline water_pipeline[2];
     VkPipeline water_pipeline_blend;
@@ -279,6 +280,7 @@ static struct {
     ae3d_vk_uniform_ring uniforms[AE3D_VK_FRAMES];
     VkDescriptorSet sets[AE3D_VK_FRAMES][AE3D_VK_MAX_TEXTURES];
     int set_texture[AE3D_VK_FRAMES][AE3D_VK_MAX_TEXTURES];
+    int set_normal[AE3D_VK_FRAMES][AE3D_VK_MAX_TEXTURES];
     int set_count[AE3D_VK_FRAMES];
 
     ae3d_vk_texture textures[AE3D_VK_MAX_TEXTURES];
@@ -1867,7 +1869,7 @@ void ae3d_vk_texture_destroy(int handle) {
 }
 
 static int ae3d_vk_create_descriptors(void) {
-    VkDescriptorSetLayoutBinding bindings[3];
+    VkDescriptorSetLayoutBinding bindings[4];
     VkDescriptorSetLayoutCreateInfo layout;
     VkDescriptorPoolSize sizes[2];
     VkDescriptorPoolCreateInfo pool;
@@ -1893,9 +1895,16 @@ static int ae3d_vk_create_descriptors(void) {
     bindings[2].descriptorCount = 1;
     bindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
+    // The normal map. A material without one binds the default texture, whose
+    // flat colour the shader never reads, because hasNormalMap is off.
+    bindings[3].binding = 3;
+    bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[3].descriptorCount = 1;
+    bindings[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
     memset(&layout, 0, sizeof(layout));
     layout.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layout.bindingCount = 3;
+    layout.bindingCount = 4;
     layout.pBindings = bindings;
     if (ae3d_vkCreateDescriptorSetLayout(vk.device, &layout, NULL, &vk.set_layout) != VK_SUCCESS) {
         return ae3d_vk_fail("vkCreateDescriptorSetLayout failed");
@@ -1905,7 +1914,7 @@ static int ae3d_vk_create_descriptors(void) {
     sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     sizes[0].descriptorCount = AE3D_VK_FRAMES * AE3D_VK_MAX_TEXTURES;
     sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    sizes[1].descriptorCount = AE3D_VK_FRAMES * AE3D_VK_MAX_TEXTURES * 2;
+    sizes[1].descriptorCount = AE3D_VK_FRAMES * AE3D_VK_MAX_TEXTURES * 3;
 
     memset(&pool, 0, sizeof(pool));
     pool.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1942,20 +1951,30 @@ static int ae3d_vk_create_descriptors(void) {
     return 1;
 }
 
-static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle) {
+/* A set is keyed on the pair of images it binds, not on the colour alone: two
+   materials can share a colour and differ in their normal map, and keying on
+   one of them hands the second the first one's surface. */
+static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle, int normal_handle) {
     VkDescriptorSetAllocateInfo allocation;
     VkDescriptorSet set = VK_NULL_HANDLE;
     VkDescriptorBufferInfo buffer;
     VkDescriptorImageInfo image;
     VkDescriptorImageInfo shadow;
-    VkWriteDescriptorSet writes[3];
+    VkDescriptorImageInfo bumps;
+    VkWriteDescriptorSet writes[4];
     ae3d_vk_texture *texture;
+    ae3d_vk_texture *normal;
     int index;
 
     int reuse = -1;
 
+    if (normal_handle < 1 || normal_handle > AE3D_VK_MAX_TEXTURES ||
+        !vk.textures[normal_handle - 1].in_use) {
+        normal_handle = vk.default_texture;
+    }
     for (index = 0; index < vk.set_count[frame]; index++) {
-        if (vk.set_texture[frame][index] == texture_handle) return vk.sets[frame][index];
+        if (vk.set_texture[frame][index] == texture_handle &&
+            vk.set_normal[frame][index] == normal_handle) return vk.sets[frame][index];
         /* Left behind by a texture that was destroyed. The set is still
            allocated and can be written again, which is what keeps a scene that
            swaps textures from exhausting the pool. */
@@ -1965,6 +1984,7 @@ static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle) {
 
     texture = &vk.textures[texture_handle - 1];
     if (!texture->in_use) return VK_NULL_HANDLE;
+    normal = &vk.textures[normal_handle - 1];
 
     if (reuse >= 0) {
         set = vk.sets[frame][reuse];
@@ -2003,6 +2023,17 @@ static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle) {
     writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[1].pImageInfo = &image;
 
+    memset(&bumps, 0, sizeof(bumps));
+    bumps.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    bumps.imageView = normal->view;
+    bumps.sampler = normal->sampler;
+    writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[3].dstSet = set;
+    writes[3].dstBinding = 3;
+    writes[3].descriptorCount = 1;
+    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[3].pImageInfo = &bumps;
+
     // Binding 2 is the shadow map. With shadows off it holds the default white
     // texture, which reads as nothing occluded.
     memset(&shadow, 0, sizeof(shadow));
@@ -2022,11 +2053,12 @@ static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle) {
     writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[2].pImageInfo = &shadow;
 
-    ae3d_vkUpdateDescriptorSets(vk.device, 3, writes, 0, NULL);
+    ae3d_vkUpdateDescriptorSets(vk.device, 4, writes, 0, NULL);
 
     index = reuse >= 0 ? reuse : vk.set_count[frame]++;
     vk.sets[frame][index] = set;
     vk.set_texture[frame][index] = texture_handle;
+    vk.set_normal[frame][index] = normal_handle;
     return set;
 }
 
@@ -2105,6 +2137,11 @@ void ae3d_vk_scene_set_vec3_array(int offset, void *handle) {
 }
 
 void ae3d_vk_set_blend(int on) { vk.blend = on; }
+
+/* Which normal map the next draws use. Renderer state rather than a draw
+   argument, the way the blend and the program already are: a material sets it
+   once and every draw of that material reads it. */
+void ae3d_vk_set_normal_map(int handle) { vk.normal_map = handle; }
 
 // Every pipeline shares the scene's vertex input and descriptor set layout, so
 // a pass differs only in its shaders and its depth and blend state. Attributes a
@@ -2666,7 +2703,7 @@ static void ae3d_vk_draw_pipeline(VkPipeline pipeline, int handle, int texture_h
     dynamic_offset = slot * ring->stride;
     memcpy(ring->mapped + dynamic_offset, vk.scene[vk.program].bytes, AE3D_VK_SCENE_SIZE);
 
-    set = ae3d_vk_set_for((int)vk.frame, texture_handle);
+    set = ae3d_vk_set_for((int)vk.frame, texture_handle, vk.normal_map);
     if (set == VK_NULL_HANDLE) return;
 
     ae3d_vkCmdBindPipeline(vk.command_buffers[vk.frame], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);

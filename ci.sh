@@ -434,6 +434,33 @@ else
     rm -f "$measure_log"
 fi
 
+step "the demo scene, held to what a scene has to look like"
+# Texel density, relief, proportion and whether a planted foot stays planted.
+# Every one of them is a property of the scene the engine already holds, and
+# none of them was ever asked for -- which is how the street came to be a row of
+# boxes at ninety texels to the metre with every measurement passing.
+if [ -z "$PYTHON" ]; then
+    skip "zombie_street (critique)" "no python3"
+elif ! have_display; then
+    skip "zombie_street (critique)" "no display"
+elif ! built_ok zombie_street; then
+    skip "zombie_street (critique)" "it did not build"
+else
+    critique_log="$(mktemp)"
+    bounded "$RUN_LIMIT" $PYTHON scripts/critique_scene.py         --launch ./build/zombie_street --port 7914 >"$critique_log" 2>&1
+    critiqued=$?
+    if [ "$critiqued" -eq 0 ]; then
+        pass "zombie_street (critique)"
+        grep -E '^  (ok|FAIL)' "$critique_log" | sed 's/^/      /' | head -20
+    elif [ "$critiqued" -eq 3 ]; then
+        skip "zombie_street (critique)" "the scene could not open a window"
+    else
+        fail "zombie_street (critique)"
+        grep -E 'FAIL|Traceback|Error|error:|critique_scene:' "$critique_log"             | sed 's/^/        /' | head -14
+    fi
+    rm -f "$critique_log"
+fi
+
 # The editor runs on either renderer, so both are checked: the Vulkan option
 # used to report Vulkan and build an OpenGL renderer, which no OpenGL-only run
 # could have caught.

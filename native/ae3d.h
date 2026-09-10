@@ -67,6 +67,10 @@ void   ae3d_gl_uniform_mat4v(int loc, int count, const void *values);
 const float *ae3d_mesh_skin_data(void *mesh);
 double ae3d_mesh_skin_joint(void *mesh, int i, int slot);
 double ae3d_mesh_skin_weight(void *mesh, int i, int slot);
+double ae3d_mesh_surface_area(void *mesh, double sx, double sy, double sz);
+double ae3d_mesh_uv_area(void *mesh);
+double ae3d_mesh_extent(void *mesh, int axis);
+int    ae3d_mesh_distinct_planes(void *mesh, double tolerance);
 int    ae3d_mesh_vertex_count(void *mesh);
 int    ae3d_mesh_index_count(void *mesh);
 double ae3d_mesh_pos_x(void *mesh, int i);
@@ -265,6 +269,7 @@ void   ae3d_vk_scene_set_vec3(int offset, double x, double y, double z);
 void   ae3d_vk_scene_set_mat4(int offset, const double *m);
 void   ae3d_vk_scene_set_clip_mat4(int offset, const double *m);
 void   ae3d_vk_scene_set_mat4v(int offset, int count, const void *values);
+void   ae3d_vk_set_normal_map(int handle);
 void   ae3d_vk_set_blend(int on);
 void   ae3d_vk_draw(int mesh, int texture, int instances, int instance_count);
 void   ae3d_vk_draw_sky(int mesh, int texture);
@@ -306,10 +311,16 @@ int  ae3d_capture_height(void);
 int  ae3d_capture_pixel(int x, int y, double *out);
 int  ae3d_capture_region(int x, int y, int width, int height,
                          int background, int tolerance, double *out);
+int  ae3d_capture_grid(int columns, int rows, int background, int tolerance,
+                       double *out);
 int  ae3d_capture_hold_reference(void);
 int  ae3d_capture_diff(int tolerance, double *out);
 void ae3d_capture_release(void);
 int  ae3d_capture_adopt(const unsigned char *pixels, int width, int height);
+/* How many numbers the fixed-size answers -- a pixel, a region, a diff -- are
+   written into. A grid is as long as it has cells and says so. */
+#define AE3D_CAPTURE_SLOTS 8
 double ae3d_capture_slot(const double *block, int index);
+double ae3d_capture_slot_of(const double *block, int index, int count);
 
 #endif

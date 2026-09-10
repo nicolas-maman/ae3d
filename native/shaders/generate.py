@@ -410,7 +410,7 @@ def main():
                                         light_members)
 
     vk_fragment, _, _ = to_vulkan(fragment, "frag", ordered,
-                                  ["textureSampler", "shadowMap"], vertex_out, [],
+                                  ["textureSampler", "shadowMap", "normalMap"], vertex_out, [],
                                   light_members)
 
     written = {"scene_vk.vert": vk_vertex, "scene_vk.frag": vk_fragment}

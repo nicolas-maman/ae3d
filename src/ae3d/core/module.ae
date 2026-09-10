@@ -23,6 +23,7 @@ import ae3d.platform
 exports (
     mesh_push_skybox_cube, skybox_solid, skybox_texture, mesh_normal,
     mesh_set_skin, mesh_is_skinned, mesh_skin_joint, mesh_skin_weight,
+    mesh_surface_area, mesh_uv_area, mesh_distinct_planes, mesh_size,
     palette_create, palette_destroy, palette_bones, palette_set, palette_get,
     palette_data, skinrows_create, skinrows_destroy, skinrows_count, skinrows_set,
     Vec2, Vec3, Vec4, Quat, Mat4, vec2, vec3, vec4, quat, v3_add, v3_sub, v3_mul, v3_div,
@@ -46,7 +47,7 @@ exports (
     model_set_skeleton, model_skeleton,
     model_set_specular, model_set_pbr, model_set_exposure, model_set_alpha,
     model_set_texture, model_set_shader, model_set_name, model_set_source_path,
-    material_set_texture_path, material_set_name, light_set_name, camera_set_name, text,
+    material_set_texture_path, material_set_normal_path, material_set_name, light_set_name, camera_set_name, text,
     set_owned, model_metallic, model_plastic, model_rough_metal,
     model_polished_metal, model_matte, model_glossy, model_glass, model_transparent_plastic,
     model_add_group, model_group, model_group_count, model_sort_groups_by_texture,
@@ -136,6 +137,10 @@ extern ae3d_mesh_index_count(mesh: ptr) -> int
 extern ae3d_mesh_set_skin(mesh: ptr, i: int, j0: int, j1: int, j2: int, j3: int,
                           w0: float, w1: float, w2: float, w3: float) -> int
 extern ae3d_mesh_is_skinned(mesh: ptr) -> int
+extern ae3d_mesh_surface_area(mesh: ptr, sx: float, sy: float, sz: float) -> float
+extern ae3d_mesh_uv_area(mesh: ptr) -> float
+extern ae3d_mesh_extent(mesh: ptr, axis: int) -> float
+extern ae3d_mesh_distinct_planes(mesh: ptr, tolerance: float) -> int
 extern ae3d_mesh_skin_joint(mesh: ptr, i: int, slot: int) -> float
 extern ae3d_mesh_skin_weight(mesh: ptr, i: int, slot: int) -> float
 
@@ -265,6 +270,12 @@ struct Material {
     texture_stale: bool
     name: string
     texture_path: string
+    // The surface's shape, as opposed to its colour. Without one a wall
+    // catches the light as the single flat plane it is, and no amount of
+    // resolution in the colour makes brick read as brick.
+    normal_id: int
+    normal_stale: bool
+    normal_path: string
 }
 
 struct MaterialGroup {
@@ -324,6 +335,11 @@ struct Model {
     // The skeleton this model is posed by, or null. Borrowed: a figure's bones
     // are models in the same scene, and what owns them is whatever built them.
     skeleton: ptr
+    // How far the surface stands off the bones, measured in the pose it was
+    // bound in. A skinned mesh sits at the origin and its bones carry it, so
+    // its own bounds say nothing about where it is; what they do say is how
+    // thick it is, and that is the part still true once it has moved.
+    skin_reach: float
     instances: ptr
     material: *Material
     materials: ptr
@@ -1086,6 +1102,8 @@ material_new(name: string) -> *Material {
     m.alpha = 1.0
     m.texture_id = 0
     m.texture_stale = false
+    m.normal_id = 0
+    m.normal_stale = false
     return m
 }
 
@@ -1115,6 +1133,7 @@ material_clone(src: *Material) -> *Material {
     m = heap.new(Material)
     material_set_name(m, src.name)
     material_set_texture_path(m, text(src.texture_path))
+    material_set_normal_path(m, text(src.normal_path))
     m.diffuse = src.diffuse
     m.specular = src.specular
     m.metallic = src.metallic
@@ -1123,6 +1142,8 @@ material_clone(src: *Material) -> *Material {
     m.alpha = src.alpha
     m.texture_id = src.texture_id
     m.texture_stale = src.texture_stale
+    m.normal_id = src.normal_id
+    m.normal_stale = src.normal_stale
     return m
 }
 
@@ -1328,6 +1349,9 @@ model_set_mesh(m: *Model, mesh: ptr) {
 model_set_skeleton(m: *Model, skeleton: ptr) {
     if m == null { return }
     m.skeleton = skeleton
+    // Attached in the bind pose, so what the mesh measures now is how far it
+    // reaches around the bones rather than where those bones happen to be.
+    m.skin_reach = m.bounding_radius
 }
 
 model_skeleton(m: *Model) -> ptr {
@@ -1492,6 +1516,11 @@ model_set_source_path(m: *Model, path: string) {
 material_set_texture_path(m: *Material, path: string) {
     m.texture_path = set_owned(m.texture_path, path)
     m.texture_stale = true
+}
+
+material_set_normal_path(m: *Material, path: string) {
+    m.normal_path = set_owned(m.normal_path, path)
+    m.normal_stale = true
 }
 
 material_set_name(m: *Material, name: string) {
@@ -2080,6 +2109,27 @@ mesh_push_triangle(mesh: ptr, a: int, b: int, c: int) {
 mesh_set_skin(mesh: ptr, i: int, j0: int, j1: int, j2: int, j3: int,
               w0: float, w1: float, w2: float, w3: float) -> bool {
     return ae3d_mesh_set_skin(mesh, i, j0, j1, j2, j3, w0, w1, w2, w3) != 0
+}
+
+// The world area a mesh covers, its area in texture space, and how many ways
+// its faces point. Together these say whether a surface carries enough texture
+// to be looked at closely and whether a shape has a silhouette or is a box.
+mesh_surface_area(mesh: ptr, scale: Vec3) -> float {
+    return ae3d_mesh_surface_area(mesh, scale.x, scale.y, scale.z)
+}
+
+mesh_uv_area(mesh: ptr) -> float { return ae3d_mesh_uv_area(mesh) }
+
+// How far a mesh reaches along each of its own axes, scaled the way the model
+// is. Proportion is a ratio of extents; a bounding radius cannot express one.
+mesh_size(mesh: ptr, scale: Vec3) -> Vec3 {
+    return vec3(ae3d_mesh_extent(mesh, 0) * scale.x,
+                ae3d_mesh_extent(mesh, 1) * scale.y,
+                ae3d_mesh_extent(mesh, 2) * scale.z)
+}
+
+mesh_distinct_planes(mesh: ptr, tolerance: float) -> int {
+    return ae3d_mesh_distinct_planes(mesh, tolerance)
 }
 
 mesh_is_skinned(mesh: ptr) -> bool {

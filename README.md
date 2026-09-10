@@ -124,19 +124,26 @@ blender_pipeline: showcase.blend exported by Blender 5.2.1 LTS
 blender_pipeline: playing 'OrbAction', 1.95833s, 2 channels
 ```
 
-`examples/zombie_street.ae` is the same pipeline at scale: a night street and
-a zombie, 40 objects out of one `.blend`, sixteen of them animated, every
-surface carrying an image authored beside it. The zombie is rigid parts: the
-parts hang off each other, so a clip is a rotation about a joint and the
-hierarchy carries each limb through the arc of the one above it.
+`examples/zombie_street.ae` is the same pipeline at scale, and it is the scene
+the engine is demonstrated and measured with: a night street and a zombie, 49
+objects out of one `.blend`, every surface carrying an image authored beside
+it. The figure is one skinned surface over a 23-bone skeleton; its bones are
+ordinary models, so the clips drive them the way clips drive anything and
+`ae3d.ik` solves a limb of them without being told they belong to a skin.
 
-The engine no longer requires that. `ae3d.skin` draws a mesh over a skeleton,
-on both backends, and the exporter carries an armature, its weights and a clip
-per bone. A bone is an ordinary model in the transform hierarchy, so the same
-clips drive one and `ae3d.ik` solves a limb of them without being told they
-belong to a skin. `tests/fixtures/spin.blend` carries a rigged column that the
-tests follow from Blender to the palette a draw reads; rebuilding the zombie
-around a skeleton is the next thing that scene wants.
+Two scripts hold it to that, both on every build. `scripts/measure_scene.py`
+asks what the engine drew. `scripts/critique_scene.py` asks whether it is any
+good, which is a different question and one a screenshot cannot answer:
+
+```
+critique_scene: the scene meets every standard
+  ok   no surface is softer than a texel every four millimetres (607, wanted 256)
+  ok   the scene is textured to one standard (607 to 1941 is 3 times, wanted 8)
+  ok   every surface holds up at arm's length (0 of 46 below 512)
+  ok   nothing large enough to fill a frame is a bare slab
+  ok   the figure carries the geometry a figure needs (26272 triangles)
+  ok   a planted foot stays planted (worst 0.021 m in a frame, allowed 0.025)
+```
 
 `scripts/measure_scene.py` drives a running scene over the agent channel and
 says what it found, which is how the picture is checked rather than looked at:

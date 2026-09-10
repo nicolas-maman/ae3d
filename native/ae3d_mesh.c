@@ -851,3 +851,145 @@ int ae3d_objbuild_emit(void *handle, void *mesh, int v, int vt, int vn) {
     b->table_used++;
     return unified;
 }
+
+/* What a surface is made of, in numbers a scene can be judged by.
+ *
+ * Texel density is the one that decides whether a wall reads as brick or as a
+ * photograph of brick seen from an inch away: it is how many times the texture
+ * repeats across a metre of the surface, and it is a property of the UVs and
+ * the geometry together, so neither the image nor the mesh can be asked about
+ * it alone. Distinct face normals stand in for silhouette -- a box has six
+ * whatever its triangle count, and a figure that reads as a figure has
+ * hundreds.
+ *
+ * Rotation does not change an area and translation does not either, so the
+ * world transform enters here only as its scale.
+ */
+
+static void ae3d_tri_of(const float *v, int i0, int i1, int i2,
+                        double sx, double sy, double sz, double out[9]) {
+    const float *a = v + (size_t)i0 * AE3D_STRIDE;
+    const float *b = v + (size_t)i1 * AE3D_STRIDE;
+    const float *c = v + (size_t)i2 * AE3D_STRIDE;
+    out[0] = a[0] * sx; out[1] = a[1] * sy; out[2] = a[2] * sz;
+    out[3] = b[0] * sx; out[4] = b[1] * sy; out[5] = b[2] * sz;
+    out[6] = c[0] * sx; out[7] = c[1] * sy; out[8] = c[2] * sz;
+}
+
+double ae3d_mesh_surface_area(void *handle, double sx, double sy, double sz) {
+    ae3d_mesh *m = (ae3d_mesh *)handle;
+    double total = 0.0;
+    int i;
+    if (!m || !m->vertices || !m->indices) return 0.0;
+    for (i = 0; i + 2 < m->index_count; i += 3) {
+        double t[9], ux, uy, uz, vx, vy, vz, cx, cy, cz;
+        ae3d_tri_of(m->vertices, (int)m->indices[i], (int)m->indices[i + 1],
+                    (int)m->indices[i + 2], sx, sy, sz, t);
+        ux = t[3] - t[0]; uy = t[4] - t[1]; uz = t[5] - t[2];
+        vx = t[6] - t[0]; vy = t[7] - t[1]; vz = t[8] - t[2];
+        cx = uy * vz - uz * vy;
+        cy = uz * vx - ux * vz;
+        cz = ux * vy - uy * vx;
+        total += 0.5 * sqrt(cx * cx + cy * cy + cz * cz);
+    }
+    return total;
+}
+
+double ae3d_mesh_uv_area(void *handle) {
+    ae3d_mesh *m = (ae3d_mesh *)handle;
+    double total = 0.0;
+    int i;
+    if (!m || !m->vertices || !m->indices) return 0.0;
+    for (i = 0; i + 2 < m->index_count; i += 3) {
+        const float *a = m->vertices + (size_t)m->indices[i] * AE3D_STRIDE;
+        const float *b = m->vertices + (size_t)m->indices[i + 1] * AE3D_STRIDE;
+        const float *c = m->vertices + (size_t)m->indices[i + 2] * AE3D_STRIDE;
+        double ux = b[3] - a[3], uy = b[4] - a[4];
+        double vx = c[3] - a[3], vy = c[4] - a[4];
+        total += 0.5 * fabs(ux * vy - uy * vx);
+    }
+    return total;
+}
+
+#define AE3D_NORMAL_SLOTS 8192
+
+/* Distinct planes, which is what relief is.
+ *
+ * Counting directions alone cannot tell a box from a facade: a wall with
+ * recessed windows, sills and a cornice is built entirely from faces pointing
+ * the same six ways as the box it started as. What separates them is that the
+ * facade's faces lie in many planes and the box's lie in six. So the key is
+ * the normal and the distance along it, quantised together, and a shape that
+ * has been given depth counts higher than one that has only been painted. */
+int ae3d_mesh_distinct_planes(void *handle, double tolerance) {
+    ae3d_mesh *m = (ae3d_mesh *)handle;
+    int *keys;
+    int distinct = 0, i;
+    double step;
+
+    if (!m || !m->vertices || !m->indices) return 0;
+    if (tolerance < 1e-4) tolerance = 1e-4;
+    step = 1.0 / tolerance;
+    keys = (int *)calloc(AE3D_NORMAL_SLOTS, sizeof(int));
+    if (!keys) return 0;
+
+    for (i = 0; i + 2 < m->index_count; i += 3) {
+        double t[9], ux, uy, uz, vx, vy, vz, cx, cy, cz, length, offset;
+        int qx, qy, qz, qd;
+        unsigned slot, guard;
+        int key;
+
+        ae3d_tri_of(m->vertices, (int)m->indices[i], (int)m->indices[i + 1],
+                    (int)m->indices[i + 2], 1.0, 1.0, 1.0, t);
+        ux = t[3] - t[0]; uy = t[4] - t[1]; uz = t[5] - t[2];
+        vx = t[6] - t[0]; vy = t[7] - t[1]; vz = t[8] - t[2];
+        cx = uy * vz - uz * vy;
+        cy = uz * vx - ux * vz;
+        cz = ux * vy - uy * vx;
+        length = sqrt(cx * cx + cy * cy + cz * cz);
+        if (length < 1e-9) continue;
+        cx /= length; cy /= length; cz /= length;
+        qx = (int)floor(cx * step + 0.5);
+        qy = (int)floor(cy * step + 0.5);
+        qz = (int)floor(cz * step + 0.5);
+        /* How far the plane stands off the origin along its own normal, in
+           centimetres: two faces pointing the same way a window's depth apart
+           are two planes, and that depth is what a facade is made of. */
+        offset = t[0] * cx + t[1] * cy + t[2] * cz;
+        qd = (int)floor(offset * 100.0 + 0.5);
+        if (qd < -32768) qd = -32768;
+        if (qd > 32767) qd = 32767;
+        /* Never zero, so a filled slot is distinguishable from an empty one. */
+        key = (((qx + 4096) * 8209 + (qy + 4096)) * 8209 + (qz + 4096)) * 65537
+              + qd + 1;
+        slot = ((unsigned)key * 2654435761u) % AE3D_NORMAL_SLOTS;
+        for (guard = 0; guard < AE3D_NORMAL_SLOTS; guard++) {
+            if (keys[slot] == 0) { keys[slot] = key; distinct++; break; }
+            if (keys[slot] == key) break;
+            slot = (slot + 1) % AE3D_NORMAL_SLOTS;
+        }
+    }
+    free(keys);
+    return distinct;
+}
+
+/* How far a mesh reaches along one of its own axes, in its own space.
+ *
+ * The bounding sphere says how big something is and nothing about its shape,
+ * which is the wrong question to ask of a figure: proportion is a ratio of
+ * extents, and a head is judged against a height rather than against a radius.
+ */
+double ae3d_mesh_extent(void *handle, int axis) {
+    ae3d_mesh *m = (ae3d_mesh *)handle;
+    double low, high;
+    int i;
+    if (!m || !m->vertices || m->vertex_count <= 0 || axis < 0 || axis > 2) return 0.0;
+    low = m->vertices[axis];
+    high = low;
+    for (i = 1; i < m->vertex_count; i++) {
+        double v = m->vertices[(size_t)i * AE3D_STRIDE + axis];
+        if (v < low) low = v;
+        if (v > high) high = v;
+    }
+    return high - low;
+}

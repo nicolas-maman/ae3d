@@ -191,14 +191,89 @@ void ae3d_capture_release(void) {
     memset(&g_reference, 0, sizeof(g_reference));
 }
 
-double ae3d_capture_slot(const double *block, int index) {
-    if (!block || index < 0 || index >= 8) return 0.0;
+/* One number out of a block the caller allocated, with the caller saying how
+   long it is. The bound used to be eight, which was how long every block was
+   when it was written; a grid is four numbers a cell and read every one past
+   the eighth as zero -- a whole frame that came back black with nothing to say
+   why. A length nobody passes is a length that goes stale. */
+double ae3d_capture_slot_of(const double *block, int index, int count) {
+    if (!block || index < 0 || index >= count) return 0.0;
     return block[index];
+}
+
+double ae3d_capture_slot(const double *block, int index) {
+    return ae3d_capture_slot_of(block, index, AE3D_CAPTURE_SLOTS);
 }
 
 int ae3d_capture_adopt(const unsigned char *pixels, int width, int height) {
     if (!pixels) return 0;
     if (!ae3d_capture_reserve(&g_frame, width, height)) return 0;
     memcpy(g_frame.pixels, pixels, (size_t)width * (size_t)height * 4u);
+    return 1;
+}
+
+/* The frame reduced to a grid of cell means, in one call.
+ *
+ * A picture tells a person a figure looks wrong and tells a program nothing;
+ * asking pixel by pixel over a channel that answers one question a frame tells
+ * a program nothing either, because a thousand round trips is a thousand
+ * frames. This is the middle: the whole frame in one answer, coarse enough to
+ * fit in a reply and fine enough that a silhouette is legible in it.
+ *
+ * Four numbers a cell -- red, green, blue and how much of the cell is not the
+ * background -- so a caller can read the picture or read the shape.
+ */
+int ae3d_capture_grid(int columns, int rows, int background, int tolerance,
+                      double *out) {
+    int cx, cy;
+    int bg_r = (background >> 24) & 0xff;
+    int bg_g = (background >> 16) & 0xff;
+    int bg_b = (background >> 8) & 0xff;
+
+    if (!g_frame.pixels || g_frame.width <= 0 || g_frame.height <= 0) return 0;
+    if (columns <= 0 || rows <= 0 || !out) return 0;
+
+    for (cy = 0; cy < rows; cy++) {
+        int y0 = (int)((long long)cy * g_frame.height / rows);
+        int y1 = (int)((long long)(cy + 1) * g_frame.height / rows);
+        if (y1 <= y0) y1 = y0 + 1;
+        for (cx = 0; cx < columns; cx++) {
+            int x0 = (int)((long long)cx * g_frame.width / columns);
+            int x1 = (int)((long long)(cx + 1) * g_frame.width / columns);
+            long long sum[3] = {0, 0, 0};
+            long long covered = 0, total = 0;
+            int x, y;
+            double *slot;
+
+            if (x1 <= x0) x1 = x0 + 1;
+            if (x1 > g_frame.width) x1 = g_frame.width;
+            if (y1 > g_frame.height) y1 = g_frame.height;
+
+            for (y = y0; y < y1; y++) {
+                const unsigned char *row = g_frame.pixels + (size_t)y * g_frame.width * 4u;
+                for (x = x0; x < x1; x++) {
+                    const unsigned char *p = row + (size_t)x * 4u;
+                    sum[0] += p[0];
+                    sum[1] += p[1];
+                    sum[2] += p[2];
+                    if (abs((int)p[0] - bg_r) > tolerance ||
+                        abs((int)p[1] - bg_g) > tolerance ||
+                        abs((int)p[2] - bg_b) > tolerance) {
+                        covered++;
+                    }
+                    total++;
+                }
+            }
+            slot = out + ((size_t)cy * columns + cx) * 4u;
+            if (total <= 0) {
+                slot[0] = slot[1] = slot[2] = slot[3] = 0.0;
+                continue;
+            }
+            slot[0] = (double)sum[0] / total / 255.0;
+            slot[1] = (double)sum[1] / total / 255.0;
+            slot[2] = (double)sum[2] / total / 255.0;
+            slot[3] = (double)covered / total;
+        }
+    }
     return 1;
 }
