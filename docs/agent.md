@@ -46,7 +46,7 @@ interleaved with the first.
 | `ping` |  | Liveness. Answers immediately, on the frame it was drained. |
 | `frame.stats` |  | frame, fps, delta, viewport, draw calls and instances for the last frame, and the mean milliseconds a frame has cost to submit. |
 | `camera.get` |  | Camera position, orientation, field of view and clip planes. |
-| `scene.tree` | `[detail]` | Every model the renderer holds: index, name, position and visibility. With detail, also its material, texture, parent, world position, triangles and where it lands on screen -- one round trip instead of one per model. |
+| `scene.tree` | `[detail], [audit]` | Every model the renderer holds: index, name, position and visibility. With detail, also its material, texture, parent, world position, triangles and where it lands on screen -- one round trip instead of one per model. With audit, what the surface is made of: its area in metres, its size along each axis, how many ways its faces point, how often its texture repeats across a metre and how many texels that is. |
 | `scene.isolate` | `[object]` | Show only this model, or show every model again when given no name. |
 | `model.get` | `index` | One model in full: transform, bounds, material and mesh counts. |
 | `light.list` |  | Every light: kind, position, direction, colour, intensity and ambient. |

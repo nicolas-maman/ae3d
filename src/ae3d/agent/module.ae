@@ -311,8 +311,8 @@ help_result() -> ptr {
         "frame, fps, delta, viewport, draw calls and instances for the last frame, and the mean milliseconds a frame has cost to submit."))
     json.array_add_raw(ops, describe("camera.get", "",
         "Camera position, orientation, field of view and clip planes."))
-    json.array_add_raw(ops, describe("scene.tree", "[detail]",
-        "Every model the renderer holds: index, name, position and visibility. With detail, also its material, texture, parent, world position, triangles and where it lands on screen -- one round trip instead of one per model."))
+    json.array_add_raw(ops, describe("scene.tree", "[detail], [audit]",
+        "Every model the renderer holds: index, name, position and visibility. With detail, also its material, texture, parent, world position, triangles and where it lands on screen -- one round trip instead of one per model. With audit, what the surface is made of: its area in metres, its size along each axis, how many ways its faces point, how often its texture repeats across a metre and how many texels that is."))
     json.array_add_raw(ops, describe("scene.isolate", "[object]",
         "Show only this model, or show every model again when given no name."))
     json.array_add_raw(ops, describe("model.get", "index",
@@ -431,7 +431,7 @@ model_brief(m: *Model, index: int) -> ptr {
 // Asking forty models what they are made of and where they are took forty
 // round trips, and a round trip costs a frame: the answer cannot be given
 // until the frame it describes has been drawn. One call is one frame.
-tree_result(c: *Context, detail: bool) -> ptr {
+tree_result(c: *Context, detail: bool, audit: bool) -> ptr {
     models = json.arr()
     count = model_count(c)
     i = 0
@@ -440,6 +440,7 @@ tree_result(c: *Context, detail: bool) -> ptr {
         if m != null {
             entry = model_brief(m, i)
             if detail { describe_model(c, m, entry) }
+            if audit { audit_model(c, m, entry) }
             json.array_add_raw(models, entry)
         }
         i = i + 1
@@ -476,6 +477,47 @@ describe_model(c: *Context, m: *Model, entry: ptr) {
         json.object_set_raw(entry, "screen_region",
                             region_json(box.x, box.y, box.z, box.w))
     }
+}
+
+// What a surface is made of, as numbers a scene can be judged by rather than
+// looked at.
+//
+// Texel density is the one that decides whether a wall reads as brick or as a
+// photograph of brick seen from an inch away, and it is a property of the UVs
+// and the geometry together: how many times the image repeats across a metre
+// of surface, times how many pixels the image has. Neither the mesh nor the
+// image answers it alone, and a screenshot answers it only to an eye.
+//
+// Distinct face normals stand in for silhouette. A box has six however many
+// triangles it is built from, and a shape that reads as a shape has hundreds.
+audit_model(c: *Context, m: *Model, entry: ptr) {
+    if m.mesh == null { return }
+    area = core.mesh_surface_area(m.mesh, m.world_scale)
+    uv_area = core.mesh_uv_area(m.mesh)
+    json.object_set_raw(entry, "area_m2", json.num(area))
+    json.object_set_raw(entry, "normals",
+                        json.from_int(core.mesh_distinct_normals(m.mesh, 0.05)))
+    json.object_set_raw(entry, "triangles",
+                        json.from_int(core.mesh_index_count(m.mesh) / 3))
+
+    repeats = 0.0
+    if area > 0.000001 { repeats = core.sqrt_of(uv_area / area) }
+    json.object_set_raw(entry, "uv_repeats_per_m", json.num(repeats))
+
+    if c.gl_renderer != null {
+        size = gl.renderer_material_texture_size(c.gl_renderer as *GLRenderer,
+                                                 model_surface(m))
+        if size.x > 0.0 {
+            json.object_set_raw(entry, "texture_pixels", json.from_int(size.x as int))
+            json.object_set_raw(entry, "texels_per_m", json.num(repeats * size.x))
+        }
+    }
+
+    // In metres along its own axes, so proportion can be checked as the ratio
+    // it is. A bounding radius says how big something is and nothing at all
+    // about its shape.
+    size = core.mesh_size(m.mesh, m.world_scale)
+    json.object_set_raw(entry, "size", vec3_json(size.x, size.y, size.z))
 }
 
 model_result(m: *Model, index: int) -> ptr {
@@ -1299,7 +1341,9 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
     if op == "camera.get"  { answer(id, camera_result(c)) return false }
     if op == "scene.tree" {
         node = json.object_get_raw(request, "detail")
-        answer(id, tree_result(c, node != null && json.get_bool(node) == 1))
+        wanted = json.object_get_raw(request, "audit")
+        answer(id, tree_result(c, node != null && json.get_bool(node) == 1,
+                               wanted != null && json.get_bool(wanted) == 1))
         return false
     }
 

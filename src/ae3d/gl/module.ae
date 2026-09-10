@@ -30,6 +30,7 @@ exports (
     renderer_set_shadows, renderer_shadows, renderer_shadow_map, renderer_default_program,
     renderer_set_shadow_distance, renderer_shadow_distance,
     renderer_load_texture, renderer_release_texture, renderer_texture_count,
+    renderer_material_texture_size,
     renderer_frame_pixels, read_pixel, snapshot
 )
 
@@ -115,6 +116,8 @@ extern ae3d_gl_snapshot(path: string, width: int, height: int) -> int
 extern ae3d_offscreen_bind(target: ptr)
 extern ae3d_offscreen_unbind()
 extern ae3d_image_load(path: string) -> ptr
+extern ae3d_image_width(image: ptr) -> int
+extern ae3d_image_height(image: ptr) -> int
 extern ae3d_image_solid(width: int, height: int, r: int, g: int, b: int, a: int) -> ptr
 extern ae3d_image_free(img: ptr)
 extern ae3d_image_error() -> string
@@ -634,6 +637,12 @@ renderer_load_texture(r: *GLRenderer, path: string) -> int {
         return 0
     }
     id = ae3d_gl_texture_from_image(image, 0, 1)
+    // Read before the image is released. How many pixels an image has is half
+    // of what decides whether a surface carries enough detail to be looked at
+    // closely; the other half is how far its UVs stretch, and neither is
+    // recoverable from a texture handle afterwards.
+    width = ae3d_image_width(image)
+    height = ae3d_image_height(image)
     ae3d_image_free(image)
     if id == 0 { return 0 }
 
@@ -641,6 +650,8 @@ renderer_load_texture(r: *GLRenderer, path: string) -> int {
     texture_entry_set_path(entry, path)
     entry.id = id
     entry.refs = 1
+    entry.width = width
+    entry.height = height
     list.add_raw(r.textures, entry)
     return id
 }
@@ -670,6 +681,24 @@ renderer_release_texture(r: *GLRenderer, id: int) {
 
 renderer_texture_count(r: *GLRenderer) -> int {
     return list.size(r.textures)
+}
+
+// How big the image behind a material is. Texel density is the texture size
+// and the UVs together, so neither alone answers whether a surface carries
+// enough detail to be looked at closely.
+renderer_material_texture_size(r: *GLRenderer, material: *Material) -> Vec3 {
+    if r == null { return core.vec3(0.0, 0.0, 0.0) }
+    id = texture_for(r, material)
+    count = list.size(r.textures)
+    i = 0
+    while i < count {
+        entry = list.get_raw(r.textures, i) as *TextureEntry
+        if entry != null && entry.id == id {
+            return core.vec3(entry.width * 1.0, entry.height * 1.0, 0.0)
+        }
+        i = i + 1
+    }
+    return core.vec3(0.0, 0.0, 0.0)
 }
 
 renderer_add_model(r: *GLRenderer, m: *Model) {
