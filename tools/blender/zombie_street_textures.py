@@ -182,7 +182,7 @@ def paving(size=1024, seed=53):
     return _image("PavingSlab", size, _rgba(rgb))
 
 
-def skin(size=512, seed=71):
+def skin(size=1024, seed=71):
     """Mottled, bruised, and not well."""
     rng = random.Random(seed)
     blotch = _noise(rng, size, 4, 3)
@@ -196,7 +196,7 @@ def skin(size=512, seed=71):
     return _image("ZombieSkin", size, _rgba(rgb))
 
 
-def cloth(size=512, seed=89):
+def cloth(size=1024, seed=89):
     """Torn, filthy, and woven closely enough to read as fabric."""
     rng = random.Random(seed)
     grime = _noise(rng, size, 4, 3)

@@ -13,6 +13,7 @@ import std.string
 import std.list
 import ae3d.core
 import ae3d.gl
+import ae3d.skin
 import ae3d.vk
 import ae3d.anim
 import ae3d.assets
@@ -313,6 +314,8 @@ help_result() -> ptr {
         "Camera position, orientation, field of view and clip planes."))
     json.array_add_raw(ops, describe("scene.tree", "[detail], [audit]",
         "Every model the renderer holds: index, name, position and visibility. With detail, also its material, texture, parent, world position, triangles and where it lands on screen -- one round trip instead of one per model. With audit, what the surface is made of: its area in metres, its size along each axis, how many ways its faces point, how often its texture repeats across a metre and how many texels that is."))
+    json.array_add_raw(ops, describe("scene.skeleton", "object",
+        "Every bone of a skinned model: name, parent, where it is in the world and how it is turned. A skinned mesh stays in its bind pose and its bones carry it, so this is the only thing that says where a figure's hand or foot actually is."))
     json.array_add_raw(ops, describe("scene.isolate", "[object]",
         "Show only this model, or show every model again when given no name."))
     json.array_add_raw(ops, describe("model.get", "index",
@@ -470,6 +473,17 @@ describe_model(c: *Context, m: *Model, entry: ptr) {
     }
     world = core.model_world_position(m)
     json.object_set_raw(entry, "world_position", vec3_json(world.x, world.y, world.z))
+    // A skinned mesh never moves: its vertices are written in the pose it was
+    // bound in and its bones carry it. So its own position is the origin
+    // however far it has walked, and the question an agent is really asking --
+    // where is it -- is answered by the bones.
+    if m.skeleton != null {
+        json.object_set_raw(entry, "skinned", json.boolean(true))
+        json.object_set_raw(entry, "posed_at",
+            vec3_json(m.bounding_center.x, m.bounding_center.y, m.bounding_center.z))
+        json.object_set_raw(entry, "bones",
+            json.from_int(skin.skeleton_count(m.skeleton as *Skeleton)))
+    }
     json.object_set_raw(entry, "triangles", json.from_int(core.mesh_index_count(m.mesh) / 3))
 
     box = core.vec4(0.0, 0.0, 0.0, 0.0)
@@ -518,6 +532,35 @@ audit_model(c: *Context, m: *Model, entry: ptr) {
     // about its shape.
     size = core.mesh_size(m.mesh, m.world_scale)
     json.object_set_raw(entry, "size", vec3_json(size.x, size.y, size.z))
+}
+
+skeleton_result(s: *Skeleton) -> ptr {
+    bones = json.arr()
+    count = skin.skeleton_count(s)
+    i = 0
+    while i < count {
+        bone = skin.skeleton_bone(s, i)
+        if bone != null {
+            core.model_sync_transform(bone)
+            at = core.model_world_position(bone)
+            entry = json.obj()
+            json.object_set_raw(entry, "index", json.from_int(i))
+            json.object_set_raw(entry, "name", json.str(core.text(bone.name)))
+            parent = core.model_parent(bone)
+            if parent != null {
+                json.object_set_raw(entry, "parent", json.str(core.text(parent.name)))
+            }
+            json.object_set_raw(entry, "world_position", vec3_json(at.x, at.y, at.z))
+            json.object_set_raw(entry, "rotation",
+                quat_json(bone.rotation.x, bone.rotation.y, bone.rotation.z, bone.rotation.w))
+            json.array_add_raw(bones, entry)
+        }
+        i = i + 1
+    }
+    out = json.obj()
+    json.object_set_raw(out, "count", json.from_int(count))
+    json.object_set_raw(out, "bones", bones)
+    return out
 }
 
 model_result(m: *Model, index: int) -> ptr {
@@ -1344,6 +1387,40 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
         wanted = json.object_get_raw(request, "audit")
         answer(id, tree_result(c, node != null && json.get_bool(node) == 1,
                                wanted != null && json.get_bool(wanted) == 1))
+        return false
+    }
+
+    // A figure's bones, which are the only part of it that moves.
+    //
+    // Nothing else can answer this. The skinned mesh sits at the origin in its
+    // bind pose, so scene.tree describes a figure standing still; where a foot
+    // is, whether it is on the road, and whether it slides while it is there
+    // are facts about the bones. Without them an agent can see that a figure
+    // is animated and not whether the animation is any good.
+    if op == "scene.skeleton" {
+        named = json.object_get_raw(request, "object")
+        if named == null {
+            fail(id, "scene.skeleton needs an object")
+            return false
+        }
+        wanted = json.get_string_raw(named)
+        found = null
+        count = model_count(c)
+        i = 0
+        while i < count {
+            m = model_at(c, i)
+            if m != null && m.skeleton != null && core.text(m.name) == wanted {
+                found = m.skeleton
+                i = count
+            } else {
+                i = i + 1
+            }
+        }
+        if found == null {
+            fail(id, "no skinned model by that name")
+            return false
+        }
+        answer(id, skeleton_result(found as *Skeleton))
         return false
     }
 

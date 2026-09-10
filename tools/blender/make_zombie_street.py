@@ -2,15 +2,19 @@
 
     blender --background --factory-startup --python tools/blender/make_zombie_street.py -- --out resources/blender/zombie_street.blend
 
-The zombie is rigid parts on a parent chain rather than a skinned mesh, because
-ae3d has no skinning (ae3d#192). Every joint is the origin of the part below it
-and every part overlaps the one above, so a bent elbow bends rather than coming
-apart: the transform hierarchy carries each limb through the arc of its parent
-(ae3d#230).
+The zombie is one surface over a skeleton -- see zombie_figure -- and the walk
+is a footstep plan rather than a swing: the stance foot is nailed to the place
+it came down and the body travels over it, which is the difference between a
+figure walking and a figure on castors.
 
-Everything is textured from generated images (zombie_street_textures) with UVs
-projected per face at a fixed number of repeats per metre, so a wall and a kerb
-carry brick and paving of the same size whatever their own size.
+The street is built rather than printed. Windows are openings with a reveal, a
+sill, a glazing bar and glass at the back of them, because a window painted
+into a wall tile forces that tile to span a whole storey and pins the entire
+street at ninety texels to the metre. Everything is textured from generated
+images (zombie_street_textures) with UVs projected per face at a fixed number
+of repeats per metre, so a wall and a kerb carry brick and paving of the same
+size whatever their own size, and every surface in the frame is held to one
+standard of texel density.
 
 The timeline is one clip in three phases at 24fps:
 
@@ -23,6 +27,7 @@ Seek to 3.2s over the agent channel and the zombie is mid-attack.
 
 import bpy
 import bmesh
+import mathutils
 import argparse
 import math
 import os
@@ -31,13 +36,21 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import zombie_street_textures as textures
+import zombie_figure as figure
 
 FPS = 24
 WALK_END = 64
 ATTACK_END = 92
 TOTAL = 120
 
-STRIDE_RATE = 1.9
+# How many gait cycles a second. This is not a free choice. A leg reaches only
+# so far sideways once it has reached down: 0.86 m of leg with 0.78 of it spent
+# on the drop to the road leaves 0.36 to spare, so a foot can be planted 0.36
+# ahead and leave 0.36 behind and no further. That is 0.72 m of street a stance,
+# 1.45 m a cycle, and 0.9 m/s is 0.62 cycles a second; 0.66 keeps a margin. At
+# 1.9 the feet were doing three times the steps the street needed and sliding
+# the difference along the road.
+STRIDE_RATE = 0.66
 WALK_SPEED = 0.9
 WALK_START_X = -6.4
 
@@ -142,6 +155,9 @@ def block(name, low, high, surface, repeats=0.5, bevel=0.0, taper=1.0):
 WALL_REPEATS = 0.84
 GROUND_REPEATS = 0.84
 GLASS_REPEATS = 1.7
+# The figure stands closer to the camera than anything else in the scene, so it
+# carries more texture across a metre than the street does.
+FIGURE_REPEATS = 1.9
 
 # A storey, and the opening in it. These are the numbers that decide whether a
 # street reads at the scale of a person: a window a person could climb through,
@@ -507,118 +523,28 @@ def build_street(parts, surfaces):
 
 
 def build_zombie(parts, surfaces):
-    """Every limb is a box whose joint is its own origin.
+    """One surface over a skeleton, and the skeleton the walk is written on.
 
-    Each one extends downwards past its child joint and upwards past its own,
-    so consecutive parts overlap: the overlap is what closes the seam when a
-    joint bends.
+    Two meshes rather than one, because a zombie is skin at the head and the
+    hands and cloth everywhere else, and the exporter writes the material an
+    object names. Both hang off the same rig, so they are one figure: a weight
+    that blends across a shoulder blends across it in both.
     """
-    skin = surfaces["skin"]
-    cloth = surfaces["cloth"]
+    body = figure.build_body("Zombie_Body", surfaces["skin"])
+    figure.unwrap(body, FIGURE_REPEATS)
+    clothes = figure.build_clothes("Zombie_Clothes", surfaces["cloth"])
+    figure.unwrap(clothes, FIGURE_REPEATS)
 
-    hips = block("Zombie_Hips", (-0.16, -0.175, -0.11), (0.16, 0.175, 0.15),
-                 cloth, repeats=3.0, bevel=0.03, taper=0.86)
-    hips.location = (WALK_START_X, 0.0, 0.95)
-    parts["Zombie_Hips"] = hips
+    rig = figure.build_rig("Zombie_Rig")
+    figure.bind(rig, (body, clothes))
 
-    spine = block("Zombie_Spine", (-0.155, -0.125, -0.06), (0.155, 0.125, 0.46),
-                  cloth, repeats=3.0, bevel=0.04, taper=1.28)
-    spine.parent = hips
-    spine.location = (0.0, 0.0, 0.12)
-    parts["Zombie_Spine"] = spine
-
-    neck = block("Zombie_Neck", (-0.062, -0.062, -0.03), (0.062, 0.062, 0.10),
-                 skin, repeats=6.0, bevel=0.02, taper=0.92)
-    neck.parent = spine
-    neck.location = (0.0, 0.0, 0.42)
-    parts["Zombie_Neck"] = neck
-
-    head = block("Zombie_Head", (-0.115, -0.10, -0.04), (0.115, 0.10, 0.21),
-                 skin, repeats=4.0, bevel=0.045, taper=0.88)
-    head.parent = neck
-    head.location = (0.0, 0.0, 0.06)
-    parts["Zombie_Head"] = head
-
-    jaw = block("Zombie_Jaw", (-0.10, -0.075, -0.06), (0.12, 0.075, 0.0),
-                skin, repeats=5.0, bevel=0.02)
-    jaw.parent = head
-    jaw.location = (0.02, 0.0, 0.015)
-    parts["Zombie_Jaw"] = jaw
-
-    # A blank box reads as the back of a head from every angle. Sockets and a
-    # mouth are what make it the front.
-    gore = surfaces["gore"]
-    mouth = block("Zombie_Mouth", (-0.02, -0.055, -0.045), (0.02, 0.055, 0.0),
-                  gore, repeats=8.0)
-    mouth.parent = head
-    mouth.location = (0.10, 0.0, 0.02)
-    parts["Zombie_Mouth"] = mouth
-
-    for side, y in (("L", 0.048), ("R", -0.048)):
-        socket = block("Zombie_Eye" + side, (-0.03, -0.025, -0.022),
-                       (0.012, 0.025, 0.022), gore, repeats=10.0)
-        socket.parent = head
-        socket.location = (0.105, y, 0.115)
-        parts["Zombie_Eye" + side] = socket
-
-    # Inside the chest, not beside it: a shoulder level with the edge of the
-    # torso opens a gap the moment the arm swings.
-    for side, y in (("L", 0.196), ("R", -0.196)):
-        upper = block("Zombie_ArmUpper" + side,
-                      (-0.055, -0.055, -0.30), (0.055, 0.055, 0.075),
-                      cloth, repeats=4.0, bevel=0.025, taper=1.22)
-        upper.parent = spine
-        upper.location = (0.0, y, 0.37)
-        parts["Zombie_ArmUpper" + side] = upper
-
-        lower = block("Zombie_ArmLower" + side,
-                      (-0.05, -0.05, -0.27), (0.05, 0.05, 0.055),
-                      skin, repeats=4.5, bevel=0.022, taper=1.26)
-        lower.parent = upper
-        lower.location = (0.0, 0.0, -0.29)
-        parts["Zombie_ArmLower" + side] = lower
-
-        hand = block("Zombie_Hand" + side,
-                     (-0.058, -0.035, -0.15), (0.058, 0.035, 0.04),
-                     skin, repeats=6.0, bevel=0.02, taper=1.18)
-        hand.parent = lower
-        hand.location = (0.0, 0.0, -0.26)
-        parts["Zombie_Hand" + side] = hand
-
-    for side, y in (("L", 0.105), ("R", -0.105)):
-        thigh = block("Zombie_LegUpper" + side,
-                      (-0.078, -0.078, -0.40), (0.078, 0.078, 0.07),
-                      cloth, repeats=3.5, bevel=0.03, taper=1.34)
-        thigh.parent = hips
-        thigh.location = (0.0, y, -0.06)
-        parts["Zombie_LegUpper" + side] = thigh
-
-        shin = block("Zombie_LegLower" + side,
-                     (-0.066, -0.066, -0.39), (0.066, 0.066, 0.06),
-                     cloth, repeats=3.5, bevel=0.028, taper=1.28)
-        shin.parent = thigh
-        shin.location = (0.0, 0.0, -0.39)
-        parts["Zombie_LegLower" + side] = shin
-
-        foot = block("Zombie_Foot" + side,
-                     (-0.075, -0.072, -0.09), (0.185, 0.072, 0.035),
-                     cloth, repeats=4.0, bevel=0.025)
-        foot.parent = shin
-        foot.location = (0.0, 0.0, -0.38)
-        parts["Zombie_Foot" + side] = foot
-
-
-def key(obj, frame, location=None, rotation=None):
-    if location is not None:
-        obj.location = location
-        obj.keyframe_insert(data_path="location", frame=frame)
-    if rotation is not None:
-        obj.rotation_euler = rotation
-        obj.keyframe_insert(data_path="rotation_euler", frame=frame)
+    parts["Zombie_Body"] = body
+    parts["Zombie_Clothes"] = clothes
+    return rig
 
 
 def phase(frame):
-    """The angle the walk cycle has reached at this frame."""
+    """How far through the gait this frame is."""
     return (frame - 1) / FPS * STRIDE_RATE * math.tau
 
 
@@ -631,7 +557,7 @@ def strike(frame):
 
 
 def advance(frame):
-    """How far up the street the hips have travelled by this frame."""
+    """How far up the street the figure has travelled by this frame."""
     walked = min(frame, WALK_END + 1) - 1
     distance = walked / FPS * WALK_SPEED
     if frame > WALK_END:
@@ -643,52 +569,187 @@ def advance(frame):
     return distance
 
 
-def animate(parts):
-    for frame in range(1, TOTAL + 1, 2):
+def _turn(axis, angle):
+    return mathutils.Quaternion(axis, angle)
+
+
+def _compose(*turns):
+    out = mathutils.Quaternion((1.0, 0.0, 0.0, 0.0))
+    for turn in turns:
+        out = out @ turn
+    return out
+
+
+X = mathutils.Vector((1.0, 0.0, 0.0))
+Y = mathutils.Vector((0.0, 1.0, 0.0))
+Z = mathutils.Vector((0.0, 0.0, 1.0))
+
+# The right leg is the one that does not work. Everything asymmetric about the
+# walk comes from this one number: that side takes a shorter step, lifts less,
+# and the hip has to be hauled round to bring it through.
+DRAG = 0.45
+
+
+# A gait cycle, and where in it the foot is on the road. Stance is the first
+# half: the heel lands in front, the body travels over it, the toe leaves
+# behind. The second half is the leg coming forward through the air, and it is
+# the only half the knee folds in.
+UPPER_LEG = 0.44
+LOWER_LEG = 0.42
+ROAD = 0.09
+# How high a foot is carried over the road on its way through. A zombie clears
+# it by very little.
+LIFT = 0.16
+
+
+def _cycle_frame(cycle, offset):
+    """The frame at which this leg reaches this point of its cycle."""
+    return 1.0 + (cycle - offset) * FPS / (STRIDE_RATE * math.tau)
+
+
+def _step_at(cycle, offset):
+    """Where the foot comes down for the stance beginning at this cycle.
+
+    Half of what the body travels in a stance ahead of where the body is, so
+    the hip passes over the foot rather than dragging it along behind.
+    """
+    frame = _cycle_frame(cycle, offset)
+    return WALK_START_X + advance(frame) + 0.5 * WALK_SPEED / (2.0 * STRIDE_RATE)
+
+
+def foot_target(cycle, offset):
+    """Where a foot should be, as a function of where the walk has got to.
+
+    A footstep plan rather than a swing: the stance foot is nailed to the place
+    it came down and the swing foot is carried from there to the next place,
+    lifted over the road and eased into both ends. Everything about a walk that
+    reads as weight comes out of this -- a foot that is put down and stays down,
+    and a body that travels over it.
+
+    Planned rather than swung, so the stride cannot disagree with the speed. The
+    two used to, and the difference came out as a quarter of a metre of skating
+    every frame the foot was down.
+    """
+    stance_start = math.floor(cycle / math.tau) * math.tau
+    here = _step_at(stance_start, offset)
+    if math.sin(cycle) >= 0.0:
+        return mathutils.Vector((here, 0.0, ROAD)), 0.0
+
+    ahead = _step_at(stance_start + math.tau, offset)
+    through = (cycle - (stance_start + math.pi)) / math.pi
+    # Smoothstep, so the foot leaves the road and meets it again with no
+    # horizontal speed. Landing with speed and stopping dead is the pop that
+    # says "animation" louder than anything else in a walk.
+    eased = through * through * (3.0 - 2.0 * through)
+    lift = LIFT * math.sin(through * math.pi)
+    return mathutils.Vector((here + (ahead - here) * eased, 0.0, ROAD + lift)), lift
+
+
+def _leg_to(pose, side, target, lift, hit):
+    """Solve the leg so the ankle sits on the target the plan gave it."""
+    lame = DRAG if side == "R" else 0.0
+    hip = pose.world()["Thigh" + side].to_translation()
+    aim = mathutils.Vector((target.x, hip.y, target.z))
+    thigh, knee = figure.solve_leg(hip, aim, UPPER_LEG, LOWER_LEG)
+    # The bad leg never quite straightens and never quite comes through.
+    knee = knee + 0.42 * lame
+    pose.set_world("Thigh" + side, _compose(_turn(Y, thigh),
+                                            _turn(X, (0.05 if side == "L" else -0.05))))
+    pose.set("Knee" + side, _turn(Y, knee))
+    # Flat to the road while it is on it, and hanging while it is not: the sole
+    # follows the ground rather than the shin.
+    flat = 0.0 - thigh - knee
+    pose.set("Ankle" + side, _turn(Y, flat * (1.0 - lift / LIFT) - 0.22 * lift / LIFT
+                                   - 0.24 * lame))
+    pose.set("Toe" + side, _turn(Y, 0.0))
+
+
+def _arm(pose, side, swing, hit, reach_for):
+    """One arm, hanging forward the way a zombie carries them.
+
+    Both are held up and out; the right one is the one that swipes. The
+    shoulder leads, the elbow follows a beat later and the wrist later still,
+    which is what makes a swing read as a whip rather than a gate.
+    """
+    lead = 1.0 if side == "R" else 0.55
+    forward = -1.05 - 0.22 * swing - reach_for * 1.15 * lead
+    out = (0.20 if side == "L" else -0.20) - reach_for * 0.10 * lead
+    elbow = 0.62 + 0.18 * swing - reach_for * 0.62 * lead
+    wrist = 0.20 - reach_for * 0.45 * lead
+
+    pose.set("Shoulder" + side, _compose(_turn(Y, forward), _turn(X, out),
+                                         _turn(Z, -0.12 * lead * reach_for)))
+    pose.set("Elbow" + side, _compose(_turn(Y, elbow), _turn(Z, 0.10 * lead)))
+    pose.set("Wrist" + side, _turn(Y, wrist))
+    pose.set("Hand" + side, _turn(Y, 0.15 + 0.35 * reach_for * lead))
+
+
+def animate(rig):
+    """The walk, the lunge, and the recovery, on the bones.
+
+    What makes this read as a body rather than as a rig: the hips fall onto
+    whichever leg is taking the weight and rise at push-off, the shoulders turn
+    against the pelvis, and the head arrives at everything a few frames after
+    the body does. The lag is the whole of it -- a head that turns with the
+    chest belongs to a mannequin.
+    """
+    pose = figure.Pose(rig)
+    for frame in range(1, TOTAL + 1):
         step = phase(frame)
         hit = strike(frame)
-        settled = 1.0 - hit
-        x = WALK_START_X + advance(frame)
+        # The head is late to everything, and the chest a little late too.
+        late = phase(frame - 3.0)
+        chest_late = phase(frame - 1.5)
 
-        # A zombie does not so much walk as fall forwards and catch itself.
-        bob = 0.035 * math.cos(step * 2.0) - 0.02 * hit
-        lean = 0.13 + 0.30 * hit
-        sway = 0.06 * math.sin(step)
+        swing_l = math.sin(step)
+        swing_r = math.sin(step + math.pi)
 
-        key(parts["Zombie_Hips"], frame,
-            location=(x, 0.0, 0.95 + bob),
-            rotation=(sway * 0.4, lean * 0.35, sway))
-        key(parts["Zombie_Spine"], frame,
-            rotation=(0.0, 0.16 + 0.22 * hit, 0.10 * math.sin(step) - 0.12 * hit))
-        key(parts["Zombie_Head"], frame,
-            rotation=(0.13 * math.sin(step * 0.5) + 0.10 * hit,
-                      0.10 - 0.30 * hit, 0.16 * math.sin(step * 0.5)))
-        key(parts["Zombie_Jaw"], frame, rotation=(0.0, 0.22 + 0.55 * hit, 0.0))
+        # Down onto each foot and up off it: twice a cycle, and deeper on the
+        # side that is not carrying itself.
+        drop = -0.080 - 0.022 * math.cos(step * 2.0) - 0.014 * max(0.0, swing_r)
+        lean = 0.17 + 0.34 * hit
+        roll = 0.075 * math.sin(step) - 0.02
+        yaw = -0.10 * math.sin(step) - 0.05
 
-        for side, sign in (("L", 1.0), ("R", -1.0)):
-            swing = math.sin(step + (0.0 if sign > 0.0 else math.pi))
+        pose.set("Hips", _compose(_turn(Y, lean * 0.42), _turn(X, roll),
+                                  _turn(Z, yaw)),
+                 shift=(0.0, 0.0, drop))
+        pose.set("Spine", _compose(_turn(Y, lean * 0.30),
+                                   _turn(Z, -yaw * 0.55),
+                                   _turn(X, -roll * 0.35)))
+        # The shoulders turn against the pelvis, and later than it.
+        pose.set("Chest", _compose(_turn(Y, lean * 0.34 + 0.10 * hit),
+                                   _turn(Z, 0.16 * math.sin(chest_late) - yaw * 0.4),
+                                   _turn(X, -roll * 0.5)))
+        pose.set("Neck", _compose(_turn(Y, -lean * 0.30 + 0.16 * hit),
+                                  _turn(Z, 0.09 * math.sin(late))))
+        pose.set("Head", _compose(_turn(Y, -lean * 0.34 + 0.10 - 0.34 * hit),
+                                  _turn(Z, 0.13 * math.sin(late)),
+                                  _turn(X, 0.10 * math.sin(late * 0.5) + 0.06)))
 
-            # Both arms are held out in front; the right one does the swiping.
-            reach = -1.15 - 0.12 * swing * settled
-            elbow = 0.55 - 0.15 * swing * settled
-            if sign < 0.0:
-                reach -= 1.05 * hit
-                elbow -= 0.40 * hit
-            else:
-                reach -= 0.35 * hit
-            key(parts["Zombie_ArmUpper" + side], frame,
-                rotation=(0.10 * sign, reach, 0.16 * sign))
-            key(parts["Zombie_ArmLower" + side], frame, rotation=(0.0, elbow, 0.0))
-            key(parts["Zombie_Hand" + side], frame,
-                rotation=(0.0, 0.35 - 0.30 * hit, 0.0))
+        # Where the figure is, rather than what it is doing. This goes on a
+        # bone rather than on the armature because a bone is what the engine is
+        # given: the armature is not a mesh, so nothing exports it, and a walk
+        # carried there would arrive with the figure treading water.
+        pose.set("Root", _turn(Z, -0.06 + 0.03 * math.sin(step)),
+                 shift=(WALK_START_X + advance(frame), 0.0, 0.0))
+        # Both legs the same way: to wherever the footstep plan says the foot
+        # is. A stance leg and a swing leg differ in what the plan asks of them,
+        # not in how they are driven.
+        for side, offset in (("L", 0.0), ("R", math.pi)):
+            target, lift = foot_target(step + offset, offset)
+            _leg_to(pose, side, target, lift, hit)
 
-            # The legs keep walking through the lunge, on a shorter stride.
-            gait = 0.55 * swing * (1.0 - 0.55 * hit)
-            knee = max(0.0, -0.9 * swing) * (1.0 - 0.5 * hit) + 0.12
-            key(parts["Zombie_LegUpper" + side], frame, rotation=(0.0, gait, 0.0))
-            key(parts["Zombie_LegLower" + side], frame, rotation=(0.0, knee, 0.0))
-            key(parts["Zombie_Foot" + side], frame,
-                rotation=(0.0, -0.35 * gait - 0.10, 0.0))
+        _arm(pose, "L", swing_r, hit, hit * 0.55)
+        _arm(pose, "R", swing_l, hit, hit)
+        pose.apply(frame)
+
+    # Every frame is keyed, so there is nothing between two keys for a curve to
+    # shape. Bezier here would only make the exporter resample a curve it
+    # already has at full rate.
+    for curve in figure.action_curves(rig):
+        for point in curve.keyframe_points:
+            point.interpolation = "LINEAR"
 
 
 def main(argv):
@@ -720,8 +781,7 @@ def main(argv):
 
     parts = {}
     build_street(parts, surfaces)
-    build_zombie(parts, surfaces)
-    animate(parts)
+    animate(build_zombie(parts, surfaces))
 
     # The sky is not an object in the scene and the exporter only writes what a
     # material names, so it is written here, beside the file rather than into

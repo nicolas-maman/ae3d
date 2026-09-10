@@ -86,7 +86,12 @@ def surfaces(engine, models, sky, wanted):
                      width=box["width"], height=box["height"],
                      background=packed, tolerance=12)
         covered = got.get("coverage", 0.0)
-        if covered < 0.02:
+        # A surface that fills too little of its own box cannot be separated
+        # from what is behind it: the background is subtracted in proportion to
+        # what it does not cover, and below a third that estimate is worth less
+        # than the measurement. Thin trim and small panes land here, and saying
+        # so is better than reporting a colour with a negative in it.
+        if covered < 0.30:
             print("  %-9s covers %.1f%% of its own box" % (label, covered * 100))
             continue
         colour = tuple((got["mean"][i] - sky[i] * (1 - covered)) / covered for i in range(3))
@@ -222,18 +227,18 @@ def main(argv):
         engine("frame.pause")
         engine("anim.set", time=3.35)
         models = pipeline(engine)
-        traced(engine, ["Zombie_Head", "Zombie_HandR", "Street_Road", "Street_LampHead0"])
+        traced(engine, ["Zombie_Body", "Zombie_Clothes", "Street_Road", "Street_LampHead0"])
         surfaces(engine, models, (0.075, 0.088, 0.125), {
             "Street_BlockL0": ("brick", "WallBrick"),
             "Street_BlockL1": ("concrete", "WallConcrete"),
             "Street_PathL": ("paving", "PathPaving"),
             "Street_Road": ("tarmac", "RoadTarmac"),
-            "Zombie_Head": ("skin", "ZombieSkin"),
-            "Zombie_Spine": ("cloth", "ZombieCloth"),
+            "Zombie_Body": ("skin", "ZombieSkin"),
+            "Zombie_Clothes": ("cloth", "ZombieCloth"),
             "Street_LampHead0": ("lamp", "LampGlow"),
         })
         depth_is_decided(engine, (0.35, 1.34, 1.55), (-3.5, 1.1, -0.2))
-        animation_arrives(engine, "Zombie_HandR", 1.4, 3.35, stats["width"])
+        animation_arrives(engine, "Zombie_Body", 1.4, 3.35, stats["width"])
         engine("frame.resume")
     if scene is not None:
         stop(scene)

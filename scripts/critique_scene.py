@@ -52,6 +52,11 @@ BOX_PLANES = 8
 # What a figure has to carry to read as one rather than as a stack of props.
 CHARACTER_TRIANGLES = 20000
 CHARACTER_PLANES = 3000
+# A planted foot is planted. These are the tolerances a foot-locked walk keeps;
+# a leg swung by a curve against a body moving at its own speed misses them by
+# an order of magnitude.
+SLIDE_PER_FRAME = 0.025
+SLIDE_PER_CONTACT = 0.040
 
 FAILURES = []
 
@@ -154,11 +159,80 @@ def proportion(models, prefix):
               0.75 <= fore / upper <= 1.0, "forearm/upper %.2f" % (fore / upper))
 
 
+def gait(engine, figure_mesh, feet, road, seconds, fps):
+    """Whether the figure walks or skates.
+
+    The one thing a walk has to do is leave a planted foot where it was
+    planted. A leg swung by a curve covers whatever that curve covers while the
+    body covers whatever its speed covers, and the difference comes out as a
+    foot sliding along the road -- which reads as a figure on castors and is
+    invisible to every other measurement in this file.
+
+    Read off the bones, because a skinned mesh does not move: its vertices sit
+    in the pose they were bound in and the bones carry them, so where a foot is
+    is a fact about the skeleton and nothing else can answer it.
+    """
+    print("\n== the walk ==")
+    try:
+        engine("scene.skeleton", object=figure_mesh)
+    except AgentError as refused:
+        check("the figure has a skeleton to read", False, str(refused))
+        return
+
+    track = {}
+    frames = int(seconds * fps)
+    for frame in range(frames):
+        engine("anim.set", time=frame / float(fps))
+        for bone in engine("scene.skeleton", object=figure_mesh)["bones"]:
+            track.setdefault(bone["name"], []).append(bone["world_position"])
+
+    lowest = min(min(at[1] for at in track[foot]) for foot in feet if foot in track)
+    check("no foot goes through the road", lowest >= road - 0.01,
+          "the lowest is %+.3f, the road is %+.3f" % (lowest, road))
+
+    worst_slide = 0.0
+    worst_drift = 0.0
+    contacts = 0
+    for foot in feet:
+        rows = track.get(foot)
+        if not rows:
+            continue
+        floor = min(at[1] for at in rows) + 0.02
+        run = []
+        runs = []
+        for at in rows:
+            if at[1] < floor:
+                run.append(at[0])
+            elif run:
+                runs.append(run)
+                run = []
+        if run:
+            runs.append(run)
+        for one in runs:
+            if len(one) < 2:
+                continue
+            contacts += 1
+            worst_drift = max(worst_drift, abs(one[-1] - one[0]))
+            for index in range(1, len(one)):
+                worst_slide = max(worst_slide, abs(one[index] - one[index - 1]))
+        print("  %-8s lowest %+.3f, %d contact(s)" % (foot, min(at[1] for at in rows), len(runs)))
+
+    check("the figure takes steps", contacts >= 2, "%d contacts in %.1fs" % (contacts, seconds))
+    check("a planted foot stays planted", worst_slide <= SLIDE_PER_FRAME,
+          "worst %.3f m in a frame, allowed %.3f" % (worst_slide, SLIDE_PER_FRAME))
+    check("and does not creep over the whole contact", worst_drift <= SLIDE_PER_CONTACT,
+          "worst %.3f m, allowed %.3f" % (worst_drift, SLIDE_PER_CONTACT))
+
+
 def main(argv):
     parser = argparse.ArgumentParser(prog="critique_scene")
     parser.add_argument("--port", type=int, default=7911)
     parser.add_argument("--launch", metavar="BINARY")
     parser.add_argument("--figure", default="Zombie_")
+    parser.add_argument("--walks", default="Zombie_Body",
+                        help="the skinned model whose skeleton carries the walk")
+    parser.add_argument("--feet", default="AnkleL,AnkleR,ToeL,ToeR")
+    parser.add_argument("--road", type=float, default=0.0)
     args = parser.parse_args(argv)
 
     started = time.time()
@@ -197,6 +271,8 @@ def main(argv):
         relief(models)
         character(models, args.figure)
         proportion(models, args.figure)
+        if args.walks:
+            gait(engine, args.walks, args.feet.split(","), args.road, 2.6, 24)
         engine("frame.resume")
 
     if scene is not None:
