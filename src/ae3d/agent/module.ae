@@ -310,8 +310,10 @@ help_result() -> ptr {
         "frame, fps, delta, viewport, draw calls and instances for the last frame."))
     json.array_add_raw(ops, describe("camera.get", "",
         "Camera position, orientation, field of view and clip planes."))
-    json.array_add_raw(ops, describe("scene.tree", "",
-        "Every model the renderer holds: index, name, position and visibility."))
+    json.array_add_raw(ops, describe("scene.tree", "[detail]",
+        "Every model the renderer holds: index, name, position and visibility. With detail, also its material, texture, parent, world position, triangles and where it lands on screen -- one round trip instead of one per model."))
+    json.array_add_raw(ops, describe("scene.isolate", "[object]",
+        "Show only this model, or show every model again when given no name."))
     json.array_add_raw(ops, describe("model.get", "index",
         "One model in full: transform, bounds, material and mesh counts."))
     json.array_add_raw(ops, describe("light.list", "",
@@ -422,19 +424,56 @@ model_brief(m: *Model, index: int) -> ptr {
     return out
 }
 
-tree_result(c: *Context) -> ptr {
+// Every model, and with detail every model in the depth a sweep needs.
+//
+// Asking forty models what they are made of and where they are took forty
+// round trips, and a round trip costs a frame: the answer cannot be given
+// until the frame it describes has been drawn. One call is one frame.
+tree_result(c: *Context, detail: bool) -> ptr {
     models = json.arr()
     count = model_count(c)
     i = 0
     while i < count {
         m = model_at(c, i)
-        if m != null { json.array_add_raw(models, model_brief(m, i)) }
+        if m != null {
+            entry = model_brief(m, i)
+            if detail { describe_model(c, m, entry) }
+            json.array_add_raw(models, entry)
+        }
         i = i + 1
     }
     out = json.obj()
     json.object_set_raw(out, "count", json.from_int(count))
     json.object_set_raw(out, "models", models)
     return out
+}
+
+describe_model(c: *Context, m: *Model, entry: ptr) {
+    surface = model_surface(m)
+    if surface != null {
+        json.object_set_raw(entry, "material", json.str(core.text(surface.name)))
+        path = core.text(surface.texture_path)
+        if path != "" {
+            json.object_set_raw(entry, "texture", json.str(path))
+            json.object_set_raw(entry, "texture_loaded",
+                                json.boolean(surface.texture_id != 0))
+        }
+        json.object_set_raw(entry, "diffuse",
+            vec3_json(surface.diffuse.x, surface.diffuse.y, surface.diffuse.z))
+    }
+    parent = core.model_parent(m)
+    if parent != null {
+        json.object_set_raw(entry, "parent", json.str(core.text(parent.name)))
+    }
+    world = core.model_world_position(m)
+    json.object_set_raw(entry, "world_position", vec3_json(world.x, world.y, world.z))
+    json.object_set_raw(entry, "triangles", json.from_int(core.mesh_index_count(m.mesh) / 3))
+
+    box = core.vec4(0.0, 0.0, 0.0, 0.0)
+    if model_screen_box(c, m, &box) {
+        json.object_set_raw(entry, "screen_region",
+                            region_json(box.x, box.y, box.z, box.w))
+    }
 }
 
 model_result(m: *Model, index: int) -> ptr {
@@ -1256,7 +1295,37 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
     if op == "ping"        { answer(id, json.obj()) return false }
     if op == "frame.stats" { answer(id, stats_result(c)) return false }
     if op == "camera.get"  { answer(id, camera_result(c)) return false }
-    if op == "scene.tree"  { answer(id, tree_result(c)) return false }
+    if op == "scene.tree" {
+        node = json.object_get_raw(request, "detail")
+        answer(id, tree_result(c, node != null && json.get_bool(node) == 1))
+        return false
+    }
+
+    // Show one model and hide the rest, or show everything again. Measuring a
+    // surface means seeing only that surface, and doing it a model at a time
+    // was two calls per model per measurement.
+    if op == "scene.isolate" {
+        named = json.object_get_raw(request, "object")
+        wanted = ""
+        if named != null { wanted = json.get_string_raw(named) }
+        shown = 0
+        count = model_count(c)
+        i = 0
+        while i < count {
+            m = model_at(c, i)
+            if m != null {
+                on = wanted == "" || core.text(m.name) == wanted
+                m.visible = on
+                if on { shown = shown + 1 }
+            }
+            i = i + 1
+        }
+        out = json.obj()
+        json.object_set_raw(out, "visible", json.from_int(shown))
+        json.object_set_raw(out, "of", json.from_int(count))
+        answer(id, out)
+        return false
+    }
 
     if op == "model.get" {
         node = json.object_get_raw(request, "index")

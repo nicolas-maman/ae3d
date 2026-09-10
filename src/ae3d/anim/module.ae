@@ -21,7 +21,7 @@ exports (
     player_playing, player_play, player_pause, player_rewind,
     advance, apply, last_error,
     Binding, Registry, registry_new, registry_free, registry_add, registry_count,
-    registry_binding, registry_find, registry_advance,
+    registry_binding, registry_find, registry_advance, registry_apply,
     binding_name, binding_player, binding_model
 )
 
@@ -522,6 +522,22 @@ registry_advance(r: *Registry, delta: float) {
             advance(b.player, delta)
             apply(b.player, b.model)
         }
+        i = i + 1
+    }
+}
+
+// The playheads where they are, onto the models again. A clip is a function of
+// its playhead, so applying one twice puts a model where it already was --
+// which is the point: anything that poses a model after the clips has left its
+// own result in the same fields, and without this that result is what the next
+// pose is built from.
+registry_apply(r: *Registry) {
+    if r == null { return }
+    i = 0
+    count = list.size(r.bindings)
+    while i < count {
+        b = list.get_raw(r.bindings, i) as *Binding
+        if b != null { apply(b.player, b.model) }
         i = i + 1
     }
 }
