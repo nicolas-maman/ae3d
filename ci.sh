@@ -105,6 +105,20 @@ died_on() {   # died_on <status>
 
 . "$PWD/scripts/native.sh"
 
+# A PNG's size, without a decoder: the IHDR width and height are two big-endian
+# 32-bit words at a fixed offset, after the signature and the chunk header.
+# od's --endian is GNU-only and this has to read the same on macOS.
+snapshot_size() {
+    "$PYTHON" -c 'import struct,sys
+d = open(sys.argv[1], "rb").read(24)
+print("%dx%d" % struct.unpack(">II", d[16:24]) if len(d) >= 24 else "")' "$1" 2>/dev/null
+}
+
+snapshot_is() {
+    [ -n "$2" ] || return 0
+    [ "$(snapshot_size "$1")" = "$2" ]
+}
+
 step "platform link libraries"
 # Every host this can be built on, checked from any host. Windows had no arm
 # at all and the catch-all's -lm cannot link an OpenGL program, so ae3d could
@@ -499,6 +513,15 @@ check_editor_run() {
         fail "$name (wrote no report)"
     elif [ ! -s "$snapshot" ]; then
         fail "$name (wrote no viewport snapshot)"
+    elif ! snapshot_is "$snapshot" "$(sed -n 's/^viewport //p' "$report")"; then
+        # The snapshot is the frame the renderer produced, so its size is the
+        # size the scene was rendered at. On the GPU path that is the
+        # framebuffer's, in pixels; a snapshot that came back the canvas's size
+        # in points is the viewport quietly rendering at half resolution on a
+        # HiDPI screen, which looks like a slightly soft picture and nothing
+        # else says a word.
+        fail "$name (snapshot is $(snapshot_size "$snapshot"), the scene was rendered at $(sed -n 's/^viewport //p' "$report"))"
+        sed 's/^/        /' "$report"
     elif [ "$(sed -n 's/^backend //p' "$report")" != "$editor_backend" ]; then
         fail "$name (rendered with $(sed -n 's/^backend //p' "$report"))"
     elif ! grep -q '^frames 30$' "$report"; then
@@ -512,6 +535,23 @@ check_editor_run() {
          [ "$(sed -n 's/^lights //p' "$report")" != "1" ] || \
          [ "$(sed -n 's/^scripted //p' "$report")" != "1" ]; then
         fail "$name (component types did not build)"
+        sed 's/^/        /' "$report"
+    elif [ "$(sed -n 's/^viewport_path //p' "$report")" = "gpu-unbuilt" ]; then
+        # The GPU path was taken and the renderer was never built on it, so the
+        # viewport is a rectangle that never draws. Nothing else notices: the
+        # report is written, the run ends, and every counter in it reads zero.
+        fail "$name (the GPU viewport was chosen and never built)"
+        sed 's/^/        /' "$report"
+    elif [ "$(uname -s)" = "Darwin" ] && \
+         [ "$(sed -n 's/^backend //p' "$report")" = "opengl" ] && \
+         [ "$(sed -n 's/^viewport_path //p' "$report")" != "gpu" ]; then
+        # Every Mac has a GL device, so a blit here is a silent fall back to
+        # reading the framebuffer to the CPU every frame and rendering the
+        # viewport at half resolution. Both look right in a snapshot.
+        #
+        # OpenGL only: Vulkan cannot draw into a GL context, so it keeps the
+        # framebuffer of its own and the blit that shows it.
+        fail "$name (fell back to the blit viewport: $(sed -n 's/^viewport_path //p' "$report"))"
         sed 's/^/        /' "$report"
     elif [ "$(sed -n 's/^stuck_rows //p' "$report")" != "0" ]; then
         # A row that records an undo step and moves its own readout looks exactly

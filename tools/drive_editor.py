@@ -464,6 +464,14 @@ def main():
         scene = scene_list_id(widgets)
         if scene is None:
             raise SystemExit("could not find the scene list in the widget tree")
+
+        # Wait for the scene to be there before counting it. The GPU viewport
+        # builds the renderer when aether-ui hands over its context, which is
+        # after the window exists, and the scene is filled then: a count taken
+        # the instant the tree first answers is a count of an editor still
+        # starting up.
+        wait_rows_settled(args.port, scene)
+        widgets = tree(args.port)
         before = len(rows_under(widgets, scene))
 
         # A button, pressed where a person would press it.
