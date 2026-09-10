@@ -17,7 +17,9 @@ Exits non-zero with a line naming what failed.
 
 import argparse
 import os
+import subprocess
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
@@ -118,7 +120,7 @@ def depth_is_decided(engine, position, target):
     engine("camera.set", position=list(position), look_at=list(target))
 
 
-def animation_arrives(engine, part, rest, moment):
+def animation_arrives(engine, part, rest, moment, width):
     print("\n== the animation reaches the picture ==")
     engine("anim.set", time=rest)
     engine("frame.hold")
@@ -135,23 +137,67 @@ def animation_arrives(engine, part, rest, moment):
     moved = 0.0
     if None not in (x0, y0, x1, y1):
         moved = ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
-    print("  %s moved %.0f pixels between %ss and %ss" % (part, moved, rest, moment))
+    # How far a hand swings is a fraction of the picture, not a number of
+    # pixels: the same scene drawn at a CI's size has to answer the same.
+    want = width * 0.03
+    print("  %s moved %.0f pixels between %ss and %ss (%.1f%% of the width)"
+          % (part, moved, rest, moment, moved * 100.0 / width))
     check("seeking changes the picture", changed.get("fraction", 0.0) > 0.005,
           "%.2f%% of the frame" % (changed.get("fraction", 0.0) * 100))
-    check("and the part that should have moved did", moved > 40, "%.0f pixels" % moved)
+    check("and the part that should have moved did", moved > want,
+          "%.0f pixels, wanted more than %.0f" % (moved, want))
+
+
+def launch(binary, port):
+    """Start the scene with the channel open, and wait for it to answer."""
+    env = dict(os.environ)
+    env["AE3D_AGENT"] = str(port)
+    env["AE3D_FRAMES"] = "100000"
+    log = tempfile.NamedTemporaryFile(prefix="ae3d_measure_", suffix=".log", delete=False)
+    scene = subprocess.Popen([binary], env=env, stdout=log, stderr=subprocess.STDOUT)
+    deadline = time.time() + 30.0
+    while time.time() < deadline:
+        if scene.poll() is not None:
+            print("measure_scene: %s exited with %d before it opened the channel"
+                  % (binary, scene.returncode))
+            print(open(log.name).read()[-2000:])
+            return scene, log.name, None
+        try:
+            return scene, log.name, Session(port)
+        except OSError:
+            time.sleep(0.25)
+    print("measure_scene: %s never answered on port %d" % (binary, port))
+    return scene, log.name, None
+
+
+def stop(scene):
+    scene.terminate()
+    try:
+        scene.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        scene.kill()
 
 
 def main(argv):
     parser = argparse.ArgumentParser(prog="measure_scene")
     parser.add_argument("--port", type=int, default=7911)
+    parser.add_argument("--launch", metavar="BINARY",
+                        help="start this scene first, and stop it at the end")
     args = parser.parse_args(argv)
 
     started = time.time()
-    try:
-        engine = Session(args.port)
-    except OSError as failure:
-        print("measure_scene: nothing answering on port %d (%s)" % (args.port, failure))
-        return 2
+    scene = None
+    if args.launch:
+        scene, log, engine = launch(args.launch, args.port)
+        if engine is None:
+            stop(scene)
+            return 2
+    else:
+        try:
+            engine = Session(args.port)
+        except OSError as failure:
+            print("measure_scene: nothing answering on port %d (%s)" % (args.port, failure))
+            return 2
 
     with engine:
         stats = engine("frame.stats")
@@ -174,8 +220,10 @@ def main(argv):
             "Street_LampHead0": ("lamp", "LampGlow"),
         })
         depth_is_decided(engine, (0.35, 1.34, 1.55), (-3.5, 1.1, -0.2))
-        animation_arrives(engine, "Zombie_HandR", 1.4, 3.35)
+        animation_arrives(engine, "Zombie_HandR", 1.4, 3.35, stats["width"])
         engine("frame.resume")
+    if scene is not None:
+        stop(scene)
 
     print("\n%s in %.1fs"
           % ("measure_scene: everything measured passed" if not FAILURES

@@ -402,6 +402,29 @@ for example in examples/*.ae; do
     fi
 done
 
+step "the demo scene, measured through the channel"
+# The scene the engine is demonstrated with, asked what it drew rather than
+# looked at: what every model is made of, whether the image its material names
+# was loaded, what colour each surface arrived at, whether a camera that has
+# not moved draws the same frame twice, and whether seeking a clip moves the
+# part it drives. Everything a screenshot would be read for, as numbers.
+if [ -z "$PYTHON" ]; then
+    skip "zombie_street (measured)" "no python3"
+elif ! have_display; then
+    skip "zombie_street (measured)" "no display"
+elif ! built_ok zombie_street; then
+    skip "zombie_street (measured)" "it did not build"
+else
+    measure_log="$(mktemp)"
+    if bounded "$RUN_LIMIT" $PYTHON scripts/measure_scene.py             --launch ./build/zombie_street --port 7913 >"$measure_log" 2>&1; then
+        pass "zombie_street (measured)"
+    else
+        fail "zombie_street (measured)"
+        grep -E 'FAIL|Traceback|Error|error:|measure_scene:' "$measure_log"             | sed 's/^/        /' | head -12
+    fi
+    rm -f "$measure_log"
+fi
+
 # The editor runs on either renderer, so both are checked: the Vulkan option
 # used to report Vulkan and build an OpenGL renderer, which no OpenGL-only run
 # could have caught.
