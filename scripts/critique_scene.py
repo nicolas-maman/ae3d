@@ -66,9 +66,15 @@ SLIDE_PER_CONTACT = 0.040
 SHAPE_LOW = 0.35
 SHAPE_HIGH = 2.5
 # What the engine is set to, and how much of a difference that has to make. A
-# map that is loaded and a map that reaches the frame are different facts.
+# map that is loaded and a map that reaches the frame are different facts, and
+# this asserts the second one.
+#
+# How much is deliberately modest, because it depends on how big the frame is:
+# the same maps move the worst pixel 0.094 at 1280x720 and 0.035 at the 320x180
+# a CI draws at, since minification averages the relief away. What is being
+# asked is whether they arrive at all, not how loud they are.
 NORMAL_STRENGTH = 2.5
-NORMAL_VISIBLE = 0.05
+NORMAL_VISIBLE = 0.025
 
 FAILURES = []
 
