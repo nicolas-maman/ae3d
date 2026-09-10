@@ -137,6 +137,23 @@ frame_limit_from_env() -> int {
     return core.env_int("AE3D_FRAMES", 0)
 }
 
+// AE3D_WIDTH and AE3D_HEIGHT override the size a program asked for, applied
+// here rather than in engine_new so that a program setting its own size does
+// not overwrite them.
+//
+// A software rasteriser costs what it draws, and this engine's fragment shader
+// is not a cheap one: the same run at a quarter of the width and a quarter of
+// the height does everything it did -- every frame, every draw, every branch of
+// the shader -- for a sixteenth of the pixels. That is the difference between
+// a smoke test that runs on a runner with no GPU and one that is billed for a
+// software rasteriser drawing a million pixels a frame.
+size_from_env(e: *Engine) {
+    width = core.env_int("AE3D_WIDTH", 0)
+    height = core.env_int("AE3D_HEIGHT", 0)
+    if width > 0 { e.width = width }
+    if height > 0 { e.height = height }
+}
+
 // AE3D_SNAPSHOT writes the last frame of a bounded run to a PNG.
 //
 // Running an example proves it does not crash and counting its draws proves it
@@ -407,6 +424,8 @@ engine_start(e: *Engine, x: int, y: int) -> bool {
         println("ae3d: ${platform.error()}")
         return false
     }
+
+    size_from_env(e)
 
     e.window = platform.window_create(e.width, e.height, e.title,
                                       e.api, e.msaa, e.decorated, 32)

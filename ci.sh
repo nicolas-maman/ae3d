@@ -13,6 +13,17 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
 FRAMES="${AE3D_CI_FRAMES:-30}"
+
+# The size suites and examples draw at. A runner has no GPU, and a software
+# rasteriser is billed for every pixel it shades: the same run at a quarter of
+# the width and a quarter of the height does every frame, every draw and every
+# branch of the shader for a sixteenth of the work. Three examples were 68% of
+# this file's wall time on Linux for that reason alone.
+#
+# Benchmarks are exempt: what they measure is the cost of a frame, and a frame
+# is a size.
+export AE3D_WIDTH="${AE3D_CI_WIDTH:-320}"
+export AE3D_HEIGHT="${AE3D_CI_HEIGHT:-180}"
 failures=0
 skipped=0
 
@@ -612,7 +623,7 @@ for bench in benchmarks/bench_*.ae; do
         fail "$name (build warnings)"
         continue
     fi
-    if output="$(bounded "$RUN_LIMIT" ./build/"$name" 2>&1)"; then
+    if output="$(AE3D_WIDTH= AE3D_HEIGHT= bounded "$RUN_LIMIT" ./build/"$name" 2>&1)"; then
         pass "$name"
         printf '%s\n' "$output" | sed 's/^/        /'
     else
