@@ -126,10 +126,17 @@ blender_pipeline: playing 'OrbAction', 1.95833s, 2 channels
 
 `examples/zombie_street.ae` is the same pipeline at scale: a night street and
 a zombie, 40 objects out of one `.blend`, sixteen of them animated, every
-surface carrying an image authored beside it. The zombie is rigid parts rather
-than a skinned mesh, because ae3d has no skinning (ae3d#192); the parts hang
-off each other, so a clip is a rotation about a joint and the hierarchy carries
-each limb through the arc of the one above it.
+surface carrying an image authored beside it. The zombie is rigid parts: the
+parts hang off each other, so a clip is a rotation about a joint and the
+hierarchy carries each limb through the arc of the one above it.
+
+The engine no longer requires that. `ae3d.skin` draws a mesh over a skeleton,
+on both backends, and the exporter carries an armature, its weights and a clip
+per bone. A bone is an ordinary model in the transform hierarchy, so the same
+clips drive one and `ae3d.ik` solves a limb of them without being told they
+belong to a skin. `tests/fixtures/spin.blend` carries a rigged column that the
+tests follow from Blender to the palette a draw reads; rebuilding the zombie
+around a skeleton is the next thing that scene wants.
 
 `scripts/measure_scene.py` drives a running scene over the agent channel and
 says what it found, which is how the picture is checked rather than looked at:

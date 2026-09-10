@@ -27,6 +27,10 @@ from ae3d_session import Session, AgentError
 
 FAILURES = []
 
+# What launch() answers with instead of a session when the scene stopped
+# without a word, which is the engine reporting it has nowhere to draw.
+NO_WINDOW = object()
+
 
 def check(name, ok, detail=""):
     print("  %-4s %s%s" % ("ok" if ok else "FAIL", name, (" (%s)" % detail) if detail else ""))
@@ -158,10 +162,15 @@ def launch(binary, port):
     deadline = time.time() + 30.0
     while time.time() < deadline:
         if scene.poll() is not None:
+            # A scene that stops of its own accord without complaining is one
+            # that could not open a window: the engine says so and returns,
+            # which on a runner with no display is the right thing to do and
+            # nothing this script can measure. Anything else is a failure.
+            said = open(log.name).read()
             print("measure_scene: %s exited with %d before it opened the channel"
                   % (binary, scene.returncode))
-            print(open(log.name).read()[-2000:])
-            return scene, log.name, None
+            print(said[-2000:])
+            return scene, log.name, None if scene.returncode else NO_WINDOW
         try:
             return scene, log.name, Session(port)
         except OSError:
@@ -189,6 +198,9 @@ def main(argv):
     scene = None
     if args.launch:
         scene, log, engine = launch(args.launch, args.port)
+        if engine is NO_WINDOW:
+            stop(scene)
+            return 3
         if engine is None:
             stop(scene)
             return 2

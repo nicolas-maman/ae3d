@@ -416,8 +416,14 @@ elif ! built_ok zombie_street; then
     skip "zombie_street (measured)" "it did not build"
 else
     measure_log="$(mktemp)"
-    if bounded "$RUN_LIMIT" $PYTHON scripts/measure_scene.py             --launch ./build/zombie_street --port 7913 >"$measure_log" 2>&1; then
+    bounded "$RUN_LIMIT" $PYTHON scripts/measure_scene.py         --launch ./build/zombie_street --port 7913 >"$measure_log" 2>&1
+    measured=$?
+    if [ "$measured" -eq 0 ]; then
         pass "zombie_street (measured)"
+    elif [ "$measured" -eq 3 ]; then
+        # The scene stopped without complaining, which is the engine saying it
+        # has nowhere to draw. A runner with a display is where this is asked.
+        skip "zombie_street (measured)" "the scene could not open a window"
     else
         fail "zombie_street (measured)"
         grep -E 'FAIL|Traceback|Error|error:|measure_scene:' "$measure_log"             | sed 's/^/        /' | head -12

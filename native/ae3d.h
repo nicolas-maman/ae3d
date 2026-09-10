@@ -56,6 +56,13 @@ void   ae3d_palette_set(void *palette, int bone, const double *m);
 double ae3d_palette_get(void *palette, int bone, int i);
 const float *ae3d_palette_data(void *palette);
 void   ae3d_gl_upload_skin(void *mesh, int vbo);
+void  *ae3d_skinrows_create(int count);
+void   ae3d_skinrows_destroy(void *rows);
+int    ae3d_skinrows_count(void *rows);
+void   ae3d_skinrows_set(void *rows, int i, int j0, int j1, int j2, int j3,
+                         double w0, double w1, double w2, double w3);
+void   ae3d_skinrows_apply(void *rows, void *mesh, int vertex, int position);
+void   ae3d_objbuild_set_skin(void *build, void *rows);
 void   ae3d_gl_uniform_mat4v(int loc, int count, const void *values);
 const float *ae3d_mesh_skin_data(void *mesh);
 double ae3d_mesh_skin_joint(void *mesh, int i, int slot);

@@ -1,0 +1,244 @@
+// A skinned mesh, all the way from Blender.
+//
+// tests/test_skin checks the arithmetic and tests/test_skinned_render checks
+// that a draw reads it. This checks the other half: that what Blender was asked
+// for is what arrives. A rig can be right in the engine and wrong in the
+// export -- an axis converted for the mesh and not for the skeleton, a weight
+// keyed to a vertex the OBJ folded away, a pose written without the rest it
+// composes onto -- and every one of those produces a figure that moves.
+//
+// The fixture is tests/fixtures/spin.blend: a column over six bones, weighted
+// by Blender itself, leaning over one second. No window and no driver.
+
+import std.list
+import ae3d.core
+import ae3d.assets
+import ae3d.anim
+import ae3d.skin
+
+const EXPORTED = "tests/fixtures/exported/manifest.json"
+const EPSILON = 0.0005
+
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, condition: bool) {
+    g_checks = g_checks + 1
+    if condition {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        g_failures = g_failures + 1
+    }
+}
+
+near(a: float, b: float, tolerance: float) -> bool {
+    d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    return d < tolerance
+}
+
+// One bone's palette entry applied to a point: what the vertex shader does for
+// a vertex weighted wholly to that bone.
+posed_by(s: *Skeleton, bone: int, p: Vec3) -> Vec3 {
+    palette = skin.skeleton_palette(s)
+    m = core.mat4_ident()
+    m.m0  = core.palette_get(palette, bone, 0)
+    m.m1  = core.palette_get(palette, bone, 1)
+    m.m2  = core.palette_get(palette, bone, 2)
+    m.m3  = core.palette_get(palette, bone, 3)
+    m.m4  = core.palette_get(palette, bone, 4)
+    m.m5  = core.palette_get(palette, bone, 5)
+    m.m6  = core.palette_get(palette, bone, 6)
+    m.m7  = core.palette_get(palette, bone, 7)
+    m.m8  = core.palette_get(palette, bone, 8)
+    m.m9  = core.palette_get(palette, bone, 9)
+    m.m10 = core.palette_get(palette, bone, 10)
+    m.m11 = core.palette_get(palette, bone, 11)
+    m.m12 = core.palette_get(palette, bone, 12)
+    m.m13 = core.palette_get(palette, bone, 13)
+    m.m14 = core.palette_get(palette, bone, 14)
+    m.m15 = core.palette_get(palette, bone, 15)
+    return core.mat4_transform_point(m, p)
+}
+
+entry_named(m: *Manifest, name: string) -> *Entry {
+    count = assets.manifest_count(m)
+    i = 0
+    while i < count {
+        e = assets.manifest_entry(m, i)
+        if assets.entry_object(e) == name { return e }
+        i = i + 1
+    }
+    return null
+}
+
+main() {
+    m = assets.manifest_load(EXPORTED)
+    if m == null {
+        println("skinned pipeline: SKIP ${assets.last_error()}")
+        return
+    }
+
+    entry = entry_named(m, "Bender")
+    if entry == null {
+        println("skinned pipeline: FAIL the export has no Bender in it")
+        assets.manifest_free(m)
+        return
+    }
+
+    check("the export names a skeleton", assets.entry_skeleton(entry) != "")
+    check("and the weights beside it", assets.entry_skin(entry) != "")
+
+    model = assets.entry_load_model(m, entry)
+    check("the mesh loads", model != null)
+    if model == null {
+        assets.manifest_free(m)
+        return
+    }
+
+    bones = assets.entry_load_skeleton(m, entry)
+    check("the skeleton loads", bones != null && list.size(bones) == 6)
+    if bones == null {
+        assets.manifest_free(m)
+        return
+    }
+
+    // Blender's bones are a chain, and the chain has to survive the export:
+    // a skeleton whose bones are all parented to nothing still draws, and
+    // still bends every joint about the origin.
+    root = list.get_raw(bones, 0) as *Model
+    second = list.get_raw(bones, 1) as *Model
+    check("the bones are a chain", core.model_parent(second) == root)
+    check("and the root hangs off nothing", core.model_parent(root) == null)
+
+    check("the weights arrive with the mesh", core.mesh_is_skinned(model.mesh))
+
+    // Blender was asked for automatic weights, which blend across a joint. A
+    // rig where every vertex is bound rigidly to one bone is what an export
+    // that dropped the blend looks like, and it is not what was asked for.
+    vertices = core.mesh_vertex_count(model.mesh)
+    blended = 0
+    i = 0
+    while i < vertices {
+        if core.mesh_skin_weight(model.mesh, i, 1) > 0.01 { blended = blended + 1 }
+        i = i + 1
+    }
+    println("  ${blended} of ${vertices} vertices are shared between two bones")
+    check("the weights blend across the joints", blended > vertices / 2)
+
+    skeleton = skin.skeleton_new()
+    i = 0
+    while i < list.size(bones) {
+        skin.skeleton_add(skeleton, list.get_raw(bones, i) as *Model)
+        i = i + 1
+    }
+    skin.skeleton_bind(skeleton)
+    core.model_set_skeleton(model, skeleton as ptr)
+
+    // The rest pose the skeleton file placed the bones in is the pose the mesh
+    // was modelled in, so the palette poses nothing.
+    at = core.vec3(0.2, 1.4, 0.1)
+    landed = posed_by(skeleton, 3, at)
+    check("the exported rest pose is the bind pose",
+          near(landed.x, at.x, EPSILON) && near(landed.y, at.y, EPSILON) &&
+          near(landed.z, at.z, EPSILON))
+
+    clips = assets.entry_load_bone_clips(m, entry)
+    check("the bone clips load", clips != null && list.size(clips) == 6)
+    if clips == null {
+        assets.manifest_free(m)
+        return
+    }
+
+    // Each clip is named after the bone it drives. Bound by name rather than by
+    // position, because a clip landing on the wrong bone is exactly the failure
+    // that still produces a figure that moves.
+    registry = anim.registry_new()
+    bound = 0
+    i = 0
+    while i < list.size(clips) {
+        clip = list.get_raw(clips, i) as *Clip
+        index = skin.skeleton_find(skeleton, anim.clip_name(clip))
+        if index >= 0 {
+            anim.registry_add(registry, anim.clip_name(clip),
+                              anim.player_new(clip), skin.skeleton_bone(skeleton, index))
+            bound = bound + 1
+        }
+        i = i + 1
+    }
+    check("every clip names a bone the skeleton has", bound == list.size(clips))
+
+    // At the start of the clip the pose is the rest pose, so driving the
+    // animation to zero has to leave the mesh where binding left it. This is
+    // the check that a pose was exported composed onto its rest rather than
+    // instead of it: without that, the figure folds up at the first frame.
+    seek(registry, 0.0)
+    skin.skeleton_update(skeleton)
+    landed = posed_by(skeleton, 3, at)
+    check("the first frame of the clip is the bind pose",
+          near(landed.x, at.x, EPSILON) && near(landed.y, at.y, EPSILON) &&
+          near(landed.z, at.z, EPSILON))
+
+    // And at the end of it the column leans. The lean accumulates up the chain,
+    // so the base is where it was and the top has travelled.
+    seek(registry, 1.0)
+    skin.skeleton_update(skeleton)
+    base = core.model_world_position(skin.skeleton_bone(skeleton, 0))
+    top = core.model_world_position(skin.skeleton_bone(skeleton, 5))
+    println("  base at ${base.x} ${base.y} ${base.z}, top at ${top.x} ${top.y} ${top.z}")
+    check("the base of the column stays where it was",
+          near(base.x, 0.0 - 4.0, EPSILON) && near(base.y, 0.0, EPSILON))
+    check("and the top of it leans", core.abs_of(top.z) > 0.1)
+    // Along the chain, not across it: a bent chain's ends are closer together
+    // than the bones between them are long, which is what bending is.
+    along = 0.0
+    i = 1
+    while i < 6 {
+        along = along + core.v3_distance(
+            core.model_world_position(skin.skeleton_bone(skeleton, i - 1)),
+            core.model_world_position(skin.skeleton_bone(skeleton, i)))
+        i = i + 1
+    }
+    println("  the chain measures ${along} along its bones and ${core.v3_distance(base, top)} across")
+    check("no bone grew or shrank", near(along, 2.5, 0.001))
+    check("and the bend brought the ends closer together",
+          core.v3_distance(base, top) < along - 0.05)
+
+    anim.registry_free(registry)
+    skin.skeleton_free(skeleton)
+    i = 0
+    while i < list.size(clips) {
+        anim.clip_free(list.get_raw(clips, i) as *Clip)
+        i = i + 1
+    }
+    list.free(clips)
+    i = list.size(bones) - 1
+    while i >= 0 {
+        bone = list.get_raw(bones, i) as *Model
+        core.model_set_parent(bone, null)
+        core.model_free(bone)
+        i = i - 1
+    }
+    list.free(bones)
+    core.model_free(model)
+    assets.provenance_release()
+    assets.manifest_free(m)
+
+    if g_failures == 0 {
+        println("skinned pipeline: all checks passed (${g_checks})")
+        return
+    }
+    println("skinned pipeline: ${g_failures} failure(s) of ${g_checks}")
+}
+
+seek(registry: *Registry, time: float) {
+    count = anim.registry_count(registry)
+    i = 0
+    while i < count {
+        binding = anim.registry_binding(registry, i)
+        anim.player_set_time(anim.binding_player(binding), time)
+        i = i + 1
+    }
+    anim.registry_apply(registry)
+}

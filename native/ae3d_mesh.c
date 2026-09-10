@@ -686,6 +686,10 @@ typedef struct {
     ae3d_objkey *table;
     int table_mask;
     int table_used;
+    /* Borrowed for the length of one load, and only when the mesh has a skin:
+       the loader knows which vertices a position turned into and nothing else
+       does. */
+    void *skin;
 } ae3d_objbuild;
 
 static int ae3d_grow_floats(float **buffer, int *capacity, int needed) {
@@ -778,6 +782,11 @@ int ae3d_objbuild_add_normal(void *handle, double x, double y, double z) {
     return b->normal_count / 3 - 1;
 }
 
+void ae3d_objbuild_set_skin(void *handle, void *rows) {
+    ae3d_objbuild *b = (ae3d_objbuild *)handle;
+    if (b) b->skin = rows;
+}
+
 int ae3d_objbuild_position_count(void *handle) {
     ae3d_objbuild *b = (ae3d_objbuild *)handle;
     return b ? b->position_count / 3 : 0;
@@ -833,6 +842,7 @@ int ae3d_objbuild_emit(void *handle, void *mesh, int v, int vt, int vn) {
 
     unified = ae3d_mesh_push_vertex(mesh, px, py, pz, u, tv, nx, ny, nz);
     if (unified < 0) return -1;
+    if (b->skin) ae3d_skinrows_apply(b->skin, mesh, unified, v);
 
     b->table[slot].v = v;
     b->table[slot].vt = vt;

@@ -7,6 +7,9 @@ Writes, per exported object:
     <name>.obj        geometry, triangulated, with normals and UVs
     <name>.mtl        the material, when the object has one
     <name>.anim.json  clips, channels and keyframes, when the object is animated
+    <name>.skel.json  the armature's rest pose, when the object is skinned
+    <name>.skin.json  four bones and four weights per position, beside it
+    <name>.bones.json a clip per animated bone, driving the skeleton
 
 and one manifest.json for the lot. The manifest is the first link in the chain
 #181 has to be able to follow: it records what came from where, with a hash of
@@ -45,9 +48,13 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 
-EXPORTER_VERSION = 2
+EXPORTER_VERSION = 3
+
+# What the vertex shader's bone array holds; ae3d.skin says the same number.
+MAX_BONES = 48
 
 # Blender is Z-up, ae3d is Y-up. Every position, normal and translation key
 # goes through this, and it is the one conversion that has to be applied
@@ -83,6 +90,249 @@ def local_transform(obj, exported_names):
         "rotation": [rounded(qx), rounded(qy), rounded(qz), rounded(rotation.w)],
         "scale": [rounded(scale.x), rounded(scale.z), rounded(scale.y)],
     }
+
+
+def matrix_transform(matrix):
+    """A Blender matrix as the transform ae3d records, in ae3d's axes.
+
+    The same decomposition local_transform does for an object, applied to a
+    bone's rest matrix: a bone is a transform in a hierarchy like any other, and
+    an axis convention that held for one and not the other would put a skeleton
+    inside a mesh that was converted differently.
+    """
+    location, rotation, scale = matrix.decompose()
+    x, y, z = to_y_up(location.x, location.y, location.z)
+    qx, qy, qz = to_y_up(rotation.x, rotation.y, rotation.z)
+    return {
+        "location": [rounded(x), rounded(y), rounded(z)],
+        "rotation": [rounded(qx), rounded(qy), rounded(qz), rounded(rotation.w)],
+        "scale": [rounded(scale.x), rounded(scale.z), rounded(scale.y)],
+    }
+
+
+def armature_of(obj):
+    """The armature deforming this mesh, or None."""
+    for modifier in obj.modifiers:
+        if modifier.type == "ARMATURE" and modifier.object is not None:
+            return modifier.object
+    return None
+
+
+def bone_order(armature):
+    """Every bone, parents before children.
+
+    The order is the order the palette is in and the order the per-vertex joint
+    indices count in, so it has to be the same on every run: roots sorted by
+    name, and each bone's children sorted by name under it. A bone also cannot
+    appear before its parent, since ae3d composes a bone onto a parent that has
+    to exist by then.
+    """
+    ordered = []
+
+    def walk(bone):
+        ordered.append(bone)
+        for child in sorted(bone.children, key=lambda b: b.name):
+            walk(child)
+
+    for root in sorted((b for b in armature.data.bones if b.parent is None),
+                       key=lambda b: b.name):
+        walk(root)
+    return ordered
+
+
+def write_skeleton(armature, path, warnings):
+    """The rest pose: every bone, its parent, and where it sits under it.
+
+    ae3d builds the inverse bind matrices itself, from the bones as this places
+    them. That is the same thing said once rather than twice -- an inverse bind
+    matrix written here and a rest transform written beside it can disagree, and
+    when they do a mesh arrives inside out with nothing to say why.
+    """
+    bones = bone_order(armature)
+    if len(bones) > MAX_BONES:
+        warnings.append("%s has %d bones and ae3d draws %d"
+                        % (armature.name, len(bones), MAX_BONES))
+    records = []
+    for bone in bones:
+        if bone.parent is not None:
+            matrix = bone.parent.matrix_local.inverted() @ bone.matrix_local
+        else:
+            matrix = armature.matrix_world @ bone.matrix_local
+        records.append({
+            "name": bone.name,
+            "parent": bone.parent.name if bone.parent else "",
+            "transform": matrix_transform(matrix),
+        })
+    with open(path, "w", newline="\n") as handle:
+        json.dump({"bones": records}, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    return [bone.name for bone in bones]
+
+
+def write_skin(obj, bone_names, sources, positions, path, warnings):
+    """Four bones and four weights for every position the OBJ kept.
+
+    The OBJ writer folds vertices that share a position, so a weight belongs to
+    a position rather than to a Blender vertex; where several vertices fold into
+    one, their weights are averaged, which is what a seam between two halves of
+    the same surface wants. Only the four heaviest bones are kept, because that
+    is what the vertex shader blends -- a fifth would be dropped silently by the
+    renderer instead, and this at least says so.
+    """
+    index_of = {name: n for n, name in enumerate(bone_names)}
+    group_bone = {}
+    for group in obj.vertex_groups:
+        if group.name in index_of:
+            group_bone[group.index] = index_of[group.name]
+
+    dropped = 0
+    unweighted = 0
+    rows = []
+    for key in positions:
+        weights = {}
+        contributors = sources.get(key, ())
+        for vertex_index in contributors:
+            for element in obj.data.vertices[vertex_index].groups:
+                bone = group_bone.get(element.group)
+                if bone is not None and element.weight > 0.0:
+                    weights[bone] = weights.get(bone, 0.0) + element.weight
+        ranked = sorted(weights.items(), key=lambda kv: (-kv[1], kv[0]))
+        if len(ranked) > 4:
+            dropped += 1
+        ranked = ranked[:4]
+        if not ranked:
+            unweighted += 1
+            ranked = [(0, 1.0)]
+        total = sum(weight for _, weight in ranked)
+        joints = [bone for bone, _ in ranked] + [0] * (4 - len(ranked))
+        values = [rounded(weight / total) for _, weight in ranked] + [0.0] * (4 - len(ranked))
+        rows.append({"joints": joints, "weights": values})
+
+    if dropped:
+        warnings.append("%s has %d vertex/vertices weighted to more than four bones"
+                        % (obj.name, dropped))
+    if unweighted:
+        warnings.append("%s has %d unweighted vertex/vertices, bound to the first bone"
+                        % (obj.name, unweighted))
+    with open(path, "w", newline="\n") as handle:
+        json.dump({"vertices": rows}, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+
+POSE_PATH = re.compile(r'^pose\.bones\["(.+)"\]\.(location|rotation_quaternion|'
+                       r'rotation_euler|scale)$')
+
+
+def bone_curves(action):
+    """The armature's fcurves, grouped by bone and then by what they drive."""
+    grouped = {}
+    for fcurve in iter_fcurves(action):
+        match = POSE_PATH.match(fcurve.data_path)
+        if match:
+            bone, target = match.group(1), match.group(2)
+            grouped.setdefault(bone, {}).setdefault(target, {})[fcurve.array_index] = fcurve
+    return grouped
+
+
+def pose_basis(curves, frame, rotation_mode):
+    """What the pose adds to the rest, at this frame, as a Blender matrix."""
+    import mathutils
+
+    def value(target, index, default):
+        curve = curves.get(target, {}).get(index)
+        return curve.evaluate(frame) if curve else default
+
+    location = mathutils.Vector((value("location", 0, 0.0),
+                                 value("location", 1, 0.0),
+                                 value("location", 2, 0.0)))
+    if "rotation_quaternion" in curves:
+        rotation = mathutils.Quaternion((value("rotation_quaternion", 0, 1.0),
+                                         value("rotation_quaternion", 1, 0.0),
+                                         value("rotation_quaternion", 2, 0.0),
+                                         value("rotation_quaternion", 3, 0.0)))
+    else:
+        rotation = mathutils.Euler((value("rotation_euler", 0, 0.0),
+                                    value("rotation_euler", 1, 0.0),
+                                    value("rotation_euler", 2, 0.0)),
+                                   rotation_mode).to_quaternion()
+    scale = mathutils.Vector((value("scale", 0, 1.0),
+                              value("scale", 1, 1.0),
+                              value("scale", 2, 1.0)))
+    return (mathutils.Matrix.Translation(location)
+            @ rotation.to_matrix().to_4x4()
+            @ mathutils.Matrix.Diagonal(scale).to_4x4())
+
+
+def build_bone_clips(armature, bone_names, scene, warnings):
+    """One clip per animated bone, driving it the way a clip drives a model.
+
+    ae3d has no separate idea of a pose. A bone is a model and a clip sets a
+    model's local transform outright, so what is written here is the rest
+    transform with the pose composed onto it rather than the pose alone --
+    otherwise the first keyframe would throw away the rest pose and the figure
+    would fold up at frame zero.
+
+    Blender's pose curves can be Bezier and a composed matrix has no tangents
+    that follow from its components', so the composition is sampled and the
+    channels say LINEAR. Where that resamples a curve rather than reproducing
+    it, it says so instead of quietly losing the shape.
+    """
+    animation = armature.animation_data
+    if not animation or not animation.action:
+        return []
+    spf = seconds_per_frame(scene)
+    origin = frame_origin(scene)
+    grouped = bone_curves(animation.action)
+    rest = {bone.name: bone for bone in armature.data.bones}
+
+    clips = []
+    for name in bone_names:
+        curves = grouped.get(name)
+        if not curves:
+            continue
+        bone = rest.get(name)
+        if bone is None:
+            continue
+        if bone.parent is not None:
+            rest_matrix = bone.parent.matrix_local.inverted() @ bone.matrix_local
+        else:
+            rest_matrix = armature.matrix_world @ bone.matrix_local
+
+        frames = set()
+        curved = False
+        for target in curves.values():
+            for fcurve in target.values():
+                for point in fcurve.keyframe_points:
+                    frames.add(point.co[0])
+                    if point.interpolation == "BEZIER":
+                        curved = True
+        ordered = sorted(frames)
+        if len(ordered) < 2:
+            continue
+        if curved:
+            ordered = subdivide(ordered, 4)
+            warnings.append("%s of %s was keyed with Bezier tangents and is "
+                            "sampled at %d points" % (name, armature.name, len(ordered)))
+
+        mode = armature.pose.bones[name].rotation_mode
+        if mode not in {"XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"}:
+            mode = "XYZ"
+
+        translations, rotations, scales = [], [], []
+        for frame in ordered:
+            transform = matrix_transform(rest_matrix @ pose_basis(curves, frame, mode))
+            t = rounded((frame - origin) * spf)
+            translations.append({"t": t, "v": transform["location"]})
+            rotations.append({"t": t, "v": transform["rotation"]})
+            scales.append({"t": t, "v": transform["scale"]})
+
+        channels = [{"target": "translation", "interpolation": "LINEAR", "keys": translations},
+                    {"target": "rotation", "interpolation": "LINEAR", "keys": rotations},
+                    {"target": "scale", "interpolation": "LINEAR", "keys": scales}]
+        clips.append({"name": name,
+                      "duration": rounded((ordered[-1] - origin) * spf),
+                      "channels": channels})
+    return clips
 
 
 def rounded(value, digits=6):
@@ -458,15 +708,22 @@ def write_obj(obj, depsgraph, path, material_name, warnings):
         uv_layer = mesh.uv_layers.active.data if mesh.uv_layers.active else None
 
         corner_triangles = []
+        # Which Blender vertices ended up at each written position. The OBJ
+        # folds vertices that share one, and a skin weight belongs to the
+        # position rather than to whichever vertex happened to be written first.
+        sources = {}
         for triangle in triangulate(mesh, warnings, obj.name):
             corners = []
             for loop_index in triangle:
-                vertex = mesh.vertices[mesh.loops[loop_index].vertex_index]
+                vertex_index = mesh.loops[loop_index].vertex_index
+                vertex = mesh.vertices[vertex_index]
                 px, py, pz = to_y_up(*vertex.co)
                 nx, ny, nz = to_y_up(*mesh.loops[loop_index].normal)
                 uv = uv_layer[loop_index].uv if uv_layer else (0.0, 0.0)
+                position = (rounded(px), rounded(py), rounded(pz))
+                sources.setdefault(position, set()).add(vertex_index)
                 corners.append((
-                    (rounded(px), rounded(py), rounded(pz)),
+                    position,
                     (rounded(uv[0]), rounded(uv[1])),
                     (rounded(nx), rounded(ny), rounded(nz)),
                 ))
@@ -502,7 +759,8 @@ def write_obj(obj, depsgraph, path, material_name, warnings):
 
         with open(path, "w", newline="\n") as handle:
             handle.write("\n".join(lines) + "\n")
-        return len(positions), len(faces)
+        return (len(positions), len(faces), positions,
+                {key: sorted(value) for key, value in sources.items()})
     finally:
         evaluated.to_mesh_clear()
 
@@ -647,7 +905,8 @@ def main(argv):
         material = obj.data.materials[0] if obj.data.materials else None
         material_name = material.name if material else None
 
-        vertices, triangles = write_obj(obj, depsgraph, obj_path, material_name, warnings)
+        vertices, triangles, positions, sources = write_obj(
+            obj, depsgraph, obj_path, material_name, warnings)
 
         files = {"mesh": os.path.basename(obj_path)}
         if material:
@@ -656,6 +915,28 @@ def main(argv):
             files["material"] = os.path.basename(mtl_path)
             if texture:
                 files["texture"] = texture
+
+        # A skinned mesh is one surface over a skeleton, so the skeleton is
+        # written beside it and the weights beside that. A mesh with no
+        # armature writes neither and loads exactly as it did before.
+        armature = armature_of(obj)
+        bones = 0
+        if armature is not None:
+            skeleton_path = os.path.join(args.out, stem + ".skel.json")
+            bone_names = write_skeleton(armature, skeleton_path, warnings)
+            files["skeleton"] = os.path.basename(skeleton_path)
+            skin_path = os.path.join(args.out, stem + ".skin.json")
+            write_skin(obj, bone_names, sources, positions, skin_path, warnings)
+            files["skin"] = os.path.basename(skin_path)
+            bones = len(bone_names)
+
+            bone_clips = build_bone_clips(armature, bone_names, scene, warnings)
+            if bone_clips:
+                pose_path = os.path.join(args.out, stem + ".bones.json")
+                with open(pose_path, "w", newline="\n") as handle:
+                    json.dump({"clips": bone_clips}, handle, indent=2, sort_keys=True)
+                    handle.write("\n")
+                files["bone_animation"] = os.path.basename(pose_path)
 
         clip = build_clip(obj, scene, warnings)
         if clip:
@@ -675,6 +956,7 @@ def main(argv):
             "files": files,
             "vertices": vertices,
             "triangles": triangles,
+            "bones": bones,
             "clips": [clip["name"]] if clip else [],
             "channels": len(clip["channels"]) if clip else 0,
         })
