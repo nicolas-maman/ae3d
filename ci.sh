@@ -49,6 +49,14 @@ else
 fi
 RUN_LIMIT="${AE3D_CI_RUN_LIMIT:-300}"
 
+# A shell gives 128 plus the signal for a child that was killed, and the
+# message a crash leaves on its own says neither which signal nor which suite.
+died_on() {   # died_on <status>
+    if [ "$1" -gt 128 ] && [ "$1" -lt 160 ]; then
+        printf ' (died on signal %d)' "$(($1 - 128))"
+    fi
+}
+
 step "platform link libraries"
 # Every host this can be built on, checked from any host. Windows had no arm
 # at all and the catch-all's -lm cannot link an OpenGL program, so ae3d could
@@ -270,7 +278,7 @@ for suite in tests/test_*.ae; do
         fail "$name (still running after ${RUN_LIMIT}s)"
         printf '%s\n' "$output" | sed 's/^/        /' | tail -10
     elif [ "$suite_status" -ne 0 ]; then
-        fail "$name"
+        fail "$name$(died_on "$suite_status")"
         printf '%s\n' "$output" | sed 's/^/        /' | head -20
     elif printf '%s' "$output" | grep -q "all checks passed"; then
         pass "$name"
