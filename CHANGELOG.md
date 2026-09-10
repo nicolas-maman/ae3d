@@ -2,6 +2,24 @@
 
 ## [current]
 
+### The agent channel
+
+- A channel stopped while a client is still attached no longer hangs the
+  program. Waking the serving thread by giving its `accept` a connection
+  covered the case where nothing was attached; where something was, the thread
+  is inside `recv` on the client instead, and closing that socket under it does
+  not wake it on any platform. An editor that someone had attached an agent to
+  hung on the way out, on macOS as well as Linux.
+
+  Every wait in the thread is bounded now, so it notices the stop itself,
+  closes the client it was serving and returns. `ae3d_agent_stop` asks, waits
+  for the thread, and only then closes the sockets, rather than closing them
+  under a thread still using them. The wake-by-connecting is gone with it: one
+  mechanism that covers both cases rather than two that each cover one.
+
+- `tests/test_agent_attached` is that case. Every other agent suite closes its
+  socket before the engine comes down, so none of them could reach it.
+
 First working engine.
 
 ### Rendering

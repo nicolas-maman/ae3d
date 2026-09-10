@@ -1,0 +1,80 @@
+// A channel stopped while a client is still attached.
+//
+// Every other agent suite closes its socket before the engine comes down, so
+// the serving thread has already seen the end of the connection and gone back
+// to waiting for the next one. None of them can catch what happens when it has
+// not: an editor that someone attached an agent to and then quit, which is the
+// ordinary way for this to happen and the one nothing was checking.
+//
+// The suite is the exit. There is nothing to assert beyond reaching the end:
+// with a thread stopped by closing the socket under it, this never printed
+// anything at all, because ae3d_agent_stop waited for a thread that had no way
+// left to return.
+
+import std.os
+import std.tcp
+import std.string
+import ae3d.core
+import ae3d.platform
+import ae3d.engine
+import ae3d.agent
+
+var g_sock: ptr = null
+var g_frames = 0
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, condition: bool) {
+    g_checks = g_checks + 1
+    if !condition {
+        g_failures = g_failures + 1
+        println("  FAIL ${name}")
+        return
+    }
+    println("  ok   ${name}")
+}
+
+on_render(data: ptr, delta: float) {
+    g_frames = g_frames + 1
+    if g_frames != 2 { return }
+
+    sock, _err = tcp.connect("127.0.0.1", agent.port())
+    g_sock = sock
+
+    // One request, so the thread is serving a connection rather than sitting on
+    // an empty one, and then nothing more. The answer is not read and the
+    // socket is not closed: that is the whole of the case.
+    if g_sock != null { tcp.tcp_send_raw(g_sock, "{\"id\":1,\"op\":\"frame.stats\"}\n") }
+}
+
+main() {
+    os.setenv("AE3D_AGENT", "auto")
+
+    e = engine.engine_new(platform.API_GL)
+    engine.engine_set_size(e, 320, 240)
+    engine.engine_set_title(e, "ae3d agent attached test")
+    engine.engine_set_camera_input(e, false)
+    engine.engine_set_frame_limit(e, 30)
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_render(e, on_render)
+
+    if !engine.engine_run(e, -1, -1) {
+        println("SKIP no window")
+        engine.engine_free(e)
+        return
+    }
+
+    check("a client attached", g_sock != null)
+    // Past this line is the point. engine_free stops the channel, and the
+    // thread serving that still-open socket has to end itself.
+    engine.engine_free(e)
+    check("the channel stopped with the client still attached", true)
+
+    if g_sock != null { tcp.tcp_close(g_sock) }
+
+    if g_failures == 0 {
+        println("agent_attached: all checks passed (${g_checks})")
+        return
+    }
+    println("agent_attached: ${g_failures} failure(s) of ${g_checks}")
+}
