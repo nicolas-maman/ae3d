@@ -7,6 +7,7 @@
 #include <stdio.h>
 
 #define AE3D_STRIDE_BYTES (8 * (int)sizeof(float))
+#define AE3D_SKIN_BYTES (8 * (int)sizeof(float))
 #define AE3D_MATRIX_BYTES (16 * (int)sizeof(float))
 #define AE3D_COLOR_BYTES  (3 * (int)sizeof(float))
 
@@ -312,6 +313,28 @@ void ae3d_gl_update_mesh_vertices(void *mesh, int vbo) {
     glBindBuffer(GL_ARRAY_BUFFER, (GLuint)vbo);
     glBufferSubData(GL_ARRAY_BUFFER, 0,
                     (GLsizeiptr)vertex_count * AE3D_STRIDE_BYTES, vertices);
+}
+
+/* Joints and weights live in their own buffer on attributes 8 and 9, so a mesh
+   that is not skinned uploads nothing extra and reads the stride it always
+   read. Slots 0-2 are the vertex, 3-6 the instance matrix and 7 its colour. */
+void ae3d_gl_upload_skin(void *mesh, int vbo) {
+    const float *skin = ae3d_mesh_skin_data(mesh);
+    int vertex_count = ae3d_mesh_vertex_count(mesh);
+    if (!vbo || !skin || vertex_count <= 0) return;
+    glBindBuffer(GL_ARRAY_BUFFER, (GLuint)vbo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 (GLsizeiptr)vertex_count * AE3D_SKIN_BYTES, skin, GL_STATIC_DRAW);
+    glVertexAttribPointer(8, 4, GL_FLOAT, GL_FALSE, AE3D_SKIN_BYTES, (const void *)0);
+    glEnableVertexAttribArray(8);
+    glVertexAttribPointer(9, 4, GL_FLOAT, GL_FALSE, AE3D_SKIN_BYTES,
+                          (const void *)(4 * sizeof(float)));
+    glEnableVertexAttribArray(9);
+}
+
+void ae3d_gl_uniform_mat4v(int loc, int count, const void *values) {
+    if (loc < 0 || count <= 0 || !values) return;
+    glUniformMatrix4fv(loc, (GLsizei)count, GL_FALSE, (const GLfloat *)values);
 }
 
 void ae3d_gl_setup_vertex_attribs(void) {

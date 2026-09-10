@@ -246,6 +246,47 @@ test_apply_moves_and_scales() {
     core.model_free(m)
 }
 
+// A held frame does not advance the playheads, and it still has to put the
+// clips back. Whatever poses a model after the clips -- an IK solve, a
+// behaviour -- writes to the same local transform they do, so a frame that
+// re-used the last one as its starting point would build each pose on the one
+// before it and drift while the playhead stood still.
+test_apply_is_the_clip_not_the_last_pose() {
+    m = loader.cube(1.0)
+    clip = anim.clip_new("walk")
+    t = anim.channel_new(anim.TRANSLATION, anim.LINEAR)
+    anim.channel_add_key(t, 0.0, 0.0, 0.0, 0.0, 0.0)
+    anim.channel_add_key(t, 1.0, 10.0, 0.0, 0.0, 0.0)
+    anim.clip_add_channel(clip, t)
+
+    registry = anim.registry_new()
+    p = anim.player_new(clip)
+    anim.player_set_time(p, 0.5)
+    anim.registry_add(registry, "walk", p, m)
+    anim.registry_apply(registry)
+    check_near("the clip decides where the model is", m.position.x, 5.0)
+
+    // What a pose hook does: it moves the thing the clip drives.
+    core.model_set_position(m, m.position.x + 2.0, 0.0, 0.0)
+    anim.registry_apply(registry)
+    check_near("applying again is the clip, not the clip plus what moved it",
+               m.position.x, 5.0)
+
+    // And it stays there however many times the frame is drawn.
+    i = 0
+    while i < 8 {
+        core.model_set_position(m, m.position.x + 2.0, 0.0, 0.0)
+        anim.registry_apply(registry)
+        i = i + 1
+    }
+    check_near("and does not creep over a held frame drawn again and again",
+               m.position.x, 5.0)
+
+    anim.registry_free(registry)
+    anim.clip_free(clip)
+    core.model_free(m)
+}
+
 main() {
     test_empty_and_single()
     test_linear_vec3()
@@ -257,6 +298,7 @@ main() {
     test_player()
     test_apply_touches_only_what_it_drives()
     test_apply_moves_and_scales()
+    test_apply_is_the_clip_not_the_last_pose()
 
     if g_failures == 0 {
         println("test_anim: all checks passed (${g_checks})")

@@ -12,12 +12,13 @@ import std.string
 import ae3d.core
 
 exports (
-    load_obj, load_obj_instanced, load_mtl, materials_free,
+    load_obj, load_obj_skinned, load_obj_instanced, load_mtl, materials_free,
     cube, sphere, plane, water_surface, quad, grid, box_outline,
     last_error
 )
 
 extern ae3d_objbuild_create() -> ptr
+extern ae3d_objbuild_set_skin(build: ptr, rows: ptr)
 extern ae3d_objbuild_destroy(build: ptr)
 extern ae3d_objbuild_add_position(build: ptr, x: float, y: float, z: float) -> int
 extern ae3d_objbuild_add_uv(build: ptr, u: float, v: float) -> int
@@ -247,6 +248,15 @@ materials_free(materials: ptr) {
 }
 
 load_obj(path: string, recalculate_normals: bool) -> *Model {
+    return load_obj_skinned(path, recalculate_normals, null)
+}
+
+// The same load, with weights. A loaded mesh has more vertices than the OBJ has
+// positions -- a position with two normals across a hard edge is two vertices,
+// and only this knows which -- so the weights arrive keyed by position and are
+// written onto each vertex as it is emitted. A null skin loads exactly as
+// load_obj always did and touches nothing.
+load_obj_skinned(path: string, recalculate_normals: bool, skin: ptr) -> *Model {
     content, err = fs.read(path)
     if err != "" {
         set_error("cannot read ", path)
@@ -266,6 +276,8 @@ load_obj(path: string, recalculate_normals: bool) -> *Model {
         core.model_free(m)
         return null
     }
+
+    ae3d_objbuild_set_skin(build, skin)
 
     materials = list.new()
     positions = 0

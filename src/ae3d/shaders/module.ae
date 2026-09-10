@@ -24,12 +24,23 @@ layout(location = 1) in vec2 inTexCoord; // Texture Coordinate
 layout(location = 2) in vec3 inNormal;   // Vertex normal
 layout(location = 3) in mat4 instanceModel; // Instanced model matrix (locations 3,4,5,6)
 layout(location = 7) in vec3 instanceColor; // Per-instance color (for voxels)
+layout(location = 8) in vec4 inJoints;   // The four bones this vertex hangs off
+layout(location = 9) in vec4 inWeights;  // How much of each, summing to one
 
 uniform bool isInstanced; // Flag to differentiate instanced vs non-instanced rendering
 uniform bool useInstanceColor;
 uniform mat4 model;       // Regular model matrix
 uniform mat4 viewProjection;
 uniform mat4 lightSpaceMatrix;
+
+// A skinned draw is posed by the palette rather than by the model matrix
+// alone: each bone carries where it is now against where it was bound, and a
+// vertex is moved by the blend of the four it belongs to. Bounded so the array
+// fits the vertex uniform budget GL 3.3 guarantees, which is what a software
+// rasteriser actually gives.
+#define MAX_BONES 48
+uniform bool isSkinned;
+uniform mat4 bones[MAX_BONES];
 
 out vec2 fragTexCoord;    // Pass to fragment shader
 out vec3 Normal;          // Pass normal to fragment shader
@@ -43,14 +54,25 @@ void main() {
     // This allows moving/scaling/rotating the entire group of instances using the model transform
     mat4 modelMatrix = isInstanced ? (model * instanceModel) : model;
 
+    vec4 posed = vec4(inPosition, 1.0);
+    vec3 posedNormal = inNormal;
+    if (isSkinned) {
+        mat4 skin = inWeights.x * bones[int(inJoints.x)]
+                  + inWeights.y * bones[int(inJoints.y)]
+                  + inWeights.z * bones[int(inJoints.z)]
+                  + inWeights.w * bones[int(inJoints.w)];
+        posed = skin * posed;
+        posedNormal = mat3(skin) * inNormal;
+    }
+
     // High-precision world position calculation
-    FragPos = vec3(modelMatrix * vec4(inPosition, 1.0));
+    FragPos = vec3(modelMatrix * posed);
     
     // Correct normal transformation using inverse transpose
     // For uniform scaling, we can use the upper-left 3x3 of the model matrix
     // For non-uniform scaling, this should be inverse(transpose(mat3(modelMatrix)))
     mat3 normalMatrix = mat3(modelMatrix);
-    Normal = normalize(normalMatrix * inNormal);
+    Normal = normalize(normalMatrix * posedNormal);
     
     fragTexCoord = inTexCoord;
     
@@ -59,7 +81,7 @@ void main() {
 
     // Final vertex position
     FragPosLightSpace = lightSpaceMatrix * vec4(FragPos, 1.0);
-    gl_Position = viewProjection * modelMatrix * vec4(inPosition, 1.0);
+    gl_Position = viewProjection * modelMatrix * posed;
 }
 
 GLSL_END
@@ -1711,17 +1733,33 @@ const VERTEX_DEPTH = <<GLSL_END
 #version 330 core
 layout (location = 0) in vec3 inPosition;
 layout (location = 3) in mat4 instanceModel;
+layout (location = 8) in vec4 inJoints;
+layout (location = 9) in vec4 inWeights;
 
 uniform bool isInstanced;
 uniform mat4 model;
 uniform mat4 lightSpaceMatrix;
+
+#define MAX_BONES 48
+uniform bool isSkinned;
+uniform mat4 bones[MAX_BONES];
 
 void main() {
     // The same transform the lit pass builds. Reading instanceModel alone left
     // an instanced model casting its shadow from wherever its own transform was
     // not applied.
     mat4 modelMatrix = isInstanced ? (model * instanceModel) : model;
-    gl_Position = lightSpaceMatrix * modelMatrix * vec4(inPosition, 1.0);
+    // And the same pose. A shadow pass that skipped this drew the bind pose,
+    // so a figure threw the shadow of a mannequin standing where it started.
+    vec4 posed = vec4(inPosition, 1.0);
+    if (isSkinned) {
+        mat4 skin = inWeights.x * bones[int(inJoints.x)]
+                  + inWeights.y * bones[int(inJoints.y)]
+                  + inWeights.z * bones[int(inJoints.z)]
+                  + inWeights.w * bones[int(inJoints.w)];
+        posed = skin * posed;
+    }
+    gl_Position = lightSpaceMatrix * modelMatrix * posed;
 }
 GLSL_END
 

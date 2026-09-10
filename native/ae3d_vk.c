@@ -49,6 +49,7 @@
 #define AE3D_VK_PROGRAM_COUNT 2
 #define AE3D_VK_DRAWS_PER_FRAME 4096
 #define AE3D_VK_MAX_TEXTURES 256
+#define AE3D_VK_SKIN_STRIDE (8 * (unsigned)sizeof(float))
 #define AE3D_VK_STRIDE (8 * (int)sizeof(float))
 
 #define AE3D_VK_GLOBAL_FUNCS(X) \
@@ -165,6 +166,12 @@ typedef struct {
     VkDeviceMemory vertex_memory;
     VkBuffer index_buffer;
     VkDeviceMemory index_memory;
+    /* Joints and weights, for a mesh that has them. A mesh that does not
+       allocates nothing here and is drawn by a pipeline whose vertex input
+       does not name the binding. */
+    VkBuffer skin_buffer;
+    VkDeviceMemory skin_memory;
+    int skinned;
     unsigned index_count;
     int in_use;
     // Geometry that appears many times is uploaded once, so the models using it
@@ -239,6 +246,7 @@ static struct {
     VkImageView shadow_view;
     VkSampler shadow_sampler;
     VkPipeline shadow_pipeline;
+    VkPipeline skinned_shadow_pipeline;
     VkPipeline water_pipeline[2];
     VkPipeline water_pipeline_blend;
     int program;
@@ -261,6 +269,8 @@ static struct {
     // are two pipelines rather than one dynamic state.
     VkPipeline pipeline[2];
     VkPipeline pipeline_blend;
+    VkPipeline skinned_pipeline[2];
+    VkPipeline skinned_pipeline_blend;
     int cull;
     VkDescriptorSetLayout set_layout;
     VkDescriptorPool descriptor_pool;
@@ -284,6 +294,10 @@ static struct {
     float bloom_intensity;
     VkBuffer identity_instance;
     VkDeviceMemory identity_instance_memory;
+    /* One unused joint and weight, for the draws whose pipeline strides zero
+       through it. */
+    VkBuffer empty_skin;
+    VkDeviceMemory empty_skin_memory;
 
     VkCommandBuffer command_buffers[AE3D_VK_FRAMES];
     VkSemaphore image_available[AE3D_VK_FRAMES];
@@ -2033,6 +2047,17 @@ void ae3d_vk_scene_set_mat4(int offset, const double *m) {
     ae3d_vk_set_mat4(&vk.scene[vk.program], offset, m);
 }
 
+/* The bone palette, which is already the floats the block wants: std140 gives
+   a mat4 array a stride of 64 bytes, which is the matrix itself, so the run
+   copies whole rather than a matrix at a time. */
+void ae3d_vk_scene_set_mat4v(int offset, int count, const void *values) {
+    ae3d_vk_scene *block = &vk.scene[vk.program];
+    size_t bytes = (size_t)count * 16 * sizeof(float);
+    if (!values || count <= 0 || offset < 0) return;
+    if ((size_t)offset + bytes > sizeof(block->bytes)) return;
+    memcpy(block->bytes + offset, values, bytes);
+}
+
 // Vulkan clip space puts y downward and z in [0, 1] while the engine's matrices
 // are OpenGL-shaped, so the correction is folded in here rather than making
 // every caller keep two projections. It applies to whichever matrix reaches
@@ -2088,10 +2113,11 @@ void ae3d_vk_set_blend(int on) { vk.blend = on; }
 static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
                                         VkShaderModule fragment_module, int blend,
                                         int depth_test, int depth_write,
-                                        VkRenderPass render_pass, int cull) {
+                                        VkRenderPass render_pass, int cull,
+                                        int skinned) {
     VkPipelineShaderStageCreateInfo stages[2];
-    VkVertexInputBindingDescription bindings[2];
-    VkVertexInputAttributeDescription attributes[8];
+    VkVertexInputBindingDescription bindings[3];
+    VkVertexInputAttributeDescription attributes[10];
     VkPipelineVertexInputStateCreateInfo vertex_input;
     VkPipelineInputAssemblyStateCreateInfo assembly;
     VkPipelineViewportStateCreateInfo viewport_state;
@@ -2106,6 +2132,7 @@ static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
     VkPipeline pipeline = VK_NULL_HANDLE;
     int i;
 
+    memset(bindings, 0, sizeof(bindings));
     memset(stages, 0, sizeof(stages));
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -2150,11 +2177,31 @@ static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
     attributes[7].format = VK_FORMAT_R32G32B32_SFLOAT;
     attributes[7].offset = 16 * (unsigned)sizeof(float);
 
+    /* Vulkan has no equivalent of leaving an attribute disabled: the vertex
+       input has to describe every input the shader reads, and one shader
+       serves both kinds of draw. So both pipelines name the binding, and what
+       differs is the stride -- the skinned one steps through a joint and
+       weight per vertex, the plain one strides zero and every vertex reads the
+       same unused element out of a buffer that is one element long. That is
+       what makes an unskinned mesh cost nothing: no skin buffer, no allocation
+       that scales with the mesh, and a branch the shader does not take. */
+    bindings[2].binding = 2;
+    bindings[2].stride = skinned ? AE3D_VK_SKIN_STRIDE : 0;
+    bindings[2].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    attributes[8].location = 8;
+    attributes[8].binding = 2;
+    attributes[8].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attributes[8].offset = 0;
+    attributes[9].location = 9;
+    attributes[9].binding = 2;
+    attributes[9].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attributes[9].offset = 4 * (unsigned)sizeof(float);
+
     memset(&vertex_input, 0, sizeof(vertex_input));
     vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vertex_input.vertexBindingDescriptionCount = 2;
+    vertex_input.vertexBindingDescriptionCount = 3;
     vertex_input.pVertexBindingDescriptions = bindings;
-    vertex_input.vertexAttributeDescriptionCount = 8;
+    vertex_input.vertexAttributeDescriptionCount = 10;
     vertex_input.pVertexAttributeDescriptions = attributes;
 
     memset(&assembly, 0, sizeof(assembly));
@@ -2268,6 +2315,9 @@ static int ae3d_vk_create_pass_pipelines(void) {
         { ae3d_vk_water_vert_spv, sizeof(ae3d_vk_water_vert_spv),
           ae3d_vk_water_frag_spv, sizeof(ae3d_vk_water_frag_spv),
           0, 1, 1, 1, 1, VK_NULL_HANDLE, NULL },
+        { ae3d_vk_depth_vert_spv, sizeof(ae3d_vk_depth_vert_spv),
+          ae3d_vk_depth_frag_spv, sizeof(ae3d_vk_depth_frag_spv),
+          0, 1, 1, 1, 0, VK_NULL_HANDLE, NULL },
     };
     unsigned i;
 
@@ -2276,6 +2326,7 @@ static int ae3d_vk_create_pass_pipelines(void) {
     builds[2].pass = vk.post_pass;   builds[2].out = &vk.post_pipelines[1];
     builds[3].pass = vk.post_pass;   builds[3].out = &vk.post_pipelines[2];
     builds[4].pass = vk.shadow_pass; builds[4].out = &vk.shadow_pipeline;
+    builds[8].pass = vk.shadow_pass; builds[8].out = &vk.skinned_shadow_pipeline;
     builds[5].pass = vk.render_pass; builds[5].out = &vk.water_pipeline[0];
     builds[6].pass = vk.render_pass; builds[6].out = &vk.water_pipeline_blend;
     builds[7].pass = vk.render_pass; builds[7].out = &vk.water_pipeline[1];
@@ -2284,9 +2335,10 @@ static int ae3d_vk_create_pass_pipelines(void) {
         VkShaderModule vertex_module = ae3d_vk_shader(builds[i].vert, builds[i].vert_size);
         VkShaderModule fragment_module = ae3d_vk_shader(builds[i].frag, builds[i].frag_size);
         if (!vertex_module || !fragment_module) return ae3d_vk_fail("pass vkCreateShaderModule failed");
+        int skinned = (builds[i].out == &vk.skinned_shadow_pipeline);
         *builds[i].out = ae3d_vk_build_pipeline(vertex_module, fragment_module, builds[i].blend,
                                                 builds[i].depth_test, builds[i].depth_write,
-                                                builds[i].pass, builds[i].cull);
+                                                builds[i].pass, builds[i].cull, skinned);
         ae3d_vkDestroyShaderModule(vk.device, vertex_module, NULL);
         ae3d_vkDestroyShaderModule(vk.device, fragment_module, NULL);
         if (!*builds[i].out && builds[i].required) {
@@ -2320,17 +2372,21 @@ static int ae3d_vk_create_pipeline(void) {
     // OpenGL backend turns culling off for the transparent pass for the same
     // reason, which is why only the opaque pipeline comes in two variants.
     vk.pipeline_blend = ae3d_vk_build_pipeline(vertex_module, fragment_module, 1, 1, 0,
-                                               vk.render_pass, 0);
+                                               vk.render_pass, 0, 0);
+    vk.skinned_pipeline_blend = ae3d_vk_build_pipeline(vertex_module, fragment_module, 1, 1, 0,
+                                                       vk.render_pass, 0, 1);
     for (cull = 0; cull < 2; cull++) {
         vk.pipeline[cull] = ae3d_vk_build_pipeline(vertex_module, fragment_module, 1, 1, 1,
-                                                   vk.render_pass, cull);
-        if (!vk.pipeline[cull]) {
+                                                   vk.render_pass, cull, 0);
+        vk.skinned_pipeline[cull] = ae3d_vk_build_pipeline(vertex_module, fragment_module, 1, 1, 1,
+                                                           vk.render_pass, cull, 1);
+        if (!vk.pipeline[cull] || !vk.skinned_pipeline[cull]) {
             ae3d_vkDestroyShaderModule(vk.device, vertex_module, NULL);
             ae3d_vkDestroyShaderModule(vk.device, fragment_module, NULL);
             return ae3d_vk_fail("vkCreateGraphicsPipelines failed");
         }
     }
-    if (!vk.pipeline_blend) {
+    if (!vk.pipeline_blend || !vk.skinned_pipeline_blend) {
         ae3d_vkDestroyShaderModule(vk.device, vertex_module, NULL);
         ae3d_vkDestroyShaderModule(vk.device, fragment_module, NULL);
         return ae3d_vk_fail("vkCreateGraphicsPipelines failed");
@@ -2362,6 +2418,14 @@ static int ae3d_vk_create_defaults(void) {
     if (!ae3d_vk_upload_buffer(identity, sizeof(identity), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                                &vk.identity_instance, &vk.identity_instance_memory)) {
         return 0;
+    }
+    {
+        float empty[8];
+        memset(empty, 0, sizeof(empty));
+        if (!ae3d_vk_upload_buffer(empty, sizeof(empty), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                   &vk.empty_skin, &vk.empty_skin_memory)) {
+            return 0;
+        }
     }
     return 1;
 }
@@ -2579,6 +2643,8 @@ int ae3d_vk_sample_count(void) { return (int)vk.samples; }
 // caller has been filling is snapshotted per draw rather than shared.
 static void ae3d_vk_draw_pipeline(VkPipeline pipeline, int handle, int texture_handle,
                                   int instance_handle, int instance_count) {
+    /* Whether the pipeline names binding 2 is decided by the mesh, which is
+       what chose the pipeline: the two cannot disagree. */
     ae3d_vk_uniform_ring *ring;
     VkDescriptorSet set;
     VkDeviceSize offsets[1];
@@ -2622,6 +2688,14 @@ static void ae3d_vk_draw_pipeline(VkPipeline pipeline, int handle, int texture_h
         instance_count = 1;
     }
 
+    if (mesh->skinned && mesh->skin_buffer) {
+        ae3d_vkCmdBindVertexBuffers(vk.command_buffers[vk.frame], 2, 1,
+                                    &mesh->skin_buffer, offsets);
+    } else {
+        ae3d_vkCmdBindVertexBuffers(vk.command_buffers[vk.frame], 2, 1,
+                                    &vk.empty_skin, offsets);
+    }
+
     ae3d_vkCmdBindIndexBuffer(vk.command_buffers[vk.frame], mesh->index_buffer, 0, VK_INDEX_TYPE_UINT32);
     ae3d_vkCmdDrawIndexed(vk.command_buffers[vk.frame], mesh->index_count,
                           (unsigned)instance_count, 0, 0, 0);
@@ -2642,11 +2716,15 @@ void ae3d_vk_set_face_culling(int on) { vk.cull = on ? 1 : 0; }
 void ae3d_vk_draw(int handle, int texture_handle, int instance_handle, int instance_count) {
     VkPipeline opaque = vk.pipeline[vk.cull];
     VkPipeline blended = vk.pipeline_blend;
+    int skinned = handle > 0 && handle <= vk.mesh_capacity && vk.meshes[handle - 1].skinned;
 
     if (vk.program == AE3D_VK_PROGRAM_WATER && vk.water_pipeline[vk.cull]
         && vk.water_pipeline_blend) {
         opaque = vk.water_pipeline[vk.cull];
         blended = vk.water_pipeline_blend;
+    } else if (skinned && vk.skinned_pipeline[vk.cull] && vk.skinned_pipeline_blend) {
+        opaque = vk.skinned_pipeline[vk.cull];
+        blended = vk.skinned_pipeline_blend;
     }
     ae3d_vk_draw_pipeline(vk.blend ? blended : opaque, handle, texture_handle,
                           instance_handle, instance_count);
@@ -2744,9 +2822,14 @@ int ae3d_vk_shadow_begin(void) {
 }
 
 void ae3d_vk_shadow_draw(int mesh_handle, int instance_handle, int instance_count) {
+    VkPipeline pipeline = vk.shadow_pipeline;
     if (!vk.shadow_pipeline || !vk.in_shadow_pass) return;
+    if (mesh_handle > 0 && mesh_handle <= vk.mesh_capacity
+        && vk.meshes[mesh_handle - 1].skinned && vk.skinned_shadow_pipeline) {
+        pipeline = vk.skinned_shadow_pipeline;
+    }
     vk.program = AE3D_VK_PROGRAM_SCENE;
-    ae3d_vk_draw_pipeline(vk.shadow_pipeline, mesh_handle, vk.default_texture,
+    ae3d_vk_draw_pipeline(pipeline, mesh_handle, vk.default_texture,
                           instance_handle, instance_count);
 }
 
@@ -2962,6 +3045,10 @@ int ae3d_vk_upload_mesh(void *mesh) {
     for (i = 0; i < vk.mesh_capacity; i++) {
         ae3d_vk_mesh *entry = &vk.meshes[i];
         if (!entry->in_use || !entry->shared || entry->refs <= 0) continue;
+        /* Two meshes alike in their vertices can differ in their skins, and the
+           comparison below cannot see that, so a skinned mesh is never shared
+           and never shares. */
+        if (entry->skinned || ae3d_mesh_is_skinned(mesh)) continue;
         if (entry->vertex_count != vertex_count) continue;
         if (entry->index_count != (unsigned)index_count) continue;
         if (memcmp(entry->vertices, vertices, (size_t)vertex_count * AE3D_VK_STRIDE) != 0) continue;
@@ -3007,6 +3094,17 @@ int ae3d_vk_upload_mesh(void *mesh) {
                                &slot->vertex_buffer, &slot->vertex_memory)) {
         free(sequential);
         return 0;
+    }
+
+    if (ae3d_mesh_is_skinned(mesh)) {
+        if (!ae3d_vk_upload_buffer(ae3d_mesh_skin_data(mesh),
+                                   (VkDeviceSize)vertex_count * AE3D_VK_SKIN_STRIDE,
+                                   VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                   &slot->skin_buffer, &slot->skin_memory)) {
+            free(sequential);
+            return 0;
+        }
+        slot->skinned = 1;
     }
     if (!ae3d_vk_upload_buffer(indices, (VkDeviceSize)index_count * sizeof(unsigned),
                                VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
@@ -3155,6 +3253,10 @@ void ae3d_vk_free_mesh(int handle) {
     ae3d_vkFreeMemory(vk.device, mesh->vertex_memory, NULL);
     ae3d_vkDestroyBuffer(vk.device, mesh->index_buffer, NULL);
     ae3d_vkFreeMemory(vk.device, mesh->index_memory, NULL);
+    if (mesh->skin_buffer) {
+        ae3d_vkDestroyBuffer(vk.device, mesh->skin_buffer, NULL);
+        ae3d_vkFreeMemory(vk.device, mesh->skin_memory, NULL);
+    }
     memset(mesh, 0, sizeof(*mesh));
 }
 
@@ -3174,6 +3276,10 @@ void ae3d_vk_shutdown(void) {
             ae3d_vkFreeMemory(vk.device, vk.meshes[i].vertex_memory, NULL);
             ae3d_vkDestroyBuffer(vk.device, vk.meshes[i].index_buffer, NULL);
             ae3d_vkFreeMemory(vk.device, vk.meshes[i].index_memory, NULL);
+            if (vk.meshes[i].skin_buffer) {
+                ae3d_vkDestroyBuffer(vk.device, vk.meshes[i].skin_buffer, NULL);
+                ae3d_vkFreeMemory(vk.device, vk.meshes[i].skin_memory, NULL);
+            }
             // The copy a shared mesh keeps of the bytes it was built from.
             free(vk.meshes[i].vertices);
             free(vk.meshes[i].indices);
@@ -3208,6 +3314,8 @@ void ae3d_vk_shutdown(void) {
 
     if (vk.identity_instance) ae3d_vkDestroyBuffer(vk.device, vk.identity_instance, NULL);
     if (vk.identity_instance_memory) ae3d_vkFreeMemory(vk.device, vk.identity_instance_memory, NULL);
+    if (vk.empty_skin) ae3d_vkDestroyBuffer(vk.device, vk.empty_skin, NULL);
+    if (vk.empty_skin_memory) ae3d_vkFreeMemory(vk.device, vk.empty_skin_memory, NULL);
 
     if (vk.descriptor_pool) ae3d_vkDestroyDescriptorPool(vk.device, vk.descriptor_pool, NULL);
     if (vk.set_layout) ae3d_vkDestroyDescriptorSetLayout(vk.device, vk.set_layout, NULL);

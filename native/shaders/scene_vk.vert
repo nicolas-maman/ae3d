@@ -20,6 +20,8 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 model;
     mat4 viewProjection;
     mat4 lightSpaceMatrix;
+    bool isSkinned;
+    mat4 bones[48];
     int lightCount;
     vec3 viewPos;
     float viewDistance;
@@ -119,10 +121,20 @@ layout(location = 1) in vec2 inTexCoord; // Texture Coordinate
 layout(location = 2) in vec3 inNormal;   // Vertex normal
 layout(location = 3) in mat4 instanceModel; // Instanced model matrix (locations 3,4,5,6)
 layout(location = 7) in vec3 instanceColor; // Per-instance color (for voxels)
+layout(location = 8) in vec4 inJoints;   // The four bones this vertex hangs off
+layout(location = 9) in vec4 inWeights;  // How much of each, summing to one
 
 
 
 
+
+
+
+// A skinned draw is posed by the palette rather than by the model matrix
+// alone: each bone carries where it is now against where it was bound, and a
+// vertex is moved by the blend of the four it belongs to. Bounded so the array
+// fits the vertex uniform budget GL 3.3 guarantees, which is what a software
+// rasteriser actually gives.
 
 
 
@@ -138,14 +150,25 @@ void main() {
     // This allows moving/scaling/rotating the entire group of instances using the model transform
     mat4 modelMatrix = isInstanced ? (model * instanceModel) : model;
 
+    vec4 posed = vec4(inPosition, 1.0);
+    vec3 posedNormal = inNormal;
+    if (isSkinned) {
+        mat4 skin = inWeights.x * bones[int(inJoints.x)]
+                  + inWeights.y * bones[int(inJoints.y)]
+                  + inWeights.z * bones[int(inJoints.z)]
+                  + inWeights.w * bones[int(inJoints.w)];
+        posed = skin * posed;
+        posedNormal = mat3(skin) * inNormal;
+    }
+
     // High-precision world position calculation
-    FragPos = vec3(modelMatrix * vec4(inPosition, 1.0));
+    FragPos = vec3(modelMatrix * posed);
     
     // Correct normal transformation using inverse transpose
     // For uniform scaling, we can use the upper-left 3x3 of the model matrix
     // For non-uniform scaling, this should be inverse(transpose(mat3(modelMatrix)))
     mat3 normalMatrix = mat3(modelMatrix);
-    Normal = normalize(normalMatrix * inNormal);
+    Normal = normalize(normalMatrix * posedNormal);
     
     fragTexCoord = inTexCoord;
     
@@ -154,6 +177,6 @@ void main() {
 
     // Final vertex position
     FragPosLightSpace = lightSpaceMatrix * vec4(FragPos, 1.0);
-    gl_Position = viewProjection * modelMatrix * vec4(inPosition, 1.0);
+    gl_Position = viewProjection * modelMatrix * posed;
 }
 

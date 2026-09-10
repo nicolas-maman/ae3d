@@ -46,6 +46,27 @@ int    ae3d_mesh_push_vertex(void *mesh, double px, double py, double pz,
                              double u, double v,
                              double nx, double ny, double nz);
 int    ae3d_mesh_push_index(void *mesh, int index);
+int    ae3d_mesh_set_skin(void *mesh, int i, int j0, int j1, int j2, int j3,
+                          double w0, double w1, double w2, double w3);
+int    ae3d_mesh_is_skinned(void *mesh);
+void  *ae3d_palette_create(int bones);
+void   ae3d_palette_destroy(void *palette);
+int    ae3d_palette_bones(void *palette);
+void   ae3d_palette_set(void *palette, int bone, const double *m);
+double ae3d_palette_get(void *palette, int bone, int i);
+const float *ae3d_palette_data(void *palette);
+void   ae3d_gl_upload_skin(void *mesh, int vbo);
+void  *ae3d_skinrows_create(int count);
+void   ae3d_skinrows_destroy(void *rows);
+int    ae3d_skinrows_count(void *rows);
+void   ae3d_skinrows_set(void *rows, int i, int j0, int j1, int j2, int j3,
+                         double w0, double w1, double w2, double w3);
+void   ae3d_skinrows_apply(void *rows, void *mesh, int vertex, int position);
+void   ae3d_objbuild_set_skin(void *build, void *rows);
+void   ae3d_gl_uniform_mat4v(int loc, int count, const void *values);
+const float *ae3d_mesh_skin_data(void *mesh);
+double ae3d_mesh_skin_joint(void *mesh, int i, int slot);
+double ae3d_mesh_skin_weight(void *mesh, int i, int slot);
 int    ae3d_mesh_vertex_count(void *mesh);
 int    ae3d_mesh_index_count(void *mesh);
 double ae3d_mesh_pos_x(void *mesh, int i);
@@ -243,6 +264,7 @@ void   ae3d_vk_scene_set_int(int offset, int value);
 void   ae3d_vk_scene_set_vec3(int offset, double x, double y, double z);
 void   ae3d_vk_scene_set_mat4(int offset, const double *m);
 void   ae3d_vk_scene_set_clip_mat4(int offset, const double *m);
+void   ae3d_vk_scene_set_mat4v(int offset, int count, const void *values);
 void   ae3d_vk_set_blend(int on);
 void   ae3d_vk_draw(int mesh, int texture, int instances, int instance_count);
 void   ae3d_vk_draw_sky(int mesh, int texture);

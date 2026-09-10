@@ -22,6 +22,9 @@ import ae3d.platform
 
 exports (
     mesh_push_skybox_cube, skybox_solid, skybox_texture, mesh_normal,
+    mesh_set_skin, mesh_is_skinned, mesh_skin_joint, mesh_skin_weight,
+    palette_create, palette_destroy, palette_bones, palette_set, palette_get,
+    palette_data, skinrows_create, skinrows_destroy, skinrows_count, skinrows_set,
     Vec2, Vec3, Vec4, Quat, Mat4, vec2, vec3, vec4, quat, v3_add, v3_sub, v3_mul, v3_div,
     v3_neg, v3_dot, v3_cross, v3_len, v3_len_sq, v3_normalize, v3_distance, v3_lerp, v3_eq,
     v3_zero, v4_from_v3, v4_xyz, quat_ident, quat_rotate, quat_mul, quat_apply,
@@ -40,6 +43,7 @@ exports (
     model_update_matrix, model_recalculate_bounds, model_mark_dirty, model_set_diffuse,
     model_set_parent, model_parent, model_sync_transform, model_world_position,
     model_set_mesh, model_disable_instancing,
+    model_set_skeleton, model_skeleton,
     model_set_specular, model_set_pbr, model_set_exposure, model_set_alpha,
     model_set_texture, model_set_shader, model_set_name, model_set_source_path,
     material_set_texture_path, material_set_name, light_set_name, camera_set_name, text,
@@ -128,6 +132,25 @@ extern ae3d_mesh_norm_y(mesh: ptr, i: int) -> float
 extern ae3d_mesh_norm_z(mesh: ptr, i: int) -> float
 
 extern ae3d_mesh_index_count(mesh: ptr) -> int
+
+extern ae3d_mesh_set_skin(mesh: ptr, i: int, j0: int, j1: int, j2: int, j3: int,
+                          w0: float, w1: float, w2: float, w3: float) -> int
+extern ae3d_mesh_is_skinned(mesh: ptr) -> int
+extern ae3d_mesh_skin_joint(mesh: ptr, i: int, slot: int) -> float
+extern ae3d_mesh_skin_weight(mesh: ptr, i: int, slot: int) -> float
+
+extern ae3d_palette_create(bones: int) -> ptr
+extern ae3d_palette_destroy(palette: ptr)
+extern ae3d_palette_bones(palette: ptr) -> int
+extern ae3d_palette_set(palette: ptr, bone: int, m: ptr)
+extern ae3d_palette_get(palette: ptr, bone: int, i: int) -> float
+extern ae3d_palette_data(palette: ptr) -> ptr
+
+extern ae3d_skinrows_create(count: int) -> ptr
+extern ae3d_skinrows_destroy(rows: ptr)
+extern ae3d_skinrows_count(rows: ptr) -> int
+extern ae3d_skinrows_set(rows: ptr, i: int, j0: int, j1: int, j2: int, j3: int,
+                         w0: float, w1: float, w2: float, w3: float)
 
 extern ae3d_mesh_compute_bounds(mesh: ptr, px: float, py: float, pz: float, sx: float, sy: float, sz: float, qx: float, qy: float, qz: float, qw: float)
 
@@ -298,6 +321,9 @@ struct Model {
     shadow_stamp: int
 
     mesh: ptr
+    // The skeleton this model is posed by, or null. Borrowed: a figure's bones
+    // are models in the same scene, and what owns them is whatever built them.
+    skeleton: ptr
     instances: ptr
     material: *Material
     materials: ptr
@@ -309,6 +335,7 @@ struct Model {
     vao: int
     vbo: int
     ebo: int
+    skin_vbo: int
     shares_geometry: bool
     instance_vbo: int
     instance_vbo_capacity: int
@@ -1295,6 +1322,19 @@ model_set_mesh(m: *Model, mesh: ptr) {
     model_recalculate_bounds(m)
 }
 
+// Pose this model by a skeleton. The renderer reads it when the model is
+// drawn; a model with none draws exactly as it always did, and the skinning
+// branch in the shader is not taken.
+model_set_skeleton(m: *Model, skeleton: ptr) {
+    if m == null { return }
+    m.skeleton = skeleton
+}
+
+model_skeleton(m: *Model) -> ptr {
+    if m == null { return null }
+    return m.skeleton
+}
+
 model_recalculate_bounds(m: *Model) {
     if m.is_instanced && m.instances != null && ae3d_inst_count(m.instances) > 0 {
         ae3d_inst_compute_bounds(m.instances)
@@ -2033,6 +2073,44 @@ mesh_push_triangle(mesh: ptr, a: int, b: int, c: int) {
     ae3d_mesh_push_index(mesh, a)
     ae3d_mesh_push_index(mesh, b)
     ae3d_mesh_push_index(mesh, c)
+}
+
+// Four bones and four weights for one vertex. The weights are normalised on
+// the way in, so what a renderer reads always sums to one.
+mesh_set_skin(mesh: ptr, i: int, j0: int, j1: int, j2: int, j3: int,
+              w0: float, w1: float, w2: float, w3: float) -> bool {
+    return ae3d_mesh_set_skin(mesh, i, j0, j1, j2, j3, w0, w1, w2, w3) != 0
+}
+
+mesh_is_skinned(mesh: ptr) -> bool {
+    return ae3d_mesh_is_skinned(mesh) != 0
+}
+
+mesh_skin_joint(mesh: ptr, i: int, slot: int) -> int {
+    return ae3d_mesh_skin_joint(mesh, i, slot) as int
+}
+
+mesh_skin_weight(mesh: ptr, i: int, slot: int) -> float {
+    return ae3d_mesh_skin_weight(mesh, i, slot)
+}
+
+palette_create(bones: int) -> ptr { return ae3d_palette_create(bones) }
+palette_destroy(palette: ptr) { ae3d_palette_destroy(palette) }
+palette_bones(palette: ptr) -> int { return ae3d_palette_bones(palette) }
+palette_set(palette: ptr, bone: int, m: ptr) { ae3d_palette_set(palette, bone, m) }
+palette_get(palette: ptr, bone: int, i: int) -> float {
+    return ae3d_palette_get(palette, bone, i)
+}
+palette_data(palette: ptr) -> ptr { return ae3d_palette_data(palette) }
+
+// Weights keyed by the position they were authored against, for a loader to
+// spread over the vertices that position becomes.
+skinrows_create(count: int) -> ptr { return ae3d_skinrows_create(count) }
+skinrows_destroy(rows: ptr) { ae3d_skinrows_destroy(rows) }
+skinrows_count(rows: ptr) -> int { return ae3d_skinrows_count(rows) }
+skinrows_set(rows: ptr, i: int, j0: int, j1: int, j2: int, j3: int,
+             w0: float, w1: float, w2: float, w3: float) {
+    ae3d_skinrows_set(rows, i, j0, j1, j2, j3, w0, w1, w2, w3)
 }
 
 mesh_vertex_count(mesh: ptr) -> int {

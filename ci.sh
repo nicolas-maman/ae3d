@@ -13,6 +13,17 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
 FRAMES="${AE3D_CI_FRAMES:-30}"
+
+# The size suites and examples draw at. A runner has no GPU, and a software
+# rasteriser is billed for every pixel it shades: the same run at a quarter of
+# the width and a quarter of the height does every frame, every draw and every
+# branch of the shader for a sixteenth of the work. Three examples were 68% of
+# this file's wall time on Linux for that reason alone.
+#
+# Benchmarks are exempt: what they measure is the cost of a frame, and a frame
+# is a size.
+export AE3D_WIDTH="${AE3D_CI_WIDTH:-320}"
+export AE3D_HEIGHT="${AE3D_CI_HEIGHT:-180}"
 failures=0
 skipped=0
 
@@ -51,6 +62,41 @@ RUN_LIMIT="${AE3D_CI_RUN_LIMIT:-300}"
 
 # A shell gives 128 plus the signal for a child that was killed, and the
 # message a crash leaves on its own says neither which signal nor which suite.
+# Every target is built the same way and none of them depend on another, so
+# they are built at once and run one at a time: builds are the whole of the
+# Windows leg, where most suites skip for want of a GPU, and running in
+# parallel would have several programs contending for one software rasteriser
+# and report timings nobody can read.
+JOBS="${AE3D_CI_JOBS:-$( (nproc || sysctl -n hw.ncpu) 2>/dev/null || echo 2 )}"
+BUILD_DIR="${TMPDIR:-/tmp}/ae3d_builds"
+
+build_together() {   # build_together <source> [<source>...]
+    rm -rf "$BUILD_DIR"
+    mkdir -p "$BUILD_DIR"
+    # The C half once, up front: every build below would otherwise race to
+    # compile the same objects into the same files.
+    ./build.sh --natives >"$BUILD_DIR/natives.log" 2>&1 || true
+    started=0
+    for source in "$@"; do
+        target="$(basename "$source" .ae)"
+        (
+            ./build.sh "$source" "$target" >"$BUILD_DIR/$target.log" 2>&1
+            echo $? >"$BUILD_DIR/$target.status"
+        ) &
+        started=$((started + 1))
+        if [ "$started" -ge "$JOBS" ]; then
+            wait
+            started=0
+        fi
+    done
+    wait
+}
+
+# What build_together made of one target: 0 and a quiet log, or the reason.
+built_ok() {   # built_ok <name>
+    [ "$(cat "$BUILD_DIR/$1.status" 2>/dev/null || echo 1)" = "0" ]
+}
+
 died_on() {   # died_on <status>
     if [ "$1" -gt 128 ] && [ "$1" -lt 160 ]; then
         printf ' (died on signal %d)' "$(($1 - 128))"
@@ -286,16 +332,17 @@ for script_source in resources/scripts/*.ae; do
 done
 
 step "test suites"
+build_together tests/test_*.ae
 for suite in tests/test_*.ae; do
     name="$(basename "$suite" .ae)"
-    if ! ./build.sh "$suite" "$name" >/tmp/ae3d_build.log 2>&1; then
+    if ! built_ok "$name"; then
         fail "$name (build)"
-        sed 's/^/        /' /tmp/ae3d_build.log | head -20
+        sed 's/^/        /' "$BUILD_DIR/$name.log" | head -20
         continue
     fi
-    if grep -q "warning" /tmp/ae3d_build.log; then
+    if grep -q "warning" "$BUILD_DIR/$name.log"; then
         fail "$name (build warnings)"
-        grep "warning" /tmp/ae3d_build.log | sed 's/^/        /' | head -10
+        grep "warning" "$BUILD_DIR/$name.log" | sed 's/^/        /' | head -10
         continue
     fi
     needs_window=0
@@ -325,16 +372,17 @@ for suite in tests/test_*.ae; do
 done
 
 step "examples build and run"
+build_together examples/*.ae
 for example in examples/*.ae; do
     name="$(basename "$example" .ae)"
-    if ! ./build.sh "$example" "$name" >/tmp/ae3d_build.log 2>&1; then
+    if ! built_ok "$name"; then
         fail "$name (build)"
-        sed 's/^/        /' /tmp/ae3d_build.log | head -20
+        sed 's/^/        /' "$BUILD_DIR/$name.log" | head -20
         continue
     fi
-    if grep -q "warning" /tmp/ae3d_build.log; then
+    if grep -q "warning" "$BUILD_DIR/$name.log"; then
         fail "$name (build warnings)"
-        grep "warning" /tmp/ae3d_build.log | sed 's/^/        /' | head -10
+        grep "warning" "$BUILD_DIR/$name.log" | sed 's/^/        /' | head -10
         continue
     fi
     if ! have_display; then
@@ -353,6 +401,38 @@ for example in examples/*.ae; do
         sed 's/^/        /' /tmp/ae3d_run.log | head -20
     fi
 done
+
+step "the demo scene, measured through the channel"
+# The scene the engine is demonstrated with, asked what it drew rather than
+# looked at: what every model is made of, whether the image its material names
+# was loaded, what colour each surface arrived at, whether a camera that has
+# not moved draws the same frame twice, and whether seeking a clip moves the
+# part it drives. Everything a screenshot would be read for, as numbers.
+if [ -z "$PYTHON" ]; then
+    skip "zombie_street (measured)" "no python3"
+elif ! have_display; then
+    skip "zombie_street (measured)" "no display"
+elif ! built_ok zombie_street; then
+    skip "zombie_street (measured)" "it did not build"
+else
+    measure_log="$(mktemp)"
+    bounded "$RUN_LIMIT" $PYTHON scripts/measure_scene.py         --launch ./build/zombie_street --port 7913 >"$measure_log" 2>&1
+    measured=$?
+    if [ "$measured" -eq 0 ]; then
+        pass "zombie_street (measured)"
+        # The first line carries what the scene costs, which is the number this
+        # scene exists to report and is worth having in the log of every run.
+        head -1 "$measure_log" | sed 's/^/        /'
+    elif [ "$measured" -eq 3 ]; then
+        # The scene stopped without complaining, which is the engine saying it
+        # has nowhere to draw. A runner with a display is where this is asked.
+        skip "zombie_street (measured)" "the scene could not open a window"
+    else
+        fail "zombie_street (measured)"
+        grep -E 'FAIL|Traceback|Error|error:|measure_scene:' "$measure_log"             | sed 's/^/        /' | head -12
+    fi
+    rm -f "$measure_log"
+fi
 
 # The editor runs on either renderer, so both are checked: the Vulkan option
 # used to report Vulkan and build an OpenGL renderer, which no OpenGL-only run
@@ -606,19 +686,20 @@ if [ -n "${CI:-}" ]; then
 fi
 
 step "benchmarks"
+build_together benchmarks/bench_*.ae
 for bench in benchmarks/bench_*.ae; do
     [ -e "$bench" ] || continue
     name="$(basename "$bench" .ae)"
-    if ! ./build.sh "$bench" "$name" >/tmp/ae3d_build.log 2>&1; then
+    if ! built_ok "$name"; then
         fail "$name (build)"
-        sed 's/^/        /' /tmp/ae3d_build.log | head -20
+        sed 's/^/        /' "$BUILD_DIR/$name.log" | head -20
         continue
     fi
-    if grep -q "warning" /tmp/ae3d_build.log; then
+    if grep -q "warning" "$BUILD_DIR/$name.log"; then
         fail "$name (build warnings)"
         continue
     fi
-    if output="$(bounded "$RUN_LIMIT" ./build/"$name" 2>&1)"; then
+    if output="$(AE3D_WIDTH= AE3D_HEIGHT= bounded "$RUN_LIMIT" ./build/"$name" 2>&1)"; then
         pass "$name"
         printf '%s\n' "$output" | sed 's/^/        /'
     else

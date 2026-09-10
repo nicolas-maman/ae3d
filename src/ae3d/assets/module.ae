@@ -19,6 +19,8 @@ exports (
     manifest_warning_count, entry_id, entry_material, entry_animation,
     entry_vertices, entry_triangles,
     entry_load_model, entry_load_clip, entry_parent, entry_object, manifest_load_scene,
+    entry_load_skeleton, entry_load_bone_clips,
+    entry_skeleton, entry_skin,
     clip_load, clip_reference_error, last_error,
     Provenance, provenance_record, provenance_for, provenance_by_id,
     provenance_by_object, provenance_model,
@@ -34,6 +36,9 @@ struct Entry {
     mesh: string
     material: string
     animation: string
+    skeleton: string
+    skin: string
+    bone_animation: string
     vertices: int
     triangles: int
     position: Vec3
@@ -150,6 +155,9 @@ manifest_load(path: string) -> *Manifest {
             e.mesh = ""
             e.material = ""
             e.animation = ""
+            e.skeleton = ""
+            e.skin = ""
+            e.bone_animation = ""
             e.position = core.vec3(0.0, 0.0, 0.0)
             e.rotation = core.quat_ident()
             e.scale = core.vec3(1.0, 1.0, 1.0)
@@ -176,6 +184,9 @@ manifest_load(path: string) -> *Manifest {
                 e.mesh = text_field(files, "mesh")
                 e.material = text_field(files, "material")
                 e.animation = text_field(files, "animation")
+                e.skeleton = text_field(files, "skeleton")
+                e.skin = text_field(files, "skin")
+                e.bone_animation = text_field(files, "bone_animation")
             }
             list.add_raw(m.entries, e as ptr)
             i = i + 1
@@ -270,6 +281,16 @@ entry_id(e: *Entry) -> string {
 
 // The name the object had in Blender, which is what a person or an agent will
 // call it: the id is a hash, and nobody types a hash.
+entry_skeleton(e: *Entry) -> string {
+    if e == null { return "" }
+    return e.skeleton
+}
+
+entry_skin(e: *Entry) -> string {
+    if e == null { return "" }
+    return e.skin
+}
+
 entry_object(e: *Entry) -> string {
     if e == null { return "" }
     return e.object
@@ -302,9 +323,11 @@ entry_load_model(m: *Manifest, e: *Entry) -> *Model {
         set_error("no mesh named for ", "that entry")
         return null
     }
+    skin = read_skin_rows(m, e)
     path = join(m.directory, e.mesh)
-    model = loader.load_obj(path, false)
+    model = loader.load_obj_skinned(path, false, skin)
     string.free(path)
+    if skin != null { core.skinrows_destroy(skin) }
     if model == null {
         set_error("cannot load ", e.mesh)
         return null
@@ -318,6 +341,142 @@ entry_load_model(m: *Manifest, e: *Entry) -> *Model {
     provenance_record(model, e.id, e.object, m.source, e.mesh, e.animation,
                       e.vertices, e.triangles)
     return model
+}
+
+// The weights the exporter wrote, one row per OBJ position. They are handed to
+// the loader rather than written onto a finished mesh: a position becomes as
+// many vertices as it has distinct normals and UVs, and which those are is
+// something only the load knows.
+read_skin_rows(m: *Manifest, e: *Entry) -> ptr {
+    if m == null || e == null || e.skin == "" { return null }
+    path = join(m.directory, e.skin)
+    root = read_json(path)
+    string.free(path)
+    if root == null {
+        set_error("cannot read ", e.skin)
+        return null
+    }
+    node = json.object_get_raw(root, "vertices")
+    if node == null {
+        json.free(root)
+        set_error("no vertices in ", e.skin)
+        return null
+    }
+    count = json.array_size(node)
+    rows = core.skinrows_create(count)
+    i = 0
+    while i < count {
+        row = json.array_get_raw(node, i)
+        joints = json.object_get_raw(row, "joints")
+        weights = json.object_get_raw(row, "weights")
+        core.skinrows_set(rows, i,
+                          component(joints, 0) as int, component(joints, 1) as int,
+                          component(joints, 2) as int, component(joints, 3) as int,
+                          component(weights, 0), component(weights, 1),
+                          component(weights, 2), component(weights, 3))
+        i = i + 1
+    }
+    json.free(root)
+    return rows
+}
+
+// The skeleton the mesh is weighted to: a model per bone, parented as Blender
+// had them and placed where the rest pose put them. They are models because
+// that is all a bone is here, so a clip drives one and ae3d.ik solves a limb of
+// them without knowing they belong to a skin.
+//
+// Answers the bones in the order the weights index them, for the caller to
+// keep: they are the skeleton's to name and nobody's to own.
+entry_load_skeleton(m: *Manifest, e: *Entry) -> ptr {
+    if m == null || e == null || e.skeleton == "" { return null }
+    path = join(m.directory, e.skeleton)
+    root = read_json(path)
+    string.free(path)
+    if root == null {
+        set_error("cannot read ", e.skeleton)
+        return null
+    }
+    nodes = json.object_get_raw(root, "bones")
+    if nodes == null {
+        json.free(root)
+        set_error("no bones in ", e.skeleton)
+        return null
+    }
+    bones = list.new()
+    count = json.array_size(nodes)
+    i = 0
+    while i < count {
+        node = json.array_get_raw(nodes, i)
+        bone = core.model_new()
+        core.model_set_name(bone, text_field(node, "name"))
+        transform = json.object_get_raw(node, "transform")
+        if transform != null {
+            location = json.object_get_raw(transform, "location")
+            rotation = json.object_get_raw(transform, "rotation")
+            scale = json.object_get_raw(transform, "scale")
+            core.model_set_position(bone, component(location, 0), component(location, 1),
+                                    component(location, 2))
+            core.model_set_rotation(bone, core.quat(component(rotation, 0),
+                                                    component(rotation, 1),
+                                                    component(rotation, 2),
+                                                    component(rotation, 3)))
+            core.model_set_scale(bone, component(scale, 0), component(scale, 1),
+                                 component(scale, 2))
+        }
+        list.add_raw(bones, bone as ptr)
+        i = i + 1
+    }
+    // Parents after, since the file lists parents first but nothing here
+    // depends on that being true.
+    i = 0
+    while i < count {
+        parent_name = text_field(json.array_get_raw(nodes, i), "parent")
+        if parent_name != "" {
+            j = 0
+            while j < count {
+                if text_field(json.array_get_raw(nodes, j), "name") == parent_name {
+                    core.model_set_parent(list.get_raw(bones, i) as *Model,
+                                          list.get_raw(bones, j) as *Model)
+                    j = count
+                } else {
+                    j = j + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    json.free(root)
+    return bones
+}
+
+// One clip per animated bone, in the order the file lists them. Each is named
+// after the bone it drives, so a caller binds them to the models
+// entry_load_skeleton answered with by matching names.
+entry_load_bone_clips(m: *Manifest, e: *Entry) -> ptr {
+    if m == null || e == null || e.bone_animation == "" { return null }
+    path = join(m.directory, e.bone_animation)
+    root = read_json(path)
+    string.free(path)
+    if root == null {
+        set_error("cannot read ", e.bone_animation)
+        return null
+    }
+    nodes = json.object_get_raw(root, "clips")
+    if nodes == null {
+        json.free(root)
+        set_error("no clips in ", e.bone_animation)
+        return null
+    }
+    clips = list.new()
+    count = json.array_size(nodes)
+    i = 0
+    while i < count {
+        clip = clip_from(json.array_get_raw(nodes, i))
+        if clip != null { list.add_raw(clips, clip as ptr) }
+        i = i + 1
+    }
+    json.free(root)
+    return clips
 }
 
 entry_parent(e: *Entry) -> string {
@@ -408,7 +567,16 @@ clip_load(path: string) -> *Clip {
         return null
     }
 
-    node = json.array_get_raw(clips, 0)
+    clip = clip_from(json.array_get_raw(clips, 0))
+    json.free(root)
+    return clip
+}
+
+// One clip out of one node of a clips array. Object animation carries a single
+// clip per file and a skinned mesh carries one per bone, which is the same node
+// read the same way.
+clip_from(node: ptr) -> *Clip {
+    if node == null { return null }
     name = text_field(node, "name")
     clip = anim.clip_new(name)
     string.free(name)
@@ -450,7 +618,6 @@ clip_load(path: string) -> *Clip {
         }
     }
 
-    json.free(root)
     return clip
 }
 
