@@ -14,9 +14,12 @@
   draws a function table nothing ever filled in. One library is the same
   arrangement everywhere and leaves one copy of that state.
 
-  `ci.sh` checks the invariant rather than the arrangement: a built script must
-  define none of the engine's C itself. It reads 56 when `native/ae3d_mesh.c`
-  is linked into one.
+  `ci.sh` checks the invariant rather than the arrangement. Off Windows a built
+  script must define none of the engine's C itself, which reads 56 when
+  `native/ae3d_mesh.c` is linked into one. On Windows it must import the engine
+  library, because linking against an import library leaves a thunk under the
+  imported name and a DLL exports those too, so there every imported call reads
+  as a definition.
 
 ### The agent channel
 
