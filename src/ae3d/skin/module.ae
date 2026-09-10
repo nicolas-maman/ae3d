@@ -1,0 +1,162 @@
+// Skinned meshes: one mesh, many bones, and the vertices that hang off them.
+//
+// A rigid figure is a model per part, each with its own transform. It holds
+// together as long as the parts are boxes and comes apart the moment they are
+// not: two limbs meeting at a shoulder are two surfaces sliding through each
+// other, and no amount of modelling closes that seam. A skinned figure is one
+// surface, and the joints are inside it.
+//
+// The bones here are ordinary models. Nothing about them is special -- they
+// have a position, a rotation, a scale and a parent, and they compose through
+// the same hierarchy every other model does. That is the whole point: a clip
+// exported from Blender drives a bone exactly as it drives a part, and ae3d.ik
+// solves a limb of bones exactly as it solves a limb of parts. A skeleton adds
+// one thing to a chain of models, which is where each of them was when the mesh
+// was bound to it.
+//
+// The palette a draw is posed by is that difference, per bone: where the bone
+// is now, times the inverse of where it was bound. A mesh in its bind pose
+// therefore comes out of a skinned draw exactly where it went in, which is the
+// property that makes a wrong weight visible rather than plausible.
+
+import std.list
+import std.heap
+import ae3d.core
+
+exports (
+    Skeleton, Bone, skeleton_new, skeleton_free, skeleton_add, skeleton_bind,
+    skeleton_count, skeleton_bone, skeleton_find, skeleton_palette,
+    skeleton_update, MAX_BONES
+)
+
+// The vertex shader declares an array this long. It is bounded by the vertex
+// uniform budget GL 3.3 guarantees rather than by what a desktop driver happens
+// to allow, so a figure that fits here fits on a software rasteriser too.
+const MAX_BONES = 48
+
+struct Bone {
+    // Borrowed. A skeleton names bones, it does not own them, because these are
+    // the same models the clips and the solver drive.
+    model: ptr
+    // Where this bone was when the mesh was bound to it, inverted.
+    inverse_bind: Mat4
+    // What the model's world transform was when this bone's palette entry was
+    // last written. A bone that has not moved is not recomputed.
+    stamp: int
+}
+
+struct Skeleton {
+    bones: ptr
+    palette: ptr
+}
+
+skeleton_new() -> *Skeleton {
+    s = heap.new(Skeleton)
+    s.bones = list.new()
+    s.palette = null
+    return s
+}
+
+skeleton_free(s: *Skeleton) {
+    if s == null { return }
+    if s.bones != null {
+        i = 0
+        count = list.size(s.bones)
+        while i < count {
+            b = list.get_raw(s.bones, i) as *Bone
+            if b != null { heap.free(b) }
+            i = i + 1
+        }
+        list.free(s.bones)
+    }
+    if s.palette != null { core.palette_destroy(s.palette) }
+    heap.free(s)
+}
+
+// Add a bone, and answer the index the mesh weights against. Refuses past the
+// limit rather than writing off the end of the palette.
+skeleton_add(s: *Skeleton, bone: *Model) -> int {
+    if s == null || bone == null { return 0 - 1 }
+    if list.size(s.bones) >= MAX_BONES { return 0 - 1 }
+    index = list.size(s.bones)
+    b = heap.new(Bone)
+    b.model = bone as ptr
+    b.inverse_bind = core.mat4_ident()
+    b.stamp = 0 - 1
+    list.add_raw(s.bones, b as ptr)
+    return index
+}
+
+// The pose the bones are in now is the pose the mesh was modelled in. Called
+// once, after the bones are placed and before anything animates them.
+skeleton_bind(s: *Skeleton) {
+    if s == null { return }
+    count = list.size(s.bones)
+    i = 0
+    while i < count {
+        b = list.get_raw(s.bones, i) as *Bone
+        if b != null && b.model != null {
+            bone = b.model as *Model
+            core.model_sync_transform(bone)
+            b.inverse_bind = core.mat4_inverse(bone.model_matrix)
+            b.stamp = 0 - 1
+        }
+        i = i + 1
+    }
+    skeleton_update(s)
+}
+
+skeleton_count(s: *Skeleton) -> int {
+    if s == null { return 0 }
+    return list.size(s.bones)
+}
+
+skeleton_bone(s: *Skeleton, index: int) -> *Model {
+    if s == null || index < 0 || index >= list.size(s.bones) { return null }
+    b = list.get_raw(s.bones, index) as *Bone
+    if b == null { return null }
+    return b.model as *Model
+}
+
+skeleton_find(s: *Skeleton, name: string) -> int {
+    if s == null { return 0 - 1 }
+    count = list.size(s.bones)
+    i = 0
+    while i < count {
+        bone = skeleton_bone(s, i)
+        if bone != null {
+            if core.text(bone.name) == name { return i }
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// Rebuild the matrices a draw reads, for the bones that moved. A skeleton
+// standing still writes nothing: the stamp a model bumps when its world
+// transform is rebuilt is what says whether it did.
+skeleton_update(s: *Skeleton) {
+    if s == null { return }
+    count = list.size(s.bones)
+    if count == 0 { return }
+    if s.palette == null { s.palette = core.palette_create(count) }
+    i = 0
+    while i < count {
+        b = list.get_raw(s.bones, i) as *Bone
+        if b != null && b.model != null {
+            bone = b.model as *Model
+            core.model_sync_transform(bone)
+            if b.stamp != bone.world_stamp {
+                posed = core.mat4_mul(bone.model_matrix, b.inverse_bind)
+                core.palette_set(s.palette, i, &posed)
+                b.stamp = bone.world_stamp
+            }
+        }
+        i = i + 1
+    }
+}
+
+skeleton_palette(s: *Skeleton) -> ptr {
+    if s == null { return null }
+    return s.palette
+}

@@ -1,0 +1,202 @@
+// A mesh posed by bones, checked against where the arithmetic says it goes.
+//
+// Skinning is easy to make plausible and hard to make right: a figure whose
+// weights are wrong still moves, still bends at roughly the joints, and still
+// looks like a figure. So nothing here is "did it move". Each check names the
+// position a vertex has to arrive at and asks whether it did.
+//
+// The palette is what a draw reads, so the palette is what is read here. No
+// window and no driver: a bone is a model in the transform hierarchy, and the
+// matrix a vertex is posed by is built from its world transform.
+
+import std.list
+import ae3d.core
+import ae3d.loader
+import ae3d.skin
+
+const EPSILON = 0.0001
+const QUARTER_TURN = 1.5707963
+
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, condition: bool) {
+    g_checks = g_checks + 1
+    if condition {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        g_failures = g_failures + 1
+    }
+}
+
+near(a: float, b: float) -> bool {
+    d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    return d < EPSILON
+}
+
+// One bone's matrix out of the palette, applied to a point: what the vertex
+// shader does for a vertex weighted wholly to that bone.
+posed_by(s: *Skeleton, bone: int, p: Vec3) -> Vec3 {
+    palette = skin.skeleton_palette(s)
+    m = core.mat4_ident()
+    m.m0  = core.palette_get(palette, bone, 0)
+    m.m1  = core.palette_get(palette, bone, 1)
+    m.m2  = core.palette_get(palette, bone, 2)
+    m.m3  = core.palette_get(palette, bone, 3)
+    m.m4  = core.palette_get(palette, bone, 4)
+    m.m5  = core.palette_get(palette, bone, 5)
+    m.m6  = core.palette_get(palette, bone, 6)
+    m.m7  = core.palette_get(palette, bone, 7)
+    m.m8  = core.palette_get(palette, bone, 8)
+    m.m9  = core.palette_get(palette, bone, 9)
+    m.m10 = core.palette_get(palette, bone, 10)
+    m.m11 = core.palette_get(palette, bone, 11)
+    m.m12 = core.palette_get(palette, bone, 12)
+    m.m13 = core.palette_get(palette, bone, 13)
+    m.m14 = core.palette_get(palette, bone, 14)
+    m.m15 = core.palette_get(palette, bone, 15)
+    return core.mat4_transform_point(m, p)
+}
+
+// A vertex split between two bones, the way a vertex at a joint is.
+blended(s: *Skeleton, a: int, b: int, wa: float, wb: float, p: Vec3) -> Vec3 {
+    return core.v3_add(core.v3_mul(posed_by(s, a, p), wa),
+                       core.v3_mul(posed_by(s, b, p), wb))
+}
+
+main() {
+    // An arm: a shoulder at the origin, an elbow a metre out along x, a wrist
+    // a metre past that. The mesh is modelled around them in this pose, so
+    // this pose is the bind pose.
+    shoulder = loader.cube(0.1)
+    elbow = loader.cube(0.1)
+    wrist = loader.cube(0.1)
+    core.model_set_position(shoulder, 0.0, 0.0, 0.0)
+    core.model_set_position(elbow, 1.0, 0.0, 0.0)
+    core.model_set_position(wrist, 1.0, 0.0, 0.0)
+    core.model_set_name(shoulder, "Shoulder")
+    core.model_set_name(elbow, "Elbow")
+    core.model_set_name(wrist, "Wrist")
+    core.model_set_parent(elbow, shoulder)
+    core.model_set_parent(wrist, elbow)
+
+    s = skin.skeleton_new()
+    check("a bone can be added", skin.skeleton_add(s, shoulder) == 0)
+    check("and the next takes the next index", skin.skeleton_add(s, elbow) == 1)
+    skin.skeleton_add(s, wrist)
+    check("the skeleton knows how many it has", skin.skeleton_count(s) == 3)
+    check("and can find one by name", skin.skeleton_find(s, "Elbow") == 1)
+    check("and says so when there is no such bone",
+          skin.skeleton_find(s, "Tail") == 0 - 1)
+    skin.skeleton_bind(s)
+
+    // Nothing has moved, so every bone carries its world transform times the
+    // inverse of the same. A mesh in its bind pose comes out of a skinned draw
+    // exactly where it went in, which is what makes a wrong weight visible
+    // rather than merely plausible.
+    at = core.vec3(1.5, 0.2, 0.0 - 0.3)
+    landed = posed_by(s, 1, at)
+    check("the bind pose poses nothing",
+          near(landed.x, at.x) && near(landed.y, at.y) && near(landed.z, at.z))
+
+    // Move the shoulder. Everything under it is carried, so a vertex on the
+    // wrist goes exactly as far as the shoulder did.
+    core.model_set_position(shoulder, 0.0, 2.0, 0.0)
+    skin.skeleton_update(s)
+    landed = posed_by(s, 2, at)
+    check("a vertex on the wrist follows the shoulder that carries it",
+          near(landed.x, at.x) && near(landed.y, at.y + 2.0) && near(landed.z, at.z))
+
+    // Turn the elbow a quarter turn about z, and the forearm swings up: a
+    // point half a metre past the elbow ends up half a metre above it.
+    core.model_set_position(shoulder, 0.0, 0.0, 0.0)
+    core.model_set_rotation(elbow,
+        core.quat_rotate(QUARTER_TURN, core.vec3(0.0, 0.0, 1.0)))
+    skin.skeleton_update(s)
+    landed = posed_by(s, 2, core.vec3(1.5, 0.0, 0.0))
+    check("bending the elbow swings what hangs off it",
+          near(landed.x, 1.0) && near(landed.y, 0.5) && near(landed.z, 0.0))
+
+    // The joint itself. The bone above it does not move the point and the bone
+    // below turns about it, so both leave the joint where it is: that is what
+    // makes it a joint. Half a metre along, half weight puts the vertex halfway
+    // between straight and swung, which is the crease a skinned limb makes
+    // where a rigid one makes a gap.
+    joint = core.vec3(1.0, 0.0, 0.0)
+    upper = posed_by(s, 0, joint)
+    lower = posed_by(s, 1, joint)
+    check("neither bone moves the joint they meet at",
+          near(upper.x, 1.0) && near(upper.y, 0.0) &&
+          near(lower.x, 1.0) && near(lower.y, 0.0))
+    along = core.vec3(1.4, 0.0, 0.0)
+    half = blended(s, 0, 1, 0.5, 0.5, along)
+    swung = posed_by(s, 1, along)
+    check("half a weight is half the swing",
+          near(half.x, (along.x + swung.x) / 2.0) && near(half.y, swung.y / 2.0))
+
+    // Weights are normalised where they are stored, so a renderer never has to
+    // trust what was authored.
+    mesh = core.mesh_create()
+    core.mesh_push_vertex(mesh, core.vec3(0.0, 0.0, 0.0), 0.0, 0.0,
+                      core.vec3(0.0, 1.0, 0.0))
+    check("a mesh is not skinned until it is given a skin", !core.mesh_is_skinned(mesh))
+    core.mesh_set_skin(mesh, 0, 1, 2, 0, 0, 1.0, 3.0, 0.0, 0.0)
+    check("and is afterwards", core.mesh_is_skinned(mesh))
+    check("the joints are the ones it was given",
+          core.mesh_skin_joint(mesh, 0, 0) == 1 && core.mesh_skin_joint(mesh, 0, 1) == 2)
+    check("weights that do not sum to one are made to",
+          near(core.mesh_skin_weight(mesh, 0, 0), 0.25) &&
+          near(core.mesh_skin_weight(mesh, 0, 1), 0.75))
+
+    // A vertex nothing weighted is bound rigidly to the first bone rather than
+    // collapsed onto the origin, which is what an unweighted vertex means.
+    core.mesh_push_vertex(mesh, core.vec3(1.0, 0.0, 0.0), 0.0, 0.0,
+                      core.vec3(0.0, 1.0, 0.0))
+    core.mesh_set_skin(mesh, 1, 3, 3, 3, 3, 0.0, 0.0, 0.0, 0.0)
+    check("a vertex with no weight is bound to one bone whole",
+          core.mesh_skin_joint(mesh, 1, 0) == 0 &&
+          near(core.mesh_skin_weight(mesh, 1, 0), 1.0))
+    core.mesh_destroy(mesh)
+
+    check("a skeleton refuses more bones than the shader has room for",
+          bones_beyond_the_limit())
+
+    skin.skeleton_free(s)
+    core.model_set_parent(wrist, null)
+    core.model_set_parent(elbow, null)
+    core.model_free(wrist)
+    core.model_free(elbow)
+    core.model_free(shoulder)
+
+    if g_failures == 0 {
+        println("test_skin: all checks passed (${g_checks})")
+        return
+    }
+    println("test_skin: ${g_failures} failure(s) of ${g_checks}")
+}
+
+// The palette is a fixed-size uniform array, so a skeleton that would overrun
+// it says so rather than writing past the end of it.
+bones_beyond_the_limit() -> bool {
+    s = skin.skeleton_new()
+    made = list.new()
+    refused = false
+    i = 0
+    while i < skin.MAX_BONES + 2 {
+        bone = loader.cube(0.1)
+        list.add_raw(made, bone as ptr)
+        if skin.skeleton_add(s, bone) < 0 { refused = true }
+        i = i + 1
+    }
+    ok = refused && skin.skeleton_count(s) == skin.MAX_BONES
+    skin.skeleton_free(s)
+    i = 0
+    while i < list.size(made) {
+        core.model_free(list.get_raw(made, i) as *Model)
+        i = i + 1
+    }
+    list.free(made)
+    return ok
+}

@@ -15,6 +15,7 @@ import ae3d.core
 import ae3d.platform
 import ae3d.rendering
 import ae3d.shaders
+import ae3d.skin
 
 exports (
     GLRenderer, ProgramSlots, TextureEntry, Skybox,
@@ -59,6 +60,8 @@ extern ae3d_gl_buffer_delete(buffer: int)
 extern ae3d_gl_upload_mesh(mesh: ptr, vbo: int, ebo: int)
 extern ae3d_gl_update_mesh_vertices(mesh: ptr, vbo: int)
 extern ae3d_gl_setup_vertex_attribs()
+extern ae3d_gl_upload_skin(mesh: ptr, vbo: int)
+extern ae3d_gl_uniform_mat4v(loc: int, count: int, values: ptr)
 extern ae3d_gl_setup_instance_attribs(inst: ptr, matrix_vbo: int, color_vbo: int)
 extern ae3d_gl_update_instances(inst: ptr, matrix_vbo: int, capacity_bytes: int) -> int
 extern ae3d_gl_update_instance_colors(inst: ptr, color_vbo: int)
@@ -146,6 +149,8 @@ struct ProgramSlots {
     texture_sampler: int
     is_instanced: int
     use_instance_color: int
+    is_skinned: int
+    bones: int
     caustics_time: int
     fog_enabled: int
     shadow_direction: int
@@ -232,6 +237,7 @@ struct GLRenderer {
     bound_material_set: bool
     bound_texture: int
     bound_instanced: int
+    bound_skinned: int
     bound_instance_color: int
 
     post_fbo: int
@@ -416,6 +422,8 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
     s.texture_sampler = ae3d_gl_uniform_location(program, "textureSampler")
     s.is_instanced = ae3d_gl_uniform_location(program, "isInstanced")
     s.use_instance_color = ae3d_gl_uniform_location(program, "useInstanceColor")
+    s.is_skinned = ae3d_gl_uniform_location(program, "isSkinned")
+    s.bones = ae3d_gl_uniform_location(program, "bones")
     s.caustics_time = ae3d_gl_uniform_location(program, "causticsTime")
     s.shadow_direction = ae3d_gl_uniform_location(program, "shadowDirection")
     s.shadow_texel_world = ae3d_gl_uniform_location(program, "shadowTexelWorld")
@@ -522,6 +530,27 @@ apply_instance_color(r: *GLRenderer, slots: *ProgramSlots, on: int) {
     if r.bound_instance_color == on { return }
     ae3d_gl_uniform_int(slots.use_instance_color, on)
     r.bound_instance_color = on
+}
+
+// The pose, for a model that has one. A skeleton is asked to bring its palette
+// up to date first: it rebuilds only the bones whose world transform changed,
+// so a figure standing still uploads the array and computes nothing.
+apply_skeleton(r: *GLRenderer, slots: *ProgramSlots, m: *Model) {
+    if m.skeleton == null {
+        if r.bound_skinned != 0 {
+            ae3d_gl_uniform_int(slots.is_skinned, 0)
+            r.bound_skinned = 0
+        }
+        return
+    }
+    sk = m.skeleton as *Skeleton
+    skin.skeleton_update(sk)
+    ae3d_gl_uniform_int(slots.is_skinned, 1)
+    ae3d_gl_uniform_mat4v(slots.bones, skin.skeleton_count(sk),
+                          core.palette_data(skin.skeleton_palette(sk)))
+    // Every skinned model carries its own palette, so this cannot be skipped
+    // for a second one in the same frame the way a shared uniform could.
+    r.bound_skinned = 1
 }
 
 renderer_init(r: *GLRenderer, window: ptr, width: int, height: int) -> int {
@@ -650,7 +679,13 @@ renderer_add_model(r: *GLRenderer, m: *Model) {
     // since the instance attributes are part of that state. Everything else
     // goes through the shared cache, so identical geometry is uploaded once and
     // can be merged into one draw later.
-    if m.is_instanced && core.model_instance_count(m) > 0 {
+    // The geometry cache keys on the vertex array, and joints and weights are
+    // not in it: two meshes alike in their vertices and different in their
+    // skins would share a vertex array and one of them would be posed by the
+    // other's. A skinned mesh takes its own, which costs nothing worth having
+    // -- a cache exists for repeated props, and a figure is not one.
+    skinned = core.mesh_is_skinned(m.mesh)
+    if (m.is_instanced && core.model_instance_count(m) > 0) || skinned {
         m.vao = ae3d_gl_vao_create()
         ae3d_gl_vao_bind(m.vao)
         m.vbo = ae3d_gl_buffer_create()
@@ -674,6 +709,11 @@ renderer_add_model(r: *GLRenderer, m: *Model) {
             m.shares_geometry = true
         }
         ae3d_gl_vao_bind(m.vao)
+    }
+
+    if skinned {
+        m.skin_vbo = ae3d_gl_buffer_create()
+        ae3d_gl_upload_skin(m.mesh, m.skin_vbo)
     }
 
     if m.is_instanced && core.model_instance_count(m) > 0 {
@@ -980,6 +1020,8 @@ render_shadow_pass(r: *GLRenderer, light: *Light, cam: *Camera) {
     space = ae3d_gl_uniform_location(r.shadow_program, "lightSpaceMatrix")
     model_slot = ae3d_gl_uniform_location(r.shadow_program, "model")
     instanced_slot = ae3d_gl_uniform_location(r.shadow_program, "isInstanced")
+    skinned_slot = ae3d_gl_uniform_location(r.shadow_program, "isSkinned")
+    bones_slot = ae3d_gl_uniform_location(r.shadow_program, "bones")
     ae3d_gl_uniform_mat4(space, &r.shadow_space)
 
     r.shadow_batch_count = 0
@@ -1012,6 +1054,7 @@ render_shadow_pass(r: *GLRenderer, light: *Light, cam: *Camera) {
             if m.is_instanced && core.model_instance_count(m) > 0 { instanced = 1 }
             ae3d_gl_uniform_int(instanced_slot, instanced)
             ae3d_gl_uniform_mat4(model_slot, &m.model_matrix)
+            pose_depth(skinned_slot, bones_slot, m)
             ae3d_gl_vao_bind(m.vao)
             draw_depth(r, m, instanced)
         }
@@ -1027,10 +1070,12 @@ render_shadow_pass(r: *GLRenderer, light: *Light, cam: *Camera) {
         if b.count == 1 {
             ae3d_gl_uniform_int(instanced_slot, 0)
             ae3d_gl_uniform_mat4(model_slot, &first.model_matrix)
+            pose_depth(skinned_slot, bones_slot, first)
             ae3d_gl_vao_bind(first.vao)
             draw_depth(r, first, 0)
         } else if b.count > 1 {
             ae3d_gl_uniform_int(instanced_slot, 1)
+            ae3d_gl_uniform_int(skinned_slot, 0)
             ae3d_gl_uniform_mat4(model_slot, &identity)
             ae3d_gl_vao_bind(b.vao)
             if b.stale {
@@ -1389,6 +1434,21 @@ batch_for(r: *GLRenderer, m: *Model) -> *GLBatch {
     return b
 }
 
+// The shadow pass takes its uniform locations straight from the shadow program
+// rather than through the slot cache, which is per drawn program; this is the
+// same work apply_skeleton does, against those locations.
+pose_depth(skinned_slot: int, bones_slot: int, m: *Model) {
+    if m.skeleton == null {
+        ae3d_gl_uniform_int(skinned_slot, 0)
+        return
+    }
+    sk = m.skeleton as *Skeleton
+    skin.skeleton_update(sk)
+    ae3d_gl_uniform_int(skinned_slot, 1)
+    ae3d_gl_uniform_mat4v(bones_slot, skin.skeleton_count(sk),
+                          core.palette_data(skin.skeleton_palette(sk)))
+}
+
 // The depth pass only cares about shape, so models that share geometry merge
 // whatever their materials are. It also ignores the camera's frustum: a caster
 // off screen still throws a shadow onto something on it.
@@ -1562,6 +1622,7 @@ render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
     }
     bind_shadow_map(r, slots)
     set_model_matrix(slots, m)
+    apply_skeleton(r, slots, m)
     apply_shading(r, slots, m, program)
 
     ae3d_gl_vao_bind(m.vao)

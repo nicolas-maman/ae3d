@@ -5,10 +5,16 @@
 #include <math.h>
 
 #define AE3D_STRIDE 8
+#define AE3D_SKIN_STRIDE 8
 
 typedef struct {
     float   *vertices;
     unsigned *indices;
+    /* Four joints and four weights per vertex, in their own array rather than
+       interleaved with the rest: a mesh that is not skinned never allocates
+       it, and the stride every unskinned draw reads stays what it was. */
+    float   *skin;
+    int      skin_dirty;
     int      vertex_count;
     int      vertex_capacity;
     int      index_count;
@@ -72,6 +78,15 @@ void *ae3d_mesh_clone(void *handle) {
         copy->index_capacity = src->index_count;
     }
 
+    if (src->skin && src->vertex_count > 0) {
+        size_t bytes = (size_t)src->vertex_count * AE3D_SKIN_STRIDE * sizeof(float);
+        copy->skin = (float *)calloc((size_t)src->vertex_count * AE3D_SKIN_STRIDE,
+                                     sizeof(float));
+        if (!copy->skin) { free(copy->indices); free(copy->vertices); free(copy); return NULL; }
+        memcpy(copy->skin, src->skin, bytes);
+        copy->skin_dirty = 1;
+    }
+
     copy->dirty = src->dirty;
     copy->bound[0] = src->bound[0];
     copy->bound[1] = src->bound[1];
@@ -85,6 +100,7 @@ void ae3d_mesh_destroy(void *handle) {
     if (!m) return;
     free(m->vertices);
     free(m->indices);
+    free(m->skin);
     free(m);
 }
 
@@ -97,6 +113,14 @@ static int ae3d_mesh_grow_vertices(ae3d_mesh *m, int needed) {
     grown = (float *)realloc(m->vertices, (size_t)capacity * AE3D_STRIDE * sizeof(float));
     if (!grown) return 0;
     m->vertices = grown;
+    if (m->skin) {
+        float *skin = (float *)realloc(m->skin,
+                                       (size_t)capacity * AE3D_SKIN_STRIDE * sizeof(float));
+        if (!skin) return 0;
+        memset(skin + (size_t)m->vertex_capacity * AE3D_SKIN_STRIDE, 0,
+               (size_t)(capacity - m->vertex_capacity) * AE3D_SKIN_STRIDE * sizeof(float));
+        m->skin = skin;
+    }
     m->vertex_capacity = capacity;
     return 1;
 }
@@ -134,6 +158,59 @@ int ae3d_mesh_push_vertex(void *handle, double px, double py, double pz,
     m->dirty = 1;
     m->local_known = 0;
     return m->vertex_count++;
+}
+
+/* Weights arrive as authored and are normalised here, because a renderer that
+   trusts them cannot tell a mesh whose weights sum to 0.98 from one that is
+   meant to shrink. A vertex with no weight at all is bound rigidly to joint 0,
+   which is what an unweighted vertex on a skinned mesh means. */
+int ae3d_mesh_set_skin(void *handle, int i, int j0, int j1, int j2, int j3,
+                       double w0, double w1, double w2, double w3) {
+    ae3d_mesh *m = (ae3d_mesh *)handle;
+    float *slot;
+    double total;
+
+    if (!m || i < 0 || i >= m->vertex_count) return 0;
+    if (!m->skin) {
+        m->skin = (float *)calloc((size_t)m->vertex_capacity * AE3D_SKIN_STRIDE,
+                                  sizeof(float));
+        if (!m->skin) return 0;
+    }
+    slot = m->skin + (size_t)i * AE3D_SKIN_STRIDE;
+    slot[0] = (float)j0; slot[1] = (float)j1;
+    slot[2] = (float)j2; slot[3] = (float)j3;
+    total = w0 + w1 + w2 + w3;
+    if (total > 1e-6) {
+        slot[4] = (float)(w0 / total); slot[5] = (float)(w1 / total);
+        slot[6] = (float)(w2 / total); slot[7] = (float)(w3 / total);
+    } else {
+        slot[4] = 1.0f; slot[5] = 0.0f; slot[6] = 0.0f; slot[7] = 0.0f;
+        slot[0] = 0.0f;
+    }
+    m->skin_dirty = 1;
+    return 1;
+}
+
+int ae3d_mesh_is_skinned(void *handle) {
+    ae3d_mesh *m = (ae3d_mesh *)handle;
+    return (m && m->skin) ? 1 : 0;
+}
+
+const float *ae3d_mesh_skin_data(void *handle) {
+    ae3d_mesh *m = (ae3d_mesh *)handle;
+    return m ? m->skin : NULL;
+}
+
+double ae3d_mesh_skin_joint(void *handle, int i, int slot) {
+    ae3d_mesh *m = (ae3d_mesh *)handle;
+    if (!m || !m->skin || i < 0 || i >= m->vertex_count || slot < 0 || slot > 3) return 0.0;
+    return m->skin[(size_t)i * AE3D_SKIN_STRIDE + slot];
+}
+
+double ae3d_mesh_skin_weight(void *handle, int i, int slot) {
+    ae3d_mesh *m = (ae3d_mesh *)handle;
+    if (!m || !m->skin || i < 0 || i >= m->vertex_count || slot < 0 || slot > 3) return 0.0;
+    return m->skin[(size_t)i * AE3D_SKIN_STRIDE + 4 + slot];
 }
 
 int ae3d_mesh_push_index(void *handle, int index) {
