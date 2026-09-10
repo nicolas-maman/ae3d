@@ -213,6 +213,61 @@ def gore(size=64, seed=101):
     return _image("ZombieGore", size, _rgba(rgb))
 
 
+def dusk_sky(width=1024, seed=131):
+    """The sky the street is under, as an equirectangular image.
+
+    v runs from straight down at the bottom of the image to straight up at the
+    top, which is what the skybox shader reads it as. Below the horizon there
+    is nothing to see and the colour only has to meet the fog; above it the
+    blue deepens towards the zenith, the last of the sun sits in one quarter of
+    the sky, and there are as many stars as a street with lamps on it lets you
+    see, which is not many.
+    """
+    rng = random.Random(seed)
+    height = width // 2
+    image = numpy.zeros((height, width, 4), dtype=numpy.float32)
+    image[:, :, 3] = 1.0
+
+    horizon = numpy.array((0.075, 0.088, 0.125), dtype=numpy.float32)
+    zenith = numpy.array((0.018, 0.024, 0.055), dtype=numpy.float32)
+    below = numpy.array((0.030, 0.032, 0.042), dtype=numpy.float32)
+    sunset = numpy.array((0.42, 0.24, 0.14), dtype=numpy.float32)
+
+    up = numpy.linspace(-1.0, 1.0, height, dtype=numpy.float32)[:, None]
+    azimuth = numpy.linspace(0.0, 2.0 * math.pi, width, endpoint=False,
+                             dtype=numpy.float32)[None, :]
+
+    # Above the horizon the blue deepens with the square root of the height, so
+    # the band near the horizon is wide and the change overhead is slow.
+    lift = numpy.clip(up, 0.0, 1.0) ** 0.5
+    sky = horizon[None, None, :] * (1.0 - lift[:, :, None]) + zenith[None, None, :] * lift[:, :, None]
+    ground = numpy.broadcast_to(below[None, None, :], (height, width, 3))
+    # Over a few degrees rather than at a line: a hard edge at the horizon is
+    # a black band across the picture wherever the ground does not reach.
+    settle = numpy.clip((up + 0.09) / 0.18, 0.0, 1.0)
+    settle = settle * settle * (3.0 - 2.0 * settle)
+    sky = ground * (1.0 - settle[:, :, None]) + sky * settle[:, :, None]
+
+    # What is left of the sun, low and in one direction.
+    glow = numpy.clip(numpy.cos(azimuth - 2.6), 0.0, 1.0) ** 6
+    near = numpy.clip(1.0 - numpy.abs(up) * 7.0, 0.0, 1.0)
+    sky = sky + sunset[None, None, :] * (glow * near)[:, :, None] * 0.55
+
+    for _ in range(420):
+        y = int(height * 0.5 + rng.random() ** 0.6 * height * 0.5)
+        if y >= height:
+            continue
+        x = rng.randrange(width)
+        brightness = 0.25 + rng.random() ** 3 * 0.75
+        sky[y, x] = numpy.clip(sky[y, x] + brightness, 0.0, 1.0)
+
+    image[:, :, 0:3] = numpy.clip(sky, 0.0, 1.0)
+    made = bpy.data.images.new("DuskSky", width=width, height=height, alpha=False)
+    made.colorspace_settings.name = "sRGB"
+    made.pixels.foreach_set(image.reshape(-1))
+    return made
+
+
 def metal(size=128, seed=97):
     rng = random.Random(seed)
     grain = _noise(rng, size, 5, 5)

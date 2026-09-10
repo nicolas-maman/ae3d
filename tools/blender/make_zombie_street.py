@@ -421,6 +421,18 @@ def main(argv):
     build_zombie(parts, surfaces)
     animate(parts)
 
+    # The sky is not an object in the scene and the exporter only writes what a
+    # material names, so it is written here, beside the file rather than into
+    # it: the program loads it as a skybox.
+    sky_path = os.path.join(os.path.dirname(os.path.abspath(args.out)),
+                            "..", "sky", "dusk.png")
+    sky_path = os.path.abspath(sky_path)
+    os.makedirs(os.path.dirname(sky_path), exist_ok=True)
+    sky = textures.dusk_sky()
+    sky.file_format = "PNG"
+    sky.save_render(sky_path)
+    print("make_zombie_street: sky -> %s" % sky_path)
+
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=os.path.abspath(args.out))
     print("make_zombie_street: %d objects -> %s" % (len(parts), args.out))
