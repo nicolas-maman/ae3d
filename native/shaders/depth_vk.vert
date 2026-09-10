@@ -20,6 +20,8 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 model;
     mat4 viewProjection;
     mat4 lightSpaceMatrix;
+    bool isSkinned;
+    mat4 bones[48];
     int lightCount;
     vec3 viewPos;
     float viewDistance;
@@ -115,6 +117,11 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
 };
 layout (location = 0) in vec3 inPosition;
 layout (location = 3) in mat4 instanceModel;
+layout (location = 8) in vec4 inJoints;
+layout (location = 9) in vec4 inWeights;
+
+
+
 
 
 
@@ -125,5 +132,15 @@ void main() {
     // an instanced model casting its shadow from wherever its own transform was
     // not applied.
     mat4 modelMatrix = isInstanced ? (model * instanceModel) : model;
-    gl_Position = lightSpaceMatrix * modelMatrix * vec4(inPosition, 1.0);
+    // And the same pose. A shadow pass that skipped this drew the bind pose,
+    // so a figure threw the shadow of a mannequin standing where it started.
+    vec4 posed = vec4(inPosition, 1.0);
+    if (isSkinned) {
+        mat4 skin = inWeights.x * bones[int(inJoints.x)]
+                  + inWeights.y * bones[int(inJoints.y)]
+                  + inWeights.z * bones[int(inJoints.z)]
+                  + inWeights.w * bones[int(inJoints.w)];
+        posed = skin * posed;
+    }
+    gl_Position = lightSpaceMatrix * modelMatrix * posed;
 }

@@ -33,7 +33,20 @@ def block(name):
     match = re.search(rf"^const {name} = <<GLSL_END\n(.*?)^GLSL_END$", text, re.S | re.M)
     if not match:
         raise SystemExit(f"generate: {name} not found in {SHADERS}")
-    return match.group(1)
+    return resolve_bones(match.group(1))
+
+
+def resolve_bones(text):
+    """The bone array is sized by a #define, and everything downstream reads
+    array sizes as literals: the uniform block generated from them, the C
+    offsets generated beside it, and the regex that lifts a uniform into the
+    block. The number is taken from the GLSL rather than repeated here, so the
+    shader stays the one place it is written down."""
+    match = re.search(r"^#define MAX_BONES (\d+)$", text, re.M)
+    if not match:
+        return text
+    text = re.sub(r"^#define MAX_BONES \d+\n", "", text, flags=re.M)
+    return text.replace("MAX_BONES", match.group(1))
 
 
 SCALARS = {"float": (4, 4), "int": (4, 4), "bool": (4, 4)}
@@ -53,9 +66,10 @@ ARRAY_STRIDE = 16
 def std140(members, base=0):
     """Assign std140 offsets, returning (name, type, offset) and the total size.
 
-    A member may carry a count, and an array's element stride is 16 whatever the
-    element type, which is why the wave tables cannot be written as a flat run of
-    floats.
+    A member may carry a count. An array's element stride is the element rounded
+    up to 16, so a run of floats or vec3s costs 16 bytes each -- which is why the
+    wave tables cannot be written as a flat run of floats -- and a run of mat4s
+    costs the 64 each of them already is.
     """
     offset = base
     placed = []
@@ -65,7 +79,7 @@ def std140(members, base=0):
         align, size = SCALARS.get(kind) or VECTORS[kind]
         if count:
             align = ARRAY_STRIDE
-            size = ARRAY_STRIDE * count
+            size = max(ARRAY_STRIDE, (size + 15) // 16 * 16) * count
         offset = (offset + align - 1) // align * align
         placed.append((name, kind, offset))
         offset += size

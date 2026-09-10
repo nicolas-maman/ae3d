@@ -14,6 +14,7 @@ import ae3d.core
 import ae3d.platform
 import ae3d.rendering
 import ae3d.vkscene
+import ae3d.skin
 
 exports (
     VKRenderer,
@@ -50,6 +51,7 @@ extern ae3d_vk_scene_set_float(offset: int, value: float)
 extern ae3d_vk_scene_set_int(offset: int, value: int)
 extern ae3d_vk_scene_set_vec3(offset: int, x: float, y: float, z: float)
 extern ae3d_vk_scene_set_mat4(offset: int, m: ptr)
+extern ae3d_vk_scene_set_mat4v(offset: int, count: int, values: ptr)
 extern ae3d_vk_scene_set_clip_mat4(offset: int, m: ptr)
 extern ae3d_vk_set_blend(on: int)
 extern ae3d_vk_draw(mesh: int, texture: int, instances: int, instance_count: int)
@@ -405,6 +407,7 @@ render_shadow_pass(r: *VKRenderer, light: *Light, cam: *Camera) {
             instanced = 0
             if instances > 0 { instanced = 1 }
             ae3d_vk_scene_set_int(vkscene.OFF_ISINSTANCED, instanced)
+            pose(m)
             ae3d_vk_shadow_draw(m.vbo, m.instance_vbo, instances)
         }
         i = i + 1
@@ -705,8 +708,24 @@ set_scene_uniforms(r: *VKRenderer, m: *Model) {
     // This backend draws a model's own instances and nothing else, so a model
     // that has instances always has a colour for each of them.
     ae3d_vk_scene_set_int(vkscene.OFF_USEINSTANCECOLOR, instanced)
+    pose(m)
 
     apply_shading(r, m, active_program(m))
+}
+
+// The palette a skinned model is drawn by, into the scene block. A skeleton is
+// asked to bring its own up to date first: it rebuilds only the bones whose
+// world transform changed, so a figure standing still computes nothing.
+pose(m: *Model) {
+    if m.skeleton == null {
+        ae3d_vk_scene_set_int(vkscene.OFF_ISSKINNED, 0)
+        return
+    }
+    sk = m.skeleton as *Skeleton
+    skin.skeleton_update(sk)
+    ae3d_vk_scene_set_int(vkscene.OFF_ISSKINNED, 1)
+    ae3d_vk_scene_set_mat4v(vkscene.OFF_BONES, skin.skeleton_count(sk),
+                            core.palette_data(skin.skeleton_palette(sk)))
 }
 
 active_program(m: *Model) -> int {

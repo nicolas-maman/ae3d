@@ -257,6 +257,7 @@ void   ae3d_vk_scene_set_int(int offset, int value);
 void   ae3d_vk_scene_set_vec3(int offset, double x, double y, double z);
 void   ae3d_vk_scene_set_mat4(int offset, const double *m);
 void   ae3d_vk_scene_set_clip_mat4(int offset, const double *m);
+void   ae3d_vk_scene_set_mat4v(int offset, int count, const void *values);
 void   ae3d_vk_set_blend(int on);
 void   ae3d_vk_draw(int mesh, int texture, int instances, int instance_count);
 void   ae3d_vk_draw_sky(int mesh, int texture);

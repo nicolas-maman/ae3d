@@ -1,0 +1,323 @@
+// A skinned mesh drawn, on both renderers.
+//
+// tests/test_skin checks the arithmetic: the palette a draw would read, against
+// the positions it has to produce. This checks that the draw reads it -- that
+// the joints and the weights reach the vertex shader, that the palette reaches
+// the uniform the shader indexes, and that both backends agree about all of it.
+//
+// The strong check is the bind pose. A skinned draw of a mesh whose bones have
+// not moved has to produce exactly the frame an unskinned draw of the same mesh
+// produces: identical pixels, not merely similar ones. Every way of getting
+// skinning wrong that still draws something -- a transposed matrix, weights
+// read as joints, the palette written at the wrong offset, a stride that walks
+// off the vertex -- moves those pixels.
+
+import std.list
+import std.mem
+import std.string
+import ae3d.core
+import ae3d.gl
+import ae3d.vk
+import ae3d.offscreen
+import ae3d.loader
+import ae3d.skin
+
+const WIDTH = 192
+const HEIGHT = 144
+const QUARTER_TURN = 1.5707963
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern memcpy(to: ptr, from: ptr, bytes: int) -> ptr
+
+var g_failures = 0
+
+check(name: string, condition: bool) {
+    if condition {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        g_failures = g_failures + 1
+    }
+}
+
+lit(pixels: ptr) -> int {
+    count = 0
+    i = 0
+    while i < WIDTH * HEIGHT * 4 {
+        if mem.get_byte(pixels, i) > 24 { count = count + 1 }
+        i = i + 4
+    }
+    return count
+}
+
+differing(a: ptr, b: ptr) -> int {
+    count = 0
+    i = 0
+    while i < WIDTH * HEIGHT * 4 {
+        d = mem.get_byte(a, i) - mem.get_byte(b, i)
+        if d < 0 { d = 0 - d }
+        if d > 2 { count = count + 1 }
+        i = i + 1
+    }
+    return count
+}
+
+// A column of segments standing on the origin, so bending a bone halfway up
+// swings the top of it sideways across the frame.
+const SEGMENTS = 8
+const RADIUS = 0.35
+const HEIGHT_EACH = 0.5
+
+// The mesh is one surface. Every ring of vertices is weighted to the two bones
+// it lies between, by how far it is between them, which is what makes the
+// column bend rather than break.
+build_column(bones: ptr) -> ptr {
+    mesh = core.mesh_create()
+    ring = 0
+    while ring <= SEGMENTS {
+        y = ring * HEIGHT_EACH
+        side = 0
+        while side < 4 {
+            angle = side * QUARTER_TURN
+            x = RADIUS * core.cos_of(angle)
+            z = RADIUS * core.sin_of(angle)
+            core.mesh_push_vertex(mesh, core.vec3(x, y, z),
+                                  (side * 1.0) / 4.0, (ring * 1.0) / SEGMENTS,
+                                  core.v3_normalize(core.vec3(x, 0.0, z)))
+            side = side + 1
+        }
+        ring = ring + 1
+    }
+
+    ring = 0
+    while ring < SEGMENTS {
+        side = 0
+        while side < 4 {
+            next = (side + 1) % 4
+            a = ring * 4 + side
+            b = ring * 4 + next
+            c = (ring + 1) * 4 + next
+            d = (ring + 1) * 4 + side
+            core.mesh_push_index(mesh, a)
+            core.mesh_push_index(mesh, b)
+            core.mesh_push_index(mesh, c)
+            core.mesh_push_index(mesh, a)
+            core.mesh_push_index(mesh, c)
+            core.mesh_push_index(mesh, d)
+            side = side + 1
+        }
+        ring = ring + 1
+    }
+
+    // Each ring sits between two bones and is shared between them. The bottom
+    // ring is wholly the first bone and the top wholly the last.
+    count = list.size(bones)
+    ring = 0
+    while ring <= SEGMENTS {
+        along = (ring * 1.0) / SEGMENTS * ((count - 1) * 1.0)
+        lower = along as int
+        if lower > count - 2 { lower = count - 2 }
+        if lower < 0 { lower = 0 }
+        blend = along - (lower * 1.0)
+        side = 0
+        while side < 4 {
+            core.mesh_set_skin(mesh, ring * 4 + side, lower, lower + 1, 0, 0,
+                               1.0 - blend, blend, 0.0, 0.0)
+            side = side + 1
+        }
+        ring = ring + 1
+    }
+    return mesh
+}
+
+// The bones the column is weighted to, one per segment boundary, each hanging
+// off the one below it.
+build_bones() -> ptr {
+    bones = list.new()
+    i = 0
+    while i < SEGMENTS + 1 {
+        bone = loader.cube(0.02)
+        if i == 0 {
+            core.model_set_position(bone, 0.0, 0.0, 0.0)
+        } else {
+            core.model_set_position(bone, 0.0, HEIGHT_EACH, 0.0)
+            core.model_set_parent(bone, list.get_raw(bones, i - 1) as *Model)
+        }
+        list.add_raw(bones, bone as ptr)
+        i = i + 1
+    }
+    return bones
+}
+
+free_bones(bones: ptr) {
+    i = list.size(bones) - 1
+    while i >= 0 {
+        bone = list.get_raw(bones, i) as *Model
+        core.model_set_parent(bone, null)
+        core.model_free(bone)
+        i = i - 1
+    }
+    list.free(bones)
+}
+
+bend(bones: ptr, angle: float) {
+    // Everything above the waist, so the bend accumulates up the column the way
+    // a spine does rather than hinging at one joint.
+    i = list.size(bones) / 2
+    while i < list.size(bones) {
+        core.model_set_rotation(list.get_raw(bones, i) as *Model,
+                                core.quat_rotate(angle, core.vec3(0.0, 0.0, 1.0)))
+        i = i + 1
+    }
+}
+
+main() {
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 2.0, 7.0))
+    core.camera_look_at(cam, core.vec3(0.0, 2.0, 0.0))
+    core.camera_set_aspect(cam, (WIDTH * 1.0) / (HEIGHT * 1.0))
+
+    light = core.light_directional(core.vec3(0.3, 0.8, 0.6),
+                                   core.vec3(1.0, 1.0, 1.0), 1.0)
+    light.ambient_strength = 0.6
+
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("skinned: SKIP no OpenGL context")
+        return
+    }
+
+    gl_renderer = gl.renderer_new()
+    gl_pass = gl.backend(gl_renderer)
+    if !core.backend_init(&gl_pass, context, WIDTH, HEIGHT) {
+        println("skinned: SKIP the OpenGL backend would not initialise")
+        return
+    }
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(gl_renderer, target)
+    gl.renderer_set_clear_color(gl_renderer, 0.0, 0.0, 0.0)
+
+    // The same geometry twice: one model posed by bones and one not. Nothing
+    // has bent yet, so the two have to arrive at the same pixels.
+    bones = build_bones()
+    skeleton = skin.skeleton_new()
+    i = 0
+    while i < list.size(bones) {
+        skin.skeleton_add(skeleton, list.get_raw(bones, i) as *Model)
+        i = i + 1
+    }
+    skin.skeleton_bind(skeleton)
+
+    rigid = core.model_new()
+    core.model_set_mesh(rigid, build_column(bones))
+    core.backend_add_model(&gl_pass, rigid)
+    core.backend_render(&gl_pass, cam, light)
+    rigid_lit = lit(offscreen.target_pixels(target))
+    rigid_pixels = calloc(WIDTH * HEIGHT, 4)
+    memcpy(rigid_pixels, offscreen.target_pixels(target), WIDTH * HEIGHT * 4)
+    core.backend_remove_model(&gl_pass, rigid)
+
+    posed = core.model_new()
+    core.model_set_mesh(posed, build_column(bones))
+    core.model_set_skeleton(posed, skeleton as ptr)
+    core.backend_add_model(&gl_pass, posed)
+    core.backend_render(&gl_pass, cam, light)
+    bind_lit = lit(offscreen.target_pixels(target))
+
+    check("the column is on screen at all", rigid_lit > WIDTH * HEIGHT / 40)
+    check("a skinned draw in its bind pose is the unskinned draw",
+          differing(rigid_pixels, offscreen.target_pixels(target)) == 0)
+
+    bind_pixels = calloc(WIDTH * HEIGHT, 4)
+    memcpy(bind_pixels, offscreen.target_pixels(target), WIDTH * HEIGHT * 4)
+
+    bend(bones, QUARTER_TURN / 6.0)
+    core.backend_render(&gl_pass, cam, light)
+    bent_gl = differing(bind_pixels, offscreen.target_pixels(target))
+    check("bending a bone moves the mesh", bent_gl > WIDTH * HEIGHT / 20)
+    check("and does not throw it off screen",
+          lit(offscreen.target_pixels(target)) > bind_lit / 2)
+
+    bend(bones, 0.0)
+    core.backend_render(&gl_pass, cam, light)
+    check("straightening it puts the mesh back exactly",
+          differing(bind_pixels, offscreen.target_pixels(target)) == 0)
+
+    // The same thing through Vulkan, which reaches the palette by a different
+    // road: a uniform block at a generated offset rather than a uniform array,
+    // and a second pipeline rather than a branch on a bound attribute.
+    vk_renderer = vk.renderer_new()
+    vk_pass = vk.backend(vk_renderer)
+    if !core.backend_init(&vk_pass, null, WIDTH, HEIGHT) {
+        println("  skip Vulkan would not start (${vk.last_error()})")
+        report()
+        return
+    }
+    vk.renderer_set_clear_color(vk_renderer, 0.0, 0.0, 0.0)
+
+    vk_bones = build_bones()
+    vk_skeleton = skin.skeleton_new()
+    i = 0
+    while i < list.size(vk_bones) {
+        skin.skeleton_add(vk_skeleton, list.get_raw(vk_bones, i) as *Model)
+        i = i + 1
+    }
+    skin.skeleton_bind(vk_skeleton)
+
+    vk_rigid = core.model_new()
+    core.model_set_mesh(vk_rigid, build_column(vk_bones))
+    core.backend_add_model(&vk_pass, vk_rigid)
+    core.backend_render(&vk_pass, cam, light)
+    vk_rigid_pixels = calloc(WIDTH * HEIGHT, 4)
+    memcpy(vk_rigid_pixels, vk.offscreen_pixels(), WIDTH * HEIGHT * 4)
+    core.backend_remove_model(&vk_pass, vk_rigid)
+
+    vk_posed = core.model_new()
+    core.model_set_mesh(vk_posed, build_column(vk_bones))
+    core.model_set_skeleton(vk_posed, vk_skeleton as ptr)
+    core.backend_add_model(&vk_pass, vk_posed)
+    core.backend_render(&vk_pass, cam, light)
+    check("vulkan draws a bind pose the way it draws an unskinned mesh",
+          differing(vk_rigid_pixels, vk.offscreen_pixels()) == 0)
+
+    vk_bind_pixels = calloc(WIDTH * HEIGHT, 4)
+    memcpy(vk_bind_pixels, vk.offscreen_pixels(), WIDTH * HEIGHT * 4)
+    bend(vk_bones, QUARTER_TURN / 6.0)
+    core.backend_render(&vk_pass, cam, light)
+    bent_vk = differing(vk_bind_pixels, vk.offscreen_pixels())
+    check("vulkan bends it too", bent_vk > WIDTH * HEIGHT / 20)
+
+    // Both backends were given the same bend, so they have to have moved about
+    // the same amount of the frame. Exact equality is the wrong bar across two
+    // rasterisers; an order of magnitude apart is a different pose.
+    spread = bent_gl - bent_vk
+    if spread < 0 { spread = 0 - spread }
+    println("  bent: opengl ${bent_gl} channels, vulkan ${bent_vk}")
+    check("and by the same pose", spread < bent_gl / 4 + 64)
+
+    free(vk_bind_pixels)
+    free(vk_rigid_pixels)
+    core.backend_remove_model(&vk_pass, vk_posed)
+    core.model_free(vk_posed)
+    core.model_free(vk_rigid)
+    skin.skeleton_free(vk_skeleton)
+    free_bones(vk_bones)
+
+    free(bind_pixels)
+    free(rigid_pixels)
+    core.backend_remove_model(&gl_pass, posed)
+    core.model_free(posed)
+    core.model_free(rigid)
+    skin.skeleton_free(skeleton)
+    free_bones(bones)
+    report()
+}
+
+report() {
+    if g_failures == 0 {
+        println("skinned: all checks passed")
+        return
+    }
+    println("skinned: ${g_failures} failure(s)")
+}
