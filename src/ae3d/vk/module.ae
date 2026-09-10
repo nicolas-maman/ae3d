@@ -21,7 +21,7 @@ exports (
     renderer_new, renderer_free, backend,
     available, device_name, last_error,
     renderer_model_count, renderer_model, renderer_light_count, renderer_light, renderer_draw_calls, renderer_set_clear_color,
-    renderer_set_normal_strength,
+    renderer_set_normal_strength, renderer_set_occlusion_strength,
     renderer_load_texture, renderer_release_texture, renderer_sample_count, renderer_set_post,
     renderer_set_shadows, renderer_shadows, renderer_add_light, renderer_remove_light,
     renderer_set_fog, renderer_fog, renderer_set_shadow_distance, renderer_shadow_distance,
@@ -115,6 +115,7 @@ struct VKRenderer {
     lights: ptr
     // How hard normal maps push, for the whole scene. A look, not a surface.
     normal_strength: float
+    occlusion_strength: float
     textures: ptr
     frustum: ptr
     skybox: ptr
@@ -183,6 +184,7 @@ renderer_new() -> *VKRenderer {
     r.frustum = core.frustum_new()
     r.shadow_space = core.mat4_ident()
     r.normal_strength = 2.5
+    r.occlusion_strength = 1.0
     r.batches = list.new()
     r.batch_count = 0
     r.fog = core.fog_none()
@@ -590,6 +592,10 @@ renderer_set_normal_strength(r: *VKRenderer, strength: float) {
     if r != null { r.normal_strength = strength }
 }
 
+renderer_set_occlusion_strength(r: *VKRenderer, strength: float) {
+    if r != null { r.occlusion_strength = strength }
+}
+
 normal_for(r: *VKRenderer, material: *Material) -> int {
     if material == null { return 0 }
     if material.normal_stale {
@@ -610,6 +616,7 @@ apply_normal_map(r: *VKRenderer, material: *Material) {
     ae3d_vk_set_normal_map(normal)
     ae3d_vk_scene_set_int(vkscene.OFF_HASNORMALMAP, normal != 0)
     ae3d_vk_scene_set_float(vkscene.OFF_NORMALSTRENGTH, r.normal_strength)
+    ae3d_vk_scene_set_float(vkscene.OFF_OCCLUSIONSTRENGTH, r.occlusion_strength)
 }
 
 renderer_remove_model(r: *VKRenderer, m: *Model) {

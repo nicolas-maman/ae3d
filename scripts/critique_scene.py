@@ -75,6 +75,8 @@ SHAPE_HIGH = 2.5
 # asked is whether they arrive at all, not how loud they are.
 NORMAL_STRENGTH = 2.5
 NORMAL_VISIBLE = 0.025
+# Baked occlusion, measured the same way and from the scene's own camera.
+OCCLUSION_VISIBLE = 0.03
 
 FAILURES = []
 
@@ -224,6 +226,22 @@ def surface_relief(engine, models, lit_from=(0.0, 1.6, 3.0), lit_at=(0.0, 0.0, 0
           moved["max_delta"] >= NORMAL_VISIBLE,
           "the worst pixel moves %.3f, wanted %.3f"
           % (moved["max_delta"], NORMAL_VISIBLE))
+
+    # Ambient occlusion, the same way. Ambient is the dimmest light in a scene
+    # and the one that reaches everywhere, so without this a corner is as bright
+    # as an open wall and every surface reads flat wherever the lamps do not
+    # fall. Measured from the scene's own camera, because occlusion darkens what
+    # is already in shadow and that is most of the frame.
+    engine("render.set", occlusion_strength=0.0)
+    engine("frame.hold")
+    engine("render.set", occlusion_strength=1.0)
+    shut = engine("frame.diff", tolerance=2)
+    print("  occlusion moves %.1f%% of the frame, worst %.3f"
+          % (shut["fraction"] * 100, shut["max_delta"]))
+    check("and the corners are darker than the open walls",
+          shut["max_delta"] >= OCCLUSION_VISIBLE,
+          "the worst pixel moves %.3f, wanted %.3f"
+          % (shut["max_delta"], OCCLUSION_VISIBLE))
 
 
 def silhouette(engine, mesh, columns=52, rows=44):

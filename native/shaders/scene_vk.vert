@@ -33,6 +33,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float materialAlpha;
     bool hasNormalMap;
     float normalStrength;
+    float occlusionStrength;
     bool enableClearcoat;
     float clearcoatRoughness;
     float clearcoatIntensity;
@@ -125,6 +126,7 @@ layout(location = 3) in mat4 instanceModel; // Instanced model matrix (locations
 layout(location = 7) in vec3 instanceColor; // Per-instance color (for voxels)
 layout(location = 8) in vec4 inJoints;   // The four bones this vertex hangs off
 layout(location = 9) in vec4 inWeights;  // How much of each, summing to one
+layout(location = 10) in float inOcclusion; // How much of the sky it can see
 
 
 
@@ -145,8 +147,10 @@ layout(location = 1) out vec3 Normal;
 layout(location = 2) out vec3 FragPos;
 layout(location = 3) out vec3 InstanceColor;
 layout(location = 4) out vec4 FragPosLightSpace;
+layout(location = 5) out float Occlusion;
 
 void main() {
+    Occlusion = inOcclusion;
     // Decide whether to use instanced or regular model matrix
     // For instanced rendering, we multiply the global model matrix by the instance matrix
     // This allows moving/scaling/rotating the entire group of instances using the model transform

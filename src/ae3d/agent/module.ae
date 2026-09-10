@@ -375,8 +375,8 @@ help_result() -> ptr {
         "Camera position, orientation, field of view and clip planes."))
     json.array_add_raw(ops, describe("scene.tree", "[detail], [audit]",
         "Every model the renderer holds: index, name, position and visibility. With detail, also its material, texture, parent, world position, triangles and where it lands on screen -- one round trip instead of one per model. With audit, what the surface is made of: its area in metres, its size along each axis, how many ways its faces point, how often its texture repeats across a metre and how many texels that is."))
-    json.array_add_raw(ops, describe("render.set", "normal_strength",
-        "How hard normal maps push, for the whole scene. Zero is the normal the geometry has, which is what a surface without a map is shaded by."))
+    json.array_add_raw(ops, describe("render.set", "[normal_strength], [occlusion_strength]",
+        "How hard normal maps push and how much baked occlusion is applied, for the whole scene. Zero on either is the lighting this renderer had before it could do that, which is what makes the difference measurable rather than a matter of opinion."))
     json.array_add_raw(ops, describe("scene.skeleton", "object",
         "Every bone of a skinned model: name, parent, where it is in the world and how it is turned. A skinned mesh stays in its bind pose and its bones carry it, so this is the only thing that says where a figure's hand or foot actually is."))
     json.array_add_raw(ops, describe("scene.isolate", "[object]",
@@ -1479,19 +1479,32 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
     // is what the renderer did before it could do this.
     if op == "render.set" {
         node = json.object_get_raw(request, "normal_strength")
-        if node == null {
+        shading = json.object_get_raw(request, "occlusion_strength")
+        if node == null && shading == null {
             fail(id, "render.set needs something to set")
             return false
         }
-        strength = json.get_number(node)
-        if c.gl_renderer != null {
-            gl.renderer_set_normal_strength(c.gl_renderer as *GLRenderer, strength)
-        }
-        if c.vk_renderer != null {
-            vk.renderer_set_normal_strength(c.vk_renderer as *VKRenderer, strength)
-        }
         out = json.obj()
-        json.object_set_raw(out, "normal_strength", json.num(strength))
+        if node != null {
+            strength = json.get_number(node)
+            if c.gl_renderer != null {
+                gl.renderer_set_normal_strength(c.gl_renderer as *GLRenderer, strength)
+            }
+            if c.vk_renderer != null {
+                vk.renderer_set_normal_strength(c.vk_renderer as *VKRenderer, strength)
+            }
+            json.object_set_raw(out, "normal_strength", json.num(strength))
+        }
+        if shading != null {
+            strength = json.get_number(shading)
+            if c.gl_renderer != null {
+                gl.renderer_set_occlusion_strength(c.gl_renderer as *GLRenderer, strength)
+            }
+            if c.vk_renderer != null {
+                vk.renderer_set_occlusion_strength(c.vk_renderer as *VKRenderer, strength)
+            }
+            json.object_set_raw(out, "occlusion_strength", json.num(strength))
+        }
         answer(id, out)
         return false
     }

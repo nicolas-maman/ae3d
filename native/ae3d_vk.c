@@ -50,7 +50,7 @@
 #define AE3D_VK_DRAWS_PER_FRAME 4096
 #define AE3D_VK_MAX_TEXTURES 256
 #define AE3D_VK_SKIN_STRIDE (8 * (unsigned)sizeof(float))
-#define AE3D_VK_STRIDE (8 * (int)sizeof(float))
+#define AE3D_VK_STRIDE (9 * (int)sizeof(float))
 
 #define AE3D_VK_GLOBAL_FUNCS(X) \
     X(vkCreateInstance) \
@@ -2154,7 +2154,7 @@ static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
                                         int skinned) {
     VkPipelineShaderStageCreateInfo stages[2];
     VkVertexInputBindingDescription bindings[3];
-    VkVertexInputAttributeDescription attributes[10];
+    VkVertexInputAttributeDescription attributes[11];
     VkPipelineVertexInputStateCreateInfo vertex_input;
     VkPipelineInputAssemblyStateCreateInfo assembly;
     VkPipelineViewportStateCreateInfo viewport_state;
@@ -2203,6 +2203,12 @@ static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
     attributes[2].binding = 0;
     attributes[2].format = VK_FORMAT_R32G32B32_SFLOAT;
     attributes[2].offset = 5 * (unsigned)sizeof(float);
+    /* Baked occlusion, in the vertex rather than a binding of its own, so no
+       pipeline has to know whether a mesh has any. */
+    attributes[10].location = 10;
+    attributes[10].binding = 0;
+    attributes[10].format = VK_FORMAT_R32_SFLOAT;
+    attributes[10].offset = 8 * (unsigned)sizeof(float);
     for (i = 0; i < 4; i++) {
         attributes[3 + i].location = (unsigned)(3 + i);
         attributes[3 + i].binding = 1;
@@ -2238,7 +2244,7 @@ static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
     vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     vertex_input.vertexBindingDescriptionCount = 3;
     vertex_input.pVertexBindingDescriptions = bindings;
-    vertex_input.vertexAttributeDescriptionCount = 10;
+    vertex_input.vertexAttributeDescriptionCount = 11;
     vertex_input.pVertexAttributeDescriptions = attributes;
 
     memset(&assembly, 0, sizeof(assembly));

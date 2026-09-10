@@ -401,7 +401,7 @@ def main():
 
     vertex_out = [("vec2", "fragTexCoord"), ("vec3", "Normal"),
                   ("vec3", "FragPos"), ("vec3", "InstanceColor"),
-                  ("vec4", "FragPosLightSpace")]
+                  ("vec4", "FragPosLightSpace"), ("float", "Occlusion")]
     vertex_in = [("vec3", "inPosition"), ("vec2", "inTexCoord"), ("vec3", "inNormal")]
 
     # The vertex inputs already carry explicit locations in the OpenGL source,

@@ -6,7 +6,7 @@
 #include <string.h>
 #include <stdio.h>
 
-#define AE3D_STRIDE_BYTES (8 * (int)sizeof(float))
+#define AE3D_STRIDE_BYTES (9 * (int)sizeof(float))
 #define AE3D_SKIN_BYTES (8 * (int)sizeof(float))
 #define AE3D_MATRIX_BYTES (16 * (int)sizeof(float))
 #define AE3D_COLOR_BYTES  (3 * (int)sizeof(float))
@@ -344,6 +344,11 @@ void ae3d_gl_setup_vertex_attribs(void) {
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, AE3D_STRIDE_BYTES, (const void *)(5 * sizeof(float)));
     glEnableVertexAttribArray(2);
+    /* Slot 10, because 3-6 carry the instance matrix, 7 its colour and 8-9 the
+       skin. Baked occlusion rides with the vertex, so it needs no binding of
+       its own and no pipeline that knows about it. */
+    glVertexAttribPointer(10, 1, GL_FLOAT, GL_FALSE, AE3D_STRIDE_BYTES, (const void *)(8 * sizeof(float)));
+    glEnableVertexAttribArray(10);
 }
 
 void ae3d_gl_setup_instance_attribs(void *inst, int matrix_vbo, int color_vbo) {

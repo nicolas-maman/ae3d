@@ -26,6 +26,7 @@ layout(location = 3) in mat4 instanceModel; // Instanced model matrix (locations
 layout(location = 7) in vec3 instanceColor; // Per-instance color (for voxels)
 layout(location = 8) in vec4 inJoints;   // The four bones this vertex hangs off
 layout(location = 9) in vec4 inWeights;  // How much of each, summing to one
+layout(location = 10) in float inOcclusion; // How much of the sky it can see
 
 uniform bool isInstanced; // Flag to differentiate instanced vs non-instanced rendering
 uniform bool useInstanceColor;
@@ -47,8 +48,10 @@ out vec3 Normal;          // Pass normal to fragment shader
 out vec3 FragPos;         // Pass position to fragment shader
 out vec3 InstanceColor;   // Pass instance color to fragment shader
 out vec4 FragPosLightSpace;
+out float Occlusion;
 
 void main() {
+    Occlusion = inOcclusion;
     // Decide whether to use instanced or regular model matrix
     // For instanced rendering, we multiply the global model matrix by the instance matrix
     // This allows moving/scaling/rotating the entire group of instances using the model transform
@@ -94,6 +97,11 @@ in vec3 Normal;
 in vec3 FragPos;
 in vec3 InstanceColor; // Per-instance color from vertex shader
 in vec4 FragPosLightSpace;
+// How much of the sky this point can see, baked against the whole scene.
+// Ambient is light arriving from everywhere, so it is the term this belongs
+// to: without it a corner is as bright as an open wall and every surface reads
+// flat wherever direct light does not reach.
+in float Occlusion;
 
 uniform sampler2D textureSampler;
 uniform sampler2D shadowMap;
@@ -136,6 +144,10 @@ uniform float materialAlpha; // Material transparency (0.0 = transparent, 1.0 = 
 // all on those that do not.
 uniform bool hasNormalMap;
 uniform float normalStrength;
+// How much of the baked occlusion to apply. Zero is the lighting this renderer
+// had before it could do this, which is what makes the difference measurable
+// rather than a matter of opinion.
+uniform float occlusionStrength;
 
 uniform bool enableClearcoat;
 uniform float clearcoatRoughness;
@@ -920,7 +932,12 @@ void main() {
     // the key light alone; summing it per light would wash the image out as
     // lights were added.
     vec3 keyColor = lights[0].color * kelvinToRGB(lights[0].temperature);
-    vec3 ambient = lights[0].ambientStrength * keyColor * albedo * 0.8;
+    // Ambient is light arriving from every direction, so what a point can see
+    // of the sky is exactly what scales it. This is the term occlusion belongs
+    // to and the only one: darkening the direct light as well would put a
+    // shadow where a lamp is plainly shining.
+    float shut = mix(1.0, Occlusion, occlusionStrength);
+    vec3 ambient = lights[0].ambientStrength * keyColor * albedo * 0.8 * shut;
     vec3 fillLightContrib = vec3(0.0);
 
     vec3 color = ambient + fillLightContrib + Lo;

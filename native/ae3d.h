@@ -46,6 +46,8 @@ int    ae3d_mesh_push_vertex(void *mesh, double px, double py, double pz,
                              double u, double v,
                              double nx, double ny, double nz);
 int    ae3d_mesh_push_index(void *mesh, int index);
+void   ae3d_mesh_set_occlusion(void *mesh, int i, double value);
+double ae3d_mesh_occlusion(void *mesh, int i);
 int    ae3d_mesh_set_skin(void *mesh, int i, int j0, int j1, int j2, int j3,
                           double w0, double w1, double w2, double w3);
 int    ae3d_mesh_is_skinned(void *mesh);
@@ -63,6 +65,7 @@ void   ae3d_skinrows_set(void *rows, int i, int j0, int j1, int j2, int j3,
                          double w0, double w1, double w2, double w3);
 void   ae3d_skinrows_apply(void *rows, void *mesh, int vertex, int position);
 void   ae3d_objbuild_set_skin(void *build, void *rows);
+void   ae3d_objbuild_set_occlusion(void *build, void *values);
 void   ae3d_gl_uniform_mat4v(int loc, int count, const void *values);
 const float *ae3d_mesh_skin_data(void *mesh);
 double ae3d_mesh_skin_joint(void *mesh, int i, int slot);

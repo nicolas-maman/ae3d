@@ -47,7 +47,7 @@ interleaved with the first.
 | `frame.stats` |  | frame, fps, delta, viewport, draw calls and instances for the last frame, and the mean milliseconds a frame has cost to submit. |
 | `camera.get` |  | Camera position, orientation, field of view and clip planes. |
 | `scene.tree` | `[detail], [audit]` | Every model the renderer holds: index, name, position and visibility. With detail, also its material, texture, parent, world position, triangles and where it lands on screen -- one round trip instead of one per model. With audit, what the surface is made of: its area in metres, its size along each axis, how many ways its faces point, how often its texture repeats across a metre and how many texels that is. |
-| `render.set` | `normal_strength` | How hard normal maps push, for the whole scene. Zero is the normal the geometry has, which is what a surface without a map is shaded by. |
+| `render.set` | `[normal_strength], [occlusion_strength]` | How hard normal maps push and how much baked occlusion is applied, for the whole scene. Zero on either is the lighting this renderer had before it could do that, which is what makes the difference measurable rather than a matter of opinion. |
 | `scene.skeleton` | `object` | Every bone of a skinned model: name, parent, where it is in the world and how it is turned. A skinned mesh stays in its bind pose and its bones carry it, so this is the only thing that says where a figure's hand or foot actually is. |
 | `scene.isolate` | `[object]` | Show only this model, or show every model again when given no name. |
 | `model.get` | `index` | One model in full: transform, bounds, material and mesh counts. |

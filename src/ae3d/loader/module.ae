@@ -12,13 +12,14 @@ import std.string
 import ae3d.core
 
 exports (
-    load_obj, load_obj_skinned, load_obj_instanced, load_mtl, materials_free,
+    load_obj, load_obj_skinned, load_obj_baked, load_obj_instanced, load_mtl, materials_free,
     cube, sphere, plane, water_surface, quad, grid, box_outline,
     last_error
 )
 
 extern ae3d_objbuild_create() -> ptr
 extern ae3d_objbuild_set_skin(build: ptr, rows: ptr)
+extern ae3d_objbuild_set_occlusion(build: ptr, values: ptr)
 extern ae3d_objbuild_destroy(build: ptr)
 extern ae3d_objbuild_add_position(build: ptr, x: float, y: float, z: float) -> int
 extern ae3d_objbuild_add_uv(build: ptr, u: float, v: float) -> int
@@ -269,6 +270,15 @@ load_obj(path: string, recalculate_normals: bool) -> *Model {
 // written onto each vertex as it is emitted. A null skin loads exactly as
 // load_obj always did and touches nothing.
 load_obj_skinned(path: string, recalculate_normals: bool, skin: ptr) -> *Model {
+    return load_obj_baked(path, recalculate_normals, skin, null)
+}
+
+// The same load, with what was baked against the scene: weights, and how much
+// of the sky each position can see. Both arrive keyed by position, because a
+// position becomes as many vertices as it has distinct normals and UVs and
+// only this knows which.
+load_obj_baked(path: string, recalculate_normals: bool, skin: ptr,
+               occlusion: ptr) -> *Model {
     content, err = fs.read(path)
     if err != "" {
         set_error("cannot read ", path)
@@ -290,6 +300,7 @@ load_obj_skinned(path: string, recalculate_normals: bool, skin: ptr) -> *Model {
     }
 
     ae3d_objbuild_set_skin(build, skin)
+    ae3d_objbuild_set_occlusion(build, occlusion)
 
     materials = list.new()
     positions = 0

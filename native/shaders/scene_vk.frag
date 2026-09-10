@@ -34,6 +34,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float materialAlpha;
     bool hasNormalMap;
     float normalStrength;
+    float occlusionStrength;
     bool enableClearcoat;
     float clearcoatRoughness;
     float clearcoatIntensity;
@@ -126,6 +127,11 @@ layout(location = 1) in vec3 Normal;
 layout(location = 2) in vec3 FragPos;
 layout(location = 3) in vec3 InstanceColor;
 layout(location = 4) in vec4 FragPosLightSpace;
+// How much of the sky this point can see, baked against the whole scene.
+// Ambient is light arriving from everywhere, so it is the term this belongs
+// to: without it a corner is as bright as an open wall and every surface reads
+// flat wherever direct light does not reach.
+layout(location = 5) in float Occlusion;
 
 
 
@@ -152,6 +158,10 @@ layout(location = 4) in vec4 FragPosLightSpace;
 // cost is a handful of instructions on surfaces that have a map and nothing at
 // all on those that do not.
 
+
+// How much of the baked occlusion to apply. Zero is the lighting this renderer
+// had before it could do this, which is what makes the difference measurable
+// rather than a matter of opinion.
 
 
 
@@ -937,7 +947,12 @@ void main() {
     // the key light alone; summing it per light would wash the image out as
     // lights were added.
     vec3 keyColor = lights[0].color * kelvinToRGB(lights[0].temperature);
-    vec3 ambient = lights[0].ambientStrength * keyColor * albedo * 0.8;
+    // Ambient is light arriving from every direction, so what a point can see
+    // of the sky is exactly what scales it. This is the term occlusion belongs
+    // to and the only one: darkening the direct light as well would put a
+    // shadow where a lamp is plainly shining.
+    float shut = mix(1.0, Occlusion, occlusionStrength);
+    vec3 ambient = lights[0].ambientStrength * keyColor * albedo * 0.8 * shut;
     vec3 fillLightContrib = vec3(0.0);
 
     vec3 color = ambient + fillLightContrib + Lo;
