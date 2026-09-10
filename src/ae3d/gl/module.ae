@@ -31,6 +31,8 @@ exports (
     renderer_set_shadow_distance, renderer_shadow_distance,
     renderer_load_texture, renderer_release_texture, renderer_texture_count,
     renderer_material_texture_size, renderer_set_normal_strength,
+    renderer_shadow_ms, renderer_scene_ms, renderer_post_ms,
+    renderer_program_binds, renderer_material_binds, renderer_texture_binds,
     renderer_set_occlusion_strength,
     renderer_frame_pixels, read_pixel, snapshot
 )
@@ -215,6 +217,14 @@ struct GLRenderer {
     initialized: bool
 
     last_draw_calls: int
+    // The passes, timed apart. One number for a frame says it got slower and
+    // nothing about where, and the three of them are what a budget is set on.
+    last_shadow_ms: float
+    last_scene_ms: float
+    last_post_ms: float
+    last_programs: int
+    last_materials: int
+    last_textures: int
     frame_stamp: int
     shadow_program: int
     shadow_fbo: int
@@ -501,6 +511,9 @@ set_wireframe(r: *GLRenderer, on: bool) {
 // remembers about them is only true while that program stays current.
 use_program(r: *GLRenderer, program: int) {
     if r.current_program == program { return }
+    // Counted where the change happens, not where it is asked for: a budget on
+    // how often the renderer is called is a budget on nothing.
+    r.last_programs = r.last_programs + 1
     ae3d_gl_program_use(program)
     r.current_program = program
     r.bound_material = null
@@ -531,6 +544,7 @@ group_material(m: *Model, group: *MaterialGroup) -> *Material {
 
 apply_material(r: *GLRenderer, slots: *ProgramSlots, material: *Material) {
     if r.bound_material_set && r.bound_material == material as ptr { return }
+    r.last_materials = r.last_materials + 1
     set_material_uniforms(slots, material)
     r.bound_material = material as ptr
     r.bound_material_set = true
@@ -538,6 +552,7 @@ apply_material(r: *GLRenderer, slots: *ProgramSlots, material: *Material) {
 
 apply_texture(r: *GLRenderer, slots: *ProgramSlots, texture: int) {
     if r.bound_texture == texture { return }
+    r.last_textures = r.last_textures + 1
     ae3d_gl_texture_bind(0, texture)
     ae3d_gl_uniform_int(slots.texture_sampler, 0)
     r.bound_texture = texture
@@ -947,6 +962,15 @@ renderer_model(r: *GLRenderer, index: int) -> *Model {
 renderer_draw_calls(r: *GLRenderer) -> int {
     return r.last_draw_calls
 }
+
+// What the last frame cost, split by pass, and how much of it was the renderer
+// changing its mind about what it was drawing with.
+renderer_shadow_ms(r: *GLRenderer) -> float { return r.last_shadow_ms }
+renderer_scene_ms(r: *GLRenderer) -> float { return r.last_scene_ms }
+renderer_post_ms(r: *GLRenderer) -> float { return r.last_post_ms }
+renderer_program_binds(r: *GLRenderer) -> int { return r.last_programs }
+renderer_material_binds(r: *GLRenderer) -> int { return r.last_materials }
+renderer_texture_binds(r: *GLRenderer) -> int { return r.last_textures }
 
 renderer_instance_count(r: *GLRenderer) -> int {
     total = 0
@@ -1380,6 +1404,13 @@ renderer_frame_pixels(r: *GLRenderer) -> ptr {
 renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
     if !r.initialized { return }
     r.last_draw_calls = 0
+    // What a frame is made of, counted per frame. Draw calls and state changes
+    // are what a scene actually regresses by, and unlike a millisecond they
+    // mean the same thing on a workstation and on a runner drawing through
+    // llvmpipe -- which is what lets a budget be enforced rather than printed.
+    r.last_programs = 0
+    r.last_materials = 0
+    r.last_textures = 0
     r.frame_stamp = r.frame_stamp + 1
     r.scene_time = platform.time() - r.scene_start
     r.bound_material = null
@@ -1391,7 +1422,10 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
 
     active_light = key_light(r.lights, light)
 
+    started = platform.time()
     render_shadow_pass(r, active_light, cam)
+    r.last_shadow_ms = (platform.time() - started) * 1000.0
+    started = platform.time()
 
     bind_output(r)
     post_active = begin_post_processing(r)
@@ -1435,7 +1469,10 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
         i = i + 1
     }
 
+    r.last_scene_ms = (platform.time() - started) * 1000.0
+    started = platform.time()
     if post_active { resolve_post_processing(r) }
+    r.last_post_ms = (platform.time() - started) * 1000.0
 }
 
 // A model can join a merged draw when nothing about it is per-model except

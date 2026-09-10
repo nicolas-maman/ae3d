@@ -77,6 +77,13 @@ NORMAL_STRENGTH = 2.5
 NORMAL_VISIBLE = 0.025
 # Baked occlusion, measured the same way and from the scene's own camera.
 OCCLUSION_VISIBLE = 0.03
+# What a frame of this scene is allowed to cost, in the units that mean the same
+# thing on every machine. Set above what it costs now with room to grow, and
+# below what would be a different scene: 95 draws, 36,106 triangles, 4 program
+# changes today.
+MAX_DRAWS = 140
+MAX_TRIANGLES = 60000
+MAX_PROGRAM_CHANGES = 12
 
 FAILURES = []
 
@@ -177,6 +184,47 @@ def proportion(models, prefix):
     if upper > 0.0 and fore > 0.0:
         check("and the forearm a little shorter than the upper arm",
               0.75 <= fore / upper <= 1.0, "forearm/upper %.2f" % (fore / upper))
+
+
+def budget(engine):
+    """What a frame costs, against what it is allowed to cost.
+
+    Milliseconds cannot be budgeted across machines: this scene draws in 4.6 ms
+    on a workstation and 412 on a runner rasterising in software, so a threshold
+    that holds on one is meaningless on the other. Draw calls, triangles and
+    state changes mean the same thing everywhere, and they are what a scene
+    actually regresses by -- somebody splits a mesh, or gives every object its
+    own material, and the count moves before anybody notices the time.
+
+    The milliseconds are printed beside them, split by pass, so that when a
+    count is exceeded there is something to say about where the time went. They
+    are CPU-side: the GPU is not waited on, and a driver that stalls charges the
+    wait to whichever call blocks, so the split says where the frame was
+    submitted rather than where it was rendered.
+    """
+    print("\n== what a frame costs ==")
+    engine("frame.capture")
+    stats = engine("frame.stats")
+    passes = stats["shadow_ms"] + stats["scene_ms"] + stats["post_ms"]
+    print("  %d draws, %d triangles, %d program / %d material / %d texture changes"
+          % (stats["draw_calls"], stats["triangles"], stats["program_binds"],
+             stats["material_binds"], stats["texture_binds"]))
+    print("  shadow %.2f ms, scene %.2f ms, post %.2f ms, submitted in %.2f ms"
+          % (stats["shadow_ms"], stats["scene_ms"], stats["post_ms"], passes))
+    check("the scene draws within its budget of draw calls",
+          stats["draw_calls"] <= MAX_DRAWS,
+          "%d draws, allowed %d" % (stats["draw_calls"], MAX_DRAWS))
+    check("and within its budget of triangles",
+          stats["triangles"] <= MAX_TRIANGLES,
+          "%d triangles, allowed %d" % (stats["triangles"], MAX_TRIANGLES))
+    check("and does not thrash the program it draws with",
+          stats["program_binds"] <= MAX_PROGRAM_CHANGES,
+          "%d program changes, allowed %d"
+          % (stats["program_binds"], MAX_PROGRAM_CHANGES))
+    check("and changes material no more often than it draws",
+          stats["material_binds"] <= stats["draw_calls"],
+          "%d material changes against %d draws"
+          % (stats["material_binds"], stats["draw_calls"]))
 
 
 def surface_relief(engine, models, lit_from=(0.0, 1.6, 3.0), lit_at=(0.0, 0.0, 0.0)):
@@ -466,6 +514,7 @@ def main(argv):
         surface_relief(engine, models)
         character(models, args.figure)
         proportion(models, args.figure)
+        budget(engine)
         if args.walks:
             silhouette(engine, args.walks)
             gait(engine, args.walks, args.feet.split(","), args.road, 2.6, 24)
