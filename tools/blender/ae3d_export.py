@@ -838,7 +838,7 @@ def linked_image(socket):
 def principled_surface(material):
     """Base colour, metallic, roughness and the base-colour image, if any."""
     surface = {"diffuse": (0.8, 0.8, 0.8), "metallic": 0.0,
-               "roughness": 0.5, "texture": None}
+               "roughness": 0.5, "texture": None, "normal": None}
     if not material:
         return surface
     if not getattr(material, "node_tree", None):
@@ -856,6 +856,13 @@ def principled_surface(material):
             socket = node.inputs.get(name)
             if socket is not None:
                 surface[key] = float(socket.default_value)
+        # A normal map arrives through a normal-map node, so its image is one
+        # link further away than the base colour's is.
+        shaped = node.inputs.get("Normal")
+        if shaped is not None and shaped.is_linked:
+            shaper = shaped.links[0].from_node
+            colour = shaper.inputs.get("Color") if shaper.type == "NORMAL_MAP" else None
+            surface["normal"] = linked_image(colour) if colour is not None else None
         break
     return surface
 
@@ -879,9 +886,17 @@ def write_mtl(material, path, out_directory):
         if written_texture:
             lines.append("map_Kd %s" % written_texture)
 
+    # `norm` is what OBJ grew for a tangent-space normal map. map_Bump is a
+    # height map and means something else, however often the two are confused.
+    written_normal = None
+    if surface["normal"] is not None:
+        written_normal = export_image(surface["normal"], out_directory)
+        if written_normal:
+            lines.append("norm %s" % written_normal)
+
     with open(path, "w", newline="\n") as handle:
         handle.write("\n".join(lines) + "\n")
-    return written_texture
+    return written_texture, written_normal
 
 
 def export_image(image, out_directory):
@@ -972,10 +987,12 @@ def main(argv):
         files = {"mesh": os.path.basename(obj_path)}
         if material:
             mtl_path = os.path.join(args.out, stem + ".mtl")
-            texture = write_mtl(material, mtl_path, args.out)
+            texture, normal = write_mtl(material, mtl_path, args.out)
             files["material"] = os.path.basename(mtl_path)
             if texture:
                 files["texture"] = texture
+            if normal:
+                files["normal"] = normal
 
         # A skinned mesh is one surface over a skeleton, so the skeleton is
         # written beside it and the weights beside that. A mesh with no

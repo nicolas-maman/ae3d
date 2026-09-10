@@ -30,7 +30,7 @@ exports (
     renderer_set_shadows, renderer_shadows, renderer_shadow_map, renderer_default_program,
     renderer_set_shadow_distance, renderer_shadow_distance,
     renderer_load_texture, renderer_release_texture, renderer_texture_count,
-    renderer_material_texture_size,
+    renderer_material_texture_size, renderer_set_normal_strength,
     renderer_frame_pixels, read_pixel, snapshot
 )
 
@@ -154,6 +154,9 @@ struct ProgramSlots {
     use_instance_color: int
     is_skinned: int
     bones: int
+    normal_sampler: int
+    has_normal_map: int
+    normal_strength: int
     caustics_time: int
     fog_enabled: int
     shadow_direction: int
@@ -241,6 +244,11 @@ struct GLRenderer {
     bound_texture: int
     bound_instanced: int
     bound_skinned: int
+    bound_normal: int
+    // How hard a normal map is allowed to push. One is the map as authored;
+    // less flattens it, more exaggerates it. A scene knob rather than a
+    // material one, because it is a look and not a surface.
+    normal_strength: float
     bound_instance_color: int
 
     post_fbo: int
@@ -281,6 +289,11 @@ renderer_new() -> *GLRenderer {
     r.batch_count = 0
     r.shadow_batches = list.new()
     r.shadow_batch_count = 0
+    // Measured rather than chosen: at 1 a normal map moves the worst pixel
+    // by 0.04 and reads as almost nothing; at 4 by 0.16 and reads as
+    // plastic. 2.5 is 0.10, which is relief.
+    r.normal_strength = 2.5
+    r.bound_normal = 0 - 1
     r.fog = core.fog_none()
     r.clear_r = 0.0
     r.clear_g = 0.0
@@ -294,6 +307,7 @@ renderer_new() -> *GLRenderer {
     r.bound_material_set = false
     r.bound_texture = 0 - 1
     r.bound_instanced = 0 - 1
+    r.bound_normal = 0 - 1
     r.bound_instance_color = 0 - 1
     r.scene_start = platform.time()
     r.scene_time = 0.0
@@ -427,6 +441,9 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
     s.use_instance_color = ae3d_gl_uniform_location(program, "useInstanceColor")
     s.is_skinned = ae3d_gl_uniform_location(program, "isSkinned")
     s.bones = ae3d_gl_uniform_location(program, "bones")
+    s.normal_sampler = ae3d_gl_uniform_location(program, "normalMap")
+    s.has_normal_map = ae3d_gl_uniform_location(program, "hasNormalMap")
+    s.normal_strength = ae3d_gl_uniform_location(program, "normalStrength")
     s.caustics_time = ae3d_gl_uniform_location(program, "causticsTime")
     s.shadow_direction = ae3d_gl_uniform_location(program, "shadowDirection")
     s.shadow_texel_world = ae3d_gl_uniform_location(program, "shadowTexelWorld")
@@ -485,6 +502,7 @@ use_program(r: *GLRenderer, program: int) {
     r.bound_material_set = false
     r.bound_texture = 0 - 1
     r.bound_instanced = 0 - 1
+    r.bound_normal = 0 - 1
     r.bound_instance_color = 0 - 1
 }
 
@@ -518,6 +536,17 @@ apply_texture(r: *GLRenderer, slots: *ProgramSlots, texture: int) {
     ae3d_gl_texture_bind(0, texture)
     ae3d_gl_uniform_int(slots.texture_sampler, 0)
     r.bound_texture = texture
+}
+
+// Unit 2, because 0 is the colour and 1 is the shadow map.
+apply_normal_map(r: *GLRenderer, slots: *ProgramSlots, normal: int) {
+    if r.bound_normal == normal { return }
+    if normal != 0 {
+        ae3d_gl_texture_bind(2, normal)
+        ae3d_gl_uniform_int(slots.normal_sampler, 2)
+    }
+    ae3d_gl_uniform_int(slots.has_normal_map, normal != 0)
+    r.bound_normal = normal
 }
 
 apply_instancing(r: *GLRenderer, slots: *ProgramSlots, instanced: int) {
@@ -679,6 +708,11 @@ renderer_release_texture(r: *GLRenderer, id: int) {
     }
 }
 
+// How hard normal maps push, for the whole scene.
+renderer_set_normal_strength(r: *GLRenderer, strength: float) {
+    if r != null { r.normal_strength = strength }
+}
+
 renderer_texture_count(r: *GLRenderer) -> int {
     return list.size(r.textures)
 }
@@ -791,6 +825,21 @@ resolve_material_texture(r: *GLRenderer, material: *Material) {
     id = renderer_load_texture(r, material.texture_path)
     if id == 0 { id = r.default_texture }
     material.texture_id = id
+}
+
+// A normal map is loaded through the same cache the colour is, and its absence
+// is not a fallback to anything: a surface without one is shaded by the normal
+// its geometry has, which is the right answer rather than a flat blue image.
+resolve_material_normal(r: *GLRenderer, material: *Material) {
+    material.normal_stale = false
+    if core.text(material.normal_path) == "" || material.normal_id != 0 { return }
+    material.normal_id = renderer_load_texture(r, material.normal_path)
+}
+
+normal_for(r: *GLRenderer, material: *Material) -> int {
+    if material == null { return 0 }
+    if material.normal_stale { resolve_material_normal(r, material) }
+    return material.normal_id
 }
 
 // The path was changed after this material had already been given a texture, so
@@ -1328,6 +1377,7 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
     r.bound_material_set = false
     r.bound_texture = 0 - 1
     r.bound_instanced = 0 - 1
+    r.bound_normal = 0 - 1
     r.bound_instance_color = 0 - 1
 
     active_light = key_light(r.lights, light)
@@ -1599,6 +1649,7 @@ draw_batch(r: *GLRenderer, b: *GLBatch, view_projection: *Mat4, light: *Light, c
     apply_material(r, slots, material)
     apply_transparency(r, false)
     apply_texture(r, slots, texture_for(r, material))
+    apply_normal_map(r, slots, normal_for(r, material))
     apply_instancing(r, slots, 1)
     apply_instance_color(r, slots, 0)
 
@@ -1673,6 +1724,8 @@ render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
                 apply_material(r, slots, material)
                 apply_transparency(r, is_transparent)
                 apply_texture(r, slots, texture_for(r, material))
+                apply_normal_map(r, slots, normal_for(r, material))
+    apply_normal_map(r, slots, normal_for(r, material))
                 draw(r, m, slots, group.index_count, group.index_start * 4)
             }
             i = i + 1
@@ -1686,6 +1739,7 @@ render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
             apply_material(r, slots, m.material)
             apply_transparency(r, is_transparent)
             apply_texture(r, slots, texture_for(r, m.material))
+            apply_normal_map(r, slots, normal_for(r, m.material))
             draw(r, m, slots, core.mesh_index_count(m.mesh), 0)
         }
     }
@@ -1740,6 +1794,7 @@ draw(r: *GLRenderer, m: *Model, slots: *ProgramSlots, count: int, byte_offset: i
 set_frame_uniforms(r: *GLRenderer, slots: *ProgramSlots, view_projection: *Mat4,
                    light: *Light, lights: ptr, cam: *Camera) {
     ae3d_gl_uniform_mat4(slots.view_projection, view_projection)
+    ae3d_gl_uniform_float(slots.normal_strength, r.normal_strength)
 
     upload_lights(slots, lights, light)
 

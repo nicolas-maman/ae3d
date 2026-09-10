@@ -21,6 +21,7 @@ exports (
     renderer_new, renderer_free, backend,
     available, device_name, last_error,
     renderer_model_count, renderer_model, renderer_light_count, renderer_light, renderer_draw_calls, renderer_set_clear_color,
+    renderer_set_normal_strength,
     renderer_load_texture, renderer_release_texture, renderer_sample_count, renderer_set_post,
     renderer_set_shadows, renderer_shadows, renderer_add_light, renderer_remove_light,
     renderer_set_fog, renderer_fog, renderer_set_shadow_distance, renderer_shadow_distance,
@@ -52,6 +53,7 @@ extern ae3d_vk_scene_set_int(offset: int, value: int)
 extern ae3d_vk_scene_set_vec3(offset: int, x: float, y: float, z: float)
 extern ae3d_vk_scene_set_mat4(offset: int, m: ptr)
 extern ae3d_vk_scene_set_mat4v(offset: int, count: int, values: ptr)
+extern ae3d_vk_set_normal_map(handle: int)
 extern ae3d_vk_scene_set_clip_mat4(offset: int, m: ptr)
 extern ae3d_vk_set_blend(on: int)
 extern ae3d_vk_draw(mesh: int, texture: int, instances: int, instance_count: int)
@@ -111,6 +113,8 @@ struct VKBatch {
 struct VKRenderer {
     models: ptr
     lights: ptr
+    // How hard normal maps push, for the whole scene. A look, not a surface.
+    normal_strength: float
     textures: ptr
     frustum: ptr
     skybox: ptr
@@ -178,6 +182,7 @@ renderer_new() -> *VKRenderer {
     r.textures = list.new()
     r.frustum = core.frustum_new()
     r.shadow_space = core.mat4_ident()
+    r.normal_strength = 2.5
     r.batches = list.new()
     r.batch_count = 0
     r.fog = core.fog_none()
@@ -577,6 +582,34 @@ texture_for(r: *VKRenderer, material: *Material) -> int {
         resolve_one(r, material)
     }
     return material.texture_id
+}
+
+// The surface's shape, loaded through the same cache its colour is. A material
+// without one binds nothing and the shader is told not to look.
+renderer_set_normal_strength(r: *VKRenderer, strength: float) {
+    if r != null { r.normal_strength = strength }
+}
+
+normal_for(r: *VKRenderer, material: *Material) -> int {
+    if material == null { return 0 }
+    if material.normal_stale {
+        if material.normal_id != 0 { renderer_release_texture(r, material.normal_id) }
+        material.normal_id = 0
+        material.normal_stale = false
+        if core.text(material.normal_path) != "" {
+            material.normal_id = renderer_load_texture(r, material.normal_path)
+        }
+    }
+    return material.normal_id
+}
+
+// Set together, because they are one fact about a surface: a map, and whether
+// there is one.
+apply_normal_map(r: *VKRenderer, material: *Material) {
+    normal = normal_for(r, material)
+    ae3d_vk_set_normal_map(normal)
+    ae3d_vk_scene_set_int(vkscene.OFF_HASNORMALMAP, normal != 0)
+    ae3d_vk_scene_set_float(vkscene.OFF_NORMALSTRENGTH, r.normal_strength)
 }
 
 renderer_remove_model(r: *VKRenderer, m: *Model) {
@@ -1076,6 +1109,7 @@ draw_model(r: *VKRenderer, m: *Model, transparent_pass: bool) {
     }
 
     set_material_uniforms(m.material)
+    apply_normal_map(r, m.material)
     texture = 0
     if m.material != null { texture = texture_for(r, m.material) }
     ae3d_vk_draw(m.vbo, texture, m.instance_vbo, instances)

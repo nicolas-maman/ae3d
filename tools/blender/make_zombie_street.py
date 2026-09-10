@@ -55,7 +55,7 @@ WALK_SPEED = 0.9
 WALK_START_X = -6.4
 
 
-def material(name, image, roughness=0.9, metallic=0.0, emission=None):
+def material(name, image, roughness=0.9, metallic=0.0, emission=None, normal=None):
     made = bpy.data.materials.new(name)
     made.use_nodes = True
     tree = made.node_tree
@@ -72,6 +72,19 @@ def material(name, image, roughness=0.9, metallic=0.0, emission=None):
     node.image = image
     node.location = (-320.0, 200.0)
     tree.links.new(node.outputs["Color"], principled.inputs["Base Color"])
+
+    # A normal map through a normal-map node, which is where every exporter
+    # looks for one. Without it a wall catches the light as one flat plane and
+    # no amount of resolution in the colour makes brick read as brick.
+    if normal is not None:
+        bump = tree.nodes.new("ShaderNodeTexImage")
+        bump.image = normal
+        bump.image.colorspace_settings.name = "Non-Color"
+        bump.location = (-620.0, -160.0)
+        shaper = tree.nodes.new("ShaderNodeNormalMap")
+        shaper.location = (-320.0, -160.0)
+        tree.links.new(bump.outputs["Color"], shaper.inputs["Color"])
+        tree.links.new(shaper.outputs["Normal"], principled.inputs["Normal"])
     # The exported MTL carries the image and a base colour. Keeping the colour
     # white means a renderer that samples the texture is not also tinting it by
     # whatever the swatch happened to be.
@@ -764,19 +777,26 @@ def main(argv):
     scene.frame_end = TOTAL
 
     surfaces = {
-        "brick": material("WallBrick", textures.brick(), roughness=0.95),
-        "concrete": material("WallConcrete", textures.concrete(), roughness=0.92),
-        "stone": material("TrimStone", textures.stone(), roughness=0.8),
+        "brick": material("WallBrick", textures.brick(), roughness=0.95,
+                          normal=textures.brick_normal()),
+        "concrete": material("WallConcrete", textures.concrete(), roughness=0.92,
+                             normal=textures.concrete_normal()),
+        "stone": material("TrimStone", textures.stone(), roughness=0.8,
+                          normal=textures.stone_normal()),
         "glass": material("WindowGlass", textures.glass_dark(), roughness=0.15,
                           metallic=0.1),
         "glow": material("WindowLit", textures.glass_lit(), roughness=0.5),
-        "tarmac": material("RoadTarmac", textures.tarmac(), roughness=0.88),
-        "paving": material("PathPaving", textures.paving(), roughness=0.9),
+        "tarmac": material("RoadTarmac", textures.tarmac(), roughness=0.88,
+                           normal=textures.tarmac_normal()),
+        "paving": material("PathPaving", textures.paving(), roughness=0.9,
+                           normal=textures.paving_normal()),
         "metal": material("LampMetal", textures.metal(), roughness=0.4, metallic=0.8),
         "lamp": material("LampGlow", None, emission=(1.0, 0.72, 0.36)),
-        "skin": material("ZombieSkin", textures.skin(), roughness=0.85),
+        "skin": material("ZombieSkin", textures.skin(), roughness=0.85,
+                         normal=textures.skin_normal()),
         "gore": material("ZombieGore", textures.gore(), roughness=0.55),
-        "cloth": material("ZombieCloth", textures.cloth(), roughness=0.96),
+        "cloth": material("ZombieCloth", textures.cloth(), roughness=0.96,
+                          normal=textures.cloth_normal()),
     }
 
     parts = {}

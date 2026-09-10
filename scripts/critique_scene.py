@@ -65,6 +65,10 @@ SLIDE_PER_CONTACT = 0.040
 # which drew four times its own shape and every count it had still read right.
 SHAPE_LOW = 0.35
 SHAPE_HIGH = 2.5
+# What the engine is set to, and how much of a difference that has to make. A
+# map that is loaded and a map that reaches the frame are different facts.
+NORMAL_STRENGTH = 2.5
+NORMAL_VISIBLE = 0.05
 
 FAILURES = []
 
@@ -165,6 +169,55 @@ def proportion(models, prefix):
     if upper > 0.0 and fore > 0.0:
         check("and the forearm a little shorter than the upper arm",
               0.75 <= fore / upper <= 1.0, "forearm/upper %.2f" % (fore / upper))
+
+
+def surface_relief(engine, models, lit_from=(0.0, 1.6, 3.0), lit_at=(0.0, 0.0, 0.0)):
+    """Whether surfaces have a shape as well as a colour, and whether it lands.
+
+    A normal map that a material names and the renderer never loaded is a wall
+    lit as the one flat plane it is, and nothing about its colour says so. So
+    both facts are asked for: that the maps are there, and that turning them off
+    changes the picture -- because loaded and reaching the frame are different
+    things, and only the second one is worth having.
+    """
+    print("\n== the shape of the surfaces ==")
+    big = [m for m in models
+           if m.get("texture") and m.get("area_m2", 0.0) > 8.0
+           and "Glass" not in m["name"] and "Lit" not in m["name"]]
+    without = [m["name"] for m in big if not m.get("normal")]
+    unloaded = [m["name"] for m in big if m.get("normal") and not m.get("normal_loaded")]
+    print("  %d of %d surfaces over 8 m2 carry a normal map"
+          % (len(big) - len(without), len(big)))
+    check("every surface big enough to stand next to has a normal map", not without,
+          "%d without: %s" % (len(without), ", ".join(without[:4])))
+    check("and the renderer loaded every one it names", not unloaded,
+          ", ".join(unloaded[:4]))
+
+    # Measured from somewhere the light actually falls. A normal map changes
+    # how a surface catches light, so a view down a dark street at grazing
+    # angles measures almost nothing and says nothing either -- the honest place
+    # to ask is a lit surface seen face on.
+    was = engine("camera.get")
+    try:
+        engine("render.set", normal_strength=0.0)
+    except AgentError as refused:
+        check("the maps can be turned off to see whether they matter", False, str(refused))
+        return
+    engine("camera.set", position=list(lit_from), look_at=list(lit_at))
+    engine("frame.hold")
+    engine("render.set", normal_strength=NORMAL_STRENGTH)
+    moved = engine("frame.diff", tolerance=2)
+    # camera.get answers a direction, not a point, so the way back is a point
+    # along it. Left where it was found, because everything after this measures
+    # the scene as the demo actually frames it.
+    home = [was["position"][i] + was["front"][i] * 4.0 for i in range(3)]
+    engine("camera.set", position=was["position"], look_at=home)
+    print("  under a lamp they move %.1f%% of the frame, worst %.3f"
+          % (moved["fraction"] * 100, moved["max_delta"]))
+    check("and the maps reach the picture",
+          moved["max_delta"] >= NORMAL_VISIBLE,
+          "the worst pixel moves %.3f, wanted %.3f"
+          % (moved["max_delta"], NORMAL_VISIBLE))
 
 
 def silhouette(engine, mesh, columns=52, rows=44):
@@ -386,6 +439,7 @@ def main(argv):
         models = engine("scene.tree", detail=True, audit=True)["models"]
         texel_density(models)
         relief(models)
+        surface_relief(engine, models)
         character(models, args.figure)
         proportion(models, args.figure)
         if args.walks:

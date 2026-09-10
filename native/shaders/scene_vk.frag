@@ -32,6 +32,8 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float roughness;
     float exposure;
     float materialAlpha;
+    bool hasNormalMap;
+    float normalStrength;
     bool enableClearcoat;
     float clearcoatRoughness;
     float clearcoatIntensity;
@@ -118,11 +120,13 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
 };
 layout(set = 0, binding = 1) uniform sampler2D textureSampler;
 layout(set = 0, binding = 2) uniform sampler2D shadowMap;
+layout(set = 0, binding = 3) uniform sampler2D normalMap;
 layout(location = 0) in vec2 fragTexCoord;
 layout(location = 1) in vec3 Normal;
 layout(location = 2) in vec3 FragPos;
 layout(location = 3) in vec3 InstanceColor;
 layout(location = 4) in vec4 FragPosLightSpace;
+
 
 
 
@@ -142,6 +146,14 @@ layout(location = 4) in vec4 FragPosLightSpace;
 
 
 // Modern PBR Extensions
+// The surface's shape rather than its colour. The tangent frame is worked out
+// per pixel from the derivatives of the position and the UVs, so no tangent has
+// to be stored on a vertex and nothing about the vertex format changes -- the
+// cost is a handful of instructions on surfaces that have a map and nothing at
+// all on those that do not.
+
+
+
 
 
 
@@ -746,6 +758,35 @@ vec3 caustic_light(vec3 worldPos, vec3 norm) {
     return keyColor * lights[0].intensity * web * facing * attenuation * causticsIntensity;
 }
 
+// The tangent frame of a surface, worked out from how the position and the UVs
+// change across the screen.
+//
+// The usual way is a tangent stored on every vertex, which means a wider vertex
+// for every mesh in the scene whether or not it has a map. This costs a few
+// instructions on the surfaces that do have one and nothing on the rest, and
+// gets the same frame -- the derivatives of a position against the derivatives
+// of its UVs are what a tangent is.
+mat3 cotangent_frame(vec3 normal, vec3 position, vec2 uv) {
+    vec3 dpx = dFdx(position);
+    vec3 dpy = dFdy(position);
+    vec2 duvx = dFdx(uv);
+    vec2 duvy = dFdy(uv);
+
+    vec3 perp_y = cross(dpy, normal);
+    vec3 perp_x = cross(normal, dpx);
+    vec3 tangent = perp_y * duvx.x + perp_x * duvy.x;
+    vec3 bitangent = perp_y * duvx.y + perp_x * duvy.y;
+
+    float scale = inversesqrt(max(dot(tangent, tangent), dot(bitangent, bitangent)));
+    return mat3(tangent * scale, bitangent * scale, normal);
+}
+
+vec3 mapped_normal(vec3 normal, vec3 position, vec2 uv) {
+    vec3 sampled = texture(normalMap, uv).xyz * 2.0 - 1.0;
+    sampled.xy *= normalStrength;
+    return normalize(cotangent_frame(normal, position, uv) * sampled);
+}
+
 // One light's contribution. Everything here depends on which light is shading;
 // anything that does not stays in main and is computed once.
 vec3 direct_light(Light L, vec3 norm, vec3 viewDir, vec3 albedo, vec3 F0,
@@ -836,6 +877,9 @@ void main() {
     
     // Pre-calculate expensive operations once
     vec3 norm = normalize(Normal);
+    if (hasNormalMap) {
+        norm = mapped_normal(norm, FragPos, fragTexCoord);
+    }
     vec3 viewDir = normalize(viewPos - FragPos);
 
     // Material properties

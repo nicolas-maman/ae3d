@@ -47,7 +47,7 @@ exports (
     model_set_skeleton, model_skeleton,
     model_set_specular, model_set_pbr, model_set_exposure, model_set_alpha,
     model_set_texture, model_set_shader, model_set_name, model_set_source_path,
-    material_set_texture_path, material_set_name, light_set_name, camera_set_name, text,
+    material_set_texture_path, material_set_normal_path, material_set_name, light_set_name, camera_set_name, text,
     set_owned, model_metallic, model_plastic, model_rough_metal,
     model_polished_metal, model_matte, model_glossy, model_glass, model_transparent_plastic,
     model_add_group, model_group, model_group_count, model_sort_groups_by_texture,
@@ -270,6 +270,12 @@ struct Material {
     texture_stale: bool
     name: string
     texture_path: string
+    // The surface's shape, as opposed to its colour. Without one a wall
+    // catches the light as the single flat plane it is, and no amount of
+    // resolution in the colour makes brick read as brick.
+    normal_id: int
+    normal_stale: bool
+    normal_path: string
 }
 
 struct MaterialGroup {
@@ -1096,6 +1102,8 @@ material_new(name: string) -> *Material {
     m.alpha = 1.0
     m.texture_id = 0
     m.texture_stale = false
+    m.normal_id = 0
+    m.normal_stale = false
     return m
 }
 
@@ -1125,6 +1133,7 @@ material_clone(src: *Material) -> *Material {
     m = heap.new(Material)
     material_set_name(m, src.name)
     material_set_texture_path(m, text(src.texture_path))
+    material_set_normal_path(m, text(src.normal_path))
     m.diffuse = src.diffuse
     m.specular = src.specular
     m.metallic = src.metallic
@@ -1133,6 +1142,8 @@ material_clone(src: *Material) -> *Material {
     m.alpha = src.alpha
     m.texture_id = src.texture_id
     m.texture_stale = src.texture_stale
+    m.normal_id = src.normal_id
+    m.normal_stale = src.normal_stale
     return m
 }
 
@@ -1505,6 +1516,11 @@ model_set_source_path(m: *Model, path: string) {
 material_set_texture_path(m: *Material, path: string) {
     m.texture_path = set_owned(m.texture_path, path)
     m.texture_stale = true
+}
+
+material_set_normal_path(m: *Material, path: string) {
+    m.normal_path = set_owned(m.normal_path, path)
+    m.normal_stale = true
 }
 
 material_set_name(m: *Material, name: string) {

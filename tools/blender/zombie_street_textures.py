@@ -335,3 +335,100 @@ def glass_lit(size=1024, seed=131):
     furniture = int(size * 0.72)
     rgb[furniture:, int(size * 0.45):int(size * 0.85)] *= 0.30
     return _image("WindowGlassLit", size, _rgba(numpy.clip(rgb, 0.0, 1.0)))
+
+
+def _normal_from_height(height, strength=1.0, name="Normal"):
+    """A normal map from a height field, by the slope at each texel.
+
+    What a diffuse texture cannot do is catch the light differently on the two
+    sides of a brick, and that is most of what makes a wall read as brick
+    rather than as a photograph of one. The height is the same field the colour
+    was shaded from, so the mortar that is darker is also the mortar that is
+    lower, and a lamp above the street lights the top of every course and
+    leaves the underside of it dark.
+
+    Slopes are taken with a wrap, because these tile: a seam in a normal map is
+    a line of wrong lighting straight down a wall.
+    """
+    dx = (numpy.roll(height, -1, axis=1) - numpy.roll(height, 1, axis=1)) * strength
+    dy = (numpy.roll(height, -1, axis=0) - numpy.roll(height, 1, axis=0)) * strength
+    normal = numpy.empty(height.shape + (3,), dtype=numpy.float32)
+    normal[:, :, 0] = -dx
+    normal[:, :, 1] = -dy
+    normal[:, :, 2] = 1.0
+    length = numpy.sqrt((normal * normal).sum(axis=2))[:, :, None]
+    normal /= numpy.maximum(length, 1e-6)
+    return _image(name, height.shape[0], _rgba(normal * 0.5 + 0.5))
+
+
+def brick_normal(size=1024, seed=11):
+    """The courses standing proud and the mortar sunk between them."""
+    rng = random.Random(seed)
+    rows, columns = 16, 6
+    row_height = size / rows
+    column_width = size / columns
+    mortar = max(1.0, size / 128.0)
+    height = numpy.zeros((size, size), dtype=numpy.float32)
+    for y in range(size):
+        row = int(y / row_height)
+        in_row = y - row * row_height
+        offset = 0.5 * column_width if row % 2 else 0.0
+        for x in range(size):
+            u = (x + offset) % size
+            in_column = u % column_width
+            joint = (in_row < mortar or in_column < mortar or
+                     in_row > row_height - mortar or in_column > column_width - mortar)
+            height[y, x] = 0.0 if joint else 1.0
+    height += _noise(rng, size, 5, 6) * 0.22
+    return _normal_from_height(height, 2.6, "BrickWallNormal")
+
+
+def concrete_normal(size=1024, seed=23):
+    rng = random.Random(seed)
+    height = _noise(rng, size, 5, 6) * 0.7 + _noise(rng, size, 4, 3) * 0.3
+    return _normal_from_height(height, 1.4, "ConcreteWallNormal")
+
+
+def tarmac_normal(size=1024, seed=37):
+    rng = random.Random(seed)
+    height = _noise(rng, size, 6, 10) * 0.8 + _noise(rng, size, 3, 5) * 0.2
+    return _normal_from_height(height, 1.9, "RoadTarmacNormal")
+
+
+def paving_normal(size=1024, seed=53):
+    """Slabs proud of the grooves between them."""
+    slabs = 2
+    pitch = size / slabs
+    groove = max(1.0, size / 96.0)
+    rng = random.Random(seed)
+    height = numpy.ones((size, size), dtype=numpy.float32)
+    for y in range(size):
+        in_row = y % pitch
+        for x in range(size):
+            in_column = x % pitch
+            if in_row < groove or in_column < groove:
+                height[y, x] = 0.0
+    height += _noise(rng, size, 5, 4) * 0.25
+    return _normal_from_height(height, 2.2, "PathPavingNormal")
+
+
+def stone_normal(size=512, seed=113):
+    rng = random.Random(seed)
+    height = _noise(rng, size, 5, 5) * 0.6 + _noise(rng, size, 3, 3) * 0.4
+    return _normal_from_height(height, 1.1, "TrimStoneNormal")
+
+
+def skin_normal(size=1024, seed=71):
+    """What is left of a face, in relief."""
+    rng = random.Random(seed)
+    height = _noise(rng, size, 6, 7) * 0.65 + _noise(rng, size, 4, 4) * 0.35
+    return _normal_from_height(height, 2.1, "ZombieSkinNormal")
+
+
+def cloth_normal(size=1024, seed=89):
+    """A weave, and the creases in it."""
+    rng = random.Random(seed)
+    weave = numpy.linspace(0.0, size / 6.0 * math.tau, size, dtype=numpy.float32)
+    height = (numpy.sin(weave)[None, :] + numpy.sin(weave)[:, None]) * 0.12
+    height += _noise(rng, size, 5, 5) * 0.7
+    return _normal_from_height(height, 1.6, "ZombieClothNormal")

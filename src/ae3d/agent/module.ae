@@ -359,6 +359,8 @@ help_result() -> ptr {
         "Camera position, orientation, field of view and clip planes."))
     json.array_add_raw(ops, describe("scene.tree", "[detail], [audit]",
         "Every model the renderer holds: index, name, position and visibility. With detail, also its material, texture, parent, world position, triangles and where it lands on screen -- one round trip instead of one per model. With audit, what the surface is made of: its area in metres, its size along each axis, how many ways its faces point, how often its texture repeats across a metre and how many texels that is."))
+    json.array_add_raw(ops, describe("render.set", "normal_strength",
+        "How hard normal maps push, for the whole scene. Zero is the normal the geometry has, which is what a surface without a map is shaded by."))
     json.array_add_raw(ops, describe("scene.skeleton", "object",
         "Every bone of a skinned model: name, parent, where it is in the world and how it is turned. A skinned mesh stays in its bind pose and its bones carry it, so this is the only thing that says where a figure's hand or foot actually is."))
     json.array_add_raw(ops, describe("scene.isolate", "[object]",
@@ -510,6 +512,15 @@ describe_model(c: *Context, m: *Model, entry: ptr) {
             json.object_set_raw(entry, "texture", json.str(path))
             json.object_set_raw(entry, "texture_loaded",
                                 json.boolean(surface.texture_id != 0))
+        }
+        // A surface's shape, separately from its colour: a normal map that a
+        // material names and the renderer never loaded is a wall that is lit
+        // as one flat plane, and nothing about the colour says so.
+        path = core.text(surface.normal_path)
+        if path != "" {
+            json.object_set_raw(entry, "normal", json.str(path))
+            json.object_set_raw(entry, "normal_loaded",
+                                json.boolean(surface.normal_id != 0))
         }
         json.object_set_raw(entry, "diffuse",
             vec3_json(surface.diffuse.x, surface.diffuse.y, surface.diffuse.z))
@@ -1444,6 +1455,31 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
     // is, whether it is on the road, and whether it slides while it is there
     // are facts about the bones. Without them an agent can see that a figure
     // is animated and not whether the animation is any good.
+    // How hard normal maps push, for the whole scene.
+    //
+    // Here because a map that is loaded and a map that reaches the picture are
+    // different facts, and the only way to tell them apart is to turn it off
+    // and see whether anything moved. Zero is the geometry's own normal, which
+    // is what the renderer did before it could do this.
+    if op == "render.set" {
+        node = json.object_get_raw(request, "normal_strength")
+        if node == null {
+            fail(id, "render.set needs something to set")
+            return false
+        }
+        strength = json.get_number(node)
+        if c.gl_renderer != null {
+            gl.renderer_set_normal_strength(c.gl_renderer as *GLRenderer, strength)
+        }
+        if c.vk_renderer != null {
+            vk.renderer_set_normal_strength(c.vk_renderer as *VKRenderer, strength)
+        }
+        out = json.obj()
+        json.object_set_raw(out, "normal_strength", json.num(strength))
+        answer(id, out)
+        return false
+    }
+
     if op == "scene.skeleton" {
         named = json.object_get_raw(request, "object")
         if named == null {
