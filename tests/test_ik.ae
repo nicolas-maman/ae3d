@@ -1,0 +1,182 @@
+// Solving a limb for where its end has to be.
+//
+// Keyframes say what angle each joint is at and the end of the limb lands
+// wherever that puts it. This asks the other question: the hand has to be
+// here, what are the angles. A two-bone limb is a triangle, so the answer is
+// exact and there is nothing to converge to -- which is what these checks are
+// for, since an iterative solver that stops early looks the same as one that
+// is wrong until the numbers are read.
+//
+// No GPU: a solved pose is arithmetic over the transform hierarchy, so this
+// runs everywhere.
+
+import ae3d.core
+import ae3d.ik
+import ae3d.loader
+
+const EPSILON = 0.0005
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+near(a: float, b: float, tolerance: float) -> bool {
+    d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    return d < tolerance
+}
+
+// A limb with its joint at each part's own origin, the way the exporter writes
+// one: the bone is the offset from a part to the part below it.
+struct Limb {
+    root: *Model
+    mid: *Model
+    tip: *Model
+    upper: float
+    lower: float
+}
+
+limb_new(upper: float, lower: float) -> Limb {
+    root = loader.cube(0.2)
+    mid = loader.cube(0.2)
+    tip = loader.cube(0.2)
+    core.model_set_position(root, 0.0, 4.0, 0.0)
+    core.model_set_position(mid, 0.0, 0.0 - upper, 0.0)
+    core.model_set_position(tip, 0.0, 0.0 - lower, 0.0)
+    core.model_set_parent(mid, root)
+    core.model_set_parent(tip, mid)
+    return Limb { root: root, mid: mid, tip: tip, upper: upper, lower: lower }
+}
+
+limb_free(limb: *Limb) {
+    core.model_free(limb.tip)
+    core.model_free(limb.mid)
+    core.model_free(limb.root)
+}
+
+bones_kept(limb: *Limb) -> bool {
+    root_at = core.model_world_position(limb.root)
+    mid_at = core.model_world_position(limb.mid)
+    tip_at = core.model_world_position(limb.tip)
+    return near(core.v3_distance(root_at, mid_at), limb.upper, EPSILON) &&
+           near(core.v3_distance(mid_at, tip_at), limb.lower, EPSILON)
+}
+
+main() {
+    limb = limb_new(1.0, 0.8)
+    root_at = core.model_world_position(limb.root)
+    pole = core.v3_add(root_at, core.vec3(2.0, 0.0, 0.0))
+
+    // Somewhere inside the limb's reach, off to one side and below.
+    target = core.vec3(0.9, 3.2, 0.35)
+    reached = ik.solve_two_bone(limb.root, limb.mid, limb.tip, target, pole)
+    landed = core.model_world_position(limb.tip)
+    away = core.v3_distance(landed, target)
+    println("  tip at ${landed.x} ${landed.y} ${landed.z}, ${away} from the target")
+    check("the target is reported as reachable", reached)
+    check("and the tip is on it", away < EPSILON)
+    check("with both bones the length they were", bones_kept(&limb))
+
+    // The pole decides which way the joint bends. Two solves of the same
+    // target with the pole on either side put the middle joint on either side.
+    left_pole = core.v3_add(root_at, core.vec3(0.0, 0.0, 3.0))
+    ik.solve_two_bone(limb.root, limb.mid, limb.tip, target, left_pole)
+    front = core.model_world_position(limb.mid)
+    right_pole = core.v3_add(root_at, core.vec3(0.0, 0.0, 0.0 - 3.0))
+    ik.solve_two_bone(limb.root, limb.mid, limb.tip, target, right_pole)
+    back = core.model_world_position(limb.mid)
+    println("  knee at z ${front.z} then ${back.z}")
+    check("the pole chooses the side the joint bends to", front.z > back.z + 0.05)
+    check("and the tip stays on the target either way",
+          core.v3_distance(core.model_world_position(limb.tip), target) < EPSILON)
+
+    // Further than the two bones can span: the limb straightens and points at
+    // it, which is the closest it can be and the pose a leg reaches with.
+    far_target = core.v3_add(root_at, core.vec3(6.0, 0.0 - 4.0, 0.0))
+    reached = ik.solve_two_bone(limb.root, limb.mid, limb.tip, far_target, pole)
+    landed = core.model_world_position(limb.tip)
+    span = core.v3_distance(root_at, landed)
+    bend = core.v3_distance(core.model_world_position(limb.mid),
+                            core.v3_add(root_at,
+                                        core.v3_mul(core.v3_normalize(
+                                            core.v3_sub(far_target, root_at)), limb.upper)))
+    println("  out of reach: tip ${span} out of ${limb.upper + limb.lower}, joint ${bend} off the line")
+    check("an unreachable target is reported as one", !reached)
+    check("the limb is straight", bend < EPSILON)
+    check("and stretched its whole length", near(span, limb.upper + limb.lower, EPSILON))
+    check("with both bones still the length they were", bones_kept(&limb))
+
+    // Folded as far as it goes: a target closer than the difference between
+    // the bones cannot be reached either.
+    near_target = core.v3_add(root_at, core.vec3(0.05, 0.0, 0.0))
+    reached = ik.solve_two_bone(limb.root, limb.mid, limb.tip, near_target, pole)
+    check("nor can one inside the fold", !reached)
+    check("and the bones survive that too", bones_kept(&limb))
+
+    // Solving for where the tip already is changes nothing.
+    ik.solve_two_bone(limb.root, limb.mid, limb.tip, target, pole)
+    settled = core.model_world_position(limb.tip)
+    ik.solve_two_bone(limb.root, limb.mid, limb.tip, settled, pole)
+    again = core.model_world_position(limb.tip)
+    check("solving for the pose it is already in leaves it there",
+          core.v3_distance(settled, again) < EPSILON)
+
+    // A limb whose root is carried by something else: the solve is in world
+    // space, so moving the parent afterwards moves the whole solved limb with
+    // it and the shape it was solved into is kept.
+    hips = loader.cube(0.3)
+    core.model_set_position(hips, 0.0, 4.0, 0.0)
+    core.model_set_parent(limb.root, hips)
+    core.model_set_position(limb.root, 0.0, 0.0, 0.0)
+    carried_target = core.vec3(0.6, 3.4, 0.0 - 0.4)
+    ik.solve_two_bone(limb.root, limb.mid, limb.tip, carried_target,
+                      core.v3_add(core.model_world_position(limb.root), core.vec3(2.0, 0.0, 0.0)))
+    before = core.v3_sub(core.model_world_position(limb.tip),
+                         core.model_world_position(limb.root))
+    check("a carried limb reaches its target",
+          core.v3_distance(core.model_world_position(limb.tip), carried_target) < EPSILON)
+    core.model_set_position(hips, 3.0, 4.5, 1.0)
+    after = core.v3_sub(core.model_world_position(limb.tip),
+                        core.model_world_position(limb.root))
+    check("and keeps its shape when what carries it moves",
+          core.v3_distance(before, after) < EPSILON)
+
+    core.model_set_parent(limb.root, null)
+    core.model_free(hips)
+    limb_free(&limb)
+
+    // Aiming one joint, which is the whole of what a head does: the far end of
+    // it ends up on the line from the joint to what it was pointed at.
+    neck = loader.cube(0.2)
+    head = loader.cube(0.2)
+    core.model_set_position(neck, 0.0, 1.5, 0.0)
+    core.model_set_position(head, 0.0, 0.3, 0.0)
+    core.model_set_parent(head, neck)
+
+    look = core.vec3(2.0, 1.9, 0.0 - 1.0)
+    ik.aim_at(neck, head, look)
+    neck_at = core.model_world_position(neck)
+    along = core.v3_normalize(core.v3_sub(core.model_world_position(head), neck_at))
+    wanted = core.v3_normalize(core.v3_sub(look, neck_at))
+    check("aiming a joint points what it carries at the target",
+          core.v3_distance(along, wanted) < EPSILON)
+    check("without changing how far away it is",
+          near(core.v3_distance(neck_at, core.model_world_position(head)), 0.3, EPSILON))
+
+    core.model_set_parent(head, null)
+    core.model_free(head)
+    core.model_free(neck)
+
+    if failures == 0 {
+        println("ik: all checks passed")
+    } else {
+        println("ik: ${failures} failure(s)")
+    }
+}

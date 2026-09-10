@@ -29,7 +29,7 @@ import urllib.request
 
 ACCENT = "#2e6eeb"
 # What a loadable library is called here, which the editor asks the loader for.
-LIB_SUFFIX = ".dylib" if sys.platform == "darwin" else ".so"
+LIB_SUFFIX = {"darwin": ".dylib", "win32": ".dll"}.get(sys.platform, ".so")
 FAILURES = []
 
 
@@ -165,6 +165,38 @@ def wait_file(path, seconds=8.0, newer_than=None):
         time.sleep(0.1)
     return (os.path.exists(path) and os.path.getsize(path) > 0
             and (newer_than is None or os.path.getmtime(path) > newer_than))
+
+
+def wait_rows_settled(port, scene, seconds=12.0):
+    """Wait until the scene list stops changing size.
+
+    A load rebuilds the list, and a row clicked while it is still being
+    rebuilt is a row that is about to be replaced: the selection goes with it,
+    and what follows asks the editor about whatever ended up selected instead.
+    """
+    deadline = time.time() + seconds
+    count = -1
+    while time.time() < deadline:
+        rows = len(rows_under(tree(port), scene))
+        if rows > 0 and rows == count:
+            return rows
+        count = rows
+        time.sleep(0.2)
+    return count
+
+
+def wait_text(port, widget, wanted, seconds=8.0):
+    """Wait until a widget spells this, and answer what it spells.
+
+    A fixed sleep after an action is a guess about how long the editor takes to
+    do it, and a guess that is usually right is the worst kind: the check
+    passes on an idle machine and fails inside a full run, naming the check
+    rather than the assumption.
+    """
+    widgets, _ = wait_for(port,
+                          lambda ws: ws.get(widget, {}).get("text", "").strip() == wanted,
+                          seconds)
+    return widgets.get(widget, {}).get("text", "").strip()
 
 
 def wait_for(port, predicate, seconds=8.0):
@@ -386,6 +418,19 @@ def layout_faults(widgets):
     return faults
 
 
+def editor_binary(path):
+    """The built editor, whatever the platform calls it, as an absolute path.
+
+    Two Windows details, both of which fail as a file-not-found naming nothing
+    useful: the binary is called .exe, and CreateProcess will not take a
+    relative path written with forward slashes.
+    """
+    for candidate in (path, path + ".exe"):
+        if os.path.exists(candidate):
+            return os.path.abspath(candidate)
+    raise SystemExit("no editor at %s: build it with editor/build_editor.sh" % path)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8791)
@@ -410,7 +455,7 @@ def main():
     editor_log = tempfile.NamedTemporaryFile(prefix="ae3d_editor_", suffix=".log",
                                              delete=False)
     EDITOR_LOG[0] = editor_log.name
-    editor = subprocess.Popen([args.binary], env=env,
+    editor = subprocess.Popen([editor_binary(args.binary)], env=env,
                               stdout=editor_log, stderr=subprocess.STDOUT)
     EDITOR_PROC[0] = editor
     try:
@@ -866,14 +911,18 @@ def main():
                             post(args.port, "/widget/%d/click" % row["id"])
                             time.sleep(0.8)
                             break
+                    # Saved once the readout says the value arrived: saving
+                    # before it has is what left the file holding the number
+                    # the row started at.
                     post(args.port, "/widget/%d/set_value?v=9.25" % later[0]["id"])
-                    time.sleep(0.9)
+                    showed = wait_text(args.port, readout[0]["id"], "9.25")
+                    check("the wave height takes the value it was given",
+                          showed == "9.25", showed)
                     stamped = os.path.getmtime(scene_file)
                     post(args.port, "/widget/%d/click" % save)
                     wait_file(scene_file, newer_than=stamped)
                     post(args.port, "/widget/%d/set_value?v=3.0" % later[0]["id"])
-                    time.sleep(0.9)
-                    moved = tree(args.port)[readout[0]["id"]]["text"].strip()
+                    moved = wait_text(args.port, readout[0]["id"], "3.00")
                     post(args.port, "/widget/%d/click" % load)
                     wait_for(args.port,
                              lambda ws: len(rows_under(ws, scene)) == saved_rows)
@@ -882,9 +931,8 @@ def main():
                     for row in water_rows:
                         if row_name(tree(args.port), row) == "water":
                             post(args.port, "/widget/%d/click" % row["id"])
-                            time.sleep(0.9)
                             break
-                    restored = tree(args.port)[readout[0]["id"]]["text"].strip()
+                    restored = wait_text(args.port, readout[0]["id"], "9.25")
                     check("a setting survives the scene file",
                           moved == "3.00" and restored == "9.25",
                           "changed to %s, came back as %s" % (moved, restored))
@@ -906,8 +954,11 @@ def main():
             made = sorted(written(None))
             check("pressing it leaves a file to edit", bool(made), str(made))
             if made:
+                # Through bash by name: Windows will not execute a shell
+                # script as a program, and reports it as a file that is not a
+                # Win32 application, which is true and unhelpful.
                 built = subprocess.run(
-                    ["./scripts/build_script.sh",
+                    ["bash", "scripts/build_script.sh",
                      os.path.join(scripts_dir, made[0])],
                     capture_output=True, text=True)
                 check("and what it wrote compiles", built.returncode == 0,
@@ -971,7 +1022,7 @@ def main():
             post(args.port, "/widget/%d/click" % ids["None"])
             wait_for(args.port, lambda ws: ws[ids["None"]].get("bg") == ACCENT)
             post(args.port, "/widget/%d/click" % load)
-            wait_for(args.port, lambda ws: len(rows_under(ws, scene)) > 0)
+            wait_rows_settled(args.port, scene)
 
             # Back to the object that was given the script, because the button
             # says what the selected object carries.

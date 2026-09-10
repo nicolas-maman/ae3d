@@ -67,7 +67,13 @@ const VIEWPORT_G = 0.149
 const VIEWPORT_B = 0.176
 const BUTTON_H = 23
 const CONSOLE_LINES = 7
-const DEFAULT_SEED = 20260903
+// A seed is a whole number carried through a row that holds floats, so the
+// seeds this can express are the whole numbers a float counts exactly: up to
+// two to the twenty-fourth. Above that, adding one to a seed lands back on the
+// seed it started from, and the row silently refuses every other value typed
+// into it. The default sits well inside the range for the same reason.
+const SEED_MAX = 16777216.0
+const DEFAULT_SEED = 2026090
 const VOXEL_SIZE = 4.0
 const WATER_SIZE = 700.0
 
@@ -123,9 +129,11 @@ var g_light: ptr = null
 var g_models: ptr = null
 var g_rows: ptr = null
 var g_hierarchy: ptr = null
-// What ui.modifiers() reports for the keys held right now.
-const MOD_SHIFT = 1
-const MOD_COMMAND = 8
+// What ui.modifiers() reports for the keys held right now. Not MOD_SHIFT:
+// windows.h takes that name for RegisterHotKey, and a constant named after a
+// macro is replaced by its value before the compiler ever sees a declaration.
+const HELD_SHIFT = 1
+const HELD_COMMAND = 8
 
 // The last object clicked. The inspector answers for this one; an edit reaches
 // everything selected, which is how Unreal, Unity and Godot all behave.
@@ -625,6 +633,7 @@ pump_agent() {
         }
         if c.pending_capture_id >= 0 { agent.answer_capture(c, captured) }
         agent.answer_pending_trace(c)
+        agent.answer_deferred(c)
     }
     if c.want_pause {
         c.want_pause = false
@@ -1174,8 +1183,8 @@ select_object(index: int) {
     // selection the editor had just made.
     if g_syncing { return }
     holding = ui.modifiers()
-    adding = holding == MOD_SHIFT || holding == MOD_COMMAND ||
-             holding == MOD_SHIFT + MOD_COMMAND
+    adding = holding == HELD_SHIFT || holding == HELD_COMMAND ||
+             holding == HELD_SHIFT + HELD_COMMAND
     select_object_adding(index, adding)
 }
 
@@ -1440,6 +1449,7 @@ scan_scripts() {
         list.add_raw(g_script_libs, loaded as ptr)
         stamp, stamp_err = fs.mtime(path)
         if stamp_err == "" { stamps[id] = stamp }
+        string.free(path)
         id = id + 1
     }
     say("${found} script(s) available")
@@ -1468,6 +1478,7 @@ reload_changed_scripts() {
             if stamp != pending[id] {
                 // Changed since the last look, so wait for it to settle.
                 pending[id] = stamp
+                string.free(path)
                 id = id + 1
                 continue
             }
@@ -1489,6 +1500,7 @@ reload_changed_scripts() {
                 }
             }
         }
+        string.free(path)
         id = id + 1
     }
 }
@@ -2628,6 +2640,8 @@ apply_property(index: int, value: float) {
     if index == TERRAIN_SEED_ROW {
         w = selected_world()
         if w == null { return }
+        if value < 0.0 { value = 0.0 }
+        if value > SEED_MAX { value = SEED_MAX }
         was = (terrain_seed()) as float
         if core.abs_of(value - was) < 0.5 { return }
         history.history_record(g_history, history.STEP_PROPERTY, selected_model() as ptr,

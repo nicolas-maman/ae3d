@@ -57,10 +57,17 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     bool enableBloom;
     float bloomThreshold;
     float bloomIntensity;
+    bool enableFog;
+    float fogStart;
+    float fogEnd;
+    vec3 fogColor;
+    float fogIntensity;
     bool enableShadows;
     bool hasShadowMap;
     float shadowIntensity;
     float shadowSoftness;
+    vec3 shadowDirection;
+    float shadowTexelWorld;
     bool enablePerlinNoise;
     float noiseScale;
     int noiseOctaves;
@@ -98,11 +105,6 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float foamIntensity;
     float waterPlaneHeight;
     float waterLevel;
-    bool enableFog;
-    float fogStart;
-    float fogEnd;
-    vec3 fogColor;
-    float fogIntensity;
     vec3 skyColor;
     vec3 horizonColor;
     bool enableWaterReflection;
@@ -176,9 +178,29 @@ layout(location = 4) in vec4 FragPosLightSpace;
 
 
 
+// Distance haze. The same four names the water shader uses, because one scene
+// has one atmosphere: a street that fades into the dark has to fade the water
+// running down it by the same amount.
+
+
+
+
+
+
 // GPU Gems Chapter 9 & 11: Shadow Volume Support with Antialiasing
 
 
+
+
+// The way the light travelled when the map was drawn. The map is orthographic
+// whatever kind of light cast it, so for a point light this is not the
+// direction from the surface to the lamp: the offset a surface needs depends on
+// the angle it makes with the map, and using the wrong one of the two striped
+// every wall the map happened to graze.
+
+// How much of the world one shadow-map texel covers. Everything about the map
+// scales with the box it was fitted to, and this is the number that says by how
+// much.
 
 
 
@@ -209,28 +231,48 @@ float light_depth(float clipZ) {
 }
 
 float shadow_factor() {
-    vec3 projected = FragPosLightSpace.xyz / FragPosLightSpace.w;
+    vec3 surface = normalize(Normal);
+    vec3 toLight = normalize(-shadowDirection);
+
+    // How much depth one texel spans is the tangent of the angle between the
+    // surface and the map, which runs away at grazing incidence: a wall lit
+    // along its length spans many texels of depth and a floor lit from
+    // overhead spans almost none. Bounded, because the tangent is not.
+    float facing = max(dot(surface, toLight), 0.0);
+    float slope = min(sqrt(1.0 - facing * facing) / max(facing, 0.02), 32.0);
+
+    // Offset along the surface rather than into the depth. Pushing the
+    // comparison deeper is what a depth bias does, and enough of it to stop a
+    // grazing wall striping itself is enough to lift every shadow off the
+    // ground with it. Moving the sample sideways by the width of a texel costs
+    // the same and detaches nothing.
+    vec4 lightSpace = lightSpaceMatrix *
+        vec4(FragPos + surface * shadowTexelWorld * (1.0 + slope), 1.0);
+    vec3 projected = lightSpace.xyz / lightSpace.w;
     projected.xy = projected.xy * 0.5 + 0.5;
     projected.z = light_depth(projected.z);
     if (projected.z > 1.0) {
         return 1.0;
     }
 
-    vec3 surface = normalize(Normal);
-    vec3 toLight = normalize(lights[0].position - FragPos);
-    if (lights[0].isDirectional == 1) {
-        toLight = normalize(lights[0].direction);
-    }
-
-    // A surface nearly edge-on to the light needs a larger offset, or its own
-    // depth reads as occluding it.
-    float bias = max(0.02 * (1.0 - dot(surface, toLight)), 0.005);
-
     vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0));
     // At least one texel between taps. Below that the nine samples of the 3x3
     // land on the same texel and cost nine lookups to produce what one would,
     // and the edge is as hard as no filtering at all.
     float radius = max(shadowSoftness, 1.0);
+
+    // The offset a surface needs in order not to shadow itself is the depth one
+    // shadow texel spans, and a texel is worth the same fraction of the light
+    // box however large the box is: the texel and the depth range scale
+    // together. A constant in normalised depth does not, so it was sized for
+    // one scene and swallowed whole figures in a larger one -- a street ninety
+    // metres long left nothing standing in it casting anything at all. A
+    // surface nearly edge-on to the light spans more depth across that texel,
+    // which is what the slope term is for.
+    // What is left for the depth comparison is the texel the sample landed in,
+    // which the offset above has already taken the slope out of.
+    float bias = 2.0 * radius / (2.0 * float(textureSize(shadowMap, 0).x));
+
     float lit = 0.0;
     for (int sx = -1; sx <= 1; sx++) {
         for (int sy = -1; sy <= 1; sy++) {
@@ -768,12 +810,26 @@ void main() {
 
     vec4 texColor = texture(textureSampler, fragTexCoord);
     
-    // Check for emissive objects first - bypass all lighting for sun-like objects
+    // An emissive surface is its own light source, so it skips shading. It does
+    // not skip having a colour: this returned a hardcoded white, which made an
+    // emissive model the one thing in the engine that could not be coloured --
+    // diffuseColor, the texture and the per-instance tint were all discarded.
+    // An accretion disc whose whole point is that its inner edge is blue-white
+    // and its rim is red came out uniformly white.
+    //
+    // It also skipped tone mapping and gamma, so an emissive surface sat in a
+    // different colour space from every lit surface beside it. Both now run,
+    // which is also what lets a colour brighter than 1.0 (an instance colour is
+    // a float attribute, so it can carry one) roll off to white through ACES
+    // instead of clipping per channel and shifting hue on the way.
+    //
+    // exposure is the emissive strength, scaled so the 10.0 that opens this
+    // branch means 1x. Below that the surface is lit normally.
     if (exposure > 10.0) {
-        // For emissive objects like sun spheres - MAXIMUM brightness emission
-        vec3 emissiveColor = vec3(1.0, 1.0, 1.0); // Pure white
-        FragColor = vec4(emissiveColor, 1.0); // Full opacity, no tone mapping
-        return; // Skip all lighting calculations
+        vec3 emissive = diffuseColor * texColor.rgb * InstanceColor * (exposure * 0.1);
+        emissive = ACESFilm(emissive);
+        FragColor = vec4(pow(emissive, vec3(1.0 / 2.2)), 1.0);
+        return;
     }
     
     // Pre-calculate expensive operations once
@@ -895,6 +951,14 @@ void main() {
     // Gamma correction (sRGB)
     color = pow(color, vec3(1.0/2.2));
     
+    // The air between the eye and the surface. After tone mapping and gamma,
+    // because fog is what is seen rather than another light in the scene: put
+    // in before them and the tone curve pulls the horizon back out again.
+    if (enableFog) {
+        float haze = smoothstep(fogStart, fogEnd, distanceToCamera) * fogIntensity;
+        color = mix(color, fogColor, clamp(haze, 0.0, 1.0));
+    }
+
     // Use material alpha for transparency
     float finalAlpha = texColor.a * materialAlpha;
     

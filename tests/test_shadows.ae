@@ -57,6 +57,17 @@ column_total(pixels: ptr, x: int) -> int {
     return total
 }
 
+// How many rows are measurably darker than the frame they are compared with.
+darkened(pixels: ptr, lit: int[]) -> int {
+    rows = 0
+    y = 0
+    while y < HEIGHT {
+        if lit[y] - row_total(pixels, y) > WIDTH * 4 { rows = rows + 1 }
+        y = y + 1
+    }
+    return rows
+}
+
 row_total(pixels: ptr, y: int) -> int {
     total = 0
     x = 0
@@ -214,6 +225,58 @@ run_checks(backend: *Backend, name: string) {
     println("  ${name}: sun to the right: ${away_drop} darkened to its left, ${towards_drop} to its right")
 
     free(columns_store)
+
+    // A world is not all one size. The map is fitted to every model in the
+    // scene, so a ground plane wide enough to reach a horizon spreads it until
+    // the depth comparison swallows anything standing on it -- the shadow does
+    // not get softer, it stops existing, and nothing says so. A shadow distance
+    // fits the map to what the camera can see instead.
+    horizon = loader.plane(60, 64.0)
+    core.model_set_position(horizon, 0.0 - 1920.0, 0.0 - 1.0, 0.0 - 1920.0)
+    core.model_matte(horizon, 0.8, 0.8, 0.8)
+    core.backend_add_model(backend, horizon)
+
+    // Small, the way a figure is small against a street: three ten-thousandths
+    // of the world it stands in.
+    post = loader.cube(9.0)
+    core.model_set_position(post, 0.0 - 26.0, 12.0, 96.0)
+    core.model_matte(post, 0.7, 0.25, 0.2)
+    core.backend_add_model(backend, post)
+    blocker.visible = false
+
+    core.backend_set_shadows(backend, false)
+    core.backend_render(backend, cam, light)
+    plain = frame_of(backend)
+    if plain == null { println("shadows: SKIP no pixels") ; return }
+    y = 0
+    while y < HEIGHT {
+        rows_lit[y] = row_total(plain, y)
+        y = y + 1
+    }
+
+    core.backend_set_shadows(backend, true)
+    core.backend_render(backend, cam, light)
+    wide = frame_of(backend)
+    if wide == null { println("shadows: SKIP no pixels") ; return }
+    wide_rows = darkened(wide, rows_lit)
+
+    core.backend_set_shadow_distance(backend, 260.0)
+    core.backend_render(backend, cam, light)
+    bounded = frame_of(backend)
+    if bounded == null { println("shadows: SKIP no pixels") ; return }
+    bounded_rows = darkened(bounded, rows_lit)
+
+    println("  ${name}: a nine-unit post in a world 3840 across darkens ${wide_rows} rows fitted to the scene, ${bounded_rows} bounded to 260")
+    check("${name} a shadow distance keeps a small shadow in a large world",
+          bounded_rows > 2 && bounded_rows > wide_rows * 2)
+
+    core.backend_set_shadow_distance(backend, 0.0)
+    blocker.visible = true
+    core.backend_remove_model(backend, post)
+    core.backend_remove_model(backend, horizon)
+    core.model_free(post)
+    core.model_free(horizon)
+
     core.light_free(side)
     free(rows_store)
         core.backend_remove_model(backend, ground)

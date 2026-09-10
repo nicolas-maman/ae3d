@@ -1,0 +1,154 @@
+// Inverse kinematics over the transform hierarchy.
+//
+// Keyframes are forward kinematics: an angle at every joint, and wherever the
+// hand or the foot ends up is where it ends up. That is fine until the world
+// has a say in it -- a foot on ground that is not where the animator's floor
+// was, a hand that has to reach a particular thing rather than a particular
+// direction. Then the question runs the other way: here is where the end of
+// the limb has to be, what are the angles.
+//
+// A limb is two bones, so the answer is a triangle and there is no need to
+// iterate towards it. The two bone lengths and the distance to the target give
+// the angle at each joint by the law of cosines, and the plane the limb bends
+// in is chosen by a pole: a point the middle joint is turned towards, which is
+// what a knee points at.
+//
+// Everything here is world space in and local rotations out. The chain is
+// three models parented root -> mid -> tip, which is what the loader rebuilds
+// from a manifest, so a limb exported from Blender is a chain this can solve
+// without being told anything else about it.
+
+import ae3d.core
+
+exports (solve_two_bone, aim_at)
+
+const EPSILON = 0.000001
+
+// Put the tip on the target. Answers false when the target is out of reach, in
+// which case the limb is left straight and pointing at it, which is the closest
+// it can get and the pose a leg takes when it is stretched for the ground.
+//
+// The pole is a point in the world, not a direction: the middle joint turns
+// towards it, so a knee is given something in front of the figure and an elbow
+// something behind it.
+solve_two_bone(root: *Model, mid: *Model, tip: *Model, target: Vec3, pole: Vec3) -> bool {
+    if root == null || mid == null || tip == null { return false }
+
+    core.model_sync_transform(tip)
+    root_at = core.model_world_position(root)
+    upper = core.v3_distance(root_at, core.model_world_position(mid))
+    lower = core.v3_distance(core.model_world_position(mid), core.model_world_position(tip))
+    if upper < EPSILON || lower < EPSILON { return false }
+
+    to_target = core.v3_sub(target, root_at)
+    span = core.v3_len(to_target)
+    if span < EPSILON { return false }
+
+    // Straighten towards the target first, so what follows only has to bend.
+    turn_towards(root, core.v3_sub(core.model_world_position(tip), root_at), to_target)
+
+    reachable = true
+    shortest = core.abs_of(upper - lower)
+    if span > upper + lower {
+        span = upper + lower
+        reachable = false
+    } else if span < shortest {
+        span = shortest
+        reachable = false
+    }
+
+    // The plane to bend in is the pole's: the one holding the line to the
+    // target and the point the joint is told to turn towards. A limb already
+    // bent somewhere else is twisted about that line until its plane is this
+    // one, which changes nothing about where it points.
+    core.model_sync_transform(tip)
+    mid_at = core.model_world_position(mid)
+    tip_at = core.model_world_position(tip)
+
+    // From the pole to the target, not the other way: a positive turn about
+    // this axis carries the bone off the line towards the pole, which is the
+    // side a knee is meant to end up on.
+    axis = core.v3_cross(core.v3_sub(pole, root_at), to_target)
+    if core.v3_len(axis) < EPSILON {
+        // A pole on the line to the target names no plane. The limb keeps the
+        // one it has, which is the answer that moves it least.
+        axis = core.v3_cross(core.v3_sub(mid_at, root_at), core.v3_sub(tip_at, root_at))
+    }
+    if core.v3_len(axis) < EPSILON { return reachable }
+    axis = core.v3_normalize(axis)
+
+    plane = core.v3_cross(core.v3_sub(mid_at, root_at), core.v3_sub(tip_at, root_at))
+    if core.v3_len(plane) > EPSILON {
+        turn_towards(root, plane, axis)
+        core.model_sync_transform(tip)
+        mid_at = core.model_world_position(mid)
+        tip_at = core.model_world_position(tip)
+    }
+
+    // Law of cosines at each joint, against the angles the limb has now.
+    wanted_root = core.acos_of(clamped((upper * upper + span * span - lower * lower) /
+                                       (2.0 * upper * span)))
+    have_root = angle_between(core.v3_sub(mid_at, root_at), core.v3_sub(tip_at, root_at))
+    turn_about(root, axis, wanted_root - have_root)
+
+    core.model_sync_transform(tip)
+    mid_at = core.model_world_position(mid)
+    tip_at = core.model_world_position(tip)
+    wanted_mid = core.acos_of(clamped((upper * upper + lower * lower - span * span) /
+                                      (2.0 * upper * lower)))
+    have_mid = angle_between(core.v3_sub(root_at, mid_at), core.v3_sub(tip_at, mid_at))
+    turn_about(mid, axis, have_mid - wanted_mid)
+
+    // Turning the middle joint moved the tip off the line to the target, so the
+    // limb is aimed once more with the bend it now has.
+    core.model_sync_transform(tip)
+    turn_towards(root, core.v3_sub(core.model_world_position(tip), root_at),
+                 core.v3_sub(target, root_at))
+    return reachable
+}
+
+// Point a model's own forward at something. The forward is whichever way the
+// model's first child sits from it, which for a limb is down the bone.
+aim_at(joint: *Model, child: *Model, target: Vec3) {
+    if joint == null || child == null { return }
+    core.model_sync_transform(child)
+    at = core.model_world_position(joint)
+    turn_towards(joint, core.v3_sub(core.model_world_position(child), at),
+                 core.v3_sub(target, at))
+}
+
+turn_towards(m: *Model, from: Vec3, to: Vec3) {
+    if core.v3_len(from) < EPSILON || core.v3_len(to) < EPSILON { return }
+    apply_world_turn(m, core.quat_from_to(from, to))
+}
+
+turn_about(m: *Model, axis: Vec3, radians: float) {
+    if core.abs_of(radians) < EPSILON { return }
+    apply_world_turn(m, core.quat_rotate(radians, axis))
+}
+
+// A rotation given in world space, written down as the local rotation that
+// produces it. The parent's world rotation is what stands between the two.
+apply_world_turn(m: *Model, turn: Quat) {
+    core.model_sync_transform(m)
+    wanted = core.quat_normalize(core.quat_mul(turn, m.world_rotation))
+    parent = core.model_parent(m)
+    if parent == null {
+        core.model_set_rotation(m, wanted)
+        return
+    }
+    core.model_set_rotation(m, core.quat_normalize(
+        core.quat_mul(core.quat_conjugate(parent.world_rotation), wanted)))
+}
+
+angle_between(a: Vec3, b: Vec3) -> float {
+    length = core.v3_len(a) * core.v3_len(b)
+    if length < EPSILON { return 0.0 }
+    return core.acos_of(clamped(core.v3_dot(a, b) / length))
+}
+
+clamped(x: float) -> float {
+    if x < 0.0 - 1.0 { return 0.0 - 1.0 }
+    if x > 1.0 { return 1.0 }
+    return x
+}

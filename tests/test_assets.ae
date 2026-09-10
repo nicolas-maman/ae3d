@@ -148,8 +148,18 @@ main() {
         anim.clip_free(clip)
     }
 
-    if model != null { core.model_free(model) }
+    if model != null {
+        check("a loaded model carries where it came from",
+              assets.provenance_for(model) != null)
+        // The record is keyed on the model, so it has to go when the model
+        // does: another model can land on the same address.
+        assets.provenance_forget(model)
+        check("and stops carrying it once forgotten",
+              assets.provenance_for(model) == null)
+        core.model_free(model)
+    }
     assets.manifest_free(m)
+    assets.provenance_release()
 
     if g_failures == 0 {
         println("test_assets: all checks passed (${g_checks})")

@@ -1,0 +1,164 @@
+// Shadows asked for through the engine surface have to reach the frame.
+//
+// ae3d#231: every shadow the engine could draw was drawn by something else.
+// The renderers build their map inside the "turn shadows on" setter, and the
+// engine never called it, so a program written against ae3d.engine rendered
+// shadowless whatever it asked for -- the editor and the backend suites call
+// the backend directly and never noticed. Rendering the same scene twice
+// through the engine and comparing the two frames is the only thing that would
+// have caught it: with no shadow map the two are identical.
+//
+// The sun is off to one side, so the shadow lands on one half of the frame and
+// the other half is the control. A global dim would move both.
+
+import std.mem
+import ae3d.core
+import ae3d.platform
+import ae3d.engine
+import ae3d.gl
+import ae3d.loader
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern ae3d_capture_frame(width: int, height: int) -> int
+extern ae3d_capture_region(x: int, y: int, width: int, height: int,
+                           background: int, tolerance: int, out: ptr) -> int
+extern ae3d_capture_slot(block: ptr, index: int) -> float
+
+const WIDTH = 480
+const HEIGHT = 360
+
+var g_checks = 0
+var g_failures = 0
+
+var g_ground: ptr = null
+var g_blocker: ptr = null
+
+var g_default_on = false
+var g_reported_off = true
+var g_measured = 0
+
+// Mean brightness of the two halves, with shadows on and then off.
+var g_shadowed_left = 0.0
+var g_shadowed_right = 0.0
+var g_lit_left = 0.0
+var g_lit_right = 0.0
+
+check(name: string, condition: bool) {
+    g_checks = g_checks + 1
+    if condition {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        g_failures = g_failures + 1
+    }
+}
+
+half_brightness(block: ptr, x: int) -> float {
+    if ae3d_capture_region(x, 0, WIDTH / 2, HEIGHT, 0, 0, block) == 0 { return 0.0 }
+    return (ae3d_capture_slot(block, 0) +
+            ae3d_capture_slot(block, 1) +
+            ae3d_capture_slot(block, 2)) / 3.0
+}
+
+on_start(data: ptr) {
+    e = data as *Engine
+
+    ground = loader.plane(24, 16.0)
+    core.model_set_position(ground, 0.0 - 192.0, 0.0, 0.0 - 192.0)
+    core.model_matte(ground, 0.85, 0.85, 0.85)
+    engine.engine_add_model(e, ground)
+    g_ground = ground as ptr
+
+    blocker = loader.sphere(1.0, 32, 24)
+    core.model_set_scale(blocker, 30.0, 30.0, 30.0)
+    core.model_set_position(blocker, 0.0, 130.0, 0.0)
+    core.model_matte(blocker, 0.8, 0.3, 0.2)
+    engine.engine_add_model(e, blocker)
+    g_blocker = blocker as ptr
+
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(0.0, 150.0, 260.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+
+    // Before anything was rendered, and without the program having asked: an
+    // engine lights its scenes with shadows unless told otherwise.
+    g_default_on = engine.engine_shadows(e)
+}
+
+on_render(data: ptr, delta: float) {
+    e = data as *Engine
+    frame = engine.engine_frame_count(e)
+
+    if frame != 2 && frame != 4 { return }
+    if ae3d_capture_frame(WIDTH, HEIGHT) == 0 { return }
+
+    block = calloc(8, 8)
+    if frame == 2 {
+        g_shadowed_left = half_brightness(block, 0)
+        g_shadowed_right = half_brightness(block, WIDTH / 2)
+        engine.engine_set_shadows(e, false)
+        g_reported_off = engine.engine_shadows(e)
+    } else {
+        g_lit_left = half_brightness(block, 0)
+        g_lit_right = half_brightness(block, WIDTH / 2)
+    }
+    g_measured = g_measured + 1
+    free(block)
+}
+
+main() {
+    e = engine.engine_new(platform.API_GL)
+    engine.engine_set_size(e, WIDTH, HEIGHT)
+    engine.engine_set_title(e, "ae3d engine shadows test")
+    engine.engine_set_frame_limit(e, 6)
+    engine.engine_set_camera_input(e, false)
+    engine.engine_set_vsync(e, 0)
+
+    // Off to the right and low, so what it casts lands to the left of the
+    // blocker rather than under it.
+    light = core.light_sun(core.vec3(1.0, 0.85, 0.0))
+    light.ambient_strength = 0.35
+    engine.engine_set_light(e, light)
+
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_start(e, on_start as fn(ptr))
+    engine.engine_on_render(e, on_render as fn(ptr, float))
+
+    if !engine.engine_run(e, -1, -1) {
+        println("engine shadows: SKIP no window")
+        core.light_free(light)
+        engine.engine_free(e)
+        return
+    }
+
+    if g_measured < 2 {
+        println("engine shadows: SKIP no readable frames")
+        core.light_free(light)
+        engine.engine_free(e)
+        return
+    }
+
+    check("shadows are on by default", g_default_on)
+    check("turning them off is reported", !g_reported_off)
+
+    shadow_drop = g_lit_left - g_shadowed_left
+    control_drop = g_lit_right - g_shadowed_right
+    if control_drop < 0.0 { control_drop = 0.0 - control_drop }
+
+    println("  left half ${g_shadowed_left} shadowed vs ${g_lit_left} lit, right half ${g_shadowed_right} vs ${g_lit_right}")
+
+    check("the engine's frame darkens where the shadow falls", shadow_drop > 0.004)
+    check("the half the shadow misses is left alone", shadow_drop > control_drop * 3.0)
+
+    core.light_free(light)
+    engine.engine_free(e)
+    if g_ground != null { core.model_free(g_ground as *Model) }
+    if g_blocker != null { core.model_free(g_blocker as *Model) }
+
+    if g_failures == 0 {
+        println("engine shadows: all checks passed (${g_checks})")
+    } else {
+        println("engine shadows: ${g_failures} of ${g_checks} checks failed")
+    }
+}

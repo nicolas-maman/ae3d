@@ -12,7 +12,12 @@ import ae3d.loader
 
 const MANIFEST = "resources/blender/showcase/manifest.json"
 
+// engine_add_model borrows, and a Player borrows its clip: both outlive the
+// engine and are released after it. Held here so main can reach them.
 var g_orb: ptr = null
+var g_plinth: ptr = null
+var g_clip: ptr = null
+var g_light: ptr = null
 
 main() {
     e = engine.engine_new(platform.API_GL)
@@ -29,6 +34,20 @@ main() {
         return
     }
     engine.engine_free(e)
+    // After the engine: freeing the renderer is what releases the GPU handles
+    // the models were given, and the registry is what frees the players that
+    // read the clip.
+    free_model(g_orb)
+    free_model(g_plinth)
+    if g_clip != null { anim.clip_free(g_clip as *Clip) }
+    if g_light != null { core.light_free(g_light as *Light) }
+    assets.provenance_release()
+}
+
+free_model(handle: ptr) {
+    if handle == null { return }
+    assets.provenance_forget(handle as *Model)
+    core.model_free(handle as *Model)
 }
 
 on_start(data: ptr) {
@@ -41,6 +60,7 @@ on_start(data: ptr) {
     light = core.light_directional(core.vec3(0.0 - 0.4, 0.0 - 1.0, 0.0 - 0.35),
                                    core.vec3(1.0, 0.96, 0.9), 2.6)
     engine.engine_set_light(e, light)
+    g_light = light as ptr
 
     m = assets.manifest_load(MANIFEST)
     if m == null {
@@ -58,13 +78,17 @@ on_start(data: ptr) {
         g_orb = orb as ptr
         clip = assets.entry_load_clip(m, orb_entry)
         if clip != null {
+            g_clip = clip as ptr
             engine.engine_add_animation(e, "orb", anim.player_new(clip), orb)
             println("blender_pipeline: playing '${anim.clip_name(clip)}', ${anim.clip_duration(clip)}s, ${anim.clip_channel_count(clip)} channels")
         }
     }
 
     plinth = assets.entry_load_model(m, assets.manifest_find_by_object(m, "Plinth"))
-    if plinth != null { engine.engine_add_model(e, plinth) }
+    if plinth != null {
+        engine.engine_add_model(e, plinth)
+        g_plinth = plinth as ptr
+    }
 
     assets.manifest_free(m)
 }

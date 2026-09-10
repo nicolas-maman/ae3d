@@ -3,6 +3,11 @@
 #
 #   ./build.sh examples/triangle.ae            -> build/triangle
 #   ./build.sh examples/triangle.ae demo       -> build/demo
+#   ./build.sh --natives                       -> build/obj only
+#
+# --natives compiles the C half and stops. A Windows script library has to be
+# linked against those objects rather than left to find them in its host, and
+# it cannot be the first thing built if they are not there yet.
 #
 # Module resolution is CWD-relative (src/ae3d/<module>/module.ae), so the
 # compiler always runs from the repository root regardless of where the caller
@@ -12,6 +17,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
+
+NATIVES_ONLY=0
+if [ "${1:-}" = "--natives" ]; then
+    NATIVES_ONLY=1
+    shift
+    set -- "build.sh" ""
+fi
 
 SOURCE="${1:?usage: build.sh <source.ae> [output-name]}"
 NAME="$(basename "${2:-$(basename "$SOURCE" .ae)}")"
@@ -138,6 +150,16 @@ fi
 . "$ROOT/scripts/platform.sh"
 PLATFORM_LIBS="$(ae3d_platform_libs "$(uname -s)")"
 
+# A script is a library loaded into this program that calls back into it, and
+# on ELF the symbols of an executable are not in its dynamic table unless it
+# says so: the library loads and then fails on the first engine symbol it
+# needs. macOS resolves those at load without being asked, and a Windows DLL
+# links them in itself because it has to.
+case "$(uname -s)" in
+    Darwin|MINGW*|MSYS*|CYGWIN*) EXPORT_FLAGS="" ;;
+    *)                           EXPORT_FLAGS="-Wl,--export-dynamic" ;;
+esac
+
 NATIVE_SOURCES="native/ae3d_agent.c native/ae3d_script.c native/ae3d_capture.c native/ae3d_glapi.c native/ae3d_platform.c native/ae3d_mesh.c native/ae3d_meshfile.c native/ae3d_image.c native/ae3d_png.c native/ae3d_gl.c native/ae3d_offscreen.c native/ae3d_vk.c"
 if [ "$(uname -s)" = "Darwin" ]; then
     NATIVE_SOURCES="$NATIVE_SOURCES native/ae3d_vk_surface.m"
@@ -163,6 +185,11 @@ for src in $NATIVE_SOURCES; do
     fi
 done
 
+if [ "$NATIVES_ONLY" = 1 ]; then
+    echo "built: $OBJ_DIR"
+    exit 0
+fi
+
 # Two module trees. ae3d.* is the engine, under src/. examples/lib/ is shared
 # code belonging to the examples themselves -- a black hole renderer is a tech
 # demo, not an engine feature, and putting it under src/ would have told everyone
@@ -171,7 +198,7 @@ done
 # benchmark times it, and the test checks it against general relativity.
 export AETHER_LIB_DIR="$ROOT/src:$ROOT/examples/lib"
 "$AETHERC" "$SOURCE" "$GEN"
-"$CC" $CFLAGS "$GEN" $OBJ_DIR/*.o $AETHER_COMPILE_FLAGS $AETHER_LIBS $GLFW_LIBS $ZLIB_LIBS $PLATFORM_LIBS -o "$OUT"
+"$CC" $CFLAGS "$GEN" $OBJ_DIR/*.o $AETHER_COMPILE_FLAGS $AETHER_LIBS $GLFW_LIBS $ZLIB_LIBS $PLATFORM_LIBS $EXPORT_FLAGS -o "$OUT"
 
 # MinGW gcc appends .exe to an output name that has no extension, so the file
 # is not at the path this asked for. Name the one that exists.

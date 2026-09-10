@@ -21,12 +21,40 @@ pass() { printf '   ok    %s\n' "$1"; }
 fail() { printf '   FAIL  %s\n' "$1"; failures=$((failures + 1)); }
 skip() { printf '   skip  %s (%s)\n' "$1" "$2"; skipped=$((skipped + 1)); }
 
+# Windows ships a python3 on PATH whose only purpose is to open the Microsoft
+# Store, and it answers command -v exactly like an interpreter would. Asking it
+# to run something is the only way to tell them apart.
+PYTHON=""
+for candidate in python3 python "py -3"; do
+    if $candidate -c "" >/dev/null 2>&1; then PYTHON="$candidate"; break; fi
+done
+
 have_display() {
     case "$(uname -s)" in
         Darwin) return 0 ;;
         MINGW*|MSYS*|CYGWIN*|Windows_NT) return 0 ;;
         *) [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ] ;;
     esac
+}
+
+# A suite, example or benchmark that hangs should fail this step by name rather
+# than stall the job until the runner's own six-hour limit: one did, on Linux,
+# for three and a half hours, and the log said nothing at all. Not every
+# platform ships coreutils' timeout, so where it is missing the run is
+# unguarded, exactly as it was before.
+if command -v timeout >/dev/null 2>&1; then
+    bounded() { timeout "$@"; }
+else
+    bounded() { shift; "$@"; }
+fi
+RUN_LIMIT="${AE3D_CI_RUN_LIMIT:-300}"
+
+# A shell gives 128 plus the signal for a child that was killed, and the
+# message a crash leaves on its own says neither which signal nor which suite.
+died_on() {   # died_on <status>
+    if [ "$1" -gt 128 ] && [ "$1" -lt 160 ]; then
+        printf ' (died on signal %d)' "$(($1 - 128))"
+    fi
 }
 
 step "platform link libraries"
@@ -95,8 +123,28 @@ if command -v blender >/dev/null 2>&1 || [ -n "${BLENDER:-}" ]; then
     }
     check_exported tests/fixtures/spin.blend tests/fixtures/exported
     check_exported resources/blender/showcase.blend resources/blender/showcase
+    check_exported resources/blender/zombie_street.blend resources/blender/zombie_street
 else
     skip "exported fixtures" "no Blender"
+fi
+
+step "no two surfaces share a plane"
+# Z-fighting is two faces in one plane close enough in depth that rounding
+# decides which is in front. Looked for on screen it depends on where the
+# camera happens to be; looked for in the geometry, either two faces share a
+# plane and overlap or they do not. Runs against the committed export, so it
+# needs no Blender.
+if [ -n "$PYTHON" ]; then
+    for exported in resources/blender/zombie_street resources/blender/showcase; do
+        if $PYTHON tools/blender/check_coplanar.py "$exported" >/tmp/ae3d_coplanar.log 2>&1; then
+            pass "$exported has no coplanar overlaps"
+        else
+            fail "$exported has surfaces that would fight over the same depth"
+            sed 's/^/        /' /tmp/ae3d_coplanar.log | head -12
+        fi
+    done
+else
+    skip "coplanar surfaces" "no python3"
 fi
 
 step "docs/agent.md matches the engine's command table"
@@ -161,7 +209,7 @@ fi
 step "modules type-check"
 for module in src/ae3d/*/; do
     name="$(basename "$module")"
-    probe="$(mktemp -t ae3d_probe).ae"
+    probe="$(mktemp -t ae3d_probe.XXXXXX).ae"
     printf 'import ae3d.%s\nmain() { println("ok") }\n' "$name" > "$probe"
     if aetherc "$probe" "${probe%.ae}.c" >/tmp/ae3d_mod.log 2>&1; then
         pass "ae3d.$name"
@@ -179,7 +227,7 @@ done
 for module in examples/lib/*/; do
     [ -e "$module" ] || continue
     name="$(basename "$module")"
-    probe="$(mktemp -t ae3d_probe).ae"
+    probe="$(mktemp -t ae3d_probe.XXXXXX).ae"
     printf 'import %s\nmain() { println("ok") }\n' "$name" > "$probe"
     if AETHER_LIB_DIR="$PWD/src:$PWD/examples/lib" aetherc "$probe" "${probe%.ae}.c" >/tmp/ae3d_mod.log 2>&1; then
         pass "examples/lib/$name"
@@ -224,8 +272,13 @@ for suite in tests/test_*.ae; do
         skip "$name" "no display"
         continue
     fi
-    if ! output="$(AE3D_FRAMES="$FRAMES" ./build/"$name" 2>&1)"; then
-        fail "$name"
+    output="$(AE3D_FRAMES="$FRAMES" bounded "$RUN_LIMIT" ./build/"$name" 2>&1)"
+    suite_status=$?
+    if [ "$suite_status" -eq 124 ]; then
+        fail "$name (still running after ${RUN_LIMIT}s)"
+        printf '%s\n' "$output" | sed 's/^/        /' | tail -10
+    elif [ "$suite_status" -ne 0 ]; then
+        fail "$name$(died_on "$suite_status")"
         printf '%s\n' "$output" | sed 's/^/        /' | head -20
     elif printf '%s' "$output" | grep -q "all checks passed"; then
         pass "$name"
@@ -256,7 +309,12 @@ for example in examples/*.ae; do
         skip "$name" "no display"
         continue
     fi
-    if AE3D_FRAMES="$FRAMES" ./build/"$name" >/tmp/ae3d_run.log 2>&1; then
+    AE3D_FRAMES="$FRAMES" bounded "$RUN_LIMIT" ./build/"$name" >/tmp/ae3d_run.log 2>&1
+    example_status=$?
+    if [ "$example_status" -eq 124 ]; then
+        fail "$name (still running after ${RUN_LIMIT}s)"
+        sed 's/^/        /' /tmp/ae3d_run.log | tail -10
+    elif [ "$example_status" -eq 0 ]; then
         pass "$name"
     else
         fail "$name"
@@ -275,7 +333,7 @@ check_editor_run() {
         name="ae3d_editor ($editor_backend, $editor_scene)"
     fi
     report="$(mktemp)"
-    snapshot="$(mktemp -t ae3d_shot).png"
+    snapshot="$(mktemp -t ae3d_shot.XXXXXX).png"
     log="$(mktemp)"
     # A bounded run ends itself; the timeout is only a backstop so a hang
     # fails the step rather than blocking it.
@@ -451,9 +509,9 @@ else
         # A name the editor shares with the toolkit it imports is bound
         # differently inside the ui.window block than outside it, silently, and
         # that is how the Undo button came to step the toolkit's empty stack.
-        if command -v python3 >/dev/null 2>&1; then
+        if [ -n "$PYTHON" ]; then
             collide_log="$(mktemp)"
-            if AETHER_UI_ROOT="$UI_ROOT" python3 tools/check_ui_name_collisions.py \
+            if AETHER_UI_ROOT="$UI_ROOT" $PYTHON tools/check_ui_name_collisions.py \
                     >"$collide_log" 2>&1; then
                 pass "ae3d_editor (names)"
             else
@@ -470,7 +528,7 @@ else
         # cannot be hit, a field whose callback is not wired, a row that does
         # not respond to a click: all of them pass. So this presses the real
         # widgets through aether-ui's driver and asks the tree what changed.
-        if ! command -v python3 >/dev/null 2>&1; then
+        if [ -z "$PYTHON" ]; then
             skip "ae3d_editor (driver)" "no python3"
         elif ! have_display; then
             skip "ae3d_editor (driver)" "no display"
@@ -481,7 +539,7 @@ else
             # a real click exercises.
             for driver_backend in opengl vulkan; do
                 driver_log="$(mktemp)"
-                if python3 tools/drive_editor.py --backend "$driver_backend" \
+                if $PYTHON tools/drive_editor.py --backend "$driver_backend" \
                         --port 8797 >"$driver_log" 2>&1; then
                     pass "ae3d_editor (driver, $driver_backend)"
                 else
@@ -522,7 +580,7 @@ for bench in benchmarks/bench_*.ae; do
         fail "$name (build warnings)"
         continue
     fi
-    if output="$(./build/"$name" 2>&1)"; then
+    if output="$(bounded "$RUN_LIMIT" ./build/"$name" 2>&1)"; then
         pass "$name"
         printf '%s\n' "$output" | sed 's/^/        /'
     else
@@ -564,7 +622,7 @@ elif command -v leaks >/dev/null 2>&1; then
         # this binary. That is what lets the suites using ae3d.engine be
         # checked at all: they were skipped wholesale for opening a window, and
         # the exclusion was hiding a lost model in each of them.
-        output="$(MallocStackLogging=1 leaks --atExit -- "./build/$name" 2>&1)"
+        output="$(MallocStackLogging=1 bounded "$RUN_LIMIT" leaks --atExit -- "./build/$name" 2>&1)"
         report="$(printf '%s' "$output" | grep -o '[0-9]* leaks for [0-9]* total leaked bytes' | tail -1)"
         lost="$(printf '%s' "$output" | awk -v bin="$name" '
             /^STACK OF /   { inblock = (index($0, "ROOT LEAK") > 0); ours = 0; next }

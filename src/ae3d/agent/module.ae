@@ -21,7 +21,7 @@ import ae3d.scene
 exports (
     Context, context_new, context_free,
     start, active, port, stop, pump, answer_step, answer_snapshot, answer_capture,
-    capture_release, capture_frame, capture_adopt, answer_pending_trace,
+    capture_release, capture_frame, capture_adopt, answer_pending_trace, answer_deferred,
     answer_capture_unsupported, is_paused,
     schema_json, last_error
 )
@@ -46,6 +46,28 @@ extern ae3d_capture_slot(block: ptr, index: int) -> float
 extern ae3d_capture_adopt(pixels: ptr, width: int, height: int) -> int
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
+
+// A frame can only be read between the last draw and the buffer swap, and
+// requests are drained after it. Everything that reads pixels is therefore
+// answered a frame late, from the frame that was on screen when the request
+// arrived: reading whatever happened to be in the capture buffer answers a
+// question about a picture that is no longer there, which is worse than not
+// answering at all.
+const READ_PIXEL = 0
+const READ_REGION = 1
+const READ_HOLD = 2
+const READ_DIFF = 3
+
+struct Deferred {
+    kind: int
+    id: int
+    x: int
+    y: int
+    width: int
+    height: int
+    background: int
+    tolerance: int
+}
 
 struct Context {
     camera: ptr
@@ -77,6 +99,13 @@ struct Context {
     want_capture: bool
     step_from: int
     paused: bool
+    shadows: bool
+    shadow_map: int
+    light_count: int
+    fog_enabled: bool
+
+    deferred: ptr
+    reference_frame: int
 }
 
 var g_error = ""
@@ -91,11 +120,115 @@ context_new() -> *Context {
     c.pending_snapshot_id = -1
     c.pending_capture_id = -1
     c.pending_trace_id = -1
+    c.deferred = list.new()
+    c.reference_frame = -1
     return c
 }
 
+defer_read(c: *Context, kind: int, id: int, x: int, y: int, width: int, height: int,
+           background: int, tolerance: int) -> bool {
+    d = heap.new(Deferred)
+    d.kind = kind
+    d.id = id
+    d.x = x
+    d.y = y
+    d.width = width
+    d.height = height
+    d.background = background
+    d.tolerance = tolerance
+    list.add_raw(c.deferred, d as ptr)
+    c.want_capture = true
+    return true
+}
+
+// Called once the frame has been read back, in the order the requests arrived.
+answer_deferred(c: *Context) {
+    count = list.size(c.deferred)
+    i = 0
+    while i < count {
+        d = list.get_raw(c.deferred, i) as *Deferred
+        answer_one_read(c, d)
+        heap.free(d)
+        i = i + 1
+    }
+    list.clear(c.deferred)
+}
+
+answer_one_read(c: *Context, d: *Deferred) {
+    if d.kind == READ_PIXEL {
+        block = capture_doubles()
+        if ae3d_capture_pixel(d.x, d.y, block) == 0 {
+            free(block)
+            fail(d.id, "the point is outside the frame")
+            return
+        }
+        out = colour_json(block)
+        free(block)
+        json.object_set_raw(out, "x", json.from_int(d.x))
+        json.object_set_raw(out, "y", json.from_int(d.y))
+        json.object_set_raw(out, "frame", json.from_int(c.frame_count))
+        answer(d.id, out)
+        return
+    }
+
+    if d.kind == READ_REGION {
+        out = region_result(d.x, d.y, d.width, d.height, d.background, d.tolerance)
+        if out == null {
+            fail(d.id, "the region is outside the frame")
+            return
+        }
+        json.object_set_raw(out, "frame", json.from_int(c.frame_count))
+        answer(d.id, out)
+        return
+    }
+
+    if d.kind == READ_HOLD {
+        if ae3d_capture_hold_reference() == 0 {
+            fail(d.id, "the frame could not be read")
+            return
+        }
+        c.reference_frame = c.frame_count
+        out = json.obj()
+        json.object_set_raw(out, "frame", json.from_int(c.frame_count))
+        answer(d.id, out)
+        return
+    }
+
+    block = capture_doubles()
+    if ae3d_capture_diff(d.tolerance, block) == 0 {
+        free(block)
+        fail(d.id, "no held reference, or the frame is a different size than it was")
+        return
+    }
+    out = json.obj()
+    json.object_set_raw(out, "changed", json.num(read_double(block, 0)))
+    json.object_set_raw(out, "fraction", json.num(read_double(block, 1)))
+    json.object_set_raw(out, "max_delta", json.num(read_double(block, 2)))
+    json.object_set_raw(out, "pixels", json.num(read_double(block, 3)))
+    free(block)
+    // Which two frames these are. A hold and a diff sent together are one
+    // frame compared with itself, and the answer says so rather than reading
+    // as "nothing you did had any effect".
+    json.object_set_raw(out, "reference_frame", json.from_int(c.reference_frame))
+    json.object_set_raw(out, "frame", json.from_int(c.frame_count))
+    answer(d.id, out)
+}
+
 context_free(c: *Context) {
-    if c != null { heap.free(c) }
+    if c == null { return }
+    // A read waiting on a frame that never arrived is still in the queue: the
+    // context outlives the answer only when the program stops mid-exchange.
+    if c.deferred != null {
+        count = list.size(c.deferred)
+        i = 0
+        while i < count {
+            d = list.get_raw(c.deferred, i) as *Deferred
+            if d != null { heap.free(d) }
+            i = i + 1
+        }
+        list.free(c.deferred)
+    }
+    heap.free(c)
 }
 
 start() -> bool {
@@ -198,7 +331,7 @@ help_result() -> ptr {
     json.array_add_raw(ops, describe("frame.pixel", "x, y",
         "One pixel of the captured frame as r, g, b, a and hex."))
     json.array_add_raw(ops, describe("frame.region", "x, y, width, height, [background], [tolerance]",
-        "Mean colour and coverage over a rectangle, summarised in the engine rather than shipped as pixels."))
+        "Mean colour, coverage, and the luminance spread over a rectangle. A flat surface has a stddev near zero; stipple and shadow acne do not."))
     json.array_add_raw(ops, describe("frame.hold", "",
         "Keep the captured frame as the reference frame.diff compares against."))
     json.array_add_raw(ops, describe("frame.diff", "[tolerance]",
@@ -211,8 +344,8 @@ help_result() -> ptr {
         "Every animation bound to a model: clip, playhead, duration, speed and the pose it produced."))
     json.array_add_raw(ops, describe("anim.get", "name | index",
         "One animation in full, including the transform its playhead currently produces."))
-    json.array_add_raw(ops, describe("anim.set", "name | index, [time], [speed], [playing], [looping]",
-        "Drive an animation. Setting time seeks and reposes at once, so a snapshot after it shows that pose."))
+    json.array_add_raw(ops, describe("anim.set", "[name | index], [time], [speed], [playing], [looping]",
+        "Drive an animation, or every animation at once when no name or index is given. Setting time seeks and reposes together, so a snapshot after it shows that pose."))
     json.array_add_raw(ops, describe("snapshot", "path",
         "Write the next completed frame to a PNG. Answers once the file exists."))
     json.array_add_raw(ops, describe("frame.pause", "",
@@ -241,6 +374,16 @@ stats_result(c: *Context) -> ptr {
     json.object_set_raw(out, "draw_calls", json.from_int(c.draw_calls))
     json.object_set_raw(out, "instances", json.from_int(c.instances))
     json.object_set_raw(out, "paused", json.boolean(c.paused))
+
+    // What the renderer is doing, rather than what the program asked for. A
+    // scene with no shadows in it and a scene whose shadow map was never built
+    // look the same from outside, and this is the difference.
+    render = json.obj()
+    json.object_set_raw(render, "shadows", json.boolean(c.shadows))
+    json.object_set_raw(render, "shadow_map", json.from_int(c.shadow_map))
+    json.object_set_raw(render, "lights", json.from_int(c.light_count))
+    json.object_set_raw(render, "fog", json.boolean(c.fog_enabled))
+    json.object_set_raw(out, "render", render)
     return out
 }
 
@@ -564,15 +707,43 @@ region_result(x: int, y: int, width: int, height: int,
     json.object_set_raw(out, "mean_alpha", json.num(read_double(block, 3)))
     json.object_set_raw(out, "coverage", json.num(read_double(block, 4)))
     json.object_set_raw(out, "pixels", json.num(read_double(block, 5)))
+    json.object_set_raw(out, "stddev", json.num(read_double(block, 6)))
+    json.object_set_raw(out, "range", json.num(read_double(block, 7)))
     free(block)
     return out
 }
 
+// A loaded mesh carries its materials in its groups rather than in the single
+// slot a primitive uses, and the first group is what the model is surfaced
+// with wherever it has only one.
+model_surface(m: *Model) -> *Material {
+    if m.material != null { return m.material }
+    if core.model_group_count(m) > 0 {
+        group = core.model_group(m, 0)
+        if group != null { return group.material }
+    }
+    return null
+}
+
+// Where on screen to look for a model, clipped to the frame.
+//
+// A road sixty metres long has its centre behind the camera while it fills the
+// bottom of the picture, so projecting the centre and asking whether that point
+// landed in the frame answers no for something plainly there. What can be said
+// about such a model is that part of it is in view, and the part of the frame
+// to sample is all of it.
 model_screen_box(c: *Context, m: *Model, box: *Vec4) -> bool {
     if c.camera == null { return false }
     cam = c.camera as *Camera
+
     centre = core.camera_world_to_screen(cam, m.bounding_center, c.width, c.height)
-    if centre.w <= 0.0001 { return false }
+    if centre.w <= 0.0001 {
+        box.x = 0.0
+        box.y = 0.0
+        box.z = c.width * 1.0
+        box.w = c.height * 1.0
+        return true
+    }
 
     edge = core.v3_add(m.bounding_center, core.v3_mul(cam.right, m.bounding_radius))
     projected = core.camera_world_to_screen(cam, edge, c.width, c.height)
@@ -580,10 +751,20 @@ model_screen_box(c: *Context, m: *Model, box: *Vec4) -> bool {
     if radius < 0.0 { radius = 0.0 - radius }
     if radius < 1.0 { radius = 1.0 }
 
-    box.x = centre.x - radius
-    box.y = centre.y - radius
-    box.z = radius * 2.0
-    box.w = radius * 2.0
+    left = centre.x - radius
+    top = centre.y - radius
+    right = centre.x + radius
+    bottom = centre.y + radius
+    if left < 0.0 { left = 0.0 }
+    if top < 0.0 { top = 0.0 }
+    if right > c.width * 1.0 { right = c.width * 1.0 }
+    if bottom > c.height * 1.0 { bottom = c.height * 1.0 }
+    if right <= left || bottom <= top { return false }
+
+    box.x = left
+    box.y = top
+    box.z = right - left
+    box.w = bottom - top
     return true
 }
 
@@ -752,6 +933,42 @@ anim_list_result(c: *Context) -> ptr {
     return out
 }
 
+// Applies whatever the request carries to every binding, and answers with how
+// many were driven and where they ended up.
+drive_all(c: *Context, request: ptr) -> ptr {
+    registry = c.animations as *Registry
+    count = anim.registry_count(registry)
+    i = 0
+    while i < count {
+        drive_binding(anim.registry_binding(registry, i), request)
+        i = i + 1
+    }
+    out = json.obj()
+    json.object_set_raw(out, "animations", json.from_int(count))
+    node = json.object_get_raw(request, "time")
+    if node != null { json.object_set_raw(out, "time", json.num(json.get_number(node))) }
+    return out
+}
+
+drive_binding(b: *Binding, request: ptr) {
+    if b == null { return }
+    p = anim.binding_player(b)
+
+    node = json.object_get_raw(request, "time")
+    if node != null {
+        anim.player_set_time(p, json.get_number(node))
+        anim.apply(p, anim.binding_model(b))
+    }
+    node = json.object_get_raw(request, "speed")
+    if node != null { anim.player_set_speed(p, json.get_number(node)) }
+    node = json.object_get_raw(request, "looping")
+    if node != null { anim.player_set_looping(p, json.get_bool(node) == 1) }
+    node = json.object_get_raw(request, "playing")
+    if node != null {
+        if json.get_bool(node) == 1 { anim.player_play(p) } else { anim.player_pause(p) }
+    }
+}
+
 binding_from(c: *Context, request: ptr) -> int {
     registry = c.animations as *Registry
     named = json.object_get_raw(request, "name")
@@ -823,12 +1040,28 @@ visibility_detail(c: *Context, m: *Model, reached: ptr) -> bool {
     if in_front {
         json.object_set_raw(reached, "screen_x", json.num(screen.x))
         json.object_set_raw(reached, "screen_y", json.num(screen.y))
-        on_screen = screen.x >= 0.0 && screen.y >= 0.0 &&
-                    screen.x <= (c.width * 1.0) && screen.y <= (c.height * 1.0)
-        json.object_set_raw(reached, "on_screen", json.boolean(on_screen))
-        return inside && on_screen
     }
-    return false
+
+    // Whether any of it is in the frame, rather than whether its centre is: a
+    // model larger than the view has its centre wherever the geometry averages
+    // out, which for a road is behind the camera driving down it.
+    box = core.vec4(0.0, 0.0, 0.0, 0.0)
+    covered = model_screen_box(c, m, &box)
+    json.object_set_raw(reached, "on_screen", json.boolean(inside && covered))
+    if covered {
+        json.object_set_raw(reached, "screen_region",
+                            region_json(box.x, box.y, box.z, box.w))
+    }
+    return inside && covered
+}
+
+region_json(x: float, y: float, width: float, height: float) -> ptr {
+    out = json.obj()
+    json.object_set_raw(out, "x", json.from_int(x as int))
+    json.object_set_raw(out, "y", json.from_int(y as int))
+    json.object_set_raw(out, "width", json.from_int(width as int))
+    json.object_set_raw(out, "height", json.from_int(height as int))
+    return out
 }
 
 trace_result(c: *Context, m: *Model, p: *Provenance) -> ptr {
@@ -901,6 +1134,35 @@ trace_result(c: *Context, m: *Model, p: *Provenance) -> ptr {
     json.object_set_raw(node, "visible_flag", json.boolean(m.visible))
     json.object_set_raw(node, "position", vec3_json(m.position.x, m.position.y, m.position.z))
     json.object_set_raw(node, "scale", vec3_json(m.scale.x, m.scale.y, m.scale.z))
+    parent = core.model_parent(m)
+    if parent != null {
+        json.object_set_raw(node, "parent", json.str(core.text(parent.name)))
+        world = core.model_world_position(m)
+        json.object_set_raw(node, "world_position", vec3_json(world.x, world.y, world.z))
+    }
+
+    // What it is surfaced with, and whether the renderer resolved the image the
+    // material names. A model drawn in flat white because its texture never
+    // loaded looks, from every other stage, exactly like one that did.
+    surface = model_surface(m)
+    if surface != null {
+        material = json.obj()
+        json.object_set_raw(material, "name", json.str(core.text(surface.name)))
+        json.object_set_raw(material, "diffuse",
+                            vec3_json(surface.diffuse.x, surface.diffuse.y, surface.diffuse.z))
+        json.object_set_raw(material, "groups",
+                            json.from_int(core.model_group_count(m)))
+        path = core.text(surface.texture_path)
+        json.object_set_raw(material, "texture", json.str(path))
+        json.object_set_raw(material, "texture_loaded",
+                            json.boolean(surface.texture_id != 0))
+        if path != "" && surface.texture_id == 0 {
+            node_ok = false
+            json.object_set_raw(node, "note",
+                json.str("the material names a texture the renderer never loaded"))
+        }
+        json.object_set_raw(node, "material", material)
+    }
     if !node_ok {
         json.object_set_raw(node, "note",
             json.str("the renderer has never been given this model; engine_add_model was not called"))
@@ -1101,69 +1363,36 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
     }
 
     if op == "frame.pixel" {
-        px = json.get_int(json.object_get_raw(request, "x"))
-        py = json.get_int(json.object_get_raw(request, "y"))
-        block = capture_doubles()
-        if ae3d_capture_pixel(px, py, block) == 0 {
-            free(block)
-            fail(id, "no captured frame, or the point is outside it; send frame.capture first")
-            return false
-        }
-        out = colour_json(block)
-        free(block)
-        json.object_set_raw(out, "x", json.from_int(px))
-        json.object_set_raw(out, "y", json.from_int(py))
-        answer(id, out)
-        return false
+        return defer_read(c, READ_PIXEL, id,
+                          json.get_int(json.object_get_raw(request, "x")),
+                          json.get_int(json.object_get_raw(request, "y")),
+                          0, 0, 0, 0)
     }
 
     if op == "frame.region" {
-        rx = json.get_int(json.object_get_raw(request, "x"))
-        ry = json.get_int(json.object_get_raw(request, "y"))
-        rw = json.get_int(json.object_get_raw(request, "width"))
-        rh = json.get_int(json.object_get_raw(request, "height"))
         background = 0
         tolerance = 8
         node = json.object_get_raw(request, "background")
         if node != null { background = json.get_int(node) }
         node = json.object_get_raw(request, "tolerance")
         if node != null { tolerance = json.get_int(node) }
-        out = region_result(rx, ry, rw, rh, background, tolerance)
-        if out == null {
-            fail(id, "no captured frame; send frame.capture first")
-            return false
-        }
-        answer(id, out)
-        return false
+        return defer_read(c, READ_REGION, id,
+                          json.get_int(json.object_get_raw(request, "x")),
+                          json.get_int(json.object_get_raw(request, "y")),
+                          json.get_int(json.object_get_raw(request, "width")),
+                          json.get_int(json.object_get_raw(request, "height")),
+                          background, tolerance)
     }
 
     if op == "frame.hold" {
-        if ae3d_capture_hold_reference() == 0 {
-            fail(id, "no captured frame to hold; send frame.capture first")
-            return false
-        }
-        answer(id, json.obj())
-        return false
+        return defer_read(c, READ_HOLD, id, 0, 0, 0, 0, 0, 0)
     }
 
     if op == "frame.diff" {
         tolerance = 8
         node = json.object_get_raw(request, "tolerance")
         if node != null { tolerance = json.get_int(node) }
-        block = capture_doubles()
-        if ae3d_capture_diff(tolerance, block) == 0 {
-            free(block)
-            fail(id, "need a held reference and a captured frame of the same size")
-            return false
-        }
-        out = json.obj()
-        json.object_set_raw(out, "changed", json.num(read_double(block, 0)))
-        json.object_set_raw(out, "fraction", json.num(read_double(block, 1)))
-        json.object_set_raw(out, "max_delta", json.num(read_double(block, 2)))
-        json.object_set_raw(out, "pixels", json.num(read_double(block, 3)))
-        free(block)
-        answer(id, out)
-        return false
+        return defer_read(c, READ_DIFF, id, 0, 0, 0, 0, 0, tolerance)
     }
 
     if op == "world" { answer(id, world_result(c)) return false }
@@ -1209,27 +1438,22 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
     }
 
     if op == "anim.set" {
+        // A rig is many clips, one per part, and seeking one of them poses one
+        // limb of a figure whose other fifteen are still where they were. With
+        // no name and no index, this drives all of them: a character is the
+        // thing an agent means when it asks to see a moment.
+        if json.object_get_raw(request, "name") == null &&
+           json.object_get_raw(request, "index") == null {
+            answer(id, drive_all(c, request))
+            return false
+        }
         index = binding_from(c, request)
         b = anim.registry_binding(c.animations as *Registry, index)
         if b == null {
             fail(id, "no animation by that name or index")
             return false
         }
-        p = anim.binding_player(b)
-
-        node = json.object_get_raw(request, "time")
-        if node != null {
-            anim.player_set_time(p, json.get_number(node))
-            anim.apply(p, anim.binding_model(b))
-        }
-        node = json.object_get_raw(request, "speed")
-        if node != null { anim.player_set_speed(p, json.get_number(node)) }
-        node = json.object_get_raw(request, "looping")
-        if node != null { anim.player_set_looping(p, json.get_bool(node) == 1) }
-        node = json.object_get_raw(request, "playing")
-        if node != null {
-            if json.get_bool(node) == 1 { anim.player_play(p) } else { anim.player_pause(p) }
-        }
+        drive_binding(b, request)
         answer(id, binding_result(b, index))
         return false
     }
@@ -1360,6 +1584,16 @@ capture_adopt(pixels: ptr, width: int, height: int) -> bool {
 }
 
 answer_capture_unsupported(c: *Context, reason: string) {
+    count = list.size(c.deferred)
+    i = 0
+    while i < count {
+        d = list.get_raw(c.deferred, i) as *Deferred
+        fail(d.id, reason)
+        heap.free(d)
+        i = i + 1
+    }
+    list.clear(c.deferred)
+
     if c.pending_capture_id >= 0 {
         fail(c.pending_capture_id, reason)
         c.pending_capture_id = -1

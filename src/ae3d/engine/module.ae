@@ -20,14 +20,15 @@ exports (
     engine_new, engine_free, engine_run, engine_start, engine_loop, engine_shutdown,
     engine_stop, engine_on_start,
     engine_add_model, engine_remove_model, engine_set_light, engine_light,
+    engine_add_light, engine_remove_light,
     engine_camera, engine_window, engine_backend_name,
     engine_set_size, engine_set_title, engine_set_msaa, engine_set_decorated, engine_set_post,
-    engine_set_render_scale,
+    engine_set_render_scale, engine_set_shadows, engine_shadows, engine_set_fog, engine_fog, engine_set_shadow_distance, engine_shadow_distance,
     engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
     engine_set_skybox, engine_load_texture,
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
     engine_set_debug, engine_set_frustum_culling, engine_set_face_culling,
-    engine_on_update, engine_on_fixed_update, engine_on_render,
+    engine_on_update, engine_on_fixed_update, engine_on_render, engine_on_pose,
     engine_set_user_data, engine_user_data,
     engine_add_animation, engine_animations,
     engine_gl_renderer, engine_vk_renderer, engine_mouse_x, engine_mouse_y, engine_mouse_down, engine_key_down
@@ -49,6 +50,12 @@ struct Engine {
     backend_set_skybox: fn(ptr, ptr)
     backend_update_viewport: fn(ptr, int, int)
     backend_set_post: fn(ptr, int, int, float, float)
+    backend_set_shadows: fn(ptr, int)
+    backend_set_fog: fn(ptr, ptr)
+    backend_set_shadow_distance: fn(ptr, float)
+    backend_add_light: fn(ptr, ptr)
+    backend_remove_light: fn(ptr, ptr)
+    backend_shadows: fn(ptr) -> int
     backend_set_render_scale: fn(ptr, float) -> float
     backend_cleanup: fn(ptr)
     backend_name: string
@@ -57,6 +64,7 @@ struct Engine {
     on_update: fn(ptr, float)
     on_fixed_update: fn(ptr, float)
     on_render: fn(ptr, float)
+    on_pose: fn(ptr)
     user_data: ptr
 
     width: int
@@ -66,6 +74,9 @@ struct Engine {
     decorated: bool
     vsync: int
     camera_input: bool
+    shadows: bool
+    shadow_distance: float
+    fog: Fog
 
     fixed_step: float
     fixed_accumulator: float
@@ -99,6 +110,8 @@ engine_new(api: int) -> *Engine {
     e.decorated = true
     e.vsync = 1
     e.camera_input = true
+    e.shadows = true
+    e.fog = core.fog_none()
     e.fixed_step = 1.0 / 60.0
     e.first_mouse = true
     e.frame_limit = frame_limit_from_env()
@@ -177,6 +190,12 @@ bind_backend(e: *Engine, b: Backend) {
     e.backend_load_texture = b.load_texture
     e.backend_set_skybox = b.set_skybox
     e.backend_set_post = b.set_post
+    e.backend_set_shadows = b.set_shadows
+    e.backend_set_fog = b.set_fog
+    e.backend_set_shadow_distance = b.set_shadow_distance
+    e.backend_add_light = b.add_light
+    e.backend_remove_light = b.remove_light
+    e.backend_shadows = b.shadows
     e.backend_set_render_scale = b.set_render_scale
     e.backend_update_viewport = b.update_viewport
     e.backend_cleanup = b.cleanup
@@ -220,6 +239,50 @@ engine_set_post(e: *Engine, fxaa: bool, bloom: bool, threshold: float, intensity
     if bloom { bl = 1 }
     e.backend_set_post(e.backend_state, fx, bl, threshold, intensity)
 }
+// Shadows are a property of the scene rather than of the moment a program
+// happens to ask for them, so this is remembered and applied once the backend
+// has a device to build the map on. Both backends drop renderer state at init,
+// since the OpenGL map needs a live context and the Vulkan one is wired into
+// descriptor sets that init recreates, so a program that configured its engine
+// before engine_run was talking to nothing.
+engine_set_shadows(e: *Engine, on: bool) {
+    e.shadows = on
+    if e.running { apply_shadows(e) }
+}
+
+// The air the scene is seen through. Kept here rather than set straight
+// through, for the same reason shadows are: a backend has no device to hold it
+// on until the window is open.
+engine_set_fog(e: *Engine, f: Fog) {
+    e.fog = f
+    if e.running { e.backend_set_fog(e.backend_state, &e.fog) }
+}
+
+engine_fog(e: *Engine) -> Fog { return e.fog }
+
+// How far from the camera shadows reach. Zero, the default, fits the shadow
+// map to the whole scene; a scene with a horizon in it wants a bound, or the
+// map is spread so thin that nothing standing on the ground casts anything.
+engine_set_shadow_distance(e: *Engine, metres: float) {
+    e.shadow_distance = metres
+    if e.running { e.backend_set_shadow_distance(e.backend_state, metres) }
+}
+
+engine_shadow_distance(e: *Engine) -> float { return e.shadow_distance }
+
+// What the backend managed rather than what was asked for: a device that could
+// not build the map reports false here.
+engine_shadows(e: *Engine) -> bool {
+    if !e.running { return e.shadows }
+    return e.backend_shadows(e.backend_state) == 1
+}
+
+apply_shadows(e: *Engine) {
+    flag = 0
+    if e.shadows { flag = 1 }
+    e.backend_set_shadows(e.backend_state, flag)
+}
+
 // Draw the scene smaller than the window. The answer is the scale the backend
 // adopted rather than the one asked for, so a program stepping down a quality
 // ladder is told which rungs exist on the renderer it happens to have got.
@@ -270,6 +333,15 @@ engine_set_face_culling(e: *Engine, on: bool) { core.set_face_culling(on) }
 engine_on_start(e: *Engine, handler: fn(ptr)) { e.on_start = handler }
 engine_on_update(e: *Engine, handler: fn(ptr, float)) { e.on_update = handler }
 engine_on_render(e: *Engine, handler: fn(ptr, float)) { e.on_render = handler }
+
+// Called once the clips have been applied and before anything is drawn, on
+// every frame including the ones an agent is holding still: a pose an agent
+// seeks to is a pose it wants solved, or it is looking at half an answer.
+//
+// This is where inverse kinematics goes. A clip is an angle at every joint and
+// wherever the foot lands is where it lands; the solve afterwards is what puts
+// it on the ground it is actually standing on.
+engine_on_pose(e: *Engine, handler: fn(ptr)) { e.on_pose = handler }
 engine_set_user_data(e: *Engine, data: ptr) { e.user_data = data }
 engine_user_data(e: *Engine) -> ptr { return e.user_data }
 
@@ -283,6 +355,18 @@ engine_frame_count(e: *Engine) -> int { return e.frame_count }
 engine_fps(e: *Engine) -> float { return e.fps }
 
 engine_set_light(e: *Engine, light: *Light) { e.light = light as ptr }
+
+// The key light is the one the scene is lit and shadowed by; these are the
+// rest of them. Both renderers have taken several lights since the array went
+// into the shader, and the engine could only ever name one, so a street with
+// lamps in it could not be lit by them.
+engine_add_light(e: *Engine, light: *Light) {
+    e.backend_add_light(e.backend_state, light as ptr)
+}
+
+engine_remove_light(e: *Engine, light: *Light) {
+    e.backend_remove_light(e.backend_state, light as ptr)
+}
 engine_light(e: *Engine) -> *Light { return e.light as *Light }
 
 // The engine BORROWS a model: it draws it and forgets it when it shuts down,
@@ -358,6 +442,9 @@ engine_start(e: *Engine, x: int, y: int) -> bool {
         return false
     }
 
+    apply_shadows(e)
+    e.backend_set_fog(e.backend_state, &e.fog)
+    e.backend_set_shadow_distance(e.backend_state, e.shadow_distance)
     e.camera = core.camera_new(e.width, e.height) as ptr
     platform.window_set_cursor_mode(e.window, platform.CURSOR_NORMAL)
     e.running = true
@@ -385,7 +472,15 @@ pump_agent(e: *Engine) {
     c.width = e.width
     c.height = e.height
     c.draw_calls = 0
-    if e.gl_renderer != null { c.draw_calls = gl.renderer_draw_calls(e.gl_renderer) }
+    c.shadow_map = 0
+    c.light_count = 0
+    if e.gl_renderer != null {
+        c.draw_calls = gl.renderer_draw_calls(e.gl_renderer)
+        c.shadow_map = gl.renderer_shadow_map(e.gl_renderer as *GLRenderer)
+        c.light_count = gl.renderer_light_count(e.gl_renderer as *GLRenderer)
+    }
+    c.shadows = engine_shadows(e)
+    c.fog_enabled = e.fog.enabled
 
     // A step still owed from an earlier frame is settled before anything new is
     // drained, so a client that pipelined a step and a query gets them in order.
@@ -440,6 +535,7 @@ service_agent_capture(e: *Engine) {
     captured = agent.capture_frame(width, height)
     if c.pending_capture_id >= 0 { agent.answer_capture(c, captured) }
     agent.answer_pending_trace(c)
+    agent.answer_deferred(c)
 }
 
 service_agent_snapshot(e: *Engine) {
@@ -540,6 +636,8 @@ engine_loop(e: *Engine) {
             anim.registry_advance(e.animations as *Registry, delta)
             if e.on_update != null { e.on_update(e.user_data, delta) }
         }
+
+        if e.on_pose != null { e.on_pose(e.user_data) }
 
         e.backend_render(e.backend_state, cam, e.light)
 

@@ -40,6 +40,9 @@
 #endif
 
 #define AE3D_VK_FRAMES 2
+/* A cached descriptor set whose texture has been destroyed. Not zero: zero is
+   a texture handle nothing uses, and not -1 alone, which reads as an error. */
+#define AE3D_VK_SET_FREE (-2)
 #define AE3D_VK_SHADOW_SIZE 2048
 #define AE3D_VK_PROGRAM_SCENE 0
 #define AE3D_VK_PROGRAM_WATER 1
@@ -1822,10 +1825,26 @@ int ae3d_vk_texture_create(int width, int height, const void *rgba) {
 
 void ae3d_vk_texture_destroy(int handle) {
     ae3d_vk_texture *texture;
+    int frame, index;
+
     if (!vk.device || handle < 1 || handle > AE3D_VK_MAX_TEXTURES) return;
     texture = &vk.textures[handle - 1];
     if (!texture->in_use) return;
     ae3d_vkDeviceWaitIdle(vk.device);
+
+    /* Descriptor sets are cached against the texture handle, and handles are
+       reused: a set written for the image being destroyed here would be handed
+       to whichever texture is created in this slot next, naming an image view
+       that no longer exists. A hardware driver has usually survived reading
+       one; lavapipe dereferences it, which is where this was found. The sets
+       go back on the free list and are written again when they are claimed. */
+    for (frame = 0; frame < AE3D_VK_FRAMES; frame++) {
+        for (index = 0; index < vk.set_count[frame]; index++) {
+            if (vk.set_texture[frame][index] == handle) {
+                vk.set_texture[frame][index] = AE3D_VK_SET_FREE;
+            }
+        }
+    }
     if (texture->sampler) ae3d_vkDestroySampler(vk.device, texture->sampler, NULL);
     if (texture->view) ae3d_vkDestroyImageView(vk.device, texture->view, NULL);
     if (texture->image) ae3d_vkDestroyImage(vk.device, texture->image, NULL);
@@ -1919,20 +1938,32 @@ static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle) {
     ae3d_vk_texture *texture;
     int index;
 
+    int reuse = -1;
+
     for (index = 0; index < vk.set_count[frame]; index++) {
         if (vk.set_texture[frame][index] == texture_handle) return vk.sets[frame][index];
+        /* Left behind by a texture that was destroyed. The set is still
+           allocated and can be written again, which is what keeps a scene that
+           swaps textures from exhausting the pool. */
+        if (vk.set_texture[frame][index] == AE3D_VK_SET_FREE && reuse < 0) reuse = index;
     }
-    if (vk.set_count[frame] >= AE3D_VK_MAX_TEXTURES) return VK_NULL_HANDLE;
+    if (reuse < 0 && vk.set_count[frame] >= AE3D_VK_MAX_TEXTURES) return VK_NULL_HANDLE;
 
     texture = &vk.textures[texture_handle - 1];
     if (!texture->in_use) return VK_NULL_HANDLE;
 
-    memset(&allocation, 0, sizeof(allocation));
-    allocation.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocation.descriptorPool = vk.descriptor_pool;
-    allocation.descriptorSetCount = 1;
-    allocation.pSetLayouts = &vk.set_layout;
-    if (ae3d_vkAllocateDescriptorSets(vk.device, &allocation, &set) != VK_SUCCESS) return VK_NULL_HANDLE;
+    if (reuse >= 0) {
+        set = vk.sets[frame][reuse];
+    } else {
+        memset(&allocation, 0, sizeof(allocation));
+        allocation.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocation.descriptorPool = vk.descriptor_pool;
+        allocation.descriptorSetCount = 1;
+        allocation.pSetLayouts = &vk.set_layout;
+        if (ae3d_vkAllocateDescriptorSets(vk.device, &allocation, &set) != VK_SUCCESS) {
+            return VK_NULL_HANDLE;
+        }
+    }
 
     memset(&buffer, 0, sizeof(buffer));
     buffer.buffer = vk.uniforms[frame].buffer;
@@ -1979,7 +2010,7 @@ static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle) {
 
     ae3d_vkUpdateDescriptorSets(vk.device, 3, writes, 0, NULL);
 
-    index = vk.set_count[frame]++;
+    index = reuse >= 0 ? reuse : vk.set_count[frame]++;
     vk.sets[frame][index] = set;
     vk.set_texture[frame][index] = texture_handle;
     return set;
@@ -2378,10 +2409,16 @@ static int ae3d_vk_create_commands(void) {
 // read back rather than presented. That is what lets the editor host the
 // Vulkan renderer inside a toolkit that owns the real window.
 int ae3d_vk_init(void *win, int width, int height) {
+    // Whether shadows are wanted is a setting rather than device state, and
+    // descriptor sets written later in init read it. Clearing it here would
+    // discard anything asked for before the device existed.
+    int shadows = vk.shadow_enabled;
+
     if (vk.ready) return 1;
     if (!ae3d_vk_available()) return 0;
 
     memset(&vk, 0, sizeof(vk));
+    vk.shadow_enabled = shadows;
     vk.offscreen = win == NULL;
     vk.readback_frame = -1;
 
@@ -2877,11 +2914,35 @@ int ae3d_vk_frame_end(void) {
     return 1;
 }
 
+/* The finished frame, at an address that does not move.
+
+   Readback is double buffered, so the mapped memory the frame landed in
+   alternates: handing that out means the caller is given a different pointer
+   every frame for what is, to it, the same image. Anything that keeps work
+   against the buffer it was given -- a canvas that uploads the image it is
+   drawing, say -- then redoes that work on every frame and on every buffer,
+   and never hits what it cached. Copying two megabytes costs a fifth of a
+   millisecond; in ae3d's own editor, not copying cost a hundred and fifty. */
+static unsigned char *g_readback_copy = NULL;
+static size_t g_readback_copy_size = 0;
+
 void *ae3d_vk_offscreen_pixels(void) {
+    size_t needed;
+
     if (!vk.offscreen) return NULL;
     if (vk.readback_frame < 0) return NULL;
     ae3d_vkWaitForFences(vk.device, 1, &vk.in_flight[vk.readback_frame], VK_TRUE, UINT64_MAX);
-    return vk.readback_mapped[vk.readback_frame];
+
+    needed = (size_t)vk.readback_width * (size_t)vk.readback_height * 4u;
+    if (needed > g_readback_copy_size) {
+        free(g_readback_copy);
+        g_readback_copy = (unsigned char *)malloc(needed);
+        g_readback_copy_size = g_readback_copy ? needed : 0;
+    }
+    if (!g_readback_copy) return vk.readback_mapped[vk.readback_frame];
+
+    memcpy(g_readback_copy, vk.readback_mapped[vk.readback_frame], needed);
+    return g_readback_copy;
 }
 
 int ae3d_vk_offscreen_width(void) { return vk.readback_width; }
@@ -3099,6 +3160,10 @@ void ae3d_vk_free_mesh(int handle) {
 
 void ae3d_vk_shutdown(void) {
     unsigned i;
+
+    free(g_readback_copy);
+    g_readback_copy = NULL;
+    g_readback_copy_size = 0;
 
     if (!vk.ready) return;
     ae3d_vkDeviceWaitIdle(vk.device);

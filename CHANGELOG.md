@@ -664,6 +664,26 @@ First working engine.
   framed their subject in the bottom third. `water` is left alone: its camera
   looks at a horizon on purpose.
 
+### Continuous integration
+
+- A suite, example or benchmark that hangs now fails the step by name. The
+  Linux leg held a runner for three and a half hours with nothing in the log to
+  say where it had stopped, and the job had no limit of its own to end it. Each
+  run is bounded where coreutils' `timeout` exists, and the workflow job stops
+  at 45 minutes against a whole run that takes twenty on the slowest platform.
+
+### Ownership
+
+- The engine borrows a model, a player borrows its clip, and the assets module
+  keeps a record of where each loaded model came from. That last one kept every
+  model it had ever described reachable, which hid the fact that nothing was
+  freeing them: `assets.provenance_release` ends the table, `provenance_forget`
+  drops one record when its model dies, and the suites and examples that load a
+  manifest now release what they made. The leak check reads the same on this
+  branch as on main.
+- `agent.context_free` frees the queue of reads still waiting on a frame. A
+  program that stopped mid-exchange lost the queue and everything in it.
+
 ### Editor
 
 - More than one object can be selected. A click selects one, shift or command

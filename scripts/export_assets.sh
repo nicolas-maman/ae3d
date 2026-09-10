@@ -45,18 +45,20 @@ echo "export_assets: using $BLENDER_BIN"
 if [ $# -eq 0 ]; then
     "$0" tests/fixtures/spin.blend tests/fixtures/exported || exit 1
     "$0" resources/blender/showcase.blend resources/blender/showcase || exit 1
+    "$0" resources/blender/zombie_street.blend resources/blender/zombie_street || exit 1
     exit 0
 fi
 
 SOURCE="$1"
 OUT="${2:?usage: export_assets.sh [<file.blend> <out-directory>]}"
 
-# The .blend files are generated, not committed: a .blend is a file nobody can
-# review and nobody can regenerate when Blender changes it.
+# The .blend files are committed; these builders are how they are authored, and
+# are only reached when one is missing.
 if [ ! -f "$SOURCE" ]; then
     case "$SOURCE" in
         tests/fixtures/spin.blend)        builder=tools/blender/make_fixture.py ;;
         resources/blender/showcase.blend) builder=tools/blender/make_showcase.py ;;
+        resources/blender/zombie_street.blend) builder=tools/blender/make_zombie_street.py ;;
         *)                                builder="" ;;
     esac
     if [ -n "$builder" ]; then

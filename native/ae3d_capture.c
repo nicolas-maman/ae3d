@@ -2,6 +2,7 @@
 #include "ae3d_glapi.h"
 
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 
 typedef struct {
@@ -89,6 +90,10 @@ int ae3d_capture_region(int x, int y, int width, int height,
     long long sum[4] = {0, 0, 0, 0};
     long long covered = 0;
     long long total;
+    double luma_sum = 0.0;
+    double luma_squares = 0.0;
+    int luma_low = 255;
+    int luma_high = 0;
     int row, column;
     int br = (background >> 24) & 0xFF;
     int bg = (background >> 16) & 0xFF;
@@ -110,10 +115,15 @@ int ae3d_capture_region(int x, int y, int width, int height,
             if (dr < 0) dr = -dr;
             if (dg < 0) dg = -dg;
             if (db < 0) db = -db;
+            int luma = (299 * (int)p[0] + 587 * (int)p[1] + 114 * (int)p[2]) / 1000;
             sum[0] += p[0];
             sum[1] += p[1];
             sum[2] += p[2];
             sum[3] += p[3];
+            luma_sum += (double)luma;
+            luma_squares += (double)luma * (double)luma;
+            if (luma < luma_low) luma_low = luma;
+            if (luma > luma_high) luma_high = luma;
             if (dr > tolerance || dg > tolerance || db > tolerance) covered++;
         }
     }
@@ -124,6 +134,14 @@ int ae3d_capture_region(int x, int y, int width, int height,
     out[3] = (double)sum[3] / (double)total / 255.0;
     out[4] = (double)covered / (double)total;
     out[5] = (double)total;
+
+    {
+        double mean = luma_sum / (double)total;
+        double variance = luma_squares / (double)total - mean * mean;
+        if (variance < 0.0) variance = 0.0;
+        out[6] = sqrt(variance) / 255.0;
+        out[7] = (double)(luma_high - luma_low) / 255.0;
+    }
     return 1;
 }
 

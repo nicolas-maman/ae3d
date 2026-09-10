@@ -15,26 +15,30 @@ import ae3d.loader
 
 exports (
     Entry, Manifest,
-    manifest_load, manifest_free, manifest_count, manifest_find, manifest_find_by_object, manifest_source, manifest_blender,
+    manifest_load, manifest_free, manifest_count, manifest_entry, manifest_find, manifest_find_by_object, manifest_source, manifest_blender,
     manifest_warning_count, entry_id, entry_material, entry_animation,
     entry_vertices, entry_triangles,
-    entry_load_model, entry_load_clip,
+    entry_load_model, entry_load_clip, entry_parent, entry_object, manifest_load_scene,
     clip_load, clip_reference_error, last_error,
     Provenance, provenance_record, provenance_for, provenance_by_id,
     provenance_by_object, provenance_model,
     provenance_id, provenance_object, provenance_source, provenance_mesh_file,
     provenance_animation_file, provenance_expected_vertices,
-    provenance_expected_triangles
+    provenance_expected_triangles, provenance_forget, provenance_release
 )
 
 struct Entry {
     id: string
     object: string
+    parent: string
     mesh: string
     material: string
     animation: string
     vertices: int
     triangles: int
+    position: Vec3
+    rotation: Quat
+    scale: Vec3
 }
 
 struct Warning {
@@ -142,9 +146,31 @@ manifest_load(path: string) -> *Manifest {
             e.object = text_field(node, "object")
             e.vertices = int_field(node, "vertices", 0)
             e.triangles = int_field(node, "triangles", 0)
+            e.parent = text_field(node, "parent")
             e.mesh = ""
             e.material = ""
             e.animation = ""
+            e.position = core.vec3(0.0, 0.0, 0.0)
+            e.rotation = core.quat_ident()
+            e.scale = core.vec3(1.0, 1.0, 1.0)
+            transform = json.object_get_raw(node, "transform")
+            if transform != null {
+                location = json.object_get_raw(transform, "location")
+                rotation = json.object_get_raw(transform, "rotation")
+                scale = json.object_get_raw(transform, "scale")
+                if location != null {
+                    e.position = core.vec3(component(location, 0), component(location, 1),
+                                           component(location, 2))
+                }
+                if rotation != null {
+                    e.rotation = core.quat(component(rotation, 0), component(rotation, 1),
+                                           component(rotation, 2), component(rotation, 3))
+                }
+                if scale != null {
+                    e.scale = core.vec3(component(scale, 0), component(scale, 1),
+                                        component(scale, 2))
+                }
+            }
             files = json.object_get_raw(node, "files")
             if files != null {
                 e.mesh = text_field(files, "mesh")
@@ -183,6 +209,12 @@ manifest_free(m: *Manifest) {
         list.free(m.warnings)
     }
     heap.free(m)
+}
+
+manifest_entry(m: *Manifest, index: int) -> *Entry {
+    if m == null { return null }
+    if index < 0 || index >= list.size(m.entries) { return null }
+    return list.get_raw(m.entries, index) as *Entry
 }
 
 manifest_count(m: *Manifest) -> int {
@@ -236,6 +268,13 @@ entry_id(e: *Entry) -> string {
     return e.id
 }
 
+// The name the object had in Blender, which is what a person or an agent will
+// call it: the id is a hash, and nobody types a hash.
+entry_object(e: *Entry) -> string {
+    if e == null { return "" }
+    return e.object
+}
+
 
 
 entry_material(e: *Entry) -> string {
@@ -271,9 +310,65 @@ entry_load_model(m: *Manifest, e: *Entry) -> *Model {
         return null
     }
     core.model_set_name(model, e.object)
+    // The mesh is written in its own space, so this is where the object stops
+    // being a shape and becomes a thing standing somewhere.
+    core.model_set_position(model, e.position.x, e.position.y, e.position.z)
+    core.model_set_rotation(model, e.rotation)
+    core.model_set_scale(model, e.scale.x, e.scale.y, e.scale.z)
     provenance_record(model, e.id, e.object, m.source, e.mesh, e.animation,
                       e.vertices, e.triangles)
     return model
+}
+
+entry_parent(e: *Entry) -> string {
+    if e == null { return "" }
+    return e.parent
+}
+
+// Every object in the manifest, loaded, placed, and hung off whatever it was
+// hung off in Blender. The answer is in manifest order, so the caller can walk
+// the entries and the models together to bind the clips.
+//
+// Parenting is a second pass because a child can be named before its parent
+// is: the manifest is sorted by object name, not by depth.
+manifest_load_scene(m: *Manifest) -> ptr {
+    models = list.new()
+    if m == null { return models }
+
+    count = list.size(m.entries)
+    i = 0
+    while i < count {
+        e = list.get_raw(m.entries, i) as *Entry
+        list.add_raw(models, entry_load_model(m, e) as ptr)
+        i = i + 1
+    }
+
+    i = 0
+    while i < count {
+        e = list.get_raw(m.entries, i) as *Entry
+        model = list.get_raw(models, i) as *Model
+        if model != null && e.parent != "" {
+            parent = find_model(m, models, e.parent)
+            if parent == null {
+                set_error("no parent called ", e.parent)
+            } else {
+                core.model_set_parent(model, parent)
+            }
+        }
+        i = i + 1
+    }
+    return models
+}
+
+find_model(m: *Manifest, models: ptr, name: string) -> *Model {
+    count = list.size(m.entries)
+    i = 0
+    while i < count {
+        e = list.get_raw(m.entries, i) as *Entry
+        if e.object == name { return list.get_raw(models, i) as *Model }
+        i = i + 1
+    }
+    return null
 }
 
 entry_load_clip(m: *Manifest, e: *Entry) -> *Clip {
@@ -370,11 +465,44 @@ struct Provenance {
     expected_triangles: int
 }
 
+// A record outlives the manifest it came from: every caller frees the manifest
+// as soon as it has its models, and the trace runs long after. So the records
+// live here rather than in the Manifest, and the program that loaded them says
+// when they are done with `provenance_release`. A program that never loads a
+// manifest never allocates the table.
 var g_provenance: ptr = null
 
 provenance_table() -> ptr {
     if g_provenance == null { g_provenance = list.new() }
     return g_provenance
+}
+
+provenance_forget(m: *Model) {
+    if m == null || g_provenance == null { return }
+    i = 0
+    count = list.size(g_provenance)
+    while i < count {
+        p = list.get_raw(g_provenance, i) as *Provenance
+        if p != null && p.model == m {
+            list.remove(g_provenance, i)
+            heap.free(p)
+            return
+        }
+        i = i + 1
+    }
+}
+
+provenance_release() {
+    if g_provenance == null { return }
+    i = 0
+    count = list.size(g_provenance)
+    while i < count {
+        p = list.get_raw(g_provenance, i) as *Provenance
+        if p != null { heap.free(p) }
+        i = i + 1
+    }
+    list.free(g_provenance)
+    g_provenance = null
 }
 
 provenance_record(m: *Model, id: string, object: string, source: string,
