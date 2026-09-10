@@ -311,7 +311,8 @@ int  ae3d_capture_height(void);
 int  ae3d_capture_pixel(int x, int y, double *out);
 int  ae3d_capture_region(int x, int y, int width, int height,
                          int background, int tolerance, double *out);
-int  ae3d_capture_grid(int columns, int rows, int background, int tolerance,
+int  ae3d_capture_grid(int left, int top, int width, int height,
+                       int columns, int rows, int background, int tolerance,
                        double *out);
 int  ae3d_capture_hold_reference(void);
 int  ae3d_capture_diff(int tolerance, double *out);

@@ -60,7 +60,7 @@ interleaved with the first.
 | `frame.capture` |  | Read the finished frame into the engine. Answers with its size once it is there. |
 | `frame.pixel` | `x, y` | One pixel of the captured frame as r, g, b, a and hex. |
 | `frame.region` | `x, y, width, height, [background], [tolerance]` | Mean colour, coverage, and the luminance spread over a rectangle. A flat surface has a stddev near zero; stipple and shadow acne do not. |
-| `frame.grid` | `[columns], [rows], [background], [tolerance]` | The whole frame as a grid of cells, each with its mean colour and how much of it is not the background. One answer instead of a round trip a pixel, which is what makes a picture something an agent can read. |
+| `frame.grid` | `[x], [y], [width], [height], [columns], [rows], [background], [tolerance]` | A window of the frame as a grid of cells, each with its mean colour and how much of it is not the background; the whole frame by default. One answer instead of a round trip a pixel, which is what makes a picture something an agent can read. Given a window no larger than the grid is fine, every cell is one pixel. |
 | `frame.hold` |  | Keep the captured frame as the reference frame.diff compares against. |
 | `frame.diff` | `[tolerance]` | Changed pixel count, fraction and largest channel delta against the held reference. |
 | `world` |  | Every entity and the relations between them: blend object, asset, model, mesh, clip, light, camera. One query instead of joining four. |
