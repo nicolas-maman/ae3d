@@ -119,6 +119,9 @@ case "$OS" in
         UI_SOURCES="$UI_ROOT/backend/aether_ui_gtk4.c $UI_ROOT/backend/aether_ui_sni.c $UI_ROOT/backend/aether_ui_test_server.c $UI_ROOT/backend/aether_ui_system_extras.c"
         UI_FLAGS="$(pkg-config --cflags gtk4)"
         PLATFORM_LIBS="$(pkg-config --libs gtk4) -ldl -lm -lpthread"
+        # The editor loads behaviours that call back into it, and on ELF an
+        # executable's symbols are not in its dynamic table unless it says so.
+        LINK_EXTRA="-Wl,--export-dynamic"
         NATIVE_EXTRA=""
         ;;
     MINGW*|MSYS*|CYGWIN*|Windows_NT)
@@ -171,6 +174,7 @@ aetherc "$SOURCE" "$GEN"
 
 "$CC" $CFLAGS $UI_FLAGS "$GEN" $UI_SOURCES $OBJ_DIR/*.o \
     $AETHER_COMPILE_FLAGS $AETHER_LIBS $GLFW_LIBS $ZLIB_LIBS $PLATFORM_LIBS \
+    ${LINK_EXTRA:-} \
     -o "$OUT"
 
 echo "built: $OUT"

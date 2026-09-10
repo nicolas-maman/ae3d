@@ -355,6 +355,28 @@ int ae3d_agent_start(void) {
     return 1;
 }
 
+/* Wake a thread parked in accept(), by giving it the connection it is waiting
+   for. Closing the listening socket does not do this on Linux: the descriptor
+   goes and the blocked accept stays blocked, so the join below waited for a
+   thread that was never going to return -- forever on POSIX, and for the two
+   seconds Windows allows before it gives up. The connection lands in the
+   backlog whether or not the thread has reached accept yet, so there is no
+   window this can be called in where it does not work. */
+static void ae3d_agent_wake_listener(void) {
+    struct sockaddr_in address;
+    ae3d_socket waker;
+
+    if (g_listener == AE3D_INVALID_SOCKET) return;
+    waker = socket(AF_INET, SOCK_STREAM, 0);
+    if (waker == AE3D_INVALID_SOCKET) return;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons((unsigned short)g_port);
+    connect(waker, (struct sockaddr *)&address, sizeof(address));
+    ae3d_close_socket(waker);
+}
+
 void ae3d_agent_stop(void) {
     ae3d_socket client;
 
@@ -362,6 +384,7 @@ void ae3d_agent_stop(void) {
     g_active = 0;
     g_stopping = 1;
 
+    ae3d_agent_wake_listener();
     if (g_listener != AE3D_INVALID_SOCKET) {
         ae3d_close_socket(g_listener);
         g_listener = AE3D_INVALID_SOCKET;

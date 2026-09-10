@@ -88,14 +88,28 @@ def project_uvs(bm, repeats_per_metre):
                               position[second] * repeats_per_metre)
 
 
-def block(name, low, high, surface, repeats=0.5, bevel=0.0):
-    """A box between two corners, in the space of the object that carries it."""
+def block(name, low, high, surface, repeats=0.5, bevel=0.0, taper=1.0):
+    """A box between two corners, in the space of the object that carries it.
+
+    A limb is built from its own joint outwards, so the high end of the box is
+    the joint it hangs from and the low end is the joint it carries. taper
+    scales the high end, which is what makes an arm thicker at the shoulder
+    than at the elbow and read as an arm rather than as a length of timber.
+    """
     bm = bmesh.new()
+    mid_x = (low[0] + high[0]) * 0.5
+    mid_y = (low[1] + high[1]) * 0.5
+
+    def far(x, y):
+        return (mid_x + (x - mid_x) * taper, mid_y + (y - mid_y) * taper)
+
+    fx0, fy0 = far(low[0], low[1])
+    fx1, fy1 = far(high[0], high[1])
     corners = [
         (low[0], low[1], low[2]), (high[0], low[1], low[2]),
         (high[0], high[1], low[2]), (low[0], high[1], low[2]),
-        (low[0], low[1], high[2]), (high[0], low[1], high[2]),
-        (high[0], high[1], high[2]), (low[0], high[1], high[2]),
+        (fx0, fy0, high[2]), (fx1, fy0, high[2]),
+        (fx1, fy1, high[2]), (fx0, fy1, high[2]),
     ]
     verts = [bm.verts.new(corner) for corner in corners]
     for indices in ((0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4),
@@ -204,21 +218,27 @@ def build_zombie(parts, surfaces):
     skin = surfaces["skin"]
     cloth = surfaces["cloth"]
 
-    hips = block("Zombie_Hips", (-0.16, -0.17, -0.11), (0.16, 0.17, 0.15),
-                 cloth, repeats=3.0, bevel=0.03)
+    hips = block("Zombie_Hips", (-0.16, -0.175, -0.11), (0.16, 0.175, 0.15),
+                 cloth, repeats=3.0, bevel=0.03, taper=0.86)
     hips.location = (WALK_START_X, 0.0, 0.95)
     parts["Zombie_Hips"] = hips
 
-    spine = block("Zombie_Spine", (-0.19, -0.145, -0.06), (0.19, 0.145, 0.46),
-                  cloth, repeats=3.0, bevel=0.04)
+    spine = block("Zombie_Spine", (-0.155, -0.125, -0.06), (0.155, 0.125, 0.46),
+                  cloth, repeats=3.0, bevel=0.04, taper=1.28)
     spine.parent = hips
     spine.location = (0.0, 0.0, 0.12)
     parts["Zombie_Spine"] = spine
 
+    neck = block("Zombie_Neck", (-0.062, -0.062, -0.03), (0.062, 0.062, 0.10),
+                 skin, repeats=6.0, bevel=0.02, taper=0.92)
+    neck.parent = spine
+    neck.location = (0.0, 0.0, 0.42)
+    parts["Zombie_Neck"] = neck
+
     head = block("Zombie_Head", (-0.115, -0.10, -0.04), (0.115, 0.10, 0.21),
-                 skin, repeats=4.0, bevel=0.045)
-    head.parent = spine
-    head.location = (0.0, 0.0, 0.48)
+                 skin, repeats=4.0, bevel=0.045, taper=0.88)
+    head.parent = neck
+    head.location = (0.0, 0.0, 0.06)
     parts["Zombie_Head"] = head
 
     jaw = block("Zombie_Jaw", (-0.10, -0.075, -0.06), (0.12, 0.075, 0.0),
@@ -243,24 +263,26 @@ def build_zombie(parts, surfaces):
         socket.location = (0.105, y, 0.115)
         parts["Zombie_Eye" + side] = socket
 
-    for side, y in (("L", 0.235), ("R", -0.235)):
+    # Inside the chest, not beside it: a shoulder level with the edge of the
+    # torso opens a gap the moment the arm swings.
+    for side, y in (("L", 0.196), ("R", -0.196)):
         upper = block("Zombie_ArmUpper" + side,
-                      (-0.058, -0.058, -0.30), (0.058, 0.058, 0.06),
-                      cloth, repeats=4.0, bevel=0.025)
+                      (-0.055, -0.055, -0.30), (0.055, 0.055, 0.075),
+                      cloth, repeats=4.0, bevel=0.025, taper=1.22)
         upper.parent = spine
         upper.location = (0.0, y, 0.37)
         parts["Zombie_ArmUpper" + side] = upper
 
         lower = block("Zombie_ArmLower" + side,
                       (-0.05, -0.05, -0.27), (0.05, 0.05, 0.055),
-                      skin, repeats=4.5, bevel=0.022)
+                      skin, repeats=4.5, bevel=0.022, taper=1.26)
         lower.parent = upper
         lower.location = (0.0, 0.0, -0.29)
         parts["Zombie_ArmLower" + side] = lower
 
         hand = block("Zombie_Hand" + side,
                      (-0.058, -0.035, -0.15), (0.058, 0.035, 0.04),
-                     skin, repeats=6.0, bevel=0.02)
+                     skin, repeats=6.0, bevel=0.02, taper=1.18)
         hand.parent = lower
         hand.location = (0.0, 0.0, -0.26)
         parts["Zombie_Hand" + side] = hand
@@ -268,14 +290,14 @@ def build_zombie(parts, surfaces):
     for side, y in (("L", 0.105), ("R", -0.105)):
         thigh = block("Zombie_LegUpper" + side,
                       (-0.078, -0.078, -0.40), (0.078, 0.078, 0.07),
-                      cloth, repeats=3.5, bevel=0.03)
+                      cloth, repeats=3.5, bevel=0.03, taper=1.34)
         thigh.parent = hips
         thigh.location = (0.0, y, -0.06)
         parts["Zombie_LegUpper" + side] = thigh
 
         shin = block("Zombie_LegLower" + side,
                      (-0.066, -0.066, -0.39), (0.066, 0.066, 0.06),
-                     cloth, repeats=3.5, bevel=0.028)
+                     cloth, repeats=3.5, bevel=0.028, taper=1.28)
         shin.parent = thigh
         shin.location = (0.0, 0.0, -0.39)
         parts["Zombie_LegLower" + side] = shin
