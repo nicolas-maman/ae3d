@@ -27,6 +27,7 @@ exports (
     engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
     engine_set_skybox, engine_load_texture,
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
+    engine_render_ms, engine_render_frames,
     engine_set_debug, engine_set_frustum_culling, engine_set_face_culling,
     engine_on_update, engine_on_fixed_update, engine_on_render, engine_on_pose,
     engine_set_user_data, engine_user_data,
@@ -81,6 +82,12 @@ struct Engine {
     fixed_step: float
     fixed_accumulator: float
     delta_time: float
+    // What the frames drawn so far cost to submit, and how many there were.
+    // The GPU is not waited on, so this is the CPU's half: the scene walk, the
+    // culling, the uniforms and the draw calls, which is the half a scene
+    // grows out of and the half a benchmark on a shared runner can trust.
+    render_seconds: float
+    render_frames: int
     frame_count: int
     fps: float
     fps_window: float
@@ -371,6 +378,18 @@ engine_delta_time(e: *Engine) -> float { return e.delta_time }
 engine_frame_count(e: *Engine) -> int { return e.frame_count }
 engine_fps(e: *Engine) -> float { return e.fps }
 
+// The mean cost of submitting a frame, in milliseconds. Answers zero before
+// anything has been drawn.
+engine_render_ms(e: *Engine) -> float {
+    if e == null || e.render_frames == 0 { return 0.0 }
+    return e.render_seconds * 1000.0 / (e.render_frames * 1.0)
+}
+
+engine_render_frames(e: *Engine) -> int {
+    if e == null { return 0 }
+    return e.render_frames
+}
+
 engine_set_light(e: *Engine, light: *Light) { e.light = light as ptr }
 
 // The key light is the one the scene is lit and shadowed by; these are the
@@ -487,6 +506,7 @@ pump_agent(e: *Engine) {
     c.backend = e.backend_name
     c.frame_count = e.frame_count
     c.fps = e.fps
+    c.render_ms = engine_render_ms(e)
     c.delta = e.delta_time
     c.width = e.width
     c.height = e.height
@@ -664,7 +684,10 @@ engine_loop(e: *Engine) {
 
         if e.on_pose != null { e.on_pose(e.user_data) }
 
+        render_started = platform.time()
         e.backend_render(e.backend_state, cam, e.light)
+        e.render_seconds = e.render_seconds + (platform.time() - render_started)
+        e.render_frames = e.render_frames + 1
 
         if e.on_render != null { e.on_render(e.user_data, delta) }
 

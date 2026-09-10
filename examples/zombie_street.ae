@@ -92,6 +92,7 @@ main() {
         engine.engine_free(e)
         return
     }
+    report_cost(e)
     engine.engine_free(e)
     // After the engine: freeing the renderer is what releases the GPU handles
     // the models were given, and the registry is what frees the players that
@@ -99,6 +100,36 @@ main() {
     free_scene()
     assets.provenance_release()
     free_lamps()
+}
+
+// What this scene costs. It is the scene ae3d is demonstrated with, so it is
+// also the one the engine is measured on, and a demo whose cost nobody reports
+// is a demo that gets slower.
+//
+// The number is the CPU's half of a frame: the scene walk, the culling, the
+// pose solve, the uniforms and the draw calls. The GPU is not waited on, which
+// is what makes this the half that means the same thing on a workstation and
+// on a shared runner drawing through llvmpipe.
+report_cost(e: *Engine) {
+    frames = engine.engine_render_frames(e)
+    if frames == 0 { return }
+    renderer = engine.engine_gl_renderer(e)
+    draws = 0
+    if renderer != null { draws = gl.renderer_draw_calls(renderer as *GLRenderer) }
+    println("zombie_street: ${engine.engine_render_ms(e)} ms per frame over ${frames} frames, ${draws} draws, ${triangles()} triangles")
+}
+
+triangles() -> int {
+    total = 0
+    if g_models == null { return total }
+    i = 0
+    count = list.size(g_models)
+    while i < count {
+        model = list.get_raw(g_models, i) as *Model
+        if model != null { total = total + core.mesh_index_count(model.mesh) / 3 }
+        i = i + 1
+    }
+    return total
 }
 
 free_scene() {

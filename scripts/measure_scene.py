@@ -214,9 +214,10 @@ def main(argv):
     with engine:
         stats = engine("frame.stats")
         render = stats["render"]
-        print("%s, %dx%d, %d draws, shadows %s, fog %s, %d lights"
+        print("%s, %dx%d, %d draws, shadows %s, fog %s, %d lights, %.2f ms a frame"
               % (stats["backend"], stats["width"], stats["height"], stats["draw_calls"],
-                 render["shadows"], render["fog"], render["lights"]))
+                 render["shadows"], render["fog"], render["lights"],
+                 stats.get("render_ms", 0.0)))
 
         engine("frame.pause")
         engine("anim.set", time=3.35)
