@@ -187,13 +187,30 @@ only way to tell whether a panel is where it should be.
 
 ## How the viewport works
 
-aether-ui owns the window and every widget, and has no GPU surface
-([aether-ui#92](https://github.com/aether-lang-dev/aether-ui/issues/92)). The
-scene is drawn into a framebuffer object with no window of its own, read back,
-and blitted into a canvas. The readback is pipelined through two pixel buffers so
-it never stalls, and the viewport only redraws when something in it changed.
+aether-ui hosts a real GL context
+([aether-ui#92](https://github.com/aether-lang-dev/aether-ui/issues/92)), so the
+scene is drawn straight into it. The viewport is two layers: the GPU view
+underneath, and a canvas over it carrying the gizmo. The canvas keeps every
+event it ever had, so orbiting, picking and dragging are unchanged; what it no
+longer carries is a copy of the scene.
 
-The remaining cost is the blit: the canvas copies the whole image on every call
-([aether-ui#102](https://github.com/aether-lang-dev/aether-ui/issues/102)), which
-is more than reading the frame off the GPU costs. When a GPU surface exists, both
-the readback and the copy go away.
+That is worth more than the readback it saves. A canvas can only ever hold the
+canvas's own point size, so the blit path rendered the scene at 880x622 on a
+display whose viewport is 1760x1244 pixels and let the window scale it up. The
+GPU view is given the framebuffer size, so the picture is the screen's.
+
+Two sizes follow from that, and mixing them is a bug the compiler cannot catch:
+the renderer and the camera work in the framebuffer's pixels, and the gizmo is
+drawn and picked in the canvas's points.
+
+Where there is no GPU surface to draw on, the scene is drawn into a framebuffer
+of its own, read back and blitted into that same canvas, which is what every
+run did before and what a Vulkan run still does: Vulkan cannot draw into a GL
+context. `ci.sh` reads `viewport_path` out of the editor's report and fails an
+OpenGL run on macOS that took the blit, because falling back is invisible in a
+picture. It checks the snapshot's size against the size the scene was rendered
+at for the same reason.
+
+The one thing the GPU path does not carry is the gizmo in a snapshot: a
+snapshot is the frame the renderer produced, and the gizmo is on the canvas
+above it.

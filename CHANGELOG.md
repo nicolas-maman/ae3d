@@ -2,6 +2,33 @@
 
 ## [current]
 
+### The viewport
+
+- The scene is drawn straight into the window's own GL context. aether-ui had
+  no GPU surface when the editor was written, so the scene went into a
+  framebuffer of its own, was read back to the CPU every frame and blitted into
+  a canvas. It is now a GPU view with the gizmo canvas over it: the canvas keeps
+  every event it had, so orbiting, picking and dragging are unchanged, and what
+  it no longer carries is a copy of the scene.
+
+  The resolution is the bigger half of it. A canvas holds the canvas's own point
+  size, so the blit path rendered the viewport at 880x622 on a display whose
+  viewport is 1760x1244 pixels and let the window scale it up. The picture is
+  the screen's now.
+
+  Two sizes follow, and mixing them is a bug nothing else would catch: the
+  renderer and the camera work in the framebuffer's pixels, the gizmo is drawn
+  and picked in the canvas's points.
+
+  Where there is no GPU surface, and for Vulkan, which cannot draw into a GL
+  context, the old path is what runs. `ci.sh` reads `viewport_path` out of the
+  editor's report and fails an OpenGL run on macOS that took it, because
+  falling back is invisible in a picture, and checks the snapshot's size against
+  the size the scene was rendered at for the same reason.
+
+  A snapshot on this path is the frame the renderer produced, so it no longer
+  carries the gizmo drawn on the canvas above it.
+
 ### Building
 
 - Building the editor first in a clean checkout failed on zlib. The editor and

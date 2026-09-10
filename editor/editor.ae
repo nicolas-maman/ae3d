@@ -1,11 +1,12 @@
 // ae3d editor.
 //
 // The chrome is aether-ui: it owns the real window, the panels, the hierarchy
-// list and every control. The viewport is a GPU render composited into an
-// aether-ui canvas, because aether-ui has no GPU surface of its own
-// (aether-lang-dev/aether-ui#92): the scene is drawn into a framebuffer object
-// with no window, read back, and blitted each frame. When a GPU surface exists,
-// the readback is the only part that goes away.
+// list and every control. The viewport is a GPU view aether-ui hosts
+// (aether-lang-dev/aether-ui#92) with a canvas over it for the gizmo, so the
+// scene is drawn straight into the window's own context at the framebuffer's
+// size. Where there is no GPU surface, and for Vulkan, which cannot draw into a
+// GL context, the scene is drawn into a framebuffer of its own, read back and
+// blitted into that same canvas, which is what every run did before.
 //
 //   ./editor/build_editor.sh && ./build/ae3d_editor
 
@@ -119,8 +120,27 @@ var g_gizmo_angle = 0.0
 var g_gizmo_turned = 0.0
 
 var g_canvas = 0
+// The GPU view the scene is drawn into, or 0 when it is drawn into a
+// framebuffer of the editor's own and blitted into the canvas above.
+var g_gpu = 0
+// Decided before the window, because the two paths build the renderer at
+// different moments: the editor's own context exists straight away, and
+// aether-ui's does not exist until the view is realised.
+var g_gpu_path = false
+// Whether the frame being finished was one the agent is holding still, so the
+// render callback can tell what the timer already worked out.
+var g_held = false
+// The size the scene is rendered at, in PIXELS. On the GPU path that is the
+// framebuffer aether-ui hands over, which on a HiDPI screen is twice the
+// canvas: the blit path could only ever render at the canvas's own point size,
+// so the viewport was half resolution there and is not here.
 var g_view_w = 900
 var g_view_h = 620
+// The canvas over it, in POINTS. The gizmo is drawn and picked in these, and
+// mixing the two puts the handles at half the distance from the origin on a
+// HiDPI screen. Equal on the blit path, where the canvas is the framebuffer.
+var g_canvas_w = 900
+var g_canvas_h = 620
 
 var g_target: ptr = null
 var g_renderer: ptr = null
@@ -540,8 +560,10 @@ apply_preset(name: string) {
     say("${name} preset applied to ${list.size(g_models)} models")
 }
 
-// Vulkan renders offscreen on its own; OpenGL needs a context and a target to
-// render into, which is the only difference the editor sees between them.
+// Three ways in. Vulkan renders offscreen on its own. OpenGL on the GPU path
+// is handed a context that is already current and draws into its default
+// framebuffer, so it needs neither a context of its own nor a target. OpenGL on
+// the blit path makes both.
 start_renderer() -> bool {
     if g_vulkan {
         renderer = vk.renderer_new()
@@ -551,6 +573,19 @@ start_renderer() -> bool {
             return false
         }
         g_renderer = renderer as ptr
+        return true
+    }
+
+    if g_gpu != 0 {
+        gpu_renderer = gl.renderer_new()
+        gpu_backend = gl.backend(gpu_renderer)
+        // The context is aether-ui's and is current; renderer_init loads its
+        // entry points out of whatever that is, so it is told nothing about it.
+        if !core.backend_init(&gpu_backend, null, g_view_w, g_view_h) {
+            println("editor: the OpenGL backend would not initialise")
+            return false
+        }
+        g_renderer = gpu_renderer as ptr
         return true
     }
 
@@ -570,6 +605,20 @@ start_renderer() -> bool {
     g_target = offscreen.target_create(g_view_w, g_view_h)
     gl.renderer_set_target(renderer, g_target)
     return true
+}
+
+// What the renderer is set up with, once it exists. Its own function because
+// the two viewport paths build the renderer at different moments and both owe
+// it the same settings.
+configure_renderer() {
+    backend = viewport_backend()
+    // CRITICAL to keep in step with the canvas fill on the blit path: the
+    // canvas is painted this colour before the first frame arrives, and a
+    // mismatch shows as the viewport changing shade on startup.
+    core.backend_set_clear_color(&backend, VIEWPORT_R, VIEWPORT_G, VIEWPORT_B)
+    core.backend_set_post(&backend, g_fxaa, g_bloom, BLOOM_THRESHOLD, BLOOM_INTENSITY)
+    core.backend_set_shadows(&backend, true)
+    core.set_face_culling(true)
 }
 
 // Either renderer, reached the same way. The editor holds the renderer as a
@@ -625,6 +674,10 @@ pump_agent() {
             if pixels != null {
                 captured = agent.capture_adopt(pixels, vk.offscreen_width(), vk.offscreen_height())
             }
+        } else if g_gpu != 0 {
+            // Read from the framebuffer that has just been drawn. There is no
+            // copy of it on the CPU on this path, which is the point of it.
+            captured = agent.capture_frame(g_view_w, g_view_h)
         } else {
             pixels = gl.renderer_frame_pixels(g_renderer as *GLRenderer)
             if pixels != null {
@@ -650,10 +703,7 @@ pump_agent() {
     }
 
     if c.want_snapshot != "" {
-        // The canvas, not the framebuffer. What an agent means by a snapshot of
-        // the editor is what the editor is showing, which is what was blitted
-        // rather than whatever the renderer last produced.
-        ui.canvas_write_png(g_canvas, c.want_snapshot, g_view_w, g_view_h)
+        write_snapshot(c.want_snapshot)
         agent.answer_snapshot(c, c.want_snapshot, true)
         c.want_snapshot = ""
     }
@@ -1668,7 +1718,7 @@ pick_at(x: float, y: float) {
     cam = g_camera as *Camera
     if cam == null || g_models == null { return }
 
-    direction = raycast.screen_direction(cam, x, y, g_view_w, g_view_h)
+    direction = raycast.screen_direction(cam, x, y, g_canvas_w, g_canvas_h)
     nearest = raycast.miss()
     chosen = 0 - 1
 
@@ -1696,6 +1746,24 @@ pick_at(x: float, y: float) {
     }
 }
 
+// The canvas changed size, in points. On the blit path the canvas is the
+// framebuffer, so this is the render size too.
+resize_canvas(width: int, height: int) {
+    mark_dirty()
+    if width < 16 || height < 16 { return }
+    if width == g_canvas_w && height == g_canvas_h { return }
+    g_canvas_w = width
+    g_canvas_h = height
+    if g_gpu != 0 {
+        // The GPU view says what the framebuffer is; this one only says where
+        // the gizmo goes.
+        draw_frame()
+        return
+    }
+    resize_viewport(width, height)
+}
+
+// The framebuffer changed size, in pixels.
 resize_viewport(width: int, height: int) {
     mark_dirty()
     if width < 16 || height < 16 { return }
@@ -1710,9 +1778,15 @@ resize_viewport(width: int, height: int) {
     // frame while the window is being dragged.
     ui.canvas_clear(g_canvas)
 
+    core.camera_set_aspect(g_camera as *Camera, (width * 1.0) / (height * 1.0))
+    // CRITICAL: the GPU path lays the view out before it hands over a context,
+    // so this runs with no renderer behind it. viewport_backend would build a
+    // vtable of null pointers out of a null renderer and the first call through
+    // it jumps to zero.
+    if g_renderer == null { return }
+
     backend = viewport_backend()
     core.backend_update_viewport(&backend, width, height)
-    core.camera_set_aspect(g_camera as *Camera, (width * 1.0) / (height * 1.0))
     draw_frame()
 }
 
@@ -1799,6 +1873,7 @@ draw_frame() {
     // producing the frames an agent is holding it still in order to look at.
     held = false
     if g_agent_on { held = agent.is_paused(g_agent_ctx as *Context) }
+    g_held = held
 
     // Outside the held check: a frame the agent is holding is exactly when
     // someone is looking at one object and rebuilding the script on it, and a
@@ -1821,6 +1896,17 @@ draw_frame() {
     }
     g_dirty = false
 
+    // On the GPU path the scene is drawn by aether-ui, inside the one callback
+    // where its context is current. The canvas above it carries the gizmo and
+    // nothing else, so it is repainted here and the frame is asked for.
+    if g_gpu != 0 {
+        ui.canvas_clear(g_canvas)
+        draw_gizmo()
+        ui.canvas_redraw(g_canvas)
+        ui.gpuview_request_render(g_gpu)
+        return
+    }
+
     core.backend_render(&backend, g_camera as *Camera, g_light as *Light)
 
     pixels = core.backend_frame_pixels(&backend)
@@ -1839,21 +1925,50 @@ draw_frame() {
                                       pixels, g_view_w * g_view_h * 4)
     draw_gizmo()
     ui.canvas_redraw(g_canvas)
-    if !held { g_frames = g_frames + 1 }
+    frame_finished(&backend)
+}
 
-    update_stats(&backend)
+// The scene, drawn where aether-ui's context is current. Draw only, as the
+// toolkit asks: it presents afterwards, and a swap here would present twice.
+//
+// Everything that follows a frame happens here too rather than in the timer,
+// because a snapshot and an agent's capture are both reads of the framebuffer
+// that has just been drawn, and this is the only place it can be read from.
+render_viewport() {
+    if g_renderer == null { return }
+    backend = viewport_backend()
+    core.backend_render(&backend, g_camera as *Camera, g_light as *Light)
+    frame_finished(&backend)
+}
+
+// What a produced frame owes: the count, the bar, the agent, and the end of a
+// bounded run.
+frame_finished(backend: *Backend) {
+    if !g_held { g_frames = g_frames + 1 }
+
+    update_stats(backend)
 
     if g_agent_on { pump_agent() }
 
     if g_frame_limit > 0 && g_frames >= g_frame_limit && !g_reported {
         g_reported = true
-        if g_snapshot != "" {
-            ui.canvas_write_png(g_canvas, g_snapshot, g_view_w, g_view_h)
-        }
+        write_snapshot(g_snapshot)
         ui.timer_cancel(g_timer)
         report_state()
         ui.app_quit()
     }
+}
+
+// The frame as a PNG. On the GPU path that is the GL framebuffer, read where it
+// was drawn; on the blit path it is the canvas, which is what the editor is
+// actually showing and includes the gizmo over it.
+write_snapshot(path: string) {
+    if path == "" { return }
+    if g_gpu != 0 {
+        gl.snapshot(path, g_view_w, g_view_h)
+        return
+    }
+    ui.canvas_write_png(g_canvas, path, g_view_w, g_view_h)
 }
 
 // A scripted run of the edit paths, so undo and redo are checked by exercising
@@ -2224,6 +2339,17 @@ report_state() {
     if m != null { selected = core.text(m.name) }
 
     lines = string.concat("backend ", g_backend_name)
+    // Which of the two viewports drew this run. A blit where a GPU surface was
+    // available is a silent regression to reading the framebuffer back every
+    // frame, and it looks identical in a snapshot.
+    lines = string.concat(lines, "\nviewport_path ")
+    if g_gpu != 0 {
+        lines = string.concat(lines, "gpu")
+    } else if g_gpu_path {
+        lines = string.concat(lines, "gpu-unbuilt")
+    } else {
+        lines = string.concat(lines, "blit")
+    }
     lines = string.concat(lines, "\nmodels ")
     lines = string.concat(lines, string.from_int(list.size(g_models)))
     lines = string.concat(lines, "\nassets ")
@@ -3749,7 +3875,7 @@ gizmo_reach() -> float {
 }
 
 gizmo_project(p: Vec3) -> Vec4 {
-    return core.camera_world_to_screen(g_camera as *Camera, p, g_view_w, g_view_h)
+    return core.camera_world_to_screen(g_camera as *Camera, p, g_canvas_w, g_canvas_h)
 }
 
 // Distance from a point to a segment, the same test for hovering an axis and
@@ -4097,19 +4223,20 @@ main() {
         }
     }
 
-    if !start_renderer() { return }
+    // Vulkan cannot draw into a GL context, so it keeps the framebuffer of its
+    // own and the blit that shows it. Asked before the window because the
+    // answer decides how the window is built.
+    if !g_vulkan && ui.gpuview_available() == 1 { g_gpu_path = true }
 
-    backend = viewport_backend()
-    // CRITICAL to keep in step with the canvas fill below: the canvas is painted
-// this colour before the first frame arrives, and a mismatch shows as the
-// viewport changing shade on startup.
-    core.backend_set_clear_color(&backend, VIEWPORT_R, VIEWPORT_G, VIEWPORT_B)
-    core.backend_set_post(&backend, g_fxaa, g_bloom, BLOOM_THRESHOLD, BLOOM_INTENSITY)
-    core.backend_set_shadows(&backend, true)
+    // The blit path makes its own context, so the renderer can be built now.
+    // The GPU path's context arrives with the view, so it is built at realize.
+    if !g_gpu_path {
+        if !start_renderer() { return }
+        configure_renderer()
+    }
 
     g_camera = core.camera_new(g_view_w, g_view_h) as ptr
     g_light = core.light_sun(core.vec3(0.42, 0.82, 0.38)) as ptr
-    core.set_face_culling(true)
 
     sheet = theme()
 
@@ -4247,15 +4374,56 @@ main() {
         g_mode_hint = ui.text(viewport_bar, "W move   E rotate   R scale   F frame")
         ui.add_css_class(g_mode_hint, "stats")
 
-        g_canvas = ui.canvas_create(stage, g_view_w, g_view_h)
+        // Two layers where there is a GPU to draw on: the scene underneath,
+        // drawn by aether-ui's own context, and the canvas over it carrying the
+        // gizmo. The canvas keeps every event it ever had, so orbiting,
+        // picking and dragging are unchanged; what it no longer carries is a
+        // copy of the scene read back off the GPU every frame.
+        viewport_host = stage
+        if g_gpu_path {
+            layers = ui.zstack(stage)
+            ui.fill_width(layers)
+            ui.fill_height(layers)
+            viewport_host = layers
+
+            g_gpu = ui.gpuview_create(layers, g_view_w, g_view_h)
+            gpu_view = ui.gpuview_widget(g_gpu)
+            ui.fill_width(gpu_view)
+            ui.fill_height(gpu_view)
+
+            // The context is current here and nowhere earlier, so this is
+            // where the renderer is built and the scene it holds is filled.
+            ui.gpuview_on_realize(g_gpu) callback {
+                if start_renderer() {
+                    configure_renderer()
+                    build_scene()
+                    scan_assets()
+                    apply_orbit()
+                }
+            }
+            ui.gpuview_on_render(g_gpu) callback |_dt: float| {
+                render_viewport()
+            }
+            // PIXELS, not points, which is what the renderer wants and what
+            // makes this path sharper than the blit it replaces.
+            ui.gpuview_on_resize(g_gpu) callback |w: int, h: int| {
+                resize_viewport(w, h)
+            }
+        }
+
+        g_canvas = ui.canvas_create(viewport_host, g_view_w, g_view_h)
         ui.fill_width(g_canvas)
         ui.fill_height(g_canvas)
-        ui.canvas_fill_rect(g_canvas, 0.0, 0.0, g_view_w * 1.0, g_view_h * 1.0,
-                            VIEWPORT_R, VIEWPORT_G, VIEWPORT_B, 1.0)
-        ui.canvas_redraw(g_canvas)
+        // Only on the blit path. Over a GPU view this would paint the scene
+        // out, and the clear colour the renderer was given is the same one.
+        if g_gpu == 0 {
+            ui.canvas_fill_rect(g_canvas, 0.0, 0.0, g_view_w * 1.0, g_view_h * 1.0,
+                                VIEWPORT_R, VIEWPORT_G, VIEWPORT_B, 1.0)
+            ui.canvas_redraw(g_canvas)
+        }
 
         ui.canvas_on_resize(g_canvas) callback |w: float, h: float| {
-            resize_viewport(w as int, h as int)
+            resize_canvas(w as int, h as int)
         }
         // A press that never moves is a selection; a press that moves is an
         // orbit. Doing both makes the view lurch every time something is picked.
@@ -4561,9 +4729,13 @@ main() {
         }
 
         ui.apply_styles(0, sheet)
-        build_scene()
-        scan_assets()
-        apply_orbit()
+        // On the GPU path this happens at realize instead: the models go into
+        // a renderer that does not exist until aether-ui hands over a context.
+        if g_gpu == 0 {
+            build_scene()
+            scan_assets()
+            apply_orbit()
+        }
 
         g_timer = ui.timer(16) callback {
             draw_frame()
