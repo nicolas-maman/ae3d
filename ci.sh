@@ -420,6 +420,9 @@ else
     measured=$?
     if [ "$measured" -eq 0 ]; then
         pass "zombie_street (measured)"
+        # The first line carries what the scene costs, which is the number this
+        # scene exists to report and is worth having in the log of every run.
+        head -1 "$measure_log" | sed 's/^/        /'
     elif [ "$measured" -eq 3 ]; then
         # The scene stopped without complaining, which is the engine saying it
         # has nowhere to draw. A runner with a display is where this is asked.
