@@ -70,7 +70,7 @@ double ae3d_mesh_skin_weight(void *mesh, int i, int slot);
 double ae3d_mesh_surface_area(void *mesh, double sx, double sy, double sz);
 double ae3d_mesh_uv_area(void *mesh);
 double ae3d_mesh_extent(void *mesh, int axis);
-int    ae3d_mesh_distinct_normals(void *mesh, double tolerance);
+int    ae3d_mesh_distinct_planes(void *mesh, double tolerance);
 int    ae3d_mesh_vertex_count(void *mesh);
 int    ae3d_mesh_index_count(void *mesh);
 double ae3d_mesh_pos_x(void *mesh, int i);

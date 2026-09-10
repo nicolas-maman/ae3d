@@ -26,6 +26,7 @@ import bmesh
 import argparse
 import math
 import os
+import random
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -134,17 +135,296 @@ def block(name, low, high, surface, repeats=0.5, bevel=0.0, taper=1.0):
     return obj
 
 
+# How often a material repeats across a metre. Texel density is this times the
+# size of the image, and it is the number that decides whether a wall reads as
+# brick or as a photograph of brick seen from an inch away. One standard across
+# the street, so no two surfaces in a frame are textured to different ones.
+WALL_REPEATS = 0.84
+GROUND_REPEATS = 0.84
+GLASS_REPEATS = 1.7
+
+# A storey, and the opening in it. These are the numbers that decide whether a
+# street reads at the scale of a person: a window a person could climb through,
+# a door a person could walk through, a floor-to-floor height a person could
+# stand in.
+STOREY = 3.15
+WINDOW_W = 1.15
+WINDOW_H = 1.55
+SILL_UP = 0.95
+REVEAL = 0.24
+DOOR_W = 1.35
+DOOR_H = 2.45
+BAY = 2.6
+
+
+def _face(bm, corners):
+    bm.faces.new([bm.verts.new(corner) for corner in corners])
+
+
+def _slab(bm, low, high):
+    x0, y0, z0 = low
+    x1, y1, z1 = high
+    _face(bm, [(x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0)])
+    _face(bm, [(x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)])
+    _face(bm, [(x0, y0, z0), (x1, y0, z0), (x1, y0, z1), (x0, y0, z1)])
+    _face(bm, [(x0, y1, z0), (x1, y1, z0), (x1, y1, z1), (x0, y1, z1)])
+    _face(bm, [(x0, y0, z0), (x0, y1, z0), (x0, y1, z1), (x0, y0, z1)])
+    _face(bm, [(x1, y0, z0), (x1, y1, z0), (x1, y1, z1), (x1, y0, z1)])
+
+
+def _unit_uvs(bm):
+    """Every face mapped across the whole image, once.
+
+    A window is not tiled. What is behind the glass is a room, and a room that
+    repeats twice across one pane is a wallpaper pattern: the image has to land
+    on the pane exactly once, whatever size the pane is.
+    """
+    layer = bm.loops.layers.uv.verify()
+    for face in bm.faces:
+        normal = face.normal
+        axis = max(range(3), key=lambda i: abs(normal[i]))
+        first, second = [(1, 2), (0, 2), (0, 1)][axis]
+        lows = [min(loop.vert.co[a] for loop in face.loops) for a in (first, second)]
+        spans = [max(1e-6, max(loop.vert.co[a] for loop in face.loops) - lows[n])
+                 for n, a in enumerate((first, second))]
+        for loop in face.loops:
+            position = loop.vert.co
+            loop[layer].uv = ((position[first] - lows[0]) / spans[0],
+                              (position[second] - lows[1]) / spans[1])
+
+
+def _finish(bm, name, surface, repeats):
+    """Weld, face outwards, project and hand back an object."""
+    bmesh.ops.remove_doubles(bm, verts=list(bm.verts), dist=1e-5)
+    bmesh.ops.recalc_face_normals(bm, faces=list(bm.faces))
+    bm.normal_update()
+    if repeats > 0.0:
+        project_uvs(bm, repeats)
+    else:
+        _unit_uvs(bm)
+    mesh = bpy.data.meshes.new(name)
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.materials.append(surface)
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    return obj
+
+
+def _openings(width, base, height):
+    """Where the holes in a front go: windows by storey and bay, a door in the
+    middle of the ground floor.
+
+    Bays are laid out from the middle outwards rather than divided into the
+    width, so a wide building gets more windows and not wider ones. A window is
+    a size, not a fraction.
+    """
+    bays = max(1, int(width / BAY))
+    storeys = max(1, int((height - base - 0.6) / STOREY))
+    spacing = width / bays
+    holes = []
+    for storey in range(storeys):
+        floor = base + storey * STOREY
+        for bay in range(bays):
+            centre = -width * 0.5 + (bay + 0.5) * spacing
+            if storey == 0 and bay == bays // 2:
+                holes.append((centre - DOOR_W * 0.5, centre + DOOR_W * 0.5,
+                              base + 0.02, base + DOOR_H, True))
+                continue
+            low = floor + SILL_UP
+            holes.append((centre - WINDOW_W * 0.5, centre + WINDOW_W * 0.5,
+                          low, low + WINDOW_H, False))
+    return holes, storeys
+
+
+def _front(bm, x0, x1, z0, z1, sign, holes):
+    """The plane of a front, as a grid of quads with the holes left out, and
+    the reveal each hole is set back into."""
+    xs = sorted({x0, x1} | {v for hole in holes for v in hole[:2]})
+    zs = sorted({z0, z1} | {v for hole in holes for v in hole[2:4]})
+    for i in range(len(xs) - 1):
+        for j in range(len(zs) - 1):
+            cx = (xs[i] + xs[i + 1]) * 0.5
+            cz = (zs[j] + zs[j + 1]) * 0.5
+            if any(h[0] < cx < h[1] and h[2] < cz < h[3] for h in holes):
+                continue
+            _face(bm, [(xs[i], 0.0, zs[j]), (xs[i + 1], 0.0, zs[j]),
+                       (xs[i + 1], 0.0, zs[j + 1]), (xs[i], 0.0, zs[j + 1])])
+
+    back = sign * REVEAL
+    for hx0, hx1, hz0, hz1, _door in holes:
+        _face(bm, [(hx0, 0.0, hz0), (hx0, back, hz0), (hx0, back, hz1), (hx0, 0.0, hz1)])
+        _face(bm, [(hx1, 0.0, hz0), (hx1, back, hz0), (hx1, back, hz1), (hx1, 0.0, hz1)])
+        _face(bm, [(hx0, 0.0, hz0), (hx1, 0.0, hz0), (hx1, back, hz0), (hx0, back, hz0)])
+        _face(bm, [(hx0, 0.0, hz1), (hx1, 0.0, hz1), (hx1, back, hz1), (hx0, back, hz1)])
+
+
+def building(name, width, depth, height, base, surface, repeats, sign, trim,
+             glass, glow, rng):
+    """A terrace front: a mass, the holes in it, what frames them, what fills them.
+
+    Three objects rather than one, because the exporter writes the material an
+    object names and these are three materials. They are also three things: a
+    wall of brick, a course of stone, and glass with a room behind it.
+    """
+    holes, storeys = _openings(width, base, height)
+    half = width * 0.5
+    far = sign * depth
+
+    shell = bmesh.new()
+    _front(shell, -half, half, base, height, sign, holes)
+    _face(shell, [(-half, far, base), (half, far, base), (half, far, height), (-half, far, height)])
+    _face(shell, [(-half, 0.0, base), (-half, far, base), (-half, far, height), (-half, 0.0, height)])
+    _face(shell, [(half, 0.0, base), (half, far, base), (half, far, height), (half, 0.0, height)])
+    _face(shell, [(-half, 0.0, height), (half, 0.0, height), (half, far, height), (-half, far, height)])
+    _face(shell, [(-half, 0.0, base), (half, 0.0, base), (half, far, base), (-half, far, base)])
+    shell_obj = _finish(shell, name, surface, repeats)
+
+    # What a facade is articulated by: a sill under every window, a band at
+    # every floor line, and a cornice that throws the top of the wall into
+    # shadow. All of it stands proud of the front, so all of it catches the
+    # light from one side and not the other, which is most of what makes a
+    # wall read as built rather than printed.
+    band = bmesh.new()
+    out = sign * -0.09
+    for hx0, hx1, hz0, _hz1, door in holes:
+        if door:
+            _slab(band, (hx0 - 0.12, min(0.0, out * 1.6), hz0),
+                  (hx1 + 0.12, max(0.0, out * 1.6), hz0 + DOOR_H + 0.14))
+            continue
+        _slab(band, (hx0 - 0.09, min(0.0, out), hz0 - 0.08),
+              (hx1 + 0.09, max(0.0, out), hz0))
+    for storey in range(1, storeys + 1):
+        z = base + storey * STOREY
+        if z >= height - 0.1:
+            continue
+        _slab(band, (-half, min(0.0, out * 0.55), z - 0.07),
+              (half, max(0.0, out * 0.55), z))
+    cornice = sign * -0.26
+    _slab(band, (-half - 0.1, min(0.0, cornice), height - 0.42),
+          (half + 0.1, max(0.0, cornice), height))
+
+    # Glass at the back of its reveal, in two objects rather than one: a lit
+    # room and a dark one are different materials, and a night street is mostly
+    # made of which windows are which. Which ones are lit is drawn rather than
+    # patterned -- a terrace where every fourth window is on reads as wallpaper.
+    dark = bmesh.new()
+    lit = bmesh.new()
+    at = sign * (REVEAL - 0.015)
+    for hx0, hx1, hz0, hz1, door in holes:
+        panes = dark if (door or rng.random() > 0.34) else lit
+        _face(panes, [(hx0 + 0.04, at, hz0 + 0.04), (hx1 - 0.04, at, hz0 + 0.04),
+                      (hx1 - 0.04, at, hz1 - 0.04), (hx0 + 0.04, at, hz1 - 0.04)])
+        if door:
+            continue
+        # The glazing bar is joinery and belongs to the frame, not to the
+        # glass: a pane is two panes because something solid divides them.
+        middle = (hx0 + hx1) * 0.5
+        _slab(band, (middle - 0.025, min(at, at - sign * 0.03), hz0 + 0.04),
+              (middle + 0.025, max(at, at - sign * 0.03), hz1 - 0.04))
+    trim_obj = _finish(band, name + "_Trim", trim, 2.2)
+    trim_obj.parent = shell_obj
+
+    dark_obj = _finish(dark, name + "_Glass", glass, 0.0)
+    dark_obj.parent = shell_obj
+    lit_obj = _finish(lit, name + "_Lit", glow, 0.0)
+    lit_obj.parent = shell_obj
+    return shell_obj, trim_obj, dark_obj, lit_obj
+
+
+def ground_plane(name, length, width, surface, repeats, rng):
+    """What the street stands on: a base with a fall across it, not a table top.
+
+    It is mostly hidden by the road and the pavements, so it is cut coarsely --
+    detail nobody sees is the one thing an expensive-looking scene never
+    spends on. What it does need is not to be one flat quad, because the far
+    end of a street is exactly where a flat quad shows itself.
+    """
+    bm = bmesh.new()
+    along, across = 14, 8
+    grid = []
+    for i in range(along + 1):
+        x = -length * 0.5 + length * i / along
+        row = []
+        for j in range(across + 1):
+            y = -width * 0.5 + width * j / across
+            row.append(bm.verts.new((x, y, -0.34 + rng.uniform(-0.05, 0.02))))
+        grid.append(row)
+    for i in range(along):
+        for j in range(across):
+            bm.faces.new([grid[i][j], grid[i + 1][j], grid[i + 1][j + 1], grid[i][j + 1]])
+    return _finish(bm, name, surface, repeats)
+
+
+def road_surface(name, length, width, camber, surface, repeats, rng):
+    """A carriageway with a crown down the middle and a fall to each gutter.
+
+    A road is not flat. It is built with a camber so water runs off it, and
+    that camber is most of what stops a street reading as a corridor with a
+    black rectangle in it: the crown catches the lamps down its length and the
+    gutters stay dark. Cut across its length as well, so the surface is a
+    surface and not one quad.
+    """
+    bm = bmesh.new()
+    along, across = 44, 8
+    top = []
+    for i in range(along + 1):
+        x = -length * 0.5 + length * i / along
+        row = []
+        for j in range(across + 1):
+            t = j / across
+            y = -width * 0.5 + width * t
+            fall = camber * (1.0 - (2.0 * t - 1.0) ** 2)
+            # Worn, not machined: the surface sags a little where it has been
+            # driven on and rises where it has not.
+            wear = rng.uniform(-0.006, 0.006)
+            row.append(bm.verts.new((x, y, fall + wear)))
+        top.append(row)
+    for i in range(along):
+        for j in range(across):
+            bm.faces.new([top[i][j], top[i + 1][j], top[i + 1][j + 1], top[i][j + 1]])
+
+    # A skirt down to the base, so the road is a solid and not a sheet.
+    base = -0.30
+    for i in range(along):
+        for edge in (0, across):
+            a, b = top[i][edge], top[i + 1][edge]
+            low_a = bm.verts.new((a.co.x, a.co.y, base))
+            low_b = bm.verts.new((b.co.x, b.co.y, base))
+            bm.faces.new([a, b, low_b, low_a])
+    return _finish(bm, name, surface, repeats)
+
+
+def kerbs(name, length, width, surface, repeats, rng):
+    """Individual stones, laid end to end with a joint between them.
+
+    One long block reads as an extrusion. What makes a kerb a kerb is that it
+    is a run of separate stones, each sitting a millimetre or two differently
+    from its neighbour.
+    """
+    bm = bmesh.new()
+    stone = 0.9
+    count = int(length / stone)
+    for i in range(count):
+        x0 = -length * 0.5 + i * stone + 0.012
+        x1 = x0 + stone - 0.024
+        lift = rng.uniform(-0.004, 0.006)
+        _slab(bm, (x0, -width * 0.5, -0.42), (x1, width * 0.5, 0.15 + lift))
+    return _finish(bm, name, surface, repeats)
+
+
 def build_street(parts, surfaces):
     # Nothing here shares a plane with anything else: the road sinks into the
     # ground and the kerbs sink into the road, so no two faces are coplanar and
     # the depth test never has to choose between them.
-    ground = block("Street_Ground", (-46.0, -34.0, -0.92), (46.0, 34.0, -0.25),
-                   surfaces["tarmac"], repeats=0.12)
+    shape = random.Random(9173)
+    ground = ground_plane("Street_Ground", 84.0, 44.0, surfaces["tarmac"],
+                          GROUND_REPEATS, shape)
     ground.location = (6.0, 0.0, 0.0)
     parts["Street_Ground"] = ground
 
-    road = block("Street_Road", (-34.0, -3.5, -0.30), (34.0, 3.5, 0.0),
-                 surfaces["tarmac"], repeats=0.55)
+    road = road_surface("Street_Road", 68.0, 7.0, 0.075,
+                        surfaces["tarmac"], GROUND_REPEATS, shape)
     road.location = (6.0, 0.0, 0.0)
     parts["Street_Road"] = road
 
@@ -153,11 +433,18 @@ def build_street(parts, surfaces):
     # faces that stop in the same plane are two faces the depth test has to
     # choose between.
     for side, y in (("L", 5.0), ("R", -5.0)):
-        kerb = block("Street_Path" + side,
-                     (-35.0, -1.6, -0.45), (35.0, 1.6, 0.15),
-                     surfaces["paving"], repeats=0.75, bevel=0.02)
-        kerb.location = (6.0, y, 0.0)
-        parts["Street_Path" + side] = kerb
+        path = block("Street_Path" + side,
+                     (-35.0, -1.6, -0.45), (35.0, 1.6, 0.14),
+                     surfaces["paving"], repeats=GROUND_REPEATS, bevel=0.02)
+        path.location = (6.0, y, 0.0)
+        parts["Street_Path" + side] = path
+
+        # The stones between the pavement and the gutter, on the road side of
+        # it, laid one at a time.
+        stones = kerbs("Street_Kerb" + side, 70.0, 0.34,
+                       surfaces["stone"], 2.2, shape)
+        stones.location = (6.0, y - 1.62 if y > 0.0 else y + 1.62, 0.0)
+        parts["Street_Kerb" + side] = stones
 
     # The far terrace runs unbroken; the near side is set back, so the street
     # reads as a corridor rather than a trench. Blender Y becomes ae3d -Z.
@@ -167,24 +454,35 @@ def build_street(parts, surfaces):
     # Each is sunk to a depth of its own. Buildings founded at the same level
     # share the plane of their own footings wherever two of them touch, and one
     # sitting exactly on the ground shares that.
+    rng = random.Random(4021)
     for index, (x, depth, height, surface) in enumerate(far):
-        wall = block("Street_BlockL%d" % index,
-                     (-5.6, 0.0, -0.4 - index * 0.03), (5.6, depth, height),
-                     surfaces[surface], repeats=0.35)
+        name = "Street_BlockL%d" % index
+        shell, trim, dark, lit = building(name, 11.2, depth, height,
+                                          -0.4 - index * 0.03, surfaces[surface],
+                                          WALL_REPEATS, 1.0, surfaces["stone"],
+                                          surfaces["glass"], surfaces["glow"], rng)
         # A terrace is not machined: each front sets back a few centimetres
         # from its neighbour, which is also what keeps two of them from sharing
         # the plane they face the street in.
-        wall.location = (x, 6.55 + index * 0.04, 0.0)
-        parts["Street_BlockL%d" % index] = wall
+        shell.location = (x, 6.55 + index * 0.04, 0.0)
+        parts[name] = shell
+        parts[name + "_Trim"] = trim
+        parts[name + "_Glass"] = dark
+        parts[name + "_Lit"] = lit
 
     near = ((-16.0, 8.0, 11.0, "concrete"), (2.0, 9.0, 14.0, "brick"),
             (20.0, 8.0, 12.0, "concrete"))
     for index, (x, depth, height, surface) in enumerate(near):
-        wall = block("Street_BlockR%d" % index,
-                     (-6.5, -depth, -0.55 - index * 0.03), (6.5, 0.0, height),
-                     surfaces[surface], repeats=0.35)
-        wall.location = (x, -7.55 - index * 0.04, 0.0)
-        parts["Street_BlockR%d" % index] = wall
+        name = "Street_BlockR%d" % index
+        shell, trim, dark, lit = building(name, 13.0, depth, height,
+                                          -0.55 - index * 0.03, surfaces[surface],
+                                          WALL_REPEATS, -1.0, surfaces["stone"],
+                                          surfaces["glass"], surfaces["glow"], rng)
+        shell.location = (x, -7.55 - index * 0.04, 0.0)
+        parts[name] = shell
+        parts[name + "_Trim"] = trim
+        parts[name + "_Glass"] = dark
+        parts[name + "_Lit"] = lit
 
     for index, x in enumerate((-14.0, 0.0, 14.0)):
         post = block("Street_Lamp%d" % index,
@@ -407,6 +705,10 @@ def main(argv):
     surfaces = {
         "brick": material("WallBrick", textures.brick(), roughness=0.95),
         "concrete": material("WallConcrete", textures.concrete(), roughness=0.92),
+        "stone": material("TrimStone", textures.stone(), roughness=0.8),
+        "glass": material("WindowGlass", textures.glass_dark(), roughness=0.15,
+                          metallic=0.1),
+        "glow": material("WindowLit", textures.glass_lit(), roughness=0.5),
         "tarmac": material("RoadTarmac", textures.tarmac(), roughness=0.88),
         "paving": material("PathPaving", textures.paving(), roughness=0.9),
         "metal": material("LampMetal", textures.metal(), roughness=0.4, metallic=0.8),

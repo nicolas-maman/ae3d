@@ -63,12 +63,12 @@ def _tint(base, shade, amount):
 
 
 def _windows(rgb, size, rng, sill):
-    """Two courses of two windows, so a wall repeats every four of them.
+    """Two courses of two windows, painted into a wall tile.
 
-    Windows are what makes a wall read as a building rather than a slab, and at
-    a third of a repeat per metre one texture tile is about three metres, which
-    is one storey. A few are lit: a street at dusk is not a street where
-    everybody is out.
+    Kept for nothing: windows are built as openings now, with a reveal, a sill
+    and glass set back behind it. Painting them into the tile forced the tile to
+    span a whole storey, which is what pinned the whole street at ninety texels
+    to the metre -- a texel every eleven millimetres, which is a smear.
     """
     lit = [(1.00, 0.78, 0.44), None, None, (0.86, 0.62, 0.30)]
     rng.shuffle(lit)
@@ -101,10 +101,15 @@ def _windows(rgb, size, rng, sill):
     return rgb
 
 
-def brick(size=256, seed=11):
-    """Courses of brick, offset every other row, with mortar between."""
+def brick(size=1024, seed=11):
+    """Courses of brick, offset every other row, with mortar between.
+
+    Sixteen courses across a tile that covers 1.2 metres is a course of 75mm,
+    which is what a brick is. The tile carries nothing else, so it can be this
+    small and still tile without a pattern anybody can see.
+    """
     rng = random.Random(seed)
-    rows, columns = 16, 8
+    rows, columns = 16, 6
     grain = _noise(rng, size, 4, 4)
     field = numpy.zeros((size, size), dtype=numpy.float32)
     shade = numpy.zeros((size, size), dtype=numpy.float32)
@@ -130,22 +135,20 @@ def brick(size=256, seed=11):
     joint_colour = numpy.array((0.52, 0.50, 0.47), dtype=numpy.float32)
     rgb = face[None, None, :] * (1.0 + shade[:, :, None] + (grain[:, :, None] - 0.5) * 0.35)
     rgb = rgb * (1.0 - field[:, :, None]) + joint_colour[None, None, :] * field[:, :, None]
-    rgb = _windows(rgb, size, rng, (0.30, 0.29, 0.27))
     return _image("BrickWall", size, _rgba(rgb))
 
 
-def concrete(size=256, seed=23):
+def concrete(size=1024, seed=23):
     rng = random.Random(seed)
     grain = _noise(rng, size, 5, 6)
     streak = _noise(rng, size, 4, 3)
     stain = numpy.clip((streak - 0.5) * 2.0, 0.0, 1.0)
     rgb = _tint((0.40, 0.40, 0.39), (0.21, 0.21, 0.22), stain * 0.8)
     rgb *= (0.84 + grain[:, :, None] * 0.32)
-    rgb = _windows(rgb, size, rng, (0.26, 0.26, 0.25))
     return _image("ConcreteWall", size, _rgba(rgb))
 
 
-def tarmac(size=256, seed=37):
+def tarmac(size=1024, seed=37):
     rng = random.Random(seed)
     grit = _noise(rng, size, 6, 10)
     patch = _noise(rng, size, 3, 5)
@@ -155,11 +158,12 @@ def tarmac(size=256, seed=37):
     return _image("RoadTarmac", size, _rgba(rgb))
 
 
-def paving(size=256, seed=53):
-    """Slabs, four across, with a groove between them."""
+def paving(size=1024, seed=53):
+    """Slabs, with a groove between them. Two across a 1.2 metre tile is a
+    slab of 600mm, which is the one a pavement is laid from."""
     rng = random.Random(seed)
     grain = _noise(rng, size, 5, 4)
-    slabs = 4
+    slabs = 2
     pitch = size / slabs
     groove = max(1.0, size / 96.0)
     field = numpy.zeros((size, size), dtype=numpy.float32)
@@ -178,7 +182,7 @@ def paving(size=256, seed=53):
     return _image("PavingSlab", size, _rgba(rgb))
 
 
-def skin(size=128, seed=71):
+def skin(size=512, seed=71):
     """Mottled, bruised, and not well."""
     rng = random.Random(seed)
     blotch = _noise(rng, size, 4, 3)
@@ -192,7 +196,7 @@ def skin(size=128, seed=71):
     return _image("ZombieSkin", size, _rgba(rgb))
 
 
-def cloth(size=128, seed=89):
+def cloth(size=512, seed=89):
     """Torn, filthy, and woven closely enough to read as fabric."""
     rng = random.Random(seed)
     grime = _noise(rng, size, 4, 3)
@@ -205,7 +209,7 @@ def cloth(size=128, seed=89):
     return _image("ZombieCloth", size, _rgba(rgb))
 
 
-def gore(size=64, seed=101):
+def gore(size=256, seed=101):
     """What is behind the eye sockets and the mouth: dark, wet, not much of it."""
     rng = random.Random(seed)
     wet = _noise(rng, size, 4, 4)
@@ -268,8 +272,66 @@ def dusk_sky(width=1024, seed=131):
     return made
 
 
-def metal(size=128, seed=97):
+def metal(size=512, seed=97):
     rng = random.Random(seed)
     grain = _noise(rng, size, 5, 5)
     rgb = _tint((0.20, 0.21, 0.23), (0.11, 0.11, 0.13), numpy.clip(grain * 1.4 - 0.3, 0.0, 1.0))
     return _image("LampMetal", size, _rgba(rgb))
+
+
+def stone(size=512, seed=113):
+    """The pale limestone a sill, a band and a cornice are cut from.
+
+    Trim is what a facade is articulated by, and it is a different stone from
+    the wall it interrupts: lighter, smoother, and laid in long pieces rather
+    than in courses. Reading as a different material is the whole job.
+    """
+    rng = random.Random(seed)
+    grain = _noise(rng, size, 5, 5)
+    weathering = _noise(rng, size, 3, 3)
+    rgb = _tint((0.52, 0.51, 0.48), (0.34, 0.34, 0.33),
+                numpy.clip(weathering * 1.3 - 0.35, 0.0, 1.0))
+    rgb *= (0.88 + grain[:, :, None] * 0.24)
+    return _image("TrimStone", size, _rgba(rgb))
+
+
+def glass_dark(size=1024, seed=127):
+    """A window with nobody home.
+
+    Not black: a dark pane still carries the sky it faces and the room it hides,
+    and a street of pure black rectangles reads as holes cut in a wall.
+    """
+    rng = random.Random(seed)
+    sheen = _noise(rng, size, 3, 2)
+    rgb = _tint((0.055, 0.062, 0.080), (0.100, 0.112, 0.140),
+                numpy.clip(sheen * 1.5 - 0.4, 0.0, 1.0))
+    # The pane leans back a little towards the top, so what it reflects there
+    # is more sky and less street.
+    ramp = numpy.linspace(1.0, 1.5, size, dtype=numpy.float32)
+    rgb *= ramp[:, None, None]
+    return _image("WindowGlassDark", size, _rgba(rgb))
+
+
+def glass_lit(size=1024, seed=131):
+    """A window with the light on, and something in the room behind it.
+
+    A lit window that is one flat colour reads as a light box. What makes it a
+    room is that it is brighter at the top, where the ceiling fitting is, and
+    that something interrupts it: a curtain down one side, and the shadow of
+    whatever the room has in it across the bottom.
+    """
+    rng = random.Random(seed)
+    grain = _noise(rng, size, 4, 3)
+    warm = numpy.array((1.00, 0.80, 0.48), dtype=numpy.float32)
+    ramp = numpy.linspace(1.0, 0.42, size, dtype=numpy.float32)
+    rgb = numpy.empty((size, size, 3), dtype=numpy.float32)
+    rgb[:, :, :] = warm[None, None, :] * ramp[:, None, None]
+    rgb *= (0.86 + grain[:, :, None] * 0.28)
+
+    curtain = int(size * 0.26)
+    fold = numpy.linspace(0.0, 3.0, curtain, dtype=numpy.float32)
+    rgb[:, :curtain] *= (0.42 + 0.16 * numpy.abs(numpy.sin(fold)))[None, :, None]
+
+    furniture = int(size * 0.72)
+    rgb[furniture:, int(size * 0.45):int(size * 0.85)] *= 0.30
+    return _image("WindowGlassLit", size, _rgba(numpy.clip(rgb, 0.0, 1.0)))

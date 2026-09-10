@@ -18,11 +18,11 @@ each of them is:
   magnitude reads as parts from different games, whatever any one surface
   measures.
 
-  Silhouette. How many directions a shape's faces point. A box has six however
-  many triangles it is cut into, and everything that makes a building read as a
-  building -- a recessed window, a sill, a course line, a doorway -- is a
-  normal the box does not have. This is the measure that says "it is a box"
-  without anybody having to look at it.
+  Relief. How many distinct planes a shape's faces lie in. Counting directions
+  cannot tell a box from a facade -- a wall with recessed windows, sills and a
+  cornice is built from faces pointing the same six ways the box did -- but a
+  box's faces lie in six planes and a facade's in hundreds. This is the measure
+  that says "it is a slab" without anybody having to look at it.
 
   Density of geometry. Triangles for each square metre of surface. A figure
   carries its detail where it is seen, so a hand and a wall cannot be held to
@@ -47,11 +47,11 @@ WANT_TEXELS = 512.0
 FLOOR_TEXELS = 256.0
 # Densities further apart than this read as different games in one frame.
 SPREAD = 8.0
-# A shape with no more ways to face than a cube has is a cube.
-BOX_NORMALS = 6
+# A shape lying in no more planes than a cube does is a cube.
+BOX_PLANES = 8
 # What a figure has to carry to read as one rather than as a stack of props.
 CHARACTER_TRIANGLES = 20000
-CHARACTER_NORMALS = 2000
+CHARACTER_PLANES = 3000
 
 FAILURES = []
 
@@ -93,15 +93,18 @@ def texel_density(models):
           "%d of %d below %.0f" % (len(short), len(textured), WANT_TEXELS))
 
 
-def silhouette(models):
+def relief(models):
     print("\n== what the shapes are, rather than what they are painted with ==")
-    boxes = [m for m in models
-             if m.get("normals", 0) <= BOX_NORMALS and m.get("area_m2", 0.0) > 1.0]
-    for m in sorted(boxes, key=lambda m: -m.get("area_m2", 0.0))[:6]:
-        print("  %-22s %6d triangles, %3d normals, %8.1f m2"
-              % (m["name"], m.get("triangles", 0), m.get("normals", 0), m["area_m2"]))
-    check("nothing large enough to be looked at is a bare box", not boxes,
-          "%d of them, %s" % (len(boxes), ", ".join(m["name"] for m in boxes[:4])))
+    # Big enough to fill a frame, and flat enough to have nothing in it. A pane
+    # of glass lies in one plane and is meant to.
+    slabs = [m for m in models
+             if m.get("planes", 0) <= BOX_PLANES and m.get("area_m2", 0.0) > 8.0
+             and "Glass" not in m["name"] and "Lit" not in m["name"]]
+    for m in sorted(models, key=lambda m: -m.get("area_m2", 0.0))[:8]:
+        print("  %-22s %6d triangles, %5d planes, %9.1f m2"
+              % (m["name"], m.get("triangles", 0), m.get("planes", 0), m["area_m2"]))
+    check("nothing large enough to fill a frame is a bare slab", not slabs,
+          "%d of them, %s" % (len(slabs), ", ".join(m["name"] for m in slabs[:4])))
 
 
 def character(models, prefix):
@@ -111,16 +114,16 @@ def character(models, prefix):
         check("the scene has a figure in it", False, "nothing named %s" % prefix)
         return
     triangles = sum(m.get("triangles", 0) for m in parts)
-    normals = sum(m.get("normals", 0) for m in parts)
+    planes = sum(m.get("planes", 0) for m in parts)
     area = sum(m.get("area_m2", 0.0) for m in parts)
-    print("  %d part(s), %d triangles, %d normals, %.2f m2 of surface"
-          % (len(parts), triangles, normals, area))
+    print("  %d part(s), %d triangles, %d planes, %.2f m2 of surface"
+          % (len(parts), triangles, planes, area))
     check("the figure carries the geometry a figure needs",
           triangles >= CHARACTER_TRIANGLES,
           "%d triangles, wanted %d" % (triangles, CHARACTER_TRIANGLES))
     check("and enough of a silhouette to read as one",
-          normals >= CHARACTER_NORMALS,
-          "%d distinct normals, wanted %d" % (normals, CHARACTER_NORMALS))
+          planes >= CHARACTER_PLANES,
+          "%d distinct planes, wanted %d" % (planes, CHARACTER_PLANES))
     check("and is one surface rather than a pile of parts", len(parts) <= 2,
           "%d separate models" % len(parts))
 
@@ -191,7 +194,7 @@ def main(argv):
         engine("frame.pause")
         models = engine("scene.tree", detail=True, audit=True)["models"]
         texel_density(models)
-        silhouette(models)
+        relief(models)
         character(models, args.figure)
         proportion(models, args.figure)
         engine("frame.resume")

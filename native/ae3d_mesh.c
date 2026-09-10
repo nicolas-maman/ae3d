@@ -913,10 +913,15 @@ double ae3d_mesh_uv_area(void *handle) {
 
 #define AE3D_NORMAL_SLOTS 8192
 
-/* Face normals quantised onto a grid and counted. A tolerance of 0.05 puts
-   two normals in the same bucket when they point within about three degrees of
-   each other, which is the difference between a rounded edge and a flat one. */
-int ae3d_mesh_distinct_normals(void *handle, double tolerance) {
+/* Distinct planes, which is what relief is.
+ *
+ * Counting directions alone cannot tell a box from a facade: a wall with
+ * recessed windows, sills and a cornice is built entirely from faces pointing
+ * the same six ways as the box it started as. What separates them is that the
+ * facade's faces lie in many planes and the box's lie in six. So the key is
+ * the normal and the distance along it, quantised together, and a shape that
+ * has been given depth counts higher than one that has only been painted. */
+int ae3d_mesh_distinct_planes(void *handle, double tolerance) {
     ae3d_mesh *m = (ae3d_mesh *)handle;
     int *keys;
     int distinct = 0, i;
@@ -929,8 +934,8 @@ int ae3d_mesh_distinct_normals(void *handle, double tolerance) {
     if (!keys) return 0;
 
     for (i = 0; i + 2 < m->index_count; i += 3) {
-        double t[9], ux, uy, uz, vx, vy, vz, cx, cy, cz, length;
-        int qx, qy, qz;
+        double t[9], ux, uy, uz, vx, vy, vz, cx, cy, cz, length, offset;
+        int qx, qy, qz, qd;
         unsigned slot, guard;
         int key;
 
@@ -943,11 +948,20 @@ int ae3d_mesh_distinct_normals(void *handle, double tolerance) {
         cz = ux * vy - uy * vx;
         length = sqrt(cx * cx + cy * cy + cz * cz);
         if (length < 1e-9) continue;
-        qx = (int)floor(cx / length * step + 0.5);
-        qy = (int)floor(cy / length * step + 0.5);
-        qz = (int)floor(cz / length * step + 0.5);
+        cx /= length; cy /= length; cz /= length;
+        qx = (int)floor(cx * step + 0.5);
+        qy = (int)floor(cy * step + 0.5);
+        qz = (int)floor(cz * step + 0.5);
+        /* How far the plane stands off the origin along its own normal, in
+           centimetres: two faces pointing the same way a window's depth apart
+           are two planes, and that depth is what a facade is made of. */
+        offset = t[0] * cx + t[1] * cy + t[2] * cz;
+        qd = (int)floor(offset * 100.0 + 0.5);
+        if (qd < -32768) qd = -32768;
+        if (qd > 32767) qd = 32767;
         /* Never zero, so a filled slot is distinguishable from an empty one. */
-        key = ((qx + 4096) * 8209 + (qy + 4096)) * 8209 + (qz + 4096) + 1;
+        key = (((qx + 4096) * 8209 + (qy + 4096)) * 8209 + (qz + 4096)) * 65537
+              + qd + 1;
         slot = ((unsigned)key * 2654435761u) % AE3D_NORMAL_SLOTS;
         for (guard = 0; guard < AE3D_NORMAL_SLOTS; guard++) {
             if (keys[slot] == 0) { keys[slot] = key; distinct++; break; }
