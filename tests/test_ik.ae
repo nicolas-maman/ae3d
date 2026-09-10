@@ -152,6 +152,28 @@ main() {
     core.model_free(hips)
     limb_free(&limb)
 
+    // Aiming one joint, which is the whole of what a head does: the far end of
+    // it ends up on the line from the joint to what it was pointed at.
+    neck = loader.cube(0.2)
+    head = loader.cube(0.2)
+    core.model_set_position(neck, 0.0, 1.5, 0.0)
+    core.model_set_position(head, 0.0, 0.3, 0.0)
+    core.model_set_parent(head, neck)
+
+    look = core.vec3(2.0, 1.9, 0.0 - 1.0)
+    ik.aim_at(neck, head, look)
+    neck_at = core.model_world_position(neck)
+    along = core.v3_normalize(core.v3_sub(core.model_world_position(head), neck_at))
+    wanted = core.v3_normalize(core.v3_sub(look, neck_at))
+    check("aiming a joint points what it carries at the target",
+          core.v3_distance(along, wanted) < EPSILON)
+    check("without changing how far away it is",
+          near(core.v3_distance(neck_at, core.model_world_position(head)), 0.3, EPSILON))
+
+    core.model_set_parent(head, null)
+    core.model_free(head)
+    core.model_free(neck)
+
     if failures == 0 {
         println("ik: all checks passed")
     } else {
