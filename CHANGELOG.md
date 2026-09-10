@@ -2,6 +2,17 @@
 
 ## [current]
 
+### Building
+
+- Building the editor first in a clean checkout failed on zlib. The editor and
+  `build.sh` each decided for themselves what the engine library links, and
+  disagreed: `build.sh` names zlib once, and the editor dropped it whenever the
+  Aether toolchain's own libraries already carried it, which is a rule that
+  belongs to a program's link line rather than to a library's. Every CI run
+  passed because `build.sh` always ran first and left the library built, so the
+  editor never linked it. `ci.sh` now removes the library before building the
+  editor, which is the run that was missing.
+
 ### Scripts
 
 - The engine's C is built once into `build/libae3d_native`, and every program,
