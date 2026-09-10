@@ -95,10 +95,16 @@ The scene records the script by name, so a project that still has the file gets
 the assignment back when it loads. A scene naming a script the project does not
 have gets none rather than a wrong one.
 
+A script links the same engine library the editor links,
+`build/libae3d_native`, so a call into the engine reaches the one copy the
+editor is running rather than a second copy with an empty GL loader in it. The
+three platforms each offered a different way to arrange that, and two of them
+would have let a script carry its own engine; this is the arrangement that is
+the same everywhere.
+
 CRITICAL: build a script with the tree that will run it. A script carries its
-own copy of what it imported and reaches back into the host for the runtime, so
-the two agree about what a `Model` is only while both were built from the same
-sources.
+own copy of the Aether it imported, so it and the editor agree about what a
+`Model` is only while both were built from the same sources.
 
 **Edit** is undo, redo, duplicate, frame, delete, and saving or loading the scene
 as `build/editor_scene.json`. Loading replaces the scene rather than merging into

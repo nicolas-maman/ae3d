@@ -2,6 +2,22 @@
 
 ## [current]
 
+### Scripts
+
+- The engine's C is built once into `build/libae3d_native`, and every program,
+  the editor and every script links it. Each platform had a different way in:
+  macOS resolved a script's engine calls out of its host at load, Linux did the
+  same once the host was told to export its symbols, and Windows, where a DLL
+  has to resolve everything, linked the engine's objects into the script. That
+  last one gives a script its own copy of the engine's C, GL loader state and
+  all, which works for a script that moves a model and gives a script that
+  draws a function table nothing ever filled in. One library is the same
+  arrangement everywhere and leaves one copy of that state.
+
+  `ci.sh` checks the invariant rather than the arrangement: a built script must
+  define none of the engine's C itself. It reads 56 when `native/ae3d_mesh.c`
+  is linked into one.
+
 First working engine.
 
 ### Rendering

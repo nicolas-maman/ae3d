@@ -17,17 +17,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+. "$ROOT/scripts/platform.sh"
+. "$ROOT/scripts/native.sh"
+
 SOURCE="${1:?usage: build_script.sh <script.ae> [output directory]}"
 OUT_DIR="${2:-build/scripts}"
 NAME="$(basename "$SOURCE" .ae)"
 
 mkdir -p "$OUT_DIR"
 
-case "$(uname -s)" in
-    Darwin) SUFFIX=".dylib" ;;
-    MINGW*|MSYS*|CYGWIN*) SUFFIX=".dll" ;;
-    *) SUFFIX=".so" ;;
-esac
+SUFFIX="$(ae3d_native_suffix)"
 
 GEN="$OUT_DIR/$NAME.c"
 LIB="$OUT_DIR/$NAME$SUFFIX"
@@ -41,39 +40,21 @@ fi
 AETHER_LIB_DIR="$ROOT/src" aetherc "$SOURCE" "$GEN"
 
 CC="${CC:-cc}"
-HOST_OBJECTS=""
-HOST_LIBS=""
 case "$(uname -s)" in
-    Darwin)
-        # The host resolves what the script leaves undefined. Without this the
-        # link fails on every runtime symbol the script's own imports call.
-        LINK_FLAGS="-dynamiclib -undefined dynamic_lookup"
-        ;;
-    MINGW*|MSYS*|CYGWIN*)
-        # A DLL has no undefined symbols: the PE loader has nowhere to look
-        # them up, so the link has to resolve every one. A script here carries
-        # the engine's C and the runtime rather than borrowing its host's, and
-        # the objects it links are the ones the host was built from -- which is
-        # the same rule as everywhere else, enforced by the linker instead of
-        # by the reader.
-        LINK_FLAGS="-shared"
-        ./build.sh --natives >/dev/null
-        HOST_OBJECTS="$ROOT/build/obj/*.o"
-        . "$ROOT/scripts/platform.sh"
-        HOST_LIBS="$(ae cflags --libs 2>/dev/null || true) $(ae3d_platform_libs "$(uname -s)")"
-        if command -v pkg-config >/dev/null 2>&1; then
-            pkg-config --exists glfw3 && HOST_LIBS="$HOST_LIBS $(pkg-config --libs glfw3)"
-            pkg-config --exists zlib && HOST_LIBS="$HOST_LIBS $(pkg-config --libs zlib)"
-        else
-            HOST_LIBS="$HOST_LIBS -lglfw3 -lz"
-        fi
-        ;;
-    *)
-        LINK_FLAGS="-shared -fPIC"
-        ;;
+    # The Aether runtime comes from the toolchain's own library; what stays
+    # undefined is the engine, and that is resolved by linking the same engine
+    # library the host links.
+    Darwin) LINK_FLAGS="-dynamiclib" ;;
+    *)      LINK_FLAGS="-shared" ;;
 esac
 
+if [ ! -f "$(ae3d_native_library)" ]; then
+    ./build.sh --natives >/dev/null
+fi
+
+# A script sits in build/scripts, one directory below the library.
 # shellcheck disable=SC2086
-$CC -O2 -fwrapv -fPIC $AETHER_CFLAGS -Inative $LINK_FLAGS "$GEN" $HOST_OBJECTS -o "$LIB" $HOST_LIBS
+$CC -O2 -fwrapv $(ae3d_native_pic_flag) $AETHER_CFLAGS -Inative $LINK_FLAGS \
+    "$GEN" $(ae3d_native_link_flags ..) -o "$LIB"
 
 echo "built: $LIB"
