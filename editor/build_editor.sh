@@ -82,9 +82,6 @@ else
     ZLIB_CFLAGS=""
     ZLIB_LIBS="-lz"
 fi
-case " $AETHER_LIBS " in
-    *" -lz "*) ZLIB_LIBS="" ;;
-esac
 
 VULKAN_CFLAGS=""
 if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists vulkan; then

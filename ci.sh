@@ -519,6 +519,12 @@ if [ ! -f "$UI_ROOT/ui/module.ae" ]; then
 elif ! have_display; then
     skip "ae3d_editor" "no display"
 else
+    # From nothing, not from whatever build.sh left behind. The editor builds
+    # the engine library itself when it is missing, and it did that with a
+    # different set of libraries than build.sh did: every run here passed
+    # because build.sh had already built the library, and building the editor
+    # first in a clean checkout failed on zlib.
+    rm -f build/libae3d_native.* build/libae3d_native
     if ! ./editor/build_editor.sh >/tmp/ae3d_build.log 2>&1; then
         fail "ae3d_editor (build)"
         sed 's/^/        /' /tmp/ae3d_build.log | head -20
