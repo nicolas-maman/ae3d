@@ -310,10 +310,16 @@ int  ae3d_capture_height(void);
 int  ae3d_capture_pixel(int x, int y, double *out);
 int  ae3d_capture_region(int x, int y, int width, int height,
                          int background, int tolerance, double *out);
+int  ae3d_capture_grid(int columns, int rows, int background, int tolerance,
+                       double *out);
 int  ae3d_capture_hold_reference(void);
 int  ae3d_capture_diff(int tolerance, double *out);
 void ae3d_capture_release(void);
 int  ae3d_capture_adopt(const unsigned char *pixels, int width, int height);
+/* How many numbers the fixed-size answers -- a pixel, a region, a diff -- are
+   written into. A grid is as long as it has cells and says so. */
+#define AE3D_CAPTURE_SLOTS 8
 double ae3d_capture_slot(const double *block, int index);
+double ae3d_capture_slot_of(const double *block, int index, int count);
 
 #endif

@@ -57,6 +57,14 @@ CHARACTER_PLANES = 3000
 # an order of magnitude.
 SLIDE_PER_FRAME = 0.025
 SLIDE_PER_CONTACT = 0.040
+# How far the shape of a drawn figure may stray from the shape of its skeleton.
+# Wide, deliberately. The mesh reaches past the bones by the thickness of the
+# surface, and a camera looking at a figure from an angle sees less of its width
+# than the world span says -- head on this scene measures 1.05, obliquely 0.6.
+# What is being caught here is not a few per cent but a figure deformed twice,
+# which drew four times its own shape and every count it had still read right.
+SHAPE_LOW = 0.35
+SHAPE_HIGH = 2.5
 
 FAILURES = []
 
@@ -157,6 +165,115 @@ def proportion(models, prefix):
     if upper > 0.0 and fore > 0.0:
         check("and the forearm a little shorter than the upper arm",
               0.75 <= fore / upper <= 1.0, "forearm/upper %.2f" % (fore / upper))
+
+
+def silhouette(engine, mesh, columns=52, rows=44):
+    """What the figure actually covers on screen, against what it should.
+
+    Every other measure here counts things: triangles, planes, texels. A mesh
+    can have all of them right and still be wrong, because none of them says
+    what shape it is -- and a figure deformed twice reads as 26,000 triangles
+    and 9,000 planes exactly like a figure deformed once. This is the measure
+    that says what is there.
+
+    Two facts, both cheap. A silhouette is compared against the box the
+    skeleton says the figure occupies, so a mesh spread over tens of metres by
+    a pose baked in twice is caught however many triangles it has. And it is
+    checked for being in one piece, because a figure that has come apart is in
+    several.
+    """
+    print("\n== the figure on screen ==")
+    e = engine
+
+    def grid():
+        return e("frame.grid", columns=columns, rows=rows)["cells"]
+
+    e("scene.isolate", object=mesh)
+    with_it = grid()
+    e("scene.isolate", object="__nothing__")
+    without = grid()
+    e("scene.isolate")
+    mask = [[sum(abs(a[i] - b[i]) for i in range(3)) > 0.015
+             for a, b in zip(ra, rb)] for ra, rb in zip(with_it, without)]
+
+    cells = [(x, y) for y, row in enumerate(mask) for x, on in enumerate(row) if on]
+    if not cells:
+        check("the figure is on screen at all", False, "nothing was drawn for %s" % mesh)
+        return
+    left = min(x for x, _ in cells)
+    right = max(x for x, _ in cells)
+    top = min(y for _, y in cells)
+    bottom = max(y for _, y in cells)
+
+    stats = e("frame.stats")
+    drawn = ((right - left + 1) / float(columns), (bottom - top + 1) / float(rows))
+    print("  covers %d cells, %.0f%% of the frame across and %.0f%% down"
+          % (len(cells), drawn[0] * 100, drawn[1] * 100))
+
+    # The shape of what was drawn against the shape of what is meant to have
+    # drawn it. Both are ratios, so neither depends on where the camera stands
+    # or how big the frame is, and a mesh spread over tens of metres by a pose
+    # baked in twice disagrees with its own skeleton by a factor, not a few per
+    # cent. This is the one measure that catches a figure that has exploded:
+    # every count it has is still right.
+    bones = [x["world_position"] for x in e("scene.skeleton", object=mesh)["bones"]]
+    across = max(max(v[0] for v in bones) - min(v[0] for v in bones),
+                 max(v[2] for v in bones) - min(v[2] for v in bones))
+    upright = max(v[1] for v in bones) - min(v[1] for v in bones)
+    wide_px = (right - left + 1) * stats["width"] / float(columns)
+    tall_px = (bottom - top + 1) * stats["height"] / float(rows)
+    if upright > 1e-6 and tall_px > 0.0:
+        want = across / upright
+        got = wide_px / tall_px
+        ratio = got / max(want, 1e-6)
+        print("  its bones span %.2f across by %.2f up (%.2f); it drew %.2f"
+              % (across, upright, want, got))
+        check("the figure is the shape its skeleton is",
+              SHAPE_LOW <= ratio <= SHAPE_HIGH,
+              "drew %.2f against %.2f, which is %.1f times" % (got, want, ratio))
+
+    box = None
+    entry = next((m for m in e("scene.tree", detail=True)["models"] if m["name"] == mesh), None)
+    if entry:
+        box = entry.get("screen_region")
+    if box:
+        # The bones say where the figure is and how big; the pixels say where it
+        # drew and how big. A mesh posed twice, or drawn through a transform its
+        # skeleton does not know about, disagrees with them.
+        wide = (box["width"] / float(stats["width"])) * 1.35 + 0.06
+        tall = (box["height"] / float(stats["height"])) * 1.35 + 0.06
+        check("the figure draws no bigger than its bones say it is",
+              drawn[0] <= wide and drawn[1] <= tall,
+              "drew %.0f%% x %.0f%%, allowed %.0f%% x %.0f%%"
+              % (drawn[0] * 100, drawn[1] * 100, wide * 100, tall * 100))
+
+
+    # One piece. Anything that has come off a figure is a separate island.
+    seen = set()
+    islands = []
+    for start in cells:
+        if start in seen:
+            continue
+        stack, size = [start], 0
+        seen.add(start)
+        while stack:
+            x, y = stack.pop()
+            size += 1
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                near = (x + dx, y + dy)
+                if near in seen or near not in set(cells):
+                    continue
+                seen.add(near)
+                stack.append(near)
+        islands.append(size)
+    big = [n for n in islands if n >= max(3, len(cells) // 20)]
+    check("the figure is in one piece", len(big) <= 1,
+          "%d pieces of it, sizes %s" % (len(big), sorted(big, reverse=True)[:4]))
+
+    # A standing figure is taller than it is wide. One lying in a heap is not.
+    check("and stands taller than it is wide",
+          (bottom - top) >= (right - left),
+          "%d cells tall against %d wide" % (bottom - top + 1, right - left + 1))
 
 
 def gait(engine, figure_mesh, feet, road, seconds, fps):
@@ -272,6 +389,7 @@ def main(argv):
         character(models, args.figure)
         proportion(models, args.figure)
         if args.walks:
+            silhouette(engine, args.walks)
             gait(engine, args.walks, args.feet.split(","), args.road, 2.6, 24)
         engine("frame.resume")
 

@@ -42,8 +42,10 @@ extern ae3d_capture_pixel(x: int, y: int, out: ptr) -> int
 extern ae3d_capture_region(x: int, y: int, width: int, height: int, background: int, tolerance: int, out: ptr) -> int
 extern ae3d_capture_hold_reference() -> int
 extern ae3d_capture_diff(tolerance: int, out: ptr) -> int
+extern ae3d_capture_grid(columns: int, rows: int, background: int, tolerance: int, out: ptr) -> int
 extern ae3d_capture_release()
 extern ae3d_capture_slot(block: ptr, index: int) -> float
+extern ae3d_capture_slot_of(block: ptr, index: int, count: int) -> float
 extern ae3d_capture_adopt(pixels: ptr, width: int, height: int) -> int
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
@@ -58,6 +60,12 @@ const READ_PIXEL = 0
 const READ_REGION = 1
 const READ_HOLD = 2
 const READ_DIFF = 3
+const READ_GRID = 4
+
+// A grid fine enough that a silhouette is legible in it and coarse enough to
+// fit in one reply. 64 by 36 is 2304 cells, which is a frame a person could
+// read and a program certainly can.
+const GRID_LIMIT = 4096
 
 struct Deferred {
     kind: int
@@ -179,6 +187,43 @@ answer_one_read(c: *Context, d: *Deferred) {
             fail(d.id, "the region is outside the frame")
             return
         }
+        json.object_set_raw(out, "frame", json.from_int(c.frame_count))
+        answer(d.id, out)
+        return
+    }
+
+    if d.kind == READ_GRID {
+        cells = d.width * d.height
+        block = calloc(cells * 4, 8)
+        if ae3d_capture_grid(d.width, d.height, d.background, d.tolerance, block) == 0 {
+            free(block)
+            fail(d.id, "there is no frame to read")
+            return
+        }
+        rows = json.arr()
+        y = 0
+        while y < d.height {
+            row = json.arr()
+            x = 0
+            while x < d.width {
+                at = (y * d.width + x) * 4
+                cell = json.arr()
+                span = cells * 4
+                json.array_add_raw(cell, json.num(ae3d_capture_slot_of(block, at, span)))
+                json.array_add_raw(cell, json.num(ae3d_capture_slot_of(block, at + 1, span)))
+                json.array_add_raw(cell, json.num(ae3d_capture_slot_of(block, at + 2, span)))
+                json.array_add_raw(cell, json.num(ae3d_capture_slot_of(block, at + 3, span)))
+                json.array_add_raw(row, cell)
+                x = x + 1
+            }
+            json.array_add_raw(rows, row)
+            y = y + 1
+        }
+        free(block)
+        out = json.obj()
+        json.object_set_raw(out, "columns", json.from_int(d.width))
+        json.object_set_raw(out, "rows", json.from_int(d.height))
+        json.object_set_raw(out, "cells", rows)
         json.object_set_raw(out, "frame", json.from_int(c.frame_count))
         answer(d.id, out)
         return
@@ -338,6 +383,8 @@ help_result() -> ptr {
         "One pixel of the captured frame as r, g, b, a and hex."))
     json.array_add_raw(ops, describe("frame.region", "x, y, width, height, [background], [tolerance]",
         "Mean colour, coverage, and the luminance spread over a rectangle. A flat surface has a stddev near zero; stipple and shadow acne do not."))
+    json.array_add_raw(ops, describe("frame.grid", "[columns], [rows], [background], [tolerance]",
+        "The whole frame as a grid of cells, each with its mean colour and how much of it is not the background. One answer instead of a round trip a pixel, which is what makes a picture something an agent can read."))
     json.array_add_raw(ops, describe("frame.hold", "",
         "Keep the captured frame as the reference frame.diff compares against."))
     json.array_add_raw(ops, describe("frame.diff", "[tolerance]",
@@ -1574,6 +1621,35 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
                           json.get_int(json.object_get_raw(request, "width")),
                           json.get_int(json.object_get_raw(request, "height")),
                           background, tolerance)
+    }
+
+    // The whole frame, coarsely, in one answer.
+    //
+    // frame.pixel answers one point and costs a frame to do it, so reading a
+    // picture that way is a thousand frames and a thousand round trips. This is
+    // what makes the frame legible instead: every cell's mean colour and how
+    // much of it is not the background, which is a silhouette an agent can
+    // measure and, printed, a picture a person can see.
+    if op == "frame.grid" {
+        columns = 64
+        rows = 36
+        background = 0
+        tolerance = 10
+        node = json.object_get_raw(request, "columns")
+        if node != null { columns = json.get_int(node) }
+        node = json.object_get_raw(request, "rows")
+        if node != null { rows = json.get_int(node) }
+        node = json.object_get_raw(request, "background")
+        if node != null { background = json.get_int(node) }
+        node = json.object_get_raw(request, "tolerance")
+        if node != null { tolerance = json.get_int(node) }
+        if columns < 1 { columns = 1 }
+        if rows < 1 { rows = 1 }
+        if columns * rows > GRID_LIMIT {
+            fail(id, "that grid is larger than the channel will answer with")
+            return false
+        }
+        return defer_read(c, READ_GRID, id, 0, 0, columns, rows, background, tolerance)
     }
 
     if op == "frame.hold" {

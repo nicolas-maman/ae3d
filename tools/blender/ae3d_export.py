@@ -169,7 +169,35 @@ def write_skeleton(armature, path, warnings):
     return [bone.name for bone in bones]
 
 
-def write_skin(obj, bone_names, sources, positions, path, warnings):
+# How far a vertex may typically sit from the bone that moves it. A human
+# figure is about a quarter of a metre thick at the chest and much less
+# everywhere else, so half a metre is generous and a metre is a mesh that is
+# somewhere else entirely.
+BIND_RADIUS = 0.5
+
+
+def distance_to_bone(rows, positions, bone_rest):
+    """How far each position is from the bone it is mostly weighted to."""
+    out = []
+    for row, position in zip(rows, positions):
+        joint = row["joints"][0]
+        if joint < 0 or joint >= len(bone_rest):
+            continue
+        at = bone_rest[joint]
+        out.append(sum((position[i] - at[i]) ** 2 for i in range(3)) ** 0.5)
+    return out
+
+
+def rest_in_ae3d(armature):
+    """Where each bone sits, in the axes the mesh was written in."""
+    out = []
+    for bone in bone_order(armature):
+        head = armature.matrix_world @ bone.head_local
+        out.append(to_y_up(head.x, head.y, head.z))
+    return out
+
+
+def write_skin(obj, bone_names, sources, positions, path, warnings, bone_rest):
     """Four bones and four weights for every position the OBJ kept.
 
     The OBJ writer folds vertices that share a position, so a weight belongs to
@@ -207,6 +235,22 @@ def write_skin(obj, bone_names, sources, positions, path, warnings):
         joints = [bone for bone, _ in ranked] + [0] * (4 - len(ranked))
         values = [rounded(weight / total) for _, weight in ranked] + [0.0] * (4 - len(ranked))
         rows.append({"joints": joints, "weights": values})
+
+    # A vertex sits on the bone it is weighted to, or the mesh is not in the
+    # pose it was bound in. This is the check that catches a mesh evaluated
+    # with its armature switched on: every count, every density and every
+    # triangle still reads correctly, and the figure arrives deformed twice and
+    # spread over tens of metres. Measured as a median rather than a maximum,
+    # because a coat hem is legitimately far from any bone and half a mesh is
+    # not.
+    away = sorted(distance_to_bone(rows, positions, bone_rest))
+    if away:
+        median = away[len(away) // 2]
+        if median > BIND_RADIUS:
+            warnings.append(
+                "%s is not in its bind pose: the typical vertex is %.2f m from "
+                "the bone it is weighted to, and should be under %.2f"
+                % (obj.name, median, BIND_RADIUS))
 
     if dropped:
         warnings.append("%s has %d vertex/vertices weighted to more than four bones"
@@ -701,7 +745,22 @@ def is_convex(mesh, loops, normal):
 
 
 def write_obj(obj, depsgraph, path, material_name, warnings):
-    """Triangulated geometry, in the OBJ ae3d's loader already reads."""
+    """Triangulated geometry, in the OBJ ae3d's loader already reads.
+
+    A skinned mesh is written in its bind pose, which means evaluating it with
+    the armature switched off. Evaluating with it on bakes whatever pose the
+    scene happens to be parked at into the vertices, and the engine then poses
+    those vertices again from the same skeleton -- so the figure arrives
+    deformed twice, spread over tens of metres, with every count and every
+    density still reading correctly. Everything else about the evaluation
+    stays: a bevel or a subdivision is geometry, and a pose is not.
+    """
+    posed = [m for m in obj.modifiers if m.type == "ARMATURE" and m.show_viewport]
+    for modifier in posed:
+        modifier.show_viewport = False
+    if posed:
+        bpy.context.view_layer.update()
+        depsgraph = bpy.context.evaluated_depsgraph_get()
     evaluated = obj.evaluated_get(depsgraph)
     mesh = evaluated.to_mesh()
     try:
@@ -763,6 +822,8 @@ def write_obj(obj, depsgraph, path, material_name, warnings):
                 {key: sorted(value) for key, value in sources.items()})
     finally:
         evaluated.to_mesh_clear()
+        for modifier in posed:
+            modifier.show_viewport = True
 
 
 def linked_image(socket):
@@ -926,7 +987,8 @@ def main(argv):
             bone_names = write_skeleton(armature, skeleton_path, warnings)
             files["skeleton"] = os.path.basename(skeleton_path)
             skin_path = os.path.join(args.out, stem + ".skin.json")
-            write_skin(obj, bone_names, sources, positions, skin_path, warnings)
+            write_skin(obj, bone_names, sources, positions, skin_path, warnings,
+                       rest_in_ae3d(armature))
             files["skin"] = os.path.basename(skin_path)
             bones = len(bone_names)
 
