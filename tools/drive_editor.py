@@ -167,6 +167,38 @@ def wait_file(path, seconds=8.0, newer_than=None):
             and (newer_than is None or os.path.getmtime(path) > newer_than))
 
 
+def wait_rows_settled(port, scene, seconds=12.0):
+    """Wait until the scene list stops changing size.
+
+    A load rebuilds the list, and a row clicked while it is still being
+    rebuilt is a row that is about to be replaced: the selection goes with it,
+    and what follows asks the editor about whatever ended up selected instead.
+    """
+    deadline = time.time() + seconds
+    count = -1
+    while time.time() < deadline:
+        rows = len(rows_under(tree(port), scene))
+        if rows > 0 and rows == count:
+            return rows
+        count = rows
+        time.sleep(0.2)
+    return count
+
+
+def wait_text(port, widget, wanted, seconds=8.0):
+    """Wait until a widget spells this, and answer what it spells.
+
+    A fixed sleep after an action is a guess about how long the editor takes to
+    do it, and a guess that is usually right is the worst kind: the check
+    passes on an idle machine and fails inside a full run, naming the check
+    rather than the assumption.
+    """
+    widgets, _ = wait_for(port,
+                          lambda ws: ws.get(widget, {}).get("text", "").strip() == wanted,
+                          seconds)
+    return widgets.get(widget, {}).get("text", "").strip()
+
+
 def wait_for(port, predicate, seconds=8.0):
     """Poll the tree until predicate(widgets) holds, or give up.
 
@@ -879,14 +911,18 @@ def main():
                             post(args.port, "/widget/%d/click" % row["id"])
                             time.sleep(0.8)
                             break
+                    # Saved once the readout says the value arrived: saving
+                    # before it has is what left the file holding the number
+                    # the row started at.
                     post(args.port, "/widget/%d/set_value?v=9.25" % later[0]["id"])
-                    time.sleep(0.9)
+                    showed = wait_text(args.port, readout[0]["id"], "9.25")
+                    check("the wave height takes the value it was given",
+                          showed == "9.25", showed)
                     stamped = os.path.getmtime(scene_file)
                     post(args.port, "/widget/%d/click" % save)
                     wait_file(scene_file, newer_than=stamped)
                     post(args.port, "/widget/%d/set_value?v=3.0" % later[0]["id"])
-                    time.sleep(0.9)
-                    moved = tree(args.port)[readout[0]["id"]]["text"].strip()
+                    moved = wait_text(args.port, readout[0]["id"], "3.00")
                     post(args.port, "/widget/%d/click" % load)
                     wait_for(args.port,
                              lambda ws: len(rows_under(ws, scene)) == saved_rows)
@@ -895,9 +931,8 @@ def main():
                     for row in water_rows:
                         if row_name(tree(args.port), row) == "water":
                             post(args.port, "/widget/%d/click" % row["id"])
-                            time.sleep(0.9)
                             break
-                    restored = tree(args.port)[readout[0]["id"]]["text"].strip()
+                    restored = wait_text(args.port, readout[0]["id"], "9.25")
                     check("a setting survives the scene file",
                           moved == "3.00" and restored == "9.25",
                           "changed to %s, came back as %s" % (moved, restored))
@@ -987,7 +1022,7 @@ def main():
             post(args.port, "/widget/%d/click" % ids["None"])
             wait_for(args.port, lambda ws: ws[ids["None"]].get("bg") == ACCENT)
             post(args.port, "/widget/%d/click" % load)
-            wait_for(args.port, lambda ws: len(rows_under(ws, scene)) > 0)
+            wait_rows_settled(args.port, scene)
 
             # Back to the object that was given the script, because the button
             # says what the selected object carries.
