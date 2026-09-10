@@ -215,6 +215,12 @@ def build_rig(name):
     for joint in ORDER:
         if PARENT[joint]:
             edit[joint].parent = edit[PARENT[joint]]
+        # A bone with no thickness carries the figure; it is not part of it.
+        # Left deforming, Blender's automatic weights hand it whatever is
+        # nearest -- and Root runs from the ground up through the pelvis, so it
+        # took the hips and half the torso with it and then dragged them up the
+        # street. A root motion bone never deforms.
+        edit[joint].use_deform = joint in GROWN
     bpy.ops.object.mode_set(mode="OBJECT")
     return rig
 
@@ -334,7 +340,12 @@ def build_clothes(name, material, subdivisions=2):
     the same bones, so a sleeve bends with the elbow inside it.
     """
     at = rest_positions()
-    covered = [joint for joint in ORDER if joint not in BARE]
+    # GROWN, not ORDER: a joint with no thickness is a handle for the animation
+    # to hold and not a part of the figure. Root has none and sits on the
+    # ground, so including it grew a limb from the hips down between the legs --
+    # a third leg, in every frame, which every count and every density still
+    # read as correct.
+    covered = [joint for joint in GROWN if joint not in BARE]
     bm = bmesh.new()
     verts = {}
     for joint in covered:

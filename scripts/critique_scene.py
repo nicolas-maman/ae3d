@@ -84,6 +84,10 @@ OCCLUSION_VISIBLE = 0.03
 MAX_DRAWS = 140
 MAX_TRIANGLES = 60000
 MAX_PROGRAM_CHANGES = 12
+# How much sharper than its own busiest movement a bone may move between two
+# samples. This walk measures 2.0; a leg interpolating the long way round
+# measured 37 to 45, and so did a reading taken while the pose was half built.
+SPIN_LIMIT = 8
 
 FAILURES = []
 
@@ -401,6 +405,91 @@ def silhouette(engine, mesh, columns=52, rows=44):
           "%d cells tall against %d wide" % (bottom - top + 1, right - left + 1))
 
 
+def limbs(engine, mesh, figure_prefix, columns=64, rows=48):
+    """How many legs the figure has, counted off the picture.
+
+    This exists because it had three. A joint with no thickness was still grown
+    around, so a limb ran from the hips to the ground between the legs -- in
+    every frame, with the triangle count, the plane count, the texel density,
+    the proportion and the foot planting all reading correctly. Nothing here
+    could see it, and it took being told.
+
+    Counted as runs of covered cells across the lower third of the silhouette,
+    at the widest point of the stride, which is where legs are separate.
+    """
+    print("\n== how many legs ==")
+    worst = 0
+    at = 0.0
+    for tenth in range(10):
+        moment = tenth * 0.26
+        engine("anim.set", time=moment)
+        bones = {b["name"]: b["world_position"]
+                 for b in engine("scene.skeleton", object=mesh)["bones"]}
+        hips = bones.get("Hips") or [0.0, 1.0, 0.0]
+        engine("camera.set", position=[hips[0], 1.05, hips[2] + 2.5],
+               look_at=[hips[0], 0.95, hips[2]])
+        engine("scene.isolate", object=mesh)
+        lit = engine("frame.grid", columns=columns, rows=rows)["cells"]
+        engine("scene.isolate", object="__nothing__")
+        bare = engine("frame.grid", columns=columns, rows=rows)["cells"]
+        engine("scene.isolate")
+        mask = [[sum(abs(a[i] - b[i]) for i in range(3)) > 0.012
+                 for a, b in zip(ra, rb)] for ra, rb in zip(lit, bare)]
+        covered = [y for y, row in enumerate(mask) if any(row)]
+        if not covered:
+            continue
+        low = covered[0] + int((covered[-1] - covered[0]) * 0.78)
+        for y in range(low, min(covered[-1], len(mask) - 1) + 1):
+            runs, inside = 0, False
+            for on in mask[y]:
+                if on and not inside:
+                    runs += 1
+                inside = on
+            if runs > worst:
+                worst, at = runs, moment
+    print("  the most separate limbs anywhere below the hips: %d (at %.2fs)"
+          % (worst, at))
+    check("the figure has two legs and not three", worst <= 2,
+          "%d separate limbs across the lower body at %.2fs" % (worst, at))
+
+
+def spins(engine, mesh, seconds=4.0, samples=320):
+    """Whether any bone takes the long way round.
+
+    A rotation and its negation are the same pose and interpolate along
+    opposite arcs, so a clip whose keys flip sign between frames sends a bone
+    through a full turn -- which is what the right leg was doing, six times,
+    while every number about the clip read as correct.
+
+    Sampled between the keys, because at a key the pose is right and it is the
+    arc between two of them that is wrong.
+    """
+    print("\n== does anything spin ==")
+    track = {}
+    for step in range(samples):
+        engine("anim.set", time=step * seconds / samples)
+        for bone in engine("scene.skeleton", object=mesh)["bones"]:
+            track.setdefault(bone["name"], []).append(bone["world_position"])
+    worst_name, worst = None, 0.0
+    for name, rows in track.items():
+        steps = sorted(sum((rows[i][k] - rows[i - 1][k]) ** 2 for k in range(3)) ** 0.5
+                       for i in range(1, len(rows)))
+        # Against the 95th and not the median, because a planted foot is
+        # motionless for half a cycle: its median step is zero and everything
+        # is infinitely more than that.
+        busy = steps[int(len(steps) * 0.95)]
+        if busy < 1e-6:
+            continue
+        spike = steps[-1] / busy
+        if spike > worst:
+            worst_name, worst = name, spike
+    print("  the sharpest movement between samples: %s at %.1f times its own busiest"
+          % (worst_name, worst))
+    check("no bone takes the long way round", worst <= SPIN_LIMIT,
+          "%s moves %.1f times its busiest in one step, allowed %d"
+          % (worst_name, worst, SPIN_LIMIT))
+
+
 def gait(engine, figure_mesh, feet, road, seconds, fps):
     """Whether the figure walks or skates.
 
@@ -517,6 +606,8 @@ def main(argv):
         budget(engine)
         if args.walks:
             silhouette(engine, args.walks)
+            limbs(engine, args.walks, args.figure)
+            spins(engine, args.walks)
             gait(engine, args.walks, args.feet.split(","), args.road, 2.6, 24)
         engine("frame.resume")
 

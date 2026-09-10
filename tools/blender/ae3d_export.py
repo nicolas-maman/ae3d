@@ -366,8 +366,17 @@ def build_bone_clips(armature, bone_names, scene, warnings):
         for frame in ordered:
             transform = matrix_transform(rest_matrix @ pose_basis(curves, frame, mode))
             t = rounded((frame - origin) * spf)
+            turn = transform["rotation"]
+            # q and -q are the same rotation and interpolate along opposite
+            # arcs, so a decomposition that happens to pick the other sign
+            # between two frames sends the bone the long way round -- a full
+            # spin, in a clip whose numbers all look right. Decomposing a matrix
+            # picks a sign by whichever term is largest, which flips exactly
+            # where a joint passes through a half turn.
+            if rotations:
+                turn = [rounded(v) for v in align(turn, rotations[-1]["v"])]
             translations.append({"t": t, "v": transform["location"]})
-            rotations.append({"t": t, "v": transform["rotation"]})
+            rotations.append({"t": t, "v": turn})
             scales.append({"t": t, "v": transform["scale"]})
 
         channels = [{"target": "translation", "interpolation": "LINEAR", "keys": translations},

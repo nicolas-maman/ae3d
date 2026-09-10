@@ -61,6 +61,7 @@ const READ_REGION = 1
 const READ_HOLD = 2
 const READ_DIFF = 3
 const READ_GRID = 4
+const READ_SKELETON = 5
 
 // A grid fine enough that a silhouette is legible in it and coarse enough to
 // fit in one reply. 64 by 36 is 2304 cells, which is a frame a person could
@@ -80,6 +81,8 @@ struct Deferred {
     // needs both: where to look and how finely.
     columns: int
     rows: int
+    // What the read is about, for the reads that are about something.
+    subject: ptr
 }
 
 struct Context {
@@ -149,6 +152,16 @@ context_new() -> *Context {
 defer_read(c: *Context, kind: int, id: int, x: int, y: int, width: int, height: int,
            background: int, tolerance: int) -> bool {
     return defer_grid(c, kind, id, x, y, width, height, background, tolerance, 0, 0)
+}
+
+defer_skeleton(c: *Context, id: int, skeleton: ptr) -> bool {
+    d = heap.new(Deferred)
+    d.kind = READ_SKELETON
+    d.id = id
+    d.subject = skeleton
+    list.add_raw(c.deferred, d as ptr)
+    c.want_capture = true
+    return true
 }
 
 defer_grid(c: *Context, kind: int, id: int, x: int, y: int, width: int, height: int,
@@ -249,6 +262,11 @@ answer_one_read(c: *Context, d: *Deferred) {
         json.object_set_raw(out, "cells", rows)
         json.object_set_raw(out, "frame", json.from_int(c.frame_count))
         answer(d.id, out)
+        return
+    }
+
+    if d.kind == READ_SKELETON {
+        answer(d.id, skeleton_result(d.subject as *Skeleton))
         return
     }
 
@@ -385,7 +403,7 @@ help_result() -> ptr {
     json.array_add_raw(ops, describe("render.set", "[normal_strength], [occlusion_strength]",
         "How hard normal maps push and how much baked occlusion is applied, for the whole scene. Zero on either is the lighting this renderer had before it could do that, which is what makes the difference measurable rather than a matter of opinion."))
     json.array_add_raw(ops, describe("scene.skeleton", "object",
-        "Every bone of a skinned model: name, parent, where it is in the world and how it is turned. A skinned mesh stays in its bind pose and its bones carry it, so this is the only thing that says where a figure's hand or foot actually is."))
+        "Every bone of a skinned model: name, parent, where it is in the world and how it is turned. A skinned mesh stays in its bind pose and its bones carry it, so this is the only thing that says where a figure's hand or foot actually is. Answered at the frame boundary, so it describes a pose that is finished rather than one part way through being built."))
     json.array_add_raw(ops, describe("scene.isolate", "[object]",
         "Show only this model, or show every model again when given no name."))
     json.array_add_raw(ops, describe("model.get", "index",
@@ -1550,8 +1568,14 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
             fail(id, "no skinned model by that name")
             return false
         }
-        answer(id, skeleton_result(found as *Skeleton))
-        return false
+        // Deferred to the frame boundary, like every read about what was
+        // drawn. A pose is finished in three steps -- the clips are applied,
+        // then whatever poses the figure afterwards runs, then it is drawn --
+        // and answering the moment the question arrives can land between two of
+        // them. It did: a hand read half a metre from where it was, in one
+        // sample out of a thousand, which is exactly the kind of wrong answer
+        // that gets believed.
+        return defer_skeleton(c, id, found)
     }
 
     // Show one model and hide the rest, or show everything again. Measuring a
