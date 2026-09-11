@@ -126,6 +126,11 @@ FOLLOW_LAG = 1
 # lamp and no run of dark between them.
 LIGHT_SOURCE_LUM = 0.55     # a cell this bright is a light source (lamp, lit window)
 MIN_LIGHT_SOURCES = 3       # a night street has at least this many alight
+# ...but not most of the frame. A scene flooded flat by a bright ambient lights
+# a quarter of its cells this bright; a night lit in pools lights a twentieth.
+# This is the number that tells the two apart, where the median cannot -- the
+# dark sky pulls a flooded frame's median down just as far as a real night's.
+LIGHT_SOURCE_FRACTION_MAX = 0.15
 BRIGHTEST_WANTED = 0.6      # something in frame burns at least this bright
 # Deep dark, but not crushed to nothing: a black frame reads as broken, a lifted
 # one as fog. The darkest tenth sits in this band, which is shadow with a little
@@ -136,7 +141,7 @@ DARK_CEIL = 0.22            # above this the night has been washed flat
 NIGHT_MEDIAN_MAX = 0.42
 # The light is warm and the dark is cool: sodium lamps against a dusk sky. Read
 # as the red-minus-blue of the bright cells and of the dark cells.
-WARM_LIGHTS_MIN = 0.02      # bright cells lean warm by at least this
+WARM_LIGHTS_MIN = 0.10      # bright cells lean warm by at least this -- a lamp, not a grey flood
 COOL_DARK_MAX = 0.02        # dark cells do not lean warm past this
 # The road reflects the lights: the brightest of the road band stands far above
 # its own median. A dry matte road is uniform; a wet one has the lamp in it.
@@ -801,9 +806,14 @@ def lighting(engine, at=2.2):
     check("something in the frame burns like a light",
           brightest >= BRIGHTEST_WANTED,
           "the brightest cell is %.3f, wanted %.2f" % (brightest, BRIGHTEST_WANTED))
+    source_fraction = len(sources) / float(n)
     check("the street has its lamps and windows alight",
           len(sources) >= MIN_LIGHT_SOURCES,
           "%d cells over %.2f, wanted %d" % (len(sources), LIGHT_SOURCE_LUM, MIN_LIGHT_SOURCES))
+    check("and lit in pools rather than flooded flat",
+          source_fraction <= LIGHT_SOURCE_FRACTION_MAX,
+          "%.0f%% of the frame burns that bright, wanted under %.0f%%"
+          % (source_fraction * 100.0, LIGHT_SOURCE_FRACTION_MAX * 100.0))
     check("the night is dark rather than a flat wash",
           median <= NIGHT_MEDIAN_MAX,
           "the median cell is %.3f, wanted under %.2f" % (median, NIGHT_MEDIAN_MAX))
