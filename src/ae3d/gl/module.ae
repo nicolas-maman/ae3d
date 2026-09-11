@@ -1764,9 +1764,34 @@ draw_batch(r: *GLRenderer, b: *GLBatch, view_projection: *Mat4, light: *Light, c
     r.last_draw_calls = r.last_draw_calls + 1
 }
 
+// Whether the model has a surface to draw in this pass. A model split across
+// materials can have opaque groups and transparent ones and so take part in
+// both; a single-material model takes part in one. Asked before any per-model
+// work so a model with nothing in this pass costs a pointer walk rather than a
+// transform, a skin fit, a program bind and a set of uniforms it never draws.
+model_in_pass(m: *Model, transparent_pass: bool) -> bool {
+    groups = core.model_group_count(m)
+    if groups > 0 {
+        i = 0
+        while i < groups {
+            group = core.model_group(m, i)
+            material = group_material(m, group)
+            alpha = 1.0
+            if material != null { alpha = material.alpha }
+            if (alpha < 0.99) == transparent_pass { return true }
+            i = i + 1
+        }
+        return false
+    }
+    alpha = 1.0
+    if m.material != null { alpha = m.material.alpha }
+    return (alpha < 0.99) == transparent_pass
+}
+
 render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
              light: *Light, cam: *Camera, transparent_pass: bool) {
     if m == null || !m.visible { return }
+    if !model_in_pass(m, transparent_pass) { return }
 
     core.model_sync_transform(m)
     // Before the cull, because a skinned mesh's own bounds are the bind pose's
@@ -1815,7 +1840,6 @@ render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
                 apply_transparency(r, is_transparent)
                 apply_texture(r, slots, texture_for(r, material))
                 apply_normal_map(r, slots, normal_for(r, material))
-    apply_normal_map(r, slots, normal_for(r, material))
                 draw(r, m, slots, group.index_count, group.index_start * 4)
             }
             i = i + 1
