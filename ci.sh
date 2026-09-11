@@ -463,6 +463,32 @@ step "the demo scene, held to what a scene has to look like"
 # Every one of them is a property of the scene the engine already holds, and
 # none of them was ever asked for -- which is how the street came to be a row of
 # boxes at ninety texels to the metre with every measurement passing.
+# Both renderers. The whole point is that the scene is judged by the numbers the
+# channel answers with, on the backend it is taken forward on -- so the critique
+# reads the Vulkan frame too, and its verdict on the lighting is proven there.
+# Where a backend cannot give the frame back (software Vulkan on a headless
+# runner has no swapchain to read), it skips rather than fails.
+run_critique() {   # run_critique <backend> <port>
+    crit_backend="$1"
+    crit_port="$2"
+    crit_name="zombie_street (critique, $crit_backend)"
+    crit_arg=""
+    [ "$crit_backend" = vulkan ] && crit_arg="--vulkan"
+    crit_log="$(mktemp)"
+    bounded "$RUN_LIMIT" $PYTHON scripts/critique_scene.py --launch ./build/zombie_street \
+        $crit_arg --port "$crit_port" >"$crit_log" 2>&1
+    crit_status=$?
+    if [ "$crit_status" -eq 0 ]; then
+        pass "$crit_name"
+        grep -E '^  (ok|FAIL)' "$crit_log" | sed 's/^/      /' | head -30
+    elif [ "$crit_status" -eq 3 ]; then
+        skip "$crit_name" "$(grep -m1 'SKIP' "$crit_log" | sed 's/.*SKIP *//' || echo 'the frame could not be read')"
+    else
+        fail "$crit_name"
+        grep -E 'FAIL|Traceback|Error|error:|critique_scene:' "$crit_log" | sed 's/^/        /' | head -16
+    fi
+    rm -f "$crit_log"
+}
 if [ -z "$PYTHON" ]; then
     skip "zombie_street (critique)" "no python3"
 elif ! have_display; then
@@ -470,19 +496,8 @@ elif ! have_display; then
 elif ! built_ok zombie_street; then
     skip "zombie_street (critique)" "it did not build"
 else
-    critique_log="$(mktemp)"
-    bounded "$RUN_LIMIT" $PYTHON scripts/critique_scene.py         --launch ./build/zombie_street --port 7914 >"$critique_log" 2>&1
-    critiqued=$?
-    if [ "$critiqued" -eq 0 ]; then
-        pass "zombie_street (critique)"
-        grep -E '^  (ok|FAIL)' "$critique_log" | sed 's/^/      /' | head -20
-    elif [ "$critiqued" -eq 3 ]; then
-        skip "zombie_street (critique)" "the scene could not open a window"
-    else
-        fail "zombie_street (critique)"
-        grep -E 'FAIL|Traceback|Error|error:|critique_scene:' "$critique_log"             | sed 's/^/        /' | head -14
-    fi
-    rm -f "$critique_log"
+    run_critique opengl 7914
+    run_critique vulkan 7926
 fi
 
 step "the demo scene, held to what it cost last time"

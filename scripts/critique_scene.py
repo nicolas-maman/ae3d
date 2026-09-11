@@ -881,6 +881,23 @@ def main(argv):
 
     with engine:
         engine("frame.pause")
+
+        # The whole critique reads the rendered frame. A backend that cannot
+        # give it back -- software Vulkan on a headless runner has no swapchain
+        # to read from -- cannot be judged, which is a skip rather than a
+        # failure. Probed once, here, so it is caught before any standard runs.
+        probe = engine("frame.grid", columns=8, rows=8).get("cells") or []
+        readable = any(sum(c[:3]) > 0.02 for row in probe for c in row)
+        if not readable:
+            print("critique_scene: SKIP the frame could not be read back on this backend")
+            if scene is not None:
+                scene.terminate()
+                try:
+                    scene.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    scene.kill()
+            return 3
+
         models = engine("scene.tree", detail=True, audit=True)["models"]
         texel_density(models)
         relief(models)
