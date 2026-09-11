@@ -1297,6 +1297,17 @@ group_material(m: *Model, group: *MaterialGroup) -> *Material {
 draw_model(r: *VKRenderer, m: *Model, transparent_pass: bool) {
     if m == null || !m.visible || m.vbo == 0 { return }
 
+    // The pass filter first, off the one cheap read it needs. A model on the
+    // wrong side of the opaque/transparent split takes no part in this pass, so
+    // it is dropped here rather than after its transform, its skin and its cull
+    // have been recomputed for a frame it never draws in -- the transparent
+    // pass would otherwise re-fit every skinned mesh in the scene and throw the
+    // result away.
+    alpha = 1.0
+    if m.material != null { alpha = m.material.alpha }
+    is_transparent = alpha < 0.99
+    if is_transparent != transparent_pass { return }
+
     core.model_sync_transform(m)
     // Before the cull, because a skinned mesh's own bounds are the bind pose's
     // and say nothing about where its bones have carried it.
@@ -1308,11 +1319,6 @@ draw_model(r: *VKRenderer, m: *Model, transparent_pass: bool) {
 
     instances = 0
     if m.is_instanced { instances = core.model_instance_count(m) }
-
-    alpha = 1.0
-    if m.material != null { alpha = m.material.alpha }
-    is_transparent = alpha < 0.99
-    if is_transparent != transparent_pass { return }
 
     program = core.SHADER_CUSTOM
     if core.shader_valid(&m.shader) { program = m.shader.kind }
