@@ -857,6 +857,9 @@ def main(argv):
     parser.add_argument("--road", type=float, default=0.0)
     parser.add_argument("--vulkan", action="store_true",
                         help="drive the Vulkan backend rather than OpenGL")
+    parser.add_argument("--frame-only", action="store_true", dest="frame_only",
+                        help="skip the per-frame animation sampling; keep the "
+                             "scene and lighting standards (for a slow backend)")
     args = parser.parse_args(argv)
 
     started = time.time()
@@ -926,7 +929,14 @@ def main(argv):
         proportion(models, args.figure)
         budget(engine)
         lighting(engine)
-        if args.walks:
+        # The animation standards read the skeleton hundreds of times, once a
+        # frame -- fine at sixty frames a second, but on the software Vulkan a
+        # headless runner falls back to, a frame is a tenth of a second and the
+        # sampling runs for minutes. They judge the pose, which is the same on
+        # every backend and is fully covered by the OpenGL run, so --frame-only
+        # skips them: the Vulkan pass exists to prove the lighting and the
+        # frame-reading on the target, and those it keeps.
+        if args.walks and not args.frame_only:
             silhouette(engine, args.walks)
             limbs(engine, args.walks, args.figure)
             spins(engine, args.walks)

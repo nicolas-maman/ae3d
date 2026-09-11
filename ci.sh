@@ -473,7 +473,11 @@ run_critique() {   # run_critique <backend> <port>
     crit_port="$2"
     crit_name="zombie_street (critique, $crit_backend)"
     crit_arg=""
-    [ "$crit_backend" = vulkan ] && crit_arg="--vulkan"
+    # The Vulkan pass proves the lighting and the frame-reading on the target;
+    # its animation sampling is the same pose the OpenGL pass already judges and
+    # would run for minutes on the software renderer a headless runner uses, so
+    # it is skipped there.
+    [ "$crit_backend" = vulkan ] && crit_arg="--vulkan --frame-only"
     crit_log="$(mktemp)"
     bounded "$RUN_LIMIT" $PYTHON scripts/critique_scene.py --launch ./build/zombie_street \
         $crit_arg --port "$crit_port" >"$crit_log" 2>&1
