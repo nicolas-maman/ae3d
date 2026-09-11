@@ -364,6 +364,7 @@ for suite in tests/test_*.ae; do
     elif [ "$suite_status" -ne 0 ]; then
         fail "$name$(died_on "$suite_status")"
         printf '%s\n' "$output" | sed 's/^/        /' | head -20
+        trace_crash "$suite_status" ./build/"$name"
     elif printf '%s' "$output" | grep -q "all checks passed"; then
         pass "$name"
     elif printf '%s' "$output" | grep -q "SKIP" && ! printf '%s' "$output" | grep -q "FAIL"; then
