@@ -22,7 +22,7 @@ exports (
     available, device_name, last_error,
     renderer_model_count, renderer_model, renderer_light_count, renderer_light, renderer_draw_calls, renderer_set_clear_color,
     renderer_shadow_ms, renderer_scene_ms, renderer_post_ms, renderer_post_active, renderer_program_binds, renderer_material_binds,
-    renderer_set_normal_strength, renderer_set_occlusion_strength,
+    renderer_set_normal_strength, renderer_set_occlusion_strength, renderer_material_texture_size,
     renderer_load_texture, renderer_release_texture, renderer_sample_count, renderer_set_post,
     renderer_set_shadows, renderer_shadows, renderer_add_light, renderer_remove_light,
     renderer_set_fog, renderer_fog, renderer_set_shadow_distance, renderer_shadow_distance,
@@ -107,6 +107,8 @@ struct VulkanTexture {
     path: string
     handle: int
     refs: int
+    width: int
+    height: int
 }
 
 // One merged draw: the geometry every member shares, the surface they all have,
@@ -662,8 +664,9 @@ renderer_load_texture(r: *VKRenderer, path: string) -> int {
         println("ae3d: texture load failed: ${ae3d_image_error()}")
         return 0
     }
-    handle = ae3d_vk_texture_create(ae3d_image_width(image), ae3d_image_height(image),
-                                    ae3d_image_pixels(image))
+    tex_w = ae3d_image_width(image)
+    tex_h = ae3d_image_height(image)
+    handle = ae3d_vk_texture_create(tex_w, tex_h, ae3d_image_pixels(image))
     ae3d_image_free(image)
     if handle == 0 { return 0 }
 
@@ -671,6 +674,8 @@ renderer_load_texture(r: *VKRenderer, path: string) -> int {
     texture_entry_set_path(entry, path)
     entry.handle = handle
     entry.refs = 1
+    entry.width = tex_w
+    entry.height = tex_h
     list.add_raw(r.textures, entry)
     return handle
 }
@@ -741,8 +746,16 @@ resolve_textures(r: *VKRenderer, m: *Model) {
 
 resolve_one(r: *VKRenderer, material: *Material) {
     material.texture_stale = false
-    if core.text(material.texture_path) == "" || material.texture_id != 0 { return }
-    material.texture_id = renderer_load_texture(r, material.texture_path)
+    if core.text(material.texture_path) != "" && material.texture_id == 0 {
+        material.texture_id = renderer_load_texture(r, material.texture_path)
+    }
+    // The normal too, here rather than at first draw. A rooftop tank is culled
+    // for the whole clip, so a normal loaded lazily would never load, and a map
+    // named and never loaded is what the critique catches.
+    material.normal_stale = false
+    if core.text(material.normal_path) != "" && material.normal_id == 0 {
+        material.normal_id = renderer_load_texture(r, material.normal_path)
+    }
 }
 
 // The path was changed after this material had already been given a texture, so
@@ -765,6 +778,23 @@ renderer_set_normal_strength(r: *VKRenderer, strength: float) {
 
 renderer_set_occlusion_strength(r: *VKRenderer, strength: float) {
     if r != null { r.occlusion_strength = strength }
+}
+
+// The pixel size of a material's colour texture, for the agent's texel-density
+// read, the same figure the OpenGL renderer reports from its own texture list.
+renderer_material_texture_size(r: *VKRenderer, material: *Material) -> Vec3 {
+    if r == null || material == null { return core.vec3(0.0, 0.0, 0.0) }
+    id = texture_for(r, material)
+    count = list.size(r.textures)
+    i = 0
+    while i < count {
+        entry = list.get_raw(r.textures, i) as *VulkanTexture
+        if entry != null && entry.handle == id {
+            return core.vec3(entry.width * 1.0, entry.height * 1.0, 0.0)
+        }
+        i = i + 1
+    }
+    return core.vec3(0.0, 0.0, 0.0)
 }
 
 normal_for(r: *VKRenderer, material: *Material) -> int {

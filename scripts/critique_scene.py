@@ -118,6 +118,30 @@ STRIKE_REACH = 0.12
 # frames -- a head that turns with the pelvis, or before it, belongs to a
 # mannequin.
 FOLLOW_LAG = 1
+# What a night street has to be in the frame, read off the rendered grid rather
+# than off a screenshot -- every number below comes back through the channel.
+#
+# A night is contrast: bright sources against deep dark. A scene lit by a flat
+# ambient wash has neither, so it is caught by having no cell brighter than a
+# lamp and no run of dark between them.
+LIGHT_SOURCE_LUM = 0.55     # a cell this bright is a light source (lamp, lit window)
+MIN_LIGHT_SOURCES = 3       # a night street has at least this many alight
+BRIGHTEST_WANTED = 0.6      # something in frame burns at least this bright
+# Deep dark, but not crushed to nothing: a black frame reads as broken, a lifted
+# one as fog. The darkest tenth sits in this band, which is shadow with a little
+# indirect light in it and no more.
+DARK_FLOOR = 0.008          # below this is a pure-black crush
+DARK_CEIL = 0.22            # above this the night has been washed flat
+# The frame as a whole is dark -- it is night -- so its median is low.
+NIGHT_MEDIAN_MAX = 0.42
+# The light is warm and the dark is cool: sodium lamps against a dusk sky. Read
+# as the red-minus-blue of the bright cells and of the dark cells.
+WARM_LIGHTS_MIN = 0.02      # bright cells lean warm by at least this
+COOL_DARK_MAX = 0.02        # dark cells do not lean warm past this
+# The road reflects the lights: the brightest of the road band stands far above
+# its own median. A dry matte road is uniform; a wet one has the lamp in it.
+ROAD_REFLECTION_MIN = 0.25
+
 
 FAILURES = []
 
@@ -739,6 +763,79 @@ def secondary_motion(engine, mesh, seconds=5.0, fps=24):
           "best alignment at a lag of %d frames, wanted at least %d" % (best_lag, FOLLOW_LAG))
 
 
+def _lum(cell):
+    return 0.2126 * cell[0] + 0.7152 * cell[1] + 0.0722 * cell[2]
+
+
+def lighting(engine, at=2.2):
+    """Whether the frame reads as a night, measured off the rendered grid.
+
+    Nothing here is looked at. frame.grid answers the whole frame as a grid of
+    mean colours -- the same numbers a person's eye would be forming an
+    impression from -- and the impression is made of contrast, warm light
+    against cool dark, and the lamps caught in the wet road. Each of those is a
+    number, so each is a standard the scene either meets or does not, on
+    whichever backend drew the frame.
+    """
+    print("\n== does it read as a night ==")
+    # The scene is already paused by the caller; seek and read, and do not
+    # resume -- the measures after this one depend on the playhead staying put.
+    engine("anim.set", time=at)
+    grid = engine("frame.grid", columns=48, rows=27)["cells"]
+    cells = [c for row in grid for c in row]
+    if not cells:
+        check("the frame came back to be read", False, "the grid was empty")
+        return
+    lums = sorted(_lum(c) for c in cells)
+    n = len(lums)
+
+    brightest = lums[-1]
+    median = lums[n // 2]
+    dark = lums[max(1, n // 10) - 1]
+    sources = [c for c in cells if _lum(c) >= LIGHT_SOURCE_LUM]
+
+    print("  luminance runs %.3f to %.3f, median %.3f, darkest tenth at %.3f"
+          % (lums[0], brightest, median, dark))
+    print("  %d cells burn as light sources" % len(sources))
+
+    check("something in the frame burns like a light",
+          brightest >= BRIGHTEST_WANTED,
+          "the brightest cell is %.3f, wanted %.2f" % (brightest, BRIGHTEST_WANTED))
+    check("the street has its lamps and windows alight",
+          len(sources) >= MIN_LIGHT_SOURCES,
+          "%d cells over %.2f, wanted %d" % (len(sources), LIGHT_SOURCE_LUM, MIN_LIGHT_SOURCES))
+    check("the night is dark rather than a flat wash",
+          median <= NIGHT_MEDIAN_MAX,
+          "the median cell is %.3f, wanted under %.2f" % (median, NIGHT_MEDIAN_MAX))
+    check("the shadows are deep but not crushed to black",
+          DARK_FLOOR <= dark <= DARK_CEIL,
+          "the darkest tenth is %.3f, wanted %.3f to %.2f" % (dark, DARK_FLOOR, DARK_CEIL))
+
+    # Warm light, cool dark: the red-minus-blue of the brightest and the darkest.
+    bright_cells = sorted(cells, key=_lum)[-max(3, n // 20):]
+    dark_cells = sorted(cells, key=_lum)[:max(3, n // 5)]
+    warm = sum(c[0] - c[2] for c in bright_cells) / len(bright_cells)
+    cool = sum(c[0] - c[2] for c in dark_cells) / len(dark_cells)
+    print("  the light leans %+.3f warm, the dark leans %+.3f" % (warm, cool))
+    check("the light is warm", warm >= WARM_LIGHTS_MIN,
+          "the bright cells lean %+.3f, wanted %+.2f" % (warm, WARM_LIGHTS_MIN))
+    check("and the dark is not warmer than the light",
+          cool <= COOL_DARK_MAX and cool < warm,
+          "the dark cells lean %+.3f" % cool)
+
+    # The road: the bottom third of the frame, where the wet surface takes the
+    # lamps. Its brightest stands well above its own median when it is wet.
+    road = [c for row in grid[int(len(grid) * 0.62):] for c in row]
+    if road:
+        rl = sorted(_lum(c) for c in road)
+        contrast = rl[-1] - rl[len(rl) // 2]
+        print("  the road runs %.3f to %.3f (%.3f of reflection)"
+              % (rl[0], rl[-1], contrast))
+        check("the wet road takes the lamps", contrast >= ROAD_REFLECTION_MIN,
+              "the road's brightest stands %.3f over its median, wanted %.2f"
+              % (contrast, ROAD_REFLECTION_MIN))
+
+
 def main(argv):
     parser = argparse.ArgumentParser(prog="critique_scene")
     parser.add_argument("--port", type=int, default=7911)
@@ -748,6 +845,8 @@ def main(argv):
                         help="the skinned model whose skeleton carries the walk")
     parser.add_argument("--feet", default="AnkleL,AnkleR,ToeL,ToeR")
     parser.add_argument("--road", type=float, default=0.0)
+    parser.add_argument("--vulkan", action="store_true",
+                        help="drive the Vulkan backend rather than OpenGL")
     args = parser.parse_args(argv)
 
     started = time.time()
@@ -757,7 +856,8 @@ def main(argv):
         env["AE3D_AGENT"] = str(args.port)
         env["AE3D_FRAMES"] = "100000"
         log = tempfile.NamedTemporaryFile(prefix="ae3d_critique_", suffix=".log", delete=False)
-        scene = subprocess.Popen([args.launch], env=env, stdout=log, stderr=subprocess.STDOUT)
+        command = [args.launch] + (["vulkan"] if args.vulkan else [])
+        scene = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT)
         engine = None
         deadline = time.time() + 30.0
         while time.time() < deadline and engine is None:
@@ -788,6 +888,7 @@ def main(argv):
         character(models, args.figure)
         proportion(models, args.figure)
         budget(engine)
+        lighting(engine)
         if args.walks:
             silhouette(engine, args.walks)
             limbs(engine, args.walks, args.figure)

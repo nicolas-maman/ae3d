@@ -632,13 +632,17 @@ audit_model(c: *Context, m: *Model, entry: ptr) {
     if area > 0.000001 { repeats = core.sqrt_of(uv_area / area) }
     json.object_set_raw(entry, "uv_repeats_per_m", json.num(repeats))
 
+    // Texel density needs the texture's pixel size, which the renderer that
+    // loaded it knows -- whichever renderer that is.
+    size = core.vec3(0.0, 0.0, 0.0)
     if c.gl_renderer != null {
-        size = gl.renderer_material_texture_size(c.gl_renderer as *GLRenderer,
-                                                 model_surface(m))
-        if size.x > 0.0 {
-            json.object_set_raw(entry, "texture_pixels", json.from_int(size.x as int))
-            json.object_set_raw(entry, "texels_per_m", json.num(repeats * size.x))
-        }
+        size = gl.renderer_material_texture_size(c.gl_renderer as *GLRenderer, model_surface(m))
+    } else if c.vk_renderer != null {
+        size = vk.renderer_material_texture_size(c.vk_renderer as *VKRenderer, model_surface(m))
+    }
+    if size.x > 0.0 {
+        json.object_set_raw(entry, "texture_pixels", json.from_int(size.x as int))
+        json.object_set_raw(entry, "texels_per_m", json.num(repeats * size.x))
     }
 
     // In metres along its own axes, so proportion can be checked as the ratio
