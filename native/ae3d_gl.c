@@ -728,9 +728,16 @@ void ae3d_gl_passtimer_destroy(void *handle) {
     ae3d_gl_passtimer *timer = (ae3d_gl_passtimer *)handle;
     int slot, pass;
     if (!timer) return;
-    for (slot = 0; slot < AE3D_GL_TIMER_DEPTH; slot++)
-        for (pass = 0; pass < AE3D_GL_PASSES; pass++)
-            if (timer->id[slot][pass]) glDeleteQueries(1, &timer->id[slot][pass]);
+    /* Only delete the query objects if a context is current to delete them in.
+       When the window is already gone -- a program that frees its renderer
+       after shutting the engine down, or a test that destroys its offscreen
+       context first -- the queries died with the context, and calling
+       glDeleteQueries against no context segfaults on llvmpipe. */
+    if (ae3d_gl_context_current()) {
+        for (slot = 0; slot < AE3D_GL_TIMER_DEPTH; slot++)
+            for (pass = 0; pass < AE3D_GL_PASSES; pass++)
+                if (timer->id[slot][pass]) glDeleteQueries(1, &timer->id[slot][pass]);
+    }
     free(timer);
 }
 

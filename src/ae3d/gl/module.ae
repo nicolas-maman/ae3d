@@ -345,10 +345,6 @@ renderer_new() -> *GLRenderer {
 
 renderer_free(r: *GLRenderer) {
     if r == null { return }
-    if r.pass_timer != null {
-        ae3d_gl_passtimer_destroy(r.pass_timer)
-        r.pass_timer = null
-    }
     renderer_cleanup(r)
     ae3d_gl_geometry_shutdown()
     if r.models != null { list.free(r.models) }
@@ -2354,6 +2350,16 @@ free_batches(batches: ptr) {
 
 renderer_cleanup(r: *GLRenderer) {
     if r == null { return }
+
+    // The pass timer owns GL query objects, and deleting a GL object needs the
+    // context that made it. This runs from engine_shutdown while the context is
+    // still current; renderer_free runs later, after the window and its context
+    // are gone, so a glDeleteQueries there dereferences a context that no longer
+    // exists -- which a desktop driver shrugs off and llvmpipe segfaults on.
+    if r.pass_timer != null {
+        ae3d_gl_passtimer_destroy(r.pass_timer)
+        r.pass_timer = null
+    }
 
     free_batches(r.batches)
     free_batches(r.shadow_batches)

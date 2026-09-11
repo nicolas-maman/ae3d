@@ -153,6 +153,9 @@ int    ae3d_image_height(void *img);
 const char *ae3d_image_error(void);
 
 int    ae3d_gl_load(void);
+/* Whether a GL context is current on this thread; cleanup that can outlive the
+   window checks this before deleting GL objects. */
+int    ae3d_gl_context_current(void);
 const char *ae3d_gl_version(void);
 const char *ae3d_gl_renderer(void);
 int    ae3d_gl_error(void);

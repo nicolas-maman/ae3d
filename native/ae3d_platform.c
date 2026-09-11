@@ -153,6 +153,14 @@ void ae3d_window_make_current(void *win) {
     if (win) glfwMakeContextCurrent((GLFWwindow *)win);
 }
 
+/* Whether a GL context is current on this thread. Deleting a GL object with no
+   context is undefined: a desktop driver returns early, llvmpipe dereferences
+   the missing context and crashes, so cleanup that can run after the window is
+   gone asks this first. */
+int ae3d_gl_context_current(void) {
+    return glfwGetCurrentContext() != NULL;
+}
+
 void ae3d_window_set_vsync(int interval) { glfwSwapInterval(interval); }
 
 int ae3d_window_width(void *win) {
