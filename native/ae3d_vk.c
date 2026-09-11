@@ -3046,6 +3046,16 @@ void ae3d_vk_set_post(int fxaa, int bloom, double threshold, double intensity) {
 
 int ae3d_vk_post_active(void) { return vk.post_active; }
 
+/* The bloom intensity on its own, so a caller can read it, dial it out to see
+ * what the bloom is worth, and put it back, without knowing the other post
+ * parameters the scene set. Every bloom term scales by it, so zero is off with
+ * the pipeline otherwise unchanged. */
+void ae3d_vk_set_bloom_intensity(double intensity) {
+    vk.bloom_intensity = (float)intensity;
+}
+
+double ae3d_vk_bloom_intensity(void) { return vk.bloom_intensity; }
+
 // Post parameters are written here rather than by the caller because the scene
 // draws share this block and a material's own bloom settings would otherwise be
 // what the composite pass read.

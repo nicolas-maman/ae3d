@@ -146,6 +146,14 @@ COOL_DARK_MAX = 0.02        # dark cells do not lean warm past this
 # The road reflects the lights: the brightest of the road band stands far above
 # its own median. A dry matte road is uniform; a wet one has the lamp in it.
 ROAD_REFLECTION_MIN = 0.25
+# Bloom, proved by turning it off. Every bloom term scales by its intensity, so
+# dialling it to zero over the channel is the same render path with the glow
+# removed -- no pipeline change to confound the reading. Bloom adds light and
+# spreads it, so with it on the frame carries more total luminance and more
+# cells burn over the light-source line. Measured lift on both backends is
+# ~1.6x total and ~2.4x bright cells; these are the floors, well under that.
+BLOOM_TOTAL_LIFT = 1.15    # the lit frame is at least this times as bright in total
+BLOOM_BRIGHT_LIFT = 1.30   # and at least this many times as many cells burn bright
 
 
 FAILURES = []
@@ -846,6 +854,49 @@ def lighting(engine, at=2.2):
               % (contrast, ROAD_REFLECTION_MIN))
 
 
+def bloom(engine, at=2.2):
+    """That the bloom the scene turns on is doing measurable work.
+
+    Read by turning it off. render.set dials the intensity to zero on the same
+    render path -- every bloom term is scaled by it, so nothing about the
+    pipeline changes, the glow simply goes to nothing -- and the frame is read
+    again. Bloom lifts light and spreads it, so the lit frame carries more total
+    luminance and more cells over the light-source line than the frame without
+    it. Both are numbers off the grid, so both are standards rather than
+    opinions. The intensity is read first and put back after, so nothing
+    downstream sees the frame with its glow removed.
+    """
+    print("\n== the bloom earns its place ==")
+    engine("anim.set", time=at)
+    configured = engine("frame.stats")["render"].get("bloom_intensity")
+    if not configured or configured <= 0.0:
+        check("the scene has bloom to measure", False,
+              "the renderer reports bloom_intensity %r" % configured)
+        return
+
+    def read():
+        grid = engine("frame.grid", columns=64, rows=36)["cells"]
+        lums = [_lum(c) for row in grid for c in row]
+        return sum(lums), sum(1 for x in lums if x >= LIGHT_SOURCE_LUM)
+
+    on_total, on_bright = read()
+    engine("render.set", bloom_intensity=0.0)
+    off_total, off_bright = read()
+    engine("render.set", bloom_intensity=configured)
+
+    print("  with bloom the frame carries %.1f of light across %d bright cells;"
+          " with it off, %.1f across %d"
+          % (on_total, on_bright, off_total, off_bright))
+    check("bloom lifts the light in the frame",
+          on_total >= off_total * BLOOM_TOTAL_LIFT,
+          "with bloom %.1f, without %.1f (%.2fx, wanted %.2fx)"
+          % (on_total, off_total, on_total / max(off_total, 1e-6), BLOOM_TOTAL_LIFT))
+    check("and spreads it, so more of the frame burns bright",
+          on_bright >= off_bright * BLOOM_BRIGHT_LIFT,
+          "with bloom %d bright cells, without %d (%.2fx, wanted %.2fx)"
+          % (on_bright, off_bright, on_bright / float(max(off_bright, 1)), BLOOM_BRIGHT_LIFT))
+
+
 def main(argv):
     parser = argparse.ArgumentParser(prog="critique_scene")
     parser.add_argument("--port", type=int, default=7911)
@@ -929,6 +980,7 @@ def main(argv):
         proportion(models, args.figure)
         budget(engine)
         lighting(engine)
+        bloom(engine)
         # The animation standards read the skeleton hundreds of times, once a
         # frame -- fine at sixty frames a second, but on the software Vulkan a
         # headless runner falls back to, a frame is a tenth of a second and the
