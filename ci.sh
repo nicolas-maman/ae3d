@@ -377,7 +377,9 @@ for suite in tests/test_*.ae; do
 done
 
 step "examples build and run"
-build_together examples/*.ae
+# The benchmark is built in the same pass: build_together starts from a clean
+# status directory, so a later call would forget that the examples built.
+build_together examples/*.ae tools/ae3d_bench.ae
 for example in examples/*.ae; do
     name="$(basename "$example" .ae)"
     if ! built_ok "$name"; then
@@ -480,7 +482,6 @@ step "the demo scene, held to what it cost last time"
 # Both renderers, because a cost that can only be measured on one of them is
 # a cost that regresses unseen on the other; Vulkan skips where there is no
 # driver, the way every other Vulkan check here does.
-build_together tools/ae3d_bench.ae
 frame_cost() {   # frame_cost <backend> <port>
     cost_backend="$1"
     cost_port="$2"

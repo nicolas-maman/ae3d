@@ -87,7 +87,13 @@ OCCLUSION_VISIBLE = 0.03
 # thing on every machine. Set above what it costs now with room to grow, and
 # below what would be a different scene: 95 draws, 36,106 triangles, 4 program
 # changes today.
-MAX_DRAWS = 140
+# The scene is the engine's benchmark, so its draw count is the load it exists
+# to carry, not an accident to be trimmed: a terrace with a roofline, downpipes
+# and a dressed pavement draws in the low hundreds and is meant to. This is a
+# ceiling against a scene that has quietly gone wrong -- a texture bound per
+# face, a merge that stopped merging -- while tools/ae3d_bench.ae holds the
+# exact figure and fails the build on a single draw more than last recorded.
+MAX_DRAWS = 320
 MAX_TRIANGLES = 60000
 MAX_PROGRAM_CHANGES = 12
 # How much sharper than its own busiest movement a bone may move between two

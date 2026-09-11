@@ -432,3 +432,90 @@ def cloth_normal(size=1024, seed=89):
     height = (numpy.sin(weave)[None, :] + numpy.sin(weave)[:, None]) * 0.12
     height += _noise(rng, size, 5, 5) * 0.7
     return _normal_from_height(height, 1.6, "ZombieClothNormal")
+
+
+def _planks(size, rng, boards, gap):
+    """Which texels are the gap between boards, and which board each is on.
+
+    Boards run along y, so a crate or a bench is built with its length along
+    the grain, which is the way timber is used.
+    """
+    pitch = size / boards
+    field = numpy.zeros((size, size), dtype=numpy.float32)
+    board = numpy.zeros((size, size), dtype=numpy.float32)
+    tones = [rng.uniform(-0.09, 0.09) for _ in range(boards)]
+    for x in range(size):
+        which = int(x / pitch)
+        in_board = x - which * pitch
+        field[:, x] = 1.0 if (in_board < gap or in_board > pitch - gap) else 0.0
+        board[:, x] = tones[which]
+    return field, board
+
+
+def wood(size=512, seed=139):
+    """Rough sawn boards, four across a tile of sixty centimetres, so a board
+    is 150mm and the grain runs the length of whatever is built from it."""
+    rng = random.Random(seed)
+    field, board = _planks(size, rng, 4, max(1.0, size / 160.0))
+    grain = _noise(rng, size, 6, 3)
+    streak = _noise(rng, size, 2, 24)
+    rgb = _tint((0.44, 0.31, 0.19), (0.19, 0.13, 0.08), field)
+    rgb *= (0.84 + board[:, :, None] + (grain[:, :, None] - 0.5) * 0.30
+            + (streak[:, :, None] - 0.5) * 0.14)
+    return _image("PropWood", size, _rgba(rgb))
+
+
+def wood_normal(size=512, seed=139):
+    rng = random.Random(seed)
+    field, _board = _planks(size, rng, 4, max(1.0, size / 160.0))
+    height = (1.0 - field) + _noise(rng, size, 6, 3) * 0.18
+    return _normal_from_height(height, 2.2, "PropWoodNormal")
+
+
+def painted_metal(size=512, seed=149):
+    """A wheelie bin or a bollard: paint over pressed steel, worn through at
+    the edges and dented where it has been knocked about."""
+    rng = random.Random(seed)
+    dents = _noise(rng, size, 3, 4)
+    wear = _noise(rng, size, 5, 7)
+    rgb = _tint((0.16, 0.22, 0.18), (0.30, 0.28, 0.24),
+                numpy.clip(wear * 1.6 - 0.75, 0.0, 1.0))
+    rgb *= (0.86 + (dents[:, :, None] - 0.5) * 0.26)
+    return _image("PropPaint", size, _rgba(rgb))
+
+
+def painted_metal_normal(size=512, seed=149):
+    rng = random.Random(seed)
+    height = _noise(rng, size, 3, 4) * 0.8 + _noise(rng, size, 5, 7) * 0.2
+    return _normal_from_height(height, 1.6, "PropPaintNormal")
+
+
+def sacking(size=512, seed=151):
+    """A refuse sack: black polythene, creased, with a sheen where it is
+    stretched. The creases are the normal map's; the colour is nearly one."""
+    rng = random.Random(seed)
+    crease = _noise(rng, size, 4, 6)
+    rgb = _tint((0.045, 0.045, 0.05), (0.10, 0.10, 0.11),
+                numpy.clip(crease * 1.5 - 0.5, 0.0, 1.0))
+    return _image("PropSack", size, _rgba(rgb))
+
+
+def sacking_normal(size=512, seed=151):
+    rng = random.Random(seed)
+    height = _noise(rng, size, 4, 6) * 0.7 + _noise(rng, size, 6, 14) * 0.3
+    return _normal_from_height(height, 2.8, "PropSackNormal")
+
+
+def wet_tarmac(size=1024, seed=37):
+    """The road after rain. The same grit and the same patches as the dry
+    surface -- it is the same road -- but darker, because a film of water lets
+    less light back out, and cooler, because what it does let out has been
+    through the sky. What makes it read as wet is not here: it is the
+    roughness, which is the material's, and the lamps it then reflects."""
+    rng = random.Random(seed)
+    grit = _noise(rng, size, 6, 10)
+    patch = _noise(rng, size, 3, 5)
+    rgb = _tint((0.040, 0.042, 0.050), (0.064, 0.066, 0.076),
+                numpy.clip(patch * 1.4 - 0.35, 0.0, 1.0))
+    rgb *= (0.80 + grit[:, :, None] * 0.40)
+    return _image("RoadTarmac", size, _rgba(rgb))

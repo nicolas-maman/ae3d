@@ -369,7 +369,18 @@ load_obj_baked(path: string, recalculate_normals: bool, skin: ptr,
 
     final_count = core.mesh_index_count(m.mesh)
     if have_group && final_count > group_start {
-        core.model_add_group(m, group_material, group_start, final_count - group_start)
+        if core.model_group_count(m) == 0 && group_start == 0 {
+            // One usemtl covering the whole mesh is a material, not a group.
+            // A group is a run of faces with a material of its own, and a
+            // model with any is drawn on its own: the renderers merge only
+            // models whose one material is the model's. Every object an
+            // exporter writes has a usemtl line, so without this nothing
+            // exported could ever be merged, and a street of bollards cost a
+            // draw a bollard.
+            m.material = group_material
+        } else {
+            core.model_add_group(m, group_material, group_start, final_count - group_start)
+        }
     }
 
     string.array_free(lines)
@@ -393,7 +404,7 @@ load_obj_baked(path: string, recalculate_normals: bool, skin: ptr,
         core.mesh_recalculate_normals(m.mesh)
     }
 
-    if core.model_group_count(m) == 0 && list.size(materials) > 0 {
+    if core.model_group_count(m) == 0 && m.material == null && list.size(materials) > 0 {
         m.material = list.get_raw(materials, 0) as *Material
     }
 

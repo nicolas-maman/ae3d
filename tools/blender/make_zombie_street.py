@@ -193,6 +193,8 @@ REVEAL = 0.24
 DOOR_W = 1.35
 DOOR_H = 2.45
 BAY = 2.6
+# The top of the plinth course, above the pavement.
+PLINTH = 0.48
 
 
 def _face(bm, corners):
@@ -298,7 +300,7 @@ def _front(bm, x0, x1, z0, z1, sign, holes):
 
 
 def building(name, width, depth, height, base, surface, repeats, sign, trim,
-             glass, glow, rng):
+             glass, glow, pipes_surface, rng):
     """A terrace front: a mass, the holes in it, what frames them, what fills them.
 
     Three objects rather than one, because the exporter writes the material an
@@ -341,6 +343,15 @@ def building(name, width, depth, height, base, surface, repeats, sign, trim,
     cornice = sign * -0.26
     _slab(band, (-half - 0.1, min(0.0, cornice), height - 0.42),
           (half + 0.1, max(0.0, cornice), height))
+    # A plinth course at the foot of the wall. Where a wall meets the
+    # pavement is where it gets kicked, splashed and leant on, and a terrace
+    # is built with a harder stone there for that reason; it is also where
+    # the eye reads whether the building stands on the street or floats over
+    # it. Proud of the wall by more than the sills, so the corner it makes
+    # with the pavement is a real one and the occlusion bake finds it.
+    plinth = sign * -0.13
+    _slab(band, (-half - 0.06, min(0.0, plinth), base),
+          (half + 0.06, max(0.0, plinth), PLINTH))
 
     # Glass at the back of its reveal, in two objects rather than one: a lit
     # room and a dark one are different materials, and a night street is mostly
@@ -367,7 +378,25 @@ def building(name, width, depth, height, base, surface, repeats, sign, trim,
     dark_obj.parent = shell_obj
     lit_obj = _finish(lit, name + "_Lit", glow, 0.0)
     lit_obj.parent = shell_obj
-    return shell_obj, trim_obj, dark_obj, lit_obj
+
+    # Downpipes at the party walls, from the gutter to a shoe above the
+    # plinth. Nothing breaks a facade's flatness like a vertical that stands
+    # off it, and every terrace has one at every joint.
+    pipes = bmesh.new()
+    stand = sign * -0.16
+    for px in (-half + 0.28, half - 0.28):
+        _slab(pipes, (px - 0.055, min(stand, stand + sign * 0.11), PLINTH + 0.12),
+              (px + 0.055, max(stand, stand + sign * 0.11), height - 0.30))
+        # The bracket that holds it to the wall, one a storey.
+        for storey in range(storeys + 1):
+            z = base + storey * STOREY + 1.2
+            if z >= height - 0.5:
+                continue
+            _slab(pipes, (px - 0.085, min(0.0, stand), z - 0.04),
+                  (px + 0.085, max(0.0, stand), z + 0.04))
+    pipes_obj = _finish(pipes, name + "_Pipes", pipes_surface, 3.0)
+    pipes_obj.parent = shell_obj
+    return shell_obj, trim_obj, dark_obj, lit_obj, pipes_obj
 
 
 def ground_plane(name, length, width, surface, repeats, rng):
@@ -451,6 +480,188 @@ def kerbs(name, length, width, surface, repeats, rng):
     return _finish(bm, name, surface, repeats)
 
 
+def roofline(parts, name, shell, width, depth, height, sign, surface, surfaces, rng):
+    """What stands above the cornice.
+
+    A terrace's roofline is the one edge in the frame that is drawn against
+    the sky, and a row of flat tops is a row of boxes whatever their fronts
+    are made of. Brick buildings carry chimney stacks; concrete ones carry a
+    water tank on legs and an aerial. Every one of them is placed by the
+    building's own random draw, so no two rooflines repeat.
+    """
+    half = width * 0.5
+    back = sign * depth
+    props = []
+    if surface == "brick":
+        for index in range(2 + int(rng.random() * 2)):
+            x = rng.uniform(-half + 1.2, half - 1.2)
+            y = back * rng.uniform(0.25, 0.7)
+            tall = 1.35 + rng.uniform(0.0, 0.3)
+            stack = block("%s_Stack%d" % (name, index),
+                          (-0.38, -0.38, 0.0), (0.38, 0.38, tall),
+                          surfaces["brick"], repeats=WALL_REPEATS, bevel=0.0)
+            stack.parent = shell
+            stack.location = (x, y, height - 0.05)
+            props.append(stack)
+            # The pot on top, and a cap over it, which is what makes a stack
+            # read as a chimney rather than as a post.
+            pot = block("%s_Pot%d" % (name, index),
+                        (-0.16, -0.16, 0.0), (0.16, 0.16, 0.55),
+                        surfaces["stone"], repeats=2.2, bevel=0.02, taper=0.85)
+            pot.parent = stack
+            pot.location = (0.0, 0.0, tall - 0.02)
+            props.append(pot)
+    else:
+        x = rng.uniform(-half + 2.0, half - 2.0)
+        y = back * rng.uniform(0.35, 0.65)
+        tank = block("%s_Tank" % name, (-1.05, -1.05, 0.0), (1.05, 1.05, 1.7),
+                     surfaces["paint"], repeats=1.6, bevel=0.06)
+        tank.parent = shell
+        tank.location = (x, y, height + 1.1)
+        props.append(tank)
+        for index, (lx, ly) in enumerate(((-0.8, -0.8), (0.8, -0.8), (0.8, 0.8), (-0.8, 0.8))):
+            leg = block("%s_TankLeg%d" % (name, index),
+                        (-0.06, -0.06, 0.0), (0.06, 0.06, 1.15),
+                        surfaces["metal"], repeats=1.2, bevel=0.0)
+            leg.parent = tank
+            leg.location = (lx, ly, -1.15)
+            props.append(leg)
+        mast = block("%s_Aerial" % name, (-0.025, -0.025, 0.0), (0.025, 0.025, 3.2),
+                     surfaces["metal"], repeats=1.2, bevel=0.0)
+        mast.parent = shell
+        mast.location = (rng.uniform(-half + 1.0, half - 1.0), back * 0.8, height - 0.05)
+        props.append(mast)
+        for index, z in enumerate((2.2, 2.7, 3.1)):
+            bar = block("%s_AerialBar%d" % (name, index),
+                        (-0.55 + index * 0.12, -0.015, -0.015), (0.55 - index * 0.12, 0.015, 0.015),
+                        surfaces["metal"], repeats=1.2, bevel=0.0)
+            bar.parent = mast
+            bar.location = (0.0, 0.0, z)
+            props.append(bar)
+    # A parapet raised over part of the front, on about half of them. This is
+    # the cheapest thing that stops two cornices reading as one line.
+    if rng.random() < 0.55:
+        span = rng.uniform(2.0, 2.7)
+        at = rng.uniform(-half + span * 0.5 + 0.3, half - span * 0.5 - 0.3)
+        raise_by = rng.uniform(0.5, 0.62)
+        parapet = block("%s_Parapet" % name,
+                        (-span * 0.5, min(0.0, sign * -0.20), 0.0),
+                        (span * 0.5, max(0.0, sign * -0.20) + sign * 0.42, raise_by),
+                        surfaces[surface], repeats=WALL_REPEATS, bevel=0.0)
+        parapet.parent = shell
+        parapet.location = (at, 0.0, height - 0.02)
+        props.append(parapet)
+        coping = block("%s_Coping" % name,
+                       (-span * 0.5 - 0.08, min(0.0, sign * -0.26), 0.0),
+                       (span * 0.5 + 0.08, max(0.0, sign * -0.26) + sign * 0.58, 0.12),
+                       surfaces["stone"], repeats=2.2, bevel=0.015)
+        coping.parent = parapet
+        coping.location = (0.0, 0.0, raise_by - 0.01)
+        props.append(coping)
+    for prop in props:
+        parts[prop.name] = prop
+
+
+def build_clutter(parts, surfaces, rng):
+    """What a street has on it that nobody put there on purpose.
+
+    A pavement with nothing on it is a corridor. Bins against the walls, sacks
+    beside them, crates where a shop takes its deliveries, bollards along the
+    kerb where cars used to mount it, and a bench. Each is placed by a random
+    draw seeded once, so the street is the same street every time it is built
+    and no two stretches of it are the same stretch.
+
+    Blender Y is across the street: +5 is the far pavement, -5 the near one.
+    """
+    props = []
+
+    def bin_at(index, x, side):
+        y = side * 6.05
+        body = block("Street_Bin%d" % index, (-0.29, -0.36, 0.0), (0.29, 0.36, 0.98),
+                     surfaces["paint"], repeats=1.6, bevel=0.03, taper=1.06)
+        body.location = (x, y, 0.14)
+        body.rotation_euler = (0.0, 0.0, rng.uniform(-0.25, 0.25))
+        lid = block("Street_BinLid%d" % index, (-0.31, -0.38, 0.0), (0.31, 0.38, 0.08),
+                    surfaces["paint"], repeats=1.6, bevel=0.025, taper=0.9)
+        lid.parent = body
+        lid.location = (0.0, 0.0, 0.98)
+        lid.rotation_euler = (rng.uniform(0.0, 0.35), 0.0, 0.0)
+        props.extend((body, lid))
+
+    def sack_at(index, x, y):
+        sack = block("Street_Sack%d" % index, (-0.30, -0.26, 0.0), (0.30, 0.26, 0.42),
+                     surfaces["sack"], repeats=1.6, bevel=0.11, taper=0.62)
+        sack.location = (x, y, 0.14)
+        sack.rotation_euler = (0.0, 0.0, rng.uniform(0.0, 6.28))
+        props.append(sack)
+
+    def crate_at(index, x, y, layers):
+        below = None
+        for layer in range(layers):
+            crate = block("Street_Crate%d_%d" % (index, layer),
+                          (-0.26, -0.21, 0.0), (0.26, 0.21, 0.30),
+                          surfaces["wood"], repeats=1.7, bevel=0.012)
+            if below is None:
+                crate.location = (x, y, 0.14)
+                crate.rotation_euler = (0.0, 0.0, rng.uniform(-0.3, 0.3))
+            else:
+                crate.parent = below
+                crate.location = (rng.uniform(-0.03, 0.03), rng.uniform(-0.03, 0.03), 0.30)
+                crate.rotation_euler = (0.0, 0.0, rng.uniform(-0.2, 0.2))
+            props.append(crate)
+            below = crate
+
+    def bollard_at(index, x, side):
+        post = block("Street_Bollard%d" % index, (-0.075, -0.075, 0.0), (0.075, 0.075, 0.92),
+                     surfaces["paint"], repeats=1.6, bevel=0.02, taper=0.8)
+        post.location = (x, side * 3.62, 0.14)
+        props.append(post)
+
+    def bench_at(index, x, side):
+        y = side * 5.6
+        seat = block("Street_Bench%d" % index, (-0.85, -0.24, 0.0), (0.85, 0.24, 0.05),
+                     surfaces["wood"], repeats=1.7, bevel=0.008)
+        seat.location = (x, y, 0.14 + 0.44)
+        for end, ex in enumerate((-0.78, 0.78)):
+            leg = block("Street_BenchEnd%d_%d" % (index, end),
+                        (-0.04, -0.22, 0.0), (0.04, 0.22, 0.44),
+                        surfaces["metal"], repeats=1.2, bevel=0.0)
+            leg.parent = seat
+            leg.location = (ex, 0.0, -0.44)
+            props.append(leg)
+        back = block("Street_BenchBack%d" % index, (-0.85, -0.03, 0.0), (0.85, 0.03, 0.34),
+                     surfaces["wood"], repeats=1.7, bevel=0.008)
+        back.parent = seat
+        back.location = (0.0, side * 0.2, 0.12)
+        back.rotation_euler = (side * -0.18, 0.0, 0.0)
+        props.append(seat)
+        props.append(back)
+
+    # The near pavement is the one the camera stands on and the far one is the
+    # one it looks across at, so both are dressed, and more thickly where the
+    # walk begins than where it ends.
+    for index, x in enumerate((-27.5, -19.0, -11.5, -3.0, 5.5)):
+        bin_at(index, x + rng.uniform(-0.4, 0.4), 1.0)
+    for index, x in enumerate((-23.0, -14.5, -7.0, 2.0)):
+        bin_at(10 + index, x + rng.uniform(-0.4, 0.4), -1.0)
+    for index, (x, y) in enumerate(((-26.8, 5.6), (-18.2, 5.9), (-10.9, 5.5), (-22.3, -5.7),
+                                    (-13.8, -5.9), (-6.3, -5.4), (-2.3, 5.8))):
+        sack_at(index, x + rng.uniform(-0.3, 0.3), y)
+    crate_at(0, -15.6, 6.0, 3)
+    crate_at(1, -15.0, 6.05, 2)
+    crate_at(2, -8.4, -6.1, 2)
+    crate_at(3, 3.8, 6.0, 3)
+    for index, x in enumerate((-29.0, -25.0, -21.0, -17.0, -13.0, -9.0, -5.0, -1.0)):
+        bollard_at(index, x, 1.0)
+    for index, x in enumerate((-24.0, -16.0, -8.0, 0.0)):
+        bollard_at(10 + index, x, -1.0)
+    bench_at(0, -20.5, 1.0)
+    bench_at(1, -4.5, -1.0)
+
+    for prop in props:
+        parts[prop.name] = prop
+
+
 def build_street(parts, surfaces):
     # Nothing here shares a plane with anything else: the road sinks into the
     # ground and the kerbs sink into the road, so no two faces are coplanar and
@@ -495,10 +706,11 @@ def build_street(parts, surfaces):
     rng = random.Random(4021)
     for index, (x, depth, height, surface) in enumerate(far):
         name = "Street_BlockL%d" % index
-        shell, trim, dark, lit = building(name, 11.2, depth, height,
-                                          -0.4 - index * 0.03, surfaces[surface],
-                                          WALL_REPEATS, 1.0, surfaces["stone"],
-                                          surfaces["glass"], surfaces["glow"], rng)
+        shell, trim, dark, lit, pipes = building(name, 11.2, depth, height,
+                                                 -0.4 - index * 0.03, surfaces[surface],
+                                                 WALL_REPEATS, 1.0, surfaces["stone"],
+                                                 surfaces["glass"], surfaces["glow"],
+                                                 surfaces["paint"], rng)
         # A terrace is not machined: each front sets back a few centimetres
         # from its neighbour, which is also what keeps two of them from sharing
         # the plane they face the street in.
@@ -507,20 +719,25 @@ def build_street(parts, surfaces):
         parts[name + "_Trim"] = trim
         parts[name + "_Glass"] = dark
         parts[name + "_Lit"] = lit
+        parts[name + "_Pipes"] = pipes
+        roofline(parts, name, shell, 11.2, depth, height, 1.0, surface, surfaces, rng)
 
     near = ((-16.0, 8.0, 11.0, "concrete"), (2.0, 9.0, 14.0, "brick"),
             (20.0, 8.0, 12.0, "concrete"))
     for index, (x, depth, height, surface) in enumerate(near):
         name = "Street_BlockR%d" % index
-        shell, trim, dark, lit = building(name, 13.0, depth, height,
-                                          -0.55 - index * 0.03, surfaces[surface],
-                                          WALL_REPEATS, -1.0, surfaces["stone"],
-                                          surfaces["glass"], surfaces["glow"], rng)
+        shell, trim, dark, lit, pipes = building(name, 13.0, depth, height,
+                                                 -0.55 - index * 0.03, surfaces[surface],
+                                                 WALL_REPEATS, -1.0, surfaces["stone"],
+                                                 surfaces["glass"], surfaces["glow"],
+                                                 surfaces["paint"], rng)
         shell.location = (x, -7.55 - index * 0.04, 0.0)
         parts[name] = shell
         parts[name + "_Trim"] = trim
         parts[name + "_Glass"] = dark
         parts[name + "_Lit"] = lit
+        parts[name + "_Pipes"] = pipes
+        roofline(parts, name, shell, 13.0, depth, height, -1.0, surface, surfaces, rng)
 
     for index, x in enumerate((-14.0, 0.0, 14.0)):
         post = block("Street_Lamp%d" % index,
@@ -816,11 +1033,20 @@ def main(argv):
         "glass": material("WindowGlass", textures.glass_dark(), roughness=0.15,
                           metallic=0.1),
         "glow": material("WindowLit", textures.glass_lit(), roughness=0.5),
-        "tarmac": material("RoadTarmac", textures.tarmac(), roughness=0.88,
+        # Wet. The lamps and the lit windows are reflected in the road, which
+        # is most of what a night street looks like, and all of it comes from
+        # the roughness: the colour is only darker for it.
+        "tarmac": material("RoadTarmac", textures.wet_tarmac(), roughness=0.30,
                            normal=textures.tarmac_normal()),
         "paving": material("PathPaving", textures.paving(), roughness=0.9,
                            normal=textures.paving_normal()),
         "metal": material("LampMetal", textures.metal(), roughness=0.4, metallic=0.8),
+        "wood": material("PropWood", textures.wood(), roughness=0.85,
+                         normal=textures.wood_normal()),
+        "paint": material("PropPaint", textures.painted_metal(), roughness=0.55,
+                          metallic=0.15, normal=textures.painted_metal_normal()),
+        "sack": material("PropSack", textures.sacking(), roughness=0.35,
+                         normal=textures.sacking_normal()),
         "lamp": material("LampGlow", None, emission=(1.0, 0.72, 0.36)),
         "skin": material("ZombieSkin", textures.skin(), roughness=0.85,
                          normal=textures.skin_normal()),
@@ -831,6 +1057,7 @@ def main(argv):
 
     parts = {}
     build_street(parts, surfaces)
+    build_clutter(parts, surfaces, random.Random(6211))
     animate(build_zombie(parts, surfaces))
 
     # The sky is not an object in the scene and the exporter only writes what a
