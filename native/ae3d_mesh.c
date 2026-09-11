@@ -4,7 +4,12 @@
 #include <string.h>
 #include <math.h>
 
-#define AE3D_STRIDE 8
+/* Position, texture coordinate, normal, and how much of the sky this vertex
+   can see. Occlusion belongs to a vertex the way a normal does -- it is a
+   property of where the surface sits among the rest of the scene -- so it
+   rides in the vertex rather than in a buffer beside it, and every mesh has
+   one whether or not anything baked it. */
+#define AE3D_STRIDE 9
 #define AE3D_SKIN_STRIDE 8
 
 typedef struct {
@@ -155,6 +160,9 @@ int ae3d_mesh_push_vertex(void *handle, double px, double py, double pz,
     slot[0] = (float)px; slot[1] = (float)py; slot[2] = (float)pz;
     slot[3] = (float)u;  slot[4] = (float)v;
     slot[5] = (float)nx; slot[6] = (float)ny; slot[7] = (float)nz;
+    /* Unoccluded until something says otherwise, so a mesh nobody baked is
+       lit exactly as it was before this existed. */
+    slot[8] = 1.0f;
     m->dirty = 1;
     m->local_known = 0;
     return m->vertex_count++;
@@ -211,6 +219,26 @@ double ae3d_mesh_skin_weight(void *handle, int i, int slot) {
     ae3d_mesh *m = (ae3d_mesh *)handle;
     if (!m || !m->skin || i < 0 || i >= m->vertex_count || slot < 0 || slot > 3) return 0.0;
     return m->skin[(size_t)i * AE3D_SKIN_STRIDE + 4 + slot];
+}
+
+static float *ae3d_mesh_slot(ae3d_mesh *m, int i);
+
+/* How much of the sky a vertex can see: one is open, zero is buried. Baked
+   against the whole scene rather than against the mesh it belongs to, because
+   what darkens the foot of a wall is the pavement, which is a different
+   object. */
+void ae3d_mesh_set_occlusion(void *handle, int i, double value) {
+    float *slot = ae3d_mesh_slot((ae3d_mesh *)handle, i);
+    if (!slot) return;
+    if (value < 0.0) value = 0.0;
+    if (value > 1.0) value = 1.0;
+    slot[8] = (float)value;
+    ((ae3d_mesh *)handle)->dirty = 1;
+}
+
+double ae3d_mesh_occlusion(void *handle, int i) {
+    float *slot = ae3d_mesh_slot((ae3d_mesh *)handle, i);
+    return slot ? slot[8] : 1.0;
 }
 
 int ae3d_mesh_push_index(void *handle, int index) {
@@ -686,10 +714,11 @@ typedef struct {
     ae3d_objkey *table;
     int table_mask;
     int table_used;
-    /* Borrowed for the length of one load, and only when the mesh has a skin:
-       the loader knows which vertices a position turned into and nothing else
-       does. */
+    /* Borrowed for the length of one load: the loader is the only thing that
+       knows which vertices a position turned into, and both of these are
+       written per position. */
     void *skin;
+    void *occlusion;
 } ae3d_objbuild;
 
 static int ae3d_grow_floats(float **buffer, int *capacity, int needed) {
@@ -787,6 +816,11 @@ void ae3d_objbuild_set_skin(void *handle, void *rows) {
     if (b) b->skin = rows;
 }
 
+void ae3d_objbuild_set_occlusion(void *handle, void *values) {
+    ae3d_objbuild *b = (ae3d_objbuild *)handle;
+    if (b) b->occlusion = values;
+}
+
 int ae3d_objbuild_position_count(void *handle) {
     ae3d_objbuild *b = (ae3d_objbuild *)handle;
     return b ? b->position_count / 3 : 0;
@@ -843,6 +877,9 @@ int ae3d_objbuild_emit(void *handle, void *mesh, int v, int vt, int vn) {
     unified = ae3d_mesh_push_vertex(mesh, px, py, pz, u, tv, nx, ny, nz);
     if (unified < 0) return -1;
     if (b->skin) ae3d_skinrows_apply(b->skin, mesh, unified, v);
+    if (b->occlusion && v >= 0 && v < ae3d_farr_count(b->occlusion)) {
+        ae3d_mesh_set_occlusion(mesh, unified, ae3d_farr_get(b->occlusion, v));
+    }
 
     b->table[slot].v = v;
     b->table[slot].vt = vt;

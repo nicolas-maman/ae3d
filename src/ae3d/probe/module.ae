@@ -1,0 +1,146 @@
+// The agent channel, asking side.
+//
+// ae3d.agent is what a running scene answers with. This is what asks, so a
+// tool that measures or judges a scene is an ae3d program written against the
+// engine's own JSON and its own protocol, rather than a second implementation
+// of both in another language that drifts from this one every time an op
+// changes.
+//
+// A connection is kept open for the whole run. Opening one per question costs
+// a process start and a handshake for a question that takes a frame to answer,
+// and the loop a tool actually runs is hundreds of questions.
+
+import std.heap
+import std.json
+import std.string
+import ae3d.core
+
+exports (
+    Probe, open, close, ask, op, did,
+    accepted, result, refusal,
+    number, integer, text, flag, field, last_error
+)
+
+extern ae3d_client_init()
+extern ae3d_client_connect(host: string, port: int) -> int
+extern ae3d_client_send(handle: int, line: string) -> int
+extern ae3d_client_read(handle: int) -> string
+extern ae3d_client_close(handle: int)
+extern ae3d_client_error() -> string
+
+struct Probe {
+    handle: int
+    next_id: int
+}
+
+// Loopback only. The channel is a debugging surface with no authentication of
+// any kind, and the engine binds it to 127.0.0.1 for the same reason.
+open(port: int) -> *Probe {
+    ae3d_client_init()
+    handle = ae3d_client_connect("127.0.0.1", port)
+    if handle == 0 { return null }
+    p = heap.new(Probe)
+    p.handle = handle
+    p.next_id = 1
+    return p
+}
+
+close(p: *Probe) {
+    if p == null { return }
+    if p.handle != 0 { ae3d_client_close(p.handle) }
+    heap.free(p)
+}
+
+last_error() -> string {
+    return ae3d_client_error()
+}
+
+// Sends a request object and answers with the whole answered, or null if the
+// connection failed. The answered is the caller's to free with json.free; a
+// refusal is a answered like any other, carrying the reason the far end gave.
+//
+// The whole envelope rather than the result inside it, because a parsed
+// document is one arena: every node in it dies when it is freed, so a result
+// handed back on its own would either have to be copied or would be a pointer
+// into something already released.
+ask(p: *Probe, request: ptr) -> ptr {
+    if p == null || request == null { return null }
+
+    json.object_set_raw(request, "id", json.from_int(p.next_id))
+    p.next_id = p.next_id + 1
+
+    line = json.stringify_raw(request)
+    if ae3d_client_send(p.handle, line) == 0 { return null }
+
+    answer = ae3d_client_read(p.handle)
+    if answer == null { return null }
+
+    return json.parse_raw(answer)
+}
+
+// The common case: an op that takes no arguments.
+op(p: *Probe, name: string) -> ptr {
+    request = json.obj()
+    json.object_set_raw(request, "op", json.str(name))
+    answered = ask(p, request)
+    json.free(request)
+    return answered
+}
+
+// For an op whose answer is not wanted, only its effect.
+did(p: *Probe, name: string) -> bool {
+    answered = op(p, name)
+    if answered == null { return false }
+    yes = accepted(answered)
+    json.free(answered)
+    return yes
+}
+
+accepted(answered: ptr) -> bool {
+    if answered == null { return false }
+    ok_node = json.object_get_raw(answered, "ok")
+    if ok_node == null { return false }
+    return json.get_bool(ok_node)
+}
+
+// Borrowed from the answered, and only good until the answered is freed.
+result(answered: ptr) -> ptr {
+    if answered == null { return null }
+    return json.object_get_raw(answered, "result")
+}
+
+refusal(answered: ptr) -> string {
+    if answered == null { return "no answer" }
+    reason = json.object_get_raw(answered, "error")
+    if reason == null { return "no reason given" }
+    return json.get_string_raw(reason)
+}
+
+field(node: ptr, name: string) -> ptr {
+    if node == null { return null }
+    return json.object_get_raw(node, name)
+}
+
+number(node: ptr, name: string) -> float {
+    found = field(node, name)
+    if found == null { return 0.0 }
+    return json.get_number(found)
+}
+
+integer(node: ptr, name: string) -> int {
+    found = field(node, name)
+    if found == null { return 0 }
+    return json.get_int(found)
+}
+
+text(node: ptr, name: string) -> string {
+    found = field(node, name)
+    if found == null { return "" }
+    return json.get_string_raw(found)
+}
+
+flag(node: ptr, name: string) -> bool {
+    found = field(node, name)
+    if found == null { return false }
+    return json.get_bool(found)
+}

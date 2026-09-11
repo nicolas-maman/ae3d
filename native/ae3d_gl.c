@@ -6,7 +6,7 @@
 #include <string.h>
 #include <stdio.h>
 
-#define AE3D_STRIDE_BYTES (8 * (int)sizeof(float))
+#define AE3D_STRIDE_BYTES (9 * (int)sizeof(float))
 #define AE3D_SKIN_BYTES (8 * (int)sizeof(float))
 #define AE3D_MATRIX_BYTES (16 * (int)sizeof(float))
 #define AE3D_COLOR_BYTES  (3 * (int)sizeof(float))
@@ -344,6 +344,11 @@ void ae3d_gl_setup_vertex_attribs(void) {
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, AE3D_STRIDE_BYTES, (const void *)(5 * sizeof(float)));
     glEnableVertexAttribArray(2);
+    /* Slot 10, because 3-6 carry the instance matrix, 7 its colour and 8-9 the
+       skin. Baked occlusion rides with the vertex, so it needs no binding of
+       its own and no pipeline that knows about it. */
+    glVertexAttribPointer(10, 1, GL_FLOAT, GL_FALSE, AE3D_STRIDE_BYTES, (const void *)(8 * sizeof(float)));
+    glEnableVertexAttribArray(10);
 }
 
 void ae3d_gl_setup_instance_attribs(void *inst, int matrix_vbo, int color_vbo) {
@@ -674,6 +679,118 @@ void ae3d_gl_texture_bind(int unit, int texture) {
 void ae3d_gl_texture_bind_cubemap(int unit, int texture) {
     glActiveTexture(GL_TEXTURE0 + (GLenum)unit);
     glBindTexture(GL_TEXTURE_CUBE_MAP, (GLuint)texture);
+}
+
+/* A pass costs what the GPU spends on it, and the CPU time around a submit is
+   not that number: the driver returns from a draw call long before the work is
+   done, so a pass that doubled in cost on the GPU can read as unchanged.
+   GL_TIME_ELAPSED brackets the work itself.
+
+   The result is read a frame or two later, never in the frame that issued it.
+   Asking for it immediately is a stall: the CPU waits for the GPU to drain,
+   which both costs the frame time it is trying to measure and changes it. */
+#define AE3D_GL_TIME_ELAPSED            0x88BF
+#define AE3D_GL_QUERY_RESULT            0x8866
+#define AE3D_GL_QUERY_RESULT_AVAILABLE  0x8867
+
+#define AE3D_GL_PASSES 3
+/* Deep enough that a result is always read long after the GPU has finished
+   with it, so the read never waits. */
+#define AE3D_GL_TIMER_DEPTH 3
+
+typedef struct {
+    GLuint id[AE3D_GL_TIMER_DEPTH][AE3D_GL_PASSES];
+    int    issued[AE3D_GL_TIMER_DEPTH][AE3D_GL_PASSES];
+    double ms[AE3D_GL_PASSES];
+    int    slot;
+    int    open;
+} ae3d_gl_passtimer;
+
+static int ae3d_gl_queries_available(void) {
+    return ae3d_glGenQueries && ae3d_glDeleteQueries && ae3d_glBeginQuery
+        && ae3d_glEndQuery && ae3d_glGetQueryObjectuiv
+        && ae3d_glGetQueryObjectui64v;
+}
+
+void *ae3d_gl_passtimer_create(void) {
+    ae3d_gl_passtimer *timer;
+    int slot, pass;
+    if (!ae3d_gl_queries_available()) return NULL;
+    timer = (ae3d_gl_passtimer *)calloc(1, sizeof(*timer));
+    if (!timer) return NULL;
+    for (slot = 0; slot < AE3D_GL_TIMER_DEPTH; slot++)
+        for (pass = 0; pass < AE3D_GL_PASSES; pass++)
+            glGenQueries(1, &timer->id[slot][pass]);
+    return timer;
+}
+
+void ae3d_gl_passtimer_destroy(void *handle) {
+    ae3d_gl_passtimer *timer = (ae3d_gl_passtimer *)handle;
+    int slot, pass;
+    if (!timer) return;
+    /* Only delete the query objects if a context is current to delete them in.
+       When the window is already gone -- a program that frees its renderer
+       after shutting the engine down, or a test that destroys its offscreen
+       context first -- the queries died with the context, and calling
+       glDeleteQueries against no context segfaults on llvmpipe. */
+    if (ae3d_gl_context_current()) {
+        for (slot = 0; slot < AE3D_GL_TIMER_DEPTH; slot++)
+            for (pass = 0; pass < AE3D_GL_PASSES; pass++)
+                if (timer->id[slot][pass]) glDeleteQueries(1, &timer->id[slot][pass]);
+    }
+    free(timer);
+}
+
+/* Moves to the slot this frame will write, collecting what that slot measured
+   the last time round. A pass that was not drawn reports nothing rather than
+   the last figure it happened to have. */
+void ae3d_gl_passtimer_frame(void *handle) {
+    ae3d_gl_passtimer *timer = (ae3d_gl_passtimer *)handle;
+    int pass;
+    if (!timer) return;
+    timer->slot = (timer->slot + 1) % AE3D_GL_TIMER_DEPTH;
+    for (pass = 0; pass < AE3D_GL_PASSES; pass++) {
+        GLuint id = timer->id[timer->slot][pass];
+        GLuint ready = 0;
+        if (!timer->issued[timer->slot][pass]) {
+            timer->ms[pass] = 0.0;
+            continue;
+        }
+        timer->issued[timer->slot][pass] = 0;
+        if (!id) continue;
+        glGetQueryObjectuiv(id, AE3D_GL_QUERY_RESULT_AVAILABLE, &ready);
+        if (ready) {
+            unsigned long long elapsed = 0;
+            glGetQueryObjectui64v(id, AE3D_GL_QUERY_RESULT, &elapsed);
+            /* Nanoseconds. A double carries every integer to 2^53, so the
+               conversion to milliseconds loses nothing a timer can measure. */
+            timer->ms[pass] = (double)elapsed / 1000000.0;
+        }
+    }
+}
+
+void ae3d_gl_passtimer_begin(void *handle, int pass) {
+    ae3d_gl_passtimer *timer = (ae3d_gl_passtimer *)handle;
+    GLuint id;
+    if (!timer || pass < 0 || pass >= AE3D_GL_PASSES || timer->open) return;
+    id = timer->id[timer->slot][pass];
+    if (!id) return;
+    glBeginQuery(AE3D_GL_TIME_ELAPSED, id);
+    timer->issued[timer->slot][pass] = 1;
+    timer->open = 1;
+}
+
+void ae3d_gl_passtimer_end(void *handle) {
+    ae3d_gl_passtimer *timer = (ae3d_gl_passtimer *)handle;
+    if (!timer || !timer->open) return;
+    glEndQuery(AE3D_GL_TIME_ELAPSED);
+    timer->open = 0;
+}
+
+double ae3d_gl_passtimer_ms(void *handle, int pass) {
+    ae3d_gl_passtimer *timer = (ae3d_gl_passtimer *)handle;
+    if (!timer || pass < 0 || pass >= AE3D_GL_PASSES) return 0.0;
+    return timer->ms[pass];
 }
 
 int ae3d_gl_fbo_create(void) {

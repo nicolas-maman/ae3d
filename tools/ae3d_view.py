@@ -53,6 +53,9 @@ def main(argv):
                         help="show only this model, so what prints is its silhouette")
     parser.add_argument("--coverage", action="store_true",
                         help="print how much of each cell is not the background")
+    parser.add_argument("--region", default=None, metavar="X,Y,W,H",
+                        help="a window of the frame rather than all of it; with "
+                             "--columns and --rows to match, one cell is one pixel")
     parser.add_argument("--absolute", action="store_true",
                         help="lay the ramp over 0 to 1 rather than over what the frame uses")
     args = parser.parse_args(argv)
@@ -63,7 +66,11 @@ def main(argv):
             engine("anim.set", time=args.time)
         if args.isolate:
             engine("scene.isolate", object=args.isolate)
-        grid = engine("frame.grid", columns=args.columns, rows=args.rows)
+        window = {}
+        if args.region:
+            left, top, wide, tall = (int(v) for v in args.region.split(","))
+            window = {"x": left, "y": top, "width": wide, "height": tall}
+        grid = engine("frame.grid", columns=args.columns, rows=args.rows, **window)
         if args.isolate:
             engine("scene.isolate")
         key = (lambda c: c[3]) if args.coverage else None
@@ -72,7 +79,10 @@ def main(argv):
                  else render(grid["cells"], key, stretch))
         for line in lines:
             print(line)
-        print("frame %s, %dx%d cells" % (grid.get("frame"), grid["columns"], grid["rows"]))
+        print("frame %s, %d,%d %dx%d px in %dx%d cells"
+              % (grid.get("frame"), grid.get("x", 0), grid.get("y", 0),
+                 grid.get("width", 0), grid.get("height", 0),
+                 grid["columns"], grid["rows"]))
     return 0
 
 

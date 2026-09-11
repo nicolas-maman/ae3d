@@ -188,11 +188,19 @@ def distance_to_bone(rows, positions, bone_rest):
     return out
 
 
-def rest_in_ae3d(armature):
-    """Where each bone sits, in the axes the mesh was written in."""
+def rest_in_ae3d(obj, armature):
+    """Where each bone sits, in the space the mesh was written in.
+
+    The OBJ carries the mesh's own coordinates and the manifest carries where
+    the object stands, so a bone has to be brought through the armature's
+    transform and back through the mesh's before the two can be compared. Done
+    in world space, a column standing four metres from the origin read as four
+    metres from its own bones.
+    """
+    into_mesh = obj.matrix_world.inverted() @ armature.matrix_world
     out = []
     for bone in bone_order(armature):
-        head = armature.matrix_world @ bone.head_local
+        head = into_mesh @ bone.head_local
         out.append(to_y_up(head.x, head.y, head.z))
     return out
 
@@ -366,8 +374,17 @@ def build_bone_clips(armature, bone_names, scene, warnings):
         for frame in ordered:
             transform = matrix_transform(rest_matrix @ pose_basis(curves, frame, mode))
             t = rounded((frame - origin) * spf)
+            turn = transform["rotation"]
+            # q and -q are the same rotation and interpolate along opposite
+            # arcs, so a decomposition that happens to pick the other sign
+            # between two frames sends the bone the long way round -- a full
+            # spin, in a clip whose numbers all look right. Decomposing a matrix
+            # picks a sign by whichever term is largest, which flips exactly
+            # where a joint passes through a half turn.
+            if rotations:
+                turn = [rounded(v) for v in align(turn, rotations[-1]["v"])]
             translations.append({"t": t, "v": transform["location"]})
-            rotations.append({"t": t, "v": transform["rotation"]})
+            rotations.append({"t": t, "v": turn})
             scales.append({"t": t, "v": transform["scale"]})
 
         channels = [{"target": "translation", "interpolation": "LINEAR", "keys": translations},
@@ -974,6 +991,9 @@ def main(argv):
     if args.only:
         meshes = [o for o in meshes if o.name == args.only]
     exported_names = {o.name for o in meshes}
+    # One tree over the whole scene, built once, so occlusion is a fact about a
+    # place rather than about a mesh.
+    occluders = scene_bvh(depsgraph, meshes)
 
     for obj in meshes:
         stem = obj.name
@@ -1005,7 +1025,7 @@ def main(argv):
             files["skeleton"] = os.path.basename(skeleton_path)
             skin_path = os.path.join(args.out, stem + ".skin.json")
             write_skin(obj, bone_names, sources, positions, skin_path, warnings,
-                       rest_in_ae3d(armature))
+                       rest_in_ae3d(obj, armature))
             files["skin"] = os.path.basename(skin_path)
             bones = len(bone_names)
 
@@ -1016,6 +1036,15 @@ def main(argv):
                     json.dump({"clips": bone_clips}, handle, indent=2, sort_keys=True)
                     handle.write("\n")
                 files["bone_animation"] = os.path.basename(pose_path)
+
+        occlusion = bake_occlusion(obj, depsgraph, occluders, positions, sources,
+                                   warnings)
+        if occlusion is not None:
+            ao_path = os.path.join(args.out, stem + ".ao.json")
+            with open(ao_path, "w", newline=chr(10)) as handle:
+                json.dump({"occlusion": occlusion}, handle, sort_keys=True)
+                handle.write(chr(10))
+            files["occlusion"] = os.path.basename(ao_path)
 
         clip = build_clip(obj, scene, warnings)
         if clip:
@@ -1058,6 +1087,109 @@ def main(argv):
     for warning in warnings:
         print("ae3d_export: warning: %s" % warning)
     return 0
+
+
+# How far a ray looks for something to be occluded by, and how many it casts.
+# A metre is the scale that matters: what darkens the foot of a wall is the
+# pavement in front of it, not the building across the street. Sixteen rays is
+# enough that the noise is below what a vertex-interpolated value shows.
+OCCLUSION_REACH = 1.1
+OCCLUSION_RAYS = 16
+# Never fully black. Ambient occlusion multiplies light that is already the
+# dimmest in the scene, and a corner that reaches zero reads as a hole.
+OCCLUSION_FLOOR = 0.25
+
+
+def scene_bvh(depsgraph, objects):
+    """One tree over every mesh in the scene, in world space.
+
+    Per object would be the easy thing and the wrong one: what darkens the foot
+    of a wall is the pavement, and what darkens a window reveal is the wall
+    around it. Occlusion is a fact about a place, not about a mesh.
+    """
+    from mathutils.bvhtree import BVHTree
+
+    vertices = []
+    polygons = []
+    for obj in objects:
+        evaluated = obj.evaluated_get(depsgraph)
+        mesh = evaluated.to_mesh()
+        try:
+            matrix = obj.matrix_world
+            base = len(vertices)
+            vertices.extend(matrix @ v.co for v in mesh.vertices)
+            for face in mesh.polygons:
+                loop = [base + i for i in face.vertices]
+                for corner in range(1, len(loop) - 1):
+                    polygons.append((loop[0], loop[corner], loop[corner + 1]))
+        finally:
+            evaluated.to_mesh_clear()
+    if not polygons:
+        return None
+    return BVHTree.FromPolygons(vertices, polygons, all_triangles=True)
+
+
+def hemisphere(rays):
+    """Directions over a hemisphere about +Z, spread by the golden angle.
+
+    Evenly spread rather than random, so the same scene bakes to the same
+    numbers every time -- an export that changes when nothing changed is an
+    export nobody can diff.
+    """
+    import math as _math
+
+    out = []
+    golden = _math.pi * (3.0 - _math.sqrt(5.0))
+    for index in range(rays):
+        z = (index + 0.5) / rays
+        radius = _math.sqrt(max(0.0, 1.0 - z * z))
+        angle = index * golden
+        out.append((radius * _math.cos(angle), radius * _math.sin(angle), z))
+    return out
+
+
+def bake_occlusion(obj, depsgraph, tree, positions, sources, warnings):
+    """How much of the sky each written position can see.
+
+    Cast over the hemisphere about the vertex normal and count what comes back
+    having hit something within reach. The result is one number a vertex, which
+    the renderer multiplies its ambient by -- the term light arriving from every
+    direction belongs to, and the only one: darkening the direct light as well
+    would put a shadow where a lamp is plainly shining.
+    """
+    import mathutils
+
+    if tree is None:
+        return None
+    evaluated = obj.evaluated_get(depsgraph)
+    mesh = evaluated.to_mesh()
+    try:
+        matrix = obj.matrix_world
+        rotation = matrix.to_3x3().inverted().transposed()
+        directions = [mathutils.Vector(d) for d in hemisphere(OCCLUSION_RAYS)]
+        out = []
+        for key in positions:
+            first = sources.get(key, ())
+            if not first:
+                out.append(1.0)
+                continue
+            vertex = mesh.vertices[first[0]]
+            at = matrix @ vertex.co
+            normal = (rotation @ vertex.normal).normalized()
+            # Lifted off the surface, or every ray hits the face it started on.
+            origin = at + normal * 0.004
+            frame = normal.to_track_quat("Z", "Y").to_matrix()
+            hits = 0
+            for direction in directions:
+                aimed = frame @ direction
+                found = tree.ray_cast(origin, aimed, OCCLUSION_REACH)
+                if found[0] is not None:
+                    hits += 1
+            open_sky = 1.0 - hits / float(len(directions))
+            out.append(rounded(OCCLUSION_FLOOR + (1.0 - OCCLUSION_FLOOR) * open_sky, 4))
+        return out
+    finally:
+        evaluated.to_mesh_clear()
 
 
 if __name__ == "__main__":

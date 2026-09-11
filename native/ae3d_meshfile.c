@@ -9,7 +9,7 @@
 #define AE3D_MESH_MAGIC   0x4D455348u
 #define AE3D_MESH_VERSION 1u
 #define AE3D_MESH_INSTANCED 1u
-#define AE3D_STRIDE 8
+#define AE3D_STRIDE 9
 
 typedef struct {
     void *mesh;

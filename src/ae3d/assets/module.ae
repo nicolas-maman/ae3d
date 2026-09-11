@@ -39,6 +39,7 @@ struct Entry {
     skeleton: string
     skin: string
     bone_animation: string
+    occlusion: string
     vertices: int
     triangles: int
     position: Vec3
@@ -158,6 +159,7 @@ manifest_load(path: string) -> *Manifest {
             e.skeleton = ""
             e.skin = ""
             e.bone_animation = ""
+            e.occlusion = ""
             e.position = core.vec3(0.0, 0.0, 0.0)
             e.rotation = core.quat_ident()
             e.scale = core.vec3(1.0, 1.0, 1.0)
@@ -187,6 +189,7 @@ manifest_load(path: string) -> *Manifest {
                 e.skeleton = text_field(files, "skeleton")
                 e.skin = text_field(files, "skin")
                 e.bone_animation = text_field(files, "bone_animation")
+                e.occlusion = text_field(files, "occlusion")
             }
             list.add_raw(m.entries, e as ptr)
             i = i + 1
@@ -324,10 +327,12 @@ entry_load_model(m: *Manifest, e: *Entry) -> *Model {
         return null
     }
     skin = read_skin_rows(m, e)
+    occlusion = read_occlusion(m, e)
     path = join(m.directory, e.mesh)
-    model = loader.load_obj_skinned(path, false, skin)
+    model = loader.load_obj_baked(path, false, skin, occlusion)
     string.free(path)
     if skin != null { core.skinrows_destroy(skin) }
+    if occlusion != null { core.farr_destroy(occlusion) }
     if model == null {
         set_error("cannot load ", e.mesh)
         return null
@@ -378,6 +383,35 @@ read_skin_rows(m: *Manifest, e: *Entry) -> ptr {
     }
     json.free(root)
     return rows
+}
+
+// How much of the sky each position can see, baked against the whole scene.
+// One number a position, handed to the loader for the same reason the weights
+// are: a position becomes as many vertices as it has distinct normals and UVs.
+read_occlusion(m: *Manifest, e: *Entry) -> ptr {
+    if m == null || e == null || e.occlusion == "" { return null }
+    path = join(m.directory, e.occlusion)
+    root = read_json(path)
+    string.free(path)
+    if root == null {
+        set_error("cannot read ", e.occlusion)
+        return null
+    }
+    node = json.object_get_raw(root, "occlusion")
+    if node == null {
+        json.free(root)
+        set_error("no occlusion in ", e.occlusion)
+        return null
+    }
+    count = json.array_size(node)
+    values = core.farr_create(count)
+    i = 0
+    while i < count {
+        core.farr_set(values, i, json.get_number(json.array_get_raw(node, i)))
+        i = i + 1
+    }
+    json.free(root)
+    return values
 }
 
 // The skeleton the mesh is weighted to: a model per bone, parented as Blender

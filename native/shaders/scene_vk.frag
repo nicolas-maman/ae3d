@@ -34,6 +34,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float materialAlpha;
     bool hasNormalMap;
     float normalStrength;
+    float occlusionStrength;
     bool enableClearcoat;
     float clearcoatRoughness;
     float clearcoatIntensity;
@@ -126,6 +127,11 @@ layout(location = 1) in vec3 Normal;
 layout(location = 2) in vec3 FragPos;
 layout(location = 3) in vec3 InstanceColor;
 layout(location = 4) in vec4 FragPosLightSpace;
+// How much of the sky this point can see, baked against the whole scene.
+// Ambient is light arriving from everywhere, so it is the term this belongs
+// to: without it a corner is as bright as an open wall and every surface reads
+// flat wherever direct light does not reach.
+layout(location = 5) in float Occlusion;
 
 
 
@@ -152,6 +158,10 @@ layout(location = 4) in vec4 FragPosLightSpace;
 // cost is a handful of instructions on surfaces that have a map and nothing at
 // all on those that do not.
 
+
+// How much of the baked occlusion to apply. Zero is the lighting this renderer
+// had before it could do this, which is what makes the difference measurable
+// rather than a matter of opinion.
 
 
 
@@ -495,44 +505,34 @@ float calculateSSAO(vec3 position, vec3 normal, float distanceToCamera) {
 // Volumetric Lighting (light shafts, fog) with distance-based optimization
 vec3 calculateVolumetricLighting(vec3 worldPos, vec3 lightPos, vec3 viewPos) {
     if (!enableVolumetricLighting) return vec3(0.0);
-    
-    float distanceToCamera = length(worldPos - viewPos);
-    
-    // Skip volumetric for whatever is right in front of the camera, where it
-    // covers the most pixels for the least effect. A tenth of what the camera
-    // can see, rather than a thousand units, which switched the whole feature
-    // off for every scene smaller than that.
-    if (distanceToCamera < viewDistance * 0.1) return vec3(0.0);
-    
-    // Adaptive step count based on distance
-    int adaptiveSteps = volumetricSteps;
-    if (distanceToCamera < viewDistance) {
-        adaptiveSteps = max(4, volumetricSteps / 4);
-    } else if (distanceToCamera < viewDistance * 3.0) {
-        adaptiveSteps = max(8, volumetricSteps / 2);
+
+    // Light scattered by the air between the eye and the surface -- the haze
+    // that stands around a lamp on a wet night, and the whole of what makes a
+    // night read as atmosphere rather than as lit objects in the dark. The view
+    // ray is marched from the eye to the surface and, at each step, the lamp's
+    // light that would scatter back toward the eye is added, so the glow
+    // gathers where the ray passes close to the lamp and thins away from it.
+    vec3 toSurface = worldPos - viewPos;
+    float rayLength = length(toSurface);
+    if (rayLength < 0.001) return vec3(0.0);
+    vec3 rayDir = toSurface / rayLength;
+
+    int steps = clamp(volumetricSteps, 8, 32);
+
+    // The lamp's own colour and warmth: the haze is its light, not a grey fog.
+    vec3 tint = lights[0].color * kelvinToRGB(lights[0].temperature);
+
+    float scatter = 0.0;
+    float stepSize = rayLength / float(steps);
+    for (int i = 0; i < steps && i < 32; i++) {
+        vec3 samplePos = viewPos + rayDir * (stepSize * (float(i) + 0.5));
+        float d = length(lightPos - samplePos);
+        // Concentrated near the lamp -- a metre off it is bright, ten metres a
+        // faint wash -- which gathers the glow into a halo rather than lifting
+        // the whole frame. scattering is that falloff, in inverse metres.
+        scatter += stepSize / (1.0 + d * d * volumetricScattering);
     }
-    
-    vec3 rayDir = normalize(worldPos - viewPos);
-    vec3 lightDir = normalize(lightPos - viewPos);
-    float rayLength = distanceToCamera;
-    
-    vec3 volumetricColor = vec3(0.0);
-    float stepSize = rayLength / float(adaptiveSteps);
-    
-    // March along the ray
-    for (int i = 0; i < adaptiveSteps && i < 32; i++) {
-        vec3 samplePos = viewPos + rayDir * stepSize * float(i);
-        float distanceToLight = length(lightPos - samplePos);
-        
-        // Simple scattering calculation
-        float scattering = 1.0 / (1.0 + distanceToLight * distanceToLight * 0.0001);
-        scattering *= volumetricScattering;
-        
-        volumetricColor += vec3(scattering);
-    }
-    
-    volumetricColor /= float(adaptiveSteps);
-    return volumetricColor * volumetricIntensity * 0.1;
+    return tint * scatter * volumetricIntensity;
 }
 
 // Global Illumination approximation with distance-based optimization
@@ -937,7 +937,12 @@ void main() {
     // the key light alone; summing it per light would wash the image out as
     // lights were added.
     vec3 keyColor = lights[0].color * kelvinToRGB(lights[0].temperature);
-    vec3 ambient = lights[0].ambientStrength * keyColor * albedo * 0.8;
+    // Ambient is light arriving from every direction, so what a point can see
+    // of the sky is exactly what scales it. This is the term occlusion belongs
+    // to and the only one: darkening the direct light as well would put a
+    // shadow where a lamp is plainly shining.
+    float shut = mix(1.0, Occlusion, occlusionStrength);
+    vec3 ambient = lights[0].ambientStrength * keyColor * albedo * 0.8 * shut;
     vec3 fillLightContrib = vec3(0.0);
 
     vec3 color = ambient + fillLightContrib + Lo;

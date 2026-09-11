@@ -73,6 +73,7 @@ struct Engine {
     msaa: int
     title: string
     decorated: bool
+    visible: bool
     vsync: int
     camera_input: bool
     shadows: bool
@@ -115,6 +116,7 @@ engine_new(api: int) -> *Engine {
     e.msaa = 4
     e.title = "ae3d"
     e.decorated = true
+    e.visible = true
     e.vsync = 1
     e.camera_input = true
     e.shadows = true
@@ -161,6 +163,20 @@ size_from_env(e: *Engine) {
     if height > 0 { e.height = height }
 }
 
+// AE3D_HIDDEN keeps the window off the screen. The frame is still drawn --
+// same passes, same draws, same pixels -- so everything the agent channel reads
+// reads the same; the window simply never appears, never takes focus and never
+// reaches the taskbar.
+//
+// This is what an agent inspecting a scene wants. It is measuring the frame,
+// not watching it, and a run that seizes the screen every time cannot be run on
+// a machine somebody is using. It is also what a windowed CI runner wants,
+// where a dozen examples each flashing up a window is a dozen chances to steal
+// focus from the test that is actually running.
+hidden_from_env(e: *Engine) {
+    if core.env_int("AE3D_HIDDEN", 0) != 0 { e.visible = false }
+}
+
 // AE3D_SNAPSHOT writes the last frame of a bounded run to a PNG.
 //
 // Running an example proves it does not crash and counting its draws proves it
@@ -178,7 +194,9 @@ write_snapshot(e: *Engine) {
     path = snapshot_path(e)
     if path == "" { return }
     if e.api == platform.API_VULKAN {
-        println("ae3d: AE3D_SNAPSHOT needs the OpenGL backend")
+        if !vk.snapshot(path) {
+            println("ae3d: could not capture the Vulkan frame for ${path}")
+        }
         return
     }
     width = platform.window_fb_width(e.window)
@@ -445,9 +463,11 @@ engine_start(e: *Engine, x: int, y: int) -> bool {
     }
 
     size_from_env(e)
+    hidden_from_env(e)
 
     e.window = platform.window_create(e.width, e.height, e.title,
-                                      e.api, e.msaa, e.decorated, 32)
+                                      e.api, e.msaa, e.decorated, e.visible,
+                                      32)
     if e.window == null {
         println("ae3d: could not create window: ${platform.error()}")
         platform.shutdown()
@@ -507,6 +527,59 @@ pump_agent(e: *Engine) {
     c.frame_count = e.frame_count
     c.fps = e.fps
     c.render_ms = engine_render_ms(e)
+    c.shadow_ms = 0.0
+    c.scene_ms = 0.0
+    c.post_ms = 0.0
+    c.post_active = false
+    c.device = ""
+    if e.api == platform.API_VULKAN {
+        c.device = vk.device_name()
+    } else {
+        c.device = gl.device_name()
+    }
+    c.program_binds = 0
+    c.material_binds = 0
+    c.texture_binds = 0
+    c.triangles = 0
+    if e.gl_renderer != null {
+        renderer = e.gl_renderer as *GLRenderer
+        c.shadow_ms = gl.renderer_shadow_ms(renderer)
+        c.scene_ms = gl.renderer_scene_ms(renderer)
+        c.post_ms = gl.renderer_post_ms(renderer)
+        c.post_active = gl.renderer_post_active(renderer)
+        c.program_binds = gl.renderer_program_binds(renderer)
+        c.material_binds = gl.renderer_material_binds(renderer)
+        c.texture_binds = gl.renderer_texture_binds(renderer)
+        i = 0
+        while i < gl.renderer_model_count(renderer) {
+            m = gl.renderer_model(renderer, i)
+            if m != null && m.visible {
+                c.triangles = c.triangles + core.mesh_index_count(m.mesh) / 3
+            }
+            i = i + 1
+        }
+    }
+    // The same figures from the other backend, so a frame drawn with Vulkan
+    // answers what it is made of and what each pass cost, rather than zeros.
+    // Triangles and lights are counted the same way; the shadow map is a GL
+    // texture handle and has no Vulkan equivalent worth inventing one for.
+    if e.api == platform.API_VULKAN && e.backend_state != null {
+        vkr = e.backend_state as *VKRenderer
+        c.shadow_ms = vk.renderer_shadow_ms(vkr)
+        c.scene_ms = vk.renderer_scene_ms(vkr)
+        c.post_ms = vk.renderer_post_ms(vkr)
+        c.post_active = vk.renderer_post_active(vkr)
+        c.program_binds = vk.renderer_program_binds(vkr)
+        c.material_binds = vk.renderer_material_binds(vkr)
+        i = 0
+        while i < vk.renderer_model_count(vkr) {
+            m = vk.renderer_model(vkr, i)
+            if m != null && m.visible {
+                c.triangles = c.triangles + core.mesh_index_count(m.mesh) / 3
+            }
+            i = i + 1
+        }
+    }
     c.delta = e.delta_time
     c.width = e.width
     c.height = e.height
@@ -517,6 +590,11 @@ pump_agent(e: *Engine) {
         c.draw_calls = gl.renderer_draw_calls(e.gl_renderer)
         c.shadow_map = gl.renderer_shadow_map(e.gl_renderer as *GLRenderer)
         c.light_count = gl.renderer_light_count(e.gl_renderer as *GLRenderer)
+    }
+    if e.api == platform.API_VULKAN && e.backend_state != null {
+        vkr = e.backend_state as *VKRenderer
+        c.draw_calls = vk.renderer_draw_calls(vkr)
+        c.light_count = vk.renderer_light_count(vkr)
     }
     c.shadows = engine_shadows(e)
     c.fog_enabled = e.fog.enabled
@@ -560,18 +638,42 @@ pump_agent(e: *Engine) {
 // Called from there, which is why the agent's snapshot is not taken where the
 // rest of its work happens: after the swap the back buffer holds nothing this
 // frame put in it, and the file came out empty with an "ok" already sent.
+// Whether a frame read is waiting, so the Vulkan capture can be armed before
+// the frame that will answer it is drawn.
+agent_wants_capture(e: *Engine) -> bool {
+    if e.agent_ctx == null { return false }
+    c = e.agent_ctx as *Context
+    return c.want_capture
+}
+
 service_agent_capture(e: *Engine) {
     c = e.agent_ctx as *Context
-    if !c.want_capture { return }
-    c.want_capture = false
-    if e.api == platform.API_VULKAN {
-        agent.answer_capture_unsupported(c,
-            "the windowed Vulkan backend has no swapchain readback; use the OpenGL backend, or the editor, which renders offscreen")
-        return
+    if !agent.wants_deferred(c) { return }
+    agent.clear_deferred(c)
+    // A frame of pixels is read back only when a read actually needs it -- a
+    // grid, a pixel, a capture. A skeleton read is deferred to the same frame
+    // boundary but wants no pixels, so it does not pay for a readback.
+    need_pixels = agent.wants_capture(c)
+    agent.clear_capture(c)
+    captured = false
+    if need_pixels {
+        if e.api == platform.API_VULKAN {
+            // Copied out as the frame was submitted; read it back and hand it
+            // to the same capture the OpenGL path fills, so the agent sees the
+            // Vulkan frame as numbers exactly as it sees the OpenGL one.
+            if vk.capture_ready() {
+                pixels = vk.capture_pixels()
+                if pixels != null {
+                    captured = agent.capture_adopt(pixels, vk.capture_width(),
+                                                   vk.capture_height())
+                }
+            }
+        } else {
+            width = platform.window_fb_width(e.window)
+            height = platform.window_fb_height(e.window)
+            captured = agent.capture_frame(width, height)
+        }
     }
-    width = platform.window_fb_width(e.window)
-    height = platform.window_fb_height(e.window)
-    captured = agent.capture_frame(width, height)
     if c.pending_capture_id >= 0 { agent.answer_capture(c, captured) }
     agent.answer_pending_trace(c)
     agent.answer_deferred(c)
@@ -684,6 +786,17 @@ engine_loop(e: *Engine) {
 
         if e.on_pose != null { e.on_pose(e.user_data) }
 
+        // A Vulkan frame is copied out as it is submitted, so any read of it --
+        // a snapshot, or an agent grid or pixel read -- has to be armed on this
+        // frame, before backend_render records the copy that the servicing
+        // below then reads. A snapshot arms on the frame before the last; an
+        // agent capture arms whenever one is waiting.
+        last_frame = e.frame_limit > 0 && e.frame_count + 1 >= e.frame_limit
+        if e.api == platform.API_VULKAN {
+            want_shot = last_frame && snapshot_path(e) != ""
+            want_read = e.agent_on && agent_wants_capture(e)
+            if want_shot || want_read { vk.request_capture() }
+        }
         render_started = platform.time()
         e.backend_render(e.backend_state, cam, e.light)
         e.render_seconds = e.render_seconds + (platform.time() - render_started)

@@ -8,6 +8,13 @@
 
 #if defined(_WIN32)
 #  include <windows.h>
+#else
+#  include <signal.h>
+#  include <unistd.h>
+#  if defined(__GLIBC__) || defined(__APPLE__)
+#    include <execinfo.h>
+#    define AE3D_HAVE_BACKTRACE 1
+#  endif
 #endif
 
 #define GLFW_INCLUDE_NONE
@@ -15,6 +22,45 @@
 
 static char g_error[512];
 static int  g_initialized;
+
+#if defined(AE3D_HAVE_BACKTRACE)
+/* A crash on a headless CI runner leaves nothing but "died on signal 11" and
+   a core file nobody can open. This prints the native stack to stderr the
+   instant it happens, so the log names the frame that fell over. Async-signal
+   safe: backtrace and backtrace_symbols_fd are on the allowed list, write is
+   the only other call, and the handler re-raises the default so the process
+   still dies and the exit status is unchanged. */
+static void ae3d_say(const char *text) {
+    /* write() is marked warn_unused_result by glibc and the build is -Werror;
+       there is nothing useful to do if writing the crash message itself fails,
+       so the result is captured and discarded. */
+    ssize_t written = write(2, text, strlen(text));
+    (void)written;
+}
+
+static void ae3d_crash_handler(int sig) {
+    void *frames[64];
+    int n = backtrace(frames, 64);
+    char digit[2];
+    digit[0] = (char)('0' + (sig % 10));
+    digit[1] = '\n';
+    ae3d_say("\nae3d: native crash, signal ");
+    { ssize_t w = write(2, digit, 2); (void)w; }
+    backtrace_symbols_fd(frames, n, 2);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+/* Installed when the shared library loads, before any entry point runs, so an
+   offscreen test that never opens a window is covered too. */
+__attribute__((constructor))
+static void ae3d_install_crash_handler(void) {
+    signal(SIGSEGV, ae3d_crash_handler);
+    signal(SIGABRT, ae3d_crash_handler);
+    signal(SIGBUS, ae3d_crash_handler);
+    signal(SIGFPE, ae3d_crash_handler);
+}
+#endif
 
 static void ae3d_error_callback(int code, const char *description) {
     snprintf(g_error, sizeof(g_error), "glfw error %d: %s", code, description ? description : "");
@@ -43,13 +89,22 @@ void ae3d_platform_shutdown(void) {
 const char *ae3d_platform_error(void) { return g_error; }
 
 void *ae3d_window_create(int width, int height, const char *title,
-                         int api, int msaa, int decorated, int depth_bits) {
+                         int api, int msaa, int decorated, int visible,
+                         int depth_bits) {
     GLFWwindow *win;
     double *scroll;
 
     glfwDefaultWindowHints();
     glfwWindowHint(GLFW_DECORATED, decorated ? GLFW_TRUE : GLFW_FALSE);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+    /* An invisible window still has a framebuffer and still renders; it just
+       never reaches the screen or the taskbar, and cannot take focus away from
+       whatever the machine is actually being used for. */
+    glfwWindowHint(GLFW_VISIBLE, visible ? GLFW_TRUE : GLFW_FALSE);
+    if (!visible) {
+        glfwWindowHint(GLFW_FOCUSED, GLFW_FALSE);
+        glfwWindowHint(GLFW_FOCUS_ON_SHOW, GLFW_FALSE);
+    }
     if (depth_bits > 0) glfwWindowHint(GLFW_DEPTH_BITS, depth_bits);
     if (msaa > 0) glfwWindowHint(GLFW_SAMPLES, msaa);
 
@@ -96,6 +151,14 @@ void ae3d_window_swap(void *win) {
 
 void ae3d_window_make_current(void *win) {
     if (win) glfwMakeContextCurrent((GLFWwindow *)win);
+}
+
+/* Whether a GL context is current on this thread. Deleting a GL object with no
+   context is undefined: a desktop driver returns early, llvmpipe dereferences
+   the missing context and crashes, so cleanup that can run after the window is
+   gone asks this first. */
+int ae3d_gl_context_current(void) {
+    return glfwGetCurrentContext() != NULL;
 }
 
 void ae3d_window_set_vsync(int interval) { glfwSwapInterval(interval); }

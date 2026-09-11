@@ -22,10 +22,13 @@
 
 import std.heap
 import std.list
+import std.os
+import std.string
 import ae3d.core
 import ae3d.platform
 import ae3d.engine
 import ae3d.gl
+import ae3d.vk
 import ae3d.assets
 import ae3d.anim
 import ae3d.ik
@@ -57,11 +60,17 @@ var g_bones: ptr = null
 var g_skeleton: *Skeleton = null
 
 // The road, and how far the ankle sits above the sole standing on it.
-const GROUND = 0.0
+// The road under the figure. It has a camber and the figure walks along the
+// crown of it, so the surface here is not zero.
+const GROUND = 0.075
 const ANKLE = 0.085
 // How much of its own lift a foot has to give up before it stops being planted.
 const STEP_BAND = 0.07
 const SAMPLES = 96
+// Beyond this multiple of its own length the arm gives up reaching, and once
+// the shoulder is this far past the target it has gone by.
+const REACH_FADE = 1.7
+const PASSED_BY = 0.15
 
 // What the zombie is walking at. Out of reach for most of the street, which is
 // what keeps the arm straight and pointing; inside it at the end of the lunge,
@@ -82,12 +91,26 @@ struct Limb {
 var g_models: ptr = null
 var g_clips: ptr = null
 
+// The benchmark scene, so it has to run on both renderers: a cost that can
+// only be measured on one of them is a cost that regresses unseen on the
+// other. `vulkan` as the first argument, the same way backend_switch takes it.
+chosen_api() -> int {
+    if os.aether_args_count() > 1 && string.equals(os.aether_args_get(1), "vulkan") == 1 {
+        if !vk.available() {
+            println("zombie_street: no Vulkan driver available: ${vk.last_error()}")
+            os.exit(1)
+        }
+        return platform.API_VULKAN
+    }
+    return platform.API_GL
+}
+
 main() {
-    e = engine.engine_new(platform.API_GL)
+    e = engine.engine_new(chosen_api())
     engine.engine_set_size(e, 1280, 720)
     engine.engine_set_title(e, "ae3d: a zombie, on a street")
     engine.engine_set_camera_input(e, true)
-    engine.engine_set_post(e, true, true, 1.35, 0.4)
+    engine.engine_set_post(e, true, true, 0.85, 0.85)
     engine.engine_set_fog(e, core.fog_distance(5.0, 40.0,
                                                core.vec3(SKY_R, SKY_G, SKY_B), 0.95))
     // The street runs ninety metres and the zombie is under two. Fitting the
@@ -96,6 +119,11 @@ main() {
     engine.engine_set_shadow_distance(e, 18.0)
     engine.engine_set_user_data(e, e as ptr)
     engine.engine_on_start(e, on_start)
+
+    // The controls, because a window that gives no sign of how to move in it is
+    // a window you cannot move in. Right-drag to look rather than a captured
+    // cursor, so the mouse is free to leave the window on a desktop.
+    println("zombie_street: WASD to move, hold right mouse to look, shift to sprint, space/ctrl up and down")
 
     if !engine.engine_run(e, -1, -1) {
         println("zombie_street: no window")
@@ -125,7 +153,11 @@ report_cost(e: *Engine) {
     if frames == 0 { return }
     renderer = engine.engine_gl_renderer(e)
     draws = 0
-    if renderer != null { draws = gl.renderer_draw_calls(renderer as *GLRenderer) }
+    if renderer != null {
+        draws = gl.renderer_draw_calls(renderer as *GLRenderer)
+    } else {
+        draws = vk.renderer_draw_calls(engine.engine_vk_renderer(e))
+    }
     println("zombie_street: ${engine.engine_render_ms(e)} ms per frame over ${frames} frames, ${draws} draws, ${triangles()} triangles")
 }
 
@@ -182,11 +214,11 @@ on_start(data: ptr) {
     // under.
     g_lamps = list.new()
     g_key = lamp_at(0.0)
-    g_key.ambient_strength = 0.12
+    g_key.ambient_strength = 0.10
     engine.engine_set_light(e, g_key)
 
     dusk = core.light_directional(core.vec3(0.0 - 0.30, 0.62, 0.72),
-                                  core.vec3(0.34, 0.42, 0.68), 0.75)
+                                  core.vec3(0.30, 0.40, 0.72), 0.16)
     engine.engine_add_light(e, dusk)
     list.add_raw(g_lamps, dusk as ptr)
 
@@ -199,8 +231,12 @@ on_start(data: ptr) {
     if renderer != null {
         gl.renderer_set_clear_color(renderer as *GLRenderer, SKY_R, SKY_G, SKY_B)
         g_sky = gl.skybox_create(renderer as *GLRenderer, SKY)
-        engine.engine_set_skybox(e, g_sky as ptr)
+    } else {
+        vulkan = engine.engine_vk_renderer(e)
+        vk.renderer_set_clear_color(vulkan, SKY_R, SKY_G, SKY_B)
+        g_sky = vk.skybox_create(vulkan, SKY)
     }
+    engine.engine_set_skybox(e, g_sky as ptr)
 
     m = assets.manifest_load(MANIFEST)
     if m == null {
@@ -233,12 +269,22 @@ on_start(data: ptr) {
 
     animated = animated + rig_the_figure(e, models, m)
 
+    // Real light sources, not bright paint. A lamp head and a lit window are
+    // their own light: the engine's emissive path (an exposure past ten) makes
+    // a surface skip shading and glow at its own colour, which is what then
+    // spills into the bloom. Set here rather than in the export so the same
+    // asset is a plain material to any scene that does not want it lit.
+    make_emissive(models, m)
+
     g_leg_l = limb_of(e, "ThighL", "KneeL", "AnkleL")
     g_leg_r = limb_of(e, "ThighR", "KneeR", "AnkleR")
     g_arm_r = limb_of(e, "ShoulderR", "ElbowR", "WristR")
     g_arm_l = limb_of(e, "ShoulderL", "ElbowL", "WristL")
-    g_head = bone_named("Neck")
-    g_jaw = bone_named("Head")
+    // The head, and where its face points. Turning the neck towards something
+    // turns the head over: the neck runs upwards, so aiming it at anything
+    // ahead lays the head on its side. What has to be aimed is the face.
+    g_head = bone_named("Head")
+    g_jaw = bone_named("Face")
     engine.engine_on_pose(e, solve_pose)
 
     println("zombie_street: ${count} objects from ${assets.manifest_source(m)}, ${animated} animated")
@@ -293,6 +339,26 @@ rig_the_figure(e: *Engine, models: ptr, m: *Manifest) -> int {
     }
     list.free(clips)
     return bound
+}
+
+// The lamp heads burn hard; the lit rooms glow softly behind their glass. The
+// number is the emissive strength times ten, so 16 is a bright lamp and 13 a
+// window with a lamp on inside it.
+make_emissive(models: ptr, m: *Manifest) {
+    count = assets.manifest_count(m)
+    i = 0
+    while i < count {
+        name = assets.entry_object(assets.manifest_entry(m, i))
+        model = list.get_raw(models, i) as *Model
+        if model != null {
+            if string.contains(name, "LampHead") == 1 {
+                core.model_set_exposure(model, 16.0)
+            } else if string.contains(name, "_Lit") == 1 {
+                core.model_set_exposure(model, 13.0)
+            }
+        }
+        i = i + 1
+    }
 }
 
 entry_named(m: *Manifest, name: string) -> *Entry {
@@ -397,36 +463,84 @@ solve_pose(data: ptr) {
     // It looks at what it is walking at. A head looks along its face, and the
     // jaw is what the face is: pointing the neck would fold the head onto the
     // chest, since the neck runs the other way.
-    ik.aim_at(g_head, g_jaw, core.v3_add(victim, core.vec3(0.0, 0.22, 0.0)))
+    look_at(g_head, g_jaw, core.v3_add(victim, core.vec3(0.0, 0.22, 0.0)), g_arm_r)
 }
 
+// Ground, for a foot that has gone below it.
+//
+// The clip plants its own feet -- it is authored against a footstep plan, so a
+// foot that is down stays where it was put to within a couple of centimetres.
+// What a clip cannot know is the road, which has a camber. So this only ever
+// lifts: a foot above the surface is the animation's business and is left
+// alone, and a foot below it is pushed back out.
+//
+// It used to pull as well as push, engaging whenever a foot came within a hand
+// of its own lowest point. On the leg that drags, which barely clears the road,
+// that caught the foot mid-swing and yanked it down -- five touchdowns in a
+// cycle that has two, and four centimetres of skating each time.
 plant(limb: *Limb) {
     if limb == null { return }
     if limb.root == null || limb.mid == null || limb.tip == null { return }
     at = core.model_world_position(limb.tip)
-    lift = at.y - limb.lowest
-    if lift > STEP_BAND { return }
+    if at.y >= GROUND + ANKLE { return }
 
-    planted = 1.0 - lift / STEP_BAND
-    on_road = core.vec3(at.x, GROUND + ANKLE, at.z)
-    target = core.v3_lerp(at, on_road, planted)
+    target = core.vec3(at.x, GROUND + ANKLE, at.z)
     knee = core.v3_add(core.model_world_position(limb.mid), core.vec3(2.0, 0.0, 0.0))
     ik.solve_two_bone(limb.root, limb.mid, limb.tip, target, knee)
+}
+
+// How much the figure is actually going for it.
+//
+// A solve that runs every frame against a fixed point in the street tracks that
+// point for the whole clip: the arm swings round to keep pointing at it as the
+// figure walks by, and round again when the clip loops and the figure is back
+// where it started. That is the head and the arms turning all the way round,
+// and it is the solve doing it, not the animation -- which loops to within two
+// degrees.
+//
+// So the reach is weighted by whether the thing is reachable at all: full
+// inside the arm's own length, fading out beyond it, nothing once the shoulder
+// is past it. The clip animates the lunge; this only closes the last of it.
+reach_weight(limb: *Limb, target: Vec3) -> float {
+    shoulder = core.model_world_position(limb.root)
+    // Walking up the street in +x, so a target behind the shoulder is one the
+    // figure has already gone by.
+    if target.x < shoulder.x - PASSED_BY { return 0.0 }
+    full = core.v3_distance(shoulder, core.model_world_position(limb.mid)) +
+           core.v3_distance(core.model_world_position(limb.mid),
+                            core.model_world_position(limb.tip))
+    span = core.v3_distance(shoulder, target)
+    if span <= full { return 1.0 }
+    if span >= full * REACH_FADE { return 0.0 }
+    return 1.0 - (span - full) / (full * (REACH_FADE - 1.0))
 }
 
 reach(limb: *Limb, target: Vec3) {
     if limb == null { return }
     if limb.root == null || limb.mid == null || limb.tip == null { return }
+    weight = reach_weight(limb, target)
+    // At no weight the target is where the hand already is, so the solve leaves
+    // it exactly there -- which tests/test_ik proves it does.
+    aim = core.v3_lerp(core.model_world_position(limb.tip), target, weight)
     shoulder = core.model_world_position(limb.root)
     elbow = core.v3_add(shoulder, core.vec3(0.0 - 1.0, 0.0 - 1.2, 1.6))
-    ik.solve_two_bone(limb.root, limb.mid, limb.tip, target, elbow)
+    ik.solve_two_bone(limb.root, limb.mid, limb.tip, aim, elbow)
+}
+
+// The same, for what the figure is looking at. A head that tracks a fixed point
+// turns all the way round as the figure walks past it.
+look_at(neck: *Model, face: *Model, target: Vec3, limb: *Limb) {
+    if neck == null || face == null { return }
+    weight = reach_weight(limb, target)
+    aim = core.v3_lerp(core.model_world_position(face), target, weight)
+    ik.aim_at(neck, face, aim)
 }
 
 // Sodium light, under the lamp head the exported scene put at this x. Its range
 // is short enough that the pools of light on the road stay separate.
 lamp_at(x: float) -> *Light {
     lamp = core.light_point(core.vec3(x, 4.25, 0.0 - 2.94),
-                            core.vec3(1.0, 0.74, 0.44), 1.35, 12.0)
+                            core.vec3(1.0, 0.72, 0.40), 2.7, 15.0)
     list.add_raw(g_lamps, lamp as ptr)
     return lamp
 }

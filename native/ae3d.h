@@ -13,7 +13,8 @@ void   ae3d_platform_shutdown(void);
 const char *ae3d_platform_error(void);
 
 void  *ae3d_window_create(int width, int height, const char *title,
-                          int api, int msaa, int decorated, int depth_bits);
+                          int api, int msaa, int decorated, int visible,
+                          int depth_bits);
 void   ae3d_window_destroy(void *win);
 int    ae3d_window_should_close(void *win);
 void   ae3d_window_close(void *win);
@@ -46,6 +47,8 @@ int    ae3d_mesh_push_vertex(void *mesh, double px, double py, double pz,
                              double u, double v,
                              double nx, double ny, double nz);
 int    ae3d_mesh_push_index(void *mesh, int index);
+void   ae3d_mesh_set_occlusion(void *mesh, int i, double value);
+double ae3d_mesh_occlusion(void *mesh, int i);
 int    ae3d_mesh_set_skin(void *mesh, int i, int j0, int j1, int j2, int j3,
                           double w0, double w1, double w2, double w3);
 int    ae3d_mesh_is_skinned(void *mesh);
@@ -63,6 +66,7 @@ void   ae3d_skinrows_set(void *rows, int i, int j0, int j1, int j2, int j3,
                          double w0, double w1, double w2, double w3);
 void   ae3d_skinrows_apply(void *rows, void *mesh, int vertex, int position);
 void   ae3d_objbuild_set_skin(void *build, void *rows);
+void   ae3d_objbuild_set_occlusion(void *build, void *values);
 void   ae3d_gl_uniform_mat4v(int loc, int count, const void *values);
 const float *ae3d_mesh_skin_data(void *mesh);
 double ae3d_mesh_skin_joint(void *mesh, int i, int slot);
@@ -149,6 +153,9 @@ int    ae3d_image_height(void *img);
 const char *ae3d_image_error(void);
 
 int    ae3d_gl_load(void);
+/* Whether a GL context is current on this thread; cleanup that can outlive the
+   window checks this before deleting GL objects. */
+int    ae3d_gl_context_current(void);
 const char *ae3d_gl_version(void);
 const char *ae3d_gl_renderer(void);
 int    ae3d_gl_error(void);
@@ -213,6 +220,14 @@ int    ae3d_gl_texture_cubemap_from_image(void *img);
 void   ae3d_gl_texture_delete(int texture);
 void   ae3d_gl_texture_bind(int unit, int texture);
 void   ae3d_gl_texture_bind_cubemap(int unit, int texture);
+
+/* GPU time per pass, read three frames late so the read never waits. */
+void  *ae3d_gl_passtimer_create(void);
+void   ae3d_gl_passtimer_destroy(void *handle);
+void   ae3d_gl_passtimer_frame(void *handle);
+void   ae3d_gl_passtimer_begin(void *handle, int pass);
+void   ae3d_gl_passtimer_end(void *handle);
+double ae3d_gl_passtimer_ms(void *handle, int pass);
 
 int    ae3d_gl_fbo_create(void);
 void   ae3d_gl_fbo_bind(int fbo);
@@ -289,10 +304,24 @@ void   ae3d_vk_shadow_end(void);
 void   ae3d_vk_set_post(int fxaa, int bloom, double threshold, double intensity);
 int    ae3d_vk_post_active(void);
 int    ae3d_vk_draw_calls(void);
+int    ae3d_vk_mesh_shared(int handle);
+/* GPU time per pass -- 0 shadow, 1 scene, 2 post -- from the frame whose
+   fence was last waited on, and what that frame cost in changes of mind. */
+double ae3d_vk_pass_ms(int pass);
+int    ae3d_vk_pipeline_binds(void);
+int    ae3d_vk_set_binds(void);
 int    ae3d_vk_sample_count(void);
 void  *ae3d_vk_offscreen_pixels(void);
 int    ae3d_vk_offscreen_width(void);
 int    ae3d_vk_offscreen_height(void);
+/* Windowed frame capture: arm it, then after a frame is submitted read the
+   presented image back as RGBA (top row first). request returns 0 when the
+   surface cannot be a transfer source. */
+int    ae3d_vk_request_capture(void);
+int    ae3d_vk_capture_ready(void);
+void  *ae3d_vk_capture_pixels(void);
+int    ae3d_vk_capture_width(void);
+int    ae3d_vk_capture_height(void);
 
 // The agent channel: a localhost NDJSON socket an agent drives the engine
 // through. ae3d_agent_active() is what every hot path tests, and it is zero
@@ -305,13 +334,23 @@ void        ae3d_agent_respond(const char *line);
 void        ae3d_agent_stop(void);
 const char *ae3d_agent_error(void);
 
+/* The asking end of the same channel, so a tool that measures a scene can be
+   written against the engine rather than against a copy of the protocol. */
+void        ae3d_client_init(void);
+int         ae3d_client_connect(const char *host, int port);
+int         ae3d_client_send(int handle, const char *line);
+const char *ae3d_client_read(int handle);
+void        ae3d_client_close(int handle);
+const char *ae3d_client_error(void);
+
 int  ae3d_capture_frame(int width, int height);
 int  ae3d_capture_width(void);
 int  ae3d_capture_height(void);
 int  ae3d_capture_pixel(int x, int y, double *out);
 int  ae3d_capture_region(int x, int y, int width, int height,
                          int background, int tolerance, double *out);
-int  ae3d_capture_grid(int columns, int rows, int background, int tolerance,
+int  ae3d_capture_grid(int left, int top, int width, int height,
+                       int columns, int rows, int background, int tolerance,
                        double *out);
 int  ae3d_capture_hold_reference(void);
 int  ae3d_capture_diff(int tolerance, double *out);

@@ -24,6 +24,11 @@ FRAMES="${AE3D_CI_FRAMES:-30}"
 # is a size.
 export AE3D_WIDTH="${AE3D_CI_WIDTH:-320}"
 export AE3D_HEIGHT="${AE3D_CI_HEIGHT:-180}"
+# Every frame is still drawn; none of them reaches a screen. On a runner with a
+# display this file used to open and close dozens of windows, each one a chance
+# to take focus from whatever else the machine was doing, and none of them was
+# ever looked at -- what the examples are judged on comes back over the channel.
+export AE3D_HIDDEN="${AE3D_HIDDEN:-1}"
 failures=0
 skipped=0
 
@@ -101,6 +106,22 @@ died_on() {   # died_on <status>
     if [ "$1" -gt 128 ] && [ "$1" -lt 160 ]; then
         printf ' (died on signal %d)' "$(($1 - 128))"
     fi
+}
+
+# A crash on a headless runner leaves only "died on signal 11". When the status
+# is a signal and gdb is present, run the program again under it and print the
+# native stack, so the log names the frame that fell over instead of a core
+# file nobody can open. Off unless AE3D_CI_TRACE is set, since it re-runs a
+# crashing program.
+trace_crash() {   # trace_crash <status> <binary> [args...]
+    [ -n "${AE3D_CI_TRACE:-}" ] || return 0
+    trace_status="$1"; shift
+    [ "$trace_status" -gt 128 ] && [ "$trace_status" -lt 160 ] || return 0
+    command -v gdb >/dev/null 2>&1 || return 0
+    echo "        --- native stack (gdb) ---"
+    AE3D_FRAMES="${FRAMES:-3}" gdb -batch -nx \
+        -ex run -ex bt -ex quit --args "$@" 2>&1 \
+        | grep -E '^#[0-9]+|Program received|signal SIG' | sed 's/^/        /' | head -25
 }
 
 . "$PWD/scripts/native.sh"
@@ -373,6 +394,7 @@ for suite in tests/test_*.ae; do
     elif [ "$suite_status" -ne 0 ]; then
         fail "$name$(died_on "$suite_status")"
         printf '%s\n' "$output" | sed 's/^/        /' | head -20
+        trace_crash "$suite_status" ./build/"$name"
     elif printf '%s' "$output" | grep -q "all checks passed"; then
         pass "$name"
     elif printf '%s' "$output" | grep -q "SKIP" && ! printf '%s' "$output" | grep -q "FAIL"; then
@@ -386,7 +408,9 @@ for suite in tests/test_*.ae; do
 done
 
 step "examples build and run"
-build_together examples/*.ae
+# The benchmark is built in the same pass: build_together starts from a clean
+# status directory, so a later call would forget that the examples built.
+build_together examples/*.ae tools/ae3d_bench.ae
 for example in examples/*.ae; do
     name="$(basename "$example" .ae)"
     if ! built_ok "$name"; then
@@ -453,6 +477,36 @@ step "the demo scene, held to what a scene has to look like"
 # Every one of them is a property of the scene the engine already holds, and
 # none of them was ever asked for -- which is how the street came to be a row of
 # boxes at ninety texels to the metre with every measurement passing.
+# Both renderers. The whole point is that the scene is judged by the numbers the
+# channel answers with, on the backend it is taken forward on -- so the critique
+# reads the Vulkan frame too, and its verdict on the lighting is proven there.
+# Where a backend cannot give the frame back (software Vulkan on a headless
+# runner has no swapchain to read), it skips rather than fails.
+run_critique() {   # run_critique <backend> <port>
+    crit_backend="$1"
+    crit_port="$2"
+    crit_name="zombie_street (critique, $crit_backend)"
+    crit_arg=""
+    # The Vulkan pass proves the lighting and the frame-reading on the target;
+    # its animation sampling is the same pose the OpenGL pass already judges and
+    # would run for minutes on the software renderer a headless runner uses, so
+    # it is skipped there.
+    [ "$crit_backend" = vulkan ] && crit_arg="--vulkan --frame-only"
+    crit_log="$(mktemp)"
+    bounded "$RUN_LIMIT" $PYTHON scripts/critique_scene.py --launch ./build/zombie_street \
+        $crit_arg --port "$crit_port" >"$crit_log" 2>&1
+    crit_status=$?
+    if [ "$crit_status" -eq 0 ]; then
+        pass "$crit_name"
+        grep -E '^  (ok|FAIL)' "$crit_log" | sed 's/^/      /' | head -30
+    elif [ "$crit_status" -eq 3 ]; then
+        skip "$crit_name" "$(grep -m1 'SKIP' "$crit_log" | sed 's/.*SKIP *//' || echo 'the frame could not be read')"
+    else
+        fail "$crit_name"
+        grep -E 'FAIL|Traceback|Error|error:|critique_scene:' "$crit_log" | sed 's/^/        /' | head -16
+    fi
+    rm -f "$crit_log"
+}
 if [ -z "$PYTHON" ]; then
     skip "zombie_street (critique)" "no python3"
 elif ! have_display; then
@@ -460,19 +514,74 @@ elif ! have_display; then
 elif ! built_ok zombie_street; then
     skip "zombie_street (critique)" "it did not build"
 else
-    critique_log="$(mktemp)"
-    bounded "$RUN_LIMIT" $PYTHON scripts/critique_scene.py         --launch ./build/zombie_street --port 7914 >"$critique_log" 2>&1
-    critiqued=$?
-    if [ "$critiqued" -eq 0 ]; then
-        pass "zombie_street (critique)"
-        grep -E '^  (ok|FAIL)' "$critique_log" | sed 's/^/      /' | head -20
-    elif [ "$critiqued" -eq 3 ]; then
-        skip "zombie_street (critique)" "the scene could not open a window"
+    run_critique opengl 7914
+    run_critique vulkan 7926
+fi
+
+step "the demo scene, held to what it cost last time"
+# The benchmark. Written in ae3d against ae3d's own protocol rather than in
+# another language against a second copy of it, which is the point of the
+# channel having a client in the engine's own language.
+#
+# Draw calls, triangles and state changes are the same on every machine that
+# runs this, so they are compared against the recorded figures exactly and a
+# single extra program bind fails the build. The milliseconds beside them are
+# compared only when the card that recorded them is the card running them, and
+# reported otherwise: a time from one GPU says nothing about another.
+#
+# Both renderers, because a cost that can only be measured on one of them is
+# a cost that regresses unseen on the other; Vulkan skips where there is no
+# driver, the way every other Vulkan check here does.
+frame_cost() {   # frame_cost <backend> <port>
+    cost_backend="$1"
+    cost_port="$2"
+    cost_name="zombie_street (frame cost, $cost_backend)"
+    cost_arg=""
+    [ "$cost_backend" = vulkan ] && cost_arg="vulkan"
+    cost_log="$(mktemp)"
+    scene_log="$(mktemp)"
+    AE3D_AGENT="$cost_port" ./build/zombie_street $cost_arg >"$scene_log" 2>&1 &
+    cost_scene=$!
+    # The scene opens its port after the window and the first frame, so the
+    # first question can arrive before there is anything to answer it. Retried
+    # only while that is what came back, and only while the scene is alive.
+    costed=1
+    attempt=0
+    while [ "$attempt" -lt 50 ]; do
+        kill -0 "$cost_scene" 2>/dev/null || break
+        bounded "$RUN_LIMIT" ./build/ae3d_bench "$cost_port" >"$cost_log" 2>&1
+        costed=$?
+        grep -q 'nothing answering' "$cost_log" || break
+        attempt=$((attempt + 1))
+        sleep 0.2
+    done
+    if ! kill -0 "$cost_scene" 2>/dev/null; then
+        if grep -q 'no Vulkan driver' "$scene_log"; then
+            skip "$cost_name" "no Vulkan driver"
+        else
+            skip "$cost_name" "the scene could not open a window"
+        fi
+    elif [ "$costed" -eq 0 ]; then
+        pass "$cost_name"
+        sed 's/^/        /' "$cost_log" | head -20
     else
-        fail "zombie_street (critique)"
-        grep -E 'FAIL|Traceback|Error|error:|critique_scene:' "$critique_log"             | sed 's/^/        /' | head -14
+        fail "$cost_name"
+        sed 's/^/        /' "$cost_log" | head -20
     fi
-    rm -f "$critique_log"
+    kill "$cost_scene" 2>/dev/null
+    wait "$cost_scene" 2>/dev/null
+    rm -f "$cost_log" "$scene_log"
+}
+if ! built_ok ae3d_bench; then
+    fail "ae3d_bench (build)"
+    sed 's/^/        /' "$BUILD_DIR/ae3d_bench.log" | head -20
+elif ! have_display; then
+    skip "zombie_street (frame cost)" "no display"
+elif ! built_ok zombie_street; then
+    skip "zombie_street (frame cost)" "it did not build"
+else
+    frame_cost opengl 7915
+    frame_cost vulkan 7916
 fi
 
 # The editor runs on either renderer, so both are checked: the Vulkan option

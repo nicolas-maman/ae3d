@@ -23,6 +23,7 @@ exports (
     Context, context_new, context_free,
     start, active, port, stop, pump, answer_step, answer_snapshot, answer_capture,
     capture_release, capture_frame, capture_adopt, answer_pending_trace, answer_deferred,
+    wants_deferred, clear_deferred, wants_capture, clear_capture,
     answer_capture_unsupported, is_paused,
     schema_json, last_error
 )
@@ -42,7 +43,7 @@ extern ae3d_capture_pixel(x: int, y: int, out: ptr) -> int
 extern ae3d_capture_region(x: int, y: int, width: int, height: int, background: int, tolerance: int, out: ptr) -> int
 extern ae3d_capture_hold_reference() -> int
 extern ae3d_capture_diff(tolerance: int, out: ptr) -> int
-extern ae3d_capture_grid(columns: int, rows: int, background: int, tolerance: int, out: ptr) -> int
+extern ae3d_capture_grid(left: int, top: int, width: int, height: int, columns: int, rows: int, background: int, tolerance: int, out: ptr) -> int
 extern ae3d_capture_release()
 extern ae3d_capture_slot(block: ptr, index: int) -> float
 extern ae3d_capture_slot_of(block: ptr, index: int, count: int) -> float
@@ -61,6 +62,7 @@ const READ_REGION = 1
 const READ_HOLD = 2
 const READ_DIFF = 3
 const READ_GRID = 4
+const READ_SKELETON = 5
 
 // A grid fine enough that a silhouette is legible in it and coarse enough to
 // fit in one reply. 64 by 36 is 2304 cells, which is a frame a person could
@@ -76,6 +78,12 @@ struct Deferred {
     height: int
     background: int
     tolerance: int
+    // A grid reads a window of the frame at a resolution of its own, so it
+    // needs both: where to look and how finely.
+    columns: int
+    rows: int
+    // What the read is about, for the reads that are about something.
+    subject: ptr
 }
 
 struct Context {
@@ -89,6 +97,15 @@ struct Context {
     frame_count: int
     fps: float
     render_ms: float
+    shadow_ms: float
+    scene_ms: float
+    post_ms: float
+    post_active: bool
+    device: string
+    program_binds: int
+    material_binds: int
+    texture_binds: int
+    triangles: int
     delta: float
     width: int
     height: int
@@ -107,6 +124,7 @@ struct Context {
     pending_trace_id: int
     pending_trace_model: ptr
     want_capture: bool
+    want_deferred: bool
     step_from: int
     paused: bool
     shadows: bool
@@ -130,6 +148,7 @@ context_new() -> *Context {
     c.pending_snapshot_id = -1
     c.pending_capture_id = -1
     c.pending_trace_id = -1
+    c.want_deferred = false
     c.deferred = list.new()
     c.reference_frame = -1
     return c
@@ -137,6 +156,24 @@ context_new() -> *Context {
 
 defer_read(c: *Context, kind: int, id: int, x: int, y: int, width: int, height: int,
            background: int, tolerance: int) -> bool {
+    return defer_grid(c, kind, id, x, y, width, height, background, tolerance, 0, 0)
+}
+
+defer_skeleton(c: *Context, id: int, skeleton: ptr) -> bool {
+    d = heap.new(Deferred)
+    d.kind = READ_SKELETON
+    d.id = id
+    d.subject = skeleton
+    list.add_raw(c.deferred, d as ptr)
+    // A skeleton read answers bone positions at the frame boundary, so it is
+    // deferred, but it needs no pixels -- setting want_capture here made every
+    // one of the hundreds a gait measure does stall a full Vulkan readback.
+    c.want_deferred = true
+    return true
+}
+
+defer_grid(c: *Context, kind: int, id: int, x: int, y: int, width: int, height: int,
+           background: int, tolerance: int, columns: int, rows: int) -> bool {
     d = heap.new(Deferred)
     d.kind = kind
     d.id = id
@@ -146,10 +183,18 @@ defer_read(c: *Context, kind: int, id: int, x: int, y: int, width: int, height: 
     d.height = height
     d.background = background
     d.tolerance = tolerance
+    d.columns = columns
+    d.rows = rows
     list.add_raw(c.deferred, d as ptr)
     c.want_capture = true
+    c.want_deferred = true
     return true
 }
+
+wants_deferred(c: *Context) -> bool { return c.want_deferred }
+clear_deferred(c: *Context) { c.want_deferred = false }
+wants_capture(c: *Context) -> bool { return c.want_capture }
+clear_capture(c: *Context) { c.want_capture = false }
 
 // Called once the frame has been read back, in the order the requests arrived.
 answer_deferred(c: *Context) {
@@ -193,20 +238,21 @@ answer_one_read(c: *Context, d: *Deferred) {
     }
 
     if d.kind == READ_GRID {
-        cells = d.width * d.height
+        cells = d.columns * d.rows
         block = calloc(cells * 4, 8)
-        if ae3d_capture_grid(d.width, d.height, d.background, d.tolerance, block) == 0 {
+        if ae3d_capture_grid(d.x, d.y, d.width, d.height, d.columns, d.rows,
+                             d.background, d.tolerance, block) == 0 {
             free(block)
             fail(d.id, "there is no frame to read")
             return
         }
         rows = json.arr()
         y = 0
-        while y < d.height {
+        while y < d.rows {
             row = json.arr()
             x = 0
-            while x < d.width {
-                at = (y * d.width + x) * 4
+            while x < d.columns {
+                at = (y * d.columns + x) * 4
                 cell = json.arr()
                 span = cells * 4
                 json.array_add_raw(cell, json.num(ae3d_capture_slot_of(block, at, span)))
@@ -221,11 +267,20 @@ answer_one_read(c: *Context, d: *Deferred) {
         }
         free(block)
         out = json.obj()
-        json.object_set_raw(out, "columns", json.from_int(d.width))
-        json.object_set_raw(out, "rows", json.from_int(d.height))
+        json.object_set_raw(out, "columns", json.from_int(d.columns))
+        json.object_set_raw(out, "rows", json.from_int(d.rows))
+        json.object_set_raw(out, "x", json.from_int(d.x))
+        json.object_set_raw(out, "y", json.from_int(d.y))
+        json.object_set_raw(out, "width", json.from_int(d.width))
+        json.object_set_raw(out, "height", json.from_int(d.height))
         json.object_set_raw(out, "cells", rows)
         json.object_set_raw(out, "frame", json.from_int(c.frame_count))
         answer(d.id, out)
+        return
+    }
+
+    if d.kind == READ_SKELETON {
+        answer(d.id, skeleton_result(d.subject as *Skeleton))
         return
     }
 
@@ -359,10 +414,10 @@ help_result() -> ptr {
         "Camera position, orientation, field of view and clip planes."))
     json.array_add_raw(ops, describe("scene.tree", "[detail], [audit]",
         "Every model the renderer holds: index, name, position and visibility. With detail, also its material, texture, parent, world position, triangles and where it lands on screen -- one round trip instead of one per model. With audit, what the surface is made of: its area in metres, its size along each axis, how many ways its faces point, how often its texture repeats across a metre and how many texels that is."))
-    json.array_add_raw(ops, describe("render.set", "normal_strength",
-        "How hard normal maps push, for the whole scene. Zero is the normal the geometry has, which is what a surface without a map is shaded by."))
+    json.array_add_raw(ops, describe("render.set", "[normal_strength], [occlusion_strength]",
+        "How hard normal maps push and how much baked occlusion is applied, for the whole scene. Zero on either is the lighting this renderer had before it could do that, which is what makes the difference measurable rather than a matter of opinion."))
     json.array_add_raw(ops, describe("scene.skeleton", "object",
-        "Every bone of a skinned model: name, parent, where it is in the world and how it is turned. A skinned mesh stays in its bind pose and its bones carry it, so this is the only thing that says where a figure's hand or foot actually is."))
+        "Every bone of a skinned model: name, parent, where it is in the world and how it is turned. A skinned mesh stays in its bind pose and its bones carry it, so this is the only thing that says where a figure's hand or foot actually is. Answered at the frame boundary, so it describes a pose that is finished rather than one part way through being built."))
     json.array_add_raw(ops, describe("scene.isolate", "[object]",
         "Show only this model, or show every model again when given no name."))
     json.array_add_raw(ops, describe("model.get", "index",
@@ -385,8 +440,8 @@ help_result() -> ptr {
         "One pixel of the captured frame as r, g, b, a and hex."))
     json.array_add_raw(ops, describe("frame.region", "x, y, width, height, [background], [tolerance]",
         "Mean colour, coverage, and the luminance spread over a rectangle. A flat surface has a stddev near zero; stipple and shadow acne do not."))
-    json.array_add_raw(ops, describe("frame.grid", "[columns], [rows], [background], [tolerance]",
-        "The whole frame as a grid of cells, each with its mean colour and how much of it is not the background. One answer instead of a round trip a pixel, which is what makes a picture something an agent can read."))
+    json.array_add_raw(ops, describe("frame.grid", "[x], [y], [width], [height], [columns], [rows], [background], [tolerance]",
+        "A window of the frame as a grid of cells, each with its mean colour and how much of it is not the background; the whole frame by default. One answer instead of a round trip a pixel, which is what makes a picture something an agent can read. Given a window no larger than the grid is fine, every cell is one pixel."))
     json.array_add_raw(ops, describe("frame.hold", "",
         "Keep the captured frame as the reference frame.diff compares against."))
     json.array_add_raw(ops, describe("frame.diff", "[tolerance]",
@@ -423,10 +478,22 @@ stats_result(c: *Context) -> ptr {
     json.object_set_raw(out, "frame", json.from_int(c.frame_count))
     json.object_set_raw(out, "fps", json.num(c.fps))
     json.object_set_raw(out, "render_ms", json.num(c.render_ms))
+    // A frame split by pass, and what it cost in changes of mind. Draw calls,
+    // state changes and triangles mean the same thing on every machine, which
+    // is what lets a budget be enforced rather than printed; the milliseconds
+    // beside them say where the time went when one is exceeded.
+    json.object_set_raw(out, "shadow_ms", json.num(c.shadow_ms))
+    json.object_set_raw(out, "scene_ms", json.num(c.scene_ms))
+    json.object_set_raw(out, "post_ms", json.num(c.post_ms))
+    json.object_set_raw(out, "program_binds", json.from_int(c.program_binds))
+    json.object_set_raw(out, "material_binds", json.from_int(c.material_binds))
+    json.object_set_raw(out, "texture_binds", json.from_int(c.texture_binds))
+    json.object_set_raw(out, "triangles", json.from_int(c.triangles))
     json.object_set_raw(out, "delta", json.num(c.delta))
     json.object_set_raw(out, "width", json.from_int(c.width))
     json.object_set_raw(out, "height", json.from_int(c.height))
     json.object_set_raw(out, "backend", json.str(c.backend))
+    json.object_set_raw(out, "device", json.str(c.device))
     json.object_set_raw(out, "draw_calls", json.from_int(c.draw_calls))
     json.object_set_raw(out, "instances", json.from_int(c.instances))
     json.object_set_raw(out, "paused", json.boolean(c.paused))
@@ -439,6 +506,7 @@ stats_result(c: *Context) -> ptr {
     json.object_set_raw(render, "shadow_map", json.from_int(c.shadow_map))
     json.object_set_raw(render, "lights", json.from_int(c.light_count))
     json.object_set_raw(render, "fog", json.boolean(c.fog_enabled))
+    json.object_set_raw(render, "post", json.boolean(c.post_active))
     json.object_set_raw(out, "render", render)
     return out
 }
@@ -576,13 +644,17 @@ audit_model(c: *Context, m: *Model, entry: ptr) {
     if area > 0.000001 { repeats = core.sqrt_of(uv_area / area) }
     json.object_set_raw(entry, "uv_repeats_per_m", json.num(repeats))
 
+    // Texel density needs the texture's pixel size, which the renderer that
+    // loaded it knows -- whichever renderer that is.
+    size = core.vec3(0.0, 0.0, 0.0)
     if c.gl_renderer != null {
-        size = gl.renderer_material_texture_size(c.gl_renderer as *GLRenderer,
-                                                 model_surface(m))
-        if size.x > 0.0 {
-            json.object_set_raw(entry, "texture_pixels", json.from_int(size.x as int))
-            json.object_set_raw(entry, "texels_per_m", json.num(repeats * size.x))
-        }
+        size = gl.renderer_material_texture_size(c.gl_renderer as *GLRenderer, model_surface(m))
+    } else if c.vk_renderer != null {
+        size = vk.renderer_material_texture_size(c.vk_renderer as *VKRenderer, model_surface(m))
+    }
+    if size.x > 0.0 {
+        json.object_set_raw(entry, "texture_pixels", json.from_int(size.x as int))
+        json.object_set_raw(entry, "texels_per_m", json.num(repeats * size.x))
     }
 
     // In metres along its own axes, so proportion can be checked as the ratio
@@ -1463,19 +1535,32 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
     // is what the renderer did before it could do this.
     if op == "render.set" {
         node = json.object_get_raw(request, "normal_strength")
-        if node == null {
+        shading = json.object_get_raw(request, "occlusion_strength")
+        if node == null && shading == null {
             fail(id, "render.set needs something to set")
             return false
         }
-        strength = json.get_number(node)
-        if c.gl_renderer != null {
-            gl.renderer_set_normal_strength(c.gl_renderer as *GLRenderer, strength)
-        }
-        if c.vk_renderer != null {
-            vk.renderer_set_normal_strength(c.vk_renderer as *VKRenderer, strength)
-        }
         out = json.obj()
-        json.object_set_raw(out, "normal_strength", json.num(strength))
+        if node != null {
+            strength = json.get_number(node)
+            if c.gl_renderer != null {
+                gl.renderer_set_normal_strength(c.gl_renderer as *GLRenderer, strength)
+            }
+            if c.vk_renderer != null {
+                vk.renderer_set_normal_strength(c.vk_renderer as *VKRenderer, strength)
+            }
+            json.object_set_raw(out, "normal_strength", json.num(strength))
+        }
+        if shading != null {
+            strength = json.get_number(shading)
+            if c.gl_renderer != null {
+                gl.renderer_set_occlusion_strength(c.gl_renderer as *GLRenderer, strength)
+            }
+            if c.vk_renderer != null {
+                vk.renderer_set_occlusion_strength(c.vk_renderer as *VKRenderer, strength)
+            }
+            json.object_set_raw(out, "occlusion_strength", json.num(strength))
+        }
         answer(id, out)
         return false
     }
@@ -1503,8 +1588,14 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
             fail(id, "no skinned model by that name")
             return false
         }
-        answer(id, skeleton_result(found as *Skeleton))
-        return false
+        // Deferred to the frame boundary, like every read about what was
+        // drawn. A pose is finished in three steps -- the clips are applied,
+        // then whatever poses the figure afterwards runs, then it is drawn --
+        // and answering the moment the question arrives can land between two of
+        // them. It did: a hand read half a metre from where it was, in one
+        // sample out of a thousand, which is exactly the kind of wrong answer
+        // that gets believed.
+        return defer_skeleton(c, id, found)
     }
 
     // Show one model and hide the rest, or show everything again. Measuring a
@@ -1633,6 +1724,7 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
 
     if op == "frame.capture" {
         c.want_capture = true
+        c.want_deferred = true
         c.pending_capture_id = id
         return true
     }
@@ -1685,7 +1777,24 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
             fail(id, "that grid is larger than the channel will answer with")
             return false
         }
-        return defer_read(c, READ_GRID, id, 0, 0, columns, rows, background, tolerance)
+        // A window, defaulting to the whole frame. Asked for a small one with
+        // as many cells as it has pixels, this answers the pixels themselves,
+        // which is the difference between seeing that something is wrong and
+        // seeing what is wrong with it.
+        left = 0
+        top = 0
+        width = 0
+        height = 0
+        node = json.object_get_raw(request, "x")
+        if node != null { left = json.get_int(node) }
+        node = json.object_get_raw(request, "y")
+        if node != null { top = json.get_int(node) }
+        node = json.object_get_raw(request, "width")
+        if node != null { width = json.get_int(node) }
+        node = json.object_get_raw(request, "height")
+        if node != null { height = json.get_int(node) }
+        return defer_grid(c, READ_GRID, id, left, top, width, height,
+                          background, tolerance, columns, rows)
     }
 
     if op == "frame.hold" {
@@ -1723,6 +1832,7 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
             return false
         }
         c.want_capture = true
+        c.want_deferred = true
         c.pending_trace_id = id
         c.pending_trace_model = m as ptr
         return true

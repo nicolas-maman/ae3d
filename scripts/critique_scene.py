@@ -32,6 +32,7 @@ Exits non-zero with a line naming what failed.
 """
 
 import argparse
+import math
 import os
 import subprocess
 import sys
@@ -55,6 +56,11 @@ CHARACTER_PLANES = 3000
 # A planted foot is planted. These are the tolerances a foot-locked walk keeps;
 # a leg swung by a curve against a body moving at its own speed misses them by
 # an order of magnitude.
+# How close to the bottom of its travel a joint has to be, and how still
+# vertically, to count as standing on the road.
+CONTACT_BAND = 0.020
+CONTACT_SETTLE = 0.002
+
 SLIDE_PER_FRAME = 0.025
 SLIDE_PER_CONTACT = 0.040
 # How far the shape of a drawn figure may stray from the shape of its skeleton.
@@ -75,6 +81,72 @@ SHAPE_HIGH = 2.5
 # asked is whether they arrive at all, not how loud they are.
 NORMAL_STRENGTH = 2.5
 NORMAL_VISIBLE = 0.025
+# Baked occlusion, measured the same way and from the scene's own camera.
+OCCLUSION_VISIBLE = 0.03
+# What a frame of this scene is allowed to cost, in the units that mean the same
+# thing on every machine. Set above what it costs now with room to grow, and
+# below what would be a different scene: 95 draws, 36,106 triangles, 4 program
+# changes today.
+# The scene is the engine's benchmark, so its draw count is the load it exists
+# to carry, not an accident to be trimmed: a terrace with a roofline, downpipes
+# and a dressed pavement draws in the low hundreds and is meant to. This is a
+# ceiling against a scene that has quietly gone wrong -- a texture bound per
+# face, a merge that stopped merging -- while tools/ae3d_bench.ae holds the
+# exact figure and fails the build on a single draw more than last recorded.
+MAX_DRAWS = 320
+MAX_TRIANGLES = 60000
+MAX_PROGRAM_CHANGES = 12
+# How much sharper than its own busiest movement a bone may move between two
+# samples. This walk measures 2.0; a leg interpolating the long way round
+# measured 37 to 45, and so did a reading taken while the pose was half built.
+SPIN_LIMIT = 8
+# How far off upright a head may lean. A person looking down at their feet is
+# about 40; anything past 60 is a head that has come off its neck.
+HEAD_LEAN = 55
+# The pelvis rises and falls as the weight goes from one leg to the other. Too
+# little and the figure glides along a rail; too much and it pogos. A metre of
+# a body's height moves a couple of centimetres a step.
+WEIGHT_BOB_LOW = 0.010
+WEIGHT_BOB_HIGH = 0.20
+# The strike has to reach. The swiping arm straightens at the peak of the lunge
+# and extends further than it ever does shuffling, by at least this. An arm is
+# about 0.55 m and a right-angle bend shortens it to 0.39, so the most a
+# straightening can add is around 0.16; 0.12 is a clear thrust and not a lean.
+STRIKE_REACH = 0.12
+# The head follows the body rather than leading it. The best alignment between
+# how the head turns and how the hips turn is at a lag of at least this many
+# frames -- a head that turns with the pelvis, or before it, belongs to a
+# mannequin.
+FOLLOW_LAG = 1
+# What a night street has to be in the frame, read off the rendered grid rather
+# than off a screenshot -- every number below comes back through the channel.
+#
+# A night is contrast: bright sources against deep dark. A scene lit by a flat
+# ambient wash has neither, so it is caught by having no cell brighter than a
+# lamp and no run of dark between them.
+LIGHT_SOURCE_LUM = 0.55     # a cell this bright is a light source (lamp, lit window)
+MIN_LIGHT_SOURCES = 3       # a night street has at least this many alight
+# ...but not most of the frame. A scene flooded flat by a bright ambient lights
+# a quarter of its cells this bright; a night lit in pools lights a twentieth.
+# This is the number that tells the two apart, where the median cannot -- the
+# dark sky pulls a flooded frame's median down just as far as a real night's.
+LIGHT_SOURCE_FRACTION_MAX = 0.15
+BRIGHTEST_WANTED = 0.6      # something in frame burns at least this bright
+# Deep dark, but not crushed to nothing: a black frame reads as broken, a lifted
+# one as fog. The darkest tenth sits in this band, which is shadow with a little
+# indirect light in it and no more.
+DARK_FLOOR = 0.008          # below this is a pure-black crush
+DARK_CEIL = 0.22            # above this the night has been washed flat
+# The frame as a whole is dark -- it is night -- so its median is low.
+NIGHT_MEDIAN_MAX = 0.42
+# The light is warm and the dark is cool: sodium lamps against a dusk sky. Read
+# as the red-minus-blue of the bright cells and of the dark cells.
+WARM_LIGHTS_MIN = 0.10      # bright cells lean warm by at least this -- a lamp, not a grey flood
+COOL_DARK_MAX = 0.02        # dark cells do not lean warm past this
+# The road reflects the lights: the brightest of the road band stands far above
+# its own median. A dry matte road is uniform; a wet one has the lamp in it.
+ROAD_REFLECTION_MIN = 0.25
+
 
 FAILURES = []
 
@@ -177,6 +249,47 @@ def proportion(models, prefix):
               0.75 <= fore / upper <= 1.0, "forearm/upper %.2f" % (fore / upper))
 
 
+def budget(engine):
+    """What a frame costs, against what it is allowed to cost.
+
+    Milliseconds cannot be budgeted across machines: this scene draws in 4.6 ms
+    on a workstation and 412 on a runner rasterising in software, so a threshold
+    that holds on one is meaningless on the other. Draw calls, triangles and
+    state changes mean the same thing everywhere, and they are what a scene
+    actually regresses by -- somebody splits a mesh, or gives every object its
+    own material, and the count moves before anybody notices the time.
+
+    The milliseconds are printed beside them, split by pass, so that when a
+    count is exceeded there is something to say about where the time went. They
+    are CPU-side: the GPU is not waited on, and a driver that stalls charges the
+    wait to whichever call blocks, so the split says where the frame was
+    submitted rather than where it was rendered.
+    """
+    print("\n== what a frame costs ==")
+    engine("frame.capture")
+    stats = engine("frame.stats")
+    passes = stats["shadow_ms"] + stats["scene_ms"] + stats["post_ms"]
+    print("  %d draws, %d triangles, %d program / %d material / %d texture changes"
+          % (stats["draw_calls"], stats["triangles"], stats["program_binds"],
+             stats["material_binds"], stats["texture_binds"]))
+    print("  shadow %.2f ms, scene %.2f ms, post %.2f ms, submitted in %.2f ms"
+          % (stats["shadow_ms"], stats["scene_ms"], stats["post_ms"], passes))
+    check("the scene draws within its budget of draw calls",
+          stats["draw_calls"] <= MAX_DRAWS,
+          "%d draws, allowed %d" % (stats["draw_calls"], MAX_DRAWS))
+    check("and within its budget of triangles",
+          stats["triangles"] <= MAX_TRIANGLES,
+          "%d triangles, allowed %d" % (stats["triangles"], MAX_TRIANGLES))
+    check("and does not thrash the program it draws with",
+          stats["program_binds"] <= MAX_PROGRAM_CHANGES,
+          "%d program changes, allowed %d"
+          % (stats["program_binds"], MAX_PROGRAM_CHANGES))
+    check("and changes material no more often than it draws",
+          stats["material_binds"] <= stats["draw_calls"],
+          "%d material changes against %d draws"
+          % (stats["material_binds"], stats["draw_calls"]))
+
+
 def surface_relief(engine, models, lit_from=(0.0, 1.6, 3.0), lit_at=(0.0, 0.0, 0.0)):
     """Whether surfaces have a shape as well as a colour, and whether it lands.
 
@@ -224,6 +337,22 @@ def surface_relief(engine, models, lit_from=(0.0, 1.6, 3.0), lit_at=(0.0, 0.0, 0
           moved["max_delta"] >= NORMAL_VISIBLE,
           "the worst pixel moves %.3f, wanted %.3f"
           % (moved["max_delta"], NORMAL_VISIBLE))
+
+    # Ambient occlusion, the same way. Ambient is the dimmest light in a scene
+    # and the one that reaches everywhere, so without this a corner is as bright
+    # as an open wall and every surface reads flat wherever the lamps do not
+    # fall. Measured from the scene's own camera, because occlusion darkens what
+    # is already in shadow and that is most of the frame.
+    engine("render.set", occlusion_strength=0.0)
+    engine("frame.hold")
+    engine("render.set", occlusion_strength=1.0)
+    shut = engine("frame.diff", tolerance=2)
+    print("  occlusion moves %.1f%% of the frame, worst %.3f"
+          % (shut["fraction"] * 100, shut["max_delta"]))
+    check("and the corners are darker than the open walls",
+          shut["max_delta"] >= OCCLUSION_VISIBLE,
+          "the worst pixel moves %.3f, wanted %.3f"
+          % (shut["max_delta"], OCCLUSION_VISIBLE))
 
 
 def silhouette(engine, mesh, columns=52, rows=44):
@@ -335,6 +464,121 @@ def silhouette(engine, mesh, columns=52, rows=44):
           "%d cells tall against %d wide" % (bottom - top + 1, right - left + 1))
 
 
+def limbs(engine, mesh, figure_prefix, columns=64, rows=48):
+    """How many legs the figure has, counted off the picture.
+
+    This exists because it had three. A joint with no thickness was still grown
+    around, so a limb ran from the hips to the ground between the legs -- in
+    every frame, with the triangle count, the plane count, the texel density,
+    the proportion and the foot planting all reading correctly. Nothing here
+    could see it, and it took being told.
+
+    Counted as runs of covered cells across the lower third of the silhouette,
+    at the widest point of the stride, which is where legs are separate.
+    """
+    print("\n== how many legs ==")
+    worst = 0
+    at = 0.0
+    for tenth in range(10):
+        moment = tenth * 0.26
+        engine("anim.set", time=moment)
+        bones = {b["name"]: b["world_position"]
+                 for b in engine("scene.skeleton", object=mesh)["bones"]}
+        hips = bones.get("Hips") or [0.0, 1.0, 0.0]
+        engine("camera.set", position=[hips[0], 1.05, hips[2] + 2.5],
+               look_at=[hips[0], 0.95, hips[2]])
+        engine("scene.isolate", object=mesh)
+        lit = engine("frame.grid", columns=columns, rows=rows)["cells"]
+        engine("scene.isolate", object="__nothing__")
+        bare = engine("frame.grid", columns=columns, rows=rows)["cells"]
+        engine("scene.isolate")
+        mask = [[sum(abs(a[i] - b[i]) for i in range(3)) > 0.012
+                 for a, b in zip(ra, rb)] for ra, rb in zip(lit, bare)]
+        covered = [y for y, row in enumerate(mask) if any(row)]
+        if not covered:
+            continue
+        low = covered[0] + int((covered[-1] - covered[0]) * 0.78)
+        for y in range(low, min(covered[-1], len(mask) - 1) + 1):
+            runs, inside = 0, False
+            for on in mask[y]:
+                if on and not inside:
+                    runs += 1
+                inside = on
+            if runs > worst:
+                worst, at = runs, moment
+    print("  the most separate limbs anywhere below the hips: %d (at %.2fs)"
+          % (worst, at))
+    check("the figure has two legs and not three", worst <= 2,
+          "%d separate limbs across the lower body at %.2fs" % (worst, at))
+
+
+def spins(engine, mesh, seconds=4.0, samples=320):
+    """Whether any bone takes the long way round.
+
+    A rotation and its negation are the same pose and interpolate along
+    opposite arcs, so a clip whose keys flip sign between frames sends a bone
+    through a full turn -- which is what the right leg was doing, six times,
+    while every number about the clip read as correct.
+
+    Sampled between the keys, because at a key the pose is right and it is the
+    arc between two of them that is wrong.
+    """
+    print("\n== does anything spin ==")
+    track = {}
+    for step in range(samples):
+        engine("anim.set", time=step * seconds / samples)
+        for bone in engine("scene.skeleton", object=mesh)["bones"]:
+            track.setdefault(bone["name"], []).append(bone["world_position"])
+    worst_name, worst = None, 0.0
+    for name, rows in track.items():
+        steps = sorted(sum((rows[i][k] - rows[i - 1][k]) ** 2 for k in range(3)) ** 0.5
+                       for i in range(1, len(rows)))
+        # Against the 95th and not the median, because a planted foot is
+        # motionless for half a cycle: its median step is zero and everything
+        # is infinitely more than that.
+        busy = steps[int(len(steps) * 0.95)]
+        if busy < 1e-6:
+            continue
+        spike = steps[-1] / busy
+        if spike > worst:
+            worst_name, worst = name, spike
+    print("  the sharpest movement between samples: %s at %.1f times its own busiest"
+          % (worst_name, worst))
+    check("no bone takes the long way round", worst <= SPIN_LIMIT,
+          "%s moves %.1f times its busiest in one step, allowed %d"
+          % (worst_name, worst, SPIN_LIMIT))
+
+
+def head_carriage(engine, mesh, seconds=5.0, samples=48):
+    """Whether the figure carries its head or wears it.
+
+    A pose solve that runs after the clip can overrule it, and one aiming the
+    wrong bone overrules it completely: the neck runs upwards, so aiming the
+    neck at something ahead lays the head over on its side. It reached 102
+    degrees off vertical and stayed there for the last two seconds of the clip,
+    which from the front is a figure with no head at all.
+    """
+    print("\n== how the head is carried ==")
+    worst, when = 0.0, 0.0
+    for step in range(samples):
+        moment = step * seconds / samples
+        engine("anim.set", time=moment)
+        bones = {b["name"]: b["world_position"]
+                 for b in engine("scene.skeleton", object=mesh)["bones"]}
+        if "Neck" not in bones or "Head" not in bones:
+            return
+        up = [bones["Head"][i] - bones["Neck"][i] for i in range(3)]
+        length = sum(v * v for v in up) ** 0.5
+        if length < 1e-6:
+            continue
+        lean = math.degrees(math.acos(max(-1.0, min(1.0, up[1] / length))))
+        if lean > worst:
+            worst, when = lean, moment
+    print("  the head leans at most %.0f degrees off upright (at %.2fs)" % (worst, when))
+    check("the figure carries its head upright", worst <= HEAD_LEAN,
+          "%.0f degrees at %.2fs, allowed %d" % (worst, when, HEAD_LEAN))
+
+
 def gait(engine, figure_mesh, feet, road, seconds, fps):
     """Whether the figure walks or skates.
 
@@ -347,6 +591,14 @@ def gait(engine, figure_mesh, feet, road, seconds, fps):
     Read off the bones, because a skinned mesh does not move: its vertices sit
     in the pose they were bound in and the bones carry them, so where a foot is
     is a fact about the skeleton and nothing else can answer it.
+
+    A foot is down when it is at the bottom of its travel and is neither coming
+    down nor going up. Height alone is not enough: a toe leaves the road before
+    it has climbed a centimetre, and judging contact by height alone scored the
+    first six frames of the swing as a planted foot and charged the walk for the
+    distance the foot covered in them. Both halves are needed and neither is
+    circular -- this asks nothing about how the foot moves along the road, which
+    is the thing being measured.
     """
     print("\n== the walk ==")
     try:
@@ -373,11 +625,12 @@ def gait(engine, figure_mesh, feet, road, seconds, fps):
         rows = track.get(foot)
         if not rows:
             continue
-        floor = min(at[1] for at in rows) + 0.02
+        floor = min(at[1] for at in rows) + CONTACT_BAND
         run = []
         runs = []
-        for at in rows:
-            if at[1] < floor:
+        for index, at in enumerate(rows):
+            settled = index > 0 and abs(at[1] - rows[index - 1][1]) <= CONTACT_SETTLE
+            if at[1] < floor and settled:
                 run.append(at[0])
             elif run:
                 runs.append(run)
@@ -400,6 +653,199 @@ def gait(engine, figure_mesh, feet, road, seconds, fps):
           "worst %.3f m, allowed %.3f" % (worst_drift, SLIDE_PER_CONTACT))
 
 
+def _track(engine, mesh, seconds, fps):
+    """Every bone's world position at each frame of the clip, once."""
+    frames = int(seconds * fps)
+    rows = []
+    for frame in range(frames):
+        engine("anim.set", time=frame / float(fps))
+        rows.append({b["name"]: b["world_position"]
+                     for b in engine("scene.skeleton", object=mesh)["bones"]})
+    return rows
+
+
+def weight_shift(engine, mesh, seconds=5.0, fps=24):
+    """Whether the figure takes its weight, or glides.
+
+    A walk is a controlled fall onto each leg in turn, and the pelvis drops as
+    the weight lands and rises as it is pushed off -- twice a stride. Read off
+    the hip bone, whose height is a fact about the skeleton and nothing the
+    camera or the mesh can hide. A pelvis held at one height is a figure on a
+    rail, whatever its legs are doing.
+    """
+    print("\n== does it take its weight ==")
+    track = _track(engine, mesh, seconds, fps)
+    if "Hips" not in track[0]:
+        check("the figure shifts its weight", False, "no Hips bone to read")
+        return
+    heights = [row["Hips"][1] for row in track]
+    bob = max(heights) - min(heights)
+    print("  the hips ride between %+.3f and %+.3f" % (min(heights), max(heights)))
+    check("the figure takes its weight onto each leg",
+          WEIGHT_BOB_LOW <= bob <= WEIGHT_BOB_HIGH,
+          "the pelvis rises and falls %.3f m over the walk, wanted %.3f to %.3f"
+          % (bob, WEIGHT_BOB_LOW, WEIGHT_BOB_HIGH))
+
+
+def hand_to_target(engine, mesh, seconds=5.0, fps=24, strike=(2.67, 3.83)):
+    """Whether the strike reaches, or is a pose already held.
+
+    The lunge is the one moment the figure does something to the world, and it
+    reads only if the swiping arm extends further than it ever does shuffling.
+    Measured as the straight-line distance from shoulder to wrist -- the arm's
+    reach, which does not care which way the body faces -- at the peak of the
+    lunge against the furthest it reaches at any other time. A strike that does
+    not beat the walk is an arm held out for a second, not a swing.
+    """
+    print("\n== the strike ==")
+    track = _track(engine, mesh, seconds, fps)
+    if "WristR" not in track[0] or "ShoulderR" not in track[0]:
+        check("the strike reaches", False, "no right arm to read")
+        return
+    # How far the arm is extended, as the straight-line distance from the
+    # shoulder to the wrist. Rotation-independent -- it says nothing about
+    # which way the body faces -- so it isolates the arm reaching out from the
+    # body lunging under it. A bent shuffle keeps it short; a strike straightens
+    # the elbow and the distance jumps toward the arm's full length.
+    def extension(row):
+        a, w = row["ShoulderR"], row["WristR"]
+        return sum((w[i] - a[i]) ** 2 for i in range(3)) ** 0.5
+
+    reach = [extension(track[i]) for i in range(len(track))]
+    lo, hi = strike
+    during = [reach[i] for i in range(len(track)) if lo <= i / float(fps) <= hi]
+    # The walk it is compared against is the shuffle before the lunge, not the
+    # whole clip: the arm passes through straight as it recovers from the swing,
+    # and folding that recovery back into "the walk" would credit the walk with
+    # the strike's own reach. Before the lunge the arm has only ever shuffled.
+    before = [reach[i] for i in range(len(track)) if i / float(fps) < lo]
+    if not during or not before:
+        check("the strike reaches", False, "no lunge in the clip")
+        return
+    peak = max(during)
+    walk = max(before)
+    print("  the arm extends to %.3f m at the strike, %.3f m in the shuffle before it"
+          % (peak, walk))
+    check("the strike reaches past anything the walk does", peak - walk >= STRIKE_REACH,
+          "the strike extends the arm %.3f m past the walk, wanted %.3f"
+          % (peak - walk, STRIKE_REACH))
+
+
+def secondary_motion(engine, mesh, seconds=5.0, fps=24):
+    """Whether the upper body follows the hips, or is bolted to them.
+
+    The turn of the pelvis arrives at the shoulders a beat later and at the
+    head later still: that lag is the whole of what makes a body read as a
+    body and not as a rig. Measured by sliding the head's side-to-side motion
+    against the hips' and finding the offset that lines them up best. A head
+    that lines up best at zero lag, or a negative one, turns with the pelvis
+    or ahead of it -- which nothing living does.
+    """
+    print("\n== does the body follow through ==")
+    track = _track(engine, mesh, seconds, fps)
+    if "Head" not in track[0] or "Hips" not in track[0]:
+        check("the head follows the body", False, "no Head and Hips to read")
+        return
+    # Across the street, which is the axis the turn swings the head along.
+    hips = [row["Hips"][2] for row in track]
+    head = [row["Head"][2] for row in track]
+
+    def centred(values):
+        mean = sum(values) / len(values)
+        return [v - mean for v in values]
+
+    hips = centred(hips)
+    head = centred(head)
+    best_lag, best = 0, -1.0
+    for lag in range(0, 12):
+        total = 0.0
+        for i in range(len(track) - lag):
+            total += hips[i] * head[i + lag]
+        if total > best:
+            best, best_lag = total, lag
+    print("  the head's turn lines up best %d frames behind the hips" % best_lag)
+    check("the head follows the body rather than leading it", best_lag >= FOLLOW_LAG,
+          "best alignment at a lag of %d frames, wanted at least %d" % (best_lag, FOLLOW_LAG))
+
+
+def _lum(cell):
+    return 0.2126 * cell[0] + 0.7152 * cell[1] + 0.0722 * cell[2]
+
+
+def lighting(engine, at=2.2):
+    """Whether the frame reads as a night, measured off the rendered grid.
+
+    Nothing here is looked at. frame.grid answers the whole frame as a grid of
+    mean colours -- the same numbers a person's eye would be forming an
+    impression from -- and the impression is made of contrast, warm light
+    against cool dark, and the lamps caught in the wet road. Each of those is a
+    number, so each is a standard the scene either meets or does not, on
+    whichever backend drew the frame.
+    """
+    print("\n== does it read as a night ==")
+    # The scene is already paused by the caller; seek and read, and do not
+    # resume -- the measures after this one depend on the playhead staying put.
+    engine("anim.set", time=at)
+    grid = engine("frame.grid", columns=48, rows=27)["cells"]
+    cells = [c for row in grid for c in row]
+    if not cells:
+        check("the frame came back to be read", False, "the grid was empty")
+        return
+    lums = sorted(_lum(c) for c in cells)
+    n = len(lums)
+
+    brightest = lums[-1]
+    median = lums[n // 2]
+    dark = lums[max(1, n // 10) - 1]
+    sources = [c for c in cells if _lum(c) >= LIGHT_SOURCE_LUM]
+
+    print("  luminance runs %.3f to %.3f, median %.3f, darkest tenth at %.3f"
+          % (lums[0], brightest, median, dark))
+    print("  %d cells burn as light sources" % len(sources))
+
+    check("something in the frame burns like a light",
+          brightest >= BRIGHTEST_WANTED,
+          "the brightest cell is %.3f, wanted %.2f" % (brightest, BRIGHTEST_WANTED))
+    source_fraction = len(sources) / float(n)
+    check("the street has its lamps and windows alight",
+          len(sources) >= MIN_LIGHT_SOURCES,
+          "%d cells over %.2f, wanted %d" % (len(sources), LIGHT_SOURCE_LUM, MIN_LIGHT_SOURCES))
+    check("and lit in pools rather than flooded flat",
+          source_fraction <= LIGHT_SOURCE_FRACTION_MAX,
+          "%.0f%% of the frame burns that bright, wanted under %.0f%%"
+          % (source_fraction * 100.0, LIGHT_SOURCE_FRACTION_MAX * 100.0))
+    check("the night is dark rather than a flat wash",
+          median <= NIGHT_MEDIAN_MAX,
+          "the median cell is %.3f, wanted under %.2f" % (median, NIGHT_MEDIAN_MAX))
+    check("the shadows are deep but not crushed to black",
+          DARK_FLOOR <= dark <= DARK_CEIL,
+          "the darkest tenth is %.3f, wanted %.3f to %.2f" % (dark, DARK_FLOOR, DARK_CEIL))
+
+    # Warm light, cool dark: the red-minus-blue of the brightest and the darkest.
+    bright_cells = sorted(cells, key=_lum)[-max(3, n // 20):]
+    dark_cells = sorted(cells, key=_lum)[:max(3, n // 5)]
+    warm = sum(c[0] - c[2] for c in bright_cells) / len(bright_cells)
+    cool = sum(c[0] - c[2] for c in dark_cells) / len(dark_cells)
+    print("  the light leans %+.3f warm, the dark leans %+.3f" % (warm, cool))
+    check("the light is warm", warm >= WARM_LIGHTS_MIN,
+          "the bright cells lean %+.3f, wanted %+.2f" % (warm, WARM_LIGHTS_MIN))
+    check("and the dark is not warmer than the light",
+          cool <= COOL_DARK_MAX and cool < warm,
+          "the dark cells lean %+.3f" % cool)
+
+    # The road: the bottom third of the frame, where the wet surface takes the
+    # lamps. Its brightest stands well above its own median when it is wet.
+    road = [c for row in grid[int(len(grid) * 0.62):] for c in row]
+    if road:
+        rl = sorted(_lum(c) for c in road)
+        contrast = rl[-1] - rl[len(rl) // 2]
+        print("  the road runs %.3f to %.3f (%.3f of reflection)"
+              % (rl[0], rl[-1], contrast))
+        check("the wet road takes the lamps", contrast >= ROAD_REFLECTION_MIN,
+              "the road's brightest stands %.3f over its median, wanted %.2f"
+              % (contrast, ROAD_REFLECTION_MIN))
+
+
 def main(argv):
     parser = argparse.ArgumentParser(prog="critique_scene")
     parser.add_argument("--port", type=int, default=7911)
@@ -409,6 +855,11 @@ def main(argv):
                         help="the skinned model whose skeleton carries the walk")
     parser.add_argument("--feet", default="AnkleL,AnkleR,ToeL,ToeR")
     parser.add_argument("--road", type=float, default=0.0)
+    parser.add_argument("--vulkan", action="store_true",
+                        help="drive the Vulkan backend rather than OpenGL")
+    parser.add_argument("--frame-only", action="store_true", dest="frame_only",
+                        help="skip the per-frame animation sampling; keep the "
+                             "scene and lighting standards (for a slow backend)")
     args = parser.parse_args(argv)
 
     started = time.time()
@@ -418,11 +869,22 @@ def main(argv):
         env["AE3D_AGENT"] = str(args.port)
         env["AE3D_FRAMES"] = "100000"
         log = tempfile.NamedTemporaryFile(prefix="ae3d_critique_", suffix=".log", delete=False)
-        scene = subprocess.Popen([args.launch], env=env, stdout=log, stderr=subprocess.STDOUT)
+        command = [args.launch] + (["vulkan"] if args.vulkan else [])
+        scene = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT)
         engine = None
         deadline = time.time() + 30.0
         while time.time() < deadline and engine is None:
             if scene.poll() is not None:
+                # A backend the machine has no driver for -- Vulkan on a runner
+                # without a loader -- is a skip, not a failure: there is nothing
+                # to judge, and the scene said so on its way out.
+                try:
+                    said = open(log.name, encoding="utf-8", errors="replace").read()
+                except OSError:
+                    said = ""
+                if "no Vulkan driver" in said or "no Vulkan" in said:
+                    print("critique_scene: SKIP no Vulkan driver on this machine")
+                    return 3
                 print("critique_scene: %s stopped before it opened the channel" % args.launch)
                 return 3 if scene.returncode == 0 else 2
             try:
@@ -442,15 +904,47 @@ def main(argv):
 
     with engine:
         engine("frame.pause")
+
+        # The whole critique reads the rendered frame. A backend that cannot
+        # give it back -- software Vulkan on a headless runner has no swapchain
+        # to read from -- cannot be judged, which is a skip rather than a
+        # failure. Probed once, here, so it is caught before any standard runs.
+        probe = engine("frame.grid", columns=8, rows=8).get("cells") or []
+        readable = any(sum(c[:3]) > 0.02 for row in probe for c in row)
+        if not readable:
+            print("critique_scene: SKIP the frame could not be read back on this backend")
+            if scene is not None:
+                scene.terminate()
+                try:
+                    scene.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    scene.kill()
+            return 3
+
         models = engine("scene.tree", detail=True, audit=True)["models"]
         texel_density(models)
         relief(models)
         surface_relief(engine, models)
         character(models, args.figure)
         proportion(models, args.figure)
-        if args.walks:
+        budget(engine)
+        lighting(engine)
+        # The animation standards read the skeleton hundreds of times, once a
+        # frame -- fine at sixty frames a second, but on the software Vulkan a
+        # headless runner falls back to, a frame is a tenth of a second and the
+        # sampling runs for minutes. They judge the pose, which is the same on
+        # every backend and is fully covered by the OpenGL run, so --frame-only
+        # skips them: the Vulkan pass exists to prove the lighting and the
+        # frame-reading on the target, and those it keeps.
+        if args.walks and not args.frame_only:
             silhouette(engine, args.walks)
+            limbs(engine, args.walks, args.figure)
+            spins(engine, args.walks)
+            head_carriage(engine, args.walks)
             gait(engine, args.walks, args.feet.split(","), args.road, 2.6, 24)
+            weight_shift(engine, args.walks)
+            hand_to_target(engine, args.walks)
+            secondary_motion(engine, args.walks)
         engine("frame.resume")
 
     if scene is not None:

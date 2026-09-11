@@ -223,7 +223,8 @@ int ae3d_capture_adopt(const unsigned char *pixels, int width, int height) {
  * Four numbers a cell -- red, green, blue and how much of the cell is not the
  * background -- so a caller can read the picture or read the shape.
  */
-int ae3d_capture_grid(int columns, int rows, int background, int tolerance,
+int ae3d_capture_grid(int left, int top, int width, int height,
+                      int columns, int rows, int background, int tolerance,
                       double *out) {
     int cx, cy;
     int bg_r = (background >> 24) & 0xff;
@@ -233,13 +234,23 @@ int ae3d_capture_grid(int columns, int rows, int background, int tolerance,
     if (!g_frame.pixels || g_frame.width <= 0 || g_frame.height <= 0) return 0;
     if (columns <= 0 || rows <= 0 || !out) return 0;
 
+    /* A window onto the frame, clipped to it. Given the whole frame and a
+       coarse grid this is a picture; given a small window and as many cells as
+       it has pixels it is the pixels themselves, which is the difference
+       between seeing that something is wrong and seeing what. */
+    if (left < 0) left = 0;
+    if (top < 0) top = 0;
+    if (width <= 0 || left + width > g_frame.width) width = g_frame.width - left;
+    if (height <= 0 || top + height > g_frame.height) height = g_frame.height - top;
+    if (width <= 0 || height <= 0) return 0;
+
     for (cy = 0; cy < rows; cy++) {
-        int y0 = (int)((long long)cy * g_frame.height / rows);
-        int y1 = (int)((long long)(cy + 1) * g_frame.height / rows);
+        int y0 = top + (int)((long long)cy * height / rows);
+        int y1 = top + (int)((long long)(cy + 1) * height / rows);
         if (y1 <= y0) y1 = y0 + 1;
         for (cx = 0; cx < columns; cx++) {
-            int x0 = (int)((long long)cx * g_frame.width / columns);
-            int x1 = (int)((long long)(cx + 1) * g_frame.width / columns);
+            int x0 = left + (int)((long long)cx * width / columns);
+            int x1 = left + (int)((long long)(cx + 1) * width / columns);
             long long sum[3] = {0, 0, 0};
             long long covered = 0, total = 0;
             int x, y;

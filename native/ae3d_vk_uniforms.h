@@ -30,10 +30,11 @@ typedef struct {
 #define AE3D_VK_OFF_MATERIALALPHA 3688
 #define AE3D_VK_OFF_HASNORMALMAP 3692
 #define AE3D_VK_OFF_NORMALSTRENGTH 3696
-#define AE3D_VK_OFF_ENABLECLEARCOAT 3700
-#define AE3D_VK_OFF_CLEARCOATROUGHNESS 3704
-#define AE3D_VK_OFF_CLEARCOATINTENSITY 3708
-#define AE3D_VK_OFF_ENABLESHEEN 3712
+#define AE3D_VK_OFF_OCCLUSIONSTRENGTH 3700
+#define AE3D_VK_OFF_ENABLECLEARCOAT 3704
+#define AE3D_VK_OFF_CLEARCOATROUGHNESS 3708
+#define AE3D_VK_OFF_CLEARCOATINTENSITY 3712
+#define AE3D_VK_OFF_ENABLESHEEN 3716
 #define AE3D_VK_OFF_SHEENCOLOR 3728
 #define AE3D_VK_OFF_SHEENROUGHNESS 3740
 #define AE3D_VK_OFF_ENABLETRANSMISSION 3744
@@ -142,14 +143,14 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "causticsSpeed", 3916 },
     { "causticsTime", 3928 },
     { "causticsWaterLevel", 3920 },
-    { "clearcoatIntensity", 3708 },
-    { "clearcoatRoughness", 3704 },
+    { "clearcoatIntensity", 3712 },
+    { "clearcoatRoughness", 3708 },
     { "diffuseColor", 3648 },
     { "edgeThreshold", 4072 },
     { "edgeThresholdMin", 4076 },
     { "enableBloom", 3816 },
     { "enableCaustics", 3904 },
-    { "enableClearcoat", 3700 },
+    { "enableClearcoat", 3704 },
     { "enableEnergyConservation", 3756 },
     { "enableFoam", 4560 },
     { "enableFog", 3828 },
@@ -159,7 +160,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "enablePerlinNoise", 3888 },
     { "enableSSAO", 3784 },
     { "enableShadows", 3856 },
-    { "enableSheen", 3712 },
+    { "enableSheen", 3716 },
     { "enableTransmission", 3744 },
     { "enableVolumetricLighting", 3768 },
     { "enableWaterDistortion", 4612 },
@@ -192,6 +193,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "noiseOctaves", 3896 },
     { "noiseScale", 3892 },
     { "normalStrength", 3696 },
+    { "occlusionStrength", 3700 },
     { "projection", 3936 },
     { "roughness", 3680 },
     { "shadowDirection", 3872 },
@@ -236,7 +238,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "waveSteepness", 4432 },
 };
 
-#define AE3D_VK_UNIFORM_SLOT_COUNT 101
+#define AE3D_VK_UNIFORM_SLOT_COUNT 102
 
 static inline int ae3d_vk_uniform_offset(const char *name) {
     int low = 0;

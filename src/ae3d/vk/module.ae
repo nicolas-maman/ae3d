@@ -21,12 +21,14 @@ exports (
     renderer_new, renderer_free, backend,
     available, device_name, last_error,
     renderer_model_count, renderer_model, renderer_light_count, renderer_light, renderer_draw_calls, renderer_set_clear_color,
-    renderer_set_normal_strength,
+    renderer_shadow_ms, renderer_scene_ms, renderer_post_ms, renderer_post_active, renderer_program_binds, renderer_material_binds,
+    renderer_set_normal_strength, renderer_set_occlusion_strength, renderer_material_texture_size,
     renderer_load_texture, renderer_release_texture, renderer_sample_count, renderer_set_post,
     renderer_set_shadows, renderer_shadows, renderer_add_light, renderer_remove_light,
     renderer_set_fog, renderer_fog, renderer_set_shadow_distance, renderer_shadow_distance,
     skybox_create, skybox_free,
     offscreen_pixels, offscreen_width, offscreen_height,
+    request_capture, capture_ready, capture_pixels, capture_width, capture_height, snapshot,
     live_shadow_targets
 )
 
@@ -71,8 +73,18 @@ extern ae3d_vk_shadow_end()
 extern ae3d_vk_set_post(fxaa: int, bloom: int, threshold: float, intensity: float)
 extern ae3d_vk_post_active() -> int
 extern ae3d_vk_draw_calls() -> int
+extern ae3d_vk_mesh_shared(handle: int) -> int
+extern ae3d_vk_pass_ms(pass: int) -> float
+extern ae3d_vk_pipeline_binds() -> int
+extern ae3d_vk_set_binds() -> int
 extern ae3d_vk_sample_count() -> int
 extern ae3d_vk_offscreen_pixels() -> ptr
+extern ae3d_vk_request_capture() -> int
+extern ae3d_vk_capture_ready() -> int
+extern ae3d_vk_capture_pixels() -> ptr
+extern ae3d_vk_capture_width() -> int
+extern ae3d_vk_capture_height() -> int
+extern ae3d_png_write(path: string, rgba: ptr, width: int, height: int) -> int
 extern ae3d_vk_scene_offset(name: string) -> int
 extern ae3d_vk_scene_set_float_array(offset: int, handle: ptr)
 extern ae3d_vk_scene_set_vec3_array(offset: int, handle: ptr)
@@ -95,6 +107,8 @@ struct VulkanTexture {
     path: string
     handle: int
     refs: int
+    width: int
+    height: int
 }
 
 // One merged draw: the geometry every member shares, the surface they all have,
@@ -115,16 +129,27 @@ struct VKRenderer {
     lights: ptr
     // How hard normal maps push, for the whole scene. A look, not a surface.
     normal_strength: float
+    occlusion_strength: float
     textures: ptr
     frustum: ptr
     skybox: ptr
     shadow_space: Mat4
     batches: ptr
     batch_count: int
+    // The depth pass merges by mesh alone -- a shadow has no material -- so
+    // it keeps batches of its own rather than sharing the scene pass's, which
+    // are keyed on the material as well.
+    shadow_batches: ptr
+    shadow_batch_count: int
     screen_mesh: ptr
     screen_handle: int
     initialized: bool
     last_draw_calls: int
+    last_shadow_ms: float
+    last_scene_ms: float
+    last_post_ms: float
+    last_pipeline_binds: int
+    last_set_binds: int
     clear_r: float
     clear_g: float
     clear_b: float
@@ -167,6 +192,36 @@ offscreen_pixels() -> ptr {
     return ae3d_vk_offscreen_pixels()
 }
 
+// Arm a capture of the next presented frame. False when the surface will not
+// give a frame back, so a caller can say so rather than write nothing.
+request_capture() -> bool {
+    return ae3d_vk_request_capture() == 1
+}
+
+capture_ready() -> bool {
+    return ae3d_vk_capture_ready() == 1
+}
+
+// The captured frame as RGBA for the agent to read numerically -- the same
+// pixels a grid or a pixel read is answered from, so the agent sees the Vulkan
+// frame the way it already sees the OpenGL one.
+capture_pixels() -> ptr {
+    return ae3d_vk_capture_pixels()
+}
+
+capture_width() -> int { return ae3d_vk_capture_width() }
+capture_height() -> int { return ae3d_vk_capture_height() }
+
+// Write the captured frame to a PNG. The frame has to have been asked for and
+// drawn first, so request_capture one frame ahead of this.
+snapshot(path: string) -> bool {
+    if ae3d_vk_capture_ready() != 1 { return false }
+    pixels = ae3d_vk_capture_pixels()
+    if pixels == null { return false }
+    return ae3d_png_write(path, pixels, ae3d_vk_capture_width(),
+                          ae3d_vk_capture_height()) == 1
+}
+
 offscreen_width() -> int {
     return ae3d_vk_offscreen_width()
 }
@@ -183,7 +238,10 @@ renderer_new() -> *VKRenderer {
     r.frustum = core.frustum_new()
     r.shadow_space = core.mat4_ident()
     r.normal_strength = 2.5
+    r.occlusion_strength = 1.0
     r.batches = list.new()
+    r.shadow_batches = list.new()
+    r.shadow_batch_count = 0
     r.batch_count = 0
     r.fog = core.fog_none()
     r.scene_start = platform.time()
@@ -385,7 +443,33 @@ light_box(r: *VKRenderer, light: *Light, centre: Vec3, radius: float) -> Mat4 {
     view = core.mat4_look_at(eye, centre, up)
     projection = core.mat4_ortho(0.0 - radius, radius, 0.0 - radius, radius,
                                  0.01, radius * 4.0)
-    return core.mat4_mul(projection, view)
+    matrix = core.mat4_mul(projection, view)
+
+    // Snap the map to its own texel grid, locked to the world rather than to
+    // the camera. Without this the box follows the camera by fractions of a
+    // texel every frame, and the whole shadow crawls along its own edges as it
+    // moves -- the swimming that reads as cheap however sharp the map is. A
+    // fixed world point, the origin, is projected into the map; the fraction of
+    // a texel it lands off the grid is taken back out of the projection, so
+    // every world point lands on the texel it landed on last frame.
+    half = SHADOW_SIZE * 0.5
+    at = core.mat4_transform_point(matrix, core.vec3(0.0, 0.0, 0.0))
+    tx = at.x * half
+    ty = at.y * half
+    rx = snap_round(tx)
+    ry = snap_round(ty)
+    matrix.m12 = matrix.m12 + (rx - tx) / half
+    matrix.m13 = matrix.m13 + (ry - ty) / half
+    return matrix
+}
+
+// Nearest integer, halves away from zero. A cast to int truncates toward zero,
+// which would round a texel coordinate the wrong way on the half of the map
+// with negative coordinates and leave the two halves snapped to grids half a
+// texel apart.
+snap_round(v: float) -> float {
+    if v >= 0.0 { return ((v + 0.5) as int) as float }
+    return ((v - 0.5) as int) as float
 }
 
 render_shadow_pass(r: *VKRenderer, light: *Light, cam: *Camera) {
@@ -400,24 +484,111 @@ render_shadow_pass(r: *VKRenderer, light: *Light, cam: *Camera) {
     ae3d_vk_scene_set_clip_mat4(vkscene.OFF_LIGHTSPACEMATRIX, &r.shadow_space)
     if ae3d_vk_shadow_begin() != 1 { return }
 
+    // Casters that share a mesh are drawn as one instanced draw, the way the
+    // OpenGL backend draws them. Drawn one by one, a street of kerb stones
+    // and lamp posts cost this pass four draws more than the same street on
+    // the other renderer, for the same shadow.
+    r.shadow_batch_count = 0
     count = list.size(r.models)
     i = 0
     while i < count {
         m = list.get_raw(r.models, i) as *Model
-        if m != null && m.visible && m.casts_shadow && m.vbo != 0 {
-            core.model_sync_transform(m)
-            instances = 0
-            if m.is_instanced { instances = core.model_instance_count(m) }
-            ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &m.model_matrix)
-            instanced = 0
-            if instances > 0 { instanced = 1 }
-            ae3d_vk_scene_set_int(vkscene.OFF_ISINSTANCED, instanced)
-            pose(m)
-            ae3d_vk_shadow_draw(m.vbo, m.instance_vbo, instances)
+        if m == null || !m.visible || !m.casts_shadow || m.vbo == 0 {
+            i = i + 1
+            continue
+        }
+        core.model_sync_transform(m)
+        if shadow_batchable(m) {
+            moved = m.shadow_stamp != m.world_stamp
+            m.shadow_stamp = m.world_stamp
+            b = shadow_batch_for(r, m)
+            if b.count >= list.size(b.members) {
+                list.add_raw(b.members, m as ptr)
+                b.stale = true
+            } else if list.get_raw(b.members, b.count) != m as ptr {
+                list.set(b.members, b.count, m as ptr)
+                b.stale = true
+            }
+            if moved { b.stale = true }
+            b.count = b.count + 1
+        } else {
+            shadow_draw_model(m)
+        }
+        i = i + 1
+    }
+
+    i = 0
+    while i < r.shadow_batch_count {
+        b = list.get_raw(r.shadow_batches, i) as *VKBatch
+        if b.count != list.size(b.members) { b.stale = true }
+        if b.count == 1 {
+            shadow_draw_model(b.first as *Model)
+        } else if b.count > 1 {
+            sync_batch_instances(b)
+            if b.handle != 0 {
+                identity = core.mat4_ident()
+                ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &identity)
+                ae3d_vk_scene_set_int(vkscene.OFF_ISINSTANCED, 1)
+                ae3d_vk_scene_set_int(vkscene.OFF_ISSKINNED, 0)
+                ae3d_vk_shadow_draw(b.mesh, b.handle, b.count)
+            }
         }
         i = i + 1
     }
     ae3d_vk_shadow_end()
+}
+
+shadow_draw_model(m: *Model) {
+    instances = 0
+    if m.is_instanced { instances = core.model_instance_count(m) }
+    ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &m.model_matrix)
+    instanced = 0
+    if instances > 0 { instanced = 1 }
+    ae3d_vk_scene_set_int(vkscene.OFF_ISINSTANCED, instanced)
+    pose(m)
+    ae3d_vk_shadow_draw(m.vbo, m.instance_vbo, instances)
+}
+
+// A caster joins a merged depth draw when its mesh is one that other models
+// draw too. Asked of the upload cache rather than of a flag set when the
+// model was added: the first model built from a mesh is alone at that moment
+// and shares it with every one added after.
+//
+// A skinned model's vertices are carried by its bones, and an instanced draw
+// carries only a matrix, so a merged skinned caster would throw the shadow
+// of its bind pose; it draws on its own.
+shadow_batchable(m: *Model) -> bool {
+    if m.skeleton != null || ae3d_vk_mesh_shared(m.vbo) == 0 { return false }
+    return !(m.is_instanced && core.model_instance_count(m) > 0)
+}
+
+shadow_batch_for(r: *VKRenderer, m: *Model) -> *VKBatch {
+    i = 0
+    while i < r.shadow_batch_count {
+        b = list.get_raw(r.shadow_batches, i) as *VKBatch
+        if b.mesh == m.vbo { return b }
+        i = i + 1
+    }
+
+    if r.shadow_batch_count >= list.size(r.shadow_batches) {
+        fresh = heap.new(VKBatch)
+        fresh.instances = ae3d_inst_create()
+        fresh.members = list.new()
+        fresh.handle = 0
+        fresh.count = 0
+        fresh.mesh = 0
+        fresh.material = null
+        fresh.stale = true
+        list.add_raw(r.shadow_batches, fresh)
+    }
+    b = list.get_raw(r.shadow_batches, r.shadow_batch_count) as *VKBatch
+    if b.mesh != m.vbo { b.stale = true }
+    b.mesh = m.vbo
+    b.material = null
+    b.first = m as ptr
+    b.count = 0
+    r.shadow_batch_count = r.shadow_batch_count + 1
+    return b
 }
 
 renderer_set_post(r: *VKRenderer, fxaa: int, bloom: int, threshold: float, intensity: float) {
@@ -493,8 +664,9 @@ renderer_load_texture(r: *VKRenderer, path: string) -> int {
         println("ae3d: texture load failed: ${ae3d_image_error()}")
         return 0
     }
-    handle = ae3d_vk_texture_create(ae3d_image_width(image), ae3d_image_height(image),
-                                    ae3d_image_pixels(image))
+    tex_w = ae3d_image_width(image)
+    tex_h = ae3d_image_height(image)
+    handle = ae3d_vk_texture_create(tex_w, tex_h, ae3d_image_pixels(image))
     ae3d_image_free(image)
     if handle == 0 { return 0 }
 
@@ -502,6 +674,8 @@ renderer_load_texture(r: *VKRenderer, path: string) -> int {
     texture_entry_set_path(entry, path)
     entry.handle = handle
     entry.refs = 1
+    entry.width = tex_w
+    entry.height = tex_h
     list.add_raw(r.textures, entry)
     return handle
 }
@@ -538,6 +712,10 @@ renderer_add_model(r: *VKRenderer, m: *Model) {
         return
     }
     m.vbo = handle
+    // For the channel's report of the model. What the depth pass merges is
+    // asked of the cache at draw time, since this is only true of the second
+    // model built from a mesh and every one after.
+    m.shares_geometry = ae3d_vk_mesh_shared(handle) == 1
     // Building a mesh marks it dirty, and what was just uploaded is not an edit
     // waiting to be sent.
     ae3d_mesh_clear_dirty(m.mesh)
@@ -568,8 +746,16 @@ resolve_textures(r: *VKRenderer, m: *Model) {
 
 resolve_one(r: *VKRenderer, material: *Material) {
     material.texture_stale = false
-    if core.text(material.texture_path) == "" || material.texture_id != 0 { return }
-    material.texture_id = renderer_load_texture(r, material.texture_path)
+    if core.text(material.texture_path) != "" && material.texture_id == 0 {
+        material.texture_id = renderer_load_texture(r, material.texture_path)
+    }
+    // The normal too, here rather than at first draw. A rooftop tank is culled
+    // for the whole clip, so a normal loaded lazily would never load, and a map
+    // named and never loaded is what the critique catches.
+    material.normal_stale = false
+    if core.text(material.normal_path) != "" && material.normal_id == 0 {
+        material.normal_id = renderer_load_texture(r, material.normal_path)
+    }
 }
 
 // The path was changed after this material had already been given a texture, so
@@ -588,6 +774,27 @@ texture_for(r: *VKRenderer, material: *Material) -> int {
 // without one binds nothing and the shader is told not to look.
 renderer_set_normal_strength(r: *VKRenderer, strength: float) {
     if r != null { r.normal_strength = strength }
+}
+
+renderer_set_occlusion_strength(r: *VKRenderer, strength: float) {
+    if r != null { r.occlusion_strength = strength }
+}
+
+// The pixel size of a material's colour texture, for the agent's texel-density
+// read, the same figure the OpenGL renderer reports from its own texture list.
+renderer_material_texture_size(r: *VKRenderer, material: *Material) -> Vec3 {
+    if r == null || material == null { return core.vec3(0.0, 0.0, 0.0) }
+    id = texture_for(r, material)
+    count = list.size(r.textures)
+    i = 0
+    while i < count {
+        entry = list.get_raw(r.textures, i) as *VulkanTexture
+        if entry != null && entry.handle == id {
+            return core.vec3(entry.width * 1.0, entry.height * 1.0, 0.0)
+        }
+        i = i + 1
+    }
+    return core.vec3(0.0, 0.0, 0.0)
 }
 
 normal_for(r: *VKRenderer, material: *Material) -> int {
@@ -610,6 +817,7 @@ apply_normal_map(r: *VKRenderer, material: *Material) {
     ae3d_vk_set_normal_map(normal)
     ae3d_vk_scene_set_int(vkscene.OFF_HASNORMALMAP, normal != 0)
     ae3d_vk_scene_set_float(vkscene.OFF_NORMALSTRENGTH, r.normal_strength)
+    ae3d_vk_scene_set_float(vkscene.OFF_OCCLUSIONSTRENGTH, r.occlusion_strength)
 }
 
 renderer_remove_model(r: *VKRenderer, m: *Model) {
@@ -659,6 +867,14 @@ write_frame_uniforms(r: *VKRenderer, light: *Light, cam: *Camera) {
     fog_on = 0
     if r.fog.enabled { fog_on = 1 }
     ae3d_vk_scene_set_int(vkscene.OFF_ENABLEFOG, fog_on)
+    // The air that hazes distance is the air that scatters a lamp's light, so
+    // the volumetric glow rides on the fog: on when there is fog, and lit at
+    // the fog's own strength. Steps are the march resolution; scattering is how
+    // hard the glow gathers to the lamp, in inverse metres squared.
+    ae3d_vk_scene_set_int(vkscene.OFF_ENABLEVOLUMETRICLIGHTING, fog_on)
+    ae3d_vk_scene_set_float(vkscene.OFF_VOLUMETRICINTENSITY, r.fog.intensity * 0.010)
+    ae3d_vk_scene_set_int(vkscene.OFF_VOLUMETRICSTEPS, 24)
+    ae3d_vk_scene_set_float(vkscene.OFF_VOLUMETRICSCATTERING, 0.16)
     ae3d_vk_scene_set_float(vkscene.OFF_FOGSTART, r.fog.start)
     ae3d_vk_scene_set_float(vkscene.OFF_FOGEND, r.fog.end)
     ae3d_vk_scene_set_vec3(vkscene.OFF_FOGCOLOR, r.fog.color.x, r.fog.color.y, r.fog.color.z)
@@ -914,7 +1130,14 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     }
 
     r.last_draw_calls = ae3d_vk_draw_calls()
+    r.last_pipeline_binds = ae3d_vk_pipeline_binds()
+    r.last_set_binds = ae3d_vk_set_binds()
     ae3d_vk_frame_end()
+    // The stamps read back at the start of this frame describe the frame that
+    // used this slot last, which is the most recent one the GPU has finished.
+    r.last_shadow_ms = ae3d_vk_pass_ms(0)
+    r.last_scene_ms = ae3d_vk_pass_ms(1)
+    r.last_post_ms = ae3d_vk_pass_ms(2)
 }
 
 // The same rule the OpenGL backend uses: a model joins a merged draw when
@@ -1011,20 +1234,23 @@ draw_opaque(r: *VKRenderer) {
 // An instance stream is a buffer of its own on this backend, so a group that
 // has changed is re-uploaded and the one it replaces is released. A group that
 // has not changed keeps the buffer it already sent.
-draw_batch(r: *VKRenderer, b: *VKBatch) {
-    if b.stale {
-        while list.size(b.members) > b.count { list.remove(b.members, list.size(b.members) - 1) }
-        ae3d_inst_resize(b.instances, b.count)
-        i = 0
-        while i < b.count {
-            m = list.get_raw(b.members, i) as *Model
-            ae3d_inst_set_matrix(b.instances, i, &m.model_matrix)
-            i = i + 1
-        }
-        if b.handle != 0 { ae3d_vk_free_mesh(b.handle) }
-        b.handle = ae3d_vk_upload_instances(b.instances)
-        b.stale = false
+sync_batch_instances(b: *VKBatch) {
+    if !b.stale { return }
+    while list.size(b.members) > b.count { list.remove(b.members, list.size(b.members) - 1) }
+    ae3d_inst_resize(b.instances, b.count)
+    i = 0
+    while i < b.count {
+        m = list.get_raw(b.members, i) as *Model
+        ae3d_inst_set_matrix(b.instances, i, &m.model_matrix)
+        i = i + 1
     }
+    if b.handle != 0 { ae3d_vk_free_mesh(b.handle) }
+    b.handle = ae3d_vk_upload_instances(b.instances)
+    b.stale = false
+}
+
+draw_batch(r: *VKRenderer, b: *VKBatch) {
+    sync_batch_instances(b)
     if b.handle == 0 { return }
 
     first = b.first as *Model
@@ -1137,6 +1363,7 @@ free_batches(batches: ptr) {
 
 renderer_cleanup(r: *VKRenderer) {
     free_batches(r.batches)
+    free_batches(r.shadow_batches)
     r.batches = null
     r.batch_count = 0
 
@@ -1173,6 +1400,13 @@ renderer_model(r: *VKRenderer, index: int) -> *Model {
 renderer_draw_calls(r: *VKRenderer) -> int {
     return r.last_draw_calls
 }
+
+renderer_post_active(r: *VKRenderer) -> bool { return ae3d_vk_post_active() == 1 }
+renderer_shadow_ms(r: *VKRenderer) -> float { return r.last_shadow_ms }
+renderer_scene_ms(r: *VKRenderer) -> float { return r.last_scene_ms }
+renderer_post_ms(r: *VKRenderer) -> float { return r.last_post_ms }
+renderer_program_binds(r: *VKRenderer) -> int { return r.last_pipeline_binds }
+renderer_material_binds(r: *VKRenderer) -> int { return r.last_set_binds }
 
 renderer_set_fog(r: *VKRenderer, f: *Fog) {
     if f == null { r.fog = core.fog_none() ; return }
