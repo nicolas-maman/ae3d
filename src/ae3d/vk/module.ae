@@ -404,7 +404,33 @@ light_box(r: *VKRenderer, light: *Light, centre: Vec3, radius: float) -> Mat4 {
     view = core.mat4_look_at(eye, centre, up)
     projection = core.mat4_ortho(0.0 - radius, radius, 0.0 - radius, radius,
                                  0.01, radius * 4.0)
-    return core.mat4_mul(projection, view)
+    matrix = core.mat4_mul(projection, view)
+
+    // Snap the map to its own texel grid, locked to the world rather than to
+    // the camera. Without this the box follows the camera by fractions of a
+    // texel every frame, and the whole shadow crawls along its own edges as it
+    // moves -- the swimming that reads as cheap however sharp the map is. A
+    // fixed world point, the origin, is projected into the map; the fraction of
+    // a texel it lands off the grid is taken back out of the projection, so
+    // every world point lands on the texel it landed on last frame.
+    half = SHADOW_SIZE * 0.5
+    at = core.mat4_transform_point(matrix, core.vec3(0.0, 0.0, 0.0))
+    tx = at.x * half
+    ty = at.y * half
+    rx = snap_round(tx)
+    ry = snap_round(ty)
+    matrix.m12 = matrix.m12 + (rx - tx) / half
+    matrix.m13 = matrix.m13 + (ry - ty) / half
+    return matrix
+}
+
+// Nearest integer, halves away from zero. A cast to int truncates toward zero,
+// which would round a texel coordinate the wrong way on the half of the map
+// with negative coordinates and leave the two halves snapped to grids half a
+// texel apart.
+snap_round(v: float) -> float {
+    if v >= 0.0 { return ((v + 0.5) as int) as float }
+    return ((v - 0.5) as int) as float
 }
 
 render_shadow_pass(r: *VKRenderer, light: *Light, cam: *Camera) {
