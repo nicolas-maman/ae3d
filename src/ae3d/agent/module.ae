@@ -93,6 +93,11 @@ struct Context {
     animations: ptr
     vk_renderer: ptr
     backend: string
+    // The scene's per-frame pose solve (IK, head tracking), and what to hand
+    // it. anim.track replays a pose exactly as a drawn frame builds it, which
+    // means running this on top of the clips at each sampled time.
+    on_pose: fn(ptr)
+    user_data: ptr
 
     frame_count: int
     fps: float
@@ -457,6 +462,8 @@ help_result() -> ptr {
         "One animation in full, including the transform its playhead currently produces."))
     json.array_add_raw(ops, describe("anim.set", "[name | index], [time], [speed], [playing], [looping]",
         "Drive an animation, or every animation at once when no name or index is given. Setting time seeks and reposes together, so a snapshot after it shows that pose."))
+    json.array_add_raw(ops, describe("anim.track", "object, times",
+        "Where every bone of a skinned model is at each of a list of animation times, in one answer. Each time is posed the way a drawn frame is -- the clips applied, then the scene's own solve on top -- and every bone's world position read, with no frame rendered between them: a path sampled a thousand times over that would otherwise be a thousand round trips. The playheads are left where they were."))
     json.array_add_raw(ops, describe("snapshot", "path",
         "Write the next completed frame to a PNG. Answers once the file exists."))
     json.array_add_raw(ops, describe("frame.pause", "",
@@ -671,6 +678,55 @@ audit_model(c: *Context, m: *Model, entry: ptr) {
     // about its shape.
     size = core.mesh_size(m.mesh, m.world_scale)
     json.object_set_raw(entry, "size", vec3_json(size.x, size.y, size.z))
+}
+
+find_skeleton(c: *Context, wanted: string) -> ptr {
+    count = model_count(c)
+    i = 0
+    while i < count {
+        m = model_at(c, i)
+        if m != null && m.skeleton != null && core.text(m.name) == wanted { return m.skeleton }
+        i = i + 1
+    }
+    return null
+}
+
+// The pose a drawn frame builds: the clips applied at the playhead the caller
+// set, then the scene's per-frame solve on top of them. Kept together because
+// reading a pose between the two is reading half of one.
+pose_all_at(c: *Context, t: float) {
+    registry = c.animations as *Registry
+    count = anim.registry_count(registry)
+    i = 0
+    while i < count {
+        b = anim.registry_binding(registry, i)
+        if b != null { anim.player_set_time(anim.binding_player(b), t) }
+        i = i + 1
+    }
+    anim.registry_apply(registry)
+    if c.on_pose != null { c.on_pose(c.user_data) }
+}
+
+// Just the names and world positions, which is all a path through time is made
+// of. skeleton_result carries the parent and the rotation too; a track of a
+// thousand samples does not want them a thousand times over.
+skeleton_positions(s: *Skeleton) -> ptr {
+    bones = json.arr()
+    count = skin.skeleton_count(s)
+    i = 0
+    while i < count {
+        bone = skin.skeleton_bone(s, i)
+        if bone != null {
+            core.model_sync_transform(bone)
+            at = core.model_world_position(bone)
+            entry = json.obj()
+            json.object_set_raw(entry, "name", json.str(core.text(bone.name)))
+            json.object_set_raw(entry, "world_position", vec3_json(at.x, at.y, at.z))
+            json.array_add_raw(bones, entry)
+        }
+        i = i + 1
+    }
+    return bones
 }
 
 skeleton_result(s: *Skeleton) -> ptr {
@@ -1602,19 +1658,7 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
             fail(id, "scene.skeleton needs an object")
             return false
         }
-        wanted = json.get_string_raw(named)
-        found = null
-        count = model_count(c)
-        i = 0
-        while i < count {
-            m = model_at(c, i)
-            if m != null && m.skeleton != null && core.text(m.name) == wanted {
-                found = m.skeleton
-                i = count
-            } else {
-                i = i + 1
-            }
-        }
+        found = find_skeleton(c, json.get_string_raw(named))
         if found == null {
             fail(id, "no skinned model by that name")
             return false
@@ -1627,6 +1671,66 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
         // sample out of a thousand, which is exactly the kind of wrong answer
         // that gets believed.
         return defer_skeleton(c, id, found)
+    }
+
+    if op == "anim.track" {
+        // The whole of a bone's path through a span of the animation, in one
+        // answer. scene.skeleton reads one finished pose; asking it once a
+        // frame for a thousand frames spends a thousand round trips, each
+        // waiting out a frame at the boundary, which is minutes on a software
+        // renderer. Here the pose pipeline a drawn frame runs -- the clips
+        // applied at the time, then the scene's own solve on top -- is replayed
+        // for each requested time and every bone read, without a frame in
+        // between. The playheads are put back at the end, so a paused agent
+        // finds the pose it left.
+        named = json.object_get_raw(request, "object")
+        times_node = json.object_get_raw(request, "times")
+        if named == null || times_node == null {
+            fail(id, "anim.track needs an object and a list of times")
+            return false
+        }
+        skeleton = find_skeleton(c, json.get_string_raw(named))
+        if skeleton == null {
+            fail(id, "no skinned model by that name")
+            return false
+        }
+        registry = c.animations as *Registry
+        bindings = anim.registry_count(registry)
+        saved = core.farr_create(bindings)
+        b = 0
+        while b < bindings {
+            core.farr_set(saved, b, anim.player_time(anim.binding_player(anim.registry_binding(registry, b))))
+            b = b + 1
+        }
+
+        samples = json.arr()
+        moments = json.array_size(times_node)
+        s = 0
+        while s < moments {
+            t = json.get_number(json.array_get_raw(times_node, s))
+            pose_all_at(c, t)
+            entry = json.obj()
+            json.object_set_raw(entry, "time", json.num(t))
+            json.object_set_raw(entry, "bones", skeleton_positions(skeleton as *Skeleton))
+            json.array_add_raw(samples, entry)
+            s = s + 1
+        }
+
+        // Back to where the agent had it, pose and all.
+        b = 0
+        while b < bindings {
+            anim.player_set_time(anim.binding_player(anim.registry_binding(registry, b)), core.farr_get(saved, b))
+            b = b + 1
+        }
+        core.farr_destroy(saved)
+        anim.registry_apply(registry)
+        if c.on_pose != null { c.on_pose(c.user_data) }
+
+        out = json.obj()
+        json.object_set_raw(out, "object", json.str(json.get_string_raw(named)))
+        json.object_set_raw(out, "samples", samples)
+        answer(id, out)
+        return false
     }
 
     // Show one model and hide the rest, or show everything again. Measuring a
