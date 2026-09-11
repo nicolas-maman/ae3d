@@ -138,6 +138,30 @@ def brick(size=1024, seed=11):
     return _image("BrickWall", size, _rgba(rgb))
 
 
+def _concrete_panels(size):
+    """Where a precast panel meets its neighbour, and the form-tie holes down
+    each joint. A blank concrete wall is a slab; the joints and the ties are
+    what say it was cast in pieces and lifted into place."""
+    seam = numpy.zeros((size, size), dtype=numpy.float32)
+    tie = numpy.zeros((size, size), dtype=numpy.float32)
+    groove = max(1.0, size / 220.0)
+    panels = 3
+    pitch = size / panels
+    axis = numpy.arange(size)
+    near = numpy.minimum(axis % pitch, pitch - (axis % pitch))
+    line = (near < groove).astype(numpy.float32)
+    seam = numpy.maximum(line[None, :], line[:, None])
+    # Two tie holes down every vertical joint.
+    radius = max(1.5, size / 300.0)
+    for col in range(1, panels):
+        cx = col * pitch
+        for row in (0.32, 0.68):
+            cy = row * size
+            yy, xx = numpy.ogrid[0:size, 0:size]
+            tie = numpy.maximum(tie, ((xx - cx) ** 2 + (yy - cy) ** 2 < radius * radius).astype(numpy.float32))
+    return seam, tie
+
+
 def concrete(size=1024, seed=23):
     rng = random.Random(seed)
     grain = _noise(rng, size, 5, 6)
@@ -145,6 +169,10 @@ def concrete(size=1024, seed=23):
     stain = numpy.clip((streak - 0.5) * 2.0, 0.0, 1.0)
     rgb = _tint((0.40, 0.40, 0.39), (0.21, 0.21, 0.22), stain * 0.8)
     rgb *= (0.84 + grain[:, :, None] * 0.32)
+    # The joints sit in shadow and the tie holes darker still.
+    seam, tie = _concrete_panels(size)
+    rgb *= (1.0 - 0.35 * seam[:, :, None])
+    rgb *= (1.0 - 0.5 * tie[:, :, None])
     return _image("ConcreteWall", size, _rgba(rgb))
 
 
@@ -386,7 +414,12 @@ def brick_normal(size=1024, seed=11):
 def concrete_normal(size=1024, seed=23):
     rng = random.Random(seed)
     height = _noise(rng, size, 5, 6) * 0.7 + _noise(rng, size, 4, 3) * 0.3
-    return _normal_from_height(height, 1.4, "ConcreteWallNormal")
+    # The panel joints are recesses and the tie holes deeper pits, so a lamp
+    # raking across the wall catches every panel edge -- which is most of what
+    # makes cast concrete read as cast rather than as flat grey.
+    seam, tie = _concrete_panels(size)
+    height = height - 0.9 * seam - 1.0 * tie
+    return _normal_from_height(height, 2.4, "ConcreteWallNormal")
 
 
 def tarmac_normal(size=1024, seed=37):
