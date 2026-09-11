@@ -354,6 +354,14 @@ static struct {
     int readback_height;
     int offscreen;
 
+    // Reading a windowed frame back. The swapchain image is copied to the
+    // per-frame staging buffers above, but only when a capture is asked for --
+    // a readback stalls the frame it reads, so it is off by default and armed
+    // for the one frame a snapshot or an agent grid needs.
+    int can_capture;      /* the surface allows a transfer-source swapchain */
+    int capture_request;  /* copy the next frame that is submitted */
+    int capture_slot;     /* which staging buffer holds the last capture, or -1 */
+
     int ready;
 } vk;
 
@@ -868,30 +876,33 @@ static void ae3d_vk_destroy_swapchain(void) {
     }
     // An offscreen target's image is owned here, unlike a swapchain's, which
     // the swapchain owns and destroys with itself.
+    // The staging buffers are sized to the extent, so they go with the target
+    // they copy from -- the offscreen image here, or the swapchain, whose
+    // windowed capture buffers are the same array. Buffers never created are
+    // VK_NULL_HANDLE and skipped, so this is safe on both paths.
+    {
+        unsigned slot;
+        for (slot = 0; slot < AE3D_VK_FRAMES; slot++) {
+            if (vk.readback_mapped[slot]) {
+                ae3d_vkUnmapMemory(vk.device, vk.readback_buffer_memory[slot]);
+                vk.readback_mapped[slot] = NULL;
+            }
+            if (vk.readback_buffer[slot]) {
+                ae3d_vkDestroyBuffer(vk.device, vk.readback_buffer[slot], NULL);
+                vk.readback_buffer[slot] = VK_NULL_HANDLE;
+            }
+            if (vk.readback_buffer_memory[slot]) {
+                ae3d_vkFreeMemory(vk.device, vk.readback_buffer_memory[slot], NULL);
+                vk.readback_buffer_memory[slot] = VK_NULL_HANDLE;
+            }
+        }
+    }
+    vk.capture_slot = -1;
     if (vk.offscreen && vk.images && vk.images[0]) {
         ae3d_vkDestroyImage(vk.device, vk.images[0], NULL);
         if (vk.readback_memory) {
             ae3d_vkFreeMemory(vk.device, vk.readback_memory, NULL);
             vk.readback_memory = VK_NULL_HANDLE;
-        }
-        // The staging buffer is sized to the extent, so it goes with the image
-        // it copies from. Leaving it would hand back a mapping of the old size.
-        {
-            unsigned slot;
-            for (slot = 0; slot < AE3D_VK_FRAMES; slot++) {
-                if (vk.readback_mapped[slot]) {
-                    ae3d_vkUnmapMemory(vk.device, vk.readback_buffer_memory[slot]);
-                    vk.readback_mapped[slot] = NULL;
-                }
-                if (vk.readback_buffer[slot]) {
-                    ae3d_vkDestroyBuffer(vk.device, vk.readback_buffer[slot], NULL);
-                    vk.readback_buffer[slot] = VK_NULL_HANDLE;
-                }
-                if (vk.readback_buffer_memory[slot]) {
-                    ae3d_vkFreeMemory(vk.device, vk.readback_buffer_memory[slot], NULL);
-                    vk.readback_buffer_memory[slot] = VK_NULL_HANDLE;
-                }
-            }
         }
         vk.readback_width = 0;
         vk.readback_height = 0;
@@ -1123,6 +1134,13 @@ static int ae3d_vk_create_swapchain(int width, int height) {
     info.imageExtent = vk.extent;
     info.imageArrayLayers = 1;
     info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    // Reading a finished frame back -- for a snapshot, or for the agent to see
+    // what it drew -- means copying the swapchain image, which needs it to be a
+    // transfer source. Nearly every surface allows it; where one does not the
+    // capture path stays off rather than failing to create the swapchain.
+    vk.can_capture = (capabilities.supportedUsageFlags
+                      & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) ? 1 : 0;
+    if (vk.can_capture) info.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     info.preTransform = capabilities.currentTransform;
     info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     info.presentMode = vk.present_mode;
@@ -2624,6 +2642,7 @@ int ae3d_vk_init(void *win, int width, int height) {
     vk.bloom_intensity = bloom_intensity;
     vk.offscreen = win == NULL;
     vk.readback_frame = -1;
+    vk.capture_slot = -1;
 
     if (!ae3d_vk_create_instance()) return 0;
 
@@ -3109,6 +3128,63 @@ int ae3d_vk_frame_end(void) {
                                     vk.readback_buffer[vk.frame], 1, &region);
     }
 
+    // A windowed frame is copied only when a capture was asked for. The
+    // swapchain image is in present layout after the render pass, so it is
+    // moved to transfer-source, copied to this frame's staging buffer, and put
+    // back before it is handed to the presenter.
+    if (!vk.offscreen && vk.capture_request && vk.can_capture
+        && vk.readback_buffer[vk.frame]) {
+        VkImageMemoryBarrier to_src, to_present;
+        VkBufferImageCopy region;
+
+        memset(&to_src, 0, sizeof(to_src));
+        to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        to_src.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_src.image = vk.images[vk.image_index];
+        to_src.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        to_src.subresourceRange.levelCount = 1;
+        to_src.subresourceRange.layerCount = 1;
+        to_src.srcAccessMask = 0;
+        to_src.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        ae3d_vkCmdPipelineBarrier(vk.command_buffers[vk.frame],
+                                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL,
+                                  1, &to_src);
+
+        memset(&region, 0, sizeof(region));
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent.width = vk.extent.width;
+        region.imageExtent.height = vk.extent.height;
+        region.imageExtent.depth = 1;
+        ae3d_vkCmdCopyImageToBuffer(vk.command_buffers[vk.frame], vk.images[vk.image_index],
+                                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                    vk.readback_buffer[vk.frame], 1, &region);
+
+        memset(&to_present, 0, sizeof(to_present));
+        to_present.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        to_present.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        to_present.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        to_present.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_present.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_present.image = vk.images[vk.image_index];
+        to_present.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        to_present.subresourceRange.levelCount = 1;
+        to_present.subresourceRange.layerCount = 1;
+        to_present.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        to_present.dstAccessMask = 0;
+        ae3d_vkCmdPipelineBarrier(vk.command_buffers[vk.frame],
+                                  VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                  VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL,
+                                  1, &to_present);
+
+        vk.capture_slot = (int)vk.frame;
+        vk.capture_request = 0;
+    }
+
     ae3d_vk_stamp_through(3);
     vk.stamped[vk.frame] = vk.stamp_next == AE3D_VK_STAMPS;
     ae3d_vkEndCommandBuffer(vk.command_buffers[vk.frame]);
@@ -3198,6 +3274,83 @@ void *ae3d_vk_offscreen_pixels(void) {
 
 int ae3d_vk_offscreen_width(void) { return vk.readback_width; }
 int ae3d_vk_offscreen_height(void) { return vk.readback_height; }
+
+/* Windowed capture: read a presented frame back the way the offscreen path
+   reads its target. The staging buffers are made on first use, sized to the
+   swapchain extent, and freed with the swapchain. */
+static int ae3d_vk_ensure_capture_buffers(void) {
+    VkDeviceSize size;
+    unsigned slot;
+    if (vk.readback_buffer[0]) return 1;   /* already made for this extent */
+    size = (VkDeviceSize)vk.extent.width * vk.extent.height * 4;
+    for (slot = 0; slot < AE3D_VK_FRAMES; slot++) {
+        void *mapped = NULL;
+        if (!ae3d_vk_create_buffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                       | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                   &vk.readback_buffer[slot],
+                                   &vk.readback_buffer_memory[slot])) {
+            return 0;
+        }
+        if (ae3d_vkMapMemory(vk.device, vk.readback_buffer_memory[slot], 0, size, 0,
+                             &mapped) != VK_SUCCESS) {
+            return 0;
+        }
+        vk.readback_mapped[slot] = (unsigned char *)mapped;
+    }
+    vk.readback_width = (int)vk.extent.width;
+    vk.readback_height = (int)vk.extent.height;
+    return 1;
+}
+
+/* Arm a capture: the next frame submitted copies the presented image out.
+   Returns 0 when the surface does not allow reading a frame back. */
+int ae3d_vk_request_capture(void) {
+    if (vk.offscreen || !vk.can_capture || !vk.ready) return 0;
+    if (!ae3d_vk_ensure_capture_buffers()) return 0;
+    vk.capture_slot = -1;
+    vk.capture_request = 1;
+    return 1;
+}
+
+int ae3d_vk_capture_ready(void) { return vk.capture_slot >= 0; }
+
+/* The captured frame as RGBA, top row first -- the orientation a PNG and the
+   capture buffer both use, so no flip like the OpenGL readback needs. The
+   swapchain is usually BGRA, so the red and blue channels are swapped on the
+   way out. */
+void *ae3d_vk_capture_pixels(void) {
+    size_t needed, i;
+    int swap;
+    unsigned char *src;
+
+    if (vk.capture_slot < 0) return NULL;
+    ae3d_vkWaitForFences(vk.device, 1, &vk.in_flight[vk.capture_slot], VK_TRUE, UINT64_MAX);
+
+    needed = (size_t)vk.readback_width * (size_t)vk.readback_height * 4u;
+    if (needed > g_readback_copy_size) {
+        free(g_readback_copy);
+        g_readback_copy = (unsigned char *)malloc(needed);
+        g_readback_copy_size = g_readback_copy ? needed : 0;
+    }
+    if (!g_readback_copy) return NULL;
+    src = vk.readback_mapped[vk.capture_slot];
+    memcpy(g_readback_copy, src, needed);
+
+    swap = (vk.color_format == VK_FORMAT_B8G8R8A8_UNORM
+            || vk.color_format == VK_FORMAT_B8G8R8A8_SRGB);
+    if (swap) {
+        for (i = 0; i + 3 < needed; i += 4) {
+            unsigned char b = g_readback_copy[i];
+            g_readback_copy[i] = g_readback_copy[i + 2];
+            g_readback_copy[i + 2] = b;
+        }
+    }
+    return g_readback_copy;
+}
+
+int ae3d_vk_capture_width(void) { return vk.readback_width; }
+int ae3d_vk_capture_height(void) { return vk.readback_height; }
 
 int ae3d_vk_upload_mesh(void *mesh) {
     const float *vertices = ae3d_mesh_vertex_data(mesh);

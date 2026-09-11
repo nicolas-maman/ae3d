@@ -314,6 +314,14 @@ int    ae3d_vk_sample_count(void);
 void  *ae3d_vk_offscreen_pixels(void);
 int    ae3d_vk_offscreen_width(void);
 int    ae3d_vk_offscreen_height(void);
+/* Windowed frame capture: arm it, then after a frame is submitted read the
+   presented image back as RGBA (top row first). request returns 0 when the
+   surface cannot be a transfer source. */
+int    ae3d_vk_request_capture(void);
+int    ae3d_vk_capture_ready(void);
+void  *ae3d_vk_capture_pixels(void);
+int    ae3d_vk_capture_width(void);
+int    ae3d_vk_capture_height(void);
 
 // The agent channel: a localhost NDJSON socket an agent drives the engine
 // through. ae3d_agent_active() is what every hot path tests, and it is zero

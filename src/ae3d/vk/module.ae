@@ -28,6 +28,7 @@ exports (
     renderer_set_fog, renderer_fog, renderer_set_shadow_distance, renderer_shadow_distance,
     skybox_create, skybox_free,
     offscreen_pixels, offscreen_width, offscreen_height,
+    request_capture, capture_ready, snapshot,
     live_shadow_targets
 )
 
@@ -78,6 +79,12 @@ extern ae3d_vk_pipeline_binds() -> int
 extern ae3d_vk_set_binds() -> int
 extern ae3d_vk_sample_count() -> int
 extern ae3d_vk_offscreen_pixels() -> ptr
+extern ae3d_vk_request_capture() -> int
+extern ae3d_vk_capture_ready() -> int
+extern ae3d_vk_capture_pixels() -> ptr
+extern ae3d_vk_capture_width() -> int
+extern ae3d_vk_capture_height() -> int
+extern ae3d_png_write(path: string, rgba: ptr, width: int, height: int) -> int
 extern ae3d_vk_scene_offset(name: string) -> int
 extern ae3d_vk_scene_set_float_array(offset: int, handle: ptr)
 extern ae3d_vk_scene_set_vec3_array(offset: int, handle: ptr)
@@ -181,6 +188,26 @@ renderer_sample_count() -> int {
 // renderer and the next frame overwrites it.
 offscreen_pixels() -> ptr {
     return ae3d_vk_offscreen_pixels()
+}
+
+// Arm a capture of the next presented frame. False when the surface will not
+// give a frame back, so a caller can say so rather than write nothing.
+request_capture() -> bool {
+    return ae3d_vk_request_capture() == 1
+}
+
+capture_ready() -> bool {
+    return ae3d_vk_capture_ready() == 1
+}
+
+// Write the captured frame to a PNG. The frame has to have been asked for and
+// drawn first, so request_capture one frame ahead of this.
+snapshot(path: string) -> bool {
+    if ae3d_vk_capture_ready() != 1 { return false }
+    pixels = ae3d_vk_capture_pixels()
+    if pixels == null { return false }
+    return ae3d_png_write(path, pixels, ae3d_vk_capture_width(),
+                          ae3d_vk_capture_height()) == 1
 }
 
 offscreen_width() -> int {

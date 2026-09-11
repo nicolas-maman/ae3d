@@ -194,7 +194,9 @@ write_snapshot(e: *Engine) {
     path = snapshot_path(e)
     if path == "" { return }
     if e.api == platform.API_VULKAN {
-        println("ae3d: AE3D_SNAPSHOT needs the OpenGL backend")
+        if !vk.snapshot(path) {
+            println("ae3d: could not capture the Vulkan frame for ${path}")
+        }
         return
     }
     width = platform.window_fb_width(e.window)
@@ -760,6 +762,13 @@ engine_loop(e: *Engine) {
 
         if e.on_pose != null { e.on_pose(e.user_data) }
 
+        // A Vulkan snapshot is copied out of the frame as it is submitted, so
+        // the capture is armed on the frame before write_snapshot reads it --
+        // which is this one, when the next frame is the last.
+        last_frame = e.frame_limit > 0 && e.frame_count + 1 >= e.frame_limit
+        if e.api == platform.API_VULKAN && last_frame && snapshot_path(e) != "" {
+            vk.request_capture()
+        }
         render_started = platform.time()
         e.backend_render(e.backend_state, cam, e.light)
         e.render_seconds = e.render_seconds + (platform.time() - render_started)
