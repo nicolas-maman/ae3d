@@ -21,7 +21,7 @@ exports (
     renderer_new, renderer_free, backend,
     available, device_name, last_error,
     renderer_model_count, renderer_model, renderer_light_count, renderer_light, renderer_draw_calls, renderer_set_clear_color,
-    renderer_shadow_ms, renderer_scene_ms, renderer_post_ms, renderer_post_active, renderer_program_binds, renderer_material_binds,
+    renderer_shadow_ms, renderer_scene_ms, renderer_post_ms, renderer_cpu_work_ms, renderer_post_active, renderer_program_binds, renderer_material_binds,
     renderer_set_normal_strength, renderer_set_occlusion_strength, renderer_material_texture_size,
     renderer_load_texture, renderer_release_texture, renderer_sample_count, renderer_set_post,
     renderer_set_shadows, renderer_shadows, renderer_add_light, renderer_remove_light,
@@ -148,6 +148,7 @@ struct VKRenderer {
     last_shadow_ms: float
     last_scene_ms: float
     last_post_ms: float
+    last_cpu_work_ms: float
     last_pipeline_binds: int
     last_set_binds: int
     clear_r: float
@@ -1088,6 +1089,12 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     active_light = key_light(r, light)
 
     if ae3d_vk_frame_begin(r.clear_r, r.clear_g, r.clear_b, 1.0) != 1 { return }
+    // The engine's own CPU cost is the command building and submission below,
+    // not the fence-and-acquire wait frame_begin just blocked on -- that wait
+    // is the display pacing the frame, and folding it into "the CPU frame"
+    // makes a vsync-limited scene read as CPU-bound when the work is a fraction
+    // of a millisecond. Timed from here, after the wait.
+    work_started = platform.time()
 
     render_shadow_pass(r, active_light, cam)
     set_frame_uniforms(r, active_light, cam)
@@ -1133,6 +1140,7 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     r.last_pipeline_binds = ae3d_vk_pipeline_binds()
     r.last_set_binds = ae3d_vk_set_binds()
     ae3d_vk_frame_end()
+    r.last_cpu_work_ms = (platform.time() - work_started) * 1000.0
     // The stamps read back at the start of this frame describe the frame that
     // used this slot last, which is the most recent one the GPU has finished.
     r.last_shadow_ms = ae3d_vk_pass_ms(0)
@@ -1404,6 +1412,7 @@ renderer_draw_calls(r: *VKRenderer) -> int {
 renderer_post_active(r: *VKRenderer) -> bool { return ae3d_vk_post_active() == 1 }
 renderer_shadow_ms(r: *VKRenderer) -> float { return r.last_shadow_ms }
 renderer_scene_ms(r: *VKRenderer) -> float { return r.last_scene_ms }
+renderer_cpu_work_ms(r: *VKRenderer) -> float { return r.last_cpu_work_ms }
 renderer_post_ms(r: *VKRenderer) -> float { return r.last_post_ms }
 renderer_program_binds(r: *VKRenderer) -> int { return r.last_pipeline_binds }
 renderer_material_binds(r: *VKRenderer) -> int { return r.last_set_binds }

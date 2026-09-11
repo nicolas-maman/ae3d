@@ -72,6 +72,7 @@ struct Cost {
     scene_ms: float
     post_ms: float
     cpu_ms: float
+    work_ms: float
     device: string
     backend: string
     width: int
@@ -110,6 +111,7 @@ measure(p: *Probe) -> Cost {
     scene_us = intarr.intarr_new_raw(SAMPLES)
     post_us = intarr.intarr_new_raw(SAMPLES)
     cpu_us = intarr.intarr_new_raw(SAMPLES)
+    work_us = intarr.intarr_new_raw(SAMPLES)
 
     i = 0
     while i < SAMPLES {
@@ -135,6 +137,7 @@ measure(p: *Probe) -> Cost {
         intarr.intarr_set_raw(scene_us, i, (probe.number(stats, "scene_ms") * 1000.0) as int)
         intarr.intarr_set_raw(post_us, i, (probe.number(stats, "post_ms") * 1000.0) as int)
         intarr.intarr_set_raw(cpu_us, i, (probe.number(stats, "render_ms") * 1000.0) as int)
+        intarr.intarr_set_raw(work_us, i, (probe.number(stats, "cpu_work_ms") * 1000.0) as int)
 
         json.free(answered)
         i = i + 1
@@ -144,10 +147,12 @@ measure(p: *Probe) -> Cost {
     out.scene_ms = middle(scene_us)
     out.post_ms = middle(post_us)
     out.cpu_ms = middle(cpu_us)
+    out.work_ms = middle(work_us)
     intarr.intarr_free(shadow_us)
     intarr.intarr_free(scene_us)
     intarr.intarr_free(post_us)
     intarr.intarr_free(cpu_us)
+    intarr.intarr_free(work_us)
     return out
 }
 
@@ -161,6 +166,7 @@ cost_json(c: Cost) -> ptr {
     json.object_set_raw(out, "scene_ms", json.num(c.scene_ms))
     json.object_set_raw(out, "post_ms", json.num(c.post_ms))
     json.object_set_raw(out, "cpu_ms", json.num(c.cpu_ms))
+    json.object_set_raw(out, "work_ms", json.num(c.work_ms))
     json.object_set_raw(out, "device", json.str(c.device))
     json.object_set_raw(out, "backend", json.str(c.backend))
     json.object_set_raw(out, "width", json.from_int(c.width))
@@ -303,10 +309,11 @@ main() {
     failures = failures + time_line("shadow pass (gpu)", measured.shadow_ms, probe.number(recorded, "shadow_ms"), comparable)
     failures = failures + time_line("scene pass (gpu)", measured.scene_ms, probe.number(recorded, "scene_ms"), comparable)
     failures = failures + time_line("post pass (gpu)", measured.post_ms, probe.number(recorded, "post_ms"), comparable)
-    time_line("frame (cpu, in the renderer's calls)", measured.cpu_ms, probe.number(recorded, "cpu_ms"), false)
+    time_line("engine cpu work (building+submitting)", measured.work_ms, probe.number(recorded, "work_ms"), false)
+    time_line("frame wall time (paced by vsync)", measured.cpu_ms, probe.number(recorded, "cpu_ms"), false)
 
     gpu = measured.shadow_ms + measured.scene_ms + measured.post_ms
-    println("       gpu total: ${ms_text(gpu)} ms of a ${ms_text(measured.cpu_ms)} ms frame")
+    println("       the engine builds the frame in ${ms_text(measured.work_ms)} ms of cpu and ${ms_text(gpu)} ms of gpu; the ${ms_text(measured.cpu_ms)} ms wall time is the display pacing it")
 
     json.free(recorded)
 
