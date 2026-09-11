@@ -476,7 +476,51 @@ step "the demo scene, held to what it cost last time"
 # single extra program bind fails the build. The milliseconds beside them are
 # compared only when the card that recorded them is the card running them, and
 # reported otherwise: a time from one GPU says nothing about another.
+#
+# Both renderers, because a cost that can only be measured on one of them is
+# a cost that regresses unseen on the other; Vulkan skips where there is no
+# driver, the way every other Vulkan check here does.
 build_together tools/ae3d_bench.ae
+frame_cost() {   # frame_cost <backend> <port>
+    cost_backend="$1"
+    cost_port="$2"
+    cost_name="zombie_street (frame cost, $cost_backend)"
+    cost_arg=""
+    [ "$cost_backend" = vulkan ] && cost_arg="vulkan"
+    cost_log="$(mktemp)"
+    scene_log="$(mktemp)"
+    AE3D_AGENT="$cost_port" ./build/zombie_street $cost_arg >"$scene_log" 2>&1 &
+    cost_scene=$!
+    # The scene opens its port after the window and the first frame, so the
+    # first question can arrive before there is anything to answer it. Retried
+    # only while that is what came back, and only while the scene is alive.
+    costed=1
+    attempt=0
+    while [ "$attempt" -lt 50 ]; do
+        kill -0 "$cost_scene" 2>/dev/null || break
+        bounded "$RUN_LIMIT" ./build/ae3d_bench "$cost_port" >"$cost_log" 2>&1
+        costed=$?
+        grep -q 'nothing answering' "$cost_log" || break
+        attempt=$((attempt + 1))
+        sleep 0.2
+    done
+    if ! kill -0 "$cost_scene" 2>/dev/null; then
+        if grep -q 'no Vulkan driver' "$scene_log"; then
+            skip "$cost_name" "no Vulkan driver"
+        else
+            skip "$cost_name" "the scene could not open a window"
+        fi
+    elif [ "$costed" -eq 0 ]; then
+        pass "$cost_name"
+        sed 's/^/        /' "$cost_log" | head -20
+    else
+        fail "$cost_name"
+        sed 's/^/        /' "$cost_log" | head -20
+    fi
+    kill "$cost_scene" 2>/dev/null
+    wait "$cost_scene" 2>/dev/null
+    rm -f "$cost_log" "$scene_log"
+}
 if ! built_ok ae3d_bench; then
     fail "ae3d_bench (build)"
     sed 's/^/        /' "$BUILD_DIR/ae3d_bench.log" | head -20
@@ -485,34 +529,8 @@ elif ! have_display; then
 elif ! built_ok zombie_street; then
     skip "zombie_street (frame cost)" "it did not build"
 else
-    bench_log="$(mktemp)"
-    AE3D_AGENT=7915 ./build/zombie_street >/dev/null 2>&1 &
-    bench_scene=$!
-    # The scene opens its port after the window and the first frame, so the
-    # first question can arrive before there is anything to answer it. Retried
-    # only while that is what came back, and only while the scene is alive.
-    benched=1
-    attempt=0
-    while [ "$attempt" -lt 50 ]; do
-        kill -0 "$bench_scene" 2>/dev/null || break
-        bounded "$RUN_LIMIT" ./build/ae3d_bench 7915 >"$bench_log" 2>&1
-        benched=$?
-        grep -q 'nothing answering' "$bench_log" || break
-        attempt=$((attempt + 1))
-        sleep 0.2
-    done
-    if ! kill -0 "$bench_scene" 2>/dev/null; then
-        skip "zombie_street (frame cost)" "the scene could not open a window"
-    elif [ "$benched" -eq 0 ]; then
-        pass "zombie_street (frame cost)"
-        sed 's/^/        /' "$bench_log" | head -20
-    else
-        fail "zombie_street (frame cost)"
-        sed 's/^/        /' "$bench_log" | head -20
-    fi
-    kill "$bench_scene" 2>/dev/null
-    wait "$bench_scene" 2>/dev/null
-    rm -f "$bench_log"
+    frame_cost opengl 7915
+    frame_cost vulkan 7916
 fi
 
 # The editor runs on either renderer, so both are checked: the Vulkan option

@@ -40,6 +40,8 @@
 #endif
 
 #define AE3D_VK_FRAMES 2
+/* Timestamps a frame: start, after shadow, after scene, after post. */
+#define AE3D_VK_STAMPS 4
 /* A cached descriptor set whose texture has been destroyed. Not zero: zero is
    a texture handle nothing uses, and not -1 alone, which reads as an error. */
 #define AE3D_VK_SET_FREE (-2)
@@ -142,7 +144,12 @@
     X(vkDestroyFence) \
     X(vkWaitForFences) \
     X(vkResetFences) \
-    X(vkQueueSubmit)
+    X(vkQueueSubmit) \
+    X(vkCreateQueryPool) \
+    X(vkDestroyQueryPool) \
+    X(vkCmdResetQueryPool) \
+    X(vkCmdWriteTimestamp) \
+    X(vkGetQueryPoolResults)
 
 // Swapchain entry points come from the device extension an offscreen device
 // does not enable, so they are loaded the same way and required the same way.
@@ -264,6 +271,25 @@ static struct {
     int fxaa;
     int bloom;
     int post_active;
+
+    /* GPU time per pass. Four timestamps a frame -- start, after the shadow
+       pass, after the scene pass, after post -- in one pool, read back when
+       the frame's fence says the GPU has finished with them, which is
+       AE3D_VK_FRAMES frames later and never a wait. */
+    VkQueryPool timestamps;
+    double timestamp_ms;          /* milliseconds per tick, from the device */
+    int timestamps_usable;        /* the graphics queue reports valid bits */
+    int stamped[AE3D_VK_FRAMES];  /* this frame's four stamps were all written */
+    int stamp_next;               /* how many of this frame's stamps are written */
+    double pass_ms[3];
+
+    /* What a frame costs in changes of mind, the same way the OpenGL backend
+       counts them. A pipeline bound twice in a row is bound once. */
+    VkPipeline bound_pipeline;
+    int bound_texture;
+    int bound_normal;
+    int pipeline_binds;
+    int set_binds;
     VkPipelineLayout pipeline_layout;
     // Indexed by whether back faces are culled. Cull mode is fixed at pipeline
     // creation before Vulkan 1.3 and the loader targets 1.1, so the two states
@@ -604,7 +630,7 @@ static int ae3d_vk_pick_device(void) {
     for (i = 0; i < count && chosen < 0; i++) {
         VkQueueFamilyProperties *families;
         unsigned family_count = 0;
-        int graphics = -1, present = -1;
+        int graphics = -1, present = -1, timestamp_bits = 0;
 
         ae3d_vkGetPhysicalDeviceQueueFamilyProperties(devices[i], &family_count, NULL);
         if (family_count == 0) continue;
@@ -614,7 +640,10 @@ static int ae3d_vk_pick_device(void) {
 
         for (q = 0; q < family_count; q++) {
             VkBool32 supported = VK_FALSE;
-            if (graphics < 0 && (families[q].queueFlags & VK_QUEUE_GRAPHICS_BIT)) graphics = (int)q;
+            if (graphics < 0 && (families[q].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
+                graphics = (int)q;
+                timestamp_bits = (int)families[q].timestampValidBits;
+            }
             if (vk.offscreen) {
                 if (present < 0 && graphics >= 0) present = graphics;
                 continue;
@@ -631,6 +660,8 @@ static int ae3d_vk_pick_device(void) {
             vk.present_family = (unsigned)present;
             ae3d_vkGetPhysicalDeviceProperties(vk.physical, &properties);
             snprintf(vk.device_name, sizeof(vk.device_name), "%s", properties.deviceName);
+            vk.timestamp_ms = (double)properties.limits.timestampPeriod / 1000000.0;
+            vk.timestamps_usable = timestamp_bits > 0;
             ae3d_vkGetPhysicalDeviceMemoryProperties(vk.physical, &vk.memory_properties);
             chosen = (int)i;
         }
@@ -2508,24 +2539,89 @@ static int ae3d_vk_create_commands(void) {
             ae3d_vkCreateFence(vk.device, &fence, NULL, &vk.in_flight[i]) != VK_SUCCESS) {
             return ae3d_vk_fail("could not create frame synchronisation objects");
         }
+        vk.stamped[i] = 0;
+    }
+
+    if (vk.timestamps_usable) {
+        VkQueryPoolCreateInfo pool;
+        memset(&pool, 0, sizeof(pool));
+        pool.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        pool.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        pool.queryCount = AE3D_VK_FRAMES * AE3D_VK_STAMPS;
+        if (ae3d_vkCreateQueryPool(vk.device, &pool, NULL, &vk.timestamps) != VK_SUCCESS) {
+            /* Not fatal: a frame without a timer still draws. */
+            vk.timestamps = VK_NULL_HANDLE;
+            vk.timestamps_usable = 0;
+        }
     }
     return 1;
 }
+
+/* One timestamp, at the next slot of this frame's four. Bottom of pipe, so
+   the stamp lands when everything recorded before it has finished. */
+static void ae3d_vk_stamp(void) {
+    if (!vk.timestamps || vk.stamp_next >= AE3D_VK_STAMPS) return;
+    ae3d_vkCmdWriteTimestamp(vk.command_buffers[vk.frame], VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                             vk.timestamps, vk.frame * AE3D_VK_STAMPS + (unsigned)vk.stamp_next);
+    vk.stamp_next++;
+}
+
+/* Writes every stamp up to and including this one. A pass that did not run
+   gets two stamps in the same place and costs nothing, rather than being
+   charged for whatever ran instead of it. */
+static void ae3d_vk_stamp_through(int index) {
+    while (vk.stamp_next <= index) ae3d_vk_stamp();
+}
+
+/* Reads back the stamps this frame slot wrote last time round. Called after
+   the slot's fence has been waited on, so the results exist and nothing here
+   waits for the GPU. */
+static void ae3d_vk_collect_stamps(void) {
+    unsigned long long ticks[AE3D_VK_STAMPS];
+    int i;
+    if (!vk.stamped[vk.frame]) return;
+    vk.stamped[vk.frame] = 0;
+    if (ae3d_vkGetQueryPoolResults(vk.device, vk.timestamps, vk.frame * AE3D_VK_STAMPS, AE3D_VK_STAMPS,
+                                   sizeof(ticks), ticks, sizeof(ticks[0]),
+                                   VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) {
+        return;
+    }
+    for (i = 0; i < 3; i++) {
+        vk.pass_ms[i] = ticks[i + 1] >= ticks[i]
+            ? (double)(ticks[i + 1] - ticks[i]) * vk.timestamp_ms : 0.0;
+    }
+}
+
+double ae3d_vk_pass_ms(int pass) {
+    if (pass < 0 || pass > 2) return 0.0;
+    return vk.pass_ms[pass];
+}
+
+int ae3d_vk_pipeline_binds(void) { return vk.pipeline_binds; }
+int ae3d_vk_set_binds(void) { return vk.set_binds; }
 
 // A null window means offscreen: no surface, no swapchain, and the frame is
 // read back rather than presented. That is what lets the editor host the
 // Vulkan renderer inside a toolkit that owns the real window.
 int ae3d_vk_init(void *win, int width, int height) {
-    // Whether shadows are wanted is a setting rather than device state, and
-    // descriptor sets written later in init read it. Clearing it here would
-    // discard anything asked for before the device existed.
+    // Whether shadows and post-processing are wanted are settings rather than
+    // device state, and a program sets them before the device exists. Clearing
+    // them here discarded the request: the demo asked for FXAA and bloom and
+    // the Vulkan frame drew without either, and nothing said so until the
+    // channel reported which passes had run.
     int shadows = vk.shadow_enabled;
+    int fxaa = vk.fxaa, bloom = vk.bloom;
+    float bloom_threshold = vk.bloom_threshold, bloom_intensity = vk.bloom_intensity;
 
     if (vk.ready) return 1;
     if (!ae3d_vk_available()) return 0;
 
     memset(&vk, 0, sizeof(vk));
     vk.shadow_enabled = shadows;
+    vk.fxaa = fxaa;
+    vk.bloom = bloom;
+    vk.bloom_threshold = bloom_threshold;
+    vk.bloom_intensity = bloom_intensity;
     vk.offscreen = win == NULL;
     vk.readback_frame = -1;
 
@@ -2596,6 +2692,7 @@ static void ae3d_vk_open_scene_pass(void) {
     VkRect2D scissor;
 
     if (vk.pass_open) return;
+    ae3d_vk_stamp_through(1);
 
     memset(clears, 0, sizeof(clears));
     clears[0].color.float32[0] = vk.scene_clear[0];
@@ -2636,6 +2733,7 @@ int ae3d_vk_frame_begin(double r, double g, double b, double a) {
     }
 
     ae3d_vkWaitForFences(vk.device, 1, &vk.in_flight[vk.frame], VK_TRUE, UINT64_MAX);
+    ae3d_vk_collect_stamps();
 
     if (vk.offscreen) {
         vk.image_index = 0;
@@ -2659,6 +2757,18 @@ int ae3d_vk_frame_begin(double r, double g, double b, double a) {
     begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     ae3d_vkBeginCommandBuffer(vk.command_buffers[vk.frame], &begin);
+
+    vk.stamp_next = 0;
+    if (vk.timestamps) {
+        ae3d_vkCmdResetQueryPool(vk.command_buffers[vk.frame], vk.timestamps,
+                                 vk.frame * AE3D_VK_STAMPS, AE3D_VK_STAMPS);
+        ae3d_vk_stamp();
+    }
+    vk.bound_pipeline = VK_NULL_HANDLE;
+    vk.bound_texture = -1;
+    vk.bound_normal = -1;
+    vk.pipeline_binds = 0;
+    vk.set_binds = 0;
 
     vk.scene_clear[0] = (float)r;
     vk.scene_clear[1] = (float)g;
@@ -2712,7 +2822,18 @@ static void ae3d_vk_draw_pipeline(VkPipeline pipeline, int handle, int texture_h
     set = ae3d_vk_set_for((int)vk.frame, texture_handle, vk.normal_map);
     if (set == VK_NULL_HANDLE) return;
 
-    ae3d_vkCmdBindPipeline(vk.command_buffers[vk.frame], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    if (pipeline != vk.bound_pipeline) {
+        ae3d_vkCmdBindPipeline(vk.command_buffers[vk.frame], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        vk.bound_pipeline = pipeline;
+        vk.pipeline_binds++;
+    }
+    /* The set is bound every draw because its dynamic offset moves every
+       draw; what is counted is the material behind it changing. */
+    if (texture_handle != vk.bound_texture || vk.normal_map != vk.bound_normal) {
+        vk.bound_texture = texture_handle;
+        vk.bound_normal = vk.normal_map;
+        vk.set_binds++;
+    }
     ae3d_vkCmdBindDescriptorSets(vk.command_buffers[vk.frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
                                  vk.pipeline_layout, 0, 1, &set, 1, &dynamic_offset);
 
@@ -2884,6 +3005,7 @@ void ae3d_vk_shadow_end(void) {
     ae3d_vkCmdEndRenderPass(vk.command_buffers[vk.frame]);
     vk.in_shadow_pass = 0;
     vk.pass_open = 0;
+    ae3d_vk_stamp_through(1);
 
     memset(&viewport, 0, sizeof(viewport));
     viewport.width = (float)vk.extent.width;
@@ -2941,6 +3063,7 @@ int ae3d_vk_frame_end(void) {
     ae3d_vk_open_scene_pass();
     ae3d_vkCmdEndRenderPass(vk.command_buffers[vk.frame]);
     vk.pass_open = 0;
+    ae3d_vk_stamp_through(2);
 
     if (vk.post_active) {
         VkRenderPassBeginInfo pass;
@@ -2986,6 +3109,8 @@ int ae3d_vk_frame_end(void) {
                                     vk.readback_buffer[vk.frame], 1, &region);
     }
 
+    ae3d_vk_stamp_through(3);
+    vk.stamped[vk.frame] = vk.stamp_next == AE3D_VK_STAMPS;
     ae3d_vkEndCommandBuffer(vk.command_buffers[vk.frame]);
 
     memset(&submit, 0, sizeof(submit));
@@ -3281,6 +3406,15 @@ int ae3d_vk_upload_instances(void *instances) {
     return handle;
 }
 
+/* Whether more than one model draws this mesh. The upload cache hands the
+   same handle to every model built from the same bytes, and a depth pass can
+   draw all of them in one instanced call if it knows. */
+int ae3d_vk_mesh_shared(int handle) {
+    if (handle <= 0 || handle > vk.mesh_capacity) return 0;
+    if (!vk.meshes[handle - 1].in_use) return 0;
+    return vk.meshes[handle - 1].shared && vk.meshes[handle - 1].refs > 1;
+}
+
 void ae3d_vk_free_mesh(int handle) {
     ae3d_vk_mesh *mesh;
 
@@ -3332,6 +3466,10 @@ void ae3d_vk_shutdown(void) {
     vk.meshes = NULL;
     vk.mesh_capacity = 0;
 
+    if (vk.timestamps) {
+        ae3d_vkDestroyQueryPool(vk.device, vk.timestamps, NULL);
+        vk.timestamps = VK_NULL_HANDLE;
+    }
     for (i = 0; i < AE3D_VK_FRAMES; i++) {
         if (vk.image_available[i]) ae3d_vkDestroySemaphore(vk.device, vk.image_available[i], NULL);
         if (vk.render_finished[i]) ae3d_vkDestroySemaphore(vk.device, vk.render_finished[i], NULL);

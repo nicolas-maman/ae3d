@@ -301,6 +301,12 @@ void   ae3d_vk_shadow_end(void);
 void   ae3d_vk_set_post(int fxaa, int bloom, double threshold, double intensity);
 int    ae3d_vk_post_active(void);
 int    ae3d_vk_draw_calls(void);
+int    ae3d_vk_mesh_shared(int handle);
+/* GPU time per pass -- 0 shadow, 1 scene, 2 post -- from the frame whose
+   fence was last waited on, and what that frame cost in changes of mind. */
+double ae3d_vk_pass_ms(int pass);
+int    ae3d_vk_pipeline_binds(void);
+int    ae3d_vk_set_binds(void);
 int    ae3d_vk_sample_count(void);
 void  *ae3d_vk_offscreen_pixels(void);
 int    ae3d_vk_offscreen_width(void);

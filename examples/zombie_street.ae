@@ -22,10 +22,13 @@
 
 import std.heap
 import std.list
+import std.os
+import std.string
 import ae3d.core
 import ae3d.platform
 import ae3d.engine
 import ae3d.gl
+import ae3d.vk
 import ae3d.assets
 import ae3d.anim
 import ae3d.ik
@@ -88,8 +91,22 @@ struct Limb {
 var g_models: ptr = null
 var g_clips: ptr = null
 
+// The benchmark scene, so it has to run on both renderers: a cost that can
+// only be measured on one of them is a cost that regresses unseen on the
+// other. `vulkan` as the first argument, the same way backend_switch takes it.
+chosen_api() -> int {
+    if os.aether_args_count() > 1 && string.equals(os.aether_args_get(1), "vulkan") == 1 {
+        if !vk.available() {
+            println("zombie_street: no Vulkan driver available: ${vk.last_error()}")
+            os.exit(1)
+        }
+        return platform.API_VULKAN
+    }
+    return platform.API_GL
+}
+
 main() {
-    e = engine.engine_new(platform.API_GL)
+    e = engine.engine_new(chosen_api())
     engine.engine_set_size(e, 1280, 720)
     engine.engine_set_title(e, "ae3d: a zombie, on a street")
     engine.engine_set_camera_input(e, true)
@@ -131,7 +148,11 @@ report_cost(e: *Engine) {
     if frames == 0 { return }
     renderer = engine.engine_gl_renderer(e)
     draws = 0
-    if renderer != null { draws = gl.renderer_draw_calls(renderer as *GLRenderer) }
+    if renderer != null {
+        draws = gl.renderer_draw_calls(renderer as *GLRenderer)
+    } else {
+        draws = vk.renderer_draw_calls(engine.engine_vk_renderer(e))
+    }
     println("zombie_street: ${engine.engine_render_ms(e)} ms per frame over ${frames} frames, ${draws} draws, ${triangles()} triangles")
 }
 
@@ -205,8 +226,12 @@ on_start(data: ptr) {
     if renderer != null {
         gl.renderer_set_clear_color(renderer as *GLRenderer, SKY_R, SKY_G, SKY_B)
         g_sky = gl.skybox_create(renderer as *GLRenderer, SKY)
-        engine.engine_set_skybox(e, g_sky as ptr)
+    } else {
+        vulkan = engine.engine_vk_renderer(e)
+        vk.renderer_set_clear_color(vulkan, SKY_R, SKY_G, SKY_B)
+        g_sky = vk.skybox_create(vulkan, SKY)
     }
+    engine.engine_set_skybox(e, g_sky as ptr)
 
     m = assets.manifest_load(MANIFEST)
     if m == null {

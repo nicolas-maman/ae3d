@@ -4,6 +4,12 @@
 //     ./build/ae3d_bench 7911
 //     ./build/ae3d_bench 7911 --record     # after a deliberate change
 //
+// The baseline is resources/zombie_street.<backend>.budget.json unless
+// --baseline names another: the two renderers draw the same triangles but
+// count their state changes at different grains -- a Vulkan pipeline is a
+// program and a blend mode and a vertex layout at once -- so each keeps a
+// record of its own.
+//
 // Written in ae3d, against ae3d's own JSON and ae3d's own protocol, because a
 // benchmark in another language is a second implementation of both and drifts
 // from this one every time an op changes.
@@ -212,7 +218,7 @@ main() {
 
     port = string.get_int(os.args_get(1))
     record = false
-    baseline_path = "resources/zombie_street.budget.json"
+    baseline_path = ""
     i = 2
     while i < os.args_count() {
         argument = os.args_get(i)
@@ -248,6 +254,9 @@ main() {
     measured = measure(p)
     probe.close(p)
 
+    if baseline_path == "" {
+        baseline_path = "resources/zombie_street.${measured.backend}.budget.json"
+    }
     println("ae3d_bench: ${measured.backend} on ${measured.device}, ${measured.width}x${measured.height}")
 
     if record {

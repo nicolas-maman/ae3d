@@ -528,6 +528,7 @@ pump_agent(e: *Engine) {
     c.shadow_ms = 0.0
     c.scene_ms = 0.0
     c.post_ms = 0.0
+    c.post_active = false
     c.device = ""
     if e.api == platform.API_VULKAN {
         c.device = vk.device_name()
@@ -543,12 +544,34 @@ pump_agent(e: *Engine) {
         c.shadow_ms = gl.renderer_shadow_ms(renderer)
         c.scene_ms = gl.renderer_scene_ms(renderer)
         c.post_ms = gl.renderer_post_ms(renderer)
+        c.post_active = gl.renderer_post_active(renderer)
         c.program_binds = gl.renderer_program_binds(renderer)
         c.material_binds = gl.renderer_material_binds(renderer)
         c.texture_binds = gl.renderer_texture_binds(renderer)
         i = 0
         while i < gl.renderer_model_count(renderer) {
             m = gl.renderer_model(renderer, i)
+            if m != null && m.visible {
+                c.triangles = c.triangles + core.mesh_index_count(m.mesh) / 3
+            }
+            i = i + 1
+        }
+    }
+    // The same figures from the other backend, so a frame drawn with Vulkan
+    // answers what it is made of and what each pass cost, rather than zeros.
+    // Triangles and lights are counted the same way; the shadow map is a GL
+    // texture handle and has no Vulkan equivalent worth inventing one for.
+    if e.api == platform.API_VULKAN && e.backend_state != null {
+        vkr = e.backend_state as *VKRenderer
+        c.shadow_ms = vk.renderer_shadow_ms(vkr)
+        c.scene_ms = vk.renderer_scene_ms(vkr)
+        c.post_ms = vk.renderer_post_ms(vkr)
+        c.post_active = vk.renderer_post_active(vkr)
+        c.program_binds = vk.renderer_program_binds(vkr)
+        c.material_binds = vk.renderer_material_binds(vkr)
+        i = 0
+        while i < vk.renderer_model_count(vkr) {
+            m = vk.renderer_model(vkr, i)
             if m != null && m.visible {
                 c.triangles = c.triangles + core.mesh_index_count(m.mesh) / 3
             }
@@ -565,6 +588,11 @@ pump_agent(e: *Engine) {
         c.draw_calls = gl.renderer_draw_calls(e.gl_renderer)
         c.shadow_map = gl.renderer_shadow_map(e.gl_renderer as *GLRenderer)
         c.light_count = gl.renderer_light_count(e.gl_renderer as *GLRenderer)
+    }
+    if e.api == platform.API_VULKAN && e.backend_state != null {
+        vkr = e.backend_state as *VKRenderer
+        c.draw_calls = vk.renderer_draw_calls(vkr)
+        c.light_count = vk.renderer_light_count(vkr)
     }
     c.shadows = engine_shadows(e)
     c.fog_enabled = e.fog.enabled
