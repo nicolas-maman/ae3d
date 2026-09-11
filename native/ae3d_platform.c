@@ -10,6 +10,7 @@
 #  include <windows.h>
 #else
 #  include <signal.h>
+#  include <unistd.h>
 #  if defined(__GLIBC__) || defined(__APPLE__)
 #    include <execinfo.h>
 #    define AE3D_HAVE_BACKTRACE 1
@@ -29,14 +30,22 @@ static int  g_initialized;
    safe: backtrace and backtrace_symbols_fd are on the allowed list, write is
    the only other call, and the handler re-raises the default so the process
    still dies and the exit status is unchanged. */
+static void ae3d_say(const char *text) {
+    /* write() is marked warn_unused_result by glibc and the build is -Werror;
+       there is nothing useful to do if writing the crash message itself fails,
+       so the result is captured and discarded. */
+    ssize_t written = write(2, text, strlen(text));
+    (void)written;
+}
+
 static void ae3d_crash_handler(int sig) {
     void *frames[64];
     int n = backtrace(frames, 64);
-    const char *label = "\nae3d: native crash, signal ";
-    char digit = (char)('0' + (sig % 10));
-    write(2, label, strlen(label));
-    write(2, &digit, 1);
-    write(2, "\n", 1);
+    char digit[2];
+    digit[0] = (char)('0' + (sig % 10));
+    digit[1] = '\n';
+    ae3d_say("\nae3d: native crash, signal ");
+    { ssize_t w = write(2, digit, 2); (void)w; }
     backtrace_symbols_fd(frames, n, 2);
     signal(sig, SIG_DFL);
     raise(sig);
