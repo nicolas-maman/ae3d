@@ -269,6 +269,13 @@ on_start(data: ptr) {
 
     animated = animated + rig_the_figure(e, models, m)
 
+    // Real light sources, not bright paint. A lamp head and a lit window are
+    // their own light: the engine's emissive path (an exposure past ten) makes
+    // a surface skip shading and glow at its own colour, which is what then
+    // spills into the bloom. Set here rather than in the export so the same
+    // asset is a plain material to any scene that does not want it lit.
+    make_emissive(models, m)
+
     g_leg_l = limb_of(e, "ThighL", "KneeL", "AnkleL")
     g_leg_r = limb_of(e, "ThighR", "KneeR", "AnkleR")
     g_arm_r = limb_of(e, "ShoulderR", "ElbowR", "WristR")
@@ -332,6 +339,26 @@ rig_the_figure(e: *Engine, models: ptr, m: *Manifest) -> int {
     }
     list.free(clips)
     return bound
+}
+
+// The lamp heads burn hard; the lit rooms glow softly behind their glass. The
+// number is the emissive strength times ten, so 16 is a bright lamp and 13 a
+// window with a lamp on inside it.
+make_emissive(models: ptr, m: *Manifest) {
+    count = assets.manifest_count(m)
+    i = 0
+    while i < count {
+        name = assets.entry_object(assets.manifest_entry(m, i))
+        model = list.get_raw(models, i) as *Model
+        if model != null {
+            if string.contains(name, "LampHead") == 1 {
+                core.model_set_exposure(model, 16.0)
+            } else if string.contains(name, "_Lit") == 1 {
+                core.model_set_exposure(model, 13.0)
+            }
+        }
+        i = i + 1
+    }
 }
 
 entry_named(m: *Manifest, name: string) -> *Entry {
