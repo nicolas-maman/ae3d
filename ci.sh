@@ -108,6 +108,22 @@ died_on() {   # died_on <status>
     fi
 }
 
+# A crash on a headless runner leaves only "died on signal 11". When the status
+# is a signal and gdb is present, run the program again under it and print the
+# native stack, so the log names the frame that fell over instead of a core
+# file nobody can open. Off unless AE3D_CI_TRACE is set, since it re-runs a
+# crashing program.
+trace_crash() {   # trace_crash <status> <binary> [args...]
+    [ -n "${AE3D_CI_TRACE:-}" ] || return 0
+    trace_status="$1"; shift
+    [ "$trace_status" -gt 128 ] && [ "$trace_status" -lt 160 ] || return 0
+    command -v gdb >/dev/null 2>&1 || return 0
+    echo "        --- native stack (gdb) ---"
+    AE3D_FRAMES="${FRAMES:-3}" gdb -batch -nx \
+        -ex run -ex bt -ex quit --args "$@" 2>&1 \
+        | grep -E '^#[0-9]+|Program received|signal SIG' | sed 's/^/        /' | head -25
+}
+
 . "$PWD/scripts/native.sh"
 
 step "platform link libraries"
