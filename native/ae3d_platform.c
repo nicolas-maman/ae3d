@@ -43,13 +43,22 @@ void ae3d_platform_shutdown(void) {
 const char *ae3d_platform_error(void) { return g_error; }
 
 void *ae3d_window_create(int width, int height, const char *title,
-                         int api, int msaa, int decorated, int depth_bits) {
+                         int api, int msaa, int decorated, int visible,
+                         int depth_bits) {
     GLFWwindow *win;
     double *scroll;
 
     glfwDefaultWindowHints();
     glfwWindowHint(GLFW_DECORATED, decorated ? GLFW_TRUE : GLFW_FALSE);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+    /* An invisible window still has a framebuffer and still renders; it just
+       never reaches the screen or the taskbar, and cannot take focus away from
+       whatever the machine is actually being used for. */
+    glfwWindowHint(GLFW_VISIBLE, visible ? GLFW_TRUE : GLFW_FALSE);
+    if (!visible) {
+        glfwWindowHint(GLFW_FOCUSED, GLFW_FALSE);
+        glfwWindowHint(GLFW_FOCUS_ON_SHOW, GLFW_FALSE);
+    }
     if (depth_bits > 0) glfwWindowHint(GLFW_DEPTH_BITS, depth_bits);
     if (msaa > 0) glfwWindowHint(GLFW_SAMPLES, msaa);
 

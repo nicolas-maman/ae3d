@@ -13,7 +13,8 @@ void   ae3d_platform_shutdown(void);
 const char *ae3d_platform_error(void);
 
 void  *ae3d_window_create(int width, int height, const char *title,
-                          int api, int msaa, int decorated, int depth_bits);
+                          int api, int msaa, int decorated, int visible,
+                          int depth_bits);
 void   ae3d_window_destroy(void *win);
 int    ae3d_window_should_close(void *win);
 void   ae3d_window_close(void *win);

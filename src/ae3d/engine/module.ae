@@ -73,6 +73,7 @@ struct Engine {
     msaa: int
     title: string
     decorated: bool
+    visible: bool
     vsync: int
     camera_input: bool
     shadows: bool
@@ -115,6 +116,7 @@ engine_new(api: int) -> *Engine {
     e.msaa = 4
     e.title = "ae3d"
     e.decorated = true
+    e.visible = true
     e.vsync = 1
     e.camera_input = true
     e.shadows = true
@@ -159,6 +161,20 @@ size_from_env(e: *Engine) {
     height = core.env_int("AE3D_HEIGHT", 0)
     if width > 0 { e.width = width }
     if height > 0 { e.height = height }
+}
+
+// AE3D_HIDDEN keeps the window off the screen. The frame is still drawn --
+// same passes, same draws, same pixels -- so everything the agent channel reads
+// reads the same; the window simply never appears, never takes focus and never
+// reaches the taskbar.
+//
+// This is what an agent inspecting a scene wants. It is measuring the frame,
+// not watching it, and a run that seizes the screen every time cannot be run on
+// a machine somebody is using. It is also what a windowed CI runner wants,
+// where a dozen examples each flashing up a window is a dozen chances to steal
+// focus from the test that is actually running.
+hidden_from_env(e: *Engine) {
+    if core.env_int("AE3D_HIDDEN", 0) != 0 { e.visible = false }
 }
 
 // AE3D_SNAPSHOT writes the last frame of a bounded run to a PNG.
@@ -445,9 +461,11 @@ engine_start(e: *Engine, x: int, y: int) -> bool {
     }
 
     size_from_env(e)
+    hidden_from_env(e)
 
     e.window = platform.window_create(e.width, e.height, e.title,
-                                      e.api, e.msaa, e.decorated, 32)
+                                      e.api, e.msaa, e.decorated, e.visible,
+                                      32)
     if e.window == null {
         println("ae3d: could not create window: ${platform.error()}")
         platform.shutdown()

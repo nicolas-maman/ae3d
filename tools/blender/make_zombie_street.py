@@ -50,8 +50,17 @@ TOTAL = 120
 # 1.45 m a cycle, and 0.9 m/s is 0.62 cycles a second; 0.66 keeps a margin. At
 # 1.9 the feet were doing three times the steps the street needed and sliding
 # the difference along the road.
-STRIDE_RATE = 0.66
-WALK_SPEED = 0.9
+# Three whole gait cycles in the 120 frames of the clip. This is not a rounding
+# of the speed: a clip that ends part way through a cycle does not loop, and
+# every time it restarts the limbs travel from wherever they stopped back to
+# wherever they started. The neck was swinging 173 degrees at the seam and the
+# shoulders 156, which reads as the head and arms turning all the way round.
+STRIDE_RATE = 0.6
+# And the speed follows from it. A leg reaches 0.362 m sideways once it has
+# reached down, so 0.85 m/s at 0.6 cycles is a half-step of 0.354 and 0.9 would
+# be 0.375 -- past what the leg can do, which the solver would clamp and the
+# feet would slide.
+WALK_SPEED = 0.85
 WALK_START_X = -6.4
 
 
@@ -609,7 +618,11 @@ DRAG = 0.45
 # the only half the knee folds in.
 UPPER_LEG = 0.44
 LOWER_LEG = 0.42
-ROAD = 0.09
+# Where the ankle sits when the foot is down: the road surface, plus the height
+# of the ankle above the sole. The road has a camber and the figure walks along
+# its crown, so the surface there is 0.075 and not zero -- planting at zero put
+# the figure into the road up to its ankles.
+ROAD = 0.165
 # How high a foot is carried over the road on its way through. A zombie clears
 # it by very little.
 LIFT = 0.16
@@ -630,7 +643,7 @@ def _step_at(cycle, offset):
     return WALK_START_X + advance(frame) + 0.5 * WALK_SPEED / (2.0 * STRIDE_RATE)
 
 
-def foot_target(cycle, offset):
+def foot_target(cycle, offset, lame=0.0):
     """Where a foot should be, as a function of where the walk has got to.
 
     A footstep plan rather than a swing: the stance foot is nailed to the place
@@ -643,36 +656,52 @@ def foot_target(cycle, offset):
     two used to, and the difference came out as a quarter of a metre of skating
     every frame the foot was down.
     """
+    # Both halves of this decision come off the same number. Asking sin(cycle)
+    # which half of the cycle this is, and floor(cycle / tau) which cycle it is,
+    # is two measures of one instant, and at the seam they disagree: sin(tau) is
+    # -2.4e-16, so the exact end of a cycle reads as swing, while the floor has
+    # already moved on to the next stance. That put `through` at -1, where the
+    # smoothstep t*t*(3-2t) is 5 rather than 0, and threw the foot five strides
+    # up the street for the single frame the walk landed on a cycle boundary.
     stance_start = math.floor(cycle / math.tau) * math.tau
+    into = cycle - stance_start
     here = _step_at(stance_start, offset)
-    if math.sin(cycle) >= 0.0:
+    if into < math.pi:
         return mathutils.Vector((here, 0.0, ROAD)), 0.0
 
     ahead = _step_at(stance_start + math.tau, offset)
-    through = (cycle - (stance_start + math.pi)) / math.pi
+    through = (into - math.pi) / math.pi
     # Smoothstep, so the foot leaves the road and meets it again with no
     # horizontal speed. Landing with speed and stopping dead is the pop that
     # says "animation" louder than anything else in a walk.
     eased = through * through * (3.0 - 2.0 * through)
-    lift = LIFT * math.sin(through * math.pi)
-    return mathutils.Vector((here + (ahead - here) * eased, 0.0, ROAD + lift)), lift
+    # The bad leg barely clears the road. Expressed here, in where the foot is
+    # asked to go, because that is the only place it can be expressed without
+    # contradicting the solve that puts it there.
+    carried = math.sin(through * math.pi) * (1.0 - 0.6 * lame)
+    return (mathutils.Vector((here + (ahead - here) * eased, 0.0, ROAD + LIFT * carried)),
+            carried)
 
 
-def _leg_to(pose, side, target, lift, hit):
-    """Solve the leg so the ankle sits on the target the plan gave it."""
+def _leg_to(pose, side, target, carried, hit):
+    """Solve the leg so the ankle sits on the target the plan gave it.
+
+    Nothing is added to the angles the solve returns. Adding to the knee after
+    solving for it is not a limp, it is a different pose: the ankle stops
+    landing on the target and the foot swings up to knee height. It did, by a
+    quarter of a metre, on the leg that was meant to be dragging.
+    """
     lame = DRAG if side == "R" else 0.0
     hip = pose.world()["Thigh" + side].to_translation()
     aim = mathutils.Vector((target.x, hip.y, target.z))
     thigh, knee = figure.solve_leg(hip, aim, UPPER_LEG, LOWER_LEG)
-    # The bad leg never quite straightens and never quite comes through.
-    knee = knee + 0.42 * lame
     pose.set_world("Thigh" + side, _compose(_turn(Y, thigh),
                                             _turn(X, (0.05 if side == "L" else -0.05))))
     pose.set("Knee" + side, _turn(Y, knee))
     # Flat to the road while it is on it, and hanging while it is not: the sole
     # follows the ground rather than the shin.
     flat = 0.0 - thigh - knee
-    pose.set("Ankle" + side, _turn(Y, flat * (1.0 - lift / LIFT) - 0.22 * lift / LIFT
+    pose.set("Ankle" + side, _turn(Y, flat * (1.0 - carried) - 0.22 * carried
                                    - 0.24 * lame))
     pose.set("Toe" + side, _turn(Y, 0.0))
 
@@ -750,8 +779,9 @@ def animate(rig):
         # is. A stance leg and a swing leg differ in what the plan asks of them,
         # not in how they are driven.
         for side, offset in (("L", 0.0), ("R", math.pi)):
-            target, lift = foot_target(step + offset, offset)
-            _leg_to(pose, side, target, lift, hit)
+            lame = DRAG if side == "R" else 0.0
+            target, carried = foot_target(step + offset, offset, lame)
+            _leg_to(pose, side, target, carried, hit)
 
         _arm(pose, "L", swing_r, hit, hit * 0.55)
         _arm(pose, "R", swing_l, hit, hit)

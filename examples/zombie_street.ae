@@ -57,11 +57,17 @@ var g_bones: ptr = null
 var g_skeleton: *Skeleton = null
 
 // The road, and how far the ankle sits above the sole standing on it.
-const GROUND = 0.0
+// The road under the figure. It has a camber and the figure walks along the
+// crown of it, so the surface here is not zero.
+const GROUND = 0.075
 const ANKLE = 0.085
 // How much of its own lift a foot has to give up before it stops being planted.
 const STEP_BAND = 0.07
 const SAMPLES = 96
+// Beyond this multiple of its own length the arm gives up reaching, and once
+// the shoulder is this far past the target it has gone by.
+const REACH_FADE = 1.7
+const PASSED_BY = 0.15
 
 // What the zombie is walking at. Out of reach for most of the street, which is
 // what keeps the arm straight and pointing; inside it at the end of the lunge,
@@ -237,8 +243,11 @@ on_start(data: ptr) {
     g_leg_r = limb_of(e, "ThighR", "KneeR", "AnkleR")
     g_arm_r = limb_of(e, "ShoulderR", "ElbowR", "WristR")
     g_arm_l = limb_of(e, "ShoulderL", "ElbowL", "WristL")
-    g_head = bone_named("Neck")
-    g_jaw = bone_named("Head")
+    // The head, and where its face points. Turning the neck towards something
+    // turns the head over: the neck runs upwards, so aiming it at anything
+    // ahead lays the head on its side. What has to be aimed is the face.
+    g_head = bone_named("Head")
+    g_jaw = bone_named("Face")
     engine.engine_on_pose(e, solve_pose)
 
     println("zombie_street: ${count} objects from ${assets.manifest_source(m)}, ${animated} animated")
@@ -397,29 +406,77 @@ solve_pose(data: ptr) {
     // It looks at what it is walking at. A head looks along its face, and the
     // jaw is what the face is: pointing the neck would fold the head onto the
     // chest, since the neck runs the other way.
-    ik.aim_at(g_head, g_jaw, core.v3_add(victim, core.vec3(0.0, 0.22, 0.0)))
+    look_at(g_head, g_jaw, core.v3_add(victim, core.vec3(0.0, 0.22, 0.0)), g_arm_r)
 }
 
+// Ground, for a foot that has gone below it.
+//
+// The clip plants its own feet -- it is authored against a footstep plan, so a
+// foot that is down stays where it was put to within a couple of centimetres.
+// What a clip cannot know is the road, which has a camber. So this only ever
+// lifts: a foot above the surface is the animation's business and is left
+// alone, and a foot below it is pushed back out.
+//
+// It used to pull as well as push, engaging whenever a foot came within a hand
+// of its own lowest point. On the leg that drags, which barely clears the road,
+// that caught the foot mid-swing and yanked it down -- five touchdowns in a
+// cycle that has two, and four centimetres of skating each time.
 plant(limb: *Limb) {
     if limb == null { return }
     if limb.root == null || limb.mid == null || limb.tip == null { return }
     at = core.model_world_position(limb.tip)
-    lift = at.y - limb.lowest
-    if lift > STEP_BAND { return }
+    if at.y >= GROUND + ANKLE { return }
 
-    planted = 1.0 - lift / STEP_BAND
-    on_road = core.vec3(at.x, GROUND + ANKLE, at.z)
-    target = core.v3_lerp(at, on_road, planted)
+    target = core.vec3(at.x, GROUND + ANKLE, at.z)
     knee = core.v3_add(core.model_world_position(limb.mid), core.vec3(2.0, 0.0, 0.0))
     ik.solve_two_bone(limb.root, limb.mid, limb.tip, target, knee)
+}
+
+// How much the figure is actually going for it.
+//
+// A solve that runs every frame against a fixed point in the street tracks that
+// point for the whole clip: the arm swings round to keep pointing at it as the
+// figure walks by, and round again when the clip loops and the figure is back
+// where it started. That is the head and the arms turning all the way round,
+// and it is the solve doing it, not the animation -- which loops to within two
+// degrees.
+//
+// So the reach is weighted by whether the thing is reachable at all: full
+// inside the arm's own length, fading out beyond it, nothing once the shoulder
+// is past it. The clip animates the lunge; this only closes the last of it.
+reach_weight(limb: *Limb, target: Vec3) -> float {
+    shoulder = core.model_world_position(limb.root)
+    // Walking up the street in +x, so a target behind the shoulder is one the
+    // figure has already gone by.
+    if target.x < shoulder.x - PASSED_BY { return 0.0 }
+    full = core.v3_distance(shoulder, core.model_world_position(limb.mid)) +
+           core.v3_distance(core.model_world_position(limb.mid),
+                            core.model_world_position(limb.tip))
+    span = core.v3_distance(shoulder, target)
+    if span <= full { return 1.0 }
+    if span >= full * REACH_FADE { return 0.0 }
+    return 1.0 - (span - full) / (full * (REACH_FADE - 1.0))
 }
 
 reach(limb: *Limb, target: Vec3) {
     if limb == null { return }
     if limb.root == null || limb.mid == null || limb.tip == null { return }
+    weight = reach_weight(limb, target)
+    // At no weight the target is where the hand already is, so the solve leaves
+    // it exactly there -- which tests/test_ik proves it does.
+    aim = core.v3_lerp(core.model_world_position(limb.tip), target, weight)
     shoulder = core.model_world_position(limb.root)
     elbow = core.v3_add(shoulder, core.vec3(0.0 - 1.0, 0.0 - 1.2, 1.6))
-    ik.solve_two_bone(limb.root, limb.mid, limb.tip, target, elbow)
+    ik.solve_two_bone(limb.root, limb.mid, limb.tip, aim, elbow)
+}
+
+// The same, for what the figure is looking at. A head that tracks a fixed point
+// turns all the way round as the figure walks past it.
+look_at(neck: *Model, face: *Model, target: Vec3, limb: *Limb) {
+    if neck == null || face == null { return }
+    weight = reach_weight(limb, target)
+    aim = core.v3_lerp(core.model_world_position(face), target, weight)
+    ik.aim_at(neck, face, aim)
 }
 
 // Sodium light, under the lamp head the exported scene put at this x. Its range

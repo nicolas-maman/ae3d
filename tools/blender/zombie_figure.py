@@ -41,6 +41,12 @@ JOINTS = (
     ("Neck",      "Chest",     (0.00,  0.00,  0.22), 0.062),
     ("Head",      "Neck",      (0.00,  0.00,  0.09), 0.115),
     ("Crown",     "Head",      (0.00,  0.00,  0.13), 0.055),
+    # Where the face points. No thickness, so nothing is grown around it and
+    # nothing is weighted to it: it exists so that something can be turned
+    # towards what the figure is looking at. Without it the only thing to aim is
+    # the neck, and the neck points up -- aiming that at anything ahead lays the
+    # head over on its side.
+    ("Face",      "Head",      (0.11,  0.00,  0.02), 0.000),
 
     ("ShoulderL", "Chest",     (0.00,  0.17,  0.14), 0.072),
     ("ElbowL",    "ShoulderL", (0.00,  0.02, -0.29), 0.055),

@@ -32,6 +32,7 @@ Exits non-zero with a line naming what failed.
 """
 
 import argparse
+import math
 import os
 import subprocess
 import sys
@@ -55,6 +56,11 @@ CHARACTER_PLANES = 3000
 # A planted foot is planted. These are the tolerances a foot-locked walk keeps;
 # a leg swung by a curve against a body moving at its own speed misses them by
 # an order of magnitude.
+# How close to the bottom of its travel a joint has to be, and how still
+# vertically, to count as standing on the road.
+CONTACT_BAND = 0.020
+CONTACT_SETTLE = 0.002
+
 SLIDE_PER_FRAME = 0.025
 SLIDE_PER_CONTACT = 0.040
 # How far the shape of a drawn figure may stray from the shape of its skeleton.
@@ -88,6 +94,9 @@ MAX_PROGRAM_CHANGES = 12
 # samples. This walk measures 2.0; a leg interpolating the long way round
 # measured 37 to 45, and so did a reading taken while the pose was half built.
 SPIN_LIMIT = 8
+# How far off upright a head may lean. A person looking down at their feet is
+# about 40; anything past 60 is a head that has come off its neck.
+HEAD_LEAN = 55
 
 FAILURES = []
 
@@ -490,6 +499,36 @@ def spins(engine, mesh, seconds=4.0, samples=320):
           % (worst_name, worst, SPIN_LIMIT))
 
 
+def head_carriage(engine, mesh, seconds=5.0, samples=48):
+    """Whether the figure carries its head or wears it.
+
+    A pose solve that runs after the clip can overrule it, and one aiming the
+    wrong bone overrules it completely: the neck runs upwards, so aiming the
+    neck at something ahead lays the head over on its side. It reached 102
+    degrees off vertical and stayed there for the last two seconds of the clip,
+    which from the front is a figure with no head at all.
+    """
+    print("\n== how the head is carried ==")
+    worst, when = 0.0, 0.0
+    for step in range(samples):
+        moment = step * seconds / samples
+        engine("anim.set", time=moment)
+        bones = {b["name"]: b["world_position"]
+                 for b in engine("scene.skeleton", object=mesh)["bones"]}
+        if "Neck" not in bones or "Head" not in bones:
+            return
+        up = [bones["Head"][i] - bones["Neck"][i] for i in range(3)]
+        length = sum(v * v for v in up) ** 0.5
+        if length < 1e-6:
+            continue
+        lean = math.degrees(math.acos(max(-1.0, min(1.0, up[1] / length))))
+        if lean > worst:
+            worst, when = lean, moment
+    print("  the head leans at most %.0f degrees off upright (at %.2fs)" % (worst, when))
+    check("the figure carries its head upright", worst <= HEAD_LEAN,
+          "%.0f degrees at %.2fs, allowed %d" % (worst, when, HEAD_LEAN))
+
+
 def gait(engine, figure_mesh, feet, road, seconds, fps):
     """Whether the figure walks or skates.
 
@@ -502,6 +541,14 @@ def gait(engine, figure_mesh, feet, road, seconds, fps):
     Read off the bones, because a skinned mesh does not move: its vertices sit
     in the pose they were bound in and the bones carry them, so where a foot is
     is a fact about the skeleton and nothing else can answer it.
+
+    A foot is down when it is at the bottom of its travel and is neither coming
+    down nor going up. Height alone is not enough: a toe leaves the road before
+    it has climbed a centimetre, and judging contact by height alone scored the
+    first six frames of the swing as a planted foot and charged the walk for the
+    distance the foot covered in them. Both halves are needed and neither is
+    circular -- this asks nothing about how the foot moves along the road, which
+    is the thing being measured.
     """
     print("\n== the walk ==")
     try:
@@ -528,11 +575,12 @@ def gait(engine, figure_mesh, feet, road, seconds, fps):
         rows = track.get(foot)
         if not rows:
             continue
-        floor = min(at[1] for at in rows) + 0.02
+        floor = min(at[1] for at in rows) + CONTACT_BAND
         run = []
         runs = []
-        for at in rows:
-            if at[1] < floor:
+        for index, at in enumerate(rows):
+            settled = index > 0 and abs(at[1] - rows[index - 1][1]) <= CONTACT_SETTLE
+            if at[1] < floor and settled:
                 run.append(at[0])
             elif run:
                 runs.append(run)
@@ -608,6 +656,7 @@ def main(argv):
             silhouette(engine, args.walks)
             limbs(engine, args.walks, args.figure)
             spins(engine, args.walks)
+            head_carriage(engine, args.walks)
             gait(engine, args.walks, args.feet.split(","), args.road, 2.6, 24)
         engine("frame.resume")
 
