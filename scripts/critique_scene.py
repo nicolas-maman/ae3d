@@ -154,6 +154,14 @@ ROAD_REFLECTION_MIN = 0.25
 # ~1.6x total and ~2.4x bright cells; these are the floors, well under that.
 BLOOM_TOTAL_LIFT = 1.15    # the lit frame is at least this times as bright in total
 BLOOM_BRIGHT_LIFT = 1.30   # and at least this many times as many cells burn bright
+# Shadows, proved by turning them off. A shadow is light kept out of a place the
+# scene is occluded from, so with shadows off the frame takes in the light that
+# was being blocked: more total luminance, and far more cells over the
+# light-source line once nothing is in shadow. Measured on both backends the
+# frame gains ~1.45x total and ~5.5x bright cells with shadows removed; these
+# floors sit well inside that.
+SHADOW_TOTAL_LIFT = 1.15   # removing shadows brightens the frame by at least this
+SHADOW_BRIGHT_LIFT = 1.80  # and lets at least this many times as many cells burn bright
 
 
 FAILURES = []
@@ -897,6 +905,47 @@ def bloom(engine, at=2.2):
           % (on_bright, off_bright, on_bright / float(max(off_bright, 1)), BLOOM_BRIGHT_LIFT))
 
 
+def shadows(engine, at=2.2):
+    """That the shadows the scene casts are keeping light out of the frame.
+
+    Read by turning them off. render.set drops the whole scene's shadowing, the
+    frame is read, and it is put back. A shadow is light the scene is occluded
+    from, so with shadows off that light returns: the frame carries more total
+    luminance and far more cells burn over the light-source line once nothing is
+    in shadow. Both are numbers off the grid. The state is read first and
+    restored after, so nothing downstream sees the scene unshadowed.
+    """
+    print("\n== the shadows keep light out ==")
+    engine("anim.set", time=at)
+    was = engine("frame.stats")["render"].get("shadows")
+    if not was:
+        check("the scene is casting shadows to measure", False,
+              "the renderer reports shadows %r" % was)
+        return
+
+    def read():
+        grid = engine("frame.grid", columns=64, rows=36)["cells"]
+        lums = [_lum(c) for row in grid for c in row]
+        return sum(lums), sum(1 for x in lums if x >= LIGHT_SOURCE_LUM)
+
+    on_total, on_bright = read()
+    engine("render.set", shadows=False)
+    off_total, off_bright = read()
+    engine("render.set", shadows=True)
+
+    print("  shadowed, the frame carries %.1f of light across %d bright cells;"
+          " unshadowed, %.1f across %d"
+          % (on_total, on_bright, off_total, off_bright))
+    check("shadows take light out of the frame",
+          off_total >= on_total * SHADOW_TOTAL_LIFT,
+          "unshadowed %.1f against shadowed %.1f (%.2fx, wanted %.2fx)"
+          % (off_total, on_total, off_total / max(on_total, 1e-6), SHADOW_TOTAL_LIFT))
+    check("and hold back the light that would flood the occluded parts",
+          off_bright >= on_bright * SHADOW_BRIGHT_LIFT,
+          "unshadowed %d bright cells against shadowed %d (%.2fx, wanted %.2fx)"
+          % (off_bright, on_bright, off_bright / float(max(on_bright, 1)), SHADOW_BRIGHT_LIFT))
+
+
 def main(argv):
     parser = argparse.ArgumentParser(prog="critique_scene")
     parser.add_argument("--port", type=int, default=7911)
@@ -981,6 +1030,7 @@ def main(argv):
         budget(engine)
         lighting(engine)
         bloom(engine)
+        shadows(engine)
         # The animation standards read the skeleton hundreds of times, once a
         # frame -- fine at sixty frames a second, but on the software Vulkan a
         # headless runner falls back to, a frame is a tenth of a second and the
