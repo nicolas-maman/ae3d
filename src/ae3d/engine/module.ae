@@ -648,29 +648,32 @@ agent_wants_capture(e: *Engine) -> bool {
 
 service_agent_capture(e: *Engine) {
     c = e.agent_ctx as *Context
-    if !c.want_capture { return }
-    c.want_capture = false
-    if e.api == platform.API_VULKAN {
-        // The frame armed above was copied out as it was submitted. Read it
-        // back and hand it to the same capture the OpenGL path fills, so a grid
-        // or a pixel read is answered from the Vulkan frame exactly as it is
-        // from the OpenGL one -- the agent sees the target backend numerically.
-        captured = false
-        if vk.capture_ready() {
-            pixels = vk.capture_pixels()
-            if pixels != null {
-                captured = agent.capture_adopt(pixels, vk.capture_width(),
-                                               vk.capture_height())
+    if !agent.wants_deferred(c) { return }
+    agent.clear_deferred(c)
+    // A frame of pixels is read back only when a read actually needs it -- a
+    // grid, a pixel, a capture. A skeleton read is deferred to the same frame
+    // boundary but wants no pixels, so it does not pay for a readback.
+    need_pixels = agent.wants_capture(c)
+    agent.clear_capture(c)
+    captured = false
+    if need_pixels {
+        if e.api == platform.API_VULKAN {
+            // Copied out as the frame was submitted; read it back and hand it
+            // to the same capture the OpenGL path fills, so the agent sees the
+            // Vulkan frame as numbers exactly as it sees the OpenGL one.
+            if vk.capture_ready() {
+                pixels = vk.capture_pixels()
+                if pixels != null {
+                    captured = agent.capture_adopt(pixels, vk.capture_width(),
+                                                   vk.capture_height())
+                }
             }
+        } else {
+            width = platform.window_fb_width(e.window)
+            height = platform.window_fb_height(e.window)
+            captured = agent.capture_frame(width, height)
         }
-        if c.pending_capture_id >= 0 { agent.answer_capture(c, captured) }
-        agent.answer_pending_trace(c)
-        agent.answer_deferred(c)
-        return
     }
-    width = platform.window_fb_width(e.window)
-    height = platform.window_fb_height(e.window)
-    captured = agent.capture_frame(width, height)
     if c.pending_capture_id >= 0 { agent.answer_capture(c, captured) }
     agent.answer_pending_trace(c)
     agent.answer_deferred(c)

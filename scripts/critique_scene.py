@@ -862,6 +862,16 @@ def main(argv):
         deadline = time.time() + 30.0
         while time.time() < deadline and engine is None:
             if scene.poll() is not None:
+                # A backend the machine has no driver for -- Vulkan on a runner
+                # without a loader -- is a skip, not a failure: there is nothing
+                # to judge, and the scene said so on its way out.
+                try:
+                    said = open(log.name, encoding="utf-8", errors="replace").read()
+                except OSError:
+                    said = ""
+                if "no Vulkan driver" in said or "no Vulkan" in said:
+                    print("critique_scene: SKIP no Vulkan driver on this machine")
+                    return 3
                 print("critique_scene: %s stopped before it opened the channel" % args.launch)
                 return 3 if scene.returncode == 0 else 2
             try:

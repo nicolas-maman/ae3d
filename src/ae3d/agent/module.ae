@@ -23,6 +23,7 @@ exports (
     Context, context_new, context_free,
     start, active, port, stop, pump, answer_step, answer_snapshot, answer_capture,
     capture_release, capture_frame, capture_adopt, answer_pending_trace, answer_deferred,
+    wants_deferred, clear_deferred, wants_capture, clear_capture,
     answer_capture_unsupported, is_paused,
     schema_json, last_error
 )
@@ -123,6 +124,7 @@ struct Context {
     pending_trace_id: int
     pending_trace_model: ptr
     want_capture: bool
+    want_deferred: bool
     step_from: int
     paused: bool
     shadows: bool
@@ -146,6 +148,7 @@ context_new() -> *Context {
     c.pending_snapshot_id = -1
     c.pending_capture_id = -1
     c.pending_trace_id = -1
+    c.want_deferred = false
     c.deferred = list.new()
     c.reference_frame = -1
     return c
@@ -162,7 +165,10 @@ defer_skeleton(c: *Context, id: int, skeleton: ptr) -> bool {
     d.id = id
     d.subject = skeleton
     list.add_raw(c.deferred, d as ptr)
-    c.want_capture = true
+    // A skeleton read answers bone positions at the frame boundary, so it is
+    // deferred, but it needs no pixels -- setting want_capture here made every
+    // one of the hundreds a gait measure does stall a full Vulkan readback.
+    c.want_deferred = true
     return true
 }
 
@@ -181,8 +187,14 @@ defer_grid(c: *Context, kind: int, id: int, x: int, y: int, width: int, height: 
     d.rows = rows
     list.add_raw(c.deferred, d as ptr)
     c.want_capture = true
+    c.want_deferred = true
     return true
 }
+
+wants_deferred(c: *Context) -> bool { return c.want_deferred }
+clear_deferred(c: *Context) { c.want_deferred = false }
+wants_capture(c: *Context) -> bool { return c.want_capture }
+clear_capture(c: *Context) { c.want_capture = false }
 
 // Called once the frame has been read back, in the order the requests arrived.
 answer_deferred(c: *Context) {
@@ -1712,6 +1724,7 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
 
     if op == "frame.capture" {
         c.want_capture = true
+        c.want_deferred = true
         c.pending_capture_id = id
         return true
     }
@@ -1819,6 +1832,7 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
             return false
         }
         c.want_capture = true
+        c.want_deferred = true
         c.pending_trace_id = id
         c.pending_trace_model = m as ptr
         return true
