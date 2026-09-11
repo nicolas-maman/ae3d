@@ -1053,7 +1053,7 @@ def main(argv):
         # Wet. The lamps and the lit windows are reflected in the road, which
         # is most of what a night street looks like, and all of it comes from
         # the roughness: the colour is only darker for it.
-        "tarmac": material("RoadTarmac", textures.wet_tarmac(), roughness=0.30,
+        "tarmac": material("RoadTarmac", textures.wet_tarmac(), roughness=0.16,
                            normal=textures.tarmac_normal()),
         "paving": material("PathPaving", textures.paving(), roughness=0.9,
                            normal=textures.paving_normal()),
