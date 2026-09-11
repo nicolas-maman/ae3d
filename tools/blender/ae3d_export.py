@@ -188,11 +188,19 @@ def distance_to_bone(rows, positions, bone_rest):
     return out
 
 
-def rest_in_ae3d(armature):
-    """Where each bone sits, in the axes the mesh was written in."""
+def rest_in_ae3d(obj, armature):
+    """Where each bone sits, in the space the mesh was written in.
+
+    The OBJ carries the mesh's own coordinates and the manifest carries where
+    the object stands, so a bone has to be brought through the armature's
+    transform and back through the mesh's before the two can be compared. Done
+    in world space, a column standing four metres from the origin read as four
+    metres from its own bones.
+    """
+    into_mesh = obj.matrix_world.inverted() @ armature.matrix_world
     out = []
     for bone in bone_order(armature):
-        head = armature.matrix_world @ bone.head_local
+        head = into_mesh @ bone.head_local
         out.append(to_y_up(head.x, head.y, head.z))
     return out
 
@@ -1017,7 +1025,7 @@ def main(argv):
             files["skeleton"] = os.path.basename(skeleton_path)
             skin_path = os.path.join(args.out, stem + ".skin.json")
             write_skin(obj, bone_names, sources, positions, skin_path, warnings,
-                       rest_in_ae3d(armature))
+                       rest_in_ae3d(obj, armature))
             files["skin"] = os.path.basename(skin_path)
             bones = len(bone_names)
 
