@@ -103,6 +103,21 @@ SPIN_LIMIT = 8
 # How far off upright a head may lean. A person looking down at their feet is
 # about 40; anything past 60 is a head that has come off its neck.
 HEAD_LEAN = 55
+# The pelvis rises and falls as the weight goes from one leg to the other. Too
+# little and the figure glides along a rail; too much and it pogos. A metre of
+# a body's height moves a couple of centimetres a step.
+WEIGHT_BOB_LOW = 0.010
+WEIGHT_BOB_HIGH = 0.20
+# The strike has to reach. The swiping arm straightens at the peak of the lunge
+# and extends further than it ever does shuffling, by at least this. An arm is
+# about 0.55 m and a right-angle bend shortens it to 0.39, so the most a
+# straightening can add is around 0.16; 0.12 is a clear thrust and not a lean.
+STRIKE_REACH = 0.12
+# The head follows the body rather than leading it. The best alignment between
+# how the head turns and how the hips turn is at a lag of at least this many
+# frames -- a head that turns with the pelvis, or before it, belongs to a
+# mannequin.
+FOLLOW_LAG = 1
 
 FAILURES = []
 
@@ -609,6 +624,121 @@ def gait(engine, figure_mesh, feet, road, seconds, fps):
           "worst %.3f m, allowed %.3f" % (worst_drift, SLIDE_PER_CONTACT))
 
 
+def _track(engine, mesh, seconds, fps):
+    """Every bone's world position at each frame of the clip, once."""
+    frames = int(seconds * fps)
+    rows = []
+    for frame in range(frames):
+        engine("anim.set", time=frame / float(fps))
+        rows.append({b["name"]: b["world_position"]
+                     for b in engine("scene.skeleton", object=mesh)["bones"]})
+    return rows
+
+
+def weight_shift(engine, mesh, seconds=5.0, fps=24):
+    """Whether the figure takes its weight, or glides.
+
+    A walk is a controlled fall onto each leg in turn, and the pelvis drops as
+    the weight lands and rises as it is pushed off -- twice a stride. Read off
+    the hip bone, whose height is a fact about the skeleton and nothing the
+    camera or the mesh can hide. A pelvis held at one height is a figure on a
+    rail, whatever its legs are doing.
+    """
+    print("\n== does it take its weight ==")
+    track = _track(engine, mesh, seconds, fps)
+    if "Hips" not in track[0]:
+        check("the figure shifts its weight", False, "no Hips bone to read")
+        return
+    heights = [row["Hips"][1] for row in track]
+    bob = max(heights) - min(heights)
+    print("  the hips ride between %+.3f and %+.3f" % (min(heights), max(heights)))
+    check("the figure takes its weight onto each leg",
+          WEIGHT_BOB_LOW <= bob <= WEIGHT_BOB_HIGH,
+          "the pelvis rises and falls %.3f m over the walk, wanted %.3f to %.3f"
+          % (bob, WEIGHT_BOB_LOW, WEIGHT_BOB_HIGH))
+
+
+def hand_to_target(engine, mesh, seconds=5.0, fps=24, strike=(2.67, 3.83)):
+    """Whether the strike reaches, or is a pose already held.
+
+    The lunge is the one moment the figure does something to the world, and it
+    reads only if the swiping arm extends further than it ever does shuffling.
+    Measured as the straight-line distance from shoulder to wrist -- the arm's
+    reach, which does not care which way the body faces -- at the peak of the
+    lunge against the furthest it reaches at any other time. A strike that does
+    not beat the walk is an arm held out for a second, not a swing.
+    """
+    print("\n== the strike ==")
+    track = _track(engine, mesh, seconds, fps)
+    if "WristR" not in track[0] or "ShoulderR" not in track[0]:
+        check("the strike reaches", False, "no right arm to read")
+        return
+    # How far the arm is extended, as the straight-line distance from the
+    # shoulder to the wrist. Rotation-independent -- it says nothing about
+    # which way the body faces -- so it isolates the arm reaching out from the
+    # body lunging under it. A bent shuffle keeps it short; a strike straightens
+    # the elbow and the distance jumps toward the arm's full length.
+    def extension(row):
+        a, w = row["ShoulderR"], row["WristR"]
+        return sum((w[i] - a[i]) ** 2 for i in range(3)) ** 0.5
+
+    reach = [extension(track[i]) for i in range(len(track))]
+    lo, hi = strike
+    during = [reach[i] for i in range(len(track)) if lo <= i / float(fps) <= hi]
+    # The walk it is compared against is the shuffle before the lunge, not the
+    # whole clip: the arm passes through straight as it recovers from the swing,
+    # and folding that recovery back into "the walk" would credit the walk with
+    # the strike's own reach. Before the lunge the arm has only ever shuffled.
+    before = [reach[i] for i in range(len(track)) if i / float(fps) < lo]
+    if not during or not before:
+        check("the strike reaches", False, "no lunge in the clip")
+        return
+    peak = max(during)
+    walk = max(before)
+    print("  the arm extends to %.3f m at the strike, %.3f m in the shuffle before it"
+          % (peak, walk))
+    check("the strike reaches past anything the walk does", peak - walk >= STRIKE_REACH,
+          "the strike extends the arm %.3f m past the walk, wanted %.3f"
+          % (peak - walk, STRIKE_REACH))
+
+
+def secondary_motion(engine, mesh, seconds=5.0, fps=24):
+    """Whether the upper body follows the hips, or is bolted to them.
+
+    The turn of the pelvis arrives at the shoulders a beat later and at the
+    head later still: that lag is the whole of what makes a body read as a
+    body and not as a rig. Measured by sliding the head's side-to-side motion
+    against the hips' and finding the offset that lines them up best. A head
+    that lines up best at zero lag, or a negative one, turns with the pelvis
+    or ahead of it -- which nothing living does.
+    """
+    print("\n== does the body follow through ==")
+    track = _track(engine, mesh, seconds, fps)
+    if "Head" not in track[0] or "Hips" not in track[0]:
+        check("the head follows the body", False, "no Head and Hips to read")
+        return
+    # Across the street, which is the axis the turn swings the head along.
+    hips = [row["Hips"][2] for row in track]
+    head = [row["Head"][2] for row in track]
+
+    def centred(values):
+        mean = sum(values) / len(values)
+        return [v - mean for v in values]
+
+    hips = centred(hips)
+    head = centred(head)
+    best_lag, best = 0, -1.0
+    for lag in range(0, 12):
+        total = 0.0
+        for i in range(len(track) - lag):
+            total += hips[i] * head[i + lag]
+        if total > best:
+            best, best_lag = total, lag
+    print("  the head's turn lines up best %d frames behind the hips" % best_lag)
+    check("the head follows the body rather than leading it", best_lag >= FOLLOW_LAG,
+          "best alignment at a lag of %d frames, wanted at least %d" % (best_lag, FOLLOW_LAG))
+
+
 def main(argv):
     parser = argparse.ArgumentParser(prog="critique_scene")
     parser.add_argument("--port", type=int, default=7911)
@@ -664,6 +794,9 @@ def main(argv):
             spins(engine, args.walks)
             head_carriage(engine, args.walks)
             gait(engine, args.walks, args.feet.split(","), args.road, 2.6, 24)
+            weight_shift(engine, args.walks)
+            hand_to_target(engine, args.walks)
+            secondary_motion(engine, args.walks)
         engine("frame.resume")
 
     if scene is not None:

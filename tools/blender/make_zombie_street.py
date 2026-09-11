@@ -562,6 +562,13 @@ def roofline(parts, name, shell, width, depth, height, sign, surface, surfaces, 
         parts[prop.name] = prop
 
 
+# The pavement top is at 0.14. A prop resting its base exactly there shares
+# that plane with it and the depth test has nothing to choose between; sunk a
+# few centimetres, its base is inside the slab, the way the road sinks into
+# the ground and the kerbs into the road.
+PROP_FOOT = 0.10
+
+
 def build_clutter(parts, surfaces, rng):
     """What a street has on it that nobody put there on purpose.
 
@@ -579,7 +586,7 @@ def build_clutter(parts, surfaces, rng):
         y = side * 6.05
         body = block("Street_Bin%d" % index, (-0.29, -0.36, 0.0), (0.29, 0.36, 0.98),
                      surfaces["paint"], repeats=1.6, bevel=0.03, taper=1.06)
-        body.location = (x, y, 0.14)
+        body.location = (x, y, PROP_FOOT)
         body.rotation_euler = (0.0, 0.0, rng.uniform(-0.25, 0.25))
         lid = block("Street_BinLid%d" % index, (-0.31, -0.38, 0.0), (0.31, 0.38, 0.08),
                     surfaces["paint"], repeats=1.6, bevel=0.025, taper=0.9)
@@ -591,7 +598,7 @@ def build_clutter(parts, surfaces, rng):
     def sack_at(index, x, y):
         sack = block("Street_Sack%d" % index, (-0.30, -0.26, 0.0), (0.30, 0.26, 0.42),
                      surfaces["sack"], repeats=1.6, bevel=0.11, taper=0.62)
-        sack.location = (x, y, 0.14)
+        sack.location = (x, y, PROP_FOOT)
         sack.rotation_euler = (0.0, 0.0, rng.uniform(0.0, 6.28))
         props.append(sack)
 
@@ -602,7 +609,7 @@ def build_clutter(parts, surfaces, rng):
                           (-0.26, -0.21, 0.0), (0.26, 0.21, 0.30),
                           surfaces["wood"], repeats=1.7, bevel=0.012)
             if below is None:
-                crate.location = (x, y, 0.14)
+                crate.location = (x, y, PROP_FOOT)
                 crate.rotation_euler = (0.0, 0.0, rng.uniform(-0.3, 0.3))
             else:
                 crate.parent = below
@@ -614,14 +621,14 @@ def build_clutter(parts, surfaces, rng):
     def bollard_at(index, x, side):
         post = block("Street_Bollard%d" % index, (-0.075, -0.075, 0.0), (0.075, 0.075, 0.92),
                      surfaces["paint"], repeats=1.6, bevel=0.02, taper=0.8)
-        post.location = (x, side * 3.62, 0.14)
+        post.location = (x, side * 3.62, PROP_FOOT)
         props.append(post)
 
     def bench_at(index, x, side):
         y = side * 5.6
         seat = block("Street_Bench%d" % index, (-0.85, -0.24, 0.0), (0.85, 0.24, 0.05),
                      surfaces["wood"], repeats=1.7, bevel=0.008)
-        seat.location = (x, y, 0.14 + 0.44)
+        seat.location = (x, y, PROP_FOOT + 0.44)
         for end, ex in enumerate((-0.78, 0.78)):
             leg = block("Street_BenchEnd%d_%d" % (index, end),
                         (-0.04, -0.22, 0.0), (0.04, 0.22, 0.44),
@@ -931,14 +938,24 @@ def _arm(pose, side, swing, hit, reach_for):
     which is what makes a swing read as a whip rather than a gate.
     """
     lead = 1.0 if side == "R" else 0.55
-    forward = -1.05 - 0.22 * swing - reach_for * 1.15 * lead
+    # At rest the arms hang half-raised in front, the shuffle a zombie carries
+    # them at. The strike thrusts to horizontal and straightens the elbow, so
+    # the hand is carried a good half-metre further forward than the walk ever
+    # takes it -- the reach is the arm's, not the body's lunge under it.
+    forward = -0.62 - 0.22 * swing - reach_for * 0.95 * lead
     out = (0.20 if side == "L" else -0.20) - reach_for * 0.10 * lead
-    elbow = 0.62 + 0.18 * swing - reach_for * 0.62 * lead
-    wrist = 0.20 - reach_for * 0.45 * lead
+    wrist = 0.30 - reach_for * 0.55 * lead
+    # The elbow bends about the axis across the arm, not along it: a rotation
+    # about the bone's own length is a twist and leaves the arm as straight as
+    # it found it, which is why a zombie posed only in twists reaches with a
+    # dead-straight arm. Kept bent in the shuffle and driven straight at the
+    # strike, so the thrust has a bend to spend and the hand is carried a hand's
+    # length further out than the walk ever takes it.
+    bend = 1.8 + 0.2 * swing - reach_for * 1.8 * lead
 
     pose.set("Shoulder" + side, _compose(_turn(Y, forward), _turn(X, out),
                                          _turn(Z, -0.12 * lead * reach_for)))
-    pose.set("Elbow" + side, _compose(_turn(Y, elbow), _turn(Z, 0.10 * lead)))
+    pose.set("Elbow" + side, _compose(_turn(X, bend), _turn(Z, 0.10 * lead)))
     pose.set("Wrist" + side, _turn(Y, wrist))
     pose.set("Hand" + side, _turn(Y, 0.15 + 0.35 * reach_for * lead))
 
