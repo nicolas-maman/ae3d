@@ -216,7 +216,13 @@ typedef ptrdiff_t     GLsizeiptr;
     X(void, glDeleteRenderbuffers, (GLsizei n, const GLuint *renderbuffers)) \
     X(void, glReadPixels, (GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, void *pixels)) \
     X(void, glDrawBuffer, (GLenum buf)) \
-    X(void, glReadBuffer, (GLenum src))
+    X(void, glReadBuffer, (GLenum src)) \
+    X(void, glGenQueries, (GLsizei n, GLuint *ids)) \
+    X(void, glDeleteQueries, (GLsizei n, const GLuint *ids)) \
+    X(void, glBeginQuery, (GLenum target, GLuint id)) \
+    X(void, glEndQuery, (GLenum target)) \
+    X(void, glGetQueryObjectuiv, (GLuint id, GLenum pname, GLuint *params)) \
+    X(void, glGetQueryObjectui64v, (GLuint id, GLenum pname, unsigned long long *params))
 
 #define AE3D_GL_DECL(ret, name, args) typedef ret (*ae3d_pfn_##name) args; extern ae3d_pfn_##name ae3d_##name;
 AE3D_GL_FUNCS(AE3D_GL_DECL)
@@ -304,5 +310,11 @@ int ae3d_glapi_load(void);
 #define glReadPixels               ae3d_glReadPixels
 #define glDrawBuffer               ae3d_glDrawBuffer
 #define glReadBuffer               ae3d_glReadBuffer
+#define glGenQueries               ae3d_glGenQueries
+#define glDeleteQueries            ae3d_glDeleteQueries
+#define glBeginQuery               ae3d_glBeginQuery
+#define glEndQuery                 ae3d_glEndQuery
+#define glGetQueryObjectuiv        ae3d_glGetQueryObjectuiv
+#define glGetQueryObjectui64v      ae3d_glGetQueryObjectui64v
 
 #endif

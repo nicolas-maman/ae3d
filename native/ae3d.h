@@ -218,6 +218,14 @@ void   ae3d_gl_texture_delete(int texture);
 void   ae3d_gl_texture_bind(int unit, int texture);
 void   ae3d_gl_texture_bind_cubemap(int unit, int texture);
 
+/* GPU time per pass, read three frames late so the read never waits. */
+void  *ae3d_gl_passtimer_create(void);
+void   ae3d_gl_passtimer_destroy(void *handle);
+void   ae3d_gl_passtimer_frame(void *handle);
+void   ae3d_gl_passtimer_begin(void *handle, int pass);
+void   ae3d_gl_passtimer_end(void *handle);
+double ae3d_gl_passtimer_ms(void *handle, int pass);
+
 int    ae3d_gl_fbo_create(void);
 void   ae3d_gl_fbo_bind(int fbo);
 void   ae3d_gl_fbo_delete(int fbo);
@@ -308,6 +316,15 @@ const char *ae3d_agent_next_request(void);
 void        ae3d_agent_respond(const char *line);
 void        ae3d_agent_stop(void);
 const char *ae3d_agent_error(void);
+
+/* The asking end of the same channel, so a tool that measures a scene can be
+   written against the engine rather than against a copy of the protocol. */
+void        ae3d_client_init(void);
+int         ae3d_client_connect(const char *host, int port);
+int         ae3d_client_send(int handle, const char *line);
+const char *ae3d_client_read(int handle);
+void        ae3d_client_close(int handle);
+const char *ae3d_client_error(void);
 
 int  ae3d_capture_frame(int width, int height);
 int  ae3d_capture_width(void);

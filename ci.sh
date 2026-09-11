@@ -24,6 +24,11 @@ FRAMES="${AE3D_CI_FRAMES:-30}"
 # is a size.
 export AE3D_WIDTH="${AE3D_CI_WIDTH:-320}"
 export AE3D_HEIGHT="${AE3D_CI_HEIGHT:-180}"
+# Every frame is still drawn; none of them reaches a screen. On a runner with a
+# display this file used to open and close dozens of windows, each one a chance
+# to take focus from whatever else the machine was doing, and none of them was
+# ever looked at -- what the examples are judged on comes back over the channel.
+export AE3D_HIDDEN="${AE3D_HIDDEN:-1}"
 failures=0
 skipped=0
 
@@ -459,6 +464,55 @@ else
         grep -E 'FAIL|Traceback|Error|error:|critique_scene:' "$critique_log"             | sed 's/^/        /' | head -14
     fi
     rm -f "$critique_log"
+fi
+
+step "the demo scene, held to what it cost last time"
+# The benchmark. Written in ae3d against ae3d's own protocol rather than in
+# another language against a second copy of it, which is the point of the
+# channel having a client in the engine's own language.
+#
+# Draw calls, triangles and state changes are the same on every machine that
+# runs this, so they are compared against the recorded figures exactly and a
+# single extra program bind fails the build. The milliseconds beside them are
+# compared only when the card that recorded them is the card running them, and
+# reported otherwise: a time from one GPU says nothing about another.
+build_together tools/ae3d_bench.ae
+if ! built_ok ae3d_bench; then
+    fail "ae3d_bench (build)"
+    sed 's/^/        /' "$BUILD_DIR/ae3d_bench.log" | head -20
+elif ! have_display; then
+    skip "zombie_street (frame cost)" "no display"
+elif ! built_ok zombie_street; then
+    skip "zombie_street (frame cost)" "it did not build"
+else
+    bench_log="$(mktemp)"
+    AE3D_AGENT=7915 ./build/zombie_street >/dev/null 2>&1 &
+    bench_scene=$!
+    # The scene opens its port after the window and the first frame, so the
+    # first question can arrive before there is anything to answer it. Retried
+    # only while that is what came back, and only while the scene is alive.
+    benched=1
+    attempt=0
+    while [ "$attempt" -lt 50 ]; do
+        kill -0 "$bench_scene" 2>/dev/null || break
+        bounded "$RUN_LIMIT" ./build/ae3d_bench 7915 >"$bench_log" 2>&1
+        benched=$?
+        grep -q 'nothing answering' "$bench_log" || break
+        attempt=$((attempt + 1))
+        sleep 0.2
+    done
+    if ! kill -0 "$bench_scene" 2>/dev/null; then
+        skip "zombie_street (frame cost)" "the scene could not open a window"
+    elif [ "$benched" -eq 0 ]; then
+        pass "zombie_street (frame cost)"
+        sed 's/^/        /' "$bench_log" | head -20
+    else
+        fail "zombie_street (frame cost)"
+        sed 's/^/        /' "$bench_log" | head -20
+    fi
+    kill "$bench_scene" 2>/dev/null
+    wait "$bench_scene" 2>/dev/null
+    rm -f "$bench_log"
 fi
 
 # The editor runs on either renderer, so both are checked: the Vulkan option

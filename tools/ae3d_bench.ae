@@ -1,0 +1,310 @@
+// What a frame of the scene costs, and whether that has changed.
+//
+//     AE3D_AGENT=7911 AE3D_HIDDEN=1 ./build/zombie_street &
+//     ./build/ae3d_bench 7911
+//     ./build/ae3d_bench 7911 --record     # after a deliberate change
+//
+// Written in ae3d, against ae3d's own JSON and ae3d's own protocol, because a
+// benchmark in another language is a second implementation of both and drifts
+// from this one every time an op changes.
+//
+// Two kinds of number come back and they are not gated the same way.
+//
+// Draw calls, triangles and state changes are properties of the scene and of
+// the renderer, identical on every machine that runs it, so they are compared
+// against the recorded figure exactly: one more program bind than last time is
+// a regression whoever runs it. This is the check that breaks a build.
+//
+// Milliseconds are properties of the machine and of the frame. The same scene
+// is ten times dearer on a laptop than on a workstation and sixteen times
+// cheaper at a quarter of the width and height, so a recorded time means
+// something only against the same card drawing the same size. They are reported
+// always and compared only then.
+//
+// The GPU passes are what is compared. The CPU figure is the time inside the
+// renderer's calls, and on a driver that paces frames by blocking in one of
+// them it is mostly the wait for the previous frame to present -- it went up
+// when the frame got smaller. It is reported because it is the number that
+// says whether the CPU or the GPU is the one holding the frame back, and it is
+// not gated because it does not measure the scene.
+
+import std.fs
+import std.intarr
+import std.json
+import std.os
+import std.string
+import ae3d.probe
+
+// How many frames are timed. The GPU timer is read three frames behind, so the
+// first samples carry nothing; a few of these are those, and the middle of the
+// rest is not moved by them.
+const SAMPLES = 61
+// The animation is parked here before anything is counted. A frame's draw
+// count depends on what is on screen, and what is on screen depends on where
+// the walk has got to, so a benchmark that did not park the clip would compare
+// two different frames and call the difference a regression.
+const AT = 1.0
+// What counts as the same machine having got slower. Two terms, because timer
+// noise does not scale with the thing being timed: a pass costing a tenth of a
+// millisecond reads a fifth higher from one run to the next while a pass
+// costing ten milliseconds does not. A regression has to be both half again
+// dearer and dearer by more than the timer can wander.
+//
+// Half again, not a fifth. A card that is a sixth busy does not hold its clock,
+// and the whole distribution of a one-millisecond pass shifts by a quarter as
+// it moves between states -- the median with it. The counts above are the
+// sharp gate; this one is for a pass that has doubled.
+const TIME_ALLOWANCE = 1.5
+const TIME_NOISE_MS = 0.05
+
+struct Cost {
+    draw_calls: int
+    triangles: int
+    program_binds: int
+    material_binds: int
+    shadow_ms: float
+    scene_ms: float
+    post_ms: float
+    cpu_ms: float
+    device: string
+    backend: string
+    width: int
+    height: int
+}
+
+// The middle of many samples. Not the mean, which one stalled frame drags;
+// and not the minimum either, which would be right if the timer only ever read
+// high. It does not: a GPU timer at this scale wanders both ways with clock
+// state and quantisation, and one run recorded a scene pass at 0.39 ms that
+// every other frame around it put at 0.95. The median is moved by neither.
+//
+// Held in microseconds as integers, which is what the array type carries and
+// finer than the timer resolves.
+middle(samples: ptr) -> float {
+    count = intarr.intarr_size(samples)
+    if count == 0 { return 0.0 }
+    // Insertion sort. Forty numbers, once.
+    i = 1
+    while i < count {
+        value = intarr.intarr_get_raw(samples, i)
+        j = i - 1
+        while j >= 0 && intarr.intarr_get_raw(samples, j) > value {
+            intarr.intarr_set_raw(samples, j + 1, intarr.intarr_get_raw(samples, j))
+            j = j - 1
+        }
+        intarr.intarr_set_raw(samples, j + 1, value)
+        i = i + 1
+    }
+    return (intarr.intarr_get_raw(samples, count / 2) as float) / 1000.0
+}
+
+measure(p: *Probe) -> Cost {
+    out = Cost{}
+    shadow_us = intarr.intarr_new_raw(SAMPLES)
+    scene_us = intarr.intarr_new_raw(SAMPLES)
+    post_us = intarr.intarr_new_raw(SAMPLES)
+    cpu_us = intarr.intarr_new_raw(SAMPLES)
+
+    i = 0
+    while i < SAMPLES {
+        answered = probe.op(p, "frame.stats")
+        if !probe.accepted(answered) {
+            println("ae3d_bench: frame.stats: ${probe.refusal(answered)}")
+            os.exit(1)
+        }
+        stats = probe.result(answered)
+        // The counts are the same every frame; taking them from the last
+        // sample rather than the first means they describe a frame drawn after
+        // everything had settled.
+        out.draw_calls = probe.integer(stats, "draw_calls")
+        out.triangles = probe.integer(stats, "triangles")
+        out.program_binds = probe.integer(stats, "program_binds")
+        out.material_binds = probe.integer(stats, "material_binds")
+        out.device = probe.text(stats, "device")
+        out.backend = probe.text(stats, "backend")
+        out.width = probe.integer(stats, "width")
+        out.height = probe.integer(stats, "height")
+
+        intarr.intarr_set_raw(shadow_us, i, (probe.number(stats, "shadow_ms") * 1000.0) as int)
+        intarr.intarr_set_raw(scene_us, i, (probe.number(stats, "scene_ms") * 1000.0) as int)
+        intarr.intarr_set_raw(post_us, i, (probe.number(stats, "post_ms") * 1000.0) as int)
+        intarr.intarr_set_raw(cpu_us, i, (probe.number(stats, "render_ms") * 1000.0) as int)
+
+        json.free(answered)
+        i = i + 1
+    }
+
+    out.shadow_ms = middle(shadow_us)
+    out.scene_ms = middle(scene_us)
+    out.post_ms = middle(post_us)
+    out.cpu_ms = middle(cpu_us)
+    intarr.intarr_free(shadow_us)
+    intarr.intarr_free(scene_us)
+    intarr.intarr_free(post_us)
+    intarr.intarr_free(cpu_us)
+    return out
+}
+
+cost_json(c: Cost) -> ptr {
+    out = json.obj()
+    json.object_set_raw(out, "draw_calls", json.from_int(c.draw_calls))
+    json.object_set_raw(out, "triangles", json.from_int(c.triangles))
+    json.object_set_raw(out, "program_binds", json.from_int(c.program_binds))
+    json.object_set_raw(out, "material_binds", json.from_int(c.material_binds))
+    json.object_set_raw(out, "shadow_ms", json.num(c.shadow_ms))
+    json.object_set_raw(out, "scene_ms", json.num(c.scene_ms))
+    json.object_set_raw(out, "post_ms", json.num(c.post_ms))
+    json.object_set_raw(out, "cpu_ms", json.num(c.cpu_ms))
+    json.object_set_raw(out, "device", json.str(c.device))
+    json.object_set_raw(out, "backend", json.str(c.backend))
+    json.object_set_raw(out, "width", json.from_int(c.width))
+    json.object_set_raw(out, "height", json.from_int(c.height))
+    return out
+}
+
+// Three decimals. A double interpolated straight into a string carries every
+// digit it has, and a benchmark that reports 1.0980000000000001 ms is harder
+// to read than one that reports 1.098 and no less true.
+ms_text(value: float) -> string {
+    scaled = (value * 1000.0 + 0.5) as int
+    whole = scaled / 1000
+    part = scaled - whole * 1000
+    pad = ""
+    if part < 100 { pad = "0" }
+    if part < 10 { pad = "00" }
+    return "${whole}.${pad}${part}"
+}
+
+// Each check answers with the number of standards it broke, so the count of
+// them is the sum and nothing needs to be held between calls.
+count_check(name: string, measured: int, recorded: int) -> int {
+    if measured == recorded {
+        println("  ok   ${name}: ${measured}")
+        return 0
+    }
+    moved = "more"
+    if measured < recorded { moved = "fewer" }
+    println("  FAIL ${name}: ${measured}, was ${recorded} (${moved})")
+    return 1
+}
+
+time_line(name: string, measured: float, recorded: float, comparable: bool) -> int {
+    shown = ms_text(measured)
+    if !comparable {
+        println("       ${name}: ${shown} ms")
+        return 0
+    }
+    was = ms_text(recorded)
+    dearer = measured - recorded
+    if recorded > 0.0 && measured > recorded * TIME_ALLOWANCE && dearer > TIME_NOISE_MS {
+        println("  FAIL ${name}: ${shown} ms, was ${was} ms on this card")
+        return 1
+    }
+    println("  ok   ${name}: ${shown} ms, was ${was} ms")
+    return 0
+}
+
+main() {
+    if os.args_count() < 2 {
+        println("usage: ae3d_bench <port> [--record] [--baseline <path>]")
+        os.exit(2)
+    }
+
+    port = string.get_int(os.args_get(1))
+    record = false
+    baseline_path = "resources/zombie_street.budget.json"
+    i = 2
+    while i < os.args_count() {
+        argument = os.args_get(i)
+        if argument == "--record" { record = true }
+        if argument == "--baseline" && i + 1 < os.args_count() {
+            baseline_path = os.args_get(i + 1)
+            i = i + 1
+        }
+        i = i + 1
+    }
+
+    p = probe.open(port)
+    if p == null {
+        println("ae3d_bench: nothing answering on port ${port}: ${probe.last_error()}")
+        os.exit(1)
+    }
+
+    if !probe.did(p, "frame.pause") {
+        println("ae3d_bench: the scene would not pause")
+        os.exit(1)
+    }
+    seek = json.obj()
+    json.object_set_raw(seek, "op", json.str("anim.set"))
+    json.object_set_raw(seek, "time", json.num(AT))
+    parked = probe.ask(p, seek)
+    json.free(seek)
+    if !probe.accepted(parked) {
+        println("ae3d_bench: anim.set: ${probe.refusal(parked)}")
+        os.exit(1)
+    }
+    json.free(parked)
+
+    measured = measure(p)
+    probe.close(p)
+
+    println("ae3d_bench: ${measured.backend} on ${measured.device}, ${measured.width}x${measured.height}")
+
+    if record {
+        out = cost_json(measured)
+        text = json.stringify_raw(out)
+        error = fs.write(baseline_path, text)
+        json.free(out)
+        if error != "" {
+            println("ae3d_bench: could not write ${baseline_path}: ${error}")
+            os.exit(1)
+        }
+        println("ae3d_bench: recorded ${baseline_path}")
+        return
+    }
+
+    text, error = fs.read(baseline_path)
+    if error != "" {
+        println("ae3d_bench: no baseline at ${baseline_path}; record one with --record")
+        os.exit(1)
+    }
+    recorded = json.parse_raw(text)
+    if recorded == null {
+        println("ae3d_bench: ${baseline_path} is not JSON")
+        os.exit(1)
+    }
+
+    println("")
+    println("== what the frame is made of ==")
+    failures = count_check("draw calls", measured.draw_calls, probe.integer(recorded, "draw_calls"))
+    failures = failures + count_check("triangles", measured.triangles, probe.integer(recorded, "triangles"))
+    failures = failures + count_check("program binds", measured.program_binds, probe.integer(recorded, "program_binds"))
+    failures = failures + count_check("material binds", measured.material_binds, probe.integer(recorded, "material_binds"))
+
+    same_card = probe.text(recorded, "device") == measured.device
+    same_size = probe.integer(recorded, "width") == measured.width && probe.integer(recorded, "height") == measured.height
+    comparable = same_card && same_size
+    println("")
+    println("== what it cost ==")
+    if !same_card {
+        println("       recorded on ${probe.text(recorded, "device")}, so the times below are reported and not compared")
+    } else if !same_size {
+        println("       recorded at ${probe.integer(recorded, "width")}x${probe.integer(recorded, "height")}, so the times below are reported and not compared")
+    }
+    failures = failures + time_line("shadow pass (gpu)", measured.shadow_ms, probe.number(recorded, "shadow_ms"), comparable)
+    failures = failures + time_line("scene pass (gpu)", measured.scene_ms, probe.number(recorded, "scene_ms"), comparable)
+    failures = failures + time_line("post pass (gpu)", measured.post_ms, probe.number(recorded, "post_ms"), comparable)
+    time_line("frame (cpu, in the renderer's calls)", measured.cpu_ms, probe.number(recorded, "cpu_ms"), false)
+
+    gpu = measured.shadow_ms + measured.scene_ms + measured.post_ms
+    println("       gpu total: ${ms_text(gpu)} ms of a ${ms_text(measured.cpu_ms)} ms frame")
+
+    json.free(recorded)
+
+    println("")
+    if failures > 0 {
+        println("ae3d_bench: ${failures} figure(s) moved; re-record with --record if that was intended")
+        os.exit(1)
+    }
+    println("ae3d_bench: the frame costs what it cost")
+}
