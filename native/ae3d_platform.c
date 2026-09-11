@@ -8,6 +8,12 @@
 
 #if defined(_WIN32)
 #  include <windows.h>
+#else
+#  include <signal.h>
+#  if defined(__GLIBC__) || defined(__APPLE__)
+#    include <execinfo.h>
+#    define AE3D_HAVE_BACKTRACE 1
+#  endif
 #endif
 
 #define GLFW_INCLUDE_NONE
@@ -15,6 +21,37 @@
 
 static char g_error[512];
 static int  g_initialized;
+
+#if defined(AE3D_HAVE_BACKTRACE)
+/* A crash on a headless CI runner leaves nothing but "died on signal 11" and
+   a core file nobody can open. This prints the native stack to stderr the
+   instant it happens, so the log names the frame that fell over. Async-signal
+   safe: backtrace and backtrace_symbols_fd are on the allowed list, write is
+   the only other call, and the handler re-raises the default so the process
+   still dies and the exit status is unchanged. */
+static void ae3d_crash_handler(int sig) {
+    void *frames[64];
+    int n = backtrace(frames, 64);
+    const char *label = "\nae3d: native crash, signal ";
+    char digit = (char)('0' + (sig % 10));
+    write(2, label, strlen(label));
+    write(2, &digit, 1);
+    write(2, "\n", 1);
+    backtrace_symbols_fd(frames, n, 2);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+/* Installed when the shared library loads, before any entry point runs, so an
+   offscreen test that never opens a window is covered too. */
+__attribute__((constructor))
+static void ae3d_install_crash_handler(void) {
+    signal(SIGSEGV, ae3d_crash_handler);
+    signal(SIGABRT, ae3d_crash_handler);
+    signal(SIGBUS, ae3d_crash_handler);
+    signal(SIGFPE, ae3d_crash_handler);
+}
+#endif
 
 static void ae3d_error_callback(int code, const char *description) {
     snprintf(g_error, sizeof(g_error), "glfw error %d: %s", code, description ? description : "");

@@ -75,16 +75,22 @@ ae3d_native_build() {
     [ "$ae3d_stale" = 0 ] && return 0
 
     ae3d_soname=""
+    # Names in a crash backtrace: -rdynamic puts the library's symbols in the
+    # dynamic table so backtrace_symbols_fd can name the frame that fell over,
+    # rather than printing a bare address. ELF only; the linker on Windows and
+    # macOS does not take it.
+    ae3d_backtrace=""
     case "$(uname -s)" in
         Darwin) ae3d_soname="-Wl,-install_name,@rpath/$(basename "$ae3d_lib")" ;;
         MINGW*|MSYS*|CYGWIN*|Windows_NT)
             # The import library is what a program links against; the DLL
             # itself is only ever loaded.
             ae3d_soname="-Wl,--out-implib,$ae3d_lib.a" ;;
-        *) ae3d_soname="-Wl,-soname,$(basename "$ae3d_lib")" ;;
+        *) ae3d_soname="-Wl,-soname,$(basename "$ae3d_lib")"
+           ae3d_backtrace="-rdynamic" ;;
     esac
 
     # shellcheck disable=SC2086
-    "$ae3d_cc" -shared $ae3d_cflags "$ae3d_obj_dir"/*.o $ae3d_soname \
+    "$ae3d_cc" -shared $ae3d_cflags $ae3d_backtrace "$ae3d_obj_dir"/*.o $ae3d_soname \
         $ae3d_extra_libs $(ae3d_platform_libs "$(uname -s)") -o "$ae3d_lib"
 }
