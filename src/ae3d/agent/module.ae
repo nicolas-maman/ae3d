@@ -415,8 +415,8 @@ help_result() -> ptr {
         "Camera position, orientation, field of view and clip planes."))
     json.array_add_raw(ops, describe("scene.tree", "[detail], [audit]",
         "Every model the renderer holds: index, name, position and visibility. With detail, also its material, texture, parent, world position, triangles and where it lands on screen -- one round trip instead of one per model. With audit, what the surface is made of: its area in metres, its size along each axis, how many ways its faces point, how often its texture repeats across a metre and how many texels that is."))
-    json.array_add_raw(ops, describe("render.set", "[normal_strength], [occlusion_strength], [bloom_intensity]",
-        "How hard normal maps push, how much baked occlusion is applied, and how strong the bloom is, for the whole scene. Zero on any is the frame this renderer draws without that -- bloom_intensity of zero is the frame with no glow at all -- which is what makes the difference measurable rather than a matter of opinion."))
+    json.array_add_raw(ops, describe("render.set", "[normal_strength], [occlusion_strength], [bloom_intensity], [shadows]",
+        "How hard normal maps push, how much baked occlusion is applied, how strong the bloom is, and whether shadows are cast, for the whole scene. Zero on any strength, or shadows off, is the frame this renderer draws without that -- bloom_intensity of zero is no glow, shadows false is no shadow at all -- which is what makes each one's difference measurable rather than a matter of opinion."))
     json.array_add_raw(ops, describe("scene.skeleton", "object",
         "Every bone of a skinned model: name, parent, where it is in the world and how it is turned. A skinned mesh stays in its bind pose and its bones carry it, so this is the only thing that says where a figure's hand or foot actually is. Answered at the frame boundary, so it describes a pose that is finished rather than one part way through being built."))
     json.array_add_raw(ops, describe("scene.isolate", "[object]",
@@ -1546,7 +1546,8 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
         node = json.object_get_raw(request, "normal_strength")
         shading = json.object_get_raw(request, "occlusion_strength")
         blooming = json.object_get_raw(request, "bloom_intensity")
-        if node == null && shading == null && blooming == null {
+        shadowing = json.object_get_raw(request, "shadows")
+        if node == null && shading == null && blooming == null && shadowing == null {
             fail(id, "render.set needs something to set")
             return false
         }
@@ -1580,6 +1581,16 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
                 vk.renderer_set_bloom_intensity(c.vk_renderer as *VKRenderer, strength)
             }
             json.object_set_raw(out, "bloom_intensity", json.num(strength))
+        }
+        if shadowing != null {
+            on = json.get_bool(shadowing) == 1
+            if c.gl_renderer != null {
+                gl.renderer_set_shadows(c.gl_renderer as *GLRenderer, on)
+            }
+            if c.vk_renderer != null {
+                vk.renderer_set_shadows(c.vk_renderer as *VKRenderer, on)
+            }
+            json.object_set_raw(out, "shadows", json.boolean(on))
         }
         answer(id, out)
         return false
