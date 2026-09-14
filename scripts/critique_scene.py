@@ -162,6 +162,13 @@ ROAD_REFLECTION_MIN = 0.25
 # to a quarter of the peak; these are the floors, well inside that.
 POOL_MIN = 2                # at least this many separate pools of light on the road
 POOL_DIP_FRACTION = 0.6     # the dark between two pools falls to at most this of the peak
+# The wet road reflects the street's lamps: turning its reflectivity off dims it
+# to a matte surface, turning it on brings the lamps back as bright cells on the
+# tarmac. Proved by toggling the road's reflectivity over the channel and
+# counting the bright cells in the road band. Measured lift on both backends is
+# ~1.85x; this floor sits well inside that, and a matte road cannot reach it.
+REFLECTION_ON = 0.8         # the reflectivity the wet road is measured at
+REFLECTION_LAMP_LIFT = 1.4  # the road carries at least this many times as many bright cells wet as dry
 # Held still, the frame must not move. Two frames drawn of the same paused pose
 # should be the same frame; a cell that drifts between them is temporal shimmer
 # -- an unseeded dither, a jittered ray march with no accumulation, a readback
@@ -1004,6 +1011,47 @@ def light_pools(engine, at=2.2):
               % (best * 100, POOL_DIP_FRACTION * 100))
 
 
+def wet_road_reflection(engine, at=2.2):
+    """That the wet road reflects the street's lamps, not just pools of fill.
+
+    A wet road is a mirror held to the lights: each lamp overhead comes back as
+    a bright reflection on the tarmac, brightest where the view grazes it. The
+    road's reflectivity is turned off over the channel -- dropping it to a matte
+    surface -- and the bright cells in the road band are counted, then turned
+    back on and counted again. With it on the lamps return, so the road carries
+    far more bright cells than the dry, matte version. Both are numbers off the
+    grid; the road is left wet, the way the scene set it.
+    """
+    print("\n== the wet road reflects the lamps ==")
+    engine("anim.set", time=at)
+    models = engine("scene.tree", detail=True)["models"]
+    wet = [i for i, m in enumerate(models)
+           if m["name"] == "Street_Road" or m["name"] == "Street_Ground"]
+    if not wet:
+        check("the scene has a wet road to measure", False, "no road or ground model")
+        return
+
+    def set_reflectivity(value):
+        for i in wet:
+            engine("model.set", index=i, reflectivity=value)
+
+    def road_bright():
+        grid = engine("frame.grid", columns=64, rows=48)["cells"]
+        band = [c for row in grid[int(len(grid) * 0.60):] for c in row]
+        return sum(1 for c in band if _lum(c) >= LIGHT_SOURCE_LUM)
+
+    set_reflectivity(0.0)
+    dry = road_bright()
+    set_reflectivity(REFLECTION_ON)
+    wet_count = road_bright()
+
+    print("  the road carries %d bright cells wet, %d dry" % (wet_count, dry))
+    check("the wet road reflects the lamps",
+          wet_count >= dry * REFLECTION_LAMP_LIFT,
+          "%d bright cells with the reflection on against %d off (%.2fx, wanted %.2fx)"
+          % (wet_count, dry, wet_count / float(max(dry, 1)), REFLECTION_LAMP_LIFT))
+
+
 def bloom(engine, at=2.2):
     """That the bloom the scene turns on is doing measurable work.
 
@@ -1175,6 +1223,7 @@ def main(argv):
         stability(engine)
         lighting(engine)
         light_pools(engine)
+        wet_road_reflection(engine)
         bloom(engine)
         shadows(engine)
         if args.walks:
