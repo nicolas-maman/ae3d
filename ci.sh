@@ -13,6 +13,16 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
 FRAMES="${AE3D_CI_FRAMES:-30}"
+# The examples are a build-and-run smoke test: does each one start, render and
+# survive a few frames without crashing. That is answered in the first handful
+# of frames -- init, the first draw, the loop settling -- and the behaviour and
+# look of the engine are proved at depth elsewhere, by the test suites and by
+# the demo scene's own critique, neither of which this touches. Two examples are
+# heavy per frame on the software rasteriser a headless runner falls back to
+# (particle_disc and sand together spent four minutes of a nine-minute run at
+# thirty frames each); a smoke depth of ten keeps the coverage and gives that
+# time back.
+EXAMPLE_FRAMES="${AE3D_CI_EXAMPLE_FRAMES:-10}"
 
 # The size suites and examples draw at. A runner has no GPU, and a software
 # rasteriser is billed for every pixel it shades: the same run at a quarter of
@@ -427,7 +437,7 @@ for example in examples/*.ae; do
         skip "$name" "no display"
         continue
     fi
-    AE3D_FRAMES="$FRAMES" bounded "$RUN_LIMIT" ./build/"$name" >/tmp/ae3d_run.log 2>&1
+    AE3D_FRAMES="$EXAMPLE_FRAMES" bounded "$RUN_LIMIT" ./build/"$name" >/tmp/ae3d_run.log 2>&1
     example_status=$?
     if [ "$example_status" -eq 124 ]; then
         fail "$name (still running after ${RUN_LIMIT}s)"
