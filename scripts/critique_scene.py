@@ -153,6 +153,13 @@ ROAD_REFLECTION_MIN = 0.25
 # to a quarter of the peak; these are the floors, well inside that.
 POOL_MIN = 2                # at least this many separate pools of light on the road
 POOL_DIP_FRACTION = 0.6     # the dark between two pools falls to at most this of the peak
+# Held still, the frame must not move. Two frames drawn of the same paused pose
+# should be the same frame; a cell that drifts between them is temporal shimmer
+# -- an unseeded dither, a jittered ray march with no accumulation, a readback
+# of uninitialised memory -- which reads as a scene that crawls when nothing in
+# it does. Measured: Vulkan is bit-exact, OpenGL within one code value; this
+# floor is many times that and far below anything the eye would catch.
+STABILITY_EPS = 0.004       # the most a cell may differ between two held frames
 # Bloom, proved by turning it off. Every bloom term scales by its intensity, so
 # dialling it to zero over the channel is the same render path with the glow
 # removed -- no pipeline change to confound the reading. Bloom adds light and
@@ -908,6 +915,30 @@ def lighting(engine, at=2.2):
               % (contrast, ROAD_REFLECTION_MIN))
 
 
+def stability(engine, at=2.2):
+    """That a held frame holds still.
+
+    With the simulation paused on one pose, two frames drawn of it should be the
+    same frame. Anything that drifts between them -- a dither reseeded each
+    frame, a volumetric march jittered without accumulating, a readback of
+    memory that was never cleared -- is temporal shimmer: the scene crawls while
+    nothing in it moves, which no still image and no single-frame standard can
+    see. Read as the largest a cell moves between two consecutive grids of the
+    same paused pose.
+    """
+    print("\n== a held frame holds still ==")
+    engine("anim.set", time=at)
+    first = [c for row in engine("frame.grid", columns=64, rows=36)["cells"] for c in row]
+    second = [c for row in engine("frame.grid", columns=64, rows=36)["cells"] for c in row]
+    if not first or len(first) != len(second):
+        check("the frame came back twice to be compared", False, "the grids did not match up")
+        return
+    worst = max(max(abs(first[i][k] - second[i][k]) for k in range(3)) for i in range(len(first)))
+    print("  the most any cell moved between two held frames: %.6f" % worst)
+    check("nothing shimmers when the scene is held still", worst <= STABILITY_EPS,
+          "a cell moved %.6f between two held frames, allowed %.4f" % (worst, STABILITY_EPS))
+
+
 def light_pools(engine, at=2.2):
     """That the lamps lay separate pools on the road, not one flat wash.
 
@@ -1125,6 +1156,7 @@ def main(argv):
         character(models, args.figure)
         proportion(models, args.figure)
         budget(engine)
+        stability(engine)
         lighting(engine)
         light_pools(engine)
         bloom(engine)
