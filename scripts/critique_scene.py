@@ -146,6 +146,13 @@ COOL_DARK_MAX = 0.02        # dark cells do not lean warm past this
 # The road reflects the lights: the brightest of the road band stands far above
 # its own median. A dry matte road is uniform; a wet one has the lamp in it.
 ROAD_REFLECTION_MIN = 0.25
+# A night street is lit in pools -- bright under each lamp, dark between -- which
+# is what a point light with real falloff makes and a flat fill does not. Read
+# off the road's horizontal profile: peaks under the lamps with dark gaps
+# between. Measured on both backends the road shows three pools whose gaps fall
+# to a quarter of the peak; these are the floors, well inside that.
+POOL_MIN = 2                # at least this many separate pools of light on the road
+POOL_DIP_FRACTION = 0.6     # the dark between two pools falls to at most this of the peak
 # Bloom, proved by turning it off. Every bloom term scales by its intensity, so
 # dialling it to zero over the channel is the same render path with the glow
 # removed -- no pipeline change to confound the reading. Bloom adds light and
@@ -901,6 +908,57 @@ def lighting(engine, at=2.2):
               % (contrast, ROAD_REFLECTION_MIN))
 
 
+def light_pools(engine, at=2.2):
+    """That the lamps lay separate pools on the road, not one flat wash.
+
+    A night street reads by its pools of light -- bright under each lamp, dark
+    between -- and a point light with real falloff makes them where a flat
+    ambient fill cannot. Read as the road's horizontal profile: the brightest
+    cell of each column down the wet band, which rises to a peak under a lamp
+    and falls away between them. Pools are the runs above the road's own bright
+    line; the dark between two of them is measured against their peaks, because
+    a wash has the peaks without the dark.
+    """
+    print("\n== the lamps lay pools on the road ==")
+    engine("anim.set", time=at)
+    grid = engine("frame.grid", columns=64, rows=36)["cells"]
+    band = grid[int(len(grid) * 0.62):]
+    width = len(band[0])
+    col = [max(_lum(row[x]) for row in band) for x in range(width)]
+    mean = sum(col) / width
+    spread = (sum((v - mean) ** 2 for v in col) / width) ** 0.5
+    bright_line = mean + 0.6 * spread
+
+    pools = []
+    x = 0
+    while x < width:
+        if col[x] >= bright_line:
+            peak, run = col[x], x
+            while run < width and col[run] >= bright_line * 0.75:
+                peak = max(peak, col[run])
+                run += 1
+            pools.append((x, run - 1, peak))
+            x = run
+        else:
+            x += 1
+
+    print("  %d pool(s) on the road, peaks at %s"
+          % (len(pools), ", ".join("%.2f" % p[2] for p in pools)))
+    check("the road is lit in separate pools", len(pools) >= POOL_MIN,
+          "%d pool(s) over the road's bright line, wanted %d" % (len(pools), POOL_MIN))
+
+    if len(pools) >= 2:
+        # The clearest gap between two adjacent pools: the darkest cell between
+        # them against the dimmer of the two peaks. A wash never dips.
+        best = min(min(col[pools[i - 1][1]:pools[i][0] + 1]) / min(pools[i - 1][2], pools[i][2])
+                   for i in range(1, len(pools)))
+        print("  the darkest gap between adjacent pools falls to %.0f%% of the pool" % (best * 100))
+        check("and the dark between the pools is genuinely dark",
+              best <= POOL_DIP_FRACTION,
+              "the shallowest gap is %.0f%% of its pool's peak, wanted under %.0f%%"
+              % (best * 100, POOL_DIP_FRACTION * 100))
+
+
 def bloom(engine, at=2.2):
     """That the bloom the scene turns on is doing measurable work.
 
@@ -1068,6 +1126,7 @@ def main(argv):
         proportion(models, args.figure)
         budget(engine)
         lighting(engine)
+        light_pools(engine)
         bloom(engine)
         shadows(engine)
         if args.walks:
