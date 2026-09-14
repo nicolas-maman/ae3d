@@ -63,6 +63,15 @@ CONTACT_SETTLE = 0.002
 
 SLIDE_PER_FRAME = 0.025
 SLIDE_PER_CONTACT = 0.040
+# How far off the road surface the deepest a foot reaches may sit. A foot below
+# the road by more than SINK has gone through it; one above by more than FLOAT
+# never touches down and the figure walks on air. The road passed in is that
+# surface -- for this scene the pavement the walk is on, where the lowest of the
+# tracked feet rests at about 0.115 -- so the band is set around a real touch,
+# not around zero, which a floating figure would pass as readily as a planted
+# one.
+GROUND_SINK = 0.03
+GROUND_FLOAT = 0.07
 # How far the shape of a drawn figure may stray from the shape of its skeleton.
 # Wide, deliberately. The mesh reaches past the bones by the thickness of the
 # surface, and a camera looking at a figure from an angle sees less of its width
@@ -647,8 +656,13 @@ def gait(engine, figure_mesh, feet, road, seconds, fps):
             track.setdefault(name, []).append(position)
 
     lowest = min(min(at[1] for at in track[foot]) for foot in feet if foot in track)
-    check("no foot goes through the road", lowest >= road - 0.01,
-          "the lowest is %+.3f, the road is %+.3f" % (lowest, road))
+    check("no foot sinks through the road", lowest >= road - GROUND_SINK,
+          "the lowest foot is %+.3f, %.3f under the road at %+.3f, allowed %.3f"
+          % (lowest, road - lowest, road, GROUND_SINK))
+    check("and the walk plants a foot on it rather than floating over it",
+          lowest <= road + GROUND_FLOAT,
+          "the lowest foot is %+.3f, %.3f above the road at %+.3f, allowed %.3f"
+          % (lowest, lowest - road, road, GROUND_FLOAT))
 
     worst_slide = 0.0
     worst_drift = 0.0
@@ -1082,7 +1096,9 @@ def main(argv):
     parser.add_argument("--walks", default="Zombie_Body",
                         help="the skinned model whose skeleton carries the walk")
     parser.add_argument("--feet", default="AnkleL,AnkleR,ToeL,ToeR")
-    parser.add_argument("--road", type=float, default=0.0)
+    parser.add_argument("--road", type=float, default=0.115,
+                        help="height of the surface the figure walks on, that its "
+                             "planted foot should reach and not sink through")
     parser.add_argument("--vulkan", action="store_true",
                         help="drive the Vulkan backend rather than OpenGL")
     parser.add_argument("--frame-only", action="store_true", dest="frame_only",
