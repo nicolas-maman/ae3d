@@ -32,6 +32,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float roughness;
     float exposure;
     float materialAlpha;
+    float reflectivity;
     bool hasNormalMap;
     float normalStrength;
     float occlusionStrength;
@@ -149,6 +150,12 @@ layout(location = 5) in float Occlusion;
 
 
 
+
+// How mirror-like the surface is. Zero is an ordinary matte surface whose
+// highlight fades as the view grazes it. Above zero the surface reflects the
+// scene's lights the way a wet road does -- brightest exactly where the view
+// grazes it, so a lamp overhead smears into a bright streak down the road
+// toward the viewer. Per material, so only the wet surfaces reflect.
 
 
 // Modern PBR Extensions
@@ -824,9 +831,19 @@ vec3 direct_light(Light L, vec3 norm, vec3 viewDir, vec3 albedo, vec3 F0,
     float denominator = 4.0 * NdotV * NdotL + 0.0001;
     vec3 specular = numerator / denominator;
 
-    // Apply view-dependent attenuation to make highlights more natural
+    // A matte surface's highlight fades as the view grazes it. A wet or mirror
+    // surface does the opposite: the grazing reflection is the brightest it
+    // throws, which is why a lamp smears furthest down a wet road seen at a
+    // shallow angle. reflectivity picks between the two -- zero leaves an
+    // ordinary surface exactly as it was, above zero lifts the grazing
+    // reflection and scales it by how wet the surface is.
     float viewAttenuation = pow(NdotV, 0.6);
-    specular *= viewAttenuation * 0.5;
+    if (reflectivity > 0.001) {
+        float grazing = 1.0 - NdotV;
+        specular *= reflectivity * (0.5 + grazing * grazing * 4.0);
+    } else {
+        specular *= viewAttenuation * 0.5;
+    }
 
     vec3 clearcoat = calculateClearcoat(norm, viewDir, lightDir, halfwayDir, albedo);
     vec3 sheen = calculateSheen(norm, viewDir, lightDir, halfwayDir);

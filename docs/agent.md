@@ -52,7 +52,7 @@ interleaved with the first.
 | `scene.isolate` | `[object]` | Show only this model, or show every model again when given no name. |
 | `model.get` | `index` | One model in full: transform, bounds, material and mesh counts. |
 | `light.list` |  | Every light: kind, position, direction, colour, intensity and ambient. |
-| `model.set` | `index, [position], [rotation], [scale], [diffuse], [metallic], [roughness], [alpha], [visible], [casts_shadow], [name]` | Change a model. Only the fields present are written; answers with the model as it now is. |
+| `model.set` | `index, [position], [rotation], [scale], [diffuse], [metallic], [roughness], [reflectivity], [alpha], [visible], [casts_shadow], [name]` | Change a model. Only the fields present are written; answers with the model as it now is. |
 | `camera.set` | `[position], [look_at], [fov], [near], [far]` | Move or reframe the camera. |
 | `light.set` | `[index], [position], [direction], [color], [intensity], [ambient]` | Change a light. |
 | `scene.save` | `path, [mesh_directory]` | Write the scene to JSON, with generated geometry beside it. |

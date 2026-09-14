@@ -45,7 +45,7 @@ exports (
     model_set_parent, model_parent, model_sync_transform, model_world_position,
     model_set_mesh, model_disable_instancing,
     model_set_skeleton, model_skeleton,
-    model_set_specular, model_set_pbr, model_set_exposure, model_set_alpha,
+    model_set_specular, model_set_pbr, model_set_exposure, model_set_reflectivity, model_set_alpha,
     model_set_texture, model_set_shader, model_set_name, model_set_source_path,
     material_set_texture_path, material_set_normal_path, material_set_name, light_set_name, camera_set_name, text,
     set_owned, model_metallic, model_plastic, model_rough_metal,
@@ -263,6 +263,8 @@ struct Material {
     metallic: float
     roughness: float
     exposure: float
+    // How mirror-like the surface is; see the reflectivity uniform in the shader.
+    reflectivity: float
     alpha: float
     texture_id: int
     // The path was changed after a renderer had already resolved it, so the
@@ -1099,6 +1101,7 @@ material_new(name: string) -> *Material {
     m.metallic = 0.0
     m.roughness = 0.5
     m.exposure = 1.0
+    m.reflectivity = 0.0
     m.alpha = 1.0
     m.texture_id = 0
     m.texture_stale = false
@@ -1122,6 +1125,7 @@ material_equals(a: *Material, b: *Material) -> bool {
     if a.roughness != b.roughness || a.exposure != b.exposure || a.alpha != b.alpha {
         return false
     }
+    if a.reflectivity != b.reflectivity { return false }
     if a.diffuse.x != b.diffuse.x || a.diffuse.y != b.diffuse.y || a.diffuse.z != b.diffuse.z {
         return false
     }
@@ -1139,6 +1143,7 @@ material_clone(src: *Material) -> *Material {
     m.metallic = src.metallic
     m.roughness = src.roughness
     m.exposure = src.exposure
+    m.reflectivity = src.reflectivity
     m.alpha = src.alpha
     m.texture_id = src.texture_id
     m.texture_stale = src.texture_stale
@@ -1434,6 +1439,11 @@ model_set_pbr(m: *Model, metallic: float, roughness: float) {
 model_set_exposure(m: *Model, exposure: float) {
     model_ensure_material(m)
     m.material.exposure = exposure
+}
+
+model_set_reflectivity(m: *Model, reflectivity: float) {
+    model_ensure_material(m)
+    m.material.reflectivity = reflectivity
 }
 
 model_set_alpha(m: *Model, alpha: float) {
