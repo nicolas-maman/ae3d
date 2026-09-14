@@ -162,6 +162,11 @@ BLOOM_BRIGHT_LIFT = 1.30   # and at least this many times as many cells burn bri
 # floors sit well inside that.
 SHADOW_TOTAL_LIFT = 1.15   # removing shadows brightens the frame by at least this
 SHADOW_BRIGHT_LIFT = 1.80  # and lets at least this many times as many cells burn bright
+# anim.track poses a time without drawing it; this is how far a bone read that
+# way may sit from the same bone read through a drawn frame. It is a hair off
+# zero, not zero, only to leave room for the order floats are summed in; the
+# two paths run the same clip and the same solve, so a real gap is a bug.
+SAMPLE_MATCH_EPS = 0.0005
 
 
 FAILURES = []
@@ -541,10 +546,10 @@ def spins(engine, mesh, seconds=4.0, samples=320):
     """
     print("\n== does anything spin ==")
     track = {}
-    for step in range(samples):
-        engine("anim.set", time=step * seconds / samples)
-        for bone in engine("scene.skeleton", object=mesh)["bones"]:
-            track.setdefault(bone["name"], []).append(bone["world_position"])
+    times = [step * seconds / samples for step in range(samples)]
+    for bones in _series(engine, mesh, times):
+        for name, position in bones.items():
+            track.setdefault(name, []).append(position)
     worst_name, worst = None, 0.0
     for name, rows in track.items():
         steps = sorted(sum((rows[i][k] - rows[i - 1][k]) ** 2 for k in range(3)) ** 0.5
@@ -576,11 +581,9 @@ def head_carriage(engine, mesh, seconds=5.0, samples=48):
     """
     print("\n== how the head is carried ==")
     worst, when = 0.0, 0.0
-    for step in range(samples):
-        moment = step * seconds / samples
-        engine("anim.set", time=moment)
-        bones = {b["name"]: b["world_position"]
-                 for b in engine("scene.skeleton", object=mesh)["bones"]}
+    times = [step * seconds / samples for step in range(samples)]
+    for step, bones in enumerate(_series(engine, mesh, times)):
+        moment = times[step]
         if "Neck" not in bones or "Head" not in bones:
             return
         up = [bones["Head"][i] - bones["Neck"][i] for i in range(3)]
@@ -624,11 +627,10 @@ def gait(engine, figure_mesh, feet, road, seconds, fps):
         return
 
     track = {}
-    frames = int(seconds * fps)
-    for frame in range(frames):
-        engine("anim.set", time=frame / float(fps))
-        for bone in engine("scene.skeleton", object=figure_mesh)["bones"]:
-            track.setdefault(bone["name"], []).append(bone["world_position"])
+    times = [frame / float(fps) for frame in range(int(seconds * fps))]
+    for bones in _series(engine, figure_mesh, times):
+        for name, position in bones.items():
+            track.setdefault(name, []).append(position)
 
     lowest = min(min(at[1] for at in track[foot]) for foot in feet if foot in track)
     check("no foot goes through the road", lowest >= road - 0.01,
@@ -669,15 +671,52 @@ def gait(engine, figure_mesh, feet, road, seconds, fps):
           "worst %.3f m, allowed %.3f" % (worst_drift, SLIDE_PER_CONTACT))
 
 
+def sampling_matches(engine, mesh):
+    """That anim.track reads the same pose a drawn frame does.
+
+    Every walk standard below reads the skeleton through anim.track, which poses
+    a time without rendering it. That is only trustworthy if it lands on the
+    same pose the per-frame path does -- anim.set, which seeks and reposes, then
+    scene.skeleton, which is answered at the frame boundary after the scene's
+    solve has run. So the two are compared here, bone for bone, before anything
+    is measured off the fast one. If they ever diverge, every number after this
+    is measuring a pose that was never drawn, and this is what says so.
+    """
+    print("\n== the fast pose reads true ==")
+    times = [0.4, 1.1, 1.9, 2.67, 3.3]
+    batched = _series(engine, mesh, times)
+    worst, where = 0.0, ""
+    for i, moment in enumerate(times):
+        engine("anim.set", time=moment)
+        drawn = {b["name"]: b["world_position"]
+                 for b in engine("scene.skeleton", object=mesh)["bones"]}
+        for name, pos in drawn.items():
+            d = max(abs(pos[k] - batched[i][name][k]) for k in range(3))
+            if d > worst:
+                worst, where = d, "%s at %.2fs" % (name, moment)
+    print("  worst bone disagreement between the two: %.6f m (%s)" % (worst, where or "-"))
+    check("anim.track lands on the pose a frame draws", worst <= SAMPLE_MATCH_EPS,
+          "a bone read %.6f m apart between anim.track and the per-frame path (%s), allowed %.4f"
+          % (worst, where, SAMPLE_MATCH_EPS))
+
+
+def _series(engine, mesh, times):
+    """Every bone's world position at each of the given animation times.
+
+    One channel call. anim.track poses each time exactly as a drawn frame does
+    -- the clips applied, then the scene's own solve on top -- and reads every
+    bone, with no frame rendered between samples. It is the per-frame anim.set
+    plus scene.skeleton loop collapsed into a single answer, which is what makes
+    the animation standards affordable to run a thousand samples deep, and on
+    the software renderer a headless runner falls back to.
+    """
+    return [{b["name"]: b["world_position"] for b in sample["bones"]}
+            for sample in engine("anim.track", object=mesh, times=times)["samples"]]
+
+
 def _track(engine, mesh, seconds, fps):
     """Every bone's world position at each frame of the clip, once."""
-    frames = int(seconds * fps)
-    rows = []
-    for frame in range(frames):
-        engine("anim.set", time=frame / float(fps))
-        rows.append({b["name"]: b["world_position"]
-                     for b in engine("scene.skeleton", object=mesh)["bones"]})
-    return rows
+    return _series(engine, mesh, [frame / float(fps) for frame in range(int(seconds * fps))])
 
 
 def weight_shift(engine, mesh, seconds=5.0, fps=24):
@@ -1031,22 +1070,26 @@ def main(argv):
         lighting(engine)
         bloom(engine)
         shadows(engine)
-        # The animation standards read the skeleton hundreds of times, once a
-        # frame -- fine at sixty frames a second, but on the software Vulkan a
-        # headless runner falls back to, a frame is a tenth of a second and the
-        # sampling runs for minutes. They judge the pose, which is the same on
-        # every backend and is fully covered by the OpenGL run, so --frame-only
-        # skips them: the Vulkan pass exists to prove the lighting and the
-        # frame-reading on the target, and those it keeps.
-        if args.walks and not args.frame_only:
-            silhouette(engine, args.walks)
-            limbs(engine, args.walks, args.figure)
+        if args.walks:
+            sampling_matches(engine, args.walks)
+            # These read the pose through anim.track, which samples every time
+            # in one answer without rendering a frame, so they cost the same on
+            # the software Vulkan a headless runner falls back to as on a
+            # workstation. That is what lets the Vulkan pass prove the walk on
+            # the target rather than leaving it to the OpenGL run.
             spins(engine, args.walks)
             head_carriage(engine, args.walks)
             gait(engine, args.walks, args.feet.split(","), args.road, 2.6, 24)
             weight_shift(engine, args.walks)
             hand_to_target(engine, args.walks)
             secondary_motion(engine, args.walks)
+            # These pose the figure and read the picture of it, a rendered frame
+            # per sample. On software Vulkan a frame is a tenth of a second and
+            # this runs for minutes, and the shape it judges is the same on
+            # every backend, so --frame-only leaves it to the OpenGL run.
+            if not args.frame_only:
+                silhouette(engine, args.walks)
+                limbs(engine, args.walks, args.figure)
         engine("frame.resume")
 
     if scene is not None:
