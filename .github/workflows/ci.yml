@@ -90,14 +90,44 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install glfw vulkan-headers
 
+      # The toolchain is built from source every run, which is a minute or more
+      # of a run that asks for it by hand. It only changes when aether does, so
+      # it is cached under the commit it was built from: a different aether HEAD
+      # is a different key and rebuilds, the same one is restored. The path is
+      # resolved in the job's own shell -- ~/.aether, which on the MSYS2 shell is
+      # a POSIX home actions/cache (a Node action) cannot read, so cygpath hands
+      # it the Windows path for the same directory.
+      - name: Resolve the Aether version
+        id: aether
+        run: |
+          echo "sha=$(git ls-remote https://github.com/aether-lang-dev/aether.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
+          dir="$HOME/.aether"
+          if command -v cygpath >/dev/null 2>&1; then dir="$(cygpath -w "$dir")"; fi
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the Aether toolchain
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.aether.outputs.dir }}
+          key: aether-${{ runner.os }}-${{ steps.aether.outputs.sha }}
+
       # install.sh is a bash script that changes to its own directory and builds
       # the compiler from the tree around it. Piping it into a shell gave it
       # neither: dash rejected its options on Linux, and on macOS it ran make in
       # this checkout instead, which has no compiler to build.
+      #
+      # Skipped when the cache already holds a working toolchain, and run anyway
+      # if it does not: a cache that restored partially leaves the binaries
+      # missing, and building them is how that heals rather than failing the
+      # whole run on a "'aetherc' not found".
       - name: Install the Aether toolchain
         run: |
-          git clone --depth 1 https://github.com/aether-lang-dev/aether.git "$RUNNER_TEMP/aether"
-          (cd "$RUNNER_TEMP/aether" && ./install.sh)
+          if [ -x "$HOME/.aether/bin/aetherc" ] || [ -x "$HOME/.aether/bin/aetherc.exe" ]; then
+            echo "Aether toolchain restored from cache; skipping the build."
+          else
+            git clone --depth 1 https://github.com/aether-lang-dev/aether.git "$RUNNER_TEMP/aether"
+            (cd "$RUNNER_TEMP/aether" && ./install.sh)
+          fi
 
       - name: Run CI
         run: |
