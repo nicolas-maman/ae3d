@@ -281,6 +281,13 @@ static struct {
     int ssr_set_built;
     float ssr_road_height;
     float ssr_strength;
+    // The reflective composite writes here rather than to the swapchain, so the
+    // ordinary bloom/fxaa composite can then read it and bloom the mirrored
+    // lamps too. It is a single-sample colour target that ends the pass in
+    // sampler-read layout, built and torn down with the camera-depth target.
+    VkRenderPass ssr_pass;
+    VkFramebuffer ssr_framebuffer;
+    int ssr_reflect_texture;
     float scene_clear[4];
     VkFramebuffer scene_framebuffer;
     VkFramebuffer *post_framebuffers;
@@ -1438,6 +1445,14 @@ static void ae3d_vk_destroy_camdepth_target(void) {
     }
     vk.camdepth_width = 0;
     vk.camdepth_height = 0;
+    if (vk.ssr_framebuffer) {
+        ae3d_vkDestroyFramebuffer(vk.device, vk.ssr_framebuffer, NULL);
+        vk.ssr_framebuffer = VK_NULL_HANDLE;
+    }
+    if (vk.ssr_reflect_texture) {
+        ae3d_vk_texture_destroy(vk.ssr_reflect_texture);
+        vk.ssr_reflect_texture = 0;
+    }
     // The SSR sets sample this target; force them to be reallocated and
     // rewritten against the new one when SSR is next drawn.
     {
@@ -1488,12 +1503,66 @@ static int ae3d_vk_create_camdepth_target(int width, int height) {
     }
     vk.camdepth_width = width;
     vk.camdepth_height = height;
+
+    // The intermediate the reflective composite writes into: a colour target
+    // the ordinary composite then samples, sized to match, filtered linearly so
+    // the bloom that reads it can blur across it.
+    {
+        ae3d_vk_texture *reflect = NULL;
+        VkSamplerCreateInfo rsampler;
+        VkImageView rattach[1];
+        VkFramebufferCreateInfo rinfo;
+        int slot;
+
+        for (slot = 0; slot < AE3D_VK_MAX_TEXTURES; slot++) {
+            if (!vk.textures[slot].in_use) { reflect = &vk.textures[slot]; break; }
+        }
+        if (!reflect) return ae3d_vk_fail("texture table full");
+
+        if (!ae3d_vk_create_image(width, height, 1, vk.color_format, VK_SAMPLE_COUNT_1_BIT,
+                                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                  VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_TILING_OPTIMAL,
+                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                  &reflect->image, &reflect->memory, &reflect->view)) {
+            return 0;
+        }
+
+        memset(&rsampler, 0, sizeof(rsampler));
+        rsampler.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        rsampler.magFilter = VK_FILTER_LINEAR;
+        rsampler.minFilter = VK_FILTER_LINEAR;
+        rsampler.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        rsampler.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        rsampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        rsampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        rsampler.maxLod = 1.0f;
+        if (ae3d_vkCreateSampler(vk.device, &rsampler, NULL, &reflect->sampler) != VK_SUCCESS) {
+            return ae3d_vk_fail("ssr-reflect vkCreateSampler failed");
+        }
+        reflect->width = width;
+        reflect->height = height;
+        reflect->in_use = 1;
+        vk.ssr_reflect_texture = slot + 1;
+
+        rattach[0] = reflect->view;
+        memset(&rinfo, 0, sizeof(rinfo));
+        rinfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        rinfo.renderPass = vk.ssr_pass;
+        rinfo.attachmentCount = 1;
+        rinfo.pAttachments = rattach;
+        rinfo.width = (unsigned)width;
+        rinfo.height = (unsigned)height;
+        rinfo.layers = 1;
+        if (ae3d_vkCreateFramebuffer(vk.device, &rinfo, NULL, &vk.ssr_framebuffer) != VK_SUCCESS) {
+            return ae3d_vk_fail("ssr-reflect vkCreateFramebuffer failed");
+        }
+    }
     return 1;
 }
 
 // The composite pass reads what the scene pass produced, so it takes a single
 // resolved colour attachment and no depth.
-static int ae3d_vk_build_post_pass(VkImageLayout present_layout) {
+static int ae3d_vk_build_post_pass(VkImageLayout present_layout, VkRenderPass *out) {
     VkAttachmentDescription attachment;
     VkAttachmentReference colour_ref;
     VkSubpassDescription subpass;
@@ -1536,7 +1605,7 @@ static int ae3d_vk_build_post_pass(VkImageLayout present_layout) {
     info.dependencyCount = 1;
     info.pDependencies = &dependency;
 
-    if (ae3d_vkCreateRenderPass(vk.device, &info, NULL, &vk.post_pass) != VK_SUCCESS) {
+    if (ae3d_vkCreateRenderPass(vk.device, &info, NULL, out) != VK_SUCCESS) {
         return ae3d_vk_fail("post vkCreateRenderPass failed");
     }
     return 1;
@@ -1552,7 +1621,12 @@ static int ae3d_vk_create_render_pass(void) {
     if (!ae3d_vk_build_render_pass(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, &vk.scene_pass)) return 0;
     if (!ae3d_vk_build_shadow_pass()) return 0;
     if (!ae3d_vk_build_camdepth_pass()) return 0;
-    return ae3d_vk_build_post_pass(present_layout);
+    // The reflective composite writes into an off-screen colour target the
+    // final composite then samples, so its pass ends in sampler-read layout;
+    // it stays compatible with the swapchain post pass, so one set of post
+    // pipelines is valid in either.
+    if (!ae3d_vk_build_post_pass(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, &vk.ssr_pass)) return 0;
+    return ae3d_vk_build_post_pass(present_layout, &vk.post_pass);
 }
 
 // The scene renders into a sampled image when post-processing is on, and the
@@ -2988,7 +3062,7 @@ int ae3d_vk_frame_begin(double r, double g, double b, double a) {
     vk.scene_clear[2] = (float)b;
     vk.scene_clear[3] = (float)a;
 
-    vk.post_active = (vk.fxaa || vk.bloom) && vk.screen_quad > 0 && vk.post_texture > 0;
+    vk.post_active = (vk.fxaa || vk.bloom || vk.ssr_enabled) && vk.screen_quad > 0 && vk.post_texture > 0;
     vk.pass_open = 0;
     vk.in_shadow_pass = 0;
 
@@ -3429,11 +3503,12 @@ static void ae3d_vk_draw_ssr(void) {
     vk.draw_calls++;
 }
 
-static void ae3d_vk_draw_post(void) {
+// The post uniforms live in the shared scene block, so both the reflective
+// composite and the ordinary one read them; set them once before either draws.
+static void ae3d_vk_setup_post_uniforms(void) {
     float texel_x = vk.extent.width ? 1.0f / (float)vk.extent.width : 0.0f;
     float texel_y = vk.extent.height ? 1.0f / (float)vk.extent.height : 0.0f;
     float texel[2];
-    int index = vk.bloom && vk.post_pipelines[2] ? 2 : (vk.fxaa && vk.post_pipelines[1] ? 1 : 0);
 
     texel[0] = texel_x;
     texel[1] = texel_y;
@@ -3446,15 +3521,14 @@ static void ae3d_vk_draw_post(void) {
     ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_SSRROADHEIGHT, vk.ssr_road_height);
     ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_SSRSTRENGTH, vk.ssr_strength);
     vk.program = AE3D_VK_PROGRAM_SCENE;
+}
 
-    // When SSR is on, the reflective composite replaces the bloom/fxaa one: it
-    // reads the scene colour and the camera depth and mirrors the geometry onto
-    // the wet road. Off, the ordinary composite runs and nothing changed.
-    if (vk.ssr_enabled && vk.post_pipelines[3] && vk.camdepth_framebuffer) {
-        ae3d_vk_draw_ssr();
-    } else {
-        ae3d_vk_draw_pipeline(vk.post_pipelines[index], vk.screen_quad, vk.post_texture, 0, 1);
-    }
+// The ordinary composite: bloom, else fxaa, else a straight copy, reading the
+// given colour source -- the scene directly, or the reflected intermediate when
+// SSR ran a stage before it.
+static void ae3d_vk_draw_composite(int source_texture) {
+    int index = vk.bloom && vk.post_pipelines[2] ? 2 : (vk.fxaa && vk.post_pipelines[1] ? 1 : 0);
+    ae3d_vk_draw_pipeline(vk.post_pipelines[index], vk.screen_quad, source_texture, 0, 1);
 }
 
 int ae3d_vk_frame_end(void) {
@@ -3474,6 +3548,37 @@ int ae3d_vk_frame_end(void) {
         VkRenderPassBeginInfo pass;
         VkViewport viewport;
         VkRect2D scissor;
+        // The reflective stage runs when SSR is on and its off-screen targets
+        // are built. It mirrors the scene into the intermediate; the ordinary
+        // composite then reads that instead of the scene colour, so the bloom
+        // it does picks up the mirrored lamps as well.
+        int ssr_now = vk.ssr_enabled && vk.post_pipelines[3] &&
+                      vk.ssr_framebuffer && vk.camdepth_framebuffer &&
+                      vk.ssr_reflect_texture > 0;
+
+        memset(&viewport, 0, sizeof(viewport));
+        viewport.width = (float)vk.extent.width;
+        viewport.height = (float)vk.extent.height;
+        viewport.maxDepth = 1.0f;
+        memset(&scissor, 0, sizeof(scissor));
+        scissor.extent = vk.extent;
+
+        ae3d_vk_setup_post_uniforms();
+
+        if (ssr_now) {
+            memset(&pass, 0, sizeof(pass));
+            pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            pass.renderPass = vk.ssr_pass;
+            pass.framebuffer = vk.ssr_framebuffer;
+            pass.renderArea.extent = vk.extent;
+            ae3d_vkCmdBeginRenderPass(vk.command_buffers[vk.frame], &pass, VK_SUBPASS_CONTENTS_INLINE);
+            vk.pass_open = 1;
+            ae3d_vkCmdSetViewport(vk.command_buffers[vk.frame], 0, 1, &viewport);
+            ae3d_vkCmdSetScissor(vk.command_buffers[vk.frame], 0, 1, &scissor);
+            ae3d_vk_draw_ssr();
+            ae3d_vkCmdEndRenderPass(vk.command_buffers[vk.frame]);
+            vk.pass_open = 0;
+        }
 
         memset(&pass, 0, sizeof(pass));
         pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -3482,18 +3587,9 @@ int ae3d_vk_frame_end(void) {
         pass.renderArea.extent = vk.extent;
         ae3d_vkCmdBeginRenderPass(vk.command_buffers[vk.frame], &pass, VK_SUBPASS_CONTENTS_INLINE);
         vk.pass_open = 1;
-
-        memset(&viewport, 0, sizeof(viewport));
-        viewport.width = (float)vk.extent.width;
-        viewport.height = (float)vk.extent.height;
-        viewport.maxDepth = 1.0f;
         ae3d_vkCmdSetViewport(vk.command_buffers[vk.frame], 0, 1, &viewport);
-
-        memset(&scissor, 0, sizeof(scissor));
-        scissor.extent = vk.extent;
         ae3d_vkCmdSetScissor(vk.command_buffers[vk.frame], 0, 1, &scissor);
-
-        ae3d_vk_draw_post();
+        ae3d_vk_draw_composite(ssr_now ? vk.ssr_reflect_texture : vk.post_texture);
         ae3d_vkCmdEndRenderPass(vk.command_buffers[vk.frame]);
         vk.pass_open = 0;
     }
@@ -4057,6 +4153,7 @@ void ae3d_vk_shutdown(void) {
     if (vk.render_pass) ae3d_vkDestroyRenderPass(vk.device, vk.render_pass, NULL);
     if (vk.scene_pass) ae3d_vkDestroyRenderPass(vk.device, vk.scene_pass, NULL);
     if (vk.post_pass) ae3d_vkDestroyRenderPass(vk.device, vk.post_pass, NULL);
+    if (vk.ssr_pass) ae3d_vkDestroyRenderPass(vk.device, vk.ssr_pass, NULL);
     if (vk.shadow_pass) ae3d_vkDestroyRenderPass(vk.device, vk.shadow_pass, NULL);
     if (vk.camdepth_pass) ae3d_vkDestroyRenderPass(vk.device, vk.camdepth_pass, NULL);
     if (vk.shadow_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.shadow_pipeline, NULL);
