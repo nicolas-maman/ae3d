@@ -1,0 +1,156 @@
+// The point of an ECS crowd is that a million entities cost what a hundred do
+// in draw calls: they are one instanced draw, not one draw each. This renders
+// crowds of growing size and checks the draw-call count does not move with them
+// -- the flat line that makes "millions on screen" a rendering possibility at
+// all. The instance positions come straight from the ECS position column with
+// no repack, since an Aether float is the same 64-bit the instance upload
+// wants. Offscreen, so it runs headless on both backends.
+
+import std.mem
+import ae3d.core
+import ae3d.gl
+import ae3d.vk
+import ae3d.offscreen
+import ae3d.loader
+import ae3d.ecs
+import ae3d.platform
+
+const VIEW = 96
+
+var failures = 0
+
+check_true(name: string, ok: bool) {
+    if !ok {
+        println("FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// Render one crowd of `n` ECS entities as a single instanced model and return
+// the scene's draw-call count. The crowd is laid out in a grid on the ground;
+// its positions live in an ECS column, handed to the instance upload directly.
+crowd_draws(backend: *Backend, cam: *Camera, key: *Light, n: int) -> int {
+    w = ecs.world_new(n)
+    position = ecs.column_new(n, 3)
+    if w == null || position == null {
+        if position != null { ecs.column_free(position) }
+        if w != null { ecs.world_free(w) }
+        return 0 - 1
+    }
+
+    // A square-ish grid centred on the origin, so the whole crowd is in frame.
+    side = 1
+    while side * side < n { side = side + 1 }
+    half = (side as float) * 0.5
+    i = 0
+    while i < n {
+        e = ecs.entity_create(w)
+        slot = ecs.entity_index(e)
+        gx = (i % side) as float
+        gz = (i / side) as float
+        ecs.column_set3(position, slot, core.vec3(gx - half, 0.0, gz - half))
+        i = i + 1
+    }
+
+    swarm = loader.cube(0.4)
+    core.model_matte(swarm, 0.8, 0.8, 0.8)
+    if !core.model_enable_instancing(swarm, n) {
+        core.model_free(swarm)
+        ecs.column_free(position)
+        ecs.world_free(w)
+        return 0 - 1
+    }
+    // Zero-copy: the column's own buffer is the packed xyz the upload consumes.
+    core.model_set_instance_positions(swarm, ecs.column_data(position), n)
+    core.backend_add_model(backend, swarm)
+
+    core.backend_render(backend, cam, key)
+    draws = core.backend_draw_calls(backend)
+
+    core.backend_remove_model(backend, swarm)
+    core.model_free(swarm)
+    ecs.column_free(position)
+    ecs.world_free(w)
+    return draws
+}
+
+run_checks(backend: *Backend, name: string) {
+    cam = core.camera_new(VIEW, VIEW)
+    core.camera_set_position(cam, core.vec3(0.0, 240.0, 360.0))
+    core.camera_set_far(cam, 40000.0)
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+
+    key = core.light_directional(core.vec3(0.0, 0.0 - 1.0, 0.0 - 0.3),
+                                 core.vec3(1.0, 1.0, 1.0), 3.0)
+    key.ambient_strength = 0.5
+
+    small = crowd_draws(backend, cam, key, 1000)
+    mid = crowd_draws(backend, cam, key, 10000)
+    big = crowd_draws(backend, cam, key, 100000)
+
+    println("  ${name}: draw calls  1k=${small}  10k=${mid}  100k=${big}")
+    check_true("${name}: the crowd renders (draw calls are counted)", small > 0)
+    check_true("${name}: draw calls stay flat as the crowd grows 100x",
+               small == mid && mid == big)
+
+    // The per-entity spawn+fill cost at the largest size, as the recorded seed
+    // of the crowd's CPU budget.
+    n = 100000
+    w = ecs.world_new(n)
+    position = ecs.column_new(n, 3)
+    started = platform.time()
+    i = 0
+    while i < n {
+        e = ecs.entity_create(w)
+        ecs.column_set3(position, ecs.entity_index(e), core.vec3((i % 317) as float, 0.0, (i / 317) as float))
+        i = i + 1
+    }
+    fill_ms = (platform.time() - started) * 1000.0
+    println("  ${name}: spawned + placed ${n} entities in ${fill_ms} ms")
+    ecs.column_free(position)
+    ecs.world_free(w)
+
+    core.camera_free(cam)
+    core.light_free(key)
+}
+
+main() {
+    context = offscreen.context_create(VIEW, VIEW)
+    if context == null {
+        println("ecs_render: SKIP no OpenGL context")
+        return
+    }
+    renderer = gl.renderer_new()
+    gl_pass = gl.backend(renderer)
+    if !core.backend_init(&gl_pass, context, VIEW, VIEW) {
+        println("ecs_render: SKIP the OpenGL backend would not initialise")
+        return
+    }
+    target = offscreen.target_create(VIEW, VIEW)
+    gl.renderer_set_target(renderer, target)
+    run_checks(&gl_pass, "opengl")
+    core.backend_cleanup(&gl_pass)
+    offscreen.target_destroy(target)
+    gl.renderer_free(renderer)
+    offscreen.context_destroy(context)
+
+    if !vk.available() {
+        println("ecs_render: no Vulkan driver (${vk.last_error()}), checked OpenGL only")
+    } else {
+        vk_renderer = vk.renderer_new()
+        vk_pass = vk.backend(vk_renderer)
+        if !core.backend_init(&vk_pass, null, VIEW, VIEW) {
+            println("ecs_render: SKIP Vulkan would not start (${vk.last_error()})")
+        } else {
+            run_checks(&vk_pass, "vulkan")
+            core.backend_cleanup(&vk_pass)
+        }
+        vk.renderer_free(vk_renderer)
+    }
+
+    if failures == 0 {
+        println("ecs_render: all checks passed")
+    } else {
+        println("ecs_render: ${failures} failure(s)")
+    }
+}
