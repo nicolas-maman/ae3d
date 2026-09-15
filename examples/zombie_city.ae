@@ -67,12 +67,15 @@ var g_yaw: *Column = null     // per-zombie heading about Y; also its facing
 var g_grid: *HordeGrid = null
 // Per-tier compacted buffers, filled each frame by bucketing the crowd by
 // distance to the camera. Sized to the whole count -- a tier may hold all of it.
+var g_color: *Column = null   // a fixed muted tint per zombie, for variety
 var g_nb_pos: *Column = null
 var g_nb_yaw: *Column = null
 var g_nb_phase: *Column = null
+var g_nb_col: *Column = null
 var g_fb_pos: *Column = null
 var g_fb_yaw: *Column = null
 var g_fb_phase: *Column = null
+var g_fb_col: *Column = null
 var g_count = CROWD_DEFAULT
 var g_walk = 1.0
 
@@ -156,6 +159,7 @@ setup_crowd(model: *Model, cell: float) -> int {
     core.model_enable_instancing(model, g_count)
     core.model_set_pose_bank(model, g_bank, FRAMES)
     core.model_enable_instance_phases(model)
+    core.model_enable_instance_colors(model)
     return core.mesh_index_count(core.model_mesh(model)) / 3
 }
 
@@ -274,12 +278,15 @@ on_start(data: ptr) {
     g_vel = ecs.column_new(g_count, 3)
     g_phase = ecs.column_new(g_count, 1)
     g_yaw = ecs.column_new(g_count, 1)
+    g_color = ecs.column_new(g_count, 3)
     g_nb_pos = ecs.column_new(g_count, 3)
     g_nb_yaw = ecs.column_new(g_count, 1)
     g_nb_phase = ecs.column_new(g_count, 1)
+    g_nb_col = ecs.column_new(g_count, 3)
     g_fb_pos = ecs.column_new(g_count, 3)
     g_fb_yaw = ecs.column_new(g_count, 1)
     g_fb_phase = ecs.column_new(g_count, 1)
+    g_fb_col = ecs.column_new(g_count, 3)
     i = 0
     while i < g_count {
         ent = ecs.entity_create(g_world)
@@ -294,6 +301,13 @@ on_start(data: ptr) {
         down = 0.0
         if next_random() < 0.5 { down = 3.1415926 }
         ecs.column_set(g_yaw, slot, 0, down + (next_random() - 0.5) * 1.8)
+        // A muted tint per zombie -- some greener, some greyer, some paler and
+        // some darker -- so the horde is not one flat colour. It multiplies the
+        // skin and cloth texture, so it stays in the dead-flesh range.
+        tr = 0.55 + next_random() * 0.55
+        tg = 0.60 + next_random() * 0.45
+        tb = 0.50 + next_random() * 0.45
+        ecs.column_set3(g_color, slot, core.vec3(tr, tg, tb))
         i = i + 1
     }
     // The spatial grid the separation runs on, sized to hold the whole street.
@@ -331,21 +345,22 @@ on_update(data: ptr, delta: float) {
                      ecs.column_data(g_phase), g_count, delta, MAX_SPEED,
                      STREET_X0, STREET_X1, ROAD_Z0, ROAD_Z1, ROAD_Y, g_walk)
     nn = crowd.crowd_bucket(ecs.column_data(g_pos), ecs.column_data(g_yaw), ecs.column_data(g_phase),
-                            g_count, cam.position.x, cam.position.z, NEAR_DIST,
-                            ecs.column_data(g_nb_pos), ecs.column_data(g_nb_yaw), ecs.column_data(g_nb_phase),
-                            ecs.column_data(g_fb_pos), ecs.column_data(g_fb_yaw), ecs.column_data(g_fb_phase))
+                            ecs.column_data(g_color), g_count, cam.position.x, cam.position.z, NEAR_DIST,
+                            ecs.column_data(g_nb_pos), ecs.column_data(g_nb_yaw), ecs.column_data(g_nb_phase), ecs.column_data(g_nb_col),
+                            ecs.column_data(g_fb_pos), ecs.column_data(g_fb_yaw), ecs.column_data(g_fb_phase), ecs.column_data(g_fb_col))
     nf = g_count - nn
 
-    upload_tier(g_near_body, g_nb_pos, g_nb_yaw, g_nb_phase, nn)
-    if g_near_clothes != null { upload_tier(g_near_clothes, g_nb_pos, g_nb_yaw, g_nb_phase, nn) }
-    upload_tier(g_far_body, g_fb_pos, g_fb_yaw, g_fb_phase, nf)
+    upload_tier(g_near_body, g_nb_pos, g_nb_yaw, g_nb_phase, g_nb_col, nn)
+    if g_near_clothes != null { upload_tier(g_near_clothes, g_nb_pos, g_nb_yaw, g_nb_phase, g_nb_col, nn) }
+    upload_tier(g_far_body, g_fb_pos, g_fb_yaw, g_fb_phase, g_fb_col, nf)
 }
 
-upload_tier(model: *Model, pos: *Column, yaw: *Column, phase: *Column, count: int) {
+upload_tier(model: *Model, pos: *Column, yaw: *Column, phase: *Column, col: *Column, count: int) {
     core.model_set_instance_draw_count(model, count)
     core.model_set_instance_positions_yaw(model, ecs.column_data(pos),
                                           ecs.column_data(yaw), count)
     core.model_set_instance_phases(model, ecs.column_data(phase), count)
+    core.model_set_instance_colors(model, ecs.column_data(col), count)
 }
 
 main() {

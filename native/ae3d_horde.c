@@ -315,10 +315,11 @@ void ae3d_crowd_step(double *pos, const double *vel, double *yaw, double *phase,
 /* Sort the crowd into the near and far draw buffers by distance to the camera,
  * compacting each into its own contiguous run of position, yaw and phase.
  * Returns the near count; the far count is n minus it. */
-int ae3d_crowd_bucket(const double *pos, const double *yaw, const double *phase, int n,
+int ae3d_crowd_bucket(const double *pos, const double *yaw, const double *phase,
+                      const double *col, int n,
                       double cx, double cz, double near_dist,
-                      double *np, double *ny, double *nph,
-                      double *fp, double *fy, double *fph) {
+                      double *np, double *ny, double *nph, double *ncol,
+                      double *fp, double *fy, double *fph, double *fcol) {
     int i, nn = 0, nf = 0;
     double nd2 = near_dist * near_dist;
     if (!pos || !yaw || !phase) return 0;
@@ -330,10 +331,14 @@ int ae3d_crowd_bucket(const double *pos, const double *yaw, const double *phase,
         double dz = z - cz;
         if (dx * dx + dz * dz < nd2) {
             np[nn * 3] = x; np[nn * 3 + 1] = y; np[nn * 3 + 2] = z;
-            ny[nn] = yaw[i]; nph[nn] = phase[i]; nn++;
+            ny[nn] = yaw[i]; nph[nn] = phase[i];
+            if (col && ncol) { ncol[nn * 3] = col[i * 3]; ncol[nn * 3 + 1] = col[i * 3 + 1]; ncol[nn * 3 + 2] = col[i * 3 + 2]; }
+            nn++;
         } else {
             fp[nf * 3] = x; fp[nf * 3 + 1] = y; fp[nf * 3 + 2] = z;
-            fy[nf] = yaw[i]; fph[nf] = phase[i]; nf++;
+            fy[nf] = yaw[i]; fph[nf] = phase[i];
+            if (col && fcol) { fcol[nf * 3] = col[i * 3]; fcol[nf * 3 + 1] = col[i * 3 + 1]; fcol[nf * 3 + 2] = col[i * 3 + 2]; }
+            nf++;
         }
     }
     return nn;
