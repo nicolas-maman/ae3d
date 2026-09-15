@@ -1039,14 +1039,21 @@ def wet_road_reflection(engine, at=2.2):
     surface -- and the bright cells in the road band are counted, then turned
     back on and counted again. With it on the lamps return, so the road carries
     far more bright cells than the dry, matte version. Both are numbers off the
-    grid; the road is left wet, the way the scene set it.
+    grid; the road is left wet, the way the scene set it. Screen-space reflection
+    is held off across the toggle, since it lights the road on both sides and
+    would otherwise measure the wrong feature; it is restored after.
     """
     print("\n== the wet road reflects the lamps ==")
     engine("anim.set", time=at)
+    was_ssr = engine("frame.stats").get("render", {}).get("ssr", False)
+    if was_ssr:
+        engine("render.set", ssr=False)
     models = engine("scene.tree", detail=True)["models"]
     wet = [i for i, m in enumerate(models)
            if m["name"] == "Street_Road" or m["name"] == "Street_Ground"]
     if not wet:
+        if was_ssr:
+            engine("render.set", ssr=True)
         check("the scene has a wet road to measure", False, "no road or ground model")
         return
 
@@ -1063,6 +1070,8 @@ def wet_road_reflection(engine, at=2.2):
     dry = road_bright()
     set_reflectivity(REFLECTION_ON)
     wet_count = road_bright()
+    if was_ssr:
+        engine("render.set", ssr=True)
 
     print("  the road carries %d bright cells wet, %d dry" % (wet_count, dry))
     check("the wet road reflects the lamps",
