@@ -3,10 +3,14 @@
 // Every zombie is an entity in the data-oriented ECS (ae3d.ecs): its position
 // and velocity are rows in dense columns, a system shambles the whole crowd
 // forward in one linear pass, and the position column's own buffer is handed
-// straight to the instanced draw with no repack. Ten thousand or ten million,
+// straight to the instanced draw with no repack. Forty thousand or a million,
 // the renderer issues a single instanced call -- the draw-call count does not
 // move with the crowd size, which is the whole reason a crowd this large can be
 // on screen at all. Run it and read the tail: N zombies, 1 draw call.
+//
+// AE3D_CROWD overrides the count, so the same program is a 40k demo and a
+// million-zombie stress test:
+//     AE3D_CROWD=1000000 ./build/zombie_crowd
 
 import ae3d.core
 import ae3d.engine
@@ -15,15 +19,15 @@ import ae3d.loader
 import ae3d.ecs
 import ae3d.platform
 
-const CROWD = 40000
-const FIELD = 60.0        // half-width of the ground the crowd shambles across
+const CROWD_DEFAULT = 40000
 const SPEED = 1.4
 
-// Typed as the ECS's own pointer types, so no casts are needed below.
+var g_count = CROWD_DEFAULT       // how many zombies, from AE3D_CROWD or the default
+var g_field = 60.0                // half-width of the ground, grown to fit the crowd
 var g_world: *EcsWorld = null
 var g_position: *Column = null
 var g_velocity: *Column = null
-var g_crowd: *Model = null
+var g_crowd: *Model = null        // the one instanced model the whole horde is
 var g_ground: *Model = null
 var g_seed = 0x9e3779b1
 
@@ -35,17 +39,25 @@ next_random() -> float {
 on_start(data: ptr) {
     e = data as *Engine
 
-    g_world = ecs.world_new(CROWD)
-    g_position = ecs.column_new(CROWD, 3)
-    g_velocity = ecs.column_new(CROWD, 3)
-    if g_world == null || g_position == null || g_velocity == null { return }
+    g_count = core.env_int("AE3D_CROWD", CROWD_DEFAULT)
+    // Grow the ground with the crowd so the density stays a horde rather than a
+    // wall: 40k fills a 120m square, a million a 600m one.
+    g_field = 0.3 * core.sqrt_of(g_count as float)
+
+    g_world = ecs.world_new(g_count)
+    g_position = ecs.column_new(g_count, 3)
+    g_velocity = ecs.column_new(g_count, 3)
+    if g_world == null || g_position == null || g_velocity == null {
+        println("zombie_crowd: could not allocate a crowd of ${g_count}")
+        return
+    }
 
     i = 0
-    while i < CROWD {
+    while i < g_count {
         ent = ecs.entity_create(g_world)
         slot = ecs.entity_index(ent)
-        x = (next_random() - 0.5) * 2.0 * FIELD
-        z = (next_random() - 0.5) * 2.0 * FIELD
+        x = (next_random() - 0.5) * 2.0 * g_field
+        z = (next_random() - 0.5) * 2.0 * g_field
         ecs.column_set3(g_position, slot, core.vec3(x, 0.0, z))
         // A slow shuffle in a random heading -- the shamble.
         angle = next_random() * 6.2831853
@@ -54,17 +66,17 @@ on_start(data: ptr) {
         i = i + 1
     }
 
-    // The crowd itself: one cube mesh, CROWD instances, a sickly green so the
+    // The crowd itself: one cube mesh, g_count instances, a sickly green so the
     // horde reads as a horde. One mesh, one material, one draw.
     crowd = loader.cube(0.5)
     core.model_matte(crowd, 0.20, 0.42, 0.16)
-    if !core.model_enable_instancing(crowd, CROWD) { return }
-    core.model_set_instance_positions(crowd, ecs.column_data(g_position), CROWD)
+    if !core.model_enable_instancing(crowd, g_count) { return }
+    core.model_set_instance_positions(crowd, ecs.column_data(g_position), g_count)
     engine.engine_add_model(e, crowd)
     g_crowd = crowd
 
     // A ground to shamble on.
-    ground = loader.plane(2, FIELD * 2.0)
+    ground = loader.plane(2, g_field * 2.0)
     core.model_matte(ground, 0.06, 0.07, 0.06)
     engine.engine_add_model(e, ground)
     g_ground = ground
@@ -74,12 +86,13 @@ on_start(data: ptr) {
         gl.renderer_set_clear_color(renderer, 0.02, 0.03, 0.04)
     }
 
+    // Pulled back far enough that the whole field is in frame at any size.
     cam = engine.engine_camera(e)
-    core.camera_set_position(cam, core.vec3(0.0, 34.0, 78.0))
-    core.camera_set_far(cam, 4000.0)
+    core.camera_set_position(cam, core.vec3(0.0, g_field * 0.55, g_field * 1.25))
+    core.camera_set_far(cam, 40000.0)
     core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
 
-    println("zombie_crowd: ${CROWD} zombies, one instanced draw")
+    println("zombie_crowd: ${g_count} zombies, one instanced draw")
 }
 
 on_update(data: ptr, delta: float) {
@@ -96,16 +109,16 @@ on_update(data: ptr, delta: float) {
     while slot < n {
         if ecs.slot_alive(g_world, slot) {
             p = ecs.column_get3(g_position, slot)
-            if p.x > FIELD { p.x = 0.0 - FIELD }
-            if p.x < 0.0 - FIELD { p.x = FIELD }
-            if p.z > FIELD { p.z = 0.0 - FIELD }
-            if p.z < 0.0 - FIELD { p.z = FIELD }
+            if p.x > g_field { p.x = 0.0 - g_field }
+            if p.x < 0.0 - g_field { p.x = g_field }
+            if p.z > g_field { p.z = 0.0 - g_field }
+            if p.z < 0.0 - g_field { p.z = g_field }
             ecs.column_set3(g_position, slot, p)
         }
         slot = slot + 1
     }
 
-    core.model_set_instance_positions(g_crowd, ecs.column_data(g_position), CROWD)
+    core.model_set_instance_positions(g_crowd, ecs.column_data(g_position), g_count)
 }
 
 main() {
@@ -128,7 +141,7 @@ main() {
     draws = 0
     renderer = engine.engine_gl_renderer(e)
     if renderer != null { draws = gl.renderer_draw_calls(renderer) }
-    println("zombie_crowd: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${CROWD} zombies in ${draws} draw call(s)")
+    println("zombie_crowd: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${g_count} zombies in ${draws} draw call(s)")
 
     if g_crowd != null { core.model_free(g_crowd) }
     if g_ground != null { core.model_free(g_ground) }

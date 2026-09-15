@@ -80,7 +80,10 @@ of a hundred thousand on screen in a **single draw call**. See [Credits](#credit
 ![40,000 ECS entities shambling across the ground, drawn in a single instanced call](docs/zombie-crowd.png)
 
 *`examples/zombie_crowd.ae`: forty thousand entities, one instanced draw. The
-draw-call count does not move with the crowd size.*
+draw-call count does not move with the crowd size — `AE3D_CROWD=1000000
+./build/zombie_crowd` puts **a million** on screen, still one instanced draw,
+at ~26 fps on an RTX 4070 Ti (per-frame cost is the instance-buffer upload, not
+the draw).*
 
 ## Driving it from a program
 
@@ -333,7 +336,7 @@ everything else.
 | `sand.ae` | 250000 grains falling and settling, click to scatter them |
 | `blender_pipeline.ae` | A model authored and keyed in Blender, exported, loaded and played |
 | `zombie_street.ae` | A zombie walking a night street and attacking, 40 textured objects from one .blend, wet road reflecting the lamps (Vulkan) |
-| `zombie_crowd.ae` | 40,000 ECS zombies shambling in a single instanced draw — the draw-call count does not move with the crowd size |
+| `zombie_crowd.ae` | 40,000 ECS zombies shambling in a single instanced draw (`AE3D_CROWD=1000000` for a million) — the draw-call count does not move with the crowd size |
 | `smooth_terrain.ae` | The same terrain meshed with surface nets, 67590 triangles |
 
 ### Examples as instruments
