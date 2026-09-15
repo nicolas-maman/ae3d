@@ -28,23 +28,20 @@ const LOD_CELL = 0.09
 const CROWD_DEFAULT = 20000
 
 // The road runs along x; Blender Y became ae3d -Z, so the carriageway sits at
-// about z = -2.94 and the crowd walks the length of it in +x, toward the camera.
-// The street block is tiled along x into a longer city, so the crowd floods a
-// street of blocks rather than one, receding into the fog.
+// about z = -2.94. The street block is tiled along x into a longer city, and the
+// crowd is a real horde inside it -- it seeks a target that drifts along the
+// street and shoves apart from itself, so it surges and mills and never leaves
+// the street. Nothing teleports, because nothing is ever recycled.
 const BLOCK_LEN = 84.0
 const TILES = 3          // blocks along the street, centred on the middle one
-const STREET_X0 = 0.0 - 10.0
-const STREET_X1 = 105.0
-const ROAD_Z0 = 0.0 - 6.4
-const ROAD_Z1 = 0.6
-const WALK_SPEED = 1.1
+const STREET_X0 = 0.0 - 100.0
+const STREET_X1 = 110.0
+const ROAD_Z0 = 0.0 - 6.0    // the street corridor the horde is held to, between
+const ROAD_Z1 = 5.0          // the far terrace and the near, so it clips no wall
 const ROAD_Y = 0.16
-// A zombie that walks off the near end is recycled to the far end -- but only
-// once it is well behind the camera (which sits at STREET_X1 + 2, looking back
-// down the street), so the recycle happens off-screen and reads as a continuous
-// flow out of the dark rather than a figure teleporting in full view.
-const RECYCLE_X = 114.0   // just behind the camera (STREET_X1 + 3), so recycling is off-screen
-const SPREAD = 0.7   // how far off straight-ahead a zombie may face and head
+const SPEED = 2.6            // how fast a zombie shambles toward the target
+const SEP_RADIUS = 1.1       // it shoves apart from anything closer than this
+const SEP_STRENGTH = 5.0
 
 var g_scene: ptr = null
 var g_lamps: ptr = null
@@ -52,12 +49,15 @@ var g_sky: *Skybox = null
 var g_body: *Model = null
 var g_clothes: *Model = null
 var g_bank: ptr = null
+var g_world: *EcsWorld = null
 var g_pos: *Column = null
+var g_vel: *Column = null
 var g_phase: *Column = null
-var g_speed: *Column = null   // per-zombie shamble speed
-var g_yaw: *Column = null     // per-zombie facing about Y, for an organic crowd
+var g_yaw: *Column = null     // per-zombie facing about Y, taken from its heading
+var g_grid: *HordeGrid = null
 var g_count = CROWD_DEFAULT
 var g_walk = 1.0
+var g_time = 0.0
 
 var g_seed = 0x2f6a41b3
 next_random() -> float {
@@ -239,23 +239,26 @@ on_start(data: ptr) {
     clothes_entry = entry_named(m, "Zombie_Clothes")
     if clothes_entry != null { g_clothes = assets.entry_load_model(m, clothes_entry) }
 
+    g_world = ecs.world_new(g_count)
     g_pos = ecs.column_new(g_count, 3)
+    g_vel = ecs.column_new(g_count, 3)
     g_phase = ecs.column_new(g_count, 1)
-    g_speed = ecs.column_new(g_count, 1)
     g_yaw = ecs.column_new(g_count, 1)
     i = 0
     while i < g_count {
+        ent = ecs.entity_create(g_world)
+        slot = ecs.entity_index(ent)
         x = STREET_X0 + next_random() * (STREET_X1 - STREET_X0)
         z = ROAD_Z0 + next_random() * (ROAD_Z1 - ROAD_Z0)
-        ecs.column_set3(g_pos, i, core.vec3(x, ROAD_Y, z))
-        ecs.column_set(g_phase, i, 0, next_random())
-        // A shamble is not a march: each zombie has its own pace and faces its
-        // own way, so the crowd spreads and closes and turns rather than moving
-        // as one rigid block.
-        ecs.column_set(g_speed, i, 0, WALK_SPEED * (0.55 + next_random() * 0.9))
-        ecs.column_set(g_yaw, i, 0, (next_random() - 0.5) * SPREAD)
+        ecs.column_set3(g_pos, slot, core.vec3(x, ROAD_Y, z))
+        ecs.column_set(g_phase, slot, 0, next_random())
+        ecs.column_set(g_yaw, slot, 0, 0.0)
         i = i + 1
     }
+    // The spatial grid the separation runs on, sized to hold the whole street.
+    span = STREET_X1 - STREET_X0 + 40.0
+    cols = (span / SEP_RADIUS) as int + 2
+    g_grid = crowd.grid_new(cols, SEP_RADIUS, STREET_X0 - 20.0, 0.0 - span * 0.5, 48)
 
     // Skin and cloth, two surfaces over the one skeleton, each decimated to a
     // crowd LOD and instanced, both posed by the shared bank -- so the zombie
@@ -272,37 +275,48 @@ on_start(data: ptr) {
 
 on_update(data: ptr, delta: float) {
     if g_body == null { return }
-    i = 0
-    while i < g_count {
-        p = ecs.column_get3(g_pos, i)
-        speed = ecs.column_get(g_speed, i, 0)
-        a = ecs.column_get(g_yaw, i, 0)
-        ph = ecs.column_get(g_phase, i, 0)
+    g_time = g_time + delta
 
-        // Move along the way it faces: the mesh's forward at yaw a is
-        // (cos a, 0, -sin a), so travel and facing agree and the feet do not
-        // skate. Mostly down the street, each at its own angle off it.
-        nx = p.x + speed * core.cos_of(a) * delta
-        nz = p.z - speed * core.sin_of(a) * delta
-        if nx > RECYCLE_X {
-            // Off-screen behind the camera: send it back to the far dark, its
-            // heading and pace redrawn, so it walks back in rather than blinks.
-            nx = STREET_X0 - next_random() * 8.0
-            nz = ROAD_Z0 + next_random() * (ROAD_Z1 - ROAD_Z0)
-            speed = WALK_SPEED * (0.55 + next_random() * 0.9)
-            a = (next_random() - 0.5) * SPREAD
-            ecs.column_set(g_speed, i, 0, speed)
-            ecs.column_set(g_yaw, i, 0, a)
-        }
-        ecs.column_set3(g_pos, i, core.vec3(nx, ROAD_Y, nz))
+    // A target that drifts the length of the street: the horde surges after it
+    // and regroups behind it, so it is a horde and not a settled crowd. It never
+    // leaves the street, so nothing is ever teleported.
+    mid = (STREET_X0 + STREET_X1) * 0.5
+    reach = (STREET_X1 - STREET_X0) * 0.5 - 6.0
+    target = core.vec3(mid + core.sin_of(g_time * 0.08) * reach, ROAD_Y, 0.0 - 2.4)
 
-        // The walk cycles with the speed, so a faster zombie steps faster and
-        // the feet keep up with the ground instead of skating over it.
-        ph = ph + delta * (speed / g_walk) * 0.9
-        while ph >= 1.0 { ph = ph - 1.0 }
-        ecs.column_set(g_phase, i, 0, ph)
-        i = i + 1
+    crowd.horde_seek(g_world, g_pos, g_vel, target, SPEED, 0.4)
+    if g_grid != null {
+        crowd.horde_separate(g_world, g_pos, g_vel, g_grid, SEP_RADIUS, SEP_STRENGTH)
     }
+    ecs.integrate3(g_world, g_pos, g_vel, delta)
+
+    // Hold each zombie to the street corridor and the road, face it along its
+    // heading, and step its walk at its own speed so the feet keep the ground.
+    step_scale = delta / g_walk
+    slot = 0
+    n = ecs.world_slot_count(g_world)
+    while slot < n {
+        if ecs.slot_alive(g_world, slot) {
+            p = ecs.column_get3(g_pos, slot)
+            v = ecs.column_get3(g_vel, slot)
+            nz = p.z
+            if nz < ROAD_Z0 { nz = ROAD_Z0 }
+            if nz > ROAD_Z1 { nz = ROAD_Z1 }
+            nx = p.x
+            if nx < STREET_X0 { nx = STREET_X0 }
+            if nx > STREET_X1 { nx = STREET_X1 }
+            ecs.column_set3(g_pos, slot, core.vec3(nx, ROAD_Y, nz))
+            // Face the heading. Mesh forward at yaw a is (cos a, 0, -sin a), so
+            // to face velocity (vx, vz), a = atan2(-vz, vx).
+            sp = core.sqrt_of(v.x * v.x + v.z * v.z)
+            if sp > 0.05 { ecs.column_set(g_yaw, slot, 0, core.atan2_of(0.0 - v.z, v.x)) }
+            ph = ecs.column_get(g_phase, slot, 0) + step_scale * (0.4 + sp * 0.25)
+            while ph >= 1.0 { ph = ph - 1.0 }
+            ecs.column_set(g_phase, slot, 0, ph)
+        }
+        slot = slot + 1
+    }
+
     core.model_set_instance_positions_yaw(g_body, ecs.column_data(g_pos),
                                           ecs.column_data(g_yaw), g_count)
     core.model_set_instance_phases(g_body, ecs.column_data(g_phase), g_count)
