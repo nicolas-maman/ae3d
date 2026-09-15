@@ -23,6 +23,12 @@ import ae3d.platform
 const MANIFEST = "resources/blender/zombie_street/manifest.json"
 const FRAMES = 24
 const CROWD_DEFAULT = 4000
+// The crowd draws a decimated stand-in of the hero zombie, not the ~21k-triangle
+// mesh itself -- half a million of those is thirteen billion triangles a frame.
+// A cell of this size collapses the real figure to ~170 triangles, which the
+// render-scale sweep puts inside a 60 fps frame at half a million, and the skin
+// rides along so the coarse figure walks on the same skeleton.
+const LOD_CELL = 0.18
 
 const SPEED = 3.0        // how fast the horde shuffles toward its target
 const SEP_RADIUS = 1.4   // zombies closer than this shove apart
@@ -130,6 +136,17 @@ on_start(data: ptr) {
     if g_bank == null || g_body == null {
         println("zombie_horde: could not load the zombie")
         return
+    }
+
+    // Decimate the hero mesh to a crowd LOD at load, in the engine -- no DCC
+    // round-trip. The stand-in keeps the silhouette and the skin, so the crowd
+    // is the real zombie, only coarse enough that half a million of it draws.
+    src_mesh = core.model_mesh(g_body)
+    hero_tris = core.mesh_index_count(src_mesh) / 3
+    lod_mesh = core.mesh_decimate(src_mesh, LOD_CELL)
+    if lod_mesh != null {
+        core.model_set_mesh(g_body, lod_mesh)
+        println("zombie_horde: crowd LOD ${hero_tris} -> ${core.mesh_index_count(lod_mesh) / 3} triangles a figure")
     }
 
     if !core.model_enable_instancing(g_body, g_count) { return }
