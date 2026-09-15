@@ -277,11 +277,15 @@ static struct {
     int pass_open;
     int in_shadow_pass;
     int in_camdepth;
+    VkDescriptorSet ssr_set[AE3D_VK_FRAMES];
+    int ssr_set_built;
+    float ssr_road_height;
+    float ssr_strength;
     float scene_clear[4];
     VkFramebuffer scene_framebuffer;
     VkFramebuffer *post_framebuffers;
     int post_texture;
-    VkPipeline post_pipelines[3];
+    VkPipeline post_pipelines[4];
     VkPipeline sky_pipeline;
     int screen_quad;
     int fxaa;
@@ -1434,6 +1438,12 @@ static void ae3d_vk_destroy_camdepth_target(void) {
     }
     vk.camdepth_width = 0;
     vk.camdepth_height = 0;
+    // The SSR sets sample this target; force them to be reallocated and
+    // rewritten against the new one when SSR is next drawn.
+    {
+        int f;
+        for (f = 0; f < AE3D_VK_FRAMES; f++) vk.ssr_set[f] = VK_NULL_HANDLE;
+    }
 }
 
 // Built at the swapchain's size, the first time SSR is turned on and again
@@ -2299,6 +2309,44 @@ void ae3d_vk_scene_set_clip_mat4(int offset, const double *m) {
     ae3d_vk_set_mat4(&vk.scene[vk.program], offset, corrected);
 }
 
+/* The inverse of the clip-corrected view-projection, for the SSR shader to
+ * rebuild a world position from a screen pixel and its depth. It must invert
+ * the SAME matrix the vertex stage used (the corrected one above, mapping world
+ * to Vulkan NDC: y down, z in 0..1), so the correction is applied first and the
+ * result inverted. Column-major throughout, matching the rest of the block. */
+void ae3d_vk_scene_set_inv_viewproj(int offset, const double *m) {
+    double c[16], inv[16], det;
+    int column, i;
+    if (!m) return;
+    for (column = 0; column < 4; column++) {
+        c[column * 4 + 0] = m[column * 4 + 0];
+        c[column * 4 + 1] = -m[column * 4 + 1];
+        c[column * 4 + 2] = 0.5 * (m[column * 4 + 2] + m[column * 4 + 3]);
+        c[column * 4 + 3] = m[column * 4 + 3];
+    }
+    inv[0]  =  c[5]*c[10]*c[15] - c[5]*c[11]*c[14] - c[9]*c[6]*c[15] + c[9]*c[7]*c[14] + c[13]*c[6]*c[11] - c[13]*c[7]*c[10];
+    inv[4]  = -c[4]*c[10]*c[15] + c[4]*c[11]*c[14] + c[8]*c[6]*c[15] - c[8]*c[7]*c[14] - c[12]*c[6]*c[11] + c[12]*c[7]*c[10];
+    inv[8]  =  c[4]*c[9]*c[15]  - c[4]*c[11]*c[13] - c[8]*c[5]*c[15] + c[8]*c[7]*c[13] + c[12]*c[5]*c[11] - c[12]*c[7]*c[9];
+    inv[12] = -c[4]*c[9]*c[14]  + c[4]*c[10]*c[13] + c[8]*c[5]*c[14] - c[8]*c[6]*c[13] - c[12]*c[5]*c[10] + c[12]*c[6]*c[9];
+    inv[1]  = -c[1]*c[10]*c[15] + c[1]*c[11]*c[14] + c[9]*c[2]*c[15] - c[9]*c[3]*c[14] - c[13]*c[2]*c[11] + c[13]*c[3]*c[10];
+    inv[5]  =  c[0]*c[10]*c[15] - c[0]*c[11]*c[14] - c[8]*c[2]*c[15] + c[8]*c[3]*c[14] + c[12]*c[2]*c[11] - c[12]*c[3]*c[10];
+    inv[9]  = -c[0]*c[9]*c[15]  + c[0]*c[11]*c[13] + c[8]*c[1]*c[15] - c[8]*c[3]*c[13] - c[12]*c[1]*c[11] + c[12]*c[3]*c[9];
+    inv[13] =  c[0]*c[9]*c[14]  - c[0]*c[10]*c[13] - c[8]*c[1]*c[14] + c[8]*c[2]*c[13] + c[12]*c[1]*c[10] - c[12]*c[2]*c[9];
+    inv[2]  =  c[1]*c[6]*c[15]  - c[1]*c[7]*c[14]  - c[5]*c[2]*c[15] + c[5]*c[3]*c[14] + c[13]*c[2]*c[7]  - c[13]*c[3]*c[6];
+    inv[6]  = -c[0]*c[6]*c[15]  + c[0]*c[7]*c[14]  + c[4]*c[2]*c[15] - c[4]*c[3]*c[14] - c[12]*c[2]*c[7]  + c[12]*c[3]*c[6];
+    inv[10] =  c[0]*c[5]*c[15]  - c[0]*c[7]*c[13]  - c[4]*c[1]*c[15] + c[4]*c[3]*c[13] + c[12]*c[1]*c[7]  - c[12]*c[3]*c[5];
+    inv[14] = -c[0]*c[5]*c[14]  + c[0]*c[6]*c[13]  + c[4]*c[1]*c[14] - c[4]*c[2]*c[13] - c[12]*c[1]*c[6]  + c[12]*c[2]*c[5];
+    inv[3]  = -c[1]*c[6]*c[11]  + c[1]*c[7]*c[10]  + c[5]*c[2]*c[11] - c[5]*c[3]*c[10] - c[9]*c[2]*c[7]   + c[9]*c[3]*c[6];
+    inv[7]  =  c[0]*c[6]*c[11]  - c[0]*c[7]*c[10]  - c[4]*c[2]*c[11] + c[4]*c[3]*c[10] + c[8]*c[2]*c[7]   - c[8]*c[3]*c[6];
+    inv[11] = -c[0]*c[5]*c[11]  + c[0]*c[7]*c[9]   + c[4]*c[1]*c[11] - c[4]*c[3]*c[9]  - c[8]*c[1]*c[7]   + c[8]*c[3]*c[5];
+    inv[15] =  c[0]*c[5]*c[10]  - c[0]*c[6]*c[9]   - c[4]*c[1]*c[10] + c[4]*c[2]*c[9]  + c[8]*c[1]*c[6]   - c[8]*c[2]*c[5];
+    det = c[0]*inv[0] + c[1]*inv[4] + c[2]*inv[8] + c[3]*inv[12];
+    if (det > -1e-12 && det < 1e-12) { ae3d_vk_set_mat4(&vk.scene[vk.program], offset, c); return; }
+    det = 1.0 / det;
+    for (i = 0; i < 16; i++) inv[i] *= det;
+    ae3d_vk_set_mat4(&vk.scene[vk.program], offset, inv);
+}
+
 // A model's own uniforms arrive by name. The offset is resolved once and cached
 // on the uniform, so the strcmp walk happens the first time a name is seen and
 // never again.
@@ -2552,6 +2600,9 @@ static int ae3d_vk_create_pass_pipelines(void) {
         { ae3d_vk_depth_vert_spv, sizeof(ae3d_vk_depth_vert_spv),
           ae3d_vk_depth_frag_spv, sizeof(ae3d_vk_depth_frag_spv),
           0, 1, 1, 1, 0, VK_NULL_HANDLE, NULL },
+        { ae3d_vk_screen_vert_spv, sizeof(ae3d_vk_screen_vert_spv),
+          ae3d_vk_ssr_frag_spv, sizeof(ae3d_vk_ssr_frag_spv),
+          0, 0, 0, 0, 0, VK_NULL_HANDLE, NULL },
     };
     unsigned i;
 
@@ -2564,6 +2615,7 @@ static int ae3d_vk_create_pass_pipelines(void) {
     builds[5].pass = vk.render_pass; builds[5].out = &vk.water_pipeline[0];
     builds[6].pass = vk.render_pass; builds[6].out = &vk.water_pipeline_blend;
     builds[7].pass = vk.render_pass; builds[7].out = &vk.water_pipeline[1];
+    builds[9].pass = vk.post_pass;   builds[9].out = &vk.post_pipelines[3];
 
     for (i = 0; i < sizeof(builds) / sizeof(builds[0]); i++) {
         VkShaderModule vertex_module = ae3d_vk_shader(builds[i].vert, builds[i].vert_size);
@@ -3275,6 +3327,108 @@ double ae3d_vk_bloom_intensity(void) { return vk.bloom_intensity; }
 // The sky, the shadow pass and the composites all read the scene program's
 // block. Whichever program the last model selected is still current here, and a
 // composite reading the water block gets nonsense for its edge thresholds.
+void ae3d_vk_set_ssr_params(double road_height, double strength) {
+    vk.ssr_road_height = (float)road_height;
+    vk.ssr_strength = (float)strength;
+}
+
+// The SSR composite draw. Its own descriptor set puts the scene colour at
+// binding 1 and the camera depth at binding 2 (where the scene sets keep the
+// shadow map), and it reads the same uniform block as everything else, so the
+// SSR shader gets viewProjection, invViewProjection and the road parameters
+// the frame set. Written every draw because both images are remade on resize.
+static void ae3d_vk_draw_ssr(void) {
+    VkDescriptorSetAllocateInfo alloc;
+    VkDescriptorBufferInfo buffer;
+    VkDescriptorImageInfo scene_img, depth_img, def_img;
+    VkWriteDescriptorSet writes[4];
+    VkDeviceSize offsets[1];
+    ae3d_vk_uniform_ring *ring;
+    ae3d_vk_mesh *mesh;
+    ae3d_vk_texture *scene_tex;
+    VkDescriptorSet set;
+    unsigned slot, dynamic_offset;
+    int frame = (int)vk.frame;
+
+    if (vk.screen_quad <= 0 || vk.screen_quad > vk.mesh_capacity) return;
+    if (!vk.camdepth_view || vk.post_texture <= 0) return;
+    mesh = &vk.meshes[vk.screen_quad - 1];
+    if (!mesh->in_use || mesh->index_count == 0) return;
+    scene_tex = &vk.textures[vk.post_texture - 1];
+    if (!scene_tex->in_use) return;
+
+    if (!vk.ssr_set[frame]) {
+        memset(&alloc, 0, sizeof(alloc));
+        alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        alloc.descriptorPool = vk.descriptor_pool;
+        alloc.descriptorSetCount = 1;
+        alloc.pSetLayouts = &vk.set_layout;
+        if (ae3d_vkAllocateDescriptorSets(vk.device, &alloc, &set) != VK_SUCCESS) return;
+        vk.ssr_set[frame] = set;
+    }
+    set = vk.ssr_set[frame];
+
+    ring = &vk.uniforms[frame];
+    if (ring->used >= ring->capacity) return;
+    slot = ring->used++;
+    dynamic_offset = slot * ring->stride;
+    memcpy(ring->mapped + dynamic_offset, vk.scene[AE3D_VK_PROGRAM_SCENE].bytes, AE3D_VK_SCENE_SIZE);
+
+    memset(&buffer, 0, sizeof(buffer));
+    buffer.buffer = ring->buffer;
+    buffer.offset = 0;
+    buffer.range = AE3D_VK_SCENE_SIZE;
+
+    memset(&scene_img, 0, sizeof(scene_img));
+    scene_img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    scene_img.imageView = scene_tex->view;
+    scene_img.sampler = scene_tex->sampler;
+
+    memset(&depth_img, 0, sizeof(depth_img));
+    depth_img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    depth_img.imageView = vk.camdepth_view;
+    depth_img.sampler = vk.camdepth_sampler;
+
+    memset(&def_img, 0, sizeof(def_img));
+    def_img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    def_img.imageView = vk.textures[vk.default_texture - 1].view;
+    def_img.sampler = vk.textures[vk.default_texture - 1].sampler;
+
+    memset(writes, 0, sizeof(writes));
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = set; writes[0].dstBinding = 0; writes[0].descriptorCount = 1;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    writes[0].pBufferInfo = &buffer;
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet = set; writes[1].dstBinding = 1; writes[1].descriptorCount = 1;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[1].pImageInfo = &scene_img;
+    writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[2].dstSet = set; writes[2].dstBinding = 2; writes[2].descriptorCount = 1;
+    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[2].pImageInfo = &depth_img;
+    writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[3].dstSet = set; writes[3].dstBinding = 3; writes[3].descriptorCount = 1;
+    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[3].pImageInfo = &def_img;
+    ae3d_vkUpdateDescriptorSets(vk.device, 4, writes, 0, NULL);
+
+    if (vk.post_pipelines[3] != vk.bound_pipeline) {
+        ae3d_vkCmdBindPipeline(vk.command_buffers[vk.frame], VK_PIPELINE_BIND_POINT_GRAPHICS, vk.post_pipelines[3]);
+        vk.bound_pipeline = vk.post_pipelines[3];
+        vk.pipeline_binds++;
+    }
+    ae3d_vkCmdBindDescriptorSets(vk.command_buffers[vk.frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                 vk.pipeline_layout, 0, 1, &set, 1, &dynamic_offset);
+    offsets[0] = 0;
+    ae3d_vkCmdBindVertexBuffers(vk.command_buffers[vk.frame], 0, 1, &mesh->vertex_buffer, offsets);
+    ae3d_vkCmdBindVertexBuffers(vk.command_buffers[vk.frame], 1, 1, &vk.identity_instance, offsets);
+    ae3d_vkCmdBindVertexBuffers(vk.command_buffers[vk.frame], 2, 1, &vk.empty_skin, offsets);
+    ae3d_vkCmdBindIndexBuffer(vk.command_buffers[vk.frame], mesh->index_buffer, 0, VK_INDEX_TYPE_UINT32);
+    ae3d_vkCmdDrawIndexed(vk.command_buffers[vk.frame], mesh->index_count, 1, 0, 0, 0);
+    vk.draw_calls++;
+}
+
 static void ae3d_vk_draw_post(void) {
     float texel_x = vk.extent.width ? 1.0f / (float)vk.extent.width : 0.0f;
     float texel_y = vk.extent.height ? 1.0f / (float)vk.extent.height : 0.0f;
@@ -3289,9 +3443,18 @@ static void ae3d_vk_draw_post(void) {
     ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_EDGETHRESHOLD, 0.125f);
     ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_EDGETHRESHOLDMIN, 0.0625f);
     ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_SUBPIXELQUALITY, 0.75f);
+    ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_SSRROADHEIGHT, vk.ssr_road_height);
+    ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_SSRSTRENGTH, vk.ssr_strength);
     vk.program = AE3D_VK_PROGRAM_SCENE;
 
-    ae3d_vk_draw_pipeline(vk.post_pipelines[index], vk.screen_quad, vk.post_texture, 0, 1);
+    // When SSR is on, the reflective composite replaces the bloom/fxaa one: it
+    // reads the scene colour and the camera depth and mirrors the geometry onto
+    // the wet road. Off, the ordinary composite runs and nothing changed.
+    if (vk.ssr_enabled && vk.post_pipelines[3] && vk.camdepth_framebuffer) {
+        ae3d_vk_draw_ssr();
+    } else {
+        ae3d_vk_draw_pipeline(vk.post_pipelines[index], vk.screen_quad, vk.post_texture, 0, 1);
+    }
 }
 
 int ae3d_vk_frame_end(void) {
