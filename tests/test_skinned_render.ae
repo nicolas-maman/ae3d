@@ -186,6 +186,8 @@ main() {
     gl_pass = gl.backend(gl_renderer)
     if !core.backend_init(&gl_pass, context, WIDTH, HEIGHT) {
         println("skinned: SKIP the OpenGL backend would not initialise")
+        gl.renderer_free(gl_renderer)
+        offscreen.context_destroy(context)
         return
     }
 
@@ -258,10 +260,15 @@ main() {
         free(bind_pixels)
         free(rigid_pixels)
         core.backend_remove_model(&gl_pass, posed)
+        core.backend_cleanup(&gl_pass)
+        offscreen.target_destroy(target)
+        offscreen.context_destroy(context)
         core.model_free(posed)
         core.model_free(rigid)
         skin.skeleton_free(skeleton)
         free_bones(bones)
+        gl.renderer_free(gl_renderer)
+        vk.renderer_free(vk_renderer)
         core.light_free(light)
         core.camera_free(cam)
         report()
@@ -311,19 +318,31 @@ main() {
 
     free(vk_bind_pixels)
     free(vk_rigid_pixels)
+    free(bind_pixels)
+    free(rigid_pixels)
+
+    // The renderers first, because cleaning one up is what releases the GPU
+    // handles its models were given; then the models, then the renderers'
+    // own memory. The renderers were never freed at all, and each took the
+    // defaults model it makes for itself down with it.
     core.backend_remove_model(&vk_pass, vk_posed)
+    core.backend_remove_model(&gl_pass, posed)
+    core.backend_cleanup(&vk_pass)
+    core.backend_cleanup(&gl_pass)
+    offscreen.target_destroy(target)
+    offscreen.context_destroy(context)
+
     core.model_free(vk_posed)
     core.model_free(vk_rigid)
     skin.skeleton_free(vk_skeleton)
     free_bones(vk_bones)
-
-    free(bind_pixels)
-    free(rigid_pixels)
-    core.backend_remove_model(&gl_pass, posed)
     core.model_free(posed)
     core.model_free(rigid)
     skin.skeleton_free(skeleton)
     free_bones(bones)
+
+    gl.renderer_free(gl_renderer)
+    vk.renderer_free(vk_renderer)
     core.light_free(light)
     core.camera_free(cam)
     report()
