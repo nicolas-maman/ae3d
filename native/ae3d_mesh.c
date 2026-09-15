@@ -1148,15 +1148,30 @@ void *ae3d_mesh_decimate(void *handle, double cell_size) {
     }
 
     /* Assign each vertex to its cell's representative, accumulating as we go.
-       The cell key packs three 21-bit signed cell coordinates, which covers a
-       million cells an axis -- far more than any figure at a sane cell size. */
+       The cell key packs the vertex's dominant joint with three 16-bit cell
+       coordinates. Folding the joint in is what keeps a skinned figure from
+       tearing: two vertices a cell apart in the bind pose but weighted to
+       different bones -- the inner faces of the two legs, an arm against the
+       torso -- must not collapse to one, or the walk that pulls those bones
+       apart would drag the merged vertex into a spike between them. Same-bone
+       vertices in a cell still merge freely; that is where the triangles go. */
     for (i = 0; i < n; i++) {
         const float *vs = src->vertices + (size_t)i * AE3D_STRIDE;
         long long cx = (long long)floor((double)vs[0] * inv);
         long long cy = (long long)floor((double)vs[1] * inv);
         long long cz = (long long)floor((double)vs[2] * inv);
-        long long key = ((cx & 0x1FFFFFLL) << 42) | ((cy & 0x1FFFFFLL) << 21)
-                        | (cz & 0x1FFFFFLL);
+        long long dom = 0;
+        long long key;
+        if (skinned) {
+            const float *sk0 = src->skin + (size_t)i * AE3D_SKIN_STRIDE;
+            double best = -1.0;
+            int t;
+            for (t = 0; t < 4; t++) {
+                if ((double)sk0[4 + t] > best) { best = (double)sk0[4 + t]; dom = (long long)sk0[t]; }
+            }
+        }
+        key = ((dom & 0x7FFFLL) << 48) | ((cx & 0xFFFFLL) << 32)
+              | ((cy & 0xFFFFLL) << 16) | (cz & 0xFFFFLL);
         unsigned h = (unsigned)((unsigned long long)key * 1103515245ULL + 12345ULL)
                      & (unsigned)(cap - 1);
         double *a;

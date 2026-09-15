@@ -5,8 +5,9 @@
 //
 //     AE3D_CROWD=200000 ./build/zombie_horde
 //
-// The real zombie is ~26k triangles, so a huge crowd wants a decimated mesh or
-// LOD (a later step); this renders the full mesh at a crowd the GPU can carry.
+// The real zombie is ~21k triangles, far too many at half a million, so the
+// engine decimates it to a crowd LOD at load (core.mesh_decimate, bone-aware so
+// the walk does not tear it). AE3D_LOD_CELL (mm) tunes the budget; 0 draws full.
 
 import std.list
 import ae3d.core
@@ -143,10 +144,17 @@ on_start(data: ptr) {
     // is the real zombie, only coarse enough that half a million of it draws.
     src_mesh = core.model_mesh(g_body)
     hero_tris = core.mesh_index_count(src_mesh) / 3
-    lod_mesh = core.mesh_decimate(src_mesh, LOD_CELL)
-    if lod_mesh != null {
-        core.model_set_mesh(g_body, lod_mesh)
-        println("zombie_horde: crowd LOD ${hero_tris} -> ${core.mesh_index_count(lod_mesh) / 3} triangles a figure")
+    // AE3D_LOD_CELL is the cluster cell in millimetres (0 = no LOD, full mesh),
+    // a debug knob for dialling the crowd's triangle budget against its looks.
+    cell = (core.env_int("AE3D_LOD_CELL", (LOD_CELL * 1000.0) as int) as float) / 1000.0
+    if cell > 0.0 {
+        lod_mesh = core.mesh_decimate(src_mesh, cell)
+        if lod_mesh != null {
+            core.model_set_mesh(g_body, lod_mesh)
+            println("zombie_horde: crowd LOD ${hero_tris} -> ${core.mesh_index_count(lod_mesh) / 3} triangles a figure (cell ${cell})")
+        }
+    } else {
+        println("zombie_horde: no LOD, full ${hero_tris} triangles a figure")
     }
 
     if !core.model_enable_instancing(g_body, g_count) { return }
