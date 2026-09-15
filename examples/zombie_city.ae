@@ -1,0 +1,243 @@
+// A horde flooding the lit street: the zombie_street environment -- its
+// buildings, its lamps, its wet road and dusk sky -- with a crowd of the real
+// zombie marching down the road toward the camera, each a decimated LOD instance
+// posed by the shared pose bank. The street is the quality bar; this puts a
+// horde into it.
+//
+//     AE3D_CROWD=3000 ./build/zombie_city
+
+import std.list
+import std.string
+import ae3d.core
+import ae3d.platform
+import ae3d.engine
+import ae3d.gl
+import ae3d.assets
+import ae3d.anim
+import ae3d.skin
+import ae3d.crowd
+import ae3d.ecs
+
+const MANIFEST = "resources/blender/zombie_street/manifest.json"
+const SKY = "resources/sky/dusk.png"
+const SKY_R = 0.075
+const SKY_G = 0.088
+const SKY_B = 0.125
+const FRAMES = 24
+const LOD_CELL = 0.15
+const CROWD_DEFAULT = 3000
+
+// The road runs along x; Blender Y became ae3d -Z, so the carriageway sits at
+// about z = -2.94 and the crowd walks the length of it in +x, toward the camera.
+const STREET_X0 = 0.0 - 42.0
+const STREET_X1 = 42.0
+const ROAD_Z0 = 0.0 - 6.4
+const ROAD_Z1 = 0.6
+const WALK_SPEED = 1.1
+const ROAD_Y = 0.16
+
+var g_scene: ptr = null
+var g_lamps: ptr = null
+var g_sky: *Skybox = null
+var g_body: *Model = null
+var g_bank: ptr = null
+var g_pos: *Column = null
+var g_phase: *Column = null
+var g_count = CROWD_DEFAULT
+var g_walk = 1.0
+
+var g_seed = 0x2f6a41b3
+next_random() -> float {
+    g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
+    return (g_seed as float) / 2147483647.0
+}
+
+entry_named(m: *Manifest, name: string) -> *Entry {
+    count = assets.manifest_count(m)
+    i = 0
+    while i < count {
+        entry = assets.manifest_entry(m, i)
+        if assets.entry_object(entry) == name { return entry }
+        i = i + 1
+    }
+    return null
+}
+
+lamp_at(x: float) -> *Light {
+    lamp = core.light_point(core.vec3(x, 4.25, 0.0 - 2.94),
+                            core.vec3(1.0, 0.72, 0.40), 2.7, 15.0)
+    list.add_raw(g_lamps, lamp as ptr)
+    return lamp
+}
+
+bake_zombie(m: *Manifest, entry: *Entry) -> ptr {
+    bones = assets.entry_load_skeleton(m, entry)
+    if bones == null { return null }
+    skel = skin.skeleton_new()
+    i = 0
+    while i < list.size(bones) {
+        skin.skeleton_add(skel, list.get_raw(bones, i) as *Model)
+        i = i + 1
+    }
+    skin.skeleton_bind(skel)
+    clips = assets.entry_load_bone_clips(m, entry)
+    reg = anim.registry_new()
+    duration = 0.0
+    i = 0
+    while clips != null && i < list.size(clips) {
+        clip = list.get_raw(clips, i) as *Clip
+        index = skin.skeleton_find(skel, anim.clip_name(clip))
+        if index >= 0 {
+            anim.registry_add(reg, anim.clip_name(clip), anim.player_new(clip),
+                              skin.skeleton_bone(skel, index))
+            d = anim.clip_duration(clip)
+            if d > duration { duration = d }
+        }
+        i = i + 1
+    }
+    if clips != null { list.free(clips) }
+    if duration <= 0.0 { duration = 1.0 }
+    g_walk = duration
+    bank = crowd.posebank_bake(reg, skel, FRAMES, duration)
+    anim.registry_free(reg)
+    skin.skeleton_free(skel)
+    i = 0
+    while i < list.size(bones) {
+        core.model_free(list.get_raw(bones, i) as *Model)
+        i = i + 1
+    }
+    list.free(bones)
+    return bank
+}
+
+on_start(data: ptr) {
+    e = data as *Engine
+    g_count = core.env_int("AE3D_CROWD", CROWD_DEFAULT)
+
+    // A camera down at the road, looking back along it so the horde walks out of
+    // the far dark toward the lamps and the viewer.
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(STREET_X1 + 2.0, 3.4, 1.4))
+    core.camera_set_far(cam, 300.0)
+    core.camera_look_at(cam, core.vec3(0.0 - 10.0, 0.7, 0.0 - 2.9))
+
+    // The lamp is the key light the street is shadowed by; the sun is a dusk
+    // fill. Same lighting the reference street uses.
+    g_lamps = list.new()
+    key = lamp_at(0.0)
+    key.ambient_strength = 0.10
+    engine.engine_set_light(e, key)
+    dusk = core.light_directional(core.vec3(0.0 - 0.30, 0.62, 0.72),
+                                  core.vec3(0.30, 0.40, 0.72), 0.16)
+    engine.engine_add_light(e, dusk)
+    list.add_raw(g_lamps, dusk as ptr)
+    engine.engine_add_light(e, lamp_at(0.0 - 14.0))
+    engine.engine_add_light(e, lamp_at(14.0))
+    engine.engine_add_light(e, lamp_at(28.0))
+    engine.engine_add_light(e, lamp_at(0.0 - 28.0))
+
+    renderer = engine.engine_gl_renderer(e)
+    if renderer != null {
+        gl.renderer_set_clear_color(renderer, SKY_R, SKY_G, SKY_B)
+        g_sky = gl.skybox_create(renderer, SKY)
+        engine.engine_set_skybox(e, g_sky as ptr)
+    }
+
+    m = assets.manifest_load(MANIFEST)
+    if m == null {
+        println("zombie_city: ${assets.last_error()}")
+        return
+    }
+
+    // The environment: every scene object except the hero figure, which the
+    // crowd replaces. Lamp heads and lit windows glow; the road is wet.
+    g_scene = assets.manifest_load_scene(m)
+    count = assets.manifest_count(m)
+    i = 0
+    while i < count {
+        name = assets.entry_object(assets.manifest_entry(m, i))
+        model = list.get_raw(g_scene, i) as *Model
+        if model != null && string.contains(name, "Zombie") == 0 {
+            if string.contains(name, "LampHead") == 1 { core.model_set_exposure(model, 16.0) }
+            else if string.contains(name, "_Lit") == 1 { core.model_set_exposure(model, 13.0) }
+            if string.contains(name, "Road") == 1 || string.contains(name, "Ground") == 1 {
+                core.model_set_reflectivity(model, 0.8)
+            }
+            engine.engine_add_model(e, model)
+        }
+        i = i + 1
+    }
+
+    // The crowd: the real zombie, decimated to a bone-aware LOD, instanced.
+    entry = entry_named(m, "Zombie_Body")
+    if entry == null { println("zombie_city: no Zombie_Body"); assets.manifest_free(m); return }
+    g_bank = bake_zombie(m, entry)
+    g_body = assets.entry_load_model(m, entry)
+    if g_bank == null || g_body == null { println("zombie_city: load failed"); assets.manifest_free(m); return }
+
+    src = core.model_mesh(g_body)
+    lod = core.mesh_decimate(src, LOD_CELL)
+    if lod != null { core.model_set_mesh(g_body, lod) }
+
+    if !core.model_enable_instancing(g_body, g_count) { assets.manifest_free(m); return }
+    core.model_set_pose_bank(g_body, g_bank, FRAMES)
+    core.model_enable_instance_phases(g_body)
+
+    g_pos = ecs.column_new(g_count, 3)
+    g_phase = ecs.column_new(g_count, 1)
+    i = 0
+    while i < g_count {
+        x = STREET_X0 + next_random() * (STREET_X1 - STREET_X0)
+        z = ROAD_Z0 + next_random() * (ROAD_Z1 - ROAD_Z0)
+        ecs.column_set3(g_pos, i, core.vec3(x, ROAD_Y, z))
+        ecs.column_set(g_phase, i, 0, next_random())
+        i = i + 1
+    }
+    core.model_set_instance_positions(g_body, ecs.column_data(g_pos), g_count)
+    core.model_set_instance_phases(g_body, ecs.column_data(g_phase), g_count)
+    engine.engine_add_model(e, g_body)
+
+    assets.manifest_free(m)
+    println("zombie_city: ${g_count} zombies flooding the street, LOD ${core.mesh_index_count(core.model_mesh(g_body)) / 3} tris each")
+}
+
+on_update(data: ptr, delta: float) {
+    if g_body == null { return }
+    rate = 1.0 / g_walk
+    i = 0
+    while i < g_count {
+        p = ecs.column_get3(g_pos, i)
+        nx = p.x + WALK_SPEED * delta
+        if nx > STREET_X1 { nx = STREET_X0 }   // wrap to the far end, a continuous flow
+        ecs.column_set3(g_pos, i, core.vec3(nx, p.y, p.z))
+        ph = ecs.column_get(g_phase, i, 0) + delta * rate
+        while ph >= 1.0 { ph = ph - 1.0 }
+        ecs.column_set(g_phase, i, 0, ph)
+        i = i + 1
+    }
+    core.model_set_instance_positions(g_body, ecs.column_data(g_pos), g_count)
+    core.model_set_instance_phases(g_body, ecs.column_data(g_phase), g_count)
+}
+
+main() {
+    e = engine.engine_new(platform.API_GL)
+    engine.engine_set_size(e, 1280, 720)
+    engine.engine_set_title(e, "ae3d - zombie city")
+    engine.engine_set_face_culling(e, true)
+    engine.engine_set_camera_input(e, true)
+    engine.engine_set_post(e, true, true, 0.85, 0.85)
+    engine.engine_set_fog(e, core.fog_distance(6.0, 60.0,
+                                               core.vec3(SKY_R, SKY_G, SKY_B), 0.95))
+    engine.engine_set_shadow_distance(e, 18.0)
+    engine.engine_set_frustum_culling(e, true)
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_start(e, on_start as fn(ptr))
+    engine.engine_on_update(e, on_update as fn(ptr, float))
+
+    engine.engine_run(e, 0 - 1, 0 - 1)
+
+    draws = 0
+    renderer = engine.engine_gl_renderer(e)
+    if renderer != null { draws = gl.renderer_draw_calls(renderer) }
+    println("zombie_city: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${draws} draws")
+}
