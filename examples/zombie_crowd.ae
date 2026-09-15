@@ -1,0 +1,140 @@
+// A crowd of zombies that is one draw call, however many there are.
+//
+// Every zombie is an entity in the data-oriented ECS (ae3d.ecs): its position
+// and velocity are rows in dense columns, a system shambles the whole crowd
+// forward in one linear pass, and the position column's own buffer is handed
+// straight to the instanced draw with no repack. Ten thousand or ten million,
+// the renderer issues a single instanced call -- the draw-call count does not
+// move with the crowd size, which is the whole reason a crowd this large can be
+// on screen at all. Run it and read the tail: N zombies, 1 draw call.
+
+import ae3d.core
+import ae3d.engine
+import ae3d.gl
+import ae3d.loader
+import ae3d.ecs
+import ae3d.platform
+
+const CROWD = 40000
+const FIELD = 60.0        // half-width of the ground the crowd shambles across
+const SPEED = 1.4
+
+// Typed as the ECS's own pointer types, so no casts are needed below.
+var g_world: *EcsWorld = null
+var g_position: *Column = null
+var g_velocity: *Column = null
+var g_crowd: *Model = null
+var g_ground: *Model = null
+var g_seed = 0x9e3779b1
+
+next_random() -> float {
+    g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
+    return (g_seed as float) / 2147483647.0
+}
+
+on_start(data: ptr) {
+    e = data as *Engine
+
+    g_world = ecs.world_new(CROWD)
+    g_position = ecs.column_new(CROWD, 3)
+    g_velocity = ecs.column_new(CROWD, 3)
+    if g_world == null || g_position == null || g_velocity == null { return }
+
+    i = 0
+    while i < CROWD {
+        ent = ecs.entity_create(g_world)
+        slot = ecs.entity_index(ent)
+        x = (next_random() - 0.5) * 2.0 * FIELD
+        z = (next_random() - 0.5) * 2.0 * FIELD
+        ecs.column_set3(g_position, slot, core.vec3(x, 0.0, z))
+        // A slow shuffle in a random heading -- the shamble.
+        angle = next_random() * 6.2831853
+        ecs.column_set3(g_velocity, slot,
+                        core.vec3(core.cos_of(angle) * SPEED, 0.0, core.sin_of(angle) * SPEED))
+        i = i + 1
+    }
+
+    // The crowd itself: one cube mesh, CROWD instances, a sickly green so the
+    // horde reads as a horde. One mesh, one material, one draw.
+    crowd = loader.cube(0.5)
+    core.model_matte(crowd, 0.20, 0.42, 0.16)
+    if !core.model_enable_instancing(crowd, CROWD) { return }
+    core.model_set_instance_positions(crowd, ecs.column_data(g_position), CROWD)
+    engine.engine_add_model(e, crowd)
+    g_crowd = crowd
+
+    // A ground to shamble on.
+    ground = loader.plane(2, FIELD * 2.0)
+    core.model_matte(ground, 0.06, 0.07, 0.06)
+    engine.engine_add_model(e, ground)
+    g_ground = ground
+
+    renderer = engine.engine_gl_renderer(e)
+    if renderer != null {
+        gl.renderer_set_clear_color(renderer, 0.02, 0.03, 0.04)
+    }
+
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(0.0, 34.0, 78.0))
+    core.camera_set_far(cam, 4000.0)
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+
+    println("zombie_crowd: ${CROWD} zombies, one instanced draw")
+}
+
+on_update(data: ptr, delta: float) {
+    if g_crowd == null { return }
+
+    // One linear pass shambles the whole crowd; then the moved column is the
+    // instance buffer, uploaded in one call.
+    ecs.integrate3(g_world, g_position, g_velocity, delta)
+
+    // Wrap a zombie that wanders off the field back to the far edge, so the
+    // crowd stays in frame.
+    slot = 0
+    n = ecs.world_slot_count(g_world)
+    while slot < n {
+        if ecs.slot_alive(g_world, slot) {
+            p = ecs.column_get3(g_position, slot)
+            if p.x > FIELD { p.x = 0.0 - FIELD }
+            if p.x < 0.0 - FIELD { p.x = FIELD }
+            if p.z > FIELD { p.z = 0.0 - FIELD }
+            if p.z < 0.0 - FIELD { p.z = FIELD }
+            ecs.column_set3(g_position, slot, p)
+        }
+        slot = slot + 1
+    }
+
+    core.model_set_instance_positions(g_crowd, ecs.column_data(g_position), CROWD)
+}
+
+main() {
+    e = engine.engine_new(platform.API_GL)
+    engine.engine_set_size(e, 1280, 800)
+    engine.engine_set_title(e, "ae3d - zombie crowd")
+    engine.engine_set_face_culling(e, true)
+
+    light = core.light_directional(core.vec3(0.0 - 0.3, 0.0 - 1.0, 0.0 - 0.2),
+                                   core.vec3(0.8, 0.9, 0.8), 2.0)
+    light.ambient_strength = 0.35
+    engine.engine_set_light(e, light)
+
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_start(e, on_start as fn(ptr))
+    engine.engine_on_update(e, on_update as fn(ptr, float))
+
+    engine.engine_run(e, 0 - 1, 0 - 1)
+
+    draws = 0
+    renderer = engine.engine_gl_renderer(e)
+    if renderer != null { draws = gl.renderer_draw_calls(renderer) }
+    println("zombie_crowd: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${CROWD} zombies in ${draws} draw call(s)")
+
+    if g_crowd != null { core.model_free(g_crowd) }
+    if g_ground != null { core.model_free(g_ground) }
+    if g_position != null { ecs.column_free(g_position) }
+    if g_velocity != null { ecs.column_free(g_velocity) }
+    if g_world != null { ecs.world_free(g_world) }
+    core.light_free(light)
+    engine.engine_free(e)
+}

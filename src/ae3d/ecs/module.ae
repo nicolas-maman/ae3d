@@ -22,7 +22,7 @@ import std.arena
 import ae3d.core
 
 exports (
-    World,
+    EcsWorld,
     world_new, world_free, world_capacity, world_live, world_slot_count,
     entity_create, entity_destroy, entity_alive,
     entity_index, entity_generation,
@@ -46,7 +46,7 @@ const INDEX_MASK = 0xFFFFFF
 // to be handed out again. `count` is the high-water mark -- the number of slots
 // ever touched -- so a system walks `[0, count)` rather than the whole
 // capacity. `live` is how many of those are alive right now.
-struct World {
+struct EcsWorld {
     capacity: int
     count: int
     live: int
@@ -60,11 +60,11 @@ struct World {
 // arrays are allocated once, here, and never grow: a crowd's size is decided up
 // front, the way its memory budget is. Returns null if capacity is out of range
 // or an allocation fails.
-world_new(capacity: int) -> *World {
+world_new(capacity: int) -> *EcsWorld {
     if capacity <= 0 { return null }
     if capacity > INDEX_MASK { return null }
 
-    w = heap.new(World)
+    w = heap.new(EcsWorld)
     w.capacity = capacity
     w.count = 0
     w.live = 0
@@ -79,7 +79,7 @@ world_new(capacity: int) -> *World {
     return w
 }
 
-world_free(w: *World) {
+world_free(w: *EcsWorld) {
     if w == null { return }
     if w.alive != null { intarr.free(w.alive) }
     if w.generations != null { intarr.free(w.generations) }
@@ -87,12 +87,12 @@ world_free(w: *World) {
     heap.free(w)
 }
 
-world_capacity(w: *World) -> int { return w.capacity }
-world_live(w: *World) -> int { return w.live }
+world_capacity(w: *EcsWorld) -> int { return w.capacity }
+world_live(w: *EcsWorld) -> int { return w.live }
 // The number of slots a system has to walk to see every live entity. Freed
 // slots inside this range are skipped by their alive flag; only fresh growth
 // past every freed slot moves the mark.
-world_slot_count(w: *World) -> int { return w.count }
+world_slot_count(w: *EcsWorld) -> int { return w.count }
 
 // Split a handle back into its parts. Kept in one place so the packing is
 // described once.
@@ -106,7 +106,7 @@ pack(index: int, generation: int) -> int {
 // Hand out an entity. A freed slot is reused before the world grows, so the
 // dense arrays stay packed and `count` climbs only when there is nothing to
 // recycle. Returns ENTITY_NONE if the world is full.
-entity_create(w: *World) -> int {
+entity_create(w: *EcsWorld) -> int {
     index = 0
     if w.free_count > 0 {
         w.free_count = w.free_count - 1
@@ -124,7 +124,7 @@ entity_create(w: *World) -> int {
 // Is this handle still the entity it named? False for ENTITY_NONE, for an index
 // outside the touched range, for a dead slot, and -- the point of the
 // generation -- for a handle whose slot has since been reused.
-entity_alive(w: *World, e: int) -> bool {
+entity_alive(w: *EcsWorld, e: int) -> bool {
     if e < 0 { return false }
     index = entity_index(e)
     if index >= w.count { return false }
@@ -136,7 +136,7 @@ entity_alive(w: *World, e: int) -> bool {
 // to it now fails `entity_alive`, and the slot goes back on the free list for
 // the next `entity_create`. A stale or already-dead handle is a no-op, so
 // double-destroy is safe.
-entity_destroy(w: *World, e: int) {
+entity_destroy(w: *EcsWorld, e: int) {
     if !entity_alive(w, e) { return }
     index = entity_index(e)
     intarr.set_unchecked(w.alive, index, 0)
@@ -150,13 +150,13 @@ entity_destroy(w: *World, e: int) {
 // Slot-level access for a system walking `[0, world_slot_count)`. `slot_alive`
 // gates the work; `slot_entity` rebuilds the handle for a live slot so a system
 // can hand it to code that speaks handles.
-slot_alive(w: *World, slot: int) -> bool {
+slot_alive(w: *EcsWorld, slot: int) -> bool {
     if slot < 0 { return false }
     if slot >= w.count { return false }
     return intarr.get_unchecked(w.alive, slot) == 1
 }
 
-slot_entity(w: *World, slot: int) -> int {
+slot_entity(w: *EcsWorld, slot: int) -> int {
     return pack(slot, intarr.get_unchecked(w.generations, slot))
 }
 
@@ -259,7 +259,7 @@ column_set3(c: *Column, slot: int, v: core.Vec3) {
 // boundary -- and the shape every crowd system (flow, separation, animation
 // phase) takes. Both columns are indexed by the world's slots; dead slots are
 // skipped.
-integrate3(w: *World, position: *Column, velocity: *Column, dt: float) {
+integrate3(w: *EcsWorld, position: *Column, velocity: *Column, dt: float) {
     pos = position.data as float[]
     vel = velocity.data as float[]
     parity = position.arity
