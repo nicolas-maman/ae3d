@@ -58,7 +58,7 @@ exports (
     model_enable_instance_colors, model_set_instance_positions, model_set_instance_positions_yaw, model_set_instance_colors,
     model_set_pose_bank, model_pose_bank, model_enable_instance_phases, model_set_instance_phase,
     model_set_instance_phases,
-    model_instance_count, model_remove_instance, light_new, light_directional, light_point,
+    model_instance_count, model_set_instance_draw_count, model_remove_instance, light_new, light_directional, light_point,
     light_warm, light_cool, light_sun, light_free, shader_new, shader_named, shader_valid,
     SHADER_CUSTOM, SHADER_WATER, debug_enabled,
     set_debug, frustum_culling, set_frustum_culling, face_culling, set_face_culling,
@@ -177,6 +177,7 @@ extern ae3d_inst_destroy(inst: ptr)
 extern ae3d_inst_resize(inst: ptr, count: int) -> int
 
 extern ae3d_inst_count(inst: ptr) -> int
+extern ae3d_inst_set_count(inst: ptr, count: int)
 
 extern ae3d_inst_set_trs(inst: ptr, i: int, px: float, py: float, pz: float, sx: float, sy: float, sz: float, qx: float, qy: float, qz: float, qw: float)
 
@@ -1841,6 +1842,16 @@ model_set_instance_colors(m: *Model, rgb: ptr, count: int) {
 model_instance_count(m: *Model) -> int {
     if m.instances == null { return 0 }
     return ae3d_inst_count(m.instances)
+}
+
+// Draw only the first `count` instances this frame, of however many the model
+// was enabled for. A distance LOD fills one model with the near zombies and
+// another with the far, and each frame the counts shift; this is what lets a
+// model draw a different number of them without being reallocated.
+model_set_instance_draw_count(m: *Model, count: int) {
+    if m.instances == null { return }
+    ae3d_inst_set_count(m.instances, count)
+    m.instances_updated = true
 }
 
 // CRITICAL: removing an instance shifts every colour after it down one, the

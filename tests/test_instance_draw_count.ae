@@ -1,0 +1,55 @@
+// The instanced draw count can be set below the reserved capacity, which is
+// what a distance LOD needs: fill one model with the near zombies and another
+// with the far, and let each draw a different number of them frame to frame
+// without being reallocated. No GL -- this is the instance buffer's own count.
+
+import ae3d.core
+
+var failures = 0
+
+check_true(name: string, ok: bool) {
+    if !ok {
+        println("FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+main() {
+    m = core.model_new()
+    core.model_set_mesh(m, core.mesh_create())
+    if !core.model_enable_instancing(m, 1000) {
+        println("instance_draw_count: SKIP instancing would not enable")
+        return
+    }
+
+    check_true("enabling reserves the capacity as the count",
+               core.model_instance_count(m) == 1000)
+
+    core.model_set_instance_draw_count(m, 250)
+    check_true("the draw count can be set below capacity",
+               core.model_instance_count(m) == 250)
+
+    // Capacity is at least what was reserved and may be rounded up, so a count
+    // far above it must come back clamped -- less than what was asked for, and
+    // still enough to draw every reserved instance.
+    core.model_set_instance_draw_count(m, 100000000)
+    cap = core.model_instance_count(m)
+    check_true("a count above capacity is clamped to the capacity",
+               cap >= 1000 && cap < 100000000)
+
+    core.model_set_instance_draw_count(m, 0 - 10)
+    check_true("a negative count is clamped to zero",
+               core.model_instance_count(m) == 0)
+
+    core.model_set_instance_draw_count(m, 640)
+    check_true("it can be raised again toward capacity",
+               core.model_instance_count(m) == 640)
+
+    core.model_free(m)
+
+    if failures == 0 {
+        println("instance_draw_count: all checks passed")
+    } else {
+        println("instance_draw_count: ${failures} failure(s)")
+    }
+}

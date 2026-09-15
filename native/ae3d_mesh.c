@@ -527,6 +527,18 @@ int ae3d_inst_count(void *handle) {
     return inst ? inst->count : 0;
 }
 
+/* Draw fewer instances than the buffer holds, without freeing the rest. A
+ * distance LOD fills this model with the near zombies one frame and a different
+ * number the next; the capacity is what was reserved, the count is what draws.
+ * Clamped to the capacity, so it can never read off the end of the matrices. */
+void ae3d_inst_set_count(void *handle, int count) {
+    ae3d_inst *inst = (ae3d_inst *)handle;
+    if (!inst) return;
+    if (count < 0) count = 0;
+    if (count > inst->capacity) count = inst->capacity;
+    inst->count = count;
+}
+
 void ae3d_inst_set_trs(void *handle, int i,
                        double px, double py, double pz,
                        double sx, double sy, double sz,
