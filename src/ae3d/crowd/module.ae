@@ -12,7 +12,6 @@
 // that samples it is the next phase (#271).
 
 import std.heap
-import std.arena
 import ae3d.core
 import ae3d.anim
 import ae3d.skin
@@ -32,6 +31,11 @@ extern ae3d_posebank_bones(bank: ptr) -> int
 extern ae3d_posebank_capture(bank: ptr, frame: int, palette: ptr)
 extern ae3d_posebank_get(bank: ptr, frame: int, bone: int, i: int) -> float
 extern ae3d_posebank_data(bank: ptr) -> ptr
+extern ae3d_horde_grid_create(cols: int, per_cell: int) -> ptr
+extern ae3d_horde_grid_destroy(grid: ptr)
+extern ae3d_horde_separate(grid: ptr, pos: ptr, vel: ptr, n: int,
+                           ox: float, oz: float, cell_size: float,
+                           radius: float, strength: float)
 
 // Bake `frames` evenly spaced poses across `duration` seconds of the clip the
 // registry's players carry, into a bank the whole crowd will share. Each frame
@@ -110,155 +114,53 @@ horde_seek(world: *EcsWorld, position: *Column, velocity: *Column,
 }
 
 // A uniform spatial grid over the XZ ground, so a horde's separation is O(N)
-// rather than every zombie testing every other. The world is a `cols` x `cols`
-// board of cells `cell_size` across from the corner (ox, oz); each cell holds up
-// to `per_cell` entity slots. Rebuilt from the live positions each frame; a cell
-// that overflows drops the overflow from that frame's separation, which at worst
-// lets a few in a dense knot not push apart for a frame -- never a crash, never
-// a stall.
+// rather than every zombie testing every other. `cols` x `cols` cells of
+// `cell_size` from the corner (ox, oz), each holding up to `per_cell` entities.
+// The grid's arrays and the whole separation pass live in native C: at half a
+// million entities the neighbour tests number in the tens of millions a frame,
+// too many for a per-element language loop, so this is a thin handle over the
+// kernel in ae3d_horde.c.
 struct HordeGrid {
+    native: ptr
     cols: int
     cell_size: float
     ox: float
     oz: float
-    per_cell: int
-    arena: ptr
-    count: ptr
-    slots: ptr
 }
 
 grid_new(cols: int, cell_size: float, ox: float, oz: float, per_cell: int) -> *HordeGrid {
     if cols <= 0 || cell_size <= 0.0 || per_cell <= 0 { return null }
-    cells = cols * cols
     g = heap.new(HordeGrid)
+    g.native = ae3d_horde_grid_create(cols, per_cell)
+    if g.native == null { heap.free(g); return null }
     g.cols = cols
     g.cell_size = cell_size
     g.ox = ox
     g.oz = oz
-    g.per_cell = per_cell
-    // The counts and the bucket lists are read and written tens of millions of
-    // times a frame when the crowd is large, so they are arena ints indexed
-    // directly rather than a bounds-checked array that crosses the boundary on
-    // every access.
-    g.arena = arena.create((cells + cells * per_cell) * 8)
-    if g.arena == null { heap.free(g); return null }
-    g.count = arena.alloc(g.arena, cells * 8)
-    g.slots = arena.alloc(g.arena, cells * per_cell * 8)
-    if g.count == null || g.slots == null {
-        grid_free(g)
-        return null
-    }
     return g
 }
 
 grid_free(g: *HordeGrid) {
     if g == null { return }
-    if g.arena != null { arena.destroy(g.arena) }
+    if g.native != null { ae3d_horde_grid_destroy(g.native) }
     heap.free(g)
 }
 
-// A horde system: push apart entities closer than `radius`, so the crowd
-// spreads across the ground under its target instead of collapsing onto one
-// point. The grid is rebuilt from the current positions, then each entity is
-// pushed away from the neighbours in its own and the eight adjacent cells -- the
-// only ones a cell's width can reach. `strength` scales the push added to the
-// velocity. Pair after horde_seek and before ecs.integrate3.
+// A horde system: push apart entities closer than `radius`, so the crowd spreads
+// across the ground under its target instead of collapsing onto one point. The
+// grid is rebuilt from the current positions, then each entity is pushed off the
+// neighbours in its own and the eight adjacent cells; `strength` scales the push
+// added to the velocity. Pair after horde_seek and before ecs.integrate3.
 //
-// The hot loop runs tens of millions of times a frame at crowd scale, so it
-// reads the grid ints and the position and velocity columns as raw arrays
-// indexed directly -- no bounds-checked call across the boundary per access --
-// and rejects a far neighbour on its squared distance before paying for a
-// square root. On the flat ground the y axis carries nothing, so cells are keyed
-// on x and z alone.
+// The whole pass is the native kernel, run straight over the position and
+// velocity columns' own buffers -- the crowd is taken as the compact range
+// [0, world_slot_count), which is a horde that only spawns. It moves the
+// separation of half a million entities from a fifth of a second in Aether to a
+// few milliseconds.
 horde_separate(world: *EcsWorld, position: *Column, velocity: *Column,
                g: *HordeGrid, radius: float, strength: float) {
-    cols = g.cols
-    cells = cols * cols
-    per_cell = g.per_cell
-    cnt = g.count as int[]
-    sl = g.slots as int[]
-    pos = ecs.column_data(position) as float[]
-    vel = ecs.column_data(velocity) as float[]
-    inv_cell = 1.0 / g.cell_size
-    radius_sq = radius * radius
-    n = ecs.world_slot_count(world)
-
-    // Empty the cells (arena memory is not cleared), then bucket every live
-    // entity into its cell up to per_cell.
-    i = 0
-    while i < cells { cnt[i] = 0; i = i + 1 }
-    slot = 0
-    while slot < n {
-        if ecs.slot_alive(world, slot) {
-            base = slot * 3
-            cx = ((pos[base] - g.ox) * inv_cell) as int
-            cz = ((pos[base + 2] - g.oz) * inv_cell) as int
-            if cx < 0 { cx = 0 }
-            if cx >= cols { cx = cols - 1 }
-            if cz < 0 { cz = 0 }
-            if cz >= cols { cz = cols - 1 }
-            cell = cz * cols + cx
-            c = cnt[cell]
-            if c < per_cell {
-                sl[cell * per_cell + c] = slot
-                cnt[cell] = c + 1
-            }
-        }
-        slot = slot + 1
-    }
-
-    slot = 0
-    while slot < n {
-        if ecs.slot_alive(world, slot) {
-            base = slot * 3
-            px = pos[base]
-            py = pos[base + 1]
-            pz = pos[base + 2]
-            cx = ((px - g.ox) * inv_cell) as int
-            cz = ((pz - g.oz) * inv_cell) as int
-            pushx = 0.0
-            pushy = 0.0
-            pushz = 0.0
-            dz = 0 - 1
-            while dz <= 1 {
-                ncz = cz + dz
-                if ncz >= 0 && ncz < cols {
-                    dx = 0 - 1
-                    while dx <= 1 {
-                        ncx = cx + dx
-                        if ncx >= 0 && ncx < cols {
-                            cbase = (ncz * cols + ncx) * per_cell
-                            cn = cnt[ncz * cols + ncx]
-                            k = 0
-                            while k < cn {
-                                j = sl[cbase + k]
-                                if j != slot {
-                                    jb = j * 3
-                                    ddx = px - pos[jb]
-                                    ddy = py - pos[jb + 1]
-                                    ddz = pz - pos[jb + 2]
-                                    dsq = ddx * ddx + ddy * ddy + ddz * ddz
-                                    if dsq > 0.00000001 && dsq < radius_sq {
-                                        dist = core.sqrt_of(dsq)
-                                        f = (radius - dist) / (dist * radius)
-                                        pushx = pushx + ddx * f
-                                        pushy = pushy + ddy * f
-                                        pushz = pushz + ddz * f
-                                    }
-                                }
-                                k = k + 1
-                            }
-                        }
-                        dx = dx + 1
-                    }
-                }
-                dz = dz + 1
-            }
-            vb = slot * 3
-            vel[vb] = vel[vb] + pushx * strength
-            vel[vb + 1] = vel[vb + 1] + pushy * strength
-            vel[vb + 2] = vel[vb + 2] + pushz * strength
-        }
-        slot = slot + 1
-    }
+    if g == null { return }
+    ae3d_horde_separate(g.native, ecs.column_data(position), ecs.column_data(velocity),
+                        ecs.world_slot_count(world), g.ox, g.oz, g.cell_size,
+                        radius, strength)
 }

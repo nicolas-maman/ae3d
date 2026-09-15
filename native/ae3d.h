@@ -68,6 +68,11 @@ const float *ae3d_posebank_data(void *bank);
 int    ae3d_gl_posebank_texture(void *bank);
 void   ae3d_gl_setup_instance_phase(void *inst, int phase_vbo);
 void   ae3d_gl_update_instance_phases(void *inst, int phase_vbo);
+void  *ae3d_horde_grid_create(int cols, int per_cell);
+void   ae3d_horde_grid_destroy(void *grid);
+void   ae3d_horde_separate(void *grid, double *pos, double *vel, int n,
+                           double ox, double oz, double cell_size,
+                           double radius, double strength);
 void   ae3d_gl_upload_skin(void *mesh, int vbo);
 void  *ae3d_skinrows_create(int count);
 void   ae3d_skinrows_destroy(void *rows);

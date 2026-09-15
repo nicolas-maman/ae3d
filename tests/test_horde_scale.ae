@@ -103,13 +103,22 @@ main() {
     check_true("the crowd is all there", ecs.world_live(world) == N)
     // The ECS core -- steering, integration and the walk advance over dense
     // columns -- is what "500k on the ECS" rests on, and it stays inside a frame
-    // by a wide margin: three linear passes at direct-indexed cost. The
-    // neighbour separation is the one super-linear pass; at this scale it wants a
-    // native kernel to run every frame in real time (tracked in #271), so it is
-    // measured here, not gated. Generous on a slow CI host; the numbers are the
-    // point.
+    // by a wide margin: three linear passes at direct-indexed cost.
     check_true("the ECS core simulates half a million entities within a frame",
                core_ms < 12.0)
+    // The neighbour separation is the one super-linear pass. It runs in the
+    // native CSR kernel (ae3d_horde.c): the crowd is counting-sorted into a
+    // spatial grid with the positions packed cell-major, so the 3x3 neighbour
+    // scan sweeps contiguous memory instead of gathering each position from a
+    // twelve-megabyte array, and each pair is pushed once by Newton's third law.
+    // That is a few times faster than the same pass in Aether -- around 50 ms
+    // for half a million here -- but still a super-linear pass, not yet a
+    // within-frame one; closing that last gap wants SIMD or threads across the
+    // cells (a follow-up, #271). So the number is measured, and only guarded
+    // against a gross regression -- e.g. a fall back to the scattered gather --
+    // with wide headroom for a slow CI host.
+    check_true("the native separation kernel stays well under a scattered gather",
+               sep_ms < 150.0)
 
     crowd.grid_free(grid)
     ecs.column_free(pos)
