@@ -91,6 +91,9 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float edgeThreshold;
     float edgeThresholdMin;
     float subpixelQuality;
+    mat4 invViewProjection;
+    float ssrRoadHeight;
+    float ssrStrength;
     float time;
     float waveSpeedMultiplier;
     float waveHeightMultiplier;

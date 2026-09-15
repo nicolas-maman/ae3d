@@ -122,15 +122,55 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     bool enableWaterNormalMapping;
     float waterNormalIntensity;
 };
-layout (location = 0) in vec3 inPosition;
+layout(set = 0, binding = 1) uniform sampler2D screenTexture;
+layout(set = 0, binding = 2) uniform sampler2D depthTexture;
 
-layout(location = 0) out vec3 TexCoords;
+layout(location = 0) in vec2 TexCoords;
+layout(location = 0) out vec4 FragColor;
 
 
 
+
+
+
+
+
+
+// The world position the depth at a screen UV was written from.
+vec3 worldFromDepth(vec2 uv) {
+    float d = texture(depthTexture, uv).r;
+    vec4 clip = vec4(uv * 2.0 - 1.0, d, 1.0);
+    vec4 world = invViewProjection * clip;
+    return world.xyz / world.w;
+}
 
 void main() {
-    TexCoords = inPosition;
-    vec4 pos = projection * view * vec4(inPosition, 1.0);
-    gl_Position = pos.xyww; // Ensure skybox is always at max depth
+    vec3 scene = texture(screenTexture, TexCoords).rgb;
+    if (ssrStrength <= 0.0) { FragColor = vec4(scene, 1.0); return; }
+
+    vec3 P = worldFromDepth(TexCoords);
+    // Only the flat wet surface reflects; everything else is left as it was.
+    if (abs(P.y - ssrRoadHeight) > 0.06) { FragColor = vec4(scene, 1.0); return; }
+
+    vec3 V = normalize(P - viewPos);
+    vec3 R = reflect(V, vec3(0.0, 1.0, 0.0));
+    float stepLen = 0.25;
+    vec3 pos = P + R * stepLen;
+    vec3 refl = scene;
+    for (int i = 0; i < 48; i++) {
+        vec4 clip = viewProjection * vec4(pos, 1.0);
+        if (clip.w <= 0.0) break;
+        vec2 uv = (clip.xy / clip.w) * 0.5 + 0.5;
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) break;
+        vec3 sceneAt = worldFromDepth(uv);
+        if (distance(viewPos, pos) > distance(viewPos, sceneAt) + 0.03) {
+            // Fade toward the screen edges so the reflection does not cut hard.
+            float edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+            refl = mix(scene, texture(screenTexture, uv).rgb, clamp(edge * 8.0, 0.0, 1.0));
+            break;
+        }
+        pos += R * stepLen;
+    }
+
+    FragColor = vec4(mix(scene, refl, ssrStrength), 1.0);
 }

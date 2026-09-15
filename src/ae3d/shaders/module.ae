@@ -12,7 +12,7 @@ exports (
     VERTEX_WATER, FRAGMENT_WATER,
     VERTEX_DEPTH, FRAGMENT_DEPTH,
     VERTEX_SKYBOX, FRAGMENT_SKYBOX, FRAGMENT_SKYBOX_SOLID,
-    VERTEX_SCREEN, FRAGMENT_FXAA, FRAGMENT_BLOOM, FRAGMENT_PASSTHROUGH,
+    VERTEX_SCREEN, FRAGMENT_FXAA, FRAGMENT_BLOOM, FRAGMENT_PASSTHROUGH, FRAGMENT_SSR,
     default_shader, water_shader
 )
 
@@ -2037,6 +2037,68 @@ uniform sampler2D screenTexture;
 
 void main() {
     FragColor = texture(screenTexture, TexCoords);
+}
+GLSL_END
+
+// Screen-space reflection, composited over the scene. The wet road is a flat
+// mirror: a fragment whose reconstructed world height is the road's reflects
+// the scene above it. The view ray is reflected about the road's up-normal and
+// marched in world space, each step projected to the screen and tested against
+// the camera depth; where the ray falls behind what was drawn it has met a
+// surface, and that pixel's colour is the reflection. Everything off the road
+// passes through untouched, and with strength zero the pass is a passthrough,
+// so it is safe to run and only shows where a scene has asked for it.
+const FRAGMENT_SSR = <<GLSL_END
+#version 410 core
+
+in vec2 TexCoords;
+out vec4 FragColor;
+
+uniform sampler2D screenTexture;   // the rendered scene colour
+uniform sampler2D depthTexture;    // camera-space depth of the scene
+uniform mat4 viewProjection;       // world -> clip, to project each march step
+uniform mat4 invViewProjection;    // clip -> world, to rebuild a position from depth
+uniform vec3 viewPos;              // the camera, in world space
+uniform float ssrRoadHeight;       // height of the reflective plane
+uniform float ssrStrength;         // how strongly the reflection shows (0 = off)
+
+// The world position the depth at a screen UV was written from.
+vec3 worldFromDepth(vec2 uv) {
+    float d = texture(depthTexture, uv).r;
+    vec4 clip = vec4(uv * 2.0 - 1.0, d, 1.0);
+    vec4 world = invViewProjection * clip;
+    return world.xyz / world.w;
+}
+
+void main() {
+    vec3 scene = texture(screenTexture, TexCoords).rgb;
+    if (ssrStrength <= 0.0) { FragColor = vec4(scene, 1.0); return; }
+
+    vec3 P = worldFromDepth(TexCoords);
+    // Only the flat wet surface reflects; everything else is left as it was.
+    if (abs(P.y - ssrRoadHeight) > 0.06) { FragColor = vec4(scene, 1.0); return; }
+
+    vec3 V = normalize(P - viewPos);
+    vec3 R = reflect(V, vec3(0.0, 1.0, 0.0));
+    float stepLen = 0.25;
+    vec3 pos = P + R * stepLen;
+    vec3 refl = scene;
+    for (int i = 0; i < 48; i++) {
+        vec4 clip = viewProjection * vec4(pos, 1.0);
+        if (clip.w <= 0.0) break;
+        vec2 uv = (clip.xy / clip.w) * 0.5 + 0.5;
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) break;
+        vec3 sceneAt = worldFromDepth(uv);
+        if (distance(viewPos, pos) > distance(viewPos, sceneAt) + 0.03) {
+            // Fade toward the screen edges so the reflection does not cut hard.
+            float edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+            refl = mix(scene, texture(screenTexture, uv).rgb, clamp(edge * 8.0, 0.0, 1.0));
+            break;
+        }
+        pos += R * stepLen;
+    }
+
+    FragColor = vec4(mix(scene, refl, ssrStrength), 1.0);
 }
 GLSL_END
 

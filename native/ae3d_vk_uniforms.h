@@ -4,12 +4,12 @@
 
 #include <string.h>
 
-#define AE3D_VK_SCENE_SIZE 4640
+#define AE3D_VK_SCENE_SIZE 4720
 
 /* std140 layout, offsets computed from the same declarations the shader
    block is generated from, so the two cannot disagree. */
 typedef struct {
-    unsigned char bytes[4640];
+    unsigned char bytes[4720];
 } ae3d_vk_scene;
 
 #define AE3D_VK_OFF_ISINSTANCED 320
@@ -87,34 +87,37 @@ typedef struct {
 #define AE3D_VK_OFF_EDGETHRESHOLD 4072
 #define AE3D_VK_OFF_EDGETHRESHOLDMIN 4076
 #define AE3D_VK_OFF_SUBPIXELQUALITY 4080
-#define AE3D_VK_OFF_TIME 4084
-#define AE3D_VK_OFF_WAVESPEEDMULTIPLIER 4088
-#define AE3D_VK_OFF_WAVEHEIGHTMULTIPLIER 4092
-#define AE3D_VK_OFF_WAVERANDOMNESS 4096
-#define AE3D_VK_OFF_WAVEDIRECTIONS 4112
-#define AE3D_VK_OFF_WAVEAMPLITUDES 4176
-#define AE3D_VK_OFF_WAVEFREQUENCIES 4240
-#define AE3D_VK_OFF_WAVESPEEDS 4304
-#define AE3D_VK_OFF_WAVEPHASES 4368
-#define AE3D_VK_OFF_WAVESTEEPNESS 4432
-#define AE3D_VK_OFF_LIGHTPOS 4496
-#define AE3D_VK_OFF_LIGHTDIRECTION 4512
-#define AE3D_VK_OFF_LIGHTCOLOR 4528
-#define AE3D_VK_OFF_LIGHTINTENSITY 4540
-#define AE3D_VK_OFF_WATERBASECOLOR 4544
-#define AE3D_VK_OFF_WATEROPACITY 4556
-#define AE3D_VK_OFF_ENABLEFOAM 4560
-#define AE3D_VK_OFF_FOAMINTENSITY 4564
-#define AE3D_VK_OFF_WATERPLANEHEIGHT 4568
-#define AE3D_VK_OFF_WATERLEVEL 4572
-#define AE3D_VK_OFF_SKYCOLOR 4576
-#define AE3D_VK_OFF_HORIZONCOLOR 4592
-#define AE3D_VK_OFF_ENABLEWATERREFLECTION 4604
-#define AE3D_VK_OFF_WATERREFLECTIONINTENSITY 4608
-#define AE3D_VK_OFF_ENABLEWATERDISTORTION 4612
-#define AE3D_VK_OFF_WATERDISTORTIONINTENSITY 4616
-#define AE3D_VK_OFF_ENABLEWATERNORMALMAPPING 4620
-#define AE3D_VK_OFF_WATERNORMALINTENSITY 4624
+#define AE3D_VK_OFF_INVVIEWPROJECTION 4096
+#define AE3D_VK_OFF_SSRROADHEIGHT 4160
+#define AE3D_VK_OFF_SSRSTRENGTH 4164
+#define AE3D_VK_OFF_TIME 4168
+#define AE3D_VK_OFF_WAVESPEEDMULTIPLIER 4172
+#define AE3D_VK_OFF_WAVEHEIGHTMULTIPLIER 4176
+#define AE3D_VK_OFF_WAVERANDOMNESS 4180
+#define AE3D_VK_OFF_WAVEDIRECTIONS 4192
+#define AE3D_VK_OFF_WAVEAMPLITUDES 4256
+#define AE3D_VK_OFF_WAVEFREQUENCIES 4320
+#define AE3D_VK_OFF_WAVESPEEDS 4384
+#define AE3D_VK_OFF_WAVEPHASES 4448
+#define AE3D_VK_OFF_WAVESTEEPNESS 4512
+#define AE3D_VK_OFF_LIGHTPOS 4576
+#define AE3D_VK_OFF_LIGHTDIRECTION 4592
+#define AE3D_VK_OFF_LIGHTCOLOR 4608
+#define AE3D_VK_OFF_LIGHTINTENSITY 4620
+#define AE3D_VK_OFF_WATERBASECOLOR 4624
+#define AE3D_VK_OFF_WATEROPACITY 4636
+#define AE3D_VK_OFF_ENABLEFOAM 4640
+#define AE3D_VK_OFF_FOAMINTENSITY 4644
+#define AE3D_VK_OFF_WATERPLANEHEIGHT 4648
+#define AE3D_VK_OFF_WATERLEVEL 4652
+#define AE3D_VK_OFF_SKYCOLOR 4656
+#define AE3D_VK_OFF_HORIZONCOLOR 4672
+#define AE3D_VK_OFF_ENABLEWATERREFLECTION 4684
+#define AE3D_VK_OFF_WATERREFLECTIONINTENSITY 4688
+#define AE3D_VK_OFF_ENABLEWATERDISTORTION 4692
+#define AE3D_VK_OFF_WATERDISTORTIONINTENSITY 4696
+#define AE3D_VK_OFF_ENABLEWATERNORMALMAPPING 4700
+#define AE3D_VK_OFF_WATERNORMALINTENSITY 4704
 
 #define AE3D_VK_MAX_LIGHTS 4
 #define AE3D_VK_LIGHT_STRIDE 80
@@ -153,7 +156,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "enableCaustics", 3904 },
     { "enableClearcoat", 3708 },
     { "enableEnergyConservation", 3756 },
-    { "enableFoam", 4560 },
+    { "enableFoam", 4640 },
     { "enableFog", 3828 },
     { "enableGlobalIllumination", 3804 },
     { "enableImageBasedLighting", 3760 },
@@ -164,11 +167,11 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "enableSheen", 3720 },
     { "enableTransmission", 3744 },
     { "enableVolumetricLighting", 3768 },
-    { "enableWaterDistortion", 4612 },
-    { "enableWaterNormalMapping", 4620 },
-    { "enableWaterReflection", 4604 },
+    { "enableWaterDistortion", 4692 },
+    { "enableWaterNormalMapping", 4700 },
+    { "enableWaterReflection", 4684 },
     { "exposure", 3684 },
-    { "foamIntensity", 4564 },
+    { "foamIntensity", 4644 },
     { "fogColor", 3840 },
     { "fogEnd", 3836 },
     { "fogIntensity", 3852 },
@@ -177,15 +180,16 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "giIntensity", 3808 },
     { "hasNormalMap", 3696 },
     { "hasShadowMap", 3860 },
-    { "horizonColor", 4592 },
+    { "horizonColor", 4672 },
     { "iblIntensity", 3764 },
+    { "invViewProjection", 4096 },
     { "isInstanced", 320 },
     { "isSkinned", 528 },
-    { "lightColor", 4528 },
+    { "lightColor", 4608 },
     { "lightCount", 3616 },
-    { "lightDirection", 4512 },
-    { "lightIntensity", 4540 },
-    { "lightPos", 4496 },
+    { "lightDirection", 4592 },
+    { "lightIntensity", 4620 },
+    { "lightPos", 4576 },
     { "lightSpaceMatrix", 464 },
     { "materialAlpha", 3688 },
     { "metallic", 3676 },
@@ -204,15 +208,17 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "shadowTexelWorld", 3884 },
     { "sheenColor", 3728 },
     { "sheenRoughness", 3740 },
-    { "skyColor", 4576 },
+    { "skyColor", 4656 },
     { "specularColor", 3664 },
     { "ssaoBias", 3796 },
     { "ssaoIntensity", 3788 },
     { "ssaoRadius", 3792 },
     { "ssaoSampleCount", 3800 },
+    { "ssrRoadHeight", 4160 },
+    { "ssrStrength", 4164 },
     { "subpixelQuality", 4080 },
     { "texelSize", 4064 },
-    { "time", 4084 },
+    { "time", 4168 },
     { "transmissionFactor", 3748 },
     { "useInstanceColor", 324 },
     { "view", 4000 },
@@ -222,25 +228,25 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "volumetricIntensity", 3772 },
     { "volumetricScattering", 3780 },
     { "volumetricSteps", 3776 },
-    { "waterBaseColor", 4544 },
-    { "waterDistortionIntensity", 4616 },
-    { "waterLevel", 4572 },
-    { "waterNormalIntensity", 4624 },
-    { "waterOpacity", 4556 },
-    { "waterPlaneHeight", 4568 },
-    { "waterReflectionIntensity", 4608 },
-    { "waveAmplitudes", 4176 },
-    { "waveDirections", 4112 },
-    { "waveFrequencies", 4240 },
-    { "waveHeightMultiplier", 4092 },
-    { "wavePhases", 4368 },
-    { "waveRandomness", 4096 },
-    { "waveSpeedMultiplier", 4088 },
-    { "waveSpeeds", 4304 },
-    { "waveSteepness", 4432 },
+    { "waterBaseColor", 4624 },
+    { "waterDistortionIntensity", 4696 },
+    { "waterLevel", 4652 },
+    { "waterNormalIntensity", 4704 },
+    { "waterOpacity", 4636 },
+    { "waterPlaneHeight", 4648 },
+    { "waterReflectionIntensity", 4688 },
+    { "waveAmplitudes", 4256 },
+    { "waveDirections", 4192 },
+    { "waveFrequencies", 4320 },
+    { "waveHeightMultiplier", 4176 },
+    { "wavePhases", 4448 },
+    { "waveRandomness", 4180 },
+    { "waveSpeedMultiplier", 4172 },
+    { "waveSpeeds", 4384 },
+    { "waveSteepness", 4512 },
 };
 
-#define AE3D_VK_UNIFORM_SLOT_COUNT 103
+#define AE3D_VK_UNIFORM_SLOT_COUNT 106
 
 static inline int ae3d_vk_uniform_offset(const char *name) {
     int low = 0;
