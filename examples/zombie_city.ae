@@ -39,23 +39,40 @@ const STREET_X1 = 110.0
 const ROAD_Z0 = 0.0 - 5.4    // the street corridor the horde is held to, between
 const ROAD_Z1 = 4.4          // the far terrace and the near, so it clips no wall
 const ROAD_Y = 0.16
-const SPEED = 1.5            // how fast a zombie shambles toward the prey
+const SPEED = 1.4            // how fast a zombie shambles
 const SEP_RADIUS = 1.05      // it shoves apart from anything closer than this
-const SEP_STRENGTH = 2.2     // gently, so the pack spreads without flinging
-const MAX_SPEED = 2.2        // capped, so a shove can never fling a zombie and pop it
+const SEP_STRENGTH = 2.0     // gently, so the pack spreads without flinging
+const MAX_SPEED = 2.0        // capped, so a shove can never fling a zombie and pop it
+
+// Distance LOD: the zombies close to the camera are drawn from a detailed model,
+// the ones far off from a cheap one, so most of a city-sized crowd costs almost
+// nothing and the count can climb. A zombie within NEAR_DIST of the camera is
+// near; beyond it, far.
+const LOD_NEAR = 0.06
+const LOD_FAR = 0.24
+const NEAR_DIST = 28.0
 
 var g_scene: ptr = null
 var g_lamps: ptr = null
 var g_sky: *Skybox = null
-var g_body: *Model = null
-var g_clothes: *Model = null
+var g_near_body: *Model = null    // detailed body + clothes, for zombies close by
+var g_near_clothes: *Model = null
+var g_far_body: *Model = null     // cheap body only, for the ones far off
 var g_bank: ptr = null
 var g_world: *EcsWorld = null
 var g_pos: *Column = null
 var g_vel: *Column = null
 var g_phase: *Column = null
-var g_yaw: *Column = null     // per-zombie facing about Y, taken from its heading
+var g_yaw: *Column = null     // per-zombie heading about Y; also its facing
 var g_grid: *HordeGrid = null
+// Per-tier compacted buffers, filled each frame by bucketing the crowd by
+// distance to the camera. Sized to the whole count -- a tier may hold all of it.
+var g_nb_pos: *Column = null
+var g_nb_yaw: *Column = null
+var g_nb_phase: *Column = null
+var g_fb_pos: *Column = null
+var g_fb_yaw: *Column = null
+var g_fb_phase: *Column = null
 var g_count = CROWD_DEFAULT
 var g_walk = 1.0
 
@@ -123,12 +140,13 @@ bake_zombie(m: *Manifest, entry: *Entry) -> ptr {
     return bank
 }
 
-// Decimate a figure's mesh to a crowd LOD and wire it as an instanced,
-// pose-bank-posed crowd over the shared position and phase columns. Returns the
-// LOD's triangle count.
-setup_crowd(model: *Model) -> int {
+// Decimate a figure's mesh to a crowd LOD at `cell` and wire it as an instanced,
+// pose-bank-posed crowd, reserving room for the whole count -- a distance tier
+// will fill it with as many as fall in its band each frame. Returns the LOD's
+// triangle count.
+setup_crowd(model: *Model, cell: float) -> int {
     src = core.model_mesh(model)
-    lod = core.mesh_decimate(src, LOD_CELL)
+    lod = core.mesh_decimate(src, cell)
     if lod != null { core.model_set_mesh(model, lod) }
     // Dead flesh and damp cloth, not wet plastic: kill the specular and roughen
     // the surface so the lamps do not smear an oily highlight across every
@@ -138,9 +156,6 @@ setup_crowd(model: *Model) -> int {
     core.model_enable_instancing(model, g_count)
     core.model_set_pose_bank(model, g_bank, FRAMES)
     core.model_enable_instance_phases(model)
-    core.model_set_instance_positions_yaw(model, ecs.column_data(g_pos),
-                                          ecs.column_data(g_yaw), g_count)
-    core.model_set_instance_phases(model, ecs.column_data(g_phase), g_count)
     return core.mesh_index_count(core.model_mesh(model)) / 3
 }
 
@@ -235,20 +250,30 @@ on_start(data: ptr) {
         t = t + 1
     }
 
-    // The crowd: the real zombie, decimated to a bone-aware LOD, instanced.
+    // The crowd. The real zombie loaded twice for the two distance tiers, plus
+    // its clothes for the near one; all posed by the one baked bank.
     entry = entry_named(m, "Zombie_Body")
     if entry == null { println("zombie_city: no Zombie_Body"); assets.manifest_free(m); return }
     g_bank = bake_zombie(m, entry)
-    g_body = assets.entry_load_model(m, entry)
-    if g_bank == null || g_body == null { println("zombie_city: load failed"); assets.manifest_free(m); return }
+    g_near_body = assets.entry_load_model(m, entry)
+    g_far_body = assets.entry_load_model(m, entry)
+    if g_bank == null || g_near_body == null || g_far_body == null {
+        println("zombie_city: load failed"); assets.manifest_free(m); return
+    }
     clothes_entry = entry_named(m, "Zombie_Clothes")
-    if clothes_entry != null { g_clothes = assets.entry_load_model(m, clothes_entry) }
+    if clothes_entry != null { g_near_clothes = assets.entry_load_model(m, clothes_entry) }
 
     g_world = ecs.world_new(g_count)
     g_pos = ecs.column_new(g_count, 3)
     g_vel = ecs.column_new(g_count, 3)
     g_phase = ecs.column_new(g_count, 1)
     g_yaw = ecs.column_new(g_count, 1)
+    g_nb_pos = ecs.column_new(g_count, 3)
+    g_nb_yaw = ecs.column_new(g_count, 1)
+    g_nb_phase = ecs.column_new(g_count, 1)
+    g_fb_pos = ecs.column_new(g_count, 3)
+    g_fb_yaw = ecs.column_new(g_count, 1)
+    g_fb_phase = ecs.column_new(g_count, 1)
     i = 0
     while i < g_count {
         ent = ecs.entity_create(g_world)
@@ -257,7 +282,12 @@ on_start(data: ptr) {
         z = ROAD_Z0 + next_random() * (ROAD_Z1 - ROAD_Z0)
         ecs.column_set3(g_pos, slot, core.vec3(x, ROAD_Y, z))
         ecs.column_set(g_phase, slot, 0, next_random())
-        ecs.column_set(g_yaw, slot, 0, 0.0)
+        // A heading roughly along the street, spread wide, so the crowd wanders
+        // and mills rather than converging on a point -- which is what fills a
+        // city and leaves most of it far from the camera and cheap to draw.
+        down = 0.0
+        if next_random() < 0.5 { down = 3.1415926 }
+        ecs.column_set(g_yaw, slot, 0, down + (next_random() - 0.5) * 1.8)
         i = i + 1
     }
     // The spatial grid the separation runs on, sized to hold the whole street.
@@ -265,80 +295,101 @@ on_start(data: ptr) {
     cols = (span / SEP_RADIUS) as int + 2
     g_grid = crowd.grid_new(cols, SEP_RADIUS, STREET_X0 - 20.0, 0.0 - span * 0.5, 48)
 
-    // Skin and cloth, two surfaces over the one skeleton, each decimated to a
-    // crowd LOD and instanced, both posed by the shared bank -- so the zombie
-    // has a shape and clothes, not a bare blob.
-    body_tris = setup_crowd(g_body)
+    near_tris = setup_crowd(g_near_body, LOD_NEAR)
     cloth_tris = 0
-    if g_clothes != null { cloth_tris = setup_crowd(g_clothes) }
-    engine.engine_add_model(e, g_body)
-    if g_clothes != null { engine.engine_add_model(e, g_clothes) }
+    if g_near_clothes != null { cloth_tris = setup_crowd(g_near_clothes, LOD_NEAR) }
+    far_tris = setup_crowd(g_far_body, LOD_FAR)
+    engine.engine_add_model(e, g_near_body)
+    if g_near_clothes != null { engine.engine_add_model(e, g_near_clothes) }
+    engine.engine_add_model(e, g_far_body)
 
     assets.manifest_free(m)
-    println("zombie_city: ${g_count} zombies -- skin ${body_tris} + cloth ${cloth_tris} tris each, ${FRAMES} poses")
+    println("zombie_city: ${g_count} zombies -- near ${near_tris}+${cloth_tris} tris, far ${far_tris} tris, ${FRAMES} poses")
 }
 
 on_update(data: ptr, delta: float) {
-    if g_body == null { return }
+    if g_near_body == null { return }
     e = data as *Engine
-
-    // The prey is the viewer: the horde shambles toward the camera and presses
-    // in, which is what a horde does -- it hunts you, it does not sweep the
-    // street. It never leaves the street, so nothing is ever teleported.
     cam = engine.engine_camera(e)
-    target = core.vec3(cam.position.x, ROAD_Y, cam.position.z)
+    cx = cam.position.x
+    cz = cam.position.z
 
-    crowd.horde_seek(g_world, g_pos, g_vel, target, SPEED, 1.2)
+    // Each zombie ambles along its own heading; separation then shoves neighbours
+    // apart, so the crowd spreads and mills across the whole city rather than
+    // collapsing to a point -- which is what leaves most of it far and cheap.
+    n = ecs.world_slot_count(g_world)
+    slot = 0
+    while slot < n {
+        if ecs.slot_alive(g_world, slot) {
+            a = ecs.column_get(g_yaw, slot, 0)
+            ecs.column_set3(g_vel, slot,
+                            core.vec3(core.cos_of(a) * SPEED, 0.0, 0.0 - core.sin_of(a) * SPEED))
+        }
+        slot = slot + 1
+    }
     if g_grid != null {
         crowd.horde_separate(g_world, g_pos, g_vel, g_grid, SEP_RADIUS, SEP_STRENGTH)
     }
 
-    // One pass: cap the speed so a shove can never fling a zombie, step it along
-    // its own velocity, hold it to the road corridor, face it along its heading,
-    // and advance its walk with its pace so the feet keep the ground. Replacing
-    // integrate3 with this keeps it all to a single loop over the columns.
+    // Integrate, bounce off the street edges so it stays in the city, advance the
+    // walk, and bucket by distance to the camera into the near and far tiers --
+    // one pass over the columns.
     step_scale = delta / g_walk
+    near2 = NEAR_DIST * NEAR_DIST
+    nn = 0
+    nf = 0
     slot = 0
-    n = ecs.world_slot_count(g_world)
     while slot < n {
         if ecs.slot_alive(g_world, slot) {
             p = ecs.column_get3(g_pos, slot)
             v = ecs.column_get3(g_vel, slot)
-            sp = core.sqrt_of(v.x * v.x + v.z * v.z)
+            a = ecs.column_get(g_yaw, slot, 0)
             vx = v.x
             vz = v.z
-            if sp > MAX_SPEED {
-                scale = MAX_SPEED / sp
-                vx = vx * scale
-                vz = vz * scale
-                sp = MAX_SPEED
-                ecs.column_set3(g_vel, slot, core.vec3(vx, 0.0, vz))
-            }
+            sp = core.sqrt_of(vx * vx + vz * vz)
+            if sp > MAX_SPEED { scale = MAX_SPEED / sp; vx = vx * scale; vz = vz * scale; sp = MAX_SPEED }
             nx = p.x + vx * delta
             nz = p.z + vz * delta
-            if nx < STREET_X0 { nx = STREET_X0 }
-            if nx > STREET_X1 { nx = STREET_X1 }
-            if nz < ROAD_Z0 { nz = ROAD_Z0 }
-            if nz > ROAD_Z1 { nz = ROAD_Z1 }
+            bounced = false
+            if nx < STREET_X0 { nx = STREET_X0; a = 3.1415926 - a; bounced = true }
+            if nx > STREET_X1 { nx = STREET_X1; a = 3.1415926 - a; bounced = true }
+            if nz < ROAD_Z0 { nz = ROAD_Z0; a = 0.0 - a; bounced = true }
+            if nz > ROAD_Z1 { nz = ROAD_Z1; a = 0.0 - a; bounced = true }
             ecs.column_set3(g_pos, slot, core.vec3(nx, ROAD_Y, nz))
-            // Face the heading: mesh forward at yaw a is (cos a, 0, -sin a), so
-            // to face velocity (vx, vz), a = atan2(-vz, vx).
-            if sp > 0.1 { ecs.column_set(g_yaw, slot, 0, core.atan2_of(0.0 - vz, vx)) }
+            if bounced { ecs.column_set(g_yaw, slot, 0, a) }
+            else if sp > 0.1 { a = core.atan2_of(0.0 - vz, vx); ecs.column_set(g_yaw, slot, 0, a) }
             ph = ecs.column_get(g_phase, slot, 0) + step_scale * (0.35 + sp * 0.3)
             while ph >= 1.0 { ph = ph - 1.0 }
             ecs.column_set(g_phase, slot, 0, ph)
+
+            dx = nx - cx
+            dz = nz - cz
+            if dx * dx + dz * dz < near2 {
+                ecs.column_set3(g_nb_pos, nn, core.vec3(nx, ROAD_Y, nz))
+                ecs.column_set(g_nb_yaw, nn, 0, a)
+                ecs.column_set(g_nb_phase, nn, 0, ph)
+                nn = nn + 1
+            } else {
+                ecs.column_set3(g_fb_pos, nf, core.vec3(nx, ROAD_Y, nz))
+                ecs.column_set(g_fb_yaw, nf, 0, a)
+                ecs.column_set(g_fb_phase, nf, 0, ph)
+                nf = nf + 1
+            }
         }
         slot = slot + 1
     }
 
-    core.model_set_instance_positions_yaw(g_body, ecs.column_data(g_pos),
-                                          ecs.column_data(g_yaw), g_count)
-    core.model_set_instance_phases(g_body, ecs.column_data(g_phase), g_count)
-    if g_clothes != null {
-        core.model_set_instance_positions_yaw(g_clothes, ecs.column_data(g_pos),
-                                              ecs.column_data(g_yaw), g_count)
-        core.model_set_instance_phases(g_clothes, ecs.column_data(g_phase), g_count)
-    }
+    // Each tier draws only the zombies that fell into it this frame.
+    upload_tier(g_near_body, g_nb_pos, g_nb_yaw, g_nb_phase, nn)
+    if g_near_clothes != null { upload_tier(g_near_clothes, g_nb_pos, g_nb_yaw, g_nb_phase, nn) }
+    upload_tier(g_far_body, g_fb_pos, g_fb_yaw, g_fb_phase, nf)
+}
+
+upload_tier(model: *Model, pos: *Column, yaw: *Column, phase: *Column, count: int) {
+    core.model_set_instance_draw_count(model, count)
+    core.model_set_instance_positions_yaw(model, ecs.column_data(pos),
+                                          ecs.column_data(yaw), count)
+    core.model_set_instance_phases(model, ecs.column_data(phase), count)
 }
 
 main() {
