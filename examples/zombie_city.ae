@@ -25,7 +25,7 @@ const SKY_G = 0.088
 const SKY_B = 0.125
 const FRAMES = 48
 const LOD_CELL = 0.09
-const CROWD_DEFAULT = 20000
+const CROWD_DEFAULT = 35000
 
 // The road runs along x; Blender Y became ae3d -Z, so the carriageway sits at
 // about z = -2.94. The street block is tiled along x into a longer city, and the
@@ -50,7 +50,7 @@ const MAX_SPEED = 2.0        // capped, so a shove can never fling a zombie and 
 // near; beyond it, far.
 const LOD_NEAR = 0.06
 const LOD_FAR = 0.24
-const NEAR_DIST = 28.0
+const NEAR_DIST = 15.0
 
 var g_scene: ptr = null
 var g_lamps: ptr = null
@@ -293,7 +293,7 @@ on_start(data: ptr) {
     // The spatial grid the separation runs on, sized to hold the whole street.
     span = STREET_X1 - STREET_X0 + 40.0
     cols = (span / SEP_RADIUS) as int + 2
-    g_grid = crowd.grid_new(cols, SEP_RADIUS, STREET_X0 - 20.0, 0.0 - span * 0.5, 48)
+    g_grid = crowd.grid_new(cols, SEP_RADIUS, STREET_X0 - 20.0, 0.0 - span * 0.5, 16)
 
     near_tris = setup_crowd(g_near_body, LOD_NEAR)
     cloth_tris = 0
@@ -311,75 +311,25 @@ on_update(data: ptr, delta: float) {
     if g_near_body == null { return }
     e = data as *Engine
     cam = engine.engine_camera(e)
-    cx = cam.position.x
-    cz = cam.position.z
 
-    // Each zombie ambles along its own heading; separation then shoves neighbours
-    // apart, so the crowd spreads and mills across the whole city rather than
-    // collapsing to a point -- which is what leaves most of it far and cheap.
-    n = ecs.world_slot_count(g_world)
-    slot = 0
-    while slot < n {
-        if ecs.slot_alive(g_world, slot) {
-            a = ecs.column_get(g_yaw, slot, 0)
-            ecs.column_set3(g_vel, slot,
-                            core.vec3(core.cos_of(a) * SPEED, 0.0, 0.0 - core.sin_of(a) * SPEED))
-        }
-        slot = slot + 1
-    }
+    // The whole per-frame crowd update is native now (crowd/module.ae -> C):
+    // point each velocity along its heading, shove neighbours apart, step and
+    // bounce and advance the walk, then sort by distance to the camera into the
+    // near and far draw buffers. At a city's worth of zombies the Aether loops
+    // this replaces were the wall, not the GPU.
+    crowd.crowd_wander(ecs.column_data(g_vel), ecs.column_data(g_yaw), g_count, SPEED)
     if g_grid != null {
         crowd.horde_separate(g_world, g_pos, g_vel, g_grid, SEP_RADIUS, SEP_STRENGTH)
     }
+    crowd.crowd_step(ecs.column_data(g_pos), ecs.column_data(g_vel), ecs.column_data(g_yaw),
+                     ecs.column_data(g_phase), g_count, delta, MAX_SPEED,
+                     STREET_X0, STREET_X1, ROAD_Z0, ROAD_Z1, ROAD_Y, g_walk)
+    nn = crowd.crowd_bucket(ecs.column_data(g_pos), ecs.column_data(g_yaw), ecs.column_data(g_phase),
+                            g_count, cam.position.x, cam.position.z, NEAR_DIST,
+                            ecs.column_data(g_nb_pos), ecs.column_data(g_nb_yaw), ecs.column_data(g_nb_phase),
+                            ecs.column_data(g_fb_pos), ecs.column_data(g_fb_yaw), ecs.column_data(g_fb_phase))
+    nf = g_count - nn
 
-    // Integrate, bounce off the street edges so it stays in the city, advance the
-    // walk, and bucket by distance to the camera into the near and far tiers --
-    // one pass over the columns.
-    step_scale = delta / g_walk
-    near2 = NEAR_DIST * NEAR_DIST
-    nn = 0
-    nf = 0
-    slot = 0
-    while slot < n {
-        if ecs.slot_alive(g_world, slot) {
-            p = ecs.column_get3(g_pos, slot)
-            v = ecs.column_get3(g_vel, slot)
-            a = ecs.column_get(g_yaw, slot, 0)
-            vx = v.x
-            vz = v.z
-            sp = core.sqrt_of(vx * vx + vz * vz)
-            if sp > MAX_SPEED { scale = MAX_SPEED / sp; vx = vx * scale; vz = vz * scale; sp = MAX_SPEED }
-            nx = p.x + vx * delta
-            nz = p.z + vz * delta
-            bounced = false
-            if nx < STREET_X0 { nx = STREET_X0; a = 3.1415926 - a; bounced = true }
-            if nx > STREET_X1 { nx = STREET_X1; a = 3.1415926 - a; bounced = true }
-            if nz < ROAD_Z0 { nz = ROAD_Z0; a = 0.0 - a; bounced = true }
-            if nz > ROAD_Z1 { nz = ROAD_Z1; a = 0.0 - a; bounced = true }
-            ecs.column_set3(g_pos, slot, core.vec3(nx, ROAD_Y, nz))
-            if bounced { ecs.column_set(g_yaw, slot, 0, a) }
-            else if sp > 0.1 { a = core.atan2_of(0.0 - vz, vx); ecs.column_set(g_yaw, slot, 0, a) }
-            ph = ecs.column_get(g_phase, slot, 0) + step_scale * (0.35 + sp * 0.3)
-            while ph >= 1.0 { ph = ph - 1.0 }
-            ecs.column_set(g_phase, slot, 0, ph)
-
-            dx = nx - cx
-            dz = nz - cz
-            if dx * dx + dz * dz < near2 {
-                ecs.column_set3(g_nb_pos, nn, core.vec3(nx, ROAD_Y, nz))
-                ecs.column_set(g_nb_yaw, nn, 0, a)
-                ecs.column_set(g_nb_phase, nn, 0, ph)
-                nn = nn + 1
-            } else {
-                ecs.column_set3(g_fb_pos, nf, core.vec3(nx, ROAD_Y, nz))
-                ecs.column_set(g_fb_yaw, nf, 0, a)
-                ecs.column_set(g_fb_phase, nf, 0, ph)
-                nf = nf + 1
-            }
-        }
-        slot = slot + 1
-    }
-
-    // Each tier draws only the zombies that fell into it this frame.
     upload_tier(g_near_body, g_nb_pos, g_nb_yaw, g_nb_phase, nn)
     if g_near_clothes != null { upload_tier(g_near_clothes, g_nb_pos, g_nb_yaw, g_nb_phase, nn) }
     upload_tier(g_far_body, g_fb_pos, g_fb_yaw, g_fb_phase, nf)

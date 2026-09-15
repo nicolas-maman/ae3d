@@ -74,6 +74,15 @@ void   ae3d_horde_grid_destroy(void *grid);
 void   ae3d_horde_separate(void *grid, double *pos, double *vel, int n,
                            double ox, double oz, double cell_size,
                            double radius, double strength);
+void   ae3d_crowd_wander(double *vel, const double *yaw, int n, double speed);
+void   ae3d_crowd_step(double *pos, const double *vel, double *yaw, double *phase,
+                       int n, double dt, double max_speed,
+                       double x0, double x1, double z0, double z1,
+                       double road_y, double walk);
+int    ae3d_crowd_bucket(const double *pos, const double *yaw, const double *phase, int n,
+                         double cx, double cz, double near_dist,
+                         double *np, double *ny, double *nph,
+                         double *fp, double *fy, double *fph);
 void   ae3d_gl_upload_skin(void *mesh, int vbo);
 void  *ae3d_skinrows_create(int count);
 void   ae3d_skinrows_destroy(void *rows);

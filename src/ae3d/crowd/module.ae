@@ -21,7 +21,8 @@ exports (
     posebank_bake, posebank_free,
     posebank_frames, posebank_bones, posebank_get, posebank_data,
     horde_seek,
-    HordeGrid, grid_new, grid_free, horde_separate
+    HordeGrid, grid_new, grid_free, horde_separate,
+    crowd_wander, crowd_step, crowd_bucket
 )
 
 extern ae3d_posebank_create(frames: int, bones: int) -> ptr
@@ -36,6 +37,15 @@ extern ae3d_horde_grid_destroy(grid: ptr)
 extern ae3d_horde_separate(grid: ptr, pos: ptr, vel: ptr, n: int,
                            ox: float, oz: float, cell_size: float,
                            radius: float, strength: float)
+extern ae3d_crowd_wander(vel: ptr, yaw: ptr, n: int, speed: float)
+extern ae3d_crowd_step(pos: ptr, vel: ptr, yaw: ptr, phase: ptr, n: int,
+                       dt: float, max_speed: float,
+                       x0: float, x1: float, z0: float, z1: float,
+                       road_y: float, walk: float)
+extern ae3d_crowd_bucket(pos: ptr, yaw: ptr, phase: ptr, n: int,
+                         cx: float, cz: float, near_dist: float,
+                         np: ptr, ny: ptr, nph: ptr,
+                         fp: ptr, fy: ptr, fph: ptr) -> int
 
 // Bake `frames` evenly spaced poses across `duration` seconds of the clip the
 // registry's players carry, into a bank the whole crowd will share. Each frame
@@ -163,4 +173,31 @@ horde_separate(world: *EcsWorld, position: *Column, velocity: *Column,
     ae3d_horde_separate(g.native, ecs.column_data(position), ecs.column_data(velocity),
                         ecs.world_slot_count(world), g.ox, g.oz, g.cell_size,
                         radius, strength)
+}
+
+// The crowd's per-frame motion and its distance sort, native. These run over
+// the ECS columns' own buffers (ecs.column_data) rather than the EcsWorld: the
+// crowd is the compact range [0, n), a horde that only spawns.
+
+// Point every zombie's velocity along its heading at `speed`, before the
+// separation pass adds its shove.
+crowd_wander(vel: ptr, yaw: ptr, n: int, speed: float) {
+    ae3d_crowd_wander(vel, yaw, n, speed)
+}
+
+// Cap the speed, step, bounce off the street's edges (turning the heading so the
+// crowd stays in the city), keep it on the road, face it along its heading, and
+// advance its walk. Replaces the Aether motion loop.
+crowd_step(pos: ptr, vel: ptr, yaw: ptr, phase: ptr, n: int, dt: float,
+           max_speed: float, x0: float, x1: float, z0: float, z1: float,
+           road_y: float, walk: float) {
+    ae3d_crowd_step(pos, vel, yaw, phase, n, dt, max_speed, x0, x1, z0, z1, road_y, walk)
+}
+
+// Sort the crowd into the near and far draw buffers by distance to the camera,
+// compacting each into its own run. Returns the near count; far is n minus it.
+crowd_bucket(pos: ptr, yaw: ptr, phase: ptr, n: int, cx: float, cz: float,
+             near_dist: float, np: ptr, ny: ptr, nph: ptr,
+             fp: ptr, fy: ptr, fph: ptr) -> int {
+    return ae3d_crowd_bucket(pos, yaw, phase, n, cx, cz, near_dist, np, ny, nph, fp, fy, fph)
 }
