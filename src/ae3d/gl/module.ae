@@ -68,6 +68,8 @@ extern ae3d_gl_setup_vertex_attribs()
 extern ae3d_gl_upload_skin(mesh: ptr, vbo: int)
 extern ae3d_gl_uniform_mat4v(loc: int, count: int, values: ptr)
 extern ae3d_gl_setup_instance_attribs(inst: ptr, matrix_vbo: int, color_vbo: int)
+extern ae3d_gl_setup_instance_phase(inst: ptr, phase_vbo: int)
+extern ae3d_gl_posebank_texture(bank: ptr) -> int
 extern ae3d_gl_update_instances(inst: ptr, matrix_vbo: int, capacity_bytes: int) -> int
 extern ae3d_gl_update_instance_colors(inst: ptr, color_vbo: int)
 extern ae3d_gl_draw_elements(count: int, byte_offset: int)
@@ -836,6 +838,14 @@ renderer_add_model(r: *GLRenderer, m: *Model) {
         m.instance_vbo_capacity = core.model_instance_count(m) * 64
         m.instances_updated = false
         m.instance_colors_updated = false
+        // A crowd (a model carrying a pose bank) also gets the per-instance
+        // phase attribute at location 11, so the crowd program can pose each
+        // instance from its own frame of the bank.
+        if core.model_pose_bank(m) != null {
+            m.instance_phase_vbo = ae3d_gl_buffer_create()
+            ae3d_gl_setup_instance_phase(m.instances, m.instance_phase_vbo)
+            m.instance_phases_updated = false
+        }
     }
 
     ae3d_gl_vao_bind(0)
