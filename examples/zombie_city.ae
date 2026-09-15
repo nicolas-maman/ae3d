@@ -177,7 +177,7 @@ is_prop(name: string) -> bool {
 // the engine. The figure objects and the small clutter are left out; only the
 // root models are shifted, so the parented trim and glass ride along on their
 // shells. Lamp heads and lit windows glow; the road is wet.
-add_tile(e: *Engine, m: *Manifest, off_x: float) -> ptr {
+add_tile(e: *Engine, m: *Manifest, off_x: float, flip: bool) -> ptr {
     models = assets.manifest_load_scene(m)
     count = assets.manifest_count(m)
     i = 0
@@ -185,9 +185,15 @@ add_tile(e: *Engine, m: *Manifest, off_x: float) -> ptr {
         name = assets.entry_object(assets.manifest_entry(m, i))
         model = list.get_raw(models, i) as *Model
         if model != null && string.contains(name, "Zombie") == 0 && !is_prop(name) {
-            if off_x != 0.0 && core.model_parent(model) == null {
+            if core.model_parent(model) == null {
+                // Every other block is mirrored along the street (its root
+                // positions reflected about the block centre; the parented trim
+                // rides along), so the terrace order alternates and the city
+                // does not read as one block copied down the road.
                 wp = core.model_world_position(model)
-                core.model_set_position(model, wp.x + off_x, wp.y, wp.z)
+                nx = wp.x + off_x
+                if flip { nx = off_x - wp.x }
+                core.model_set_position(model, nx, wp.y, wp.z)
             }
             if string.contains(name, "LampHead") == 1 { core.model_set_exposure(model, 16.0) }
             else if string.contains(name, "_Lit") == 1 {
@@ -265,7 +271,7 @@ on_start(data: ptr) {
     half = (TILES - 1) / 2
     while t < TILES {
         off = (t - half) as float * BLOCK_LEN
-        tile = add_tile(e, m, off)
+        tile = add_tile(e, m, off, t % 2 == 1)
         if t == 0 { g_scene = tile }
         t = t + 1
     }
