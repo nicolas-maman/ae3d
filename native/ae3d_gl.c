@@ -351,6 +351,23 @@ void ae3d_gl_setup_vertex_attribs(void) {
     glEnableVertexAttribArray(10);
 }
 
+/* The crowd's extra instance attribute: one float an instance at location 11,
+ * the animation phase VERTEX_CROWD reads to pick a pose-bank frame. Called
+ * after the shared setup, so a crowd draw carries matrices, colours and phases
+ * and an ordinary instanced draw carries only the first two. */
+void ae3d_gl_setup_instance_phase(void *inst, int phase_vbo) {
+    const float *phases = ae3d_inst_phase_data(inst);
+    int count = ae3d_inst_count(inst);
+
+    if (count <= 0 || !phase_vbo || !phases || !ae3d_inst_has_phases(inst)) return;
+    glBindBuffer(GL_ARRAY_BUFFER, (GLuint)phase_vbo);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)count * (GLsizeiptr)sizeof(float),
+                 phases, GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(11);
+    glVertexAttribPointer(11, 1, GL_FLOAT, GL_FALSE, (GLsizei)sizeof(float), (const void *)0);
+    glVertexAttribDivisor(11, 1);
+}
+
 void ae3d_gl_setup_instance_attribs(void *inst, int matrix_vbo, int color_vbo) {
     const float *matrices = ae3d_inst_matrix_data(inst);
     const float *colors = ae3d_inst_color_data(inst);
