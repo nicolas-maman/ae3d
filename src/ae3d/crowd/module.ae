@@ -11,6 +11,8 @@
 // This module owns the bake and the bank's storage; the instanced-skinned draw
 // that samples it is the next phase (#271).
 
+import std.heap
+import std.intarr
 import ae3d.core
 import ae3d.anim
 import ae3d.skin
@@ -19,7 +21,8 @@ import ae3d.ecs
 exports (
     posebank_bake, posebank_free,
     posebank_frames, posebank_bones, posebank_get, posebank_data,
-    horde_seek
+    horde_seek,
+    HordeGrid, grid_new, grid_free, horde_separate
 )
 
 extern ae3d_posebank_create(frames: int, bones: int) -> ptr
@@ -101,6 +104,128 @@ horde_seek(world: *EcsWorld, position: *Column, velocity: *Column,
             } else {
                 ecs.column_set3(velocity, slot, core.vec3(0.0, 0.0, 0.0))
             }
+        }
+        slot = slot + 1
+    }
+}
+
+// A uniform spatial grid over the XZ ground, so a horde's separation is O(N)
+// rather than every zombie testing every other. The world is a `cols` x `cols`
+// board of cells `cell_size` across from the corner (ox, oz); each cell holds up
+// to `per_cell` entity slots. Rebuilt from the live positions each frame; a cell
+// that overflows drops the overflow from that frame's separation, which at worst
+// lets a few in a dense knot not push apart for a frame -- never a crash, never
+// a stall.
+struct HordeGrid {
+    cols: int
+    cell_size: float
+    ox: float
+    oz: float
+    per_cell: int
+    count: ptr
+    slots: ptr
+}
+
+grid_new(cols: int, cell_size: float, ox: float, oz: float, per_cell: int) -> *HordeGrid {
+    if cols <= 0 || cell_size <= 0.0 || per_cell <= 0 { return null }
+    g = heap.new(HordeGrid)
+    g.cols = cols
+    g.cell_size = cell_size
+    g.ox = ox
+    g.oz = oz
+    g.per_cell = per_cell
+    g.count = intarr.new_raw(cols * cols)
+    g.slots = intarr.new_raw(cols * cols * per_cell)
+    if g.count == null || g.slots == null {
+        grid_free(g)
+        return null
+    }
+    return g
+}
+
+grid_free(g: *HordeGrid) {
+    if g == null { return }
+    if g.count != null { intarr.free(g.count) }
+    if g.slots != null { intarr.free(g.slots) }
+    heap.free(g)
+}
+
+// The cell a world position falls in, clamped to the board so an entity that
+// wanders off the edge still lands in a real cell.
+cell_index(g: *HordeGrid, x: float, z: float) -> int {
+    cx = ((x - g.ox) / g.cell_size) as int
+    cz = ((z - g.oz) / g.cell_size) as int
+    if cx < 0 { cx = 0 }
+    if cx >= g.cols { cx = g.cols - 1 }
+    if cz < 0 { cz = 0 }
+    if cz >= g.cols { cz = g.cols - 1 }
+    return cz * g.cols + cx
+}
+
+// A horde system: push apart entities closer than `radius`, so the crowd spreads
+// across the ground under its target instead of collapsing onto one point. The
+// grid is rebuilt from the current positions, then each entity is pushed away
+// from the neighbours in its own and the eight adjacent cells -- the only ones
+// that can hold anything within a cell's width. `strength` scales the push added
+// to the velocity. Pair after horde_seek and before ecs.integrate3.
+horde_separate(world: *EcsWorld, position: *Column, velocity: *Column,
+               g: *HordeGrid, radius: float, strength: float) {
+    intarr.fill(g.count, 0)
+
+    // Bucket every live entity into its cell, up to per_cell.
+    slot = 0
+    n = ecs.world_slot_count(world)
+    while slot < n {
+        if ecs.slot_alive(world, slot) {
+            p = ecs.column_get3(position, slot)
+            cell = cell_index(g, p.x, p.z)
+            c = intarr.get_unchecked(g.count, cell)
+            if c < g.per_cell {
+                intarr.set_unchecked(g.slots, cell * g.per_cell + c, slot)
+                intarr.set_unchecked(g.count, cell, c + 1)
+            }
+        }
+        slot = slot + 1
+    }
+
+    // Push each entity away from its close neighbours in the 3x3 block of cells.
+    slot = 0
+    while slot < n {
+        if ecs.slot_alive(world, slot) {
+            p = ecs.column_get3(position, slot)
+            cx = ((p.x - g.ox) / g.cell_size) as int
+            cz = ((p.z - g.oz) / g.cell_size) as int
+            push = core.vec3(0.0, 0.0, 0.0)
+            dz = 0 - 1
+            while dz <= 1 {
+                dx = 0 - 1
+                while dx <= 1 {
+                    ncx = cx + dx
+                    ncz = cz + dz
+                    if ncx >= 0 && ncx < g.cols && ncz >= 0 && ncz < g.cols {
+                        cell = ncz * g.cols + ncx
+                        cnt = intarr.get_unchecked(g.count, cell)
+                        k = 0
+                        while k < cnt {
+                            j = intarr.get_unchecked(g.slots, cell * g.per_cell + k)
+                            if j != slot {
+                                q = ecs.column_get3(position, j)
+                                diff = core.v3_sub(p, q)
+                                dist = core.v3_len(diff)
+                                if dist > 0.0001 && dist < radius {
+                                    push = core.v3_add(push,
+                                        core.v3_mul(diff, (radius - dist) / (dist * radius)))
+                                }
+                            }
+                            k = k + 1
+                        }
+                    }
+                    dx = dx + 1
+                }
+                dz = dz + 1
+            }
+            v = ecs.column_get3(velocity, slot)
+            ecs.column_set3(velocity, slot, core.v3_add(v, core.v3_mul(push, strength)))
         }
         slot = slot + 1
     }
