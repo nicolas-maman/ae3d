@@ -12,7 +12,7 @@
 // that samples it is the next phase (#271).
 
 import std.heap
-import std.intarr
+import std.arena
 import ae3d.core
 import ae3d.anim
 import ae3d.skin
@@ -122,20 +122,28 @@ struct HordeGrid {
     ox: float
     oz: float
     per_cell: int
+    arena: ptr
     count: ptr
     slots: ptr
 }
 
 grid_new(cols: int, cell_size: float, ox: float, oz: float, per_cell: int) -> *HordeGrid {
     if cols <= 0 || cell_size <= 0.0 || per_cell <= 0 { return null }
+    cells = cols * cols
     g = heap.new(HordeGrid)
     g.cols = cols
     g.cell_size = cell_size
     g.ox = ox
     g.oz = oz
     g.per_cell = per_cell
-    g.count = intarr.new_raw(cols * cols)
-    g.slots = intarr.new_raw(cols * cols * per_cell)
+    // The counts and the bucket lists are read and written tens of millions of
+    // times a frame when the crowd is large, so they are arena ints indexed
+    // directly rather than a bounds-checked array that crosses the boundary on
+    // every access.
+    g.arena = arena.create((cells + cells * per_cell) * 8)
+    if g.arena == null { heap.free(g); return null }
+    g.count = arena.alloc(g.arena, cells * 8)
+    g.slots = arena.alloc(g.arena, cells * per_cell * 8)
     if g.count == null || g.slots == null {
         grid_free(g)
         return null
@@ -145,87 +153,111 @@ grid_new(cols: int, cell_size: float, ox: float, oz: float, per_cell: int) -> *H
 
 grid_free(g: *HordeGrid) {
     if g == null { return }
-    if g.count != null { intarr.free(g.count) }
-    if g.slots != null { intarr.free(g.slots) }
+    if g.arena != null { arena.destroy(g.arena) }
     heap.free(g)
 }
 
-// The cell a world position falls in, clamped to the board so an entity that
-// wanders off the edge still lands in a real cell.
-cell_index(g: *HordeGrid, x: float, z: float) -> int {
-    cx = ((x - g.ox) / g.cell_size) as int
-    cz = ((z - g.oz) / g.cell_size) as int
-    if cx < 0 { cx = 0 }
-    if cx >= g.cols { cx = g.cols - 1 }
-    if cz < 0 { cz = 0 }
-    if cz >= g.cols { cz = g.cols - 1 }
-    return cz * g.cols + cx
-}
-
-// A horde system: push apart entities closer than `radius`, so the crowd spreads
-// across the ground under its target instead of collapsing onto one point. The
-// grid is rebuilt from the current positions, then each entity is pushed away
-// from the neighbours in its own and the eight adjacent cells -- the only ones
-// that can hold anything within a cell's width. `strength` scales the push added
-// to the velocity. Pair after horde_seek and before ecs.integrate3.
+// A horde system: push apart entities closer than `radius`, so the crowd
+// spreads across the ground under its target instead of collapsing onto one
+// point. The grid is rebuilt from the current positions, then each entity is
+// pushed away from the neighbours in its own and the eight adjacent cells -- the
+// only ones a cell's width can reach. `strength` scales the push added to the
+// velocity. Pair after horde_seek and before ecs.integrate3.
+//
+// The hot loop runs tens of millions of times a frame at crowd scale, so it
+// reads the grid ints and the position and velocity columns as raw arrays
+// indexed directly -- no bounds-checked call across the boundary per access --
+// and rejects a far neighbour on its squared distance before paying for a
+// square root. On the flat ground the y axis carries nothing, so cells are keyed
+// on x and z alone.
 horde_separate(world: *EcsWorld, position: *Column, velocity: *Column,
                g: *HordeGrid, radius: float, strength: float) {
-    intarr.fill(g.count, 0)
-
-    // Bucket every live entity into its cell, up to per_cell.
-    slot = 0
+    cols = g.cols
+    cells = cols * cols
+    per_cell = g.per_cell
+    cnt = g.count as int[]
+    sl = g.slots as int[]
+    pos = ecs.column_data(position) as float[]
+    vel = ecs.column_data(velocity) as float[]
+    inv_cell = 1.0 / g.cell_size
+    radius_sq = radius * radius
     n = ecs.world_slot_count(world)
+
+    // Empty the cells (arena memory is not cleared), then bucket every live
+    // entity into its cell up to per_cell.
+    i = 0
+    while i < cells { cnt[i] = 0; i = i + 1 }
+    slot = 0
     while slot < n {
         if ecs.slot_alive(world, slot) {
-            p = ecs.column_get3(position, slot)
-            cell = cell_index(g, p.x, p.z)
-            c = intarr.get_unchecked(g.count, cell)
-            if c < g.per_cell {
-                intarr.set_unchecked(g.slots, cell * g.per_cell + c, slot)
-                intarr.set_unchecked(g.count, cell, c + 1)
+            base = slot * 3
+            cx = ((pos[base] - g.ox) * inv_cell) as int
+            cz = ((pos[base + 2] - g.oz) * inv_cell) as int
+            if cx < 0 { cx = 0 }
+            if cx >= cols { cx = cols - 1 }
+            if cz < 0 { cz = 0 }
+            if cz >= cols { cz = cols - 1 }
+            cell = cz * cols + cx
+            c = cnt[cell]
+            if c < per_cell {
+                sl[cell * per_cell + c] = slot
+                cnt[cell] = c + 1
             }
         }
         slot = slot + 1
     }
 
-    // Push each entity away from its close neighbours in the 3x3 block of cells.
     slot = 0
     while slot < n {
         if ecs.slot_alive(world, slot) {
-            p = ecs.column_get3(position, slot)
-            cx = ((p.x - g.ox) / g.cell_size) as int
-            cz = ((p.z - g.oz) / g.cell_size) as int
-            push = core.vec3(0.0, 0.0, 0.0)
+            base = slot * 3
+            px = pos[base]
+            py = pos[base + 1]
+            pz = pos[base + 2]
+            cx = ((px - g.ox) * inv_cell) as int
+            cz = ((pz - g.oz) * inv_cell) as int
+            pushx = 0.0
+            pushy = 0.0
+            pushz = 0.0
             dz = 0 - 1
             while dz <= 1 {
-                dx = 0 - 1
-                while dx <= 1 {
-                    ncx = cx + dx
-                    ncz = cz + dz
-                    if ncx >= 0 && ncx < g.cols && ncz >= 0 && ncz < g.cols {
-                        cell = ncz * g.cols + ncx
-                        cnt = intarr.get_unchecked(g.count, cell)
-                        k = 0
-                        while k < cnt {
-                            j = intarr.get_unchecked(g.slots, cell * g.per_cell + k)
-                            if j != slot {
-                                q = ecs.column_get3(position, j)
-                                diff = core.v3_sub(p, q)
-                                dist = core.v3_len(diff)
-                                if dist > 0.0001 && dist < radius {
-                                    push = core.v3_add(push,
-                                        core.v3_mul(diff, (radius - dist) / (dist * radius)))
+                ncz = cz + dz
+                if ncz >= 0 && ncz < cols {
+                    dx = 0 - 1
+                    while dx <= 1 {
+                        ncx = cx + dx
+                        if ncx >= 0 && ncx < cols {
+                            cbase = (ncz * cols + ncx) * per_cell
+                            cn = cnt[ncz * cols + ncx]
+                            k = 0
+                            while k < cn {
+                                j = sl[cbase + k]
+                                if j != slot {
+                                    jb = j * 3
+                                    ddx = px - pos[jb]
+                                    ddy = py - pos[jb + 1]
+                                    ddz = pz - pos[jb + 2]
+                                    dsq = ddx * ddx + ddy * ddy + ddz * ddz
+                                    if dsq > 0.00000001 && dsq < radius_sq {
+                                        dist = core.sqrt_of(dsq)
+                                        f = (radius - dist) / (dist * radius)
+                                        pushx = pushx + ddx * f
+                                        pushy = pushy + ddy * f
+                                        pushz = pushz + ddz * f
+                                    }
                                 }
+                                k = k + 1
                             }
-                            k = k + 1
                         }
+                        dx = dx + 1
                     }
-                    dx = dx + 1
                 }
                 dz = dz + 1
             }
-            v = ecs.column_get3(velocity, slot)
-            ecs.column_set3(velocity, slot, core.v3_add(v, core.v3_mul(push, strength)))
+            vb = slot * 3
+            vel[vb] = vel[vb] + pushx * strength
+            vel[vb + 1] = vel[vb + 1] + pushy * strength
+            vel[vb + 2] = vel[vb + 2] + pushz * strength
         }
         slot = slot + 1
     }
