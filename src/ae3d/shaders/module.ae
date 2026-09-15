@@ -9,6 +9,7 @@ import ae3d.core
 
 exports (
     VERTEX_DEFAULT, FRAGMENT_DEFAULT,
+    VERTEX_CROWD,
     VERTEX_WATER, FRAGMENT_WATER,
     VERTEX_DEPTH, FRAGMENT_DEPTH,
     VERTEX_SKYBOX, FRAGMENT_SKYBOX, FRAGMENT_SKYBOX_SOLID,
@@ -87,6 +88,77 @@ void main() {
     gl_Position = viewProjection * modelMatrix * posed;
 }
 
+GLSL_END
+
+// The crowd's vertex shader: one instanced skinned draw where every instance is
+// at its own point in the walk. The bone palette does not come from a uniform,
+// which holds one pose, but from a pose bank -- a float texture of `frames`
+// poses baked from the clip -- sampled at the instance's own phase. So a
+// million zombies, each mid-stride somewhere different, are one draw call and
+// one upload of the bank, not a palette apiece. Pairs with FRAGMENT_DEFAULT.
+const VERTEX_CROWD = <<GLSL_END
+#version 330 core
+
+layout(location = 0) in vec3 inPosition;
+layout(location = 1) in vec2 inTexCoord;
+layout(location = 2) in vec3 inNormal;
+layout(location = 3) in mat4 instanceModel; // per-instance placement (3,4,5,6)
+layout(location = 7) in vec3 instanceColor; // per-instance tint
+layout(location = 8) in vec4 inJoints;      // the four bones a vertex hangs off
+layout(location = 9) in vec4 inWeights;     // how much of each
+layout(location = 10) in float inOcclusion;
+layout(location = 11) in float instancePhase; // where in the walk this one is, 0..1
+
+uniform mat4 model;
+uniform mat4 viewProjection;
+uniform mat4 lightSpaceMatrix;
+
+// The baked walk: bones*4 texels wide (four texels a bone matrix), `frames`
+// rows tall. Sampled by exact texel, never filtered between poses.
+uniform sampler2D poseBank;
+uniform int poseBankFrames;
+
+out vec2 fragTexCoord;
+out vec3 Normal;
+out vec3 FragPos;
+out vec3 InstanceColor;
+out vec4 FragPosLightSpace;
+out float Occlusion;
+
+// The bone's matrix at a frame, read as its four columns from the bank.
+mat4 boneAt(int bone, int frame) {
+    int x = bone * 4;
+    return mat4(texelFetch(poseBank, ivec2(x + 0, frame), 0),
+                texelFetch(poseBank, ivec2(x + 1, frame), 0),
+                texelFetch(poseBank, ivec2(x + 2, frame), 0),
+                texelFetch(poseBank, ivec2(x + 3, frame), 0));
+}
+
+void main() {
+    Occlusion = inOcclusion;
+    mat4 modelMatrix = model * instanceModel;
+
+    // The phase picks a baked pose. Clamped, so a phase of exactly 1 lands on
+    // the last frame rather than off the end of the bank.
+    int frame = int(instancePhase * float(poseBankFrames));
+    if (frame < 0) { frame = 0; }
+    if (frame >= poseBankFrames) { frame = poseBankFrames - 1; }
+
+    mat4 skin = inWeights.x * boneAt(int(inJoints.x), frame)
+              + inWeights.y * boneAt(int(inJoints.y), frame)
+              + inWeights.z * boneAt(int(inJoints.z), frame)
+              + inWeights.w * boneAt(int(inJoints.w), frame);
+
+    vec4 posed = skin * vec4(inPosition, 1.0);
+    vec3 posedNormal = mat3(skin) * inNormal;
+
+    FragPos = vec3(modelMatrix * posed);
+    Normal = normalize(mat3(modelMatrix) * posedNormal);
+    fragTexCoord = inTexCoord;
+    InstanceColor = instanceColor;
+    FragPosLightSpace = lightSpaceMatrix * vec4(FragPos, 1.0);
+    gl_Position = viewProjection * modelMatrix * posed;
+}
 GLSL_END
 
 const FRAGMENT_DEFAULT = <<GLSL_END
