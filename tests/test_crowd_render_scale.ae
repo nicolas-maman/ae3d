@@ -40,6 +40,14 @@ const DURATION = 1.0
 const FIELD = 630.0
 const WARMUP = 3
 const TIMED = 10
+// A probe crowd, and the frame time above which the renderer is taken to be a
+// software rasteriser. On the hardware these numbers describe, this many
+// instances draw in a millisecond or two; a shared CI runner on llvmpipe takes
+// far longer, and a 500k sweep at that rate is neither a measurement nor
+// something CI can sit through (it timed the suite out at 300s). Same guard
+// bench_black_hole uses for the same reason.
+const PROBE_N = 15000
+const SLOW_FRAME_MS = 50.0
 
 var failures = 0
 
@@ -245,6 +253,50 @@ bench(backend: *Backend, renderer: *GLRenderer, cam: *Camera, key: *Light,
     return draws
 }
 
+// One timed frame of a modest crowd, to find out what kind of renderer this is
+// before committing to the half-million sweep. Builds, renders a warm frame and
+// a timed one (the readback is the sync point), and hands back the frame time in
+// milliseconds; the caller reads a slow one as a software rasteriser and skips.
+probe_frame_ms(backend: *Backend, cam: *Camera, key: *Light,
+               bones: ptr, bank: ptr) -> float {
+    mesh = build_column(bones, 6)
+    world = ecs.world_new(PROBE_N)
+    pos = ecs.column_new(PROBE_N, 3)
+    phase = ecs.column_new(PROBE_N, 1)
+    if world == null || pos == null || phase == null { return 0.0 }
+    i = 0
+    while i < PROBE_N {
+        e = ecs.entity_create(world)
+        slot = ecs.entity_index(e)
+        ecs.column_set3(pos, slot,
+                        core.vec3((next_random() - 0.5) * 2.0 * FIELD, 0.0,
+                                  (next_random() - 0.5) * 2.0 * FIELD))
+        ecs.column_set(phase, slot, 0, next_random())
+        i = i + 1
+    }
+    swarm = core.model_new()
+    core.model_set_mesh(swarm, mesh)
+    core.model_matte(swarm, 0.85, 0.85, 0.85)
+    if !core.model_enable_instancing(swarm, PROBE_N) { return 0.0 }
+    core.model_set_pose_bank(swarm, bank, FRAMES)
+    core.model_enable_instance_phases(swarm)
+    core.model_set_instance_positions(swarm, ecs.column_data(pos), PROBE_N)
+    core.model_set_instance_phases(swarm, ecs.column_data(phase), PROBE_N)
+    core.backend_add_model(backend, swarm)
+    core.backend_render(backend, cam, key)
+    core.backend_frame_pixels(backend)
+    m0 = platform.time()
+    core.backend_render(backend, cam, key)
+    core.backend_frame_pixels(backend)
+    ms = (platform.time() - m0) * 1000.0
+    core.backend_remove_model(backend, swarm)
+    core.model_free(swarm)
+    ecs.column_free(pos)
+    ecs.column_free(phase)
+    ecs.world_free(world)
+    return ms
+}
+
 main() {
     context = offscreen.context_create(WIDTH, HEIGHT)
     if context == null {
@@ -289,24 +341,35 @@ main() {
     key.ambient_strength = 0.6
     gl.renderer_add_light(renderer, key)
 
-    // A hundred thousand at a low-poly figure, for a scale reference.
-    draws_100k = bench(&backend, renderer, cam, key, bones, bank, 100000, 6)
-    check_true("a hundred thousand instances render in one draw", draws_100k == 1)
+    // Find out what kind of renderer this is before the sweep. A software one
+    // (a CI runner's llvmpipe) is skipped: half a million instances would time
+    // the suite out, and the timings would describe the software, not hardware.
+    probe_ms = probe_frame_ms(&backend, cam, key, bones, bank)
+    software = probe_ms > SLOW_FRAME_MS
+    if software {
+        println("  crowd_render_scale: SKIP software renderer -- ${PROBE_N} instances took ${probe_ms} ms/frame; a 500k sweep would not finish in CI and would not describe hardware")
+    }
 
-    // The triangle-budget sweep at the half-million goal: the same crowd and the
-    // same silhouette at rising polygon density, 48 to 768 triangles a figure.
-    // This is the number that sets what a real zombie must be decimated to for
-    // the crowd -- a full one is ~26k tris (13 billion a frame at 500k), and the
-    // base skin hull of the demo figure (its subsurf at level 0) is a few
-    // hundred, so the LOD lives in this range. Whichever rows stay within a
-    // frame are the budgets the decimated mesh can spend.
-    d0 = bench(&backend, renderer, cam, key, bones, bank, 500000, 6)
-    d1 = bench(&backend, renderer, cam, key, bones, bank, 500000, 24)
-    d2 = bench(&backend, renderer, cam, key, bones, bank, 500000, 48)
-    d3 = bench(&backend, renderer, cam, key, bones, bank, 500000, 96)
+    if !software {
+        // A hundred thousand at a low-poly figure, for a scale reference.
+        draws_100k = bench(&backend, renderer, cam, key, bones, bank, 100000, 6)
+        check_true("a hundred thousand instances render in one draw", draws_100k == 1)
 
-    check_true("half a million instances render in one draw at every density",
-               d0 == 1 && d1 == 1 && d2 == 1 && d3 == 1)
+        // The triangle-budget sweep at the half-million goal: the same crowd and
+        // the same silhouette at rising polygon density, 48 to 768 triangles a
+        // figure. This is the number that sets what a real zombie must be
+        // decimated to for the crowd -- a full one is ~26k tris (13 billion a
+        // frame at 500k), and the base skin hull of the demo figure (its subsurf
+        // at level 0) is a few hundred, so the LOD lives in this range. Whichever
+        // rows stay within a frame are the budgets the decimated mesh can spend.
+        d0 = bench(&backend, renderer, cam, key, bones, bank, 500000, 6)
+        d1 = bench(&backend, renderer, cam, key, bones, bank, 500000, 24)
+        d2 = bench(&backend, renderer, cam, key, bones, bank, 500000, 48)
+        d3 = bench(&backend, renderer, cam, key, bones, bank, 500000, 96)
+
+        check_true("half a million instances render in one draw at every density",
+                   d0 == 1 && d1 == 1 && d2 == 1 && d3 == 1)
+    }
 
     crowd.posebank_free(bank)
     anim.registry_free(reg)
@@ -320,7 +383,9 @@ main() {
     gl.renderer_free(renderer)
     offscreen.context_destroy(context)
 
-    if failures == 0 {
+    if software {
+        println("crowd_render_scale: SKIP (software renderer)")
+    } else if failures == 0 {
         println("crowd_render_scale: all checks passed")
     } else {
         println("crowd_render_scale: ${failures} failure(s)")
