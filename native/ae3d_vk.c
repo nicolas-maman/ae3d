@@ -276,6 +276,7 @@ static struct {
     int camdepth_height;
     int pass_open;
     int in_shadow_pass;
+    int in_camdepth;
     float scene_clear[4];
     VkFramebuffer scene_framebuffer;
     VkFramebuffer *post_framebuffers;
@@ -3167,7 +3168,10 @@ int ae3d_vk_shadow_begin(void) {
 
 void ae3d_vk_shadow_draw(int mesh_handle, int instance_handle, int instance_count) {
     VkPipeline pipeline = vk.shadow_pipeline;
-    if (!vk.shadow_pipeline || !vk.in_shadow_pass) return;
+    // Also draws in the camera-depth prepass: it is depth-only from the same
+    // geometry, and its render pass is compatible with the shadow one, so the
+    // shadow depth pipeline is exactly the pipeline it wants.
+    if (!vk.shadow_pipeline || (!vk.in_shadow_pass && !vk.in_camdepth)) return;
     if (mesh_handle > 0 && mesh_handle <= vk.mesh_capacity
         && vk.meshes[mesh_handle - 1].skinned && vk.skinned_shadow_pipeline) {
         pipeline = vk.skinned_shadow_pipeline;
@@ -3196,6 +3200,54 @@ void ae3d_vk_shadow_end(void) {
     memset(&scissor, 0, sizeof(scissor));
     scissor.extent = vk.extent;
     ae3d_vkCmdSetScissor(vk.command_buffers[vk.frame], 0, 1, &scissor);
+}
+
+// The camera-space depth prepass. Same shape as the shadow pass -- begin the
+// depth-only pass, draw the casters (with the camera view-projection in the
+// light-space slot the depth shader reads), end -- into the full-size camdepth
+// target the SSR pass samples. Only when SSR is on and the target exists.
+int ae3d_vk_camdepth_begin(void) {
+    VkRenderPassBeginInfo pass;
+    VkClearValue clear;
+    VkViewport viewport;
+    VkRect2D scissor;
+
+    if (!vk.recording || !vk.ssr_enabled || !vk.camdepth_framebuffer) return 0;
+    if (vk.pass_open) return 0;
+
+    memset(&clear, 0, sizeof(clear));
+    clear.depthStencil.depth = 1.0f;
+
+    memset(&pass, 0, sizeof(pass));
+    pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    pass.renderPass = vk.camdepth_pass;
+    pass.framebuffer = vk.camdepth_framebuffer;
+    pass.renderArea.extent = vk.extent;
+    pass.clearValueCount = 1;
+    pass.pClearValues = &clear;
+    ae3d_vkCmdBeginRenderPass(vk.command_buffers[vk.frame], &pass, VK_SUBPASS_CONTENTS_INLINE);
+
+    memset(&viewport, 0, sizeof(viewport));
+    viewport.width = (float)vk.extent.width;
+    viewport.height = (float)vk.extent.height;
+    viewport.maxDepth = 1.0f;
+    ae3d_vkCmdSetViewport(vk.command_buffers[vk.frame], 0, 1, &viewport);
+
+    memset(&scissor, 0, sizeof(scissor));
+    scissor.extent = vk.extent;
+    ae3d_vkCmdSetScissor(vk.command_buffers[vk.frame], 0, 1, &scissor);
+    vk.in_camdepth = 1;
+    vk.pass_open = 1;
+    return 1;
+}
+
+void ae3d_vk_camdepth_end(void) {
+    if (!vk.recording || !vk.in_camdepth) return;
+    ae3d_vkCmdEndRenderPass(vk.command_buffers[vk.frame]);
+    vk.in_camdepth = 0;
+    vk.pass_open = 0;
+    // Viewport and scissor are already the full extent; the scene pass sets its
+    // own besides.
 }
 
 void ae3d_vk_set_post(int fxaa, int bloom, double threshold, double intensity) {
