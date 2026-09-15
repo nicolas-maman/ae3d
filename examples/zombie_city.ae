@@ -25,7 +25,7 @@ const SKY_G = 0.088
 const SKY_B = 0.125
 const FRAMES = 48
 const LOD_CELL = 0.09
-const CROWD_DEFAULT = 60000
+const CROWD_DEFAULT = 70000
 
 // The road runs along x; Blender Y became ae3d -Z, so the carriageway sits at
 // about z = -2.94. The street block is tiled along x into a longer city, and the
@@ -163,10 +163,20 @@ setup_crowd(model: *Model, cell: float) -> int {
     return core.mesh_index_count(core.model_mesh(model)) / 3
 }
 
+// The small street clutter -- bins, crates, sacks, bollards, benches. There are
+// far more of these than buildings, and the horde hides them anyway, so a tiled
+// city drops them: fewer models a block means the renderer can afford more
+// blocks, which is what spreads the crowd thin.
+is_prop(name: string) -> bool {
+    return string.contains(name, "Bin") == 1 || string.contains(name, "Crate") == 1 ||
+           string.contains(name, "Sack") == 1 || string.contains(name, "Bollard") == 1 ||
+           string.contains(name, "Bench") == 1
+}
+
 // One copy of the street environment, shifted `off_x` down the road, added to
-// the engine. The figure objects are left out -- the crowd is the figures --
-// and only the root models are shifted, so the parented trim and glass ride
-// along on their shells. Lamp heads and lit windows glow; the road is wet.
+// the engine. The figure objects and the small clutter are left out; only the
+// root models are shifted, so the parented trim and glass ride along on their
+// shells. Lamp heads and lit windows glow; the road is wet.
 add_tile(e: *Engine, m: *Manifest, off_x: float) -> ptr {
     models = assets.manifest_load_scene(m)
     count = assets.manifest_count(m)
@@ -174,7 +184,7 @@ add_tile(e: *Engine, m: *Manifest, off_x: float) -> ptr {
     while i < count {
         name = assets.entry_object(assets.manifest_entry(m, i))
         model = list.get_raw(models, i) as *Model
-        if model != null && string.contains(name, "Zombie") == 0 {
+        if model != null && string.contains(name, "Zombie") == 0 && !is_prop(name) {
             if off_x != 0.0 && core.model_parent(model) == null {
                 wp = core.model_world_position(model)
                 core.model_set_position(model, wp.x + off_x, wp.y, wp.z)
