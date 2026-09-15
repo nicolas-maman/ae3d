@@ -168,6 +168,8 @@ struct ProgramSlots {
     use_instance_color: int
     is_skinned: int
     bones: int
+    pose_bank: int
+    pose_bank_frames: int
     normal_sampler: int
     has_normal_map: int
     normal_strength: int
@@ -475,6 +477,8 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
     s.use_instance_color = ae3d_gl_uniform_location(program, "useInstanceColor")
     s.is_skinned = ae3d_gl_uniform_location(program, "isSkinned")
     s.bones = ae3d_gl_uniform_location(program, "bones")
+    s.pose_bank = ae3d_gl_uniform_location(program, "poseBank")
+    s.pose_bank_frames = ae3d_gl_uniform_location(program, "poseBankFrames")
     s.normal_sampler = ae3d_gl_uniform_location(program, "normalMap")
     s.has_normal_map = ae3d_gl_uniform_location(program, "hasNormalMap")
     s.normal_strength = ae3d_gl_uniform_location(program, "normalStrength")
@@ -623,6 +627,19 @@ apply_skeleton(r: *GLRenderer, slots: *ProgramSlots, m: *Model) {
     // Every skinned model carries its own palette, so this cannot be skipped
     // for a second one in the same frame the way a shared uniform could.
     r.bound_skinned = 1
+}
+
+// A crowd is posed from its pose bank -- a float texture of baked frames -- on
+// texture unit 3, uploaded the first time this model is drawn. VERTEX_CROWD
+// reads it by (bone, frame); poseBankFrames lets it turn an instance's phase
+// into a frame.
+bind_pose_bank(r: *GLRenderer, slots: *ProgramSlots, m: *Model) {
+    if m.pose_bank_texture == 0 {
+        m.pose_bank_texture = ae3d_gl_posebank_texture(m.pose_bank)
+    }
+    ae3d_gl_texture_bind(3, m.pose_bank_texture)
+    ae3d_gl_uniform_int(slots.pose_bank, 3)
+    ae3d_gl_uniform_int(slots.pose_bank_frames, m.pose_bank_frames)
 }
 
 renderer_init(r: *GLRenderer, window: ptr, width: int, height: int) -> int {
@@ -1827,7 +1844,13 @@ render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
     }
 
     program = r.default_program
-    if core.shader_valid(&m.shader) {
+    // A crowd -- a model carrying a pose bank -- draws through the crowd
+    // program, which poses each instance from the bank at its own phase rather
+    // than from the one shared bone uniform.
+    is_crowd = core.model_pose_bank(m) != null
+    if is_crowd {
+        program = r.crowd_program
+    } else if core.shader_valid(&m.shader) {
         if !m.shader.compiled {
             m.shader.program = compile_program(m.shader.vertex_source,
                                                m.shader.fragment_source, "model")
@@ -1846,6 +1869,7 @@ render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
     set_model_matrix(slots, m)
     apply_skeleton(r, slots, m)
     apply_shading(r, slots, m, program)
+    if is_crowd { bind_pose_bank(r, slots, m) }
 
     ae3d_gl_vao_bind(m.vao)
 
