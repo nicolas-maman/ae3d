@@ -18,6 +18,7 @@
 
 import std.heap
 import std.intarr
+import std.arena
 import ae3d.core
 
 exports (
@@ -28,7 +29,7 @@ exports (
     slot_alive, slot_entity,
     ENTITY_NONE,
     Column,
-    column_new, column_free, column_arity,
+    column_new, column_free, column_arity, column_data,
     column_get, column_set, column_get3, column_set3,
     integrate3
 )
@@ -160,90 +161,118 @@ slot_entity(w: *World, slot: int) -> int {
 }
 
 // A dense component column: `arity` floats per entity, one row per slot, laid
-// out row-major in one contiguous native array indexed by the entity's slot.
-// A system reads and writes it front to back, so the data a loop touches is
-// adjacent in memory -- the whole point of storing components this way rather
-// than hanging them off per-entity objects. Sized to the world's capacity, so
-// a slot handed out by `entity_create` always has a row here.
+// out row-major in one contiguous buffer indexed by the entity's slot. The
+// buffer comes from an arena the column owns, and is read and written by
+// indexing it directly as a float array -- no per-element call across the
+// language boundary, so a system's linear pass over it is a tight native loop.
+// That directness is the point: a component read on the hot path is a load, not
+// a function call. `float` is 64-bit here, so the same buffer is what the
+// instanced renderer uploads as per-instance positions without a copy.
+// Sized to the world's capacity, so a slot handed out by `entity_create` always
+// has a row.
 struct Column {
+    arena: ptr
     data: ptr
     arity: int
     capacity: int
 }
 
 // Build a column of `arity` floats per entity for a world of `capacity` slots.
-// Rows are zero-initialised. Returns null on a bad shape or an allocation
-// failure. `capacity` should match the world the column is indexed by.
+// Backed by its own arena -- freed whole in `column_free`, since a column lives
+// as long as the world it indexes. Rows are zero-initialised, matching a fresh
+// entity's expectation of a zero component. Returns null on a bad shape or an
+// allocation failure. `capacity` should match the world the column indexes.
 column_new(capacity: int, arity: int) -> *Column {
     if capacity <= 0 { return null }
     if arity <= 0 { return null }
+    count = capacity * arity
     c = heap.new(Column)
     c.arity = arity
     c.capacity = capacity
-    c.data = core.farr_create(capacity * arity)
-    if c.data == null {
+    c.arena = arena.create(count * 8)
+    if c.arena == null {
         heap.free(c)
         return null
+    }
+    c.data = arena.alloc(c.arena, count * 8)
+    if c.data == null {
+        arena.destroy(c.arena)
+        heap.free(c)
+        return null
+    }
+    // Arena memory is handed out as-is, so a fresh column is zeroed here rather
+    // than trusting the block to be clean.
+    buf = c.data as float[]
+    i = 0
+    while i < count {
+        buf[i] = 0.0
+        i = i + 1
     }
     return c
 }
 
 column_free(c: *Column) {
     if c == null { return }
-    if c.data != null { core.farr_destroy(c.data) }
+    if c.arena != null { arena.destroy(c.arena) }
     heap.free(c)
 }
 
 column_arity(c: *Column) -> int { return c.arity }
 
-// Read/write component `k` (0..arity) of the entity in `slot`. The caller owns
-// staying inside the world's live slots and the column's arity; this is the
-// hot path a system runs per entity per frame.
+// The raw contiguous buffer, for the renderer that uploads a whole column of
+// positions as per-instance data in one go rather than a value at a time.
+column_data(c: *Column) -> ptr { return c.data }
+
+// Read/write component `k` (0..arity) of the entity in `slot`. A direct array
+// load/store; the caller owns staying inside the world's live slots and the
+// column's arity. This is the hot path a system runs per entity per frame.
 column_get(c: *Column, slot: int, k: int) -> float {
-    return core.farr_get(c.data, slot * c.arity + k)
+    buf = c.data as float[]
+    return buf[slot * c.arity + k]
 }
 
 column_set(c: *Column, slot: int, k: int, v: float) {
-    core.farr_set(c.data, slot * c.arity + k, v)
+    buf = c.data as float[]
+    buf[slot * c.arity + k] = v
 }
 
 // The Vec3 shape, since position, velocity and colour are all three-wide and
 // three floats is the common component.
 column_get3(c: *Column, slot: int) -> core.Vec3 {
+    buf = c.data as float[]
     base = slot * c.arity
-    return core.vec3(core.farr_get(c.data, base),
-                     core.farr_get(c.data, base + 1),
-                     core.farr_get(c.data, base + 2))
+    return core.vec3(buf[base], buf[base + 1], buf[base + 2])
 }
 
 column_set3(c: *Column, slot: int, v: core.Vec3) {
+    buf = c.data as float[]
     base = slot * c.arity
-    core.farr_set(c.data, base, v.x)
-    core.farr_set(c.data, base + 1, v.y)
-    core.farr_set(c.data, base + 2, v.z)
+    buf[base] = v.x
+    buf[base + 1] = v.y
+    buf[base + 2] = v.z
 }
 
 // A system: the forward-Euler step that moves every live entity by its
 // velocity, `position += velocity * dt`, over two Vec3 columns. It is the
-// smallest real system -- one linear pass over the live slots, reading and
-// writing adjacent memory, no per-entity dispatch -- and the shape every crowd
-// system (flow, separation, animation phase) takes. Both columns are indexed by
-// the world's slots; dead slots are skipped.
+// smallest real system -- one linear pass over the live slots, direct array
+// loads and stores, no per-entity dispatch and nothing crossing the language
+// boundary -- and the shape every crowd system (flow, separation, animation
+// phase) takes. Both columns are indexed by the world's slots; dead slots are
+// skipped.
 integrate3(w: *World, position: *Column, velocity: *Column, dt: float) {
+    pos = position.data as float[]
+    vel = velocity.data as float[]
+    parity = position.arity
+    varity = velocity.arity
     slot = 0
     n = w.count
-    pbase = 0
-    vbase = 0
     while slot < n {
         if intarr.get_unchecked(w.alive, slot) == 1 {
-            pbase = slot * position.arity
-            vbase = slot * velocity.arity
-            core.farr_set(position.data, pbase,
-                          core.farr_get(position.data, pbase) + core.farr_get(velocity.data, vbase) * dt)
-            core.farr_set(position.data, pbase + 1,
-                          core.farr_get(position.data, pbase + 1) + core.farr_get(velocity.data, vbase + 1) * dt)
-            core.farr_set(position.data, pbase + 2,
-                          core.farr_get(position.data, pbase + 2) + core.farr_get(velocity.data, vbase + 2) * dt)
+            pbase = slot * parity
+            vbase = slot * varity
+            pos[pbase] = pos[pbase] + vel[vbase] * dt
+            pos[pbase + 1] = pos[pbase + 1] + vel[vbase + 1] * dt
+            pos[pbase + 2] = pos[pbase + 2] + vel[vbase + 2] * dt
         }
         slot = slot + 1
     }
