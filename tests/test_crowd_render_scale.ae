@@ -33,14 +33,13 @@ import ae3d.platform
 const WIDTH = 480
 const HEIGHT = 360
 const RADIUS = 0.16
-const HEIGHT_EACH = 0.34
+const FIGURE_HEIGHT = 1.9
 const QUARTER_TURN = 1.5707963
-const SEGMENTS = 6
 const FRAMES = 12
 const DURATION = 1.0
 const FIELD = 630.0
 const WARMUP = 3
-const TIMED = 12
+const TIMED = 10
 
 var failures = 0
 
@@ -81,7 +80,7 @@ build_bones() -> ptr {
         if i == 0 {
             core.model_set_position(bone, 0.0, 0.0, 0.0)
         } else {
-            core.model_set_position(bone, 0.0, HEIGHT_EACH * 2.0, 0.0)
+            core.model_set_position(bone, 0.0, FIGURE_HEIGHT / 3.0, 0.0)
             core.model_set_parent(bone, list.get_raw(bones, i - 1) as *Model)
         }
         list.add_raw(bones, bone as ptr)
@@ -103,13 +102,15 @@ free_bones(bones: ptr) {
 
 // The bendable column of test_crowd_ecs: a ring of four verts every level,
 // skinned along a four-bone chain. `segs` rings sets the triangle count
-// (segs * 4 * 2 triangles), so the same figure stands in for a mesh decimated
-// to whatever budget the crowd needs.
+// (segs * 4 * 2 triangles) over a fixed figure height, so the same silhouette
+// stands in for a mesh decimated to whatever budget the crowd needs and only
+// the polygon density changes -- which is exactly the axis a triangle-budget
+// sweep wants to isolate.
 build_column(bones: ptr, segs: int) -> ptr {
     mesh = core.mesh_create()
     ring = 0
     while ring <= segs {
-        y = ring * HEIGHT_EACH
+        y = (ring * 1.0) / segs * FIGURE_HEIGHT
         side = 0
         while side < 4 {
             angle = side * QUARTER_TURN
@@ -167,8 +168,8 @@ build_column(bones: ptr, segs: int) -> ptr {
 // costs and returns the scene's draw-call count. Each crowd gets its own mesh,
 // since a model frees its mesh with itself.
 bench(backend: *Backend, renderer: *GLRenderer, cam: *Camera, key: *Light,
-      bones: ptr, bank: ptr, n: int) -> int {
-    mesh = build_column(bones, SEGMENTS)
+      bones: ptr, bank: ptr, n: int, segs: int) -> int {
+    mesh = build_column(bones, segs)
     world = ecs.world_new(n)
     pos = ecs.column_new(n, 3)
     phase = ecs.column_new(n, 1)
@@ -232,7 +233,8 @@ bench(backend: *Backend, renderer: *GLRenderer, cam: *Camera, key: *Light,
     draw_ms = t_draw * scale
     frame_ms = pos_ms + ph_ms + draw_ms
 
-    println("  render_scale: ${n} instances -- ${frame_ms} ms/frame (${1000.0 / frame_ms} fps), draws ${draws}, lit ${lit}")
+    tris = segs * 4 * 2
+    println("  render_scale: ${n} instances x ${tris} tris -- ${frame_ms} ms/frame (${1000.0 / frame_ms} fps), draws ${draws}, lit ${lit}")
     println("    pack pos ${pos_ms} ms, pack phase ${ph_ms} ms, upload+draw+readback ${draw_ms} ms")
 
     core.backend_remove_model(backend, swarm)
@@ -287,12 +289,24 @@ main() {
     key.ambient_strength = 0.6
     gl.renderer_add_light(renderer, key)
 
-    // The two scales that matter: a hundred thousand, and the half-million goal.
-    draws_100k = bench(&backend, renderer, cam, key, bones, bank, 100000)
-    draws_500k = bench(&backend, renderer, cam, key, bones, bank, 500000)
-
+    // A hundred thousand at a low-poly figure, for a scale reference.
+    draws_100k = bench(&backend, renderer, cam, key, bones, bank, 100000, 6)
     check_true("a hundred thousand instances render in one draw", draws_100k == 1)
-    check_true("half a million instances still render in one draw", draws_500k == 1)
+
+    // The triangle-budget sweep at the half-million goal: the same crowd and the
+    // same silhouette at rising polygon density, 48 to 768 triangles a figure.
+    // This is the number that sets what a real zombie must be decimated to for
+    // the crowd -- a full one is ~26k tris (13 billion a frame at 500k), and the
+    // base skin hull of the demo figure (its subsurf at level 0) is a few
+    // hundred, so the LOD lives in this range. Whichever rows stay within a
+    // frame are the budgets the decimated mesh can spend.
+    d0 = bench(&backend, renderer, cam, key, bones, bank, 500000, 6)
+    d1 = bench(&backend, renderer, cam, key, bones, bank, 500000, 24)
+    d2 = bench(&backend, renderer, cam, key, bones, bank, 500000, 48)
+    d3 = bench(&backend, renderer, cam, key, bones, bank, 500000, 96)
+
+    check_true("half a million instances render in one draw at every density",
+               d0 == 1 && d1 == 1 && d2 == 1 && d3 == 1)
 
     crowd.posebank_free(bank)
     anim.registry_free(reg)
