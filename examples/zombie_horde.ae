@@ -1,21 +1,42 @@
 // A horde of the real zombie: the skinned figure from zombie_street, baked once
-// into a pose bank and then an ECS crowd of hundreds of thousands, each an
-// entity, flowing and spreading as a horde and drawn in one instanced-skinned
-// call. This is the crowd-skinning demo (#271); it grows across a few commits.
+// into a pose bank, then an ECS crowd of it -- each zombie an entity, each at
+// its own point in the walk -- drawn in one instanced-skinned call. The
+// crowd-skinning demo (#271). AE3D_CROWD overrides the count.
 //
-// Stage one, here: load the zombie -- its skeleton and its walk -- and bake the
-// walk into a pose bank the whole crowd will share. The ECS crowd, the horde
-// behaviour and the draw come next.
+//     AE3D_CROWD=200000 ./build/zombie_horde
+//
+// The real zombie is ~26k triangles, so a huge crowd wants a decimated mesh or
+// LOD (a later step); this renders the full mesh at a crowd the GPU can carry.
 
 import std.list
 import ae3d.core
+import ae3d.engine
+import ae3d.gl
+import ae3d.loader
+import ae3d.ecs
 import ae3d.anim
 import ae3d.skin
 import ae3d.assets
 import ae3d.crowd
+import ae3d.platform
 
 const MANIFEST = "resources/blender/zombie_street/manifest.json"
-const FRAMES = 24        // poses baked across the walk; the crowd samples between them
+const FRAMES = 24
+const CROWD_DEFAULT = 4000
+
+var g_count = CROWD_DEFAULT
+var g_field = 40.0
+var g_world: *EcsWorld = null
+var g_pos: *Column = null
+var g_phase: *Column = null
+var g_body: *Model = null
+var g_bank: ptr = null
+var g_seed = 0x51ed2701
+
+next_random() -> float {
+    g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
+    return (g_seed as float) / 2147483647.0
+}
 
 entry_named(m: *Manifest, name: string) -> *Entry {
     count = assets.manifest_count(m)
@@ -28,31 +49,11 @@ entry_named(m: *Manifest, name: string) -> *Entry {
     return null
 }
 
-// Load the zombie's skeleton and walk and bake the walk into a pose bank the
-// whole crowd shares. The bones' clips are bound into a registry and driven
-// exactly the way the live figure is, so a baked pose is a pose the zombie
-// strikes. The skeleton is only needed to drive the bake, so it and its bones
-// are freed here; the bank is what the crowd keeps. Returns null on failure.
-bake_zombie() -> ptr {
-    m = assets.manifest_load(MANIFEST)
-    if m == null {
-        println("zombie_horde: ${assets.last_error()}")
-        println("zombie_horde: run ./scripts/export_assets.sh to build the assets")
-        return null
-    }
-    entry = entry_named(m, "Zombie_Body")
-    if entry == null {
-        println("zombie_horde: the export has no Zombie_Body")
-        assets.manifest_free(m)
-        return null
-    }
-
+// Bake the zombie's walk into a pose bank from a manifest entry. The skeleton
+// only drives the bake, so it is freed here; the bank is what the crowd keeps.
+bake_zombie(m: *Manifest, entry: *Entry) -> ptr {
     bones = assets.entry_load_skeleton(m, entry)
-    if bones == null {
-        println("zombie_horde: ${assets.last_error()}")
-        assets.manifest_free(m)
-        return null
-    }
+    if bones == null { return null }
     skel = skin.skeleton_new()
     i = 0
     while i < list.size(bones) {
@@ -80,9 +81,8 @@ bake_zombie() -> ptr {
     if duration <= 0.0 { duration = 1.0 }
 
     bank = crowd.posebank_bake(reg, skel, FRAMES, duration)
-    println("zombie_horde: ${skin.skeleton_count(skel)} bones, ${crowd.posebank_frames(bank)} poses baked over ${duration}s of walk")
+    println("zombie_horde: ${skin.skeleton_count(skel)} bones, ${crowd.posebank_frames(bank)} poses over ${duration}s of walk")
 
-    // Everything but the bank was only needed to drive the bake.
     anim.registry_free(reg)
     skin.skeleton_free(skel)
     i = 0
@@ -91,20 +91,104 @@ bake_zombie() -> ptr {
         i = i + 1
     }
     list.free(bones)
-    assets.manifest_free(m)
     return bank
 }
 
-main() {
-    bank = bake_zombie()
-    if bank == null {
-        println("zombie_horde: could not bake the zombie")
+on_start(data: ptr) {
+    e = data as *Engine
+
+    g_count = core.env_int("AE3D_CROWD", CROWD_DEFAULT)
+    g_field = 0.9 * core.sqrt_of(g_count as float)
+
+    m = assets.manifest_load(MANIFEST)
+    if m == null {
+        println("zombie_horde: ${assets.last_error()}")
+        println("zombie_horde: run ./scripts/export_assets.sh to build the assets")
+        return
+    }
+    entry = entry_named(m, "Zombie_Body")
+    if entry == null {
+        println("zombie_horde: the export has no Zombie_Body")
+        assets.manifest_free(m)
         return
     }
 
-    // Stage one done: the zombie's walk is a pose bank the crowd will sample.
-    // The ECS crowd, the horde behaviour and the instanced-skinned draw build
-    // on this in the next commits.
-    println("zombie_horde: pose bank ready (${crowd.posebank_bones(bank)} bones x ${crowd.posebank_frames(bank)} frames)")
-    crowd.posebank_free(bank)
+    g_bank = bake_zombie(m, entry)
+    // The crowd is the zombie's own mesh, instanced. The model owns its mesh, so
+    // the manifest can go once it is loaded.
+    g_body = assets.entry_load_model(m, entry)
+    assets.manifest_free(m)
+    if g_bank == null || g_body == null {
+        println("zombie_horde: could not load the zombie")
+        return
+    }
+
+    if !core.model_enable_instancing(g_body, g_count) { return }
+    core.model_set_pose_bank(g_body, g_bank, FRAMES)
+    core.model_enable_instance_phases(g_body)
+
+    // Every zombie an entity: a place on the ground and a point in the walk.
+    g_world = ecs.world_new(g_count)
+    g_pos = ecs.column_new(g_count, 3)
+    g_phase = ecs.column_new(g_count, 1)
+    i = 0
+    while i < g_count {
+        ent = ecs.entity_create(g_world)
+        slot = ecs.entity_index(ent)
+        x = (next_random() - 0.5) * 2.0 * g_field
+        z = (next_random() - 0.5) * 2.0 * g_field
+        ecs.column_set3(g_pos, slot, core.vec3(x, 0.0, z))
+        ecs.column_set(g_phase, slot, 0, next_random())   // scattered through the walk
+        i = i + 1
+    }
+    core.model_set_instance_positions(g_body, ecs.column_data(g_pos), g_count)
+    core.model_set_instance_phases(g_body, ecs.column_data(g_phase), g_count)
+    engine.engine_add_model(e, g_body)
+
+    renderer = engine.engine_gl_renderer(e)
+    if renderer != null { gl.renderer_set_clear_color(renderer, 0.03, 0.03, 0.045) }
+
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(0.0, g_field * 0.5, g_field * 1.15))
+    core.camera_set_far(cam, 40000.0)
+    core.camera_look_at(cam, core.vec3(0.0, 1.0, 0.0))
+
+    println("zombie_horde: ${g_count} real zombies, one instanced-skinned draw")
+}
+
+on_update(data: ptr, delta: float) {
+    // Static for now (5b): the horde behaviour and the per-frame walk advance
+    // come in the next commits.
+    if g_body == null { return }
+}
+
+main() {
+    e = engine.engine_new(platform.API_GL)
+    engine.engine_set_size(e, 1280, 800)
+    engine.engine_set_title(e, "ae3d - zombie horde")
+    engine.engine_set_face_culling(e, true)
+
+    light = core.light_directional(core.vec3(0.0 - 0.3, 0.0 - 1.0, 0.0 - 0.4),
+                                   core.vec3(0.9, 0.9, 0.85), 2.2)
+    light.ambient_strength = 0.4
+    engine.engine_set_light(e, light)
+
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_start(e, on_start as fn(ptr))
+    engine.engine_on_update(e, on_update as fn(ptr, float))
+
+    engine.engine_run(e, 0 - 1, 0 - 1)
+
+    draws = 0
+    renderer = engine.engine_gl_renderer(e)
+    if renderer != null { draws = gl.renderer_draw_calls(renderer) }
+    println("zombie_horde: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${g_count} zombies in ${draws} draw call(s)")
+
+    if g_body != null { core.model_free(g_body) }
+    if g_pos != null { ecs.column_free(g_pos) }
+    if g_phase != null { ecs.column_free(g_phase) }
+    if g_world != null { ecs.world_free(g_world) }
+    if g_bank != null { crowd.posebank_free(g_bank) }
+    core.light_free(light)
+    engine.engine_free(e)
 }
