@@ -35,6 +35,12 @@ const ROAD_Z0 = 0.0 - 6.4
 const ROAD_Z1 = 0.6
 const WALK_SPEED = 1.1
 const ROAD_Y = 0.16
+// A zombie that walks off the near end is recycled to the far end -- but only
+// once it is well behind the camera (which sits at STREET_X1 + 2, looking back
+// down the street), so the recycle happens off-screen and reads as a continuous
+// flow out of the dark rather than a figure teleporting in full view.
+const RECYCLE_X = 52.0
+const SPREAD = 0.7   // how far off straight-ahead a zombie may face and head
 
 var g_scene: ptr = null
 var g_lamps: ptr = null
@@ -44,6 +50,8 @@ var g_clothes: *Model = null
 var g_bank: ptr = null
 var g_pos: *Column = null
 var g_phase: *Column = null
+var g_speed: *Column = null   // per-zombie shamble speed
+var g_yaw: *Column = null     // per-zombie facing about Y, for an organic crowd
 var g_count = CROWD_DEFAULT
 var g_walk = 1.0
 
@@ -121,7 +129,8 @@ setup_crowd(model: *Model) -> int {
     core.model_enable_instancing(model, g_count)
     core.model_set_pose_bank(model, g_bank, FRAMES)
     core.model_enable_instance_phases(model)
-    core.model_set_instance_positions(model, ecs.column_data(g_pos), g_count)
+    core.model_set_instance_positions_yaw(model, ecs.column_data(g_pos),
+                                          ecs.column_data(g_yaw), g_count)
     core.model_set_instance_phases(model, ecs.column_data(g_phase), g_count)
     return core.mesh_index_count(core.model_mesh(model)) / 3
 }
@@ -133,9 +142,21 @@ on_start(data: ptr) {
     // A camera down at the road, looking back along it so the horde walks out of
     // the far dark toward the lamps and the viewer.
     cam = engine.engine_camera(e)
-    core.camera_set_position(cam, core.vec3(STREET_X1 + 2.0, 3.4, 1.4))
     core.camera_set_far(cam, 300.0)
-    core.camera_look_at(cam, core.vec3(0.0 - 10.0, 0.7, 0.0 - 2.9))
+    // AE3D_VIEW picks the camera, a debug knob for judging the scene from more
+    // than one angle: 0 elevated down the street, 1 side-on across the road,
+    // 2 low in the middle of the horde.
+    view = core.env_int("AE3D_VIEW", 0)
+    if view == 1 {
+        core.camera_set_position(cam, core.vec3(6.0, 1.7, 4.5))
+        core.camera_look_at(cam, core.vec3(0.0, 0.9, 0.0 - 3.0))
+    } else if view == 2 {
+        core.camera_set_position(cam, core.vec3(0.0, 0.9, 0.0 - 1.0))
+        core.camera_look_at(cam, core.vec3(0.0 - 12.0, 0.9, 0.0 - 3.2))
+    } else {
+        core.camera_set_position(cam, core.vec3(STREET_X1 + 2.0, 3.4, 1.4))
+        core.camera_look_at(cam, core.vec3(0.0 - 10.0, 0.7, 0.0 - 2.9))
+    }
 
     // The lamp is the key light the street is shadowed by; the sun is a dusk
     // fill. Same lighting the reference street uses.
@@ -196,12 +217,19 @@ on_start(data: ptr) {
 
     g_pos = ecs.column_new(g_count, 3)
     g_phase = ecs.column_new(g_count, 1)
+    g_speed = ecs.column_new(g_count, 1)
+    g_yaw = ecs.column_new(g_count, 1)
     i = 0
     while i < g_count {
         x = STREET_X0 + next_random() * (STREET_X1 - STREET_X0)
         z = ROAD_Z0 + next_random() * (ROAD_Z1 - ROAD_Z0)
         ecs.column_set3(g_pos, i, core.vec3(x, ROAD_Y, z))
         ecs.column_set(g_phase, i, 0, next_random())
+        // A shamble is not a march: each zombie has its own pace and faces its
+        // own way, so the crowd spreads and closes and turns rather than moving
+        // as one rigid block.
+        ecs.column_set(g_speed, i, 0, WALK_SPEED * (0.55 + next_random() * 0.9))
+        ecs.column_set(g_yaw, i, 0, (next_random() - 0.5) * SPREAD)
         i = i + 1
     }
 
@@ -220,22 +248,43 @@ on_start(data: ptr) {
 
 on_update(data: ptr, delta: float) {
     if g_body == null { return }
-    rate = 1.0 / g_walk
     i = 0
     while i < g_count {
         p = ecs.column_get3(g_pos, i)
-        nx = p.x + WALK_SPEED * delta
-        if nx > STREET_X1 { nx = STREET_X0 }   // wrap to the far end, a continuous flow
-        ecs.column_set3(g_pos, i, core.vec3(nx, p.y, p.z))
-        ph = ecs.column_get(g_phase, i, 0) + delta * rate
+        speed = ecs.column_get(g_speed, i, 0)
+        a = ecs.column_get(g_yaw, i, 0)
+        ph = ecs.column_get(g_phase, i, 0)
+
+        // Move along the way it faces: the mesh's forward at yaw a is
+        // (cos a, 0, -sin a), so travel and facing agree and the feet do not
+        // skate. Mostly down the street, each at its own angle off it.
+        nx = p.x + speed * core.cos_of(a) * delta
+        nz = p.z - speed * core.sin_of(a) * delta
+        if nx > RECYCLE_X {
+            // Off-screen behind the camera: send it back to the far dark, its
+            // heading and pace redrawn, so it walks back in rather than blinks.
+            nx = STREET_X0 - next_random() * 8.0
+            nz = ROAD_Z0 + next_random() * (ROAD_Z1 - ROAD_Z0)
+            speed = WALK_SPEED * (0.55 + next_random() * 0.9)
+            a = (next_random() - 0.5) * SPREAD
+            ecs.column_set(g_speed, i, 0, speed)
+            ecs.column_set(g_yaw, i, 0, a)
+        }
+        ecs.column_set3(g_pos, i, core.vec3(nx, ROAD_Y, nz))
+
+        // The walk cycles with the speed, so a faster zombie steps faster and
+        // the feet keep up with the ground instead of skating over it.
+        ph = ph + delta * (speed / g_walk) * 0.9
         while ph >= 1.0 { ph = ph - 1.0 }
         ecs.column_set(g_phase, i, 0, ph)
         i = i + 1
     }
-    core.model_set_instance_positions(g_body, ecs.column_data(g_pos), g_count)
+    core.model_set_instance_positions_yaw(g_body, ecs.column_data(g_pos),
+                                          ecs.column_data(g_yaw), g_count)
     core.model_set_instance_phases(g_body, ecs.column_data(g_phase), g_count)
     if g_clothes != null {
-        core.model_set_instance_positions(g_clothes, ecs.column_data(g_pos), g_count)
+        core.model_set_instance_positions_yaw(g_clothes, ecs.column_data(g_pos),
+                                              ecs.column_data(g_yaw), g_count)
         core.model_set_instance_phases(g_clothes, ecs.column_data(g_phase), g_count)
     }
 }

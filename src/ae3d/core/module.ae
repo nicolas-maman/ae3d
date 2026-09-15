@@ -55,7 +55,7 @@ exports (
     model_ensure_material, model_set_uniform_float, model_set_uniform_int,
     model_set_uniform_vec3, model_set_uniform_array, model_uniform_count, model_uniform, model_uniform_names,
     model_enable_instancing, model_set_instance_position, model_set_instance_color,
-    model_enable_instance_colors, model_set_instance_positions, model_set_instance_colors,
+    model_enable_instance_colors, model_set_instance_positions, model_set_instance_positions_yaw, model_set_instance_colors,
     model_set_pose_bank, model_pose_bank, model_enable_instance_phases, model_set_instance_phase,
     model_set_instance_phases,
     model_instance_count, model_remove_instance, light_new, light_directional, light_point,
@@ -220,6 +220,7 @@ extern ae3d_mesh_index_at(mesh: ptr, i: int) -> int
 extern ae3d_mesh_recalc_normals(mesh: ptr)
 extern ae3d_inst_has_colors(inst: ptr) -> int
 extern ae3d_inst_set_positions(inst: ptr, xyz: ptr, count: int, sx: float, sy: float, sz: float, qx: float, qy: float, qz: float, qw: float)
+extern ae3d_inst_set_positions_yaw(inst: ptr, xyz: ptr, yaw: ptr, count: int, sx: float, sy: float, sz: float)
 extern ae3d_inst_set_colors(inst: ptr, rgb: ptr, count: int)
 
 
@@ -1819,6 +1820,15 @@ model_set_instance_positions(m: *Model, xyz: ptr, count: int) {
     ae3d_inst_set_positions(m.instances, xyz, count,
                             m.scale.x, m.scale.y, m.scale.z,
                             m.rotation.x, m.rotation.y, m.rotation.z, m.rotation.w)
+    m.instances_updated = true
+}
+
+// The same, but each instance faces its own way: `yaw` is a per-instance
+// turn about Y, so a crowd can shamble at its own angles rather than in rank.
+model_set_instance_positions_yaw(m: *Model, xyz: ptr, yaw: ptr, count: int) {
+    if m.instances == null { return }
+    ae3d_inst_set_positions_yaw(m.instances, xyz, yaw, count,
+                                m.scale.x, m.scale.y, m.scale.z)
     m.instances_updated = true
 }
 

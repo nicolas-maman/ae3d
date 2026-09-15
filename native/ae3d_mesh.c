@@ -597,6 +597,32 @@ void ae3d_inst_set_positions(void *handle, const double *xyz, int count,
     }
 }
 
+/* Per-instance facing: each instance turned about Y by its own yaw, so a crowd
+   is a crowd and not a rank all facing one way. The mesh's forward (+x) maps to
+   (cos a, 0, -sin a), which is the direction the caller moves the instance in,
+   so facing and travel agree and the feet do not skate sideways. */
+void ae3d_inst_set_positions_yaw(void *handle, const double *xyz, const double *yaw,
+                                 int count, double sx, double sy, double sz) {
+    ae3d_inst *inst = (ae3d_inst *)handle;
+    int i, limit;
+
+    if (!inst || !xyz || !yaw || count <= 0) return;
+    limit = count < inst->count ? count : inst->count;
+
+    for (i = 0; i < limit; i++) {
+        double a = yaw[i];
+        double c = cos(a), s = sin(a);
+        float *m = inst->matrices + (size_t)i * 16;
+        m[0]  = (float)(c * sx); m[1]  = 0.0f;      m[2]  = (float)(-s * sx); m[3]  = 0.0f;
+        m[4]  = 0.0f;            m[5]  = (float)sy; m[6]  = 0.0f;             m[7]  = 0.0f;
+        m[8]  = (float)(s * sz); m[9]  = 0.0f;      m[10] = (float)(c * sz);  m[11] = 0.0f;
+        m[12] = (float)xyz[i * 3];
+        m[13] = (float)xyz[i * 3 + 1];
+        m[14] = (float)xyz[i * 3 + 2];
+        m[15] = 1.0f;
+    }
+}
+
 void ae3d_inst_set_colors(void *handle, const double *rgb, int count) {
     ae3d_inst *inst = (ae3d_inst *)handle;
     int i, limit;

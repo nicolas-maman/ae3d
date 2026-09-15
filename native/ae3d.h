@@ -136,6 +136,8 @@ void   ae3d_inst_set_trs(void *inst, int i,
 void   ae3d_inst_set_positions(void *inst, const double *xyz, int count,
                                double sx, double sy, double sz,
                                double qx, double qy, double qz, double qw);
+void   ae3d_inst_set_positions_yaw(void *inst, const double *xyz, const double *yaw,
+                                   int count, double sx, double sy, double sz);
 void   ae3d_inst_set_colors(void *inst, const double *rgb, int count);
 void   ae3d_inst_set_matrix(void *inst, int i, const double *m);
 void   ae3d_inst_remove(void *inst, int i);
