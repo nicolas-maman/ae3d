@@ -43,9 +43,10 @@ extern ae3d_crowd_step(pos: ptr, vel: ptr, yaw: ptr, phase: ptr, n: int,
                        x0: float, x1: float, z0: float, z1: float,
                        road_y: float, walk: float)
 extern ae3d_crowd_bucket(pos: ptr, yaw: ptr, phase: ptr, col: ptr, n: int,
-                         cx: float, cz: float, near_dist: float,
+                         cx: float, cz: float, near_dist: float, cull_dist: float,
                          np: ptr, ny: ptr, nph: ptr, ncol: ptr,
-                         fp: ptr, fy: ptr, fph: ptr, fcol: ptr) -> int
+                         fp: ptr, fy: ptr, fph: ptr, fcol: ptr,
+                         far_out: ptr) -> int
 
 // Bake `frames` evenly spaced poses across `duration` seconds of the clip the
 // registry's players carry, into a bank the whole crowd will share. Each frame
@@ -195,10 +196,13 @@ crowd_step(pos: ptr, vel: ptr, yaw: ptr, phase: ptr, n: int, dt: float,
 }
 
 // Sort the crowd into the near and far draw buffers by distance to the camera,
-// compacting each into its own run. Returns the near count; far is n minus it.
+// compacting each into its own run and dropping any zombie past `cull_dist`
+// (beyond the fog, so invisible and not worth a draw; pass <= 0 to keep all).
+// Returns the near count and writes the far count into far_out[0] -- with the
+// cull, near + far no longer sum to n.
 crowd_bucket(pos: ptr, yaw: ptr, phase: ptr, col: ptr, n: int, cx: float, cz: float,
-             near_dist: float, np: ptr, ny: ptr, nph: ptr, ncol: ptr,
-             fp: ptr, fy: ptr, fph: ptr, fcol: ptr) -> int {
-    return ae3d_crowd_bucket(pos, yaw, phase, col, n, cx, cz, near_dist,
-                             np, ny, nph, ncol, fp, fy, fph, fcol)
+             near_dist: float, cull_dist: float, np: ptr, ny: ptr, nph: ptr, ncol: ptr,
+             fp: ptr, fy: ptr, fph: ptr, fcol: ptr, far_out: ptr) -> int {
+    return ae3d_crowd_bucket(pos, yaw, phase, col, n, cx, cz, near_dist, cull_dist,
+                             np, ny, nph, ncol, fp, fy, fph, fcol, far_out)
 }

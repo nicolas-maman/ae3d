@@ -58,6 +58,13 @@ const LOD_NEAR = 0.06
 // is nothing more to win. AE3D_LODFAR (hundredths of the cell) tunes it live.
 const LOD_FAR = 0.5
 const NEAR_DIST = 12.0
+// The crowd fills the whole street, but the fog swallows it by ~150m, so a
+// zombie past this is invisible however many there are. Culling it from the
+// draw there -- for free, in the bucket that already has its distance -- means
+// the count can climb without the far tier drawing the ~three-quarters of the
+// street no one can see. Set a touch beyond the fog so nothing pops at its
+// edge. AE3D_CULL (metres, 0 = keep all) tunes it live.
+const CULL_DIST = 160.0
 
 var g_scene: ptr = null
 var g_lamps: ptr = null
@@ -86,6 +93,8 @@ var g_fb_col: *Column = null
 var g_count = CROWD_DEFAULT
 var g_walk = 1.0
 var g_near_dist = NEAR_DIST   // AE3D_NEAR overrides, a knob for the LOD sweep
+var g_cull_dist = CULL_DIST   // AE3D_CULL overrides; 0 keeps the whole crowd
+var g_farcount: *Column = null   // one slot the native bucket writes the far count into
 
 var g_seed = 0x2f6a41b3
 next_random() -> float {
@@ -225,6 +234,7 @@ on_start(data: ptr) {
     e = data as *Engine
     g_count = core.env_int("AE3D_CROWD", CROWD_DEFAULT)
     g_near_dist = core.env_int("AE3D_NEAR", NEAR_DIST as int) as float
+    g_cull_dist = core.env_int("AE3D_CULL", CULL_DIST as int) as float
 
     // A camera down at the road, looking back along it so the horde walks out of
     // the far dark toward the lamps and the viewer.
@@ -312,6 +322,7 @@ on_start(data: ptr) {
     g_fb_yaw = ecs.column_new(g_count, 1)
     g_fb_phase = ecs.column_new(g_count, 1)
     g_fb_col = ecs.column_new(g_count, 3)
+    g_farcount = ecs.column_new(1, 1)
     i = 0
     while i < g_count {
         ent = ecs.entity_create(g_world)
@@ -371,10 +382,13 @@ on_update(data: ptr, delta: float) {
                      ecs.column_data(g_phase), g_count, delta, MAX_SPEED,
                      STREET_X0, STREET_X1, ROAD_Z0, ROAD_Z1, ROAD_Y, g_walk)
     nn = crowd.crowd_bucket(ecs.column_data(g_pos), ecs.column_data(g_yaw), ecs.column_data(g_phase),
-                            ecs.column_data(g_color), g_count, cam.position.x, cam.position.z, g_near_dist,
+                            ecs.column_data(g_color), g_count, cam.position.x, cam.position.z, g_near_dist, g_cull_dist,
                             ecs.column_data(g_nb_pos), ecs.column_data(g_nb_yaw), ecs.column_data(g_nb_phase), ecs.column_data(g_nb_col),
-                            ecs.column_data(g_fb_pos), ecs.column_data(g_fb_yaw), ecs.column_data(g_fb_phase), ecs.column_data(g_fb_col))
-    nf = g_count - nn
+                            ecs.column_data(g_fb_pos), ecs.column_data(g_fb_yaw), ecs.column_data(g_fb_phase), ecs.column_data(g_fb_col),
+                            ecs.column_data(g_farcount))
+    // The cull drops the fogged-out zombies, so far is what the bucket counted,
+    // not the leftover of n.
+    nf = ecs.column_get(g_farcount, 0, 0) as int
 
     upload_tier(g_near_body, g_nb_pos, g_nb_yaw, g_nb_phase, g_nb_col, nn)
     if g_near_clothes != null { upload_tier(g_near_clothes, g_nb_pos, g_nb_yaw, g_nb_phase, g_nb_col, nn) }

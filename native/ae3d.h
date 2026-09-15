@@ -81,9 +81,10 @@ void   ae3d_crowd_step(double *pos, const double *vel, double *yaw, double *phas
                        double road_y, double walk);
 int    ae3d_crowd_bucket(const double *pos, const double *yaw, const double *phase,
                          const double *col, int n,
-                         double cx, double cz, double near_dist,
+                         double cx, double cz, double near_dist, double cull_dist,
                          double *np, double *ny, double *nph, double *ncol,
-                         double *fp, double *fy, double *fph, double *fcol);
+                         double *fp, double *fy, double *fph, double *fcol,
+                         double *far_out);
 void   ae3d_gl_upload_skin(void *mesh, int vbo);
 void  *ae3d_skinrows_create(int count);
 void   ae3d_skinrows_destroy(void *rows);

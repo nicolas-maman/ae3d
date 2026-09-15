@@ -350,23 +350,32 @@ void ae3d_crowd_step(double *pos, const double *vel, double *yaw, double *phase,
 }
 
 /* Sort the crowd into the near and far draw buffers by distance to the camera,
- * compacting each into its own contiguous run of position, yaw and phase.
- * Returns the near count; the far count is n minus it. */
+ * compacting each into its own contiguous run of position, yaw and phase, and
+ * dropping any zombie past `cull_dist` -- beyond the fog it is invisible, so it
+ * is written to neither buffer and costs no draw. The loop already has each
+ * zombie's distance in hand, so the cull is free. Returns the near count and
+ * writes the far count into far_out[0]; a zombie is near, far, or culled, so
+ * the two no longer sum to n. `cull_dist <= 0` keeps the whole crowd. */
 int ae3d_crowd_bucket(const double *pos, const double *yaw, const double *phase,
                       const double *col, int n,
-                      double cx, double cz, double near_dist,
+                      double cx, double cz, double near_dist, double cull_dist,
                       double *np, double *ny, double *nph, double *ncol,
-                      double *fp, double *fy, double *fph, double *fcol) {
+                      double *fp, double *fy, double *fph, double *fcol,
+                      double *far_out) {
     int i, nn = 0, nf = 0;
     double nd2 = near_dist * near_dist;
-    if (!pos || !yaw || !phase) return 0;
+    double cd2 = cull_dist * cull_dist;
+    int cull = cull_dist > 0.0;
+    if (!pos || !yaw || !phase) { if (far_out) far_out[0] = 0.0; return 0; }
     for (i = 0; i < n; i++) {
         double x = pos[i * 3];
         double y = pos[i * 3 + 1];
         double z = pos[i * 3 + 2];
         double dx = x - cx;
         double dz = z - cz;
-        if (dx * dx + dz * dz < nd2) {
+        double d2 = dx * dx + dz * dz;
+        if (cull && d2 > cd2) { continue; }
+        if (d2 < nd2) {
             np[nn * 3] = x; np[nn * 3 + 1] = y; np[nn * 3 + 2] = z;
             ny[nn] = yaw[i]; nph[nn] = phase[i];
             if (col && ncol) { ncol[nn * 3] = col[i * 3]; ncol[nn * 3 + 1] = col[i * 3 + 1]; ncol[nn * 3 + 2] = col[i * 3 + 2]; }
@@ -378,5 +387,6 @@ int ae3d_crowd_bucket(const double *pos, const double *yaw, const double *phase,
             nf++;
         }
     }
+    if (far_out) far_out[0] = (double)nf;
     return nn;
 }
