@@ -35,9 +35,11 @@ typedef struct {
 typedef struct {
     float *matrices;
     float *colors;
+    float *phases;      /* per-instance animation phase 0..1, for a crowd's skinning */
     int    count;
     int    capacity;
     int    has_colors;
+    int    has_phases;
     float  bound[3];
     float  radius;
 } ae3d_inst;
@@ -476,6 +478,7 @@ void ae3d_inst_destroy(void *handle) {
     if (!inst) return;
     free(inst->matrices);
     free(inst->colors);
+    free(inst->phases);
     free(inst);
 }
 
@@ -497,6 +500,11 @@ int ae3d_inst_resize(void *handle, int count) {
             if (!grown) return 0;
             inst->colors = grown;
         }
+        if (inst->has_phases) {
+            float *grown = (float *)realloc(inst->phases, (size_t)capacity * sizeof(float));
+            if (!grown) return 0;
+            inst->phases = grown;
+        }
         inst->capacity = capacity;
     }
 
@@ -508,6 +516,7 @@ int ae3d_inst_resize(void *handle, int count) {
             float *c = inst->colors + (size_t)i * 3;
             c[0] = 1.0f; c[1] = 1.0f; c[2] = 1.0f;
         }
+        if (inst->has_phases) { inst->phases[i] = 0.0f; }
     }
     inst->count = count;
     return 1;
@@ -600,6 +609,54 @@ void ae3d_inst_set_colors(void *handle, const double *rgb, int count) {
         c[1] = (float)rgb[i * 3 + 1];
         c[2] = (float)rgb[i * 3 + 2];
     }
+}
+
+/* Per-instance animation phase, the crowd's counterpart of per-instance colour:
+ * one float an instance saying where in the baked walk it is, so the skinning
+ * shader poses each from a different frame of the pose bank. */
+int ae3d_inst_enable_phases(void *handle, int count) {
+    ae3d_inst *inst = (ae3d_inst *)handle;
+    int capacity, i;
+    if (!inst) return 0;
+    capacity = inst->capacity > count ? inst->capacity : count;
+    if (capacity <= 0) capacity = 16;
+    {
+        float *grown = (float *)realloc(inst->phases, (size_t)capacity * sizeof(float));
+        if (!grown) return 0;
+        inst->phases = grown;
+    }
+    for (i = inst->has_phases ? inst->count : 0; i < capacity; i++) {
+        inst->phases[i] = 0.0f;
+    }
+    inst->has_phases = 1;
+    return 1;
+}
+
+int ae3d_inst_has_phases(void *handle) {
+    ae3d_inst *inst = (ae3d_inst *)handle;
+    return inst ? inst->has_phases : 0;
+}
+
+const float *ae3d_inst_phase_data(void *handle) {
+    ae3d_inst *inst = (ae3d_inst *)handle;
+    return inst ? inst->phases : NULL;
+}
+
+void ae3d_inst_set_phases(void *handle, const double *phases, int count) {
+    ae3d_inst *inst = (ae3d_inst *)handle;
+    int i, limit;
+
+    if (!inst || !phases || !inst->has_phases || count <= 0) return;
+    limit = count < inst->count ? count : inst->count;
+    for (i = 0; i < limit; i++) {
+        inst->phases[i] = (float)phases[i];
+    }
+}
+
+void ae3d_inst_set_phase(void *handle, int i, double phase) {
+    ae3d_inst *inst = (ae3d_inst *)handle;
+    if (!inst || !inst->has_phases || i < 0 || i >= inst->count) return;
+    inst->phases[i] = (float)phase;
 }
 
 void ae3d_inst_set_matrix(void *handle, int i, const double *src) {
