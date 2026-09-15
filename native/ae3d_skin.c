@@ -70,6 +70,79 @@ const float *ae3d_palette_data(void *handle) {
     return p ? p->values : NULL;
 }
 
+/* A bank of poses baked from a clip: `frames` bone palettes laid end to end,
+ * frame-major, so frame f's bones start at f * bones * 16. One animated crowd
+ * shares it -- an instance picks a frame by its own phase and is posed from
+ * that slice -- so the upload is fixed at `frames` poses however many entities
+ * sample it. Floats, in the palette's own layout, ready to become a texture. */
+typedef struct {
+    float *values;
+    int    frames;
+    int    bones;
+} ae3d_posebank;
+
+void *ae3d_posebank_create(int frames, int bones) {
+    ae3d_posebank *b;
+    size_t n, i;
+    if (frames <= 0 || bones <= 0) return NULL;
+    b = (ae3d_posebank *)calloc(1, sizeof(ae3d_posebank));
+    if (!b) return NULL;
+    n = (size_t)frames * (size_t)bones * 16;
+    b->values = (float *)calloc(n, sizeof(float));
+    if (!b->values) { free(b); return NULL; }
+    b->frames = frames;
+    b->bones = bones;
+    /* Identity per bone, so a frame never captured still draws the bind pose
+       rather than collapsing the mesh. */
+    for (i = 0; i < (size_t)frames * (size_t)bones; i++) {
+        float *m = b->values + i * 16;
+        m[0] = 1.0f; m[5] = 1.0f; m[10] = 1.0f; m[15] = 1.0f;
+    }
+    return b;
+}
+
+void ae3d_posebank_destroy(void *handle) {
+    ae3d_posebank *b = (ae3d_posebank *)handle;
+    if (!b) return;
+    free(b->values);
+    free(b);
+}
+
+int ae3d_posebank_frames(void *handle) {
+    ae3d_posebank *b = (ae3d_posebank *)handle;
+    return b ? b->frames : 0;
+}
+
+int ae3d_posebank_bones(void *handle) {
+    ae3d_posebank *b = (ae3d_posebank *)handle;
+    return b ? b->bones : 0;
+}
+
+/* Copy a filled palette into one frame of the bank. The palette is the live
+ * skeleton posed at that frame's time; the bank keeps a snapshot of it. */
+void ae3d_posebank_capture(void *handle, int frame, void *palette_handle) {
+    ae3d_posebank *b = (ae3d_posebank *)handle;
+    const float *src = ae3d_palette_data(palette_handle);
+    int pbones = ae3d_palette_bones(palette_handle);
+    int bones;
+    if (!b || !src || frame < 0 || frame >= b->frames) return;
+    bones = pbones < b->bones ? pbones : b->bones;
+    memcpy(b->values + (size_t)frame * (size_t)b->bones * 16,
+           src, (size_t)bones * 16 * sizeof(float));
+}
+
+double ae3d_posebank_get(void *handle, int frame, int bone, int i) {
+    ae3d_posebank *b = (ae3d_posebank *)handle;
+    if (!b || frame < 0 || frame >= b->frames || bone < 0 || bone >= b->bones
+        || i < 0 || i >= 16) return 0.0;
+    return b->values[((size_t)frame * (size_t)b->bones + (size_t)bone) * 16 + i];
+}
+
+const float *ae3d_posebank_data(void *handle) {
+    ae3d_posebank *b = (ae3d_posebank *)handle;
+    return b ? b->values : NULL;
+}
+
 /* The weights an OBJ's positions carry, on the way in.
  *
  * A loaded mesh has more vertices than the OBJ has positions: a position with

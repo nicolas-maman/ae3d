@@ -1,0 +1,77 @@
+// ae3d crowd: baking a skinned figure's animation into a pose bank.
+//
+// A skinned draw is posed by one bone palette, set per draw. A crowd cannot be:
+// a thousand zombies at a thousand points in the walk would be a thousand
+// palettes, and a uniform holds one. So the walk is baked once, here, into a
+// bank of `frames` poses -- each a full bone palette sampled at one time in the
+// clip -- and every entity later picks a frame by its own phase and is posed
+// from that slice. The bank is fixed at `frames` poses however large the crowd
+// grows, which is what lets an animated crowd scale the way a static one does.
+//
+// This module owns the bake and the bank's storage; the instanced-skinned draw
+// that samples it is the next phase (#271).
+
+import ae3d.core
+import ae3d.anim
+import ae3d.skin
+
+exports (
+    posebank_bake, posebank_free,
+    posebank_frames, posebank_bones, posebank_get, posebank_data
+)
+
+extern ae3d_posebank_create(frames: int, bones: int) -> ptr
+extern ae3d_posebank_destroy(bank: ptr)
+extern ae3d_posebank_frames(bank: ptr) -> int
+extern ae3d_posebank_bones(bank: ptr) -> int
+extern ae3d_posebank_capture(bank: ptr, frame: int, palette: ptr)
+extern ae3d_posebank_get(bank: ptr, frame: int, bone: int, i: int) -> float
+extern ae3d_posebank_data(bank: ptr) -> ptr
+
+// Bake `frames` evenly spaced poses across `duration` seconds of the clip the
+// registry's players carry, into a bank the whole crowd will share. Each frame
+// drives every bound player to its time, applies it to the bone, and snapshots
+// the skeleton's palette -- the same path the engine poses the live figure by,
+// so a baked pose is the pose the figure would strike at that instant. Returns
+// null on a bad shape or an allocation failure.
+posebank_bake(reg: *Registry, skel: *Skeleton, frames: int, duration: float) -> ptr {
+    if reg == null || skel == null || frames <= 0 { return null }
+    bones = skin.skeleton_count(skel)
+    if bones <= 0 { return null }
+
+    bank = ae3d_posebank_create(frames, bones)
+    if bank == null { return null }
+
+    k = 0
+    while k < frames {
+        // The clip wraps, so the last frame lands just short of the loop point
+        // rather than on the duplicate of the first: [0, duration).
+        t = 0.0
+        if frames > 1 { t = (k as float) / (frames as float) * duration }
+
+        n = anim.registry_count(reg)
+        i = 0
+        while i < n {
+            b = anim.registry_binding(reg, i)
+            if b != null {
+                player = anim.binding_player(b)
+                anim.player_set_time(player, t)
+                anim.apply(player, anim.binding_model(b))
+            }
+            i = i + 1
+        }
+
+        skin.skeleton_update(skel)
+        ae3d_posebank_capture(bank, k, skin.skeleton_palette(skel))
+        k = k + 1
+    }
+    return bank
+}
+
+posebank_free(bank: ptr) { ae3d_posebank_destroy(bank) }
+posebank_frames(bank: ptr) -> int { return ae3d_posebank_frames(bank) }
+posebank_bones(bank: ptr) -> int { return ae3d_posebank_bones(bank) }
+posebank_get(bank: ptr, frame: int, bone: int, i: int) -> float {
+    return ae3d_posebank_get(bank, frame, bone, i)
+}
+posebank_data(bank: ptr) -> ptr { return ae3d_posebank_data(bank) }

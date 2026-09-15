@@ -1,0 +1,113 @@
+// A pose bank has to hold, at frame k, exactly the palette the live skeleton
+// strikes at frame k's time -- otherwise a crowd posed from the bank is posed
+// wrong. This bakes a tiny animated skeleton and checks each baked frame
+// against the skeleton driven live to the same time, and that the poses vary
+// across the bank rather than all coming out the bind pose. No GPU.
+
+import ae3d.core
+import ae3d.anim
+import ae3d.skin
+import ae3d.crowd
+import ae3d.loader
+
+const FRAMES = 8
+const DURATION = 2.0
+const RISE = 10.0        // how far the animated bone travels over the clip
+
+var failures = 0
+
+check_true(name: string, ok: bool) {
+    if !ok {
+        println("FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+near(a: float, b: float) -> bool {
+    d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    return d < 0.0001
+}
+
+main() {
+    // Two bones: a still root and one the clip lifts, so the bank has both a
+    // constant palette to hold and a changing one to track.
+    root = loader.cube(1.0)
+    core.model_set_position(root, 0.0, 0.0, 0.0)
+    arm = loader.cube(1.0)
+    core.model_set_position(arm, 0.0, 0.0, 0.0)
+
+    skel = skin.skeleton_new()
+    skin.skeleton_add(skel, root)
+    arm_bone = skin.skeleton_add(skel, arm)
+    skin.skeleton_bind(skel)
+
+    // A clip that lifts the arm bone from 0 to RISE over DURATION.
+    clip = anim.clip_new("lift")
+    ch = anim.channel_new(anim.TRANSLATION, anim.LINEAR)
+    anim.channel_add_key(ch, 0.0, 0.0, 0.0, 0.0, 0.0)
+    anim.channel_add_key(ch, DURATION, 0.0, RISE, 0.0, 0.0)
+    anim.clip_add_channel(clip, ch)
+
+    player = anim.player_new(clip)
+    reg = anim.registry_new()
+    anim.registry_add(reg, "arm", player, arm)
+
+    bank = crowd.posebank_bake(reg, skel, FRAMES, DURATION)
+    check_true("the bake returns a bank", bank != null)
+    if bank == null { return }
+    check_true("the bank has the frames asked for", crowd.posebank_frames(bank) == FRAMES)
+    check_true("the bank has one palette per bone", crowd.posebank_bones(bank) == 2)
+
+    // Element 13 of a column-major mat4 is the y of the translation column: the
+    // arm bone's lift. Track it live and against the bank at each frame.
+    palette = skin.skeleton_palette(skel)
+    matched = 0
+    seen_low = 1000.0
+    seen_high = 0.0 - 1000.0
+    k = 0
+    while k < FRAMES {
+        t = (k as float) / (FRAMES as float) * DURATION
+        anim.player_set_time(player, t)
+        anim.apply(player, arm)
+        skin.skeleton_update(skel)
+
+        live_y = core.palette_get(palette, arm_bone, 13)
+        bank_y = crowd.posebank_get(bank, k, arm_bone, 13)
+        if near(live_y, bank_y) { matched = matched + 1 }
+        if bank_y < seen_low { seen_low = bank_y }
+        if bank_y > seen_high { seen_high = bank_y }
+
+        // Every one of the sixteen matrix elements should agree, not just y.
+        all16 = true
+        i = 0
+        while i < 16 {
+            if !near(core.palette_get(palette, arm_bone, i), crowd.posebank_get(bank, k, arm_bone, i)) {
+                all16 = false
+            }
+            i = i + 1
+        }
+        check_true("frame ${k}: the baked arm palette matches the live one", all16)
+        k = k + 1
+    }
+
+    check_true("every frame's baked pose matched the live pose", matched == FRAMES)
+    // The lift runs 0 -> ~RISE across the bank, so the poses must span a range,
+    // not sit on one frozen pose.
+    check_true("the bank varies across its frames (not one frozen pose)",
+               seen_high - seen_low > RISE * 0.5)
+    println("  posebank: arm lift spans ${seen_low} to ${seen_high} over ${FRAMES} baked frames")
+
+    crowd.posebank_free(bank)
+    anim.registry_free(reg)   // frees the player it was given, too
+    anim.clip_free(clip)
+    skin.skeleton_free(skel)
+    core.model_free(root)
+    core.model_free(arm)
+
+    if failures == 0 {
+        println("posebank: all checks passed")
+    } else {
+        println("posebank: ${failures} failure(s)")
+    }
+}
