@@ -36,12 +36,13 @@ const BLOCK_LEN = 84.0
 const TILES = 3          // blocks along the street, centred on the middle one
 const STREET_X0 = 0.0 - 100.0
 const STREET_X1 = 110.0
-const ROAD_Z0 = 0.0 - 6.0    // the street corridor the horde is held to, between
-const ROAD_Z1 = 5.0          // the far terrace and the near, so it clips no wall
+const ROAD_Z0 = 0.0 - 5.4    // the street corridor the horde is held to, between
+const ROAD_Z1 = 4.4          // the far terrace and the near, so it clips no wall
 const ROAD_Y = 0.16
-const SPEED = 2.6            // how fast a zombie shambles toward the target
-const SEP_RADIUS = 1.1       // it shoves apart from anything closer than this
-const SEP_STRENGTH = 5.0
+const SPEED = 1.5            // how fast a zombie shambles toward the prey
+const SEP_RADIUS = 1.05      // it shoves apart from anything closer than this
+const SEP_STRENGTH = 2.2     // gently, so the pack spreads without flinging
+const MAX_SPEED = 2.2        // capped, so a shove can never fling a zombie and pop it
 
 var g_scene: ptr = null
 var g_lamps: ptr = null
@@ -57,7 +58,6 @@ var g_yaw: *Column = null     // per-zombie facing about Y, taken from its headi
 var g_grid: *HordeGrid = null
 var g_count = CROWD_DEFAULT
 var g_walk = 1.0
-var g_time = 0.0
 
 var g_seed = 0x2f6a41b3
 next_random() -> float {
@@ -130,6 +130,11 @@ setup_crowd(model: *Model) -> int {
     src = core.model_mesh(model)
     lod = core.mesh_decimate(src, LOD_CELL)
     if lod != null { core.model_set_mesh(model, lod) }
+    // Dead flesh and damp cloth, not wet plastic: kill the specular and roughen
+    // the surface so the lamps do not smear an oily highlight across every
+    // zombie. Keeps the texture; only the shine goes.
+    core.model_set_specular(model, 0.03, 0.03, 0.03)
+    core.model_set_pbr(model, 0.0, 0.95)
     core.model_enable_instancing(model, g_count)
     core.model_set_pose_bank(model, g_bank, FRAMES)
     core.model_enable_instance_phases(model)
@@ -275,23 +280,23 @@ on_start(data: ptr) {
 
 on_update(data: ptr, delta: float) {
     if g_body == null { return }
-    g_time = g_time + delta
+    e = data as *Engine
 
-    // A target that drifts the length of the street: the horde surges after it
-    // and regroups behind it, so it is a horde and not a settled crowd. It never
-    // leaves the street, so nothing is ever teleported.
-    mid = (STREET_X0 + STREET_X1) * 0.5
-    reach = (STREET_X1 - STREET_X0) * 0.5 - 6.0
-    target = core.vec3(mid + core.sin_of(g_time * 0.08) * reach, ROAD_Y, 0.0 - 2.4)
+    // The prey is the viewer: the horde shambles toward the camera and presses
+    // in, which is what a horde does -- it hunts you, it does not sweep the
+    // street. It never leaves the street, so nothing is ever teleported.
+    cam = engine.engine_camera(e)
+    target = core.vec3(cam.position.x, ROAD_Y, cam.position.z)
 
-    crowd.horde_seek(g_world, g_pos, g_vel, target, SPEED, 0.4)
+    crowd.horde_seek(g_world, g_pos, g_vel, target, SPEED, 1.2)
     if g_grid != null {
         crowd.horde_separate(g_world, g_pos, g_vel, g_grid, SEP_RADIUS, SEP_STRENGTH)
     }
-    ecs.integrate3(g_world, g_pos, g_vel, delta)
 
-    // Hold each zombie to the street corridor and the road, face it along its
-    // heading, and step its walk at its own speed so the feet keep the ground.
+    // One pass: cap the speed so a shove can never fling a zombie, step it along
+    // its own velocity, hold it to the road corridor, face it along its heading,
+    // and advance its walk with its pace so the feet keep the ground. Replacing
+    // integrate3 with this keeps it all to a single loop over the columns.
     step_scale = delta / g_walk
     slot = 0
     n = ecs.world_slot_count(g_world)
@@ -299,18 +304,27 @@ on_update(data: ptr, delta: float) {
         if ecs.slot_alive(g_world, slot) {
             p = ecs.column_get3(g_pos, slot)
             v = ecs.column_get3(g_vel, slot)
-            nz = p.z
-            if nz < ROAD_Z0 { nz = ROAD_Z0 }
-            if nz > ROAD_Z1 { nz = ROAD_Z1 }
-            nx = p.x
+            sp = core.sqrt_of(v.x * v.x + v.z * v.z)
+            vx = v.x
+            vz = v.z
+            if sp > MAX_SPEED {
+                scale = MAX_SPEED / sp
+                vx = vx * scale
+                vz = vz * scale
+                sp = MAX_SPEED
+                ecs.column_set3(g_vel, slot, core.vec3(vx, 0.0, vz))
+            }
+            nx = p.x + vx * delta
+            nz = p.z + vz * delta
             if nx < STREET_X0 { nx = STREET_X0 }
             if nx > STREET_X1 { nx = STREET_X1 }
+            if nz < ROAD_Z0 { nz = ROAD_Z0 }
+            if nz > ROAD_Z1 { nz = ROAD_Z1 }
             ecs.column_set3(g_pos, slot, core.vec3(nx, ROAD_Y, nz))
-            // Face the heading. Mesh forward at yaw a is (cos a, 0, -sin a), so
+            // Face the heading: mesh forward at yaw a is (cos a, 0, -sin a), so
             // to face velocity (vx, vz), a = atan2(-vz, vx).
-            sp = core.sqrt_of(v.x * v.x + v.z * v.z)
-            if sp > 0.05 { ecs.column_set(g_yaw, slot, 0, core.atan2_of(0.0 - v.z, v.x)) }
-            ph = ecs.column_get(g_phase, slot, 0) + step_scale * (0.4 + sp * 0.25)
+            if sp > 0.1 { ecs.column_set(g_yaw, slot, 0, core.atan2_of(0.0 - vz, vx)) }
+            ph = ecs.column_get(g_phase, slot, 0) + step_scale * (0.35 + sp * 0.3)
             while ph >= 1.0 { ph = ph - 1.0 }
             ecs.column_set(g_phase, slot, 0, ph)
         }
