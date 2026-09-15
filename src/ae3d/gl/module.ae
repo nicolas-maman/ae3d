@@ -1136,6 +1136,15 @@ light_space_matrix(r: *GLRenderer, light: *Light, cam: *Camera) -> Mat4 {
     if r.shadow_distance > 0.0 && cam != null {
         centre = core.v3_add(cam.position,
                              core.v3_mul(cam.front, r.shadow_distance * 0.5))
+        // Snap the box centre to the shadow map's world-texel grid, so the map
+        // covers the same texels frame to frame and only ever shifts by whole
+        // texels. Without it the box slides continuously with the camera and the
+        // shadow edges crawl and shimmer as you move -- the classic swim. The
+        // moon is near enough to straight down that snapping on the world axes
+        // stands in for snapping on the light's own.
+        texel = r.shadow_distance * 2.0 / (SHADOW_SIZE * 1.0)
+        centre = core.vec3(snap_to(centre.x, texel), snap_to(centre.y, texel),
+                           snap_to(centre.z, texel))
         return light_box(r, light, centre, r.shadow_distance)
     }
 
@@ -1150,6 +1159,15 @@ light_space_matrix(r: *GLRenderer, light: *Light, cam: *Camera) -> Mat4 {
     }
 
     return light_box(r, light, centre, radius)
+}
+
+// Round a coordinate to the nearest multiple of `t`, for either sign.
+snap_to(v: float, t: float) -> float {
+    if t <= 0.0 { return v }
+    n = v / t
+    k = 0
+    if n >= 0.0 { k = (n + 0.5) as int } else { k = (n - 0.5) as int }
+    return (k as float) * t
 }
 
 // A light's direction points at the light, the way the shading does it, so the
