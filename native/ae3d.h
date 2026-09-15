@@ -65,6 +65,7 @@ int    ae3d_posebank_bones(void *bank);
 void   ae3d_posebank_capture(void *bank, int frame, void *palette);
 double ae3d_posebank_get(void *bank, int frame, int bone, int i);
 const float *ae3d_posebank_data(void *bank);
+int    ae3d_gl_posebank_texture(void *bank);
 void   ae3d_gl_upload_skin(void *mesh, int vbo);
 void  *ae3d_skinrows_create(int count);
 void   ae3d_skinrows_destroy(void *rows);

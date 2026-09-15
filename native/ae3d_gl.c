@@ -641,6 +641,36 @@ int ae3d_gl_texture_from_image(void *img, int srgb, int mipmap) {
     return (int)texture;
 }
 
+/* A pose bank as a float texture the skinning shader samples per instance.
+ * The bank is frame-major, bone-major, sixteen floats a bone -- which is one
+ * RGBA32F row of `bones * 4` texels a frame -- so its bytes upload straight in
+ * with no repacking. Nearest, clamped: the shader fetches exact texels by
+ * (bone column, frame), never filters between them. 32-bit float, since a bone
+ * matrix carries translations a 16-bit float would round the crowd apart on. */
+#ifndef GL_RGBA32F
+#define GL_RGBA32F 0x8814
+#endif
+int ae3d_gl_posebank_texture(void *bank) {
+    const float *data = ae3d_posebank_data(bank);
+    int frames = ae3d_posebank_frames(bank);
+    int bones = ae3d_posebank_bones(bank);
+    GLuint texture = 0;
+
+    if (!data || frames <= 0 || bones <= 0) return 0;
+
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, bones * 4, frames, 0,
+                 GL_RGBA, GL_FLOAT, data);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return (int)texture;
+}
+
 int ae3d_gl_texture_cubemap_from_image(void *img) {
     const unsigned char *pixels = ae3d_image_pixels(img);
     int width = ae3d_image_width(img);
