@@ -1,10 +1,17 @@
 # ae3d
 
-A 3D rendering engine in [Aether](https://github.com/aether-lang-dev/aether), with a
-switchable OpenGL 4.1 / Vulkan backend.
+![the zombie_street demo on Vulkan — a night street, a walking figure, and the wet road reflecting the lit buildings](docs/zombie-street.png)
 
-This is a port of [Gopher3D](https://github.com/nicolas-maman/gopher3D), a Go
-engine, to Aether and C. See [Credits](#credits).
+A 3D rendering engine written in [Aether](https://github.com/aether-lang-dev/aether):
+one scene API over a switchable **OpenGL 4.1 / Vulkan** backend, a **Blender asset
+pipeline**, and an **agent channel** a program — or an AI — drives it through, so a
+frame can be checked by number instead of by eye.
+
+ae3d is the continuation of [Gopher3D](https://github.com/nicolas-maman/gopher3D),
+the same author's earlier Go engine — rebuilt in Aether and C and taken past where
+Gopher3D stopped: a Vulkan renderer at parity with OpenGL and proven pixel by pixel,
+screen-space reflections on wet surfaces, and a data-oriented ECS that puts a crowd
+of a hundred thousand on screen in a **single draw call**. See [Credits](#credits).
 
 ## What it does
 
@@ -19,6 +26,16 @@ engine, to Aether and C. See [Credits](#credits).
   models cost 87us a frame in one call, against 1363us in four hundred.
   `core.set_draw_merging(false)` turns it off, which is how those two numbers
   are measured.
+- **A crowd is one draw, whatever its size.** A data-oriented entity store
+  (`ae3d.ecs`) keeps entities as integer handles and their components in dense
+  arrays a system walks in one linear pass; a crowd renders from the position
+  column's own buffer as a single instanced draw. Draw calls stay flat as the
+  crowd scales — 1k, 10k or 100k entities is one draw on both backends — and a
+  million entities advance in ~2.8 ms. `examples/zombie_crowd.ae`.
+- **Screen-space reflections** on wet surfaces (Vulkan): a camera-depth prepass
+  and a post pass mirror the lit street back onto the road. The composite is
+  additive — it only ever adds a reflected highlight, never darkens — and runs
+  before the bloom, so the mirrored lamps bloom with the real ones.
 - **Shadow mapping** in both backends: the light draws the scene into a depth
   map, and the lit pass compares against it over a 3x3 neighbourhood, offset
   along the surface by the width of one texel rather than pushed into the
@@ -59,6 +76,11 @@ engine, to Aether and C. See [Credits](#credits).
   on loopback: read the scene, change it, hold a frame still, read the pixels
   it produced, and ask why a model is not on screen. Costs one load of a global
   per frame when it is not asked for. See [docs/agent.md](docs/agent.md).
+
+![40,000 ECS entities shambling across the ground, drawn in a single instanced call](docs/zombie-crowd.png)
+
+*`examples/zombie_crowd.ae`: forty thousand entities, one instanced draw. The
+draw-call count does not move with the crowd size.*
 
 ## Driving it from a program
 
@@ -310,10 +332,13 @@ everything else.
 | `particle_disc.ae` | The same scene as an N-body: 200000 particles under Verlet integration in one instanced draw, coloured per instance |
 | `sand.ae` | 250000 grains falling and settling, click to scatter them |
 | `blender_pipeline.ae` | A model authored and keyed in Blender, exported, loaded and played |
-| `zombie_street.ae` | A zombie walking a night street and attacking, 40 textured objects from one .blend |
+| `zombie_street.ae` | A zombie walking a night street and attacking, 40 textured objects from one .blend, wet road reflecting the lamps (Vulkan) |
+| `zombie_crowd.ae` | 40,000 ECS zombies shambling in a single instanced draw — the draw-call count does not move with the crowd size |
 | `smooth_terrain.ae` | The same terrain meshed with surface nets, 67590 triangles |
 
 ### Examples as instruments
+
+![black_hole.ae — a Kerr hole's asymmetric shadow, a lensed accretion disc and a lensed sky, integrated per pixel](docs/black-hole.png)
 
 The bigger examples are not only scenes. Each is picked to push one part of the
 engine harder than anything else does, and to have an answer of its own that can
@@ -423,14 +448,18 @@ editor has.
 - **No game export.** Gopher3D's editor builds a standalone Go binary. Saving and
   loading a scene covers getting work out of the editor; generating a program is
   a different job from editing one.
+- **Ground of its own.** The agent channel, the screen-space reflections and the
+  data-oriented ECS crowd renderer are ae3d's, not ported — Gopher3D had none of
+  them.
 
 ## Credits
 
-A port of [Gopher3D](https://github.com/nicolas-maman/gopher3D) by the Gopher3D
-contributors, MIT. The architecture, the GLSL programs, the material and
-lighting model, the OBJ loader's behaviour and the demo scenes all come from that
-project. The Go was used as the reference; none of it was copied, and the Aether
-and C here are independent implementations.
+ae3d continues [Gopher3D](https://github.com/nicolas-maman/gopher3D) (MIT), the
+same author's earlier Go engine. The architecture, the GLSL programs, the material
+and lighting model, the OBJ loader's behaviour and the demo scenes carry over from
+it; the Go served as the reference, none of it was copied, and the Aether and C
+here are an independent implementation that takes the engine past where Gopher3D
+left off.
 
 Built with [GLFW](https://www.glfw.org/), [Vulkan](https://www.vulkan.org/) via
 MoltenVK on macOS, and [stb_image](https://github.com/nothings/stb).
