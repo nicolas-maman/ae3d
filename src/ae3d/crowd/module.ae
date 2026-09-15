@@ -14,10 +14,12 @@
 import ae3d.core
 import ae3d.anim
 import ae3d.skin
+import ae3d.ecs
 
 exports (
     posebank_bake, posebank_free,
-    posebank_frames, posebank_bones, posebank_get, posebank_data
+    posebank_frames, posebank_bones, posebank_get, posebank_data,
+    horde_seek
 )
 
 extern ae3d_posebank_create(frames: int, bones: int) -> ptr
@@ -75,3 +77,31 @@ posebank_get(bank: ptr, frame: int, bone: int, i: int) -> float {
     return ae3d_posebank_get(bank, frame, bone, i)
 }
 posebank_data(bank: ptr) -> ptr { return ae3d_posebank_data(bank) }
+
+// A horde system: steer every live entity's velocity toward a target at a
+// common speed, so the crowd flows the same way rather than each wandering off
+// on its own -- the cohesion a horde reads as. One linear pass over the position
+// and velocity columns, no per-entity dispatch and nothing across the language
+// boundary. Pair it with ecs.integrate3 to move the crowd, and (later) a
+// separation pass so they spread across the ground instead of collapsing onto
+// the target. `arrive` is how close counts as arrived, so an entity on the
+// target stops rather than jittering across it.
+horde_seek(world: *EcsWorld, position: *Column, velocity: *Column,
+           target: core.Vec3, speed: float, arrive: float) {
+    slot = 0
+    n = ecs.world_slot_count(world)
+    while slot < n {
+        if ecs.slot_alive(world, slot) {
+            p = ecs.column_get3(position, slot)
+            d = core.v3_sub(target, p)
+            dist = core.v3_len(d)
+            if dist > arrive {
+                dir = core.v3_mul(d, speed / dist)
+                ecs.column_set3(velocity, slot, dir)
+            } else {
+                ecs.column_set3(velocity, slot, core.vec3(0.0, 0.0, 0.0))
+            }
+        }
+        slot = slot + 1
+    }
+}

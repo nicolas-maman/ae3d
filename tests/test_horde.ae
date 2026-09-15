@@ -1,0 +1,94 @@
+// A horde moves as one: scattered entities all steer toward a target and close
+// on it, rather than each wandering independently. This runs the horde_seek
+// system with ecs.integrate3 over a crowd started in a wide ring and checks the
+// mean distance to the target collapses -- the flow-toward-target the "horde"
+// in the goal means. Pure ECS, no GPU.
+
+import ae3d.core
+import ae3d.ecs
+import ae3d.crowd
+
+const N = 2000
+const RING = 40.0
+const SPEED = 6.0
+const DT = 0.05
+const STEPS = 200
+
+var failures = 0
+
+check_true(name: string, ok: bool) {
+    if !ok {
+        println("FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+var g_seed = 0x2545f491
+
+next_random() -> float {
+    g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
+    return (g_seed as float) / 2147483647.0
+}
+
+// Mean distance from the target over the live crowd.
+mean_distance(world: *EcsWorld, pos: *Column, target: core.Vec3) -> float {
+    total = 0.0
+    live = 0
+    slot = 0
+    n = ecs.world_slot_count(world)
+    while slot < n {
+        if ecs.slot_alive(world, slot) {
+            total = total + core.v3_len(core.v3_sub(target, ecs.column_get3(pos, slot)))
+            live = live + 1
+        }
+        slot = slot + 1
+    }
+    if live == 0 { return 0.0 }
+    return total / (live as float)
+}
+
+main() {
+    world = ecs.world_new(N)
+    pos = ecs.column_new(N, 3)
+    vel = ecs.column_new(N, 3)
+
+    // A wide ring of entities around the origin.
+    i = 0
+    while i < N {
+        e = ecs.entity_create(world)
+        slot = ecs.entity_index(e)
+        angle = next_random() * 6.2831853
+        radius = RING * (0.5 + next_random() * 0.5)
+        ecs.column_set3(pos, slot,
+                        core.vec3(radius * core.cos_of(angle), 0.0, radius * core.sin_of(angle)))
+        i = i + 1
+    }
+
+    // The horde converges on a point off to one side, to prove it is the target
+    // it seeks and not just the origin it was centred on.
+    target = core.vec3(6.0, 0.0, 0.0)
+    before = mean_distance(world, pos, target)
+
+    step = 0
+    while step < STEPS {
+        crowd.horde_seek(world, pos, vel, target, SPEED, 0.4)
+        ecs.integrate3(world, pos, vel, DT)
+        step = step + 1
+    }
+
+    after = mean_distance(world, pos, target)
+    println("  horde: mean distance to target ${before} -> ${after} over ${STEPS} steps")
+    check_true("the horde started spread out", before > RING * 0.5)
+    check_true("the horde flowed in and closed on the target", after < before * 0.1)
+    check_true("and settled near it rather than overshooting away", after < 2.0)
+
+    ecs.column_free(pos)
+    ecs.column_free(vel)
+    ecs.world_free(world)
+
+    if failures == 0 {
+        println("horde: all checks passed")
+    } else {
+        println("horde: ${failures} failure(s)")
+    }
+}
