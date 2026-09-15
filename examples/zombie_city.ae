@@ -95,7 +95,7 @@ entry_named(m: *Manifest, name: string) -> *Entry {
 
 lamp_at(x: float) -> *Light {
     lamp = core.light_point(core.vec3(x, 4.25, 0.0 - 2.94),
-                            core.vec3(1.0, 0.72, 0.40), 2.7, 15.0)
+                            core.vec3(1.0, 0.74, 0.42), 4.5, 22.0)
     list.add_raw(g_lamps, lamp as ptr)
     return lamp
 }
@@ -176,7 +176,13 @@ add_tile(e: *Engine, m: *Manifest, off_x: float) -> ptr {
                 core.model_set_position(model, wp.x + off_x, wp.y, wp.z)
             }
             if string.contains(name, "LampHead") == 1 { core.model_set_exposure(model, 16.0) }
-            else if string.contains(name, "_Lit") == 1 { core.model_set_exposure(model, 13.0) }
+            else if string.contains(name, "_Lit") == 1 {
+                // Vary which rooms are lit, and how brightly, per block -- so the
+                // night skyline is not the same block copied down the street.
+                // Some go dark (exposure 0, a room with the light off).
+                if next_random() < 0.65 { core.model_set_exposure(model, 8.0 + next_random() * 8.0) }
+                else { core.model_set_exposure(model, 0.0) }
+            }
             if string.contains(name, "Road") == 1 || string.contains(name, "Ground") == 1 {
                 core.model_set_reflectivity(model, 0.8)
             }
@@ -218,8 +224,8 @@ on_start(data: ptr) {
     // lights survive to the shader, so the other three are warm lamp accents
     // near the middle -- the far blocks fall to the moon and the fog.
     moon = core.light_directional(core.vec3(0.0 - 0.35, 0.0 - 0.82, 0.30),
-                                  core.vec3(0.52, 0.60, 0.82), 1.05)
-    moon.ambient_strength = 0.22
+                                  core.vec3(0.62, 0.70, 0.92), 2.6)
+    moon.ambient_strength = 0.42
     engine.engine_set_light(e, moon)
     list.add_raw(g_lamps, moon as ptr)
     engine.engine_add_light(e, lamp_at(0.0))
