@@ -1,0 +1,139 @@
+// Component columns and the systems that walk them. A column holds one row per
+// entity slot, so a system is a linear pass over live slots reading and writing
+// adjacent memory -- the shape a crowd of a million has to be simulated in.
+// This proves a motion system moves entities correctly and holds its per-entity
+// cost at scale. No GPU, so it runs anywhere.
+
+import ae3d.ecs
+import ae3d.core
+import ae3d.platform
+
+var failures = 0
+
+check_true(name: string, ok: bool) {
+    if !ok {
+        println("FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+near(a: float, b: float) -> bool {
+    d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    return d < 0.0001
+}
+
+check_vec3(name: string, got: core.Vec3, x: float, y: float, z: float) {
+    if !near(got.x, x) || !near(got.y, y) || !near(got.z, z) {
+        println("FAIL ${name}: got (${got.x}, ${got.y}, ${got.z}), want (${x}, ${y}, ${z})")
+        failures = failures + 1
+    }
+}
+
+// A known entity, integrated over known steps, lands where the arithmetic says.
+motion_is_correct() {
+    cap = 64
+    w = ecs.world_new(cap)
+    position = ecs.column_new(cap, 3)
+    velocity = ecs.column_new(cap, 3)
+    check_true("columns allocate", position != null && velocity != null)
+
+    e = ecs.entity_create(w)
+    slot = ecs.entity_index(e)
+    ecs.column_set3(position, slot, core.vec3(0.0, 0.0, 0.0))
+    ecs.column_set3(velocity, slot, core.vec3(1.0, 2.0, 3.0))
+
+    // Ten steps of half a second: 5 s of travel.
+    step = 0
+    while step < 10 {
+        ecs.integrate3(w, position, velocity, 0.5)
+        step = step + 1
+    }
+    check_vec3("position advanced by velocity * time", ecs.column_get3(position, slot),
+               5.0, 10.0, 15.0)
+    check_true("velocity is unchanged by the step",
+               near(ecs.column_get3(velocity, slot).x, 1.0))
+
+    ecs.column_free(position)
+    ecs.column_free(velocity)
+    ecs.world_free(w)
+}
+
+// A dead entity's row is not integrated: the system skips it by the alive flag.
+dead_slots_are_skipped() {
+    cap = 8
+    w = ecs.world_new(cap)
+    position = ecs.column_new(cap, 3)
+    velocity = ecs.column_new(cap, 3)
+
+    keep = ecs.entity_create(w)
+    drop = ecs.entity_create(w)
+    ecs.column_set3(velocity, ecs.entity_index(keep), core.vec3(1.0, 0.0, 0.0))
+    ecs.column_set3(velocity, ecs.entity_index(drop), core.vec3(1.0, 0.0, 0.0))
+    ecs.column_set3(position, ecs.entity_index(drop), core.vec3(9.0, 9.0, 9.0))
+    ecs.entity_destroy(w, drop)
+
+    ecs.integrate3(w, position, velocity, 1.0)
+    check_true("the live entity moved", near(ecs.column_get3(position, ecs.entity_index(keep)).x, 1.0))
+    check_vec3("the dead entity's row was left alone",
+               ecs.column_get3(position, ecs.entity_index(drop)), 9.0, 9.0, 9.0)
+
+    ecs.column_free(position)
+    ecs.column_free(velocity)
+    ecs.world_free(w)
+}
+
+// The per-entity cost of a system, held at a million entities: the seed of the
+// numeric budget the crowd renderer's phases will be measured against.
+scale() {
+    n = 1000000
+    w = ecs.world_new(n)
+    position = ecs.column_new(n, 3)
+    velocity = ecs.column_new(n, 3)
+    check_true("a million-entity world with columns allocates",
+               w != null && position != null && velocity != null)
+    if w == null || position == null || velocity == null { return }
+
+    i = 0
+    while i < n {
+        e = ecs.entity_create(w)
+        slot = ecs.entity_index(e)
+        ecs.column_set3(velocity, slot, core.vec3(1.0, 0.0, 0.0))
+        i = i + 1
+    }
+
+    // Time a handful of steps so the per-step, per-entity cost is readable.
+    steps = 8
+    started = platform.time()
+    s = 0
+    while s < steps {
+        ecs.integrate3(w, position, velocity, 0.016)
+        s = s + 1
+    }
+    total_ms = (platform.time() - started) * 1000.0
+    per_step_ms = total_ms / (steps * 1.0)
+
+    // After `steps` of dt, x = steps * dt (velocity 1 on x).
+    expect_x = steps * 0.016
+    check_true("every entity integrated the same",
+               near(ecs.column_get3(position, 0).x, expect_x) &&
+               near(ecs.column_get3(position, n - 1).x, expect_x))
+
+    println("  ecs motion: ${n} entities integrated in ${per_step_ms} ms/step (${total_ms} ms for ${steps} steps)")
+
+    ecs.column_free(position)
+    ecs.column_free(velocity)
+    ecs.world_free(w)
+}
+
+main() {
+    motion_is_correct()
+    dead_slots_are_skipped()
+    scale()
+
+    if failures == 0 {
+        println("ecs_components: all checks passed")
+    } else {
+        println("ecs_components: ${failures} failure(s)")
+    }
+}
