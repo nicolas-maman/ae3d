@@ -95,6 +95,12 @@ var g_walk = 1.0
 var g_near_dist = NEAR_DIST   // AE3D_NEAR overrides, a knob for the LOD sweep
 var g_cull_dist = CULL_DIST   // AE3D_CULL overrides; 0 keeps the whole crowd
 var g_farcount: *Column = null   // one slot the native bucket writes the far count into
+// Separation is the crowd's heaviest pass, so it runs every SEP_INTERVAL
+// frames rather than every frame -- see the note at its call site. AE3D_SEPN
+// overrides (1 = every frame, 0 = never).
+const SEP_INTERVAL = 2
+var g_sepn = SEP_INTERVAL
+var g_frame = 0
 
 var g_seed = 0x2f6a41b3
 next_random() -> float {
@@ -235,6 +241,7 @@ on_start(data: ptr) {
     g_count = core.env_int("AE3D_CROWD", CROWD_DEFAULT)
     g_near_dist = core.env_int("AE3D_NEAR", NEAR_DIST as int) as float
     g_cull_dist = core.env_int("AE3D_CULL", CULL_DIST as int) as float
+    g_sepn = core.env_int("AE3D_SEPN", SEP_INTERVAL)
 
     // A camera down at the road, looking back along it so the horde walks out of
     // the far dark toward the lamps and the viewer.
@@ -375,8 +382,15 @@ on_update(data: ptr, delta: float) {
     // near and far draw buffers. At a city's worth of zombies the Aether loops
     // this replaces were the wall, not the GPU.
     crowd.crowd_wander(ecs.column_data(g_vel), ecs.column_data(g_yaw), g_count, SPEED)
-    if g_grid != null {
-        crowd.horde_separate(g_world, g_pos, g_vel, g_grid, SEP_RADIUS, SEP_STRENGTH)
+    // Separation is the crowd's heaviest pass by far -- a full grid rebuild and
+    // neighbour scan over every zombie, ~two thirds of the sim at half a
+    // million. But a zombie drifts only centimetres a frame, so the pack does
+    // not re-cram between frames; running the shove every Nth frame and scaling
+    // it up to keep the same steady push is invisible and reclaims most of it.
+    g_frame = g_frame + 1
+    if g_grid != null && g_sepn > 0 && g_frame % g_sepn == 0 {
+        crowd.horde_separate(g_world, g_pos, g_vel, g_grid, SEP_RADIUS,
+                             SEP_STRENGTH * (g_sepn as float))
     }
     crowd.crowd_step(ecs.column_data(g_pos), ecs.column_data(g_vel), ecs.column_data(g_yaw),
                      ecs.column_data(g_phase), g_count, delta, MAX_SPEED,
