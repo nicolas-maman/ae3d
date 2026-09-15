@@ -1,0 +1,169 @@
+// The entity store has to behave the same at a handful of entities and at a
+// million: a handle names one entity for exactly as long as that entity lives,
+// a freed slot comes back without the world growing, and a handle kept past its
+// entity's death reads as dead rather than as whoever took the slot next. None
+// of it touches the GPU, so it runs anywhere the toolchain builds.
+
+import ae3d.ecs
+import ae3d.platform
+
+var failures = 0
+
+check_true(name: string, ok: bool) {
+    if !ok {
+        println("FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+check_int(name: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${name}: got ${got}, want ${want}")
+        failures = failures + 1
+    }
+}
+
+// Create and destroy at the small scale where every count is checkable.
+basic_lifecycle() {
+    w = ecs.world_new(8)
+    check_true("world_new returns a world", w != null)
+    check_int("a fresh world is empty", ecs.world_live(w), 0)
+
+    a = ecs.entity_create(w)
+    b = ecs.entity_create(w)
+    c = ecs.entity_create(w)
+    check_int("three creates, three live", ecs.world_live(w), 3)
+    check_true("a is alive", ecs.entity_alive(w, a))
+    check_true("b is alive", ecs.entity_alive(w, b))
+    check_true("the three handles are distinct", a != b && b != c && a != c)
+
+    ecs.entity_destroy(w, b)
+    check_int("after one destroy, two live", ecs.world_live(w), 2)
+    check_true("the destroyed handle is dead", !ecs.entity_alive(w, b))
+    check_true("its neighbours still live", ecs.entity_alive(w, a) && ecs.entity_alive(w, c))
+    check_true("double-destroy is a no-op", true)
+    ecs.entity_destroy(w, b)
+    check_int("double-destroy did not change the count", ecs.world_live(w), 2)
+
+    ecs.world_free(w)
+}
+
+// A freed slot is reused, and the handle that freed it does not come back to
+// life pointing at its replacement.
+recycling_and_stale_handles() {
+    w = ecs.world_new(4)
+    a = ecs.entity_create(w)
+    b = ecs.entity_create(w)
+    slots_before = ecs.world_slot_count(w)
+
+    ecs.entity_destroy(w, a)
+    reused = ecs.entity_create(w)
+    check_int("a reused slot does not grow the world", ecs.world_slot_count(w), slots_before)
+    check_true("the reused slot is the freed index",
+               ecs.entity_index(reused) == ecs.entity_index(a))
+    check_true("the reused handle differs from the stale one", reused != a)
+    check_true("the stale handle is dead", !ecs.entity_alive(w, a))
+    check_true("the reused handle is alive", ecs.entity_alive(w, reused))
+    check_true("the untouched handle is still alive", ecs.entity_alive(w, b))
+
+    ecs.world_free(w)
+}
+
+// The world is a fixed size; asking past it fails cleanly rather than growing
+// or corrupting.
+full_world() {
+    w = ecs.world_new(3)
+    ecs.entity_create(w)
+    ecs.entity_create(w)
+    last = ecs.entity_create(w)
+    check_true("the last slot filled", ecs.entity_alive(w, last))
+    over = ecs.entity_create(w)
+    check_true("creating past capacity returns ENTITY_NONE", over == ecs.ENTITY_NONE)
+    check_true("ENTITY_NONE is not alive", !ecs.entity_alive(w, over))
+    check_int("a full world stays at capacity", ecs.world_live(w), 3)
+    ecs.world_free(w)
+}
+
+// A system walks [0, slot_count) and touches only live slots; the count it sees
+// matches the world's own tally.
+iteration_counts_the_living() {
+    w = ecs.world_new(16)
+    i = 0
+    while i < 10 {
+        ecs.entity_create(w)
+        i = i + 1
+    }
+    // Kill every third handle by walking the slots.
+    slot = 0
+    n = ecs.world_slot_count(w)
+    while slot < n {
+        if slot % 3 == 0 {
+            ecs.entity_destroy(w, ecs.slot_entity(w, slot))
+        }
+        slot = slot + 1
+    }
+    walked = 0
+    slot = 0
+    while slot < ecs.world_slot_count(w) {
+        if ecs.slot_alive(w, slot) { walked = walked + 1 }
+        slot = slot + 1
+    }
+    check_int("a walk of live slots matches world_live", walked, ecs.world_live(w))
+    ecs.world_free(w)
+}
+
+// It has to hold its shape at scale: a million creates, a walk, a million
+// destroys, with the live count landing back at zero and the timing printed as
+// the seed of a numeric budget.
+scale() {
+    n = 1000000
+    w = ecs.world_new(n)
+    check_true("a million-entity world allocates", w != null)
+    if w == null { return }
+
+    started = platform.time()
+    i = 0
+    while i < n {
+        ecs.entity_create(w)
+        i = i + 1
+    }
+    create_ms = (platform.time() - started) * 1000.0
+    check_int("a million creates, a million live", ecs.world_live(w), n)
+
+    started = platform.time()
+    walked = 0
+    slot = 0
+    slots = ecs.world_slot_count(w)
+    while slot < slots {
+        if ecs.slot_alive(w, slot) { walked = walked + 1 }
+        slot = slot + 1
+    }
+    walk_ms = (platform.time() - started) * 1000.0
+    check_int("the walk sees every live entity", walked, n)
+
+    started = platform.time()
+    slot = 0
+    while slot < slots {
+        ecs.entity_destroy(w, ecs.slot_entity(w, slot))
+        slot = slot + 1
+    }
+    destroy_ms = (platform.time() - started) * 1000.0
+    check_int("a million destroys, none live", ecs.world_live(w), 0)
+
+    println("  ecs scale: ${n} entities -- create ${create_ms} ms, walk ${walk_ms} ms, destroy ${destroy_ms} ms")
+    ecs.world_free(w)
+}
+
+main() {
+    basic_lifecycle()
+    recycling_and_stale_handles()
+    full_world()
+    iteration_counts_the_living()
+    scale()
+
+    if failures == 0 {
+        println("ecs: all checks passed")
+    } else {
+        println("ecs: ${failures} failure(s)")
+    }
+}

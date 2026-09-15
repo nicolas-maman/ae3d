@@ -1,0 +1,156 @@
+// ae3d ecs: a data-oriented entity store for crowds too large to be objects.
+//
+// The engine's `behaviour` module gives each game object its own heap block and
+// a vtable of lifecycle callbacks. That is the right shape for a handful of
+// scripted objects and the wrong one for a million zombies: a heap allocation
+// and a virtual call per entity per frame, and no two entities' data adjacent
+// in memory. This module is the other shape. An entity is an integer handle,
+// not a pointer; component data lives in dense preallocated arrays a system
+// walks front to back; nothing is allocated per entity after the world is
+// built. The render side (a later phase) collapses the crowd to one instanced
+// draw per (mesh, material), so a million entities cost a few dozen draws.
+//
+// A handle packs a slot index and a generation: `index | (generation << 24)`.
+// The index addresses the dense arrays; the generation is bumped when a slot is
+// freed, so a handle kept past its entity's death fails `entity_alive` instead
+// of reading a stranger's data. Twenty-four index bits hold 16.7M live entities
+// at once; the generation takes the rest of the 64-bit word.
+
+import std.heap
+import std.intarr
+import ae3d.core
+
+exports (
+    World,
+    world_new, world_free, world_capacity, world_live, world_slot_count,
+    entity_create, entity_destroy, entity_alive,
+    entity_index, entity_generation,
+    slot_alive, slot_entity,
+    ENTITY_NONE
+)
+
+// The handle returned when a world is full: no slot could be allocated. It is
+// never a live entity, and `entity_alive` reports it dead.
+const ENTITY_NONE = 0 - 1
+
+const INDEX_BITS = 24
+const INDEX_MASK = 0xFFFFFF
+
+// One crowd's worth of entities. The three arrays are index-parallel: slot i's
+// aliveness, its generation, and (for the free list) the stack of slots ready
+// to be handed out again. `count` is the high-water mark -- the number of slots
+// ever touched -- so a system walks `[0, count)` rather than the whole
+// capacity. `live` is how many of those are alive right now.
+struct World {
+    capacity: int
+    count: int
+    live: int
+    alive: ptr
+    generations: ptr
+    free_ids: ptr
+    free_count: int
+}
+
+// Build a world sized for `capacity` simultaneous entities (<= 16.7M). The
+// arrays are allocated once, here, and never grow: a crowd's size is decided up
+// front, the way its memory budget is. Returns null if capacity is out of range
+// or an allocation fails.
+world_new(capacity: int) -> *World {
+    if capacity <= 0 { return null }
+    if capacity > INDEX_MASK { return null }
+
+    w = heap.new(World)
+    w.capacity = capacity
+    w.count = 0
+    w.live = 0
+    w.free_count = 0
+    w.alive = intarr.new_raw(capacity)
+    w.generations = intarr.new_raw(capacity)
+    w.free_ids = intarr.new_raw(capacity)
+    if w.alive == null || w.generations == null || w.free_ids == null {
+        world_free(w)
+        return null
+    }
+    return w
+}
+
+world_free(w: *World) {
+    if w == null { return }
+    if w.alive != null { intarr.free(w.alive) }
+    if w.generations != null { intarr.free(w.generations) }
+    if w.free_ids != null { intarr.free(w.free_ids) }
+    heap.free(w)
+}
+
+world_capacity(w: *World) -> int { return w.capacity }
+world_live(w: *World) -> int { return w.live }
+// The number of slots a system has to walk to see every live entity. Freed
+// slots inside this range are skipped by their alive flag; only fresh growth
+// past every freed slot moves the mark.
+world_slot_count(w: *World) -> int { return w.count }
+
+// Split a handle back into its parts. Kept in one place so the packing is
+// described once.
+entity_index(e: int) -> int { return e & INDEX_MASK }
+entity_generation(e: int) -> int { return e >> INDEX_BITS }
+
+pack(index: int, generation: int) -> int {
+    return index | (generation << INDEX_BITS)
+}
+
+// Hand out an entity. A freed slot is reused before the world grows, so the
+// dense arrays stay packed and `count` climbs only when there is nothing to
+// recycle. Returns ENTITY_NONE if the world is full.
+entity_create(w: *World) -> int {
+    index = 0
+    if w.free_count > 0 {
+        w.free_count = w.free_count - 1
+        index = intarr.get_unchecked(w.free_ids, w.free_count)
+    } else {
+        if w.count >= w.capacity { return ENTITY_NONE }
+        index = w.count
+        w.count = w.count + 1
+    }
+    intarr.set_unchecked(w.alive, index, 1)
+    w.live = w.live + 1
+    return pack(index, intarr.get_unchecked(w.generations, index))
+}
+
+// Is this handle still the entity it named? False for ENTITY_NONE, for an index
+// outside the touched range, for a dead slot, and -- the point of the
+// generation -- for a handle whose slot has since been reused.
+entity_alive(w: *World, e: int) -> bool {
+    if e < 0 { return false }
+    index = entity_index(e)
+    if index >= w.count { return false }
+    if intarr.get_unchecked(w.alive, index) != 1 { return false }
+    return intarr.get_unchecked(w.generations, index) == entity_generation(e)
+}
+
+// Retire an entity. The slot's generation is bumped so every outstanding handle
+// to it now fails `entity_alive`, and the slot goes back on the free list for
+// the next `entity_create`. A stale or already-dead handle is a no-op, so
+// double-destroy is safe.
+entity_destroy(w: *World, e: int) {
+    if !entity_alive(w, e) { return }
+    index = entity_index(e)
+    intarr.set_unchecked(w.alive, index, 0)
+    intarr.set_unchecked(w.generations, index,
+                         intarr.get_unchecked(w.generations, index) + 1)
+    intarr.set_unchecked(w.free_ids, w.free_count, index)
+    w.free_count = w.free_count + 1
+    w.live = w.live - 1
+}
+
+// Slot-level access for a system walking `[0, world_slot_count)`. `slot_alive`
+// gates the work; `slot_entity` rebuilds the handle for a live slot so a system
+// can hand it to code that speaks handles.
+slot_alive(w: *World, slot: int) -> bool {
+    if slot < 0 { return false }
+    if slot >= w.count { return false }
+    return intarr.get_unchecked(w.alive, slot) == 1
+}
+
+slot_entity(w: *World, slot: int) -> int {
+    return pack(slot, intarr.get_unchecked(w.generations, slot))
+}
