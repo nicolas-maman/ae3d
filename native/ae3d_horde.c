@@ -30,6 +30,43 @@
 #include <stdlib.h>
 #include <math.h>
 
+/* Facing and heading for a crowd is trig per zombie per frame -- a cos and a
+ * sin to point the velocity along the heading, an atan2 to face the zombie
+ * along the shove-perturbed result. At half a million that is a couple of
+ * million libm transcendentals a frame, and profiling put it at the sim floor.
+ * A zombie's facing needs to be right to a degree, not to a bit, so these
+ * approximations stand in: a polynomial atan2 good to ~0.2 degrees, and a
+ * quadratic sine good to under 0.2%, both several times cheaper than libm and
+ * invisible on a shambling figure. */
+
+/* Polynomial atan2, max error ~0.0038 rad. Public-domain DSP standard. */
+static double fast_atan2(double y, double x) {
+    double ax = fabs(x), ay = fabs(y);
+    double mx = ax > ay ? ax : ay;
+    double mn = ax > ay ? ay : ax;
+    double a = mn / (mx + 1e-18);   /* 0..1; guarded against 0/0 at the origin */
+    double s = a * a;
+    double r = ((-0.0464964749 * s + 0.15931422) * s - 0.327622764) * s * a + a;
+    if (ay > ax) r = 1.57079632679489662 - r;
+    if (x < 0.0) r = 3.14159265358979324 - r;
+    if (y < 0.0) r = -r;
+    return r;
+}
+
+/* Bhaskara-style sine on [-pi, pi], error < 0.2%, and its cosine by phase. */
+static double fast_sin(double a) {
+    double pi = 3.14159265358979324;
+    /* wrap into [-pi, pi] */
+    if (a < -pi || a > pi) {
+        double t = a * (1.0 / (2.0 * pi));
+        a = a - 2.0 * pi * floor(t + 0.5);
+    }
+    double b = 4.0 / pi, c = -4.0 / (pi * pi);
+    double y = b * a + c * a * fabs(a);
+    return 0.225 * (y * fabs(y) - y) + y;   /* the precision refinement term */
+}
+static double fast_cos(double a) { return fast_sin(a + 1.57079632679489662); }
+
 typedef struct {
     long long *off;   /* cells+1 cell offsets into the packed arrays (CSR)  */
     long long *cur;   /* cells within-cell write cursor during the scatter  */
@@ -266,9 +303,9 @@ void ae3d_crowd_wander(double *vel, const double *yaw, int n, double speed) {
     if (!vel || !yaw) return;
     for (i = 0; i < n; i++) {
         double a = yaw[i];
-        vel[i * 3]     = cos(a) * speed;
+        vel[i * 3]     = fast_cos(a) * speed;
         vel[i * 3 + 1] = 0.0;
-        vel[i * 3 + 2] = -sin(a) * speed;
+        vel[i * 3 + 2] = -fast_sin(a) * speed;
     }
 }
 
@@ -305,7 +342,7 @@ void ae3d_crowd_step(double *pos, const double *vel, double *yaw, double *phase,
         pos[i * 3 + 1] = road_y;
         pos[i * 3 + 2] = nz;
         if (bounced) yaw[i] = a;
-        else if (sp > 0.1) yaw[i] = atan2(-vz, vx);
+        else if (sp > 0.1) yaw[i] = fast_atan2(-vz, vx);
         ph = phase[i] + step_scale * (0.35 + sp * 0.3);
         while (ph >= 1.0) ph -= 1.0;
         phase[i] = ph;
