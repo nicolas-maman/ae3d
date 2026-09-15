@@ -1,0 +1,393 @@
+// The render half of "500k zombies performantly": how much does one
+// instanced-skinned crowd draw actually cost as the crowd grows into the
+// hundreds of thousands? The simulation half is measured in test_horde_scale;
+// this is the draw. Two things have to hold, and a third is measured:
+//
+//   - the draw stays ONE call at half a million instances (draw-calls-flat, the
+//     whole premise of crowd rendering -- proven small in test_crowd_ecs, here
+//     at scale);
+//   - the crowd actually paints (a live GPU path, not a silent skip);
+//   - and the per-frame cost is reported -- the CPU pack of positions and
+//     phases into the instance buffers, and the GPU upload+draw+readback -- so
+//     the triangle budget a real zombie must be decimated to (a full one is
+//     ~26k tris; 500k of those is 13 billion a frame) is a measured number, not
+//     a guess.
+//
+// The figure is the same synthetic bendable column test_crowd_ecs uses, at a
+// low-poly triangle count standing in for a decimated zombie. The framebuffer
+// is modest on purpose: this measures geometry, instancing and buffer upload,
+// which scale with the crowd; fragment cost scales with the screen, not the
+// crowd, and is a separate budget. Offscreen, headless.
+
+import std.list
+import ae3d.core
+import ae3d.anim
+import ae3d.skin
+import ae3d.crowd
+import ae3d.ecs
+import ae3d.gl
+import ae3d.offscreen
+import ae3d.loader
+import ae3d.platform
+
+const WIDTH = 480
+const HEIGHT = 360
+const RADIUS = 0.16
+const FIGURE_HEIGHT = 1.9
+const QUARTER_TURN = 1.5707963
+const FRAMES = 12
+const DURATION = 1.0
+const FIELD = 630.0
+const WARMUP = 3
+const TIMED = 10
+// A probe crowd, and the frame time above which the renderer is taken to be a
+// software rasteriser. On the hardware these numbers describe, this many
+// instances draw in a millisecond or two; a shared CI runner on llvmpipe takes
+// far longer, and a 500k sweep at that rate is neither a measurement nor
+// something CI can sit through (it timed the suite out at 300s). Same guard
+// bench_black_hole uses for the same reason.
+const PROBE_N = 15000
+const SLOW_FRAME_MS = 50.0
+
+var failures = 0
+
+check_true(name: string, ok: bool) {
+    if !ok {
+        println("FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+channel(pixels: ptr, index: int) -> int {
+    bytes = pixels as byte[]
+    return (bytes[index] as int) & 255
+}
+
+lit_pixels(pixels: ptr) -> int {
+    total = 0
+    i = 0
+    while i < WIDTH * HEIGHT {
+        if channel(pixels, i * 4) > 40 { total = total + 1 }
+        i = i + 1
+    }
+    return total
+}
+
+var g_seed = 0x6d2b79f5
+
+next_random() -> float {
+    g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
+    return (g_seed as float) / 2147483647.0
+}
+
+build_bones() -> ptr {
+    bones = list.new()
+    i = 0
+    while i < 4 {
+        bone = loader.cube(0.02)
+        if i == 0 {
+            core.model_set_position(bone, 0.0, 0.0, 0.0)
+        } else {
+            core.model_set_position(bone, 0.0, FIGURE_HEIGHT / 3.0, 0.0)
+            core.model_set_parent(bone, list.get_raw(bones, i - 1) as *Model)
+        }
+        list.add_raw(bones, bone as ptr)
+        i = i + 1
+    }
+    return bones
+}
+
+free_bones(bones: ptr) {
+    i = list.size(bones) - 1
+    while i >= 0 {
+        bone = list.get_raw(bones, i) as *Model
+        core.model_set_parent(bone, null)
+        core.model_free(bone)
+        i = i - 1
+    }
+    list.free(bones)
+}
+
+// The bendable column of test_crowd_ecs: a ring of four verts every level,
+// skinned along a four-bone chain. `segs` rings sets the triangle count
+// (segs * 4 * 2 triangles) over a fixed figure height, so the same silhouette
+// stands in for a mesh decimated to whatever budget the crowd needs and only
+// the polygon density changes -- which is exactly the axis a triangle-budget
+// sweep wants to isolate.
+build_column(bones: ptr, segs: int) -> ptr {
+    mesh = core.mesh_create()
+    ring = 0
+    while ring <= segs {
+        y = (ring * 1.0) / segs * FIGURE_HEIGHT
+        side = 0
+        while side < 4 {
+            angle = side * QUARTER_TURN
+            x = RADIUS * core.cos_of(angle)
+            z = RADIUS * core.sin_of(angle)
+            core.mesh_push_vertex(mesh, core.vec3(x, y, z),
+                                  (side * 1.0) / 4.0, (ring * 1.0) / segs,
+                                  core.v3_normalize(core.vec3(x, 0.0, z)))
+            side = side + 1
+        }
+        ring = ring + 1
+    }
+    ring = 0
+    while ring < segs {
+        side = 0
+        while side < 4 {
+            next = (side + 1) % 4
+            a = ring * 4 + side
+            b = ring * 4 + next
+            c = (ring + 1) * 4 + next
+            d = (ring + 1) * 4 + side
+            core.mesh_push_index(mesh, a)
+            core.mesh_push_index(mesh, b)
+            core.mesh_push_index(mesh, c)
+            core.mesh_push_index(mesh, a)
+            core.mesh_push_index(mesh, c)
+            core.mesh_push_index(mesh, d)
+            side = side + 1
+        }
+        ring = ring + 1
+    }
+    count = list.size(bones)
+    ring = 0
+    while ring <= segs {
+        along = (ring * 1.0) / segs * ((count - 1) * 1.0)
+        lower = along as int
+        if lower > count - 2 { lower = count - 2 }
+        if lower < 0 { lower = 0 }
+        blend = along - (lower * 1.0)
+        side = 0
+        while side < 4 {
+            core.mesh_set_skin(mesh, ring * 4 + side, lower, lower + 1, 0, 0,
+                               1.0 - blend, blend, 0.0, 0.0)
+            side = side + 1
+        }
+        ring = ring + 1
+    }
+    return mesh
+}
+
+// Time one crowd of `n` instances: build the ECS columns, wire the crowd model
+// to a shared pose bank, then measure the steady-state per-frame cost -- the
+// CPU pack of positions and phases into the instance buffers, and the GPU
+// upload+draw+readback -- over TIMED frames after a short warm-up. Prints the
+// costs and returns the scene's draw-call count. Each crowd gets its own mesh,
+// since a model frees its mesh with itself.
+bench(backend: *Backend, renderer: *GLRenderer, cam: *Camera, key: *Light,
+      bones: ptr, bank: ptr, n: int, segs: int) -> int {
+    mesh = build_column(bones, segs)
+    world = ecs.world_new(n)
+    pos = ecs.column_new(n, 3)
+    phase = ecs.column_new(n, 1)
+    if world == null || pos == null || phase == null { return 0 }
+
+    i = 0
+    while i < n {
+        e = ecs.entity_create(world)
+        slot = ecs.entity_index(e)
+        ecs.column_set3(pos, slot,
+                        core.vec3((next_random() - 0.5) * 2.0 * FIELD, 0.0,
+                                  (next_random() - 0.5) * 2.0 * FIELD))
+        ecs.column_set(phase, slot, 0, next_random())
+        i = i + 1
+    }
+
+    swarm = core.model_new()
+    core.model_set_mesh(swarm, mesh)
+    core.model_matte(swarm, 0.85, 0.85, 0.85)
+    if !core.model_enable_instancing(swarm, n) { return 0 }
+    core.model_set_pose_bank(swarm, bank, FRAMES)
+    core.model_enable_instance_phases(swarm)
+    core.model_set_instance_positions(swarm, ecs.column_data(pos), n)
+    core.backend_add_model(backend, swarm)
+
+    // Warm up: first frames allocate the GPU buffers and prime the pipeline;
+    // they are not the steady-state cost.
+    w = 0
+    while w < WARMUP {
+        core.model_set_instance_phases(swarm, ecs.column_data(phase), n)
+        core.backend_render(backend, cam, key)
+        core.backend_frame_pixels(backend)
+        w = w + 1
+    }
+    draws = core.backend_draw_calls(backend)
+    lit = lit_pixels(core.backend_frame_pixels(backend))
+
+    t_pos = 0.0
+    t_ph = 0.0
+    t_draw = 0.0
+    f = 0
+    while f < TIMED {
+        m0 = platform.time()
+        core.model_set_instance_positions(swarm, ecs.column_data(pos), n)
+        m1 = platform.time()
+        core.model_set_instance_phases(swarm, ecs.column_data(phase), n)
+        m2 = platform.time()
+        core.backend_render(backend, cam, key)
+        // The readback blocks on the frame's completion, so wall time across
+        // the loop is the true upload+draw cost, not a queue depth behind it.
+        core.backend_frame_pixels(backend)
+        m3 = platform.time()
+        t_pos = t_pos + (m1 - m0)
+        t_ph = t_ph + (m2 - m1)
+        t_draw = t_draw + (m3 - m2)
+        f = f + 1
+    }
+    scale = 1000.0 / (TIMED * 1.0)
+    pos_ms = t_pos * scale
+    ph_ms = t_ph * scale
+    draw_ms = t_draw * scale
+    frame_ms = pos_ms + ph_ms + draw_ms
+
+    tris = segs * 4 * 2
+    println("  render_scale: ${n} instances x ${tris} tris -- ${frame_ms} ms/frame (${1000.0 / frame_ms} fps), draws ${draws}, lit ${lit}")
+    println("    pack pos ${pos_ms} ms, pack phase ${ph_ms} ms, upload+draw+readback ${draw_ms} ms")
+
+    core.backend_remove_model(backend, swarm)
+    core.model_free(swarm)
+    ecs.column_free(pos)
+    ecs.column_free(phase)
+    ecs.world_free(world)
+    return draws
+}
+
+// One timed frame of a modest crowd, to find out what kind of renderer this is
+// before committing to the half-million sweep. Builds, renders a warm frame and
+// a timed one (the readback is the sync point), and hands back the frame time in
+// milliseconds; the caller reads a slow one as a software rasteriser and skips.
+probe_frame_ms(backend: *Backend, cam: *Camera, key: *Light,
+               bones: ptr, bank: ptr) -> float {
+    mesh = build_column(bones, 6)
+    world = ecs.world_new(PROBE_N)
+    pos = ecs.column_new(PROBE_N, 3)
+    phase = ecs.column_new(PROBE_N, 1)
+    if world == null || pos == null || phase == null { return 0.0 }
+    i = 0
+    while i < PROBE_N {
+        e = ecs.entity_create(world)
+        slot = ecs.entity_index(e)
+        ecs.column_set3(pos, slot,
+                        core.vec3((next_random() - 0.5) * 2.0 * FIELD, 0.0,
+                                  (next_random() - 0.5) * 2.0 * FIELD))
+        ecs.column_set(phase, slot, 0, next_random())
+        i = i + 1
+    }
+    swarm = core.model_new()
+    core.model_set_mesh(swarm, mesh)
+    core.model_matte(swarm, 0.85, 0.85, 0.85)
+    if !core.model_enable_instancing(swarm, PROBE_N) { return 0.0 }
+    core.model_set_pose_bank(swarm, bank, FRAMES)
+    core.model_enable_instance_phases(swarm)
+    core.model_set_instance_positions(swarm, ecs.column_data(pos), PROBE_N)
+    core.model_set_instance_phases(swarm, ecs.column_data(phase), PROBE_N)
+    core.backend_add_model(backend, swarm)
+    core.backend_render(backend, cam, key)
+    core.backend_frame_pixels(backend)
+    m0 = platform.time()
+    core.backend_render(backend, cam, key)
+    core.backend_frame_pixels(backend)
+    ms = (platform.time() - m0) * 1000.0
+    core.backend_remove_model(backend, swarm)
+    core.model_free(swarm)
+    ecs.column_free(pos)
+    ecs.column_free(phase)
+    ecs.world_free(world)
+    return ms
+}
+
+main() {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("crowd_render_scale: SKIP no OpenGL context")
+        return
+    }
+    renderer = gl.renderer_new()
+    backend = gl.backend(renderer)
+    if !core.backend_init(&backend, context, WIDTH, HEIGHT) {
+        println("crowd_render_scale: SKIP the OpenGL backend would not initialise")
+        return
+    }
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    gl.renderer_set_clear_color(renderer, 0.02, 0.02, 0.04)
+
+    bones = build_bones()
+    skel = skin.skeleton_new()
+    i = 0
+    while i < list.size(bones) {
+        skin.skeleton_add(skel, list.get_raw(bones, i) as *Model)
+        i = i + 1
+    }
+    skin.skeleton_bind(skel)
+    clip = anim.clip_new("bend")
+    ch = anim.channel_new(anim.ROTATION, anim.LINEAR)
+    anim.channel_add_key(ch, 0.0, 0.0, 0.0, 0.0, 1.0)
+    anim.channel_add_key(ch, DURATION, 0.0, 0.0, 0.4226, 0.9063)
+    anim.clip_add_channel(clip, ch)
+    player = anim.player_new(clip)
+    reg = anim.registry_new()
+    anim.registry_add(reg, "bend", player, list.get_raw(bones, 1) as *Model)
+    bank = crowd.posebank_bake(reg, skel, FRAMES, DURATION)
+    check_true("the pose bank baked", bank != null)
+    if bank == null { return }
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 120.0, FIELD * 1.3))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+    key = core.light_directional(core.vec3(0.0, 0.0 - 0.4, 0.0 - 1.0),
+                                 core.vec3(1.0, 1.0, 1.0), 3.0)
+    key.ambient_strength = 0.6
+    gl.renderer_add_light(renderer, key)
+
+    // Find out what kind of renderer this is before the sweep. A software one
+    // (a CI runner's llvmpipe) is skipped: half a million instances would time
+    // the suite out, and the timings would describe the software, not hardware.
+    probe_ms = probe_frame_ms(&backend, cam, key, bones, bank)
+    software = probe_ms > SLOW_FRAME_MS
+    if software {
+        println("  crowd_render_scale: SKIP software renderer -- ${PROBE_N} instances took ${probe_ms} ms/frame; a 500k sweep would not finish in CI and would not describe hardware")
+    }
+
+    if !software {
+        // A hundred thousand at a low-poly figure, for a scale reference.
+        draws_100k = bench(&backend, renderer, cam, key, bones, bank, 100000, 6)
+        check_true("a hundred thousand instances render in one draw", draws_100k == 1)
+
+        // The triangle-budget sweep at the half-million goal: the same crowd and
+        // the same silhouette at rising polygon density, 48 to 768 triangles a
+        // figure. This is the number that sets what a real zombie must be
+        // decimated to for the crowd -- a full one is ~26k tris (13 billion a
+        // frame at 500k), and the base skin hull of the demo figure (its subsurf
+        // at level 0) is a few hundred, so the LOD lives in this range. Whichever
+        // rows stay within a frame are the budgets the decimated mesh can spend.
+        d0 = bench(&backend, renderer, cam, key, bones, bank, 500000, 6)
+        d1 = bench(&backend, renderer, cam, key, bones, bank, 500000, 24)
+        d2 = bench(&backend, renderer, cam, key, bones, bank, 500000, 48)
+        d3 = bench(&backend, renderer, cam, key, bones, bank, 500000, 96)
+
+        check_true("half a million instances render in one draw at every density",
+                   d0 == 1 && d1 == 1 && d2 == 1 && d3 == 1)
+    }
+
+    crowd.posebank_free(bank)
+    anim.registry_free(reg)
+    anim.clip_free(clip)
+    skin.skeleton_free(skel)
+    free_bones(bones)
+    core.camera_free(cam)
+    core.light_free(key)
+    core.backend_cleanup(&backend)
+    offscreen.target_destroy(target)
+    gl.renderer_free(renderer)
+    offscreen.context_destroy(context)
+
+    if software {
+        println("crowd_render_scale: SKIP (software renderer)")
+    } else if failures == 0 {
+        println("crowd_render_scale: all checks passed")
+    } else {
+        println("crowd_render_scale: ${failures} failure(s)")
+    }
+}

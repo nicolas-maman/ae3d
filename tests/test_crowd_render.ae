@@ -1,0 +1,254 @@
+// The crowd's whole point: one instanced draw poses each instance from a
+// different frame of the pose bank, so a thousand zombies are at a thousand
+// points in the walk at once. This proves it at two: a bendable column baked
+// into a pose bank, drawn as two instances at different phases in one call, and
+// the two come out in different poses -- the straight one narrow, the bent one
+// wider. If per-instance phase did nothing, both would strike the same pose and
+// their footprints would match.
+
+import std.mem
+import std.list
+import ae3d.core
+import ae3d.anim
+import ae3d.skin
+import ae3d.crowd
+import ae3d.gl
+import ae3d.offscreen
+import ae3d.loader
+
+const WIDTH = 200
+const HEIGHT = 160
+const SEGMENTS = 8
+const RADIUS = 0.16
+const HEIGHT_EACH = 0.32
+const QUARTER_TURN = 1.5707963
+const FRAMES = 12
+const DURATION = 1.0
+
+var failures = 0
+
+check_true(name: string, ok: bool) {
+    if !ok {
+        println("FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// A column of rings weighted up a chain of bones, so bending a bone bends the
+// surface. Same shape test_skinned_render uses.
+build_column(bones: ptr) -> ptr {
+    mesh = core.mesh_create()
+    ring = 0
+    while ring <= SEGMENTS {
+        y = ring * HEIGHT_EACH
+        side = 0
+        while side < 4 {
+            angle = side * QUARTER_TURN
+            x = RADIUS * core.cos_of(angle)
+            z = RADIUS * core.sin_of(angle)
+            core.mesh_push_vertex(mesh, core.vec3(x, y, z),
+                                  (side * 1.0) / 4.0, (ring * 1.0) / SEGMENTS,
+                                  core.v3_normalize(core.vec3(x, 0.0, z)))
+            side = side + 1
+        }
+        ring = ring + 1
+    }
+    ring = 0
+    while ring < SEGMENTS {
+        side = 0
+        while side < 4 {
+            next = (side + 1) % 4
+            a = ring * 4 + side
+            b = ring * 4 + next
+            c = (ring + 1) * 4 + next
+            d = (ring + 1) * 4 + side
+            core.mesh_push_index(mesh, a)
+            core.mesh_push_index(mesh, b)
+            core.mesh_push_index(mesh, c)
+            core.mesh_push_index(mesh, a)
+            core.mesh_push_index(mesh, c)
+            core.mesh_push_index(mesh, d)
+            side = side + 1
+        }
+        ring = ring + 1
+    }
+    count = list.size(bones)
+    ring = 0
+    while ring <= SEGMENTS {
+        along = (ring * 1.0) / SEGMENTS * ((count - 1) * 1.0)
+        lower = along as int
+        if lower > count - 2 { lower = count - 2 }
+        if lower < 0 { lower = 0 }
+        blend = along - (lower * 1.0)
+        side = 0
+        while side < 4 {
+            core.mesh_set_skin(mesh, ring * 4 + side, lower, lower + 1, 0, 0,
+                               1.0 - blend, blend, 0.0, 0.0)
+            side = side + 1
+        }
+        ring = ring + 1
+    }
+    return mesh
+}
+
+build_bones() -> ptr {
+    bones = list.new()
+    i = 0
+    while i < 5 {
+        bone = loader.cube(0.02)
+        if i == 0 {
+            core.model_set_position(bone, 0.0, 0.0, 0.0)
+        } else {
+            core.model_set_position(bone, 0.0, HEIGHT_EACH * 2.0, 0.0)
+            core.model_set_parent(bone, list.get_raw(bones, i - 1) as *Model)
+        }
+        list.add_raw(bones, bone as ptr)
+        i = i + 1
+    }
+    return bones
+}
+
+// The horizontal spread of lit pixels in a screen column band [x0, x1): a
+// straight column is narrow, a bent one leans and is wider. Pose, read off the
+// frame.
+channel(pixels: ptr, index: int) -> int {
+    bytes = pixels as byte[]
+    return (bytes[index] as int) & 255
+}
+
+spread(pixels: ptr, x0: int, x1: int) -> int {
+    min_x = x1
+    max_x = x0
+    y = 0
+    while y < HEIGHT {
+        x = x0
+        while x < x1 {
+            idx = (y * WIDTH + x) * 4
+            lum = channel(pixels, idx)
+            if lum > 40 {
+                if x < min_x { min_x = x }
+                if x > max_x { max_x = x }
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    if max_x < min_x { return 0 }
+    return max_x - min_x
+}
+
+main() {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("crowd_render: SKIP no OpenGL context")
+        return
+    }
+    renderer = gl.renderer_new()
+    backend = gl.backend(renderer)
+    if !core.backend_init(&backend, context, WIDTH, HEIGHT) {
+        println("crowd_render: SKIP the OpenGL backend would not initialise")
+        return
+    }
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    gl.renderer_set_clear_color(renderer, 0.0, 0.0, 0.0)
+
+    // A skeleton whose middle bone the clip bends, so t=0 is straight and later
+    // frames lean.
+    bones = build_bones()
+    skel = skin.skeleton_new()
+    i = 0
+    while i < list.size(bones) {
+        skin.skeleton_add(skel, list.get_raw(bones, i) as *Model)
+        i = i + 1
+    }
+    skin.skeleton_bind(skel)
+
+    clip = anim.clip_new("bend")
+    ch = anim.channel_new(anim.ROTATION, anim.LINEAR)
+    anim.channel_add_key(ch, 0.0, 0.0, 0.0, 0.0, 1.0)
+    // ~50 degrees about z by the end: sin(25)=0.4226, cos(25)=0.9063.
+    anim.channel_add_key(ch, DURATION, 0.0, 0.0, 0.4226, 0.9063)
+    anim.clip_add_channel(clip, ch)
+    player = anim.player_new(clip)
+    reg = anim.registry_new()
+    // Bend the second bone up the chain.
+    anim.registry_add(reg, "bend", player, list.get_raw(bones, 1) as *Model)
+
+    bank = crowd.posebank_bake(reg, skel, FRAMES, DURATION)
+    check_true("the pose bank baked", bank != null)
+    if bank == null { return }
+
+    mesh = build_column(bones)
+    swarm = core.model_new()
+    core.model_set_mesh(swarm, mesh)
+    core.model_matte(swarm, 0.9, 0.9, 0.9)
+    if !core.model_enable_instancing(swarm, 2) {
+        println("crowd_render: SKIP instancing unavailable")
+        return
+    }
+    // Two zombies side by side.
+    core.model_set_instance_position(swarm, 0, core.vec3(0.0 - 1.6, 0.0, 0.0))
+    core.model_set_instance_position(swarm, 1, core.vec3(1.6, 0.0, 0.0))
+    core.model_set_pose_bank(swarm, bank, FRAMES)
+    core.model_enable_instance_phases(swarm)
+    core.model_set_instance_phase(swarm, 0, 0.0)   // straight (frame 0)
+    core.model_set_instance_phase(swarm, 1, 0.95)  // bent (last frame)
+    core.backend_add_model(&backend, swarm)
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 1.4, 6.0))
+    core.camera_look_at(cam, core.vec3(0.0, 1.4, 0.0))
+    key = core.light_directional(core.vec3(0.0, 0.0 - 0.4, 0.0 - 1.0),
+                                 core.vec3(1.0, 1.0, 1.0), 3.0)
+    key.ambient_strength = 0.6
+    gl.renderer_add_light(renderer, key)
+
+    core.backend_render(&backend, cam, key)
+    draws = core.backend_draw_calls(&backend)
+    pixels = core.backend_frame_pixels(&backend)
+    if pixels == null {
+        println("crowd_render: SKIP no pixels")
+        return
+    }
+
+    // Left half is the straight instance, right half the bent one.
+    straight = spread(pixels, 0, WIDTH / 2)
+    bent = spread(pixels, WIDTH / 2, WIDTH)
+
+    println("  crowd_render: straight spread ${straight}px, bent spread ${bent}px, ${draws} draw call(s)")
+    check_true("both instances rendered", straight > 0 && bent > 0)
+    check_true("the crowd is one instanced draw, not two", draws <= 3)
+    check_true("the two instances are in different poses (bent wider than straight)",
+               bent > straight + 4)
+
+    core.model_free(swarm)   // frees its mesh too
+    crowd.posebank_free(bank)
+    anim.registry_free(reg)
+    anim.clip_free(clip)
+    skin.skeleton_free(skel)
+    free_bones(bones)
+    core.camera_free(cam)
+    core.light_free(key)
+    core.backend_cleanup(&backend)
+    offscreen.target_destroy(target)
+    gl.renderer_free(renderer)
+    offscreen.context_destroy(context)
+
+    if failures == 0 {
+        println("crowd_render: all checks passed")
+    } else {
+        println("crowd_render: ${failures} failure(s)")
+    }
+}
+
+free_bones(bones: ptr) {
+    i = list.size(bones) - 1
+    while i >= 0 {
+        bone = list.get_raw(bones, i) as *Model
+        core.model_set_parent(bone, null)
+        core.model_free(bone)
+        i = i - 1
+    }
+    list.free(bones)
+}

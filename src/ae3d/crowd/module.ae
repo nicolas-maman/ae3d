@@ -1,0 +1,166 @@
+// ae3d crowd: baking a skinned figure's animation into a pose bank.
+//
+// A skinned draw is posed by one bone palette, set per draw. A crowd cannot be:
+// a thousand zombies at a thousand points in the walk would be a thousand
+// palettes, and a uniform holds one. So the walk is baked once, here, into a
+// bank of `frames` poses -- each a full bone palette sampled at one time in the
+// clip -- and every entity later picks a frame by its own phase and is posed
+// from that slice. The bank is fixed at `frames` poses however large the crowd
+// grows, which is what lets an animated crowd scale the way a static one does.
+//
+// This module owns the bake and the bank's storage; the instanced-skinned draw
+// that samples it is the next phase (#271).
+
+import std.heap
+import ae3d.core
+import ae3d.anim
+import ae3d.skin
+import ae3d.ecs
+
+exports (
+    posebank_bake, posebank_free,
+    posebank_frames, posebank_bones, posebank_get, posebank_data,
+    horde_seek,
+    HordeGrid, grid_new, grid_free, horde_separate
+)
+
+extern ae3d_posebank_create(frames: int, bones: int) -> ptr
+extern ae3d_posebank_destroy(bank: ptr)
+extern ae3d_posebank_frames(bank: ptr) -> int
+extern ae3d_posebank_bones(bank: ptr) -> int
+extern ae3d_posebank_capture(bank: ptr, frame: int, palette: ptr)
+extern ae3d_posebank_get(bank: ptr, frame: int, bone: int, i: int) -> float
+extern ae3d_posebank_data(bank: ptr) -> ptr
+extern ae3d_horde_grid_create(cols: int, per_cell: int) -> ptr
+extern ae3d_horde_grid_destroy(grid: ptr)
+extern ae3d_horde_separate(grid: ptr, pos: ptr, vel: ptr, n: int,
+                           ox: float, oz: float, cell_size: float,
+                           radius: float, strength: float)
+
+// Bake `frames` evenly spaced poses across `duration` seconds of the clip the
+// registry's players carry, into a bank the whole crowd will share. Each frame
+// drives every bound player to its time, applies it to the bone, and snapshots
+// the skeleton's palette -- the same path the engine poses the live figure by,
+// so a baked pose is the pose the figure would strike at that instant. Returns
+// null on a bad shape or an allocation failure.
+posebank_bake(reg: *Registry, skel: *Skeleton, frames: int, duration: float) -> ptr {
+    if reg == null || skel == null || frames <= 0 { return null }
+    bones = skin.skeleton_count(skel)
+    if bones <= 0 { return null }
+
+    bank = ae3d_posebank_create(frames, bones)
+    if bank == null { return null }
+
+    k = 0
+    while k < frames {
+        // The clip wraps, so the last frame lands just short of the loop point
+        // rather than on the duplicate of the first: [0, duration).
+        t = 0.0
+        if frames > 1 { t = (k as float) / (frames as float) * duration }
+
+        n = anim.registry_count(reg)
+        i = 0
+        while i < n {
+            b = anim.registry_binding(reg, i)
+            if b != null {
+                player = anim.binding_player(b)
+                anim.player_set_time(player, t)
+                anim.apply(player, anim.binding_model(b))
+            }
+            i = i + 1
+        }
+
+        skin.skeleton_update(skel)
+        ae3d_posebank_capture(bank, k, skin.skeleton_palette(skel))
+        k = k + 1
+    }
+    return bank
+}
+
+posebank_free(bank: ptr) { ae3d_posebank_destroy(bank) }
+posebank_frames(bank: ptr) -> int { return ae3d_posebank_frames(bank) }
+posebank_bones(bank: ptr) -> int { return ae3d_posebank_bones(bank) }
+posebank_get(bank: ptr, frame: int, bone: int, i: int) -> float {
+    return ae3d_posebank_get(bank, frame, bone, i)
+}
+posebank_data(bank: ptr) -> ptr { return ae3d_posebank_data(bank) }
+
+// A horde system: steer every live entity's velocity toward a target at a
+// common speed, so the crowd flows the same way rather than each wandering off
+// on its own -- the cohesion a horde reads as. One linear pass over the position
+// and velocity columns, no per-entity dispatch and nothing across the language
+// boundary. Pair it with ecs.integrate3 to move the crowd, and (later) a
+// separation pass so they spread across the ground instead of collapsing onto
+// the target. `arrive` is how close counts as arrived, so an entity on the
+// target stops rather than jittering across it.
+horde_seek(world: *EcsWorld, position: *Column, velocity: *Column,
+           target: core.Vec3, speed: float, arrive: float) {
+    slot = 0
+    n = ecs.world_slot_count(world)
+    while slot < n {
+        if ecs.slot_alive(world, slot) {
+            p = ecs.column_get3(position, slot)
+            d = core.v3_sub(target, p)
+            dist = core.v3_len(d)
+            if dist > arrive {
+                dir = core.v3_mul(d, speed / dist)
+                ecs.column_set3(velocity, slot, dir)
+            } else {
+                ecs.column_set3(velocity, slot, core.vec3(0.0, 0.0, 0.0))
+            }
+        }
+        slot = slot + 1
+    }
+}
+
+// A uniform spatial grid over the XZ ground, so a horde's separation is O(N)
+// rather than every zombie testing every other. `cols` x `cols` cells of
+// `cell_size` from the corner (ox, oz), each holding up to `per_cell` entities.
+// The grid's arrays and the whole separation pass live in native C: at half a
+// million entities the neighbour tests number in the tens of millions a frame,
+// too many for a per-element language loop, so this is a thin handle over the
+// kernel in ae3d_horde.c.
+struct HordeGrid {
+    native: ptr
+    cols: int
+    cell_size: float
+    ox: float
+    oz: float
+}
+
+grid_new(cols: int, cell_size: float, ox: float, oz: float, per_cell: int) -> *HordeGrid {
+    if cols <= 0 || cell_size <= 0.0 || per_cell <= 0 { return null }
+    g = heap.new(HordeGrid)
+    g.native = ae3d_horde_grid_create(cols, per_cell)
+    if g.native == null { heap.free(g); return null }
+    g.cols = cols
+    g.cell_size = cell_size
+    g.ox = ox
+    g.oz = oz
+    return g
+}
+
+grid_free(g: *HordeGrid) {
+    if g == null { return }
+    if g.native != null { ae3d_horde_grid_destroy(g.native) }
+    heap.free(g)
+}
+
+// A horde system: push apart entities closer than `radius`, so the crowd spreads
+// across the ground under its target instead of collapsing onto one point. The
+// grid is rebuilt from the current positions, then each entity is pushed off the
+// neighbours in its own and the eight adjacent cells; `strength` scales the push
+// added to the velocity. Pair after horde_seek and before ecs.integrate3.
+//
+// The whole pass is the native kernel, run straight over the position and
+// velocity columns' own buffers -- the crowd is taken as the compact range
+// [0, world_slot_count), which is a horde that only spawns. It moves the
+// separation of half a million entities from a fifth of a second in Aether to a
+// few milliseconds.
+horde_separate(world: *EcsWorld, position: *Column, velocity: *Column,
+               g: *HordeGrid, radius: float, strength: float) {
+    if g == null { return }
+    ae3d_horde_separate(g.native, ecs.column_data(position), ecs.column_data(velocity),
+                        ecs.world_slot_count(world), g.ox, g.oz, g.cell_size,
+                        radius, strength)
+}

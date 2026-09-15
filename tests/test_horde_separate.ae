@@ -1,0 +1,111 @@
+// Avoidance: a horde packed onto one spot must push itself apart rather than
+// stay a single stacked point, so it reads as a crowd standing on the ground
+// and not a spike. This starts 1500 entities in a tiny clump and runs the
+// spatial-grid separation with ecs.integrate3; the crowd's spread -- the mean
+// distance from its centre -- has to grow as they shove apart. Pure ECS, and
+// the grid keeps it O(N), not every zombie against every other.
+
+import ae3d.core
+import ae3d.ecs
+import ae3d.crowd
+
+const N = 1500
+const DT = 0.05
+const STEPS = 120
+
+var failures = 0
+
+check_true(name: string, ok: bool) {
+    if !ok {
+        println("FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+var g_seed = 0x1234567
+
+next_random() -> float {
+    g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
+    return (g_seed as float) / 2147483647.0
+}
+
+// Mean distance of the live crowd from its own centre.
+spread(world: *EcsWorld, pos: *Column) -> float {
+    cxs = 0.0
+    czs = 0.0
+    live = 0
+    slot = 0
+    n = ecs.world_slot_count(world)
+    while slot < n {
+        if ecs.slot_alive(world, slot) {
+            p = ecs.column_get3(pos, slot)
+            cxs = cxs + p.x
+            czs = czs + p.z
+            live = live + 1
+        }
+        slot = slot + 1
+    }
+    if live == 0 { return 0.0 }
+    cx = cxs / (live as float)
+    cz = czs / (live as float)
+    total = 0.0
+    slot = 0
+    while slot < n {
+        if ecs.slot_alive(world, slot) {
+            p = ecs.column_get3(pos, slot)
+            dx = p.x - cx
+            dz = p.z - cz
+            total = total + core.sqrt_of(dx * dx + dz * dz)
+        }
+        slot = slot + 1
+    }
+    return total / (live as float)
+}
+
+main() {
+    world = ecs.world_new(N)
+    pos = ecs.column_new(N, 3)
+    vel = ecs.column_new(N, 3)
+
+    // All packed into a 2x2 metre patch: a stacked knot.
+    i = 0
+    while i < N {
+        e = ecs.entity_create(world)
+        slot = ecs.entity_index(e)
+        ecs.column_set3(pos, slot,
+                        core.vec3((next_random() - 0.5) * 2.0, 0.0, (next_random() - 0.5) * 2.0))
+        i = i + 1
+    }
+
+    // A grid big enough to hold the crowd as it spreads: 128 cells of 1 m from a
+    // corner 64 m out, deep buckets since the knot starts dense.
+    grid = crowd.grid_new(128, 1.0, 0.0 - 64.0, 0.0 - 64.0, 128)
+    check_true("the grid allocates", grid != null)
+    if grid == null { return }
+
+    before = spread(world, pos)
+    step = 0
+    while step < STEPS {
+        // Only separation drives them -- no seek -- so any spreading is the
+        // avoidance, not a target pulling them out.
+        crowd.horde_separate(world, pos, vel, grid, 1.0, 1.2)
+        ecs.integrate3(world, pos, vel, DT)
+        step = step + 1
+    }
+    after = spread(world, pos)
+
+    println("  horde_separate: spread ${before} -> ${after} over ${STEPS} steps")
+    check_true("the crowd started as a tight knot", before < 1.5)
+    check_true("separation pushed the crowd apart", after > before * 3.0)
+
+    crowd.grid_free(grid)
+    ecs.column_free(pos)
+    ecs.column_free(vel)
+    ecs.world_free(world)
+
+    if failures == 0 {
+        println("horde_separate: all checks passed")
+    } else {
+        println("horde_separate: ${failures} failure(s)")
+    }
+}

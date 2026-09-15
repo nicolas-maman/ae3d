@@ -56,6 +56,8 @@ exports (
     model_set_uniform_vec3, model_set_uniform_array, model_uniform_count, model_uniform, model_uniform_names,
     model_enable_instancing, model_set_instance_position, model_set_instance_color,
     model_enable_instance_colors, model_set_instance_positions, model_set_instance_colors,
+    model_set_pose_bank, model_pose_bank, model_enable_instance_phases, model_set_instance_phase,
+    model_set_instance_phases,
     model_instance_count, model_remove_instance, light_new, light_directional, light_point,
     light_warm, light_cool, light_sun, light_free, shader_new, shader_named, shader_valid,
     SHADER_CUSTOM, SHADER_WATER, debug_enabled,
@@ -180,6 +182,9 @@ extern ae3d_inst_set_trs(inst: ptr, i: int, px: float, py: float, pz: float, sx:
 extern ae3d_inst_remove(inst: ptr, i: int)
 
 extern ae3d_inst_enable_colors(inst: ptr, count: int) -> int
+extern ae3d_inst_enable_phases(inst: ptr, count: int) -> int
+extern ae3d_inst_set_phase(inst: ptr, i: int, phase: float)
+extern ae3d_inst_set_phases(inst: ptr, phases: ptr, count: int)
 
 extern ae3d_inst_set_color(inst: ptr, i: int, r: float, g: float, b: float)
 
@@ -358,11 +363,20 @@ struct Model {
     instance_vbo: int
     instance_vbo_capacity: int
     instance_color_vbo: int
+    // A crowd's animation: the pose bank (borrowed) its instances are skinned
+    // from, its GL texture once uploaded, its frame count, and the per-instance
+    // phase buffer. Null bank means an ordinary draw; a bank turns this model
+    // into an instanced-skinned crowd.
+    pose_bank: ptr
+    pose_bank_texture: int
+    pose_bank_frames: int
+    instance_phase_vbo: int
 
     is_dirty: bool
     is_instanced: bool
     instances_updated: bool
     instance_colors_updated: bool
+    instance_phases_updated: bool
     visible: bool
     casts_shadow: bool
 
@@ -1750,6 +1764,43 @@ model_set_instance_color(m: *Model, index: int, r: float, g: float, b: float) {
     if m.instances == null { return }
     ae3d_inst_set_color(m.instances, index, r, g, b)
     m.instance_colors_updated = true
+}
+
+// Turn this instanced model into an animated crowd: every instance is skinned
+// from `bank` (a pose bank baked by ae3d.crowd), each at its own phase. The
+// bank is borrowed, not owned -- one bank serves a whole crowd and outlives any
+// one model. `frames` is how many poses it holds, which the shader needs to map
+// a phase to a row.
+model_set_pose_bank(m: *Model, bank: ptr, frames: int) {
+    m.pose_bank = bank
+    m.pose_bank_frames = frames
+    // The texture is uploaded by the renderer the first time it draws this
+    // model, so this stays backend-free; force that upload if the bank changed.
+    m.pose_bank_texture = 0
+}
+
+model_pose_bank(m: *Model) -> ptr { return m.pose_bank }
+
+// Give the crowd a phase per instance. Enables the per-instance phase buffer at
+// the model's current instance count.
+model_enable_instance_phases(m: *Model) -> bool {
+    if m.instances == null { return false }
+    return ae3d_inst_enable_phases(m.instances, ae3d_inst_count(m.instances)) == 1
+}
+
+model_set_instance_phase(m: *Model, index: int, phase: float) {
+    if m.instances == null { return }
+    ae3d_inst_set_phase(m.instances, index, phase)
+    m.instance_phases_updated = true
+}
+
+// Bulk upload of every instance's phase from a packed float array -- one call a
+// frame as the crowd's animation advances, the counterpart of
+// model_set_instance_positions.
+model_set_instance_phases(m: *Model, phases: ptr, count: int) {
+    if m.instances == null { return }
+    ae3d_inst_set_phases(m.instances, phases, count)
+    m.instance_phases_updated = true
 }
 
 // Bulk upload of every instance's position from a packed xyz array. One call

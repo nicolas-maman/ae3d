@@ -351,6 +351,23 @@ void ae3d_gl_setup_vertex_attribs(void) {
     glEnableVertexAttribArray(10);
 }
 
+/* The crowd's extra instance attribute: one float an instance at location 11,
+ * the animation phase VERTEX_CROWD reads to pick a pose-bank frame. Called
+ * after the shared setup, so a crowd draw carries matrices, colours and phases
+ * and an ordinary instanced draw carries only the first two. */
+void ae3d_gl_setup_instance_phase(void *inst, int phase_vbo) {
+    const float *phases = ae3d_inst_phase_data(inst);
+    int count = ae3d_inst_count(inst);
+
+    if (count <= 0 || !phase_vbo || !phases || !ae3d_inst_has_phases(inst)) return;
+    glBindBuffer(GL_ARRAY_BUFFER, (GLuint)phase_vbo);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)count * (GLsizeiptr)sizeof(float),
+                 phases, GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(11);
+    glVertexAttribPointer(11, 1, GL_FLOAT, GL_FALSE, (GLsizei)sizeof(float), (const void *)0);
+    glVertexAttribDivisor(11, 1);
+}
+
 void ae3d_gl_setup_instance_attribs(void *inst, int matrix_vbo, int color_vbo) {
     const float *matrices = ae3d_inst_matrix_data(inst);
     const float *colors = ae3d_inst_color_data(inst);
@@ -450,6 +467,19 @@ void ae3d_gl_update_instance_colors(void *inst, int color_vbo) {
     glBindBuffer(GL_ARRAY_BUFFER, (GLuint)color_vbo);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)count * AE3D_COLOR_BYTES,
                  colors, GL_DYNAMIC_DRAW);
+}
+
+/* Refresh the per-instance phases each frame -- a crowd's animation advances,
+ * so unlike colours these change constantly. Just the data; the location-11
+ * attribute binding was set once at registration. */
+void ae3d_gl_update_instance_phases(void *inst, int phase_vbo) {
+    const float *phases = ae3d_inst_phase_data(inst);
+    int count = ae3d_inst_count(inst);
+
+    if (count <= 0 || !phase_vbo || !phases || !ae3d_inst_has_phases(inst)) return;
+    glBindBuffer(GL_ARRAY_BUFFER, (GLuint)phase_vbo);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)count * (GLsizeiptr)sizeof(float),
+                 phases, GL_DYNAMIC_DRAW);
 }
 
 void ae3d_gl_draw_elements(int count, int byte_offset) {
@@ -637,6 +667,36 @@ int ae3d_gl_texture_from_image(void *img, int srgb, int mipmap) {
     } else {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     }
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return (int)texture;
+}
+
+/* A pose bank as a float texture the skinning shader samples per instance.
+ * The bank is frame-major, bone-major, sixteen floats a bone -- which is one
+ * RGBA32F row of `bones * 4` texels a frame -- so its bytes upload straight in
+ * with no repacking. Nearest, clamped: the shader fetches exact texels by
+ * (bone column, frame), never filters between them. 32-bit float, since a bone
+ * matrix carries translations a 16-bit float would round the crowd apart on. */
+#ifndef GL_RGBA32F
+#define GL_RGBA32F 0x8814
+#endif
+int ae3d_gl_posebank_texture(void *bank) {
+    const float *data = ae3d_posebank_data(bank);
+    int frames = ae3d_posebank_frames(bank);
+    int bones = ae3d_posebank_bones(bank);
+    GLuint texture = 0;
+
+    if (!data || frames <= 0 || bones <= 0) return 0;
+
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, bones * 4, frames, 0,
+                 GL_RGBA, GL_FLOAT, data);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glBindTexture(GL_TEXTURE_2D, 0);
     return (int)texture;
 }

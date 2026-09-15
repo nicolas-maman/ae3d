@@ -768,6 +768,34 @@ def build_street(parts, surfaces):
         parts["Street_LampHead%d" % index] = head
 
 
+# The crowd's zombie is not this zombie. A full figure is ~26k triangles, and
+# half a million of those is thirteen billion a frame -- the crowd cannot draw
+# the hero mesh. So a second, decimated figure is built beside it: grown on the
+# same skeleton at the lowest subdivision (the skin hull, ~340 triangles) and
+# collapsed to about half that. The render-scale sweep (tests/test_crowd_render_
+# scale.ae) measured the budget -- half a million instances stay inside a 60fps
+# frame at ~150-200 triangles a figure -- and this lands there. Tunable: raise
+# the ratio for a rounder zombie at fewer frames, lower it for more crowd.
+LOD_SUBDIV = 0
+LOD_DECIMATE_RATIO = 0.5
+
+
+def _decimate(obj, ratio):
+    """Collapse a mesh to a fraction of its faces, in place.
+
+    Applied here, before the rig's weights are assigned, so the weights land on
+    the mesh that is actually drawn rather than on geometry the collapse then
+    throws away. Same apply-the-modifier path the skin and subsurf take in
+    figure.build_body, so the mesh that leaves is plain geometry with no
+    modifier stack for the exporter to have an opinion about.
+    """
+    bpy.context.view_layer.objects.active = obj
+    modifier = obj.modifiers.new("Decimate", "DECIMATE")
+    modifier.decimate_type = "COLLAPSE"
+    modifier.ratio = ratio
+    bpy.ops.object.modifier_apply(modifier="Decimate")
+
+
 def build_zombie(parts, surfaces):
     """One surface over a skeleton, and the skeleton the walk is written on.
 
@@ -775,17 +803,29 @@ def build_zombie(parts, surfaces):
     hands and cloth everywhere else, and the exporter writes the material an
     object names. Both hang off the same rig, so they are one figure: a weight
     that blends across a shoulder blends across it in both.
+
+    A third mesh, Zombie_Body_LOD, is the low-poly stand-in the crowd draws: the
+    same body grown coarse and collapsed to the crowd's triangle budget, bound
+    to the same rig so the one baked walk drives it too. It is skin only -- at
+    the distance half a million of them are seen, the cloth seam the hero figure
+    splits into a second mesh for is not there to see.
     """
     body = figure.build_body("Zombie_Body", surfaces["skin"])
     figure.unwrap(body, FIGURE_REPEATS)
     clothes = figure.build_clothes("Zombie_Clothes", surfaces["cloth"])
     figure.unwrap(clothes, FIGURE_REPEATS)
 
+    crowd_lod = figure.build_body("Zombie_Body_LOD", surfaces["skin"],
+                                  subdivisions=LOD_SUBDIV)
+    _decimate(crowd_lod, LOD_DECIMATE_RATIO)
+    figure.unwrap(crowd_lod, FIGURE_REPEATS)
+
     rig = figure.build_rig("Zombie_Rig")
-    figure.bind(rig, (body, clothes))
+    figure.bind(rig, (body, clothes, crowd_lod))
 
     parts["Zombie_Body"] = body
     parts["Zombie_Clothes"] = clothes
+    parts["Zombie_Body_LOD"] = crowd_lod
     return rig
 
 

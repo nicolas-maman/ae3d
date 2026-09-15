@@ -68,6 +68,9 @@ extern ae3d_gl_setup_vertex_attribs()
 extern ae3d_gl_upload_skin(mesh: ptr, vbo: int)
 extern ae3d_gl_uniform_mat4v(loc: int, count: int, values: ptr)
 extern ae3d_gl_setup_instance_attribs(inst: ptr, matrix_vbo: int, color_vbo: int)
+extern ae3d_gl_setup_instance_phase(inst: ptr, phase_vbo: int)
+extern ae3d_gl_update_instance_phases(inst: ptr, phase_vbo: int)
+extern ae3d_gl_posebank_texture(bank: ptr) -> int
 extern ae3d_gl_update_instances(inst: ptr, matrix_vbo: int, capacity_bytes: int) -> int
 extern ae3d_gl_update_instance_colors(inst: ptr, color_vbo: int)
 extern ae3d_gl_draw_elements(count: int, byte_offset: int)
@@ -166,6 +169,8 @@ struct ProgramSlots {
     use_instance_color: int
     is_skinned: int
     bones: int
+    pose_bank: int
+    pose_bank_frames: int
     normal_sampler: int
     has_normal_map: int
     normal_strength: int
@@ -213,6 +218,7 @@ struct GLRenderer {
     target: ptr
 
     default_program: int
+    crowd_program: int
     fxaa_program: int
     bloom_program: int
     passthrough_program: int
@@ -472,6 +478,8 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
     s.use_instance_color = ae3d_gl_uniform_location(program, "useInstanceColor")
     s.is_skinned = ae3d_gl_uniform_location(program, "isSkinned")
     s.bones = ae3d_gl_uniform_location(program, "bones")
+    s.pose_bank = ae3d_gl_uniform_location(program, "poseBank")
+    s.pose_bank_frames = ae3d_gl_uniform_location(program, "poseBankFrames")
     s.normal_sampler = ae3d_gl_uniform_location(program, "normalMap")
     s.has_normal_map = ae3d_gl_uniform_location(program, "hasNormalMap")
     s.normal_strength = ae3d_gl_uniform_location(program, "normalStrength")
@@ -622,6 +630,19 @@ apply_skeleton(r: *GLRenderer, slots: *ProgramSlots, m: *Model) {
     r.bound_skinned = 1
 }
 
+// A crowd is posed from its pose bank -- a float texture of baked frames -- on
+// texture unit 3, uploaded the first time this model is drawn. VERTEX_CROWD
+// reads it by (bone, frame); poseBankFrames lets it turn an instance's phase
+// into a frame.
+bind_pose_bank(r: *GLRenderer, slots: *ProgramSlots, m: *Model) {
+    if m.pose_bank_texture == 0 {
+        m.pose_bank_texture = ae3d_gl_posebank_texture(m.pose_bank)
+    }
+    ae3d_gl_texture_bind(3, m.pose_bank_texture)
+    ae3d_gl_uniform_int(slots.pose_bank, 3)
+    ae3d_gl_uniform_int(slots.pose_bank_frames, m.pose_bank_frames)
+}
+
 renderer_init(r: *GLRenderer, window: ptr, width: int, height: int) -> int {
     missing = ae3d_gl_load()
     if missing != 0 {
@@ -641,6 +662,12 @@ renderer_init(r: *GLRenderer, window: ptr, width: int, height: int) -> int {
     r.default_program = compile_program(shaders.VERTEX_DEFAULT, shaders.FRAGMENT_DEFAULT, "default")
     if r.default_program == 0 { return 0 }
     slots_for(r, r.default_program)
+
+    // The crowd's instanced-skinned program: same lighting as the default, but a
+    // vertex stage that poses each instance from the pose bank at its own phase.
+    r.crowd_program = compile_program(shaders.VERTEX_CROWD, shaders.FRAGMENT_DEFAULT, "crowd")
+    if r.crowd_program == 0 { return 0 }
+    slots_for(r, r.crowd_program)
 
     r.shadow_program = compile_program(shaders.VERTEX_DEPTH, shaders.FRAGMENT_DEPTH, "depth")
     r.fxaa_program = compile_program(shaders.VERTEX_SCREEN, shaders.FRAGMENT_FXAA, "fxaa")
@@ -829,6 +856,14 @@ renderer_add_model(r: *GLRenderer, m: *Model) {
         m.instance_vbo_capacity = core.model_instance_count(m) * 64
         m.instances_updated = false
         m.instance_colors_updated = false
+        // A crowd (a model carrying a pose bank) also gets the per-instance
+        // phase attribute at location 11, so the crowd program can pose each
+        // instance from its own frame of the bank.
+        if core.model_pose_bank(m) != null {
+            m.instance_phase_vbo = ae3d_gl_buffer_create()
+            ae3d_gl_setup_instance_phase(m.instances, m.instance_phase_vbo)
+            m.instance_phases_updated = false
+        }
     }
 
     ae3d_gl_vao_bind(0)
@@ -1810,7 +1845,13 @@ render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
     }
 
     program = r.default_program
-    if core.shader_valid(&m.shader) {
+    // A crowd -- a model carrying a pose bank -- draws through the crowd
+    // program, which poses each instance from the bank at its own phase rather
+    // than from the one shared bone uniform.
+    is_crowd = core.model_pose_bank(m) != null
+    if is_crowd {
+        program = r.crowd_program
+    } else if core.shader_valid(&m.shader) {
         if !m.shader.compiled {
             m.shader.program = compile_program(m.shader.vertex_source,
                                                m.shader.fragment_source, "model")
@@ -1829,6 +1870,7 @@ render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
     set_model_matrix(slots, m)
     apply_skeleton(r, slots, m)
     apply_shading(r, slots, m, program)
+    if is_crowd { bind_pose_bank(r, slots, m) }
 
     ae3d_gl_vao_bind(m.vao)
 
@@ -1897,6 +1939,10 @@ draw(r: *GLRenderer, m: *Model, slots: *ProgramSlots, count: int, byte_offset: i
         if m.instance_colors_updated {
             ae3d_gl_update_instance_colors(m.instances, m.instance_color_vbo)
             m.instance_colors_updated = false
+        }
+        if m.instance_phases_updated && m.instance_phase_vbo != 0 {
+            ae3d_gl_update_instance_phases(m.instances, m.instance_phase_vbo)
+            m.instance_phases_updated = false
         }
         apply_instancing(r, slots, 1)
         apply_instance_color(r, slots, 1)
