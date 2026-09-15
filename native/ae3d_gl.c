@@ -469,6 +469,19 @@ void ae3d_gl_update_instance_colors(void *inst, int color_vbo) {
                  colors, GL_DYNAMIC_DRAW);
 }
 
+/* Refresh the per-instance phases each frame -- a crowd's animation advances,
+ * so unlike colours these change constantly. Just the data; the location-11
+ * attribute binding was set once at registration. */
+void ae3d_gl_update_instance_phases(void *inst, int phase_vbo) {
+    const float *phases = ae3d_inst_phase_data(inst);
+    int count = ae3d_inst_count(inst);
+
+    if (count <= 0 || !phase_vbo || !phases || !ae3d_inst_has_phases(inst)) return;
+    glBindBuffer(GL_ARRAY_BUFFER, (GLuint)phase_vbo);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)count * (GLsizeiptr)sizeof(float),
+                 phases, GL_DYNAMIC_DRAW);
+}
+
 void ae3d_gl_draw_elements(int count, int byte_offset) {
     glDrawElements(GL_TRIANGLES, (GLsizei)count, GL_UNSIGNED_INT,
                    (const void *)(size_t)byte_offset);
