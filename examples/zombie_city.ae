@@ -24,13 +24,17 @@ const SKY_R = 0.075
 const SKY_G = 0.088
 const SKY_B = 0.125
 const FRAMES = 48
-const LOD_CELL = 0.06
-const CROWD_DEFAULT = 3000
+const LOD_CELL = 0.09
+const CROWD_DEFAULT = 20000
 
 // The road runs along x; Blender Y became ae3d -Z, so the carriageway sits at
 // about z = -2.94 and the crowd walks the length of it in +x, toward the camera.
-const STREET_X0 = 0.0 - 42.0
-const STREET_X1 = 42.0
+// The street block is tiled along x into a longer city, so the crowd floods a
+// street of blocks rather than one, receding into the fog.
+const BLOCK_LEN = 84.0
+const TILES = 3          // blocks along the street, centred on the middle one
+const STREET_X0 = 0.0 - 10.0
+const STREET_X1 = 105.0
 const ROAD_Z0 = 0.0 - 6.4
 const ROAD_Z1 = 0.6
 const WALK_SPEED = 1.1
@@ -39,7 +43,7 @@ const ROAD_Y = 0.16
 // once it is well behind the camera (which sits at STREET_X1 + 2, looking back
 // down the street), so the recycle happens off-screen and reads as a continuous
 // flow out of the dark rather than a figure teleporting in full view.
-const RECYCLE_X = 52.0
+const RECYCLE_X = 114.0   // just behind the camera (STREET_X1 + 3), so recycling is off-screen
 const SPREAD = 0.7   // how far off straight-ahead a zombie may face and head
 
 var g_scene: ptr = null
@@ -135,6 +139,34 @@ setup_crowd(model: *Model) -> int {
     return core.mesh_index_count(core.model_mesh(model)) / 3
 }
 
+// One copy of the street environment, shifted `off_x` down the road, added to
+// the engine. The figure objects are left out -- the crowd is the figures --
+// and only the root models are shifted, so the parented trim and glass ride
+// along on their shells. Lamp heads and lit windows glow; the road is wet.
+add_tile(e: *Engine, m: *Manifest, off_x: float) -> ptr {
+    models = assets.manifest_load_scene(m)
+    count = assets.manifest_count(m)
+    i = 0
+    while i < count {
+        name = assets.entry_object(assets.manifest_entry(m, i))
+        model = list.get_raw(models, i) as *Model
+        if model != null && string.contains(name, "Zombie") == 0 {
+            if off_x != 0.0 && core.model_parent(model) == null {
+                wp = core.model_world_position(model)
+                core.model_set_position(model, wp.x + off_x, wp.y, wp.z)
+            }
+            if string.contains(name, "LampHead") == 1 { core.model_set_exposure(model, 16.0) }
+            else if string.contains(name, "_Lit") == 1 { core.model_set_exposure(model, 13.0) }
+            if string.contains(name, "Road") == 1 || string.contains(name, "Ground") == 1 {
+                core.model_set_reflectivity(model, 0.8)
+            }
+            engine.engine_add_model(e, model)
+        }
+        i = i + 1
+    }
+    return models
+}
+
 on_start(data: ptr) {
     e = data as *Engine
     g_count = core.env_int("AE3D_CROWD", CROWD_DEFAULT)
@@ -154,23 +186,23 @@ on_start(data: ptr) {
         core.camera_set_position(cam, core.vec3(0.0, 0.9, 0.0 - 1.0))
         core.camera_look_at(cam, core.vec3(0.0 - 12.0, 0.9, 0.0 - 3.2))
     } else {
-        core.camera_set_position(cam, core.vec3(STREET_X1 + 2.0, 3.4, 1.4))
-        core.camera_look_at(cam, core.vec3(0.0 - 10.0, 0.7, 0.0 - 2.9))
+        core.camera_set_position(cam, core.vec3(STREET_X1 + 3.0, 3.6, 2.6))
+        core.camera_look_at(cam, core.vec3(0.0 - 18.0, 0.7, 0.0 - 2.9))
     }
 
     // The lamp is the key light the street is shadowed by; the sun is a dusk
     // fill. Same lighting the reference street uses.
     g_lamps = list.new()
-    key = lamp_at(0.0)
-    key.ambient_strength = 0.10
-    engine.engine_set_light(e, key)
-    dusk = core.light_directional(core.vec3(0.0 - 0.30, 0.62, 0.72),
-                                  core.vec3(0.30, 0.40, 0.72), 0.16)
-    engine.engine_add_light(e, dusk)
-    list.add_raw(g_lamps, dusk as ptr)
-    // Exactly four lights, which is the shader's limit: the key lamp above, the
-    // dusk fill, and the two neighbouring lamps. More than four and the engine
-    // keeps the first four, so naming five would silently drop one.
+    // Moonlight is the key: a directional lights and shadows the whole city, so
+    // a street of blocks reads, not just the pool under one lamp. Only four
+    // lights survive to the shader, so the other three are warm lamp accents
+    // near the middle -- the far blocks fall to the moon and the fog.
+    moon = core.light_directional(core.vec3(0.0 - 0.35, 0.0 - 0.82, 0.30),
+                                  core.vec3(0.52, 0.60, 0.82), 1.05)
+    moon.ambient_strength = 0.22
+    engine.engine_set_light(e, moon)
+    list.add_raw(g_lamps, moon as ptr)
+    engine.engine_add_light(e, lamp_at(0.0))
     engine.engine_add_light(e, lamp_at(0.0 - 14.0))
     engine.engine_add_light(e, lamp_at(14.0))
 
@@ -187,23 +219,15 @@ on_start(data: ptr) {
         return
     }
 
-    // The environment: every scene object except the hero figure, which the
-    // crowd replaces. Lamp heads and lit windows glow; the road is wet.
-    g_scene = assets.manifest_load_scene(m)
-    count = assets.manifest_count(m)
-    i = 0
-    while i < count {
-        name = assets.entry_object(assets.manifest_entry(m, i))
-        model = list.get_raw(g_scene, i) as *Model
-        if model != null && string.contains(name, "Zombie") == 0 {
-            if string.contains(name, "LampHead") == 1 { core.model_set_exposure(model, 16.0) }
-            else if string.contains(name, "_Lit") == 1 { core.model_set_exposure(model, 13.0) }
-            if string.contains(name, "Road") == 1 || string.contains(name, "Ground") == 1 {
-                core.model_set_reflectivity(model, 0.8)
-            }
-            engine.engine_add_model(e, model)
-        }
-        i = i + 1
+    // The city: the street block tiled along its length. TILES copies, centred
+    // on the middle one, so the crowd floods a run of blocks into the fog.
+    t = 0
+    half = (TILES - 1) / 2
+    while t < TILES {
+        off = (t - half) as float * BLOCK_LEN
+        tile = add_tile(e, m, off)
+        if t == 0 { g_scene = tile }
+        t = t + 1
     }
 
     // The crowd: the real zombie, decimated to a bone-aware LOD, instanced.
@@ -296,7 +320,7 @@ main() {
     engine.engine_set_face_culling(e, true)
     engine.engine_set_camera_input(e, true)
     engine.engine_set_post(e, true, true, 0.85, 0.85)
-    engine.engine_set_fog(e, core.fog_distance(6.0, 60.0,
+    engine.engine_set_fog(e, core.fog_distance(12.0, 150.0,
                                                core.vec3(SKY_R, SKY_G, SKY_B), 0.95))
     engine.engine_set_shadow_distance(e, 18.0)
     engine.engine_set_frustum_culling(e, true)
