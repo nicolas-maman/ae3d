@@ -23,8 +23,8 @@ const SKY = "resources/sky/dusk.png"
 const SKY_R = 0.075
 const SKY_G = 0.088
 const SKY_B = 0.125
-const FRAMES = 24
-const LOD_CELL = 0.15
+const FRAMES = 48
+const LOD_CELL = 0.06
 const CROWD_DEFAULT = 3000
 
 // The road runs along x; Blender Y became ae3d -Z, so the carriageway sits at
@@ -40,6 +40,7 @@ var g_scene: ptr = null
 var g_lamps: ptr = null
 var g_sky: *Skybox = null
 var g_body: *Model = null
+var g_clothes: *Model = null
 var g_bank: ptr = null
 var g_pos: *Column = null
 var g_phase: *Column = null
@@ -110,6 +111,21 @@ bake_zombie(m: *Manifest, entry: *Entry) -> ptr {
     return bank
 }
 
+// Decimate a figure's mesh to a crowd LOD and wire it as an instanced,
+// pose-bank-posed crowd over the shared position and phase columns. Returns the
+// LOD's triangle count.
+setup_crowd(model: *Model) -> int {
+    src = core.model_mesh(model)
+    lod = core.mesh_decimate(src, LOD_CELL)
+    if lod != null { core.model_set_mesh(model, lod) }
+    core.model_enable_instancing(model, g_count)
+    core.model_set_pose_bank(model, g_bank, FRAMES)
+    core.model_enable_instance_phases(model)
+    core.model_set_instance_positions(model, ecs.column_data(g_pos), g_count)
+    core.model_set_instance_phases(model, ecs.column_data(g_phase), g_count)
+    return core.mesh_index_count(core.model_mesh(model)) / 3
+}
+
 on_start(data: ptr) {
     e = data as *Engine
     g_count = core.env_int("AE3D_CROWD", CROWD_DEFAULT)
@@ -131,10 +147,11 @@ on_start(data: ptr) {
                                   core.vec3(0.30, 0.40, 0.72), 0.16)
     engine.engine_add_light(e, dusk)
     list.add_raw(g_lamps, dusk as ptr)
+    // Exactly four lights, which is the shader's limit: the key lamp above, the
+    // dusk fill, and the two neighbouring lamps. More than four and the engine
+    // keeps the first four, so naming five would silently drop one.
     engine.engine_add_light(e, lamp_at(0.0 - 14.0))
     engine.engine_add_light(e, lamp_at(14.0))
-    engine.engine_add_light(e, lamp_at(28.0))
-    engine.engine_add_light(e, lamp_at(0.0 - 28.0))
 
     renderer = engine.engine_gl_renderer(e)
     if renderer != null {
@@ -174,14 +191,8 @@ on_start(data: ptr) {
     g_bank = bake_zombie(m, entry)
     g_body = assets.entry_load_model(m, entry)
     if g_bank == null || g_body == null { println("zombie_city: load failed"); assets.manifest_free(m); return }
-
-    src = core.model_mesh(g_body)
-    lod = core.mesh_decimate(src, LOD_CELL)
-    if lod != null { core.model_set_mesh(g_body, lod) }
-
-    if !core.model_enable_instancing(g_body, g_count) { assets.manifest_free(m); return }
-    core.model_set_pose_bank(g_body, g_bank, FRAMES)
-    core.model_enable_instance_phases(g_body)
+    clothes_entry = entry_named(m, "Zombie_Clothes")
+    if clothes_entry != null { g_clothes = assets.entry_load_model(m, clothes_entry) }
 
     g_pos = ecs.column_new(g_count, 3)
     g_phase = ecs.column_new(g_count, 1)
@@ -193,12 +204,18 @@ on_start(data: ptr) {
         ecs.column_set(g_phase, i, 0, next_random())
         i = i + 1
     }
-    core.model_set_instance_positions(g_body, ecs.column_data(g_pos), g_count)
-    core.model_set_instance_phases(g_body, ecs.column_data(g_phase), g_count)
+
+    // Skin and cloth, two surfaces over the one skeleton, each decimated to a
+    // crowd LOD and instanced, both posed by the shared bank -- so the zombie
+    // has a shape and clothes, not a bare blob.
+    body_tris = setup_crowd(g_body)
+    cloth_tris = 0
+    if g_clothes != null { cloth_tris = setup_crowd(g_clothes) }
     engine.engine_add_model(e, g_body)
+    if g_clothes != null { engine.engine_add_model(e, g_clothes) }
 
     assets.manifest_free(m)
-    println("zombie_city: ${g_count} zombies flooding the street, LOD ${core.mesh_index_count(core.model_mesh(g_body)) / 3} tris each")
+    println("zombie_city: ${g_count} zombies -- skin ${body_tris} + cloth ${cloth_tris} tris each, ${FRAMES} poses")
 }
 
 on_update(data: ptr, delta: float) {
@@ -217,6 +234,10 @@ on_update(data: ptr, delta: float) {
     }
     core.model_set_instance_positions(g_body, ecs.column_data(g_pos), g_count)
     core.model_set_instance_phases(g_body, ecs.column_data(g_phase), g_count)
+    if g_clothes != null {
+        core.model_set_instance_positions(g_clothes, ecs.column_data(g_pos), g_count)
+        core.model_set_instance_phases(g_clothes, ecs.column_data(g_phase), g_count)
+    }
 }
 
 main() {
