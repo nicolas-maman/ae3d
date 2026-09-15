@@ -156,21 +156,29 @@ void main() {
     vec3 R = reflect(V, vec3(0.0, 1.0, 0.0));
     float stepLen = 0.25;
     vec3 pos = P + R * stepLen;
-    vec3 refl = scene;
-    for (int i = 0; i < 48; i++) {
+    vec3 hit = scene;
+    float edgeFade = 0.0;
+    for (int i = 0; i < 64; i++) {
         vec4 clip = viewProjection * vec4(pos, 1.0);
         if (clip.w <= 0.0) break;
         vec2 uv = (clip.xy / clip.w) * 0.5 + 0.5;
         if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) break;
         vec3 sceneAt = worldFromDepth(uv);
         if (distance(viewPos, pos) > distance(viewPos, sceneAt) + 0.03) {
+            hit = texture(screenTexture, uv).rgb;
             // Fade toward the screen edges so the reflection does not cut hard.
             float edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
-            refl = mix(scene, texture(screenTexture, uv).rgb, clamp(edge * 8.0, 0.0, 1.0));
+            edgeFade = clamp(edge * 8.0, 0.0, 1.0);
             break;
         }
         pos += R * stepLen;
     }
 
-    FragColor = vec4(mix(scene, refl, ssrStrength), 1.0);
+    // Add only the reflection's *excess* brightness -- the lamps and lit
+    // windows mirrored on the wet tarmac -- and never subtract. Reflecting the
+    // dark night sky then costs nothing, so a wet road gains its bright streaks
+    // without the surface going dark, which is both the look and a change the
+    // numbers can only read as more light where a light is mirrored.
+    vec3 glint = max(hit - scene, vec3(0.0));
+    FragColor = vec4(scene + ssrStrength * edgeFade * glint, 1.0);
 }

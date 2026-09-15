@@ -169,6 +169,16 @@ POOL_DIP_FRACTION = 0.6     # the dark between two pools falls to at most this o
 # ~1.85x; this floor sits well inside that, and a matte road cannot reach it.
 REFLECTION_ON = 0.8         # the reflectivity the wet road is measured at
 REFLECTION_LAMP_LIFT = 1.4  # the road carries at least this many times as many bright cells wet as dry
+# Screen-space reflection mirrors the on-screen geometry (lit windows, lamps)
+# onto the wet road: it only ever adds a mirrored light, never darkens, so with
+# it on the road carries more bright cells than without. Measured on Vulkan at
+# strength 1.5 the road gains ~30% more bright cells; the floor sits under that.
+# Vulkan-only for now (the OpenGL path is a later step), so it is measured only
+# where the backend is Vulkan. Bloom is held off across the A/B so the reading
+# is the reflection's own contribution, not the composite it replaces.
+SSR_ROAD_HEIGHT = 0.115     # the reflective plane, matching the scene's road
+SSR_STRENGTH = 1.5          # the reflection strength the standard measures at
+SSR_LAMP_LIFT = 1.15        # SSR adds at least this many times as many road bright cells
 # Held still, the frame must not move. Two frames drawn of the same paused pose
 # should be the same frame; a cell that drifts between them is temporal shimmer
 # -- an unseeded dither, a jittered ray march with no accumulation, a readback
@@ -1052,6 +1062,43 @@ def wet_road_reflection(engine, at=2.2):
           % (wet_count, dry, wet_count / float(max(dry, 1)), REFLECTION_LAMP_LIFT))
 
 
+def wet_road_ssr(engine, at=2.2):
+    """That screen-space reflection mirrors the scene's geometry onto the road.
+
+    Where the analytic reflection mirrors the lights, SSR mirrors what is drawn
+    -- the lit windows and lamp posts above the road come back on the wet
+    tarmac. It is additive: it only adds a mirrored light and never darkens, so
+    with it on the road carries more bright cells than without. Measured with
+    bloom held off across the toggle, so the reading is the reflection's own
+    contribution rather than the composite pass it stands in for. Vulkan-only
+    for now, so it runs only where the backend is Vulkan.
+    """
+    engine("anim.set", time=at)
+    stats = engine("frame.stats")
+    if stats.get("backend") != "vulkan":
+        return
+    print("\n== the wet road mirrors the scene (SSR) ==")
+    was_bloom = stats.get("render", {}).get("bloom_intensity", 0.0)
+
+    def road_bright():
+        grid = engine("frame.grid", columns=64, rows=48)["cells"]
+        band = [c for row in grid[int(len(grid) * 0.60):] for c in row]
+        return sum(1 for c in band if _lum(c) >= LIGHT_SOURCE_LUM)
+
+    engine("render.set", ssr=False, bloom_intensity=0.0)
+    off = road_bright()
+    engine("render.set", ssr=True, ssr_road_height=SSR_ROAD_HEIGHT, ssr_strength=SSR_STRENGTH)
+    on = road_bright()
+    # Leave it as the scene had it: SSR off, bloom restored.
+    engine("render.set", ssr=False, bloom_intensity=was_bloom)
+
+    print("  the road carries %d bright cells with SSR mirroring the scene, %d without" % (on, off))
+    check("screen-space reflection mirrors the scene onto the wet road",
+          on >= off * SSR_LAMP_LIFT,
+          "%d bright cells with SSR on against %d off (%.2fx, wanted %.2fx)"
+          % (on, off, on / float(max(off, 1)), SSR_LAMP_LIFT))
+
+
 def bloom(engine, at=2.2):
     """That the bloom the scene turns on is doing measurable work.
 
@@ -1224,6 +1271,7 @@ def main(argv):
         lighting(engine)
         light_pools(engine)
         wet_road_reflection(engine)
+        wet_road_ssr(engine)
         bloom(engine)
         shadows(engine)
         if args.walks:
