@@ -24,13 +24,21 @@ const MANIFEST = "resources/blender/zombie_street/manifest.json"
 const FRAMES = 24
 const CROWD_DEFAULT = 4000
 
+const SPEED = 3.0        // how fast the horde shuffles toward its target
+const SEP_RADIUS = 1.4   // zombies closer than this shove apart
+const SEP_STRENGTH = 2.0
+
 var g_count = CROWD_DEFAULT
 var g_field = 40.0
 var g_world: *EcsWorld = null
 var g_pos: *Column = null
+var g_vel: *Column = null
 var g_phase: *Column = null
+var g_grid: *HordeGrid = null
 var g_body: *Model = null
 var g_bank: ptr = null
+var g_walk: float = 1.0   // the walk clip's length, so a phase advances at life speed
+var g_time: float = 0.0
 var g_seed = 0x51ed2701
 
 next_random() -> float {
@@ -79,6 +87,7 @@ bake_zombie(m: *Manifest, entry: *Entry) -> ptr {
     }
     if clips != null { list.free(clips) }
     if duration <= 0.0 { duration = 1.0 }
+    g_walk = duration
 
     bank = crowd.posebank_bake(reg, skel, FRAMES, duration)
     println("zombie_horde: ${skin.skeleton_count(skel)} bones, ${crowd.posebank_frames(bank)} poses over ${duration}s of walk")
@@ -127,9 +136,11 @@ on_start(data: ptr) {
     core.model_set_pose_bank(g_body, g_bank, FRAMES)
     core.model_enable_instance_phases(g_body)
 
-    // Every zombie an entity: a place on the ground and a point in the walk.
+    // Every zombie an entity: a place on the ground, a velocity, and a point in
+    // the walk.
     g_world = ecs.world_new(g_count)
     g_pos = ecs.column_new(g_count, 3)
+    g_vel = ecs.column_new(g_count, 3)
     g_phase = ecs.column_new(g_count, 1)
     i = 0
     while i < g_count {
@@ -141,6 +152,11 @@ on_start(data: ptr) {
         ecs.column_set(g_phase, slot, 0, next_random())   // scattered through the walk
         i = i + 1
     }
+
+    // The spatial grid the separation uses, sized to the field so the whole
+    // crowd falls on the board.
+    cols = ((2.0 * g_field) / SEP_RADIUS) as int + 2
+    g_grid = crowd.grid_new(cols, SEP_RADIUS, 0.0 - g_field, 0.0 - g_field, 48)
     core.model_set_instance_positions(g_body, ecs.column_data(g_pos), g_count)
     core.model_set_instance_phases(g_body, ecs.column_data(g_phase), g_count)
     engine.engine_add_model(e, g_body)
@@ -157,9 +173,38 @@ on_start(data: ptr) {
 }
 
 on_update(data: ptr, delta: float) {
-    // Static for now (5b): the horde behaviour and the per-frame walk advance
-    // come in the next commits.
     if g_body == null { return }
+    g_time = g_time + delta
+
+    // Prey moving across the field: the horde surges toward it and regroups as
+    // it goes, which is what makes it read as a horde and not a settled crowd.
+    target = core.vec3(core.cos_of(g_time * 0.25) * g_field * 0.5, 0.0,
+                       core.sin_of(g_time * 0.25) * g_field * 0.5)
+
+    // Flow toward the prey, shove apart from neighbours, then move -- the horde,
+    // three linear passes over the columns.
+    crowd.horde_seek(g_world, g_pos, g_vel, target, SPEED, 0.5)
+    if g_grid != null {
+        crowd.horde_separate(g_world, g_pos, g_vel, g_grid, SEP_RADIUS, SEP_STRENGTH)
+    }
+    ecs.integrate3(g_world, g_pos, g_vel, delta)
+
+    // Advance every zombie's walk at life speed, wrapping the clip.
+    step = delta / g_walk
+    slot = 0
+    n = ecs.world_slot_count(g_world)
+    while slot < n {
+        if ecs.slot_alive(g_world, slot) {
+            ph = ecs.column_get(g_phase, slot, 0) + step
+            while ph >= 1.0 { ph = ph - 1.0 }
+            ecs.column_set(g_phase, slot, 0, ph)
+        }
+        slot = slot + 1
+    }
+
+    // The moved crowd and its new poses become the instance buffer, one upload.
+    core.model_set_instance_positions(g_body, ecs.column_data(g_pos), g_count)
+    core.model_set_instance_phases(g_body, ecs.column_data(g_phase), g_count)
 }
 
 main() {
@@ -185,7 +230,9 @@ main() {
     println("zombie_horde: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${g_count} zombies in ${draws} draw call(s)")
 
     if g_body != null { core.model_free(g_body) }
+    if g_grid != null { crowd.grid_free(g_grid) }
     if g_pos != null { ecs.column_free(g_pos) }
+    if g_vel != null { ecs.column_free(g_vel) }
     if g_phase != null { ecs.column_free(g_phase) }
     if g_world != null { ecs.world_free(g_world) }
     if g_bank != null { crowd.posebank_free(g_bank) }
