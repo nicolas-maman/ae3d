@@ -259,13 +259,40 @@ static struct {
     VkPipeline water_pipeline_blend;
     int program;
     int shadow_enabled;
+    // Screen-space reflection: a camera-space depth prepass, sampled by the SSR
+    // post pass to reflect on-screen geometry onto wet surfaces. Off unless a
+    // scene asks for it, so the default render pays nothing and cannot break;
+    // the target is built the first time it is turned on. The depth is single-
+    // sample and sampleable by construction (the shadow map's pattern), which
+    // is why it does not have to resolve the multisampled scene depth.
+    int ssr_enabled;
+    VkRenderPass camdepth_pass;
+    VkFramebuffer camdepth_framebuffer;
+    VkImage camdepth_image;
+    VkDeviceMemory camdepth_memory;
+    VkImageView camdepth_view;
+    VkSampler camdepth_sampler;
+    int camdepth_width;
+    int camdepth_height;
     int pass_open;
     int in_shadow_pass;
+    int in_camdepth;
+    VkDescriptorSet ssr_set[AE3D_VK_FRAMES];
+    int ssr_set_built;
+    float ssr_road_height;
+    float ssr_strength;
+    // The reflective composite writes here rather than to the swapchain, so the
+    // ordinary bloom/fxaa composite can then read it and bloom the mirrored
+    // lamps too. It is a single-sample colour target that ends the pass in
+    // sampler-read layout, built and torn down with the camera-depth target.
+    VkRenderPass ssr_pass;
+    VkFramebuffer ssr_framebuffer;
+    int ssr_reflect_texture;
     float scene_clear[4];
     VkFramebuffer scene_framebuffer;
     VkFramebuffer *post_framebuffers;
     int post_texture;
-    VkPipeline post_pipelines[3];
+    VkPipeline post_pipelines[4];
     VkPipeline sky_pipeline;
     int screen_quad;
     int fxaa;
@@ -856,6 +883,7 @@ static int ae3d_vk_create_image(int width, int height, int mip_levels, VkFormat 
 void ae3d_vk_texture_destroy(int handle);
 
 static void ae3d_vk_destroy_shadow_target(void);
+static void ae3d_vk_destroy_camdepth_target(void);
 
 static void ae3d_vk_destroy_swapchain(void) {
     unsigned i;
@@ -920,6 +948,7 @@ static void ae3d_vk_destroy_swapchain(void) {
         vk.post_framebuffers = NULL;
     }
     ae3d_vk_destroy_shadow_target();
+    ae3d_vk_destroy_camdepth_target();
     if (vk.scene_framebuffer) {
         ae3d_vkDestroyFramebuffer(vk.device, vk.scene_framebuffer, NULL);
         vk.scene_framebuffer = VK_NULL_HANDLE;
@@ -1340,9 +1369,200 @@ static int ae3d_vk_build_shadow_pass(void) {
     return 1;
 }
 
+// The camera-space depth prepass, for screen-space reflection. The same
+// depth-only pass the shadow map uses -- a single-sample depth attachment
+// cleared, stored, and left readable -- but rendered from the camera rather
+// than the light, so the SSR post pass can sample the scene's own depth.
+static int ae3d_vk_build_camdepth_pass(void) {
+    VkAttachmentDescription attachment;
+    VkAttachmentReference depth_ref;
+    VkSubpassDescription subpass;
+    VkSubpassDependency dependency;
+    VkRenderPassCreateInfo info;
+
+    memset(&attachment, 0, sizeof(attachment));
+    attachment.format = vk.depth_format;
+    attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    memset(&depth_ref, 0, sizeof(depth_ref));
+    depth_ref.attachment = 0;
+    depth_ref.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    memset(&subpass, 0, sizeof(subpass));
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 0;
+    subpass.pDepthStencilAttachment = &depth_ref;
+
+    memset(&dependency, 0, sizeof(dependency));
+    dependency.srcSubpass = 0;
+    dependency.dstSubpass = VK_SUBPASS_EXTERNAL;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    dependency.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependency.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    info.attachmentCount = 1;
+    info.pAttachments = &attachment;
+    info.subpassCount = 1;
+    info.pSubpasses = &subpass;
+    info.dependencyCount = 1;
+    info.pDependencies = &dependency;
+
+    if (ae3d_vkCreateRenderPass(vk.device, &info, NULL, &vk.camdepth_pass) != VK_SUCCESS) {
+        return ae3d_vk_fail("camera-depth vkCreateRenderPass failed");
+    }
+    return 1;
+}
+
+static void ae3d_vk_destroy_camdepth_target(void) {
+    if (vk.camdepth_framebuffer) {
+        ae3d_vkDestroyFramebuffer(vk.device, vk.camdepth_framebuffer, NULL);
+        vk.camdepth_framebuffer = VK_NULL_HANDLE;
+    }
+    if (vk.camdepth_sampler) {
+        ae3d_vkDestroySampler(vk.device, vk.camdepth_sampler, NULL);
+        vk.camdepth_sampler = VK_NULL_HANDLE;
+    }
+    if (vk.camdepth_view) {
+        ae3d_vkDestroyImageView(vk.device, vk.camdepth_view, NULL);
+        vk.camdepth_view = VK_NULL_HANDLE;
+    }
+    if (vk.camdepth_image) {
+        ae3d_vkDestroyImage(vk.device, vk.camdepth_image, NULL);
+        vk.camdepth_image = VK_NULL_HANDLE;
+    }
+    if (vk.camdepth_memory) {
+        ae3d_vkFreeMemory(vk.device, vk.camdepth_memory, NULL);
+        vk.camdepth_memory = VK_NULL_HANDLE;
+    }
+    vk.camdepth_width = 0;
+    vk.camdepth_height = 0;
+    if (vk.ssr_framebuffer) {
+        ae3d_vkDestroyFramebuffer(vk.device, vk.ssr_framebuffer, NULL);
+        vk.ssr_framebuffer = VK_NULL_HANDLE;
+    }
+    if (vk.ssr_reflect_texture) {
+        ae3d_vk_texture_destroy(vk.ssr_reflect_texture);
+        vk.ssr_reflect_texture = 0;
+    }
+    // The SSR sets sample this target; force them to be reallocated and
+    // rewritten against the new one when SSR is next drawn.
+    {
+        int f;
+        for (f = 0; f < AE3D_VK_FRAMES; f++) vk.ssr_set[f] = VK_NULL_HANDLE;
+    }
+}
+
+// Built at the swapchain's size, the first time SSR is turned on and again
+// whenever the swapchain is remade at a new size.
+static int ae3d_vk_create_camdepth_target(int width, int height) {
+    VkSamplerCreateInfo sampler;
+    VkImageView attachments[1];
+    VkFramebufferCreateInfo info;
+
+    if (!ae3d_vk_create_image(width, height, 1, vk.depth_format, VK_SAMPLE_COUNT_1_BIT,
+                              VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                              VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_TILING_OPTIMAL,
+                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                              &vk.camdepth_image, &vk.camdepth_memory, &vk.camdepth_view)) {
+        return 0;
+    }
+
+    memset(&sampler, 0, sizeof(sampler));
+    sampler.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sampler.magFilter = VK_FILTER_NEAREST;
+    sampler.minFilter = VK_FILTER_NEAREST;
+    sampler.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sampler.maxLod = 1.0f;
+    if (ae3d_vkCreateSampler(vk.device, &sampler, NULL, &vk.camdepth_sampler) != VK_SUCCESS) {
+        return ae3d_vk_fail("camera-depth vkCreateSampler failed");
+    }
+
+    attachments[0] = vk.camdepth_view;
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    info.renderPass = vk.camdepth_pass;
+    info.attachmentCount = 1;
+    info.pAttachments = attachments;
+    info.width = (unsigned)width;
+    info.height = (unsigned)height;
+    info.layers = 1;
+    if (ae3d_vkCreateFramebuffer(vk.device, &info, NULL, &vk.camdepth_framebuffer) != VK_SUCCESS) {
+        return ae3d_vk_fail("camera-depth vkCreateFramebuffer failed");
+    }
+    vk.camdepth_width = width;
+    vk.camdepth_height = height;
+
+    // The intermediate the reflective composite writes into: a colour target
+    // the ordinary composite then samples, sized to match, filtered linearly so
+    // the bloom that reads it can blur across it.
+    {
+        ae3d_vk_texture *reflect = NULL;
+        VkSamplerCreateInfo rsampler;
+        VkImageView rattach[1];
+        VkFramebufferCreateInfo rinfo;
+        int slot;
+
+        for (slot = 0; slot < AE3D_VK_MAX_TEXTURES; slot++) {
+            if (!vk.textures[slot].in_use) { reflect = &vk.textures[slot]; break; }
+        }
+        if (!reflect) return ae3d_vk_fail("texture table full");
+
+        if (!ae3d_vk_create_image(width, height, 1, vk.color_format, VK_SAMPLE_COUNT_1_BIT,
+                                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                  VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_TILING_OPTIMAL,
+                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                  &reflect->image, &reflect->memory, &reflect->view)) {
+            return 0;
+        }
+
+        memset(&rsampler, 0, sizeof(rsampler));
+        rsampler.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        rsampler.magFilter = VK_FILTER_LINEAR;
+        rsampler.minFilter = VK_FILTER_LINEAR;
+        rsampler.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        rsampler.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        rsampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        rsampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        rsampler.maxLod = 1.0f;
+        if (ae3d_vkCreateSampler(vk.device, &rsampler, NULL, &reflect->sampler) != VK_SUCCESS) {
+            return ae3d_vk_fail("ssr-reflect vkCreateSampler failed");
+        }
+        reflect->width = width;
+        reflect->height = height;
+        reflect->in_use = 1;
+        vk.ssr_reflect_texture = slot + 1;
+
+        rattach[0] = reflect->view;
+        memset(&rinfo, 0, sizeof(rinfo));
+        rinfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        rinfo.renderPass = vk.ssr_pass;
+        rinfo.attachmentCount = 1;
+        rinfo.pAttachments = rattach;
+        rinfo.width = (unsigned)width;
+        rinfo.height = (unsigned)height;
+        rinfo.layers = 1;
+        if (ae3d_vkCreateFramebuffer(vk.device, &rinfo, NULL, &vk.ssr_framebuffer) != VK_SUCCESS) {
+            return ae3d_vk_fail("ssr-reflect vkCreateFramebuffer failed");
+        }
+    }
+    return 1;
+}
+
 // The composite pass reads what the scene pass produced, so it takes a single
 // resolved colour attachment and no depth.
-static int ae3d_vk_build_post_pass(VkImageLayout present_layout) {
+static int ae3d_vk_build_post_pass(VkImageLayout present_layout, VkRenderPass *out) {
     VkAttachmentDescription attachment;
     VkAttachmentReference colour_ref;
     VkSubpassDescription subpass;
@@ -1385,7 +1605,7 @@ static int ae3d_vk_build_post_pass(VkImageLayout present_layout) {
     info.dependencyCount = 1;
     info.pDependencies = &dependency;
 
-    if (ae3d_vkCreateRenderPass(vk.device, &info, NULL, &vk.post_pass) != VK_SUCCESS) {
+    if (ae3d_vkCreateRenderPass(vk.device, &info, NULL, out) != VK_SUCCESS) {
         return ae3d_vk_fail("post vkCreateRenderPass failed");
     }
     return 1;
@@ -1400,7 +1620,13 @@ static int ae3d_vk_create_render_pass(void) {
     if (!ae3d_vk_build_render_pass(present_layout, &vk.render_pass)) return 0;
     if (!ae3d_vk_build_render_pass(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, &vk.scene_pass)) return 0;
     if (!ae3d_vk_build_shadow_pass()) return 0;
-    return ae3d_vk_build_post_pass(present_layout);
+    if (!ae3d_vk_build_camdepth_pass()) return 0;
+    // The reflective composite writes into an off-screen colour target the
+    // final composite then samples, so its pass ends in sampler-read layout;
+    // it stays compatible with the swapchain post pass, so one set of post
+    // pipelines is valid in either.
+    if (!ae3d_vk_build_post_pass(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, &vk.ssr_pass)) return 0;
+    return ae3d_vk_build_post_pass(present_layout, &vk.post_pass);
 }
 
 // The scene renders into a sampled image when post-processing is on, and the
@@ -2157,6 +2383,44 @@ void ae3d_vk_scene_set_clip_mat4(int offset, const double *m) {
     ae3d_vk_set_mat4(&vk.scene[vk.program], offset, corrected);
 }
 
+/* The inverse of the clip-corrected view-projection, for the SSR shader to
+ * rebuild a world position from a screen pixel and its depth. It must invert
+ * the SAME matrix the vertex stage used (the corrected one above, mapping world
+ * to Vulkan NDC: y down, z in 0..1), so the correction is applied first and the
+ * result inverted. Column-major throughout, matching the rest of the block. */
+void ae3d_vk_scene_set_inv_viewproj(int offset, const double *m) {
+    double c[16], inv[16], det;
+    int column, i;
+    if (!m) return;
+    for (column = 0; column < 4; column++) {
+        c[column * 4 + 0] = m[column * 4 + 0];
+        c[column * 4 + 1] = -m[column * 4 + 1];
+        c[column * 4 + 2] = 0.5 * (m[column * 4 + 2] + m[column * 4 + 3]);
+        c[column * 4 + 3] = m[column * 4 + 3];
+    }
+    inv[0]  =  c[5]*c[10]*c[15] - c[5]*c[11]*c[14] - c[9]*c[6]*c[15] + c[9]*c[7]*c[14] + c[13]*c[6]*c[11] - c[13]*c[7]*c[10];
+    inv[4]  = -c[4]*c[10]*c[15] + c[4]*c[11]*c[14] + c[8]*c[6]*c[15] - c[8]*c[7]*c[14] - c[12]*c[6]*c[11] + c[12]*c[7]*c[10];
+    inv[8]  =  c[4]*c[9]*c[15]  - c[4]*c[11]*c[13] - c[8]*c[5]*c[15] + c[8]*c[7]*c[13] + c[12]*c[5]*c[11] - c[12]*c[7]*c[9];
+    inv[12] = -c[4]*c[9]*c[14]  + c[4]*c[10]*c[13] + c[8]*c[5]*c[14] - c[8]*c[6]*c[13] - c[12]*c[5]*c[10] + c[12]*c[6]*c[9];
+    inv[1]  = -c[1]*c[10]*c[15] + c[1]*c[11]*c[14] + c[9]*c[2]*c[15] - c[9]*c[3]*c[14] - c[13]*c[2]*c[11] + c[13]*c[3]*c[10];
+    inv[5]  =  c[0]*c[10]*c[15] - c[0]*c[11]*c[14] - c[8]*c[2]*c[15] + c[8]*c[3]*c[14] + c[12]*c[2]*c[11] - c[12]*c[3]*c[10];
+    inv[9]  = -c[0]*c[9]*c[15]  + c[0]*c[11]*c[13] + c[8]*c[1]*c[15] - c[8]*c[3]*c[13] - c[12]*c[1]*c[11] + c[12]*c[3]*c[9];
+    inv[13] =  c[0]*c[9]*c[14]  - c[0]*c[10]*c[13] - c[8]*c[1]*c[14] + c[8]*c[2]*c[13] + c[12]*c[1]*c[10] - c[12]*c[2]*c[9];
+    inv[2]  =  c[1]*c[6]*c[15]  - c[1]*c[7]*c[14]  - c[5]*c[2]*c[15] + c[5]*c[3]*c[14] + c[13]*c[2]*c[7]  - c[13]*c[3]*c[6];
+    inv[6]  = -c[0]*c[6]*c[15]  + c[0]*c[7]*c[14]  + c[4]*c[2]*c[15] - c[4]*c[3]*c[14] - c[12]*c[2]*c[7]  + c[12]*c[3]*c[6];
+    inv[10] =  c[0]*c[5]*c[15]  - c[0]*c[7]*c[13]  - c[4]*c[1]*c[15] + c[4]*c[3]*c[13] + c[12]*c[1]*c[7]  - c[12]*c[3]*c[5];
+    inv[14] = -c[0]*c[5]*c[14]  + c[0]*c[6]*c[13]  + c[4]*c[1]*c[14] - c[4]*c[2]*c[13] - c[12]*c[1]*c[6]  + c[12]*c[2]*c[5];
+    inv[3]  = -c[1]*c[6]*c[11]  + c[1]*c[7]*c[10]  + c[5]*c[2]*c[11] - c[5]*c[3]*c[10] - c[9]*c[2]*c[7]   + c[9]*c[3]*c[6];
+    inv[7]  =  c[0]*c[6]*c[11]  - c[0]*c[7]*c[10]  - c[4]*c[2]*c[11] + c[4]*c[3]*c[10] + c[8]*c[2]*c[7]   - c[8]*c[3]*c[6];
+    inv[11] = -c[0]*c[5]*c[11]  + c[0]*c[7]*c[9]   + c[4]*c[1]*c[11] - c[4]*c[3]*c[9]  - c[8]*c[1]*c[7]   + c[8]*c[3]*c[5];
+    inv[15] =  c[0]*c[5]*c[10]  - c[0]*c[6]*c[9]   - c[4]*c[1]*c[10] + c[4]*c[2]*c[9]  + c[8]*c[1]*c[6]   - c[8]*c[2]*c[5];
+    det = c[0]*inv[0] + c[1]*inv[4] + c[2]*inv[8] + c[3]*inv[12];
+    if (det > -1e-12 && det < 1e-12) { ae3d_vk_set_mat4(&vk.scene[vk.program], offset, c); return; }
+    det = 1.0 / det;
+    for (i = 0; i < 16; i++) inv[i] *= det;
+    ae3d_vk_set_mat4(&vk.scene[vk.program], offset, inv);
+}
+
 // A model's own uniforms arrive by name. The offset is resolved once and cached
 // on the uniform, so the strcmp walk happens the first time a name is seen and
 // never again.
@@ -2410,6 +2674,9 @@ static int ae3d_vk_create_pass_pipelines(void) {
         { ae3d_vk_depth_vert_spv, sizeof(ae3d_vk_depth_vert_spv),
           ae3d_vk_depth_frag_spv, sizeof(ae3d_vk_depth_frag_spv),
           0, 1, 1, 1, 0, VK_NULL_HANDLE, NULL },
+        { ae3d_vk_screen_vert_spv, sizeof(ae3d_vk_screen_vert_spv),
+          ae3d_vk_ssr_frag_spv, sizeof(ae3d_vk_ssr_frag_spv),
+          0, 0, 0, 0, 0, VK_NULL_HANDLE, NULL },
     };
     unsigned i;
 
@@ -2422,6 +2689,7 @@ static int ae3d_vk_create_pass_pipelines(void) {
     builds[5].pass = vk.render_pass; builds[5].out = &vk.water_pipeline[0];
     builds[6].pass = vk.render_pass; builds[6].out = &vk.water_pipeline_blend;
     builds[7].pass = vk.render_pass; builds[7].out = &vk.water_pipeline[1];
+    builds[9].pass = vk.post_pass;   builds[9].out = &vk.post_pipelines[3];
 
     for (i = 0; i < sizeof(builds) / sizeof(builds[0]); i++) {
         VkShaderModule vertex_module = ae3d_vk_shader(builds[i].vert, builds[i].vert_size);
@@ -2794,7 +3062,7 @@ int ae3d_vk_frame_begin(double r, double g, double b, double a) {
     vk.scene_clear[2] = (float)b;
     vk.scene_clear[3] = (float)a;
 
-    vk.post_active = (vk.fxaa || vk.bloom) && vk.screen_quad > 0 && vk.post_texture > 0;
+    vk.post_active = (vk.fxaa || vk.bloom || vk.ssr_enabled) && vk.screen_quad > 0 && vk.post_texture > 0;
     vk.pass_open = 0;
     vk.in_shadow_pass = 0;
 
@@ -2965,6 +3233,26 @@ void ae3d_vk_set_shadows(int on) {
 
 int ae3d_vk_shadows(void) { return vk.shadow_enabled; }
 
+// Turn screen-space reflection on or off. The camera-depth target it samples is
+// built the first time it is turned on, and rebuilt if the swapchain has since
+// been remade at a different size, so a scene that never asks for SSR allocates
+// nothing. The march itself is wired on top of this in a later step; for now
+// this owns the target's lifetime.
+void ae3d_vk_set_ssr(int on) {
+    on = on ? 1 : 0;
+    vk.ssr_enabled = on;
+    if (!vk.ready || !on) return;
+    if (!vk.camdepth_framebuffer ||
+        vk.camdepth_width != (int)vk.extent.width ||
+        vk.camdepth_height != (int)vk.extent.height) {
+        ae3d_vkDeviceWaitIdle(vk.device);
+        ae3d_vk_destroy_camdepth_target();
+        ae3d_vk_create_camdepth_target((int)vk.extent.width, (int)vk.extent.height);
+    }
+}
+
+int ae3d_vk_ssr(void) { return vk.ssr_enabled; }
+
 // The pass leaves the map in shader-read layout, so the scene pass that follows
 // in the same command buffer samples it without a barrier of its own.
 int ae3d_vk_shadow_begin(void) {
@@ -3006,7 +3294,10 @@ int ae3d_vk_shadow_begin(void) {
 
 void ae3d_vk_shadow_draw(int mesh_handle, int instance_handle, int instance_count) {
     VkPipeline pipeline = vk.shadow_pipeline;
-    if (!vk.shadow_pipeline || !vk.in_shadow_pass) return;
+    // Also draws in the camera-depth prepass: it is depth-only from the same
+    // geometry, and its render pass is compatible with the shadow one, so the
+    // shadow depth pipeline is exactly the pipeline it wants.
+    if (!vk.shadow_pipeline || (!vk.in_shadow_pass && !vk.in_camdepth)) return;
     if (mesh_handle > 0 && mesh_handle <= vk.mesh_capacity
         && vk.meshes[mesh_handle - 1].skinned && vk.skinned_shadow_pipeline) {
         pipeline = vk.skinned_shadow_pipeline;
@@ -3037,6 +3328,54 @@ void ae3d_vk_shadow_end(void) {
     ae3d_vkCmdSetScissor(vk.command_buffers[vk.frame], 0, 1, &scissor);
 }
 
+// The camera-space depth prepass. Same shape as the shadow pass -- begin the
+// depth-only pass, draw the casters (with the camera view-projection in the
+// light-space slot the depth shader reads), end -- into the full-size camdepth
+// target the SSR pass samples. Only when SSR is on and the target exists.
+int ae3d_vk_camdepth_begin(void) {
+    VkRenderPassBeginInfo pass;
+    VkClearValue clear;
+    VkViewport viewport;
+    VkRect2D scissor;
+
+    if (!vk.recording || !vk.ssr_enabled || !vk.camdepth_framebuffer) return 0;
+    if (vk.pass_open) return 0;
+
+    memset(&clear, 0, sizeof(clear));
+    clear.depthStencil.depth = 1.0f;
+
+    memset(&pass, 0, sizeof(pass));
+    pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    pass.renderPass = vk.camdepth_pass;
+    pass.framebuffer = vk.camdepth_framebuffer;
+    pass.renderArea.extent = vk.extent;
+    pass.clearValueCount = 1;
+    pass.pClearValues = &clear;
+    ae3d_vkCmdBeginRenderPass(vk.command_buffers[vk.frame], &pass, VK_SUBPASS_CONTENTS_INLINE);
+
+    memset(&viewport, 0, sizeof(viewport));
+    viewport.width = (float)vk.extent.width;
+    viewport.height = (float)vk.extent.height;
+    viewport.maxDepth = 1.0f;
+    ae3d_vkCmdSetViewport(vk.command_buffers[vk.frame], 0, 1, &viewport);
+
+    memset(&scissor, 0, sizeof(scissor));
+    scissor.extent = vk.extent;
+    ae3d_vkCmdSetScissor(vk.command_buffers[vk.frame], 0, 1, &scissor);
+    vk.in_camdepth = 1;
+    vk.pass_open = 1;
+    return 1;
+}
+
+void ae3d_vk_camdepth_end(void) {
+    if (!vk.recording || !vk.in_camdepth) return;
+    ae3d_vkCmdEndRenderPass(vk.command_buffers[vk.frame]);
+    vk.in_camdepth = 0;
+    vk.pass_open = 0;
+    // Viewport and scissor are already the full extent; the scene pass sets its
+    // own besides.
+}
+
 void ae3d_vk_set_post(int fxaa, int bloom, double threshold, double intensity) {
     vk.fxaa = fxaa;
     vk.bloom = bloom;
@@ -3062,11 +3401,114 @@ double ae3d_vk_bloom_intensity(void) { return vk.bloom_intensity; }
 // The sky, the shadow pass and the composites all read the scene program's
 // block. Whichever program the last model selected is still current here, and a
 // composite reading the water block gets nonsense for its edge thresholds.
-static void ae3d_vk_draw_post(void) {
+void ae3d_vk_set_ssr_params(double road_height, double strength) {
+    vk.ssr_road_height = (float)road_height;
+    vk.ssr_strength = (float)strength;
+}
+
+// The SSR composite draw. Its own descriptor set puts the scene colour at
+// binding 1 and the camera depth at binding 2 (where the scene sets keep the
+// shadow map), and it reads the same uniform block as everything else, so the
+// SSR shader gets viewProjection, invViewProjection and the road parameters
+// the frame set. Written every draw because both images are remade on resize.
+static void ae3d_vk_draw_ssr(void) {
+    VkDescriptorSetAllocateInfo alloc;
+    VkDescriptorBufferInfo buffer;
+    VkDescriptorImageInfo scene_img, depth_img, def_img;
+    VkWriteDescriptorSet writes[4];
+    VkDeviceSize offsets[1];
+    ae3d_vk_uniform_ring *ring;
+    ae3d_vk_mesh *mesh;
+    ae3d_vk_texture *scene_tex;
+    VkDescriptorSet set;
+    unsigned slot, dynamic_offset;
+    int frame = (int)vk.frame;
+
+    if (vk.screen_quad <= 0 || vk.screen_quad > vk.mesh_capacity) return;
+    if (!vk.camdepth_view || vk.post_texture <= 0) return;
+    mesh = &vk.meshes[vk.screen_quad - 1];
+    if (!mesh->in_use || mesh->index_count == 0) return;
+    scene_tex = &vk.textures[vk.post_texture - 1];
+    if (!scene_tex->in_use) return;
+
+    if (!vk.ssr_set[frame]) {
+        memset(&alloc, 0, sizeof(alloc));
+        alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        alloc.descriptorPool = vk.descriptor_pool;
+        alloc.descriptorSetCount = 1;
+        alloc.pSetLayouts = &vk.set_layout;
+        if (ae3d_vkAllocateDescriptorSets(vk.device, &alloc, &set) != VK_SUCCESS) return;
+        vk.ssr_set[frame] = set;
+    }
+    set = vk.ssr_set[frame];
+
+    ring = &vk.uniforms[frame];
+    if (ring->used >= ring->capacity) return;
+    slot = ring->used++;
+    dynamic_offset = slot * ring->stride;
+    memcpy(ring->mapped + dynamic_offset, vk.scene[AE3D_VK_PROGRAM_SCENE].bytes, AE3D_VK_SCENE_SIZE);
+
+    memset(&buffer, 0, sizeof(buffer));
+    buffer.buffer = ring->buffer;
+    buffer.offset = 0;
+    buffer.range = AE3D_VK_SCENE_SIZE;
+
+    memset(&scene_img, 0, sizeof(scene_img));
+    scene_img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    scene_img.imageView = scene_tex->view;
+    scene_img.sampler = scene_tex->sampler;
+
+    memset(&depth_img, 0, sizeof(depth_img));
+    depth_img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    depth_img.imageView = vk.camdepth_view;
+    depth_img.sampler = vk.camdepth_sampler;
+
+    memset(&def_img, 0, sizeof(def_img));
+    def_img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    def_img.imageView = vk.textures[vk.default_texture - 1].view;
+    def_img.sampler = vk.textures[vk.default_texture - 1].sampler;
+
+    memset(writes, 0, sizeof(writes));
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = set; writes[0].dstBinding = 0; writes[0].descriptorCount = 1;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    writes[0].pBufferInfo = &buffer;
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet = set; writes[1].dstBinding = 1; writes[1].descriptorCount = 1;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[1].pImageInfo = &scene_img;
+    writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[2].dstSet = set; writes[2].dstBinding = 2; writes[2].descriptorCount = 1;
+    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[2].pImageInfo = &depth_img;
+    writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[3].dstSet = set; writes[3].dstBinding = 3; writes[3].descriptorCount = 1;
+    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[3].pImageInfo = &def_img;
+    ae3d_vkUpdateDescriptorSets(vk.device, 4, writes, 0, NULL);
+
+    if (vk.post_pipelines[3] != vk.bound_pipeline) {
+        ae3d_vkCmdBindPipeline(vk.command_buffers[vk.frame], VK_PIPELINE_BIND_POINT_GRAPHICS, vk.post_pipelines[3]);
+        vk.bound_pipeline = vk.post_pipelines[3];
+        vk.pipeline_binds++;
+    }
+    ae3d_vkCmdBindDescriptorSets(vk.command_buffers[vk.frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                 vk.pipeline_layout, 0, 1, &set, 1, &dynamic_offset);
+    offsets[0] = 0;
+    ae3d_vkCmdBindVertexBuffers(vk.command_buffers[vk.frame], 0, 1, &mesh->vertex_buffer, offsets);
+    ae3d_vkCmdBindVertexBuffers(vk.command_buffers[vk.frame], 1, 1, &vk.identity_instance, offsets);
+    ae3d_vkCmdBindVertexBuffers(vk.command_buffers[vk.frame], 2, 1, &vk.empty_skin, offsets);
+    ae3d_vkCmdBindIndexBuffer(vk.command_buffers[vk.frame], mesh->index_buffer, 0, VK_INDEX_TYPE_UINT32);
+    ae3d_vkCmdDrawIndexed(vk.command_buffers[vk.frame], mesh->index_count, 1, 0, 0, 0);
+    vk.draw_calls++;
+}
+
+// The post uniforms live in the shared scene block, so both the reflective
+// composite and the ordinary one read them; set them once before either draws.
+static void ae3d_vk_setup_post_uniforms(void) {
     float texel_x = vk.extent.width ? 1.0f / (float)vk.extent.width : 0.0f;
     float texel_y = vk.extent.height ? 1.0f / (float)vk.extent.height : 0.0f;
     float texel[2];
-    int index = vk.bloom && vk.post_pipelines[2] ? 2 : (vk.fxaa && vk.post_pipelines[1] ? 1 : 0);
 
     texel[0] = texel_x;
     texel[1] = texel_y;
@@ -3076,9 +3518,17 @@ static void ae3d_vk_draw_post(void) {
     ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_EDGETHRESHOLD, 0.125f);
     ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_EDGETHRESHOLDMIN, 0.0625f);
     ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_SUBPIXELQUALITY, 0.75f);
+    ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_SSRROADHEIGHT, vk.ssr_road_height);
+    ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_SSRSTRENGTH, vk.ssr_strength);
     vk.program = AE3D_VK_PROGRAM_SCENE;
+}
 
-    ae3d_vk_draw_pipeline(vk.post_pipelines[index], vk.screen_quad, vk.post_texture, 0, 1);
+// The ordinary composite: bloom, else fxaa, else a straight copy, reading the
+// given colour source -- the scene directly, or the reflected intermediate when
+// SSR ran a stage before it.
+static void ae3d_vk_draw_composite(int source_texture) {
+    int index = vk.bloom && vk.post_pipelines[2] ? 2 : (vk.fxaa && vk.post_pipelines[1] ? 1 : 0);
+    ae3d_vk_draw_pipeline(vk.post_pipelines[index], vk.screen_quad, source_texture, 0, 1);
 }
 
 int ae3d_vk_frame_end(void) {
@@ -3098,6 +3548,37 @@ int ae3d_vk_frame_end(void) {
         VkRenderPassBeginInfo pass;
         VkViewport viewport;
         VkRect2D scissor;
+        // The reflective stage runs when SSR is on and its off-screen targets
+        // are built. It mirrors the scene into the intermediate; the ordinary
+        // composite then reads that instead of the scene colour, so the bloom
+        // it does picks up the mirrored lamps as well.
+        int ssr_now = vk.ssr_enabled && vk.post_pipelines[3] &&
+                      vk.ssr_framebuffer && vk.camdepth_framebuffer &&
+                      vk.ssr_reflect_texture > 0;
+
+        memset(&viewport, 0, sizeof(viewport));
+        viewport.width = (float)vk.extent.width;
+        viewport.height = (float)vk.extent.height;
+        viewport.maxDepth = 1.0f;
+        memset(&scissor, 0, sizeof(scissor));
+        scissor.extent = vk.extent;
+
+        ae3d_vk_setup_post_uniforms();
+
+        if (ssr_now) {
+            memset(&pass, 0, sizeof(pass));
+            pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            pass.renderPass = vk.ssr_pass;
+            pass.framebuffer = vk.ssr_framebuffer;
+            pass.renderArea.extent = vk.extent;
+            ae3d_vkCmdBeginRenderPass(vk.command_buffers[vk.frame], &pass, VK_SUBPASS_CONTENTS_INLINE);
+            vk.pass_open = 1;
+            ae3d_vkCmdSetViewport(vk.command_buffers[vk.frame], 0, 1, &viewport);
+            ae3d_vkCmdSetScissor(vk.command_buffers[vk.frame], 0, 1, &scissor);
+            ae3d_vk_draw_ssr();
+            ae3d_vkCmdEndRenderPass(vk.command_buffers[vk.frame]);
+            vk.pass_open = 0;
+        }
 
         memset(&pass, 0, sizeof(pass));
         pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -3106,18 +3587,9 @@ int ae3d_vk_frame_end(void) {
         pass.renderArea.extent = vk.extent;
         ae3d_vkCmdBeginRenderPass(vk.command_buffers[vk.frame], &pass, VK_SUBPASS_CONTENTS_INLINE);
         vk.pass_open = 1;
-
-        memset(&viewport, 0, sizeof(viewport));
-        viewport.width = (float)vk.extent.width;
-        viewport.height = (float)vk.extent.height;
-        viewport.maxDepth = 1.0f;
         ae3d_vkCmdSetViewport(vk.command_buffers[vk.frame], 0, 1, &viewport);
-
-        memset(&scissor, 0, sizeof(scissor));
-        scissor.extent = vk.extent;
         ae3d_vkCmdSetScissor(vk.command_buffers[vk.frame], 0, 1, &scissor);
-
-        ae3d_vk_draw_post();
+        ae3d_vk_draw_composite(ssr_now ? vk.ssr_reflect_texture : vk.post_texture);
         ae3d_vkCmdEndRenderPass(vk.command_buffers[vk.frame]);
         vk.pass_open = 0;
     }
@@ -3681,7 +4153,9 @@ void ae3d_vk_shutdown(void) {
     if (vk.render_pass) ae3d_vkDestroyRenderPass(vk.device, vk.render_pass, NULL);
     if (vk.scene_pass) ae3d_vkDestroyRenderPass(vk.device, vk.scene_pass, NULL);
     if (vk.post_pass) ae3d_vkDestroyRenderPass(vk.device, vk.post_pass, NULL);
+    if (vk.ssr_pass) ae3d_vkDestroyRenderPass(vk.device, vk.ssr_pass, NULL);
     if (vk.shadow_pass) ae3d_vkDestroyRenderPass(vk.device, vk.shadow_pass, NULL);
+    if (vk.camdepth_pass) ae3d_vkDestroyRenderPass(vk.device, vk.camdepth_pass, NULL);
     if (vk.shadow_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.shadow_pipeline, NULL);
     ae3d_vk_destroy_shadow_target();
     if (vk.device) ae3d_vkDestroyDevice(vk.device, NULL);

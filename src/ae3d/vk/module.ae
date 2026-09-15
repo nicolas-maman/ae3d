@@ -25,7 +25,7 @@ exports (
     renderer_set_normal_strength, renderer_set_occlusion_strength, renderer_material_texture_size,
     renderer_load_texture, renderer_release_texture, renderer_sample_count, renderer_set_post,
     renderer_set_bloom_intensity, renderer_bloom_intensity,
-    renderer_set_shadows, renderer_shadows, renderer_add_light, renderer_remove_light,
+    renderer_set_shadows, renderer_shadows, renderer_set_ssr, renderer_ssr, renderer_set_ssr_params, renderer_add_light, renderer_remove_light,
     renderer_set_fog, renderer_fog, renderer_set_shadow_distance, renderer_shadow_distance,
     skybox_create, skybox_free,
     offscreen_pixels, offscreen_width, offscreen_height,
@@ -58,6 +58,8 @@ extern ae3d_vk_scene_set_mat4(offset: int, m: ptr)
 extern ae3d_vk_scene_set_mat4v(offset: int, count: int, values: ptr)
 extern ae3d_vk_set_normal_map(handle: int)
 extern ae3d_vk_scene_set_clip_mat4(offset: int, m: ptr)
+extern ae3d_vk_scene_set_inv_viewproj(offset: int, m: ptr)
+extern ae3d_vk_set_ssr_params(road_height: float, strength: float)
 extern ae3d_vk_set_blend(on: int)
 extern ae3d_vk_draw(mesh: int, texture: int, instances: int, instance_count: int)
 extern ae3d_vk_draw_sky(mesh: int, texture: int)
@@ -71,6 +73,10 @@ const SHADOW_SIZE = 2048
 extern ae3d_vk_shadow_begin() -> int
 extern ae3d_vk_shadow_draw(mesh: int, instances: int, instance_count: int)
 extern ae3d_vk_shadow_end()
+extern ae3d_vk_camdepth_begin() -> int
+extern ae3d_vk_camdepth_end()
+extern ae3d_vk_set_ssr(on: int)
+extern ae3d_vk_ssr() -> int
 extern ae3d_vk_set_post(fxaa: int, bloom: int, threshold: float, intensity: float)
 extern ae3d_vk_set_bloom_intensity(intensity: float)
 extern ae3d_vk_bloom_intensity() -> float
@@ -382,6 +388,60 @@ renderer_set_shadows(r: *VKRenderer, on: bool) {
 
 renderer_shadows(r: *VKRenderer) -> bool {
     return ae3d_vk_shadows() == 1
+}
+
+renderer_set_ssr(r: *VKRenderer, on: bool) {
+    flag = 0
+    if on { flag = 1 }
+    ae3d_vk_set_ssr(flag)
+}
+
+renderer_ssr(r: *VKRenderer) -> bool { return ae3d_vk_ssr() == 1 }
+
+renderer_set_ssr_params(r: *VKRenderer, road_height: float, strength: float) {
+    ae3d_vk_set_ssr_params(road_height, strength)
+}
+
+// The camera-space depth prepass, when screen-space reflection is on. Depth of
+// all visible geometry from the camera, into the target the SSR pass samples.
+// The depth shader transforms by the light-space slot, so the camera's own
+// view-projection goes there for the length of the pass and the light's is put
+// back after, since the scene pass samples the shadow map through it.
+render_camdepth_pass(r: *VKRenderer, cam: *Camera) {
+    if ae3d_vk_ssr() != 1 { return }
+    ae3d_vk_set_program(core.SHADER_CUSTOM)
+    vp = core.camera_view_projection(cam)
+    ae3d_vk_scene_set_clip_mat4(vkscene.OFF_LIGHTSPACEMATRIX, &vp)
+    if ae3d_vk_camdepth_begin() != 1 {
+        ae3d_vk_scene_set_clip_mat4(vkscene.OFF_LIGHTSPACEMATRIX, &r.shadow_space)
+        return
+    }
+    count = list.size(r.models)
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        if m != null && m.visible && m.vbo != 0 {
+            core.model_sync_transform(m)
+            // The reflection marches against opaque depth, so a transparent
+            // surface must not write a false occluder into it; and the pass is
+            // culled against the camera frustum, so it carries the visible set
+            // rather than the whole street -- the depth off screen is never
+            // sampled. Both are what the scene pass already does.
+            alpha = 1.0
+            if m.material != null { alpha = m.material.alpha }
+            in_view = true
+            if core.frustum_culling() &&
+               !core.frustum_sphere_visible(r.frustum, m.bounding_center, m.bounding_radius) {
+                in_view = false
+            }
+            if alpha >= 0.99 && in_view {
+                shadow_draw_model(m)
+            }
+        }
+        i = i + 1
+    }
+    ae3d_vk_camdepth_end()
+    ae3d_vk_scene_set_clip_mat4(vkscene.OFF_LIGHTSPACEMATRIX, &r.shadow_space)
 }
 
 // The same box the OpenGL backend builds, from the same scene, so the two
@@ -1108,6 +1168,17 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     work_started = platform.time()
 
     render_shadow_pass(r, active_light, cam)
+    // Filled from this camera every frame rather than cached behind a flag. The
+    // flag was one boolean for the whole program while the frustum it guarded
+    // belongs to a renderer, so a second camera drawing after a first was culled
+    // against the first camera's frustum: the flag was already clear and nothing
+    // refilled. A minimap, a reflection or a second viewport is exactly that.
+    // Six planes out of one matrix multiply is not worth a cache. Filled before
+    // the depth prepass so that pass culls against the same planes the scene
+    // pass does, and draws the visible street rather than every model in it.
+    if core.frustum_culling() { core.camera_fill_frustum(cam, r.frustum) }
+
+    render_camdepth_pass(r, cam)
     set_frame_uniforms(r, active_light, cam)
 
     culling = 0
@@ -1118,20 +1189,14 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     view_projection = core.camera_view_projection(cam)
     programs = ae3d_vk_program_count()
     i = 0
+    ssr_on = ae3d_vk_ssr() == 1
     while i < programs {
         ae3d_vk_set_program(i)
         ae3d_vk_scene_set_clip_mat4(vkscene.OFF_VIEWPROJECTION, &view_projection)
+        if ssr_on { ae3d_vk_scene_set_inv_viewproj(vkscene.OFF_INVVIEWPROJECTION, &view_projection) }
         i = i + 1
     }
     ae3d_vk_set_program(core.SHADER_CUSTOM)
-
-    // Filled from this camera every frame rather than cached behind a flag. The
-    // flag was one boolean for the whole program while the frustum it guarded
-    // belongs to a renderer, so a second camera drawing after a first was culled
-    // against the first camera's frustum: the flag was already clear and nothing
-    // refilled. A minimap, a reflection or a second viewport is exactly that.
-    // Six planes out of one matrix multiply is not worth a cache.
-    if core.frustum_culling() { core.camera_fill_frustum(cam, r.frustum) }
 
     draw_opaque(r)
 

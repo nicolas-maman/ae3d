@@ -98,10 +98,14 @@ OCCLUSION_VISIBLE = 0.03
 # changes today.
 # The scene is the engine's benchmark, so its draw count is the load it exists
 # to carry, not an accident to be trimmed: a terrace with a roofline, downpipes
-# and a dressed pavement draws in the low hundreds and is meant to. This is a
-# ceiling against a scene that has quietly gone wrong -- a texture bound per
-# face, a merge that stopped merging -- while tools/ae3d_bench.ae holds the
-# exact figure and fails the build on a single draw more than last recorded.
+# and a dressed pavement draws in the low hundreds and is meant to. On Vulkan
+# the wet road adds a camera-depth prepass for its reflection, which redraws the
+# frustum-culled opaque set once more -- a real, bounded cost the ceiling
+# leaves room for, not the whole street redrawn. This is a ceiling against a
+# scene that has quietly gone wrong -- a texture bound per face, a merge that
+# stopped merging, a prepass that stopped culling -- while tools/ae3d_bench.ae
+# holds the exact figure and fails the build on a single draw more than last
+# recorded.
 MAX_DRAWS = 320
 MAX_TRIANGLES = 60000
 MAX_PROGRAM_CHANGES = 12
@@ -169,6 +173,21 @@ POOL_DIP_FRACTION = 0.6     # the dark between two pools falls to at most this o
 # ~1.85x; this floor sits well inside that, and a matte road cannot reach it.
 REFLECTION_ON = 0.8         # the reflectivity the wet road is measured at
 REFLECTION_LAMP_LIFT = 1.4  # the road carries at least this many times as many bright cells wet as dry
+# Screen-space reflection mirrors the on-screen geometry (lit windows, lamps)
+# onto the wet road: it only ever adds a mirrored light, never darkens, so with
+# it on the road carries more bright cells than without. Measured on Vulkan at
+# strength 1.5 the road gains ~30% more bright cells; the floor sits under that.
+# Vulkan-only for now (the OpenGL path is a later step), so it is measured only
+# where the backend is Vulkan. Bloom is held off across the A/B so the reading
+# is the reflection's own contribution, not the composite it replaces.
+SSR_ROAD_HEIGHT = 0.115     # the reflective plane, matching the scene's road
+SSR_STRENGTH = 1.5          # the reflection strength the standard measures at
+SSR_LAMP_LIFT = 1.15        # SSR adds at least this many times as many road bright cells
+# The reflective pass writes into an intermediate the bloom pass then reads, so
+# the mirrored lamps bloom with the real ones rather than the reflection
+# replacing the bloom. Proven by holding SSR on and toggling bloom: if bloom
+# were replaced it would not change the frame, so bloom on must lift the light.
+SSR_BLOOM_COEXIST_LIFT = 1.05  # with SSR on, bloom lifts total light at least this much
 # Held still, the frame must not move. Two frames drawn of the same paused pose
 # should be the same frame; a cell that drifts between them is temporal shimmer
 # -- an unseeded dither, a jittered ray march with no accumulation, a readback
@@ -1020,14 +1039,21 @@ def wet_road_reflection(engine, at=2.2):
     surface -- and the bright cells in the road band are counted, then turned
     back on and counted again. With it on the lamps return, so the road carries
     far more bright cells than the dry, matte version. Both are numbers off the
-    grid; the road is left wet, the way the scene set it.
+    grid; the road is left wet, the way the scene set it. Screen-space reflection
+    is held off across the toggle, since it lights the road on both sides and
+    would otherwise measure the wrong feature; it is restored after.
     """
     print("\n== the wet road reflects the lamps ==")
     engine("anim.set", time=at)
+    was_ssr = engine("frame.stats").get("render", {}).get("ssr", False)
+    if was_ssr:
+        engine("render.set", ssr=False)
     models = engine("scene.tree", detail=True)["models"]
     wet = [i for i, m in enumerate(models)
            if m["name"] == "Street_Road" or m["name"] == "Street_Ground"]
     if not wet:
+        if was_ssr:
+            engine("render.set", ssr=True)
         check("the scene has a wet road to measure", False, "no road or ground model")
         return
 
@@ -1044,12 +1070,92 @@ def wet_road_reflection(engine, at=2.2):
     dry = road_bright()
     set_reflectivity(REFLECTION_ON)
     wet_count = road_bright()
+    if was_ssr:
+        engine("render.set", ssr=True)
 
     print("  the road carries %d bright cells wet, %d dry" % (wet_count, dry))
     check("the wet road reflects the lamps",
           wet_count >= dry * REFLECTION_LAMP_LIFT,
           "%d bright cells with the reflection on against %d off (%.2fx, wanted %.2fx)"
           % (wet_count, dry, wet_count / float(max(dry, 1)), REFLECTION_LAMP_LIFT))
+
+
+def wet_road_ssr(engine, at=2.2):
+    """That screen-space reflection mirrors the scene's geometry onto the road.
+
+    Where the analytic reflection mirrors the lights, SSR mirrors what is drawn
+    -- the lit windows and lamp posts above the road come back on the wet
+    tarmac. It is additive: it only adds a mirrored light and never darkens, so
+    with it on the road carries more bright cells than without. It composites
+    before the bloom rather than instead of it, so bloom is held off across the
+    toggle only to read the reflection's own contribution cleanly. Vulkan-only
+    for now, so it runs only where the backend is Vulkan. The scene's own SSR
+    setting is captured and restored, so this reads the same whatever the demo
+    left it at.
+    """
+    engine("anim.set", time=at)
+    stats = engine("frame.stats")
+    if stats.get("backend") != "vulkan":
+        return
+    print("\n== the wet road mirrors the scene (SSR) ==")
+    was_bloom = stats.get("render", {}).get("bloom_intensity", 0.0)
+    was_ssr = stats.get("render", {}).get("ssr", False)
+
+    def road_bright():
+        grid = engine("frame.grid", columns=64, rows=48)["cells"]
+        band = [c for row in grid[int(len(grid) * 0.60):] for c in row]
+        return sum(1 for c in band if _lum(c) >= LIGHT_SOURCE_LUM)
+
+    engine("render.set", ssr=False, bloom_intensity=0.0)
+    off = road_bright()
+    engine("render.set", ssr=True, ssr_road_height=SSR_ROAD_HEIGHT, ssr_strength=SSR_STRENGTH)
+    on = road_bright()
+    # Leave it exactly as the scene had it: SSR and bloom back to their defaults.
+    engine("render.set", ssr=was_ssr, bloom_intensity=was_bloom)
+
+    print("  the road carries %d bright cells with SSR mirroring the scene, %d without" % (on, off))
+    check("screen-space reflection mirrors the scene onto the wet road",
+          on >= off * SSR_LAMP_LIFT,
+          "%d bright cells with SSR on against %d off (%.2fx, wanted %.2fx)"
+          % (on, off, on / float(max(off, 1)), SSR_LAMP_LIFT))
+
+
+def ssr_bloom_coexist(engine, at=2.2):
+    """That bloom composites on top of the reflection rather than replacing it.
+
+    The reflective pass writes into an intermediate target the bloom pass then
+    reads, so the mirrored lamps bloom along with the real ones. Were bloom
+    replaced whenever SSR is on -- the earlier behaviour -- toggling bloom with
+    SSR held on would change nothing. So with SSR on, the frame must carry more
+    light with bloom than without: proof the two passes run in sequence. The
+    scene's SSR and bloom settings are captured and restored. Vulkan-only.
+    """
+    engine("anim.set", time=at)
+    stats = engine("frame.stats")
+    if stats.get("backend") != "vulkan":
+        return
+    print("\n== SSR and bloom coexist ==")
+    was_bloom = stats.get("render", {}).get("bloom_intensity", 0.0)
+    was_ssr = stats.get("render", {}).get("ssr", False)
+    lit_bloom = was_bloom if was_bloom > 0.0 else 0.85
+
+    def frame_light():
+        grid = engine("frame.grid", columns=64, rows=36)["cells"]
+        return sum(_lum(c) for row in grid for c in row)
+
+    engine("render.set", ssr=True, ssr_road_height=SSR_ROAD_HEIGHT, ssr_strength=SSR_STRENGTH,
+           bloom_intensity=0.0)
+    without = frame_light()
+    engine("render.set", bloom_intensity=lit_bloom)
+    withb = frame_light()
+    engine("render.set", ssr=was_ssr, bloom_intensity=was_bloom)
+
+    print("  with the reflection on, the frame carries %.1f of light with bloom, %.1f without"
+          % (withb, without))
+    check("bloom composites over the reflection (the two passes coexist)",
+          withb >= without * SSR_BLOOM_COEXIST_LIFT,
+          "%.1f with bloom against %.1f without (%.2fx, wanted %.2fx)"
+          % (withb, without, withb / max(without, 1e-6), SSR_BLOOM_COEXIST_LIFT))
 
 
 def bloom(engine, at=2.2):
@@ -1224,6 +1330,8 @@ def main(argv):
         lighting(engine)
         light_pools(engine)
         wet_road_reflection(engine)
+        wet_road_ssr(engine)
+        ssr_bloom_coexist(engine)
         bloom(engine)
         shadows(engine)
         if args.walks:

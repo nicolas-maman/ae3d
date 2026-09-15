@@ -371,6 +371,7 @@ AUXILIARY = [
     ("passthrough_vk.frag", "FRAGMENT_PASSTHROUGH", "frag", ["screenTexture"], SCREEN_OUT, []),
     ("fxaa_vk.frag", "FRAGMENT_FXAA", "frag", ["screenTexture"], SCREEN_OUT, []),
     ("bloom_vk.frag", "FRAGMENT_BLOOM", "frag", ["screenTexture"], SCREEN_OUT, []),
+    ("ssr_vk.frag", "FRAGMENT_SSR", "frag", ["screenTexture", "depthTexture"], SCREEN_OUT, []),
     ("water_vk.vert", "VERTEX_WATER", "vert", [], [], WATER_OUT),
     ("water_vk.frag", "FRAGMENT_WATER", "frag", [], WATER_OUT, []),
 ]

@@ -523,6 +523,13 @@ stats_result(c: *Context) -> ptr {
         bloom = gl.renderer_bloom_intensity(c.gl_renderer as *GLRenderer)
     }
     json.object_set_raw(render, "bloom_intensity", json.num(bloom))
+    // Screen-space reflection is a Vulkan-only pass; on the OpenGL renderer it
+    // is never on, so the flag reads false there rather than being absent.
+    reflecting = false
+    if c.vk_renderer != null {
+        reflecting = vk.renderer_ssr(c.vk_renderer as *VKRenderer)
+    }
+    json.object_set_raw(render, "ssr", json.boolean(reflecting))
     json.object_set_raw(out, "render", render)
     return out
 }
@@ -1606,7 +1613,11 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
         shading = json.object_get_raw(request, "occlusion_strength")
         blooming = json.object_get_raw(request, "bloom_intensity")
         shadowing = json.object_get_raw(request, "shadows")
-        if node == null && shading == null && blooming == null && shadowing == null {
+        reflecting = json.object_get_raw(request, "ssr")
+        ssr_road = json.object_get_raw(request, "ssr_road_height")
+        ssr_str = json.object_get_raw(request, "ssr_strength")
+        if node == null && shading == null && blooming == null && shadowing == null &&
+           reflecting == null && ssr_road == null && ssr_str == null {
             fail(id, "render.set needs something to set")
             return false
         }
@@ -1650,6 +1661,26 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
                 vk.renderer_set_shadows(c.vk_renderer as *VKRenderer, on)
             }
             json.object_set_raw(out, "shadows", json.boolean(on))
+        }
+        // Screen-space reflection lives on the Vulkan backend (the OpenGL path
+        // is a later step), so these apply there and are a no-op on OpenGL.
+        if ssr_road != null || ssr_str != null {
+            height = 0.0
+            if ssr_road != null { height = json.get_number(ssr_road) }
+            strength = 0.6
+            if ssr_str != null { strength = json.get_number(ssr_str) }
+            if c.vk_renderer != null {
+                vk.renderer_set_ssr_params(c.vk_renderer as *VKRenderer, height, strength)
+            }
+            json.object_set_raw(out, "ssr_road_height", json.num(height))
+            json.object_set_raw(out, "ssr_strength", json.num(strength))
+        }
+        if reflecting != null {
+            on = json.get_bool(reflecting) == 1
+            if c.vk_renderer != null {
+                vk.renderer_set_ssr(c.vk_renderer as *VKRenderer, on)
+            }
+            json.object_set_raw(out, "ssr", json.boolean(on))
         }
         answer(id, out)
         return false
