@@ -1,0 +1,110 @@
+// A horde of the real zombie: the skinned figure from zombie_street, baked once
+// into a pose bank and then an ECS crowd of hundreds of thousands, each an
+// entity, flowing and spreading as a horde and drawn in one instanced-skinned
+// call. This is the crowd-skinning demo (#271); it grows across a few commits.
+//
+// Stage one, here: load the zombie -- its skeleton and its walk -- and bake the
+// walk into a pose bank the whole crowd will share. The ECS crowd, the horde
+// behaviour and the draw come next.
+
+import std.list
+import ae3d.core
+import ae3d.anim
+import ae3d.skin
+import ae3d.assets
+import ae3d.crowd
+
+const MANIFEST = "resources/blender/zombie_street/manifest.json"
+const FRAMES = 24        // poses baked across the walk; the crowd samples between them
+
+entry_named(m: *Manifest, name: string) -> *Entry {
+    count = assets.manifest_count(m)
+    i = 0
+    while i < count {
+        entry = assets.manifest_entry(m, i)
+        if assets.entry_object(entry) == name { return entry }
+        i = i + 1
+    }
+    return null
+}
+
+// Load the zombie's skeleton and walk and bake the walk into a pose bank the
+// whole crowd shares. The bones' clips are bound into a registry and driven
+// exactly the way the live figure is, so a baked pose is a pose the zombie
+// strikes. The skeleton is only needed to drive the bake, so it and its bones
+// are freed here; the bank is what the crowd keeps. Returns null on failure.
+bake_zombie() -> ptr {
+    m = assets.manifest_load(MANIFEST)
+    if m == null {
+        println("zombie_horde: ${assets.last_error()}")
+        println("zombie_horde: run ./scripts/export_assets.sh to build the assets")
+        return null
+    }
+    entry = entry_named(m, "Zombie_Body")
+    if entry == null {
+        println("zombie_horde: the export has no Zombie_Body")
+        assets.manifest_free(m)
+        return null
+    }
+
+    bones = assets.entry_load_skeleton(m, entry)
+    if bones == null {
+        println("zombie_horde: ${assets.last_error()}")
+        assets.manifest_free(m)
+        return null
+    }
+    skel = skin.skeleton_new()
+    i = 0
+    while i < list.size(bones) {
+        skin.skeleton_add(skel, list.get_raw(bones, i) as *Model)
+        i = i + 1
+    }
+    skin.skeleton_bind(skel)
+
+    clips = assets.entry_load_bone_clips(m, entry)
+    reg = anim.registry_new()
+    duration = 0.0
+    i = 0
+    while clips != null && i < list.size(clips) {
+        clip = list.get_raw(clips, i) as *Clip
+        index = skin.skeleton_find(skel, anim.clip_name(clip))
+        if index >= 0 {
+            anim.registry_add(reg, anim.clip_name(clip), anim.player_new(clip),
+                              skin.skeleton_bone(skel, index))
+            d = anim.clip_duration(clip)
+            if d > duration { duration = d }
+        }
+        i = i + 1
+    }
+    if clips != null { list.free(clips) }
+    if duration <= 0.0 { duration = 1.0 }
+
+    bank = crowd.posebank_bake(reg, skel, FRAMES, duration)
+    println("zombie_horde: ${skin.skeleton_count(skel)} bones, ${crowd.posebank_frames(bank)} poses baked over ${duration}s of walk")
+
+    // Everything but the bank was only needed to drive the bake.
+    anim.registry_free(reg)
+    skin.skeleton_free(skel)
+    i = 0
+    while i < list.size(bones) {
+        core.model_free(list.get_raw(bones, i) as *Model)
+        i = i + 1
+    }
+    list.free(bones)
+    assets.manifest_free(m)
+    return bank
+}
+
+main() {
+    bank = bake_zombie()
+    if bank == null {
+        println("zombie_horde: could not bake the zombie")
+        return
+    }
+
+    // Stage one done: the zombie's walk is a pose bank the crowd will sample.
+    // The ECS crowd, the horde behaviour and the instanced-skinned draw build
+    // on this in the next commits.
+    println("zombie_horde: pose bank ready (${crowd.posebank_bones(bank)} bones x ${crowd.posebank_frames(bank)} frames)")
+    crowd.posebank_free(bank)
+}
