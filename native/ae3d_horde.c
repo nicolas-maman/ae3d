@@ -275,8 +275,12 @@ void ae3d_horde_separate(void *handle, double *pos, double *vel, int n,
         }
     }
 
-    /* Scatter the accumulated push back to each entity's velocity. */
-    for (p = 0; p < (long long)n; p++) {
+    /* Scatter the accumulated push back to each entity's velocity. Only the
+     * packed entities are walked -- off[cells] of them, which the per-cell cap
+     * holds below n when cells overflow. Running to n instead read the
+     * uninitialised tail of pidx and wrote the push to a garbage entity index,
+     * an out-of-bounds store that crashed under a dense crowd. */
+    for (p = 0; p < g->off[cells]; p++) {
         long long self = g->pidx[p];
         vel[self * 3] += g->pux[p] * strength;
         vel[self * 3 + 1] += g->puy[p] * strength;
