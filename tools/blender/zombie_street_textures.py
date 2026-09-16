@@ -286,16 +286,41 @@ def paving(size=1024, seed=53):
 
 
 def skin(size=1024, seed=71):
-    """Mottled, bruised, and not well."""
+    """Dead skin: pale and sickly, not green paint.
+
+    The old tile was a dark olive with a mottle so faint and so broad that
+    nothing read at any distance -- the figure was a flat green shape, and
+    the per-zombie tint on top made it a muddy one. Dead skin is PALE, a
+    grey-green drained of blood, and what makes it read as skin is detail at
+    several scales: broad blotches of grey-purple bruising where the blood
+    has pooled, patches gone dark with rot, a lace of thin dark veins, and a
+    fine grain of pores over the lot. The pale base leaves the tint room to
+    make one zombie greener, one greyer, one yellower.
+    """
     rng = random.Random(seed)
-    blotch = _noise(rng, size, 4, 3)
-    veins = _noise(rng, size, 5, 6)
-    rot = numpy.clip((blotch - 0.5) * 2.0, 0.0, 1.0)
-    rgb = _tint((0.21, 0.25, 0.17), (0.12, 0.15, 0.10), rot)
-    bruise = numpy.clip((veins - 0.62) * 3.0, 0.0, 1.0)
-    rgb = rgb * (1.0 - bruise[:, :, None] * 0.6) + \
-        numpy.array((0.30, 0.16, 0.20), dtype=numpy.float32)[None, None, :] * \
-        bruise[:, :, None] * 0.6
+    blotch = _noise(rng, size, 4, 3)      # broad: bruising and rot
+    mottle = _noise(rng, size, 5, 12)     # mid: uneven patches
+    vein = _noise(rng, size, 4, 24)       # ridge source for the veins
+    pore = _noise(rng, size, 3, 64)       # fine grain
+
+    base = numpy.array((0.46, 0.48, 0.39), dtype=numpy.float32)
+    rgb = numpy.ones((size, size, 3), dtype=numpy.float32) * base[None, None, :]
+    rgb *= (0.80 + mottle[:, :, None] * 0.40)
+
+    # Bruising: grey-purple where blood has settled.
+    bruise = numpy.clip((blotch - 0.54) * 3.2, 0.0, 1.0) * 0.55
+    rgb = rgb * (1.0 - bruise[:, :, None]) + \
+        numpy.array((0.34, 0.25, 0.34), dtype=numpy.float32)[None, None, :] * bruise[:, :, None]
+    # Rot: gone dark and greenish where the tissue has broken down.
+    rot = numpy.clip((0.42 - blotch) * 3.2, 0.0, 1.0) * 0.6
+    rgb = rgb * (1.0 - rot[:, :, None]) + \
+        numpy.array((0.15, 0.18, 0.11), dtype=numpy.float32)[None, None, :] * rot[:, :, None]
+    # Veins: the contour lines of a noise field are thin, branching and
+    # closed -- the shape veins have.
+    lines = numpy.clip(1.0 - numpy.abs(vein - 0.5) / 0.022, 0.0, 1.0) * 0.42
+    rgb *= (1.0 - lines[:, :, None])
+    # Pores.
+    rgb *= (0.90 + pore[:, :, None] * 0.20)
     return _image("ZombieSkin", size, _rgba(rgb))
 
 
