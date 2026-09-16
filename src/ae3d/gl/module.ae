@@ -179,6 +179,9 @@ struct ProgramSlots {
     fog_enabled: int
     shadow_direction: int
     shadow_texel_world: int
+    enable_shadows: int
+    shadow_intensity: int
+    shadow_softness: int
     fog_start: int
     fog_end: int
     fog_color: int
@@ -488,6 +491,9 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
     s.caustics_time = ae3d_gl_uniform_location(program, "causticsTime")
     s.shadow_direction = ae3d_gl_uniform_location(program, "shadowDirection")
     s.shadow_texel_world = ae3d_gl_uniform_location(program, "shadowTexelWorld")
+    s.enable_shadows = ae3d_gl_uniform_location(program, "enableShadows")
+    s.shadow_intensity = ae3d_gl_uniform_location(program, "shadowIntensity")
+    s.shadow_softness = ae3d_gl_uniform_location(program, "shadowSoftness")
     s.fog_enabled = ae3d_gl_uniform_location(program, "enableFog")
     s.fog_start = ae3d_gl_uniform_location(program, "fogStart")
     s.fog_end = ae3d_gl_uniform_location(program, "fogEnd")
@@ -2147,6 +2153,15 @@ bind_shadow_map(r: *GLRenderer, slots: *ProgramSlots) {
         return
     }
     ae3d_gl_uniform_int(slots.has_shadow_map, 1)
+    // Turn the shadow term on with the map. The fragment shader gates it behind
+    // enableShadows, and only the rendering.Config path and the water module
+    // ever set that -- so an engine-API scene (its models made straight from
+    // core) bound a shadow map the shader then ignored, and nothing cast a
+    // shadow. Default it on, at a readable strength, whenever a real map is
+    // bound; a model that wants no shadow still overrides these per draw.
+    ae3d_gl_uniform_int(slots.enable_shadows, 1)
+    ae3d_gl_uniform_float(slots.shadow_intensity, 0.32)
+    ae3d_gl_uniform_float(slots.shadow_softness, 0.35)
     ae3d_gl_uniform_mat4(slots.light_space, &r.shadow_space)
     ae3d_gl_uniform_vec3(slots.shadow_direction, r.shadow_direction.x,
                          r.shadow_direction.y, r.shadow_direction.z)
