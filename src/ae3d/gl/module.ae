@@ -2028,6 +2028,12 @@ apply_transparency(r: *GLRenderer, transparent: bool) {
 
 draw(r: *GLRenderer, m: *Model, slots: *ProgramSlots, count: int, byte_offset: int) {
     if count <= 0 { return }
+    // An instanced model with nothing active draws nothing. It used to fall
+    // through to the plain branch and draw one raw copy of the mesh at the
+    // origin -- unposed, untinted -- so a crowd tier that emptied left a
+    // bind-pose ghost standing at (0,0,0) that appeared and vanished as the
+    // tier filled and emptied.
+    if m.is_instanced && core.model_instance_count(m) <= 0 { return }
     if m.is_instanced && core.model_instance_count(m) > 0 {
         if m.instances_updated {
             m.instance_vbo_capacity = ae3d_gl_update_instances(m.instances, m.instance_vbo,

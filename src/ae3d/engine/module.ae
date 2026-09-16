@@ -188,11 +188,36 @@ snapshot_path(e: *Engine) -> string {
     return core.text(os.getenv("AE3D_SNAPSHOT"))
 }
 
+// AE3D_SNAPSHOT_BURST=N writes the last N frames instead of only the last
+// one, each to the snapshot path with its frame number spliced in before the
+// extension (scene.png -> scene_0057.png). One frame cannot show motion: a
+// walk cycle, a jitter, a limb that snaps between poses only appear across
+// consecutive frames laid side by side.
+snapshot_burst(e: *Engine) -> int {
+    n = core.env_int("AE3D_SNAPSHOT_BURST", 1)
+    if n < 1 { n = 1 }
+    return n
+}
+
+// The path a burst frame is written to: the snapshot path with _NNNN before
+// its extension. A single snapshot keeps the path as given.
+burst_path(path: string, frame: int) -> string {
+    n = string.length(path)
+    if n > 4 && string.substring(path, n - 4, n) == ".png" {
+        stem = string.substring(path, 0, n - 4)
+        num = "${frame}"
+        while string.length(num) < 4 { num = "0${num}" }
+        return "${stem}_${num}.png"
+    }
+    return "${path}_${frame}"
+}
+
 // Taken between the last draw and the buffer swap, which is the only moment a
 // windowed program's finished frame is still readable.
 write_snapshot(e: *Engine) {
     path = snapshot_path(e)
     if path == "" { return }
+    if snapshot_burst(e) > 1 { path = burst_path(path, e.frame_count + 1) }
     if e.api == platform.API_VULKAN {
         if !vk.snapshot(path) {
             println("ae3d: could not capture the Vulkan frame for ${path}")
@@ -814,7 +839,7 @@ engine_loop(e: *Engine) {
 
         // Before the swap, because after it the back buffer holds nothing this
         // frame put there.
-        if e.frame_limit > 0 && e.frame_count + 1 >= e.frame_limit {
+        if e.frame_limit > 0 && e.frame_count + 1 > e.frame_limit - snapshot_burst(e) {
             write_snapshot(e)
         }
         if e.agent_on {
