@@ -210,14 +210,17 @@ setup_crowd(model: *Model, cell: float) -> int {
 }
 
 // The small street clutter -- bins, crates, sacks, bollards, benches. There are
-// far more of these than buildings, and the horde hides them anyway, so a tiled
-// city drops them: fewer models a block means the renderer can afford more
-// blocks, which is what spreads the crowd thin.
+// far more of these than buildings, so a city drawn for a horde of hundreds of
+// thousands drops them: fewer models a block means the renderer can afford
+// more blocks. At the inspectable count they cost nothing, and they are what
+// makes a street a street rather than two rows of walls with a road between:
+// kept by default, stripped with AE3D_NOPROPS=1 when the count needs it.
 is_prop(name: string) -> bool {
     return string.contains(name, "Bin") == 1 || string.contains(name, "Crate") == 1 ||
            string.contains(name, "Sack") == 1 || string.contains(name, "Bollard") == 1 ||
            string.contains(name, "Bench") == 1
 }
+var g_strip_props = false
 
 // One copy of the street environment, shifted `off_x` down the road, added to
 // the engine. The figure objects and the small clutter are left out; only the
@@ -230,7 +233,8 @@ add_tile(e: *Engine, m: *Manifest, off_x: float, flip: bool) -> ptr {
     while i < count {
         name = assets.entry_object(assets.manifest_entry(m, i))
         model = list.get_raw(models, i) as *Model
-        if model != null && string.contains(name, "Zombie") == 0 && !is_prop(name) {
+        if model != null && string.contains(name, "Zombie") == 0 &&
+           !(g_strip_props && is_prop(name)) {
             if core.model_parent(model) == null {
                 // Every other block is mirrored along the street (its root
                 // positions reflected about the block centre; the parented trim
@@ -279,6 +283,7 @@ on_start(data: ptr) {
     g_near_dist = core.env_int("AE3D_NEAR", NEAR_DIST as int) as float
     g_cull_dist = core.env_int("AE3D_CULL", CULL_DIST as int) as float
     g_sepn = core.env_int("AE3D_SEPN", SEP_INTERVAL)
+    g_strip_props = core.env_int("AE3D_NOPROPS", 0) != 0
 
     // A camera down at the road, looking back along it so the horde walks out of
     // the far dark toward the lamps and the viewer.
