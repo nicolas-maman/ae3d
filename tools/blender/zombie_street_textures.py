@@ -227,25 +227,61 @@ def tarmac(size=1024, seed=37):
 
 def paving(size=1024, seed=53):
     """Slabs, with a groove between them. Two across a 1.2 metre tile is a
-    slab of 600mm, which is the one a pavement is laid from."""
+    slab of 600mm, which is the one a pavement is laid from.
+
+    A pavement is not four identical slabs. Each is its own shade; grime
+    gathers in the joints and along every slab's edge where feet do not scuff
+    it off; broad patches lie damp and dark; and the surface is speckled with
+    grit and trodden-in gum. Four flat grey squares read as a floor tile in a
+    game, and no lighting could make them a street.
+    """
     rng = random.Random(seed)
     grain = _noise(rng, size, 5, 4)
+    damp = _noise(rng, size, 3, 2)        # broad damp and dirty patches
+    speck = _noise(rng, size, 6, 24)      # grit and trodden gum
     slabs = 2
     pitch = size / slabs
     groove = max(1.0, size / 96.0)
     field = numpy.zeros((size, size), dtype=numpy.float32)
     shade = numpy.zeros((size, size), dtype=numpy.float32)
+    edge = numpy.zeros((size, size), dtype=numpy.float32)
+    tones = {}
     for y in range(size):
         row = int(y / pitch)
         in_row = y % pitch
         for x in range(size):
             column = int(x / pitch)
             in_column = x % pitch
-            edge = (in_row < groove or in_column < groove)
-            field[y, x] = 1.0 if edge else 0.0
-            shade[y, x] = ((row * 7 + column * 13) % 5) * 0.012
-    rgb = _tint((0.46, 0.45, 0.43), (0.22, 0.22, 0.22), field)
-    rgb *= (0.86 + grain[:, :, None] * 0.28 + shade[:, :, None])
+            joint = (in_row < groove or in_column < groove)
+            field[y, x] = 1.0 if joint else 0.0
+            key = (row, column)
+            tone = tones.get(key)
+            if tone is None:
+                tone = rng.uniform(-0.11, 0.11)
+                tones[key] = tone
+            shade[y, x] = tone
+            # How far into the slab from its nearest edge, as a fraction of
+            # the slab; grime falls off away from the joint.
+            edge[y, x] = min(in_row, in_column, pitch - in_row, pitch - in_column) / pitch
+
+    base = numpy.array((0.46, 0.45, 0.43), dtype=numpy.float32)
+    groove_colour = numpy.array((0.22, 0.22, 0.22), dtype=numpy.float32)
+    rgb = base[None, None, :] * (1.0 + shade[:, :, None])
+    rgb *= (0.86 + grain[:, :, None] * 0.28)
+
+    # Grime along every slab edge, damp patches across the whole surface, and
+    # a scatter of dark specks.
+    # Broken up by the grain, or it reads as a bevel around every slab.
+    edge_grime = numpy.clip(1.0 - edge / 0.10, 0.0, 1.0) * 0.26 * (0.45 + grain * 1.1)
+    dampness = numpy.clip((0.50 - damp) * 1.6, 0.0, 1.0) * 0.30
+    specks = numpy.clip((speck - 0.70) * 6.0, 0.0, 1.0) * 0.45
+    rgb *= (1.0 - edge_grime[:, :, None])
+    rgb *= (1.0 - dampness[:, :, None])
+    rgb *= (1.0 - specks[:, :, None])
+
+    # The joint itself, uneven and dirtier where the surface is damp.
+    joint_rgb = groove_colour[None, None, :] * (1.0 + (grain[:, :, None] - 0.5) * 0.4 - dampness[:, :, None] * 0.3)
+    rgb = rgb * (1.0 - field[:, :, None]) + joint_rgb * field[:, :, None]
     return _image("PavingSlab", size, _rgba(rgb))
 
 
