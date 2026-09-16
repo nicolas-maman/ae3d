@@ -37,7 +37,6 @@ const CROWD_DEFAULT = 400
 // the street. Nothing teleports, because nothing is ever recycled.
 const BLOCK_LEN = 84.0   // the block's ground slab, Street_Ground: x -36..48
 const BLOCK_CX = 6.0     // its centre; the road and the mirror axis sit here
-const ROAD_LEN = 68.0    // the road mesh is authored 68m; stretched to the block
 const TILES = 7          // blocks along the street, centred on the middle one
 const STREET_X0 = 0.0 - 280.0
 const STREET_X1 = 290.0
@@ -247,13 +246,19 @@ add_tile(e: *Engine, m: *Manifest, off_x: float, flip: bool) -> ptr {
                 if flip { nx = off_x + (2.0 * BLOCK_CX - wp.x) }
                 core.model_set_position(model, nx, wp.y, wp.z)
             }
-            // The road and its kerbs are authored 68m long inside an 84m block,
-            // so tiled at the block's pitch every seam was 16m of missing road.
-            // Stretch them along the street to the block's full length; they then
-            // meet the next block's exactly, and the tarmac stretches 23% --
-            // nothing the eye picks out.
-            if string.contains(name, "Street_Road") == 1 || string.contains(name, "Kerb") == 1 {
-                core.model_set_scale(model, BLOCK_LEN / ROAD_LEN, 1.0, 1.0)
+            // The strips that run the length of the street -- road, kerbs,
+            // pavements -- are each authored shorter than the 84m block (the
+            // road 68m, the kerbs 69m, the pavements 70m), so tiled at the
+            // block's pitch every seam was metres of missing road and pavement.
+            // Stretch each to the block's full length, measured from its own
+            // mesh so each meets the next block's exactly; the tarmac and
+            // paving stretch a fifth, which nothing picks out.
+            if string.contains(name, "Street_Road") == 1 || string.contains(name, "Kerb") == 1 ||
+               string.contains(name, "Street_Path") == 1 {
+                extent = core.mesh_size(core.model_mesh(model), core.vec3(1.0, 1.0, 1.0))
+                if extent.x > 1.0 {
+                    core.model_set_scale(model, BLOCK_LEN / extent.x, 1.0, 1.0)
+                }
             }
             if string.contains(name, "LampHead") == 1 { core.model_set_exposure(model, 16.0) }
             else if string.contains(name, "_Lit") == 1 {
