@@ -978,20 +978,24 @@ def _arm(pose, side, swing, hit, reach_for):
     which is what makes a swing read as a whip rather than a gate.
     """
     lead = 1.0 if side == "R" else 0.55
-    # At rest the arms hang half-raised in front, the shuffle a zombie carries
-    # them at. The strike thrusts to horizontal and straightens the elbow, so
-    # the hand is carried a good half-metre further forward than the walk ever
-    # takes it -- the reach is the arm's, not the body's lunge under it.
-    forward = -0.62 - 0.22 * swing - reach_for * 0.95 * lead
+    # At rest the arms hang low and loose in front, the shuffle a zombie
+    # carries them at -- not held up level, which is a mannequin with its arms
+    # out. They sway with the step, further than the body does, and the left
+    # hangs a little lower and limper than the right that swipes, so the two
+    # are not a mirrored pair. The strike thrusts to horizontal and straightens
+    # the elbow, so the hand is carried a good half-metre further forward than
+    # the walk ever takes it -- the reach is the arm's, not the body's lunge.
+    hang = 0.0 if side == "R" else 0.12
+    forward = -0.44 + hang - 0.30 * swing - reach_for * 0.95 * lead
     out = (0.20 if side == "L" else -0.20) - reach_for * 0.10 * lead
     wrist = 0.30 - reach_for * 0.55 * lead
     # The elbow bends about the axis across the arm, not along it: a rotation
     # about the bone's own length is a twist and leaves the arm as straight as
     # it found it, which is why a zombie posed only in twists reaches with a
-    # dead-straight arm. Kept bent in the shuffle and driven straight at the
-    # strike, so the thrust has a bend to spend and the hand is carried a hand's
-    # length further out than the walk ever takes it.
-    bend = 1.8 + 0.2 * swing - reach_for * 1.8 * lead
+    # dead-straight arm. Kept bent in the shuffle and flexing with the sway --
+    # a fixed bend is what made the arm read as a rod -- then driven straight
+    # at the strike, so the thrust has a bend to spend.
+    bend = 1.55 + 0.35 * swing - reach_for * 1.8 * lead
 
     pose.set("Shoulder" + side, _compose(_turn(Y, forward), _turn(X, out),
                                          _turn(Z, -0.12 * lead * reach_for)))
