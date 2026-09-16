@@ -285,6 +285,25 @@ def paving(size=1024, seed=53):
     return _image("PavingSlab", size, _rgba(rgb))
 
 
+def _skin_fields(size, seed):
+    """The noise the skin is built from, shared by its colour and its relief
+    so the vein that is darker is also the vein that is sunken."""
+    rng = random.Random(seed)
+    blotch = _noise(rng, size, 4, 3)      # broad: bruising and rot
+    mottle = _noise(rng, size, 5, 12)     # mid: uneven patches
+    vein = _noise(rng, size, 4, 24)       # ridge source for the veins
+    pore = _noise(rng, size, 3, 64)       # fine grain
+    return blotch, mottle, vein, pore
+
+
+def _skin_marks(blotch, vein, pore):
+    """Bruise, rot, veins and pores as 0..1 fields, from the shared noise."""
+    bruise = numpy.clip((blotch - 0.54) * 3.2, 0.0, 1.0)
+    rot = numpy.clip((0.42 - blotch) * 3.2, 0.0, 1.0)
+    lines = numpy.clip(1.0 - numpy.abs(vein - 0.5) / 0.022, 0.0, 1.0)
+    return bruise, rot, lines, pore
+
+
 def skin(size=1024, seed=71):
     """Dead skin: pale and sickly, not green paint.
 
@@ -297,31 +316,45 @@ def skin(size=1024, seed=71):
     fine grain of pores over the lot. The pale base leaves the tint room to
     make one zombie greener, one greyer, one yellower.
     """
-    rng = random.Random(seed)
-    blotch = _noise(rng, size, 4, 3)      # broad: bruising and rot
-    mottle = _noise(rng, size, 5, 12)     # mid: uneven patches
-    vein = _noise(rng, size, 4, 24)       # ridge source for the veins
-    pore = _noise(rng, size, 3, 64)       # fine grain
+    blotch, mottle, vein, pore = _skin_fields(size, seed)
 
     base = numpy.array((0.46, 0.48, 0.39), dtype=numpy.float32)
     rgb = numpy.ones((size, size, 3), dtype=numpy.float32) * base[None, None, :]
     rgb *= (0.80 + mottle[:, :, None] * 0.40)
 
+    bruise, rot, lines, pore = _skin_marks(blotch, vein, pore)
     # Bruising: grey-purple where blood has settled.
-    bruise = numpy.clip((blotch - 0.54) * 3.2, 0.0, 1.0) * 0.55
-    rgb = rgb * (1.0 - bruise[:, :, None]) + \
-        numpy.array((0.34, 0.25, 0.34), dtype=numpy.float32)[None, None, :] * bruise[:, :, None]
+    b = bruise * 0.55
+    rgb = rgb * (1.0 - b[:, :, None]) + \
+        numpy.array((0.34, 0.25, 0.34), dtype=numpy.float32)[None, None, :] * b[:, :, None]
     # Rot: gone dark and greenish where the tissue has broken down.
-    rot = numpy.clip((0.42 - blotch) * 3.2, 0.0, 1.0) * 0.6
-    rgb = rgb * (1.0 - rot[:, :, None]) + \
-        numpy.array((0.15, 0.18, 0.11), dtype=numpy.float32)[None, None, :] * rot[:, :, None]
+    r = rot * 0.6
+    rgb = rgb * (1.0 - r[:, :, None]) + \
+        numpy.array((0.15, 0.18, 0.11), dtype=numpy.float32)[None, None, :] * r[:, :, None]
     # Veins: the contour lines of a noise field are thin, branching and
     # closed -- the shape veins have.
-    lines = numpy.clip(1.0 - numpy.abs(vein - 0.5) / 0.022, 0.0, 1.0) * 0.42
-    rgb *= (1.0 - lines[:, :, None])
+    rgb *= (1.0 - (lines * 0.42)[:, :, None])
     # Pores.
     rgb *= (0.90 + pore[:, :, None] * 0.20)
     return _image("ZombieSkin", size, _rgba(rgb))
+
+
+def _cloth_fields(size, seed):
+    """The noise and the weave the cloth is built from, shared by its colour
+    and its relief so the thread that catches the light is the one drawn."""
+    rng = random.Random(seed)
+    grime = _noise(rng, size, 4, 3)       # broad dirt
+    dust = _noise(rng, size, 3, 2)        # broad settled dust
+    wear = _noise(rng, size, 5, 10)       # worn and faded patches
+    blood = _noise(rng, size, 4, 5)       # a few stains
+    fray = _noise(rng, size, 6, 40)       # threads and frays
+    # A fine cross-hatch at eight texels, which on the figure is a thread
+    # every couple of millimetres: fabric, not paint.
+    yy, xx = numpy.mgrid[0:size, 0:size].astype(numpy.float32)
+    period = size / 128.0
+    weave = 0.5 + 0.25 * numpy.sin(xx * 2.0 * math.pi / period) + \
+        0.25 * numpy.sin(yy * 2.0 * math.pi / period)
+    return grime, dust, wear, blood, fray, weave
 
 
 def cloth(size=1024, seed=89):
@@ -336,19 +369,7 @@ def cloth(size=1024, seed=89):
     threads and frays. A base that is dark but not black leaves the folds
     something to shade.
     """
-    rng = random.Random(seed)
-    grime = _noise(rng, size, 4, 3)       # broad dirt
-    dust = _noise(rng, size, 3, 2)        # broad settled dust
-    wear = _noise(rng, size, 5, 10)       # worn and faded patches
-    blood = _noise(rng, size, 4, 5)       # a few stains
-    fray = _noise(rng, size, 6, 40)       # threads and frays
-
-    # A fine cross-hatch at eight texels, which on the figure is a thread
-    # every couple of millimetres: fabric, not paint.
-    yy, xx = numpy.mgrid[0:size, 0:size].astype(numpy.float32)
-    period = size / 128.0
-    weave = 0.5 + 0.25 * numpy.sin(xx * 2.0 * math.pi / period) + \
-        0.25 * numpy.sin(yy * 2.0 * math.pi / period)
+    grime, dust, wear, blood, fray, weave = _cloth_fields(size, seed)
 
     base = numpy.array((0.30, 0.27, 0.31), dtype=numpy.float32)
     rgb = numpy.ones((size, size, 3), dtype=numpy.float32) * base[None, None, :]
@@ -583,19 +604,25 @@ def stone_normal(size=512, seed=113):
 
 
 def skin_normal(size=1024, seed=71):
-    """What is left of a face, in relief."""
-    rng = random.Random(seed)
-    height = _noise(rng, size, 6, 7) * 0.65 + _noise(rng, size, 4, 4) * 0.35
-    return _normal_from_height(height, 2.1, "ZombieSkinNormal")
+    """The skin's relief, from the same fields as its colour: the bruises
+    swell a little, the rot sinks, the veins are grooves, and the pores pit
+    the surface -- so a lamp rakes the same marks the colour shows."""
+    blotch, mottle, vein, pore = _skin_fields(size, seed)
+    bruise, rot, lines, pore = _skin_marks(blotch, vein, pore)
+    height = mottle * 0.30 + bruise * 0.20 - rot * 0.25 - lines * 0.45 - pore * 0.12
+    return _normal_from_height(height, 2.4, "ZombieSkinNormal")
 
 
 def cloth_normal(size=1024, seed=89):
-    """A weave, and the creases in it."""
-    rng = random.Random(seed)
-    weave = numpy.linspace(0.0, size / 6.0 * math.tau, size, dtype=numpy.float32)
-    height = (numpy.sin(weave)[None, :] + numpy.sin(weave)[:, None]) * 0.12
-    height += _noise(rng, size, 5, 5) * 0.7
-    return _normal_from_height(height, 1.6, "ZombieClothNormal")
+    """The cloth's relief, from the same fields as its colour: the weave
+    stands proud thread by thread at the scale the colour draws it, the worn
+    patches lie flatter, and the frays are pits; broad creases over the lot.
+    The old map wove at a period twenty times the colour's -- relief and
+    colour disagreed about where the threads were."""
+    grime, dust, wear, blood, fray, weave = _cloth_fields(size, seed)
+    threads = numpy.clip((fray - 0.75) * 8.0, 0.0, 1.0)
+    height = weave * 0.35 + wear * 0.18 + grime * 0.30 - threads * 0.40
+    return _normal_from_height(height, 1.8, "ZombieClothNormal")
 
 
 def _planks(size, rng, boards, gap):
