@@ -248,7 +248,14 @@ var g_strip_props = false
 // the engine. The figure objects and the small clutter are left out; only the
 // root models are shifted, so the parented trim and glass ride along on their
 // shells. Lamp heads and lit windows glow; the road is wet.
-add_tile(e: *Engine, m: *Manifest, off_x: float, flip: bool) -> ptr {
+// The strips a block is made of: what runs on past the last block so the
+// street does not end at a cliff.
+is_street(name: string) -> bool {
+    return string.contains(name, "Street_Road") == 1 || string.contains(name, "Kerb") == 1 ||
+           string.contains(name, "Street_Path") == 1 || string.contains(name, "Street_Ground") == 1
+}
+
+add_tile(e: *Engine, m: *Manifest, off_x: float, flip: bool, street_only: bool) -> ptr {
     models = assets.manifest_load_scene(m)
     count = assets.manifest_count(m)
     kept = 0
@@ -258,6 +265,13 @@ add_tile(e: *Engine, m: *Manifest, off_x: float, flip: bool) -> ptr {
     while i < count {
         name = assets.entry_object(assets.manifest_entry(m, i))
         model = list.get_raw(models, i) as *Model
+        // Past the city's ends only the street itself continues -- road, kerbs,
+        // pavements, base -- into the fog, with no buildings on it. The last
+        // block used to be the edge of the world.
+        if street_only && !is_street(name) {
+            i = i + 1
+            continue
+        }
         // Mirroring alternates the terrace, but every other block was still the
         // same block, and a street of two blocks repeated reads as a copy. So
         // each tile also keeps only some of its clutter -- a different bin,
@@ -433,10 +447,15 @@ on_start(data: ptr) {
     half = (TILES - 1) / 2
     while t < TILES {
         off = (t - half) as float * BLOCK_LEN
-        tile = add_tile(e, m, off, t % 2 == 1)
+        tile = add_tile(e, m, off, t % 2 == 1, false)
         if t == 0 { g_scene = tile }
         t = t + 1
     }
+    // One more block-length of bare street past each end, so the road runs
+    // on into the fog instead of stopping at the last terrace. The crowd and
+    // its grid stay within the built blocks.
+    add_tile(e, m, (0 - half - 1) as float * BLOCK_LEN, false, true)
+    add_tile(e, m, (TILES - half) as float * BLOCK_LEN, false, true)
 
     // The ground the city stands on. Each block is an 84x44m pavement slab
     // (Street_Ground, its top at y -0.32) with a raised road down the middle;
