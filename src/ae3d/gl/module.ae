@@ -244,6 +244,7 @@ struct GLRenderer {
     last_textures: int
     frame_stamp: int
     shadow_program: int
+    crowd_shadow_program: int
     shadow_fbo: int
     shadow_map: int
     shadow_enabled: bool
@@ -670,6 +671,9 @@ renderer_init(r: *GLRenderer, window: ptr, width: int, height: int) -> int {
     slots_for(r, r.crowd_program)
 
     r.shadow_program = compile_program(shaders.VERTEX_DEPTH, shaders.FRAGMENT_DEPTH, "depth")
+    // The crowd's depth pass poses from the pose bank by phase, so it casts a
+    // walking shadow, not a bind-pose one. Same fragment (depth only).
+    r.crowd_shadow_program = compile_program(shaders.VERTEX_CROWD_DEPTH, shaders.FRAGMENT_DEPTH, "crowd_depth")
     r.fxaa_program = compile_program(shaders.VERTEX_SCREEN, shaders.FRAGMENT_FXAA, "fxaa")
     r.bloom_program = compile_program(shaders.VERTEX_SCREEN, shaders.FRAGMENT_BLOOM, "bloom")
     r.passthrough_program = compile_program(shaders.VERTEX_SCREEN, shaders.FRAGMENT_PASSTHROUGH, "passthrough")
@@ -1231,6 +1235,12 @@ render_shadow_pass(r: *GLRenderer, light: *Light, cam: *Camera) {
             i = i + 1
             continue
         }
+        // The crowd is posed from the pose bank, not a bones palette, so it is
+        // drawn in its own sub-pass below with the crowd depth program.
+        if core.model_pose_bank(m) != null {
+            i = i + 1
+            continue
+        }
         core.model_sync_transform(m)
         moved = m.shadow_stamp != m.world_stamp
         m.shadow_stamp = m.world_stamp
@@ -1285,9 +1295,66 @@ render_shadow_pass(r: *GLRenderer, light: *Light, cam: *Camera) {
         }
         i = i + 1
     }
+    render_crowd_shadows(r)
+
     ae3d_gl_vao_bind(0)
     bind_output(r)
     ae3d_gl_viewport(0, 0, r.viewport_width, r.viewport_height)
+}
+
+// The crowd's shadow sub-pass: every pose-bank model, posed by its instances'
+// phases, written into the same shadow map with the crowd depth program. The
+// instance and phase buffers are brought current here (the shadow pass runs
+// before the lit pass would upload them) and their dirty flags cleared, so the
+// lit pass reuses the same upload. Depth only, so no colour or lighting.
+render_crowd_shadows(r: *GLRenderer) {
+    if r.crowd_shadow_program == 0 { return }
+    bound = 0
+    space_loc = 0
+    model_loc = 0
+    bank_loc = 0
+    frames_loc = 0
+    count = list.size(r.models)
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        i = i + 1
+        if m == null || !m.visible || !m.casts_shadow { continue }
+        if core.model_pose_bank(m) == null { continue }
+        if !m.is_instanced || core.model_instance_count(m) <= 0 { continue }
+        if bound == 0 {
+            use_program(r, r.crowd_shadow_program)
+            space_loc = ae3d_gl_uniform_location(r.crowd_shadow_program, "lightSpaceMatrix")
+            model_loc = ae3d_gl_uniform_location(r.crowd_shadow_program, "model")
+            bank_loc = ae3d_gl_uniform_location(r.crowd_shadow_program, "poseBank")
+            frames_loc = ae3d_gl_uniform_location(r.crowd_shadow_program, "poseBankFrames")
+            ae3d_gl_uniform_mat4(space_loc, &r.shadow_space)
+            bound = 1
+        }
+        core.model_sync_transform(m)
+        // Bring the per-instance placement and walk phase current, then let the
+        // lit pass skip re-uploading the same data this frame.
+        if m.instances_updated {
+            m.instance_vbo_capacity = ae3d_gl_update_instances(m.instances, m.instance_vbo,
+                                                               m.instance_vbo_capacity)
+            m.instances_updated = false
+        }
+        if m.instance_phases_updated && m.instance_phase_vbo != 0 {
+            ae3d_gl_update_instance_phases(m.instances, m.instance_phase_vbo)
+            m.instance_phases_updated = false
+        }
+        if m.pose_bank_texture == 0 {
+            m.pose_bank_texture = ae3d_gl_posebank_texture(m.pose_bank)
+        }
+        ae3d_gl_texture_bind(3, m.pose_bank_texture)
+        ae3d_gl_uniform_int(bank_loc, 3)
+        ae3d_gl_uniform_int(frames_loc, m.pose_bank_frames)
+        ae3d_gl_uniform_mat4(model_loc, &m.model_matrix)
+        ae3d_gl_vao_bind(m.vao)
+        ae3d_gl_draw_elements_instanced(core.mesh_index_count(m.mesh), 0,
+                                        core.model_instance_count(m))
+        r.last_draw_calls = r.last_draw_calls + 1
+    }
 }
 
 draw_depth(r: *GLRenderer, m: *Model, instanced: int) {
@@ -2523,6 +2590,7 @@ renderer_cleanup(r: *GLRenderer) {
 
     if r.default_program != 0 { ae3d_gl_program_delete(r.default_program) ; r.default_program = 0 }
     if r.shadow_program != 0 { ae3d_gl_program_delete(r.shadow_program) ; r.shadow_program = 0 }
+    if r.crowd_shadow_program != 0 { ae3d_gl_program_delete(r.crowd_shadow_program) ; r.crowd_shadow_program = 0 }
     if r.fxaa_program != 0 { ae3d_gl_program_delete(r.fxaa_program) ; r.fxaa_program = 0 }
     if r.bloom_program != 0 { ae3d_gl_program_delete(r.bloom_program) ; r.bloom_program = 0 }
     if r.passthrough_program != 0 {

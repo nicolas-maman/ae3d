@@ -9,7 +9,7 @@ import ae3d.core
 
 exports (
     VERTEX_DEFAULT, FRAGMENT_DEFAULT,
-    VERTEX_CROWD,
+    VERTEX_CROWD, VERTEX_CROWD_DEPTH,
     VERTEX_WATER, FRAGMENT_WATER,
     VERTEX_DEPTH, FRAGMENT_DEPTH,
     VERTEX_SKYBOX, FRAGMENT_SKYBOX, FRAGMENT_SKYBOX_SOLID,
@@ -168,6 +168,54 @@ void main() {
     InstanceColor = instanceColor;
     FragPosLightSpace = lightSpaceMatrix * vec4(FragPos, 1.0);
     gl_Position = viewProjection * modelMatrix * posed;
+}
+GLSL_END
+
+// The crowd's depth pass. VERTEX_DEPTH poses a skinned figure from a bones
+// palette, but the crowd is posed from the pose bank by each instance's phase,
+// exactly as VERTEX_CROWD does -- so the shadow map needs this variant, or the
+// crowd casts the shadow of a bind-pose mannequin (or nothing). Same pose as
+// the lit crowd pass, projected into light space and written depth-only.
+const VERTEX_CROWD_DEPTH = <<GLSL_END
+#version 330 core
+layout(location = 0) in vec3 inPosition;
+layout(location = 3) in mat4 instanceModel;
+layout(location = 8) in vec4 inJoints;
+layout(location = 9) in vec4 inWeights;
+layout(location = 11) in float instancePhase;
+
+uniform mat4 model;
+uniform mat4 lightSpaceMatrix;
+uniform sampler2D poseBank;
+uniform int poseBankFrames;
+
+mat4 boneAt(int bone, int frame) {
+    int x = bone * 4;
+    return mat4(texelFetch(poseBank, ivec2(x + 0, frame), 0),
+                texelFetch(poseBank, ivec2(x + 1, frame), 0),
+                texelFetch(poseBank, ivec2(x + 2, frame), 0),
+                texelFetch(poseBank, ivec2(x + 3, frame), 0));
+}
+
+mat4 skinAt(int frame) {
+    return inWeights.x * boneAt(int(inJoints.x), frame)
+         + inWeights.y * boneAt(int(inJoints.y), frame)
+         + inWeights.z * boneAt(int(inJoints.z), frame)
+         + inWeights.w * boneAt(int(inJoints.w), frame);
+}
+
+void main() {
+    mat4 modelMatrix = model * instanceModel;
+    float fpos = instancePhase * float(poseBankFrames);
+    int frame0 = int(floor(fpos));
+    float blend = fpos - float(frame0);
+    if (frame0 < 0) { frame0 = 0; blend = 0.0; }
+    if (frame0 >= poseBankFrames) { frame0 = poseBankFrames - 1; blend = 0.0; }
+    int frame1 = frame0 + 1;
+    if (frame1 >= poseBankFrames) { frame1 = 0; }
+    mat4 skin = skinAt(frame0) * (1.0 - blend) + skinAt(frame1) * blend;
+    vec4 posed = skin * vec4(inPosition, 1.0);
+    gl_Position = lightSpaceMatrix * modelMatrix * posed;
 }
 GLSL_END
 
