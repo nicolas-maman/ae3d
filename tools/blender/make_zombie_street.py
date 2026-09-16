@@ -420,6 +420,22 @@ def ground_plane(name, length, width, surface, repeats, rng):
     for i in range(along):
         for j in range(across):
             bm.faces.new([grid[i][j], grid[i + 1][j], grid[i + 1][j + 1], grid[i][j + 1]])
+    # A closed slab, not an open sheet. _finish recalculates normals to face
+    # outward, and an open sheet has no outward: it came out facing down, and
+    # a base facing down is culled from above -- the whole slab was invisible
+    # in the engine and the blocks stood on a void. A bottom and four sides
+    # give it an inside, so its top faces up the way the road's does.
+    depth = 0.08
+    low = [[bm.verts.new((v.co.x, v.co.y, v.co.z - depth)) for v in row] for row in grid]
+    for i in range(along):
+        for j in range(across):
+            bm.faces.new([low[i][j], low[i][j + 1], low[i + 1][j + 1], low[i + 1][j]])
+    for i in range(along):
+        bm.faces.new([grid[i][0], low[i][0], low[i + 1][0], grid[i + 1][0]])
+        bm.faces.new([grid[i][across], grid[i + 1][across], low[i + 1][across], low[i][across]])
+    for j in range(across):
+        bm.faces.new([grid[0][j], grid[0][j + 1], low[0][j + 1], low[0][j]])
+        bm.faces.new([grid[along][j], low[along][j], low[along][j + 1], grid[along][j + 1]])
     return _finish(bm, name, surface, repeats)
 
 

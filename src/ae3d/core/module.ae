@@ -1028,11 +1028,15 @@ env_int(name: string, fallback: int) -> int {
     raw = os.getenv(name)
     if raw == null { return fallback }
 
+    // Any integer the variable parses to, zero and negatives included. This
+    // used to keep only values of one and up and hand back the fallback for
+    // the rest, silently: AE3D_CAMX=-100 placed the camera at the default,
+    // AE3D_CULL=0 left the cull at its default distance, AE3D_SEPN=0 ran
+    // separation at its default rate -- and every one of those reads looked
+    // like a result. A knob that quietly ignores what it is set to is worse
+    // than no knob. An unparseable value still falls back.
     chosen = fallback
-    if string.try_int(raw) != 0 {
-        value = string.get_int(raw)
-        if value >= 1 { chosen = value }
-    }
+    if string.try_int(raw) != 0 { chosen = string.get_int(raw) }
     string.free(raw)
     return chosen
 }

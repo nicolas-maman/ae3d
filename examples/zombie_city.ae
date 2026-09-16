@@ -208,6 +208,29 @@ setup_crowd(model: *Model, cell: float) -> int {
     return core.mesh_index_count(core.model_mesh(model)) / 3
 }
 
+// A flat slab, face up, `length` along the street by `width` across it, its
+// near corner at the origin, with its texture repeating every 1/per_metre
+// metres so paving reads as slabs and not one stretched tile. loader.plane
+// runs its UVs 0..1 once whatever its size and is not centred, so a ground
+// of any size needs this.
+paved_slab(length: float, width: float, per_metre: float) -> *Model {
+    m = core.model_new()
+    up = core.vec3(0.0, 1.0, 0.0)
+    core.mesh_reserve(m.mesh, 4, 6)
+    ru = length * per_metre
+    rv = width * per_metre
+    core.mesh_push_vertex(m.mesh, core.vec3(0.0, 0.0, 0.0), 0.0, 0.0, up)
+    core.mesh_push_vertex(m.mesh, core.vec3(length, 0.0, 0.0), ru, 0.0, up)
+    core.mesh_push_vertex(m.mesh, core.vec3(length, 0.0, width), ru, rv, up)
+    core.mesh_push_vertex(m.mesh, core.vec3(0.0, 0.0, width), 0.0, rv, up)
+    // The same winding loader.plane uses, which the culler accepts as up.
+    core.mesh_push_triangle(m.mesh, 0, 2, 1)
+    core.mesh_push_triangle(m.mesh, 0, 3, 2)
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    return m
+}
+
 // The small street clutter -- bins, crates, sacks, bollards, benches. There are
 // far more of these than buildings, so a city drawn for a horde of hundreds of
 // thousands drops them: fewer models a block means the renderer can afford
@@ -228,12 +251,34 @@ var g_strip_props = false
 add_tile(e: *Engine, m: *Manifest, off_x: float, flip: bool) -> ptr {
     models = assets.manifest_load_scene(m)
     count = assets.manifest_count(m)
+    kept = 0
+    dropped = 0
+    first_tint = 0.0
     i = 0
     while i < count {
         name = assets.entry_object(assets.manifest_entry(m, i))
         model = list.get_raw(models, i) as *Model
-        if model != null && string.contains(name, "Zombie") == 0 &&
+        // Mirroring alternates the terrace, but every other block was still the
+        // same block, and a street of two blocks repeated reads as a copy. So
+        // each tile also keeps only some of its clutter -- a different bin,
+        // bench and crate here than there -- and tints every building shell its
+        // own way, a shade lighter or darker, warmer or cooler: the same brick
+        // reads as a different building. The windows, glow and trim keep their
+        // own colour. Drawn from the seeded stream, so the city is the same
+        // every run.
+        keep = true
+        if model != null && is_prop(name) && !g_strip_props {
+            keep = next_random() < 0.62
+            if keep { kept = kept + 1 } else { dropped = dropped + 1 }
+        }
+        if model != null && keep && string.contains(name, "Zombie") == 0 &&
            !(g_strip_props && is_prop(name)) {
+            if core.model_parent(model) == null && string.contains(name, "Street_Block") == 1 {
+                bright = 0.80 + next_random() * 0.34
+                warm = (next_random() - 0.5) * 0.14
+                core.model_set_diffuse(model, bright * (1.0 + warm), bright, bright * (1.0 - warm))
+                if first_tint == 0.0 { first_tint = bright }
+            }
             if core.model_parent(model) == null {
                 // Every other block is mirrored along the street (its root
                 // positions reflected about the block centre; the parented trim
@@ -275,10 +320,31 @@ add_tile(e: *Engine, m: *Manifest, off_x: float, flip: bool) -> ptr {
             if string.contains(name, "Road") == 1 || string.contains(name, "Ground") == 1 {
                 core.model_set_reflectivity(model, 0.3)
             }
+            if string.contains(name, "Street_Ground") == 1 {
+                // The block's base slab as exported faces DOWN -- every one of
+                // its 112 normals -- so from above it is back-face culled and
+                // has never once drawn: the blocks stood on a void, with black
+                // between pavement and building. (An open sheet given outward
+                // normals; fixed at the source in make_zombie_street.py.) Until
+                // the rebuild lands, the base is laid here instead: a paved
+                // slab the block's size, at the slab's height, facing up.
+                base = paved_slab(BLOCK_LEN, 44.0, 1.0 / 1.2)
+                core.model_set_position(base, off_x + BLOCK_CX - BLOCK_LEN * 0.5, 0.0 - 0.33, 0.0 - 22.0)
+                core.model_set_texture(base, "resources/blender/zombie_street/PavingSlab.png")
+                if base.material != null {
+                    core.material_set_normal_path(base.material, "resources/blender/zombie_street/PathPavingNormal.png")
+                }
+                core.model_set_specular(base, 0.04, 0.04, 0.04)
+                core.model_set_pbr(base, 0.0, 0.95)
+                engine.engine_add_model(e, base)
+                i = i + 1
+                continue
+            }
             engine.engine_add_model(e, model)
         }
         i = i + 1
     }
+    println("zombie_city[diag] tile at x=${off_x} flip=${flip}: props kept ${kept} dropped ${dropped}, first shell tint ${first_tint}")
     return models
 }
 
@@ -380,8 +446,11 @@ on_start(data: ptr) {
     // earth past the ends and behind the terraces -- and the city holds
     // together as one place. It must sit under the slab: placed at road level
     // it hid every pavement and z-fought the road.
+    // loader.plane is not centred -- it spans 0..900 from its origin corner --
+    // so placed at the origin it covered only the eastern half of the city
+    // and the void was still there west of it. Its corner goes at -450.
     ground = loader.plane(2, 900.0)
-    core.model_set_position(ground, 0.0, 0.0 - 0.45, 0.0 - 2.9)
+    core.model_set_position(ground, 0.0 - 450.0, 0.0 - 0.45, 0.0 - 450.0)
     core.model_set_diffuse(ground, 0.075, 0.072, 0.068)
     core.model_set_specular(ground, 0.02, 0.02, 0.02)
     core.model_set_pbr(ground, 0.0, 0.98)
