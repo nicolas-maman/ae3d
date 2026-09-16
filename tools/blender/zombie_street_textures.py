@@ -325,15 +325,46 @@ def skin(size=1024, seed=71):
 
 
 def cloth(size=1024, seed=89):
-    """Torn, filthy, and woven closely enough to read as fabric."""
+    """A suit that has been through something.
+
+    The old tile was near-black with a two-texel weave that averaged away to
+    nothing: the clothes drew as a flat dark shape. Cloth reads as cloth by
+    its weave, at a scale the eye can see, and as WORN cloth by what has
+    happened to it: dust, which lightens a dark fabric where it has settled;
+    grime, which darkens it; patches gone thin and faded at the wear points;
+    dried blood in a few dark rust-brown blots; and a scatter of pulled
+    threads and frays. A base that is dark but not black leaves the folds
+    something to shade.
+    """
     rng = random.Random(seed)
-    grime = _noise(rng, size, 4, 3)
-    weave = numpy.zeros((size, size), dtype=numpy.float32)
-    for y in range(size):
-        for x in range(size):
-            weave[y, x] = 0.5 + 0.5 * math.sin(x * math.pi / 2.0) * math.sin(y * math.pi / 2.0)
-    rgb = _tint((0.20, 0.19, 0.22), (0.09, 0.09, 0.11), numpy.clip(grime * 1.3 - 0.25, 0.0, 1.0))
-    rgb *= (0.88 + weave[:, :, None] * 0.14)
+    grime = _noise(rng, size, 4, 3)       # broad dirt
+    dust = _noise(rng, size, 3, 2)        # broad settled dust
+    wear = _noise(rng, size, 5, 10)       # worn and faded patches
+    blood = _noise(rng, size, 4, 5)       # a few stains
+    fray = _noise(rng, size, 6, 40)       # threads and frays
+
+    # A fine cross-hatch at eight texels, which on the figure is a thread
+    # every couple of millimetres: fabric, not paint.
+    yy, xx = numpy.mgrid[0:size, 0:size].astype(numpy.float32)
+    period = size / 128.0
+    weave = 0.5 + 0.25 * numpy.sin(xx * 2.0 * math.pi / period) + \
+        0.25 * numpy.sin(yy * 2.0 * math.pi / period)
+
+    base = numpy.array((0.30, 0.27, 0.31), dtype=numpy.float32)
+    rgb = numpy.ones((size, size, 3), dtype=numpy.float32) * base[None, None, :]
+    rgb *= (0.86 + weave[:, :, None] * 0.28)
+    rgb *= (0.84 + wear[:, :, None] * 0.32)
+
+    settled = numpy.clip((dust - 0.50) * 2.0, 0.0, 1.0) * 0.35
+    rgb = rgb * (1.0 - settled[:, :, None]) + \
+        numpy.array((0.44, 0.41, 0.36), dtype=numpy.float32)[None, None, :] * settled[:, :, None]
+    dirt = numpy.clip((0.50 - grime) * 1.8, 0.0, 1.0) * 0.45
+    rgb *= (1.0 - dirt[:, :, None])
+    stain = numpy.clip((blood - 0.68) * 5.0, 0.0, 1.0) * 0.7
+    rgb = rgb * (1.0 - stain[:, :, None]) + \
+        numpy.array((0.22, 0.06, 0.05), dtype=numpy.float32)[None, None, :] * stain[:, :, None]
+    threads = numpy.clip((fray - 0.75) * 8.0, 0.0, 1.0) * 0.5
+    rgb *= (1.0 - threads[:, :, None])
     return _image("ZombieCloth", size, _rgba(rgb))
 
 
