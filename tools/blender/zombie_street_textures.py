@@ -107,34 +107,73 @@ def brick(size=1024, seed=11):
     Sixteen courses across a tile that covers 1.2 metres is a course of 75mm,
     which is what a brick is. The tile carries nothing else, so it can be this
     small and still tile without a pattern anybody can see.
+
+    A wall is not one brick repeated. Every brick here gets its own tone -- a
+    little lighter or darker, a little more orange or more purple-brown -- the
+    way a kiln fires a batch unevenly, and the mortar is grubbier in some
+    joints than others. Over that, weathering: dark patches where rain has
+    streaked and soot has settled, and the odd spalled brick with a chipped,
+    darker face. One flat colour with a per-row shade read as a cartoon tile,
+    and no lighting could make it brick.
     """
     rng = random.Random(seed)
     rows, columns = 16, 6
-    grain = _noise(rng, size, 4, 4)
+    grain = _noise(rng, size, 4, 4)        # fine surface texture
+    weather = _noise(rng, size, 3, 2)      # broad soot and rain patches
+    spall = _noise(rng, size, 5, 16)       # small chips and pits
     field = numpy.zeros((size, size), dtype=numpy.float32)
     shade = numpy.zeros((size, size), dtype=numpy.float32)
+    warmth = numpy.zeros((size, size), dtype=numpy.float32)
 
     row_height = size / rows
     column_width = size / columns
     mortar = max(1.0, size / 128.0)
 
+    # Each brick's own tone, keyed by course and position so it tiles.
+    tones = {}
     for y in range(size):
         row = int(y / row_height)
         in_row = y - row * row_height
         offset = 0.5 * column_width if row % 2 else 0.0
-        row_shade = rng.uniform(-0.06, 0.06)
         for x in range(size):
             u = (x + offset) % size
+            index = int(u / column_width)
             in_column = u % column_width
             joint = (in_row < mortar or in_column < mortar or
                      in_row > row_height - mortar or in_column > column_width - mortar)
             field[y, x] = 1.0 if joint else 0.0
-            shade[y, x] = row_shade
+            key = (row, index)
+            tone = tones.get(key)
+            if tone is None:
+                # Mostly near the base tone; now and then a clearly odd brick.
+                if rng.random() < 0.12:
+                    tone = (rng.uniform(-0.30, 0.28), rng.uniform(-0.14, 0.16))
+                else:
+                    tone = (rng.uniform(-0.14, 0.14), rng.uniform(-0.07, 0.08))
+                tones[key] = tone
+            shade[y, x] = tone[0]
+            warmth[y, x] = tone[1]
 
     face = numpy.array((0.42, 0.20, 0.15), dtype=numpy.float32)
     joint_colour = numpy.array((0.52, 0.50, 0.47), dtype=numpy.float32)
-    rgb = face[None, None, :] * (1.0 + shade[:, :, None] + (grain[:, :, None] - 0.5) * 0.35)
-    rgb = rgb * (1.0 - field[:, :, None]) + joint_colour[None, None, :] * field[:, :, None]
+
+    # Per-brick brightness and warmth: warmth pushes red up and blue down.
+    rgb = face[None, None, :] * (1.0 + shade[:, :, None])
+    rgb[:, :, 0] *= 1.0 + warmth
+    rgb[:, :, 2] *= 1.0 - warmth
+    rgb *= 1.0 + (grain[:, :, None] - 0.5) * 0.35
+
+    # Weathering: broad dark patches of soot and rain-streaking, on brick and
+    # mortar alike, and a scatter of spalled, chipped faces on the bricks.
+    soot = numpy.clip((0.52 - weather) * 1.6, 0.0, 1.0) * 0.38
+    chips = numpy.clip((spall - 0.64) * 5.0, 0.0, 1.0) * 0.55
+    rgb *= (1.0 - soot[:, :, None])
+    rgb *= (1.0 - (chips * (1.0 - field))[:, :, None])
+
+    # Mortar: uneven, and grubby where the weather has got into the joint.
+    joint_var = 1.0 + (grain - 0.5) * 0.5 - numpy.clip((0.56 - weather) * 1.8, 0.0, 1.0) * 0.45
+    joint_rgb = joint_colour[None, None, :] * joint_var[:, :, None]
+    rgb = rgb * (1.0 - field[:, :, None]) + joint_rgb * field[:, :, None]
     return _image("BrickWall", size, _rgba(rgb))
 
 
