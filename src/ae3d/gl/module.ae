@@ -1930,7 +1930,14 @@ render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
     // Before the cull, because a skinned mesh's own bounds are the bind pose's
     // and say nothing about where its bones have carried it.
     if m.skeleton != null { skin.skeleton_fit(m.skeleton as *Skeleton, m) }
-    if core.frustum_culling() &&
+    // An instanced model is never culled by its own bounds: they describe the
+    // one base mesh at its origin, while its instances stand anywhere in the
+    // world. Testing that one small sphere threw the whole crowd away the moment
+    // the camera looked past its origin -- every zombie vanished on a zoom.
+    // The instances cull themselves: the crowd bucket drops the fogged-out ones
+    // and the GPU clips the rest.
+    spread = m.is_instanced && core.model_instance_count(m) > 0
+    if core.frustum_culling() && !spread &&
        !core.frustum_sphere_visible(r.frustum, m.bounding_center, m.bounding_radius) {
         return
     }

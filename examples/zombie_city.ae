@@ -13,6 +13,7 @@ import ae3d.platform
 import ae3d.engine
 import ae3d.gl
 import ae3d.assets
+import ae3d.loader
 import ae3d.anim
 import ae3d.skin
 import ae3d.crowd
@@ -34,7 +35,9 @@ const CROWD_DEFAULT = 400
 // crowd is a real horde inside it -- it seeks a target that drifts along the
 // street and shoves apart from itself, so it surges and mills and never leaves
 // the street. Nothing teleports, because nothing is ever recycled.
-const BLOCK_LEN = 84.0
+const BLOCK_LEN = 84.0   // the block's ground slab, Street_Ground: x -36..48
+const BLOCK_CX = 6.0     // its centre; the road and the mirror axis sit here
+const ROAD_LEN = 68.0    // the road mesh is authored 68m; stretched to the block
 const TILES = 7          // blocks along the street, centred on the middle one
 const STREET_X0 = 0.0 - 280.0
 const STREET_X1 = 290.0
@@ -59,7 +62,12 @@ const LOD_NEAR = 0.0    // near tier keeps the full mesh (0 = no decimation)
 // 30 to 38fps. Below ~100 tris the bone-aware clustering bottoms out and there
 // is nothing more to win. AE3D_LODFAR (hundredths of the cell) tunes it live.
 const LOD_FAR = 0.5
-const NEAR_DIST = 12.0
+// At the inspectable count every zombie is drawn from the full mesh: the whole
+// street sits inside the near band, so nothing ever swaps to the decimated
+// far model. A swap at a fixed distance is a silhouette pop, and when the
+// camera zooms, dozens cross the line at once -- it read as the crowd
+// teleporting. AE3D_NEAR pulls the band in when the count needs the far tier.
+const NEAR_DIST = 600.0
 // The crowd fills the whole street, but the fog swallows it by ~150m, so a
 // zombie past this is invisible however many there are. Culling it from the
 // draw there -- for free, in the bucket that already has its distance -- means
@@ -100,7 +108,10 @@ var g_farcount: *Column = null   // one slot the native bucket writes the far co
 // Separation is the crowd's heaviest pass, so it runs every SEP_INTERVAL
 // frames rather than every frame -- see the note at its call site. AE3D_SEPN
 // overrides (1 = every frame, 0 = never).
-const SEP_INTERVAL = 2
+// Every frame. Running it every other frame at double strength made each
+// zombie's speed alternate frame to frame -- a shimmer you could see up close.
+// At the inspectable count that costs nothing; AE3D_SEPN throttles it at scale.
+const SEP_INTERVAL = 1
 var g_sepn = SEP_INTERVAL
 var g_frame = 0
 
@@ -219,11 +230,21 @@ add_tile(e: *Engine, m: *Manifest, off_x: float, flip: bool) -> ptr {
                 // Every other block is mirrored along the street (its root
                 // positions reflected about the block centre; the parented trim
                 // rides along), so the terrace order alternates and the city
-                // does not read as one block copied down the road.
+                // does not read as one block copied down the road. The block is
+                // centred at BLOCK_CX, not 0: reflecting about 0 slid every
+                // mirrored block 12m along the road and opened a gap at each seam.
                 wp = core.model_world_position(model)
                 nx = wp.x + off_x
-                if flip { nx = off_x - wp.x }
+                if flip { nx = off_x + (2.0 * BLOCK_CX - wp.x) }
                 core.model_set_position(model, nx, wp.y, wp.z)
+            }
+            // The road and its kerbs are authored 68m long inside an 84m block,
+            // so tiled at the block's pitch every seam was 16m of missing road.
+            // Stretch them along the street to the block's full length; they then
+            // meet the next block's exactly, and the tarmac stretches 23% --
+            // nothing the eye picks out.
+            if string.contains(name, "Street_Road") == 1 || string.contains(name, "Kerb") == 1 {
+                core.model_set_scale(model, BLOCK_LEN / ROAD_LEN, 1.0, 1.0)
             }
             if string.contains(name, "LampHead") == 1 { core.model_set_exposure(model, 16.0) }
             else if string.contains(name, "_Lit") == 1 {
@@ -233,8 +254,12 @@ add_tile(e: *Engine, m: *Manifest, off_x: float, flip: bool) -> ptr {
                 if next_random() < 0.65 { core.model_set_exposure(model, 8.0 + next_random() * 8.0) }
                 else { core.model_set_exposure(model, 0.0) }
             }
+            // A damp road, not a mirror. At 0.8 the lamps smeared one huge
+            // highlight across the tarmac that slid with every step of the
+            // camera -- it read as the light itself moving. A modest sheen keeps
+            // the wet look and stays put.
             if string.contains(name, "Road") == 1 || string.contains(name, "Ground") == 1 {
-                core.model_set_reflectivity(model, 0.8)
+                core.model_set_reflectivity(model, 0.3)
             }
             engine.engine_add_model(e, model)
         }
@@ -264,6 +289,15 @@ on_start(data: ptr) {
     } else if view == 2 {
         core.camera_set_position(cam, core.vec3(0.0, 0.9, 0.0 - 1.0))
         core.camera_look_at(cam, core.vec3(0.0 - 12.0, 0.9, 0.0 - 3.2))
+    } else if view == 3 {
+        // A free camera for sweeps: AE3D_CAMX/Y/Z place it (metres), looking
+        // down the street. Used to verify the crowd from many positions --
+        // a single still cannot show a zombie vanishing on a zoom.
+        cx = core.env_int("AE3D_CAMX", 40) as float
+        cy = core.env_int("AE3D_CAMY", 3) as float
+        cz = core.env_int("AE3D_CAMZ", 2) as float
+        core.camera_set_position(cam, core.vec3(cx, cy, cz))
+        core.camera_look_at(cam, core.vec3(cx - 30.0, 0.7, 0.0 - 2.9))
     } else {
         core.camera_set_position(cam, core.vec3(STREET_X1 + 3.0, 3.6, 2.6))
         core.camera_look_at(cam, core.vec3(0.0 - 18.0, 0.7, 0.0 - 2.9))
@@ -314,6 +348,20 @@ on_start(data: ptr) {
         if t == 0 { g_scene = tile }
         t = t + 1
     }
+
+    // The ground the city stands on. The street block is a strip of road and
+    // pavement with buildings on it and nothing else: seen from anywhere but
+    // straight down the road, the blocks were islands in a black void, with
+    // void between neighbouring buildings and void under your feet where the
+    // strip ended. One wide, dark, matte plane just under road level, so every
+    // gap reads as ground -- an alley, a yard, the earth -- and the city holds
+    // together as one place. Below the road so the road still draws on top.
+    ground = loader.plane(2, 900.0)
+    core.model_set_position(ground, 0.0, ROAD_Y - 0.08, 0.0 - 2.9)
+    core.model_set_diffuse(ground, 0.075, 0.072, 0.068)
+    core.model_set_specular(ground, 0.02, 0.02, 0.02)
+    core.model_set_pbr(ground, 0.0, 0.98)
+    engine.engine_add_model(e, ground)
 
     // The crowd. The real zombie loaded twice for the two distance tiers, plus
     // its clothes for the near one; all posed by the one baked bank.
@@ -397,7 +445,7 @@ log_scene(e: *Engine, cam: *Camera, near_tris: int, cloth_tris: int, far_tris: i
     println("zombie_city[diag] city: ${TILES} blocks, block ${BLOCK_LEN}m, street x[${STREET_X0}..${STREET_X1}], road z[${ROAD_Z0}..${ROAD_Z1}] y=${ROAD_Y}")
     cp = cam.position
     println("zombie_city[diag] camera: pos(${cp.x}, ${cp.y}, ${cp.z}) view=${core.env_int("AE3D_VIEW", 0)} far=300")
-    println("zombie_city[diag] shadow: distance 18m, size 2048; fog 12..150m")
+    println("zombie_city[diag] shadow: distance ${core.env_int("AE3D_SHADOWDIST", 48)}m, size 2048; fog 12..150m")
     n = list.size(g_lamps)
     i = 0
     while i < n {
@@ -472,7 +520,11 @@ main() {
     engine.engine_set_post(e, true, true, 0.85, 0.85)
     engine.engine_set_fog(e, core.fog_distance(12.0, 150.0,
                                                core.vec3(SKY_R, SKY_G, SKY_B), 0.95))
-    engine.engine_set_shadow_distance(e, core.env_int("AE3D_SHADOWDIST", 18) as float)
+    // A wide shadow box. A small one slides with the camera, so shadows at its
+    // edge appear and vanish as you move -- the shadows seemed to follow the
+    // camera. 48m keeps the whole visible street in one stable, texel-snapped
+    // region; 2048 texels over it is still ~2cm a texel.
+    engine.engine_set_shadow_distance(e, core.env_int("AE3D_SHADOWDIST", 48) as float)
     engine.engine_set_frustum_culling(e, true)
     engine.engine_set_user_data(e, e as ptr)
     engine.engine_on_start(e, on_start as fn(ptr))
