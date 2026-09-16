@@ -25,7 +25,9 @@ const SKY_G = 0.088
 const SKY_B = 0.125
 const FRAMES = 48
 const LOD_CELL = 0.09
-const CROWD_DEFAULT = 70000
+// A small crowd by default so the scene is inspectable -- a zombie fills enough
+// pixels to judge its mesh, pose, shadow and lighting. Scale up with AE3D_CROWD.
+const CROWD_DEFAULT = 400
 
 // The road runs along x; Blender Y became ae3d -Z, so the carriageway sits at
 // about z = -2.94. The street block is tiled along x into a longer city, and the
@@ -48,7 +50,7 @@ const MAX_SPEED = 2.0        // capped, so a shove can never fling a zombie and 
 // the ones far off from a cheap one, so most of a city-sized crowd costs almost
 // nothing and the count can climb. A zombie within NEAR_DIST of the camera is
 // near; beyond it, far.
-const LOD_NEAR = 0.06
+const LOD_NEAR = 0.0    // near tier keeps the full mesh (0 = no decimation)
 // The far tier is the whole crowd's GPU cost: a far zombie is ~200 tris at
 // cell 0.24, and there are hundreds of thousands of them, so the far draw is
 // the frame's biggest single load. A far zombie is metres off and fog-dimmed,
@@ -166,14 +168,19 @@ bake_zombie(m: *Manifest, entry: *Entry) -> ptr {
     return bank
 }
 
-// Decimate a figure's mesh to a crowd LOD at `cell` and wire it as an instanced,
-// pose-bank-posed crowd, reserving room for the whole count -- a distance tier
-// will fill it with as many as fall in its band each frame. Returns the LOD's
-// triangle count.
+// Wire a figure as an instanced, pose-bank-posed crowd, reserving room for the
+// whole count -- a distance tier fills it with as many as fall in its band each
+// frame. `cell > 0` first decimates the mesh to a crowd LOD at that cell; `cell
+// <= 0` keeps the full mesh, which the near tier needs: the body and the clothes
+// are two coincident meshes, and decimating them independently pulls their
+// vertices apart so the skin pokes through the cloth in patches. Only the far
+// tier, metres off and fogged, can afford the decimation. Returns the tri count.
 setup_crowd(model: *Model, cell: float) -> int {
-    src = core.model_mesh(model)
-    lod = core.mesh_decimate(src, cell)
-    if lod != null { core.model_set_mesh(model, lod) }
+    if cell > 0.0 {
+        src = core.model_mesh(model)
+        lod = core.mesh_decimate(src, cell)
+        if lod != null { core.model_set_mesh(model, lod) }
+    }
     // Dead flesh and damp cloth, not wet plastic: kill the specular and roughen
     // the surface so the lamps do not smear an oily highlight across every
     // zombie. Keeps the texture; only the shine goes.
@@ -346,10 +353,11 @@ on_start(data: ptr) {
         ecs.column_set(g_yaw, slot, 0, down + (next_random() - 0.5) * 1.8)
         // A muted tint per zombie -- some greener, some greyer, some paler and
         // some darker -- so the horde is not one flat colour. It multiplies the
-        // skin and cloth texture, so it stays in the dead-flesh range.
-        tr = 0.55 + next_random() * 0.55
-        tg = 0.60 + next_random() * 0.45
-        tb = 0.50 + next_random() * 0.45
+        // skin and cloth texture, so keep it in the dead-flesh range: green the
+        // top channel, blue held lowest and narrow, so none tint blue or purple.
+        tr = 0.50 + next_random() * 0.35
+        tg = 0.55 + next_random() * 0.35
+        tb = 0.40 + next_random() * 0.22
         ecs.column_set3(g_color, slot, core.vec3(tr, tg, tb))
         i = i + 1
     }
@@ -368,7 +376,39 @@ on_start(data: ptr) {
     engine.engine_add_model(e, g_far_body)
 
     assets.manifest_free(m)
-    println("zombie_city: ${g_count} zombies -- near ${near_tris}+${cloth_tris} tris, far ${far_tris} tris, ${FRAMES} poses")
+    log_scene(e, cam, near_tris, cloth_tris, far_tris)
+}
+
+// Dump the whole scene so it is debuggable without guessing: the crowd, the
+// tiers and their triangle budgets, every light with its real values, the
+// shadow and fog envelope, and the camera. Printed once at start-up; grep
+// "[diag]" for it.
+log_scene(e: *Engine, cam: *Camera, near_tris: int, cloth_tris: int, far_tris: int) {
+    println("zombie_city[diag] ================ SCENE ================")
+    println("zombie_city[diag] crowd: ${g_count} zombies (AE3D_CROWD), sep every ${g_sepn} frame(s)")
+    println("zombie_city[diag] tiers: near ${near_tris}+${cloth_tris} tris (full mesh), far ${far_tris} tris; ${FRAMES} pose bank")
+    println("zombie_city[diag] LOD: near<${g_near_dist}m detailed, beyond far; cull ${g_cull_dist}m")
+    println("zombie_city[diag] city: ${TILES} blocks, block ${BLOCK_LEN}m, street x[${STREET_X0}..${STREET_X1}], road z[${ROAD_Z0}..${ROAD_Z1}] y=${ROAD_Y}")
+    cp = cam.position
+    println("zombie_city[diag] camera: pos(${cp.x}, ${cp.y}, ${cp.z}) view=${core.env_int("AE3D_VIEW", 0)} far=300")
+    println("zombie_city[diag] shadow: distance 18m, size 2048; fog 12..150m")
+    n = list.size(g_lamps)
+    i = 0
+    while i < n {
+        L = list.get_raw(g_lamps, i) as *Light
+        if L != null {
+            c = L.color
+            if L.mode == core.MODE_DIRECTIONAL {
+                d = L.direction
+                println("zombie_city[diag] light ${i}: DIRECTIONAL dir(${d.x}, ${d.y}, ${d.z}) rgb(${c.x}, ${c.y}, ${c.z}) intensity ${L.intensity} ambient ${L.ambient_strength}")
+            } else {
+                p = L.position
+                println("zombie_city[diag] light ${i}: POINT pos(${p.x}, ${p.y}, ${p.z}) rgb(${c.x}, ${c.y}, ${c.z}) intensity ${L.intensity}")
+            }
+        }
+        i = i + 1
+    }
+    println("zombie_city[diag] ======================================")
 }
 
 on_update(data: ptr, delta: float) {
