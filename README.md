@@ -238,7 +238,10 @@ low grazing view and a view toward the sun, on both backends, and lays the
 six frames out as one picture (`tools/montage.ae`). One camera flatters a
 scene: a sea that reads as water from the shore reads as stripes from a low
 one, and a cloud that reads as a cloud looking up reads as a die looking
-toward the sun. The sheet is what a look is judged from.
+toward the sun. The sheet is what a look is judged from; a detail on it is
+judged at full size with `tools/crop.ae` (a region of a frame, by pixel),
+and in numbers with `tools/probe_image.ae` (the mean colour and greyness of
+each band of a frame, and what moved between two).
 
 ## Driving it from a program
 

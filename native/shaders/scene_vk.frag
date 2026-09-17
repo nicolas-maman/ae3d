@@ -711,11 +711,21 @@ vec3 getGradient(int hash) {
 const float CLOUD_BASE = 1400.0;
 const float CLOUD_TOP = 1950.0;
 
-// A hash that is a hash on small integer lattices: the product-of-fracts
-// one drifted smoothly across neighbouring cells, and the noise built on
-// it was a gentle gradient with no cloud in it.
+// A hash on the lattice's integer corners, in integers: the sine hash the
+// clouds were first built on is a sine of a number in the thousands, and
+// the two backends' sines disagree out there (the Vulkan sky's clouds came
+// out smeared into streaks), while the product-of-fracts one drifted
+// smoothly across neighbouring cells and made no cloud at all. Bit mixing
+// is exact on both.
 float cloudHash(vec3 p) {
-    return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
+    uvec3 v = uvec3(ivec3(floor(p))) * uvec3(1597334677u, 3812015801u, 2798796415u);
+    uint n = (v.x ^ v.y ^ v.z) * 1597334677u;
+    n ^= n >> 16u;
+    n *= 0x7feb352du;
+    n ^= n >> 15u;
+    n *= 0x846ca68bu;
+    n ^= n >> 16u;
+    return float(n) * (1.0 / 4294967296.0);
 }
 
 float cloudNoise(vec3 x) {
@@ -748,7 +758,12 @@ float cloudFbm(vec3 p) {
 // field, drifting with the wind, shaped by the cover setting so 0.3 is a
 // few fair-weather clouds and 0.8 an overcast with holes.
 float cloudCoverage(vec2 xz, float cover, float t) {
-    vec2 p = xz * 0.0012 + vec2(t * 0.004, t * 0.0015);
+    vec2 p = xz * 0.00075 + vec2(t * 0.003, t * 0.0011);
+    // Bent before it is read: value noise is a lattice, and read straight
+    // its clouds were squares with rounded corners. A slow warp of the
+    // lookup by another noise turns the lattice into lobes.
+    vec2 warp = vec2(cloudNoise(vec3(p * 1.6, 1.3)), cloudNoise(vec3(p * 1.6, 7.9))) - 0.5;
+    p += warp * 0.55;
     // The fbm of a value noise sits between 0.3 and 0.7 nearly everywhere;
     // stretched over 0..1 first, so the cover setting cuts it where it says.
     float shape = clamp((cloudFbm(vec3(p, 3.7)) - 0.3) / 0.4, 0.0, 1.0);
@@ -757,7 +772,7 @@ float cloudCoverage(vec2 xz, float cover, float t) {
     // sprinkle of the same puff.
     float bank = cloudNoise(vec3(p * 0.13 + vec2(t * 0.001, 0.0), 8.1));
     float threshold = 1.0 - cover * (0.45 + 1.1 * bank);
-    return clamp((shape - threshold) / 0.3, 0.0, 1.0);
+    return clamp((shape - threshold) / 0.35, 0.0, 1.0);
 }
 
 // The clouds' shadow at a point: the coverage over it, looked up where the
