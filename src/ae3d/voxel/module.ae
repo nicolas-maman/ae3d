@@ -569,15 +569,25 @@ world_build_surface(w: *World) -> *Model {
 emit_quads(w: *World, m: *Model, cells: int[], cells_x: int, cells_y: int, cells_z: int) {
     plane = cells_y * cells_z
 
-    x = 1
+    // Every corner from the first, not the second. A quad around the edge
+    // from corner (x, y, z) along one axis is stitched from the four cells
+    // around that edge, which lie one cell back along the *other* two axes
+    // only -- so an x edge in column 0 is a perfectly good quad, needing
+    // nothing at x - 1. Starting all three loops at 1 skipped the first row
+    // of faces on every axis, and a field closed at its boundary still
+    // meshed to a surface open along the grid's rim: a camera whose ray
+    // slipped in through that seam saw the inside of the volume, where every
+    // face is a back face and culled, and the terrain example read as hills
+    // you could see through.
+    x = 0
     while x < cells_x {
-        y = 1
+        y = 0
         while y < cells_y {
-            z = 1
+            z = 0
             while z < cells_z {
                 here = world_sdf_get(w, x, y, z)
 
-                if inside(here) != inside(world_sdf_get(w, x + 1, y, z)) {
+                if y > 0 && z > 0 && inside(here) != inside(world_sdf_get(w, x + 1, y, z)) {
                     a = cells[x * plane + (y - 1) * cells_z + (z - 1)]
                     b = cells[x * plane + y * cells_z + (z - 1)]
                     c = cells[x * plane + y * cells_z + z]
@@ -585,7 +595,7 @@ emit_quads(w: *World, m: *Model, cells: int[], cells_x: int, cells_y: int, cells
                     push_quad(m, a, b, c, d, !inside(here))
                 }
 
-                if inside(here) != inside(world_sdf_get(w, x, y + 1, z)) {
+                if x > 0 && z > 0 && inside(here) != inside(world_sdf_get(w, x, y + 1, z)) {
                     a = cells[(x - 1) * plane + y * cells_z + (z - 1)]
                     b = cells[x * plane + y * cells_z + (z - 1)]
                     c = cells[x * plane + y * cells_z + z]
@@ -593,7 +603,7 @@ emit_quads(w: *World, m: *Model, cells: int[], cells_x: int, cells_y: int, cells
                     push_quad(m, a, b, c, d, inside(here))
                 }
 
-                if inside(here) != inside(world_sdf_get(w, x, y, z + 1)) {
+                if x > 0 && y > 0 && inside(here) != inside(world_sdf_get(w, x, y, z + 1)) {
                     a = cells[(x - 1) * plane + (y - 1) * cells_z + z]
                     b = cells[x * plane + (y - 1) * cells_z + z]
                     c = cells[x * plane + y * cells_z + z]

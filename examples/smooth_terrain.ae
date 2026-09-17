@@ -10,6 +10,8 @@ import ae3d.engine
 import ae3d.gl
 import ae3d.noise
 import ae3d.voxel
+import ae3d.rendering
+import ae3d.water
 
 extern clock_ns() -> long
 
@@ -18,8 +20,22 @@ const WORLD_Z = 160
 const WORLD_HEIGHT = 64
 const CELL = 6.0
 
+// The sea the terrain stands in, so it is an island and not a slab in the
+// air: the water surface lies at y = 0 whatever its model is told, so the
+// terrain is lowered until the sea cuts it this far above its lowest point.
+// And the sun where the painted sky has it (tools/make_sky.ae).
+const SEA_DEPTH = 34.0
+const SUN_X = 0.0 - 0.295
+const SUN_Y = 0.408
+const SUN_Z = 0.0 - 0.865
+const HAZE_R = 0.86
+const HAZE_G = 0.80
+const HAZE_B = 0.70
+
 var g_world: ptr = null
 var g_surface: ptr = null
+var g_sea: ptr = null
+var g_sky: *Skybox = null
 
 // The field is the signed height above the terrain, so it is negative under the
 // surface and zero exactly on it, which is what the mesher interpolates against.
@@ -34,10 +50,29 @@ build_field(world: *World) {
             sample = noise.fbm2(field, (x * 1.0) * 0.022, (z * 1.0) * 0.022, 5, 0.5)
             ridged = noise.ridge(field, (x * 1.0) * 0.006, 0.0, (z * 1.0) * 0.006, 3, 0.5)
             height = 12.0 + (sample + 1.0) * 0.5 * 22.0 + ridged * 16.0
+            // An island: the land falls away toward the grid's edges, so its
+            // rim -- and the walls the field closes the volume with -- lie
+            // under the sea rather than standing as a cliff at the edge of
+            // the world.
+            dx = (x as float) - (WORLD_X as float) * 0.5
+            dz = (z as float) - (WORLD_Z as float) * 0.5
+            shore = core.sqrt_of(dx * dx + dz * dz) / ((WORLD_X as float) * 0.5)
+            keep = 1.0 - (shore - 0.55) / 0.40
+            if keep > 1.0 { keep = 1.0 }
+            if keep < 0.0 { keep = 0.0 }
+            keep = keep * keep * (3.0 - 2.0 * keep)
+            height = 6.0 + (height - 6.0) * keep
 
             y = 0
             while y < WORLD_HEIGHT {
-                voxel.world_sdf_set(world, x, y, z, (y * 1.0) - height)
+                value = (y * 1.0) - height
+                // The volume closed: outside on the boundary rows puts a
+                // floor and walls one cell in, under the sea, so the island
+                // is a solid and not a sheet.
+                if y == 0 || x == 0 || z == 0 || x == WORLD_X - 1 || z == WORLD_Z - 1 {
+                    value = 1.0
+                }
+                voxel.world_sdf_set(world, x, y, z, value)
                 y = y + 1
             }
             z = z + 1
@@ -70,25 +105,76 @@ on_start(data: ptr) {
         return
     }
 
-    core.model_matte(surface, 0.42, 0.55, 0.32)
-    core.model_set_pbr(surface, 0.0, 0.85)
+    core.model_matte(surface, 0.40, 0.50, 0.28)
+    core.model_set_pbr(surface, 0.0, 0.9)
+    // Ground is not one colour: the shader's own noise breaks the slopes
+    // into patches, which is all the texture a hillside this size needs.
+    config = rendering.default_config()
+    config.perlin_noise = true
+    config.noise_scale = 0.03
+    config.noise_intensity = 0.6
+    rendering.apply(surface, config)
     engine.engine_add_model(e, surface)
+
+    // The sea around it. The world is 960 m across and the surface reaches
+    // well past that, so the island sits in open water to the horizon.
+    sea = water.simulation_new(12000.0, 3.0)
+    water.simulation_set_color(sea, 0.03, 0.14, 0.22)
+    water.simulation_set_sky_color(sea, 0.50, 0.64, 0.80)
+    water.simulation_set_reflection(sea, 0.7)
+    water.simulation_set_foam(sea, true, 0.4)
+    // Opaque enough that the drowned slopes do not show through as a shadow
+    // of the island under the island.
+    water.simulation_set_opacity(sea, 0.92)
+    ocean = water.simulation_build(sea, water.RESOLUTION)
+    if ocean != null {
+        core.model_set_position(ocean, (WORLD_X as float) * CELL * 0.5, 0.0,
+                                (WORLD_Z as float) * CELL * 0.5)
+        engine.engine_add_model(e, ocean)
+    }
+    g_sea = sea as ptr
 
     g_world = world as ptr
     g_surface = surface as ptr
 
-    println("surface: ${core.mesh_vertex_count(surface.mesh)} vertices, ${core.mesh_index_count(surface.mesh) / 3} triangles")
+    lowest = 1000000.0
+    highest = 0.0 - 1000000.0
+    v = 0
+    while v < core.mesh_vertex_count(surface.mesh) {
+        at = core.mesh_position(surface.mesh, v)
+        py = at.y
+        // The lowest land: not the floor the field closes the volume with,
+        // and not the walls at its edges, which run from the floor up.
+        edge = CELL * 2.5
+        inland = at.x > edge && at.z > edge &&
+                 at.x < (WORLD_X as float) * CELL - edge && at.z < (WORLD_Z as float) * CELL - edge
+        if inland && py > CELL * 1.5 && py < lowest { lowest = py }
+        if py > highest { highest = py }
+        v = v + 1
+    }
+    core.model_set_position(surface, 0.0, 0.0 - (lowest + SEA_DEPTH), 0.0)
+    println("surface: ${core.mesh_vertex_count(surface.mesh)} vertices, ${core.mesh_index_count(surface.mesh) / 3} triangles, ${highest - lowest} m of relief, ${SEA_DEPTH} m of it under the sea")
     println("field ${(filled - started) / 1000000} ms, mesh ${(meshed - filled) / 1000000} ms")
 
     renderer = engine.engine_gl_renderer(e)
-    gl.renderer_set_clear_color(renderer, 0.52, 0.68, 0.85)
+    gl.renderer_set_clear_color(renderer, HAZE_R, HAZE_G, HAZE_B)
     gl.renderer_set_fxaa(renderer, true)
+    g_sky = gl.skybox_create(renderer, "resources/sky/desert.png")
+    engine.engine_set_skybox(e, g_sky as ptr)
 
+    // From over the water, low enough that the island stands against the
+    // sky and the sea runs out to the horizon under it.
     cam = engine.engine_camera(e)
-    core.camera_set_position(cam, core.vec3(0.0 - 240.0, 360.0, 0.0 - 240.0))
+    core.camera_set_position(cam, core.vec3(0.0 - 170.0, 22.0, 0.0 - 120.0))
     core.camera_set_speed(cam, 500.0)
-    core.camera_set_far(cam, 20000.0)
-    core.camera_look_at(cam, core.vec3(480.0, 90.0, 480.0))
+    core.camera_set_far(cam, 30000.0)
+    core.camera_look_at(cam, core.vec3(420.0, 45.0, 420.0))
+}
+
+on_update(data: ptr, delta: float) {
+    sea = g_sea as *Simulation
+    if sea == null { return }
+    water.simulation_update(sea, delta)
 }
 
 main() {
@@ -97,10 +183,16 @@ main() {
     engine.engine_set_title(e, "ae3d - smooth terrain")
     engine.engine_set_face_culling(e, true)
 
-    light = core.light_sun(core.vec3(0.4, 0.8, 0.35))
+    light = core.light_directional(core.vec3(SUN_X, SUN_Y, SUN_Z),
+                                   core.vec3(1.0, 0.94, 0.82), 2.0)
+    light.ambient_strength = 0.30
     engine.engine_set_light(e, light)
+    engine.engine_set_shadow_distance(e, 700.0)
+    engine.engine_set_fog(e, core.fog_distance(1500.0, 9000.0,
+                                               core.vec3(HAZE_R, HAZE_G, HAZE_B), 0.9))
     engine.engine_set_user_data(e, e as ptr)
     engine.engine_on_start(e, on_start as fn(ptr))
+    engine.engine_on_update(e, on_update as fn(ptr, float))
 
     engine.engine_run(e, 0 - 1, 0 - 1)
 
@@ -110,6 +202,8 @@ main() {
     if surface != null { core.model_free(surface) }
     world = g_world as *World
     if world != null { voxel.world_free(world) }
+    sea = g_sea as *Simulation
+    if sea != null { water.simulation_free(sea) }
     core.light_free(light)
     engine.engine_free(e)
 }
