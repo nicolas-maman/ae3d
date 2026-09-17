@@ -267,8 +267,18 @@ run_checks(backend: *Backend, name: string) {
     bounded_rows = darkened(bounded, rows_lit)
 
     println("  ${name}: a nine-unit post in a world 3840 across darkens ${wide_rows} rows fitted to the scene, ${bounded_rows} bounded to 260")
+    // The bounded map must keep the post's shadow, and keep it at least as
+    // well as the map spread over the whole world does. Not "twice as
+    // many rows": that used to hold because the floor beyond the box was
+    // shaded by the map's border texel -- sixty-nine rows darkened, most of
+    // them a shadow of nothing -- and a lookup outside the box is lit now.
     check("${name} a shadow distance keeps a small shadow in a large world",
-          bounded_rows > 2 && bounded_rows > wide_rows * 2)
+          bounded_rows > 2 && bounded_rows >= wide_rows)
+    // And nothing past the box is darkened: the rows nearest the camera lie
+    // outside a 260-unit box around it only where the floor runs on, and a
+    // box's edge must not be a line across the ground.
+    check("${name} the floor beyond the shadow box is lit",
+          bounded_rows < HEIGHT / 4)
 
     core.backend_set_shadow_distance(backend, 0.0)
     blocker.visible = true
