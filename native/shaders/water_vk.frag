@@ -249,6 +249,25 @@ float noise(vec2 st) {
     return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
 }
 
+// The same noise with its slope: the value in x, the derivative along
+// each axis in yz, from the interpolation's own polynomial, so a surface
+// ridden on it can shade without three lookups per point.
+vec3 noised(vec2 st) {
+    vec2 i = floor(st);
+    vec2 f = fract(st);
+    float a = hash(i);
+    float b = hash(i + vec2(1.0, 0.0));
+    float c = hash(i + vec2(0.0, 1.0));
+    float d = hash(i + vec2(1.0, 1.0));
+    vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    vec2 du = 30.0 * f * f * (f * (f - 2.0) + 1.0);
+    float k1 = b - a;
+    float k2 = c - a;
+    float k3 = a - b - c + d;
+    return vec3(a + k1 * u.x + k2 * u.y + k3 * u.x * u.y,
+                du * vec2(k1 + k3 * u.y, k2 + k3 * u.x));
+}
+
 // GPU Gems Chapter 5: Multi-octave Perlin noise for enhanced detail
 float perlinNoise(vec2 p, int octaves) {
     float value = 0.0;
@@ -414,9 +433,11 @@ void waveField(vec2 p, float t, float dist, out vec3 normal, out vec3 swell,
     // noise, so each crest meanders, and the two noise fields turn with
     // the octave so no two octaves bend alike.
     vec2 warp = vec2(noise(p * k0 * 0.12 + vec2(3.1, 7.7)), noise(p * k0 * 0.12 + vec2(9.2, 1.3))) * 2.0 - 1.0;
-    for (int j = 1; j <= 8; j++) {
+    // Fanned a little about the wind, not a lot: two trains crossing at a
+    // right angle print a diamond lattice on the sea, whatever bends them.
+    for (int j = 1; j <= 4; j++) {
         float k = k0 * pow(1.65, float(j));
-        float turn = sin(float(j) * 2.3 + float(j * j) * 0.61) * 1.0;
+        float turn = sin(float(j) * 2.3 + float(j * j) * 0.61) * 0.5;
         vec2 d = vec2(wind.x * cos(turn) - wind.y * sin(turn), wind.x * sin(turn) + wind.y * cos(turn));
         float A = 0.028 / k;
         float lambda = 6.28318531 / k;
@@ -428,6 +449,28 @@ void waveField(vec2 p, float t, float dist, out vec3 normal, out vec3 swell,
         dhx += d.x * c;
         dhz += d.y * c;
         slopeMax += A * k * fade;
+    }
+    // Under the sines, the chop. Not more sines: a sum of straight waves
+    // is a lattice from above however it is fanned, and the short ones
+    // made the whole sea a crosshatch. Three octaves of noise instead,
+    // one cell per wavelength, blown along the wind at the speed deep
+    // water gives that length, whose slope is read off the noise's own
+    // derivative. Noise has no crest lines to cross.
+    float kc = k0 * pow(1.65, 5.0);
+    for (int j = 0; j < 3; j++) {
+        float k = kc * pow(2.1, float(j));
+        float lambda = 6.28318531 / k;
+        float fade = (1.0 - smoothstep(lambda * 40.0, lambda * 160.0, dist)) * sets;
+        if (fade <= 0.0) continue;
+        float A = 0.16 / k;
+        vec2 st = p * (k / 6.28318531) - wind * (t * sqrt(9.81 * k) * speedMul / 6.28318531)
+                + vec2(float(j) * 17.3, float(j) * 5.9);
+        vec3 n = noised(st);
+        height += A * (n.x - 0.5) * fade;
+        float slope = A * k / 6.28318531 * fade;
+        dhx += n.y * slope;
+        dhz += n.z * slope;
+        slopeMax += slope * 1.5;
     }
     normal = normalize(vec3(-dhx, 1.0, -dhz));
     swell = normalize(vec3(-sx, 1.0, -sz));
@@ -510,7 +553,10 @@ void main() {
     // How far the ripples bend the mirror: the distortion setting, its
     // default of a fifth being the bend that reads as water without pulling
     // the horizon down into it.
+    // Less far off: the horizon mirrored in every far ripple is a sea of
+    // pale specks, and from a distance a sea is a mirror of the swell.
     float bend = enableWaterDistortion ? clamp(waterDistortionIntensity, 0.0, 1.0) * 0.6 : 0.12;
+    bend *= 1.0 - 0.7 * far;
     vec3 mirrorNorm = normalize(mix(swell, norm, bend));
 
     vec3 halfDir = normalize(lightDir + viewDir);
