@@ -300,7 +300,11 @@ def _skin_marks(blotch, vein, pore):
     """Bruise, rot, veins and pores as 0..1 fields, from the shared noise."""
     bruise = numpy.clip((blotch - 0.54) * 3.2, 0.0, 1.0)
     rot = numpy.clip((0.42 - blotch) * 3.2, 0.0, 1.0)
-    lines = numpy.clip(1.0 - numpy.abs(vein - 0.5) / 0.022, 0.0, 1.0)
+    # Thin, and only where the skin is thin enough to show them: gated by the
+    # blotch field so they lace a patch here and there rather than crazing
+    # the whole body like a map of rivers, which is how they read up close.
+    lines = numpy.clip(1.0 - numpy.abs(vein - 0.5) / 0.014, 0.0, 1.0)
+    lines = lines * numpy.clip((blotch - 0.40) * 4.0, 0.0, 1.0)
     return bruise, rot, lines, pore
 
 
@@ -333,7 +337,7 @@ def skin(size=1024, seed=71):
         numpy.array((0.15, 0.18, 0.11), dtype=numpy.float32)[None, None, :] * r[:, :, None]
     # Veins: the contour lines of a noise field are thin, branching and
     # closed -- the shape veins have.
-    rgb *= (1.0 - (lines * 0.42)[:, :, None])
+    rgb *= (1.0 - (lines * 0.28)[:, :, None])
     # Pores.
     rgb *= (0.90 + pore[:, :, None] * 0.20)
     return _image("ZombieSkin", size, _rgba(rgb))
@@ -609,7 +613,7 @@ def skin_normal(size=1024, seed=71):
     the surface -- so a lamp rakes the same marks the colour shows."""
     blotch, mottle, vein, pore = _skin_fields(size, seed)
     bruise, rot, lines, pore = _skin_marks(blotch, vein, pore)
-    height = mottle * 0.30 + bruise * 0.20 - rot * 0.25 - lines * 0.45 - pore * 0.12
+    height = mottle * 0.30 + bruise * 0.20 - rot * 0.25 - lines * 0.25 - pore * 0.12
     return _normal_from_height(height, 2.4, "ZombieSkinNormal")
 
 
