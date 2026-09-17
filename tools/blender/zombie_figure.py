@@ -47,16 +47,10 @@ JOINTS = (
     # the neck, and the neck points up -- aiming that at anything ahead lays the
     # head over on its side.
     ("Face",      "Head",      (0.11,  0.00,  0.02), 0.000),
-    # The skull. A head that is one sphere has no face from any angle; these
-    # grow the surface out where a skull actually stands proud -- the brow
-    # ridge above the eyes, the cheekbones, and the jaw and chin below -- so
-    # the head reads as a head with a front, sunken between brow and jaw where
-    # the eyes sit. They ride the Head bone and carry no animation of their own.
-    ("Brow",      "Head",      (0.085, 0.00,  0.055), 0.060),
-    ("CheekL",    "Head",      (0.070, 0.052, -0.010), 0.046),
-    ("CheekR",    "Head",      (0.070, -0.052, -0.010), 0.046),
-    ("Jaw",       "Head",      (0.075, 0.00, -0.070), 0.058),
-    ("Chin",      "Jaw",       (0.020, 0.00, -0.030), 0.036),
+    # No skull joints. The skin modifier grows a tube along every edge, so
+    # joints radiating from the head's centre made a ring of tubes around
+    # a sunken middle: from the front, a crater with a rim, not a face. The
+    # face is carved into the head's own sphere instead (carve_face).
 
     ("ShoulderL", "Chest",     (0.00,  0.17,  0.14), 0.072),
     ("ElbowL",    "ShoulderL", (0.00,  0.02, -0.29), 0.055),
@@ -79,8 +73,7 @@ JOINTS = (
 
 # Which joints wear cloth and which are bare. A zombie in a suit that has been
 # through something is skin at the head, the forearms and the hands.
-BARE = {"Neck", "Head", "Crown", "Brow", "CheekL", "CheekR", "Jaw", "Chin",
-        "WristL", "HandL", "WristR", "HandR"}
+BARE = {"Neck", "Head", "Crown", "WristL", "HandL", "WristR", "HandR"}
 
 PARENT = {name: parent for name, parent, _offset, _radius in JOINTS}
 OFFSET = {name: offset for name, _parent, offset, _radius in JOINTS}
@@ -154,9 +147,104 @@ def build_body(name, material, subdivisions=3):
         smooth.levels = subdivisions
         smooth.render_levels = subdivisions
         bpy.ops.object.modifier_apply(modifier="Round")
+        refine_face(mesh, at)
+        carve_face(mesh, at)
 
     mesh.materials.append(material)
     return obj
+
+
+# The features, sculpted into the front of the head's sphere in the figure's
+# own axes: offsets from the Head joint across (Y) and up (Z), the feature's
+# half-width across and half-height up, and how far it is pressed in along
+# the face's forward (+X); negative stands proud. Pressed in, eased to nothing
+# at the rim, so a socket dips without a crease. The brow is a ridge above the
+# eyes, the eyes two hollows under it that the light does not reach and the
+# exported occlusion bake darkens further, the nose and cheekbones stand out
+# between them and the mouth is a slit above a chin. That is what makes a
+# head a face from across a street: not detail, but light and shadow in the
+# right places.
+FEATURES = (
+    # name        across   up     half_w  half_h  depth
+    ("brow",      0.000,  0.060,  0.085,  0.024, -0.014),
+    ("eye_l",     0.038,  0.026,  0.034,  0.026,  0.032),
+    ("eye_r",    -0.038,  0.026,  0.034,  0.026,  0.032),
+    ("nose",      0.000, -0.012,  0.015,  0.032, -0.018),
+    ("cheek_l",   0.058, -0.022,  0.030,  0.028, -0.009),
+    ("cheek_r",  -0.058, -0.022,  0.030,  0.028, -0.009),
+    ("mouth",     0.000, -0.058,  0.040,  0.010,  0.014),
+    ("chin",      0.000, -0.090,  0.028,  0.022, -0.011),
+)
+# A skull is taller than it is wide and longer than either; the skin
+# modifier's head is a ball. The head's vertices are drawn in across and
+# stretched up about the Head joint by these before the features go in.
+SKULL_ACROSS = 0.90
+SKULL_UP = 1.08
+
+
+def refine_face(mesh, at, cuts=2):
+    """Cut the front of the head finer, so there are vertices for a face.
+
+    Three levels of subdivision leave the head with a vertex every two
+    centimetres, and a socket three centimetres across lands on three of
+    them and smooths away to nothing. Every face on the front of the head is
+    cut `cuts` times each way before the features are pressed in, which puts
+    a vertex every seven millimetres where the face is and leaves the rest
+    of the figure as it was.
+    """
+    head = at["Head"]
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    edges = set()
+    for face in bm.faces:
+        centre = face.calc_center_median() - head
+        if centre.x > 0.02 and centre.length < 0.16:
+            edges.update(face.edges)
+    bmesh.ops.subdivide_edges(bm, edges=list(edges), cuts=cuts,
+                              use_grid_fill=True, smooth=1.0)
+    bm.to_mesh(mesh)
+    bm.free()
+
+
+def carve_face(mesh, at):
+    """Sculpt the features into the front of the head.
+
+    Every vertex on the front of the head inside a feature's ellipse is moved
+    along the face's forward direction by the feature's depth, eased to
+    nothing at the rim. Only the front moves: the back of the skull sits
+    under the same axes and must not dent in sympathy. The features overlap
+    -- the eyes sit under the brow, the nose between the cheeks -- and their
+    displacements add, which is what a face is: a brow that rises over
+    sockets that fall away.
+    """
+    head = at["Head"]
+    forward = mathutils.Vector((1.0, 0.0, 0.0))
+    # The skull's proportions first, on the whole head: everything above the
+    # neck within the head's reach, eased in over the neck so the throat is
+    # not stepped.
+    for vertex in mesh.vertices:
+        rel = vertex.co - head
+        if rel.length > 0.19 or rel.z < -0.13:
+            continue
+        blend = min(1.0, max(0.0, (rel.z + 0.13) / 0.05))
+        vertex.co.y = head.y + rel.y * (1.0 + (SKULL_ACROSS - 1.0) * blend)
+        vertex.co.z = head.z + rel.z * (1.0 + (SKULL_UP - 1.0) * blend)
+    for vertex in mesh.vertices:
+        rel = vertex.co - head
+        if rel.x < 0.04:
+            continue
+        push = 0.0
+        for _name, across, up, half_w, half_h, depth in FEATURES:
+            dy = (rel.y - across) / half_w
+            dz = (rel.z - up) / half_h
+            r = math.sqrt(dy * dy + dz * dz)
+            if r >= 1.0:
+                continue
+            t = 1.0 - r
+            push += depth * t * t * (3.0 - 2.0 * t)
+        if push != 0.0:
+            vertex.co -= forward * push
+    mesh.update()
 
 
 def unwrap(obj, repeats_per_metre, angle=1.15, margin=0.02):
