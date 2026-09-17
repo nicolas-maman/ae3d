@@ -89,11 +89,10 @@ const PRESET_KINDS = 3
 // The shading features the section offers, in the order they are drawn.
 const SHADE_CLEARCOAT = 0
 const SHADE_SHEEN = 1
-const SHADE_SSAO = 2
-const SHADE_VOLUMETRIC = 3
-const SHADE_GI = 4
-const SHADE_SHADOWS = 5
-const SHADE_KINDS = 6
+const SHADE_VOLUMETRIC = 2
+const SHADE_GI = 3
+const SHADE_SHADOWS = 4
+const SHADE_KINDS = 5
 
 // Room for every section either panel builds, checked at build time: a
 // section past the end would write off the end of these arrays.
@@ -249,7 +248,13 @@ var g_preset = PRESET_BALANCED
 // themselves disagree about, which is what makes them worth a control.
 var g_shade_clearcoat = false
 var g_shade_sheen = false
-var g_shade_ssao = false
+// Ambient occlusion from the scene's depth: a property of the view like
+// the clouds, drawn by either backend, with how far a thing shadows its
+// neighbours (metres) and how dark that goes.
+var g_ssao = false
+var g_ssao_toggle = 0
+var g_ssao_radius = 3.0
+var g_ssao_intensity = 1.0
 var g_shade_volumetric = false
 var g_shade_gi = false
 var g_shade_shadows = false
@@ -466,7 +471,6 @@ load_shading() {
     c = preset_config()
     g_shade_clearcoat = c.clearcoat
     g_shade_sheen = c.sheen
-    g_shade_ssao = c.ssao
     g_shade_volumetric = c.volumetric_lighting
     g_shade_gi = c.global_illumination
     g_shade_shadows = c.advanced_shadows
@@ -481,7 +485,6 @@ shading_config() -> Config {
     c = preset_config()
     c.clearcoat = g_shade_clearcoat
     c.sheen = g_shade_sheen
-    c.ssao = g_shade_ssao
     c.volumetric_lighting = g_shade_volumetric
     c.global_illumination = g_shade_gi
     c.advanced_shadows = g_shade_shadows
@@ -510,7 +513,6 @@ read_shading() {
     if m == null { return }
     g_shade_clearcoat = model_flag(m, shading_uniform(SHADE_CLEARCOAT)) == 1
     g_shade_sheen = model_flag(m, shading_uniform(SHADE_SHEEN)) == 1
-    g_shade_ssao = model_flag(m, shading_uniform(SHADE_SSAO)) == 1
     g_shade_volumetric = model_flag(m, shading_uniform(SHADE_VOLUMETRIC)) == 1
     g_shade_gi = model_flag(m, shading_uniform(SHADE_GI)) == 1
     g_shade_shadows = model_flag(m, shading_uniform(SHADE_SHADOWS)) == 1
@@ -542,7 +544,6 @@ shading_disagrees() -> int {
 refresh_shading_toggles() {
     set_shading_toggle(SHADE_CLEARCOAT, g_shade_clearcoat)
     set_shading_toggle(SHADE_SHEEN, g_shade_sheen)
-    set_shading_toggle(SHADE_SSAO, g_shade_ssao)
     set_shading_toggle(SHADE_VOLUMETRIC, g_shade_volumetric)
     set_shading_toggle(SHADE_GI, g_shade_gi)
     set_shading_toggle(SHADE_SHADOWS, g_shade_shadows)
@@ -742,8 +743,10 @@ apply_post() {
     if g_clouds { cover = g_cloud_cover }
     if g_vulkan {
         vk.renderer_set_clouds(g_renderer as *VKRenderer, cover, 1.0)
+        vk.renderer_set_ssao(g_renderer as *VKRenderer, g_ssao, g_ssao_radius, g_ssao_intensity)
     } else {
         gl.renderer_set_clouds(g_renderer as *GLRenderer, cover, 1.0)
+        gl.renderer_set_ssao(g_renderer as *GLRenderer, g_ssao, g_ssao_radius, g_ssao_intensity)
     }
     draw_frame()
 }
@@ -946,22 +949,22 @@ extern malloc(size: int) -> ptr
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 
-const ROWS = 30
+const ROWS = 32
 // Past every inspector row, because a turn of the gizmo is not a row: it is
 // recorded as the angle the drag has turned through so far, and undone by
 // turning back through it.
-const ROTATE_FIRST_SLOT = 30
-// Past the rotation axes, which take 30 through 32. A behaviour is a property
+const ROTATE_FIRST_SLOT = 32
+// Past the rotation axes, which take 32 through 34. A behaviour is a property
 // of a model like any other as far as undo is concerned, so it travels as a
 // property step in a slot no row uses.
-const SCRIPT_SLOT = 33
+const SCRIPT_SLOT = 35
 // A terrain's shape. A choice rather than a number, so it travels the way a
 // behaviour does rather than as a row.
-const TERRAIN_BIOME_SLOT = 34
+const TERRAIN_BIOME_SLOT = 36
 // A terrain's style. Blocks are voxels drawn one cube per cell; smooth meshes
 // the same field into one surface. Voxels are a kind of terrain rather than
 // what terrain is.
-const TERRAIN_STYLE_SLOT = 35
+const TERRAIN_STYLE_SLOT = 37
 const STYLE_BLOCKS = 0
 const STYLE_SMOOTH = 1
 const STYLE_KINDS = 2
@@ -989,6 +992,10 @@ const SHORE_FADE_ROW = 27
 const SHORE_FOAM_ROW = 28
 // How much of the sky the clouds cover, when they are on.
 const CLOUD_COVER_ROW = 29
+// The occlusion, when it is on: how dark it goes, and how far in metres a
+// thing shadows what stands beside it.
+const SSAO_ROW = 30
+const SSAO_RADIUS_ROW = 31
 const SCRIPT_NONE = 0
 // A behaviour is a script found on disk, not a case in this file. Zero is
 // always "none"; the rest are whatever resources/scripts holds, in the order
@@ -2840,6 +2847,17 @@ apply_property(index: int, value: float) {
         return
     }
 
+    if index == SSAO_ROW || index == SSAO_RADIUS_ROW {
+        was = g_ssao_intensity
+        if index == SSAO_RADIUS_ROW { was = g_ssao_radius }
+        history.history_record(g_history, history.STEP_PROPERTY, null, index, was, value)
+        g_last_edit = seconds()
+        if index == SSAO_ROW { g_ssao_intensity = value } else { g_ssao_radius = value }
+        apply_post()
+        show_row(index, value)
+        return
+    }
+
     if is_sky_row(index) {
         history.history_record(g_history, history.STEP_PROPERTY, null, index,
                                sky_value(index), value)
@@ -3047,7 +3065,6 @@ shading_row(parent: int, name: string, slot: int) {
 set_shading(slot: int, on: bool) {
     if slot == SHADE_CLEARCOAT { g_shade_clearcoat = on }
     if slot == SHADE_SHEEN { g_shade_sheen = on }
-    if slot == SHADE_SSAO { g_shade_ssao = on }
     if slot == SHADE_VOLUMETRIC { g_shade_volumetric = on }
     if slot == SHADE_GI { g_shade_gi = on }
     if slot == SHADE_SHADOWS { g_shade_shadows = on }
@@ -3058,7 +3075,6 @@ set_shading(slot: int, on: bool) {
 shading_name(slot: int) -> string {
     if slot == SHADE_CLEARCOAT { return "clearcoat" }
     if slot == SHADE_SHEEN { return "sheen" }
-    if slot == SHADE_SSAO { return "ambient occlusion" }
     if slot == SHADE_VOLUMETRIC { return "volumetric light" }
     if slot == SHADE_GI { return "global illumination" }
     return "soft shadows"
@@ -3069,7 +3085,6 @@ shading_name(slot: int) -> string {
 shading_uniform(slot: int) -> string {
     if slot == SHADE_CLEARCOAT { return "enableClearcoat" }
     if slot == SHADE_SHEEN { return "enableSheen" }
-    if slot == SHADE_SSAO { return "enableSSAO" }
     if slot == SHADE_VOLUMETRIC { return "enableVolumetricLighting" }
     if slot == SHADE_GI { return "enableGlobalIllumination" }
     return "enableShadows"
@@ -3098,7 +3113,6 @@ unreached_shading() -> int {
 shading_state(slot: int) -> bool {
     if slot == SHADE_CLEARCOAT { return g_shade_clearcoat }
     if slot == SHADE_SHEEN { return g_shade_sheen }
-    if slot == SHADE_SSAO { return g_shade_ssao }
     if slot == SHADE_VOLUMETRIC { return g_shade_volumetric }
     if slot == SHADE_GI { return g_shade_gi }
     return g_shade_shadows
@@ -3445,6 +3459,9 @@ current_view() -> View {
     v.ssr_strength = SSR_STRENGTH
     v.clouds = g_clouds
     v.cloud_cover = g_cloud_cover
+    v.ssao = g_ssao
+    v.ssao_radius = g_ssao_radius
+    v.ssao_intensity = g_ssao_intensity
     return v
 }
 
@@ -3584,6 +3601,12 @@ load_scene() {
     g_clouds = view.clouds
     g_cloud_cover = view.cloud_cover
     show_row(CLOUD_COVER_ROW, g_cloud_cover)
+    g_ssao = view.ssao
+    g_ssao_radius = view.ssao_radius
+    g_ssao_intensity = view.ssao_intensity
+    show_row(SSAO_ROW, g_ssao_intensity)
+    show_row(SSAO_RADIUS_ROW, g_ssao_radius)
+    if g_ssao_toggle != 0 { ui.set_toggle(g_ssao_toggle, flag_of(g_ssao)) }
     if g_fxaa_toggle != 0 { ui.set_toggle(g_fxaa_toggle, flag_of(g_fxaa)) }
     if g_bloom_toggle != 0 { ui.set_toggle(g_bloom_toggle, flag_of(g_bloom)) }
     if g_ssr_toggle != 0 { ui.set_toggle(g_ssr_toggle, flag_of(g_ssr)) }
@@ -4770,7 +4793,6 @@ main() {
 
         shading_row(shading_body, "Clearcoat", SHADE_CLEARCOAT)
         shading_row(shading_body, "Sheen", SHADE_SHEEN)
-        shading_row(shading_body, "Ambient occlusion", SHADE_SSAO)
         shading_row(shading_body, "Volumetric light", SHADE_VOLUMETRIC)
         shading_row(shading_body, "Global illumination", SHADE_GI)
         shading_row(shading_body, "Soft shadows", SHADE_SHADOWS)
@@ -4821,6 +4843,19 @@ main() {
             say("clouds ${on}")
         }
         inspector_row(shading_body, "cloud cover", 0.0, 1.0, 0.4, CLOUD_COVER_ROW)
+
+        ssao_row = ui.hstack(shading_body, 8)
+        as_row(ssao_row)
+        ssao_caption = ui.text(ssao_row, "Ambient occlusion")
+        ui.add_css_class(ssao_caption, "label")
+        ui.spacer(ssao_row)
+        g_ssao_toggle = ui.toggle(ssao_row, "") callback |on: bool| {
+            g_ssao = on
+            apply_post()
+            say("ambient occlusion ${on}")
+        }
+        inspector_row(shading_body, "occlusion", 0.0, 2.0, 1.0, SSAO_ROW)
+        inspector_row(shading_body, "occlusion reach", 0.2, 30.0, 3.0, SSAO_RADIUS_ROW)
         ui.spacer(right)
 
         g_stage = stage

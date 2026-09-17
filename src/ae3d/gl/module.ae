@@ -28,6 +28,7 @@ exports (
     renderer_set_target,
     renderer_set_bloom_params, renderer_set_bloom_intensity, renderer_bloom_intensity,
     renderer_set_post, renderer_set_fog, renderer_fog, renderer_set_clouds,
+    renderer_set_ssao, renderer_ssao,
     renderer_set_shadows, renderer_shadows, renderer_shadow_map, renderer_default_program,
     renderer_set_shadow_distance, renderer_shadow_distance,
     renderer_load_texture, renderer_release_texture, renderer_texture_count,
@@ -100,6 +101,7 @@ extern ae3d_gl_passtimer_ms(timer: ptr, pass: int) -> float
 
 extern ae3d_gl_fbo_create() -> int
 extern ae3d_gl_scene_depth_capture() -> int
+extern ae3d_gl_set_blend_multiply()
 extern ae3d_gl_fbo_bind(fbo: int)
 extern ae3d_gl_fbo_delete(fbo: int)
 extern ae3d_gl_fbo_attach_color(fbo: int, width: int, height: int, hdr: int) -> int
@@ -235,6 +237,13 @@ struct GLRenderer {
     crowd_program: int
     fxaa_program: int
     bloom_program: int
+    // Ambient occlusion from the scene's depth: a fullscreen multiply over
+    // the opaque pass, on when a scene asks, with how far a thing shadows
+    // its neighbours in metres and how dark that goes.
+    ssao_program: int
+    ssao_enabled: bool
+    ssao_radius: float
+    ssao_intensity: float
     passthrough_program: int
     current_program: int
     default_texture: int
@@ -360,6 +369,9 @@ renderer_new() -> *GLRenderer {
     r.render_scale = 1.0
     r.bloom_threshold = 0.8
     r.bloom_intensity = 0.4
+    r.ssao_enabled = false
+    r.ssao_radius = 3.0
+    r.ssao_intensity = 1.0
     r.depth_test_state = true
     r.bound_material = null
     r.bound_material_set = false
@@ -707,6 +719,7 @@ renderer_init(r: *GLRenderer, window: ptr, width: int, height: int) -> int {
     r.crowd_shadow_program = compile_program(shaders.VERTEX_CROWD_DEPTH, shaders.FRAGMENT_DEPTH, "crowd_depth")
     r.fxaa_program = compile_program(shaders.VERTEX_SCREEN, shaders.FRAGMENT_FXAA, "fxaa")
     r.bloom_program = compile_program(shaders.VERTEX_SCREEN, shaders.FRAGMENT_BLOOM, "bloom")
+    r.ssao_program = compile_program(shaders.VERTEX_SCREEN, shaders.FRAGMENT_SSAO, "ssao")
     r.passthrough_program = compile_program(shaders.VERTEX_SCREEN, shaders.FRAGMENT_PASSTHROUGH, "passthrough")
 
     r.default_texture = create_default_texture(r)
@@ -1098,6 +1111,17 @@ renderer_set_clouds(r: *GLRenderer, cover: float, wind: float) {
     r.cloud_wind = wind
 }
 
+// Ambient occlusion on or off: `radius` is how far, in metres, a thing
+// shadows what stands beside it, `intensity` how dark that shadow goes
+// (1.0 is the full occlusion the depth finds, 0 none).
+renderer_set_ssao(r: *GLRenderer, on: bool, radius: float, intensity: float) {
+    r.ssao_enabled = on
+    r.ssao_radius = radius
+    r.ssao_intensity = intensity
+}
+
+renderer_ssao(r: *GLRenderer) -> bool { return r.ssao_enabled }
+
 renderer_set_fog(r: *GLRenderer, f: *Fog) {
     if f == null { r.fog = core.fog_none() ; return }
     r.fog.color = f.color
@@ -1296,7 +1320,16 @@ render_shadow_pass(r: *GLRenderer, light: *Light, cam: *Camera) {
             instanced = 0
             if m.is_instanced && core.model_instance_count(m) > 0 { instanced = 1 }
             ae3d_gl_uniform_int(instanced_slot, instanced)
-            ae3d_gl_uniform_mat4(model_slot, &m.model_matrix)
+            // The same rule as set_model_matrix: an instanced model's
+            // transform is already in every instance, so the model matrix
+            // goes as the identity or the scale and the rotation are
+            // applied twice. Sent as the model's own, every instanced
+            // caster threw the shadow of a copy scaled by itself again.
+            if instanced == 1 {
+                ae3d_gl_uniform_mat4(model_slot, &identity)
+            } else {
+                ae3d_gl_uniform_mat4(model_slot, &m.model_matrix)
+            }
             pose_depth(skinned_slot, bones_slot, m)
             ae3d_gl_vao_bind(m.vao)
             draw_depth(r, m, instanced)
@@ -1386,7 +1419,11 @@ render_crowd_shadows(r: *GLRenderer) {
         ae3d_gl_texture_bind(3, m.pose_bank_texture)
         ae3d_gl_uniform_int(bank_loc, 3)
         ae3d_gl_uniform_int(frames_loc, m.pose_bank_frames)
-        ae3d_gl_uniform_mat4(model_loc, &m.model_matrix)
+        // The identity, as the lit crowd draw sends: each figure's placement
+        // is its instance matrix, built from the model's own scale, and a
+        // shadow cast through the model matrix as well was scaled twice.
+        crowd_identity = core.mat4_ident()
+        ae3d_gl_uniform_mat4(model_loc, &crowd_identity)
         ae3d_gl_vao_bind(m.vao)
         ae3d_gl_draw_elements_instanced(core.mesh_index_count(m.mesh), 0,
                                         core.model_instance_count(m))
@@ -1680,9 +1717,11 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
     draw_opaque(r, &view_projection, active_light, cam)
 
     // What the opaque pass drew, as depth, for a water surface to read the
-    // ground under it by. Copied once, only when there is water to read it.
+    // ground under it by and for the occlusion to shade it from. Copied
+    // once, only when something will read it.
     r.scene_depth = 0
-    if wants_scene_depth(r) { r.scene_depth = ae3d_gl_scene_depth_capture() }
+    if wants_scene_depth(r) || r.ssao_enabled { r.scene_depth = ae3d_gl_scene_depth_capture() }
+    if r.ssao_enabled && r.scene_depth != 0 { draw_occlusion(r, cam) }
 
     count = list.size(r.models)
     i = 0
@@ -1987,6 +2026,47 @@ wants_scene_depth(r: *GLRenderer) -> bool {
         i = i + 1
     }
     return false
+}
+
+// The occlusion over the opaque scene: the depth just captured, read by a
+// fullscreen draw that multiplies what is there by how much of the
+// hemisphere over each pixel the depth says is filled. Before the
+// transparent pass, so the water is not darkened by the ground it hides.
+draw_occlusion(r: *GLRenderer, cam: *Camera) {
+    if r.ssao_program == 0 || r.screen_vao == 0 { return }
+    use_program(r, r.ssao_program)
+    ae3d_gl_texture_bind(1, r.scene_depth)
+    r.bound_texture = 0 - 1
+    ae3d_gl_uniform_int(ae3d_gl_uniform_location(r.ssao_program, "depthTexture"), 1)
+    ae3d_gl_uniform_int(ae3d_gl_uniform_location(r.ssao_program, "screenTexture"), 0)
+    view_projection = core.camera_view_projection(cam)
+    inverse = core.mat4_inverse(view_projection)
+    ae3d_gl_uniform_mat4(ae3d_gl_uniform_location(r.ssao_program, "viewProjection"), &view_projection)
+    ae3d_gl_uniform_mat4(ae3d_gl_uniform_location(r.ssao_program, "invViewProjection"), &inverse)
+    ae3d_gl_uniform_vec3(ae3d_gl_uniform_location(r.ssao_program, "viewPos"),
+                         cam.position.x, cam.position.y, cam.position.z)
+    ae3d_gl_uniform_vec2(ae3d_gl_uniform_location(r.ssao_program, "screenSize"),
+                         ae3d_gl_viewport_width() * 1.0, ae3d_gl_viewport_height() * 1.0)
+    ae3d_gl_uniform_float(ae3d_gl_uniform_location(r.ssao_program, "ssaoRadius"), r.ssao_radius)
+    ae3d_gl_uniform_float(ae3d_gl_uniform_location(r.ssao_program, "ssaoIntensity"), r.ssao_intensity)
+
+    set_depth_test(r, false)
+    ae3d_gl_set_depth_mask(0)
+    set_wireframe(r, false)
+    // AE3D_SSAO_SHOW=1 draws the occlusion itself in place of the scene,
+    // for looking at what the pass found.
+    if core.env_int("AE3D_SSAO_SHOW", 0) == 1 { ae3d_gl_set_blend(0) } else { ae3d_gl_set_blend_multiply() }
+    ae3d_gl_vao_bind(r.screen_vao)
+    ae3d_gl_draw_arrays(0, 6)
+    ae3d_gl_vao_bind(0)
+    r.last_draw_calls = r.last_draw_calls + 1
+
+    // The ordinary blend back, whatever the cache says it was.
+    ae3d_gl_set_blend(1)
+    r.blend_state = true
+    ae3d_gl_set_depth_mask(1)
+    set_depth_test(r, core.depth_test())
+    set_wireframe(r, core.debug_enabled())
 }
 
 // The scene's depth on texture unit 4 for a program that reads it, with

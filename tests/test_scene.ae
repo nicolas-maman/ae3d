@@ -339,12 +339,8 @@ test_rendering_config() {
     first_count = core.model_uniform_count(m)
     check_true("config wrote uniforms", first_count > 20)
 
-    ssao = uniform_named(m, "enableSSAO")
-    check_true("ssao present", ssao != null)
-    check_int("ssao on by default", ssao.integer, 1)
-
-    samples = uniform_named(m, "ssaoSampleCount")
-    check_int("default sample count", samples.integer, 12)
+    // The occlusion is the view's, not a model's: a config carries none.
+    check_true("no occlusion uniform on a model", uniform_named(m, "enableSSAO") == null)
 
     sheen = uniform_named(m, "sheenColor")
     check_true("sheen colour is a vector", sheen.kind == core.UNIFORM_VEC3)
@@ -354,17 +350,13 @@ test_rendering_config() {
     // set that the renderer would then upload twice.
     rendering.apply(m, rendering.performance_config())
     check_int("uniforms replaced not appended", core.model_uniform_count(m), first_count)
-    check_int("ssao off for performance", uniform_named(m, "enableSSAO").integer, 0)
     check_int("bloom off for performance", uniform_named(m, "enableBloom").integer, 0)
 
     rendering.apply(m, rendering.high_quality_config())
-    check_int("ssao back on", uniform_named(m, "enableSSAO").integer, 1)
-    check_int("high quality sample count", uniform_named(m, "ssaoSampleCount").integer, 24)
     check_int("clearcoat on", uniform_named(m, "enableClearcoat").integer, 1)
 
     rendering.apply(m, rendering.voxel_config())
     check_int("voxel noise off", uniform_named(m, "enablePerlinNoise").integer, 0)
-    check("voxel occlusion raised", uniform_named(m, "ssaoIntensity").number, 0.45)
 
     core.model_free(m)
 }

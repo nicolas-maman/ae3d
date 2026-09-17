@@ -44,12 +44,6 @@ struct Config {
     volumetric_steps: int
     volumetric_scattering: float
 
-    ssao: bool
-    ssao_intensity: float
-    ssao_radius: float
-    ssao_bias: float
-    ssao_samples: int
-
     global_illumination: bool
     gi_intensity: float
     gi_bounces: int
@@ -99,12 +93,6 @@ default_config() -> Config {
         volumetric_steps: 16,
         volumetric_scattering: 0.1,
 
-        ssao: true,
-        ssao_intensity: 0.35,
-        ssao_radius: 200.0,
-        ssao_bias: 0.015,
-        ssao_samples: 12,
-
         global_illumination: false,
         gi_intensity: 0.5,
         gi_bounces: 2,
@@ -129,7 +117,6 @@ high_quality_config() -> Config {
     c.volumetric_lighting = true
     c.global_illumination = true
     c.gi_bounces = 3
-    c.ssao_samples = 24
     c.volumetric_steps = 32
     c.noise_octaves = 5
     c.shadow_softness = 0.35
@@ -146,21 +133,19 @@ performance_config() -> Config {
     c.perlin_noise = false
     c.advanced_shadows = false
     c.volumetric_lighting = false
-    c.ssao = false
     c.global_illumination = false
     c.bloom = false
     return c
 }
 
-// Voxel worlds are lit flat surfaces in bulk: screen-space occlusion between
-// blocks is what sells the depth, and surface noise on a cube face only shimmers.
+// Voxel worlds are lit flat surfaces in bulk: the occlusion between blocks
+// is what sells the depth (the scene's, from engine_set_ssao, and the sky
+// each corner sees, baked into the mesh), and surface noise on a cube face
+// only shimmers.
 voxel_config() -> Config {
     c = default_config()
     c.perlin_noise = false
     c.noise_intensity = 0.0
-    c.ssao = true
-    c.ssao_intensity = 0.45
-    c.ssao_radius = 120.0
     c.clearcoat = false
     c.sheen = false
     c.volumetric_lighting = false
@@ -205,12 +190,6 @@ apply(m: *Model, c: Config) {
     core.model_set_uniform_float(m, "volumetricIntensity", c.volumetric_intensity)
     core.model_set_uniform_int(m, "volumetricSteps", c.volumetric_steps)
     core.model_set_uniform_float(m, "volumetricScattering", c.volumetric_scattering)
-
-    core.model_set_uniform_int(m, "enableSSAO", flag(c.ssao))
-    core.model_set_uniform_float(m, "ssaoIntensity", c.ssao_intensity)
-    core.model_set_uniform_float(m, "ssaoRadius", c.ssao_radius)
-    core.model_set_uniform_float(m, "ssaoBias", c.ssao_bias)
-    core.model_set_uniform_int(m, "ssaoSampleCount", c.ssao_samples)
 
     core.model_set_uniform_int(m, "enableGlobalIllumination", flag(c.global_illumination))
     core.model_set_uniform_float(m, "giIntensity", c.gi_intensity)
@@ -265,11 +244,6 @@ unset_config() -> Config {
     c.volumetric_intensity = 0.0
     c.volumetric_steps = 0
     c.volumetric_scattering = 0.0
-    c.ssao = false
-    c.ssao_intensity = 0.0
-    c.ssao_radius = 0.0
-    c.ssao_bias = 0.0
-    c.ssao_samples = 0
     c.global_illumination = false
     c.gi_intensity = 0.0
     c.gi_bounces = 0

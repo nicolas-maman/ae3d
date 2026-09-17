@@ -209,6 +209,7 @@ void   ae3d_gl_set_depth_test(int on);
 void   ae3d_gl_set_depth_mask(int on);
 void   ae3d_gl_set_face_culling(int on);
 void   ae3d_gl_set_blend(int on);
+void   ae3d_gl_set_blend_multiply(void);
 void   ae3d_gl_set_multisample(int on);
 void   ae3d_gl_set_wireframe(int on);
 int    ae3d_gl_viewport_width(void);

@@ -54,11 +54,6 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float volumetricIntensity;
     int volumetricSteps;
     float volumetricScattering;
-    bool enableSSAO;
-    float ssaoIntensity;
-    float ssaoRadius;
-    float ssaoBias;
-    int ssaoSampleCount;
     bool enableGlobalIllumination;
     float giIntensity;
     int giBounces;
@@ -97,6 +92,9 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 invViewProjection;
     float ssrRoadHeight;
     float ssrStrength;
+    vec2 screenSize;
+    float ssaoRadius;
+    float ssaoIntensity;
     float time;
     float waveSpeedMultiplier;
     float waveHeightMultiplier;
@@ -123,7 +121,6 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float waterReflectionIntensity;
     int hasSkyTexture;
     int hasSceneDepth;
-    vec2 screenSize;
     float waterDepthFade;
     float waterShoreFoam;
     bool enableWaterDistortion;

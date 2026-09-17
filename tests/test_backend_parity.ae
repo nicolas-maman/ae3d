@@ -331,6 +331,28 @@ main() {
     check_true("the clouds reach the frame", frame_total(offscreen.target_pixels(target)) != sky_gl)
     gl.renderer_set_clouds(gl_renderer, 0.0, 1.0)
     vk.renderer_set_clouds(vk_renderer, 0.0, 1.0)
+
+    // The occlusion: a fullscreen multiply over the opaque pass, from the
+    // scene's depth, which each backend captures its own way (a blit of the
+    // draw buffer's depth, a prepass into a depth image). Both must find
+    // the same corners, and it must darken: a pass that draws nothing would
+    // agree perfectly.
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    open_gl = frame_total(offscreen.target_pixels(target))
+    open_vk = frame_total(vk.offscreen_pixels())
+    // A reach of fifteen metres: the cubes stand eleven apart, and a
+    // reach of three would find nothing between them to shadow.
+    gl.renderer_set_ssao(gl_renderer, true, 15.0, 1.0)
+    vk.renderer_set_ssao(vk_renderer, true, 15.0, 1.0)
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    compare_within("occlusion over the scene", offscreen.target_pixels(target), vk.offscreen_pixels(), 4)
+    println("  occlusion: opengl ${open_gl} -> ${frame_total(offscreen.target_pixels(target))}, vulkan ${open_vk} -> ${frame_total(vk.offscreen_pixels())}")
+    check_true("the occlusion darkens the opengl frame", frame_total(offscreen.target_pixels(target)) < open_gl)
+    check_true("the occlusion darkens the vulkan frame", frame_total(vk.offscreen_pixels()) < open_vk)
+    gl.renderer_set_ssao(gl_renderer, false, 15.0, 1.0)
+    vk.renderer_set_ssao(vk_renderer, false, 15.0, 1.0)
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
 

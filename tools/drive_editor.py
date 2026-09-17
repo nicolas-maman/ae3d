@@ -611,8 +611,8 @@ def main():
         # check flips them through set_shading; this is the half that proves a
         # switch on the screen is wired to that at all.
         widgets = tree(args.port)
-        wanted = ["Clearcoat", "Sheen", "Ambient occlusion", "Volumetric light",
-                  "Global illumination", "Soft shadows"]
+        wanted = ["Clearcoat", "Sheen", "Volumetric light",
+                  "Global illumination", "Soft shadows", "Ambient occlusion"]
         captions = {w["text"].strip(): w for w in widgets.values()
                     if w["type"] == "text" and w["text"].strip() in wanted}
         check("the shading section offers every feature the presets disagree on",
@@ -820,7 +820,8 @@ def main():
         # constant behind a switch. Each is a slider with a box, and moving
         # the cover's slider writes its box like any other row's.
         widgets = tree(args.port)
-        for caption in ("wave scale", "shore fade", "shore foam", "cloud cover"):
+        for caption in ("wave scale", "shore fade", "shore foam", "cloud cover",
+                        "occlusion", "occlusion reach"):
             caps = [w for w in widgets.values()
                     if w["type"] == "text" and w["text"].strip() == caption]
             check("the %s row is in the tree" % caption, len(caps) == 1)

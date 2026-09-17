@@ -55,11 +55,6 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float volumetricIntensity;
     int volumetricSteps;
     float volumetricScattering;
-    bool enableSSAO;
-    float ssaoIntensity;
-    float ssaoRadius;
-    float ssaoBias;
-    int ssaoSampleCount;
     bool enableGlobalIllumination;
     float giIntensity;
     int giBounces;
@@ -98,6 +93,9 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 invViewProjection;
     float ssrRoadHeight;
     float ssrStrength;
+    vec2 screenSize;
+    float ssaoRadius;
+    float ssaoIntensity;
     float time;
     float waveSpeedMultiplier;
     float waveHeightMultiplier;
@@ -124,7 +122,6 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float waterReflectionIntensity;
     int hasSkyTexture;
     int hasSceneDepth;
-    vec2 screenSize;
     float waterDepthFade;
     float waterShoreFoam;
     bool enableWaterDistortion;
@@ -205,13 +202,6 @@ layout(location = 5) in float Occlusion;
 
 
 // Volumetric Lighting
-
-
-
-
-
-// SSAO
-
 
 
 
@@ -469,69 +459,6 @@ vec3 applyEnergyConservation(vec3 diffuse, vec3 specular, vec3 clearcoat, vec3 s
     }
     
     return totalEnergy;
-}
-
-// Improved Screen Space Ambient Occlusion approximation
-// Note: True SSAO requires depth buffer, this is a world-space approximation with hemisphere sampling
-float calculateSSAO(vec3 position, vec3 normal, float distanceToCamera) {
-    if (!enableSSAO) return 1.0;
-    
-    // Distance-based LOD: reduce samples for close objects (voxel performance)
-    int adaptiveSamples = ssaoSampleCount;
-    if (distanceToCamera < viewDistance * 0.5) {
-        adaptiveSamples = max(2, ssaoSampleCount / 8); // Very few samples when close
-    } else if (distanceToCamera < viewDistance * 2.0) {
-        adaptiveSamples = max(4, ssaoSampleCount / 4);
-    } else if (distanceToCamera < viewDistance * 5.0) {
-        adaptiveSamples = max(6, ssaoSampleCount / 2);
-    }
-    
-    float occlusion = 0.0;
-    float radius = ssaoRadius;
-    
-    // Create tangent space basis from normal for hemisphere sampling
-    vec3 tangent = normalize(cross(normal, vec3(0.0, 1.0, 0.0)));
-    if (length(cross(normal, vec3(0.0, 1.0, 0.0))) < 0.1) {
-        tangent = normalize(cross(normal, vec3(1.0, 0.0, 0.0)));
-    }
-    vec3 bitangent = normalize(cross(normal, tangent));
-    mat3 TBN = mat3(tangent, bitangent, normal);
-    
-    // Golden ratio for better sample distribution
-    float goldenAngle = 2.39996323;
-    
-    // Sample hemisphere around the point
-    for (int i = 0; i < adaptiveSamples && i < 16; i++) {
-        // Vogel disk method for better distribution
-        float angle = float(i) * goldenAngle;
-        float radiusSample = sqrt(float(i) + 0.5) / sqrt(float(adaptiveSamples));
-        
-        // Create sample direction in tangent space (hemisphere)
-        float x = cos(angle) * radiusSample;
-        float y = sin(angle) * radiusSample;
-        float z = sqrt(1.0 - radiusSample * radiusSample);
-        
-        vec3 sampleDir = TBN * vec3(x, y, z);
-        
-        // Sample position at varying distances
-        float scale = mix(0.1, 1.0, float(i) / float(adaptiveSamples));
-        vec3 samplePos = position + sampleDir * radius * scale;
-        
-        float sampleDistance = length(samplePos - position);
-        float geometryTest = dot(normalize(samplePos - position), normal);
-        
-        // Only occlude if sample is in front of surface
-        if (geometryTest > ssaoBias) {
-            float rangeCheck = smoothstep(0.0, 1.0, radius / abs(sampleDistance));
-            float depthDiff = max(0.0, geometryTest - ssaoBias);
-            occlusion += depthDiff * rangeCheck;
-        }
-    }
-    
-    occlusion = 1.0 - (occlusion / float(adaptiveSamples));
-    occlusion = pow(occlusion, 1.0 + ssaoIntensity);
-    
-    return occlusion;
 }
 
 // Volumetric Lighting (light shafts, fog) with distance-based optimization
@@ -1094,10 +1021,6 @@ void main() {
 	
 	// Apply modern lighting effects with distance-based LOD
 	
-	// SSAO (Improved hemisphere sampling with distance-based LOD)
-	float ssaoFactor = calculateSSAO(FragPos, norm, distanceToCamera);
-	color *= ssaoFactor;
-    
 	// Volumetric lighting (with distance LOD built-in)
 	vec3 volumetric = calculateVolumetricLighting(FragPos, lights[0].position, viewPos);
 	color += volumetric;

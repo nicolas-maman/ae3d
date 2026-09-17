@@ -27,6 +27,7 @@ exports (
     renderer_set_bloom_intensity, renderer_bloom_intensity,
     renderer_set_shadows, renderer_shadows, renderer_set_ssr, renderer_ssr, renderer_set_ssr_params, renderer_add_light, renderer_remove_light,
     renderer_set_fog, renderer_fog, renderer_set_clouds, renderer_set_shadow_distance, renderer_shadow_distance,
+    renderer_set_ssao, renderer_ssao,
     skybox_create, skybox_free,
     offscreen_pixels, offscreen_width, offscreen_height,
     request_capture, capture_ready, capture_pixels, capture_width, capture_height, snapshot,
@@ -85,6 +86,9 @@ extern ae3d_vk_shadow_end()
 extern ae3d_vk_camdepth_begin() -> int
 extern ae3d_vk_camdepth_end()
 extern ae3d_vk_set_ssr(on: int)
+extern ae3d_vk_set_ssao(on: int, radius: float, intensity: float)
+extern ae3d_vk_ssao() -> int
+extern ae3d_vk_draw_ssao()
 extern ae3d_vk_ssr() -> int
 extern ae3d_vk_set_post(fxaa: int, bloom: int, threshold: float, intensity: float)
 extern ae3d_vk_set_bloom_intensity(intensity: float)
@@ -420,6 +424,17 @@ renderer_set_ssr(r: *VKRenderer, on: bool) {
     ae3d_vk_set_ssr(flag)
 }
 
+// Ambient occlusion on or off: `radius` is how far, in metres, a thing
+// shadows what stands beside it, `intensity` how dark that shadow goes
+// (1.0 is the full occlusion the depth finds, 0 none).
+renderer_set_ssao(r: *VKRenderer, on: bool, radius: float, intensity: float) {
+    flag = 0
+    if on { flag = 1 }
+    ae3d_vk_set_ssao(flag, radius, intensity)
+}
+
+renderer_ssao(r: *VKRenderer) -> bool { return ae3d_vk_ssao() == 1 }
+
 renderer_ssr(r: *VKRenderer) -> bool { return ae3d_vk_ssr() == 1 }
 
 renderer_set_ssr_params(r: *VKRenderer, road_height: float, strength: float) {
@@ -447,12 +462,13 @@ wants_scene_depth(r: *VKRenderer) -> bool {
 }
 
 render_camdepth_pass(r: *VKRenderer, cam: *Camera) {
-    // The camera depth is drawn for the reflection, or for a water surface
-    // to read the ground under it by; a scene with neither draws none.
+    // The camera depth is drawn for the reflection, for the occlusion, or
+    // for a water surface to read the ground under it by; a scene with none
+    // of them draws none.
     wanted = 0
     if wants_scene_depth(r) { wanted = 1 }
     ae3d_vk_set_scene_depth(wanted)
-    if ae3d_vk_ssr() != 1 && wanted == 0 { return }
+    if ae3d_vk_ssr() != 1 && wanted == 0 && ae3d_vk_ssao() != 1 { return }
     ae3d_vk_set_program(core.SHADER_CUSTOM)
     vp = core.camera_view_projection(cam)
     ae3d_vk_scene_set_clip_mat4(vkscene.OFF_LIGHTSPACEMATRIX, &vp)
@@ -649,9 +665,20 @@ render_shadow_pass(r: *VKRenderer, light: *Light, cam: *Camera) {
 shadow_draw_model(m: *Model) {
     instances = 0
     if m.is_instanced { instances = core.model_instance_count(m) }
-    ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &m.model_matrix)
     instanced = 0
     if instances > 0 { instanced = 1 }
+    // The same rule as the lit draw: an instanced model's transform is
+    // already in every instance, so the model matrix goes as the identity
+    // or the scale is applied twice. Sent as the model's own, a grid of
+    // nine-metre cubes cast the shadows of eighty-one-metre ones, and the
+    // camera depth the reflection, the shore and the occlusion read had
+    // those in it and not the cubes.
+    if instanced == 1 {
+        identity = core.mat4_ident()
+        ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &identity)
+    } else {
+        ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &m.model_matrix)
+    }
     ae3d_vk_scene_set_int(vkscene.OFF_ISINSTANCED, instanced)
     pose(m)
     ae3d_vk_shadow_draw(m.vbo, m.instance_vbo, instances)
@@ -1299,7 +1326,8 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     programs = ae3d_vk_program_count()
     i = 0
     ssr_on = ae3d_vk_ssr() == 1
-    depth_ready = ae3d_vk_scene_depth_ready() == 1 && (ssr_on || wants_scene_depth(r))
+    ssao_on = ae3d_vk_ssao() == 1
+    depth_ready = ae3d_vk_scene_depth_ready() == 1 && (ssr_on || ssao_on || wants_scene_depth(r))
     while i < programs {
         ae3d_vk_set_program(i)
         ae3d_vk_scene_set_clip_mat4(vkscene.OFF_VIEWPROJECTION, &view_projection)
@@ -1318,6 +1346,9 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     ae3d_vk_set_program(core.SHADER_CUSTOM)
 
     draw_opaque(r)
+    // The occlusion over what the opaque pass drew, before the transparent
+    // one, so the water is not darkened by the ground it hides.
+    if ssao_on && depth_ready { ae3d_vk_draw_ssao() }
 
     count = list.size(r.models)
     pass = 1
