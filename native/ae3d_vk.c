@@ -199,6 +199,9 @@ typedef struct {
        frame_begin already waited on. Made on the first update, sized to the
        largest stream seen. */
     VkBuffer ring[AE3D_VK_FRAMES];
+    /* An instance stream of points: eight floats an instance, drawn through
+       the point pipelines, whose second binding strides by that. */
+    int points;
     VkDeviceMemory ring_memory[AE3D_VK_FRAMES];
     void *ring_mapped[AE3D_VK_FRAMES];
     VkDeviceSize ring_size;
@@ -356,6 +359,11 @@ static struct {
     VkPipeline crowd_pipeline[2];
     VkPipeline crowd_pipeline_blend;
     VkPipeline crowd_shadow_pipeline;
+    /* Point instances: the scene pipelines again over a second binding of
+       eight floats an instance, and a depth variant for the shadow pass. */
+    VkPipeline point_pipeline[2];
+    VkPipeline point_pipeline_blend;
+    VkPipeline point_shadow_pipeline;
     /* The pose bank the next draws are posed from, as a texture handle; zero
        between crowds. Part of the descriptor set's key, at binding 4. */
     int pose_bank;
@@ -2550,7 +2558,7 @@ static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
                                         VkShaderModule fragment_module, int blend,
                                         int depth_test, int depth_write,
                                         VkRenderPass render_pass, int cull,
-                                        int skinned) {
+                                        int skinned, int points) {
     VkPipelineShaderStageCreateInfo stages[2];
     VkVertexInputBindingDescription bindings[3];
     VkVertexInputAttributeDescription attributes[12];
@@ -2587,6 +2595,11 @@ static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
     bindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
     bindings[1].binding = 1;
     bindings[1].stride = 16 * (unsigned)sizeof(float) + 4 * (unsigned)sizeof(float);
+    /* Points: position and scale, colour, phase -- eight floats. The matrix's
+       other three columns are named at offset zero, since the input has to
+       describe every attribute the shader declares, and a point draw never
+       reads them. */
+    if (points) bindings[1].stride = 8 * (unsigned)sizeof(float);
     bindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
 
     memset(attributes, 0, sizeof(attributes));
@@ -2612,19 +2625,19 @@ static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
         attributes[3 + i].location = (unsigned)(3 + i);
         attributes[3 + i].binding = 1;
         attributes[3 + i].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-        attributes[3 + i].offset = (unsigned)(i * 4 * (int)sizeof(float));
+        attributes[3 + i].offset = points ? 0u : (unsigned)(i * 4 * (int)sizeof(float));
     }
     attributes[7].location = 7;
     attributes[7].binding = 1;
     attributes[7].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attributes[7].offset = 16 * (unsigned)sizeof(float);
+    attributes[7].offset = (points ? 4u : 16u) * (unsigned)sizeof(float);
     /* The instance's phase in its walk, in the float after its colour that
        the stream always carried and nothing read. Every pipeline names it;
        only the crowd's shaders read it. */
     attributes[11].location = 11;
     attributes[11].binding = 1;
     attributes[11].format = VK_FORMAT_R32_SFLOAT;
-    attributes[11].offset = 19 * (unsigned)sizeof(float);
+    attributes[11].offset = (points ? 7u : 19u) * (unsigned)sizeof(float);
 
     /* Vulkan has no equivalent of leaving an attribute disabled: the vertex
        input has to describe every input the shader reads, and one shader
@@ -2782,6 +2795,9 @@ static int ae3d_vk_create_pass_pipelines(void) {
         { ae3d_vk_screen_vert_spv, sizeof(ae3d_vk_screen_vert_spv),
           ae3d_vk_ssao_frag_spv, sizeof(ae3d_vk_ssao_frag_spv),
           2, 0, 0, 0, 0, VK_NULL_HANDLE, NULL },
+        { ae3d_vk_depth_vert_spv, sizeof(ae3d_vk_depth_vert_spv),
+          ae3d_vk_depth_frag_spv, sizeof(ae3d_vk_depth_frag_spv),
+          0, 1, 1, 0, 0, VK_NULL_HANDLE, NULL },
     };
     unsigned i;
 
@@ -2797,6 +2813,7 @@ static int ae3d_vk_create_pass_pipelines(void) {
     builds[9].pass = vk.post_pass;   builds[9].out = &vk.post_pipelines[3];
     builds[10].pass = vk.shadow_pass; builds[10].out = &vk.crowd_shadow_pipeline;
     builds[11].pass = vk.render_pass; builds[11].out = &vk.ssao_pipeline;
+    builds[12].pass = vk.shadow_pass; builds[12].out = &vk.point_shadow_pipeline;
 
     for (i = 0; i < sizeof(builds) / sizeof(builds[0]); i++) {
         VkShaderModule vertex_module = ae3d_vk_shader(builds[i].vert, builds[i].vert_size);
@@ -2804,9 +2821,10 @@ static int ae3d_vk_create_pass_pipelines(void) {
         if (!vertex_module || !fragment_module) return ae3d_vk_fail("pass vkCreateShaderModule failed");
         int skinned = (builds[i].out == &vk.skinned_shadow_pipeline
                        || builds[i].out == &vk.crowd_shadow_pipeline);
+        int points = builds[i].out == &vk.point_shadow_pipeline;
         *builds[i].out = ae3d_vk_build_pipeline(vertex_module, fragment_module, builds[i].blend,
                                                 builds[i].depth_test, builds[i].depth_write,
-                                                builds[i].pass, builds[i].cull, skinned);
+                                                builds[i].pass, builds[i].cull, skinned, points);
         ae3d_vkDestroyShaderModule(vk.device, vertex_module, NULL);
         ae3d_vkDestroyShaderModule(vk.device, fragment_module, NULL);
         if (!*builds[i].out && builds[i].required) {
@@ -2840,14 +2858,14 @@ static int ae3d_vk_create_pipeline(void) {
     // OpenGL backend turns culling off for the transparent pass for the same
     // reason, which is why only the opaque pipeline comes in two variants.
     vk.pipeline_blend = ae3d_vk_build_pipeline(vertex_module, fragment_module, 1, 1, 0,
-                                               vk.render_pass, 0, 0);
+                                               vk.render_pass, 0, 0, 0);
     vk.skinned_pipeline_blend = ae3d_vk_build_pipeline(vertex_module, fragment_module, 1, 1, 0,
-                                                       vk.render_pass, 0, 1);
+                                                       vk.render_pass, 0, 1, 0);
     for (cull = 0; cull < 2; cull++) {
         vk.pipeline[cull] = ae3d_vk_build_pipeline(vertex_module, fragment_module, 1, 1, 1,
-                                                   vk.render_pass, cull, 0);
+                                                   vk.render_pass, cull, 0, 0);
         vk.skinned_pipeline[cull] = ae3d_vk_build_pipeline(vertex_module, fragment_module, 1, 1, 1,
-                                                           vk.render_pass, cull, 1);
+                                                           vk.render_pass, cull, 1, 0);
         if (!vk.pipeline[cull] || !vk.skinned_pipeline[cull]) {
             ae3d_vkDestroyShaderModule(vk.device, vertex_module, NULL);
             ae3d_vkDestroyShaderModule(vk.device, fragment_module, NULL);
@@ -2859,6 +2877,15 @@ static int ae3d_vk_create_pipeline(void) {
         ae3d_vkDestroyShaderModule(vk.device, fragment_module, NULL);
         return ae3d_vk_fail("vkCreateGraphicsPipelines failed");
     }
+    /* Points: not required, a device that will not build them draws a point
+       stream through the matrix pipelines, at the stride of a matrix, which
+       is wrong but not a crash; the parity test says which it is. */
+    vk.point_pipeline_blend = ae3d_vk_build_pipeline(vertex_module, fragment_module, 1, 1, 0,
+                                                     vk.render_pass, 0, 0, 1);
+    for (cull = 0; cull < 2; cull++) {
+        vk.point_pipeline[cull] = ae3d_vk_build_pipeline(vertex_module, fragment_module, 1, 1, 1,
+                                                         vk.render_pass, cull, 0, 1);
+    }
     ae3d_vkDestroyShaderModule(vk.device, vertex_module, NULL);
 
     // The crowd: the same fragment shader after a vertex shader that poses
@@ -2867,10 +2894,10 @@ static int ae3d_vk_create_pipeline(void) {
     vertex_module = ae3d_vk_shader(ae3d_vk_crowd_vert_spv, (unsigned)sizeof(ae3d_vk_crowd_vert_spv));
     if (vertex_module) {
         vk.crowd_pipeline_blend = ae3d_vk_build_pipeline(vertex_module, fragment_module, 1, 1, 0,
-                                                         vk.render_pass, 0, 1);
+                                                         vk.render_pass, 0, 1, 0);
         for (cull = 0; cull < 2; cull++) {
             vk.crowd_pipeline[cull] = ae3d_vk_build_pipeline(vertex_module, fragment_module, 1, 1, 1,
-                                                             vk.render_pass, cull, 1);
+                                                             vk.render_pass, cull, 1, 0);
         }
         ae3d_vkDestroyShaderModule(vk.device, vertex_module, NULL);
     }
@@ -3286,12 +3313,21 @@ int ae3d_vk_program_count(void) { return AE3D_VK_PROGRAM_COUNT; }
 
 void ae3d_vk_set_face_culling(int on) { vk.cull = on ? 1 : 0; }
 
+static int ae3d_vk_instances_are_points(int instance_handle, int instance_count) {
+    if (instance_count <= 0 || instance_handle <= 0 || instance_handle > vk.mesh_capacity) return 0;
+    return vk.meshes[instance_handle - 1].in_use && vk.meshes[instance_handle - 1].points;
+}
+
 void ae3d_vk_draw(int handle, int texture_handle, int instance_handle, int instance_count) {
     VkPipeline opaque = vk.pipeline[vk.cull];
     VkPipeline blended = vk.pipeline_blend;
     int skinned = handle > 0 && handle <= vk.mesh_capacity && vk.meshes[handle - 1].skinned;
 
-    if (vk.program == AE3D_VK_PROGRAM_WATER && vk.water_pipeline[vk.cull]
+    if (ae3d_vk_instances_are_points(instance_handle, instance_count)
+        && vk.point_pipeline[vk.cull] && vk.point_pipeline_blend) {
+        opaque = vk.point_pipeline[vk.cull];
+        blended = vk.point_pipeline_blend;
+    } else if (vk.program == AE3D_VK_PROGRAM_WATER && vk.water_pipeline[vk.cull]
         && vk.water_pipeline_blend) {
         opaque = vk.water_pipeline[vk.cull];
         blended = vk.water_pipeline_blend;
@@ -3464,7 +3500,9 @@ void ae3d_vk_shadow_draw(int mesh_handle, int instance_handle, int instance_coun
     // geometry, and its render pass is compatible with the shadow one, so the
     // shadow depth pipeline is exactly the pipeline it wants.
     if (!vk.shadow_pipeline || (!vk.in_shadow_pass && !vk.in_camdepth)) return;
-    if (mesh_handle > 0 && mesh_handle <= vk.mesh_capacity
+    if (ae3d_vk_instances_are_points(instance_handle, instance_count) && vk.point_shadow_pipeline) {
+        pipeline = vk.point_shadow_pipeline;
+    } else if (mesh_handle > 0 && mesh_handle <= vk.mesh_capacity
         && vk.meshes[mesh_handle - 1].skinned && vk.skinned_shadow_pipeline) {
         pipeline = vk.skinned_shadow_pipeline;
         /* A crowd casts from the poses its bank gives each instance, or
@@ -4329,6 +4367,19 @@ int ae3d_vk_update_instances(int handle, void *instances) {
     slot = &vk.meshes[handle - 1];
     if (!slot->in_use) return 0;
 
+    if (ae3d_inst_is_points(instances)) {
+        /* A point stream is already the bytes the binding reads: one copy
+           into this frame's slot of the ring, no packing. */
+        const float *points = ae3d_inst_point_data(instances);
+        if (!points) return 0;
+        bytes = (VkDeviceSize)count * 8 * sizeof(float);
+        if (!ae3d_vk_ensure_ring(slot, bytes)) return 0;
+        memcpy(slot->ring_mapped[vk.frame], points, (size_t)bytes);
+        slot->vertex_buffer = slot->ring[vk.frame];
+        slot->points = 1;
+        return 1;
+    }
+
     /* Packed straight into this frame's slot of the ring, which this
        frame's draws then bind. The first update turns the stream over from
        the device-local buffer of the upload to the ring; from then on an
@@ -4348,7 +4399,9 @@ int ae3d_vk_upload_instances(void *instances) {
     ae3d_vk_mesh *slot = NULL;
     float *packed;
     int i, handle = 0;
+    int points = ae3d_inst_is_points(instances);
 
+    if (points) matrices = ae3d_inst_point_data(instances);
     if (!vk.device || !matrices || count <= 0) { ae3d_vk_fail("no instances"); return 0; }
 
     for (i = 0; i < vk.mesh_capacity; i++) {
@@ -4365,6 +4418,18 @@ int ae3d_vk_upload_instances(void *instances) {
         vk.mesh_capacity = grown;
     }
 
+    if (points) {
+        if (!ae3d_vk_upload_buffer((void *)matrices, (VkDeviceSize)count * 8 * sizeof(float),
+                                   VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                   &slot->vertex_buffer, &slot->vertex_memory)) {
+            return 0;
+        }
+        slot->points = 1;
+        slot->index_count = 0;
+        slot->in_use = 1;
+        return handle;
+    }
+
     packed = ae3d_vk_pack_instances(instances, count);
     if (!packed) { ae3d_vk_fail("out of memory"); return 0; }
 
@@ -4376,6 +4441,7 @@ int ae3d_vk_upload_instances(void *instances) {
     }
     free(packed);
 
+    slot->points = 0;
     slot->index_count = 0;
     slot->in_use = 1;
     return handle;
@@ -4499,6 +4565,10 @@ void ae3d_vk_shutdown(void) {
     if (vk.crowd_shadow_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.crowd_shadow_pipeline, NULL);
     if (vk.sky_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.sky_pipeline, NULL);
     if (vk.ssao_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.ssao_pipeline, NULL);
+    if (vk.point_pipeline_blend) ae3d_vkDestroyPipeline(vk.device, vk.point_pipeline_blend, NULL);
+    if (vk.point_pipeline[0]) ae3d_vkDestroyPipeline(vk.device, vk.point_pipeline[0], NULL);
+    if (vk.point_pipeline[1]) ae3d_vkDestroyPipeline(vk.device, vk.point_pipeline[1], NULL);
+    if (vk.point_shadow_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.point_shadow_pipeline, NULL);
     for (i = 0; i < 3; i++) {
         if (vk.post_pipelines[i]) ae3d_vkDestroyPipeline(vk.device, vk.post_pipelines[i], NULL);
     }

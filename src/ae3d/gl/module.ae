@@ -69,6 +69,7 @@ extern ae3d_gl_setup_vertex_attribs()
 extern ae3d_gl_upload_skin(mesh: ptr, vbo: int)
 extern ae3d_gl_uniform_mat4v(loc: int, count: int, values: ptr)
 extern ae3d_gl_setup_instance_attribs(inst: ptr, matrix_vbo: int, color_vbo: int)
+extern ae3d_inst_is_points(inst: ptr) -> int
 extern ae3d_gl_setup_instance_phase(inst: ptr, phase_vbo: int)
 extern ae3d_gl_update_instance_phases(inst: ptr, phase_vbo: int)
 extern ae3d_gl_posebank_texture(bank: ptr) -> int
@@ -179,6 +180,7 @@ struct ProgramSlots {
     material_alpha: int
     texture_sampler: int
     is_instanced: int
+    instance_points: int
     use_instance_color: int
     is_skinned: int
     bones: int
@@ -509,6 +511,7 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
     s.material_alpha = ae3d_gl_uniform_location(program, "materialAlpha")
     s.texture_sampler = ae3d_gl_uniform_location(program, "textureSampler")
     s.is_instanced = ae3d_gl_uniform_location(program, "isInstanced")
+    s.instance_points = ae3d_gl_uniform_location(program, "instancePoints")
     s.use_instance_color = ae3d_gl_uniform_location(program, "useInstanceColor")
     s.is_skinned = ae3d_gl_uniform_location(program, "isSkinned")
     s.bones = ae3d_gl_uniform_location(program, "bones")
@@ -642,6 +645,15 @@ apply_instancing(r: *GLRenderer, slots: *ProgramSlots, instanced: int) {
     if r.bound_instanced == instanced { return }
     ae3d_gl_uniform_int(slots.is_instanced, instanced)
     r.bound_instanced = instanced
+}
+
+// Whether the instances are points: a position and a scale each, the
+// model's own rotation and scale in the model matrix. Sent every draw,
+// since it is not part of the instanced cache and a batch is never points.
+apply_points(slots: *ProgramSlots, m: *Model) {
+    points = 0
+    if m.instances != null && ae3d_inst_is_points(m.instances) == 1 { points = 1 }
+    ae3d_gl_uniform_int(slots.instance_points, points)
 }
 
 // A model's own instances carry a colour each; a merged draw does not, and its
@@ -1281,6 +1293,7 @@ render_shadow_pass(r: *GLRenderer, light: *Light, cam: *Camera) {
     space = ae3d_gl_uniform_location(r.shadow_program, "lightSpaceMatrix")
     model_slot = ae3d_gl_uniform_location(r.shadow_program, "model")
     instanced_slot = ae3d_gl_uniform_location(r.shadow_program, "isInstanced")
+    points_slot = ae3d_gl_uniform_location(r.shadow_program, "instancePoints")
     skinned_slot = ae3d_gl_uniform_location(r.shadow_program, "isSkinned")
     bones_slot = ae3d_gl_uniform_location(r.shadow_program, "bones")
     ae3d_gl_uniform_mat4(space, &r.shadow_space)
@@ -1320,12 +1333,19 @@ render_shadow_pass(r: *GLRenderer, light: *Light, cam: *Camera) {
             instanced = 0
             if m.is_instanced && core.model_instance_count(m) > 0 { instanced = 1 }
             ae3d_gl_uniform_int(instanced_slot, instanced)
+            points = 0
+            if instanced == 1 && ae3d_inst_is_points(m.instances) == 1 { points = 1 }
+            ae3d_gl_uniform_int(points_slot, points)
             // The same rule as set_model_matrix: an instanced model's
             // transform is already in every instance, so the model matrix
             // goes as the identity or the scale and the rotation are
             // applied twice. Sent as the model's own, every instanced
             // caster threw the shadow of a copy scaled by itself again.
-            if instanced == 1 {
+            // A point stream has the model's frame here instead.
+            if points == 1 {
+                placed = point_frame(m)
+                ae3d_gl_uniform_mat4(model_slot, &placed)
+            } else if instanced == 1 {
                 ae3d_gl_uniform_mat4(model_slot, &identity)
             } else {
                 ae3d_gl_uniform_mat4(model_slot, &m.model_matrix)
@@ -1345,12 +1365,14 @@ render_shadow_pass(r: *GLRenderer, light: *Light, cam: *Camera) {
         first = b.first as *Model
         if b.count == 1 {
             ae3d_gl_uniform_int(instanced_slot, 0)
+            ae3d_gl_uniform_int(points_slot, 0)
             ae3d_gl_uniform_mat4(model_slot, &first.model_matrix)
             pose_depth(skinned_slot, bones_slot, first)
             ae3d_gl_vao_bind(first.vao)
             draw_depth(r, first, 0)
         } else if b.count > 1 {
             ae3d_gl_uniform_int(instanced_slot, 1)
+            ae3d_gl_uniform_int(points_slot, 0)
             ae3d_gl_uniform_int(skinned_slot, 0)
             ae3d_gl_uniform_mat4(model_slot, &identity)
             ae3d_gl_vao_bind(b.vao)
@@ -1966,6 +1988,7 @@ draw_batch(r: *GLRenderer, b: *GLBatch, view_projection: *Mat4, light: *Light, c
     apply_texture(r, slots, texture_for(r, material))
     apply_normal_map(r, slots, normal_for(r, material))
     apply_instancing(r, slots, 1)
+    ae3d_gl_uniform_int(slots.instance_points, 0)
     apply_instance_color(r, slots, 0)
 
     // The shader reads the instanced transform as model * instanceModel, so the
@@ -2214,6 +2237,7 @@ draw(r: *GLRenderer, m: *Model, slots: *ProgramSlots, count: int, byte_offset: i
             m.instance_phases_updated = false
         }
         apply_instancing(r, slots, 1)
+        apply_points(slots, m)
         apply_instance_color(r, slots, 1)
         ae3d_gl_draw_elements_instanced(count, byte_offset, core.model_instance_count(m))
     } else {
@@ -2370,11 +2394,29 @@ bind_shadow_map(r: *GLRenderer, slots: *ProgramSlots) {
 // identity here for the same reason.
 set_model_matrix(slots: *ProgramSlots, m: *Model) {
     if m.is_instanced && core.model_instance_count(m) > 0 {
+        // Points carry a position and a scale only: the model's rotation
+        // and scale reach the shader here, in the model matrix with its
+        // translation taken out, and each point puts its own back.
+        if ae3d_inst_is_points(m.instances) == 1 {
+            placed = point_frame(m)
+            ae3d_gl_uniform_mat4(slots.model, &placed)
+            return
+        }
         identity = core.mat4_ident()
         ae3d_gl_uniform_mat4(slots.model, &identity)
         return
     }
     ae3d_gl_uniform_mat4(slots.model, &m.model_matrix)
+}
+
+// A model's matrix without its translation: what a point instance is
+// placed by, before the point's own position is put in the last column.
+point_frame(m: *Model) -> Mat4 {
+    frame = m.model_matrix
+    frame.m12 = 0.0
+    frame.m13 = 0.0
+    frame.m14 = 0.0
+    return frame
 }
 
 set_material_uniforms(slots: *ProgramSlots, material: *Material) {

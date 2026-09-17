@@ -17,6 +17,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     Light lights[4];
     bool isInstanced;
     bool useInstanceColor;
+    bool instancePoints;
     mat4 model;
     mat4 viewProjection;
     mat4 lightSpaceMatrix;
@@ -141,11 +142,17 @@ layout (location = 9) in vec4 inWeights;
 
 
 
+
 void main() {
     // The same transform the lit pass builds. Reading instanceModel alone left
     // an instanced model casting its shadow from wherever its own transform was
     // not applied.
     mat4 modelMatrix = isInstanced ? (model * instanceModel) : model;
+    if (isInstanced && instancePoints) {
+        vec4 point = instanceModel[0];
+        modelMatrix = mat4(model[0] * point.w, model[1] * point.w, model[2] * point.w,
+                           vec4(point.xyz, 1.0));
+    }
     // And the same pose. A shadow pass that skipped this drew the bind pose,
     // so a figure threw the shadow of a mannequin standing where it started.
     vec4 posed = vec4(inPosition, 1.0);

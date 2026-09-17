@@ -28,6 +28,7 @@ const TEXTURE = "resources/obj/Earth/Albedo.jpg"
 
 extern calloc(count: int, size: int) -> ptr
 extern free(p: ptr)
+extern memcpy(dst: ptr, src: ptr, bytes: int) -> ptr
 extern ae3d_png_write(path: string, rgba: ptr, width: int, height: int) -> int
 
 // AE3D_PARITY_DUMP=<dir> writes both backends' frame of every case there, so
@@ -35,7 +36,7 @@ extern ae3d_png_write(path: string, rgba: ptr, width: int, height: int) -> int
 dump_frames(name: string, gl_pixels: ptr, vk_pixels: ptr) {
     dir = core.text(os.getenv("AE3D_PARITY_DUMP"))
     if dir == "" { return }
-    stem = string.replace(string.replace(name, " ", "_"), ",", "")
+    stem = string.replace_all(string.replace_all(name, " ", "_"), ",", "")
     ae3d_png_write("${dir}/${stem}_gl.png", gl_pixels, WIDTH, HEIGHT)
     ae3d_png_write("${dir}/${stem}_vk.png", vk_pixels, WIDTH, HEIGHT)
 }
@@ -67,6 +68,36 @@ frame_total(pixels: ptr) -> long {
         i = i + 1
     }
     return total
+}
+
+// A row of small spheres across the front of the scene, each scaled by the
+// model and tinted its own colour: placed by a matrix each, or as points.
+point_spheres(as_points: bool) -> *Model {
+    m = loader.sphere(1.0, 12, 8)
+    core.model_set_scale(m, 5.0, 5.0, 5.0)
+    core.model_set_diffuse(m, 0.9, 0.9, 0.9)
+    core.model_enable_instancing(m, 6)
+    core.model_enable_instance_colors(m)
+    if as_points { core.model_enable_point_instancing(m) }
+    xyz = calloc(6 * 3, 8)
+    rgb = calloc(6 * 3, 8)
+    positions = xyz as float[]
+    tints = rgb as float[]
+    i = 0
+    while i < 6 {
+        positions[i * 3] = (i as float) * 16.0 - 40.0
+        positions[i * 3 + 1] = 0.0 - 30.0
+        positions[i * 3 + 2] = 60.0
+        tints[i * 3] = 0.3 + (i as float) * 0.12
+        tints[i * 3 + 1] = 0.9 - (i as float) * 0.1
+        tints[i * 3 + 2] = 0.4
+        i = i + 1
+    }
+    core.model_set_instance_positions(m, xyz, 6)
+    core.model_set_instance_colors(m, rgb, 6)
+    free(xyz)
+    free(rgb)
+    return m
 }
 
 // A polished metal sphere and a textured one, so one frame exercises the
@@ -353,6 +384,40 @@ main() {
     check_true("the occlusion darkens the vulkan frame", frame_total(vk.offscreen_pixels()) < open_vk)
     gl.renderer_set_ssao(gl_renderer, false, 15.0, 1.0)
     vk.renderer_set_ssao(vk_renderer, false, 15.0, 1.0)
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+
+    // Instances as points: the same spheres placed by a matrix each and by
+    // a point each must draw the same picture, on each backend and between
+    // them, since the point pipelines are a second vertex layout and a
+    // branch in the vertex shader that nothing else exercises.
+    point_pixels = calloc(WIDTH * HEIGHT * 4, 1)
+    gl_matrices = point_spheres(false)
+    vk_matrices = point_spheres(false)
+    core.backend_add_model(&opengl_pass, gl_matrices)
+    core.backend_add_model(&vulkan_pass, vk_matrices)
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    matrices_lit = compare("spheres placed by matrices", offscreen.target_pixels(target), vk.offscreen_pixels())
+    memcpy(point_pixels, offscreen.target_pixels(target), WIDTH * HEIGHT * 4)
+    core.backend_remove_model(&opengl_pass, gl_matrices)
+    core.backend_remove_model(&vulkan_pass, vk_matrices)
+    core.model_free(gl_matrices)
+    core.model_free(vk_matrices)
+    gl_points = point_spheres(true)
+    vk_points = point_spheres(true)
+    core.backend_add_model(&opengl_pass, gl_points)
+    core.backend_add_model(&vulkan_pass, vk_points)
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    points_lit = compare("spheres placed by points", offscreen.target_pixels(target), vk.offscreen_pixels())
+    compare("points against matrices", point_pixels, offscreen.target_pixels(target))
+    check_true("the spheres are in the frame", matrices_lit != sky_gl && points_lit != sky_gl)
+    core.backend_remove_model(&opengl_pass, gl_points)
+    core.backend_remove_model(&vulkan_pass, vk_points)
+    core.model_free(gl_points)
+    core.model_free(vk_points)
+    free(point_pixels)
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
 

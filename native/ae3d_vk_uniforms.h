@@ -14,6 +14,7 @@ typedef struct {
 
 #define AE3D_VK_OFF_ISINSTANCED 320
 #define AE3D_VK_OFF_USEINSTANCECOLOR 324
+#define AE3D_VK_OFF_INSTANCEPOINTS 328
 #define AE3D_VK_OFF_MODEL 336
 #define AE3D_VK_OFF_VIEWPROJECTION 400
 #define AE3D_VK_OFF_LIGHTSPACEMATRIX 464
@@ -194,6 +195,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "hasSkyTexture", 4724 },
     { "horizonColor", 4704 },
     { "iblIntensity", 3780 },
+    { "instancePoints", 328 },
     { "invViewProjection", 4112 },
     { "isInstanced", 320 },
     { "isSkinned", 528 },
@@ -260,7 +262,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "waveSteepness", 4544 },
 };
 
-#define AE3D_VK_UNIFORM_SLOT_COUNT 113
+#define AE3D_VK_UNIFORM_SLOT_COUNT 114
 
 static inline int ae3d_vk_uniform_offset(const char *name) {
     int low = 0;

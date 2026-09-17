@@ -17,6 +17,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     Light lights[4];
     bool isInstanced;
     bool useInstanceColor;
+    bool instancePoints;
     mat4 model;
     mat4 viewProjection;
     mat4 lightSpaceMatrix;
@@ -141,6 +142,12 @@ layout(location = 10) in float inOcclusion; // How much of the sky it can see
 
 
 
+// Instances as points: the stream carries a position and a scale in the
+// first column of instanceModel and nothing in the other three, and the
+// model matrix carries the model's own rotation and scale, without its
+// translation. Eight floats an instance instead of twenty, for a million
+// grains that all move every frame.
+
 
 
 
@@ -166,6 +173,11 @@ void main() {
     // For instanced rendering, we multiply the global model matrix by the instance matrix
     // This allows moving/scaling/rotating the entire group of instances using the model transform
     mat4 modelMatrix = isInstanced ? (model * instanceModel) : model;
+    if (isInstanced && instancePoints) {
+        vec4 point = instanceModel[0];
+        modelMatrix = mat4(model[0] * point.w, model[1] * point.w, model[2] * point.w,
+                           vec4(point.xyz, 1.0));
+    }
 
     vec4 posed = vec4(inPosition, 1.0);
     vec3 posedNormal = inNormal;
