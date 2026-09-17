@@ -366,6 +366,7 @@ void ae3d_gl_setup_instance_phase(void *inst, int phase_vbo) {
     const float *phases = ae3d_inst_phase_data(inst);
     int count = ae3d_inst_count(inst);
 
+    if (ae3d_inst_is_points(inst)) return;
     if (count <= 0 || !phase_vbo || !phases || !ae3d_inst_has_phases(inst)) return;
     glBindBuffer(GL_ARRAY_BUFFER, (GLuint)phase_vbo);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)count * (GLsizeiptr)sizeof(float),
@@ -375,13 +376,46 @@ void ae3d_gl_setup_instance_phase(void *inst, int phase_vbo) {
     glVertexAttribDivisor(11, 1);
 }
 
+/* The point layout: eight floats an instance in the one buffer. Location 3
+   takes the position and the scale as a vec4, location 7 the colour and 11
+   the phase from the same stride; 4 to 6, the matrix's other columns, are
+   left disabled and the shader does not read them for a point. */
+#define AE3D_POINT_BYTES (8 * (int)sizeof(float))
+
+static void ae3d_gl_point_attribs(void) {
+    int i;
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, AE3D_POINT_BYTES, (const void *)0);
+    glVertexAttribDivisor(3, 1);
+    for (i = 1; i < 4; i++) glDisableVertexAttribArray((GLuint)(3 + i));
+    glEnableVertexAttribArray(7);
+    glVertexAttribPointer(7, 3, GL_FLOAT, GL_FALSE, AE3D_POINT_BYTES,
+                          (const void *)(size_t)(4 * sizeof(float)));
+    glVertexAttribDivisor(7, 1);
+    glEnableVertexAttribArray(11);
+    glVertexAttribPointer(11, 1, GL_FLOAT, GL_FALSE, AE3D_POINT_BYTES,
+                          (const void *)(size_t)(7 * sizeof(float)));
+    glVertexAttribDivisor(11, 1);
+}
+
 void ae3d_gl_setup_instance_attribs(void *inst, int matrix_vbo, int color_vbo) {
     const float *matrices = ae3d_inst_matrix_data(inst);
     const float *colors = ae3d_inst_color_data(inst);
     int count = ae3d_inst_count(inst);
     int i;
 
-    if (count <= 0 || !matrix_vbo || !matrices) return;
+    if (count <= 0 || !matrix_vbo) return;
+
+    if (ae3d_inst_is_points(inst)) {
+        const float *points = ae3d_inst_point_data(inst);
+        if (!points) return;
+        glBindBuffer(GL_ARRAY_BUFFER, (GLuint)matrix_vbo);
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)count * AE3D_POINT_BYTES,
+                     points, GL_DYNAMIC_DRAW);
+        ae3d_gl_point_attribs();
+        return;
+    }
+    if (!matrices) return;
 
     glBindBuffer(GL_ARRAY_BUFFER, (GLuint)matrix_vbo);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)count * AE3D_MATRIX_BYTES,
@@ -449,8 +483,16 @@ int ae3d_gl_update_instances(void *inst, int matrix_vbo, int capacity_bytes) {
     int count = ae3d_inst_count(inst);
     int needed;
 
-    if (count <= 0 || !matrix_vbo || !matrices) return capacity_bytes;
-    needed = count * AE3D_MATRIX_BYTES;
+    if (count <= 0 || !matrix_vbo) return capacity_bytes;
+    if (ae3d_inst_is_points(inst)) {
+        /* The whole stream, position, scale, colour and phase in one: a
+           point's colour and phase have no buffer of their own to refresh. */
+        matrices = ae3d_inst_point_data(inst);
+        needed = count * AE3D_POINT_BYTES;
+    } else {
+        needed = count * AE3D_MATRIX_BYTES;
+    }
+    if (!matrices) return capacity_bytes;
 
     glBindBuffer(GL_ARRAY_BUFFER, (GLuint)matrix_vbo);
     if (needed > capacity_bytes) {
@@ -470,6 +512,7 @@ void ae3d_gl_update_instance_colors(void *inst, int color_vbo) {
     const float *colors = ae3d_inst_color_data(inst);
     int count = ae3d_inst_count(inst);
 
+    if (ae3d_inst_is_points(inst)) return;
     if (count <= 0 || !color_vbo || !colors || !ae3d_inst_has_colors(inst)) return;
     glBindBuffer(GL_ARRAY_BUFFER, (GLuint)color_vbo);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)count * AE3D_COLOR_BYTES,
@@ -483,6 +526,7 @@ void ae3d_gl_update_instance_phases(void *inst, int phase_vbo) {
     const float *phases = ae3d_inst_phase_data(inst);
     int count = ae3d_inst_count(inst);
 
+    if (ae3d_inst_is_points(inst)) return;
     if (count <= 0 || !phase_vbo || !phases || !ae3d_inst_has_phases(inst)) return;
     glBindBuffer(GL_ARRAY_BUFFER, (GLuint)phase_vbo);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)count * (GLsizeiptr)sizeof(float),

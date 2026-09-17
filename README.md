@@ -27,9 +27,16 @@ can be interrogated while it runs. See [Credits](#credits).
   argument and nothing else changes. `tests/test_backend_parity` draws the same
   scene through both and compares them channel by channel across materials,
   textures, instancing, transparency, skybox, FXAA, bloom, shadows, multiple
-  lights, a Gerstner ocean and an instanced voxel chunk. They agree to within
-  0.7% of channels, and CI fails if the generated Vulkan shaders fall behind
-  the GLSL they are made from.
+  lights, a Gerstner ocean, an instanced voxel chunk, the clouds, the
+  occlusion and instances placed as points. They agree to within 0.7% of
+  channels, and CI fails if the generated Vulkan shaders fall behind the GLSL
+  they are made from.
+- **Instances as matrices or as points.** An instanced model carries a
+  matrix, a colour and a phase per instance, or -- `model_enable_point_instancing`
+  -- a position, a scale, a colour and a phase in eight floats, with the
+  model's own rotation and scale applied to all of them in the shader. A
+  million grains of sand that all move in a frame are a 32 MB stream
+  instead of an 80 MB one built matrix by matrix, on both backends.
 - **Skinned crowds in one draw.** A figure's walk is baked once into a pose
   bank (a texture of bone palettes); every instance carries its own phase and
   is posed from the bank in the vertex shader. A crowd of the real 26,636-
@@ -298,7 +305,7 @@ git clone https://github.com/aether-lang-dev/aether-ui.git ../aether-ui
 |---|---|
 | `zombie_city.ae` | The city: seven blocks of terraces under a painted night sky, and a horde of the same skinned figure posed from a pose bank in two instanced draws; `AE3D_CROWD` sets the count |
 | `caustics.ae` | The seabed under the swell: a diver's height off the sand, murk with distance, the water's light web on the sand and the rocks |
-| `sand.ae` | A desert: a million grains with a tint each, falling onto a heap of sand that is itself a heightfield; hold the button and a ball under the cursor ploughs it, the sand out to a rim that slumps to its angle of repose, the grains shoved aside. Grains at rest live in a tier uploaded only when it changes, so the settled pile costs the draw and nothing else: ~100 fps while digging on an RTX 4070 Ti |
+| `sand.ae` | A desert: a million grains with a tint each, falling onto a heap of sand that is itself a heightfield; hold the button and a ball under the cursor ploughs it, the sand out to a rim that slumps to its angle of repose, the grains shoved aside. Grains at rest live in a tier uploaded only when it changes, so the settled pile costs the draw and nothing else, and every grain is a point instance, so the pour streams eight floats a grain: ~85 fps with all million falling and ~140 settled on an RTX 4070 Ti (OpenGL; Vulkan close behind) |
 | `black_hole.ae` | Kerr geodesics integrated per pixel: a spinning hole, its asymmetric shadow, a lensed disc and sky; `tests/test_blackhole` measures the shadow against sqrt(27) M. [docs/black-hole.md](docs/black-hole.md) |
 | `voxel_world.ae` | 3.9 million voxels of Perlin terrain as an island in a sea, meshed as the 259,000 faces that show with the sky each corner sees baked in, a forest on its grass, one draw call |
 | `smooth_terrain.ae` | A volcanic island meshed with surface nets, its albedo baked from its own height and slope, in a sea that mirrors the painted sky |

@@ -56,6 +56,7 @@ exports (
     model_set_uniform_vec3, model_set_uniform_array, model_uniform_count, model_uniform, model_uniform_names,
     model_enable_instancing, model_set_instance_position, model_set_instance_color,
     model_enable_instance_colors, model_set_instance_positions, model_set_instance_positions_yaw, model_set_instance_colors,
+    model_enable_point_instancing, model_instance_points, model_set_instance_scales,
     model_set_pose_bank, model_pose_bank, model_enable_instance_phases, model_set_instance_phase,
     model_set_instance_phases,
     model_instance_count, model_set_instance_draw_count, model_remove_instance, light_new, light_directional, light_point,
@@ -223,6 +224,9 @@ extern ae3d_inst_has_colors(inst: ptr) -> int
 extern ae3d_inst_set_positions(inst: ptr, xyz: ptr, count: int, sx: float, sy: float, sz: float, qx: float, qy: float, qz: float, qw: float)
 extern ae3d_inst_set_positions_yaw(inst: ptr, xyz: ptr, yaw: ptr, count: int, sx: float, sy: float, sz: float)
 extern ae3d_inst_set_colors(inst: ptr, rgb: ptr, count: int)
+extern ae3d_inst_enable_points(inst: ptr) -> int
+extern ae3d_inst_is_points(inst: ptr) -> int
+extern ae3d_inst_set_point_scales(inst: ptr, scales: ptr, count: int)
 
 
 struct Vec2 {
@@ -1780,6 +1784,31 @@ model_enable_instance_colors(m: *Model) -> bool {
     return ae3d_inst_enable_colors(m.instances, ae3d_inst_count(m.instances)) == 1
 }
 
+// Instances as points: each is a position, a scale, a colour and a phase --
+// eight floats -- and the model's own rotation and scale are applied to
+// every one of them, instead of each carrying a matrix of its own. For a
+// stream that moves every frame, a million grains of sand, it is less than
+// half the bytes to build and to send. Colours and phases need no enabling
+// of their own; a point always has them. Call after model_enable_instancing.
+model_enable_point_instancing(m: *Model) -> bool {
+    if m.instances == null { return false }
+    if ae3d_inst_enable_points(m.instances) != 1 { return false }
+    m.instances_updated = true
+    return true
+}
+
+model_instance_points(m: *Model) -> bool {
+    if m.instances == null { return false }
+    return ae3d_inst_is_points(m.instances) == 1
+}
+
+// A scale per point instance, multiplying the model's own.
+model_set_instance_scales(m: *Model, scales: ptr, count: int) {
+    if m.instances == null { return }
+    ae3d_inst_set_point_scales(m.instances, scales, count)
+    m.instances_updated = true
+}
+
 model_set_instance_color(m: *Model, index: int, r: float, g: float, b: float) {
     if m.instances == null { return }
     ae3d_inst_set_color(m.instances, index, r, g, b)
@@ -1821,6 +1850,7 @@ model_set_instance_phases(m: *Model, phases: ptr, count: int) {
     if m.instances == null { return }
     ae3d_inst_set_phases(m.instances, phases, count)
     m.instance_phases_updated = true
+    if ae3d_inst_is_points(m.instances) == 1 { m.instances_updated = true }
 }
 
 // Bulk upload of every instance's position from a packed xyz array. One call
@@ -1847,6 +1877,9 @@ model_set_instance_colors(m: *Model, rgb: ptr, count: int) {
     if m.instances == null { return }
     ae3d_inst_set_colors(m.instances, rgb, count)
     m.instance_colors_updated = true
+    // A point's colour rides in the one stream with its position, so the
+    // stream is what goes back to the device.
+    if ae3d_inst_is_points(m.instances) == 1 { m.instances_updated = true }
 }
 
 model_instance_count(m: *Model) -> int {

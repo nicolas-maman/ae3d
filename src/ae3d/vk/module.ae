@@ -653,6 +653,7 @@ render_shadow_pass(r: *VKRenderer, light: *Light, cam: *Camera) {
                 identity = core.mat4_ident()
                 ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &identity)
                 ae3d_vk_scene_set_int(vkscene.OFF_ISINSTANCED, 1)
+                ae3d_vk_scene_set_int(vkscene.OFF_INSTANCEPOINTS, 0)
                 ae3d_vk_scene_set_int(vkscene.OFF_ISSKINNED, 0)
                 ae3d_vk_shadow_draw(b.mesh, b.handle, b.count)
             }
@@ -673,15 +674,31 @@ shadow_draw_model(m: *Model) {
     // nine-metre cubes cast the shadows of eighty-one-metre ones, and the
     // camera depth the reflection, the shore and the occlusion read had
     // those in it and not the cubes.
-    if instanced == 1 {
+    points = 0
+    if instanced == 1 && core.model_instance_points(m) { points = 1 }
+    if points == 1 {
+        placed = point_frame(m)
+        ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &placed)
+    } else if instanced == 1 {
         identity = core.mat4_ident()
         ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &identity)
     } else {
         ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &m.model_matrix)
     }
     ae3d_vk_scene_set_int(vkscene.OFF_ISINSTANCED, instanced)
+    ae3d_vk_scene_set_int(vkscene.OFF_INSTANCEPOINTS, points)
     pose(m)
     ae3d_vk_shadow_draw(m.vbo, m.instance_vbo, instances)
+}
+
+// A model's matrix without its translation: what a point instance is
+// placed by, before the point's own position is put in the last column.
+point_frame(m: *Model) -> Mat4 {
+    frame = m.model_matrix
+    frame.m12 = 0.0
+    frame.m13 = 0.0
+    frame.m14 = 0.0
+    return frame
 }
 
 // A caster joins a merged depth draw when its mesh is one that other models
@@ -1098,7 +1115,15 @@ set_scene_uniforms(r: *VKRenderer, m: *Model) {
     // own scale and rotation, and the shader multiplies the model matrix by the
     // instance's, so sending both applied the scale and the rotation twice: a
     // model scaled 2.4 drew its instances at 5.76.
-    if instanced == 1 {
+    points = 0
+    if instanced == 1 && core.model_instance_points(m) { points = 1 }
+    if points == 1 {
+        // Points carry a position and a scale only: the model's rotation
+        // and scale go in the model matrix with its translation taken out,
+        // and each point puts its own back.
+        placed = point_frame(m)
+        ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &placed)
+    } else if instanced == 1 {
         identity = core.mat4_ident()
         ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &identity)
     } else {
@@ -1106,6 +1131,7 @@ set_scene_uniforms(r: *VKRenderer, m: *Model) {
     }
 
     ae3d_vk_scene_set_int(vkscene.OFF_ISINSTANCED, instanced)
+    ae3d_vk_scene_set_int(vkscene.OFF_INSTANCEPOINTS, points)
     // This backend draws a model's own instances and nothing else, so a model
     // that has instances always has a colour for each of them.
     ae3d_vk_scene_set_int(vkscene.OFF_USEINSTANCECOLOR, instanced)
@@ -1492,6 +1518,7 @@ draw_batch(r: *VKRenderer, b: *VKBatch) {
     identity = core.mat4_ident()
     ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &identity)
     ae3d_vk_scene_set_int(vkscene.OFF_ISINSTANCED, 1)
+    ae3d_vk_scene_set_int(vkscene.OFF_INSTANCEPOINTS, 0)
     // The merged stream carries no per-instance colour, and its members already
     // share one material, so the shader is told to leave the tint alone.
     ae3d_vk_scene_set_int(vkscene.OFF_USEINSTANCECOLOR, 0)

@@ -155,6 +155,11 @@ void   ae3d_inst_set_positions(void *inst, const double *xyz, int count,
 void   ae3d_inst_set_positions_yaw(void *inst, const double *xyz, const double *yaw,
                                    int count, double sx, double sy, double sz);
 void   ae3d_inst_set_colors(void *inst, const double *rgb, int count);
+int    ae3d_inst_enable_points(void *inst);
+int    ae3d_inst_is_points(void *inst);
+const float *ae3d_inst_point_data(void *inst);
+int    ae3d_inst_point_floats(void);
+void   ae3d_inst_set_point_scales(void *inst, const double *scales, int count);
 void   ae3d_inst_set_matrix(void *inst, int i, const double *m);
 void   ae3d_inst_remove(void *inst, int i);
 int    ae3d_inst_enable_colors(void *inst, int count);

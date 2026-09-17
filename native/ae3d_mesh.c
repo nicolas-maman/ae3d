@@ -36,6 +36,13 @@ typedef struct {
     float *matrices;
     float *colors;
     float *phases;      /* per-instance animation phase 0..1, for a crowd's skinning */
+    /* Points: an instance as eight floats -- x, y, z, scale, r, g, b, phase --
+       in place of a matrix, a colour and a phase. The model's own rotation
+       and scale ride in the model matrix instead, so a stream of a million
+       grains is 32 MB a frame and not 80, and a position goes to the stream
+       as three floats and not as sixteen built from it. */
+    float *points;
+    int    is_points;
     int    count;
     int    capacity;
     int    has_colors;
@@ -43,6 +50,8 @@ typedef struct {
     float  bound[3];
     float  radius;
 } ae3d_inst;
+
+#define AE3D_POINT_FLOATS 8
 
 static void ae3d_quat_rotate(const double q[4], const float in[3], float out[3]) {
     double x = q[0], y = q[1], z = q[2], w = q[3];
@@ -479,8 +488,50 @@ void ae3d_inst_destroy(void *handle) {
     free(inst->matrices);
     free(inst->colors);
     free(inst->phases);
+    free(inst->points);
     free(inst);
 }
+
+/* Instances as points, from now on: the stream is eight floats each. Every
+   instance so far becomes the point at its matrix's translation with a
+   scale of one, white, at phase zero. */
+int ae3d_inst_enable_points(void *handle) {
+    ae3d_inst *inst = (ae3d_inst *)handle;
+    int capacity, i;
+    if (!inst) return 0;
+    if (inst->is_points) return 1;
+    capacity = inst->capacity > 0 ? inst->capacity : 16;
+    {
+        float *grown = (float *)realloc(inst->points, (size_t)capacity * AE3D_POINT_FLOATS * sizeof(float));
+        if (!grown) return 0;
+        inst->points = grown;
+    }
+    for (i = 0; i < capacity; i++) {
+        float *p = inst->points + (size_t)i * AE3D_POINT_FLOATS;
+        const float *m = inst->matrices + (size_t)i * 16;
+        int placed = i < inst->count && inst->matrices;
+        p[0] = placed ? m[12] : 0.0f;
+        p[1] = placed ? m[13] : 0.0f;
+        p[2] = placed ? m[14] : 0.0f;
+        p[3] = 1.0f;
+        p[4] = 1.0f; p[5] = 1.0f; p[6] = 1.0f;
+        p[7] = 0.0f;
+    }
+    inst->is_points = 1;
+    return 1;
+}
+
+int ae3d_inst_is_points(void *handle) {
+    ae3d_inst *inst = (ae3d_inst *)handle;
+    return inst ? inst->is_points : 0;
+}
+
+const float *ae3d_inst_point_data(void *handle) {
+    ae3d_inst *inst = (ae3d_inst *)handle;
+    return inst ? inst->points : NULL;
+}
+
+int ae3d_inst_point_floats(void) { return AE3D_POINT_FLOATS; }
 
 int ae3d_inst_resize(void *handle, int count) {
     ae3d_inst *inst = (ae3d_inst *)handle;
@@ -505,6 +556,11 @@ int ae3d_inst_resize(void *handle, int count) {
             if (!grown) return 0;
             inst->phases = grown;
         }
+        if (inst->is_points) {
+            float *grown = (float *)realloc(inst->points, (size_t)capacity * AE3D_POINT_FLOATS * sizeof(float));
+            if (!grown) return 0;
+            inst->points = grown;
+        }
         inst->capacity = capacity;
     }
 
@@ -517,6 +573,11 @@ int ae3d_inst_resize(void *handle, int count) {
             c[0] = 1.0f; c[1] = 1.0f; c[2] = 1.0f;
         }
         if (inst->has_phases) { inst->phases[i] = 0.0f; }
+        if (inst->is_points) {
+            float *p = inst->points + (size_t)i * AE3D_POINT_FLOATS;
+            p[0] = 0.0f; p[1] = 0.0f; p[2] = 0.0f; p[3] = 1.0f;
+            p[4] = 1.0f; p[5] = 1.0f; p[6] = 1.0f; p[7] = 0.0f;
+        }
     }
     inst->count = count;
     return 1;
@@ -589,6 +650,16 @@ void ae3d_inst_set_positions(void *handle, const double *xyz, int count,
     if (!inst || !xyz || count <= 0) return;
     limit = count < inst->count ? count : inst->count;
 
+    if (inst->is_points) {
+        for (i = 0; i < limit; i++) {
+            float *p = inst->points + (size_t)i * AE3D_POINT_FLOATS;
+            p[0] = (float)xyz[i * 3];
+            p[1] = (float)xyz[i * 3 + 1];
+            p[2] = (float)xyz[i * 3 + 2];
+        }
+        return;
+    }
+
     xx = qx * qx; yy = qy * qy; zz = qz * qz;
     xy = qx * qy; xz = qx * qz; yz = qy * qz;
     wx = qw * qx; wy = qw * qy; wz = qw * qz;
@@ -645,13 +716,35 @@ void ae3d_inst_set_colors(void *handle, const double *rgb, int count) {
     ae3d_inst *inst = (ae3d_inst *)handle;
     int i, limit;
 
-    if (!inst || !rgb || !inst->has_colors || count <= 0) return;
+    if (!inst || !rgb || count <= 0) return;
     limit = count < inst->count ? count : inst->count;
+    if (inst->is_points) {
+        for (i = 0; i < limit; i++) {
+            float *p = inst->points + (size_t)i * AE3D_POINT_FLOATS;
+            p[4] = (float)rgb[i * 3];
+            p[5] = (float)rgb[i * 3 + 1];
+            p[6] = (float)rgb[i * 3 + 2];
+        }
+        return;
+    }
+    if (!inst->has_colors) return;
     for (i = 0; i < limit; i++) {
         float *c = inst->colors + (size_t)i * 3;
         c[0] = (float)rgb[i * 3];
         c[1] = (float)rgb[i * 3 + 1];
         c[2] = (float)rgb[i * 3 + 2];
+    }
+}
+
+/* A point's scale, the one number of its own a point instance has beyond
+   where it is: a grain of sand is not all the same grain. */
+void ae3d_inst_set_point_scales(void *handle, const double *scales, int count) {
+    ae3d_inst *inst = (ae3d_inst *)handle;
+    int i, limit;
+    if (!inst || !scales || !inst->is_points || count <= 0) return;
+    limit = count < inst->count ? count : inst->count;
+    for (i = 0; i < limit; i++) {
+        inst->points[(size_t)i * AE3D_POINT_FLOATS + 3] = (float)scales[i];
     }
 }
 
@@ -690,8 +783,15 @@ void ae3d_inst_set_phases(void *handle, const double *phases, int count) {
     ae3d_inst *inst = (ae3d_inst *)handle;
     int i, limit;
 
-    if (!inst || !phases || !inst->has_phases || count <= 0) return;
+    if (!inst || !phases || count <= 0) return;
     limit = count < inst->count ? count : inst->count;
+    if (inst->is_points) {
+        for (i = 0; i < limit; i++) {
+            inst->points[(size_t)i * AE3D_POINT_FLOATS + 7] = (float)phases[i];
+        }
+        return;
+    }
+    if (!inst->has_phases) return;
     for (i = 0; i < limit; i++) {
         inst->phases[i] = (float)phases[i];
     }
@@ -767,6 +867,22 @@ void ae3d_inst_compute_bounds(void *handle) {
     int i;
 
     if (!inst || inst->count == 0) return;
+    if (inst->is_points) {
+        for (i = 0; i < inst->count; i++) {
+            const float *p = inst->points + (size_t)i * AE3D_POINT_FLOATS;
+            cx += p[0]; cy += p[1]; cz += p[2];
+        }
+        cx /= inst->count; cy /= inst->count; cz /= inst->count;
+        for (i = 0; i < inst->count; i++) {
+            const float *p = inst->points + (size_t)i * AE3D_POINT_FLOATS;
+            double dx = p[0] - cx, dy = p[1] - cy, dz = p[2] - cz;
+            double distance = dx * dx + dy * dy + dz * dz;
+            if (distance > worst) worst = distance;
+        }
+        inst->bound[0] = (float)cx; inst->bound[1] = (float)cy; inst->bound[2] = (float)cz;
+        inst->radius = (float)sqrt(worst);
+        return;
+    }
     for (i = 0; i < inst->count; i++) {
         const float *m = inst->matrices + (size_t)i * 16;
         cx += m[12]; cy += m[13]; cz += m[14];

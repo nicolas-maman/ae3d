@@ -645,6 +645,10 @@ on_start(data: ptr) {
 
     core.model_set_casts_shadow(grain, false)
     if !core.model_enable_instancing(grain, GRAINS) { return }
+    // As points: a position, a scale and a colour each, eight floats, in
+    // place of a matrix built from the position every frame. The stream a
+    // frame of pouring sends is 32 MB and not 80.
+    core.model_enable_point_instancing(grain)
     core.model_enable_instance_colors(grain)
     core.model_set_instance_colors(grain, g_tint, GRAINS)
     engine.engine_add_model(e, grain)
@@ -658,6 +662,7 @@ on_start(data: ptr) {
     rendering.apply(still, rendering.performance_config())
     core.model_set_casts_shadow(still, false)
     if !core.model_enable_instancing(still, GRAINS) { return }
+    core.model_enable_point_instancing(still)
     core.model_enable_instance_colors(still)
     engine.engine_add_model(e, still)
     // Empty until grains come to rest: after the add, since a model added
@@ -668,11 +673,18 @@ on_start(data: ptr) {
     engine.engine_set_clear_color(e, HAZE_R, HAZE_G, HAZE_B)
 
     // Low, so the sky and the dunes are in the frame with the pile.
+    // Where the camera stands and looks, in metres, so the scene can be
+    // rendered from any view without a rebuild: the contact sheet's low
+    // view and its view toward the sun are these knobs.
     cam = engine.engine_camera(e)
-    core.camera_set_position(cam, core.vec3(0.0 - 260.0, 150.0, 820.0))
+    core.camera_set_position(cam, core.vec3(core.env_int("AE3D_CAMX", 0 - 260) as float,
+                                            core.env_int("AE3D_CAMY", 150) as float,
+                                            core.env_int("AE3D_CAMZ", 820) as float))
     core.camera_set_speed(cam, 500.0)
     core.camera_set_far(cam, 30000.0)
-    core.camera_look_at(cam, core.vec3(80.0, 150.0, 0.0 - 200.0))
+    core.camera_look_at(cam, core.vec3(core.env_int("AE3D_AIMX", 80) as float,
+                                       core.env_int("AE3D_AIMY", 150) as float,
+                                       core.env_int("AE3D_AIMZ", 0 - 200) as float))
 
     println("sand: ${GRAINS} grains in one instanced draw, hold the left button to dig")
 }
