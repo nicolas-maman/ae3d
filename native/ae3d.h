@@ -79,11 +79,11 @@ void   ae3d_horde_separate(void *grid, double *pos, double *vel, int n,
                            double radius, double strength);
 void   ae3d_crowd_wander(double *vel, const double *yaw, int n, double speed);
 void   ae3d_crowd_step(double *pos, const double *vel, double *yaw, double *phase,
-                       int n, double dt, double max_speed,
+                       int start, int n, double dt, double max_speed,
                        double x0, double x1, double z0, double z1,
                        double road_y, double walk, void *bank);
 int    ae3d_crowd_bucket(const double *pos, const double *yaw, const double *phase,
-                         const double *col, int n,
+                         const double *col, int start, int n,
                          double cx, double cz, double near_dist, double cull_dist,
                          double *np, double *ny, double *nph, double *ncol,
                          double *fp, double *fy, double *fph, double *fcol,

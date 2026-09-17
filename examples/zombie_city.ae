@@ -6,6 +6,7 @@
 //
 //     AE3D_CROWD=3000 ./build/zombie_city
 
+import std.heap
 import std.list
 import std.string
 import ae3d.core
@@ -86,11 +87,26 @@ const CULL_DIST = 0.0
 var g_scene: ptr = null
 var g_lamps: ptr = null
 var g_sky: *Skybox = null
-var g_near_body: *Model = null    // detailed body + clothes, for zombies close by
-var g_near_clothes: *Model = null
-var g_far_body: *Model = null     // cheap body only, for the ones far off
-var g_far_exported = false        // ...the build's own LOD, or decimated here
-var g_bank: ptr = null
+// One figure of the horde: a body walked in one gait. The build ships two
+// (Zombie_Body and Zombie_Body_B, the second dragging the other leg, bent
+// further, head down, arms lower) so the crowd is not one zombie copied at
+// different phases. Each keeps its own run of the crowd's columns, its own
+// baked walk, and its own near and far tiers -- and buckets and steps only
+// its run, at its own walk's pace.
+struct Figure {
+    near_body: *Model       // detailed body + clothes, for zombies close by
+    near_clothes: *Model
+    far_body: *Model        // cheap body only, for the ones far off
+    far_exported: bool      // ...the build's own LOD, or decimated here
+    bank: ptr
+    walk: float             // the gait cycle's length, seconds
+    start: int              // its run of the crowd: [start, start + count)
+    count: int
+    near_tris: int
+    cloth_tris: int
+    far_tris: int
+}
+var g_figures: ptr = null         // *Figure, one or two
 var g_world: *EcsWorld = null
 var g_pos: *Column = null
 var g_vel: *Column = null
@@ -109,7 +125,6 @@ var g_fb_yaw: *Column = null
 var g_fb_phase: *Column = null
 var g_fb_col: *Column = null
 var g_count = CROWD_DEFAULT
-var g_walk = 1.0
 var g_near_dist = NEAR_DIST   // AE3D_NEAR overrides, a knob for the LOD sweep
 var g_cull_dist = CULL_DIST   // AE3D_CULL overrides; 0 keeps the whole crowd
 var g_farcount: *Column = null   // one slot the native bucket writes the far count into
@@ -149,7 +164,7 @@ lamp_at(x: float) -> *Light {
     return lamp
 }
 
-bake_zombie(m: *Manifest, entry: *Entry) -> ptr {
+bake_zombie(m: *Manifest, entry: *Entry, fig: *Figure) -> ptr {
     bones = assets.entry_load_skeleton(m, entry)
     if bones == null { return null }
     skel = skin.skeleton_new()
@@ -189,7 +204,7 @@ bake_zombie(m: *Manifest, entry: *Entry) -> ptr {
         gait = 0.0
         gait_end = duration
     }
-    g_walk = gait_end - gait
+    fig.walk = gait_end - gait
     // In place: the clip walks the figure up the street, and that travel is
     // on the Root bone. Baked as authored, every zombie's mesh walked metres
     // off its simulated position through the clip and snapped back at the
@@ -199,7 +214,7 @@ bake_zombie(m: *Manifest, entry: *Entry) -> ptr {
     root = skin.skeleton_find(skel, "Root")
     if root < 0 { root = skin.skeleton_find(skel, "Hips") }
     if root < 0 { println("zombie_city: no Root bone -- the crowd will carry the clip's travel") }
-    bank = crowd.posebank_bake_in_place(reg, skel, FRAMES, gait, g_walk, root)
+    bank = crowd.posebank_bake_in_place(reg, skel, FRAMES, gait, fig.walk, root)
     anim.registry_free(reg)
     skin.skeleton_free(skel)
     i = 0
@@ -218,7 +233,7 @@ bake_zombie(m: *Manifest, entry: *Entry) -> ptr {
 // are two coincident meshes, and decimating them independently pulls their
 // vertices apart so the skin pokes through the cloth in patches. Only the far
 // tier, metres off and fogged, can afford the decimation. Returns the tri count.
-setup_crowd(model: *Model, cell: float) -> int {
+setup_crowd(model: *Model, cell: float, bank: ptr) -> int {
     if cell > 0.0 {
         src = core.model_mesh(model)
         lod = core.mesh_decimate(src, cell)
@@ -230,7 +245,7 @@ setup_crowd(model: *Model, cell: float) -> int {
     core.model_set_specular(model, 0.03, 0.03, 0.03)
     core.model_set_pbr(model, 0.0, 0.95)
     core.model_enable_instancing(model, g_count)
-    core.model_set_pose_bank(model, g_bank, FRAMES)
+    core.model_set_pose_bank(model, bank, FRAMES)
     core.model_enable_instance_phases(model)
     core.model_enable_instance_colors(model)
     return core.mesh_index_count(core.model_mesh(model)) / 3
@@ -510,30 +525,54 @@ on_start(data: ptr) {
     core.model_set_pbr(ground, 0.0, 1.0)
     engine.engine_add_model(e, ground)
 
-    // The crowd. The real zombie loaded twice for the two distance tiers, plus
-    // its clothes for the near one; all posed by the one baked bank.
-    entry = entry_named(m, "Zombie_Body")
-    if entry == null { println("zombie_city: no Zombie_Body"); assets.manifest_free(m); return }
-    g_bank = bake_zombie(m, entry)
-    g_near_body = assets.entry_load_model(m, entry)
-    // The far tier is the build's own stand-in when the export carries one:
-    // Zombie_Body_LOD, the body collapsed to the crowd's budget in Blender
-    // *before* the rig's weights were assigned, so the weights land on the
-    // triangles actually drawn. Decimating the full body here instead
-    // collapses vertices after weighting and can fold a joint across a bone.
-    // An older export without it falls back to the in-engine decimation.
-    lod_entry = entry_named(m, "Zombie_Body_LOD")
-    g_far_exported = lod_entry != null
-    if g_far_exported {
-        g_far_body = assets.entry_load_model(m, lod_entry)
-    } else {
-        g_far_body = assets.entry_load_model(m, entry)
+    // The crowd: one figure per gait the export carries, each loaded for its
+    // two distance tiers plus its clothes for the near one, each posed by its
+    // own baked bank, each given a run of the crowd.
+    g_figures = list.new()
+    k = 0
+    while k < 2 {
+        suffix = ""
+        if k == 1 { suffix = "_B" }
+        entry = entry_named(m, "Zombie_Body${suffix}")
+        if entry == null {
+            if k == 0 { println("zombie_city: no Zombie_Body"); assets.manifest_free(m); return }
+            k = k + 1
+            continue
+        }
+        fig = heap.new(Figure)
+        fig.walk = 1.0
+        fig.bank = bake_zombie(m, entry, fig)
+        fig.near_body = assets.entry_load_model(m, entry)
+        // The far tier is the build's own stand-in when the export carries
+        // one: the body collapsed to the crowd's budget in Blender *before*
+        // the rig's weights were assigned, so the weights land on the
+        // triangles actually drawn. An older export falls back to the
+        // in-engine decimation.
+        lod_entry = entry_named(m, "Zombie_Body_LOD${suffix}")
+        fig.far_exported = lod_entry != null
+        if fig.far_exported {
+            fig.far_body = assets.entry_load_model(m, lod_entry)
+        } else {
+            fig.far_body = assets.entry_load_model(m, entry)
+        }
+        if fig.bank == null || fig.near_body == null || fig.far_body == null {
+            println("zombie_city: load failed"); assets.manifest_free(m); return
+        }
+        fig.near_clothes = null
+        clothes_entry = entry_named(m, "Zombie_Clothes${suffix}")
+        if clothes_entry != null { fig.near_clothes = assets.entry_load_model(m, clothes_entry) }
+        list.add_raw(g_figures, fig as ptr)
+        k = k + 1
     }
-    if g_bank == null || g_near_body == null || g_far_body == null {
-        println("zombie_city: load failed"); assets.manifest_free(m); return
+    // The crowd split between the figures, each its own run of the columns.
+    figures = list.size(g_figures)
+    k = 0
+    while k < figures {
+        fig = list.get_raw(g_figures, k) as *Figure
+        fig.start = (g_count * k) / figures
+        fig.count = (g_count * (k + 1)) / figures - fig.start
+        k = k + 1
     }
-    clothes_entry = entry_named(m, "Zombie_Clothes")
-    if clothes_entry != null { g_near_clothes = assets.entry_load_model(m, clothes_entry) }
 
     g_world = ecs.world_new(g_count)
     g_pos = ecs.column_new(g_count, 3)
@@ -579,39 +618,49 @@ on_start(data: ptr) {
     cols = (span / SEP_RADIUS) as int + 2
     g_grid = crowd.grid_new(cols, SEP_RADIUS, STREET_X0 - 20.0, 0.0 - span * 0.5, 10)
 
-    near_tris = setup_crowd(g_near_body, LOD_NEAR)
-    cloth_tris = 0
-    if g_near_clothes != null { cloth_tris = setup_crowd(g_near_clothes, LOD_NEAR) }
-    // AE3D_LODFAR (hundredths of a metre) decimates the far tier in the
-    // engine; with the exported stand-in that is off unless asked for.
-    far_default = (LOD_FAR * 100.0) as int
-    if g_far_exported { far_default = 0 }
-    far_cell = core.env_int("AE3D_LODFAR", far_default) as float / 100.0
-    far_tris = setup_crowd(g_far_body, far_cell)
-    engine.engine_add_model(e, g_near_body)
-    if g_near_clothes != null { engine.engine_add_model(e, g_near_clothes) }
-    engine.engine_add_model(e, g_far_body)
+    k = 0
+    while k < figures {
+        fig = list.get_raw(g_figures, k) as *Figure
+        fig.near_tris = setup_crowd(fig.near_body, LOD_NEAR, fig.bank)
+        fig.cloth_tris = 0
+        if fig.near_clothes != null { fig.cloth_tris = setup_crowd(fig.near_clothes, LOD_NEAR, fig.bank) }
+        // AE3D_LODFAR (hundredths of a metre) decimates the far tier in the
+        // engine; with the exported stand-in that is off unless asked for.
+        far_default = (LOD_FAR * 100.0) as int
+        if fig.far_exported { far_default = 0 }
+        far_cell = core.env_int("AE3D_LODFAR", far_default) as float / 100.0
+        fig.far_tris = setup_crowd(fig.far_body, far_cell, fig.bank)
+        engine.engine_add_model(e, fig.near_body)
+        if fig.near_clothes != null { engine.engine_add_model(e, fig.near_clothes) }
+        engine.engine_add_model(e, fig.far_body)
+        k = k + 1
+    }
 
     assets.manifest_free(m)
-    log_scene(e, cam, near_tris, cloth_tris, far_tris)
+    log_scene(e, cam)
 }
 
 // Dump the whole scene so it is debuggable without guessing: the crowd, the
 // tiers and their triangle budgets, every light with its real values, the
 // shadow and fog envelope, and the camera. Printed once at start-up; grep
 // "[diag]" for it.
-log_scene(e: *Engine, cam: *Camera, near_tris: int, cloth_tris: int, far_tris: int) {
+log_scene(e: *Engine, cam: *Camera) {
     println("zombie_city[diag] ================ SCENE ================")
     println("zombie_city[diag] crowd: ${g_count} zombies (AE3D_CROWD), sep every ${g_sepn} frame(s)")
-    far_from = "decimated in the engine (AE3D_LODFAR)"
-    if g_far_exported { far_from = "Zombie_Body_LOD from the export" }
-    println("zombie_city[diag] tiers: near ${near_tris}+${cloth_tris} tris (full mesh), far ${far_tris} tris, ${far_from}; ${FRAMES} pose bank")
-    // The walk the bank carries: how far the clip's root travels over its
-    // length, and the pace that sets. In place, so that travel is the crowd's
-    // motion and not the mesh's; zero here means the clip was baked as
-    // authored and the horde will drift off its positions.
-    total = crowd.posebank_travel(g_bank, FRAMES)
-    println("zombie_city[diag] walk: ${g_walk}s clip, root travels ${total}m in place => ${total / g_walk}m/s mean; at phase 0.25 ${crowd.posebank_speed(g_bank, 0.25, g_walk)}m/s, at 0.75 ${crowd.posebank_speed(g_bank, 0.75, g_walk)}m/s")
+    k = 0
+    while k < list.size(g_figures) {
+        fig = list.get_raw(g_figures, k) as *Figure
+        far_from = "decimated in the engine (AE3D_LODFAR)"
+        if fig.far_exported { far_from = "the build's own LOD" }
+        println("zombie_city[diag] figure ${k}: zombies ${fig.start}..${fig.start + fig.count - 1}; near ${fig.near_tris}+${fig.cloth_tris} tris (full mesh), far ${fig.far_tris} tris, ${far_from}; ${FRAMES} pose bank")
+        // The walk the bank carries: how far the clip's root travels over
+        // its length, and the pace that sets. In place, so that travel is
+        // the crowd's motion and not the mesh's; zero here means the clip
+        // was baked as authored and the horde will drift off its positions.
+        total = crowd.posebank_travel(fig.bank, FRAMES)
+        println("zombie_city[diag] figure ${k} walk: ${fig.walk}s cycle, root travels ${total}m in place => ${total / fig.walk}m/s mean; at phase 0.25 ${crowd.posebank_speed(fig.bank, 0.25, fig.walk)}m/s, at 0.75 ${crowd.posebank_speed(fig.bank, 0.75, fig.walk)}m/s")
+        k = k + 1
+    }
     println("zombie_city[diag] LOD: near<${g_near_dist}m detailed, beyond far; cull ${g_cull_dist}m")
     println("zombie_city[diag] city: ${TILES} blocks, block ${BLOCK_LEN}m, street x[${STREET_X0}..${STREET_X1}], road z[${ROAD_Z0}..${ROAD_Z1}] y=${ROAD_Y}")
     cp = cam.position
@@ -712,7 +761,7 @@ log_materials_once() {
 }
 
 on_update(data: ptr, delta: float) {
-    if g_near_body == null { return }
+    if g_figures == null || list.size(g_figures) == 0 { return }
     e = data as *Engine
     cam = engine.engine_camera(e)
 
@@ -732,25 +781,38 @@ on_update(data: ptr, delta: float) {
         crowd.horde_separate(g_world, g_pos, g_vel, g_grid, SEP_RADIUS,
                              SEP_STRENGTH * (g_sepn as float))
     }
-    // The bank drives the pace: each zombie moves at the speed its pose is
-    // walking at, so the feet plant rather than skate (see crowd_step).
-    crowd.crowd_step(ecs.column_data(g_pos), ecs.column_data(g_vel), ecs.column_data(g_yaw),
-                     ecs.column_data(g_phase), g_count, delta, MAX_SPEED,
-                     STREET_X0, STREET_X1, ROAD_Z0, ROAD_Z1, ROAD_Y, g_walk, g_bank)
+    // Each figure's run stepped at its own bank's pace: a zombie moves at
+    // the speed its pose is walking at, so the feet plant rather than skate
+    // (see crowd_step).
+    k = 0
+    while k < list.size(g_figures) {
+        fig = list.get_raw(g_figures, k) as *Figure
+        crowd.crowd_step(ecs.column_data(g_pos), ecs.column_data(g_vel), ecs.column_data(g_yaw),
+                         ecs.column_data(g_phase), fig.start, fig.count, delta, MAX_SPEED,
+                         STREET_X0, STREET_X1, ROAD_Z0, ROAD_Z1, ROAD_Y, fig.walk, fig.bank)
+        k = k + 1
+    }
     detect_teleports(delta)
     log_materials_once()
-    nn = crowd.crowd_bucket(ecs.column_data(g_pos), ecs.column_data(g_yaw), ecs.column_data(g_phase),
-                            ecs.column_data(g_color), g_count, cam.position.x, cam.position.z, g_near_dist, g_cull_dist,
-                            ecs.column_data(g_nb_pos), ecs.column_data(g_nb_yaw), ecs.column_data(g_nb_phase), ecs.column_data(g_nb_col),
-                            ecs.column_data(g_fb_pos), ecs.column_data(g_fb_yaw), ecs.column_data(g_fb_phase), ecs.column_data(g_fb_col),
-                            ecs.column_data(g_farcount))
-    // The cull drops the fogged-out zombies, so far is what the bucket counted,
-    // not the leftover of n.
-    nf = ecs.column_get(g_farcount, 0, 0) as int
-
-    upload_tier(g_near_body, g_nb_pos, g_nb_yaw, g_nb_phase, g_nb_col, nn)
-    if g_near_clothes != null { upload_tier(g_near_clothes, g_nb_pos, g_nb_yaw, g_nb_phase, g_nb_col, nn) }
-    upload_tier(g_far_body, g_fb_pos, g_fb_yaw, g_fb_phase, g_fb_col, nf)
+    // Each figure's run bucketed into its own tiers. The near and far
+    // buffers are shared scratch, sized for the whole crowd, filled and
+    // uploaded one figure at a time.
+    k = 0
+    while k < list.size(g_figures) {
+        fig = list.get_raw(g_figures, k) as *Figure
+        nn = crowd.crowd_bucket(ecs.column_data(g_pos), ecs.column_data(g_yaw), ecs.column_data(g_phase),
+                                ecs.column_data(g_color), fig.start, fig.count, cam.position.x, cam.position.z, g_near_dist, g_cull_dist,
+                                ecs.column_data(g_nb_pos), ecs.column_data(g_nb_yaw), ecs.column_data(g_nb_phase), ecs.column_data(g_nb_col),
+                                ecs.column_data(g_fb_pos), ecs.column_data(g_fb_yaw), ecs.column_data(g_fb_phase), ecs.column_data(g_fb_col),
+                                ecs.column_data(g_farcount))
+        // The cull drops the fogged-out zombies, so far is what the bucket
+        // counted, not the leftover of the run.
+        nf = ecs.column_get(g_farcount, 0, 0) as int
+        upload_tier(fig.near_body, g_nb_pos, g_nb_yaw, g_nb_phase, g_nb_col, nn)
+        if fig.near_clothes != null { upload_tier(fig.near_clothes, g_nb_pos, g_nb_yaw, g_nb_phase, g_nb_col, nn) }
+        upload_tier(fig.far_body, g_fb_pos, g_fb_yaw, g_fb_phase, g_fb_col, nf)
+        k = k + 1
+    }
 }
 
 upload_tier(model: *Model, pos: *Column, yaw: *Column, phase: *Column, col: *Column, count: int) {

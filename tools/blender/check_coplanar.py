@@ -85,6 +85,13 @@ def main(argv):
         if entry.get("parent"):
             rotated.append(entry["object"])
             continue
+        # A skinned figure is drawn posed by its bones, never in the bind
+        # pose its faces are exported in, and the crowd draws it thousands
+        # of times wherever the simulation puts it: two figures exported on
+        # the same spot share every plane and fight over none of them.
+        if entry["files"].get("skin"):
+            rotated.append(entry["object"])
+            continue
         positions, faces = load_obj(os.path.join(directory, entry["files"]["mesh"]))
         surfaces[entry["object"]] = world_faces(positions, faces, entry)
 
@@ -105,7 +112,7 @@ def main(argv):
                     continue
                 break
 
-    print("check_coplanar: %d objects checked, %d skipped as rotated or parented"
+    print("check_coplanar: %d objects checked, %d skipped as rotated, parented or skinned"
           % (len(surfaces), len(rotated)))
     for first, second, axis, plane in clashes:
         print("  %s and %s share the plane %s = %.4f and overlap there"
