@@ -16,7 +16,7 @@ exports (
     simulation_set_wave_height, simulation_set_amplitude, simulation_amplitude,
     simulation_set_wave_speed, simulation_set_randomness,
     simulation_set_caustics, simulation_set_foam, simulation_set_reflection, simulation_set_shadow,
-    simulation_set_wave_scale,
+    simulation_set_wave_scale, simulation_set_sky_texture,
     simulation_set_distortion, simulation_set_normal_strength,
     simulation_adopt, simulation_size,
     simulation_color_r, simulation_color_g, simulation_color_b,
@@ -37,6 +37,8 @@ struct Simulation {
     model: ptr
     ocean_size: float
     base_amplitude: float
+    // The skybox image the surface reflects, or "" for the computed sky.
+    sky_path: string
     // Multiplies every wave's frequency: 1 is the ocean's own table, whose
     // longest wave is 78 km and shortest 8 km -- swells for a sea seen from
     // the air. A shore, or a surface seen from under it, wants waves metres
@@ -74,6 +76,7 @@ simulation_new(size: float, amplitude: float) -> *Simulation {
     w.ocean_size = size
     w.base_amplitude = amplitude
     w.wave_scale = 1.0
+    w.sky_path = ""
     w.color_r = 0.06
     w.color_g = 0.22
     w.color_b = 0.45
@@ -178,6 +181,14 @@ simulation_set_opacity(w: *Simulation, value: float) {
 // a single uniform.
 // How much shorter than the ocean's own the waves are: 1 keeps wavelengths
 // of kilometres, 400 makes them 20 to 200 metres. Rebuild after changing.
+// The skybox image the water reflects -- the same file the scene's skybox
+// was made from -- so the sea shows the sky that is actually over it.
+// Takes effect on the next build.
+simulation_set_sky_texture(w: *Simulation, path: string) {
+    w.sky_path = path
+    settled(w)
+}
+
 simulation_set_wave_scale(w: *Simulation, value: float) {
     w.wave_scale = value
     settled(w)
@@ -260,11 +271,15 @@ wave_frequency(w: *Simulation, index: int) -> float {
     return base * w.wave_scale
 }
 
-// Deep-water dispersion: a longer wave travels faster, which is what keeps four
-// superimposed trains from marching in lockstep.
+// Deep-water dispersion: the rate a wave's phase turns is sqrt(g k) for its
+// wavenumber k, so a longer wave travels faster and no two of the four
+// trains march in lockstep. In radians a second, which is what the shader
+// adds per second of time: a 160 m wave turns 0.6 a second (a ten-second
+// period), a 16 m one 2.0. The old 0.002 * sqrt(wavelength) was tuned for
+// kilometre swells and left waves metres long all but standing still.
 wave_speed(w: *Simulation, index: int) -> float {
-    wavelength = core.TWO_PI / wave_frequency(w, index)
-    return 0.002 * core.sqrt_of(wavelength)
+    k = wave_frequency(w, index)
+    return core.sqrt_of(9.81 * k)
 }
 
 upload_wave_table(w: *Simulation, m: *Model) {
@@ -277,7 +292,14 @@ upload_wave_table(w: *Simulation, m: *Model) {
 
     i = 0
     while i < MAX_WAVES {
-        angle = (i * 1.0) * core.deg_to_rad(45.0)
+        // The trains fan out around one wind, unevenly: spaced a neat 45
+        // degrees apart they crossed into a lattice of crests, an egg box
+        // with a foam cap on every bump.
+        spread = 0.0
+        if i == 1 { spread = 0.0 - 27.0 }
+        if i == 2 { spread = 38.0 }
+        if i == 3 { spread = 0.0 - 61.0 }
+        angle = core.deg_to_rad(17.0 + spread)
         direction = core.v3_normalize(core.vec3(core.cos_of(angle), 0.0, core.sin_of(angle)))
 
         ae3d_farr_set(directions, i * 3, direction.x)
@@ -311,6 +333,10 @@ simulation_build(w: *Simulation, resolution: int) -> *Model {
     // there composites a number of times that depends on depth precision.
     core.model_set_alpha(m, w.opacity)
     core.model_set_shader(m, shaders.water_shader())
+    // A sea casts no shadow: the light through it is the caustics, and the
+    // shore beside it is sunlit. Left as a caster, the surface put every
+    // seabed and every drowned slope into one flat shadow.
+    core.model_set_casts_shadow(m, false)
 
     upload_wave_table(w, m)
     core.model_set_uniform_int(m, "waveCount", MAX_WAVES)
@@ -361,6 +387,12 @@ simulation_apply(w: *Simulation) {
     core.model_set_uniform_float(m, "causticsScale", w.caustics_scale)
 
     core.model_set_uniform_float(m, "waterReflectionIntensity", w.reflection_intensity)
+    has_sky = 0
+    if w.sky_path != "" {
+        core.model_set_texture(m, w.sky_path)
+        has_sky = 1
+    }
+    core.model_set_uniform_int(m, "hasSkyTexture", has_sky)
     core.model_set_uniform_float(m, "shadowIntensity", w.shadow_strength)
     core.model_set_uniform_float(m, "waterDistortionIntensity", w.distortion_strength)
     core.model_set_uniform_float(m, "waterNormalIntensity", w.normal_strength)

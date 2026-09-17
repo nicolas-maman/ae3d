@@ -117,6 +117,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     vec3 horizonColor;
     bool enableWaterReflection;
     float waterReflectionIntensity;
+    int hasSkyTexture;
     bool enableWaterDistortion;
     float waterDistortionIntensity;
     bool enableWaterNormalMapping;
@@ -174,7 +175,12 @@ float perlinNoise(vec2 p, int octaves) {
 // GPU Gems enhanced Gerstner wave with wave sharpening
 vec3 calculateGerstnerWave(vec3 position, vec3 direction, float amplitude, float frequency, float speed, float phase, float steepness, float time) {
     vec2 d = normalize(direction.xz);
-    float wave = dot(d, position.xz) * frequency + time * speed + phase;
+    // The same speed the normal is computed at: the displacement used to
+    // ignore the multiplier, so the lit slope and the shape were out of
+    // phase whenever a scene set one.
+    float effectiveSpeed = speed * waveSpeedMultiplier;
+    if (waveSpeedMultiplier <= 0.001) effectiveSpeed = speed;
+    float wave = dot(d, position.xz) * frequency + time * effectiveSpeed + phase;
     float c = cos(wave);
     float s = sin(wave);
     
@@ -264,10 +270,6 @@ void main() {
     // Natural wave displacement for photorealistic appearance
     totalDisplacement.y *= 1.5; // Gentle vertical displacement to prevent artifacts
     
-    // Add fine surface detail for realism (performance-optimized)
-    vec2 detailCoord = worldPos.xz * 0.01 + time * 0.05;
-    float surfaceDetail = (sin(detailCoord.x * 8.0) + sin(detailCoord.y * 6.0)) * 0.02;
-    totalDisplacement.y += surfaceDetail * 15.0; // Subtle surface ripples
     
     // Apply displacement
     worldPos += totalDisplacement;

@@ -118,6 +118,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     vec3 horizonColor;
     bool enableWaterReflection;
     float waterReflectionIntensity;
+    int hasSkyTexture;
     bool enableWaterDistortion;
     float waterDistortionIntensity;
     bool enableWaterNormalMapping;
@@ -747,6 +748,16 @@ float turbulence(vec3 p, int octaves) {
 // GPU Gems Chapter 2: the bright web a water surface casts on what lies under
 // it. Two noise fields drift apart and the pattern is where they cross, which
 // is what gives caustics their thin moving lines rather than smooth blobs.
+// One web of the caustic pattern: where two drifting noise fields cross,
+// a thin bright line, which is what the focused light off a wave crest
+// draws on the floor.
+float caustic_web(vec2 uv, float t) {
+    vec2 drift = vec2(0.7, 0.3) * causticsSpeed * t;
+    float a = perlinNoise3D(vec3(uv + drift, t * causticsSpeed * 0.5));
+    float b = perlinNoise3D(vec3(uv * 1.7 - drift * 0.8, t * causticsSpeed * 0.4 + 5.3));
+    return pow(clamp(1.0 - abs(a - b) * 3.0, 0.0, 1.0), 8.0);
+}
+
 vec3 caustic_light(vec3 worldPos, vec3 norm) {
     if (!enableCaustics) {
         return vec3(0.0);
@@ -757,11 +768,16 @@ vec3 caustic_light(vec3 worldPos, vec3 norm) {
         return vec3(0.0);
     }
 
+    // Two webs, the finer one half as bright, so the pattern is a network
+    // with nodes where they cross and not one set of parallel worms; and
+    // each colour a hair to one side, the fringe light through water has.
     vec2 uv = worldPos.xz * causticsScale;
-    vec2 drift = vec2(0.7, 0.3) * causticsSpeed * causticsTime;
-    float a = perlinNoise3D(vec3(uv + drift, causticsTime * causticsSpeed * 0.5));
-    float b = perlinNoise3D(vec3(uv * 1.7 - drift * 0.8, causticsTime * causticsSpeed * 0.4 + 5.3));
-    float web = pow(clamp(1.0 - abs(a - b) * 2.5, 0.0, 1.0), 6.0);
+    float t = causticsTime;
+    vec2 fringe = vec2(0.006, 0.004);
+    vec3 web;
+    web.r = caustic_web(uv + fringe, t) + 0.5 * caustic_web(uv * 2.3 + fringe * 2.0 + 11.0, t);
+    web.g = caustic_web(uv, t) + 0.5 * caustic_web(uv * 2.3 + 11.0, t);
+    web.b = caustic_web(uv - fringe, t) + 0.5 * caustic_web(uv * 2.3 - fringe * 2.0 + 11.0, t);
 
     // The light falls from the surface straight down, so a floor catches the
     // whole pattern, a wall catches a grazing fraction of it, and depth of

@@ -114,10 +114,11 @@ typedef struct {
 #define AE3D_VK_OFF_HORIZONCOLOR 4672
 #define AE3D_VK_OFF_ENABLEWATERREFLECTION 4684
 #define AE3D_VK_OFF_WATERREFLECTIONINTENSITY 4688
-#define AE3D_VK_OFF_ENABLEWATERDISTORTION 4692
-#define AE3D_VK_OFF_WATERDISTORTIONINTENSITY 4696
-#define AE3D_VK_OFF_ENABLEWATERNORMALMAPPING 4700
-#define AE3D_VK_OFF_WATERNORMALINTENSITY 4704
+#define AE3D_VK_OFF_HASSKYTEXTURE 4692
+#define AE3D_VK_OFF_ENABLEWATERDISTORTION 4696
+#define AE3D_VK_OFF_WATERDISTORTIONINTENSITY 4700
+#define AE3D_VK_OFF_ENABLEWATERNORMALMAPPING 4704
+#define AE3D_VK_OFF_WATERNORMALINTENSITY 4708
 
 #define AE3D_VK_MAX_LIGHTS 4
 #define AE3D_VK_LIGHT_STRIDE 80
@@ -167,8 +168,8 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "enableSheen", 3720 },
     { "enableTransmission", 3744 },
     { "enableVolumetricLighting", 3768 },
-    { "enableWaterDistortion", 4692 },
-    { "enableWaterNormalMapping", 4700 },
+    { "enableWaterDistortion", 4696 },
+    { "enableWaterNormalMapping", 4704 },
     { "enableWaterReflection", 4684 },
     { "exposure", 3684 },
     { "foamIntensity", 4644 },
@@ -180,6 +181,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "giIntensity", 3808 },
     { "hasNormalMap", 3696 },
     { "hasShadowMap", 3860 },
+    { "hasSkyTexture", 4692 },
     { "horizonColor", 4672 },
     { "iblIntensity", 3764 },
     { "invViewProjection", 4096 },
@@ -229,9 +231,9 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "volumetricScattering", 3780 },
     { "volumetricSteps", 3776 },
     { "waterBaseColor", 4624 },
-    { "waterDistortionIntensity", 4696 },
+    { "waterDistortionIntensity", 4700 },
     { "waterLevel", 4652 },
-    { "waterNormalIntensity", 4704 },
+    { "waterNormalIntensity", 4708 },
     { "waterOpacity", 4636 },
     { "waterPlaneHeight", 4648 },
     { "waterReflectionIntensity", 4688 },
@@ -246,7 +248,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "waveSteepness", 4512 },
 };
 
-#define AE3D_VK_UNIFORM_SLOT_COUNT 106
+#define AE3D_VK_UNIFORM_SLOT_COUNT 107
 
 static inline int ae3d_vk_uniform_offset(const char *name) {
     int low = 0;

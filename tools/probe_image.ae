@@ -1,0 +1,143 @@
+// Numbers for a rendered frame, so a look is judged by measurement and not
+// by squinting at a thumbnail: per horizontal band the mean colour, how grey
+// it is (mean of min/max channel: 1.0 is white or grey, 0 is a pure hue),
+// and given a second frame, how much moved between them.
+//
+//   ./build.sh tools/probe_image.ae && ./build/probe_image frame.png [next.png [diff.png]]
+//
+// With a third path the difference is written there as an image, each
+// channel's gap scaled four times, so where two frames disagree can be seen.
+//
+// The loader flips rows so band 0 is the bottom of the frame; the bands are
+// printed top first to read like the picture.
+import ae3d.core
+import std.os
+
+extern ae3d_image_load(path: string) -> ptr
+extern ae3d_image_free(img: ptr)
+extern ae3d_image_width(img: ptr) -> int
+extern ae3d_image_height(img: ptr) -> int
+extern ae3d_image_pixels(img: ptr) -> ptr
+extern ae3d_image_error() -> string
+extern ae3d_png_write(path: string, rgba: ptr, width: int, height: int) -> int
+extern ae3d_rgba_set(rgba: ptr, index: int, r: float, g: float, b: float, a: float)
+extern calloc(count: int, size: int) -> ptr
+extern free(block: ptr)
+
+const BANDS = 8
+const STRIDE = 4
+
+channel(pixels: ptr, index: int) -> int {
+    bytes = pixels as byte[]
+    return (bytes[index] as int) & 255
+}
+
+band_report(pixels: ptr, width: int, height: int) {
+    band = BANDS - 1
+    while band >= 0 {
+        y0 = height * band / BANDS
+        y1 = height * (band + 1) / BANDS
+        n = 0
+        r = 0
+        g = 0
+        b = 0
+        grey = 0.0
+        y = y0
+        while y < y1 {
+            x = 0
+            while x < width {
+                at = (y * width + x) * 4
+                cr = channel(pixels, at)
+                cg = channel(pixels, at + 1)
+                cb = channel(pixels, at + 2)
+                r = r + cr
+                g = g + cg
+                b = b + cb
+                hi = cr
+                if cg > hi { hi = cg }
+                if cb > hi { hi = cb }
+                lo = cr
+                if cg < lo { lo = cg }
+                if cb < lo { lo = cb }
+                if hi > 0 { grey = grey + (lo as float) / (hi as float) }
+                n = n + 1
+                x = x + STRIDE
+            }
+            y = y + STRIDE
+        }
+        top = height - y1
+        println("rows ${top}-${height - y0}: mean ${r / n} ${g / n} ${b / n}, grey ${grey / (n as float)}")
+        band = band - 1
+    }
+}
+
+motion_report(a: ptr, b: ptr, width: int, height: int, diff_path: string) {
+    total = 0
+    worst = 0
+    n = 0
+    diff = null as ptr
+    if diff_path != "" { diff = calloc(width * height * 4, 1) }
+    y = 0
+    while y < height {
+        x = 0
+        while x < width {
+            at = (y * width + x) * 4
+            d = 0
+            gap_r = 0
+            gap_g = 0
+            gap_b = 0
+            c = 0
+            while c < 3 {
+                e = channel(a, at + c) - channel(b, at + c)
+                if e < 0 { e = 0 - e }
+                if c == 0 { gap_r = e }
+                if c == 1 { gap_g = e }
+                if c == 2 { gap_b = e }
+                d = d + e
+                c = c + 1
+            }
+            if d > worst { worst = d }
+            total = total + d
+            n = n + 1
+            if diff != null {
+                // Written top row first: the loader flipped the frame.
+                row = height - 1 - y
+                ae3d_rgba_set(diff, row * width + x, (gap_r * 4) as float / 255.0,
+                              (gap_g * 4) as float / 255.0, (gap_b * 4) as float / 255.0, 1.0)
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    println("motion: mean ${(total as float) / (n as float) / 3.0}/255 per channel, worst ${worst / 3}")
+    if diff != null {
+        if ae3d_png_write(diff_path, diff, width, height) == 1 { println("diff written to ${diff_path}") }
+        free(diff)
+    }
+}
+
+main() {
+    if os.args_count() < 2 {
+        println("usage: probe_image frame.png [next.png]")
+        return
+    }
+    img = ae3d_image_load(os.args_get(1))
+    if img == null { println("probe_image: ${ae3d_image_error()}"); return }
+    width = ae3d_image_width(img)
+    height = ae3d_image_height(img)
+    println("${os.args_get(1)}: ${width}x${height}")
+    band_report(ae3d_image_pixels(img), width, height)
+    if os.args_count() > 2 {
+        next = ae3d_image_load(os.args_get(2))
+        if next == null { println("probe_image: ${ae3d_image_error()}"); ae3d_image_free(img); return }
+        if ae3d_image_width(next) == width && ae3d_image_height(next) == height {
+            diff_path = ""
+            if os.args_count() > 3 { diff_path = os.args_get(3) }
+            motion_report(ae3d_image_pixels(img), ae3d_image_pixels(next), width, height, diff_path)
+        } else {
+            println("motion: frames differ in size")
+        }
+        ae3d_image_free(next)
+    }
+    ae3d_image_free(img)
+}
