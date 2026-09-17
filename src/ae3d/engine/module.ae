@@ -25,7 +25,7 @@ exports (
     engine_set_size, engine_set_title, engine_set_msaa, engine_set_decorated, engine_set_post,
     engine_set_render_scale, engine_set_shadows, engine_shadows, engine_set_fog, engine_fog, engine_set_shadow_distance, engine_shadow_distance,
     engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
-    engine_set_skybox, engine_set_sky, engine_set_clear_color, engine_draw_calls, engine_load_texture,
+    engine_set_skybox, engine_set_sky, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_load_texture,
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
     engine_render_ms, engine_render_frames,
     engine_set_debug, engine_set_frustum_culling, engine_set_face_culling,
@@ -415,11 +415,18 @@ engine_set_clear_color(e: *Engine, red: float, green: float, blue: float) {
     e.backend_set_clear_color(e.backend_state, red, green, blue)
 }
 
-// How many draws the last frame took, from whichever backend drew it.
-engine_draw_calls(e: *Engine) -> int {
-    if e.backend_state == null { return 0 }
-    if e.api == platform.API_VULKAN { return vk.renderer_draw_calls(e.backend_state as *VKRenderer) }
-    return gl.renderer_draw_calls(e.gl_renderer as *GLRenderer)
+// Clouds over the sky, on either backend: `cover` is how much of the sky
+// they take (0 clear, 0.3 a few, 0.8 overcast with holes), `wind` how fast
+// they drift as a multiple of scene time. They are marched in the sky
+// shader over whatever sky is set, lit by the key light, and throw their
+// shadow on the ground through the same coverage the sky draws.
+engine_set_clouds(e: *Engine, cover: float, wind: float) {
+    if e.backend_state == null { return }
+    if e.api == platform.API_VULKAN {
+        vk.renderer_set_clouds(e.backend_state as *VKRenderer, cover, wind)
+    } else {
+        gl.renderer_set_clouds(e.gl_renderer as *GLRenderer, cover, wind)
+    }
 }
 
 // How many draws the last frame took, from whichever backend drew it.

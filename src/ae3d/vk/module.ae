@@ -26,7 +26,7 @@ exports (
     renderer_load_texture, renderer_release_texture, renderer_sample_count, renderer_set_post,
     renderer_set_bloom_intensity, renderer_bloom_intensity,
     renderer_set_shadows, renderer_shadows, renderer_set_ssr, renderer_ssr, renderer_set_ssr_params, renderer_add_light, renderer_remove_light,
-    renderer_set_fog, renderer_fog, renderer_set_shadow_distance, renderer_shadow_distance,
+    renderer_set_fog, renderer_fog, renderer_set_clouds, renderer_set_shadow_distance, renderer_shadow_distance,
     skybox_create, skybox_free,
     offscreen_pixels, offscreen_width, offscreen_height,
     request_capture, capture_ready, capture_pixels, capture_width, capture_height, snapshot,
@@ -179,6 +179,8 @@ struct VKRenderer {
     shadow_texel_world: float
     scene_start: float
     scene_time: float
+    cloud_cover: float
+    cloud_wind: float
     defaults: ptr
     loaded_names: ptr
     shading_loaded: ptr
@@ -405,6 +407,11 @@ renderer_set_shadows(r: *VKRenderer, on: bool) {
 
 renderer_shadows(r: *VKRenderer) -> bool {
     return ae3d_vk_shadows() == 1
+}
+
+renderer_set_clouds(r: *VKRenderer, cover: float, wind: float) {
+    r.cloud_cover = cover
+    r.cloud_wind = wind
 }
 
 renderer_set_ssr(r: *VKRenderer, on: bool) {
@@ -970,6 +977,17 @@ write_frame_uniforms(r: *VKRenderer, light: *Light, cam: *Camera) {
     ae3d_vk_scene_set_float(vkscene.OFF_SHADOWTEXELWORLD, r.shadow_texel_world)
     ae3d_vk_scene_set_int(vkscene.OFF_HASSHADOWMAP, ae3d_vk_shadows())
     ae3d_vk_scene_set_float(vkscene.OFF_CAUSTICSTIME, r.scene_time)
+    // The clouds, for the sky that draws them and the ground they shadow.
+    ae3d_vk_scene_set_float(vkscene.OFF_CLOUDCOVER, r.cloud_cover)
+    ae3d_vk_scene_set_float(vkscene.OFF_CLOUDTIME, r.scene_time * r.cloud_wind)
+    sun = key_light(r, light)
+    if sun != null {
+        ae3d_vk_scene_set_vec3(vkscene.OFF_CLOUDSUN, sun.direction.x, sun.direction.y, sun.direction.z)
+        ae3d_vk_scene_set_vec3(vkscene.OFF_CLOUDSUNCOLOR, sun.color.x, sun.color.y, sun.color.z)
+    } else {
+        ae3d_vk_scene_set_vec3(vkscene.OFF_CLOUDSUN, 0.0, 1.0, 0.0)
+        ae3d_vk_scene_set_vec3(vkscene.OFF_CLOUDSUNCOLOR, 1.0, 1.0, 1.0)
+    }
 
     fog_on = 0
     if r.fog.enabled { fog_on = 1 }

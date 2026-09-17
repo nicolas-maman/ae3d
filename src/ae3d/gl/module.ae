@@ -27,7 +27,7 @@ exports (
     renderer_set_render_scale, renderer_render_scale,
     renderer_set_target,
     renderer_set_bloom_params, renderer_set_bloom_intensity, renderer_bloom_intensity,
-    renderer_set_post, renderer_set_fog, renderer_fog,
+    renderer_set_post, renderer_set_fog, renderer_fog, renderer_set_clouds,
     renderer_set_shadows, renderer_shadows, renderer_shadow_map, renderer_default_program,
     renderer_set_shadow_distance, renderer_shadow_distance,
     renderer_load_texture, renderer_release_texture, renderer_texture_count,
@@ -152,6 +152,11 @@ struct ProgramSlots {
     has_scene_depth: int
     screen_size: int
     inv_view_projection: int
+    // The clouds' shadow: cover, drift and the sun, the same three the sky
+    // draws the clouds with.
+    cloud_cover: int
+    cloud_time: int
+    cloud_sun: int
     light_slots: ptr
     light_count: int
     light_space: int
@@ -307,6 +312,10 @@ struct GLRenderer {
 
     scene_start: float
     scene_time: float
+    // The clouds: how much of the sky they cover (zero is a clear sky and
+    // no march), and how fast they drift, as a multiple of scene time.
+    cloud_cover: float
+    cloud_wind: float
     defaults: ptr
     post_depth: int
     bloom_fbo: int
@@ -494,6 +503,9 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
     s.pose_bank = ae3d_gl_uniform_location(program, "poseBank")
     s.pose_bank_frames = ae3d_gl_uniform_location(program, "poseBankFrames")
     s.scene_depth = ae3d_gl_uniform_location(program, "sceneDepth")
+    s.cloud_cover = ae3d_gl_uniform_location(program, "cloudCover")
+    s.cloud_time = ae3d_gl_uniform_location(program, "cloudTime")
+    s.cloud_sun = ae3d_gl_uniform_location(program, "cloudSun")
     s.has_scene_depth = ae3d_gl_uniform_location(program, "hasSceneDepth")
     s.screen_size = ae3d_gl_uniform_location(program, "screenSize")
     s.inv_view_projection = ae3d_gl_uniform_location(program, "invViewProjection")
@@ -1080,6 +1092,12 @@ renderer_set_clear_color(r: *GLRenderer, red: float, green: float, blue: float) 
     r.clear_b = blue
 }
 
+// The clouds: how much of the sky they cover, and how fast they drift.
+renderer_set_clouds(r: *GLRenderer, cover: float, wind: float) {
+    r.cloud_cover = cover
+    r.cloud_wind = wind
+}
+
 renderer_set_fog(r: *GLRenderer, f: *Fog) {
     if f == null { r.fog = core.fog_none() ; return }
     r.fog.color = f.color
@@ -1492,6 +1510,11 @@ skybox_create(r: *GLRenderer, path: string) -> *Skybox {
     sky.u_view = ae3d_gl_uniform_location(sky.program, "view")
     sky.u_projection = ae3d_gl_uniform_location(sky.program, "projection")
     sky.u_sampler = ae3d_gl_uniform_location(sky.program, "skybox")
+    sky.u_cloud_cover = ae3d_gl_uniform_location(sky.program, "cloudCover")
+    sky.u_cloud_time = ae3d_gl_uniform_location(sky.program, "cloudTime")
+    sky.u_cloud_sun = ae3d_gl_uniform_location(sky.program, "cloudSun")
+    sky.u_cloud_sun_color = ae3d_gl_uniform_location(sky.program, "cloudSunColor")
+    sky.u_cloud_eye = ae3d_gl_uniform_location(sky.program, "viewPos")
 
     sky.mesh = core.mesh_create()
     core.mesh_push_skybox_cube(sky.mesh, sky.size)
@@ -1518,11 +1541,23 @@ skybox_free(r: *GLRenderer, sky: *Skybox) {
 
 // The sky must sit behind everything, so its translation is stripped from the
 // view matrix and it is drawn with depth writes off.
-render_skybox(r: *GLRenderer, cam: *Camera) {
+render_skybox(r: *GLRenderer, cam: *Camera, light: *Light) {
     sky = r.skybox as *Skybox
     if sky == null || sky.texture == 0 || sky.vao == 0 { return }
 
     use_program(r, sky.program)
+    // The clouds over the image, lit by the scene's key light.
+    ae3d_gl_uniform_float(sky.u_cloud_cover, r.cloud_cover)
+    ae3d_gl_uniform_float(sky.u_cloud_time, r.scene_time * r.cloud_wind)
+    ae3d_gl_uniform_vec3(sky.u_cloud_eye, cam.position.x, cam.position.y, cam.position.z)
+    sun = key_light(r.lights, light)
+    if sun != null {
+        ae3d_gl_uniform_vec3(sky.u_cloud_sun, sun.direction.x, sun.direction.y, sun.direction.z)
+        ae3d_gl_uniform_vec3(sky.u_cloud_sun_color, sun.color.x, sun.color.y, sun.color.z)
+    } else {
+        ae3d_gl_uniform_vec3(sky.u_cloud_sun, 0.0, 1.0, 0.0)
+        ae3d_gl_uniform_vec3(sky.u_cloud_sun_color, 1.0, 1.0, 1.0)
+    }
 
     view = core.camera_view(cam)
     view.m12 = 0.0
@@ -1628,7 +1663,7 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
     ae3d_gl_clear(1, 1)
 
     set_depth_test(r, core.depth_test())
-    if r.skybox != null { render_skybox(r, cam) }
+    if r.skybox != null { render_skybox(r, cam, active_light) }
     set_blend(r, true)
     set_face_culling(r, core.face_culling())
 
@@ -2123,6 +2158,14 @@ set_frame_uniforms(r: *GLRenderer, slots: *ProgramSlots, view_projection: *Mat4,
     ae3d_gl_uniform_vec3(slots.view_pos, cam.position.x, cam.position.y, cam.position.z)
     ae3d_gl_uniform_float(slots.view_distance, core.camera_far(cam))
     ae3d_gl_uniform_float(slots.caustics_time, r.scene_time)
+    ae3d_gl_uniform_float(slots.cloud_cover, r.cloud_cover)
+    ae3d_gl_uniform_float(slots.cloud_time, r.scene_time * r.cloud_wind)
+    sun = key_light(lights, light)
+    if sun != null {
+        ae3d_gl_uniform_vec3(slots.cloud_sun, sun.direction.x, sun.direction.y, sun.direction.z)
+    } else {
+        ae3d_gl_uniform_vec3(slots.cloud_sun, 0.0, 1.0, 0.0)
+    }
 
     enabled = 0
     if r.fog.enabled { enabled = 1 }

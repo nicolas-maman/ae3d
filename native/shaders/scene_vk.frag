@@ -31,6 +31,9 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float metallic;
     float roughness;
     float exposure;
+    float cloudCover;
+    float cloudTime;
+    vec3 cloudSun;
     float materialAlpha;
     float reflectivity;
     bool hasNormalMap;
@@ -87,6 +90,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float causticsTime;
     mat4 projection;
     mat4 view;
+    vec3 cloudSunColor;
     vec2 texelSize;
     float edgeThreshold;
     float edgeThresholdMin;
@@ -156,6 +160,11 @@ layout(location = 5) in float Occlusion;
 
 
 
+
+
+
+// The clouds over the scene, for the shadow they throw: cover, drift time
+// and the sun's direction, the same three the sky draws them with.
 
 
 
@@ -694,6 +703,70 @@ vec3 getGradient(int hash) {
     else return vec3(u, v, w);
 }
 
+// Clouds, shared by the sky that draws them and the ground they shadow.
+// A layer between CLOUD_BASE and CLOUD_TOP metres up, whose coverage is a
+// 2D field of value noise (the same field the ground reads its shadow
+// from) and whose body is that coverage eroded by a 3D noise, so the
+// edges are ragged and the undersides lumpy.
+const float CLOUD_BASE = 1400.0;
+const float CLOUD_TOP = 1950.0;
+
+// A hash that is a hash on small integer lattices: the product-of-fracts
+// one drifted smoothly across neighbouring cells, and the noise built on
+// it was a gentle gradient with no cloud in it.
+float cloudHash(vec3 p) {
+    return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
+}
+
+float cloudNoise(vec3 x) {
+    vec3 i = floor(x);
+    vec3 f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(cloudHash(i + vec3(0, 0, 0)), cloudHash(i + vec3(1, 0, 0)), f.x),
+                   mix(cloudHash(i + vec3(0, 1, 0)), cloudHash(i + vec3(1, 1, 0)), f.x), f.y),
+               mix(mix(cloudHash(i + vec3(0, 0, 1)), cloudHash(i + vec3(1, 0, 1)), f.x),
+                   mix(cloudHash(i + vec3(0, 1, 1)), cloudHash(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+}
+
+float cloudFbm(vec3 p) {
+    float v = 0.0;
+    float a = 0.5;
+    for (int i = 0; i < 4; i++) {
+        v += a * cloudNoise(p);
+        p = p * 2.02 + vec3(11.0, 5.0, 3.0);
+        a *= 0.5;
+    }
+    return v;
+}
+
+// How much cloud there is over a point of the ground, 0..1: the coverage
+// field, drifting with the wind, shaped by the cover setting so 0.3 is a
+// few fair-weather clouds and 0.8 an overcast with holes.
+float cloudCoverage(vec2 xz, float cover, float t) {
+    vec2 p = xz * 0.0012 + vec2(t * 0.004, t * 0.0015);
+    // The fbm of a value noise sits between 0.3 and 0.7 nearly everywhere;
+    // stretched over 0..1 first, so the cover setting cuts it where it says.
+    float shape = clamp((cloudFbm(vec3(p, 3.7)) - 0.3) / 0.4, 0.0, 1.0);
+    // Weather has districts: a slower field gathers the clouds into
+    // banks and leaves clearings between, so the sky is not one even
+    // sprinkle of the same puff.
+    float bank = cloudNoise(vec3(p * 0.13 + vec2(t * 0.001, 0.0), 8.1));
+    float threshold = 1.0 - cover * (0.45 + 1.1 * bank);
+    return clamp((shape - threshold) / 0.3, 0.0, 1.0);
+}
+
+// The clouds' shadow at a point: the coverage over it, looked up where the
+// sun's ray through it meets the cloud layer, so the shadow drifts with
+// the clouds and leans with the sun. One minus most of the coverage: the
+// sky still lights the ground under a cloud.
+float cloudShadow(vec3 worldPos) {
+    if (cloudCover <= 0.0 || cloudSun.y <= 0.05) return 1.0;
+    vec3 sun = normalize(cloudSun);
+    float up = (CLOUD_BASE + (CLOUD_TOP - CLOUD_BASE) * 0.35 - worldPos.y) / max(sun.y, 0.05);
+    vec2 at = worldPos.xz + sun.xz * up;
+    return 1.0 - 0.65 * cloudCoverage(at, cloudCover, cloudTime);
+}
+
 // Simplified 3D Perlin noise for GLSL
 float perlinNoise3D(vec3 p) {
     // Find unit cube containing point
@@ -993,7 +1066,8 @@ void main() {
     vec3 ambient = lights[0].ambientStrength * keyColor * albedo * 0.8 * shut;
     vec3 fillLightContrib = vec3(0.0);
 
-    vec3 color = ambient + fillLightContrib + Lo;
+    // The direct light, under the clouds' shadow where a cloud drifts over.
+    vec3 color = ambient + fillLightContrib + Lo * cloudShadow(FragPos);
     
 	// Calculate distance for performance scaling (CRITICAL for voxel terrain performance)
 	float distanceToCamera = length(FragPos - viewPos);

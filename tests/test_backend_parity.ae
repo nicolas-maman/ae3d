@@ -316,6 +316,21 @@ main() {
     check_true("the skybox reaches the vulkan frame",
                frame_total(vk.offscreen_pixels()) != bare_vk)
 
+    // Clouds over the sky, marched in the sky shader, and their shadow on
+    // the ground through the same coverage field: the one sky feature that
+    // is computed rather than sampled, so the one that could differ.
+    sky_gl = frame_total(offscreen.target_pixels(target))
+    gl.renderer_set_clouds(gl_renderer, 0.6, 1.0)
+    vk.renderer_set_clouds(vk_renderer, 0.6, 1.0)
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    compare_within("clouds over the skybox", offscreen.target_pixels(target), vk.offscreen_pixels(), 4)
+    check_true("the clouds reach the frame", frame_total(offscreen.target_pixels(target)) != sky_gl)
+    gl.renderer_set_clouds(gl_renderer, 0.0, 1.0)
+    vk.renderer_set_clouds(vk_renderer, 0.0, 1.0)
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+
     plain_gl = frame_total(offscreen.target_pixels(target))
     plain_vk = frame_total(vk.offscreen_pixels())
 

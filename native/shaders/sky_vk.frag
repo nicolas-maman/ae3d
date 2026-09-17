@@ -30,6 +30,9 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float metallic;
     float roughness;
     float exposure;
+    float cloudCover;
+    float cloudTime;
+    vec3 cloudSun;
     float materialAlpha;
     float reflectivity;
     bool hasNormalMap;
@@ -86,6 +89,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float causticsTime;
     mat4 projection;
     mat4 view;
+    vec3 cloudSunColor;
     vec2 texelSize;
     float edgeThreshold;
     float edgeThresholdMin;
@@ -134,13 +138,137 @@ layout(location = 0) out vec4 FragColor;
 layout(location = 0) in vec3 TexCoords;
 
 
+// The clouds over the painted sky: how much of it they cover (zero is a
+// clear sky and no march at all), the time they drift by, and the sun
+// that lights them, pointing at it, with its colour.
+
+
+
+
+// Where the eye is: the layer stands in the world, over the ground it
+// shadows, so the march starts from the camera and not from the origin.
+
+
+// Clouds, shared by the sky that draws them and the ground they shadow.
+// A layer between CLOUD_BASE and CLOUD_TOP metres up, whose coverage is a
+// 2D field of value noise (the same field the ground reads its shadow
+// from) and whose body is that coverage eroded by a 3D noise, so the
+// edges are ragged and the undersides lumpy.
+const float CLOUD_BASE = 1400.0;
+const float CLOUD_TOP = 1950.0;
+
+// A hash that is a hash on small integer lattices: the product-of-fracts
+// one drifted smoothly across neighbouring cells, and the noise built on
+// it was a gentle gradient with no cloud in it.
+float cloudHash(vec3 p) {
+    return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
+}
+
+float cloudNoise(vec3 x) {
+    vec3 i = floor(x);
+    vec3 f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(cloudHash(i + vec3(0, 0, 0)), cloudHash(i + vec3(1, 0, 0)), f.x),
+                   mix(cloudHash(i + vec3(0, 1, 0)), cloudHash(i + vec3(1, 1, 0)), f.x), f.y),
+               mix(mix(cloudHash(i + vec3(0, 0, 1)), cloudHash(i + vec3(1, 0, 1)), f.x),
+                   mix(cloudHash(i + vec3(0, 1, 1)), cloudHash(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+}
+
+float cloudFbm(vec3 p) {
+    float v = 0.0;
+    float a = 0.5;
+    for (int i = 0; i < 4; i++) {
+        v += a * cloudNoise(p);
+        p = p * 2.02 + vec3(11.0, 5.0, 3.0);
+        a *= 0.5;
+    }
+    return v;
+}
+
+// How much cloud there is over a point of the ground, 0..1: the coverage
+// field, drifting with the wind, shaped by the cover setting so 0.3 is a
+// few fair-weather clouds and 0.8 an overcast with holes.
+float cloudCoverage(vec2 xz, float cover, float t) {
+    vec2 p = xz * 0.0012 + vec2(t * 0.004, t * 0.0015);
+    // The fbm of a value noise sits between 0.3 and 0.7 nearly everywhere;
+    // stretched over 0..1 first, so the cover setting cuts it where it says.
+    float shape = clamp((cloudFbm(vec3(p, 3.7)) - 0.3) / 0.4, 0.0, 1.0);
+    // Weather has districts: a slower field gathers the clouds into
+    // banks and leaves clearings between, so the sky is not one even
+    // sprinkle of the same puff.
+    float bank = cloudNoise(vec3(p * 0.13 + vec2(t * 0.001, 0.0), 8.1));
+    float threshold = 1.0 - cover * (0.45 + 1.1 * bank);
+    return clamp((shape - threshold) / 0.3, 0.0, 1.0);
+}
+
+// The cloud's density at a point in the layer: the coverage over it,
+// eroded by 3D noise, thinned toward the layer's floor and ceiling so a
+// cloud is a heap and not a slab.
+float cloudDensity(vec3 p, float cover, float t) {
+    float cov = cloudCoverage(p.xz, cover, t);
+    if (cov <= 0.0) return 0.0;
+    float h = clamp((p.y - CLOUD_BASE) / (CLOUD_TOP - CLOUD_BASE), 0.0, 1.0);
+    float profile = smoothstep(0.0, 0.2, h) * (1.0 - smoothstep(0.55, 1.0, h));
+    // Flatter than tall: a cumulus is wider than it is high.
+    vec3 q = vec3(p.x * 0.0028, p.y * 0.0055, p.z * 0.0028) + vec3(t * 0.01, 0.0, t * 0.004);
+    float erosion = cloudFbm(q);
+    float d = cov * profile - (1.0 - cov) * 0.3 - erosion * 0.55 + 0.25;
+    return clamp(d * 2.0, 0.0, 1.0);
+}
+
+// Clouds along a view ray from the ground: the layer marched in a few
+// dozen steps, each lit by a short march toward the sun through the
+// cloud above it (Beer's law, with the brightening at the edge a thin
+// cloud has), summed front to back until the sky behind is hidden.
+vec4 cloudsAlong(vec3 dir, float cover, float t) {
+    if (cover <= 0.0 || dir.y <= 0.02) return vec4(0.0);
+    float t0 = CLOUD_BASE / dir.y;
+    float t1 = CLOUD_TOP / dir.y;
+    int steps = 32;
+    float dt = (t1 - t0) / float(steps);
+    vec3 sun = normalize(cloudSun);
+    vec3 sunLight = cloudSunColor * 1.35;
+    vec3 colour = vec3(0.0);
+    float alpha = 0.0;
+    // A little jitter along the ray, so the steps do not band.
+    float jitter = fract(sin(dot(dir.xz, vec2(12.9898, 78.233))) * 43758.5453);
+    float ray = t0 + dt * jitter * 0.5;
+    for (int i = 0; i < steps; i++) {
+        vec3 p = vec3(viewPos.x, 0.0, viewPos.z) + dir * ray;
+        float d = cloudDensity(p, cover, t);
+        if (d > 0.001) {
+            // Toward the sun: how much cloud stands between here and it.
+            float shade = 0.0;
+            float ls = 90.0;
+            for (int k = 1; k <= 4; k++) {
+                shade += cloudDensity(p + sun * ls * float(k), cover, t) * ls;
+            }
+            // The sky lights the top of a cloud and little of its base: the
+            // ambient darkens down the layer, which is what gives a cloud
+            // its grey underside and its bright crown.
+            float h = clamp((p.y - CLOUD_BASE) / (CLOUD_TOP - CLOUD_BASE), 0.0, 1.0);
+            vec3 ambient = mix(vec3(0.36, 0.40, 0.50), vec3(0.62, 0.68, 0.80), h);
+            float light = exp(-shade * 0.014) * (1.0 - exp(-d * 2.0)) * 1.3 + 0.08;
+            vec3 c = sunLight * light + ambient * (0.45 + 0.55 * exp(-shade * 0.004));
+            float a = 1.0 - exp(-d * dt * 0.02);
+            colour += c * a * (1.0 - alpha);
+            alpha += a * (1.0 - alpha);
+            if (alpha > 0.98) break;
+        }
+        ray += dt;
+    }
+    // Gone at the horizon, where the layer is a hundred kilometres deep and
+    // the haze the sky is painted with has swallowed it.
+    float horizon = smoothstep(0.02, 0.12, dir.y);
+    return vec4(colour, alpha * horizon);
+}
 
 void main() {
     vec3 dir = normalize(TexCoords);
-    
+
     float theta = atan(dir.z, dir.x);
     float phi = asin(dir.y);
-    
+
     float u = (theta + 3.14159265) / 6.28318531;
     float v = (phi + 1.57079633) / 3.14159265;
 
@@ -149,5 +277,8 @@ void main() {
     // darkest mip for that one column of pixels: a dark line down the sky
     // wherever the camera faced -X. A sky is a smooth gradient with nothing a
     // mip chain has to tame, so level 0 is right everywhere and seamless here.
-    FragColor = textureLod(skybox, vec2(u, v), 0.0);
+    vec3 sky = textureLod(skybox, vec2(u, v), 0.0).rgb;
+    vec4 clouds = cloudsAlong(dir, cloudCover, cloudTime);
+    sky = sky * (1.0 - clouds.a) + clouds.rgb;
+    FragColor = vec4(sky, 1.0);
 }
