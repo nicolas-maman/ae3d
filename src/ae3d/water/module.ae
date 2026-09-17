@@ -25,7 +25,8 @@ exports (
     simulation_randomness, simulation_caustics_on, simulation_caustics_intensity,
     simulation_caustics_scale, simulation_foam_on, simulation_foam_intensity,
     simulation_reflection, simulation_shadow,
-    simulation_distortion, simulation_normal
+    simulation_distortion, simulation_normal,
+    simulation_wave_scale, simulation_sky_path, simulation_shore_fade, simulation_shore_foam
 )
 
 extern ae3d_farr_set(arr: ptr, i: int, v: float)
@@ -81,7 +82,9 @@ simulation_new(size: float, amplitude: float) -> *Simulation {
     w.ocean_size = size
     w.base_amplitude = amplitude
     w.wave_scale = 1.0
-    w.sky_path = ""
+    // Owned: a path handed in is copied, since a scene file's strings go
+    // with the file.
+    w.sky_path = core.set_owned(null, "")
     w.color_r = 0.06
     w.color_g = 0.22
     w.color_b = 0.45
@@ -150,6 +153,10 @@ simulation_reflection(w: *Simulation) -> float { return w.reflection_intensity }
 simulation_shadow(w: *Simulation) -> float { return w.shadow_strength }
 simulation_distortion(w: *Simulation) -> float { return w.distortion_strength }
 simulation_normal(w: *Simulation) -> float { return w.normal_strength }
+simulation_wave_scale(w: *Simulation) -> float { return w.wave_scale }
+simulation_sky_path(w: *Simulation) -> string { return w.sky_path }
+simulation_shore_fade(w: *Simulation) -> float { return w.depth_fade }
+simulation_shore_foam(w: *Simulation) -> float { return w.shore_foam }
 
 // Everything the surface is told goes into the uniforms it draws from. Left to
 // build time alone, as it was, a setting made after the surface existed changed
@@ -192,7 +199,7 @@ simulation_set_opacity(w: *Simulation, value: float) {
 // was made from -- so the sea shows the sky that is actually over it.
 // Takes effect on the next build.
 simulation_set_sky_texture(w: *Simulation, path: string) {
-    w.sky_path = path
+    w.sky_path = core.set_owned(w.sky_path, path)
     settled(w)
 }
 
