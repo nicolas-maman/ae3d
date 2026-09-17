@@ -7,11 +7,11 @@ drawn, and check the frame by number instead of by eye.
 
 ![A horde of skinned zombies shambling down a lamp-lit street at night, the wet road reflecting the lamps](docs/zombie-city.png)
 
-*`examples/zombie_city.ae`: a street of seven blocks and a crowd of the same
-skinned zombie, every one posed from a shared pose bank and drawn in two
-instanced calls. Everything in the frame was modelled, textured and animated
-by a script in Blender and exported through the pipeline below; the sky was
-painted by the engine.*
+*`examples/zombie_city.ae`: a street of seven blocks and a horde of two
+skinned figures, each walking its own gait, every one posed from a baked pose
+bank and drawn in two instanced calls per figure. Everything in the frame was
+modelled, textured and animated by a script in Blender and exported through
+the pipeline below; the sky was painted by the engine.*
 
 ae3d is written in [Aether](https://github.com/aether-lang-dev/aether) with a
 thin C layer for the GPU, windowing and image decoding. It continues
@@ -60,6 +60,20 @@ can be interrogated while it runs. See [Credits](#credits).
 full mesh, the far tier the build's own 168-triangle stand-in, and the draw
 count does not change with the crowd. Twenty thousand hold ~38 fps on an
 RTX 4070 Ti at 1280x720 with the GPU shared.*
+
+## The scenes
+
+| | |
+|---|---|
+| ![The seabed under the swell: caustics on sand and rocks, murk with distance](docs/caustics.png) | ![A pile of four hundred thousand grains of sand in a desert, dunes at the horizon](docs/sand.png) |
+| *`caustics`: the seabed under the swell, a diver's height off the sand* | *`sand`: 400,000 grains settling into a pile in a desert the engine painted* |
+| ![An island in a sea under an afternoon sky, meshed with surface nets](docs/smooth-terrain.png) | ![A voxel terrain of terraces under the sun, its shadows on the steps](docs/voxel-world.png) |
+| *`smooth_terrain`: a signed distance field meshed with surface nets, an island in a sea* | *`voxel_world`: 960,464 voxels, the 93,030 exposed ones drawn in one call* |
+| ![Five spheres on a floor under a night sky, one shadow each](docs/materials.png) | ![A Kerr black hole: its asymmetric shadow, a lensed disc and a lensed sky](docs/black-hole.png) |
+| *`lights`: the material presets, on a floor, under the painted night* | *`black_hole`: Kerr geodesics per pixel, the shadow checked against sqrt(27) M* |
+
+Every scene is verified the same way the engine is: from a sweep of camera
+positions and by numbers read back over the channel, not from one still.
 
 ## Quick start
 
