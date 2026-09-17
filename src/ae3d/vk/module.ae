@@ -153,6 +153,7 @@ struct VKRenderer {
     screen_mesh: ptr
     screen_handle: int
     initialized: bool
+    failed_frames: int      // frames the device refused, reported once
     last_draw_calls: int
     last_shadow_ms: float
     last_scene_ms: float
@@ -225,9 +226,15 @@ capture_height() -> int { return ae3d_vk_capture_height() }
 // Write the captured frame to a PNG. The frame has to have been asked for and
 // drawn first, so request_capture one frame ahead of this.
 snapshot(path: string) -> bool {
-    if ae3d_vk_capture_ready() != 1 { return false }
+    if ae3d_vk_capture_ready() != 1 {
+        println("ae3d: no Vulkan frame was captured (the capture was not armed, or the surface cannot be read back)")
+        return false
+    }
     pixels = ae3d_vk_capture_pixels()
-    if pixels == null { return false }
+    if pixels == null {
+        println("ae3d: the captured Vulkan frame could not be read")
+        return false
+    }
     return ae3d_png_write(path, pixels, ae3d_vk_capture_width(),
                           ae3d_vk_capture_height()) == 1
 }
@@ -242,6 +249,7 @@ offscreen_height() -> int {
 
 renderer_new() -> *VKRenderer {
     r = heap.new(VKRenderer)
+    r.failed_frames = 0
     r.models = list.new()
     r.lights = list.new()
     r.textures = list.new()
@@ -1153,19 +1161,49 @@ set_material_uniforms(material: *Material) {
     ae3d_vk_scene_set_float(vkscene.OFF_MATERIALALPHA, material.alpha)
 }
 
+// A frame the device would not take is said once, not once a frame: a lost
+// device answers every acquire after it with "not ready", and a program that
+// keeps running at full speed drawing nothing is the worst way to find out.
+report_failed_frame(r: *VKRenderer) {
+    r.failed_frames = r.failed_frames + 1
+    if r.failed_frames == 1 {
+        println("ae3d: Vulkan dropped a frame: ${ae3d_vk_last_error()}")
+    }
+}
+
 renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     if !r.initialized { return }
     r.scene_time = platform.time() - r.scene_start
 
     active_light = key_light(r, light)
 
-    if ae3d_vk_frame_begin(r.clear_r, r.clear_g, r.clear_b, 1.0) != 1 { return }
+    if ae3d_vk_frame_begin(r.clear_r, r.clear_g, r.clear_b, 1.0) != 1 {
+        report_failed_frame(r)
+        return
+    }
     // The engine's own CPU cost is the command building and submission below,
     // not the fence-and-acquire wait frame_begin just blocked on -- that wait
     // is the display pacing the frame, and folding it into "the CPU frame"
     // makes a vsync-limited scene read as CPU-bound when the work is a fraction
     // of a millisecond. Timed from here, after the wait.
     work_started = platform.time()
+
+    // Everything edited since the last frame goes to the device before a
+    // single draw is recorded. A refresh replaces the buffer, and the shadow
+    // pass had already recorded a draw of the old one when the lit pass
+    // replaced it: the submit then read a freed buffer and the device was
+    // lost -- silently, since a lost device answers every acquire with "not
+    // ready" and the program ran on at full speed drawing nothing.
+    count = list.size(r.models)
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        if m != null && m.visible {
+            refresh_geometry(m)
+            refresh_instances(m)
+        }
+        i = i + 1
+    }
 
     render_shadow_pass(r, active_light, cam)
     // Filled from this camera every frame rather than cached behind a flag. The
@@ -1215,7 +1253,7 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     r.last_draw_calls = ae3d_vk_draw_calls()
     r.last_pipeline_binds = ae3d_vk_pipeline_binds()
     r.last_set_binds = ae3d_vk_set_binds()
-    ae3d_vk_frame_end()
+    if ae3d_vk_frame_end() != 1 { report_failed_frame(r) }
     r.last_cpu_work_ms = (platform.time() - work_started) * 1000.0
     // The stamps read back at the start of this frame describe the frame that
     // used this slot last, which is the most recent one the GPU has finished.
@@ -1400,9 +1438,7 @@ draw_model(r: *VKRenderer, m: *Model, transparent_pass: bool) {
     if core.shader_valid(&m.shader) { program = m.shader.kind }
     ae3d_vk_set_program(program)
 
-    refresh_geometry(m)
     set_scene_uniforms(r, m)
-    refresh_instances(m)
     blend = 0
     if is_transparent { blend = 1 }
     ae3d_vk_set_blend(blend)
