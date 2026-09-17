@@ -1689,7 +1689,20 @@ void main() {
     float foam = 0.0;
     if (enableFoam && tallest > 0.0) {
         float torn = ridgedNoise(fragPosition.xz * rippleFreq * 0.08 + time * 0.02);
-        float breaking = smoothstep(0.45, 1.0, crest);
+        // What breaks is the steep face of a crest, not the broad top of a
+        // long swell: the slope of the surface here against the steepest
+        // the table can make (the sum of each train's wavenumber times its
+        // amplitude), so a whitecap is a few metres on a short wave and not
+        // a field on a long one.
+        // The vertex pass sums the four trains' normals onto an upright one
+        // and normalises, so the slope its normal carries is about a fifth
+        // of the water's; measured against the same fifth.
+        float steepest = (waveFrequencies[0] * waveAmplitudes[0] + waveFrequencies[1] * waveAmplitudes[1] +
+                          waveFrequencies[2] * waveAmplitudes[2] + waveFrequencies[3] * waveAmplitudes[3])
+                         * waveHeightMultiplier * 0.3;
+        float slope = length(swell.xz) / max(swell.y, 0.05);
+        float steep = clamp(slope / max(steepest, 0.0001), 0.0, 1.0);
+        float breaking = smoothstep(0.15, 0.65, steep) * (0.4 + 0.6 * crest);
         foam = breaking * (0.35 + 0.65 * smoothstep(0.35, 0.8, torn));
         // Lace, not paint: the fine ripple noise eats holes in it.
         foam *= 0.55 + 0.45 * noise(fragPosition.xz * rippleFreq * 1.5 + rippleTime * 0.5);
