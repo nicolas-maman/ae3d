@@ -45,8 +45,11 @@ const STREET_X1 = 290.0
 // the kerb onto Street_Ground -- the block's pavement slab, which sits 0.43m
 // LOWER than the road -- so anything past the kerb hung half a metre in the
 // air. On the road, at the road's height, every foot is on the ground.
-const ROAD_Z0 = 0.0 - 3.3
-const ROAD_Z1 = 3.3
+// Half a metre inside the kerb: a zombie is held by its centre and stands
+// 0.6m wide, so a centre at 3.3 put a foot on the kerb top at 3.38 and the
+// figure read as walking the pavement.
+const ROAD_Z0 = 0.0 - 2.8
+const ROAD_Z1 = 2.8
 const ROAD_Y = 0.08
 const SPEED = 1.4            // how fast a zombie shambles
 const SEP_RADIUS = 1.05      // it shoves apart from anything closer than this
@@ -138,7 +141,9 @@ entry_named(m: *Manifest, name: string) -> *Entry {
 
 lamp_at(x: float) -> *Light {
     lamp = core.light_point(core.vec3(x, 4.25, 0.0 - 2.94),
-                            core.vec3(1.0, 0.74, 0.42), 4.5, 22.0)
+                            core.vec3(1.0, 0.74, 0.42),
+                            core.env_int("AE3D_LAMP", 320) as float / 100.0,
+                            core.env_int("AE3D_LAMPR", 8) as float)
     list.add_raw(g_lamps, lamp as ptr)
     return lamp
 }
@@ -442,9 +447,11 @@ on_start(data: ptr) {
     // else was ambient and lamp fill, which is exactly the flat, dead look.
     // 3.0 was tuned while it lit nothing above the horizon; now that the road
     // and pavements actually take it, that blew them to white. A moon.
+    // AE3D_MOON (hundredths) sweeps the moon's strength live for the look.
     moon = core.light_directional(core.vec3(0.58, 0.52, 0.0 - 0.30),
-                                  core.vec3(0.66, 0.74, 0.96), 1.5)
-    moon.ambient_strength = 0.26
+                                  core.vec3(0.66, 0.74, 0.96),
+                                  core.env_int("AE3D_MOON", 35) as float / 100.0)
+    moon.ambient_strength = core.env_int("AE3D_AMBIENT", 10) as float / 100.0
     engine.engine_set_light(e, moon)
     list.add_raw(g_lamps, moon as ptr)
     if core.env_int("AE3D_NOLAMPS", 0) == 0 {
@@ -631,12 +638,19 @@ detect_teleports(delta: float) {
     // The furthest a zombie may move in a frame, with headroom for a clamp.
     limit = MAX_SPEED * delta * 3.0 + 0.05
     shown = 0
+    // The crowd's extent across the road, so a zombie on the pavement shows
+    // up as a number past the kerb rather than as a perspective to argue
+    // about in a still.
+    z_lo = 1000.0
+    z_hi = 0.0 - 1000.0
     i = 0
     while i < g_count {
         p = ecs.column_get3(g_pos, i)
         q = ecs.column_get3(g_prev_pos, i)
         d = core.v3_len(core.v3_sub(p, q))
         if d > g_tp_worst { g_tp_worst = d; g_tp_worst_id = i }
+        if p.z < z_lo { z_lo = p.z }
+        if p.z > z_hi { z_hi = p.z }
         if d > limit {
             g_tp_count = g_tp_count + 1
             if shown < 3 {
@@ -648,7 +662,7 @@ detect_teleports(delta: float) {
         i = i + 1
     }
     if g_frame % 60 == 0 {
-        println("zombie_city[teleport] frames ${g_frame - 59}..${g_frame}: worst step ${g_tp_worst}m by zombie ${g_tp_worst_id}, jumps so far ${g_tp_count}")
+        println("zombie_city[teleport] frames ${g_frame - 59}..${g_frame}: worst step ${g_tp_worst}m by zombie ${g_tp_worst_id}, jumps so far ${g_tp_count}; crowd z ${z_lo}..${z_hi} (road ${ROAD_Z0}..${ROAD_Z1})")
         g_tp_worst = 0.0
     }
 }
