@@ -10,6 +10,11 @@ between tuning a texture by reading numbers and tuning it by looking at it --
 and between a change an agent can verify and one it has to trust.
 
 Only the standard library and numpy: the PNG is written by hand.
+
+The preview is what the generator computed, not what Blender writes: the
+exported PNGs pass through Blender's colour management and encoder and come
+out within about 2% of these (at most 14/255 on a channel). Tune here; the
+export is authoritative.
 """
 
 import struct

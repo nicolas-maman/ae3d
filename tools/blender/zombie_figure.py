@@ -145,12 +145,15 @@ def build_body(name, material, subdivisions=3):
     # rather than around whichever vertex happened to be first.
     layer[GROWN.index("Hips")].use_root = True
 
-    smooth = obj.modifiers.new("Round", "SUBSURF")
-    smooth.levels = subdivisions
-    smooth.render_levels = subdivisions
-
     bpy.ops.object.modifier_apply(modifier="Skin")
-    bpy.ops.object.modifier_apply(modifier="Round")
+    # No rounding at zero levels: a subdivision modifier with nothing to do
+    # is one Blender 5 reports as disabled and refuses to apply, which broke
+    # the crowd LOD body (built at subdivisions=0). Only add it when it acts.
+    if subdivisions > 0:
+        smooth = obj.modifiers.new("Round", "SUBSURF")
+        smooth.levels = subdivisions
+        smooth.render_levels = subdivisions
+        bpy.ops.object.modifier_apply(modifier="Round")
 
     mesh.materials.append(material)
     return obj
