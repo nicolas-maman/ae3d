@@ -40,13 +40,107 @@ static void *ae3d_image_wrap(unsigned char *pixels, int width, int height, int o
     return img;
 }
 
+/* Images the program made rather than read: a palette a mesher wrote, a map
+   a tool painted. They are kept under a name, and a texture asks for them by
+   that name through the same load as a file, so a model textured from memory
+   is set up like any other and both backends bind it the same way. Rows are
+   stored bottom first, as a loaded file's are after the flip, so a caller
+   building one writes its top row last. */
+typedef struct {
+    char *name;
+    unsigned char *pixels;
+    int width;
+    int height;
+} ae3d_image_entry;
+
+static ae3d_image_entry *g_registered;
+static int g_registered_count;
+static int g_registered_capacity;
+
+static ae3d_image_entry *ae3d_image_find(const char *name) {
+    int i;
+    for (i = 0; i < g_registered_count; i++) {
+        if (strcmp(g_registered[i].name, name) == 0) return &g_registered[i];
+    }
+    return NULL;
+}
+
+int ae3d_image_register(const char *name, const void *rgba, int width, int height) {
+    ae3d_image_entry *entry;
+    unsigned char *copy;
+    size_t bytes;
+
+    if (!name || !*name || !rgba || width <= 0 || height <= 0) {
+        snprintf(g_image_error, sizeof(g_image_error), "bad registered image");
+        return 0;
+    }
+    bytes = (size_t)width * (size_t)height * 4;
+    copy = (unsigned char *)malloc(bytes);
+    if (!copy) {
+        snprintf(g_image_error, sizeof(g_image_error), "out of memory");
+        return 0;
+    }
+    memcpy(copy, rgba, bytes);
+
+    entry = ae3d_image_find(name);
+    if (entry) {
+        free(entry->pixels);
+    } else {
+        if (g_registered_count == g_registered_capacity) {
+            int grown = g_registered_capacity ? g_registered_capacity * 2 : 8;
+            ae3d_image_entry *wider = (ae3d_image_entry *)realloc(
+                g_registered, (size_t)grown * sizeof(ae3d_image_entry));
+            if (!wider) {
+                free(copy);
+                snprintf(g_image_error, sizeof(g_image_error), "out of memory");
+                return 0;
+            }
+            g_registered = wider;
+            g_registered_capacity = grown;
+        }
+        entry = &g_registered[g_registered_count++];
+        entry->name = (char *)malloc(strlen(name) + 1);
+        if (!entry->name) {
+            free(copy);
+            g_registered_count--;
+            snprintf(g_image_error, sizeof(g_image_error), "out of memory");
+            return 0;
+        }
+        strcpy(entry->name, name);
+    }
+    entry->pixels = copy;
+    entry->width = width;
+    entry->height = height;
+    return 1;
+}
+
+void ae3d_image_unregister(const char *name) {
+    ae3d_image_entry *entry = name ? ae3d_image_find(name) : NULL;
+    if (!entry) return;
+    free(entry->name);
+    free(entry->pixels);
+    *entry = g_registered[--g_registered_count];
+}
+
 void *ae3d_image_load(const char *path) {
     int width = 0, height = 0, channels = 0;
     unsigned char *pixels;
+    ae3d_image_entry *entry;
 
     if (!path || !*path) {
         snprintf(g_image_error, sizeof(g_image_error), "empty path");
         return NULL;
+    }
+    entry = ae3d_image_find(path);
+    if (entry) {
+        size_t bytes = (size_t)entry->width * (size_t)entry->height * 4;
+        pixels = (unsigned char *)malloc(bytes);
+        if (!pixels) {
+            snprintf(g_image_error, sizeof(g_image_error), "out of memory");
+            return NULL;
+        }
+        memcpy(pixels, entry->pixels, bytes);
+        return ae3d_image_wrap(pixels, entry->width, entry->height, 0);
     }
     stbi_set_flip_vertically_on_load(1);
     pixels = stbi_load(path, &width, &height, &channels, 4);

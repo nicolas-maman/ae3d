@@ -18,6 +18,10 @@ import ae3d.core
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 extern memset(block: ptr, value: int, bytes: int) -> ptr
+extern ae3d_mesh_set_occlusion(mesh: ptr, index: int, value: float)
+extern ae3d_image_register(name: string, rgba: ptr, width: int, height: int) -> int
+extern ae3d_image_unregister(name: string)
+extern ae3d_rgba_set(rgba: ptr, index: int, r: float, g: float, b: float, a: float)
 
 exports (
     World, Palette,
@@ -25,7 +29,8 @@ exports (
     world_new, world_free,
     world_set, world_get, world_solid, world_in_bounds,
     world_fill_column, world_generate, world_clear,
-    world_active_count, world_visible_count, world_build,
+    world_active_count, world_visible_count, world_build, world_build_mesh,
+    world_palette_texture, PALETTE_KINDS,
     world_size_x, world_size_z, world_max_height, world_voxel_size,
     world_set_origin, world_origin_seed, world_origin_kind, world_set_base_height,
     palette_set, palette_reset, palette_color,
@@ -71,13 +76,18 @@ struct World {
     // build places are absolute, so a world lowered under a sea is lowered
     // here and not by moving the model.
     base_y: float
+    // The name its palette image is registered under, once it has been.
+    palette_name: string
 }
+
+var g_palettes_named = 0
 
 world_new(size_x: int, size_z: int, max_height: int, voxel_size: float) -> *World {
     if size_x <= 0 || size_z <= 0 || max_height <= 0 { return null }
 
     w = heap.new(World)
     w.base_y = 0.0
+    w.palette_name = ""
     w.size_x = size_x
     w.size_z = size_z
     w.max_height = max_height
@@ -327,6 +337,206 @@ world_build(w: *World, base: *Model) -> *Model {
     return base
 }
 
+
+// The world as one mesh: only the faces that show, each with the sky it can
+// see baked into its corners.
+//
+// The instanced build draws every exposed voxel as a whole cube, buried faces
+// and all, and every cube is lit alike: the one at the lip of a terrace and
+// the one at the foot of a cliff. This walks the grid once and emits a quad
+// per face whose neighbour is air, so a 384x384 island is a few hundred
+// thousand quads and not six times that, and the shadow pass has no buried
+// faces to fight over. Each corner carries how much of the sky it can see,
+// from the three voxels that crowd it (the two along the face's edges and
+// the one on the diagonal), which is the darkening in a crevice and the
+// light on an edge that reads as a voxel world rather than a pile of dice.
+//
+// A mesh has one colour per model, so the kinds are told apart through a
+// palette texture the world registers with the image layer: each kind a
+// column of it, and every corner of a face at the centre of its kind's
+// column, so no filter ever mixes two.
+
+const PALETTE_KINDS = 16
+const PALETTE_CELL = 8
+
+// The palette as an image, registered under the world's own name so the
+// mesh can be textured with it by both backends, and rewritten by the next
+// build if the palette changed in between.
+world_palette_texture(w: *World) -> string {
+    if w.palette_name == "" {
+        g_palettes_named = g_palettes_named + 1
+        w.palette_name = "ae3d://voxel-palette/${g_palettes_named}"
+    }
+    name = w.palette_name
+    pixels = calloc(PALETTE_KINDS * PALETTE_CELL * PALETTE_CELL * 4, 1)
+    if pixels == null { return "" }
+    kind = 0
+    while kind < PALETTE_KINDS {
+        colour = palette_color(w, kind)
+        row = 0
+        while row < PALETTE_CELL {
+            column = 0
+            while column < PALETTE_CELL {
+                ae3d_rgba_set(pixels, row * PALETTE_KINDS * PALETTE_CELL + kind * PALETTE_CELL + column,
+                              colour.x, colour.y, colour.z, 1.0)
+                column = column + 1
+            }
+            row = row + 1
+        }
+        kind = kind + 1
+    }
+    ok = ae3d_image_register(name, pixels, PALETTE_KINDS * PALETTE_CELL, PALETTE_CELL) == 1
+    free(pixels)
+    if !ok { return "" }
+    return name
+}
+
+// Whether a voxel is there, with the world's edges as air and the ground
+// under it as rock, so the sides of the block show and its underside does not.
+filled(data: int[], w: *World, x: int, y: int, z: int) -> bool {
+    if y < 0 { return true }
+    if x < 0 || z < 0 || y >= w.max_height || x >= w.size_x || z >= w.size_z { return false }
+    return data[(x * w.size_z + z) * w.max_height + y] != EMPTY
+}
+
+// How much sky a face's corner sees, 0..3, from the three voxels beside it
+// on the face's own side: the two along its edges and the diagonal one.
+// Both edge voxels present is a corner the diagonal cannot open further.
+corner_sky(data: int[], w: *World, x: int, y: int, z: int,
+           ux: int, uy: int, uz: int, vx: int, vy: int, vz: int) -> int {
+    side_u = 0
+    if filled(data, w, x + ux, y + uy, z + uz) { side_u = 1 }
+    side_v = 0
+    if filled(data, w, x + vx, y + vy, z + vz) { side_v = 1 }
+    if side_u == 1 && side_v == 1 { return 0 }
+    diagonal = 0
+    if filled(data, w, x + ux + vx, y + uy + vy, z + uz + vz) { diagonal = 1 }
+    return 3 - side_u - side_v - diagonal
+}
+
+// Three of four neighbours open is full daylight; a corner with none open
+// keeps under half of it, which is as dark as a crevice a voxel wide gets.
+sky_to_light(sky: int) -> float {
+    return 0.45 + 0.55 * (sky as float) / 3.0
+}
+
+// One face of one voxel: four corners, their sky, and the two triangles
+// laid across the diagonal that keeps the lighter pair together, so the
+// shading does not streak one way along a run of faces. The tangents u and
+// v are positive axes; the face's low corner is the voxel's own, pushed to
+// its far side where the normal is positive.
+emit_face(m: *Model, data: int[], w: *World, x: int, y: int, z: int, kind: int,
+          nx: int, ny: int, nz: int, ux: int, uy: int, uz: int, vx: int, vy: int, vz: int) {
+    size = w.voxel_size
+    normal = core.vec3(nx as float, ny as float, nz as float)
+    u = ((kind as float) + 0.5) / (PALETTE_KINDS as float)
+    ox = (x as float) * size
+    oy = (y as float) * size + w.base_y
+    oz = (z as float) * size
+    if nx > 0 { ox = ox + size }
+    if ny > 0 { oy = oy + size }
+    if nz > 0 { oz = oz + size }
+    // The air voxel the face looks into, where its corner neighbours are.
+    ax = x + nx
+    ay = y + ny
+    az = z + nz
+
+    sky0 = corner_sky(data, w, ax, ay, az, 0 - ux, 0 - uy, 0 - uz, 0 - vx, 0 - vy, 0 - vz)
+    sky1 = corner_sky(data, w, ax, ay, az, ux, uy, uz, 0 - vx, 0 - vy, 0 - vz)
+    sky2 = corner_sky(data, w, ax, ay, az, ux, uy, uz, vx, vy, vz)
+    sky3 = corner_sky(data, w, ax, ay, az, 0 - ux, 0 - uy, 0 - uz, vx, vy, vz)
+
+    a = core.mesh_push_vertex(m.mesh, core.vec3(ox, oy, oz), u, 0.5, normal)
+    b = core.mesh_push_vertex(m.mesh, core.vec3(ox + (ux as float) * size, oy + (uy as float) * size, oz + (uz as float) * size), u, 0.5, normal)
+    c = core.mesh_push_vertex(m.mesh, core.vec3(ox + ((ux + vx) as float) * size, oy + ((uy + vy) as float) * size, oz + ((uz + vz) as float) * size), u, 0.5, normal)
+    d = core.mesh_push_vertex(m.mesh, core.vec3(ox + (vx as float) * size, oy + (vy as float) * size, oz + (vz as float) * size), u, 0.5, normal)
+    ae3d_mesh_set_occlusion(m.mesh, a, sky_to_light(sky0))
+    ae3d_mesh_set_occlusion(m.mesh, b, sky_to_light(sky1))
+    ae3d_mesh_set_occlusion(m.mesh, c, sky_to_light(sky2))
+    ae3d_mesh_set_occlusion(m.mesh, d, sky_to_light(sky3))
+
+    // Wound so the triangles face along the normal: u then v runs counter-
+    // clockwise seen from u x v, so where that is against the normal asked
+    // the order turns.
+    flip = (uy * vz - uz * vy) * nx + (uz * vx - ux * vz) * ny + (ux * vy - uy * vx) * nz < 0
+    if sky0 + sky2 > sky1 + sky3 {
+        if flip {
+            core.mesh_push_triangle(m.mesh, a, c, b)
+            core.mesh_push_triangle(m.mesh, a, d, c)
+        } else {
+            core.mesh_push_triangle(m.mesh, a, b, c)
+            core.mesh_push_triangle(m.mesh, a, c, d)
+        }
+    } else {
+        if flip {
+            core.mesh_push_triangle(m.mesh, b, d, c)
+            core.mesh_push_triangle(m.mesh, b, a, d)
+        } else {
+            core.mesh_push_triangle(m.mesh, b, c, d)
+            core.mesh_push_triangle(m.mesh, b, d, a)
+        }
+    }
+}
+
+// The faces the world shows, as one mesh with the palette for its texture,
+// or null when the world is empty or the memory is not there.
+world_build_mesh(w: *World) -> *Model {
+    data = w.voxels as int[]
+    total = w.size_x * w.size_z * w.max_height
+    column = w.max_height
+    plane = w.size_z * column
+
+    // Count first so the mesh is reserved once: a face per side whose
+    // neighbour is air, the underside of the bottom row never.
+    faces = 0
+    index = 0
+    while index < total {
+        if data[index] != EMPTY {
+            x = index / plane
+            remainder = index - x * plane
+            z = remainder / column
+            y = remainder - z * column
+            if !filled(data, w, x + 1, y, z) { faces = faces + 1 }
+            if !filled(data, w, x - 1, y, z) { faces = faces + 1 }
+            if !filled(data, w, x, y + 1, z) { faces = faces + 1 }
+            if !filled(data, w, x, y - 1, z) { faces = faces + 1 }
+            if !filled(data, w, x, y, z + 1) { faces = faces + 1 }
+            if !filled(data, w, x, y, z - 1) { faces = faces + 1 }
+        }
+        index = index + 1
+    }
+    if faces == 0 { return null }
+
+    m = core.model_new()
+    if !core.mesh_reserve(m.mesh, faces * 4, faces * 6) {
+        core.model_free(m)
+        return null
+    }
+    index = 0
+    while index < total {
+        kind = data[index]
+        if kind != EMPTY {
+            x = index / plane
+            remainder = index - x * plane
+            z = remainder / column
+            y = remainder - z * column
+            if !filled(data, w, x + 1, y, z) { emit_face(m, data, w, x, y, z, kind, 1, 0, 0, 0, 0, 1, 0, 1, 0) }
+            if !filled(data, w, x - 1, y, z) { emit_face(m, data, w, x, y, z, kind, 0 - 1, 0, 0, 0, 0, 1, 0, 1, 0) }
+            if !filled(data, w, x, y + 1, z) { emit_face(m, data, w, x, y, z, kind, 0, 1, 0, 1, 0, 0, 0, 0, 1) }
+            if !filled(data, w, x, y - 1, z) { emit_face(m, data, w, x, y, z, kind, 0, 0 - 1, 0, 1, 0, 0, 0, 0, 1) }
+            if !filled(data, w, x, y, z + 1) { emit_face(m, data, w, x, y, z, kind, 0, 0, 1, 1, 0, 0, 0, 1, 0) }
+            if !filled(data, w, x, y, z - 1) { emit_face(m, data, w, x, y, z, kind, 0, 0, 0 - 1, 1, 0, 0, 0, 1, 0) }
+        }
+        index = index + 1
+    }
+
+    palette = world_palette_texture(w)
+    if palette != "" { core.model_set_texture(m, palette) }
+    core.model_set_diffuse(m, 1.0, 1.0, 1.0)
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    return m
+}
 
 // Surface nets over a signed distance field.
 //

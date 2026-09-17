@@ -11,7 +11,6 @@
 import ae3d.core
 import ae3d.platform
 import ae3d.engine
-import ae3d.gl
 import ae3d.loader
 import ae3d.raycast
 import ae3d.rendering
@@ -30,9 +29,9 @@ const BLAST_FORCE = 900.0
 // The sun as tools/make_sky.ae painted it into the sky: azimuth -1.9 and
 // elevation 0.42, which the light points at, so the shadows fall away from
 // the sun that is actually in the frame.
-const SUN_X = 0.0 - 0.295
-const SUN_Y = 0.408
-const SUN_Z = 0.0 - 0.865
+const SUN_X = 0.0 - 0.263
+const SUN_Y = 0.581
+const SUN_Z = 0.0 - 0.770
 // The haze the sky has at its horizon, which the far dunes fade into.
 const HAZE_R = 0.86
 const HAZE_G = 0.80
@@ -55,7 +54,6 @@ var g_velocity: ptr = null
 var g_tint: ptr = null
 var g_seed = 24681357
 var g_settled = 0
-var g_sky: *Skybox = null
 
 next_random() -> float {
     g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
@@ -270,9 +268,7 @@ on_start(data: ptr) {
     }
     seed_grains()
 
-    renderer = engine.engine_gl_renderer(e)
-    g_sky = gl.skybox_create(renderer, "resources/sky/desert.png")
-    engine.engine_set_skybox(e, g_sky as ptr)
+    engine.engine_set_sky(e, "resources/sky/desert.png")
 
     plain = sand_floor(FLAT * 2.0, 90.0)
     core.model_set_position(plain, 0.0, 0.0 - 1.0, 0.0)
@@ -303,7 +299,7 @@ on_start(data: ptr) {
     engine.engine_add_model(e, grain)
     g_model = grain as ptr
 
-    gl.renderer_set_clear_color(renderer, HAZE_R, HAZE_G, HAZE_B)
+    engine.engine_set_clear_color(e, HAZE_R, HAZE_G, HAZE_B)
 
     // Low, so the sky and the dunes are in the frame with the pile.
     cam = engine.engine_camera(e)
@@ -359,7 +355,7 @@ main() {
 
     engine.engine_run(e, 0 - 1, 0 - 1)
 
-    println("sand: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${g_settled} grains settled, ${gl.renderer_draw_calls(engine.engine_gl_renderer(e))} draw calls")
+    println("sand: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${g_settled} grains settled, ${engine.engine_draw_calls(e)} draw calls")
 
     grain = g_model as *Model
     if grain != null { core.model_free(grain) }

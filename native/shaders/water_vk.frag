@@ -456,18 +456,28 @@ void main() {
     // sun the water glows from inside, greener and brighter than its body.
     float tallest = (waveAmplitudes[0] + waveAmplitudes[1] +
                      waveAmplitudes[2] + waveAmplitudes[3]) * waveHeightMultiplier;
+    // Against the table's sum: the surface reaches past it (the vertex pass
+    // lifts the displacement by half again) only where every train crests
+    // at once, so a crest at the sum is a tall one and an ordinary crest is
+    // half of it.
     float crest = clamp((waveHeight - waterLevel) / max(tallest, 0.001), 0.0, 1.0);
     float through = pow(clamp(dot(viewDir, -lightDir), 0.0, 1.0), 3.0) * (0.3 + 0.7 * crest)
                   + crest * 0.25 * NdotL;
     vec3 scatter = (base * 2.5 + vec3(0.0, 0.06, 0.04)) * sun * 0.30 * through;
 
     // Foam where a crest breaks, torn up by the ripple noise so it is
-    // patches and not a band along every crest.
+    // patches and not a band along every crest. The noise thins it and
+    // never removes it: a sea whose waves are kilometres long puts the
+    // whole view inside one cell of that noise, and its crests still break.
     float foam = 0.0;
     if (enableFoam && tallest > 0.0) {
         float torn = ridgedNoise(fragPosition.xz * rippleFreq * 0.08 + time * 0.02);
-        foam = smoothstep(0.68, 0.95, crest) * smoothstep(0.5, 0.85, torn) * clamp(foamIntensity, 0.0, 1.5);
-        foam *= 1.0 - 0.7 * far;
+        float breaking = smoothstep(0.45, 1.0, crest);
+        foam = breaking * (0.35 + 0.65 * smoothstep(0.35, 0.8, torn));
+        // Lace, not paint: the fine ripple noise eats holes in it.
+        foam *= 0.55 + 0.45 * noise(fragPosition.xz * rippleFreq * 1.5 + rippleTime * 0.5);
+        foam *= clamp(foamIntensity, 0.0, 2.0) * (1.0 - 0.7 * far);
+        foam = clamp(foam, 0.0, 1.0);
     }
 
     vec3 skyHit = reflectedSky(reflect(-viewDir, mirrorNorm));

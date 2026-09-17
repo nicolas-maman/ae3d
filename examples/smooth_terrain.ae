@@ -7,7 +7,6 @@
 import ae3d.core
 import ae3d.platform
 import ae3d.engine
-import ae3d.gl
 import ae3d.noise
 import ae3d.voxel
 import ae3d.rendering
@@ -25,9 +24,9 @@ const CELL = 6.0
 // terrain is lowered until the sea cuts it this far above its lowest point.
 // And the sun where the painted sky has it (tools/make_sky.ae).
 const SEA_DEPTH = 34.0
-const SUN_X = 0.0 - 0.295
-const SUN_Y = 0.408
-const SUN_Z = 0.0 - 0.865
+const SUN_X = 0.0 - 0.263
+const SUN_Y = 0.581
+const SUN_Z = 0.0 - 0.770
 const HAZE_R = 0.86
 const HAZE_G = 0.80
 const HAZE_B = 0.70
@@ -35,7 +34,6 @@ const HAZE_B = 0.70
 var g_world: ptr = null
 var g_surface: ptr = null
 var g_sea: ptr = null
-var g_sky: *Skybox = null
 
 // The field is the signed height above the terrain, so it is negative under the
 // surface and zero exactly on it, which is what the mesher interpolates against.
@@ -162,11 +160,9 @@ on_start(data: ptr) {
     println("surface: ${core.mesh_vertex_count(surface.mesh)} vertices, ${core.mesh_index_count(surface.mesh) / 3} triangles, ${highest - lowest} m of relief, ${SEA_DEPTH} m of it under the sea")
     println("field ${(filled - started) / 1000000} ms, mesh ${(meshed - filled) / 1000000} ms")
 
-    renderer = engine.engine_gl_renderer(e)
-    gl.renderer_set_clear_color(renderer, HAZE_R, HAZE_G, HAZE_B)
-    gl.renderer_set_fxaa(renderer, true)
-    g_sky = gl.skybox_create(renderer, "resources/sky/desert.png")
-    engine.engine_set_skybox(e, g_sky as ptr)
+    engine.engine_set_clear_color(e, HAZE_R, HAZE_G, HAZE_B)
+    engine.engine_set_post(e, true, false, 0.8, 0.4)
+    engine.engine_set_sky(e, "resources/sky/desert.png")
 
     // From over the water, low enough that the island stands against the
     // sky and the sea runs out to the horizon under it.
@@ -202,7 +198,7 @@ main() {
 
     engine.engine_run(e, 0 - 1, 0 - 1)
 
-    println("smooth terrain: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${gl.renderer_draw_calls(engine.engine_gl_renderer(e))} draw calls")
+    println("smooth terrain: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${engine.engine_draw_calls(e)} draw calls")
 
     surface = g_surface as *Model
     if surface != null { core.model_free(surface) }
