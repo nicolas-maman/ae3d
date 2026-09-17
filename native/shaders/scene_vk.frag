@@ -728,12 +728,17 @@ float cloudNoise(vec3 x) {
                    mix(cloudHash(i + vec3(0, 1, 1)), cloudHash(i + vec3(1, 1, 1)), f.x), f.y), f.z);
 }
 
+// Octaves turned against each other, so the lattice of one is not the
+// lattice of the next and a cloud is not a stack of dice.
 float cloudFbm(vec3 p) {
     float v = 0.0;
     float a = 0.5;
-    for (int i = 0; i < 4; i++) {
+    mat3 turn = mat3(0.00, 0.80, 0.60,
+                     -0.80, 0.36, -0.48,
+                     -0.60, -0.48, 0.64);
+    for (int i = 0; i < 5; i++) {
         v += a * cloudNoise(p);
-        p = p * 2.02 + vec3(11.0, 5.0, 3.0);
+        p = turn * p * 2.02 + vec3(11.0, 5.0, 3.0);
         a *= 0.5;
     }
     return v;

@@ -4222,6 +4222,13 @@ static int ae3d_vk_ensure_ring(ae3d_vk_mesh *slot, VkDeviceSize bytes) {
     if (slot->streaming && slot->ring_size >= bytes) return 1;
 
     ae3d_vkDeviceWaitIdle(vk.device);
+    if (slot->streaming) {
+        /* Regrowing: the bound buffer is one of the ring's, which the ring
+           frees. Destroying it here as well destroyed it twice, and the
+           driver fell over on the second when a stream grew. */
+        slot->vertex_buffer = VK_NULL_HANDLE;
+        slot->vertex_memory = VK_NULL_HANDLE;
+    }
     ae3d_vk_free_ring(slot);
     /* The device-local buffer the first upload made is not read again. */
     if (slot->vertex_buffer) ae3d_vkDestroyBuffer(vk.device, slot->vertex_buffer, NULL);

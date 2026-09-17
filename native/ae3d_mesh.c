@@ -531,6 +531,12 @@ int ae3d_inst_count(void *handle) {
  * distance LOD fills this model with the near zombies one frame and a different
  * number the next; the capacity is what was reserved, the count is what draws.
  * Clamped to the capacity, so it can never read off the end of the matrices. */
+/* A pointer `bytes` past another: what a program needs to hand a backend the
+   tail of an array it owns, without copying it. */
+void *ae3d_ptr_offset(void *p, long bytes) {
+    return p ? (char *)p + bytes : NULL;
+}
+
 void ae3d_inst_set_count(void *handle, int count) {
     ae3d_inst *inst = (ae3d_inst *)handle;
     if (!inst) return;

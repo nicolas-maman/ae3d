@@ -20,6 +20,7 @@ import ae3d.noise
 
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
+extern ae3d_ptr_offset(p: ptr, bytes: long) -> ptr
 
 const GRAINS = 1000000
 const GRAVITY = 0.0 - 240.0
@@ -57,7 +58,18 @@ const REPOSE = 0.58
 // The probe: a ball this far across that pushes the sand out of its way.
 const PROBE_R = 70.0
 
-var g_model: ptr = null
+// The grains in two tiers. Every grain lives in one array, the moving ones
+// packed at its front and the settled ones behind them, and a grain that
+// comes to rest is swapped to the back while one the probe disturbs is
+// swapped to the front. The front is a model uploaded every frame; the
+// back is a model uploaded now and then, when its membership has changed.
+// Once the pile has settled that is a few thousand matrices a frame in
+// place of a million, and the frame is the draw and nothing else.
+var g_model: ptr = null          // the moving grains
+var g_settled_model: ptr = null  // the ones at rest
+var g_active = GRAINS            // [0, g_active) move
+var g_settled_dirty = false
+var g_settled_age = 0
 var g_position: ptr = null
 var g_velocity: ptr = null
 var g_tint: ptr = null
@@ -414,25 +426,40 @@ dig(cx: float, cz: float) {
     // settles at the slope sand holds against a ball.
     heap_relax_window(ci - reach * 2, cj - reach * 2, ci + reach * 2, cj + reach * 2, 10)
 
-    // The grains in the ball's way: out to its edge, and given a shove
-    // outward and up, the harder the deeper in they were.
+    // Every grain at rest near the probe wakes: the ground under it has
+    // moved, and it has to fall or be lifted with it. The grains in the
+    // ball's way are shoved out to its edge, outward and up, the harder the
+    // deeper in they were.
     position = g_position as float[]
     velocity = g_velocity as float[]
+    wake_r = PROBE_R * 2.4
     n = 0
     while n < GRAINS {
         slot = n * 3
         dx = position[slot] - cx
         dz = position[slot + 2] - cz
         flat_sq = dx * dx + dz * dz
-        if flat_sq < PROBE_R * PROBE_R {
-            dy = position[slot + 1] - cy
-            if dx * dx + dy * dy + dz * dz < PROBE_R * PROBE_R {
-                flat = core.sqrt_of(flat_sq)
-                if flat < 1.0 { flat = 1.0 }
-                inside = 1.0 - flat / PROBE_R
-                velocity[slot] = velocity[slot] + dx / flat * (60.0 + inside * 120.0)
-                velocity[slot + 2] = velocity[slot + 2] + dz / flat * (60.0 + inside * 120.0)
-                velocity[slot + 1] = velocity[slot + 1] + 40.0 + inside * 80.0
+        if flat_sq < wake_r * wake_r {
+            if n >= g_active {
+                // Into the moving tier. What was at the tier's edge was
+                // settled and already looked at, so nothing is skipped.
+                swap_grains(n, g_active)
+                g_active = g_active + 1
+                g_settled_dirty = true
+                dx = position[slot] - cx
+                dz = position[slot + 2] - cz
+                flat_sq = dx * dx + dz * dz
+            }
+            if flat_sq < PROBE_R * PROBE_R {
+                dy = position[slot + 1] - cy
+                if dx * dx + dy * dy + dz * dz < PROBE_R * PROBE_R {
+                    flat = core.sqrt_of(flat_sq)
+                    if flat < 1.0 { flat = 1.0 }
+                    inside = 1.0 - flat / PROBE_R
+                    velocity[slot] = velocity[slot] + dx / flat * (60.0 + inside * 120.0)
+                    velocity[slot + 2] = velocity[slot + 2] + dz / flat * (60.0 + inside * 120.0)
+                    velocity[slot + 1] = velocity[slot + 1] + 40.0 + inside * 80.0
+                }
             }
         }
         n = n + 1
@@ -456,9 +483,8 @@ step_grains(delta: float) {
     step = delta
     if step > 0.033 { step = 0.033 }
 
-    settled = 0
     i = 0
-    while i < GRAINS {
+    while i < g_active {
         slot = i * 3
         vy = velocity[slot + 1] + GRAVITY * step
 
@@ -467,13 +493,18 @@ step_grains(delta: float) {
         z = position[slot + 2] + velocity[slot + 2] * step
 
         ground = heap(x, z)
+        at_rest = false
         if y <= ground {
             y = ground
             if vy < 0.0 - 60.0 {
                 vy = (0.0 - vy) * BOUNCE
             } else {
                 vy = 0.0
-                settled = settled + 1
+                // Lying on the ground and barely sliding: at rest, and
+                // out of the moving tier until something disturbs it.
+                vx = velocity[slot] * FRICTION
+                vz = velocity[slot + 2] * FRICTION
+                at_rest = vx * vx + vz * vz < 4.0
             }
             velocity[slot] = velocity[slot] * FRICTION
             velocity[slot + 2] = velocity[slot + 2] * FRICTION
@@ -484,9 +515,41 @@ step_grains(delta: float) {
         position[slot + 2] = z
         velocity[slot + 1] = vy
 
-        i = i + 1
+        if at_rest {
+            velocity[slot] = 0.0
+            velocity[slot + 2] = 0.0
+            g_active = g_active - 1
+            swap_grains(i, g_active)
+            g_settled_dirty = true
+            // The grain swapped in has not been stepped: look at it next.
+        } else {
+            i = i + 1
+        }
     }
-    g_settled = settled
+    g_settled = GRAINS - g_active
+}
+
+// Two grains change places in every array: their positions, their
+// velocities and their tints, so a grain keeps its colour whichever tier
+// it is in.
+swap_grains(a: int, b: int) {
+    if a == b { return }
+    position = g_position as float[]
+    velocity = g_velocity as float[]
+    tint = g_tint as float[]
+    k = 0
+    while k < 3 {
+        t = position[a * 3 + k]
+        position[a * 3 + k] = position[b * 3 + k]
+        position[b * 3 + k] = t
+        t = velocity[a * 3 + k]
+        velocity[a * 3 + k] = velocity[b * 3 + k]
+        velocity[b * 3 + k] = t
+        t = tint[a * 3 + k]
+        tint[a * 3 + k] = tint[b * 3 + k]
+        tint[b * 3 + k] = t
+        k = k + 1
+    }
 }
 
 // Where the cursor ray meets the ground plane. Returns false when it points at
@@ -574,7 +637,7 @@ on_start(data: ptr) {
     // A grain a metre and a half across seen from hundreds of metres is a
     // few pixels: an eight-sided sphere is all the silhouette it can show,
     // and a million of anything is a million times its triangles.
-    grain = loader.sphere(1.0, 6, 3)
+    grain = loader.sphere(1.0, 4, 2)
     core.model_set_scale(grain, 1.5, 1.5, 1.5)
     core.model_matte(grain, 1.0, 1.0, 1.0)
     core.model_set_exposure(grain, 1.0)
@@ -586,6 +649,21 @@ on_start(data: ptr) {
     core.model_set_instance_colors(grain, g_tint, GRAINS)
     engine.engine_add_model(e, grain)
     g_model = grain as ptr
+
+    // The same grain again for the tier at rest.
+    still = loader.sphere(1.0, 4, 2)
+    core.model_set_scale(still, 1.5, 1.5, 1.5)
+    core.model_matte(still, 1.0, 1.0, 1.0)
+    core.model_set_exposure(still, 1.0)
+    rendering.apply(still, rendering.performance_config())
+    core.model_set_casts_shadow(still, false)
+    if !core.model_enable_instancing(still, GRAINS) { return }
+    core.model_enable_instance_colors(still)
+    engine.engine_add_model(e, still)
+    // Empty until grains come to rest: after the add, since a model added
+    // with no instances is given no instance stream to draw from.
+    core.model_set_instance_draw_count(still, 0)
+    g_settled_model = still as ptr
 
     engine.engine_set_clear_color(e, HAZE_R, HAZE_G, HAZE_B)
 
@@ -644,7 +722,31 @@ on_update(data: ptr, delta: float) {
         println("sand[diag] frame ${engine.engine_frame_count(e)}: heap volume ${total} cell-metres, top ${top} m, probe at ${centre.x}, ${centre.z}")
     }
 
-    if core.env_int("AE3D_NOUPLOAD", 0) == 0 { core.model_set_instance_positions(grain, g_position, GRAINS) }
+    if core.env_int("AE3D_NOUPLOAD", 0) == 0 { upload_tiers() }
+}
+
+// The moving tier every frame; the tier at rest only when grains have
+// joined or left it, and then no more than a few times a second, since
+// what it costs is the whole pile.
+upload_tiers() {
+    grain = g_model as *Model
+    still = g_settled_model as *Model
+    core.model_set_instance_draw_count(grain, g_active)
+    if g_active > 0 {
+        core.model_set_instance_positions(grain, g_position, g_active)
+        core.model_set_instance_colors(grain, g_tint, g_active)
+    }
+    g_settled_age = g_settled_age + 1
+    if still != null && g_settled_dirty && g_settled_age >= 20 {
+        resting = GRAINS - g_active
+        core.model_set_instance_draw_count(still, resting)
+        if resting > 0 {
+            core.model_set_instance_positions(still, ae3d_ptr_offset(g_position, (g_active * 24) as long), resting)
+            core.model_set_instance_colors(still, ae3d_ptr_offset(g_tint, (g_active * 24) as long), resting)
+        }
+        g_settled_dirty = false
+        g_settled_age = 0
+    }
 }
 
 main() {
@@ -672,10 +774,12 @@ main() {
 
     engine.engine_run(e, 0 - 1, 0 - 1)
 
-    println("sand: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${g_settled} grains settled, ${engine.engine_draw_calls(e)} draw calls")
+    println("sand: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${g_settled} grains settled, ${g_active} moving, ${engine.engine_draw_calls(e)} draw calls")
 
     grain = g_model as *Model
     if grain != null { core.model_free(grain) }
+    still = g_settled_model as *Model
+    if still != null { core.model_free(still) }
     if g_position != null { free(g_position) }
     if g_velocity != null { free(g_velocity) }
     if g_tint != null { free(g_tint) }
