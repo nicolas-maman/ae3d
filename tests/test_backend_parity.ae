@@ -170,6 +170,13 @@ compare_size(name: string, gl_pixels: ptr, vk_pixels: ptr, width: int, height: i
 }
 
 compare(name: string, gl_pixels: ptr, vk_pixels: ptr) -> int {
+    return compare_within(name, gl_pixels, vk_pixels, 2)
+}
+
+// The same, allowing `percent` of the channels to differ: for a feature
+// read off the frame itself rather than off a uniform, where the two
+// backends' anti-aliasing puts every silhouette a pixel apart.
+compare_within(name: string, gl_pixels: ptr, vk_pixels: ptr, percent: int) -> int {
     dump_frames(name, gl_pixels, vk_pixels)
     lit_gl = 0
     lit_vk = 0
@@ -231,7 +238,7 @@ compare(name: string, gl_pixels: ptr, vk_pixels: ptr) -> int {
     coverage = lit_gl - lit_vk
     if coverage < 0 { coverage = 0 - coverage }
     check_true("${name}: both cover the same area", coverage * 20 < lit_gl)
-    check_true("${name}: frames agree", differing * 100 < total * 2)
+    check_true("${name}: frames agree", differing * 100 < total * percent)
 
     println("  ${name}: opengl lit ${lit_gl}, vulkan lit ${lit_vk}, ${differing} of ${total} channels differ, worst ${worst}")
     return brightness
@@ -408,6 +415,23 @@ main() {
     core.backend_render(&vulkan_pass, cam, light)
     ocean_lit = compare("gerstner ocean", offscreen.target_pixels(target), vk.offscreen_pixels())
     check_true("the ocean changes the frame", ocean_lit != preset_lit)
+
+    // A shore: the surface reads the scene's depth under it, captured after
+    // the opaque pass on both backends, and goes clear over the cubes that
+    // stand in it with foam where they break the surface. The one water
+    // feature that reads a frame back rather than a uniform, so the one
+    // most likely to differ between the two.
+    water.simulation_set_shore(gl_sim, 12.0, 8.0)
+    water.simulation_set_shore(vk_sim, 12.0, 8.0)
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    // Read off the frame's depth, which the two backends resolve from their
+    // own anti-aliasing: every silhouette that meets the water is a pixel
+    // apart, so this case is allowed twice the usual disagreement.
+    shore_lit = compare_within("shore from the scene depth", offscreen.target_pixels(target), vk.offscreen_pixels(), 4)
+    check_true("the shore changes the frame", shore_lit != ocean_lit)
+    water.simulation_set_shore(gl_sim, 0.0, 0.0)
+    water.simulation_set_shore(vk_sim, 0.0, 0.0)
 
     // The editor runs shadows, an ocean and FXAA together, which is the
     // combination that put the water program's uniforms under the composite.

@@ -40,6 +40,8 @@
 #endif
 
 #define AE3D_VK_FRAMES 2
+/* Asked for at binding 4 in place of a texture handle: the camera depth. */
+#define AE3D_VK_AUX_SCENE_DEPTH (-1)
 /* Timestamps a frame: start, after shadow, after scene, after post. */
 #define AE3D_VK_STAMPS 4
 /* A cached descriptor set whose texture has been destroyed. Not zero: zero is
@@ -288,6 +290,9 @@ static struct {
     int pass_open;
     int in_shadow_pass;
     int in_camdepth;
+    /* Whether something other than the reflection wants the camera depth
+       drawn: a water surface reading the ground under it. */
+    int scene_depth_wanted;
     VkDescriptorSet ssr_set[AE3D_VK_FRAMES];
     int ssr_set_built;
     float ssr_road_height;
@@ -1444,6 +1449,15 @@ static int ae3d_vk_build_camdepth_pass(void) {
 }
 
 static void ae3d_vk_destroy_camdepth_target(void) {
+    int frame, index;
+    /* Sets that bound the depth at binding 4 name a view about to go. */
+    for (frame = 0; frame < AE3D_VK_FRAMES; frame++) {
+        for (index = 0; index < vk.set_count[frame]; index++) {
+            if (vk.set_bank[frame][index] == AE3D_VK_AUX_SCENE_DEPTH) {
+                vk.set_texture[frame][index] = AE3D_VK_SET_FREE;
+            }
+        }
+    }
     if (vk.camdepth_framebuffer) {
         ae3d_vkDestroyFramebuffer(vk.device, vk.camdepth_framebuffer, NULL);
         vk.camdepth_framebuffer = VK_NULL_HANDLE;
@@ -2279,8 +2293,13 @@ static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle, int normal
         !vk.textures[normal_handle - 1].in_use) {
         normal_handle = vk.default_texture;
     }
-    if (bank_handle < 1 || bank_handle > AE3D_VK_MAX_TEXTURES ||
-        !vk.textures[bank_handle - 1].in_use) {
+    /* Binding 4 is whichever auxiliary image the draw needs: a crowd's pose
+       bank by its texture handle, or the camera depth for a water surface,
+       asked for as AE3D_VK_AUX_SCENE_DEPTH. */
+    if (bank_handle == AE3D_VK_AUX_SCENE_DEPTH) {
+        if (!vk.camdepth_view || !vk.camdepth_sampler) bank_handle = vk.default_texture;
+    } else if (bank_handle < 1 || bank_handle > AE3D_VK_MAX_TEXTURES ||
+               !vk.textures[bank_handle - 1].in_use) {
         bank_handle = vk.default_texture;
     }
     for (index = 0; index < vk.set_count[frame]; index++) {
@@ -2297,7 +2316,7 @@ static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle, int normal
     texture = &vk.textures[texture_handle - 1];
     if (!texture->in_use) return VK_NULL_HANDLE;
     normal = &vk.textures[normal_handle - 1];
-    poses = &vk.textures[bank_handle - 1];
+    poses = bank_handle == AE3D_VK_AUX_SCENE_DEPTH ? NULL : &vk.textures[bank_handle - 1];
 
     if (reuse >= 0) {
         set = vk.sets[frame][reuse];
@@ -2371,8 +2390,13 @@ static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle, int normal
     // never samples it.
     memset(&bank, 0, sizeof(bank));
     bank.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    bank.imageView = poses->view;
-    bank.sampler = poses->sampler;
+    if (poses) {
+        bank.imageView = poses->view;
+        bank.sampler = poses->sampler;
+    } else {
+        bank.imageView = vk.camdepth_view;
+        bank.sampler = vk.camdepth_sampler;
+    }
     writes[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[4].dstSet = set;
     writes[4].dstBinding = 4;
@@ -3336,6 +3360,26 @@ void ae3d_vk_set_ssr(int on) {
 
 int ae3d_vk_ssr(void) { return vk.ssr_enabled; }
 
+/* The camera depth drawn for its own sake: a water surface reads the scene's
+   depth under it for its shore, whether or not the road reflects. The same
+   target the reflection uses, made the same way. */
+void ae3d_vk_set_scene_depth(int on) {
+    on = on ? 1 : 0;
+    vk.scene_depth_wanted = on;
+    if (!vk.ready || !on) return;
+    if (!vk.camdepth_framebuffer ||
+        vk.camdepth_width != (int)vk.extent.width ||
+        vk.camdepth_height != (int)vk.extent.height) {
+        ae3d_vkDeviceWaitIdle(vk.device);
+        ae3d_vk_destroy_camdepth_target();
+        ae3d_vk_create_camdepth_target((int)vk.extent.width, (int)vk.extent.height);
+    }
+}
+
+int ae3d_vk_scene_depth_ready(void) {
+    return vk.camdepth_framebuffer != VK_NULL_HANDLE && vk.camdepth_view != VK_NULL_HANDLE;
+}
+
 // The pass leaves the map in shader-read layout, so the scene pass that follows
 // in the same command buffer samples it without a barrier of its own.
 int ae3d_vk_shadow_begin(void) {
@@ -3424,7 +3468,7 @@ int ae3d_vk_camdepth_begin(void) {
     VkViewport viewport;
     VkRect2D scissor;
 
-    if (!vk.recording || !vk.ssr_enabled || !vk.camdepth_framebuffer) return 0;
+    if (!vk.recording || !(vk.ssr_enabled || vk.scene_depth_wanted) || !vk.camdepth_framebuffer) return 0;
     if (vk.pass_open) return 0;
 
     memset(&clear, 0, sizeof(clear));
@@ -3839,6 +3883,10 @@ void *ae3d_vk_offscreen_pixels(void) {
     memcpy(g_readback_copy, vk.readback_mapped[vk.readback_frame], needed);
     return g_readback_copy;
 }
+
+/* The size of the frame being drawn, in pixels: the swapchain's extent. */
+int ae3d_vk_frame_width(void) { return (int)vk.extent.width; }
+int ae3d_vk_frame_height(void) { return (int)vk.extent.height; }
 
 int ae3d_vk_offscreen_width(void) { return vk.readback_width; }
 int ae3d_vk_offscreen_height(void) { return vk.readback_height; }

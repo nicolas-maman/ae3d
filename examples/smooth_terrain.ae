@@ -13,6 +13,7 @@ import ae3d.rendering
 import ae3d.water
 
 extern clock_ns() -> long
+extern pow(x: float, y: float) -> float
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 extern ae3d_image_register(name: string, rgba: ptr, width: int, height: int) -> int
@@ -58,6 +59,9 @@ land_height(field: *Perlin, x: float, z: float) -> float {
     shore = core.sqrt_of(dx * dx + dz * dz) / ((WORLD_X as float) * 0.5)
     if shore > 0.95 { shore = 0.95 }
     keep = 0.5 + 0.5 * core.cos_of(shore / 0.95 * 3.14159265)
+    // Eased at the foot, so the land runs out under the sea as a shelf and
+    // the shore is shallows and a beach, not a wall the water stops at.
+    keep = pow(keep, 0.6)
     return 6.0 + (height - 6.0) * keep
 }
 
@@ -212,6 +216,9 @@ on_start(data: ptr) {
     water.simulation_set_reflection(sea, 0.9)
     // What it mirrors: the painted sky itself, not a flat sky colour.
     water.simulation_set_sky_texture(sea, "resources/sky/desert.png")
+    // A shore: clear over the sand within a few metres of the surface, foam
+    // along the waterline.
+    water.simulation_set_shore(sea, 9.0, 3.0)
     water.simulation_set_normal_strength(sea, 1.6)
     water.simulation_set_foam(sea, true, 0.3)
     // Opaque enough that the drowned slopes do not show through as a shadow

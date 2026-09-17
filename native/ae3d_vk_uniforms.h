@@ -4,12 +4,12 @@
 
 #include <string.h>
 
-#define AE3D_VK_SCENE_SIZE 4720
+#define AE3D_VK_SCENE_SIZE 4752
 
 /* std140 layout, offsets computed from the same declarations the shader
    block is generated from, so the two cannot disagree. */
 typedef struct {
-    unsigned char bytes[4720];
+    unsigned char bytes[4752];
 } ae3d_vk_scene;
 
 #define AE3D_VK_OFF_ISINSTANCED 320
@@ -115,11 +115,15 @@ typedef struct {
 #define AE3D_VK_OFF_ENABLEWATERREFLECTION 4684
 #define AE3D_VK_OFF_WATERREFLECTIONINTENSITY 4688
 #define AE3D_VK_OFF_HASSKYTEXTURE 4692
-#define AE3D_VK_OFF_ENABLEWATERDISTORTION 4696
-#define AE3D_VK_OFF_WATERDISTORTIONINTENSITY 4700
-#define AE3D_VK_OFF_ENABLEWATERNORMALMAPPING 4704
-#define AE3D_VK_OFF_WATERNORMALINTENSITY 4708
-#define AE3D_VK_OFF_POSEBANKFRAMES 4712
+#define AE3D_VK_OFF_HASSCENEDEPTH 4696
+#define AE3D_VK_OFF_SCREENSIZE 4704
+#define AE3D_VK_OFF_WATERDEPTHFADE 4712
+#define AE3D_VK_OFF_WATERSHOREFOAM 4716
+#define AE3D_VK_OFF_ENABLEWATERDISTORTION 4720
+#define AE3D_VK_OFF_WATERDISTORTIONINTENSITY 4724
+#define AE3D_VK_OFF_ENABLEWATERNORMALMAPPING 4728
+#define AE3D_VK_OFF_WATERNORMALINTENSITY 4732
+#define AE3D_VK_OFF_POSEBANKFRAMES 4736
 
 #define AE3D_VK_MAX_LIGHTS 4
 #define AE3D_VK_LIGHT_STRIDE 80
@@ -169,8 +173,8 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "enableSheen", 3720 },
     { "enableTransmission", 3744 },
     { "enableVolumetricLighting", 3768 },
-    { "enableWaterDistortion", 4696 },
-    { "enableWaterNormalMapping", 4704 },
+    { "enableWaterDistortion", 4720 },
+    { "enableWaterNormalMapping", 4728 },
     { "enableWaterReflection", 4684 },
     { "exposure", 3684 },
     { "foamIntensity", 4644 },
@@ -181,6 +185,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "giBounces", 3812 },
     { "giIntensity", 3808 },
     { "hasNormalMap", 3696 },
+    { "hasSceneDepth", 4696 },
     { "hasShadowMap", 3860 },
     { "hasSkyTexture", 4692 },
     { "horizonColor", 4672 },
@@ -202,10 +207,11 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "noiseScale", 3892 },
     { "normalStrength", 3700 },
     { "occlusionStrength", 3704 },
-    { "poseBankFrames", 4712 },
+    { "poseBankFrames", 4736 },
     { "projection", 3936 },
     { "reflectivity", 3692 },
     { "roughness", 3680 },
+    { "screenSize", 4704 },
     { "shadowDirection", 3872 },
     { "shadowIntensity", 3864 },
     { "shadowSoftness", 3868 },
@@ -233,12 +239,14 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "volumetricScattering", 3780 },
     { "volumetricSteps", 3776 },
     { "waterBaseColor", 4624 },
-    { "waterDistortionIntensity", 4700 },
+    { "waterDepthFade", 4712 },
+    { "waterDistortionIntensity", 4724 },
     { "waterLevel", 4652 },
-    { "waterNormalIntensity", 4708 },
+    { "waterNormalIntensity", 4732 },
     { "waterOpacity", 4636 },
     { "waterPlaneHeight", 4648 },
     { "waterReflectionIntensity", 4688 },
+    { "waterShoreFoam", 4716 },
     { "waveAmplitudes", 4256 },
     { "waveDirections", 4192 },
     { "waveFrequencies", 4320 },
@@ -250,7 +258,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "waveSteepness", 4512 },
 };
 
-#define AE3D_VK_UNIFORM_SLOT_COUNT 108
+#define AE3D_VK_UNIFORM_SLOT_COUNT 112
 
 static inline int ae3d_vk_uniform_offset(const char *name) {
     int low = 0;

@@ -99,6 +99,7 @@ extern ae3d_gl_passtimer_end(timer: ptr)
 extern ae3d_gl_passtimer_ms(timer: ptr, pass: int) -> float
 
 extern ae3d_gl_fbo_create() -> int
+extern ae3d_gl_scene_depth_capture() -> int
 extern ae3d_gl_fbo_bind(fbo: int)
 extern ae3d_gl_fbo_delete(fbo: int)
 extern ae3d_gl_fbo_attach_color(fbo: int, width: int, height: int, hdr: int) -> int
@@ -146,6 +147,11 @@ struct ProgramSlots {
     frame_stamp: int
     view_projection: int
     model: int
+    // The scene depth a water surface reads its shore from.
+    scene_depth: int
+    has_scene_depth: int
+    screen_size: int
+    inv_view_projection: int
     light_slots: ptr
     light_count: int
     light_space: int
@@ -246,6 +252,9 @@ struct GLRenderer {
     last_materials: int
     last_textures: int
     frame_stamp: int
+    // The scene's depth after the opaque pass, for the transparent pass to
+    // read: zero until a frame with a water surface in it captures one.
+    scene_depth: int
     shadow_program: int
     crowd_shadow_program: int
     shadow_fbo: int
@@ -484,6 +493,10 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
     s.bones = ae3d_gl_uniform_location(program, "bones")
     s.pose_bank = ae3d_gl_uniform_location(program, "poseBank")
     s.pose_bank_frames = ae3d_gl_uniform_location(program, "poseBankFrames")
+    s.scene_depth = ae3d_gl_uniform_location(program, "sceneDepth")
+    s.has_scene_depth = ae3d_gl_uniform_location(program, "hasSceneDepth")
+    s.screen_size = ae3d_gl_uniform_location(program, "screenSize")
+    s.inv_view_projection = ae3d_gl_uniform_location(program, "invViewProjection")
     s.normal_sampler = ae3d_gl_uniform_location(program, "normalMap")
     s.has_normal_map = ae3d_gl_uniform_location(program, "hasNormalMap")
     s.normal_strength = ae3d_gl_uniform_location(program, "normalStrength")
@@ -1631,6 +1644,11 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
 
     draw_opaque(r, &view_projection, active_light, cam)
 
+    // What the opaque pass drew, as depth, for a water surface to read the
+    // ground under it by. Copied once, only when there is water to read it.
+    r.scene_depth = 0
+    if wants_scene_depth(r) { r.scene_depth = ae3d_gl_scene_depth_capture() }
+
     count = list.size(r.models)
     i = 0
     while i < count {
@@ -1921,6 +1939,37 @@ model_in_pass(m: *Model, transparent_pass: bool) -> bool {
     return (alpha < 0.99) == transparent_pass
 }
 
+// Whether any model draws through the water program: the one shader that
+// reads the scene's depth.
+wants_scene_depth(r: *GLRenderer) -> bool {
+    count = list.size(r.models)
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        if m != null && m.visible && core.shader_valid(&m.shader) && m.shader.kind == core.SHADER_WATER {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// The scene's depth on texture unit 4 for a program that reads it, with
+// what it needs to turn a stored depth back into a world position.
+bind_scene_depth(r: *GLRenderer, slots: *ProgramSlots, cam: *Camera) {
+    if slots.scene_depth < 0 { return }
+    has = 0
+    if r.scene_depth != 0 {
+        ae3d_gl_texture_bind(4, r.scene_depth)
+        has = 1
+    }
+    ae3d_gl_uniform_int(slots.scene_depth, 4)
+    ae3d_gl_uniform_int(slots.has_scene_depth, has)
+    ae3d_gl_uniform_vec2(slots.screen_size, ae3d_gl_viewport_width() * 1.0, ae3d_gl_viewport_height() * 1.0)
+    inverse = core.mat4_inverse(core.camera_view_projection(cam))
+    ae3d_gl_uniform_mat4(slots.inv_view_projection, &inverse)
+}
+
 render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
              light: *Light, cam: *Camera, transparent_pass: bool) {
     if m == null || !m.visible { return }
@@ -1965,6 +2014,7 @@ render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
         slots.frame_stamp = r.frame_stamp
     }
     bind_shadow_map(r, slots)
+    bind_scene_depth(r, slots, cam)
     set_model_matrix(slots, m)
     apply_skeleton(r, slots, m)
     apply_shading(r, slots, m, program)

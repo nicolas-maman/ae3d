@@ -55,7 +55,10 @@ can be interrogated while it runs. See [Credits](#credits).
   water and the reflected sky (the scene's own skybox image, where it has
   one), GGX glitter from the sun, light through the crests, whitecaps on the
   steep faces, ripples finer than the mesh from scrolling noise slopes, tone
-  mapped and fogged the same way as the shore beside it. From underneath, the
+  mapped and fogged the same way as the shore beside it. The shore itself
+  comes from the scene's depth, captured after the opaque pass on both
+  backends: shallows go clear over the sand and a foam line runs along the
+  waterline. From underneath, the
   surface is the sky through the swell and the seabed is lit by a two-scale
   caustic web with a chromatic fringe.
 - **Voxel worlds as a face mesh.** Only the faces that show, each corner
@@ -110,7 +113,7 @@ pacman -S mingw-w64-ucrt-x86_64-{gcc,glfw,zlib,pkgconf,vulkan-headers,vulkan-loa
 ```bash
 ./build.sh examples/spinning_cube.ae && ./build/spinning_cube
 ./build.sh examples/zombie_city.ae   && ./build/zombie_city
-./build/zombie_city vulkan
+AE3D_API=vulkan ./build/zombie_city
 ```
 
 `build.sh` compiles the native layer once, runs `aetherc` over the Aether
@@ -121,6 +124,7 @@ sources and links. Every program honours a few environment variables:
 | `AE3D_FRAMES=n` | stop after `n` frames, so any example is a smoke test |
 | `AE3D_SNAPSHOT=path.png` | write the last frame; `AE3D_SNAPSHOT_BURST=k` writes the last `k` |
 | `AE3D_HIDDEN=1` | no window on screen (rendering still happens) |
+| `AE3D_API=vulkan` | run through the other renderer, whatever the program asked for (`opengl` the other way) |
 | `AE3D_AGENT=port` | open the control channel on loopback |
 
 `./ci.sh` builds with warnings as errors, type-checks every module, runs every

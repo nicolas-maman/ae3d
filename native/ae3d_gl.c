@@ -988,6 +988,62 @@ int ae3d_gl_fbo_resolve(int source, int destination, int width, int height) {
     return (int)status;
 }
 
+/* The scene's depth as drawn so far, copied into a texture the transparent
+   pass can read: what a water surface asks to know how much water lies
+   between it and the ground. One framebuffer and one depth texture, kept at
+   the size of whatever is being drawn into and remade when that changes;
+   the copy resolves a multisampled frame to one sample, which for depth
+   takes the nearest. Returns the texture, or 0 when the copy failed. */
+static GLuint g_scene_depth_fbo, g_scene_depth_texture;
+static int g_scene_depth_width, g_scene_depth_height;
+
+int ae3d_gl_scene_depth_capture(void) {
+    GLint viewport[4];
+    GLint source = 0;
+    int width, height;
+
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    width = viewport[2];
+    height = viewport[3];
+    if (width < 1 || height < 1) return 0;
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &source);
+
+    if (!g_scene_depth_fbo) glGenFramebuffers(1, &g_scene_depth_fbo);
+    if (!g_scene_depth_texture || width != g_scene_depth_width || height != g_scene_depth_height) {
+        if (g_scene_depth_texture) glDeleteTextures(1, &g_scene_depth_texture);
+        glGenTextures(1, &g_scene_depth_texture);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, g_scene_depth_texture);
+        /* The same depth-stencil format the frame is drawn with: a blit of
+           depth is refused between formats that differ, and both the window
+           and the post-processing target carry 24 bits of depth with 8 of
+           stencil. */
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, width, height, 0,
+                     GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+        glBindFramebuffer(GL_FRAMEBUFFER, g_scene_depth_fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D,
+                               g_scene_depth_texture, 0);
+        glDrawBuffer(GL_NONE);
+        glReadBuffer(GL_NONE);
+        g_scene_depth_width = width;
+        g_scene_depth_height = height;
+    }
+
+    while (glGetError() != GL_NO_ERROR) { }
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)source);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_scene_depth_fbo);
+    glBlitFramebuffer(viewport[0], viewport[1], viewport[0] + width, viewport[1] + height,
+                      0, 0, width, height, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)source);
+    if (glGetError() != GL_NO_ERROR) return 0;
+    return (int)g_scene_depth_texture;
+}
+
 int ae3d_gl_fbo_attach_depth(int fbo, int width, int height) {
     GLuint rbo = 0;
     if (width < 1) width = 1;

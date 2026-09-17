@@ -16,7 +16,7 @@ exports (
     simulation_set_wave_height, simulation_set_amplitude, simulation_amplitude,
     simulation_set_wave_speed, simulation_set_randomness,
     simulation_set_caustics, simulation_set_foam, simulation_set_reflection, simulation_set_shadow,
-    simulation_set_wave_scale, simulation_set_sky_texture,
+    simulation_set_wave_scale, simulation_set_sky_texture, simulation_set_shore,
     simulation_set_distortion, simulation_set_normal_strength,
     simulation_adopt, simulation_size,
     simulation_color_r, simulation_color_g, simulation_color_b,
@@ -66,6 +66,11 @@ struct Simulation {
     foam_intensity: float
 
     reflection_intensity: float
+    // The shore: how many metres of water hide the bottom, and how many
+    // the foam line along the waterline runs out over. Zero means no
+    // shore: the surface is one opacity everywhere.
+    depth_fade: float
+    shore_foam: float
     shadow_strength: float
     distortion_strength: float
     normal_strength: float
@@ -95,6 +100,8 @@ simulation_new(size: float, amplitude: float) -> *Simulation {
     w.foam_enabled = true
     w.foam_intensity = 1.0
     w.reflection_intensity = 1.0
+    w.depth_fade = 0.0
+    w.shore_foam = 0.0
     w.shadow_strength = 0.5
     w.distortion_strength = 0.2
     w.normal_strength = 1.0
@@ -186,6 +193,17 @@ simulation_set_opacity(w: *Simulation, value: float) {
 // Takes effect on the next build.
 simulation_set_sky_texture(w: *Simulation, path: string) {
     w.sky_path = path
+    settled(w)
+}
+
+// A shore: the water goes clear over ground within `fade` metres of the
+// surface, so the sand shows through, and lays foam where the ground is
+// within `foam` metres. Needs the scene's depth under the water, which the
+// backend captures before the transparent pass on both renderers; the
+// surface is kept translucent so it is drawn in that pass.
+simulation_set_shore(w: *Simulation, fade: float, foam: float) {
+    w.depth_fade = fade
+    w.shore_foam = foam
     settled(w)
 }
 
@@ -370,7 +388,14 @@ simulation_apply(w: *Simulation) {
 
     core.model_set_uniform_vec3(m, "waterBaseColor", core.vec3(w.color_r, w.color_g, w.color_b))
     core.model_set_uniform_float(m, "waterOpacity", w.opacity)
-    core.model_set_alpha(m, w.opacity)
+    // With a shore the surface has to draw after the ground it reads the
+    // depth of, which is the transparent pass: an opaque alpha would put it
+    // in the opaque pass, reading its own depth as the bottom.
+    drawn_alpha = w.opacity
+    if w.depth_fade > 0.0 && drawn_alpha > 0.98 { drawn_alpha = 0.98 }
+    core.model_set_alpha(m, drawn_alpha)
+    core.model_set_uniform_float(m, "waterDepthFade", w.depth_fade)
+    core.model_set_uniform_float(m, "waterShoreFoam", w.shore_foam)
     core.model_set_uniform_float(m, "waveSpeedMultiplier", w.wave_speed_multiplier)
     core.model_set_uniform_float(m, "waveHeightMultiplier", w.wave_height)
     core.model_set_uniform_float(m, "waveRandomness", w.wave_randomness)

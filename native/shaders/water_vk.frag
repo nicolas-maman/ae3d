@@ -118,6 +118,10 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     bool enableWaterReflection;
     float waterReflectionIntensity;
     int hasSkyTexture;
+    int hasSceneDepth;
+    vec2 screenSize;
+    float waterDepthFade;
+    float waterShoreFoam;
     bool enableWaterDistortion;
     float waterDistortionIntensity;
     bool enableWaterNormalMapping;
@@ -125,6 +129,9 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     int poseBankFrames;
 };
 layout(set = 0, binding = 1) uniform sampler2D textureSampler;
+layout(set = 0, binding = 2) uniform sampler2D shadowMap;
+layout(set = 0, binding = 3) uniform sampler2D normalMap;
+layout(set = 0, binding = 4) uniform sampler2D sceneDepth;
 
 layout(location = 0) in vec2 fragTexCoord;
 layout(location = 1) in vec3 fragNormal;
@@ -190,6 +197,17 @@ layout(location = 2) in vec3 fragPosition;
 // model as its texture (the one texture every program binds), read as the
 // equirect the skybox shader reads it as. Zero means no image, and the
 // reflection stays the computed sky colour.
+
+
+// What is under the water: the scene's depth as drawn before the water,
+// so a fragment knows how much water lies between its surface and the
+// ground beneath. Shallow water goes clear and pale and lays a line of foam
+// along the shore; without the depth (a backend that has not captured it)
+// the surface is what it always was.
+
+
+
+
 
 
 
@@ -370,6 +388,25 @@ vec3 ACESFilm(vec3 x) {
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 
+// A stored scene depth as clip-space z: OpenGL keeps depth in 0..1 for a
+// clip range of -1..1, Vulkan's clip range is the 0..1 it stores.
+float scene_depth_clip(float depth) {
+    return depth;
+}
+
+// How much water lies along the view ray between this fragment and what
+// the scene drew behind it, in metres; zero without a depth to read.
+float water_below(vec3 fragmentPos, vec3 eye) {
+    if (hasSceneDepth != 1) return 1000.0;
+    vec2 suv = gl_FragCoord.xy / screenSize;
+    float d = texture(sceneDepth, suv).r;
+    if (d >= 0.99999) return 1000.0;
+    vec4 clip = vec4(suv * 2.0 - 1.0, scene_depth_clip(d), 1.0);
+    vec4 world = invViewProjection * clip;
+    vec3 ground = world.xyz / world.w;
+    return max(distance(eye, ground) - distance(eye, fragmentPos), 0.0);
+}
+
 // What the surface reflects: the skybox image where the reflected ray meets
 // it, read as the equirect the skybox shader reads, or the two sky colours
 // graded from horizon to zenith when the scene has no image.
@@ -512,11 +549,28 @@ void main() {
         finalColor = mix(finalColor, fogColor, clamp(haze, 0.0, 1.0));
     }
 
+    // The shore. Where the ground is close under the surface the water goes
+    // clear, so the sand shows through it, and pale, since the light comes
+    // back off that sand; and a line of foam runs along the waterline, torn
+    // by the ripple noise, from the wash of the last wave.
+    float below = water_below(fragPosition, viewPos);
+    float clear = 1.0 - exp(-below / max(waterDepthFade, 0.01));
+    if (hasSceneDepth == 1 && below < 999.0) {
+        float wash = 1.0 - smoothstep(0.0, max(waterShoreFoam, 0.01), below);
+        float lace = 0.5 + 0.5 * noise(fragPosition.xz * rippleFreq * 0.8 + rippleTime * 0.3);
+        float shoreFoam = wash * wash * lace * 0.9;
+        vec3 shoreLit = pow(vec3(0.9) * (sun * 0.5 * max(lightDir.y, 0.0) + skyLight * 0.6), vec3(1.0 / 2.2));
+        finalColor = mix(finalColor, shoreLit, clamp(shoreFoam, 0.0, 1.0));
+        foam = max(foam, shoreFoam);
+    }
+
     // What reflects is not seen through: the surface goes opaque as the
-    // mirror takes over, and under foam.
+    // mirror takes over, and under foam; and seen through where the ground
+    // is close beneath it.
     float alpha = waterOpacity;
     if (alpha <= 0.01) alpha = 0.85;
     alpha = mix(alpha, 1.0, fresnel * mirror);
+    alpha *= clear;
     alpha = mix(alpha, 1.0, foam);
 
     // Underwater camera effect (when camera is below water surface)
