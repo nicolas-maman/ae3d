@@ -16,6 +16,7 @@ exports (
     simulation_set_wave_height, simulation_set_amplitude, simulation_amplitude,
     simulation_set_wave_speed, simulation_set_randomness,
     simulation_set_caustics, simulation_set_foam, simulation_set_reflection, simulation_set_shadow,
+    simulation_set_wave_scale,
     simulation_set_distortion, simulation_set_normal_strength,
     simulation_adopt, simulation_size,
     simulation_color_r, simulation_color_g, simulation_color_b,
@@ -36,6 +37,11 @@ struct Simulation {
     model: ptr
     ocean_size: float
     base_amplitude: float
+    // Multiplies every wave's frequency: 1 is the ocean's own table, whose
+    // longest wave is 78 km and shortest 8 km -- swells for a sea seen from
+    // the air. A shore, or a surface seen from under it, wants waves metres
+    // long, which is this at a few hundred.
+    wave_scale: float
     elapsed: float
 
     color_r: float
@@ -67,6 +73,7 @@ simulation_new(size: float, amplitude: float) -> *Simulation {
     w = heap.new(Simulation)
     w.ocean_size = size
     w.base_amplitude = amplitude
+    w.wave_scale = 1.0
     w.color_r = 0.06
     w.color_g = 0.22
     w.color_b = 0.45
@@ -169,6 +176,13 @@ simulation_set_opacity(w: *Simulation, value: float) {
 // How high the waves stand, in the units the surface is laid out in. The wave
 // table is derived from it, so applying rebuilds the table rather than writing
 // a single uniform.
+// How much shorter than the ocean's own the waves are: 1 keeps wavelengths
+// of kilometres, 400 makes them 20 to 200 metres. Rebuild after changing.
+simulation_set_wave_scale(w: *Simulation, value: float) {
+    w.wave_scale = value
+    settled(w)
+}
+
 simulation_set_amplitude(w: *Simulation, value: float) {
     w.base_amplitude = value
     if w.model != null { upload_wave_table(w, w.model as *Model) }
@@ -238,17 +252,18 @@ wave_amplitude(w: *Simulation, index: int) -> float {
     return w.base_amplitude * 0.4
 }
 
-wave_frequency(index: int) -> float {
-    if index == 0 { return 0.00008 }
-    if index == 1 { return 0.00015 }
-    if index == 2 { return 0.0004 }
-    return 0.0008
+wave_frequency(w: *Simulation, index: int) -> float {
+    base = 0.0008
+    if index == 0 { base = 0.00008 }
+    if index == 1 { base = 0.00015 }
+    if index == 2 { base = 0.0004 }
+    return base * w.wave_scale
 }
 
 // Deep-water dispersion: a longer wave travels faster, which is what keeps four
 // superimposed trains from marching in lockstep.
-wave_speed(index: int) -> float {
-    wavelength = core.TWO_PI / wave_frequency(index)
+wave_speed(w: *Simulation, index: int) -> float {
+    wavelength = core.TWO_PI / wave_frequency(w, index)
     return 0.002 * core.sqrt_of(wavelength)
 }
 
@@ -269,8 +284,8 @@ upload_wave_table(w: *Simulation, m: *Model) {
         ae3d_farr_set(directions, i * 3 + 1, direction.y)
         ae3d_farr_set(directions, i * 3 + 2, direction.z)
         ae3d_farr_set(amplitudes, i, wave_amplitude(w, i))
-        ae3d_farr_set(frequencies, i, wave_frequency(i))
-        ae3d_farr_set(speeds, i, wave_speed(i))
+        ae3d_farr_set(frequencies, i, wave_frequency(w, i))
+        ae3d_farr_set(speeds, i, wave_speed(w, i))
         ae3d_farr_set(phases, i, (i * 1.0) * core.PI / 3.0)
         ae3d_farr_set(steepness, i, 0.2 + (i * 1.0) * 0.1)
         i = i + 1

@@ -1,4 +1,4 @@
-// Falling sand in a desert: four hundred thousand grains under gravity,
+// Falling sand in a desert: eight hundred thousand grains under gravity,
 // settling into a pile on the sand with friction, and scattering where you
 // click -- under the desert sky and sun the engine wrote for itself
 // (tools/make_sky.ae), on a floor of its own sand, with dunes at the horizon.
@@ -20,7 +20,7 @@ import ae3d.noise
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 
-const GRAINS = 400000
+const GRAINS = 800000
 const GRAVITY = 0.0 - 240.0
 const FRICTION = 0.86
 const BOUNCE = 0.28
@@ -288,12 +288,11 @@ on_start(data: ptr) {
     core.model_set_specular(horizon, 0.03, 0.03, 0.03)
     engine.engine_add_model(e, horizon)
 
-    grain = loader.load_obj("resources/obj/Sphere_Low.obj", true)
-    if grain == null {
-        println("could not load the grain mesh: ${loader.last_error()}")
-        return
-    }
-    core.model_set_scale(grain, 2.4, 2.4, 2.4)
+    // A grain a metre and a half across seen from hundreds of metres is a
+    // few pixels: an eight-sided sphere is all the silhouette it can show,
+    // and a million of anything is a million times its triangles.
+    grain = loader.sphere(1.0, 6, 3)
+    core.model_set_scale(grain, 1.7, 1.7, 1.7)
     core.model_matte(grain, 1.0, 1.0, 1.0)
     core.model_set_exposure(grain, 1.0)
     rendering.apply(grain, rendering.performance_config())
@@ -321,15 +320,18 @@ on_update(data: ptr, delta: float) {
     grain = g_model as *Model
     if grain == null { return }
 
-    step_grains(delta)
+    // AE3D_NOSTEP=1 and AE3D_NOUPLOAD=1 skip the simulation and the
+    // instance upload, so a frame's cost splits into its three parts: at
+    // 800k grains the draw is most of it, the 51 MB of instance matrices a
+    // frame next, the step least.
+    if core.env_int("AE3D_NOSTEP", 0) == 0 { step_grains(delta) }
 
     if engine.engine_mouse_down(e, platform.MOUSE_LEFT) {
         centre = core.vec3(0.0, 0.0, 0.0)
         if ground_under_cursor(e, &centre) { blast(centre) }
     }
 
-    core.model_set_instance_positions(grain, g_position, GRAINS)
-    core.model_set_instance_colors(grain, g_tint, GRAINS)
+    if core.env_int("AE3D_NOUPLOAD", 0) == 0 { core.model_set_instance_positions(grain, g_position, GRAINS) }
 }
 
 main() {

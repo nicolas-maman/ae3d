@@ -9,13 +9,20 @@ import ae3d.gl
 import ae3d.loader
 import ae3d.noise
 import ae3d.voxel
+import ae3d.rendering
+import ae3d.water
 
 extern clock_ns() -> long
 
-const WORLD_X = 192
-const WORLD_Z = 192
-const WORLD_HEIGHT = 48
-const VOXEL_SIZE = 4.0
+// Four times the voxels of the first cut: the same 768 m of ground at two
+// metres a voxel instead of four, and twice the height to carve it in.
+const WORLD_X = 384
+const WORLD_Z = 384
+const WORLD_HEIGHT = 96
+const VOXEL_SIZE = 2.0
+// The lowest ground is sand, and the sand is a shore: a sea lies at this
+// many voxels up.
+const SEA_VOXELS = 15
 // The sun as tools/make_sky.ae painted it into the desert sky, and the
 // haze that sky has at its horizon.
 const SUN_X = 0.0 - 0.295
@@ -26,16 +33,17 @@ const HAZE_G = 0.80
 const HAZE_B = 0.70
 
 var g_sky: *Skybox = null
+var g_sea: ptr = null
 
 var g_world: ptr = null
 
 layer_at(height: int, y: int) -> int {
     if y == height - 1 {
-        if height < 8 { return voxel.SAND }
-        if height > 30 { return voxel.STONE }
+        if height < SEA_VOXELS + 3 { return voxel.SAND }
+        if height > 46 { return voxel.STONE }
         return voxel.GRASS
     }
-    if y > height - 5 { return voxel.DIRT }
+    if y > height - 9 { return voxel.DIRT }
     return voxel.STONE
 }
 
@@ -50,10 +58,20 @@ build_terrain(world: *World) {
     while x < voxel.world_size_x(world) {
         z = 0
         while z < voxel.world_size_z(world) {
-            sample = noise.fbm2(field, (x * 1.0) * 0.018, (z * 1.0) * 0.018, 5, 0.5)
-            ridged = noise.ridge(field, (x * 1.0) * 0.004, 0.0, (z * 1.0) * 0.004, 3, 0.5)
+            sample = noise.fbm2(field, (x * 1.0) * 0.009, (z * 1.0) * 0.009, 6, 0.5)
+            ridged = noise.ridge(field, (x * 1.0) * 0.002, 0.0, (z * 1.0) * 0.002, 3, 0.5)
             normalised = (sample + 1.0) * 0.5
-            height = (4.0 + normalised * 26.0 + ridged * 14.0) as int
+            land = 8.0 + normalised * 52.0 + ridged * 28.0
+            // An island: the land falls away toward the world's edges, under
+            // the sea, so the block is not a cake cut square at its sides.
+            dx = (x as float) - (WORLD_X as float) * 0.5
+            dz = (z as float) - (WORLD_Z as float) * 0.5
+            shore = core.sqrt_of(dx * dx + dz * dz) / ((WORLD_X as float) * 0.5)
+            keep = 1.0 - (shore - 0.60) / 0.36
+            if keep > 1.0 { keep = 1.0 }
+            if keep < 0.0 { keep = 0.0 }
+            keep = keep * keep * (3.0 - 2.0 * keep)
+            height = (4.0 + (land - 4.0) * keep) as int
             if height < 1 { height = 1 }
             if height > WORLD_HEIGHT { height = WORLD_HEIGHT }
 
@@ -78,6 +96,7 @@ on_start(data: ptr) {
         println("could not allocate the voxel world")
         return
     }
+    voxel.world_set_base_height(world, 0.0 - (SEA_VOXELS as float) * VOXEL_SIZE)
 
     started = clock_ns()
     build_terrain(world)
@@ -96,8 +115,33 @@ on_start(data: ptr) {
     println("voxels: ${voxel.world_active_count(world)} solid, ${core.model_instance_count(model)} visible")
     println("terrain ${(generated - started) / 1000000} ms, instances ${(built - generated) / 1000000} ms")
 
+    // The shader's noise across the blocks, so a hillside of one grass is
+    // not one flat green.
+    config = rendering.default_config()
+    config.perlin_noise = true
+    config.noise_scale = 0.06
+    config.noise_intensity = 0.5
+    rendering.apply(model, config)
     engine.engine_add_model(e, model)
     g_world = world as ptr
+
+    // The sea, lapping at the sand: the water surface lies at y = 0 whatever
+    // its model is told, so the world was built with its floor lowered to
+    // put the shore at it.
+    sea = water.simulation_new(6000.0, 0.8)
+    water.simulation_set_wave_scale(sea, 300.0)
+    water.simulation_set_color(sea, 0.03, 0.16, 0.24)
+    water.simulation_set_sky_color(sea, 0.50, 0.64, 0.80)
+    water.simulation_set_reflection(sea, 0.7)
+    water.simulation_set_opacity(sea, 0.9)
+    water.simulation_set_foam(sea, true, 0.4)
+    ocean = water.simulation_build(sea, water.RESOLUTION)
+    if ocean != null {
+        core.model_set_position(ocean, (WORLD_X as float) * VOXEL_SIZE * 0.5, 0.0,
+                                (WORLD_Z as float) * VOXEL_SIZE * 0.5)
+        engine.engine_add_model(e, ocean)
+    }
+    g_sea = sea as ptr
 
     renderer = engine.engine_gl_renderer(e)
     gl.renderer_set_clear_color(renderer, HAZE_R, HAZE_G, HAZE_B)
@@ -107,10 +151,16 @@ on_start(data: ptr) {
     // Low over the near corner, so the block stands against the sky and the
     // sun rakes across the terraces of the terrain.
     cam = engine.engine_camera(e)
-    core.camera_set_position(cam, core.vec3(0.0 - 40.0, 230.0, 0.0 - 60.0))
+    core.camera_set_position(cam, core.vec3(40.0, 70.0, 0.0 - 30.0))
     core.camera_set_speed(cam, 400.0)
     core.camera_set_far(cam, 20000.0)
-    core.camera_look_at(cam, core.vec3(460.0, 30.0, 440.0))
+    core.camera_look_at(cam, core.vec3(420.0, 45.0, 400.0))
+}
+
+on_update(data: ptr, delta: float) {
+    sea = g_sea as *Simulation
+    if sea == null { return }
+    water.simulation_update(sea, delta)
 }
 
 main() {
@@ -131,6 +181,7 @@ main() {
                                                core.vec3(HAZE_R, HAZE_G, HAZE_B), 0.85))
     engine.engine_set_user_data(e, e as ptr)
     engine.engine_on_start(e, on_start as fn(ptr))
+    engine.engine_on_update(e, on_update as fn(ptr, float))
 
     engine.engine_run(e, 0 - 1, 0 - 1)
 
@@ -138,6 +189,8 @@ main() {
 
     world = g_world as *World
     if world != null { voxel.world_free(world) }
+    sea = g_sea as *Simulation
+    if sea != null { water.simulation_free(sea) }
     core.light_free(light)
     engine.engine_free(e)
 }
