@@ -2083,7 +2083,27 @@ update_stats(backend: *Backend) {
     if g_stats_written > 0.0 && now - g_stats_written < STATS_INTERVAL { return }
     g_stats_written = now
     if g_first_fps < 0 { g_first_fps = (g_fps) as int }
-    ui.set_text(g_stats, "${g_backend_name}   ${(g_fps) as int} fps   ${core.backend_draw_calls(backend)} draws   ${scene_triangles()} tris   ${g_view_w}x${g_view_h}")
+    ui.set_text(g_stats, "${g_backend_name}   ${(g_fps) as int} fps   ${pass_costs()}   ${core.backend_draw_calls(backend)} draws   ${scene_triangles()} tris   ${g_view_w}x${g_view_h}")
+}
+
+// What the last frame cost on the device, pass by pass, in milliseconds:
+// the shadow map, the scene, the effects. A frame rate says a scene is
+// slow; this says which pass made it so. Both renderers time their passes
+// with device timestamps, so the numbers are the GPU's and not the driver's.
+pass_costs() -> string {
+    shadow = 0.0
+    scene = 0.0
+    post = 0.0
+    if g_vulkan {
+        shadow = vk.renderer_shadow_ms(g_renderer as *VKRenderer)
+        scene = vk.renderer_scene_ms(g_renderer as *VKRenderer)
+        post = vk.renderer_post_ms(g_renderer as *VKRenderer)
+    } else {
+        shadow = gl.renderer_shadow_ms(g_renderer as *GLRenderer)
+        scene = gl.renderer_scene_ms(g_renderer as *GLRenderer)
+        post = gl.renderer_post_ms(g_renderer as *GLRenderer)
+    }
+    return "shadow ${number(shadow)} scene ${number(scene)} post ${number(post)} ms"
 }
 
 // Every row is asked to move its target and the target is read back, because a

@@ -609,6 +609,26 @@ def main():
                     lambda ws: on_screen(ws, ws[red[0]["id"]]))
                 check("and clicking it again brings it back", ok)
 
+        # The bar under the viewport says what the last frame cost on the
+        # device, pass by pass: a rate says a scene is slow, the split says
+        # which pass made it so. Read as numbers, not as the presence of a
+        # label a bar could carry with nothing behind it.
+        def costs(ws):
+            for w in ws.values():
+                if w["type"] == "text" and "shadow " in w["text"] and " ms" in w["text"]:
+                    return w["text"]
+            return ""
+
+        widgets, ok = wait_for(args.port, lambda ws: bool(costs(ws)), seconds=10.0)
+        check("the stats bar splits the frame by pass", ok)
+        if ok:
+            words = costs(widgets).split()
+            try:
+                scene_ms = float(words[words.index("scene") + 1])
+            except (ValueError, IndexError):
+                scene_ms = -1.0
+            check("and the scene pass has a cost", scene_ms >= 0.0, costs(widgets))
+
         # The shading switches, pressed rather than called. The report's own
         # check flips them through set_shading; this is the half that proves a
         # switch on the screen is wired to that at all.
