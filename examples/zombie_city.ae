@@ -89,6 +89,7 @@ var g_sky: *Skybox = null
 var g_near_body: *Model = null    // detailed body + clothes, for zombies close by
 var g_near_clothes: *Model = null
 var g_far_body: *Model = null     // cheap body only, for the ones far off
+var g_far_exported = false        // ...the build's own LOD, or decimated here
 var g_bank: ptr = null
 var g_world: *EcsWorld = null
 var g_pos: *Column = null
@@ -515,7 +516,19 @@ on_start(data: ptr) {
     if entry == null { println("zombie_city: no Zombie_Body"); assets.manifest_free(m); return }
     g_bank = bake_zombie(m, entry)
     g_near_body = assets.entry_load_model(m, entry)
-    g_far_body = assets.entry_load_model(m, entry)
+    // The far tier is the build's own stand-in when the export carries one:
+    // Zombie_Body_LOD, the body collapsed to the crowd's budget in Blender
+    // *before* the rig's weights were assigned, so the weights land on the
+    // triangles actually drawn. Decimating the full body here instead
+    // collapses vertices after weighting and can fold a joint across a bone.
+    // An older export without it falls back to the in-engine decimation.
+    lod_entry = entry_named(m, "Zombie_Body_LOD")
+    g_far_exported = lod_entry != null
+    if g_far_exported {
+        g_far_body = assets.entry_load_model(m, lod_entry)
+    } else {
+        g_far_body = assets.entry_load_model(m, entry)
+    }
     if g_bank == null || g_near_body == null || g_far_body == null {
         println("zombie_city: load failed"); assets.manifest_free(m); return
     }
@@ -569,7 +582,11 @@ on_start(data: ptr) {
     near_tris = setup_crowd(g_near_body, LOD_NEAR)
     cloth_tris = 0
     if g_near_clothes != null { cloth_tris = setup_crowd(g_near_clothes, LOD_NEAR) }
-    far_cell = core.env_int("AE3D_LODFAR", (LOD_FAR * 100.0) as int) as float / 100.0
+    // AE3D_LODFAR (hundredths of a metre) decimates the far tier in the
+    // engine; with the exported stand-in that is off unless asked for.
+    far_default = (LOD_FAR * 100.0) as int
+    if g_far_exported { far_default = 0 }
+    far_cell = core.env_int("AE3D_LODFAR", far_default) as float / 100.0
     far_tris = setup_crowd(g_far_body, far_cell)
     engine.engine_add_model(e, g_near_body)
     if g_near_clothes != null { engine.engine_add_model(e, g_near_clothes) }
@@ -586,7 +603,9 @@ on_start(data: ptr) {
 log_scene(e: *Engine, cam: *Camera, near_tris: int, cloth_tris: int, far_tris: int) {
     println("zombie_city[diag] ================ SCENE ================")
     println("zombie_city[diag] crowd: ${g_count} zombies (AE3D_CROWD), sep every ${g_sepn} frame(s)")
-    println("zombie_city[diag] tiers: near ${near_tris}+${cloth_tris} tris (full mesh), far ${far_tris} tris; ${FRAMES} pose bank")
+    far_from = "decimated in the engine (AE3D_LODFAR)"
+    if g_far_exported { far_from = "Zombie_Body_LOD from the export" }
+    println("zombie_city[diag] tiers: near ${near_tris}+${cloth_tris} tris (full mesh), far ${far_tris} tris, ${far_from}; ${FRAMES} pose bank")
     // The walk the bank carries: how far the clip's root travels over its
     // length, and the pace that sets. In place, so that travel is the crowd's
     // motion and not the mesh's; zero here means the clip was baked as
