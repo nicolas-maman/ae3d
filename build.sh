@@ -147,6 +147,17 @@ if [ "$(uname -s)" = "Darwin" ]; then
     NATIVE_SOURCES="$NATIVE_SOURCES native/ae3d_vk_surface.m"
 fi
 
+# The Vulkan shaders are generated from the GLSL in src/ae3d/shaders and
+# compiled into the native library; an edit to the GLSL without the generator
+# run after it leaves Vulkan on the previous shaders, which then fail parity
+# in ways that look like real bugs. Said here, once, at every build, since
+# CI's --check only says so after the push.
+if [ -f native/shaders/generate.py ] && [ -f native/ae3d_vk_scene_shaders.h ]; then
+    if [ src/ae3d/shaders/module.ae -nt native/ae3d_vk_scene_shaders.h ]; then
+        echo "build: src/ae3d/shaders/module.ae is newer than the generated Vulkan shaders; run native/shaders/generate.py" >&2
+    fi
+fi
+
 # Every header, not a list of three. The generated ones carry the shaders and
 # the uniform offsets, so leaving them out meant regenerating the shaders and
 # linking the previous ones, with nothing to say so.

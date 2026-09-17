@@ -125,7 +125,10 @@ as `build/editor_scene.json`. Loading replaces the scene rather than merging int
 it, and clears the history, since the steps in it refer to models that are gone.
 
 **Console** keeps the last few messages. The status line under the viewport
-carries the newest.
+carries the newest, and the stats bar beside it says what the last frame
+cost: the rate, then the device's own time for each pass -- the shadow map,
+the scene, the effects -- in milliseconds, then draws, triangles and the
+size. A rate says a scene is slow; the split says which pass made it so.
 
 **Inspector** changes with what is selected. Transform and material are always
 there (colour, metallic, roughness, and reflectivity -- how much of the wet

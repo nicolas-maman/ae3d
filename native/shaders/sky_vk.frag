@@ -292,10 +292,13 @@ vec4 cloudsAlong(vec3 dir, vec3 sky, float cover, float t, float dither) {
             // Rolled off, since the sky is drawn without the scene's tone
             // curve and a lit crown would otherwise clip to paper white.
             c = c / (1.0 + c * 0.3);
-            // Into the haze with distance.
-            float haze = 1.0 - exp(-ray * 0.00011);
+            // Into the haze with distance: the colour toward the sky's, and
+            // the cloud itself thinner, since the air between is what is
+            // seen more and more of. Without the second the horizon filled
+            // with a band of small white blocks the haze had only tinted.
+            float haze = 1.0 - exp(-ray * 0.00016);
             c = mix(c, sky, haze);
-            float a = 1.0 - exp(-d * dt * 0.03);
+            float a = (1.0 - exp(-d * dt * 0.03)) * (1.0 - 0.75 * haze);
             colour += c * a * (1.0 - alpha);
             alpha += a * (1.0 - alpha);
             if (alpha > 0.98) break;
