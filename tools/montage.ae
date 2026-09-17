@@ -1,0 +1,95 @@
+// Several frames as one picture, so a scene is judged from every camera at
+// once instead of from the one that happened to flatter it: the rendered
+// views of a contact sheet, side by side and halved, in one PNG.
+//
+//   ./build.sh tools/montage.ae && ./build/montage sheet.png a.png b.png c.png
+//
+// Each input is halved (every other pixel) and laid left to right, in one
+// row up to three views and in two rows past that (a backend a row, when
+// the sheet is two backends of the same views); every cell is the size of
+// the first input. scripts/contact_sheet.sh drives this over a scene's
+// views on both backends.
+import ae3d.core
+import std.os
+
+extern ae3d_image_load(path: string) -> ptr
+extern ae3d_image_free(img: ptr)
+extern ae3d_image_width(img: ptr) -> int
+extern ae3d_image_height(img: ptr) -> int
+extern ae3d_image_pixels(img: ptr) -> ptr
+extern ae3d_image_error() -> string
+extern ae3d_png_write(path: string, rgba: ptr, width: int, height: int) -> int
+extern ae3d_rgba_set(rgba: ptr, index: int, r: float, g: float, b: float, a: float)
+extern calloc(count: int, size: int) -> ptr
+extern free(block: ptr)
+
+const GAP = 4
+
+channel(pixels: ptr, index: int) -> int {
+    bytes = pixels as byte[]
+    return (bytes[index] as int) & 255
+}
+
+main() {
+    if os.args_count() < 3 {
+        println("usage: montage out.png frame.png [frame.png ...]")
+        return
+    }
+    count = os.args_count() - 2
+    columns = count
+    if count > 3 { columns = (count + 1) / 2 }
+    rows = (count + columns - 1) / columns
+
+    first = ae3d_image_load(os.args_get(2))
+    if first == null { println("montage: ${ae3d_image_error()}"); return }
+    cell_w = ae3d_image_width(first) / 2
+    cell_h = ae3d_image_height(first) / 2
+    ae3d_image_free(first)
+    total_w = columns * cell_w + (columns - 1) * GAP
+    total_h = rows * cell_h + (rows - 1) * GAP
+    pixels = calloc(total_w * total_h * 4, 1)
+    if pixels == null { return }
+    // Dark gutters between the views.
+    n = 0
+    while n < total_w * total_h {
+        ae3d_rgba_set(pixels, n, 0.1, 0.1, 0.1, 1.0)
+        n = n + 1
+    }
+
+    i = 0
+    while i < count {
+        img = ae3d_image_load(os.args_get(i + 2))
+        if img == null {
+            println("montage: ${ae3d_image_error()}")
+            return
+        }
+        w = ae3d_image_width(img)
+        h = ae3d_image_height(img)
+        src = ae3d_image_pixels(img)
+        left = (i % columns) * (cell_w + GAP)
+        top = (i / columns) * (cell_h + GAP)
+        y = 0
+        while y < cell_h && y * 2 < h {
+            x = 0
+            while x < cell_w && x * 2 < w {
+                // The loader flips rows so row 0 is the bottom; the sheet is
+                // written top row first, like the frames it came from.
+                at = ((h - 1 - y * 2) * w + x * 2) * 4
+                ae3d_rgba_set(pixels, (top + y) * total_w + left + x,
+                              (channel(src, at) as float) / 255.0,
+                              (channel(src, at + 1) as float) / 255.0,
+                              (channel(src, at + 2) as float) / 255.0, 1.0)
+                x = x + 1
+            }
+            y = y + 1
+        }
+        ae3d_image_free(img)
+        i = i + 1
+    }
+    if ae3d_png_write(os.args_get(1), pixels, total_w, total_h) == 1 {
+        println("montage: wrote ${os.args_get(1)} (${total_w}x${total_h}, ${count} views)")
+    } else {
+        println("montage: could not write ${os.args_get(1)}")
+    }
+    free(pixels)
+}
