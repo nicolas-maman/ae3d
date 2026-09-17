@@ -1380,13 +1380,35 @@ def main(argv):
             return 2
 
     with engine:
-        engine("frame.pause")
+        # The channel opens before the backend does, so a scene can answer
+        # the handshake and then die on a machine with no Vulkan driver; the
+        # next question then finds the connection torn down. That is the same
+        # skip as the driver saying so on the way out, not a failure.
+        try:
+            engine("frame.pause")
+            probe = engine("frame.grid", columns=8, rows=8).get("cells") or []
+        except (OSError, ConnectionError) as gone:
+            said = ""
+            if scene is not None:
+                try:
+                    scene.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    scene.kill()
+                try:
+                    said = open(log.name, encoding="utf-8", errors="replace").read()
+                except OSError:
+                    said = ""
+            if "Vulkan" in said and ("failed" in said or "no Vulkan" in said):
+                print("critique_scene: SKIP no working Vulkan driver on this machine (%s)"
+                      % said.strip().splitlines()[-1])
+                return 3
+            print("critique_scene: the scene went away mid-critique (%s)" % gone)
+            return 2
 
         # The whole critique reads the rendered frame. A backend that cannot
         # give it back -- software Vulkan on a headless runner has no swapchain
         # to read from -- cannot be judged, which is a skip rather than a
         # failure. Probed once, here, so it is caught before any standard runs.
-        probe = engine("frame.grid", columns=8, rows=8).get("cells") or []
         readable = any(sum(c[:3]) > 0.02 for row in probe for c in row)
         if not readable:
             print("critique_scene: SKIP the frame could not be read back on this backend")
