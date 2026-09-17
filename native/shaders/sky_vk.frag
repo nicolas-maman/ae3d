@@ -174,12 +174,17 @@ float cloudNoise(vec3 x) {
                    mix(cloudHash(i + vec3(0, 1, 1)), cloudHash(i + vec3(1, 1, 1)), f.x), f.y), f.z);
 }
 
+// Octaves turned against each other, so the lattice of one is not the
+// lattice of the next and a cloud is not a stack of dice.
 float cloudFbm(vec3 p) {
     float v = 0.0;
     float a = 0.5;
-    for (int i = 0; i < 4; i++) {
+    mat3 turn = mat3(0.00, 0.80, 0.60,
+                     -0.80, 0.36, -0.48,
+                     -0.60, -0.48, 0.64);
+    for (int i = 0; i < 5; i++) {
         v += a * cloudNoise(p);
-        p = p * 2.02 + vec3(11.0, 5.0, 3.0);
+        p = turn * p * 2.02 + vec3(11.0, 5.0, 3.0);
         a *= 0.5;
     }
     return v;
@@ -212,8 +217,8 @@ float cloudDensity(vec3 p, float cover, float t) {
     // Flatter than tall: a cumulus is wider than it is high.
     vec3 q = vec3(p.x * 0.0028, p.y * 0.0055, p.z * 0.0028) + vec3(t * 0.01, 0.0, t * 0.004);
     float erosion = cloudFbm(q);
-    float d = cov * profile - (1.0 - cov) * 0.3 - erosion * 0.55 + 0.25;
-    return clamp(d * 2.0, 0.0, 1.0);
+    float d = cov * profile - (1.0 - cov) * 0.3 - erosion * 0.6 + 0.28;
+    return smoothstep(0.0, 0.45, d);
 }
 
 // Clouds along a view ray from the ground: the layer marched in a few
@@ -221,10 +226,12 @@ float cloudDensity(vec3 p, float cover, float t) {
 // cloud above it (Beer's law, with the brightening at the edge a thin
 // cloud has), summed front to back until the sky behind is hidden.
 vec4 cloudsAlong(vec3 dir, float cover, float t) {
-    if (cover <= 0.0 || dir.y <= 0.02) return vec4(0.0);
+    if (cover <= 0.0 || dir.y <= 0.05) return vec4(0.0);
     float t0 = CLOUD_BASE / dir.y;
     float t1 = CLOUD_TOP / dir.y;
-    int steps = 32;
+    // More steps toward the horizon, where the ray crosses the layer at a
+    // slant and the same count would stride over whole clouds.
+    int steps = int(20.0 + 24.0 * (1.0 - clamp(dir.y, 0.0, 1.0)));
     float dt = (t1 - t0) / float(steps);
     vec3 sun = normalize(cloudSun);
     vec3 sunLight = cloudSunColor * 1.35;
@@ -232,7 +239,7 @@ vec4 cloudsAlong(vec3 dir, float cover, float t) {
     float alpha = 0.0;
     // A little jitter along the ray, so the steps do not band.
     float jitter = fract(sin(dot(dir.xz, vec2(12.9898, 78.233))) * 43758.5453);
-    float ray = t0 + dt * jitter * 0.5;
+    float ray = t0 + dt * jitter * 0.3;
     for (int i = 0; i < steps; i++) {
         vec3 p = vec3(viewPos.x, 0.0, viewPos.z) + dir * ray;
         float d = cloudDensity(p, cover, t);
@@ -250,6 +257,9 @@ vec4 cloudsAlong(vec3 dir, float cover, float t) {
             vec3 ambient = mix(vec3(0.36, 0.40, 0.50), vec3(0.62, 0.68, 0.80), h);
             float light = exp(-shade * 0.014) * (1.0 - exp(-d * 2.0)) * 1.3 + 0.08;
             vec3 c = sunLight * light + ambient * (0.45 + 0.55 * exp(-shade * 0.004));
+            // Rolled off, since the sky is drawn without the scene's tone
+            // curve and a lit crown would otherwise clip to paper white.
+            c = c / (1.0 + c * 0.3);
             float a = 1.0 - exp(-d * dt * 0.02);
             colour += c * a * (1.0 - alpha);
             alpha += a * (1.0 - alpha);
@@ -259,7 +269,7 @@ vec4 cloudsAlong(vec3 dir, float cover, float t) {
     }
     // Gone at the horizon, where the layer is a hundred kilometres deep and
     // the haze the sky is painted with has swallowed it.
-    float horizon = smoothstep(0.02, 0.12, dir.y);
+    float horizon = smoothstep(0.05, 0.14, dir.y);
     return vec4(colour, alpha * horizon);
 }
 

@@ -144,6 +144,7 @@ void   ae3d_inst_destroy(void *inst);
 int    ae3d_inst_resize(void *inst, int count);
 int    ae3d_inst_count(void *inst);
 void   ae3d_inst_set_count(void *inst, int count);
+void  *ae3d_ptr_offset(void *p, long bytes);
 void   ae3d_inst_set_trs(void *inst, int i,
                          double px, double py, double pz,
                          double sx, double sy, double sz,
