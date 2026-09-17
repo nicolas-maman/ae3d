@@ -1,0 +1,73 @@
+// The sun by the hour: where it is, what colour, how strong, and the day it
+// makes. Checked at the hours a person knows the answer to -- six is sunrise
+// in the east, noon is high in the south, six again is sunset in the west,
+// midnight is dark -- and between them for continuity, since a sky that
+// jumps at some hour would be seen as a flash by anyone dragging the slider.
+import ae3d.core
+import ae3d.sky
+
+var failures = 0
+
+record_failure(reason: string) {
+    println("FAIL ${reason}")
+    failures = failures + 1
+}
+
+check_true(name: string, condition: bool) {
+    if !condition { record_failure(name) }
+}
+
+check_near(name: string, got: float, want: float, tolerance: float) {
+    if core.abs_of(got - want) > tolerance { record_failure("${name}: got ${got}, want ${want}") }
+}
+
+main() {
+    dawn = sky.sun_direction(6.0)
+    check_near("at six the sun is on the horizon", dawn.y, 0.0, 0.05)
+    check_true("and in the east", dawn.x > 0.8)
+    noon = sky.sun_direction(12.0)
+    check_true("at noon the sun is high", noon.y > 0.8)
+    check_true("and leans south, not straight overhead", noon.z < 0.0 - 0.2)
+    dusk = sky.sun_direction(18.0)
+    check_near("at six in the evening it is on the horizon again", dusk.y, 0.0, 0.05)
+    check_true("and in the west", dusk.x < 0.0 - 0.8)
+    midnight = sky.sun_direction(0.0)
+    check_true("at midnight it is under", midnight.y < 0.0 - 0.8)
+    check_near("the day wraps", sky.sun_direction(30.0).y, dawn.y, 0.001)
+
+    check_near("noon is full day", sky.dayness(12.0), 1.0, 0.001)
+    check_near("midnight is full night", sky.dayness(0.0), 0.0, 0.001)
+    check_true("sunset is still day, mostly", sky.dayness(18.0) > 0.7)
+    check_true("an hour after sunset is dusk", sky.dayness(19.0) < sky.dayness(18.0))
+
+    check_true("the noon sun is white", sky.sun_color(12.0).y > 0.9 && sky.sun_color(12.0).z > 0.8)
+    setting = sky.sun_color(18.0)
+    check_true("the setting sun is orange", setting.x > 0.9 && setting.z < 0.5)
+    moon = sky.sun_color(0.0)
+    check_true("the moon is blue", moon.z > moon.x)
+
+    check_near("a noon sun lights the scene at full", sky.sun_intensity(12.0), 1.0, 0.001)
+    check_true("the moon lights it a little, not nothing", sky.sun_intensity(0.0) > 0.03 && sky.sun_intensity(0.0) < 0.1)
+    check_true("the day fills shadows more than the night", sky.ambient_strength(12.0) > sky.ambient_strength(0.0))
+
+    // Continuity: no minute of the day changes the light by a jump.
+    h = 0.0
+    worst = 0.0
+    while h < 24.0 {
+        a = sky.sun_intensity(h)
+        b = sky.sun_intensity(h + 0.05)
+        step = core.abs_of(a - b)
+        if step > worst { worst = step }
+        h = h + 0.05
+    }
+    check_true("the sun's strength changes smoothly through the day (worst step ${worst})", worst < 0.05)
+
+    check_true("17:30 is spelled 17:30", sky.hour_name(17.5) == "17:30")
+    check_true("half past midnight is 0:30", sky.hour_name(24.5) == "0:30")
+
+    if failures == 0 {
+        println("sky: all checks passed")
+    } else {
+        println("sky: ${failures} failure(s)")
+    }
+}

@@ -83,6 +83,7 @@ typedef struct {
 #define AE3D_VK_OFF_PROJECTION 3936
 #define AE3D_VK_OFF_VIEW 4000
 #define AE3D_VK_OFF_CLOUDSUNCOLOR 4064
+#define AE3D_VK_OFF_SKYPROCEDURAL 4076
 #define AE3D_VK_OFF_TEXELSIZE 4080
 #define AE3D_VK_OFF_EDGETHRESHOLD 4088
 #define AE3D_VK_OFF_EDGETHRESHOLDMIN 4092
@@ -225,6 +226,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "sheenColor", 3744 },
     { "sheenRoughness", 3756 },
     { "skyColor", 4688 },
+    { "skyProcedural", 4076 },
     { "specularColor", 3664 },
     { "ssaoIntensity", 4196 },
     { "ssaoRadius", 4192 },
@@ -262,7 +264,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "waveSteepness", 4544 },
 };
 
-#define AE3D_VK_UNIFORM_SLOT_COUNT 114
+#define AE3D_VK_UNIFORM_SLOT_COUNT 115
 
 static inline int ae3d_vk_uniform_offset(const char *name) {
     int low = 0;

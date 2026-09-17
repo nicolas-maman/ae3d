@@ -899,7 +899,7 @@ def main():
         # the cover's slider writes its box like any other row's.
         widgets = tree(args.port)
         for caption in ("wave scale", "shore fade", "shore foam", "cloud cover",
-                        "occlusion", "occlusion reach"):
+                        "occlusion", "occlusion reach", "time of day"):
             caps = [w for w in widgets.values()
                     if w["type"] == "text" and w["text"].strip() == caption]
             check("the %s row is in the tree" % caption, len(caps) == 1)
@@ -1177,9 +1177,14 @@ def main():
             body = sorted([w for w in widgets.values()
                            if w["parent"] == bar["parent"] and w["id"] > bar["id"]],
                           key=lambda w: w["id"])[0]
+            # The section also carries the hour's slider, under the sun by
+            # time switch; the three colour channels are the rows above it.
             channels = [w for r in widgets.values() if r["parent"] == body["id"]
                         for w in widgets.values()
-                        if w["parent"] == r["id"] and w["type"] == "slider"]
+                        if w["parent"] == r["id"] and w["type"] == "slider"
+                        and any(c["parent"] == r["id"] and c["type"] == "text"
+                                and c["text"].strip() in ("red", "green", "blue")
+                                for c in widgets.values())]
             check("the sky has a channel for each colour", len(channels) == 3,
                   "%d" % len(channels))
             if len(channels) == 3:
@@ -1262,6 +1267,40 @@ def main():
                 post(args.port, "/widget/%d/click" % load_btn)
                 widgets, back = wait_for(args.port, ssr_on)
                 check("and reflections come back with the scene", back)
+
+        # The sun by the hour: switched on, the key light's intensity row
+        # follows the hour, which is read back as the row's box changing when
+        # the hour is dragged from noon to dusk.
+        widgets = tree(args.port)
+        sun = [w for w in widgets.values()
+               if w["type"] == "text" and w["text"].strip() == "Sun by time"]
+        check("the sky section offers the sun by time", len(sun) == 1)
+        if sun:
+            switch = [w for w in widgets.values()
+                      if w["parent"] == sun[0]["parent"] and w["type"] == "toggle"]
+            caps = [w for w in widgets.values()
+                    if w["type"] == "text" and w["text"].strip() == "time of day"]
+            if switch and caps:
+                post(args.port, "/widget/%d/click" % switch[0]["id"])
+                widgets, on = wait_for(
+                    args.port, lambda ws: bool(ws[switch[0]["id"]].get("active")))
+                check("the sun by time turns on", on)
+                bar = [w for w in widgets.values()
+                       if w["parent"] == caps[0]["parent"] and w["type"] == "slider"]
+                intensity = [w for w in widgets.values()
+                             if w["type"] == "text" and w["text"].strip() == "intensity"]
+                if bar and intensity:
+                    box = row_box(widgets, intensity[0])
+                    if box:
+                        noon = box[0]["text"]
+                        post(args.port, "/widget/%d/set_value?v=18.5" % bar[0]["id"])
+                        widgets, ok = wait_for(
+                            args.port,
+                            lambda ws: ws[box[0]["id"]]["text"] != noon)
+                        check("dragging the hour to dusk moves the light's intensity", ok,
+                              "intensity stayed %r" % noon)
+                post(args.port, "/widget/%d/click" % switch[0]["id"])
+                wait_for(args.port, lambda ws: not ws[switch[0]["id"]].get("active"))
 
         # Clouds the same way: marched by either backend, carried by the scene.
         widgets = tree(args.port)

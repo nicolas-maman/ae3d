@@ -13,6 +13,7 @@ import ae3d.gl
 import ae3d.vk
 import ae3d.agent
 import ae3d.anim
+import ae3d.sky
 import std.os
 
 exports (
@@ -26,6 +27,7 @@ exports (
     engine_set_render_scale, engine_set_shadows, engine_shadows, engine_set_fog, engine_fog, engine_set_shadow_distance, engine_shadow_distance,
     engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
     engine_set_skybox, engine_set_sky, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_set_ssao, engine_load_texture,
+    engine_set_time_of_day, engine_time_of_day,
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
     engine_render_ms, engine_render_frames,
     engine_set_debug, engine_set_frustum_culling, engine_set_face_culling,
@@ -85,6 +87,9 @@ struct Engine {
     ssao_on: bool
     ssao_radius: float
     ssao_intensity: float
+    // The hour the sun is set by, when it is; under zero when the scene
+    // lights itself.
+    time_of_day: float
 
     fixed_step: float
     fixed_accumulator: float
@@ -131,6 +136,7 @@ engine_new(api: int) -> *Engine {
     e.ssao_on = false
     e.ssao_radius = 3.0
     e.ssao_intensity = 1.0
+    e.time_of_day = 0.0 - 1.0
     e.fixed_step = 1.0 / 60.0
     e.first_mouse = true
     e.frame_limit = frame_limit_from_env()
@@ -416,6 +422,36 @@ engine_set_sky(e: *Engine, path: string) -> bool {
     return true
 }
 
+// The hour of the day, 0 to 24: the sun goes where that hour puts it, the
+// key light takes the sun's direction, colour, strength and fill for that
+// hour, and the sky is drawn from the sun in place of an image, so the
+// sky, the clouds and the light agree. The key light is the scene's own if
+// it has one, made if it has none. Call again to move the sun; a scene
+// that sets its own sky after this gets that sky back with the light left
+// as the hour set it.
+engine_set_time_of_day(e: *Engine, hours: float) {
+    e.time_of_day = hours
+    light = e.light as *Light
+    if light == null {
+        light = core.light_directional(core.vec3(0.0, 1.0, 0.0), core.vec3(1.0, 1.0, 1.0), 1.0)
+        e.light = light as ptr
+    }
+    light.direction = sky.sun_direction(hours)
+    light.color = sky.sun_color(hours)
+    light.intensity = sky.sun_intensity(hours)
+    light.ambient_strength = sky.ambient_strength(hours)
+    // The haze takes the sky's colour at the horizon, which is what a
+    // distance fades into; a fog set for a noon sky was a grey band over a
+    // sunset and a bright one over the night.
+    if e.fog.enabled {
+        e.fog.color = sky.horizon_color(hours)
+        if e.running { e.backend_set_fog(e.backend_state, &e.fog) }
+    }
+    if e.running { engine_set_sky(e, core.SKY_PROCEDURAL) }
+}
+
+engine_time_of_day(e: *Engine) -> float { return e.time_of_day }
+
 // The colour behind everything, where no sky or model is: what a scene
 // fades to at its horizon.
 engine_set_clear_color(e: *Engine, red: float, green: float, blue: float) {
@@ -625,6 +661,7 @@ engine_start(e: *Engine, x: int, y: int) -> bool {
     platform.window_set_cursor_mode(e.window, platform.CURSOR_NORMAL)
     e.running = true
     apply_ssao(e)
+    if e.time_of_day >= 0.0 { engine_set_sky(e, core.SKY_PROCEDURAL) }
     return true
 }
 

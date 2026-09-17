@@ -11,6 +11,7 @@ import ae3d.noise
 import ae3d.voxel
 import ae3d.rendering
 import ae3d.water
+import ae3d.sky
 
 extern clock_ns() -> long
 extern pow(x: float, y: float) -> float
@@ -174,6 +175,14 @@ bake_albedo(sea: float) -> string {
     return name
 }
 
+// The hour the scene is lit at: an hour before sunset by default, AE3D_TIME=HHMM
+// for another, and AE3D_TIME=-1 for the painted sky and the scene's own light.
+scene_hour() -> float {
+    hhmm = core.env_int("AE3D_TIME", 1700)
+    if hhmm < 0 { return 0.0 - 1.0 }
+    return ((hhmm / 100) as float) + ((hhmm % 100) as float) / 60.0
+}
+
 on_start(data: ptr) {
     e = data as *Engine
 
@@ -217,7 +226,15 @@ on_start(data: ptr) {
     // as a white band, and the sea read as stripes.
     water.simulation_set_reflection(sea, 0.6)
     // What it mirrors: the painted sky itself, not a flat sky colour.
-    water.simulation_set_sky_texture(sea, "resources/sky/desert.png")
+    if scene_hour() >= 0.0 {
+        // The water mirrors the sky drawn from the sun: its colours, since
+        // there is no image to reflect.
+        overhead = sky.zenith_color(scene_hour())
+        rim = sky.horizon_color(scene_hour())
+        water.simulation_set_sky_color(sea, (overhead.x + rim.x) * 0.5, (overhead.y + rim.y) * 0.5, (overhead.z + rim.z) * 0.5)
+    } else {
+        water.simulation_set_sky_texture(sea, "resources/sky/desert.png")
+    }
     // A shore: clear over the sand within a few metres of the surface, foam
     // along the waterline.
     water.simulation_set_shore(sea, 9.0, 3.0)
@@ -261,8 +278,14 @@ on_start(data: ptr) {
 
     engine.engine_set_clear_color(e, HAZE_R, HAZE_G, HAZE_B)
     engine.engine_set_post(e, true, false, 0.8, 0.4)
-    engine.engine_set_sky(e, "resources/sky/desert.png")
-    // Clouds over the painted sky, drifting, their shadows crossing the ground.
+    // The sky drawn from the sun at the scene's hour, with the light set to
+    // agree with it; or the painted sky, with AE3D_TIME=-1.
+    if scene_hour() >= 0.0 {
+        engine.engine_set_time_of_day(e, scene_hour())
+    } else {
+        engine.engine_set_sky(e, "resources/sky/desert.png")
+    }
+    // Clouds over the sky, drifting, their shadows crossing the ground.
     engine.engine_set_clouds(e, 0.38, 1.0)
 
     // From over the water on the island's sunlit side, low enough that it

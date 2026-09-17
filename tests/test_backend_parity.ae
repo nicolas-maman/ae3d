@@ -363,6 +363,22 @@ main() {
     gl.renderer_set_clouds(gl_renderer, 0.0, 1.0)
     vk.renderer_set_clouds(vk_renderer, 0.0, 1.0)
 
+    // The sky drawn from the sun in place of the image, at the hour the
+    // key light says: the same sky on both, and not the image's.
+    gl_sun_sky = gl.skybox_create(gl_renderer, core.SKY_PROCEDURAL)
+    vk_sun_sky = vk.skybox_create(vk_renderer, core.SKY_PROCEDURAL)
+    check_true("a sky drawn from the sun is a sky", gl_sun_sky.procedural && vk_sun_sky.procedural)
+    core.backend_set_skybox(&opengl_pass, gl_sun_sky as ptr)
+    core.backend_set_skybox(&vulkan_pass, vk_sun_sky as ptr)
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    sun_sky_lit = compare("the sky drawn from the sun", offscreen.target_pixels(target), vk.offscreen_pixels())
+    check_true("the sky drawn from the sun is not the image", sun_sky_lit != sky_gl)
+    core.backend_set_skybox(&opengl_pass, gl_sky as ptr)
+    core.backend_set_skybox(&vulkan_pass, vk_sky as ptr)
+    gl.skybox_free(gl_renderer, gl_sun_sky)
+    vk.skybox_free(vk_renderer, vk_sun_sky)
+
     // The occlusion: a fullscreen multiply over the opaque pass, from the
     // scene's depth, which each backend captures its own way (a blit of the
     // draw buffer's depth, a prepass into a depth image). Both must find

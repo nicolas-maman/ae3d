@@ -86,6 +86,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 projection;
     mat4 view;
     vec3 cloudSunColor;
+    int skyProcedural;
     vec2 texelSize;
     float edgeThreshold;
     float edgeThresholdMin;
@@ -145,6 +146,10 @@ layout(location = 0) in vec3 TexCoords;
 
 // Where the eye is: the layer stands in the world, over the ground it
 // shadows, so the march starts from the camera and not from the origin.
+
+// A sky drawn from the sun instead of read from the image: one, and the
+// image is ignored. The sun is cloudSun, the same sun the clouds are lit
+// by, so the sky, the clouds and the ground agree about where it is.
 
 
 // Clouds, shared by the sky that draws them and the ground they shadow.
@@ -311,6 +316,43 @@ vec4 cloudsAlong(vec3 dir, vec3 sky, float cover, float t, float dither) {
     return vec4(colour, alpha * horizon);
 }
 
+// A clear sky from the sun's position alone. Blue overhead and pale at the
+// horizon by day; the horizon goes gold and then red as the sun nears it,
+// most on the sun's side; a glow around the sun from the air's forward
+// scattering, and the disc itself; a deep blue-grey once the sun is under,
+// with the moon's worth of light the scenes keep. Not a measurement of an
+// atmosphere -- the shapes a clear sky makes, at the cost of a gradient.
+vec3 proceduralSky(vec3 dir, vec3 sun, vec3 sunColor) {
+    float elevation = sun.y;
+    // Day lasts until the sun is well under: the sky at sunset is still
+    // bright, and goes dark through the twilight after.
+    float day = smoothstep(-0.14, 0.06, elevation);
+    float low = 1.0 - smoothstep(-0.05, 0.35, elevation);
+    vec3 zenithDay = vec3(0.20, 0.42, 0.85);
+    vec3 zenithDusk = vec3(0.16, 0.20, 0.45);
+    vec3 zenithNight = vec3(0.02, 0.03, 0.08);
+    vec3 horizonDay = vec3(0.72, 0.82, 0.93);
+    vec3 horizonDusk = vec3(1.0, 0.52, 0.22);
+    vec3 horizonNight = vec3(0.06, 0.07, 0.13);
+    // The dusk colour sits on the sun's side of the sky and fades out
+    // opposite it, where the horizon stays a cooler mauve.
+    float toward = 0.5 + 0.5 * dot(normalize(vec2(dir.x, dir.z) + 1e-5), normalize(vec2(sun.x, sun.z) + 1e-5));
+    vec3 horizon = mix(horizonDay, horizonDusk, low * (0.25 + 0.75 * toward * toward));
+    horizon = mix(horizonNight, horizon, day);
+    vec3 zenith = mix(zenithNight, mix(zenithDay, zenithDusk, low), day);
+    float up = clamp(dir.y, 0.0, 1.0);
+    vec3 sky = mix(horizon, zenith, pow(up, 0.55));
+    // Below the horizon: the haze the ground would be seen through.
+    if (dir.y < 0.0) sky = mix(horizon, horizon * 0.6, clamp(-dir.y * 4.0, 0.0, 1.0));
+    // The glow and the disc.
+    float cosAngle = dot(dir, sun);
+    float glow = pow(max(cosAngle, 0.0), 4.0) * 0.16 + pow(max(cosAngle, 0.0), 40.0) * 0.5;
+    sky += sunColor * glow * (0.3 + 0.7 * day) * (1.0 + low * 1.6);
+    float disc = smoothstep(0.9993, 0.9997, cosAngle);
+    sky += sunColor * disc * (0.6 + 1.4 * day);
+    return sky;
+}
+
 void main() {
     vec3 dir = normalize(TexCoords);
 
@@ -326,6 +368,7 @@ void main() {
     // wherever the camera faced -X. A sky is a smooth gradient with nothing a
     // mip chain has to tame, so level 0 is right everywhere and seamless here.
     vec3 sky = textureLod(skybox, vec2(u, v), 0.0).rgb;
+    if (skyProcedural == 1) sky = proceduralSky(dir, normalize(cloudSun), cloudSunColor);
     vec4 clouds = cloudsAlong(dir, sky, cloudCover, cloudTime, cloudDither(gl_FragCoord.xy));
     sky = sky * (1.0 - clouds.a) + clouds.rgb;
     FragColor = vec4(sky, 1.0);
