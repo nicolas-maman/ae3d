@@ -98,7 +98,8 @@ OCCLUSION_VISIBLE = 0.03
 # changes today.
 # The scene is the engine's benchmark, so its draw count is the load it exists
 # to carry, not an accident to be trimmed: a terrace with a roofline, downpipes
-# and a dressed pavement draws in the low hundreds and is meant to. On Vulkan
+# and a dressed pavement the whole block long draws 254 on OpenGL and is meant
+# to (340 on Vulkan). On Vulkan
 # the wet road adds a camera-depth prepass for its reflection, which redraws the
 # frustum-culled opaque set once more -- a real, bounded cost the ceiling
 # leaves room for, not the whole street redrawn. This is a ceiling against a
@@ -106,7 +107,7 @@ OCCLUSION_VISIBLE = 0.03
 # stopped merging, a prepass that stopped culling -- while tools/ae3d_bench.ae
 # holds the exact figure and fails the build on a single draw more than last
 # recorded.
-MAX_DRAWS = 320
+MAX_DRAWS = 400
 MAX_TRIANGLES = 60000
 MAX_PROGRAM_CHANGES = 12
 # How much sharper than its own busiest movement a bone may move between two
