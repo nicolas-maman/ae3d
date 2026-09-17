@@ -13,6 +13,7 @@ import std.list
 const SPHERES = 5
 
 var g_spheres: ptr = null
+var g_sky: *Skybox = null
 var g_engine: ptr = null
 var g_elapsed = 0.0
 var g_stage = 0 - 1
@@ -82,14 +83,26 @@ on_start(data: ptr) {
         i = i + 1
     }
 
+    // A floor under them, so a light has something to fall on and a sphere
+    // something to shadow: what a point light does that a sun does not is
+    // only visible on a surface between them.
+    floor_plane = loader.plane(2, 6000.0)
+    core.model_set_position(floor_plane, 0.0 - 3000.0, 0.0 - 22.0, 0.0 - 3000.0)
+    core.model_matte(floor_plane, 0.18, 0.18, 0.20)
+    core.model_set_pbr(floor_plane, 0.0, 0.55)
+    core.model_set_reflectivity(floor_plane, 0.12)
+    engine.engine_add_model(e, floor_plane)
+
     renderer = engine.engine_gl_renderer(e)
     gl.renderer_set_clear_color(renderer, 0.03, 0.04, 0.06)
     gl.renderer_set_bloom(renderer, true)
     gl.renderer_set_bloom_params(renderer, 0.85, 0.35)
+    g_sky = gl.skybox_create(renderer, "resources/sky/night.png")
+    engine.engine_set_skybox(e, g_sky as ptr)
 
     cam = engine.engine_camera(e)
-    core.camera_set_position(cam, core.vec3(0.0, 24.0, 230.0))
-    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+    core.camera_set_position(cam, core.vec3(0.0, 46.0, 230.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0 - 4.0, 0.0))
     core.camera_set_speed(cam, 220.0)
 }
 
@@ -115,6 +128,12 @@ main() {
     engine.engine_set_title(e, "ae3d - materials")
 
     engine.engine_set_light(e, core.light_sun(core.vec3(0.3, 0.8, 0.5)))
+    // The shadow map fitted to the row, not the whole floor: a texel a few
+    // centimetres across, so a sphere's own terminator is not a crescent of
+    // acne.
+    engine.engine_set_shadow_distance(e, 240.0)
+    // The floor runs to the horizon and fades into the sky's glow before it.
+    engine.engine_set_fog(e, core.fog_distance(400.0, 2600.0, core.vec3(0.14, 0.10, 0.07), 1.0))
     engine.engine_set_user_data(e, e as ptr)
     engine.engine_on_start(e, on_start as fn(ptr))
     engine.engine_on_update(e, on_update as fn(ptr, float))
