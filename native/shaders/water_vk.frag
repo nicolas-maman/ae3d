@@ -700,22 +700,36 @@ void main() {
     // Underwater camera effect (when camera is below water surface)
     float underwaterDepth = max(0.0, waterPlaneHeight - viewPos.y);
     if (underwaterDepth > 0.5) {
-        // Underwater color tint (blue-green)
-        vec3 underwaterTint = vec3(0.1, 0.3, 0.5);
-        float tintStrength = clamp(underwaterDepth * 0.015, 0.0, 0.7);
-        finalColor = mix(finalColor, underwaterTint, tintStrength);
-        
-        // Underwater fog/murkiness
+        // The surface from below is the sky coming through the swell, not a
+        // ceiling lit by the fill. Straight overhead the sky comes through
+        // brightest (Snell's window); toward the horizon the underside
+        // reflects the water's own colour back, and the swell's normals
+        // sweep that boundary about, which is what says "waves" from
+        // underneath. The tint deepens with the diver's depth.
+        vec3 through = mix(skyColor, waterBaseColor, 0.35);
+        float overhead = clamp(dot(norm, -viewDir), 0.0, 1.0);
+        float window = smoothstep(0.15, 0.75, overhead);
+        vec3 underside = mix(waterBaseColor * 0.55, through, window);
+        float deep = clamp(underwaterDepth * 0.0025, 0.0, 0.5);
+        finalColor = mix(underside, waterBaseColor * 0.5, deep);
+        // The sun through the surface: a glitter where the swell's normals
+        // point it at the eye, and the caustic web on the underside.
+        vec3 refracted = normalize(reflect(-viewDir, norm));
+        float glitter = pow(max(0.0, dot(refracted, lightDir)), 48.0);
+        finalColor += lightColor * glitter * 0.8 * window;
+        finalColor += vec3(gpuGemsCaustics * 0.35) * window;
+
+        // Underwater murk: the surface fades with distance into the scene's
+        // own fog when it has one, the same murk the seabed and everything
+        // on it fade into -- a fade to 0.4x the water colour was a dark band
+        // along the horizon under a sea that was otherwise one colour.
         float underwaterFog = clamp(distanceFromCamera * 0.0002, 0.0, 0.85);
-        finalColor = mix(finalColor, waterBaseColor * 0.4, underwaterFog);
-        
-        // Underwater caustics are more prominent
-        finalColor += vec3(gpuGemsCaustics * 0.6);
-        
-        // God rays effect (simple volumetric light approximation)
-        float godRayStrength = max(0.0, dot(lightDir, viewDir));
-        godRayStrength = pow(godRayStrength, 4.0) * 0.1;
-        finalColor += lightColor * godRayStrength * (1.0 - tintStrength);
+        vec3 murk = waterBaseColor * 0.4;
+        if (enableFog) {
+            underwaterFog = smoothstep(fogStart, fogEnd, distanceFromCamera) * fogIntensity;
+            murk = fogColor;
+        }
+        finalColor = mix(finalColor, murk, underwaterFog);
     }
     
     alpha = clamp(alpha, 0.001, 0.98); // Allow almost complete transparency

@@ -14,20 +14,74 @@ import ae3d.gl
 import ae3d.loader
 import ae3d.rendering
 import ae3d.water
+import ae3d.noise
 
+// The seabed runs as far as the sea does: the surface is REACH * 4 across,
+// and so is the floor under it, so no edge of the world shows through the
+// murk. Rolling, from the noise, so it is a seabed and not a table.
 const REACH = 2400.0
 const SEABED = 0.0 - 260.0
+const SEABED_CELLS = 160
 // The colour the water fades everything to: deep, green-blue, and dark enough
 // that the seabed's far edge is gone before it is seen.
-const MURK_R = 0.015
-const MURK_G = 0.10
-const MURK_B = 0.15
+const MURK_R = 0.07
+const MURK_G = 0.24
+const MURK_B = 0.30
 
 var g_water: ptr = null
 var g_seed = 0x3a5c91
 next_random() -> float {
     g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
     return (g_seed as float) / 2147483647.0
+}
+
+// The floor's relief: broad swells of sand and a finer ripple, in metres
+// above SEABED, the same everywhere it is asked so the rocks can sit on it.
+var g_floor_noise: *Perlin = null
+seafloor_height(x: float, z: float) -> float {
+    if g_floor_noise == null { g_floor_noise = noise.perlin_new(5150) }
+    broad = noise.fbm2(g_floor_noise, x * 0.00045, z * 0.00045, 4, 0.5)
+    fine = noise.fbm2(g_floor_noise, x * 0.004 + 3.0, z * 0.004, 3, 0.5)
+    return broad * 70.0 + fine * 9.0
+}
+
+// The seabed as a heightfield across the whole sea, its sand tiling every
+// forty metres.
+seafloor(cells: int, size: float) -> *Model {
+    m = core.model_new()
+    core.mesh_reserve(m.mesh, cells * cells, (cells - 1) * (cells - 1) * 6)
+    step = size / ((cells - 1) as float)
+    up = core.vec3(0.0, 1.0, 0.0)
+    i = 0
+    while i < cells {
+        j = 0
+        while j < cells {
+            x = (i as float) * step - size * 0.5
+            z = (j as float) * step - size * 0.5
+            core.mesh_push_vertex(m.mesh, core.vec3(x, seafloor_height(x, z), z),
+                                  x / 40.0, z / 40.0, up)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < cells - 1 {
+        j = 0
+        while j < cells - 1 {
+            near_l = i * cells + j
+            near_r = near_l + 1
+            far_l = (i + 1) * cells + j
+            far_r = far_l + 1
+            core.mesh_push_triangle(m.mesh, near_l, far_r, far_l)
+            core.mesh_push_triangle(m.mesh, near_l, near_r, far_r)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    core.mesh_recalculate_normals(m.mesh)
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    return m
 }
 
 lit_by_caustics(m: *Model, grainy: bool) {
@@ -50,47 +104,68 @@ lit_by_caustics(m: *Model, grainy: bool) {
 on_start(data: ptr) {
     e = data as *Engine
 
-    seabed = loader.plane(48, REACH / 47.0)
-    core.model_set_position(seabed, 0.0 - REACH / 2.0, SEABED, 0.0 - REACH / 2.0)
-    core.model_set_diffuse(seabed, 0.62, 0.56, 0.42)
+    seabed = seafloor(SEABED_CELLS, REACH * 4.0)
+    core.model_set_position(seabed, 0.0, SEABED, 0.0)
+    core.model_set_texture(seabed, "resources/textures/sand.png")
+    core.model_set_diffuse(seabed, 0.70, 0.66, 0.55)
     core.model_set_pbr(seabed, 0.0, 0.95)
-    lit_by_caustics(seabed, true)
+    core.model_set_specular(seabed, 0.02, 0.02, 0.02)
+    lit_by_caustics(seabed, false)
     engine.engine_add_model(e, seabed)
 
     // A field of rocks, scattered from the seeded stream so the seabed is the
-    // same every run: a few big ones the light webs across, many small.
+    // same every run: a few big ones the light webs across, many small,
+    // each sunk to where the floor is under it and dressed in stone.
     placed = 0
-    while placed < 42 {
+    while placed < 90 {
         rock = loader.sphere(1.0, 20, 16)
         big = next_random()
-        radius = 14.0 + big * big * 90.0
-        core.model_set_scale(rock, radius, radius * (0.45 + next_random() * 0.35), radius)
+        radius = 10.0 + big * big * 110.0
+        rx = (next_random() - 0.5) * REACH * 1.6
+        rz = (next_random() - 0.5) * REACH * 1.6
+        core.model_set_scale(rock, radius, radius * (0.40 + next_random() * 0.35), radius)
         core.model_rotate(rock, 0.0, next_random() * 360.0, 0.0)
-        core.model_set_position(rock,
-                                (next_random() - 0.5) * REACH * 0.8,
-                                SEABED + radius * 0.25,
-                                (next_random() - 0.5) * REACH * 0.8)
-        shade = 0.40 + next_random() * 0.20
-        core.model_set_diffuse(rock, shade, shade * 1.02, shade * 0.88)
+        core.model_set_position(rock, rx, SEABED + seafloor_height(rx, rz) + radius * 0.12, rz)
+        core.model_set_texture(rock, "resources/blender/zombie_street/TrimStone.png")
+        if rock.material != null {
+            core.material_set_normal_path(rock.material, "resources/blender/zombie_street/TrimStoneNormal.png")
+        }
+        shade = 0.50 + next_random() * 0.25
+        core.model_set_diffuse(rock, shade, shade * 1.02, shade * 0.90)
         core.model_set_specular(rock, 0.02, 0.02, 0.02)
-        core.model_set_pbr(rock, 0.0, 0.95)
-        lit_by_caustics(rock, true)
+        core.model_set_pbr(rock, 0.0, 0.92)
+        lit_by_caustics(rock, false)
         engine.engine_add_model(e, rock)
         placed = placed + 1
     }
 
-    ocean = water.simulation_new(REACH * 4.0, 6.0)
+    // A swell you can see from underneath: taller waves, and the surface's
+    // normals pushed harder so the underside is not one flat sheet of
+    // sky-colour but ridges and troughs the light comes through.
+    // Waves metres long, not kilometres: the ocean's own table is swells for
+    // a sea seen from the air, and from under the surface it is a plain.
+    ocean = water.simulation_new(REACH * 4.0, 2.6)
+    water.simulation_set_wave_scale(ocean, 500.0)
+    water.simulation_set_normal_strength(ocean, 2.4)
+    water.simulation_set_wave_speed(ocean, 0.7)
     // Seen from below, the surface is the sky coming through it: light, not
     // the dark of the deep. Both colours are what the underside shows.
-    water.simulation_set_color(ocean, 0.18, 0.42, 0.52)
-    water.simulation_set_sky_color(ocean, 0.55, 0.78, 0.92)
-    // Low, because this scene is about what the surface throws onto the
-    // seabed and the seabed has to be visible through it. Set to 0.85 the
-    // water was almost opaque and the caustics example showed no caustics.
-    water.simulation_set_opacity(ocean, 0.15)
-    water.simulation_set_wave_height(ocean, 0.4)
+    water.simulation_set_color(ocean, 0.26, 0.52, 0.60)
+    water.simulation_set_sky_color(ocean, 0.62, 0.82, 0.94)
+    // Seen from below, the surface has to be there: the sky comes through
+    // it, and at low opacity it is nothing but a faint tint over the sky
+    // and vanishes overhead. From above (AE3D_VIEW=1 and 2) the seabed has
+    // to show through instead, so the opacity follows the view.
+    if core.env_int("AE3D_VIEW", 0) == 0 {
+        water.simulation_set_opacity(ocean, 0.82)
+    } else {
+        water.simulation_set_opacity(ocean, 0.15)
+    }
+    water.simulation_set_wave_height(ocean, 1.2)
 
-    surface = water.simulation_build(ocean, water.RESOLUTION)
+    // Twice the usual resolution: the swell is seen from a diver's height,
+    // and at 256 across a sea this wide a vertex every 37 m flattens it.
+    surface = water.simulation_build(ocean, 512)
     if surface == null {
         println("could not build the water surface")
         return
@@ -101,14 +176,22 @@ on_start(data: ptr) {
     gl.renderer_set_clear_color(engine.engine_gl_renderer(e), MURK_R, MURK_G, MURK_B)
 
     cam = engine.engine_camera(e)
-    if core.env_int("AE3D_VIEW", 0) == 1 {
+    if core.env_int("AE3D_VIEW", 0) == 2 {
+        // Just over the surface, looking down through it at the seabed.
+        core.camera_set_position(cam, core.vec3(0.0 - 300.0, 40.0, 620.0))
+        core.camera_look_at(cam, core.vec3(220.0, SEABED + 40.0, 0.0 - 300.0))
+    } else if core.env_int("AE3D_VIEW", 0) == 1 {
         core.camera_set_position(cam, core.vec3(0.0, 420.0, 1500.0))
         core.camera_look_at(cam, core.vec3(0.0, SEABED, 0.0))
     } else {
         // Under the surface, a diver's height off the sand, looking along the
         // seabed with the swell overhead.
-        core.camera_set_position(cam, core.vec3(0.0 - 420.0, SEABED + 110.0, 760.0))
-        core.camera_look_at(cam, core.vec3(180.0, SEABED - 10.0, 0.0 - 400.0))
+        cam_x = 0.0 - 420.0
+        cam_z = 760.0
+        core.camera_set_position(cam, core.vec3(cam_x, SEABED + seafloor_height(cam_x, cam_z) + 150.0, cam_z))
+        // Tilted up enough that the swell overhead is in the frame, not only
+        // the floor: the surface is what says this is water.
+        core.camera_look_at(cam, core.vec3(180.0, SEABED + 175.0, 0.0 - 400.0))
     }
     core.camera_set_speed(cam, 600.0)
     core.camera_set_far(cam, 40000.0)
@@ -132,7 +215,7 @@ main() {
 
     light = core.light_sun(core.vec3(0.2, 1.0, 0.35))
     light.intensity = 3.5
-    light.ambient_strength = 0.18
+    light.ambient_strength = 0.30
     engine.engine_set_light(e, light)
 
     engine.engine_set_user_data(e, e as ptr)
@@ -145,6 +228,7 @@ main() {
 
     ocean = g_water as *Simulation
     if ocean != null { water.simulation_free(ocean) }
+    if g_floor_noise != null { noise.perlin_free(g_floor_noise) }
     core.light_free(light)
     engine.engine_free(e)
 }
