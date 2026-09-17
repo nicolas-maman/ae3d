@@ -123,6 +123,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float waterDistortionIntensity;
     bool enableWaterNormalMapping;
     float waterNormalIntensity;
+    int poseBankFrames;
 };
 layout(set = 0, binding = 1) uniform sampler2D textureSampler;
 layout(set = 0, binding = 2) uniform sampler2D shadowMap;

@@ -359,6 +359,8 @@ int    ae3d_vk_offscreen_height(void);
    presented image back as RGBA (top row first). request returns 0 when the
    surface cannot be a transfer source. */
 int    ae3d_vk_request_capture(void);
+int    ae3d_vk_texture_create_float(int width, int height, const float *rgba);
+void   ae3d_vk_set_pose_bank(int texture_handle);
 int    ae3d_vk_capture_ready(void);
 void  *ae3d_vk_capture_pixels(void);
 int    ae3d_vk_capture_width(void);

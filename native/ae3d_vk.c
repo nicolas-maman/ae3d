@@ -336,6 +336,15 @@ static struct {
     VkPipeline pipeline_blend;
     VkPipeline skinned_pipeline[2];
     VkPipeline skinned_pipeline_blend;
+    /* A crowd: instanced and skinned, every instance posed from the pose bank
+       at its own phase. Its own vertex shader, so its own pipelines, and a
+       depth variant for the shadow pass. */
+    VkPipeline crowd_pipeline[2];
+    VkPipeline crowd_pipeline_blend;
+    VkPipeline crowd_shadow_pipeline;
+    /* The pose bank the next draws are posed from, as a texture handle; zero
+       between crowds. Part of the descriptor set's key, at binding 4. */
+    int pose_bank;
     int cull;
     VkDescriptorSetLayout set_layout;
     VkDescriptorPool descriptor_pool;
@@ -345,6 +354,7 @@ static struct {
     VkDescriptorSet sets[AE3D_VK_FRAMES][AE3D_VK_MAX_TEXTURES];
     int set_texture[AE3D_VK_FRAMES][AE3D_VK_MAX_TEXTURES];
     int set_normal[AE3D_VK_FRAMES][AE3D_VK_MAX_TEXTURES];
+    int set_bank[AE3D_VK_FRAMES][AE3D_VK_MAX_TEXTURES];
     int set_count[AE3D_VK_FRAMES];
 
     ae3d_vk_texture textures[AE3D_VK_MAX_TEXTURES];
@@ -2155,7 +2165,7 @@ void ae3d_vk_texture_destroy(int handle) {
 }
 
 static int ae3d_vk_create_descriptors(void) {
-    VkDescriptorSetLayoutBinding bindings[4];
+    VkDescriptorSetLayoutBinding bindings[5];
     VkDescriptorSetLayoutCreateInfo layout;
     VkDescriptorPoolSize sizes[2];
     VkDescriptorPoolCreateInfo pool;
@@ -2188,9 +2198,17 @@ static int ae3d_vk_create_descriptors(void) {
     bindings[3].descriptorCount = 1;
     bindings[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
+    // The pose bank: a float texture of baked bone palettes the crowd vertex
+    // shader fetches by (bone, frame). Read in the vertex stage, which is
+    // what sets this binding apart from the other three.
+    bindings[4].binding = 4;
+    bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[4].descriptorCount = 1;
+    bindings[4].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
     memset(&layout, 0, sizeof(layout));
     layout.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layout.bindingCount = 4;
+    layout.bindingCount = 5;
     layout.pBindings = bindings;
     if (ae3d_vkCreateDescriptorSetLayout(vk.device, &layout, NULL, &vk.set_layout) != VK_SUCCESS) {
         return ae3d_vk_fail("vkCreateDescriptorSetLayout failed");
@@ -2200,7 +2218,7 @@ static int ae3d_vk_create_descriptors(void) {
     sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     sizes[0].descriptorCount = AE3D_VK_FRAMES * AE3D_VK_MAX_TEXTURES;
     sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    sizes[1].descriptorCount = AE3D_VK_FRAMES * AE3D_VK_MAX_TEXTURES * 3;
+    sizes[1].descriptorCount = AE3D_VK_FRAMES * AE3D_VK_MAX_TEXTURES * 4;
 
     memset(&pool, 0, sizeof(pool));
     pool.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -2240,16 +2258,19 @@ static int ae3d_vk_create_descriptors(void) {
 /* A set is keyed on the pair of images it binds, not on the colour alone: two
    materials can share a colour and differ in their normal map, and keying on
    one of them hands the second the first one's surface. */
-static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle, int normal_handle) {
+static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle, int normal_handle,
+                                       int bank_handle) {
     VkDescriptorSetAllocateInfo allocation;
     VkDescriptorSet set = VK_NULL_HANDLE;
     VkDescriptorBufferInfo buffer;
     VkDescriptorImageInfo image;
     VkDescriptorImageInfo shadow;
     VkDescriptorImageInfo bumps;
-    VkWriteDescriptorSet writes[4];
+    VkDescriptorImageInfo bank;
+    VkWriteDescriptorSet writes[5];
     ae3d_vk_texture *texture;
     ae3d_vk_texture *normal;
+    ae3d_vk_texture *poses;
     int index;
 
     int reuse = -1;
@@ -2258,9 +2279,14 @@ static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle, int normal
         !vk.textures[normal_handle - 1].in_use) {
         normal_handle = vk.default_texture;
     }
+    if (bank_handle < 1 || bank_handle > AE3D_VK_MAX_TEXTURES ||
+        !vk.textures[bank_handle - 1].in_use) {
+        bank_handle = vk.default_texture;
+    }
     for (index = 0; index < vk.set_count[frame]; index++) {
         if (vk.set_texture[frame][index] == texture_handle &&
-            vk.set_normal[frame][index] == normal_handle) return vk.sets[frame][index];
+            vk.set_normal[frame][index] == normal_handle &&
+            vk.set_bank[frame][index] == bank_handle) return vk.sets[frame][index];
         /* Left behind by a texture that was destroyed. The set is still
            allocated and can be written again, which is what keeps a scene that
            swaps textures from exhausting the pool. */
@@ -2271,6 +2297,7 @@ static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle, int normal
     texture = &vk.textures[texture_handle - 1];
     if (!texture->in_use) return VK_NULL_HANDLE;
     normal = &vk.textures[normal_handle - 1];
+    poses = &vk.textures[bank_handle - 1];
 
     if (reuse >= 0) {
         set = vk.sets[frame][reuse];
@@ -2339,12 +2366,27 @@ static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle, int normal
     writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[2].pImageInfo = &shadow;
 
-    ae3d_vkUpdateDescriptorSets(vk.device, 4, writes, 0, NULL);
+    // Binding 4 is the pose bank the crowd vertex shader reads its bones
+    // from; a draw that is not a crowd binds the default texture there and
+    // never samples it.
+    memset(&bank, 0, sizeof(bank));
+    bank.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    bank.imageView = poses->view;
+    bank.sampler = poses->sampler;
+    writes[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[4].dstSet = set;
+    writes[4].dstBinding = 4;
+    writes[4].descriptorCount = 1;
+    writes[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[4].pImageInfo = &bank;
+
+    ae3d_vkUpdateDescriptorSets(vk.device, 5, writes, 0, NULL);
 
     index = reuse >= 0 ? reuse : vk.set_count[frame]++;
     vk.sets[frame][index] = set;
     vk.set_texture[frame][index] = texture_handle;
     vk.set_normal[frame][index] = normal_handle;
+    vk.set_bank[frame][index] = bank_handle;
     return set;
 }
 
@@ -2478,7 +2520,7 @@ static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
                                         int skinned) {
     VkPipelineShaderStageCreateInfo stages[2];
     VkVertexInputBindingDescription bindings[3];
-    VkVertexInputAttributeDescription attributes[11];
+    VkVertexInputAttributeDescription attributes[12];
     VkPipelineVertexInputStateCreateInfo vertex_input;
     VkPipelineInputAssemblyStateCreateInfo assembly;
     VkPipelineViewportStateCreateInfo viewport_state;
@@ -2543,6 +2585,13 @@ static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
     attributes[7].binding = 1;
     attributes[7].format = VK_FORMAT_R32G32B32_SFLOAT;
     attributes[7].offset = 16 * (unsigned)sizeof(float);
+    /* The instance's phase in its walk, in the float after its colour that
+       the stream always carried and nothing read. Every pipeline names it;
+       only the crowd's shaders read it. */
+    attributes[11].location = 11;
+    attributes[11].binding = 1;
+    attributes[11].format = VK_FORMAT_R32_SFLOAT;
+    attributes[11].offset = 19 * (unsigned)sizeof(float);
 
     /* Vulkan has no equivalent of leaving an attribute disabled: the vertex
        input has to describe every input the shader reads, and one shader
@@ -2568,7 +2617,7 @@ static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
     vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     vertex_input.vertexBindingDescriptionCount = 3;
     vertex_input.pVertexBindingDescriptions = bindings;
-    vertex_input.vertexAttributeDescriptionCount = 11;
+    vertex_input.vertexAttributeDescriptionCount = 12;
     vertex_input.pVertexAttributeDescriptions = attributes;
 
     memset(&assembly, 0, sizeof(assembly));
@@ -2688,6 +2737,9 @@ static int ae3d_vk_create_pass_pipelines(void) {
         { ae3d_vk_screen_vert_spv, sizeof(ae3d_vk_screen_vert_spv),
           ae3d_vk_ssr_frag_spv, sizeof(ae3d_vk_ssr_frag_spv),
           0, 0, 0, 0, 0, VK_NULL_HANDLE, NULL },
+        { ae3d_vk_crowd_depth_vert_spv, sizeof(ae3d_vk_crowd_depth_vert_spv),
+          ae3d_vk_depth_frag_spv, sizeof(ae3d_vk_depth_frag_spv),
+          0, 1, 1, 0, 0, VK_NULL_HANDLE, NULL },
     };
     unsigned i;
 
@@ -2701,12 +2753,14 @@ static int ae3d_vk_create_pass_pipelines(void) {
     builds[6].pass = vk.render_pass; builds[6].out = &vk.water_pipeline_blend;
     builds[7].pass = vk.render_pass; builds[7].out = &vk.water_pipeline[1];
     builds[9].pass = vk.post_pass;   builds[9].out = &vk.post_pipelines[3];
+    builds[10].pass = vk.shadow_pass; builds[10].out = &vk.crowd_shadow_pipeline;
 
     for (i = 0; i < sizeof(builds) / sizeof(builds[0]); i++) {
         VkShaderModule vertex_module = ae3d_vk_shader(builds[i].vert, builds[i].vert_size);
         VkShaderModule fragment_module = ae3d_vk_shader(builds[i].frag, builds[i].frag_size);
         if (!vertex_module || !fragment_module) return ae3d_vk_fail("pass vkCreateShaderModule failed");
-        int skinned = (builds[i].out == &vk.skinned_shadow_pipeline);
+        int skinned = (builds[i].out == &vk.skinned_shadow_pipeline
+                       || builds[i].out == &vk.crowd_shadow_pipeline);
         *builds[i].out = ae3d_vk_build_pipeline(vertex_module, fragment_module, builds[i].blend,
                                                 builds[i].depth_test, builds[i].depth_write,
                                                 builds[i].pass, builds[i].cull, skinned);
@@ -2763,6 +2817,20 @@ static int ae3d_vk_create_pipeline(void) {
         return ae3d_vk_fail("vkCreateGraphicsPipelines failed");
     }
     ae3d_vkDestroyShaderModule(vk.device, vertex_module, NULL);
+
+    // The crowd: the same fragment shader after a vertex shader that poses
+    // each instance from the pose bank. Not required: a device that will not
+    // build it draws a crowd unposed instead of not at all.
+    vertex_module = ae3d_vk_shader(ae3d_vk_crowd_vert_spv, (unsigned)sizeof(ae3d_vk_crowd_vert_spv));
+    if (vertex_module) {
+        vk.crowd_pipeline_blend = ae3d_vk_build_pipeline(vertex_module, fragment_module, 1, 1, 0,
+                                                         vk.render_pass, 0, 1);
+        for (cull = 0; cull < 2; cull++) {
+            vk.crowd_pipeline[cull] = ae3d_vk_build_pipeline(vertex_module, fragment_module, 1, 1, 1,
+                                                             vk.render_pass, cull, 1);
+        }
+        ae3d_vkDestroyShaderModule(vk.device, vertex_module, NULL);
+    }
     ae3d_vkDestroyShaderModule(vk.device, fragment_module, NULL);
     return ae3d_vk_create_pass_pipelines();
 }
@@ -3117,7 +3185,7 @@ static void ae3d_vk_draw_pipeline(VkPipeline pipeline, int handle, int texture_h
     dynamic_offset = slot * ring->stride;
     memcpy(ring->mapped + dynamic_offset, vk.scene[vk.program].bytes, AE3D_VK_SCENE_SIZE);
 
-    set = ae3d_vk_set_for((int)vk.frame, texture_handle, vk.normal_map);
+    set = ae3d_vk_set_for((int)vk.frame, texture_handle, vk.normal_map, vk.pose_bank);
     if (set == VK_NULL_HANDLE) return;
 
     if (pipeline != vk.bound_pipeline) {
@@ -3184,6 +3252,10 @@ void ae3d_vk_draw(int handle, int texture_handle, int instance_handle, int insta
         && vk.water_pipeline_blend) {
         opaque = vk.water_pipeline[vk.cull];
         blended = vk.water_pipeline_blend;
+    } else if (skinned && vk.pose_bank > 0 && vk.crowd_pipeline[vk.cull]
+               && vk.crowd_pipeline_blend) {
+        opaque = vk.crowd_pipeline[vk.cull];
+        blended = vk.crowd_pipeline_blend;
     } else if (skinned && vk.skinned_pipeline[vk.cull] && vk.skinned_pipeline_blend) {
         opaque = vk.skinned_pipeline[vk.cull];
         blended = vk.skinned_pipeline_blend;
@@ -3312,6 +3384,9 @@ void ae3d_vk_shadow_draw(int mesh_handle, int instance_handle, int instance_coun
     if (mesh_handle > 0 && mesh_handle <= vk.mesh_capacity
         && vk.meshes[mesh_handle - 1].skinned && vk.skinned_shadow_pipeline) {
         pipeline = vk.skinned_shadow_pipeline;
+        /* A crowd casts from the poses its bank gives each instance, or
+           its shadows would stand in the bind pose under walking figures. */
+        if (vk.pose_bank > 0 && vk.crowd_shadow_pipeline) pipeline = vk.crowd_shadow_pipeline;
     }
     vk.program = AE3D_VK_PROGRAM_SCENE;
     ae3d_vk_draw_pipeline(pipeline, mesh_handle, vk.default_texture,
@@ -3808,6 +3883,93 @@ int ae3d_vk_request_capture(void) {
 
 int ae3d_vk_capture_ready(void) { return vk.capture_slot >= 0; }
 
+/* The pose bank the draws after this are posed from, as the handle of a
+   float texture made by ae3d_vk_texture_create_float, or zero for none.
+   A crowd draw is a skinned draw with a bank bound. */
+void ae3d_vk_set_pose_bank(int texture_handle) { vk.pose_bank = texture_handle; }
+
+/* A texture of floats, four a texel, with no filtering and no mipmaps:
+   what a pose bank is, fetched by exact texel. */
+int ae3d_vk_texture_create_float(int width, int height, const float *rgba) {
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory staging_memory = VK_NULL_HANDLE;
+    VkCommandBuffer command;
+    VkBufferImageCopy region;
+    VkSamplerCreateInfo sampler;
+    ae3d_vk_texture *texture = NULL;
+    void *mapped = NULL;
+    VkDeviceSize size;
+    int slot, handle = 0;
+
+    if (!vk.device || width <= 0 || height <= 0 || !rgba) return 0;
+    size = (VkDeviceSize)width * height * 4 * sizeof(float);
+
+    for (slot = 0; slot < AE3D_VK_MAX_TEXTURES; slot++) {
+        if (!vk.textures[slot].in_use) { texture = &vk.textures[slot]; handle = slot + 1; break; }
+    }
+    if (!texture) { ae3d_vk_fail("texture table full"); return 0; }
+
+    if (!ae3d_vk_create_buffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                               &staging, &staging_memory)) {
+        return 0;
+    }
+    ae3d_vkMapMemory(vk.device, staging_memory, 0, size, 0, &mapped);
+    memcpy(mapped, rgba, (size_t)size);
+    ae3d_vkUnmapMemory(vk.device, staging_memory);
+
+    if (!ae3d_vk_create_image(width, height, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
+                              VK_SAMPLE_COUNT_1_BIT,
+                              VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                              VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_TILING_OPTIMAL,
+                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                              &texture->image, &texture->memory, &texture->view)) {
+        ae3d_vkDestroyBuffer(vk.device, staging, NULL);
+        ae3d_vkFreeMemory(vk.device, staging_memory, NULL);
+        return 0;
+    }
+
+    command = ae3d_vk_begin_once();
+    ae3d_vk_transition(command, texture->image, VK_IMAGE_LAYOUT_UNDEFINED,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                       VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    memset(&region, 0, sizeof(region));
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent.width = (unsigned)width;
+    region.imageExtent.height = (unsigned)height;
+    region.imageExtent.depth = 1;
+    ae3d_vkCmdCopyBufferToImage(command, staging, texture->image,
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    ae3d_vk_transition(command, texture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                       VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    ae3d_vk_end_once(command);
+
+    ae3d_vkDestroyBuffer(vk.device, staging, NULL);
+    ae3d_vkFreeMemory(vk.device, staging_memory, NULL);
+
+    memset(&sampler, 0, sizeof(sampler));
+    sampler.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sampler.magFilter = VK_FILTER_NEAREST;
+    sampler.minFilter = VK_FILTER_NEAREST;
+    sampler.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sampler.maxLod = 0.0f;
+    if (ae3d_vkCreateSampler(vk.device, &sampler, NULL, &texture->sampler) != VK_SUCCESS) {
+        ae3d_vk_fail("vkCreateSampler failed");
+        return 0;
+    }
+
+    texture->width = width;
+    texture->height = height;
+    texture->in_use = 1;
+    return handle;
+}
+
 /* The captured frame as RGBA, top row first -- the orientation a PNG and the
    capture buffer both use, so no flip like the OpenGL readback needs. The
    swapchain is usually BGRA, so the red and blue channels are swapped on the
@@ -3961,6 +4123,7 @@ int ae3d_vk_upload_mesh(void *mesh) {
 static void ae3d_vk_pack_instances_into(float *packed, void *instances, int count) {
     const float *matrices = ae3d_inst_matrix_data(instances);
     const float *colours = ae3d_inst_color_data(instances);
+    const float *phases = ae3d_inst_has_phases(instances) ? ae3d_inst_phase_data(instances) : NULL;
     int has_colours = ae3d_inst_has_colors(instances);
     int i;
 
@@ -3973,7 +4136,9 @@ static void ae3d_vk_pack_instances_into(float *packed, void *instances, int coun
             packed[i * 20 + 17] = 1.0f;
             packed[i * 20 + 18] = 1.0f;
         }
-        packed[i * 20 + 19] = 0.0f;
+        /* The phase rides in the float after the colour; the crowd vertex
+           shader reads it, nothing else does. */
+        packed[i * 20 + 19] = phases ? phases[i] : 0.0f;
     }
 }
 
@@ -4207,9 +4372,12 @@ void ae3d_vk_shutdown(void) {
     for (i = 0; i < 2; i++) {
         if (vk.pipeline[i]) ae3d_vkDestroyPipeline(vk.device, vk.pipeline[i], NULL);
         if (vk.water_pipeline[i]) ae3d_vkDestroyPipeline(vk.device, vk.water_pipeline[i], NULL);
+        if (vk.crowd_pipeline[i]) ae3d_vkDestroyPipeline(vk.device, vk.crowd_pipeline[i], NULL);
     }
     if (vk.pipeline_blend) ae3d_vkDestroyPipeline(vk.device, vk.pipeline_blend, NULL);
     if (vk.water_pipeline_blend) ae3d_vkDestroyPipeline(vk.device, vk.water_pipeline_blend, NULL);
+    if (vk.crowd_pipeline_blend) ae3d_vkDestroyPipeline(vk.device, vk.crowd_pipeline_blend, NULL);
+    if (vk.crowd_shadow_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.crowd_shadow_pipeline, NULL);
     if (vk.sky_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.sky_pipeline, NULL);
     for (i = 0; i < 3; i++) {
         if (vk.post_pipelines[i]) ae3d_vkDestroyPipeline(vk.device, vk.post_pipelines[i], NULL);

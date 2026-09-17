@@ -358,6 +358,9 @@ ATTRIBUTE_RENAMES = [
     (r"\baPos\b", "inPosition"),
 ]
 
+SCENE_OUT = [("vec2", "fragTexCoord"), ("vec3", "Normal"),
+             ("vec3", "FragPos"), ("vec3", "InstanceColor"),
+             ("vec4", "FragPosLightSpace"), ("float", "Occlusion")]
 SKY_OUT = [("vec3", "TexCoords")]
 SCREEN_OUT = [("vec2", "TexCoords")]
 WATER_OUT = [("vec2", "fragTexCoord"), ("vec3", "fragNormal"), ("vec3", "fragPosition")]
@@ -374,6 +377,14 @@ AUXILIARY = [
     ("ssr_vk.frag", "FRAGMENT_SSR", "frag", ["screenTexture", "depthTexture"], SCREEN_OUT, []),
     ("water_vk.vert", "VERTEX_WATER", "vert", [], [], WATER_OUT),
     ("water_vk.frag", "FRAGMENT_WATER", "frag", ["textureSampler"], WATER_OUT, []),
+    # The crowd's vertex shaders read the pose bank, a sampler in the vertex
+    # stage, at binding 4: past the three the fragment shader has, so the
+    # one descriptor set layout serves them too. The three before it are
+    # named so the bank lands on 4, not so the vertex shader reads them.
+    ("crowd_vk.vert", "VERTEX_CROWD", "vert",
+     ["textureSampler", "shadowMap", "normalMap", "poseBank"], [], SCENE_OUT),
+    ("crowd_depth_vk.vert", "VERTEX_CROWD_DEPTH", "vert",
+     ["textureSampler", "shadowMap", "normalMap", "poseBank"], [], []),
 ]
 
 
@@ -400,9 +411,7 @@ def main():
         seen[name] = shape
         ordered.append(member)
 
-    vertex_out = [("vec2", "fragTexCoord"), ("vec3", "Normal"),
-                  ("vec3", "FragPos"), ("vec3", "InstanceColor"),
-                  ("vec4", "FragPosLightSpace"), ("float", "Occlusion")]
+    vertex_out = SCENE_OUT
     vertex_in = [("vec3", "inPosition"), ("vec2", "inTexCoord"), ("vec3", "inNormal")]
 
     # The vertex inputs already carry explicit locations in the OpenGL source,
