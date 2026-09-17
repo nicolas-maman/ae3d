@@ -117,9 +117,15 @@ carries the newest.
 there (colour, metallic, roughness, and reflectivity -- how much of the wet
 road's mirror a surface gets on Vulkan, under Reflections); water, light,
 camera, behaviour and rendering sections appear when they apply. A section is the rows that belong to it rather than a run of them: the
-water rows are not contiguous, because the foam row was added after the row
-indices below it were spoken for, so which section a row is in is a question
-asked of the row and not of its number.
+water rows are not contiguous, because the foam, wave scale and shore rows
+were added after the row indices below them were spoken for, so which section
+a row is in is a question asked of the row and not of its number. The water
+section is the whole simulation: amplitude, speed, opacity, foam, the wave
+scale (how many times longer than the table's kilometre swells the waves
+are), and the shore -- the metres of water the bottom shows through and the
+metres the foam line runs out over. Rendering has the clouds switch and,
+under it, the cover: how much of the sky they take, a slider like any row,
+undone like one, and saved with the scene.
 
 ## Undo
 
@@ -151,9 +157,9 @@ wave table nothing reads:
 |---|---|
 | component | `water`, `voxel`, `light` or `mesh` |
 | script | the behaviour running on it, if any |
-| water | every knob of the simulation driving it |
+| water | every knob of the simulation driving it, the wave scale, the shore and the sky image it reflects included |
 | material | colour, metallic, roughness, reflectivity, alpha, and the texture and normal map paths |
-| rendering | FXAA, bloom, reflections (SSR), clouds -- the view menu's switches, applied on the backend that has them |
+| rendering | FXAA, bloom, reflections (SSR), clouds and their cover -- the view menu's switches, applied on the backend that has them |
 
 and the file records the view: where the camera stood, its field of view and
 clip planes, and whether face and frustum culling were on.

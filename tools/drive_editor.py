@@ -815,6 +815,27 @@ def main():
                 check("the reflectivity slider writes the box", ok,
                       repr(widgets[box[0]["id"]]["text"]))
 
+        # The rest of the water and the sky's cover are rows too: the wave
+        # scale and the shore were file-only knobs, the cloud cover a
+        # constant behind a switch. Each is a slider with a box, and moving
+        # the cover's slider writes its box like any other row's.
+        widgets = tree(args.port)
+        for caption in ("wave scale", "shore fade", "shore foam", "cloud cover"):
+            caps = [w for w in widgets.values()
+                    if w["type"] == "text" and w["text"].strip() == caption]
+            check("the %s row is in the tree" % caption, len(caps) == 1)
+            if caps and caption == "cloud cover":
+                box = row_box(widgets, caps[0])
+                bar = [w for w in widgets.values()
+                       if w["parent"] == caps[0]["parent"] and w["type"] == "slider"]
+                if box and bar:
+                    post(args.port, "/widget/%d/set_value?v=0.70" % bar[0]["id"])
+                    widgets, ok = wait_for(
+                        args.port,
+                        lambda ws: ws[box[0]["id"]]["text"].strip() == "0.70")
+                    check("the cloud cover slider writes the box", ok,
+                          repr(widgets[box[0]["id"]]["text"]))
+
         # A section with nothing to edit hides whole. Hiding a control and its
         # readout but not the row leaves the caption behind, and the water
         # settings read as four stranded words with no heading over them.
@@ -1184,9 +1205,12 @@ def main():
                       wait_file(scene_file, newer_than=written))
                 with open(scene_file) as handle:
                     saved = json.load(handle)
-                check("and the file says so",
-                      bool(saved.get("view", {}).get("rendering", {}).get("clouds")),
-                      json.dumps(saved.get("view", {}).get("rendering", {})))
+                rendering = saved.get("view", {}).get("rendering", {})
+                check("and the file says so", bool(rendering.get("clouds")),
+                      json.dumps(rendering))
+                check("with the cover the slider was left at",
+                      abs(float(rendering.get("cloud_cover", 0.0)) - 0.70) < 0.01,
+                      json.dumps(rendering))
                 post(args.port, "/widget/%d/click" % switch[0]["id"])
                 wait_for(args.port, lambda ws: not clouds_on(ws))
                 post(args.port, "/widget/%d/click" % load_btn)

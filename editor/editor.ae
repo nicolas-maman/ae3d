@@ -287,7 +287,7 @@ var g_ssr = false
 // Clouds over the sky: a switch, at the cover a scene's sky usually wants.
 var g_clouds = false
 var g_clouds_toggle = 0
-const CLOUD_COVER = 0.4
+var g_cloud_cover = 0.4
 const SSR_ROAD_HEIGHT = 0.0
 const SSR_STRENGTH = 0.6
 // The first frame rate the bar ever showed. A driver cannot see it: by the
@@ -739,7 +739,7 @@ apply_post() {
         vk.renderer_set_ssr_params(g_renderer as *VKRenderer, SSR_ROAD_HEIGHT, SSR_STRENGTH)
     }
     cover = 0.0
-    if g_clouds { cover = CLOUD_COVER }
+    if g_clouds { cover = g_cloud_cover }
     if g_vulkan {
         vk.renderer_set_clouds(g_renderer as *VKRenderer, cover, 1.0)
     } else {
@@ -946,22 +946,22 @@ extern malloc(size: int) -> ptr
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 
-const ROWS = 26
+const ROWS = 30
 // Past every inspector row, because a turn of the gizmo is not a row: it is
 // recorded as the angle the drag has turned through so far, and undone by
 // turning back through it.
-const ROTATE_FIRST_SLOT = 26
-// Past the rotation axes, which take 26 through 28. A behaviour is a property
+const ROTATE_FIRST_SLOT = 30
+// Past the rotation axes, which take 30 through 32. A behaviour is a property
 // of a model like any other as far as undo is concerned, so it travels as a
 // property step in a slot no row uses.
-const SCRIPT_SLOT = 29
+const SCRIPT_SLOT = 33
 // A terrain's shape. A choice rather than a number, so it travels the way a
 // behaviour does rather than as a row.
-const TERRAIN_BIOME_SLOT = 30
+const TERRAIN_BIOME_SLOT = 34
 // A terrain's style. Blocks are voxels drawn one cube per cell; smooth meshes
 // the same field into one surface. Voxels are a kind of terrain rather than
 // what terrain is.
-const TERRAIN_STYLE_SLOT = 31
+const TERRAIN_STYLE_SLOT = 35
 const STYLE_BLOCKS = 0
 const STYLE_SMOOTH = 1
 const STYLE_KINDS = 2
@@ -981,6 +981,14 @@ const TERRAIN_SEED_ROW = 24
 // on Vulkan (Reflections, in the view menu). A material property like the
 // roughness beside it, so it saves with the model and undoes as a row.
 const REFLECT_ROW = 25
+// The rest of the water: how long its waves are, as the multiplier over the
+// table's kilometre swells, and the shore -- the metres of water that hide
+// the bottom and the metres the foam line runs out over.
+const WAVE_SCALE_ROW = 26
+const SHORE_FADE_ROW = 27
+const SHORE_FOAM_ROW = 28
+// How much of the sky the clouds cover, when they are on.
+const CLOUD_COVER_ROW = 29
 const SCRIPT_NONE = 0
 // A behaviour is a script found on disk, not a case in this file. Zero is
 // always "none"; the rest are whatever resources/scripts holds, in the order
@@ -1196,6 +1204,10 @@ sync_inspector() {
         show_row(11, sim.base_amplitude)
         show_row(12, sim.wave_speed_multiplier)
         show_row(13, sim.opacity)
+        show_row(FOAM_ROW, water.simulation_foam_intensity(sim))
+        show_row(WAVE_SCALE_ROW, water.simulation_wave_scale(sim))
+        show_row(SHORE_FADE_ROW, water.simulation_shore_fade(sim))
+        show_row(SHORE_FOAM_ROW, water.simulation_shore_foam(sim))
     }
 
     show_row(0, m.position.x)
@@ -2526,6 +2538,10 @@ replay(step: *EditStep, backwards: bool) {
                 if step.slot == 11 { water.simulation_set_amplitude(sim, target) }
                 if step.slot == 12 { water.simulation_set_wave_speed(sim, target) }
                 if step.slot == 13 { water.simulation_set_opacity(sim, target) }
+                if step.slot == FOAM_ROW { water.simulation_set_foam(sim, true, target) }
+                if step.slot == WAVE_SCALE_ROW { water.simulation_set_wave_scale(sim, target) }
+                if step.slot == SHORE_FADE_ROW { water.simulation_set_shore(sim, target, water.simulation_shore_foam(sim)) }
+                if step.slot == SHORE_FOAM_ROW { water.simulation_set_shore(sim, water.simulation_shore_fade(sim), target) }
                 show_row(step.slot, target)
                 paint_soon()
             }
@@ -2685,6 +2701,9 @@ water_value(index: int) -> float {
     if index == 12 { return sim.wave_speed_multiplier }
     if index == 13 { return sim.opacity }
     if index == FOAM_ROW { return water.simulation_foam_intensity(sim) }
+    if index == WAVE_SCALE_ROW { return water.simulation_wave_scale(sim) }
+    if index == SHORE_FADE_ROW { return water.simulation_shore_fade(sim) }
+    if index == SHORE_FOAM_ROW { return water.simulation_shore_foam(sim) }
     return 0.0
 }
 
@@ -2701,7 +2720,8 @@ camera_value(index: int) -> float {
 // settings and the foam row that follows them. A predicate rather than a range,
 // which is what is_light_row and is_camera_row already are.
 is_water_row(index: int) -> bool {
-    return index == 11 || index == 12 || index == 13 || index == FOAM_ROW
+    return index == 11 || index == 12 || index == 13 || index == FOAM_ROW ||
+           index == WAVE_SCALE_ROW || index == SHORE_FADE_ROW || index == SHORE_FOAM_ROW
 }
 
 is_light_row(index: int) -> bool {
@@ -2811,6 +2831,15 @@ apply_property(index: int, value: float) {
         return
     }
 
+    if index == CLOUD_COVER_ROW {
+        history.history_record(g_history, history.STEP_PROPERTY, null, index, g_cloud_cover, value)
+        g_last_edit = seconds()
+        g_cloud_cover = value
+        apply_post()
+        show_row(index, value)
+        return
+    }
+
     if is_sky_row(index) {
         history.history_record(g_history, history.STEP_PROPERTY, null, index,
                                sky_value(index), value)
@@ -2833,6 +2862,9 @@ apply_property(index: int, value: float) {
             if index == 12 { water.simulation_set_wave_speed(sim, value) }
             if index == 13 { water.simulation_set_opacity(sim, value) }
             if index == FOAM_ROW { water.simulation_set_foam(sim, true, value) }
+            if index == WAVE_SCALE_ROW { water.simulation_set_wave_scale(sim, value) }
+            if index == SHORE_FADE_ROW { water.simulation_set_shore(sim, value, water.simulation_shore_foam(sim)) }
+            if index == SHORE_FOAM_ROW { water.simulation_set_shore(sim, water.simulation_shore_fade(sim), value) }
         }
         show_row(index, value)
         paint_soon()
@@ -3412,7 +3444,7 @@ current_view() -> View {
     v.ssr_road_height = SSR_ROAD_HEIGHT
     v.ssr_strength = SSR_STRENGTH
     v.clouds = g_clouds
-    v.cloud_cover = CLOUD_COVER
+    v.cloud_cover = g_cloud_cover
     return v
 }
 
@@ -3550,6 +3582,8 @@ load_scene() {
     g_bloom = view.bloom
     g_ssr = view.ssr
     g_clouds = view.clouds
+    g_cloud_cover = view.cloud_cover
+    show_row(CLOUD_COVER_ROW, g_cloud_cover)
     if g_fxaa_toggle != 0 { ui.set_toggle(g_fxaa_toggle, flag_of(g_fxaa)) }
     if g_bloom_toggle != 0 { ui.set_toggle(g_bloom_toggle, flag_of(g_bloom)) }
     if g_ssr_toggle != 0 { ui.set_toggle(g_ssr_toggle, flag_of(g_ssr)) }
@@ -4667,6 +4701,9 @@ main() {
         inspector_row(g_water_body, "wave speed", 0.0, 4.0, 1.0, 12)
         inspector_row(g_water_body, "opacity", 0.0, 1.0, 0.72, 13)
         inspector_row(g_water_body, "foam", 0.0, 4.0, 1.0, FOAM_ROW)
+        inspector_row(g_water_body, "wave scale", 1.0, 600.0, 1.0, WAVE_SCALE_ROW)
+        inspector_row(g_water_body, "shore fade", 0.0, 40.0, 0.0, SHORE_FADE_ROW)
+        inspector_row(g_water_body, "shore foam", 0.0, 15.0, 0.0, SHORE_FOAM_ROW)
 
         ui.divider(right)
         camera_body = fold_section(right, "CAMERA")
@@ -4783,6 +4820,7 @@ main() {
             apply_post()
             say("clouds ${on}")
         }
+        inspector_row(shading_body, "cloud cover", 0.0, 1.0, 0.4, CLOUD_COVER_ROW)
         ui.spacer(right)
 
         g_stage = stage
