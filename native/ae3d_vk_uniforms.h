@@ -4,12 +4,12 @@
 
 #include <string.h>
 
-#define AE3D_VK_SCENE_SIZE 4784
+#define AE3D_VK_SCENE_SIZE 4768
 
 /* std140 layout, offsets computed from the same declarations the shader
    block is generated from, so the two cannot disagree. */
 typedef struct {
-    unsigned char bytes[4784];
+    unsigned char bytes[4768];
 } ae3d_vk_scene;
 
 #define AE3D_VK_OFF_ISINSTANCED 320
@@ -51,49 +51,47 @@ typedef struct {
 #define AE3D_VK_OFF_VOLUMETRICINTENSITY 3788
 #define AE3D_VK_OFF_VOLUMETRICSTEPS 3792
 #define AE3D_VK_OFF_VOLUMETRICSCATTERING 3796
-#define AE3D_VK_OFF_ENABLESSAO 3800
-#define AE3D_VK_OFF_SSAOINTENSITY 3804
-#define AE3D_VK_OFF_SSAORADIUS 3808
-#define AE3D_VK_OFF_SSAOBIAS 3812
-#define AE3D_VK_OFF_SSAOSAMPLECOUNT 3816
-#define AE3D_VK_OFF_ENABLEGLOBALILLUMINATION 3820
-#define AE3D_VK_OFF_GIINTENSITY 3824
-#define AE3D_VK_OFF_GIBOUNCES 3828
-#define AE3D_VK_OFF_ENABLEBLOOM 3832
-#define AE3D_VK_OFF_BLOOMTHRESHOLD 3836
-#define AE3D_VK_OFF_BLOOMINTENSITY 3840
-#define AE3D_VK_OFF_ENABLEFOG 3844
-#define AE3D_VK_OFF_FOGSTART 3848
-#define AE3D_VK_OFF_FOGEND 3852
-#define AE3D_VK_OFF_FOGCOLOR 3856
-#define AE3D_VK_OFF_FOGINTENSITY 3868
-#define AE3D_VK_OFF_ENABLESHADOWS 3872
-#define AE3D_VK_OFF_HASSHADOWMAP 3876
-#define AE3D_VK_OFF_SHADOWINTENSITY 3880
-#define AE3D_VK_OFF_SHADOWSOFTNESS 3884
-#define AE3D_VK_OFF_SHADOWDIRECTION 3888
-#define AE3D_VK_OFF_SHADOWTEXELWORLD 3900
-#define AE3D_VK_OFF_ENABLEPERLINNOISE 3904
-#define AE3D_VK_OFF_NOISESCALE 3908
-#define AE3D_VK_OFF_NOISEOCTAVES 3912
-#define AE3D_VK_OFF_NOISEINTENSITY 3916
-#define AE3D_VK_OFF_ENABLECAUSTICS 3920
-#define AE3D_VK_OFF_CAUSTICSINTENSITY 3924
-#define AE3D_VK_OFF_CAUSTICSSCALE 3928
-#define AE3D_VK_OFF_CAUSTICSSPEED 3932
-#define AE3D_VK_OFF_CAUSTICSWATERLEVEL 3936
-#define AE3D_VK_OFF_CAUSTICSDEPTH 3940
-#define AE3D_VK_OFF_CAUSTICSTIME 3944
-#define AE3D_VK_OFF_PROJECTION 3952
-#define AE3D_VK_OFF_VIEW 4016
-#define AE3D_VK_OFF_CLOUDSUNCOLOR 4080
-#define AE3D_VK_OFF_TEXELSIZE 4096
-#define AE3D_VK_OFF_EDGETHRESHOLD 4104
-#define AE3D_VK_OFF_EDGETHRESHOLDMIN 4108
-#define AE3D_VK_OFF_SUBPIXELQUALITY 4112
-#define AE3D_VK_OFF_INVVIEWPROJECTION 4128
-#define AE3D_VK_OFF_SSRROADHEIGHT 4192
-#define AE3D_VK_OFF_SSRSTRENGTH 4196
+#define AE3D_VK_OFF_ENABLEGLOBALILLUMINATION 3800
+#define AE3D_VK_OFF_GIINTENSITY 3804
+#define AE3D_VK_OFF_GIBOUNCES 3808
+#define AE3D_VK_OFF_ENABLEBLOOM 3812
+#define AE3D_VK_OFF_BLOOMTHRESHOLD 3816
+#define AE3D_VK_OFF_BLOOMINTENSITY 3820
+#define AE3D_VK_OFF_ENABLEFOG 3824
+#define AE3D_VK_OFF_FOGSTART 3828
+#define AE3D_VK_OFF_FOGEND 3832
+#define AE3D_VK_OFF_FOGCOLOR 3840
+#define AE3D_VK_OFF_FOGINTENSITY 3852
+#define AE3D_VK_OFF_ENABLESHADOWS 3856
+#define AE3D_VK_OFF_HASSHADOWMAP 3860
+#define AE3D_VK_OFF_SHADOWINTENSITY 3864
+#define AE3D_VK_OFF_SHADOWSOFTNESS 3868
+#define AE3D_VK_OFF_SHADOWDIRECTION 3872
+#define AE3D_VK_OFF_SHADOWTEXELWORLD 3884
+#define AE3D_VK_OFF_ENABLEPERLINNOISE 3888
+#define AE3D_VK_OFF_NOISESCALE 3892
+#define AE3D_VK_OFF_NOISEOCTAVES 3896
+#define AE3D_VK_OFF_NOISEINTENSITY 3900
+#define AE3D_VK_OFF_ENABLECAUSTICS 3904
+#define AE3D_VK_OFF_CAUSTICSINTENSITY 3908
+#define AE3D_VK_OFF_CAUSTICSSCALE 3912
+#define AE3D_VK_OFF_CAUSTICSSPEED 3916
+#define AE3D_VK_OFF_CAUSTICSWATERLEVEL 3920
+#define AE3D_VK_OFF_CAUSTICSDEPTH 3924
+#define AE3D_VK_OFF_CAUSTICSTIME 3928
+#define AE3D_VK_OFF_PROJECTION 3936
+#define AE3D_VK_OFF_VIEW 4000
+#define AE3D_VK_OFF_CLOUDSUNCOLOR 4064
+#define AE3D_VK_OFF_TEXELSIZE 4080
+#define AE3D_VK_OFF_EDGETHRESHOLD 4088
+#define AE3D_VK_OFF_EDGETHRESHOLDMIN 4092
+#define AE3D_VK_OFF_SUBPIXELQUALITY 4096
+#define AE3D_VK_OFF_INVVIEWPROJECTION 4112
+#define AE3D_VK_OFF_SSRROADHEIGHT 4176
+#define AE3D_VK_OFF_SSRSTRENGTH 4180
+#define AE3D_VK_OFF_SCREENSIZE 4184
+#define AE3D_VK_OFF_SSAORADIUS 4192
+#define AE3D_VK_OFF_SSAOINTENSITY 4196
 #define AE3D_VK_OFF_TIME 4200
 #define AE3D_VK_OFF_WAVESPEEDMULTIPLIER 4204
 #define AE3D_VK_OFF_WAVEHEIGHTMULTIPLIER 4208
@@ -120,14 +118,13 @@ typedef struct {
 #define AE3D_VK_OFF_WATERREFLECTIONINTENSITY 4720
 #define AE3D_VK_OFF_HASSKYTEXTURE 4724
 #define AE3D_VK_OFF_HASSCENEDEPTH 4728
-#define AE3D_VK_OFF_SCREENSIZE 4736
-#define AE3D_VK_OFF_WATERDEPTHFADE 4744
-#define AE3D_VK_OFF_WATERSHOREFOAM 4748
-#define AE3D_VK_OFF_ENABLEWATERDISTORTION 4752
-#define AE3D_VK_OFF_WATERDISTORTIONINTENSITY 4756
-#define AE3D_VK_OFF_ENABLEWATERNORMALMAPPING 4760
-#define AE3D_VK_OFF_WATERNORMALINTENSITY 4764
-#define AE3D_VK_OFF_POSEBANKFRAMES 4768
+#define AE3D_VK_OFF_WATERDEPTHFADE 4732
+#define AE3D_VK_OFF_WATERSHOREFOAM 4736
+#define AE3D_VK_OFF_ENABLEWATERDISTORTION 4740
+#define AE3D_VK_OFF_WATERDISTORTIONINTENSITY 4744
+#define AE3D_VK_OFF_ENABLEWATERNORMALMAPPING 4748
+#define AE3D_VK_OFF_WATERNORMALINTENSITY 4752
+#define AE3D_VK_OFF_POSEBANKFRAMES 4756
 
 #define AE3D_VK_MAX_LIGHTS 4
 #define AE3D_VK_LIGHT_STRIDE 80
@@ -148,57 +145,56 @@ typedef struct {
 } ae3d_vk_uniform_slot;
 
 static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
-    { "bloomIntensity", 3840 },
-    { "bloomThreshold", 3836 },
+    { "bloomIntensity", 3820 },
+    { "bloomThreshold", 3816 },
     { "bones", 544 },
-    { "causticsDepth", 3940 },
-    { "causticsIntensity", 3924 },
-    { "causticsScale", 3928 },
-    { "causticsSpeed", 3932 },
-    { "causticsTime", 3944 },
-    { "causticsWaterLevel", 3936 },
+    { "causticsDepth", 3924 },
+    { "causticsIntensity", 3908 },
+    { "causticsScale", 3912 },
+    { "causticsSpeed", 3916 },
+    { "causticsTime", 3928 },
+    { "causticsWaterLevel", 3920 },
     { "clearcoatIntensity", 3736 },
     { "clearcoatRoughness", 3732 },
     { "cloudCover", 3688 },
     { "cloudSun", 3696 },
-    { "cloudSunColor", 4080 },
+    { "cloudSunColor", 4064 },
     { "cloudTime", 3692 },
     { "diffuseColor", 3648 },
-    { "edgeThreshold", 4104 },
-    { "edgeThresholdMin", 4108 },
-    { "enableBloom", 3832 },
-    { "enableCaustics", 3920 },
+    { "edgeThreshold", 4088 },
+    { "edgeThresholdMin", 4092 },
+    { "enableBloom", 3812 },
+    { "enableCaustics", 3904 },
     { "enableClearcoat", 3728 },
     { "enableEnergyConservation", 3772 },
     { "enableFoam", 4672 },
-    { "enableFog", 3844 },
-    { "enableGlobalIllumination", 3820 },
+    { "enableFog", 3824 },
+    { "enableGlobalIllumination", 3800 },
     { "enableImageBasedLighting", 3776 },
     { "enableMultipleScattering", 3768 },
-    { "enablePerlinNoise", 3904 },
-    { "enableSSAO", 3800 },
-    { "enableShadows", 3872 },
+    { "enablePerlinNoise", 3888 },
+    { "enableShadows", 3856 },
     { "enableSheen", 3740 },
     { "enableTransmission", 3760 },
     { "enableVolumetricLighting", 3784 },
-    { "enableWaterDistortion", 4752 },
-    { "enableWaterNormalMapping", 4760 },
+    { "enableWaterDistortion", 4740 },
+    { "enableWaterNormalMapping", 4748 },
     { "enableWaterReflection", 4716 },
     { "exposure", 3684 },
     { "foamIntensity", 4676 },
-    { "fogColor", 3856 },
-    { "fogEnd", 3852 },
-    { "fogIntensity", 3868 },
-    { "fogStart", 3848 },
-    { "giBounces", 3828 },
-    { "giIntensity", 3824 },
+    { "fogColor", 3840 },
+    { "fogEnd", 3832 },
+    { "fogIntensity", 3852 },
+    { "fogStart", 3828 },
+    { "giBounces", 3808 },
+    { "giIntensity", 3804 },
     { "hasNormalMap", 3716 },
     { "hasSceneDepth", 4728 },
-    { "hasShadowMap", 3876 },
+    { "hasShadowMap", 3860 },
     { "hasSkyTexture", 4724 },
     { "horizonColor", 4704 },
     { "iblIntensity", 3780 },
-    { "invViewProjection", 4128 },
+    { "invViewProjection", 4112 },
     { "isInstanced", 320 },
     { "isSkinned", 528 },
     { "lightColor", 4640 },
@@ -210,36 +206,34 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "materialAlpha", 3708 },
     { "metallic", 3676 },
     { "model", 336 },
-    { "noiseIntensity", 3916 },
-    { "noiseOctaves", 3912 },
-    { "noiseScale", 3908 },
+    { "noiseIntensity", 3900 },
+    { "noiseOctaves", 3896 },
+    { "noiseScale", 3892 },
     { "normalStrength", 3720 },
     { "occlusionStrength", 3724 },
-    { "poseBankFrames", 4768 },
-    { "projection", 3952 },
+    { "poseBankFrames", 4756 },
+    { "projection", 3936 },
     { "reflectivity", 3712 },
     { "roughness", 3680 },
-    { "screenSize", 4736 },
-    { "shadowDirection", 3888 },
-    { "shadowIntensity", 3880 },
-    { "shadowSoftness", 3884 },
-    { "shadowTexelWorld", 3900 },
+    { "screenSize", 4184 },
+    { "shadowDirection", 3872 },
+    { "shadowIntensity", 3864 },
+    { "shadowSoftness", 3868 },
+    { "shadowTexelWorld", 3884 },
     { "sheenColor", 3744 },
     { "sheenRoughness", 3756 },
     { "skyColor", 4688 },
     { "specularColor", 3664 },
-    { "ssaoBias", 3812 },
-    { "ssaoIntensity", 3804 },
-    { "ssaoRadius", 3808 },
-    { "ssaoSampleCount", 3816 },
-    { "ssrRoadHeight", 4192 },
-    { "ssrStrength", 4196 },
-    { "subpixelQuality", 4112 },
-    { "texelSize", 4096 },
+    { "ssaoIntensity", 4196 },
+    { "ssaoRadius", 4192 },
+    { "ssrRoadHeight", 4176 },
+    { "ssrStrength", 4180 },
+    { "subpixelQuality", 4096 },
+    { "texelSize", 4080 },
     { "time", 4200 },
     { "transmissionFactor", 3764 },
     { "useInstanceColor", 324 },
-    { "view", 4016 },
+    { "view", 4000 },
     { "viewDistance", 3644 },
     { "viewPos", 3632 },
     { "viewProjection", 400 },
@@ -247,14 +241,14 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "volumetricScattering", 3796 },
     { "volumetricSteps", 3792 },
     { "waterBaseColor", 4656 },
-    { "waterDepthFade", 4744 },
-    { "waterDistortionIntensity", 4756 },
+    { "waterDepthFade", 4732 },
+    { "waterDistortionIntensity", 4744 },
     { "waterLevel", 4684 },
-    { "waterNormalIntensity", 4764 },
+    { "waterNormalIntensity", 4752 },
     { "waterOpacity", 4668 },
     { "waterPlaneHeight", 4680 },
     { "waterReflectionIntensity", 4720 },
-    { "waterShoreFoam", 4748 },
+    { "waterShoreFoam", 4736 },
     { "waveAmplitudes", 4288 },
     { "waveDirections", 4224 },
     { "waveFrequencies", 4352 },
@@ -266,7 +260,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "waveSteepness", 4544 },
 };
 
-#define AE3D_VK_UNIFORM_SLOT_COUNT 116
+#define AE3D_VK_UNIFORM_SLOT_COUNT 113
 
 static inline int ae3d_vk_uniform_offset(const char *name) {
     int low = 0;

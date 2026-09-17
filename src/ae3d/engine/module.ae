@@ -25,7 +25,7 @@ exports (
     engine_set_size, engine_set_title, engine_set_msaa, engine_set_decorated, engine_set_post,
     engine_set_render_scale, engine_set_shadows, engine_shadows, engine_set_fog, engine_fog, engine_set_shadow_distance, engine_shadow_distance,
     engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
-    engine_set_skybox, engine_set_sky, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_load_texture,
+    engine_set_skybox, engine_set_sky, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_set_ssao, engine_load_texture,
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
     engine_render_ms, engine_render_frames,
     engine_set_debug, engine_set_frustum_culling, engine_set_face_culling,
@@ -80,6 +80,11 @@ struct Engine {
     shadows: bool
     shadow_distance: float
     fog: Fog
+    // The occlusion, kept here so a scene can ask for it before the backend
+    // exists and have it applied when it does.
+    ssao_on: bool
+    ssao_radius: float
+    ssao_intensity: float
 
     fixed_step: float
     fixed_accumulator: float
@@ -123,6 +128,9 @@ engine_new(api: int) -> *Engine {
     e.camera_input = true
     e.shadows = true
     e.fog = core.fog_none()
+    e.ssao_on = false
+    e.ssao_radius = 3.0
+    e.ssao_intensity = 1.0
     e.fixed_step = 1.0 / 60.0
     e.first_mouse = true
     e.frame_limit = frame_limit_from_env()
@@ -429,6 +437,26 @@ engine_set_clouds(e: *Engine, cover: float, wind: float) {
     }
 }
 
+// Ambient occlusion from the scene's depth, on either backend: the corners
+// and the feet of things go darker by how much stands around them. `radius`
+// is the reach of that in metres, `intensity` how dark it goes (1.0 is what
+// the depth finds, 0 none).
+engine_set_ssao(e: *Engine, on: bool, radius: float, intensity: float) {
+    e.ssao_on = on
+    e.ssao_radius = radius
+    e.ssao_intensity = intensity
+    if e.running { apply_ssao(e) }
+}
+
+apply_ssao(e: *Engine) {
+    if e.backend_state == null { return }
+    if e.api == platform.API_VULKAN {
+        vk.renderer_set_ssao(e.backend_state as *VKRenderer, e.ssao_on, e.ssao_radius, e.ssao_intensity)
+    } else {
+        gl.renderer_set_ssao(e.gl_renderer as *GLRenderer, e.ssao_on, e.ssao_radius, e.ssao_intensity)
+    }
+}
+
 // How many draws the last frame took, from whichever backend drew it.
 engine_draw_calls(e: *Engine) -> int {
     if e.backend_state == null { return 0 }
@@ -596,6 +624,7 @@ engine_start(e: *Engine, x: int, y: int) -> bool {
     e.camera = core.camera_new(e.width, e.height) as ptr
     platform.window_set_cursor_mode(e.window, platform.CURSOR_NORMAL)
     e.running = true
+    apply_ssao(e)
     return true
 }
 

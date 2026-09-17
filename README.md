@@ -42,10 +42,12 @@ can be interrogated while it runs. See [Credits](#credits).
   the position column's buffer. The native crowd step, separation grid and
   distance bucketing are C over those columns.
 - **Physically based shading**: metallic/roughness materials, up to four
-  directional or point lights, normal mapping, baked per-vertex occlusion,
-  shadow mapping with a texel-snapped light box (both backends), fog applied
-  after tone mapping, MSAA, FXAA and bloom. Screen-space reflections on wet
-  surfaces on Vulkan.
+  directional or point lights, normal mapping, baked per-vertex occlusion and
+  screen-space ambient occlusion from the scene's depth (`engine_set_ssao`,
+  both backends), shadow mapping with a texel-snapped light box (both
+  backends), volumetric clouds and their shadows, fog applied after tone
+  mapping, MSAA, FXAA and bloom. Screen-space reflections on wet surfaces on
+  Vulkan.
 - **Models compose.** A model keeps its own transform and composes it onto its
   parent's, so bones are ordinary models: a clip exported from Blender drives a
   bone exactly as it drives a part, and `ae3d.ik` solves a limb of bones

@@ -85,6 +85,13 @@ void ae3d_gl_set_blend(int on) {
     }
 }
 
+/* What is drawn scales what is there: the occlusion pass darkening the
+   opaque scene under it. ae3d_gl_set_blend(1) puts the ordinary blend back. */
+void ae3d_gl_set_blend_multiply(void) {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_DST_COLOR, GL_ZERO);
+}
+
 void ae3d_gl_set_multisample(int on) {
     if (on) glEnable(GL_MULTISAMPLE); else glDisable(GL_MULTISAMPLE);
 }

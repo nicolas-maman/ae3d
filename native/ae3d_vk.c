@@ -297,6 +297,15 @@ static struct {
     int ssr_set_built;
     float ssr_road_height;
     float ssr_strength;
+    // Ambient occlusion from the same camera depth: a fullscreen multiply
+    // drawn into the scene pass after the opaque geometry, before anything
+    // transparent, with its own descriptor sets since the reflection's are
+    // written for the post stage with the scene colour bound.
+    int ssao_enabled;
+    float ssao_radius;
+    float ssao_intensity;
+    VkPipeline ssao_pipeline;
+    VkDescriptorSet ssao_set[AE3D_VK_FRAMES];
     // The reflective composite writes here rather than to the swapchain, so the
     // ordinary bloom/fxaa composite can then read it and bloom the mirrored
     // lamps too. It is a single-sample colour target that ends the pass in
@@ -1492,7 +1501,7 @@ static void ae3d_vk_destroy_camdepth_target(void) {
     // rewritten against the new one when SSR is next drawn.
     {
         int f;
-        for (f = 0; f < AE3D_VK_FRAMES; f++) vk.ssr_set[f] = VK_NULL_HANDLE;
+        for (f = 0; f < AE3D_VK_FRAMES; f++) { vk.ssr_set[f] = VK_NULL_HANDLE; vk.ssao_set[f] = VK_NULL_HANDLE; }
     }
 }
 
@@ -2678,6 +2687,12 @@ static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
     blend_attachment.blendEnable = blend ? VK_TRUE : VK_FALSE;
     blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
     blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    /* 2 is a multiply: what is drawn scales what is there, which is how the
+       occlusion pass darkens the opaque scene under it. */
+    if (blend == 2) {
+        blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
+        blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+    }
     blend_attachment.colorBlendOp = VK_BLEND_OP_ADD;
     blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
     blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
@@ -2764,6 +2779,9 @@ static int ae3d_vk_create_pass_pipelines(void) {
         { ae3d_vk_crowd_depth_vert_spv, sizeof(ae3d_vk_crowd_depth_vert_spv),
           ae3d_vk_depth_frag_spv, sizeof(ae3d_vk_depth_frag_spv),
           0, 1, 1, 0, 0, VK_NULL_HANDLE, NULL },
+        { ae3d_vk_screen_vert_spv, sizeof(ae3d_vk_screen_vert_spv),
+          ae3d_vk_ssao_frag_spv, sizeof(ae3d_vk_ssao_frag_spv),
+          2, 0, 0, 0, 0, VK_NULL_HANDLE, NULL },
     };
     unsigned i;
 
@@ -2778,6 +2796,7 @@ static int ae3d_vk_create_pass_pipelines(void) {
     builds[7].pass = vk.render_pass; builds[7].out = &vk.water_pipeline[1];
     builds[9].pass = vk.post_pass;   builds[9].out = &vk.post_pipelines[3];
     builds[10].pass = vk.shadow_pass; builds[10].out = &vk.crowd_shadow_pipeline;
+    builds[11].pass = vk.render_pass; builds[11].out = &vk.ssao_pipeline;
 
     for (i = 0; i < sizeof(builds) / sizeof(builds[0]); i++) {
         VkShaderModule vertex_module = ae3d_vk_shader(builds[i].vert, builds[i].vert_size);
@@ -3360,6 +3379,26 @@ void ae3d_vk_set_ssr(int on) {
 
 int ae3d_vk_ssr(void) { return vk.ssr_enabled; }
 
+/* Ambient occlusion on or off, with how far a thing shadows its neighbours
+   (metres) and how dark that goes. The camera depth it reads is the
+   reflection's target, made the same way when it is first wanted. */
+void ae3d_vk_set_ssao(int on, double radius, double intensity) {
+    on = on ? 1 : 0;
+    vk.ssao_enabled = on;
+    vk.ssao_radius = (float)radius;
+    vk.ssao_intensity = (float)intensity;
+    if (!vk.ready || !on) return;
+    if (!vk.camdepth_framebuffer ||
+        vk.camdepth_width != (int)vk.extent.width ||
+        vk.camdepth_height != (int)vk.extent.height) {
+        ae3d_vkDeviceWaitIdle(vk.device);
+        ae3d_vk_destroy_camdepth_target();
+        ae3d_vk_create_camdepth_target((int)vk.extent.width, (int)vk.extent.height);
+    }
+}
+
+int ae3d_vk_ssao(void) { return vk.ssao_enabled; }
+
 /* The camera depth drawn for its own sake: a water surface reads the scene's
    depth under it for its shore, whether or not the road reflects. The same
    target the reflection uses, made the same way. */
@@ -3468,7 +3507,19 @@ int ae3d_vk_camdepth_begin(void) {
     VkViewport viewport;
     VkRect2D scissor;
 
-    if (!vk.recording || !(vk.ssr_enabled || vk.scene_depth_wanted) || !vk.camdepth_framebuffer) return 0;
+    if (!vk.recording || !(vk.ssr_enabled || vk.scene_depth_wanted || vk.ssao_enabled)) return 0;
+    /* The target is made when a feature that reads it is turned on, but a
+       scene turns the occlusion on at start, before there is a swapchain
+       to size it by; so it is made here too, at the frame that first
+       needs it, and remade when the swapchain has changed size. */
+    if (!vk.camdepth_framebuffer ||
+        vk.camdepth_width != (int)vk.extent.width ||
+        vk.camdepth_height != (int)vk.extent.height) {
+        ae3d_vkDeviceWaitIdle(vk.device);
+        ae3d_vk_destroy_camdepth_target();
+        if (!ae3d_vk_create_camdepth_target((int)vk.extent.width, (int)vk.extent.height)) return 0;
+    }
+    if (!vk.camdepth_framebuffer) return 0;
     if (vk.pass_open) return 0;
 
     memset(&clear, 0, sizeof(clear));
@@ -3541,7 +3592,7 @@ void ae3d_vk_set_ssr_params(double road_height, double strength) {
 // shadow map), and it reads the same uniform block as everything else, so the
 // SSR shader gets viewProjection, invViewProjection and the road parameters
 // the frame set. Written every draw because both images are remade on resize.
-static void ae3d_vk_draw_ssr(void) {
+static void ae3d_vk_draw_screen(VkPipeline pipeline, VkDescriptorSet *set_slot, int colour_texture) {
     VkDescriptorSetAllocateInfo alloc;
     VkDescriptorBufferInfo buffer;
     VkDescriptorImageInfo scene_img, depth_img, def_img;
@@ -3552,27 +3603,26 @@ static void ae3d_vk_draw_ssr(void) {
     ae3d_vk_texture *scene_tex;
     VkDescriptorSet set;
     unsigned slot, dynamic_offset;
-    int frame = (int)vk.frame;
 
-    if (vk.screen_quad <= 0 || vk.screen_quad > vk.mesh_capacity) return;
-    if (!vk.camdepth_view || vk.post_texture <= 0) return;
+    if (!pipeline || vk.screen_quad <= 0 || vk.screen_quad > vk.mesh_capacity) return;
+    if (!vk.camdepth_view || colour_texture <= 0 || colour_texture > AE3D_VK_MAX_TEXTURES) return;
     mesh = &vk.meshes[vk.screen_quad - 1];
     if (!mesh->in_use || mesh->index_count == 0) return;
-    scene_tex = &vk.textures[vk.post_texture - 1];
+    scene_tex = &vk.textures[colour_texture - 1];
     if (!scene_tex->in_use) return;
 
-    if (!vk.ssr_set[frame]) {
+    if (!*set_slot) {
         memset(&alloc, 0, sizeof(alloc));
         alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
         alloc.descriptorPool = vk.descriptor_pool;
         alloc.descriptorSetCount = 1;
         alloc.pSetLayouts = &vk.set_layout;
         if (ae3d_vkAllocateDescriptorSets(vk.device, &alloc, &set) != VK_SUCCESS) return;
-        vk.ssr_set[frame] = set;
+        *set_slot = set;
     }
-    set = vk.ssr_set[frame];
+    set = *set_slot;
 
-    ring = &vk.uniforms[frame];
+    ring = &vk.uniforms[vk.frame];
     if (ring->used >= ring->capacity) return;
     slot = ring->used++;
     dynamic_offset = slot * ring->stride;
@@ -3617,9 +3667,9 @@ static void ae3d_vk_draw_ssr(void) {
     writes[3].pImageInfo = &def_img;
     ae3d_vkUpdateDescriptorSets(vk.device, 4, writes, 0, NULL);
 
-    if (vk.post_pipelines[3] != vk.bound_pipeline) {
-        ae3d_vkCmdBindPipeline(vk.command_buffers[vk.frame], VK_PIPELINE_BIND_POINT_GRAPHICS, vk.post_pipelines[3]);
-        vk.bound_pipeline = vk.post_pipelines[3];
+    if (pipeline != vk.bound_pipeline) {
+        ae3d_vkCmdBindPipeline(vk.command_buffers[vk.frame], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        vk.bound_pipeline = pipeline;
         vk.pipeline_binds++;
     }
     ae3d_vkCmdBindDescriptorSets(vk.command_buffers[vk.frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -3653,6 +3703,19 @@ static void ae3d_vk_setup_post_uniforms(void) {
     vk.program = AE3D_VK_PROGRAM_SCENE;
 }
 
+// The occlusion, over the opaque scene: a multiply drawn inside the scene
+// pass with depth off, reading the camera depth the prepass drew. Nothing
+// when the occlusion is off, the prepass did not run, or the pipeline did
+// not build; the scene is then simply not darkened.
+void ae3d_vk_draw_ssao(void) {
+    if (!vk.recording || !vk.ssao_enabled || !vk.ssao_pipeline) return;
+    if (!vk.camdepth_view || !vk.camdepth_framebuffer || vk.default_texture <= 0) return;
+    ae3d_vk_open_scene_pass();
+    ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_SSAORADIUS, vk.ssao_radius);
+    ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_SSAOINTENSITY, vk.ssao_intensity);
+    ae3d_vk_draw_screen(vk.ssao_pipeline, &vk.ssao_set[(int)vk.frame], vk.default_texture);
+}
+
 // The ordinary composite: bloom, else fxaa, else a straight copy, reading the
 // given colour source -- the scene directly, or the reflected intermediate when
 // SSR ran a stage before it.
@@ -3666,6 +3729,7 @@ int ae3d_vk_frame_end(void) {
     VkPresentInfoKHR present;
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkResult result;
+    int frame_slot = (int)vk.frame;
 
     if (!vk.recording) return 0;
 
@@ -3705,7 +3769,7 @@ int ae3d_vk_frame_end(void) {
             vk.pass_open = 1;
             ae3d_vkCmdSetViewport(vk.command_buffers[vk.frame], 0, 1, &viewport);
             ae3d_vkCmdSetScissor(vk.command_buffers[vk.frame], 0, 1, &scissor);
-            ae3d_vk_draw_ssr();
+            ae3d_vk_draw_screen(vk.post_pipelines[3], &vk.ssr_set[frame_slot], vk.post_texture);
             ae3d_vkCmdEndRenderPass(vk.command_buffers[vk.frame]);
             vk.pass_open = 0;
         }
@@ -4434,6 +4498,7 @@ void ae3d_vk_shutdown(void) {
     if (vk.crowd_pipeline_blend) ae3d_vkDestroyPipeline(vk.device, vk.crowd_pipeline_blend, NULL);
     if (vk.crowd_shadow_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.crowd_shadow_pipeline, NULL);
     if (vk.sky_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.sky_pipeline, NULL);
+    if (vk.ssao_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.ssao_pipeline, NULL);
     for (i = 0; i < 3; i++) {
         if (vk.post_pipelines[i]) ae3d_vkDestroyPipeline(vk.device, vk.post_pipelines[i], NULL);
     }

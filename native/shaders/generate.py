@@ -141,6 +141,9 @@ def to_vulkan(source, stage, members, samplers, varyings_in, varyings_out,
     # is already the 0..1 the shadow map stores.
     text = text.replace("return clipZ * 0.5 + 0.5;", "return clipZ;")
     text = text.replace("return depth * 2.0 - 1.0;", "return depth;")
+    # OpenGL's screen y runs up, Vulkan's down: a normal built from the
+    # screen's axes comes out facing the other way.
+    text = text.replace("return 1.0; /* screen y up */", "return -1.0; /* screen y down */")
 
     text = re.sub(r"^uniform\s+(vec3|vec4|vec2|float|int|bool|mat4)\s+\w+\s*(\[\d+\])?\s*;.*$", "", text, flags=re.M)
     text = re.sub(r"^uniform\s+sampler2D\s+\w+\s*;.*$", "", text, flags=re.M)
@@ -376,6 +379,7 @@ AUXILIARY = [
     ("fxaa_vk.frag", "FRAGMENT_FXAA", "frag", ["screenTexture"], SCREEN_OUT, []),
     ("bloom_vk.frag", "FRAGMENT_BLOOM", "frag", ["screenTexture"], SCREEN_OUT, []),
     ("ssr_vk.frag", "FRAGMENT_SSR", "frag", ["screenTexture", "depthTexture"], SCREEN_OUT, []),
+    ("ssao_vk.frag", "FRAGMENT_SSAO", "frag", ["screenTexture", "depthTexture"], SCREEN_OUT, []),
     ("water_vk.vert", "VERTEX_WATER", "vert", [], [], WATER_OUT),
     # The water reads the scene depth at binding 4, the slot the crowd's pose
     # bank takes: whichever auxiliary image a draw needs sits there.
