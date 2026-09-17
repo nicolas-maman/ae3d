@@ -1010,8 +1010,13 @@ def _arm(pose, side, swing, hit, reach_for):
     # it found it, which is why a zombie posed only in twists reaches with a
     # dead-straight arm. Kept bent in the shuffle and flexing with the sway --
     # a fixed bend is what made the arm read as a rod -- then driven straight
-    # at the strike, so the thrust has a bend to spend.
-    bend = 1.55 + 0.35 * swing - reach_for * 1.8 * lead
+    # at the strike, so the thrust has a bend to spend. The shuffle's bend is
+    # what the strike spends: with the upper arm 0.29 m and the forearm 0.26,
+    # straightening from 1.42 rad carries the wrist 0.13 m further out, and
+    # the critique wants the swipe to beat the walk by 0.12 (STRIKE_REACH).
+    # Flex the shuffle wider than 0.30 or hold it below 1.40 at the loosest
+    # and the strike no longer reaches past the walk.
+    bend = (1.72 + 0.30 * swing) * (1.0 - reach_for * lead)
 
     pose.set("Shoulder" + side, _compose(_turn(Y, forward), _turn(X, out),
                                          _turn(Z, -0.12 * lead * reach_for)))
