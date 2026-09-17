@@ -280,6 +280,12 @@ var g_fxaa = true
 var g_fxaa_toggle = 0
 var g_bloom_toggle = 0
 var g_bloom = false
+// Screen-space reflection: a Vulkan feature, so the switch acts there and is
+// inert on OpenGL, but the scene carries it either way (#267).
+var g_ssr_toggle = 0
+var g_ssr = false
+const SSR_ROAD_HEIGHT = 0.0
+const SSR_STRENGTH = 0.6
 // The first frame rate the bar ever showed. A driver cannot see it: by the
 // time anything can ask, the average has climbed to something plausible and a
 // check on what the bar says now passes against a bar that opened on nothing.
@@ -724,6 +730,10 @@ apply_post() {
     if g_renderer == null { return }
     backend = viewport_backend()
     core.backend_set_post(&backend, g_fxaa, g_bloom, BLOOM_THRESHOLD, BLOOM_INTENSITY)
+    if g_vulkan {
+        vk.renderer_set_ssr(g_renderer as *VKRenderer, g_ssr)
+        vk.renderer_set_ssr_params(g_renderer as *VKRenderer, SSR_ROAD_HEIGHT, SSR_STRENGTH)
+    }
     draw_frame()
 }
 
@@ -3376,6 +3386,9 @@ current_view() -> View {
     v.bloom = g_bloom
     v.bloom_threshold = BLOOM_THRESHOLD
     v.bloom_intensity = BLOOM_INTENSITY
+    v.ssr = g_ssr
+    v.ssr_road_height = SSR_ROAD_HEIGHT
+    v.ssr_strength = SSR_STRENGTH
     return v
 }
 
@@ -3511,8 +3524,10 @@ load_scene() {
     refresh_sky_rows()
     g_fxaa = view.fxaa
     g_bloom = view.bloom
+    g_ssr = view.ssr
     if g_fxaa_toggle != 0 { ui.set_toggle(g_fxaa_toggle, flag_of(g_fxaa)) }
     if g_bloom_toggle != 0 { ui.set_toggle(g_bloom_toggle, flag_of(g_bloom)) }
+    if g_ssr_toggle != 0 { ui.set_toggle(g_ssr_toggle, flag_of(g_ssr)) }
     apply_post()
 
 
@@ -4717,6 +4732,18 @@ main() {
             g_bloom = on
             apply_post()
             say("bloom ${on}")
+        }
+
+        ssr_row = ui.hstack(shading_body, 8)
+        as_row(ssr_row)
+        ssr_caption = ui.text(ssr_row, "Reflections")
+        ui.add_css_class(ssr_caption, "label")
+        ui.spacer(ssr_row)
+        g_ssr_toggle = ui.toggle(ssr_row, "") callback |on: bool| {
+            g_ssr = on
+            apply_post()
+            if g_vulkan { say("reflections ${on}") }
+            else { say("reflections ${on} (drawn on the Vulkan backend)") }
         }
         ui.spacer(right)
 
