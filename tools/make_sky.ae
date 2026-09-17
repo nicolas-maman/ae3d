@@ -5,9 +5,10 @@
 //
 //   ./build.sh tools/make_sky.ae && ./build/make_sky
 //
-// Writes resources/sky/desert.png (2048x1024) and resources/textures/sand.png
-// (1024x1024, tiling). The sky's top row is the zenith and its middle row the
-// horizon, which is how the skybox reads an equirect image (see dusk.png).
+// Writes resources/sky/desert.png and resources/sky/night.png (2048x1024) and
+// resources/textures/sand.png (1024x1024, tiling). A sky's top row is the
+// zenith and its middle row the horizon, which is how the skybox reads an
+// equirect image.
 
 import ae3d.core
 import ae3d.noise
@@ -117,6 +118,106 @@ write_sky(path: string) -> bool {
     return ok
 }
 
+// The zombie city's moon, where zombie_city.ae points its key light:
+// direction (0.58, 0.52, -0.30), which is 31 degrees up and this azimuth.
+const MOON_AZIMUTH = 0.0 - 0.477
+const MOON_ELEVATION = 0.547
+
+// A cheap hash of two integers to a float in [0, 1), for the stars: the same
+// sky every run, and a star where nothing else in the frame repeats.
+hash2(a: int, b: int) -> float {
+    h = (a * 374761393 + b * 668265263) & 0x7FFFFFFF
+    h = ((h ^ (h >> 13)) * 1274126177) & 0x7FFFFFFF
+    return ((h ^ (h >> 16)) & 0xFFFFFF) as float / 16777216.0
+}
+
+// Night over a city: near-black blue overhead, a sodium glow rising from the
+// streets at the horizon, a moon with its halo, and stars that thin into the
+// glow the way they do over a lit town.
+write_night(path: string) -> bool {
+    pixels = calloc(SKY_W * SKY_H * 4, 1)
+    if pixels == null { return false }
+    field = noise.perlin_new(4451)
+
+    moon_y = core.sin_of(MOON_ELEVATION)
+    moon_x = core.cos_of(MOON_ELEVATION) * core.cos_of(MOON_AZIMUTH)
+    moon_z = core.cos_of(MOON_ELEVATION) * core.sin_of(MOON_AZIMUTH)
+
+    y = 0
+    while y < SKY_H {
+        elevation = (0.5 - (y as float + 0.5) / (SKY_H as float)) * PI
+        x = 0
+        while x < SKY_W {
+            azimuth = ((x as float + 0.5) / (SKY_W as float)) * 2.0 * PI - PI
+            dx = core.cos_of(elevation) * core.cos_of(azimuth)
+            dy = core.sin_of(elevation)
+            dz = core.cos_of(elevation) * core.sin_of(azimuth)
+
+            up = clamp01(dy)
+            // The sky itself: the city's glow at the horizon, warm and
+            // uneven with the noise (brighter over the town's centre), gone
+            // by twenty degrees up into a blue-black.
+            glow_shape = 0.7 + 0.3 * noise.fbm2(field, azimuth * 1.3, 0.0, 3, 0.5)
+            glow = exp(0.0 - up * 9.0) * glow_shape
+            r = 0.010 + 0.30 * glow
+            g = 0.014 + 0.20 * glow
+            b = 0.035 + 0.12 * glow
+            if dy < 0.0 {
+                // Below the horizon, a scene's ground; the same glow fading
+                // down into black for the sliver ever seen.
+                down = clamp01(0.0 - dy)
+                r = (0.010 + 0.30 * glow_shape) * (1.0 - down)
+                g = (0.014 + 0.20 * glow_shape) * (1.0 - down)
+                b = (0.035 + 0.12 * glow_shape) * (1.0 - down)
+            }
+
+            // Stars: one in a cell here and there, brighter or fainter, and
+            // thinning into the glow. Skipped where the moon's halo is.
+            if dy > 0.0 {
+                cell_x = x / 3
+                cell_y = y / 3
+                roll = hash2(cell_x, cell_y)
+                if roll < 0.045 {
+                    px = (hash2(cell_x + 7, cell_y) * 3.0) as int
+                    py = (hash2(cell_x, cell_y + 11) * 3.0) as int
+                    if x % 3 == px && y % 3 == py {
+                        bright = 0.25 + hash2(cell_x + 3, cell_y + 5) * 0.75
+                        bright = bright * bright * smoothstep(0.0, 0.18, dy)
+                        r = r + bright * 0.85
+                        g = g + bright * 0.88
+                        b = b + bright * 1.0
+                    }
+                }
+            }
+
+            // The moon: a disc and a soft halo, cool and bright.
+            cosd = dx * moon_x + dy * moon_y + dz * moon_z
+            d = core.acos_of(clamp01(cosd))
+            halo = exp(0.0 - d * d * 60.0) * 0.55 + exp(0.0 - d * 6.0) * 0.12
+            r = r + halo * 0.70
+            g = g + halo * 0.76
+            b = b + halo * 0.90
+            if d < 0.026 {
+                // Its face: a pale disc, darker at the seas, the noise as maria.
+                sea = noise.fbm2(field, dx * 90.0, dz * 90.0 + dy * 40.0, 3, 0.5)
+                face = 0.82 - smoothstep(0.45, 0.65, sea) * 0.22
+                r = face * 0.94
+                g = face * 0.95
+                b = face
+            }
+
+            put(pixels, y * SKY_W + x, r, g, b)
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    ok = ae3d_png_write(path, pixels, SKY_W, SKY_H) == 1
+    noise.perlin_free(field)
+    free(pixels)
+    return ok
+}
+
 // Sand: wind ripples running one way, broken by finer grain and by broad
 // patches a shade darker or lighter, and tiling -- the noise is sampled on a
 // torus so the left edge is the right edge and the top the bottom.
@@ -169,6 +270,11 @@ main() {
         println("make_sky: wrote resources/sky/desert.png (${SKY_W}x${SKY_H})")
     } else {
         println("make_sky: could not write resources/sky/desert.png")
+    }
+    if write_night("resources/sky/night.png") {
+        println("make_sky: wrote resources/sky/night.png (${SKY_W}x${SKY_H})")
+    } else {
+        println("make_sky: could not write resources/sky/night.png")
     }
     if write_sand("resources/textures/sand.png") {
         println("make_sky: wrote resources/textures/sand.png (${SAND_W}x${SAND_W}, tiling)")
