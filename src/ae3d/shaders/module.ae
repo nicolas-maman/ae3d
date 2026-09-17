@@ -2073,6 +2073,7 @@ void main() {
     vec3 R = reflect(V, vec3(0.0, 1.0, 0.0));
     float stepLen = 0.25;
     vec3 pos = P + R * stepLen;
+    vec3 prev = P;
     vec3 hit = scene;
     float edgeFade = 0.0;
     for (int i = 0; i < 64; i++) {
@@ -2081,14 +2082,37 @@ void main() {
         vec2 uv = (clip.xy / clip.w) * 0.5 + 0.5;
         if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) break;
         vec3 sceneAt = worldFromDepth(uv);
-        if (distance(viewPos, pos) > distance(viewPos, sceneAt) + 0.03) {
+        float behind = distance(viewPos, pos) - distance(viewPos, sceneAt);
+        // A hit is the ray entering a surface, not the ray anywhere behind
+        // one. Without a thickness every step that passed behind a figure
+        // counted, so a road pixel well below a zombie reflected its legs:
+        // the ray from there crosses the figure's column on screen far
+        // behind it in depth, and the figure smeared into a stripe down
+        // to the bottom of the frame.
+        if (behind > 0.03 && behind < stepLen * 2.0 + 0.2) {
+            // Bisect between the last step outside and this one inside, so
+            // the hit is the surface and not a quarter-metre band on it.
+            vec3 lo = prev;
+            vec3 hi = pos;
+            for (int k = 0; k < 4; k++) {
+                vec3 mid = (lo + hi) * 0.5;
+                vec4 mclip = viewProjection * vec4(mid, 1.0);
+                vec2 muv = (mclip.xy / mclip.w) * 0.5 + 0.5;
+                if (distance(viewPos, mid) > distance(viewPos, worldFromDepth(muv))) hi = mid; else lo = mid;
+            }
+            vec4 hclip = viewProjection * vec4(hi, 1.0);
+            uv = (hclip.xy / hclip.w) * 0.5 + 0.5;
             hit = texture(screenTexture, uv).rgb;
             // Fade toward the screen edges so the reflection does not cut hard.
             float edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
             edgeFade = clamp(edge * 8.0, 0.0, 1.0);
             break;
         }
+        prev = pos;
         pos += R * stepLen;
+        // Longer steps further out, so the march reaches the far facades
+        // within its budget while the near ones are still found finely.
+        stepLen *= 1.05;
     }
 
     // Add only the reflection's *excess* brightness -- the lamps and lit

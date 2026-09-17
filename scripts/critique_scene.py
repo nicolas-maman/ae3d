@@ -184,6 +184,10 @@ REFLECTION_LAMP_LIFT = 1.4  # the road carries at least this many times as many 
 SSR_ROAD_HEIGHT = 0.115     # the reflective plane, matching the scene's road
 SSR_STRENGTH = 1.5          # the reflection strength the standard measures at
 SSR_LAMP_LIFT = 1.15        # SSR adds at least this many times as many road bright cells
+# How much the wet road's reflection may change the cells just under the
+# figure's feet: a mirror puts the shins there (0.10 on this scene), the
+# thickness-less march put the lit torso there (0.33).
+SSR_FIGURE_SMEAR = 0.20
 # The reflective pass writes into an intermediate the bloom pass then reads, so
 # the mirrored lamps bloom with the real ones rather than the reflection
 # replacing the bloom. Proven by holding SSR on and toggling bloom: if bloom
@@ -1121,6 +1125,80 @@ def wet_road_ssr(engine, at=2.2):
           % (on, off, on / float(max(off, 1)), SSR_LAMP_LIFT))
 
 
+def figure_reflection(engine, mesh, at=2.2, columns=64, rows=48):
+    """That the figure's reflection on the wet road is a figure, not a smear.
+
+    A screen-space march without a thickness test counts every step that
+    passes behind a thin surface as a hit, so a road pixel far below the
+    figure reflected its legs: the figure smeared into a striped column down
+    to the bottom of the frame. A mirror image of a figure standing on the
+    road is at most as tall as the figure, so under the figure's own columns
+    the cells the reflection changes may run no further below its feet than
+    the figure runs up from them. Read from the whole frame with the
+    reflection on against off, in the figure's columns only: isolating the
+    figure would take away the road it is mirrored in. Vulkan-only, like the
+    reflection.
+    """
+    engine("anim.set", time=at)
+    stats = engine("frame.stats")
+    if stats.get("backend") != "vulkan":
+        return
+    print("\n== the figure's reflection ==")
+    was_ssr = stats.get("render", {}).get("ssr", False)
+    was_bloom = stats.get("render", {}).get("bloom_intensity", 0.0)
+
+    def grid():
+        return engine("frame.grid", columns=columns, rows=rows)["cells"]
+
+    engine("render.set", ssr=False, bloom_intensity=0.0)
+    engine("scene.isolate", object=mesh)
+    with_it = grid()
+    engine("scene.isolate", object="__nothing__")
+    without = grid()
+    engine("scene.isolate")
+    body = [[sum(abs(a[i] - b[i]) for i in range(3)) > 0.015
+             for a, b in zip(ra, rb)] for ra, rb in zip(with_it, without)]
+    cells = [(x, y) for y, row in enumerate(body) for x, on in enumerate(row) if on]
+    if not cells:
+        check("the figure is on screen for its reflection to be judged", False, "nothing drawn for %s" % mesh)
+        engine("render.set", ssr=was_ssr, bloom_intensity=was_bloom)
+        return
+    left, right = min(x for x, _ in cells), max(x for x, _ in cells)
+    top, bottom = min(y for _, y in cells), max(y for _, y in cells)
+    height = bottom - top + 1
+
+    off = grid()
+    engine("render.set", ssr=True, ssr_road_height=SSR_ROAD_HEIGHT, ssr_strength=SSR_STRENGTH)
+    on = grid()
+    engine("render.set", ssr=was_ssr, bloom_intensity=was_bloom)
+
+    # Rows below the feet where the reflection changed a cell in the figure's
+    # columns by more than the road's own glint does elsewhere.
+    reach = 0
+    profile = []
+    for y in range(bottom + 1, rows):
+        deltas = [sum(abs(on[y][x][i] - off[y][x][i]) for i in range(3)) for x in range(left, right + 1)]
+        profile.append(max(deltas))
+        if any(d > 0.08 for d in deltas):
+            reach = y - bottom
+    print("  the figure spans rows %d..%d (%d rows), columns %d..%d; the reflection changes cells down to %d rows below its feet"
+          % (top, bottom, height, left, right, reach))
+    print("  row deltas below the feet: %s" % " ".join("%.2f" % d for d in profile))
+    check("the reflection is no taller than the figure it mirrors",
+          reach <= height * 1.2 + 2,
+          "%d rows of reflection under a figure %d rows tall" % (reach, height))
+    # A mirror image is the figure upside down: what lies just under the feet
+    # is the feet and shins, the darkest of it. The smear put the lit torso
+    # there, for every road pixel whose ray crossed the figure's column: the
+    # rows just under the feet ran three times brighter than a mirror's.
+    near = profile[:max(1, height // 3)]
+    near_mean = sum(near) / float(len(near))
+    check("what lies just under the feet is the feet mirrored, not the torso smeared",
+          near_mean < SSR_FIGURE_SMEAR,
+          "the reflection changes the rows under the feet by %.2f on average, wanted under %.2f"
+          % (near_mean, SSR_FIGURE_SMEAR))
+
+
 def ssr_bloom_coexist(engine, at=2.2):
     """That bloom composites on top of the reflection rather than replacing it.
 
@@ -1333,6 +1411,8 @@ def main(argv):
         wet_road_reflection(engine)
         wet_road_ssr(engine)
         ssr_bloom_coexist(engine)
+        if args.walks:
+            figure_reflection(engine, args.walks)
         bloom(engine)
         shadows(engine)
         if args.walks:

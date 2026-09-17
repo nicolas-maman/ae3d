@@ -151,6 +151,14 @@ engine is measured on. 225 objects, every surface textured to one texel
 density, the figure one skinned surface with a face, and the wet road taking
 the lamp.*
 
+![The same street through Vulkan: the wet road mirrors the lit windows, the lamp and the figure](docs/zombie-street-vulkan.png)
+
+*The same rig through Vulkan, where the wet road is a screen-space reflection
+of what is drawn: the windows, the lamp and the figure, mirrored. The march has
+a thickness, so a figure reflects as a figure and not as a stripe; the critique
+measures that the rows under its feet hold the feet mirrored, not the torso
+smeared.*
+
 What makes the pipeline usable by a program rather than a person:
 
 - **The export is deterministic.** Blender is not: regenerating a scene gives
