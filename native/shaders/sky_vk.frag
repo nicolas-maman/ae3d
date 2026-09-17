@@ -137,6 +137,11 @@ void main() {
     
     float u = (theta + 3.14159265) / 6.28318531;
     float v = (phi + 1.57079633) / 3.14159265;
-    
-    FragColor = texture(skybox, vec2(u, v));
+
+    // Sample the base level. u wraps from 1 to 0 along one longitude, and the
+    // derivative across that step is huge, so texture() chose the smallest,
+    // darkest mip for that one column of pixels: a dark line down the sky
+    // wherever the camera faced -X. A sky is a smooth gradient with nothing a
+    // mip chain has to tame, so level 0 is right everywhere and seamless here.
+    FragColor = textureLod(skybox, vec2(u, v), 0.0);
 }
