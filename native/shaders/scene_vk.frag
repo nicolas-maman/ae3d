@@ -995,12 +995,21 @@ void main() {
 
     // Every light in the scene contributes; the loop stops at lightCount, so a
     // scene with one light costs what it did before there could be four.
+    // The key light is the one the shadow map and the clouds are cast by,
+    // so its light alone is taken by them; a lamp beside a wall lights the
+    // wall's shadowed side, which is what a lamp is for. A shadow takes the
+    // direct light and leaves the sky's fill alone: multiplied over the
+    // whole colour, ambient included, as it was, a shadow went to a third
+    // of black and the shadowed side of a hill at dusk was a hole.
+    float sunlit = cloudShadow(FragPos);
+    if (hasShadowMap && enableShadows) sunlit *= shadow_factor();
     vec3 Lo = vec3(0.0);
     for (int i = 0; i < 4; i++) {
         if (i >= lightCount) {
             break;
         }
-        Lo += direct_light(lights[i], norm, viewDir, albedo, F0, NdotV, adjustedRoughness);
+        vec3 lit = direct_light(lights[i], norm, viewDir, albedo, F0, NdotV, adjustedRoughness);
+        Lo += i == 0 ? lit * sunlit : lit;
     }
 
     // Ambient belongs to the scene rather than to each light, so it comes from
@@ -1016,7 +1025,7 @@ void main() {
     vec3 fillLightContrib = vec3(0.0);
 
     // The direct light, under the clouds' shadow where a cloud drifts over.
-    vec3 color = ambient + fillLightContrib + Lo * cloudShadow(FragPos);
+    vec3 color = ambient + fillLightContrib + Lo;
     
 	// Calculate distance for performance scaling (CRITICAL for voxel terrain performance)
 	float distanceToCamera = length(FragPos - viewPos);
@@ -1043,14 +1052,6 @@ void main() {
     
     // HDR exposure and tone mapping for normal objects
     color = color * exposure;
-    // GPU Gems Chapter 9 & 11: Apply shadows with proper sun behavior
-    // Without a map there is nothing to compare against, and the light-space
-    // position is meaningless: dividing it by a w of zero used to leave the
-    // whole surface darkened by whatever the sampler happened to return.
-    if (hasShadowMap && enableShadows) {
-        color = color * shadow_factor();
-    }
-    
     // Apply bloom effect
     if (enableBloom) {
         // Extract bright areas for bloom
