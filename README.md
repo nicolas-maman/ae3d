@@ -10,7 +10,8 @@ drawn, and check the frame by number instead of by eye.
 *`examples/zombie_city.ae`: a street of seven blocks and a crowd of the same
 skinned zombie, every one posed from a shared pose bank and drawn in two
 instanced calls. Everything in the frame was modelled, textured and animated
-by a script in Blender and exported through the pipeline below.*
+by a script in Blender and exported through the pipeline below; the sky was
+painted by the engine.*
 
 ae3d is written in [Aether](https://github.com/aether-lang-dev/aether) with a
 thin C layer for the GPU, windowing and image decoding. It continues
@@ -30,7 +31,7 @@ can be interrogated while it runs. See [Credits](#credits).
   0.7% of channels.
 - **Skinned crowds in one draw.** A figure's walk is baked once into a pose
   bank (a texture of bone palettes); every instance carries its own phase and
-  is posed from the bank in the vertex shader. A crowd of the real 23,680-
+  is posed from the bank in the vertex shader. A crowd of the real 26,636-
   triangle zombie is one instanced call per distance tier, and the bake is
   *in place*: the clip's travel is taken out of the poses and handed back to
   the simulation as speed, so feet plant instead of skating and nothing
@@ -56,8 +57,8 @@ can be interrogated while it runs. See [Credits](#credits).
 ![Twenty thousand zombies filling the street from end to end, seen from above the pavement](docs/zombie-horde.png)
 
 *`AE3D_CROWD=20000 AE3D_NEAR=28 ./build/zombie_city`: the near tier draws the
-full mesh, the far tier a bone-aware decimation of it (130 triangles), and the
-draw count does not change with the crowd. Twenty thousand hold ~36 fps on an
+full mesh, the far tier the build's own 168-triangle stand-in, and the draw
+count does not change with the crowd. Twenty thousand hold ~38 fps on an
 RTX 4070 Ti at 1280x720 with the GPU shared.*
 
 ## Quick start
@@ -100,7 +101,7 @@ cost.
 The zombie street is not a downloaded asset. `tools/blender/make_zombie_street.py`
 builds the whole scene in a headless Blender: the terrace of buildings, the
 street furniture, the road with its camber, the zombie as a skin-modifier
-body over a 29-bone rig, its clothes, the textures (generated with numpy,
+body over a 24-bone rig with a sculpted face, its clothes, the textures (generated with numpy,
 brick and paving and dead skin and cloth, each with a normal map), and the
 walk cycle, lunge and recovery as a footstep plan solved onto the legs.
 `ae3d_export.py` then writes each object's geometry, material, animation and
@@ -113,8 +114,8 @@ blender --background --factory-startup --python tools/blender/make_zombie_street
 
 ![The hero zombie walking a night street under a lamp, its shadow on the wet road](docs/zombie-street.png)
 
-*`examples/zombie_street.ae`: the same export as one figure, the scene the
-engine is measured against. 177 objects, every surface textured to one texel
+*`tools/zombie_street.ae`: the same export as one figure, the rig the
+engine is measured on. 225 objects, every surface textured to one texel
 density, the figure one skinned surface with a face, and the wet road taking
 the lamp.*
 
@@ -129,6 +130,10 @@ What makes the pipeline usable by a program rather than a person:
   `gait_end`, `lunge`, `recover`) go into the manifest, and a scene asks for
   them by name: the crowd loops exactly one gait cycle, which repeats without a
   seam, instead of hard-coding a frame range.
+- **The engine paints its own skies and ground.** `tools/make_sky.ae` writes
+  the desert's afternoon sky, the city's night sky (moon, stars, the town's
+  glow at the horizon) and a tiling sand texture from the engine's own noise
+  through its own PNG writer -- no downloads, no second language.
 - **Textures can be looked at without Blender.**
   `py tools/blender/preview_textures.py brick out/brick.png` renders any
   generator to a PNG (within ~2% of what Blender exports), so a texture is
@@ -228,21 +233,22 @@ git clone https://github.com/aether-lang-dev/aether-ui.git ../aether-ui
 
 | Example | What it shows |
 |---|---|
-| `spinning_cube.ae` | The smallest complete program: window, light, one model |
-| `backend_switch.ae` | The same scene through either renderer, `./build/backend_switch vulkan` |
-| `zombie_street.ae` | The hero scene: a skinned figure walking and attacking in a lamp-lit street, 177 objects from one `.blend` |
-| `zombie_city.ae` | A city of the street's blocks and a horde of the figure, posed from a pose bank in two instanced draws; `AE3D_CROWD` sets the count |
-| `zombie_horde.ae` | The crowd alone on open ground, one draw, `AE3D_CROWD=200000` |
-| `blender_pipeline.ae` | A model authored and keyed in Blender, exported, loaded and played |
-| `models.ae` | OBJ loading, including a multi-material model drawn as one group per material |
-| `lights.ae` | Material presets cycling with the light type, bloom, transparency |
-| `water.ae` | A 256x256 Gerstner ocean, 65536 vertices |
+| `zombie_city.ae` | The city: seven blocks of terraces under a painted night sky, and a horde of the same skinned figure posed from a pose bank in two instanced draws; `AE3D_CROWD` sets the count |
+| `caustics.ae` | The seabed under the swell: a diver's height off the sand, murk with distance, the water's light web on the sand and the rocks |
+| `sand.ae` | A desert: 400,000 grains with a tint each, falling and settling into a pile under a sky and a sun the engine painted, dunes to the horizon |
+| `black_hole.ae` | Kerr geodesics integrated per pixel: a spinning hole, its asymmetric shadow, a lensed disc and sky; `tests/test_blackhole` measures the shadow against sqrt(27) M. [docs/black-hole.md](docs/black-hole.md) |
 | `voxel_world.ae` | 960464 voxels of Perlin terrain, 93030 visible, one draw call |
 | `smooth_terrain.ae` | The same terrain meshed with surface nets |
-| `black_hole.ae` | Kerr geodesics integrated per pixel: a spinning hole, its asymmetric shadow, a lensed disc and sky; `tests/test_blackhole` measures the shadow against sqrt(27) M. [docs/black-hole.md](docs/black-hole.md) |
-| `particle_disc.ae` | 200000 particles under Verlet integration, one instanced draw |
-| `sand.ae` | 250000 grains falling and settling |
-| `zombie_crowd.ae` | The ECS on its own: a million entities advanced in ~2.8 ms and drawn as one instanced call |
+| `models.ae` | OBJ loading, including a multi-material model drawn as one group per material |
+| `lights.ae` | Material presets cycling with the light type, bloom, transparency |
+| `blender_pipeline.ae` | A model authored and keyed in Blender, exported, loaded and played |
+| `backend_switch.ae` | The same scene through either renderer, `./build/backend_switch vulkan` |
+| `spinning_cube.ae` | The smallest complete program: window, light, one model |
+
+Beside them, `tools/zombie_street.ae` is the figure's measuring rig: one block
+and one zombie, where the critique, the measurement and the frame budget hold
+the figure and the street to their standards on every build. It is not a demo
+and it is what the demo is built from.
 
 The bigger examples each push one part of the engine harder than anything
 else does and have an answer of their own to check: the black hole's shadow
