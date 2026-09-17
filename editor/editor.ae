@@ -935,22 +935,22 @@ extern malloc(size: int) -> ptr
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 
-const ROWS = 25
+const ROWS = 26
 // Past every inspector row, because a turn of the gizmo is not a row: it is
 // recorded as the angle the drag has turned through so far, and undone by
 // turning back through it.
-const ROTATE_FIRST_SLOT = 25
-// Past the rotation axes, which take 21 through 23. A behaviour is a property
+const ROTATE_FIRST_SLOT = 26
+// Past the rotation axes, which take 26 through 28. A behaviour is a property
 // of a model like any other as far as undo is concerned, so it travels as a
 // property step in a slot no row uses.
-const SCRIPT_SLOT = 28
+const SCRIPT_SLOT = 29
 // A terrain's shape. A choice rather than a number, so it travels the way a
 // behaviour does rather than as a row.
-const TERRAIN_BIOME_SLOT = 29
+const TERRAIN_BIOME_SLOT = 30
 // A terrain's style. Blocks are voxels drawn one cube per cell; smooth meshes
 // the same field into one surface. Voxels are a kind of terrain rather than
 // what terrain is.
-const TERRAIN_STYLE_SLOT = 30
+const TERRAIN_STYLE_SLOT = 31
 const STYLE_BLOCKS = 0
 const STYLE_SMOOTH = 1
 const STYLE_KINDS = 2
@@ -966,6 +966,10 @@ const SKY_FIRST_ROW = 21
 const SKY_LAST_ROW = 23
 // A terrain's seed. Unbounded, so it is a field rather than a slider.
 const TERRAIN_SEED_ROW = 24
+// How mirror-like a surface is: what the wet road's reflection is scaled by
+// on Vulkan (Reflections, in the view menu). A material property like the
+// roughness beside it, so it saves with the model and undoes as a row.
+const REFLECT_ROW = 25
 const SCRIPT_NONE = 0
 // A behaviour is a script found on disk, not a case in this file. Zero is
 // always "none"; the rest are whatever resources/scripts holds, in the order
@@ -1194,6 +1198,7 @@ sync_inspector() {
         show_row(6, m.material.diffuse.z)
         show_row(7, m.material.metallic)
         show_row(8, m.material.roughness)
+        show_row(REFLECT_ROW, m.material.reflectivity)
     }
 }
 
@@ -2630,7 +2635,7 @@ select_model_pointer(m: ptr) {
 // inspector writes to gets a material first; core makes one with the same
 // defaults a loader would.
 write_property(m: *Model, index: int, value: float) {
-    if index >= 4 && index <= 8 { core.model_ensure_material(m) }
+    if is_material_row(index) { core.model_ensure_material(m) }
     if index == 0 { core.model_set_position(m, value, m.position.y, m.position.z) }
     if index == 1 { core.model_set_position(m, m.position.x, value, m.position.z) }
     if index == 2 { core.model_set_position(m, m.position.x, m.position.y, value) }
@@ -2640,10 +2645,15 @@ write_property(m: *Model, index: int, value: float) {
     if index == 6 { core.model_set_diffuse(m, m.material.diffuse.x, m.material.diffuse.y, value) }
     if index == 7 { core.model_set_pbr(m, value, m.material.roughness) }
     if index == 8 { core.model_set_pbr(m, m.material.metallic, value) }
+    if index == REFLECT_ROW { core.model_set_reflectivity(m, value) }
+}
+
+is_material_row(index: int) -> bool {
+    return (index >= 4 && index <= 8) || index == REFLECT_ROW
 }
 
 property_value(m: *Model, index: int) -> float {
-    if index >= 4 && index <= 8 && m.material == null { return 0.0 }
+    if is_material_row(index) && m.material == null { return 0.0 }
     if index == 0 { return m.position.x }
     if index == 1 { return m.position.y }
     if index == 2 { return m.position.z }
@@ -2653,6 +2663,7 @@ property_value(m: *Model, index: int) -> float {
     if index == 6 { return m.material.diffuse.z }
     if index == 7 { return m.material.metallic }
     if index == 8 { return m.material.roughness }
+    if index == REFLECT_ROW { return m.material.reflectivity }
     return 0.0
 }
 
@@ -4582,6 +4593,7 @@ main() {
         inspector_row(material_body, "blue", 0.0, 1.0, 0.3, 6)
         inspector_row(material_body, "metallic", 0.0, 1.0, 0.0, 7)
         inspector_row(material_body, "roughness", 0.0, 1.0, 0.5, 8)
+        inspector_row(material_body, "reflectivity", 0.0, 1.0, 0.0, REFLECT_ROW)
 
         ui.divider(right)
         light_body = fold_section(right, "LIGHT")

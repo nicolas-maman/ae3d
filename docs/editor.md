@@ -114,8 +114,9 @@ it, and clears the history, since the steps in it refer to models that are gone.
 carries the newest.
 
 **Inspector** changes with what is selected. Transform and material are always
-there; water, light, camera, behaviour and rendering sections appear when they
-apply. A section is the rows that belong to it rather than a run of them: the
+there (colour, metallic, roughness, and reflectivity -- how much of the wet
+road's mirror a surface gets on Vulkan, under Reflections); water, light,
+camera, behaviour and rendering sections appear when they apply. A section is the rows that belong to it rather than a run of them: the
 water rows are not contiguous, because the foam row was added after the row
 indices below it were spoken for, so which section a row is in is a question
 asked of the row and not of its number.
@@ -151,6 +152,7 @@ wave table nothing reads:
 | component | `water`, `voxel`, `light` or `mesh` |
 | script | the behaviour running on it, if any |
 | water | every knob of the simulation driving it |
+| material | colour, metallic, roughness, reflectivity, alpha, and the texture and normal map paths |
 
 and the file records the view: where the camera stood, its field of view and
 clip planes, and whether face and frustum culling were on.
