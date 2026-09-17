@@ -153,6 +153,7 @@ wave table nothing reads:
 | script | the behaviour running on it, if any |
 | water | every knob of the simulation driving it |
 | material | colour, metallic, roughness, reflectivity, alpha, and the texture and normal map paths |
+| rendering | FXAA, bloom, reflections (SSR), clouds -- the view menu's switches, applied on the backend that has them |
 
 and the file records the view: where the camera stood, its field of view and
 clip planes, and whether face and frustum culling were on.

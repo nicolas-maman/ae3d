@@ -1163,6 +1163,36 @@ def main():
                 widgets, back = wait_for(args.port, ssr_on)
                 check("and reflections come back with the scene", back)
 
+        # Clouds the same way: marched by either backend, carried by the scene.
+        widgets = tree(args.port)
+        clouds = [w for w in widgets.values()
+                  if w["type"] == "text" and w["text"].strip() == "Clouds"]
+        check("the clouds switch is in the tree", len(clouds) == 1)
+        if clouds and save_btn and load_btn:
+            switch = [w for w in widgets.values()
+                      if w["parent"] == clouds[0]["parent"] and w["type"] == "toggle"]
+            if switch:
+                def clouds_on(ws):
+                    return bool(ws[switch[0]["id"]].get("active"))
+
+                post(args.port, "/widget/%d/click" % switch[0]["id"])
+                widgets, on = wait_for(args.port, clouds_on)
+                check("the clouds switch turns on", on)
+                written = os.path.getmtime(scene_file)
+                post(args.port, "/widget/%d/click" % save_btn)
+                check("the scene is written with clouds on",
+                      wait_file(scene_file, newer_than=written))
+                with open(scene_file) as handle:
+                    saved = json.load(handle)
+                check("and the file says so",
+                      bool(saved.get("view", {}).get("rendering", {}).get("clouds")),
+                      json.dumps(saved.get("view", {}).get("rendering", {})))
+                post(args.port, "/widget/%d/click" % switch[0]["id"])
+                wait_for(args.port, lambda ws: not clouds_on(ws))
+                post(args.port, "/widget/%d/click" % load_btn)
+                widgets, back = wait_for(args.port, clouds_on)
+                check("and clouds come back with the scene", back)
+
         if delete and scene:
             before_delete = len(rows_under(tree(args.port), scene))
             post(args.port, "/widget/%d/click" % delete)

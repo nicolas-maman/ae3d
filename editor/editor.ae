@@ -284,6 +284,10 @@ var g_bloom = false
 // inert on OpenGL, but the scene carries it either way (#267).
 var g_ssr_toggle = 0
 var g_ssr = false
+// Clouds over the sky: a switch, at the cover a scene's sky usually wants.
+var g_clouds = false
+var g_clouds_toggle = 0
+const CLOUD_COVER = 0.4
 const SSR_ROAD_HEIGHT = 0.0
 const SSR_STRENGTH = 0.6
 // The first frame rate the bar ever showed. A driver cannot see it: by the
@@ -733,6 +737,13 @@ apply_post() {
     if g_vulkan {
         vk.renderer_set_ssr(g_renderer as *VKRenderer, g_ssr)
         vk.renderer_set_ssr_params(g_renderer as *VKRenderer, SSR_ROAD_HEIGHT, SSR_STRENGTH)
+    }
+    cover = 0.0
+    if g_clouds { cover = CLOUD_COVER }
+    if g_vulkan {
+        vk.renderer_set_clouds(g_renderer as *VKRenderer, cover, 1.0)
+    } else {
+        gl.renderer_set_clouds(g_renderer as *GLRenderer, cover, 1.0)
     }
     draw_frame()
 }
@@ -3400,6 +3411,8 @@ current_view() -> View {
     v.ssr = g_ssr
     v.ssr_road_height = SSR_ROAD_HEIGHT
     v.ssr_strength = SSR_STRENGTH
+    v.clouds = g_clouds
+    v.cloud_cover = CLOUD_COVER
     return v
 }
 
@@ -3536,9 +3549,11 @@ load_scene() {
     g_fxaa = view.fxaa
     g_bloom = view.bloom
     g_ssr = view.ssr
+    g_clouds = view.clouds
     if g_fxaa_toggle != 0 { ui.set_toggle(g_fxaa_toggle, flag_of(g_fxaa)) }
     if g_bloom_toggle != 0 { ui.set_toggle(g_bloom_toggle, flag_of(g_bloom)) }
     if g_ssr_toggle != 0 { ui.set_toggle(g_ssr_toggle, flag_of(g_ssr)) }
+    if g_clouds_toggle != 0 { ui.set_toggle(g_clouds_toggle, flag_of(g_clouds)) }
     apply_post()
 
 
@@ -4756,6 +4771,17 @@ main() {
             apply_post()
             if g_vulkan { say("reflections ${on}") }
             else { say("reflections ${on} (drawn on the Vulkan backend)") }
+        }
+
+        clouds_row = ui.hstack(shading_body, 8)
+        as_row(clouds_row)
+        clouds_caption = ui.text(clouds_row, "Clouds")
+        ui.add_css_class(clouds_caption, "label")
+        ui.spacer(clouds_row)
+        g_clouds_toggle = ui.toggle(clouds_row, "") callback |on: bool| {
+            g_clouds = on
+            apply_post()
+            say("clouds ${on}")
         }
         ui.spacer(right)
 
