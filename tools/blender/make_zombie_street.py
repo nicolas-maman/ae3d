@@ -1104,6 +1104,16 @@ def main(argv):
     scene.render.fps = FPS
     scene.frame_start = 1
     scene.frame_end = TOTAL
+    # What the clip is made of, for whatever reads it. The walk before the
+    # lunge is a pure function of the gait phase, so one cycle of it -- 1/
+    # STRIDE_RATE seconds, 40 frames -- loops without a seam; a crowd bakes
+    # that and nothing else, so a horde shuffles rather than lunging in
+    # unison every five seconds. The exporter writes these to the manifest.
+    cycle = round(FPS / STRIDE_RATE)
+    scene.timeline_markers.new("gait", frame=1)
+    scene.timeline_markers.new("gait_end", frame=1 + cycle)
+    scene.timeline_markers.new("lunge", frame=WALK_END + 1)
+    scene.timeline_markers.new("recover", frame=ATTACK_END + 1)
 
     surfaces = {
         "brick": material("WallBrick", textures.brick(), roughness=0.95,

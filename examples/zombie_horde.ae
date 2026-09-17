@@ -94,10 +94,20 @@ bake_zombie(m: *Manifest, entry: *Entry) -> ptr {
     }
     if clips != null { list.free(clips) }
     if duration <= 0.0 { duration = 1.0 }
-    g_walk = duration
-
-    bank = crowd.posebank_bake(reg, skel, FRAMES, duration)
-    println("zombie_horde: ${skin.skeleton_count(skel)} bones, ${crowd.posebank_frames(bank)} poses over ${duration}s of walk")
+    // One gait cycle, in place: the build marks the cycle, and the clip's
+    // travel is the Root bone's while the horde's is the sim's (see
+    // zombie_city, which explains both).
+    gait = assets.manifest_marker(m, "gait", 0.0)
+    gait_end = assets.manifest_marker(m, "gait_end", duration)
+    if gait_end <= gait {
+        gait = 0.0
+        gait_end = duration
+    }
+    g_walk = gait_end - gait
+    root = skin.skeleton_find(skel, "Root")
+    if root < 0 { root = skin.skeleton_find(skel, "Hips") }
+    bank = crowd.posebank_bake_in_place(reg, skel, FRAMES, gait, g_walk, root)
+    println("zombie_horde: ${skin.skeleton_count(skel)} bones, ${crowd.posebank_frames(bank)} poses over ${g_walk}s of walk")
 
     anim.registry_free(reg)
     skin.skeleton_free(skel)

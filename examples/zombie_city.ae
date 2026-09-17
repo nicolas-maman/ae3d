@@ -170,8 +170,30 @@ bake_zombie(m: *Manifest, entry: *Entry) -> ptr {
     }
     if clips != null { list.free(clips) }
     if duration <= 0.0 { duration = 1.0 }
-    g_walk = duration
-    bank = crowd.posebank_bake(reg, skel, FRAMES, duration)
+    // The crowd loops one gait cycle, not the hero's whole clip. The clip is
+    // a walk, a lunge and a recovery; looped entire, a quarter of the horde
+    // is mid-lunge at any moment with its arms out straight, and every zombie
+    // lunges every five seconds. The build marks the cycle ("gait" to
+    // "gait_end", one stride period, which repeats without a seam); an export
+    // without the markers loops the whole clip and says so.
+    gait = assets.manifest_marker(m, "gait", 0.0)
+    gait_end = assets.manifest_marker(m, "gait_end", duration)
+    if gait_end <= gait {
+        println("zombie_city: no gait markers in the export -- the crowd loops the whole ${duration}s clip, lunge and all")
+        gait = 0.0
+        gait_end = duration
+    }
+    g_walk = gait_end - gait
+    // In place: the clip walks the figure up the street, and that travel is
+    // on the Root bone. Baked as authored, every zombie's mesh walked metres
+    // off its simulated position through the clip and snapped back at the
+    // loop -- the "teleporting" the eye caught and the position check could
+    // not, because the positions never moved. The bake takes the travel out
+    // of the pose and records it; the step puts it back as motion.
+    root = skin.skeleton_find(skel, "Root")
+    if root < 0 { root = skin.skeleton_find(skel, "Hips") }
+    if root < 0 { println("zombie_city: no Root bone -- the crowd will carry the clip's travel") }
+    bank = crowd.posebank_bake_in_place(reg, skel, FRAMES, gait, g_walk, root)
     anim.registry_free(reg)
     skin.skeleton_free(skel)
     i = 0
@@ -558,6 +580,12 @@ log_scene(e: *Engine, cam: *Camera, near_tris: int, cloth_tris: int, far_tris: i
     println("zombie_city[diag] ================ SCENE ================")
     println("zombie_city[diag] crowd: ${g_count} zombies (AE3D_CROWD), sep every ${g_sepn} frame(s)")
     println("zombie_city[diag] tiers: near ${near_tris}+${cloth_tris} tris (full mesh), far ${far_tris} tris; ${FRAMES} pose bank")
+    // The walk the bank carries: how far the clip's root travels over its
+    // length, and the pace that sets. In place, so that travel is the crowd's
+    // motion and not the mesh's; zero here means the clip was baked as
+    // authored and the horde will drift off its positions.
+    total = crowd.posebank_travel(g_bank, FRAMES)
+    println("zombie_city[diag] walk: ${g_walk}s clip, root travels ${total}m in place => ${total / g_walk}m/s mean; at phase 0.25 ${crowd.posebank_speed(g_bank, 0.25, g_walk)}m/s, at 0.75 ${crowd.posebank_speed(g_bank, 0.75, g_walk)}m/s")
     println("zombie_city[diag] LOD: near<${g_near_dist}m detailed, beyond far; cull ${g_cull_dist}m")
     println("zombie_city[diag] city: ${TILES} blocks, block ${BLOCK_LEN}m, street x[${STREET_X0}..${STREET_X1}], road z[${ROAD_Z0}..${ROAD_Z1}] y=${ROAD_Y}")
     cp = cam.position
@@ -671,9 +699,11 @@ on_update(data: ptr, delta: float) {
         crowd.horde_separate(g_world, g_pos, g_vel, g_grid, SEP_RADIUS,
                              SEP_STRENGTH * (g_sepn as float))
     }
+    // The bank drives the pace: each zombie moves at the speed its pose is
+    // walking at, so the feet plant rather than skate (see crowd_step).
     crowd.crowd_step(ecs.column_data(g_pos), ecs.column_data(g_vel), ecs.column_data(g_yaw),
                      ecs.column_data(g_phase), g_count, delta, MAX_SPEED,
-                     STREET_X0, STREET_X1, ROAD_Z0, ROAD_Z1, ROAD_Y, g_walk)
+                     STREET_X0, STREET_X1, ROAD_Z0, ROAD_Z1, ROAD_Y, g_walk, g_bank)
     detect_teleports(delta)
     log_materials_once()
     nn = crowd.crowd_bucket(ecs.column_data(g_pos), ecs.column_data(g_yaw), ecs.column_data(g_phase),

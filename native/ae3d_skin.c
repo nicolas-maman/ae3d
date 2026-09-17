@@ -79,6 +79,12 @@ typedef struct {
     float *values;
     int    frames;
     int    bones;
+    /* How far the clip's root has travelled across the ground by each frame,
+     * frames + 1 entries so the last spans the loop back to the first. Filled
+     * by an in-place bake, which takes that travel out of the poses; the crowd
+     * step puts it back as motion, so a zombie moves exactly as fast as its
+     * pose is walking and its feet plant instead of skating. */
+    double *travel;
 } ae3d_posebank;
 
 void *ae3d_posebank_create(int frames, int bones) {
@@ -90,6 +96,8 @@ void *ae3d_posebank_create(int frames, int bones) {
     n = (size_t)frames * (size_t)bones * 16;
     b->values = (float *)calloc(n, sizeof(float));
     if (!b->values) { free(b); return NULL; }
+    b->travel = (double *)calloc((size_t)frames + 1, sizeof(double));
+    if (!b->travel) { free(b->values); free(b); return NULL; }
     b->frames = frames;
     b->bones = bones;
     /* Identity per bone, so a frame never captured still draws the bind pose
@@ -104,8 +112,37 @@ void *ae3d_posebank_create(int frames, int bones) {
 void ae3d_posebank_destroy(void *handle) {
     ae3d_posebank *b = (ae3d_posebank *)handle;
     if (!b) return;
+    free(b->travel);
     free(b->values);
     free(b);
+}
+
+/* The root's travel at frame k (0..frames, the last being the loop point),
+ * relative to wherever the bake chose as zero. */
+void ae3d_posebank_set_travel(void *handle, int frame, double distance) {
+    ae3d_posebank *b = (ae3d_posebank *)handle;
+    if (!b || frame < 0 || frame > b->frames) return;
+    b->travel[frame] = distance;
+}
+
+double ae3d_posebank_travel(void *handle, int frame) {
+    ae3d_posebank *b = (ae3d_posebank *)handle;
+    if (!b || frame < 0 || frame > b->frames) return 0.0;
+    return b->travel[frame];
+}
+
+/* How fast the root is walking at `phase` (0..1 through the clip) when the
+ * clip plays over `duration` seconds: the travel across the frame the phase
+ * falls in, over that frame's time. A bank baked as authored has no travel
+ * recorded and answers zero. */
+double ae3d_posebank_speed(void *handle, double phase, double duration) {
+    ae3d_posebank *b = (ae3d_posebank *)handle;
+    int f;
+    if (!b || duration <= 0.0 || b->frames <= 0) return 0.0;
+    if (phase < 0.0) phase = 0.0;
+    f = (int)(phase * b->frames);
+    if (f >= b->frames) f = b->frames - 1;
+    return (b->travel[f + 1] - b->travel[f]) * (double)b->frames / duration;
 }
 
 int ae3d_posebank_frames(void *handle) {

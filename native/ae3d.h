@@ -66,6 +66,9 @@ int    ae3d_posebank_bones(void *bank);
 void   ae3d_posebank_capture(void *bank, int frame, void *palette);
 double ae3d_posebank_get(void *bank, int frame, int bone, int i);
 const float *ae3d_posebank_data(void *bank);
+void   ae3d_posebank_set_travel(void *bank, int frame, double distance);
+double ae3d_posebank_travel(void *bank, int frame);
+double ae3d_posebank_speed(void *bank, double phase, double duration);
 int    ae3d_gl_posebank_texture(void *bank);
 void   ae3d_gl_setup_instance_phase(void *inst, int phase_vbo);
 void   ae3d_gl_update_instance_phases(void *inst, int phase_vbo);
@@ -78,7 +81,7 @@ void   ae3d_crowd_wander(double *vel, const double *yaw, int n, double speed);
 void   ae3d_crowd_step(double *pos, const double *vel, double *yaw, double *phase,
                        int n, double dt, double max_speed,
                        double x0, double x1, double z0, double z1,
-                       double road_y, double walk);
+                       double road_y, double walk, void *bank);
 int    ae3d_crowd_bucket(const double *pos, const double *yaw, const double *phase,
                          const double *col, int n,
                          double cx, double cz, double near_dist, double cull_dist,

@@ -313,14 +313,32 @@ void ae3d_crowd_wander(double *vel, const double *yaw, int n, double speed) {
     }
 }
 
+/* Each zombie's own pace through the walk, so a crowd does not march in lock
+ * step: a fixed spread of 0.85 to 1.15 of the clip's speed, hashed from the
+ * index so it is the same zombie every frame with no column to carry it. */
+static double crowd_pace(int i) {
+    double t = (double)i * 0.6180339887498949;
+    t -= (double)(long)t;
+    return 0.85 + 0.30 * t;
+}
+
 /* Cap the speed, step along the velocity, bounce off the street's edges (which
  * turns the heading so the zombie walks back in and the crowd stays in the
  * city), keep it on the road, face it along its heading, and advance its walk
- * with its pace. One pass. */
+ * with its pace. One pass.
+ *
+ * With a bank baked in place, the walk drives the motion rather than the other
+ * way round: the clip advances at the zombie's pace, and it moves along its
+ * velocity's direction at exactly the speed the clip's root was travelling at
+ * that point of the walk. That is what plants the feet -- a body that covers
+ * ground at any other rate than its stride slides its soles over the road.
+ * The velocity the wander and the shove built still says which way; only how
+ * fast is the clip's. Without a bank the velocity is taken as given and the
+ * clip plays in real time. */
 void ae3d_crowd_step(double *pos, const double *vel, double *yaw, double *phase,
                      int n, double dt, double max_speed,
                      double x0, double x1, double z0, double z1,
-                     double road_y, double walk) {
+                     double road_y, double walk, void *bank) {
     int i;
     double pi = 3.14159265358979323846;
     double step_scale = walk > 0.0 ? dt / walk : dt;
@@ -331,7 +349,16 @@ void ae3d_crowd_step(double *pos, const double *vel, double *yaw, double *phase,
         double sp = sqrt(vx * vx + vz * vz);
         double a = yaw[i];
         double nx, nz, ph;
+        double pace = 1.0;
         int bounced = 0;
+        if (bank) {
+            pace = crowd_pace(i);
+            if (sp > 1e-9) {
+                double want = ae3d_posebank_speed(bank, phase[i], walk) * pace;
+                double s = want / sp;
+                vx *= s; vz *= s; sp = want;
+            }
+        }
         if (sp > max_speed && sp > 1e-9) {
             double s = max_speed / sp;
             vx *= s; vz *= s; sp = max_speed;
@@ -347,7 +374,9 @@ void ae3d_crowd_step(double *pos, const double *vel, double *yaw, double *phase,
         pos[i * 3 + 2] = nz;
         if (bounced) yaw[i] = a;
         else if (sp > 0.1) yaw[i] = fast_atan2(-vz, vx);
-        ph = phase[i] + step_scale * (0.35 + sp * 0.3);
+        /* The walk advances at the zombie's pace when the clip is driving,
+         * and by its old speed-scaled rate when it is not. */
+        ph = phase[i] + step_scale * (bank ? pace : 0.35 + sp * 0.3);
         while (ph >= 1.0) ph -= 1.0;
         phase[i] = ph;
     }

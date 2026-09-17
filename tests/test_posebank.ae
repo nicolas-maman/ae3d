@@ -13,6 +13,7 @@ import ae3d.loader
 const FRAMES = 8
 const DURATION = 2.0
 const RISE = 10.0        // how far the animated bone travels over the clip
+const TRAVEL = 6.0       // how far the walking root crosses the ground over the clip
 
 var failures = 0
 
@@ -97,6 +98,54 @@ main() {
     check_true("the bank varies across its frames (not one frozen pose)",
                seen_high - seen_low > RISE * 0.5)
     println("  posebank: arm lift spans ${seen_low} to ${seen_high} over ${FRAMES} baked frames")
+
+    // In place. A clip that walks the root across the ground must bake with
+    // that travel taken out: the root's ground-plane translation stays at
+    // bind, its height still follows the clip, and the child carries the
+    // same correction -- the pose is intact, only the travel is gone.
+    walk = anim.clip_new("walk")
+    wch = anim.channel_new(anim.TRANSLATION, anim.LINEAR)
+    anim.channel_add_key(wch, 0.0, 0.0, 0.0, 0.0, 0.0)
+    anim.channel_add_key(wch, DURATION, TRAVEL, RISE, TRAVEL, 0.0)
+    anim.clip_add_channel(walk, wch)
+    wreg = anim.registry_new()
+    anim.registry_add(wreg, "root", anim.player_new(walk), root)
+    anim.registry_add(wreg, "arm", anim.player_new(clip), arm)
+    // Bind the arm under the root so the root's travel reaches it.
+    core.model_set_parent(arm, root)
+    core.model_set_position(root, 0.0, 0.0, 0.0)
+    core.model_set_position(arm, 0.0, 0.0, 0.0)
+    skin.skeleton_bind(skel)
+
+    fixed = crowd.posebank_bake_in_place(wreg, skel, FRAMES, 0.0, DURATION, 0)
+    check_true("the in-place bake returns a bank", fixed != null)
+    if fixed != null {
+        last = FRAMES - 1
+        t_last = (last as float) / (FRAMES as float) * DURATION
+        rose = t_last / DURATION * RISE
+        check_true("in place: the root's x stays at bind",
+                   near(crowd.posebank_get(fixed, last, 0, 12), 0.0))
+        check_true("in place: the root's z stays at bind",
+                   near(crowd.posebank_get(fixed, last, 0, 14), 0.0))
+        check_true("in place: the root still rises with the clip",
+                   near(crowd.posebank_get(fixed, last, 0, 13), rose))
+        // The arm rides the root: its own lift plus the root's rise, and the
+        // same travel subtracted, so it stays over the root rather than
+        // trailing where the root would have walked.
+        check_true("in place: the child carries the same correction",
+                   near(crowd.posebank_get(fixed, last, arm_bone, 12), 0.0) &&
+                   near(crowd.posebank_get(fixed, last, arm_bone, 13), rose + rose))
+        // And as authored, for comparison, the root has walked.
+        moved = crowd.posebank_bake(wreg, skel, FRAMES, DURATION)
+        if moved != null {
+            check_true("as authored: the root carries its travel",
+                       near(crowd.posebank_get(moved, last, 0, 12), t_last / DURATION * TRAVEL))
+            crowd.posebank_free(moved)
+        }
+        crowd.posebank_free(fixed)
+    }
+    anim.registry_free(wreg)
+    anim.clip_free(walk)
 
     crowd.posebank_free(bank)
     anim.registry_free(reg)   // frees the player it was given, too

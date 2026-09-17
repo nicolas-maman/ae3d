@@ -16,7 +16,8 @@ import ae3d.loader
 exports (
     Entry, Manifest,
     manifest_load, manifest_free, manifest_count, manifest_entry, manifest_find, manifest_find_by_object, manifest_source, manifest_blender,
-    manifest_warning_count, entry_id, entry_material, entry_animation,
+    manifest_warning_count, manifest_marker, manifest_marker_count, Marker,
+    entry_id, entry_material, entry_animation,
     entry_vertices, entry_triangles,
     entry_load_model, entry_load_clip, entry_parent, entry_object, manifest_load_scene,
     entry_load_skeleton, entry_load_bone_clips,
@@ -51,12 +52,22 @@ struct Warning {
     text: string
 }
 
+// A timeline marker the Blender build placed: a name and a time in clip
+// seconds. What the builder had to say about the animation's structure --
+// where a loop begins and ends -- which a scene asks for by name instead
+// of knowing.
+struct Marker {
+    name: string
+    time: float
+}
+
 struct Manifest {
     directory: string
     source: string
     blender: string
     entries: ptr
     warnings: ptr
+    markers: ptr
 }
 
 var g_error = ""
@@ -123,11 +134,34 @@ manifest_load(path: string) -> *Manifest {
     m.directory = directory_of(path)
     m.entries = list.new()
     m.warnings = list.new()
+    m.markers = list.new()
     m.blender = text_field(root, "blender")
     m.source = ""
 
     source = json.object_get_raw(root, "source")
     if source != null { m.source = text_field(source, "name") }
+
+    scene = json.object_get_raw(root, "scene")
+    if scene != null {
+        markers = json.object_get_raw(scene, "markers")
+        if markers != null {
+            i = 0
+            count = json.object_size(markers)
+            while i < count {
+                key, value, err = json.object_entry(markers, i)
+                if err == "" && value != null {
+                    mk = heap.new(Marker)
+                    mk.name = key
+                    mk.time = json.get_number(value)
+                    list.add_raw(m.markers, mk as ptr)
+                } else {
+                    string.free(key)
+                }
+                string.free(err)
+                i = i + 1
+            }
+        }
+    }
 
     warnings = json.object_get_raw(root, "warnings")
     if warnings != null {
@@ -222,7 +256,40 @@ manifest_free(m: *Manifest) {
         }
         list.free(m.warnings)
     }
+    if m.markers != null {
+        i = 0
+        count = list.size(m.markers)
+        while i < count {
+            mk = list.get_raw(m.markers, i) as *Marker
+            if mk != null {
+                string.free(mk.name)
+                heap.free(mk)
+            }
+            i = i + 1
+        }
+        list.free(m.markers)
+    }
     heap.free(m)
+}
+
+// The time of a named timeline marker, in clip seconds, or `fallback` when
+// the build placed none by that name -- so a scene can ask for "gait_end"
+// and take the whole clip if the builder had nothing to say.
+manifest_marker(m: *Manifest, name: string, fallback: float) -> float {
+    if m == null || m.markers == null { return fallback }
+    i = 0
+    count = list.size(m.markers)
+    while i < count {
+        mk = list.get_raw(m.markers, i) as *Marker
+        if mk != null && mk.name == name { return mk.time }
+        i = i + 1
+    }
+    return fallback
+}
+
+manifest_marker_count(m: *Manifest) -> int {
+    if m == null || m.markers == null { return 0 }
+    return list.size(m.markers)
 }
 
 manifest_entry(m: *Manifest, index: int) -> *Entry {

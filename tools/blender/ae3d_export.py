@@ -1069,11 +1069,20 @@ def main(argv):
             "channels": len(clip["channels"]) if clip else 0,
         })
 
+    # The scene's timeline markers, in clip seconds: what the builder had to say
+    # about the animation's structure -- where a loop begins and ends, where
+    # the walk gives way to the lunge -- which a scene reads instead of
+    # knowing it. A crowd loops the gait between two markers; without them it
+    # can only loop the whole clip, lunge and all.
+    markers = {marker.name: rounded((marker.frame - frame_origin(scene)) * seconds_per_frame(scene))
+               for marker in scene.timeline_markers}
+
     manifest = {
         "exporter_version": EXPORTER_VERSION,
         "blender": bpy.app.version_string,
         "source": {"name": source_name, "sha256": file_hash(source_path)},
-        "scene": {"fps": scene.render.fps, "fps_base": scene.render.fps_base},
+        "scene": {"fps": scene.render.fps, "fps_base": scene.render.fps_base,
+                  "markers": markers},
         "up_axis": "Y",
         "objects": records,
         "warnings": warnings,
