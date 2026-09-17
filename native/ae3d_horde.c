@@ -30,6 +30,43 @@
 #include <stdlib.h>
 #include <math.h>
 
+/* Facing and heading for a crowd is trig per zombie per frame -- a cos and a
+ * sin to point the velocity along the heading, an atan2 to face the zombie
+ * along the shove-perturbed result. At half a million that is a couple of
+ * million libm transcendentals a frame, and profiling put it at the sim floor.
+ * A zombie's facing needs to be right to a degree, not to a bit, so these
+ * approximations stand in: a polynomial atan2 good to ~0.2 degrees, and a
+ * quadratic sine good to under 0.2%, both several times cheaper than libm and
+ * invisible on a shambling figure. */
+
+/* Polynomial atan2, max error ~0.0038 rad. Public-domain DSP standard. */
+static double fast_atan2(double y, double x) {
+    double ax = fabs(x), ay = fabs(y);
+    double mx = ax > ay ? ax : ay;
+    double mn = ax > ay ? ay : ax;
+    double a = mn / (mx + 1e-18);   /* 0..1; guarded against 0/0 at the origin */
+    double s = a * a;
+    double r = ((-0.0464964749 * s + 0.15931422) * s - 0.327622764) * s * a + a;
+    if (ay > ax) r = 1.57079632679489662 - r;
+    if (x < 0.0) r = 3.14159265358979324 - r;
+    if (y < 0.0) r = -r;
+    return r;
+}
+
+/* Bhaskara-style sine on [-pi, pi], error < 0.2%, and its cosine by phase. */
+static double fast_sin(double a) {
+    double pi = 3.14159265358979324;
+    /* wrap into [-pi, pi] */
+    if (a < -pi || a > pi) {
+        double t = a * (1.0 / (2.0 * pi));
+        a = a - 2.0 * pi * floor(t + 0.5);
+    }
+    double b = 4.0 / pi, c = -4.0 / (pi * pi);
+    double y = b * a + c * a * fabs(a);
+    return 0.225 * (y * fabs(y) - y) + y;   /* the precision refinement term */
+}
+static double fast_cos(double a) { return fast_sin(a + 1.57079632679489662); }
+
 typedef struct {
     long long *off;   /* cells+1 cell offsets into the packed arrays (CSR)  */
     long long *cur;   /* cells within-cell write cursor during the scatter  */
@@ -41,13 +78,13 @@ typedef struct {
     double *puz;      /* two equal-and-opposite writes both stay local       */
     long long *pidx;  /* the entity's original index, packed the same way   */
     int cols;
+    int per_cell;     /* neighbours considered per cell, so cost is bounded  */
     long long cap;    /* capacity of the packed arrays, in entities         */
 } ae3d_horde_grid;
 
 void *ae3d_horde_grid_create(int cols, int per_cell) {
     ae3d_horde_grid *g;
     long long cells;
-    (void)per_cell; /* kept for API stability; the CSR grid has no fixed cap */
     if (cols <= 0) return NULL;
     g = (ae3d_horde_grid *)calloc(1, sizeof(ae3d_horde_grid));
     if (!g) return NULL;
@@ -61,6 +98,7 @@ void *ae3d_horde_grid_create(int cols, int per_cell) {
         return NULL;
     }
     g->cols = cols;
+    g->per_cell = per_cell > 0 ? per_cell : 24;
     return g;
 }
 
@@ -132,9 +170,16 @@ void ae3d_horde_separate(void *handle, double *pos, double *vel, int n,
         if (cz >= cols) cz = cols - 1;
         g->off[(long long)cz * cols + cx + 1]++;
     }
-    /* Prefix sum: off[cell] is now where that cell's run begins. */
+    /* Prefix sum, capped: a cell keeps at most per_cell of its entities, so a
+     * jammed cell -- half a million zombies in a street pack tens into one --
+     * costs a bounded number of neighbour tests instead of quadratic. The rest
+     * are simply not pushed this frame; the sort order shifts next frame, so it
+     * is a different few each time and the crowd still spreads. off[c+1] holds
+     * cell c's full count from the histogram; clamp it to the cap. */
     for (c = 0; c < cells; c++) {
-        g->off[c + 1] += g->off[c];
+        long long full = g->off[c + 1];
+        long long cap = full < (long long)g->per_cell ? full : (long long)g->per_cell;
+        g->off[c + 1] = g->off[c] + cap;
         g->cur[c] = g->off[c];
     }
 
@@ -149,14 +194,17 @@ void ae3d_horde_separate(void *handle, double *pos, double *vel, int n,
         if (cz < 0) cz = 0;
         if (cz >= cols) cz = cols - 1;
         cell = (long long)cz * cols + cx;
-        p = g->cur[cell]++;
-        g->px[p] = pos[i * 3];
-        g->py[p] = pos[i * 3 + 1];
-        g->pz[p] = pos[i * 3 + 2];
-        g->pidx[p] = i;
-        g->pux[p] = 0.0;
-        g->puy[p] = 0.0;
-        g->puz[p] = 0.0;
+        p = g->cur[cell];
+        if (p < g->off[cell + 1]) {   /* room in this cell, up to the cap */
+            g->cur[cell] = p + 1;
+            g->px[p] = pos[i * 3];
+            g->py[p] = pos[i * 3 + 1];
+            g->pz[p] = pos[i * 3 + 2];
+            g->pidx[p] = i;
+            g->pux[p] = 0.0;
+            g->puy[p] = 0.0;
+            g->puz[p] = 0.0;
+        }
     }
 
     /* Push apart every pair of entities closer than the radius, each pair once.
@@ -227,11 +275,151 @@ void ae3d_horde_separate(void *handle, double *pos, double *vel, int n,
         }
     }
 
-    /* Scatter the accumulated push back to each entity's velocity. */
-    for (p = 0; p < (long long)n; p++) {
+    /* Scatter the accumulated push back to each entity's velocity. Only the
+     * packed entities are walked -- off[cells] of them, which the per-cell cap
+     * holds below n when cells overflow. Running to n instead read the
+     * uninitialised tail of pidx and wrote the push to a garbage entity index,
+     * an out-of-bounds store that crashed under a dense crowd. */
+    for (p = 0; p < g->off[cells]; p++) {
         long long self = g->pidx[p];
         vel[self * 3] += g->pux[p] * strength;
         vel[self * 3 + 1] += g->puy[p] * strength;
         vel[self * 3 + 2] += g->puz[p] * strength;
     }
+}
+
+/* The crowd's motion and its distance sort, in C.
+ *
+ * At tens of thousands the per-frame walk over the crowd -- set a velocity from
+ * each zombie's heading, step it, bounce it off the street, advance its walk,
+ * and sort it into the near and far draw buffers -- was a per-element language
+ * loop, and it, not the GPU, was the wall a city-sized crowd hit. So it lives
+ * here, straight over the packed xyz position, velocity, and the per-zombie yaw
+ * and phase the ECS columns already hold. Aether's float is a C double, so the
+ * buffers are doubles; a heading and a phase are one each, a position and a
+ * velocity three.
+ */
+
+/* Point each zombie's velocity along its heading at `speed`. Separation adds to
+ * this afterwards; the step below reads the sum. */
+void ae3d_crowd_wander(double *vel, const double *yaw, int n, double speed) {
+    int i;
+    if (!vel || !yaw) return;
+    for (i = 0; i < n; i++) {
+        double a = yaw[i];
+        vel[i * 3]     = fast_cos(a) * speed;
+        vel[i * 3 + 1] = 0.0;
+        vel[i * 3 + 2] = -fast_sin(a) * speed;
+    }
+}
+
+/* Each zombie's own pace through the walk, so a crowd does not march in lock
+ * step: a fixed spread of 0.85 to 1.15 of the clip's speed, hashed from the
+ * index so it is the same zombie every frame with no column to carry it. */
+static double crowd_pace(int i) {
+    double t = (double)i * 0.6180339887498949;
+    t -= (double)(long)t;
+    return 0.85 + 0.30 * t;
+}
+
+/* Cap the speed, step along the velocity, bounce off the street's edges (which
+ * turns the heading so the zombie walks back in and the crowd stays in the
+ * city), keep it on the road, face it along its heading, and advance its walk
+ * with its pace. One pass.
+ *
+ * With a bank baked in place, the walk drives the motion rather than the other
+ * way round: the clip advances at the zombie's pace, and it moves along its
+ * velocity's direction at exactly the speed the clip's root was travelling at
+ * that point of the walk. That is what plants the feet -- a body that covers
+ * ground at any other rate than its stride slides its soles over the road.
+ * The velocity the wander and the shove built still says which way; only how
+ * fast is the clip's. Without a bank the velocity is taken as given and the
+ * clip plays in real time. */
+void ae3d_crowd_step(double *pos, const double *vel, double *yaw, double *phase,
+                     int n, double dt, double max_speed,
+                     double x0, double x1, double z0, double z1,
+                     double road_y, double walk, void *bank) {
+    int i;
+    double pi = 3.14159265358979323846;
+    double step_scale = walk > 0.0 ? dt / walk : dt;
+    if (!pos || !vel || !yaw || !phase) return;
+    for (i = 0; i < n; i++) {
+        double vx = vel[i * 3];
+        double vz = vel[i * 3 + 2];
+        double sp = sqrt(vx * vx + vz * vz);
+        double a = yaw[i];
+        double nx, nz, ph;
+        double pace = 1.0;
+        int bounced = 0;
+        if (bank) {
+            pace = crowd_pace(i);
+            if (sp > 1e-9) {
+                double want = ae3d_posebank_speed(bank, phase[i], walk) * pace;
+                double s = want / sp;
+                vx *= s; vz *= s; sp = want;
+            }
+        }
+        if (sp > max_speed && sp > 1e-9) {
+            double s = max_speed / sp;
+            vx *= s; vz *= s; sp = max_speed;
+        }
+        nx = pos[i * 3] + vx * dt;
+        nz = pos[i * 3 + 2] + vz * dt;
+        if (nx < x0) { nx = x0; a = pi - a; bounced = 1; }
+        if (nx > x1) { nx = x1; a = pi - a; bounced = 1; }
+        if (nz < z0) { nz = z0; a = -a; bounced = 1; }
+        if (nz > z1) { nz = z1; a = -a; bounced = 1; }
+        pos[i * 3]     = nx;
+        pos[i * 3 + 1] = road_y;
+        pos[i * 3 + 2] = nz;
+        if (bounced) yaw[i] = a;
+        else if (sp > 0.1) yaw[i] = fast_atan2(-vz, vx);
+        /* The walk advances at the zombie's pace when the clip is driving,
+         * and by its old speed-scaled rate when it is not. */
+        ph = phase[i] + step_scale * (bank ? pace : 0.35 + sp * 0.3);
+        while (ph >= 1.0) ph -= 1.0;
+        phase[i] = ph;
+    }
+}
+
+/* Sort the crowd into the near and far draw buffers by distance to the camera,
+ * compacting each into its own contiguous run of position, yaw and phase, and
+ * dropping any zombie past `cull_dist` -- beyond the fog it is invisible, so it
+ * is written to neither buffer and costs no draw. The loop already has each
+ * zombie's distance in hand, so the cull is free. Returns the near count and
+ * writes the far count into far_out[0]; a zombie is near, far, or culled, so
+ * the two no longer sum to n. `cull_dist <= 0` keeps the whole crowd. */
+int ae3d_crowd_bucket(const double *pos, const double *yaw, const double *phase,
+                      const double *col, int n,
+                      double cx, double cz, double near_dist, double cull_dist,
+                      double *np, double *ny, double *nph, double *ncol,
+                      double *fp, double *fy, double *fph, double *fcol,
+                      double *far_out) {
+    int i, nn = 0, nf = 0;
+    double nd2 = near_dist * near_dist;
+    double cd2 = cull_dist * cull_dist;
+    int cull = cull_dist > 0.0;
+    if (!pos || !yaw || !phase) { if (far_out) far_out[0] = 0.0; return 0; }
+    for (i = 0; i < n; i++) {
+        double x = pos[i * 3];
+        double y = pos[i * 3 + 1];
+        double z = pos[i * 3 + 2];
+        double dx = x - cx;
+        double dz = z - cz;
+        double d2 = dx * dx + dz * dz;
+        if (cull && d2 > cd2) { continue; }
+        if (d2 < nd2) {
+            np[nn * 3] = x; np[nn * 3 + 1] = y; np[nn * 3 + 2] = z;
+            ny[nn] = yaw[i]; nph[nn] = phase[i];
+            if (col && ncol) { ncol[nn * 3] = col[i * 3]; ncol[nn * 3 + 1] = col[i * 3 + 1]; ncol[nn * 3 + 2] = col[i * 3 + 2]; }
+            nn++;
+        } else {
+            fp[nf * 3] = x; fp[nf * 3 + 1] = y; fp[nf * 3 + 2] = z;
+            fy[nf] = yaw[i]; fph[nf] = phase[i];
+            if (col && fcol) { fcol[nf * 3] = col[i * 3]; fcol[nf * 3 + 1] = col[i * 3 + 1]; fcol[nf * 3 + 2] = col[i * 3 + 2]; }
+            nf++;
+        }
+    }
+    if (far_out) far_out[0] = (double)nf;
+    return nn;
 }

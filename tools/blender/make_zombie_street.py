@@ -420,6 +420,22 @@ def ground_plane(name, length, width, surface, repeats, rng):
     for i in range(along):
         for j in range(across):
             bm.faces.new([grid[i][j], grid[i + 1][j], grid[i + 1][j + 1], grid[i][j + 1]])
+    # A closed slab, not an open sheet. _finish recalculates normals to face
+    # outward, and an open sheet has no outward: it came out facing down, and
+    # a base facing down is culled from above -- the whole slab was invisible
+    # in the engine and the blocks stood on a void. A bottom and four sides
+    # give it an inside, so its top faces up the way the road's does.
+    depth = 0.08
+    low = [[bm.verts.new((v.co.x, v.co.y, v.co.z - depth)) for v in row] for row in grid]
+    for i in range(along):
+        for j in range(across):
+            bm.faces.new([low[i][j], low[i][j + 1], low[i + 1][j + 1], low[i + 1][j]])
+    for i in range(along):
+        bm.faces.new([grid[i][0], low[i][0], low[i + 1][0], grid[i + 1][0]])
+        bm.faces.new([grid[i][across], grid[i + 1][across], low[i + 1][across], low[i][across]])
+    for j in range(across):
+        bm.faces.new([grid[0][j], grid[0][j + 1], low[0][j + 1], low[0][j]])
+        bm.faces.new([grid[along][j], low[along][j], low[along][j + 1], grid[along][j + 1]])
     return _finish(bm, name, surface, repeats)
 
 
@@ -978,20 +994,29 @@ def _arm(pose, side, swing, hit, reach_for):
     which is what makes a swing read as a whip rather than a gate.
     """
     lead = 1.0 if side == "R" else 0.55
-    # At rest the arms hang half-raised in front, the shuffle a zombie carries
-    # them at. The strike thrusts to horizontal and straightens the elbow, so
-    # the hand is carried a good half-metre further forward than the walk ever
-    # takes it -- the reach is the arm's, not the body's lunge under it.
-    forward = -0.62 - 0.22 * swing - reach_for * 0.95 * lead
+    # At rest the arms hang low and loose in front, the shuffle a zombie
+    # carries them at -- not held up level, which is a mannequin with its arms
+    # out. They sway with the step, further than the body does, and the left
+    # hangs a little lower and limper than the right that swipes, so the two
+    # are not a mirrored pair. The strike thrusts to horizontal and straightens
+    # the elbow, so the hand is carried a good half-metre further forward than
+    # the walk ever takes it -- the reach is the arm's, not the body's lunge.
+    hang = 0.0 if side == "R" else 0.12
+    forward = -0.44 + hang - 0.30 * swing - reach_for * 0.95 * lead
     out = (0.20 if side == "L" else -0.20) - reach_for * 0.10 * lead
     wrist = 0.30 - reach_for * 0.55 * lead
     # The elbow bends about the axis across the arm, not along it: a rotation
     # about the bone's own length is a twist and leaves the arm as straight as
     # it found it, which is why a zombie posed only in twists reaches with a
-    # dead-straight arm. Kept bent in the shuffle and driven straight at the
-    # strike, so the thrust has a bend to spend and the hand is carried a hand's
-    # length further out than the walk ever takes it.
-    bend = 1.8 + 0.2 * swing - reach_for * 1.8 * lead
+    # dead-straight arm. Kept bent in the shuffle and flexing with the sway --
+    # a fixed bend is what made the arm read as a rod -- then driven straight
+    # at the strike, so the thrust has a bend to spend. The shuffle's bend is
+    # what the strike spends: with the upper arm 0.29 m and the forearm 0.26,
+    # straightening from 1.42 rad carries the wrist 0.13 m further out, and
+    # the critique wants the swipe to beat the walk by 0.12 (STRIKE_REACH).
+    # Flex the shuffle wider than 0.30 or hold it below 1.40 at the loosest
+    # and the strike no longer reaches past the walk.
+    bend = (1.72 + 0.30 * swing) * (1.0 - reach_for * lead)
 
     pose.set("Shoulder" + side, _compose(_turn(Y, forward), _turn(X, out),
                                          _turn(Z, -0.12 * lead * reach_for)))
@@ -1079,6 +1104,16 @@ def main(argv):
     scene.render.fps = FPS
     scene.frame_start = 1
     scene.frame_end = TOTAL
+    # What the clip is made of, for whatever reads it. The walk before the
+    # lunge is a pure function of the gait phase, so one cycle of it -- 1/
+    # STRIDE_RATE seconds, 40 frames -- loops without a seam; a crowd bakes
+    # that and nothing else, so a horde shuffles rather than lunging in
+    # unison every five seconds. The exporter writes these to the manifest.
+    cycle = round(FPS / STRIDE_RATE)
+    scene.timeline_markers.new("gait", frame=1)
+    scene.timeline_markers.new("gait_end", frame=1 + cycle)
+    scene.timeline_markers.new("lunge", frame=WALK_END + 1)
+    scene.timeline_markers.new("recover", frame=ATTACK_END + 1)
 
     surfaces = {
         "brick": material("WallBrick", textures.brick(), roughness=0.95,

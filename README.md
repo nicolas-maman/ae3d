@@ -1,325 +1,228 @@
 # ae3d
 
-![the zombie_street demo on Vulkan — a night street, a walking figure, and the wet road reflecting the lit buildings](docs/zombie-street.png)
+**A 3D engine built to be driven by programs.** One scene API over OpenGL 4.1
+and Vulkan, a Blender-to-engine asset pipeline, and a control channel through
+which a program, a test, or an AI agent can build a scene, read back what was
+drawn, and check the frame by number instead of by eye.
 
-A 3D rendering engine written in [Aether](https://github.com/aether-lang-dev/aether):
-one scene API over a switchable **OpenGL 4.1 / Vulkan** backend, a **Blender asset
-pipeline**, and an **agent channel** a program — or an AI — drives it through, so a
-frame can be checked by number instead of by eye.
+![A horde of skinned zombies shambling down a lamp-lit street at night, the wet road reflecting the lamps](docs/zombie-city.png)
 
-ae3d is the continuation of [Gopher3D](https://github.com/nicolas-maman/gopher3D),
-the same author's earlier Go engine — rebuilt in Aether and C and taken past where
-Gopher3D stopped: a Vulkan renderer at parity with OpenGL and proven pixel by pixel,
-screen-space reflections on wet surfaces, and a data-oriented ECS that puts a crowd
-of a hundred thousand on screen in a **single draw call**. See [Credits](#credits).
+*`examples/zombie_city.ae`: a street of seven blocks and a crowd of the same
+skinned zombie, every one posed from a shared pose bank and drawn in two
+instanced calls. Everything in the frame was modelled, textured and animated
+by a script in Blender and exported through the pipeline below.*
 
-## What it does
+ae3d is written in [Aether](https://github.com/aether-lang-dev/aether) with a
+thin C layer for the GPU, windowing and image decoding. It continues
+[Gopher3D](https://github.com/nicolas-maman/gopher3D), the same author's
+earlier Go engine, rebuilt and taken past where that one stopped: a Vulkan
+renderer at parity with OpenGL, skinned instanced crowds, and an engine that
+can be interrogated while it runs. See [Credits](#credits).
 
-- **Two renderers behind one interface.** `Backend` is a vtable of function
-  pointers that both the OpenGL and Vulkan renderers fill in, so a program picks
-  its renderer with a constructor argument and nothing else changes.
-- **OpenGL 4.1 core**, the highest version macOS offers and enough everywhere
-  else: PBR materials, up to four directional or point lights, instanced
-  rendering, frustum culling, a separate transparent pass, MSAA, FXAA and bloom.
-- **Draws are merged automatically.** Identical geometry is uploaded once, and
-  models that share it and a material go out as one instanced draw: 400 separate
-  models cost 87us a frame in one call, against 1363us in four hundred.
-  `core.set_draw_merging(false)` turns it off, which is how those two numbers
-  are measured.
-- **A crowd is one draw, whatever its size.** A data-oriented entity store
-  (`ae3d.ecs`) keeps entities as integer handles and their components in dense
-  arrays a system walks in one linear pass; a crowd renders from the position
-  column's own buffer as a single instanced draw. Draw calls stay flat as the
-  crowd scales — 1k, 10k or 100k entities is one draw on both backends — and a
-  million entities advance in ~2.8 ms. `examples/zombie_crowd.ae`.
-- **Screen-space reflections** on wet surfaces (Vulkan): a camera-depth prepass
-  and a post pass mirror the lit street back onto the road. The composite is
-  additive — it only ever adds a reflected highlight, never darkens — and runs
-  before the bloom, so the mirrored lamps bloom with the real ones.
-- **Shadow mapping** in both backends: the light draws the scene into a depth
-  map, and the lit pass compares against it over a 3x3 neighbourhood, offset
-  along the surface by the width of one texel rather than pushed into the
-  depth -- enough depth bias to stop a grazing wall striping itself is enough
-  to lift every shadow off the ground with it. The map is fitted to the scene,
-  or to `engine_set_shadow_distance` metres around the camera: a ground plane
-  ninety metres across spreads a scene-fitted map until nothing standing on it
-  casts anything.
-- **Models hang off each other.** A model keeps its own position, rotation and
-  scale and composes them onto its parent's, so a figure built from parts bends
-  at its joints instead of coming apart. Bounds follow, so culling and picking
-  follow a child that moved because something above it did.
-- **Fog** belongs to the scene rather than to each model: a colour and the
-  distance over which the picture fades into it, applied after tone mapping so
-  the colour asked for is the colour that arrives.
-- **Vulkan**, windowed and offscreen, on a loader opened at runtime. Nothing
-  links against Vulkan, so a program built with this backend still starts where
-  no driver exists and says so. It runs the same feature set as OpenGL, and
-  `tests/test_backend_parity` proves it: the same scene through both renderers,
-  compared channel by channel across materials and textures, instancing and
-  transparency, the skybox, FXAA, bloom, shadows, multiple lights, shading
-  presets, a Gerstner ocean, back-face culling and an instanced voxel chunk. The
-  two agree to within 0.7%
-  of channels.
-- **Gerstner-wave ocean**, **Perlin terrain**, **voxel worlds** drawn as a single
-  instanced call in one of five terrains (plains, mountains, desert, islands,
-  caves), **surface nets** over a signed distance field, an OBJ/MTL loader, ray
-  casting, and a component system.
-- **Scenes save and load.** Transforms and materials as JSON; geometry that came
-  from a file records its path, and geometry that did not is written to a
-  compressed binary mesh beside the scene. A scene also carries what is attached
-  to each model, so a water surface comes back as water with the simulation
-  driving it rather than as a mesh with a wave table nothing reads, and it
-  records the view it was framed in.
-- **Keyframe animation.** Clips, channels and samplers in glTF's shape, with
-  step, linear and cubic interpolation, so what Blender exports is what plays.
-- **A channel a program can drive.** `AE3D_AGENT=<port>` opens a JSON protocol
-  on loopback: read the scene, change it, hold a frame still, read the pixels
-  it produced, and ask why a model is not on screen. Costs one load of a global
-  per frame when it is not asked for. See [docs/agent.md](docs/agent.md).
+## Highlights
 
-![40,000 ECS entities shambling across the ground, drawn in a single instanced call](docs/zombie-crowd.png)
+- **Two renderers behind one interface.** `Backend` is a vtable both the OpenGL
+  and Vulkan renderers fill in; a program picks its renderer with a constructor
+  argument and nothing else changes. `tests/test_backend_parity` draws the same
+  scene through both and compares them channel by channel across materials,
+  textures, instancing, transparency, skybox, FXAA, bloom, shadows, multiple
+  lights, a Gerstner ocean and an instanced voxel chunk. They agree to within
+  0.7% of channels.
+- **Skinned crowds in one draw.** A figure's walk is baked once into a pose
+  bank (a texture of bone palettes); every instance carries its own phase and
+  is posed from the bank in the vertex shader. A crowd of the real 23,680-
+  triangle zombie is one instanced call per distance tier, and the bake is
+  *in place*: the clip's travel is taken out of the poses and handed back to
+  the simulation as speed, so feet plant instead of skating and nothing
+  snaps at the loop.
+- **A data-oriented ECS** (`ae3d.ecs`): entities as integer handles, components
+  in dense columns a system walks in one pass, a crowd rendering straight from
+  the position column's buffer. The native crowd step, separation grid and
+  distance bucketing are C over those columns.
+- **Physically based shading**: metallic/roughness materials, up to four
+  directional or point lights, normal mapping, baked per-vertex occlusion,
+  shadow mapping with a texel-snapped light box (both backends), fog applied
+  after tone mapping, MSAA, FXAA and bloom. Screen-space reflections on wet
+  surfaces on Vulkan.
+- **Models compose.** A model keeps its own transform and composes it onto its
+  parent's, so bones are ordinary models: a clip exported from Blender drives a
+  bone exactly as it drives a part, and `ae3d.ik` solves a limb of bones
+  without being told they belong to a skin.
+- **Also:** Gerstner ocean, Perlin terrain, voxel worlds as a single instanced
+  draw, surface nets over a signed distance field, an OBJ/MTL loader, ray
+  casting, keyframe animation in glTF's shape (step, linear, cubic), scenes
+  that save and load with everything attached to them, and a scene editor.
 
-*`examples/zombie_crowd.ae`: forty thousand entities, one instanced draw. The
-draw-call count does not move with the crowd size — `AE3D_CROWD=1000000
-./build/zombie_crowd` puts **a million** on screen, still one instanced draw,
-at ~26 fps on an RTX 4070 Ti (per-frame cost is the instance-buffer upload, not
-the draw).*
+![Twenty thousand zombies filling the street from end to end, seen from above the pavement](docs/zombie-horde.png)
 
-## Driving it from a program
+*`AE3D_CROWD=20000 AE3D_NEAR=28 ./build/zombie_city`: the near tier draws the
+full mesh, the far tier a bone-aware decimation of it (130 triangles), and the
+draw count does not change with the crowd. Twenty thousand hold ~36 fps on an
+RTX 4070 Ti at 1280x720 with the GPU shared.*
 
-An engine started with `AE3D_AGENT` answers questions about itself:
+## Quick start
+
+Requirements: the [Aether toolchain](https://github.com/aether-lang-dev/aether)
+(`ae`, `aetherc`) on `PATH`, a C compiler, GLFW 3, zlib, `pkg-config`, and the
+Vulkan headers (the loader is opened at runtime, so a driver is optional).
 
 ```bash
-AE3D_AGENT=7911 ./build/spinning_cube &
-python3 tools/ae3d_agent.py --port 7911 trace.model index=0
+brew install glfw                                          # macOS
+brew install molten-vk vulkan-loader                       # macOS, to run Vulkan
+sudo apt install libglfw3-dev libvulkan-dev mesa-vulkan-drivers   # Debian/Ubuntu
+# Windows, from an MSYS2 UCRT64 shell (match the Aether install's C runtime):
+pacman -S mingw-w64-ucrt-x86_64-{gcc,glfw,zlib,pkgconf,vulkan-headers,vulkan-loader}
 ```
 
-```
-ok=True  broke_at=-
-  source      n/a  this model was not loaded from a manifest
-  asset       n/a  no manifest entry, so there are no exported files to check
-  mesh        ok   {"triangles": 12}
-  node        ok   {"index": 0, "visible_flag": true}
-  animation   ok   {"bound": false}
-  visibility  ok   {"in_frustum": true, "on_screen": true}
-  pixels      ok   {"coverage": 0.56}
+```bash
+./build.sh examples/spinning_cube.ae && ./build/spinning_cube
+./build.sh examples/zombie_city.ae   && ./build/zombie_city
+./build/zombie_city vulkan
 ```
 
-`trace.model` follows one model from the Blender object it was authored as to
-the pixels it produced and names the first stage where it stopped being right,
-which separates half a dozen bugs that otherwise share the symptom "I cannot
-see it". The last stage reads the frame rather than reasoning about it.
+`build.sh` compiles the native layer once, runs `aetherc` over the Aether
+sources and links. Every program honours a few environment variables:
 
-The same protocol runs inside Blender
-(`tools/blender/ae3d_agent_server.py`), so one client drives the modelling tool
-and the engine.
+| Variable | Effect |
+|---|---|
+| `AE3D_FRAMES=n` | stop after `n` frames, so any example is a smoke test |
+| `AE3D_SNAPSHOT=path.png` | write the last frame; `AE3D_SNAPSHOT_BURST=k` writes the last `k` |
+| `AE3D_HIDDEN=1` | no window on screen (rendering still happens) |
+| `AE3D_AGENT=port` | open the control channel on loopback |
+
+`./ci.sh` builds with warnings as errors, type-checks every module, runs every
+test, benchmark and example, checks each headless one for leaks, runs the
+scene critique on both backends and holds the demo scene to its recorded frame
+cost.
 
 ## The Blender pipeline
 
-```bash
-blender --background scene.blend --python tools/blender/ae3d_export.py -- --out build/assets
-```
-
-Geometry, materials and animation per object, with a manifest recording the
-source file's hash and a stable id for each object.
-
-The export is deterministic, and Blender is not: regenerating a scene gives the
-same vertices in the same order but a different triangulation and polygon
-order. The exporter makes its output a function of the geometry instead --
-canonical quad diagonals, canonical winding, sorted triangles and sorted vertex
-tables -- so two `.blend` files generated separately from the same script
-export to identical geometry, animation and materials.
-
-Blender keys with Bezier easing by default; the exporter converts it to cubic
-segments the engine samples, and records what Blender itself evaluated the
-curve to so `tests/test_assets` can hold the engine to it. It currently agrees
-to 1.4e-4.
-
-`examples/blender_pipeline.ae` is the whole path in one program: a turning,
-rising orb modelled and keyed in Blender, exported, loaded from its manifest,
-and played.
+The zombie street is not a downloaded asset. `tools/blender/make_zombie_street.py`
+builds the whole scene in a headless Blender: the terrace of buildings, the
+street furniture, the road with its camber, the zombie as a skin-modifier
+body over a 29-bone rig, its clothes, the textures (generated with numpy,
+brick and paving and dead skin and cloth, each with a normal map), and the
+walk cycle, lunge and recovery as a footstep plan solved onto the legs.
+`ae3d_export.py` then writes each object's geometry, material, animation and
+occlusion beside a manifest the engine loads.
 
 ```bash
-./scripts/export_assets.sh          # regenerates every asset the repo ships
-./build.sh examples/blender_pipeline.ae && ./build/blender_pipeline
+blender --background --factory-startup --python tools/blender/make_zombie_street.py -- --out resources/blender/zombie_street.blend
+./scripts/export_assets.sh resources/blender/zombie_street.blend resources/blender/zombie_street
 ```
 
-```
-blender_pipeline: showcase.blend exported by Blender 5.2.1 LTS
-blender_pipeline: playing 'OrbAction', 1.95833s, 2 channels
-```
+![The hero zombie walking a night street under a lamp, its shadow on the wet road](docs/zombie-street.png)
 
-`examples/zombie_street.ae` is the same pipeline at scale, and it is the scene
-the engine is demonstrated and measured with: a night street and a zombie, 49
-objects out of one `.blend`, every surface carrying an image authored beside
-it. The figure is one skinned surface over a 23-bone skeleton; its bones are
-ordinary models, so the clips drive them the way clips drive anything and
-`ae3d.ik` solves a limb of them without being told they belong to a skin.
+*`examples/zombie_street.ae`: the same export as one figure, the scene the
+engine is measured against. 177 objects, every surface textured to one texel
+density, the figure one skinned surface with a face, and the wet road taking
+the lamp.*
 
-Two scripts hold it to that, both on every build. `scripts/measure_scene.py`
-asks what the engine drew. `scripts/critique_scene.py` asks whether it is any
-good, which is a different question and one a screenshot cannot answer:
+What makes the pipeline usable by a program rather than a person:
+
+- **The export is deterministic.** Blender is not: regenerating a scene gives
+  a different triangulation and polygon order. The exporter makes its output a
+  function of the geometry (canonical diagonals and winding, sorted triangles
+  and vertex tables), so two `.blend` files built from the same script export
+  byte-identical assets.
+- **The build says what the animation is.** Timeline markers (`gait`,
+  `gait_end`, `lunge`, `recover`) go into the manifest, and a scene asks for
+  them by name: the crowd loops exactly one gait cycle, which repeats without a
+  seam, instead of hard-coding a frame range.
+- **Textures can be looked at without Blender.**
+  `py tools/blender/preview_textures.py brick out/brick.png` renders any
+  generator to a PNG (within ~2% of what Blender exports), so a texture is
+  tuned by looking at it and a change is verified rather than trusted.
+- **Bezier easing is preserved and checked.** The exporter converts Blender's
+  curves to cubic segments and records what Blender evaluated them to;
+  `tests/test_assets` holds the engine to it (currently within 1.4e-4).
+- **Coplanar faces are caught at export.** `tools/blender/check_coplanar.py`
+  reads the exported scene back with its transforms and reports any pair of
+  faces sharing a plane, which is what z-fighting is; `ci.sh` runs it on every
+  exported scene.
+
+### Holding the scene to a standard
+
+Two scripts run on every build. `scripts/measure_scene.py` asks the engine
+what it drew; `scripts/critique_scene.py` asks whether it is any good, which a
+screenshot cannot answer:
 
 ```
 critique_scene: the scene meets every standard
   ok   no surface is softer than a texel every four millimetres (607, wanted 256)
-  ok   the scene is textured to one standard (607 to 1941 is 3 times, wanted 8)
-  ok   every surface holds up at arm's length (0 of 46 below 512)
-  ok   nothing large enough to fill a frame is a bare slab
-  ok   the figure carries the geometry a figure needs (26272 triangles)
-  ok   a planted foot stays planted (worst 0.021 m in a frame, allowed 0.025)
+  ok   every surface big enough to stand next to has a normal map (0 without)
+  ok   the figure carries the geometry a figure needs (27408 triangles, wanted 20000)
+  ok   the street has its lamps and windows alight (88 cells over 0.55, wanted 3)
+  ok   and lit in pools rather than flooded flat (7% of the frame burns that bright)
+  ok   no foot sinks through the road (the lowest foot is +0.116, allowed 0.030)
+  ok   a planted foot stays planted (worst 0.000 m in a frame, allowed 0.025)
+  ok   the strike reaches past anything the walk does (0.138 m past the walk, wanted 0.120)
+  ok   the head follows the body rather than leading it (a lag of 11 frames)
 ```
 
-`scripts/measure_scene.py` drives a running scene over the agent channel and
-says what it found, which is how the picture is checked rather than looked at:
+`tools/ae3d_bench.ae` records what a frame of the scene costs (draws,
+triangles, program and material binds, GPU pass times) in
+`resources/zombie_street.<backend>.budget.json`; a build that draws one more
+triangle than the record fails until the record is deliberately re-taken with
+`--record`.
 
-```
-opengl, 66 draws, shadows True, fog True, 3 lights
-  ok   every model in view traces through to pixels (37 of 40)
-  ok   every image a material names was loaded (37 textured materials)
-  brick     WallBrick    r=0.344 g=0.234 b=0.192  r/g=1.47  covers 48%
-  concrete  WallConcrete r=0.455 g=0.385 b=0.326  r/g=1.18  covers 53%
-  skin      ZombieSkin   r=0.329 g=0.296 b=0.179  g/b=1.65  covers 62%
-  ok   the same camera draws the same frame (0 pixels of 921600)
-  ok   half a millimetre sideways moves almost nothing (0.000% of the frame)
-  ok   seeking changes the picture (4.29%), and the hand moves 151 pixels
+The crowd scene logs everything it decided under `zombie_city[diag]`: the
+crowd's tiers and triangle counts, the walk the bank carries and the speed it
+sets, every light, the shadow and fog settings, the camera, each tile's props
+and tint, each material's texture and normal map with the GPU id it resolved
+to, and a per-60-frame check that no zombie ever moved further than it can
+walk. The knobs it exposes (`AE3D_VIEW`, `AE3D_CAMX/Y/Z`, `AE3D_CROWD`,
+`AE3D_NEAR`, `AE3D_MOON`, `AE3D_LAMP`, `AE3D_AMBIENT`, ...) are how the scene
+is swept from many camera positions and lighting states, because a single
+still is blind to a zombie vanishing on a zoom or a shadow sliding with the
+camera.
+
+## Driving it from a program
+
+An engine started with `AE3D_AGENT` answers questions about itself over a
+JSON protocol on loopback: read the scene, change it, seek an animation, hold
+a frame still, read the pixels it produced, and trace a model from the Blender
+object it was authored as to the pixels it landed on:
+
+```bash
+AE3D_AGENT=7911 ./build/zombie_street &
+python3 tools/ae3d_agent.py --port 7911 trace.model object=Zombie_Body
 ```
 
-Two faces in one plane are what z-fighting is, so
-`tools/blender/check_coplanar.py` reads the exported scene back with the
-transforms the manifest recorded and asks whether any pair shares a plane and
-overlaps there. `ci.sh` asks it of every exported scene.
-
-Started with `AE3D_AGENT` it can be driven while it runs, which is how the
-easing above is checked against the curve rather than against a screenshot:
-
+```json
+{ "name": "Zombie_Body", "ok": true, "stages": [
+  { "stage": "source",     "detail": { "blend": "zombie_street.blend", "id": "a0612e051dc3f268" } },
+  { "stage": "asset",      "detail": { "mesh_file": "Zombie_Body.obj", "exported_vertices": 11895 } },
+  { "stage": "mesh",       "detail": { "triangles": 23680, "matches_export": true } },
+  { "stage": "node",       "detail": { "index": 174, "visible_flag": true, "position": [0, 0, 0] } },
+  { "stage": "visibility", "detail": { "in_frustum": true, "in_front_of_camera": true } },
+  { "stage": "pixels",     "detail": { "region": { "x": 383, "y": 143, "width": 469, "height": 469 } } }
+] }
 ```
-clip        -> OrbAction  1.958s  2 channels
-  t=0.0  y=1.500  rot_y=0.000
-  t=0.5  y=2.405  rot_y=0.511
-  t=1.0  y=3.191  rot_y=0.995
-```
+
+Each stage is checked in order and the first one that fails is named, which
+separates half a dozen bugs that otherwise share the symptom "I cannot see
+it"; the last stage reads the frame rather than reasoning about it. The same protocol runs inside Blender
+(`tools/blender/ae3d_agent_server.py`), so one client drives the modelling
+tool and the engine. The protocol is documented in [docs/agent.md](docs/agent.md).
 
 ## Editor
 
 ![the editor viewport](docs/editor-viewport.png)
 
-`editor/` is a scene editor whose chrome is [aether-ui](https://github.com/aether-lang-dev/aether-ui).
-It has a scene hierarchy, an asset browser over the meshes in `resources/`, a
-console, an inspector that changes with what is selected, and a viewport you
-orbit with the mouse and click to select objects in. A transform gizmo moves,
-rotates and scales the selection along an axis; edits are undoable; and a
-property change repaints the viewport as you drag rather than when you let go.
-
-Objects can be meshes, water, voxel worlds or lights. Each carries a component
-recording what it is, and the inspector shows the section that belongs to it:
-wave height and speed for water, colour and intensity for a light, field of view
-and clip planes for the camera. A behaviour can be attached to any object and
-runs in the frame loop.
-
-See [docs/editor.md](docs/editor.md) for the controls.
-
-aether-ui owns the real window and every widget. The viewport is a GPU render:
-the scene is drawn into a framebuffer object that has no window of its own, read
-back, and blitted into an aether-ui canvas each frame. That is what lets a native
-toolkit with no GPU surface host a 3D view
-([aether-ui#92](https://github.com/aether-lang-dev/aether-ui/issues/92)); when a
-GPU surface exists, the readback is the only part that goes away.
-
-The editor runs on either renderer, `AE3D_EDITOR_BACKEND=vulkan` picks Vulkan
-and falls back to OpenGL when no driver is present. Everything the viewport
-needs goes through `Backend`, so the two paths differ only in which renderer the
-editor constructs.
+`editor/` is a scene editor whose chrome is
+[aether-ui](https://github.com/aether-lang-dev/aether-ui): a hierarchy, an
+asset browser, a console, an inspector that changes with the selection, a
+viewport you orbit and click to select in, a transform gizmo, and undo. Objects
+are meshes, water, voxel worlds or lights, each carrying a component the
+inspector shows the right section for; a behaviour can be attached to any
+object and runs in the frame loop. It runs on either renderer
+(`AE3D_EDITOR_BACKEND=vulkan`). See [docs/editor.md](docs/editor.md).
 
 ```bash
 git clone https://github.com/aether-lang-dev/aether-ui.git ../aether-ui
-./editor/build_editor.sh
-./build/ae3d_editor
+./editor/build_editor.sh && ./build/ae3d_editor
 ```
-
-Picking casts the cursor ray against every model's exact triangles, rejecting
-each against its bounding sphere first, so selection stays cheap with a full
-scene.
-
-## Requirements
-
-- The [Aether toolchain](https://github.com/aether-lang-dev/aether) on `PATH`
-  (`ae` and `aetherc`).
-- GLFW 3.
-- A C compiler.
-- The Vulkan **headers**, on every platform. The loader is opened at runtime and
-  nothing links against it, but `native/ae3d_vk.c` includes GLFW with
-  `GLFW_INCLUDE_VULKAN`, so `vulkan/vulkan.h` has to be present or the build
-  stops there.
-- For actually running the Vulkan backend: a Vulkan loader and driver. On macOS
-  that is MoltenVK. Neither is needed to build.
-- `pkg-config`. `build.sh` asks it where GLFW and zlib are; without it the
-  fallback is a bare `-lglfw`/`-lz` with no include path, which does not find an
-  MSYS2 install.
-
-```bash
-brew install glfw                      # macOS
-brew install molten-vk vulkan-loader   # macOS, optional, for the Vulkan backend
-
-sudo apt install libglfw3-dev          # Debian and Ubuntu
-sudo apt install libvulkan-dev mesa-vulkan-drivers   # optional
-
-# Windows, from an MSYS2 UCRT64 shell
-pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-glfw \
-          mingw-w64-ucrt-x86_64-zlib mingw-w64-ucrt-x86_64-pkgconf \
-          mingw-w64-ucrt-x86_64-vulkan-headers
-pacman -S mingw-w64-ucrt-x86_64-vulkan-loader   # optional, to run the Vulkan backend
-```
-
-zlib is listed for Windows because the mesh loader includes `zlib.h` directly;
-macOS and the Debian toolchains have it already. `vulkan-headers` is not
-optional: GLFW is included with `GLFW_INCLUDE_VULKAN`, so the build needs the
-header whether or not a driver exists. `pkgconf` is what tells `build.sh` where
-GLFW and zlib live.
-
-**Use the UCRT64 shell, and match the Aether install's C runtime.** MSYS2 ships
-two environments, UCRT64 linking the Universal CRT and MINGW64 linking msvcrt, and a
-`libaether.a` from one does not link against the other. Building ae3d in MINGW64
-against a UCRT Aether fails on symbols that look like ae3d's problem and are
-not:
-
-```
-undefined reference to `__imp__get_timezone'
-undefined reference to `__imp__strtof_l'
-```
-
-Those are UCRT-only. UCRT64 is the right default: it is what the Aether
-installer's own toolchain uses. Either way, build from an MSYS2 shell,
-`build.sh` reads `uname -s` to pick the platform libraries, and a plain `cmd` or
-PowerShell prompt is not one of the shells it can run in.
-
-## Build and run
-
-```bash
-./build.sh examples/spinning_cube.ae
-./build/spinning_cube
-```
-
-`build.sh` compiles the native layer once, runs `aetherc` over the Aether
-sources, and links. `AE3D_FRAMES=<n>` caps any program at `n` frames, so
-every example doubles as a smoke test that terminates on its own, and
-`AE3D_SNAPSHOT=<path>` writes that last frame out as a PNG:
-
-```sh
-AE3D_FRAMES=40 AE3D_SNAPSHOT=/tmp/caustics.png ./build/caustics
-```
-
-Running a program proves it does not crash and counting its draws proves it
-asked for something. Neither says what came out, and an example that renders
-a flat wash of one colour exits zero with the same number of draws as one
-that renders the scene it is named after. Looking at the frame is what tells
-them apart. Needs the OpenGL backend, which is what every example uses.
-
-`./ci.sh` builds the native layer with warnings as errors, type-checks every
-module, runs every test suite, benchmark and example, and checks that every
-headless one reports zero leaks. The leak check needs `leaks` to attach to a
-stopped process, which some sandboxes deny; `AE3D_SKIP_LEAKS=1 ./ci.sh` runs
-everything else.
 
 ## Examples
 
@@ -327,147 +230,85 @@ everything else.
 |---|---|
 | `spinning_cube.ae` | The smallest complete program: window, light, one model |
 | `backend_switch.ae` | The same scene through either renderer, `./build/backend_switch vulkan` |
-| `models.ae` | OBJ loading, including a multi-material model drawn as one group per material |
-| `lights.ae` | PBR material presets cycling with the light type, bloom, transparency |
-| `water.ae` | A 256x256 Gerstner-wave ocean, 65536 vertices |
-| `voxel_world.ae` | 960464 voxels of Perlin terrain, 93030 visible, one draw call |
-| `black_hole.ae` | Kerr geodesics integrated per pixel in one screen quad: a spinning hole, its asymmetric shadow, a lensed disc and a lensed sky. The heaviest scene here, and the one with answers to check against. [docs/black-hole.md](docs/black-hole.md) |
-| `particle_disc.ae` | The same scene as an N-body: 200000 particles under Verlet integration in one instanced draw, coloured per instance |
-| `sand.ae` | 250000 grains falling and settling, click to scatter them |
+| `zombie_street.ae` | The hero scene: a skinned figure walking and attacking in a lamp-lit street, 177 objects from one `.blend` |
+| `zombie_city.ae` | A city of the street's blocks and a horde of the figure, posed from a pose bank in two instanced draws; `AE3D_CROWD` sets the count |
+| `zombie_horde.ae` | The crowd alone on open ground, one draw, `AE3D_CROWD=200000` |
 | `blender_pipeline.ae` | A model authored and keyed in Blender, exported, loaded and played |
-| `zombie_street.ae` | A zombie walking a night street and attacking, 40 textured objects from one .blend, wet road reflecting the lamps (Vulkan) |
-| `zombie_crowd.ae` | 40,000 ECS zombies shambling in a single instanced draw (`AE3D_CROWD=1000000` for a million) — the draw-call count does not move with the crowd size |
-| `smooth_terrain.ae` | The same terrain meshed with surface nets, 67590 triangles |
+| `models.ae` | OBJ loading, including a multi-material model drawn as one group per material |
+| `lights.ae` | Material presets cycling with the light type, bloom, transparency |
+| `water.ae` | A 256x256 Gerstner ocean, 65536 vertices |
+| `voxel_world.ae` | 960464 voxels of Perlin terrain, 93030 visible, one draw call |
+| `smooth_terrain.ae` | The same terrain meshed with surface nets |
+| `black_hole.ae` | Kerr geodesics integrated per pixel: a spinning hole, its asymmetric shadow, a lensed disc and sky; `tests/test_blackhole` measures the shadow against sqrt(27) M. [docs/black-hole.md](docs/black-hole.md) |
+| `particle_disc.ae` | 200000 particles under Verlet integration, one instanced draw |
+| `sand.ae` | 250000 grains falling and settling |
+| `zombie_crowd.ae` | The ECS on its own: a million entities advanced in ~2.8 ms and drawn as one instanced call |
 
-### Examples as instruments
-
-![black_hole.ae — a Kerr hole's asymmetric shadow, a lensed accretion disc and a lensed sky, integrated per pixel](docs/black-hole.png)
-
-The bigger examples are not only scenes. Each is picked to push one part of the
-engine harder than anything else does, and to have an answer of its own that can
-be checked rather than admired, so that a regression shows up as a number and
-not as a picture somebody has to notice.
-
-`black_hole.ae` is the furthest along. It has a benchmark
-(`benchmarks/bench_black_hole.ae`) that reports what a frame costs and where,
-because a windowed run is pinned to the display's refresh and hides everything
-under 6.9 ms; and a test (`tests/test_blackhole.ae`) that measures the shadow
-against `sqrt(27) M`, which general relativity fixes and this renderer does not
-get a say in. What that has already found in the engine, an emissive surface
-that could not carry a colour, a bulk instancing path with no test behind it,
-is written up in [docs/black-hole.md](docs/black-hole.md).
+The bigger examples each push one part of the engine harder than anything
+else does and have an answer of their own to check: the black hole's shadow
+diameter, the street's frame budget, the crowd's step length. A regression
+shows up as a number, not as a picture somebody has to notice.
 
 ## Layout
 
 ```
-native/     C: GLFW window and input, OpenGL entry points, Vulkan backend,
-            float32 mesh and instance buffers, image decoding, the agent
-            channel's socket, framebuffer capture
+native/      C: window and input, OpenGL entry points, Vulkan backend, mesh
+             and instance buffers, pose banks, the crowd step and separation
+             grid, image decoding, the agent channel's socket
 src/ae3d/    Aether modules
-  core        vectors, quaternions, matrices, scene types, camera, frustum
-  platform    window, input, timing
-  shaders     the GLSL programs
-  gl          the OpenGL renderer
-  vk          the Vulkan renderer
-  engine      window, main loop, backend selection
-  loader      OBJ/MTL and procedural primitives
-  noise       Perlin noise
-  voxel       voxel worlds
-  water       the ocean surface
-  scene       saving and loading scenes
-  rendering   presets for the shader's advanced features
-  behaviour   game objects and components
-  raycast     ray tests against spheres, triangles and meshes
-  anim        clips, channels, samplers and playback
-  assets      manifests and exported clips, and what a model came from
-  agent       the control channel: what a request means
-tools/      ae3d_agent.py, a client; agent_schema.ae, the protocol's schema
-  blender/    ae3d_export.py, and an agent channel that runs inside Blender
-tests/      test suites, each a program that prints its own verdict
-benchmarks/ per-frame cost measured without a window
-examples/   runnable scenes
-  lib/        code shared between an example, its benchmark and its test.
-              Not engine surface: a black hole renderer is a tech demo, and
-              putting it in src/ae3d would have claimed otherwise
+  core         vectors, quaternions, matrices, scene types, camera, frustum
+  gl, vk       the two renderers;  shaders  the GLSL programs
+  engine       window, main loop, backend selection
+  skin, anim   skeletons and palettes; clips, channels, samplers, playback
+  crowd        pose-bank baking, the crowd systems
+  ecs          the entity store
+  assets       manifests, exported clips and markers, provenance
+  agent        the control channel
+  loader, noise, voxel, water, scene, rendering, behaviour, raycast, ik
+tools/       ae3d_agent.py (client), ae3d_bench.ae (frame budget)
+  blender/     make_zombie_street.py, zombie_figure.py, zombie_street_textures.py,
+               preview_textures.py, ae3d_export.py, check_coplanar.py,
+               ae3d_agent_server.py
+scripts/     export_assets.sh, critique_scene.py, measure_scene.py
+tests/       one program per suite, each printing its own verdict
+benchmarks/  per-frame cost measured without a window
+examples/    runnable scenes
 ```
 
 ## How it is put together
 
-**Aether never handles float32.** A model owns a native mesh handle holding
-interleaved position, uv and normal data, and, when instanced, a native buffer of
-per-instance matrices. Aether drives them through `ae3d.core`; the GPU reads them
-with no conversion pass in between.
-
-**Uniform locations are resolved once per program** into named slots rather than
-looked up or hashed per draw. Per-model custom uniforms cache their own location
-on the uniform that owns them.
-
-**Only exposed voxels become instances.** A solid world never pays for its own
-interior: 960464 solid voxels reduce to 93030 visible ones.
-
-**Bulk paths exist where they matter.** A particle system moving every instance
-each frame uploads all positions in one call, not one call per instance.
-
-**The frame allocates nothing.** `benchmarks/bench_frame.ae` runs the heaviest
-per-frame work two thousand times with no window, so what it measures is the
-engine rather than the GL implementation: 578us to upload two hundred thousand
-instance matrices, under a microsecond each for transforms, camera, frustum and
-water, and zero leaked bytes at 26MB peak.
-
-**The frame's uniforms go up once, not once per model.** Of the seventeen
-uniforms a draw needs, sixteen are the same for every model in the frame. They
-are uploaded once per program per frame, which took a four-hundred-model scene
-from 1200us to 806us. `benchmarks/bench_scene.ae` keeps that honest.
-
-**The viewport readback is pipelined.** Reading a frame into client memory stalls
-until the GPU has finished it; two pixel buffers mean the read is issued into one
-while the one filled last frame is mapped, so the CPU never waits. At 1280x720
-that is around 1500us a frame against 374us. `benchmarks/bench_readback.ae` measures
-both paths in one process. The editor takes the pipelined read and is a frame
-behind; anything comparing what it just drew takes the waiting one.
-
-**The editor only redraws when something changed.** A camera move, an edit, a
-selection, or a scene holding water or a behaviour. Otherwise the frame already
-on screen is the right one, and rendering it again is the largest idle cost an
-editor has.
-
-## Differences from Gopher3D
-
-- **One transform, not two.** Gopher3D's `GameObject` carries its own transform
-  and the component manager copies it to and from the model's every frame in both
-  directions. Here a game object points at the model that already owns one.
-- **No voxel chunks.** The instanced path builds a single model for the whole
-  world, so chunking bought nothing and cost a pointer chase per voxel. Storage
-  is one flat grid.
-- **Ray tests return a distance**, negative for a miss, instead of a tuple, so a
-  query allocates nothing and the caller derives a hit point only when it wants
-  one.
-- **Surface nets actually runs.** Gopher3D carries the pieces of a surface
-  mesher, corner sampling, edge interpolation and a gradient normal, but its
-  surface path only ever emits a height field and the pieces are never reached.
-  Here it is the algorithm those pieces describe.
-- **Vulkan actually renders.** Gopher3D lists its Vulkan renderer as incomplete.
-  Here it is at parity with OpenGL and a test proves it pixel by pixel.
-- **No game export.** Gopher3D's editor builds a standalone Go binary. Saving and
-  loading a scene covers getting work out of the editor; generating a program is
-  a different job from editing one.
-- **Ground of its own.** The agent channel, the screen-space reflections and the
-  data-oriented ECS crowd renderer are ae3d's, not ported — Gopher3D had none of
-  them.
+- **Aether never handles float32.** A model owns a native mesh holding
+  interleaved position, uv and normal data and, when instanced, a native buffer
+  of per-instance matrices. Aether's `float` is a C double; the columns the
+  crowd systems walk are doubles and the GPU buffers are floats, converted
+  once at upload.
+- **The frame's uniforms go up once per program, not once per model.** Of the
+  uniforms a draw needs, all but one are the same for every model in the
+  frame. Draws that share geometry and a material are merged into one
+  instanced draw automatically (`core.set_draw_merging(false)` turns it off).
+- **The frame allocates nothing.** `benchmarks/bench_frame.ae` runs the
+  heaviest per-frame work two thousand times with no window: 578us to upload
+  two hundred thousand instance matrices, under a microsecond each for
+  transforms, camera, frustum and water, zero leaked bytes.
+- **Only exposed voxels become instances**, and **the viewport readback is
+  pipelined** (two pixel buffers, so the CPU never waits on the GPU; the editor
+  runs a frame behind, anything comparing what it just drew takes the waiting
+  read).
+- **Vulkan links nothing.** The loader is opened at runtime, so a program built
+  with the Vulkan backend still starts where no driver exists and says so.
 
 ## Credits
 
-ae3d continues [Gopher3D](https://github.com/nicolas-maman/gopher3D) (MIT), the
-same author's earlier Go engine. The architecture, the GLSL programs, the material
-and lighting model, the OBJ loader's behaviour and the demo scenes carry over from
-it; the Go served as the reference, none of it was copied, and the Aether and C
-here are an independent implementation that takes the engine past where Gopher3D
-left off.
+ae3d continues [Gopher3D](https://github.com/nicolas-maman/gopher3D) (MIT),
+the same author's earlier Go engine. The architecture, the GLSL programs, the
+material and lighting model and the OBJ loader's behaviour carry over from it;
+the Go served as the reference and none of it was copied. The Vulkan renderer,
+the agent channel, the Blender pipeline, the ECS, the pose-bank crowd and the
+screen-space reflections are new here.
 
-Built with [GLFW](https://www.glfw.org/), [Vulkan](https://www.vulkan.org/) via
-MoltenVK on macOS, and [stb_image](https://github.com/nothings/stb).
-
-See [NOTICE](NOTICE) and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+Built with [GLFW](https://www.glfw.org/), [Vulkan](https://www.vulkan.org/)
+(via MoltenVK on macOS) and [stb_image](https://github.com/nothings/stb). See
+[NOTICE](NOTICE) and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 
 ## License
 

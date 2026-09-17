@@ -18,10 +18,12 @@ import ae3d.skin
 import ae3d.ecs
 
 exports (
-    posebank_bake, posebank_free,
+    posebank_bake, posebank_bake_in_place, posebank_free,
     posebank_frames, posebank_bones, posebank_get, posebank_data,
+    posebank_travel, posebank_speed,
     horde_seek,
-    HordeGrid, grid_new, grid_free, horde_separate
+    HordeGrid, grid_new, grid_free, horde_separate,
+    crowd_wander, crowd_step, crowd_bucket
 )
 
 extern ae3d_posebank_create(frames: int, bones: int) -> ptr
@@ -31,11 +33,24 @@ extern ae3d_posebank_bones(bank: ptr) -> int
 extern ae3d_posebank_capture(bank: ptr, frame: int, palette: ptr)
 extern ae3d_posebank_get(bank: ptr, frame: int, bone: int, i: int) -> float
 extern ae3d_posebank_data(bank: ptr) -> ptr
+extern ae3d_posebank_set_travel(bank: ptr, frame: int, distance: float)
+extern ae3d_posebank_travel(bank: ptr, frame: int) -> float
+extern ae3d_posebank_speed(bank: ptr, phase: float, duration: float) -> float
 extern ae3d_horde_grid_create(cols: int, per_cell: int) -> ptr
 extern ae3d_horde_grid_destroy(grid: ptr)
 extern ae3d_horde_separate(grid: ptr, pos: ptr, vel: ptr, n: int,
                            ox: float, oz: float, cell_size: float,
                            radius: float, strength: float)
+extern ae3d_crowd_wander(vel: ptr, yaw: ptr, n: int, speed: float)
+extern ae3d_crowd_step(pos: ptr, vel: ptr, yaw: ptr, phase: ptr, n: int,
+                       dt: float, max_speed: float,
+                       x0: float, x1: float, z0: float, z1: float,
+                       road_y: float, walk: float, bank: ptr)
+extern ae3d_crowd_bucket(pos: ptr, yaw: ptr, phase: ptr, col: ptr, n: int,
+                         cx: float, cz: float, near_dist: float, cull_dist: float,
+                         np: ptr, ny: ptr, nph: ptr, ncol: ptr,
+                         fp: ptr, fy: ptr, fph: ptr, fcol: ptr,
+                         far_out: ptr) -> int
 
 // Bake `frames` evenly spaced poses across `duration` seconds of the clip the
 // registry's players carry, into a bank the whole crowd will share. Each frame
@@ -44,6 +59,29 @@ extern ae3d_horde_separate(grid: ptr, pos: ptr, vel: ptr, n: int,
 // so a baked pose is the pose the figure would strike at that instant. Returns
 // null on a bad shape or an allocation failure.
 posebank_bake(reg: *Registry, skel: *Skeleton, frames: int, duration: float) -> ptr {
+    return posebank_bake_in_place(reg, skel, frames, 0.0, duration, 0 - 1)
+}
+
+// The same bake with the figure's travel taken out. A clip authored for a
+// hero figure walks it somewhere -- the zombie's clip carries it two metres
+// up the street, lunges it another, and walks on -- and that travel lives in
+// the root bone. A crowd baked from it drifts: each instance's mesh walks
+// off the position the simulation holds it at, metres by the end of the
+// clip, and snaps back when the loop restarts. It reads as the whole horde
+// teleporting, and no check on the simulated positions can see it, because
+// they never moved. `root` names the bone that carries the travel; each
+// frame its ground-plane displacement from where it was bound is subtracted
+// from every bone, so the pose is struck in place and the crowd's motion is
+// the simulation's alone. Height is kept -- the hips rising and falling over
+// each step is the walk's weight, not its travel. `root < 0` bakes as is.
+//
+// `start` and `duration` pick the window of the clip to loop: a hero clip is
+// a walk, a lunge and a recovery, and a crowd wants only the walk -- one
+// gait cycle, which repeats without a seam -- or every zombie lunges in step
+// every few seconds. The build declares the cycle as timeline markers; the
+// scene reads them from the manifest and passes the window here.
+posebank_bake_in_place(reg: *Registry, skel: *Skeleton, frames: int, start: float,
+                       duration: float, root: int) -> ptr {
     if reg == null || skel == null || frames <= 0 { return null }
     bones = skin.skeleton_count(skel)
     if bones <= 0 { return null }
@@ -51,12 +89,22 @@ posebank_bake(reg: *Registry, skel: *Skeleton, frames: int, duration: float) -> 
     bank = ae3d_posebank_create(frames, bones)
     if bank == null { return null }
 
+    bound = core.vec3(0.0, 0.0, 0.0)
+    if root >= 0 { bound = skin.skeleton_bind_position(skel, root) }
+
+    // The root's path over the ground, as distance walked: summed frame to
+    // frame so it does not care which way the clip was authored to face. One
+    // sample past the last frame, at the clip's end, so the step from the last
+    // pose back round to the first has a distance too.
+    walked = 0.0
+    last_x = 0.0
+    last_z = 0.0
     k = 0
-    while k < frames {
-        // The clip wraps, so the last frame lands just short of the loop point
+    while k <= frames {
+        // The clip wraps, so the last pose lands just short of the loop point
         // rather than on the duplicate of the first: [0, duration).
-        t = 0.0
-        if frames > 1 { t = (k as float) / (frames as float) * duration }
+        t = start
+        if frames > 1 { t = start + (k as float) / (frames as float) * duration }
 
         n = anim.registry_count(reg)
         i = 0
@@ -70,11 +118,34 @@ posebank_bake(reg: *Registry, skel: *Skeleton, frames: int, duration: float) -> 
             i = i + 1
         }
 
-        skin.skeleton_update(skel)
-        ae3d_posebank_capture(bank, k, skin.skeleton_palette(skel))
+        if root >= 0 {
+            hips = skin.skeleton_bone(skel, root)
+            core.model_sync_transform(hips)
+            travel = core.vec3(hips.model_matrix.m12 - bound.x, 0.0,
+                               hips.model_matrix.m14 - bound.z)
+            if k > 0 {
+                dx = travel.x - last_x
+                dz = travel.z - last_z
+                walked = walked + core.sqrt_of(dx * dx + dz * dz)
+            }
+            last_x = travel.x
+            last_z = travel.z
+            ae3d_posebank_set_travel(bank, k, walked)
+            if k < frames { skin.skeleton_update_shifted(skel, travel) }
+        } else if k < frames {
+            skin.skeleton_update(skel)
+        }
+        if k < frames { ae3d_posebank_capture(bank, k, skin.skeleton_palette(skel)) }
         k = k + 1
     }
     return bank
+}
+
+// How far the clip's root had walked by frame k of an in-place bake, and how
+// fast it is walking at a phase of it. Zero for a bank baked as authored.
+posebank_travel(bank: ptr, frame: int) -> float { return ae3d_posebank_travel(bank, frame) }
+posebank_speed(bank: ptr, phase: float, duration: float) -> float {
+    return ae3d_posebank_speed(bank, phase, duration)
 }
 
 posebank_free(bank: ptr) { ae3d_posebank_destroy(bank) }
@@ -163,4 +234,35 @@ horde_separate(world: *EcsWorld, position: *Column, velocity: *Column,
     ae3d_horde_separate(g.native, ecs.column_data(position), ecs.column_data(velocity),
                         ecs.world_slot_count(world), g.ox, g.oz, g.cell_size,
                         radius, strength)
+}
+
+// The crowd's per-frame motion and its distance sort, native. These run over
+// the ECS columns' own buffers (ecs.column_data) rather than the EcsWorld: the
+// crowd is the compact range [0, n), a horde that only spawns.
+
+// Point every zombie's velocity along its heading at `speed`, before the
+// separation pass adds its shove.
+crowd_wander(vel: ptr, yaw: ptr, n: int, speed: float) {
+    ae3d_crowd_wander(vel, yaw, n, speed)
+}
+
+// Cap the speed, step, bounce off the street's edges (turning the heading so the
+// crowd stays in the city), keep it on the road, face it along its heading, and
+// advance its walk. Replaces the Aether motion loop.
+crowd_step(pos: ptr, vel: ptr, yaw: ptr, phase: ptr, n: int, dt: float,
+           max_speed: float, x0: float, x1: float, z0: float, z1: float,
+           road_y: float, walk: float, bank: ptr) {
+    ae3d_crowd_step(pos, vel, yaw, phase, n, dt, max_speed, x0, x1, z0, z1, road_y, walk, bank)
+}
+
+// Sort the crowd into the near and far draw buffers by distance to the camera,
+// compacting each into its own run and dropping any zombie past `cull_dist`
+// (beyond the fog, so invisible and not worth a draw; pass <= 0 to keep all).
+// Returns the near count and writes the far count into far_out[0] -- with the
+// cull, near + far no longer sum to n.
+crowd_bucket(pos: ptr, yaw: ptr, phase: ptr, col: ptr, n: int, cx: float, cz: float,
+             near_dist: float, cull_dist: float, np: ptr, ny: ptr, nph: ptr, ncol: ptr,
+             fp: ptr, fy: ptr, fph: ptr, fcol: ptr, far_out: ptr) -> int {
+    return ae3d_crowd_bucket(pos, yaw, phase, col, n, cx, cz, near_dist, cull_dist,
+                             np, ny, nph, ncol, fp, fy, fph, fcol, far_out)
 }

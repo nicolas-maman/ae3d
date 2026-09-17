@@ -22,7 +22,7 @@ import ae3d.platform
 
 exports (
     mesh_push_skybox_cube, skybox_solid, skybox_texture, mesh_normal,
-    mesh_set_skin, mesh_is_skinned, mesh_skin_joint, mesh_skin_weight,
+    mesh_set_skin, mesh_is_skinned, mesh_skin_joint, mesh_skin_weight, mesh_decimate,
     mesh_surface_area, mesh_uv_area, mesh_distinct_planes, mesh_size,
     palette_create, palette_destroy, palette_bones, palette_set, palette_get,
     palette_data, farr_create, farr_destroy, farr_set, farr_get, skinrows_create, skinrows_destroy, skinrows_count, skinrows_set,
@@ -43,7 +43,7 @@ exports (
     model_set_position, model_set_scale, model_set_rotation, model_rotate,
     model_update_matrix, model_recalculate_bounds, model_mark_dirty, model_set_diffuse,
     model_set_parent, model_parent, model_sync_transform, model_world_position,
-    model_set_mesh, model_disable_instancing,
+    model_set_mesh, model_mesh, model_disable_instancing,
     model_set_skeleton, model_skeleton,
     model_set_specular, model_set_pbr, model_set_exposure, model_set_reflectivity, model_set_alpha,
     model_set_texture, model_set_shader, model_set_name, model_set_source_path,
@@ -55,10 +55,10 @@ exports (
     model_ensure_material, model_set_uniform_float, model_set_uniform_int,
     model_set_uniform_vec3, model_set_uniform_array, model_uniform_count, model_uniform, model_uniform_names,
     model_enable_instancing, model_set_instance_position, model_set_instance_color,
-    model_enable_instance_colors, model_set_instance_positions, model_set_instance_colors,
+    model_enable_instance_colors, model_set_instance_positions, model_set_instance_positions_yaw, model_set_instance_colors,
     model_set_pose_bank, model_pose_bank, model_enable_instance_phases, model_set_instance_phase,
     model_set_instance_phases,
-    model_instance_count, model_remove_instance, light_new, light_directional, light_point,
+    model_instance_count, model_set_instance_draw_count, model_remove_instance, light_new, light_directional, light_point,
     light_warm, light_cool, light_sun, light_free, shader_new, shader_named, shader_valid,
     SHADER_CUSTOM, SHADER_WATER, debug_enabled,
     set_debug, frustum_culling, set_frustum_culling, face_culling, set_face_culling,
@@ -127,6 +127,7 @@ var g_next_model_id = 1
 extern ae3d_mesh_create() -> ptr
 
 extern ae3d_mesh_clone(mesh: ptr) -> ptr
+extern ae3d_mesh_decimate(mesh: ptr, cell_size: float) -> ptr
 extern ae3d_mesh_destroy(mesh: ptr)
 
 extern ae3d_mesh_vertex_count(mesh: ptr) -> int
@@ -176,6 +177,7 @@ extern ae3d_inst_destroy(inst: ptr)
 extern ae3d_inst_resize(inst: ptr, count: int) -> int
 
 extern ae3d_inst_count(inst: ptr) -> int
+extern ae3d_inst_set_count(inst: ptr, count: int)
 
 extern ae3d_inst_set_trs(inst: ptr, i: int, px: float, py: float, pz: float, sx: float, sy: float, sz: float, qx: float, qy: float, qz: float, qw: float)
 
@@ -219,6 +221,7 @@ extern ae3d_mesh_index_at(mesh: ptr, i: int) -> int
 extern ae3d_mesh_recalc_normals(mesh: ptr)
 extern ae3d_inst_has_colors(inst: ptr) -> int
 extern ae3d_inst_set_positions(inst: ptr, xyz: ptr, count: int, sx: float, sy: float, sz: float, qx: float, qy: float, qz: float, qw: float)
+extern ae3d_inst_set_positions_yaw(inst: ptr, xyz: ptr, yaw: ptr, count: int, sx: float, sy: float, sz: float)
 extern ae3d_inst_set_colors(inst: ptr, rgb: ptr, count: int)
 
 
@@ -1025,11 +1028,15 @@ env_int(name: string, fallback: int) -> int {
     raw = os.getenv(name)
     if raw == null { return fallback }
 
+    // Any integer the variable parses to, zero and negatives included. This
+    // used to keep only values of one and up and hand back the fallback for
+    // the rest, silently: AE3D_CAMX=-100 placed the camera at the default,
+    // AE3D_CULL=0 left the cull at its default distance, AE3D_SEPN=0 ran
+    // separation at its default rate -- and every one of those reads looked
+    // like a result. A knob that quietly ignores what it is set to is worse
+    // than no knob. An unparseable value still falls back.
     chosen = fallback
-    if string.try_int(raw) != 0 {
-        value = string.get_int(raw)
-        if value >= 1 { chosen = value }
-    }
+    if string.try_int(raw) != 0 { chosen = string.get_int(raw) }
     string.free(raw)
     return chosen
 }
@@ -1360,6 +1367,13 @@ model_set_mesh(m: *Model, mesh: ptr) {
     if m.mesh != null { ae3d_mesh_destroy(m.mesh) }
     m.mesh = mesh
     model_recalculate_bounds(m)
+}
+
+// The mesh a model draws, so a caller can read it -- to decimate it into a
+// crowd LOD, for one -- and hand a new one back through model_set_mesh.
+model_mesh(m: *Model) -> ptr {
+    if m == null { return null }
+    return m.mesh
 }
 
 // Pose this model by a skeleton. The renderer reads it when the model is
@@ -1814,6 +1828,15 @@ model_set_instance_positions(m: *Model, xyz: ptr, count: int) {
     m.instances_updated = true
 }
 
+// The same, but each instance faces its own way: `yaw` is a per-instance
+// turn about Y, so a crowd can shamble at its own angles rather than in rank.
+model_set_instance_positions_yaw(m: *Model, xyz: ptr, yaw: ptr, count: int) {
+    if m.instances == null { return }
+    ae3d_inst_set_positions_yaw(m.instances, xyz, yaw, count,
+                                m.scale.x, m.scale.y, m.scale.z)
+    m.instances_updated = true
+}
+
 model_set_instance_colors(m: *Model, rgb: ptr, count: int) {
     if m.instances == null { return }
     ae3d_inst_set_colors(m.instances, rgb, count)
@@ -1823,6 +1846,16 @@ model_set_instance_colors(m: *Model, rgb: ptr, count: int) {
 model_instance_count(m: *Model) -> int {
     if m.instances == null { return 0 }
     return ae3d_inst_count(m.instances)
+}
+
+// Draw only the first `count` instances this frame, of however many the model
+// was enabled for. A distance LOD fills one model with the near zombies and
+// another with the far, and each frame the counts shift; this is what lets a
+// model draw a different number of them without being reallocated.
+model_set_instance_draw_count(m: *Model, count: int) {
+    if m.instances == null { return }
+    ae3d_inst_set_count(m.instances, count)
+    m.instances_updated = true
 }
 
 // CRITICAL: removing an instance shifts every colour after it down one, the
@@ -2140,6 +2173,14 @@ camera_screen_to_world(c: *Camera, screen_x: float, screen_y: float,
 
 mesh_create() -> ptr {
     return ae3d_mesh_create()
+}
+
+// A decimated copy of a mesh for a crowd LOD: vertices sharing a `cell_size`
+// grid cell collapse to one, triangles that fold to a line drop, and the skin
+// is carried so the coarse figure bends on the same skeleton. Larger cells,
+// fewer triangles. Returns a new mesh the caller owns, or null on failure.
+mesh_decimate(mesh: ptr, cell_size: float) -> ptr {
+    return ae3d_mesh_decimate(mesh, cell_size)
 }
 
 mesh_destroy(mesh: ptr) {

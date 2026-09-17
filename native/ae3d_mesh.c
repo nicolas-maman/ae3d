@@ -527,6 +527,18 @@ int ae3d_inst_count(void *handle) {
     return inst ? inst->count : 0;
 }
 
+/* Draw fewer instances than the buffer holds, without freeing the rest. A
+ * distance LOD fills this model with the near zombies one frame and a different
+ * number the next; the capacity is what was reserved, the count is what draws.
+ * Clamped to the capacity, so it can never read off the end of the matrices. */
+void ae3d_inst_set_count(void *handle, int count) {
+    ae3d_inst *inst = (ae3d_inst *)handle;
+    if (!inst) return;
+    if (count < 0) count = 0;
+    if (count > inst->capacity) count = inst->capacity;
+    inst->count = count;
+}
+
 void ae3d_inst_set_trs(void *handle, int i,
                        double px, double py, double pz,
                        double sx, double sy, double sz,
@@ -590,6 +602,32 @@ void ae3d_inst_set_positions(void *handle, const double *xyz, int count,
         m[0] = basis[0]; m[1] = basis[1]; m[2]  = basis[2]; m[3]  = 0.0f;
         m[4] = basis[3]; m[5] = basis[4]; m[6]  = basis[5]; m[7]  = 0.0f;
         m[8] = basis[6]; m[9] = basis[7]; m[10] = basis[8]; m[11] = 0.0f;
+        m[12] = (float)xyz[i * 3];
+        m[13] = (float)xyz[i * 3 + 1];
+        m[14] = (float)xyz[i * 3 + 2];
+        m[15] = 1.0f;
+    }
+}
+
+/* Per-instance facing: each instance turned about Y by its own yaw, so a crowd
+   is a crowd and not a rank all facing one way. The mesh's forward (+x) maps to
+   (cos a, 0, -sin a), which is the direction the caller moves the instance in,
+   so facing and travel agree and the feet do not skate sideways. */
+void ae3d_inst_set_positions_yaw(void *handle, const double *xyz, const double *yaw,
+                                 int count, double sx, double sy, double sz) {
+    ae3d_inst *inst = (ae3d_inst *)handle;
+    int i, limit;
+
+    if (!inst || !xyz || !yaw || count <= 0) return;
+    limit = count < inst->count ? count : inst->count;
+
+    for (i = 0; i < limit; i++) {
+        double a = yaw[i];
+        double c = cos(a), s = sin(a);
+        float *m = inst->matrices + (size_t)i * 16;
+        m[0]  = (float)(c * sx); m[1]  = 0.0f;      m[2]  = (float)(-s * sx); m[3]  = 0.0f;
+        m[4]  = 0.0f;            m[5]  = (float)sy; m[6]  = 0.0f;             m[7]  = 0.0f;
+        m[8]  = (float)(s * sz); m[9]  = 0.0f;      m[10] = (float)(c * sz);  m[11] = 0.0f;
         m[12] = (float)xyz[i * 3];
         m[13] = (float)xyz[i * 3 + 1];
         m[14] = (float)xyz[i * 3 + 2];
@@ -1086,4 +1124,174 @@ double ae3d_mesh_extent(void *handle, int axis) {
         if (v > high) high = v;
     }
     return high - low;
+}
+
+/* Runtime mesh decimation, by vertex clustering, for the crowd LOD.
+ *
+ * A crowd cannot draw the hero mesh: half a million times twenty-six thousand
+ * triangles is thirteen billion a frame. It draws a decimated stand-in, and the
+ * reason to build it here rather than in a DCC tool is that any mesh the engine
+ * loads then gets a crowd LOD with no round-trip -- the figure that walks in the
+ * demo is the one the crowd is made of, only coarser.
+ *
+ * Clustering rather than edge-collapse: bucket the vertices into a uniform grid
+ * of `cell_size`, collapse every vertex sharing a cell to one representative
+ * (its cell's averaged position, normal and texcoord), and rewrite the triangles
+ * onto the representatives, dropping the ones that fold to a line. It is O(n), it
+ * never opens a hole, and -- the part that matters for a skinned crowd -- it
+ * carries the skin: a representative's weights are the sum of its cell's, the
+ * four heaviest joints kept and (by set_skin) renormalised, so the coarse figure
+ * bends on the same skeleton as the fine one. Larger cells, fewer triangles.
+ *
+ * Occlusion (vertex slot 8) is left at its default: a crowd is lit by the scene,
+ * not by the per-vertex bake meant for the hero figure seen up close. Returns a
+ * new mesh the caller owns, or null on a bad argument or an allocation failure.
+ */
+#define AE3D_DECIMATE_MAXJ 16
+void *ae3d_mesh_decimate(void *handle, double cell_size) {
+    ae3d_mesh *src = (ae3d_mesh *)handle;
+    void *out;
+    int n, ic, i, k, r, reps = 0, cap, skinned;
+    double inv;
+    int *remap = NULL, *cnt = NULL, *sj = NULL, *nj = NULL, *hval = NULL;
+    double *acc = NULL, *sw = NULL;
+    char *hused = NULL;
+    long long *hkey = NULL;
+
+    if (!src || src->vertex_count <= 0 || cell_size <= 0.0) return NULL;
+    n = src->vertex_count;
+    ic = src->index_count;
+    inv = 1.0 / cell_size;
+    skinned = src->skin ? 1 : 0;
+
+    cap = 64;
+    while (cap < n * 2) cap *= 2;
+
+    remap = (int *)malloc((size_t)n * sizeof(int));
+    acc   = (double *)calloc((size_t)n * 8, sizeof(double));
+    cnt   = (int *)calloc((size_t)n, sizeof(int));
+    hkey  = (long long *)malloc((size_t)cap * sizeof(long long));
+    hval  = (int *)malloc((size_t)cap * sizeof(int));
+    hused = (char *)calloc((size_t)cap, sizeof(char));
+    if (skinned) {
+        sj = (int *)malloc((size_t)n * AE3D_DECIMATE_MAXJ * sizeof(int));
+        sw = (double *)calloc((size_t)n * AE3D_DECIMATE_MAXJ, sizeof(double));
+        nj = (int *)calloc((size_t)n, sizeof(int));
+    }
+    if (!remap || !acc || !cnt || !hkey || !hval || !hused ||
+        (skinned && (!sj || !sw || !nj))) {
+        free(remap); free(acc); free(cnt); free(hkey); free(hval); free(hused);
+        free(sj); free(sw); free(nj);
+        return NULL;
+    }
+
+    /* Assign each vertex to its cell's representative, accumulating as we go.
+       The cell key packs the vertex's dominant joint with three 16-bit cell
+       coordinates. Folding the joint in is what keeps a skinned figure from
+       tearing: two vertices a cell apart in the bind pose but weighted to
+       different bones -- the inner faces of the two legs, an arm against the
+       torso -- must not collapse to one, or the walk that pulls those bones
+       apart would drag the merged vertex into a spike between them. Same-bone
+       vertices in a cell still merge freely; that is where the triangles go. */
+    for (i = 0; i < n; i++) {
+        const float *vs = src->vertices + (size_t)i * AE3D_STRIDE;
+        long long cx = (long long)floor((double)vs[0] * inv);
+        long long cy = (long long)floor((double)vs[1] * inv);
+        long long cz = (long long)floor((double)vs[2] * inv);
+        long long dom = 0;
+        long long key;
+        if (skinned) {
+            const float *sk0 = src->skin + (size_t)i * AE3D_SKIN_STRIDE;
+            double best = -1.0;
+            int t;
+            for (t = 0; t < 4; t++) {
+                if ((double)sk0[4 + t] > best) { best = (double)sk0[4 + t]; dom = (long long)sk0[t]; }
+            }
+        }
+        key = ((dom & 0x7FFFLL) << 48) | ((cx & 0xFFFFLL) << 32)
+              | ((cy & 0xFFFFLL) << 16) | (cz & 0xFFFFLL);
+        unsigned h = (unsigned)((unsigned long long)key * 1103515245ULL + 12345ULL)
+                     & (unsigned)(cap - 1);
+        double *a;
+        while (hused[h] && hkey[h] != key) h = (h + 1) & (unsigned)(cap - 1);
+        if (!hused[h]) { hused[h] = 1; hkey[h] = key; hval[h] = reps; r = reps; reps++; }
+        else r = hval[h];
+        remap[i] = r;
+        a = acc + (size_t)r * 8;
+        a[0] += vs[0]; a[1] += vs[1]; a[2] += vs[2];
+        a[3] += vs[3]; a[4] += vs[4];
+        a[5] += vs[5]; a[6] += vs[6]; a[7] += vs[7];
+        cnt[r]++;
+        if (skinned) {
+            const float *sk = src->skin + (size_t)i * AE3D_SKIN_STRIDE;
+            int *rj = sj + (size_t)r * AE3D_DECIMATE_MAXJ;
+            double *rw = sw + (size_t)r * AE3D_DECIMATE_MAXJ;
+            for (k = 0; k < 4; k++) {
+                int j = (int)sk[k];
+                double w = (double)sk[4 + k];
+                int m, found = 0;
+                if (w <= 0.0) continue;
+                for (m = 0; m < nj[r]; m++) {
+                    if (rj[m] == j) { rw[m] += w; found = 1; break; }
+                }
+                if (!found && nj[r] < AE3D_DECIMATE_MAXJ) {
+                    rj[nj[r]] = j; rw[nj[r]] = w; nj[r]++;
+                }
+            }
+        }
+    }
+
+    out = ae3d_mesh_create();
+    if (!out || !ae3d_mesh_reserve(out, reps, ic)) {
+        if (out) ae3d_mesh_destroy(out);
+        free(remap); free(acc); free(cnt); free(hkey); free(hval); free(hused);
+        free(sj); free(sw); free(nj);
+        return NULL;
+    }
+
+    /* One vertex per representative: the cell's average, normal renormalised. */
+    for (r = 0; r < reps; r++) {
+        double *a = acc + (size_t)r * 8;
+        double c = cnt[r] > 0 ? (double)cnt[r] : 1.0;
+        double nx = a[5], ny = a[6], nz = a[7];
+        double nl = sqrt(nx * nx + ny * ny + nz * nz);
+        if (nl > 1e-8) { nx /= nl; ny /= nl; nz /= nl; }
+        else { nx = 0.0; ny = 1.0; nz = 0.0; }
+        ae3d_mesh_push_vertex(out, a[0] / c, a[1] / c, a[2] / c,
+                              a[3] / c, a[4] / c, nx, ny, nz);
+    }
+
+    /* Carry the skin: the four heaviest joints of each representative's cell,
+       handed to set_skin, which renormalises them. */
+    if (skinned) {
+        for (r = 0; r < reps; r++) {
+            int *rj = sj + (size_t)r * AE3D_DECIMATE_MAXJ;
+            double *rw = sw + (size_t)r * AE3D_DECIMATE_MAXJ;
+            int top[4]; double tw[4]; int t, m;
+            for (t = 0; t < 4; t++) { top[t] = 0; tw[t] = 0.0; }
+            for (m = 0; m < nj[r]; m++) {
+                int minidx = 0;
+                for (t = 1; t < 4; t++) if (tw[t] < tw[minidx]) minidx = t;
+                if (rw[m] > tw[minidx]) { tw[minidx] = rw[m]; top[minidx] = rj[m]; }
+            }
+            ae3d_mesh_set_skin(out, r, top[0], top[1], top[2], top[3],
+                               tw[0], tw[1], tw[2], tw[3]);
+        }
+    }
+
+    /* Rewrite the triangles onto the representatives, dropping any that fold to
+       a line (two corners in one cell). */
+    for (i = 0; i + 2 < ic; i += 3) {
+        int r0 = remap[src->indices[i]];
+        int r1 = remap[src->indices[i + 1]];
+        int r2 = remap[src->indices[i + 2]];
+        if (r0 == r1 || r1 == r2 || r0 == r2) continue;
+        ae3d_mesh_push_index(out, r0);
+        ae3d_mesh_push_index(out, r1);
+        ae3d_mesh_push_index(out, r2);
+    }
+
+    free(remap); free(acc); free(cnt); free(hkey); free(hval); free(hused);
+    free(sj); free(sw); free(nj);
+    return out;
 }

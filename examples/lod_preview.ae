@@ -1,0 +1,144 @@
+// LOD preview: one zombie, frozen at a mid-walk pose through the same pose-bank
+// skinning the crowd uses, framed head to foot, so the crowd LOD can be judged
+// by eye -- both its geometry and, the part a bounding box cannot see, whether
+// it tears when the walk pulls its bones apart. AE3D_LOD_CELL is the cluster
+// cell in millimetres; unset (or 0) draws the full mesh. A debugging tool.
+//
+//     AE3D_LOD_CELL=110 AE3D_FRAMES=3 AE3D_SNAPSHOT=lod.png ./build/lod_preview
+
+import std.list
+import ae3d.core
+import ae3d.engine
+import ae3d.gl
+import ae3d.ecs
+import ae3d.anim
+import ae3d.skin
+import ae3d.crowd
+import ae3d.assets
+import ae3d.platform
+
+const MANIFEST = "resources/blender/zombie_street/manifest.json"
+const FRAMES = 24
+const POSE = 0.32   // where in the walk to freeze -- legs apart, the tearing pose
+
+var g_body: *Model = null
+var g_bank: ptr = null
+var g_pos: *Column = null
+var g_phase: *Column = null
+
+entry_for(m: *Manifest, name: string) -> *Entry {
+    n = assets.manifest_count(m)
+    i = 0
+    while i < n {
+        ent = assets.manifest_entry(m, i)
+        if assets.entry_object(ent) == name { return ent }
+        i = i + 1
+    }
+    return null
+}
+
+bake_zombie(m: *Manifest, entry: *Entry) -> ptr {
+    bones = assets.entry_load_skeleton(m, entry)
+    if bones == null { return null }
+    skel = skin.skeleton_new()
+    i = 0
+    while i < list.size(bones) {
+        skin.skeleton_add(skel, list.get_raw(bones, i) as *Model)
+        i = i + 1
+    }
+    skin.skeleton_bind(skel)
+    clips = assets.entry_load_bone_clips(m, entry)
+    reg = anim.registry_new()
+    duration = 0.0
+    i = 0
+    while clips != null && i < list.size(clips) {
+        clip = list.get_raw(clips, i) as *Clip
+        index = skin.skeleton_find(skel, anim.clip_name(clip))
+        if index >= 0 {
+            anim.registry_add(reg, anim.clip_name(clip), anim.player_new(clip),
+                              skin.skeleton_bone(skel, index))
+            d = anim.clip_duration(clip)
+            if d > duration { duration = d }
+        }
+        i = i + 1
+    }
+    if clips != null { list.free(clips) }
+    if duration <= 0.0 { duration = 1.0 }
+    bank = crowd.posebank_bake(reg, skel, FRAMES, duration)
+    anim.registry_free(reg)
+    skin.skeleton_free(skel)
+    i = 0
+    while i < list.size(bones) {
+        core.model_free(list.get_raw(bones, i) as *Model)
+        i = i + 1
+    }
+    list.free(bones)
+    return bank
+}
+
+on_start(data: ptr) {
+    e = data as *Engine
+    m = assets.manifest_load(MANIFEST)
+    if m == null { println("lod_preview: ${assets.last_error()}"); return }
+    entry = entry_for(m, "Zombie_Body")
+    if entry == null { println("lod_preview: no Zombie_Body"); assets.manifest_free(m); return }
+    g_bank = bake_zombie(m, entry)
+    g_body = assets.entry_load_model(m, entry)
+    assets.manifest_free(m)
+    if g_bank == null || g_body == null { println("lod_preview: load failed"); return }
+
+    src = core.model_mesh(g_body)
+    tris = core.mesh_index_count(src) / 3
+    cell = (core.env_int("AE3D_LOD_CELL", 0) as float) / 1000.0
+    if cell > 0.0 {
+        lod = core.mesh_decimate(src, cell)
+        if lod != null {
+            core.model_set_mesh(g_body, lod)
+            println("lod_preview: ${tris} -> ${core.mesh_index_count(lod) / 3} tris (cell ${cell})")
+        }
+    } else {
+        println("lod_preview: full ${tris} tris")
+    }
+
+    // One instance, at the origin, frozen at a mid-walk pose through the crowd's
+    // pose-bank skinning -- the same path the horde draws with.
+    core.model_enable_instancing(g_body, 1)
+    core.model_set_pose_bank(g_body, g_bank, FRAMES)
+    core.model_enable_instance_phases(g_body)
+    g_pos = ecs.column_new(1, 3)
+    g_phase = ecs.column_new(1, 1)
+    ecs.column_set3(g_pos, 0, core.vec3(0.0, 0.0, 0.0))
+    ecs.column_set(g_phase, 0, 0, POSE)
+    core.model_set_instance_positions(g_body, ecs.column_data(g_pos), 1)
+    core.model_set_instance_phases(g_body, ecs.column_data(g_phase), 1)
+    engine.engine_add_model(e, g_body)
+
+    renderer = engine.engine_gl_renderer(e)
+    if renderer != null { gl.renderer_set_clear_color(renderer, 0.14, 0.15, 0.19) }
+
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(1.1, 1.0, 2.6))
+    core.camera_look_at(cam, core.vec3(0.0, 0.9, 0.0))
+}
+
+main() {
+    e = engine.engine_new(platform.API_GL)
+    engine.engine_set_size(e, 720, 900)
+    engine.engine_set_title(e, "ae3d - lod preview")
+    engine.engine_set_face_culling(e, true)
+
+    light = core.light_directional(core.vec3(0.0 - 0.4, 0.0 - 0.8, 0.0 - 0.5),
+                                   core.vec3(1.0, 1.0, 0.96), 2.6)
+    light.ambient_strength = 0.5
+    engine.engine_set_light(e, light)
+
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_start(e, on_start as fn(ptr))
+    engine.engine_run(e, 0 - 1, 0 - 1)
+
+    if g_body != null { core.model_free(g_body) }
+    if g_pos != null { ecs.column_free(g_pos) }
+    if g_phase != null { ecs.column_free(g_phase) }
+    if g_bank != null { crowd.posebank_free(g_bank) }
+    core.light_free(light)
+}

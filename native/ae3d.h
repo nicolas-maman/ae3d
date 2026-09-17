@@ -41,6 +41,7 @@ double ae3d_scroll_delta(void *win);
 
 void  *ae3d_mesh_create(void);
 void  *ae3d_mesh_clone(void *mesh);
+void  *ae3d_mesh_decimate(void *mesh, double cell_size);
 void   ae3d_mesh_destroy(void *mesh);
 int    ae3d_mesh_reserve(void *mesh, int vertices, int indices);
 int    ae3d_mesh_push_vertex(void *mesh, double px, double py, double pz,
@@ -65,6 +66,9 @@ int    ae3d_posebank_bones(void *bank);
 void   ae3d_posebank_capture(void *bank, int frame, void *palette);
 double ae3d_posebank_get(void *bank, int frame, int bone, int i);
 const float *ae3d_posebank_data(void *bank);
+void   ae3d_posebank_set_travel(void *bank, int frame, double distance);
+double ae3d_posebank_travel(void *bank, int frame);
+double ae3d_posebank_speed(void *bank, double phase, double duration);
 int    ae3d_gl_posebank_texture(void *bank);
 void   ae3d_gl_setup_instance_phase(void *inst, int phase_vbo);
 void   ae3d_gl_update_instance_phases(void *inst, int phase_vbo);
@@ -73,6 +77,17 @@ void   ae3d_horde_grid_destroy(void *grid);
 void   ae3d_horde_separate(void *grid, double *pos, double *vel, int n,
                            double ox, double oz, double cell_size,
                            double radius, double strength);
+void   ae3d_crowd_wander(double *vel, const double *yaw, int n, double speed);
+void   ae3d_crowd_step(double *pos, const double *vel, double *yaw, double *phase,
+                       int n, double dt, double max_speed,
+                       double x0, double x1, double z0, double z1,
+                       double road_y, double walk, void *bank);
+int    ae3d_crowd_bucket(const double *pos, const double *yaw, const double *phase,
+                         const double *col, int n,
+                         double cx, double cz, double near_dist, double cull_dist,
+                         double *np, double *ny, double *nph, double *ncol,
+                         double *fp, double *fy, double *fph, double *fcol,
+                         double *far_out);
 void   ae3d_gl_upload_skin(void *mesh, int vbo);
 void  *ae3d_skinrows_create(int count);
 void   ae3d_skinrows_destroy(void *rows);
@@ -128,6 +143,7 @@ void  *ae3d_inst_create(void);
 void   ae3d_inst_destroy(void *inst);
 int    ae3d_inst_resize(void *inst, int count);
 int    ae3d_inst_count(void *inst);
+void   ae3d_inst_set_count(void *inst, int count);
 void   ae3d_inst_set_trs(void *inst, int i,
                          double px, double py, double pz,
                          double sx, double sy, double sz,
@@ -135,6 +151,8 @@ void   ae3d_inst_set_trs(void *inst, int i,
 void   ae3d_inst_set_positions(void *inst, const double *xyz, int count,
                                double sx, double sy, double sz,
                                double qx, double qy, double qz, double qw);
+void   ae3d_inst_set_positions_yaw(void *inst, const double *xyz, const double *yaw,
+                                   int count, double sx, double sy, double sz);
 void   ae3d_inst_set_colors(void *inst, const double *rgb, int count);
 void   ae3d_inst_set_matrix(void *inst, int i, const double *m);
 void   ae3d_inst_remove(void *inst, int i);

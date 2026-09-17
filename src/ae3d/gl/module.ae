@@ -179,6 +179,9 @@ struct ProgramSlots {
     fog_enabled: int
     shadow_direction: int
     shadow_texel_world: int
+    enable_shadows: int
+    shadow_intensity: int
+    shadow_softness: int
     fog_start: int
     fog_end: int
     fog_color: int
@@ -244,6 +247,7 @@ struct GLRenderer {
     last_textures: int
     frame_stamp: int
     shadow_program: int
+    crowd_shadow_program: int
     shadow_fbo: int
     shadow_map: int
     shadow_enabled: bool
@@ -487,6 +491,9 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
     s.caustics_time = ae3d_gl_uniform_location(program, "causticsTime")
     s.shadow_direction = ae3d_gl_uniform_location(program, "shadowDirection")
     s.shadow_texel_world = ae3d_gl_uniform_location(program, "shadowTexelWorld")
+    s.enable_shadows = ae3d_gl_uniform_location(program, "enableShadows")
+    s.shadow_intensity = ae3d_gl_uniform_location(program, "shadowIntensity")
+    s.shadow_softness = ae3d_gl_uniform_location(program, "shadowSoftness")
     s.fog_enabled = ae3d_gl_uniform_location(program, "enableFog")
     s.fog_start = ae3d_gl_uniform_location(program, "fogStart")
     s.fog_end = ae3d_gl_uniform_location(program, "fogEnd")
@@ -670,6 +677,9 @@ renderer_init(r: *GLRenderer, window: ptr, width: int, height: int) -> int {
     slots_for(r, r.crowd_program)
 
     r.shadow_program = compile_program(shaders.VERTEX_DEPTH, shaders.FRAGMENT_DEPTH, "depth")
+    // The crowd's depth pass poses from the pose bank by phase, so it casts a
+    // walking shadow, not a bind-pose one. Same fragment (depth only).
+    r.crowd_shadow_program = compile_program(shaders.VERTEX_CROWD_DEPTH, shaders.FRAGMENT_DEPTH, "crowd_depth")
     r.fxaa_program = compile_program(shaders.VERTEX_SCREEN, shaders.FRAGMENT_FXAA, "fxaa")
     r.bloom_program = compile_program(shaders.VERTEX_SCREEN, shaders.FRAGMENT_BLOOM, "bloom")
     r.passthrough_program = compile_program(shaders.VERTEX_SCREEN, shaders.FRAGMENT_PASSTHROUGH, "passthrough")
@@ -1136,6 +1146,15 @@ light_space_matrix(r: *GLRenderer, light: *Light, cam: *Camera) -> Mat4 {
     if r.shadow_distance > 0.0 && cam != null {
         centre = core.v3_add(cam.position,
                              core.v3_mul(cam.front, r.shadow_distance * 0.5))
+        // Snap the box centre to the shadow map's world-texel grid, so the map
+        // covers the same texels frame to frame and only ever shifts by whole
+        // texels. Without it the box slides continuously with the camera and the
+        // shadow edges crawl and shimmer as you move -- the classic swim. The
+        // moon is near enough to straight down that snapping on the world axes
+        // stands in for snapping on the light's own.
+        texel = r.shadow_distance * 2.0 / (SHADOW_SIZE * 1.0)
+        centre = core.vec3(snap_to(centre.x, texel), snap_to(centre.y, texel),
+                           snap_to(centre.z, texel))
         return light_box(r, light, centre, r.shadow_distance)
     }
 
@@ -1150,6 +1169,15 @@ light_space_matrix(r: *GLRenderer, light: *Light, cam: *Camera) -> Mat4 {
     }
 
     return light_box(r, light, centre, radius)
+}
+
+// Round a coordinate to the nearest multiple of `t`, for either sign.
+snap_to(v: float, t: float) -> float {
+    if t <= 0.0 { return v }
+    n = v / t
+    k = 0
+    if n >= 0.0 { k = (n + 0.5) as int } else { k = (n - 0.5) as int }
+    return (k as float) * t
 }
 
 // A light's direction points at the light, the way the shading does it, so the
@@ -1213,6 +1241,12 @@ render_shadow_pass(r: *GLRenderer, light: *Light, cam: *Camera) {
             i = i + 1
             continue
         }
+        // The crowd is posed from the pose bank, not a bones palette, so it is
+        // drawn in its own sub-pass below with the crowd depth program.
+        if core.model_pose_bank(m) != null {
+            i = i + 1
+            continue
+        }
         core.model_sync_transform(m)
         moved = m.shadow_stamp != m.world_stamp
         m.shadow_stamp = m.world_stamp
@@ -1267,9 +1301,66 @@ render_shadow_pass(r: *GLRenderer, light: *Light, cam: *Camera) {
         }
         i = i + 1
     }
+    render_crowd_shadows(r)
+
     ae3d_gl_vao_bind(0)
     bind_output(r)
     ae3d_gl_viewport(0, 0, r.viewport_width, r.viewport_height)
+}
+
+// The crowd's shadow sub-pass: every pose-bank model, posed by its instances'
+// phases, written into the same shadow map with the crowd depth program. The
+// instance and phase buffers are brought current here (the shadow pass runs
+// before the lit pass would upload them) and their dirty flags cleared, so the
+// lit pass reuses the same upload. Depth only, so no colour or lighting.
+render_crowd_shadows(r: *GLRenderer) {
+    if r.crowd_shadow_program == 0 { return }
+    bound = 0
+    space_loc = 0
+    model_loc = 0
+    bank_loc = 0
+    frames_loc = 0
+    count = list.size(r.models)
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        i = i + 1
+        if m == null || !m.visible || !m.casts_shadow { continue }
+        if core.model_pose_bank(m) == null { continue }
+        if !m.is_instanced || core.model_instance_count(m) <= 0 { continue }
+        if bound == 0 {
+            use_program(r, r.crowd_shadow_program)
+            space_loc = ae3d_gl_uniform_location(r.crowd_shadow_program, "lightSpaceMatrix")
+            model_loc = ae3d_gl_uniform_location(r.crowd_shadow_program, "model")
+            bank_loc = ae3d_gl_uniform_location(r.crowd_shadow_program, "poseBank")
+            frames_loc = ae3d_gl_uniform_location(r.crowd_shadow_program, "poseBankFrames")
+            ae3d_gl_uniform_mat4(space_loc, &r.shadow_space)
+            bound = 1
+        }
+        core.model_sync_transform(m)
+        // Bring the per-instance placement and walk phase current, then let the
+        // lit pass skip re-uploading the same data this frame.
+        if m.instances_updated {
+            m.instance_vbo_capacity = ae3d_gl_update_instances(m.instances, m.instance_vbo,
+                                                               m.instance_vbo_capacity)
+            m.instances_updated = false
+        }
+        if m.instance_phases_updated && m.instance_phase_vbo != 0 {
+            ae3d_gl_update_instance_phases(m.instances, m.instance_phase_vbo)
+            m.instance_phases_updated = false
+        }
+        if m.pose_bank_texture == 0 {
+            m.pose_bank_texture = ae3d_gl_posebank_texture(m.pose_bank)
+        }
+        ae3d_gl_texture_bind(3, m.pose_bank_texture)
+        ae3d_gl_uniform_int(bank_loc, 3)
+        ae3d_gl_uniform_int(frames_loc, m.pose_bank_frames)
+        ae3d_gl_uniform_mat4(model_loc, &m.model_matrix)
+        ae3d_gl_vao_bind(m.vao)
+        ae3d_gl_draw_elements_instanced(core.mesh_index_count(m.mesh), 0,
+                                        core.model_instance_count(m))
+        r.last_draw_calls = r.last_draw_calls + 1
+    }
 }
 
 draw_depth(r: *GLRenderer, m: *Model, instanced: int) {
@@ -1839,7 +1930,14 @@ render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
     // Before the cull, because a skinned mesh's own bounds are the bind pose's
     // and say nothing about where its bones have carried it.
     if m.skeleton != null { skin.skeleton_fit(m.skeleton as *Skeleton, m) }
-    if core.frustum_culling() &&
+    // An instanced model is never culled by its own bounds: they describe the
+    // one base mesh at its origin, while its instances stand anywhere in the
+    // world. Testing that one small sphere threw the whole crowd away the moment
+    // the camera looked past its origin -- every zombie vanished on a zoom.
+    // The instances cull themselves: the crowd bucket drops the fogged-out ones
+    // and the GPU clips the rest.
+    spread = m.is_instanced && core.model_instance_count(m) > 0
+    if core.frustum_culling() && !spread &&
        !core.frustum_sphere_visible(r.frustum, m.bounding_center, m.bounding_radius) {
         return
     }
@@ -1930,6 +2028,12 @@ apply_transparency(r: *GLRenderer, transparent: bool) {
 
 draw(r: *GLRenderer, m: *Model, slots: *ProgramSlots, count: int, byte_offset: int) {
     if count <= 0 { return }
+    // An instanced model with nothing active draws nothing. It used to fall
+    // through to the plain branch and draw one raw copy of the mesh at the
+    // origin -- unposed, untinted -- so a crowd tier that emptied left a
+    // bind-pose ghost standing at (0,0,0) that appeared and vanished as the
+    // tier filled and emptied.
+    if m.is_instanced && core.model_instance_count(m) <= 0 { return }
     if m.is_instanced && core.model_instance_count(m) > 0 {
         if m.instances_updated {
             m.instance_vbo_capacity = ae3d_gl_update_instances(m.instances, m.instance_vbo,
@@ -2062,6 +2166,15 @@ bind_shadow_map(r: *GLRenderer, slots: *ProgramSlots) {
         return
     }
     ae3d_gl_uniform_int(slots.has_shadow_map, 1)
+    // Turn the shadow term on with the map. The fragment shader gates it behind
+    // enableShadows, and only the rendering.Config path and the water module
+    // ever set that -- so an engine-API scene (its models made straight from
+    // core) bound a shadow map the shader then ignored, and nothing cast a
+    // shadow. Default it on, at a readable strength, whenever a real map is
+    // bound; a model that wants no shadow still overrides these per draw.
+    ae3d_gl_uniform_int(slots.enable_shadows, 1)
+    ae3d_gl_uniform_float(slots.shadow_intensity, 0.32)
+    ae3d_gl_uniform_float(slots.shadow_softness, 0.35)
     ae3d_gl_uniform_mat4(slots.light_space, &r.shadow_space)
     ae3d_gl_uniform_vec3(slots.shadow_direction, r.shadow_direction.x,
                          r.shadow_direction.y, r.shadow_direction.z)
@@ -2505,6 +2618,7 @@ renderer_cleanup(r: *GLRenderer) {
 
     if r.default_program != 0 { ae3d_gl_program_delete(r.default_program) ; r.default_program = 0 }
     if r.shadow_program != 0 { ae3d_gl_program_delete(r.shadow_program) ; r.shadow_program = 0 }
+    if r.crowd_shadow_program != 0 { ae3d_gl_program_delete(r.crowd_shadow_program) ; r.crowd_shadow_program = 0 }
     if r.fxaa_program != 0 { ae3d_gl_program_delete(r.fxaa_program) ; r.fxaa_program = 0 }
     if r.bloom_program != 0 { ae3d_gl_program_delete(r.bloom_program) ; r.bloom_program = 0 }
     if r.passthrough_program != 0 {

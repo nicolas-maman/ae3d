@@ -5,8 +5,9 @@
 //
 //     AE3D_CROWD=200000 ./build/zombie_horde
 //
-// The real zombie is ~26k triangles, so a huge crowd wants a decimated mesh or
-// LOD (a later step); this renders the full mesh at a crowd the GPU can carry.
+// The real zombie is ~21k triangles, far too many at half a million, so the
+// engine decimates it to a crowd LOD at load (core.mesh_decimate, bone-aware so
+// the walk does not tear it). AE3D_LOD_CELL (mm) tunes the budget; 0 draws full.
 
 import std.list
 import ae3d.core
@@ -23,6 +24,12 @@ import ae3d.platform
 const MANIFEST = "resources/blender/zombie_street/manifest.json"
 const FRAMES = 24
 const CROWD_DEFAULT = 4000
+// The crowd draws a decimated stand-in of the hero zombie, not the ~21k-triangle
+// mesh itself -- half a million of those is thirteen billion triangles a frame.
+// A cell of this size collapses the real figure to ~170 triangles, which the
+// render-scale sweep puts inside a 60 fps frame at half a million, and the skin
+// rides along so the coarse figure walks on the same skeleton.
+const LOD_CELL = 0.18
 
 const SPEED = 3.0        // how fast the horde shuffles toward its target
 const SEP_RADIUS = 1.4   // zombies closer than this shove apart
@@ -87,10 +94,20 @@ bake_zombie(m: *Manifest, entry: *Entry) -> ptr {
     }
     if clips != null { list.free(clips) }
     if duration <= 0.0 { duration = 1.0 }
-    g_walk = duration
-
-    bank = crowd.posebank_bake(reg, skel, FRAMES, duration)
-    println("zombie_horde: ${skin.skeleton_count(skel)} bones, ${crowd.posebank_frames(bank)} poses over ${duration}s of walk")
+    // One gait cycle, in place: the build marks the cycle, and the clip's
+    // travel is the Root bone's while the horde's is the sim's (see
+    // zombie_city, which explains both).
+    gait = assets.manifest_marker(m, "gait", 0.0)
+    gait_end = assets.manifest_marker(m, "gait_end", duration)
+    if gait_end <= gait {
+        gait = 0.0
+        gait_end = duration
+    }
+    g_walk = gait_end - gait
+    root = skin.skeleton_find(skel, "Root")
+    if root < 0 { root = skin.skeleton_find(skel, "Hips") }
+    bank = crowd.posebank_bake_in_place(reg, skel, FRAMES, gait, g_walk, root)
+    println("zombie_horde: ${skin.skeleton_count(skel)} bones, ${crowd.posebank_frames(bank)} poses over ${g_walk}s of walk")
 
     anim.registry_free(reg)
     skin.skeleton_free(skel)
@@ -130,6 +147,24 @@ on_start(data: ptr) {
     if g_bank == null || g_body == null {
         println("zombie_horde: could not load the zombie")
         return
+    }
+
+    // Decimate the hero mesh to a crowd LOD at load, in the engine -- no DCC
+    // round-trip. The stand-in keeps the silhouette and the skin, so the crowd
+    // is the real zombie, only coarse enough that half a million of it draws.
+    src_mesh = core.model_mesh(g_body)
+    hero_tris = core.mesh_index_count(src_mesh) / 3
+    // AE3D_LOD_CELL is the cluster cell in millimetres (0 = no LOD, full mesh),
+    // a debug knob for dialling the crowd's triangle budget against its looks.
+    cell = (core.env_int("AE3D_LOD_CELL", (LOD_CELL * 1000.0) as int) as float) / 1000.0
+    if cell > 0.0 {
+        lod_mesh = core.mesh_decimate(src_mesh, cell)
+        if lod_mesh != null {
+            core.model_set_mesh(g_body, lod_mesh)
+            println("zombie_horde: crowd LOD ${hero_tris} -> ${core.mesh_index_count(lod_mesh) / 3} triangles a figure (cell ${cell})")
+        }
+    } else {
+        println("zombie_horde: no LOD, full ${hero_tris} triangles a figure")
     }
 
     if !core.model_enable_instancing(g_body, g_count) { return }

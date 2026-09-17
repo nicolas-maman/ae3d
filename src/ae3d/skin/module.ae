@@ -27,7 +27,7 @@ exports (
     Skeleton, Bone, skeleton_new, skeleton_free, skeleton_add, skeleton_bind,
     skeleton_count, skeleton_bone, skeleton_find, skeleton_palette,
     skeleton_fit, skeleton_reach,
-    skeleton_update, MAX_BONES
+    skeleton_update, skeleton_update_shifted, skeleton_bind_position, MAX_BONES
 )
 
 // The vertex shader declares an array this long. It is bounded by the vertex
@@ -161,6 +161,46 @@ skeleton_update(s: *Skeleton) {
         }
         i = i + 1
     }
+}
+
+// The palette with the figure's travel taken out: every entry rebuilt with
+// `offset` subtracted from where the bone stands, so the pose is struck in
+// place. A clip that walks the figure up the street carries that walk in its
+// root bone, and a crowd baked from such a clip would carry it too -- every
+// instance drifting off its own simulated position through the clip and
+// snapping back at the loop, which reads as teleporting. The crowd moves the
+// instance; the pose must not. Every entry, stamps or not, because the shift
+// changes bones that did not move; and the stamps are cleared after, so a
+// plain update returns the palette to the true pose.
+skeleton_update_shifted(s: *Skeleton, offset: Vec3) {
+    if s == null { return }
+    count = list.size(s.bones)
+    if count == 0 { return }
+    if s.palette == null { s.palette = core.palette_create(count) }
+    i = 0
+    while i < count {
+        b = list.get_raw(s.bones, i) as *Bone
+        if b != null && b.model != null {
+            bone = b.model as *Model
+            core.model_sync_transform(bone)
+            posed = core.mat4_mul(bone.model_matrix, b.inverse_bind)
+            posed.m12 = posed.m12 - offset.x
+            posed.m13 = posed.m13 - offset.y
+            posed.m14 = posed.m14 - offset.z
+            core.palette_set(s.palette, i, &posed)
+            b.stamp = 0 - 1
+        }
+        i = i + 1
+    }
+}
+
+// Where a bone stood when the mesh was bound to it.
+skeleton_bind_position(s: *Skeleton, index: int) -> Vec3 {
+    if s == null || index < 0 || index >= list.size(s.bones) { return core.vec3(0.0, 0.0, 0.0) }
+    b = list.get_raw(s.bones, index) as *Bone
+    if b == null { return core.vec3(0.0, 0.0, 0.0) }
+    bind = core.mat4_inverse(b.inverse_bind)
+    return core.vec3(bind.m12, bind.m13, bind.m14)
 }
 
 skeleton_palette(s: *Skeleton) -> ptr {

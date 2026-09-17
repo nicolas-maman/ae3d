@@ -1,0 +1,142 @@
+// Runtime mesh decimation for the crowd LOD. A crowd cannot draw the hero mesh,
+// so the engine collapses it to a coarse stand-in at load -- this proves the
+// kernel: a dense skinned figure decimates to far fewer triangles while keeping
+// its silhouette (extents hold) and its skin (weights still sum to one, joints
+// still in range), so the coarse figure bends on the same skeleton. No GL.
+
+import ae3d.core
+
+const RINGS = 40
+const SIDES = 16
+const RADIUS = 0.3
+const HEIGHT = 1.9
+const TAU = 6.2831853
+
+var failures = 0
+
+check_true(name: string, ok: bool) {
+    if !ok {
+        println("FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+fabs(x: float) -> float {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// A tall cylinder, RINGS x SIDES, skinned up a four-bone chain by height -- a
+// stand-in dense enough that clustering has plenty to collapse.
+build_cylinder() -> ptr {
+    mesh = core.mesh_create()
+    ring = 0
+    while ring <= RINGS {
+        y = (ring * 1.0) / RINGS * HEIGHT
+        side = 0
+        while side < SIDES {
+            ang = (side * 1.0) / SIDES * TAU
+            x = RADIUS * core.cos_of(ang)
+            z = RADIUS * core.sin_of(ang)
+            core.mesh_push_vertex(mesh, core.vec3(x, y, z),
+                                  (side * 1.0) / SIDES, (ring * 1.0) / RINGS,
+                                  core.v3_normalize(core.vec3(x, 0.0, z)))
+            side = side + 1
+        }
+        ring = ring + 1
+    }
+    ring = 0
+    while ring < RINGS {
+        side = 0
+        while side < SIDES {
+            nxt = (side + 1) % SIDES
+            a = ring * SIDES + side
+            b = ring * SIDES + nxt
+            c = (ring + 1) * SIDES + nxt
+            d = (ring + 1) * SIDES + side
+            core.mesh_push_index(mesh, a)
+            core.mesh_push_index(mesh, b)
+            core.mesh_push_index(mesh, c)
+            core.mesh_push_index(mesh, a)
+            core.mesh_push_index(mesh, c)
+            core.mesh_push_index(mesh, d)
+            side = side + 1
+        }
+        ring = ring + 1
+    }
+    ring = 0
+    while ring <= RINGS {
+        along = (ring * 1.0) / RINGS * 3.0
+        lower = along as int
+        if lower > 2 { lower = 2 }
+        blend = along - (lower * 1.0)
+        side = 0
+        while side < SIDES {
+            core.mesh_set_skin(mesh, ring * SIDES + side, lower, lower + 1, 0, 0,
+                               1.0 - blend, blend, 0.0, 0.0)
+            side = side + 1
+        }
+        ring = ring + 1
+    }
+    return mesh
+}
+
+main() {
+    src = build_cylinder()
+    sv = core.mesh_vertex_count(src)
+    st = core.mesh_index_count(src) / 3
+    ssize = core.mesh_size(src, core.vec3(1.0, 1.0, 1.0))
+    check_true("the source mesh is built and skinned",
+               sv > 0 && st > 0 && core.mesh_is_skinned(src))
+
+    // A cell around a fifth of the radius: merges neighbours, keeps the shape.
+    cell = RADIUS * 0.6
+    lod = core.mesh_decimate(src, cell)
+    check_true("decimate returns a mesh", lod != null)
+    if lod == null { return }
+
+    lv = core.mesh_vertex_count(lod)
+    lt = core.mesh_index_count(lod) / 3
+    lsize = core.mesh_size(lod, core.vec3(1.0, 1.0, 1.0))
+
+    println("  mesh_decimate: verts ${sv} -> ${lv}, tris ${st} -> ${lt}, cell ${cell}")
+    println("    extents src (${ssize.x}, ${ssize.y}, ${ssize.z}) lod (${lsize.x}, ${lsize.y}, ${lsize.z})")
+
+    check_true("vertices drop", lv > 0 && lv < sv)
+    check_true("triangles drop", lt > 0 && lt < st)
+    check_true("the LOD is still skinned", core.mesh_is_skinned(lod))
+
+    // Silhouette holds: every extent within a couple of cells of the original.
+    tol = cell * 2.0
+    check_true("height preserved", fabs(lsize.y - ssize.y) < tol)
+    check_true("width preserved (x)", fabs(lsize.x - ssize.x) < tol)
+    check_true("depth preserved (z)", fabs(lsize.z - ssize.z) < tol)
+
+    // Skin sane: every LOD vertex's four weights sum to one, joints in range.
+    ok_w = true
+    ok_j = true
+    i = 0
+    while i < lv {
+        s = 0.0
+        j = 0
+        while j < 4 {
+            s = s + core.mesh_skin_weight(lod, i, j)
+            jt = core.mesh_skin_joint(lod, i, j) as int
+            if jt < 0 || jt > 3 { ok_j = false }
+            j = j + 1
+        }
+        if fabs(s - 1.0) > 0.01 { ok_w = false }
+        i = i + 1
+    }
+    check_true("every LOD vertex's weights sum to one", ok_w)
+    check_true("every LOD joint index stays in range", ok_j)
+
+    core.mesh_destroy(lod)
+    core.mesh_destroy(src)
+
+    if failures == 0 {
+        println("mesh_decimate: all checks passed")
+    } else {
+        println("mesh_decimate: ${failures} failure(s)")
+    }
+}

@@ -47,6 +47,16 @@ JOINTS = (
     # the neck, and the neck points up -- aiming that at anything ahead lays the
     # head over on its side.
     ("Face",      "Head",      (0.11,  0.00,  0.02), 0.000),
+    # The skull. A head that is one sphere has no face from any angle; these
+    # grow the surface out where a skull actually stands proud -- the brow
+    # ridge above the eyes, the cheekbones, and the jaw and chin below -- so
+    # the head reads as a head with a front, sunken between brow and jaw where
+    # the eyes sit. They ride the Head bone and carry no animation of their own.
+    ("Brow",      "Head",      (0.085, 0.00,  0.055), 0.060),
+    ("CheekL",    "Head",      (0.070, 0.052, -0.010), 0.046),
+    ("CheekR",    "Head",      (0.070, -0.052, -0.010), 0.046),
+    ("Jaw",       "Head",      (0.075, 0.00, -0.070), 0.058),
+    ("Chin",      "Jaw",       (0.020, 0.00, -0.030), 0.036),
 
     ("ShoulderL", "Chest",     (0.00,  0.17,  0.14), 0.072),
     ("ElbowL",    "ShoulderL", (0.00,  0.02, -0.29), 0.055),
@@ -69,7 +79,8 @@ JOINTS = (
 
 # Which joints wear cloth and which are bare. A zombie in a suit that has been
 # through something is skin at the head, the forearms and the hands.
-BARE = {"Neck", "Head", "Crown", "WristL", "HandL", "WristR", "HandR"}
+BARE = {"Neck", "Head", "Crown", "Brow", "CheekL", "CheekR", "Jaw", "Chin",
+        "WristL", "HandL", "WristR", "HandR"}
 
 PARENT = {name: parent for name, parent, _offset, _radius in JOINTS}
 OFFSET = {name: offset for name, _parent, offset, _radius in JOINTS}
@@ -134,12 +145,15 @@ def build_body(name, material, subdivisions=3):
     # rather than around whichever vertex happened to be first.
     layer[GROWN.index("Hips")].use_root = True
 
-    smooth = obj.modifiers.new("Round", "SUBSURF")
-    smooth.levels = subdivisions
-    smooth.render_levels = subdivisions
-
     bpy.ops.object.modifier_apply(modifier="Skin")
-    bpy.ops.object.modifier_apply(modifier="Round")
+    # No rounding at zero levels: a subdivision modifier with nothing to do
+    # is one Blender 5 reports as disabled and refuses to apply, which broke
+    # the crowd LOD body (built at subdivisions=0). Only add it when it acts.
+    if subdivisions > 0:
+        smooth = obj.modifiers.new("Round", "SUBSURF")
+        smooth.levels = subdivisions
+        smooth.render_levels = subdivisions
+        bpy.ops.object.modifier_apply(modifier="Round")
 
     mesh.materials.append(material)
     return obj

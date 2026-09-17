@@ -107,34 +107,73 @@ def brick(size=1024, seed=11):
     Sixteen courses across a tile that covers 1.2 metres is a course of 75mm,
     which is what a brick is. The tile carries nothing else, so it can be this
     small and still tile without a pattern anybody can see.
+
+    A wall is not one brick repeated. Every brick here gets its own tone -- a
+    little lighter or darker, a little more orange or more purple-brown -- the
+    way a kiln fires a batch unevenly, and the mortar is grubbier in some
+    joints than others. Over that, weathering: dark patches where rain has
+    streaked and soot has settled, and the odd spalled brick with a chipped,
+    darker face. One flat colour with a per-row shade read as a cartoon tile,
+    and no lighting could make it brick.
     """
     rng = random.Random(seed)
     rows, columns = 16, 6
-    grain = _noise(rng, size, 4, 4)
+    grain = _noise(rng, size, 4, 4)        # fine surface texture
+    weather = _noise(rng, size, 3, 2)      # broad soot and rain patches
+    spall = _noise(rng, size, 5, 16)       # small chips and pits
     field = numpy.zeros((size, size), dtype=numpy.float32)
     shade = numpy.zeros((size, size), dtype=numpy.float32)
+    warmth = numpy.zeros((size, size), dtype=numpy.float32)
 
     row_height = size / rows
     column_width = size / columns
     mortar = max(1.0, size / 128.0)
 
+    # Each brick's own tone, keyed by course and position so it tiles.
+    tones = {}
     for y in range(size):
         row = int(y / row_height)
         in_row = y - row * row_height
         offset = 0.5 * column_width if row % 2 else 0.0
-        row_shade = rng.uniform(-0.06, 0.06)
         for x in range(size):
             u = (x + offset) % size
+            index = int(u / column_width)
             in_column = u % column_width
             joint = (in_row < mortar or in_column < mortar or
                      in_row > row_height - mortar or in_column > column_width - mortar)
             field[y, x] = 1.0 if joint else 0.0
-            shade[y, x] = row_shade
+            key = (row, index)
+            tone = tones.get(key)
+            if tone is None:
+                # Mostly near the base tone; now and then a clearly odd brick.
+                if rng.random() < 0.12:
+                    tone = (rng.uniform(-0.30, 0.28), rng.uniform(-0.14, 0.16))
+                else:
+                    tone = (rng.uniform(-0.14, 0.14), rng.uniform(-0.07, 0.08))
+                tones[key] = tone
+            shade[y, x] = tone[0]
+            warmth[y, x] = tone[1]
 
     face = numpy.array((0.42, 0.20, 0.15), dtype=numpy.float32)
     joint_colour = numpy.array((0.52, 0.50, 0.47), dtype=numpy.float32)
-    rgb = face[None, None, :] * (1.0 + shade[:, :, None] + (grain[:, :, None] - 0.5) * 0.35)
-    rgb = rgb * (1.0 - field[:, :, None]) + joint_colour[None, None, :] * field[:, :, None]
+
+    # Per-brick brightness and warmth: warmth pushes red up and blue down.
+    rgb = face[None, None, :] * (1.0 + shade[:, :, None])
+    rgb[:, :, 0] *= 1.0 + warmth
+    rgb[:, :, 2] *= 1.0 - warmth
+    rgb *= 1.0 + (grain[:, :, None] - 0.5) * 0.35
+
+    # Weathering: broad dark patches of soot and rain-streaking, on brick and
+    # mortar alike, and a scatter of spalled, chipped faces on the bricks.
+    soot = numpy.clip((0.52 - weather) * 1.6, 0.0, 1.0) * 0.38
+    chips = numpy.clip((spall - 0.64) * 5.0, 0.0, 1.0) * 0.55
+    rgb *= (1.0 - soot[:, :, None])
+    rgb *= (1.0 - (chips * (1.0 - field))[:, :, None])
+
+    # Mortar: uneven, and grubby where the weather has got into the joint.
+    joint_var = 1.0 + (grain - 0.5) * 0.5 - numpy.clip((0.56 - weather) * 1.8, 0.0, 1.0) * 0.45
+    joint_rgb = joint_colour[None, None, :] * joint_var[:, :, None]
+    rgb = rgb * (1.0 - field[:, :, None]) + joint_rgb * field[:, :, None]
     return _image("BrickWall", size, _rgba(rgb))
 
 
@@ -188,52 +227,165 @@ def tarmac(size=1024, seed=37):
 
 def paving(size=1024, seed=53):
     """Slabs, with a groove between them. Two across a 1.2 metre tile is a
-    slab of 600mm, which is the one a pavement is laid from."""
+    slab of 600mm, which is the one a pavement is laid from.
+
+    A pavement is not four identical slabs. Each is its own shade; grime
+    gathers in the joints and along every slab's edge where feet do not scuff
+    it off; broad patches lie damp and dark; and the surface is speckled with
+    grit and trodden-in gum. Four flat grey squares read as a floor tile in a
+    game, and no lighting could make them a street.
+    """
     rng = random.Random(seed)
     grain = _noise(rng, size, 5, 4)
+    damp = _noise(rng, size, 3, 2)        # broad damp and dirty patches
+    speck = _noise(rng, size, 6, 24)      # grit and trodden gum
     slabs = 2
     pitch = size / slabs
     groove = max(1.0, size / 96.0)
     field = numpy.zeros((size, size), dtype=numpy.float32)
     shade = numpy.zeros((size, size), dtype=numpy.float32)
+    edge = numpy.zeros((size, size), dtype=numpy.float32)
+    tones = {}
     for y in range(size):
         row = int(y / pitch)
         in_row = y % pitch
         for x in range(size):
             column = int(x / pitch)
             in_column = x % pitch
-            edge = (in_row < groove or in_column < groove)
-            field[y, x] = 1.0 if edge else 0.0
-            shade[y, x] = ((row * 7 + column * 13) % 5) * 0.012
-    rgb = _tint((0.46, 0.45, 0.43), (0.22, 0.22, 0.22), field)
-    rgb *= (0.86 + grain[:, :, None] * 0.28 + shade[:, :, None])
+            joint = (in_row < groove or in_column < groove)
+            field[y, x] = 1.0 if joint else 0.0
+            key = (row, column)
+            tone = tones.get(key)
+            if tone is None:
+                tone = rng.uniform(-0.11, 0.11)
+                tones[key] = tone
+            shade[y, x] = tone
+            # How far into the slab from its nearest edge, as a fraction of
+            # the slab; grime falls off away from the joint.
+            edge[y, x] = min(in_row, in_column, pitch - in_row, pitch - in_column) / pitch
+
+    base = numpy.array((0.46, 0.45, 0.43), dtype=numpy.float32)
+    groove_colour = numpy.array((0.22, 0.22, 0.22), dtype=numpy.float32)
+    rgb = base[None, None, :] * (1.0 + shade[:, :, None])
+    rgb *= (0.86 + grain[:, :, None] * 0.28)
+
+    # Grime along every slab edge, damp patches across the whole surface, and
+    # a scatter of dark specks.
+    # Broken up by the grain, or it reads as a bevel around every slab.
+    edge_grime = numpy.clip(1.0 - edge / 0.10, 0.0, 1.0) * 0.26 * (0.45 + grain * 1.1)
+    dampness = numpy.clip((0.50 - damp) * 1.6, 0.0, 1.0) * 0.30
+    specks = numpy.clip((speck - 0.70) * 6.0, 0.0, 1.0) * 0.45
+    rgb *= (1.0 - edge_grime[:, :, None])
+    rgb *= (1.0 - dampness[:, :, None])
+    rgb *= (1.0 - specks[:, :, None])
+
+    # The joint itself, uneven and dirtier where the surface is damp.
+    joint_rgb = groove_colour[None, None, :] * (1.0 + (grain[:, :, None] - 0.5) * 0.4 - dampness[:, :, None] * 0.3)
+    rgb = rgb * (1.0 - field[:, :, None]) + joint_rgb * field[:, :, None]
     return _image("PavingSlab", size, _rgba(rgb))
 
 
-def skin(size=1024, seed=71):
-    """Mottled, bruised, and not well."""
+def _skin_fields(size, seed):
+    """The noise the skin is built from, shared by its colour and its relief
+    so the vein that is darker is also the vein that is sunken."""
     rng = random.Random(seed)
-    blotch = _noise(rng, size, 4, 3)
-    veins = _noise(rng, size, 5, 6)
-    rot = numpy.clip((blotch - 0.5) * 2.0, 0.0, 1.0)
-    rgb = _tint((0.21, 0.25, 0.17), (0.12, 0.15, 0.10), rot)
-    bruise = numpy.clip((veins - 0.62) * 3.0, 0.0, 1.0)
-    rgb = rgb * (1.0 - bruise[:, :, None] * 0.6) + \
-        numpy.array((0.30, 0.16, 0.20), dtype=numpy.float32)[None, None, :] * \
-        bruise[:, :, None] * 0.6
+    blotch = _noise(rng, size, 4, 3)      # broad: bruising and rot
+    mottle = _noise(rng, size, 5, 12)     # mid: uneven patches
+    vein = _noise(rng, size, 4, 24)       # ridge source for the veins
+    pore = _noise(rng, size, 3, 64)       # fine grain
+    return blotch, mottle, vein, pore
+
+
+def _skin_marks(blotch, vein, pore):
+    """Bruise, rot, veins and pores as 0..1 fields, from the shared noise."""
+    bruise = numpy.clip((blotch - 0.54) * 3.2, 0.0, 1.0)
+    rot = numpy.clip((0.42 - blotch) * 3.2, 0.0, 1.0)
+    lines = numpy.clip(1.0 - numpy.abs(vein - 0.5) / 0.022, 0.0, 1.0)
+    return bruise, rot, lines, pore
+
+
+def skin(size=1024, seed=71):
+    """Dead skin: pale and sickly, not green paint.
+
+    The old tile was a dark olive with a mottle so faint and so broad that
+    nothing read at any distance -- the figure was a flat green shape, and
+    the per-zombie tint on top made it a muddy one. Dead skin is PALE, a
+    grey-green drained of blood, and what makes it read as skin is detail at
+    several scales: broad blotches of grey-purple bruising where the blood
+    has pooled, patches gone dark with rot, a lace of thin dark veins, and a
+    fine grain of pores over the lot. The pale base leaves the tint room to
+    make one zombie greener, one greyer, one yellower.
+    """
+    blotch, mottle, vein, pore = _skin_fields(size, seed)
+
+    base = numpy.array((0.46, 0.48, 0.39), dtype=numpy.float32)
+    rgb = numpy.ones((size, size, 3), dtype=numpy.float32) * base[None, None, :]
+    rgb *= (0.80 + mottle[:, :, None] * 0.40)
+
+    bruise, rot, lines, pore = _skin_marks(blotch, vein, pore)
+    # Bruising: grey-purple where blood has settled.
+    b = bruise * 0.55
+    rgb = rgb * (1.0 - b[:, :, None]) + \
+        numpy.array((0.34, 0.25, 0.34), dtype=numpy.float32)[None, None, :] * b[:, :, None]
+    # Rot: gone dark and greenish where the tissue has broken down.
+    r = rot * 0.6
+    rgb = rgb * (1.0 - r[:, :, None]) + \
+        numpy.array((0.15, 0.18, 0.11), dtype=numpy.float32)[None, None, :] * r[:, :, None]
+    # Veins: the contour lines of a noise field are thin, branching and
+    # closed -- the shape veins have.
+    rgb *= (1.0 - (lines * 0.42)[:, :, None])
+    # Pores.
+    rgb *= (0.90 + pore[:, :, None] * 0.20)
     return _image("ZombieSkin", size, _rgba(rgb))
 
 
-def cloth(size=1024, seed=89):
-    """Torn, filthy, and woven closely enough to read as fabric."""
+def _cloth_fields(size, seed):
+    """The noise and the weave the cloth is built from, shared by its colour
+    and its relief so the thread that catches the light is the one drawn."""
     rng = random.Random(seed)
-    grime = _noise(rng, size, 4, 3)
-    weave = numpy.zeros((size, size), dtype=numpy.float32)
-    for y in range(size):
-        for x in range(size):
-            weave[y, x] = 0.5 + 0.5 * math.sin(x * math.pi / 2.0) * math.sin(y * math.pi / 2.0)
-    rgb = _tint((0.20, 0.19, 0.22), (0.09, 0.09, 0.11), numpy.clip(grime * 1.3 - 0.25, 0.0, 1.0))
-    rgb *= (0.88 + weave[:, :, None] * 0.14)
+    grime = _noise(rng, size, 4, 3)       # broad dirt
+    dust = _noise(rng, size, 3, 2)        # broad settled dust
+    wear = _noise(rng, size, 5, 10)       # worn and faded patches
+    blood = _noise(rng, size, 4, 5)       # a few stains
+    fray = _noise(rng, size, 6, 40)       # threads and frays
+    # A fine cross-hatch at eight texels, which on the figure is a thread
+    # every couple of millimetres: fabric, not paint.
+    yy, xx = numpy.mgrid[0:size, 0:size].astype(numpy.float32)
+    period = size / 128.0
+    weave = 0.5 + 0.25 * numpy.sin(xx * 2.0 * math.pi / period) + \
+        0.25 * numpy.sin(yy * 2.0 * math.pi / period)
+    return grime, dust, wear, blood, fray, weave
+
+
+def cloth(size=1024, seed=89):
+    """A suit that has been through something.
+
+    The old tile was near-black with a two-texel weave that averaged away to
+    nothing: the clothes drew as a flat dark shape. Cloth reads as cloth by
+    its weave, at a scale the eye can see, and as WORN cloth by what has
+    happened to it: dust, which lightens a dark fabric where it has settled;
+    grime, which darkens it; patches gone thin and faded at the wear points;
+    dried blood in a few dark rust-brown blots; and a scatter of pulled
+    threads and frays. A base that is dark but not black leaves the folds
+    something to shade.
+    """
+    grime, dust, wear, blood, fray, weave = _cloth_fields(size, seed)
+
+    base = numpy.array((0.30, 0.27, 0.31), dtype=numpy.float32)
+    rgb = numpy.ones((size, size, 3), dtype=numpy.float32) * base[None, None, :]
+    rgb *= (0.86 + weave[:, :, None] * 0.28)
+    rgb *= (0.84 + wear[:, :, None] * 0.32)
+
+    settled = numpy.clip((dust - 0.50) * 2.0, 0.0, 1.0) * 0.35
+    rgb = rgb * (1.0 - settled[:, :, None]) + \
+        numpy.array((0.44, 0.41, 0.36), dtype=numpy.float32)[None, None, :] * settled[:, :, None]
+    dirt = numpy.clip((0.50 - grime) * 1.8, 0.0, 1.0) * 0.45
+    rgb *= (1.0 - dirt[:, :, None])
+    stain = numpy.clip((blood - 0.68) * 5.0, 0.0, 1.0) * 0.7
+    rgb = rgb * (1.0 - stain[:, :, None]) + \
+        numpy.array((0.22, 0.06, 0.05), dtype=numpy.float32)[None, None, :] * stain[:, :, None]
+    threads = numpy.clip((fray - 0.75) * 8.0, 0.0, 1.0) * 0.5
+    rgb *= (1.0 - threads[:, :, None])
     return _image("ZombieCloth", size, _rgba(rgb))
 
 
@@ -452,19 +604,25 @@ def stone_normal(size=512, seed=113):
 
 
 def skin_normal(size=1024, seed=71):
-    """What is left of a face, in relief."""
-    rng = random.Random(seed)
-    height = _noise(rng, size, 6, 7) * 0.65 + _noise(rng, size, 4, 4) * 0.35
-    return _normal_from_height(height, 2.1, "ZombieSkinNormal")
+    """The skin's relief, from the same fields as its colour: the bruises
+    swell a little, the rot sinks, the veins are grooves, and the pores pit
+    the surface -- so a lamp rakes the same marks the colour shows."""
+    blotch, mottle, vein, pore = _skin_fields(size, seed)
+    bruise, rot, lines, pore = _skin_marks(blotch, vein, pore)
+    height = mottle * 0.30 + bruise * 0.20 - rot * 0.25 - lines * 0.45 - pore * 0.12
+    return _normal_from_height(height, 2.4, "ZombieSkinNormal")
 
 
 def cloth_normal(size=1024, seed=89):
-    """A weave, and the creases in it."""
-    rng = random.Random(seed)
-    weave = numpy.linspace(0.0, size / 6.0 * math.tau, size, dtype=numpy.float32)
-    height = (numpy.sin(weave)[None, :] + numpy.sin(weave)[:, None]) * 0.12
-    height += _noise(rng, size, 5, 5) * 0.7
-    return _normal_from_height(height, 1.6, "ZombieClothNormal")
+    """The cloth's relief, from the same fields as its colour: the weave
+    stands proud thread by thread at the scale the colour draws it, the worn
+    patches lie flatter, and the frays are pits; broad creases over the lot.
+    The old map wove at a period twenty times the colour's -- relief and
+    colour disagreed about where the threads were."""
+    grime, dust, wear, blood, fray, weave = _cloth_fields(size, seed)
+    threads = numpy.clip((fray - 0.75) * 8.0, 0.0, 1.0)
+    height = weave * 0.35 + wear * 0.18 + grime * 0.30 - threads * 0.40
+    return _normal_from_height(height, 1.8, "ZombieClothNormal")
 
 
 def _planks(size, rng, boards, gap):

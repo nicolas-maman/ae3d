@@ -1,0 +1,770 @@
+// A horde flooding the lit street: the zombie_street environment -- its
+// buildings, its lamps, its wet road and dusk sky -- with a crowd of the real
+// zombie marching down the road toward the camera, each a decimated LOD instance
+// posed by the shared pose bank. The street is the quality bar; this puts a
+// horde into it.
+//
+//     AE3D_CROWD=3000 ./build/zombie_city
+
+import std.list
+import std.string
+import ae3d.core
+import ae3d.platform
+import ae3d.engine
+import ae3d.gl
+import ae3d.assets
+import ae3d.loader
+import ae3d.anim
+import ae3d.skin
+import ae3d.crowd
+import ae3d.ecs
+
+const MANIFEST = "resources/blender/zombie_street/manifest.json"
+const SKY = "resources/sky/dusk.png"
+const SKY_R = 0.075
+const SKY_G = 0.088
+const SKY_B = 0.125
+const FRAMES = 48
+const LOD_CELL = 0.09
+// A small crowd by default so the scene is inspectable -- a zombie fills enough
+// pixels to judge its mesh, pose, shadow and lighting. Scale up with AE3D_CROWD.
+const CROWD_DEFAULT = 400
+
+// The road runs along x; Blender Y became ae3d -Z, so the carriageway sits at
+// about z = -2.94. The street block is tiled along x into a longer city, and the
+// crowd is a real horde inside it -- it seeks a target that drifts along the
+// street and shoves apart from itself, so it surges and mills and never leaves
+// the street. Nothing teleports, because nothing is ever recycled.
+const BLOCK_LEN = 84.0   // the block's ground slab, Street_Ground: x -36..48
+const BLOCK_CX = 6.0     // its centre; the road and the mirror axis sit here
+const TILES = 7          // blocks along the street, centred on the middle one
+const STREET_X0 = 0.0 - 280.0
+const STREET_X1 = 290.0
+// The horde is held to the road itself: Street_Road is 7m wide, z -3.5..3.5,
+// its surface at y 0.08, kerbed at +-3.38. It used to roam to z +-5.4, over
+// the kerb onto Street_Ground -- the block's pavement slab, which sits 0.43m
+// LOWER than the road -- so anything past the kerb hung half a metre in the
+// air. On the road, at the road's height, every foot is on the ground.
+// Half a metre inside the kerb: a zombie is held by its centre and stands
+// 0.6m wide, so a centre at 3.3 put a foot on the kerb top at 3.38 and the
+// figure read as walking the pavement.
+const ROAD_Z0 = 0.0 - 2.8
+const ROAD_Z1 = 2.8
+const ROAD_Y = 0.08
+const SPEED = 1.4            // how fast a zombie shambles
+const SEP_RADIUS = 1.05      // it shoves apart from anything closer than this
+const SEP_STRENGTH = 2.0     // gently, so the pack spreads without flinging
+const MAX_SPEED = 2.0        // capped, so a shove can never fling a zombie and pop it
+
+// Distance LOD: the zombies close to the camera are drawn from a detailed model,
+// the ones far off from a cheap one, so most of a city-sized crowd costs almost
+// nothing and the count can climb. A zombie within NEAR_DIST of the camera is
+// near; beyond it, far.
+const LOD_NEAR = 0.0    // near tier keeps the full mesh (0 = no decimation)
+// The far tier is the whole crowd's GPU cost: a far zombie is ~200 tris at
+// cell 0.24, and there are hundreds of thousands of them, so the far draw is
+// the frame's biggest single load. A far zombie is metres off and fog-dimmed,
+// where its silhouette is all that reads, so decimating it harder -- ~116 tris
+// at 0.5 -- is invisible in the scene and lifts a quarter-million crowd from
+// 30 to 38fps. Below ~100 tris the bone-aware clustering bottoms out and there
+// is nothing more to win. AE3D_LODFAR (hundredths of the cell) tunes it live.
+const LOD_FAR = 0.5
+// At the inspectable count every zombie is drawn from the full mesh: the whole
+// street sits inside the near band, so nothing ever swaps to the decimated
+// far model. A swap at a fixed distance is a silhouette pop, and when the
+// camera zooms, dozens cross the line at once -- it read as the crowd
+// teleporting. AE3D_NEAR pulls the band in when the count needs the far tier.
+const NEAR_DIST = 600.0
+// No distance cull at the inspectable count. A cull sphere is a hard edge that
+// travels with the camera: zombies were popping into and out of existence
+// wherever it swept, and with a free camera that is everywhere -- it read as
+// teleporting, and the fog alone fades them cleanly. The sim was proven clean
+// (see detect_teleports: no zombie ever steps further than it can walk); the
+// pop was purely the cull. AE3D_CULL (metres) re-enables it for a huge crowd.
+const CULL_DIST = 0.0
+
+var g_scene: ptr = null
+var g_lamps: ptr = null
+var g_sky: *Skybox = null
+var g_near_body: *Model = null    // detailed body + clothes, for zombies close by
+var g_near_clothes: *Model = null
+var g_far_body: *Model = null     // cheap body only, for the ones far off
+var g_bank: ptr = null
+var g_world: *EcsWorld = null
+var g_pos: *Column = null
+var g_vel: *Column = null
+var g_phase: *Column = null
+var g_yaw: *Column = null     // per-zombie heading about Y; also its facing
+var g_grid: *HordeGrid = null
+// Per-tier compacted buffers, filled each frame by bucketing the crowd by
+// distance to the camera. Sized to the whole count -- a tier may hold all of it.
+var g_color: *Column = null   // a fixed muted tint per zombie, for variety
+var g_nb_pos: *Column = null
+var g_nb_yaw: *Column = null
+var g_nb_phase: *Column = null
+var g_nb_col: *Column = null
+var g_fb_pos: *Column = null
+var g_fb_yaw: *Column = null
+var g_fb_phase: *Column = null
+var g_fb_col: *Column = null
+var g_count = CROWD_DEFAULT
+var g_walk = 1.0
+var g_near_dist = NEAR_DIST   // AE3D_NEAR overrides, a knob for the LOD sweep
+var g_cull_dist = CULL_DIST   // AE3D_CULL overrides; 0 keeps the whole crowd
+var g_farcount: *Column = null   // one slot the native bucket writes the far count into
+// Separation is the crowd's heaviest pass, so it runs every SEP_INTERVAL
+// frames rather than every frame -- see the note at its call site. AE3D_SEPN
+// overrides (1 = every frame, 0 = never).
+// Every frame. Running it every other frame at double strength made each
+// zombie's speed alternate frame to frame -- a shimmer you could see up close.
+// At the inspectable count that costs nothing; AE3D_SEPN throttles it at scale.
+const SEP_INTERVAL = 1
+var g_sepn = SEP_INTERVAL
+var g_frame = 0
+
+var g_seed = 0x2f6a41b3
+next_random() -> float {
+    g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
+    return (g_seed as float) / 2147483647.0
+}
+
+entry_named(m: *Manifest, name: string) -> *Entry {
+    count = assets.manifest_count(m)
+    i = 0
+    while i < count {
+        entry = assets.manifest_entry(m, i)
+        if assets.entry_object(entry) == name { return entry }
+        i = i + 1
+    }
+    return null
+}
+
+lamp_at(x: float) -> *Light {
+    lamp = core.light_point(core.vec3(x, 4.25, 0.0 - 2.94),
+                            core.vec3(1.0, 0.74, 0.42),
+                            core.env_int("AE3D_LAMP", 320) as float / 100.0,
+                            core.env_int("AE3D_LAMPR", 8) as float)
+    list.add_raw(g_lamps, lamp as ptr)
+    return lamp
+}
+
+bake_zombie(m: *Manifest, entry: *Entry) -> ptr {
+    bones = assets.entry_load_skeleton(m, entry)
+    if bones == null { return null }
+    skel = skin.skeleton_new()
+    i = 0
+    while i < list.size(bones) {
+        skin.skeleton_add(skel, list.get_raw(bones, i) as *Model)
+        i = i + 1
+    }
+    skin.skeleton_bind(skel)
+    clips = assets.entry_load_bone_clips(m, entry)
+    reg = anim.registry_new()
+    duration = 0.0
+    i = 0
+    while clips != null && i < list.size(clips) {
+        clip = list.get_raw(clips, i) as *Clip
+        index = skin.skeleton_find(skel, anim.clip_name(clip))
+        if index >= 0 {
+            anim.registry_add(reg, anim.clip_name(clip), anim.player_new(clip),
+                              skin.skeleton_bone(skel, index))
+            d = anim.clip_duration(clip)
+            if d > duration { duration = d }
+        }
+        i = i + 1
+    }
+    if clips != null { list.free(clips) }
+    if duration <= 0.0 { duration = 1.0 }
+    // The crowd loops one gait cycle, not the hero's whole clip. The clip is
+    // a walk, a lunge and a recovery; looped entire, a quarter of the horde
+    // is mid-lunge at any moment with its arms out straight, and every zombie
+    // lunges every five seconds. The build marks the cycle ("gait" to
+    // "gait_end", one stride period, which repeats without a seam); an export
+    // without the markers loops the whole clip and says so.
+    gait = assets.manifest_marker(m, "gait", 0.0)
+    gait_end = assets.manifest_marker(m, "gait_end", duration)
+    if gait_end <= gait {
+        println("zombie_city: no gait markers in the export -- the crowd loops the whole ${duration}s clip, lunge and all")
+        gait = 0.0
+        gait_end = duration
+    }
+    g_walk = gait_end - gait
+    // In place: the clip walks the figure up the street, and that travel is
+    // on the Root bone. Baked as authored, every zombie's mesh walked metres
+    // off its simulated position through the clip and snapped back at the
+    // loop -- the "teleporting" the eye caught and the position check could
+    // not, because the positions never moved. The bake takes the travel out
+    // of the pose and records it; the step puts it back as motion.
+    root = skin.skeleton_find(skel, "Root")
+    if root < 0 { root = skin.skeleton_find(skel, "Hips") }
+    if root < 0 { println("zombie_city: no Root bone -- the crowd will carry the clip's travel") }
+    bank = crowd.posebank_bake_in_place(reg, skel, FRAMES, gait, g_walk, root)
+    anim.registry_free(reg)
+    skin.skeleton_free(skel)
+    i = 0
+    while i < list.size(bones) {
+        core.model_free(list.get_raw(bones, i) as *Model)
+        i = i + 1
+    }
+    list.free(bones)
+    return bank
+}
+
+// Wire a figure as an instanced, pose-bank-posed crowd, reserving room for the
+// whole count -- a distance tier fills it with as many as fall in its band each
+// frame. `cell > 0` first decimates the mesh to a crowd LOD at that cell; `cell
+// <= 0` keeps the full mesh, which the near tier needs: the body and the clothes
+// are two coincident meshes, and decimating them independently pulls their
+// vertices apart so the skin pokes through the cloth in patches. Only the far
+// tier, metres off and fogged, can afford the decimation. Returns the tri count.
+setup_crowd(model: *Model, cell: float) -> int {
+    if cell > 0.0 {
+        src = core.model_mesh(model)
+        lod = core.mesh_decimate(src, cell)
+        if lod != null { core.model_set_mesh(model, lod) }
+    }
+    // Dead flesh and damp cloth, not wet plastic: kill the specular and roughen
+    // the surface so the lamps do not smear an oily highlight across every
+    // zombie. Keeps the texture; only the shine goes.
+    core.model_set_specular(model, 0.03, 0.03, 0.03)
+    core.model_set_pbr(model, 0.0, 0.95)
+    core.model_enable_instancing(model, g_count)
+    core.model_set_pose_bank(model, g_bank, FRAMES)
+    core.model_enable_instance_phases(model)
+    core.model_enable_instance_colors(model)
+    return core.mesh_index_count(core.model_mesh(model)) / 3
+}
+
+// A flat slab, face up, `length` along the street by `width` across it, its
+// near corner at the origin, with its texture repeating every 1/per_metre
+// metres so paving reads as slabs and not one stretched tile. loader.plane
+// runs its UVs 0..1 once whatever its size and is not centred, so a ground
+// of any size needs this.
+paved_slab(length: float, width: float, per_metre: float) -> *Model {
+    m = core.model_new()
+    up = core.vec3(0.0, 1.0, 0.0)
+    core.mesh_reserve(m.mesh, 4, 6)
+    ru = length * per_metre
+    rv = width * per_metre
+    core.mesh_push_vertex(m.mesh, core.vec3(0.0, 0.0, 0.0), 0.0, 0.0, up)
+    core.mesh_push_vertex(m.mesh, core.vec3(length, 0.0, 0.0), ru, 0.0, up)
+    core.mesh_push_vertex(m.mesh, core.vec3(length, 0.0, width), ru, rv, up)
+    core.mesh_push_vertex(m.mesh, core.vec3(0.0, 0.0, width), 0.0, rv, up)
+    // The same winding loader.plane uses, which the culler accepts as up.
+    core.mesh_push_triangle(m.mesh, 0, 2, 1)
+    core.mesh_push_triangle(m.mesh, 0, 3, 2)
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    return m
+}
+
+// The small street clutter -- bins, crates, sacks, bollards, benches. There are
+// far more of these than buildings, so a city drawn for a horde of hundreds of
+// thousands drops them: fewer models a block means the renderer can afford
+// more blocks. At the inspectable count they cost nothing, and they are what
+// makes a street a street rather than two rows of walls with a road between:
+// kept by default, stripped with AE3D_NOPROPS=1 when the count needs it.
+is_prop(name: string) -> bool {
+    return string.contains(name, "Bin") == 1 || string.contains(name, "Crate") == 1 ||
+           string.contains(name, "Sack") == 1 || string.contains(name, "Bollard") == 1 ||
+           string.contains(name, "Bench") == 1
+}
+var g_strip_props = false
+
+// One copy of the street environment, shifted `off_x` down the road, added to
+// the engine. The figure objects and the small clutter are left out; only the
+// root models are shifted, so the parented trim and glass ride along on their
+// shells. Lamp heads and lit windows glow; the road is wet.
+// The strips a block is made of: what runs on past the last block so the
+// street does not end at a cliff.
+is_street(name: string) -> bool {
+    return string.contains(name, "Street_Road") == 1 || string.contains(name, "Kerb") == 1 ||
+           string.contains(name, "Street_Path") == 1 || string.contains(name, "Street_Ground") == 1
+}
+
+add_tile(e: *Engine, m: *Manifest, off_x: float, flip: bool, street_only: bool) -> ptr {
+    models = assets.manifest_load_scene(m)
+    count = assets.manifest_count(m)
+    kept = 0
+    dropped = 0
+    first_tint = 0.0
+    i = 0
+    while i < count {
+        name = assets.entry_object(assets.manifest_entry(m, i))
+        model = list.get_raw(models, i) as *Model
+        // Past the city's ends only the street itself continues -- road, kerbs,
+        // pavements, base -- into the fog, with no buildings on it. The last
+        // block used to be the edge of the world.
+        if street_only && !is_street(name) {
+            i = i + 1
+            continue
+        }
+        // Mirroring alternates the terrace, but every other block was still the
+        // same block, and a street of two blocks repeated reads as a copy. So
+        // each tile also keeps only some of its clutter -- a different bin,
+        // bench and crate here than there -- and tints every building shell its
+        // own way, a shade lighter or darker, warmer or cooler: the same brick
+        // reads as a different building. The windows, glow and trim keep their
+        // own colour. Drawn from the seeded stream, so the city is the same
+        // every run.
+        keep = true
+        if model != null && is_prop(name) && !g_strip_props {
+            keep = next_random() < 0.62
+            if keep { kept = kept + 1 } else { dropped = dropped + 1 }
+        }
+        if model != null && keep && string.contains(name, "Zombie") == 0 &&
+           !(g_strip_props && is_prop(name)) {
+            if core.model_parent(model) == null && string.contains(name, "Street_Block") == 1 {
+                bright = 0.80 + next_random() * 0.34
+                warm = (next_random() - 0.5) * 0.14
+                core.model_set_diffuse(model, bright * (1.0 + warm), bright, bright * (1.0 - warm))
+                if first_tint == 0.0 { first_tint = bright }
+            }
+            if core.model_parent(model) == null {
+                // Every other block is mirrored along the street (its root
+                // positions reflected about the block centre; the parented trim
+                // rides along), so the terrace order alternates and the city
+                // does not read as one block copied down the road. The block is
+                // centred at BLOCK_CX, not 0: reflecting about 0 slid every
+                // mirrored block 12m along the road and opened a gap at each seam.
+                wp = core.model_world_position(model)
+                nx = wp.x + off_x
+                if flip { nx = off_x + (2.0 * BLOCK_CX - wp.x) }
+                core.model_set_position(model, nx, wp.y, wp.z)
+            }
+            // The strips that run the length of the street -- road, kerbs,
+            // pavements -- are each authored shorter than the 84m block (the
+            // road 68m, the kerbs 69m, the pavements 70m), so tiled at the
+            // block's pitch every seam was metres of missing road and pavement.
+            // Stretch each to the block's full length, measured from its own
+            // mesh so each meets the next block's exactly; the tarmac and
+            // paving stretch a fifth, which nothing picks out.
+            if string.contains(name, "Street_Road") == 1 || string.contains(name, "Kerb") == 1 ||
+               string.contains(name, "Street_Path") == 1 {
+                extent = core.mesh_size(core.model_mesh(model), core.vec3(1.0, 1.0, 1.0))
+                if extent.x > 1.0 {
+                    core.model_set_scale(model, BLOCK_LEN / extent.x, 1.0, 1.0)
+                }
+            }
+            // Paving under a full moon blew out to white at the city's edge,
+            // where no building shadows it; a shade darker keeps it a light
+            // grey stone under the moon and unchanged under the lamps.
+            if string.contains(name, "Street_Path") == 1 {
+                core.model_set_diffuse(model, 0.80, 0.80, 0.80)
+            }
+            if string.contains(name, "LampHead") == 1 { core.model_set_exposure(model, 16.0) }
+            else if string.contains(name, "_Lit") == 1 {
+                // Vary which rooms are lit, and how brightly, per block -- so the
+                // night skyline is not the same block copied down the street.
+                // Some go dark (exposure 0, a room with the light off).
+                if next_random() < 0.65 { core.model_set_exposure(model, 8.0 + next_random() * 8.0) }
+                else { core.model_set_exposure(model, 0.0) }
+            }
+            // A damp road, not a mirror. At 0.8 the lamps smeared one huge
+            // highlight across the tarmac that slid with every step of the
+            // camera -- it read as the light itself moving. A modest sheen keeps
+            // the wet look and stays put.
+            if string.contains(name, "Road") == 1 || string.contains(name, "Ground") == 1 {
+                core.model_set_reflectivity(model, 0.3)
+            }
+            if string.contains(name, "Street_Ground") == 1 {
+                // The block's base slab, now a closed solid from the Blender
+                // build (it was an open sheet whose every normal faced down,
+                // so it had never once drawn and the blocks stood on a void).
+                // It is surfaced as road tarmac in the asset; where it shows
+                // -- between the pavement and the buildings, in their shadow
+                // -- tarmac that dark reads as a hole. A block's base is
+                // paving: the pavement's slabs, and it reads as ground.
+                core.model_set_texture(model, "resources/blender/zombie_street/PavingSlab.png")
+                if model.material != null {
+                    core.material_set_normal_path(model.material, "resources/blender/zombie_street/PathPavingNormal.png")
+                }
+                core.model_set_specular(model, 0.04, 0.04, 0.04)
+                core.model_set_pbr(model, 0.0, 0.95)
+                core.model_set_diffuse(model, 0.80, 0.80, 0.80)
+                core.model_set_reflectivity(model, 0.08)
+            }
+            engine.engine_add_model(e, model)
+        }
+        i = i + 1
+    }
+    println("zombie_city[diag] tile at x=${off_x} flip=${flip}: props kept ${kept} dropped ${dropped}, first shell tint ${first_tint}")
+    return models
+}
+
+on_start(data: ptr) {
+    e = data as *Engine
+    g_count = core.env_int("AE3D_CROWD", CROWD_DEFAULT)
+    g_near_dist = core.env_int("AE3D_NEAR", NEAR_DIST as int) as float
+    g_cull_dist = core.env_int("AE3D_CULL", CULL_DIST as int) as float
+    g_sepn = core.env_int("AE3D_SEPN", SEP_INTERVAL)
+    g_strip_props = core.env_int("AE3D_NOPROPS", 0) != 0
+
+    // A camera down at the road, looking back along it so the horde walks out of
+    // the far dark toward the lamps and the viewer.
+    cam = engine.engine_camera(e)
+    core.camera_set_far(cam, 300.0)
+    // AE3D_VIEW picks the camera, a debug knob for judging the scene from more
+    // than one angle: 0 elevated down the street, 1 side-on across the road,
+    // 2 low in the middle of the horde.
+    view = core.env_int("AE3D_VIEW", 0)
+    if view == 1 {
+        core.camera_set_position(cam, core.vec3(6.0, 1.7, 4.5))
+        core.camera_look_at(cam, core.vec3(0.0, 0.9, 0.0 - 3.0))
+    } else if view == 2 {
+        core.camera_set_position(cam, core.vec3(0.0, 0.9, 0.0 - 1.0))
+        core.camera_look_at(cam, core.vec3(0.0 - 12.0, 0.9, 0.0 - 3.2))
+    } else if view == 3 {
+        // A free camera for sweeps: AE3D_CAMX/Y/Z place it (metres), looking
+        // down the street. Used to verify the crowd from many positions --
+        // a single still cannot show a zombie vanishing on a zoom.
+        cx = core.env_int("AE3D_CAMX", 40) as float
+        cy = core.env_int("AE3D_CAMY", 3) as float
+        cz = core.env_int("AE3D_CAMZ", 2) as float
+        core.camera_set_position(cam, core.vec3(cx, cy, cz))
+        core.camera_look_at(cam, core.vec3(cx - 30.0, 0.7, 0.0 - 2.9))
+    } else {
+        core.camera_set_position(cam, core.vec3(STREET_X1 + 3.0, 3.6, 2.6))
+        core.camera_look_at(cam, core.vec3(0.0 - 18.0, 0.7, 0.0 - 2.9))
+    }
+
+    // The lamp is the key light the street is shadowed by; the sun is a dusk
+    // fill. Same lighting the reference street uses.
+    g_lamps = list.new()
+    // Moonlight is the key: a directional lights and shadows the whole city, so
+    // a street of blocks reads, not just the pool under one lamp. Only four
+    // lights survive to the shader, so the other three are warm lamp accents
+    // near the middle -- the far blocks fall to the moon and the fog.
+    // Moonlight rakes low across the street rather than dropping from overhead,
+    // so a figure throws a long shadow that reads, not a puddle under its feet.
+    // Kept the key light and its ambient held down, so the shadow it casts is a
+    // real darkening and not filled back in.
+    // The direction points AT the moon -- up in the sky -- the convention the
+    // shading (dot(normal, direction)) and the shadow pass both use. It was
+    // given with y negative, below the ground: no up-facing surface -- road,
+    // pavement, roof -- received any moonlight, and the shadow eye sat under
+    // the street. The key light only ever side-lit the walls; everything
+    // else was ambient and lamp fill, which is exactly the flat, dead look.
+    // 3.0 was tuned while it lit nothing above the horizon; now that the road
+    // and pavements actually take it, that blew them to white. A moon.
+    // AE3D_MOON (hundredths) sweeps the moon's strength live for the look.
+    moon = core.light_directional(core.vec3(0.58, 0.52, 0.0 - 0.30),
+                                  core.vec3(0.66, 0.74, 0.96),
+                                  core.env_int("AE3D_MOON", 35) as float / 100.0)
+    moon.ambient_strength = core.env_int("AE3D_AMBIENT", 10) as float / 100.0
+    engine.engine_set_light(e, moon)
+    list.add_raw(g_lamps, moon as ptr)
+    if core.env_int("AE3D_NOLAMPS", 0) == 0 {
+        engine.engine_add_light(e, lamp_at(0.0))
+        engine.engine_add_light(e, lamp_at(0.0 - 14.0))
+        engine.engine_add_light(e, lamp_at(14.0))
+    }
+
+    renderer = engine.engine_gl_renderer(e)
+    if renderer != null {
+        gl.renderer_set_clear_color(renderer, SKY_R, SKY_G, SKY_B)
+        g_sky = gl.skybox_create(renderer, SKY)
+        engine.engine_set_skybox(e, g_sky as ptr)
+    }
+
+    m = assets.manifest_load(MANIFEST)
+    if m == null {
+        println("zombie_city: ${assets.last_error()}")
+        return
+    }
+
+    // The city: the street block tiled along its length. TILES copies, centred
+    // on the middle one, so the crowd floods a run of blocks into the fog.
+    t = 0
+    half = (TILES - 1) / 2
+    while t < TILES {
+        off = (t - half) as float * BLOCK_LEN
+        tile = add_tile(e, m, off, t % 2 == 1, false)
+        if t == 0 { g_scene = tile }
+        t = t + 1
+    }
+    // One more block-length of bare street past each end, so the road runs
+    // on into the fog instead of stopping at the last terrace. The crowd and
+    // its grid stay within the built blocks.
+    add_tile(e, m, (0 - half - 1) as float * BLOCK_LEN, false, true)
+    add_tile(e, m, (TILES - half) as float * BLOCK_LEN, false, true)
+
+    // The ground the city stands on. Each block is an 84x44m pavement slab
+    // (Street_Ground, its top at y -0.32) with a raised road down the middle;
+    // beyond the slabs there was nothing, so seen from anywhere but straight
+    // down the road the blocks were islands in a black void. One wide, dark,
+    // matte plane BELOW the slabs, so it shows only where no block is -- the
+    // earth past the ends and behind the terraces -- and the city holds
+    // together as one place. It must sit under the slab: placed at road level
+    // it hid every pavement and z-fought the road.
+    // Not a bare plane: one flat colour lit by the moon read as a grey table
+    // running to the horizon. Dark tarmac, tiled coarsely, is dark rough
+    // ground with a grain, and held well under the paving so the city's slabs
+    // stand off it. Its corner is at -450, so it is centred on the city.
+    ground = paved_slab(900.0, 900.0, 1.0 / 6.0)
+    core.model_set_position(ground, 0.0 - 450.0, 0.0 - 0.45, 0.0 - 450.0)
+    core.model_set_texture(ground, "resources/blender/zombie_street/RoadTarmac.png")
+    core.model_set_diffuse(ground, 0.42, 0.40, 0.36)
+    core.model_set_specular(ground, 0.0, 0.0, 0.0)
+    core.model_set_pbr(ground, 0.0, 1.0)
+    engine.engine_add_model(e, ground)
+
+    // The crowd. The real zombie loaded twice for the two distance tiers, plus
+    // its clothes for the near one; all posed by the one baked bank.
+    entry = entry_named(m, "Zombie_Body")
+    if entry == null { println("zombie_city: no Zombie_Body"); assets.manifest_free(m); return }
+    g_bank = bake_zombie(m, entry)
+    g_near_body = assets.entry_load_model(m, entry)
+    g_far_body = assets.entry_load_model(m, entry)
+    if g_bank == null || g_near_body == null || g_far_body == null {
+        println("zombie_city: load failed"); assets.manifest_free(m); return
+    }
+    clothes_entry = entry_named(m, "Zombie_Clothes")
+    if clothes_entry != null { g_near_clothes = assets.entry_load_model(m, clothes_entry) }
+
+    g_world = ecs.world_new(g_count)
+    g_pos = ecs.column_new(g_count, 3)
+    g_vel = ecs.column_new(g_count, 3)
+    g_phase = ecs.column_new(g_count, 1)
+    g_yaw = ecs.column_new(g_count, 1)
+    g_color = ecs.column_new(g_count, 3)
+    g_nb_pos = ecs.column_new(g_count, 3)
+    g_nb_yaw = ecs.column_new(g_count, 1)
+    g_nb_phase = ecs.column_new(g_count, 1)
+    g_nb_col = ecs.column_new(g_count, 3)
+    g_fb_pos = ecs.column_new(g_count, 3)
+    g_fb_yaw = ecs.column_new(g_count, 1)
+    g_fb_phase = ecs.column_new(g_count, 1)
+    g_fb_col = ecs.column_new(g_count, 3)
+    g_farcount = ecs.column_new(1, 1)
+    i = 0
+    while i < g_count {
+        ent = ecs.entity_create(g_world)
+        slot = ecs.entity_index(ent)
+        x = STREET_X0 + next_random() * (STREET_X1 - STREET_X0)
+        z = ROAD_Z0 + next_random() * (ROAD_Z1 - ROAD_Z0)
+        ecs.column_set3(g_pos, slot, core.vec3(x, ROAD_Y, z))
+        ecs.column_set(g_phase, slot, 0, next_random())
+        // A heading roughly along the street, spread wide, so the crowd wanders
+        // and mills rather than converging on a point -- which is what fills a
+        // city and leaves most of it far from the camera and cheap to draw.
+        down = 0.0
+        if next_random() < 0.5 { down = 3.1415926 }
+        ecs.column_set(g_yaw, slot, 0, down + (next_random() - 0.5) * 1.8)
+        // A muted tint per zombie -- some greener, some greyer, some paler and
+        // some darker -- so the horde is not one flat colour. It multiplies the
+        // skin and cloth texture, so keep it in the dead-flesh range: green the
+        // top channel, blue held lowest and narrow, so none tint blue or purple.
+        tr = 0.50 + next_random() * 0.35
+        tg = 0.55 + next_random() * 0.35
+        tb = 0.40 + next_random() * 0.22
+        ecs.column_set3(g_color, slot, core.vec3(tr, tg, tb))
+        i = i + 1
+    }
+    // The spatial grid the separation runs on, sized to hold the whole street.
+    span = STREET_X1 - STREET_X0 + 40.0
+    cols = (span / SEP_RADIUS) as int + 2
+    g_grid = crowd.grid_new(cols, SEP_RADIUS, STREET_X0 - 20.0, 0.0 - span * 0.5, 10)
+
+    near_tris = setup_crowd(g_near_body, LOD_NEAR)
+    cloth_tris = 0
+    if g_near_clothes != null { cloth_tris = setup_crowd(g_near_clothes, LOD_NEAR) }
+    far_cell = core.env_int("AE3D_LODFAR", (LOD_FAR * 100.0) as int) as float / 100.0
+    far_tris = setup_crowd(g_far_body, far_cell)
+    engine.engine_add_model(e, g_near_body)
+    if g_near_clothes != null { engine.engine_add_model(e, g_near_clothes) }
+    engine.engine_add_model(e, g_far_body)
+
+    assets.manifest_free(m)
+    log_scene(e, cam, near_tris, cloth_tris, far_tris)
+}
+
+// Dump the whole scene so it is debuggable without guessing: the crowd, the
+// tiers and their triangle budgets, every light with its real values, the
+// shadow and fog envelope, and the camera. Printed once at start-up; grep
+// "[diag]" for it.
+log_scene(e: *Engine, cam: *Camera, near_tris: int, cloth_tris: int, far_tris: int) {
+    println("zombie_city[diag] ================ SCENE ================")
+    println("zombie_city[diag] crowd: ${g_count} zombies (AE3D_CROWD), sep every ${g_sepn} frame(s)")
+    println("zombie_city[diag] tiers: near ${near_tris}+${cloth_tris} tris (full mesh), far ${far_tris} tris; ${FRAMES} pose bank")
+    // The walk the bank carries: how far the clip's root travels over its
+    // length, and the pace that sets. In place, so that travel is the crowd's
+    // motion and not the mesh's; zero here means the clip was baked as
+    // authored and the horde will drift off its positions.
+    total = crowd.posebank_travel(g_bank, FRAMES)
+    println("zombie_city[diag] walk: ${g_walk}s clip, root travels ${total}m in place => ${total / g_walk}m/s mean; at phase 0.25 ${crowd.posebank_speed(g_bank, 0.25, g_walk)}m/s, at 0.75 ${crowd.posebank_speed(g_bank, 0.75, g_walk)}m/s")
+    println("zombie_city[diag] LOD: near<${g_near_dist}m detailed, beyond far; cull ${g_cull_dist}m")
+    println("zombie_city[diag] city: ${TILES} blocks, block ${BLOCK_LEN}m, street x[${STREET_X0}..${STREET_X1}], road z[${ROAD_Z0}..${ROAD_Z1}] y=${ROAD_Y}")
+    cp = cam.position
+    println("zombie_city[diag] camera: pos(${cp.x}, ${cp.y}, ${cp.z}) view=${core.env_int("AE3D_VIEW", 0)} far=300")
+    println("zombie_city[diag] shadow: distance ${core.env_int("AE3D_SHADOWDIST", 48)}m, size 2048; fog 12..150m")
+    n = list.size(g_lamps)
+    i = 0
+    while i < n {
+        L = list.get_raw(g_lamps, i) as *Light
+        if L != null {
+            c = L.color
+            if L.mode == core.MODE_DIRECTIONAL {
+                d = L.direction
+                println("zombie_city[diag] light ${i}: DIRECTIONAL dir(${d.x}, ${d.y}, ${d.z}) rgb(${c.x}, ${c.y}, ${c.z}) intensity ${L.intensity} ambient ${L.ambient_strength}")
+            } else {
+                p = L.position
+                println("zombie_city[diag] light ${i}: POINT pos(${p.x}, ${p.y}, ${p.z}) rgb(${c.x}, ${c.y}, ${c.z}) intensity ${L.intensity}")
+            }
+        }
+        i = i + 1
+    }
+    println("zombie_city[diag] ======================================")
+}
+
+// A teleport is a step no zombie could take: further in one frame than
+// MAX_SPEED allows. Measure it instead of guessing at it -- compare every
+// zombie's position with its previous one and report each jump with the
+// zombie, the frame, both positions and the distance. Prints the worst jump of
+// every 60 frames and each offender past the threshold (capped so a broken
+// frame cannot flood the log). AE3D_TELEPORT=0 turns it off.
+var g_prev_pos: *Column = null
+var g_tp_worst = 0.0
+var g_tp_worst_id = 0
+var g_tp_count = 0
+detect_teleports(delta: float) {
+    if core.env_int("AE3D_TELEPORT", 1) == 0 { return }
+    if g_prev_pos == null {
+        g_prev_pos = ecs.column_new(g_count, 3)
+        i = 0
+        while i < g_count { ecs.column_set3(g_prev_pos, i, ecs.column_get3(g_pos, i)); i = i + 1 }
+        return
+    }
+    // The furthest a zombie may move in a frame, with headroom for a clamp.
+    limit = MAX_SPEED * delta * 3.0 + 0.05
+    shown = 0
+    // The crowd's extent across the road, so a zombie on the pavement shows
+    // up as a number past the kerb rather than as a perspective to argue
+    // about in a still.
+    z_lo = 1000.0
+    z_hi = 0.0 - 1000.0
+    i = 0
+    while i < g_count {
+        p = ecs.column_get3(g_pos, i)
+        q = ecs.column_get3(g_prev_pos, i)
+        d = core.v3_len(core.v3_sub(p, q))
+        if d > g_tp_worst { g_tp_worst = d; g_tp_worst_id = i }
+        if p.z < z_lo { z_lo = p.z }
+        if p.z > z_hi { z_hi = p.z }
+        if d > limit {
+            g_tp_count = g_tp_count + 1
+            if shown < 3 {
+                println("zombie_city[teleport] frame ${g_frame} zombie ${i}: (${q.x}, ${q.z}) -> (${p.x}, ${p.z}) jumped ${d}m (limit ${limit})")
+                shown = shown + 1
+            }
+        }
+        ecs.column_set3(g_prev_pos, i, p)
+        i = i + 1
+    }
+    if g_frame % 60 == 0 {
+        println("zombie_city[teleport] frames ${g_frame - 59}..${g_frame}: worst step ${g_tp_worst}m by zombie ${g_tp_worst_id}, jumps so far ${g_tp_count}; crowd z ${z_lo}..${z_hi} (road ${ROAD_Z0}..${ROAD_Z1})")
+        g_tp_worst = 0.0
+    }
+}
+
+// Once, a few frames in (after the renderer has resolved each material's
+// textures), report what every distinct material of the first block actually
+// carries: its colour texture and its normal map -- the path it was given and
+// whether a GPU texture came of it. A wall that looks flat is either a normal
+// map that was never named or one that never loaded; this says which.
+var g_mat_logged = false
+log_materials_once() {
+    if g_mat_logged || g_frame < 5 || g_scene == null { return }
+    g_mat_logged = true
+    models = g_scene as ptr
+    n = list.size(models)
+    i = 0
+    shown = 0
+    while i < n && shown < 12 {
+        m = list.get_raw(models, i) as *Model
+        if m != null && m.material != null && !is_prop(m.name) &&
+           string.contains(m.name, "Zombie") == 0 {
+            mat = m.material
+            println("zombie_city[diag] material ${m.name}: tex '${mat.texture_path}' id ${mat.texture_id} | normal '${mat.normal_path}' id ${mat.normal_id}")
+            shown = shown + 1
+        }
+        i = i + 1
+    }
+}
+
+on_update(data: ptr, delta: float) {
+    if g_near_body == null { return }
+    e = data as *Engine
+    cam = engine.engine_camera(e)
+
+    // The whole per-frame crowd update is native now (crowd/module.ae -> C):
+    // point each velocity along its heading, shove neighbours apart, step and
+    // bounce and advance the walk, then sort by distance to the camera into the
+    // near and far draw buffers. At a city's worth of zombies the Aether loops
+    // this replaces were the wall, not the GPU.
+    crowd.crowd_wander(ecs.column_data(g_vel), ecs.column_data(g_yaw), g_count, SPEED)
+    // Separation is the crowd's heaviest pass by far -- a full grid rebuild and
+    // neighbour scan over every zombie, ~two thirds of the sim at half a
+    // million. But a zombie drifts only centimetres a frame, so the pack does
+    // not re-cram between frames; running the shove every Nth frame and scaling
+    // it up to keep the same steady push is invisible and reclaims most of it.
+    g_frame = g_frame + 1
+    if g_grid != null && g_sepn > 0 && g_frame % g_sepn == 0 {
+        crowd.horde_separate(g_world, g_pos, g_vel, g_grid, SEP_RADIUS,
+                             SEP_STRENGTH * (g_sepn as float))
+    }
+    // The bank drives the pace: each zombie moves at the speed its pose is
+    // walking at, so the feet plant rather than skate (see crowd_step).
+    crowd.crowd_step(ecs.column_data(g_pos), ecs.column_data(g_vel), ecs.column_data(g_yaw),
+                     ecs.column_data(g_phase), g_count, delta, MAX_SPEED,
+                     STREET_X0, STREET_X1, ROAD_Z0, ROAD_Z1, ROAD_Y, g_walk, g_bank)
+    detect_teleports(delta)
+    log_materials_once()
+    nn = crowd.crowd_bucket(ecs.column_data(g_pos), ecs.column_data(g_yaw), ecs.column_data(g_phase),
+                            ecs.column_data(g_color), g_count, cam.position.x, cam.position.z, g_near_dist, g_cull_dist,
+                            ecs.column_data(g_nb_pos), ecs.column_data(g_nb_yaw), ecs.column_data(g_nb_phase), ecs.column_data(g_nb_col),
+                            ecs.column_data(g_fb_pos), ecs.column_data(g_fb_yaw), ecs.column_data(g_fb_phase), ecs.column_data(g_fb_col),
+                            ecs.column_data(g_farcount))
+    // The cull drops the fogged-out zombies, so far is what the bucket counted,
+    // not the leftover of n.
+    nf = ecs.column_get(g_farcount, 0, 0) as int
+
+    upload_tier(g_near_body, g_nb_pos, g_nb_yaw, g_nb_phase, g_nb_col, nn)
+    if g_near_clothes != null { upload_tier(g_near_clothes, g_nb_pos, g_nb_yaw, g_nb_phase, g_nb_col, nn) }
+    upload_tier(g_far_body, g_fb_pos, g_fb_yaw, g_fb_phase, g_fb_col, nf)
+}
+
+upload_tier(model: *Model, pos: *Column, yaw: *Column, phase: *Column, col: *Column, count: int) {
+    core.model_set_instance_draw_count(model, count)
+    core.model_set_instance_positions_yaw(model, ecs.column_data(pos),
+                                          ecs.column_data(yaw), count)
+    core.model_set_instance_phases(model, ecs.column_data(phase), count)
+    core.model_set_instance_colors(model, ecs.column_data(col), count)
+}
+
+main() {
+    e = engine.engine_new(platform.API_GL)
+    engine.engine_set_size(e, 1280, 720)
+    engine.engine_set_title(e, "ae3d - zombie city")
+    engine.engine_set_face_culling(e, true)
+    engine.engine_set_camera_input(e, true)
+    engine.engine_set_post(e, true, true, 0.85, 0.85)
+    engine.engine_set_fog(e, core.fog_distance(12.0, 150.0,
+                                               core.vec3(SKY_R, SKY_G, SKY_B), 0.95))
+    // A wide shadow box. A small one slides with the camera, so shadows at its
+    // edge appear and vanish as you move -- the shadows seemed to follow the
+    // camera. 48m keeps the whole visible street in one stable, texel-snapped
+    // region; 2048 texels over it is still ~2cm a texel.
+    engine.engine_set_shadow_distance(e, core.env_int("AE3D_SHADOWDIST", 48) as float)
+    engine.engine_set_frustum_culling(e, true)
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_start(e, on_start as fn(ptr))
+    engine.engine_on_update(e, on_update as fn(ptr, float))
+
+    engine.engine_run(e, 0 - 1, 0 - 1)
+
+    draws = 0
+    renderer = engine.engine_gl_renderer(e)
+    if renderer != null { draws = gl.renderer_draw_calls(renderer) }
+    println("zombie_city: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${draws} draws")
+}
