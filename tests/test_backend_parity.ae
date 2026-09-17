@@ -316,6 +316,21 @@ main() {
     check_true("the skybox reaches the vulkan frame",
                frame_total(vk.offscreen_pixels()) != bare_vk)
 
+    // Clouds over the sky, marched in the sky shader, and their shadow on
+    // the ground through the same coverage field: the one sky feature that
+    // is computed rather than sampled, so the one that could differ.
+    sky_gl = frame_total(offscreen.target_pixels(target))
+    gl.renderer_set_clouds(gl_renderer, 0.6, 1.0)
+    vk.renderer_set_clouds(vk_renderer, 0.6, 1.0)
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    compare_within("clouds over the skybox", offscreen.target_pixels(target), vk.offscreen_pixels(), 4)
+    check_true("the clouds reach the frame", frame_total(offscreen.target_pixels(target)) != sky_gl)
+    gl.renderer_set_clouds(gl_renderer, 0.0, 1.0)
+    vk.renderer_set_clouds(vk_renderer, 0.0, 1.0)
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+
     plain_gl = frame_total(offscreen.target_pixels(target))
     plain_vk = frame_total(vk.offscreen_pixels())
 
@@ -421,6 +436,21 @@ main() {
     // stand in it with foam where they break the surface. The one water
     // feature that reads a frame back rather than a uniform, so the one
     // most likely to differ between the two.
+    // A shelf eight metres under the surface across the view, so the
+    // shallows are a broad region and not the rim of a few cubes.
+    gl_shelf = loader.cube(1.0)
+    vk_shelf = loader.cube(1.0)
+    core.model_set_scale(gl_shelf, 400.0, 2.0, 400.0)
+    core.model_set_scale(vk_shelf, 400.0, 2.0, 400.0)
+    core.model_set_position(gl_shelf, 0.0, 0.0 - 35.0, 0.0)
+    core.model_set_position(vk_shelf, 0.0, 0.0 - 35.0, 0.0)
+    core.model_set_diffuse(gl_shelf, 0.8, 0.7, 0.5)
+    core.model_set_diffuse(vk_shelf, 0.8, 0.7, 0.5)
+    core.backend_add_model(&opengl_pass, gl_shelf)
+    core.backend_add_model(&vulkan_pass, vk_shelf)
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    shelf_lit = compare("a shelf under the ocean", offscreen.target_pixels(target), vk.offscreen_pixels())
     water.simulation_set_shore(gl_sim, 12.0, 8.0)
     water.simulation_set_shore(vk_sim, 12.0, 8.0)
     core.backend_render(&opengl_pass, cam, light)
@@ -429,9 +459,13 @@ main() {
     // own anti-aliasing: every silhouette that meets the water is a pixel
     // apart, so this case is allowed twice the usual disagreement.
     shore_lit = compare_within("shore from the scene depth", offscreen.target_pixels(target), vk.offscreen_pixels(), 4)
-    check_true("the shore changes the frame", shore_lit != ocean_lit)
+    check_true("the shore changes the frame", shore_lit != shelf_lit)
     water.simulation_set_shore(gl_sim, 0.0, 0.0)
     water.simulation_set_shore(vk_sim, 0.0, 0.0)
+    core.backend_remove_model(&opengl_pass, gl_shelf)
+    core.backend_remove_model(&vulkan_pass, vk_shelf)
+    core.model_free(gl_shelf)
+    core.model_free(vk_shelf)
 
     // The editor runs shadows, an ocean and FXAA together, which is the
     // combination that put the water program's uniforms under the composite.

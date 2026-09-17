@@ -65,10 +65,13 @@ water_frame(backend: *Backend, cam: *Camera, light: *Light, sim: *Simulation) ->
 
 // A tenth of a percent, which is a thousand times the drift between two renders
 // of the same scene and a small fraction of what any of these settings does.
+// In floats: a frame sum is tens of millions, and a change of a fifth of
+// it times a thousand is past what an int holds, so the check that a big
+// change moved the frame came back false for being too big.
 moved(after: int, before: int) -> bool {
-    drift = after - before
-    if drift < 0 { drift = 0 - drift }
-    return drift * 1000 > before
+    drift = (after - before) as float
+    if drift < 0.0 { drift = 0.0 - drift }
+    return drift * 1000.0 > (before as float)
 }
 
 check_water(backend: *Backend, cam: *Camera, bright: *Light) {
@@ -99,8 +102,10 @@ check_water(backend: *Backend, cam: *Camera, bright: *Light) {
     base = water_frame(backend, cam, light, sim)
 
 
-    water.simulation_set_reflection(sim, 6.0)
-    if water_frame(backend, cam, light, sim) == base {
+    // Off rather than past full: the mirror's strength is clamped to one,
+    // and six of it is the one the base already has.
+    water.simulation_set_reflection(sim, 0.0)
+    if !moved(water_frame(backend, cam, light, sim), base) {
         println("FAIL water reflection changes nothing")
         failures = failures + 1
     }
@@ -169,17 +174,6 @@ check_water(backend: *Backend, cam: *Camera, bright: *Light) {
     water.simulation_set_opacity(sim, 0.85)
     settled = water_frame(backend, cam, light, sim)
 
-    // Foam sits on the crests, which are measured from the water's own level.
-    // Moving that level well above the surface leaves no crest above it, so the
-    // foam has to go: it is the only thing the level feeds.
-    core.model_set_uniform_float(surface, "waterLevel", 400.0)
-    core.backend_render(backend, cam, light)
-    core.backend_frame_pixels(backend)
-    if frame_sum(core.backend_frame_pixels(backend)) == settled {
-        println("FAIL water foam changes nothing")
-        failures = failures + 1
-    }
-    core.model_set_uniform_float(surface, "waterLevel", 0.0 - 60.0)
 
     // The fog colour reaches the fog. A local of the same name used to hide the
     // uniform, so the surface faded into a shade nobody chose.

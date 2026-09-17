@@ -30,6 +30,9 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float metallic;
     float roughness;
     float exposure;
+    float cloudCover;
+    float cloudTime;
+    vec3 cloudSun;
     float materialAlpha;
     float reflectivity;
     bool hasNormalMap;
@@ -86,6 +89,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float causticsTime;
     mat4 projection;
     mat4 view;
+    vec3 cloudSunColor;
     vec2 texelSize;
     float edgeThreshold;
     float edgeThresholdMin;
@@ -169,6 +173,8 @@ layout(location = 2) in vec3 fragPosition;
 // The still level the waves rise and fall around, so a crest can be measured
 // against the water rather than against however high the world's zero happens
 // to be.
+
+
 
 
 
@@ -364,19 +370,68 @@ float generateCaustics(vec3 worldPos, float time) {
     return combined * causticsIntensity * distanceAttenuation;
 }
 
-// Ripples finer than the swell the vertices carry: two layers of noise
-// slope, scrolling against each other, scaled from the shortest wave the
-// scene set so they stay ripples whatever units the world is in. They fade
-// with distance, where a ripple is smaller than a pixel and would only
-// sparkle.
-vec3 rippleNormal(vec2 p, float t, float strength) {
-    float e = 0.3;
-    vec2 a = p + vec2(t * 0.9, t * 0.4);
-    vec2 b = p * 1.9 + vec2(7.3 - t * 0.5, 2.1 + t * 0.7);
-    float h = noise(a) + 0.5 * noise(b);
-    float hx = noise(a + vec2(e, 0.0)) + 0.5 * noise(b + vec2(e * 1.9, 0.0));
-    float hz = noise(a + vec2(0.0, e)) + 0.5 * noise(b + vec2(0.0, e * 1.9));
-    return normalize(vec3((h - hx) / e * strength, 1.0, (h - hz) / e * strength));
+// The sea's surface at a point, summed per fragment: the four trains of
+// the wave table, and eight octaves of wind waves below the shortest of
+// them, each a sine with the same steepness and a direction fanned about
+// the wind, moving at the speed deep water gives its length. The normal is
+// the water's and not the mesh's, so a swell too long for the vertices to
+// carry still shades as crest and trough, and the ripples too short for
+// them still catch the sun. Each octave fades out where its wavelength is
+// under a couple of hundredths of the distance, before it can alias into
+// a sparkle; the wind waves also come and go in sets, under a slow noise.
+// `swell` is the normal of the four trains alone, for the mirror: the sky
+// bent by every ripple pulls the horizon down as white blotches.
+void waveField(vec2 p, float t, float dist, out vec3 normal, out vec3 swell,
+               out float height, out float steep) {
+    float dhx = 0.0;
+    float dhz = 0.0;
+    float sx = 0.0;
+    float sz = 0.0;
+    float slopeMax = 0.0;
+    float speedMul = max(waveSpeedMultiplier, 0.001);
+    height = 0.0;
+    for (int i = 0; i < 4; i++) {
+        vec2 d = normalize(waveDirections[i].xz);
+        float k = waveFrequencies[i];
+        float A = waveAmplitudes[i] * waveHeightMultiplier * 1.5;
+        float lambda = 6.28318531 / max(k, 0.000001);
+        float fade = 1.0 - smoothstep(lambda * 40.0, lambda * 160.0, dist);
+        float phase = dot(d, p) * k + t * waveSpeeds[i] * speedMul + wavePhases[i]
+                    + noise(p * k * 0.2 + vec2(float(i) * 4.1, 0.0)) * 1.2;
+        float c = cos(phase) * A * k * fade;
+        height += A * sin(phase) * fade;
+        sx += d.x * c;
+        sz += d.y * c;
+        slopeMax += A * k * fade;
+    }
+    dhx = sx;
+    dhz = sz;
+    vec2 wind = normalize(waveDirections[0].xz);
+    float k0 = waveFrequencies[3];
+    float sets = 0.55 + 0.9 * noise(p * k0 * 0.03 + vec2(t * 0.004, 0.0));
+    // A sum of straight sines is a lattice from above, however many it
+    // has: every crest is a ruled line. The phases are bent by a slow
+    // noise, so each crest meanders, and the two noise fields turn with
+    // the octave so no two octaves bend alike.
+    vec2 warp = vec2(noise(p * k0 * 0.12 + vec2(3.1, 7.7)), noise(p * k0 * 0.12 + vec2(9.2, 1.3))) * 2.0 - 1.0;
+    for (int j = 1; j <= 8; j++) {
+        float k = k0 * pow(1.65, float(j));
+        float turn = sin(float(j) * 2.3 + float(j * j) * 0.61) * 1.0;
+        vec2 d = vec2(wind.x * cos(turn) - wind.y * sin(turn), wind.x * sin(turn) + wind.y * cos(turn));
+        float A = 0.028 / k;
+        float lambda = 6.28318531 / k;
+        float fade = (1.0 - smoothstep(lambda * 40.0, lambda * 160.0, dist)) * sets;
+        float bend = (warp.x * d.y - warp.y * d.x) * 2.4;
+        float phase = dot(d, p) * k + t * sqrt(9.81 * k) * speedMul + float(j) * 1.7 + bend;
+        float c = cos(phase) * A * k * fade;
+        height += A * sin(phase) * fade;
+        dhx += d.x * c;
+        dhz += d.y * c;
+        slopeMax += A * k * fade;
+    }
+    normal = normalize(vec3(-dhx, 1.0, -dhz));
+    swell = normalize(vec3(-sx, 1.0, -sz));
+    steep = clamp(length(vec2(dhx, dhz)) / max(slopeMax * 0.5, 0.0001), 0.0, 1.0);
 }
 
 vec3 ACESFilm(vec3 x) {
@@ -440,20 +495,23 @@ void main() {
     // the mirror's sharpness all fall off with it.
     float far = smoothstep(0.0, viewDistance * 0.35, distanceFromCamera);
 
-    // The swell's normal, flattened as asked, with the ripples laid over it.
-    vec3 norm = normalize(fragNormal);
+    // The surface here, summed from the wave field; flattened as asked.
+    vec3 norm;
+    vec3 swell;
+    float fieldHeight;
+    float steep;
+    waveField(fragPosition.xz, time, distanceFromCamera, norm, swell, fieldHeight, steep);
     if (enableWaterNormalMapping) {
         norm = normalize(mix(vec3(0.0, 1.0, 0.0), norm, waterNormalIntensity));
+        swell = normalize(mix(vec3(0.0, 1.0, 0.0), swell, waterNormalIntensity));
     }
     float rippleFreq = waveFrequencies[3] * 9.0 / 6.28318531;
     float rippleTime = time * waveSpeeds[3] * max(waveSpeedMultiplier, 0.001) * 0.35;
-    vec3 ripple = rippleNormal(fragPosition.xz * rippleFreq, rippleTime, 0.30 * (1.0 - 0.85 * far));
-    // The swell alone is what the sky mirrors in: the ripples break the
-    // sun's glitter up, but bent into the mirror as well they would pull the
-    // bright horizon down into the water as white blotches.
-    vec3 swell = norm;
-    norm = normalize(vec3(norm.x + ripple.x, norm.y * ripple.y, norm.z + ripple.z));
-    vec3 mirrorNorm = normalize(mix(swell, norm, 0.25));
+    // How far the ripples bend the mirror: the distortion setting, its
+    // default of a fifth being the bend that reads as water without pulling
+    // the horizon down into it.
+    float bend = enableWaterDistortion ? clamp(waterDistortionIntensity, 0.0, 1.0) * 0.6 : 0.12;
+    vec3 mirrorNorm = normalize(mix(swell, norm, bend));
 
     vec3 halfDir = normalize(lightDir + viewDir);
     float NdotV = max(dot(norm, viewDir), 0.001);
@@ -494,11 +552,10 @@ void main() {
     // sun the water glows from inside, greener and brighter than its body.
     float tallest = (waveAmplitudes[0] + waveAmplitudes[1] +
                      waveAmplitudes[2] + waveAmplitudes[3]) * waveHeightMultiplier;
-    // Against the table's sum: the surface reaches past it (the vertex pass
-    // lifts the displacement by half again) only where every train crests
-    // at once, so a crest at the sum is a tall one and an ordinary crest is
-    // half of it.
-    float crest = clamp((waveHeight - waterLevel) / max(tallest, 0.001), 0.0, 1.0);
+    // Against the table's sum: the field reaches past it only where every
+    // train crests at once, so a crest at the sum is a tall one and an
+    // ordinary crest is half of it.
+    float crest = clamp(fieldHeight / max(tallest, 0.001), 0.0, 1.0);
     float through = pow(clamp(dot(viewDir, -lightDir), 0.0, 1.0), 3.0) * (0.3 + 0.7 * crest)
                   + crest * 0.25 * NdotL;
     vec3 scatter = (base * 2.5 + vec3(0.0, 0.06, 0.04)) * sun * 0.30 * through;
@@ -511,19 +568,10 @@ void main() {
     if (enableFoam && tallest > 0.0) {
         float torn = ridgedNoise(fragPosition.xz * rippleFreq * 0.08 + time * 0.02);
         // What breaks is the steep face of a crest, not the broad top of a
-        // long swell: the slope of the surface here against the steepest
-        // the table can make (the sum of each train's wavenumber times its
-        // amplitude), so a whitecap is a few metres on a short wave and not
-        // a field on a long one.
-        // The vertex pass sums the four trains' normals onto an upright one
-        // and normalises, so the slope its normal carries is about a fifth
-        // of the water's; measured against the same fifth.
-        float steepest = (waveFrequencies[0] * waveAmplitudes[0] + waveFrequencies[1] * waveAmplitudes[1] +
-                          waveFrequencies[2] * waveAmplitudes[2] + waveFrequencies[3] * waveAmplitudes[3])
-                         * waveHeightMultiplier * 0.3;
-        float slope = length(swell.xz) / max(swell.y, 0.05);
-        float steep = clamp(slope / max(steepest, 0.0001), 0.0, 1.0);
-        float breaking = smoothstep(0.15, 0.65, steep) * (0.4 + 0.6 * crest);
+        // long swell: the field's slope here against the steepest it can
+        // make, so a whitecap is a few metres on a short wave and not a
+        // field on a long one.
+        float breaking = smoothstep(0.45, 0.9, steep) * (0.4 + 0.6 * crest);
         foam = breaking * (0.35 + 0.65 * smoothstep(0.35, 0.8, torn));
         // Lace, not paint: the fine ripple noise eats holes in it.
         foam *= 0.55 + 0.45 * noise(fragPosition.xz * rippleFreq * 1.5 + rippleTime * 0.5);
@@ -583,14 +631,17 @@ void main() {
         // sweep that boundary about, which is what says "waves" from
         // underneath. The tint deepens with the diver's depth.
         vec3 through = mix(skyColor, waterBaseColor, 0.35);
-        float overhead = clamp(dot(norm, -viewDir), 0.0, 1.0);
+        // Softened: the field's every ripple would flip the window between
+        // sky and water, and the underside became a hard two-tone print.
+        vec3 under = normalize(mix(vec3(0.0, 1.0, 0.0), norm, 0.35));
+        float overhead = clamp(dot(under, -viewDir), 0.0, 1.0);
         float window = smoothstep(0.15, 0.75, overhead);
         vec3 underside = mix(waterBaseColor * 0.55, through, window);
         float deep = clamp(underwaterDepth * 0.0025, 0.0, 0.5);
         finalColor = mix(underside, waterBaseColor * 0.5, deep);
         // The sun through the surface: a glitter where the swell's normals
         // point it at the eye, and the caustic web on the underside.
-        vec3 refracted = normalize(reflect(-viewDir, norm));
+        vec3 refracted = normalize(reflect(-viewDir, under));
         float glitter = pow(max(0.0, dot(refracted, lightDir)), 48.0);
         finalColor += lightColor * glitter * 0.8 * window;
         finalColor += vec3(gpuGemsCaustics * 0.35) * window;
