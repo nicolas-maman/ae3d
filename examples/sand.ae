@@ -1,5 +1,7 @@
-// Falling sand: a quarter of a million grains under gravity, settling on the
-// ground with friction, and scattering where you click.
+// Falling sand in a desert: four hundred thousand grains under gravity,
+// settling into a pile on the sand with friction, and scattering where you
+// click -- under the desert sky and sun the engine wrote for itself
+// (tools/make_sky.ae), on a floor of its own sand, with dunes at the horizon.
 //
 // Left click throws the grains away from the point under the cursor; the ground
 // point comes from a ray cast through the camera.
@@ -13,23 +15,47 @@ import ae3d.gl
 import ae3d.loader
 import ae3d.raycast
 import ae3d.rendering
+import ae3d.noise
 
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 
-const GRAINS = 250000
+const GRAINS = 400000
 const GRAVITY = 0.0 - 240.0
 const FRICTION = 0.86
 const BOUNCE = 0.28
-const FIELD = 900.0
 const BLAST_RADIUS = 260.0
 const BLAST_FORCE = 900.0
+
+// The sun as tools/make_sky.ae painted it into the sky: azimuth -1.9 and
+// elevation 0.42, which the light points at, so the shadows fall away from
+// the sun that is actually in the frame.
+const SUN_X = 0.0 - 0.295
+const SUN_Y = 0.408
+const SUN_Z = 0.0 - 0.865
+// The haze the sky has at its horizon, which the far dunes fade into.
+const HAZE_R = 0.86
+const HAZE_G = 0.80
+const HAZE_B = 0.70
+// The desert around the pile: a plain of sand the grains fall on, and dunes
+// from there to the horizon. The plain is flat out to FLAT and the dunes
+// rise beyond it, over a field DESERT across.
+const FLAT = 1400.0
+const DESERT = 14000.0
+// The grains do not collide with each other, so on a flat floor they lie
+// one deep in a rug. What a pile of sand looks like is what the grains
+// settle *on*: a cone at sand's angle of repose, HEAP_H high over HEAP_R
+// out from the middle, that every grain treats as its ground.
+const HEAP_R = 420.0
+const HEAP_H = 200.0
 
 var g_model: ptr = null
 var g_position: ptr = null
 var g_velocity: ptr = null
+var g_tint: ptr = null
 var g_seed = 24681357
 var g_settled = 0
+var g_sky: *Skybox = null
 
 next_random() -> float {
     g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
@@ -39,18 +65,109 @@ next_random() -> float {
 seed_grains() {
     position = g_position as float[]
     velocity = g_velocity as float[]
+    tint = g_tint as float[]
 
     i = 0
     while i < GRAINS {
         slot = i * 3
-        position[slot] = (next_random() - 0.5) * FIELD
-        position[slot + 1] = 40.0 + next_random() * 900.0
-        position[slot + 2] = (next_random() - 0.5) * FIELD
+        // Poured over the heap: a disc of grains, denser toward the middle,
+        // dropped from a column of heights so the fall lasts.
+        angle = next_random() * 6.2831853
+        reach = HEAP_R * 1.15 * core.sqrt_of(next_random())
+        position[slot] = core.cos_of(angle) * reach
+        position[slot + 1] = HEAP_H + 40.0 + next_random() * 900.0
+        position[slot + 2] = core.sin_of(angle) * reach
         velocity[slot] = 0.0
         velocity[slot + 1] = 0.0
         velocity[slot + 2] = 0.0
+        // No two grains the same colour: the pile reads as sand, not as one
+        // paint poured over spheres. Ochre to pale, a few dark.
+        shade = 0.78 + next_random() * 0.30
+        if next_random() < 0.06 { shade = 0.45 + next_random() * 0.2 }
+        tint[slot] = shade
+        tint[slot + 1] = shade * (0.84 + next_random() * 0.06)
+        tint[slot + 2] = shade * (0.60 + next_random() * 0.08)
         i = i + 1
     }
+}
+
+// A plain of sand under the pile, tiled from the engine's own sand texture:
+// a quad `size` across with its texture repeating every `metres`.
+sand_floor(size: float, metres: float) -> *Model {
+    m = core.model_new()
+    up = core.vec3(0.0, 1.0, 0.0)
+    core.mesh_reserve(m.mesh, 4, 6)
+    half = size * 0.5
+    reps = size / metres
+    core.mesh_push_vertex(m.mesh, core.vec3(0.0 - half, 0.0, 0.0 - half), 0.0, 0.0, up)
+    core.mesh_push_vertex(m.mesh, core.vec3(half, 0.0, 0.0 - half), reps, 0.0, up)
+    core.mesh_push_vertex(m.mesh, core.vec3(half, 0.0, half), reps, reps, up)
+    core.mesh_push_vertex(m.mesh, core.vec3(0.0 - half, 0.0, half), 0.0, reps, up)
+    core.mesh_push_triangle(m.mesh, 0, 2, 1)
+    core.mesh_push_triangle(m.mesh, 0, 3, 2)
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    return m
+}
+
+// Dunes: a heightfield over the whole desert, flat where the pile forms and
+// rising from there to the horizon, ridged the way wind leaves sand.
+dunes(cells: int) -> *Model {
+    m = core.model_new()
+    dune_noise = noise.perlin_new(7719)
+    core.mesh_reserve(m.mesh, cells * cells, (cells - 1) * (cells - 1) * 6)
+    step = DESERT / ((cells - 1) as float)
+    up = core.vec3(0.0, 1.0, 0.0)
+    i = 0
+    while i < cells {
+        j = 0
+        while j < cells {
+            x = (i as float) * step - DESERT * 0.5
+            z = (j as float) * step - DESERT * 0.5
+            d = core.sqrt_of(x * x + z * z)
+            // Nothing inside the plain, easing up over the next stretch so
+            // the first dunes are low and the floor meets them without a lip.
+            rise = (d - FLAT) / 2400.0
+            if rise < 0.0 { rise = 0.0 }
+            if rise > 1.0 { rise = 1.0 }
+            rise = rise * rise * (3.0 - 2.0 * rise)
+            broad = noise.fbm2(dune_noise, x * 0.00022, z * 0.00022, 4, 0.5)
+            ridged = noise.ridge(dune_noise, x * 0.0006, 0.0, z * 0.0006, 3, 0.5)
+            dune_h = (broad * 520.0 + ridged * 160.0 - 180.0) * rise
+            if dune_h < 0.0 { dune_h = dune_h * 0.15 }
+            core.mesh_push_vertex(m.mesh, core.vec3(x, dune_h, z),
+                                  (i as float) * 0.6, (j as float) * 0.6, up)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < cells - 1 {
+        j = 0
+        while j < cells - 1 {
+            near_l = i * cells + j
+            near_r = near_l + 1
+            far_l = (i + 1) * cells + j
+            far_r = far_l + 1
+            core.mesh_push_triangle(m.mesh, near_l, far_r, far_l)
+            core.mesh_push_triangle(m.mesh, near_l, near_r, far_r)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    core.mesh_recalculate_normals(m.mesh)
+    noise.perlin_free(dune_noise)
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    return m
+}
+
+// The ground a grain lands on: the heap in the middle, the plain beyond it.
+heap(x: float, z: float) -> float {
+    r = core.sqrt_of(x * x + z * z)
+    if r >= HEAP_R { return 0.0 }
+    t = 1.0 - r / HEAP_R
+    return HEAP_H * t * t * (3.0 - 2.0 * t)
 }
 
 // Grains stop rather than jitter: below a threshold the vertical velocity is
@@ -72,8 +189,9 @@ step_grains(delta: float) {
         y = position[slot + 1] + vy * step
         z = position[slot + 2] + velocity[slot + 2] * step
 
-        if y <= 0.0 {
-            y = 0.0
+        ground = heap(x, z)
+        if y <= ground {
+            y = ground
             if vy < 0.0 - 60.0 {
                 vy = (0.0 - vy) * BOUNCE
             } else {
@@ -145,11 +263,30 @@ on_start(data: ptr) {
 
     g_position = calloc(GRAINS * 3, 8)
     g_velocity = calloc(GRAINS * 3, 8)
-    if g_position == null || g_velocity == null {
+    g_tint = calloc(GRAINS * 3, 8)
+    if g_position == null || g_velocity == null || g_tint == null {
         println("could not allocate the grains")
         return
     }
     seed_grains()
+
+    renderer = engine.engine_gl_renderer(e)
+    g_sky = gl.skybox_create(renderer, "resources/sky/desert.png")
+    engine.engine_set_skybox(e, g_sky as ptr)
+
+    plain = sand_floor(FLAT * 2.0, 90.0)
+    core.model_set_position(plain, 0.0, 0.0 - 1.0, 0.0)
+    core.model_set_texture(plain, "resources/textures/sand.png")
+    core.model_set_pbr(plain, 0.0, 0.95)
+    core.model_set_specular(plain, 0.03, 0.03, 0.03)
+    engine.engine_add_model(e, plain)
+
+    horizon = dunes(160)
+    core.model_set_position(horizon, 0.0, 0.0 - 2.0, 0.0)
+    core.model_set_texture(horizon, "resources/textures/sand.png")
+    core.model_set_pbr(horizon, 0.0, 0.95)
+    core.model_set_specular(horizon, 0.03, 0.03, 0.03)
+    engine.engine_add_model(e, horizon)
 
     grain = loader.load_obj("resources/obj/Sphere_Low.obj", true)
     if grain == null {
@@ -157,22 +294,24 @@ on_start(data: ptr) {
         return
     }
     core.model_set_scale(grain, 2.4, 2.4, 2.4)
-    core.model_matte(grain, 0.9, 0.72, 0.45)
+    core.model_matte(grain, 1.0, 1.0, 1.0)
     core.model_set_exposure(grain, 1.0)
     rendering.apply(grain, rendering.performance_config())
 
     if !core.model_enable_instancing(grain, GRAINS) { return }
+    core.model_enable_instance_colors(grain)
+    core.model_set_instance_colors(grain, g_tint, GRAINS)
     engine.engine_add_model(e, grain)
     g_model = grain as ptr
 
-    renderer = engine.engine_gl_renderer(e)
-    gl.renderer_set_clear_color(renderer, 0.62, 0.55, 0.44)
+    gl.renderer_set_clear_color(renderer, HAZE_R, HAZE_G, HAZE_B)
 
+    // Low, so the sky and the dunes are in the frame with the pile.
     cam = engine.engine_camera(e)
-    core.camera_set_position(cam, core.vec3(0.0, 320.0, 900.0))
+    core.camera_set_position(cam, core.vec3(0.0 - 260.0, 150.0, 820.0))
     core.camera_set_speed(cam, 500.0)
-    core.camera_set_far(cam, 20000.0)
-    core.camera_look_at(cam, core.vec3(0.0, 60.0, 0.0))
+    core.camera_set_far(cam, 30000.0)
+    core.camera_look_at(cam, core.vec3(80.0, 150.0, 0.0 - 200.0))
 
     println("sand: ${GRAINS} grains in one instanced draw, left click to scatter")
 }
@@ -190,6 +329,7 @@ on_update(data: ptr, delta: float) {
     }
 
     core.model_set_instance_positions(grain, g_position, GRAINS)
+    core.model_set_instance_colors(grain, g_tint, GRAINS)
 }
 
 main() {
@@ -198,9 +338,18 @@ main() {
     engine.engine_set_title(e, "ae3d - sand")
     engine.engine_set_face_culling(e, true)
 
-    light = core.light_warm(core.vec3(0.0 - 400.0, 1000.0, 0.0 - 300.0), 2.5)
-    light.ambient_strength = 0.3
+    // The desert sun, where the sky has it; the direction points at it.
+    light = core.light_directional(core.vec3(SUN_X, SUN_Y, SUN_Z),
+                                   core.vec3(1.0, 0.94, 0.82), 2.2)
+    light.ambient_strength = 0.34
     engine.engine_set_light(e, light)
+    // No shadow map: under a sun this low a flat floor shadows itself in
+    // blocks (acne) over every texel the map covers, and a pile of spheres
+    // shades itself well enough by its normals alone.
+    engine.engine_set_shadows(e, false)
+    // Heat haze: the dunes fade to the sky's horizon colour with distance.
+    engine.engine_set_fog(e, core.fog_distance(1800.0, 9000.0,
+                                               core.vec3(HAZE_R, HAZE_G, HAZE_B), 0.9))
 
     engine.engine_set_user_data(e, e as ptr)
     engine.engine_on_start(e, on_start as fn(ptr))
@@ -214,6 +363,7 @@ main() {
     if grain != null { core.model_free(grain) }
     if g_position != null { free(g_position) }
     if g_velocity != null { free(g_velocity) }
+    if g_tint != null { free(g_tint) }
     core.light_free(light)
     engine.engine_free(e)
 }

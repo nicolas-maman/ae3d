@@ -1,0 +1,178 @@
+// The images the desert scene is lit and floored by, written by the engine
+// itself: an equirectangular daytime sky and a tiling sand texture, from the
+// engine's own noise and its own PNG writer, so what a scene needs is not a
+// download and not a second language.
+//
+//   ./build.sh tools/make_sky.ae && ./build/make_sky
+//
+// Writes resources/sky/desert.png (2048x1024) and resources/textures/sand.png
+// (1024x1024, tiling). The sky's top row is the zenith and its middle row the
+// horizon, which is how the skybox reads an equirect image (see dusk.png).
+
+import ae3d.core
+import ae3d.noise
+
+extern calloc(count: int, size: int) -> ptr
+extern free(block: ptr)
+extern ae3d_png_write(path: string, rgba: ptr, width: int, height: int) -> int
+extern ae3d_rgba_set(rgba: ptr, index: int, r: float, g: float, b: float, a: float)
+extern pow(x: float, y: float) -> float
+extern exp(x: float) -> float
+
+const SKY_W = 2048
+const SKY_H = 1024
+const SAND_W = 1024
+const PI = 3.14159265358979
+
+// Where the sun stands: a low afternoon sun, warm, ahead of the default
+// camera. Azimuth is measured the way the skybox reads it, atan(z, x).
+const SUN_AZIMUTH = 0.0 - 1.9
+const SUN_ELEVATION = 0.42
+
+clamp01(v: float) -> float {
+    if v < 0.0 { return 0.0 }
+    if v > 1.0 { return 1.0 }
+    return v
+}
+
+smoothstep(a: float, b: float, v: float) -> float {
+    t = clamp01((v - a) / (b - a))
+    return t * t * (3.0 - 2.0 * t)
+}
+
+put(pixels: ptr, index: int, r: float, g: float, b: float) {
+    ae3d_rgba_set(pixels, index, r, g, b, 1.0)
+}
+
+// A clear desert afternoon: deep blue overhead falling to a warm, dusty haze
+// at the horizon, the sun's disc with its glow, thin high cloud, and below the
+// horizon the same haze darkening to sand -- what a scene sees when its ground
+// does not reach the edge of the world.
+write_sky(path: string) -> bool {
+    pixels = calloc(SKY_W * SKY_H * 4, 1)
+    if pixels == null { return false }
+    field = noise.perlin_new(9173)
+
+    sun_y = core.sin_of(SUN_ELEVATION)
+    sun_x = core.cos_of(SUN_ELEVATION) * core.cos_of(SUN_AZIMUTH)
+    sun_z = core.cos_of(SUN_ELEVATION) * core.sin_of(SUN_AZIMUTH)
+
+    y = 0
+    while y < SKY_H {
+        // Row 0 is the zenith; the middle row is the horizon.
+        elevation = (0.5 - (y as float + 0.5) / (SKY_H as float)) * PI
+        x = 0
+        while x < SKY_W {
+            azimuth = ((x as float + 0.5) / (SKY_W as float)) * 2.0 * PI - PI
+            dx = core.cos_of(elevation) * core.cos_of(azimuth)
+            dy = core.sin_of(elevation)
+            dz = core.cos_of(elevation) * core.sin_of(azimuth)
+
+            up = clamp01(dy)
+            // The sky: haze at the horizon, blue overhead, the blue deepening
+            // slowly so the whole upper sky is not one flat colour.
+            t = pow(up, 0.45)
+            r = 0.86 + (0.16 - 0.86) * t
+            g = 0.80 + (0.36 - 0.80) * t
+            b = 0.70 + (0.74 - 0.70) * t
+            if dy < 0.0 {
+                // Below the horizon: the haze sinking into sand-coloured
+                // ground, for the sliver a scene ever shows of it.
+                down = clamp01(0.0 - dy)
+                r = 0.86 + (0.62 - 0.86) * down
+                g = 0.80 + (0.52 - 0.80) * down
+                b = 0.70 + (0.38 - 0.70) * down
+            }
+
+            // The sun: a disc, a tight glow, and a broad warm haze around it.
+            cosd = dx * sun_x + dy * sun_y + dz * sun_z
+            d = core.acos_of(clamp01(cosd))
+            glow = exp(0.0 - d * d * 180.0)
+            haze = exp(0.0 - d * 2.2) * 0.35
+            r = r + glow * 1.0 + haze * 0.55
+            g = g + glow * 0.92 + haze * 0.42
+            b = b + glow * 0.75 + haze * 0.25
+            if d < 0.018 { r = 1.0; g = 0.98; b = 0.92 }
+
+            // Thin high cloud, only above the horizon and thinning toward it
+            // the way distant cloud does, from the noise field on the sphere.
+            if dy > 0.02 {
+                cover = noise.fbm2(field, dx * 3.2 + 7.0, dz * 3.2 + 3.0, 5, 0.55)
+                cover = cover + noise.fbm2(field, dx * 9.0, dz * 9.0, 3, 0.5) * 0.25
+                cloud = smoothstep(0.52, 0.80, cover) * smoothstep(0.02, 0.25, dy) * 0.85
+                r = r + (0.97 - r) * cloud
+                g = g + (0.95 - g) * cloud
+                b = b + (0.93 - b) * cloud
+            }
+
+            put(pixels, y * SKY_W + x, r, g, b)
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    ok = ae3d_png_write(path, pixels, SKY_W, SKY_H) == 1
+    noise.perlin_free(field)
+    free(pixels)
+    return ok
+}
+
+// Sand: wind ripples running one way, broken by finer grain and by broad
+// patches a shade darker or lighter, and tiling -- the noise is sampled on a
+// torus so the left edge is the right edge and the top the bottom.
+write_sand(path: string) -> bool {
+    pixels = calloc(SAND_W * SAND_W * 4, 1)
+    if pixels == null { return false }
+    field = noise.perlin_new(3391)
+
+    y = 0
+    while y < SAND_W {
+        v = (y as float) / (SAND_W as float)
+        x = 0
+        while x < SAND_W {
+            u = (x as float) / (SAND_W as float)
+            // Tiling coordinates: a point on a torus, so every octave wraps.
+            tx = core.cos_of(u * 2.0 * PI) * 2.0
+            ty = core.sin_of(u * 2.0 * PI) * 2.0
+            tz = core.cos_of(v * 2.0 * PI) * 2.0
+            tw = core.sin_of(v * 2.0 * PI) * 2.0
+
+            // Ripples: a wave across the tile, its crests wandering with the
+            // noise so no two are parallel.
+            wander = noise.fbm3(field, tx * 0.8, ty * 0.8, tz * 0.8, 3, 0.5) * 2.5
+            ripple = core.sin_of((u * 22.0 + v * 4.0) * 2.0 * PI + wander)
+            ripple = 0.5 + 0.5 * ripple
+            ripple = pow(ripple, 1.6)
+            // Grain, fine and everywhere.
+            grain = noise.fbm3(field, tx * 9.0 + tw, ty * 9.0, tz * 9.0, 4, 0.5)
+            // Patches, broad and slow.
+            patch = noise.fbm3(field, tx * 0.5 + tw * 0.5, ty * 0.5, tz * 0.5, 3, 0.5)
+
+            base = 0.80 + (ripple - 0.5) * 0.16 + (grain - 0.5) * 0.14 + (patch - 0.5) * 0.12
+            r = base * 0.96
+            g = base * 0.84
+            b = base * 0.62
+            put(pixels, y * SAND_W + x, r, g, b)
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    ok = ae3d_png_write(path, pixels, SAND_W, SAND_W) == 1
+    noise.perlin_free(field)
+    free(pixels)
+    return ok
+}
+
+main() {
+    if write_sky("resources/sky/desert.png") {
+        println("make_sky: wrote resources/sky/desert.png (${SKY_W}x${SKY_H})")
+    } else {
+        println("make_sky: could not write resources/sky/desert.png")
+    }
+    if write_sand("resources/textures/sand.png") {
+        println("make_sky: wrote resources/textures/sand.png (${SAND_W}x${SAND_W}, tiling)")
+    } else {
+        println("make_sky: could not write resources/textures/sand.png")
+    }
+}
