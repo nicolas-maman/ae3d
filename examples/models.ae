@@ -28,10 +28,32 @@ on_start(data: ptr) {
     e = data as *Engine
 
     sphere = place(e, "resources/obj/Sphere.obj", 0.0 - 80.0, 1.0)
-    if sphere != null { core.model_polished_metal(sphere, 0.85, 0.55, 0.2) }
+    if sphere != null {
+        core.model_polished_metal(sphere, 0.85, 0.55, 0.2)
+        // Brushed rather than mirror-polished: a mirror with no surroundings
+        // to reflect is a flat disc with one highlight on it.
+        core.model_set_pbr(sphere, 0.9, 0.45)
+    }
 
     earth = place(e, "resources/obj/Earth/Earth.obj", 0.0, 26.0)
-    if earth != null { g_spin = earth as ptr }
+    if earth != null {
+        // The .mtl names no images, but the map and its relief ship beside
+        // it; without them the Earth drew as a brown disc.
+        // A multi-material model draws one group per material, each with
+        // a material of its own, so the images go on every group's.
+        i = 0
+        while i < core.model_group_count(earth) {
+            group = core.model_group(earth, i)
+            if group.material != null {
+                core.material_set_texture_path(group.material, "resources/obj/Earth/Albedo.jpg")
+                core.material_set_normal_path(group.material, "resources/obj/Earth/Bump.jpg")
+                group.material.roughness = 0.7
+                group.material.metallic = 0.0
+            }
+            i = i + 1
+        }
+        g_spin = earth as ptr
+    }
 
     cube = place(e, "resources/obj/Cube.obj", 80.0, 22.0)
     if cube != null { core.model_glossy(cube, 0.2, 0.5, 0.85) }
