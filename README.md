@@ -233,6 +233,13 @@ is swept from many camera positions and lighting states, because a single
 still is blind to a zombie vanishing on a zoom or a shadow sliding with the
 camera.
 
+`scripts/contact_sheet.sh <scene> out.png` renders a scene's default view, a
+low grazing view and a view toward the sun, on both backends, and lays the
+six frames out as one picture (`tools/montage.ae`). One camera flatters a
+scene: a sea that reads as water from the shore reads as stripes from a low
+one, and a cloud that reads as a cloud looking up reads as a die looking
+toward the sun. The sheet is what a look is judged from.
+
 ## Driving it from a program
 
 An engine started with `AE3D_AGENT` answers questions about itself over a
