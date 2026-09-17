@@ -336,14 +336,16 @@ static double crowd_pace(int i) {
  * fast is the clip's. Without a bank the velocity is taken as given and the
  * clip plays in real time. */
 void ae3d_crowd_step(double *pos, const double *vel, double *yaw, double *phase,
-                     int n, double dt, double max_speed,
+                     int start, int n, double dt, double max_speed,
                      double x0, double x1, double z0, double z1,
                      double road_y, double walk, void *bank) {
     int i;
     double pi = 3.14159265358979323846;
     double step_scale = walk > 0.0 ? dt / walk : dt;
     if (!pos || !vel || !yaw || !phase) return;
-    for (i = 0; i < n; i++) {
+    /* From `start`, `n` of them, so a crowd of two figures steps each
+     * figure's run at its own bank's pace. */
+    for (i = start; i < start + n; i++) {
         double vx = vel[i * 3];
         double vz = vel[i * 3 + 2];
         double sp = sqrt(vx * vx + vz * vz);
@@ -390,7 +392,7 @@ void ae3d_crowd_step(double *pos, const double *vel, double *yaw, double *phase,
  * writes the far count into far_out[0]; a zombie is near, far, or culled, so
  * the two no longer sum to n. `cull_dist <= 0` keeps the whole crowd. */
 int ae3d_crowd_bucket(const double *pos, const double *yaw, const double *phase,
-                      const double *col, int n,
+                      const double *col, int start, int n,
                       double cx, double cz, double near_dist, double cull_dist,
                       double *np, double *ny, double *nph, double *ncol,
                       double *fp, double *fy, double *fph, double *fcol,
@@ -400,7 +402,10 @@ int ae3d_crowd_bucket(const double *pos, const double *yaw, const double *phase,
     double cd2 = cull_dist * cull_dist;
     int cull = cull_dist > 0.0;
     if (!pos || !yaw || !phase) { if (far_out) far_out[0] = 0.0; return 0; }
-    for (i = 0; i < n; i++) {
+    /* From `start`, `n` of them: a crowd of two figures keeps each figure's
+     * zombies in its own run of the columns and buckets each run into its
+     * own tiers. */
+    for (i = start; i < start + n; i++) {
         double x = pos[i * 3];
         double y = pos[i * 3 + 1];
         double z = pos[i * 3 + 2];

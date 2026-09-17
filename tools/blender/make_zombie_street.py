@@ -820,7 +820,7 @@ def _decimate(obj, ratio):
     bpy.ops.object.modifier_apply(modifier="Decimate")
 
 
-def build_zombie(parts, surfaces):
+def build_zombie(parts, surfaces, suffix=""):
     """One surface over a skeleton, and the skeleton the walk is written on.
 
     Two meshes rather than one, because a zombie is skin at the head and the
@@ -834,22 +834,22 @@ def build_zombie(parts, surfaces):
     the distance half a million of them are seen, the cloth seam the hero figure
     splits into a second mesh for is not there to see.
     """
-    body = figure.build_body("Zombie_Body", surfaces["skin"])
+    body = figure.build_body("Zombie_Body" + suffix, surfaces["skin"])
     figure.unwrap(body, FIGURE_REPEATS)
-    clothes = figure.build_clothes("Zombie_Clothes", surfaces["cloth"])
+    clothes = figure.build_clothes("Zombie_Clothes" + suffix, surfaces["cloth"])
     figure.unwrap(clothes, FIGURE_REPEATS)
 
-    crowd_lod = figure.build_body("Zombie_Body_LOD", surfaces["skin"],
+    crowd_lod = figure.build_body("Zombie_Body_LOD" + suffix, surfaces["skin"],
                                   subdivisions=LOD_SUBDIV)
     _decimate(crowd_lod, LOD_DECIMATE_RATIO)
     figure.unwrap(crowd_lod, FIGURE_REPEATS)
 
-    rig = figure.build_rig("Zombie_Rig")
+    rig = figure.build_rig("Zombie_Rig" + suffix)
     figure.bind(rig, (body, clothes, crowd_lod))
 
-    parts["Zombie_Body"] = body
-    parts["Zombie_Clothes"] = clothes
-    parts["Zombie_Body_LOD"] = crowd_lod
+    parts["Zombie_Body" + suffix] = body
+    parts["Zombie_Clothes" + suffix] = clothes
+    parts["Zombie_Body_LOD" + suffix] = crowd_lod
     return rig
 
 
@@ -898,6 +898,18 @@ Z = mathutils.Vector((0.0, 0.0, 1.0))
 # walk comes from this one number: that side takes a shorter step, lifts less,
 # and the hip has to be hauled round to bring it through.
 DRAG = 0.45
+
+# A gait is what a figure's walk does that another's does not: which leg
+# drags and how badly, how far the body leans into the walk, how low the head
+# hangs, how the arms are carried. The hero walks the first; a crowd of one
+# gait phase-shifted still reads as one zombie copied, so the horde is drawn
+# from two figures with a gait each.
+GAITS = {
+    "": dict(drag_side="R", drag=DRAG, lean=0.17, head=0.10, hang=0.0, sway=1.0),
+    # Heavier: the left leg dragged worse, bent further forward, the head
+    # sunk, the arms hanging lower and swinging less.
+    "_B": dict(drag_side="L", drag=0.70, lean=0.30, head=0.26, hang=0.22, sway=0.7),
+}
 
 
 # A gait cycle, and where in it the foot is on the road. Stance is the first
@@ -971,7 +983,7 @@ def foot_target(cycle, offset, lame=0.0):
             carried)
 
 
-def _leg_to(pose, side, target, carried, hit):
+def _leg_to(pose, side, target, carried, hit, lame):
     """Solve the leg so the ankle sits on the target the plan gave it.
 
     Nothing is added to the angles the solve returns. Adding to the knee after
@@ -979,7 +991,6 @@ def _leg_to(pose, side, target, carried, hit):
     landing on the target and the foot swings up to knee height. It did, by a
     quarter of a metre, on the leg that was meant to be dragging.
     """
-    lame = DRAG if side == "R" else 0.0
     hip = pose.world()["Thigh" + side].to_translation()
     aim = mathutils.Vector((target.x, hip.y, target.z))
     thigh, knee = figure.solve_leg(hip, aim, UPPER_LEG, LOWER_LEG)
@@ -994,7 +1005,7 @@ def _leg_to(pose, side, target, carried, hit):
     pose.set("Toe" + side, _turn(Y, 0.0))
 
 
-def _arm(pose, side, swing, hit, reach_for):
+def _arm(pose, side, swing, hit, reach_for, gait):
     """One arm, hanging forward the way a zombie carries them.
 
     Both are held up and out; the right one is the one that swipes. The
@@ -1009,7 +1020,8 @@ def _arm(pose, side, swing, hit, reach_for):
     # are not a mirrored pair. The strike thrusts to horizontal and straightens
     # the elbow, so the hand is carried a good half-metre further forward than
     # the walk ever takes it -- the reach is the arm's, not the body's lunge.
-    hang = 0.0 if side == "R" else 0.12
+    hang = (0.0 if side == "R" else 0.12) + gait["hang"]
+    swing = swing * gait["sway"]
     forward = -0.44 + hang - 0.30 * swing - reach_for * 0.95 * lead
     out = (0.20 if side == "L" else -0.20) - reach_for * 0.10 * lead
     wrist = 0.30 - reach_for * 0.55 * lead
@@ -1033,8 +1045,8 @@ def _arm(pose, side, swing, hit, reach_for):
     pose.set("Hand" + side, _turn(Y, 0.15 + 0.35 * reach_for * lead))
 
 
-def animate(rig):
-    """The walk, the lunge, and the recovery, on the bones.
+def animate(rig, gait=None):
+    """The walk, the lunge, and the recovery, on the bones, in one gait.
 
     What makes this read as a body rather than as a rig: the hips fall onto
     whichever leg is taking the weight and rise at push-off, the shoulders turn
@@ -1042,6 +1054,7 @@ def animate(rig):
     the body does. The lag is the whole of it -- a head that turns with the
     chest belongs to a mannequin.
     """
+    gait = gait or GAITS[""]
     pose = figure.Pose(rig)
     for frame in range(1, TOTAL + 1):
         step = phase(frame)
@@ -1056,7 +1069,7 @@ def animate(rig):
         # Down onto each foot and up off it: twice a cycle, and deeper on the
         # side that is not carrying itself.
         drop = -0.080 - 0.022 * math.cos(step * 2.0) - 0.014 * max(0.0, swing_r)
-        lean = 0.17 + 0.34 * hit
+        lean = gait["lean"] + 0.34 * hit
         roll = 0.075 * math.sin(step) - 0.02
         yaw = -0.10 * math.sin(step) - 0.05
 
@@ -1072,7 +1085,7 @@ def animate(rig):
                                    _turn(X, -roll * 0.5)))
         pose.set("Neck", _compose(_turn(Y, -lean * 0.30 + 0.16 * hit),
                                   _turn(Z, 0.09 * math.sin(late))))
-        pose.set("Head", _compose(_turn(Y, -lean * 0.34 + 0.10 - 0.34 * hit),
+        pose.set("Head", _compose(_turn(Y, -lean * 0.34 + gait["head"] - 0.34 * hit),
                                   _turn(Z, 0.13 * math.sin(late)),
                                   _turn(X, 0.10 * math.sin(late * 0.5) + 0.06)))
 
@@ -1086,12 +1099,12 @@ def animate(rig):
         # is. A stance leg and a swing leg differ in what the plan asks of them,
         # not in how they are driven.
         for side, offset in (("L", 0.0), ("R", math.pi)):
-            lame = DRAG if side == "R" else 0.0
+            lame = gait["drag"] if side == gait["drag_side"] else 0.0
             target, carried = foot_target(step + offset, offset, lame)
-            _leg_to(pose, side, target, carried, hit)
+            _leg_to(pose, side, target, carried, hit, lame)
 
-        _arm(pose, "L", swing_r, hit, hit * 0.55)
-        _arm(pose, "R", swing_l, hit, hit)
+        _arm(pose, "L", swing_r, hit, hit * 0.55, gait)
+        _arm(pose, "R", swing_l, hit, hit, gait)
         pose.apply(frame)
 
     # Every frame is keyed, so there is nothing between two keys for a curve to
@@ -1159,6 +1172,11 @@ def main(argv):
     build_street(parts, surfaces)
     build_clutter(parts, surfaces, random.Random(6211))
     animate(build_zombie(parts, surfaces))
+    # The second figure, for the horde: the same body on its own rig, walked
+    # in its own gait. On the same spot as the first -- an offset rig would
+    # put the bones' bind in one space and the mesh in another -- which the
+    # figure's rig scene leaves out and the city draws half its crowd from.
+    animate(build_zombie(parts, surfaces, "_B"), GAITS["_B"])
 
     # The sky is not an object in the scene and the exporter only writes what a
     # material names, so it is written here, beside the file rather than into
