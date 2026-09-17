@@ -190,6 +190,17 @@ typedef struct {
     int vertex_count;
     int shared;
     int refs;
+    /* An instance stream that moves every frame is written in place into a
+       ring of host-visible buffers, one per frame in flight, and the frame's
+       draws bind that frame's. Nothing is waited for and nothing destroyed:
+       the slot a frame writes was last read by the frame whose fence
+       frame_begin already waited on. Made on the first update, sized to the
+       largest stream seen. */
+    VkBuffer ring[AE3D_VK_FRAMES];
+    VkDeviceMemory ring_memory[AE3D_VK_FRAMES];
+    void *ring_mapped[AE3D_VK_FRAMES];
+    VkDeviceSize ring_size;
+    int streaming;
 } ae3d_vk_mesh;
 
 typedef struct {
@@ -3945,15 +3956,14 @@ int ae3d_vk_upload_mesh(void *mesh) {
 // matrix then a colour, one vertex-input binding stepping per instance.
 // One matrix and one colour per instance, in the layout the vertex shader
 // declares. Both the first upload and every later refresh build it the same way.
-static float *ae3d_vk_pack_instances(void *instances, int count) {
+/* The stream packed into `packed`, sixteen floats of matrix and four of
+   colour an instance, as the pipeline's second vertex binding reads it. */
+static void ae3d_vk_pack_instances_into(float *packed, void *instances, int count) {
     const float *matrices = ae3d_inst_matrix_data(instances);
     const float *colours = ae3d_inst_color_data(instances);
     int has_colours = ae3d_inst_has_colors(instances);
-    float *packed;
     int i;
 
-    packed = (float *)malloc((size_t)count * 20 * sizeof(float));
-    if (!packed) return NULL;
     for (i = 0; i < count; i++) {
         memcpy(packed + (size_t)i * 20, matrices + (size_t)i * 16, 16 * sizeof(float));
         if (has_colours && colours) {
@@ -3965,40 +3975,86 @@ static float *ae3d_vk_pack_instances(void *instances, int count) {
         }
         packed[i * 20 + 19] = 0.0f;
     }
+}
+
+static float *ae3d_vk_pack_instances(void *instances, int count) {
+    float *packed = (float *)malloc((size_t)count * 20 * sizeof(float));
+    if (!packed) return NULL;
+    ae3d_vk_pack_instances_into(packed, instances, count);
     return packed;
 }
 
 // An instance stream that has been moved or recoloured since it was uploaded.
 // Without this the buffer is written once, when the model is registered, and a
 // particle that moves or a block that changes colour never reaches the GPU.
-int ae3d_vk_update_instances(int handle, void *instances) {
-    ae3d_vk_mesh *slot;
-    int count = ae3d_inst_count(instances);
-    float *packed;
+static void ae3d_vk_free_ring(ae3d_vk_mesh *slot) {
+    unsigned i;
+    for (i = 0; i < AE3D_VK_FRAMES; i++) {
+        if (slot->ring_mapped[i]) ae3d_vkUnmapMemory(vk.device, slot->ring_memory[i]);
+        if (slot->ring[i]) ae3d_vkDestroyBuffer(vk.device, slot->ring[i], NULL);
+        if (slot->ring_memory[i]) ae3d_vkFreeMemory(vk.device, slot->ring_memory[i], NULL);
+        slot->ring[i] = VK_NULL_HANDLE;
+        slot->ring_memory[i] = VK_NULL_HANDLE;
+        slot->ring_mapped[i] = NULL;
+    }
+    slot->ring_size = 0;
+    slot->streaming = 0;
+}
 
-    if (!vk.ready || handle <= 0 || handle > vk.mesh_capacity || count <= 0) return 0;
-    slot = &vk.meshes[handle - 1];
-    if (!slot->in_use) return 0;
+/* The ring for a stream of `bytes`, made or regrown. Growing waits for the
+   device once, since every slot of the old ring may be in flight; a stream
+   that keeps its size never waits again. */
+static int ae3d_vk_ensure_ring(ae3d_vk_mesh *slot, VkDeviceSize bytes) {
+    unsigned i;
+    if (slot->streaming && slot->ring_size >= bytes) return 1;
 
-    packed = ae3d_vk_pack_instances(instances, count);
-    if (!packed) { ae3d_vk_fail("out of memory"); return 0; }
-
-    // The buffer is device-local, so the write goes through the same staging
-    // path the first upload used, and the device has to be idle before the one
-    // a frame in flight may still be reading is replaced.
     ae3d_vkDeviceWaitIdle(vk.device);
+    ae3d_vk_free_ring(slot);
+    /* The device-local buffer the first upload made is not read again. */
     if (slot->vertex_buffer) ae3d_vkDestroyBuffer(vk.device, slot->vertex_buffer, NULL);
     if (slot->vertex_memory) ae3d_vkFreeMemory(vk.device, slot->vertex_memory, NULL);
     slot->vertex_buffer = VK_NULL_HANDLE;
     slot->vertex_memory = VK_NULL_HANDLE;
 
-    if (!ae3d_vk_upload_buffer(packed, (VkDeviceSize)count * 20 * sizeof(float),
-                               VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                               &slot->vertex_buffer, &slot->vertex_memory)) {
-        free(packed);
-        return 0;
+    for (i = 0; i < AE3D_VK_FRAMES; i++) {
+        if (!ae3d_vk_create_buffer(bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                       | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                   &slot->ring[i], &slot->ring_memory[i])) {
+            ae3d_vk_free_ring(slot);
+            return 0;
+        }
+        if (ae3d_vkMapMemory(vk.device, slot->ring_memory[i], 0, bytes, 0,
+                             &slot->ring_mapped[i]) != VK_SUCCESS) {
+            slot->ring_mapped[i] = NULL;
+            ae3d_vk_free_ring(slot);
+            return ae3d_vk_fail("vkMapMemory failed for an instance ring");
+        }
     }
-    free(packed);
+    slot->ring_size = bytes;
+    slot->streaming = 1;
+    return 1;
+}
+
+int ae3d_vk_update_instances(int handle, void *instances) {
+    ae3d_vk_mesh *slot;
+    int count = ae3d_inst_count(instances);
+    VkDeviceSize bytes;
+
+    if (!vk.ready || handle <= 0 || handle > vk.mesh_capacity || count <= 0) return 0;
+    slot = &vk.meshes[handle - 1];
+    if (!slot->in_use) return 0;
+
+    /* Packed straight into this frame's slot of the ring, which this
+       frame's draws then bind. The first update turns the stream over from
+       the device-local buffer of the upload to the ring; from then on an
+       update is one pass over the instances into mapped memory, where it
+       used to be a wait for the whole device, a destroy and a staged upload
+       of a fresh buffer every frame. */
+    bytes = (VkDeviceSize)count * 20 * sizeof(float);
+    if (!ae3d_vk_ensure_ring(slot, bytes)) return 0;
+    ae3d_vk_pack_instances_into((float *)slot->ring_mapped[vk.frame], instances, count);
+    slot->vertex_buffer = slot->ring[vk.frame];
     return 1;
 }
 
@@ -4061,6 +4117,12 @@ void ae3d_vk_free_mesh(int handle) {
     ae3d_vkDeviceWaitIdle(vk.device);
     free(mesh->vertices);
     free(mesh->indices);
+    if (mesh->streaming) {
+        /* The bound buffer is one of the ring's; the ring frees it. */
+        mesh->vertex_buffer = VK_NULL_HANDLE;
+        mesh->vertex_memory = VK_NULL_HANDLE;
+        ae3d_vk_free_ring(mesh);
+    }
     ae3d_vkDestroyBuffer(vk.device, mesh->vertex_buffer, NULL);
     ae3d_vkFreeMemory(vk.device, mesh->vertex_memory, NULL);
     ae3d_vkDestroyBuffer(vk.device, mesh->index_buffer, NULL);
@@ -4084,6 +4146,11 @@ void ae3d_vk_shutdown(void) {
 
     for (i = 0; i < (unsigned)vk.mesh_capacity; i++) {
         if (vk.meshes[i].in_use) {
+            if (vk.meshes[i].streaming) {
+                vk.meshes[i].vertex_buffer = VK_NULL_HANDLE;
+                vk.meshes[i].vertex_memory = VK_NULL_HANDLE;
+                ae3d_vk_free_ring(&vk.meshes[i]);
+            }
             ae3d_vkDestroyBuffer(vk.device, vk.meshes[i].vertex_buffer, NULL);
             ae3d_vkFreeMemory(vk.device, vk.meshes[i].vertex_memory, NULL);
             ae3d_vkDestroyBuffer(vk.device, vk.meshes[i].index_buffer, NULL);
