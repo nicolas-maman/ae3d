@@ -1,0 +1,606 @@
+// The figure's measuring rig: one zombie walking up one block of the street
+// at dusk, and attacking.
+//
+// Not an example -- the demo is examples/zombie_city.ae, the same street and
+// the same figure as a horde. This is where the figure and the street are
+// measured, one block and one zombie at a time, so a defect is a number and
+// not something to spot in a crowd: scripts/measure_scene.py asks what it
+// drew, scripts/critique_scene.py asks whether that is good enough (foot
+// plant, the strike's reach, the lamps' pools, texel density, every surface
+// with its normal map), and tools/ae3d_bench.ae holds a frame of it to the
+// recorded budget -- all on every build.
+//
+// Authored in Blender by tools/blender/make_zombie_street.py, exported through
+// tools/blender/ae3d_export.py, and loaded here straight from the manifest:
+// meshes, textures, placement, the parent chain, the skeleton and its weights,
+// and a clip a bone.
+//
+// The figure is one surface over a skeleton. Its bones are ordinary models, so
+// the clips drive them the way clips drive anything and ae3d.ik solves a limb
+// of them without being told they belong to a skin -- which is what lets the
+// solve below put the feet on this road rather than on the floor they were
+// animated against.
+//
+//   AE3D_AGENT=7911 ./build/zombie_street
+//   python3 tools/ae3d_agent.py --port 7911 anim.set time=3.2
+//   python3 tools/ae3d_agent.py --port 7911 scene.skeleton object=Zombie_Body
+
+import std.heap
+import std.list
+import std.os
+import std.string
+import ae3d.core
+import ae3d.platform
+import ae3d.engine
+import ae3d.gl
+import ae3d.vk
+import ae3d.assets
+import ae3d.anim
+import ae3d.ik
+import ae3d.skin
+
+const MANIFEST = "resources/blender/zombie_street/manifest.json"
+const SKY = "resources/sky/dusk.png"
+
+// Blender is Z-up and ae3d is Y-up, so the street's Blender Y became ae3d -Z:
+// the far terrace stands at negative z, the near one at positive, and the road
+// is the corridor between them.
+const SKY_R = 0.075
+const SKY_G = 0.088
+const SKY_B = 0.125
+
+var g_lamps: ptr = null
+var g_sky: *Skybox = null
+var g_key: *Light = null
+
+// The limbs the solve runs on, and what the clips leave for it to correct.
+// Filled at load: a file-scope value has to be a constant here.
+var g_leg_l: *Limb = null
+var g_leg_r: *Limb = null
+var g_arm_r: *Limb = null
+var g_arm_l: *Limb = null
+var g_head: *Model = null
+var g_jaw: *Model = null
+var g_bones: ptr = null
+var g_skeleton: *Skeleton = null
+
+// The road, and how far the ankle sits above the sole standing on it.
+// The road under the figure. It has a camber and the figure walks along the
+// crown of it, so the surface here is not zero.
+const GROUND = 0.075
+const ANKLE = 0.085
+// How much of its own lift a foot has to give up before it stops being planted.
+const STEP_BAND = 0.07
+const SAMPLES = 96
+// Beyond this multiple of its own length the arm gives up reaching, and once
+// the shoulder is this far past the target it has gone by.
+const REACH_FADE = 1.7
+const PASSED_BY = 0.15
+
+// What the zombie is walking at. Out of reach for most of the street, which is
+// what keeps the arm straight and pointing; inside it at the end of the lunge,
+// where the hand closes on it exactly.
+const VICTIM_X = 0.0 - 2.72
+const VICTIM_Y = 1.2
+const VICTIM_Z = 0.33
+
+struct Limb {
+    root: *Model
+    mid: *Model
+    tip: *Model
+    lowest: float
+}
+
+// engine_add_model borrows, and a Player borrows its clip: both outlive the
+// engine and are released after it.
+var g_models: ptr = null
+var g_clips: ptr = null
+
+// The benchmark scene, so it has to run on both renderers: a cost that can
+// only be measured on one of them is a cost that regresses unseen on the
+// other. `vulkan` as the first argument, the same way backend_switch takes it.
+chosen_api() -> int {
+    if os.aether_args_count() > 1 && string.equals(os.aether_args_get(1), "vulkan") == 1 {
+        if !vk.available() {
+            println("zombie_street: no Vulkan driver available: ${vk.last_error()}")
+            os.exit(1)
+        }
+        return platform.API_VULKAN
+    }
+    return platform.API_GL
+}
+
+main() {
+    e = engine.engine_new(chosen_api())
+    engine.engine_set_size(e, 1280, 720)
+    engine.engine_set_title(e, "ae3d: a zombie, on a street")
+    engine.engine_set_camera_input(e, true)
+    engine.engine_set_post(e, true, true, 0.85, 0.85)
+    engine.engine_set_fog(e, core.fog_distance(5.0, 40.0,
+                                               core.vec3(SKY_R, SKY_G, SKY_B), 0.95))
+    // The street runs ninety metres and the zombie is under two. Fitting the
+    // shadow map to the whole of it leaves nothing for the figure standing in
+    // the middle, so the map is fitted to what the camera can see instead.
+    engine.engine_set_shadow_distance(e, 18.0)
+    // Cull to the camera's frustum: the street runs ninety metres and the
+    // camera sees a slice of it, so most of what is loaded is behind or beside
+    // the view every frame. The engine can skip those draws entirely; it just
+    // has to be told to, and a benchmark that does not is measuring work no
+    // real frame would do.
+    engine.engine_set_frustum_culling(e, true)
+    engine.engine_set_user_data(e, e as ptr)
+    engine.engine_on_start(e, on_start)
+
+    // The controls, because a window that gives no sign of how to move in it is
+    // a window you cannot move in. Right-drag to look rather than a captured
+    // cursor, so the mouse is free to leave the window on a desktop.
+    println("zombie_street: WASD to move, hold right mouse to look, shift to sprint, space/ctrl up and down")
+
+    if !engine.engine_run(e, -1, -1) {
+        println("zombie_street: no window")
+        engine.engine_free(e)
+        return
+    }
+    report_cost(e)
+    engine.engine_free(e)
+    // After the engine: freeing the renderer is what releases the GPU handles
+    // the models were given, and the registry is what frees the players that
+    // read the clips.
+    free_scene()
+    assets.provenance_release()
+    free_lamps()
+}
+
+// What this scene costs. It is the scene ae3d is demonstrated with, so it is
+// also the one the engine is measured on, and a demo whose cost nobody reports
+// is a demo that gets slower.
+//
+// The number is the CPU's half of a frame: the scene walk, the culling, the
+// pose solve, the uniforms and the draw calls. The GPU is not waited on, which
+// is what makes this the half that means the same thing on a workstation and
+// on a shared runner drawing through llvmpipe.
+report_cost(e: *Engine) {
+    frames = engine.engine_render_frames(e)
+    if frames == 0 { return }
+    renderer = engine.engine_gl_renderer(e)
+    draws = 0
+    if renderer != null {
+        draws = gl.renderer_draw_calls(renderer as *GLRenderer)
+    } else {
+        draws = vk.renderer_draw_calls(engine.engine_vk_renderer(e))
+    }
+    println("zombie_street: ${engine.engine_render_ms(e)} ms per frame over ${frames} frames, ${draws} draws, ${triangles()} triangles")
+}
+
+triangles() -> int {
+    total = 0
+    if g_models == null { return total }
+    i = 0
+    count = list.size(g_models)
+    while i < count {
+        model = list.get_raw(g_models, i) as *Model
+        if model != null { total = total + core.mesh_index_count(model.mesh) / 3 }
+        i = i + 1
+    }
+    return total
+}
+
+free_scene() {
+    if g_models != null {
+        i = 0
+        count = list.size(g_models)
+        while i < count {
+            model = list.get_raw(g_models, i) as *Model
+            if model != null { core.model_free(model) }
+            i = i + 1
+        }
+        list.free(g_models)
+        g_models = null
+    }
+    if g_clips != null {
+        i = 0
+        count = list.size(g_clips)
+        while i < count {
+            clip = list.get_raw(g_clips, i) as *Clip
+            if clip != null { anim.clip_free(clip) }
+            i = i + 1
+        }
+        list.free(g_clips)
+        g_clips = null
+    }
+}
+
+on_start(data: ptr) {
+    e = data as *Engine
+
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(0.35, 1.34, 1.55))
+    core.camera_look_at(cam, core.vec3(0.0 - 3.5, 1.1, 0.0 - 0.2))
+
+    // A street this narrow is in the shade of its own terrace long before dusk
+    // is over, so the light that shapes it is the lamp overhead rather than
+    // what is left of the sun. The key light is the one the scene is shadowed
+    // by, so the lamp is the key light and the sun is a fill: the shadow the
+    // zombie throws is the one cast up the road by the lamp it is walking
+    // under.
+    g_lamps = list.new()
+    g_key = lamp_at(0.0)
+    g_key.ambient_strength = 0.10
+    engine.engine_set_light(e, g_key)
+
+    dusk = core.light_directional(core.vec3(0.0 - 0.30, 0.62, 0.72),
+                                  core.vec3(0.30, 0.40, 0.72), 0.16)
+    engine.engine_add_light(e, dusk)
+    list.add_raw(g_lamps, dusk as ptr)
+
+    engine.engine_add_light(e, lamp_at(0.0 - 14.0))
+    engine.engine_add_light(e, lamp_at(14.0))
+
+    // A sky rather than a colour: the blue band at the horizon is what the far
+    // end of the street fades into, and the fog is set to meet it.
+    renderer = engine.engine_gl_renderer(e)
+    if renderer != null {
+        gl.renderer_set_clear_color(renderer as *GLRenderer, SKY_R, SKY_G, SKY_B)
+        g_sky = gl.skybox_create(renderer as *GLRenderer, SKY)
+    } else {
+        vulkan = engine.engine_vk_renderer(e)
+        vk.renderer_set_clear_color(vulkan, SKY_R, SKY_G, SKY_B)
+        g_sky = vk.skybox_create(vulkan, SKY)
+        // The wet road mirrors the lit street back at the camera. It is a
+        // Vulkan-only pass, so it lives on this branch; it composites before the
+        // bloom, so the mirrored lamps bloom along with the real ones. The plane
+        // sits at the road's height; the strength is dialled for a wet sheen
+        // rather than a mirror.
+        vk.renderer_set_ssr_params(vulkan, 0.115, 1.2)
+        vk.renderer_set_ssr(vulkan, true)
+    }
+    engine.engine_set_skybox(e, g_sky as ptr)
+
+    m = assets.manifest_load(MANIFEST)
+    if m == null {
+        println("zombie_street: ${assets.last_error()}")
+        println("zombie_street: run ./scripts/export_assets.sh to build the assets")
+        return
+    }
+
+    models = assets.manifest_load_scene(m)
+    g_models = models
+    g_clips = list.new()
+    animated = 0
+    count = assets.manifest_count(m)
+    i = 0
+    while i < count {
+        model = list.get_raw(models, i) as *Model
+        if model != null {
+            entry = assets.manifest_entry(m, i)
+            // The crowd's stand-in (Zombie_Body_LOD, the same body collapsed
+            // to the horde's triangle budget) ships in the export for the
+            // crowd scenes to instance; it is not an actor here. Placed, it
+            // stands unskinned in bind pose inside the figure -- a third part
+            // of a two-part zombie, and a rigid ghost through the walk.
+            if string.contains(assets.entry_object(entry), "_LOD") == 1 {
+                i = i + 1
+                continue
+            }
+            engine.engine_add_model(e, model)
+            clip = assets.entry_load_clip(m, entry)
+            if clip != null {
+                list.add_raw(g_clips, clip as ptr)
+                engine.engine_add_animation(e, assets.entry_object(entry),
+                                            anim.player_new(clip), model)
+                animated = animated + 1
+            }
+        }
+        i = i + 1
+    }
+
+    animated = animated + rig_the_figure(e, models, m)
+
+    // Real light sources, not bright paint. A lamp head and a lit window are
+    // their own light: the engine's emissive path (an exposure past ten) makes
+    // a surface skip shading and glow at its own colour, which is what then
+    // spills into the bloom. Set here rather than in the export so the same
+    // asset is a plain material to any scene that does not want it lit.
+    make_emissive(models, m)
+    wet_the_road(models, m)
+
+    g_leg_l = limb_of(e, "ThighL", "KneeL", "AnkleL")
+    g_leg_r = limb_of(e, "ThighR", "KneeR", "AnkleR")
+    g_arm_r = limb_of(e, "ShoulderR", "ElbowR", "WristR")
+    g_arm_l = limb_of(e, "ShoulderL", "ElbowL", "WristL")
+    // The head, and where its face points. Turning the neck towards something
+    // turns the head over: the neck runs upwards, so aiming it at anything
+    // ahead lays the head on its side. What has to be aimed is the face.
+    g_head = bone_named("Head")
+    g_jaw = bone_named("Face")
+    engine.engine_on_pose(e, solve_pose)
+
+    println("zombie_street: ${count} objects from ${assets.manifest_source(m)}, ${animated} animated")
+    println("zombie_street: ${skin.skeleton_count(g_skeleton)} bones, the clips leave the feet at ${g_leg_l.lowest} and ${g_leg_r.lowest} above the road")
+    assets.manifest_free(m)
+}
+
+// The figure: one skeleton, the two surfaces hung off it, and a clip a bone.
+//
+// The bones are models like any other, which is why the solver below can take
+// them and why the clips drive them with nothing special anywhere: what makes
+// them a skeleton is that the meshes are weighted to them.
+rig_the_figure(e: *Engine, models: ptr, m: *Manifest) -> int {
+    entry = entry_named(m, "Zombie_Body")
+    if entry == null {
+        println("zombie_street: the export has no figure in it")
+        return 0
+    }
+
+    g_bones = assets.entry_load_skeleton(m, entry)
+    if g_bones == null {
+        println("zombie_street: ${assets.last_error()}")
+        return 0
+    }
+    g_skeleton = skin.skeleton_new()
+    i = 0
+    while i < list.size(g_bones) {
+        skin.skeleton_add(g_skeleton, list.get_raw(g_bones, i) as *Model)
+        i = i + 1
+    }
+    skin.skeleton_bind(g_skeleton)
+
+    // Skin and cloth are two surfaces over one figure, so they share a
+    // skeleton: a shoulder that bends bends the sleeve on it.
+    core.model_set_skeleton(model_named(models, m, "Zombie_Body"), g_skeleton as ptr)
+    core.model_set_skeleton(model_named(models, m, "Zombie_Clothes"), g_skeleton as ptr)
+
+    clips = assets.entry_load_bone_clips(m, entry)
+    if clips == null { return 0 }
+    bound = 0
+    i = 0
+    while i < list.size(clips) {
+        clip = list.get_raw(clips, i) as *Clip
+        list.add_raw(g_clips, clip as ptr)
+        index = skin.skeleton_find(g_skeleton, anim.clip_name(clip))
+        if index >= 0 {
+            engine.engine_add_animation(e, anim.clip_name(clip), anim.player_new(clip),
+                                        skin.skeleton_bone(g_skeleton, index))
+            bound = bound + 1
+        }
+        i = i + 1
+    }
+    list.free(clips)
+    return bound
+}
+
+// The lamp heads burn hard; the lit rooms glow softly behind their glass. The
+// number is the emissive strength times ten, so 16 is a bright lamp and 13 a
+// window with a lamp on inside it.
+// The road and the ground it sinks into are wet, so they reflect the street's
+// lamps: a lamp overhead smears into a bright streak down the tarmac toward the
+// viewer, brightest where the view grazes the road. Set here rather than in the
+// export because a dry street would leave it at zero, and the same mesh is a
+// benchmark on a dozen machines that must not each bake it in differently.
+wet_the_road(models: ptr, m: *Manifest) {
+    count = assets.manifest_count(m)
+    i = 0
+    while i < count {
+        name = assets.entry_object(assets.manifest_entry(m, i))
+        model = list.get_raw(models, i) as *Model
+        if model != null {
+            if string.contains(name, "Road") == 1 || string.contains(name, "Ground") == 1 {
+                core.model_set_reflectivity(model, 0.8)
+            }
+        }
+        i = i + 1
+    }
+}
+
+make_emissive(models: ptr, m: *Manifest) {
+    count = assets.manifest_count(m)
+    i = 0
+    while i < count {
+        name = assets.entry_object(assets.manifest_entry(m, i))
+        model = list.get_raw(models, i) as *Model
+        if model != null {
+            if string.contains(name, "LampHead") == 1 {
+                core.model_set_exposure(model, 16.0)
+            } else if string.contains(name, "_Lit") == 1 {
+                core.model_set_exposure(model, 13.0)
+            }
+        }
+        i = i + 1
+    }
+}
+
+entry_named(m: *Manifest, name: string) -> *Entry {
+    count = assets.manifest_count(m)
+    i = 0
+    while i < count {
+        entry = assets.manifest_entry(m, i)
+        if assets.entry_object(entry) == name { return entry }
+        i = i + 1
+    }
+    return null
+}
+
+bone_named(name: string) -> *Model {
+    index = skin.skeleton_find(g_skeleton, name)
+    if index < 0 { return null }
+    return skin.skeleton_bone(g_skeleton, index)
+}
+
+limb_of(e: *Engine, root: string, mid: string, tip: string) -> *Limb {
+    limb = heap.new(Limb)
+    limb.root = bone_named(root)
+    limb.mid = bone_named(mid)
+    limb.tip = bone_named(tip)
+    limb.lowest = lowest_of(e, limb.tip)
+    return limb
+}
+
+model_named(models: ptr, m: *Manifest, name: string) -> *Model {
+    count = assets.manifest_count(m)
+    i = 0
+    while i < count {
+        if assets.entry_object(assets.manifest_entry(m, i)) == name {
+            return list.get_raw(models, i) as *Model
+        }
+        i = i + 1
+    }
+    return null
+}
+
+// The lowest the clips ever put this part, which is where its own step touches
+// down. Read off the animation rather than assumed: a clip is a set of angles,
+// and the floor it was drawn against is not in them.
+lowest_of(e: *Engine, part: *Model) -> float {
+    if part == null { return 0.0 }
+    registry = engine.engine_animations(e) as *Registry
+    if registry == null { return 0.0 }
+
+    duration = 0.0
+    bound = anim.registry_count(registry)
+    i = 0
+    while i < bound {
+        length = anim.clip_duration(anim.player_clip(
+            anim.binding_player(anim.registry_binding(registry, i))))
+        if length > duration { duration = length }
+        i = i + 1
+    }
+    if duration <= 0.0 { return core.model_world_position(part).y }
+
+    lowest = core.model_world_position(part).y
+    step = 0
+    while step <= SAMPLES {
+        pose_at(registry, duration * (step * 1.0) / (SAMPLES * 1.0))
+        height = core.model_world_position(part).y
+        if height < lowest { lowest = height }
+        step = step + 1
+    }
+    pose_at(registry, 0.0)
+    return lowest
+}
+
+pose_at(registry: *Registry, time: float) {
+    count = anim.registry_count(registry)
+    i = 0
+    while i < count {
+        binding = anim.registry_binding(registry, i)
+        player = anim.binding_player(binding)
+        anim.player_set_time(player, time)
+        anim.apply(player, anim.binding_model(binding))
+        i = i + 1
+    }
+}
+
+// What the clips leave out. A walk is a set of angles that happened to look
+// right against the floor it was drawn on; on this road the feet float a
+// hand's width above it and wander up and down by half that again as the hips
+// bob. The solve puts each foot on the road for the part of the stride it is
+// standing on, and leaves the swing alone.
+//
+// The arm is the other direction the question runs in: it reaches for
+// something at a place, and the solver says whether it got there. Out of range
+// it straightens towards it, which is the shape of a zombie walking at you;
+// in range the hand lands on it.
+solve_pose(data: ptr) {
+    victim = core.vec3(VICTIM_X, VICTIM_Y, VICTIM_Z)
+    // Both hands go for it. The far one trails, which is what makes the near
+    // one read as the one doing the reaching.
+    plant(g_leg_l)
+    plant(g_leg_r)
+    reach(g_arm_r, victim)
+    reach(g_arm_l, core.v3_add(victim, core.vec3(0.0 - 0.22, 0.0 - 0.16, 0.34)))
+    // It looks at what it is walking at. A head looks along its face, and the
+    // jaw is what the face is: pointing the neck would fold the head onto the
+    // chest, since the neck runs the other way.
+    look_at(g_head, g_jaw, core.v3_add(victim, core.vec3(0.0, 0.22, 0.0)), g_arm_r)
+}
+
+// Ground, for a foot that has gone below it.
+//
+// The clip plants its own feet -- it is authored against a footstep plan, so a
+// foot that is down stays where it was put to within a couple of centimetres.
+// What a clip cannot know is the road, which has a camber. So this only ever
+// lifts: a foot above the surface is the animation's business and is left
+// alone, and a foot below it is pushed back out.
+//
+// It used to pull as well as push, engaging whenever a foot came within a hand
+// of its own lowest point. On the leg that drags, which barely clears the road,
+// that caught the foot mid-swing and yanked it down -- five touchdowns in a
+// cycle that has two, and four centimetres of skating each time.
+plant(limb: *Limb) {
+    if limb == null { return }
+    if limb.root == null || limb.mid == null || limb.tip == null { return }
+    at = core.model_world_position(limb.tip)
+    if at.y >= GROUND + ANKLE { return }
+
+    target = core.vec3(at.x, GROUND + ANKLE, at.z)
+    knee = core.v3_add(core.model_world_position(limb.mid), core.vec3(2.0, 0.0, 0.0))
+    ik.solve_two_bone(limb.root, limb.mid, limb.tip, target, knee)
+}
+
+// How much the figure is actually going for it.
+//
+// A solve that runs every frame against a fixed point in the street tracks that
+// point for the whole clip: the arm swings round to keep pointing at it as the
+// figure walks by, and round again when the clip loops and the figure is back
+// where it started. That is the head and the arms turning all the way round,
+// and it is the solve doing it, not the animation -- which loops to within two
+// degrees.
+//
+// So the reach is weighted by whether the thing is reachable at all: full
+// inside the arm's own length, fading out beyond it, nothing once the shoulder
+// is past it. The clip animates the lunge; this only closes the last of it.
+reach_weight(limb: *Limb, target: Vec3) -> float {
+    shoulder = core.model_world_position(limb.root)
+    // Walking up the street in +x, so a target behind the shoulder is one the
+    // figure has already gone by.
+    if target.x < shoulder.x - PASSED_BY { return 0.0 }
+    full = core.v3_distance(shoulder, core.model_world_position(limb.mid)) +
+           core.v3_distance(core.model_world_position(limb.mid),
+                            core.model_world_position(limb.tip))
+    span = core.v3_distance(shoulder, target)
+    if span <= full { return 1.0 }
+    if span >= full * REACH_FADE { return 0.0 }
+    return 1.0 - (span - full) / (full * (REACH_FADE - 1.0))
+}
+
+reach(limb: *Limb, target: Vec3) {
+    if limb == null { return }
+    if limb.root == null || limb.mid == null || limb.tip == null { return }
+    weight = reach_weight(limb, target)
+    // At no weight the target is where the hand already is, so the solve leaves
+    // it exactly there -- which tests/test_ik proves it does.
+    aim = core.v3_lerp(core.model_world_position(limb.tip), target, weight)
+    shoulder = core.model_world_position(limb.root)
+    elbow = core.v3_add(shoulder, core.vec3(0.0 - 1.0, 0.0 - 1.2, 1.6))
+    ik.solve_two_bone(limb.root, limb.mid, limb.tip, aim, elbow)
+}
+
+// The same, for what the figure is looking at. A head that tracks a fixed point
+// turns all the way round as the figure walks past it.
+look_at(neck: *Model, face: *Model, target: Vec3, limb: *Limb) {
+    if neck == null || face == null { return }
+    weight = reach_weight(limb, target)
+    aim = core.v3_lerp(core.model_world_position(face), target, weight)
+    ik.aim_at(neck, face, aim)
+}
+
+// Sodium light, under the lamp head the exported scene put at this x. Its range
+// is short enough that the pools of light on the road stay separate.
+lamp_at(x: float) -> *Light {
+    lamp = core.light_point(core.vec3(x, 4.25, 0.0 - 2.94),
+                            core.vec3(1.0, 0.72, 0.40), 2.7, 15.0)
+    list.add_raw(g_lamps, lamp as ptr)
+    return lamp
+}
+
+free_lamps() {
+    if g_lamps == null { return }
+    i = 0
+    count = list.size(g_lamps)
+    while i < count {
+        core.light_free(list.get_raw(g_lamps, i) as *Light)
+        i = i + 1
+    }
+    list.free(g_lamps)
+    g_lamps = null
+}

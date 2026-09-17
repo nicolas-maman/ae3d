@@ -96,3 +96,20 @@ int ae3d_png_write(const char *path, const void *rgba, int width, int height) {
     free(packed);
     return ok;
 }
+
+/* One pixel of an RGBA buffer, from the language that cannot store a byte
+ * itself: Aether's arrays are of its own numeric types, so a tool that
+ * builds an image writes each pixel through here. Channels are clamped. */
+static unsigned char channel_byte(double v) {
+    if (v <= 0.0) return 0;
+    if (v >= 1.0) return 255;
+    return (unsigned char)(v * 255.0 + 0.5);
+}
+
+void ae3d_rgba_set(void *rgba, int index, double r, double g, double b, double a) {
+    unsigned char *p = (unsigned char *)rgba + (size_t)index * 4;
+    p[0] = channel_byte(r);
+    p[1] = channel_byte(g);
+    p[2] = channel_byte(b);
+    p[3] = channel_byte(a);
+}

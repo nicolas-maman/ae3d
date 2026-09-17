@@ -19,7 +19,7 @@ FRAMES="${AE3D_CI_FRAMES:-30}"
 # look of the engine are proved at depth elsewhere, by the test suites and by
 # the demo scene's own critique, neither of which this touches. Two examples are
 # heavy per frame on the software rasteriser a headless runner falls back to
-# (particle_disc and sand together spent four minutes of a nine-minute run at
+# (sand alone spent minutes of a nine-minute run at
 # thirty frames each); a smoke depth of ten keeps the coverage and gives that
 # time back.
 EXAMPLE_FRAMES="${AE3D_CI_EXAMPLE_FRAMES:-10}"
@@ -420,7 +420,7 @@ done
 step "examples build and run"
 # The benchmark is built in the same pass: build_together starts from a clean
 # status directory, so a later call would forget that the examples built.
-build_together examples/*.ae tools/ae3d_bench.ae
+build_together examples/*.ae tools/ae3d_bench.ae tools/zombie_street.ae
 for example in examples/*.ae; do
     name="$(basename "$example" .ae)"
     if ! built_ok "$name"; then

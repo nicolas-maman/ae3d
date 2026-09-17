@@ -293,6 +293,7 @@ void  *ae3d_offscreen_read(void *target);
 void  *ae3d_offscreen_read_pipelined(void *target);
 
 int    ae3d_png_write(const char *path, const void *rgba, int width, int height);
+void   ae3d_rgba_set(void *rgba, int index, double r, double g, double b, double a);
 int    ae3d_gl_snapshot(const char *path, int width, int height);
 void   ae3d_offscreen_destroy(void *target);
 

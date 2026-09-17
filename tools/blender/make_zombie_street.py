@@ -720,9 +720,16 @@ def build_street(parts, surfaces):
 
     # The far terrace runs unbroken; the near side is set back, so the street
     # reads as a corridor rather than a trench. Blender Y becomes ae3d -Z.
+    # Both terraces run the block's whole length (x -36..48, the ground
+    # slab): a block whose buildings stopped twenty-five metres short of
+    # each end tiled into a city that was two fifths empty lots.
+    # The end shells come last so the original five keep their names: the
+    # measurement (scripts/measure_scene.py) reads Street_BlockL0 as brick
+    # and L1 as concrete.
     far = ((-22.0, 7.0, 12.5, "brick"), (-9.0, 8.0, 9.0, "concrete"),
            (2.0, 6.5, 13.5, "brick"), (13.0, 7.5, 10.0, "concrete"),
-           (25.0, 7.0, 15.0, "brick"))
+           (25.0, 7.0, 15.0, "brick"),
+           (-30.6, 7.0, 11.0, "concrete"), (37.4, 7.5, 12.0, "concrete"))
     # Each is sunk to a depth of its own. Buildings founded at the same level
     # share the plane of their own footings wherever two of them touch, and one
     # sitting exactly on the ground shares that.
@@ -746,7 +753,8 @@ def build_street(parts, surfaces):
         roofline(parts, name, shell, 11.2, depth, height, 1.0, surface, surfaces, rng)
 
     near = ((-16.0, 8.0, 11.0, "concrete"), (2.0, 9.0, 14.0, "brick"),
-            (20.0, 8.0, 12.0, "concrete"))
+            (20.0, 8.0, 12.0, "concrete"),
+            (-29.3, 8.0, 10.0, "brick"), (36.0, 8.5, 13.0, "brick"))
     for index, (x, depth, height, surface) in enumerate(near):
         name = "Street_BlockR%d" % index
         shell, trim, dark, lit, pipes = building(name, 13.0, depth, height,
