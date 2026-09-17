@@ -28,7 +28,8 @@ can be interrogated while it runs. See [Credits](#credits).
   scene through both and compares them channel by channel across materials,
   textures, instancing, transparency, skybox, FXAA, bloom, shadows, multiple
   lights, a Gerstner ocean and an instanced voxel chunk. They agree to within
-  0.7% of channels.
+  0.7% of channels, and CI fails if the generated Vulkan shaders fall behind
+  the GLSL they are made from.
 - **Skinned crowds in one draw.** A figure's walk is baked once into a pose
   bank (a texture of bone palettes); every instance carries its own phase and
   is posed from the bank in the vertex shader. A crowd of the real 26,636-
@@ -49,10 +50,27 @@ can be interrogated while it runs. See [Credits](#credits).
   parent's, so bones are ordinary models: a clip exported from Blender drives a
   bone exactly as it drives a part, and `ae3d.ik` solves a limb of bones
   without being told they belong to a skin.
-- **Also:** Gerstner ocean, Perlin terrain, voxel worlds as a single instanced
-  draw, surface nets over a signed distance field, an OBJ/MTL loader, ray
-  casting, keyframe animation in glTF's shape (step, linear, cubic), scenes
-  that save and load with everything attached to them, and a scene editor.
+- **Water that is water.** A Gerstner sea with deep-water dispersion, shaded
+  as one physically based surface: Schlick fresnel between the body of the
+  water and the reflected sky (the scene's own skybox image, where it has
+  one), GGX glitter from the sun, light through the crests, whitecaps on the
+  steep faces, ripples finer than the mesh from scrolling noise slopes, tone
+  mapped and fogged the same way as the shore beside it. From underneath, the
+  surface is the sky through the swell and the seabed is lit by a two-scale
+  caustic web with a chromatic fringe.
+- **Voxel worlds as a face mesh.** Only the faces that show, each corner
+  carrying the sky it can see from the three voxels that crowd it -- the
+  darkening in a crevice and the light on an edge a voxel world reads by --
+  with the block kinds told apart through a palette image the world registers
+  in memory. Surface nets over a signed distance field for the smooth kind.
+- **Images the engine paints.** The skies, the sand and its normal map, a
+  voxel palette, an island's albedo baked from its own height and slope: made
+  by the engine from its own noise, registered under a name any texture path
+  can use, nothing downloaded and nothing written to disk that need not be.
+- **Also:** Perlin terrain, an OBJ/MTL loader, ray casting, keyframe animation
+  in glTF's shape (step, linear, cubic), scenes that save and load with
+  everything attached to them, a scene editor, and `AE3D_API=vulkan` to run
+  any program on the other renderer.
 
 ![Twenty thousand zombies filling the street from end to end, seen from above the pavement](docs/zombie-horde.png)
 
@@ -65,10 +83,10 @@ RTX 4070 Ti at 1280x720 with the GPU shared.*
 
 | | |
 |---|---|
-| ![The seabed under the swell: caustics on sand and rocks, murk with distance](docs/caustics.png) | ![A pile of four hundred thousand grains of sand in a desert, dunes at the horizon](docs/sand.png) |
-| *`caustics`: the seabed under the swell, a diver's height off the sand* | *`sand`: 400,000 grains settling into a pile in a desert the engine painted* |
-| ![An island in a sea under an afternoon sky, meshed with surface nets](docs/smooth-terrain.png) | ![A voxel terrain of terraces under the sun, its shadows on the steps](docs/voxel-world.png) |
-| *`smooth_terrain`: a signed distance field meshed with surface nets, an island in a sea* | *`voxel_world`: 960,464 voxels, the 93,030 exposed ones drawn in one call* |
+| ![The seabed under the swell: a caustic web over rippled sand and rocks, the surface seen from below](docs/caustics.png) | ![A heap of a million grains of sand in a desert, a furrow ploughed across it](docs/sand.png) |
+| *`caustics`: the seabed under the swell, a diver's height off the sand* | *`sand`: a million grains on a heap you dig into, in a desert the engine painted* |
+| ![A volcanic island in a sea under an afternoon sky, grass on its flanks and rock at its summit](docs/smooth-terrain.png) | ![A voxel island with a forest on it, under the sun](docs/voxel-world.png) |
+| *`smooth_terrain`: a signed distance field meshed with surface nets, its albedo baked from its own slope* | *`voxel_world`: 3.9 million voxels as 259,000 faces with baked corner sky, and a forest* |
 | ![Five spheres on a floor under a night sky, one shadow each](docs/materials.png) | ![A Kerr black hole: its asymmetric shadow, a lensed disc and a lensed sky](docs/black-hole.png) |
 | *`lights`: the material presets, on a floor, under the painted night* | *`black_hole`: Kerr geodesics per pixel, the shadow checked against sqrt(27) M* |
 
@@ -249,10 +267,10 @@ git clone https://github.com/aether-lang-dev/aether-ui.git ../aether-ui
 |---|---|
 | `zombie_city.ae` | The city: seven blocks of terraces under a painted night sky, and a horde of the same skinned figure posed from a pose bank in two instanced draws; `AE3D_CROWD` sets the count |
 | `caustics.ae` | The seabed under the swell: a diver's height off the sand, murk with distance, the water's light web on the sand and the rocks |
-| `sand.ae` | A desert: 400,000 grains with a tint each, falling and settling into a pile under a sky and a sun the engine painted, dunes to the horizon |
+| `sand.ae` | A desert: a million grains with a tint each, falling onto a heap of sand that is itself a heightfield; hold the button and a ball under the cursor ploughs it, the sand out to a rim that slumps to its angle of repose, the grains shoved aside |
 | `black_hole.ae` | Kerr geodesics integrated per pixel: a spinning hole, its asymmetric shadow, a lensed disc and sky; `tests/test_blackhole` measures the shadow against sqrt(27) M. [docs/black-hole.md](docs/black-hole.md) |
-| `voxel_world.ae` | 960464 voxels of Perlin terrain, 93030 visible, one draw call |
-| `smooth_terrain.ae` | The same terrain meshed with surface nets |
+| `voxel_world.ae` | 3.9 million voxels of Perlin terrain as an island in a sea, meshed as the 259,000 faces that show with the sky each corner sees baked in, a forest on its grass, one draw call |
+| `smooth_terrain.ae` | A volcanic island meshed with surface nets, its albedo baked from its own height and slope, in a sea that mirrors the painted sky |
 | `models.ae` | OBJ loading, including a multi-material model drawn as one group per material |
 | `lights.ae` | Material presets cycling with the light type, bloom, transparency |
 | `blender_pipeline.ae` | A model authored and keyed in Blender, exported, loaded and played |

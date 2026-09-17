@@ -794,6 +794,27 @@ def main():
                 check("dragging the slider writes the box", ok,
                       repr(widgets[box[0]["id"]]["text"]))
 
+        # Reflectivity is a material row like roughness: what the wet road's
+        # mirror is scaled by. It was settable over the channel and nowhere
+        # in the panel, and a scene saved with one came back matte.
+        widgets = tree(args.port)
+        caps = [w for w in widgets.values()
+                if w["type"] == "text" and w["text"].strip() == "reflectivity"]
+        check("the reflectivity row is in the tree", len(caps) == 1)
+        if caps:
+            box = row_box(widgets, caps[0])
+            bar = [w for w in widgets.values()
+                   if w["parent"] == caps[0]["parent"] and w["type"] == "slider"]
+            check("reflectivity has both a slider and a box",
+                  len(box) == 1 and len(bar) == 1)
+            if box and bar:
+                post(args.port, "/widget/%d/set_value?v=0.60" % bar[0]["id"])
+                widgets, ok = wait_for(
+                    args.port,
+                    lambda ws: ws[box[0]["id"]]["text"].strip() == "0.60")
+                check("the reflectivity slider writes the box", ok,
+                      repr(widgets[box[0]["id"]]["text"]))
+
         # A section with nothing to edit hides whole. Hiding a control and its
         # readout but not the row leaves the caption behind, and the water
         # settings read as four stranded words with no heading over them.

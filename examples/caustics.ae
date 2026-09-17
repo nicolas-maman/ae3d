@@ -83,6 +83,26 @@ seafloor(cells: int, size: float) -> *Model {
     return m
 }
 
+// A sphere is not a rock. Its vertices are pushed in and out along their
+// normals by noise, a broad lump and a finer grit, so each rock is its own
+// shape with facets and hollows for the caustic web to run over.
+roughen(m: *Model, seed: int) {
+    if g_floor_noise == null { g_floor_noise = noise.perlin_new(5150) }
+    offset = (seed as float) * 17.3
+    v = 0
+    count = core.mesh_vertex_count(m.mesh)
+    while v < count {
+        at = core.mesh_position(m.mesh, v)
+        lump = noise.fbm3(g_floor_noise, at.x * 1.1 + offset, at.y * 1.1, at.z * 1.1, 2, 0.5)
+        grit = noise.fbm3(g_floor_noise, at.x * 4.0 + offset, at.y * 4.0, at.z * 4.0 + 5.0, 3, 0.5)
+        push = 1.0 + lump * 0.28 + grit * 0.08
+        core.mesh_set_position(m.mesh, v, core.vec3(at.x * push, at.y * push, at.z * push))
+        v = v + 1
+    }
+    core.mesh_recalculate_normals(m.mesh)
+    core.model_recalculate_bounds(m)
+}
+
 lit_by_caustics(m: *Model, grainy: bool) {
     config = rendering.default_config()
     config.caustics = true
@@ -123,6 +143,7 @@ on_start(data: ptr) {
     placed = 0
     while placed < 90 {
         rock = loader.sphere(1.0, 20, 16)
+        roughen(rock, placed)
         big = next_random()
         radius = 10.0 + big * big * 110.0
         rx = (next_random() - 0.5) * REACH * 1.6

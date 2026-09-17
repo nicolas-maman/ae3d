@@ -13,6 +13,10 @@ import ae3d.rendering
 import ae3d.water
 
 extern clock_ns() -> long
+extern calloc(count: int, size: int) -> ptr
+extern free(block: ptr)
+extern ae3d_image_register(name: string, rgba: ptr, width: int, height: int) -> int
+extern ae3d_rgba_set(rgba: ptr, index: int, r: float, g: float, b: float, a: float)
 
 const WORLD_X = 160
 const WORLD_Z = 160
@@ -35,6 +39,28 @@ var g_world: ptr = null
 var g_surface: ptr = null
 var g_sea: ptr = null
 
+// The land's height at a point of the grid, in cells, continuous in x and z
+// so the albedo can read it between the columns the field is filled at.
+land_height(field: *Perlin, x: float, z: float) -> float {
+    sample = noise.fbm2(field, x * 0.022, z * 0.022, 5, 0.5)
+    ridged = noise.ridge(field, x * 0.006, 0.0, z * 0.006, 3, 0.5)
+    // Gullies and knolls a few cells across, so the flanks are ground and
+    // not one smooth slope; deeper where the ridge is, as erosion is.
+    detail = noise.fbm2(field, x * 0.11 + 3.0, z * 0.11, 3, 0.5) * (1.5 + ridged * 2.0)
+    height = 8.0 + (sample + 1.0) * 0.5 * 30.0 + ridged * 26.0 + detail
+    // An island: the land falls away toward the grid's edges, so its rim --
+    // and the walls the field closes the volume with -- lie under the sea
+    // rather than standing as a cliff at the edge of the world. A dome, not
+    // a plateau: the fall starts at the middle, so the island has a massif
+    // and flanks instead of a mesa with a rim.
+    dx = x - (WORLD_X as float) * 0.5
+    dz = z - (WORLD_Z as float) * 0.5
+    shore = core.sqrt_of(dx * dx + dz * dz) / ((WORLD_X as float) * 0.5)
+    if shore > 0.95 { shore = 0.95 }
+    keep = 0.5 + 0.5 * core.cos_of(shore / 0.95 * 3.14159265)
+    return 6.0 + (height - 6.0) * keep
+}
+
 // The field is the signed height above the terrain, so it is negative under the
 // surface and zero exactly on it, which is what the mesher interpolates against.
 build_field(world: *World) {
@@ -45,21 +71,7 @@ build_field(world: *World) {
     while x < WORLD_X {
         z = 0
         while z < WORLD_Z {
-            sample = noise.fbm2(field, (x * 1.0) * 0.022, (z * 1.0) * 0.022, 5, 0.5)
-            ridged = noise.ridge(field, (x * 1.0) * 0.006, 0.0, (z * 1.0) * 0.006, 3, 0.5)
-            height = 12.0 + (sample + 1.0) * 0.5 * 22.0 + ridged * 16.0
-            // An island: the land falls away toward the grid's edges, so its
-            // rim -- and the walls the field closes the volume with -- lie
-            // under the sea rather than standing as a cliff at the edge of
-            // the world.
-            dx = (x as float) - (WORLD_X as float) * 0.5
-            dz = (z as float) - (WORLD_Z as float) * 0.5
-            shore = core.sqrt_of(dx * dx + dz * dz) / ((WORLD_X as float) * 0.5)
-            keep = 1.0 - (shore - 0.55) / 0.40
-            if keep > 1.0 { keep = 1.0 }
-            if keep < 0.0 { keep = 0.0 }
-            keep = keep * keep * (3.0 - 2.0 * keep)
-            height = 6.0 + (height - 6.0) * keep
+            height = land_height(field, x as float, z as float)
 
             y = 0
             while y < WORLD_HEIGHT {
@@ -79,6 +91,83 @@ build_field(world: *World) {
     }
 
     noise.perlin_free(field)
+}
+
+const ALBEDO_SIZE = 1024
+
+// What the island is made of, painted from its own height and slope: sand
+// at the waterline, grass on the flats, rock where the ground is steep and
+// scrub up high, the borders mottled by noise so no contour is a line.
+// The mesher's UVs run x/cells and z/cells across the grid, so a texel of
+// this is a spot of the island, and the image goes to the model through the
+// image layer's registry with nothing written to disk. `sea` is the sea
+// level in cells of the field.
+bake_albedo(sea: float) -> string {
+    pixels = calloc(ALBEDO_SIZE * ALBEDO_SIZE * 4, 1)
+    if pixels == null { return "" }
+    field = noise.perlin_new(4242)
+    mottle = noise.perlin_new(9090)
+    if field == null || mottle == null { free(pixels); return "" }
+    step = (WORLD_X as float) / (ALBEDO_SIZE as float)
+
+    row = 0
+    while row < ALBEDO_SIZE {
+        z = ((row as float) + 0.5) * step
+        column = 0
+        while column < ALBEDO_SIZE {
+            x = ((column as float) + 0.5) * step
+            h = land_height(field, x, z)
+            // Metres above the sea and metres of rise per metre of run.
+            above = (h - sea) * CELL
+            rise = core.sqrt_of((land_height(field, x + 0.5, z) - land_height(field, x - 0.5, z)) *
+                                (land_height(field, x + 0.5, z) - land_height(field, x - 0.5, z)) +
+                                (land_height(field, x, z + 0.5) - land_height(field, x, z - 0.5)) *
+                                (land_height(field, x, z + 0.5) - land_height(field, x, z - 0.5)))
+            wobble = noise.fbm2(mottle, x * 0.15, z * 0.15, 3, 0.5)
+            fine = noise.fbm2(mottle, x * 2.6 + 7.0, z * 2.6, 4, 0.5)
+
+            // Grass, lighter where it is thin and darker in the hollows.
+            r = 0.34 + wobble * 0.08 + fine * 0.05
+            g = 0.52 + wobble * 0.10 + fine * 0.06
+            b = 0.18 + wobble * 0.04
+            // Scrub up high: the grass goes yellow and sparse.
+            high = (above - 95.0) / 40.0 + wobble * 0.5
+            if high < 0.0 { high = 0.0 }
+            if high > 1.0 { high = 1.0 }
+            r = r + (0.44 - r) * high
+            g = g + (0.40 - g) * high
+            b = b + (0.20 - b) * high
+            // Rock where it is steep.
+            rocky = (rise - 1.15) / 0.45 + wobble * 0.35
+            if rocky < 0.0 { rocky = 0.0 }
+            if rocky > 1.0 { rocky = 1.0 }
+            rock = 0.42 + fine * 0.10
+            r = r + (rock * 1.02 - r) * rocky
+            g = g + (rock * 0.98 - g) * rocky
+            b = b + (rock * 0.90 - b) * rocky
+            // Sand at the waterline, and wet sand just under it.
+            sandy = 1.0 - (above - 2.0) / 5.0 + wobble * 0.6
+            if sandy < 0.0 { sandy = 0.0 }
+            if sandy > 1.0 { sandy = 1.0 }
+            sand = 0.78 + fine * 0.08
+            if above < 0.0 { sand = 0.55 }
+            r = r + (sand * 0.98 - r) * sandy
+            g = g + (sand * 0.90 - g) * sandy
+            b = b + (sand * 0.68 - b) * sandy
+
+            ae3d_rgba_set(pixels, row * ALBEDO_SIZE + column, r, g, b, 1.0)
+            column = column + 1
+        }
+        row = row + 1
+    }
+
+    name = "ae3d://island-albedo"
+    ok = ae3d_image_register(name, pixels, ALBEDO_SIZE, ALBEDO_SIZE) == 1
+    noise.perlin_free(field)
+    noise.perlin_free(mottle)
+    free(pixels)
+    if !ok { return "" }
+    return name
 }
 
 on_start(data: ptr) {
@@ -103,14 +192,12 @@ on_start(data: ptr) {
         return
     }
 
-    core.model_matte(surface, 0.40, 0.50, 0.28)
+    core.model_matte(surface, 1.0, 1.0, 1.0)
     core.model_set_pbr(surface, 0.0, 0.9)
-    // Ground is not one colour: the shader's own noise breaks the slopes
-    // into patches, which is all the texture a hillside this size needs.
     config = rendering.default_config()
     config.perlin_noise = true
     config.noise_scale = 0.03
-    config.noise_intensity = 0.6
+    config.noise_intensity = 0.25
     rendering.apply(surface, config)
     engine.engine_add_model(e, surface)
 
@@ -126,7 +213,7 @@ on_start(data: ptr) {
     // What it mirrors: the painted sky itself, not a flat sky colour.
     water.simulation_set_sky_texture(sea, "resources/sky/desert.png")
     water.simulation_set_normal_strength(sea, 1.6)
-    water.simulation_set_foam(sea, true, 0.5)
+    water.simulation_set_foam(sea, true, 0.3)
     // Opaque enough that the drowned slopes do not show through as a shadow
     // of the island under the island.
     water.simulation_set_opacity(sea, 0.97)
@@ -157,6 +244,9 @@ on_start(data: ptr) {
         v = v + 1
     }
     core.model_set_position(surface, 0.0, 0.0 - (lowest + SEA_DEPTH), 0.0)
+    // The island's colours, from the same field, now the sea level is known.
+    albedo = bake_albedo((lowest + SEA_DEPTH) / CELL)
+    if albedo != "" { core.model_set_texture(surface, albedo) }
     println("surface: ${core.mesh_vertex_count(surface.mesh)} vertices, ${core.mesh_index_count(surface.mesh) / 3} triangles, ${highest - lowest} m of relief, ${SEA_DEPTH} m of it under the sea")
     println("field ${(filled - started) / 1000000} ms, mesh ${(meshed - filled) / 1000000} ms")
 
@@ -164,13 +254,18 @@ on_start(data: ptr) {
     engine.engine_set_post(e, true, false, 0.8, 0.4)
     engine.engine_set_sky(e, "resources/sky/desert.png")
 
-    // From over the water, low enough that the island stands against the
-    // sky and the sea runs out to the horizon under it.
+    // From over the water on the island's sunlit side, low enough that it
+    // stands against the sky and the sea runs out to the horizon under it.
+    // AE3D_CAMX/Y/Z and AE3D_AIMX/Y/Z (metres) put it elsewhere.
     cam = engine.engine_camera(e)
-    core.camera_set_position(cam, core.vec3(0.0 - 170.0, 22.0, 0.0 - 120.0))
+    core.camera_set_position(cam, core.vec3(core.env_int("AE3D_CAMX", 1150) as float,
+                                            core.env_int("AE3D_CAMY", 45) as float,
+                                            core.env_int("AE3D_CAMZ", 0 - 60) as float))
     core.camera_set_speed(cam, 500.0)
     core.camera_set_far(cam, 30000.0)
-    core.camera_look_at(cam, core.vec3(420.0, 45.0, 420.0))
+    core.camera_look_at(cam, core.vec3(core.env_int("AE3D_AIMX", 480) as float,
+                                       core.env_int("AE3D_AIMY", 80) as float,
+                                       core.env_int("AE3D_AIMZ", 480) as float))
 }
 
 on_update(data: ptr, delta: float) {
