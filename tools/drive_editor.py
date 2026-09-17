@@ -1111,6 +1111,38 @@ def main():
                 widgets, back = wait_for(args.port, bloom_on)
                 check("and the post chain comes back with the scene", back)
 
+        # Reflections the same way: the switch is a Vulkan feature and inert
+        # on OpenGL, but the scene carries it on either backend, so a scene
+        # authored with it on comes back with it on wherever it is opened.
+        widgets = tree(args.port)
+        ssr = [w for w in widgets.values()
+               if w["type"] == "text" and w["text"].strip() == "Reflections"]
+        if ssr and save_btn and load_btn:
+            switch = [w for w in widgets.values()
+                      if w["parent"] == ssr[0]["parent"] and w["type"] == "toggle"]
+            if switch:
+                def ssr_on(ws):
+                    return bool(ws[switch[0]["id"]].get("active"))
+
+                post(args.port, "/widget/%d/click" % switch[0]["id"])
+                widgets, on = wait_for(args.port, ssr_on)
+                check("the reflections switch turns on", on)
+                written = os.path.getmtime(scene_file)
+                post(args.port, "/widget/%d/click" % save_btn)
+                check("the scene is written with reflections on",
+                      wait_file(scene_file, newer_than=written))
+                with open(scene_file) as handle:
+                    saved = json.load(handle)
+                check("and the file says so",
+                      bool(saved.get("view", {}).get("rendering", {}).get("ssr")),
+                      json.dumps(saved.get("view", {}).get("rendering", {})))
+                post(args.port, "/widget/%d/click" % switch[0]["id"])
+                wait_for(args.port, lambda ws: not ssr_on(ws))
+                post(args.port, "/widget/%d/click" % load_btn)
+                widgets, back = wait_for(args.port, ssr_on)
+                check("and reflections come back with the scene", back)
+
+        if delete and scene:
             before_delete = len(rows_under(tree(args.port), scene))
             post(args.port, "/widget/%d/click" % delete)
             after_delete = wait_rows(args.port, scene, before_delete - 1)
