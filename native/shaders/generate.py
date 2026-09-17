@@ -140,6 +140,7 @@ def to_vulkan(source, stage, members, samplers, varyings_in, varyings_out,
     # OpenGL clip depth spans -1..1 and needs the half-scale; Vulkan clip depth
     # is already the 0..1 the shadow map stores.
     text = text.replace("return clipZ * 0.5 + 0.5;", "return clipZ;")
+    text = text.replace("return depth * 2.0 - 1.0;", "return depth;")
 
     text = re.sub(r"^uniform\s+(vec3|vec4|vec2|float|int|bool|mat4)\s+\w+\s*(\[\d+\])?\s*;.*$", "", text, flags=re.M)
     text = re.sub(r"^uniform\s+sampler2D\s+\w+\s*;.*$", "", text, flags=re.M)
@@ -376,7 +377,10 @@ AUXILIARY = [
     ("bloom_vk.frag", "FRAGMENT_BLOOM", "frag", ["screenTexture"], SCREEN_OUT, []),
     ("ssr_vk.frag", "FRAGMENT_SSR", "frag", ["screenTexture", "depthTexture"], SCREEN_OUT, []),
     ("water_vk.vert", "VERTEX_WATER", "vert", [], [], WATER_OUT),
-    ("water_vk.frag", "FRAGMENT_WATER", "frag", ["textureSampler"], WATER_OUT, []),
+    # The water reads the scene depth at binding 4, the slot the crowd's pose
+    # bank takes: whichever auxiliary image a draw needs sits there.
+    ("water_vk.frag", "FRAGMENT_WATER", "frag",
+     ["textureSampler", "shadowMap", "normalMap", "sceneDepth"], WATER_OUT, []),
     # The crowd's vertex shaders read the pose bank, a sampler in the vertex
     # stage, at binding 4: past the three the fragment shader has, so the
     # one descriptor set layout serves them too. The three before it are

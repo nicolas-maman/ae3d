@@ -74,6 +74,10 @@ extern ae3d_vk_shadow_begin() -> int
 extern ae3d_vk_shadow_draw(mesh: int, instances: int, instance_count: int)
 extern ae3d_vk_texture_create_float(width: int, height: int, rgba: ptr) -> int
 extern ae3d_vk_set_pose_bank(texture: int)
+extern ae3d_vk_set_scene_depth(on: int)
+extern ae3d_vk_scene_depth_ready() -> int
+extern ae3d_vk_frame_width() -> int
+extern ae3d_vk_frame_height() -> int
 extern ae3d_posebank_frames(bank: ptr) -> int
 extern ae3d_posebank_bones(bank: ptr) -> int
 extern ae3d_posebank_data(bank: ptr) -> ptr
@@ -420,8 +424,28 @@ renderer_set_ssr_params(r: *VKRenderer, road_height: float, strength: float) {
 // The depth shader transforms by the light-space slot, so the camera's own
 // view-projection goes there for the length of the pass and the light's is put
 // back after, since the scene pass samples the shadow map through it.
+// Whether any model draws through the water program: the one shader that
+// reads the scene's depth, for its shore.
+wants_scene_depth(r: *VKRenderer) -> bool {
+    count = list.size(r.models)
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        if m != null && m.visible && core.shader_valid(&m.shader) && m.shader.kind == core.SHADER_WATER {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
 render_camdepth_pass(r: *VKRenderer, cam: *Camera) {
-    if ae3d_vk_ssr() != 1 { return }
+    // The camera depth is drawn for the reflection, or for a water surface
+    // to read the ground under it by; a scene with neither draws none.
+    wanted = 0
+    if wants_scene_depth(r) { wanted = 1 }
+    ae3d_vk_set_scene_depth(wanted)
+    if ae3d_vk_ssr() != 1 && wanted == 0 { return }
     ae3d_vk_set_program(core.SHADER_CUSTOM)
     vp = core.camera_view_projection(cam)
     ae3d_vk_scene_set_clip_mat4(vkscene.OFF_LIGHTSPACEMATRIX, &vp)
@@ -1066,7 +1090,13 @@ pose(m: *Model) {
         ae3d_vk_scene_set_int(vkscene.OFF_ISSKINNED, 1)
         return
     }
-    ae3d_vk_set_pose_bank(0)
+    // A water surface takes the camera depth at the same binding, to read
+    // the ground under it by.
+    aux = 0
+    if core.shader_valid(&m.shader) && m.shader.kind == core.SHADER_WATER && ae3d_vk_scene_depth_ready() == 1 {
+        aux = 0 - 1
+    }
+    ae3d_vk_set_pose_bank(aux)
     if m.skeleton == null {
         ae3d_vk_scene_set_int(vkscene.OFF_ISSKINNED, 0)
         return
@@ -1251,10 +1281,20 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     programs = ae3d_vk_program_count()
     i = 0
     ssr_on = ae3d_vk_ssr() == 1
+    depth_ready = ae3d_vk_scene_depth_ready() == 1 && (ssr_on || wants_scene_depth(r))
     while i < programs {
         ae3d_vk_set_program(i)
         ae3d_vk_scene_set_clip_mat4(vkscene.OFF_VIEWPROJECTION, &view_projection)
-        if ssr_on { ae3d_vk_scene_set_inv_viewproj(vkscene.OFF_INVVIEWPROJECTION, &view_projection) }
+        if ssr_on || depth_ready {
+            ae3d_vk_scene_set_inv_viewproj(vkscene.OFF_INVVIEWPROJECTION, &view_projection)
+        }
+        // What a water surface needs to read the depth under it back into
+        // a position: whether there is one, and the frame's size in pixels.
+        has_depth = 0
+        if depth_ready { has_depth = 1 }
+        ae3d_vk_scene_set_int(vkscene.OFF_HASSCENEDEPTH, has_depth)
+        ae3d_vk_scene_set_float(vkscene.OFF_SCREENSIZE, ae3d_vk_frame_width() as float)
+        ae3d_vk_scene_set_float(vkscene.OFF_SCREENSIZE + 4, ae3d_vk_frame_height() as float)
         i = i + 1
     }
     ae3d_vk_set_program(core.SHADER_CUSTOM)

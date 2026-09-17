@@ -270,6 +270,7 @@ void   ae3d_gl_passtimer_end(void *handle);
 double ae3d_gl_passtimer_ms(void *handle, int pass);
 
 int    ae3d_gl_fbo_create(void);
+int    ae3d_gl_scene_depth_capture(void);
 void   ae3d_gl_fbo_bind(int fbo);
 void   ae3d_gl_fbo_delete(int fbo);
 int    ae3d_gl_fbo_attach_color(int fbo, int width, int height, int hdr);
@@ -361,6 +362,10 @@ int    ae3d_vk_offscreen_height(void);
 int    ae3d_vk_request_capture(void);
 int    ae3d_vk_texture_create_float(int width, int height, const float *rgba);
 void   ae3d_vk_set_pose_bank(int texture_handle);
+void   ae3d_vk_set_scene_depth(int on);
+int    ae3d_vk_scene_depth_ready(void);
+int    ae3d_vk_frame_width(void);
+int    ae3d_vk_frame_height(void);
 int    ae3d_vk_capture_ready(void);
 void  *ae3d_vk_capture_pixels(void);
 int    ae3d_vk_capture_width(void);

@@ -118,6 +118,10 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     bool enableWaterReflection;
     float waterReflectionIntensity;
     int hasSkyTexture;
+    int hasSceneDepth;
+    vec2 screenSize;
+    float waterDepthFade;
+    float waterShoreFoam;
     bool enableWaterDistortion;
     float waterDistortionIntensity;
     bool enableWaterNormalMapping;
