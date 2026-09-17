@@ -4,7 +4,9 @@
 // into a pose bank, drawn as two instances at different phases in one call, and
 // the two come out in different poses -- the straight one narrow, the bent one
 // wider. If per-instance phase did nothing, both would strike the same pose and
-// their footprints would match.
+// their footprints would match. The same two, drawn through Vulkan where there
+// is a driver, have to come out the same: a crowd that only poses on OpenGL
+// is a crowd that stands in its bind pose on the backend the demo targets.
 
 import std.mem
 import std.list
@@ -13,6 +15,7 @@ import ae3d.anim
 import ae3d.skin
 import ae3d.crowd
 import ae3d.gl
+import ae3d.vk
 import ae3d.offscreen
 import ae3d.loader
 
@@ -221,6 +224,51 @@ main() {
     check_true("the crowd is one instanced draw, not two", draws <= 3)
     check_true("the two instances are in different poses (bent wider than straight)",
                bent > straight + 4)
+
+    // The same crowd through Vulkan: its own model over the same mesh and
+    // bank, since a model carries the handles of the backend that drew it.
+    if vk.available() {
+        vk_renderer = vk.renderer_new()
+        vulkan_pass = vk.backend(vk_renderer)
+        if core.backend_init(&vulkan_pass, null, WIDTH, HEIGHT) {
+            vk.renderer_set_clear_color(vk_renderer, 0.0, 0.0, 0.0)
+            twin = core.model_new()
+            core.model_set_mesh(twin, build_column(bones))
+            core.model_matte(twin, 0.9, 0.9, 0.9)
+            core.model_enable_instancing(twin, 2)
+            core.model_set_instance_position(twin, 0, core.vec3(0.0 - 1.6, 0.0, 0.0))
+            core.model_set_instance_position(twin, 1, core.vec3(1.6, 0.0, 0.0))
+            core.model_set_pose_bank(twin, bank, FRAMES)
+            core.model_enable_instance_phases(twin)
+            core.model_set_instance_phase(twin, 0, 0.0)
+            core.model_set_instance_phase(twin, 1, 0.95)
+            core.backend_add_model(&vulkan_pass, twin)
+            vk.renderer_add_light(vk_renderer, key)
+
+            core.backend_render(&vulkan_pass, cam, key)
+            vk_pixels = core.backend_frame_pixels(&vulkan_pass)
+            check_true("vulkan produced pixels", vk_pixels != null)
+            if vk_pixels != null {
+                vk_straight = spread(vk_pixels, 0, WIDTH / 2)
+                vk_bent = spread(vk_pixels, WIDTH / 2, WIDTH)
+                println("  crowd_render (vulkan): straight spread ${vk_straight}px, bent spread ${vk_bent}px")
+                check_true("vulkan poses the two instances apart", vk_bent > vk_straight + 4)
+                straight_gap = vk_straight - straight
+                if straight_gap < 0 { straight_gap = 0 - straight_gap }
+                bent_gap = vk_bent - bent
+                if bent_gap < 0 { bent_gap = 0 - bent_gap }
+                check_true("vulkan and opengl pose the crowd alike (${straight_gap}px, ${bent_gap}px apart)",
+                           straight_gap <= 2 && bent_gap <= 2)
+            }
+            core.model_free(twin)
+            core.backend_cleanup(&vulkan_pass)
+        } else {
+            println("  crowd_render: Vulkan would not start (${vk.last_error()}), OpenGL only")
+        }
+        vk.renderer_free(vk_renderer)
+    } else {
+        println("  crowd_render: no Vulkan driver, OpenGL only")
+    }
 
     core.model_free(swarm)   // frees its mesh too
     crowd.posebank_free(bank)

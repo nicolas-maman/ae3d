@@ -119,6 +119,7 @@ typedef struct {
 #define AE3D_VK_OFF_WATERDISTORTIONINTENSITY 4700
 #define AE3D_VK_OFF_ENABLEWATERNORMALMAPPING 4704
 #define AE3D_VK_OFF_WATERNORMALINTENSITY 4708
+#define AE3D_VK_OFF_POSEBANKFRAMES 4712
 
 #define AE3D_VK_MAX_LIGHTS 4
 #define AE3D_VK_LIGHT_STRIDE 80
@@ -201,6 +202,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "noiseScale", 3892 },
     { "normalStrength", 3700 },
     { "occlusionStrength", 3704 },
+    { "poseBankFrames", 4712 },
     { "projection", 3936 },
     { "reflectivity", 3692 },
     { "roughness", 3680 },
@@ -248,7 +250,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "waveSteepness", 4512 },
 };
 
-#define AE3D_VK_UNIFORM_SLOT_COUNT 107
+#define AE3D_VK_UNIFORM_SLOT_COUNT 108
 
 static inline int ae3d_vk_uniform_offset(const char *name) {
     int low = 0;

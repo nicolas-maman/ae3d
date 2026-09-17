@@ -72,6 +72,11 @@ const SHADOW_SIZE = 2048
 
 extern ae3d_vk_shadow_begin() -> int
 extern ae3d_vk_shadow_draw(mesh: int, instances: int, instance_count: int)
+extern ae3d_vk_texture_create_float(width: int, height: int, rgba: ptr) -> int
+extern ae3d_vk_set_pose_bank(texture: int)
+extern ae3d_posebank_frames(bank: ptr) -> int
+extern ae3d_posebank_bones(bank: ptr) -> int
+extern ae3d_posebank_data(bank: ptr) -> ptr
 extern ae3d_vk_shadow_end()
 extern ae3d_vk_camdepth_begin() -> int
 extern ae3d_vk_camdepth_end()
@@ -1044,6 +1049,24 @@ set_scene_uniforms(r: *VKRenderer, m: *Model) {
 // asked to bring its own up to date first: it rebuilds only the bones whose
 // world transform changed, so a figure standing still computes nothing.
 pose(m: *Model) {
+    // A crowd is posed from its pose bank, a float texture of baked frames
+    // uploaded the first time the model draws, by each instance's own phase
+    // in the instance stream; the crowd pipeline reads the bank at binding 4
+    // and the skeleton's palette is not consulted. The bank is bound for
+    // this draw and let go after it, so the next model, skinned or not,
+    // draws through its own pipeline.
+    if m.pose_bank != null {
+        if m.pose_bank_texture == 0 {
+            m.pose_bank_texture = ae3d_vk_texture_create_float(ae3d_posebank_bones(m.pose_bank) * 4,
+                                                               ae3d_posebank_frames(m.pose_bank),
+                                                               ae3d_posebank_data(m.pose_bank))
+        }
+        ae3d_vk_set_pose_bank(m.pose_bank_texture)
+        ae3d_vk_scene_set_int(vkscene.OFF_POSEBANKFRAMES, m.pose_bank_frames)
+        ae3d_vk_scene_set_int(vkscene.OFF_ISSKINNED, 1)
+        return
+    }
+    ae3d_vk_set_pose_bank(0)
     if m.skeleton == null {
         ae3d_vk_scene_set_int(vkscene.OFF_ISSKINNED, 0)
         return
