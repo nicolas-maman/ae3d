@@ -18,6 +18,8 @@ import ae3d.rendering
 import ae3d.water
 import ae3d.voxel
 import ae3d.noise
+import std.os
+import std.string
 
 const WIDTH = 256
 const HEIGHT = 192
@@ -26,6 +28,17 @@ const TEXTURE = "resources/obj/Earth/Albedo.jpg"
 
 extern calloc(count: int, size: int) -> ptr
 extern free(p: ptr)
+extern ae3d_png_write(path: string, rgba: ptr, width: int, height: int) -> int
+
+// AE3D_PARITY_DUMP=<dir> writes both backends' frame of every case there, so
+// a case that fails can be looked at instead of guessed at.
+dump_frames(name: string, gl_pixels: ptr, vk_pixels: ptr) {
+    dir = core.text(os.getenv("AE3D_PARITY_DUMP"))
+    if dir == "" { return }
+    stem = string.replace(string.replace(name, " ", "_"), ",", "")
+    ae3d_png_write("${dir}/${stem}_gl.png", gl_pixels, WIDTH, HEIGHT)
+    ae3d_png_write("${dir}/${stem}_vk.png", vk_pixels, WIDTH, HEIGHT)
+}
 
 var failures = 0
 
@@ -157,6 +170,7 @@ compare_size(name: string, gl_pixels: ptr, vk_pixels: ptr, width: int, height: i
 }
 
 compare(name: string, gl_pixels: ptr, vk_pixels: ptr) -> int {
+    dump_frames(name, gl_pixels, vk_pixels)
     lit_gl = 0
     lit_vk = 0
     worst = 0

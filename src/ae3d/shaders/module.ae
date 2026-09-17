@@ -858,6 +858,16 @@ float turbulence(vec3 p, int octaves) {
 // GPU Gems Chapter 2: the bright web a water surface casts on what lies under
 // it. Two noise fields drift apart and the pattern is where they cross, which
 // is what gives caustics their thin moving lines rather than smooth blobs.
+// One web of the caustic pattern: where two drifting noise fields cross,
+// a thin bright line, which is what the focused light off a wave crest
+// draws on the floor.
+float caustic_web(vec2 uv, float t) {
+    vec2 drift = vec2(0.7, 0.3) * causticsSpeed * t;
+    float a = perlinNoise3D(vec3(uv + drift, t * causticsSpeed * 0.5));
+    float b = perlinNoise3D(vec3(uv * 1.7 - drift * 0.8, t * causticsSpeed * 0.4 + 5.3));
+    return pow(clamp(1.0 - abs(a - b) * 3.0, 0.0, 1.0), 8.0);
+}
+
 vec3 caustic_light(vec3 worldPos, vec3 norm) {
     if (!enableCaustics) {
         return vec3(0.0);
@@ -868,11 +878,16 @@ vec3 caustic_light(vec3 worldPos, vec3 norm) {
         return vec3(0.0);
     }
 
+    // Two webs, the finer one half as bright, so the pattern is a network
+    // with nodes where they cross and not one set of parallel worms; and
+    // each colour a hair to one side, the fringe light through water has.
     vec2 uv = worldPos.xz * causticsScale;
-    vec2 drift = vec2(0.7, 0.3) * causticsSpeed * causticsTime;
-    float a = perlinNoise3D(vec3(uv + drift, causticsTime * causticsSpeed * 0.5));
-    float b = perlinNoise3D(vec3(uv * 1.7 - drift * 0.8, causticsTime * causticsSpeed * 0.4 + 5.3));
-    float web = pow(clamp(1.0 - abs(a - b) * 2.5, 0.0, 1.0), 6.0);
+    float t = causticsTime;
+    vec2 fringe = vec2(0.006, 0.004);
+    vec3 web;
+    web.r = caustic_web(uv + fringe, t) + 0.5 * caustic_web(uv * 2.3 + fringe * 2.0 + 11.0, t);
+    web.g = caustic_web(uv, t) + 0.5 * caustic_web(uv * 2.3 + 11.0, t);
+    web.b = caustic_web(uv - fringe, t) + 0.5 * caustic_web(uv * 2.3 - fringe * 2.0 + 11.0, t);
 
     // The light falls from the surface straight down, so a floor catches the
     // whole pattern, a wall catches a grazing fraction of it, and depth of
@@ -1214,7 +1229,12 @@ float perlinNoise(vec2 p, int octaves) {
 // GPU Gems enhanced Gerstner wave with wave sharpening
 vec3 calculateGerstnerWave(vec3 position, vec3 direction, float amplitude, float frequency, float speed, float phase, float steepness, float time) {
     vec2 d = normalize(direction.xz);
-    float wave = dot(d, position.xz) * frequency + time * speed + phase;
+    // The same speed the normal is computed at: the displacement used to
+    // ignore the multiplier, so the lit slope and the shape were out of
+    // phase whenever a scene set one.
+    float effectiveSpeed = speed * waveSpeedMultiplier;
+    if (waveSpeedMultiplier <= 0.001) effectiveSpeed = speed;
+    float wave = dot(d, position.xz) * frequency + time * effectiveSpeed + phase;
     float c = cos(wave);
     float s = sin(wave);
     
@@ -1304,10 +1324,6 @@ void main() {
     // Natural wave displacement for photorealistic appearance
     totalDisplacement.y *= 1.5; // Gentle vertical displacement to prevent artifacts
     
-    // Add fine surface detail for realism (performance-optimized)
-    vec2 detailCoord = worldPos.xz * 0.01 + time * 0.05;
-    float surfaceDetail = (sin(detailCoord.x * 8.0) + sin(detailCoord.y * 6.0)) * 0.02;
-    totalDisplacement.y += surfaceDetail * 15.0; // Subtle surface ripples
     
     // Apply displacement
     worldPos += totalDisplacement;
@@ -1364,6 +1380,8 @@ uniform float waterPlaneHeight;  // Height of water surface for ray intersection
 // to be.
 uniform float waterLevel;
 uniform float waveAmplitudes[4];
+uniform float waveFrequencies[4];   // the shortest wave sets the ripples
+uniform float waveSpeeds[4];
 
 // Configurable fog parameters
 uniform bool enableFog;
@@ -1384,6 +1402,12 @@ uniform float shadowSoftness;
 // Water Reflection and Refraction (inspired by Medium article)
 uniform bool enableWaterReflection;
 uniform float waterReflectionIntensity;
+// The sky the surface reflects: the scene's skybox image, given to the water
+// model as its texture (the one texture every program binds), read as the
+// equirect the skybox shader reads it as. Zero means no image, and the
+// reflection stays the computed sky colour.
+uniform sampler2D textureSampler;
+uniform int hasSkyTexture;
 uniform bool enableWaterDistortion;
 uniform float waterDistortionIntensity;
 uniform bool enableWaterNormalMapping;
@@ -1538,368 +1562,166 @@ float generateCaustics(vec3 worldPos, float time) {
     return combined * causticsIntensity * distanceAttenuation;
 }
 
+// Ripples finer than the swell the vertices carry: two layers of noise
+// slope, scrolling against each other, scaled from the shortest wave the
+// scene set so they stay ripples whatever units the world is in. They fade
+// with distance, where a ripple is smaller than a pixel and would only
+// sparkle.
+vec3 rippleNormal(vec2 p, float t, float strength) {
+    float e = 0.3;
+    vec2 a = p + vec2(t * 0.9, t * 0.4);
+    vec2 b = p * 1.9 + vec2(7.3 - t * 0.5, 2.1 + t * 0.7);
+    float h = noise(a) + 0.5 * noise(b);
+    float hx = noise(a + vec2(e, 0.0)) + 0.5 * noise(b + vec2(e * 1.9, 0.0));
+    float hz = noise(a + vec2(0.0, e)) + 0.5 * noise(b + vec2(0.0, e * 1.9));
+    return normalize(vec3((h - hx) / e * strength, 1.0, (h - hz) / e * strength));
+}
+
+vec3 ACESFilm(vec3 x) {
+    float a = 2.51;
+    float b = 0.03;
+    float c = 2.43;
+    float d = 0.59;
+    float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+// What the surface reflects: the skybox image where the reflected ray meets
+// it, read as the equirect the skybox shader reads, or the two sky colours
+// graded from horizon to zenith when the scene has no image.
+vec3 reflectedSky(vec3 ray) {
+    ray.y = abs(ray.y);
+    if (hasSkyTexture == 1) {
+        float theta = atan(ray.z, ray.x);
+        float phi = asin(clamp(ray.y, -1.0, 1.0));
+        vec3 shown = textureLod(textureSampler,
+                                vec2((theta + 3.14159265) / 6.28318531,
+                                     (phi + 1.57079633) / 3.14159265), 0.0).rgb;
+        return pow(shown, vec3(2.2));
+    }
+    vec3 zenith = pow(skyColor, vec3(2.2));
+    vec3 rim = pow(horizonColor, vec3(2.2));
+    return mix(rim, zenith, smoothstep(0.0, 0.35, ray.y));
+}
+
 void main() {
-    vec3 norm = normalize(fragNormal);
-    
-    // Calculate light direction based on light type (directional vs point light)
+    // Light direction points at the light for a sun, else at the point light.
     vec3 lightDir;
     if (lightDirection.x != 0.0 || lightDirection.y != 0.0 || lightDirection.z != 0.0) {
-        // A directional light's direction points at the light.
         lightDir = normalize(lightDirection);
     } else {
-        // Point light
         lightDir = normalize(lightPos - fragPosition);
     }
-    
     vec3 viewDir = normalize(viewPos - fragPosition);
-
-    float waveHeight = fragPosition.y;
     float distanceFromCamera = length(viewPos - fragPosition);
-    
-    // NO surface patterns or noise - completely clean water
-    float temporalPhase = time * 0.01;  // Minimal temporal movement for caustics only
-    float detailScale = 1.0;            // No distance scaling - uniform
-    
-    // How far the waves are allowed to tilt the surface away from flat. Averaging
-    // four samples offset symmetrically in x and z used to stand here, which
-    // cost five normalizes a fragment and returned the normal it was given: the
-    // offsets cancel.
+    float waveHeight = fragPosition.y;
+    // How much of the view this fragment is far across: ripples, foam and
+    // the mirror's sharpness all fall off with it.
+    float far = smoothstep(0.0, viewDistance * 0.35, distanceFromCamera);
+
+    // The swell's normal, flattened as asked, with the ripples laid over it.
+    vec3 norm = normalize(fragNormal);
     if (enableWaterNormalMapping) {
         norm = normalize(mix(vec3(0.0, 1.0, 0.0), norm, waterNormalIntensity));
     }
-    
-    // Use uniform water color
-    vec3 baseOceanColor = waterBaseColor;
-    if (baseOceanColor.r == 0.0 && baseOceanColor.g == 0.0 && baseOceanColor.b == 0.0) {
-        baseOceanColor = vec3(0.05, 0.15, 0.35); // Fallback default
-    }
-    
-    // Uniform water color - no distance-based gradients
-    vec3 waterColor = baseOceanColor; // Use consistent color across entire ocean
-    
-    // Enhanced foam system with wave-based trails
-    float totalFoam = 0.0;
-    
-    if (enableFoam) {
-        // Wave height foam (peaks). How high a crest has to be for foam depends
-        // on how high the waves go at all: fixed at four hundred and fifty
-        // units, it never appeared on any ocean this engine has ever drawn.
-        //
-        // The sum of the amplitudes is what the waves reach only where all four
-        // crest together, which is rare, so measuring against a large fraction
-        // of it asked for an alignment the sea does not often make: foam thinned
-        // as the water got rougher and was gone entirely past twice the default
-        // amplitude, which is backwards. A third of the sum is a crest that
-        // actually occurs.
-        float tallest = (waveAmplitudes[0] + waveAmplitudes[1] +
-                         waveAmplitudes[2] + waveAmplitudes[3]) * waveHeightMultiplier;
-        if (tallest > 0.0) {
-            float crest = waveHeight - waterLevel;
-            totalFoam += smoothstep(tallest * 0.30, tallest * 0.55, crest) * 0.15;
-        }
-        
-        // Dynamic foam trails based on wave velocity
-        vec2 waveVelocity = vec2(dFdx(fragPosition.y), dFdy(fragPosition.y));
-        float waveSpeed = length(waveVelocity) * 100.0;
-        float velocityFoam = smoothstep(0.3, 1.0, waveSpeed) * 0.12;
-        
-        // Foam persistence using noise (foam lingers)
-        vec2 foamCoord = fragPosition.xz * 0.01 - time * 0.05;
-        float foamPersistence = ridgedNoise(foamCoord) * 0.08;
-        
-        // Combine foam types
-        totalFoam += velocityFoam * foamPersistence;
-        // The cap scales with the setting as well as the sum: at 1.0 this is
-        // the quarter it always was, and turning it up has to be able to show.
-        totalFoam = clamp(totalFoam * foamIntensity, 0.0, 0.25 * foamIntensity);
-    }
-    
-    // GPU Gems Chapter 19: Physically accurate Fresnel for water
-    float NdotV = max(dot(norm, viewDir), 0.0);
-    float fresnel = pow(1.0 - NdotV, 3.0); // Physical water Fresnel
-    fresnel = mix(0.02, 0.12, fresnel); // Realistic water reflectivity range
-    
-    // Natural water specular highlights
-    float roughness = 0.15; // More realistic water surface roughness
-    float NdotH = max(dot(norm, normalize(lightDir + viewDir)), 0.0);
-    float roughnessAlpha = roughness * roughness;
-    float alpha2 = roughnessAlpha * roughnessAlpha;
-    float denom = NdotH * NdotH * (alpha2 - 1.0) + 1.0;
-    float D = alpha2 / (3.14159 * denom * denom);
-    
-    // Geometry function for water (reuse existing NdotV)
+    float rippleFreq = waveFrequencies[3] * 9.0 / 6.28318531;
+    float rippleTime = time * waveSpeeds[3] * max(waveSpeedMultiplier, 0.001) * 0.35;
+    vec3 ripple = rippleNormal(fragPosition.xz * rippleFreq, rippleTime, 0.30 * (1.0 - 0.85 * far));
+    // The swell alone is what the sky mirrors in: the ripples break the
+    // sun's glitter up, but bent into the mirror as well they would pull the
+    // bright horizon down into the water as white blotches.
+    vec3 swell = norm;
+    norm = normalize(vec3(norm.x + ripple.x, norm.y * ripple.y, norm.z + ripple.z));
+    vec3 mirrorNorm = normalize(mix(swell, norm, 0.25));
+
+    vec3 halfDir = normalize(lightDir + viewDir);
+    float NdotV = max(dot(norm, viewDir), 0.001);
     float NdotL = max(dot(norm, lightDir), 0.0);
+    float NdotH = max(dot(norm, halfDir), 0.0);
+    float VdotH = max(dot(viewDir, halfDir), 0.0);
+
+    // Water reflects two percent looking straight down and nearly all of
+    // the sky at a grazing look toward the horizon.
+    float fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(mirrorNorm, viewDir), 0.001), 5.0);
+    float mirror = enableWaterReflection ? clamp(waterReflectionIntensity, 0.0, 1.0) : 0.0;
+
+    // Everything below is radiance in the scene shader's units: the sun's
+    // colour times its intensity, tone mapped and gamma-corrected at the
+    // end the way the terrain beside the water is, so the two agree.
+    vec3 sun = lightColor * lightIntensity;
+    vec3 skyLight = pow(skyColor, vec3(2.2));
+
+    // The sun's glitter: GGX, the surface a little rougher far off so the
+    // highlight there is a path of light and not a scatter of aliased points.
+    float roughness = mix(0.07, 0.22, far);
+    float alphaR = roughness * roughness;
+    float alpha2 = alphaR * alphaR;
+    float denom = NdotH * NdotH * (alpha2 - 1.0) + 1.0;
+    float D = alpha2 / (3.14159265 * denom * denom);
     float k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
-    float G = NdotV * NdotL / ((NdotV * (1.0 - k) + k) * (NdotL * (1.0 - k) + k));
-    
-    // Schlick Fresnel for specular
-    vec3 F0 = vec3(0.02); // Water has low F0
-    vec3 F = F0 + (1.0 - F0) * pow(1.0 - NdotH, 5.0);
-    
-    // Cook-Torrance BRDF
-    vec3 specular = (D * G * F) / (4.0 * NdotV * NdotL + 0.001);
-    
-    // Subtle caustics for natural water appearance - smooth transitions
-    float causticsIntensityFactor = smoothstep(1.8, 2.5, lightIntensity);
-    vec2 causticsCoord = fragPosition.xz * 0.005 * detailScale + temporalPhase * 0.03;
-    float caustics = pow(noise(causticsCoord), 6.0) * 0.08 * causticsIntensityFactor;
-    
-    // Very subtle subsurface scattering - smooth transitions
-    vec3 subsurfaceColor = vec3(0.05, 0.15, 0.25);
-    float subsurfaceStrength = max(0.0, dot(-norm, lightDir)) * 0.1;
-    vec3 subsurface = subsurfaceColor * subsurfaceStrength * causticsIntensityFactor;
-    
-    // No surface pattern color injection - clean water surface
-    
-    // Calculate lighting factors FIRST - needed for both fog and lighting
-    // Smooth ambient lighting based on light intensity - NO hard transitions
-    float nightFactor = smoothstep(0.35, 0.25, lightIntensity); // 0=day, 1=night
-    float duskFactor = 1.0 - abs(lightIntensity - 0.55) / 0.55; // Peak at 0.55 intensity
-    duskFactor = clamp(duskFactor, 0.0, 1.0);
-    
-    // Configurable atmospheric perspective for realistic sky-water transition
-    float fogDistance = 0.0;
-    
-    if (enableFog) {
-        fogDistance = smoothstep(fogStart, fogEnd, distanceFromCamera);
-        
-        // Smooth fog color transitions - NO hard conditionals. The time of day
-        // decides the shade, and the colour the caller asked for tints it: a
-        // local of the same name used to hide that uniform completely.
-        vec3 nightFog = vec3(0.3, 0.4, 0.5);
-        vec3 duskFog = mix(vec3(0.4, 0.5, 0.6), skyColor, 0.4);
-        vec3 dayFog = vec3(0.4, 0.5, 0.6);
-        
-        vec3 timeOfDayFog = mix(dayFog, duskFog, duskFactor);
-        timeOfDayFog = mix(timeOfDayFog, nightFog, nightFactor);
-        vec3 shade = timeOfDayFog * fogColor * 2.0;
-        
-        // Smooth fog intensity scaling
-        float nightFogScale = mix(1.0, 0.5, nightFactor);
-        float duskFogScale = mix(1.0, 0.8, duskFactor);
-        float adaptiveFogIntensity = fogIntensity * nightFogScale * duskFogScale;
-        
-        waterColor = mix(waterColor, shade, fogDistance * adaptiveFogIntensity * 0.3);
+    float G = (NdotV / (NdotV * (1.0 - k) + k)) * (NdotL / (NdotL * (1.0 - k) + k));
+    float Fs = 0.02 + 0.98 * pow(1.0 - VdotH, 5.0);
+    vec3 glitter = sun * (D * G * Fs) / (4.0 * NdotL * NdotV + 0.0001) * NdotL;
+
+    // The body of the water: its own colour lit by the sky from above and
+    // the sun where the swell faces it.
+    vec3 base = waterBaseColor;
+    if (base.r == 0.0 && base.g == 0.0 && base.b == 0.0) base = vec3(0.02, 0.08, 0.14);
+    vec3 body = base * (skyLight * 0.7 + sun * (0.12 + 0.30 * NdotL));
+
+    // Light through the crests: where a wave stands between the eye and the
+    // sun the water glows from inside, greener and brighter than its body.
+    float tallest = (waveAmplitudes[0] + waveAmplitudes[1] +
+                     waveAmplitudes[2] + waveAmplitudes[3]) * waveHeightMultiplier;
+    // Against the table's sum: the surface reaches past it (the vertex pass
+    // lifts the displacement by half again) only where every train crests
+    // at once, so a crest at the sum is a tall one and an ordinary crest is
+    // half of it.
+    float crest = clamp((waveHeight - waterLevel) / max(tallest, 0.001), 0.0, 1.0);
+    float through = pow(clamp(dot(viewDir, -lightDir), 0.0, 1.0), 3.0) * (0.3 + 0.7 * crest)
+                  + crest * 0.25 * NdotL;
+    vec3 scatter = (base * 2.5 + vec3(0.0, 0.06, 0.04)) * sun * 0.30 * through;
+
+    // Foam where a crest breaks, torn up by the ripple noise so it is
+    // patches and not a band along every crest. The noise thins it and
+    // never removes it: a sea whose waves are kilometres long puts the
+    // whole view inside one cell of that noise, and its crests still break.
+    float foam = 0.0;
+    if (enableFoam && tallest > 0.0) {
+        float torn = ridgedNoise(fragPosition.xz * rippleFreq * 0.08 + time * 0.02);
+        float breaking = smoothstep(0.45, 1.0, crest);
+        foam = breaking * (0.35 + 0.65 * smoothstep(0.35, 0.8, torn));
+        // Lace, not paint: the fine ripple noise eats holes in it.
+        foam *= 0.55 + 0.45 * noise(fragPosition.xz * rippleFreq * 1.5 + rippleTime * 0.5);
+        foam *= clamp(foamIntensity, 0.0, 2.0) * (1.0 - 0.7 * far);
+        foam = clamp(foam, 0.0, 1.0);
     }
-    
-    // Modern PBR lighting for realistic water
-    vec3 sunlightColor = vec3(1.0, 0.98, 0.95);  // Natural sunlight
-    float diffuse = max(dot(norm, lightDir), 0.0);
-    
-    // Calculate lighting factors FIRST - needed for both fog and lighting
-    // Smooth ambient lighting based on light intensity - NO hard transitions
-    
-    vec3 nightAmbient = vec3(0.01, 0.015, 0.03) * lightIntensity * (1.0 + caustics * 0.05);
-    nightAmbient = mix(nightAmbient, skyColor * 0.1, 0.3);
-    
-    vec3 duskAmbient = vec3(0.04, 0.05, 0.1) * lightIntensity * (1.0 + caustics * 0.1);
-    duskAmbient = mix(duskAmbient, skyColor * 0.15, 0.4);
-    
-    vec3 dayAmbient = vec3(0.05, 0.06, 0.12) * lightIntensity * (1.0 + caustics * 0.15);
-    
-    // Smooth blend between lighting conditions
-    vec3 ambientLight = mix(dayAmbient, duskAmbient, duskFactor);
-    ambientLight = mix(ambientLight, nightAmbient, nightFactor);
-    
-    // PBR diffuse and specular lighting with sky influence
-    vec3 diffuseLight = diffuse * lightColor * lightIntensity * 1.8; // Much more diffuse for natural water appearance
-    
-    // GPU Gems Chapter 14 & 15: Enhanced perspective-corrected reflections with visibility optimization
-    vec3 sunReflectDir = reflect(-lightDir, norm);
-    float viewReflectDot = max(dot(viewDir, sunReflectDir), 0.0);
-    
-    // Chapter 15: Distance-based visibility and LOD management
-    float reflectionDistance = length(viewPos - fragPosition);
-    float perspectiveCorrection = 1.0 / (1.0 + reflectionDistance * 0.000005); // Closer = sharper
-    
-    // Chapter 15: Dynamic LOD for massive scenes - reduce detail at distance
-    float lodFactor = smoothstep(viewDistance, viewDistance * 10.0, reflectionDistance);
-    float performanceFactor = mix(1.0, 0.3, lodFactor); // Reduce complexity for distant pixels
-    
-    // GPU Gems Chapter 14: Balanced reflection calculations for realistic sun
-    float adaptiveSharpness = mix(16.0, 64.0, perspectiveCorrection * performanceFactor); // Balanced core
-    float adaptiveWidth = mix(4.0, 16.0, perspectiveCorrection * performanceFactor);       // Natural spread
-    float adaptiveGlitter = mix(1.0, 4.0, perspectiveCorrection * performanceFactor);      // Subtle glitter
-    
-    // Add wave-based variation to make reflection more organic
-    vec2 waveOffset = vec2(sin(waveHeight * 0.05), cos(waveHeight * 0.03)) * 0.1;
-    float organicReflectDot = viewReflectDot + length(waveOffset) * 0.02;
-    organicReflectDot = clamp(organicReflectDot, 0.0, 1.0);
-    
-    // Smooth, natural reflection falloff
-    float smoothReflectDot = smoothstep(0.05, 0.95, organicReflectDot);
-    
-    // Natural reflection layers with organic variation
-    float sunReflection = pow(smoothReflectDot, adaptiveSharpness);
-    sunReflection *= (1.0 + sin(waveHeight * 0.02) * 0.1); // Organic variation
-    
-    float wideReflection = pow(smoothReflectDot, adaptiveWidth);
-    wideReflection *= (1.0 + cos(waveHeight * 0.015) * 0.05);
-    
-    float glitterReflection = pow(smoothReflectDot, adaptiveGlitter);
-    glitterReflection *= (1.0 + sin(waveHeight * 0.01 + time * 0.5) * 0.03); // Gentle animation
-    
-         // Enhanced multi-layer gradient smoothing to eliminate triangle visibility
-     vec2 waveGradient = vec2(dFdx(waveHeight), dFdy(waveHeight)) * performanceFactor;
-     
-     // Multiple gradient samples for superior triangle edge elimination
-     vec2 gradient1 = vec2(dFdx(waveHeight * 0.85), dFdy(waveHeight * 0.85));
-     vec2 gradient2 = vec2(dFdx(waveHeight * 0.95), dFdy(waveHeight * 0.95));
-     vec2 gradient3 = vec2(dFdx(waveHeight * 1.05), dFdy(waveHeight * 1.05));
-     vec2 gradient4 = vec2(dFdx(waveHeight * 1.15), dFdy(waveHeight * 1.15));
-     
-     // Weighted gradient combination for maximum smoothness
-     vec2 smoothedGradient = (waveGradient * 0.4 + gradient1 * 0.2 + gradient2 * 0.2 + gradient3 * 0.15 + gradient4 * 0.05);
-     
-     float waveReflectionBoost = 1.0 + length(smoothedGradient) * 0.015; // Even gentler boost
-     
-     // Advanced gradient-based mesh smoothing with multiple passes
-     float gradientVariation = length(smoothedGradient);
-     float primarySmoothing = 1.0 - clamp(gradientVariation * 0.06, 0.0, 0.8 * performanceFactor);
-     
-     // Secondary smoothing based on directional gradient analysis
-     float gradientDirectionality = abs(smoothedGradient.x) + abs(smoothedGradient.y);
-     float secondarySmoothing = 1.0 - clamp(gradientDirectionality * 0.04, 0.0, 0.6);
-     
-     // Combined smoothing for maximum triangle hiding
-     float waveSmoothing = primarySmoothing * secondarySmoothing;
-    
-    // GPU Gems Chapter 14: Smooth perspective-corrected reflection blending
-    vec3 sunColor = lightColor * vec3(1.0, 0.95, 0.8); // Warm sun color
-    
-    // Reduced sun reflection intensity for more natural look
-    vec3 enhancedSpecular = (
-        sunReflection * 0.3 +          // Reduced sun core (was 0.8)
-        wideReflection * 0.2 +         // Reduced spread (was 0.4)
-        glitterReflection * 0.15       // Reduced glitter (was 0.2)
-    ) * sunColor * waveReflectionBoost * waveSmoothing;
-    
-    // Multi-layer smoothing for very gradual transitions
-    float smoothingFactor1 = smoothstep(0.0, 1.0, length(enhancedSpecular));
-    float smoothingFactor2 = smoothstep(0.1, 0.8, smoothingFactor1);
-    enhancedSpecular *= smoothingFactor2 * 0.5; // Reduced (was 0.8)
-    
-    // Add subtle wave-based reflections that dance on the surface
-    float waveReflect1 = sin(fragPosition.x * 0.01 + time * 0.5) * cos(fragPosition.z * 0.008 + time * 0.3);
-    float waveReflect2 = sin(fragPosition.x * 0.015 - time * 0.4) * cos(fragPosition.z * 0.012 - time * 0.25);
-    float subtleWaveReflection = (waveReflect1 + waveReflect2) * 0.5 + 0.5;
-    subtleWaveReflection = pow(subtleWaveReflection, 3.0) * 0.15 * fresnel;
-    if (enableWaterDistortion) {
-        subtleWaveReflection *= waterDistortionIntensity;
-    }
-    vec3 waveReflectionColor = sunColor * subtleWaveReflection * NdotL;
-    
-    // Enhanced quality scaling for more visible reflections
-    float qualityScale = mix(0.4, 0.7, perspectiveCorrection); // Reduced (was 0.5-0.9)
-    qualityScale = smoothstep(0.0, 1.0, qualityScale);
-    vec3 specularLight = (specular * skyColor * 0.02 + enhancedSpecular * qualityScale * 0.1 + waveReflectionColor) * lightIntensity;
-    
-    // Subtle rim lighting
-    float rimIntensity = pow(1.0 - dot(norm, viewDir), 3.0) * 0.05;
-    vec3 rimColor = vec3(0.1, 0.2, 0.35) * rimIntensity;
-    
-    // NO sparkles or surface effects - clean natural water
-    
-    // Uniform water color - NO depth variation based on waves
-    vec3 depthColor = waterColor; // Use the gradient color as-is, no wave-based modification
-    float depthFactor = 0.5; // Constant depth factor for transparency calculations
-     
-     // Simple dithering approach to break up triangle patterns
-     vec2 screenPos = gl_FragCoord.xy;
-     float dither = fract(sin(dot(screenPos, vec2(12.9898, 78.233))) * 43758.5453);
-     
-     // Add very subtle dithering to break up geometric patterns
-     depthColor += (dither - 0.5) * 0.008; // Very subtle random variation
-     
-     // Keep only the most essential smoothing
-     vec2 colorGradient = vec2(dFdx(depthColor.b), dFdy(depthColor.b));
-     float gradientMagnitude = length(colorGradient);
-     float basicSmoothing = 1.0 - clamp(gradientMagnitude * 5.0, 0.0, 0.3);
-     depthColor *= mix(1.0, basicSmoothing, 0.7);
-    
-    vec3 baseColor = depthColor * (ambientLight + diffuseLight);
-    
-    // GPU Gems Chapter 2: Enhanced caustics integration  
+
+    vec3 skyHit = reflectedSky(reflect(-viewDir, mirrorNorm));
+    vec3 finalColor = mix(body + scatter, skyHit, fresnel * mirror) + glitter * (1.0 - 0.6 * foam);
+    vec3 foamLit = vec3(0.85) * (sun * 0.5 * max(lightDir.y, 0.0) + skyLight * 0.6);
+    finalColor = mix(finalColor, foamLit, foam);
+
+    // The caustic web, for a scene that lights its surface with it.
     float gpuGemsCaustics = generateCaustics(fragPosition, time);
-    baseColor += vec3(gpuGemsCaustics) * sunlightColor * (1.0 - depthFactor * 0.3);
-    
-    // Enhanced reflections system
-    vec3 reflectVector = reflect(-viewDir, norm);
-    
-    // Sky reflection
-    vec3 skyReflection = skyColor * fresnel * 0.18;
-    
-    // Simulated environment reflection (horizon + zenith gradient)
-    float horizonFactor = abs(reflectVector.y);
-    vec3 horizonReflection = mix(horizonColor, skyColor, horizonFactor);
-    vec3 environmentReflection = horizonReflection * fresnel * 0.12;
-    
-    // Combine sky and environment reflections
-    vec3 totalReflection = skyReflection + environmentReflection;
-    if (enableWaterReflection) {
-        totalReflection *= waterReflectionIntensity;
-    } else {
-        totalReflection = vec3(0.0);
+    finalColor += gpuGemsCaustics * sun * 0.1;
+
+    finalColor = pow(ACESFilm(finalColor), vec3(1.0 / 2.2));
+
+    // The air between the eye and the surface, after the tone curve, the
+    // same as the scene shader does it, so the sea and the shore fade alike.
+    if (enableFog) {
+        float haze = smoothstep(fogStart, fogEnd, distanceFromCamera) * fogIntensity;
+        finalColor = mix(finalColor, fogColor, clamp(haze, 0.0, 1.0));
     }
-    
-    vec3 finalColor = baseColor + 
-                     specularLight * 0.8 +     // Reduced specular (was 1.5)
-                     totalReflection * 0.6 +   // Reduced reflection (was 0.9)
-                     subsurface +              
-                     rimColor;
-    
-    // Natural ocean lighting - much brighter for visible reflections
-    finalColor *= clamp(lightIntensity * 1.5, 0.8, 2.0); // Higher multiplier and max brightness
-    
-    // Enhanced wave lighting with subtle highlights on wave peaks
-    float waveFacing = max(0.0, dot(norm, lightDir));
-    float waveSlope = length(vec2(dFdx(fragPosition.y), dFdy(fragPosition.y)));
-    float waveHighlight = smoothstep(0.5, 2.0, waveSlope) * 0.08; 
-    float waveLighting = 1.0 + waveFacing * 0.2 + waveHighlight; // Increased wave lighting
-    finalColor *= waveLighting;
-    
-    // Very subtle, natural foam
-    if (totalFoam > 0.05) {
-        vec3 foamColor = vec3(0.6, 0.7, 0.8); // Brighter foam
-        float foamMix = totalFoam * 0.2; 
-        finalColor = mix(finalColor, foamColor, foamMix);
-    }
-    
-    // Use the transparency uniform from the editor
+
+    // What reflects is not seen through: the surface goes opaque as the
+    // mirror takes over, and under foam.
     float alpha = waterOpacity;
-    
-    // If transparency uniform is 0 (fallback), use default
-    if (alpha <= 0.01) {
-        alpha = 0.85;
-    }
-    
-    // Removed artificial darkening
-    // finalColor *= 0.6; <--- REMOVED
-    
-    // GPU Gems Chapter 9 & 11: Apply realistic water shadows
-    if (enableShadows) {
-        float shadowFactor = 1.0;
-        
-        // For sun lighting: create subtle wave-based shadows, not distance falloff
-        // Real ocean shadows come from wave height variations, not distance from sun
-        vec2 shadowCoord = fragPosition.xz * 0.0001;
-        float waveBasedShadow = sin(shadowCoord.x + waveHeight * 0.01) * 
-                               sin(shadowCoord.y + waveHeight * 0.01) * 0.5 + 0.5;
-        
-        // Very subtle shadow intensity based on wave depth
-        float waveDepthFactor = smoothstep(-50.0, 50.0, waveHeight);
-        shadowFactor = 1.0 - shadowIntensity * 0.15 * waveBasedShadow * waveDepthFactor;
-        
-        // Chapter 11: Add minimal soft edges
-        shadowFactor = mix(shadowFactor, 1.0, shadowSoftness * 0.1);
-        
-        finalColor *= shadowFactor;
-    }
-    
-    // NO wave-based subsurface scattering - uniform water appearance
-    
-    // NO wave-based ambient occlusion - uniform lighting
-    
+    if (alpha <= 0.01) alpha = 0.85;
+    alpha = mix(alpha, 1.0, fresnel * mirror);
+    alpha = mix(alpha, 1.0, foam);
+
     // Underwater camera effect (when camera is below water surface)
     float underwaterDepth = max(0.0, waterPlaneHeight - viewPos.y);
     if (underwaterDepth > 0.5) {

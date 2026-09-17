@@ -25,10 +25,14 @@ const SKY_H = 1024
 const SAND_W = 1024
 const PI = 3.14159265358979
 
-// Where the sun stands: a low afternoon sun, warm, ahead of the default
-// camera. Azimuth is measured the way the skybox reads it, atan(z, x).
+// Where the sun stands: an afternoon sun thirty-five degrees up, warm,
+// ahead of the default camera -- high enough that the tops of things are
+// lit and their sides shade, low enough that they still throw a shadow.
+// Azimuth is measured the way the skybox reads it, atan(z, x). The scenes
+// that light themselves by this sky (sand, smooth_terrain, voxel_world)
+// carry the same direction as SUN_X/Y/Z.
 const SUN_AZIMUTH = 0.0 - 1.9
-const SUN_ELEVATION = 0.42
+const SUN_ELEVATION = 0.62
 
 clamp01(v: float) -> float {
     if v < 0.0 { return 0.0 }
@@ -221,6 +225,27 @@ write_night(path: string) -> bool {
 // Sand: wind ripples running one way, broken by finer grain and by broad
 // patches a shade darker or lighter, and tiling -- the noise is sampled on a
 // torus so the left edge is the right edge and the top the bottom.
+//
+// The relief at a point of the tile, 0..1: the ripples and the grain, which
+// the colour shades by and the normal map is the slope of.
+sand_relief(field: *Perlin, u: float, v: float) -> float {
+    // Tiling coordinates: a point on a torus, so every octave wraps.
+    tx = core.cos_of(u * 2.0 * PI) * 2.0
+    ty = core.sin_of(u * 2.0 * PI) * 2.0
+    tz = core.cos_of(v * 2.0 * PI) * 2.0
+    tw = core.sin_of(v * 2.0 * PI) * 2.0
+
+    // Ripples: a wave across the tile, its crests wandering with the
+    // noise so no two are parallel.
+    wander = noise.fbm3(field, tx * 0.8, ty * 0.8, tz * 0.8, 3, 0.5) * 2.5
+    ripple = core.sin_of((u * 22.0 + v * 4.0) * 2.0 * PI + wander)
+    ripple = 0.5 + 0.5 * ripple
+    ripple = pow(ripple, 1.6)
+    // Grain, fine and everywhere.
+    grain = noise.fbm3(field, tx * 9.0 + tw, ty * 9.0, tz * 9.0, 4, 0.5)
+    return ripple * 0.7 + grain * 0.3
+}
+
 write_sand(path: string) -> bool {
     pixels = calloc(SAND_W * SAND_W * 4, 1)
     if pixels == null { return false }
@@ -232,28 +257,53 @@ write_sand(path: string) -> bool {
         x = 0
         while x < SAND_W {
             u = (x as float) / (SAND_W as float)
-            // Tiling coordinates: a point on a torus, so every octave wraps.
+            relief = sand_relief(field, u, v)
+            // Patches, broad and slow.
             tx = core.cos_of(u * 2.0 * PI) * 2.0
             ty = core.sin_of(u * 2.0 * PI) * 2.0
             tz = core.cos_of(v * 2.0 * PI) * 2.0
             tw = core.sin_of(v * 2.0 * PI) * 2.0
-
-            // Ripples: a wave across the tile, its crests wandering with the
-            // noise so no two are parallel.
-            wander = noise.fbm3(field, tx * 0.8, ty * 0.8, tz * 0.8, 3, 0.5) * 2.5
-            ripple = core.sin_of((u * 22.0 + v * 4.0) * 2.0 * PI + wander)
-            ripple = 0.5 + 0.5 * ripple
-            ripple = pow(ripple, 1.6)
-            // Grain, fine and everywhere.
-            grain = noise.fbm3(field, tx * 9.0 + tw, ty * 9.0, tz * 9.0, 4, 0.5)
-            // Patches, broad and slow.
             patch = noise.fbm3(field, tx * 0.5 + tw * 0.5, ty * 0.5, tz * 0.5, 3, 0.5)
 
-            base = 0.80 + (ripple - 0.5) * 0.16 + (grain - 0.5) * 0.14 + (patch - 0.5) * 0.12
+            base = 0.80 + (relief - 0.5) * 0.22 + (patch - 0.5) * 0.12
             r = base * 0.96
             g = base * 0.84
             b = base * 0.62
             put(pixels, y * SAND_W + x, r, g, b)
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    ok = ae3d_png_write(path, pixels, SAND_W, SAND_W) == 1
+    noise.perlin_free(field)
+    free(pixels)
+    return ok
+}
+
+// The sand's normal map: the slope of the same relief, so the ripples catch
+// the light from the side they face and the grain roughens everything, in
+// tangent space with the tile's u along +x and v along +y.
+write_sand_normal(path: string) -> bool {
+    pixels = calloc(SAND_W * SAND_W * 4, 1)
+    if pixels == null { return false }
+    field = noise.perlin_new(3391)
+    step = 1.0 / (SAND_W as float)
+    // How tall the relief is against the tile's width: the ripples a few
+    // centimetres over a tile of a metre or so.
+    relief_height = 0.05
+
+    y = 0
+    while y < SAND_W {
+        v = (y as float) * step
+        x = 0
+        while x < SAND_W {
+            u = (x as float) * step
+            here = sand_relief(field, u, v)
+            du = (sand_relief(field, u + step, v) - here) * relief_height / step
+            dv = (sand_relief(field, u, v + step) - here) * relief_height / step
+            n = core.v3_normalize(core.vec3(0.0 - du, 0.0 - dv, 1.0))
+            put(pixels, y * SAND_W + x, n.x * 0.5 + 0.5, n.y * 0.5 + 0.5, n.z * 0.5 + 0.5)
             x = x + 1
         }
         y = y + 1
@@ -280,5 +330,10 @@ main() {
         println("make_sky: wrote resources/textures/sand.png (${SAND_W}x${SAND_W}, tiling)")
     } else {
         println("make_sky: could not write resources/textures/sand.png")
+    }
+    if write_sand_normal("resources/textures/sand_normal.png") {
+        println("make_sky: wrote resources/textures/sand_normal.png (${SAND_W}x${SAND_W}, tiling)")
+    } else {
+        println("make_sky: could not write resources/textures/sand_normal.png")
     }
 }

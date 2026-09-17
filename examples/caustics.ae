@@ -10,7 +10,6 @@
 import ae3d.core
 import ae3d.platform
 import ae3d.engine
-import ae3d.gl
 import ae3d.loader
 import ae3d.rendering
 import ae3d.water
@@ -87,7 +86,7 @@ seafloor(cells: int, size: float) -> *Model {
 lit_by_caustics(m: *Model, grainy: bool) {
     config = rendering.default_config()
     config.caustics = true
-    config.caustics_intensity = 1.6
+    config.caustics_intensity = 1.0
     config.caustics_scale = 0.012
     config.caustics_speed = 0.5
     config.caustics_water_level = 0.0
@@ -107,6 +106,11 @@ on_start(data: ptr) {
     seabed = seafloor(SEABED_CELLS, REACH * 4.0)
     core.model_set_position(seabed, 0.0, SEABED, 0.0)
     core.model_set_texture(seabed, "resources/textures/sand.png")
+    // The ripples in relief, so the light webs over a surface and not a
+    // sheet: the slope of the same sand tools/make_sky.ae painted.
+    if seabed.material != null {
+        core.material_set_normal_path(seabed.material, "resources/textures/sand_normal.png")
+    }
     core.model_set_diffuse(seabed, 0.70, 0.66, 0.55)
     core.model_set_pbr(seabed, 0.0, 0.95)
     core.model_set_specular(seabed, 0.02, 0.02, 0.02)
@@ -130,7 +134,7 @@ on_start(data: ptr) {
         if rock.material != null {
             core.material_set_normal_path(rock.material, "resources/blender/zombie_street/TrimStoneNormal.png")
         }
-        shade = 0.50 + next_random() * 0.25
+        shade = 0.80 + next_random() * 0.25
         core.model_set_diffuse(rock, shade, shade * 1.02, shade * 0.90)
         core.model_set_specular(rock, 0.02, 0.02, 0.02)
         core.model_set_pbr(rock, 0.0, 0.92)
@@ -173,7 +177,7 @@ on_start(data: ptr) {
     engine.engine_add_model(e, surface)
     g_water = ocean as ptr
 
-    gl.renderer_set_clear_color(engine.engine_gl_renderer(e), MURK_R, MURK_G, MURK_B)
+    engine.engine_set_clear_color(e, MURK_R, MURK_G, MURK_B)
 
     cam = engine.engine_camera(e)
     if core.env_int("AE3D_VIEW", 0) == 2 {

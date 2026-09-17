@@ -5,8 +5,6 @@
 import ae3d.core
 import ae3d.platform
 import ae3d.engine
-import ae3d.gl
-import ae3d.loader
 import ae3d.noise
 import ae3d.voxel
 import ae3d.rendering
@@ -25,14 +23,13 @@ const VOXEL_SIZE = 2.0
 const SEA_VOXELS = 15
 // The sun as tools/make_sky.ae painted it into the desert sky, and the
 // haze that sky has at its horizon.
-const SUN_X = 0.0 - 0.295
-const SUN_Y = 0.408
-const SUN_Z = 0.0 - 0.865
+const SUN_X = 0.0 - 0.263
+const SUN_Y = 0.581
+const SUN_Z = 0.0 - 0.770
 const HAZE_R = 0.86
 const HAZE_G = 0.80
 const HAZE_B = 0.70
 
-var g_sky: *Skybox = null
 var g_sea: ptr = null
 
 var g_world: ptr = null
@@ -85,7 +82,103 @@ build_terrain(world: *World) {
         x = x + 1
     }
 
+    plant_forest(world, field)
     noise.perlin_free(field)
+}
+
+// Trees on the grass: a trunk of wood and a crown of leaves, where a slow
+// noise says the woods are and a fast hash says which columns in them get
+// one, so they stand in clumps with clearings and not on a grid. Each is
+// built from the column's own height, the crown a blunt cone over a
+// canopy three wide, in voxels. Nothing on sand, stone or a slope that
+// falls more than a voxel a step: trees keep to the flats.
+plant_forest(world: *World, field: *Perlin) {
+    planted = 0
+    x = 3
+    while x < voxel.world_size_x(world) - 3 {
+        z = 3
+        while z < voxel.world_size_z(world) - 3 {
+            woods = noise.fbm2(field, (x * 1.0) * 0.02 + 40.0, (z * 1.0) * 0.02 + 40.0, 3, 0.5)
+            if woods > 0.05 {
+                pick = column_pick(x, z)
+                density = 0.04 + (woods - 0.05) * 0.16
+                if pick < density {
+                    height = column_height(world, x, z)
+                    grassy = height > 0 && voxel.world_get(world, x, height - 1, z) == voxel.GRASS
+                    if grassy && column_flat(world, x, z, height) {
+                        plant_tree(world, x, height, z, 4 + ((pick * 1000.0) as int) % 3)
+                        planted = planted + 1
+                    }
+                }
+            }
+            z = z + 1
+        }
+        x = x + 1
+    }
+    println("forest: ${planted} trees")
+}
+
+// A number in 0..1 for the column, the same every run, unrelated to its
+// neighbours': an integer hash, folded to a fraction.
+column_pick(x: int, z: int) -> float {
+    h = (x * 374761393 + z * 668265263) as uint64
+    h = (h ^ (h >> 13)) * (1274126177 as uint64)
+    h = h ^ (h >> 16)
+    return ((h & (1023 as uint64)) as float) / 1024.0
+}
+
+column_height(world: *World, x: int, z: int) -> int {
+    y = voxel.world_max_height(world) - 1
+    while y >= 0 {
+        if voxel.world_get(world, x, y, z) != voxel.EMPTY { return y + 1 }
+        y = y - 1
+    }
+    return 0
+}
+
+column_flat(world: *World, x: int, z: int, height: int) -> bool {
+    dx = 0 - 1
+    while dx <= 1 {
+        dz = 0 - 1
+        while dz <= 1 {
+            other = column_height(world, x + dx, z + dz)
+            if other > height + 1 || other < height - 1 { return false }
+            dz = dz + 1
+        }
+        dx = dx + 1
+    }
+    return true
+}
+
+plant_tree(world: *World, x: int, ground: int, z: int, trunk: int) {
+    y = 0
+    while y < trunk {
+        voxel.world_set(world, x, ground + y, z, voxel.WOOD)
+        y = y + 1
+    }
+    // The crown: two wide layers, then one, then the tip.
+    layer = 0
+    while layer < 4 {
+        reach = 2
+        if layer >= 2 { reach = 1 }
+        if layer == 3 { reach = 0 }
+        dx = 0 - reach
+        while dx <= reach {
+            dz = 0 - reach
+            while dz <= reach {
+                corner = (dx == reach || dx == 0 - reach) && (dz == reach || dz == 0 - reach)
+                if !(corner && reach == 2) {
+                    ly = ground + trunk - 1 + layer
+                    if !(dx == 0 && dz == 0 && layer == 0) {
+                        voxel.world_set(world, x + dx, ly, z + dz, voxel.LEAF)
+                    }
+                }
+                dz = dz + 1
+            }
+            dx = dx + 1
+        }
+        layer = layer + 1
+    }
 }
 
 on_start(data: ptr) {
@@ -102,8 +195,10 @@ on_start(data: ptr) {
     build_terrain(world)
     generated = clock_ns()
 
-    base = loader.cube(VOXEL_SIZE)
-    model = voxel.world_build(world, base)
+    // The faces that show, as one mesh, each corner carrying the sky it
+    // can see: a cliff foot is darker than a terrace lip, which the
+    // instanced cubes could not say.
+    model = voxel.world_build_mesh(world)
     built = clock_ns()
 
     if model == null {
@@ -112,8 +207,8 @@ on_start(data: ptr) {
         return
     }
 
-    println("voxels: ${voxel.world_active_count(world)} solid, ${core.model_instance_count(model)} visible")
-    println("terrain ${(generated - started) / 1000000} ms, instances ${(built - generated) / 1000000} ms")
+    println("voxels: ${voxel.world_active_count(world)} solid, ${core.mesh_index_count(model.mesh) / 6} faces")
+    println("terrain ${(generated - started) / 1000000} ms, mesh ${(built - generated) / 1000000} ms")
 
     // The shader's noise across the blocks, so a hillside of one grass is
     // not one flat green.
@@ -133,8 +228,9 @@ on_start(data: ptr) {
     water.simulation_set_color(sea, 0.03, 0.16, 0.24)
     water.simulation_set_sky_color(sea, 0.50, 0.64, 0.80)
     water.simulation_set_reflection(sea, 0.7)
-    water.simulation_set_opacity(sea, 0.9)
-    water.simulation_set_foam(sea, true, 0.4)
+    water.simulation_set_sky_texture(sea, "resources/sky/desert.png")
+    water.simulation_set_opacity(sea, 0.96)
+    water.simulation_set_foam(sea, true, 0.3)
     ocean = water.simulation_build(sea, water.RESOLUTION)
     if ocean != null {
         core.model_set_position(ocean, (WORLD_X as float) * VOXEL_SIZE * 0.5, 0.0,
@@ -143,18 +239,22 @@ on_start(data: ptr) {
     }
     g_sea = sea as ptr
 
-    renderer = engine.engine_gl_renderer(e)
-    gl.renderer_set_clear_color(renderer, HAZE_R, HAZE_G, HAZE_B)
-    g_sky = gl.skybox_create(renderer, "resources/sky/desert.png")
-    engine.engine_set_skybox(e, g_sky as ptr)
+    engine.engine_set_clear_color(e, HAZE_R, HAZE_G, HAZE_B)
+    engine.engine_set_sky(e, "resources/sky/desert.png")
 
     // Low over the near corner, so the block stands against the sky and the
     // sun rakes across the terraces of the terrain.
+    // AE3D_CAMX/Y/Z and AE3D_AIMX/Y/Z (metres) put the camera elsewhere,
+    // for looking at one thing closely.
     cam = engine.engine_camera(e)
-    core.camera_set_position(cam, core.vec3(40.0, 70.0, 0.0 - 30.0))
+    core.camera_set_position(cam, core.vec3(core.env_int("AE3D_CAMX", 40) as float,
+                                            core.env_int("AE3D_CAMY", 70) as float,
+                                            core.env_int("AE3D_CAMZ", 0 - 30) as float))
     core.camera_set_speed(cam, 400.0)
     core.camera_set_far(cam, 20000.0)
-    core.camera_look_at(cam, core.vec3(420.0, 45.0, 400.0))
+    core.camera_look_at(cam, core.vec3(core.env_int("AE3D_AIMX", 420) as float,
+                                       core.env_int("AE3D_AIMY", 45) as float,
+                                       core.env_int("AE3D_AIMZ", 400) as float))
 }
 
 on_update(data: ptr, delta: float) {
@@ -185,7 +285,7 @@ main() {
 
     engine.engine_run(e, 0 - 1, 0 - 1)
 
-    println("voxel world: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${gl.renderer_draw_calls(engine.engine_gl_renderer(e))} draw calls")
+    println("voxel world: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${engine.engine_draw_calls(e)} draw calls")
 
     world = g_world as *World
     if world != null { voxel.world_free(world) }

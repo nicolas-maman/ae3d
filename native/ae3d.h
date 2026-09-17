@@ -183,6 +183,8 @@ int    ae3d_objbuild_normal_count(void *build);
 int    ae3d_objbuild_emit(void *build, void *mesh, int v, int vt, int vn);
 
 void  *ae3d_image_load(const char *path);
+int    ae3d_image_register(const char *name, const void *rgba, int width, int height);
+void   ae3d_image_unregister(const char *name);
 void  *ae3d_image_from_memory(const void *data, int len);
 void  *ae3d_image_solid(int width, int height, int r, int g, int b, int a);
 void   ae3d_image_free(void *img);

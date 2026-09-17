@@ -258,6 +258,20 @@ else
     sed "s/^/        /" /tmp/ae3d_docs.log | head -12
 fi
 
+# The Vulkan shaders are generated from the GLSL in src/ae3d/shaders and
+# checked in. An edit to the GLSL without the generator run after it leaves
+# Vulkan on the previous shader, which fails parity in ways that look like
+# real bugs; the check is that the checked-in files are what the source makes.
+step "Vulkan shaders regenerated"
+if [ -z "$PYTHON" ]; then
+    skip "Vulkan shaders" "no python"
+elif $PYTHON native/shaders/generate.py --check >/tmp/ae3d_shaders.log 2>&1; then
+    pass "native/shaders and vkscene are what src/ae3d/shaders produces"
+else
+    fail "generated Vulkan shaders are out of date; run native/shaders/generate.py"
+    sed "s/^/        /" /tmp/ae3d_shaders.log | head -12
+fi
+
 step "native layer, warnings as errors"
 # Same compiler search as build.sh: a Windows toolchain need not ship `cc`.
 if [ -z "${CC:-}" ]; then

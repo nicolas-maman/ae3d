@@ -25,7 +25,7 @@ exports (
     engine_set_size, engine_set_title, engine_set_msaa, engine_set_decorated, engine_set_post,
     engine_set_render_scale, engine_set_shadows, engine_shadows, engine_set_fog, engine_fog, engine_set_shadow_distance, engine_shadow_distance,
     engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
-    engine_set_skybox, engine_load_texture,
+    engine_set_skybox, engine_set_sky, engine_set_clear_color, engine_draw_calls, engine_load_texture,
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
     engine_render_ms, engine_render_frames,
     engine_set_debug, engine_set_frustum_culling, engine_set_face_culling,
@@ -49,6 +49,7 @@ struct Engine {
     backend_remove_model: fn(ptr, ptr)
     backend_load_texture: fn(ptr, string) -> int
     backend_set_skybox: fn(ptr, ptr)
+    backend_set_clear_color: fn(ptr, float, float, float)
     backend_update_viewport: fn(ptr, int, int)
     backend_set_post: fn(ptr, int, int, float, float)
     backend_set_shadows: fn(ptr, int)
@@ -109,6 +110,7 @@ struct Engine {
 }
 
 engine_new(api: int) -> *Engine {
+    api = api_from_env(api)
     e = heap.new(Engine)
     e.api = api
     e.width = 1024
@@ -138,6 +140,22 @@ engine_new(api: int) -> *Engine {
         bind_backend(e, gl.backend(opengl_state))
     }
     return e
+}
+
+// AE3D_API=vulkan or AE3D_API=opengl runs a program on that backend whatever
+// it asked for, so any scene can be looked at on both without a flag of its
+// own. A backend that is not there is reported and the asked-for one kept.
+api_from_env(asked: int) -> int {
+    wanted = core.text(os.getenv("AE3D_API"))
+    if wanted == "vulkan" {
+        if !vk.available() {
+            println("ae3d: AE3D_API=vulkan but no Vulkan driver: ${vk.last_error()}")
+            return asked
+        }
+        return platform.API_VULKAN
+    }
+    if wanted == "opengl" || wanted == "gl" { return platform.API_GL }
+    return asked
 }
 
 // AE3D_FRAMES caps the loop so any example doubles as a smoke test that
@@ -256,6 +274,7 @@ bind_backend(e: *Engine, b: Backend) {
     e.backend_remove_model = b.remove_model
     e.backend_load_texture = b.load_texture
     e.backend_set_skybox = b.set_skybox
+    e.backend_set_clear_color = b.set_clear_color
     e.backend_set_post = b.set_post
     e.backend_set_shadows = b.set_shadows
     e.backend_set_fog = b.set_fog
@@ -369,6 +388,45 @@ engine_set_render_scale(e: *Engine, scale: float) -> float {
 engine_set_skybox(e: *Engine, skybox: ptr) {
     if e.backend_state == null { return }
     e.backend_set_skybox(e.backend_state, skybox)
+}
+
+// A sky from an image, made by whichever backend is drawing and set: one
+// call on either backend, so a scene names its sky once instead of asking
+// which renderer it got and constructing the sky through that. The backend
+// owns the sky it is given and frees it with itself. False when the image
+// could not be read.
+engine_set_sky(e: *Engine, path: string) -> bool {
+    if e.backend_state == null { return false }
+    sky = null as ptr
+    if e.api == platform.API_VULKAN {
+        sky = vk.skybox_create(e.backend_state as *VKRenderer, path) as ptr
+    } else {
+        sky = gl.skybox_create(e.gl_renderer as *GLRenderer, path) as ptr
+    }
+    if sky == null { return false }
+    engine_set_skybox(e, sky)
+    return true
+}
+
+// The colour behind everything, where no sky or model is: what a scene
+// fades to at its horizon.
+engine_set_clear_color(e: *Engine, red: float, green: float, blue: float) {
+    if e.backend_state == null { return }
+    e.backend_set_clear_color(e.backend_state, red, green, blue)
+}
+
+// How many draws the last frame took, from whichever backend drew it.
+engine_draw_calls(e: *Engine) -> int {
+    if e.backend_state == null { return 0 }
+    if e.api == platform.API_VULKAN { return vk.renderer_draw_calls(e.backend_state as *VKRenderer) }
+    return gl.renderer_draw_calls(e.gl_renderer as *GLRenderer)
+}
+
+// How many draws the last frame took, from whichever backend drew it.
+engine_draw_calls(e: *Engine) -> int {
+    if e.backend_state == null { return 0 }
+    if e.api == platform.API_VULKAN { return vk.renderer_draw_calls(e.backend_state as *VKRenderer) }
+    return gl.renderer_draw_calls(e.gl_renderer as *GLRenderer)
 }
 
 // Returns the backend's texture id, or 0 when there is no backend yet or the
