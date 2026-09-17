@@ -222,6 +222,28 @@ var g_probe_field = 0
 // is on rather than only what could be chosen.
 var g_biome_buttons: ptr = null
 var g_style_buttons: ptr = null
+// Sculpting: the brush's mode and reach, and the stroke under way -- the
+// column heights the terrain had when it was pressed, so releasing can
+// record one undo step for the whole drag.
+var g_sculpt_buttons: ptr = null
+var g_sculpt = 0  // SCULPT_OFF, which is declared below the globals
+var g_brush_radius = 12.0
+var g_sculpting = false
+var g_stroke_before: ptr = null
+var g_stroke_world: ptr = null
+var g_stroke_model: ptr = null
+var g_stroke_cell_x = 0 - 1
+var g_stroke_cell_z = 0 - 1
+var g_strokes: ptr = null
+
+// One stroke, as the terrain's column heights before and after it.
+struct Stroke {
+    world: ptr
+    model: ptr
+    before: ptr
+    after: ptr
+    columns: int
+}
 var g_terrain_bar = 0
 var g_terrain_body = 0
 var g_terrain_divider = 0
@@ -949,22 +971,35 @@ extern malloc(size: int) -> ptr
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 
-const ROWS = 32
+const ROWS = 33
 // Past every inspector row, because a turn of the gizmo is not a row: it is
 // recorded as the angle the drag has turned through so far, and undone by
 // turning back through it.
-const ROTATE_FIRST_SLOT = 32
-// Past the rotation axes, which take 32 through 34. A behaviour is a property
+const ROTATE_FIRST_SLOT = 33
+// Past the rotation axes, which take 33 through 35. A behaviour is a property
 // of a model like any other as far as undo is concerned, so it travels as a
 // property step in a slot no row uses.
-const SCRIPT_SLOT = 35
+const SCRIPT_SLOT = 36
 // A terrain's shape. A choice rather than a number, so it travels the way a
 // behaviour does rather than as a row.
-const TERRAIN_BIOME_SLOT = 36
+const TERRAIN_BIOME_SLOT = 37
 // A terrain's style. Blocks are voxels drawn one cube per cell; smooth meshes
 // the same field into one surface. Voxels are a kind of terrain rather than
 // what terrain is.
-const TERRAIN_STYLE_SLOT = 37
+const TERRAIN_STYLE_SLOT = 38
+// A stroke of the sculpting brush: one undo step from press to release,
+// whose before and after are the terrain's column heights, kept in a list
+// of strokes the step indexes.
+const SCULPT_SLOT = 39
+// The brush: what it does to the ground under the cursor while it is held.
+const SCULPT_OFF = 0
+const SCULPT_RAISE = 1
+const SCULPT_LOWER = 2
+const SCULPT_SMOOTH = 3
+const SCULPT_KINDS = 4
+// How many cells the brush moves the ground at its centre per touch, falling
+// off to nothing at its edge.
+const BRUSH_STEP = 2.0
 const STYLE_BLOCKS = 0
 const STYLE_SMOOTH = 1
 const STYLE_KINDS = 2
@@ -996,6 +1031,8 @@ const CLOUD_COVER_ROW = 29
 // thing shadows what stands beside it.
 const SSAO_ROW = 30
 const SSAO_RADIUS_ROW = 31
+// The sculpting brush's reach, in metres.
+const BRUSH_ROW = 32
 const SCRIPT_NONE = 0
 // A behaviour is a script found on disk, not a case in this file. Zero is
 // always "none"; the rest are whatever resources/scripts holds, in the order
@@ -1152,6 +1189,10 @@ show_terrain_section(on: bool) {
     if g_terrain_divider != 0 { ui.set_hidden(g_terrain_divider, hidden_flag(on)) }
     frame = row_frame(TERRAIN_SEED_ROW)
     control = row_control(TERRAIN_SEED_ROW)
+    if control != 0 { ui.set_hidden(control, hidden_flag(on)) }
+    if frame != 0 { ui.set_hidden(frame, hidden_flag(on)) }
+    frame = row_frame(BRUSH_ROW)
+    control = row_control(BRUSH_ROW)
     if control != 0 { ui.set_hidden(control, hidden_flag(on)) }
     if frame != 0 { ui.set_hidden(frame, hidden_flag(on)) }
 }
@@ -2071,6 +2112,14 @@ row_reaches_its_target(index: int) -> bool {
         return moved
     }
 
+    if index == BRUSH_ROW {
+        before = g_brush_radius
+        apply_property(index, before + 0.25)
+        moved = core.abs_of(g_brush_radius - (before + 0.25)) < 0.001
+        apply_property(index, before)
+        return moved
+    }
+
     if index == TERRAIN_SEED_ROW {
         // A seed is a whole number and regenerating is the whole of what it
         // does, so it moves by one rather than by the quarter every other row
@@ -2511,7 +2560,10 @@ replay(step: *EditStep, backwards: bool) {
         target = step.after
         if backwards { target = step.before }
         subject = step.subject as *Model
-        if step.slot == TERRAIN_STYLE_SLOT {
+        if step.slot == SCULPT_SLOT {
+            select_model_pointer(step.subject)
+            apply_stroke((step.before) as int, backwards)
+        } else if step.slot == TERRAIN_STYLE_SLOT {
             select_model_pointer(step.subject)
             regenerate_terrain(terrain_seed(), terrain_biome(), (target) as int)
             refresh_terrain_section()
@@ -2843,6 +2895,14 @@ apply_property(index: int, value: float) {
         g_last_edit = seconds()
         g_cloud_cover = value
         apply_post()
+        show_row(index, value)
+        return
+    }
+
+    if index == BRUSH_ROW {
+        history.history_record(g_history, history.STEP_PROPERTY, null, index, g_brush_radius, value)
+        g_last_edit = seconds()
+        g_brush_radius = value
         show_row(index, value)
         return
     }
@@ -3824,6 +3884,231 @@ style_name(style: int) -> string {
     return "blocks"
 }
 
+// The terrain's model built again from its world, in place: blocks as the
+// instances of one cube, smooth as one surface. The model leaves the backend
+// and comes back, keeping its pointer and with it the selection, the
+// component beside it and its place in the history.
+rebuild_terrain_model(w: *World, m: *Model) -> bool {
+    backend = viewport_backend()
+    core.backend_remove_model(&backend, m)
+    built = true
+    if !m.is_instanced {
+        if voxel.world_sdf_enable(w) {
+            voxel.world_sdf_from_voxels(w)
+            surface = voxel.world_build_surface(w)
+            if surface == null {
+                built = false
+            } else {
+                handed = surface.mesh
+                surface.mesh = null
+                core.model_free(surface)
+                core.model_set_mesh(m, handed)
+            }
+        } else {
+            built = false
+        }
+    } else {
+        if voxel.world_build(w, m) == null { built = false }
+    }
+    core.backend_add_model(&backend, m)
+    refresh_title()
+    mark_dirty()
+    paint_soon()
+    return built
+}
+
+set_sculpt(mode: int) {
+    g_sculpt = mode
+    paint_segments(g_sculpt_buttons, SCULPT_KINDS, g_sculpt)
+    if mode == SCULPT_OFF { say("brush off") }
+    if mode == SCULPT_RAISE { say("brush raises the ground: press and drag on a terrain") }
+    if mode == SCULPT_LOWER { say("brush lowers the ground: press and drag on a terrain") }
+    if mode == SCULPT_SMOOTH { say("brush smooths the ground: press and drag on a terrain") }
+}
+
+// Where the cursor's ray meets the selected terrain, as a cell of its
+// world; false when it misses. A smooth terrain's surface is in the model's
+// own frame, so the hit goes back through the model matrix; blocks stand
+// where their instances were placed, which is the world's own frame.
+sculpt_cell(x: float, y: float) -> bool {
+    w = selected_world()
+    m = selected_model()
+    cam = g_camera as *Camera
+    if w == null || m == null || cam == null { return false }
+    direction = raycast.screen_direction(cam, x, y, g_canvas_w, g_canvas_h)
+    distance = raycast.model_mesh(cam.position, direction, m)
+    if !raycast.hit(distance) { return false }
+    hit = core.v3_add(cam.position, core.v3_mul(direction, distance))
+    if !m.is_instanced {
+        inverse = core.mat4_inverse(m.model_matrix)
+        local = core.mat4_mul_v4(inverse, core.vec4(hit.x, hit.y, hit.z, 1.0))
+        hit = core.vec3(local.x, local.y, local.z)
+    }
+    size = voxel.world_voxel_size(w)
+    g_stroke_cell_x = (hit.x / size) as int
+    g_stroke_cell_z = (hit.z / size) as int
+    return true
+}
+
+// The heights of every column, as one array the stroke keeps.
+column_heights(w: *World) -> ptr {
+    sx = voxel.world_size_x(w)
+    sz = voxel.world_size_z(w)
+    heights = calloc(sx * sz, 4)
+    if heights == null { return null }
+    values = heights as int[]
+    x = 0
+    while x < sx {
+        z = 0
+        while z < sz {
+            values[x * sz + z] = voxel.world_column_height(w, x, z)
+            z = z + 1
+        }
+        x = x + 1
+    }
+    return heights
+}
+
+sculpt_press(x: float, y: float) -> bool {
+    if selected_world() == null {
+        say("select a terrain to sculpt")
+        return false
+    }
+    if !sculpt_cell(x, y) { return false }
+    w = selected_world()
+    g_stroke_before = column_heights(w)
+    g_stroke_world = w as ptr
+    g_stroke_model = selected_model() as ptr
+    g_sculpting = true
+    sculpt_apply()
+    return true
+}
+
+sculpt_move(x: float, y: float) {
+    was_x = g_stroke_cell_x
+    was_z = g_stroke_cell_z
+    if !sculpt_cell(x, y) { return }
+    // Once per cell the cursor crosses, not once per pixel: the brush is a
+    // rate of change of the ground, and a slow drag is not a deeper one.
+    if g_stroke_cell_x == was_x && g_stroke_cell_z == was_z { return }
+    sculpt_apply()
+}
+
+// The brush at the cell under the cursor: every column within its reach
+// moves by the step scaled by how far in it is, up for raise, down for
+// lower; smooth pulls each toward the mean of its neighbours. Then the
+// terrain is built again.
+sculpt_apply() {
+    w = g_stroke_world as *World
+    m = g_stroke_model as *Model
+    if w == null || m == null { return }
+    size = voxel.world_voxel_size(w)
+    reach = g_brush_radius / size
+    if reach < 1.0 { reach = 1.0 }
+    span = (reach as int) + 1
+    cx = g_stroke_cell_x
+    cz = g_stroke_cell_z
+    sx = voxel.world_size_x(w)
+    sz = voxel.world_size_z(w)
+    // Read first, then written, so a smoothing pass reads the ground as it
+    // was and not half of it already moved.
+    heights = column_heights(w)
+    if heights == null { return }
+    values = heights as int[]
+    x = cx - span
+    while x <= cx + span {
+        z = cz - span
+        while z <= cz + span {
+            if x >= 0 && z >= 0 && x < sx && z < sz {
+                dx = (x - cx) as float
+                dz = (z - cz) as float
+                distance = core.sqrt_of(dx * dx + dz * dz)
+                if distance <= reach {
+                    inside = 1.0 - distance / reach
+                    height = values[x * sz + z]
+                    target = height
+                    if g_sculpt == SCULPT_RAISE {
+                        target = height + ((inside * BRUSH_STEP + 0.5) as int)
+                    } else if g_sculpt == SCULPT_LOWER {
+                        target = height - ((inside * BRUSH_STEP + 0.5) as int)
+                    } else if g_sculpt == SCULPT_SMOOTH {
+                        sum = 0
+                        n = 0
+                        nx = x - 1
+                        while nx <= x + 1 {
+                            nz = z - 1
+                            while nz <= z + 1 {
+                                if nx >= 0 && nz >= 0 && nx < sx && nz < sz {
+                                    sum = sum + values[nx * sz + nz]
+                                    n = n + 1
+                                }
+                                nz = nz + 1
+                            }
+                            nx = nx + 1
+                        }
+                        mean = (sum as float) / (n as float)
+                        target = ((height as float) + (mean - (height as float)) * inside + 0.5) as int
+                    }
+                    if target != height { voxel.world_set_column_height(w, x, z, target) }
+                }
+            }
+            z = z + 1
+        }
+        x = x + 1
+    }
+    free(heights)
+    rebuild_terrain_model(w, m)
+}
+
+sculpt_end() {
+    g_sculpting = false
+    w = g_stroke_world as *World
+    m = g_stroke_model as *Model
+    if w == null || m == null || g_stroke_before == null { return }
+    stroke = heap.new(Stroke)
+    stroke.world = w as ptr
+    stroke.model = m as ptr
+    stroke.before = g_stroke_before
+    stroke.after = column_heights(w)
+    stroke.columns = voxel.world_size_x(w) * voxel.world_size_z(w)
+    g_stroke_before = null
+    index = list.size(g_strokes)
+    list.add_raw(g_strokes, stroke as ptr)
+    history.history_record(g_history, history.STEP_PROPERTY, m as ptr, SCULPT_SLOT,
+                           (index) as float, (index) as float)
+    history.history_close(g_history)
+    changed = 0
+    before = stroke.before as int[]
+    after = stroke.after as int[]
+    i = 0
+    while i < stroke.columns {
+        if before[i] != after[i] { changed = changed + 1 }
+        i = i + 1
+    }
+    say("sculpted ${changed} columns")
+}
+
+// A stroke played back: the terrain's columns put to the heights the stroke
+// recorded, before it for undo and after it for redo, and the model rebuilt.
+apply_stroke(index: int, backwards: bool) {
+    if index < 0 || index >= list.size(g_strokes) { return }
+    stroke = list.get_raw(g_strokes, index) as *Stroke
+    w = stroke.world as *World
+    m = stroke.model as *Model
+    if w == null || m == null { return }
+    heights = stroke.after
+    if backwards { heights = stroke.before }
+    values = heights as int[]
+    sz = voxel.world_size_z(w)
+    i = 0
+    while i < stroke.columns {
+        voxel.world_set_column_height(w, i / sz, i % sz, values[i])
+        i = i + 1
+    }
+    rebuild_terrain_model(w, m)
+    refresh_terrain_section()
+}
+
 set_terrain_style(style: int) {
     w = selected_world()
     if w == null || style == terrain_style() { return }
@@ -4293,6 +4578,8 @@ main() {
     g_shade_toggles = calloc(SHADE_KINDS, 4)
     g_biome_buttons = calloc(terrain.BIOME_COUNT, 4)
     g_style_buttons = calloc(STYLE_KINDS, 4)
+    g_sculpt_buttons = calloc(SCULPT_KINDS, 4)
+    g_strokes = list.new()
     g_script_buttons = calloc(MAX_SCRIPTS, 4)
     // Before the panel is built, because the panel is built out of what this
     // finds: a button per script, and none of them known to this file.
@@ -4533,6 +4820,7 @@ main() {
                 g_last_y = y
                 return
             }
+            if g_sculpt != SCULPT_OFF && sculpt_press(x, y) { return }
             g_pressed = true
             g_moved = false
             g_press_x = x
@@ -4545,6 +4833,10 @@ main() {
                 gizmo_drag(x, y, x - g_last_x, y - g_last_y)
                 g_last_x = x
                 g_last_y = y
+                return
+            }
+            if g_sculpting {
+                sculpt_move(x, y)
                 return
             }
             hovered = gizmo_pick(x, y)
@@ -4568,6 +4860,10 @@ main() {
             if g_gizmo_dragging {
                 g_gizmo_dragging = false
                 g_gizmo_axis = 0 - 1
+                return
+            }
+            if g_sculpting {
+                sculpt_end()
                 return
             }
             if g_pressed && !g_moved { pick_at(x, y) }
@@ -4716,6 +5012,28 @@ main() {
         styles[STYLE_SMOOTH] = smooth_btn
 
         field_row(g_terrain_body, "seed", (DEFAULT_SEED) as float, TERRAIN_SEED_ROW)
+
+        // The brush. Off, the viewport picks and orbits as it always did;
+        // raise, lower or smooth, a press on the terrain sculpts it under
+        // the cursor for as long as the button is held, and the drag is one
+        // undo step.
+        sculpt_row = ui.hstack(g_terrain_body, 6)
+        as_row(sculpt_row)
+        sculpts = g_sculpt_buttons as int[]
+        sculpt_off_btn = ui.btn(sculpt_row, "Off") callback { set_sculpt(SCULPT_OFF) }
+        style_button(sculpt_off_btn, "action")
+        raise_btn = ui.btn(sculpt_row, "Raise") callback { set_sculpt(SCULPT_RAISE) }
+        style_button(raise_btn, "action")
+        lower_btn = ui.btn(sculpt_row, "Lower") callback { set_sculpt(SCULPT_LOWER) }
+        style_button(lower_btn, "action")
+        smooth_brush_btn = ui.btn(sculpt_row, "Smooth out") callback { set_sculpt(SCULPT_SMOOTH) }
+        style_button(smooth_brush_btn, "action")
+        sculpts[SCULPT_OFF] = sculpt_off_btn
+        sculpts[SCULPT_RAISE] = raise_btn
+        sculpts[SCULPT_LOWER] = lower_btn
+        sculpts[SCULPT_SMOOTH] = smooth_brush_btn
+        paint_segments(g_sculpt_buttons, SCULPT_KINDS, g_sculpt)
+        inspector_row(g_terrain_body, "brush", 1.0, 200.0, 12.0, BRUSH_ROW)
 
         g_water_divider = ui.divider(right)
         g_water_body = fold_section(right, "WATER")

@@ -29,6 +29,7 @@ exports (
     world_new, world_free,
     world_set, world_get, world_solid, world_in_bounds,
     world_fill_column, world_generate, world_clear,
+    world_column_height, world_set_column_height,
     world_active_count, world_visible_count, world_build, world_build_mesh,
     world_palette_texture, PALETTE_KINDS,
     world_size_x, world_size_z, world_max_height, world_voxel_size,
@@ -166,6 +167,45 @@ world_fill_column(w: *World, x: int, z: int, height: int, id: int) {
     while y < top {
         world_set(w, x, y, z, id)
         y = y + 1
+    }
+}
+
+// How tall a column stands: one past the highest solid cell, zero for an
+// empty column. What a brush reads before it raises or lowers the ground.
+world_column_height(w: *World, x: int, z: int) -> int {
+    if x < 0 || z < 0 || x >= w.size_x || z >= w.size_z { return 0 }
+    y = w.max_height - 1
+    while y >= 0 {
+        if world_solid(w, x, y, z) { return y + 1 }
+        y = y - 1
+    }
+    return 0
+}
+
+// A column made `height` tall. Raised, the new cells take the kind of the
+// cell that was the top, so grass stays grass as a hill grows and sand
+// stays sand; an empty column grows as dirt. Lowered, the cells above are
+// cleared, and what was buried is the top now.
+world_set_column_height(w: *World, x: int, z: int, height: int) {
+    if x < 0 || z < 0 || x >= w.size_x || z >= w.size_z { return }
+    if height < 0 { height = 0 }
+    if height > w.max_height { height = w.max_height }
+    was = world_column_height(w, x, z)
+    if height == was { return }
+    if height > was {
+        kind = DIRT
+        if was > 0 { kind = world_get(w, x, was - 1, z) }
+        y = was
+        while y < height {
+            world_set(w, x, y, z, kind)
+            y = y + 1
+        }
+    } else {
+        y = height
+        while y < was {
+            world_set(w, x, y, z, EMPTY)
+            y = y + 1
+        }
     }
 }
 

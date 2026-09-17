@@ -114,17 +114,19 @@ def editor_output():
     return note + "\n  editor said:\n    " + "\n    ".join(tail)
 
 
-def post(port, path):
+def post(port, path, quiet=False):
     """POST to the driver. A route that answers 404 is a check that failed, not
     a run that ends: one unreachable route used to abort the script and take
-    the twenty checks after it with it."""
+    the twenty checks after it with it. `quiet` is for a probe that expects
+    to miss."""
     req = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path),
                                  data=b"", method="POST")
     try:
         with urllib.request.urlopen(req, timeout=3) as r:
             return r.read()
     except urllib.error.HTTPError as e:
-        print("   note  %s answered %d" % (path, e.code))
+        if not quiet:
+            print("   note  %s answered %d" % (path, e.code))
         return b""
 
 
@@ -701,6 +703,62 @@ def main():
                                        seconds=20.0)
                 check("smoothing one gives it a surface of its own", ok,
                       "%d triangles then %d" % (blocky, triangles(widgets)))
+
+            # The brush. Raise is pressed, the canvas is pressed where the
+            # terrain stands after framing it, and the console says how many
+            # columns moved: a stroke that reached the ground and not just a
+            # button that lit.
+            widgets = tree(args.port)
+            raise_btn = find(widgets, "button", "Raise")
+            # The viewport's overlay canvas is the big one, and its size is
+            # where the centre of the view is. The canvas routes take the
+            # canvas's own handle, not its widget id: handles count from one
+            # in the order the canvases were made, so the one with the
+            # editor's hit-test closures is found by asking each in turn.
+            canvas = sorted([w for w in widgets.values() if w["type"] == "canvas"],
+                            key=lambda w: w["w"] * w["h"], reverse=True)
+            check("the terrain section offers a brush", raise_btn is not None)
+            handle = None
+            for candidate in range(1, 6):
+                if post(args.port, "/canvas/%d/key?name=f" % candidate, quiet=True):
+                    handle = candidate
+                    break
+            check("the viewport takes keys over the channel", handle is not None)
+            if raise_btn is not None and canvas and handle is not None:
+                post(args.port, "/widget/%d/click" % raise_btn)
+                cx = canvas[0]["w"] / 2
+                cy = canvas[0]["h"] / 2
+                post(args.port, "/canvas/%d/click?x=%d&y=%d" % (handle, cx, cy))
+                post(args.port, "/canvas/%d/move?x=%d&y=%d" % (handle, cx + 12, cy + 4))
+                post(args.port, "/canvas/%d/release?x=%d&y=%d" % (handle, cx + 12, cy + 4))
+                def sculpted(ws):
+                    for w in ws.values():
+                        if w["type"] == "text" and "sculpted " in w["text"]:
+                            try:
+                                return int(w["text"].split("sculpted ")[1].split()[0])
+                            except (IndexError, ValueError):
+                                return 0
+                    return 0
+
+                widgets, ok = wait_for(args.port, lambda ws: sculpted(ws) > 0, seconds=20.0)
+                check("a stroke on the terrain moves its columns", ok,
+                      "sculpted %d" % sculpted(widgets))
+                # A stroke is one undo step from press to release, and undoing
+                # it puts the ground back: the surface's triangle count after
+                # the stroke is not the count before it, and after undo it is.
+                raised = triangles(widgets)
+                undo_btn = find(widgets, "button", "Undo")
+                if undo_btn is not None and blocky > 0:
+                    post(args.port, "/widget/%d/click" % undo_btn)
+                    widgets, ok = wait_for(args.port,
+                                           lambda ws: triangles(ws) != raised,
+                                           seconds=20.0)
+                    check("undoing the stroke rebuilds the terrain as it was", ok,
+                          "%d triangles after the stroke, %d after undo"
+                          % (raised, triangles(widgets)))
+                off_btn = find(widgets, "button", "Off")
+                if off_btn is not None:
+                    post(args.port, "/widget/%d/click" % off_btn)
 
         # Two objects selected at once is checked by the editor's own report,
         # not here: the test server clicks without modifiers and ui.modifiers()

@@ -288,9 +288,10 @@ tool and the engine. The protocol is documented in [docs/agent.md](docs/agent.md
 `editor/` is a scene editor whose chrome is
 [aether-ui](https://github.com/aether-lang-dev/aether-ui): a hierarchy, an
 asset browser, a console, an inspector that changes with the selection, a
-viewport you orbit and click to select in, a transform gizmo, and undo. Objects
-are meshes, water, voxel worlds or lights, each carrying a component the
-inspector shows the right section for; a behaviour can be attached to any
+viewport you orbit and click to select in, a transform gizmo, a sculpting
+brush that raises, lowers and smooths a terrain under the cursor, and undo.
+Objects are meshes, water, voxel worlds or lights, each carrying a component
+the inspector shows the right section for; a behaviour can be attached to any
 object and runs in the frame loop. It runs on either renderer
 (`AE3D_EDITOR_BACKEND=vulkan`). See [docs/editor.md](docs/editor.md).
 
