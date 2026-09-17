@@ -27,7 +27,7 @@ exports (
     world_fill_column, world_generate, world_clear,
     world_active_count, world_visible_count, world_build,
     world_size_x, world_size_z, world_max_height, world_voxel_size,
-    world_set_origin, world_origin_seed, world_origin_kind,
+    world_set_origin, world_origin_seed, world_origin_kind, world_set_base_height,
     palette_set, palette_reset, palette_color,
     world_sdf_enable, world_sdf_set, world_sdf_get, world_sdf_from_voxels,
     world_build_surface
@@ -67,12 +67,17 @@ struct World {
     // the same way again instead of storing a grid it can reproduce.
     origin_seed: long
     origin_kind: int
+    // Where the world's floor sits in the scene, in metres: the instances a
+    // build places are absolute, so a world lowered under a sea is lowered
+    // here and not by moving the model.
+    base_y: float
 }
 
 world_new(size_x: int, size_z: int, max_height: int, voxel_size: float) -> *World {
     if size_x <= 0 || size_z <= 0 || max_height <= 0 { return null }
 
     w = heap.new(World)
+    w.base_y = 0.0
     w.size_x = size_x
     w.size_z = size_z
     w.max_height = max_height
@@ -177,6 +182,8 @@ world_generate(w: *World, generator: fn(ptr, int, int, int) -> int, state: ptr) 
 
 // Recorded by whatever filled the world, and read back by whatever wants to
 // fill another one the same way. The voxel module does not act on either.
+world_set_base_height(w: *World, y: float) { w.base_y = y }
+
 world_set_origin(w: *World, seed: long, kind: int) {
     w.origin_seed = seed
     w.origin_kind = kind
@@ -306,7 +313,7 @@ world_build(w: *World, base: *Model) -> *Model {
             if exposed_at(data, w, x, y, z, index) {
                 core.model_set_instance_position(base, placed,
                     core.vec3((x * 1.0) * w.voxel_size,
-                              (y * 1.0) * w.voxel_size,
+                              (y * 1.0) * w.voxel_size + w.base_y,
                               (z * 1.0) * w.voxel_size))
                 colour = palette_color(w, kind)
                 core.model_set_instance_color(base, placed, colour.x, colour.y, colour.z)
