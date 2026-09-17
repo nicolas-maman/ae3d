@@ -240,6 +240,20 @@ scene_load_attachments(path: string, models: ptr) -> ptr {
             if world != null {
                 terrain.fill_seeded(world, field_int(vox, "seed", 0) as long,
                                     field_int(vox, "biome", terrain.PLAINS))
+                // Then what a hand did to it: the columns whose height is
+                // not what the seed makes, as x, z, height triples.
+                columns = json.object_get_raw(vox, "columns")
+                if columns != null {
+                    count = json.array_size(columns)
+                    k = 0
+                    while k + 2 < count {
+                        voxel.world_set_column_height(world,
+                            json.get_int(json.array_get_raw(columns, k)),
+                            json.get_int(json.array_get_raw(columns, k + 1)),
+                            json.get_int(json.array_get_raw(columns, k + 2)))
+                        k = k + 3
+                    }
+                }
             }
         }
 
@@ -338,9 +352,10 @@ scene_load_lights(path: string) -> ptr {
 // EDITABLE again: six numbers reproduce it exactly, where the grid they replace
 // is a megabyte and a half for a world of any size.
 //
-// That holds while every world comes from a generator. The day voxels can be
-// edited by hand, a world that was edited is no longer what its seed makes, and
-// the grid has to be written instead.
+// That holds for what the generator made. What a hand did afterwards -- the
+// sculpting brush raises and lowers columns -- is written as the columns whose
+// height is not what the seed makes, x, z and height each, which is a few
+// numbers for a stroke and nothing at all for a world nobody touched.
 world_json(w: *World) -> ptr {
     out = json.obj()
     json.object_set_raw(out, "size_x", json.from_int(voxel.world_size_x(w)))
@@ -349,6 +364,36 @@ world_json(w: *World) -> ptr {
     json.object_set_raw(out, "voxel_size", json.num(voxel.world_voxel_size(w)))
     json.object_set_raw(out, "seed", json.from_int(voxel.world_origin_seed(w) as int))
     json.object_set_raw(out, "biome", json.from_int(voxel.world_origin_kind(w)))
+
+    // The world the seed makes, for the columns to be compared against.
+    pristine = voxel.world_new(voxel.world_size_x(w), voxel.world_size_z(w),
+                               voxel.world_max_height(w), voxel.world_voxel_size(w))
+    if pristine != null {
+        terrain.fill_seeded(pristine, voxel.world_origin_seed(w), voxel.world_origin_kind(w))
+        columns = json.arr()
+        edited = 0
+        x = 0
+        while x < voxel.world_size_x(w) {
+            z = 0
+            while z < voxel.world_size_z(w) {
+                height = voxel.world_column_height(w, x, z)
+                if height != voxel.world_column_height(pristine, x, z) {
+                    json.array_add_raw(columns, json.from_int(x))
+                    json.array_add_raw(columns, json.from_int(z))
+                    json.array_add_raw(columns, json.from_int(height))
+                    edited = edited + 1
+                }
+                z = z + 1
+            }
+            x = x + 1
+        }
+        voxel.world_free(pristine)
+        if edited > 0 {
+            json.object_set_raw(out, "columns", columns)
+        } else {
+            json.free(columns)
+        }
+    }
     return out
 }
 

@@ -53,6 +53,20 @@ per filled cell; smooth meshes the same field into one surface. Voxels are one
 way of meshing a terrain rather than what a terrain is, and both come from the
 same world, the same seed and the same five shapes.
 
+**Sculpting.** Under the style is the brush: Off, Raise, Lower and Smooth
+out, and its reach in metres. With the brush on, a press on the selected
+terrain moves the ground under the cursor and a drag keeps moving it, once
+per cell the cursor crosses -- the brush is a rate of change of the ground,
+so a slow drag is not a deeper one. Raise and Lower move each column within
+reach by up to two cells at the centre, falling off to nothing at the edge;
+Smooth out pulls each toward the mean of its neighbours. A raised column
+grows in the kind its top was, so grass stays grass and sand stays sand, and
+a lowered one uncovers what was under it. The terrain is rebuilt after every
+touch, blocks or smooth. A stroke, press to release, is one undo step, whose
+before and after are the terrain's column heights. Changing the shape, the
+seed or the style fills the world again from its seed, which is to say it
+discards the sculpting; undo brings it back.
+
 Changing the shape, the seed or the style fills the same world again and gives
 the model that is already there its new geometry, so the object keeps its place
 in the scene and its place in the undo history. The renderers decide a model's
@@ -169,10 +183,11 @@ clip planes, and whether face and frustum culling were on.
 
 A voxel world is written as what it takes to fill one again, its size and its
 seed and its terrain, rather than as its grid: six numbers reproduce it exactly,
-where the grid they replace is a megabyte and a half. That holds while every
-world comes from a generator, and the day voxels can be edited by hand a world
-that was edited is no longer what its seed makes, so the grid has to be written
-instead.
+where the grid they replace is a megabyte and a half. What a hand did to it
+afterwards is written beside them as `columns`: every column whose height is
+not what the seed makes, as x, z and height, which is a few numbers for a
+stroke of the brush and nothing at all for a world nobody touched. Loading
+fills the world from its seed and then sets those columns.
 
 `AE3D_EDITOR_SCENE=roundtrip` builds the component scene, saves it and opens it
 again before the run starts, so the report describes what came back rather than

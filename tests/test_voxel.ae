@@ -353,8 +353,36 @@ test_face_mesh() {
     voxel.world_free(w)
 }
 
+// A column's height, read and set: what the sculpting brush works in. Raised,
+// the new cells take the kind that was the top, so grass stays grass; lowered,
+// the cells above are cleared and what was buried is the top.
+test_columns() {
+    w = voxel.world_new(4, 4, 12, 1.0)
+    if w == null { record_failure("no world for the columns"); return }
+    check_int("an empty column is nought tall", voxel.world_column_height(w, 1, 1), 0)
+    voxel.world_fill_column(w, 1, 1, 3, voxel.DIRT)
+    voxel.world_set(w, 1, 2, 1, voxel.GRASS)
+    check_int("a column is one past its top", voxel.world_column_height(w, 1, 1), 3)
+    voxel.world_set_column_height(w, 1, 1, 6)
+    check_int("raised to six", voxel.world_column_height(w, 1, 1), 6)
+    check_int("the new top is what the old top was", voxel.world_get(w, 1, 5, 1), voxel.GRASS)
+    check_int("and the cells between too", voxel.world_get(w, 1, 3, 1), voxel.GRASS)
+    voxel.world_set_column_height(w, 1, 1, 2)
+    check_int("lowered to two", voxel.world_column_height(w, 1, 1), 2)
+    check_int("what was buried is the top", voxel.world_get(w, 1, 1, 1), voxel.DIRT)
+    check_int("above it is air", voxel.world_get(w, 1, 2, 1), voxel.EMPTY)
+    voxel.world_set_column_height(w, 2, 2, 2)
+    check_int("an empty column grows as dirt", voxel.world_get(w, 2, 1, 2), voxel.DIRT)
+    voxel.world_set_column_height(w, 1, 1, 40)
+    check_int("clamped to the world's height", voxel.world_column_height(w, 1, 1), 12)
+    voxel.world_set_column_height(w, 9, 9, 3)
+    check_int("out of bounds is left alone", voxel.world_column_height(w, 9, 9), 0)
+    voxel.world_free(w)
+}
+
 main() {
     test_face_mesh()
+    test_columns()
     test_storage()
     test_visibility()
     test_build()
