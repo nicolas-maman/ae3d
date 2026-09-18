@@ -1,0 +1,134 @@
+// The weather, stepped by hand and read back: the counts a kind sets, the
+// box the particles stay in as they fall and wrap, the fog and the sun it
+// takes and gives back, and the storm's lightning firing and ending.
+//
+// A hidden window for a few frames: the weather is a model in a renderer,
+// so it needs the engine up; its step is called by hand the way the loop
+// would call it, and the last frames draw the storm.
+import ae3d.core
+import ae3d.platform
+import ae3d.engine
+import ae3d.weather
+
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, condition: bool) {
+    g_checks = g_checks + 1
+    if condition {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        g_failures = g_failures + 1
+    }
+}
+
+// Every particle inside the box around the camera, with a margin for the
+// step that carried it to the edge before the wrap.
+all_in_box(w: *Weather, centre: Vec3, half: Vec3) -> bool {
+    i = 0
+    count = weather.weather_particle_count(w)
+    while i < count {
+        p = weather.weather_particle(w, i)
+        if p.x < centre.x - half.x - 1.0 || p.x > centre.x + half.x + 1.0 { return false }
+        if p.y < centre.y - half.y - 1.0 || p.y > centre.y + half.y + 1.0 { return false }
+        if p.z < centre.z - half.z - 1.0 || p.z > centre.z + half.z + 1.0 { return false }
+        i = i + 1
+    }
+    return true
+}
+
+var g_light: ptr = null
+var g_weather: ptr = null
+
+on_start(state: ptr, e: *Engine) {
+    light = g_light as *Light
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(10.0, 5.0, 20.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+    eye = cam.position
+
+    w = weather.weather_new(e)
+    g_weather = w as ptr
+    check("a new weather is clear", weather.weather_kind(w) == weather.CLEAR && weather.weather_particle_count(w) == 0)
+
+    weather.weather_set(w, weather.RAIN, 0.5)
+    check("half rain is sixty thousand drops", weather.weather_particle_count(w) == 60000)
+    check("rain dims the sun", light.intensity < 2.0 && light.intensity > 1.0)
+    fog = engine.engine_fog(e)
+    check("rain brings its own fog", fog.end < 2000.0 && fog.color.x > 0.3)
+    // The particles scatter around the camera, and stay around it as they
+    // fall through five seconds of frames.
+    centre = core.v3_add(eye, core.v3_mul(cam.front, 45.0 * 0.45))
+    check("the drops start in the box", all_in_box(w, eye, core.vec3(45.0, 22.0, 45.0)))
+    before = weather.weather_particle(w, 7)
+    i = 0
+    while i < 300 {
+        weather.weather_step(w, 1.0 / 60.0)
+        i = i + 1
+    }
+    after = weather.weather_particle(w, 7)
+    check("a drop has moved", !(before.x == after.x && before.y == after.y && before.z == after.z))
+    check("and the drops stay in the box ahead of the camera", all_in_box(w, centre, core.vec3(45.0, 22.0, 45.0)))
+
+    weather.weather_set(w, weather.CLEAR, 0.0)
+    check("clear takes the drops away", weather.weather_particle_count(w) == 0)
+    check("and gives the sun back", light.intensity == 2.0)
+    fog = engine.engine_fog(e)
+    check("and the fog", fog.end == 1000.0 && fog.start == 100.0)
+
+    weather.weather_set(w, weather.SNOW, 1.0)
+    check("full snow is fifty-eight thousand flakes", weather.weather_particle_count(w) == 58000)
+    weather.weather_set(w, weather.DUST, 1.0)
+    check("full dust is sixty thousand motes", weather.weather_particle_count(w) == 60000)
+
+    // A storm flashes: within twelve seconds of frames the light has been
+    // thrown up and brought back.
+    weather.weather_set(w, weather.STORM, 1.0)
+    dimmed = light.intensity
+    check("a storm dims the sun hard", dimmed < 1.0)
+    flashed = false
+    returned = false
+    i = 0
+    while i < 720 {
+        weather.weather_step(w, 1.0 / 60.0)
+        if weather.weather_flashing(w) && light.intensity > dimmed * 4.0 { flashed = true }
+        if flashed && !weather.weather_flashing(w) && light.intensity == dimmed { returned = true }
+        i = i + 1
+    }
+    check("the storm's lightning flashes", flashed)
+    check("and the light comes back after it", returned)
+    // Left storming for the frames that follow, so the engine draws it.
+}
+
+main() {
+    e = engine.engine_new_with(platform.API_GL)
+    engine.engine_set_size(e, 320, 200)
+    engine.engine_set_title(e, "ae3d weather test")
+    engine.engine_set_frame_limit(e, 4)
+    engine.engine_set_camera_input(e, false)
+    engine.engine_set_vsync(e, 0)
+    light = core.light_directional(core.vec3(0.3, 0.8, 0.5), core.vec3(1.0, 1.0, 1.0), 2.0)
+    engine.engine_set_light(e, light)
+    g_light = light as ptr
+    engine.engine_set_fog(e, core.fog_distance(100.0, 1000.0, core.vec3(0.1, 0.2, 0.3), 0.5))
+
+    program = engine.behaviour_new("weather test", null)
+    program.start = on_start
+    engine.engine_add_behaviour(e, program)
+    if !engine.engine_run(e) {
+        println("weather: SKIP no window")
+        engine.engine_free(e)
+        core.light_free(light)
+        return
+    }
+    if g_weather != null { weather.weather_free(g_weather as *Weather) }
+    engine.engine_free(e)
+    core.light_free(light)
+
+    if g_failures == 0 {
+        println("weather: all checks passed (${g_checks})")
+        return
+    }
+    println("weather: ${g_failures} failure(s) of ${g_checks}")
+}

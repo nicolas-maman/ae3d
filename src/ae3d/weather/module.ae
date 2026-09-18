@@ -1,0 +1,307 @@
+// The weather: rain, snow, dust and storm over any scene.
+//
+//   w = weather.weather_new(e)                  // in start, once the engine is up
+//   weather.weather_set(w, weather.STORM, 0.8)  // a kind and how hard, 0..1
+//   weather.weather_set_wind(w, core.vec3(1.0, 0.0, 0.3), 12.0)
+//
+// The weather is a behaviour the engine runs, so a scene sets it and forgets
+// it: every frame the particles step and wrap around the camera, the wind
+// blows them, a storm throws its lightning. The particles are point instances
+// -- a position, a scale, a colour and a phase each, streamed the way the
+// sand's grains are -- stepped in C (native/ae3d_weather.c), so a hundred
+// thousand drops are a fraction of a millisecond of the frame. Rain streaks
+// are a thin box falling fast; snow a small one drifting and swaying; dust a
+// sphere the size of a fist carried by the wind through a haze. A storm is
+// rain with a harder wind, heavier cloud, and lightning: a flash of the key
+// light for a few frames every several seconds, at the storm's own beat.
+//
+// What the weather takes from the scene it gives back: the fog and the cloud
+// cover it sets are restored by weather_set(w, CLEAR, 0), and the key light's
+// intensity by the end of every flash.
+import std.heap
+import ae3d.core
+import ae3d.engine
+import ae3d.loader
+
+exports (
+    Weather, CLEAR, RAIN, SNOW, DUST, STORM,
+    weather_new, weather_free, weather_set, weather_set_wind, weather_kind,
+    weather_intensity, weather_particle_count, weather_flashing, weather_step, weather_particle
+)
+
+extern ae3d_weather_scatter(xyz: ptr, phases: ptr, count: int, cx: float, cy: float, cz: float,
+                            hx: float, hy: float, hz: float, seed: int)
+extern ae3d_weather_step(xyz: ptr, phases: ptr, count: int, dt: float, fall: float,
+                         wx: float, wy: float, wz: float, sway: float, time: float,
+                         cx: float, cy: float, cz: float, hx: float, hy: float, hz: float) -> int
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern sin(x: float) -> float
+
+const CLEAR = 0
+const RAIN = 1
+const SNOW = 2
+const DUST = 3
+const STORM = 4
+
+// The most particles any kind uses at full intensity; the streams are
+// sized to it once and drawn to the count the intensity asks for.
+const MAX_PARTICLES = 120000
+
+struct Weather {
+    engine: ptr
+    kind: int
+    intensity: float
+    wind_dir: Vec3
+    wind_speed: float
+    // The particle stream: the model that draws it, the positions and the
+    // sway phases it is stepped from, and how many are drawn.
+    particles: ptr
+    xyz: ptr
+    phases: ptr
+    count: int
+    // The box around the camera the particles live in.
+    half_x: float
+    half_y: float
+    half_z: float
+    clock: float
+    // The storm's lightning: seconds to the next flash, and frames of the
+    // one under way.
+    next_flash: float
+    flash_left: int
+    light_intensity: float
+    // What the scene had before the weather came, to give back: its fog,
+    // and its key light's intensity, which the weather dims.
+    had_fog: Fog
+    had_light: float
+    behaviour: ptr
+}
+
+weather_new(e: *Engine) -> *Weather {
+    w = heap.new(Weather)
+    w.engine = e as ptr
+    w.kind = CLEAR
+    w.intensity = 0.0
+    w.wind_dir = core.vec3(1.0, 0.0, 0.2)
+    w.wind_speed = 3.0
+    w.count = 0
+    w.half_x = 40.0
+    w.half_y = 25.0
+    w.half_z = 40.0
+    w.clock = 0.0
+    w.next_flash = 4.0
+    w.flash_left = 0
+    w.light_intensity = 0.0 - 1.0
+    w.had_fog = engine.engine_fog(e)
+    w.had_light = 0.0 - 1.0
+    w.xyz = calloc(MAX_PARTICLES * 3, 8)
+    w.phases = calloc(MAX_PARTICLES, 8)
+    // One model for the stream, its mesh swapped by kind: a cube whose
+    // model scale makes it a streak, a flake or a mote.
+    m = loader.cube(1.0)
+    core.model_set_casts_shadow(m, false)
+    core.model_set_exposure(m, 1.0)
+    core.model_enable_instancing(m, MAX_PARTICLES)
+    core.model_enable_point_instancing(m)
+    core.model_enable_instance_colors(m)
+    // Added with its whole stream counted, since a renderer sets up an
+    // instanced model's buffers from the count it has when it is added;
+    // then drawn to none until there is weather.
+    m.visible = false
+    engine.engine_add_model(e, m)
+    core.model_set_instance_draw_count(m, 0)
+    w.particles = m as ptr
+    b = engine.behaviour_new("weather", w as ptr)
+    b.update = on_update
+    engine.engine_add_behaviour(e, b)
+    w.behaviour = b as ptr
+    return w
+}
+
+weather_free(w: *Weather) {
+    if w == null { return }
+    if w.behaviour != null { engine.engine_remove_behaviour(w.engine as *Engine, w.behaviour as *Behaviour) }
+    if w.particles != null {
+        engine.engine_remove_model(w.engine as *Engine, w.particles as *Model)
+        core.model_free(w.particles as *Model)
+    }
+    if w.xyz != null { free(w.xyz) }
+    if w.phases != null { free(w.phases) }
+    heap.free(w)
+}
+
+weather_kind(w: *Weather) -> int { return w.kind }
+weather_intensity(w: *Weather) -> float { return w.intensity }
+weather_particle_count(w: *Weather) -> int { return w.count }
+weather_flashing(w: *Weather) -> bool { return w.flash_left > 0 }
+
+weather_set_wind(w: *Weather, direction: Vec3, speed: float) {
+    w.wind_dir = core.v3_normalize(direction)
+    w.wind_speed = speed
+}
+
+// The kind and its intensity, 0..1: the particle count, their size and
+// colour, the fog and the cloud cover follow from it.
+weather_set(w: *Weather, kind: int, intensity: float) {
+    e = w.engine as *Engine
+    m = w.particles as *Model
+    w.kind = kind
+    w.intensity = core.clampf(intensity, 0.0, 1.0)
+    end_flash(w)
+    light = engine.engine_light(e)
+    if light != null {
+        if w.had_light < 0.0 { w.had_light = light.intensity }
+        light.intensity = w.had_light
+    }
+    if kind == CLEAR || w.intensity <= 0.0 {
+        w.kind = CLEAR
+        w.count = 0
+        core.model_set_instance_draw_count(m, 0)
+        m.visible = false
+        engine.engine_set_fog(e, w.had_fog)
+        engine.engine_set_clouds(e, 0.0, 1.0)
+        engine.engine_set_sky_overcast(e, 0.0, core.vec3(0.5, 0.5, 0.5))
+        return
+    }
+    // The sun under the weather: dimmed by the cloud that brings it.
+    dim = 1.0
+    if kind == RAIN { dim = 1.0 - 0.45 * w.intensity }
+    if kind == STORM { dim = 1.0 - 0.7 * w.intensity }
+    if kind == SNOW { dim = 1.0 - 0.35 * w.intensity }
+    if kind == DUST { dim = 1.0 - 0.5 * w.intensity }
+    if light != null { light.intensity = w.had_light * dim }
+    at = eye(e)
+    if kind == RAIN || kind == STORM {
+        w.count = (20000.0 + 80000.0 * w.intensity) as int
+        w.half_x = 45.0
+        w.half_y = 22.0
+        w.half_z = 45.0
+        // A streak: a finger thin, half a metre long, pale and translucent
+        // against the sky, glowing a little so the light does not paint it
+        // the colour of the ground.
+        core.model_set_scale(m, 0.012, 0.5, 0.012)
+        core.model_matte(m, 0.70, 0.76, 0.86)
+        core.model_set_alpha(m, 0.4)
+        fog_end = 2600.0 - 1500.0 * w.intensity
+        if kind == STORM { fog_end = 1800.0 - 1200.0 * w.intensity }
+        engine.engine_set_fog(e, core.fog_distance(30.0, fog_end, core.vec3(0.40, 0.43, 0.48), 1.0))
+        cover = 0.75 + 0.25 * w.intensity
+        if kind == STORM { cover = 1.0 }
+        engine.engine_set_clouds(e, cover, 2.0 + 3.0 * w.intensity)
+        // The sky goes to the grey of a wet day, darker in a storm.
+        grey = core.vec3(0.62, 0.65, 0.70)
+        if kind == STORM { grey = core.vec3(0.40, 0.42, 0.47) }
+        engine.engine_set_sky_overcast(e, 0.55 + 0.45 * w.intensity, grey)
+    }
+    if kind == SNOW {
+        w.count = (8000.0 + 50000.0 * w.intensity) as int
+        w.half_x = 35.0
+        w.half_y = 18.0
+        w.half_z = 35.0
+        core.model_set_scale(m, 0.045, 0.045, 0.045)
+        core.model_matte(m, 0.96, 0.97, 1.0)
+        core.model_set_alpha(m, 0.85)
+        engine.engine_set_fog(e, core.fog_distance(15.0, 2200.0 - 1400.0 * w.intensity, core.vec3(0.72, 0.74, 0.78), 1.0))
+        engine.engine_set_clouds(e, 0.7 + 0.3 * w.intensity, 1.0)
+        engine.engine_set_sky_overcast(e, 0.6 + 0.4 * w.intensity, core.vec3(0.78, 0.80, 0.84))
+    }
+    if kind == DUST {
+        w.count = (15000.0 + 45000.0 * w.intensity) as int
+        w.half_x = 50.0
+        w.half_y = 14.0
+        w.half_z = 50.0
+        core.model_set_scale(m, 0.12, 0.12, 0.12)
+        core.model_matte(m, 0.76, 0.62, 0.42)
+        core.model_set_alpha(m, 0.3)
+        // The storm's haze: the world goes ochre and short, sky and all.
+        engine.engine_set_fog(e, core.fog_distance(5.0, 900.0 - 720.0 * w.intensity, core.vec3(0.66, 0.52, 0.34), 1.0))
+        engine.engine_set_clouds(e, 0.4 + 0.4 * w.intensity, 3.0)
+        engine.engine_set_sky_overcast(e, 0.5 + 0.5 * w.intensity, core.vec3(0.80, 0.62, 0.40))
+    }
+    if w.count > MAX_PARTICLES { w.count = MAX_PARTICLES }
+    ae3d_weather_scatter(w.xyz, w.phases, w.count, at.x, at.y, at.z, w.half_x, w.half_y, w.half_z, kind * 977 + 13)
+    core.model_set_instance_draw_count(m, w.count)
+    core.model_set_instance_positions(m, w.xyz, w.count)
+    m.visible = true
+}
+
+on_update(state: ptr, e: *Engine, delta: float) {
+    weather_step(state as *Weather, delta)
+}
+
+// Where particle `index` is now, for a program that reads the weather back.
+weather_particle(w: *Weather, index: int) -> Vec3 {
+    if index < 0 || index >= w.count { return core.vec3(0.0, 0.0, 0.0) }
+    xyz = w.xyz as float[]
+    return core.vec3(xyz[index * 3], xyz[index * 3 + 1], xyz[index * 3 + 2])
+}
+
+// Where the eye is and where it looks: the engine's camera, which exists
+// once the engine runs; before that, the origin looking down -Z.
+eye(e: *Engine) -> Vec3 {
+    cam = engine.engine_camera(e)
+    if cam == null { return core.vec3(0.0, 0.0, 0.0) }
+    return cam.position
+}
+
+gaze(e: *Engine) -> Vec3 {
+    cam = engine.engine_camera(e)
+    if cam == null { return core.vec3(0.0, 0.0, 0.0 - 1.0) }
+    return cam.front
+}
+
+// The frame's step: the particles fall and wrap around the camera, and a
+// storm keeps its lightning. The engine's loop calls it through the
+// weather's behaviour; a test calls it by hand.
+weather_step(w: *Weather, delta: float) {
+    e = w.engine as *Engine
+    if w.kind == CLEAR || w.count == 0 { return }
+    w.clock = w.clock + delta
+    // The box rides ahead of the camera, so what falls in front of the eye
+    // is dense and what falls behind it is not drawn.
+    centre = core.v3_add(eye(e), core.v3_mul(gaze(e), w.half_z * 0.45))
+    fall = 9.0
+    sway = 0.0
+    wind = core.v3_mul(w.wind_dir, w.wind_speed)
+    if w.kind == STORM { fall = 14.0 ; wind = core.v3_mul(w.wind_dir, w.wind_speed * 1.8) }
+    if w.kind == SNOW { fall = 1.1 ; sway = 0.7 }
+    if w.kind == DUST { fall = 0.25 ; sway = 1.2 }
+    ae3d_weather_step(w.xyz, w.phases, w.count, delta, fall, wind.x, wind.y, wind.z, sway, w.clock,
+                      centre.x, centre.y, centre.z, w.half_x, w.half_y, w.half_z)
+    core.model_set_instance_positions(w.particles as *Model, w.xyz, w.count)
+
+    if w.kind == STORM { lightning(w, e, delta) }
+}
+
+// A flash: the key light thrown up for a few frames, its return to what it
+// was staggered over two so the flash reads as a flicker rather than a
+// step, then the next some seconds off at the storm's own beat.
+lightning(w: *Weather, e: *Engine, delta: float) {
+    light = engine.engine_light(e)
+    if light == null { return }
+    if w.flash_left > 0 {
+        w.flash_left = w.flash_left - 1
+        if w.flash_left == 0 {
+            end_flash(w)
+        } else if w.flash_left == 1 {
+            light.intensity = w.light_intensity * 3.0
+        }
+        return
+    }
+    w.next_flash = w.next_flash - delta
+    if w.next_flash > 0.0 { return }
+    w.light_intensity = light.intensity
+    light.intensity = light.intensity * (8.0 + 6.0 * w.intensity)
+    w.flash_left = 3
+    // Three to nine seconds between flashes, closer the harder it storms,
+    // from the clock rather than a random, so a run is repeatable.
+    w.next_flash = 3.0 + (1.0 - w.intensity) * 4.0 + 2.0 * (0.5 + 0.5 * sin(w.clock * 7.3))
+}
+
+end_flash(w: *Weather) {
+    if w.light_intensity < 0.0 { return }
+    light = engine.engine_light(w.engine as *Engine)
+    if light != null && w.flash_left >= 0 { light.intensity = w.light_intensity }
+    w.light_intensity = 0.0 - 1.0
+    w.flash_left = 0
+}

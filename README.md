@@ -25,6 +25,7 @@ skinned instanced crowds, and an engine that can be interrogated while it runs.
 | **Two renderers, one interface** | Vulkan by default, OpenGL 4.1 at parity; `tests/test_backend_parity` draws the same scene through both and holds them to 0.7% of channels. DirectX 12 and Metal are on the roadmap ([#311](https://github.com/nicolas-maman/ae3d/issues/311), [#312](https://github.com/nicolas-maman/ae3d/issues/312)). |
 | **Physically based shading** | Metallic/roughness materials, four lights, normal mapping, texel-snapped shadow maps, SSAO, screen-space reflections, MSAA, FXAA, bloom, ACES tone mapping, fog. |
 | **A sky by the hour** | `engine_set_time_of_day(hours)` places the sun and derives the key light, fog and a procedural sky from it. Volumetric clouds from baked Perlin-Worley textures, lit through a sun march, shadowing the ground: ~1.5 ms a frame. |
+| **Weather** | Rain, snow, dust and storm over any scene (`ae3d.weather`): a hundred thousand point-instanced particles stepped in C around the camera, wind, the sky and clouds gone overcast, the fog and the sun to match, lightning in a storm. |
 | **Water** | A Gerstner sea with dispersion, fresnel, GGX glitter, whitecaps, depth-based shallows and a foam line, and caustics from underneath. |
 | **Crowds** | A figure's walk baked into a pose bank; every instance posed in the vertex shader from its own phase. Twenty thousand of the 26k-triangle zombie in two draws, feet planted. |
 | **Instancing and ECS** | Instances as matrices or as eight-float points (a million grains of sand in a 32 MB stream); `ae3d.ecs` keeps components in dense columns the crowd systems walk in C. |
@@ -174,7 +175,7 @@ git clone https://github.com/aether-lang-dev/aether-ui.git ../aether-ui
 | `sand.ae` | A million point-instanced grains falling onto a heap you plough |
 | `black_hole.ae` | Kerr geodesics per pixel ([docs/black-hole.md](docs/black-hole.md)) |
 | `voxel_world.ae` | A voxel island with a forest, under the morning sun |
-| `smooth_terrain.ae` | A volcanic island in a sea, an hour before sunset (`AE3D_TIME=HHMM`) |
+| `smooth_terrain.ae` | A volcanic island in a sea, an hour before sunset (`AE3D_TIME=HHMM`); `AE3D_WEATHER=rain\|snow\|dust\|storm` over it |
 | `models.ae` | OBJ loading, one group per material |
 | `lights.ae` | Material presets, light types, bloom, transparency |
 | `blender_pipeline.ae` | A model authored and keyed in Blender, exported, loaded and played |

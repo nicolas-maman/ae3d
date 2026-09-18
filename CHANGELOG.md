@@ -63,6 +63,23 @@
   stamps the sky's end all the same, so its opaque draws are no longer
   charged to the sky.
 
+### Weather
+
+- `ae3d.weather`: rain, snow, dust and storm over any scene, as point
+  instances stepped in C (`native/ae3d_weather.c`) in a box that rides
+  ahead of the camera; each kind brings its fog, cloud cover, sky overcast
+  and a dimmed sun, and a storm its lightning; `weather_set(w, CLEAR, 0)`
+  gives everything back. `AE3D_WEATHER=rain|snow|dust|storm` and
+  `AE3D_WEATHER_LEVEL` on `smooth_terrain`; `tests/test_weather`.
+- `engine_set_sky_overcast(amount, colour)`: the sky, painted or by the
+  hour, pulled toward a flat cast at its own brightness, on both backends.
+- The sea takes the scene's fog. The water surface carried a haze of its
+  own (a fraction of the ocean's size, sky blue, a third strong) that
+  overrode whatever the scene set, so a fog that buried the island left
+  the sea beside it blue.
+- A Vulkan instance stream that was empty when its model was added gets
+  its buffer the first frame it has instances.
+
 ### The channel's client, in Aether
 
 - `tools/ae3d_agent.ae` replaces `tools/ae3d_agent.py`: the same command

@@ -71,6 +71,23 @@ The feature list in full, with the reasoning behind each. The [README](../README
   the same weather field where the sun's ray meets the layer, so their
   shadows cross the terrain as they drift. One call,
   `engine_set_clouds(cover, wind)`, on either backend.
+- **Weather.** `ae3d.weather` puts rain, snow, dust or a storm over any
+  scene with one call: `weather_set(w, STORM, 0.8)`. The particles are point
+  instances -- a position, a scale, a colour and a phase each, the stream
+  the sand's grains use -- stepped in C in a box that rides ahead of the
+  camera, so a hundred thousand drops cost a fraction of a millisecond
+  wherever the eye goes; rain is a thin streak falling fast, snow a flake
+  swaying down, dust a mote carried by the wind. Each kind sets the fog it
+  brings, the cloud cover, the sky's overcast (`engine_set_sky_overcast`:
+  the sky pulled toward a flat grey or ochre at its own brightness, which
+  the clouds' ambient follows) and dims the sun; a storm adds lightning, the
+  key light thrown up for three frames every few seconds at the storm's own
+  beat. What the weather takes it gives back when set clear. The weather is
+  a behaviour the engine runs; `tests/test_weather` holds the counts, the
+  box, the sun, the fog and the lightning to their numbers.
+
+  ![Rain, storm, dust and snow over the island](weather.png)
+
 - **Voxel worlds as a face mesh.** Only the faces that show, each corner
   carrying the sky it can see from the three voxels that crowd it -- the
   darkening in a crevice and the light on an edge a voxel world reads by --

@@ -12,6 +12,9 @@ import ae3d.voxel
 import ae3d.rendering
 import ae3d.water
 import ae3d.sky
+import ae3d.weather
+import std.os
+import std.string
 
 extern clock_ns() -> long
 extern pow(x: float, y: float) -> float
@@ -38,6 +41,7 @@ const HAZE_G = 0.80
 const HAZE_B = 0.70
 
 var g_world: ptr = null
+var g_weather: ptr = null
 var g_surface: ptr = null
 var g_sea: ptr = null
 
@@ -299,6 +303,20 @@ on_start(state: ptr, e: *Engine) {
     core.camera_look_at(cam, core.vec3(core.env_int("AE3D_AIMX", 480) as float,
                                        core.env_int("AE3D_AIMY", 80) as float,
                                        core.env_int("AE3D_AIMZ", 480) as float))
+    // The weather, over everything: AE3D_WEATHER=rain|snow|dust|storm and
+    // AE3D_WEATHER_LEVEL=0..100 for how hard, off by default.
+    w = weather.weather_new(e)
+    g_weather = w as ptr
+    wanted = os.getenv("AE3D_WEATHER")
+    if wanted != null {
+        kind = weather.CLEAR
+        if string.equals(wanted, "rain") == 1 { kind = weather.RAIN }
+        if string.equals(wanted, "snow") == 1 { kind = weather.SNOW }
+        if string.equals(wanted, "dust") == 1 { kind = weather.DUST }
+        if string.equals(wanted, "storm") == 1 { kind = weather.STORM }
+        weather.weather_set_wind(w, core.vec3(0.0 - 0.6, 0.0, 0.8), 6.0)
+        weather.weather_set(w, kind, core.env_int("AE3D_WEATHER_LEVEL", 70) as float / 100.0)
+    }
 }
 
 on_update(state: ptr, e: *Engine, delta: float) {
@@ -341,5 +359,6 @@ main() {
     sea = g_sea as *Simulation
     if sea != null { water.simulation_free(sea) }
     core.light_free(light)
+    if g_weather != null { weather.weather_free(g_weather as *Weather) }
     engine.engine_free(e)
 }
