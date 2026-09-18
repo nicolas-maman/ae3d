@@ -23,8 +23,12 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 model;
     mat4 viewProjection;
     mat4 lightSpaceMatrix;
+    mat4 prevModel;
+    mat4 prevViewProjection;
     bool isSkinned;
     mat4 bones[96];
+    vec2 jitter;
+    vec2 screenSize;
     int lightCount;
     bool impostor;
     int captureChannel;
@@ -100,12 +104,9 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 invViewProjection;
     float ssrRoadHeight;
     float ssrStrength;
-    vec2 screenSize;
     float ssaoRadius;
     float ssaoIntensity;
     int depthSampleCount;
-    mat4 prevViewProjection;
-    vec2 jitter;
     float taaBlend;
     float time;
     float waveSpeedMultiplier;
@@ -144,6 +145,8 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     int impostorRows;
     float impostorWidth;
     float impostorHeight;
+    float crowdTravel;
+    float crowdPhaseStep;
 };
 layout(set = 0, binding = 1) uniform sampler2D screenTexture;
 

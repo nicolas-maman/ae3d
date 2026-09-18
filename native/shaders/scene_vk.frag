@@ -24,8 +24,12 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 model;
     mat4 viewProjection;
     mat4 lightSpaceMatrix;
+    mat4 prevModel;
+    mat4 prevViewProjection;
     bool isSkinned;
     mat4 bones[96];
+    vec2 jitter;
+    vec2 screenSize;
     int lightCount;
     bool impostor;
     int captureChannel;
@@ -101,12 +105,9 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 invViewProjection;
     float ssrRoadHeight;
     float ssrStrength;
-    vec2 screenSize;
     float ssaoRadius;
     float ssaoIntensity;
     int depthSampleCount;
-    mat4 prevViewProjection;
-    vec2 jitter;
     float taaBlend;
     float time;
     float waveSpeedMultiplier;
@@ -145,6 +146,8 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     int impostorRows;
     float impostorWidth;
     float impostorHeight;
+    float crowdTravel;
+    float crowdPhaseStep;
 };
 layout(set = 0, binding = 1) uniform sampler2D textureSampler;
 layout(set = 0, binding = 2) uniform sampler2D shadowMap;
@@ -154,6 +157,11 @@ layout(location = 1) in vec3 Normal;
 layout(location = 2) in vec3 FragPos;
 layout(location = 3) in vec3 InstanceColor;
 layout(location = 4) in vec4 FragPosLightSpace;
+layout(location = 6) in vec4 ClipNow;
+layout(location = 7) in vec4 ClipPrev;
+layout(location = 1) out vec2 outVelocity;
+
+
 // How much of the sky this point can see, baked against the whole scene.
 // Ambient is light arriving from everywhere, so it is the term this belongs
 // to: without it a corner is as bright as an open wall and every surface reads
@@ -956,6 +964,19 @@ vec3 direct_light(Light L, vec3 norm, vec3 viewDir, vec3 albedo, vec3 F0,
     return lit + fillLight * tempAdjustedLightColor * albedo * 0.2;
 }
 
+
+// Where this pixel's surface was last frame, for the temporal passes: the
+// clip positions the vertex stage carried, this frame's unnudged (the
+// frame is drawn through the jittered projection; the jitter is taken back
+// out) less the last frame's, in texture space. A pixel nothing drew keeps
+// the target's clear, zero. See docs/rendering.md, "Motion vectors".
+vec2 velocity(vec4 now, vec4 prev, vec2 nudge) {
+    if (now.w <= 0.0 || prev.w <= 0.0) return vec2(0.0);
+    vec2 uvNow = now.xy / now.w * 0.5 + 0.5 - nudge;
+    vec2 uvPrev = prev.xy / prev.w * 0.5 + 0.5;
+    return uvNow - uvPrev;
+}
+
 void main() {
 
     vec4 texColor = texture(textureSampler, fragTexCoord);
@@ -996,12 +1017,21 @@ void main() {
     } else if (hasNormalMap) {
         norm = mapped_normal(norm, FragPos, fragTexCoord);
     }
+    // Before the capture channels return: a channel's frame carries the
+    // motion too.
+    outVelocity = velocity(ClipNow, ClipPrev, jitter);
     if (captureChannel == 1) {
         FragColor = vec4(diffuseColor * texColor.rgb * InstanceColor, texColor.a);
         return;
     }
     if (captureChannel == 2) {
         FragColor = vec4(norm * 0.5 + 0.5, 1.0);
+        return;
+    }
+    // The capture channel for the motion: the vector in pixels, a hundred
+    // pixels either way across the byte, so a test can read a known move.
+    if (captureChannel == 3) {
+        FragColor = vec4(outVelocity * screenSize / 200.0 + 0.5, 0.0, 1.0);
         return;
     }
     vec3 viewDir = normalize(viewPos - FragPos);

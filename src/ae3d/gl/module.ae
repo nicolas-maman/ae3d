@@ -112,6 +112,12 @@ extern ae3d_gl_fbo_bind(fbo: int)
 extern ae3d_gl_fbo_delete(fbo: int)
 extern ae3d_gl_fbo_attach_color(fbo: int, width: int, height: int, hdr: int) -> int
 extern ae3d_gl_fbo_set_color(fbo: int, texture: int)
+extern ae3d_gl_fbo_attach_velocity(fbo: int, width: int, height: int) -> int
+extern ae3d_gl_fbo_attach_velocity_multisample(fbo: int, width: int, height: int, samples: int) -> int
+extern ae3d_gl_draw_buffers(count: int)
+extern ae3d_gl_clear_attachment(index: int, r: float, g: float, b: float, a: float)
+extern ae3d_gl_fbo_resolve_attachment(source: int, destination: int, width: int, height: int, index: int) -> int
+extern ae3d_posebank_travel(bank: ptr, frame: int) -> float
 extern ae3d_gl_fbo_attach_depth(fbo: int, width: int, height: int) -> int
 extern ae3d_gl_geometry_acquire(mesh: ptr) -> int
 extern ae3d_gl_geometry_instance_vbo(vao: int) -> int
@@ -156,6 +162,13 @@ struct ProgramSlots {
     frame_stamp: int
     view_projection: int
     model: int
+    // Last frame's, for the motion vectors, with the frame's nudge and the
+    // crowd's step over the frame.
+    prev_model: int
+    prev_view_projection: int
+    jitter: int
+    crowd_travel: int
+    crowd_phase_step: int
     // The scene depth a water surface reads its shore from.
     scene_depth: int
     has_scene_depth: int
@@ -350,6 +363,13 @@ struct GLRenderer {
     post_ms_fbo: int
     post_ms_color: int
     post_ms_depth: int
+    // The motion vectors beside the colour: the texture the temporal pass
+    // reads, and its multisampled twin the scene draws into.
+    post_velocity: int
+    post_ms_velocity: int
+    // The last frame's time, for the seconds a crowd's vectors span.
+    last_scene_time: float
+    frame_seconds: float
     post_samples: int
     post_width: int
     post_height: int
@@ -512,6 +532,11 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
     s.frame_stamp = 0 - 1
     s.view_projection = ae3d_gl_uniform_location(program, "viewProjection")
     s.model = ae3d_gl_uniform_location(program, "model")
+    s.prev_model = ae3d_gl_uniform_location(program, "prevModel")
+    s.prev_view_projection = ae3d_gl_uniform_location(program, "prevViewProjection")
+    s.jitter = ae3d_gl_uniform_location(program, "jitter")
+    s.crowd_travel = ae3d_gl_uniform_location(program, "crowdTravel")
+    s.crowd_phase_step = ae3d_gl_uniform_location(program, "crowdPhaseStep")
     // One lookup per light per program, done once, because an array of structs
     // gives no guarantee that element locations are contiguous.
     s.light_slots = calloc(MAX_LIGHTS * LIGHT_SLOTS, 4)
@@ -747,6 +772,16 @@ bind_pose_bank(r: *GLRenderer, slots: *ProgramSlots, m: *Model) {
     ae3d_gl_texture_bind(3, m.pose_bank_texture)
     ae3d_gl_uniform_int(slots.pose_bank, 3)
     ae3d_gl_uniform_int(slots.pose_bank_frames, m.pose_bank_frames)
+    // For the motion vectors: how far a figure's walk and its position
+    // moved this frame, from the model's walk cycle and the bank's travel.
+    travel = 0.0
+    step = 0.0
+    if m.crowd_walk > 0.0 {
+        step = r.frame_seconds / m.crowd_walk
+        travel = ae3d_posebank_travel(m.pose_bank, m.pose_bank_frames) * step
+    }
+    ae3d_gl_uniform_float(slots.crowd_travel, travel)
+    ae3d_gl_uniform_float(slots.crowd_phase_step, step)
     // The impostor's atlas grid and size, off for a crowd drawn as itself.
     on = 0
     if core.model_is_impostor(m) { on = 1 }
@@ -1743,6 +1778,7 @@ skybox_create(r: *GLRenderer, path: string) -> *Skybox {
 
     sky.u_view = ae3d_gl_uniform_location(sky.program, "view")
     sky.u_projection = ae3d_gl_uniform_location(sky.program, "projection")
+    sky.u_prev_view_projection = ae3d_gl_uniform_location(sky.program, "prevViewProjection")
     sky.u_sampler = ae3d_gl_uniform_location(sky.program, "skybox")
     sky.u_cloud_cover = ae3d_gl_uniform_location(sky.program, "cloudCover")
     sky.u_sky_overcast = ae3d_gl_uniform_location(sky.program, "skyOvercast")
@@ -1806,6 +1842,10 @@ render_skybox(r: *GLRenderer, cam: *Camera, light: *Light) {
 
     ae3d_gl_uniform_mat4(sky.u_view, &view)
     ae3d_gl_uniform_mat4(sky.u_projection, &projection)
+    // Last frame's view, for the sky's motion vector: the camera's turn.
+    previous = core.camera_view_projection(cam)
+    if r.prev_vp_valid { previous = r.prev_vp }
+    ae3d_gl_uniform_mat4(sky.u_prev_view_projection, &previous)
     ae3d_gl_uniform_int(sky.u_sampler, 0)
 
     ae3d_gl_set_depth_mask(0)
@@ -1905,6 +1945,14 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
     ae3d_gl_set_depth_mask(1)
     ae3d_gl_clear_color(r.clear_r, r.clear_g, r.clear_b, 1.0)
     ae3d_gl_clear(1, 1)
+    // The motion vectors start at zero, whatever the clear colour is.
+    if post_active && r.post_velocity != 0 { ae3d_gl_clear_attachment(1, 0.0, 0.0, 0.0, 0.0) }
+
+    // The seconds since the last frame, for the crowd's motion vectors;
+    // a pause or a first frame counts as a short one.
+    r.frame_seconds = r.scene_time - r.last_scene_time
+    if r.frame_seconds < 0.0 || r.frame_seconds > 0.25 { r.frame_seconds = 0.0 }
+    r.last_scene_time = r.scene_time
 
     set_depth_test(r, core.depth_test())
     if r.skybox != null { render_skybox(r, cam, active_light) }
@@ -1930,7 +1978,7 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
     // when something will read it.
     r.scene_depth = 0
     if wants_scene_depth(r) || r.ssao_enabled || r.enable_taa { r.scene_depth = ae3d_gl_scene_depth_capture() }
-    if r.ssao_enabled && r.scene_depth != 0 { draw_occlusion(r, cam) }
+    if r.ssao_enabled && r.scene_depth != 0 && r.capture_channel == 0 { draw_occlusion(r, cam) }
 
     count = list.size(r.models)
     i = 0
@@ -1946,6 +1994,13 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
     if post_active { resolve_post_processing(r, cam, view_projection, unjittered) }
     r.prev_vp = unjittered
     r.prev_vp_valid = true
+    // Every model's matrix of this frame is last frame's now.
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        if m != null { core.model_frame_done(m) }
+        i = i + 1
+    }
     r.taa_frame = r.taa_frame + 1
     ae3d_gl_passtimer_end(r.pass_timer)
 
@@ -2187,6 +2242,8 @@ draw_batch(r: *GLRenderer, b: *GLBatch, view_projection: *Mat4, light: *Light, c
     // world transforms of the models it merged.
     identity = core.mat4_ident()
     ae3d_gl_uniform_mat4(slots.model, &identity)
+    // Its members stand still: last frame's matrix is this frame's.
+    ae3d_gl_uniform_mat4(slots.prev_model, &identity)
 
     // A batch's members carry no settings of their own, so the program must not
     // still be holding the ones the model before them asked for.
@@ -2445,6 +2502,13 @@ draw(r: *GLRenderer, m: *Model, slots: *ProgramSlots, count: int, byte_offset: i
 set_frame_uniforms(r: *GLRenderer, slots: *ProgramSlots, view_projection: *Mat4,
                    light: *Light, lights: ptr, cam: *Camera) {
     ae3d_gl_uniform_mat4(slots.view_projection, view_projection)
+    // Last frame's view, unjittered, and this frame's nudge: what every
+    // scene shader writes its motion vector from.
+    previous = core.camera_view_projection(cam)
+    if r.prev_vp_valid { previous = r.prev_vp }
+    ae3d_gl_uniform_mat4(slots.prev_view_projection, &previous)
+    ae3d_gl_uniform_vec2(slots.jitter, r.jitter_x, r.jitter_y)
+    ae3d_gl_uniform_vec2(slots.screen_size, r.post_width * 1.0, r.post_height * 1.0)
     ae3d_gl_uniform_float(slots.normal_strength, r.normal_strength)
     ae3d_gl_uniform_float(slots.occlusion_strength, r.occlusion_strength)
     ae3d_gl_uniform_int(slots.capture_channel, r.capture_channel)
@@ -2586,20 +2650,21 @@ bind_shadow_map(r: *GLRenderer, slots: *ProgramSlots) {
 // scaled 2.4 drew its instances at 5.76. The merged-batch path has always sent
 // identity here for the same reason.
 set_model_matrix(slots: *ProgramSlots, m: *Model) {
+    sent = m.model_matrix
     if m.is_instanced && core.model_instance_count(m) > 0 {
         // Points carry a position and a scale only: the model's rotation
         // and scale reach the shader here, in the model matrix with its
         // translation taken out, and each point puts its own back.
         if ae3d_inst_is_points(m.instances) == 1 {
-            placed = point_frame(m)
-            ae3d_gl_uniform_mat4(slots.model, &placed)
-            return
+            sent = point_frame(m)
+        } else {
+            sent = core.mat4_ident()
         }
-        identity = core.mat4_ident()
-        ae3d_gl_uniform_mat4(slots.model, &identity)
-        return
     }
-    ae3d_gl_uniform_mat4(slots.model, &m.model_matrix)
+    ae3d_gl_uniform_mat4(slots.model, &sent)
+    // And last frame's, for the motion vectors.
+    previous = core.model_prev_matrix(m, sent)
+    ae3d_gl_uniform_mat4(slots.prev_model, &previous)
 }
 
 // A model's matrix without its translation: what a point instance is
@@ -2709,6 +2774,7 @@ set_model_uniforms(m: *Model, program: int) {
 init_post_processing(r: *GLRenderer, width: int, height: int) {
     r.post_fbo = ae3d_gl_fbo_create()
     r.post_texture = ae3d_gl_fbo_attach_color(r.post_fbo, width, height, 0)
+    r.post_velocity = ae3d_gl_fbo_attach_velocity(r.post_fbo, width, height)
     r.post_depth = ae3d_gl_fbo_attach_depth(r.post_fbo, width, height)
     if ae3d_gl_fbo_complete() != 1 {
         println("ae3d: post-processing framebuffer incomplete")
@@ -2763,17 +2829,20 @@ resize_post_processing(r: *GLRenderer, width: int, height: int) {
     if clamped_height > MAX_FBO_DIMENSION { clamped_height = MAX_FBO_DIMENSION }
 
     if r.post_texture != 0 { ae3d_gl_texture_delete(r.post_texture) }
+    if r.post_velocity != 0 { ae3d_gl_texture_delete(r.post_velocity) }
     if r.post_depth != 0 { ae3d_gl_renderbuffer_delete(r.post_depth) }
     if r.bloom_texture != 0 { ae3d_gl_texture_delete(r.bloom_texture) }
 
     r.post_width = clamped_width
     r.post_height = clamped_height
     r.post_texture = ae3d_gl_fbo_attach_color(r.post_fbo, clamped_width, clamped_height, 0)
+    r.post_velocity = ae3d_gl_fbo_attach_velocity(r.post_fbo, clamped_width, clamped_height)
     r.post_depth = ae3d_gl_fbo_attach_depth(r.post_fbo, clamped_width, clamped_height)
     ae3d_gl_fbo_bind(0)
 
     if r.post_ms_fbo != 0 {
         if r.post_ms_color != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_color) }
+        if r.post_ms_velocity != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_velocity) }
         if r.post_ms_depth != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_depth) }
         attach_multisample_post(r, clamped_width, clamped_height)
     }
@@ -2821,17 +2890,13 @@ draw_taa(r: *GLRenderer, cam: *Camera, view_projection: Mat4, unjittered: Mat4) 
     ae3d_gl_texture_bind(0, r.post_texture)
     ae3d_gl_texture_bind(1, r.scene_depth)
     ae3d_gl_texture_bind(2, history)
+    ae3d_gl_texture_bind(3, r.post_velocity)
     r.bound_texture = 0 - 1
     ae3d_gl_uniform_int(ae3d_gl_uniform_location(r.taa_program, "screenTexture"), 0)
     ae3d_gl_uniform_int(ae3d_gl_uniform_location(r.taa_program, "depthTexture"), 1)
     ae3d_gl_uniform_int(ae3d_gl_uniform_location(r.taa_program, "historyTexture"), 2)
-    inverse = core.mat4_inverse(view_projection)
-    ae3d_gl_uniform_mat4(ae3d_gl_uniform_location(r.taa_program, "invViewProjection"), &inverse)
-    previous = unjittered
-    if r.prev_vp_valid { previous = r.prev_vp }
-    ae3d_gl_uniform_mat4(ae3d_gl_uniform_location(r.taa_program, "prevViewProjection"), &previous)
+    ae3d_gl_uniform_int(ae3d_gl_uniform_location(r.taa_program, "velocityTexture"), 3)
     ae3d_gl_uniform_vec2(ae3d_gl_uniform_location(r.taa_program, "screenSize"), r.post_width * 1.0, r.post_height * 1.0)
-    ae3d_gl_uniform_vec2(ae3d_gl_uniform_location(r.taa_program, "jitter"), r.jitter_x, r.jitter_y)
     blend = 1.0
     if r.taa_history_valid { blend = 0.1 }
     ae3d_gl_uniform_float(ae3d_gl_uniform_location(r.taa_program, "taaBlend"), blend)
@@ -2849,6 +2914,8 @@ begin_post_processing(r: *GLRenderer) -> bool {
     // buffer, with or without an effect to run afterwards: resolve_post_processing
     // falls back to the passthrough program, so the composite becomes the upscale.
     if !r.enable_fxaa && !r.enable_bloom && !r.enable_taa && r.render_scale > 0.999 { return false }
+    // A capture channel is the surfaces' own numbers: no effect over them.
+    if r.capture_channel != 0 && r.render_scale > 0.999 { return false }
     if r.post_fbo == 0 || r.post_texture == 0 || r.screen_vao == 0 { return false }
 
     width = ae3d_gl_viewport_width()
@@ -2868,6 +2935,8 @@ begin_post_processing(r: *GLRenderer) -> bool {
         bind_output(r)
         return false
     }
+    // The scene writes its colour and its motion vectors.
+    if r.post_velocity != 0 { ae3d_gl_draw_buffers(2) }
     // The scene is drawn at the buffer's size, which is the viewport's only when
     // the render scale is 1. resolve_post_processing puts the viewport back.
     ae3d_gl_viewport(0, 0, r.post_width, r.post_height)
@@ -2914,6 +2983,7 @@ multisample_resolve_works(r: *GLRenderer) -> bool {
 
 drop_multisample_post(r: *GLRenderer) {
     if r.post_ms_color != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_color) ; r.post_ms_color = 0 }
+    if r.post_ms_velocity != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_velocity) ; r.post_ms_velocity = 0 }
     if r.post_ms_depth != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_depth) ; r.post_ms_depth = 0 }
     if r.post_ms_fbo != 0 { ae3d_gl_fbo_delete(r.post_ms_fbo) ; r.post_ms_fbo = 0 }
     r.post_samples = 0
@@ -2922,12 +2992,16 @@ drop_multisample_post(r: *GLRenderer) {
 attach_multisample_post(r: *GLRenderer, width: int, height: int) {
     r.post_ms_color = ae3d_gl_fbo_attach_color_multisample(r.post_ms_fbo, width, height,
                                                            r.post_samples)
+    r.post_ms_velocity = ae3d_gl_fbo_attach_velocity_multisample(r.post_ms_fbo, width, height,
+                                                                 r.post_samples)
     r.post_ms_depth = ae3d_gl_fbo_attach_depth_multisample(r.post_ms_fbo, width, height,
                                                            r.post_samples)
     if ae3d_gl_fbo_complete() != 1 {
         ae3d_gl_renderbuffer_delete(r.post_ms_color)
+        ae3d_gl_renderbuffer_delete(r.post_ms_velocity)
         ae3d_gl_renderbuffer_delete(r.post_ms_depth)
         r.post_ms_color = 0
+        r.post_ms_velocity = 0
         r.post_ms_depth = 0
         r.post_samples = 0
     }
@@ -2935,11 +3009,16 @@ attach_multisample_post(r: *GLRenderer, width: int, height: int) {
 }
 
 resolve_post_processing(r: *GLRenderer, cam: *Camera, view_projection: Mat4, unjittered: Mat4) {
+    // The scene is drawn; the passes after it write the colour alone.
+    if r.post_velocity != 0 { ae3d_gl_draw_buffers(1) }
     if r.post_samples > 0 && r.post_ms_fbo != 0 {
         // The size the buffers were made at, not whatever the viewport says.
         // A resolve of the wrong rectangle leaves the effect reading a frame
         // nothing was written into.
         refused = ae3d_gl_fbo_resolve(r.post_ms_fbo, r.post_fbo, r.post_width, r.post_height)
+        if refused == 0 && r.post_ms_velocity != 0 {
+            refused = ae3d_gl_fbo_resolve_attachment(r.post_ms_fbo, r.post_fbo, r.post_width, r.post_height, 1)
+        }
         if refused != 0 && !r.post_resolve_reported {
             println("ae3d: the driver refused the multisample resolve (0x${refused}), effects will run without it")
             r.post_resolve_reported = true
@@ -3086,6 +3165,7 @@ renderer_cleanup(r: *GLRenderer) {
     if r.bloom_texture != 0 { ae3d_gl_texture_delete(r.bloom_texture) ; r.bloom_texture = 0 }
     if r.post_depth != 0 { ae3d_gl_renderbuffer_delete(r.post_depth) ; r.post_depth = 0 }
     if r.post_ms_color != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_color) ; r.post_ms_color = 0 }
+    if r.post_ms_velocity != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_velocity) ; r.post_ms_velocity = 0 }
     if r.post_ms_depth != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_depth) ; r.post_ms_depth = 0 }
     if r.post_ms_fbo != 0 { ae3d_gl_fbo_delete(r.post_ms_fbo) ; r.post_ms_fbo = 0 }
     if r.post_fbo != 0 { ae3d_gl_fbo_delete(r.post_fbo) ; r.post_fbo = 0 }

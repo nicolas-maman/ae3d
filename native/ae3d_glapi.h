@@ -129,6 +129,10 @@ typedef ptrdiff_t     GLsizeiptr;
 #define GL_RGBA8                0x8058
 #define GL_RENDERBUFFER         0x8D41
 #define GL_COLOR_ATTACHMENT0    0x8CE0
+#define GL_COLOR_ATTACHMENT1    0x8CE1
+#define GL_COLOR                0x1800
+#define GL_RG                   0x8227
+#define GL_RG16F                0x822F
 #define GL_DEPTH_STENCIL_ATTACHMENT 0x821A
 #define GL_DEPTH24_STENCIL8     0x88F0
 #define GL_DEPTH_STENCIL        0x84F9
@@ -218,7 +222,7 @@ typedef ptrdiff_t     GLsizeiptr;
     X(void, glBindRenderbuffer, (GLenum target, GLuint renderbuffer)) \
     X(void, glRenderbufferStorage, (GLenum target, GLenum internalformat, GLsizei w, GLsizei h)) \
     X(void, glRenderbufferStorageMultisample, (GLenum target, GLsizei samples, GLenum internalformat, GLsizei w, GLsizei h)) \
-    X(void, glBlitFramebuffer, (GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLint dx0, GLint dy0, GLint dx1, GLint dy1, GLbitfield mask, GLenum filter)) \
+    X(void, glBlitFramebuffer, (GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLint dx0, GLint dy0, GLint dx1, GLint dy1, GLbitfield mask, GLenum filter))     X(void, glDrawBuffers, (GLsizei n, const GLenum *bufs))     X(void, glClearBufferfv, (GLenum buffer, GLint drawbuffer, const GLfloat *value)) \
     X(void, glFramebufferRenderbuffer, (GLenum target, GLenum attachment, GLenum rbtarget, GLuint renderbuffer)) \
     X(void, glDeleteRenderbuffers, (GLsizei n, const GLuint *renderbuffers)) \
     X(void, glReadPixels, (GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, void *pixels)) \
@@ -312,6 +316,8 @@ int ae3d_glapi_load(void);
 #define glBindRenderbuffer         ae3d_glBindRenderbuffer
 #define glRenderbufferStorageMultisample ae3d_glRenderbufferStorageMultisample
 #define glBlitFramebuffer          ae3d_glBlitFramebuffer
+#define glDrawBuffers              ae3d_glDrawBuffers
+#define glClearBufferfv            ae3d_glClearBufferfv
 #define glRenderbufferStorage      ae3d_glRenderbufferStorage
 #define glFramebufferRenderbuffer  ae3d_glFramebufferRenderbuffer
 #define glDeleteRenderbuffers      ae3d_glDeleteRenderbuffers

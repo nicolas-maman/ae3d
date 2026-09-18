@@ -1020,6 +1020,74 @@ int ae3d_gl_fbo_attach_color(int fbo, int width, int height, int hdr) {
     return (int)texture;
 }
 
+/* The motion vectors beside the colour: a two-channel half-float texture
+   at the framebuffer's second colour attachment, point sampled (a vector
+   is not blended between pixels), and its multisampled renderbuffer twin
+   for the frame that is drawn multisampled and resolved. */
+int ae3d_gl_fbo_attach_velocity(int fbo, int width, int height) {
+    GLuint texture = 0;
+    if (width < 1) width = 1;
+    if (height < 1) height = 1;
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG16F, width, height, 0, GL_RG, GL_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, texture, 0);
+    return (int)texture;
+}
+
+int ae3d_gl_fbo_attach_velocity_multisample(int fbo, int width, int height, int samples) {
+    GLuint rbo = 0;
+    if (width < 1) width = 1;
+    if (height < 1) height = 1;
+    glGenRenderbuffers(1, &rbo);
+    glBindRenderbuffer(GL_RENDERBUFFER, rbo);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_RG16F, width, height);
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)fbo);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_RENDERBUFFER, rbo);
+    return (int)rbo;
+}
+
+/* How many of the bound framebuffer's colour attachments the draws write,
+   from the first: two while the scene is drawn with its motion vectors,
+   one for the passes after, whose shaders have no second output. */
+void ae3d_gl_draw_buffers(int count) {
+    GLenum buffers[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
+    if (count < 1) count = 1;
+    if (count > 2) count = 2;
+    glDrawBuffers(count, buffers);
+}
+
+/* One colour attachment of the bound framebuffer cleared to a value of
+   its own: the motion vectors to zero, whatever the scene's clear colour. */
+void ae3d_gl_clear_attachment(int index, double r, double g, double b, double a) {
+    GLfloat value[4];
+    value[0] = (GLfloat)r; value[1] = (GLfloat)g; value[2] = (GLfloat)b; value[3] = (GLfloat)a;
+    glClearBufferfv(GL_COLOR, index, value);
+}
+
+/* The multisample resolve of one colour attachment other than the first:
+   read and draw buffers set to it for the blit and put back after. */
+int ae3d_gl_fbo_resolve_attachment(int source, int destination, int width, int height, int index) {
+    GLenum status;
+    GLenum attachment = GL_COLOR_ATTACHMENT0 + (GLenum)index;
+    while (glGetError() != GL_NO_ERROR) { }
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)source);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)destination);
+    glReadBuffer(attachment);
+    glDrawBuffer(attachment);
+    glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    status = glGetError();
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return (int)status;
+}
+
 /* A colour texture already made attached as the framebuffer's colour: the
    temporal pass writes its two history textures in turn through the one
    framebuffer. */

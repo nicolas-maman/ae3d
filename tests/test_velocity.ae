@@ -1,0 +1,179 @@
+// Motion vectors: every scene draw writes where its pixel's surface was
+// last frame beside its colour, in texture space, this frame's unnudged
+// position less last frame's. On both backends, read back through capture
+// channel 3, which draws the vector in pixels -- a hundred either way
+// across the byte, 128 for a surface that has not moved.
+//
+// A cube in front of a still camera reads still. Moved by a known amount,
+// it reads the move the camera's own projection says it made on the
+// screen, to the pixel. Still again under a camera that moves, it reads
+// the camera's move. And the vector is written to a target of its own,
+// beside the frame, which the temporal pass reads by.
+
+import std.mem
+import ae3d.core
+import ae3d.gl
+import ae3d.vk
+import ae3d.offscreen
+import ae3d.loader
+
+const WIDTH = 320
+const HEIGHT = 240
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// One frame drawn and its pixel at (x, y) as red, green, blue. On OpenGL
+// the frame comes back on the second read (a pair of buffers).
+pixel(backend: *Backend, cam: *Camera, light: *Light, x: int, y: int) -> Vec3 {
+    core.backend_render(backend, cam, light)
+    core.backend_frame_pixels(backend)
+    pixels = core.backend_frame_pixels(backend)
+    at = (y * WIDTH + x) * 4
+    return core.vec3(mem.get_byte(pixels, at) as float, mem.get_byte(pixels, at + 1) as float, mem.get_byte(pixels, at + 2) as float)
+}
+
+// A channel-3 byte as the pixels it stands for.
+moved(byte: float) -> float {
+    return (byte / 255.0 - 0.5) * 200.0
+}
+
+// Where a world point lands on the screen through the camera, in pixels,
+// x to the right and y down as the frame is read.
+screen_x(cam: *Camera, p: Vec3) -> float {
+    s = core.camera_world_to_screen(cam, p, WIDTH, HEIGHT)
+    return s.x
+}
+
+run_checks(backend: *Backend, name: string, gl_r: *GLRenderer, vk_r: *VKRenderer) {
+    println("  ${name}: starting")
+    core.backend_set_clear_color(backend, 0.0, 0.0, 0.0)
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 0.0, 6.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+    light = core.light_sun(core.vec3(0.0, 1.0, 1.0))
+
+    cube = loader.cube(1.0)
+    core.model_set_position(cube, 0.0, 0.0, 0.0)
+    core.model_set_diffuse(cube, 1.0, 0.0, 0.0)
+    core.backend_add_model(backend, cube)
+    cx = WIDTH / 2
+    cy = HEIGHT / 2
+
+    if gl_r != null { gl.renderer_set_capture_channel(gl_r, 3) }
+    if vk_r != null { vk.renderer_set_capture_channel(vk_r, 3) }
+
+    // Two frames still: the first has no last frame and reads still by
+    // definition; the second reads still because nothing moved.
+    pixel(backend, cam, light, cx, cy)
+    c = pixel(backend, cam, light, cx, cy)
+    check("${name} a still cube under a still camera reads still (${c.x}, ${c.y})",
+          c.x > 126.0 && c.x < 130.0 && c.y > 126.0 && c.y < 130.0 && c.z < 2.0)
+    c = pixel(backend, cam, light, cx + 100, cy)
+    check("${name} and the background, drawn by nothing, is the clear", c.x < 2.0 && c.y < 2.0)
+
+    // The cube moved half a metre to the right: its vector is the move the
+    // projection says it made on the screen, at the pixel it stands on now
+    // -- on its front face, half a metre nearer than its centre.
+    before = screen_x(cam, core.vec3(0.0, 0.0, 0.5))
+    core.model_set_position(cube, 0.5, 0.0, 0.0)
+    after = screen_x(cam, core.vec3(0.5, 0.0, 0.5))
+    expected = after - before
+    c = pixel(backend, cam, light, after as int, cy)
+    check("${name} a cube moved right reads its move (${moved(c.x)} px, projected ${expected})",
+          moved(c.x) > expected - 1.5 && moved(c.x) < expected + 1.5 && moved(c.y) > 0.0 - 1.5 && moved(c.y) < 1.5)
+    // And still again the frame after.
+    c = pixel(backend, cam, light, after as int, cy)
+    check("${name} and still again the frame after", c.x > 126.0 && c.x < 130.0)
+
+    // The camera moves instead: the cube slides the other way on the
+    // screen, and its vector says so, as does the ground it stands on.
+    before = screen_x(cam, core.vec3(0.5, 0.0, 0.5))
+    core.camera_set_position(cam, core.vec3(0.5, 0.0, 6.0))
+    core.camera_look_at(cam, core.vec3(0.5, 0.0, 0.0))
+    after = screen_x(cam, core.vec3(0.5, 0.0, 0.5))
+    expected = after - before
+    c = pixel(backend, cam, light, after as int, cy)
+    check("${name} a camera moved right reads the cube's slide (${moved(c.x)} px, projected ${expected})",
+          moved(c.x) > expected - 1.5 && moved(c.x) < expected + 1.5)
+
+    // The vector reaches the temporal pass: with it on, a frame after a
+    // move is not a ghost of the frame before. The cube moved by a cube's
+    // width leaves red where it was in a pass that reprojects by depth
+    // alone; one that reads the vector finds the background's history
+    // there and leaves black.
+    if gl_r != null { gl.renderer_set_capture_channel(gl_r, 0) }
+    if vk_r != null { vk.renderer_set_capture_channel(vk_r, 0) }
+    if gl_r != null { gl.renderer_set_taa(gl_r, true) }
+    if vk_r != null { vk.renderer_set_taa(vk_r, true) }
+    core.model_set_position(cube, 0.5, 0.0, 0.0)
+    i = 0
+    while i < 6 {
+        pixel(backend, cam, light, cx, cy)
+        i = i + 1
+    }
+    was = screen_x(cam, core.vec3(0.5, 0.0, 0.0)) as int
+    core.model_set_position(cube, 2.5, 0.0, 0.0)
+    c = pixel(backend, cam, light, was, cy)
+    check("${name} under the temporal pass, where the cube was is not its ghost (${c.x})", c.x < 60.0)
+    now = screen_x(cam, core.vec3(2.5, 0.0, 0.0)) as int
+    c = pixel(backend, cam, light, now, cy)
+    check("${name} and where it is, it is drawn (${c.x})", c.x > 60.0)
+    if gl_r != null { gl.renderer_set_taa(gl_r, false) }
+    if vk_r != null { vk.renderer_set_taa(vk_r, false) }
+
+    core.backend_remove_model(backend, cube)
+    core.model_free(cube)
+    core.camera_free(cam)
+    core.light_free(light)
+    println("  ${name}: done")
+}
+
+main() {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("velocity: SKIP no OpenGL context")
+        return
+    }
+    renderer = gl.renderer_new()
+    gl_pass = gl.backend(renderer)
+    if !core.backend_init(&gl_pass, context, WIDTH, HEIGHT) {
+        println("velocity: SKIP the OpenGL backend would not initialise")
+        return
+    }
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    run_checks(&gl_pass, "opengl", renderer, null)
+    core.backend_cleanup(&gl_pass)
+    offscreen.target_destroy(target)
+    gl.renderer_free(renderer)
+    offscreen.context_destroy(context)
+
+    if !vk.available() {
+        println("velocity: no Vulkan driver (${vk.last_error()}), checked OpenGL only")
+    } else {
+        vk_renderer = vk.renderer_new()
+        vk_pass = vk.backend(vk_renderer)
+        if !core.backend_init(&vk_pass, null, WIDTH, HEIGHT) {
+            println("velocity: SKIP Vulkan would not start (${vk.last_error()})")
+        } else {
+            run_checks(&vk_pass, "vulkan", null, vk_renderer)
+            core.backend_cleanup(&vk_pass)
+        }
+        vk.renderer_free(vk_renderer)
+    }
+
+    if failures == 0 {
+        println("velocity: all checks passed")
+    } else {
+        println("velocity: ${failures} failure(s)")
+    }
+}

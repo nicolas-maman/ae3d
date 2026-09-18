@@ -717,8 +717,10 @@ engine_set_sky_overcast(e: *Engine, amount: float, color: Vec3) {
 // the depth finds, 0 none).
 // What the frame is drawn as: 0 the lit picture, 1 every surface's albedo
 // (texture, material and tint, before any light), 2 its world-space
-// normals packed 0..1. A bake reads its atlases back through these, and a
-// look at a scene's normals says why a surface lights the way it does.
+// normals packed 0..1, 3 its motion vectors (a hundred pixels either way
+// across the byte, 128 for still). A bake reads its atlases back through
+// these, and a look at a scene's normals says why a surface lights the
+// way it does.
 engine_set_capture_channel(e: *Engine, channel: int) {
     if e.backend_state == null { return }
     if e.api == platform.API_VULKAN {
@@ -941,6 +943,10 @@ engine_start(e: *Engine, x: int, y: int) -> bool {
     // Asked for before the backend was up, or by AE3D_TAA=1.
     if core.env_int("AE3D_TAA", 0) == 1 { e.taa = true }
     if e.taa { engine_set_taa(e, true) }
+    // AE3D_CAPTURE=n draws the frame as a capture channel (1 albedo, 2
+    // normals, 3 motion), so a snapshot can be read as numbers.
+    channel = core.env_int("AE3D_CAPTURE", 0)
+    if channel > 0 { engine_set_capture_channel(e, channel) }
     if e.time_of_day >= 0.0 { engine_set_sky(e, core.SKY_PROCEDURAL) }
     return true
 }

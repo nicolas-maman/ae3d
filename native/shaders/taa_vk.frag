@@ -23,8 +23,12 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 model;
     mat4 viewProjection;
     mat4 lightSpaceMatrix;
+    mat4 prevModel;
+    mat4 prevViewProjection;
     bool isSkinned;
     mat4 bones[96];
+    vec2 jitter;
+    vec2 screenSize;
     int lightCount;
     bool impostor;
     int captureChannel;
@@ -100,12 +104,9 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 invViewProjection;
     float ssrRoadHeight;
     float ssrStrength;
-    vec2 screenSize;
     float ssaoRadius;
     float ssaoIntensity;
     int depthSampleCount;
-    mat4 prevViewProjection;
-    vec2 jitter;
     float taaBlend;
     float time;
     float waveSpeedMultiplier;
@@ -144,10 +145,13 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     int impostorRows;
     float impostorWidth;
     float impostorHeight;
+    float crowdTravel;
+    float crowdPhaseStep;
 };
 layout(set = 0, binding = 1) uniform sampler2D screenTexture;
 layout(set = 0, binding = 2) uniform sampler2D depthTexture;
 layout(set = 0, binding = 3) uniform sampler2D historyTexture;
+layout(set = 0, binding = 4) uniform sampler2D velocityTexture;
 
 layout(location = 0) in vec2 TexCoords;
 layout(location = 0) out vec4 FragColor;
@@ -159,33 +163,21 @@ layout(location = 0) out vec4 FragColor;
 
 
 
-
-
-// A stored scene depth as clip-space z: OpenGL keeps depth in 0..1 for a
-// clip range of -1..1, Vulkan's clip range is the 0..1 it stores.
-float taa_depth_clip(float depth) {
-    return depth;
-}
-
 void main() {
     vec2 uv = TexCoords;
     vec2 px = 1.0 / screenSize;
     vec3 current = texture(screenTexture, uv).rgb;
     if (taaBlend >= 0.999) { FragColor = vec4(current, 1.0); return; }
 
-    // Where this pixel's surface was on the screen last frame. The frame
-    // was drawn through the nudged projection, so the pixel's clip position
-    // is moved by the nudge before the inverse of that projection takes it
-    // back: the position is then the unnudged one, and a camera that has
-    // not moved finds its history at the pixel's own centre -- read there
-    // without the filter's blur, which on a software renderer lost a tenth
-    // of the light to the clamp.
-    float depth = texture(depthTexture, uv).r;
-    vec4 clip = vec4((uv + jitter) * 2.0 - 1.0, taa_depth_clip(depth), 1.0);
-    vec4 world = invViewProjection * clip;
-    vec4 prev = prevViewProjection * (world / world.w);
-    if (prev.w <= 0.0) { FragColor = vec4(current, 1.0); return; }
-    vec2 prevUV = prev.xy / prev.w * 0.5 + 0.5;
+    // Where this pixel's surface was on the screen last frame: the scene
+    // pass wrote its motion vector, the surface's own motion and the
+    // camera's, with the frame's nudge already taken out -- so a surface
+    // that has not moved under a camera that has not moved finds its
+    // history at the pixel's own centre, read there without the filter's
+    // blur, and the nudge is what the history folds up into the
+    // antialiasing. A pixel nothing drew has a vector of zero.
+    vec2 motion = texture(velocityTexture, uv).xy;
+    vec2 prevUV = uv - motion;
     if (prevUV.x < 0.0 || prevUV.x > 1.0 || prevUV.y < 0.0 || prevUV.y > 1.0) {
         FragColor = vec4(current, 1.0);
         return;

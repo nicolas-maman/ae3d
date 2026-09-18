@@ -280,7 +280,7 @@ crowd_capacity(fig: *Figure) -> int {
 // are two coincident meshes, and decimating them independently pulls their
 // vertices apart so the skin pokes through the cloth in patches. Only the far
 // tier, metres off and fogged, can afford the decimation. Returns the tri count.
-setup_crowd(model: *Model, cell: float, bank: ptr, capacity: int) -> int {
+setup_crowd(model: *Model, cell: float, bank: ptr, capacity: int, walk: float) -> int {
     if cell > 0.0 {
         src = core.model_mesh(model)
         lod = core.mesh_decimate(src, cell)
@@ -293,6 +293,9 @@ setup_crowd(model: *Model, cell: float, bank: ptr, capacity: int) -> int {
     core.model_set_pbr(model, 0.0, 0.95)
     core.model_enable_instancing(model, capacity)
     core.model_set_pose_bank(model, bank, FRAMES)
+    // The walk's length, for the motion vectors: a figure's pose and its
+    // position a frame back.
+    core.model_set_crowd_walk(model, walk)
     core.model_enable_instance_phases(model)
     core.model_enable_instance_colors(model)
     return core.mesh_index_count(core.model_mesh(model)) / 3
@@ -342,7 +345,7 @@ impostor_for(m: *Manifest, figure: string, fig: *Figure) -> *Model {
     core.model_recalculate_bounds(quad)
     core.model_set_texture(quad, "${directory}impostor_${figure}.png")
     core.material_set_normal_path(quad.material, "${directory}impostor_${figure}_normal.png")
-    setup_crowd(quad, 0.0, fig.bank, crowd_capacity(fig))
+    setup_crowd(quad, 0.0, fig.bank, crowd_capacity(fig), fig.walk)
     core.model_set_impostor(quad, cols, rows, metres, metres)
     fig.impostor_metres = metres
     return quad
@@ -719,15 +722,15 @@ on_start(state: ptr, e: *Engine) {
         fig.device = null
         if g_gpu_crowd { fig.device = crowd.device_crowd_new(fig.count) }
         if fig.device == null { tier_scratch() }
-        fig.near_tris = setup_crowd(fig.near_body, LOD_NEAR, fig.bank, crowd_capacity(fig))
+        fig.near_tris = setup_crowd(fig.near_body, LOD_NEAR, fig.bank, crowd_capacity(fig), fig.walk)
         fig.cloth_tris = 0
-        if fig.near_clothes != null { fig.cloth_tris = setup_crowd(fig.near_clothes, LOD_NEAR, fig.bank, crowd_capacity(fig)) }
+        if fig.near_clothes != null { fig.cloth_tris = setup_crowd(fig.near_clothes, LOD_NEAR, fig.bank, crowd_capacity(fig), fig.walk) }
         // AE3D_LODFAR (hundredths of a metre) decimates the far tier in the
         // engine; with the exported stand-in that is off unless asked for.
         far_default = (LOD_FAR * 100.0) as int
         if fig.far_exported { far_default = 0 }
         far_cell = core.env_int("AE3D_LODFAR", far_default) as float / 100.0
-        fig.far_tris = setup_crowd(fig.far_body, far_cell, fig.bank, crowd_capacity(fig))
+        fig.far_tris = setup_crowd(fig.far_body, far_cell, fig.bank, crowd_capacity(fig), fig.walk)
         if fig.device != null {
             crowd.device_crowd_bind(fig.device, fig.near_body, 0)
             if fig.near_clothes != null { crowd.device_crowd_bind(fig.device, fig.near_clothes, 0) }

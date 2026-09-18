@@ -115,6 +115,36 @@
   inverse binds where `skeleton_bind` would derive them from the pose.
 - `native/ae3d_blob.c`: a file as bytes and the little-endian numbers in it.
 
+### Motion vectors
+
+- Every scene draw writes its pixel's motion vector beside its colour: a
+  second colour attachment of the scene pass on Vulkan (R16G16,
+  multisampled and resolved with the colour, `ae3d_vk_velocity_texture`),
+  a second draw buffer of the post framebuffers on OpenGL. The vertex
+  stage carries its clip position this frame and last -- a model from its
+  own matrix of last frame (`model_frame_done`, taken at the frame's end),
+  the last frame's unjittered view-projection, a crowd figure from its
+  walk (`model_set_crowd_walk(m, seconds)`: its pose a frame earlier, its
+  position a frame's travel back along its facing, from the pose bank's
+  own travel), the sky from the camera's turn -- and the fragment writes
+  the difference in texture space with the frame's jitter taken out. A
+  merged batch and an instance stream carry the camera's motion alone; a
+  skinned palette's previous pose is not carried.
+- The temporal pass reprojects by the vector instead of by depth alone, so
+  a model that moves, a figure that walks and a camera that turns all find
+  their history where it is. Step 2 of #324; DLSS is handed this target.
+- Capture channel 3 (`engine_set_capture_channel(e, 3)`, `AE3D_CAPTURE=3`
+  on any scene) draws the vector in pixels, 128 for still. While a capture
+  channel is read no effect runs over it, on either backend: the post
+  chain, the reflections and the occlusion stand down, so the channel's
+  numbers are the surfaces' own.
+- `tests/test_velocity.ae`: a still cube reads still, a cube moved by half
+  a metre reads the move the camera's projection says it made, to the
+  pixel, a camera moved reads the slide, and under the temporal pass the
+  place a cube left is not its ghost. Both backends.
+- Fixed: the Vulkan sky drew its matrices into whichever program's block
+  was current; it now draws from the scene's.
+
 ### The crowd sorted on the device
 
 - On Vulkan the horde's per-frame sort is a compute pass. The simulation's
