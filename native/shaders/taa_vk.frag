@@ -172,9 +172,15 @@ void main() {
     vec3 current = texture(screenTexture, uv).rgb;
     if (taaBlend >= 0.999) { FragColor = vec4(current, 1.0); return; }
 
-    // Where this pixel's surface was on the screen last frame.
+    // Where this pixel's surface was on the screen last frame. The frame
+    // was drawn through the nudged projection, so the pixel's clip position
+    // is moved by the nudge before the inverse of that projection takes it
+    // back: the position is then the unnudged one, and a camera that has
+    // not moved finds its history at the pixel's own centre -- read there
+    // without the filter's blur, which on a software renderer lost a tenth
+    // of the light to the clamp.
     float depth = texture(depthTexture, uv).r;
-    vec4 clip = vec4(uv * 2.0 - 1.0, taa_depth_clip(depth), 1.0);
+    vec4 clip = vec4((uv + jitter) * 2.0 - 1.0, taa_depth_clip(depth), 1.0);
     vec4 world = invViewProjection * clip;
     vec4 prev = prevViewProjection * (world / world.w);
     if (prev.w <= 0.0) { FragColor = vec4(current, 1.0); return; }

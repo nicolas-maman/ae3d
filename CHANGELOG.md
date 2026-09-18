@@ -125,9 +125,8 @@
   -- and held to the range of the pixel's neighbourhood this frame, so a
   walking figure trails no ghost and a sky pixel holds its place as the
   camera turns. The result is what the post chain composites and the next
-  frame reads back. `tests/test_taa`: a tilted bar's edge goes from a
-  staircase to a ramp (496 to 1,241 in-between pixels at 320x240) with
-  the same light overall, holds still once the history has filled, and
+  frame reads back. `tests/test_taa`: a tilted bar's edge is graded finer
+  (496 to 605 in-between pixels at 320x240) with the same light overall, holds still once the history has filled, and
   leaves no trail under a panning camera. OpenGL keeps the request and
   draws as before for now. What DLSS (#324) still needs on top is
   per-object motion vectors; the jitter, the history and the depth
