@@ -964,6 +964,15 @@ else
                     grep -E 'never answered|could not find|no editor at|driver:' "$driver_log" \
                         | sed 's/^/        /' | head -6
                     tail -3 "$driver_log" | sed 's/^/        /'
+                    # On a runner the whole log is the only way to read what
+                    # led up to a failure -- which checks passed before the
+                    # stroke that sculpted nothing, what the editor printed
+                    # between them -- since nothing else of the run survives.
+                    # Bounded, and only here; a local run has the file.
+                    if [ -n "${CI:-}" ]; then
+                        echo "        --- the driver's log ---"
+                        head -300 "$driver_log" | sed 's/^/        /'
+                    fi
                 fi
                 rm -f "$driver_log"
             done
