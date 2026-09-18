@@ -143,6 +143,32 @@
   `tests/test_gltf` checks a generated two-bone arm against the arithmetic
   and loads the Khronos Fox. The skin palette holds 96 bones (was 48), a
   Mixamo rig with its fingers.
+- Every lamp throws its own shadow by ray (Vulkan, rays on): a point
+  light has no shadow map, and the key light's shadow stood in for every
+  lamp's, so a night street's figures shadowed nothing. One ray per lamp
+  that reaches the pixel, to a spot on the lamp's face
+  (`engine_set_lamp_size`), stopped short of the fitting; the rays'
+  spirals (penumbra, occlusion, lamps) turn by the golden angle every
+  frame (`rayFrame`) so the temporal pass folds them -- the projection's
+  jitter, used before, is a fraction of a pixel and turned nothing.
+  `tests/test_ray_shadows` checks a lamp's shadow of the ball.
+- Sixteen lights a frame (was four), the nearest to the camera picked each
+  frame out of every light the scene registers (`core.nearest_lights`) on
+  both backends, and a point light past its fall-off skipped before it is
+  shaded. `tests/test_lights` registers twenty-one and checks the near one
+  still lights the scene.
+- `engine_set_ssr(e, on, road_height, strength)`: the wet ground's
+  reflection through the engine, kept until the backend is up like the
+  fog and the occlusion (set on the renderer before `engine_run` it was
+  wiped by the backend's start).
+- `examples/zombie_city`: a light under every lamp head its tiles place
+  (twenty-one; three at the centre tile lit three lamps' worth of a
+  six-hundred-metre street, and the camera stood in the dark end); the
+  rays on where the device traces, with the sun's half degree, the lamps'
+  shadows and the occlusion by ray; the wet road through `engine_set_ssr`
+  at the road's own height (a plane set between the road and the
+  pavement mirrored the pavement too); the temporal pass on. 400 figures
+  139 fps, 20,000 at a 28 m near band 54 (113 with the map alone).
 - The black hole draws again by default: it makes its engine on OpenGL,
   since its picture is one GLSL fragment shader and the Vulkan backend
   compiles no GLSL at run time -- with Vulkan the default it had been a

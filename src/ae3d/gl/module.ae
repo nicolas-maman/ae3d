@@ -154,7 +154,7 @@ extern ae3d_image_error() -> string
 
 const MAX_FBO_DIMENSION = 8192
 const SHADOW_SIZE = 2048
-const MAX_LIGHTS = 4
+const MAX_LIGHTS = 16
 const LIGHT_SLOTS = 10
 
 struct ProgramSlots {
@@ -2518,7 +2518,7 @@ set_frame_uniforms(r: *GLRenderer, slots: *ProgramSlots, view_projection: *Mat4,
     ae3d_gl_uniform_int(slots.capture_channel, r.capture_channel)
     ae3d_gl_uniform_float(slots.wetness, r.wetness)
 
-    upload_lights(slots, lights, light)
+    upload_lights(slots, lights, light, cam.position)
 
     ae3d_gl_uniform_vec3(slots.view_pos, cam.position.x, cam.position.y, cam.position.z)
     ae3d_gl_uniform_float(slots.view_distance, core.camera_far(cam))
@@ -2550,7 +2550,10 @@ set_frame_uniforms(r: *GLRenderer, slots: *ProgramSlots, view_projection: *Mat4,
 // from, so a program that named a key light and then registered a few lamps
 // used to lose its key light entirely: the sun went out the moment a street
 // lamp was added.
-upload_lights(slots: *ProgramSlots, lights: ptr, key: *Light) {
+// The key light first, then the registered lights nearest the camera
+// until the slots are full: a scene may hold more lights than a frame
+// takes, and the ones a pixel can see are the ones near it.
+upload_lights(slots: *ProgramSlots, lights: ptr, key: *Light, eye: Vec3) {
     if slots.light_slots == null { return }
     slots_of = slots.light_slots as int[]
 
@@ -2560,17 +2563,14 @@ upload_lights(slots: *ProgramSlots, lights: ptr, key: *Light) {
         count = 1
     }
 
-    held = 0
-    if lights != null { held = list.size(lights) }
+    taken = core.nearest_lights(lights, key, eye, MAX_LIGHTS - count)
     i = 0
-    while i < held && count < MAX_LIGHTS {
-        l = list.get_raw(lights, i) as *Light
-        if l != key {
-            upload_light(slots_of, count, l)
-            count = count + 1
-        }
+    while i < list.size(taken) && count < MAX_LIGHTS {
+        upload_light(slots_of, count, list.get_raw(taken, i) as *Light)
+        count = count + 1
         i = i + 1
     }
+    list.free(taken)
     ae3d_gl_uniform_int(slots.light_count, count)
 
     first = key_light(lights, key)

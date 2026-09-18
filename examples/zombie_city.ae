@@ -176,11 +176,14 @@ entry_named(m: *Manifest, name: string) -> *Entry {
     return null
 }
 
-lamp_at(x: float) -> *Light {
-    lamp = core.light_point(core.vec3(x, 4.25, 0.0 - 2.94),
+
+// Sodium light a hand under a lamp head: warm, and reaching far enough
+// that the pools on the road meet at the posts' spacing.
+lamp_under(head: Vec3) -> *Light {
+    lamp = core.light_point(core.vec3(head.x, head.y - 0.20, head.z),
                             core.vec3(1.0, 0.74, 0.42),
                             core.env_int("AE3D_LAMP", 320) as float / 100.0,
-                            core.env_int("AE3D_LAMPR", 8) as float)
+                            core.env_int("AE3D_LAMPR", 9) as float)
     list.add_raw(g_lamps, lamp as ptr)
     return lamp
 }
@@ -480,8 +483,13 @@ add_tile(e: *Engine, m: *Manifest, off_x: float, flip: bool, street_only: bool) 
             // highlight across the tarmac that slid with every step of the
             // camera -- it read as the light itself moving. A modest sheen keeps
             // the wet look and stays put.
-            if string.contains(name, "Road") == 1 || string.contains(name, "Ground") == 1 {
-                core.model_set_reflectivity(model, 0.3)
+            // A wet road, a damp pavement: the road mirrors the lamps and the
+            // walls, the paving takes a sheen and no more, so the kerb still
+            // reads as a kerb.
+            if string.contains(name, "Road") == 1 {
+                core.model_set_reflectivity(model, 0.5)
+            } else if string.contains(name, "Ground") == 1 || string.contains(name, "Path") == 1 {
+                core.model_set_reflectivity(model, 0.12)
             }
             if string.contains(name, "Street_Ground") == 1 {
                 // The block's base slab, now a closed solid from the Blender
@@ -503,6 +511,23 @@ add_tile(e: *Engine, m: *Manifest, off_x: float, flip: bool, street_only: bool) 
             engine.engine_add_model(e, model)
         }
         i = i + 1
+    }
+    // A light under every lamp head the tile placed, wherever the mirroring
+    // put it: the street is lit by its own lamps, a block at a time, and the
+    // renderer takes the ones nearest the camera each frame. Three lamps at
+    // the centre tile lit three lamps' worth of a six-hundred-metre street
+    // and the camera stood in the dark end of it.
+    if core.env_int("AE3D_NOLAMPS", 0) == 0 {
+        i = 0
+        while i < count {
+            name = assets.entry_object(assets.manifest_entry(m, i))
+            model = list.get_raw(models, i) as *Model
+            if model != null && string.contains(name, "LampHead") == 1 {
+                head = core.model_world_position(model)
+                engine.engine_add_light(e, lamp_under(head))
+            }
+            i = i + 1
+        }
     }
     println("zombie_city[diag] tile at x=${off_x} flip=${flip}: props kept ${kept} dropped ${dropped}, first shell tint ${first_tint}")
     return models
@@ -576,11 +601,7 @@ on_start(state: ptr, e: *Engine) {
     // foot of every wall and the kerb go darker by what stands over them.
     engine.engine_set_ssao(e, core.env_int("AE3D_SSAO", 1) == 1, 1.5, 1.0)
     list.add_raw(g_lamps, moon as ptr)
-    if core.env_int("AE3D_NOLAMPS", 0) == 0 {
-        engine.engine_add_light(e, lamp_at(0.0))
-        engine.engine_add_light(e, lamp_at(0.0 - 14.0))
-        engine.engine_add_light(e, lamp_at(14.0))
-    }
+    // The lamps come with the tiles: one light under every lamp head.
 
     engine.engine_set_clear_color(e, SKY_R, SKY_G, SKY_B)
     engine.engine_set_sky(e, SKY)
@@ -1036,6 +1057,30 @@ main() {
     // region; 2048 texels over it is still ~2cm a texel.
     engine.engine_set_shadow_distance(e, core.env_int("AE3D_SHADOWDIST", 48) as float)
     engine.engine_set_frustum_culling(e, true)
+    // The rays, where the device traces: the moon's shadow with the sun's
+    // half-degree of penumbra, the crowd in the structure, and every lamp
+    // throwing its own shadow -- the map has none for a lamp, and a night
+    // street's figures were lit from above by three lamps that shadowed
+    // nothing, floating on the road. AE3D_RAYS=0 keeps the map alone.
+    if core.env_int("AE3D_RAYS", 1) == 1 {
+        engine.engine_set_ray_shadows(e, true)
+        engine.engine_set_sun_size(e, 0.5)
+        engine.engine_set_lamp_size(e, 0.25)
+        // And the occlusion by ray in the screen-space pass's place: the
+        // contact under every foot, from the scene rather than the depth.
+        engine.engine_set_ray_occlusion(e, core.env_int("AE3D_RAY_AO", 1) == 1)
+    }
+    // The wet road mirrors the lit street back at the camera, as the
+    // measuring street (tools/zombie_street) has had it: a Vulkan pass at
+    // the road's height, dialled to a wet sheen rather than a mirror. At
+    // the road's own height and no higher: the pass takes a band six
+    // centimetres either side, and the pavement's top is six centimetres
+    // over the road, so a plane set between them mirrored the pavement
+    // too and the kerb was gone.
+    engine.engine_set_ssr(e, core.env_int("AE3D_SSR", 1) == 1, ROAD_Y, 0.75)
+    // The temporal pass folds the rays' grain -- the penumbrae, the
+    // occlusion, the lamps' shadows -- into smooth shading frame by frame.
+    if core.env_int("AE3D_TAA", 1) == 1 { engine.engine_set_taa(e, true) }
     program = engine.behaviour_new("zombie city", null)
     program.start = on_start
     program.update = on_update

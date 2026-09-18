@@ -14,7 +14,7 @@ struct Light {
 };
 
 layout(std140, set = 0, binding = 0) uniform SceneBlock {
-    Light lights[4];
+    Light lights[16];
     bool isInstanced;
     bool useInstanceColor;
     bool instancePoints;
@@ -84,6 +84,8 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float sunAngle;
     float rayOcclusion;
     float rayOcclusionStrength;
+    float rayLampRadius;
+    int rayFrame;
     bool enablePerlinNoise;
     float noiseScale;
     int noiseOctaves;

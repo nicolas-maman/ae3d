@@ -18,7 +18,7 @@ struct Light {
 };
 
 layout(std140, set = 0, binding = 0) uniform SceneBlock {
-    Light lights[4];
+    Light lights[16];
     bool isInstanced;
     bool useInstanceColor;
     bool instancePoints;
@@ -88,6 +88,8 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float sunAngle;
     float rayOcclusion;
     float rayOcclusionStrength;
+    float rayLampRadius;
+    int rayFrame;
     bool enablePerlinNoise;
     float noiseScale;
     int noiseOctaves;
@@ -178,6 +180,11 @@ layout(location = 5) in float Occlusion;
 
 
 
+// Sixteen a frame: the key light and the fifteen point lights nearest the
+// camera, which the renderer picks out of every light the scene registers
+// -- a street lit by a lamp a block, a room by its fittings. A point light
+// past its fall-off is skipped before it is shaded, so the frame pays for
+// the lamps that reach a pixel and not for the count.
 
 
 
@@ -305,6 +312,14 @@ layout(location = 5) in float Occlusion;
 // off) and how dark it goes.
 
 
+// The size of a lamp's face, in metres, for the rays' lamp shadows: the
+// larger, the softer the shadow it throws.
+
+// The frame's number, for the rays' spirals: each frame turns every
+// pixel's taps by the golden angle, so the temporal pass folds successive
+// frames into a smooth penumbra. The projection's jitter was tried for
+// this and is a fraction of a pixel, which turned the taps by nothing.
+
 
 
 // GPU Gems Chapter 5: Improved Perlin Noise Support
@@ -401,13 +416,17 @@ float shadow_factor() {
 // share of the light. The origin steps out along the normal by a little
 // more than the surface's own tessellation error, so a face does not
 // shadow itself, and the ray is opaque-only and stops at its first hit.
-bool ray_blocked(vec3 origin, vec3 direction) {
+bool ray_blocked_to(vec3 origin, vec3 direction, float far) {
     rayQueryEXT query;
     rayQueryInitializeEXT(query, sceneAS,
                           gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
-                          0xFF, origin, 0.01, direction, 500.0);
+                          0xFF, origin, 0.01, direction, far);
     rayQueryProceedEXT(query);
     return rayQueryGetIntersectionTypeEXT(query, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+}
+
+bool ray_blocked(vec3 origin, vec3 direction) {
+    return ray_blocked_to(origin, direction, 500.0);
 }
 
 // A sun with a size: four rays into the cone the sun's disc subtends, on
@@ -428,7 +447,7 @@ float ray_shadow_factor() {
     vec3 up = cross(side, toLight);
     float spread = tan(sunAngle);
     float grain = fract(52.9829189 * fract(0.06711056 * gl_FragCoord.x + 0.00583715 * gl_FragCoord.y));
-    float turn = 6.2831853 * (grain + fract(dot(jitter, vec2(97.13, 31.7))));
+    float turn = 6.2831853 * fract(grain + float(rayFrame) * 0.6180339887);
     float blocked = 0.0;
     for (int i = 0; i < SUN_TAPS; i++) {
         float radius = spread * sqrt((float(i) + 0.5) / float(SUN_TAPS));
@@ -453,7 +472,7 @@ float ray_occlusion_factor() {
     vec3 side = normalize(cross(surface, abs(surface.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
     vec3 up = cross(side, surface);
     float grain = fract(52.9829189 * fract(0.06711056 * gl_FragCoord.x + 0.00583715 * gl_FragCoord.y) + 0.37);
-    float turn = 6.2831853 * (grain + fract(dot(jitter, vec2(61.7, 113.9))));
+    float turn = 6.2831853 * fract(grain + float(rayFrame) * 0.6180339887);
     float blocked = 0.0;
     for (int i = 0; i < AO_TAPS; i++) {
         float u = (float(i) + 0.5) / float(AO_TAPS);
@@ -473,6 +492,38 @@ float ray_occlusion_factor() {
         if (rayQueryGetIntersectionTypeEXT(query, true) != gl_RayQueryCommittedIntersectionNoneEXT) blocked += 1.0;
     }
     return clamp(1.0 - rayOcclusionStrength * blocked / float(AO_TAPS), 0.0, 1.0);
+}
+
+// A lamp's shadow: one ray from the surface to the lamp, stopped short of
+// it, on a spot of the lamp's face picked by the pixel's noise and the
+// frame's jitter -- a lamp has a size, and the temporal pass folds the
+// frames into its penumbra. A lamp has no shadow map, so on the map path
+// the key light's shadow stands in for every lamp's; by ray each lamp
+// throws its own: the figure under the street lamp is the one thing on a
+// night street the eye asks for, and it was missing.
+float ray_lamp_factor(vec3 lamp, float radius) {
+    vec3 surface = normalize(Normal);
+    vec3 toLamp = lamp - FragPos;
+    float span = length(toLamp);
+    if (span < 0.05) return 1.0;
+    toLamp /= span;
+    if (dot(surface, toLamp) <= 0.0) return 1.0;
+    vec3 side = normalize(cross(toLamp, abs(toLamp.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+    vec3 up = cross(side, toLamp);
+    float grain = fract(52.9829189 * fract(0.06711056 * gl_FragCoord.x + 0.00583715 * gl_FragCoord.y) + 0.71);
+    float seed = fract(grain + float(rayFrame) * 0.6180339887);
+    float turn = 6.2831853 * seed;
+    float reach = radius * sqrt(fract(seed * 7.0));
+    vec3 spot = lamp + side * (reach * cos(turn)) + up * (reach * sin(turn));
+    vec3 direction = spot - FragPos;
+    float far = length(direction);
+    direction /= far;
+    vec3 origin = FragPos + surface * 0.02;
+    // Stopped well short of the lamp: the fitting the light hangs from --
+    // its head, its arm -- stands right over it, and a ray run to the
+    // light itself found the head and shadowed half the street's walls
+    // with a grain.
+    return ray_blocked_to(origin, direction, max(far - 0.6, 0.05)) ? shadowIntensity : 1.0;
 }
 #endif
 
@@ -1210,12 +1261,27 @@ void main() {
 #endif
     float sunlit = cloudShadow(FragPos);
     vec3 Lo = vec3(0.0);
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 16; i++) {
         if (i >= lightCount) {
             break;
         }
+        if (lights[i].isDirectional == 0) {
+            // Past the lamp's reach it gives this pixel less than a
+            // hundredth of its light: not worth the shading, nor a ray.
+            vec3 gap = lights[i].position - FragPos;
+            if (dot(gap, gap) * lights[i].quadraticAtten > 64.0) continue;
+        }
         vec3 lit = direct_light(lights[i], norm, viewDir, albedo, F0, NdotV, adjustedRoughness);
-        Lo += (i == 0 ? lit * sunlit : lit) * shaded;
+        float shade = shaded;
+#ifdef AE3D_RAY_QUERY
+        // By ray a lamp throws its own shadow, where it reaches: past the
+        // lamp's fall-off there is no light to shadow and no ray is cast.
+        if (i > 0 && rayShadows == 1 && enableShadows && lights[i].isDirectional == 0) {
+            if (dot(lit, vec3(0.333)) > 0.002) shade = ray_lamp_factor(lights[i].position, rayLampRadius);
+            else shade = 1.0;
+        }
+#endif
+        Lo += (i == 0 ? lit * sunlit : lit) * shade;
     }
 
     // Ambient belongs to the scene rather than to each light, so it comes from

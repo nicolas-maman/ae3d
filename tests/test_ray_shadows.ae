@@ -217,6 +217,41 @@ main() {
     hard = read_frame(&backend, cam, light)
     check("a point sun again: the edge is hard (${level(hard, edge_ray + 2, cy)})", level(hard, edge_ray + 2, cy) > lit_ray - lit_ray / 20)
 
+    // A lamp's shadow: the sun put out, a lamp over the ground to +x of the
+    // ball and twice its height, so the ball's shadow from it is thrown a
+    // long way to -x, well past the ball's own silhouette from above. On
+    // the map path a lamp has no shadow and the key light's stands in,
+    // which with the sun out is none: the ground there is lit as the
+    // ground under the lamp is. By ray the ball blocks the lamp and that
+    // ground goes dark, and the ground under the lamp stays lit.
+    vk.renderer_set_ray_shadows(renderer, false)
+    dark = core.light_sun(core.vec3(0.6, 1.0, 0.0))
+    dark.intensity = 0.0
+    dark.ambient_strength = 0.12
+    // Dim enough that the lit ground is well under white: a lamp that
+    // saturates the ground saturates its shadow too and the check reads
+    // nothing. The camera at 220 m sees the plane at 0.76 m a pixel; the
+    // lamp at (80, 120) throws the ball's shadow about x -80 m, and the
+    // ground under the lamp is at x +30 m, clear of the ball.
+    lamp = core.light_point(core.vec3(80.0, 120.0, 0.0), core.vec3(1.0, 0.9, 0.8), 12.0, 200.0)
+    vk.renderer_add_light(renderer, lamp)
+    far_x = cx - 105
+    near_x = cx + 40
+    mapped_lamp = read_frame(&backend, cam, dark)
+    near_map = level(mapped_lamp, near_x, cy)
+    far_map = level(mapped_lamp, far_x, cy)
+    check("on the map path a lamp throws no shadow of the ball (${far_map} against ${near_map})", far_map > near_map / 2 && near_map > 60)
+    vk.renderer_set_ray_shadows(renderer, true)
+    traced_lamp = read_frame(&backend, cam, dark)
+    near_ray = level(traced_lamp, near_x, cy)
+    far_ray = level(traced_lamp, far_x, cy)
+    check("by ray the ball shadows the ground from the lamp (${far_ray} against ${far_map} unshadowed)", far_ray < far_map - 120)
+    check("and the ground under the lamp stays lit (${near_ray} against ${near_map})", near_ray > near_map - 24 && near_ray < near_map + 24)
+    vk.renderer_set_ray_shadows(renderer, false)
+    vk.renderer_remove_light(renderer, lamp)
+    core.light_free(lamp)
+    core.light_free(dark)
+
     vk.renderer_set_ray_shadows(renderer, false)
     back = read_frame(&backend, cam, light)
     check("off again, the map's shadow is back (${level(back, shadow_x, cy)})", level(back, shadow_x, cy) < lit_map - 50)

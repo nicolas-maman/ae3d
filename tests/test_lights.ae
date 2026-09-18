@@ -114,6 +114,42 @@ main() {
     if drift < 0 { drift = 0 - drift }
     check("removing the light restores the frame", drift <= one_light / 10000)
 
+    // More lights than a frame takes: the nearest to the camera are the
+    // ones uploaded. Twenty lamps far off along +x, none of which reaches
+    // the ball, and the fill beside the camera added last: with the frame
+    // taking the first sixteen registered, the fill would be left out and
+    // the frame would be the key's alone; taking the nearest, it is in.
+    far_lamps = list.new()
+    n = 0
+    while n < 20 {
+        far = core.light_point(core.vec3(3000.0 + (n as float) * 50.0, 0.0, 0.0),
+                               core.vec3(1.0, 1.0, 1.0), 3.0, 40.0)
+        list.add_raw(far_lamps, far as ptr)
+        gl.renderer_add_light(renderer, far)
+        n = n + 1
+    }
+    gl.renderer_add_light(renderer, fill)
+    core.backend_render(&backend, cam, key)
+    pixels = offscreen.target_pixels(target)
+    crowded = frame_total(pixels)
+    check("with twenty-one lights registered the near one still lights the scene (${crowded} against ${two_lights})",
+          crowded > one_light + (two_lights - one_light) / 2)
+    // And the picking itself, in order: the fill first, then the far lamps
+    // by their distance.
+    picked = core.nearest_lights(renderer.lights, key, cam.position, 3)
+    check("nearest_lights puts the fill first", list.size(picked) == 3 && list.get_raw(picked, 0) == fill as ptr)
+    check("and the nearest far lamp second", list.get_raw(picked, 1) == list.get_raw(far_lamps, 0))
+    list.free(picked)
+    gl.renderer_remove_light(renderer, fill)
+    n = 0
+    while n < 20 {
+        far = list.get_raw(far_lamps, n) as *Light
+        gl.renderer_remove_light(renderer, far)
+        core.light_free(far)
+        n = n + 1
+    }
+    list.free(far_lamps)
+
     println("  one light ${one_light}, two lights ${two_lights}")
 
     core.backend_cleanup(&backend)
