@@ -90,17 +90,25 @@ scene and frames it.
 
 **Behaviour** attaches a script to the selected object. A script is an ordinary
 Aether source file in `resources/scripts`, with Unity's phases by Unity's
-names:
+names and the engine's signatures -- the functions a program hands to
+`engine.script`, so one script shape serves the editor and a game:
 
 ```aether
 import ae3d.core
+import ae3d.behaviour
 
 exports (update)
 
-update(m: *Model, delta: float) {
-    core.model_rotate(m, 0.0, delta * 60.0, 0.0)
+update(state: ptr, go: *GameObject, delta: float) {
+    core.model_rotate(behaviour.object_model(go), 0.0, delta * 60.0, 0.0)
 }
 ```
+
+The editor hands a null `state` (a script keeps its own in its globals) and
+the game object the script is on; every row of the hierarchy is a
+`GameObject` in the editor's scene, its model the object's, and
+`engine.of(go)` is the editor's engine -- the camera, the light, the weather
+-- as it would be in a program.
 
 `scripts/build_script.sh resources/scripts/spin.ae` compiles it into a shared
 library beside the editor, and the editor opens what it finds: the buttons in

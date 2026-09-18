@@ -40,7 +40,7 @@ exports (
     object_position, object_set_position, object_translate,
     object_rotation, object_set_rotation, object_scale, object_set_scale,
     object_forward, object_up, object_right,
-    scene_new, scene_free, scene_add, scene_remove, scene_destroy_later,
+    scene_new, scene_free, scene_add, scene_remove, scene_detach, scene_destroy_later,
     scene_find, scene_find_by_tag, scene_count, scene_object,
     scene_update, scene_fixed_update, scene_late_update, scene_clear,
     object_scene, scene_host, scene_set_host
@@ -313,6 +313,23 @@ scene_remove(s: *Scene, o: *GameObject) {
         }
         i = i + 1
     }
+}
+
+// The object out of the scene and kept: the caller holds it, to put back
+// with scene_add -- an editor's undo of a delete. False when it was not in
+// this scene.
+scene_detach(s: *Scene, o: *GameObject) -> bool {
+    count = list.size(s.objects)
+    i = 0
+    while i < count {
+        if list.get_raw(s.objects, i) == o {
+            list.remove(s.objects, i)
+            o.scene = null
+            return true
+        }
+        i = i + 1
+    }
+    return false
 }
 
 scene_destroy_later(s: *Scene, o: *GameObject) {
