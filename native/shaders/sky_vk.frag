@@ -87,6 +87,8 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 view;
     vec3 cloudSunColor;
     int skyProcedural;
+    float skyOvercast;
+    vec3 skyOvercastColor;
     vec2 texelSize;
     float edgeThreshold;
     float edgeThresholdMin;
@@ -153,6 +155,12 @@ layout(location = 0) in vec3 TexCoords;
 // A sky drawn from the sun instead of read from the image: one, and the
 // image is ignored. The sun is cloudSun, the same sun the clouds are lit
 // by, so the sky, the clouds and the ground agree about where it is.
+
+// The overcast: how far the sky, painted or procedural, is pulled toward
+// a flat cast of skyOvercastColor at its own brightness -- the grey of a
+// rainy day, the ochre of a dust storm -- which the clouds' ambient then
+// takes too, since they are lit by the sky behind them.
+
 
 
 // Clouds, shared by the sky that draws them and the ground they shadow.
@@ -455,6 +463,10 @@ void main() {
     // mip chain has to tame, so level 0 is right everywhere and seamless here.
     vec3 sky = textureLod(skybox, vec2(u, v), 0.0).rgb;
     if (skyProcedural == 1) sky = proceduralSky(dir, normalize(cloudSun), cloudSunColor);
+    if (skyOvercast > 0.0) {
+        float luma = dot(sky, vec3(0.299, 0.587, 0.114));
+        sky = mix(sky, skyOvercastColor * (0.35 + 0.65 * luma), clamp(skyOvercast, 0.0, 1.0));
+    }
     vec4 clouds = cloudsAlong(dir, sky, cloudCover, cloudTime, cloudDither(gl_FragCoord.xy));
     sky = sky * (1.0 - clouds.a) + clouds.rgb;
     FragColor = vec4(sky, 1.0);

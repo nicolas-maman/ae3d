@@ -175,15 +175,21 @@ check_water(backend: *Backend, cam: *Camera, bright: *Light) {
     settled = water_frame(backend, cam, light, sim)
 
 
-    // The fog colour reaches the fog. A local of the same name used to hide the
-    // uniform, so the surface faded into a shade nobody chose.
-    core.model_set_uniform_vec3(surface, "fogColor", core.vec3(1.0, 0.2, 0.05))
+    // The scene's fog reaches the water. The surface used to carry a haze of
+    // its own that overrode whatever the scene set, so a dust storm that
+    // buried the island left the sea beside it blue; and before that a local
+    // of the fog colour's name hid the uniform, so the surface faded into a
+    // shade nobody chose.
+    fog = core.fog_distance(1.0, 40.0, core.vec3(1.0, 0.2, 0.05), 1.0)
+    core.backend_set_fog(backend, &fog)
     core.backend_render(backend, cam, light)
     core.backend_frame_pixels(backend)
     if frame_sum(core.backend_frame_pixels(backend)) == settled {
-        println("FAIL water fog colour changes nothing")
+        println("FAIL the scene's fog does not reach the water")
         failures = failures + 1
     }
+    clear_air = core.fog_none()
+    core.backend_set_fog(backend, &clear_air)
 
     core.backend_remove_model(backend, surface)
     water.simulation_free(sim)

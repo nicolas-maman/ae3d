@@ -26,7 +26,7 @@ exports (
     renderer_load_texture, renderer_release_texture, renderer_sample_count, renderer_set_post,
     renderer_set_bloom_intensity, renderer_bloom_intensity,
     renderer_set_shadows, renderer_shadows, renderer_set_ssr, renderer_ssr, renderer_set_ssr_params, renderer_add_light, renderer_remove_light,
-    renderer_set_fog, renderer_fog, renderer_set_clouds, renderer_set_shadow_distance, renderer_shadow_distance,
+    renderer_set_fog, renderer_fog, renderer_set_clouds, renderer_set_sky_overcast, renderer_set_shadow_distance, renderer_shadow_distance,
     renderer_set_ssao, renderer_ssao,
     skybox_create, skybox_free,
     offscreen_pixels, offscreen_width, offscreen_height,
@@ -192,6 +192,8 @@ struct VKRenderer {
     scene_time: float
     cloud_cover: float
     cloud_wind: float
+    sky_overcast: float
+    sky_overcast_color: Vec3
     defaults: ptr
     loaded_names: ptr
     shading_loaded: ptr
@@ -423,6 +425,11 @@ renderer_shadows(r: *VKRenderer) -> bool {
 renderer_set_clouds(r: *VKRenderer, cover: float, wind: float) {
     r.cloud_cover = cover
     r.cloud_wind = wind
+}
+
+renderer_set_sky_overcast(r: *VKRenderer, amount: float, color: Vec3) {
+    r.sky_overcast = amount
+    r.sky_overcast_color = color
 }
 
 // The clouds' textures, uploaded from the bytes core bakes once.
@@ -1065,6 +1072,8 @@ write_frame_uniforms(r: *VKRenderer, light: *Light, cam: *Camera) {
     ae3d_vk_scene_set_float(vkscene.OFF_CAUSTICSTIME, r.scene_time)
     // The clouds, for the sky that draws them and the ground they shadow.
     ae3d_vk_scene_set_float(vkscene.OFF_CLOUDCOVER, r.cloud_cover)
+    ae3d_vk_scene_set_float(vkscene.OFF_SKYOVERCAST, r.sky_overcast)
+    ae3d_vk_scene_set_vec3(vkscene.OFF_SKYOVERCASTCOLOR, r.sky_overcast_color.x, r.sky_overcast_color.y, r.sky_overcast_color.z)
     ae3d_vk_scene_set_float(vkscene.OFF_CLOUDTIME, r.scene_time * r.cloud_wind)
     sun = key_light(r, light)
     if sun != null {
@@ -1143,7 +1152,17 @@ refresh_geometry(m: *Model) {
 // An instance stream that has moved or changed colour since it was uploaded has
 // to be sent again, or a particle system draws its first frame forever.
 refresh_instances(m: *Model) {
-    if !m.is_instanced || m.instance_vbo == 0 { return }
+    if !m.is_instanced { return }
+    // A stream that was empty when the model was added -- a weather that
+    // starts clear, a crowd not yet spawned -- has no buffer yet; it gets
+    // one the first time it has instances to send.
+    if m.instance_vbo == 0 {
+        if core.model_instance_count(m) == 0 { return }
+        m.instance_vbo = ae3d_vk_upload_instances(m.instances)
+        m.instances_updated = false
+        m.instance_colors_updated = false
+        return
+    }
     if !m.instances_updated && !m.instance_colors_updated { return }
     if ae3d_vk_update_instances(m.instance_vbo, m.instances) == 1 {
         m.instances_updated = false

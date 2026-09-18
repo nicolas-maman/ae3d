@@ -27,7 +27,7 @@ exports (
     renderer_set_render_scale, renderer_render_scale,
     renderer_set_target,
     renderer_set_bloom_params, renderer_set_bloom_intensity, renderer_bloom_intensity,
-    renderer_set_post, renderer_set_fog, renderer_fog, renderer_set_clouds,
+    renderer_set_post, renderer_set_fog, renderer_fog, renderer_set_clouds, renderer_set_sky_overcast,
     renderer_set_ssao, renderer_ssao,
     renderer_set_shadows, renderer_shadows, renderer_shadow_map, renderer_default_program,
     renderer_set_shadow_distance, renderer_shadow_distance,
@@ -333,6 +333,8 @@ struct GLRenderer {
     // no march), and how fast they drift, as a multiple of scene time.
     cloud_cover: float
     cloud_wind: float
+    sky_overcast: float
+    sky_overcast_color: Vec3
     defaults: ptr
     post_depth: int
     bloom_fbo: int
@@ -1129,6 +1131,11 @@ renderer_set_clouds(r: *GLRenderer, cover: float, wind: float) {
     r.cloud_wind = wind
 }
 
+renderer_set_sky_overcast(r: *GLRenderer, amount: float, color: Vec3) {
+    r.sky_overcast = amount
+    r.sky_overcast_color = color
+}
+
 flag_int(on: bool) -> int {
     if on { return 1 }
     return 0
@@ -1602,6 +1609,8 @@ skybox_create(r: *GLRenderer, path: string) -> *Skybox {
     sky.u_projection = ae3d_gl_uniform_location(sky.program, "projection")
     sky.u_sampler = ae3d_gl_uniform_location(sky.program, "skybox")
     sky.u_cloud_cover = ae3d_gl_uniform_location(sky.program, "cloudCover")
+    sky.u_sky_overcast = ae3d_gl_uniform_location(sky.program, "skyOvercast")
+    sky.u_sky_overcast_color = ae3d_gl_uniform_location(sky.program, "skyOvercastColor")
     sky.u_cloud_time = ae3d_gl_uniform_location(sky.program, "cloudTime")
     sky.u_cloud_sun = ae3d_gl_uniform_location(sky.program, "cloudSun")
     sky.u_cloud_sun_color = ae3d_gl_uniform_location(sky.program, "cloudSunColor")
@@ -1640,6 +1649,8 @@ render_skybox(r: *GLRenderer, cam: *Camera, light: *Light) {
     ae3d_gl_uniform_int(sky.u_sky_procedural, flag_int(sky.procedural))
     // The clouds over the image, lit by the scene's key light.
     ae3d_gl_uniform_float(sky.u_cloud_cover, r.cloud_cover)
+    ae3d_gl_uniform_float(sky.u_sky_overcast, r.sky_overcast)
+    ae3d_gl_uniform_vec3(sky.u_sky_overcast_color, r.sky_overcast_color.x, r.sky_overcast_color.y, r.sky_overcast_color.z)
     ae3d_gl_uniform_float(sky.u_cloud_time, r.scene_time * r.cloud_wind)
     ae3d_gl_uniform_vec3(sky.u_cloud_eye, cam.position.x, cam.position.y, cam.position.z)
     sun = key_light(r.lights, light)
