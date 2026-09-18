@@ -16,6 +16,7 @@
 // drawing it.
 
 import std.mem
+import std.os
 import ae3d.core
 import ae3d.vk
 import ae3d.ecs
@@ -24,6 +25,7 @@ import ae3d.loader
 import ae3d.rendering
 
 extern ae3d_posebank_create(frames: int, bones: int) -> ptr
+extern ae3d_png_write(path: string, pixels: ptr, width: int, height: int) -> int
 extern ae3d_posebank_destroy(bank: ptr)
 extern ae3d_posebank_capture(bank: ptr, frame: int, palette: ptr)
 
@@ -80,6 +82,25 @@ read_frame(backend: *Backend, cam: *Camera, light: *Light) -> ptr {
 level(pixels: ptr, x: int, y: int) -> int {
     at = (y * WIDTH + x) * 4
     return mem.get_byte(pixels, at) + mem.get_byte(pixels, at + 1) + mem.get_byte(pixels, at + 2)
+}
+
+// The mean brightness of a window of pixels, for reading a penumbra whose
+// taps differ pixel to pixel.
+mean_level(pixels: ptr, x0: int, y0: int, x1: int, y1: int) -> int {
+    total = 0
+    count = 0
+    y = y0
+    while y <= y1 {
+        x = x0
+        while x <= x1 {
+            total = total + level(pixels, x, y)
+            count = count + 1
+            x = x + 1
+        }
+        y = y + 1
+    }
+    if count == 0 { return 0 }
+    return total / count
 }
 
 // Where the shadow's edge is along a row: the first x from the left where
@@ -170,6 +191,31 @@ main() {
     // filtered edge takes more than one.
     past_ray = level(traced, edge_ray + 2, cy)
     check("past the edge a ray leaves the ground fully lit (${past_ray})", past_ray > lit_ray - lit_ray / 20)
+
+    // A sun with a size: twenty degrees across, absurd for a sun and plain
+    // for a test. The ball's rim is sixty metres over the ground, so the
+    // penumbra runs some ten metres either side of the hard edge, seven
+    // pixels here: the ground at the hard edge is half lit, the shadow's
+    // middle under the ball is as dark as before, the far ground as lit.
+    check("the sun starts as a point", vk.renderer_sun_size(renderer) == 0.0)
+    vk.renderer_set_sun_size(renderer, 20.0)
+    check("the sun takes a size (${vk.renderer_sun_size(renderer)})", vk.renderer_sun_size(renderer) > 19.9 && vk.renderer_sun_size(renderer) < 20.1)
+    // AE3D_RAY_DUMP=<dir> writes the hard and the soft frame there, to look
+    // at. The frame's pixels are the renderer's one buffer, so the hard
+    // frame is written before the soft one is drawn over it.
+    dump = core.text(os.getenv("AE3D_RAY_DUMP"))
+    if dump != "" { ae3d_png_write("${dump}/ray_hard.png", traced, WIDTH, HEIGHT) }
+    soft = read_frame(&backend, cam, light)
+    if dump != "" { ae3d_png_write("${dump}/ray_soft.png", soft, WIDTH, HEIGHT) }
+    at_edge = mean_level(soft, edge_ray - 1, cy - 6, edge_ray + 1, cy + 6)
+    inside = mean_level(soft, shadow_x - 1, cy - 6, shadow_x + 1, cy + 6)
+    outside = mean_level(soft, cx + 128, cy - 6, cx + 132, cy + 6)
+    check("a sun with a size half-lights the hard edge (${at_edge} between ${shade_ray} and ${lit_ray})", at_edge > shade_ray + (lit_ray - shade_ray) / 5 && at_edge < lit_ray - (lit_ray - shade_ray) / 5)
+    check("and leaves the shadow's middle as dark (${inside} against ${shade_ray})", inside < shade_ray + 20)
+    check("and the far ground as lit (${outside} against ${lit_ray})", outside > lit_ray - 12)
+    vk.renderer_set_sun_size(renderer, 0.0)
+    hard = read_frame(&backend, cam, light)
+    check("a point sun again: the edge is hard (${level(hard, edge_ray + 2, cy)})", level(hard, edge_ray + 2, cy) > lit_ray - lit_ray / 20)
 
     vk.renderer_set_ray_shadows(renderer, false)
     back = read_frame(&backend, cam, light)

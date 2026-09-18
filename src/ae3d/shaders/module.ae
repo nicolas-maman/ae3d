@@ -498,6 +498,10 @@ uniform float shadowTexelWorld;
 // two are combined, the darker winning. The block below is compiled into
 // the Vulkan ray-query variant of this shader alone.
 uniform int rayShadows;
+// The sun's angular radius in radians, for the rays: zero is a point sun
+// and a hard edge; the real sun's quarter degree gives a shadow that
+// sharpens toward what casts it and softens away from it, as shadows do.
+uniform float sunAngle;
 uniform mat4 lightSpaceMatrix;
 
 // GPU Gems Chapter 5: Improved Perlin Noise Support
@@ -594,20 +598,42 @@ float shadow_factor() {
 // share of the light. The origin steps out along the normal by a little
 // more than the surface's own tessellation error, so a face does not
 // shadow itself, and the ray is opaque-only and stops at its first hit.
+bool ray_blocked(vec3 origin, vec3 direction) {
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, sceneAS,
+                          gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+                          0xFF, origin, 0.01, direction, 500.0);
+    rayQueryProceedEXT(query);
+    return rayQueryGetIntersectionTypeEXT(query, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+}
+
+// A sun with a size: four rays into the cone the sun's disc subtends, on
+// a spiral turned by a per-pixel noise and by the frame's jitter, so the
+// temporal pass folds successive frames' taps into a smooth penumbra and
+// a still frame reads as a fine grain rather than a band. What stands
+// close to its shadow blocks every tap; what stands far blocks some.
+#define SUN_TAPS 4
 float ray_shadow_factor() {
     vec3 surface = normalize(Normal);
     vec3 toLight = normalize(-shadowDirection);
     if (dot(surface, toLight) <= 0.0) return shadowIntensity;
     vec3 origin = FragPos + surface * 0.02;
-    rayQueryEXT query;
-    rayQueryInitializeEXT(query, sceneAS,
-                          gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
-                          0xFF, origin, 0.01, toLight, 500.0);
-    rayQueryProceedEXT(query);
-    if (rayQueryGetIntersectionTypeEXT(query, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
-        return shadowIntensity;
+    if (sunAngle <= 0.0) {
+        return ray_blocked(origin, toLight) ? shadowIntensity : 1.0;
     }
-    return 1.0;
+    vec3 side = normalize(cross(toLight, abs(toLight.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+    vec3 up = cross(side, toLight);
+    float spread = tan(sunAngle);
+    float grain = fract(52.9829189 * fract(0.06711056 * gl_FragCoord.x + 0.00583715 * gl_FragCoord.y));
+    float turn = 6.2831853 * (grain + fract(dot(jitter, vec2(97.13, 31.7))));
+    float blocked = 0.0;
+    for (int i = 0; i < SUN_TAPS; i++) {
+        float radius = spread * sqrt((float(i) + 0.5) / float(SUN_TAPS));
+        float angle = float(i) * 2.3999632 + turn;
+        vec3 direction = normalize(toLight + side * (radius * cos(angle)) + up * (radius * sin(angle)));
+        if (ray_blocked(origin, direction)) blocked += 1.0;
+    }
+    return mix(1.0, shadowIntensity, blocked / float(SUN_TAPS));
 }
 #endif
 

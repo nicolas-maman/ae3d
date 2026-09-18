@@ -4,12 +4,12 @@
 
 #include <string.h>
 
-#define AE3D_VK_SCENE_SIZE 8048
+#define AE3D_VK_SCENE_SIZE 8064
 
 /* std140 layout, offsets computed from the same declarations the shader
    block is generated from, so the two cannot disagree. */
 typedef struct {
-    unsigned char bytes[8048];
+    unsigned char bytes[8064];
 } ae3d_vk_scene;
 
 #define AE3D_VK_OFF_ISINSTANCED 320
@@ -78,73 +78,74 @@ typedef struct {
 #define AE3D_VK_OFF_SHADOWDIRECTION 7104
 #define AE3D_VK_OFF_SHADOWTEXELWORLD 7116
 #define AE3D_VK_OFF_RAYSHADOWS 7120
-#define AE3D_VK_OFF_ENABLEPERLINNOISE 7124
-#define AE3D_VK_OFF_NOISESCALE 7128
-#define AE3D_VK_OFF_NOISEOCTAVES 7132
-#define AE3D_VK_OFF_NOISEINTENSITY 7136
-#define AE3D_VK_OFF_ENABLECAUSTICS 7140
-#define AE3D_VK_OFF_CAUSTICSINTENSITY 7144
-#define AE3D_VK_OFF_CAUSTICSSCALE 7148
-#define AE3D_VK_OFF_CAUSTICSSPEED 7152
-#define AE3D_VK_OFF_CAUSTICSWATERLEVEL 7156
-#define AE3D_VK_OFF_CAUSTICSDEPTH 7160
-#define AE3D_VK_OFF_CAUSTICSTIME 7164
-#define AE3D_VK_OFF_PROJECTION 7168
-#define AE3D_VK_OFF_VIEW 7232
-#define AE3D_VK_OFF_CLOUDSUNCOLOR 7296
-#define AE3D_VK_OFF_SKYPROCEDURAL 7308
-#define AE3D_VK_OFF_SKYOVERCAST 7312
-#define AE3D_VK_OFF_SKYOVERCASTCOLOR 7328
-#define AE3D_VK_OFF_TEXELSIZE 7344
-#define AE3D_VK_OFF_EDGETHRESHOLD 7352
-#define AE3D_VK_OFF_EDGETHRESHOLDMIN 7356
-#define AE3D_VK_OFF_SUBPIXELQUALITY 7360
-#define AE3D_VK_OFF_INVVIEWPROJECTION 7376
-#define AE3D_VK_OFF_SSRROADHEIGHT 7440
-#define AE3D_VK_OFF_SSRSTRENGTH 7444
-#define AE3D_VK_OFF_SSAORADIUS 7448
-#define AE3D_VK_OFF_SSAOINTENSITY 7452
-#define AE3D_VK_OFF_DEPTHSAMPLECOUNT 7456
-#define AE3D_VK_OFF_TAABLEND 7460
-#define AE3D_VK_OFF_TIME 7464
-#define AE3D_VK_OFF_WAVESPEEDMULTIPLIER 7468
-#define AE3D_VK_OFF_WAVEHEIGHTMULTIPLIER 7472
-#define AE3D_VK_OFF_WAVERANDOMNESS 7476
-#define AE3D_VK_OFF_WAVEDIRECTIONS 7488
-#define AE3D_VK_OFF_WAVEAMPLITUDES 7552
-#define AE3D_VK_OFF_WAVEFREQUENCIES 7616
-#define AE3D_VK_OFF_WAVESPEEDS 7680
-#define AE3D_VK_OFF_WAVEPHASES 7744
-#define AE3D_VK_OFF_WAVESTEEPNESS 7808
-#define AE3D_VK_OFF_LIGHTPOS 7872
-#define AE3D_VK_OFF_LIGHTDIRECTION 7888
-#define AE3D_VK_OFF_LIGHTCOLOR 7904
-#define AE3D_VK_OFF_LIGHTINTENSITY 7916
-#define AE3D_VK_OFF_WATERBASECOLOR 7920
-#define AE3D_VK_OFF_WATEROPACITY 7932
-#define AE3D_VK_OFF_ENABLEFOAM 7936
-#define AE3D_VK_OFF_FOAMINTENSITY 7940
-#define AE3D_VK_OFF_WATERPLANEHEIGHT 7944
-#define AE3D_VK_OFF_WATERLEVEL 7948
-#define AE3D_VK_OFF_SKYCOLOR 7952
-#define AE3D_VK_OFF_HORIZONCOLOR 7968
-#define AE3D_VK_OFF_ENABLEWATERREFLECTION 7980
-#define AE3D_VK_OFF_WATERREFLECTIONINTENSITY 7984
-#define AE3D_VK_OFF_HASSKYTEXTURE 7988
-#define AE3D_VK_OFF_HASSCENEDEPTH 7992
-#define AE3D_VK_OFF_WATERDEPTHFADE 7996
-#define AE3D_VK_OFF_WATERSHOREFOAM 8000
-#define AE3D_VK_OFF_ENABLEWATERDISTORTION 8004
-#define AE3D_VK_OFF_WATERDISTORTIONINTENSITY 8008
-#define AE3D_VK_OFF_ENABLEWATERNORMALMAPPING 8012
-#define AE3D_VK_OFF_WATERNORMALINTENSITY 8016
-#define AE3D_VK_OFF_POSEBANKFRAMES 8020
-#define AE3D_VK_OFF_IMPOSTORCOLS 8024
-#define AE3D_VK_OFF_IMPOSTORROWS 8028
-#define AE3D_VK_OFF_IMPOSTORWIDTH 8032
-#define AE3D_VK_OFF_IMPOSTORHEIGHT 8036
-#define AE3D_VK_OFF_CROWDTRAVEL 8040
-#define AE3D_VK_OFF_CROWDPHASESTEP 8044
+#define AE3D_VK_OFF_SUNANGLE 7124
+#define AE3D_VK_OFF_ENABLEPERLINNOISE 7128
+#define AE3D_VK_OFF_NOISESCALE 7132
+#define AE3D_VK_OFF_NOISEOCTAVES 7136
+#define AE3D_VK_OFF_NOISEINTENSITY 7140
+#define AE3D_VK_OFF_ENABLECAUSTICS 7144
+#define AE3D_VK_OFF_CAUSTICSINTENSITY 7148
+#define AE3D_VK_OFF_CAUSTICSSCALE 7152
+#define AE3D_VK_OFF_CAUSTICSSPEED 7156
+#define AE3D_VK_OFF_CAUSTICSWATERLEVEL 7160
+#define AE3D_VK_OFF_CAUSTICSDEPTH 7164
+#define AE3D_VK_OFF_CAUSTICSTIME 7168
+#define AE3D_VK_OFF_PROJECTION 7184
+#define AE3D_VK_OFF_VIEW 7248
+#define AE3D_VK_OFF_CLOUDSUNCOLOR 7312
+#define AE3D_VK_OFF_SKYPROCEDURAL 7324
+#define AE3D_VK_OFF_SKYOVERCAST 7328
+#define AE3D_VK_OFF_SKYOVERCASTCOLOR 7344
+#define AE3D_VK_OFF_TEXELSIZE 7360
+#define AE3D_VK_OFF_EDGETHRESHOLD 7368
+#define AE3D_VK_OFF_EDGETHRESHOLDMIN 7372
+#define AE3D_VK_OFF_SUBPIXELQUALITY 7376
+#define AE3D_VK_OFF_INVVIEWPROJECTION 7392
+#define AE3D_VK_OFF_SSRROADHEIGHT 7456
+#define AE3D_VK_OFF_SSRSTRENGTH 7460
+#define AE3D_VK_OFF_SSAORADIUS 7464
+#define AE3D_VK_OFF_SSAOINTENSITY 7468
+#define AE3D_VK_OFF_DEPTHSAMPLECOUNT 7472
+#define AE3D_VK_OFF_TAABLEND 7476
+#define AE3D_VK_OFF_TIME 7480
+#define AE3D_VK_OFF_WAVESPEEDMULTIPLIER 7484
+#define AE3D_VK_OFF_WAVEHEIGHTMULTIPLIER 7488
+#define AE3D_VK_OFF_WAVERANDOMNESS 7492
+#define AE3D_VK_OFF_WAVEDIRECTIONS 7504
+#define AE3D_VK_OFF_WAVEAMPLITUDES 7568
+#define AE3D_VK_OFF_WAVEFREQUENCIES 7632
+#define AE3D_VK_OFF_WAVESPEEDS 7696
+#define AE3D_VK_OFF_WAVEPHASES 7760
+#define AE3D_VK_OFF_WAVESTEEPNESS 7824
+#define AE3D_VK_OFF_LIGHTPOS 7888
+#define AE3D_VK_OFF_LIGHTDIRECTION 7904
+#define AE3D_VK_OFF_LIGHTCOLOR 7920
+#define AE3D_VK_OFF_LIGHTINTENSITY 7932
+#define AE3D_VK_OFF_WATERBASECOLOR 7936
+#define AE3D_VK_OFF_WATEROPACITY 7948
+#define AE3D_VK_OFF_ENABLEFOAM 7952
+#define AE3D_VK_OFF_FOAMINTENSITY 7956
+#define AE3D_VK_OFF_WATERPLANEHEIGHT 7960
+#define AE3D_VK_OFF_WATERLEVEL 7964
+#define AE3D_VK_OFF_SKYCOLOR 7968
+#define AE3D_VK_OFF_HORIZONCOLOR 7984
+#define AE3D_VK_OFF_ENABLEWATERREFLECTION 7996
+#define AE3D_VK_OFF_WATERREFLECTIONINTENSITY 8000
+#define AE3D_VK_OFF_HASSKYTEXTURE 8004
+#define AE3D_VK_OFF_HASSCENEDEPTH 8008
+#define AE3D_VK_OFF_WATERDEPTHFADE 8012
+#define AE3D_VK_OFF_WATERSHOREFOAM 8016
+#define AE3D_VK_OFF_ENABLEWATERDISTORTION 8020
+#define AE3D_VK_OFF_WATERDISTORTIONINTENSITY 8024
+#define AE3D_VK_OFF_ENABLEWATERNORMALMAPPING 8028
+#define AE3D_VK_OFF_WATERNORMALINTENSITY 8032
+#define AE3D_VK_OFF_POSEBANKFRAMES 8036
+#define AE3D_VK_OFF_IMPOSTORCOLS 8040
+#define AE3D_VK_OFF_IMPOSTORROWS 8044
+#define AE3D_VK_OFF_IMPOSTORWIDTH 8048
+#define AE3D_VK_OFF_IMPOSTORHEIGHT 8052
+#define AE3D_VK_OFF_CROWDTRAVEL 8056
+#define AE3D_VK_OFF_CROWDPHASESTEP 8060
 
 #define AE3D_VK_MAX_LIGHTS 4
 #define AE3D_VK_LIGHT_STRIDE 80
@@ -169,43 +170,43 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "bloomThreshold", 7048 },
     { "bones", 688 },
     { "captureChannel", 6856 },
-    { "causticsDepth", 7160 },
-    { "causticsIntensity", 7144 },
-    { "causticsScale", 7148 },
-    { "causticsSpeed", 7152 },
-    { "causticsTime", 7164 },
-    { "causticsWaterLevel", 7156 },
+    { "causticsDepth", 7164 },
+    { "causticsIntensity", 7148 },
+    { "causticsScale", 7152 },
+    { "causticsSpeed", 7156 },
+    { "causticsTime", 7168 },
+    { "causticsWaterLevel", 7160 },
     { "clearcoatIntensity", 6956 },
     { "clearcoatRoughness", 6952 },
     { "cloudCover", 6904 },
     { "cloudSun", 6912 },
-    { "cloudSunColor", 7296 },
+    { "cloudSunColor", 7312 },
     { "cloudTime", 6908 },
-    { "crowdPhaseStep", 8044 },
-    { "crowdTravel", 8040 },
-    { "depthSampleCount", 7456 },
+    { "crowdPhaseStep", 8060 },
+    { "crowdTravel", 8056 },
+    { "depthSampleCount", 7472 },
     { "diffuseColor", 6864 },
-    { "edgeThreshold", 7352 },
-    { "edgeThresholdMin", 7356 },
+    { "edgeThreshold", 7368 },
+    { "edgeThresholdMin", 7372 },
     { "enableBloom", 7044 },
-    { "enableCaustics", 7140 },
+    { "enableCaustics", 7144 },
     { "enableClearcoat", 6948 },
     { "enableEnergyConservation", 7004 },
-    { "enableFoam", 7936 },
+    { "enableFoam", 7952 },
     { "enableFog", 7056 },
     { "enableGlobalIllumination", 7032 },
     { "enableImageBasedLighting", 7008 },
     { "enableMultipleScattering", 7000 },
-    { "enablePerlinNoise", 7124 },
+    { "enablePerlinNoise", 7128 },
     { "enableShadows", 7088 },
     { "enableSheen", 6960 },
     { "enableTransmission", 6992 },
     { "enableVolumetricLighting", 7016 },
-    { "enableWaterDistortion", 8004 },
-    { "enableWaterNormalMapping", 8012 },
-    { "enableWaterReflection", 7980 },
+    { "enableWaterDistortion", 8020 },
+    { "enableWaterNormalMapping", 8028 },
+    { "enableWaterReflection", 7996 },
     { "exposure", 6900 },
-    { "foamIntensity", 7940 },
+    { "foamIntensity", 7956 },
     { "fogColor", 7072 },
     { "fogEnd", 7064 },
     { "fogIntensity", 7084 },
@@ -213,40 +214,40 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "giBounces", 7040 },
     { "giIntensity", 7036 },
     { "hasNormalMap", 6936 },
-    { "hasSceneDepth", 7992 },
+    { "hasSceneDepth", 8008 },
     { "hasShadowMap", 7092 },
-    { "hasSkyTexture", 7988 },
-    { "horizonColor", 7968 },
+    { "hasSkyTexture", 8004 },
+    { "horizonColor", 7984 },
     { "iblIntensity", 7012 },
     { "impostor", 6852 },
-    { "impostorCols", 8024 },
-    { "impostorHeight", 8036 },
-    { "impostorRows", 8028 },
-    { "impostorWidth", 8032 },
+    { "impostorCols", 8040 },
+    { "impostorHeight", 8052 },
+    { "impostorRows", 8044 },
+    { "impostorWidth", 8048 },
     { "instanceBillboard", 332 },
     { "instancePoints", 328 },
-    { "invViewProjection", 7376 },
+    { "invViewProjection", 7392 },
     { "isInstanced", 320 },
     { "isSkinned", 672 },
     { "jitter", 6832 },
-    { "lightColor", 7904 },
+    { "lightColor", 7920 },
     { "lightCount", 6848 },
-    { "lightDirection", 7888 },
-    { "lightIntensity", 7916 },
-    { "lightPos", 7872 },
+    { "lightDirection", 7904 },
+    { "lightIntensity", 7932 },
+    { "lightPos", 7888 },
     { "lightSpaceMatrix", 480 },
     { "materialAlpha", 6924 },
     { "metallic", 6892 },
     { "model", 352 },
-    { "noiseIntensity", 7136 },
-    { "noiseOctaves", 7132 },
-    { "noiseScale", 7128 },
+    { "noiseIntensity", 7140 },
+    { "noiseOctaves", 7136 },
+    { "noiseScale", 7132 },
     { "normalStrength", 6940 },
     { "occlusionStrength", 6944 },
-    { "poseBankFrames", 8020 },
+    { "poseBankFrames", 8036 },
     { "prevModel", 544 },
     { "prevViewProjection", 608 },
-    { "projection", 7168 },
+    { "projection", 7184 },
     { "rayShadows", 7120 },
     { "reflectivity", 6928 },
     { "roughness", 6896 },
@@ -257,50 +258,51 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "shadowTexelWorld", 7116 },
     { "sheenColor", 6976 },
     { "sheenRoughness", 6988 },
-    { "skyColor", 7952 },
-    { "skyOvercast", 7312 },
-    { "skyOvercastColor", 7328 },
-    { "skyProcedural", 7308 },
+    { "skyColor", 7968 },
+    { "skyOvercast", 7328 },
+    { "skyOvercastColor", 7344 },
+    { "skyProcedural", 7324 },
     { "specularColor", 6880 },
-    { "ssaoIntensity", 7452 },
-    { "ssaoRadius", 7448 },
-    { "ssrRoadHeight", 7440 },
-    { "ssrStrength", 7444 },
-    { "subpixelQuality", 7360 },
-    { "taaBlend", 7460 },
-    { "texelSize", 7344 },
-    { "time", 7464 },
+    { "ssaoIntensity", 7468 },
+    { "ssaoRadius", 7464 },
+    { "ssrRoadHeight", 7456 },
+    { "ssrStrength", 7460 },
+    { "subpixelQuality", 7376 },
+    { "sunAngle", 7124 },
+    { "taaBlend", 7476 },
+    { "texelSize", 7360 },
+    { "time", 7480 },
     { "transmissionFactor", 6996 },
     { "useInstanceColor", 324 },
-    { "view", 7232 },
+    { "view", 7248 },
     { "viewDistance", 6860 },
     { "viewPos", 336 },
     { "viewProjection", 416 },
     { "volumetricIntensity", 7020 },
     { "volumetricScattering", 7028 },
     { "volumetricSteps", 7024 },
-    { "waterBaseColor", 7920 },
-    { "waterDepthFade", 7996 },
-    { "waterDistortionIntensity", 8008 },
-    { "waterLevel", 7948 },
-    { "waterNormalIntensity", 8016 },
-    { "waterOpacity", 7932 },
-    { "waterPlaneHeight", 7944 },
-    { "waterReflectionIntensity", 7984 },
-    { "waterShoreFoam", 8000 },
-    { "waveAmplitudes", 7552 },
-    { "waveDirections", 7488 },
-    { "waveFrequencies", 7616 },
-    { "waveHeightMultiplier", 7472 },
-    { "wavePhases", 7744 },
-    { "waveRandomness", 7476 },
-    { "waveSpeedMultiplier", 7468 },
-    { "waveSpeeds", 7680 },
-    { "waveSteepness", 7808 },
+    { "waterBaseColor", 7936 },
+    { "waterDepthFade", 8012 },
+    { "waterDistortionIntensity", 8024 },
+    { "waterLevel", 7964 },
+    { "waterNormalIntensity", 8032 },
+    { "waterOpacity", 7948 },
+    { "waterPlaneHeight", 7960 },
+    { "waterReflectionIntensity", 8000 },
+    { "waterShoreFoam", 8016 },
+    { "waveAmplitudes", 7568 },
+    { "waveDirections", 7504 },
+    { "waveFrequencies", 7632 },
+    { "waveHeightMultiplier", 7488 },
+    { "wavePhases", 7760 },
+    { "waveRandomness", 7492 },
+    { "waveSpeedMultiplier", 7484 },
+    { "waveSpeeds", 7696 },
+    { "waveSteepness", 7824 },
     { "wetness", 6932 },
 };
 
-#define AE3D_VK_UNIFORM_SLOT_COUNT 133
+#define AE3D_VK_UNIFORM_SLOT_COUNT 134
 
 static inline int ae3d_vk_uniform_offset(const char *name) {
     int low = 0;

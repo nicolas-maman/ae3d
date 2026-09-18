@@ -254,9 +254,25 @@ rays -- that scene packs a thousand figures a square metre, so a shadow
 ray crosses hundreds of overlapping structures, a density no game scene
 has -- and 20,000 stays at 140.
 
+The sun has a size: `engine_set_sun_size(e, degrees)`, the angle its
+disc subtends (`AE3D_SUN_SIZE=n` in tenths of a degree; the real sun is
+about half a degree, and zero, the default, is a point sun and a hard
+edge). With a size, a lit pixel traces four rays into the cone the disc
+subtends, on a spiral turned by a per-pixel noise and by the frame's
+jitter, and takes the blocked share: a shadow sharp where it meets what
+casts it and soft where the caster stands far off, the way shadows are,
+since a far caster covers the disc only partly. A still frame shows the
+penumbra as a fine grain; under the temporal pass the frames' taps fold
+into a smooth one. `tests/test_ray_shadows` holds a twenty-degree sun to
+half-lighting the ball's hard edge while the shadow's middle stays as
+dark and the far ground as lit, and a point sun to the hard edge again;
+`AE3D_RAY_DUMP=<dir>` writes both frames. The four rays cost about a
+millisecond of scene time in the city at 720p (3.4 to 4.5 ms with 400
+figures); the shadow map's penumbra is untouched, since only what the
+rays shadow takes the size.
+
 What is left for the rays to do next: the skinned figures, so the map
-goes; a sun with a size, several rays a pixel folded by the temporal
-pass, for a penumbra; occlusion and reflections by ray (#323).
+goes; occlusion and reflections by ray (#323).
 
 ### DLSS
 

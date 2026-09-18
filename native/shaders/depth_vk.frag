@@ -81,6 +81,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     vec3 shadowDirection;
     float shadowTexelWorld;
     int rayShadows;
+    float sunAngle;
     bool enablePerlinNoise;
     float noiseScale;
     int noiseOctaves;
