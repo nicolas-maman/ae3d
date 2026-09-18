@@ -434,7 +434,7 @@ done
 step "examples build and run"
 # The benchmark is built in the same pass: build_together starts from a clean
 # status directory, so a later call would forget that the examples built.
-build_together examples/*.ae tools/ae3d_bench.ae tools/zombie_street.ae
+build_together examples/*.ae tools/ae3d_bench.ae tools/measure_scene.ae tools/ae3d_agent.ae tools/zombie_street.ae
 for example in examples/*.ae; do
     name="$(basename "$example" .ae)"
     if ! built_ok "$name"; then
@@ -470,30 +470,60 @@ step "the demo scene, measured through the channel"
 # was loaded, what colour each surface arrived at, whether a camera that has
 # not moved draws the same frame twice, and whether seeking a clip moves the
 # part it drives. Everything a screenshot would be read for, as numbers.
-if [ -z "$PYTHON" ]; then
-    skip "zombie_street (measured)" "no python3"
+# tools/measure_scene.ae attaches to a scene this script starts, the way the
+# frame budget does, on both renderers: the measurement is of the engine, and
+# the engine is taken forward on Vulkan.
+run_measure() {   # run_measure <backend> <port>
+    measure_backend="$1"
+    measure_port="$2"
+    measure_name="zombie_street (measured, $measure_backend)"
+    measure_log="$(mktemp)"
+    measure_scene_log="$(mktemp)"
+    AE3D_AGENT="$measure_port" ./build/zombie_street "$measure_backend" >"$measure_scene_log" 2>&1 &
+    measure_scene=$!
+    # The scene opens its port after the window and the first frame, so the
+    # first question can arrive before there is anything to answer it. Retried
+    # only while that is what came back, and only while the scene is alive.
+    measured=1
+    attempt=0
+    while [ "$attempt" -lt 50 ]; do
+        kill -0 "$measure_scene" 2>/dev/null || break
+        bounded "$RUN_LIMIT" ./build/measure_scene "$measure_port" >"$measure_log" 2>&1
+        measured=$?
+        grep -q 'nothing answering' "$measure_log" || break
+        attempt=$((attempt + 1))
+        sleep 0.2
+    done
+    if ! kill -0 "$measure_scene" 2>/dev/null; then
+        # The scene stopped without complaining, which is the engine saying it
+        # has nowhere to draw. A runner with a display is where this is asked.
+        if grep -q 'no Vulkan driver' "$measure_scene_log"; then
+            skip "$measure_name" "no Vulkan driver"
+        else
+            skip "$measure_name" "the scene could not open a window"
+        fi
+    elif [ "$measured" -eq 0 ]; then
+        pass "$measure_name"
+        # The first line carries what the scene costs, which is the number this
+        # scene exists to report and is worth having in the log of every run.
+        head -1 "$measure_log" | sed 's/^/        /'
+    else
+        fail "$measure_name"
+        grep -E 'FAIL|error:|measure_scene:' "$measure_log" | sed 's/^/        /' | head -12
+    fi
+    kill "$measure_scene" 2>/dev/null
+    wait "$measure_scene" 2>/dev/null
+    rm -f "$measure_log" "$measure_scene_log"
+}
+if ! built_ok measure_scene; then
+    fail "measure_scene (build)"
 elif ! have_display; then
     skip "zombie_street (measured)" "no display"
 elif ! built_ok zombie_street; then
     skip "zombie_street (measured)" "it did not build"
 else
-    measure_log="$(mktemp)"
-    bounded "$RUN_LIMIT" $PYTHON scripts/measure_scene.py         --launch ./build/zombie_street --port 7913 >"$measure_log" 2>&1
-    measured=$?
-    if [ "$measured" -eq 0 ]; then
-        pass "zombie_street (measured)"
-        # The first line carries what the scene costs, which is the number this
-        # scene exists to report and is worth having in the log of every run.
-        head -1 "$measure_log" | sed 's/^/        /'
-    elif [ "$measured" -eq 3 ]; then
-        # The scene stopped without complaining, which is the engine saying it
-        # has nowhere to draw. A runner with a display is where this is asked.
-        skip "zombie_street (measured)" "the scene could not open a window"
-    else
-        fail "zombie_street (measured)"
-        grep -E 'FAIL|Traceback|Error|error:|measure_scene:' "$measure_log"             | sed 's/^/        /' | head -12
-    fi
-    rm -f "$measure_log"
+    run_measure opengl 7913
+    run_measure vulkan 7914
 fi
 
 step "the demo scene, held to what a scene has to look like"

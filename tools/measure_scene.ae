@@ -1,0 +1,389 @@
+// Measure a running scene through the agent channel.
+//
+//     AE3D_AGENT=7913 ./build/zombie_street &
+//     ./build/measure_scene 7913
+//
+// Nothing here is read off a screenshot. Every number comes from the engine
+// that drew the frame: what each model is made of, where it ended up on
+// screen, what colour it arrived at, and whether the picture is stable under
+// a movement too small to change what is in it.
+//
+// One connection for the whole run, and the questions that can be asked once
+// are asked once: a round trip costs a frame, because the answer describes a
+// frame that has to have been drawn first.
+//
+// Written in ae3d against ae3d's own JSON and protocol, as tools/ae3d_bench
+// is, so it changes with the engine in the same build. Exits non-zero with a
+// line naming what failed; 2 when nothing answered on the port.
+import std.json
+import std.os
+import std.string
+import ae3d.core
+import ae3d.platform
+import ae3d.probe
+
+extern sqrt(x: float) -> float
+extern fmax(a: float, b: float) -> float
+
+// A number to `places` decimals, the way a report reads.
+fmt(value: float, places: int) -> string {
+    scale = 1
+    i = 0
+    while i < places { scale = scale * 10 ; i = i + 1 }
+    negative = value < 0.0
+    if negative { value = 0.0 - value }
+    scaled = (value * (scale as float) + 0.5) as int
+    whole = scaled / scale
+    fraction = scaled - whole * scale
+    text = "${whole}"
+    if places > 0 {
+        digits = "${fraction}"
+        while string.length(digits) < places { digits = string.concat("0", digits) }
+        text = string.concat(text, string.concat(".", digits))
+    }
+    if negative { return string.concat("-", text) }
+    return text
+}
+
+var g_failures = 0
+var g_probe = null
+
+check(name: string, ok: bool, detail: string) {
+    tag = "FAIL"
+    if ok { tag = "ok  " }
+    if detail != "" {
+        println("  ${tag} ${name} (${detail})")
+    } else {
+        println("  ${tag} ${name}")
+    }
+    if !ok { g_failures = g_failures + 1 }
+}
+
+// One request, refused answers reported and answered as null.
+ask(request: ptr) -> ptr {
+    op = probe.text(request, "op")
+    answered = probe.ask(g_probe as *Probe, request)
+    json.free(request)
+    if answered == null {
+        println("measure_scene: ${op}: the connection closed")
+        os.exit(2)
+    }
+    if !probe.accepted(answered) {
+        println("measure_scene: ${op}: ${probe.refusal(answered)}")
+        json.free(answered)
+        os.exit(2)
+    }
+    return answered
+}
+
+request(op: string) -> ptr {
+    r = json.obj()
+    json.object_set_raw(r, "op", json.str(op))
+    return r
+}
+
+with_text(r: ptr, key: string, value: string) -> ptr {
+    json.object_set_raw(r, key, json.str(value))
+    return r
+}
+
+with_number(r: ptr, key: string, value: float) -> ptr {
+    json.object_set_raw(r, key, json.num(value))
+    return r
+}
+
+with_int(r: ptr, key: string, value: int) -> ptr {
+    json.object_set_raw(r, key, json.from_int(value as long))
+    return r
+}
+
+with_flag(r: ptr, key: string, value: bool) -> ptr {
+    v = 0
+    if value { v = 1 }
+    json.object_set_raw(r, key, json.boolean(v))
+    return r
+}
+
+with_vec3(r: ptr, key: string, v: Vec3) -> ptr {
+    a = json.arr()
+    json.array_add_raw(a, json.num(v.x))
+    json.array_add_raw(a, json.num(v.y))
+    json.array_add_raw(a, json.num(v.z))
+    json.object_set_raw(r, key, a)
+    return r
+}
+
+// An op that takes no arguments, its answer dropped.
+did(op: string) {
+    json.free(ask(request(op)))
+}
+
+// The stage named `stage` of a trace, or null.
+stage_of(trace: ptr, stage: string) -> ptr {
+    stages = probe.field(trace, "stages")
+    if stages == null { return null }
+    i = 0
+    while i < json.array_size(stages) {
+        s = json.array_get_raw(stages, i)
+        if probe.text(s, "stage") == stage { return s }
+        i = i + 1
+    }
+    return null
+}
+
+// The model named `name` in a scene.tree answer, or null.
+model_named(models: ptr, name: string) -> ptr {
+    i = 0
+    while i < json.array_size(models) {
+        m = json.array_get_raw(models, i)
+        if probe.text(m, "name") == name { return m }
+        i = i + 1
+    }
+    return null
+}
+
+// ---------------------------------------------------------------------------
+
+// Every model, in one question: on screen, and its images loaded.
+pipeline(tree: ptr) {
+    println("== every part, from the .blend to the pixels ==")
+    models = probe.field(tree, "models")
+    count = probe.integer(tree, "count")
+    on_screen = 0
+    offscreen = ""
+    textured = 0
+    unloaded = ""
+    i = 0
+    while i < json.array_size(models) {
+        m = json.array_get_raw(models, i)
+        if probe.field(m, "screen_region") != null {
+            on_screen = on_screen + 1
+        } else {
+            if offscreen != "" { offscreen = string.concat(offscreen, ", ") }
+            offscreen = string.concat(offscreen, probe.text(m, "name"))
+        }
+        if probe.text(m, "texture") != "" {
+            textured = textured + 1
+            if !probe.flag(m, "texture_loaded") {
+                if unloaded != "" { unloaded = string.concat(unloaded, ", ") }
+                unloaded = string.concat(unloaded, probe.text(m, "name"))
+            }
+        }
+        i = i + 1
+    }
+    if offscreen == "" { offscreen = "none" }
+    check("every model in view lands on screen", on_screen + (json.array_size(models) - on_screen) == count,
+          "${on_screen} of ${count}; off screen: ${offscreen}")
+    if unloaded == "" { unloaded = "${textured} textured materials" }
+    check("every image a material names was loaded", unloaded == "${textured} textured materials", unloaded)
+}
+
+// The full trace for a few models, one round trip each.
+traced(name: string) {
+    answered = ask(with_text(request("trace.model"), "object", name))
+    trace = probe.result(answered)
+    reached = "nothing"
+    got_pixels = false
+    stages = probe.field(trace, "stages")
+    i = 0
+    while i < json.array_size(stages) {
+        s = json.array_get_raw(stages, i)
+        if probe.flag(s, "reached") {
+            reached = string.copy(probe.text(s, "stage"))
+            if probe.text(s, "stage") == "pixels" { got_pixels = true }
+        }
+        i = i + 1
+    }
+    check("  ${name} reaches the pixels it covers", got_pixels, "got as far as ${reached}")
+    json.free(answered)
+}
+
+// One surface alone against the sky, so the mean is the surface.
+surface(models: ptr, name: string, label: string, material: string, sky: Vec3) {
+    m = model_named(models, name)
+    if m == null || probe.field(m, "screen_region") == null {
+        println("  ${label}: not in view")
+        return
+    }
+    json.free(ask(with_text(request("scene.isolate"), "object", name)))
+    traced_answer = ask(with_text(request("trace.model"), "object", name))
+    visibility = stage_of(probe.result(traced_answer), "visibility")
+    box = null
+    if visibility != null { box = probe.field(probe.field(visibility, "detail"), "screen_region") }
+    if box == null {
+        println("  ${label}: not in view")
+        json.free(traced_answer)
+        return
+    }
+    packed = ((sky.x * 255.0) as int) * 16777216 + ((sky.y * 255.0) as int) * 65536 + ((sky.z * 255.0) as int) * 256
+    r = request("frame.region")
+    with_int(r, "x", probe.integer(box, "x"))
+    with_int(r, "y", probe.integer(box, "y"))
+    with_int(r, "width", probe.integer(box, "width"))
+    with_int(r, "height", probe.integer(box, "height"))
+    with_int(r, "background", packed)
+    with_int(r, "tolerance", 12)
+    json.free(traced_answer)
+    got_answer = ask(r)
+    got = probe.result(got_answer)
+    covered = probe.number(got, "coverage")
+    // A surface that fills too little of its own box cannot be separated
+    // from what is behind it: the background is subtracted in proportion to
+    // what it does not cover, and below a third that estimate is worth less
+    // than the measurement.
+    if covered < 0.30 {
+        println("  ${label}: covers ${fmt(covered * 100.0, 1)}% of its own box")
+        json.free(got_answer)
+        return
+    }
+    mean = probe.field(got, "mean")
+    cr = (json.get_number(json.array_get_raw(mean, 0)) - sky.x * (1.0 - covered)) / covered
+    cg = (json.get_number(json.array_get_raw(mean, 1)) - sky.y * (1.0 - covered)) / covered
+    cb = (json.get_number(json.array_get_raw(mean, 2)) - sky.z * (1.0 - covered)) / covered
+    rg = cr / fmax(cg, 0.000001)
+    gb = cg / fmax(cb, 0.000001)
+    println("  ${label} ${probe.text(m, "material")} r=${fmt(cr, 3)} g=${fmt(cg, 3)} b=${fmt(cb, 3)}  r/g=${fmt(rg, 2)} g/b=${fmt(gb, 2)}  covers ${fmt(covered * 100.0, 0)}%  stddev ${fmt(probe.number(got, "stddev"), 4)}")
+    check("  ${label} is the material Blender gave it", probe.text(m, "material") == material, probe.text(m, "material"))
+    json.free(got_answer)
+}
+
+surfaces(models: ptr, sky: Vec3) {
+    println("")
+    println("== the material each surface arrived with ==")
+    surface(models, "Street_BlockL0", "brick", "WallBrick", sky)
+    surface(models, "Street_BlockL1", "concrete", "WallConcrete", sky)
+    surface(models, "Street_PathL", "paving", "PathPaving", sky)
+    surface(models, "Street_Road", "tarmac", "RoadTarmac", sky)
+    surface(models, "Zombie_Body", "skin", "ZombieSkin", sky)
+    surface(models, "Zombie_Clothes", "cloth", "ZombieCloth", sky)
+    surface(models, "Street_LampHead0", "lamp", "LampGlow", sky)
+    did("scene.isolate")
+}
+
+set_camera(position: Vec3, target: Vec3) {
+    r = request("camera.set")
+    with_vec3(r, "position", position)
+    with_vec3(r, "look_at", target)
+    json.free(ask(r))
+}
+
+diff(tolerance: int) -> ptr {
+    return ask(with_int(request("frame.diff"), "tolerance", tolerance))
+}
+
+// The same camera draws the same frame, and half a millimetre of movement
+// moves almost nothing: two surfaces fighting over a depth swap which of
+// them wins when the camera moves by less than the geometry cares about.
+depth_is_decided(position: Vec3, target: Vec3) {
+    println("")
+    println("== the depth test never has to choose ==")
+    set_camera(position, target)
+    did("frame.hold")
+    still = diff(2)
+    changed = probe.integer(probe.result(still), "changed")
+    pixels = probe.integer(probe.result(still), "pixels")
+    check("the same camera draws the same frame", changed == 0, "${changed} pixels of ${pixels}")
+    json.free(still)
+
+    axis = 0
+    while axis < 2 {
+        nudged = position
+        label = "sideways"
+        if axis == 0 { nudged.x = nudged.x + 0.0005 } else {
+            nudged.y = nudged.y + 0.0005
+            label = "upwards"
+        }
+        did("frame.hold")
+        set_camera(nudged, target)
+        moved = diff(24)
+        fraction = probe.number(probe.result(moved), "fraction")
+        check("half a millimetre ${label} moves almost nothing", fraction < 0.01,
+              "${fmt(fraction * 100.0, 3)}% of the frame")
+        json.free(moved)
+        axis = axis + 1
+    }
+    set_camera(position, target)
+}
+
+// Where a traced model landed on screen, or (-1, -1).
+screen_position(trace: ptr) -> Vec3 {
+    visibility = stage_of(trace, "visibility")
+    if visibility == null { return core.vec3(0.0 - 1.0, 0.0 - 1.0, 0.0) }
+    detail = probe.field(visibility, "detail")
+    if probe.field(detail, "screen_x") == null { return core.vec3(0.0 - 1.0, 0.0 - 1.0, 0.0) }
+    return core.vec3(probe.number(detail, "screen_x"), probe.number(detail, "screen_y"), 0.0)
+}
+
+// Seeking the clip changes the picture, and the part it drives moves by a
+// fraction of the width: the same scene drawn at a CI's size answers the same.
+animation_arrives(part: string, rest: float, moment: float, width: int) {
+    println("")
+    println("== the animation reaches the picture ==")
+    json.free(ask(with_number(request("anim.set"), "time", rest)))
+    did("frame.hold")
+    before = ask(with_text(request("trace.model"), "object", part))
+    json.free(ask(with_number(request("anim.set"), "time", moment)))
+    changed = diff(16)
+    after = ask(with_text(request("trace.model"), "object", part))
+    p0 = screen_position(probe.result(before))
+    p1 = screen_position(probe.result(after))
+    moved = 0.0
+    if p0.x >= 0.0 && p1.x >= 0.0 {
+        moved = sqrt((p1.x - p0.x) * (p1.x - p0.x) + (p1.y - p0.y) * (p1.y - p0.y))
+    }
+    want = (width as float) * 0.03
+    println("  ${part} moved ${fmt(moved, 0)} pixels between ${rest}s and ${moment}s (${fmt(moved * 100.0 / (width as float), 1)}% of the width)")
+    fraction = probe.number(probe.result(changed), "fraction")
+    check("seeking changes the picture", fraction > 0.005, "${fmt(fraction * 100.0, 2)}% of the frame")
+    check("and the part that should have moved did", moved > want,
+          "${fmt(moved, 0)} pixels, wanted more than ${fmt(want, 0)}")
+    json.free(before)
+    json.free(changed)
+    json.free(after)
+}
+
+main() {
+    port = 7913
+    if os.aether_args_count() > 1 { port = string.string_get_int(os.aether_args_get(1)) }
+    started = platform.time()
+    p = probe.open(port)
+    if p == null {
+        println("measure_scene: nothing answering on port ${port} (${probe.last_error()})")
+        os.exit(2)
+    }
+    g_probe = p as ptr
+
+    stats_answer = ask(request("frame.stats"))
+    stats = probe.result(stats_answer)
+    render = probe.field(stats, "render")
+    println("${probe.text(stats, "backend")}, ${probe.integer(stats, "width")}x${probe.integer(stats, "height")}, ${probe.integer(stats, "draw_calls")} draws, shadows ${probe.flag(render, "shadows")}, fog ${probe.flag(render, "fog")}, ${probe.integer(render, "lights")} lights, ${fmt(probe.number(stats, "render_ms"), 2)} ms a frame")
+    width = probe.integer(stats, "width")
+    json.free(stats_answer)
+
+    did("frame.pause")
+    json.free(ask(with_number(request("anim.set"), "time", 3.35)))
+    tree_answer = ask(with_flag(request("scene.tree"), "detail", true))
+    tree = probe.result(tree_answer)
+    pipeline(tree)
+    println("")
+    println("== the stages each part came through ==")
+    traced("Zombie_Body")
+    traced("Zombie_Clothes")
+    traced("Street_Road")
+    traced("Street_LampHead0")
+    surfaces(probe.field(tree, "models"), core.vec3(0.075, 0.088, 0.125))
+    json.free(tree_answer)
+    depth_is_decided(core.vec3(0.35, 1.34, 1.55), core.vec3(0.0 - 3.5, 1.1, 0.0 - 0.2))
+    animation_arrives("Zombie_Body", 1.4, 3.35, width)
+    did("frame.resume")
+    probe.close(p)
+
+    println("")
+    elapsed = fmt(platform.time() - started, 1)
+    if g_failures == 0 {
+        println("measure_scene: everything measured passed in ${elapsed}s")
+        return
+    }
+    println("measure_scene: ${g_failures} measurement(s) failed in ${elapsed}s")
+    os.exit(1)
+}

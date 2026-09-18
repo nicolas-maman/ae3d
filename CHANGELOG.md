@@ -63,6 +63,22 @@
   stamps the sky's end all the same, so its opaque draws are no longer
   charged to the sky.
 
+### The channel's client, in Aether
+
+- `tools/ae3d_agent.ae` replaces `tools/ae3d_agent.py`: the same command
+  line (`--port`, `--raw`, `--script`, `op key=value ...`, `help` rendered
+  readable, non-zero exit on a refusal) written against `ae3d.probe`, so
+  the client speaks the engine's protocol in the engine's language and
+  changes with it in the same build. `--docs` writes `docs/agent.md` from
+  the schema on stdin around the text in `tools/agent_doc_text.md`;
+  `scripts/gen_agent_docs.sh` builds and runs it and needs no Python.
+- `tools/measure_scene.ae` replaces `scripts/measure_scene.py`, the same
+  measurements (every model on screen and its images loaded, the traces,
+  each surface's colour alone against the sky, the depth test's stability
+  under half a millimetre, the animation reaching the picture) against a
+  scene `ci.sh` starts, on OpenGL and on Vulkan; the numbers it reports
+  are the Python's to the last digit.
+
 ### glTF
 
 - `ae3d.gltf` loads glTF 2.0 -- `.gltf` with its `.bin`, or `.glb` -- into

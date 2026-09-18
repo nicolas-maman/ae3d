@@ -62,7 +62,7 @@ What makes the pipeline usable by a program rather than a person:
 
 ### Holding the scene to a standard
 
-Two scripts run on every build. `scripts/measure_scene.py` asks the engine
+Two programs run on every build. `tools/measure_scene.ae` asks the engine
 what it drew; `scripts/critique_scene.py` asks whether it is any good, which a
 screenshot cannot answer:
 
@@ -149,7 +149,7 @@ object it was authored as to the pixels it landed on:
 
 ```bash
 AE3D_AGENT=7911 ./build/zombie_street &
-python3 tools/ae3d_agent.py --port 7911 trace.model object=Zombie_Body
+./build/ae3d_agent --port 7911 trace.model object=Zombie_Body
 ```
 
 ```json
