@@ -33,6 +33,8 @@ import ae3d.script
 import ae3d.terrain
 import ae3d.sky
 import ae3d.rendering
+import ae3d.engine
+import ae3d.weather
 
 const PANEL_LEFT = 240
 const PANEL_RIGHT = 360
@@ -326,6 +328,21 @@ var g_ssr = false
 var g_clouds = false
 var g_clouds_toggle = 0
 var g_cloud_cover = 0.4
+// The sky's overcast, the scene's own: what it comes back to when the
+// weather clears.
+var g_overcast = 0.0
+// The weather over the scene, run the way a game runs it: an engine over
+// the viewport's renderer, its camera and its light, and the weather
+// module over that, stepped by the frame. The section's state beside it,
+// and the kind's buttons, one a kind.
+var g_engine: ptr = null
+var g_weather: ptr = null
+var g_weather_kind = 0
+var g_weather_intensity = 0.5
+var g_wind_heading = 0.0
+var g_wind_speed = 3.0
+var g_weather_buttons: ptr = null
+const WEATHER_KINDS = 5
 const SSR_ROAD_HEIGHT = 0.0
 const SSR_STRENGTH = 0.6
 // The first frame rate the bar ever showed. A driver cannot see it: by the
@@ -774,14 +791,91 @@ apply_post() {
     }
     cover = 0.0
     if g_clouds { cover = g_cloud_cover }
+    // The sky is the weather's while there is weather: the clouds and the
+    // overcast it brings, over the scene's own, which come back when it
+    // clears. Through the engine when there is one, so the weather knows
+    // what the scene's own are.
+    if g_weather_kind == weather.CLEAR || g_engine == null {
+        if g_engine != null {
+            engine.engine_set_clouds(g_engine as *Engine, cover, 1.0)
+            engine.engine_set_sky_overcast(g_engine as *Engine, g_overcast, overcast_grey())
+        } else if g_vulkan {
+            vk.renderer_set_clouds(g_renderer as *VKRenderer, cover, 1.0)
+            vk.renderer_set_sky_overcast(g_renderer as *VKRenderer, g_overcast, overcast_grey())
+        } else {
+            gl.renderer_set_clouds(g_renderer as *GLRenderer, cover, 1.0)
+            gl.renderer_set_sky_overcast(g_renderer as *GLRenderer, g_overcast, overcast_grey())
+        }
+    }
     if g_vulkan {
-        vk.renderer_set_clouds(g_renderer as *VKRenderer, cover, 1.0)
         vk.renderer_set_ssao(g_renderer as *VKRenderer, g_ssao, g_ssao_radius, g_ssao_intensity)
     } else {
-        gl.renderer_set_clouds(g_renderer as *GLRenderer, cover, 1.0)
         gl.renderer_set_ssao(g_renderer as *GLRenderer, g_ssao, g_ssao_radius, g_ssao_intensity)
     }
     draw_frame()
+}
+
+// The grey the scene's own overcast pulls the sky toward: a wet day's.
+overcast_grey() -> Vec3 { return core.vec3(0.62, 0.65, 0.70) }
+
+// The weather runs in the editor as it runs in a game: an engine over the
+// viewport's renderer, its camera and its light, and the weather module over
+// that, its behaviour stepped by draw_frame. Once the renderer and the
+// camera both exist, whichever came second, and once only.
+start_weather() {
+    if g_engine != null || g_renderer == null || g_camera == null { return }
+    api = platform.API_GL
+    if g_vulkan { api = platform.API_VULKAN }
+    g_engine = engine.engine_over(g_renderer, api, g_camera as *Camera, g_light as *Light) as ptr
+    g_weather = weather.weather_new(g_engine as *Engine) as ptr
+    apply_weather()
+}
+
+// The section's state onto the weather: the wind first, since a kind
+// scatters its particles into it, then the kind at its strength. The
+// engine's light is the scene's current one, which a loaded scene replaces.
+apply_weather() {
+    if g_weather == null { return }
+    engine.engine_set_light(g_engine as *Engine, g_light as *Light)
+    w = g_weather as *Weather
+    heading = core.deg_to_rad(g_wind_heading)
+    weather.weather_set_wind(w, core.vec3(core.cos_of(heading), 0.0, core.sin_of(heading)), g_wind_speed)
+    weather.weather_set(w, g_weather_kind, g_weather_intensity)
+    mark_dirty()
+}
+
+// The scene changed its key light -- a row, the hour -- under the weather,
+// which dims it from what it is now.
+relight_weather() {
+    if g_weather == null { return }
+    weather.weather_relight(g_weather as *Weather)
+}
+
+weather_words(kind: int) -> string {
+    if kind == weather.RAIN { return "rain" }
+    if kind == weather.SNOW { return "snow" }
+    if kind == weather.DUST { return "dust" }
+    if kind == weather.STORM { return "storm" }
+    return "clear"
+}
+
+// The kind chosen: one undo step, the section repainted, the weather set.
+set_weather_kind(kind: int) {
+    if kind == g_weather_kind { return }
+    history.history_record(g_history, history.STEP_PROPERTY, null, WEATHER_KIND_SLOT,
+                           (g_weather_kind) as float, (kind) as float)
+    history.history_close(g_history)
+    g_last_edit = seconds()
+    g_weather_kind = kind
+    refresh_weather_buttons()
+    apply_weather()
+    // Clear again: the scene's own sky back, as the rows have it now.
+    if kind == weather.CLEAR { apply_post() }
+    if kind == weather.CLEAR { say("the weather clears") } else { say("${weather_words(kind)} over the scene") }
+}
+
+refresh_weather_buttons() {
+    paint_segments(g_weather_buttons, WEATHER_KINDS, g_weather_kind)
 }
 
 // The three channel sliders never show the colour they add up to, so the
@@ -982,26 +1076,35 @@ extern malloc(size: int) -> ptr
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 
-const ROWS = 34
+// The weather over the scene: how hard it comes, the wind's heading in
+// degrees from +X toward +Z and its speed in metres a second; and the
+// sky's overcast, the scene's own under a clear sky.
+const WEATHER_ROW = 34
+const WIND_HEADING_ROW = 35
+const WIND_SPEED_ROW = 36
+const OVERCAST_ROW = 37
+const ROWS = 38
 // Past every inspector row, because a turn of the gizmo is not a row: it is
 // recorded as the angle the drag has turned through so far, and undone by
 // turning back through it.
-const ROTATE_FIRST_SLOT = 34
-// Past the rotation axes, which take 34 through 36. A behaviour is a property
+const ROTATE_FIRST_SLOT = 38
+// Past the rotation axes, which take 38 through 40. A behaviour is a property
 // of a model like any other as far as undo is concerned, so it travels as a
 // property step in a slot no row uses.
-const SCRIPT_SLOT = 37
+const SCRIPT_SLOT = 41
 // A terrain's shape. A choice rather than a number, so it travels the way a
 // behaviour does rather than as a row.
-const TERRAIN_BIOME_SLOT = 38
+const TERRAIN_BIOME_SLOT = 42
 // A terrain's style. Blocks are voxels drawn one cube per cell; smooth meshes
 // the same field into one surface. Voxels are a kind of terrain rather than
 // what terrain is.
-const TERRAIN_STYLE_SLOT = 39
+const TERRAIN_STYLE_SLOT = 43
 // A stroke of the sculpting brush: one undo step from press to release,
 // whose before and after are the terrain's column heights, kept in a list
 // of strokes the step indexes.
-const SCULPT_SLOT = 40
+const SCULPT_SLOT = 44
+// The weather's kind: a choice, undone the way a terrain's style is.
+const WEATHER_KIND_SLOT = 45
 // The brush: what it does to the ground under the cursor while it is held.
 const SCULPT_OFF = 0
 const SCULPT_RAISE = 1
@@ -1982,6 +2085,7 @@ draw_frame() {
     if !held {
         update_water(delta)
         run_scripts(delta)
+        if g_engine != null { engine.engine_update(g_engine as *Engine, delta) }
     }
     update_outline()
 
@@ -2164,6 +2268,17 @@ row_reaches_its_target(index: int) -> bool {
         before = g_time_of_day
         apply_property(index, before + 0.25)
         moved = core.abs_of(g_time_of_day - (before + 0.25)) < 0.001
+        apply_property(index, before)
+        return moved
+    }
+
+    // The view's rows read the editor's state rather than a model, so with
+    // a model selected they fell through to the model's properties and
+    // reported the cloud cover and the occlusion stuck, which they were not.
+    if is_view_row(index) {
+        before = view_value(index)
+        apply_property(index, before + 0.25)
+        moved = core.abs_of(view_value(index) - (before + 0.25)) < 0.001
         apply_property(index, before)
         return moved
     }
@@ -2611,6 +2726,11 @@ replay(step: *EditStep, backwards: bool) {
         if step.slot == SCULPT_SLOT {
             select_model_pointer(step.subject)
             apply_stroke((step.before) as int, backwards)
+        } else if step.slot == WEATHER_KIND_SLOT {
+            g_weather_kind = (target) as int
+            refresh_weather_buttons()
+            apply_weather()
+            if g_weather_kind == weather.CLEAR { apply_post() }
         } else if step.slot == TERRAIN_STYLE_SLOT {
             select_model_pointer(step.subject)
             regenerate_terrain(terrain_seed(), terrain_biome(), (target) as int)
@@ -2814,6 +2934,25 @@ water_value(index: int) -> float {
     return 0.0
 }
 
+// The rows that are the view's rather than a model's: the sky's clouds
+// and overcast, the occlusion, the weather and its wind. Read back from
+// the editor's own state, which is what they set.
+view_value(index: int) -> float {
+    if index == CLOUD_COVER_ROW { return g_cloud_cover }
+    if index == OVERCAST_ROW { return g_overcast }
+    if index == SSAO_ROW { return g_ssao_intensity }
+    if index == SSAO_RADIUS_ROW { return g_ssao_radius }
+    if index == WEATHER_ROW { return g_weather_intensity }
+    if index == WIND_HEADING_ROW { return g_wind_heading }
+    if index == WIND_SPEED_ROW { return g_wind_speed }
+    return 0.0
+}
+
+is_view_row(index: int) -> bool {
+    return index == CLOUD_COVER_ROW || index == OVERCAST_ROW || index == SSAO_ROW || index == SSAO_RADIUS_ROW ||
+           index == WEATHER_ROW || index == WIND_HEADING_ROW || index == WIND_SPEED_ROW
+}
+
 camera_value(index: int) -> float {
     cam = g_camera as *Camera
     if cam == null { return 0.0 }
@@ -2883,6 +3022,7 @@ apply_time_of_day() {
             light.color = sky.sun_color(g_time_of_day)
             light.intensity = sky.sun_intensity(g_time_of_day)
             light.ambient_strength = sky.ambient_strength(g_time_of_day)
+            relight_weather()
         }
         // One sky, made once and kept: the renderer draws whatever it was
         // last handed, and the hour reaches the shader through the light.
@@ -2929,6 +3069,7 @@ apply_property(index: int, value: float) {
             if index == 14 { light.color = core.vec3(value, light.color.y, light.color.z) }
             if index == 15 { light.color = core.vec3(light.color.x, value, light.color.z) }
             if index == 16 { light.color = core.vec3(light.color.x, light.color.y, value) }
+            if index == 9 { relight_weather() }
         }
         show_row(index, value)
         paint_soon()
@@ -2977,6 +3118,35 @@ apply_property(index: int, value: float) {
         g_last_edit = seconds()
         g_cloud_cover = value
         apply_post()
+        show_row(index, value)
+        return
+    }
+
+    if index == OVERCAST_ROW {
+        history.history_record(g_history, history.STEP_PROPERTY, null, index, g_overcast, value)
+        g_last_edit = seconds()
+        g_overcast = value
+        apply_post()
+        show_row(index, value)
+        return
+    }
+
+    if index == WEATHER_ROW || index == WIND_HEADING_ROW || index == WIND_SPEED_ROW {
+        was = view_value(index)
+        history.history_record(g_history, history.STEP_PROPERTY, null, index, was, value)
+        g_last_edit = seconds()
+        if index == WEATHER_ROW { g_weather_intensity = value }
+        if index == WIND_HEADING_ROW { g_wind_heading = value }
+        if index == WIND_SPEED_ROW { g_wind_speed = value }
+        // The wind alone does not scatter the particles again; the strength
+        // does, since it is their count.
+        if index == WEATHER_ROW || g_weather == null {
+            apply_weather()
+        } else {
+            heading = core.deg_to_rad(g_wind_heading)
+            weather.weather_set_wind(g_weather as *Weather, core.vec3(core.cos_of(heading), 0.0, core.sin_of(heading)), g_wind_speed)
+            mark_dirty()
+        }
         show_row(index, value)
         return
     }
@@ -3080,6 +3250,7 @@ mark_dirty() {
 // Water and attached behaviours move every frame, so a scene holding either is
 // never still.
 scene_animates() -> bool {
+    if g_weather_kind != weather.CLEAR { return true }
     if g_components == null { return false }
     if kind_count(behaviour.KIND_WATER) > 0 { return true }
     return scripted_count() > 0
@@ -3614,6 +3785,11 @@ current_view() -> View {
     v.ssr_strength = SSR_STRENGTH
     v.clouds = g_clouds
     v.cloud_cover = g_cloud_cover
+    v.overcast = g_overcast
+    v.weather_kind = g_weather_kind
+    v.weather_intensity = g_weather_intensity
+    v.wind_heading = g_wind_heading
+    v.wind_speed = g_wind_speed
     v.sky_time = 0.0 - 1.0
     if g_sun_by_time { v.sky_time = g_time_of_day }
     v.ssao = g_ssao
@@ -3689,6 +3865,7 @@ load_scene() {
         if list.size(beams) > 0 {
             if g_light != null { core.light_free(g_light as *Light) }
             g_light = list.get_raw(beams, 0)
+            if g_engine != null { engine.engine_set_light(g_engine as *Engine, g_light as *Light) }
             refresh_light_rows()
         }
         spare = 1
@@ -3763,6 +3940,17 @@ load_scene() {
     g_clouds = view.clouds
     g_cloud_cover = view.cloud_cover
     show_row(CLOUD_COVER_ROW, g_cloud_cover)
+    g_overcast = view.overcast
+    show_row(OVERCAST_ROW, g_overcast)
+    g_weather_kind = view.weather_kind
+    g_weather_intensity = view.weather_intensity
+    g_wind_heading = view.wind_heading
+    g_wind_speed = view.wind_speed
+    show_row(WEATHER_ROW, g_weather_intensity)
+    show_row(WIND_HEADING_ROW, g_wind_heading)
+    show_row(WIND_SPEED_ROW, g_wind_speed)
+    refresh_weather_buttons()
+    apply_weather()
     g_ssao = view.ssao
     g_ssao_radius = view.ssao_radius
     g_ssao_intensity = view.ssao_intensity
@@ -4687,6 +4875,7 @@ main() {
     // finds: a button per script, and none of them known to this file.
     scan_scripts()
     g_preset_buttons = calloc(PRESET_KINDS, 4)
+    g_weather_buttons = calloc(WEATHER_KINDS, 4)
     g_sliders = calloc(ROWS, 4)
     g_fields = calloc(ROWS, 4)
     g_row_frames = calloc(ROWS, 4)
@@ -4726,6 +4915,7 @@ main() {
 
     g_camera = core.camera_new(g_view_w, g_view_h) as ptr
     g_light = core.light_sun(core.vec3(0.42, 0.82, 0.38)) as ptr
+    start_weather()
 
     sheet = theme()
 
@@ -4885,6 +5075,7 @@ main() {
             ui.gpuview_on_realize(g_gpu) callback {
                 if start_renderer() {
                     configure_renderer()
+                    start_weather()
                     build_scene()
                     scan_assets()
                     apply_orbit()
@@ -5208,6 +5399,32 @@ main() {
         inspector_row(sky_body, "time of day", 0.0, 24.0, 14.0, TIME_ROW)
 
         ui.divider(right)
+        weather_body = fold_section(right, "WEATHER")
+
+        kind_row = ui.hstack(weather_body, 6)
+        as_row(kind_row)
+        clear_btn = ui.btn(kind_row, "Clear") callback { set_weather_kind(weather.CLEAR) }
+        style_button(clear_btn, "action")
+        rain_btn = ui.btn(kind_row, "Rain") callback { set_weather_kind(weather.RAIN) }
+        style_button(rain_btn, "action")
+        snow_btn = ui.btn(kind_row, "Snow") callback { set_weather_kind(weather.SNOW) }
+        style_button(snow_btn, "action")
+        dust_btn = ui.btn(kind_row, "Dust") callback { set_weather_kind(weather.DUST) }
+        style_button(dust_btn, "action")
+        storm_btn = ui.btn(kind_row, "Storm") callback { set_weather_kind(weather.STORM) }
+        style_button(storm_btn, "action")
+        kinds = g_weather_buttons as int[]
+        kinds[0] = clear_btn
+        kinds[1] = rain_btn
+        kinds[2] = snow_btn
+        kinds[3] = dust_btn
+        kinds[4] = storm_btn
+        refresh_weather_buttons()
+        inspector_row(weather_body, "strength", 0.0, 1.0, 0.5, WEATHER_ROW)
+        inspector_row(weather_body, "wind heading", 0.0, 360.0, 0.0, WIND_HEADING_ROW)
+        inspector_row(weather_body, "wind speed", 0.0, 40.0, 3.0, WIND_SPEED_ROW)
+
+        ui.divider(right)
         rendering_body = fold_section(right, "RENDERING")
 
         preset_row = ui.hstack(rendering_body, 6)
@@ -5278,6 +5495,7 @@ main() {
             say("clouds ${on}")
         }
         inspector_row(shading_body, "cloud cover", 0.0, 1.0, 0.4, CLOUD_COVER_ROW)
+        inspector_row(shading_body, "overcast", 0.0, 1.0, 0.0, OVERCAST_ROW)
 
         ssao_row = ui.hstack(shading_body, 8)
         as_row(ssao_row)

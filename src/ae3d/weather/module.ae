@@ -25,7 +25,7 @@ import ae3d.loader
 
 exports (
     Weather, CLEAR, RAIN, SNOW, DUST, STORM,
-    weather_new, weather_free, weather_set, weather_set_wind, weather_kind,
+    weather_new, weather_free, weather_set, weather_set_wind, weather_relight, weather_kind,
     weather_intensity, weather_particle_count, weather_flashing, weather_step, weather_particle
 )
 
@@ -73,8 +73,14 @@ struct Weather {
     flash_left: int
     light_intensity: float
     // What the scene had before the weather came, to give back: its fog,
-    // and its key light's intensity, which the weather dims.
+    // its clouds and its overcast, and its key light's intensity, which the
+    // weather dims. Taken when the weather comes over a clear scene, given
+    // back when it clears.
     had_fog: Fog
+    had_clouds: float
+    had_cloud_wind: float
+    had_overcast: float
+    had_overcast_color: Vec3
     had_light: float
     behaviour: ptr
 }
@@ -94,7 +100,7 @@ weather_new(e: *Engine) -> *Weather {
     w.next_flash = 4.0
     w.flash_left = 0
     w.light_intensity = 0.0 - 1.0
-    w.had_fog = engine.engine_fog(e)
+    take_sky(w)
     w.had_light = 0.0 - 1.0
     w.xyz = calloc(MAX_PARTICLES * 3, 8)
     w.phases = calloc(MAX_PARTICLES, 8)
@@ -159,16 +165,22 @@ weather_set(w: *Weather, kind: int, intensity: float) {
         light.intensity = w.had_light
     }
     if kind == CLEAR || w.intensity <= 0.0 {
+        was_clear = w.count == 0
         w.kind = CLEAR
         w.count = 0
         core.model_set_instance_draw_count(m, 0)
         m.visible = false
+        // The scene's own sky back, unless there was no weather to have
+        // taken it, in which case the sky as set now is the scene's.
+        if was_clear { take_sky(w) }
         engine.engine_set_fog(e, w.had_fog)
-        engine.engine_set_clouds(e, 0.0, 1.0)
-        engine.engine_set_sky_overcast(e, 0.0, core.vec3(0.5, 0.5, 0.5))
+        engine.engine_set_clouds(e, w.had_clouds, w.had_cloud_wind)
+        engine.engine_set_sky_overcast(e, w.had_overcast, w.had_overcast_color)
         engine.engine_set_wetness(e, 0.0)
         return
     }
+    // Over a clear scene: the sky as it is now is what to give back.
+    if w.count == 0 { take_sky(w) }
     // The ground under the weather: wet in rain, wetter in a storm, dry
     // under snow and dust.
     wetness = 0.0
@@ -176,12 +188,7 @@ weather_set(w: *Weather, kind: int, intensity: float) {
     if kind == STORM { wetness = 1.0 }
     engine.engine_set_wetness(e, wetness)
     // The sun under the weather: dimmed by the cloud that brings it.
-    dim = 1.0
-    if kind == RAIN { dim = 1.0 - 0.45 * w.intensity }
-    if kind == STORM { dim = 1.0 - 0.7 * w.intensity }
-    if kind == SNOW { dim = 1.0 - 0.35 * w.intensity }
-    if kind == DUST { dim = 1.0 - 0.5 * w.intensity }
-    if light != null { light.intensity = w.had_light * dim }
+    if light != null { light.intensity = w.had_light * dim_of(w) }
     at = eye(e)
     if kind == RAIN || kind == STORM {
         w.count = (20000.0 + 80000.0 * w.intensity) as int
@@ -246,6 +253,37 @@ weather_set(w: *Weather, kind: int, intensity: float) {
 
 on_update(state: ptr, e: *Engine, delta: float) {
     weather_step(state as *Weather, delta)
+}
+
+// How much of the sun the weather leaves.
+dim_of(w: *Weather) -> float {
+    if w.kind == RAIN { return 1.0 - 0.45 * w.intensity }
+    if w.kind == STORM { return 1.0 - 0.7 * w.intensity }
+    if w.kind == SNOW { return 1.0 - 0.35 * w.intensity }
+    if w.kind == DUST { return 1.0 - 0.5 * w.intensity }
+    return 1.0
+}
+
+// The scene set its key light under the weather -- an editor's row, the
+// hour of the day -- so the light's intensity now is the scene's own, and
+// the weather dims it from there and gives that back when it clears.
+weather_relight(w: *Weather) {
+    light = engine.engine_light(w.engine as *Engine)
+    if light == null { return }
+    w.had_light = light.intensity
+    if w.kind == CLEAR { return }
+    end_flash(w)
+    light.intensity = w.had_light * dim_of(w)
+}
+
+// The scene's sky as it stands: its fog, its clouds and its overcast.
+take_sky(w: *Weather) {
+    e = w.engine as *Engine
+    w.had_fog = engine.engine_fog(e)
+    w.had_clouds = engine.engine_clouds(e)
+    w.had_cloud_wind = engine.engine_cloud_wind(e)
+    w.had_overcast = engine.engine_sky_overcast(e)
+    w.had_overcast_color = engine.engine_sky_overcast_color(e)
 }
 
 // The particle's picture: a soft disc, its alpha falling off from the

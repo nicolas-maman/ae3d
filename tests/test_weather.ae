@@ -52,8 +52,15 @@ on_start(state: ptr, e: *Engine) {
     g_weather = w as ptr
     check("a new weather is clear", weather.weather_kind(w) == weather.CLEAR && weather.weather_particle_count(w) == 0)
 
+    // The scene's own sky, set after the weather was made: a few clouds
+    // and a touch of overcast, which the rain covers and the clearing
+    // gives back.
+    engine.engine_set_clouds(e, 0.3, 1.5)
+    engine.engine_set_sky_overcast(e, 0.2, core.vec3(0.7, 0.7, 0.75))
+
     weather.weather_set(w, weather.RAIN, 0.5)
     check("half rain is sixty thousand drops", weather.weather_particle_count(w) == 60000)
+    check("rain covers the sky", engine.engine_clouds(e) > 0.8 && engine.engine_sky_overcast(e) > 0.7)
     check("rain dims the sun", light.intensity < 2.0 && light.intensity > 1.0)
     fog = engine.engine_fog(e)
     check("rain brings its own fog", fog.end < 2000.0 && fog.color.x > 0.3)
@@ -76,6 +83,8 @@ on_start(state: ptr, e: *Engine) {
     check("and gives the sun back", light.intensity == 2.0)
     fog = engine.engine_fog(e)
     check("and the fog", fog.end == 1000.0 && fog.start == 100.0)
+    check("and the scene's own clouds", engine.engine_clouds(e) == 0.3 && engine.engine_cloud_wind(e) == 1.5)
+    check("and its overcast", engine.engine_sky_overcast(e) == 0.2 && engine.engine_sky_overcast_color(e).z == 0.75)
 
     weather.weather_set(w, weather.SNOW, 1.0)
     check("full snow is fifty-eight thousand flakes", weather.weather_particle_count(w) == 58000)

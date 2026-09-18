@@ -27,7 +27,7 @@ exports (
     Engine, Behaviour,
     behaviour_new, engine_add_behaviour, engine_remove_behaviour, engine_behaviour_count, engine_behaviour,
     engine_add_scene, engine_remove_scene,
-    engine_new, engine_new_with, engine_free, engine_run, engine_run_at, engine_start, engine_loop, engine_shutdown, engine_jobs,
+    engine_new, engine_new_with, engine_over, engine_update, engine_free, engine_run, engine_run_at, engine_start, engine_loop, engine_shutdown, engine_jobs,
     engine_stop,
     engine_add_model, engine_remove_model, engine_set_light, engine_light,
     engine_add_light, engine_remove_light,
@@ -35,7 +35,7 @@ exports (
     engine_set_size, engine_set_title, engine_set_msaa, engine_set_decorated, engine_set_post,
     engine_set_render_scale, engine_set_shadows, engine_shadows, engine_set_fog, engine_fog, engine_set_shadow_distance, engine_shadow_distance,
     engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
-    engine_set_skybox, engine_set_sky, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_set_sky_overcast, engine_set_ssao, engine_set_capture_channel, engine_set_wetness, engine_set_taa, engine_taa, engine_set_dlss, engine_dlss, engine_ray_query, engine_set_ray_shadows, engine_ray_shadows, engine_load_texture,
+    engine_set_skybox, engine_set_sky, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_clouds, engine_cloud_wind, engine_set_sky_overcast, engine_sky_overcast, engine_sky_overcast_color, engine_set_ssao, engine_set_capture_channel, engine_set_wetness, engine_set_taa, engine_taa, engine_set_dlss, engine_dlss, engine_ray_query, engine_set_ray_shadows, engine_ray_shadows, engine_load_texture,
     engine_set_time_of_day, engine_time_of_day,
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
     engine_render_ms, engine_render_frames,
@@ -126,6 +126,16 @@ struct Engine {
     // The hour the sun is set by, when it is; under zero when the scene
     // lights itself.
     time_of_day: float
+    // The sky's clouds and its overcast as last set, so what puts its own
+    // weather over them (the weather module) can give them back.
+    cloud_cover: float
+    cloud_wind: float
+    overcast: float
+    overcast_color: Vec3
+    // An engine over a renderer somebody else made and drives (the
+    // editor's): the renderer, the camera and the light are theirs, and
+    // engine_free leaves them alone.
+    borrowed: bool
 
     fixed_step: float
     fixed_accumulator: float
@@ -336,6 +346,8 @@ engine_new_with(api: int) -> *Engine {
     e.ssao_radius = 3.0
     e.ssao_intensity = 1.0
     e.time_of_day = 0.0 - 1.0
+    e.cloud_wind = 1.0
+    e.overcast_color = core.vec3(0.5, 0.5, 0.5)
     e.fixed_step = 1.0 / 60.0
     e.first_mouse = true
     e.frame_limit = frame_limit_from_env()
@@ -361,6 +373,48 @@ engine_new_with(api: int) -> *Engine {
         bind_backend(e, gl.backend(opengl_state))
     }
     return e
+}
+
+// An engine over a renderer that is already up and drawn by somebody else --
+// the editor's viewport -- so what is written for the engine (the weather,
+// a behaviour) runs in it too. Nothing here opens a window or loops: the
+// owner renders, and calls engine_update with the frame's seconds so the
+// behaviours step. The settings go straight to the renderer, since it is
+// up. The renderer, the camera and the light stay the owner's.
+engine_over(renderer: ptr, api: int, camera: *Camera, light: *Light) -> *Engine {
+    e = heap.new(Engine)
+    e.behaviours = list.new()
+    e.api = api
+    e.borrowed = true
+    e.width = 1024
+    e.height = 768
+    e.fog = core.fog_none()
+    e.cloud_wind = 1.0
+    e.overcast_color = core.vec3(0.5, 0.5, 0.5)
+    e.time_of_day = 0.0 - 1.0
+    e.fixed_step = 1.0 / 60.0
+    e.perf_stage_ms = calloc(vk.STAGE_COUNT, 8)
+    e.animations = anim.registry_new() as ptr
+    e.camera = camera as ptr
+    e.light = light as ptr
+    e.backend_state = renderer
+    if api == platform.API_VULKAN {
+        e.gl_renderer = null
+        bind_backend(e, vk.backend(renderer as *VKRenderer))
+    } else {
+        e.gl_renderer = renderer
+        bind_backend(e, gl.backend(renderer as *GLRenderer))
+    }
+    e.running = true
+    return e
+}
+
+// One frame of the behaviours, for an engine whose owner runs the loop:
+// the starts not yet run, then every update with the frame's seconds.
+engine_update(e: *Engine, delta: float) {
+    e.delta_time = delta
+    run_updates(e, delta)
+    e.frame_count = e.frame_count + 1
 }
 
 // AE3D_API=vulkan or AE3D_API=opengl runs a program on that backend whatever
@@ -521,7 +575,7 @@ engine_free(e: *Engine) {
         anim.registry_free(e.animations as *Registry)
         e.animations = null
     }
-    if e.camera != null { core.camera_free(e.camera as *Camera) }
+    if e.camera != null && !e.borrowed { core.camera_free(e.camera as *Camera) }
     if e.perf_stage_ms != null { free(e.perf_stage_ms) }
     // The behaviours are the program's: their states are freed by whoever
     // made them; the list and the records the engine made are the engine's.
@@ -535,6 +589,10 @@ engine_free(e: *Engine) {
         }
         list.free(e.behaviours)
         e.behaviours = null
+    }
+    if e.borrowed {
+        heap.free(e)
+        return
     }
     if e.api == platform.API_VULKAN {
         vk.renderer_free(e.backend_state as *VKRenderer)
@@ -700,6 +758,8 @@ engine_set_clear_color(e: *Engine, red: float, green: float, blue: float) {
 // shader over whatever sky is set, lit by the key light, and throw their
 // shadow on the ground through the same coverage the sky draws.
 engine_set_clouds(e: *Engine, cover: float, wind: float) {
+    e.cloud_cover = cover
+    e.cloud_wind = wind
     if e.backend_state == null { return }
     if e.api == platform.API_VULKAN {
         vk.renderer_set_clouds(e.backend_state as *VKRenderer, cover, wind)
@@ -713,6 +773,8 @@ engine_set_clouds(e: *Engine, cover: float, wind: float) {
 // grey for rain, ochre for a dust storm -- and the clouds, lit by that sky,
 // go with it. Zero is the sky as it was.
 engine_set_sky_overcast(e: *Engine, amount: float, color: Vec3) {
+    e.overcast = amount
+    e.overcast_color = color
     if e.backend_state == null { return }
     if e.api == platform.API_VULKAN {
         vk.renderer_set_sky_overcast(e.backend_state as *VKRenderer, amount, color)
@@ -720,6 +782,13 @@ engine_set_sky_overcast(e: *Engine, amount: float, color: Vec3) {
         gl.renderer_set_sky_overcast(e.gl_renderer as *GLRenderer, amount, color)
     }
 }
+
+// The clouds and the overcast as last set, for whatever sets its own over
+// them and gives them back.
+engine_clouds(e: *Engine) -> float { return e.cloud_cover }
+engine_cloud_wind(e: *Engine) -> float { return e.cloud_wind }
+engine_sky_overcast(e: *Engine) -> float { return e.overcast }
+engine_sky_overcast_color(e: *Engine) -> Vec3 { return e.overcast_color }
 
 // Ambient occlusion from the scene's depth, on either backend: the corners
 // and the feet of things go darker by how much stands around them. `radius`

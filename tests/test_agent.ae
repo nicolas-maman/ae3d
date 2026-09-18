@@ -361,9 +361,26 @@ on_render(state: ptr, e: *Engine, delta: float) {
         if doc == null { return }
         check("an unknown animation name fails", !ok_of(doc))
         if doc != null { json.free(doc) }
+        // The sky a weather brings, set by hand: the clouds' cover and the
+        // overcast with its colour, echoed back as applied.
+        ask_send("{\"id\":15,\"op\":\"render.set\",\"clouds\":0.8,\"cloud_wind\":2.5,\"overcast\":0.6,\"overcast_color\":[0.8,0.62,0.4]}")
+        g_stage = 17
+        return
+    }
+    if g_stage == 17 {
+        doc = ask_receive()
+        if doc == null { return }
+        r = result_of(doc)
+        check("render.set takes the clouds", ok_of(doc) && r != null && json.get_number(json.object_get_raw(r, "clouds")) == 0.8)
+        check("and their drift", r != null && json.get_number(json.object_get_raw(r, "cloud_wind")) == 2.5)
+        check("and the overcast", r != null && json.get_number(json.object_get_raw(r, "overcast")) == 0.6)
+        tint = null as ptr
+        if r != null { tint = json.object_get_raw(r, "overcast_color") }
+        check("with its colour", tint != null && json.get_number(json.array_get_raw(tint, 2)) == 0.4)
+        if doc != null { json.free(doc) }
         tcp.tcp_close(g_sock)
         g_sock = null
-        g_stage = 17
+        g_stage = 18
         engine.engine_stop(e)
         return
     }

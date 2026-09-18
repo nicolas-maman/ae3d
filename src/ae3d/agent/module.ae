@@ -420,8 +420,8 @@ help_result() -> ptr {
         "Camera position, orientation, field of view and clip planes."))
     json.array_add_raw(ops, describe("scene.tree", "[detail], [audit]",
         "Every model the renderer holds: index, name, position and visibility. With detail, also its material, texture, parent, world position, triangles and where it lands on screen -- one round trip instead of one per model. With audit, what the surface is made of: its area in metres, its size along each axis, how many ways its faces point, how often its texture repeats across a metre and how many texels that is."))
-    json.array_add_raw(ops, describe("render.set", "[normal_strength], [occlusion_strength], [bloom_intensity], [shadows]",
-        "How hard normal maps push, how much baked occlusion is applied, how strong the bloom is, and whether shadows are cast, for the whole scene. Zero on any strength, or shadows off, is the frame this renderer draws without that -- bloom_intensity of zero is no glow, shadows false is no shadow at all -- which is what makes each one's difference measurable rather than a matter of opinion."))
+    json.array_add_raw(ops, describe("render.set", "[normal_strength], [occlusion_strength], [bloom_intensity], [shadows], [ssr], [ssr_road_height], [ssr_strength], [clouds], [cloud_wind], [overcast], [overcast_color]",
+        "How hard normal maps push, how much baked occlusion is applied, how strong the bloom is, and whether shadows are cast, for the whole scene. Zero on any strength, or shadows off, is the frame this renderer draws without that -- bloom_intensity of zero is no glow, shadows false is no shadow at all -- which is what makes each one's difference measurable rather than a matter of opinion. The sky's clouds as the share of it they cover (0 none, 1 overcast with holes) with how fast they drift, and the overcast, 0..1, that pulls the sky toward a flat colour ([r, g, b], grey when not given): the sky a weather brings, set by hand so a frame under it can be compared with the clear one."))
     json.array_add_raw(ops, describe("scene.skeleton", "object",
         "Every bone of a skinned model: name, parent, where it is in the world and how it is turned. A skinned mesh stays in its bind pose and its bones carry it, so this is the only thing that says where a figure's hand or foot actually is. Answered at the frame boundary, so it describes a pose that is finished rather than one part way through being built."))
     json.array_add_raw(ops, describe("scene.isolate", "[object]",
@@ -1629,12 +1629,47 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
         reflecting = json.object_get_raw(request, "ssr")
         ssr_road = json.object_get_raw(request, "ssr_road_height")
         ssr_str = json.object_get_raw(request, "ssr_strength")
+        clouding = json.object_get_raw(request, "clouds")
+        casting = json.object_get_raw(request, "overcast")
         if node == null && shading == null && blooming == null && shadowing == null &&
-           reflecting == null && ssr_road == null && ssr_str == null {
+           reflecting == null && ssr_road == null && ssr_str == null &&
+           clouding == null && casting == null {
             fail(id, "render.set needs something to set")
             return false
         }
         out = json.obj()
+        // The sky a weather brings, by hand: the clouds' cover and drift,
+        // and the overcast's amount and colour, on either backend.
+        if clouding != null {
+            cover = json.get_number(clouding)
+            wind = number_at(request, "cloud_wind", 1.0)
+            if c.gl_renderer != null {
+                gl.renderer_set_clouds(c.gl_renderer as *GLRenderer, cover, wind)
+            }
+            if c.vk_renderer != null {
+                vk.renderer_set_clouds(c.vk_renderer as *VKRenderer, cover, wind)
+            }
+            json.object_set_raw(out, "clouds", json.num(cover))
+            json.object_set_raw(out, "cloud_wind", json.num(wind))
+        }
+        if casting != null {
+            amount = json.get_number(casting)
+            tint = core.vec3(0.5, 0.5, 0.5)
+            tinted = json.object_get_raw(request, "overcast_color")
+            if tinted != null && json.array_size(tinted) >= 3 {
+                tint = core.vec3(json.get_number(json.array_get_raw(tinted, 0)),
+                                 json.get_number(json.array_get_raw(tinted, 1)),
+                                 json.get_number(json.array_get_raw(tinted, 2)))
+            }
+            if c.gl_renderer != null {
+                gl.renderer_set_sky_overcast(c.gl_renderer as *GLRenderer, amount, tint)
+            }
+            if c.vk_renderer != null {
+                vk.renderer_set_sky_overcast(c.vk_renderer as *VKRenderer, amount, tint)
+            }
+            json.object_set_raw(out, "overcast", json.num(amount))
+            json.object_set_raw(out, "overcast_color", vec3_json(tint.x, tint.y, tint.z))
+        }
         if node != null {
             strength = json.get_number(node)
             if c.gl_renderer != null {
