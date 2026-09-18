@@ -2,6 +2,22 @@
 
 ## [current]
 
+### The weather over the city
+
+- `AE3D_WEATHER=rain|snow|dust|storm` (and `AE3D_WEATHER_LEVEL`) over the
+  city, the knob the island has: rain driven down the street on the wind,
+  a storm's lightning over the horde, the road wet under it.
+- An instanced stream set whole (`model_set_instance_positions`, `_yaw`)
+  recomputes the model's bounds. The bounds are what the cull reads, and a
+  stream that rides with the camera -- the weather's drops -- kept the
+  bounds of the empty stream it was added with, a metre at the origin, and
+  was culled the moment the camera looked anywhere else: on Vulkan, with
+  the city's frustum culling on, the rain never drew.
+- Under overcast a painted sky's stars go under the cloud. The cast's
+  brightness followed the pixel's, so a star, a bright point, stood
+  through the storm as a bright point of cloud; it follows a coarse level
+  of the painting now.
+
 ### A wet road, not a mirror
 
 - The screen-space reflection on Vulkan is Fresnel-weighted (little from a

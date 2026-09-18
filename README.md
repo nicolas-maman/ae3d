@@ -185,7 +185,7 @@ git clone https://github.com/aether-lang-dev/aether-ui.git ../aether-ui
 
 | Example | What it shows |
 |---|---|
-| `zombie_city.ae` | The city and its horde; `AE3D_CROWD` sets the count |
+| `zombie_city.ae` | The city and its horde; `AE3D_CROWD` sets the count, `AE3D_WEATHER=rain\|storm` puts the weather over it |
 | `caustics.ae` | The seabed under the swell, the water's light on the sand |
 | `sand.ae` | A million point-instanced grains falling onto a heap you plough |
 | `black_hole.ae` | Kerr geodesics per pixel ([docs/black-hole.md](docs/black-hole.md)) |
