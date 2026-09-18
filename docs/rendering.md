@@ -182,6 +182,20 @@ the byte and 128 for still, and `tests/test_velocity` holds it against the
 camera's own projection to the pixel. On Vulkan `ae3d_vk_velocity_texture`
 is the resolved target, which is what an upscaler is handed (#324).
 
+### Render scale
+
+`engine_set_render_scale(e, scale)` (0.25..1; `AE3D_RENDER_SCALE=50` for
+half) draws the scene at that fraction of the window's size: on both
+backends the scene's own targets -- its colour, depth and motion vectors,
+and the camera depth, the reflection and the temporal textures over them
+-- are made at the scaled size and every pass but the composite runs at
+it, and the composite draws the result to the window at the window's
+size, which is the upscale. The answer is the scale adopted (clamped), so
+a program stepping down a quality ladder knows which rung it got. An
+upscaler that knows more than a bilinear sample -- DLSS (#324) -- sits
+where the composite samples, handed the scene's colour, depth and motion
+vectors at the scaled size and asked for the window's.
+
 ### Temporal anti-aliasing
 
 `engine_set_taa(e, on)`, or `AE3D_TAA=1`. The projection is nudged a

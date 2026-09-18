@@ -12,6 +12,7 @@
 import std.mem
 import ae3d.core
 import ae3d.gl
+import ae3d.vk
 import ae3d.offscreen
 import ae3d.loader
 
@@ -165,9 +166,78 @@ main() {
     core.camera_free(cam)
     core.light_free(key)
 
+    vulkan_checks()
+
     if failures == 0 {
         println("render_scale: all checks passed")
     } else {
         println("render_scale: ${failures} failure(s)")
     }
+}
+
+// The same on Vulkan: the scene drawn into targets of the scaled size and
+// the composite putting it over the whole frame. Read back through the
+// backend, the frame after the draw (the readback is a frame behind).
+vk_frame(backend: *Backend, cam: *Camera, key: *Light) -> ptr {
+    core.backend_render(backend, cam, key)
+    core.backend_render(backend, cam, key)
+    return core.backend_frame_pixels(backend)
+}
+
+vulkan_checks() {
+    if !vk.available() {
+        println("  vulkan: no driver (${vk.last_error()}), checked OpenGL only")
+        return
+    }
+    renderer = vk.renderer_new()
+    backend = vk.backend(renderer)
+    if !core.backend_init(&backend, null, WIDTH, HEIGHT) {
+        println("  vulkan: would not start (${vk.last_error()}), checked OpenGL only")
+        vk.renderer_free(renderer)
+        return
+    }
+    core.backend_set_clear_color(&backend, 0.0, 0.0, 0.0)
+    ball = loader.sphere(1.0, 32, 24)
+    core.model_set_scale(ball, 40.0, 40.0, 40.0)
+    core.model_matte(ball, 0.9, 0.85, 0.8)
+    core.backend_add_model(&backend, ball)
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 0.0, 130.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+    key = core.light_directional(core.vec3(0.0, 0.0, 0.0 - 1.0), core.vec3(1.0, 1.0, 1.0), 2.5)
+    key.ambient_strength = 0.3
+
+    pixels = vk_frame(&backend, cam, key)
+    if pixels == null { println("  vulkan: SKIP no pixels") ; return }
+    full = frame_total(pixels)
+    full_reach = lit_extent(pixels)
+
+    adopted = core.backend_set_render_scale(&backend, 0.5)
+    check("vulkan adopts half scale", adopted == 0.5)
+    half_pixels = vk_frame(&backend, cam, key)
+    half = frame_total(half_pixels)
+    half_reach = lit_extent(half_pixels)
+    check("vulkan half scale still draws something", half > full / 4)
+    drift = half - full
+    if drift < 0 { drift = 0 - drift }
+    check("vulkan half scale is the same picture, not a different one", drift < full / 10)
+    spread = half_reach - full_reach
+    if spread < 0 { spread = 0 - spread }
+    check("vulkan half scale is upscaled to fill the frame", spread <= 3)
+    println("  vulkan full ${full} reaching ${full_reach}px, half ${half} reaching ${half_reach}px")
+
+    back = core.backend_set_render_scale(&backend, 1.0)
+    check("vulkan back to full", back == 1.0)
+    again = frame_total(vk_frame(&backend, cam, key))
+    drift = again - full
+    if drift < 0 { drift = 0 - drift }
+    check("vulkan back at full scale the frame is the first one again", drift < full / 100)
+    clamped = core.backend_set_render_scale(&backend, 8.0)
+    check("vulkan an impossible request comes back as what was really used", clamped == 1.0)
+
+    core.backend_cleanup(&backend)
+    core.model_free(ball)
+    vk.renderer_free(renderer)
+    core.camera_free(cam)
+    core.light_free(key)
 }

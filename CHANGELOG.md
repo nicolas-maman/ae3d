@@ -115,6 +115,18 @@
   inverse binds where `skeleton_bind` would derive them from the pose.
 - `native/ae3d_blob.c`: a file as bytes and the little-endian numbers in it.
 
+### Render scale on Vulkan
+
+- `engine_set_render_scale(e, scale)` draws the scene smaller than the
+  window on Vulkan as it has on OpenGL (it answered 1.0 before): the
+  scene's targets -- its colour, depth and motion vectors, the camera
+  depth, the reflection and the temporal textures -- at the scaled size,
+  the scene pass and the passes over it at that size, the composite at
+  the window's, so the frame's cost is the scene's pixels. Post is on
+  while scaled, since the composite is the upscale. `AE3D_RENDER_SCALE=50`
+  on any scene; `tests/test_render_scale` checks Vulkan beside OpenGL.
+  Step 3 of #324: what an upscaler needs to sit on.
+
 ### Motion vectors
 
 - Every scene draw writes its pixel's motion vector beside its colour: a
