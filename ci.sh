@@ -541,12 +541,16 @@ elif ! have_display; then
     skip "bake_impostor" "no display"
 else
     bake_out="$(mktemp -d)"
-    if bounded "$RUN_LIMIT" ./build/bake_impostor resources/blender/zombie_street/manifest.json Zombie_Body "$bake_out/impostor.png" >/tmp/ae3d_bake.log 2>&1        && grep -q ", 0 empty cells" /tmp/ae3d_bake.log        && [ -s "$bake_out/impostor.png" ] && [ -s "$bake_out/impostor_normal.png" ] && [ -s "$bake_out/impostor.json" ]; then
+    bounded "$RUN_LIMIT" ./build/bake_impostor resources/blender/zombie_street/manifest.json Zombie_Body "$bake_out/impostor.png" >/tmp/ae3d_bake.log 2>&1
+    bake_status=$?
+    if grep -q "no window" /tmp/ae3d_bake.log; then
+        skip "bake_impostor" "the bake could not open a window"
+    elif [ "$bake_status" -eq 0 ] && grep -q ", 0 empty cells" /tmp/ae3d_bake.log        && [ -s "$bake_out/impostor.png" ] && [ -s "$bake_out/impostor_normal.png" ] && [ -s "$bake_out/impostor.json" ]; then
         pass "bake_impostor"
         grep "bake_impostor: wrote" /tmp/ae3d_bake.log | sed 's/^/      /'
     else
         fail "bake_impostor"
-        sed 's/^/        /' /tmp/ae3d_bake.log | tail -12
+        sed 's/^/        /' /tmp/ae3d_bake.log | tail -30
     fi
     rm -rf "$bake_out"
 fi

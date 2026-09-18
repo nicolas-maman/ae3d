@@ -78,6 +78,11 @@ var g_metres = 2.0
 var g_bank = null
 var g_models = null
 var g_ok = false
+// How many pixels each cell kept, a channel at a time: printed with the
+// result, so a bake that went wrong on a machine no one is watching says
+// which cells and how badly.
+var g_kept: ptr = null
+var g_skipped = 0
 
 entry_named(m: *Manifest, name: string) -> *Entry {
     i = 0
@@ -253,10 +258,27 @@ on_start(state: ptr, e: *Engine) {
     core.camera_set_fov(engine.engine_camera(e), FOV)
     g_atlas = calloc(COLS * CELL * ROWS * CELL, 4)
     g_normals = calloc(COLS * CELL * ROWS * CELL, 4)
+    g_kept = calloc(COLS * ROWS * 2, 8)
     g_cell = 0
     g_channel = 1
     prepare_cell(e, 0)
     g_ok = true
+}
+
+// The cells' kept pixel counts, a row a line, for one channel.
+print_kept(channel: int) {
+    counts = g_kept as int[]
+    row = 0
+    while row < ROWS {
+        line = "bake_impostor:   "
+        column = 0
+        while column < COLS {
+            line = "${line} ${counts[(channel - 1) * COLS * ROWS + row * COLS + column]}"
+            column = column + 1
+        }
+        println(line)
+        row = row + 1
+    }
 }
 
 // The two atlases written, bled and noted.
@@ -273,7 +295,11 @@ finish() {
         println("bake_impostor: could not write ${normals_out}")
         return
     }
-    println("bake_impostor: wrote ${g_out} and ${normals_out} (${COLS * CELL}x${ROWS * CELL}), ${g_empty} empty cells, ${bled} pixels bled")
+    println("bake_impostor: wrote ${g_out} and ${normals_out} (${COLS * CELL}x${ROWS * CELL}), ${g_empty} empty cells, ${bled} pixels bled, ${g_skipped} frames skipped")
+    println("bake_impostor: pixels kept a cell, albedo:")
+    print_kept(1)
+    println("bake_impostor: pixels kept a cell, normals:")
+    print_kept(2)
     write_sidecar("${stem}.json")
 }
 
@@ -296,7 +322,7 @@ on_late(state: ptr, e: *Engine, delta: float) {
     }
     // The first frame the engine draws is before the camera above has taken
     // hold everywhere; what it drew is discarded and the cell drawn again.
-    if delta <= 0.0 { return }
+    if delta <= 0.0 { g_skipped = g_skipped + 1 ; return }
     if ae3d_capture_frame(CELL, CELL) != 1 {
         println("bake_impostor: the frame could not be read back")
         engine.engine_stop(e)
@@ -307,6 +333,8 @@ on_late(state: ptr, e: *Engine, delta: float) {
     into = g_atlas
     if g_channel == 2 { into = g_normals }
     kept = ae3d_capture_copy_keyed(into, COLS * CELL, ROWS * CELL, column * CELL, row * CELL, KEY_R, KEY_G, KEY_B, 40)
+    counts = g_kept as int[]
+    counts[(g_channel - 1) * COLS * ROWS + g_cell] = kept
     if kept <= 0 {
         cam = engine.engine_camera(e)
         println("bake_impostor: cell ${column},${row} is empty (camera ${cam.position.x}, ${cam.position.y}, ${cam.position.z})")
@@ -341,6 +369,7 @@ main() {
     engine.engine_free(e)
     if g_atlas != null { free(g_atlas) }
     if g_normals != null { free(g_normals) }
+    if g_kept != null { free(g_kept) }
     if g_bank != null { crowd.posebank_free(g_bank) }
     assets.provenance_release()
 }
