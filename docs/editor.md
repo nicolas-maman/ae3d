@@ -234,7 +234,12 @@ built directly, which is what catches a component the file does not carry.
 
 ## Running it bounded
 
-The editor takes a few environment variables, which is how CI drives it:
+The editor takes a few environment variables, which is how CI drives it.
+The Linux job fetches aether-ui at the commit `.github/workflows/ci.yml`
+pins (`AETHER_UI_REF`) and GTK4, builds the editor against it, runs it
+bounded on both backends and the roundtrip scene, and presses its
+widgets through `tools/drive_editor.py`; the other runners have no
+toolkit checkout and skip it, and so does a machine without one.
 
 | | |
 |---|---|

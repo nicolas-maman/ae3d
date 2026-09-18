@@ -35,8 +35,11 @@ The feature list in full, with the reasoning behind each. The [README](../README
   in dense columns a system walks in one pass, a crowd rendering straight from
   the position column's buffer. The native crowd step, separation grid and
   distance bucketing are C over those columns.
-- **Physically based shading**: metallic/roughness materials, up to four
-  directional or point lights, normal mapping, baked per-vertex occlusion and
+- **Physically based shading**: metallic/roughness materials, sixteen
+  directional or point lights a frame -- the key light and, of every light
+  the scene registers, the fifteen nearest the camera, picked each frame
+  (`core.nearest_lights`), a point light past its fall-off skipped before
+  it is shaded -- normal mapping, baked per-vertex occlusion and
   screen-space ambient occlusion from the scene's depth (`engine_set_ssao`,
   both backends), shadow mapping with a texel-snapped light box (both
   backends), volumetric clouds and their shadows, a sky drawn from the sun by
@@ -291,6 +294,27 @@ from straight above: the ground at its foot goes darker by ray, the open
 ground and the wall's top do not, and off again the screen-space pass is
 back. In the city at 720p the opaque pass goes from 1.23 to 1.81 ms
 (best of five) and the 0.11 ms screen-space pass is skipped.
+
+Every lamp throws its own shadow by ray: a point light has no shadow
+map, and on the map path the key light's shadow stands in for every
+lamp's -- which on a night street is a figure lit from above by three
+lamps and shadowing nothing, floating on the road. With the rays on, each
+point light that reaches a pixel casts one ray from the surface to a spot
+on the lamp's face (`engine_set_lamp_size`, the face's width in metres,
+twelve centimetres unless set), stopped sixty centimetres short of the
+light so the fitting it hangs from -- the head, the arm -- does not
+shadow the whole street with a grain. The spot turns by the golden angle
+every frame (`rayFrame`; the projection's jitter was tried for this and is
+a fraction of a pixel, which turned nothing), so the temporal pass folds
+the frames into the lamp's penumbra. `tests/test_ray_shadows` puts the sun
+out and a lamp over the ground beside the ball: on the map path the ground
+past the ball is lit as the ground under the lamp; by ray it goes dark
+(598 to 403) and the ground under the lamp stays. The city runs with the
+rays on where the device traces, a light under every lamp head its tiles
+place (twenty-one lamps; the nearest fifteen light a frame), the wet road's
+reflection (`engine_set_ssr`), the occlusion by ray and the temporal pass:
+400 figures 139 fps, 20,000 at a 28 m near band 54 (113 with the map alone,
+`AE3D_RAYS=0`).
 
 What is left for the rays to do next: the skinned figures, so the map
 goes; reflections by ray (#323).

@@ -10,7 +10,7 @@ back what was drawn and checks the frame by number rather than by eye.
 
 ![A horde of skinned zombies on a lamp-lit street at night, the wet road reflecting the lamps](docs/zombie-city.png)
 
-<sub>`examples/zombie_city.ae`: seven blocks and a horde of skinned figures, each walking its own gait from a baked pose bank, two instanced draws per figure. Every asset was modelled, textured and animated by a script in Blender; the sky was painted by the engine.</sub>
+<sub>`examples/zombie_city.ae`: seven blocks and a horde of skinned figures, each walking its own gait from a baked pose bank, two instanced draws per figure; a lamp under every lamp head, the road wet, and on Vulkan every shadow -- the moon's with its penumbra, each lamp's, the occlusion under every foot -- by ray. Every asset was modelled, textured and animated by a script in Blender; the sky was painted by the engine.</sub>
 
 ae3d is written in [Aether](https://github.com/aether-lang-dev/aether) with a
 thin C layer for the GPU, windowing and image decoding. It is the successor to
@@ -23,7 +23,7 @@ skinned instanced crowds, and an engine that can be interrogated while it runs.
 | | |
 |---|---|
 | **Two renderers, one interface** | Vulkan by default, OpenGL 4.1 at parity; `tests/test_backend_parity` draws the same scene through both and holds them to 0.7% of channels. DirectX 12 and Metal are on the roadmap ([#311](https://github.com/nicolas-maman/ae3d/issues/311), [#312](https://github.com/nicolas-maman/ae3d/issues/312)). |
-| **Physically based shading** | Metallic/roughness materials, four lights, normal mapping, texel-snapped shadow maps, SSAO, screen-space reflections, ray-traced shadows with penumbrae and ambient occlusion by ray (Vulkan ray query), MSAA, temporal anti-aliasing, DLSS (NVIDIA Streamline on Vulkan), FXAA, bloom, ACES tone mapping, fog, wet surfaces. |
+| **Physically based shading** | Metallic/roughness materials, sixteen lights a frame (the nearest of any number), normal mapping, texel-snapped shadow maps, SSAO, screen-space reflections, ray-traced shadows with penumbrae, every lamp's own shadow and ambient occlusion by ray (Vulkan ray query), MSAA, temporal anti-aliasing, DLSS (NVIDIA Streamline on Vulkan), FXAA, bloom, ACES tone mapping, fog, wet surfaces. |
 | **A sky by the hour** | `engine_set_time_of_day(hours)` places the sun and derives the key light, fog and a procedural sky from it. Volumetric clouds from baked Perlin-Worley textures, lit through a sun march, shadowing the ground: ~1.5 ms a frame. |
 | **Weather** | Rain, snow, dust and storm over any scene (`ae3d.weather`): a hundred thousand point-instanced particles stepped in C around the camera, wind, the sky and clouds gone overcast, the fog and the sun to match, lightning in a storm. |
 | **Water** | A Gerstner sea with dispersion, fresnel, GGX glitter, whitecaps, depth-based shallows and a foam line, and caustics from underneath. |

@@ -86,7 +86,7 @@ def std140(members, base=0):
     return placed, (offset + 15) // 16 * 16
 
 
-MAX_LIGHTS = 4
+MAX_LIGHTS = 16
 
 
 def light_struct(source):

@@ -118,8 +118,14 @@ case "$OS" in
             exit 1
         fi
         UI_SOURCES="$UI_ROOT/backend/aether_ui_gtk4.c $UI_ROOT/backend/aether_ui_sni.c $UI_ROOT/backend/aether_ui_test_server.c $UI_ROOT/backend/aether_ui_system_extras.c"
-        UI_FLAGS="$(pkg-config --cflags gtk4)"
-        PLATFORM_LIBS="$(pkg-config --libs gtk4) -ldl -lm -lpthread"
+        # The toolkit's backend calls GTK 4.10's deprecated entry points
+        # (gtk_css_provider_load_from_data, the message dialog), which are
+        # the toolkit's to move off, not the editor's; ci.sh fails this
+        # build on any warning, and those are not warnings about the editor.
+        # epoxy by name: the toolkit's GPU view calls GL from the GTK4
+        # backend, and gtk4.pc names neither epoxy's headers nor its library.
+        UI_FLAGS="$(pkg-config --cflags gtk4) $(pkg-config --cflags epoxy 2>/dev/null) -Wno-deprecated-declarations"
+        PLATFORM_LIBS="$(pkg-config --libs gtk4) $(pkg-config --libs epoxy 2>/dev/null) -ldl -lm -lpthread"
         NATIVE_EXTRA=""
         ;;
     MINGW*|MSYS*|CYGWIN*|Windows_NT)

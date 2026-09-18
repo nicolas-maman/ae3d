@@ -15,6 +15,7 @@ import ae3d.platform
 import ae3d.rendering
 import ae3d.vkscene
 import ae3d.skin
+import ae3d.shaders
 
 exports (
     VKRenderer,
@@ -25,7 +26,7 @@ exports (
     renderer_set_normal_strength, renderer_set_occlusion_strength, renderer_set_capture_channel, renderer_set_wetness, renderer_material_texture_size,
     renderer_load_texture, renderer_release_texture, renderer_sample_count, renderer_set_post,
     renderer_set_bloom_intensity, renderer_bloom_intensity,
-    renderer_set_shadows, renderer_shadows, renderer_set_ssr, renderer_ssr, renderer_set_ssr_params, renderer_set_taa, renderer_taa, request_dlss, renderer_set_dlss, renderer_dlss, set_samples, renderer_ray_query, renderer_set_ray_shadows, renderer_ray_shadows, renderer_set_sun_size, renderer_sun_size, renderer_set_ray_occlusion, renderer_ray_occlusion, renderer_add_light, renderer_remove_light,
+    renderer_set_shadows, renderer_shadows, renderer_set_ssr, renderer_ssr, renderer_set_ssr_params, renderer_set_taa, renderer_taa, request_dlss, renderer_set_dlss, renderer_dlss, set_samples, renderer_ray_query, renderer_set_ray_shadows, renderer_ray_shadows, renderer_set_sun_size, renderer_sun_size, renderer_set_ray_occlusion, renderer_ray_occlusion, renderer_set_lamp_size, renderer_add_light, renderer_remove_light,
     renderer_set_fog, renderer_fog, renderer_set_clouds, renderer_set_sky_overcast, renderer_set_shadow_distance, renderer_shadow_distance,
     renderer_set_ssao, renderer_ssao,
     skybox_create, skybox_free,
@@ -211,6 +212,8 @@ struct VKRenderer {
     // Occlusion by ray while the rays are on, in the screen-space pass's
     // place: asked for or not; its reach and strength are the occlusion's.
     ray_occlusion: bool
+    // The radius of a lamp's face in metres, for the rays' lamp shadows.
+    lamp_radius: float
     textures: ptr
     frustum: ptr
     skybox: ptr
@@ -350,6 +353,7 @@ renderer_new() -> *VKRenderer {
     r.wetness = 0.0
     r.sun_angle = 0.0
     r.ray_occlusion = false
+    r.lamp_radius = 0.12
     r.batches = list.new()
     r.shadow_batches = list.new()
     r.shadow_batch_count = 0
@@ -603,6 +607,15 @@ renderer_set_ray_occlusion(r: *VKRenderer, on: bool) {
 renderer_ray_occlusion(r: *VKRenderer) -> bool {
     if r == null { return false }
     return r.ray_occlusion && ae3d_vk_ray_shadows() == 1 && ae3d_vk_ssao() == 1
+}
+
+// How big a lamp's face is, in metres, for the shadow the rays throw from
+// it: a bare bulb is a few centimetres and throws a hard shadow, a shaded
+// street lamp a hand's width and a soft one. Twelve centimetres unless set.
+renderer_set_lamp_size(r: *VKRenderer, metres: float) {
+    if r == null { return }
+    if metres < 0.0 { metres = 0.0 }
+    r.lamp_radius = metres * 0.5
 }
 
 // A model whose shadow the rays cast: a static mesh drawn on its own or
@@ -1252,6 +1265,18 @@ renderer_release_texture(r: *VKRenderer, handle: int) {
 renderer_add_model(r: *VKRenderer, m: *Model) {
     if m == null || !r.initialized { return }
 
+    // A shader written as GLSL text by the program (core.shader_new) has no
+    // SPIR-V: this backend compiles nothing at run time, and the model
+    // would be drawn by the scene program in silence -- the black hole
+    // was a black frame at 150 fps for as long as Vulkan had been the
+    // default. Said once per model instead.
+    if core.shader_valid(&m.shader) && m.shader.kind == core.SHADER_CUSTOM &&
+       m.shader.fragment_source != shaders.FRAGMENT_DEFAULT {
+        who = core.text(m.name)
+        if who == "" { who = "a model" }
+        println("ae3d: ${who} carries a custom GLSL shader, which the Vulkan backend cannot compile at run time; it is drawn with the scene shader instead. Run the program with AE3D_API=opengl, or make the engine with engine_new_with(platform.API_GL).")
+    }
+
     handle = ae3d_vk_upload_mesh(m.mesh)
     if handle == 0 {
         println("ae3d: Vulkan mesh upload failed (${ae3d_vk_last_error()})")
@@ -1422,7 +1447,7 @@ set_frame_uniforms(r: *VKRenderer, light: *Light, cam: *Camera) {
 write_frame_uniforms(r: *VKRenderer, light: *Light, cam: *Camera) {
     ae3d_vk_scene_set_vec3(vkscene.OFF_VIEWPOS, cam.position.x, cam.position.y, cam.position.z)
     ae3d_vk_scene_set_float(vkscene.OFF_VIEWDISTANCE, core.camera_far(cam))
-    upload_lights(r, light)
+    upload_lights(r, light, cam.position)
     ae3d_vk_scene_set_clip_mat4(vkscene.OFF_LIGHTSPACEMATRIX, &r.shadow_space)
     ae3d_vk_scene_set_vec3(vkscene.OFF_SHADOWDIRECTION, r.shadow_direction.x,
                            r.shadow_direction.y, r.shadow_direction.z)
@@ -1636,23 +1661,24 @@ active_program(m: *Model) -> int {
 // The key light takes slot zero and the registered ones fill what is left, the
 // same order the OpenGL backend uploads them in: the two have to agree about
 // which light a scene is shadowed by.
-upload_lights(r: *VKRenderer, key: *Light) {
+// The key light first, then the registered lights nearest the camera
+// until the slots are full: a scene may hold more lights than a frame
+// takes, and the ones a pixel can see are the ones near it.
+upload_lights(r: *VKRenderer, key: *Light, eye: Vec3) {
     count = 0
     if key != null {
         upload_light(0, key)
         count = 1
     }
 
-    held = list.size(r.lights)
+    taken = core.nearest_lights(r.lights, key, eye, vkscene.MAX_LIGHTS - count)
     i = 0
-    while i < held && count < vkscene.MAX_LIGHTS {
-        l = list.get_raw(r.lights, i) as *Light
-        if l != key {
-            upload_light(count, l)
-            count = count + 1
-        }
+    while i < list.size(taken) && count < vkscene.MAX_LIGHTS {
+        upload_light(count, list.get_raw(taken, i) as *Light)
+        count = count + 1
         i = i + 1
     }
+    list.free(taken)
     ae3d_vk_scene_set_int(vkscene.OFF_LIGHTCOUNT, count)
 }
 
@@ -1838,6 +1864,8 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
         if traced_occlusion { reach = ae3d_vk_ssao_radius() }
         ae3d_vk_scene_set_float(vkscene.OFF_RAYOCCLUSION, reach)
         ae3d_vk_scene_set_float(vkscene.OFF_RAYOCCLUSIONSTRENGTH, ae3d_vk_ssao_intensity())
+        ae3d_vk_scene_set_float(vkscene.OFF_RAYLAMPRADIUS, r.lamp_radius)
+        ae3d_vk_scene_set_int(vkscene.OFF_RAYFRAME, r.sort_serial)
         // What a water surface needs to read the depth under it back into
         // a position: whether there is one, and the frame's size in pixels.
         has_depth = 0

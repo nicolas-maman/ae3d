@@ -35,7 +35,7 @@ exports (
     engine_set_size, engine_set_title, engine_set_msaa, engine_set_decorated, engine_set_post,
     engine_set_render_scale, engine_set_shadows, engine_shadows, engine_set_fog, engine_fog, engine_set_shadow_distance, engine_shadow_distance,
     engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
-    engine_set_skybox, engine_set_sky, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_clouds, engine_cloud_wind, engine_set_sky_overcast, engine_sky_overcast, engine_sky_overcast_color, engine_set_ssao, engine_set_capture_channel, engine_set_wetness, engine_set_taa, engine_taa, engine_set_dlss, engine_dlss, engine_ray_query, engine_set_ray_shadows, engine_ray_shadows, engine_set_sun_size, engine_sun_size, engine_set_ray_occlusion, engine_ray_occlusion, engine_load_texture,
+    engine_set_skybox, engine_set_sky, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_clouds, engine_cloud_wind, engine_set_sky_overcast, engine_sky_overcast, engine_sky_overcast_color, engine_set_ssao, engine_set_capture_channel, engine_set_wetness, engine_set_taa, engine_taa, engine_set_dlss, engine_dlss, engine_ray_query, engine_set_ray_shadows, engine_ray_shadows, engine_set_sun_size, engine_sun_size, engine_set_ray_occlusion, engine_ray_occlusion, engine_set_lamp_size, engine_set_ssr, engine_load_texture,
     engine_set_time_of_day, engine_time_of_day,
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
     engine_render_ms, engine_render_frames,
@@ -179,6 +179,13 @@ struct Engine {
     // Occlusion by ray, asked for: with the rays and the occlusion on, the
     // scene shader traces it and the screen-space pass is skipped.
     ray_occlusion: bool
+    // A lamp's size in metres for the rays' lamp shadows; zero keeps the
+    // renderer's own.
+    lamp_size: float
+    // The wet ground's reflection, asked for; applied when the backend is up.
+    ssr_on: bool
+    ssr_road_height: float
+    ssr_strength: float
     perf_on: bool
     perf_frames: int
     perf_shadow_ms: float
@@ -911,6 +918,40 @@ engine_ray_occlusion(e: *Engine) -> bool {
     return true
 }
 
+// Screen-space reflection of the scene in a wet ground plane at
+// `road_height` metres, `strength` how much of a mirror it is: a Vulkan
+// pass, composited before the bloom so the mirrored lamps bloom with the
+// real ones. On OpenGL there is no such pass and this is inert; a wet
+// look there is the material's own reflectivity.
+//
+// Kept here and applied when the backend is up, like the fog and the
+// occlusion: set before engine_run it would land in a renderer state the
+// backend's start wipes, and the road would stay dry in silence.
+engine_set_ssr(e: *Engine, on: bool, road_height: float, strength: float) {
+    e.ssr_on = on
+    e.ssr_road_height = road_height
+    e.ssr_strength = strength
+    if e.running { apply_ssr(e) }
+}
+
+apply_ssr(e: *Engine) {
+    if e.backend_state == null || e.api != platform.API_VULKAN { return }
+    vk.renderer_set_ssr_params(e.backend_state as *VKRenderer, e.ssr_road_height, e.ssr_strength)
+    vk.renderer_set_ssr(e.backend_state as *VKRenderer, e.ssr_on)
+}
+
+// The size of a lamp's face in metres, for the lamp shadows the rays throw
+// on Vulkan: with the rays on, every point light shadows what stands
+// between it and the surface -- a figure under a street lamp has a shadow
+// on the road -- and the size sets how soft. On the map path a lamp has no
+// shadow of its own and the key light's stands in.
+engine_set_lamp_size(e: *Engine, metres: float) {
+    e.lamp_size = metres
+    if e.backend_state != null && e.api == platform.API_VULKAN {
+        vk.renderer_set_lamp_size(e.backend_state as *VKRenderer, metres)
+    }
+}
+
 engine_set_wetness(e: *Engine, amount: float) {
     if e.backend_state == null { return }
     if e.api == platform.API_VULKAN {
@@ -1120,6 +1161,8 @@ engine_start(e: *Engine, x: int, y: int) -> bool {
     if e.sun_size > 0.0 { engine_set_sun_size(e, e.sun_size) }
     if core.env_int("AE3D_RAY_AO", 0) == 1 { e.ray_occlusion = true }
     if e.ray_occlusion { engine_set_ray_occlusion(e, true) }
+    if e.lamp_size > 0.0 { engine_set_lamp_size(e, e.lamp_size) }
+    if e.ssr_on { apply_ssr(e) }
     if e.ray_shadows {
         engine_set_ray_shadows(e, true)
         if engine_ray_query(e) { println("ae3d: shadows by ray") } else { println("ae3d: no ray query on this device; the shadow map stands") }

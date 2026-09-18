@@ -61,7 +61,7 @@ exports (
     model_enable_point_instancing, model_instance_points, model_set_instance_scales,
     model_set_pose_bank, model_pose_bank, model_enable_instance_phases, model_set_instance_phase,
     model_set_instance_phases,
-    model_instance_count, model_set_instance_draw_count, model_remove_instance, light_new, light_directional, light_point,
+    model_instance_count, model_set_instance_draw_count, model_remove_instance, light_new, light_directional, light_point, nearest_lights,
     light_warm, light_cool, light_sun, light_free, shader_new, shader_named, shader_valid,
     SHADER_CUSTOM, SHADER_WATER, debug_enabled,
     set_debug, frustum_culling, set_frustum_culling, face_culling, set_face_culling,
@@ -2062,6 +2062,45 @@ light_directional(direction: Vec3, color: Vec3, intensity: float) -> *Light {
     l.ambient_strength = 0.15
     l.temperature = 5500.0
     return l
+}
+
+// Up to `room` of `lights`, the key left out, nearest `eye` first: the
+// ones a frame uploads when a scene holds more than its slots. A
+// directional light is everywhere, so it counts as nearest of all. A new
+// list the caller frees; the lights stay the scene's.
+nearest_lights(lights: ptr, key: *Light, eye: Vec3, room: int) -> ptr {
+    out = list.new()
+    if lights == null || room <= 0 { return out }
+    held = list.size(lights)
+    taken = calloc(held + 1, 4)
+    flags = taken as int[]
+    picked = 0
+    while picked < room {
+        best = 0 - 1
+        best_d2 = 0.0
+        i = 0
+        while i < held {
+            l = list.get_raw(lights, i) as *Light
+            if l != null && l != key && flags[i] == 0 {
+                d2 = 0.0
+                if l.mode != MODE_DIRECTIONAL {
+                    gap = v3_sub(l.position, eye)
+                    d2 = v3_dot(gap, gap)
+                }
+                if best < 0 || d2 < best_d2 {
+                    best = i
+                    best_d2 = d2
+                }
+            }
+            i = i + 1
+        }
+        if best < 0 { break }
+        flags[best] = 1
+        list.add_raw(out, list.get_raw(lights, best))
+        picked = picked + 1
+    }
+    heap.free(taken)
+    return out
 }
 
 light_point(position: Vec3, color: Vec3, intensity: float, range: float) -> *Light {
