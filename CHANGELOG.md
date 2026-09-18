@@ -157,6 +157,14 @@
   draws and the scene from 2.96 to 1.57 ms (one ray in place of nine
   map taps); at half a million, where the crowd stays in the map, the
   rays cost two or three per cent.
+- Occlusion by ray: `engine_set_ray_occlusion(e, on)` / `AE3D_RAY_AO=1`,
+  with the rays and the occlusion on. Four cosine-weighted rays into the
+  hemisphere over every lit pixel, to the occlusion's reach, in the
+  screen-space pass's place, folded by the temporal pass;
+  `vk.renderer_set_ray_occlusion`. `tests/test_ray_occlusion`: a wall's
+  foot darkens by ray, the open ground and the wall's top do not. In the
+  city at 720p the opaque pass goes from 1.23 to 1.81 ms and the
+  screen-space pass is skipped.
 - The sun has a size for the rays: `engine_set_sun_size(e, degrees)` /
   `AE3D_SUN_SIZE=n` (tenths of a degree). Four rays a pixel into the
   cone the sun's disc subtends, on a spiral turned by a per-pixel noise

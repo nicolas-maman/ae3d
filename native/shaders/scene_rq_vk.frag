@@ -86,6 +86,8 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float shadowTexelWorld;
     int rayShadows;
     float sunAngle;
+    float rayOcclusion;
+    float rayOcclusionStrength;
     bool enablePerlinNoise;
     float noiseScale;
     int noiseOctaves;
@@ -298,6 +300,11 @@ layout(location = 5) in float Occlusion;
 // and a hard edge; the real sun's quarter degree gives a shadow that
 // sharpens toward what casts it and softens away from it, as shadows do.
 
+// Occlusion by ray, in the screen-space pass's place while the rays are
+// on: how far in metres a thing shadows what stands beside it (zero is
+// off) and how dark it goes.
+
+
 
 
 // GPU Gems Chapter 5: Improved Perlin Noise Support
@@ -430,6 +437,42 @@ float ray_shadow_factor() {
         if (ray_blocked(origin, direction)) blocked += 1.0;
     }
     return mix(1.0, shadowIntensity, blocked / float(SUN_TAPS));
+}
+
+// Ambient occlusion by ray: four rays into the hemisphere over the
+// surface, cosine-weighted (a ray near the normal counts for the sky it
+// stands for), on a spiral turned by a per-pixel noise and the frame's
+// jitter as the sun's taps are, each stopped at the occlusion's reach.
+// The share that hit is how much of the sky the point does not see: the
+// same number the screen-space pass estimates from the depth, from the
+// scene itself, with no screen edge or hidden surface to miss.
+#define AO_TAPS 4
+float ray_occlusion_factor() {
+    vec3 surface = normalize(Normal);
+    vec3 origin = FragPos + surface * 0.02;
+    vec3 side = normalize(cross(surface, abs(surface.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+    vec3 up = cross(side, surface);
+    float grain = fract(52.9829189 * fract(0.06711056 * gl_FragCoord.x + 0.00583715 * gl_FragCoord.y) + 0.37);
+    float turn = 6.2831853 * (grain + fract(dot(jitter, vec2(61.7, 113.9))));
+    float blocked = 0.0;
+    for (int i = 0; i < AO_TAPS; i++) {
+        float u = (float(i) + 0.5) / float(AO_TAPS);
+        float sinTheta = sqrt(u);
+        float cosTheta = sqrt(1.0 - u);
+        float angle = float(i) * 2.3999632 + turn;
+        vec3 direction = side * (cos(angle) * sinTheta) + up * (sin(angle) * sinTheta) + surface * cosTheta;
+        // From a hand's breadth out: a figure is drawn from its near mesh
+        // and traced against its far one, a few centimetres apart, so a
+        // ray that started at the skin found the proxy and dotted every
+        // figure with its own shadow.
+        rayQueryEXT query;
+        rayQueryInitializeEXT(query, sceneAS,
+                              gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+                              0xFF, origin, 0.12, direction, rayOcclusion);
+        rayQueryProceedEXT(query);
+        if (rayQueryGetIntersectionTypeEXT(query, true) != gl_RayQueryCommittedIntersectionNoneEXT) blocked += 1.0;
+    }
+    return clamp(1.0 - rayOcclusionStrength * blocked / float(AO_TAPS), 0.0, 1.0);
 }
 #endif
 
@@ -1189,7 +1232,12 @@ void main() {
 
     // The direct light, under the clouds' shadow where a cloud drifts over.
     vec3 color = ambient + fillLightContrib + Lo;
-    
+#ifdef AE3D_RAY_QUERY
+    // The occlusion by ray darkens what the screen-space pass would have,
+    // the whole of the lit surface, so the two pictures agree.
+    if (rayShadows == 1 && rayOcclusion > 0.0) color *= ray_occlusion_factor();
+#endif
+
 	// Calculate distance for performance scaling (CRITICAL for voxel terrain performance)
 	float distanceToCamera = length(FragPos - viewPos);
 	
