@@ -100,45 +100,51 @@ demo scene on both backends and holds it to its recorded frame cost.
 
 ## Writing a program
 
-A program is a behaviour the engine runs, the way a MonoBehaviour joins a
-Unity scene: the loop calls its phases and the program never calls them
-itself.
+A program is written the way a Unity or gopher3D game is: game objects in
+the engine's scene, and scripts on them with Unity's phases, by Unity's
+names. The engine calls the phases; the program never calls them itself.
 
 ```aether
 import ae3d.core
 import ae3d.engine
+import ae3d.behaviour
 import ae3d.loader
 
-var g_cube: ptr = null
+struct Spinner { pitch: float, yaw: float }        // the script's own state
 
-on_start(state: ptr, e: *Engine) {                 // once, window and backend up
-    cube = loader.cube(1.0)
-    core.model_set_scale(cube, 20.0, 20.0, 20.0)
-    engine.engine_add_model(e, cube)
-    g_cube = cube as ptr
-    core.camera_look_at(engine.engine_camera(e), core.vec3(0.0, 0.0, 0.0))
+start(state: ptr, go: *GameObject) {               // once, first frame
+    cam = engine.engine_camera(engine.of(go))
+    core.camera_look_at(cam, behaviour.object_position(go))
 }
 
-on_update(state: ptr, e: *Engine, delta: float) {  // every frame
-    core.model_rotate(g_cube as *Model, 18.0 * delta, 30.0 * delta, 0.0)
+update(state: ptr, go: *GameObject, delta: float) { // every frame
+    spin = state as *Spinner
+    core.model_rotate(behaviour.object_model(go), spin.pitch * delta, spin.yaw * delta, 0.0)
 }
 
 main() {
     e = engine.engine_new()
-    program = engine.behaviour_new("spinning cube", null)
-    program.start = on_start
-    program.update = on_update
-    engine.engine_add_behaviour(e, program)
+    cube = loader.cube(1.0)
+    core.model_set_scale(cube, 20.0, 20.0, 20.0)
+    spinner = Spinner { pitch: 18.0, yaw: 30.0 }
+    object = engine.object(e, "Cube", cube)             // a game object with a mesh
+    engine.script(object, "Spinner", &spinner, start, update)   // AddComponent
     engine.engine_run(e)
+    engine.engine_free(e)                               // the scene and its models go with it
 }
 ```
 
-The phases each frame, in order: `fixed_update(step)` as many times as the
-fixed step fits, `update(delta)` once, `pose()` after the animation clips are
-applied and before the draw, `late_update(delta)` after the frame is drawn.
-`start` runs once, on the first frame after the behaviour is added. A scene
-of game objects and components (`ae3d.behaviour`) joins the loop through
-`engine_add_scene`.
+`engine.object` puts a game object in the engine's scene and its model in the
+renderer (on the first frame, if the window is not up yet); `engine.script`
+puts a script on it. Every phase gets the script's state and the object it
+is on, the way a MonoBehaviour has `this` and `gameObject`; the engine is
+`engine.of(go)`. The phases each frame, in order: `fixed_update` as many
+times as the fixed step fits, `update` once, `late_update` after every
+object has updated. `start` runs once, on the first frame the object is in
+the scene; `engine.destroy` takes an object out at the end of the frame.
+Underneath, the scene is a behaviour (`engine.behaviour_new`,
+`engine_add_behaviour`) with the engine handed to every phase, which is what
+the engine's own systems -- the weather, the crowd tools -- are written as.
 
 ## The pipeline
 

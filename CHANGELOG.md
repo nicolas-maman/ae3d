@@ -2,6 +2,34 @@
 
 ## [current]
 
+### Game objects and scripts, the Unity shape
+
+- A program is game objects in the engine's scene with scripts on them,
+  the way Unity and gopher3D had it: `engine.object(e, name, model)` puts a
+  game object in the scene and its model in the renderer (on the first
+  frame, when the window is not up yet; the model is the object's from
+  then on), `engine.script(o, name, state, start, update, fixed_update,
+  late_update)` is AddComponent with the phases by Unity's names, and
+  `engine.destroy(e, o)` takes an object out at the end of the frame. Every
+  phase gets the script's state and the object it is on -- `start(state,
+  go)`, `update(state, go, delta)` -- the way a MonoBehaviour has `this` and
+  `gameObject`; `engine.of(go)` is the object's engine and
+  `engine.running()` the one whose loop is running. The engine owns its
+  scene (`engine_scene`) and frees it, its objects and their models with
+  itself. `behaviour.object_add_script` is the same on a bare scene;
+  `scene_late_update` runs the late phase, which the engine's scene now
+  does after every update; components' `awake`, `start` and `destroy`
+  are handed the object too. Every example is written this way, with a
+  struct of its own state where it has any, and `tests/test_gameobjects`
+  runs one through the engine on both backends. The old shape -- a
+  `Behaviour` with `on_start(state, e)` and `on_update(state, e, delta)`
+  registered on the engine -- is what the engine's own systems are, and
+  stays for them.
+- The editor's scripts export `start` and `update`, not `script_start` and
+  `script_update`: the same names as everywhere else. The loader looks for
+  those; the template the editor writes and the four shipped scripts have
+  them.
+
 ### The loop owns the lifecycle
 
 - A program is a **behaviour** the engine runs: `engine.behaviour_new(name,

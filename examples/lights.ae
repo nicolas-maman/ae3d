@@ -2,33 +2,45 @@
 // under a light that changes type as the demo advances.
 //
 //   ./build.sh examples/lights.ae && ./build/lights
+//
+// Five sphere objects, each turning under a Spinner script, and a Showcase
+// script on a manager object that restyles them and swaps the light every
+// four seconds -- the state of the demo in the script's own struct.
 
 import ae3d.core
 import ae3d.platform
 import ae3d.engine
+import ae3d.behaviour
 import ae3d.loader
-import std.list
+import std.string
 
 const SPHERES = 5
+const STAGE_SECONDS = 4.0
 
-var g_spheres: ptr = null
-var g_engine: ptr = null
-var g_elapsed = 0.0
-var g_stage = 0 - 1
+// Spinner: turns its object about the up axis, degrees a second.
+struct Spinner { rate: float }
 
-sphere_at(index: int) -> *Model {
-    if g_spheres == null { return null }
-    return list.get_raw(g_spheres, index) as *Model
+spin(state: ptr, go: *GameObject, delta: float) {
+    spinner = state as *Spinner
+    core.model_rotate(behaviour.object_model(go), 0.0, spinner.rate * delta, 0.0)
 }
 
-apply_stage(stage: int) {
-    e = g_engine as *Engine
-    light = core.light_sun(core.vec3(0.3, 0.8, 0.5))
+// Showcase: which preset the row is showing, and when it last changed.
+struct Showcase {
+    elapsed: float
+    stage: int
+}
 
+// The spheres are found in the scene by name rather than held: what the
+// scene knows, the script need not keep a copy of.
+restyle(e: *Engine, stage: int) {
     i = 0
     while i < SPHERES {
-        m = sphere_at(i)
-        if m != null {
+        name = "Sphere ${i}"
+        sphere = behaviour.scene_find(engine.engine_scene(e), name)
+        string.free(name)
+        if sphere != null {
+            m = behaviour.object_model(sphere)
             shade = (i * 1.0) / ((SPHERES - 1) * 1.0)
             if stage == 0 {
                 core.model_matte(m, 0.85, 0.3 + shade * 0.5, 0.25)
@@ -46,6 +58,7 @@ apply_stage(stage: int) {
         i = i + 1
     }
 
+    light = core.light_sun(core.vec3(0.3, 0.8, 0.5))
     if stage == 1 {
         core.light_free(light)
         light = core.light_point(core.vec3(0.0, 120.0, 180.0), core.vec3(1.0, 0.85, 0.6), 3.0, 600.0)
@@ -53,7 +66,6 @@ apply_stage(stage: int) {
         core.light_free(light)
         light = core.light_cool(core.vec3(0.0, 160.0, 220.0), 2.5)
     }
-
     previous = engine.engine_light(e)
     engine.engine_set_light(e, light)
     if previous != null { core.light_free(previous) }
@@ -65,31 +77,8 @@ apply_stage(stage: int) {
     if stage == 4 { println("polished metal, exposure rising left to right") }
 }
 
-on_start(state: ptr, e: *Engine) {
-    g_engine = e as ptr
-
-    g_spheres = list.new()
-
-    i = 0
-    while i < SPHERES {
-        m = loader.sphere(1.0, 48, 36)
-        core.model_set_scale(m, 22.0, 22.0, 22.0)
-        core.model_set_position(m, ((i - 2) * 1.0) * 60.0, 0.0, 0.0)
-        engine.engine_add_model(e, m)
-        list.add_raw(g_spheres, m)
-        i = i + 1
-    }
-
-    // A floor under them, so a light has something to fall on and a sphere
-    // something to shadow: what a point light does that a sun does not is
-    // only visible on a surface between them.
-    floor_plane = loader.plane(2, 6000.0)
-    core.model_set_position(floor_plane, 0.0 - 3000.0, 0.0 - 22.0, 0.0 - 3000.0)
-    core.model_matte(floor_plane, 0.18, 0.18, 0.20)
-    core.model_set_pbr(floor_plane, 0.0, 0.55)
-    core.model_set_reflectivity(floor_plane, 0.12)
-    engine.engine_add_model(e, floor_plane)
-
+start(state: ptr, go: *GameObject) {
+    e = engine.of(go)
     engine.engine_set_clear_color(e, 0.03, 0.04, 0.06)
     engine.engine_set_post(e, false, true, 0.85, 0.35)
     engine.engine_set_sky(e, "resources/sky/night.png")
@@ -100,19 +89,13 @@ on_start(state: ptr, e: *Engine) {
     core.camera_set_speed(cam, 220.0)
 }
 
-on_update(state: ptr, e: *Engine, delta: float) {
-    g_elapsed = g_elapsed + delta
-    stage = ((g_elapsed / 4.0) as int) % 5
-    if stage != g_stage {
-        g_stage = stage
-        apply_stage(stage)
-    }
-
-    i = 0
-    while i < SPHERES {
-        m = sphere_at(i)
-        if m != null { core.model_rotate(m, 0.0, 14.0 * delta, 0.0) }
-        i = i + 1
+update(state: ptr, go: *GameObject, delta: float) {
+    show = state as *Showcase
+    show.elapsed = show.elapsed + delta
+    stage = ((show.elapsed / STAGE_SECONDS) as int) % 5
+    if stage != show.stage {
+        show.stage = stage
+        restyle(engine.of(go), stage)
     }
 }
 
@@ -128,21 +111,37 @@ main() {
     engine.engine_set_shadow_distance(e, 240.0)
     // The floor runs to the horizon and fades into the sky's glow before it.
     engine.engine_set_fog(e, core.fog_distance(400.0, 2600.0, core.vec3(0.14, 0.10, 0.07), 1.0))
-    program = engine.behaviour_new("lights", null)
-    program.start = on_start
-    program.update = on_update
-    engine.engine_add_behaviour(e, program)
+
+    spinner = Spinner { rate: 14.0 }
+    i = 0
+    while i < SPHERES {
+        m = loader.sphere(1.0, 48, 36)
+        core.model_set_scale(m, 22.0, 22.0, 22.0)
+        core.model_set_position(m, ((i - 2) * 1.0) * 60.0, 0.0, 0.0)
+        // The object copies its name; the one built here is this loop's.
+        name = "Sphere ${i}"
+        sphere = engine.object(e, name, m)
+        string.free(name)
+        engine.script(sphere, "Spinner", &spinner, null, spin)
+        i = i + 1
+    }
+
+    // A floor under them, so a light has something to fall on and a sphere
+    // something to shadow: what a point light does that a sun does not is
+    // only visible on a surface between them.
+    floor_plane = loader.plane(2, 6000.0)
+    core.model_set_position(floor_plane, 0.0 - 3000.0, 0.0 - 22.0, 0.0 - 3000.0)
+    core.model_matte(floor_plane, 0.18, 0.18, 0.20)
+    core.model_set_pbr(floor_plane, 0.0, 0.55)
+    core.model_set_reflectivity(floor_plane, 0.12)
+    engine.object(e, "Floor", floor_plane)
+
+    show = Showcase { elapsed: 0.0, stage: 0 - 1 }
+    game = engine.object(e, "Showcase", null)
+    engine.script(game, "Showcase", &show, start, update)
 
     engine.engine_run(e)
 
     println("materials: ${engine.engine_frame_count(e)} frames, ${engine.engine_draw_calls(e)} draw calls")
-
-    i = 0
-    while i < SPHERES {
-        m = sphere_at(i)
-        if m != null { core.model_free(m) }
-        i = i + 1
-    }
-    if g_spheres != null { list.free(g_spheres) }
     engine.engine_free(e)
 }

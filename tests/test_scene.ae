@@ -36,14 +36,52 @@ check_int(name: string, got: int, want: int) {
     }
 }
 
-spin_awake(state: ptr) { awake_calls = awake_calls + 1 }
-spin_start(state: ptr) { start_calls = start_calls + 1 }
-spin_update(state: ptr, delta: float) { update_calls = update_calls + 1 }
-spin_fixed(state: ptr, delta: float) { fixed_calls = fixed_calls + 1 }
-spin_destroy(state: ptr) { destroy_calls = destroy_calls + 1 }
+// Every phase is handed the object it is on, the way a MonoBehaviour has
+// gameObject: each one records which, so the test can check it was the
+// right one and not, say, the first object in the scene.
+var phase_object: ptr = null
+spin_awake(state: ptr, go: *GameObject) {
+    awake_calls = awake_calls + 1
+    phase_object = go as ptr
+}
+spin_start(state: ptr, go: *GameObject) {
+    start_calls = start_calls + 1
+    phase_object = go as ptr
+}
+spin_update(state: ptr, go: *GameObject, delta: float) {
+    update_calls = update_calls + 1
+    phase_object = go as ptr
+}
+spin_fixed(state: ptr, go: *GameObject, delta: float) {
+    fixed_calls = fixed_calls + 1
+    phase_object = go as ptr
+}
+spin_destroy(state: ptr, go: *GameObject) {
+    destroy_calls = destroy_calls + 1
+    phase_object = go as ptr
+}
 
 var second_destroy_calls = 0
-second_destroy(state: ptr) { second_destroy_calls = second_destroy_calls + 1 }
+second_destroy(state: ptr, go: *GameObject) { second_destroy_calls = second_destroy_calls + 1 }
+
+// A script in the Unity shape: state of its own, and the phases by name.
+struct Follower {
+    moved: int
+    late: int
+    last_delta: float
+}
+var follow_order = 0
+follower_update(state: ptr, go: *GameObject, delta: float) {
+    f = state as *Follower
+    f.moved = f.moved + 1
+    f.last_delta = delta
+    // late_update must not have run yet this frame: it follows every update.
+    if f.late == f.moved { follow_order = follow_order + 1 }
+}
+follower_late(state: ptr, go: *GameObject, delta: float) {
+    f = state as *Follower
+    f.late = f.late + 1
+}
 
 test_raycast() {
     origin = core.vec3(0.0, 0.0, 10.0)
@@ -195,32 +233,71 @@ test_components() {
     behaviour.object_set_tag(object, "actor")
 
     component = behaviour.component_new("spin", behaviour.KIND_SCRIPT, null)
-    component.awake = spin_awake as fn(ptr)
-    component.start = spin_start as fn(ptr)
-    component.update = spin_update as fn(ptr, float)
-    component.fixed_update = spin_fixed as fn(ptr, float)
-    component.destroy = spin_destroy as fn(ptr)
+    component.awake = spin_awake
+    component.start = spin_start
+    component.update = spin_update
+    component.fixed_update = spin_fixed
+    component.destroy = spin_destroy
 
     behaviour.object_add_component(object, component)
     check_int("awake on add", awake_calls, 1)
+    check_true("awake is handed its object", phase_object == object as ptr)
     check_int("start deferred", start_calls, 0)
+    check_true("an object not yet in a scene has none", behaviour.object_scene(object) == null)
 
     behaviour.scene_add(scene, object)
+    check_true("an added object knows its scene", behaviour.object_scene(object) == scene)
+    phase_object = null
     behaviour.scene_update(scene, 0.016)
     check_int("start once", start_calls, 1)
     check_int("update once", update_calls, 1)
+    check_true("update is handed its object", phase_object == object as ptr)
 
     behaviour.scene_update(scene, 0.016)
     check_int("start still once", start_calls, 1)
     check_int("update twice", update_calls, 2)
 
+    phase_object = null
     behaviour.scene_fixed_update(scene, 0.016)
     check_int("fixed once", fixed_calls, 1)
+    check_true("fixed_update is handed its object", phase_object == object as ptr)
 
     behaviour.component_set_enabled(component, false)
     behaviour.scene_update(scene, 0.016)
     check_int("disabled component skipped", update_calls, 2)
     behaviour.component_set_enabled(component, true)
+
+    // The Unity shape on top: a script by its phases, and late_update after
+    // every object's update -- on a second object, added first, so the
+    // order is between objects and not just within one.
+    follower = Follower { moved: 0, late: 0, last_delta: 0.0 }
+    camera_rig = behaviour.object_new("rig")
+    behaviour.scene_add(scene, camera_rig)
+    rig_script = behaviour.object_add_script(camera_rig, "follow", (&follower) as ptr,
+                                             null, follower_update, null, follower_late)
+    check_true("a script is a component of its object",
+               behaviour.object_component(camera_rig, 0) == rig_script)
+    check_true("a script keeps the state it was given",
+               behaviour.component_state(rig_script) == (&follower) as ptr)
+    check_int("a script with no start is not started", follower.moved, 0)
+    behaviour.scene_update(scene, 0.5)
+    check_int("a script's update runs", follower.moved, 1)
+    check("a script's update gets the delta", follower.last_delta, 0.5)
+    check_int("late_update waits for scene_late_update", follower.late, 0)
+    behaviour.scene_late_update(scene, 0.5)
+    check_int("late_update runs after every update", follower.late, 1)
+    behaviour.scene_update(scene, 0.5)
+    behaviour.scene_late_update(scene, 0.5)
+    check_int("late_update never before that frame's update", follow_order, 0)
+    check_int("late_update once a frame", follower.late, 2)
+    behaviour.scene_destroy_later(scene, camera_rig)
+    behaviour.scene_update(scene, 0.016)
+    check_int("a scripted object is destroyed like any other", behaviour.scene_count(scene), 1)
+
+    // Whoever runs the scene: the engine sets itself, a bare scene has none.
+    check_true("a bare scene has no host", behaviour.scene_host(scene) == null)
+    behaviour.scene_set_host(scene, object as ptr)
+    check_true("the host is whatever was set", behaviour.scene_host(scene) == object as ptr)
 
     // The transform lives on the model, so reading it back through the object
     // must show exactly what was written, with no copy in between.
@@ -281,8 +358,8 @@ test_components() {
     // A component disabled before it is added must stay disabled. Adding one is
     // not a decision about whether it runs.
     quiet = behaviour.component_new("quiet", behaviour.KIND_CUSTOM, null)
-    quiet.update = spin_update as fn(ptr, float)
-    quiet.destroy = second_destroy as fn(ptr)
+    quiet.update = spin_update
+    quiet.destroy = second_destroy
     behaviour.component_set_enabled(quiet, false)
     behaviour.object_add_component(object, quiet)
     check_true("a component added disabled stays disabled",
@@ -317,6 +394,7 @@ test_components() {
     behaviour.scene_update(scene, 0.016)
     check_int("scene emptied", behaviour.scene_count(scene), 0)
     check_int("destroy called", destroy_calls, 1)
+    check_true("destroy is handed its object", phase_object != null)
 
     behaviour.scene_free(scene)
 }

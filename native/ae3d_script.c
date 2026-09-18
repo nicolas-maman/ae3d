@@ -85,10 +85,10 @@ void *ae3d_script_open(const char *path) {
     // update is what makes a script a script; start is optional, because a
     // script that only moves something has nothing to set up.
     ae3d_script_update_fn update =
-        (ae3d_script_update_fn)ae3d_script_dlsym(handle, "script_update");
+        (ae3d_script_update_fn)ae3d_script_dlsym(handle, "update");
     if (!update) {
         ae3d_script_dlclose(handle);
-        return ae3d_script_fail(path, "no script_update in it");
+        return ae3d_script_fail(path, "no update in it");
     }
 
     ae3d_script *s = (ae3d_script *)calloc(1, sizeof(*s));
@@ -98,7 +98,7 @@ void *ae3d_script_open(const char *path) {
     }
     s->handle = handle;
     s->update = update;
-    s->start = (ae3d_script_start_fn)ae3d_script_dlsym(handle, "script_start");
+    s->start = (ae3d_script_start_fn)ae3d_script_dlsym(handle, "start");
     return s;
 }
 

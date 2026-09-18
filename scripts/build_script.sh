@@ -3,8 +3,8 @@
 #
 #   scripts/build_script.sh resources/scripts/spin.ae [build/scripts]
 #
-# A script is an ordinary source file with script_start and script_update in
-# it. It is compiled the same way anything else is and then linked as a shared
+# A script is an ordinary source file with start and update in it, Unity's
+# phases by Unity's names. It is compiled the same way anything else is and then linked as a shared
 # library whose undefined symbols are resolved out of the host at load time:
 # the runtime, and whatever native calls the engine code it imported makes.
 #
