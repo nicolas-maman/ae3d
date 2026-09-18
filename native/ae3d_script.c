@@ -57,8 +57,10 @@ const char *ae3d_script_suffix(void) {
 #endif
 }
 
-typedef void (*ae3d_script_start_fn)(void *model);
-typedef void (*ae3d_script_update_fn)(void *model, double delta);
+/* The engine's phase signatures: the script's state, the game object it is
+ * on, and for update the frame. The editor hands a null state. */
+typedef void (*ae3d_script_start_fn)(void *state, void *object);
+typedef void (*ae3d_script_update_fn)(void *state, void *object, double delta);
 
 typedef struct {
     void                  *handle;
@@ -107,14 +109,14 @@ int ae3d_script_has_start(void *script) {
     return (s && s->start) ? 1 : 0;
 }
 
-void ae3d_script_start(void *script, void *model) {
+void ae3d_script_start(void *script, void *state, void *object) {
     ae3d_script *s = (ae3d_script *)script;
-    if (s && s->start && model) s->start(model);
+    if (s && s->start && object) s->start(state, object);
 }
 
-void ae3d_script_update(void *script, void *model, double delta) {
+void ae3d_script_update(void *script, void *state, void *object, double delta) {
     ae3d_script *s = (ae3d_script *)script;
-    if (s && s->update && model) s->update(model, delta);
+    if (s && s->update && object) s->update(state, object, delta);
 }
 
 void ae3d_script_close(void *script) {

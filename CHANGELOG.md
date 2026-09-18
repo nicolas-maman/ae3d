@@ -29,6 +29,25 @@
   `script_update`: the same names as everywhere else. The loader looks for
   those; the template the editor writes and the four shipped scripts have
   them.
+- **The editor holds a scene of game objects.** Every row of the hierarchy
+  is a `GameObject` in the editor's `Scene` (`ae3d.behaviour`): the object
+  owns its model, its first component says what the row is (mesh, water,
+  voxel, terrain, light) and carries that thing's state, its second is the
+  editor's own slot. The three parallel lists of models, components and
+  script slots are gone, and so are their three shadows for undo: a
+  deleted object is detached whole (`scene_detach`, new) and put back
+  whole. A script attached in the editor takes the engine's phase
+  signature -- `start(state, go)`, `update(state, go, delta)` -- with the
+  game object it is on, so one script shape serves the editor and a
+  program; the editor hands a null state and the model is
+  `behaviour.object_model(go)`. The four shipped scripts, the template and
+  `tests/test_script` are in that shape. The scene runs them: the editor's
+  slot on each object is a script component whose phases run whatever the
+  slot names, and a frame is `behaviour.scene_update` on the editor's
+  scene, as it is on a program's -- attaching or rebuilding a script marks
+  the slot unstarted, and start runs before the next update. The inspector
+  lists the selected object's components under its name ("water · orbit"),
+  the first thing Unity's does.
 
 ### The loop owns the lifecycle
 

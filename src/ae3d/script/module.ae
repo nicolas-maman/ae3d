@@ -1,17 +1,18 @@
 // Scripts you can assign to an object.
 //
 // A script is an ordinary Aether source file with Unity's phases in it, by
-// Unity's names:
+// Unity's names and with the engine's signatures -- the same functions a
+// program hands to engine.script:
 //
-//     start(m: *Model)                 once, when it is attached
-//     update(m: *Model, delta: float)  every frame
+//     start(state: ptr, go: *GameObject)                 once, when it is attached
+//     update(state: ptr, go: *GameObject, delta: float)  every frame
 //
 // It is compiled into a shared library and opened at runtime, so attaching one
 // is a matter of remembering which library answers for which object. That is
 // how a MonoBehaviour works in Unity and a script in Godot, and what
-// gopher3D's script manager was reaching for. A program that is not the
-// editor puts the same phases on a game object with engine.script, and
-// gets the object rather than the bare model.
+// gopher3D's script manager was reaching for. The editor hands a null state
+// (a script keeps its own in its globals) and the game object the script
+// is attached to; the model is behaviour.object_model(go).
 //
 // CRITICAL: a script is compiled from the same sources as the host and reaches
 // back into it for the runtime, so the two agree about what a Model is only
@@ -22,6 +23,7 @@ import std.list
 import std.heap
 import std.string
 import ae3d.core
+import ae3d.behaviour
 
 exports (
     Script,
@@ -31,8 +33,8 @@ exports (
 
 extern ae3d_script_open(path: string) -> ptr
 extern ae3d_script_has_start(script: ptr) -> int
-extern ae3d_script_start(script: ptr, model: ptr)
-extern ae3d_script_update(script: ptr, model: ptr, delta: float)
+extern ae3d_script_start(script: ptr, memory: ptr, object: ptr)
+extern ae3d_script_update(script: ptr, memory: ptr, object: ptr, delta: float)
 extern ae3d_script_close(script: ptr)
 extern ae3d_script_error() -> string
 extern ae3d_script_suffix() -> string
@@ -93,12 +95,12 @@ script_has_start(s: *Script) -> bool {
     return ae3d_script_has_start(s.handle) == 1
 }
 
-script_start(s: *Script, m: *Model) {
-    if s == null || m == null { return }
-    ae3d_script_start(s.handle, m as ptr)
+script_start(s: *Script, state: ptr, go: *GameObject) {
+    if s == null || go == null { return }
+    ae3d_script_start(s.handle, state, go as ptr)
 }
 
-script_update(s: *Script, m: *Model, delta: float) {
-    if s == null || m == null { return }
-    ae3d_script_update(s.handle, m as ptr, delta)
+script_update(s: *Script, state: ptr, go: *GameObject, delta: float) {
+    if s == null || go == null { return }
+    ae3d_script_update(s.handle, state, go as ptr, delta)
 }

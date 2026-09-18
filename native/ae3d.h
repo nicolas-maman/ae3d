@@ -140,8 +140,8 @@ int    ae3d_mesh_dirty(void *mesh);
  * object it is attached to passed in on every call. */
 void  *ae3d_script_open(const char *path);
 int    ae3d_script_has_start(void *script);
-void   ae3d_script_start(void *script, void *model);
-void   ae3d_script_update(void *script, void *model, double delta);
+void   ae3d_script_start(void *script, void *state, void *object);
+void   ae3d_script_update(void *script, void *state, void *object, double delta);
 void   ae3d_script_close(void *script);
 const char *ae3d_script_error(void);
 const char *ae3d_script_suffix(void);

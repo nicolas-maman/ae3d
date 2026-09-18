@@ -1,14 +1,16 @@
 // A script attached to an object runs on it.
 //
 // The whole point is that the file was not compiled into the editor: it is
-// built separately, opened at runtime, and handed the object it is attached
-// to. So this loads the library the build step produced and checks that the
-// model it is given actually moves, which is the only thing an attached script
-// is for.
+// built separately, opened at runtime, and handed the game object it is
+// attached to -- the engine's own phase signature, so the same script would
+// serve a program. So this loads the library the build step produced and
+// checks that the object it is given actually moves, which is the only thing
+// an attached script is for.
 
 import std.string
 import ae3d.core
 import ae3d.loader
+import ae3d.behaviour
 import ae3d.script
 
 var failures = 0
@@ -39,12 +41,15 @@ main() {
     check("a built script opens", true)
 
     m = loader.cube(1.0)
+    go = behaviour.object_new("cube")
+    behaviour.object_set_model(go, m)
     before = m.rotation.y
 
-    // A second of it, a sixtieth at a time, which is what the editor does.
+    // A second of it, a sixtieth at a time, which is what the editor does:
+    // no state of the editor's, the object, the frame.
     step = 0
     while step < 60 {
-        script.script_update(s, m, 1.0 / 60.0)
+        script.script_update(s, null, go, 1.0 / 60.0)
         step = step + 1
     }
 
@@ -55,6 +60,7 @@ main() {
     // and calling one it does not have would be a jump to nothing.
     check("a script without a start is known to have none", !script.script_has_start(s))
 
+    behaviour.object_free(go)
     core.model_free(m)
     script.script_close(s)
 
