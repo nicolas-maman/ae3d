@@ -30,6 +30,7 @@ skinned instanced crowds, and an engine that can be interrogated while it runs.
 | **Instancing and ECS** | Instances as matrices or as eight-float points (a million grains of sand in a 32 MB stream); `ae3d.ecs` keeps components in dense columns the crowd systems walk in C. |
 | **Voxels and terrain** | Voxel worlds meshed as only the faces that show with baked corner sky; surface nets over a signed distance field for smooth terrain; Perlin heightfields. |
 | **Self-painted assets** | Skies, sand, palettes and albedos generated from the engine's own noise and registered as textures. Nothing downloaded. |
+| **Models from anywhere** | A glTF 2.0 loader (`ae3d.gltf`): meshes, materials and textures, the node tree, skins with their inverse binds, and every animation as clips, from `.gltf` or `.glb`. A Mixamo figure walks in the engine without passing through Blender. |
 | **An engine you can ask** | `AE3D_AGENT=port` opens a JSON channel: read and change the scene, hold a frame, read its pixels, trace a model from its Blender object to the pixels it landed on. |
 | **An editor** | Hierarchy, inspector, gizmos, terrain sculpting, undo, scene files; one dark theme on every platform. |
 
@@ -177,6 +178,7 @@ git clone https://github.com/aether-lang-dev/aether-ui.git ../aether-ui
 | `models.ae` | OBJ loading, one group per material |
 | `lights.ae` | Material presets, light types, bloom, transparency |
 | `blender_pipeline.ae` | A model authored and keyed in Blender, exported, loaded and played |
+| `gltf_viewer.ae` | Any glTF on a floor under a sun, playing one of its animations: `./build/gltf_viewer Fox.glb Run` |
 | `backend_switch.ae` | The same scene through either renderer |
 | `spinning_cube.ae` | The smallest complete program |
 

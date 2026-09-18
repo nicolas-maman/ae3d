@@ -63,6 +63,25 @@
   stamps the sky's end all the same, so its opaque draws are no longer
   charged to the sky.
 
+### glTF
+
+- `ae3d.gltf` loads glTF 2.0 -- `.gltf` with its `.bin`, or `.glb` -- into
+  the engine's models, skeletons and clips: the node tree with TRS or
+  decomposed matrices, mesh primitives with position, normal, uv, joints and
+  weights, materials with base colour, metallic, roughness and their
+  textures (embedded images decoded and registered under
+  `<file>#image<n>`), skins with their inverse bind matrices, and every
+  animation as one clip per node, STEP, LINEAR and CUBICSPLINE. A skinned
+  primitive is placed by its joints alone, as the format says. What is not
+  read (sparse accessors, `data:` URIs, morph targets) is named in the
+  scene's warnings. `examples/gltf_viewer` shows any file;
+  `tests/test_gltf` checks a generated two-bone arm against the arithmetic
+  and loads the Khronos Fox. The skin palette holds 96 bones (was 48), a
+  Mixamo rig with its fingers.
+- `skin.skeleton_set_inverse_bind` and `skeleton_settle` take a file's
+  inverse binds where `skeleton_bind` would derive them from the pose.
+- `native/ae3d_blob.c`: a file as bytes and the little-endian numbers in it.
+
 ### The crowd's depth passes
 
 - `model_set_depth_proxy(m, proxy)`: the shadow map and the camera depth

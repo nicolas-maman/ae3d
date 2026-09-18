@@ -26,14 +26,15 @@ import ae3d.core
 exports (
     Skeleton, Bone, skeleton_new, skeleton_free, skeleton_add, skeleton_bind,
     skeleton_count, skeleton_bone, skeleton_find, skeleton_palette,
-    skeleton_fit, skeleton_reach,
+    skeleton_fit, skeleton_reach, skeleton_set_inverse_bind, skeleton_settle,
     skeleton_update, skeleton_update_shifted, skeleton_bind_position, MAX_BONES
 )
 
-// The vertex shader declares an array this long. It is bounded by the vertex
-// uniform budget GL 3.3 guarantees rather than by what a desktop driver happens
-// to allow, so a figure that fits here fits on a software rasteriser too.
-const MAX_BONES = 48
+// The vertex shader declares an array this long. Ninety-six matrices are six
+// kilobytes of the sixteen GL 3.3 guarantees a vertex stage, so a figure that
+// fits here fits on a software rasteriser too; a Mixamo rig with its fingers
+// is sixty-five bones, which forty-eight did not hold.
+const MAX_BONES = 96
 
 struct Bone {
     // Borrowed. A skeleton names bones, it does not own them, because these are
@@ -108,6 +109,26 @@ skeleton_bind(s: *Skeleton) {
         }
         i = i + 1
     }
+    skeleton_update(s)
+    centre = core.vec3(0.0, 0.0, 0.0)
+    s.bind_spread = skeleton_reach(s, &centre)
+}
+
+// The inverse bind matrix a file gives for a bone, where the mesh was not
+// bound in the pose the bones happen to be in now: glTF carries them
+// explicitly. Set for every bone, then skeleton_settle instead of
+// skeleton_bind.
+skeleton_set_inverse_bind(s: *Skeleton, index: int, inverse: Mat4) {
+    if s == null || index < 0 || index >= list.size(s.bones) { return }
+    b = list.get_raw(s.bones, index) as *Bone
+    b.inverse_bind = inverse
+    b.stamp = 0 - 1
+}
+
+// What skeleton_bind does after it has the inverse binds: the first
+// palette, and the bind spread the fit reads.
+skeleton_settle(s: *Skeleton) {
+    if s == null { return }
     skeleton_update(s)
     centre = core.vec3(0.0, 0.0, 0.0)
     s.bind_spread = skeleton_reach(s, &centre)
