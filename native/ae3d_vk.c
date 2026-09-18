@@ -4541,17 +4541,20 @@ int ae3d_vk_upload_mesh(void *mesh) {
 // declares. Both the first upload and every later refresh build it the same way.
 /* The stream packed into `packed`, sixteen floats of matrix and four of
    colour an instance, as the pipeline's second vertex binding reads it. */
-static void ae3d_vk_pack_instances_into(float *packed, void *instances, int count) {
-    const float *matrices = ae3d_inst_matrix_data(instances);
-    const float *colours = ae3d_inst_color_data(instances);
-    const float *phases = ae3d_inst_has_phases(instances) ? ae3d_inst_phase_data(instances) : NULL;
-    int has_colours = ae3d_inst_has_colors(instances);
-    int i;
+typedef struct {
+    float *packed;
+    const float *matrices, *colours, *phases;
+    int has_colours;
+} ae3d_vk_pack_job;
 
-    for (i = 0; i < count; i++) {
-        memcpy(packed + (size_t)i * 20, matrices + (size_t)i * 16, 16 * sizeof(float));
-        if (has_colours && colours) {
-            memcpy(packed + (size_t)i * 20 + 16, colours + (size_t)i * 3, 3 * sizeof(float));
+static void ae3d_vk_pack_instances_run(void *ctx, int start, int end) {
+    ae3d_vk_pack_job *job = (ae3d_vk_pack_job *)ctx;
+    float *packed = job->packed;
+    int i;
+    for (i = start; i < end; i++) {
+        memcpy(packed + (size_t)i * 20, job->matrices + (size_t)i * 16, 16 * sizeof(float));
+        if (job->has_colours && job->colours) {
+            memcpy(packed + (size_t)i * 20 + 16, job->colours + (size_t)i * 3, 3 * sizeof(float));
         } else {
             packed[i * 20 + 16] = 1.0f;
             packed[i * 20 + 17] = 1.0f;
@@ -4559,8 +4562,20 @@ static void ae3d_vk_pack_instances_into(float *packed, void *instances, int coun
         }
         /* The phase rides in the float after the colour; the crowd vertex
            shader reads it, nothing else does. */
-        packed[i * 20 + 19] = phases ? phases[i] : 0.0f;
+        packed[i * 20 + 19] = job->phases ? job->phases[i] : 0.0f;
     }
+}
+
+/* Eighty bytes an instance into the mapped ring: forty megabytes a frame
+   for half a million figures, which is a memory copy worth every core. */
+static void ae3d_vk_pack_instances_into(float *packed, void *instances, int count) {
+    ae3d_vk_pack_job job;
+    job.packed = packed;
+    job.matrices = ae3d_inst_matrix_data(instances);
+    job.colours = ae3d_inst_color_data(instances);
+    job.phases = ae3d_inst_has_phases(instances) ? ae3d_inst_phase_data(instances) : NULL;
+    job.has_colours = ae3d_inst_has_colors(instances);
+    ae3d_jobs_for(count, 8192, ae3d_vk_pack_instances_run, &job);
 }
 
 static float *ae3d_vk_pack_instances(void *instances, int count) {

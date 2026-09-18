@@ -115,6 +115,33 @@
   inverse binds where `skeleton_bind` would derive them from the pose.
 - `native/ae3d_blob.c`: a file as bytes and the little-endian numbers in it.
 
+### The job pool
+
+- `native/ae3d_jobs.c`: a pool of worker threads, one for every hardware
+  thread but the main one, and `ae3d_jobs_for(count, grain, fn, ctx)`, a
+  parallel for over a range in runs of `grain` elements taken by the
+  workers and the caller alike, done when it returns. The engine starts
+  it at `engine_new` and stops it at `engine_free`; `AE3D_JOBS=n` sets
+  the thread count, 1 is the main thread alone; `engine_jobs(e)` says how
+  many workers there are.
+- Every pass of the crowd runs over it: the heading, the shove (each
+  figure gathering its neighbours' push, so no two threads write one
+  entry), the step, the sort into tiers (counted a run at a time, offsets
+  summed, written a run at a time in the order one thread would have
+  written), the instance matrices from positions and yaws, the Vulkan
+  instance stream's packing, and the weather's particles. Half a million
+  zombies: 36 to 79 fps, the simulation 24 to 8 ms a frame.
+- `crowd_tiers`: the sort by distance into three compacted tiers -- near,
+  mid, far, with a cull -- in one pass, in place of a sort and a second
+  sort over the first's far output. `crowd_bucket` is the two-tier case
+  of it.
+- `AE3D_PERF=1` says the update's time (`update_ms`, the behaviours' own:
+  the simulation) beside the device's, and `zombie_city[perf] sim` names
+  its passes every 120 frames. `scripts/perf.sh` has the column.
+- `tests/test_jobs` runs a frame of the crowd alone and over a pool of
+  three and holds the two to each other: the sort the same in the same
+  order, the heading to the bit, everything the shove touches to a hair.
+
 ### Impostors: the horde's far tier as pictures
 
 - `model_set_impostor(m, cols, rows, width, height)`: a crowd model whose
