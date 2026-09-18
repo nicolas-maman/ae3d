@@ -80,8 +80,9 @@ int ae3d_blob_i8(const void *blob, long offset) {
     return v >= 128 ? v - 256 : v;
 }
 
-/* `length` bytes from `offset` as a C string the caller owns: the JSON chunk
-   of a .glb, which is not zero-terminated where it sits. */
+/* `length` bytes from `offset` as a C string the caller owns, returned to
+   ae3d_blob_text_free: the JSON chunk of a .glb, which is not
+   zero-terminated where it sits. */
 char *ae3d_blob_text(const void *blob, long offset, long length) {
     char *text;
     if (length < 0) return NULL;
@@ -91,3 +92,5 @@ char *ae3d_blob_text(const void *blob, long offset, long length) {
     text[length] = 0;
     return text;
 }
+
+void ae3d_blob_text_free(char *text) { free(text); }

@@ -47,6 +47,7 @@ extern ae3d_blob_u8(blob: ptr, offset: long) -> int
 extern ae3d_blob_i16(blob: ptr, offset: long) -> int
 extern ae3d_blob_i8(blob: ptr, offset: long) -> int
 extern ae3d_blob_text(blob: ptr, offset: long, length: long) -> string
+extern ae3d_blob_text_free(text: string)
 extern ae3d_blob_slice(blob: ptr, offset: long) -> ptr
 extern ae3d_image_from_memory(data: ptr, length: int) -> ptr
 extern ae3d_image_pixels(handle: ptr) -> ptr
@@ -886,7 +887,9 @@ load(path: string) -> *GltfScene {
         text = ae3d_blob_text(blob, 0, size)
     }
     root = json.parse_raw(text)
-    string.free(text)
+    // The text is C's, from ae3d_blob_text; string.free leaves a foreign
+    // allocation alone, so it goes back the way it came.
+    ae3d_blob_text_free(text)
     if root == null {
         ae3d_blob_free(blob)
         set_error("cannot parse ", path)
