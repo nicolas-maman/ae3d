@@ -6,6 +6,17 @@ git clone https://github.com/aether-lang-dev/aether-ui.git ../aether-ui
 ./build/ae3d_editor
 ```
 
+![the editor on Windows](editor-windows.png)
+
+The chrome is one dark theme on every platform: neutral greys, three tones
+apart -- the viewport's ground, the panels a step lighter, the bars and
+fields a step darker -- with one accent for the primary action and the
+selected row, the way Unity's, Blender's and Unreal's dark themes are
+built. It is a style sheet in `editor.ae` (`theme()`), so there is one
+place the colours live. On Windows the toolkit paints every widget on the
+ground behind it and scrolls the panels; the inspector's sections past the
+window's bottom are reached with the wheel or the bar.
+
 ## Controls
 
 The viewport has to have focus for a key to reach it, so click in it first.

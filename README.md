@@ -298,7 +298,7 @@ tool and the engine. The protocol is documented in [docs/agent.md](docs/agent.md
 
 ## Editor
 
-![the editor viewport](docs/editor-viewport.png)
+![the editor on Windows: dark panels either side of the Vulkan viewport](docs/editor-windows.png)
 
 `editor/` is a scene editor whose chrome is
 [aether-ui](https://github.com/aether-lang-dev/aether-ui): a hierarchy, an
