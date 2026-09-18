@@ -69,6 +69,8 @@ extern ae3d_gl_setup_vertex_attribs()
 extern ae3d_gl_upload_skin(mesh: ptr, vbo: int)
 extern ae3d_gl_uniform_mat4v(loc: int, count: int, values: ptr)
 extern ae3d_gl_setup_instance_attribs(inst: ptr, matrix_vbo: int, color_vbo: int)
+extern ae3d_gl_setup_proxy_vao(vao: int, mesh_vbo: int, mesh_ebo: int, skin_vbo: int,
+                               matrix_vbo: int, color_vbo: int, phase_vbo: int)
 extern ae3d_inst_is_points(inst: ptr) -> int
 extern ae3d_gl_setup_instance_phase(inst: ptr, phase_vbo: int)
 extern ae3d_gl_update_instance_phases(inst: ptr, phase_vbo: int)
@@ -1074,6 +1076,7 @@ renderer_remove_model(r: *GLRenderer, m: *Model) {
         ae3d_gl_buffer_delete(m.instance_color_vbo)
         m.instance_color_vbo = 0
     }
+    if m.depth_proxy_vao != 0 { ae3d_gl_vao_delete(m.depth_proxy_vao) ; m.depth_proxy_vao = 0 }
 
     count = list.size(r.models)
     i = 0
@@ -1412,7 +1415,7 @@ render_shadow_pass(r: *GLRenderer, light: *Light, cam: *Camera) {
                 ae3d_gl_uniform_mat4(model_slot, &m.model_matrix)
             }
             pose_depth(skinned_slot, bones_slot, m)
-            ae3d_gl_vao_bind(m.vao)
+            ae3d_gl_vao_bind(depth_vao(m))
             draw_depth(r, m, instanced)
         }
         i = i + 1
@@ -1507,15 +1510,41 @@ render_crowd_shadows(r: *GLRenderer) {
         // shadow cast through the model matrix as well was scaled twice.
         crowd_identity = core.mat4_ident()
         ae3d_gl_uniform_mat4(model_loc, &crowd_identity)
-        ae3d_gl_vao_bind(m.vao)
-        ae3d_gl_draw_elements_instanced(core.mesh_index_count(m.mesh), 0,
+        // Through the proxy's mesh where the model has one: the near tier
+        // casts from the far tier's hundred and sixty-eight triangles.
+        ae3d_gl_vao_bind(depth_vao(m))
+        ae3d_gl_draw_elements_instanced(core.mesh_index_count(depth_mesh(m)), 0,
                                         core.model_instance_count(m))
         r.last_draw_calls = r.last_draw_calls + 1
     }
 }
 
+// The vertex array a depth-only draw of `m` binds: its own, or one over
+// its proxy's mesh and its own instance stream where it has a proxy that
+// is registered (model_set_depth_proxy). A vertex array binds a mesh to an
+// instance stream, so the proxy needs a second one, made here the first
+// time and kept with the model; it is dropped and remade if the proxy's
+// buffers are not the ones it was made over.
+depth_vao(m: *Model) -> int {
+    if m.depth_proxy == null || !m.is_instanced || m.instance_vbo == 0 { return m.vao }
+    proxy = m.depth_proxy as *Model
+    if proxy.vbo == 0 || proxy.ebo == 0 || proxy.shares_geometry { return m.vao }
+    if m.depth_proxy_vao == 0 {
+        m.depth_proxy_vao = ae3d_gl_vao_create()
+        ae3d_gl_setup_proxy_vao(m.depth_proxy_vao, proxy.vbo, proxy.ebo, proxy.skin_vbo,
+                                m.instance_vbo, m.instance_color_vbo, m.instance_phase_vbo)
+    }
+    return m.depth_proxy_vao
+}
+
+// The mesh that array draws: the proxy's where the array is the proxy's.
+depth_mesh(m: *Model) -> ptr {
+    if m.depth_proxy_vao != 0 && m.depth_proxy != null { return (m.depth_proxy as *Model).mesh }
+    return m.mesh
+}
+
 draw_depth(r: *GLRenderer, m: *Model, instanced: int) {
-    indices = core.mesh_index_count(m.mesh)
+    indices = core.mesh_index_count(depth_mesh(m))
     if indices == 0 { return }
     if instanced == 1 {
         ae3d_gl_draw_elements_instanced(indices, 0, core.model_instance_count(m))
@@ -2889,6 +2918,7 @@ renderer_cleanup(r: *GLRenderer) {
                 ae3d_gl_buffer_delete(m.instance_color_vbo)
                 m.instance_color_vbo = 0
             }
+            if m.depth_proxy_vao != 0 { ae3d_gl_vao_delete(m.depth_proxy_vao) ; m.depth_proxy_vao = 0 }
         }
         i = i + 1
     }

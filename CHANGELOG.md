@@ -163,14 +163,19 @@
 - A Vulkan crowd whose only change in a frame was its phases stood still:
   the phase rides in the one instance stream with the matrix and the
   colour, and a phase set alone did not send it. It does.
+- OpenGL honours the depth proxy (#321): a vertex array binds a mesh to an
+  instance stream, so a model with a proxy keeps a second one over the
+  proxy's mesh and its own matrices, colours and phases, made the first
+  time the shadow pass needs it and freed with the model. `tests/test_depth_proxy`
+  holds both backends to it: a thirty-metre sphere's shadow through a
+  proxy a fifth its size is 56 pixels of the 1,330 its own mesh casts.
 
 ### The crowd's depth passes
 
 - `model_set_depth_proxy(m, proxy)`: the shadow map draws the proxy's mesh
   with the model's instances and pose. The city's near tier casts from its
   far tier's 168 triangles instead of its 26,636: 2,000 zombies 30 to 68
-  fps, 20,000 at `AE3D_NEAR=28` 54 to 91, on Vulkan. OpenGL draws the
-  full mesh as before (its VAO binds the mesh to the instance stream).
+  fps, 20,000 at `AE3D_NEAR=28` 54 to 91, on Vulkan.
 
 ### The front page
 

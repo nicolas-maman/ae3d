@@ -241,6 +241,8 @@ void   ae3d_gl_geometry_set_instance_capacity(int vao, int capacity);
 void   ae3d_gl_upload_mesh(void *mesh, int vbo, int ebo);
 void   ae3d_gl_setup_vertex_attribs(void);
 void   ae3d_gl_setup_instance_attribs(void *inst, int matrix_vbo, int color_vbo);
+void   ae3d_gl_setup_proxy_vao(int vao, int mesh_vbo, int mesh_ebo, int skin_vbo,
+                               int matrix_vbo, int color_vbo, int phase_vbo);
 int    ae3d_gl_update_instances(void *inst, int matrix_vbo, int capacity_bytes);
 void   ae3d_gl_update_mesh_vertices(void *mesh, int vbo);
 void   ae3d_gl_draw_elements(int count, int byte_offset);

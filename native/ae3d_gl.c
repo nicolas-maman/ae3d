@@ -358,6 +358,50 @@ void ae3d_gl_setup_vertex_attribs(void) {
     glEnableVertexAttribArray(10);
 }
 
+/* A vertex array over buffers that already exist: a proxy mesh's vertices,
+   indices and skin with another model's instance matrices, colours and
+   phases, for a depth-only draw of that model through the proxy's mesh
+   (model_set_depth_proxy). Nothing is uploaded; the attributes are pointed
+   at the buffers the two models keep, so the model's instance updates and
+   the proxy's mesh both reach this array without a copy. */
+void ae3d_gl_setup_proxy_vao(int vao, int mesh_vbo, int mesh_ebo, int skin_vbo,
+                             int matrix_vbo, int color_vbo, int phase_vbo) {
+    int i;
+    if (!vao || !mesh_vbo || !mesh_ebo || !matrix_vbo) return;
+    glBindVertexArray((GLuint)vao);
+    glBindBuffer(GL_ARRAY_BUFFER, (GLuint)mesh_vbo);
+    ae3d_gl_setup_vertex_attribs();
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, (GLuint)mesh_ebo);
+    if (skin_vbo) {
+        glBindBuffer(GL_ARRAY_BUFFER, (GLuint)skin_vbo);
+        glVertexAttribPointer(8, 4, GL_FLOAT, GL_FALSE, AE3D_SKIN_BYTES, (const void *)0);
+        glEnableVertexAttribArray(8);
+        glVertexAttribPointer(9, 4, GL_FLOAT, GL_FALSE, AE3D_SKIN_BYTES,
+                              (const void *)(4 * sizeof(float)));
+        glEnableVertexAttribArray(9);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, (GLuint)matrix_vbo);
+    for (i = 0; i < 4; i++) {
+        glEnableVertexAttribArray((GLuint)(3 + i));
+        glVertexAttribPointer((GLuint)(3 + i), 4, GL_FLOAT, GL_FALSE, AE3D_MATRIX_BYTES,
+                              (const void *)(size_t)(i * 4 * sizeof(float)));
+        glVertexAttribDivisor((GLuint)(3 + i), 1);
+    }
+    if (color_vbo) {
+        glBindBuffer(GL_ARRAY_BUFFER, (GLuint)color_vbo);
+        glEnableVertexAttribArray(7);
+        glVertexAttribPointer(7, 3, GL_FLOAT, GL_FALSE, AE3D_COLOR_BYTES, (const void *)0);
+        glVertexAttribDivisor(7, 1);
+    }
+    if (phase_vbo) {
+        glBindBuffer(GL_ARRAY_BUFFER, (GLuint)phase_vbo);
+        glEnableVertexAttribArray(11);
+        glVertexAttribPointer(11, 1, GL_FLOAT, GL_FALSE, (GLsizei)sizeof(float), (const void *)0);
+        glVertexAttribDivisor(11, 1);
+    }
+    glBindVertexArray(0);
+}
+
 /* The crowd's extra instance attribute: one float an instance at location 11,
  * the animation phase VERTEX_CROWD reads to pick a pose-bank frame. Called
  * after the shared setup, so a crowd draw carries matrices, colours and phases

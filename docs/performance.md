@@ -65,8 +65,9 @@ three; a shadow reads a figure's silhouette, not its face, so the near
 tier now casts from the far tier's 168-triangle stand-in
 (`model_set_depth_proxy`): 2,000 figures 30 to 68 fps, 20,000 at
 `AE3D_NEAR=28` 54 to 91, and the 400 of the default scene lose their 2.2
-ms shadow pass. On OpenGL the proxy is not yet taken (a VAO binds a mesh
-to its instance stream) and the full mesh is drawn as before.
+ms shadow pass. On OpenGL, where a vertex array binds a mesh to its
+instance stream, the model keeps a second array over the proxy's mesh and
+its own stream, made the first time the shadow pass needs it.
 
 The camera-depth prepass itself is gone on Vulkan. It drew every visible
 triangle a second time so the occlusion, the reflection and the water had
