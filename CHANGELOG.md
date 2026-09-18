@@ -115,6 +115,19 @@
   inverse binds where `skeleton_bind` would derive them from the pose.
 - `native/ae3d_blob.c`: a file as bytes and the little-endian numbers in it.
 
+### Billboards: the weather as sprites
+
+- `model_set_billboard(m, mode)`: a point-instanced model's mesh turned to
+  the eye at every point -- 1 upright, spun about the world's up alone, so
+  a streak of rain stays a streak; 2 full, tipped to face the eye as well,
+  for a flake. The model's scale stays, its rotation gives way to the turn.
+  Both backends, the shadow pass included.
+- The weather draws a quad with a soft disc for its texture (alpha falling
+  off to nothing at the edge, made from the engine's own numbers and
+  registered by name), a drop an upright billboard and a flake and a mote
+  full ones: a drop is a line with soft ends, a flake a dot, where they
+  were cubes that read as squares up close (#328).
+
 ### The critique, in Aether
 
 - `tools/critique_scene.ae` replaces `scripts/critique_scene.py`, standard

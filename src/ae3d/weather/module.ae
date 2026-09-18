@@ -29,6 +29,8 @@ exports (
     weather_intensity, weather_particle_count, weather_flashing, weather_step, weather_particle
 )
 
+extern ae3d_image_register(name: string, rgba: ptr, width: int, height: int) -> int
+extern ae3d_rgba_set(pixels: ptr, index: int, r: float, g: float, b: float, a: float)
 extern ae3d_weather_scatter(xyz: ptr, phases: ptr, count: int, cx: float, cy: float, cz: float,
                             hx: float, hy: float, hz: float, seed: int)
 extern ae3d_weather_step(xyz: ptr, phases: ptr, count: int, dt: float, fall: float,
@@ -96,9 +98,12 @@ weather_new(e: *Engine) -> *Weather {
     w.had_light = 0.0 - 1.0
     w.xyz = calloc(MAX_PARTICLES * 3, 8)
     w.phases = calloc(MAX_PARTICLES, 8)
-    // One model for the stream, its mesh swapped by kind: a cube whose
-    // model scale makes it a streak, a flake or a mote.
-    m = loader.cube(1.0)
+    // One model for the stream: a quad drawn as a billboard turned to the
+    // eye, whose model scale makes it a streak, a flake or a mote. A drop
+    // is a streak stood upright and spun to face the eye; a flake and a
+    // mote face it fully.
+    m = quad()
+    core.model_set_texture(m, soft_disc())
     core.model_set_casts_shadow(m, false)
     core.model_set_exposure(m, 1.0)
     core.model_enable_instancing(m, MAX_PARTICLES)
@@ -186,7 +191,8 @@ weather_set(w: *Weather, kind: int, intensity: float) {
         // A streak: a finger thin, half a metre long, pale and translucent
         // against the sky, glowing a little so the light does not paint it
         // the colour of the ground.
-        core.model_set_scale(m, 0.012, 0.5, 0.012)
+        core.model_set_scale(m, 0.02, 0.5, 1.0)
+        core.model_set_billboard(m, 1)
         core.model_matte(m, 0.70, 0.76, 0.86)
         core.model_set_alpha(m, 0.4)
         fog_end = 2600.0 - 1500.0 * w.intensity
@@ -209,7 +215,8 @@ weather_set(w: *Weather, kind: int, intensity: float) {
         w.half_x = 35.0
         w.half_y = 18.0
         w.half_z = 35.0
-        core.model_set_scale(m, 0.045, 0.045, 0.045)
+        core.model_set_scale(m, 0.045, 0.045, 1.0)
+        core.model_set_billboard(m, 2)
         core.model_matte(m, 0.96, 0.97, 1.0)
         core.model_set_alpha(m, 0.85)
         engine.engine_set_fog(e, core.fog_distance(15.0, 2200.0 - 1400.0 * w.intensity, core.vec3(0.72, 0.74, 0.78), 1.0))
@@ -221,7 +228,8 @@ weather_set(w: *Weather, kind: int, intensity: float) {
         w.half_x = 50.0
         w.half_y = 14.0
         w.half_z = 50.0
-        core.model_set_scale(m, 0.12, 0.12, 0.12)
+        core.model_set_scale(m, 0.12, 0.12, 1.0)
+        core.model_set_billboard(m, 2)
         core.model_matte(m, 0.76, 0.62, 0.42)
         core.model_set_alpha(m, 0.3)
         // The storm's haze: the world goes ochre and short, sky and all.
@@ -238,6 +246,51 @@ weather_set(w: *Weather, kind: int, intensity: float) {
 
 on_update(state: ptr, e: *Engine, delta: float) {
     weather_step(state as *Weather, delta)
+}
+
+// The particle's picture: a soft disc, its alpha falling off from the
+// centre to nothing at the edge, so a flake is a dot and a streak a line
+// with soft ends rather than a square. Made once, from the engine's own
+// numbers, and registered as a texture by name.
+const DISC = 32
+soft_disc() -> string {
+    name = "ae3d://weather/soft_disc"
+    pixels = calloc(DISC * DISC, 4)
+    y = 0
+    while y < DISC {
+        x = 0
+        while x < DISC {
+            dx = ((x as float) + 0.5) / (DISC as float) - 0.5
+            dy = ((y as float) + 0.5) / (DISC as float) - 0.5
+            r = core.sqrt_of(dx * dx + dy * dy) * 2.0
+            a = 1.0 - r * r
+            if a < 0.0 { a = 0.0 }
+            ae3d_rgba_set(pixels, y * DISC + x, 1.0, 1.0, 1.0, a)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    ok = ae3d_image_register(name, pixels, DISC, DISC) == 1
+    free(pixels)
+    if !ok { return "" }
+    return name
+}
+
+// A unit quad in the XY plane facing +Z, one metre across, centred: what
+// the billboard turns to the eye.
+quad() -> *Model {
+    m = core.model_new()
+    facing = core.vec3(0.0, 0.0, 1.0)
+    core.mesh_reserve(m.mesh, 4, 6)
+    core.mesh_push_vertex(m.mesh, core.vec3(0.0 - 0.5, 0.0 - 0.5, 0.0), 0.0, 0.0, facing)
+    core.mesh_push_vertex(m.mesh, core.vec3(0.5, 0.0 - 0.5, 0.0), 1.0, 0.0, facing)
+    core.mesh_push_vertex(m.mesh, core.vec3(0.5, 0.5, 0.0), 1.0, 1.0, facing)
+    core.mesh_push_vertex(m.mesh, core.vec3(0.0 - 0.5, 0.5, 0.0), 0.0, 1.0, facing)
+    core.mesh_push_triangle(m.mesh, 0, 1, 2)
+    core.mesh_push_triangle(m.mesh, 0, 2, 3)
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    return m
 }
 
 // Where particle `index` is now, for a program that reads the weather back.

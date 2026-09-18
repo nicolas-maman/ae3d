@@ -187,6 +187,7 @@ struct ProgramSlots {
     texture_sampler: int
     is_instanced: int
     instance_points: int
+    instance_billboard: int
     use_instance_color: int
     is_skinned: int
     bones: int
@@ -550,6 +551,7 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
     s.texture_sampler = ae3d_gl_uniform_location(program, "textureSampler")
     s.is_instanced = ae3d_gl_uniform_location(program, "isInstanced")
     s.instance_points = ae3d_gl_uniform_location(program, "instancePoints")
+    s.instance_billboard = ae3d_gl_uniform_location(program, "instanceBillboard")
     s.use_instance_color = ae3d_gl_uniform_location(program, "useInstanceColor")
     s.is_skinned = ae3d_gl_uniform_location(program, "isSkinned")
     s.bones = ae3d_gl_uniform_location(program, "bones")
@@ -699,6 +701,9 @@ apply_points(slots: *ProgramSlots, m: *Model) {
     points = 0
     if m.instances != null && ae3d_inst_is_points(m.instances) == 1 { points = 1 }
     ae3d_gl_uniform_int(slots.instance_points, points)
+    billboard = 0
+    if points == 1 { billboard = m.billboard }
+    ae3d_gl_uniform_int(slots.instance_billboard, billboard)
 }
 
 // A model's own instances carry a colour each; a merged draw does not, and its
@@ -1385,6 +1390,9 @@ render_shadow_pass(r: *GLRenderer, light: *Light, cam: *Camera) {
     model_slot = ae3d_gl_uniform_location(r.shadow_program, "model")
     instanced_slot = ae3d_gl_uniform_location(r.shadow_program, "isInstanced")
     points_slot = ae3d_gl_uniform_location(r.shadow_program, "instancePoints")
+    billboard_slot = ae3d_gl_uniform_location(r.shadow_program, "instanceBillboard")
+    view_pos_slot = ae3d_gl_uniform_location(r.shadow_program, "viewPos")
+    ae3d_gl_uniform_vec3(view_pos_slot, cam.position.x, cam.position.y, cam.position.z)
     skinned_slot = ae3d_gl_uniform_location(r.shadow_program, "isSkinned")
     bones_slot = ae3d_gl_uniform_location(r.shadow_program, "bones")
     ae3d_gl_uniform_mat4(space, &r.shadow_space)
@@ -1427,6 +1435,7 @@ render_shadow_pass(r: *GLRenderer, light: *Light, cam: *Camera) {
             points = 0
             if instanced == 1 && ae3d_inst_is_points(m.instances) == 1 { points = 1 }
             ae3d_gl_uniform_int(points_slot, points)
+            ae3d_gl_uniform_int(billboard_slot, points * m.billboard)
             // The same rule as set_model_matrix: an instanced model's
             // transform is already in every instance, so the model matrix
             // goes as the identity or the scale and the rotation are
@@ -2170,6 +2179,7 @@ draw_batch(r: *GLRenderer, b: *GLBatch, view_projection: *Mat4, light: *Light, c
     apply_normal_map(r, slots, normal_for(r, material))
     apply_instancing(r, slots, 1)
     ae3d_gl_uniform_int(slots.instance_points, 0)
+    ae3d_gl_uniform_int(slots.instance_billboard, 0)
     apply_instance_color(r, slots, 0)
 
     // The shader reads the instanced transform as model * instanceModel, so the

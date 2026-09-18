@@ -18,6 +18,8 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     bool isInstanced;
     bool useInstanceColor;
     bool instancePoints;
+    int instanceBillboard;
+    vec3 viewPos;
     mat4 model;
     mat4 viewProjection;
     mat4 lightSpaceMatrix;
@@ -26,7 +28,6 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     int lightCount;
     bool impostor;
     int captureChannel;
-    vec3 viewPos;
     float viewDistance;
     vec3 diffuseColor;
     vec3 specularColor;
@@ -157,6 +158,8 @@ layout (location = 9) in vec4 inWeights;
 
 
 
+
+
 void main() {
     // The same transform the lit pass builds. Reading instanceModel alone left
     // an instanced model casting its shadow from wherever its own transform was
@@ -166,6 +169,27 @@ void main() {
         vec4 point = instanceModel[0];
         modelMatrix = mat4(model[0] * point.w, model[1] * point.w, model[2] * point.w,
                            vec4(point.xyz, 1.0));
+        // A billboard: the mesh turned to the eye, its +Z toward the camera
+        // -- upright, spun about the world's up alone, for a streak of rain
+        // that stays a streak; or full, tipped to face the eye as well, for
+        // a flake. The model's own scale stays, its rotation does not.
+        if (instanceBillboard > 0) {
+            vec3 toEye = viewPos - point.xyz;
+            vec3 up = vec3(0.0, 1.0, 0.0);
+            vec3 forward;
+            if (instanceBillboard == 1) {
+                forward = normalize(vec3(toEye.x, 0.0, toEye.z));
+            } else {
+                forward = normalize(toEye);
+            }
+            vec3 right = normalize(cross(up, forward));
+            up = cross(forward, right);
+            float sx = length(vec3(model[0])) * point.w;
+            float sy = length(vec3(model[1])) * point.w;
+            float sz = length(vec3(model[2])) * point.w;
+            modelMatrix = mat4(vec4(right * sx, 0.0), vec4(up * sy, 0.0), vec4(forward * sz, 0.0),
+                               vec4(point.xyz, 1.0));
+        }
     }
     // And the same pose. A shadow pass that skipped this drew the bind pose,
     // so a figure threw the shadow of a mannequin standing where it started.
