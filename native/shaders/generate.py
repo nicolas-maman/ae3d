@@ -279,7 +279,7 @@ def verify_offsets(path, placed):
     disagreement is a silent corruption of every uniform after the first bad
     one. Asking the compiler is cheap; assuming is not.
     """
-    result = subprocess.run(["glslangValidator", "-V", "-q", "-o", str(path) + ".reflect",
+    result = subprocess.run(["glslangValidator", "-V", "-q"] + target_args(path) + ["-o", str(path) + ".reflect",
                              str(path)], capture_output=True, text=True)
     Path(str(path) + ".reflect").unlink(missing_ok=True)
     reported = {}
@@ -333,9 +333,15 @@ def aether_offsets(placed, size, light_placed=None, light_stride=0):
     return "\n".join(lines) + "\n"
 
 
+# A shader that traces rays needs SPIR-V 1.4 and a Vulkan 1.2 device; the
+# rest stay at the 1.0 every device takes.
+def target_args(path):
+    return ["--target-env", "vulkan1.2"] if "_rq_" in path.name else []
+
+
 def spirv(path, stage):
     out = path.with_suffix(path.suffix + ".spv")
-    result = subprocess.run(["glslangValidator", "-V", str(path), "-o", str(out)],
+    result = subprocess.run(["glslangValidator", "-V"] + target_args(path) + [str(path), "-o", str(out)],
                             capture_output=True, text=True)
     if result.returncode != 0:
         sys.stderr.write(result.stdout + result.stderr)
@@ -453,7 +459,15 @@ def main():
                                   ["textureSampler", "shadowMap", "normalMap"], vertex_out, [],
                                   light_members)
 
-    written = {"scene_vk.vert": vk_vertex, "scene_vk.frag": vk_fragment}
+    # The scene fragment twice: as it is, and tracing rays through the
+    # scene's acceleration structure at binding 5 where the device has
+    # VK_KHR_ray_query -- the same source, with its ray-query block
+    # compiled in (AE3D_RAY_QUERY) and the extension it needs.
+    vk_fragment_rq = vk_fragment.replace(
+        "#version 450",
+        "#version 460\n#extension GL_EXT_ray_query : require\n#define AE3D_RAY_QUERY 1\n"
+        "layout(set = 0, binding = 5) uniform accelerationStructureEXT sceneAS;", 1)
+    written = {"scene_vk.vert": vk_vertex, "scene_vk.frag": vk_fragment, "scene_rq_vk.frag": vk_fragment_rq}
     for name, source in COMPUTE:
         written[name] = block(source)
     for name, source, stage, samplers, vin, vout in AUXILIARY:

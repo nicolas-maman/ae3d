@@ -25,7 +25,7 @@ exports (
     renderer_set_normal_strength, renderer_set_occlusion_strength, renderer_set_capture_channel, renderer_set_wetness, renderer_material_texture_size,
     renderer_load_texture, renderer_release_texture, renderer_sample_count, renderer_set_post,
     renderer_set_bloom_intensity, renderer_bloom_intensity,
-    renderer_set_shadows, renderer_shadows, renderer_set_ssr, renderer_ssr, renderer_set_ssr_params, renderer_set_taa, renderer_taa, request_dlss, renderer_set_dlss, renderer_dlss, set_samples, renderer_add_light, renderer_remove_light,
+    renderer_set_shadows, renderer_shadows, renderer_set_ssr, renderer_ssr, renderer_set_ssr_params, renderer_set_taa, renderer_taa, request_dlss, renderer_set_dlss, renderer_dlss, set_samples, renderer_ray_query, renderer_set_ray_shadows, renderer_ray_shadows, renderer_add_light, renderer_remove_light,
     renderer_set_fog, renderer_fog, renderer_set_clouds, renderer_set_sky_overcast, renderer_set_shadow_distance, renderer_shadow_distance,
     renderer_set_ssao, renderer_ssao,
     skybox_create, skybox_free,
@@ -90,6 +90,15 @@ extern ae3d_vk_render_height() -> int
 extern ae3d_vk_set_render_scale(scale: float) -> float
 extern ae3d_vk_request_dlss(directory: string) -> int
 extern ae3d_vk_set_samples(samples: int)
+extern ae3d_vk_ray_query() -> int
+extern ae3d_vk_ray_begin()
+extern ae3d_vk_ray_add(mesh: int, matrices: ptr, count: int)
+extern ae3d_vk_ray_add_one(mesh: int, matrix: *Mat4)
+extern ae3d_vk_ray_build() -> int
+extern ae3d_vk_set_ray_shadows(on: int)
+extern ae3d_vk_ray_shadows() -> int
+extern ae3d_vk_ray_shadows_now() -> int
+extern ae3d_inst_matrix_data(inst: ptr) -> ptr
 extern ae3d_vk_dlss_available() -> int
 extern ae3d_vk_set_dlss(mode: int) -> int
 extern ae3d_vk_dlss() -> int
@@ -537,6 +546,58 @@ request_dlss(directory: string) -> bool {
     return ae3d_vk_request_dlss(directory) == 1
 }
 
+// Whether the device traces rays (VK_KHR_ray_query): what shadows by ray
+// and, later, occlusion and reflections by ray are built on.
+renderer_ray_query(r: *VKRenderer) -> bool { return ae3d_vk_ray_query() == 1 }
+
+// Shadows by ray: a ray from every lit surface toward the sun through
+// the scene's acceleration structure, built each frame from the models
+// that cast -- exact at any distance, with no map's texel to fit the
+// world into. What the structure does not hold (a skinned figure, a
+// crowd, points) keeps the shadow map, and the two are combined, the
+// darker winning. On where the device traces; otherwise nothing changes.
+renderer_set_ray_shadows(r: *VKRenderer, on: bool) {
+    flag = 0
+    if on { flag = 1 }
+    ae3d_vk_set_ray_shadows(flag)
+}
+
+renderer_ray_shadows(r: *VKRenderer) -> bool { return ae3d_vk_ray_shadows() == 1 }
+
+// A model whose shadow the rays cast: a static mesh drawn on its own or
+// through a matrix stream, with its shadow on. A skinned figure, a crowd
+// and a point stream have no structure to trace and keep the map.
+traced(m: *Model) -> bool {
+    if m == null || !m.visible || !m.casts_shadow || m.vbo == 0 { return false }
+    if m.skeleton != null || m.pose_bank != null || m.device_crowd != null { return false }
+    if m.is_instanced && core.model_instance_points(m) { return false }
+    if m.depth_proxy != null { return false }
+    return true
+}
+
+// The frame's instances into the scene's structure, and the structure
+// built, before any pass: every traced model with its matrix -- one, or
+// its stream's -- and the flag the shader reads set for every program.
+build_ray_scene(r: *VKRenderer) {
+    ae3d_vk_ray_begin()
+    if ae3d_vk_ray_shadows() != 1 { return }
+    count = list.size(r.models)
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        if traced(m) {
+            core.model_sync_transform(m)
+            if m.is_instanced && core.model_instance_count(m) > 0 {
+                ae3d_vk_ray_add(m.vbo, ae3d_inst_matrix_data(m.instances), core.model_instance_count(m))
+            } else if !m.is_instanced {
+                ae3d_vk_ray_add_one(m.vbo, &m.model_matrix)
+            }
+        }
+        i = i + 1
+    }
+    ae3d_vk_ray_build()
+}
+
 // The multisampling the frame takes, asked for before the backend starts:
 // the most it will use (4 by default); 0 or 1 is none.
 set_samples(samples: int) {
@@ -788,9 +849,16 @@ render_shadow_pass(r: *VKRenderer, light: *Light, cam: *Camera) {
     r.shadow_batch_count = 0
     count = list.size(r.models)
     i = 0
+    rays = ae3d_vk_ray_shadows_now() == 1
     while i < count {
         m = list.get_raw(r.models, i) as *Model
         if m == null || !m.visible || !m.casts_shadow || m.vbo == 0 {
+            i = i + 1
+            continue
+        }
+        // What the rays shadow this frame is not drawn into the map: the
+        // map is left with the skinned, the crowd and the points.
+        if rays && traced(m) {
             i = i + 1
             continue
         }
@@ -1632,6 +1700,7 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     }
 
     sort_device_crowds(r)
+    build_ray_scene(r)
 
     render_shadow_pass(r, active_light, cam)
     // Filled from this camera every frame rather than cached behind a flag. The
@@ -1681,6 +1750,7 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
         ae3d_vk_scene_set_clip_mat4(vkscene.OFF_PREVVIEWPROJECTION, &previous)
         ae3d_vk_scene_set_float(vkscene.OFF_JITTER, r.jitter_x)
         ae3d_vk_scene_set_float(vkscene.OFF_JITTER + 4, r.jitter_y)
+        ae3d_vk_scene_set_int(vkscene.OFF_RAYSHADOWS, ae3d_vk_ray_shadows_now())
         // What a water surface needs to read the depth under it back into
         // a position: whether there is one, and the frame's size in pixels.
         has_depth = 0

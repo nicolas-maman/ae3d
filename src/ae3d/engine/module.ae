@@ -35,7 +35,7 @@ exports (
     engine_set_size, engine_set_title, engine_set_msaa, engine_set_decorated, engine_set_post,
     engine_set_render_scale, engine_set_shadows, engine_shadows, engine_set_fog, engine_fog, engine_set_shadow_distance, engine_shadow_distance,
     engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
-    engine_set_skybox, engine_set_sky, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_set_sky_overcast, engine_set_ssao, engine_set_capture_channel, engine_set_wetness, engine_set_taa, engine_taa, engine_set_dlss, engine_dlss, engine_load_texture,
+    engine_set_skybox, engine_set_sky, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_set_sky_overcast, engine_set_ssao, engine_set_capture_channel, engine_set_wetness, engine_set_taa, engine_taa, engine_set_dlss, engine_dlss, engine_ray_query, engine_set_ray_shadows, engine_ray_shadows, engine_load_texture,
     engine_set_time_of_day, engine_time_of_day,
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
     engine_render_ms, engine_render_frames,
@@ -163,6 +163,7 @@ struct Engine {
     // DLSS: the mode asked for (0 off), on Vulkan through Streamline; the
     // runtime is loaded before the backend starts when one is wanted.
     dlss_mode: int
+    ray_shadows: bool
     perf_on: bool
     perf_frames: int
     perf_shadow_ms: float
@@ -786,6 +787,26 @@ engine_set_dlss(e: *Engine, mode: int) -> int {
 
 engine_dlss(e: *Engine) -> int { return e.dlss_mode }
 
+// Whether the renderer traces rays (Vulkan with VK_KHR_ray_query).
+engine_ray_query(e: *Engine) -> bool {
+    if e.backend_state == null || e.api != platform.API_VULKAN { return false }
+    return vk.renderer_ray_query(e.backend_state as *VKRenderer)
+}
+
+// Shadows by ray, where the renderer traces: a ray toward the sun from
+// every lit surface through the scene's acceleration structure, in place
+// of the shadow map for the static scene (the map keeps the crowd and the
+// skinned, and the two combine). Asked for any time; applied when the
+// backend is up; AE3D_RAYS=1 asks on any scene. Nothing changes where the
+// device does not trace.
+engine_set_ray_shadows(e: *Engine, on: bool) {
+    e.ray_shadows = on
+    if e.backend_state == null || e.api != platform.API_VULKAN { return }
+    vk.renderer_set_ray_shadows(e.backend_state as *VKRenderer, on)
+}
+
+engine_ray_shadows(e: *Engine) -> bool { return e.ray_shadows && engine_ray_query(e) }
+
 engine_set_wetness(e: *Engine, amount: float) {
     if e.backend_state == null { return }
     if e.api == platform.API_VULKAN {
@@ -989,6 +1010,11 @@ engine_start(e: *Engine, x: int, y: int) -> bool {
     // Asked for before the backend was up, or by AE3D_TAA=1.
     if core.env_int("AE3D_TAA", 0) == 1 { e.taa = true }
     if e.taa { engine_set_taa(e, true) }
+    if core.env_int("AE3D_RAYS", 0) == 1 { e.ray_shadows = true }
+    if e.ray_shadows {
+        engine_set_ray_shadows(e, true)
+        if engine_ray_query(e) { println("ae3d: shadows by ray") } else { println("ae3d: no ray query on this device; the shadow map stands") }
+    }
     if e.dlss_mode > 0 {
         wanted = e.dlss_mode
         e.dlss_mode = 0

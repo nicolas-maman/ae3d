@@ -66,6 +66,16 @@
     X(vkCreateInstance) \
     X(vkEnumerateInstanceExtensionProperties)
 
+/* Ray queries (VK_KHR_ray_query, VK_KHR_acceleration_structure): loaded
+   where the device has them, and the renderer says so; never required. */
+#define AE3D_VK_RAY_FUNCS(X) \
+    X(vkGetBufferDeviceAddressKHR) \
+    X(vkCreateAccelerationStructureKHR) \
+    X(vkDestroyAccelerationStructureKHR) \
+    X(vkGetAccelerationStructureBuildSizesKHR) \
+    X(vkCmdBuildAccelerationStructuresKHR) \
+    X(vkGetAccelerationStructureDeviceAddressKHR)
+
 #define AE3D_VK_INSTANCE_FUNCS(X) \
     X(vkDestroyInstance) \
     X(vkEnumeratePhysicalDevices) \
@@ -75,7 +85,9 @@
     X(vkGetPhysicalDeviceFormatProperties) \
     X(vkEnumerateDeviceExtensionProperties) \
     X(vkCreateDevice) \
-    X(vkGetDeviceProcAddr)
+    X(vkGetDeviceProcAddr) \
+    X(vkGetPhysicalDeviceProperties2) \
+    X(vkGetPhysicalDeviceFeatures2)
 
 // Only present when a surface extension was enabled. An offscreen device asks
 // for none, so these are loaded but never required.
@@ -179,6 +191,7 @@ AE3D_VK_INSTANCE_FUNCS(AE3D_VK_DECLARE)
 AE3D_VK_SURFACE_FUNCS(AE3D_VK_DECLARE)
 AE3D_VK_DEVICE_FUNCS(AE3D_VK_DECLARE)
 AE3D_VK_SWAPCHAIN_FUNCS(AE3D_VK_DECLARE)
+AE3D_VK_RAY_FUNCS(AE3D_VK_DECLARE)
 #undef AE3D_VK_DECLARE
 
 /* A crowd on the device: the figures' state as eight floats each in a
@@ -242,6 +255,13 @@ typedef struct {
     void *ring_mapped[AE3D_VK_FRAMES];
     VkDeviceSize ring_size;
     int streaming;
+    /* The bottom-level acceleration structure of the mesh, for the rays:
+       built at upload where the device traces, from the same vertex and
+       index buffers; a skinned mesh has none (its pose is not in them). */
+    VkAccelerationStructureKHR blas;
+    VkBuffer blas_buffer;
+    VkDeviceMemory blas_memory;
+    VkDeviceAddress blas_address;
 } ae3d_vk_mesh;
 
 typedef struct {
@@ -307,6 +327,27 @@ static struct {
     VkExtent2D render_extent;
     double render_scale;
     float lod_bias;      /* the scene textures' mip bias for the render scale */
+    /* Ray queries: the device has them (extensions and features on), the
+       scene's top-level structure a frame in flight, built from the
+       instances the renderer adds before the passes, and whether the
+       shadows are traced through it. */
+    int ray_query;
+    int ray_shadows;
+    unsigned as_scratch_alignment;
+    VkAccelerationStructureKHR tlas[AE3D_VK_FRAMES];
+    VkBuffer tlas_buffer[AE3D_VK_FRAMES];
+    VkDeviceMemory tlas_memory[AE3D_VK_FRAMES];
+    VkDeviceSize tlas_size[AE3D_VK_FRAMES];
+    VkBuffer tlas_scratch[AE3D_VK_FRAMES];
+    VkDeviceMemory tlas_scratch_memory[AE3D_VK_FRAMES];
+    VkDeviceSize tlas_scratch_size[AE3D_VK_FRAMES];
+    VkBuffer tlas_instances[AE3D_VK_FRAMES];
+    VkDeviceMemory tlas_instances_memory[AE3D_VK_FRAMES];
+    void *tlas_instances_mapped[AE3D_VK_FRAMES];
+    unsigned tlas_capacity[AE3D_VK_FRAMES];
+    unsigned tlas_count;          /* instances added this frame */
+    int tlas_built[AE3D_VK_FRAMES];
+    int tlas_ready;               /* this frame's is built and readable */
     /* DLSS (native/ae3d_dlss.h): asked for before the loader opened, so
        Streamline's interposer is the loader; whether the device runs it;
        the mode in force; the frame-size image it writes, kept in
@@ -697,6 +738,26 @@ static int ae3d_vk_load_device(void) {
     AE3D_VK_SWAPCHAIN_FUNCS(AE3D_VK_LOAD_SWAPCHAIN)
 #undef AE3D_VK_LOAD_SWAPCHAIN
 
+    if (vk.ray_query) {
+#define AE3D_VK_LOAD_RAY(name) \
+        ae3d_##name = (PFN_##name)ae3d_vkGetDeviceProcAddr(vk.device, #name); \
+        if (!ae3d_##name) vk.ray_query = 0;
+        AE3D_VK_RAY_FUNCS(AE3D_VK_LOAD_RAY)
+#undef AE3D_VK_LOAD_RAY
+        if (vk.ray_query) {
+            VkPhysicalDeviceAccelerationStructurePropertiesKHR as_properties;
+            VkPhysicalDeviceProperties2 properties2;
+            memset(&as_properties, 0, sizeof(as_properties));
+            as_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+            memset(&properties2, 0, sizeof(properties2));
+            properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+            properties2.pNext = &as_properties;
+            ae3d_vkGetPhysicalDeviceProperties2(vk.physical, &properties2);
+            vk.as_scratch_alignment = as_properties.minAccelerationStructureScratchOffsetAlignment;
+            if (vk.as_scratch_alignment == 0) vk.as_scratch_alignment = 256;
+        }
+    }
+
     if (!vk.offscreen) {
 #define AE3D_VK_NEED_SWAPCHAIN(name) if (!ae3d_##name) return ae3d_vk_fail("missing " #name);
         AE3D_VK_SWAPCHAIN_FUNCS(AE3D_VK_NEED_SWAPCHAIN)
@@ -759,6 +820,16 @@ static int ae3d_vk_create_instance(void) {
     app.pEngineName = "ae3d";
     app.engineVersion = VK_MAKE_VERSION(1, 0, 0);
     app.apiVersion = VK_API_VERSION_1_1;
+    {
+        /* 1.2 where the loader has it: what the ray-query shaders (SPIR-V
+           1.4) and the buffer addresses need; 1.1 is enough for all else. */
+        PFN_vkEnumerateInstanceVersion enumerate_version =
+            (PFN_vkEnumerateInstanceVersion)g_gipa(NULL, "vkEnumerateInstanceVersion");
+        unsigned version = 0;
+        if (enumerate_version && enumerate_version(&version) == VK_SUCCESS && version >= VK_API_VERSION_1_2) {
+            app.apiVersion = VK_API_VERSION_1_2;
+        }
+    }
 
     memset(&info, 0, sizeof(info));
     info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -874,10 +945,15 @@ static int ae3d_vk_create_device(void) {
     VkDeviceQueueCreateInfo queues[2];
     VkDeviceCreateInfo info;
     VkExtensionProperties *available = NULL;
-    const char *extensions[2];
+    const char *extensions[8];
     unsigned extension_count = 0, available_count = 0, queue_count = 1;
     float priority = 1.0f;
     VkResult result;
+    VkPhysicalDeviceBufferDeviceAddressFeatures address_features;
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR as_features;
+    VkPhysicalDeviceRayQueryFeaturesKHR ray_features;
+    VkPhysicalDeviceProperties properties;
+    int ray = 0;
 
     memset(queues, 0, sizeof(queues));
     queues[0].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
@@ -902,6 +978,35 @@ static int ae3d_vk_create_device(void) {
         if (ae3d_vk_has_extension(available, available_count, "VK_KHR_portability_subset")) {
             extensions[extension_count++] = "VK_KHR_portability_subset";
         }
+        /* Ray queries, where the device has all of what they take and the
+           instance is 1.2 (the features below are 1.2's), unless AE3D_NO_RAYS. */
+        ae3d_vkGetPhysicalDeviceProperties(vk.physical, &properties);
+        if (!getenv("AE3D_NO_RAYS") && properties.apiVersion >= VK_API_VERSION_1_2 &&
+            ae3d_vk_has_extension(available, available_count, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
+            ae3d_vk_has_extension(available, available_count, VK_KHR_RAY_QUERY_EXTENSION_NAME) &&
+            ae3d_vk_has_extension(available, available_count, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) &&
+            ae3d_vk_has_extension(available, available_count, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)) {
+            VkPhysicalDeviceFeatures2 features2;
+            memset(&address_features, 0, sizeof(address_features));
+            address_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+            memset(&as_features, 0, sizeof(as_features));
+            as_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+            as_features.pNext = &address_features;
+            memset(&ray_features, 0, sizeof(ray_features));
+            ray_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+            ray_features.pNext = &as_features;
+            memset(&features2, 0, sizeof(features2));
+            features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            features2.pNext = &ray_features;
+            ae3d_vkGetPhysicalDeviceFeatures2(vk.physical, &features2);
+            if (ray_features.rayQuery && as_features.accelerationStructure && address_features.bufferDeviceAddress) {
+                extensions[extension_count++] = VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME;
+                extensions[extension_count++] = VK_KHR_RAY_QUERY_EXTENSION_NAME;
+                extensions[extension_count++] = VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME;
+                extensions[extension_count++] = VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME;
+                ray = 1;
+            }
+        }
     }
     free(available);
 
@@ -911,8 +1016,24 @@ static int ae3d_vk_create_device(void) {
     info.pQueueCreateInfos = queues;
     info.enabledExtensionCount = extension_count;
     info.ppEnabledExtensionNames = extensions;
+    if (ray) {
+        /* Only the three features the rays take; the rest stay off. */
+        memset(&address_features, 0, sizeof(address_features));
+        address_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+        address_features.bufferDeviceAddress = VK_TRUE;
+        memset(&as_features, 0, sizeof(as_features));
+        as_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+        as_features.accelerationStructure = VK_TRUE;
+        as_features.pNext = &address_features;
+        memset(&ray_features, 0, sizeof(ray_features));
+        ray_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+        ray_features.rayQuery = VK_TRUE;
+        ray_features.pNext = &as_features;
+        info.pNext = &ray_features;
+    }
 
     result = ae3d_vkCreateDevice(vk.physical, &info, NULL, &vk.device);
+    vk.ray_query = ray && result == VK_SUCCESS;
     if (result != VK_SUCCESS) return ae3d_vk_fail_code("vkCreateDevice failed", result);
     if (!ae3d_vk_load_device()) return 0;
 
@@ -938,6 +1059,7 @@ static int ae3d_vk_create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
     VkBufferCreateInfo info;
     VkMemoryRequirements requirements;
     VkMemoryAllocateInfo allocation;
+    VkMemoryAllocateFlagsInfo address_flags;
     int type;
     VkResult result;
 
@@ -962,6 +1084,12 @@ static int ae3d_vk_create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
     allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocation.allocationSize = requirements.size;
     allocation.memoryTypeIndex = (unsigned)type;
+    /* A buffer the rays address by its device address needs its memory
+       allocated for that. */
+    memset(&address_flags, 0, sizeof(address_flags));
+    address_flags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+    address_flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+    if (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) allocation.pNext = &address_flags;
 
     result = ae3d_vkAllocateMemory(vk.device, &allocation, NULL, memory);
     if (result != VK_SUCCESS) {
@@ -1049,6 +1177,10 @@ static void ae3d_vk_destroy_shadow_target(void);
 static void ae3d_vk_destroy_camdepth_target(void);
 static int ae3d_vk_create_crowd_pipeline(void);
 static void ae3d_vk_destroy_dlss_output(void);
+static VkBufferUsageFlags ae3d_vk_ray_input_usage(void);
+static void ae3d_vk_build_blas(ae3d_vk_mesh *slot);
+static void ae3d_vk_free_blas(ae3d_vk_mesh *slot);
+static void ae3d_vk_free_tlas(int frame);
 static int ae3d_vk_texture_sampler(ae3d_vk_texture *texture);
 static void ae3d_vk_rebias_samplers(void);
 static int ae3d_vk_create_dlss_output(void);
@@ -2632,9 +2764,9 @@ void ae3d_vk_texture_destroy(int handle) {
 }
 
 static int ae3d_vk_create_descriptors(void) {
-    VkDescriptorSetLayoutBinding bindings[5];
+    VkDescriptorSetLayoutBinding bindings[6];
     VkDescriptorSetLayoutCreateInfo layout;
-    VkDescriptorPoolSize sizes[2];
+    VkDescriptorPoolSize sizes[3];
     VkDescriptorPoolCreateInfo pool;
     VkPhysicalDeviceProperties properties;
     unsigned alignment, stride;
@@ -2673,9 +2805,17 @@ static int ae3d_vk_create_descriptors(void) {
     bindings[4].descriptorCount = 1;
     bindings[4].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
+    // The scene's acceleration structure, for the rays the fragment
+    // traces; only where the device traces, since a layout naming a
+    // descriptor type the device has no extension for is refused.
+    bindings[5].binding = 5;
+    bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    bindings[5].descriptorCount = 1;
+    bindings[5].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
     memset(&layout, 0, sizeof(layout));
     layout.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layout.bindingCount = 5;
+    layout.bindingCount = vk.ray_query ? 6 : 5;
     layout.pBindings = bindings;
     if (ae3d_vkCreateDescriptorSetLayout(vk.device, &layout, NULL, &vk.set_layout) != VK_SUCCESS) {
         return ae3d_vk_fail("vkCreateDescriptorSetLayout failed");
@@ -2686,11 +2826,13 @@ static int ae3d_vk_create_descriptors(void) {
     sizes[0].descriptorCount = AE3D_VK_FRAMES * AE3D_VK_MAX_TEXTURES;
     sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     sizes[1].descriptorCount = AE3D_VK_FRAMES * AE3D_VK_MAX_TEXTURES * 4;
+    sizes[2].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    sizes[2].descriptorCount = AE3D_VK_FRAMES * AE3D_VK_MAX_TEXTURES;
 
     memset(&pool, 0, sizeof(pool));
     pool.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pool.maxSets = AE3D_VK_FRAMES * AE3D_VK_MAX_TEXTURES;
-    pool.poolSizeCount = 2;
+    pool.poolSizeCount = vk.ray_query ? 3 : 2;
     pool.pPoolSizes = sizes;
     if (ae3d_vkCreateDescriptorPool(vk.device, &pool, NULL, &vk.descriptor_pool) != VK_SUCCESS) {
         return ae3d_vk_fail("vkCreateDescriptorPool failed");
@@ -2734,7 +2876,9 @@ static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle, int normal
     VkDescriptorImageInfo shadow;
     VkDescriptorImageInfo bumps;
     VkDescriptorImageInfo bank;
-    VkWriteDescriptorSet writes[5];
+    VkWriteDescriptorSet writes[6];
+    VkWriteDescriptorSetAccelerationStructureKHR structure;
+    unsigned write_count = 5;
     ae3d_vk_texture *texture;
     ae3d_vk_texture *normal;
     ae3d_vk_texture *poses;
@@ -2857,7 +3001,22 @@ static VkDescriptorSet ae3d_vk_set_for(int frame, int texture_handle, int normal
     writes[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[4].pImageInfo = &bank;
 
-    ae3d_vkUpdateDescriptorSets(vk.device, 5, writes, 0, NULL);
+    /* Binding 5 is the scene's acceleration structure, this frame's: what
+       the fragment traces its rays through where the device traces. */
+    if (vk.ray_query && vk.tlas[frame]) {
+        memset(&structure, 0, sizeof(structure));
+        structure.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+        structure.accelerationStructureCount = 1;
+        structure.pAccelerationStructures = &vk.tlas[frame];
+        writes[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[5].pNext = &structure;
+        writes[5].dstSet = set;
+        writes[5].dstBinding = 5;
+        writes[5].descriptorCount = 1;
+        writes[5].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        write_count = 6;
+    }
+    ae3d_vkUpdateDescriptorSets(vk.device, write_count, writes, 0, NULL);
 
     index = reuse >= 0 ? reuse : vk.set_count[frame]++;
     vk.sets[frame][index] = set;
@@ -3328,7 +3487,13 @@ static int ae3d_vk_create_pipeline(void) {
     int cull;
 
     vertex_module = ae3d_vk_shader(ae3d_vk_scene_vert_spv, (unsigned)sizeof(ae3d_vk_scene_vert_spv));
-    fragment_module = ae3d_vk_shader(ae3d_vk_scene_frag_spv, (unsigned)sizeof(ae3d_vk_scene_frag_spv));
+    /* The fragment that traces its shadow rays where the device traces;
+       the same source without them everywhere else. */
+    if (vk.ray_query) {
+        fragment_module = ae3d_vk_shader(ae3d_vk_scene_rq_frag_spv, (unsigned)sizeof(ae3d_vk_scene_rq_frag_spv));
+    } else {
+        fragment_module = ae3d_vk_shader(ae3d_vk_scene_frag_spv, (unsigned)sizeof(ae3d_vk_scene_frag_spv));
+    }
     if (!vertex_module || !fragment_module) return ae3d_vk_fail("scene vkCreateShaderModule failed");
 
     memset(&layout, 0, sizeof(layout));
@@ -3779,6 +3944,8 @@ int ae3d_vk_frame_begin(double r, double g, double b, double a) {
     vk.uniforms[vk.frame].used = 0;
     vk.draw_calls = 0;
     vk.recording = 1;
+    vk.tlas_count = 0;
+    vk.tlas_ready = 0;
     return 1;
 }
 
@@ -4345,6 +4512,343 @@ void ae3d_vk_shadow_draw_crowd_tier(int mesh_handle, int handle, int tier) {
     ae3d_vk_draw_pipeline_indirect(mesh_handle, vk.default_texture, c->tier[tier], c->draws,
                                    (VkDeviceSize)(AE3D_VK_CROWD_TIERS + tier) * 5 * sizeof(unsigned), 1);
 }
+
+/* ---- Rays: the scene's acceleration structures ------------------------
+   Where the device has VK_KHR_ray_query, every static mesh gets a
+   bottom-level structure at upload and the renderer adds the frame's
+   instances -- the models that cast, with their matrices -- before the
+   passes; the top-level structure is built from them, once a frame, in a
+   ring of two, and the fragment shader traces its shadow rays through it
+   (the ray-query variant of the scene fragment, at binding 5). A skinned
+   mesh, whose pose is not in its buffers, stays in the shadow map; the two
+   shadows are combined in the shader, the darker winning. */
+
+/* The usage a mesh's buffers take for the builder to read them. */
+static VkBufferUsageFlags ae3d_vk_ray_input_usage(void) {
+    if (!vk.ray_query) return 0;
+    return VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+           VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+}
+
+static VkDeviceAddress ae3d_vk_buffer_address(VkBuffer buffer) {
+    VkBufferDeviceAddressInfo info;
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    info.buffer = buffer;
+    return ae3d_vkGetBufferDeviceAddressKHR(vk.device, &info);
+}
+
+/* A scratch buffer for a build, its address aligned as the device asks. */
+static int ae3d_vk_scratch(VkDeviceSize size, VkBuffer *buffer, VkDeviceMemory *memory, VkDeviceAddress *address) {
+    VkDeviceAddress raw;
+    if (!ae3d_vk_create_buffer(size + vk.as_scratch_alignment,
+                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, buffer, memory)) return 0;
+    raw = ae3d_vk_buffer_address(*buffer);
+    *address = (raw + vk.as_scratch_alignment - 1) / vk.as_scratch_alignment * vk.as_scratch_alignment;
+    return 1;
+}
+
+/* The mesh's bottom-level structure, built once from its buffers, fast to
+   trace. Failure leaves the mesh without one: its shadow then comes from
+   the map alone. */
+static void ae3d_vk_build_blas(ae3d_vk_mesh *slot) {
+    VkAccelerationStructureGeometryKHR geometry;
+    VkAccelerationStructureBuildGeometryInfoKHR build;
+    VkAccelerationStructureBuildSizesInfoKHR sizes;
+    VkAccelerationStructureBuildRangeInfoKHR range;
+    const VkAccelerationStructureBuildRangeInfoKHR *ranges[1];
+    VkAccelerationStructureCreateInfoKHR create;
+    VkAccelerationStructureDeviceAddressInfoKHR address;
+    VkBuffer scratch = VK_NULL_HANDLE;
+    VkDeviceMemory scratch_memory = VK_NULL_HANDLE;
+    VkDeviceAddress scratch_address = 0;
+    VkCommandBuffer command;
+    unsigned triangles = slot->index_count / 3;
+    if (!vk.ray_query || triangles == 0 || slot->blas) return;
+
+    memset(&geometry, 0, sizeof(geometry));
+    geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+    geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+    geometry.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+    geometry.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+    geometry.geometry.triangles.vertexData.deviceAddress = ae3d_vk_buffer_address(slot->vertex_buffer);
+    geometry.geometry.triangles.vertexStride = AE3D_VK_STRIDE;
+    geometry.geometry.triangles.maxVertex = (unsigned)(slot->vertex_count > 0 ? slot->vertex_count - 1 : 0);
+    geometry.geometry.triangles.indexType = VK_INDEX_TYPE_UINT32;
+    geometry.geometry.triangles.indexData.deviceAddress = ae3d_vk_buffer_address(slot->index_buffer);
+
+    memset(&build, 0, sizeof(build));
+    build.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    build.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    build.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    build.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    build.geometryCount = 1;
+    build.pGeometries = &geometry;
+
+    memset(&sizes, 0, sizeof(sizes));
+    sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+    ae3d_vkGetAccelerationStructureBuildSizesKHR(vk.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                                                 &build, &triangles, &sizes);
+
+    if (!ae3d_vk_create_buffer(sizes.accelerationStructureSize,
+                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+                               VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &slot->blas_buffer, &slot->blas_memory)) return;
+    memset(&create, 0, sizeof(create));
+    create.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+    create.buffer = slot->blas_buffer;
+    create.size = sizes.accelerationStructureSize;
+    create.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    if (ae3d_vkCreateAccelerationStructureKHR(vk.device, &create, NULL, &slot->blas) != VK_SUCCESS) {
+        ae3d_vk_free_blas(slot);
+        return;
+    }
+    if (!ae3d_vk_scratch(sizes.buildScratchSize, &scratch, &scratch_memory, &scratch_address)) {
+        ae3d_vk_free_blas(slot);
+        return;
+    }
+    build.dstAccelerationStructure = slot->blas;
+    build.scratchData.deviceAddress = scratch_address;
+    memset(&range, 0, sizeof(range));
+    range.primitiveCount = triangles;
+    ranges[0] = &range;
+
+    command = ae3d_vk_begin_once();
+    if (command) {
+        ae3d_vkCmdBuildAccelerationStructuresKHR(command, 1, &build, ranges);
+        ae3d_vk_end_once(command);
+    }
+    ae3d_vkDestroyBuffer(vk.device, scratch, NULL);
+    ae3d_vkFreeMemory(vk.device, scratch_memory, NULL);
+
+    memset(&address, 0, sizeof(address));
+    address.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+    address.accelerationStructure = slot->blas;
+    slot->blas_address = ae3d_vkGetAccelerationStructureDeviceAddressKHR(vk.device, &address);
+}
+
+static void ae3d_vk_free_tlas(int frame) {
+    if (vk.tlas[frame]) ae3d_vkDestroyAccelerationStructureKHR(vk.device, vk.tlas[frame], NULL);
+    if (vk.tlas_buffer[frame]) ae3d_vkDestroyBuffer(vk.device, vk.tlas_buffer[frame], NULL);
+    if (vk.tlas_memory[frame]) ae3d_vkFreeMemory(vk.device, vk.tlas_memory[frame], NULL);
+    if (vk.tlas_scratch[frame]) ae3d_vkDestroyBuffer(vk.device, vk.tlas_scratch[frame], NULL);
+    if (vk.tlas_scratch_memory[frame]) ae3d_vkFreeMemory(vk.device, vk.tlas_scratch_memory[frame], NULL);
+    if (vk.tlas_instances_mapped[frame]) ae3d_vkUnmapMemory(vk.device, vk.tlas_instances_memory[frame]);
+    if (vk.tlas_instances[frame]) ae3d_vkDestroyBuffer(vk.device, vk.tlas_instances[frame], NULL);
+    if (vk.tlas_instances_memory[frame]) ae3d_vkFreeMemory(vk.device, vk.tlas_instances_memory[frame], NULL);
+    vk.tlas[frame] = VK_NULL_HANDLE;
+    vk.tlas_buffer[frame] = VK_NULL_HANDLE;
+    vk.tlas_memory[frame] = VK_NULL_HANDLE;
+    vk.tlas_scratch[frame] = VK_NULL_HANDLE;
+    vk.tlas_scratch_memory[frame] = VK_NULL_HANDLE;
+    vk.tlas_instances[frame] = VK_NULL_HANDLE;
+    vk.tlas_instances_memory[frame] = VK_NULL_HANDLE;
+    vk.tlas_instances_mapped[frame] = NULL;
+    vk.tlas_capacity[frame] = 0;
+    vk.tlas_size[frame] = 0;
+    vk.tlas_scratch_size[frame] = 0;
+    vk.tlas_built[frame] = 0;
+}
+
+/* The frame's instance buffer, big enough for `count` instances: grown by
+   doubling, which waits for the device once and drops the descriptor
+   sets that named the structure, since the structure is remade with it. */
+static int ae3d_vk_tlas_reserve(int frame, unsigned count) {
+    unsigned capacity = vk.tlas_capacity[frame];
+    int f, index;
+    if (count <= capacity && vk.tlas_instances[frame]) return 1;
+    while (capacity < count) capacity = capacity ? capacity * 2 : 256;
+    ae3d_vkDeviceWaitIdle(vk.device);
+    ae3d_vk_free_tlas(frame);
+    if (!ae3d_vk_create_buffer((VkDeviceSize)capacity * sizeof(VkAccelerationStructureInstanceKHR),
+                               VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                               &vk.tlas_instances[frame], &vk.tlas_instances_memory[frame])) return 0;
+    if (ae3d_vkMapMemory(vk.device, vk.tlas_instances_memory[frame], 0, VK_WHOLE_SIZE, 0,
+                         &vk.tlas_instances_mapped[frame]) != VK_SUCCESS) {
+        return ae3d_vk_fail("instance vkMapMemory failed");
+    }
+    vk.tlas_capacity[frame] = capacity;
+    /* The sets of every frame named the old structure. */
+    for (f = 0; f < AE3D_VK_FRAMES; f++) {
+        for (index = 0; index < vk.set_count[f]; index++) vk.set_texture[f][index] = AE3D_VK_SET_FREE;
+    }
+    return 1;
+}
+
+/* An instance's transform from a column-major matrix: the structure's
+   three rows of four. */
+static void ae3d_vk_instance_transform(VkTransformMatrixKHR *out, const float *m) {
+    int r;
+    for (r = 0; r < 3; r++) {
+        out->matrix[r][0] = m[0 * 4 + r];
+        out->matrix[r][1] = m[1 * 4 + r];
+        out->matrix[r][2] = m[2 * 4 + r];
+        out->matrix[r][3] = m[3 * 4 + r];
+    }
+}
+
+/* The frame's instances begin: nothing in it yet. */
+void ae3d_vk_ray_begin(void) {
+    vk.tlas_count = 0;
+    vk.tlas_ready = 0;
+}
+
+/* `count` instances of `mesh_handle` at the column-major matrices, into
+   this frame's structure. A mesh without a bottom-level structure (a
+   skinned one, or one the build refused) adds nothing. */
+void ae3d_vk_ray_add(int mesh_handle, const float *matrices, int count) {
+    ae3d_vk_mesh *mesh;
+    VkAccelerationStructureInstanceKHR *out;
+    int i, frame = (int)vk.frame;
+    if (!vk.ray_query || !vk.recording || count <= 0 || !matrices) return;
+    if (mesh_handle <= 0 || mesh_handle > vk.mesh_capacity) return;
+    mesh = &vk.meshes[mesh_handle - 1];
+    if (!mesh->in_use || !mesh->blas) return;
+    if (!ae3d_vk_tlas_reserve(frame, vk.tlas_count + (unsigned)count)) return;
+    out = (VkAccelerationStructureInstanceKHR *)vk.tlas_instances_mapped[frame] + vk.tlas_count;
+    for (i = 0; i < count; i++) {
+        memset(&out[i], 0, sizeof(out[i]));
+        ae3d_vk_instance_transform(&out[i].transform, matrices + (size_t)i * 16);
+        out[i].instanceCustomIndex = 0;
+        out[i].mask = 0xFF;
+        out[i].instanceShaderBindingTableRecordOffset = 0;
+        out[i].flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+        out[i].accelerationStructureReference = mesh->blas_address;
+    }
+    vk.tlas_count += (unsigned)count;
+}
+
+/* One instance of `mesh_handle` at a column-major matrix of doubles: a
+   model drawn on its own, whose matrix the scene keeps in doubles. */
+void ae3d_vk_ray_add_one(int mesh_handle, const double *matrix) {
+    float m[16];
+    int i;
+    if (!matrix) return;
+    for (i = 0; i < 16; i++) m[i] = (float)matrix[i];
+    ae3d_vk_ray_add(mesh_handle, m, 1);
+}
+
+/* The frame's top-level structure built from its instances, recorded before
+   any pass, and made readable by the fragment shaders that follow. With no
+   instance there is nothing to trace: the rays are off this frame. */
+int ae3d_vk_ray_build(void) {
+    VkAccelerationStructureGeometryKHR geometry;
+    VkAccelerationStructureBuildGeometryInfoKHR build;
+    VkAccelerationStructureBuildSizesInfoKHR sizes;
+    VkAccelerationStructureBuildRangeInfoKHR range;
+    const VkAccelerationStructureBuildRangeInfoKHR *ranges[1];
+    VkMemoryBarrier barrier;
+    VkDeviceAddress scratch_address;
+    VkCommandBuffer command = vk.command_buffers[vk.frame];
+    int frame = (int)vk.frame;
+    unsigned count = vk.tlas_count;
+    if (!vk.ray_query || !vk.recording || vk.pass_open || count == 0) return 0;
+    if (!vk.tlas_instances[frame]) return 0;
+
+    memset(&geometry, 0, sizeof(geometry));
+    geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+    geometry.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    geometry.geometry.instances.arrayOfPointers = VK_FALSE;
+    geometry.geometry.instances.data.deviceAddress = ae3d_vk_buffer_address(vk.tlas_instances[frame]);
+
+    memset(&build, 0, sizeof(build));
+    build.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    build.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    build.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    build.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    build.geometryCount = 1;
+    build.pGeometries = &geometry;
+
+    /* Sized for the buffer's whole capacity, so a frame that adds instances
+       up to it builds into the structure it has. */
+    {
+        unsigned capacity = vk.tlas_capacity[frame];
+        memset(&sizes, 0, sizeof(sizes));
+        sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+        ae3d_vkGetAccelerationStructureBuildSizesKHR(vk.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                                                     &build, &capacity, &sizes);
+    }
+    if (!vk.tlas[frame] || vk.tlas_size[frame] < sizes.accelerationStructureSize) {
+        VkAccelerationStructureCreateInfoKHR create;
+        if (vk.tlas[frame]) {
+            ae3d_vkDeviceWaitIdle(vk.device);
+            ae3d_vkDestroyAccelerationStructureKHR(vk.device, vk.tlas[frame], NULL);
+            ae3d_vkDestroyBuffer(vk.device, vk.tlas_buffer[frame], NULL);
+            ae3d_vkFreeMemory(vk.device, vk.tlas_memory[frame], NULL);
+            vk.tlas[frame] = VK_NULL_HANDLE;
+        }
+        if (!ae3d_vk_create_buffer(sizes.accelerationStructureSize,
+                                   VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+                                   VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                   &vk.tlas_buffer[frame], &vk.tlas_memory[frame])) return 0;
+        memset(&create, 0, sizeof(create));
+        create.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+        create.buffer = vk.tlas_buffer[frame];
+        create.size = sizes.accelerationStructureSize;
+        create.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+        if (ae3d_vkCreateAccelerationStructureKHR(vk.device, &create, NULL, &vk.tlas[frame]) != VK_SUCCESS) {
+            return ae3d_vk_fail("vkCreateAccelerationStructureKHR failed");
+        }
+        vk.tlas_size[frame] = sizes.accelerationStructureSize;
+        {
+            int f, index;
+            for (f = 0; f < AE3D_VK_FRAMES; f++) {
+                for (index = 0; index < vk.set_count[f]; index++) vk.set_texture[f][index] = AE3D_VK_SET_FREE;
+            }
+        }
+    }
+    if (!vk.tlas_scratch[frame] || vk.tlas_scratch_size[frame] < sizes.buildScratchSize) {
+        if (vk.tlas_scratch[frame]) {
+            ae3d_vkDeviceWaitIdle(vk.device);
+            ae3d_vkDestroyBuffer(vk.device, vk.tlas_scratch[frame], NULL);
+            ae3d_vkFreeMemory(vk.device, vk.tlas_scratch_memory[frame], NULL);
+            vk.tlas_scratch[frame] = VK_NULL_HANDLE;
+        }
+        if (!ae3d_vk_scratch(sizes.buildScratchSize, &vk.tlas_scratch[frame], &vk.tlas_scratch_memory[frame],
+                             &scratch_address)) return 0;
+        vk.tlas_scratch_size[frame] = sizes.buildScratchSize;
+    } else {
+        VkDeviceAddress raw = ae3d_vk_buffer_address(vk.tlas_scratch[frame]);
+        scratch_address = (raw + vk.as_scratch_alignment - 1) / vk.as_scratch_alignment * vk.as_scratch_alignment;
+    }
+
+    build.dstAccelerationStructure = vk.tlas[frame];
+    build.scratchData.deviceAddress = scratch_address;
+    memset(&range, 0, sizeof(range));
+    range.primitiveCount = count;
+    ranges[0] = &range;
+    ae3d_vkCmdBuildAccelerationStructuresKHR(command, 1, &build, ranges);
+
+    memset(&barrier, 0, sizeof(barrier));
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    ae3d_vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, &barrier, 0, NULL, 0, NULL);
+    vk.tlas_built[frame] = 1;
+    vk.tlas_ready = 1;
+    return 1;
+}
+
+/* Whether the device traces rays: extensions, features and the functions
+   all there. What the renderer and a scene read. */
+int ae3d_vk_ray_query(void) { return vk.ready && vk.ray_query; }
+
+/* Shadows by ray on or off; on means the shader traces where the frame's
+   structure was built, and the map is left to the skinned. */
+void ae3d_vk_set_ray_shadows(int on) { vk.ray_shadows = on ? 1 : 0; }
+int ae3d_vk_ray_shadows(void) { return vk.ray_query && vk.ray_shadows; }
+
+/* This frame traces: the flag the scene block carries, set by the
+   renderer after the build. */
+int ae3d_vk_ray_shadows_now(void) { return vk.ray_query && vk.ray_shadows && vk.tlas_ready; }
 
 // A flat sky needs no geometry: the clear colour already fills every pixel the
 // scene does not cover, so only a textured sky is drawn.
@@ -5715,7 +6219,7 @@ int ae3d_vk_upload_mesh(void *mesh) {
     }
 
     if (!ae3d_vk_upload_buffer(vertices, (VkDeviceSize)vertex_count * AE3D_VK_STRIDE,
-                               VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                               VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | ae3d_vk_ray_input_usage(),
                                &slot->vertex_buffer, &slot->vertex_memory)) {
         free(sequential);
         return 0;
@@ -5732,7 +6236,7 @@ int ae3d_vk_upload_mesh(void *mesh) {
         slot->skinned = 1;
     }
     if (!ae3d_vk_upload_buffer(indices, (VkDeviceSize)index_count * sizeof(unsigned),
-                               VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                               VK_BUFFER_USAGE_INDEX_BUFFER_BIT | ae3d_vk_ray_input_usage(),
                                &slot->index_buffer, &slot->index_memory)) {
         ae3d_vkDestroyBuffer(vk.device, slot->vertex_buffer, NULL);
         ae3d_vkFreeMemory(vk.device, slot->vertex_memory, NULL);
@@ -5745,6 +6249,9 @@ int ae3d_vk_upload_mesh(void *mesh) {
     slot->in_use = 1;
     slot->vertex_count = vertex_count;
     slot->refs = 1;
+    /* Its bottom-level structure, for the rays: a skinned mesh's pose is
+       not in its buffers, so it has none and stays in the shadow map. */
+    if (vk.ray_query && !slot->skinned) ae3d_vk_build_blas(slot);
     slot->vertices = (float *)malloc((size_t)vertex_count * AE3D_VK_STRIDE);
     slot->indices = (unsigned *)malloc((size_t)index_count * sizeof(unsigned));
     if (slot->vertices && slot->indices) {
@@ -5816,6 +6323,16 @@ static float *ae3d_vk_pack_instances(void *instances, int count) {
 // An instance stream that has been moved or recoloured since it was uploaded.
 // Without this the buffer is written once, when the model is registered, and a
 // particle that moves or a block that changes colour never reaches the GPU.
+static void ae3d_vk_free_blas(ae3d_vk_mesh *slot) {
+    if (slot->blas) ae3d_vkDestroyAccelerationStructureKHR(vk.device, slot->blas, NULL);
+    if (slot->blas_buffer) ae3d_vkDestroyBuffer(vk.device, slot->blas_buffer, NULL);
+    if (slot->blas_memory) ae3d_vkFreeMemory(vk.device, slot->blas_memory, NULL);
+    slot->blas = VK_NULL_HANDLE;
+    slot->blas_buffer = VK_NULL_HANDLE;
+    slot->blas_memory = VK_NULL_HANDLE;
+    slot->blas_address = 0;
+}
+
 static void ae3d_vk_free_ring(ae3d_vk_mesh *slot) {
     unsigned i;
     for (i = 0; i < AE3D_VK_FRAMES; i++) {
@@ -5987,6 +6504,7 @@ void ae3d_vk_free_mesh(int handle) {
         mesh->vertex_memory = VK_NULL_HANDLE;
         ae3d_vk_free_ring(mesh);
     }
+    if (vk.ray_query) ae3d_vk_free_blas(mesh);
     ae3d_vkDestroyBuffer(vk.device, mesh->vertex_buffer, NULL);
     ae3d_vkFreeMemory(vk.device, mesh->vertex_memory, NULL);
     ae3d_vkDestroyBuffer(vk.device, mesh->index_buffer, NULL);
@@ -6015,6 +6533,7 @@ void ae3d_vk_shutdown(void) {
                 vk.meshes[i].vertex_memory = VK_NULL_HANDLE;
                 ae3d_vk_free_ring(&vk.meshes[i]);
             }
+            if (vk.ray_query) ae3d_vk_free_blas(&vk.meshes[i]);
             ae3d_vkDestroyBuffer(vk.device, vk.meshes[i].vertex_buffer, NULL);
             ae3d_vkFreeMemory(vk.device, vk.meshes[i].vertex_memory, NULL);
             ae3d_vkDestroyBuffer(vk.device, vk.meshes[i].index_buffer, NULL);
@@ -6080,6 +6599,10 @@ void ae3d_vk_shutdown(void) {
     if (vk.sky_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.sky_pipeline, NULL);
     if (vk.ssao_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.ssao_pipeline, NULL);
     ae3d_vk_destroy_dlss_output();
+    if (vk.ray_query) {
+        int f;
+        for (f = 0; f < AE3D_VK_FRAMES; f++) ae3d_vk_free_tlas(f);
+    }
     if (vk.depth_resolve_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.depth_resolve_pipeline, NULL);
     {
         int k;
