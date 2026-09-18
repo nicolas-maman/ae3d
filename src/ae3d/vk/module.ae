@@ -73,11 +73,11 @@ const SHADOW_SIZE = 2048
 
 extern ae3d_vk_shadow_begin() -> int
 extern ae3d_vk_shadow_draw(mesh: int, instances: int, instance_count: int)
-extern ae3d_vk_crowd_set_tier(handle: int, tier: int, sx: float, sy: float, sz: float, indices: int, shadow_indices: int)
+extern ae3d_vk_crowd_set_tier(handle: int, tier: int, part: int, sx: float, sy: float, sz: float, indices: int, shadow_indices: int)
 extern ae3d_vk_crowd_fill(handle: int, pos: ptr, yaw: ptr, phase: ptr, col: ptr, start: int, n: int) -> int
 extern ae3d_vk_crowd_sort(handle: int, cx: float, cz: float, near_dist: float, mid_dist: float, cull_dist: float) -> int
-extern ae3d_vk_draw_crowd_tier(mesh: int, texture: int, handle: int, tier: int)
-extern ae3d_vk_shadow_draw_crowd_tier(mesh: int, handle: int, tier: int)
+extern ae3d_vk_draw_crowd_tier(mesh: int, texture: int, handle: int, tier: int, part: int)
+extern ae3d_vk_shadow_draw_crowd_tier(mesh: int, handle: int, tier: int, part: int)
 extern ae3d_vk_texture_create_float(width: int, height: int, rgba: ptr) -> int
 extern ae3d_vk_texture_create_rgba(width: int, height: int, depth: int, rgba: ptr) -> int
 extern ae3d_vk_set_pose_bank(texture: int)
@@ -1002,7 +1002,7 @@ sort_device_crowds(r: *VKRenderer) {
                 proxy = m.depth_proxy as *Model
                 shadow_mesh = proxy.mesh
             }
-            ae3d_vk_crowd_set_tier(dc.handle, m.device_tier, m.scale.x, m.scale.y, m.scale.z,
+            ae3d_vk_crowd_set_tier(dc.handle, m.device_tier, m.device_part, m.scale.x, m.scale.y, m.scale.z,
                                    core.mesh_index_count(m.mesh), core.mesh_index_count(shadow_mesh))
         }
         i = i + 1
@@ -1063,7 +1063,7 @@ shadow_draw_model(m: *Model) {
     }
     if m.device_crowd != null {
         dc = m.device_crowd as *DeviceCrowd
-        ae3d_vk_shadow_draw_crowd_tier(vbo, dc.handle, m.device_tier)
+        ae3d_vk_shadow_draw_crowd_tier(vbo, dc.handle, m.device_tier, m.device_part)
         return
     }
     ae3d_vk_shadow_draw(vbo, m.instance_vbo, instances)
@@ -2123,7 +2123,7 @@ draw_model(r: *VKRenderer, m: *Model, transparent_pass: bool) {
 draw_instances(m: *Model, texture: int, instances: int) {
     if m.device_crowd != null {
         dc = m.device_crowd as *DeviceCrowd
-        ae3d_vk_draw_crowd_tier(m.vbo, texture, dc.handle, m.device_tier)
+        ae3d_vk_draw_crowd_tier(m.vbo, texture, dc.handle, m.device_tier, m.device_part)
         return
     }
     ae3d_vk_draw(m.vbo, texture, m.instance_vbo, instances)

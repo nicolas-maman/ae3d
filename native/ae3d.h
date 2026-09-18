@@ -433,19 +433,19 @@ void   ae3d_vk_set_capture_bypass(int on);
 int    ae3d_vk_crowd_create(int capacity);
 void   ae3d_vk_crowd_destroy(int handle);
 int    ae3d_vk_crowd_count(int handle, int tier);
-void   ae3d_vk_crowd_set_tier(int handle, int tier, double sx, double sy, double sz,
+void   ae3d_vk_crowd_set_tier(int handle, int tier, int part, double sx, double sy, double sz,
                               int indices, int shadow_indices);
 int    ae3d_vk_crowd_fill(int handle, const double *pos, const double *yaw, const double *phase,
                           const double *col, int start, int n);
 int    ae3d_vk_crowd_sort(int handle, double cx, double cz, double near_dist, double mid_dist,
                           double cull_dist);
-void   ae3d_vk_draw_crowd_tier(int mesh_handle, int texture_handle, int handle, int tier);
+void   ae3d_vk_draw_crowd_tier(int mesh_handle, int texture_handle, int handle, int tier, int part);
 /* A crowd in the rays: the far mesh at every frame of its pose bank as a
    bottom-level structure each, and the crowd's figures pointing at them. */
 int    ae3d_vk_pose_blas_create(void *mesh, const float *bank, int frames, int bones);
 void   ae3d_vk_pose_blas_destroy(int handle);
 void   ae3d_vk_crowd_set_poses(int handle, int poses);
-void   ae3d_vk_shadow_draw_crowd_tier(int mesh_handle, int handle, int tier);
+void   ae3d_vk_shadow_draw_crowd_tier(int mesh_handle, int handle, int tier, int part);
 void   ae3d_vk_set_taa(int on);
 int    ae3d_vk_taa(void);
 int    ae3d_vk_taa_history(void);

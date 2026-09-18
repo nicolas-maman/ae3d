@@ -143,6 +143,25 @@
   `tests/test_gltf` checks a generated two-bone arm against the arithmetic
   and loads the Khronos Fox. The skin palette holds 96 bones (was 48), a
   Mixamo rig with its fingers.
+- The device sort draws each part of a tier's figure whole: an indirect
+  command per part (`AE3D_VK_CROWD_PARTS`, sixteen a tier), with its own
+  index count, the sort's count copied into every one. It held one count
+  per tier -- the last part bound -- so the zombie's near body drew with
+  its clothes' count, a seventh of its mesh, and a fifteen-part glTF
+  figure came apart. The half-million figures were measured on that:
+  the device row is 78 fps, not 90 (docs/performance.md). Freeing a
+  device crowd after its engine is a no-op rather than a wait on a null
+  device.
+- `tools/bake_impostor --gltf figure.glb [Walk] [out.png] [facing]`: a
+  glTF figure's impostor atlas from its file alone, the figure turned to
+  face +X first; and the bake discards its first frame, which drew a
+  file's embedded texture before it had reached the device (a black
+  first cell).
+- `examples/gltf_crowd.ae` has the zombie's three tiers: the file's
+  meshes, the same decimated (`mesh_decimate`), and the picture beside
+  the file when the bake wrote one; the sort on the device where it
+  sorts there, on the CPU elsewhere. A hundred thousand of a Quaternius
+  figure at 130 fps hidden, with fifteen parts a figure.
 - `gltf.bake_bank(scene, animation, frames)`: any animation of a glTF
   file baked into a pose bank in place over its first skin
   (`gltf.bake_root` picks the joint that carries the travel;

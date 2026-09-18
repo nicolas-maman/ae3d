@@ -140,7 +140,14 @@ scene (`AE3D_CROWD=500000 AE3D_NEAR=3 AE3D_NOPROPS=1 AE3D_SEPN=4`):
 | crowd | sort | fps | update ms | cpu ms | sort + upload ms | gpu shadow ms | gpu scene ms |
 |---|---|---|---|---|---|---|---|
 | 500,000 | CPU, 24 threads | 75 | 7.4 | 3.3 | 1.6 + 2.5 | 3.4 | 9.2 |
-| 500,000 | device | 90 | 3.1 | 2.4 | 0 + 0 | 3.0 | 8.1 |
+| 500,000 | device | 78 | 3.4 | 2.6 | 0 + 0 | 2.9 | 9.9 |
+
+The device row was 90 fps when first measured, and that number was wrong:
+the sort held one index count per tier, the last part bound, so the near
+body drew with its clothes' count -- 11,184 of its 79,908 indices, a
+seventh of the figure. Each part has its own indirect command now (the
+counts copied from the sort's), the body draws whole, and the row is
+re-measured; the CPU sort always drew each part with its own count.
 
 The state buffer's memory matters: read by the sort from system memory
 over the bus, sixteen megabytes a frame cost the device 1.7 ms -- more

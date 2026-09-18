@@ -1,22 +1,34 @@
 // Any glTF figure as a crowd: its walk baked into a pose bank, every
-// primitive of the file instanced over the bank, a few hundred of it walking
-// a field, each at its own phase and its own heading.
+// primitive of the file instanced over the bank, hundreds or hundreds of
+// thousands of it walking a field, each at its own phase and its own
+// heading, in the zombie's three tiers.
 //
 //   ./build/gltf_crowd path/to/figure.glb [Walk]
-//   AE3D_CROWD=2000 AE3D_ANIM=Run ./build/gltf_crowd figure.glb
+//   AE3D_CROWD=100000 AE3D_ANIM=Run ./build/gltf_crowd figure.glb
 //
 // A figure from a Quaternius pack, Mixamo, Sketchfab or another engine's
 // export goes from a file to a horde without passing through Blender: the
 // loader gives the skin and the clips, gltf.bake_bank strikes the clip's
 // poses into a bank in place, and the crowd's own machinery -- the ECS
-// columns, the native wander and step, the instance streams -- takes it from
-// there, exactly as it takes the pipeline's zombie. AE3D_FACING=degrees says
-// which way the file's figure faces at rest, measured from +X toward -Z: a
-// glTF figure faces +Z, which is 90 (the default); the pipeline's zombie
-// faces +X, which is 0. Wrong, and the crowd walks sideways or backwards.
+// columns, the native wander and step, the sort into tiers on the device or
+// the CPU, the instance streams -- takes it from there, exactly as it takes
+// the pipeline's zombie. The tiers: the file's own meshes within NEAR_DIST,
+// the same meshes decimated to a coarse cell out to IMPOSTOR_DIST, and past
+// that a picture, when tools/bake_impostor --gltf has written one beside
+// the file (<stem>_impostor.png, .json and _normal.png).
+//
+// AE3D_FACING=degrees says which way the file's figure faces at rest,
+// measured from +X toward -Z: a glTF figure faces +Z, which is 90 (the
+// default); the pipeline's zombie faces +X, which is 0. Wrong, and the crowd
+// walks sideways or backwards. AE3D_NEAR, AE3D_IMPOSTOR and AE3D_CULL move
+// the bands in metres (0 for AE3D_IMPOSTOR draws no picture; 0 for
+// AE3D_CULL keeps the whole crowd); AE3D_GPU_CROWD=0 sorts on the CPU.
 
 import std.os
 import std.list
+import std.string
+import std.fs
+import std.json
 import ae3d.core
 import ae3d.engine
 import ae3d.gltf
@@ -25,13 +37,15 @@ import ae3d.ecs
 import ae3d.loader
 import ae3d.skin
 
-extern fmin(a: float, b: float) -> float
-extern fmax(a: float, b: float) -> float
-
 const FRAMES = 48
-const FIELD = 30.0
 const MAX_SPEED = 2.5
 const SPREAD = 0.9
+// The far tier's decimation cell, in metres: a man-sized figure comes out
+// at a few hundred triangles, its silhouette intact.
+const LOD_FAR = 0.08
+const NEAR_DIST = 30.0
+const IMPOSTOR_DIST = 70.0
+const CULL_DIST = 500.0
 
 var g_path = ""
 var g_animation = "Walk"
@@ -40,42 +54,117 @@ var g_bank: ptr = null
 var g_floor: ptr = null
 var g_light: ptr = null
 var g_count = 0
+var g_field = 30.0
 var g_walk = 1.0
 var g_speed = 1.0
 var g_facing = 0.0
-var g_parts: ptr = null
+var g_near_dist = NEAR_DIST
+var g_impostor_dist = IMPOSTOR_DIST
+var g_cull_dist = CULL_DIST
+// The tiers' models: the file's parts, their decimated twins, the picture.
+var g_near: ptr = null
+var g_far: ptr = null
+var g_impostor: ptr = null
+var g_device: ptr = null
+// The crowd's columns, and the scratch the CPU sort compacts each tier into.
 var g_pos: ptr = null
 var g_vel: ptr = null
 var g_yaw: ptr = null
 var g_draw_yaw: ptr = null
 var g_phase: ptr = null
 var g_color: ptr = null
+var g_tier_pos: ptr = null
+var g_tier_yaw: ptr = null
+var g_tier_phase: ptr = null
+var g_tier_col: ptr = null
+var g_tier_counts: ptr = null
 var g_seed = 0x2f6a41b3
+var g_said = false
 
 next_random() -> float {
     g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
     return (g_seed as float) / 2147483647.0
 }
 
-// The crowd's position, heading and phase onto every part of the figure,
-// the heading turned by the file's facing so the figure walks the way it
-// goes.
-upload(n: int) {
+// The path without its extension.
+stem_of(path: string) -> string {
+    length = string.length(path)
+    if length > 4 { return string.substring(path, 0, length - 4) }
+    return path
+}
+
+// A model as one tier of the crowd: instanced over the bank for the whole
+// count, posed by phase, coloured by instance.
+as_crowd(m: *Model) {
+    core.model_set_parent(m, null)
+    core.model_set_position(m, 0.0, 0.0, 0.0)
+    core.model_set_scale(m, 1.0, 1.0, 1.0)
+    core.model_set_rotation(m, core.quat_ident())
+    core.model_update_matrix(m)
+    core.model_enable_instancing(m, g_count)
+    core.model_set_pose_bank(m, g_bank, FRAMES)
+    core.model_set_crowd_walk(m, g_walk)
+    core.model_enable_instance_phases(m)
+    core.model_enable_instance_colors(m)
+}
+
+// The picture tier: an upright quad over the atlases tools/bake_impostor
+// --gltf wrote beside the file, or null when there are none.
+impostor_for(stem: string) -> *Model {
+    note_path = "${stem}_impostor.json"
+    text, err = fs.read(note_path)
+    if err != "" { return null }
+    note = json.parse_raw(text)
+    string.free(text)
+    if note == null { return null }
+    cols = json.get_int(json.object_get_raw(note, "cols"))
+    rows = json.get_int(json.object_get_raw(note, "rows"))
+    metres = json.get_number(json.object_get_raw(note, "metres"))
+    json.free(note)
+    if cols <= 0 || rows <= 0 || metres <= 0.0 { return null }
+    quad = core.model_new()
+    facing = core.vec3(1.0, 0.0, 0.0)
+    core.mesh_reserve(quad.mesh, 4, 6)
+    core.mesh_push_vertex(quad.mesh, core.vec3(0.0 - 0.5, 0.0, 0.0), 0.0, 0.0, facing)
+    core.mesh_push_vertex(quad.mesh, core.vec3(0.5, 0.0, 0.0), 1.0, 0.0, facing)
+    core.mesh_push_vertex(quad.mesh, core.vec3(0.5, 1.0, 0.0), 1.0, 1.0, facing)
+    core.mesh_push_vertex(quad.mesh, core.vec3(0.0 - 0.5, 1.0, 0.0), 0.0, 1.0, facing)
+    core.mesh_push_triangle(quad.mesh, 0, 1, 2)
+    core.mesh_push_triangle(quad.mesh, 0, 2, 3)
+    i = 0
+    while i < 4 {
+        core.mesh_set_skin(quad.mesh, i, 0, 0, 0, 0, 1.0, 0.0, 0.0, 0.0)
+        i = i + 1
+    }
+    core.model_recalculate_bounds(quad)
+    core.model_set_texture(quad, "${stem}_impostor.png")
+    core.material_set_normal_path(quad.material, "${stem}_impostor_normal.png")
+    as_crowd(quad)
+    core.model_set_impostor(quad, cols, rows, metres, metres)
+    return quad
+}
+
+upload_tier(models: ptr, pos: ptr, yaw: ptr, phase: ptr, col: ptr, n: int) {
+    k = 0
+    while k < list.size(models) {
+        m = list.get_raw(models, k) as *Model
+        core.model_set_instance_draw_count(m, n)
+        core.model_set_instance_positions_yaw(m, pos, yaw, n)
+        core.model_set_instance_phases(m, phase, n)
+        core.model_set_instance_colors(m, col, n)
+        k = k + 1
+    }
+}
+
+// The headings turned by the file's facing, so the figure walks the way
+// it goes; the device sort and the CPU sort both read the turned column.
+turn_headings() {
     yaw = ecs.column_data(g_yaw) as float[]
     turned = ecs.column_data(g_draw_yaw) as float[]
     i = 0
-    while i < n {
+    while i < g_count {
         turned[i] = yaw[i] + g_facing
         i = i + 1
-    }
-    k = 0
-    while k < list.size(g_parts) {
-        m = list.get_raw(g_parts, k) as *Model
-        core.model_set_instance_draw_count(m, n)
-        core.model_set_instance_positions_yaw(m, ecs.column_data(g_pos), ecs.column_data(g_draw_yaw), n)
-        core.model_set_instance_phases(m, ecs.column_data(g_phase), n)
-        core.model_set_instance_colors(m, ecs.column_data(g_color), n)
-        k = k + 1
     }
 }
 
@@ -114,39 +203,73 @@ on_start(state: ptr, e: *Engine) {
     skel = gltf.skeleton(scene, 0)
     println("gltf_crowd: ${g_path}: '${g_animation}' baked, ${FRAMES} poses over ${skin.skeleton_count(skel)} bones, ${g_walk}s a cycle, ${travelled}m in place, ${g_speed}m/s")
 
-    // Every skinned primitive, at the origin with no transform of its own:
-    // the bank's palette carries the rig's placement and scale, and the
-    // instance stream carries the crowd's.
-    g_parts = list.new()
+    // The near tier: every skinned primitive, at the origin with no
+    // transform of its own -- the bank's palette carries the rig's placement
+    // and scale, the instance stream the crowd's. The far tier: the same
+    // meshes decimated. The picture past that, when there is one.
+    g_near = list.new()
+    g_far = list.new()
+    near_tris = 0
+    far_tris = 0
     i = 0
     while i < gltf.primitive_count(scene) {
         m = gltf.primitive(scene, i)
         if m.skeleton != null {
-            core.model_set_parent(m, null)
-            core.model_set_position(m, 0.0, 0.0, 0.0)
-            core.model_set_scale(m, 1.0, 1.0, 1.0)
-            core.model_set_rotation(m, core.quat_ident())
-            core.model_update_matrix(m)
-            core.model_enable_instancing(m, g_count)
-            core.model_set_pose_bank(m, bank, FRAMES)
-            core.model_set_crowd_walk(m, g_walk)
-            core.model_enable_instance_phases(m)
-            core.model_enable_instance_colors(m)
+            as_crowd(m)
             engine.engine_add_model(e, m)
-            list.add_raw(g_parts, m as ptr)
+            list.add_raw(g_near, m as ptr)
+            near_tris = near_tris + core.mesh_index_count(m.mesh) / 3
+            twin = core.model_clone(m)
+            lod = core.mesh_decimate(core.model_mesh(m), LOD_FAR)
+            if lod != null { core.model_set_mesh(twin, lod) }
+            as_crowd(twin)
+            engine.engine_add_model(e, twin)
+            list.add_raw(g_far, twin as ptr)
+            far_tris = far_tris + core.mesh_index_count(twin.mesh) / 3
         }
         i = i + 1
     }
-    println("gltf_crowd: ${list.size(g_parts)} parts a figure, ${g_count} figures")
+    picture = impostor_for(stem_of(g_path))
+    if picture != null {
+        engine.engine_add_model(e, picture)
+        g_impostor = picture as ptr
+    } else {
+        g_impostor_dist = 0.0
+    }
+    // On the device where it sorts there, the three tiers bound to the
+    // same crowd; else the CPU sort into scratch each frame.
+    if core.env_int("AE3D_GPU_CROWD", 1) == 1 {
+        dc = crowd.device_crowd_new(g_count)
+        if dc != null {
+            k = 0
+            while k < list.size(g_near) { crowd.device_crowd_bind(dc, list.get_raw(g_near, k) as *Model, 0) ; k = k + 1 }
+            k = 0
+            while k < list.size(g_far) { crowd.device_crowd_bind(dc, list.get_raw(g_far, k) as *Model, 1) ; k = k + 1 }
+            if picture != null { crowd.device_crowd_bind(dc, picture, 2) }
+            g_device = dc as ptr
+        }
+    }
+    sorter = "sorted on the CPU"
+    if g_device != null { sorter = "sorted on the device" }
+    with_picture = "no picture (bake one with tools/bake_impostor --gltf)"
+    if picture != null { with_picture = "a picture past ${g_impostor_dist}m" }
+    println("gltf_crowd: ${list.size(g_near)} parts a figure, ${near_tris} tris near, ${far_tris} decimated past ${g_near_dist}m, ${with_picture}; ${g_count} figures, ${sorter}")
 
-    // The crowd: scattered over the field, each facing its own way, at its
-    // own point in the walk, in its own shade.
+    // The crowd: scattered over a field sized to it, each facing its own
+    // way, at its own point in the walk, in its own shade.
+    g_field = core.sqrt_of((g_count as float) * 4.0)
+    if g_field < 30.0 { g_field = 30.0 }
     g_pos = ecs.column_new(g_count, 3)
     g_vel = ecs.column_new(g_count, 3)
     g_yaw = ecs.column_new(g_count, 1)
     g_draw_yaw = ecs.column_new(g_count, 1)
     g_phase = ecs.column_new(g_count, 1)
     g_color = ecs.column_new(g_count, 3)
+    g_tier_pos = ecs.column_new(g_count, 3)
+    g_tier_yaw = ecs.column_new(g_count, 1)
+    g_tier_phase = ecs.column_new(g_count, 1)
+    g_tier_col = ecs.column_new(g_count, 3)
+    g_tier_counts = ecs.column_new(1, 3)
     i = 0
     while i < g_count {
         rx = next_random()
@@ -154,16 +277,15 @@ on_start(state: ptr, e: *Engine) {
         ry = next_random()
         rp = next_random()
         rc = next_random()
-        ecs.column_set3(g_pos, i, core.vec3((rx - 0.5) * FIELD * 2.0 * SPREAD, 0.0, (rz - 0.5) * FIELD * 2.0 * SPREAD))
+        ecs.column_set3(g_pos, i, core.vec3((rx - 0.5) * g_field * 2.0 * SPREAD, 0.0, (rz - 0.5) * g_field * 2.0 * SPREAD))
         ecs.column_set(g_yaw, i, 0, ry * core.TWO_PI)
         ecs.column_set(g_phase, i, 0, rp)
         ecs.column_set3(g_color, i, core.vec3(0.75 + 0.25 * rc, 0.75 + 0.25 * (1.0 - rc), 0.8))
         i = i + 1
     }
-    upload(g_count)
 
-    ground = loader.plane(4, FIELD * 2.5)
-    core.model_set_position(ground, 0.0 - FIELD * 5.0, 0.0, 0.0 - FIELD * 5.0)
+    ground = loader.plane(4, g_field * 2.5)
+    core.model_set_position(ground, 0.0 - g_field * 5.0, 0.0, 0.0 - g_field * 5.0)
     core.model_matte(ground, 0.36, 0.40, 0.30)
     core.model_set_pbr(ground, 0.0, 0.9)
     engine.engine_add_model(e, ground)
@@ -173,23 +295,84 @@ on_start(state: ptr, e: *Engine) {
     engine.engine_set_light(e, light)
     g_light = light as ptr
     engine.engine_set_shadows(e, true)
-    engine.engine_set_shadow_distance(e, FIELD * 3.0)
+    engine.engine_set_shadow_distance(e, 90.0)
     engine.engine_set_time_of_day(e, 15.0)
+    engine.engine_set_fog(e, core.fog_distance(g_field * 2.0, g_field * 8.0, core.vec3(0.70, 0.76, 0.84), 0.8))
 
     cam = engine.engine_camera(e)
-    core.camera_set_position(cam, core.vec3(0.0, 4.5, FIELD * 1.15))
+    core.camera_set_position(cam, core.vec3(0.0, 4.5, g_field * SPREAD - 8.0))
     core.camera_look_at(cam, core.vec3(0.0, 1.0, 0.0))
     core.camera_set_speed(cam, 8.0)
-    core.camera_set_far(cam, 1000.0)
+    core.camera_set_far(cam, 4000.0)
 }
 
 on_update(state: ptr, e: *Engine, delta: float) {
     if g_bank == null || g_count == 0 { return }
+    cam = engine.engine_camera(e)
     crowd.crowd_wander(ecs.column_data(g_vel), ecs.column_data(g_yaw), g_count, g_speed)
     crowd.crowd_step(ecs.column_data(g_pos), ecs.column_data(g_vel), ecs.column_data(g_yaw),
                      ecs.column_data(g_phase), 0, g_count, delta, MAX_SPEED,
-                     0.0 - FIELD, FIELD, 0.0 - FIELD, FIELD, 0.0, g_walk, g_bank)
-    upload(g_count)
+                     0.0 - g_field, g_field, 0.0 - g_field, g_field, 0.0, g_walk, g_bank)
+    turn_headings()
+    if g_device != null {
+        crowd.device_crowd_update(g_device as *DeviceCrowd, ecs.column_data(g_pos), ecs.column_data(g_draw_yaw),
+                                  ecs.column_data(g_phase), ecs.column_data(g_color),
+                                  0, g_count, cam.position.x, cam.position.z,
+                                  g_near_dist, g_impostor_dist, g_cull_dist)
+        if !g_said && engine.engine_frame_count(e) > 10 {
+            g_said = true
+            dc = g_device as *DeviceCrowd
+            println("gltf_crowd: tiers near ${crowd.device_crowd_count(dc, 0)} far ${crowd.device_crowd_count(dc, 1)} picture ${crowd.device_crowd_count(dc, 2)} of ${g_count}")
+        }
+        return
+    }
+    // The CPU sort: each tier compacted into the scratch and uploaded in
+    // turn, the scratch being big enough for the whole crowd.
+    nn = sort_tier(cam, 0)
+    upload_tier(g_near, ecs.column_data(g_tier_pos), ecs.column_data(g_tier_yaw), ecs.column_data(g_tier_phase), ecs.column_data(g_tier_col), nn)
+    nf = sort_tier(cam, 1)
+    upload_tier(g_far, ecs.column_data(g_tier_pos), ecs.column_data(g_tier_yaw), ecs.column_data(g_tier_phase), ecs.column_data(g_tier_col), nf)
+    ni = 0
+    if g_impostor != null {
+        ni = sort_tier(cam, 2)
+        picture = list.new()
+        list.add_raw(picture, g_impostor)
+        upload_tier(picture, ecs.column_data(g_tier_pos), ecs.column_data(g_tier_yaw), ecs.column_data(g_tier_phase), ecs.column_data(g_tier_col), ni)
+        list.free(picture)
+    }
+    if !g_said && engine.engine_frame_count(e) > 10 {
+        g_said = true
+        println("gltf_crowd: tiers near ${nn} far ${nf} picture ${ni} of ${g_count}")
+    }
+}
+
+// One tier of the crowd compacted into the scratch columns; its count.
+sort_tier(cam: *Camera, tier: int) -> int {
+    p = null as ptr
+    y = null as ptr
+    ph = null as ptr
+    c = null as ptr
+    np = p
+    ny = y
+    nph = ph
+    nc = c
+    fp = p
+    fy = y
+    fph = ph
+    fc = c
+    ip = p
+    iy = y
+    iph = ph
+    ic = c
+    if tier == 0 { np = ecs.column_data(g_tier_pos) ; ny = ecs.column_data(g_tier_yaw) ; nph = ecs.column_data(g_tier_phase) ; nc = ecs.column_data(g_tier_col) }
+    if tier == 1 { fp = ecs.column_data(g_tier_pos) ; fy = ecs.column_data(g_tier_yaw) ; fph = ecs.column_data(g_tier_phase) ; fc = ecs.column_data(g_tier_col) }
+    if tier == 2 { ip = ecs.column_data(g_tier_pos) ; iy = ecs.column_data(g_tier_yaw) ; iph = ecs.column_data(g_tier_phase) ; ic = ecs.column_data(g_tier_col) }
+    crowd.crowd_tiers(ecs.column_data(g_pos), ecs.column_data(g_draw_yaw), ecs.column_data(g_phase),
+                      ecs.column_data(g_color), 0, g_count, cam.position.x, cam.position.z,
+                      g_near_dist, g_impostor_dist, g_cull_dist,
+                      np, ny, nph, nc, fp, fy, fph, fc, ip, iy, iph, ic,
+                      ecs.column_data(g_tier_counts))
+    return ecs.column_get(g_tier_counts, 0, tier) as int
 }
 
 main() {
@@ -201,6 +384,9 @@ main() {
     g_count = core.env_int("AE3D_CROWD", 300)
     if g_count < 1 { g_count = 1 }
     g_facing = core.deg_to_rad(core.env_int("AE3D_FACING", 90) as float)
+    g_near_dist = core.env_int("AE3D_NEAR", NEAR_DIST as int) as float
+    g_impostor_dist = core.env_int("AE3D_IMPOSTOR", IMPOSTOR_DIST as int) as float
+    g_cull_dist = core.env_int("AE3D_CULL", CULL_DIST as int) as float
 
     e = engine.engine_new()
     engine.engine_set_size(e, 1280, 720)
@@ -214,7 +400,15 @@ main() {
     if !engine.engine_run(e) { println("gltf_crowd: no window") }
     println("gltf_crowd: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${engine.engine_draw_calls(e)} draws")
     engine.engine_free(e)
+    if g_device != null { crowd.device_crowd_free(g_device as *DeviceCrowd) }
     if g_bank != null { crowd.posebank_free(g_bank) }
+    if g_far != null {
+        k = 0
+        while k < list.size(g_far) { core.model_free(list.get_raw(g_far, k) as *Model) ; k = k + 1 }
+        list.free(g_far)
+    }
+    if g_near != null { list.free(g_near) }
+    if g_impostor != null { core.model_free(g_impostor as *Model) }
     if g_scene != null { gltf.scene_destroy(g_scene as *GltfScene) }
     if g_floor != null { core.model_free(g_floor as *Model) }
     if g_light != null { core.light_free(g_light as *Light) }
