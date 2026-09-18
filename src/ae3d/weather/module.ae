@@ -161,8 +161,15 @@ weather_set(w: *Weather, kind: int, intensity: float) {
         engine.engine_set_fog(e, w.had_fog)
         engine.engine_set_clouds(e, 0.0, 1.0)
         engine.engine_set_sky_overcast(e, 0.0, core.vec3(0.5, 0.5, 0.5))
+        engine.engine_set_wetness(e, 0.0)
         return
     }
+    // The ground under the weather: wet in rain, wetter in a storm, dry
+    // under snow and dust.
+    wetness = 0.0
+    if kind == RAIN { wetness = 0.5 + 0.5 * w.intensity }
+    if kind == STORM { wetness = 1.0 }
+    engine.engine_set_wetness(e, wetness)
     // The sun under the weather: dimmed by the cloud that brings it.
     dim = 1.0
     if kind == RAIN { dim = 1.0 - 0.45 * w.intensity }
@@ -184,7 +191,11 @@ weather_set(w: *Weather, kind: int, intensity: float) {
         core.model_set_alpha(m, 0.4)
         fog_end = 2600.0 - 1500.0 * w.intensity
         if kind == STORM { fog_end = 1800.0 - 1200.0 * w.intensity }
-        engine.engine_set_fog(e, core.fog_distance(30.0, fog_end, core.vec3(0.40, 0.43, 0.48), 1.0))
+        // The fog is the colour the overcast sky comes to at the horizon,
+        // so the sea's far edge meets the sky without a band between them.
+        haze = core.vec3(0.54, 0.57, 0.62)
+        if kind == STORM { haze = core.vec3(0.35, 0.37, 0.41) }
+        engine.engine_set_fog(e, core.fog_distance(30.0, fog_end, haze, 1.0))
         cover = 0.75 + 0.25 * w.intensity
         if kind == STORM { cover = 1.0 }
         engine.engine_set_clouds(e, cover, 2.0 + 3.0 * w.intensity)

@@ -39,6 +39,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     vec3 cloudSun;
     float materialAlpha;
     float reflectivity;
+    float wetness;
     bool hasNormalMap;
     float normalStrength;
     float occlusionStrength;
@@ -192,6 +193,12 @@ layout(location = 5) in float Occlusion;
 // scene's lights the way a wet road does -- brightest exactly where the view
 // grazes it, so a lamp overhead smears into a bright streak down the road
 // toward the viewer. Per material, so only the wet surfaces reflect.
+
+// How wet the scene is, 0..1: rain on it. A wet surface is darker, its
+// pores filled, and a mirror at a grazing angle -- the lamps smear down a
+// wet road the way they never do a dry one. Upward-facing surfaces take
+// it in full, walls hardly at all: water runs off them. Set by the
+// weather; a scene without one is dry.
 
 
 // Modern PBR Extensions
@@ -868,6 +875,10 @@ vec3 mapped_normal(vec3 normal, vec3 position, vec2 uv) {
     return normalize(cotangent_frame(normal, position, uv) * sampled);
 }
 
+// The wet's own grazing reflection at this pixel, worked out once in main
+// from the wetness and the surface's facing, and read by every light.
+float wetMirror = 0.0;
+
 // One light's contribution. Everything here depends on which light is shading;
 // anything that does not stays in main and is computed once.
 vec3 direct_light(Light L, vec3 norm, vec3 viewDir, vec3 albedo, vec3 F0,
@@ -912,9 +923,10 @@ vec3 direct_light(Light L, vec3 norm, vec3 viewDir, vec3 albedo, vec3 F0,
     // ordinary surface exactly as it was, above zero lifts the grazing
     // reflection and scales it by how wet the surface is.
     float viewAttenuation = pow(NdotV, 0.6);
-    if (reflectivity > 0.001) {
+    float mirror = max(reflectivity, wetMirror);
+    if (mirror > 0.001) {
         float grazing = 1.0 - NdotV;
-        specular *= reflectivity * (0.5 + grazing * grazing * 4.0);
+        specular *= mirror * (0.5 + grazing * grazing * 4.0);
     } else {
         specular *= viewAttenuation * 0.5;
     }
@@ -1030,6 +1042,17 @@ void main() {
     float NdotV = clamp(dot(norm, viewDir), 0.001, 1.0); // Avoid zero division
     // Ensure minimum roughness to prevent point light artifacts
     float adjustedRoughness = max(roughness, 0.08); // Balanced minimum roughness
+    // Rain on the surface: the flatter it lies, the more it holds. Darker,
+    // smoother, and a mirror at a grazing angle.
+    float wet = wetness * clamp(norm.y, 0.0, 1.0);
+    wet *= wet;
+    if (wet > 0.001) {
+        albedo *= 1.0 - 0.35 * wet;
+        adjustedRoughness = max(mix(adjustedRoughness, 0.05, wet), 0.08);
+        wetMirror = wet * 0.7;
+    } else {
+        wetMirror = 0.0;
+    }
 
     // Every light in the scene contributes; the loop stops at lightCount, so a
     // scene with one light costs what it did before there could be four.
