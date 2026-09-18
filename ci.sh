@@ -954,6 +954,14 @@ else
                     # down was reported as a wall of ok with no reason in it.
                     grep -E 'FAIL|Traceback|Error|error:' "$driver_log" \
                         | sed 's/^/        /' | head -12
+                    # And the driver's own last words, which say WHY when the
+                    # run never got to a check: "never answered /widgets" and
+                    # the editor's output behind it. The greps above matched
+                    # only the toolkit's warnings (an "Error" in a GTK
+                    # message) the first time the editor ran on Linux, and
+                    # the reason -- no test server on that backend -- was in
+                    # the line they skipped.
+                    grep -E 'never answered|could not find|no editor at|driver:' "$driver_log" \n                        | sed 's/^/        /' | head -6
                     tail -3 "$driver_log" | sed 's/^/        /'
                 fi
                 rm -f "$driver_log"
