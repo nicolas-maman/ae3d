@@ -25,7 +25,7 @@ exports (
     renderer_set_normal_strength, renderer_set_occlusion_strength, renderer_set_capture_channel, renderer_set_wetness, renderer_material_texture_size,
     renderer_load_texture, renderer_release_texture, renderer_sample_count, renderer_set_post,
     renderer_set_bloom_intensity, renderer_bloom_intensity,
-    renderer_set_shadows, renderer_shadows, renderer_set_ssr, renderer_ssr, renderer_set_ssr_params, renderer_set_taa, renderer_taa, renderer_add_light, renderer_remove_light,
+    renderer_set_shadows, renderer_shadows, renderer_set_ssr, renderer_ssr, renderer_set_ssr_params, renderer_set_taa, renderer_taa, request_dlss, renderer_set_dlss, renderer_dlss, set_samples, renderer_add_light, renderer_remove_light,
     renderer_set_fog, renderer_fog, renderer_set_clouds, renderer_set_sky_overcast, renderer_set_shadow_distance, renderer_shadow_distance,
     renderer_set_ssao, renderer_ssao,
     skybox_create, skybox_free,
@@ -88,6 +88,14 @@ extern ae3d_vk_frame_height() -> int
 extern ae3d_vk_render_width() -> int
 extern ae3d_vk_render_height() -> int
 extern ae3d_vk_set_render_scale(scale: float) -> float
+extern ae3d_vk_request_dlss(directory: string) -> int
+extern ae3d_vk_set_samples(samples: int)
+extern ae3d_vk_dlss_available() -> int
+extern ae3d_vk_set_dlss(mode: int) -> int
+extern ae3d_vk_dlss() -> int
+extern ae3d_vk_dlss_camera(view: *Mat4, projection: *Mat4, prev_view: *Mat4, prev_projection: *Mat4,
+                           jitter_x: float, jitter_y: float, near: float, far: float, fov: float, aspect: float,
+                           position: *Vec3, up: *Vec3, right: *Vec3, forward: *Vec3)
 extern ae3d_posebank_frames(bank: ptr) -> int
 extern ae3d_posebank_travel(bank: ptr, frame: int) -> float
 extern ae3d_vk_velocity_texture() -> int
@@ -174,6 +182,10 @@ struct VKRenderer {
     // The last frame's time, for the seconds between frames a crowd's
     // motion vectors are worked out over.
     last_scene_time: float
+    // Last frame's view and projection, for DLSS's reprojection.
+    prev_view: Mat4
+    prev_projection: Mat4
+    prev_camera_valid: bool
     // How hard normal maps push, for the whole scene. A look, not a surface.
     normal_strength: float
     occlusion_strength: float
@@ -517,6 +529,56 @@ renderer_set_taa(r: *VKRenderer, on: bool) {
 
 renderer_taa(r: *VKRenderer) -> bool { return ae3d_vk_taa() == 1 }
 
+// DLSS, through NVIDIA Streamline, asked for before the backend starts:
+// the runtime is loaded from `directory` (empty: AE3D_STREAMLINE, or beside
+// the program) and its interposer becomes the Vulkan loader. False, with
+// last_error saying why, where it was not built in or is not there.
+request_dlss(directory: string) -> bool {
+    return ae3d_vk_request_dlss(directory) == 1
+}
+
+// The multisampling the frame takes, asked for before the backend starts:
+// the most it will use (4 by default); 0 or 1 is none.
+set_samples(samples: int) {
+    ae3d_vk_set_samples(samples)
+}
+
+// DLSS at `mode` (0 off, 1 performance, 2 balanced, 3 quality, 4 ultra
+// performance, 5 ultra quality, 6 DLAA): the scene is drawn at the render
+// size the mode wants and DLSS writes the frame from it, its depth and its
+// motion vectors, in the temporal pass's place, with the projection nudged
+// as the temporal pass nudges it. Returns the mode in force: 0 where DLSS
+// is not available (not asked for before the start, not built in, no
+// runtime beside the program, or no card for it).
+renderer_set_dlss(r: *VKRenderer, mode: int) -> int {
+    got = ae3d_vk_set_dlss(mode)
+    r.prev_vp_valid = false
+    r.prev_camera_valid = false
+    return got
+}
+
+renderer_dlss(r: *VKRenderer) -> int { return ae3d_vk_dlss() }
+
+// The frame's camera handed to DLSS: this frame's view and projection and
+// last frame's, the frame's nudge, and the lens. Before the frame's draws.
+dlss_camera(r: *VKRenderer, cam: *Camera) {
+    view = core.camera_view(cam)
+    projection = core.camera_projection(cam)
+    prev_view = view
+    prev_projection = projection
+    if r.prev_camera_valid {
+        prev_view = r.prev_view
+        prev_projection = r.prev_projection
+    }
+    forward = cam.front
+    ae3d_vk_dlss_camera(&view, &projection, &prev_view, &prev_projection, r.jitter_x, r.jitter_y,
+                        cam.near, cam.far, core.deg_to_rad(cam.fov), cam.aspect,
+                        &cam.position, &cam.up, &cam.right, &forward)
+    r.prev_view = view
+    r.prev_projection = projection
+    r.prev_camera_valid = true
+}
+
 // The Halton sequence: the k-th point of the base, in 0..1, spread as
 // evenly as k points can be. Bases 2 and 3 give a pixel's eight offsets.
 halton(index: int, base: int) -> float {
@@ -541,7 +603,7 @@ var g_frame_seconds = 0.0
 
 frame_view_projection(r: *VKRenderer, cam: *Camera) -> Mat4 {
     vp = core.camera_view_projection(cam)
-    if ae3d_vk_taa() != 1 {
+    if ae3d_vk_taa() != 1 && ae3d_vk_dlss() == 0 {
         r.jitter_x = 0.0
         r.jitter_y = 0.0
         return vp
@@ -549,7 +611,17 @@ frame_view_projection(r: *VKRenderer, cam: *Camera) -> Mat4 {
     width = ae3d_vk_render_width() as float
     height = ae3d_vk_render_height() as float
     if width <= 0.0 || height <= 0.0 { return vp }
-    k = r.taa_frame % 8 + 1
+    // Eight points a pixel for the temporal pass; an upscaler wants more,
+    // as many as the pixels it makes of one -- the square of the scale,
+    // eight times -- or its picture is what those eight points reach.
+    phases = 8
+    if ae3d_vk_dlss() > 0 {
+        scale = ae3d_vk_frame_width() as float / width
+        phases = (8.0 * scale * scale + 0.5) as int
+        if phases < 8 { phases = 8 }
+        if phases > 64 { phases = 64 }
+    }
+    k = r.taa_frame % phases + 1
     jx = (halton(k, 2) - 0.5) * 2.0 / width
     jy = (halton(k, 3) - 0.5) * 2.0 / height
     // Kept for the temporal pass, in texture space; Vulkan's y runs down.
@@ -1584,6 +1656,7 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
 
     unjittered = core.camera_view_projection(cam)
     view_projection = frame_view_projection(r, cam)
+    if ae3d_vk_dlss() > 0 { dlss_camera(r, cam) }
     // The last frame's view-projection, for the motion vectors and the
     // temporal pass to find each pixel's history by; this frame's, when
     // there was no last frame.

@@ -115,6 +115,27 @@
   inverse binds where `skeleton_bind` would derive them from the pose.
 - `native/ae3d_blob.c`: a file as bytes and the little-endian numbers in it.
 
+### DLSS
+
+- NVIDIA DLSS through Streamline, on Vulkan: `engine_set_dlss(e, mode)`
+  or `AE3D_DLSS=n` (1 performance, 2 balanced, 3 quality, 4 ultra
+  performance, 6 DLAA). The runtime is loaded before Vulkan starts and
+  its interposer is the loader; the scene is drawn at the mode's render
+  size with the textures' mips biased by `log2(scale)` and no
+  multisampling; the camera, the jitter and the motion-vector scale go
+  in each frame, the colour, depth, vectors and output are tagged, and
+  the evaluation sits where the temporal pass was. `native/ae3d_dlss.cpp`
+  is built only with `AE3D_STREAMLINE_ROOT` (the SDK); the stub
+  otherwise says so. The runtime is not shipped (`AE3D_STREAMLINE` or
+  beside the program). Without it the program says why, draws as before
+  and the temporal pass stands in. `tests/test_dlss` (skips where it
+  cannot run). `AE3D_MSAA=n` sets the multisampling on any scene, and
+  Vulkan honours `engine_set_msaa` now (it always took 4).
+- Found on the way: an upscaler fed textures sampled at the render size's
+  mip could not reconstruct what was never sampled -- the negative LOD
+  bias is what took DLSS quality from a soft upscale to the native
+  frame's sharpness.
+
 ### Render scale on Vulkan
 
 - `engine_set_render_scale(e, scale)` draws the scene smaller than the
