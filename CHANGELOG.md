@@ -48,11 +48,20 @@
   clouds sit in the haze by their distance. The layer is 1400 to 2600 m.
 - `native/shaders/generate.py` takes a sampler as `name:3D` for a
   three-dimensional binding.
+- The clouds are lit by the key light's colour times its intensity, and
+  their sky light is lifted toward white only by day: a sun the sky module
+  had set below the horizon lit them as at noon all night, and a cloud lit
+  by a dark sky is a darker patch of it.
 - A batched model that moves no longer stalls the frame on Vulkan: the
   batch's instance stream is written into its ring, a slot a frame in
   flight, instead of freed (a wait for the whole device) and uploaded
   afresh. `lights`, five spinning spheres, went from 6.9 ms of CPU a frame
   to 0.1. `scripts/perf.sh` reads a stage time printed in exponent form.
+- The scene's split by stage is on the editor's stats bar (depth, sky,
+  opaque, ao, clear) and in the agent's `frame.stats` (`stages_ms`), on
+  Vulkan, the same figures `AE3D_PERF` prints. A frame with no sky to draw
+  stamps the sky's end all the same, so its opaque draws are no longer
+  charged to the sky.
 
 ### The editor's look
 

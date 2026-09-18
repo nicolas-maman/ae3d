@@ -44,7 +44,7 @@ interleaved with the first.
 |---|---|---|
 | `help` |  | This table. Every op, its arguments and what it answers. |
 | `ping` |  | Liveness. Answers immediately, on the frame it was drained. |
-| `frame.stats` |  | frame, fps, delta, viewport, draw calls and instances for the last frame, and the mean milliseconds a frame has cost to submit. |
+| `frame.stats` |  | frame, fps, delta, viewport, draw calls and instances for the last frame, the mean milliseconds a frame has cost to submit, and on Vulkan the scene split by stage (stages_ms: camdepth, sky, opaque, occlusion, transparent). |
 | `camera.get` |  | Camera position, orientation, field of view and clip planes. |
 | `scene.tree` | `[detail], [audit]` | Every model the renderer holds: index, name, position and visibility. With detail, also its material, texture, parent, world position, triangles and where it lands on screen -- one round trip instead of one per model. With audit, what the surface is made of: its area in metres, its size along each axis, how many ways its faces point, how often its texture repeats across a metre and how many texels that is. |
 | `render.set` | `[normal_strength], [occlusion_strength], [bloom_intensity], [shadows]` | How hard normal maps push, how much baked occlusion is applied, how strong the bloom is, and whether shadows are cast, for the whole scene. Zero on any strength, or shadows off, is the frame this renderer draws without that -- bloom_intensity of zero is no glow, shadows false is no shadow at all -- which is what makes each one's difference measurable rather than a matter of opinion. |

@@ -3377,6 +3377,16 @@ void ae3d_vk_draw_sky(int mesh_handle, int texture_handle, int weather_handle, i
     ae3d_vk_stamp_through(3);
 }
 
+/* The sky is done, drawn or not: the renderer says so before the opaque
+   draws, so a frame with no sky to draw does not charge the opaque draws
+   to the sky -- the stamp the sky draw would have written is written
+   here, at the same moment, and the sky stage reads zero. */
+void ae3d_vk_mark_sky_done(void) {
+    if (!vk.recording) return;
+    ae3d_vk_open_scene_pass();
+    ae3d_vk_stamp_through(3);
+}
+
 /* The opaque draws are done: the renderer says so before the occlusion and
    the transparent draws, so the stamps split them. */
 void ae3d_vk_mark_opaque_done(void) {

@@ -374,7 +374,11 @@ vec4 cloudsAlong(vec3 dir, vec3 sky, float cover, float t, float dither) {
             float powder = 1.0 - 0.7 * exp(-d * 8.0);
             // The sky's light, from the blue above and the ground below,
             // dimmed down the layer and inside the cloud.
-            vec3 skyLight = mix(sky, vec3(1.0), 0.35);
+            // Lifted toward white by day, when the ground and the air
+            // scatter light up into the layer, and not at night, when a
+            // cloud lit only by a dark sky is a darker patch of it.
+            float skyLuma = dot(sky, vec3(0.299, 0.587, 0.114));
+            vec3 skyLight = mix(sky, vec3(1.0), 0.35 * clamp(skyLuma * 2.5, 0.0, 1.0));
             vec3 ambient = skyLight * mix(0.30, 0.50, hf) * (0.6 + 0.4 * exp(-tau * 0.5));
             vec3 c = sunLight * beer * powder * phase + ambient;
             // Rolled off, since the sky is drawn without the scene's tone
