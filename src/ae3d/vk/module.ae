@@ -21,7 +21,7 @@ exports (
     renderer_new, renderer_free, backend,
     available, device_name, last_error,
     renderer_model_count, renderer_model, renderer_light_count, renderer_light, renderer_draw_calls, renderer_set_clear_color,
-    renderer_shadow_ms, renderer_scene_ms, renderer_post_ms, renderer_cpu_work_ms, renderer_post_active, renderer_program_binds, renderer_material_binds,
+    renderer_shadow_ms, renderer_scene_ms, renderer_post_ms, renderer_stage_ms, STAGE_COUNT, stage_name, renderer_cpu_work_ms, renderer_post_active, renderer_program_binds, renderer_material_binds,
     renderer_set_normal_strength, renderer_set_occlusion_strength, renderer_material_texture_size,
     renderer_load_texture, renderer_release_texture, renderer_sample_count, renderer_set_post,
     renderer_set_bloom_intensity, renderer_bloom_intensity,
@@ -90,6 +90,7 @@ extern ae3d_vk_set_ssao(on: int, radius: float, intensity: float)
 extern ae3d_vk_default_texture() -> int
 extern ae3d_vk_ssao() -> int
 extern ae3d_vk_draw_ssao()
+extern ae3d_vk_mark_opaque_done()
 extern ae3d_vk_ssr() -> int
 extern ae3d_vk_set_post(fxaa: int, bloom: int, threshold: float, intensity: float)
 extern ae3d_vk_set_bloom_intensity(intensity: float)
@@ -1381,6 +1382,7 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     ae3d_vk_set_program(core.SHADER_CUSTOM)
 
     draw_opaque(r)
+    ae3d_vk_mark_opaque_done()
     // The occlusion over what the opaque pass drew, before the transparent
     // one, so the water is not darkened by the ground it hides.
     if ssao_on && depth_ready { ae3d_vk_draw_ssao() }
@@ -1677,6 +1679,23 @@ renderer_draw_calls(r: *VKRenderer) -> int {
 
 renderer_post_active(r: *VKRenderer) -> bool { return ae3d_vk_post_active() == 1 }
 renderer_shadow_ms(r: *VKRenderer) -> float { return r.last_shadow_ms }
+
+// The frame's stages, as the device timed them: 0 shadow, 1 scene (the
+// whole of 3 to 7), 2 post, 3 camera depth, 4 sky, 5 opaque, 6 occlusion,
+// 7 transparent. What a change to the engine changes, stage by stage.
+const STAGE_COUNT = 8
+renderer_stage_ms(r: *VKRenderer, stage: int) -> float { return ae3d_vk_pass_ms(stage) }
+stage_name(stage: int) -> string {
+    if stage == 0 { return "shadow" }
+    if stage == 1 { return "scene" }
+    if stage == 2 { return "post" }
+    if stage == 3 { return "camdepth" }
+    if stage == 4 { return "sky" }
+    if stage == 5 { return "opaque" }
+    if stage == 6 { return "occlusion" }
+    if stage == 7 { return "transparent" }
+    return "?"
+}
 renderer_scene_ms(r: *VKRenderer) -> float { return r.last_scene_ms }
 renderer_cpu_work_ms(r: *VKRenderer) -> float { return r.last_cpu_work_ms }
 renderer_post_ms(r: *VKRenderer) -> float { return r.last_post_ms }

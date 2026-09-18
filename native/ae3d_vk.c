@@ -43,7 +43,11 @@
 /* Asked for at binding 4 in place of a texture handle: the camera depth. */
 #define AE3D_VK_AUX_SCENE_DEPTH (-1)
 /* Timestamps a frame: start, after shadow, after scene, after post. */
-#define AE3D_VK_STAMPS 4
+/* Eight timestamps a frame: the start, and the end of the shadow pass, the
+   camera-depth prepass, the sky, the opaque draws, the occlusion, the
+   transparent draws (the scene pass's end) and the post chain. */
+#define AE3D_VK_STAMPS 8
+#define AE3D_VK_STAGES 8
 /* A cached descriptor set whose texture has been destroyed. Not zero: zero is
    a texture handle nothing uses, and not -1 alone, which reads as an error. */
 #define AE3D_VK_SET_FREE (-2)
@@ -336,7 +340,7 @@ static struct {
     int timestamps_usable;        /* the graphics queue reports valid bits */
     int stamped[AE3D_VK_FRAMES];  /* this frame's four stamps were all written */
     int stamp_next;               /* how many of this frame's stamps are written */
-    double pass_ms[3];
+    double pass_ms[AE3D_VK_STAGES];
 
     /* What a frame costs in changes of mind, the same way the OpenGL backend
        counts them. A pipeline bound twice in a row is bound once. */
@@ -3021,14 +3025,27 @@ static void ae3d_vk_collect_stamps(void) {
                                    VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) {
         return;
     }
-    for (i = 0; i < 3; i++) {
-        vk.pass_ms[i] = ticks[i + 1] >= ticks[i]
-            ? (double)(ticks[i + 1] - ticks[i]) * vk.timestamp_ms : 0.0;
-    }
+    /* The three a frame has always been split into -- shadow, scene, post --
+       and the scene's own split: camera depth, sky, opaque, occlusion,
+       transparent. The scene is the whole of stamps 1 to 6. */
+#define AE3D_VK_SPAN(a, b) (ticks[b] >= ticks[a] ? (double)(ticks[b] - ticks[a]) * vk.timestamp_ms : 0.0)
+    vk.pass_ms[0] = AE3D_VK_SPAN(0, 1);
+    vk.pass_ms[1] = AE3D_VK_SPAN(1, 6);
+    vk.pass_ms[2] = AE3D_VK_SPAN(6, 7);
+    vk.pass_ms[3] = AE3D_VK_SPAN(1, 2);
+    vk.pass_ms[4] = AE3D_VK_SPAN(2, 3);
+    vk.pass_ms[5] = AE3D_VK_SPAN(3, 4);
+    vk.pass_ms[6] = AE3D_VK_SPAN(4, 5);
+    vk.pass_ms[7] = AE3D_VK_SPAN(5, 6);
+#undef AE3D_VK_SPAN
+    (void)i;
 }
 
+/* What a stage of the last finished frame cost on the device, in
+   milliseconds: 0 shadow, 1 scene (all of 3 to 7), 2 post, 3 camera depth,
+   4 sky, 5 opaque, 6 occlusion, 7 transparent. */
 double ae3d_vk_pass_ms(int pass) {
-    if (pass < 0 || pass > 2) return 0.0;
+    if (pass < 0 || pass >= AE3D_VK_STAGES) return 0.0;
     return vk.pass_ms[pass];
 }
 
@@ -3349,6 +3366,15 @@ void ae3d_vk_draw_sky(int mesh_handle, int texture_handle) {
     if (!vk.sky_pipeline || texture_handle <= 0) return;
     vk.program = AE3D_VK_PROGRAM_SCENE;
     ae3d_vk_draw_pipeline(vk.sky_pipeline, mesh_handle, texture_handle, 0, 1);
+    ae3d_vk_stamp_through(3);
+}
+
+/* The opaque draws are done: the renderer says so before the occlusion and
+   the transparent draws, so the stamps split them. */
+void ae3d_vk_mark_opaque_done(void) {
+    if (!vk.recording) return;
+    ae3d_vk_open_scene_pass();
+    ae3d_vk_stamp_through(4);
 }
 
 void ae3d_vk_set_screen_quad(int mesh_handle) { vk.screen_quad = mesh_handle; }
@@ -3595,6 +3621,7 @@ void ae3d_vk_camdepth_end(void) {
     ae3d_vkCmdEndRenderPass(vk.command_buffers[vk.frame]);
     vk.in_camdepth = 0;
     vk.pass_open = 0;
+    ae3d_vk_stamp_through(2);
     // Viewport and scissor are already the full extent; the scene pass sets its
     // own besides.
 }
@@ -3756,6 +3783,7 @@ void ae3d_vk_draw_ssao(void) {
     ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_SSAORADIUS, vk.ssao_radius);
     ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_SSAOINTENSITY, vk.ssao_intensity);
     ae3d_vk_draw_screen(vk.ssao_pipeline, &vk.ssao_set[(int)vk.frame], vk.default_texture);
+    ae3d_vk_stamp_through(5);
 }
 
 // The ordinary composite: bloom, else fxaa, else a straight copy, reading the
@@ -3778,7 +3806,7 @@ int ae3d_vk_frame_end(void) {
     ae3d_vk_open_scene_pass();
     ae3d_vkCmdEndRenderPass(vk.command_buffers[vk.frame]);
     vk.pass_open = 0;
-    ae3d_vk_stamp_through(2);
+    ae3d_vk_stamp_through(6);
 
     if (vk.post_active) {
         VkRenderPassBeginInfo pass;
@@ -3903,7 +3931,7 @@ int ae3d_vk_frame_end(void) {
         vk.capture_request = 0;
     }
 
-    ae3d_vk_stamp_through(3);
+    ae3d_vk_stamp_through(7);
     vk.stamped[vk.frame] = vk.stamp_next == AE3D_VK_STAMPS;
     ae3d_vkEndCommandBuffer(vk.command_buffers[vk.frame]);
 

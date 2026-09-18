@@ -17,6 +17,9 @@ import ae3d.sky
 import ae3d.behaviour
 import std.os
 
+extern calloc(count: int, size: int) -> ptr
+extern free(block: ptr)
+
 exports (
     Engine, Behaviour,
     behaviour_new, engine_add_behaviour, engine_remove_behaviour, engine_behaviour_count, engine_behaviour,
@@ -147,6 +150,20 @@ struct Engine {
     animations: ptr
     agent_steps_left: int
     frame_limit: int
+
+    // AE3D_PERF=1: what the run cost, summed over its frames and said at
+    // the end -- the device's own time in each pass, the CPU's in
+    // submitting, the draws -- so a scene is measured by the same numbers
+    // wherever it runs and a change to the engine is a change in them.
+    perf_on: bool
+    perf_frames: int
+    perf_shadow_ms: float
+    perf_scene_ms: float
+    perf_post_ms: float
+    perf_cpu_ms: float
+    perf_draws: int
+    perf_started: float
+    perf_stage_ms: ptr
 }
 
 // A behaviour with no phases yet: set the ones it takes part in.
@@ -308,6 +325,8 @@ engine_new_with(api: int) -> *Engine {
     e.fixed_step = 1.0 / 60.0
     e.first_mouse = true
     e.frame_limit = frame_limit_from_env()
+    e.perf_on = core.env_int("AE3D_PERF", 0) == 1
+    e.perf_stage_ms = calloc(vk.STAGE_COUNT, 8)
     e.animations = anim.registry_new() as ptr
 
     if api == platform.API_VULKAN {
@@ -477,6 +496,7 @@ engine_free(e: *Engine) {
         e.animations = null
     }
     if e.camera != null { core.camera_free(e.camera as *Camera) }
+    if e.perf_stage_ms != null { free(e.perf_stage_ms) }
     // The behaviours are the program's: their states are freed by whoever
     // made them; the list and the records the engine made are the engine's.
     if e.behaviours != null {
@@ -1046,7 +1066,66 @@ service_agent_snapshot(e: *Engine) {
     string.free(path)
 }
 
+// The last frame's costs, added to the run's. The first frames are left
+// out: they carry the uploads and the pipeline builds, which are the cost
+// of starting and not of a frame.
+account_perf(e: *Engine) {
+    if e.frame_count <= 10 { e.perf_started = platform.time(); return }
+    shadow = 0.0
+    scene = 0.0
+    post = 0.0
+    cpu = 0.0
+    if e.api == platform.API_VULKAN {
+        vkr = e.backend_state as *VKRenderer
+        shadow = vk.renderer_shadow_ms(vkr)
+        scene = vk.renderer_scene_ms(vkr)
+        post = vk.renderer_post_ms(vkr)
+        cpu = vk.renderer_cpu_work_ms(vkr)
+        stages = e.perf_stage_ms as float[]
+        k = 0
+        while k < vk.STAGE_COUNT {
+            stages[k] = stages[k] + vk.renderer_stage_ms(vkr, k)
+            k = k + 1
+        }
+    } else {
+        glr = e.gl_renderer as *GLRenderer
+        shadow = gl.renderer_shadow_ms(glr)
+        scene = gl.renderer_scene_ms(glr)
+        post = gl.renderer_post_ms(glr)
+        cpu = engine_render_ms(e)
+    }
+    e.perf_frames = e.perf_frames + 1
+    e.perf_shadow_ms = e.perf_shadow_ms + shadow
+    e.perf_scene_ms = e.perf_scene_ms + scene
+    e.perf_post_ms = e.perf_post_ms + post
+    e.perf_cpu_ms = e.perf_cpu_ms + cpu
+    e.perf_draws = e.perf_draws + engine_draw_calls(e)
+}
+
+// One line, machine-readable, the same on every backend: what a frame of
+// this run cost on the device and on the CPU, on average, past the first ten.
+say_perf(e: *Engine) {
+    if !e.perf_on || e.perf_frames <= 0 { return }
+    n = e.perf_frames * 1.0
+    wall = platform.time() - e.perf_started
+    fps = 0.0
+    if wall > 0.0 { fps = n / wall }
+    println("perf backend=${e.backend_name} frames=${e.perf_frames} fps=${fps} gpu_shadow_ms=${e.perf_shadow_ms / n} gpu_scene_ms=${e.perf_scene_ms / n} gpu_post_ms=${e.perf_post_ms / n} cpu_ms=${e.perf_cpu_ms / n} draws=${e.perf_draws / e.perf_frames} width=${e.width} height=${e.height}")
+    if e.api == platform.API_VULKAN {
+        // The scene's own split, which is where a frame's cost is.
+        stages = e.perf_stage_ms as float[]
+        line = "perf stages"
+        k = 3
+        while k < vk.STAGE_COUNT {
+            line = "${line} ${vk.stage_name(k)}=${stages[k] / n}"
+            k = k + 1
+        }
+        println(line)
+    }
+}
+
 engine_shutdown(e: *Engine) {
+    say_perf(e)
     if e.agent_on {
         agent.capture_release()
         agent.stop()
@@ -1175,6 +1254,7 @@ engine_loop(e: *Engine) {
         // Last thing in the frame: the numbers a query reports are the finished
         // frame's, and a snapshot taken now is of a frame that exists.
         if e.agent_on { pump_agent(e) }
+        if e.perf_on && !held { account_perf(e) }
 
         if e.frame_limit > 0 && e.frame_count >= e.frame_limit { e.running = false }
     }
