@@ -626,6 +626,13 @@ on_start(state: ptr, e: *Engine) {
         if fig.far_exported { far_default = 0 }
         far_cell = core.env_int("AE3D_LODFAR", far_default) as float / 100.0
         fig.far_tris = setup_crowd(fig.far_body, far_cell, fig.bank)
+        // The near tier casts its shadow and writes its depth from the far
+        // tier's mesh: the shadow map and the camera depth read a figure's
+        // silhouette, never its face, and the full mesh through the two
+        // depth-only passes was two thirds of the crowd's cost. The clothes
+        // are inside that silhouette and cast nothing of their own.
+        core.model_set_depth_proxy(fig.near_body, fig.far_body)
+        if fig.near_clothes != null { core.model_set_casts_shadow(fig.near_clothes, false) }
         engine.engine_add_model(e, fig.near_body)
         if fig.near_clothes != null { engine.engine_add_model(e, fig.near_clothes) }
         engine.engine_add_model(e, fig.far_body)

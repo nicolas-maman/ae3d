@@ -711,7 +711,17 @@ shadow_draw_model(m: *Model) {
     ae3d_vk_scene_set_int(vkscene.OFF_ISINSTANCED, instanced)
     ae3d_vk_scene_set_int(vkscene.OFF_INSTANCEPOINTS, points)
     pose(m)
-    ae3d_vk_shadow_draw(m.vbo, m.instance_vbo, instances)
+    // The depth-only passes take the proxy's mesh where the model has one:
+    // a crowd's near tier casts its shadow and writes its depth from the far
+    // tier's hundred and sixty-eight triangles instead of its twenty-six
+    // thousand, which at twenty thousand figures is the shadow pass and the
+    // camera depth each halved.
+    vbo = m.vbo
+    if m.depth_proxy != null {
+        proxy = m.depth_proxy as *Model
+        if proxy.vbo != 0 { vbo = proxy.vbo }
+    }
+    ae3d_vk_shadow_draw(vbo, m.instance_vbo, instances)
 }
 
 // A model's matrix without its translation: what a point instance is

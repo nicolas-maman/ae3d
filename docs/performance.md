@@ -37,7 +37,7 @@ the GPU, the other runs measured that too. It prints the table below.
 | sand | 74 | 6.26 | 0.63 | 2.79 | 0.09 | 0.02 | 0.07 | 0.00 | 3.43 | 15 |
 | smooth_terrain | 139 | 2.98 | 2.22 | 0.34 | 0.12 | 0.23 | 0.05 | 0.02 | 0.09 | 6 |
 | voxel_world | 144 | 1.44 | 0.89 | 0.24 | 0.08 | 0.16 | 0.12 | 0.00 | 0.09 | 6 |
-| zombie_city | 141 | 4.84 | 0.02 | 2.60 | 0.08 | 0.01 | 2.22 | 0.01 | 0.67 | 1194 |
+| zombie_city | 137 | 3.23 | 0.02 | 2.75 | 0.08 | 0.02 | 0.08 | 0.01 | 0.75 | 1192 |
 | zombie_street | 144 | 0.33 | 0.01 | 0.28 | 0.01 | 0.00 | 0.07 | 0.23 | 0.20 | 338 |
 
 Before the clouds were baked into textures (the previous entry, the same
@@ -57,6 +57,16 @@ weather and shape textures -- is a millisecond and a half to two in
 seven. The sand's opaque stage is a million grains at eight triangles each
 and its CPU time is the simulation; the city's shadow pass is its buildings
 and its crowd into the shadow map. Those two are where the frame is now.
+
+The crowd's depth-only passes were its cost. At `AE3D_CROWD=2000` the
+shadow pass and the camera-depth prepass were 10 ms each and the opaque
+draws 13, because the near tier's 26,636-triangle figure went through all
+three; a shadow and an occluder read a figure's silhouette, not its face,
+so the near tier now casts and writes depth from the far tier's
+168-triangle stand-in (`model_set_depth_proxy`): 2,000 figures 30 to 68
+fps, 20,000 at `AE3D_NEAR=28` 54 to 91, and the 400 of the default scene
+lose their 2.2 ms shadow pass. On OpenGL the proxy is not yet taken (a VAO
+binds a mesh to its instance stream) and the full mesh is drawn as before.
 
 The table found a stall as well: `lights` spent 6.9 ms of CPU a frame, at
 nine draws, because a batched model that moves had its instance buffer
