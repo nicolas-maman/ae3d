@@ -115,6 +115,17 @@
   inverse binds where `skeleton_bind` would derive them from the pose.
 - `native/ae3d_blob.c`: a file as bytes and the little-endian numbers in it.
 
+### Wet surfaces
+
+- `engine_set_wetness(e, amount)`: rain on the scene. Every surface that
+  faces up goes darker, smoother and a mirror at a grazing angle -- the
+  lamps smear down a wet road the way they never do a dry one -- and walls
+  hardly change, water runs off them. The weather sets it with the rain
+  (half to full with the intensity), full in a storm, dry under snow and
+  dust, and takes it back with the clear. `tests/test_shading_knobs` holds
+  it to changing the picture. The rain's fog is the colour its overcast
+  sky comes to at the horizon.
+
 ### The job pool
 
 - `native/ae3d_jobs.c`: a pool of worker threads, one for every hardware

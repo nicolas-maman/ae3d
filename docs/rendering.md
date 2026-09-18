@@ -132,6 +132,14 @@ picture the same. The transparent pixels of an atlas carry the colour of
 the nearest opaque ones (bled outward at the bake), so the texture's filter
 and mip levels never blend a key colour into an edge.
 
+### Rain on the surfaces
+
+`engine_set_wetness(e, amount)` is rain on the scene: every surface that
+faces up goes darker (its pores filled), smoother, and a mirror at a
+grazing angle, so the lamps smear down a wet road; walls, which water
+runs off, hardly change. The weather sets it with the rain and the storm
+and takes it back with the clear.
+
 ### The scene's depth
 
 The occlusion, the reflection and the water read the scene's depth. On
