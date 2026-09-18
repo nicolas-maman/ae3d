@@ -214,6 +214,10 @@ layout(location = 2) in vec3 fragPosition;
 // Configurable sky parameters
 
 
+// The sky's overcast, as the sky shader draws it: the sea reflects the sky
+// there is, grey under a storm and not the blue of a painted afternoon.
+
+
 
 // GPU Gems Chapter 9 & 11: Shadow support for water with antialiasing
 
@@ -532,6 +536,14 @@ float water_below(vec3 fragmentPos, vec3 eye) {
 // What the surface reflects: the skybox image where the reflected ray meets
 // it, read as the equirect the skybox shader reads, or the two sky colours
 // graded from horizon to zenith when the scene has no image.
+// The overcast over a sky colour, the pull the sky shader makes: toward a
+// flat cast at the sky's own brightness. In display space, as the sky is.
+vec3 overcastSky(vec3 shown) {
+    if (skyOvercast <= 0.0) return shown;
+    float luma = dot(shown, vec3(0.299, 0.587, 0.114));
+    return mix(shown, skyOvercastColor * (0.35 + 0.65 * luma), clamp(skyOvercast, 0.0, 1.0));
+}
+
 vec3 reflectedSky(vec3 ray) {
     ray.y = abs(ray.y);
     if (hasSkyTexture == 1) {
@@ -540,10 +552,10 @@ vec3 reflectedSky(vec3 ray) {
         vec3 shown = textureLod(textureSampler,
                                 vec2((theta + 3.14159265) / 6.28318531,
                                      (phi + 1.57079633) / 3.14159265), 0.0).rgb;
-        return pow(shown, vec3(2.2));
+        return pow(overcastSky(shown), vec3(2.2));
     }
-    vec3 zenith = pow(skyColor, vec3(2.2));
-    vec3 rim = pow(horizonColor, vec3(2.2));
+    vec3 zenith = pow(overcastSky(skyColor), vec3(2.2));
+    vec3 rim = pow(overcastSky(horizonColor), vec3(2.2));
     return mix(rim, zenith, smoothstep(0.0, 0.35, ray.y));
 }
 
@@ -611,7 +623,7 @@ void main() {
     // colour times its intensity, tone mapped and gamma-corrected at the
     // end the way the terrain beside the water is, so the two agree.
     vec3 sun = lightColor * lightIntensity;
-    vec3 skyLight = pow(skyColor, vec3(2.2));
+    vec3 skyLight = pow(overcastSky(skyColor), vec3(2.2));
 
     // The sun's glitter: GGX, the surface a little rougher far off so the
     // highlight there is a path of light and not a scatter of aliased points.

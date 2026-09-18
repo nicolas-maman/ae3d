@@ -79,6 +79,18 @@
   the sea beside it blue.
 - A Vulkan instance stream that was empty when its model was added gets
   its buffer the first frame it has instances.
+- The white band along the horizon under any cloud cover is gone: the
+  cloud march faded its alpha toward the horizon but not its premultiplied
+  colour, which was then added over a sky the alpha had left standing
+  (rows at the horizon read 249..255 under a storm; the fogged sea below
+  them 132). Both fade together now and the layer meets the fog.
+- The sea reflects the sky there is: the water shader takes the sky's
+  overcast (`skyOvercast`, `skyOvercastColor`, through the water
+  program's own uniforms on OpenGL and the shared block on Vulkan) and
+  pulls its reflected sky and sky light toward the overcast's grey, so
+  the sea under a storm is grey-blue and not the painted afternoon's
+  blue. `tests/test_backend_parity` holds the overcast sea on both
+  backends and checks it goes greyer.
 - The editor's weather section (#328): the kind as five buttons, the
   strength, the wind's heading and speed as rows, undone and saved with
   the scene (`weather` in the file, the kind by name), and an overcast
