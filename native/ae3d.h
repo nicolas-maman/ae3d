@@ -412,10 +412,13 @@ int    ae3d_vk_dlss_failed(void);
    the shadows traced through it (docs/rendering.md, "Ray-traced shadows"). */
 int    ae3d_vk_ray_query(void);
 void   ae3d_vk_ray_begin(void);
+int    ae3d_vk_ray_reserve(int count, int statics);
+int    ae3d_vk_ray_indirect(void);
 void   ae3d_vk_ray_add(int mesh_handle, const float *matrices, int count);
 void   ae3d_vk_ray_add_one(int mesh_handle, const double *matrix);
 int    ae3d_vk_ray_build(void);
 void   ae3d_vk_set_ray_shadows(int on);
+void   ae3d_vk_set_ray_reach(double metres);
 int    ae3d_vk_ray_shadows(void);
 int    ae3d_vk_ray_shadows_now(void);
 void   ae3d_vk_dlss_camera(const double *view, const double *projection,
@@ -437,6 +440,11 @@ int    ae3d_vk_crowd_fill(int handle, const double *pos, const double *yaw, cons
 int    ae3d_vk_crowd_sort(int handle, double cx, double cz, double near_dist, double mid_dist,
                           double cull_dist);
 void   ae3d_vk_draw_crowd_tier(int mesh_handle, int texture_handle, int handle, int tier);
+/* A crowd in the rays: the far mesh at every frame of its pose bank as a
+   bottom-level structure each, and the crowd's figures pointing at them. */
+int    ae3d_vk_pose_blas_create(void *mesh, const float *bank, int frames, int bones);
+void   ae3d_vk_pose_blas_destroy(int handle);
+void   ae3d_vk_crowd_set_poses(int handle, int poses);
 void   ae3d_vk_shadow_draw_crowd_tier(int mesh_handle, int handle, int tier);
 void   ae3d_vk_set_taa(int on);
 int    ae3d_vk_taa(void);

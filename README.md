@@ -197,8 +197,8 @@ gives, multiplayer -- and the map of what that still needs is
 [#326](https://github.com/nicolas-maman/ae3d/issues/326): every line becomes
 an issue when it is next, and lands as measured, tested pull requests. Done
 on that map: the crowd's sort on the device and its indirect draws, motion
-vectors, render scale, DLSS, ray-traced shadows, weather. Next:
-the crowd and the skinned in the ray-traced scene and occlusion by ray
+vectors, render scale, DLSS, ray-traced shadows with the crowd in them,
+weather. Next: the skinned in the ray-traced scene and occlusion by ray
 ([#323](https://github.com/nicolas-maman/ae3d/issues/323)), a clustered
 lighting path, streaming tiles, physics, navigation, audio, input mapping,
 multiplayer; DirectX 12 ([#311](https://github.com/nicolas-maman/ae3d/issues/311))

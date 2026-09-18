@@ -24,12 +24,17 @@ exports (
     horde_seek,
     HordeGrid, grid_new, grid_free, horde_separate,
     crowd_wander, crowd_step, crowd_bucket, crowd_tiers, crowd_audit,
-    device_crowd_new, device_crowd_free, device_crowd_bind, device_crowd_update, device_crowd_count
+    device_crowd_new, device_crowd_free, device_crowd_bind, device_crowd_update, device_crowd_count,
+    device_crowd_rays
 )
 
 extern ae3d_vk_crowd_create(capacity: int) -> int
 extern ae3d_vk_crowd_destroy(handle: int)
 extern ae3d_vk_crowd_count(handle: int, tier: int) -> int
+extern ae3d_vk_pose_blas_create(mesh: ptr, bank: ptr, frames: int, bones: int) -> int
+extern ae3d_vk_pose_blas_destroy(handle: int)
+extern ae3d_vk_crowd_set_poses(handle: int, poses: int)
+extern ae3d_vk_ray_indirect() -> int
 
 extern ae3d_posebank_create(frames: int, bones: int) -> ptr
 extern ae3d_posebank_destroy(bank: ptr)
@@ -333,8 +338,30 @@ device_crowd_count(dc: *DeviceCrowd, tier: int) -> int {
 
 device_crowd_free(dc: *DeviceCrowd) {
     if dc == null { return }
+    if dc.poses != 0 { ae3d_vk_pose_blas_destroy(dc.poses) }
     if dc.handle != 0 { ae3d_vk_crowd_destroy(dc.handle) }
     heap.free(dc)
+}
+
+// The crowd in the ray-traced scene: `far` (the far tier's skinned model,
+// a hundred and sixty-eight triangles) skinned at every frame of `bank`
+// into a bottom-level structure each, and from then on the sort writes
+// every figure's ray instance -- where it stands, facing as it walks,
+// posed at the frame its walk is at -- so the horde shadows by ray with
+// the rest of the scene, and leaves the shadow map. False where the
+// device does not trace, and the map keeps the crowd.
+device_crowd_rays(dc: *DeviceCrowd, far: *Model, bank: ptr) -> bool {
+    if dc == null || far == null || bank == null { return false }
+    if dc.poses != 0 { return true }
+    // The figures are counted on the device as the sort keeps them; a
+    // device that cannot build from its own count keeps the crowd in the map.
+    if ae3d_vk_ray_indirect() != 1 { return false }
+    frames = ae3d_posebank_frames(bank)
+    bones = ae3d_posebank_bones(bank)
+    dc.poses = ae3d_vk_pose_blas_create(core.model_mesh(far), ae3d_posebank_data(bank), frames, bones)
+    if dc.poses == 0 { return false }
+    ae3d_vk_crowd_set_poses(dc.handle, dc.poses)
+    return true
 }
 
 // `m` draws tier `tier` (0 near, 1 mid, 2 far) of the crowd. Two models can

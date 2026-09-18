@@ -216,7 +216,26 @@ typedef struct {
     float scale[AE3D_VK_CROWD_TIERS][4];
     unsigned indices[AE3D_VK_CROWD_TIERS];        /* a tier's mesh's index count */
     unsigned shadow_indices[AE3D_VK_CROWD_TIERS]; /* its depth proxy's, for the shadow draw */
+    int poses;                    /* the pose structures its rays use (a handle), 0 for none */
+    unsigned ray_base;            /* this frame's first instance slot, when the sort wrote them */
+    int ray_written;
 } ae3d_vk_crowd;
+
+/* A crowd's figures in the rays: the far mesh skinned on the CPU at every
+   frame of the pose bank, a bottom-level structure each, and their
+   addresses in a buffer the sort reads to point each figure's instance at
+   the frame its walk is at. */
+typedef struct {
+    int in_use;
+    int frames;
+    VkBuffer *vertices;
+    VkDeviceMemory *vertex_memory;
+    VkAccelerationStructureKHR *blas;
+    VkBuffer *blas_buffer;
+    VkDeviceMemory *blas_memory;
+    VkBuffer addresses;
+    VkDeviceMemory address_memory;
+} ae3d_vk_pose_blas;
 #define AE3D_VK_CROWD_DRAWS (AE3D_VK_CROWD_TIERS * 2)
 
 typedef struct {
@@ -333,6 +352,7 @@ static struct {
        shadows are traced through it. */
     int ray_query;
     int ray_shadows;
+    double ray_reach;    /* how far from the camera a crowd figure is in the rays; 0 for all */
     unsigned as_scratch_alignment;
     VkAccelerationStructureKHR tlas[AE3D_VK_FRAMES];
     VkBuffer tlas_buffer[AE3D_VK_FRAMES];
@@ -345,7 +365,19 @@ static struct {
     VkDeviceMemory tlas_instances_memory[AE3D_VK_FRAMES];
     void *tlas_instances_mapped[AE3D_VK_FRAMES];
     unsigned tlas_capacity[AE3D_VK_FRAMES];
-    unsigned tlas_count;          /* instances added this frame */
+    /* The frame's instance count, counted up by the sorts on the device
+       and read back by the CPU when the frame's slot comes round again:
+       what sizes the next build's room for the crowds. */
+    VkBuffer tlas_range[AE3D_VK_FRAMES];
+    VkDeviceMemory tlas_range_memory[AE3D_VK_FRAMES];
+    unsigned *tlas_range_mapped[AE3D_VK_FRAMES];
+    unsigned tlas_dynamic_seen;   /* the most figures a frame lately held */
+    unsigned tlas_limit;          /* this frame's build: the slots it takes */
+    unsigned tlas_count;          /* instances added this frame by the CPU */
+    unsigned tlas_static;         /* the static scene's slots, reserved first */
+    int tlas_appended;            /* a sort appended past the static slots */
+    int tlas_reserved;            /* the frame's room was reserved (ae3d_vk_ray_reserve) */
+    int tlas_locked;              /* a sort wrote into the buffer: no remaking it this frame */
     int tlas_built[AE3D_VK_FRAMES];
     int tlas_ready;               /* this frame's is built and readable */
     /* DLSS (native/ae3d_dlss.h): asked for before the loader opened, so
@@ -405,6 +437,7 @@ static struct {
     VkPipeline depth_resolve_pipeline;
     VkDescriptorSet depth_resolve_set[AE3D_VK_FRAMES];
     ae3d_vk_crowd crowds[AE3D_VK_MAX_CROWDS];
+    ae3d_vk_pose_blas poses[AE3D_VK_MAX_CROWDS];
     VkRenderPass camdepth_pass;
     VkFramebuffer camdepth_framebuffer;
     VkImage camdepth_image;
@@ -1179,6 +1212,9 @@ static int ae3d_vk_create_crowd_pipeline(void);
 static void ae3d_vk_destroy_dlss_output(void);
 static VkBufferUsageFlags ae3d_vk_ray_input_usage(void);
 static void ae3d_vk_build_blas(ae3d_vk_mesh *slot);
+static void ae3d_vk_build_blas_with(ae3d_vk_mesh *slot, VkDeviceSize stride);
+static int ae3d_vk_tlas_reserve(int frame, unsigned count);
+void ae3d_vk_pose_blas_destroy(int handle);
 static void ae3d_vk_free_blas(ae3d_vk_mesh *slot);
 static void ae3d_vk_free_tlas(int frame);
 static int ae3d_vk_texture_sampler(ae3d_vk_texture *texture);
@@ -3945,7 +3981,11 @@ int ae3d_vk_frame_begin(double r, double g, double b, double a) {
     vk.draw_calls = 0;
     vk.recording = 1;
     vk.tlas_count = 0;
+    vk.tlas_static = 0;
+    vk.tlas_appended = 0;
+    vk.tlas_reserved = 0;
     vk.tlas_ready = 0;
+    vk.tlas_locked = 0;
     return 1;
 }
 
@@ -4136,7 +4176,7 @@ void ae3d_vk_draw(int handle, int texture_handle, int instance_handle, int insta
 /* The crowd sort's descriptor set layout (five storage buffers), pool,
    pipeline layout (a push-constant block of forty bytes) and pipeline. */
 static int ae3d_vk_create_crowd_pipeline(void) {
-    VkDescriptorSetLayoutBinding bindings[5];
+    VkDescriptorSetLayoutBinding bindings[8];
     VkDescriptorSetLayoutCreateInfo layout;
     VkDescriptorPoolSize size;
     VkDescriptorPoolCreateInfo pool;
@@ -4147,7 +4187,7 @@ static int ae3d_vk_create_crowd_pipeline(void) {
     int i;
 
     memset(bindings, 0, sizeof(bindings));
-    for (i = 0; i < 5; i++) {
+    for (i = 0; i < 8; i++) {
         bindings[i].binding = (unsigned)i;
         bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         bindings[i].descriptorCount = 1;
@@ -4155,14 +4195,14 @@ static int ae3d_vk_create_crowd_pipeline(void) {
     }
     memset(&layout, 0, sizeof(layout));
     layout.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layout.bindingCount = 5;
+    layout.bindingCount = 8;
     layout.pBindings = bindings;
     if (ae3d_vkCreateDescriptorSetLayout(vk.device, &layout, NULL, &vk.crowd_sort_set_layout) != VK_SUCCESS) {
         return ae3d_vk_fail("crowd vkCreateDescriptorSetLayout failed");
     }
     memset(&size, 0, sizeof(size));
     size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    size.descriptorCount = 5 * AE3D_VK_MAX_CROWDS * AE3D_VK_FRAMES;
+    size.descriptorCount = 8 * AE3D_VK_MAX_CROWDS * AE3D_VK_FRAMES;
     memset(&pool, 0, sizeof(pool));
     pool.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pool.maxSets = AE3D_VK_MAX_CROWDS * AE3D_VK_FRAMES;
@@ -4173,7 +4213,7 @@ static int ae3d_vk_create_crowd_pipeline(void) {
     }
     memset(&range, 0, sizeof(range));
     range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    range.size = 80;
+    range.size = 88;
     memset(&plinfo, 0, sizeof(plinfo));
     plinfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     plinfo.setLayoutCount = 1;
@@ -4267,8 +4307,8 @@ int ae3d_vk_crowd_create(int capacity) {
         ae3d_vk_crowd_free(c); return 0;
     }
     for (i = 0; i < AE3D_VK_FRAMES; i++) {
-        VkDescriptorBufferInfo buffers[5];
-        VkWriteDescriptorSet writes[5];
+        VkDescriptorBufferInfo buffers[8];
+        VkWriteDescriptorSet writes[8];
         int b;
         memset(&alloc, 0, sizeof(alloc));
         alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -4282,8 +4322,13 @@ int ae3d_vk_crowd_create(int capacity) {
         buffers[2].buffer = c->tier[1];
         buffers[3].buffer = c->tier[2];
         buffers[4].buffer = c->draws;
+        /* 5 and 6 are the rays' instances and the pose structures' addresses,
+           named when a frame writes them; the draws stand in until then. */
+        buffers[5].buffer = c->draws;
+        buffers[6].buffer = c->draws;
+        buffers[7].buffer = c->draws;
         memset(writes, 0, sizeof(writes));
-        for (b = 0; b < 5; b++) {
+        for (b = 0; b < 8; b++) {
             buffers[b].range = VK_WHOLE_SIZE;
             writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[b].dstSet = c->set[i];
@@ -4292,7 +4337,7 @@ int ae3d_vk_crowd_create(int capacity) {
             writes[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[b].pBufferInfo = &buffers[b];
         }
-        ae3d_vkUpdateDescriptorSets(vk.device, 5, writes, 0, NULL);
+        ae3d_vkUpdateDescriptorSets(vk.device, 8, writes, 0, NULL);
     }
     return slot + 1;
 }
@@ -4389,7 +4434,8 @@ int ae3d_vk_crowd_sort(int handle, double cx, double cz, double near_dist, doubl
     VkBufferMemoryBarrier before, after[2];
     VkBufferCopy counts[AE3D_VK_CROWD_TIERS];
     unsigned commands[AE3D_VK_CROWD_DRAWS * 5];
-    struct { unsigned count, three; float cx, cz, near2, mid2, cull2, pad; float scale[AE3D_VK_CROWD_TIERS][4]; } params;
+    struct { unsigned count, three; float cx, cz, near2, mid2, cull2, ray2; float scale[AE3D_VK_CROWD_TIERS][4];
+             unsigned ray_base, ray_frames; } params;
     VkCommandBuffer command;
     int t;
     if (!vk.recording || vk.pass_open || handle <= 0 || handle > AE3D_VK_MAX_CROWDS) return 0;
@@ -4435,8 +4481,44 @@ int ae3d_vk_crowd_sort(int handle, double cx, double cz, double near_dist, doubl
     params.near2 = (float)(near_dist * near_dist);
     params.mid2 = (float)(mid_dist * mid_dist);
     params.cull2 = (float)(cull_dist > 0.0 ? cull_dist * cull_dist : 0.0);
-    params.pad = 0.0f;
+    params.ray2 = (float)(vk.ray_reach > 0.0 ? vk.ray_reach * vk.ray_reach : 0.0);
     memcpy(params.scale, c->scale, sizeof(params.scale));
+    /* The rays' instances: a slot a figure in this frame's structure,
+       reserved here, the pose structures' addresses at binding 6 and the
+       instances at 5. A crowd without pose structures, or a frame without
+       rays, writes none. */
+    params.ray_base = 0xFFFFFFFFu;
+    params.ray_frames = 0;
+    c->ray_written = 0;
+    if (vk.ray_query && vk.ray_shadows && c->poses > 0 && vk.poses[c->poses - 1].in_use &&
+        vk.tlas_instances[vk.frame] && vk.tlas_range[vk.frame] && vk.tlas_reserved && vk.tlas_limit > vk.tlas_static) {
+        VkDescriptorBufferInfo buffers[3];
+        VkWriteDescriptorSet writes[3];
+        int b;
+        ae3d_vk_pose_blas *poses = &vk.poses[c->poses - 1];
+        memset(buffers, 0, sizeof(buffers));
+        buffers[0].buffer = vk.tlas_instances[vk.frame];
+        buffers[0].range = VK_WHOLE_SIZE;
+        buffers[1].buffer = poses->addresses;
+        buffers[1].range = VK_WHOLE_SIZE;
+        buffers[2].buffer = vk.tlas_range[vk.frame];
+        buffers[2].range = VK_WHOLE_SIZE;
+        memset(writes, 0, sizeof(writes));
+        for (b = 0; b < 3; b++) {
+            writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[b].dstSet = c->set[vk.frame];
+            writes[b].dstBinding = (unsigned)(5 + b);
+            writes[b].descriptorCount = 1;
+            writes[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[b].pBufferInfo = &buffers[b];
+        }
+        ae3d_vkUpdateDescriptorSets(vk.device, 3, writes, 0, NULL);
+        vk.tlas_locked = 1;
+        vk.tlas_appended = 1;
+        params.ray_base = vk.tlas_limit;
+        params.ray_frames = (unsigned)poses->frames;
+        c->ray_written = 1;
+    }
     ae3d_vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, vk.crowd_sort_pipeline);
     ae3d_vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, vk.crowd_sort_layout, 0, 1,
                                  &c->set[vk.frame], 0, NULL);
@@ -4487,8 +4569,154 @@ int ae3d_vk_crowd_sort(int handle, double cx, double cz, double near_dist, doubl
                                       VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 0, NULL, 1, &after[0], 0, NULL);
         }
     }
+    if (c->ray_written) {
+        /* The instances the sort wrote and the count it added to, for the
+           structure's build. */
+        VkBufferMemoryBarrier rays[2];
+        memset(rays, 0, sizeof(rays));
+        rays[0].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        rays[0].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        rays[0].dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+        rays[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        rays[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        rays[0].buffer = vk.tlas_instances[vk.frame];
+        rays[0].size = VK_WHOLE_SIZE;
+        rays[1] = rays[0];
+        rays[1].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+        rays[1].dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        rays[1].buffer = vk.tlas_range[vk.frame];
+        ae3d_vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                  VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+                                  0, 0, NULL, 2, rays, 0, NULL);
+    }
     c->sorted = 1;
     return 1;
+}
+
+/* The far mesh at every frame of a crowd's pose bank, each a bottom-level
+   structure: what the crowd's ray instances point at. `mesh` is the far
+   tier's skinned mesh (the engine's, with its skin), `bank` the pose
+   bank's values, `frames` by `bones` column-major matrices. Skinned on the
+   CPU frame by frame -- a hundred and sixty-eight triangles, forty-eight
+   times -- uploaded, built; the addresses go into a buffer the sort reads.
+   Returns a handle, 0 where the device does not trace. */
+int ae3d_vk_pose_blas_create(void *mesh, const float *bank, int frames, int bones) {
+    ae3d_vk_pose_blas *p = NULL;
+    const float *vertices = ae3d_mesh_vertex_data(mesh);
+    const float *skin = ae3d_mesh_skin_data(mesh);
+    int vertex_count = ae3d_mesh_vertex_count(mesh);
+    int index_count = ae3d_mesh_index_count(mesh);
+    const unsigned *indices = ae3d_mesh_index_data(mesh);
+    float *posed = NULL;
+    unsigned long long *addresses = NULL;
+    VkBuffer index_buffer = VK_NULL_HANDLE;
+    VkDeviceMemory index_memory = VK_NULL_HANDLE;
+    int slot, f, v, ok = 1;
+    if (!vk.ready || !vk.ray_query || !mesh || !bank || frames <= 0 || bones <= 0) return 0;
+    if (!vertices || !skin || vertex_count <= 0 || index_count < 3 || !indices) return 0;
+    for (slot = 0; slot < AE3D_VK_MAX_CROWDS; slot++) {
+        if (!vk.poses[slot].in_use) { p = &vk.poses[slot]; break; }
+    }
+    if (!p) return 0;
+    memset(p, 0, sizeof(*p));
+    p->frames = frames;
+    p->vertices = (VkBuffer *)calloc((size_t)frames, sizeof(VkBuffer));
+    p->vertex_memory = (VkDeviceMemory *)calloc((size_t)frames, sizeof(VkDeviceMemory));
+    p->blas = (VkAccelerationStructureKHR *)calloc((size_t)frames, sizeof(VkAccelerationStructureKHR));
+    p->blas_buffer = (VkBuffer *)calloc((size_t)frames, sizeof(VkBuffer));
+    p->blas_memory = (VkDeviceMemory *)calloc((size_t)frames, sizeof(VkDeviceMemory));
+    posed = (float *)malloc((size_t)vertex_count * 3 * sizeof(float));
+    addresses = (unsigned long long *)calloc((size_t)frames, sizeof(unsigned long long));
+    if (!p->vertices || !p->vertex_memory || !p->blas || !p->blas_buffer || !p->blas_memory || !posed || !addresses) {
+        free(posed); free(addresses);
+        ae3d_vk_pose_blas_destroy(slot + 1);
+        return 0;
+    }
+    p->in_use = 1;
+    /* One index buffer for every frame: the topology does not move. */
+    if (!ae3d_vk_upload_buffer(indices, (VkDeviceSize)index_count * sizeof(unsigned),
+                               VK_BUFFER_USAGE_INDEX_BUFFER_BIT | ae3d_vk_ray_input_usage(),
+                               &index_buffer, &index_memory)) {
+        free(posed); free(addresses);
+        ae3d_vk_pose_blas_destroy(slot + 1);
+        return 0;
+    }
+    for (f = 0; f < frames && ok; f++) {
+        const float *palette = bank + (size_t)f * (size_t)bones * 16;
+        for (v = 0; v < vertex_count; v++) {
+            const float *in = vertices + (size_t)v * 9;
+            const float *sk = skin + (size_t)v * 8;
+            float out[3] = { 0.0f, 0.0f, 0.0f };
+            int k;
+            for (k = 0; k < 4; k++) {
+                int joint = (int)sk[k];
+                float w = sk[4 + k];
+                const float *m;
+                if (w == 0.0f || joint < 0 || joint >= bones) continue;
+                m = palette + (size_t)joint * 16;
+                out[0] += w * (m[0] * in[0] + m[4] * in[1] + m[8] * in[2] + m[12]);
+                out[1] += w * (m[1] * in[0] + m[5] * in[1] + m[9] * in[2] + m[13]);
+                out[2] += w * (m[2] * in[0] + m[6] * in[1] + m[10] * in[2] + m[14]);
+            }
+            posed[v * 3] = out[0]; posed[v * 3 + 1] = out[1]; posed[v * 3 + 2] = out[2];
+        }
+        if (!ae3d_vk_upload_buffer(posed, (VkDeviceSize)vertex_count * 3 * sizeof(float),
+                                   VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | ae3d_vk_ray_input_usage(),
+                                   &p->vertices[f], &p->vertex_memory[f])) { ok = 0; break; }
+        {
+            ae3d_vk_mesh scratch_mesh;
+            memset(&scratch_mesh, 0, sizeof(scratch_mesh));
+            scratch_mesh.vertex_buffer = p->vertices[f];
+            scratch_mesh.index_buffer = index_buffer;
+            scratch_mesh.index_count = (unsigned)index_count;
+            scratch_mesh.vertex_count = vertex_count;
+            ae3d_vk_build_blas_with(&scratch_mesh, 3 * sizeof(float));
+            p->blas[f] = scratch_mesh.blas;
+            p->blas_buffer[f] = scratch_mesh.blas_buffer;
+            p->blas_memory[f] = scratch_mesh.blas_memory;
+            addresses[f] = (unsigned long long)scratch_mesh.blas_address;
+            if (!p->blas[f]) ok = 0;
+        }
+    }
+    if (ok) {
+        ok = ae3d_vk_upload_buffer(addresses, (VkDeviceSize)frames * sizeof(unsigned long long),
+                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &p->addresses, &p->address_memory);
+    }
+    /* The index buffer is the first frame's to keep; every structure was
+       built from it already, and a structure keeps no reference to its
+       inputs. */
+    ae3d_vkDestroyBuffer(vk.device, index_buffer, NULL);
+    ae3d_vkFreeMemory(vk.device, index_memory, NULL);
+    free(posed);
+    free(addresses);
+    if (!ok) { ae3d_vk_pose_blas_destroy(slot + 1); return 0; }
+    return slot + 1;
+}
+
+void ae3d_vk_pose_blas_destroy(int handle) {
+    ae3d_vk_pose_blas *p;
+    int f;
+    if (handle <= 0 || handle > AE3D_VK_MAX_CROWDS) return;
+    p = &vk.poses[handle - 1];
+    if (vk.device) ae3d_vkDeviceWaitIdle(vk.device);
+    for (f = 0; f < p->frames; f++) {
+        if (p->blas && p->blas[f]) ae3d_vkDestroyAccelerationStructureKHR(vk.device, p->blas[f], NULL);
+        if (p->blas_buffer && p->blas_buffer[f]) ae3d_vkDestroyBuffer(vk.device, p->blas_buffer[f], NULL);
+        if (p->blas_memory && p->blas_memory[f]) ae3d_vkFreeMemory(vk.device, p->blas_memory[f], NULL);
+        if (p->vertices && p->vertices[f]) ae3d_vkDestroyBuffer(vk.device, p->vertices[f], NULL);
+        if (p->vertex_memory && p->vertex_memory[f]) ae3d_vkFreeMemory(vk.device, p->vertex_memory[f], NULL);
+    }
+    if (p->addresses) ae3d_vkDestroyBuffer(vk.device, p->addresses, NULL);
+    if (p->address_memory) ae3d_vkFreeMemory(vk.device, p->address_memory, NULL);
+    free(p->vertices); free(p->vertex_memory); free(p->blas); free(p->blas_buffer); free(p->blas_memory);
+    memset(p, 0, sizeof(*p));
+}
+
+/* The crowd's rays: its figures' instances point at these pose structures
+   (0 takes them out of the rays). */
+void ae3d_vk_crowd_set_poses(int handle, int poses) {
+    if (handle <= 0 || handle > AE3D_VK_MAX_CROWDS) return;
+    vk.crowds[handle - 1].poses = poses;
 }
 
 /* A draw of `mesh_handle` with tier `tier` of crowd `handle` as its
@@ -4553,6 +4781,12 @@ static int ae3d_vk_scratch(VkDeviceSize size, VkBuffer *buffer, VkDeviceMemory *
    trace. Failure leaves the mesh without one: its shadow then comes from
    the map alone. */
 static void ae3d_vk_build_blas(ae3d_vk_mesh *slot) {
+    ae3d_vk_build_blas_with(slot, AE3D_VK_STRIDE);
+}
+
+/* The same, over vertex buffers of any stride: the pose structures' are
+   positions alone. */
+static void ae3d_vk_build_blas_with(ae3d_vk_mesh *slot, VkDeviceSize stride) {
     VkAccelerationStructureGeometryKHR geometry;
     VkAccelerationStructureBuildGeometryInfoKHR build;
     VkAccelerationStructureBuildSizesInfoKHR sizes;
@@ -4574,7 +4808,7 @@ static void ae3d_vk_build_blas(ae3d_vk_mesh *slot) {
     geometry.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
     geometry.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
     geometry.geometry.triangles.vertexData.deviceAddress = ae3d_vk_buffer_address(slot->vertex_buffer);
-    geometry.geometry.triangles.vertexStride = AE3D_VK_STRIDE;
+    geometry.geometry.triangles.vertexStride = stride;
     geometry.geometry.triangles.maxVertex = (unsigned)(slot->vertex_count > 0 ? slot->vertex_count - 1 : 0);
     geometry.geometry.triangles.indexType = VK_INDEX_TYPE_UINT32;
     geometry.geometry.triangles.indexData.deviceAddress = ae3d_vk_buffer_address(slot->index_buffer);
@@ -4638,6 +4872,12 @@ static void ae3d_vk_free_tlas(int frame) {
     if (vk.tlas_instances_mapped[frame]) ae3d_vkUnmapMemory(vk.device, vk.tlas_instances_memory[frame]);
     if (vk.tlas_instances[frame]) ae3d_vkDestroyBuffer(vk.device, vk.tlas_instances[frame], NULL);
     if (vk.tlas_instances_memory[frame]) ae3d_vkFreeMemory(vk.device, vk.tlas_instances_memory[frame], NULL);
+    if (vk.tlas_range_mapped[frame]) ae3d_vkUnmapMemory(vk.device, vk.tlas_range_memory[frame]);
+    if (vk.tlas_range[frame]) ae3d_vkDestroyBuffer(vk.device, vk.tlas_range[frame], NULL);
+    if (vk.tlas_range_memory[frame]) ae3d_vkFreeMemory(vk.device, vk.tlas_range_memory[frame], NULL);
+    vk.tlas_range[frame] = VK_NULL_HANDLE;
+    vk.tlas_range_memory[frame] = VK_NULL_HANDLE;
+    vk.tlas_range_mapped[frame] = NULL;
     vk.tlas[frame] = VK_NULL_HANDLE;
     vk.tlas_buffer[frame] = VK_NULL_HANDLE;
     vk.tlas_memory[frame] = VK_NULL_HANDLE;
@@ -4659,19 +4899,42 @@ static int ae3d_vk_tlas_reserve(int frame, unsigned count) {
     unsigned capacity = vk.tlas_capacity[frame];
     int f, index;
     if (count <= capacity && vk.tlas_instances[frame]) return 1;
+    /* Once a sort has been recorded into this frame's buffer it cannot be
+       remade: the renderer reserves the frame's total before the sorts
+       (ae3d_vk_ray_reserve), and this is what happens when it did not. */
+    if (vk.tlas_locked) return ae3d_vk_fail("the rays' instance buffer is full for this frame");
     while (capacity < count) capacity = capacity ? capacity * 2 : 256;
     ae3d_vkDeviceWaitIdle(vk.device);
     ae3d_vk_free_tlas(frame);
-    if (!ae3d_vk_create_buffer((VkDeviceSize)capacity * sizeof(VkAccelerationStructureInstanceKHR),
-                               VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                               &vk.tlas_instances[frame], &vk.tlas_instances_memory[frame])) return 0;
+    /* Written by the CPU (the static scene) and by the sort (the crowd):
+       in the device's own memory where the host can see it (the BAR),
+       system memory where it cannot. */
+    {
+        VkDeviceSize bytes = (VkDeviceSize)capacity * sizeof(VkAccelerationStructureInstanceKHR);
+        VkBufferUsageFlags usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                   VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+        VkMemoryPropertyFlags host = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        if (!ae3d_vk_create_buffer(bytes, usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | host,
+                                   &vk.tlas_instances[frame], &vk.tlas_instances_memory[frame])) {
+            g_vk_error[0] = 0;
+            if (!ae3d_vk_create_buffer(bytes, usage, host,
+                                       &vk.tlas_instances[frame], &vk.tlas_instances_memory[frame])) return 0;
+        }
+    }
     if (ae3d_vkMapMemory(vk.device, vk.tlas_instances_memory[frame], 0, VK_WHOLE_SIZE, 0,
                          &vk.tlas_instances_mapped[frame]) != VK_SUCCESS) {
         return ae3d_vk_fail("instance vkMapMemory failed");
     }
     vk.tlas_capacity[frame] = capacity;
+    /* The count, four words, where the host can read it back. */
+    if (!ae3d_vk_create_buffer(4 * sizeof(unsigned), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                               &vk.tlas_range[frame], &vk.tlas_range_memory[frame])) return 0;
+    if (ae3d_vkMapMemory(vk.device, vk.tlas_range_memory[frame], 0, VK_WHOLE_SIZE, 0,
+                         (void **)&vk.tlas_range_mapped[frame]) != VK_SUCCESS) {
+        return ae3d_vk_fail("range vkMapMemory failed");
+    }
+    vk.tlas_range_mapped[frame][0] = 0;
     /* The sets of every frame named the old structure. */
     for (f = 0; f < AE3D_VK_FRAMES; f++) {
         for (index = 0; index < vk.set_count[f]; index++) vk.set_texture[f][index] = AE3D_VK_SET_FREE;
@@ -4694,8 +4957,66 @@ static void ae3d_vk_instance_transform(VkTransformMatrixKHR *out, const float *m
 /* The frame's instances begin: nothing in it yet. */
 void ae3d_vk_ray_begin(void) {
     vk.tlas_count = 0;
+    vk.tlas_static = 0;
+    vk.tlas_appended = 0;
+    vk.tlas_reserved = 0;
     vk.tlas_ready = 0;
+    vk.tlas_locked = 0;
 }
+
+/* Room for `count` instances this frame, before any sort writes into the
+   buffer: the crowds' figures and the static scene's instances together,
+   of which the static scene's `statics` take the first slots. The count
+   the build reads starts at those and the sorts add theirs on the device. */
+int ae3d_vk_ray_reserve(int count, int statics) {
+    VkBufferMemoryBarrier barrier;
+    int frame = (int)vk.frame;
+    unsigned room, seen, figures;
+    if (!vk.ray_query || !vk.recording || count <= 0 || vk.pass_open) return 0;
+    if (!ae3d_vk_tlas_reserve(frame, (unsigned)count)) return 0;
+    if (statics < 0) statics = 0;
+    if ((unsigned)statics > vk.tlas_capacity[frame]) statics = (int)vk.tlas_capacity[frame];
+    vk.tlas_static = (unsigned)statics;
+    vk.tlas_count = 0;
+    vk.tlas_reserved = 1;
+    figures = (unsigned)count - (unsigned)statics;
+    /* The count this frame's slot held when it was last used, two frames
+       ago, is what the sorts appended then: the room for them now is that
+       and a quarter more, or all of them when nothing is known yet. Kept
+       as the most seen lately, so a horde walking into view grows it. */
+    seen = vk.tlas_range_mapped[frame] ? vk.tlas_range_mapped[frame][0] : 0;
+    if (seen > vk.tlas_static) seen -= vk.tlas_static; else seen = 0;
+    if (seen > vk.tlas_dynamic_seen) vk.tlas_dynamic_seen = seen;
+    else vk.tlas_dynamic_seen = vk.tlas_dynamic_seen - vk.tlas_dynamic_seen / 16 + seen / 16;
+    room = vk.tlas_dynamic_seen + vk.tlas_dynamic_seen / 4 + 4096;
+    if (vk.tlas_dynamic_seen == 0) room = figures;
+    if (room > figures) room = figures;
+    vk.tlas_limit = vk.tlas_static + room;
+    /* The count starts at the static scene's slots; the sorts add to it. */
+    if (vk.tlas_range_mapped[frame]) vk.tlas_range_mapped[frame][0] = vk.tlas_static;
+    /* The crowds' room zeroed, so a slot no figure takes is inactive. */
+    if (room > 0) {
+        ae3d_vkCmdFillBuffer(vk.command_buffers[frame], vk.tlas_instances[frame],
+                             (VkDeviceSize)vk.tlas_static * sizeof(VkAccelerationStructureInstanceKHR),
+                             (VkDeviceSize)room * sizeof(VkAccelerationStructureInstanceKHR), 0);
+        memset(&barrier, 0, sizeof(barrier));
+        barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.buffer = vk.tlas_instances[frame];
+        barrier.size = VK_WHOLE_SIZE;
+        ae3d_vkCmdPipelineBarrier(vk.command_buffers[frame], VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                                  0, 0, NULL, 1, &barrier, 0, NULL);
+    }
+    return 1;
+}
+
+/* Whether a crowd can be in the rays: the device traces, and counts the
+   crowds' instances itself. */
+int ae3d_vk_ray_indirect(void) { return vk.ray_query; }
 
 /* `count` instances of `mesh_handle` at the column-major matrices, into
    this frame's structure. A mesh without a bottom-level structure (a
@@ -4708,7 +5029,15 @@ void ae3d_vk_ray_add(int mesh_handle, const float *matrices, int count) {
     if (mesh_handle <= 0 || mesh_handle > vk.mesh_capacity) return;
     mesh = &vk.meshes[mesh_handle - 1];
     if (!mesh->in_use || !mesh->blas) return;
-    if (!ae3d_vk_tlas_reserve(frame, vk.tlas_count + (unsigned)count)) return;
+    if (vk.tlas_static > 0) {
+        /* Into the slots reserved for the static scene; past them the
+           sorts have appended, and an instance more than was counted for
+           is dropped (and said). */
+        if (vk.tlas_count + (unsigned)count > vk.tlas_static) {
+            ae3d_vk_fail("more static instances than were reserved for the rays");
+            return;
+        }
+    } else if (!ae3d_vk_tlas_reserve(frame, vk.tlas_count + (unsigned)count)) return;
     out = (VkAccelerationStructureInstanceKHR *)vk.tlas_instances_mapped[frame] + vk.tlas_count;
     for (i = 0; i < count; i++) {
         memset(&out[i], 0, sizeof(out[i]));
@@ -4746,8 +5075,15 @@ int ae3d_vk_ray_build(void) {
     VkCommandBuffer command = vk.command_buffers[vk.frame];
     int frame = (int)vk.frame;
     unsigned count = vk.tlas_count;
-    if (!vk.ray_query || !vk.recording || vk.pass_open || count == 0) return 0;
+    if (!vk.ray_query || !vk.recording || vk.pass_open) return 0;
+    if (count == 0 && !vk.tlas_appended) return 0;
     if (!vk.tlas_instances[frame]) return 0;
+    /* The static slots not written this frame are inactive. */
+    if (vk.tlas_static > count) {
+        memset((VkAccelerationStructureInstanceKHR *)vk.tlas_instances_mapped[frame] + count, 0,
+               (size_t)(vk.tlas_static - count) * sizeof(VkAccelerationStructureInstanceKHR));
+        count = vk.tlas_static;
+    }
 
     memset(&geometry, 0, sizeof(geometry));
     geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
@@ -4760,7 +5096,10 @@ int ae3d_vk_ray_build(void) {
     memset(&build, 0, sizeof(build));
     build.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
     build.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-    build.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    /* Rebuilt every frame, so the build is what costs, not the trace: a
+       crowd of half a million instances took eleven milliseconds to build
+       for a fast trace and about half that for a fast build. */
+    build.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
     build.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     build.geometryCount = 1;
     build.pGeometries = &geometry;
@@ -4821,6 +5160,9 @@ int ae3d_vk_ray_build(void) {
 
     build.dstAccelerationStructure = vk.tlas[frame];
     build.scratchData.deviceAddress = scratch_address;
+    /* The static scene's slots and the room the crowds were given: what
+       the sorts did not fill of it is zero, inactive. */
+    if (vk.tlas_appended && vk.tlas_limit > count) count = vk.tlas_limit;
     memset(&range, 0, sizeof(range));
     range.primitiveCount = count;
     ranges[0] = &range;
@@ -4844,6 +5186,10 @@ int ae3d_vk_ray_query(void) { return vk.ready && vk.ray_query; }
 /* Shadows by ray on or off; on means the shader traces where the frame's
    structure was built, and the map is left to the skinned. */
 void ae3d_vk_set_ray_shadows(int on) { vk.ray_shadows = on ? 1 : 0; }
+
+/* How far from the camera a crowd's figures are in the rays: the shadow
+   distance, what the map covered; 0 keeps every figure kept. */
+void ae3d_vk_set_ray_reach(double metres) { vk.ray_reach = metres > 0.0 ? metres : 0.0; }
 int ae3d_vk_ray_shadows(void) { return vk.ray_query && vk.ray_shadows; }
 
 /* This frame traces: the flag the scene block carries, set by the
@@ -6602,6 +6948,7 @@ void ae3d_vk_shutdown(void) {
     if (vk.ray_query) {
         int f;
         for (f = 0; f < AE3D_VK_FRAMES; f++) ae3d_vk_free_tlas(f);
+        for (f = 0; f < AE3D_VK_MAX_CROWDS; f++) if (vk.poses[f].in_use) ae3d_vk_pose_blas_destroy(f + 1);
     }
     if (vk.depth_resolve_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.depth_resolve_pipeline, NULL);
     {
