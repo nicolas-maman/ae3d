@@ -137,6 +137,20 @@
   draws and the scene from 2.96 to 1.57 ms (one ray in place of nine
   map taps); at half a million, where the crowd stays in the map, the
   rays cost two or three per cent.
+- The crowd in the rays: `crowd.device_crowd_rays(dc, far, bank)` builds
+  a bottom-level structure per frame of the pose bank from the far
+  tier's mesh (`ae3d_vk_pose_blas_create`), and the device sort writes a
+  ray instance per kept mesh figure within the shadow map's distance --
+  position, heading, the frame's structure -- after the static scene's
+  (`crowd_sort_vk.comp` bindings 5 to 7, push constants `crowdRay2`,
+  `rayLimit`, `rayFrames`). `ae3d_vk_ray_reserve(count, statics)` sizes
+  the room from the sort's written-back count with a margin and zeroes
+  it, so unfilled slots are inactive instances; a crowd in the rays
+  leaves the shadow map. `examples/zombie_city` puts its horde in;
+  `tests/test_ray_shadows` checks a device-sorted figure's ray shadow
+  against the map's. Measured: 400 figures unchanged, 20,000 unchanged
+  (140 fps), 500,000 from 75 to 60 fps with the whole visible crowd
+  traced.
 
 ### DLSS
 

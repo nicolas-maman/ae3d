@@ -13,6 +13,20 @@ layout(std430, set = 0, binding = 3) writeonly buffer FarTier { vec4 farOut[]; }
 // sort counts into; the three after are their shadow draws, over the same
 // streams with the depth proxy's index count, given the counts afterwards.
 layout(std430, set = 0, binding = 4) buffer Draws { uint draws[]; };
+// The rays' instances (VkAccelerationStructureInstanceKHR, sixteen uints
+// each): every figure kept in the near or far tier takes a slot after the
+// static scene's, counted on the device (binding 7 holds the count; the
+// CPU reads it back a frame or two later and sizes the next build's room
+// by it, zeroing the room first so the slots past the count are inactive;
+// a figure past the room is dropped from the rays for that frame), and
+// points at the bottom-level structure of the far
+// mesh baked at the frame of the walk the figure is at, one per frame of
+// the bank (binding 6). Written only when rayFrames says so; a crowd
+// without rays skips it. A picture past the impostor distance is twenty
+// pixels tall and half fogged: its shadow is not seen, and it stays out.
+layout(std430, set = 0, binding = 5) writeonly buffer RayInstances { uint rays[]; };
+layout(std430, set = 0, binding = 6) readonly buffer PoseStructures { uvec2 poseAddress[]; };
+layout(std430, set = 0, binding = 7) buffer RayRange { uint rayRange[]; };
 
 layout(push_constant) uniform CrowdParams {
     uint crowdCount;
@@ -22,9 +36,28 @@ layout(push_constant) uniform CrowdParams {
     float crowdNear2;
     float crowdMid2;
     float crowdCull2;
-    float crowdPad;
+    float crowdRay2;      // the rays' reach from the camera, squared; 0 for all
     vec4 crowdScale[3];   // a tier's model's scale, xyz
+    uint rayLimit;        // the slot the structure's room ends at: a figure past it is dropped this frame
+    uint rayFrames;       // the bank's frames, one structure each; 0 for no rays
 } params;
+
+// A figure's ray instance: the far tier's matrix as three rows of four
+// (the structure holds the far mesh), no custom index, every mask bit,
+// no shader table, culling off, and the pose frame's structure.
+void ray_instance(uint slot, float c, float s, float x, float y, float z, float phase) {
+    uint at = slot * 16u;
+    vec3 sc = params.crowdScale[1].xyz;
+    rays[at + 0u] = floatBitsToUint(c * sc.x);  rays[at + 1u] = floatBitsToUint(0.0);  rays[at + 2u] = floatBitsToUint(s * sc.z);  rays[at + 3u] = floatBitsToUint(x);
+    rays[at + 4u] = floatBitsToUint(0.0);       rays[at + 5u] = floatBitsToUint(sc.y); rays[at + 6u] = floatBitsToUint(0.0);       rays[at + 7u] = floatBitsToUint(y);
+    rays[at + 8u] = floatBitsToUint(-s * sc.x); rays[at + 9u] = floatBitsToUint(0.0);  rays[at + 10u] = floatBitsToUint(c * sc.z); rays[at + 11u] = floatBitsToUint(z);
+    rays[at + 12u] = 0xFF000000u;
+    rays[at + 13u] = 0x01000000u;
+    uint frame = uint(fract(phase) * float(params.rayFrames)) % params.rayFrames;
+    uvec2 address = poseAddress[frame];
+    rays[at + 14u] = address.x;
+    rays[at + 15u] = address.y;
+}
 
 void put(uint tier, uint at, vec4 v) {
     if (tier == 0u) nearOut[at] = v;
@@ -41,32 +74,43 @@ void put(uint tier, uint at, vec4 v) {
 // figures', which the draw does not care about.
 shared uint groupCount[3];
 shared uint groupBase[3];
+shared uint groupRays;
+shared uint groupRayBase;
 
 void main() {
     uint i = gl_GlobalInvocationID.x;
     uint lane = gl_LocalInvocationID.x;
     if (lane < 3u) groupCount[lane] = 0u;
+    if (lane == 0u) groupRays = 0u;
     barrier();
     bool keep = i < params.crowdCount;
     float x = 0.0, y = 0.0, z = 0.0, yaw = 0.0, phase = 0.0;
     uint f = i * 8u;
     uint tier = 0u;
     uint slot = 0u;
+    float d2 = 0.0;
     if (keep) {
         x = figures[f]; y = figures[f + 1u]; z = figures[f + 2u];
         yaw = figures[f + 3u]; phase = figures[f + 4u];
         float dx = x - params.crowdCx, dz = z - params.crowdCz;
-        float d2 = dx * dx + dz * dz;
+        d2 = dx * dx + dz * dz;
         if (params.crowdCull2 > 0.0 && d2 > params.crowdCull2) keep = false;
         if (d2 >= params.crowdNear2) tier = (params.crowdThree == 0u || d2 < params.crowdMid2) ? 1u : 2u;
     }
     if (keep) slot = atomicAdd(groupCount[tier], 1u);
+    // A figure past the rays' reach -- the shadow distance, what the map
+    // covered -- shadows nothing the eye is looking at.
+    bool traced = params.rayFrames > 0u && keep && tier < 2u && (params.crowdRay2 <= 0.0 || d2 <= params.crowdRay2);
+    uint raySlot = 0u;
+    if (traced) raySlot = atomicAdd(groupRays, 1u);
     barrier();
     if (lane < 3u && groupCount[lane] > 0u) groupBase[lane] = atomicAdd(draws[lane * 5u + 1u], groupCount[lane]);
+    if (lane == 0u && groupRays > 0u) groupRayBase = atomicAdd(rayRange[0], groupRays);
     barrier();
+    float c = cos(yaw), s = sin(yaw);
+    if (traced && groupRayBase + raySlot < params.rayLimit) ray_instance(groupRayBase + raySlot, c, s, x, y, z, phase);
     if (!keep) return;
     uint at = (groupBase[tier] + slot) * 5u;
-    float c = cos(yaw), s = sin(yaw);
     vec3 sc = params.crowdScale[tier].xyz;
     // The matrix the crowd's stream carries, column by column: yaw about
     // the world's up, the tier's scale, the figure's position -- the same

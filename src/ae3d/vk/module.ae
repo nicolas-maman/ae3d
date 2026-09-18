@@ -92,10 +92,13 @@ extern ae3d_vk_request_dlss(directory: string) -> int
 extern ae3d_vk_set_samples(samples: int)
 extern ae3d_vk_ray_query() -> int
 extern ae3d_vk_ray_begin()
+extern ae3d_vk_ray_reserve(count: int, statics: int) -> int
+extern ae3d_vk_ray_indirect() -> int
 extern ae3d_vk_ray_add(mesh: int, matrices: ptr, count: int)
 extern ae3d_vk_ray_add_one(mesh: int, matrix: *Mat4)
 extern ae3d_vk_ray_build() -> int
 extern ae3d_vk_set_ray_shadows(on: int)
+extern ae3d_vk_set_ray_reach(metres: float)
 extern ae3d_vk_ray_shadows() -> int
 extern ae3d_vk_ray_shadows_now() -> int
 extern ae3d_inst_matrix_data(inst: ptr) -> ptr
@@ -575,11 +578,47 @@ traced(m: *Model) -> bool {
     return true
 }
 
+// A crowd model whose figures the rays hold: its crowd has pose
+// structures, so the sort writes their instances.
+crowd_traced(m: *Model) -> bool {
+    if m == null || !m.visible || m.device_crowd == null { return false }
+    dc = m.device_crowd as *DeviceCrowd
+    return dc.poses != 0
+}
+
+// Room in the frame's structure for everything that will be in it -- the
+// crowds' figures, which the sorts write, and the static scene's
+// instances -- before any sort records into it, since the buffer cannot
+// be remade once one has.
+reserve_ray_scene(r: *VKRenderer) {
+    if ae3d_vk_ray_shadows() != 1 { return }
+    // The crowd's figures in the rays reach as far as the map did.
+    ae3d_vk_set_ray_reach(r.shadow_distance)
+    statics = 0
+    figures = 0
+    count = list.size(r.models)
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        if traced(m) {
+            if m.is_instanced { statics = statics + core.model_instance_count(m) } else { statics = statics + 1 }
+        } else if crowd_traced(m) {
+            dc = m.device_crowd as *DeviceCrowd
+            if dc.reserved_serial != r.sort_serial + 1 {
+                dc.reserved_serial = r.sort_serial + 1
+                figures = figures + dc.count
+            }
+        }
+        i = i + 1
+    }
+    if statics + figures > 0 { ae3d_vk_ray_reserve(statics + figures, statics) }
+}
+
 // The frame's instances into the scene's structure, and the structure
 // built, before any pass: every traced model with its matrix -- one, or
-// its stream's -- and the flag the shader reads set for every program.
+// its stream's -- after the sorts wrote the crowds', and the flag the
+// shader reads set for every program.
 build_ray_scene(r: *VKRenderer) {
-    ae3d_vk_ray_begin()
     if ae3d_vk_ray_shadows() != 1 { return }
     count = list.size(r.models)
     i = 0
@@ -857,8 +896,9 @@ render_shadow_pass(r: *VKRenderer, light: *Light, cam: *Camera) {
             continue
         }
         // What the rays shadow this frame is not drawn into the map: the
-        // map is left with the skinned, the crowd and the points.
-        if rays && traced(m) {
+        // map is left with the skinned, the points, and a crowd that is
+        // not in the rays.
+        if rays && (traced(m) || crowd_traced(m)) {
             i = i + 1
             continue
         }
@@ -1699,6 +1739,7 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
         i = i + 1
     }
 
+    reserve_ray_scene(r)
     sort_device_crowds(r)
     build_ray_scene(r)
 

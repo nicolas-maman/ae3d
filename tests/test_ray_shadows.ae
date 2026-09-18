@@ -9,12 +9,51 @@
 // as lit -- and its edge is a ray's: a pixel a little way past the ball's
 // silhouette is fully lit, where the map's filtered edge is still part
 // way. Turned off again, the map's picture comes back.
+//
+// Then a crowd: a figure sorted on the device, standing on the plane as
+// a tall quad, is put in the rays (a structure per frame of its pose
+// bank) and shadows the ground beside it by ray, with the map no longer
+// drawing it.
 
 import std.mem
 import ae3d.core
 import ae3d.vk
+import ae3d.ecs
+import ae3d.crowd
 import ae3d.loader
 import ae3d.rendering
+
+extern ae3d_posebank_create(frames: int, bones: int) -> ptr
+extern ae3d_posebank_destroy(bank: ptr)
+extern ae3d_posebank_capture(bank: ptr, frame: int, palette: ptr)
+
+// A crowd figure: an upright quad, x -0.5..0.5 by y 0..1, skinned to one
+// bone that the bank holds at the identity, so it stands as drawn.
+crowd_figure(bank: ptr) -> *Model {
+    quad = core.model_new()
+    normal = core.vec3(0.0, 0.0, 1.0)
+    core.mesh_reserve(quad.mesh, 4, 6)
+    core.mesh_push_vertex(quad.mesh, core.vec3(0.0 - 0.5, 0.0, 0.0), 0.0, 0.0, normal)
+    core.mesh_push_vertex(quad.mesh, core.vec3(0.5, 0.0, 0.0), 1.0, 0.0, normal)
+    core.mesh_push_vertex(quad.mesh, core.vec3(0.5, 1.0, 0.0), 1.0, 1.0, normal)
+    core.mesh_push_vertex(quad.mesh, core.vec3(0.0 - 0.5, 1.0, 0.0), 0.0, 1.0, normal)
+    core.mesh_push_triangle(quad.mesh, 0, 1, 2)
+    core.mesh_push_triangle(quad.mesh, 0, 2, 3)
+    i = 0
+    while i < 4 {
+        core.mesh_set_skin(quad.mesh, i, 0, 0, 0, 0, 1.0, 0.0, 0.0, 0.0)
+        i = i + 1
+    }
+    core.model_set_scale(quad, 40.0, 60.0, 40.0)
+    core.model_update_matrix(quad)
+    core.model_recalculate_bounds(quad)
+    core.model_set_diffuse(quad, 0.2, 0.8, 0.3)
+    core.model_enable_instancing(quad, 1)
+    core.model_set_pose_bank(quad, bank, 1)
+    core.model_enable_instance_phases(quad)
+    core.model_enable_instance_colors(quad)
+    return quad
+}
 
 const WIDTH = 320
 const HEIGHT = 240
@@ -32,7 +71,7 @@ check(name: string, ok: bool) {
 
 // The frame after two draws (the readback is a frame behind), and its
 // brightness at (x, y).
-frame(backend: *Backend, cam: *Camera, light: *Light) -> ptr {
+read_frame(backend: *Backend, cam: *Camera, light: *Light) -> ptr {
     core.backend_render(backend, cam, light)
     core.backend_render(backend, cam, light)
     return core.backend_frame_pixels(backend)
@@ -103,13 +142,13 @@ main() {
     // the lit ground well beyond it.
     cx = WIDTH / 2
     cy = HEIGHT / 2
-    mapped = frame(&backend, cam, light)
+    mapped = read_frame(&backend, cam, light)
     lit_map = level(mapped, cx + 120, cy)
     // The ball hides its own shadow from straight above; the sun a little
     // to the side moves the shadow out from under it.
     light = core.light_sun(core.vec3(0.6, 1.0, 0.0))
     light.ambient_strength = 0.35
-    mapped = frame(&backend, cam, light)
+    mapped = read_frame(&backend, cam, light)
     lit_map = level(mapped, cx + 130, cy)
     shadow_x = cx - 62
     shade_map = level(mapped, shadow_x, cy)
@@ -118,7 +157,7 @@ main() {
 
     vk.renderer_set_ray_shadows(renderer, true)
     check("the rays are on", vk.renderer_ray_shadows(renderer))
-    traced = frame(&backend, cam, light)
+    traced = read_frame(&backend, cam, light)
     lit_ray = level(traced, cx + 130, cy)
     shade_ray = level(traced, shadow_x, cy)
     check("the rays shadow the same ground (${shade_ray} against the map's ${shade_map})", shade_ray < lit_ray - 50 && shade_ray > shade_map - 20 && shade_ray < shade_map + 20)
@@ -133,8 +172,71 @@ main() {
     check("past the edge a ray leaves the ground fully lit (${past_ray})", past_ray > lit_ray - lit_ray / 20)
 
     vk.renderer_set_ray_shadows(renderer, false)
-    back = frame(&backend, cam, light)
+    back = read_frame(&backend, cam, light)
     check("off again, the map's shadow is back (${level(back, shadow_x, cy)})", level(back, shadow_x, cy) < lit_map - 50)
+
+    // The crowd: one figure, a quad 40 by 60 metres standing at x 100 on
+    // the plane facing +Z, sorted on the device. The sun from (0.6, 1, 0)
+    // throws its shadow toward -x: the ground at x 100 - 36 is shaded by
+    // it, and the ground past the ball's reach at x 100 + 40 is lit.
+    bank = ae3d_posebank_create(1, 1)
+    palette = core.palette_create(1)
+    identity = core.mat4_ident()
+    core.palette_set(palette, 0, &identity)
+    ae3d_posebank_capture(bank, 0, palette)
+    figure = crowd_figure(bank)
+    dc = crowd.device_crowd_new(4)
+    check("the device takes the crowd", dc != null)
+    if dc != null {
+        crowd.device_crowd_bind(dc, figure, 1)
+        core.backend_add_model(&backend, figure)
+        pos = ecs.column_new(1, 3)
+        yaw = ecs.column_new(1, 1)
+        phase = ecs.column_new(1, 1)
+        col = ecs.column_new(1, 3)
+        // The figure at (60, 0, 60), turned a quarter (yaw): the quad's own
+        // plane is XY, and at yaw zero the sun from +x would see it edge
+        // on; turned, its face takes the sun and throws a shadow toward -x,
+        // away from the ball and its shadow.
+        ecs.column_set3(pos, 0, core.vec3(60.0, 0.0, 60.0))
+        ecs.column_set(yaw, 0, 0, 1.5707963)
+        ecs.column_set(phase, 0, 0, 0.0)
+        ecs.column_set3(col, 0, core.vec3(1.0, 1.0, 1.0))
+        crowd.device_crowd_update(dc, ecs.column_data(pos), ecs.column_data(yaw), ecs.column_data(phase),
+                                  ecs.column_data(col), 0, 1, 0.0, 220.0, 1.0, 0.0, 0.0)
+        // Where the figure's shadow lands: the quad's top at 60 m under a
+        // sun 0.6 over in x for 1 up throws it 36 m toward -x from its
+        // foot, so the ground at (40, 0, 60) is in it and (110, 0, 60),
+        // past the figure the other way, is lit -- through the camera's own
+        // projection, to the pixel.
+        shade_at = core.camera_world_to_screen(cam, core.vec3(40.0, 0.0, 60.0), WIDTH, HEIGHT)
+        lit_at = core.camera_world_to_screen(cam, core.vec3(110.0, 0.0, 60.0), WIDTH, HEIGHT)
+        sx = shade_at.x as int
+        sy = shade_at.y as int
+        mapped = read_frame(&backend, cam, light)
+        lit_far = level(mapped, lit_at.x as int, lit_at.y as int)
+        shade_crowd_map = level(mapped, sx, sy)
+        check("the map shadows the ground the figure throws its shadow on (${shade_crowd_map} against ${lit_far})", shade_crowd_map < lit_far - 50)
+
+        in_rays = crowd.device_crowd_rays(dc, figure, bank)
+        check("the crowd goes into the rays", in_rays)
+        vk.renderer_set_ray_shadows(renderer, true)
+        traced = read_frame(&backend, cam, light)
+        shade_crowd_ray = level(traced, sx, sy)
+        check("the rays shadow it the same (${shade_crowd_ray})", shade_crowd_ray < lit_far - 50 && shade_crowd_ray > shade_crowd_map - 24 && shade_crowd_ray < shade_crowd_map + 24)
+        check("and the ball's shadow still holds (${level(traced, shadow_x, cy)})", level(traced, shadow_x, cy) < lit_map - 50)
+        vk.renderer_set_ray_shadows(renderer, false)
+
+        core.backend_remove_model(&backend, figure)
+        crowd.device_crowd_free(dc)
+        ecs.column_free(pos)
+        ecs.column_free(yaw)
+        ecs.column_free(phase)
+        ecs.column_free(col)
+    }
+    core.model_free(figure)
+    core.palette_destroy(palette)
+    ae3d_posebank_destroy(bank)
 
     core.backend_cleanup(&backend)
     core.model_free(ground)

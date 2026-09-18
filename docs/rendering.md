@@ -211,20 +211,42 @@ ray-query variant (`scene_rq_vk.frag`, GLSL 4.60, SPIR-V 1.4, the
 structure at binding 5) traces one opaque ray, first hit, from a
 little off the surface: lit, or the shadow's share of the light, exact
 at any distance and with no map's texel to fit the world into. What the
-structure does not hold -- a skinned figure, a crowd, a point stream --
-stays in the shadow map, which is drawn with those alone while the rays
-are on, and the two shadows combine, the darker winning. Off, or on a
-device that does not trace, nothing changes; `AE3D_NO_RAYS=1` keeps the
-extensions off. `tests/test_ray_shadows` holds the rays' shadow to the
-map's -- the same ground shaded to the same depth, the same edge -- and
-past the edge, a ray's ground fully lit where a map's filtered edge is
-still part way.
+structure does not hold -- a skinned figure, a point stream, a crowd
+not in the rays -- stays in the shadow map, which is drawn with those
+alone while the rays are on, and the two shadows combine, the darker
+winning. Off, or on a device that does not trace, nothing changes;
+`AE3D_NO_RAYS=1` keeps the extensions off. `tests/test_ray_shadows`
+holds the rays' shadow to the map's -- the same ground shaded to the
+same depth, the same edge -- and past the edge, a ray's ground fully lit
+where a map's filtered edge is still part way.
 
-What is left for the rays to do next: the crowd (a structure per baked
-pose of the bank, the sort's instances referring to them) and the
-skinned, so the map goes; a sun with a size, several rays a pixel folded
-by the temporal pass, for a penumbra; occlusion and reflections by ray
-(#323).
+A crowd sorted on the device goes into the rays too:
+`crowd.device_crowd_rays(dc, far, bank)` skins the far tier's mesh (a
+hundred and sixty-eight triangles) at every frame of the pose bank on
+the CPU, once, into a bottom-level structure each, and from then on the
+sort's compute pass writes a ray instance for every figure it keeps
+that is drawn as a mesh -- where it stands, turned as it walks, the
+structure of the frame its walk is at -- straight into the frame's
+instance buffer, after the static scene's. The impostors past the far
+tier are left out (a card's shadow is not worth a ray), and so is any
+figure past the shadow map's distance, which is as far as the map ever
+shadowed. The buffer is sized before the sort from what the last frames
+wrote back -- the count the sort reaches, kept in a host-visible word,
+with a quarter's margin and a floor of four thousand -- and its room is
+zeroed first so a slot the sort does not fill is an inactive instance;
+the top-level build then takes the whole room, since the instance count
+cannot come from the device on hardware without indirect builds.
+`tests/test_ray_shadows` stands a device-sorted figure beside the ball
+and checks the ground it shades by ray against the map's shadow of it.
+Measured in the city: at 400 figures nothing changes; at half a million
+the frame goes from 75 to 60 fps with the whole visible horde in the
+rays -- that scene packs a thousand figures a square metre, so a shadow
+ray crosses hundreds of overlapping structures, a density no game scene
+has -- and 20,000 stays at 140.
+
+What is left for the rays to do next: the skinned figures, so the map
+goes; a sun with a size, several rays a pixel folded by the temporal
+pass, for a penumbra; occlusion and reflections by ray (#323).
 
 ### DLSS
 
