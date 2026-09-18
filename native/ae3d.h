@@ -395,6 +395,10 @@ void   ae3d_vk_set_scene_depth(int on);
 int    ae3d_vk_scene_depth_ready(void);
 int    ae3d_vk_resolve_scene_depth(void);
 int    ae3d_vk_velocity_texture(void);
+int    ae3d_vk_render_width(void);
+int    ae3d_vk_render_height(void);
+double ae3d_vk_set_render_scale(double scale);
+double ae3d_vk_render_scale(void);
 void   ae3d_vk_set_capture_bypass(int on);
 /* A crowd sorted on the device (crowd_sort_vk.comp): its figures' state
    written as eight floats each into the frame's buffer, the sort dispatched

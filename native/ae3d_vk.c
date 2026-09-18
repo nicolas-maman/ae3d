@@ -297,6 +297,12 @@ static struct {
        the temporal passes sample it) -- the only one when there is one
        sample. R16G16, texture-space units. */
     VkFormat velocity_format;
+    /* The scene is drawn at render_extent -- the swapchain's extent times
+       render_scale, 1 unless asked otherwise -- into targets of that size,
+       and the composite draws it to the swapchain at the swapchain's. An
+       upscaler (DLSS) sits between the two. */
+    VkExtent2D render_extent;
+    double render_scale;
     VkImage velocity_image;
     VkDeviceMemory velocity_memory;
     VkImageView velocity_view;
@@ -1152,7 +1158,7 @@ static int ae3d_vk_create_velocity(void) {
 
     vk.velocity_format = VK_FORMAT_R16G16_SFLOAT;
     if (vk.samples != VK_SAMPLE_COUNT_1_BIT) {
-        if (!ae3d_vk_create_image((int)vk.extent.width, (int)vk.extent.height, 1, vk.velocity_format,
+        if (!ae3d_vk_create_image((int)vk.render_extent.width, (int)vk.render_extent.height, 1, vk.velocity_format,
                                   vk.samples, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                                   VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
                                   VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_TILING_OPTIMAL,
@@ -1165,7 +1171,7 @@ static int ae3d_vk_create_velocity(void) {
         if (!vk.textures[slot].in_use) { texture = &vk.textures[slot]; break; }
     }
     if (!texture) return ae3d_vk_fail("texture table full");
-    if (!ae3d_vk_create_image((int)vk.extent.width, (int)vk.extent.height, 1, vk.velocity_format,
+    if (!ae3d_vk_create_image((int)vk.render_extent.width, (int)vk.render_extent.height, 1, vk.velocity_format,
                               VK_SAMPLE_COUNT_1_BIT,
                               VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                               VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_TILING_OPTIMAL,
@@ -1185,8 +1191,8 @@ static int ae3d_vk_create_velocity(void) {
     if (ae3d_vkCreateSampler(vk.device, &sampler, NULL, &texture->sampler) != VK_SUCCESS) {
         return ae3d_vk_fail("velocity vkCreateSampler failed");
     }
-    texture->width = (int)vk.extent.width;
-    texture->height = (int)vk.extent.height;
+    texture->width = (int)vk.render_extent.width;
+    texture->height = (int)vk.render_extent.height;
     texture->in_use = 1;
     vk.velocity_texture = slot + 1;
     return 1;
@@ -1208,8 +1214,8 @@ static int ae3d_vk_create_depth(void) {
     image.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     image.imageType = VK_IMAGE_TYPE_2D;
     image.format = vk.depth_format;
-    image.extent.width = vk.extent.width;
-    image.extent.height = vk.extent.height;
+    image.extent.width = vk.render_extent.width;
+    image.extent.height = vk.render_extent.height;
     image.extent.depth = 1;
     image.mipLevels = 1;
     image.arrayLayers = 1;
@@ -1250,6 +1256,22 @@ static int ae3d_vk_create_depth(void) {
 
 // The offscreen equivalent of a swapchain: one image the pass resolves into,
 // which is then copied to a host-visible buffer for the caller to read.
+/* The scene's own extent: the frame's times the render scale, never less
+   than a pixel. Set whenever the frame's is. */
+static void ae3d_vk_scale_extent(void) {
+    double scale = vk.render_scale > 0.0 && vk.render_scale < 1.0 ? vk.render_scale : 1.0;
+    vk.render_extent.width = (unsigned)((double)vk.extent.width * scale + 0.5);
+    vk.render_extent.height = (unsigned)((double)vk.extent.height * scale + 0.5);
+    if (vk.render_extent.width < 1) vk.render_extent.width = 1;
+    if (vk.render_extent.height < 1) vk.render_extent.height = 1;
+}
+
+/* The scene is drawn smaller than the frame: the post chain is then what
+   scales it up, so it runs whether or not an effect asked for it. */
+static int ae3d_vk_scaled(void) {
+    return vk.render_extent.width != vk.extent.width || vk.render_extent.height != vk.extent.height;
+}
+
 static int ae3d_vk_create_offscreen_target(int width, int height) {
     VkDeviceSize size;
 
@@ -1257,6 +1279,7 @@ static int ae3d_vk_create_offscreen_target(int width, int height) {
     if (height < 1) height = 1;
     vk.extent.width = (unsigned)width;
     vk.extent.height = (unsigned)height;
+    ae3d_vk_scale_extent();
 
     vk.image_count = 1;
     vk.images = (VkImage *)calloc(1, sizeof(VkImage));
@@ -1294,7 +1317,8 @@ static int ae3d_vk_create_offscreen_target(int width, int height) {
     vk.readback_height = height;
 
     if (vk.samples != VK_SAMPLE_COUNT_1_BIT) {
-        if (!ae3d_vk_create_image(width, height, 1, vk.color_format, vk.samples,
+        if (!ae3d_vk_create_image((int)vk.render_extent.width, (int)vk.render_extent.height, 1,
+                                  vk.color_format, vk.samples,
                                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
                                   VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_TILING_OPTIMAL,
                                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
@@ -1326,6 +1350,7 @@ static int ae3d_vk_create_swapchain(int width, int height) {
         if (vk.extent.height > capabilities.maxImageExtent.height) vk.extent.height = capabilities.maxImageExtent.height;
     }
     if (vk.extent.width == 0 || vk.extent.height == 0) return ae3d_vk_fail("surface has zero extent");
+    ae3d_vk_scale_extent();
 
     desired = capabilities.minImageCount + 1;
     if (capabilities.maxImageCount > 0 && desired > capabilities.maxImageCount) {
@@ -1387,7 +1412,7 @@ static int ae3d_vk_create_swapchain(int width, int height) {
     }
 
     if (vk.samples != VK_SAMPLE_COUNT_1_BIT) {
-        if (!ae3d_vk_create_image((int)vk.extent.width, (int)vk.extent.height, 1, vk.color_format,
+        if (!ae3d_vk_create_image((int)vk.render_extent.width, (int)vk.render_extent.height, 1, vk.color_format,
                                   vk.samples, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                                   VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
                                   VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_TILING_OPTIMAL,
@@ -1905,7 +1930,7 @@ void ae3d_vk_set_taa(int on) {
     ae3d_vkDeviceWaitIdle(vk.device);
     ae3d_vk_destroy_camdepth_target();
     if (on || vk.ssr_enabled || vk.ssao_enabled || vk.scene_depth_wanted) {
-        ae3d_vk_create_camdepth_target((int)vk.extent.width, (int)vk.extent.height);
+        ae3d_vk_create_camdepth_target((int)vk.render_extent.width, (int)vk.render_extent.height);
     }
 }
 
@@ -2083,7 +2108,7 @@ static int ae3d_vk_create_post_target(void) {
     }
     if (!texture) return ae3d_vk_fail("texture table full");
 
-    if (!ae3d_vk_create_image((int)vk.extent.width, (int)vk.extent.height, 1, vk.color_format,
+    if (!ae3d_vk_create_image((int)vk.render_extent.width, (int)vk.render_extent.height, 1, vk.color_format,
                               VK_SAMPLE_COUNT_1_BIT,
                               VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                               VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_TILING_OPTIMAL,
@@ -2105,8 +2130,8 @@ static int ae3d_vk_create_post_target(void) {
         return ae3d_vk_fail("post vkCreateSampler failed");
     }
 
-    texture->width = (int)vk.extent.width;
-    texture->height = (int)vk.extent.height;
+    texture->width = (int)vk.render_extent.width;
+    texture->height = (int)vk.render_extent.height;
     texture->in_use = 1;
     vk.post_texture = slot + 1;
 
@@ -2127,15 +2152,19 @@ static int ae3d_vk_create_post_target(void) {
     info.renderPass = vk.scene_pass;
     info.attachmentCount = multisampled ? 5u : 3u;
     info.pAttachments = attachments;
-    info.width = vk.extent.width;
-    info.height = vk.extent.height;
+    info.width = vk.render_extent.width;
+    info.height = vk.render_extent.height;
     info.layers = 1;
     if (ae3d_vkCreateFramebuffer(vk.device, &info, NULL, &vk.scene_framebuffer) != VK_SUCCESS) {
         return ae3d_vk_fail("scene vkCreateFramebuffer failed");
     }
 
+    /* The composite's framebuffers are the swapchain's images at the frame's
+       own size: what scales the scene up when it was drawn smaller. */
     vk.post_framebuffers = (VkFramebuffer *)calloc(vk.image_count, sizeof(VkFramebuffer));
     if (!vk.post_framebuffers) return ae3d_vk_fail("out of memory");
+    info.width = vk.extent.width;
+    info.height = vk.extent.height;
     for (i = 0; i < vk.image_count; i++) {
         info.renderPass = vk.post_pass;
         info.attachmentCount = 1;
@@ -2153,7 +2182,11 @@ static int ae3d_vk_create_framebuffers(void) {
     vk.framebuffers = (VkFramebuffer *)calloc(vk.image_count, sizeof(VkFramebuffer));
     if (!vk.framebuffers) return ae3d_vk_fail("out of memory");
 
-    for (i = 0; i < vk.image_count; i++) {
+    /* Drawn into straight, without the post chain, only when the scene is
+       the frame's size: their depth and vectors are the scene's, and an
+       attachment smaller than the framebuffer is not allowed. Scaled, the
+       post chain always runs and these stay null. */
+    for (i = 0; i < vk.image_count && !ae3d_vk_scaled(); i++) {
         VkImageView attachments[5];
         VkFramebufferCreateInfo info;
         VkResult result;
@@ -3498,7 +3531,7 @@ static void ae3d_vk_open_scene_pass(void) {
         else pass.renderPass = vk.post_active ? vk.scene_pass_first : vk.render_pass_first;
     }
     pass.framebuffer = vk.post_active ? vk.scene_framebuffer : vk.framebuffers[vk.image_index];
-    pass.renderArea.extent = vk.extent;
+    pass.renderArea.extent = vk.render_extent;
     /* The third clear is the motion vectors', zero: a pixel nothing draws
        has not moved. */
     pass.clearValueCount = 3;
@@ -3506,13 +3539,13 @@ static void ae3d_vk_open_scene_pass(void) {
     ae3d_vkCmdBeginRenderPass(vk.command_buffers[vk.frame], &pass, VK_SUBPASS_CONTENTS_INLINE);
 
     memset(&viewport, 0, sizeof(viewport));
-    viewport.width = (float)vk.extent.width;
-    viewport.height = (float)vk.extent.height;
+    viewport.width = (float)vk.render_extent.width;
+    viewport.height = (float)vk.render_extent.height;
     viewport.maxDepth = 1.0f;
     ae3d_vkCmdSetViewport(vk.command_buffers[vk.frame], 0, 1, &viewport);
 
     memset(&scissor, 0, sizeof(scissor));
-    scissor.extent = vk.extent;
+    scissor.extent = vk.render_extent;
     ae3d_vkCmdSetScissor(vk.command_buffers[vk.frame], 0, 1, &scissor);
     vk.pass_open = 1;
 }
@@ -3573,7 +3606,7 @@ int ae3d_vk_frame_begin(double r, double g, double b, double a) {
     /* A capture channel is the surfaces' own numbers -- albedo, normals,
        motion -- and no effect over them: the post chain, the reflections
        and the occlusion stand down while one is read. */
-    vk.post_active = !vk.capture_bypass && (vk.fxaa || vk.bloom || vk.ssr_enabled || vk.taa_enabled)
+    vk.post_active = (ae3d_vk_scaled() || (!vk.capture_bypass && (vk.fxaa || vk.bloom || vk.ssr_enabled || vk.taa_enabled)))
                      && vk.screen_quad > 0 && vk.post_texture > 0;
     {
         int k;
@@ -3589,11 +3622,11 @@ int ae3d_vk_frame_begin(double r, double g, double b, double a) {
     vk.depth_resolved = 0;
     if ((vk.ssr_enabled || vk.scene_depth_wanted || vk.ssao_enabled || vk.taa_enabled) && vk.depth_resolve_pipeline) {
         if (!vk.camdepth_framebuffer ||
-            vk.camdepth_width != (int)vk.extent.width ||
-            vk.camdepth_height != (int)vk.extent.height) {
+            vk.camdepth_width != (int)vk.render_extent.width ||
+            vk.camdepth_height != (int)vk.render_extent.height) {
             ae3d_vkDeviceWaitIdle(vk.device);
             ae3d_vk_destroy_camdepth_target();
-            ae3d_vk_create_camdepth_target((int)vk.extent.width, (int)vk.extent.height);
+            ae3d_vk_create_camdepth_target((int)vk.render_extent.width, (int)vk.render_extent.height);
         }
         vk.depth_split = vk.camdepth_framebuffer != VK_NULL_HANDLE;
     }
@@ -4257,11 +4290,11 @@ void ae3d_vk_set_ssr(int on) {
     vk.ssr_enabled = on;
     if (!vk.ready || !on) return;
     if (!vk.camdepth_framebuffer ||
-        vk.camdepth_width != (int)vk.extent.width ||
-        vk.camdepth_height != (int)vk.extent.height) {
+        vk.camdepth_width != (int)vk.render_extent.width ||
+        vk.camdepth_height != (int)vk.render_extent.height) {
         ae3d_vkDeviceWaitIdle(vk.device);
         ae3d_vk_destroy_camdepth_target();
-        ae3d_vk_create_camdepth_target((int)vk.extent.width, (int)vk.extent.height);
+        ae3d_vk_create_camdepth_target((int)vk.render_extent.width, (int)vk.render_extent.height);
     }
 }
 
@@ -4280,11 +4313,11 @@ void ae3d_vk_set_ssao(int on, double radius, double intensity) {
     vk.ssao_intensity = (float)intensity;
     if (!vk.ready || !on) return;
     if (!vk.camdepth_framebuffer ||
-        vk.camdepth_width != (int)vk.extent.width ||
-        vk.camdepth_height != (int)vk.extent.height) {
+        vk.camdepth_width != (int)vk.render_extent.width ||
+        vk.camdepth_height != (int)vk.render_extent.height) {
         ae3d_vkDeviceWaitIdle(vk.device);
         ae3d_vk_destroy_camdepth_target();
-        ae3d_vk_create_camdepth_target((int)vk.extent.width, (int)vk.extent.height);
+        ae3d_vk_create_camdepth_target((int)vk.render_extent.width, (int)vk.render_extent.height);
     }
 }
 
@@ -4302,11 +4335,11 @@ void ae3d_vk_set_scene_depth(int on) {
     vk.scene_depth_wanted = on;
     if (!vk.ready || !on) return;
     if (!vk.camdepth_framebuffer ||
-        vk.camdepth_width != (int)vk.extent.width ||
-        vk.camdepth_height != (int)vk.extent.height) {
+        vk.camdepth_width != (int)vk.render_extent.width ||
+        vk.camdepth_height != (int)vk.render_extent.height) {
         ae3d_vkDeviceWaitIdle(vk.device);
         ae3d_vk_destroy_camdepth_target();
-        ae3d_vk_create_camdepth_target((int)vk.extent.width, (int)vk.extent.height);
+        ae3d_vk_create_camdepth_target((int)vk.render_extent.width, (int)vk.render_extent.height);
     }
 }
 
@@ -4384,13 +4417,13 @@ void ae3d_vk_shadow_end(void) {
     ae3d_vk_stamp_through(1);
 
     memset(&viewport, 0, sizeof(viewport));
-    viewport.width = (float)vk.extent.width;
-    viewport.height = (float)vk.extent.height;
+    viewport.width = (float)vk.render_extent.width;
+    viewport.height = (float)vk.render_extent.height;
     viewport.maxDepth = 1.0f;
     ae3d_vkCmdSetViewport(vk.command_buffers[vk.frame], 0, 1, &viewport);
 
     memset(&scissor, 0, sizeof(scissor));
-    scissor.extent = vk.extent;
+    scissor.extent = vk.render_extent;
     ae3d_vkCmdSetScissor(vk.command_buffers[vk.frame], 0, 1, &scissor);
 }
 
@@ -4431,19 +4464,19 @@ int ae3d_vk_resolve_scene_depth(void) {
     pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     pass.renderPass = vk.camdepth_pass;
     pass.framebuffer = vk.camdepth_framebuffer;
-    pass.renderArea.extent = vk.extent;
+    pass.renderArea.extent = vk.render_extent;
     pass.clearValueCount = 1;
     pass.pClearValues = &clear;
     ae3d_vkCmdBeginRenderPass(vk.command_buffers[vk.frame], &pass, VK_SUBPASS_CONTENTS_INLINE);
     vk.pass_open = 1;
 
     memset(&viewport, 0, sizeof(viewport));
-    viewport.width = (float)vk.extent.width;
-    viewport.height = (float)vk.extent.height;
+    viewport.width = (float)vk.render_extent.width;
+    viewport.height = (float)vk.render_extent.height;
     viewport.maxDepth = 1.0f;
     ae3d_vkCmdSetViewport(vk.command_buffers[vk.frame], 0, 1, &viewport);
     memset(&scissor, 0, sizeof(scissor));
-    scissor.extent = vk.extent;
+    scissor.extent = vk.render_extent;
     ae3d_vkCmdSetScissor(vk.command_buffers[vk.frame], 0, 1, &scissor);
 
     ae3d_vk_set_int(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_DEPTHSAMPLECOUNT, (int)vk.samples);
@@ -4608,8 +4641,8 @@ static void ae3d_vk_draw_screen(VkPipeline pipeline, VkDescriptorSet *set_slot, 
 // The post uniforms live in the shared scene block, so both the reflective
 // composite and the ordinary one read them; set them once before either draws.
 static void ae3d_vk_setup_post_uniforms(void) {
-    float texel_x = vk.extent.width ? 1.0f / (float)vk.extent.width : 0.0f;
-    float texel_y = vk.extent.height ? 1.0f / (float)vk.extent.height : 0.0f;
+    float texel_x = vk.render_extent.width ? 1.0f / (float)vk.render_extent.width : 0.0f;
+    float texel_y = vk.render_extent.height ? 1.0f / (float)vk.render_extent.height : 0.0f;
     float texel[2];
 
     texel[0] = texel_x;
@@ -4685,11 +4718,11 @@ int ae3d_vk_frame_end(void) {
         int source;
 
         memset(&viewport, 0, sizeof(viewport));
-        viewport.width = (float)vk.extent.width;
-        viewport.height = (float)vk.extent.height;
+        viewport.width = (float)vk.render_extent.width;
+        viewport.height = (float)vk.render_extent.height;
         viewport.maxDepth = 1.0f;
         memset(&scissor, 0, sizeof(scissor));
-        scissor.extent = vk.extent;
+        scissor.extent = vk.render_extent;
 
         ae3d_vk_setup_post_uniforms();
 
@@ -4698,7 +4731,7 @@ int ae3d_vk_frame_end(void) {
             pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
             pass.renderPass = vk.ssr_pass;
             pass.framebuffer = vk.ssr_framebuffer;
-            pass.renderArea.extent = vk.extent;
+            pass.renderArea.extent = vk.render_extent;
             ae3d_vkCmdBeginRenderPass(vk.command_buffers[vk.frame], &pass, VK_SUBPASS_CONTENTS_INLINE);
             vk.pass_open = 1;
             ae3d_vkCmdSetViewport(vk.command_buffers[vk.frame], 0, 1, &viewport);
@@ -4725,7 +4758,7 @@ int ae3d_vk_frame_end(void) {
             pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
             pass.renderPass = vk.ssr_pass;
             pass.framebuffer = vk.taa_framebuffer[cur];
-            pass.renderArea.extent = vk.extent;
+            pass.renderArea.extent = vk.render_extent;
             ae3d_vkCmdBeginRenderPass(vk.command_buffers[vk.frame], &pass, VK_SUBPASS_CONTENTS_INLINE);
             vk.pass_open = 1;
             ae3d_vkCmdSetViewport(vk.command_buffers[vk.frame], 0, 1, &viewport);
@@ -4740,6 +4773,11 @@ int ae3d_vk_frame_end(void) {
             vk.taa_current = old;
         }
 
+        /* The composite, at the frame's own size: the scene drawn smaller
+           is scaled up by the sampling here. */
+        viewport.width = (float)vk.extent.width;
+        viewport.height = (float)vk.extent.height;
+        scissor.extent = vk.extent;
         memset(&pass, 0, sizeof(pass));
         pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         pass.renderPass = vk.post_pass;
@@ -4917,6 +4955,26 @@ void *ae3d_vk_offscreen_pixels(void) {
 /* The size of the frame being drawn, in pixels: the swapchain's extent. */
 int ae3d_vk_frame_width(void) { return (int)vk.extent.width; }
 int ae3d_vk_frame_height(void) { return (int)vk.extent.height; }
+/* The size the scene is drawn at: the frame's times the render scale. */
+int ae3d_vk_render_width(void) { return (int)vk.render_extent.width; }
+int ae3d_vk_render_height(void) { return (int)vk.render_extent.height; }
+
+/* Draw the scene at `scale` of the frame's size (0.25..1), the composite
+   scaling it up: the frame's cost is the scene's pixels. The targets are
+   remade at the next frame. Returns the scale in force. */
+double ae3d_vk_set_render_scale(double scale) {
+    if (scale > 1.0) scale = 1.0;
+    if (scale < 0.25) scale = 0.25;
+    if (vk.render_scale == scale) return scale;
+    vk.render_scale = scale;
+    if (vk.ready) {
+        vk.needs_resize = 1;
+        vk.pending_width = (int)vk.extent.width;
+        vk.pending_height = (int)vk.extent.height;
+    }
+    return scale;
+}
+double ae3d_vk_render_scale(void) { return vk.render_scale > 0.0 ? vk.render_scale : 1.0; }
 
 int ae3d_vk_offscreen_width(void) { return vk.readback_width; }
 int ae3d_vk_offscreen_height(void) { return vk.readback_height; }

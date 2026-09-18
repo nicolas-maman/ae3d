@@ -85,6 +85,9 @@ extern ae3d_vk_set_scene_depth(on: int)
 extern ae3d_vk_scene_depth_ready() -> int
 extern ae3d_vk_frame_width() -> int
 extern ae3d_vk_frame_height() -> int
+extern ae3d_vk_render_width() -> int
+extern ae3d_vk_render_height() -> int
+extern ae3d_vk_set_render_scale(scale: float) -> float
 extern ae3d_posebank_frames(bank: ptr) -> int
 extern ae3d_posebank_travel(bank: ptr, frame: int) -> float
 extern ae3d_vk_velocity_texture() -> int
@@ -352,13 +355,14 @@ renderer_free(r: *VKRenderer) {
     heap.free(r)
 }
 
-// Always 1.0, and honestly so. The attachments in native/ae3d_vk.c are built
-// against the swapchain extent, and sizing the scene independently of the
-// window needs a second set of images, their own render pass and a blit. Until
-// that exists, a caller asking for half size is told it got full size, which is
-// what lets it stop asking rather than believe a frame got cheaper.
+// The scene drawn at `scale` of the frame (0.25..1) into targets of that
+// size -- its colour, depth and motion vectors, and the occlusion, the
+// reflection and the temporal pass over them -- and the composite drawing
+// it to the frame at the frame's size: the scene's cost is its pixels, and
+// an upscaler sits where the composite samples. The targets are remade at
+// the next frame. Returns the scale in force.
 vtable_set_render_scale(r: *VKRenderer, scale: float) -> float {
-    return 1.0
+    return ae3d_vk_set_render_scale(scale)
 }
 
 backend(r: *VKRenderer) -> Backend {
@@ -542,8 +546,8 @@ frame_view_projection(r: *VKRenderer, cam: *Camera) -> Mat4 {
         r.jitter_y = 0.0
         return vp
     }
-    width = ae3d_vk_frame_width() as float
-    height = ae3d_vk_frame_height() as float
+    width = ae3d_vk_render_width() as float
+    height = ae3d_vk_render_height() as float
     if width <= 0.0 || height <= 0.0 { return vp }
     k = r.taa_frame % 8 + 1
     jx = (halton(k, 2) - 0.5) * 2.0 / width
@@ -1609,8 +1613,8 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
         has_depth = 0
         if depth_ready { has_depth = 1 }
         ae3d_vk_scene_set_int(vkscene.OFF_HASSCENEDEPTH, has_depth)
-        ae3d_vk_scene_set_float(vkscene.OFF_SCREENSIZE, ae3d_vk_frame_width() as float)
-        ae3d_vk_scene_set_float(vkscene.OFF_SCREENSIZE + 4, ae3d_vk_frame_height() as float)
+        ae3d_vk_scene_set_float(vkscene.OFF_SCREENSIZE, ae3d_vk_render_width() as float)
+        ae3d_vk_scene_set_float(vkscene.OFF_SCREENSIZE + 4, ae3d_vk_render_height() as float)
         i = i + 1
     }
     // The sky, first into the pass, after the blocks carry the frame's
