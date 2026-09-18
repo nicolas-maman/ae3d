@@ -85,6 +85,7 @@ Every program honours a few environment variables:
 | `AE3D_API=opengl` | run through OpenGL instead of Vulkan |
 | `AE3D_RAYS=1` | shadows by ray through the scene's acceleration structure, where the Vulkan device has ray queries ([docs/rendering.md](docs/rendering.md#ray-traced-shadows)) |
 | `AE3D_SUN_SIZE=n` | the sun's size for the rays' penumbra, in tenths of a degree (5 is the sun; 0, the default, a point) |
+| `AE3D_RAY_AO=1` | ambient occlusion by ray in the screen-space pass's place, with the rays and the occlusion on |
 | `AE3D_DLSS=n` | DLSS at mode `n` (1 performance, 2 balanced, 3 quality, 6 DLAA) on Vulkan, with the Streamline runtime beside the program or in `AE3D_STREAMLINE` ([docs/rendering.md](docs/rendering.md#dlss)) |
 | `AE3D_RENDER_SCALE=50` | draw the scene at half the window's size, the composite scaling it up |
 | `AE3D_AGENT=port` | open the control channel on loopback ([docs/agent.md](docs/agent.md)) |

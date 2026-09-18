@@ -5317,6 +5317,8 @@ void ae3d_vk_set_ssao(int on, double radius, double intensity) {
 }
 
 int ae3d_vk_ssao(void) { return vk.ssao_enabled; }
+double ae3d_vk_ssao_radius(void) { return vk.ssao_radius; }
+double ae3d_vk_ssao_intensity(void) { return vk.ssao_intensity; }
 
 /* The one-pixel white texture every set falls back to, for a draw that has
    to bind an image it does not read: the sky drawn from the sun. */

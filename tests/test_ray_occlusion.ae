@@ -1,0 +1,160 @@
+// Occlusion by ray: on Vulkan where the device traces, with the rays and
+// the occlusion on, the scene shader traces the hemisphere over every lit
+// pixel in the screen-space pass's place. A wall stands on a plane under
+// a sun from straight above, so no shadow falls: the ground at the wall's
+// foot sees half a sky and goes darker; the open ground sees all of it
+// and stays as lit. The screen-space pass, drawn instead when the rays
+// are off, darkens the same foot; and with neither, the foot is as lit as
+// the open ground.
+//
+// Skips where there is no Vulkan or no ray query, as test_ray_shadows does.
+
+import std.mem
+import ae3d.core
+import ae3d.vk
+import ae3d.loader
+import ae3d.rendering
+
+const WIDTH = 320
+const HEIGHT = 240
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+read_frame(backend: *Backend, cam: *Camera, light: *Light) -> ptr {
+    core.backend_render(backend, cam, light)
+    core.backend_render(backend, cam, light)
+    return core.backend_frame_pixels(backend)
+}
+
+level(pixels: ptr, x: int, y: int) -> int {
+    at = (y * WIDTH + x) * 4
+    return mem.get_byte(pixels, at) + mem.get_byte(pixels, at + 1) + mem.get_byte(pixels, at + 2)
+}
+
+// The mean brightness of a window, since the rays' taps differ pixel to pixel.
+mean_level(pixels: ptr, x0: int, y0: int, x1: int, y1: int) -> int {
+    total = 0
+    count = 0
+    y = y0
+    while y <= y1 {
+        x = x0
+        while x <= x1 {
+            total = total + level(pixels, x, y)
+            count = count + 1
+            x = x + 1
+        }
+        y = y + 1
+    }
+    if count == 0 { return 0 }
+    return total / count
+}
+
+main() {
+    if !vk.available() {
+        println("ray_occlusion: SKIP no Vulkan driver (${vk.last_error()})")
+        return
+    }
+    renderer = vk.renderer_new()
+    backend = vk.backend(renderer)
+    if !core.backend_init(&backend, null, WIDTH, HEIGHT) {
+        println("ray_occlusion: SKIP Vulkan would not start (${vk.last_error()})")
+        vk.renderer_free(renderer)
+        return
+    }
+    if !vk.renderer_ray_query(renderer) {
+        println("ray_occlusion: SKIP the device does not trace rays (no VK_KHR_ray_query)")
+        core.backend_cleanup(&backend)
+        vk.renderer_free(renderer)
+        return
+    }
+    core.backend_set_clear_color(&backend, 0.0, 0.0, 0.0)
+
+    ground = loader.plane(24, 16.0)
+    core.model_set_position(ground, 0.0 - 192.0, 0.0, 0.0 - 192.0)
+    core.model_matte(ground, 0.85, 0.85, 0.85)
+    core.backend_add_model(&backend, ground)
+    // A wall across the middle of the view, thin along x, tall, long along z.
+    wall = loader.cube(1.0)
+    core.model_set_scale(wall, 4.0, 40.0, 200.0)
+    core.model_set_position(wall, 0.0, 20.0, 0.0)
+    core.model_matte(wall, 0.6, 0.6, 0.6)
+    core.backend_add_model(&backend, wall)
+    config = rendering.default_config()
+    rendering.apply(ground, config)
+    rendering.apply(wall, config)
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 220.0, 1.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+    light = core.light_sun(core.vec3(0.0, 1.0, 0.0))
+    light.ambient_strength = 0.35
+    core.backend_set_shadows(&backend, false)
+
+    // The wall's foot on screen: the camera at 220 m over the origin sees
+    // the plane at 1.42 m a pixel, so the wall's face at x 2 m lands about
+    // a pixel and a half right of the middle, and its foot's ground a few
+    // pixels further; the open ground is well away to the right.
+    cx = WIDTH / 2
+    cy = HEIGHT / 2
+    foot_x = cx + 5
+    open_x = cx + 120
+
+    plain = read_frame(&backend, cam, light)
+    foot_plain = mean_level(plain, foot_x - 1, cy - 8, foot_x + 1, cy + 8)
+    open_plain = mean_level(plain, open_x - 1, cy - 8, open_x + 1, cy + 8)
+    check("with no occlusion the wall's foot is as lit as the open ground (${foot_plain} against ${open_plain})", foot_plain > open_plain - 12 && foot_plain < open_plain + 12 && open_plain > 200)
+
+    // The screen-space pass: the foot goes darker.
+    vk.renderer_set_ssao(renderer, true, 20.0, 1.0)
+    screened = read_frame(&backend, cam, light)
+    foot_screen = mean_level(screened, foot_x - 1, cy - 8, foot_x + 1, cy + 8)
+    open_screen = mean_level(screened, open_x - 1, cy - 8, open_x + 1, cy + 8)
+    check("the screen-space pass darkens the foot (${foot_screen} against ${open_screen})", foot_screen < open_screen - 30)
+
+    // By ray: asked for, it waits on the rays; with them, the foot goes
+    // darker by the half sky the wall takes, and the open ground stays.
+    vk.renderer_set_ray_occlusion(renderer, true)
+    check("occlusion by ray waits on the rays", !vk.renderer_ray_occlusion(renderer))
+    vk.renderer_set_ray_shadows(renderer, true)
+    check("and is on with them", vk.renderer_ray_occlusion(renderer))
+    traced = read_frame(&backend, cam, light)
+    foot_ray = mean_level(traced, foot_x - 1, cy - 8, foot_x + 1, cy + 8)
+    open_ray = mean_level(traced, open_x - 1, cy - 8, open_x + 1, cy + 8)
+    check("the rays darken the foot (${foot_ray} against ${open_ray})", foot_ray < open_ray - 30)
+    check("and leave the open ground as lit (${open_ray} against ${open_plain})", open_ray > open_plain - 12 && open_ray < open_plain + 12)
+    // The wall's top, level and open to the whole sky, is not darkened.
+    top_plain = mean_level(plain, cx, cy - 60, cx, cy - 40)
+    top_ray = mean_level(traced, cx, cy - 60, cx, cy - 40)
+    check("nor the wall's top (${top_ray} against ${top_plain})", top_ray > top_plain - 12 && top_ray < top_plain + 12)
+
+    // Off again: the screen-space pass is back.
+    vk.renderer_set_ray_occlusion(renderer, false)
+    back = read_frame(&backend, cam, light)
+    foot_back = mean_level(back, foot_x - 1, cy - 8, foot_x + 1, cy + 8)
+    check("off again, the screen-space pass darkens the foot (${foot_back})", foot_back < open_plain - 30)
+    vk.renderer_set_ray_shadows(renderer, false)
+    vk.renderer_set_ssao(renderer, false, 20.0, 1.0)
+    plain_again = read_frame(&backend, cam, light)
+    foot_again = mean_level(plain_again, foot_x - 1, cy - 8, foot_x + 1, cy + 8)
+    check("and with neither the foot is as lit as before (${foot_again} against ${foot_plain})", foot_again > foot_plain - 12 && foot_again < foot_plain + 12)
+
+    core.backend_cleanup(&backend)
+    vk.renderer_free(renderer)
+    core.model_free(ground)
+    core.model_free(wall)
+    core.camera_free(cam)
+    if failures == 0 {
+        println("ray_occlusion: all checks passed")
+    } else {
+        println("ray_occlusion: ${failures} failure(s)")
+    }
+}

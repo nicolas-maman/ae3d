@@ -79,17 +79,19 @@ typedef struct {
 #define AE3D_VK_OFF_SHADOWTEXELWORLD 7116
 #define AE3D_VK_OFF_RAYSHADOWS 7120
 #define AE3D_VK_OFF_SUNANGLE 7124
-#define AE3D_VK_OFF_ENABLEPERLINNOISE 7128
-#define AE3D_VK_OFF_NOISESCALE 7132
-#define AE3D_VK_OFF_NOISEOCTAVES 7136
-#define AE3D_VK_OFF_NOISEINTENSITY 7140
-#define AE3D_VK_OFF_ENABLECAUSTICS 7144
-#define AE3D_VK_OFF_CAUSTICSINTENSITY 7148
-#define AE3D_VK_OFF_CAUSTICSSCALE 7152
-#define AE3D_VK_OFF_CAUSTICSSPEED 7156
-#define AE3D_VK_OFF_CAUSTICSWATERLEVEL 7160
-#define AE3D_VK_OFF_CAUSTICSDEPTH 7164
-#define AE3D_VK_OFF_CAUSTICSTIME 7168
+#define AE3D_VK_OFF_RAYOCCLUSION 7128
+#define AE3D_VK_OFF_RAYOCCLUSIONSTRENGTH 7132
+#define AE3D_VK_OFF_ENABLEPERLINNOISE 7136
+#define AE3D_VK_OFF_NOISESCALE 7140
+#define AE3D_VK_OFF_NOISEOCTAVES 7144
+#define AE3D_VK_OFF_NOISEINTENSITY 7148
+#define AE3D_VK_OFF_ENABLECAUSTICS 7152
+#define AE3D_VK_OFF_CAUSTICSINTENSITY 7156
+#define AE3D_VK_OFF_CAUSTICSSCALE 7160
+#define AE3D_VK_OFF_CAUSTICSSPEED 7164
+#define AE3D_VK_OFF_CAUSTICSWATERLEVEL 7168
+#define AE3D_VK_OFF_CAUSTICSDEPTH 7172
+#define AE3D_VK_OFF_CAUSTICSTIME 7176
 #define AE3D_VK_OFF_PROJECTION 7184
 #define AE3D_VK_OFF_VIEW 7248
 #define AE3D_VK_OFF_CLOUDSUNCOLOR 7312
@@ -170,12 +172,12 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "bloomThreshold", 7048 },
     { "bones", 688 },
     { "captureChannel", 6856 },
-    { "causticsDepth", 7164 },
-    { "causticsIntensity", 7148 },
-    { "causticsScale", 7152 },
-    { "causticsSpeed", 7156 },
-    { "causticsTime", 7168 },
-    { "causticsWaterLevel", 7160 },
+    { "causticsDepth", 7172 },
+    { "causticsIntensity", 7156 },
+    { "causticsScale", 7160 },
+    { "causticsSpeed", 7164 },
+    { "causticsTime", 7176 },
+    { "causticsWaterLevel", 7168 },
     { "clearcoatIntensity", 6956 },
     { "clearcoatRoughness", 6952 },
     { "cloudCover", 6904 },
@@ -189,7 +191,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "edgeThreshold", 7368 },
     { "edgeThresholdMin", 7372 },
     { "enableBloom", 7044 },
-    { "enableCaustics", 7144 },
+    { "enableCaustics", 7152 },
     { "enableClearcoat", 6948 },
     { "enableEnergyConservation", 7004 },
     { "enableFoam", 7952 },
@@ -197,7 +199,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "enableGlobalIllumination", 7032 },
     { "enableImageBasedLighting", 7008 },
     { "enableMultipleScattering", 7000 },
-    { "enablePerlinNoise", 7128 },
+    { "enablePerlinNoise", 7136 },
     { "enableShadows", 7088 },
     { "enableSheen", 6960 },
     { "enableTransmission", 6992 },
@@ -239,15 +241,17 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "materialAlpha", 6924 },
     { "metallic", 6892 },
     { "model", 352 },
-    { "noiseIntensity", 7140 },
-    { "noiseOctaves", 7136 },
-    { "noiseScale", 7132 },
+    { "noiseIntensity", 7148 },
+    { "noiseOctaves", 7144 },
+    { "noiseScale", 7140 },
     { "normalStrength", 6940 },
     { "occlusionStrength", 6944 },
     { "poseBankFrames", 8036 },
     { "prevModel", 544 },
     { "prevViewProjection", 608 },
     { "projection", 7184 },
+    { "rayOcclusion", 7128 },
+    { "rayOcclusionStrength", 7132 },
     { "rayShadows", 7120 },
     { "reflectivity", 6928 },
     { "roughness", 6896 },
@@ -302,7 +306,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "wetness", 6932 },
 };
 
-#define AE3D_VK_UNIFORM_SLOT_COUNT 134
+#define AE3D_VK_UNIFORM_SLOT_COUNT 136
 
 static inline int ae3d_vk_uniform_offset(const char *name) {
     int low = 0;

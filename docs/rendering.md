@@ -271,8 +271,25 @@ millisecond of scene time in the city at 720p (3.4 to 4.5 ms with 400
 figures); the shadow map's penumbra is untouched, since only what the
 rays shadow takes the size.
 
+Occlusion by ray: `engine_set_ray_occlusion(e, on)`, or `AE3D_RAY_AO=1`,
+with the rays and the occlusion (`engine_set_ssao`) both on. The scene
+shader traces four cosine-weighted rays into the hemisphere over every
+lit pixel, each stopped at the occlusion's reach, on the same turned
+spiral as the sun's taps, and darkens by the share that hit -- the share
+of the sky the point does not see, from the scene itself, with no screen
+edge or hidden surface for a depth-based estimate to miss -- and the
+screen-space pass is not drawn. The rays start a hand's breadth out,
+since a crowd figure is drawn from its near mesh and traced against its
+far one, a few centimetres apart, and a ray from the skin found the
+proxy. A still frame shows the grain; under the temporal pass it folds
+smooth. `tests/test_ray_occlusion` stands a wall on a plane under a sun
+from straight above: the ground at its foot goes darker by ray, the open
+ground and the wall's top do not, and off again the screen-space pass is
+back. In the city at 720p the opaque pass goes from 1.23 to 1.81 ms
+(best of five) and the 0.11 ms screen-space pass is skipped.
+
 What is left for the rays to do next: the skinned figures, so the map
-goes; occlusion and reflections by ray (#323).
+goes; reflections by ray (#323).
 
 ### DLSS
 

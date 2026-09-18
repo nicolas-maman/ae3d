@@ -82,6 +82,8 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float shadowTexelWorld;
     int rayShadows;
     float sunAngle;
+    float rayOcclusion;
+    float rayOcclusionStrength;
     bool enablePerlinNoise;
     float noiseScale;
     int noiseOctaves;

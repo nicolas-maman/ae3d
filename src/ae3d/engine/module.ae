@@ -35,7 +35,7 @@ exports (
     engine_set_size, engine_set_title, engine_set_msaa, engine_set_decorated, engine_set_post,
     engine_set_render_scale, engine_set_shadows, engine_shadows, engine_set_fog, engine_fog, engine_set_shadow_distance, engine_shadow_distance,
     engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
-    engine_set_skybox, engine_set_sky, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_clouds, engine_cloud_wind, engine_set_sky_overcast, engine_sky_overcast, engine_sky_overcast_color, engine_set_ssao, engine_set_capture_channel, engine_set_wetness, engine_set_taa, engine_taa, engine_set_dlss, engine_dlss, engine_ray_query, engine_set_ray_shadows, engine_ray_shadows, engine_set_sun_size, engine_sun_size, engine_load_texture,
+    engine_set_skybox, engine_set_sky, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_clouds, engine_cloud_wind, engine_set_sky_overcast, engine_sky_overcast, engine_sky_overcast_color, engine_set_ssao, engine_set_capture_channel, engine_set_wetness, engine_set_taa, engine_taa, engine_set_dlss, engine_dlss, engine_ray_query, engine_set_ray_shadows, engine_ray_shadows, engine_set_sun_size, engine_sun_size, engine_set_ray_occlusion, engine_ray_occlusion, engine_load_texture,
     engine_set_time_of_day, engine_time_of_day,
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
     engine_render_ms, engine_render_frames,
@@ -176,6 +176,9 @@ struct Engine {
     ray_shadows: bool
     // The sun's size for the rays' penumbra, in degrees; zero is a point.
     sun_size: float
+    // Occlusion by ray, asked for: with the rays and the occlusion on, the
+    // scene shader traces it and the screen-space pass is skipped.
+    ray_occlusion: bool
     perf_on: bool
     perf_frames: int
     perf_shadow_ms: float
@@ -892,6 +895,22 @@ engine_set_sun_size(e: *Engine, degrees: float) {
 
 engine_sun_size(e: *Engine) -> float { return e.sun_size }
 
+// Occlusion by ray, in the screen-space pass's place, with the same reach
+// and strength (engine_set_ssao), where the rays are on and the device
+// traces: four rays into the hemisphere over every lit pixel, folded by
+// the temporal pass. AE3D_RAY_AO=1 asks for it from outside.
+engine_set_ray_occlusion(e: *Engine, on: bool) {
+    e.ray_occlusion = on
+    if e.backend_state != null && e.api == platform.API_VULKAN {
+        vk.renderer_set_ray_occlusion(e.backend_state as *VKRenderer, on)
+    }
+}
+
+engine_ray_occlusion(e: *Engine) -> bool {
+    if !e.ray_occlusion || !e.ssao_on || !engine_ray_shadows(e) { return false }
+    return true
+}
+
 engine_set_wetness(e: *Engine, amount: float) {
     if e.backend_state == null { return }
     if e.api == platform.API_VULKAN {
@@ -1099,6 +1118,8 @@ engine_start(e: *Engine, x: int, y: int) -> bool {
     tenths = core.env_int("AE3D_SUN_SIZE", 0 - 1)
     if tenths >= 0 { e.sun_size = (tenths as float) / 10.0 }
     if e.sun_size > 0.0 { engine_set_sun_size(e, e.sun_size) }
+    if core.env_int("AE3D_RAY_AO", 0) == 1 { e.ray_occlusion = true }
+    if e.ray_occlusion { engine_set_ray_occlusion(e, true) }
     if e.ray_shadows {
         engine_set_ray_shadows(e, true)
         if engine_ray_query(e) { println("ae3d: shadows by ray") } else { println("ae3d: no ray query on this device; the shadow map stands") }

@@ -25,7 +25,7 @@ exports (
     renderer_set_normal_strength, renderer_set_occlusion_strength, renderer_set_capture_channel, renderer_set_wetness, renderer_material_texture_size,
     renderer_load_texture, renderer_release_texture, renderer_sample_count, renderer_set_post,
     renderer_set_bloom_intensity, renderer_bloom_intensity,
-    renderer_set_shadows, renderer_shadows, renderer_set_ssr, renderer_ssr, renderer_set_ssr_params, renderer_set_taa, renderer_taa, request_dlss, renderer_set_dlss, renderer_dlss, set_samples, renderer_ray_query, renderer_set_ray_shadows, renderer_ray_shadows, renderer_set_sun_size, renderer_sun_size, renderer_add_light, renderer_remove_light,
+    renderer_set_shadows, renderer_shadows, renderer_set_ssr, renderer_ssr, renderer_set_ssr_params, renderer_set_taa, renderer_taa, request_dlss, renderer_set_dlss, renderer_dlss, set_samples, renderer_ray_query, renderer_set_ray_shadows, renderer_ray_shadows, renderer_set_sun_size, renderer_sun_size, renderer_set_ray_occlusion, renderer_ray_occlusion, renderer_add_light, renderer_remove_light,
     renderer_set_fog, renderer_fog, renderer_set_clouds, renderer_set_sky_overcast, renderer_set_shadow_distance, renderer_shadow_distance,
     renderer_set_ssao, renderer_ssao,
     skybox_create, skybox_free,
@@ -126,6 +126,8 @@ extern ae3d_vk_set_ssr(on: int)
 extern ae3d_vk_set_ssao(on: int, radius: float, intensity: float)
 extern ae3d_vk_default_texture() -> int
 extern ae3d_vk_ssao() -> int
+extern ae3d_vk_ssao_radius() -> float
+extern ae3d_vk_ssao_intensity() -> float
 extern ae3d_vk_draw_ssao()
 extern ae3d_vk_mark_sky_done()
 extern ae3d_vk_mark_opaque_done()
@@ -206,6 +208,9 @@ struct VKRenderer {
     // The sun's angular radius in radians, for the rays' penumbra; zero
     // is a point sun.
     sun_angle: float
+    // Occlusion by ray while the rays are on, in the screen-space pass's
+    // place: asked for or not; its reach and strength are the occlusion's.
+    ray_occlusion: bool
     textures: ptr
     frustum: ptr
     skybox: ptr
@@ -344,6 +349,7 @@ renderer_new() -> *VKRenderer {
     r.capture_channel = 0
     r.wetness = 0.0
     r.sun_angle = 0.0
+    r.ray_occlusion = false
     r.batches = list.new()
     r.shadow_batches = list.new()
     r.shadow_batch_count = 0
@@ -584,6 +590,19 @@ renderer_set_sun_size(r: *VKRenderer, degrees: float) {
 renderer_sun_size(r: *VKRenderer) -> float {
     if r == null { return 0.0 }
     return core.rad_to_deg(r.sun_angle) * 2.0
+}
+
+// Occlusion by ray, with the occlusion's own reach and strength
+// (renderer_set_ssao), while the rays are on: the scene shader traces the
+// hemisphere over every lit pixel and the screen-space pass is not drawn.
+// Off, or with the rays off, the screen-space pass stands.
+renderer_set_ray_occlusion(r: *VKRenderer, on: bool) {
+    if r != null { r.ray_occlusion = on }
+}
+
+renderer_ray_occlusion(r: *VKRenderer) -> bool {
+    if r == null { return false }
+    return r.ray_occlusion && ae3d_vk_ray_shadows() == 1 && ae3d_vk_ssao() == 1
 }
 
 // A model whose shadow the rays cast: a static mesh drawn on its own or
@@ -1795,6 +1814,9 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     i = 0
     ssr_on = ae3d_vk_ssr() == 1
     ssao_on = ae3d_vk_ssao() == 1
+    // By ray, the occlusion is the scene shader's and the pass is skipped.
+    traced_occlusion = ssao_on && r.ray_occlusion && ae3d_vk_ray_shadows_now() == 1
+    if traced_occlusion { ssao_on = false }
     taa_on = ae3d_vk_taa() == 1
     depth_ready = ae3d_vk_scene_depth_ready() == 1 && (ssr_on || ssao_on || taa_on || wants_scene_depth(r))
     while i < programs {
@@ -1812,6 +1834,10 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
         ae3d_vk_scene_set_float(vkscene.OFF_JITTER + 4, r.jitter_y)
         ae3d_vk_scene_set_int(vkscene.OFF_RAYSHADOWS, ae3d_vk_ray_shadows_now())
         ae3d_vk_scene_set_float(vkscene.OFF_SUNANGLE, r.sun_angle)
+        reach = 0.0
+        if traced_occlusion { reach = ae3d_vk_ssao_radius() }
+        ae3d_vk_scene_set_float(vkscene.OFF_RAYOCCLUSION, reach)
+        ae3d_vk_scene_set_float(vkscene.OFF_RAYOCCLUSIONSTRENGTH, ae3d_vk_ssao_intensity())
         // What a water surface needs to read the depth under it back into
         // a position: whether there is one, and the frame's size in pixels.
         has_depth = 0
