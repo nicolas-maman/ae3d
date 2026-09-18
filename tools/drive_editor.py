@@ -646,14 +646,14 @@ def main():
                       and w["type"] == "toggle"]
             check("and each has a switch", len(switch) == 1)
             if switch:
-                post(args.port, "/widget/%d/click" % switch[0]["id"])
+                post(args.port, "/widget/%d/toggle" % switch[0]["id"])
                 widgets, ok = wait_for(
                     args.port,
                     lambda ws: any(w["type"] == "text"
                                    and "ambient occlusion" in w["text"]
                                    for w in ws.values()))
                 check("pressing one is heard by the editor", ok)
-                post(args.port, "/widget/%d/click" % switch[0]["id"])
+                post(args.port, "/widget/%d/toggle" % switch[0]["id"])
 
         # A terrain is one object whose shape is a property of it, rather than
         # five buttons in the panel that each add a different thing. The panel
@@ -1224,14 +1224,14 @@ def main():
                 def bloom_on(ws):
                     return bool(ws[switch[0]["id"]].get("active"))
 
-                post(args.port, "/widget/%d/click" % switch[0]["id"])
+                post(args.port, "/widget/%d/toggle" % switch[0]["id"])
                 widgets, on = wait_for(args.port, bloom_on)
                 check("the bloom switch turns on", on)
                 written = os.path.getmtime(scene_file)
                 post(args.port, "/widget/%d/click" % save_btn)
                 check("the scene is written again",
                       wait_file(scene_file, newer_than=written))
-                post(args.port, "/widget/%d/click" % switch[0]["id"])
+                post(args.port, "/widget/%d/toggle" % switch[0]["id"])
                 wait_for(args.port, lambda ws: not bloom_on(ws))
                 post(args.port, "/widget/%d/click" % load_btn)
                 widgets, back = wait_for(args.port, bloom_on)
@@ -1250,7 +1250,7 @@ def main():
                 def ssr_on(ws):
                     return bool(ws[switch[0]["id"]].get("active"))
 
-                post(args.port, "/widget/%d/click" % switch[0]["id"])
+                post(args.port, "/widget/%d/toggle" % switch[0]["id"])
                 widgets, on = wait_for(args.port, ssr_on)
                 check("the reflections switch turns on", on)
                 written = os.path.getmtime(scene_file)
@@ -1262,7 +1262,7 @@ def main():
                 check("and the file says so",
                       bool(saved.get("view", {}).get("rendering", {}).get("ssr")),
                       json.dumps(saved.get("view", {}).get("rendering", {})))
-                post(args.port, "/widget/%d/click" % switch[0]["id"])
+                post(args.port, "/widget/%d/toggle" % switch[0]["id"])
                 wait_for(args.port, lambda ws: not ssr_on(ws))
                 post(args.port, "/widget/%d/click" % load_btn)
                 widgets, back = wait_for(args.port, ssr_on)
@@ -1281,7 +1281,7 @@ def main():
             caps = [w for w in widgets.values()
                     if w["type"] == "text" and w["text"].strip() == "time of day"]
             if switch and caps:
-                post(args.port, "/widget/%d/click" % switch[0]["id"])
+                post(args.port, "/widget/%d/toggle" % switch[0]["id"])
                 widgets, on = wait_for(
                     args.port, lambda ws: bool(ws[switch[0]["id"]].get("active")))
                 check("the sun by time turns on", on)
@@ -1299,10 +1299,14 @@ def main():
                             lambda ws: ws[box[0]["id"]]["text"] != noon)
                         check("dragging the hour to dusk moves the light's intensity", ok,
                               "intensity stayed %r" % noon)
-                post(args.port, "/widget/%d/click" % switch[0]["id"])
+                post(args.port, "/widget/%d/toggle" % switch[0]["id"])
                 wait_for(args.port, lambda ws: not ws[switch[0]["id"]].get("active"))
 
         # Clouds the same way: marched by either backend, carried by the scene.
+        # A switch is pressed through /toggle, not /click: the routes are the
+        # toolkit's, and on GTK4 a click reaches a check button not at all
+        # (it is not a button there), while /toggle flips it and fires the
+        # app's closure on every backend, which is what a press does.
         widgets = tree(args.port)
         clouds = [w for w in widgets.values()
                   if w["type"] == "text" and w["text"].strip() == "Clouds"]
@@ -1314,7 +1318,7 @@ def main():
                 def clouds_on(ws):
                     return bool(ws[switch[0]["id"]].get("active"))
 
-                post(args.port, "/widget/%d/click" % switch[0]["id"])
+                post(args.port, "/widget/%d/toggle" % switch[0]["id"])
                 widgets, on = wait_for(args.port, clouds_on)
                 check("the clouds switch turns on", on)
                 written = os.path.getmtime(scene_file)
@@ -1329,7 +1333,7 @@ def main():
                 check("with the cover the slider was left at",
                       abs(float(rendering.get("cloud_cover", 0.0)) - 0.70) < 0.01,
                       json.dumps(rendering))
-                post(args.port, "/widget/%d/click" % switch[0]["id"])
+                post(args.port, "/widget/%d/toggle" % switch[0]["id"])
                 wait_for(args.port, lambda ws: not clouds_on(ws))
                 post(args.port, "/widget/%d/click" % load_btn)
                 widgets, back = wait_for(args.port, clouds_on)
