@@ -16,9 +16,16 @@
 //
 //   ./build.sh examples/black_hole.ae && ./build/black_hole
 //
-//   SPACE   hand the camera over to WASD and the mouse, and back
+//   TAB     hand the camera over to WASD and the mouse, and back
+//   WASD    move; SPACE up, CTRL down, SHIFT for 2.5x
+//   RMB     hold and drag to look. The engine only turns the camera while the
+//           right button is down, so the mouse alone does nothing
 //   1 .. 6  quality, 1 highest. Also takes it off the frame-time guard.
 //           Rays per pixel first, then the scale the scene is drawn at
+//
+// The toggle is TAB and not SPACE because SPACE is the engine's "up": with both
+// on one key, flying up dropped the camera back onto the orbit rails mid-climb,
+// which reads as a camera that cannot be moved at all.
 
 import ae3d.core
 import ae3d.platform
@@ -38,7 +45,7 @@ const ORBIT_PERIOD = 75.0
 var g_screen: ptr = null
 var g_time = 0.0
 var g_free = false
-var g_space_was_down = false
+var g_toggle_was_down = false
 // Quality is a ladder rather than two loose knobs, because the two do not trade
 // off against each other evenly. Rays per pixel buys edges; render scale buys
 // everything, since cost is dominated by pixels shaded and half scale is a
@@ -118,13 +125,16 @@ start(state: ptr, go: *GameObject) {
     core.camera_set_near(cam, 0.05)
     core.camera_set_far(cam, 800.0)
 
-    // The orbit drives the camera, so the built-in controls stay off until the
-    // space bar asks for them.
+    // The orbit drives the camera, so the built-in controls stay off until TAB
+    // asks for them.
     engine.engine_set_camera_input(e, false)
 
     apply_level(e, screen, 0)
     println("black hole: Kerr geodesics per pixel, spin a = ${SPIN}")
-    println("  SPACE free camera, 1-6 quality (1 highest)")
+    println("  TAB   free camera on/off")
+    println("  WASD  move, SPACE/CTRL up and down, SHIFT faster")
+    println("  RMB   hold and drag to look around")
+    println("  1-6   quality (1 highest)")
     println("  quality falls back on its own if the frame runs long")
 }
 
@@ -138,12 +148,12 @@ update(state: ptr, go: *GameObject, delta: float) {
 
     // Edge-triggered: key_down is a level, and reading it every frame would
     // toggle the camera dozens of times per press.
-    space_down = engine.engine_key_down(e, platform.KEY_SPACE)
-    if space_down && !g_space_was_down {
+    toggle_down = engine.engine_key_down(e, platform.KEY_TAB)
+    if toggle_down && !g_toggle_was_down {
         g_free = !g_free
         engine.engine_set_camera_input(e, g_free)
     }
-    g_space_was_down = space_down
+    g_toggle_was_down = toggle_down
 
     if g_auto {
         g_watched = g_watched + 1
@@ -181,6 +191,19 @@ update(state: ptr, go: *GameObject, delta: float) {
                                                 ORBIT_HEIGHT,
                                                 ORBIT_RADIUS * core.cos_of(angle)))
         core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+    } else {
+        // Speed by distance, because one number cannot serve both ends of this
+        // scene. The orbit sits at r = 58 and the horizon is at r = 1.4, so a
+        // speed that crosses the first in a few seconds crosses the second in
+        // about eighty milliseconds: aiming at the hole and holding W went
+        // straight through it and out the far side, with nothing on screen long
+        // enough to look at. Proportional speed makes the approach asymptotic --
+        // the closer in, the finer the control -- which is what lets the horizon
+        // be crept up on rather than flown past.
+        reach = core.v3_len(cam.position) * 0.32
+        if reach < 0.35 { reach = 0.35 }
+        if reach > 26.0 { reach = 26.0 }
+        core.camera_set_speed(cam, reach)
     }
 
     blackhole.set_view(screen, cam)
