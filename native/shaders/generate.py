@@ -389,6 +389,9 @@ AUXILIARY = [
     # screen draws put their colour source.
     ("depth_resolve_vk.frag", "FRAGMENT_DEPTH_RESOLVE", "frag", ["depthSamples:2DMS"], SCREEN_OUT, []),
     ("depth_copy_vk.frag", "FRAGMENT_DEPTH_COPY", "frag", ["depthSamples"], SCREEN_OUT, []),
+    # The temporal pass reads the frame at 1, the depth at 2 and its own
+    # history at 3, the slot a screen draw otherwise fills with the default.
+    ("taa_vk.frag", "FRAGMENT_TAA", "frag", ["screenTexture", "depthTexture", "historyTexture"], SCREEN_OUT, []),
     ("water_vk.vert", "VERTEX_WATER", "vert", [], [], WATER_OUT),
     # The water reads the scene depth at binding 4, the slot the crowd's pose
     # bank takes: whichever auxiliary image a draw needs sits there.

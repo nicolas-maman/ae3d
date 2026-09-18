@@ -1,0 +1,165 @@
+// Print a frame the channel answered with, as something a person can read.
+//
+//     ./build/ae3d_view --port 7911
+//     ./build/ae3d_view --port 7911 --columns 96 --rows 36 --time 3.35
+//     ./build/ae3d_view --port 7911 --isolate Zombie_Body --coverage
+//     ./build/ae3d_view --port 7911 --region 400,200,96,36     # one cell a pixel
+//
+// frame.grid gives the whole picture as cell means in one round trip. This
+// turns that into a page of characters, densest where the frame is
+// brightest, which is the closest an agent gets to looking at what it drew
+// -- and, unlike a screenshot, every character is a number it can also
+// test. --coverage prints how much of each cell is not the background
+// instead of how bright it is; --isolate shows one model alone, so what
+// prints is its silhouette; --absolute lays the ramp over 0 to 1 rather
+// than over the range the frame uses.
+//
+// Stretched across whatever range the frame actually occupies, because a
+// night street is a low-key image: its median is 0.14 and its brightest
+// cell 0.62, and a ramp laid over 0 to 1 prints most of it as blank space.
+// That is how a scene that was correctly exposed came to look empty, and
+// how a figure that had come apart went unnoticed in it.
+import std.os
+import std.string
+import std.json
+import ae3d.probe
+
+const RAMP = " .:-=+*#%@"
+const RAMP_STEPS = 10
+
+var g_probe: ptr = null
+
+// One request, refused answers reported and the program ended.
+ask(request: ptr) -> ptr {
+    op = probe.text(request, "op")
+    answered = probe.ask(g_probe as *Probe, request)
+    json.free(request)
+    if answered == null {
+        println("ae3d_view: ${op}: the connection closed")
+        os.exit(2)
+    }
+    if !probe.accepted(answered) {
+        println("ae3d_view: ${op}: ${probe.refusal(answered)}")
+        json.free(answered)
+        os.exit(2)
+    }
+    return answered
+}
+
+request(op: string) -> ptr {
+    r = json.obj()
+    json.object_set_raw(r, "op", json.str(op))
+    return r
+}
+
+// The value a cell prints by: its brightness, or its coverage.
+cell_value(cell: ptr, coverage: bool) -> float {
+    if coverage { return json.get_number(json.array_get_raw(cell, 3)) }
+    r = json.get_number(json.array_get_raw(cell, 0))
+    g = json.get_number(json.array_get_raw(cell, 1))
+    b = json.get_number(json.array_get_raw(cell, 2))
+    return r * 0.299 + g * 0.587 + b * 0.114
+}
+
+// The command line's value after `name`, or the fallback.
+arg_after(name: string, fallback: string) -> string {
+    i = 1
+    while i + 1 < os.aether_args_count() {
+        if os.aether_args_get(i) == name { return os.aether_args_get(i + 1) }
+        i = i + 1
+    }
+    return fallback
+}
+
+has_arg(name: string) -> bool {
+    i = 1
+    while i < os.aether_args_count() {
+        if os.aether_args_get(i) == name { return true }
+        i = i + 1
+    }
+    return false
+}
+
+main() {
+    port = string.string_get_int(arg_after("--port", "7911"))
+    columns = string.string_get_int(arg_after("--columns", "96"))
+    rows = string.string_get_int(arg_after("--rows", "36"))
+    time = arg_after("--time", "")
+    isolate = arg_after("--isolate", "")
+    region = arg_after("--region", "")
+    coverage = has_arg("--coverage")
+    stretch = !has_arg("--absolute")
+
+    p = probe.open(port)
+    if p == null {
+        println("ae3d_view: nothing answering on port ${port} (${probe.last_error()})")
+        os.exit(2)
+    }
+    g_probe = p as ptr
+
+    json.free(ask(request("frame.pause")))
+    if time != "" {
+        r = request("anim.set")
+        json.object_set_raw(r, "time", json.num(string.string_get_float(time)))
+        json.free(ask(r))
+    }
+    if isolate != "" {
+        r = request("scene.isolate")
+        json.object_set_raw(r, "object", json.str(isolate))
+        json.free(ask(r))
+    }
+    r = request("frame.grid")
+    json.object_set_raw(r, "columns", json.from_int(columns as long))
+    json.object_set_raw(r, "rows", json.from_int(rows as long))
+    if region != "" {
+        // x,y,width,height: a window of the frame rather than all of it;
+        // with --columns and --rows to match, one cell is one pixel.
+        parts = string.split(region, ",")
+        if string.array_size(parts) == 4 {
+            json.object_set_raw(r, "x", json.from_int(string.string_get_int(string.string_array_get(parts, 0)) as long))
+            json.object_set_raw(r, "y", json.from_int(string.string_get_int(string.string_array_get(parts, 1)) as long))
+            json.object_set_raw(r, "width", json.from_int(string.string_get_int(string.string_array_get(parts, 2)) as long))
+            json.object_set_raw(r, "height", json.from_int(string.string_get_int(string.string_array_get(parts, 3)) as long))
+        }
+        string.array_free(parts)
+    }
+    answered = ask(r)
+    grid = probe.result(answered)
+    if isolate != "" { json.free(ask(request("scene.isolate"))) }
+
+    cells = probe.field(grid, "cells")
+    low = 1000000.0
+    high = 0.0 - 1000000.0
+    y = 0
+    while y < json.array_size(cells) {
+        row = json.array_get_raw(cells, y)
+        x = 0
+        while x < json.array_size(row) {
+            v = cell_value(json.array_get_raw(row, x), coverage)
+            if v < low { low = v }
+            if v > high { high = v }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    if !stretch || high - low < 0.000001 { low = 0.0 ; high = 1.0 }
+    y = 0
+    while y < json.array_size(cells) {
+        row = json.array_get_raw(cells, y)
+        line = ""
+        x = 0
+        while x < json.array_size(row) {
+            scaled = (cell_value(json.array_get_raw(row, x), coverage) - low) / (high - low)
+            if scaled < 0.0 { scaled = 0.0 }
+            if scaled > 0.999 { scaled = 0.999 }
+            step = (scaled * (RAMP_STEPS as float)) as int
+            line = "${line}${string.substring(RAMP, step, step + 1)}"
+            x = x + 1
+        }
+        println(line)
+        y = y + 1
+    }
+    println("frame ${probe.integer(grid, "frame")}, ${probe.integer(grid, "x")},${probe.integer(grid, "y")} ${probe.integer(grid, "width")}x${probe.integer(grid, "height")} px in ${probe.integer(grid, "columns")}x${probe.integer(grid, "rows")} cells")
+    json.free(answered)
+    probe.close(p)
+}

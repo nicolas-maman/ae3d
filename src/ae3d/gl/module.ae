@@ -23,7 +23,7 @@ exports (
     renderer_new, renderer_free, backend,
     renderer_add_light, renderer_remove_light, renderer_light_count, renderer_light, renderer_model_count, renderer_model,
     renderer_draw_calls, renderer_instance_count,
-    renderer_set_clear_color, renderer_set_fxaa, renderer_set_bloom, renderer_set_msaa,
+    renderer_set_clear_color, renderer_set_fxaa, renderer_set_bloom, renderer_set_msaa, renderer_set_taa, renderer_taa,
     renderer_set_render_scale, renderer_render_scale,
     renderer_set_target,
     renderer_set_bloom_params, renderer_set_bloom_intensity, renderer_bloom_intensity,
@@ -111,6 +111,7 @@ extern ae3d_gl_texture3d_bind(unit: int, texture: int)
 extern ae3d_gl_fbo_bind(fbo: int)
 extern ae3d_gl_fbo_delete(fbo: int)
 extern ae3d_gl_fbo_attach_color(fbo: int, width: int, height: int, hdr: int) -> int
+extern ae3d_gl_fbo_set_color(fbo: int, texture: int)
 extern ae3d_gl_fbo_attach_depth(fbo: int, width: int, height: int) -> int
 extern ae3d_gl_geometry_acquire(mesh: ptr) -> int
 extern ae3d_gl_geometry_instance_vbo(vao: int) -> int
@@ -251,6 +252,22 @@ struct GLRenderer {
     crowd_program: int
     fxaa_program: int
     bloom_program: int
+    // Temporal anti-aliasing: the program, two history textures written
+    // in turn with a framebuffer each, the frame's count for the jitter
+    // sequence, the last frame's view-projection, and whether the history
+    // holds a frame yet.
+    taa_program: int
+    enable_taa: bool
+    taa_fbo: int
+    taa_texture0: int
+    taa_texture1: int
+    taa_current: int
+    taa_history_valid: bool
+    taa_frame: int
+    prev_vp: Mat4
+    prev_vp_valid: bool
+    jitter_x: float
+    jitter_y: float
     // Ambient occlusion from the scene's depth: a fullscreen multiply over
     // the opaque pass, on when a scene asks, with how far a thing shadows
     // its neighbours in metres and how dark that goes.
@@ -769,6 +786,7 @@ renderer_init(r: *GLRenderer, window: ptr, width: int, height: int) -> int {
     r.crowd_shadow_program = compile_program(shaders.VERTEX_CROWD_DEPTH, shaders.FRAGMENT_DEPTH, "crowd_depth")
     r.fxaa_program = compile_program(shaders.VERTEX_SCREEN, shaders.FRAGMENT_FXAA, "fxaa")
     r.bloom_program = compile_program(shaders.VERTEX_SCREEN, shaders.FRAGMENT_BLOOM, "bloom")
+    r.taa_program = compile_program(shaders.VERTEX_SCREEN, shaders.FRAGMENT_TAA, "taa")
     r.ssao_program = compile_program(shaders.VERTEX_SCREEN, shaders.FRAGMENT_SSAO, "ssao")
     r.passthrough_program = compile_program(shaders.VERTEX_SCREEN, shaders.FRAGMENT_PASSTHROUGH, "passthrough")
 
@@ -1564,6 +1582,46 @@ draw_depth(r: *GLRenderer, m: *Model, instanced: int) {
 }
 
 renderer_set_fxaa(r: *GLRenderer, on: bool) { r.enable_fxaa = on }
+
+// Temporal anti-aliasing on or off: the projection nudged a fraction of a
+// pixel each frame through an eight-frame Halton sequence, and each frame
+// folded into a history the temporal pass reprojects by the scene's
+// depth. On, the frame goes through the post chain.
+renderer_set_taa(r: *GLRenderer, on: bool) {
+    r.enable_taa = on
+    if !on { r.taa_history_valid = false ; r.prev_vp_valid = false }
+}
+
+renderer_taa(r: *GLRenderer) -> bool { return r.enable_taa }
+
+// The Halton sequence: the k-th point of the base, in 0..1.
+halton(index: int, base: int) -> float {
+    result = 0.0
+    f = 1.0 / (base as float)
+    i = index
+    while i > 0 {
+        result = result + f * ((i % base) as float)
+        i = i / base
+        f = f / (base as float)
+    }
+    return result
+}
+
+// The frame's view-projection: the camera's, nudged this frame's fraction
+// of a pixel when the temporal pass is on -- a translation in clip space
+// after the projection. The nudge is kept, in texture space, for the pass.
+frame_view_projection(r: *GLRenderer, cam: *Camera, width: int, height: int) -> Mat4 {
+    vp = core.camera_view_projection(cam)
+    r.jitter_x = 0.0
+    r.jitter_y = 0.0
+    if !r.enable_taa || width <= 0 || height <= 0 { return vp }
+    k = r.taa_frame % 8 + 1
+    jx = (halton(k, 2) - 0.5) * 2.0 / (width as float)
+    jy = (halton(k, 3) - 0.5) * 2.0 / (height as float)
+    r.jitter_x = jx * 0.5
+    r.jitter_y = jy * 0.5
+    return core.mat4_mul(core.mat4_translate(jx, jy, 0.0), vp)
+}
 renderer_set_bloom(r: *GLRenderer, on: bool) { r.enable_bloom = on }
 
 renderer_set_bloom_intensity(r: *GLRenderer, intensity: float) { r.bloom_intensity = intensity }
@@ -1852,15 +1910,17 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
     // Six planes out of one matrix multiply is not worth a cache.
     if core.frustum_culling() { core.camera_fill_frustum(cam, r.frustum) }
 
-    view_projection = core.camera_view_projection(cam)
+    unjittered = core.camera_view_projection(cam)
+    view_projection = frame_view_projection(r, cam, r.post_width, r.post_height)
 
     draw_opaque(r, &view_projection, active_light, cam)
 
     // What the opaque pass drew, as depth, for a water surface to read the
-    // ground under it by and for the occlusion to shade it from. Copied
-    // once, only when something will read it.
+    // ground under it by, for the occlusion to shade it from and for the
+    // temporal pass to find each pixel's history by. Copied once, only
+    // when something will read it.
     r.scene_depth = 0
-    if wants_scene_depth(r) || r.ssao_enabled { r.scene_depth = ae3d_gl_scene_depth_capture() }
+    if wants_scene_depth(r) || r.ssao_enabled || r.enable_taa { r.scene_depth = ae3d_gl_scene_depth_capture() }
     if r.ssao_enabled && r.scene_depth != 0 { draw_occlusion(r, cam) }
 
     count = list.size(r.models)
@@ -1874,7 +1934,10 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
     ae3d_gl_passtimer_end(r.pass_timer)
 
     ae3d_gl_passtimer_begin(r.pass_timer, PASS_POST)
-    if post_active { resolve_post_processing(r) }
+    if post_active { resolve_post_processing(r, cam, view_projection, unjittered) }
+    r.prev_vp = unjittered
+    r.prev_vp_valid = true
+    r.taa_frame = r.taa_frame + 1
     ae3d_gl_passtimer_end(r.pass_timer)
 
     // Three frames behind, which is what makes the read free: by the time a
@@ -2711,13 +2774,71 @@ resize_post_processing(r: *GLRenderer, width: int, height: int) {
     if bloom_height < 1 { bloom_height = 1 }
     r.bloom_texture = ae3d_gl_fbo_attach_color(r.bloom_fbo, bloom_width, bloom_height, 1)
     ae3d_gl_fbo_bind(0)
+    resize_taa(r, clamped_width, clamped_height)
+}
+
+// The temporal pass's two history textures at the post buffers' size,
+// attached to the one framebuffer in turn as the pass runs. A resize
+// empties the history.
+resize_taa(r: *GLRenderer, width: int, height: int) {
+    if r.taa_fbo == 0 { r.taa_fbo = ae3d_gl_fbo_create() }
+    if r.taa_texture0 != 0 { ae3d_gl_texture_delete(r.taa_texture0) }
+    if r.taa_texture1 != 0 { ae3d_gl_texture_delete(r.taa_texture1) }
+    r.taa_texture0 = ae3d_gl_fbo_attach_color(r.taa_fbo, width, height, 0)
+    r.taa_texture1 = ae3d_gl_fbo_attach_color(r.taa_fbo, width, height, 0)
+    ae3d_gl_fbo_bind(0)
+    r.taa_history_valid = false
+    r.taa_current = 0
+}
+
+// The temporal pass: this frame (the post buffer) folded into the history
+// by the scene's depth and the last frame's view-projection, into the
+// other history texture, which the composite then reads and the next
+// frame reads back. Returns the texture the composite should read.
+draw_taa(r: *GLRenderer, cam: *Camera, view_projection: Mat4, unjittered: Mat4) -> int {
+    if !r.enable_taa || r.taa_program == 0 || r.scene_depth == 0 { return r.post_texture }
+    // Made the first time the pass runs, at the post buffers' size; a
+    // resize of those remakes them.
+    if r.taa_fbo == 0 || r.taa_texture0 == 0 || r.taa_texture1 == 0 { resize_taa(r, r.post_width, r.post_height) }
+    if r.taa_fbo == 0 || r.taa_texture0 == 0 || r.taa_texture1 == 0 { return r.post_texture }
+    into = r.taa_texture0
+    history = r.taa_texture1
+    if r.taa_current == 1 { into = r.taa_texture1 ; history = r.taa_texture0 }
+    ae3d_gl_fbo_bind(r.taa_fbo)
+    ae3d_gl_fbo_set_color(r.taa_fbo, into)
+    ae3d_gl_viewport(0, 0, r.post_width, r.post_height)
+    use_program(r, r.taa_program)
+    ae3d_gl_texture_bind(0, r.post_texture)
+    ae3d_gl_texture_bind(1, r.scene_depth)
+    ae3d_gl_texture_bind(2, history)
+    r.bound_texture = 0 - 1
+    ae3d_gl_uniform_int(ae3d_gl_uniform_location(r.taa_program, "screenTexture"), 0)
+    ae3d_gl_uniform_int(ae3d_gl_uniform_location(r.taa_program, "depthTexture"), 1)
+    ae3d_gl_uniform_int(ae3d_gl_uniform_location(r.taa_program, "historyTexture"), 2)
+    inverse = core.mat4_inverse(view_projection)
+    ae3d_gl_uniform_mat4(ae3d_gl_uniform_location(r.taa_program, "invViewProjection"), &inverse)
+    previous = unjittered
+    if r.prev_vp_valid { previous = r.prev_vp }
+    ae3d_gl_uniform_mat4(ae3d_gl_uniform_location(r.taa_program, "prevViewProjection"), &previous)
+    ae3d_gl_uniform_vec2(ae3d_gl_uniform_location(r.taa_program, "screenSize"), r.post_width * 1.0, r.post_height * 1.0)
+    ae3d_gl_uniform_vec2(ae3d_gl_uniform_location(r.taa_program, "jitter"), r.jitter_x, r.jitter_y)
+    blend = 1.0
+    if r.taa_history_valid { blend = 0.1 }
+    ae3d_gl_uniform_float(ae3d_gl_uniform_location(r.taa_program, "taaBlend"), blend)
+    ae3d_gl_vao_bind(r.screen_vao)
+    ae3d_gl_draw_arrays(0, 6)
+    ae3d_gl_vao_bind(0)
+    r.last_draw_calls = r.last_draw_calls + 1
+    r.taa_history_valid = true
+    r.taa_current = 1 - r.taa_current
+    return into
 }
 
 begin_post_processing(r: *GLRenderer) -> bool {
     // A render scale below 1 is on its own a reason to draw into the offscreen
     // buffer, with or without an effect to run afterwards: resolve_post_processing
     // falls back to the passthrough program, so the composite becomes the upscale.
-    if !r.enable_fxaa && !r.enable_bloom && r.render_scale > 0.999 { return false }
+    if !r.enable_fxaa && !r.enable_bloom && !r.enable_taa && r.render_scale > 0.999 { return false }
     if r.post_fbo == 0 || r.post_texture == 0 || r.screen_vao == 0 { return false }
 
     width = ae3d_gl_viewport_width()
@@ -2803,7 +2924,7 @@ attach_multisample_post(r: *GLRenderer, width: int, height: int) {
     ae3d_gl_fbo_bind(0)
 }
 
-resolve_post_processing(r: *GLRenderer) {
+resolve_post_processing(r: *GLRenderer, cam: *Camera, view_projection: Mat4, unjittered: Mat4) {
     if r.post_samples > 0 && r.post_ms_fbo != 0 {
         // The size the buffers were made at, not whatever the viewport says.
         // A resolve of the wrong rectangle leaves the effect reading a frame
@@ -2815,18 +2936,19 @@ resolve_post_processing(r: *GLRenderer) {
             r.post_samples = 0
         }
     }
-    bind_output(r)
-    // Back to the full frame for the composite: the scene pass may have been
-    // drawn smaller, and this is the step that puts it back on the window.
-    ae3d_gl_viewport(0, 0, r.viewport_width, r.viewport_height)
     set_depth_test(r, false)
     ae3d_gl_set_depth_mask(0)
     set_blend(r, false)
     set_wireframe(r, false)
+    source = draw_taa(r, cam, view_projection, unjittered)
+    bind_output(r)
+    // Back to the full frame for the composite: the scene pass may have been
+    // drawn smaller, and this is the step that puts it back on the window.
+    ae3d_gl_viewport(0, 0, r.viewport_width, r.viewport_height)
 
     ae3d_gl_clear(1, 0)
     ae3d_gl_vao_bind(r.screen_vao)
-    ae3d_gl_texture_bind(0, r.post_texture)
+    ae3d_gl_texture_bind(0, source)
 
 
     // A texel of the texture being sampled, which is the post buffer, not the
@@ -2958,6 +3080,10 @@ renderer_cleanup(r: *GLRenderer) {
     if r.post_ms_fbo != 0 { ae3d_gl_fbo_delete(r.post_ms_fbo) ; r.post_ms_fbo = 0 }
     if r.post_fbo != 0 { ae3d_gl_fbo_delete(r.post_fbo) ; r.post_fbo = 0 }
     if r.bloom_fbo != 0 { ae3d_gl_fbo_delete(r.bloom_fbo) ; r.bloom_fbo = 0 }
+    if r.taa_texture0 != 0 { ae3d_gl_texture_delete(r.taa_texture0) ; r.taa_texture0 = 0 }
+    if r.taa_texture1 != 0 { ae3d_gl_texture_delete(r.taa_texture1) ; r.taa_texture1 = 0 }
+    if r.taa_fbo != 0 { ae3d_gl_fbo_delete(r.taa_fbo) ; r.taa_fbo = 0 }
+    if r.taa_program != 0 { ae3d_gl_program_delete(r.taa_program) ; r.taa_program = 0 }
     if r.shadow_map != 0 { ae3d_gl_texture_delete(r.shadow_map) ; r.shadow_map = 0 }
     if r.shadow_fbo != 0 { ae3d_gl_fbo_delete(r.shadow_fbo) ; r.shadow_fbo = 0 }
 

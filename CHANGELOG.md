@@ -115,6 +115,34 @@
   inverse binds where `skeleton_bind` would derive them from the pose.
 - `native/ae3d_blob.c`: a file as bytes and the little-endian numbers in it.
 
+### The frame as characters, in Aether
+
+- `tools/ae3d_view.ae` replaces `tools/ae3d_view.py`: `frame.grid` as a page
+  of characters, densest where the frame is brightest, stretched over the
+  range the frame uses (`--absolute` for 0 to 1), `--coverage` for how much
+  of each cell is not the background, `--isolate <model>` for one model's
+  silhouette, `--region x,y,w,h` for a window at a cell a pixel, `--time`
+  to seek the clips first. The kept connection it was built on is
+  `ae3d.probe`; what is left of #272 in Python is the critique and the
+  editor driver.
+
+### Temporal anti-aliasing
+
+- `engine_set_taa(e, on)` (`AE3D_TAA=1` in any scene), on both backends:
+  the projection is nudged a fraction of a pixel each frame through an
+  eight-frame Halton sequence, and a temporal pass folds every frame into a
+  history found by reprojection -- each pixel's world position from the
+  scene's resolved depth, projected with the last frame's view-projection
+  -- and held to the range of the pixel's neighbourhood this frame, so a
+  walking figure trails no ghost and a sky pixel holds its place as the
+  camera turns. The result is what the post chain composites and the next
+  frame reads back. `tests/test_taa`: a tilted bar's edge is graded finer
+  (496 to 605 in-between pixels at 320x240) with the same light overall, holds still once the history has filled, and
+  leaves no trail under a panning camera, on OpenGL and Vulkan alike.
+  What DLSS (#324) still needs on top is
+  per-object motion vectors; the jitter, the history and the depth
+  reprojection are in place.
+
 ### Wet surfaces
 
 - `engine_set_wetness(e, amount)`: rain on the scene. Every surface that

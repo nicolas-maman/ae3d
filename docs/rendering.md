@@ -132,6 +132,21 @@ picture the same. The transparent pixels of an atlas carry the colour of
 the nearest opaque ones (bled outward at the bake), so the texture's filter
 and mip levels never blend a key colour into an edge.
 
+### Temporal anti-aliasing
+
+`engine_set_taa(e, on)`, or `AE3D_TAA=1`. The projection is nudged a
+fraction of a pixel each frame (a Halton sequence over eight frames), so
+over frames every pixel sees its surface at eight points within itself,
+and a temporal pass folds each frame into a history: each pixel's world
+position, from the scene's resolved depth, projected with the last frame's
+view-projection is where it was on the screen -- exact for the camera's
+motion and everything that stood still -- and the history read there is
+held to the range of colours the pixel's neighbourhood has this frame, so
+what moved on its own trails no ghost. An edge that was a staircase is a
+ramp, and the shading's own aliasing goes with it. On both backends; the
+pass runs between the reflection and the composite, and the two history
+textures are written in turn.
+
 ### Rain on the surfaces
 
 `engine_set_wetness(e, amount)` is rain on the scene: every surface that

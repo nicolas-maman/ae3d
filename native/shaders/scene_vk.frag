@@ -104,6 +104,9 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float ssaoRadius;
     float ssaoIntensity;
     int depthSampleCount;
+    mat4 prevViewProjection;
+    vec2 jitter;
+    float taaBlend;
     float time;
     float waveSpeedMultiplier;
     float waveHeightMultiplier;
