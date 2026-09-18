@@ -487,6 +487,7 @@ on_start(state: ptr, e: *Engine) {
     g_sepn = core.env_int("AE3D_SEPN", SEP_INTERVAL)
     g_strip_props = core.env_int("AE3D_NOPROPS", 0) != 0
     g_impostor_dist = core.env_int("AE3D_IMPOSTOR", IMPOSTOR_DIST as int) as float
+    g_perf_sim = core.env_int("AE3D_PERF", 0) == 1
 
     // A camera down at the road, looking back along it so the horde walks out of
     // the far dark toward the lamps and the viewer.
@@ -857,9 +858,36 @@ log_materials_once() {
     }
 }
 
+// The simulation's own split, under AE3D_PERF=1: what each pass of the
+// frame's update costs at this count, said every 120 frames, so the wall a
+// horde hits is named rather than guessed at.
+var g_perf_sim = false
+var g_t_wander = 0.0
+var g_t_separate = 0.0
+var g_t_step = 0.0
+var g_t_teleport = 0.0
+var g_t_bucket = 0.0
+var g_t_upload = 0.0
+var g_t_frames = 0
+
+lap(since: float) -> float { return (platform.time() - since) * 1000.0 }
+
+say_sim_perf() {
+    n = g_t_frames as float
+    println("zombie_city[perf] sim ms/frame: wander ${g_t_wander / n} separate ${g_t_separate / n} step ${g_t_step / n} teleport ${g_t_teleport / n} bucket ${g_t_bucket / n} upload ${g_t_upload / n} (${g_count} zombies, ${g_t_frames} frames)")
+    g_t_wander = 0.0
+    g_t_separate = 0.0
+    g_t_step = 0.0
+    g_t_teleport = 0.0
+    g_t_bucket = 0.0
+    g_t_upload = 0.0
+    g_t_frames = 0
+}
+
 on_update(state: ptr, e: *Engine, delta: float) {
     if g_figures == null || list.size(g_figures) == 0 { return }
     cam = engine.engine_camera(e)
+    mark = platform.time()
 
     // The whole per-frame crowd update is native now (crowd/module.ae -> C):
     // point each velocity along its heading, shove neighbours apart, step and
@@ -867,6 +895,8 @@ on_update(state: ptr, e: *Engine, delta: float) {
     // near and far draw buffers. At a city's worth of zombies the Aether loops
     // this replaces were the wall, not the GPU.
     crowd.crowd_wander(ecs.column_data(g_vel), ecs.column_data(g_yaw), g_count, SPEED)
+    g_t_wander = g_t_wander + lap(mark)
+    mark = platform.time()
     // Separation is the crowd's heaviest pass by far -- a full grid rebuild and
     // neighbour scan over every zombie, ~two thirds of the sim at half a
     // million. But a zombie drifts only centimetres a frame, so the pack does
@@ -877,6 +907,8 @@ on_update(state: ptr, e: *Engine, delta: float) {
         crowd.horde_separate(g_world, g_pos, g_vel, g_grid, SEP_RADIUS,
                              SEP_STRENGTH * (g_sepn as float))
     }
+    g_t_separate = g_t_separate + lap(mark)
+    mark = platform.time()
     // Each figure's run stepped at its own bank's pace: a zombie moves at
     // the speed its pose is walking at, so the feet plant rather than skate
     // (see crowd_step).
@@ -888,7 +920,10 @@ on_update(state: ptr, e: *Engine, delta: float) {
                          STREET_X0, STREET_X1, ROAD_Z0, ROAD_Z1, ROAD_Y, fig.walk, fig.bank)
         k = k + 1
     }
+    g_t_step = g_t_step + lap(mark)
+    mark = platform.time()
     detect_teleports(delta)
+    g_t_teleport = g_t_teleport + lap(mark)
     log_materials_once()
     // Each figure's run bucketed into its own tiers. The near and far
     // buffers are shared scratch, sized for the whole crowd, filled and
@@ -904,6 +939,8 @@ on_update(state: ptr, e: *Engine, delta: float) {
         // The cull drops the fogged-out zombies, so far is what the bucket
         // counted, not the leftover of the run.
         nf = ecs.column_get(g_farcount, 0, 0) as int
+        g_t_bucket = g_t_bucket + lap(mark)
+        mark = platform.time()
         upload_tier(fig.near_body, g_nb_pos, g_nb_yaw, g_nb_phase, g_nb_col, nn)
         if fig.near_clothes != null { upload_tier(fig.near_clothes, g_nb_pos, g_nb_yaw, g_nb_phase, g_nb_col, nn) }
         if fig.impostor != null {
@@ -921,8 +958,12 @@ on_update(state: ptr, e: *Engine, delta: float) {
         } else {
             upload_tier(fig.far_body, g_fb_pos, g_fb_yaw, g_fb_phase, g_fb_col, nf)
         }
+        g_t_upload = g_t_upload + lap(mark)
+        mark = platform.time()
         k = k + 1
     }
+    g_t_frames = g_t_frames + 1
+    if g_perf_sim && g_t_frames >= 120 { say_sim_perf() }
 }
 
 upload_tier(model: *Model, pos: *Column, yaw: *Column, phase: *Column, col: *Column, count: int) {

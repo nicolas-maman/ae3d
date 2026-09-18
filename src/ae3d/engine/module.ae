@@ -161,9 +161,14 @@ struct Engine {
     perf_scene_ms: float
     perf_post_ms: float
     perf_cpu_ms: float
+    // The behaviours' own time: the fixed updates, the updates, the clips
+    // advancing -- the simulation, which at half a million figures is
+    // where a frame goes when the device is done in ten milliseconds.
+    perf_update_ms: float
     perf_draws: int
     perf_started: float
     perf_stage_ms: ptr
+    update_seconds: float
 }
 
 // A behaviour with no phases yet: set the ones it takes part in.
@@ -1125,6 +1130,7 @@ account_perf(e: *Engine) {
     e.perf_scene_ms = e.perf_scene_ms + scene
     e.perf_post_ms = e.perf_post_ms + post
     e.perf_cpu_ms = e.perf_cpu_ms + cpu
+    e.perf_update_ms = e.perf_update_ms + e.update_seconds * 1000.0
     e.perf_draws = e.perf_draws + engine_draw_calls(e)
 }
 
@@ -1136,7 +1142,7 @@ say_perf(e: *Engine) {
     wall = platform.time() - e.perf_started
     fps = 0.0
     if wall > 0.0 { fps = n / wall }
-    println("perf backend=${e.backend_name} frames=${e.perf_frames} fps=${fps} gpu_shadow_ms=${e.perf_shadow_ms / n} gpu_scene_ms=${e.perf_scene_ms / n} gpu_post_ms=${e.perf_post_ms / n} cpu_ms=${e.perf_cpu_ms / n} draws=${e.perf_draws / e.perf_frames} width=${e.width} height=${e.height}")
+    println("perf backend=${e.backend_name} frames=${e.perf_frames} fps=${fps} gpu_shadow_ms=${e.perf_shadow_ms / n} gpu_scene_ms=${e.perf_scene_ms / n} gpu_post_ms=${e.perf_post_ms / n} cpu_ms=${e.perf_cpu_ms / n} update_ms=${e.perf_update_ms / n} draws=${e.perf_draws / e.perf_frames} width=${e.width} height=${e.height}")
     if e.api == platform.API_VULKAN {
         // The scene's own split, which is where a frame's cost is.
         stages = e.perf_stage_ms as float[]
@@ -1220,6 +1226,7 @@ engine_loop(e: *Engine) {
         // in between, so the fixed step was a number the engine subtracted from
         // itself: a program that set one and waited for it waited forever, and
         // a behaviour scene's fixed_update had to be driven by hand.
+        update_started = platform.time()
         if !held {
             e.fixed_accumulator = e.fixed_accumulator + delta
             while e.fixed_accumulator >= e.fixed_step {
@@ -1242,6 +1249,7 @@ engine_loop(e: *Engine) {
         // The pose phase runs on a held frame too: a pose an agent seeks to
         // is a pose it wants solved, or it is looking at half an answer.
         run_poses(e)
+        e.update_seconds = platform.time() - update_started
 
         // A Vulkan frame is copied out as it is submitted, so any read of it --
         // a snapshot, or an agent grid or pixel read -- has to be armed on this

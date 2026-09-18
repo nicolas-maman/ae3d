@@ -19,7 +19,11 @@ On Vulkan the frame is split by eight timestamps -- the start, and the end
 of the shadow pass, the camera-depth prepass, the sky, the opaque draws,
 the occlusion, the transparent draws and the post chain -- so the second
 line says which stage a frame's cost is in. The same split is in the
-editor's stats bar and in the agent channel's `frame.stats`.
+editor's stats bar and in the agent channel's `frame.stats`. `update_ms`
+is the behaviours' own time -- the fixed updates, the updates, the clips
+advancing: the simulation -- which is where a frame goes once the device
+is done with it: half a million zombies are 8 ms of device and 25 of
+simulation.
 
 `scripts/perf.sh [scene ...]` runs each scene hidden on Vulkan for
 `AE3D_PERF_FRAMES` frames (240) `AE3D_PERF_RUNS` times (3) and keeps the

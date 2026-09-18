@@ -289,12 +289,12 @@ int ae3d_capture_grid(int left, int top, int width, int height,
     return 1;
 }
 
-/* The captured frame copied into a cell of an RGBA atlas at (dst_x, dst_y),
-   pixels within `tolerance` of the key colour (kr, kg, kb) made transparent
-   and every pixel's colour kept -- what tools/bake_impostor.ae fills its
-   atlas with, a cell a frame. Returns how many pixels were kept, so the
-   tool can tell an empty cell from a figure, or -1 when the cell would not
-   fit. */
+/* The captured frame's centre square copied into a `cell`-pixel cell of an
+   RGBA atlas at (dst_x, dst_y), pixels within `tolerance` of the key colour
+   (kr, kg, kb) made transparent and every pixel's colour kept -- what
+   tools/bake_impostor.ae fills its atlas with, a cell a frame. Returns how
+   many pixels were kept, so the tool can tell an empty cell from a figure,
+   or -1 when the cell would not fit. */
 /* The colour of every transparent pixel of an RGBA atlas replaced by the
    average colour of its opaque neighbours, outward pass by pass until no
    transparent pixel is without one: a texture's filter and its mip levels
@@ -351,13 +351,23 @@ int ae3d_capture_bleed(unsigned char *atlas, int width, int height) {
 }
 
 int ae3d_capture_copy_keyed(unsigned char *atlas, int atlas_width, int atlas_height,
-                            int dst_x, int dst_y, int kr, int kg, int kb, int tolerance) {
-    int x, y, kept = 0;
-    if (!atlas || !g_frame.pixels) return -1;
-    if (dst_x < 0 || dst_y < 0 || dst_x + g_frame.width > atlas_width || dst_y + g_frame.height > atlas_height) return -1;
-    for (y = 0; y < g_frame.height; y++) {
-        for (x = 0; x < g_frame.width; x++) {
-            const unsigned char *src = g_frame.pixels + ((size_t)y * (size_t)g_frame.width + (size_t)x) * 4u;
+                            int dst_x, int dst_y, int cell, int kr, int kg, int kb, int tolerance) {
+    int x, y, kept = 0, side, left, top;
+    if (!atlas || !g_frame.pixels || cell <= 0) return -1;
+    if (dst_x < 0 || dst_y < 0 || dst_x + cell > atlas_width || dst_y + cell > atlas_height) return -1;
+    /* The frame's centre square, point-sampled into the cell: a window that
+       came out the size it was asked for copies pixel for pixel, and one a
+       window system made larger (a bare X server gives a window its own
+       idea of a size) still lands the whole picture in the cell, at the
+       cell's resolution. */
+    side = g_frame.width < g_frame.height ? g_frame.width : g_frame.height;
+    left = (g_frame.width - side) / 2;
+    top = (g_frame.height - side) / 2;
+    for (y = 0; y < cell; y++) {
+        for (x = 0; x < cell; x++) {
+            int sx = left + (int)(((long long)x * side) / cell);
+            int sy = top + (int)(((long long)y * side) / cell);
+            const unsigned char *src = g_frame.pixels + ((size_t)sy * (size_t)g_frame.width + (size_t)sx) * 4u;
             unsigned char *dst = atlas + ((size_t)(dst_y + y) * (size_t)atlas_width + (size_t)(dst_x + x)) * 4u;
             int keyed = abs((int)src[0] - kr) <= tolerance && abs((int)src[1] - kg) <= tolerance && abs((int)src[2] - kb) <= tolerance;
             dst[0] = src[0];

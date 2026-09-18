@@ -17,13 +17,13 @@ runs="${AE3D_PERF_RUNS:-3}"
 scenes=("$@")
 [ "${#scenes[@]}" -gt 0 ] || scenes=(spinning_cube models lights caustics sand smooth_terrain voxel_world zombie_city zombie_street)
 
-printf '| scene | fps | gpu ms | sky | opaque | occlusion | transparent | shadow | post | cpu ms | draws |\n'
-printf '|---|---|---|---|---|---|---|---|---|---|---|\n'
+printf '| scene | fps | gpu ms | sky | opaque | occlusion | transparent | shadow | post | cpu ms | update ms | draws |\n'
+printf '|---|---|---|---|---|---|---|---|---|---|---|---|\n'
 for scene in "${scenes[@]}"; do
     bin="./build/$scene"
     [ -x "$bin" ] || bin="$bin.exe"
     if [ ! -x "$bin" ]; then
-        printf '| %s | not built | | | | | | | | | |\n' "$scene"
+        printf '| %s | not built | | | | | | | | | | |\n' "$scene"
         continue
     fi
     best=""
@@ -38,15 +38,15 @@ for scene in "${scenes[@]}"; do
         fi
     done
     if [ -z "$best" ]; then
-        printf '| %s | no perf line | | | | | | | | | |\n' "$scene"
+        printf '| %s | no perf line | | | | | | | | | | |\n' "$scene"
         continue
     fi
     # A stage that ran in no time prints as 4.4e-06: the exponent is part of
     # the number, and awk reads it, so it rounds to nothing.
     field() { printf '%s\n' "$best" | sed -n "s/.* $1=\([0-9.e+-]*\).*/\1/p" | head -1 | awk '{printf "%.2f", $1}'; }
-    printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+    printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
         "$scene" "$(field fps | awk '{printf "%.0f", $1}')" "$(field gpu_scene_ms)" \
         "$(field sky)" "$(field opaque)" "$(field occlusion)" "$(field transparent)" \
-        "$(field gpu_shadow_ms)" "$(field gpu_post_ms)" "$(field cpu_ms)" \
+        "$(field gpu_shadow_ms)" "$(field gpu_post_ms)" "$(field cpu_ms)" "$(field update_ms)" \
         "$(printf '%s\n' "$best" | sed -n 's/.* draws=\([0-9]*\).*/\1/p' | head -1)"
 done

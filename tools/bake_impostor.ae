@@ -45,7 +45,7 @@ import ae3d.crowd
 
 extern ae3d_capture_frame(width: int, height: int) -> int
 extern ae3d_capture_copy_keyed(atlas: ptr, atlas_width: int, atlas_height: int, dst_x: int, dst_y: int,
-                               kr: int, kg: int, kb: int, tolerance: int) -> int
+                               cell: int, kr: int, kg: int, kb: int, tolerance: int) -> int
 extern ae3d_capture_bleed(atlas: ptr, width: int, height: int) -> int
 extern ae3d_png_write(path: string, rgba: ptr, width: int, height: int) -> int
 extern ae3d_mesh_extent(mesh: ptr, axis: int) -> float
@@ -323,16 +323,21 @@ on_late(state: ptr, e: *Engine, delta: float) {
     // The first frame the engine draws is before the camera above has taken
     // hold everywhere; what it drew is discarded and the cell drawn again.
     if delta <= 0.0 { g_skipped = g_skipped + 1 ; return }
-    if ae3d_capture_frame(CELL, CELL) != 1 {
+    // The whole frame, whatever size the window system gave the window; the
+    // copy takes its centre square into the cell.
+    if ae3d_capture_frame(e.width, e.height) != 1 {
         println("bake_impostor: the frame could not be read back")
         engine.engine_stop(e)
         return
+    }
+    if g_cell == 0 && g_channel == 1 && (e.width != CELL || e.height != CELL) {
+        println("bake_impostor: the window is ${e.width}x${e.height}, not ${CELL}x${CELL}; its centre square is taken")
     }
     column = g_cell % COLS
     row = g_cell / COLS
     into = g_atlas
     if g_channel == 2 { into = g_normals }
-    kept = ae3d_capture_copy_keyed(into, COLS * CELL, ROWS * CELL, column * CELL, row * CELL, KEY_R, KEY_G, KEY_B, 40)
+    kept = ae3d_capture_copy_keyed(into, COLS * CELL, ROWS * CELL, column * CELL, row * CELL, CELL, KEY_R, KEY_G, KEY_B, 40)
     counts = g_kept as int[]
     counts[(g_channel - 1) * COLS * ROWS + g_cell] = kept
     if kept <= 0 {
@@ -351,7 +356,11 @@ main() {
     if g_out == "" { g_out = "${directory_of(g_manifest)}impostor_${g_figure}.png" }
     // OpenGL, for the frame readback the bake is made of.
     e = engine.engine_new_with(platform.API_GL)
-    engine.engine_set_size(e, CELL, CELL)
+    // A cell's size; AE3D_BAKE_WINDOW=512 draws through a larger window
+    // and takes its centre square, the way a bare X server makes the tool
+    // work, to check that path where the window comes out as asked.
+    window = core.env_int("AE3D_BAKE_WINDOW", CELL)
+    engine.engine_set_size(e, window, window)
     engine.engine_set_title(e, "ae3d: impostor bake")
     engine.engine_set_camera_input(e, false)
     engine.engine_set_vsync(e, 0)
