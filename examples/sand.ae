@@ -573,8 +573,7 @@ ground_under_cursor(e: *Engine, out: *Vec3) -> bool {
     return true
 }
 
-on_start(data: ptr) {
-    e = data as *Engine
+on_start(state: ptr, e: *Engine) {
 
     g_position = calloc(GRAINS * 3, 8)
     g_velocity = calloc(GRAINS * 3, 8)
@@ -689,8 +688,7 @@ on_start(data: ptr) {
     println("sand: ${GRAINS} grains in one instanced draw, hold the left button to dig")
 }
 
-on_update(data: ptr, delta: float) {
-    e = data as *Engine
+on_update(state: ptr, e: *Engine, delta: float) {
     grain = g_model as *Model
     if grain == null { return }
 
@@ -762,7 +760,7 @@ upload_tiers() {
 }
 
 main() {
-    e = engine.engine_new(platform.API_GL)
+    e = engine.engine_new()
     engine.engine_set_size(e, 1280, 800)
     engine.engine_set_title(e, "ae3d - sand")
     engine.engine_set_face_culling(e, true)
@@ -786,11 +784,12 @@ main() {
     engine.engine_set_fog(e, core.fog_distance(1800.0, 9000.0,
                                                core.vec3(HAZE_R, HAZE_G, HAZE_B), 0.9))
 
-    engine.engine_set_user_data(e, e as ptr)
-    engine.engine_on_start(e, on_start as fn(ptr))
-    engine.engine_on_update(e, on_update as fn(ptr, float))
+    program = engine.behaviour_new("sand", null)
+    program.start = on_start
+    program.update = on_update
+    engine.engine_add_behaviour(e, program)
 
-    engine.engine_run(e, 0 - 1, 0 - 1)
+    engine.engine_run(e)
 
     println("sand: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${g_settled} grains settled, ${g_active} moving, ${engine.engine_draw_calls(e)} draw calls")
 

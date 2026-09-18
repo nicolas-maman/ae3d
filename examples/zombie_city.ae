@@ -406,8 +406,7 @@ add_tile(e: *Engine, m: *Manifest, off_x: float, flip: bool, street_only: bool) 
     return models
 }
 
-on_start(data: ptr) {
-    e = data as *Engine
+on_start(state: ptr, e: *Engine) {
     g_count = core.env_int("AE3D_CROWD", CROWD_DEFAULT)
     g_near_dist = core.env_int("AE3D_NEAR", NEAR_DIST as int) as float
     g_cull_dist = core.env_int("AE3D_CULL", CULL_DIST as int) as float
@@ -757,9 +756,8 @@ log_materials_once() {
     }
 }
 
-on_update(data: ptr, delta: float) {
+on_update(state: ptr, e: *Engine, delta: float) {
     if g_figures == null || list.size(g_figures) == 0 { return }
-    e = data as *Engine
     cam = engine.engine_camera(e)
 
     // The whole per-frame crowd update is native now (crowd/module.ae -> C):
@@ -821,7 +819,7 @@ upload_tier(model: *Model, pos: *Column, yaw: *Column, phase: *Column, col: *Col
 }
 
 main() {
-    e = engine.engine_new(platform.API_GL)
+    e = engine.engine_new()
     engine.engine_set_size(e, 1280, 720)
     engine.engine_set_title(e, "ae3d - zombie city")
     engine.engine_set_face_culling(e, true)
@@ -835,11 +833,12 @@ main() {
     // region; 2048 texels over it is still ~2cm a texel.
     engine.engine_set_shadow_distance(e, core.env_int("AE3D_SHADOWDIST", 48) as float)
     engine.engine_set_frustum_culling(e, true)
-    engine.engine_set_user_data(e, e as ptr)
-    engine.engine_on_start(e, on_start as fn(ptr))
-    engine.engine_on_update(e, on_update as fn(ptr, float))
+    program = engine.behaviour_new("zombie city", null)
+    program.start = on_start
+    program.update = on_update
+    engine.engine_add_behaviour(e, program)
 
-    engine.engine_run(e, 0 - 1, 0 - 1)
+    engine.engine_run(e)
 
     println("zombie_city: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${engine.engine_draw_calls(e)} draws")
 }

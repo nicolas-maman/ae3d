@@ -120,8 +120,7 @@ lit_by_caustics(m: *Model, grainy: bool) {
     rendering.apply(m, config)
 }
 
-on_start(data: ptr) {
-    e = data as *Engine
+on_start(state: ptr, e: *Engine) {
 
     seabed = seafloor(SEABED_CELLS, REACH * 4.0)
     core.model_set_position(seabed, 0.0, SEABED, 0.0)
@@ -222,14 +221,14 @@ on_start(data: ptr) {
     core.camera_set_far(cam, 40000.0)
 }
 
-on_update(data: ptr, delta: float) {
+on_update(state: ptr, e: *Engine, delta: float) {
     ocean = g_water as *Simulation
     if ocean == null { return }
     water.simulation_update(ocean, delta)
 }
 
 main() {
-    e = engine.engine_new(platform.API_GL)
+    e = engine.engine_new()
     engine.engine_set_size(e, 1280, 800)
     engine.engine_set_title(e, "ae3d - caustics")
     engine.engine_set_face_culling(e, false)
@@ -246,11 +245,12 @@ main() {
     // rock sits on it.
     engine.engine_set_ssao(e, core.env_int("AE3D_SSAO", 1) == 1, 2.0, 1.0)
 
-    engine.engine_set_user_data(e, e as ptr)
-    engine.engine_on_start(e, on_start as fn(ptr))
-    engine.engine_on_update(e, on_update as fn(ptr, float))
+    program = engine.behaviour_new("caustics", null)
+    program.start = on_start
+    program.update = on_update
+    engine.engine_add_behaviour(e, program)
 
-    engine.engine_run(e, 0 - 1, 0 - 1)
+    engine.engine_run(e)
 
     println("caustics: ${engine.engine_frame_count(e)} frames")
 

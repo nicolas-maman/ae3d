@@ -135,18 +135,21 @@ pacman -S mingw-w64-ucrt-x86_64-{gcc,glfw,zlib,pkgconf,vulkan-headers,vulkan-loa
 ```bash
 ./build.sh examples/spinning_cube.ae && ./build/spinning_cube
 ./build.sh examples/zombie_city.ae   && ./build/zombie_city
-AE3D_API=vulkan ./build/zombie_city
+AE3D_API=opengl ./build/zombie_city
 ```
 
 `build.sh` compiles the native layer once, runs `aetherc` over the Aether
-sources and links. Every program honours a few environment variables:
+sources and links. A program draws through Vulkan; `AE3D_API=opengl` runs
+the same program through OpenGL, which stays at parity but is not where the
+engine is going (DirectX and Metal are, see the issues). Every program
+honours a few environment variables:
 
 | Variable | Effect |
 |---|---|
 | `AE3D_FRAMES=n` | stop after `n` frames, so any example is a smoke test |
 | `AE3D_SNAPSHOT=path.png` | write the last frame; `AE3D_SNAPSHOT_BURST=k` writes the last `k` |
 | `AE3D_HIDDEN=1` | no window on screen (rendering still happens) |
-| `AE3D_API=vulkan` | run through the other renderer, whatever the program asked for (`opengl` the other way) |
+| `AE3D_API=opengl` | run through OpenGL instead of Vulkan (`vulkan` the other way, for a program that asked for OpenGL) |
 | `AE3D_AGENT=port` | open the control channel on loopback |
 
 `./ci.sh` builds with warnings as errors, type-checks every module, runs every
@@ -299,7 +302,8 @@ brush that raises, lowers and smooths a terrain under the cursor, and undo.
 Objects are meshes, water, voxel worlds or lights, each carrying a component
 the inspector shows the right section for; a behaviour can be attached to any
 object and runs in the frame loop. It runs on either renderer
-(`AE3D_EDITOR_BACKEND=vulkan`). See [docs/editor.md](docs/editor.md).
+(Vulkan by default, `AE3D_EDITOR_BACKEND=opengl` for the other). See
+[docs/editor.md](docs/editor.md).
 
 ```bash
 git clone https://github.com/aether-lang-dev/aether-ui.git ../aether-ui
@@ -357,6 +361,52 @@ tests/       one program per suite, each printing its own verdict
 benchmarks/  per-frame cost measured without a window
 examples/    runnable scenes
 ```
+
+## Writing a program
+
+A program is a behaviour the engine runs, the way a MonoBehaviour joins a
+Unity scene or a gopher3D behaviour registers with its manager: the engine's
+loop calls its phases, and the program never calls them itself. `main` makes
+the engine, adds the behaviour and runs.
+
+```aether
+import ae3d.core
+import ae3d.engine
+import ae3d.loader
+
+var g_cube: ptr = null
+
+on_start(state: ptr, e: *Engine) {            // once, window and backend up
+    cube = loader.cube(1.0)
+    core.model_set_scale(cube, 20.0, 20.0, 20.0)
+    engine.engine_add_model(e, cube)
+    g_cube = cube as ptr
+    core.camera_look_at(engine.engine_camera(e), core.vec3(0.0, 0.0, 0.0))
+}
+
+on_update(state: ptr, e: *Engine, delta: float) {   // every frame
+    core.model_rotate(g_cube as *Model, 18.0 * delta, 30.0 * delta, 0.0)
+}
+
+main() {
+    e = engine.engine_new()
+    program = engine.behaviour_new("spinning cube", null)
+    program.start = on_start
+    program.update = on_update
+    engine.engine_add_behaviour(e, program)
+    engine.engine_run(e)
+}
+```
+
+The phases, in the order the loop runs them each frame: `fixed_update(step)`
+as many times as the fixed step fits (`engine_set_fixed_step`, simulation),
+`update(delta)` once, `pose()` after the animation clips are applied and
+before the draw (inverse kinematics; it runs on a held frame too, so an
+agent that seeks a pose sees it solved), and `late_update(delta)` after the
+frame is drawn (reading the frame back). `start` runs once, on the first
+frame after the behaviour is added. `state` is the behaviour's own memory,
+handed back to every phase. A scene of game objects and components
+(`ae3d.behaviour`) joins the loop the same way, through `engine_add_scene`.
 
 ## How it is put together
 

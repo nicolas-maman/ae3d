@@ -214,7 +214,7 @@ The editor takes a few environment variables, which is how CI drives it:
 | `AE3D_EDITOR_SCENE=components` | start with water, voxels, a light and a behaviour |
 | `AE3D_EDITOR_SCENE=roundtrip` | the same, saved and loaded again before the run |
 | `AE3D_EDITOR_DRIVER=1` | serve the widget tree on `127.0.0.1:9222` |
-| `AE3D_EDITOR_BACKEND=vulkan` | use the Vulkan renderer if a driver exists |
+| `AE3D_EDITOR_BACKEND=opengl` | use the OpenGL renderer; Vulkan is the default where a driver exists |
 
 The driver is how the layout is checked without being able to see it. aether-ui
 cannot rasterize widgets to pixels, so `GET /widgets` and its geometry is the

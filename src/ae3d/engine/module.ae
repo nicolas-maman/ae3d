@@ -14,12 +14,15 @@ import ae3d.vk
 import ae3d.agent
 import ae3d.anim
 import ae3d.sky
+import ae3d.behaviour
 import std.os
 
 exports (
-    Engine,
-    engine_new, engine_free, engine_run, engine_start, engine_loop, engine_shutdown,
-    engine_stop, engine_on_start,
+    Engine, Behaviour,
+    behaviour_new, engine_add_behaviour, engine_remove_behaviour, engine_behaviour_count, engine_behaviour,
+    engine_add_scene, engine_remove_scene,
+    engine_new, engine_new_with, engine_free, engine_run, engine_run_at, engine_start, engine_loop, engine_shutdown,
+    engine_stop,
     engine_add_model, engine_remove_model, engine_set_light, engine_light,
     engine_add_light, engine_remove_light,
     engine_camera, engine_window, engine_backend_name,
@@ -31,11 +34,41 @@ exports (
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
     engine_render_ms, engine_render_frames,
     engine_set_debug, engine_set_frustum_culling, engine_set_face_culling,
-    engine_on_update, engine_on_fixed_update, engine_on_render, engine_on_pose,
-    engine_set_user_data, engine_user_data,
     engine_add_animation, engine_animations,
     engine_gl_renderer, engine_vk_renderer, engine_mouse_x, engine_mouse_y, engine_mouse_down, engine_key_down
 )
+
+// A behaviour: what a program adds to the engine to take part in the loop,
+// the way a MonoBehaviour joins a Unity scene or a gopher3D behaviour
+// registers with its manager. The engine calls its phases; the program never
+// calls them itself. `state` is the behaviour's own memory, handed back to
+// every phase beside the engine.
+//
+//   start        once, on the first frame after it is added, with the window
+//                and the backend up: where a scene is built
+//   fixed_update at the fixed step (engine_set_fixed_step), as many times a
+//                frame as the frame's time covers, with the step: simulation
+//   update       once a frame, with the seconds since the last frame
+//   pose         after the clips have been applied and before anything is
+//                drawn, on every frame including a held one: inverse
+//                kinematics, and whatever else puts a bone where the frame
+//                needs it rather than where the clip left it
+//   late_update  after the frame is drawn, with the frame's delta: reading
+//                the frame back, recording, anything that wants the picture
+//
+// A phase left null is a phase the behaviour does not take part in. A
+// behaviour added while the loop runs starts on the next frame.
+struct Behaviour {
+    name: string
+    state: ptr
+    start: fn(ptr, *Engine)
+    fixed_update: fn(ptr, *Engine, float)
+    update: fn(ptr, *Engine, float)
+    pose: fn(ptr, *Engine)
+    late_update: fn(ptr, *Engine, float)
+    started: bool
+    enabled: bool
+}
 
 struct Engine {
     window: ptr
@@ -64,12 +97,9 @@ struct Engine {
     backend_cleanup: fn(ptr)
     backend_name: string
 
-    on_start: fn(ptr)
-    on_update: fn(ptr, float)
-    on_fixed_update: fn(ptr, float)
-    on_render: fn(ptr, float)
-    on_pose: fn(ptr)
-    user_data: ptr
+    // What takes part in the loop: every Behaviour added to the engine, in
+    // the order added. The loop calls their phases; nothing else does.
+    behaviours: ptr
 
     width: int
     height: int
@@ -119,9 +149,147 @@ struct Engine {
     frame_limit: int
 }
 
-engine_new(api: int) -> *Engine {
+// A behaviour with no phases yet: set the ones it takes part in.
+//
+//   b = engine.behaviour_new("spinning cube", null)
+//   b.start = on_start
+//   b.update = on_update
+//   engine.engine_add_behaviour(e, b)
+behaviour_new(name: string, state: ptr) -> *Behaviour {
+    b = heap.new(Behaviour)
+    b.name = name
+    b.state = state
+    b.started = false
+    b.enabled = true
+    return b
+}
+
+engine_add_behaviour(e: *Engine, b: *Behaviour) {
+    if b == null { return }
+    list.add_raw(e.behaviours, b as ptr)
+}
+
+engine_remove_behaviour(e: *Engine, b: *Behaviour) {
+    count = list.size(e.behaviours)
+    i = 0
+    while i < count {
+        if list.get_raw(e.behaviours, i) == b as ptr {
+            list.remove(e.behaviours, i)
+            return
+        }
+        i = i + 1
+    }
+}
+
+engine_behaviour_count(e: *Engine) -> int { return list.size(e.behaviours) }
+
+engine_behaviour(e: *Engine, index: int) -> *Behaviour {
+    if index < 0 || index >= list.size(e.behaviours) { return null }
+    return list.get_raw(e.behaviours, index) as *Behaviour
+}
+
+// A scene of game objects and components takes part in the loop as one
+// behaviour: its components' start, update and fixed_update run when the
+// engine's do. The behaviour returned is the handle to remove it by.
+engine_add_scene(e: *Engine, scene: *Scene) -> *Behaviour {
+    b = behaviour_new("scene", scene as ptr)
+    b.update = scene_behaviour_update
+    b.fixed_update = scene_behaviour_fixed
+    engine_add_behaviour(e, b)
+    return b
+}
+
+engine_remove_scene(e: *Engine, handle: *Behaviour) {
+    engine_remove_behaviour(e, handle)
+    if handle != null { heap.free(handle) }
+}
+
+scene_behaviour_update(state: ptr, e: *Engine, delta: float) {
+    behaviour.scene_update(state as *Scene, delta)
+}
+
+scene_behaviour_fixed(state: ptr, e: *Engine, step: float) {
+    behaviour.scene_fixed_update(state as *Scene, step)
+}
+
+// Each phase over every enabled behaviour, in the order they were added; a
+// behaviour that has not started starts first, whichever phase reaches it.
+run_starts(e: *Engine) {
+    count = list.size(e.behaviours)
+    i = 0
+    while i < count {
+        b = list.get_raw(e.behaviours, i) as *Behaviour
+        if b != null && b.enabled && !b.started {
+            b.started = true
+            if b.start != null { b.start(b.state, e) }
+        }
+        i = i + 1
+    }
+}
+
+run_fixed_updates(e: *Engine, step: float) {
+    run_starts(e)
+    count = list.size(e.behaviours)
+    i = 0
+    while i < count {
+        b = list.get_raw(e.behaviours, i) as *Behaviour
+        if b != null && b.enabled && b.fixed_update != null { b.fixed_update(b.state, e, step) }
+        i = i + 1
+    }
+}
+
+run_updates(e: *Engine, delta: float) {
+    run_starts(e)
+    count = list.size(e.behaviours)
+    i = 0
+    while i < count {
+        b = list.get_raw(e.behaviours, i) as *Behaviour
+        if b != null && b.enabled && b.update != null { b.update(b.state, e, delta) }
+        i = i + 1
+    }
+}
+
+run_poses(e: *Engine) {
+    count = list.size(e.behaviours)
+    i = 0
+    while i < count {
+        b = list.get_raw(e.behaviours, i) as *Behaviour
+        if b != null && b.enabled && b.started && b.pose != null { b.pose(b.state, e) }
+        i = i + 1
+    }
+}
+
+run_late_updates(e: *Engine, delta: float) {
+    count = list.size(e.behaviours)
+    i = 0
+    while i < count {
+        b = list.get_raw(e.behaviours, i) as *Behaviour
+        if b != null && b.enabled && b.started && b.late_update != null { b.late_update(b.state, e, delta) }
+        i = i + 1
+    }
+}
+
+// The agent seeks a pose and wants it solved: the pose phase, from outside
+// the loop.
+poses_for_agent(data: ptr) {
+    run_poses(data as *Engine)
+}
+
+// An engine on the backend the machine is for: Vulkan, and AE3D_API=opengl
+// to run the same program through OpenGL. The explicit choice is
+// engine_new_with.
+engine_new() -> *Engine {
+    return engine_new_with(platform.API_VULKAN)
+}
+
+engine_new_with(api: int) -> *Engine {
     api = api_from_env(api)
+    if api == platform.API_VULKAN && !vk.available() {
+        println("ae3d: no Vulkan driver (${vk.last_error()}), drawing through OpenGL")
+        api = platform.API_GL
+    }
     e = heap.new(Engine)
+    e.behaviours = list.new()
     e.api = api
     e.width = 1024
     e.height = 768
@@ -309,6 +477,19 @@ engine_free(e: *Engine) {
         e.animations = null
     }
     if e.camera != null { core.camera_free(e.camera as *Camera) }
+    // The behaviours are the program's: their states are freed by whoever
+    // made them; the list and the records the engine made are the engine's.
+    if e.behaviours != null {
+        count = list.size(e.behaviours)
+        i = 0
+        while i < count {
+            b = list.get_raw(e.behaviours, i) as *Behaviour
+            if b != null { heap.free(b) }
+            i = i + 1
+        }
+        list.free(e.behaviours)
+        e.behaviours = null
+    }
     if e.api == platform.API_VULKAN {
         vk.renderer_free(e.backend_state as *VKRenderer)
     } else {
@@ -514,10 +695,6 @@ engine_set_camera_input(e: *Engine, enabled: bool) { e.camera_input = enabled }
 // Called as many times a frame as the fixed step fits into it, with the step
 // rather than the frame's own delta, which is what a behaviour scene's
 // fixed_update wants.
-engine_on_fixed_update(e: *Engine, handler: fn(ptr, float)) {
-    e.on_fixed_update = handler
-}
-
 engine_set_fixed_step(e: *Engine, seconds: float) {
     if seconds > 0.0 { e.fixed_step = seconds }
 }
@@ -526,21 +703,6 @@ engine_set_debug(e: *Engine, on: bool) { core.set_debug(on) }
 engine_set_frustum_culling(e: *Engine, on: bool) { core.set_frustum_culling(on) }
 engine_set_face_culling(e: *Engine, on: bool) { core.set_face_culling(on) }
 
-engine_on_start(e: *Engine, handler: fn(ptr)) { e.on_start = handler }
-engine_on_update(e: *Engine, handler: fn(ptr, float)) { e.on_update = handler }
-engine_on_render(e: *Engine, handler: fn(ptr, float)) { e.on_render = handler }
-
-// Called once the clips have been applied and before anything is drawn, on
-// every frame including the ones an agent is holding still: a pose an agent
-// seeks to is a pose it wants solved, or it is looking at half an answer.
-//
-// This is where inverse kinematics goes. A clip is an angle at every joint and
-// wherever the foot lands is where it lands; the solve afterwards is what puts
-// it on the ground it is actually standing on.
-engine_on_pose(e: *Engine, handler: fn(ptr)) { e.on_pose = handler }
-engine_set_user_data(e: *Engine, data: ptr) { e.user_data = data }
-engine_user_data(e: *Engine) -> ptr { return e.user_data }
-
 engine_camera(e: *Engine) -> *Camera { return e.camera as *Camera }
 engine_window(e: *Engine) -> ptr { return e.window }
 engine_backend_name(e: *Engine) -> string { return e.backend_name }
@@ -548,7 +710,16 @@ engine_gl_renderer(e: *Engine) -> *GLRenderer { return e.gl_renderer as *GLRende
 engine_vk_renderer(e: *Engine) -> *VKRenderer { return e.backend_state as *VKRenderer }
 engine_delta_time(e: *Engine) -> float { return e.delta_time }
 engine_frame_count(e: *Engine) -> int { return e.frame_count }
-engine_fps(e: *Engine) -> float { return e.fps }
+// Frames a second, over the last half second; before a half second has
+// passed, over the run so far, so a short bounded run reports its rate and
+// not the zero the window had not filled.
+engine_fps(e: *Engine) -> float {
+    if e.fps > 0.0 { return e.fps }
+    if e.render_seconds > 0.0 && e.frame_count > 0 && e.fps_window > 0.0 {
+        return (e.fps_frames * 1.0) / e.fps_window
+    }
+    return e.fps
+}
 
 // The mean cost of submitting a frame, in milliseconds. Answers zero before
 // anything has been drawn.
@@ -599,12 +770,18 @@ engine_mouse_y(e: *Engine) -> float { return platform.cursor_y(e.window) }
 engine_mouse_down(e: *Engine, button: int) -> bool { return platform.mouse_down(e.window, button) }
 engine_key_down(e: *Engine, key: int) -> bool { return platform.key_down(e.window, key) }
 
-// One-call path: open the window, initialise the backend, fire `on_start`, run
-// the loop, then tear everything down. Programs that need to interleave their
-// own work can call engine_start / engine_loop / engine_shutdown directly.
-engine_run(e: *Engine, x: int, y: int) -> bool {
+// One-call path: open the window, initialise the backend, start the
+// behaviours, run the loop, then tear everything down. Programs that need to
+// interleave their own work can call engine_start / engine_loop /
+// engine_shutdown directly. The window goes where the system puts it;
+// engine_run_at names a position.
+engine_run(e: *Engine) -> bool {
+    return engine_run_at(e, 0 - 1, 0 - 1)
+}
+
+engine_run_at(e: *Engine, x: int, y: int) -> bool {
     if !engine_start(e, x, y) { return false }
-    if e.on_start != null { e.on_start(e.user_data) }
+    run_starts(e)
     engine_loop(e)
     engine_shutdown(e)
     return true
@@ -677,8 +854,8 @@ pump_agent(e: *Engine) {
     c.light = e.light
     c.gl_renderer = e.gl_renderer
     c.animations = e.animations
-    c.on_pose = e.on_pose
-    c.user_data = e.user_data
+    c.on_pose = poses_for_agent as fn(ptr)
+    c.user_data = e as ptr
     c.vk_renderer = null
     if e.api == platform.API_VULKAN { c.vk_renderer = e.backend_state }
     c.backend = e.backend_name
@@ -804,6 +981,12 @@ pump_agent(e: *Engine) {
 // frame put in it, and the file came out empty with an "ok" already sent.
 // Whether a frame read is waiting, so the Vulkan capture can be armed before
 // the frame that will answer it is drawn.
+agent_wants_snapshot(e: *Engine) -> bool {
+    if e.agent_ctx == null { return false }
+    c = e.agent_ctx as *Context
+    return c.pending_snapshot_id >= 0
+}
+
 agent_wants_capture(e: *Engine) -> bool {
     if e.agent_ctx == null { return false }
     c = e.agent_ctx as *Context
@@ -849,8 +1032,11 @@ service_agent_snapshot(e: *Engine) {
 
     path = c.want_snapshot
     c.want_snapshot = ""
+    // On Vulkan the frame was copied out as it was submitted, since the
+    // capture was armed for a pending snapshot before backend_render; the
+    // answer arrives with the file, the same as on OpenGL.
     if e.api == platform.API_VULKAN {
-        agent.answer_snapshot(c, path, false)
+        agent.answer_snapshot(c, path, vk.snapshot(path))
         string.free(path)
         return
     }
@@ -933,13 +1119,13 @@ engine_loop(e: *Engine) {
             e.fixed_accumulator = e.fixed_accumulator + delta
             while e.fixed_accumulator >= e.fixed_step {
                 e.fixed_accumulator = e.fixed_accumulator - e.fixed_step
-                if e.on_fixed_update != null { e.on_fixed_update(e.user_data, e.fixed_step) }
+                run_fixed_updates(e, e.fixed_step)
             }
             // With the simulation, not beside it: a held frame freezes the
             // playheads too, or an agent that paused to look at a pose would
             // find a different one each time it asked.
             anim.registry_advance(e.animations as *Registry, delta)
-            if e.on_update != null { e.on_update(e.user_data, delta) }
+            run_updates(e, delta)
         } else {
             // Frozen, not skipped. on_pose writes to the same local transforms
             // the clips do, so a held frame that did not re-apply them would
@@ -948,7 +1134,9 @@ engine_loop(e: *Engine) {
             anim.registry_apply(e.animations as *Registry)
         }
 
-        if e.on_pose != null { e.on_pose(e.user_data) }
+        // The pose phase runs on a held frame too: a pose an agent seeks to
+        // is a pose it wants solved, or it is looking at half an answer.
+        run_poses(e)
 
         // A Vulkan frame is copied out as it is submitted, so any read of it --
         // a snapshot, or an agent grid or pixel read -- has to be armed on this
@@ -958,7 +1146,7 @@ engine_loop(e: *Engine) {
         last_frame = e.frame_limit > 0 && e.frame_count + 1 >= e.frame_limit
         if e.api == platform.API_VULKAN {
             want_shot = last_frame && snapshot_path(e) != ""
-            want_read = e.agent_on && agent_wants_capture(e)
+            want_read = e.agent_on && (agent_wants_capture(e) || agent_wants_snapshot(e))
             if want_shot || want_read {
                 if !vk.request_capture() { println("ae3d: Vulkan would not arm a capture") }
             }
@@ -968,7 +1156,7 @@ engine_loop(e: *Engine) {
         e.render_seconds = e.render_seconds + (platform.time() - render_started)
         e.render_frames = e.render_frames + 1
 
-        if e.on_render != null { e.on_render(e.user_data, delta) }
+        run_late_updates(e, delta)
 
         // Before the swap, because after it the back buffer holds nothing this
         // frame put there.

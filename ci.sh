@@ -560,7 +560,7 @@ frame_cost() {   # frame_cost <backend> <port>
     cost_backend="$1"
     cost_port="$2"
     cost_name="zombie_street (frame cost, $cost_backend)"
-    cost_arg=""
+    cost_arg="opengl"
     [ "$cost_backend" = vulkan ] && cost_arg="vulkan"
     cost_log="$(mktemp)"
     scene_log="$(mktemp)"

@@ -65,8 +65,7 @@ apply_stage(stage: int) {
     if stage == 4 { println("polished metal, exposure rising left to right") }
 }
 
-on_start(data: ptr) {
-    e = data as *Engine
+on_start(state: ptr, e: *Engine) {
     g_engine = e as ptr
 
     g_spheres = list.new()
@@ -101,7 +100,7 @@ on_start(data: ptr) {
     core.camera_set_speed(cam, 220.0)
 }
 
-on_update(data: ptr, delta: float) {
+on_update(state: ptr, e: *Engine, delta: float) {
     g_elapsed = g_elapsed + delta
     stage = ((g_elapsed / 4.0) as int) % 5
     if stage != g_stage {
@@ -118,7 +117,7 @@ on_update(data: ptr, delta: float) {
 }
 
 main() {
-    e = engine.engine_new(platform.API_GL)
+    e = engine.engine_new()
     engine.engine_set_size(e, 1280, 720)
     engine.engine_set_title(e, "ae3d - materials")
 
@@ -129,11 +128,12 @@ main() {
     engine.engine_set_shadow_distance(e, 240.0)
     // The floor runs to the horizon and fades into the sky's glow before it.
     engine.engine_set_fog(e, core.fog_distance(400.0, 2600.0, core.vec3(0.14, 0.10, 0.07), 1.0))
-    engine.engine_set_user_data(e, e as ptr)
-    engine.engine_on_start(e, on_start as fn(ptr))
-    engine.engine_on_update(e, on_update as fn(ptr, float))
+    program = engine.behaviour_new("lights", null)
+    program.start = on_start
+    program.update = on_update
+    engine.engine_add_behaviour(e, program)
 
-    engine.engine_run(e, 0 - 1, 0 - 1)
+    engine.engine_run(e)
 
     println("materials: ${engine.engine_frame_count(e)} frames, ${engine.engine_draw_calls(e)} draw calls")
 
