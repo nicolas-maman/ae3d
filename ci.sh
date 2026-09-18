@@ -961,7 +961,8 @@ else
                     # message) the first time the editor ran on Linux, and
                     # the reason -- no test server on that backend -- was in
                     # the line they skipped.
-                    grep -E 'never answered|could not find|no editor at|driver:' "$driver_log" \n                        | sed 's/^/        /' | head -6
+                    grep -E 'never answered|could not find|no editor at|driver:' "$driver_log" \
+                        | sed 's/^/        /' | head -6
                     tail -3 "$driver_log" | sed 's/^/        /'
                 fi
                 rm -f "$driver_log"
