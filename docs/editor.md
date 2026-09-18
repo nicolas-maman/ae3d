@@ -153,7 +153,8 @@ scale (how many times longer than the table's kilometre swells the waves
 are), and the shore -- the metres of water the bottom shows through and the
 metres the foam line runs out over. Rendering has the clouds switch and,
 under it, the cover: how much of the sky they take, a slider like any row,
-undone like one, and saved with the scene; the sky section has, under its
+undone like one, and saved with the scene, and the overcast, 0 to 1, that
+pulls the sky toward a flat grey; the sky section has, under its
 three colour channels, a **Sun by time** switch and the hour: on, the key
 light takes the sun's direction, colour, strength and fill for that hour
 and the sky is drawn from the same sun, so a scene can be dragged from noon
@@ -162,6 +163,23 @@ ambient occlusion switch
 with its two rows, how dark the occlusion goes and how far in metres a thing
 shadows what stands beside it. Occlusion is the view's, not a model's: it is
 drawn from the scene's depth over everything opaque, by either backend.
+
+The weather section is the engine's weather module over the viewport:
+five buttons for the kind -- Clear, Rain, Snow, Dust, Storm -- lit like the
+gizmo's modes, and three rows: the strength, 0 to 1, the wind's heading in
+degrees (from +X toward +Z) and its speed in metres a second. A kind
+brings what it brings in a game -- its particles falling around the
+camera, its fog, its cloud cover and overcast, a dimmed sun, a storm's
+lightning -- and Clear gives the scene's own sky back, the clouds and the
+overcast the rows above hold. While there is weather the sky is the
+weather's, so the clouds and overcast rows wait until it clears; the light
+rows still act, and the weather dims from whatever they set. The kind is
+one undo step, the rows undo like any row, and the scene file carries all
+of it (`weather`: the kind by name, the strength, the wind). Underneath,
+the editor holds an `engine.engine_over` -- an Engine wrapped around the
+viewport's renderer, camera and light, with no window or loop of its own,
+stepped by the frame with `engine_update` -- so what is written for the
+engine runs in the editor unchanged.
 
 ## Undo
 
@@ -195,7 +213,8 @@ wave table nothing reads:
 | script | the behaviour running on it, if any |
 | water | every knob of the simulation driving it, the wave scale, the shore and the sky image it reflects included |
 | material | colour, metallic, roughness, reflectivity, alpha, and the texture and normal map paths |
-| rendering | FXAA, bloom, reflections (SSR), clouds and their cover, ambient occlusion with its strength and reach -- the view menu's switches, applied on the backend that has them |
+| rendering | FXAA, bloom, reflections (SSR), clouds and their cover, the overcast, ambient occlusion with its strength and reach -- the view menu's switches, applied on the backend that has them |
+| weather | the kind by name (`clear`, `rain`, `snow`, `dust`, `storm`), its strength, the wind's heading in degrees and its speed |
 
 and the file records the view: where the camera stood, its field of view and
 clip planes, and whether face and frustum culling were on.

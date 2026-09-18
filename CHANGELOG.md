@@ -79,6 +79,26 @@
   the sea beside it blue.
 - A Vulkan instance stream that was empty when its model was added gets
   its buffer the first frame it has instances.
+- The editor's weather section (#328): the kind as five buttons, the
+  strength, the wind's heading and speed as rows, undone and saved with
+  the scene (`weather` in the file, the kind by name), and an overcast
+  row beside the cloud cover. The weather module runs over the viewport
+  through `engine.engine_over(renderer, api, camera, light)`, an Engine
+  around a renderer somebody else draws with, stepped by `engine_update`.
+  `tools/drive_editor.py` presses the buttons, reads the file and loads
+  it back.
+- The weather gives the scene's own sky back: `weather_set(w, CLEAR, 0)`
+  restores the clouds and the overcast as they stood when the weather
+  came, not none (the engine records what `engine_set_clouds` and
+  `engine_set_sky_overcast` last set: `engine_clouds`, `engine_cloud_wind`,
+  `engine_sky_overcast`, `engine_sky_overcast_color`), and
+  `weather_relight` re-takes the key light when the scene sets it under
+  the weather.
+- `render.set` in the agent channel takes `clouds` and `cloud_wind`,
+  `overcast` and `overcast_color`: the sky a weather brings, by hand.
+- The editor's view rows (cloud cover, occlusion, overcast, weather) read
+  their own state in the row check, so they no longer report themselves
+  stuck with a model selected.
 
 ### The channel's client, in Aether
 

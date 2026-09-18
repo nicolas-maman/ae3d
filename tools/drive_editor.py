@@ -1335,6 +1335,61 @@ def main():
                 widgets, back = wait_for(args.port, clouds_on)
                 check("and clouds come back with the scene", back)
 
+        # The weather, the same way: a kind is a button, lit when chosen; the
+        # console says what came over the scene; the file carries the kind by
+        # name and comes back with it.
+        widgets = tree(args.port)
+        # By the row the kinds share: the console has a Clear button of its
+        # own, and clearing the console is not clearing the sky.
+        rain = [w for w in widgets.values()
+                if w["type"] == "button" and w["text"].strip() == "Rain"]
+        kinds = {}
+        if rain:
+            kinds = {n: w for n, w in
+                     ((w["text"].strip(), w) for w in widgets.values()
+                      if w["type"] == "button" and w["parent"] == rain[0]["parent"])
+                     if n in ("Clear", "Rain", "Snow", "Dust", "Storm")}
+        check("the weather section offers every kind", len(kinds) == 5, sorted(kinds))
+        if len(kinds) == 5 and save_btn and load_btn:
+            lit = [n for n, w in kinds.items() if w.get("bg") == ACCENT]
+            check("and starts clear", lit == ["Clear"], "lit: %s" % lit)
+
+            post(args.port, "/widget/%d/click" % kinds["Rain"]["id"])
+            widgets, ok = wait_for(
+                args.port,
+                lambda ws: any(w["type"] == "text" and "rain over the scene" in w["text"]
+                               for w in ws.values()))
+            check("choosing rain brings it over the scene", ok)
+            def lit_kinds(ws):
+                return [w["text"].strip() for w in ws.values()
+                        if w["type"] == "button" and w["parent"] == rain[0]["parent"]
+                        and w["text"].strip() in kinds and w.get("bg") == ACCENT]
+
+            lit = lit_kinds(tree(args.port))
+            check("and the button lights", lit == ["Rain"], "lit: %s" % lit)
+
+            written = os.path.getmtime(scene_file)
+            post(args.port, "/widget/%d/click" % save_btn)
+            check("the scene is written under rain",
+                  wait_file(scene_file, newer_than=written))
+            with open(scene_file) as handle:
+                saved = json.load(handle)
+            conditions = saved.get("view", {}).get("weather", {})
+            check("and the file names the kind", conditions.get("kind") == "rain",
+                  json.dumps(conditions))
+            check("with the strength the slider was left at",
+                  abs(float(conditions.get("intensity", 0.0)) - 0.5) < 0.01,
+                  json.dumps(conditions))
+
+            post(args.port, "/widget/%d/click" % kinds["Clear"]["id"])
+            widgets, cleared = wait_for(args.port, lambda ws: lit_kinds(ws) == ["Clear"])
+            check("clearing it lights Clear", cleared, "lit: %s" % lit_kinds(widgets))
+            post(args.port, "/widget/%d/click" % load_btn)
+            widgets, back = wait_for(args.port, lambda ws: lit_kinds(ws) == ["Rain"])
+            check("and the rain comes back with the scene", back)
+            post(args.port, "/widget/%d/click" % kinds["Clear"]["id"])
+            wait_for(args.port, lambda ws: lit_kinds(ws) == ["Clear"])
+
         if delete and scene:
             before_delete = len(rows_under(tree(args.port), scene))
             post(args.port, "/widget/%d/click" % delete)

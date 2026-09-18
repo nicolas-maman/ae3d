@@ -82,9 +82,19 @@ The feature list in full, with the reasoning behind each. The [README](../README
   the sky pulled toward a flat grey or ochre at its own brightness, which
   the clouds' ambient follows) and dims the sun; a storm adds lightning, the
   key light thrown up for three frames every few seconds at the storm's own
-  beat. What the weather takes it gives back when set clear. The weather is
-  a behaviour the engine runs; `tests/test_weather` holds the counts, the
-  box, the sun, the fog and the lightning to their numbers.
+  beat. What the weather takes it gives back when set clear: the scene's
+  own fog, clouds and overcast as they stood when the weather came
+  (`engine_clouds`, `engine_sky_overcast` and their colour and drift are
+  what the engine last set), and the key light's intensity, re-taken by
+  `weather_relight` when the scene sets its light under the weather. The
+  weather is a behaviour the engine runs; `tests/test_weather` holds the
+  counts, the box, the sun, the fog, the sky given back and the lightning
+  to their numbers. The editor runs the same module over its viewport
+  through `engine_over`, an engine wrapped around a renderer somebody else
+  draws with ([docs/editor.md](editor.md)); the agent channel sets the
+  sky a weather brings by hand (`render.set` with `clouds`, `cloud_wind`,
+  `overcast`, `overcast_color`) so a frame under it can be held against
+  the clear one.
 
   ![Rain, storm, dust and snow over the island](weather.png)
 

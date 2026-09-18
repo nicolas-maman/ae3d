@@ -76,9 +76,19 @@ struct View {
     ssr_road_height: float
     ssr_strength: float
     // Clouds over the sky, marched by either backend: whether, and how
-    // much of the sky they cover.
+    // much of the sky they cover; and the overcast, 0..1, that pulls the
+    // sky toward a flat grey.
     clouds: bool
     cloud_cover: float
+    overcast: float
+    // The weather over the scene: its kind (0 clear, 1 rain, 2 snow, 3
+    // dust, 4 storm -- the weather module's constants, spelled out in the
+    // file), how hard, 0..1, and the wind: where it blows toward as a
+    // heading in degrees from +X toward +Z, and metres a second.
+    weather_kind: int
+    weather_intensity: float
+    wind_heading: float
+    wind_speed: float
     // Ambient occlusion from the scene's depth, on either backend: whether,
     // how far a thing shadows its neighbours in metres, and how dark.
     ssao: bool
@@ -319,14 +329,40 @@ scene_load_view(path: string) -> View {
         v.ssr_strength = field_number(render, "ssr_strength", v.ssr_strength)
         v.clouds = field_bool(render, "clouds", v.clouds)
         v.cloud_cover = field_number(render, "cloud_cover", v.cloud_cover)
+        v.overcast = field_number(render, "overcast", v.overcast)
         v.ssao = field_bool(render, "ssao", v.ssao)
         v.ssao_radius = field_number(render, "ssao_radius", v.ssao_radius)
         v.ssao_intensity = field_number(render, "ssao_intensity", v.ssao_intensity)
         v.face_culling = field_bool(render, "face_culling", v.face_culling)
         v.frustum_culling = field_bool(render, "frustum_culling", v.frustum_culling)
     }
+    conditions = json.object_get_raw(node, "weather")
+    if conditions != null {
+        v.weather_kind = weather_kind_of(field_string(conditions, "kind"))
+        v.weather_intensity = field_number(conditions, "intensity", v.weather_intensity)
+        v.wind_heading = field_number(conditions, "wind_heading", v.wind_heading)
+        v.wind_speed = field_number(conditions, "wind_speed", v.wind_speed)
+    }
     json.free(root)
     return v
+}
+
+// The weather's kinds by name in the file, so a scene reads as what it
+// is: "rain", not 1.
+weather_kind_name(kind: int) -> string {
+    if kind == 1 { return "rain" }
+    if kind == 2 { return "snow" }
+    if kind == 3 { return "dust" }
+    if kind == 4 { return "storm" }
+    return "clear"
+}
+
+weather_kind_of(name: string) -> int {
+    if name == "rain" { return 1 }
+    if name == "snow" { return 2 }
+    if name == "dust" { return 3 }
+    if name == "storm" { return 4 }
+    return 0
 }
 
 scene_load_lights(path: string) -> ptr {
@@ -498,7 +534,8 @@ view_defaults() -> View {
         fxaa: false, bloom: false,
         bloom_threshold: 1.0, bloom_intensity: 1.0,
         ssr: false, ssr_road_height: 0.0, ssr_strength: 0.6,
-        clouds: false, cloud_cover: 0.4,
+        clouds: false, cloud_cover: 0.4, overcast: 0.0,
+        weather_kind: 0, weather_intensity: 0.5, wind_heading: 0.0, wind_speed: 3.0,
         ssao: false, ssao_radius: 3.0, ssao_intensity: 1.0,
         face_culling: false, frustum_culling: false
     }
@@ -537,12 +574,20 @@ view_json(v: *View) -> ptr {
     json.object_set_raw(render, "ssr_strength", json.num(v.ssr_strength))
     json.object_set_raw(render, "clouds", json.boolean(v.clouds))
     json.object_set_raw(render, "cloud_cover", json.num(v.cloud_cover))
+    json.object_set_raw(render, "overcast", json.num(v.overcast))
     json.object_set_raw(render, "ssao", json.boolean(v.ssao))
     json.object_set_raw(render, "ssao_radius", json.num(v.ssao_radius))
     json.object_set_raw(render, "ssao_intensity", json.num(v.ssao_intensity))
     json.object_set_raw(render, "face_culling", json.boolean(v.face_culling))
     json.object_set_raw(render, "frustum_culling", json.boolean(v.frustum_culling))
     json.object_set_raw(out, "rendering", render)
+
+    conditions = json.obj()
+    json.object_set_raw(conditions, "kind", json.str(weather_kind_name(v.weather_kind)))
+    json.object_set_raw(conditions, "intensity", json.num(v.weather_intensity))
+    json.object_set_raw(conditions, "wind_heading", json.num(v.wind_heading))
+    json.object_set_raw(conditions, "wind_speed", json.num(v.wind_speed))
+    json.object_set_raw(out, "weather", conditions)
     return out
 }
 
