@@ -41,7 +41,7 @@ exports (
     env_int, material_new, material_default, material_clone, material_equals, material_free,
     model_new, model_free,
     model_clone, model_set_casts_shadow, model_set_billboard, model_set_depth_proxy, model_set_impostor, model_is_impostor,
-    DeviceCrowd, model_set_device_crowd,
+    DeviceCrowd, model_set_device_crowd, model_frame_done, model_prev_matrix, model_set_crowd_walk,
     model_set_position, model_set_scale, model_set_rotation, model_rotate,
     model_update_matrix, model_recalculate_bounds, model_mark_dirty, model_set_diffuse,
     model_set_parent, model_parent, model_sync_transform, model_world_position,
@@ -444,6 +444,16 @@ struct Model {
     // *DeviceCrowd, null for none) and which tier: 0 near, 1 mid, 2 far.
     device_crowd: ptr
     device_tier: int
+    // For the motion vectors: the matrix the model was drawn with this
+    // frame (what the renderer sent as `model`), and last frame's, which
+    // the renderer takes at the frame's end (model_frame_done). A model
+    // never drawn has no last frame, and its vector is the camera's.
+    drawn_model_matrix: Mat4
+    prev_model_matrix: Mat4
+    prev_model_valid: bool
+    // A crowd model's walk cycle, seconds, for the motion vectors: how far
+    // a figure's phase and its position move between frames.
+    crowd_walk: float
 
     id: int
     name: string
@@ -473,6 +483,7 @@ struct Skybox {
     texture: int
     u_view: int
     u_projection: int
+    u_prev_view_projection: int
     u_sampler: int
     // The clouds the sky shader marches over the image.
     u_cloud_cover: int
@@ -2538,6 +2549,31 @@ model_set_depth_proxy(m: *Model, proxy: *Model) {
     // A vertex array made over the old proxy is left for the renderer to
     // drop: it is checked against the proxy it was made for at each draw.
     m.depth_proxy_vao = 0
+}
+
+// The frame is drawn: the matrix the model was drawn with becomes last
+// frame's, for the next frame's motion vectors. The renderer calls it for
+// every model at its frame's end.
+model_frame_done(m: *Model) {
+    m.prev_model_matrix = m.drawn_model_matrix
+    m.prev_model_valid = true
+}
+
+// The matrix to send as last frame's for this model, given the one being
+// sent now: the one it was drawn with before, or this one when it never was.
+model_prev_matrix(m: *Model, sent: Mat4) -> Mat4 {
+    m.drawn_model_matrix = sent
+    if m.prev_model_valid { return m.prev_model_matrix }
+    return sent
+}
+
+// A crowd model's walk: `seconds` a cycle of its pose bank. The motion
+// vectors take a figure's previous pose from it (its phase a frame
+// earlier) and its previous position (the bank's travel over the frame,
+// along its facing). Zero, the default, gives a crowd the camera's motion
+// alone.
+model_set_crowd_walk(m: *Model, seconds: float) {
+    m.crowd_walk = seconds
 }
 
 // Draw this crowd model as tier `tier` (0 near, 1 mid, 2 far) of a crowd

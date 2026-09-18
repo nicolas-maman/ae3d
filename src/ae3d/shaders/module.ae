@@ -44,6 +44,12 @@ uniform vec3 viewPos;
 uniform mat4 model;       // Regular model matrix
 uniform mat4 viewProjection;
 uniform mat4 lightSpaceMatrix;
+// Last frame's, for the motion vectors: the model's matrix as it was and
+// the view-projection without its jitter. A skinned draw's previous pose
+// is not carried (a second palette is the uniform budget over); its
+// motion is its model's and the camera's.
+uniform mat4 prevModel;
+uniform mat4 prevViewProjection;
 
 // A skinned draw is posed by the palette rather than by the model matrix
 // alone: each bone carries where it is now against where it was bound, and a
@@ -60,6 +66,8 @@ out vec3 FragPos;         // Pass position to fragment shader
 out vec3 InstanceColor;   // Pass instance color to fragment shader
 out vec4 FragPosLightSpace;
 out float Occlusion;
+out vec4 ClipNow;         // this vertex on the screen, this frame and last
+out vec4 ClipPrev;
 
 void main() {
     Occlusion = inOcclusion;
@@ -105,6 +113,13 @@ void main() {
         posedNormal = mat3(skin) * inNormal;
     }
 
+    // Where the vertex was last frame: the model where it stood, the
+    // instance where it is (a stream carries no history; an instance that
+    // moves on its own gets the camera's motion and its model's), a point
+    // or a billboard likewise.
+    mat4 prevModelMatrix = isInstanced ? (prevModel * instanceModel) : prevModel;
+    if (isInstanced && instancePoints) prevModelMatrix = modelMatrix;
+
     // High-precision world position calculation
     FragPos = vec3(modelMatrix * posed);
     
@@ -121,7 +136,9 @@ void main() {
 
     // Final vertex position
     FragPosLightSpace = lightSpaceMatrix * vec4(FragPos, 1.0);
-    gl_Position = viewProjection * modelMatrix * posed;
+    ClipNow = viewProjection * modelMatrix * posed;
+    ClipPrev = prevViewProjection * prevModelMatrix * posed;
+    gl_Position = ClipNow;
 }
 
 GLSL_END
@@ -167,6 +184,13 @@ uniform int impostorRows;
 uniform float impostorWidth;
 uniform float impostorHeight;
 uniform vec3 viewPos;
+// Last frame, for the motion vectors. A figure's previous slot in the
+// stream is not its own -- the sort reorders every frame -- so where it
+// was is worked out: it walked crowdTravel metres along its facing since
+// last frame, and its walk was crowdPhaseStep earlier in the cycle.
+uniform mat4 prevViewProjection;
+uniform float crowdTravel;
+uniform float crowdPhaseStep;
 
 out vec2 fragTexCoord;
 out vec3 Normal;
@@ -174,6 +198,8 @@ out vec3 FragPos;
 out vec3 InstanceColor;
 out vec4 FragPosLightSpace;
 out float Occlusion;
+out vec4 ClipNow;
+out vec4 ClipPrev;
 
 // The bone's matrix at a frame, read as its four columns from the bank.
 mat4 boneAt(int bone, int frame) {
@@ -192,9 +218,26 @@ mat4 skinAt(int frame) {
          + inWeights.w * boneAt(int(inJoints.w), frame);
 }
 
+// The vertex's skinning matrix at a phase of the walk. The phase lands
+// between two baked poses; blend them, so the walk is continuous instead
+// of snapping frame to frame. The clip loops, so the frame after the last
+// is the first.
+mat4 skinAtPhase(float phase) {
+    float fpos = fract(phase) * float(poseBankFrames);
+    int frame0 = int(floor(fpos));
+    float blend = fpos - float(frame0);
+    if (frame0 < 0) { frame0 = 0; blend = 0.0; }
+    if (frame0 >= poseBankFrames) { frame0 = poseBankFrames - 1; blend = 0.0; }
+    int frame1 = frame0 + 1;
+    if (frame1 >= poseBankFrames) { frame1 = 0; }
+    return skinAt(frame0) * (1.0 - blend) + skinAt(frame1) * blend;
+}
+
 void main() {
     Occlusion = inOcclusion;
     mat4 modelMatrix = model * instanceModel;
+    // The way the figure faces, which is the way it walks.
+    vec3 walking = normalize(vec3(modelMatrix[0].x, 0.0, modelMatrix[0].z));
 
     if (impostor) {
         // Where the figure stands and which way it faces: the instance
@@ -226,23 +269,13 @@ void main() {
                             1.0 - (float(row) + (1.0 - inTexCoord.y)) / float(impostorRows));
         InstanceColor = instanceColor;
         FragPosLightSpace = lightSpaceMatrix * vec4(world, 1.0);
-        gl_Position = viewProjection * vec4(world, 1.0);
+        ClipNow = viewProjection * vec4(world, 1.0);
+        ClipPrev = prevViewProjection * vec4(world - walking * crowdTravel, 1.0);
+        gl_Position = ClipNow;
         return;
     }
 
-    // The phase lands between two baked poses; blend them, so the walk is
-    // continuous instead of snapping frame to frame. The clip loops, so the
-    // frame after the last is the first.
-    float fpos = instancePhase * float(poseBankFrames);
-    int frame0 = int(floor(fpos));
-    float blend = fpos - float(frame0);
-    if (frame0 < 0) { frame0 = 0; blend = 0.0; }
-    if (frame0 >= poseBankFrames) { frame0 = poseBankFrames - 1; blend = 0.0; }
-    int frame1 = frame0 + 1;
-    if (frame1 >= poseBankFrames) { frame1 = 0; }
-
-    mat4 skin = skinAt(frame0) * (1.0 - blend) + skinAt(frame1) * blend;
-
+    mat4 skin = skinAtPhase(instancePhase);
     vec4 posed = skin * vec4(inPosition, 1.0);
     vec3 posedNormal = mat3(skin) * inNormal;
 
@@ -251,7 +284,14 @@ void main() {
     fragTexCoord = inTexCoord;
     InstanceColor = instanceColor;
     FragPosLightSpace = lightSpaceMatrix * vec4(FragPos, 1.0);
-    gl_Position = viewProjection * modelMatrix * posed;
+    ClipNow = viewProjection * modelMatrix * posed;
+    // Last frame: the same vertex a step back in the walk, the figure a
+    // step back along its way.
+    vec4 posedPrev = skinAtPhase(instancePhase - crowdPhaseStep) * vec4(inPosition, 1.0);
+    vec4 worldPrev = modelMatrix * posedPrev;
+    worldPrev.xyz -= walking * crowdTravel;
+    ClipPrev = prevViewProjection * worldPrev;
+    gl_Position = ClipNow;
 }
 GLSL_END
 
@@ -311,6 +351,11 @@ in vec3 Normal;
 in vec3 FragPos;
 in vec3 InstanceColor; // Per-instance color from vertex shader
 in vec4 FragPosLightSpace;
+in vec4 ClipNow;
+in vec4 ClipPrev;
+layout(location = 1) out vec2 outVelocity;
+uniform vec2 jitter;
+uniform vec2 screenSize;
 // How much of the sky this point can see, baked against the whole scene.
 // Ambient is light arriving from everywhere, so it is the term this belongs
 // to: without it a corner is as bright as an open wall and every surface reads
@@ -1128,6 +1173,19 @@ vec3 direct_light(Light L, vec3 norm, vec3 viewDir, vec3 albedo, vec3 F0,
     return lit + fillLight * tempAdjustedLightColor * albedo * 0.2;
 }
 
+
+// Where this pixel's surface was last frame, for the temporal passes: the
+// clip positions the vertex stage carried, this frame's unnudged (the
+// frame is drawn through the jittered projection; the jitter is taken back
+// out) less the last frame's, in texture space. A pixel nothing drew keeps
+// the target's clear, zero. See docs/rendering.md, "Motion vectors".
+vec2 velocity(vec4 now, vec4 prev, vec2 nudge) {
+    if (now.w <= 0.0 || prev.w <= 0.0) return vec2(0.0);
+    vec2 uvNow = now.xy / now.w * 0.5 + 0.5 - nudge;
+    vec2 uvPrev = prev.xy / prev.w * 0.5 + 0.5;
+    return uvNow - uvPrev;
+}
+
 void main() {
 
     vec4 texColor = texture(textureSampler, fragTexCoord);
@@ -1168,12 +1226,21 @@ void main() {
     } else if (hasNormalMap) {
         norm = mapped_normal(norm, FragPos, fragTexCoord);
     }
+    // Before the capture channels return: a channel's frame carries the
+    // motion too.
+    outVelocity = velocity(ClipNow, ClipPrev, jitter);
     if (captureChannel == 1) {
         FragColor = vec4(diffuseColor * texColor.rgb * InstanceColor, texColor.a);
         return;
     }
     if (captureChannel == 2) {
         FragColor = vec4(norm * 0.5 + 0.5, 1.0);
+        return;
+    }
+    // The capture channel for the motion: the vector in pixels, a hundred
+    // pixels either way across the byte, so a test can read a known move.
+    if (captureChannel == 3) {
+        FragColor = vec4(outVelocity * screenSize / 200.0 + 0.5, 0.0, 1.0);
         return;
     }
     vec3 viewDir = normalize(viewPos - FragPos);
@@ -1341,9 +1408,12 @@ layout (location = 2) in vec3 aNormal;
 out vec2 fragTexCoord;
 out vec3 fragNormal;
 out vec3 fragPosition;
+out vec4 ClipNow;
+out vec4 ClipPrev;
 
 uniform mat4 model;
 uniform mat4 viewProjection;
+uniform mat4 prevViewProjection;
 uniform float time;
 uniform float waveSpeedMultiplier;
 uniform float waveHeightMultiplier; // Control wave amplitude (default 1.0)
@@ -1490,13 +1560,21 @@ void main() {
     fragPosition = worldPos;
     fragTexCoord = aTexCoord;
     fragNormal = totalNormal;
-    
-    gl_Position = viewProjection * vec4(worldPos, 1.0);
+
+    // The surface as a surface: its waves are not motion the eye follows,
+    // so its vector is the camera's.
+    ClipNow = viewProjection * vec4(worldPos, 1.0);
+    ClipPrev = prevViewProjection * vec4(worldPos, 1.0);
+    gl_Position = ClipNow;
 }
 GLSL_END
 
 const FRAGMENT_WATER = <<GLSL_END
 #version 330 core
+in vec4 ClipNow;
+in vec4 ClipPrev;
+layout(location = 1) out vec2 outVelocity;
+uniform vec2 jitter;
 
 in vec2 fragTexCoord;
 in vec3 fragNormal;
@@ -1884,6 +1962,19 @@ vec3 reflectedSky(vec3 ray) {
     return mix(rim, zenith, smoothstep(0.0, 0.35, ray.y));
 }
 
+
+// Where this pixel's surface was last frame, for the temporal passes: the
+// clip positions the vertex stage carried, this frame's unnudged (the
+// frame is drawn through the jittered projection; the jitter is taken back
+// out) less the last frame's, in texture space. A pixel nothing drew keeps
+// the target's clear, zero. See docs/rendering.md, "Motion vectors".
+vec2 velocity(vec4 now, vec4 prev, vec2 nudge) {
+    if (now.w <= 0.0 || prev.w <= 0.0) return vec2(0.0);
+    vec2 uvNow = now.xy / now.w * 0.5 + 0.5 - nudge;
+    vec2 uvPrev = prev.xy / prev.w * 0.5 + 0.5;
+    return uvNow - uvPrev;
+}
+
 void main() {
     // Light direction points at the light for a sun, else at the point light.
     vec3 lightDir;
@@ -2069,6 +2160,7 @@ void main() {
     alpha = clamp(alpha, 0.001, 0.98); // Allow almost complete transparency
     
     FragColor = vec4(finalColor, alpha);
+    outVelocity = velocity(ClipNow, ClipPrev, jitter);
 }
 GLSL_END
 
@@ -2153,13 +2245,20 @@ const VERTEX_SKYBOX = <<GLSL_END
 layout (location = 0) in vec3 aPos;
 
 out vec3 TexCoords;
+out vec4 ClipNow;
+out vec4 ClipPrev;
 
 uniform mat4 projection;
 uniform mat4 view;
+// Last frame's view-projection, for the sky's motion vector: a direction,
+// so the camera's translation drops out and only its turn moves the sky.
+uniform mat4 prevViewProjection;
 
 void main() {
     TexCoords = aPos;
     vec4 pos = projection * view * vec4(aPos, 1.0);
+    ClipNow = pos;
+    ClipPrev = prevViewProjection * vec4(aPos, 0.0);
     gl_Position = pos.xyww; // Ensure skybox is always at max depth
 }
 GLSL_END
@@ -2167,8 +2266,11 @@ GLSL_END
 const FRAGMENT_SKYBOX = <<GLSL_END
 #version 330 core
 out vec4 FragColor;
+layout(location = 1) out vec2 outVelocity;
 
 in vec3 TexCoords;
+in vec4 ClipNow;
+in vec4 ClipPrev;
 
 uniform sampler2D skybox;
 // The clouds over the painted sky: how much of it they cover (zero is a
@@ -2476,6 +2578,19 @@ vec3 proceduralSky(vec3 dir, vec3 sun, vec3 sunColor) {
     return sky;
 }
 
+
+// Where this pixel's surface was last frame, for the temporal passes: the
+// clip positions the vertex stage carried, this frame's unnudged (the
+// frame is drawn through the jittered projection; the jitter is taken back
+// out) less the last frame's, in texture space. A pixel nothing drew keeps
+// the target's clear, zero. See docs/rendering.md, "Motion vectors".
+vec2 velocity(vec4 now, vec4 prev, vec2 nudge) {
+    if (now.w <= 0.0 || prev.w <= 0.0) return vec2(0.0);
+    vec2 uvNow = now.xy / now.w * 0.5 + 0.5 - nudge;
+    vec2 uvPrev = prev.xy / prev.w * 0.5 + 0.5;
+    return uvNow - uvPrev;
+}
+
 void main() {
     vec3 dir = normalize(TexCoords);
 
@@ -2499,6 +2614,7 @@ void main() {
     vec4 clouds = cloudsAlong(dir, sky, cloudCover, cloudTime, cloudDither(gl_FragCoord.xy));
     sky = sky * (1.0 - clouds.a) + clouds.rgb;
     FragColor = vec4(sky, 1.0);
+    outVelocity = velocity(ClipNow, ClipPrev, vec2(0.0));
 }
 GLSL_END
 
@@ -2736,17 +2852,9 @@ out vec4 FragColor;
 uniform sampler2D screenTexture;    // this frame, drawn with the jitter
 uniform sampler2D depthTexture;     // this frame's depth
 uniform sampler2D historyTexture;   // the frames before, folded
-uniform mat4 invViewProjection;     // this frame's, jitter and all
-uniform mat4 prevViewProjection;    // the last frame's, unjittered
+uniform sampler2D velocityTexture;  // where each pixel's surface was: this frame less last
 uniform vec2 screenSize;
-uniform vec2 jitter;                // this frame's nudge, in texture space
 uniform float taaBlend;             // the share of this frame: 1 is no history
-
-// A stored scene depth as clip-space z: OpenGL keeps depth in 0..1 for a
-// clip range of -1..1, Vulkan's clip range is the 0..1 it stores.
-float taa_depth_clip(float depth) {
-    return depth * 2.0 - 1.0;
-}
 
 void main() {
     vec2 uv = TexCoords;
@@ -2754,19 +2862,15 @@ void main() {
     vec3 current = texture(screenTexture, uv).rgb;
     if (taaBlend >= 0.999) { FragColor = vec4(current, 1.0); return; }
 
-    // Where this pixel's surface was on the screen last frame. The frame
-    // was drawn through the nudged projection, so the pixel's clip position
-    // is moved by the nudge before the inverse of that projection takes it
-    // back: the position is then the unnudged one, and a camera that has
-    // not moved finds its history at the pixel's own centre -- read there
-    // without the filter's blur, which on a software renderer lost a tenth
-    // of the light to the clamp.
-    float depth = texture(depthTexture, uv).r;
-    vec4 clip = vec4((uv + jitter) * 2.0 - 1.0, taa_depth_clip(depth), 1.0);
-    vec4 world = invViewProjection * clip;
-    vec4 prev = prevViewProjection * (world / world.w);
-    if (prev.w <= 0.0) { FragColor = vec4(current, 1.0); return; }
-    vec2 prevUV = prev.xy / prev.w * 0.5 + 0.5;
+    // Where this pixel's surface was on the screen last frame: the scene
+    // pass wrote its motion vector, the surface's own motion and the
+    // camera's, with the frame's nudge already taken out -- so a surface
+    // that has not moved under a camera that has not moved finds its
+    // history at the pixel's own centre, read there without the filter's
+    // blur, and the nudge is what the history folds up into the
+    // antialiasing. A pixel nothing drew has a vector of zero.
+    vec2 motion = texture(velocityTexture, uv).xy;
+    vec2 prevUV = uv - motion;
     if (prevUV.x < 0.0 || prevUV.x > 1.0 || prevUV.y < 0.0 || prevUV.y > 1.0) {
         FragColor = vec4(current, 1.0);
         return;

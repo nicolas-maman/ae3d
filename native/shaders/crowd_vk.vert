@@ -23,8 +23,12 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 model;
     mat4 viewProjection;
     mat4 lightSpaceMatrix;
+    mat4 prevModel;
+    mat4 prevViewProjection;
     bool isSkinned;
     mat4 bones[96];
+    vec2 jitter;
+    vec2 screenSize;
     int lightCount;
     bool impostor;
     int captureChannel;
@@ -100,12 +104,9 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 invViewProjection;
     float ssrRoadHeight;
     float ssrStrength;
-    vec2 screenSize;
     float ssaoRadius;
     float ssaoIntensity;
     int depthSampleCount;
-    mat4 prevViewProjection;
-    vec2 jitter;
     float taaBlend;
     float time;
     float waveSpeedMultiplier;
@@ -144,6 +145,8 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     int impostorRows;
     float impostorWidth;
     float impostorHeight;
+    float crowdTravel;
+    float crowdPhaseStep;
 };
 layout(set = 0, binding = 1) uniform sampler2D textureSampler;
 layout(set = 0, binding = 2) uniform sampler2D shadowMap;
@@ -182,6 +185,13 @@ layout(location = 11) in float instancePhase; // where in the walk this one is, 
 
 
 
+// Last frame, for the motion vectors. A figure's previous slot in the
+// stream is not its own -- the sort reorders every frame -- so where it
+// was is worked out: it walked crowdTravel metres along its facing since
+// last frame, and its walk was crowdPhaseStep earlier in the cycle.
+
+
+
 
 layout(location = 0) out vec2 fragTexCoord;
 layout(location = 1) out vec3 Normal;
@@ -189,6 +199,8 @@ layout(location = 2) out vec3 FragPos;
 layout(location = 3) out vec3 InstanceColor;
 layout(location = 4) out vec4 FragPosLightSpace;
 layout(location = 5) out float Occlusion;
+layout(location = 6) out vec4 ClipNow;
+layout(location = 7) out vec4 ClipPrev;
 
 // The bone's matrix at a frame, read as its four columns from the bank.
 mat4 boneAt(int bone, int frame) {
@@ -207,9 +219,26 @@ mat4 skinAt(int frame) {
          + inWeights.w * boneAt(int(inJoints.w), frame);
 }
 
+// The vertex's skinning matrix at a phase of the walk. The phase lands
+// between two baked poses; blend them, so the walk is continuous instead
+// of snapping frame to frame. The clip loops, so the frame after the last
+// is the first.
+mat4 skinAtPhase(float phase) {
+    float fpos = fract(phase) * float(poseBankFrames);
+    int frame0 = int(floor(fpos));
+    float blend = fpos - float(frame0);
+    if (frame0 < 0) { frame0 = 0; blend = 0.0; }
+    if (frame0 >= poseBankFrames) { frame0 = poseBankFrames - 1; blend = 0.0; }
+    int frame1 = frame0 + 1;
+    if (frame1 >= poseBankFrames) { frame1 = 0; }
+    return skinAt(frame0) * (1.0 - blend) + skinAt(frame1) * blend;
+}
+
 void main() {
     Occlusion = inOcclusion;
     mat4 modelMatrix = model * instanceModel;
+    // The way the figure faces, which is the way it walks.
+    vec3 walking = normalize(vec3(modelMatrix[0].x, 0.0, modelMatrix[0].z));
 
     if (impostor) {
         // Where the figure stands and which way it faces: the instance
@@ -241,23 +270,13 @@ void main() {
                             1.0 - (float(row) + (1.0 - inTexCoord.y)) / float(impostorRows));
         InstanceColor = instanceColor;
         FragPosLightSpace = lightSpaceMatrix * vec4(world, 1.0);
-        gl_Position = viewProjection * vec4(world, 1.0);
+        ClipNow = viewProjection * vec4(world, 1.0);
+        ClipPrev = prevViewProjection * vec4(world - walking * crowdTravel, 1.0);
+        gl_Position = ClipNow;
         return;
     }
 
-    // The phase lands between two baked poses; blend them, so the walk is
-    // continuous instead of snapping frame to frame. The clip loops, so the
-    // frame after the last is the first.
-    float fpos = instancePhase * float(poseBankFrames);
-    int frame0 = int(floor(fpos));
-    float blend = fpos - float(frame0);
-    if (frame0 < 0) { frame0 = 0; blend = 0.0; }
-    if (frame0 >= poseBankFrames) { frame0 = poseBankFrames - 1; blend = 0.0; }
-    int frame1 = frame0 + 1;
-    if (frame1 >= poseBankFrames) { frame1 = 0; }
-
-    mat4 skin = skinAt(frame0) * (1.0 - blend) + skinAt(frame1) * blend;
-
+    mat4 skin = skinAtPhase(instancePhase);
     vec4 posed = skin * vec4(inPosition, 1.0);
     vec3 posedNormal = mat3(skin) * inNormal;
 
@@ -266,5 +285,12 @@ void main() {
     fragTexCoord = inTexCoord;
     InstanceColor = instanceColor;
     FragPosLightSpace = lightSpaceMatrix * vec4(FragPos, 1.0);
-    gl_Position = viewProjection * modelMatrix * posed;
+    ClipNow = viewProjection * modelMatrix * posed;
+    // Last frame: the same vertex a step back in the walk, the figure a
+    // step back along its way.
+    vec4 posedPrev = skinAtPhase(instancePhase - crowdPhaseStep) * vec4(inPosition, 1.0);
+    vec4 worldPrev = modelMatrix * posedPrev;
+    worldPrev.xyz -= walking * crowdTravel;
+    ClipPrev = prevViewProjection * worldPrev;
+    gl_Position = ClipNow;
 }

@@ -86,6 +86,9 @@ extern ae3d_vk_scene_depth_ready() -> int
 extern ae3d_vk_frame_width() -> int
 extern ae3d_vk_frame_height() -> int
 extern ae3d_posebank_frames(bank: ptr) -> int
+extern ae3d_posebank_travel(bank: ptr, frame: int) -> float
+extern ae3d_vk_velocity_texture() -> int
+extern ae3d_vk_set_capture_bypass(on: int)
 extern ae3d_posebank_bones(bank: ptr) -> int
 extern ae3d_posebank_data(bank: ptr) -> ptr
 extern ae3d_vk_shadow_end()
@@ -165,6 +168,9 @@ struct VKRenderer {
     lights: ptr
     // Counts the frames, so a crowd two models draw tiers of is sorted once a frame.
     sort_serial: int
+    // The last frame's time, for the seconds between frames a crowd's
+    // motion vectors are worked out over.
+    last_scene_time: float
     // How hard normal maps push, for the whole scene. A look, not a surface.
     normal_strength: float
     occlusion_strength: float
@@ -525,9 +531,17 @@ halton(index: int, base: int) -> float {
 // of a pixel when the temporal pass is on, so that over eight frames every
 // pixel sees its surface at eight points within itself. The nudge is a
 // translation in clip space, applied after the projection.
+// The seconds between this frame and the last, for the motion vectors of
+// a crowd: kept here for pose(), which has the model and not the renderer.
+var g_frame_seconds = 0.0
+
 frame_view_projection(r: *VKRenderer, cam: *Camera) -> Mat4 {
     vp = core.camera_view_projection(cam)
-    if ae3d_vk_taa() != 1 { return vp }
+    if ae3d_vk_taa() != 1 {
+        r.jitter_x = 0.0
+        r.jitter_y = 0.0
+        return vp
+    }
     width = ae3d_vk_frame_width() as float
     height = ae3d_vk_frame_height() as float
     if width <= 0.0 || height <= 0.0 { return vp }
@@ -1091,7 +1105,12 @@ renderer_set_normal_strength(r: *VKRenderer, strength: float) {
 // 2 its normals -- what a bake reads back, and a view for finding out why
 // a surface lights the way it does.
 renderer_set_capture_channel(r: *VKRenderer, channel: int) {
-    if r != null { r.capture_channel = channel }
+    if r == null { return }
+    r.capture_channel = channel
+    // The channel is the surfaces' own numbers: no effect runs over them.
+    bypass = 0
+    if channel != 0 { bypass = 1 }
+    ae3d_vk_set_capture_bypass(bypass)
 }
 
 // How wet the scene is, 0..1: rain on every surface that faces up.
@@ -1308,18 +1327,19 @@ set_scene_uniforms(r: *VKRenderer, m: *Model) {
     // model scaled 2.4 drew its instances at 5.76.
     points = 0
     if instanced == 1 && core.model_instance_points(m) { points = 1 }
+    sent = m.model_matrix
     if points == 1 {
         // Points carry a position and a scale only: the model's rotation
         // and scale go in the model matrix with its translation taken out,
         // and each point puts its own back.
-        placed = point_frame(m)
-        ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &placed)
+        sent = point_frame(m)
     } else if instanced == 1 {
-        identity = core.mat4_ident()
-        ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &identity)
-    } else {
-        ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &m.model_matrix)
+        sent = core.mat4_ident()
     }
+    ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &sent)
+    // And last frame's, for the motion vectors.
+    previous = core.model_prev_matrix(m, sent)
+    ae3d_vk_scene_set_mat4(vkscene.OFF_PREVMODEL, &previous)
 
     ae3d_vk_scene_set_int(vkscene.OFF_ISINSTANCED, instanced)
     ae3d_vk_scene_set_int(vkscene.OFF_INSTANCEPOINTS, points)
@@ -1352,6 +1372,17 @@ pose(m: *Model) {
         ae3d_vk_scene_set_int(vkscene.OFF_POSEBANKFRAMES, m.pose_bank_frames)
         ae3d_vk_scene_set_int(vkscene.OFF_ISSKINNED, 1)
         set_impostor_uniforms(m)
+        // For the motion vectors: how far a figure's walk and its position
+        // moved this frame, from the model's walk cycle and the bank's
+        // travel over it.
+        travel = 0.0
+        step = 0.0
+        if m.crowd_walk > 0.0 {
+            step = g_frame_seconds / m.crowd_walk
+            travel = ae3d_posebank_travel(m.pose_bank, m.pose_bank_frames) * step
+        }
+        ae3d_vk_scene_set_float(vkscene.OFF_CROWDTRAVEL, travel)
+        ae3d_vk_scene_set_float(vkscene.OFF_CROWDPHASESTEP, step)
         return
     }
     // A water surface takes the camera depth at the same binding, to read
@@ -1540,13 +1571,18 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     culling = 0
     if core.face_culling() { culling = 1 }
     ae3d_vk_set_face_culling(culling)
-    draw_skybox(r, cam)
-    ae3d_vk_mark_sky_done()
+
+    // The seconds since the last frame, for the crowd's motion vectors;
+    // a pause or a first frame counts as a short one.
+    g_frame_seconds = r.scene_time - r.last_scene_time
+    if g_frame_seconds < 0.0 || g_frame_seconds > 0.25 { g_frame_seconds = 0.0 }
+    r.last_scene_time = r.scene_time
 
     unjittered = core.camera_view_projection(cam)
     view_projection = frame_view_projection(r, cam)
-    // The last frame's view-projection, for the temporal pass to find each
-    // pixel's history by; this frame's, when there was no last frame.
+    // The last frame's view-projection, for the motion vectors and the
+    // temporal pass to find each pixel's history by; this frame's, when
+    // there was no last frame.
     previous = unjittered
     if r.prev_vp_valid { previous = r.prev_vp }
     programs = ae3d_vk_program_count()
@@ -1561,14 +1597,13 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
         if ssr_on || depth_ready {
             ae3d_vk_scene_set_inv_viewproj(vkscene.OFF_INVVIEWPROJECTION, &view_projection)
         }
-        if taa_on {
-            // Into every program's block, as the view-projection is: the
-            // temporal pass reads the scene program's, whichever was
-            // current when the frame's nudge was worked out.
-            ae3d_vk_scene_set_clip_mat4(vkscene.OFF_PREVVIEWPROJECTION, &previous)
-            ae3d_vk_scene_set_float(vkscene.OFF_JITTER, r.jitter_x)
-            ae3d_vk_scene_set_float(vkscene.OFF_JITTER + 4, r.jitter_y)
-        }
+        // Into every program's block, as the view-projection is: every
+        // scene shader writes its motion vector from last frame's view and
+        // this frame's nudge, and the temporal pass reads the scene
+        // program's.
+        ae3d_vk_scene_set_clip_mat4(vkscene.OFF_PREVVIEWPROJECTION, &previous)
+        ae3d_vk_scene_set_float(vkscene.OFF_JITTER, r.jitter_x)
+        ae3d_vk_scene_set_float(vkscene.OFF_JITTER + 4, r.jitter_y)
         // What a water surface needs to read the depth under it back into
         // a position: whether there is one, and the frame's size in pixels.
         has_depth = 0
@@ -1578,7 +1613,13 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
         ae3d_vk_scene_set_float(vkscene.OFF_SCREENSIZE + 4, ae3d_vk_frame_height() as float)
         i = i + 1
     }
+    // The sky, first into the pass, after the blocks carry the frame's
+    // matrices: its motion vector is the camera's turn since last frame.
+    // Its own matrices go into the scene program's block, which it draws
+    // from, so that program is current before they are set.
     ae3d_vk_set_program(core.SHADER_CUSTOM)
+    draw_skybox(r, cam)
+    ae3d_vk_mark_sky_done()
 
     draw_opaque(r)
     ae3d_vk_mark_opaque_done()
@@ -1608,6 +1649,13 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     if ae3d_vk_frame_end() != 1 { report_failed_frame(r) }
     r.prev_vp = unjittered
     r.prev_vp_valid = true
+    // Every model's matrix of this frame is last frame's now.
+    i = 0
+    while i < list.size(r.models) {
+        m = list.get_raw(r.models, i) as *Model
+        if m != null { core.model_frame_done(m) }
+        i = i + 1
+    }
     r.taa_frame = r.taa_frame + 1
     r.last_cpu_work_ms = (platform.time() - work_started) * 1000.0
     // The stamps read back at the start of this frame describe the frame that
@@ -1741,6 +1789,10 @@ draw_batch(r: *VKRenderer, b: *VKBatch) {
     ae3d_vk_set_program(core.SHADER_CUSTOM)
     identity = core.mat4_ident()
     ae3d_vk_scene_set_mat4(vkscene.OFF_MODEL, &identity)
+    // A merged batch's members stand still: last frame's matrix is this
+    // frame's, or the block would carry whichever model set it last and
+    // the whole street would read as moving.
+    ae3d_vk_scene_set_mat4(vkscene.OFF_PREVMODEL, &identity)
     ae3d_vk_scene_set_int(vkscene.OFF_ISINSTANCED, 1)
     ae3d_vk_scene_set_int(vkscene.OFF_INSTANCEPOINTS, 0)
     // The merged stream carries no per-instance colour, and its members already

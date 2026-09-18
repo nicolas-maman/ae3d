@@ -367,10 +367,12 @@ ATTRIBUTE_RENAMES = [
 
 SCENE_OUT = [("vec2", "fragTexCoord"), ("vec3", "Normal"),
              ("vec3", "FragPos"), ("vec3", "InstanceColor"),
-             ("vec4", "FragPosLightSpace"), ("float", "Occlusion")]
-SKY_OUT = [("vec3", "TexCoords")]
+             ("vec4", "FragPosLightSpace"), ("float", "Occlusion"),
+             ("vec4", "ClipNow"), ("vec4", "ClipPrev")]
+SKY_OUT = [("vec3", "TexCoords"), ("vec4", "ClipNow"), ("vec4", "ClipPrev")]
 SCREEN_OUT = [("vec2", "TexCoords")]
-WATER_OUT = [("vec2", "fragTexCoord"), ("vec3", "fragNormal"), ("vec3", "fragPosition")]
+WATER_OUT = [("vec2", "fragTexCoord"), ("vec3", "fragNormal"), ("vec3", "fragPosition"),
+             ("vec4", "ClipNow"), ("vec4", "ClipPrev")]
 
 AUXILIARY = [
     ("depth_vk.vert", "VERTEX_DEPTH", "vert", [], [], []),
@@ -391,7 +393,7 @@ AUXILIARY = [
     ("depth_copy_vk.frag", "FRAGMENT_DEPTH_COPY", "frag", ["depthSamples"], SCREEN_OUT, []),
     # The temporal pass reads the frame at 1, the depth at 2 and its own
     # history at 3, the slot a screen draw otherwise fills with the default.
-    ("taa_vk.frag", "FRAGMENT_TAA", "frag", ["screenTexture", "depthTexture", "historyTexture"], SCREEN_OUT, []),
+    ("taa_vk.frag", "FRAGMENT_TAA", "frag", ["screenTexture", "depthTexture", "historyTexture", "velocityTexture"], SCREEN_OUT, []),
     ("water_vk.vert", "VERTEX_WATER", "vert", [], [], WATER_OUT),
     # The water reads the scene depth at binding 4, the slot the crowd's pose
     # bank takes: whichever auxiliary image a draw needs sits there.

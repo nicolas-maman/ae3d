@@ -23,8 +23,12 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 model;
     mat4 viewProjection;
     mat4 lightSpaceMatrix;
+    mat4 prevModel;
+    mat4 prevViewProjection;
     bool isSkinned;
     mat4 bones[96];
+    vec2 jitter;
+    vec2 screenSize;
     int lightCount;
     bool impostor;
     int captureChannel;
@@ -100,12 +104,9 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 invViewProjection;
     float ssrRoadHeight;
     float ssrStrength;
-    vec2 screenSize;
     float ssaoRadius;
     float ssaoIntensity;
     int depthSampleCount;
-    mat4 prevViewProjection;
-    vec2 jitter;
     float taaBlend;
     float time;
     float waveSpeedMultiplier;
@@ -144,11 +145,17 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     int impostorRows;
     float impostorWidth;
     float impostorHeight;
+    float crowdTravel;
+    float crowdPhaseStep;
 };
 layout(set = 0, binding = 1) uniform sampler2D textureSampler;
 layout(set = 0, binding = 2) uniform sampler2D shadowMap;
 layout(set = 0, binding = 3) uniform sampler2D normalMap;
 layout(set = 0, binding = 4) uniform sampler2D sceneDepth;
+layout(location = 3) in vec4 ClipNow;
+layout(location = 4) in vec4 ClipPrev;
+layout(location = 1) out vec2 outVelocity;
+
 
 layout(location = 0) in vec2 fragTexCoord;
 layout(location = 1) in vec3 fragNormal;
@@ -536,6 +543,19 @@ vec3 reflectedSky(vec3 ray) {
     return mix(rim, zenith, smoothstep(0.0, 0.35, ray.y));
 }
 
+
+// Where this pixel's surface was last frame, for the temporal passes: the
+// clip positions the vertex stage carried, this frame's unnudged (the
+// frame is drawn through the jittered projection; the jitter is taken back
+// out) less the last frame's, in texture space. A pixel nothing drew keeps
+// the target's clear, zero. See docs/rendering.md, "Motion vectors".
+vec2 velocity(vec4 now, vec4 prev, vec2 nudge) {
+    if (now.w <= 0.0 || prev.w <= 0.0) return vec2(0.0);
+    vec2 uvNow = now.xy / now.w * 0.5 + 0.5 - nudge;
+    vec2 uvPrev = prev.xy / prev.w * 0.5 + 0.5;
+    return uvNow - uvPrev;
+}
+
 void main() {
     // Light direction points at the light for a sun, else at the point light.
     vec3 lightDir;
@@ -721,4 +741,5 @@ void main() {
     alpha = clamp(alpha, 0.001, 0.98); // Allow almost complete transparency
     
     FragColor = vec4(finalColor, alpha);
+    outVelocity = velocity(ClipNow, ClipPrev, jitter);
 }

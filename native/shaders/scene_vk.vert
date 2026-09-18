@@ -23,8 +23,12 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 model;
     mat4 viewProjection;
     mat4 lightSpaceMatrix;
+    mat4 prevModel;
+    mat4 prevViewProjection;
     bool isSkinned;
     mat4 bones[96];
+    vec2 jitter;
+    vec2 screenSize;
     int lightCount;
     bool impostor;
     int captureChannel;
@@ -100,12 +104,9 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 invViewProjection;
     float ssrRoadHeight;
     float ssrStrength;
-    vec2 screenSize;
     float ssaoRadius;
     float ssaoIntensity;
     int depthSampleCount;
-    mat4 prevViewProjection;
-    vec2 jitter;
     float taaBlend;
     float time;
     float waveSpeedMultiplier;
@@ -144,6 +145,8 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     int impostorRows;
     float impostorWidth;
     float impostorHeight;
+    float crowdTravel;
+    float crowdPhaseStep;
 };
 
 layout(location = 0) in vec3 inPosition; // Vertex position
@@ -170,6 +173,12 @@ layout(location = 10) in float inOcclusion; // How much of the sky it can see
 
 
 
+// Last frame's, for the motion vectors: the model's matrix as it was and
+// the view-projection without its jitter. A skinned draw's previous pose
+// is not carried (a second palette is the uniform budget over); its
+// motion is its model's and the camera's.
+
+
 
 // A skinned draw is posed by the palette rather than by the model matrix
 // alone: each bone carries where it is now against where it was bound, and a
@@ -185,6 +194,8 @@ layout(location = 2) out vec3 FragPos;
 layout(location = 3) out vec3 InstanceColor;
 layout(location = 4) out vec4 FragPosLightSpace;
 layout(location = 5) out float Occlusion;
+layout(location = 6) out vec4 ClipNow;
+layout(location = 7) out vec4 ClipPrev;
 
 void main() {
     Occlusion = inOcclusion;
@@ -230,6 +241,13 @@ void main() {
         posedNormal = mat3(skin) * inNormal;
     }
 
+    // Where the vertex was last frame: the model where it stood, the
+    // instance where it is (a stream carries no history; an instance that
+    // moves on its own gets the camera's motion and its model's), a point
+    // or a billboard likewise.
+    mat4 prevModelMatrix = isInstanced ? (prevModel * instanceModel) : prevModel;
+    if (isInstanced && instancePoints) prevModelMatrix = modelMatrix;
+
     // High-precision world position calculation
     FragPos = vec3(modelMatrix * posed);
     
@@ -246,6 +264,8 @@ void main() {
 
     // Final vertex position
     FragPosLightSpace = lightSpaceMatrix * vec4(FragPos, 1.0);
-    gl_Position = viewProjection * modelMatrix * posed;
+    ClipNow = viewProjection * modelMatrix * posed;
+    ClipPrev = prevViewProjection * prevModelMatrix * posed;
+    gl_Position = ClipNow;
 }
 

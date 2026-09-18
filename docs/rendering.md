@@ -118,7 +118,8 @@ figure into an atlas: the figure seen from eight angles around it by eight
 frames of its walk, posed exactly as the crowd poses it (its gait baked in
 place into a pose bank, one instance at the origin), through a lens narrow
 enough that the picture is near orthographic. Two atlases, read back
-through the engine's capture channel (`engine_set_capture_channel`): the
+through the engine's capture channel (`engine_set_capture_channel`; no
+effect -- post chain, reflections, occlusion -- runs over a channel): the
 figure's **albedo**, before any light, and its **normals** in its own
 frame. A crowd model whose mesh is one upright quad, given the atlases and
 `model_set_impostor(m, cols, rows, width, height)`, draws each instance as
@@ -156,20 +157,44 @@ the draws. `device_crowd_count` reads the counts of the last frame the
 device finished, for a diagnostic. OpenGL 4.1 has no compute and keeps the
 CPU sort (`crowd_tiers`); `device_crowd_new` returns null there.
 
+### Motion vectors
+
+Beside its colour, every scene draw writes where its pixel's surface was
+last frame: a second colour attachment of the scene pass (R16G16, texture
+space, this frame's unnudged position less last frame's; multisampled and
+resolved like the colour on Vulkan, a second draw buffer of the post
+framebuffers on OpenGL), cleared to zero, so a pixel nothing drew has not
+moved. The vertex stage carries the vertex's clip position now and then:
+a model from its own matrix of last frame (`model_frame_done` keeps it at
+every frame's end) and the last frame's view-projection, unjittered; a
+merged batch or an instance stream, which carries no history, from the
+camera's motion alone; a crowd figure -- whose slot in the stream is not
+its own from frame to frame, since the sort reorders -- from where its
+walk puts it: `model_set_crowd_walk(m, seconds)` names the cycle, and the
+figure's previous pose is its phase a frame earlier, its previous
+position a frame's travel back along its facing, from the pose bank's own
+travel; an impostor the same; the sky from the camera's turn. A skinned
+palette's previous pose is not carried (a second palette is the OpenGL
+uniform budget over); a skinned model's motion is its model's and the
+camera's. Capture channel 3 (`engine_set_capture_channel(e, 3)`,
+`AE3D_CAPTURE=3`) draws the vector in pixels, a hundred either way across
+the byte and 128 for still, and `tests/test_velocity` holds it against the
+camera's own projection to the pixel. On Vulkan `ae3d_vk_velocity_texture`
+is the resolved target, which is what an upscaler is handed (#324).
+
 ### Temporal anti-aliasing
 
 `engine_set_taa(e, on)`, or `AE3D_TAA=1`. The projection is nudged a
 fraction of a pixel each frame (a Halton sequence over eight frames), so
 over frames every pixel sees its surface at eight points within itself,
-and a temporal pass folds each frame into a history: each pixel's world
-position, from the scene's resolved depth, projected with the last frame's
-view-projection is where it was on the screen -- exact for the camera's
-motion and everything that stood still -- and the history read there is
-held to the range of colours the pixel's neighbourhood has this frame, so
-what moved on its own trails no ghost. An edge that was a staircase is a
-ramp, and the shading's own aliasing goes with it. On both backends; the
-pass runs between the reflection and the composite, and the two history
-textures are written in turn.
+and a temporal pass folds each frame into a history: each pixel's motion
+vector says where its surface was on the screen last frame -- the
+camera's motion, the model's, the figure's walk -- and the history read
+there is held to the range of colours the pixel's neighbourhood has this
+frame, so what the vector does not know of trails no ghost. An edge that
+was a staircase is a ramp, and the shading's own aliasing goes with it.
+On both backends; the pass runs between the reflection and the composite,
+and the two history textures are written in turn.
 
 ### Billboards
 

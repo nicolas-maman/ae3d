@@ -292,6 +292,16 @@ static struct {
     VkImage colour_image;
     VkDeviceMemory colour_memory;
     VkImageView colour_view;
+    /* The motion vectors, the scene pass's second colour attachment: the
+       multisampled image it draws into, and the resolved one (a texture, so
+       the temporal passes sample it) -- the only one when there is one
+       sample. R16G16, texture-space units. */
+    VkFormat velocity_format;
+    VkImage velocity_image;
+    VkDeviceMemory velocity_memory;
+    VkImageView velocity_view;
+    int velocity_texture;
+    int capture_bypass;                /* a capture channel: no effects this frame */
 
     VkRenderPass render_pass;
     VkRenderPass scene_pass;
@@ -1070,6 +1080,10 @@ static void ae3d_vk_destroy_swapchain(void) {
     if (vk.colour_view) { ae3d_vkDestroyImageView(vk.device, vk.colour_view, NULL); vk.colour_view = VK_NULL_HANDLE; }
     if (vk.colour_image) { ae3d_vkDestroyImage(vk.device, vk.colour_image, NULL); vk.colour_image = VK_NULL_HANDLE; }
     if (vk.colour_memory) { ae3d_vkFreeMemory(vk.device, vk.colour_memory, NULL); vk.colour_memory = VK_NULL_HANDLE; }
+    if (vk.velocity_view) { ae3d_vkDestroyImageView(vk.device, vk.velocity_view, NULL); vk.velocity_view = VK_NULL_HANDLE; }
+    if (vk.velocity_image) { ae3d_vkDestroyImage(vk.device, vk.velocity_image, NULL); vk.velocity_image = VK_NULL_HANDLE; }
+    if (vk.velocity_memory) { ae3d_vkFreeMemory(vk.device, vk.velocity_memory, NULL); vk.velocity_memory = VK_NULL_HANDLE; }
+    if (vk.velocity_texture) { ae3d_vk_texture_destroy(vk.velocity_texture); vk.velocity_texture = 0; }
     if (vk.depth_view) { ae3d_vkDestroyImageView(vk.device, vk.depth_view, NULL); vk.depth_view = VK_NULL_HANDLE; }
     if (vk.depth_image) { ae3d_vkDestroyImage(vk.device, vk.depth_image, NULL); vk.depth_image = VK_NULL_HANDLE; }
     if (vk.depth_memory) { ae3d_vkFreeMemory(vk.device, vk.depth_memory, NULL); vk.depth_memory = VK_NULL_HANDLE; }
@@ -1128,6 +1142,60 @@ static int ae3d_vk_choose_surface_format(void) {
     return 1;
 }
 
+/* The motion-vector target beside the depth: the multisampled image the
+   scene draws into when the frame is multisampled, and the resolved one as
+   a texture, point sampled -- a vector is not blended between pixels. */
+static int ae3d_vk_create_velocity(void) {
+    ae3d_vk_texture *texture = NULL;
+    VkSamplerCreateInfo sampler;
+    int slot;
+
+    vk.velocity_format = VK_FORMAT_R16G16_SFLOAT;
+    if (vk.samples != VK_SAMPLE_COUNT_1_BIT) {
+        if (!ae3d_vk_create_image((int)vk.extent.width, (int)vk.extent.height, 1, vk.velocity_format,
+                                  vk.samples, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                  VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
+                                  VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_TILING_OPTIMAL,
+                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                  &vk.velocity_image, &vk.velocity_memory, &vk.velocity_view)) {
+            return 0;
+        }
+    }
+    for (slot = 0; slot < AE3D_VK_MAX_TEXTURES; slot++) {
+        if (!vk.textures[slot].in_use) { texture = &vk.textures[slot]; break; }
+    }
+    if (!texture) return ae3d_vk_fail("texture table full");
+    if (!ae3d_vk_create_image((int)vk.extent.width, (int)vk.extent.height, 1, vk.velocity_format,
+                              VK_SAMPLE_COUNT_1_BIT,
+                              VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                              VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_TILING_OPTIMAL,
+                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                              &texture->image, &texture->memory, &texture->view)) {
+        return 0;
+    }
+    memset(&sampler, 0, sizeof(sampler));
+    sampler.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sampler.magFilter = VK_FILTER_NEAREST;
+    sampler.minFilter = VK_FILTER_NEAREST;
+    sampler.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sampler.maxLod = 1.0f;
+    if (ae3d_vkCreateSampler(vk.device, &sampler, NULL, &texture->sampler) != VK_SUCCESS) {
+        return ae3d_vk_fail("velocity vkCreateSampler failed");
+    }
+    texture->width = (int)vk.extent.width;
+    texture->height = (int)vk.extent.height;
+    texture->in_use = 1;
+    vk.velocity_texture = slot + 1;
+    return 1;
+}
+
+/* The resolved motion vectors of the last frame drawn, as a texture handle;
+   0 before the first frame. What the temporal passes and an upscaler read. */
+int ae3d_vk_velocity_texture(void) { return vk.velocity_texture; }
+
 static int ae3d_vk_create_depth(void) {
     VkImageCreateInfo image;
     VkMemoryRequirements requirements;
@@ -1177,7 +1245,7 @@ static int ae3d_vk_create_depth(void) {
     view.subresourceRange.layerCount = 1;
     result = ae3d_vkCreateImageView(vk.device, &view, NULL, &vk.depth_view);
     if (result != VK_SUCCESS) return ae3d_vk_fail_code("depth vkCreateImageView failed", result);
-    return 1;
+    return ae3d_vk_create_velocity();
 }
 
 // The offscreen equivalent of a swapchain: one image the pass resolves into,
@@ -1335,13 +1403,13 @@ static int ae3d_vk_create_swapchain(int width, int height) {
    colour and depth and ends with the depth readable by a shader; 2 the rest,
    which loads both and finishes the frame. */
 static int ae3d_vk_build_render_pass(VkImageLayout present_layout, int part, VkRenderPass *out) {
-    VkAttachmentDescription attachments[3];
-    VkAttachmentReference colour_ref, depth_ref, resolve_ref;
+    VkAttachmentDescription attachments[5];
+    VkAttachmentReference colour_refs[2], depth_ref, resolve_refs[2];
     VkSubpassDescription subpass;
     VkSubpassDependency dependencies[2];
     VkRenderPassCreateInfo info;
     int multisampled = vk.samples != VK_SAMPLE_COUNT_1_BIT;
-    unsigned count = multisampled ? 3u : 2u;
+    unsigned count = multisampled ? 5u : 3u;
 
     memset(attachments, 0, sizeof(attachments));
 
@@ -1367,52 +1435,87 @@ static int ae3d_vk_build_render_pass(VkImageLayout present_layout, int part, VkR
     attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-    attachments[2].format = vk.color_format;
-    attachments[2].samples = VK_SAMPLE_COUNT_1_BIT;
-    attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    // Attachment 2 is the motion vectors, drawn beside the colour: the
+    // multisampled image when MSAA is on, otherwise the texture itself, which
+    // the temporal passes sample when the pass is done.
+    attachments[2].format = vk.velocity_format;
+    attachments[2].samples = vk.samples;
+    attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachments[2].storeOp = multisampled ? VK_ATTACHMENT_STORE_OP_DONT_CARE
+                                          : VK_ATTACHMENT_STORE_OP_STORE;
     attachments[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     attachments[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     attachments[2].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    attachments[2].finalLayout = present_layout;
+    attachments[2].finalLayout = multisampled ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                                              : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    memset(&colour_ref, 0, sizeof(colour_ref));
-    colour_ref.attachment = 0;
-    colour_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    // 3 and 4, when MSAA is on: what the colour and the vectors resolve to.
+    attachments[3].format = vk.color_format;
+    attachments[3].samples = VK_SAMPLE_COUNT_1_BIT;
+    attachments[3].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachments[3].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachments[3].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachments[3].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachments[3].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachments[3].finalLayout = present_layout;
+
+    attachments[4].format = vk.velocity_format;
+    attachments[4].samples = VK_SAMPLE_COUNT_1_BIT;
+    attachments[4].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachments[4].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachments[4].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachments[4].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachments[4].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachments[4].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    memset(colour_refs, 0, sizeof(colour_refs));
+    colour_refs[0].attachment = 0;
+    colour_refs[0].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    colour_refs[1].attachment = 2;
+    colour_refs[1].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     memset(&depth_ref, 0, sizeof(depth_ref));
     depth_ref.attachment = 1;
     depth_ref.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-    memset(&resolve_ref, 0, sizeof(resolve_ref));
-    resolve_ref.attachment = 2;
-    resolve_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    memset(resolve_refs, 0, sizeof(resolve_refs));
+    resolve_refs[0].attachment = 3;
+    resolve_refs[0].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    resolve_refs[1].attachment = 4;
+    resolve_refs[1].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     if (part == 1) {
-        /* The first half keeps what it drew for the second: the colour
-           stays in its attachment layout, the depth ends readable. The
-           multisampled colour is not resolved yet; the second half does
-           that once, at the end. */
+        /* The first half keeps what it drew for the second: the colour and
+           the vectors stay in their attachment layout, the depth ends
+           readable. The multisampled images are not resolved yet; the
+           second half does that once, at the end. */
         attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         attachments[0].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-        attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         attachments[2].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        resolve_ref.attachment = VK_ATTACHMENT_UNUSED;
+        attachments[3].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[3].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        attachments[4].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[4].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        resolve_refs[0].attachment = VK_ATTACHMENT_UNUSED;
+        resolve_refs[1].attachment = VK_ATTACHMENT_UNUSED;
     } else if (part == 2) {
         attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         attachments[0].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         attachments[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        attachments[2].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     }
 
     memset(&subpass, 0, sizeof(subpass));
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments = &colour_ref;
+    subpass.colorAttachmentCount = 2;
+    subpass.pColorAttachments = colour_refs;
     subpass.pDepthStencilAttachment = &depth_ref;
-    if (multisampled) subpass.pResolveAttachments = &resolve_ref;
+    if (multisampled) subpass.pResolveAttachments = resolve_refs;
 
     memset(dependencies, 0, sizeof(dependencies));
     dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
@@ -1969,7 +2072,7 @@ static int ae3d_vk_create_shadow_target(void) {
 static int ae3d_vk_create_post_target(void) {
     ae3d_vk_texture *texture = NULL;
     VkSamplerCreateInfo sampler;
-    VkImageView attachments[3];
+    VkImageView attachments[5];
     VkFramebufferCreateInfo info;
     int multisampled = vk.samples != VK_SAMPLE_COUNT_1_BIT;
     unsigned i;
@@ -2010,16 +2113,19 @@ static int ae3d_vk_create_post_target(void) {
     if (multisampled) {
         attachments[0] = vk.colour_view;
         attachments[1] = vk.depth_view;
-        attachments[2] = texture->view;
+        attachments[2] = vk.velocity_view;
+        attachments[3] = texture->view;
+        attachments[4] = vk.textures[vk.velocity_texture - 1].view;
     } else {
         attachments[0] = texture->view;
         attachments[1] = vk.depth_view;
+        attachments[2] = vk.textures[vk.velocity_texture - 1].view;
     }
 
     memset(&info, 0, sizeof(info));
     info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     info.renderPass = vk.scene_pass;
-    info.attachmentCount = multisampled ? 3u : 2u;
+    info.attachmentCount = multisampled ? 5u : 3u;
     info.pAttachments = attachments;
     info.width = vk.extent.width;
     info.height = vk.extent.height;
@@ -2048,7 +2154,7 @@ static int ae3d_vk_create_framebuffers(void) {
     if (!vk.framebuffers) return ae3d_vk_fail("out of memory");
 
     for (i = 0; i < vk.image_count; i++) {
-        VkImageView attachments[3];
+        VkImageView attachments[5];
         VkFramebufferCreateInfo info;
         VkResult result;
         int multisampled = vk.samples != VK_SAMPLE_COUNT_1_BIT;
@@ -2056,16 +2162,19 @@ static int ae3d_vk_create_framebuffers(void) {
         if (multisampled) {
             attachments[0] = vk.colour_view;
             attachments[1] = vk.depth_view;
-            attachments[2] = vk.image_views[i];
+            attachments[2] = vk.velocity_view;
+            attachments[3] = vk.image_views[i];
+            attachments[4] = vk.textures[vk.velocity_texture - 1].view;
         } else {
             attachments[0] = vk.image_views[i];
             attachments[1] = vk.depth_view;
+            attachments[2] = vk.textures[vk.velocity_texture - 1].view;
         }
 
         memset(&info, 0, sizeof(info));
         info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         info.renderPass = vk.render_pass;
-        info.attachmentCount = multisampled ? 3u : 2u;
+        info.attachmentCount = multisampled ? 5u : 3u;
         info.pAttachments = attachments;
         info.width = vk.extent.width;
         info.height = vk.extent.height;
@@ -2772,7 +2881,7 @@ static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
     VkPipelineRasterizationStateCreateInfo raster;
     VkPipelineMultisampleStateCreateInfo multisample;
     VkPipelineDepthStencilStateCreateInfo depth;
-    VkPipelineColorBlendAttachmentState blend_attachment;
+    VkPipelineColorBlendAttachmentState blend_attachment, blend_attachments[2];
     VkPipelineColorBlendStateCreateInfo colour_blend;
     VkPipelineDynamicStateCreateInfo dynamic;
     VkDynamicState dynamic_states[2];
@@ -2917,12 +3026,23 @@ static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
     blend_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                       VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
 
+    /* The second attachment is the scene pass's motion vectors: written
+       as they are, never blended, by every draw that has them -- the
+       occlusion composite (the multiply) draws over the scene with no
+       motion of its own, and its writes are masked off. */
+    blend_attachments[0] = blend_attachment;
+    memset(&blend_attachments[1], 0, sizeof(blend_attachments[1]));
+    blend_attachments[1].colorWriteMask = blend == 2 ? 0
+                                        : (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT);
+
     memset(&colour_blend, 0, sizeof(colour_blend));
     colour_blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     // As many blend attachments as the subpass has colour attachments, which
-    // for the shadow pass is none: it writes depth and nothing else.
-    colour_blend.attachmentCount = (render_pass == vk.shadow_pass || render_pass == vk.camdepth_pass) ? 0 : 1;
-    colour_blend.pAttachments = &blend_attachment;
+    // for the shadow pass is none: it writes depth and nothing else; the
+    // scene pass has its colour and its motion vectors.
+    colour_blend.attachmentCount = (render_pass == vk.shadow_pass || render_pass == vk.camdepth_pass) ? 0
+                                 : (render_pass == vk.render_pass ? 2 : 1);
+    colour_blend.pAttachments = blend_attachments;
 
     dynamic_states[0] = VK_DYNAMIC_STATE_VIEWPORT;
     dynamic_states[1] = VK_DYNAMIC_STATE_SCISSOR;
@@ -3356,7 +3476,7 @@ void ae3d_vk_resize(int width, int height) {
 // pass that samples it starts.
 static void ae3d_vk_open_scene_pass(void) {
     VkRenderPassBeginInfo pass;
-    VkClearValue clears[2];
+    VkClearValue clears[3];
     VkViewport viewport;
     VkRect2D scissor;
 
@@ -3379,7 +3499,9 @@ static void ae3d_vk_open_scene_pass(void) {
     }
     pass.framebuffer = vk.post_active ? vk.scene_framebuffer : vk.framebuffers[vk.image_index];
     pass.renderArea.extent = vk.extent;
-    pass.clearValueCount = 2;
+    /* The third clear is the motion vectors', zero: a pixel nothing draws
+       has not moved. */
+    pass.clearValueCount = 3;
     pass.pClearValues = clears;
     ae3d_vkCmdBeginRenderPass(vk.command_buffers[vk.frame], &pass, VK_SUBPASS_CONTENTS_INLINE);
 
@@ -3448,7 +3570,11 @@ int ae3d_vk_frame_begin(double r, double g, double b, double a) {
     vk.scene_clear[2] = (float)b;
     vk.scene_clear[3] = (float)a;
 
-    vk.post_active = (vk.fxaa || vk.bloom || vk.ssr_enabled || vk.taa_enabled) && vk.screen_quad > 0 && vk.post_texture > 0;
+    /* A capture channel is the surfaces' own numbers -- albedo, normals,
+       motion -- and no effect over them: the post chain, the reflections
+       and the occlusion stand down while one is read. */
+    vk.post_active = !vk.capture_bypass && (vk.fxaa || vk.bloom || vk.ssr_enabled || vk.taa_enabled)
+                     && vk.screen_quad > 0 && vk.post_texture > 0;
     {
         int k;
         for (k = 0; k < AE3D_VK_MAX_CROWDS; k++) { vk.crowds[k].sorted = 0; vk.crowds[k].count = 0; }
@@ -4141,6 +4267,9 @@ void ae3d_vk_set_ssr(int on) {
 
 int ae3d_vk_ssr(void) { return vk.ssr_enabled; }
 
+/* While a capture channel is read, no effect runs over the frame. */
+void ae3d_vk_set_capture_bypass(int on) { vk.capture_bypass = on ? 1 : 0; }
+
 /* Ambient occlusion on or off, with how far a thing shadows its neighbours
    (metres) and how dark that goes. The camera depth it reads is the
    reflection's target, made the same way when it is first wanted. */
@@ -4370,8 +4499,8 @@ static void ae3d_vk_draw_screen_with(VkPipeline pipeline, VkDescriptorSet *set_s
                                      VkImageView third, VkSampler third_sampler) {
     VkDescriptorSetAllocateInfo alloc;
     VkDescriptorBufferInfo buffer;
-    VkDescriptorImageInfo scene_img, depth_img, def_img;
-    VkWriteDescriptorSet writes[4];
+    VkDescriptorImageInfo scene_img, depth_img, def_img, velocity_img;
+    VkWriteDescriptorSet writes[5];
     VkDeviceSize offsets[1];
     ae3d_vk_uniform_ring *ring;
     ae3d_vk_mesh *mesh;
@@ -4420,6 +4549,14 @@ static void ae3d_vk_draw_screen_with(VkPipeline pipeline, VkDescriptorSet *set_s
     def_img.imageView = third ? third : vk.textures[vk.default_texture - 1].view;
     def_img.sampler = third_sampler ? third_sampler : vk.textures[vk.default_texture - 1].sampler;
 
+    /* Binding 4 is the frame's motion vectors, for the temporal pass. */
+    memset(&velocity_img, 0, sizeof(velocity_img));
+    velocity_img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    velocity_img.imageView = vk.velocity_texture ? vk.textures[vk.velocity_texture - 1].view
+                                                 : vk.textures[vk.default_texture - 1].view;
+    velocity_img.sampler = vk.velocity_texture ? vk.textures[vk.velocity_texture - 1].sampler
+                                               : vk.textures[vk.default_texture - 1].sampler;
+
     memset(writes, 0, sizeof(writes));
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = set; writes[0].dstBinding = 0; writes[0].descriptorCount = 1;
@@ -4437,7 +4574,11 @@ static void ae3d_vk_draw_screen_with(VkPipeline pipeline, VkDescriptorSet *set_s
     writes[3].dstSet = set; writes[3].dstBinding = 3; writes[3].descriptorCount = 1;
     writes[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[3].pImageInfo = &def_img;
-    ae3d_vkUpdateDescriptorSets(vk.device, 4, writes, 0, NULL);
+    writes[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[4].dstSet = set; writes[4].dstBinding = 4; writes[4].descriptorCount = 1;
+    writes[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[4].pImageInfo = &velocity_img;
+    ae3d_vkUpdateDescriptorSets(vk.device, 5, writes, 0, NULL);
 
     if (pipeline != vk.bound_pipeline) {
         ae3d_vkCmdBindPipeline(vk.command_buffers[vk.frame], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -4489,7 +4630,7 @@ static void ae3d_vk_setup_post_uniforms(void) {
 // when the occlusion is off, the prepass did not run, or the pipeline did
 // not build; the scene is then simply not darkened.
 void ae3d_vk_draw_ssao(void) {
-    if (!vk.recording || !vk.ssao_enabled || !vk.ssao_pipeline) return;
+    if (!vk.recording || !vk.ssao_enabled || !vk.ssao_pipeline || vk.capture_bypass) return;
     if (!vk.camdepth_view || !vk.camdepth_framebuffer || vk.default_texture <= 0) return;
     ae3d_vk_open_scene_pass();
     ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_SSAORADIUS, vk.ssao_radius);

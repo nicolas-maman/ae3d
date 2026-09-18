@@ -23,8 +23,12 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 model;
     mat4 viewProjection;
     mat4 lightSpaceMatrix;
+    mat4 prevModel;
+    mat4 prevViewProjection;
     bool isSkinned;
     mat4 bones[96];
+    vec2 jitter;
+    vec2 screenSize;
     int lightCount;
     bool impostor;
     int captureChannel;
@@ -100,12 +104,9 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 invViewProjection;
     float ssrRoadHeight;
     float ssrStrength;
-    vec2 screenSize;
     float ssaoRadius;
     float ssaoIntensity;
     int depthSampleCount;
-    mat4 prevViewProjection;
-    vec2 jitter;
     float taaBlend;
     float time;
     float waveSpeedMultiplier;
@@ -144,16 +145,25 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     int impostorRows;
     float impostorWidth;
     float impostorHeight;
+    float crowdTravel;
+    float crowdPhaseStep;
 };
 layout (location = 0) in vec3 inPosition;
 
 layout(location = 0) out vec3 TexCoords;
+layout(location = 1) out vec4 ClipNow;
+layout(location = 2) out vec4 ClipPrev;
 
 
+
+// Last frame's view-projection, for the sky's motion vector: a direction,
+// so the camera's translation drops out and only its turn moves the sky.
 
 
 void main() {
     TexCoords = inPosition;
     vec4 pos = projection * view * vec4(inPosition, 1.0);
+    ClipNow = pos;
+    ClipPrev = prevViewProjection * vec4(inPosition, 0.0);
     gl_Position = pos.xyww; // Ensure skybox is always at max depth
 }

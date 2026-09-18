@@ -297,6 +297,11 @@ void   ae3d_gl_fbo_bind(int fbo);
 void   ae3d_gl_fbo_delete(int fbo);
 int    ae3d_gl_fbo_attach_color(int fbo, int width, int height, int hdr);
 void   ae3d_gl_fbo_set_color(int fbo, int texture);
+int    ae3d_gl_fbo_attach_velocity(int fbo, int width, int height);
+int    ae3d_gl_fbo_attach_velocity_multisample(int fbo, int width, int height, int samples);
+void   ae3d_gl_draw_buffers(int count);
+void   ae3d_gl_clear_attachment(int index, double r, double g, double b, double a);
+int    ae3d_gl_fbo_resolve_attachment(int source, int destination, int width, int height, int index);
 int    ae3d_gl_fbo_attach_depth(int fbo, int width, int height);
 int    ae3d_gl_max_samples(void);
 int    ae3d_gl_fbo_attach_color_multisample(int fbo, int width, int height, int samples);
@@ -389,6 +394,8 @@ void   ae3d_vk_set_pose_bank(int texture_handle);
 void   ae3d_vk_set_scene_depth(int on);
 int    ae3d_vk_scene_depth_ready(void);
 int    ae3d_vk_resolve_scene_depth(void);
+int    ae3d_vk_velocity_texture(void);
+void   ae3d_vk_set_capture_bypass(int on);
 /* A crowd sorted on the device (crowd_sort_vk.comp): its figures' state
    written as eight floats each into the frame's buffer, the sort dispatched
    before the passes, and the tiers drawn by the counts it wrote. */
