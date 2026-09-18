@@ -3362,10 +3362,18 @@ void ae3d_vk_draw(int handle, int texture_handle, int instance_handle, int insta
 
 // A flat sky needs no geometry: the clear colour already fills every pixel the
 // scene does not cover, so only a textured sky is drawn.
-void ae3d_vk_draw_sky(int mesh_handle, int texture_handle) {
+void ae3d_vk_draw_sky(int mesh_handle, int texture_handle, int weather_handle, int shape_handle) {
+    int normal_was = vk.normal_map;
+    int bank_was = vk.pose_bank;
     if (!vk.sky_pipeline || texture_handle <= 0) return;
     vk.program = AE3D_VK_PROGRAM_SCENE;
+    /* The clouds' weather at binding 3 and their shape at 4, where a model
+       draw keeps its normal map and its pose bank. */
+    vk.normal_map = weather_handle;
+    vk.pose_bank = shape_handle;
     ae3d_vk_draw_pipeline(vk.sky_pipeline, mesh_handle, texture_handle, 0, 1);
+    vk.normal_map = normal_was;
+    vk.pose_bank = bank_was;
     ae3d_vk_stamp_through(3);
 }
 
@@ -4069,6 +4077,126 @@ int ae3d_vk_capture_ready(void) { return vk.capture_slot >= 0; }
    float texture made by ae3d_vk_texture_create_float, or zero for none.
    A crowd draw is a skinned draw with a bank bound. */
 void ae3d_vk_set_pose_bank(int texture_handle) { vk.pose_bank = texture_handle; }
+
+/* A texture from RGBA bytes, of two dimensions or, with `depth` past one,
+   three: linear, repeating on every axis, no mipmaps. What a baked map is
+   uploaded as -- the clouds' weather over the world, and the tileable 3D
+   noise their shape is read from. A 3D image binds where a 2D one does;
+   the descriptor is the same kind, and the shader says which it reads. */
+int ae3d_vk_texture_create_rgba(int width, int height, int depth, const unsigned char *rgba) {
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory staging_memory = VK_NULL_HANDLE;
+    VkCommandBuffer command;
+    VkBufferImageCopy region;
+    VkSamplerCreateInfo sampler;
+    VkImageCreateInfo info;
+    VkImageViewCreateInfo view_info;
+    VkMemoryRequirements requirements;
+    VkMemoryAllocateInfo allocation;
+    ae3d_vk_texture *texture = NULL;
+    void *mapped = NULL;
+    VkDeviceSize size;
+    int slot, handle = 0, type;
+
+    if (!vk.device || width <= 0 || height <= 0 || depth <= 0 || !rgba) return 0;
+    size = (VkDeviceSize)width * height * depth * 4;
+
+    for (slot = 0; slot < AE3D_VK_MAX_TEXTURES; slot++) {
+        if (!vk.textures[slot].in_use) { texture = &vk.textures[slot]; handle = slot + 1; break; }
+    }
+    if (!texture) { ae3d_vk_fail("texture table full"); return 0; }
+
+    if (!ae3d_vk_create_buffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                               &staging, &staging_memory)) {
+        return 0;
+    }
+    ae3d_vkMapMemory(vk.device, staging_memory, 0, size, 0, &mapped);
+    memcpy(mapped, rgba, (size_t)size);
+    ae3d_vkUnmapMemory(vk.device, staging_memory);
+
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    info.imageType = depth > 1 ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
+    info.format = VK_FORMAT_R8G8B8A8_UNORM;
+    info.extent.width = (unsigned)width;
+    info.extent.height = (unsigned)height;
+    info.extent.depth = (unsigned)depth;
+    info.mipLevels = 1;
+    info.arrayLayers = 1;
+    info.samples = VK_SAMPLE_COUNT_1_BIT;
+    info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (ae3d_vkCreateImage(vk.device, &info, NULL, &texture->image) != VK_SUCCESS) {
+        ae3d_vkDestroyBuffer(vk.device, staging, NULL);
+        ae3d_vkFreeMemory(vk.device, staging_memory, NULL);
+        return ae3d_vk_fail("rgba vkCreateImage failed");
+    }
+    ae3d_vkGetImageMemoryRequirements(vk.device, texture->image, &requirements);
+    type = ae3d_vk_memory_type(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (type < 0) return ae3d_vk_fail("no memory type for an rgba image");
+    memset(&allocation, 0, sizeof(allocation));
+    allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocation.allocationSize = requirements.size;
+    allocation.memoryTypeIndex = (unsigned)type;
+    if (ae3d_vkAllocateMemory(vk.device, &allocation, NULL, &texture->memory) != VK_SUCCESS) {
+        return ae3d_vk_fail("rgba vkAllocateMemory failed");
+    }
+    ae3d_vkBindImageMemory(vk.device, texture->image, texture->memory, 0);
+    memset(&view_info, 0, sizeof(view_info));
+    view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image = texture->image;
+    view_info.viewType = depth > 1 ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+    view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    view_info.subresourceRange.levelCount = 1;
+    view_info.subresourceRange.layerCount = 1;
+    if (ae3d_vkCreateImageView(vk.device, &view_info, NULL, &texture->view) != VK_SUCCESS) {
+        return ae3d_vk_fail("rgba vkCreateImageView failed");
+    }
+
+    command = ae3d_vk_begin_once();
+    ae3d_vk_transition(command, texture->image, VK_IMAGE_LAYOUT_UNDEFINED,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                       VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    memset(&region, 0, sizeof(region));
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent.width = (unsigned)width;
+    region.imageExtent.height = (unsigned)height;
+    region.imageExtent.depth = (unsigned)depth;
+    ae3d_vkCmdCopyBufferToImage(command, staging, texture->image,
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    ae3d_vk_transition(command, texture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                       VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    ae3d_vk_end_once(command);
+
+    ae3d_vkDestroyBuffer(vk.device, staging, NULL);
+    ae3d_vkFreeMemory(vk.device, staging_memory, NULL);
+
+    memset(&sampler, 0, sizeof(sampler));
+    sampler.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sampler.magFilter = VK_FILTER_LINEAR;
+    sampler.minFilter = VK_FILTER_LINEAR;
+    sampler.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sampler.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sampler.maxLod = 0.0f;
+    if (ae3d_vkCreateSampler(vk.device, &sampler, NULL, &texture->sampler) != VK_SUCCESS) {
+        ae3d_vk_fail("vkCreateSampler failed");
+        return 0;
+    }
+
+    texture->width = width;
+    texture->height = height;
+    texture->in_use = 1;
+    return handle;
+}
 
 /* A texture of floats, four a texel, with no filtering and no mipmaps:
    what a pose bank is, fetched by exact texel. */

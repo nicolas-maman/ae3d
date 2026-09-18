@@ -103,6 +103,9 @@ extern ae3d_gl_passtimer_ms(timer: ptr, pass: int) -> float
 extern ae3d_gl_fbo_create() -> int
 extern ae3d_gl_scene_depth_capture() -> int
 extern ae3d_gl_set_blend_multiply()
+extern ae3d_gl_texture_rgba(width: int, height: int, rgba: ptr) -> int
+extern ae3d_gl_texture3d_rgba(size: int, rgba: ptr) -> int
+extern ae3d_gl_texture3d_bind(unit: int, texture: int)
 extern ae3d_gl_fbo_bind(fbo: int)
 extern ae3d_gl_fbo_delete(fbo: int)
 extern ae3d_gl_fbo_attach_color(fbo: int, width: int, height: int, hdr: int) -> int
@@ -242,6 +245,9 @@ struct GLRenderer {
     // Ambient occlusion from the scene's depth: a fullscreen multiply over
     // the opaque pass, on when a scene asks, with how far a thing shadows
     // its neighbours in metres and how dark that goes.
+    // The clouds' noise as textures, made with the first sky and kept.
+    cloud_shape_texture: int
+    cloud_weather_texture: int
     ssao_program: int
     ssao_enabled: bool
     ssao_radius: float
@@ -389,6 +395,8 @@ renderer_new() -> *GLRenderer {
 
 renderer_free(r: *GLRenderer) {
     if r == null { return }
+    if r.cloud_shape_texture != 0 { ae3d_gl_texture_delete(r.cloud_shape_texture) }
+    if r.cloud_weather_texture != 0 { ae3d_gl_texture_delete(r.cloud_weather_texture) }
     renderer_cleanup(r)
     ae3d_gl_geometry_shutdown()
     if r.models != null { list.free(r.models) }
@@ -1128,6 +1136,18 @@ flag_int(on: bool) -> int {
     return 0
 }
 
+// The clouds' textures, uploaded from the bytes core bakes once.
+ensure_cloud_textures(r: *GLRenderer) {
+    if r.cloud_shape_texture == 0 {
+        bytes = core.cloud_shape_bytes()
+        if bytes != null { r.cloud_shape_texture = ae3d_gl_texture3d_rgba(core.CLOUD_SHAPE_SIZE, bytes) }
+    }
+    if r.cloud_weather_texture == 0 {
+        bytes = core.cloud_weather_bytes()
+        if bytes != null { r.cloud_weather_texture = ae3d_gl_texture_rgba(core.CLOUD_WEATHER_SIZE, core.CLOUD_WEATHER_SIZE, bytes) }
+    }
+}
+
 // Ambient occlusion on or off: `radius` is how far, in metres, a thing
 // shadows what stands beside it, `intensity` how dark that shadow goes
 // (1.0 is the full occlusion the depth finds, 0 none).
@@ -1576,6 +1596,9 @@ skybox_create(r: *GLRenderer, path: string) -> *Skybox {
         return sky
     }
     sky.u_sky_procedural = ae3d_gl_uniform_location(sky.program, "skyProcedural")
+    sky.u_cloud_weather = ae3d_gl_uniform_location(sky.program, "cloudWeather")
+    sky.u_cloud_shape = ae3d_gl_uniform_location(sky.program, "cloudShape")
+    ensure_cloud_textures(r)
 
     sky.u_view = ae3d_gl_uniform_location(sky.program, "view")
     sky.u_projection = ae3d_gl_uniform_location(sky.program, "projection")
@@ -1642,6 +1665,11 @@ render_skybox(r: *GLRenderer, cam: *Camera, light: *Light) {
 
     ae3d_gl_set_depth_mask(0)
     ae3d_gl_texture_bind(0, sky.texture)
+    ae3d_gl_uniform_int(sky.u_cloud_weather, 1)
+    ae3d_gl_texture_bind(1, r.cloud_weather_texture)
+    ae3d_gl_uniform_int(sky.u_cloud_shape, 2)
+    ae3d_gl_texture3d_bind(2, r.cloud_shape_texture)
+    r.bound_texture = 0 - 1
     ae3d_gl_vao_bind(sky.vao)
     ae3d_gl_draw_arrays(0, 36)
     ae3d_gl_vao_bind(0)

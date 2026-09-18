@@ -91,6 +91,8 @@ typedef ptrdiff_t     GLsizeiptr;
 #define GL_SRGB8_ALPHA8 0x8C43
 
 #define GL_TEXTURE_2D        0x0DE1
+#define GL_TEXTURE_3D        0x806F
+#define GL_TEXTURE_WRAP_R    0x8072
 #define GL_TEXTURE_CUBE_MAP  0x8513
 #define GL_TEXTURE_CUBE_MAP_POSITIVE_X 0x8515
 #define GL_TEXTURE0          0x84C0
@@ -202,6 +204,7 @@ typedef ptrdiff_t     GLsizeiptr;
     X(void, glGenTextures, (GLsizei n, GLuint *textures)) \
     X(void, glBindTexture, (GLenum target, GLuint texture)) \
     X(void, glTexImage2D, (GLenum target, GLint level, GLint internalformat, GLsizei w, GLsizei h, GLint border, GLenum format, GLenum type, const void *pixels)) \
+    X(void, glTexImage3D, (GLenum target, GLint level, GLint internalformat, GLsizei w, GLsizei h, GLsizei d, GLint border, GLenum format, GLenum type, const void *pixels)) \
     X(void, glTexParameteri, (GLenum target, GLenum pname, GLint param)) \
     X(void, glDeleteTextures, (GLsizei n, const GLuint *textures)) \
     X(void, glActiveTexture, (GLenum texture)) \
@@ -295,6 +298,7 @@ int ae3d_glapi_load(void);
 #define glGenTextures              ae3d_glGenTextures
 #define glBindTexture              ae3d_glBindTexture
 #define glTexImage2D               ae3d_glTexImage2D
+#define glTexImage3D               ae3d_glTexImage3D
 #define glTexParameteri            ae3d_glTexParameteri
 #define glDeleteTextures           ae3d_glDeleteTextures
 #define glActiveTexture            ae3d_glActiveTexture

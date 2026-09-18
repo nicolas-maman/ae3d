@@ -25,6 +25,35 @@
 - `engine_fps` reports the run's rate before the half-second window has
   filled, so a short bounded run says its rate and not zero.
 
+### Clouds as textures
+
+- The clouds are drawn from baked noise instead of noise summed in the
+  shader: `native/ae3d_cloudnoise.c` bakes a 256x256 weather map (where
+  cloud is, its kind, its banks -- the same tileable field the ground shader
+  computes for the cloud shadow, so the shadow under a cloud is the cloud)
+  and a 64x64x64 Perlin-Worley shape cube with a Worley fractal in its other
+  channels, once at start, uploaded on both backends (`sampler3D` on
+  OpenGL; bindings 3 and 4 of the Vulkan sky draw). The sky march is a fetch
+  a sample where it summed forty hashes: the sky stage of a scene under
+  clouds drops from about six and a half milliseconds to about one and a
+  half, and the frame rate of `smooth_terrain` goes from 86 to over 130.
+- The cloud itself is built the way a production sky builds it: a height
+  profile by kind, a stratus low and flat and a cumulus tall; the shape
+  remapped by the Worley fractal and carved by the cover; edges eroded by
+  the fractal at six times the scale, inverted at the base for wisps; three
+  octaves of Beer's law through a six-sample march toward the sun; the
+  powder darkening; a two-lobe Henyey-Greenstein phase; ambient from the
+  sky that darkens down the layer. The march strides through clear air and
+  steps finely in cloud, ends twelve kilometres into the layer, and the
+  clouds sit in the haze by their distance. The layer is 1400 to 2600 m.
+- `native/shaders/generate.py` takes a sampler as `name:3D` for a
+  three-dimensional binding.
+- A batched model that moves no longer stalls the frame on Vulkan: the
+  batch's instance stream is written into its ring, a slot a frame in
+  flight, instead of freed (a wait for the whole device) and uploaded
+  afresh. `lights`, five spinning spheres, went from 6.9 ms of CPU a frame
+  to 0.1. `scripts/perf.sh` reads a stage time printed in exponent form.
+
 ### The viewport
 
 - The scene is drawn straight into the window's own GL context. aether-ui had

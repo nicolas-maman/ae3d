@@ -146,7 +146,7 @@ def to_vulkan(source, stage, members, samplers, varyings_in, varyings_out,
     text = text.replace("return 1.0; /* screen y up */", "return -1.0; /* screen y down */")
 
     text = re.sub(r"^uniform\s+(vec3|vec4|vec2|float|int|bool|mat4)\s+\w+\s*(\[\d+\])?\s*;.*$", "", text, flags=re.M)
-    text = re.sub(r"^uniform\s+sampler2D\s+\w+\s*;.*$", "", text, flags=re.M)
+    text = re.sub(r"^uniform\s+sampler(2D|3D)\s+\w+\s*;.*$", "", text, flags=re.M)
 
     placed, size = std140(members, base=light_bytes(light_members))
     lines = []
@@ -169,8 +169,10 @@ def to_vulkan(source, stage, members, samplers, varyings_in, varyings_out,
 
     # Every shader shares one descriptor set layout, so whichever sampler a
     # shader names sits at binding 1 and the renderer binds the right texture.
+    # A sampler is 2D unless named "name:3D", as the clouds' shape is.
     for index, sampler in enumerate(samplers):
-        lines.append(f"layout(set = 0, binding = {index + 1}) uniform sampler2D {sampler};")
+        name, _, kind = sampler.partition(":")
+        lines.append(f"layout(set = 0, binding = {index + 1}) uniform sampler{kind or '2D'} {name};")
 
     for index, (kind, name) in enumerate(varyings_out):
         text = re.sub(rf"^out\s+{kind}\s+{name}\s*;.*$",
@@ -373,7 +375,9 @@ AUXILIARY = [
     ("depth_vk.vert", "VERTEX_DEPTH", "vert", [], [], []),
     ("depth_vk.frag", "FRAGMENT_DEPTH", "frag", [], [], []),
     ("sky_vk.vert", "VERTEX_SKYBOX", "vert", [], [], SKY_OUT),
-    ("sky_vk.frag", "FRAGMENT_SKYBOX", "frag", ["skybox"], SKY_OUT, []),
+    # The sky reads the clouds' weather at binding 3 and their shape at 4,
+    # the slots a model draw keeps its normal map and pose bank in.
+    ("sky_vk.frag", "FRAGMENT_SKYBOX", "frag", ["skybox", "shadowMap", "cloudWeather", "cloudShape:3D"], SKY_OUT, []),
     ("screen_vk.vert", "VERTEX_SCREEN", "vert", [], [], SCREEN_OUT),
     ("passthrough_vk.frag", "FRAGMENT_PASSTHROUGH", "frag", ["screenTexture"], SCREEN_OUT, []),
     ("fxaa_vk.frag", "FRAGMENT_FXAA", "frag", ["screenTexture"], SCREEN_OUT, []),

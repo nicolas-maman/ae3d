@@ -633,19 +633,18 @@ vec3 getGradient(int hash) {
 }
 
 // Clouds, shared by the sky that draws them and the ground they shadow.
-// A layer between CLOUD_BASE and CLOUD_TOP metres up, whose coverage is a
-// 2D field of value noise (the same field the ground reads its shadow
-// from) and whose body is that coverage eroded by a 3D noise, so the
-// edges are ragged and the undersides lumpy.
+// A layer between CLOUD_BASE and CLOUD_TOP metres up. Where cloud is, over
+// the world, is the weather field: a fractal of tileable 2D value noise
+// gathered into banks by a slower one, a tile of CLOUD_TILE metres that
+// repeats without a seam. The sky reads it from the weather texture the
+// engine bakes from this very function (native/ae3d_cloudnoise.c); the
+// ground computes it here for its cloud shadow, so the shadow under a
+// cloud is the cloud. Both use the one hash, in integers, exact on both
+// backends.
 const float CLOUD_BASE = 1400.0;
-const float CLOUD_TOP = 1950.0;
+const float CLOUD_TOP = 2600.0;
+const float CLOUD_TILE = 24000.0;
 
-// A hash on the lattice's integer corners, in integers: the sine hash the
-// clouds were first built on is a sine of a number in the thousands, and
-// the two backends' sines disagree out there (the Vulkan sky's clouds came
-// out smeared into streaks), while the product-of-fracts one drifted
-// smoothly across neighbouring cells and made no cloud at all. Bit mixing
-// is exact on both.
 float cloudHash(vec3 p) {
     uvec3 v = uvec3(ivec3(floor(p))) * uvec3(1597334677u, 3812015801u, 2798796415u);
     uint n = (v.x ^ v.y ^ v.z) * 1597334677u;
@@ -657,51 +656,54 @@ float cloudHash(vec3 p) {
     return float(n) * (1.0 / 4294967296.0);
 }
 
-float cloudNoise(vec3 x) {
-    vec3 i = floor(x);
-    vec3 f = fract(x);
+// Value noise on a 2D lattice of `period` cells to the tile, wrapped so it
+// tiles; the field's seed rides in z, as the baker's does.
+float cloudNoise2(vec2 x, float period, float seed) {
+    vec2 i = floor(x);
+    vec2 f = fract(x);
     f = f * f * (3.0 - 2.0 * f);
-    return mix(mix(mix(cloudHash(i + vec3(0, 0, 0)), cloudHash(i + vec3(1, 0, 0)), f.x),
-                   mix(cloudHash(i + vec3(0, 1, 0)), cloudHash(i + vec3(1, 1, 0)), f.x), f.y),
-               mix(mix(cloudHash(i + vec3(0, 0, 1)), cloudHash(i + vec3(1, 0, 1)), f.x),
-                   mix(cloudHash(i + vec3(0, 1, 1)), cloudHash(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+    vec2 i0 = mod(i, period);
+    vec2 i1 = mod(i + 1.0, period);
+    float a = cloudHash(vec3(i0.x, i0.y, seed));
+    float b = cloudHash(vec3(i1.x, i0.y, seed));
+    float c = cloudHash(vec3(i0.x, i1.y, seed));
+    float d = cloudHash(vec3(i1.x, i1.y, seed));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
-// Octaves turned against each other, so the lattice of one is not the
-// lattice of the next and a cloud is not a stack of dice.
-float cloudFbm(vec3 p) {
-    float v = 0.0;
-    float a = 0.5;
-    mat3 turn = mat3(0.00, 0.80, 0.60,
-                     -0.80, 0.36, -0.48,
-                     -0.60, -0.48, 0.64);
-    for (int i = 0; i < 5; i++) {
-        v += a * cloudNoise(p);
-        p = turn * p * 2.02 + vec3(11.0, 5.0, 3.0);
-        a *= 0.5;
+// The weather over a point of the tile, uv in 0..1: x is the cloud field
+// before the cover threshold, stretched over 0..1, y is the banks.
+vec2 cloudWeatherAt(vec2 uv) {
+    float shape = 0.0;
+    float amp = 0.5;
+    float freq = 6.0;
+    for (int o = 0; o < 5; o++) {
+        shape += amp * cloudNoise2(uv * freq, freq, float(41 + o * 17));
+        amp *= 0.5;
+        freq *= 2.0;
     }
-    return v;
+    shape = clamp((shape - 0.3) / 0.4, 0.0, 1.0);
+    float bank = cloudNoise2(uv * 3.0, 3.0, 8.0);
+    return vec2(shape, bank);
 }
 
-// How much cloud there is over a point of the ground, 0..1: the coverage
-// field, drifting with the wind, shaped by the cover setting so 0.3 is a
-// few fair-weather clouds and 0.8 an overcast with holes.
+// Where on the weather tile a point of the world is, with the wind's drift.
+vec2 cloudWeatherUv(vec2 xz, float t) {
+    return xz / CLOUD_TILE + vec2(t * 0.00012, t * 0.00004);
+}
+
+// The cover threshold over the field and the banks: 0.3 is a few
+// fair-weather clouds, 0.8 an overcast with holes.
+float cloudCoverageFrom(vec2 weather, float cover) {
+    float threshold = 1.0 - cover * (0.45 + 1.1 * weather.y);
+    // A soft ramp that stops short of one: at full coverage the cloud
+    // still has its cells, and does not flatten into a sheet.
+    return smoothstep(threshold, threshold + 0.5, weather.x) * 0.9;
+}
+
+// How much cloud there is over a point of the ground, 0..1, computed.
 float cloudCoverage(vec2 xz, float cover, float t) {
-    vec2 p = xz * 0.00075 + vec2(t * 0.003, t * 0.0011);
-    // Bent before it is read: value noise is a lattice, and read straight
-    // its clouds were squares with rounded corners. A slow warp of the
-    // lookup by another noise turns the lattice into lobes.
-    vec2 warp = vec2(cloudNoise(vec3(p * 1.6, 1.3)), cloudNoise(vec3(p * 1.6, 7.9))) - 0.5;
-    p += warp * 0.55;
-    // The fbm of a value noise sits between 0.3 and 0.7 nearly everywhere;
-    // stretched over 0..1 first, so the cover setting cuts it where it says.
-    float shape = clamp((cloudFbm(vec3(p, 3.7)) - 0.3) / 0.4, 0.0, 1.0);
-    // Weather has districts: a slower field gathers the clouds into
-    // banks and leaves clearings between, so the sky is not one even
-    // sprinkle of the same puff.
-    float bank = cloudNoise(vec3(p * 0.13 + vec2(t * 0.001, 0.0), 8.1));
-    float threshold = 1.0 - cover * (0.45 + 1.1 * bank);
-    return clamp((shape - threshold) / 0.35, 0.0, 1.0);
+    return cloudCoverageFrom(cloudWeatherAt(cloudWeatherUv(xz, t)), cover);
 }
 
 // The clouds' shadow at a point: the coverage over it, looked up where the

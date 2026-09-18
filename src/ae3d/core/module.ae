@@ -22,6 +22,7 @@ import ae3d.platform
 
 exports (
     mesh_push_skybox_cube, skybox_solid, skybox_texture, SKY_PROCEDURAL, mesh_normal,
+    CLOUD_SHAPE_SIZE, CLOUD_WEATHER_SIZE, cloud_shape_bytes, cloud_weather_bytes,
     mesh_set_skin, mesh_is_skinned, mesh_skin_joint, mesh_skin_weight, mesh_decimate,
     mesh_surface_area, mesh_uv_area, mesh_distinct_planes, mesh_size,
     palette_create, palette_destroy, palette_bones, palette_set, palette_get,
@@ -80,6 +81,9 @@ exports (
     frustum_intersects_sphere, plane_distance, camera_screen_to_world
 )
 
+extern ae3d_cloudnoise_shape(size: int, out: ptr) -> int
+extern ae3d_cloudnoise_weather(size: int, out: ptr) -> int
+extern calloc(count: int, size: int) -> ptr
 extern sqrt(x: float) -> float
 extern sin(x: float) -> float
 extern cos(x: float) -> float
@@ -423,6 +427,8 @@ struct Skybox {
     u_cloud_sun_color: int
     u_cloud_eye: int
     u_sky_procedural: int
+    u_cloud_weather: int
+    u_cloud_shape: int
     // Drawn from the sun rather than read from an image: the texture bound
     // is whatever the renderer had, and is not the skybox's to release.
     procedural: bool
@@ -435,6 +441,33 @@ struct Skybox {
 // The sky path that asks for the sky drawn from the sun instead of an
 // image: engine_set_time_of_day sets it, and a scene file may name it.
 const SKY_PROCEDURAL = "sky://procedural"
+
+// The noise the clouds are made of, baked once and kept for the process:
+// the shape, a tileable cube of CLOUD_SHAPE_SIZE texels of four channels
+// (Perlin-Worley and three Worley octaves), and the weather, a tile of
+// CLOUD_WEATHER_SIZE squared over the world (where cloud is, its kind,
+// its banks). A renderer uploads them as its textures; both renderers
+// upload the same bytes, so the two skies are the same sky.
+const CLOUD_SHAPE_SIZE = 64
+const CLOUD_WEATHER_SIZE = 256
+var g_cloud_shape: ptr = null
+var g_cloud_weather: ptr = null
+
+cloud_shape_bytes() -> ptr {
+    if g_cloud_shape == null {
+        g_cloud_shape = calloc(CLOUD_SHAPE_SIZE * CLOUD_SHAPE_SIZE * CLOUD_SHAPE_SIZE * 4, 1)
+        if g_cloud_shape != null { ae3d_cloudnoise_shape(CLOUD_SHAPE_SIZE, g_cloud_shape) }
+    }
+    return g_cloud_shape
+}
+
+cloud_weather_bytes() -> ptr {
+    if g_cloud_weather == null {
+        g_cloud_weather = calloc(CLOUD_WEATHER_SIZE * CLOUD_WEATHER_SIZE * 4, 1)
+        if g_cloud_weather != null { ae3d_cloudnoise_weather(CLOUD_WEATHER_SIZE, g_cloud_weather) }
+    }
+    return g_cloud_weather
+}
 
 // Distance haze: what a scene fades into, and where the fading begins and
 // ends. The colour is the one the eye sees, applied after tone mapping, so it
