@@ -995,21 +995,25 @@ void main() {
 
     // Every light in the scene contributes; the loop stops at lightCount, so a
     // scene with one light costs what it did before there could be four.
-    // The key light is the one the shadow map and the clouds are cast by,
-    // so its light alone is taken by them; a lamp beside a wall lights the
-    // wall's shadowed side, which is what a lamp is for. A shadow takes the
-    // direct light and leaves the sky's fill alone: multiplied over the
-    // whole colour, ambient included, as it was, a shadow went to a third
-    // of black and the shadowed side of a hill at dusk was a hole.
+    // A shadow takes the direct light and leaves the sky's fill alone:
+    // multiplied over the whole colour, ambient included, as it was, a
+    // shadow went to a third of black and the shadowed side of a hill at
+    // dusk was a hole in the picture. The one shadow map is the key
+    // light's, and it is applied to every light's direct term all the
+    // same: a lamp has no map of its own, and what stands in the key
+    // light's shadow is what stands in the way of the lamp too, near
+    // enough that a figure on a lamp-lit road keeps a shadow under it.
+    // The clouds' shadow is the key light's alone.
+    float shaded = 1.0;
+    if (hasShadowMap && enableShadows) shaded = shadow_factor();
     float sunlit = cloudShadow(FragPos);
-    if (hasShadowMap && enableShadows) sunlit *= shadow_factor();
     vec3 Lo = vec3(0.0);
     for (int i = 0; i < 4; i++) {
         if (i >= lightCount) {
             break;
         }
         vec3 lit = direct_light(lights[i], norm, viewDir, albedo, F0, NdotV, adjustedRoughness);
-        Lo += i == 0 ? lit * sunlit : lit;
+        Lo += (i == 0 ? lit * sunlit : lit) * shaded;
     }
 
     // Ambient belongs to the scene rather than to each light, so it comes from

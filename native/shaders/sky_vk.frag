@@ -233,7 +233,7 @@ float cloudDensity(vec3 p, float cover, float t) {
     float cov = cloudCoverage(p.xz, cover, t);
     if (cov <= 0.0) return 0.0;
     float h = clamp((p.y - CLOUD_BASE) / (CLOUD_TOP - CLOUD_BASE), 0.0, 1.0);
-    float top = 0.3 + 0.7 * cov;
+    float top = 0.45 + 0.55 * cov;
     float profile = smoothstep(0.0, 0.12, h) * (1.0 - smoothstep(top * 0.5, top, h));
     float base = cov * profile;
     if (base <= 0.0) return 0.0;
@@ -269,7 +269,8 @@ vec4 cloudsAlong(vec3 dir, vec3 sky, float cover, float t, float dither) {
     float t1 = CLOUD_TOP / dir.y;
     // More steps toward the horizon, where the ray crosses the layer at a
     // slant and the same count would stride over whole clouds.
-    int steps = int(24.0 + 40.0 * (1.0 - clamp(dir.y, 0.0, 1.0)));
+    float slant = 1.0 - clamp(dir.y, 0.0, 1.0);
+    int steps = int(24.0 + 72.0 * slant * slant);
     float dt = (t1 - t0) / float(steps);
     vec3 sun = normalize(cloudSun);
     vec3 sunLight = cloudSunColor * 1.5;
