@@ -41,7 +41,11 @@
   game object it is on, so one script shape serves the editor and a
   program; the editor hands a null state and the model is
   `behaviour.object_model(go)`. The four shipped scripts, the template and
-  `tests/test_script` are in that shape.
+  `tests/test_script` are in that shape. The scene runs them: the editor's
+  slot on each object is a script component whose phases run whatever the
+  slot names, and a frame is `behaviour.scene_update` on the editor's
+  scene, as it is on a program's -- attaching or rebuilding a script marks
+  the slot unstarted, and start runs before the next update.
 
 ### The loop owns the lifecycle
 

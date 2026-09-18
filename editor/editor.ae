@@ -155,7 +155,9 @@ var g_light: ptr = null
 // shape (ae3d.behaviour). The object owns its model; its first component
 // says what the row is (mesh, water, voxel, terrain, light) and carries that
 // thing's state; its second is the editor's, KIND_SCRIPT, whose state is an
-// int[2]: the script attached to it and whether the row is selected.
+// int[2] -- the script attached to it and whether the row is selected --
+// and whose phases run the attached script, so the scene runs its scripts
+// the way the engine's scene runs a program's: behaviour.scene_update.
 var g_scene: ptr = null
 var g_rows: ptr = null
 var g_hierarchy: ptr = null
@@ -1531,15 +1533,39 @@ add_model(m: *Model, name: string) {
 }
 
 // A game object for the model, at the end of the scene: the model is the
-// object's, the kind component says what it is, the editor's slot follows.
+// object's, the kind component says what it is, the editor's slot follows
+// with the phases that run whatever script the slot names.
 add_object(m: *Model, name: string, kind: int, state: ptr) -> *GameObject {
     o = behaviour.object_new(name)
     behaviour.object_set_model(o, m)
     o.owns_model = true
     behaviour.object_add_component(o, behaviour.component_new(name, kind, state))
-    behaviour.object_add_component(o, behaviour.component_new("editor", behaviour.KIND_SCRIPT, index_handle(SCRIPT_NONE)))
+    behaviour.object_add_script(o, "editor", index_handle(SCRIPT_NONE), start_attached, update_attached)
     behaviour.scene_add(g_scene as *Scene, o)
     return o
+}
+
+// The phases of the editor's slot: the script the slot names, on the
+// object the slot is on. What the script does is the script's business;
+// the editor knows which object it is attached to and how long the frame
+// was, and hands no state of its own.
+start_attached(slot: ptr, go: *GameObject) {
+    id = (slot as int[])[0]
+    if id != SCRIPT_NONE { script.script_start(script_library(id), null, go) }
+}
+
+update_attached(slot: ptr, go: *GameObject, delta: float) {
+    id = (slot as int[])[0]
+    if id != SCRIPT_NONE { script.script_update(script_library(id), null, go, delta) }
+}
+
+// The slot component on an object: its start runs again on the next frame,
+// which is what attaching a script or rebuilding one asks for.
+restart_slot(index: int) {
+    o = row_object(index)
+    if o == null { return }
+    c = behaviour.object_component(o, 1)
+    if c != null { c.started = false }
 }
 
 // The object and everything it carries, gone: the editor's slot is the
@@ -1685,8 +1711,9 @@ set_script(index: int, script: int) {
     slot[0] = script
     // Once, when it is attached, and only when the attachment changed: a
     // script that sets something up wants to do it on the object it was just
-    // given, not every time the panel is refreshed.
-    if m != null && was != script { script.script_start(script_library(script), null, row_object(index)) }
+    // given, not every time the panel is refreshed. The scene runs start
+    // before the first update, on the next frame.
+    if m != null && was != script { restart_slot(index) }
     refresh_script_buttons()
     say("${script_name(script)} on ${core.text(model_at(index).name)}")
 }
@@ -1830,7 +1857,7 @@ reload_changed_scripts() {
 restart_script(id: int) {
     i = 0
     while i < row_count() {
-        if script_at(i) == id { script.script_start(script_library(id), null, row_object(i)) }
+        if script_at(i) == id { restart_slot(i) }
         i = i + 1
     }
 }
@@ -1899,21 +1926,12 @@ scripted_count() -> int {
     return total
 }
 
+// The scene runs its objects' phases -- start once, then update -- the way
+// the engine's scene runs a program's; the editor's slot on each object is
+// what runs the attached script.
 run_scripts(delta: float) {
     g_script_clock = g_script_clock + delta
-
-    count = row_count()
-    i = 0
-    while i < count {
-        script = script_at(i)
-        if script != SCRIPT_NONE {
-            o = row_object(i)
-            // What the script does is the script's business. The editor knows
-            // which object it is attached to and how long the frame was.
-            if o != null { script.script_update(script_library(script), null, o, delta) }
-        }
-        i = i + 1
-    }
+    behaviour.scene_update(g_scene as *Scene, delta)
 }
 
 kind_count(kind: int) -> int {
