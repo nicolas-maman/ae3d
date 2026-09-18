@@ -722,6 +722,46 @@ int ae3d_gl_texture_from_image(void *img, int srgb, int mipmap) {
     return (int)texture;
 }
 
+/* A texture from raw RGBA bytes: linear, repeating, no mipmaps. What a
+   baked map -- the clouds' weather -- is uploaded as. */
+int ae3d_gl_texture_rgba(int width, int height, const unsigned char *rgba) {
+    GLuint texture = 0;
+    if (!rgba || width <= 0 || height <= 0) return 0;
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return (int)texture;
+}
+
+/* A 3D texture, `size` cubed RGBA bytes: linear, repeating on every axis,
+   which is what a tileable noise the clouds are shaped by wants. */
+int ae3d_gl_texture3d_rgba(int size, const unsigned char *rgba) {
+    GLuint texture = 0;
+    if (!rgba || size <= 0) return 0;
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_3D, texture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, size, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glBindTexture(GL_TEXTURE_3D, 0);
+    return (int)texture;
+}
+
+void ae3d_gl_texture3d_bind(int unit, int texture) {
+    glActiveTexture(GL_TEXTURE0 + (GLenum)unit);
+    glBindTexture(GL_TEXTURE_3D, (GLuint)texture);
+}
+
 /* A pose bank as a float texture the skinning shader samples per instance.
  * The bank is frame-major, bone-major, sixteen floats a bone -- which is one
  * RGBA32F row of `bones * 4` texels a frame -- so its bytes upload straight in

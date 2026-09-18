@@ -76,12 +76,18 @@ can be interrogated while it runs. See [Credits](#credits).
   waterline. From underneath, the
   surface is the sky through the swell and the seabed is lit by a two-scale
   caustic web with a chromatic fringe.
-- **Volumetric clouds.** A layer of cumulus marched in the sky shader over
-  whatever sky is set: coverage from a drifting noise field gathered into
-  banks and clearings, bodies eroded by 3D noise, lit by the scene's key
-  light through a short march toward it, grey underneath and bright on
-  top. The ground reads the same coverage field where the sun's ray meets
-  the layer, so their shadows cross the terrain as they drift. One call,
+- **Volumetric clouds.** A layer of cloud marched in the sky shader over
+  whatever sky is set, built the way a production sky builds it: a weather
+  map says where cloud is and what kind, from a low stratus to a tall
+  cumulus; a tileable Perlin-Worley cube gives the body and a Worley
+  fractal erodes its edges, wisps at the base and billows above; each
+  sample is lit by the sun through the cloud over it, in three octaves of
+  Beer's law with the powder darkening and a two-lobe phase, and by the
+  sky. The noise is baked once at start into a 2D and a 3D texture
+  (`native/ae3d_cloudnoise.c`), so the march is a fetch a sample and the
+  clouds are a millisecond and a half of the frame. The ground computes
+  the same weather field where the sun's ray meets the layer, so their
+  shadows cross the terrain as they drift. One call,
   `engine_set_clouds(cover, wind)`, on either backend.
 - **Voxel worlds as a face mesh.** Only the faces that show, each corner
   carrying the sky it can see from the three voxels that crowd it -- the

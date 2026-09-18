@@ -63,7 +63,7 @@ extern ae3d_vk_scene_set_inv_viewproj(offset: int, m: ptr)
 extern ae3d_vk_set_ssr_params(road_height: float, strength: float)
 extern ae3d_vk_set_blend(on: int)
 extern ae3d_vk_draw(mesh: int, texture: int, instances: int, instance_count: int)
-extern ae3d_vk_draw_sky(mesh: int, texture: int)
+extern ae3d_vk_draw_sky(mesh: int, texture: int, weather: int, shape: int)
 extern ae3d_vk_set_screen_quad(mesh: int)
 extern ae3d_vk_set_shadows(on: int)
 extern ae3d_vk_shadows() -> int
@@ -74,6 +74,7 @@ const SHADOW_SIZE = 2048
 extern ae3d_vk_shadow_begin() -> int
 extern ae3d_vk_shadow_draw(mesh: int, instances: int, instance_count: int)
 extern ae3d_vk_texture_create_float(width: int, height: int, rgba: ptr) -> int
+extern ae3d_vk_texture_create_rgba(width: int, height: int, depth: int, rgba: ptr) -> int
 extern ae3d_vk_set_pose_bank(texture: int)
 extern ae3d_vk_set_scene_depth(on: int)
 extern ae3d_vk_scene_depth_ready() -> int
@@ -174,6 +175,9 @@ struct VKRenderer {
     last_scene_ms: float
     last_post_ms: float
     last_cpu_work_ms: float
+    // The clouds' noise as textures, made with the first sky and kept.
+    cloud_shape_texture: int
+    cloud_weather_texture: int
     last_pipeline_binds: int
     last_set_binds: int
     clear_r: float
@@ -418,6 +422,22 @@ renderer_shadows(r: *VKRenderer) -> bool {
 renderer_set_clouds(r: *VKRenderer, cover: float, wind: float) {
     r.cloud_cover = cover
     r.cloud_wind = wind
+}
+
+// The clouds' textures, uploaded from the bytes core bakes once.
+ensure_cloud_textures(r: *VKRenderer) {
+    if r.cloud_shape_texture == 0 {
+        bytes = core.cloud_shape_bytes()
+        if bytes != null {
+            r.cloud_shape_texture = ae3d_vk_texture_create_rgba(core.CLOUD_SHAPE_SIZE, core.CLOUD_SHAPE_SIZE, core.CLOUD_SHAPE_SIZE, bytes)
+        }
+    }
+    if r.cloud_weather_texture == 0 {
+        bytes = core.cloud_weather_bytes()
+        if bytes != null {
+            r.cloud_weather_texture = ae3d_vk_texture_create_rgba(core.CLOUD_WEATHER_SIZE, core.CLOUD_WEATHER_SIZE, 1, bytes)
+        }
+    }
 }
 
 renderer_set_ssr(r: *VKRenderer, on: bool) {
@@ -779,6 +799,7 @@ skybox_create(r: *VKRenderer, path: string) -> *Skybox {
     sky = core.skybox_solid(0.5, 0.7, 1.0)
     sky.texture = texture
     sky.procedural = procedural
+    ensure_cloud_textures(r)
     sky.mesh = core.mesh_create()
     core.mesh_push_skybox_cube(sky.mesh, sky.size)
     sky.vbo = ae3d_vk_upload_mesh(sky.mesh)
@@ -810,7 +831,7 @@ draw_skybox(r: *VKRenderer, cam: *Camera) {
     procedural = 0
     if sky.procedural { procedural = 1 }
     ae3d_vk_scene_set_int(vkscene.OFF_SKYPROCEDURAL, procedural)
-    ae3d_vk_draw_sky(sky.vbo, sky.texture)
+    ae3d_vk_draw_sky(sky.vbo, sky.texture, r.cloud_weather_texture, r.cloud_shape_texture)
 }
 
 renderer_load_texture(r: *VKRenderer, path: string) -> int {
@@ -1502,9 +1523,13 @@ draw_opaque(r: *VKRenderer) {
     }
 }
 
-// An instance stream is a buffer of its own on this backend, so a group that
-// has changed is re-uploaded and the one it replaces is released. A group that
-// has not changed keeps the buffer it already sent.
+// An instance stream is a buffer of its own on this backend. A group that
+// has not changed keeps the buffer it already sent; one that has is written
+// into its ring, one slot a frame in flight, the way a model's own stream
+// is. It used to free the buffer and upload a fresh one, and freeing a
+// buffer the device may still be reading waits for the whole device: a
+// scene with one spinning sphere in a batch stalled seven milliseconds a
+// frame on that wait, at 144 frames a second.
 sync_batch_instances(b: *VKBatch) {
     if !b.stale { return }
     while list.size(b.members) > b.count { list.remove(b.members, list.size(b.members) - 1) }
@@ -1515,8 +1540,10 @@ sync_batch_instances(b: *VKBatch) {
         ae3d_inst_set_matrix(b.instances, i, &m.model_matrix)
         i = i + 1
     }
-    if b.handle != 0 { ae3d_vk_free_mesh(b.handle) }
-    b.handle = ae3d_vk_upload_instances(b.instances)
+    if b.handle == 0 || ae3d_vk_update_instances(b.handle, b.instances) != 1 {
+        if b.handle != 0 { ae3d_vk_free_mesh(b.handle) }
+        b.handle = ae3d_vk_upload_instances(b.instances)
+    }
     b.stale = false
 }
 
@@ -1645,6 +1672,8 @@ renderer_cleanup(r: *VKRenderer) {
 
     if r == null || !r.initialized { return }
     if r.skybox != null { skybox_free(r, r.skybox as *Skybox) ; r.skybox = null }
+    if r.cloud_shape_texture != 0 { ae3d_vk_texture_destroy(r.cloud_shape_texture) ; r.cloud_shape_texture = 0 }
+    if r.cloud_weather_texture != 0 { ae3d_vk_texture_destroy(r.cloud_weather_texture) ; r.cloud_weather_texture = 0 }
     if r.screen_handle != 0 { ae3d_vk_free_mesh(r.screen_handle) ; r.screen_handle = 0 }
     if r.screen_mesh != null { core.mesh_destroy(r.screen_mesh) ; r.screen_mesh = null }
     count = list.size(r.models)

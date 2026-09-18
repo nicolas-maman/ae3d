@@ -41,7 +41,9 @@ for scene in "${scenes[@]}"; do
         printf '| %s | no perf line | | | | | | | | | |\n' "$scene"
         continue
     fi
-    field() { printf '%s\n' "$best" | sed -n "s/.* $1=\([0-9.]*\).*/\1/p" | head -1 | awk '{printf "%.2f", $1}'; }
+    # A stage that ran in no time prints as 4.4e-06: the exponent is part of
+    # the number, and awk reads it, so it rounds to nothing.
+    field() { printf '%s\n' "$best" | sed -n "s/.* $1=\([0-9.e+-]*\).*/\1/p" | head -1 | awk '{printf "%.2f", $1}'; }
     printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
         "$scene" "$(field fps | awk '{printf "%.0f", $1}')" "$(field gpu_scene_ms)" \
         "$(field sky)" "$(field opaque)" "$(field occlusion)" "$(field transparent)" \
