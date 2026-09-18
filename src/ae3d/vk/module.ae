@@ -184,6 +184,8 @@ struct VKRenderer {
     taa_frame: int
     prev_vp: Mat4
     prev_vp_valid: bool
+    jitter_x: float
+    jitter_y: float
     last_draw_calls: int
     last_shadow_ms: float
     last_scene_ms: float
@@ -525,9 +527,9 @@ frame_view_projection(r: *VKRenderer, cam: *Camera) -> Mat4 {
     k = r.taa_frame % 8 + 1
     jx = (halton(k, 2) - 0.5) * 2.0 / width
     jy = (halton(k, 3) - 0.5) * 2.0 / height
-    // Said to the temporal pass in texture space; Vulkan's y runs down.
-    ae3d_vk_scene_set_float(vkscene.OFF_JITTER, jx * 0.5)
-    ae3d_vk_scene_set_float(vkscene.OFF_JITTER + 4, 0.0 - jy * 0.5)
+    // Kept for the temporal pass, in texture space; Vulkan's y runs down.
+    r.jitter_x = jx * 0.5
+    r.jitter_y = 0.0 - jy * 0.5
     return core.mat4_mul(core.mat4_translate(jx, jy, 0.0), vp)
 }
 
@@ -1497,7 +1499,14 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
         if ssr_on || depth_ready {
             ae3d_vk_scene_set_inv_viewproj(vkscene.OFF_INVVIEWPROJECTION, &view_projection)
         }
-        if taa_on { ae3d_vk_scene_set_clip_mat4(vkscene.OFF_PREVVIEWPROJECTION, &previous) }
+        if taa_on {
+            // Into every program's block, as the view-projection is: the
+            // temporal pass reads the scene program's, whichever was
+            // current when the frame's nudge was worked out.
+            ae3d_vk_scene_set_clip_mat4(vkscene.OFF_PREVVIEWPROJECTION, &previous)
+            ae3d_vk_scene_set_float(vkscene.OFF_JITTER, r.jitter_x)
+            ae3d_vk_scene_set_float(vkscene.OFF_JITTER + 4, r.jitter_y)
+        }
         // What a water surface needs to read the depth under it back into
         // a position: whether there is one, and the frame's size in pixels.
         has_depth = 0
