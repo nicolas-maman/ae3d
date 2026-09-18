@@ -200,6 +200,17 @@ compare_size(name: string, gl_pixels: ptr, vk_pixels: ptr, width: int, height: i
     println("  ${name}: opengl lit ${lit_gl}, vulkan lit ${lit_vk}")
 }
 
+// The mean of one channel over the frame, in 0..255.
+channel_mean(pixels: ptr, channel: int) -> int {
+    total = 0.0
+    i = 0
+    while i < WIDTH * HEIGHT {
+        total = total + (mem.get_byte(pixels, i * 4 + channel) as float)
+        i = i + 1
+    }
+    return (total / ((WIDTH * HEIGHT) as float)) as int
+}
+
 compare(name: string, gl_pixels: ptr, vk_pixels: ptr) -> int {
     return compare_within(name, gl_pixels, vk_pixels, 2)
 }
@@ -540,6 +551,23 @@ main() {
     core.backend_render(&vulkan_pass, cam, light)
     ocean_lit = compare("gerstner ocean", offscreen.target_pixels(target), vk.offscreen_pixels())
     check_true("the ocean changes the frame", ocean_lit != preset_lit)
+
+    // The sea under an overcast: the surface reflects the sky the sky
+    // shader draws, pulled toward the overcast's grey, on both backends
+    // alike -- the water program reads the overcast through its own
+    // uniforms on OpenGL and through the shared block on Vulkan.
+    gl.renderer_set_sky_overcast(gl_renderer, 0.9, core.vec3(0.62, 0.65, 0.70))
+    vk.renderer_set_sky_overcast(vk_renderer, 0.9, core.vec3(0.62, 0.65, 0.70))
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    gl_grey = channel_mean(offscreen.target_pixels(target), 2) - channel_mean(offscreen.target_pixels(target), 0)
+    compare("ocean under an overcast", offscreen.target_pixels(target), vk.offscreen_pixels())
+    gl.renderer_set_sky_overcast(gl_renderer, 0.0, core.vec3(0.5, 0.5, 0.5))
+    vk.renderer_set_sky_overcast(vk_renderer, 0.0, core.vec3(0.5, 0.5, 0.5))
+    core.backend_render(&opengl_pass, cam, light)
+    core.backend_render(&vulkan_pass, cam, light)
+    gl_blue = channel_mean(offscreen.target_pixels(target), 2) - channel_mean(offscreen.target_pixels(target), 0)
+    check_true("the overcast greys the sea's reflection (blue over red ${gl_grey} against ${gl_blue})", gl_grey < gl_blue - 2)
 
     // A shore: the surface reads the scene's depth under it, captured after
     // the opaque pass on both backends, and goes clear over the cubes that

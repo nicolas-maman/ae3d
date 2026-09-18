@@ -427,9 +427,12 @@ vec4 cloudsAlong(vec3 dir, vec3 sky, float cover, float t, float dither) {
         ray += dt;
     }
     // Gone at the horizon, where the layer is a hundred kilometres deep and
-    // the haze the sky is painted with has swallowed it.
+    // the haze the sky is painted with has swallowed it. The colour is
+    // premultiplied, so it fades with the alpha: faded alone, the alpha
+    // left the sky standing and the colour was added over it, a white
+    // band along the horizon under any cover.
     float horizon = smoothstep(0.04, 0.32, dir.y);
-    return vec4(colour, alpha * horizon);
+    return vec4(colour * horizon, alpha * horizon);
 }
 
 // A clear sky from the sun's position alone. Blue overhead and pale at the

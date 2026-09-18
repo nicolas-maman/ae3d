@@ -23,7 +23,7 @@ skinned instanced crowds, and an engine that can be interrogated while it runs.
 | | |
 |---|---|
 | **Two renderers, one interface** | Vulkan by default, OpenGL 4.1 at parity; `tests/test_backend_parity` draws the same scene through both and holds them to 0.7% of channels. DirectX 12 and Metal are on the roadmap ([#311](https://github.com/nicolas-maman/ae3d/issues/311), [#312](https://github.com/nicolas-maman/ae3d/issues/312)). |
-| **Physically based shading** | Metallic/roughness materials, four lights, normal mapping, texel-snapped shadow maps, SSAO, screen-space reflections, ray-traced shadows (Vulkan ray query), MSAA, temporal anti-aliasing, DLSS (NVIDIA Streamline on Vulkan), FXAA, bloom, ACES tone mapping, fog, wet surfaces. |
+| **Physically based shading** | Metallic/roughness materials, four lights, normal mapping, texel-snapped shadow maps, SSAO, screen-space reflections, ray-traced shadows with penumbrae and ambient occlusion by ray (Vulkan ray query), MSAA, temporal anti-aliasing, DLSS (NVIDIA Streamline on Vulkan), FXAA, bloom, ACES tone mapping, fog, wet surfaces. |
 | **A sky by the hour** | `engine_set_time_of_day(hours)` places the sun and derives the key light, fog and a procedural sky from it. Volumetric clouds from baked Perlin-Worley textures, lit through a sun march, shadowing the ground: ~1.5 ms a frame. |
 | **Weather** | Rain, snow, dust and storm over any scene (`ae3d.weather`): a hundred thousand point-instanced particles stepped in C around the camera, wind, the sky and clouds gone overcast, the fog and the sun to match, lightning in a storm. |
 | **Water** | A Gerstner sea with dispersion, fresnel, GGX glitter, whitecaps, depth-based shallows and a foam line, and caustics from underneath. |
