@@ -1,0 +1,1911 @@
+// Judge a running scene against what a scene has to be to look expensive.
+//
+//     AE3D_AGENT=7911 ./build/zombie_street &
+//     ./build/critique_scene 7911 [--figure Zombie_] [--walks Zombie_Body]
+//                            [--feet AnkleL,AnkleR,ToeL,ToeR] [--road 0.115] [--frame-only]
+//
+// Nothing here is read off a screenshot. A picture tells a person that a
+// wall looks wrong and tells a program nothing at all; the numbers behind
+// that impression are texel density, silhouette and proportion, and every
+// one of them is a property of the scene the engine can be asked about
+// directly, over the agent channel (ae3d.probe).
+//
+// The standards are the ones a real art review applies, with the number
+// each of them is; each is a constant below with the reason for its value
+// beside it. Exits 0 when every standard holds, 1 naming what failed, 2
+// when the scene could not be reached, 3 when the frame cannot be read back
+// on this backend (software Vulkan on a headless runner has no swapchain to
+// read), which is a skip and not a judgement.
+import std.os
+import std.list
+import std.string
+import std.json
+import std.mem
+import ae3d.core
+import ae3d.probe
+
+extern sqrt(x: float) -> float
+extern acos(x: float) -> float
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+// A texel every two millimetres is what a surface needs to survive being
+// stood next to. Half of that is the floor below which a surface is
+// visibly soft.
+const WANT_TEXELS = 512.0
+const FLOOR_TEXELS = 256.0
+// Densities further apart than this read as different games in one frame.
+const SPREAD = 8.0
+// A shape lying in no more planes than a cube does is a cube.
+const BOX_PLANES = 8
+// What a figure has to carry to read as one rather than as a stack of props.
+const CHARACTER_TRIANGLES = 20000
+const CHARACTER_PLANES = 3000
+// A planted foot is planted: how close to the bottom of its travel a joint
+// has to be, and how still vertically, to count as standing on the road,
+// and how far it may then move along it.
+const CONTACT_BAND = 0.020
+const CONTACT_SETTLE = 0.002
+const SLIDE_PER_FRAME = 0.025
+const SLIDE_PER_CONTACT = 0.040
+// How far off the road surface the deepest a foot reaches may sit: below by
+// more than SINK it has gone through, above by more than FLOAT it walks on
+// air. The road passed in is the pavement the walk is on, ~0.115 here.
+const GROUND_SINK = 0.03
+const GROUND_FLOAT = 0.07
+// How far the shape of a drawn figure may stray from the shape of its
+// skeleton: wide, since the mesh reaches past the bones and an oblique view
+// sees less width; what is caught is a figure deformed twice, four times its
+// own shape with every count still right.
+const SHAPE_LOW = 0.35
+const SHAPE_HIGH = 2.5
+// The normal maps at this strength have to move the worst pixel this much:
+// loaded and reaching the frame are different facts. Modest, since the
+// frame's size averages relief away (0.094 at 1280x720, 0.035 at 320x180).
+const NORMAL_STRENGTH = 2.5
+const NORMAL_VISIBLE = 0.025
+const OCCLUSION_VISIBLE = 0.03
+// What a frame may cost in the units that mean the same on every machine:
+// a ceiling against a scene gone quietly wrong, while ae3d_bench holds the
+// exact figure.
+const MAX_DRAWS = 400
+const MAX_TRIANGLES = 60000
+const MAX_PROGRAM_CHANGES = 12
+// How much sharper than its own busiest movement a bone may move between
+// two samples: this walk measures 2.0, a leg interpolating the long way
+// round 37 to 45.
+const SPIN_LIMIT = 8.0
+// How far off upright a head may lean: looking at one's feet is about 40,
+// past 60 is a head that has come off its neck.
+const HEAD_LEAN = 55.0
+// The pelvis rises and falls as the weight goes from leg to leg: a couple
+// of centimetres a step, neither a rail nor a pogo.
+const WEIGHT_BOB_LOW = 0.010
+const WEIGHT_BOB_HIGH = 0.20
+// The strike straightens the arm past anything the shuffle does, by at
+// least this: 0.12 is a clear thrust and not a lean.
+const STRIKE_REACH = 0.12
+// The head follows the body: its turn lines up best at least this many
+// frames behind the hips.
+const FOLLOW_LAG = 1
+// What a night street has to be in the frame, read off the rendered grid.
+const LIGHT_SOURCE_LUM = 0.55
+const MIN_LIGHT_SOURCES = 3
+const LIGHT_SOURCE_FRACTION_MAX = 0.15
+const BRIGHTEST_WANTED = 0.6
+const DARK_FLOOR = 0.008
+const DARK_CEIL = 0.22
+const NIGHT_MEDIAN_MAX = 0.42
+const WARM_LIGHTS_MIN = 0.10
+const COOL_DARK_MAX = 0.02
+const ROAD_REFLECTION_MIN = 0.25
+const POOL_MIN = 2
+const POOL_DIP_FRACTION = 0.6
+const REFLECTION_ON = 0.8
+const REFLECTION_LAMP_LIFT = 1.4
+const SSR_ROAD_HEIGHT = 0.115
+const SSR_STRENGTH = 1.5
+const SSR_LAMP_LIFT = 1.15
+const SSR_FIGURE_SMEAR = 0.20
+const SSR_BLOOM_COEXIST_LIFT = 1.05
+// Held still, the frame must not move: Vulkan is bit-exact, OpenGL within
+// one code value; this floor is many times that.
+const STABILITY_EPS = 0.004
+const BLOOM_TOTAL_LIFT = 1.15
+const BLOOM_BRIGHT_LIFT = 1.30
+const SHADOW_TOTAL_LIFT = 1.15
+const SHADOW_BRIGHT_LIFT = 1.80
+// How far a bone read through anim.track may sit from the same bone read
+// through a drawn frame: a hair off zero for the order floats are summed in.
+const SAMPLE_MATCH_EPS = 0.0005
+
+var g_failures = 0
+var g_probe = null
+
+// ---------------------------------------------------------------- reporting
+
+// A number to `places` decimals, the way a report reads.
+fmt(value: float, places: int) -> string {
+    scale = 1
+    i = 0
+    while i < places { scale = scale * 10 ; i = i + 1 }
+    negative = value < 0.0
+    if negative { value = 0.0 - value }
+    scaled = (value * (scale as float) + 0.5) as int
+    whole = scaled / scale
+    fraction = scaled - whole * scale
+    text = "${whole}"
+    if places > 0 {
+        digits = "${fraction}"
+        while string.length(digits) < places { digits = string.concat("0", digits) }
+        text = string.concat(text, string.concat(".", digits))
+    }
+    if negative { return string.concat("-", text) }
+    return text
+}
+
+// A number with its sign always shown, to three decimals.
+signed(value: float) -> string {
+    if value >= 0.0 { return "+${fmt(value, 3)}" }
+    return fmt(value, 3)
+}
+
+pct(value: float) -> string { return fmt(value * 100.0, 0) }
+
+// A standard the scene is known not to meet yet, with an issue for it:
+// said as a note rather than counted, so the build says it every run
+// without failing on a content gap that is already tracked.
+check_note(name: string, ok: bool, detail: string, issue: string) {
+    if ok {
+        check(name, true, detail)
+        return
+    }
+    println("  note ${name} (${detail}; #${issue})")
+}
+
+check(name: string, ok: bool, detail: string) {
+    tag = "FAIL"
+    if ok { tag = "ok  " }
+    if detail != "" {
+        println("  ${tag} ${name} (${detail})")
+    } else {
+        println("  ${tag} ${name}")
+    }
+    if !ok { g_failures = g_failures + 1 }
+}
+
+// ---------------------------------------------------------------- the channel
+
+// One request; a closed connection ends the run as unreachable (2), a
+// refusal is answered as null for the caller to judge.
+ask(request: ptr) -> ptr {
+    op = probe.text(request, "op")
+    answered = probe.ask(g_probe as *Probe, request)
+    json.free(request)
+    if answered == null {
+        println("critique_scene: ${op}: the scene went away mid-critique")
+        os.exit(2)
+    }
+    if !probe.accepted(answered) {
+        println("critique_scene: ${op}: ${probe.refusal(answered)}")
+        json.free(answered)
+        return null
+    }
+    return answered
+}
+
+request(op: string) -> ptr {
+    r = json.obj()
+    json.object_set_raw(r, "op", json.str(op))
+    return r
+}
+
+with_text(r: ptr, key: string, value: string) -> ptr {
+    json.object_set_raw(r, key, json.str(value))
+    return r
+}
+
+with_number(r: ptr, key: string, value: float) -> ptr {
+    json.object_set_raw(r, key, json.num(value))
+    return r
+}
+
+with_int(r: ptr, key: string, value: int) -> ptr {
+    json.object_set_raw(r, key, json.from_int(value as long))
+    return r
+}
+
+with_flag(r: ptr, key: string, value: bool) -> ptr {
+    v = 0
+    if value { v = 1 }
+    json.object_set_raw(r, key, json.boolean(v))
+    return r
+}
+
+with_vec3(r: ptr, key: string, v: Vec3) -> ptr {
+    a = json.arr()
+    json.array_add_raw(a, json.num(v.x))
+    json.array_add_raw(a, json.num(v.y))
+    json.array_add_raw(a, json.num(v.z))
+    json.object_set_raw(r, key, a)
+    return r
+}
+
+// An op whose effect is wanted and whose answer is not.
+did(request: ptr) -> bool {
+    answered = ask(request)
+    if answered == null { return false }
+    json.free(answered)
+    return true
+}
+
+seek(time: float) { did(with_number(request("anim.set"), "time", time)) }
+
+// One model shown alone (`isolate` is a word Aether keeps, so not that).
+show_only(named: string) { did(with_text(request("scene.isolate"), "object", named)) }
+
+show_all() { did(request("scene.isolate")) }
+
+// ---------------------------------------------------------------- the grid
+
+// A frame.grid answer: the whole answered is kept, since the cells live in it.
+struct Grid {
+    answered: ptr
+    cells: ptr
+    columns: int
+    rows: int
+}
+
+grid_read(columns: int, rows: int) -> Grid {
+    answered = ask(with_int(with_int(request("frame.grid"), "columns", columns), "rows", rows))
+    g = Grid { answered: answered, cells: null, columns: 0, rows: 0 }
+    if answered == null { return g }
+    result = probe.result(answered)
+    g.cells = probe.field(result, "cells")
+    g.rows = json.array_size(g.cells)
+    if g.rows > 0 { g.columns = json.array_size(json.array_get_raw(g.cells, 0)) }
+    return g
+}
+
+grid_free(g: Grid) { if g.answered != null { json.free(g.answered) } }
+
+cell(g: Grid, x: int, y: int, k: int) -> float {
+    row = json.array_get_raw(g.cells, y)
+    c = json.array_get_raw(row, x)
+    return json.get_number(json.array_get_raw(c, k))
+}
+
+lum(g: Grid, x: int, y: int) -> float {
+    return 0.2126 * cell(g, x, y, 0) + 0.7152 * cell(g, x, y, 1) + 0.0722 * cell(g, x, y, 2)
+}
+
+// The sum of a cell's colour differences between two grids.
+cell_delta(a: Grid, b: Grid, x: int, y: int) -> float {
+    d = 0.0
+    k = 0
+    while k < 3 {
+        v = cell(a, x, y, k) - cell(b, x, y, k)
+        if v < 0.0 { v = 0.0 - v }
+        d = d + v
+        k = k + 1
+    }
+    return d
+}
+
+// The grid's luminances as a sorted array of doubles; the caller frees it.
+sorted_lums(g: Grid) -> ptr {
+    n = g.columns * g.rows
+    values = calloc(n, 8)
+    out = values as float[]
+    y = 0
+    while y < g.rows {
+        x = 0
+        while x < g.columns {
+            out[y * g.columns + x] = lum(g, x, y)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    sort_doubles(values, n)
+    return values
+}
+
+// Shell sort: n is a thousand or two, and there is no comparator to hand C.
+sort_doubles(values: ptr, n: int) {
+    v = values as float[]
+    gap = n / 2
+    while gap > 0 {
+        i = gap
+        while i < n {
+            temp = v[i]
+            j = i
+            while j >= gap && v[j - gap] > temp {
+                v[j] = v[j - gap]
+                j = j - gap
+            }
+            v[j] = temp
+            i = i + 1
+        }
+        gap = gap / 2
+    }
+}
+
+// The count of cells at or over the light-source line in the rows from
+// `from_row` down, and the total luminance of them.
+bright_cells(g: Grid, from_row: int) -> int {
+    count = 0
+    y = from_row
+    while y < g.rows {
+        x = 0
+        while x < g.columns {
+            if lum(g, x, y) >= LIGHT_SOURCE_LUM { count = count + 1 }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return count
+}
+
+total_light(g: Grid) -> float {
+    sum = 0.0
+    y = 0
+    while y < g.rows {
+        x = 0
+        while x < g.columns {
+            sum = sum + lum(g, x, y)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return sum
+}
+
+// ---------------------------------------------------------------- the skeleton
+
+// The bones' world positions at each of `times`, in one channel call:
+// anim.track poses each time exactly as a drawn frame does and reads every
+// bone, no frame rendered between samples. The answered is kept; bone_at
+// reads out of it.
+struct Track {
+    answered: ptr
+    samples: ptr
+    count: int
+}
+
+track_read(mesh: string, times: ptr, count: int) -> Track {
+    arr = json.arr()
+    t = times as float[]
+    i = 0
+    while i < count {
+        json.array_add_raw(arr, json.num(t[i]))
+        i = i + 1
+    }
+    r = with_text(request("anim.track"), "object", mesh)
+    json.object_set_raw(r, "times", arr)
+    answered = ask(r)
+    tr = Track { answered: answered, samples: null, count: 0 }
+    if answered == null { return tr }
+    tr.samples = probe.field(probe.result(answered), "samples")
+    if tr.samples != null { tr.count = json.array_size(tr.samples) }
+    return tr
+}
+
+track_free(tr: Track) { if tr.answered != null { json.free(tr.answered) } }
+
+// The times 0, 1/fps, 2/fps ... for `seconds`; the caller frees them.
+frame_times(seconds: float, fps: int) -> ptr {
+    n = (seconds * (fps as float)) as int
+    times = calloc(n, 8)
+    t = times as float[]
+    i = 0
+    while i < n { t[i] = (i as float) / (fps as float) ; i = i + 1 }
+    return times
+}
+
+// A bone's world position in a bones array (scene.skeleton's or a track
+// sample's); found says whether it was there.
+var g_found = false
+
+bone_in(bones: ptr, name: string) -> Vec3 {
+    g_found = false
+    if bones == null { return core.vec3(0.0, 0.0, 0.0) }
+    i = 0
+    while i < json.array_size(bones) {
+        b = json.array_get_raw(bones, i)
+        if probe.text(b, "name") == name {
+            p = probe.field(b, "world_position")
+            g_found = true
+            return core.vec3(json.get_number(json.array_get_raw(p, 0)),
+                             json.get_number(json.array_get_raw(p, 1)),
+                             json.get_number(json.array_get_raw(p, 2)))
+        }
+        i = i + 1
+    }
+    return core.vec3(0.0, 0.0, 0.0)
+}
+
+sample_bones(tr: Track, i: int) -> ptr {
+    return probe.field(json.array_get_raw(tr.samples, i), "bones")
+}
+
+bone_at(tr: Track, i: int, name: string) -> Vec3 {
+    return bone_in(sample_bones(tr, i), name)
+}
+
+// The skeleton as a drawn frame has it, seek first.
+skeleton_bones(answered: ptr) -> ptr {
+    if answered == null { return null }
+    return probe.field(probe.result(answered), "bones")
+}
+
+// ---------------------------------------------------------------- the models
+
+model_count(models: ptr) -> int { return json.array_size(models) }
+model_at(models: ptr, i: int) -> ptr { return json.array_get_raw(models, i) }
+model_name(m: ptr) -> string { return probe.text(m, "name") }
+
+// A model's size along an axis, from its "size" triple; zero without one.
+model_size(m: ptr, axis: int) -> float {
+    size = probe.field(m, "size")
+    if size == null { return 0.0 }
+    return json.get_number(json.array_get_raw(size, axis))
+}
+
+has_text(m: ptr, key: string) -> bool { return probe.text(m, key) != "" }
+
+// ---------------------------------------------------------------- the standards
+
+texel_density(models: ptr) {
+    println("== how much texture crosses a metre of surface ==")
+    // The textured models by density, lowest first.
+    n = model_count(models)
+    order = calloc(n, 8)
+    idx = order as int[]
+    count = 0
+    i = 0
+    while i < n {
+        m = model_at(models, i)
+        if probe.number(m, "texels_per_m") > 0.0 {
+            // Insertion, lowest density first.
+            j = count
+            while j > 0 && probe.number(model_at(models, idx[j - 1]), "texels_per_m") > probe.number(m, "texels_per_m") {
+                idx[j] = idx[j - 1]
+                j = j - 1
+            }
+            idx[j] = i
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if count == 0 {
+        check("every surface carries a measurable texture", false, "none reported one")
+        free(order)
+        return
+    }
+    i = 0
+    while i < count && i < 6 {
+        m = model_at(models, idx[i])
+        material = probe.text(m, "material")
+        if material == "" { material = "-" }
+        println("  ${string_pad(model_name(m), 22)} ${string_pad(material, 14)} ${fmt(probe.number(m, "texels_per_m"), 0)} texels/m  ${fmt(probe.number(m, "uv_repeats_per_m"), 2)} repeats/m over ${fmt(probe.number(m, "area_m2"), 1)} m2")
+        i = i + 1
+    }
+    low = model_at(models, idx[0])
+    high = model_at(models, idx[count - 1])
+    low_d = probe.number(low, "texels_per_m")
+    high_d = probe.number(high, "texels_per_m")
+    check("no surface is softer than a texel every four millimetres", low_d >= FLOOR_TEXELS,
+          "${model_name(low)} is ${fmt(low_d, 0)}, wanted ${fmt(FLOOR_TEXELS, 0)}")
+    divisor = low_d
+    if divisor < 1.0 { divisor = 1.0 }
+    spread = high_d / divisor
+    check("the scene is textured to one standard", spread <= SPREAD,
+          "${fmt(low_d, 0)} to ${fmt(high_d, 0)} is ${fmt(spread, 0)} times, wanted ${fmt(SPREAD, 0)}")
+    short = 0
+    i = 0
+    while i < count {
+        if probe.number(model_at(models, idx[i]), "texels_per_m") < WANT_TEXELS { short = short + 1 }
+        i = i + 1
+    }
+    check("every surface holds up at arm's length", short == 0, "${short} of ${count} below ${fmt(WANT_TEXELS, 0)}")
+    free(order)
+}
+
+string_pad(text: string, width: int) -> string {
+    padded = text
+    while string.length(padded) < width { padded = string.concat(padded, " ") }
+    return padded
+}
+
+// A model big enough to fill a frame and flat enough to have nothing in it;
+// a pane of glass lies in one plane and is meant to.
+is_slab(m: ptr) -> bool {
+    name = model_name(m)
+    if string.contains(name, "Glass") == 1 || string.contains(name, "Lit") == 1 { return false }
+    return probe.integer(m, "planes") <= BOX_PLANES && probe.number(m, "area_m2") > 8.0
+}
+
+relief(models: ptr) {
+    println("")
+    println("== what the shapes are, rather than what they are painted with ==")
+    n = model_count(models)
+    // The eight largest, by area.
+    shown = 0
+    used = calloc(n, 1)
+    while shown < 8 && shown < n {
+        best = 0 - 1
+        i = 0
+        while i < n {
+            if mem.get_byte(used, i) == 0 && (best < 0 || probe.number(model_at(models, i), "area_m2") > probe.number(model_at(models, best), "area_m2")) { best = i }
+            i = i + 1
+        }
+        if best < 0 { break }
+        mem.set_byte(used, best, 1)
+        m = model_at(models, best)
+        println("  ${string_pad(model_name(m), 22)} ${probe.integer(m, "triangles")} triangles, ${probe.integer(m, "planes")} planes, ${fmt(probe.number(m, "area_m2"), 1)} m2")
+        shown = shown + 1
+    }
+    free(used)
+    slabs = 0
+    named = ""
+    i = 0
+    while i < n {
+        m = model_at(models, i)
+        if is_slab(m) {
+            if slabs < 4 {
+                if named != "" { named = string.concat(named, ", ") }
+                named = string.concat(named, model_name(m))
+            }
+            slabs = slabs + 1
+        }
+        i = i + 1
+    }
+    check("nothing large enough to fill a frame is a bare slab", slabs == 0, "${slabs} of them, ${named}")
+}
+
+character(models: ptr, prefix: string) {
+    println("")
+    println("== the figure ==")
+    parts = 0
+    triangles = 0
+    planes = 0
+    area = 0.0
+    i = 0
+    while i < model_count(models) {
+        m = model_at(models, i)
+        if string.starts_with(model_name(m), prefix) == 1 {
+            parts = parts + 1
+            triangles = triangles + probe.integer(m, "triangles")
+            planes = planes + probe.integer(m, "planes")
+            area = area + probe.number(m, "area_m2")
+        }
+        i = i + 1
+    }
+    if parts == 0 {
+        check("the scene has a figure in it", false, "nothing named ${prefix}")
+        return
+    }
+    println("  ${parts} part(s), ${triangles} triangles, ${planes} planes, ${fmt(area, 2)} m2 of surface")
+    check("the figure carries the geometry a figure needs", triangles >= CHARACTER_TRIANGLES, "${triangles} triangles, wanted ${CHARACTER_TRIANGLES}")
+    check("and enough of a silhouette to read as one", planes >= CHARACTER_PLANES, "${planes} distinct planes, wanted ${CHARACTER_PLANES}")
+    check("and is one surface rather than a pile of parts", parts <= 2, "${parts} separate models")
+}
+
+// The size of the figure's part `name` along `axis`, or zero.
+part_size(models: ptr, prefix: string, name: string, axis: int) -> float {
+    wanted = string.concat(prefix, name)
+    i = 0
+    while i < model_count(models) {
+        m = model_at(models, i)
+        if model_name(m) == wanted { return model_size(m, axis) }
+        i = i + 1
+    }
+    return 0.0
+}
+
+// A figure is judged against itself: limb against limb.
+proportion(models: ptr, prefix: string) {
+    head = part_size(models, prefix, "Head", 1)
+    if head <= 0.0 { return }
+    println("")
+    println("== proportion ==")
+    thigh = part_size(models, prefix, "LegUpperL", 1)
+    shin = part_size(models, prefix, "LegLowerL", 1)
+    upper = part_size(models, prefix, "ArmUpperL", 1)
+    fore = part_size(models, prefix, "ArmLowerL", 1)
+    println("  head ${fmt(head, 2)} m, thigh ${fmt(thigh, 2)}, shin ${fmt(shin, 2)}, upper arm ${fmt(upper, 2)}, forearm ${fmt(fore, 2)}")
+    if thigh > 0.0 && shin > 0.0 {
+        ratio = shin / thigh
+        check("the shin is close to the thigh in length", ratio >= 0.8 && ratio <= 1.05, "shin/thigh ${fmt(ratio, 2)}")
+    }
+    if upper > 0.0 && fore > 0.0 {
+        ratio = fore / upper
+        check("and the forearm a little shorter than the upper arm", ratio >= 0.75 && ratio <= 1.0, "forearm/upper ${fmt(ratio, 2)}")
+    }
+}
+
+// What a frame costs, against what it is allowed to cost: draw calls,
+// triangles and state changes mean the same thing on every machine, where
+// milliseconds do not; those are printed beside them, split by pass.
+budget() {
+    println("")
+    println("== what a frame costs ==")
+    did(request("frame.capture"))
+    answered = ask(request("frame.stats"))
+    if answered == null { check("the frame's cost can be read", false, "") ; return }
+    stats = probe.result(answered)
+    draws = probe.integer(stats, "draw_calls")
+    triangles = probe.integer(stats, "triangles")
+    programs = probe.integer(stats, "program_binds")
+    materials = probe.integer(stats, "material_binds")
+    passes = probe.number(stats, "shadow_ms") + probe.number(stats, "scene_ms") + probe.number(stats, "post_ms")
+    println("  ${draws} draws, ${triangles} triangles, ${programs} program / ${materials} material / ${probe.integer(stats, "texture_binds")} texture changes")
+    println("  shadow ${fmt(probe.number(stats, "shadow_ms"), 2)} ms, scene ${fmt(probe.number(stats, "scene_ms"), 2)} ms, post ${fmt(probe.number(stats, "post_ms"), 2)} ms, submitted in ${fmt(passes, 2)} ms")
+    check("the scene draws within its budget of draw calls", draws <= MAX_DRAWS, "${draws} draws, allowed ${MAX_DRAWS}")
+    check("and within its budget of triangles", triangles <= MAX_TRIANGLES, "${triangles} triangles, allowed ${MAX_TRIANGLES}")
+    check("and does not thrash the program it draws with", programs <= MAX_PROGRAM_CHANGES, "${programs} program changes, allowed ${MAX_PROGRAM_CHANGES}")
+    check("and changes material no more often than it draws", materials <= draws, "${materials} material changes against ${draws} draws")
+    json.free(answered)
+}
+
+// Whether surfaces have a shape as well as a colour, and whether it lands:
+// that the maps are there, and that turning them off changes the picture.
+surface_relief(models: ptr) {
+    println("")
+    println("== the shape of the surfaces ==")
+    big = 0
+    without = 0
+    unloaded = 0
+    without_names = ""
+    unloaded_names = ""
+    i = 0
+    while i < model_count(models) {
+        m = model_at(models, i)
+        name = model_name(m)
+        if has_text(m, "texture") && probe.number(m, "area_m2") > 8.0 && string.contains(name, "Glass") == 0 && string.contains(name, "Lit") == 0 {
+            big = big + 1
+            if !has_text(m, "normal") {
+                if without < 4 {
+                    if without_names != "" { without_names = string.concat(without_names, ", ") }
+                    without_names = string.concat(without_names, name)
+                }
+                without = without + 1
+            } else if !probe.flag(m, "normal_loaded") {
+                if unloaded < 4 {
+                    if unloaded_names != "" { unloaded_names = string.concat(unloaded_names, ", ") }
+                    unloaded_names = string.concat(unloaded_names, name)
+                }
+                unloaded = unloaded + 1
+            }
+        }
+        i = i + 1
+    }
+    println("  ${big - without} of ${big} surfaces over 8 m2 carry a normal map")
+    check("every surface big enough to stand next to has a normal map", without == 0, "${without} without: ${without_names}")
+    check("and the renderer loaded every one it names", unloaded == 0, unloaded_names)
+
+    // Measured from somewhere the light actually falls: a lit surface seen
+    // face on, then the camera put back where it was.
+    was = ask(request("camera.get"))
+    if was == null { return }
+    if !did(with_number(request("render.set"), "normal_strength", 0.0)) {
+        check("the maps can be turned off to see whether they matter", false, "render.set refused")
+        json.free(was)
+        return
+    }
+    did(with_vec3(with_vec3(request("camera.set"), "position", core.vec3(0.0, 1.6, 3.0)), "look_at", core.vec3(0.0, 0.0, 0.0)))
+    did(request("frame.hold"))
+    did(with_number(request("render.set"), "normal_strength", NORMAL_STRENGTH))
+    moved = ask(with_int(request("frame.diff"), "tolerance", 2))
+    view = probe.result(was)
+    position = probe.field(view, "position")
+    front = probe.field(view, "front")
+    at = core.vec3(json.get_number(json.array_get_raw(position, 0)), json.get_number(json.array_get_raw(position, 1)), json.get_number(json.array_get_raw(position, 2)))
+    ahead = core.vec3(at.x + json.get_number(json.array_get_raw(front, 0)) * 4.0, at.y + json.get_number(json.array_get_raw(front, 1)) * 4.0, at.z + json.get_number(json.array_get_raw(front, 2)) * 4.0)
+    did(with_vec3(with_vec3(request("camera.set"), "position", at), "look_at", ahead))
+    json.free(was)
+    if moved != null {
+        m = probe.result(moved)
+        println("  under a lamp they move ${fmt(probe.number(m, "fraction") * 100.0, 1)}% of the frame, worst ${fmt(probe.number(m, "max_delta"), 3)}")
+        check("and the maps reach the picture", probe.number(m, "max_delta") >= NORMAL_VISIBLE,
+              "the worst pixel moves ${fmt(probe.number(m, "max_delta"), 3)}, wanted ${fmt(NORMAL_VISIBLE, 3)}")
+        json.free(moved)
+    }
+
+    // Ambient occlusion the same way, from the scene's own camera.
+    did(with_number(request("render.set"), "occlusion_strength", 0.0))
+    did(request("frame.hold"))
+    did(with_number(request("render.set"), "occlusion_strength", 1.0))
+    shut = ask(with_int(request("frame.diff"), "tolerance", 2))
+    if shut != null {
+        s = probe.result(shut)
+        println("  occlusion moves ${fmt(probe.number(s, "fraction") * 100.0, 1)}% of the frame, worst ${fmt(probe.number(s, "max_delta"), 3)}")
+        check("and the corners are darker than the open walls", probe.number(s, "max_delta") >= OCCLUSION_VISIBLE,
+              "the worst pixel moves ${fmt(probe.number(s, "max_delta"), 3)}, wanted ${fmt(OCCLUSION_VISIBLE, 3)}")
+        json.free(shut)
+    }
+}
+
+// The cells a model covers: a byte a cell, one where the frame with the
+// model alone differs from the frame with nothing. The caller frees it.
+coverage_mask(mesh: string, columns: int, rows: int, threshold: float) -> ptr {
+    show_only(mesh)
+    with_it = grid_read(columns, rows)
+    show_only("__nothing__")
+    without = grid_read(columns, rows)
+    show_all()
+    mask = calloc(columns * rows, 1)
+    if with_it.cells != null && without.cells != null {
+        y = 0
+        while y < rows && y < with_it.rows && y < without.rows {
+            x = 0
+            while x < columns {
+                if cell_delta(with_it, without, x, y) > threshold { mem.set_byte(mask, y * columns + x, 1) }
+                x = x + 1
+            }
+            y = y + 1
+        }
+    }
+    grid_free(with_it)
+    grid_free(without)
+    return mask
+}
+
+// What the figure actually covers on screen, against what it should: the
+// shape its skeleton says, one piece, taller than wide.
+silhouette(mesh: string, columns: int, rows: int) {
+    println("")
+    println("== the figure on screen ==")
+    mask = coverage_mask(mesh, columns, rows, 0.015)
+    count = 0
+    left = columns
+    right = 0 - 1
+    top = rows
+    bottom = 0 - 1
+    y = 0
+    while y < rows {
+        x = 0
+        while x < columns {
+            if mem.get_byte(mask, y * columns + x) == 1 {
+                count = count + 1
+                if x < left { left = x }
+                if x > right { right = x }
+                if y < top { top = y }
+                if y > bottom { bottom = y }
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    if count == 0 {
+        check("the figure is on screen at all", false, "nothing was drawn for ${mesh}")
+        free(mask)
+        return
+    }
+    stats_answer = ask(request("frame.stats"))
+    width = 1
+    height = 1
+    if stats_answer != null {
+        width = probe.integer(probe.result(stats_answer), "width")
+        height = probe.integer(probe.result(stats_answer), "height")
+        json.free(stats_answer)
+    }
+    drawn_x = ((right - left + 1) as float) / (columns as float)
+    drawn_y = ((bottom - top + 1) as float) / (rows as float)
+    println("  covers ${count} cells, ${pct(drawn_x)}% of the frame across and ${pct(drawn_y)}% down")
+
+    // The shape of what was drawn against the shape of what is meant to
+    // have drawn it: both ratios, so neither depends on the camera or the
+    // frame, and a figure deformed twice disagrees by a factor.
+    skel = ask(with_text(request("scene.skeleton"), "object", mesh))
+    bones = skeleton_bones(skel)
+    if bones != null && json.array_size(bones) > 0 {
+        min_x = 1000000.0
+        max_x = 0.0 - 1000000.0
+        min_y = 1000000.0
+        max_y = 0.0 - 1000000.0
+        min_z = 1000000.0
+        max_z = 0.0 - 1000000.0
+        i = 0
+        while i < json.array_size(bones) {
+            p = probe.field(json.array_get_raw(bones, i), "world_position")
+            px = json.get_number(json.array_get_raw(p, 0))
+            py = json.get_number(json.array_get_raw(p, 1))
+            pz = json.get_number(json.array_get_raw(p, 2))
+            if px < min_x { min_x = px }
+            if px > max_x { max_x = px }
+            if py < min_y { min_y = py }
+            if py > max_y { max_y = py }
+            if pz < min_z { min_z = pz }
+            if pz > max_z { max_z = pz }
+            i = i + 1
+        }
+        across = max_x - min_x
+        if max_z - min_z > across { across = max_z - min_z }
+        upright = max_y - min_y
+        wide_px = ((right - left + 1) as float) * (width as float) / (columns as float)
+        tall_px = ((bottom - top + 1) as float) * (height as float) / (rows as float)
+        if upright > 0.000001 && tall_px > 0.0 {
+            want = across / upright
+            got = wide_px / tall_px
+            divisor = want
+            if divisor < 0.000001 { divisor = 0.000001 }
+            ratio = got / divisor
+            println("  its bones span ${fmt(across, 2)} across by ${fmt(upright, 2)} up (${fmt(want, 2)}); it drew ${fmt(got, 2)}")
+            check("the figure is the shape its skeleton is", ratio >= SHAPE_LOW && ratio <= SHAPE_HIGH,
+                  "drew ${fmt(got, 2)} against ${fmt(want, 2)}, which is ${fmt(ratio, 1)} times")
+        }
+    }
+    if skel != null { json.free(skel) }
+
+    // The bones say where the figure is and how big; the pixels say where
+    // it drew and how big.
+    tree = ask(with_flag(request("scene.tree"), "detail", true))
+    if tree != null {
+        models = probe.field(probe.result(tree), "models")
+        i = 0
+        while i < model_count(models) {
+            m = model_at(models, i)
+            if model_name(m) == mesh {
+                box = probe.field(m, "screen_region")
+                if box != null {
+                    wide = (probe.number(box, "width") / (width as float)) * 1.35 + 0.06
+                    tall = (probe.number(box, "height") / (height as float)) * 1.35 + 0.06
+                    check("the figure draws no bigger than its bones say it is", drawn_x <= wide && drawn_y <= tall,
+                          "drew ${pct(drawn_x)}% x ${pct(drawn_y)}%, allowed ${pct(wide)}% x ${pct(tall)}%")
+                }
+            }
+            i = i + 1
+        }
+        json.free(tree)
+    }
+
+    // One piece: anything that has come off a figure is a separate island.
+    // A flood fill over the mask, the islands' sizes kept.
+    seen = calloc(columns * rows, 1)
+    stack = calloc(columns * rows, 8)
+    st = stack as int[]
+    big = 0
+    threshold = count / 20
+    if threshold < 3 { threshold = 3 }
+    biggest = ""
+    y = 0
+    while y < rows {
+        x = 0
+        while x < columns {
+            at = y * columns + x
+            if mem.get_byte(mask, at) == 1 && mem.get_byte(seen, at) == 0 {
+                mem.set_byte(seen, at, 1)
+                depth = 0
+                st[0] = at
+                depth = 1
+                size = 0
+                while depth > 0 {
+                    depth = depth - 1
+                    here = st[depth]
+                    size = size + 1
+                    hx = here % columns
+                    hy = here / columns
+                    d = 0
+                    while d < 4 {
+                        nx = hx
+                        ny = hy
+                        if d == 0 { nx = hx + 1 }
+                        if d == 1 { nx = hx - 1 }
+                        if d == 2 { ny = hy + 1 }
+                        if d == 3 { ny = hy - 1 }
+                        if nx >= 0 && nx < columns && ny >= 0 && ny < rows {
+                            near = ny * columns + nx
+                            if mem.get_byte(mask, near) == 1 && mem.get_byte(seen, near) == 0 {
+                                mem.set_byte(seen, near, 1)
+                                st[depth] = near
+                                depth = depth + 1
+                            }
+                        }
+                        d = d + 1
+                    }
+                }
+                if size >= threshold {
+                    big = big + 1
+                    if big <= 4 { biggest = string.concat(biggest, " ${size}") }
+                }
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    check("the figure is in one piece", big <= 1, "${big} pieces of it, sizes${biggest}")
+    // A standing figure is taller than it is wide.
+    check("and stands taller than it is wide", (bottom - top) >= (right - left), "${bottom - top + 1} cells tall against ${right - left + 1} wide")
+    free(seen)
+    free(stack)
+    free(mask)
+}
+
+// How many legs the figure has, counted off the picture: runs of covered
+// cells across the lower part of the silhouette at ten moments of the walk.
+limbs(mesh: string, columns: int, rows: int) {
+    println("")
+    println("== how many legs ==")
+    worst = 0
+    at = 0.0
+    tenth = 0
+    while tenth < 10 {
+        moment = (tenth as float) * 0.26
+        seek(moment)
+        skel = ask(with_text(request("scene.skeleton"), "object", mesh))
+        hips = core.vec3(0.0, 1.0, 0.0)
+        if skel != null {
+            found = bone_in(skeleton_bones(skel), "Hips")
+            if g_found { hips = found }
+            json.free(skel)
+        }
+        did(with_vec3(with_vec3(request("camera.set"), "position", core.vec3(hips.x, 1.05, hips.z + 2.5)), "look_at", core.vec3(hips.x, 0.95, hips.z)))
+        mask = coverage_mask(mesh, columns, rows, 0.012)
+        first = 0 - 1
+        last = 0 - 1
+        y = 0
+        while y < rows {
+            x = 0
+            any = false
+            while x < columns {
+                if mem.get_byte(mask, y * columns + x) == 1 { any = true }
+                x = x + 1
+            }
+            if any {
+                if first < 0 { first = y }
+                last = y
+            }
+            y = y + 1
+        }
+        if first >= 0 {
+            low = first + (((last - first) as float) * 0.78) as int
+            y = low
+            while y <= last && y < rows {
+                runs = 0
+                inside = false
+                x = 0
+                while x < columns {
+                    on = mem.get_byte(mask, y * columns + x) == 1
+                    if on && !inside { runs = runs + 1 }
+                    inside = on
+                    x = x + 1
+                }
+                if runs > worst { worst = runs ; at = moment }
+                y = y + 1
+            }
+        }
+        free(mask)
+        tenth = tenth + 1
+    }
+    println("  the most separate limbs anywhere below the hips: ${worst} (at ${fmt(at, 2)}s)")
+    check("the figure has two legs and not three", worst <= 2, "${worst} separate limbs across the lower body at ${fmt(at, 2)}s")
+}
+
+// Whether any bone takes the long way round: the sharpest step of any bone
+// between samples against its own 95th-percentile step.
+spins(mesh: string, seconds: float, samples: int) {
+    println("")
+    println("== does anything spin ==")
+    times = calloc(samples, 8)
+    t = times as float[]
+    i = 0
+    while i < samples { t[i] = (i as float) * seconds / (samples as float) ; i = i + 1 }
+    tr = track_read(mesh, times, samples)
+    free(times)
+    if tr.count < 2 { check("no bone takes the long way round", false, "the track came back empty") ; track_free(tr) ; return }
+    bones = sample_bones(tr, 0)
+    n = json.array_size(bones)
+    steps = calloc(tr.count, 8)
+    st = steps as float[]
+    worst = 0.0
+    worst_name = "-"
+    b = 0
+    while b < n {
+        name = probe.text(json.array_get_raw(bones, b), "name")
+        prev = bone_at(tr, 0, name)
+        i = 1
+        while i < tr.count {
+            now = bone_at(tr, i, name)
+            st[i - 1] = core.v3_len(core.v3_sub(now, prev))
+            prev = now
+            i = i + 1
+        }
+        m = tr.count - 1
+        sort_doubles(steps, m)
+        // Against the 95th and not the median: a planted foot is motionless
+        // for half a cycle.
+        busy = st[(m * 95) / 100]
+        if busy > 0.000001 {
+            spike = st[m - 1] / busy
+            if spike > worst { worst = spike ; worst_name = name }
+        }
+        b = b + 1
+    }
+    free(steps)
+    track_free(tr)
+    println("  the sharpest movement between samples: ${worst_name} at ${fmt(worst, 1)} times its own busiest")
+    check("no bone takes the long way round", worst <= SPIN_LIMIT, "${worst_name} moves ${fmt(worst, 1)} times its busiest in one step, allowed ${fmt(SPIN_LIMIT, 0)}")
+}
+
+// Whether the figure carries its head or wears it: the neck-to-head
+// direction's lean off upright, at its worst over the clip.
+head_carriage(mesh: string, seconds: float, samples: int) {
+    println("")
+    println("== how the head is carried ==")
+    times = calloc(samples, 8)
+    t = times as float[]
+    i = 0
+    while i < samples { t[i] = (i as float) * seconds / (samples as float) ; i = i + 1 }
+    tr = track_read(mesh, times, samples)
+    worst = 0.0
+    at_time = 0.0
+    i = 0
+    while i < tr.count {
+        neck = bone_at(tr, i, "Neck")
+        had_neck = g_found
+        head = bone_at(tr, i, "Head")
+        if !had_neck || !g_found { free(times) ; track_free(tr) ; return }
+        up = core.v3_sub(head, neck)
+        length = core.v3_len(up)
+        if length > 0.000001 {
+            c = up.y / length
+            if c > 1.0 { c = 1.0 }
+            if c < 0.0 - 1.0 { c = 0.0 - 1.0 }
+            lean = acos(c) * 57.29577951308232
+            if lean > worst {
+                worst = lean
+                at_time = t[i]
+            }
+        }
+        i = i + 1
+    }
+    free(times)
+    track_free(tr)
+    println("  the head leans at most ${fmt(worst, 0)} degrees off upright (at ${fmt(at_time, 2)}s)")
+    check("the figure carries its head upright", worst <= HEAD_LEAN, "${fmt(worst, 0)} degrees at ${fmt(at_time, 2)}s, allowed ${fmt(HEAD_LEAN, 0)}")
+}
+
+// Whether the figure walks or skates: a planted foot stays where it was
+// planted. Read off the bones; a foot is down when it is at the bottom of
+// its travel and neither coming down nor going up.
+gait(mesh: string, feet: string, road: float, seconds: float, fps: int) {
+    println("")
+    println("== the walk ==")
+    times = frame_times(seconds, fps)
+    n = (seconds * (fps as float)) as int
+    tr = track_read(mesh, times, n)
+    free(times)
+    if tr.count == 0 { check("the figure has a skeleton to read", false, "anim.track answered nothing") ; track_free(tr) ; return }
+    names = string.split(feet, ",")
+    foot_count = string.array_size(names)
+    lowest = 1000000.0
+    worst_slide = 0.0
+    worst_drift = 0.0
+    contacts = 0
+    f = 0
+    while f < foot_count {
+        foot = string.string_array_get(names, f)
+        // The foot's heights and x positions along the track.
+        ys = calloc(tr.count, 8)
+        xs = calloc(tr.count, 8)
+        y = ys as float[]
+        x = xs as float[]
+        present = true
+        i = 0
+        floor_y = 1000000.0
+        while i < tr.count {
+            p = bone_at(tr, i, foot)
+            if !g_found { present = false }
+            y[i] = p.y
+            x[i] = p.x
+            if p.y < floor_y { floor_y = p.y }
+            i = i + 1
+        }
+        if present {
+            if floor_y < lowest { lowest = floor_y }
+            floor = floor_y + CONTACT_BAND
+            // The contacts: runs of settled, low samples.
+            runs = 0
+            run_start = 0 - 1
+            run_prev = 0.0
+            run_first = 0.0
+            i = 0
+            while i <= tr.count {
+                down = false
+                if i < tr.count {
+                    settled = i > 0
+                    if i > 0 {
+                        dy = y[i] - y[i - 1]
+                        if dy < 0.0 { dy = 0.0 - dy }
+                        settled = dy <= CONTACT_SETTLE
+                    }
+                    down = y[i] < floor && settled
+                }
+                if down {
+                    if run_start < 0 {
+                        run_start = i
+                        run_first = x[i]
+                    } else {
+                        step = x[i] - run_prev
+                        if step < 0.0 { step = 0.0 - step }
+                        if step > worst_slide { worst_slide = step }
+                    }
+                    run_prev = x[i]
+                } else if run_start >= 0 {
+                    if i - run_start >= 2 {
+                        contacts = contacts + 1
+                        drift = run_prev - run_first
+                        if drift < 0.0 { drift = 0.0 - drift }
+                        if drift > worst_drift { worst_drift = drift }
+                    }
+                    runs = runs + 1
+                    run_start = 0 - 1
+                }
+                i = i + 1
+            }
+            println("  ${string_pad(foot, 8)} lowest ${signed(floor_y)}, ${runs} contact(s)")
+        }
+        free(ys)
+        free(xs)
+        f = f + 1
+    }
+    string.array_free(names)
+    track_free(tr)
+    check("no foot sinks through the road", lowest >= road - GROUND_SINK,
+          "the lowest foot is ${signed(lowest)}, ${fmt(road - lowest, 3)} under the road at ${signed(road)}, allowed ${fmt(GROUND_SINK, 3)}")
+    check("and the walk plants a foot on it rather than floating over it", lowest <= road + GROUND_FLOAT,
+          "the lowest foot is ${signed(lowest)}, ${fmt(lowest - road, 3)} above the road at ${signed(road)}, allowed ${fmt(GROUND_FLOAT, 3)}")
+    check("the figure takes steps", contacts >= 2, "${contacts} contacts in ${fmt(seconds, 1)}s")
+    check("a planted foot stays planted", worst_slide <= SLIDE_PER_FRAME, "worst ${fmt(worst_slide, 3)} m in a frame, allowed ${fmt(SLIDE_PER_FRAME, 3)}")
+    check("and does not creep over the whole contact", worst_drift <= SLIDE_PER_CONTACT, "worst ${fmt(worst_drift, 3)} m, allowed ${fmt(SLIDE_PER_CONTACT, 3)}")
+}
+
+// That anim.track reads the same pose a drawn frame does, bone for bone,
+// before anything is measured off the fast one.
+sampling_matches(mesh: string) {
+    println("")
+    println("== the fast pose reads true ==")
+    times = calloc(5, 8)
+    t = times as float[]
+    t[0] = 0.4 ; t[1] = 1.1 ; t[2] = 1.9 ; t[3] = 2.67 ; t[4] = 3.3
+    tr = track_read(mesh, times, 5)
+    worst = 0.0
+    where = "-"
+    i = 0
+    while i < 5 && i < tr.count {
+        seek(t[i])
+        skel = ask(with_text(request("scene.skeleton"), "object", mesh))
+        if skel != null {
+            bones = skeleton_bones(skel)
+            b = 0
+            while b < json.array_size(bones) {
+                entry = json.array_get_raw(bones, b)
+                name = probe.text(entry, "name")
+                drawn = bone_in(bones, name)
+                fast = bone_at(tr, i, name)
+                d = core.v3_sub(drawn, fast)
+                dx = d.x
+                if dx < 0.0 { dx = 0.0 - dx }
+                dy = d.y
+                if dy < 0.0 { dy = 0.0 - dy }
+                dz = d.z
+                if dz < 0.0 { dz = 0.0 - dz }
+                if dy > dx { dx = dy }
+                if dz > dx { dx = dz }
+                if dx > worst { worst = dx ; where = "${name} at ${fmt(t[i], 2)}s" }
+                b = b + 1
+            }
+            json.free(skel)
+        }
+        i = i + 1
+    }
+    free(times)
+    track_free(tr)
+    println("  worst bone disagreement between the two: ${fmt(worst, 6)} m (${where})")
+    check("anim.track lands on the pose a frame draws", worst <= SAMPLE_MATCH_EPS,
+          "a bone read ${fmt(worst, 6)} m apart between anim.track and the per-frame path (${where}), allowed ${fmt(SAMPLE_MATCH_EPS, 4)}")
+}
+
+// Whether the figure takes its weight, or glides: the hips' rise and fall.
+weight_shift(mesh: string, seconds: float, fps: int) {
+    println("")
+    println("== does it take its weight ==")
+    times = frame_times(seconds, fps)
+    n = (seconds * (fps as float)) as int
+    tr = track_read(mesh, times, n)
+    free(times)
+    low = 1000000.0
+    high = 0.0 - 1000000.0
+    i = 0
+    while i < tr.count {
+        h = bone_at(tr, i, "Hips")
+        if !g_found { check("the figure shifts its weight", false, "no Hips bone to read") ; track_free(tr) ; return }
+        if h.y < low { low = h.y }
+        if h.y > high { high = h.y }
+        i = i + 1
+    }
+    track_free(tr)
+    bob = high - low
+    println("  the hips ride between ${signed(low)} and ${signed(high)}")
+    check("the figure takes its weight onto each leg", bob >= WEIGHT_BOB_LOW && bob <= WEIGHT_BOB_HIGH,
+          "the pelvis rises and falls ${fmt(bob, 3)} m over the walk, wanted ${fmt(WEIGHT_BOB_LOW, 3)} to ${fmt(WEIGHT_BOB_HIGH, 3)}")
+}
+
+// Whether the strike reaches: the arm's extension at the peak of the lunge
+// against the furthest it reaches in the shuffle before it.
+hand_to_target(mesh: string, seconds: float, fps: int, strike_from: float, strike_to: float) {
+    println("")
+    println("== the strike ==")
+    times = frame_times(seconds, fps)
+    n = (seconds * (fps as float)) as int
+    tr = track_read(mesh, times, n)
+    free(times)
+    peak = 0.0 - 1.0
+    walk = 0.0 - 1.0
+    i = 0
+    while i < tr.count {
+        shoulder = bone_at(tr, i, "ShoulderR")
+        had = g_found
+        wrist = bone_at(tr, i, "WristR")
+        if !had || !g_found { check("the strike reaches", false, "no right arm to read") ; track_free(tr) ; return }
+        reach = core.v3_len(core.v3_sub(wrist, shoulder))
+        moment = (i as float) / (fps as float)
+        if moment >= strike_from && moment <= strike_to { if reach > peak { peak = reach } }
+        if moment < strike_from { if reach > walk { walk = reach } }
+        i = i + 1
+    }
+    track_free(tr)
+    if peak < 0.0 || walk < 0.0 { check("the strike reaches", false, "no lunge in the clip") ; return }
+    println("  the arm extends to ${fmt(peak, 3)} m at the strike, ${fmt(walk, 3)} m in the shuffle before it")
+    check("the strike reaches past anything the walk does", peak - walk >= STRIKE_REACH,
+          "the strike extends the arm ${fmt(peak - walk, 3)} m past the walk, wanted ${fmt(STRIKE_REACH, 2)}")
+}
+
+// Whether the upper body follows the hips: the lag at which the head's
+// side-to-side motion lines up best with the hips'.
+secondary_motion(mesh: string, seconds: float, fps: int) {
+    println("")
+    println("== does the body follow through ==")
+    times = frame_times(seconds, fps)
+    n = (seconds * (fps as float)) as int
+    tr = track_read(mesh, times, n)
+    free(times)
+    if tr.count == 0 { track_free(tr) ; return }
+    hips = calloc(tr.count, 8)
+    head = calloc(tr.count, 8)
+    hp = hips as float[]
+    hd = head as float[]
+    hips_mean = 0.0
+    head_mean = 0.0
+    i = 0
+    while i < tr.count {
+        a = bone_at(tr, i, "Hips")
+        had = g_found
+        b = bone_at(tr, i, "Head")
+        if !had || !g_found { check("the head follows the body", false, "no Head and Hips to read") ; free(hips) ; free(head) ; track_free(tr) ; return }
+        hp[i] = a.z
+        hd[i] = b.z
+        hips_mean = hips_mean + a.z
+        head_mean = head_mean + b.z
+        i = i + 1
+    }
+    hips_mean = hips_mean / (tr.count as float)
+    head_mean = head_mean / (tr.count as float)
+    best_lag = 0
+    best = 0.0 - 1.0
+    lag = 0
+    while lag < 12 {
+        total = 0.0
+        i = 0
+        while i < tr.count - lag {
+            total = total + (hp[i] - hips_mean) * (hd[i + lag] - head_mean)
+            i = i + 1
+        }
+        if total > best { best = total ; best_lag = lag }
+        lag = lag + 1
+    }
+    free(hips)
+    free(head)
+    track_free(tr)
+    println("  the head's turn lines up best ${best_lag} frames behind the hips")
+    // A note, not a check, until the clip has a follow-through to measure:
+    // on this walk the head moves rigidly with the pelvis on every axis
+    // (the Python critique's "11 frames" ranked noise of 1e-17), which is
+    // the clip's to fix in Blender (#333).
+    check_note("the head follows the body rather than leading it", best_lag >= FOLLOW_LAG, "best alignment at a lag of ${best_lag} frames, wanted at least ${FOLLOW_LAG}", "333")
+}
+
+// Whether the frame reads as a night, off the rendered grid: contrast, warm
+// light against cool dark, the lamps caught in the wet road.
+lighting(at: float) {
+    println("")
+    println("== does it read as a night ==")
+    seek(at)
+    g = grid_read(48, 27)
+    if g.cells == null || g.rows == 0 { check("the frame came back to be read", false, "the grid was empty") ; grid_free(g) ; return }
+    n = g.columns * g.rows
+    lums = sorted_lums(g)
+    l = lums as float[]
+    brightest = l[n - 1]
+    median = l[n / 2]
+    tenth = n / 10
+    if tenth < 1 { tenth = 1 }
+    dark = l[tenth - 1]
+    sources = bright_cells(g, 0)
+    println("  luminance runs ${fmt(l[0], 3)} to ${fmt(brightest, 3)}, median ${fmt(median, 3)}, darkest tenth at ${fmt(dark, 3)}")
+    println("  ${sources} cells burn as light sources")
+    check("something in the frame burns like a light", brightest >= BRIGHTEST_WANTED, "the brightest cell is ${fmt(brightest, 3)}, wanted ${fmt(BRIGHTEST_WANTED, 2)}")
+    fraction = (sources as float) / (n as float)
+    check("the street has its lamps and windows alight", sources >= MIN_LIGHT_SOURCES, "${sources} cells over ${fmt(LIGHT_SOURCE_LUM, 2)}, wanted ${MIN_LIGHT_SOURCES}")
+    check("and lit in pools rather than flooded flat", fraction <= LIGHT_SOURCE_FRACTION_MAX, "${pct(fraction)}% of the frame burns that bright, wanted under ${pct(LIGHT_SOURCE_FRACTION_MAX)}%")
+    check("the night is dark rather than a flat wash", median <= NIGHT_MEDIAN_MAX, "the median cell is ${fmt(median, 3)}, wanted under ${fmt(NIGHT_MEDIAN_MAX, 2)}")
+    check("the shadows are deep but not crushed to black", dark >= DARK_FLOOR && dark <= DARK_CEIL, "the darkest tenth is ${fmt(dark, 3)}, wanted ${fmt(DARK_FLOOR, 3)} to ${fmt(DARK_CEIL, 2)}")
+
+    // Warm light, cool dark: the red-minus-blue of the brightest twentieth
+    // and the darkest fifth of the cells.
+    bright_n = n / 20
+    if bright_n < 3 { bright_n = 3 }
+    dark_n = n / 5
+    if dark_n < 3 { dark_n = 3 }
+    bright_line = l[n - bright_n]
+    dark_line = l[dark_n - 1]
+    warm = 0.0
+    warm_n = 0
+    cool = 0.0
+    cool_n = 0
+    y = 0
+    while y < g.rows {
+        x = 0
+        while x < g.columns {
+            v = lum(g, x, y)
+            rb = cell(g, x, y, 0) - cell(g, x, y, 2)
+            if v >= bright_line && warm_n < bright_n { warm = warm + rb ; warm_n = warm_n + 1 }
+            if v <= dark_line && cool_n < dark_n { cool = cool + rb ; cool_n = cool_n + 1 }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    if warm_n > 0 { warm = warm / (warm_n as float) }
+    if cool_n > 0 { cool = cool / (cool_n as float) }
+    println("  the light leans ${signed(warm)} warm, the dark leans ${signed(cool)}")
+    check("the light is warm", warm >= WARM_LIGHTS_MIN, "the bright cells lean ${signed(warm)}, wanted +${fmt(WARM_LIGHTS_MIN, 2)}")
+    check("and the dark is not warmer than the light", cool <= COOL_DARK_MAX && cool < warm, "the dark cells lean ${signed(cool)}")
+    free(lums)
+
+    // The road: the bottom third, where the wet surface takes the lamps.
+    from = (g.rows as float * 0.62) as int
+    road_n = (g.rows - from) * g.columns
+    if road_n > 0 {
+        road = calloc(road_n, 8)
+        r = road as float[]
+        k = 0
+        y = from
+        while y < g.rows {
+            x = 0
+            while x < g.columns { r[k] = lum(g, x, y) ; k = k + 1 ; x = x + 1 }
+            y = y + 1
+        }
+        sort_doubles(road, road_n)
+        contrast = r[road_n - 1] - r[road_n / 2]
+        println("  the road runs ${fmt(r[0], 3)} to ${fmt(r[road_n - 1], 3)} (${fmt(contrast, 3)} of reflection)")
+        check("the wet road takes the lamps", contrast >= ROAD_REFLECTION_MIN, "the road's brightest stands ${fmt(contrast, 3)} over its median, wanted ${fmt(ROAD_REFLECTION_MIN, 2)}")
+        free(road)
+    }
+    grid_free(g)
+}
+
+// That a held frame holds still: two grids of the same paused pose.
+stability(at: float) {
+    println("")
+    println("== a held frame holds still ==")
+    seek(at)
+    first = grid_read(64, 36)
+    second = grid_read(64, 36)
+    if first.cells == null || second.cells == null || first.rows != second.rows || first.columns != second.columns {
+        check("the frame came back twice to be compared", false, "the grids did not match up")
+        grid_free(first) ; grid_free(second)
+        return
+    }
+    worst = 0.0
+    y = 0
+    while y < first.rows {
+        x = 0
+        while x < first.columns {
+            k = 0
+            while k < 3 {
+                d = cell(first, x, y, k) - cell(second, x, y, k)
+                if d < 0.0 { d = 0.0 - d }
+                if d > worst { worst = d }
+                k = k + 1
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    grid_free(first) ; grid_free(second)
+    println("  the most any cell moved between two held frames: ${fmt(worst, 6)}")
+    check("nothing shimmers when the scene is held still", worst <= STABILITY_EPS, "a cell moved ${fmt(worst, 6)} between two held frames, allowed ${fmt(STABILITY_EPS, 4)}")
+}
+
+// That the lamps lay separate pools on the road: the road band's column
+// profile rises under each lamp and falls between.
+light_pools(at: float) {
+    println("")
+    println("== the lamps lay pools on the road ==")
+    seek(at)
+    g = grid_read(64, 36)
+    if g.cells == null || g.rows == 0 { grid_free(g) ; return }
+    from = (g.rows as float * 0.62) as int
+    width = g.columns
+    col = calloc(width, 8)
+    c = col as float[]
+    mean = 0.0
+    x = 0
+    while x < width {
+        best = 0.0
+        y = from
+        while y < g.rows {
+            v = lum(g, x, y)
+            if v > best { best = v }
+            y = y + 1
+        }
+        c[x] = best
+        mean = mean + best
+        x = x + 1
+    }
+    mean = mean / (width as float)
+    spread = 0.0
+    x = 0
+    while x < width { spread = spread + (c[x] - mean) * (c[x] - mean) ; x = x + 1 }
+    spread = sqrt(spread / (width as float))
+    bright_line = mean + 0.6 * spread
+    // The pools: runs over the bright line, each with its start, end, peak.
+    starts = calloc(width, 8)
+    ends = calloc(width, 8)
+    peaks = calloc(width, 8)
+    ps = starts as int[]
+    pe = ends as int[]
+    pp = peaks as float[]
+    pools = 0
+    peaks_text = ""
+    x = 0
+    while x < width {
+        if c[x] >= bright_line {
+            peak = c[x]
+            run = x
+            while run < width && c[run] >= bright_line * 0.75 {
+                if c[run] > peak { peak = c[run] }
+                run = run + 1
+            }
+            ps[pools] = x
+            pe[pools] = run - 1
+            pp[pools] = peak
+            if peaks_text != "" { peaks_text = string.concat(peaks_text, ", ") }
+            peaks_text = string.concat(peaks_text, fmt(peak, 2))
+            pools = pools + 1
+            x = run
+        } else {
+            x = x + 1
+        }
+    }
+    println("  ${pools} pool(s) on the road, peaks at ${peaks_text}")
+    check("the road is lit in separate pools", pools >= POOL_MIN, "${pools} pool(s) over the road's bright line, wanted ${POOL_MIN}")
+    if pools >= 2 {
+        // The clearest gap between adjacent pools: the darkest cell between
+        // them against the dimmer of the two peaks.
+        best = 1000000.0
+        i = 1
+        while i < pools {
+            lowest = 1000000.0
+            x = pe[i - 1]
+            while x <= ps[i] {
+                if c[x] < lowest { lowest = c[x] }
+                x = x + 1
+            }
+            dimmer = pp[i - 1]
+            if pp[i] < dimmer { dimmer = pp[i] }
+            ratio = lowest / dimmer
+            if ratio < best { best = ratio }
+            i = i + 1
+        }
+        println("  the darkest gap between adjacent pools falls to ${pct(best)}% of the pool")
+        check("and the dark between the pools is genuinely dark", best <= POOL_DIP_FRACTION, "the shallowest gap is ${pct(best)}% of its pool's peak, wanted under ${pct(POOL_DIP_FRACTION)}%")
+    }
+    free(col) ; free(starts) ; free(ends) ; free(peaks)
+    grid_free(g)
+}
+
+// The renderer's settings this moment: whether SSR is on, the bloom's
+// intensity, whether shadows are on, and the backend's name.
+struct RenderState {
+    backend: string
+    ssr: bool
+    bloom: float
+    shadows: bool
+}
+
+render_state() -> RenderState {
+    st = RenderState { backend: "", ssr: false, bloom: 0.0, shadows: false }
+    answered = ask(request("frame.stats"))
+    if answered == null { return st }
+    stats = probe.result(answered)
+    render = probe.field(stats, "render")
+    st.backend = string.copy(probe.text(stats, "backend"))
+    st.ssr = probe.flag(render, "ssr")
+    st.bloom = probe.number(render, "bloom_intensity")
+    st.shadows = probe.flag(render, "shadows")
+    json.free(answered)
+    return st
+}
+
+set_ssr(on: bool) { did(with_flag(request("render.set"), "ssr", on)) }
+set_ssr_full() {
+    did(with_number(with_number(with_flag(request("render.set"), "ssr", true), "ssr_road_height", SSR_ROAD_HEIGHT), "ssr_strength", SSR_STRENGTH))
+}
+set_bloom(intensity: float) { did(with_number(request("render.set"), "bloom_intensity", intensity)) }
+
+// The bright cells of the road band of a 64x48 grid.
+road_bright() -> int {
+    g = grid_read(64, 48)
+    count = 0
+    if g.cells != null { count = bright_cells(g, (g.rows as float * 0.60) as int) }
+    grid_free(g)
+    return count
+}
+
+// That the wet road reflects the street's lamps: the road's reflectivity
+// turned off over the channel and the bright cells counted, then on.
+wet_road_reflection(at: float) {
+    println("")
+    println("== the wet road reflects the lamps ==")
+    seek(at)
+    state = render_state()
+    if state.ssr { set_ssr(false) }
+    tree = ask(with_flag(request("scene.tree"), "detail", true))
+    if tree == null { return }
+    models = probe.field(probe.result(tree), "models")
+    wet = calloc(model_count(models) + 1, 8)
+    wet_n = 0
+    w = wet as int[]
+    i = 0
+    while i < model_count(models) {
+        name = model_name(model_at(models, i))
+        if name == "Street_Road" || name == "Street_Ground" {
+            w[wet_n] = i
+            wet_n = wet_n + 1
+        }
+        i = i + 1
+    }
+    json.free(tree)
+    if wet_n == 0 {
+        if state.ssr { set_ssr(true) }
+        check("the scene has a wet road to measure", false, "no road or ground model")
+        free(wet)
+        return
+    }
+    set_road_reflectivity(wet, wet_n, 0.0)
+    dry = road_bright()
+    set_road_reflectivity(wet, wet_n, REFLECTION_ON)
+    wet_count = road_bright()
+    if state.ssr { set_ssr(true) }
+    free(wet)
+    println("  the road carries ${wet_count} bright cells wet, ${dry} dry")
+    divisor = dry
+    if divisor < 1 { divisor = 1 }
+    check("the wet road reflects the lamps", (wet_count as float) >= (dry as float) * REFLECTION_LAMP_LIFT,
+          "${wet_count} bright cells with the reflection on against ${dry} off (${fmt((wet_count as float) / (divisor as float), 2)}x, wanted ${fmt(REFLECTION_LAMP_LIFT, 2)}x)")
+}
+
+set_road_reflectivity(indices: ptr, count: int, value: float) {
+    w = indices as int[]
+    i = 0
+    while i < count {
+        did(with_number(with_int(request("model.set"), "index", w[i]), "reflectivity", value))
+        i = i + 1
+    }
+}
+
+// That screen-space reflection mirrors the scene's geometry onto the road.
+// Vulkan only, where the reflection is.
+wet_road_ssr(at: float) {
+    seek(at)
+    state = render_state()
+    if state.backend != "vulkan" { return }
+    println("")
+    println("== the wet road mirrors the scene (SSR) ==")
+    did(with_number(with_flag(request("render.set"), "ssr", false), "bloom_intensity", 0.0))
+    off = road_bright()
+    set_ssr_full()
+    on = road_bright()
+    did(with_number(with_flag(request("render.set"), "ssr", state.ssr), "bloom_intensity", state.bloom))
+    println("  the road carries ${on} bright cells with SSR mirroring the scene, ${off} without")
+    divisor = off
+    if divisor < 1 { divisor = 1 }
+    check("screen-space reflection mirrors the scene onto the wet road", (on as float) >= (off as float) * SSR_LAMP_LIFT,
+          "${on} bright cells with SSR on against ${off} off (${fmt((on as float) / (divisor as float), 2)}x, wanted ${fmt(SSR_LAMP_LIFT, 2)}x)")
+}
+
+// That the figure's reflection on the wet road is a figure, not a smear:
+// under the figure's columns, the reflection reaches no further below the
+// feet than the figure stands above them, and what lies just under the
+// feet is the feet, dark, not the lit torso.
+figure_reflection(mesh: string, at: float, columns: int, rows: int) {
+    seek(at)
+    state = render_state()
+    if state.backend != "vulkan" { return }
+    println("")
+    println("== the figure's reflection ==")
+    did(with_number(with_flag(request("render.set"), "ssr", false), "bloom_intensity", 0.0))
+    mask = coverage_mask(mesh, columns, rows, 0.015)
+    left = columns
+    right = 0 - 1
+    top = rows
+    bottom = 0 - 1
+    count = 0
+    y = 0
+    while y < rows {
+        x = 0
+        while x < columns {
+            if mem.get_byte(mask, y * columns + x) == 1 {
+                count = count + 1
+                if x < left { left = x }
+                if x > right { right = x }
+                if y < top { top = y }
+                if y > bottom { bottom = y }
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    free(mask)
+    if count == 0 {
+        check("the figure is on screen for its reflection to be judged", false, "nothing drawn for ${mesh}")
+        did(with_number(with_flag(request("render.set"), "ssr", state.ssr), "bloom_intensity", state.bloom))
+        return
+    }
+    height = bottom - top + 1
+    off = grid_read(columns, rows)
+    set_ssr_full()
+    on = grid_read(columns, rows)
+    did(with_number(with_flag(request("render.set"), "ssr", state.ssr), "bloom_intensity", state.bloom))
+    reach = 0
+    profile = ""
+    near_sum = 0.0
+    near_n = 0
+    near_rows = height / 3
+    if near_rows < 1 { near_rows = 1 }
+    y = bottom + 1
+    while y < rows {
+        worst = 0.0
+        x = left
+        while x <= right {
+            d = cell_delta(on, off, x, y)
+            if d > worst { worst = d }
+            x = x + 1
+        }
+        if worst > 0.08 { reach = y - bottom }
+        if y - bottom <= near_rows { near_sum = near_sum + worst ; near_n = near_n + 1 }
+        profile = string.concat(profile, " ${fmt(worst, 2)}")
+        y = y + 1
+    }
+    grid_free(on) ; grid_free(off)
+    println("  the figure spans rows ${top}..${bottom} (${height} rows), columns ${left}..${right}; the reflection changes cells down to ${reach} rows below its feet")
+    println("  row deltas below the feet:${profile}")
+    check("the reflection is no taller than the figure it mirrors", (reach as float) <= (height as float) * 1.2 + 2.0, "${reach} rows of reflection under a figure ${height} rows tall")
+    near_mean = 0.0
+    if near_n > 0 { near_mean = near_sum / (near_n as float) }
+    check("what lies just under the feet is the feet mirrored, not the torso smeared", near_mean < SSR_FIGURE_SMEAR,
+          "the reflection changes the rows under the feet by ${fmt(near_mean, 2)} on average, wanted under ${fmt(SSR_FIGURE_SMEAR, 2)}")
+}
+
+frame_light() -> float {
+    g = grid_read(64, 36)
+    total = 0.0
+    if g.cells != null { total = total_light(g) }
+    grid_free(g)
+    return total
+}
+
+// That bloom composites on top of the reflection rather than replacing it.
+ssr_bloom_coexist(at: float) {
+    seek(at)
+    state = render_state()
+    if state.backend != "vulkan" { return }
+    println("")
+    println("== SSR and bloom coexist ==")
+    lit = state.bloom
+    if lit <= 0.0 { lit = 0.85 }
+    did(with_number(with_number(with_number(with_flag(request("render.set"), "ssr", true), "ssr_road_height", SSR_ROAD_HEIGHT), "ssr_strength", SSR_STRENGTH), "bloom_intensity", 0.0))
+    without = frame_light()
+    set_bloom(lit)
+    with_bloom = frame_light()
+    did(with_number(with_flag(request("render.set"), "ssr", state.ssr), "bloom_intensity", state.bloom))
+    println("  with the reflection on, the frame carries ${fmt(with_bloom, 1)} of light with bloom, ${fmt(without, 1)} without")
+    divisor = without
+    if divisor < 0.000001 { divisor = 0.000001 }
+    check("bloom composites over the reflection (the two passes coexist)", with_bloom >= without * SSR_BLOOM_COEXIST_LIFT,
+          "${fmt(with_bloom, 1)} with bloom against ${fmt(without, 1)} without (${fmt(with_bloom / divisor, 2)}x, wanted ${fmt(SSR_BLOOM_COEXIST_LIFT, 2)}x)")
+}
+
+// The frame's total light and bright cells, off a 64x36 grid.
+var g_read_total = 0.0
+var g_read_bright = 0
+read_light() {
+    g = grid_read(64, 36)
+    g_read_total = 0.0
+    g_read_bright = 0
+    if g.cells != null {
+        g_read_total = total_light(g)
+        g_read_bright = bright_cells(g, 0)
+    }
+    grid_free(g)
+}
+
+// That the bloom the scene turns on is doing measurable work: off, the
+// frame carries less light and fewer bright cells.
+bloom(at: float) {
+    println("")
+    println("== the bloom earns its place ==")
+    seek(at)
+    state = render_state()
+    if state.bloom <= 0.0 {
+        check("the scene has bloom to measure", false, "the renderer reports bloom_intensity ${fmt(state.bloom, 2)}")
+        return
+    }
+    read_light()
+    on_total = g_read_total
+    on_bright = g_read_bright
+    set_bloom(0.0)
+    read_light()
+    off_total = g_read_total
+    off_bright = g_read_bright
+    set_bloom(state.bloom)
+    println("  with bloom the frame carries ${fmt(on_total, 1)} of light across ${on_bright} bright cells; with it off, ${fmt(off_total, 1)} across ${off_bright}")
+    divisor = off_total
+    if divisor < 0.000001 { divisor = 0.000001 }
+    check("bloom lifts the light in the frame", on_total >= off_total * BLOOM_TOTAL_LIFT,
+          "with bloom ${fmt(on_total, 1)}, without ${fmt(off_total, 1)} (${fmt(on_total / divisor, 2)}x, wanted ${fmt(BLOOM_TOTAL_LIFT, 2)}x)")
+    bd = off_bright
+    if bd < 1 { bd = 1 }
+    check("and spreads it, so more of the frame burns bright", (on_bright as float) >= (off_bright as float) * BLOOM_BRIGHT_LIFT,
+          "with bloom ${on_bright} bright cells, without ${off_bright} (${fmt((on_bright as float) / (bd as float), 2)}x, wanted ${fmt(BLOOM_BRIGHT_LIFT, 2)}x)")
+}
+
+// That the shadows the scene casts are keeping light out of the frame.
+shadows(at: float) {
+    println("")
+    println("== the shadows keep light out ==")
+    seek(at)
+    state = render_state()
+    if !state.shadows {
+        check("the scene is casting shadows to measure", false, "the renderer reports shadows off")
+        return
+    }
+    read_light()
+    on_total = g_read_total
+    on_bright = g_read_bright
+    did(with_flag(request("render.set"), "shadows", false))
+    read_light()
+    off_total = g_read_total
+    off_bright = g_read_bright
+    did(with_flag(request("render.set"), "shadows", true))
+    println("  shadowed, the frame carries ${fmt(on_total, 1)} of light across ${on_bright} bright cells; unshadowed, ${fmt(off_total, 1)} across ${off_bright}")
+    divisor = on_total
+    if divisor < 0.000001 { divisor = 0.000001 }
+    check("shadows take light out of the frame", off_total >= on_total * SHADOW_TOTAL_LIFT,
+          "unshadowed ${fmt(off_total, 1)} against shadowed ${fmt(on_total, 1)} (${fmt(off_total / divisor, 2)}x, wanted ${fmt(SHADOW_TOTAL_LIFT, 2)}x)")
+    bd = on_bright
+    if bd < 1 { bd = 1 }
+    check("and hold back the light that would flood the occluded parts", (off_bright as float) >= (on_bright as float) * SHADOW_BRIGHT_LIFT,
+          "unshadowed ${off_bright} bright cells against shadowed ${on_bright} (${fmt((off_bright as float) / (bd as float), 2)}x, wanted ${fmt(SHADOW_BRIGHT_LIFT, 2)}x)")
+}
+
+// ---------------------------------------------------------------- main
+
+arg_after(name: string, fallback: string) -> string {
+    i = 1
+    while i + 1 < os.aether_args_count() {
+        if os.aether_args_get(i) == name { return os.aether_args_get(i + 1) }
+        i = i + 1
+    }
+    return fallback
+}
+
+has_arg(name: string) -> bool {
+    i = 1
+    while i < os.aether_args_count() {
+        if os.aether_args_get(i) == name { return true }
+        i = i + 1
+    }
+    return false
+}
+
+main() {
+    port = 7911
+    if os.aether_args_count() > 1 && string.starts_with(os.aether_args_get(1), "--") == 0 {
+        port = string.string_get_int(os.aether_args_get(1))
+    }
+    port = string.string_get_int(arg_after("--port", "${port}"))
+    figure = arg_after("--figure", "Zombie_")
+    walks = arg_after("--walks", "Zombie_Body")
+    feet = arg_after("--feet", "AnkleL,AnkleR,ToeL,ToeR")
+    road = string.string_get_float(arg_after("--road", "0.115"))
+    frame_only = has_arg("--frame-only")
+
+    p = probe.open(port)
+    if p == null {
+        println("critique_scene: nothing answering on port ${port} (${probe.last_error()})")
+        os.exit(2)
+    }
+    g_probe = p as ptr
+
+    // The whole critique reads the rendered frame. A backend that cannot
+    // give it back cannot be judged, which is a skip rather than a failure.
+    did(request("frame.pause"))
+    probe_grid = grid_read(8, 8)
+    readable = false
+    if probe_grid.cells != null {
+        y = 0
+        while y < probe_grid.rows {
+            x = 0
+            while x < probe_grid.columns {
+                if cell(probe_grid, x, y, 0) + cell(probe_grid, x, y, 1) + cell(probe_grid, x, y, 2) > 0.02 { readable = true }
+                x = x + 1
+            }
+            y = y + 1
+        }
+    }
+    grid_free(probe_grid)
+    if !readable {
+        println("critique_scene: SKIP the frame could not be read back on this backend")
+        probe.close(p)
+        os.exit(3)
+    }
+
+    tree = ask(with_flag(with_flag(request("scene.tree"), "detail", true), "audit", true))
+    if tree == null { os.exit(2) }
+    models = probe.field(probe.result(tree), "models")
+    texel_density(models)
+    relief(models)
+    surface_relief(models)
+    character(models, figure)
+    proportion(models, figure)
+    json.free(tree)
+    budget()
+    stability(2.2)
+    lighting(2.2)
+    light_pools(2.2)
+    wet_road_reflection(2.2)
+    wet_road_ssr(2.2)
+    ssr_bloom_coexist(2.2)
+    if walks != "" { figure_reflection(walks, 2.2, 64, 48) }
+    bloom(2.2)
+    shadows(2.2)
+    if walks != "" {
+        sampling_matches(walks)
+        // These read the pose through anim.track, which samples every time
+        // in one answer without rendering a frame, so they cost the same on
+        // the software Vulkan a headless runner falls back to.
+        spins(walks, 4.0, 320)
+        head_carriage(walks, 5.0, 48)
+        gait(walks, feet, road, 2.6, 24)
+        weight_shift(walks, 5.0, 24)
+        hand_to_target(walks, 5.0, 24, 2.67, 3.83)
+        secondary_motion(walks, 5.0, 24)
+        if !frame_only {
+            // These render frames, which a software renderer does slowly.
+            silhouette(walks, 52, 44)
+            limbs(walks, 64, 48)
+        }
+    }
+    did(request("frame.resume"))
+    probe.close(p)
+    println("")
+    if g_failures == 0 {
+        println("critique_scene: the scene meets every standard")
+        return
+    }
+    println("critique_scene: ${g_failures} standard(s) not met")
+    os.exit(1)
+}
