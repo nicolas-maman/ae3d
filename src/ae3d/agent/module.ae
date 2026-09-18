@@ -415,7 +415,7 @@ help_result() -> ptr {
     json.array_add_raw(ops, describe("ping", "",
         "Liveness. Answers immediately, on the frame it was drained."))
     json.array_add_raw(ops, describe("frame.stats", "",
-        "frame, fps, delta, viewport, draw calls and instances for the last frame, and the mean milliseconds a frame has cost to submit."))
+        "frame, fps, delta, viewport, draw calls and instances for the last frame, the mean milliseconds a frame has cost to submit, and on Vulkan the scene split by stage (stages_ms: camdepth, sky, opaque, occlusion, transparent)."))
     json.array_add_raw(ops, describe("camera.get", "",
         "Camera position, orientation, field of view and clip planes."))
     json.array_add_raw(ops, describe("scene.tree", "[detail], [audit]",
@@ -493,6 +493,19 @@ stats_result(c: *Context) -> ptr {
     json.object_set_raw(out, "shadow_ms", json.num(c.shadow_ms))
     json.object_set_raw(out, "scene_ms", json.num(c.scene_ms))
     json.object_set_raw(out, "post_ms", json.num(c.post_ms))
+    // The scene split by stage, on the backend that stamps it: what the
+    // sky, the opaque draws, the occlusion and the transparent draws each
+    // cost of the scene figure above, so "the frame is slow" becomes
+    // "the clouds are the frame".
+    if c.vk_renderer != null {
+        stages = json.obj()
+        k = 3
+        while k < vk.STAGE_COUNT {
+            json.object_set_raw(stages, vk.stage_name(k), json.num(vk.renderer_stage_ms(c.vk_renderer as *VKRenderer, k)))
+            k = k + 1
+        }
+        json.object_set_raw(out, "stages_ms", stages)
+    }
     json.object_set_raw(out, "cpu_work_ms", json.num(c.cpu_work_ms))
     json.object_set_raw(out, "program_binds", json.from_int(c.program_binds))
     json.object_set_raw(out, "material_binds", json.from_int(c.material_binds))

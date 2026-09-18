@@ -30,15 +30,15 @@ the GPU, the other runs measured that too. It prints the table below.
 
 | scene | fps | gpu ms | sky | opaque | occlusion | transparent | shadow | post | cpu ms | draws |
 |---|---|---|---|---|---|---|---|---|---|---|
-| spinning_cube | 144 | 0.02 | 0.00 | 0.00 | 0.01 | 0.00 | 0.01 | 0.00 | 0.10 | 2 |
-| models | 144 | 0.12 | 0.00 | 0.00 | 0.01 | 0.00 | 0.04 | 0.00 | 0.09 | 8 |
-| lights | 144 | 0.07 | 0.00 | 0.05 | 0.01 | 0.00 | 0.02 | 0.01 | 0.10 | 9 |
-| caustics | 144 | 0.80 | 0.32 | 0.00 | 0.06 | 0.40 | 0.04 | 0.00 | 0.22 | 275 |
-| sand | 72 | 6.11 | 0.46 | 2.79 | 0.10 | 0.01 | 0.07 | 0.00 | 3.62 | 15 |
-| smooth_terrain | 130 | 2.12 | 1.52 | 0.19 | 0.08 | 0.26 | 0.03 | 0.01 | 0.10 | 6 |
-| voxel_world | 131 | 1.32 | 0.76 | 0.24 | 0.08 | 0.17 | 0.12 | 0.00 | 0.12 | 6 |
-| zombie_city | 141 | 4.83 | 0.02 | 2.59 | 0.08 | 0.01 | 2.22 | 0.01 | 0.69 | 1194 |
-| zombie_street | 144 | 0.42 | 0.02 | 0.34 | 0.03 | 0.00 | 0.09 | 0.23 | 0.25 | 338 |
+| spinning_cube | 144 | 0.02 | 0.00 | 0.01 | 0.01 | 0.00 | 0.01 | 0.00 | 0.11 | 2 |
+| models | 144 | 0.11 | 0.00 | 0.09 | 0.01 | 0.00 | 0.03 | 0.00 | 0.10 | 8 |
+| lights | 144 | 0.07 | 0.00 | 0.04 | 0.01 | 0.00 | 0.02 | 0.01 | 0.11 | 9 |
+| caustics | 144 | 0.86 | 0.01 | 0.31 | 0.06 | 0.47 | 0.04 | 0.00 | 0.16 | 275 |
+| sand | 74 | 6.26 | 0.63 | 2.79 | 0.09 | 0.02 | 0.07 | 0.00 | 3.43 | 15 |
+| smooth_terrain | 139 | 2.98 | 2.22 | 0.34 | 0.12 | 0.23 | 0.05 | 0.02 | 0.09 | 6 |
+| voxel_world | 144 | 1.44 | 0.89 | 0.24 | 0.08 | 0.16 | 0.12 | 0.00 | 0.09 | 6 |
+| zombie_city | 141 | 4.84 | 0.02 | 2.60 | 0.08 | 0.01 | 2.22 | 0.01 | 0.67 | 1194 |
+| zombie_street | 144 | 0.33 | 0.01 | 0.28 | 0.01 | 0.00 | 0.07 | 0.23 | 0.20 | 338 |
 
 Before the clouds were baked into textures (the previous entry, the same
 day), the sky stage of `smooth_terrain` was 6.68 ms and the scene ran at
@@ -52,7 +52,7 @@ quiet machine rather than a ceiling.
 What the table says: the scenes under a sky are bounded by the hidden
 window's 144 Hz clock now, not by the clouds. The sky stage -- the sky
 itself and the clouds marched over it, a fetch a sample from the baked
-weather and shape textures -- is a millisecond and a half in
+weather and shape textures -- is a millisecond and a half to two in
 `smooth_terrain` and under one in `voxel_world`, where it was five to
 seven. The sand's opaque stage is a million grains at eight triangles each
 and its CPU time is the simulation; the city's shadow pass is its buildings

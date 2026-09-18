@@ -53,6 +53,11 @@
   flight, instead of freed (a wait for the whole device) and uploaded
   afresh. `lights`, five spinning spheres, went from 6.9 ms of CPU a frame
   to 0.1. `scripts/perf.sh` reads a stage time printed in exponent form.
+- The scene's split by stage is on the editor's stats bar (depth, sky,
+  opaque, ao, clear) and in the agent's `frame.stats` (`stages_ms`), on
+  Vulkan, the same figures `AE3D_PERF` prints. A frame with no sky to draw
+  stamps the sky's end all the same, so its opaque draws are no longer
+  charged to the sky.
 
 ### The editor's look
 
