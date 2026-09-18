@@ -189,6 +189,25 @@ git clone https://github.com/aether-lang-dev/aether-ui.git ../aether-ui
 `tools/zombie_street.ae` is the measuring rig the critique and the frame
 budget run on: one block, one zombie, held to their standards on every build.
 
+## Roadmap
+
+The engine is built toward an open-world game it has to carry -- hordes of
+the real animated zombie, extreme weather, the best picture the hardware
+gives, multiplayer -- and the map of what that still needs is
+[#326](https://github.com/nicolas-maman/ae3d/issues/326): every line becomes
+an issue when it is next, and lands as measured, tested pull requests. Done
+on that map: the crowd's sort on the device and its indirect draws, motion
+vectors, render scale, DLSS, ray-traced shadows, weather. Next:
+the crowd and the skinned in the ray-traced scene and occlusion by ray
+([#323](https://github.com/nicolas-maman/ae3d/issues/323)), a clustered
+lighting path, streaming tiles, physics, navigation, audio, input mapping,
+multiplayer; DirectX 12 ([#311](https://github.com/nicolas-maman/ae3d/issues/311))
+and Metal ([#312](https://github.com/nicolas-maman/ae3d/issues/312)) beside
+Vulkan; the tooling, the scene language and the shaders in Aether
+([#272](https://github.com/nicolas-maman/ae3d/issues/272),
+[#275](https://github.com/nicolas-maman/ae3d/issues/275),
+[#276](https://github.com/nicolas-maman/ae3d/issues/276)).
+
 ## Layout
 
 ```
