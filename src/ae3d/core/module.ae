@@ -40,7 +40,7 @@ exports (
     UNIFORM_FLOAT, UNIFORM_INT, UNIFORM_VEC3, UNIFORM_FLOAT_ARRAY, UNIFORM_VEC3_ARRAY,
     env_int, material_new, material_default, material_clone, material_equals, material_free,
     model_new, model_free,
-    model_clone, model_set_casts_shadow,
+    model_clone, model_set_casts_shadow, model_set_depth_proxy,
     model_set_position, model_set_scale, model_set_rotation, model_rotate,
     model_update_matrix, model_recalculate_bounds, model_mark_dirty, model_set_diffuse,
     model_set_parent, model_parent, model_sync_transform, model_world_position,
@@ -390,6 +390,11 @@ struct Model {
     instance_phases_updated: bool
     visible: bool
     casts_shadow: bool
+    // The model drawn in this one's place in the depth-only passes -- the
+    // shadow map and the camera depth -- with this model's instances and
+    // pose: a crowd's far tier standing in for its near one, where a
+    // shadow or an occluder needs the silhouette and not the face.
+    depth_proxy: ptr
 
     id: int
     name: string
@@ -2457,6 +2462,17 @@ mesh_push_skybox_cube(mesh: ptr, size: float) {
 // water surface, can be kept out of the depth pass.
 model_set_casts_shadow(m: *Model, on: bool) {
     m.casts_shadow = on
+}
+
+// The depth-only passes draw `proxy`'s mesh where they would draw `m`'s,
+// carrying m's instances and pose bank, so the two must share a rig and an
+// instance layout: a crowd's decimated far tier stands in for its full
+// near tier in the shadow map and the camera depth, which read the
+// silhouette and never the face. The proxy must itself be registered
+// with the renderer (it is drawn on its own as the far tier), so its mesh
+// is uploaded. Null puts the model's own mesh back.
+model_set_depth_proxy(m: *Model, proxy: *Model) {
+    m.depth_proxy = proxy as ptr
 }
 
 model_instance_has_colors(m: *Model) -> bool {

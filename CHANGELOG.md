@@ -63,6 +63,15 @@
   stamps the sky's end all the same, so its opaque draws are no longer
   charged to the sky.
 
+### The crowd's depth passes
+
+- `model_set_depth_proxy(m, proxy)`: the shadow map and the camera depth
+  draw the proxy's mesh with the model's instances and pose. The city's
+  near tier casts and writes depth from its far tier's 168 triangles
+  instead of its 26,636: 2,000 zombies 30 to 68 fps, 20,000 at
+  `AE3D_NEAR=28` 54 to 91, on Vulkan. OpenGL draws the full mesh as
+  before (its VAO binds the mesh to the instance stream).
+
 ### The front page
 
 - The README is a front page: a feature table, the scenes, a quick start, a
