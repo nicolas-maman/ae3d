@@ -10,8 +10,7 @@ import ae3d.loader
 
 var g_cube: ptr = null
 
-on_start(data: ptr) {
-    e = data as *Engine
+on_start(state: ptr, e: *Engine) {
     cube = loader.cube(1.0)
     core.model_set_scale(cube, 20.0, 20.0, 20.0)
     core.model_polished_metal(cube, 0.85, 0.35, 0.2)
@@ -26,25 +25,26 @@ on_start(data: ptr) {
     core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
 }
 
-on_update(data: ptr, delta: float) {
+on_update(state: ptr, e: *Engine, delta: float) {
     cube = g_cube as *Model
     if cube == null { return }
     core.model_rotate(cube, 18.0 * delta, 30.0 * delta, 0.0)
 }
 
 main() {
-    e = engine.engine_new(platform.API_GL)
+    e = engine.engine_new()
     engine.engine_set_size(e, 1024, 768)
     engine.engine_set_title(e, "ae3d - spinning cube")
 
     light = core.light_sun(core.vec3(0.4, 0.8, 0.5))
     engine.engine_set_light(e, light)
 
-    engine.engine_set_user_data(e, e as ptr)
-    engine.engine_on_start(e, on_start as fn(ptr))
-    engine.engine_on_update(e, on_update as fn(ptr, float))
+    program = engine.behaviour_new("spinning cube", null)
+    program.start = on_start
+    program.update = on_update
+    engine.engine_add_behaviour(e, program)
 
-    engine.engine_run(e, 0 - 1, 0 - 1)
+    engine.engine_run(e)
 
     cube = g_cube as *Model
     if cube != null { core.model_free(cube) }

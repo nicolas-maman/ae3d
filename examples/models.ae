@@ -23,8 +23,7 @@ place(e: *Engine, path: string, x: float, scale: float) -> *Model {
     return m
 }
 
-on_start(data: ptr) {
-    e = data as *Engine
+on_start(state: ptr, e: *Engine) {
 
     sphere = place(e, "resources/obj/Sphere.obj", 0.0 - 80.0, 1.0)
     if sphere != null {
@@ -65,25 +64,26 @@ on_start(data: ptr) {
     core.camera_set_speed(cam, 160.0)
 }
 
-on_update(data: ptr, delta: float) {
+on_update(state: ptr, e: *Engine, delta: float) {
     earth = g_spin as *Model
     if earth == null { return }
     core.model_rotate(earth, 0.0, 12.0 * delta, 0.0)
 }
 
 main() {
-    e = engine.engine_new(platform.API_GL)
+    e = engine.engine_new()
     engine.engine_set_size(e, 1280, 720)
     engine.engine_set_title(e, "ae3d - models")
 
     light = core.light_sun(core.vec3(0.3, 0.6, 0.75))
     light.intensity = 2.0
     engine.engine_set_light(e, light)
-    engine.engine_set_user_data(e, e as ptr)
-    engine.engine_on_start(e, on_start as fn(ptr))
-    engine.engine_on_update(e, on_update as fn(ptr, float))
+    program = engine.behaviour_new("models", null)
+    program.start = on_start
+    program.update = on_update
+    engine.engine_add_behaviour(e, program)
 
-    engine.engine_run(e, 0 - 1, 0 - 1)
+    engine.engine_run(e)
 
     println("models: ${engine.engine_frame_count(e)} frames, ${engine.engine_draw_calls(e)} draw calls")
     core.light_free(light)

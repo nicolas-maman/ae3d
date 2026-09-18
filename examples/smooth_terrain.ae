@@ -183,8 +183,7 @@ scene_hour() -> float {
     return ((hhmm / 100) as float) + ((hhmm % 100) as float) / 60.0
 }
 
-on_start(data: ptr) {
-    e = data as *Engine
+on_start(state: ptr, e: *Engine) {
 
     world = voxel.world_new(WORLD_X, WORLD_Z, WORLD_HEIGHT, CELL)
     if world == null || !voxel.world_sdf_enable(world) {
@@ -302,14 +301,14 @@ on_start(data: ptr) {
                                        core.env_int("AE3D_AIMZ", 480) as float))
 }
 
-on_update(data: ptr, delta: float) {
+on_update(state: ptr, e: *Engine, delta: float) {
     sea = g_sea as *Simulation
     if sea == null { return }
     water.simulation_update(sea, delta)
 }
 
 main() {
-    e = engine.engine_new(platform.API_GL)
+    e = engine.engine_new()
     engine.engine_set_size(e, 1280, 800)
     engine.engine_set_title(e, "ae3d - smooth terrain")
     engine.engine_set_face_culling(e, true)
@@ -326,11 +325,12 @@ main() {
     engine.engine_set_shadow_distance(e, 700.0)
     engine.engine_set_fog(e, core.fog_distance(1500.0, 9000.0,
                                                core.vec3(HAZE_R, HAZE_G, HAZE_B), 0.9))
-    engine.engine_set_user_data(e, e as ptr)
-    engine.engine_on_start(e, on_start as fn(ptr))
-    engine.engine_on_update(e, on_update as fn(ptr, float))
+    program = engine.behaviour_new("smooth terrain", null)
+    program.start = on_start
+    program.update = on_update
+    engine.engine_add_behaviour(e, program)
 
-    engine.engine_run(e, 0 - 1, 0 - 1)
+    engine.engine_run(e)
 
     println("smooth terrain: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${engine.engine_draw_calls(e)} draw calls")
 

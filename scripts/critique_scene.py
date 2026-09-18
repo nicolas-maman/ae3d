@@ -1346,7 +1346,7 @@ def main(argv):
         env["AE3D_AGENT"] = str(args.port)
         env["AE3D_FRAMES"] = "100000"
         log = tempfile.NamedTemporaryFile(prefix="ae3d_critique_", suffix=".log", delete=False)
-        command = [args.launch] + (["vulkan"] if args.vulkan else [])
+        command = [args.launch] + (["vulkan"] if args.vulkan else ["opengl"])
         scene = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT)
         engine = None
         deadline = time.time() + 30.0

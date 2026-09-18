@@ -34,8 +34,7 @@ teardown(e: *Engine, light: *Light) {
     }
 }
 
-on_start(data: ptr) {
-    e = data as *Engine
+on_start(state: ptr, e: *Engine) {
     cube = loader.cube(1.0)
     core.model_set_scale(cube, 40.0, 40.0, 40.0)
     core.model_matte(cube, 0.9, 0.2, 0.15)
@@ -49,13 +48,12 @@ on_start(data: ptr) {
 // The engine drained its fixed-step accumulator a step at a time and called
 // nothing in between, so a program that set a step and waited for it waited
 // forever.
-on_fixed(data: ptr, delta: float) {
+on_fixed(state: ptr, e: *Engine, step: float) {
     g_fixed_calls = g_fixed_calls + 1
-    g_fixed_delta = delta
+    g_fixed_delta = step
 }
 
-on_render(data: ptr, delta: float) {
-    e = data as *Engine
+on_render(state: ptr, e: *Engine, delta: float) {
     width = platform.window_fb_width(engine.engine_window(e))
     height = platform.window_fb_height(engine.engine_window(e))
     g_centre = gl.read_pixel(width / 2, height / 2)
@@ -64,7 +62,8 @@ on_render(data: ptr, delta: float) {
 }
 
 main() {
-    e = engine.engine_new(platform.API_GL)
+    // An OpenGL test by design: it reads the frame through gl.read_pixel.
+    e = engine.engine_new_with(platform.API_GL)
     engine.engine_set_size(e, 640, 480)
     engine.engine_set_title(e, "ae3d render test")
     engine.engine_set_frame_limit(e, 8)
@@ -73,14 +72,15 @@ main() {
 
     light = core.light_sun(core.vec3(0.0, 0.0, 1.0))
     engine.engine_set_light(e, light)
-    engine.engine_set_user_data(e, e as ptr)
-    engine.engine_on_start(e, on_start as fn(ptr))
-    engine.engine_on_render(e, on_render as fn(ptr, float))
-    engine.engine_on_fixed_update(e, on_fixed as fn(ptr, float))
+    program = engine.behaviour_new("render test", null)
+    program.start = on_start
+    program.fixed_update = on_fixed
+    program.late_update = on_render
+    engine.engine_add_behaviour(e, program)
 
     // A machine with no display cannot be asked to open one. That is a fact
     // about where this is running, not something the renderer got wrong.
-    if !engine.engine_run(e, 0 - 1, 0 - 1) {
+    if !engine.engine_run(e) {
         println("render: SKIP no window available")
         teardown(e, light)
         return

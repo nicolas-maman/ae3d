@@ -2,6 +2,29 @@
 
 ## [current]
 
+### The loop owns the lifecycle
+
+- A program is a **behaviour** the engine runs: `engine.behaviour_new(name,
+  state)`, its `start`, `fixed_update`, `update`, `pose` and `late_update`
+  set to the program's functions, `engine_add_behaviour`, `engine_run`. The
+  engine's loop calls the phases, in that order each frame, and the program
+  never calls them itself -- the way a MonoBehaviour joins a Unity scene or
+  a gopher3D behaviour registers with its manager. Any number of behaviours;
+  one added while the loop runs starts on the next frame; a scene of game
+  objects and components joins the loop through `engine_add_scene`. The
+  single hooks `engine_on_start/on_update/on_fixed_update/on_render/on_pose`
+  and `engine_set_user_data` are gone with the `data as *Engine` casts they
+  needed: every phase is handed the behaviour's state and the engine. Every
+  example, tool and test is a behaviour now.
+- **Vulkan by default.** `engine_new()` draws through Vulkan, and through
+  OpenGL where there is no driver, said so; `engine_new_with(api)` is the
+  explicit choice and `AE3D_API=opengl` the override. The editor the same.
+  `engine_run(e)` takes no window position; `engine_run_at(e, x, y)` does.
+- The agent's `snapshot` works on Vulkan: the capture is armed for a pending
+  snapshot before the frame is drawn, and the answer arrives with the file.
+- `engine_fps` reports the run's rate before the half-second window has
+  filled, so a short bounded run says its rate and not zero.
+
 ### The viewport
 
 - The scene is drawn straight into the window's own GL context. aether-ui had

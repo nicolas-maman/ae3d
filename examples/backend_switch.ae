@@ -17,8 +17,7 @@ import ae3d.loader
 var g_model: ptr = null
 var g_spin = 0.0
 
-on_start(data: ptr) {
-    e = data as *Engine
+on_start(state: ptr, e: *Engine) {
     model = loader.sphere(1.0, 32, 24)
     core.model_set_scale(model, 24.0, 24.0, 24.0)
     core.model_polished_metal(model, 0.35, 0.62, 0.9)
@@ -30,7 +29,7 @@ on_start(data: ptr) {
     core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
 }
 
-on_update(data: ptr, delta: float) {
+on_update(state: ptr, e: *Engine, delta: float) {
     model = g_model as *Model
     if model == null { return }
     g_spin = g_spin + delta
@@ -60,17 +59,18 @@ main() {
         return
     }
 
-    e = engine.engine_new(api)
+    e = engine.engine_new_with(api)
     engine.engine_set_size(e, 1024, 768)
     engine.engine_set_title(e, "ae3d - ${wanted}")
 
     light = core.light_sun(core.vec3(0.4, 0.8, 0.5))
     engine.engine_set_light(e, light)
-    engine.engine_set_user_data(e, e as ptr)
-    engine.engine_on_start(e, on_start as fn(ptr))
-    engine.engine_on_update(e, on_update as fn(ptr, float))
+    program = engine.behaviour_new("backend switch", null)
+    program.start = on_start
+    program.update = on_update
+    engine.engine_add_behaviour(e, program)
 
-    engine.engine_run(e, 0 - 1, 0 - 1)
+    engine.engine_run(e)
 
     println("${engine.engine_backend_name(e)}: ${engine.engine_frame_count(e)} frames, ${draw_calls(e)} draw calls in the last frame")
 

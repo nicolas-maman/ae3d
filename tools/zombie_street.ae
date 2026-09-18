@@ -99,19 +99,25 @@ var g_clips: ptr = null
 // The benchmark scene, so it has to run on both renderers: a cost that can
 // only be measured on one of them is a cost that regresses unseen on the
 // other. `vulkan` as the first argument, the same way backend_switch takes it.
+// Vulkan, as every program; `opengl` on the command line for the other
+// renderer, and `vulkan` for Vulkan said explicitly, which is an error
+// where there is no driver rather than a quiet fall back, since a run that
+// asked for a backend by name is measuring that backend.
 chosen_api() -> int {
+    if os.aether_args_count() > 1 && string.equals(os.aether_args_get(1), "opengl") == 1 {
+        return platform.API_GL
+    }
     if os.aether_args_count() > 1 && string.equals(os.aether_args_get(1), "vulkan") == 1 {
         if !vk.available() {
             println("zombie_street: no Vulkan driver available: ${vk.last_error()}")
             os.exit(1)
         }
-        return platform.API_VULKAN
     }
-    return platform.API_GL
+    return platform.API_VULKAN
 }
 
 main() {
-    e = engine.engine_new(chosen_api())
+    e = engine.engine_new_with(chosen_api())
     engine.engine_set_size(e, 1280, 720)
     engine.engine_set_title(e, "ae3d: a zombie, on a street")
     engine.engine_set_camera_input(e, true)
@@ -128,15 +134,17 @@ main() {
     // has to be told to, and a benchmark that does not is measuring work no
     // real frame would do.
     engine.engine_set_frustum_culling(e, true)
-    engine.engine_set_user_data(e, e as ptr)
-    engine.engine_on_start(e, on_start)
+    program = engine.behaviour_new("zombie street", null)
+    program.start = on_start
+    program.pose = solve_pose
+    engine.engine_add_behaviour(e, program)
 
     // The controls, because a window that gives no sign of how to move in it is
     // a window you cannot move in. Right-drag to look rather than a captured
     // cursor, so the mouse is free to leave the window on a desktop.
     println("zombie_street: WASD to move, hold right mouse to look, shift to sprint, space/ctrl up and down")
 
-    if !engine.engine_run(e, -1, -1) {
+    if !engine.engine_run(e) {
         println("zombie_street: no window")
         engine.engine_free(e)
         return
@@ -210,8 +218,7 @@ free_scene() {
     }
 }
 
-on_start(data: ptr) {
-    e = data as *Engine
+on_start(state: ptr, e: *Engine) {
 
     cam = engine.engine_camera(e)
     core.camera_set_position(cam, core.vec3(0.35, 1.34, 1.55))
@@ -315,7 +322,6 @@ on_start(data: ptr) {
     // ahead lays the head on its side. What has to be aimed is the face.
     g_head = bone_named("Head")
     g_jaw = bone_named("Face")
-    engine.engine_on_pose(e, solve_pose)
 
     println("zombie_street: ${count} objects from ${assets.manifest_source(m)}, ${animated} animated")
     println("zombie_street: ${skin.skeleton_count(g_skeleton)} bones, the clips leave the feet at ${g_leg_l.lowest} and ${g_leg_r.lowest} above the road")
@@ -502,7 +508,7 @@ pose_at(registry: *Registry, time: float) {
 // something at a place, and the solver says whether it got there. Out of range
 // it straightens towards it, which is the shape of a zombie walking at you;
 // in range the hand lands on it.
-solve_pose(data: ptr) {
+solve_pose(state: ptr, e: *Engine) {
     victim = core.vec3(VICTIM_X, VICTIM_Y, VICTIM_Z)
     // Both hands go for it. The far one trails, which is what makes the near
     // one read as the one doing the reaching.
