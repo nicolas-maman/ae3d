@@ -89,14 +89,15 @@ where they are defined.
 scene and frames it.
 
 **Behaviour** attaches a script to the selected object. A script is an ordinary
-Aether source file in `resources/scripts`:
+Aether source file in `resources/scripts`, with Unity's phases by Unity's
+names:
 
 ```aether
 import ae3d.core
 
-exports (script_update)
+exports (update)
 
-script_update(m: *Model, delta: float) {
+update(m: *Model, delta: float) {
     core.model_rotate(m, 0.0, delta * 60.0, 0.0)
 }
 ```
@@ -105,7 +106,7 @@ script_update(m: *Model, delta: float) {
 library beside the editor, and the editor opens what it finds: the buttons in
 the section are the files in that directory, so adding a behaviour is adding a
 file and the editor does not have to be taught what it does. A script may also
-export `script_start`, which runs once when it is attached.
+export `start`, which runs once when it is attached.
 
 **New script** writes a template into `resources/scripts` and says where it
 went. Building it is the same step that builds every other script, and the

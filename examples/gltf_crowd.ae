@@ -31,6 +31,7 @@ import std.fs
 import std.json
 import ae3d.core
 import ae3d.engine
+import ae3d.behaviour
 import ae3d.gltf
 import ae3d.crowd
 import ae3d.ecs
@@ -168,7 +169,8 @@ turn_headings() {
     }
 }
 
-on_start(state: ptr, e: *Engine) {
+start(state: ptr, go: *GameObject) {
+    e = engine.of(go)
     scene = gltf.load(g_path)
     if scene == null {
         println("gltf_crowd: ${gltf.last_error()}")
@@ -306,7 +308,8 @@ on_start(state: ptr, e: *Engine) {
     core.camera_set_far(cam, 4000.0)
 }
 
-on_update(state: ptr, e: *Engine, delta: float) {
+update(state: ptr, go: *GameObject, delta: float) {
+    e = engine.of(go)
     if g_bank == null || g_count == 0 { return }
     cam = engine.engine_camera(e)
     crowd.crowd_wander(ecs.column_data(g_vel), ecs.column_data(g_yaw), g_count, g_speed)
@@ -393,10 +396,8 @@ main() {
     engine.engine_set_title(e, "ae3d: glTF crowd")
     engine.engine_set_camera_input(e, true)
     engine.engine_set_post(e, true, true, 1.0, 0.5)
-    program = engine.behaviour_new("gltf crowd", null)
-    program.start = on_start
-    program.update = on_update
-    engine.engine_add_behaviour(e, program)
+    game = engine.object(e, "Game", null)
+    engine.script(game, "gltf crowd", null, start, update)
     if !engine.engine_run(e) { println("gltf_crowd: no window") }
     println("gltf_crowd: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${engine.engine_draw_calls(e)} draws")
     engine.engine_free(e)

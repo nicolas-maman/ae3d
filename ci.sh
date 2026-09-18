@@ -139,8 +139,9 @@ trace_crash() {   # trace_crash <status> <binary> [args...]
 # A PNG's size, without a decoder: the IHDR width and height are two big-endian
 # 32-bit words at a fixed offset, after the signature and the chunk header.
 # od's --endian is GNU-only and this has to read the same on macOS.
+# Unquoted, as everywhere else: "py -3" is two words.
 snapshot_size() {
-    "$PYTHON" -c 'import struct,sys
+    $PYTHON -c 'import struct,sys
 d = open(sys.argv[1], "rb").read(24)
 print("%dx%d" % struct.unpack(">II", d[16:24]) if len(d) >= 24 else "")' "$1" 2>/dev/null
 }

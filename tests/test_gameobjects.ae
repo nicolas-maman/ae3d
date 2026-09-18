@@ -1,0 +1,174 @@
+// Game objects through the engine: the shape a program takes.
+//
+// A program makes objects before the engine is up (engine.object), puts
+// scripts on them (engine.script) and runs; the engine owns the scene,
+// uploads what was made before the window existed on the first frame, and
+// calls the phases by Unity's names. What is checked is what a script sees:
+// its object, its engine (engine.of, engine.running), the order of update
+// and late_update, and that an object made or destroyed mid-run comes and
+// goes without the program touching the renderer.
+
+import ae3d.core
+import ae3d.platform
+import ae3d.engine
+import ae3d.behaviour
+import ae3d.loader
+
+var failures = 0
+
+check_int(name: string, got: int, want: int) {
+    if got != want {
+        println("gameobjects: FAIL ${name}: got ${got} want ${want}")
+        failures = failures + 1
+    }
+}
+
+check_true(name: string, ok: bool) {
+    if !ok {
+        println("gameobjects: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// The spinner's state: what its phases saw.
+struct Spinner {
+    starts: int
+    updates: int
+    lates: int
+    fixeds: int
+    // late_update ran before that frame's update: never.
+    late_first: int
+    // The object handed to start, so main can check it was this one.
+    started_on: ptr
+    // engine.of(go) and engine.running() from inside a phase.
+    of_engine: ptr
+    running_engine: ptr
+}
+
+var g_engine: ptr = null
+// Made from inside update on the second frame, destroyed on the fourth.
+var g_visitor: ptr = null
+var g_visitor_starts = 0
+var g_visitor_updates = 0
+
+spin_start(state: ptr, go: *GameObject) {
+    s = state as *Spinner
+    s.starts = s.starts + 1
+    s.started_on = go as ptr
+    s.of_engine = engine.of(go) as ptr
+    s.running_engine = engine.running() as ptr
+}
+
+spin_update(state: ptr, go: *GameObject, delta: float) {
+    s = state as *Spinner
+    s.updates = s.updates + 1
+    if s.lates >= s.updates { s.late_first = s.late_first + 1 }
+    core.model_rotate(behaviour.object_model(go), 0.0, 90.0 * delta, 0.0)
+
+    e = engine.of(go)
+    frame = engine.engine_frame_count(e)
+    if frame == 1 {
+        // An object made while the engine runs goes straight into the
+        // renderer, and its start runs on the next frame.
+        cube = loader.cube(1.0)
+        core.model_set_scale(cube, 6.0, 6.0, 6.0)
+        core.model_set_position(cube, 20.0, 0.0, 0.0)
+        visitor = engine.object(e, "Visitor", cube)
+        engine.script(visitor, "counter", null, visitor_start, visitor_update)
+        g_visitor = visitor as ptr
+    }
+    if frame == 3 {
+        engine.destroy(e, g_visitor as *GameObject)
+    }
+}
+
+spin_fixed(state: ptr, go: *GameObject, delta: float) {
+    s = state as *Spinner
+    s.fixeds = s.fixeds + 1
+}
+
+spin_late(state: ptr, go: *GameObject, delta: float) {
+    s = state as *Spinner
+    s.lates = s.lates + 1
+}
+
+visitor_start(state: ptr, go: *GameObject) { g_visitor_starts = g_visitor_starts + 1 }
+visitor_update(state: ptr, go: *GameObject, delta: float) { g_visitor_updates = g_visitor_updates + 1 }
+
+main() {
+    e = engine.engine_new()
+    engine.engine_set_size(e, 320, 240)
+    engine.engine_set_title(e, "ae3d game objects test")
+    engine.engine_set_frame_limit(e, 6)
+    engine.engine_set_camera_input(e, false)
+    g_engine = e as ptr
+
+    light = core.light_sun(core.vec3(0.3, 0.8, 0.5))
+    engine.engine_set_light(e, light)
+
+    check_true("no engine is running before engine_run", engine.running() == null)
+    check_true("the engine has a scene from the start", engine.engine_scene(e) != null)
+
+    // Before the window exists: the model waits for the first frame.
+    cube = loader.cube(1.0)
+    core.model_set_scale(cube, 10.0, 10.0, 10.0)
+    core.model_polished_metal(cube, 0.8, 0.3, 0.2)
+    spinner = Spinner { starts: 0, updates: 0, lates: 0, fixeds: 0, late_first: 0,
+                        started_on: null, of_engine: null, running_engine: null }
+    object = engine.object(e, "Cube", cube)
+    check_true("an object made before the run is in the scene",
+               behaviour.scene_find(engine.engine_scene(e), "Cube") == object)
+    check_true("an object knows its engine before the run", engine.of(object) == e)
+    script = engine.script(object, "Spinner", (&spinner) as ptr, spin_start, spin_update, spin_fixed, spin_late)
+    check_true("a script is a component of its object", behaviour.object_component(object, 0) == script)
+    check_int("nothing runs before the engine does", spinner.starts, 0)
+
+    manager = engine.object(e, "Game", null)
+    check_true("an object with no model has none", behaviour.object_model(manager) == null)
+    check_int("two objects before the run", behaviour.scene_count(engine.engine_scene(e)), 2)
+
+    // Made and unmade before the window exists: its model must not reach
+    // the renderer on the first frame, by which time the scene has freed it.
+    ghost = engine.object(e, "Ghost", loader.cube(1.0))
+    engine.destroy(e, ghost)
+
+    if !engine.engine_run(e) {
+        println("gameobjects: SKIP no window available")
+        core.light_free(light)
+        engine.engine_free(e)
+        return
+    }
+
+    frames = engine.engine_frame_count(e)
+    check_int("the run was bounded", frames, 6)
+    check_int("start once", spinner.starts, 1)
+    check_true("start is handed its object", spinner.started_on == object as ptr)
+    check_true("engine.of from a phase is the engine", spinner.of_engine == e as ptr)
+    check_true("engine.running from a phase is the engine", spinner.running_engine == e as ptr)
+    check_int("update every frame", spinner.updates, frames)
+    check_int("late_update every frame", spinner.lates, frames)
+    check_int("late_update never before that frame's update", spinner.late_first, 0)
+    check_true("no engine is running after the run", engine.running() == null)
+
+    // The visitor: made on frame 1, started on frame 2, destroyed at the end
+    // of frame 3 -- so updated on frames 2 and 3.
+    check_int("an object made mid-run starts on the next frame", g_visitor_starts, 1)
+    check_int("an object destroyed mid-run stops updating", g_visitor_updates, 2)
+    check_int("the scene is back to the two objects", behaviour.scene_count(engine.engine_scene(e)), 2)
+    check_true("the destroyed object is gone from the scene",
+               behaviour.scene_find(engine.engine_scene(e), "Visitor") == null)
+    check_true("an object destroyed before the run never appears",
+               behaviour.scene_find(engine.engine_scene(e), "Ghost") == null)
+
+    // The cube drew: the pending model reached the renderer on the first
+    // frame. One draw is the cube; the sky and the shadow pass are not counted
+    // as models.
+    check_true("the model made before the run was drawn", engine.engine_draw_calls(e) >= 1)
+
+    if failures == 0 {
+        println("gameobjects: all checks passed (${frames} frames, ${spinner.fixeds} fixed steps)")
+    }
+    core.light_free(light)
+    // The scene, its objects and the models they own go with the engine.
+    engine.engine_free(e)
+}

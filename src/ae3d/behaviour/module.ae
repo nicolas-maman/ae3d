@@ -1,10 +1,26 @@
-// Game objects and components.
+// Game objects and components: the shape Unity and gopher3D gave a scene.
 //
-// A component is a vtable of lifecycle callbacks over its own state pointer,
-// which is how Aether expresses what Go did with an interface. A game object
-// keeps no transform of its own: it points at the model that already owns one,
-// so there is no per-frame copy back and forth between two copies of the same
-// position.
+// A game object is a named thing in the scene with a transform (the model
+// that draws it, or one made for it) and a list of components. A script is
+// a component with Unity's phases, named as Unity names them, over a state
+// of its own:
+//
+//     struct Spinner { speed: float }
+//
+//     start(state: ptr, go: *GameObject) { ... }              // once, first frame
+//     update(state: ptr, go: *GameObject, delta: float) { ... } // every frame
+//
+//     cube = engine.object(e, "Cube", loader.cube(1.0))
+//     engine.script(cube, "Spinner", &spinner, start, update)
+//
+// Every phase gets the script's state and the object it is on, the way a
+// MonoBehaviour has `this` and `gameObject`; `fixed_update` runs at the
+// engine's fixed step and `late_update` after every update, as in Unity.
+// A component is a vtable of these over its state pointer, which is how
+// Aether expresses what Go did with an interface and Unity with a class.
+// A game object keeps no transform of its own: it points at the model that
+// already owns one, so there is no per-frame copy back and forth between
+// two copies of the same position.
 
 import std.list
 import std.heap
@@ -18,7 +34,7 @@ exports (
     component_new, component_free, component_enabled, component_set_enabled,
     component_set_name, object_set_name, object_set_tag,
     component_owner, component_state,
-    object_new, object_free, object_add_component, object_component,
+    object_new, object_free, object_add_component, object_add_script, object_component,
     object_component_count, object_find_component, object_remove_component,
     object_set_model, object_model, object_active, object_set_active,
     object_position, object_set_position, object_translate,
@@ -26,7 +42,8 @@ exports (
     object_forward, object_up, object_right,
     scene_new, scene_free, scene_add, scene_remove, scene_destroy_later,
     scene_find, scene_find_by_tag, scene_count, scene_object,
-    scene_update, scene_fixed_update, scene_clear
+    scene_update, scene_fixed_update, scene_late_update, scene_clear,
+    object_scene, scene_host, scene_set_host
 )
 
 const KIND_MESH = 0
@@ -47,11 +64,13 @@ struct Component {
     enabled: bool
     started: bool
 
-    awake: fn(ptr)
-    start: fn(ptr)
-    update: fn(ptr, float)
-    fixed_update: fn(ptr, float)
-    destroy: fn(ptr)
+    // The phases, Unity's, each handed the state and the object it is on.
+    awake: fn(ptr, *GameObject)
+    start: fn(ptr, *GameObject)
+    update: fn(ptr, *GameObject, float)
+    fixed_update: fn(ptr, *GameObject, float)
+    late_update: fn(ptr, *GameObject, float)
+    destroy: fn(ptr, *GameObject)
 }
 
 struct GameObject {
@@ -62,11 +81,16 @@ struct GameObject {
     active: bool
     started: bool
     owns_model: bool
+    // The scene it was added to, so a script can reach the scene and,
+    // through it, whatever runs the scene (the engine).
+    scene: ptr
 }
 
 struct Scene {
     objects: ptr
     pending_destroy: ptr
+    // Whoever runs this scene -- the engine -- for a script that asks.
+    host: ptr
 }
 
 component_new(name: string, kind: int, state: ptr) -> *Component {
@@ -116,7 +140,7 @@ object_free(o: *GameObject) {
         while i < count {
             c = list.get_raw(o.components, i) as *Component
             if c != null {
-                if c.destroy != null { c.destroy(c.state) }
+                if c.destroy != null { c.destroy(c.state, o) }
                 component_free(c)
             }
             i = i + 1
@@ -156,8 +180,30 @@ object_set_active(o: *GameObject, on: bool) { o.active = on }
 object_add_component(o: *GameObject, c: *Component) {
     c.owner = o as ptr
     list.add_raw(o.components, c)
-    if c.awake != null { c.awake(c.state) }
+    if c.awake != null { c.awake(c.state, o) }
 }
+
+// A script on the object, Unity's AddComponent: its state, and its phases
+// by Unity's names -- `start` once before its first update, `update`
+// every frame, `fixed_update` at the fixed step, `late_update` after every
+// object has updated. Any may be null. The component made is returned, to
+// disable or remove; the state stays the caller's.
+object_add_script(o: *GameObject, name: string, state: ptr,
+                  start: fn(ptr, *GameObject), update: fn(ptr, *GameObject, float),
+                  fixed_update: fn(ptr, *GameObject, float) = null,
+                  late_update: fn(ptr, *GameObject, float) = null) -> *Component {
+    c = component_new(name, KIND_SCRIPT, state)
+    c.start = start
+    c.update = update
+    c.fixed_update = fixed_update
+    c.late_update = late_update
+    object_add_component(o, c)
+    return c
+}
+
+object_scene(o: *GameObject) -> *Scene { return o.scene as *Scene }
+scene_host(s: *Scene) -> ptr { return s.host }
+scene_set_host(s: *Scene, host: ptr) { s.host = host }
 
 object_component_count(o: *GameObject) -> int {
     return list.size(o.components)
@@ -183,7 +229,7 @@ object_remove_component(o: *GameObject, c: *Component) {
     i = 0
     while i < count {
         if list.get_raw(o.components, i) == c {
-            if c.destroy != null { c.destroy(c.state) }
+            if c.destroy != null { c.destroy(c.state, o) }
             list.remove(o.components, i)
             component_free(c)
             return
@@ -252,6 +298,7 @@ scene_free(s: *Scene) {
 }
 
 scene_add(s: *Scene, o: *GameObject) {
+    o.scene = s as ptr
     list.add_raw(s.objects, o)
 }
 
@@ -332,10 +379,10 @@ scene_update(s: *Scene, delta: float) {
                 c = list.get_raw(o.components, j) as *Component
                 if c != null && c.enabled {
                     if !c.started {
-                        if c.start != null { c.start(c.state) }
+                        if c.start != null { c.start(c.state, o) }
                         c.started = true
                     }
-                    if c.update != null { c.update(c.state, delta) }
+                    if c.update != null { c.update(c.state, o, delta) }
                 }
                 j = j + 1
             }
@@ -356,7 +403,29 @@ scene_fixed_update(s: *Scene, delta: float) {
             while j < components {
                 c = list.get_raw(o.components, j) as *Component
                 if c != null && c.enabled && c.fixed_update != null {
-                    c.fixed_update(c.state, delta)
+                    c.fixed_update(c.state, o, delta)
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+// After every object's update: the phase a camera that follows a
+// character runs in, once the character has moved.
+scene_late_update(s: *Scene, delta: float) {
+    count = list.size(s.objects)
+    i = 0
+    while i < count {
+        o = list.get_raw(s.objects, i) as *GameObject
+        if o != null && o.active {
+            components = list.size(o.components)
+            j = 0
+            while j < components {
+                c = list.get_raw(o.components, j) as *Component
+                if c != null && c.enabled && c.started && c.late_update != null {
+                    c.late_update(c.state, o, delta)
                 }
                 j = j + 1
             }

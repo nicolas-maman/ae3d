@@ -14,6 +14,7 @@ import std.json
 import ae3d.core
 import ae3d.platform
 import ae3d.engine
+import ae3d.behaviour
 import ae3d.assets
 import ae3d.loader
 import ae3d.anim
@@ -533,7 +534,8 @@ add_tile(e: *Engine, m: *Manifest, off_x: float, flip: bool, street_only: bool) 
     return models
 }
 
-on_start(state: ptr, e: *Engine) {
+start(state: ptr, go: *GameObject) {
+    e = engine.of(go)
     g_count = core.env_int("AE3D_CROWD", CROWD_DEFAULT)
     g_near_dist = core.env_int("AE3D_NEAR", NEAR_DIST as int) as float
     g_cull_dist = core.env_int("AE3D_CULL", CULL_DIST as int) as float
@@ -939,7 +941,8 @@ say_sim_perf() {
     g_t_frames = 0
 }
 
-on_update(state: ptr, e: *Engine, delta: float) {
+update(state: ptr, go: *GameObject, delta: float) {
+    e = engine.of(go)
     if g_figures == null || list.size(g_figures) == 0 { return }
     cam = engine.engine_camera(e)
     mark = platform.time()
@@ -1081,10 +1084,8 @@ main() {
     // The temporal pass folds the rays' grain -- the penumbrae, the
     // occlusion, the lamps' shadows -- into smooth shading frame by frame.
     if core.env_int("AE3D_TAA", 1) == 1 { engine.engine_set_taa(e, true) }
-    program = engine.behaviour_new("zombie city", null)
-    program.start = on_start
-    program.update = on_update
-    engine.engine_add_behaviour(e, program)
+    game = engine.object(e, "Game", null)
+    engine.script(game, "zombie city", null, start, update)
 
     engine.engine_run(e)
 

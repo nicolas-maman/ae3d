@@ -23,6 +23,7 @@
 import ae3d.core
 import ae3d.platform
 import ae3d.engine
+import ae3d.behaviour
 import blackhole
 
 // 0 is Schwarzschild, 0.998 the Thorne limit that accretion holds a real hole
@@ -101,7 +102,8 @@ apply_level(e: *Engine, screen: *Model, level: int) {
     println("  level ${g_level}: ${g_taps} ray(s), ${g_steps} steps, scale ${adopted}")
 }
 
-on_start(state: ptr, e: *Engine) {
+start(state: ptr, go: *GameObject) {
+    e = engine.of(go)
 
     screen = blackhole.screen_new()
     blackhole.set_spin(screen, SPIN)
@@ -126,7 +128,8 @@ on_start(state: ptr, e: *Engine) {
     println("  quality falls back on its own if the frame runs long")
 }
 
-on_update(state: ptr, e: *Engine, delta: float) {
+update(state: ptr, go: *GameObject, delta: float) {
+    e = engine.of(go)
     screen = g_screen as *Model
     if screen == null { return }
 
@@ -205,10 +208,8 @@ main() {
     light.ambient_strength = 0.0
     engine.engine_set_light(e, light)
 
-    program = engine.behaviour_new("black hole", null)
-    program.start = on_start
-    program.update = on_update
-    engine.engine_add_behaviour(e, program)
+    game = engine.object(e, "Game", null)
+    engine.script(game, "black hole", null, start, update)
 
     engine.engine_run(e)
 

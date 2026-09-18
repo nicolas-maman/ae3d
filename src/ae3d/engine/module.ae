@@ -27,6 +27,7 @@ exports (
     Engine, Behaviour,
     behaviour_new, engine_add_behaviour, engine_remove_behaviour, engine_behaviour_count, engine_behaviour,
     engine_add_scene, engine_remove_scene,
+    object, script, destroy, running, of, engine_scene,
     engine_new, engine_new_with, engine_over, engine_update, engine_free, engine_run, engine_run_at, engine_start, engine_loop, engine_shutdown, engine_jobs,
     engine_stop,
     engine_add_model, engine_remove_model, engine_set_light, engine_light,
@@ -44,11 +45,30 @@ exports (
     engine_gl_renderer, engine_vk_renderer, engine_mouse_x, engine_mouse_y, engine_mouse_down, engine_key_down
 )
 
-// A behaviour: what a program adds to the engine to take part in the loop,
-// the way a MonoBehaviour joins a Unity scene or a gopher3D behaviour
-// registers with its manager. The engine calls its phases; the program never
-// calls them itself. `state` is the behaviour's own memory, handed back to
-// every phase beside the engine.
+// A program is written the way a Unity or gopher3D game is: game objects
+// in the engine's scene, and scripts on them with Unity's phases, which
+// the engine calls. The program never calls a phase itself.
+//
+//     struct Spinner { speed: float }
+//     start(state: ptr, go: *GameObject) { ... }
+//     update(state: ptr, go: *GameObject, delta: float) { ... }
+//
+//     cube = engine.object(e, "Cube", loader.cube(1.0))     // a game object with a mesh
+//     engine.script(cube, "Spinner", &spinner, start, update)
+//     engine.engine_run(e)
+//
+// `object` puts the object in the scene and its model in the renderer (at
+// start, if the engine is not up yet); `script` is AddComponent. A script
+// reaches its engine through engine.of(go) -- the camera, the lights, the
+// clock -- or engine.running(), the engine whose loop is running. The
+// phases: `start` once on the first frame the object is in the scene,
+// `fixed_update` at the fixed step, `update` once a frame, `late_update`
+// after every object has updated and before the frame is drawn; a phase
+// left null is not taken part in.
+//
+// Underneath, a behaviour: what the engine's own systems (the scene above,
+// the weather) add to take part in the loop, with the engine handed to
+// every phase. `state` is the behaviour's own memory.
 //
 //   start        once, on the first frame after it is added, with the window
 //                and the backend up: where a scene is built
@@ -64,6 +84,8 @@ exports (
 //
 // A phase left null is a phase the behaviour does not take part in. A
 // behaviour added while the loop runs starts on the next frame.
+var g_running: ptr = null
+
 struct Behaviour {
     name: string
     state: ptr
@@ -106,6 +128,10 @@ struct Engine {
     // What takes part in the loop: every Behaviour added to the engine, in
     // the order added. The loop calls their phases; nothing else does.
     behaviours: ptr
+    // The engine's scene of game objects (a *Scene), run as a behaviour,
+    // and the models made before the backend was up, added at start.
+    scene: ptr
+    pending_models: ptr
 
     width: int
     height: int
@@ -245,11 +271,76 @@ engine_behaviour(e: *Engine, index: int) -> *Behaviour {
 // behaviour: its components' start, update and fixed_update run when the
 // engine's do. The behaviour returned is the handle to remove it by.
 engine_add_scene(e: *Engine, scene: *Scene) -> *Behaviour {
+    behaviour.scene_set_host(scene, e as ptr)
     b = behaviour_new("scene", scene as ptr)
     b.update = scene_behaviour_update
     b.fixed_update = scene_behaviour_fixed
     engine_add_behaviour(e, b)
     return b
+}
+
+// The engine's own scene: what `object` puts objects in.
+engine_scene(e: *Engine) -> *Scene { return e.scene as *Scene }
+
+// A game object in the engine's scene, drawn by `model` (null for an
+// object with no mesh -- a game manager, a camera rig). The model is the
+// object's from here: freed with it when the scene goes. Into the
+// renderer now when the engine is up, else on the first frame.
+object(e: *Engine, name: string, model: *Model) -> *GameObject {
+    o = behaviour.object_new(name)
+    if model != null {
+        behaviour.object_set_model(o, model)
+        o.owns_model = true
+        if e.running { e.backend_add_model(e.backend_state, model) }
+        else { list.add_raw(e.pending_models, model as ptr) }
+    }
+    behaviour.scene_add(e.scene as *Scene, o)
+    return o
+}
+
+// A script on a game object: Unity's AddComponent, with the phases by
+// Unity's names. Any phase may be null; the state stays the caller's.
+script(o: *GameObject, name: string, state: ptr,
+       start: fn(ptr, *GameObject), update: fn(ptr, *GameObject, float),
+       fixed_update: fn(ptr, *GameObject, float) = null,
+       late_update: fn(ptr, *GameObject, float) = null) -> *Component {
+    return behaviour.object_add_script(o, name, state, start, update, fixed_update, late_update)
+}
+
+// The object out of the scene and its model out of the renderer, at the
+// end of this frame: Unity's Destroy.
+destroy(e: *Engine, o: *GameObject) {
+    if o == null { return }
+    if o.model != null {
+        if e.running {
+            e.backend_remove_model(e.backend_state, o.model as *Model)
+        } else {
+            // Not yet uploaded: out of the queue, or the first frame would
+            // hand the renderer a model the scene has freed by then.
+            pending = list.size(e.pending_models)
+            i = 0
+            while i < pending {
+                if list.get_raw(e.pending_models, i) == o.model {
+                    list.remove(e.pending_models, i)
+                    pending = 0
+                }
+                i = i + 1
+            }
+        }
+    }
+    behaviour.scene_destroy_later(e.scene as *Scene, o)
+}
+
+// The engine whose loop is running, for a script that has no other way to
+// it (Unity's singletons); null between runs.
+running() -> *Engine { return g_running as *Engine }
+
+// The engine an object's scene is run by.
+of(o: *GameObject) -> *Engine {
+    if o == null || o.scene == null { return running() }
+    host = behaviour.scene_host(o.scene as *Scene)
+    if host == null { return running() }
+    return host as *Engine
 }
 
 engine_remove_scene(e: *Engine, handle: *Behaviour) {
@@ -259,6 +350,7 @@ engine_remove_scene(e: *Engine, handle: *Behaviour) {
 
 scene_behaviour_update(state: ptr, e: *Engine, delta: float) {
     behaviour.scene_update(state as *Scene, delta)
+    behaviour.scene_late_update(state as *Scene, delta)
 }
 
 scene_behaviour_fixed(state: ptr, e: *Engine, step: float) {
@@ -343,6 +435,9 @@ engine_new_with(api: int) -> *Engine {
     }
     e = heap.new(Engine)
     e.behaviours = list.new()
+    e.pending_models = list.new()
+    e.scene = behaviour.scene_new() as ptr
+    engine_add_scene(e, e.scene as *Scene)
     e.api = api
     e.width = 1024
     e.height = 768
@@ -396,6 +491,9 @@ engine_new_with(api: int) -> *Engine {
 engine_over(renderer: ptr, api: int, camera: *Camera, light: *Light) -> *Engine {
     e = heap.new(Engine)
     e.behaviours = list.new()
+    e.pending_models = list.new()
+    e.scene = behaviour.scene_new() as ptr
+    engine_add_scene(e, e.scene as *Scene)
     e.api = api
     e.borrowed = true
     e.width = 1024
@@ -583,6 +681,27 @@ bind_backend(e: *Engine, b: Backend) {
 
 engine_free(e: *Engine) {
     if e == null { return }
+    if g_running == e as ptr { g_running = null }
+    // The scene's objects, and the models they own, before the behaviours
+    // (the scene's runner is one of them). An owned model leaves the
+    // renderer the way engine_remove_model takes one out, so its buffers go
+    // with it rather than with the device; a model never uploaded has none
+    // to release, and the backends know that.
+    if e.scene != null {
+        scene = e.scene as *Scene
+        count = behaviour.scene_count(scene)
+        i = 0
+        while i < count {
+            o = behaviour.scene_object(scene, i)
+            if o != null && o.owns_model && o.model != null && e.backend_state != null {
+                e.backend_remove_model(e.backend_state, o.model as *Model)
+            }
+            i = i + 1
+        }
+        behaviour.scene_free(scene)
+        e.scene = null
+    }
+    if e.pending_models != null { list.free(e.pending_models) ; e.pending_models = null }
     if e.animations != null {
         anim.registry_free(e.animations as *Registry)
         e.animations = null
@@ -1151,6 +1270,15 @@ engine_start(e: *Engine, x: int, y: int) -> bool {
     e.camera = core.camera_new(e.width, e.height) as ptr
     platform.window_set_cursor_mode(e.window, platform.CURSOR_NORMAL)
     e.running = true
+    g_running = e as ptr
+    // What was made before the backend was up.
+    pending = list.size(e.pending_models)
+    i = 0
+    while i < pending {
+        e.backend_add_model(e.backend_state, list.get_raw(e.pending_models, i) as *Model)
+        i = i + 1
+    }
+    list.clear(e.pending_models)
     apply_ssao(e)
     // Asked for before the backend was up, or by AE3D_TAA=1.
     if core.env_int("AE3D_TAA", 0) == 1 { e.taa = true }
@@ -1455,6 +1583,8 @@ say_perf(e: *Engine) {
 }
 
 engine_shutdown(e: *Engine) {
+    // Between runs there is no running engine for a script to find.
+    if g_running == e as ptr { g_running = null }
     say_perf(e)
     if e.agent_on {
         agent.capture_release()

@@ -1,34 +1,38 @@
 // Minimal end-to-end scene: one lit cube spinning in front of the camera.
-// Run it to confirm the toolchain, the window and the OpenGL backend all work.
+// Run it to confirm the toolchain, the window and a backend all work.
 //
 //   ./build.sh examples/spinning_cube.ae && ./build/spinning_cube
+//
+// The shape every program here takes, the shape Unity and gopher3D gave a
+// game: game objects in the engine's scene, and scripts on them whose
+// phases the engine calls -- start once, update every frame.
 
 import ae3d.core
 import ae3d.platform
 import ae3d.engine
+import ae3d.behaviour
 import ae3d.loader
 
-var g_cube: ptr = null
+// Spinner: turns whatever it is on, a little faster about one axis than
+// the other so the cube tumbles rather than rolls.
+struct Spinner {
+    pitch: float
+    yaw: float
+}
 
-on_start(state: ptr, e: *Engine) {
-    cube = loader.cube(1.0)
-    core.model_set_scale(cube, 20.0, 20.0, 20.0)
-    core.model_polished_metal(cube, 0.85, 0.35, 0.2)
-    engine.engine_add_model(e, cube)
-    g_cube = cube as ptr
-
+start(state: ptr, go: *GameObject) {
+    e = engine.of(go)
     cam = engine.engine_camera(e)
     core.camera_set_position(cam, core.vec3(0.0, 20.0, 90.0))
     // Placing the camera above the cube without aiming it leaves the cube in
     // the bottom third of the frame: a new camera looks along -z, not at
     // anything in particular.
-    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+    core.camera_look_at(cam, behaviour.object_position(go))
 }
 
-on_update(state: ptr, e: *Engine, delta: float) {
-    cube = g_cube as *Model
-    if cube == null { return }
-    core.model_rotate(cube, 18.0 * delta, 30.0 * delta, 0.0)
+update(state: ptr, go: *GameObject, delta: float) {
+    spin = state as *Spinner
+    core.model_rotate(behaviour.object_model(go), spin.pitch * delta, spin.yaw * delta, 0.0)
 }
 
 main() {
@@ -39,15 +43,15 @@ main() {
     light = core.light_sun(core.vec3(0.4, 0.8, 0.5))
     engine.engine_set_light(e, light)
 
-    program = engine.behaviour_new("spinning cube", null)
-    program.start = on_start
-    program.update = on_update
-    engine.engine_add_behaviour(e, program)
+    cube = loader.cube(1.0)
+    core.model_set_scale(cube, 20.0, 20.0, 20.0)
+    core.model_polished_metal(cube, 0.85, 0.35, 0.2)
+    spinner = Spinner { pitch: 18.0, yaw: 30.0 }
+    object = engine.object(e, "Cube", cube)
+    engine.script(object, "Spinner", &spinner, start, update)
 
     engine.engine_run(e)
 
-    cube = g_cube as *Model
-    if cube != null { core.model_free(cube) }
     core.light_free(light)
     engine.engine_free(e)
 }

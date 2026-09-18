@@ -1,16 +1,25 @@
 // Loads the OBJ models from resources/, including a multi-material one, and
-// shows them side by side.
+// shows them side by side: three game objects, and a script on the Earth
+// that turns it.
 //
 //   ./build.sh examples/models.ae && ./build/models
 
 import ae3d.core
 import ae3d.platform
 import ae3d.engine
+import ae3d.behaviour
 import ae3d.loader
 
-var g_spin: ptr = null
+// Spinner: turns its object about its own up axis, degrees a second.
+struct Spinner { rate: float }
 
-place(e: *Engine, path: string, x: float, scale: float) -> *Model {
+update(state: ptr, go: *GameObject, delta: float) {
+    spin = state as *Spinner
+    core.model_rotate(behaviour.object_model(go), 0.0, spin.rate * delta, 0.0)
+}
+
+// A model from a file, at x on the ground, as a game object in the scene.
+place(e: *Engine, name: string, path: string, x: float, scale: float) -> *GameObject {
     m = loader.load_obj(path, false)
     if m == null {
         println("could not load ${path}: ${loader.last_error()}")
@@ -19,29 +28,39 @@ place(e: *Engine, path: string, x: float, scale: float) -> *Model {
     core.model_set_scale(m, scale, scale, scale)
     core.model_set_position(m, x, 0.0, 0.0)
     println("${path}: ${core.mesh_vertex_count(m.mesh)} vertices, ${core.model_group_count(m)} material groups")
-    engine.engine_add_model(e, m)
-    return m
+    return engine.object(e, name, m)
 }
 
-on_start(state: ptr, e: *Engine) {
+main() {
+    e = engine.engine_new()
+    engine.engine_set_size(e, 1280, 720)
+    engine.engine_set_title(e, "ae3d - models")
+    engine.engine_set_clear_color(e, 0.05, 0.06, 0.09)
 
-    sphere = place(e, "resources/obj/Sphere.obj", 0.0 - 80.0, 1.0)
+    light = core.light_sun(core.vec3(0.3, 0.6, 0.75))
+    light.intensity = 2.0
+    engine.engine_set_light(e, light)
+
+    sphere = place(e, "Sphere", "resources/obj/Sphere.obj", 0.0 - 80.0, 1.0)
     if sphere != null {
-        core.model_polished_metal(sphere, 0.85, 0.55, 0.2)
+        m = behaviour.object_model(sphere)
+        core.model_polished_metal(m, 0.85, 0.55, 0.2)
         // Brushed rather than mirror-polished: a mirror with no surroundings
         // to reflect is a flat disc with one highlight on it.
-        core.model_set_pbr(sphere, 0.9, 0.45)
+        core.model_set_pbr(m, 0.9, 0.45)
     }
 
-    earth = place(e, "resources/obj/Earth/Earth.obj", 0.0, 26.0)
+    spinner = Spinner { rate: 12.0 }
+    earth = place(e, "Earth", "resources/obj/Earth/Earth.obj", 0.0, 26.0)
     if earth != null {
+        m = behaviour.object_model(earth)
         // The .mtl names no images, but the map and its relief ship beside
         // it; without them the Earth drew as a brown disc.
         // A multi-material model draws one group per material, each with
         // a material of its own, so the images go on every group's.
         i = 0
-        while i < core.model_group_count(earth) {
-            group = core.model_group(earth, i)
+        while i < core.model_group_count(m) {
+            group = core.model_group(m, i)
             if group.material != null {
                 core.material_set_texture_path(group.material, "resources/obj/Earth/Albedo.jpg")
                 core.material_set_normal_path(group.material, "resources/obj/Earth/Bump.jpg")
@@ -50,42 +69,27 @@ on_start(state: ptr, e: *Engine) {
             }
             i = i + 1
         }
-        g_spin = earth as ptr
+        engine.script(earth, "Spinner", &spinner, null, update)
     }
 
-    cube = place(e, "resources/obj/Cube.obj", 80.0, 22.0)
-    if cube != null { core.model_glossy(cube, 0.2, 0.5, 0.85) }
+    cube = place(e, "Cube", "resources/obj/Cube.obj", 80.0, 22.0)
+    if cube != null { core.model_glossy(behaviour.object_model(cube), 0.2, 0.5, 0.85) }
 
-    engine.engine_set_clear_color(e, 0.05, 0.06, 0.09)
-
-    cam = engine.engine_camera(e)
-    core.camera_set_position(cam, core.vec3(0.0, 20.0, 190.0))
-    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
-    core.camera_set_speed(cam, 160.0)
-}
-
-on_update(state: ptr, e: *Engine, delta: float) {
-    earth = g_spin as *Model
-    if earth == null { return }
-    core.model_rotate(earth, 0.0, 12.0 * delta, 0.0)
-}
-
-main() {
-    e = engine.engine_new()
-    engine.engine_set_size(e, 1280, 720)
-    engine.engine_set_title(e, "ae3d - models")
-
-    light = core.light_sun(core.vec3(0.3, 0.6, 0.75))
-    light.intensity = 2.0
-    engine.engine_set_light(e, light)
-    program = engine.behaviour_new("models", null)
-    program.start = on_start
-    program.update = on_update
-    engine.engine_add_behaviour(e, program)
+    // The camera is the engine's, made when the window is: placed from a
+    // script's start, on the first frame, when it exists.
+    rig = engine.object(e, "Camera rig", null)
+    engine.script(rig, "look at the models", null, aim, null)
 
     engine.engine_run(e)
 
     println("models: ${engine.engine_frame_count(e)} frames, ${engine.engine_draw_calls(e)} draw calls")
     core.light_free(light)
     engine.engine_free(e)
+}
+
+aim(state: ptr, go: *GameObject) {
+    cam = engine.engine_camera(engine.of(go))
+    core.camera_set_position(cam, core.vec3(0.0, 20.0, 190.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+    core.camera_set_speed(cam, 160.0)
 }
