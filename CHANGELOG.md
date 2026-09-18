@@ -143,6 +143,15 @@
   `tests/test_gltf` checks a generated two-bone arm against the arithmetic
   and loads the Khronos Fox. The skin palette holds 96 bones (was 48), a
   Mixamo rig with its fingers.
+- `gltf.bake_bank(scene, animation, frames)`: any animation of a glTF
+  file baked into a pose bank in place over its first skin
+  (`gltf.bake_root` picks the joint that carries the travel;
+  `gltf.animation_duration` the cycle), so a figure from a public pack is
+  a crowd without Blender. `examples/gltf_crowd.ae` walks hundreds of any
+  figure over a field, every skinned primitive instanced over the bank;
+  `tests/test_gltf_crowd` bakes the Khronos Fox's walk and draws thirty.
+  Three hundred of a Quaternius (CC0) survivor at 150 fps hidden, on both
+  backends alike.
 - `skin.skeleton_set_inverse_bind` and `skeleton_settle` take a file's
   inverse binds where `skeleton_bind` would derive them from the pose.
 - `native/ae3d_blob.c`: a file as bytes and the little-endian numbers in it.

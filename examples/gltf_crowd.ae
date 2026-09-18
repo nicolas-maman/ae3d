@@ -1,0 +1,221 @@
+// Any glTF figure as a crowd: its walk baked into a pose bank, every
+// primitive of the file instanced over the bank, a few hundred of it walking
+// a field, each at its own phase and its own heading.
+//
+//   ./build/gltf_crowd path/to/figure.glb [Walk]
+//   AE3D_CROWD=2000 AE3D_ANIM=Run ./build/gltf_crowd figure.glb
+//
+// A figure from a Quaternius pack, Mixamo, Sketchfab or another engine's
+// export goes from a file to a horde without passing through Blender: the
+// loader gives the skin and the clips, gltf.bake_bank strikes the clip's
+// poses into a bank in place, and the crowd's own machinery -- the ECS
+// columns, the native wander and step, the instance streams -- takes it from
+// there, exactly as it takes the pipeline's zombie. AE3D_FACING=degrees says
+// which way the file's figure faces at rest, measured from +X toward -Z: a
+// glTF figure faces +Z, which is 90 (the default); the pipeline's zombie
+// faces +X, which is 0. Wrong, and the crowd walks sideways or backwards.
+
+import std.os
+import std.list
+import ae3d.core
+import ae3d.engine
+import ae3d.gltf
+import ae3d.crowd
+import ae3d.ecs
+import ae3d.loader
+import ae3d.skin
+
+extern fmin(a: float, b: float) -> float
+extern fmax(a: float, b: float) -> float
+
+const FRAMES = 48
+const FIELD = 30.0
+const MAX_SPEED = 2.5
+const SPREAD = 0.9
+
+var g_path = ""
+var g_animation = "Walk"
+var g_scene: ptr = null
+var g_bank: ptr = null
+var g_floor: ptr = null
+var g_light: ptr = null
+var g_count = 0
+var g_walk = 1.0
+var g_speed = 1.0
+var g_facing = 0.0
+var g_parts: ptr = null
+var g_pos: ptr = null
+var g_vel: ptr = null
+var g_yaw: ptr = null
+var g_draw_yaw: ptr = null
+var g_phase: ptr = null
+var g_color: ptr = null
+var g_seed = 0x2f6a41b3
+
+next_random() -> float {
+    g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
+    return (g_seed as float) / 2147483647.0
+}
+
+// The crowd's position, heading and phase onto every part of the figure,
+// the heading turned by the file's facing so the figure walks the way it
+// goes.
+upload(n: int) {
+    yaw = ecs.column_data(g_yaw) as float[]
+    turned = ecs.column_data(g_draw_yaw) as float[]
+    i = 0
+    while i < n {
+        turned[i] = yaw[i] + g_facing
+        i = i + 1
+    }
+    k = 0
+    while k < list.size(g_parts) {
+        m = list.get_raw(g_parts, k) as *Model
+        core.model_set_instance_draw_count(m, n)
+        core.model_set_instance_positions_yaw(m, ecs.column_data(g_pos), ecs.column_data(g_draw_yaw), n)
+        core.model_set_instance_phases(m, ecs.column_data(g_phase), n)
+        core.model_set_instance_colors(m, ecs.column_data(g_color), n)
+        k = k + 1
+    }
+}
+
+on_start(state: ptr, e: *Engine) {
+    scene = gltf.load(g_path)
+    if scene == null {
+        println("gltf_crowd: ${gltf.last_error()}")
+        engine.engine_stop(e)
+        return
+    }
+    g_scene = scene as ptr
+    if gltf.skeleton_count(scene) == 0 || gltf.animation_count(scene) == 0 {
+        println("gltf_crowd: ${g_path} has ${gltf.skeleton_count(scene)} skins and ${gltf.animation_count(scene)} animations; a crowd needs one of each")
+        engine.engine_stop(e)
+        return
+    }
+    bank = gltf.bake_bank(scene, g_animation, FRAMES)
+    if bank == null {
+        println("gltf_crowd: ${gltf.last_error()}")
+        a = 0
+        while a < gltf.animation_count(scene) {
+            println("gltf_crowd: animation '${gltf.animation_name(scene, a)}'")
+            a = a + 1
+        }
+        engine.engine_stop(e)
+        return
+    }
+    g_bank = bank
+    g_walk = gltf.animation_duration(scene, g_animation)
+    if g_walk <= 0.0 { g_walk = 1.0 }
+    // The clip's own pace where it travelled, so the feet plant; a clip
+    // authored in place walks at a stroll.
+    travelled = crowd.posebank_travel(bank, FRAMES)
+    g_speed = travelled / g_walk
+    if g_speed < 0.2 { g_speed = 1.1 }
+    skel = gltf.skeleton(scene, 0)
+    println("gltf_crowd: ${g_path}: '${g_animation}' baked, ${FRAMES} poses over ${skin.skeleton_count(skel)} bones, ${g_walk}s a cycle, ${travelled}m in place, ${g_speed}m/s")
+
+    // Every skinned primitive, at the origin with no transform of its own:
+    // the bank's palette carries the rig's placement and scale, and the
+    // instance stream carries the crowd's.
+    g_parts = list.new()
+    i = 0
+    while i < gltf.primitive_count(scene) {
+        m = gltf.primitive(scene, i)
+        if m.skeleton != null {
+            core.model_set_parent(m, null)
+            core.model_set_position(m, 0.0, 0.0, 0.0)
+            core.model_set_scale(m, 1.0, 1.0, 1.0)
+            core.model_set_rotation(m, core.quat_ident())
+            core.model_update_matrix(m)
+            core.model_enable_instancing(m, g_count)
+            core.model_set_pose_bank(m, bank, FRAMES)
+            core.model_set_crowd_walk(m, g_walk)
+            core.model_enable_instance_phases(m)
+            core.model_enable_instance_colors(m)
+            engine.engine_add_model(e, m)
+            list.add_raw(g_parts, m as ptr)
+        }
+        i = i + 1
+    }
+    println("gltf_crowd: ${list.size(g_parts)} parts a figure, ${g_count} figures")
+
+    // The crowd: scattered over the field, each facing its own way, at its
+    // own point in the walk, in its own shade.
+    g_pos = ecs.column_new(g_count, 3)
+    g_vel = ecs.column_new(g_count, 3)
+    g_yaw = ecs.column_new(g_count, 1)
+    g_draw_yaw = ecs.column_new(g_count, 1)
+    g_phase = ecs.column_new(g_count, 1)
+    g_color = ecs.column_new(g_count, 3)
+    i = 0
+    while i < g_count {
+        rx = next_random()
+        rz = next_random()
+        ry = next_random()
+        rp = next_random()
+        rc = next_random()
+        ecs.column_set3(g_pos, i, core.vec3((rx - 0.5) * FIELD * 2.0 * SPREAD, 0.0, (rz - 0.5) * FIELD * 2.0 * SPREAD))
+        ecs.column_set(g_yaw, i, 0, ry * core.TWO_PI)
+        ecs.column_set(g_phase, i, 0, rp)
+        ecs.column_set3(g_color, i, core.vec3(0.75 + 0.25 * rc, 0.75 + 0.25 * (1.0 - rc), 0.8))
+        i = i + 1
+    }
+    upload(g_count)
+
+    ground = loader.plane(4, FIELD * 2.5)
+    core.model_set_position(ground, 0.0 - FIELD * 5.0, 0.0, 0.0 - FIELD * 5.0)
+    core.model_matte(ground, 0.36, 0.40, 0.30)
+    core.model_set_pbr(ground, 0.0, 0.9)
+    engine.engine_add_model(e, ground)
+    g_floor = ground as ptr
+
+    light = core.light_directional(core.vec3(0.0 - 0.45, 0.0 - 1.0, 0.0 - 0.3), core.vec3(1.0, 0.97, 0.92), 2.4)
+    engine.engine_set_light(e, light)
+    g_light = light as ptr
+    engine.engine_set_shadows(e, true)
+    engine.engine_set_shadow_distance(e, FIELD * 3.0)
+    engine.engine_set_time_of_day(e, 15.0)
+
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(0.0, 4.5, FIELD * 1.15))
+    core.camera_look_at(cam, core.vec3(0.0, 1.0, 0.0))
+    core.camera_set_speed(cam, 8.0)
+    core.camera_set_far(cam, 1000.0)
+}
+
+on_update(state: ptr, e: *Engine, delta: float) {
+    if g_bank == null || g_count == 0 { return }
+    crowd.crowd_wander(ecs.column_data(g_vel), ecs.column_data(g_yaw), g_count, g_speed)
+    crowd.crowd_step(ecs.column_data(g_pos), ecs.column_data(g_vel), ecs.column_data(g_yaw),
+                     ecs.column_data(g_phase), 0, g_count, delta, MAX_SPEED,
+                     0.0 - FIELD, FIELD, 0.0 - FIELD, FIELD, 0.0, g_walk, g_bank)
+    upload(g_count)
+}
+
+main() {
+    g_path = "tests/fixtures/gltf/Fox.glb"
+    if os.aether_args_count() > 1 { g_path = os.aether_args_get(1) }
+    if os.aether_args_count() > 2 { g_animation = os.aether_args_get(2) }
+    env_anim = os.getenv("AE3D_ANIM")
+    if env_anim != null { g_animation = core.text(env_anim) }
+    g_count = core.env_int("AE3D_CROWD", 300)
+    if g_count < 1 { g_count = 1 }
+    g_facing = core.deg_to_rad(core.env_int("AE3D_FACING", 90) as float)
+
+    e = engine.engine_new()
+    engine.engine_set_size(e, 1280, 720)
+    engine.engine_set_title(e, "ae3d: glTF crowd")
+    engine.engine_set_camera_input(e, true)
+    engine.engine_set_post(e, true, true, 1.0, 0.5)
+    program = engine.behaviour_new("gltf crowd", null)
+    program.start = on_start
+    program.update = on_update
+    engine.engine_add_behaviour(e, program)
+    if !engine.engine_run(e) { println("gltf_crowd: no window") }
+    println("gltf_crowd: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${engine.engine_draw_calls(e)} draws")
+    engine.engine_free(e)
+    if g_bank != null { crowd.posebank_free(g_bank) }
+    if g_scene != null { gltf.scene_destroy(g_scene as *GltfScene) }
+    if g_floor != null { core.model_free(g_floor as *Model) }
+    if g_light != null { core.light_free(g_light as *Light) }
+}
