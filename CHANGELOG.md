@@ -45,7 +45,9 @@
   slot on each object is a script component whose phases run whatever the
   slot names, and a frame is `behaviour.scene_update` on the editor's
   scene, as it is on a program's -- attaching or rebuilding a script marks
-  the slot unstarted, and start runs before the next update.
+  the slot unstarted, and start runs before the next update. The inspector
+  lists the selected object's components under its name ("water · orbit"),
+  the first thing Unity's does.
 
 ### The loop owns the lifecycle
 

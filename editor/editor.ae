@@ -357,6 +357,9 @@ const SSR_STRENGTH = 0.6
 var g_first_fps = 0 - 1
 var g_stats = 0
 var g_title = 0
+// The object's components, under its name: what Unity's inspector lists
+// first. The kind it is, and the script on it when there is one.
+var g_parts = 0
 var g_sliders: ptr = null
 // Every row has a number box. A bounded row has a slider beside it as well:
 // dragging and typing are two ways into the same value, which is how all three
@@ -955,6 +958,30 @@ refresh_title() {
         return
     }
     ui.set_text(g_title, "${core.text(m.name)}   ${core.mesh_index_count(m.mesh) / 3} triangles")
+    refresh_parts()
+}
+
+// "mesh", "water · orbit": the components on the selected object, in the
+// order they are on it, the way an inspector lists them.
+refresh_parts() {
+    if g_parts == 0 { return }
+    c = component_at(g_selected)
+    if c == null {
+        ui.set_text(g_parts, "")
+        return
+    }
+    parts = string.copy(kind_name(c.kind))
+    attached = script_at(g_selected)
+    if attached != SCRIPT_NONE {
+        name = script_name(attached)
+        joined = string.concat(parts, " · ")
+        string.free(parts)
+        parts = string.concat(joined, name)
+        string.free(joined)
+        string.free(name)
+    }
+    ui.set_text(g_parts, parts)
+    string.free(parts)
 }
 
 refresh_swatch() {
@@ -1386,6 +1413,7 @@ sync_inspector() {
     m = selected_model()
     if m == null {
         if g_title != 0 { ui.set_text(g_title, "nothing selected") }
+        if g_parts != 0 { ui.set_text(g_parts, "") }
         show_water_section(false)
         show_terrain_section(false)
         return
@@ -4892,6 +4920,7 @@ paint_segments(store: ptr, count: int, active: int) {
 
 refresh_script_buttons() {
     paint_segments(g_script_buttons, g_script_count, script_at(g_selected))
+    refresh_parts()
 }
 
 refresh_preset_buttons() {
@@ -5280,6 +5309,8 @@ main() {
         inspector_body = fold_section(right, "INSPECTOR")
         g_title = ui.text(panel_row(inspector_body), "nothing selected")
         ui.add_css_class(g_title, "value")
+        g_parts = ui.text(panel_row(inspector_body), "")
+        ui.add_css_class(g_parts, "caption")
         ui.divider(right)
 
         transform_body = fold_section(right, "TRANSFORM")
