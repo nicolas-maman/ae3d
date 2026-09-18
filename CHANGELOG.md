@@ -115,14 +115,62 @@
   inverse binds where `skeleton_bind` would derive them from the pose.
 - `native/ae3d_blob.c`: a file as bytes and the little-endian numbers in it.
 
+### Impostors: the horde's far tier as pictures
+
+- `model_set_impostor(m, cols, rows, width, height)`: a crowd model whose
+  mesh is one upright quad draws each instance as a picture -- the cell of
+  its texture for the angle the camera sees it from (`cols` views around
+  the figure, the first from its +X, which is the crowd's yaw zero) and the
+  frame of its walk its phase is at (`rows`). Two triangles a figure instead
+  of a hundred and sixty-eight. The picture is not a lit photograph: its
+  texture is the figure's **albedo** and its normal map the figure's
+  **normals** in its own frame, turned into the world by the instance's
+  facing, and the scene's lights, shadow, fog and occlusion shade it the
+  way they shade the mesh beside it. `zombie_city` draws every zombie past
+  `AE3D_IMPOSTOR` metres (80; 0 turns it off) this way: 100,000 zombies 95
+  to 138 fps, 500,000 21 to 35, with the scene's GPU time 28.8 to 8.0 ms
+  and the shadow pass 19 to 2.7.
+- `tools/bake_impostor.ae` bakes the atlases out of the figure with the
+  engine: the gait baked in place into a pose bank, one instance of the
+  figure at the origin, a camera on a circle around it through a narrow
+  lens, a frame a cell, read back through the capture channel, keyed on a
+  colour nothing in a zombie is, the colour bled under the transparent
+  pixels so the filter and the mip levels have nothing of the key to blend
+  in. `impostor_<figure>.png`, `_normal.png` and a `.json` with the grid
+  and the metres a cell spans, beside the export. `ci.sh` rebakes one and
+  holds it to every cell filled.
+- `engine_set_capture_channel(e, n)`: the frame drawn as every surface's
+  albedo (1) or its world-space normals (2), for a bake to read back and
+  for a look at why a surface lights the way it does. `tests/test_impostor`
+  reads the cells, the cutout, the turn, the phase, the tint and the
+  normals back as exact colours on both backends.
+
+### The scene's depth comes from the opaque pass
+
+- On Vulkan the camera depth the occlusion, the reflection and the water
+  read is the frame's own depth, resolved after the opaque draws (the
+  nearest of the samples a pixel) into the target they sample; the scene
+  pass is drawn in two halves around the resolve. The prepass that drew
+  every visible triangle again, depth only, is gone: 20,000 zombies at
+  `AE3D_NEAR=28` 100 to 120 fps, 1,193 draws to 419, and the depth is of
+  what was drawn, pictures of figures included. (#320)
+- The near tier's depth proxy (`model_set_depth_proxy`) is the shadow pass's
+  alone now. Read by the occlusion at the pixel, the proxy's silhouette --
+  the far tier's, a few pixels out from the mesh's -- put the figure behind
+  into the occlusion of the figure in front, and every near zombie on
+  Vulkan wore the one behind it as a ghost. The shadow map, soft, never
+  showed it.
+- A Vulkan crowd whose only change in a frame was its phases stood still:
+  the phase rides in the one instance stream with the matrix and the
+  colour, and a phase set alone did not send it. It does.
+
 ### The crowd's depth passes
 
-- `model_set_depth_proxy(m, proxy)`: the shadow map and the camera depth
-  draw the proxy's mesh with the model's instances and pose. The city's
-  near tier casts and writes depth from its far tier's 168 triangles
-  instead of its 26,636: 2,000 zombies 30 to 68 fps, 20,000 at
-  `AE3D_NEAR=28` 54 to 91, on Vulkan. OpenGL draws the full mesh as
-  before (its VAO binds the mesh to the instance stream).
+- `model_set_depth_proxy(m, proxy)`: the shadow map draws the proxy's mesh
+  with the model's instances and pose. The city's near tier casts from its
+  far tier's 168 triangles instead of its 26,636: 2,000 zombies 30 to 68
+  fps, 20,000 at `AE3D_NEAR=28` 54 to 91, on Vulkan. OpenGL draws the
+  full mesh as before (its VAO binds the mesh to the instance stream).
 
 ### The front page
 

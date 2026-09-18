@@ -288,3 +288,84 @@ int ae3d_capture_grid(int left, int top, int width, int height,
     }
     return 1;
 }
+
+/* The captured frame copied into a cell of an RGBA atlas at (dst_x, dst_y),
+   pixels within `tolerance` of the key colour (kr, kg, kb) made transparent
+   and every pixel's colour kept -- what tools/bake_impostor.ae fills its
+   atlas with, a cell a frame. Returns how many pixels were kept, so the
+   tool can tell an empty cell from a figure, or -1 when the cell would not
+   fit. */
+/* The colour of every transparent pixel of an RGBA atlas replaced by the
+   average colour of its opaque neighbours, outward pass by pass until no
+   transparent pixel is without one: a texture's filter and its mip levels
+   blend a cut-out edge with the texels beside it, and if those hold the key
+   colour the edge wears a fringe of it. The alpha is left as it was. Returns
+   how many pixels were filled. */
+int ae3d_capture_bleed(unsigned char *atlas, int width, int height) {
+    unsigned char *filled;
+    int filled_total = 0, pass, x, y;
+    size_t count = (size_t)width * (size_t)height;
+    if (!atlas || width <= 0 || height <= 0) return 0;
+    filled = (unsigned char *)malloc(count);
+    if (!filled) return 0;
+    for (y = 0; y < height; y++)
+        for (x = 0; x < width; x++)
+            filled[(size_t)y * width + x] = atlas[((size_t)y * width + x) * 4u + 3] > 0;
+    for (pass = 0; pass < width + height; pass++) {
+        int changed = 0;
+        /* Marked after the pass, so a pixel filled this pass does not feed
+           its neighbour in the same pass and the colour walks out one ring
+           at a time. */
+        for (y = 0; y < height; y++) {
+            for (x = 0; x < width; x++) {
+                int sum[3] = {0, 0, 0}, n = 0, dx, dy;
+                size_t at = (size_t)y * width + x;
+                if (filled[at]) continue;
+                for (dy = -1; dy <= 1; dy++) {
+                    for (dx = -1; dx <= 1; dx++) {
+                        int nx = x + dx, ny = y + dy;
+                        size_t near;
+                        if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+                        near = (size_t)ny * width + nx;
+                        if (filled[near] != 1) continue;
+                        sum[0] += atlas[near * 4u]; sum[1] += atlas[near * 4u + 1]; sum[2] += atlas[near * 4u + 2];
+                        n++;
+                    }
+                }
+                if (n == 0) continue;
+                atlas[at * 4u] = (unsigned char)(sum[0] / n);
+                atlas[at * 4u + 1] = (unsigned char)(sum[1] / n);
+                atlas[at * 4u + 2] = (unsigned char)(sum[2] / n);
+                filled[at] = 2;
+                changed++;
+            }
+        }
+        if (changed == 0) break;
+        for (y = 0; y < height; y++)
+            for (x = 0; x < width; x++)
+                if (filled[(size_t)y * width + x] == 2) filled[(size_t)y * width + x] = 1;
+        filled_total += changed;
+    }
+    free(filled);
+    return filled_total;
+}
+
+int ae3d_capture_copy_keyed(unsigned char *atlas, int atlas_width, int atlas_height,
+                            int dst_x, int dst_y, int kr, int kg, int kb, int tolerance) {
+    int x, y, kept = 0;
+    if (!atlas || !g_frame.pixels) return -1;
+    if (dst_x < 0 || dst_y < 0 || dst_x + g_frame.width > atlas_width || dst_y + g_frame.height > atlas_height) return -1;
+    for (y = 0; y < g_frame.height; y++) {
+        for (x = 0; x < g_frame.width; x++) {
+            const unsigned char *src = g_frame.pixels + ((size_t)y * (size_t)g_frame.width + (size_t)x) * 4u;
+            unsigned char *dst = atlas + ((size_t)(dst_y + y) * (size_t)atlas_width + (size_t)(dst_x + x)) * 4u;
+            int keyed = abs((int)src[0] - kr) <= tolerance && abs((int)src[1] - kg) <= tolerance && abs((int)src[2] - kb) <= tolerance;
+            dst[0] = src[0];
+            dst[1] = src[1];
+            dst[2] = src[2];
+            dst[3] = keyed ? 0 : 255;
+            kept += !keyed;
+        }
+    }
+    return kept;
+}

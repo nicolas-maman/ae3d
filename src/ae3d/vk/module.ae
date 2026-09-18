@@ -22,7 +22,7 @@ exports (
     available, device_name, last_error,
     renderer_model_count, renderer_model, renderer_light_count, renderer_light, renderer_draw_calls, renderer_set_clear_color,
     renderer_shadow_ms, renderer_scene_ms, renderer_post_ms, renderer_stage_ms, STAGE_COUNT, stage_name, renderer_cpu_work_ms, renderer_post_active, renderer_program_binds, renderer_material_binds,
-    renderer_set_normal_strength, renderer_set_occlusion_strength, renderer_material_texture_size,
+    renderer_set_normal_strength, renderer_set_occlusion_strength, renderer_set_capture_channel, renderer_material_texture_size,
     renderer_load_texture, renderer_release_texture, renderer_sample_count, renderer_set_post,
     renderer_set_bloom_intensity, renderer_bloom_intensity,
     renderer_set_shadows, renderer_shadows, renderer_set_ssr, renderer_ssr, renderer_set_ssr_params, renderer_add_light, renderer_remove_light,
@@ -84,8 +84,7 @@ extern ae3d_posebank_frames(bank: ptr) -> int
 extern ae3d_posebank_bones(bank: ptr) -> int
 extern ae3d_posebank_data(bank: ptr) -> ptr
 extern ae3d_vk_shadow_end()
-extern ae3d_vk_camdepth_begin() -> int
-extern ae3d_vk_camdepth_end()
+extern ae3d_vk_resolve_scene_depth() -> int
 extern ae3d_vk_set_ssr(on: int)
 extern ae3d_vk_set_ssao(on: int, radius: float, intensity: float)
 extern ae3d_vk_default_texture() -> int
@@ -156,6 +155,7 @@ struct VKRenderer {
     // How hard normal maps push, for the whole scene. A look, not a surface.
     normal_strength: float
     occlusion_strength: float
+    capture_channel: int
     textures: ptr
     frustum: ptr
     skybox: ptr
@@ -281,6 +281,7 @@ renderer_new() -> *VKRenderer {
     r.shadow_space = core.mat4_ident()
     r.normal_strength = 2.5
     r.occlusion_strength = 1.0
+    r.capture_channel = 0
     r.batches = list.new()
     r.shadow_batches = list.new()
     r.shadow_batch_count = 0
@@ -448,6 +449,20 @@ ensure_cloud_textures(r: *VKRenderer) {
     }
 }
 
+// The impostor's atlas grid and size, for the crowd draw; off for every
+// other model, since the block is shared across draws.
+set_impostor_uniforms(m: *Model) {
+    on = 0
+    if m != null && core.model_is_impostor(m) { on = 1 }
+    ae3d_vk_scene_set_int(vkscene.OFF_IMPOSTOR, on)
+    if on == 1 {
+        ae3d_vk_scene_set_int(vkscene.OFF_IMPOSTORCOLS, m.impostor_cols)
+        ae3d_vk_scene_set_int(vkscene.OFF_IMPOSTORROWS, m.impostor_rows)
+        ae3d_vk_scene_set_float(vkscene.OFF_IMPOSTORWIDTH, m.impostor_width)
+        ae3d_vk_scene_set_float(vkscene.OFF_IMPOSTORHEIGHT, m.impostor_height)
+    }
+}
+
 renderer_set_ssr(r: *VKRenderer, on: bool) {
     flag = 0
     if on { flag = 1 }
@@ -491,47 +506,14 @@ wants_scene_depth(r: *VKRenderer) -> bool {
     return false
 }
 
-render_camdepth_pass(r: *VKRenderer, cam: *Camera) {
-    // The camera depth is drawn for the reflection, for the occlusion, or
-    // for a water surface to read the ground under it by; a scene with none
-    // of them draws none.
+// Whether a water surface -- the one shader that reads the scene's depth
+// for its shore -- is drawn this frame. Said to the device before the frame
+// begins: a frame that anything reads the depth of is drawn in two halves,
+// the depth resolved between them (ae3d_vk_resolve_scene_depth).
+declare_scene_depth(r: *VKRenderer) {
     wanted = 0
     if wants_scene_depth(r) { wanted = 1 }
     ae3d_vk_set_scene_depth(wanted)
-    if ae3d_vk_ssr() != 1 && wanted == 0 && ae3d_vk_ssao() != 1 { return }
-    ae3d_vk_set_program(core.SHADER_CUSTOM)
-    vp = core.camera_view_projection(cam)
-    ae3d_vk_scene_set_clip_mat4(vkscene.OFF_LIGHTSPACEMATRIX, &vp)
-    if ae3d_vk_camdepth_begin() != 1 {
-        ae3d_vk_scene_set_clip_mat4(vkscene.OFF_LIGHTSPACEMATRIX, &r.shadow_space)
-        return
-    }
-    count = list.size(r.models)
-    i = 0
-    while i < count {
-        m = list.get_raw(r.models, i) as *Model
-        if m != null && m.visible && m.vbo != 0 {
-            core.model_sync_transform(m)
-            // The reflection marches against opaque depth, so a transparent
-            // surface must not write a false occluder into it; and the pass is
-            // culled against the camera frustum, so it carries the visible set
-            // rather than the whole street -- the depth off screen is never
-            // sampled. Both are what the scene pass already does.
-            alpha = 1.0
-            if m.material != null { alpha = m.material.alpha }
-            in_view = true
-            if core.frustum_culling() &&
-               !core.frustum_sphere_visible(r.frustum, m.bounding_center, m.bounding_radius) {
-                in_view = false
-            }
-            if alpha >= 0.99 && in_view {
-                shadow_draw_model(m)
-            }
-        }
-        i = i + 1
-    }
-    ae3d_vk_camdepth_end()
-    ae3d_vk_scene_set_clip_mat4(vkscene.OFF_LIGHTSPACEMATRIX, &r.shadow_space)
 }
 
 // The same box the OpenGL backend builds, from the same scene, so the two
@@ -718,11 +700,12 @@ shadow_draw_model(m: *Model) {
     ae3d_vk_scene_set_int(vkscene.OFF_ISINSTANCED, instanced)
     ae3d_vk_scene_set_int(vkscene.OFF_INSTANCEPOINTS, points)
     pose(m)
-    // The depth-only passes take the proxy's mesh where the model has one:
-    // a crowd's near tier casts its shadow and writes its depth from the far
-    // tier's hundred and sixty-eight triangles instead of its twenty-six
-    // thousand, which at twenty thousand figures is the shadow pass and the
-    // camera depth each halved.
+    // The shadow pass takes the proxy's mesh where the model has one: a
+    // crowd's near tier casts from the far tier's hundred and sixty-eight
+    // triangles instead of its twenty-six thousand, which at twenty thousand
+    // figures is the shadow pass halved. A shadow is soft, and a silhouette
+    // a few pixels out is not seen in one; the camera depth, which the
+    // occlusion reads at the pixel, is the frame's own and never a proxy's.
     vbo = m.vbo
     if m.depth_proxy != null {
         proxy = m.depth_proxy as *Model
@@ -931,6 +914,7 @@ renderer_add_model(r: *VKRenderer, m: *Model) {
         m.instance_vbo = ae3d_vk_upload_instances(m.instances)
         m.instances_updated = false
         m.instance_colors_updated = false
+        m.instance_phases_updated = false
     }
 
     resolve_textures(r, m)
@@ -983,6 +967,13 @@ renderer_set_normal_strength(r: *VKRenderer, strength: float) {
     if r != null { r.normal_strength = strength }
 }
 
+// What the frame is drawn as: 0 the lit picture, 1 every surface's albedo,
+// 2 its normals -- what a bake reads back, and a view for finding out why
+// a surface lights the way it does.
+renderer_set_capture_channel(r: *VKRenderer, channel: int) {
+    if r != null { r.capture_channel = channel }
+}
+
 renderer_set_occlusion_strength(r: *VKRenderer, strength: float) {
     if r != null { r.occlusion_strength = strength }
 }
@@ -1025,6 +1016,7 @@ apply_normal_map(r: *VKRenderer, material: *Material) {
     ae3d_vk_scene_set_int(vkscene.OFF_HASNORMALMAP, normal != 0)
     ae3d_vk_scene_set_float(vkscene.OFF_NORMALSTRENGTH, r.normal_strength)
     ae3d_vk_scene_set_float(vkscene.OFF_OCCLUSIONSTRENGTH, r.occlusion_strength)
+    ae3d_vk_scene_set_int(vkscene.OFF_CAPTURECHANNEL, r.capture_channel)
 }
 
 renderer_remove_model(r: *VKRenderer, m: *Model) {
@@ -1161,12 +1153,18 @@ refresh_instances(m: *Model) {
         m.instance_vbo = ae3d_vk_upload_instances(m.instances)
         m.instances_updated = false
         m.instance_colors_updated = false
+        m.instance_phases_updated = false
         return
     }
-    if !m.instances_updated && !m.instance_colors_updated { return }
+    // The phase rides in the one stream with the matrix and the colour, so
+    // a phase set on its own -- a figure's walk moved without the figure --
+    // sends the stream as well. It did not, and a crowd whose only change
+    // was its phases stood still.
+    if !m.instances_updated && !m.instance_colors_updated && !m.instance_phases_updated { return }
     if ae3d_vk_update_instances(m.instance_vbo, m.instances) == 1 {
         m.instances_updated = false
         m.instance_colors_updated = false
+        m.instance_phases_updated = false
     }
 }
 
@@ -1223,10 +1221,12 @@ pose(m: *Model) {
         ae3d_vk_set_pose_bank(m.pose_bank_texture)
         ae3d_vk_scene_set_int(vkscene.OFF_POSEBANKFRAMES, m.pose_bank_frames)
         ae3d_vk_scene_set_int(vkscene.OFF_ISSKINNED, 1)
+        set_impostor_uniforms(m)
         return
     }
     // A water surface takes the camera depth at the same binding, to read
     // the ground under it by.
+    set_impostor_uniforms(null)
     aux = 0
     if core.shader_valid(&m.shader) && m.shader.kind == core.SHADER_WATER && ae3d_vk_scene_depth_ready() == 1 {
         aux = 0 - 1
@@ -1365,6 +1365,7 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
 
     active_light = key_light(r, light)
 
+    declare_scene_depth(r)
     if ae3d_vk_frame_begin(r.clear_r, r.clear_g, r.clear_b, 1.0) != 1 {
         report_failed_frame(r)
         return
@@ -1399,12 +1400,9 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     // belongs to a renderer, so a second camera drawing after a first was culled
     // against the first camera's frustum: the flag was already clear and nothing
     // refilled. A minimap, a reflection or a second viewport is exactly that.
-    // Six planes out of one matrix multiply is not worth a cache. Filled before
-    // the depth prepass so that pass culls against the same planes the scene
-    // pass does, and draws the visible street rather than every model in it.
+    // Six planes out of one matrix multiply is not worth a cache.
     if core.frustum_culling() { core.camera_fill_frustum(cam, r.frustum) }
 
-    render_camdepth_pass(r, cam)
     set_frame_uniforms(r, active_light, cam)
 
     culling = 0
@@ -1438,6 +1436,10 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
 
     draw_opaque(r)
     ae3d_vk_mark_opaque_done()
+    // The depth the opaque draws left, resolved for the occlusion, the
+    // reflection and the water: the frame's own depth, so a figure's
+    // silhouette is the one drawn and a picture of a figure is in it too.
+    ae3d_vk_resolve_scene_depth()
     // The occlusion over what the opaque pass drew, before the transparent
     // one, so the water is not darkened by the ground it hides.
     if ssao_on && depth_ready { ae3d_vk_draw_ssao() }
@@ -1744,8 +1746,10 @@ renderer_post_active(r: *VKRenderer) -> bool { return ae3d_vk_post_active() == 1
 renderer_shadow_ms(r: *VKRenderer) -> float { return r.last_shadow_ms }
 
 // The frame's stages, as the device timed them: 0 shadow, 1 scene (the
-// whole of 3 to 7), 2 post, 3 camera depth, 4 sky, 5 opaque, 6 occlusion,
-// 7 transparent. What a change to the engine changes, stage by stage.
+// whole of 3 to 7), 2 post, 3 camera depth (nothing now: the depth is
+// resolved after the opaque draws, inside the occlusion stage), 4 sky, 5
+// opaque, 6 occlusion (the depth resolve and the occlusion over it), 7
+// transparent. What a change to the engine changes, stage by stage.
 const STAGE_COUNT = 8
 renderer_stage_ms(r: *VKRenderer, stage: int) -> float { return ae3d_vk_pass_ms(stage) }
 stage_name(stage: int) -> string {

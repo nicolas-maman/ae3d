@@ -129,6 +129,20 @@ uniform mat4 lightSpaceMatrix;
 uniform sampler2D poseBank;
 uniform int poseBankFrames;
 
+// The crowd's far tier as impostors: the figure baked into an atlas of
+// impostorCols views around it by impostorRows frames of its walk, and each
+// instance an upright quad turned to the camera, impostorWidth by
+// impostorHeight metres, showing the cell for the angle the camera sees it
+// from and the frame its phase is at. Twenty thousand figures at a hundred
+// and sixty-eight triangles are three million; as impostors they are forty
+// thousand, and the horde can be twenty times the size.
+uniform bool impostor;
+uniform int impostorCols;
+uniform int impostorRows;
+uniform float impostorWidth;
+uniform float impostorHeight;
+uniform vec3 viewPos;
+
 out vec2 fragTexCoord;
 out vec3 Normal;
 out vec3 FragPos;
@@ -156,6 +170,40 @@ mat4 skinAt(int frame) {
 void main() {
     Occlusion = inOcclusion;
     mat4 modelMatrix = model * instanceModel;
+
+    if (impostor) {
+        // Where the figure stands and which way it faces: the instance
+        // matrix's origin and its local +X, on the ground plane -- the
+        // crowd's yaw is measured from +X, and a figure walking that way is
+        // at yaw zero, so the bake's first column is the figure seen from
+        // its own +X.
+        vec3 origin = vec3(modelMatrix[3]);
+        vec3 facing = normalize(vec3(modelMatrix[0].x, 0.0, modelMatrix[0].z));
+        vec3 toEye = viewPos - origin;
+        vec3 level = normalize(vec3(toEye.x, 0.0, toEye.z));
+        // The angle the camera sees the figure from, measured around its
+        // facing: the cell column, with the bake's first view from the front.
+        float angle = atan(dot(level, vec3(-facing.z, 0.0, facing.x)), dot(level, facing));
+        float turn = fract(angle / 6.28318530718 + 1.0);
+        int column = int(floor(turn * float(impostorCols) + 0.5)) % impostorCols;
+        int row = int(floor(fract(instancePhase) * float(impostorRows))) % impostorRows;
+        // An upright quad facing the eye: the mesh's x across it, y up it.
+        vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), level));
+        vec3 world = origin + right * (inPosition.x * impostorWidth) + vec3(0.0, inPosition.y * impostorHeight, 0.0);
+        FragPos = world;
+        // The picture's normals were baked in the figure's own frame; the
+        // fragment turns them into the world by the facing, carried here.
+        Normal = facing;
+        // The cell in the atlas. The atlas is written with row 0 at its top
+        // and loaded flipped, as every texture is, so a row counts down from
+        // the top of texture space.
+        fragTexCoord = vec2((float(column) + inTexCoord.x) / float(impostorCols),
+                            1.0 - (float(row) + (1.0 - inTexCoord.y)) / float(impostorRows));
+        InstanceColor = instanceColor;
+        FragPosLightSpace = lightSpaceMatrix * vec4(world, 1.0);
+        gl_Position = viewProjection * vec4(world, 1.0);
+        return;
+    }
 
     // The phase lands between two baked poses; blend them, so the walk is
     // continuous instead of snapping frame to frame. The clip loops, so the
@@ -265,6 +313,16 @@ struct Light {
 
 uniform Light lights[MAX_LIGHTS];
 uniform int lightCount;
+// The crowd's far tier as pictures (see VERTEX_CROWD): a picture is cut out
+// by its alpha, and its colour is the figure's albedo and its normal map
+// the figure's own normals, so it is lit below by the scene's lights the
+// way the mesh beside it is.
+uniform bool impostor;
+// What a bake reads back instead of the lit picture: 1 the albedo -- the
+// texture, the material and the tint, the surface's own colour before any
+// light -- 2 the normal, world space, packed 0..1. Zero is the picture.
+// tools/bake_impostor.ae draws its atlases through these.
+uniform int captureChannel;
 uniform vec3 viewPos;
 // How far this camera can see. Everything that fades a feature out with distance
 // measures against this rather than against a number of world units, so a scene
@@ -1059,11 +1117,28 @@ void main() {
         FragColor = vec4(pow(emissive, vec3(1.0 / 2.2)), 1.0);
         return;
     }
-    
+
     // Pre-calculate expensive operations once
     vec3 norm = normalize(Normal);
-    if (hasNormalMap) {
+    if (impostor) {
+        // The picture: cut out by its alpha, its normal read from its own
+        // atlas in the figure's frame (x its facing, y up, z to its right)
+        // and turned into the world by the facing the vertex carried, and
+        // lit from there as any surface is.
+        if (texColor.a < 0.5) discard;
+        vec3 facing = normalize(Normal);
+        vec3 baked = texture(normalMap, fragTexCoord).xyz * 2.0 - 1.0;
+        norm = normalize(baked.x * facing + vec3(0.0, baked.y, 0.0) + baked.z * vec3(-facing.z, 0.0, facing.x));
+    } else if (hasNormalMap) {
         norm = mapped_normal(norm, FragPos, fragTexCoord);
+    }
+    if (captureChannel == 1) {
+        FragColor = vec4(diffuseColor * texColor.rgb * InstanceColor, texColor.a);
+        return;
+    }
+    if (captureChannel == 2) {
+        FragColor = vec4(norm * 0.5 + 0.5, 1.0);
+        return;
     }
     vec3 viewDir = normalize(viewPos - FragPos);
 
@@ -2531,6 +2606,42 @@ GLSL_END
 // surface, and that pixel's colour is the reflection. Everything off the road
 // passes through untouched, and with strength zero the pass is a passthrough,
 // so it is safe to run and only shows where a scene has asked for it.
+// The scene's depth after the opaque pass, for the occlusion, the
+// reflection and the water to read: the frame's own multisampled depth
+// resolved to one sample a pixel, the nearest of the samples, so an edge
+// keeps the surface in front. Vulkan only -- OpenGL blits its depth
+// (ae3d_gl_scene_depth_capture) and never needs a shader for it. The
+// second is the same for a frame drawn without multisampling.
+const FRAGMENT_DEPTH_RESOLVE = <<GLSL_END
+#version 410 core
+
+in vec2 TexCoords;
+
+uniform sampler2DMS depthSamples;
+uniform int depthSampleCount;
+
+void main() {
+    ivec2 pixel = ivec2(gl_FragCoord.xy);
+    float nearest = 1.0;
+    for (int s = 0; s < depthSampleCount; s++) {
+        nearest = min(nearest, texelFetch(depthSamples, pixel, s).r);
+    }
+    gl_FragDepth = nearest;
+}
+GLSL_END
+
+const FRAGMENT_DEPTH_COPY = <<GLSL_END
+#version 410 core
+
+in vec2 TexCoords;
+
+uniform sampler2D depthSamples;
+
+void main() {
+    gl_FragDepth = texelFetch(depthSamples, ivec2(gl_FragCoord.xy), 0).r;
+}
+GLSL_END
+
 const FRAGMENT_SSAO = <<GLSL_END
 #version 410 core
 

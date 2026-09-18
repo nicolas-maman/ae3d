@@ -377,6 +377,7 @@ int    ae3d_vk_texture_create_rgba(int width, int height, int depth, const unsig
 void   ae3d_vk_set_pose_bank(int texture_handle);
 void   ae3d_vk_set_scene_depth(int on);
 int    ae3d_vk_scene_depth_ready(void);
+int    ae3d_vk_resolve_scene_depth(void);
 int    ae3d_vk_frame_width(void);
 int    ae3d_vk_frame_height(void);
 int    ae3d_vk_capture_ready(void);
@@ -417,6 +418,8 @@ int  ae3d_capture_hold_reference(void);
 int  ae3d_capture_diff(int tolerance, double *out);
 void ae3d_capture_release(void);
 int  ae3d_capture_adopt(const unsigned char *pixels, int width, int height);
+int  ae3d_capture_copy_keyed(unsigned char *atlas, int atlas_width, int atlas_height, int dst_x, int dst_y, int kr, int kg, int kb, int tolerance);
+int  ae3d_capture_bleed(unsigned char *atlas, int width, int height);
 /* How many numbers the fixed-size answers -- a pixel, a region, a diff -- are
    written into. A grid is as long as it has cells and says so. */
 #define AE3D_CAPTURE_SLOTS 8

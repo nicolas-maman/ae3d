@@ -32,7 +32,7 @@ exports (
     engine_set_size, engine_set_title, engine_set_msaa, engine_set_decorated, engine_set_post,
     engine_set_render_scale, engine_set_shadows, engine_shadows, engine_set_fog, engine_fog, engine_set_shadow_distance, engine_shadow_distance,
     engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
-    engine_set_skybox, engine_set_sky, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_set_sky_overcast, engine_set_ssao, engine_load_texture,
+    engine_set_skybox, engine_set_sky, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_set_sky_overcast, engine_set_ssao, engine_set_capture_channel, engine_load_texture,
     engine_set_time_of_day, engine_time_of_day,
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
     engine_render_ms, engine_render_frames,
@@ -691,6 +691,19 @@ engine_set_sky_overcast(e: *Engine, amount: float, color: Vec3) {
 // and the feet of things go darker by how much stands around them. `radius`
 // is the reach of that in metres, `intensity` how dark it goes (1.0 is what
 // the depth finds, 0 none).
+// What the frame is drawn as: 0 the lit picture, 1 every surface's albedo
+// (texture, material and tint, before any light), 2 its world-space
+// normals packed 0..1. A bake reads its atlases back through these, and a
+// look at a scene's normals says why a surface lights the way it does.
+engine_set_capture_channel(e: *Engine, channel: int) {
+    if e.backend_state == null { return }
+    if e.api == platform.API_VULKAN {
+        vk.renderer_set_capture_channel(e.backend_state as *VKRenderer, channel)
+    } else {
+        gl.renderer_set_capture_channel(e.gl_renderer as *GLRenderer, channel)
+    }
+}
+
 engine_set_ssao(e: *Engine, on: bool, radius: float, intensity: float) {
     e.ssao_on = on
     e.ssao_radius = radius

@@ -146,7 +146,7 @@ def to_vulkan(source, stage, members, samplers, varyings_in, varyings_out,
     text = text.replace("return 1.0; /* screen y up */", "return -1.0; /* screen y down */")
 
     text = re.sub(r"^uniform\s+(vec3|vec4|vec2|float|int|bool|mat4)\s+\w+\s*(\[\d+\])?\s*;.*$", "", text, flags=re.M)
-    text = re.sub(r"^uniform\s+sampler(2D|3D)\s+\w+\s*;.*$", "", text, flags=re.M)
+    text = re.sub(r"^uniform\s+sampler(2D|3D|2DMS)\s+\w+\s*;.*$", "", text, flags=re.M)
 
     placed, size = std140(members, base=light_bytes(light_members))
     lines = []
@@ -169,7 +169,8 @@ def to_vulkan(source, stage, members, samplers, varyings_in, varyings_out,
 
     # Every shader shares one descriptor set layout, so whichever sampler a
     # shader names sits at binding 1 and the renderer binds the right texture.
-    # A sampler is 2D unless named "name:3D", as the clouds' shape is.
+    # A sampler is 2D unless named "name:3D", as the clouds' shape is, or
+    # "name:2DMS", as the frame's multisampled depth is to its resolve.
     for index, sampler in enumerate(samplers):
         name, _, kind = sampler.partition(":")
         lines.append(f"layout(set = 0, binding = {index + 1}) uniform sampler{kind or '2D'} {name};")
@@ -384,6 +385,10 @@ AUXILIARY = [
     ("bloom_vk.frag", "FRAGMENT_BLOOM", "frag", ["screenTexture"], SCREEN_OUT, []),
     ("ssr_vk.frag", "FRAGMENT_SSR", "frag", ["screenTexture", "depthTexture"], SCREEN_OUT, []),
     ("ssao_vk.frag", "FRAGMENT_SSAO", "frag", ["screenTexture", "depthTexture"], SCREEN_OUT, []),
+    # The depth resolve reads the frame's own depth at binding 1, where the
+    # screen draws put their colour source.
+    ("depth_resolve_vk.frag", "FRAGMENT_DEPTH_RESOLVE", "frag", ["depthSamples:2DMS"], SCREEN_OUT, []),
+    ("depth_copy_vk.frag", "FRAGMENT_DEPTH_COPY", "frag", ["depthSamples"], SCREEN_OUT, []),
     ("water_vk.vert", "VERTEX_WATER", "vert", [], [], WATER_OUT),
     # The water reads the scene depth at binding 4, the slot the crowd's pose
     # bank takes: whichever auxiliary image a draw needs sits there.

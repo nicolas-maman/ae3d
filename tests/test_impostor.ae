@@ -1,0 +1,277 @@
+// A crowd drawn as impostors: each instance an upright quad turned to the
+// camera, showing the cell of an atlas for the angle it is seen from and
+// the frame its phase is at, cut out by the atlas's alpha, and lit by the
+// scene's lights through the normals baked beside it. On both backends.
+//
+// The atlas is made here -- two columns by two rows, a flat colour a cell,
+// opaque in the middle of the cell and clear around it -- so every check
+// is against a colour that was chosen: the engine's capture channel reads
+// the albedo back before any light touches it, and a pixel is either the
+// cell's colour or it is not. The lit picture is checked to be lit, and the
+// capture channel to be the albedo and the normal it says it is.
+
+import std.mem
+import std.os
+import ae3d.core
+import ae3d.gl
+import ae3d.vk
+import ae3d.offscreen
+import ae3d.loader
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern ae3d_png_write(path: string, rgba: ptr, width: int, height: int) -> int
+extern ae3d_posebank_create(frames: int, bones: int) -> ptr
+extern ae3d_posebank_destroy(bank: ptr)
+
+const WIDTH = 160
+const HEIGHT = 120
+const COLS = 2
+const ROWS = 2
+const CELL = 32
+const ATLAS = "build/test_impostor_atlas.png"
+const NORMALS = "build/test_impostor_atlas_normal.png"
+const FRAMES = 4
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// The atlas: cell (column, row) a flat colour -- red, green on the first
+// row; blue, yellow on the second -- opaque in its middle half and clear
+// around it; and beside it a normal atlas whose every normal is the
+// figure's own +X, the way it faces, so a picture seen from the front is
+// lit head on.
+write_atlas() -> bool {
+    width = COLS * CELL
+    height = ROWS * CELL
+    pixels = calloc(width * height, 4)
+    normals = calloc(width * height, 4)
+    y = 0
+    while y < height {
+        x = 0
+        while x < width {
+            column = x / CELL
+            row = y / CELL
+            r = 0
+            g = 0
+            b = 0
+            if column == 0 && row == 0 { r = 255 }
+            if column == 1 && row == 0 { g = 255 }
+            if column == 0 && row == 1 { b = 255 }
+            if column == 1 && row == 1 { r = 255 ; g = 255 }
+            inside_x = (x % CELL) >= CELL / 4 && (x % CELL) < (CELL * 3) / 4
+            inside_y = (y % CELL) >= CELL / 4 && (y % CELL) < (CELL * 3) / 4
+            a = 0
+            if inside_x && inside_y { a = 255 }
+            at = (y * width + x) * 4
+            mem.set_byte(pixels, at, r)
+            mem.set_byte(pixels, at + 1, g)
+            mem.set_byte(pixels, at + 2, b)
+            mem.set_byte(pixels, at + 3, a)
+            mem.set_byte(normals, at, 255)
+            mem.set_byte(normals, at + 1, 128)
+            mem.set_byte(normals, at + 2, 128)
+            mem.set_byte(normals, at + 3, 255)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    ok = ae3d_png_write(ATLAS, pixels, width, height) == 1 && ae3d_png_write(NORMALS, normals, width, height) == 1
+    free(pixels)
+    free(normals)
+    return ok
+}
+
+// The impostor model: one upright quad with a skin, instanced, phased,
+// posed by a bank it never reads, its texture the atlas.
+impostor_model(bank: ptr) -> *Model {
+    quad = core.model_new()
+    facing = core.vec3(1.0, 0.0, 0.0)
+    core.mesh_reserve(quad.mesh, 4, 6)
+    core.mesh_push_vertex(quad.mesh, core.vec3(0.0 - 0.5, 0.0, 0.0), 0.0, 0.0, facing)
+    core.mesh_push_vertex(quad.mesh, core.vec3(0.5, 0.0, 0.0), 1.0, 0.0, facing)
+    core.mesh_push_vertex(quad.mesh, core.vec3(0.5, 1.0, 0.0), 1.0, 1.0, facing)
+    core.mesh_push_vertex(quad.mesh, core.vec3(0.0 - 0.5, 1.0, 0.0), 0.0, 1.0, facing)
+    core.mesh_push_triangle(quad.mesh, 0, 1, 2)
+    core.mesh_push_triangle(quad.mesh, 0, 2, 3)
+    i = 0
+    while i < 4 {
+        core.mesh_set_skin(quad.mesh, i, 0, 0, 0, 0, 1.0, 0.0, 0.0, 0.0)
+        i = i + 1
+    }
+    core.model_update_matrix(quad)
+    core.model_recalculate_bounds(quad)
+    core.model_set_texture(quad, ATLAS)
+    core.material_set_normal_path(quad.material, NORMALS)
+    core.model_enable_instancing(quad, 1)
+    core.model_set_pose_bank(quad, bank, FRAMES)
+    core.model_enable_instance_phases(quad)
+    core.model_enable_instance_colors(quad)
+    core.model_set_instance_color(quad, 0, 1.0, 1.0, 1.0)
+    core.model_set_instance_phase(quad, 0, 0.0)
+    core.model_set_instance_position(quad, 0, core.vec3(0.0, 0.0, 0.0))
+    core.model_set_impostor(quad, COLS, ROWS, 1.0, 1.0)
+    return quad
+}
+
+// The pixel at (x, y) of the frame just drawn, as its red, green and blue.
+// The frame comes back the second read on OpenGL (a pair of buffers), so
+// the read is done twice.
+pixel(backend: *Backend, cam: *Camera, light: *Light, x: int, y: int) -> Vec3 {
+    core.backend_render(backend, cam, light)
+    core.backend_frame_pixels(backend)
+    pixels = core.backend_frame_pixels(backend)
+    at = (y * WIDTH + x) * 4
+    return core.vec3(mem.get_byte(pixels, at) as float, mem.get_byte(pixels, at + 1) as float, mem.get_byte(pixels, at + 2) as float)
+}
+
+near(c: Vec3, r: float, g: float, b: float) -> bool {
+    return c.x > r - 12.0 && c.x < r + 12.0 && c.y > g - 12.0 && c.y < g + 12.0 && c.z > b - 12.0 && c.z < b + 12.0
+}
+
+// The instance turned to face `yaw` radians from +X: its matrix is built
+// from the model's rotation, so the rotation is set and the instance placed.
+face(quad: *Model, yaw: float) {
+    core.model_set_rotation(quad, core.quat_rotate(yaw, core.vec3(0.0, 1.0, 0.0)))
+    core.model_set_instance_position(quad, 0, core.vec3(0.0, 0.0, 0.0))
+}
+
+run_checks(backend: *Backend, name: string, gl_r: *GLRenderer, vk_r: *VKRenderer) {
+    println("  ${name}: starting")
+    core.backend_set_clear_color(backend, 0.0, 0.0, 0.0)
+    cam = core.camera_new(WIDTH, HEIGHT)
+    // Six metres out along +X, looking back at the figure's front: through
+    // this camera the quad is twenty-four pixels tall and its opaque middle
+    // twelve, around the frame's centre.
+    core.camera_set_position(cam, core.vec3(6.0, 0.5, 0.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.5, 0.0))
+    light = core.light_directional(core.vec3(1.0, 0.3, 0.0), core.vec3(1.0, 1.0, 1.0), 2.0)
+    light.ambient_strength = 0.2
+
+    bank = ae3d_posebank_create(FRAMES, 1)
+    quad = impostor_model(bank)
+    core.backend_add_model(backend, quad)
+    cx = WIDTH / 2
+    cy = HEIGHT / 2
+
+    // The albedo channel: the cell's colour, exactly.
+    if gl_r != null { gl.renderer_set_capture_channel(gl_r, 1) }
+    if vk_r != null { vk.renderer_set_capture_channel(vk_r, 1) }
+    c = pixel(backend, cam, light, cx, cy)
+    check("${name} seen from its front at phase 0, the first cell (red)", near(c, 255.0, 0.0, 0.0))
+    c = pixel(backend, cam, light, cx + 9, cy)
+    check("${name} the clear margin of the cell is cut out", near(c, 0.0, 0.0, 0.0))
+    c = pixel(backend, cam, light, cx + 40, cy)
+    check("${name} and beside the quad is the background", near(c, 0.0, 0.0, 0.0))
+
+    core.model_set_instance_phase(quad, 0, 0.5)
+    c = pixel(backend, cam, light, cx, cy)
+    check("${name} at phase 0.5 the second row (blue)", near(c, 0.0, 0.0, 255.0))
+
+    // Turned away: the camera sees its back, half a turn round the atlas.
+    core.model_set_instance_phase(quad, 0, 0.0)
+    face(quad, 3.14159265)
+    c = pixel(backend, cam, light, cx, cy)
+    check("${name} seen from behind, the second column (green)", near(c, 0.0, 255.0, 0.0))
+    face(quad, 3.14159265)
+    core.model_set_instance_phase(quad, 0, 0.5)
+    c = pixel(backend, cam, light, cx, cy)
+    check("${name} from behind at phase 0.5, the last cell (yellow)", near(c, 255.0, 255.0, 0.0))
+
+    // A quarter turn either way lands on the nearer of the two columns:
+    // the cell is the angle rounded, never a blend of two pictures.
+    core.model_set_instance_phase(quad, 0, 0.0)
+    face(quad, 1.2)
+    c = pixel(backend, cam, light, cx, cy)
+    check("${name} a turn short of a quarter still shows the front", near(c, 255.0, 0.0, 0.0))
+
+    // The tint: the albedo carries the instance colour.
+    face(quad, 0.0)
+    core.model_set_instance_color(quad, 0, 0.5, 1.0, 1.0)
+    c = pixel(backend, cam, light, cx, cy)
+    check("${name} the instance colour tints the albedo", near(c, 128.0, 0.0, 0.0))
+    core.model_set_instance_color(quad, 0, 1.0, 1.0, 1.0)
+
+    // The normal channel: the atlas says +X in the figure's frame, and the
+    // figure faces +X, so the world normal is +X: (255, 128, 128).
+    if gl_r != null { gl.renderer_set_capture_channel(gl_r, 2) }
+    if vk_r != null { vk.renderer_set_capture_channel(vk_r, 2) }
+    c = pixel(backend, cam, light, cx, cy)
+    check("${name} the normal channel reads the baked normal in the world", near(c, 255.0, 128.0, 128.0))
+    // Turned to face +Z, the same baked normal is +Z in the world.
+    face(quad, 0.0 - 1.5707963)
+    c = pixel(backend, cam, light, cx, cy)
+    check("${name} and turns it with the figure", near(c, 128.0, 128.0, 255.0))
+    face(quad, 0.0)
+
+    // The picture itself: lit, and by the light. Red under a white light
+    // from the front is red; with the light off it is the ambient's red.
+    if gl_r != null { gl.renderer_set_capture_channel(gl_r, 0) }
+    if vk_r != null { vk.renderer_set_capture_channel(vk_r, 0) }
+    lit = pixel(backend, cam, light, cx, cy)
+    check("${name} the lit picture is red and lit", lit.x > 80.0 && lit.y < 60.0 && lit.z < 60.0)
+    light.intensity = 0.0
+    dark = pixel(backend, cam, light, cx, cy)
+    check("${name} and darker with the light off", dark.x < lit.x - 30.0)
+    light.intensity = 2.0
+
+    core.backend_remove_model(backend, quad)
+    core.model_free(quad)
+    ae3d_posebank_destroy(bank)
+    core.camera_free(cam)
+    core.light_free(light)
+    println("  ${name}: done")
+}
+
+main() {
+    if !write_atlas() {
+        println("impostor: FAIL could not write the atlas")
+        return
+    }
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("impostor: SKIP no OpenGL context")
+        return
+    }
+    renderer = gl.renderer_new()
+    gl_pass = gl.backend(renderer)
+    if !core.backend_init(&gl_pass, context, WIDTH, HEIGHT) {
+        println("impostor: SKIP the OpenGL backend would not initialise")
+        return
+    }
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    run_checks(&gl_pass, "opengl", renderer, null)
+    core.backend_cleanup(&gl_pass)
+    offscreen.target_destroy(target)
+    gl.renderer_free(renderer)
+    offscreen.context_destroy(context)
+
+    if !vk.available() {
+        println("impostor: no Vulkan driver (${vk.last_error()}), checked OpenGL only")
+    } else {
+        vk_renderer = vk.renderer_new()
+        vk_pass = vk.backend(vk_renderer)
+        if !core.backend_init(&vk_pass, null, WIDTH, HEIGHT) {
+            println("impostor: SKIP Vulkan would not start (${vk.last_error()})")
+        } else {
+            run_checks(&vk_pass, "vulkan", null, vk_renderer)
+            core.backend_cleanup(&vk_pass)
+        }
+        vk.renderer_free(vk_renderer)
+    }
+
+    if failures == 0 {
+        println("impostor: all checks passed")
+    } else {
+        println("impostor: ${failures} failure(s)")
+    }
+}

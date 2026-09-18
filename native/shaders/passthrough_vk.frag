@@ -24,6 +24,8 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     bool isSkinned;
     mat4 bones[96];
     int lightCount;
+    bool impostor;
+    int captureChannel;
     vec3 viewPos;
     float viewDistance;
     vec3 diffuseColor;
@@ -99,6 +101,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     vec2 screenSize;
     float ssaoRadius;
     float ssaoIntensity;
+    int depthSampleCount;
     float time;
     float waveSpeedMultiplier;
     float waveHeightMultiplier;
@@ -132,6 +135,10 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     bool enableWaterNormalMapping;
     float waterNormalIntensity;
     int poseBankFrames;
+    int impostorCols;
+    int impostorRows;
+    float impostorWidth;
+    float impostorHeight;
 };
 layout(set = 0, binding = 1) uniform sampler2D screenTexture;
 

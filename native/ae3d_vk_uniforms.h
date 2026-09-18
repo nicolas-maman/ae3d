@@ -4,12 +4,12 @@
 
 #include <string.h>
 
-#define AE3D_VK_SCENE_SIZE 7872
+#define AE3D_VK_SCENE_SIZE 7888
 
 /* std140 layout, offsets computed from the same declarations the shader
    block is generated from, so the two cannot disagree. */
 typedef struct {
-    unsigned char bytes[7872];
+    unsigned char bytes[7888];
 } ae3d_vk_scene;
 
 #define AE3D_VK_OFF_ISINSTANCED 320
@@ -21,6 +21,8 @@ typedef struct {
 #define AE3D_VK_OFF_ISSKINNED 528
 #define AE3D_VK_OFF_BONES 544
 #define AE3D_VK_OFF_LIGHTCOUNT 6688
+#define AE3D_VK_OFF_IMPOSTOR 6692
+#define AE3D_VK_OFF_CAPTURECHANNEL 6696
 #define AE3D_VK_OFF_VIEWPOS 6704
 #define AE3D_VK_OFF_VIEWDISTANCE 6716
 #define AE3D_VK_OFF_DIFFUSECOLOR 6720
@@ -96,10 +98,11 @@ typedef struct {
 #define AE3D_VK_OFF_SCREENSIZE 7288
 #define AE3D_VK_OFF_SSAORADIUS 7296
 #define AE3D_VK_OFF_SSAOINTENSITY 7300
-#define AE3D_VK_OFF_TIME 7304
-#define AE3D_VK_OFF_WAVESPEEDMULTIPLIER 7308
-#define AE3D_VK_OFF_WAVEHEIGHTMULTIPLIER 7312
-#define AE3D_VK_OFF_WAVERANDOMNESS 7316
+#define AE3D_VK_OFF_DEPTHSAMPLECOUNT 7304
+#define AE3D_VK_OFF_TIME 7308
+#define AE3D_VK_OFF_WAVESPEEDMULTIPLIER 7312
+#define AE3D_VK_OFF_WAVEHEIGHTMULTIPLIER 7316
+#define AE3D_VK_OFF_WAVERANDOMNESS 7320
 #define AE3D_VK_OFF_WAVEDIRECTIONS 7328
 #define AE3D_VK_OFF_WAVEAMPLITUDES 7392
 #define AE3D_VK_OFF_WAVEFREQUENCIES 7456
@@ -129,6 +132,10 @@ typedef struct {
 #define AE3D_VK_OFF_ENABLEWATERNORMALMAPPING 7852
 #define AE3D_VK_OFF_WATERNORMALINTENSITY 7856
 #define AE3D_VK_OFF_POSEBANKFRAMES 7860
+#define AE3D_VK_OFF_IMPOSTORCOLS 7864
+#define AE3D_VK_OFF_IMPOSTORROWS 7868
+#define AE3D_VK_OFF_IMPOSTORWIDTH 7872
+#define AE3D_VK_OFF_IMPOSTORHEIGHT 7876
 
 #define AE3D_VK_MAX_LIGHTS 4
 #define AE3D_VK_LIGHT_STRIDE 80
@@ -152,6 +159,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "bloomIntensity", 6892 },
     { "bloomThreshold", 6888 },
     { "bones", 544 },
+    { "captureChannel", 6696 },
     { "causticsDepth", 6996 },
     { "causticsIntensity", 6980 },
     { "causticsScale", 6984 },
@@ -164,6 +172,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "cloudSun", 6768 },
     { "cloudSunColor", 7136 },
     { "cloudTime", 6764 },
+    { "depthSampleCount", 7304 },
     { "diffuseColor", 6720 },
     { "edgeThreshold", 7192 },
     { "edgeThresholdMin", 7196 },
@@ -198,6 +207,11 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "hasSkyTexture", 7828 },
     { "horizonColor", 7808 },
     { "iblIntensity", 6852 },
+    { "impostor", 6692 },
+    { "impostorCols", 7864 },
+    { "impostorHeight", 7876 },
+    { "impostorRows", 7868 },
+    { "impostorWidth", 7872 },
     { "instancePoints", 328 },
     { "invViewProjection", 7216 },
     { "isInstanced", 320 },
@@ -238,7 +252,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "ssrStrength", 7284 },
     { "subpixelQuality", 7200 },
     { "texelSize", 7184 },
-    { "time", 7304 },
+    { "time", 7308 },
     { "transmissionFactor", 6836 },
     { "useInstanceColor", 324 },
     { "view", 7072 },
@@ -260,15 +274,15 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "waveAmplitudes", 7392 },
     { "waveDirections", 7328 },
     { "waveFrequencies", 7456 },
-    { "waveHeightMultiplier", 7312 },
+    { "waveHeightMultiplier", 7316 },
     { "wavePhases", 7584 },
-    { "waveRandomness", 7316 },
-    { "waveSpeedMultiplier", 7308 },
+    { "waveRandomness", 7320 },
+    { "waveSpeedMultiplier", 7312 },
     { "waveSpeeds", 7520 },
     { "waveSteepness", 7648 },
 };
 
-#define AE3D_VK_UNIFORM_SLOT_COUNT 117
+#define AE3D_VK_UNIFORM_SLOT_COUNT 124
 
 static inline int ae3d_vk_uniform_offset(const char *name) {
     int low = 0;

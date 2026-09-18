@@ -40,7 +40,7 @@ exports (
     UNIFORM_FLOAT, UNIFORM_INT, UNIFORM_VEC3, UNIFORM_FLOAT_ARRAY, UNIFORM_VEC3_ARRAY,
     env_int, material_new, material_default, material_clone, material_equals, material_free,
     model_new, model_free,
-    model_clone, model_set_casts_shadow, model_set_depth_proxy,
+    model_clone, model_set_casts_shadow, model_set_depth_proxy, model_set_impostor, model_is_impostor,
     model_set_position, model_set_scale, model_set_rotation, model_rotate,
     model_update_matrix, model_recalculate_bounds, model_mark_dirty, model_set_diffuse,
     model_set_parent, model_parent, model_sync_transform, model_world_position,
@@ -390,6 +390,15 @@ struct Model {
     instance_phases_updated: bool
     visible: bool
     casts_shadow: bool
+    // An impostor: the model's instances drawn as upright quads turned to
+    // the camera, each showing a cell of its texture -- an atlas of
+    // impostor_cols views around a figure by impostor_rows frames of its
+    // walk -- for the angle it is seen from and its phase. Zero columns is
+    // a model drawn as itself.
+    impostor_cols: int
+    impostor_rows: int
+    impostor_width: float
+    impostor_height: float
     // The model drawn in this one's place in the depth-only passes -- the
     // shadow map and the camera depth -- with this model's instances and
     // pose: a crowd's far tier standing in for its near one, where a
@@ -2475,6 +2484,29 @@ model_set_casts_shadow(m: *Model, on: bool) {
 // is uploaded. Null puts the model's own mesh back.
 model_set_depth_proxy(m: *Model, proxy: *Model) {
     m.depth_proxy = proxy as ptr
+}
+
+// Draw this crowd model's instances as impostors: upright quads `width`
+// by `height` metres turned to the camera, each showing the cell of the
+// model's texture for the angle it is seen from (`cols` views around the
+// figure, the first from the front) and its walk phase (`rows` frames).
+// The model is a crowd model -- instanced, phased, with a pose bank -- and
+// its mesh a quad from x -0.5..0.5 and y 0..1 with skin weights, so it
+// takes the crowd's draw and the crowd's stream; the shader turns the quad
+// and picks the cell. tools/bake_impostor.ae writes the atlas. Zero
+// columns draws the model as itself again.
+model_set_impostor(m: *Model, cols: int, rows: int, width: float, height: float) {
+    m.impostor_cols = cols
+    m.impostor_rows = rows
+    m.impostor_width = width
+    m.impostor_height = height
+    // No depth of its own: a picture has no silhouette a shadow map or an
+    // occluder should trust.
+    m.casts_shadow = cols <= 0
+}
+
+model_is_impostor(m: *Model) -> bool {
+    return m.impostor_cols > 0
 }
 
 model_instance_has_colors(m: *Model) -> bool {
