@@ -117,8 +117,8 @@
 
 ### Temporal anti-aliasing
 
-- `engine_set_taa(e, on)` (`AE3D_TAA=1` in any scene): on Vulkan the
-  projection is nudged a fraction of a pixel each frame through an
+- `engine_set_taa(e, on)` (`AE3D_TAA=1` in any scene), on both backends:
+  the projection is nudged a fraction of a pixel each frame through an
   eight-frame Halton sequence, and a temporal pass folds every frame into a
   history found by reprojection -- each pixel's world position from the
   scene's resolved depth, projected with the last frame's view-projection
@@ -127,8 +127,8 @@
   camera turns. The result is what the post chain composites and the next
   frame reads back. `tests/test_taa`: a tilted bar's edge is graded finer
   (496 to 605 in-between pixels at 320x240) with the same light overall, holds still once the history has filled, and
-  leaves no trail under a panning camera. OpenGL keeps the request and
-  draws as before for now. What DLSS (#324) still needs on top is
+  leaves no trail under a panning camera, on OpenGL and Vulkan alike.
+  What DLSS (#324) still needs on top is
   per-object motion vectors; the jitter, the history and the depth
   reprojection are in place.
 

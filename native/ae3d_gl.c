@@ -1020,6 +1020,14 @@ int ae3d_gl_fbo_attach_color(int fbo, int width, int height, int hdr) {
     return (int)texture;
 }
 
+/* A colour texture already made attached as the framebuffer's colour: the
+   temporal pass writes its two history textures in turn through the one
+   framebuffer. */
+void ae3d_gl_fbo_set_color(int fbo, int texture) {
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, (GLuint)texture, 0);
+}
+
 // A shadow map wants different sampling from a post-processing colour buffer:
 // point sampling, because the comparison is done per texel with explicit
 // offsets, and an edge clamp so a fragment projecting outside the light's view

@@ -2,7 +2,7 @@
 // that holds still.
 //
 // A thin bright bar, tilted so its edges cut across the pixel grid, over a
-// black scene, on Vulkan. Drawn plain, an edge is a staircase of steps
+// black scene, on both backends. Drawn plain, an edge is a staircase of steps
 // between black and white with a few in-between pixels from the
 // multisampling. Drawn with the temporal pass for a dozen frames -- the
 // projection nudged a fraction of a pixel a frame and each frame folded
@@ -13,7 +13,9 @@
 
 import std.mem
 import ae3d.core
+import ae3d.gl
 import ae3d.vk
+import ae3d.offscreen
 import ae3d.loader
 
 extern calloc(count: int, size: int) -> ptr
@@ -83,18 +85,19 @@ difference(a: ptr, b: ptr) -> int {
     return sum
 }
 
-main() {
-    if !vk.available() {
-        println("taa: SKIP no Vulkan driver (${vk.last_error()})")
-        return
-    }
-    renderer = vk.renderer_new()
-    pass = vk.backend(renderer)
-    if !core.backend_init(&pass, null, WIDTH, HEIGHT) {
-        println("taa: SKIP Vulkan would not start (${vk.last_error()})")
-        return
-    }
-    core.backend_set_clear_color(&pass, 0.0, 0.0, 0.0)
+set_taa(gl_r: *GLRenderer, vk_r: *VKRenderer, on: bool) {
+    if gl_r != null { gl.renderer_set_taa(gl_r, on) }
+    if vk_r != null { vk.renderer_set_taa(vk_r, on) }
+}
+
+taa_on(gl_r: *GLRenderer, vk_r: *VKRenderer) -> bool {
+    if gl_r != null { return gl.renderer_taa(gl_r) }
+    return vk.renderer_taa(vk_r)
+}
+
+run_checks(backend: *Backend, name: string, gl_r: *GLRenderer, vk_r: *VKRenderer) {
+    pass = backend
+    core.backend_set_clear_color(pass, 0.0, 0.0, 0.0)
 
     // A long thin bar, tilted, glowing white on its own so no light shapes it.
     bar = loader.cube(1.0)
@@ -103,40 +106,40 @@ main() {
     core.model_set_position(bar, 0.0, 0.0, 0.0)
     core.model_set_diffuse(bar, 1.0, 1.0, 1.0)
     core.model_set_exposure(bar, 12.0)
-    core.backend_add_model(&pass, bar)
+    core.backend_add_model(pass, bar)
 
     cam = core.camera_new(WIDTH, HEIGHT)
     core.camera_set_position(cam, core.vec3(0.0, 0.0, 40.0))
     core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
     light = core.light_sun(core.vec3(0.0, 1.0, 0.0))
 
-    plain = frame(&pass, cam, light)
+    plain = frame(pass, cam, light)
     plain_between = between(plain)
     plain_total = total(plain)
-    check("the plain bar has an edge", plain_between > 50 && plain_total > 100000)
+    check("${name} the plain bar has an edge", plain_between > 50 && plain_total > 100000)
 
-    vk.renderer_set_taa(renderer, true)
-    check("the temporal pass turns on", vk.renderer_taa(renderer))
+    set_taa(gl_r, vk_r, true)
+    check("${name} the temporal pass turns on", taa_on(gl_r, vk_r))
     i = 0
     settled = null
     last = null
     while i < 12 {
         if last != null { free(last) }
         last = settled
-        settled = frame(&pass, cam, light)
+        settled = frame(pass, cam, light)
         i = i + 1
     }
     taa_between = between(settled)
     taa_total = total(settled)
     drift = difference(settled, last)
-    println("  taa: in-between pixels ${plain_between} plain, ${taa_between} temporal; light ${plain_total} -> ${taa_total}; frame-to-frame ${drift}")
+    println("  ${name}: in-between pixels ${plain_between} plain, ${taa_between} temporal; light ${plain_total} -> ${taa_total}; frame-to-frame ${drift}")
     // The multisampling already grades the edge over a pixel; the eight
     // nudges within a pixel grade it finer, and a little wider.
-    check("the edge is graded finer: more in-between pixels", taa_between > plain_between * 11 / 10)
-    check("the same light overall: the pass averages, it does not move", taa_total > plain_total * 9 / 10 && taa_total < plain_total * 11 / 10)
+    check("${name} the edge is graded finer: more in-between pixels", taa_between > plain_between * 11 / 10)
+    check("${name} the same light overall: the pass averages, it does not move", taa_total > plain_total * 9 / 10 && taa_total < plain_total * 11 / 10)
     // Each frame folds a new nudge in, so the ramp breathes a little: under
     // a level a channel over the frame.
-    check("the picture holds still once the history has filled", drift < WIDTH * HEIGHT * 4)
+    check("${name} the picture holds still once the history has filled", drift < WIDTH * HEIGHT * 4)
 
     // A camera on the move: the history is found by reprojection, so a
     // pan leaves no trail. Panned a little a frame for a dozen frames, the
@@ -148,32 +151,65 @@ main() {
         core.camera_look_at(cam, core.vec3(0.03 * ((i + 1) as float), 0.0, 0.0))
         if last != null { free(last) }
         last = settled
-        settled = frame(&pass, cam, light)
+        settled = frame(pass, cam, light)
         i = i + 1
     }
-    vk.renderer_set_taa(renderer, false)
-    core.backend_render(&pass, cam, light)
-    moved_plain = frame(&pass, cam, light)
-    println("  taa: on the move, in-between pixels ${between(settled)}; light ${total(moved_plain)} plain, ${total(settled)} temporal")
-    check("a panning camera leaves no trail", between(settled) < taa_between * 2 && total(settled) > total(moved_plain) * 9 / 10 && total(settled) < total(moved_plain) * 11 / 10)
+    set_taa(gl_r, vk_r, false)
+    core.backend_render(pass, cam, light)
+    moved_plain = frame(pass, cam, light)
+    println("  ${name}: on the move, in-between pixels ${between(settled)}; light ${total(moved_plain)} plain, ${total(settled)} temporal")
+    check("${name} a panning camera leaves no trail", between(settled) < taa_between * 2 && total(settled) > total(moved_plain) * 9 / 10 && total(settled) < total(moved_plain) * 11 / 10)
     free(moved_plain)
 
     core.camera_set_position(cam, core.vec3(0.0, 0.0, 40.0))
     core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
-    core.backend_render(&pass, cam, light)
-    back = frame(&pass, cam, light)
-    check("off again, the plain picture comes back", difference(back, plain) < WIDTH * HEIGHT / 4)
+    core.backend_render(pass, cam, light)
+    back = frame(pass, cam, light)
+    check("${name} off again, the plain picture comes back", difference(back, plain) < WIDTH * HEIGHT / 4)
 
     free(plain)
     free(settled)
     if last != null { free(last) }
     free(back)
-    core.backend_remove_model(&pass, bar)
+    core.backend_remove_model(pass, bar)
     core.model_free(bar)
     core.camera_free(cam)
     core.light_free(light)
-    core.backend_cleanup(&pass)
-    vk.renderer_free(renderer)
+}
+
+main() {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("taa: SKIP no OpenGL context")
+        return
+    }
+    renderer = gl.renderer_new()
+    gl_pass = gl.backend(renderer)
+    if !core.backend_init(&gl_pass, context, WIDTH, HEIGHT) {
+        println("taa: SKIP the OpenGL backend would not initialise")
+        return
+    }
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    run_checks(&gl_pass, "opengl", renderer, null)
+    core.backend_cleanup(&gl_pass)
+    offscreen.target_destroy(target)
+    gl.renderer_free(renderer)
+    offscreen.context_destroy(context)
+
+    if !vk.available() {
+        println("taa: no Vulkan driver (${vk.last_error()}), checked OpenGL only")
+    } else {
+        vk_renderer = vk.renderer_new()
+        vk_pass = vk.backend(vk_renderer)
+        if !core.backend_init(&vk_pass, null, WIDTH, HEIGHT) {
+            println("taa: SKIP Vulkan would not start (${vk.last_error()})")
+        } else {
+            run_checks(&vk_pass, "vulkan", null, vk_renderer)
+            core.backend_cleanup(&vk_pass)
+        }
+        vk.renderer_free(vk_renderer)
+    }
 
     if failures == 0 {
         println("taa: all checks passed")

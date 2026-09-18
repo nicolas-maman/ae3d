@@ -143,9 +143,9 @@ view-projection is where it was on the screen -- exact for the camera's
 motion and everything that stood still -- and the history read there is
 held to the range of colours the pixel's neighbourhood has this frame, so
 what moved on its own trails no ghost. An edge that was a staircase is a
-ramp, and the shading's own aliasing goes with it. Vulkan; the pass runs
-between the reflection and the composite. OpenGL keeps the request for
-now.
+ramp, and the shading's own aliasing goes with it. On both backends; the
+pass runs between the reflection and the composite, and the two history
+textures are written in turn.
 
 ### Rain on the surfaces
 

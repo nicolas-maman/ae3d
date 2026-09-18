@@ -295,6 +295,7 @@ int    ae3d_gl_scene_depth_capture(void);
 void   ae3d_gl_fbo_bind(int fbo);
 void   ae3d_gl_fbo_delete(int fbo);
 int    ae3d_gl_fbo_attach_color(int fbo, int width, int height, int hdr);
+void   ae3d_gl_fbo_set_color(int fbo, int texture);
 int    ae3d_gl_fbo_attach_depth(int fbo, int width, int height);
 int    ae3d_gl_max_samples(void);
 int    ae3d_gl_fbo_attach_color_multisample(int fbo, int width, int height, int samples);
