@@ -399,6 +399,19 @@ int    ae3d_vk_render_width(void);
 int    ae3d_vk_render_height(void);
 double ae3d_vk_set_render_scale(double scale);
 double ae3d_vk_render_scale(void);
+/* DLSS through Streamline (native/ae3d_dlss.h): asked for before Vulkan
+   starts, a mode set once the device is up, the camera given every frame. */
+int    ae3d_vk_request_dlss(const char *directory);
+void   ae3d_vk_set_samples(int samples);
+int    ae3d_vk_dlss_available(void);
+int    ae3d_vk_set_dlss(int mode);
+int    ae3d_vk_dlss(void);
+int    ae3d_vk_dlss_failed(void);
+void   ae3d_vk_dlss_camera(const double *view, const double *projection,
+                           const double *prev_view, const double *prev_projection,
+                           double jitter_x, double jitter_y,
+                           double near_plane, double far_plane, double fov, double aspect,
+                           const double *position, const double *up, const double *right, const double *forward);
 void   ae3d_vk_set_capture_bypass(int on);
 /* A crowd sorted on the device (crowd_sort_vk.comp): its figures' state
    written as eight floats each into the frame's buffer, the sort dispatched

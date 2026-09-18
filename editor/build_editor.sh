@@ -144,7 +144,7 @@ case "$OS" in
         ;;
 esac
 
-NATIVE_SOURCES="native/ae3d_agent.c native/ae3d_script.c native/ae3d_capture.c native/ae3d_png.c native/ae3d_glapi.c native/ae3d_platform.c native/ae3d_mesh.c native/ae3d_skin.c native/ae3d_meshfile.c native/ae3d_image.c native/ae3d_gl.c native/ae3d_offscreen.c native/ae3d_vk.c native/ae3d_cloudnoise.c native/ae3d_blob.c native/ae3d_weather.c native/ae3d_jobs.c $NATIVE_EXTRA"
+NATIVE_SOURCES="native/ae3d_agent.c native/ae3d_script.c native/ae3d_capture.c native/ae3d_png.c native/ae3d_glapi.c native/ae3d_platform.c native/ae3d_mesh.c native/ae3d_skin.c native/ae3d_meshfile.c native/ae3d_image.c native/ae3d_gl.c native/ae3d_offscreen.c native/ae3d_vk.c native/ae3d_cloudnoise.c native/ae3d_blob.c native/ae3d_weather.c native/ae3d_jobs.c $(ae3d_dlss_source "$OBJ_DIR") $NATIVE_EXTRA"
 
 # Every header, not a list of three: the generated ones carry the shaders and
 # the uniform offsets, so leaving them out linked the previous shaders.
@@ -158,10 +158,10 @@ done
 for src in $NATIVE_SOURCES; do
     base="$(basename "$src")"
     obj="$OBJ_DIR/${base%.*}.o"
-    extra=""
-    case "$src" in *.m) extra="-fobjc-arc" ;; esac
+    extra="$(ae3d_native_extra_flags "$src")"
+    compiler="$(ae3d_native_compiler "$CC" "$src")"
     if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ] || [ "$newest_header" -nt "$obj" ]; then
-        "$CC" -c $CFLAGS $WARN $PIC $extra $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o "$obj"
+        "$compiler" -c $CFLAGS $WARN $PIC $extra $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o "$obj"
     fi
 done
 

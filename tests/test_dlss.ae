@@ -1,0 +1,157 @@
+// DLSS through Streamline, on Vulkan: asked for before the backend starts,
+// the scene drawn at the render size the mode wants and the frame made
+// from it by DLSS, its depth and its motion vectors. Where it is not
+// built in (no Streamline SDK at build time), not to be found (no runtime
+// beside the program or in AE3D_STREAMLINE), or not for this card, the
+// suite says so and skips: a machine without an NVIDIA card is not a
+// machine the feature failed on.
+//
+// Where it runs: the mode set is the mode in force, the frame is filled
+// over its whole extent (the upscaler wrote the frame, not a corner of
+// it), and the picture is a sharper one than the same scene drawn at the
+// mode's render size and scaled by the composite alone -- what the mode
+// is for, measured as the mean gradient of the frame.
+
+import std.mem
+import std.os
+import ae3d.core
+import ae3d.vk
+import ae3d.loader
+
+const WIDTH = 640
+const HEIGHT = 360
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+frame(backend: *Backend, cam: *Camera, light: *Light, frames: int) -> ptr {
+    i = 0
+    while i < frames {
+        core.backend_render(backend, cam, light)
+        i = i + 1
+    }
+    return core.backend_frame_pixels(backend)
+}
+
+// The mean gradient of the frame's brightness, sampled every other pixel.
+sharpness(pixels: ptr) -> float {
+    total = 0.0
+    n = 0
+    y = 1
+    while y < HEIGHT - 1 {
+        x = 1
+        while x < WIDTH - 1 {
+            a = (y * WIDTH + x + 1) * 4
+            b = (y * WIDTH + x - 1) * 4
+            c = ((y + 1) * WIDTH + x) * 4
+            d = ((y - 1) * WIDTH + x) * 4
+            gx = mem.get_byte(pixels, a) + mem.get_byte(pixels, a + 1) + mem.get_byte(pixels, a + 2) - mem.get_byte(pixels, b) - mem.get_byte(pixels, b + 1) - mem.get_byte(pixels, b + 2)
+            gy = mem.get_byte(pixels, c) + mem.get_byte(pixels, c + 1) + mem.get_byte(pixels, c + 2) - mem.get_byte(pixels, d) - mem.get_byte(pixels, d + 1) - mem.get_byte(pixels, d + 2)
+            if gx < 0 { gx = 0 - gx }
+            if gy < 0 { gy = 0 - gy }
+            total = total + (gx + gy) as float
+            n = n + 1
+            x = x + 2
+        }
+        y = y + 2
+    }
+    return total / (n as float)
+}
+
+// Whether the frame's corners and centre are drawn: a frame an upscaler
+// wrote reaches every edge.
+lit_at(pixels: ptr, x: int, y: int) -> bool {
+    at = (y * WIDTH + x) * 4
+    return mem.get_byte(pixels, at) + mem.get_byte(pixels, at + 1) + mem.get_byte(pixels, at + 2) > 30
+}
+
+main() {
+    if !vk.available() {
+        println("dlss: SKIP no Vulkan driver (${vk.last_error()})")
+        return
+    }
+    // Before the backend: the runtime becomes the Vulkan loader.
+    if !vk.request_dlss(core.text(os.getenv("AE3D_STREAMLINE"))) {
+        println("dlss: SKIP ${vk.last_error()}")
+        return
+    }
+    vk.set_samples(0)
+    renderer = vk.renderer_new()
+    backend = vk.backend(renderer)
+    if !core.backend_init(&backend, null, WIDTH, HEIGHT) {
+        println("dlss: SKIP Vulkan would not start (${vk.last_error()})")
+        vk.renderer_free(renderer)
+        return
+    }
+    if ae3d_vk_dlss_available() != 1 {
+        println("dlss: SKIP not for this device (${vk.last_error()})")
+        core.backend_cleanup(&backend)
+        vk.renderer_free(renderer)
+        return
+    }
+    core.backend_set_clear_color(&backend, 0.02, 0.02, 0.05)
+
+    // A floor of tiles and a few cubes: edges and a texture to reconstruct.
+    floor_model = loader.cube(1.0)
+    core.model_set_scale(floor_model, 40.0, 0.2, 40.0)
+    core.model_set_position(floor_model, 0.0, 0.0 - 1.0, 0.0)
+    core.model_set_texture(floor_model, "resources/blender/zombie_street/BrickWall.png")
+    core.backend_add_model(&backend, floor_model)
+    cubes = 0
+    while cubes < 6 {
+        cube = loader.cube(1.0)
+        core.model_set_position(cube, (cubes as float) * 2.5 - 6.0, 0.0, 0.0 - (cubes as float) * 3.0)
+        core.model_set_diffuse(cube, 0.8, 0.3 + (cubes as float) * 0.1, 0.2)
+        core.backend_add_model(&backend, cube)
+        cubes = cubes + 1
+    }
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 2.5, 9.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0 - 4.0))
+    light = core.light_sun(core.vec3(0.3, 1.0, 0.5))
+
+    // The composite's own scaling of the same render size, for the bar.
+    core.backend_set_render_scale(&backend, 0.5)
+    plain = sharpness(frame(&backend, cam, light, 24))
+    core.backend_set_render_scale(&backend, 1.0)
+    native = sharpness(frame(&backend, cam, light, 24))
+
+    // DLSS performance, the same render size: half the frame each way.
+    got = vk.renderer_set_dlss(renderer, 1)
+    check("performance mode is the mode in force (${got})", got == 1)
+    if got == 1 {
+        pixels = frame(&backend, cam, light, 40)
+        check("the frame is drawn to its edges", lit_at(pixels, 2, HEIGHT - 3) && lit_at(pixels, WIDTH - 3, HEIGHT - 3) && lit_at(pixels, WIDTH / 2, HEIGHT / 2))
+        upscaled = sharpness(pixels)
+        println("  sharpness: composite at half ${plain}, native ${native}, DLSS performance ${upscaled}")
+        check("DLSS from half the pixels is sharper than the composite's scaling of them", upscaled > plain * 1.1)
+        check("and within reach of the native frame", upscaled > native * 0.8)
+        off = vk.renderer_set_dlss(renderer, 0)
+        check("off again", off == 0 && vk.renderer_dlss(renderer) == 0)
+        again = sharpness(frame(&backend, cam, light, 8))
+        drift = again - native
+        if drift < 0.0 { drift = 0.0 - drift }
+        check("and the frame is the native one again", drift < native * 0.1)
+    }
+
+    core.backend_cleanup(&backend)
+    vk.renderer_free(renderer)
+    core.camera_free(cam)
+    core.light_free(light)
+
+    if failures == 0 {
+        println("dlss: all checks passed")
+    } else {
+        println("dlss: ${failures} failure(s)")
+    }
+}
+
+extern ae3d_vk_dlss_available() -> int

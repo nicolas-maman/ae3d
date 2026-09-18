@@ -196,6 +196,47 @@ upscaler that knows more than a bilinear sample -- DLSS (#324) -- sits
 where the composite samples, handed the scene's colour, depth and motion
 vectors at the scaled size and asked for the window's.
 
+### DLSS
+
+NVIDIA's DLSS, through Streamline, on Vulkan: `engine_set_dlss(e, mode)`
+before `engine_run`, or `AE3D_DLSS=n` (1 performance, 2 balanced, 3
+quality, 4 ultra performance, 6 DLAA; ultra quality is not offered by the
+current DLSS). The scene is drawn at the render size the mode wants --
+the render scale above, with the scene's textures sampled a mip finer by
+`log2(scale)`, so the detail the frame's pixels deserve is in the samples
+DLSS reconstructs from, and with no multisampling, since a resolved sample
+has none of that detail left -- and DLSS makes the frame from the scene's
+colour, its resolved depth and its motion vectors, in the temporal pass's
+place, with the same nudged projection (more phases: eight times the
+square of the scale). The composite samples what it wrote.
+
+How it is wired (`native/ae3d_dlss.cpp`, C++ against the SDK's headers,
+behind the C surface of `native/ae3d_dlss.h`): the Streamline runtime is
+loaded before Vulkan starts and its interposer stands in for the Vulkan
+loader, so the instance and the device made through it carry what DLSS
+needs; each frame the camera's matrices (column-major here, row-major and
+row-vector there: the same sixteen floats), the jitter in render pixels
+and the motion vectors' scale (texture space, and the other way round:
+from where a pixel is to where it was) go in as constants, the four
+images are tagged, and the evaluation is recorded between the scene's
+passes and the composite. The runtime -- `sl.interposer.dll`,
+`sl.common.dll`, `sl.dlss.dll`, `nvngx_dlss.dll` -- is NVIDIA's and not
+shipped here: build with `AE3D_STREAMLINE_ROOT` naming the SDK
+(github.com/NVIDIA-RTX/Streamline; the C++ shim is compiled only then,
+a stub otherwise, so every other machine builds the same), and put the
+SDK's `bin/x64` beside the program or in `AE3D_STREAMLINE`. Where DLSS is
+not built in, not there or not for the card, the program is told why,
+draws as before, and the temporal pass stands in for the multisampling
+that was turned off for it. `tests/test_dlss` skips there; on an RTX it
+holds the performance mode's frame, from half the pixels, to more than
+the composite's own scaling of them and to within a fifth of the native
+frame's sharpness.
+
+What it buys depends on where the frame's cost is: `zombie_city` at
+1080p with half a million figures, vertex-bound, goes from 73 fps under
+the temporal pass to 76 at quality and 84 at performance; a scene bound
+by its pixels gains by the render scale.
+
 ### Temporal anti-aliasing
 
 `engine_set_taa(e, on)`, or `AE3D_TAA=1`. The projection is nudged a

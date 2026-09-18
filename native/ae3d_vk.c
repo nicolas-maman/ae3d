@@ -2,10 +2,12 @@
 #include "ae3d_internal.h"
 #include "ae3d_vk_scene_shaders.h"
 #include "ae3d_vk_uniforms.h"
+#include "ae3d_dlss.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #if defined(_WIN32)
 #  define VK_USE_PLATFORM_WIN32_KHR
@@ -127,7 +129,7 @@
     X(vkCmdBindIndexBuffer) \
     X(vkCmdDrawIndexed) \
     X(vkCmdDrawIndexedIndirect) \
-    X(vkCmdDispatch) \
+    X(vkCmdDispatch)     X(vkCmdClearColorImage) \
     X(vkCmdFillBuffer) \
     X(vkCmdUpdateBuffer) \
     X(vkCreateComputePipelines) \
@@ -250,6 +252,7 @@ typedef struct {
     int width;
     int height;
     int in_use;
+    int mip_levels;   /* a scene texture with a mip chain: its sampler takes the LOD bias */
 } ae3d_vk_texture;
 
 typedef struct {
@@ -303,6 +306,22 @@ static struct {
        upscaler (DLSS) sits between the two. */
     VkExtent2D render_extent;
     double render_scale;
+    float lod_bias;      /* the scene textures' mip bias for the render scale */
+    /* DLSS (native/ae3d_dlss.h): asked for before the loader opened, so
+       Streamline's interposer is the loader; whether the device runs it;
+       the mode in force; the frame-size image it writes, kept in
+       shader-read layout between frames (undefined until the first); and
+       the camera the frame was drawn with, for its reprojection. */
+    int dlss_loaded;
+    int dlss_supported;
+    int dlss_mode;
+    int dlss_output;
+    int dlss_output_fresh;
+    int dlss_reset;
+    int dlss_failed;     /* an evaluation refused: off, and said so */
+    unsigned dlss_frame;
+    ae3d_dlss_camera dlss_camera;
+    int dlss_camera_set;
     VkImage velocity_image;
     VkDeviceMemory velocity_memory;
     VkImageView velocity_view;
@@ -599,6 +618,34 @@ static void ae3d_vk_hint_icd(void) {
 #endif
 }
 
+/* The global entry points through whatever vkGetInstanceProcAddr is in
+   force: the loader's, or the Streamline interposer's. */
+static int ae3d_vk_bind_globals(void) {
+#define AE3D_VK_LOAD_GLOBAL(name) \
+    ae3d_##name = (PFN_##name)g_gipa(NULL, #name); \
+    if (!ae3d_##name) return ae3d_vk_fail("missing " #name);
+    AE3D_VK_GLOBAL_FUNCS(AE3D_VK_LOAD_GLOBAL)
+#undef AE3D_VK_LOAD_GLOBAL
+    return 1;
+}
+
+/* DLSS asked for, before Vulkan is up: Streamline's runtime is loaded and
+   its interposer becomes the Vulkan loader, so the instance and the device
+   made through it carry what DLSS needs. Returns 1 when the runtime loaded;
+   0, with the reason in ae3d_vk_last_error, leaves Vulkan as it was. */
+int ae3d_vk_request_dlss(const char *directory) {
+    if (vk.dlss_loaded) return 1;
+    if (vk.instance) return ae3d_vk_fail("DLSS has to be asked for before Vulkan starts");
+    if (!ae3d_dlss_built()) return ae3d_vk_fail(ae3d_dlss_last_error());
+    if (!ae3d_dlss_load(directory)) return ae3d_vk_fail(ae3d_dlss_last_error());
+    g_gipa = (PFN_vkGetInstanceProcAddr)ae3d_dlss_instance_proc_addr();
+    if (!g_gipa) return ae3d_vk_fail("the Streamline interposer has no vkGetInstanceProcAddr");
+    vk.dlss_loaded = 1;
+    /* The globals again, through the interposer: its vkCreateInstance is
+       the one that adds what DLSS needs. */
+    return ae3d_vk_bind_globals();
+}
+
 static int ae3d_vk_load_global(void) {
     void *library = NULL;
     int i;
@@ -614,13 +661,7 @@ static int ae3d_vk_load_global(void) {
 
     g_gipa = (PFN_vkGetInstanceProcAddr)ae3d_vk_dlsym(library, "vkGetInstanceProcAddr");
     if (!g_gipa) return ae3d_vk_fail("vkGetInstanceProcAddr missing from the loader");
-
-#define AE3D_VK_LOAD_GLOBAL(name) \
-    ae3d_##name = (PFN_##name)g_gipa(NULL, #name); \
-    if (!ae3d_##name) return ae3d_vk_fail("missing " #name);
-    AE3D_VK_GLOBAL_FUNCS(AE3D_VK_LOAD_GLOBAL)
-#undef AE3D_VK_LOAD_GLOBAL
-    return 1;
+    return ae3d_vk_bind_globals();
 }
 
 static int ae3d_vk_load_instance(void) {
@@ -1007,6 +1048,14 @@ void ae3d_vk_texture_destroy(int handle);
 static void ae3d_vk_destroy_shadow_target(void);
 static void ae3d_vk_destroy_camdepth_target(void);
 static int ae3d_vk_create_crowd_pipeline(void);
+static void ae3d_vk_destroy_dlss_output(void);
+static int ae3d_vk_texture_sampler(ae3d_vk_texture *texture);
+static void ae3d_vk_rebias_samplers(void);
+static int ae3d_vk_create_dlss_output(void);
+static int ae3d_vk_run_dlss(int source);
+static void ae3d_vk_clip_correct(const double *m, double *c);
+static void ae3d_vk_mat4_mul(const double *a, const double *b, double *out);
+static int ae3d_vk_mat4_invert(const double *c, double *inv);
 static VkPipeline ae3d_vk_pipeline_for(int handle, int points);
 static int ae3d_vk_instances_are_points(int instance_handle, int instance_count);
 
@@ -2233,6 +2282,12 @@ static VkShaderModule ae3d_vk_shader(const unsigned char *bytes, unsigned length
 }
 
 
+/* The multisampling asked for before the backend starts: the most the
+   frame takes, 4 unless told otherwise; 0 or 1 is none, which is what an
+   upscaler wants, since a resolved pixel has no sub-pixel detail left. */
+static int g_samples_wanted = 4;
+void ae3d_vk_set_samples(int samples) { g_samples_wanted = samples; }
+
 static VkSampleCountFlagBits ae3d_vk_pick_samples(void) {
     VkPhysicalDeviceProperties properties;
     VkSampleCountFlags counts;
@@ -2240,8 +2295,8 @@ static VkSampleCountFlagBits ae3d_vk_pick_samples(void) {
     ae3d_vkGetPhysicalDeviceProperties(vk.physical, &properties);
     counts = properties.limits.framebufferColorSampleCounts &
              properties.limits.framebufferDepthSampleCounts;
-    if (counts & VK_SAMPLE_COUNT_4_BIT) return VK_SAMPLE_COUNT_4_BIT;
-    if (counts & VK_SAMPLE_COUNT_2_BIT) return VK_SAMPLE_COUNT_2_BIT;
+    if (g_samples_wanted >= 4 && (counts & VK_SAMPLE_COUNT_4_BIT)) return VK_SAMPLE_COUNT_4_BIT;
+    if (g_samples_wanted >= 2 && (counts & VK_SAMPLE_COUNT_2_BIT)) return VK_SAMPLE_COUNT_2_BIT;
     return VK_SAMPLE_COUNT_1_BIT;
 }
 
@@ -2425,7 +2480,6 @@ int ae3d_vk_texture_create(int width, int height, const void *rgba) {
     VkDeviceMemory staging_memory = VK_NULL_HANDLE;
     VkCommandBuffer command;
     VkBufferImageCopy region;
-    VkSamplerCreateInfo sampler;
     VkFormatProperties format_properties;
     ae3d_vk_texture *texture = NULL;
     void *mapped = NULL;
@@ -2492,6 +2546,24 @@ int ae3d_vk_texture_create(int width, int height, const void *rgba) {
     ae3d_vkDestroyBuffer(vk.device, staging, NULL);
     ae3d_vkFreeMemory(vk.device, staging_memory, NULL);
 
+    texture->mip_levels = mip_levels;
+    if (!ae3d_vk_texture_sampler(texture)) return 0;
+
+    texture->width = width;
+    texture->height = height;
+    texture->in_use = 1;
+    return handle;
+}
+
+/* A scene texture's sampler, with the mip chain and the LOD bias of the
+   moment: the scene drawn smaller than the frame for an upscaler picks a
+   coarser mip than the frame's pixels deserve, and the detail lost there
+   is detail the upscaler never gets to reconstruct; the bias, log2 of the
+   scale, keeps the mip the frame's own. Remade for every texture when the
+   scale changes (ae3d_vk_rebias_samplers). */
+static int ae3d_vk_texture_sampler(ae3d_vk_texture *texture) {
+    VkSamplerCreateInfo sampler;
+    if (texture->sampler) { ae3d_vkDestroySampler(vk.device, texture->sampler, NULL); texture->sampler = VK_NULL_HANDLE; }
     memset(&sampler, 0, sizeof(sampler));
     sampler.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     sampler.magFilter = VK_FILTER_LINEAR;
@@ -2500,16 +2572,34 @@ int ae3d_vk_texture_create(int width, int height, const void *rgba) {
     sampler.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     sampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    sampler.maxLod = (float)mip_levels;
+    sampler.maxLod = (float)texture->mip_levels;
+    sampler.mipLodBias = vk.lod_bias;
     if (ae3d_vkCreateSampler(vk.device, &sampler, NULL, &texture->sampler) != VK_SUCCESS) {
-        ae3d_vk_fail("vkCreateSampler failed");
-        return 0;
+        return ae3d_vk_fail("vkCreateSampler failed");
     }
+    return 1;
+}
 
-    texture->width = width;
-    texture->height = height;
-    texture->in_use = 1;
-    return handle;
+/* Every scene texture's sampler remade at the LOD bias the render scale
+   asks for, and the descriptor sets that named the old samplers let go. */
+static void ae3d_vk_rebias_samplers(void) {
+    int slot, frame, index;
+    float bias = 0.0f;
+    if (vk.render_extent.width && vk.extent.width && vk.render_extent.width < vk.extent.width) {
+        bias = (float)(log((double)vk.render_extent.width / (double)vk.extent.width) / log(2.0));
+    }
+    if (bias == vk.lod_bias) return;
+    vk.lod_bias = bias;
+    if (!vk.device) return;
+    ae3d_vkDeviceWaitIdle(vk.device);
+    for (slot = 0; slot < AE3D_VK_MAX_TEXTURES; slot++) {
+        ae3d_vk_texture *texture = &vk.textures[slot];
+        if (!texture->in_use || texture->mip_levels <= 0) continue;
+        ae3d_vk_texture_sampler(texture);
+    }
+    for (frame = 0; frame < AE3D_VK_FRAMES; frame++) {
+        for (index = 0; index < vk.set_count[frame]; index++) vk.set_texture[frame][index] = AE3D_VK_SET_FREE;
+    }
 }
 
 void ae3d_vk_texture_destroy(int handle) {
@@ -2828,16 +2918,34 @@ void ae3d_vk_scene_set_clip_mat4(int offset, const double *m) {
  * the SAME matrix the vertex stage used (the corrected one above, mapping world
  * to Vulkan NDC: y down, z in 0..1), so the correction is applied first and the
  * result inverted. Column-major throughout, matching the rest of the block. */
-void ae3d_vk_scene_set_inv_viewproj(int offset, const double *m) {
-    double c[16], inv[16], det;
-    int column, i;
-    if (!m) return;
+/* The Vulkan clip correction (y down, z in 0..1) applied to a column-major
+   OpenGL-shaped matrix that reaches clip space. */
+static void ae3d_vk_clip_correct(const double *m, double *c) {
+    int column;
     for (column = 0; column < 4; column++) {
         c[column * 4 + 0] = m[column * 4 + 0];
         c[column * 4 + 1] = -m[column * 4 + 1];
         c[column * 4 + 2] = 0.5 * (m[column * 4 + 2] + m[column * 4 + 3]);
         c[column * 4 + 3] = m[column * 4 + 3];
     }
+}
+
+/* out = a * b, column-major. */
+static void ae3d_vk_mat4_mul(const double *a, const double *b, double *out) {
+    int r, c, k;
+    for (c = 0; c < 4; c++) {
+        for (r = 0; r < 4; r++) {
+            double sum = 0.0;
+            for (k = 0; k < 4; k++) sum += a[k * 4 + r] * b[c * 4 + k];
+            out[c * 4 + r] = sum;
+        }
+    }
+}
+
+/* The inverse of a column-major matrix; 0 when it has none. */
+static int ae3d_vk_mat4_invert(const double *c, double *inv) {
+    double det;
+    int i;
     inv[0]  =  c[5]*c[10]*c[15] - c[5]*c[11]*c[14] - c[9]*c[6]*c[15] + c[9]*c[7]*c[14] + c[13]*c[6]*c[11] - c[13]*c[7]*c[10];
     inv[4]  = -c[4]*c[10]*c[15] + c[4]*c[11]*c[14] + c[8]*c[6]*c[15] - c[8]*c[7]*c[14] - c[12]*c[6]*c[11] + c[12]*c[7]*c[10];
     inv[8]  =  c[4]*c[9]*c[15]  - c[4]*c[11]*c[13] - c[8]*c[5]*c[15] + c[8]*c[7]*c[13] + c[12]*c[5]*c[11] - c[12]*c[7]*c[9];
@@ -2855,9 +2963,17 @@ void ae3d_vk_scene_set_inv_viewproj(int offset, const double *m) {
     inv[11] = -c[0]*c[5]*c[11]  + c[0]*c[7]*c[9]   + c[4]*c[1]*c[11] - c[4]*c[3]*c[9]  - c[8]*c[1]*c[7]   + c[8]*c[3]*c[5];
     inv[15] =  c[0]*c[5]*c[10]  - c[0]*c[6]*c[9]   - c[4]*c[1]*c[10] + c[4]*c[2]*c[9]  + c[8]*c[1]*c[6]   - c[8]*c[2]*c[5];
     det = c[0]*inv[0] + c[1]*inv[4] + c[2]*inv[8] + c[3]*inv[12];
-    if (det > -1e-12 && det < 1e-12) { ae3d_vk_set_mat4(&vk.scene[vk.program], offset, c); return; }
+    if (det > -1e-12 && det < 1e-12) return 0;
     det = 1.0 / det;
     for (i = 0; i < 16; i++) inv[i] *= det;
+    return 1;
+}
+
+void ae3d_vk_scene_set_inv_viewproj(int offset, const double *m) {
+    double c[16], inv[16];
+    if (!m) return;
+    ae3d_vk_clip_correct(m, c);
+    if (!ae3d_vk_mat4_invert(c, inv)) { ae3d_vk_set_mat4(&vk.scene[vk.program], offset, c); return; }
     ae3d_vk_set_mat4(&vk.scene[vk.program], offset, inv);
 }
 
@@ -3432,12 +3548,16 @@ int ae3d_vk_init(void *win, int width, int height) {
     int shadows = vk.shadow_enabled;
     int fxaa = vk.fxaa, bloom = vk.bloom;
     float bloom_threshold = vk.bloom_threshold, bloom_intensity = vk.bloom_intensity;
+    int dlss_loaded = vk.dlss_loaded;
+    double render_scale = vk.render_scale;
 
     if (vk.ready) return 1;
     if (!ae3d_vk_available()) return 0;
 
     memset(&vk, 0, sizeof(vk));
     vk.shadow_enabled = shadows;
+    vk.dlss_loaded = dlss_loaded;
+    vk.render_scale = render_scale;
     vk.fxaa = fxaa;
     vk.bloom = bloom;
     vk.bloom_threshold = bloom_threshold;
@@ -3466,6 +3586,10 @@ int ae3d_vk_init(void *win, int width, int height) {
     if (!ae3d_vk_create_defaults()) return 0;
     if (!ae3d_vk_create_pipeline()) return 0;
     if (!ae3d_vk_create_crowd_pipeline()) return 0;
+    if (vk.dlss_loaded) {
+        vk.dlss_supported = ae3d_dlss_supported((void *)vk.physical);
+        if (!vk.dlss_supported) fprintf(stderr, "ae3d: DLSS: %s\n", ae3d_dlss_last_error());
+    }
 
     snprintf(g_vk_error, sizeof(g_vk_error), "%s", "");
     vk.ready = 1;
@@ -3486,12 +3610,33 @@ static int ae3d_vk_rebuild_swapchain(int width, int height) {
     for (frame = 0; frame < AE3D_VK_FRAMES; frame++) vk.set_count[frame] = 0;
 
     ae3d_vk_destroy_swapchain();
+    ae3d_vk_destroy_dlss_output();
     if (vk.offscreen) {
         if (!ae3d_vk_create_offscreen_target(width, height)) return 0;
     } else {
         if (!ae3d_vk_create_swapchain(width, height)) return 0;
     }
     if (!ae3d_vk_create_framebuffers()) return 0;
+    ae3d_vk_rebias_samplers();
+    if (vk.dlss_mode) {
+        /* The frame's size may have changed: the mode's render size with it. */
+        unsigned rw = 0, rh = 0;
+        if (ae3d_dlss_optimal(vk.dlss_mode, vk.extent.width, vk.extent.height, &rw, &rh) &&
+            ae3d_dlss_set_options(vk.dlss_mode, vk.extent.width, vk.extent.height)) {
+            double scale = (double)rw / (double)vk.extent.width;
+            if (scale > 1.0) scale = 1.0;
+            if (scale < 0.25) scale = 0.25;
+            if (scale != vk.render_scale) {
+                vk.render_scale = scale;
+                ae3d_vk_destroy_swapchain();
+                if (vk.offscreen) { if (!ae3d_vk_create_offscreen_target(width, height)) return 0; }
+                else if (!ae3d_vk_create_swapchain(width, height)) return 0;
+                if (!ae3d_vk_create_framebuffers()) return 0;
+                ae3d_vk_rebias_samplers();
+            }
+        }
+        if (!ae3d_vk_create_dlss_output()) return 0;
+    }
     vk.needs_resize = 0;
     return 1;
 }
@@ -3620,7 +3765,7 @@ int ae3d_vk_frame_begin(double r, double g, double b, double a) {
        the swapchain, here, so the first frame that needs it has it. */
     vk.depth_split = 0;
     vk.depth_resolved = 0;
-    if ((vk.ssr_enabled || vk.scene_depth_wanted || vk.ssao_enabled || vk.taa_enabled) && vk.depth_resolve_pipeline) {
+    if ((vk.ssr_enabled || vk.scene_depth_wanted || vk.ssao_enabled || vk.taa_enabled || vk.dlss_mode) && vk.depth_resolve_pipeline) {
         if (!vk.camdepth_framebuffer ||
             vk.camdepth_width != (int)vk.render_extent.width ||
             vk.camdepth_height != (int)vk.render_extent.height) {
@@ -4638,16 +4783,19 @@ static void ae3d_vk_draw_screen(VkPipeline pipeline, VkDescriptorSet *set_slot, 
                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_NULL_HANDLE, VK_NULL_HANDLE);
 }
 
+/* The texel of what the post passes sample: the scene's size for the
+   passes over the scene, the frame's once an upscaler has written it. */
+static void ae3d_vk_set_texel(unsigned width, unsigned height) {
+    float texel[2];
+    texel[0] = width ? 1.0f / (float)width : 0.0f;
+    texel[1] = height ? 1.0f / (float)height : 0.0f;
+    memcpy(vk.scene[AE3D_VK_PROGRAM_SCENE].bytes + AE3D_VK_OFF_TEXELSIZE, texel, sizeof(texel));
+}
+
 // The post uniforms live in the shared scene block, so both the reflective
 // composite and the ordinary one read them; set them once before either draws.
 static void ae3d_vk_setup_post_uniforms(void) {
-    float texel_x = vk.render_extent.width ? 1.0f / (float)vk.render_extent.width : 0.0f;
-    float texel_y = vk.render_extent.height ? 1.0f / (float)vk.render_extent.height : 0.0f;
-    float texel[2];
-
-    texel[0] = texel_x;
-    texel[1] = texel_y;
-    memcpy(vk.scene[AE3D_VK_PROGRAM_SCENE].bytes + AE3D_VK_OFF_TEXELSIZE, texel, sizeof(texel));
+    ae3d_vk_set_texel(vk.render_extent.width, vk.render_extent.height);
     ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_BLOOMTHRESHOLD, vk.bloom_threshold);
     ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_BLOOMINTENSITY, vk.bloom_intensity);
     ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_EDGETHRESHOLD, 0.125f);
@@ -4743,10 +4891,21 @@ int ae3d_vk_frame_end(void) {
 
         source = ssr_now ? vk.ssr_reflect_texture : vk.post_texture;
 
+        /* DLSS, in the temporal pass's place: the scene at its size, its
+           depth and its motion vectors into the frame at the frame's. */
+        if (vk.dlss_mode) {
+            int upscaled = ae3d_vk_run_dlss(source);
+            if (upscaled) {
+                source = upscaled;
+                /* The composite samples the frame-size output now. */
+                ae3d_vk_set_texel(vk.extent.width, vk.extent.height);
+            }
+        }
+
         /* The temporal pass: this frame folded into the history, written
            into the other history texture, which the composite then reads
            and the next frame reads back as its history. */
-        if (vk.taa_enabled && vk.taa_pipeline && vk.taa_framebuffer[0] && vk.taa_framebuffer[1] &&
+        if (!vk.dlss_mode && vk.taa_enabled && vk.taa_pipeline && vk.taa_framebuffer[0] && vk.taa_framebuffer[1] &&
             vk.camdepth_framebuffer && source > 0) {
             int cur = vk.taa_current;
             int old = 1 - cur;
@@ -4975,6 +5134,240 @@ double ae3d_vk_set_render_scale(double scale) {
     return scale;
 }
 double ae3d_vk_render_scale(void) { return vk.render_scale > 0.0 ? vk.render_scale : 1.0; }
+
+/* DLSS runs here: the runtime loaded and the device fit for it. */
+int ae3d_vk_dlss_available(void) { return vk.ready && vk.dlss_loaded && vk.dlss_supported; }
+
+/* The frame-size image DLSS writes, sampled by the composite. Made when a
+   mode is set, remade with the frame. */
+static void ae3d_vk_destroy_dlss_output(void) {
+    if (vk.dlss_output) { ae3d_vk_texture_destroy(vk.dlss_output); vk.dlss_output = 0; }
+}
+
+static int ae3d_vk_create_dlss_output(void) {
+    ae3d_vk_texture *texture = NULL;
+    VkSamplerCreateInfo sampler;
+    int slot;
+    for (slot = 0; slot < AE3D_VK_MAX_TEXTURES; slot++) {
+        if (!vk.textures[slot].in_use) { texture = &vk.textures[slot]; break; }
+    }
+    if (!texture) return ae3d_vk_fail("texture table full");
+    if (!ae3d_vk_create_image((int)vk.extent.width, (int)vk.extent.height, 1, VK_FORMAT_R8G8B8A8_UNORM,
+                              VK_SAMPLE_COUNT_1_BIT,
+                              VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                              VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                              VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_TILING_OPTIMAL,
+                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                              &texture->image, &texture->memory, &texture->view)) {
+        return 0;
+    }
+    memset(&sampler, 0, sizeof(sampler));
+    sampler.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sampler.magFilter = VK_FILTER_LINEAR;
+    sampler.minFilter = VK_FILTER_LINEAR;
+    sampler.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    sampler.maxLod = 1.0f;
+    if (ae3d_vkCreateSampler(vk.device, &sampler, NULL, &texture->sampler) != VK_SUCCESS) {
+        return ae3d_vk_fail("dlss vkCreateSampler failed");
+    }
+    texture->width = (int)vk.extent.width;
+    texture->height = (int)vk.extent.height;
+    texture->in_use = 1;
+    vk.dlss_output = slot + 1;
+    vk.dlss_output_fresh = 1;
+    vk.dlss_reset = 1;
+    return 1;
+}
+
+/* DLSS at `mode` (native/ae3d_dlss.h: 0 off, 1 performance, 2 balanced,
+   3 quality, 4 ultra performance, 5 ultra quality, 6 DLAA): the scene is
+   drawn at the render size the mode wants for the frame's size and DLSS
+   writes the frame from it, in place of the temporal pass. Returns the
+   mode in force: 0 where DLSS is not available. */
+int ae3d_vk_set_dlss(int mode) {
+    unsigned rw = 0, rh = 0;
+    if (mode <= 0 || !ae3d_vk_dlss_available()) {
+        if (vk.dlss_mode) {
+            vk.dlss_mode = 0;
+            ae3d_vk_set_render_scale(1.0);
+            ae3d_vkDeviceWaitIdle(vk.device);
+            ae3d_vk_destroy_dlss_output();
+        }
+        return 0;
+    }
+    if (!ae3d_dlss_optimal(mode, vk.extent.width, vk.extent.height, &rw, &rh)) {
+        ae3d_vk_fail(ae3d_dlss_last_error());
+        return 0;
+    }
+    if (!ae3d_dlss_set_options(mode, vk.extent.width, vk.extent.height)) {
+        ae3d_vk_fail(ae3d_dlss_last_error());
+        return 0;
+    }
+    vk.dlss_mode = mode;
+    /* The mode's render size, as a scale of the frame; DLSS takes any size
+       between the mode's least and most, so a pixel of rounding is fine. */
+    ae3d_vk_set_render_scale((double)rw / (double)vk.extent.width);
+    ae3d_vkDeviceWaitIdle(vk.device);
+    ae3d_vk_destroy_dlss_output();
+    if (!ae3d_vk_create_dlss_output()) { vk.dlss_mode = 0; return 0; }
+    return mode;
+}
+
+int ae3d_vk_dlss(void) { return vk.dlss_mode; }
+int ae3d_vk_dlss_failed(void) { return vk.dlss_failed; }
+
+/* The camera the frame is drawn with, for DLSS to reproject by: the view
+   and the unjittered projection, last frame's pair, the jitter in texture
+   space, the lens, and where the camera stands and looks. Matrices are
+   column-major, OpenGL-shaped; the Vulkan clip correction is applied here. */
+void ae3d_vk_dlss_camera(const double *view, const double *projection,
+                         const double *prev_view, const double *prev_projection,
+                         double jitter_x, double jitter_y,
+                         double near_plane, double far_plane, double fov, double aspect,
+                         const double *position, const double *up, const double *right, const double *forward) {
+    double proj_c[16], inv_proj[16], vp[16], inv_vp[16], pvp[16], c2p[16], p2c[16];
+    double view_c[16], prev_proj_c[16];
+    int i;
+    ae3d_dlss_camera *cam = &vk.dlss_camera;
+    if (!view || !projection || !prev_view || !prev_projection) return;
+    ae3d_vk_clip_correct(projection, proj_c);
+    ae3d_vk_clip_correct(prev_projection, prev_proj_c);
+    memcpy(view_c, view, sizeof(view_c));
+    ae3d_vk_mat4_mul(proj_c, view_c, vp);
+    ae3d_vk_mat4_mul(prev_proj_c, prev_view, pvp);
+    if (!ae3d_vk_mat4_invert(proj_c, inv_proj)) memcpy(inv_proj, proj_c, sizeof(inv_proj));
+    if (!ae3d_vk_mat4_invert(vp, inv_vp)) memcpy(inv_vp, vp, sizeof(inv_vp));
+    /* This frame's clip to last frame's: through the world. */
+    ae3d_vk_mat4_mul(pvp, inv_vp, c2p);
+    if (!ae3d_vk_mat4_invert(c2p, p2c)) memcpy(p2c, c2p, sizeof(p2c));
+    for (i = 0; i < 16; i++) {
+        cam->view_to_clip[i] = (float)proj_c[i];
+        cam->clip_to_view[i] = (float)inv_proj[i];
+        cam->clip_to_prev_clip[i] = (float)c2p[i];
+        cam->prev_clip_to_clip[i] = (float)p2c[i];
+    }
+    /* The jitter in pixels of the render size; the motion vectors are in
+       texture space, from where a pixel is to where it was: DLSS wants
+       them the other way round and in that space. */
+    cam->jitter_x = (float)(jitter_x * (double)vk.render_extent.width);
+    cam->jitter_y = (float)(jitter_y * (double)vk.render_extent.height);
+    cam->mvec_scale_x = -1.0f;
+    cam->mvec_scale_y = -1.0f;
+    for (i = 0; i < 3; i++) {
+        cam->position[i] = (float)position[i];
+        cam->up[i] = (float)up[i];
+        cam->right[i] = (float)right[i];
+        cam->forward[i] = (float)forward[i];
+    }
+    cam->near_plane = (float)near_plane;
+    cam->far_plane = (float)far_plane;
+    cam->fov = (float)fov;
+    cam->aspect = (float)aspect;
+    cam->depth_inverted = 0;
+    cam->reset = vk.dlss_reset;
+    vk.dlss_camera_set = 1;
+}
+
+/* The upscale, recorded between the scene's passes and the composite: the
+   frame's constants and its four images tagged, evaluated into the output,
+   which the composite then samples. Returns the texture to composite from,
+   or 0 when DLSS did not run this frame. The renderer's bound state is
+   forgotten afterwards, since the evaluation bound its own. */
+static int ae3d_vk_run_dlss(int source) {
+    ae3d_dlss_image depth, motion, colour_in, colour_out;
+    ae3d_vk_texture *src, *out, *vel;
+    VkCommandBuffer command = vk.command_buffers[vk.frame];
+    if (!vk.dlss_mode || !vk.dlss_output || !vk.velocity_texture || !vk.camdepth_view) return 0;
+    if (source <= 0 || source > AE3D_VK_MAX_TEXTURES || !vk.dlss_camera_set) return 0;
+    if (!vk.depth_resolved) return 0;
+    src = &vk.textures[source - 1];
+    out = &vk.textures[vk.dlss_output - 1];
+    vel = &vk.textures[vk.velocity_texture - 1];
+
+    if (vk.dlss_output_fresh) {
+        /* The output starts in no layout; it is kept shader-readable
+           between frames, and DLSS moves it to what it writes through and
+           back. */
+        VkImageMemoryBarrier barrier;
+        memset(&barrier, 0, sizeof(barrier));
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = out->image;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.levelCount = 1;
+        barrier.subresourceRange.layerCount = 1;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        ae3d_vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                  0, 0, NULL, 0, NULL, 1, &barrier);
+        vk.dlss_output_fresh = 0;
+    }
+
+    if (!ae3d_dlss_begin_frame(vk.dlss_frame++)) { ae3d_vk_fail(ae3d_dlss_last_error()); return 0; }
+    if (!ae3d_dlss_set_constants(&vk.dlss_camera)) { ae3d_vk_fail(ae3d_dlss_last_error()); return 0; }
+    vk.dlss_reset = 0;
+
+    memset(&depth, 0, sizeof(depth));
+    depth.image = (void *)vk.camdepth_image;
+    depth.memory = (void *)vk.camdepth_memory;
+    depth.view = (void *)vk.camdepth_view;
+    depth.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    depth.width = vk.render_extent.width;
+    depth.height = vk.render_extent.height;
+    depth.format = (unsigned)vk.depth_format;
+    depth.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+
+    memset(&motion, 0, sizeof(motion));
+    motion.image = (void *)vel->image;
+    motion.memory = (void *)vel->memory;
+    motion.view = (void *)vel->view;
+    motion.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    motion.width = vk.render_extent.width;
+    motion.height = vk.render_extent.height;
+    motion.format = (unsigned)vk.velocity_format;
+    motion.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+
+    memset(&colour_in, 0, sizeof(colour_in));
+    colour_in.image = (void *)src->image;
+    colour_in.memory = (void *)src->memory;
+    colour_in.view = (void *)src->view;
+    colour_in.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    colour_in.width = vk.render_extent.width;
+    colour_in.height = vk.render_extent.height;
+    colour_in.format = (unsigned)vk.color_format;
+    colour_in.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+
+    memset(&colour_out, 0, sizeof(colour_out));
+    colour_out.image = (void *)out->image;
+    colour_out.memory = (void *)out->memory;
+    colour_out.view = (void *)out->view;
+    colour_out.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    colour_out.width = vk.extent.width;
+    colour_out.height = vk.extent.height;
+    colour_out.format = (unsigned)VK_FORMAT_R8G8B8A8_UNORM;
+    colour_out.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                       VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+
+    if (!ae3d_dlss_tag(&depth, &motion, &colour_in, &colour_out, (void *)command) ||
+        !ae3d_dlss_evaluate((void *)command)) {
+        /* A frame DLSS would not take: said once, and the frame is drawn
+           as it was, at the scene's size, from here on. */
+        fprintf(stderr, "ae3d: DLSS off: %s" "\n", ae3d_dlss_last_error());
+        ae3d_vk_fail(ae3d_dlss_last_error());
+        vk.dlss_mode = 0;
+        vk.dlss_failed = 1;
+        return 0;
+    }
+    vk.bound_pipeline = VK_NULL_HANDLE;
+    vk.bound_texture = 0;
+    vk.bound_normal = 0;
+    return vk.dlss_output;
+}
 
 int ae3d_vk_offscreen_width(void) { return vk.readback_width; }
 int ae3d_vk_offscreen_height(void) { return vk.readback_height; }
@@ -5686,6 +6079,7 @@ void ae3d_vk_shutdown(void) {
     if (vk.crowd_shadow_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.crowd_shadow_pipeline, NULL);
     if (vk.sky_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.sky_pipeline, NULL);
     if (vk.ssao_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.ssao_pipeline, NULL);
+    ae3d_vk_destroy_dlss_output();
     if (vk.depth_resolve_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.depth_resolve_pipeline, NULL);
     {
         int k;
@@ -5718,6 +6112,8 @@ void ae3d_vk_shutdown(void) {
     if (vk.camdepth_pass) ae3d_vkDestroyRenderPass(vk.device, vk.camdepth_pass, NULL);
     if (vk.shadow_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.shadow_pipeline, NULL);
     ae3d_vk_destroy_shadow_target();
+    /* Streamline goes before the device it wrapped. */
+    if (vk.dlss_loaded) { ae3d_dlss_shutdown(); vk.dlss_loaded = 0; vk.dlss_supported = 0; vk.dlss_mode = 0; }
     if (vk.device) ae3d_vkDestroyDevice(vk.device, NULL);
     if (vk.surface && ae3d_vkDestroySurfaceKHR) ae3d_vkDestroySurfaceKHR(vk.instance, vk.surface, NULL);
     if (vk.instance) ae3d_vkDestroyInstance(vk.instance, NULL);

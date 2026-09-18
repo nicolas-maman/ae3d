@@ -35,7 +35,7 @@ exports (
     engine_set_size, engine_set_title, engine_set_msaa, engine_set_decorated, engine_set_post,
     engine_set_render_scale, engine_set_shadows, engine_shadows, engine_set_fog, engine_fog, engine_set_shadow_distance, engine_shadow_distance,
     engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
-    engine_set_skybox, engine_set_sky, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_set_sky_overcast, engine_set_ssao, engine_set_capture_channel, engine_set_wetness, engine_set_taa, engine_taa, engine_load_texture,
+    engine_set_skybox, engine_set_sky, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_set_sky_overcast, engine_set_ssao, engine_set_capture_channel, engine_set_wetness, engine_set_taa, engine_taa, engine_set_dlss, engine_dlss, engine_load_texture,
     engine_set_time_of_day, engine_time_of_day,
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
     engine_render_ms, engine_render_frames,
@@ -160,6 +160,9 @@ struct Engine {
     // wherever it runs and a change to the engine is a change in them.
     // Temporal anti-aliasing, asked for; applied when the backend is up.
     taa: bool
+    // DLSS: the mode asked for (0 off), on Vulkan through Streamline; the
+    // runtime is loaded before the backend starts when one is wanted.
+    dlss_mode: int
     perf_on: bool
     perf_frames: int
     perf_shadow_ms: float
@@ -396,6 +399,12 @@ size_from_env(e: *Engine) {
     height = core.env_int("AE3D_HEIGHT", 0)
     if width > 0 { e.width = width }
     if height > 0 { e.height = height }
+    // AE3D_MSAA=n sets the multisampling (0 for none); DLSS wants none,
+    // since a resolved sample has no sub-pixel detail left to reconstruct
+    // from, and is the antialiasing itself.
+    msaa = core.env_int("AE3D_MSAA", 0 - 1)
+    if msaa >= 0 { e.msaa = msaa }
+    if core.env_int("AE3D_DLSS", 0) > 0 && msaa < 0 { e.msaa = 0 }
 }
 
 // AE3D_HIDDEN keeps the window off the screen. The frame is still drawn --
@@ -751,6 +760,32 @@ engine_set_taa(e: *Engine, on: bool) {
 
 engine_taa(e: *Engine) -> bool { return e.taa }
 
+// DLSS (NVIDIA, through Streamline; Vulkan only) at `mode`: 0 off, 1
+// performance, 2 balanced, 3 quality, 4 ultra performance, 5 ultra
+// quality, 6 DLAA. The scene is drawn at the render size the mode wants
+// and DLSS makes the frame from it, its depth and its motion vectors, in
+// the temporal pass's place. Asked for before engine_run (or by
+// AE3D_DLSS=n), so the Streamline runtime -- sl.interposer.dll and the
+// plugins beside it, from AE3D_STREAMLINE or beside the program -- is
+// loaded before Vulkan starts. Returns the mode in force: 0 where DLSS is
+// not available, and the frame is drawn as before; engine_dlss_error says
+// why.
+engine_set_dlss(e: *Engine, mode: int) -> int {
+    if mode < 0 { mode = 0 }
+    if e.backend_state == null || !e.running {
+        e.dlss_mode = mode
+        return mode
+    }
+    if e.api != platform.API_VULKAN { e.dlss_mode = 0 ; return 0 }
+    e.dlss_mode = vk.renderer_set_dlss(e.backend_state as *VKRenderer, mode)
+    if mode > 0 && e.dlss_mode == 0 {
+        println("ae3d: DLSS: ${vk.last_error()}")
+    }
+    return e.dlss_mode
+}
+
+engine_dlss(e: *Engine) -> int { return e.dlss_mode }
+
 engine_set_wetness(e: *Engine, amount: float) {
     if e.backend_state == null { return }
     if e.api == platform.API_VULKAN {
@@ -925,6 +960,17 @@ engine_start(e: *Engine, x: int, y: int) -> bool {
 
     if e.api != platform.API_VULKAN { platform.window_set_vsync(e.vsync) }
 
+    // DLSS wanted, by the program or by AE3D_DLSS=n: the runtime before
+    // the backend, since its interposer has to be the Vulkan loader.
+    if core.env_int("AE3D_DLSS", 0) > 0 { e.dlss_mode = core.env_int("AE3D_DLSS", 0) }
+    if e.api == platform.API_VULKAN { vk.set_samples(e.msaa) }
+    if e.dlss_mode > 0 && e.api == platform.API_VULKAN {
+        if !vk.request_dlss(core.text(os.getenv("AE3D_STREAMLINE"))) {
+            println("ae3d: DLSS: ${vk.last_error()}")
+            e.dlss_mode = 0
+        }
+    }
+
     if e.backend_init(e.backend_state, e.window, e.width, e.height) != 1 {
         println("ae3d: ${e.backend_name} backend failed to initialise")
         platform.window_destroy(e.window)
@@ -943,6 +989,18 @@ engine_start(e: *Engine, x: int, y: int) -> bool {
     // Asked for before the backend was up, or by AE3D_TAA=1.
     if core.env_int("AE3D_TAA", 0) == 1 { e.taa = true }
     if e.taa { engine_set_taa(e, true) }
+    if e.dlss_mode > 0 {
+        wanted = e.dlss_mode
+        e.dlss_mode = 0
+        engine_set_dlss(e, wanted)
+        if e.dlss_mode > 0 {
+            println("ae3d: DLSS on, mode ${e.dlss_mode}")
+        } else if !e.taa {
+            // Asked for and not there: the frame has no multisampling
+            // (an upscaler wants none), so the temporal pass stands in.
+            engine_set_taa(e, true)
+        }
+    }
     // AE3D_CAPTURE=n draws the frame as a capture channel (1 albedo, 2
     // normals, 3 motion), so a snapshot can be read as numbers.
     channel = core.env_int("AE3D_CAPTURE", 0)
