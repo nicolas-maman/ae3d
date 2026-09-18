@@ -2,6 +2,20 @@
 
 ## [current]
 
+### A wet road, not a mirror
+
+- The screen-space reflection on Vulkan is Fresnel-weighted (little from a
+  camera above the road, most at a grazing look, over a base reflectance
+  that reads as a wet street in display values), broken by a puddle mask in
+  the road's metres -- still water mirrors sharply, damp tarmac dimmer and
+  blurred by a cone over the ray's travel -- so the city's road is wet
+  asphalt with the lamps streaked down it and puddles holding the windows,
+  not the canal it was. The critique's standard counts the share of the
+  road band the mirrored scene lifts by a visible step rather than cells
+  that go white. `tools/blender/make_zombie_street.py` shades the road
+  smooth: flat, every quad of its wear took its own tilt and a raking light
+  read it as bands across the street (needs a Blender export to take).
+
 ### Game objects and scripts, the Unity shape
 
 - A program is game objects in the engine's scene with scripts on them,

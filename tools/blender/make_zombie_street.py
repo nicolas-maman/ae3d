@@ -233,11 +233,21 @@ def _unit_uvs(bm):
                               (position[second] - lows[1]) / spans[1])
 
 
-def _finish(bm, name, surface, repeats):
-    """Weld, face outwards, project and hand back an object."""
+def _finish(bm, name, surface, repeats, smooth=False):
+    """Weld, face outwards, project and hand back an object.
+
+    Flat by default: a wall is planes meeting at edges. A surface that is
+    one continuous sheet with a little wear in it -- the road -- is shaded
+    smooth, or every quad of it takes its own tilt and a raking light reads
+    the wear as bands across the street, a metre and a half apart, brightest
+    where the tarmac is wet and mirrors a lamp.
+    """
     bmesh.ops.remove_doubles(bm, verts=list(bm.verts), dist=1e-5)
     bmesh.ops.recalc_face_normals(bm, faces=list(bm.faces))
     bm.normal_update()
+    if smooth:
+        for face in bm.faces:
+            face.smooth = True
     if repeats > 0.0:
         project_uvs(bm, repeats)
     else:
@@ -475,7 +485,7 @@ def road_surface(name, length, width, camber, surface, repeats, rng):
             low_a = bm.verts.new((a.co.x, a.co.y, base))
             low_b = bm.verts.new((b.co.x, b.co.y, base))
             bm.faces.new([a, b, low_b, low_a])
-    return _finish(bm, name, surface, repeats)
+    return _finish(bm, name, surface, repeats, smooth=True)
 
 
 def kerbs(name, length, width, surface, repeats, rng):
