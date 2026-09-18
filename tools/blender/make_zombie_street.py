@@ -369,7 +369,12 @@ def building(name, width, depth, height, base, surface, repeats, sign, trim,
     # patterned -- a terrace where every fourth window is on reads as wallpaper.
     dark = bmesh.new()
     lit = bmesh.new()
-    at = sign * (REVEAL - 0.015)
+    # A third of the way into the reveal, where a sash sits, not at the
+    # back of it: glass 22 cm in was hidden by the reveal's side from any
+    # look along the street, and a night city seen down its road had no
+    # lit windows in it but slivers. At 8 cm a window a metre wide still
+    # shows two thirds of itself at fifteen degrees.
+    at = sign * (REVEAL * 0.35)
     for hx0, hx1, hz0, hz1, door in holes:
         panes = dark if (door or rng.random() > 0.34) else lit
         _face(panes, [(hx0 + 0.04, at, hz0 + 0.04), (hx1 - 0.04, at, hz0 + 0.04),
