@@ -63,6 +63,16 @@
   stamps the sky's end all the same, so its opaque draws are no longer
   charged to the sky.
 
+### The channel's client, in Aether
+
+- `tools/ae3d_agent.ae` replaces `tools/ae3d_agent.py`: the same command
+  line (`--port`, `--raw`, `--script`, `op key=value ...`, `help` rendered
+  readable, non-zero exit on a refusal) written against `ae3d.probe`, so
+  the client speaks the engine's protocol in the engine's language and
+  changes with it in the same build. `--docs` writes `docs/agent.md` from
+  the schema on stdin around the text in `tools/agent_doc_text.md`;
+  `scripts/gen_agent_docs.sh` builds and runs it and needs no Python.
+
 ### glTF
 
 - `ae3d.gltf` loads glTF 2.0 -- `.gltf` with its `.bin`, or `.glb` -- into

@@ -8,7 +8,7 @@
 Both ends speak the same protocol, so the same class drives the engine and
 Blender, and the only difference is which port it is pointed at.
 
-Why this exists. tools/ae3d_agent.py answers one question per process: it
+Why this exists. tools/ae3d_agent.ae answers one question per process: it
 starts Python, opens a socket, writes a line, reads a line and exits, which
 costs about fifty milliseconds of which six are the question. That is fine for
 asking one thing from a shell and wrong for the loop an agent actually runs,

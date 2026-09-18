@@ -1,0 +1,303 @@
+// Drive an ae3d engine's agent channel from the command line.
+//
+//   ./build/spinning_cube &                       # with AE3D_AGENT=auto or a port
+//   ./build/ae3d_agent --port 7911 scene.tree
+//   ./build/ae3d_agent --port 7911 trace.model object=Spinner
+//   ./build/ae3d_agent --port 7911 model.set index=0 position=[2,0,0]
+//   ./build/ae3d_agent --port 7911 --script session.ops
+//
+// An op takes key=value arguments. A value is read as JSON where it parses as
+// JSON and kept as a string where it does not, so `index=0` is a number,
+// `name=cube` is a string and `playing=false` is a boolean without anyone
+// quoting anything for a shell to eat. `--raw` prints the whole envelope;
+// `help` is rendered as a readable list. Exits non-zero when the engine
+// answers `ok: false`, so a shell script branches on whether the thing it
+// asked for worked.
+//
+// It also writes docs/agent.md from the same table `help` answers with:
+//
+//   ./build/agent_schema | ./build/ae3d_agent --docs > docs/agent.md
+//
+// The port is --port, else the file AE3D_AGENT_PORT_FILE names (what an
+// engine started with AE3D_AGENT=auto writes), else AE3D_AGENT itself.
+//
+// This is the engine's own client, written against ae3d.probe, which speaks
+// the engine's protocol in the engine's language: an op that changes here
+// changes for the client in the same build, where a second implementation in
+// another language drifted every time one did.
+import std.io
+import std.os
+import std.json
+import std.string
+import ae3d.core
+import ae3d.probe
+
+var g_port = 0
+var g_raw = false
+var g_docs = false
+var g_script = ""
+var g_op = ""
+var g_pairs = null
+
+// A request's arguments from key=value words (a JSON array of strings):
+// read as JSON where they parse, kept as text where they do not.
+parse_arguments(pairs: ptr, into: ptr) -> bool {
+    i = 0
+    while i < json.array_size(pairs) {
+        pair = json.get_string_raw(json.array_get_raw(pairs, i))
+        eq = string.string_index_of(pair, "=")
+        if eq < 1 {
+            io.stderr_write("ae3d-agent: expected key=value, got ${pair}\n")
+            return false
+        }
+        key = string.substring(pair, 0, eq)
+        value = string.substring(pair, eq + 1, string.length(pair))
+        parsed = json.parse_raw(value)
+        if parsed != null {
+            json.object_set_raw(into, key, parsed)
+        } else {
+            json.object_set_raw(into, key, json.str(value))
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// --port, then AE3D_AGENT_PORT_FILE, then AE3D_AGENT.
+resolve_port(explicit: int) -> int {
+    if explicit > 0 { return explicit }
+    port_file = os.getenv("AE3D_AGENT_PORT_FILE")
+    if port_file != null {
+        content, err = io.read_file(core.text(port_file))
+        if err == "" {
+            port = string.string_get_int(string.trim(content))
+            if port > 0 { return port }
+        }
+    }
+    spec = os.getenv("AE3D_AGENT")
+    if spec != null {
+        port = string.string_get_int(core.text(spec))
+        if port > 0 { return port }
+    }
+    io.stderr_write("ae3d-agent: no port. Pass --port, or set AE3D_AGENT_PORT_FILE when the\n")
+    io.stderr_write("            engine was started with AE3D_AGENT=auto.\n")
+    return 0
+}
+
+// `help` as something readable rather than the JSON it arrives in: the op
+// and its arguments on one line, the summary indented under it.
+render_help(result: ptr) {
+    protocol = json.object_get_raw(result, "protocol")
+    if protocol != null { println("protocol: ${json.get_string_raw(protocol)}") } else { println("protocol: ?") }
+    println("")
+    ops = json.object_get_raw(result, "ops")
+    if ops == null { return }
+    width = 0
+    i = 0
+    while i < json.array_size(ops) {
+        name = json.get_string_raw(json.object_get_raw(json.array_get_raw(ops, i), "op"))
+        if string.length(name) > width { width = string.length(name) }
+        i = i + 1
+    }
+    i = 0
+    while i < json.array_size(ops) {
+        entry = json.array_get_raw(ops, i)
+        name = json.get_string_raw(json.object_get_raw(entry, "op"))
+        args = text_of(entry, "args")
+        summary = text_of(entry, "summary")
+        line = string.concat("  ", string.string_pad_end(name, width, 32))
+        if args != "" { line = string.concat(line, string.concat("  ", args)) }
+        println(line)
+        println("      ${summary}")
+        i = i + 1
+    }
+}
+
+text_of(node: ptr, key: string) -> string {
+    found = json.object_get_raw(node, key)
+    if found == null { return "" }
+    return json.get_string_raw(found)
+}
+
+// One request through the channel: printed, and counted as a failure where
+// the engine refused it.
+run(p: *Probe, op: string, request: ptr) -> bool {
+    json.object_set_raw(request, "op", json.str(op))
+    answered = probe.ask(p, request)
+    if answered == null {
+        io.stderr_write("ae3d-agent: the engine closed the connection (${probe.last_error()})\n")
+        return false
+    }
+    ok = probe.accepted(answered)
+    if g_raw {
+        println(json.stringify_raw(answered))
+    } else if !ok {
+        io.stderr_write("${op}: ${probe.refusal(answered)}\n")
+    } else if op == "help" {
+        render_help(probe.result(answered))
+    } else {
+        result = probe.result(answered)
+        if result != null { println(json.stringify_raw(result)) } else { println("ok") }
+    }
+    json.free(answered)
+    return ok
+}
+
+// A script: one op per line with its key=value words, # to the end of a
+// line a comment; "-" reads stdin up to its first empty line.
+run_script(p: *Probe, path: string) -> int {
+    failures = 0
+    text = ""
+    if path == "-" {
+        text = read_stdin()
+    } else {
+        content, err = io.read_file(path)
+        if err != "" {
+            io.stderr_write("ae3d-agent: cannot read ${path}: ${err}\n")
+            return 1
+        }
+        text = content
+    }
+    lines = string.string_split(text, "\n")
+    n = 0
+    while n < string.string_array_size(lines) {
+        line = string.string_array_get(lines, n)
+        hash = string.string_index_of(line, "#")
+        if hash >= 0 { line = string.substring(line, 0, hash) }
+        line = string.trim(line)
+        if line != "" {
+            words = string.string_split(line, " ")
+            count = string.string_array_size(words)
+            if count > 0 {
+                op = string.string_array_get(words, 0)
+                pairs = json.arr()
+                w = 1
+                while w < count {
+                    word = string.string_array_get(words, w)
+                    if word != "" { json.array_add_raw(pairs, json.str(word)) }
+                    w = w + 1
+                }
+                request = json.obj()
+                if !parse_arguments(pairs, request) {
+                    failures = failures + 1
+                } else if !run(p, op, request) {
+                    failures = failures + 1
+                }
+                json.free(request)
+                json.free(pairs)
+            }
+            string.string_array_free(words)
+        }
+        n = n + 1
+    }
+    string.string_array_free(lines)
+    return failures
+}
+
+// Stdin to its first empty line or its end: fd_read_line answers ("", "")
+// for both, and a schema or a script has no empty lines inside it.
+read_stdin() -> string {
+    text = ""
+    while true {
+        line, err = io.fd_read_line(0)
+        if err != "" || line == "" { break }
+        text = string.concat(text, string.concat(line, "\n"))
+    }
+    return text
+}
+
+// docs/agent.md from the schema on stdin: the table where the page's text,
+// tools/agent_doc_text.md, carries the <!-- ops --> mark.
+render_docs() -> int {
+    text = read_stdin()
+    schema = json.parse_raw(text)
+    if schema == null {
+        io.stderr_write("ae3d-agent: the schema on stdin is not JSON\n")
+        return 1
+    }
+    frame, err = io.read_file("tools/agent_doc_text.md")
+    if err != "" {
+        io.stderr_write("ae3d-agent: cannot read tools/agent_doc_text.md: ${err}\n")
+        return 1
+    }
+    mark = "<!-- ops -->"
+    cut = string.string_index_of(frame, mark)
+    if cut < 0 {
+        io.stderr_write("ae3d-agent: tools/agent_doc_text.md has no <!-- ops --> mark\n")
+        return 1
+    }
+    out = string.substring(frame, 0, cut)
+    out = string.concat(out, "\n| op | arguments | what it does |\n|---|---|---|\n")
+    ops = json.object_get_raw(schema, "ops")
+    i = 0
+    while i < json.array_size(ops) {
+        entry = json.array_get_raw(ops, i)
+        // A pipe inside a cell ends the cell, and `id | object | index` is
+        // a real argument spelling.
+        args = string.string_replace_all(text_of(entry, "args"), "|", "\\|")
+        summary = string.string_replace_all(text_of(entry, "summary"), "|", "\\|")
+        cell = ""
+        if args != "" { cell = string.concat("`", string.concat(args, "`")) }
+        out = string.concat(out, "| `${text_of(entry, "op")}` | ${cell} | ${summary} |\n")
+        i = i + 1
+    }
+    out = string.concat(out, string.substring(frame, cut + string.length(mark), string.length(frame)))
+    io.stdout_write(out)
+    json.free(schema)
+    return 0
+}
+
+main() {
+    g_pairs = json.arr()
+    i = 1
+    while i < os.aether_args_count() {
+        arg = os.aether_args_get(i)
+        if arg == "--port" && i + 1 < os.aether_args_count() {
+            g_port = string.string_get_int(os.aether_args_get(i + 1))
+            i = i + 1
+        } else if arg == "--raw" {
+            g_raw = true
+        } else if arg == "--docs" {
+            g_docs = true
+        } else if arg == "--script" && i + 1 < os.aether_args_count() {
+            g_script = os.aether_args_get(i + 1)
+            i = i + 1
+        } else if arg == "--host" && i + 1 < os.aether_args_count() {
+            // Loopback only, as the channel is; the option is taken so a
+            // script written for the old client still runs.
+            i = i + 1
+        } else if arg == "--timeout" && i + 1 < os.aether_args_count() {
+            i = i + 1
+        } else if g_op == "" {
+            g_op = arg
+        } else {
+            json.array_add_raw(g_pairs, json.str(arg))
+        }
+        i = i + 1
+    }
+    if g_docs { os.exit(render_docs()) }
+    if g_op == "" && g_script == "" {
+        io.stderr_write("usage: ae3d_agent [--port N] [--raw] [--script file|-] op [key=value ...]\n")
+        os.exit(2)
+    }
+    port = resolve_port(g_port)
+    if port == 0 { os.exit(2) }
+    p = probe.open(port)
+    if p == null {
+        io.stderr_write("ae3d-agent: cannot connect to port ${port}: ${probe.last_error()}\n")
+        os.exit(1)
+    }
+    failures = 0
+    if g_script != "" { failures = failures + run_script(p, g_script) }
+    if g_op != "" {
+        request = json.obj()
+        if !parse_arguments(g_pairs, request) {
+            failures = failures + 1
+        } else if !run(p, g_op, request) {
+            failures = failures + 1
+        }
+        json.free(request)
+    }
+    probe.close(p)
+    if failures > 0 { os.exit(1) }
+}

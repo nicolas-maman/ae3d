@@ -149,7 +149,7 @@ object it was authored as to the pixels it landed on:
 
 ```bash
 AE3D_AGENT=7911 ./build/zombie_street &
-python3 tools/ae3d_agent.py --port 7911 trace.model object=Zombie_Body
+./build/ae3d_agent --port 7911 trace.model object=Zombie_Body
 ```
 
 ```json
