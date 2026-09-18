@@ -1976,12 +1976,19 @@ model_set_instance_phases(m: *Model, phases: ptr, count: int) {
 // Bulk upload of every instance's position from a packed xyz array. One call
 // per frame instead of one per instance, which is what a particle system that
 // moves everything each frame actually needs.
+// A stream set whole is a model whose bounds moved with it: the bounds are
+// what the cull reads, and a stream that rides with the camera -- the
+// weather's drops, a crowd's figures -- kept the bounds of the empty stream
+// it was added with, a metre at the origin, and was culled the moment the
+// camera looked anywhere else. On Vulkan the rain over the city never
+// drew.
 model_set_instance_positions(m: *Model, xyz: ptr, count: int) {
     if m.instances == null { return }
     ae3d_inst_set_positions(m.instances, xyz, count,
                             m.scale.x, m.scale.y, m.scale.z,
                             m.rotation.x, m.rotation.y, m.rotation.z, m.rotation.w)
     m.instances_updated = true
+    model_recalculate_bounds(m)
 }
 
 // The same, but each instance faces its own way: `yaw` is a per-instance
@@ -1991,6 +1998,7 @@ model_set_instance_positions_yaw(m: *Model, xyz: ptr, yaw: ptr, count: int) {
     ae3d_inst_set_positions_yaw(m.instances, xyz, yaw, count,
                                 m.scale.x, m.scale.y, m.scale.z)
     m.instances_updated = true
+    model_recalculate_bounds(m)
 }
 
 model_set_instance_colors(m: *Model, rgb: ptr, count: int) {

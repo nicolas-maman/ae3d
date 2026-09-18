@@ -21,6 +21,8 @@ import ae3d.anim
 import ae3d.skin
 import ae3d.crowd
 import ae3d.ecs
+import ae3d.weather
+import std.os
 
 const MANIFEST = "resources/blender/zombie_street/manifest.json"
 const SKY = "resources/sky/night.png"
@@ -96,6 +98,7 @@ const CULL_DIST = 0.0
 
 var g_scene: ptr = null
 var g_lamps: ptr = null
+var g_weather: ptr = null
 // One figure of the horde: a body walked in one gait. The build ships two
 // (Zombie_Body and Zombie_Body_B, the second dragging the other leg, bent
 // further, head down, arms lower) so the crowd is not one zombie copied at
@@ -614,6 +617,24 @@ start(state: ptr, go: *GameObject) {
 
     engine.engine_set_clear_color(e, SKY_R, SKY_G, SKY_B)
     engine.engine_set_sky(e, SKY)
+
+    // The weather over the city: AE3D_WEATHER=rain|snow|dust|storm and
+    // AE3D_WEATHER_LEVEL=0..100 for how hard, clear by default. The road is
+    // wet either way -- after the rain, or in it. A storm drives the rain
+    // down the street on its wind and throws lightning over the horde.
+    w = weather.weather_new(e)
+    g_weather = w as ptr
+    wanted = os.getenv("AE3D_WEATHER")
+    if wanted != null {
+        kind = weather.CLEAR
+        if string.equals(wanted, "rain") == 1 { kind = weather.RAIN }
+        if string.equals(wanted, "snow") == 1 { kind = weather.SNOW }
+        if string.equals(wanted, "dust") == 1 { kind = weather.DUST }
+        if string.equals(wanted, "storm") == 1 { kind = weather.STORM }
+        // Down the street, from the far end toward the camera.
+        weather.weather_set_wind(w, core.vec3(1.0, 0.0, 0.15), 7.0)
+        weather.weather_set(w, kind, core.env_int("AE3D_WEATHER_LEVEL", 70) as float / 100.0)
+    }
 
     m = assets.manifest_load(MANIFEST)
     if m == null {
