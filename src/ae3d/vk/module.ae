@@ -25,7 +25,7 @@ exports (
     renderer_set_normal_strength, renderer_set_occlusion_strength, renderer_set_capture_channel, renderer_set_wetness, renderer_material_texture_size,
     renderer_load_texture, renderer_release_texture, renderer_sample_count, renderer_set_post,
     renderer_set_bloom_intensity, renderer_bloom_intensity,
-    renderer_set_shadows, renderer_shadows, renderer_set_ssr, renderer_ssr, renderer_set_ssr_params, renderer_add_light, renderer_remove_light,
+    renderer_set_shadows, renderer_shadows, renderer_set_ssr, renderer_ssr, renderer_set_ssr_params, renderer_set_taa, renderer_taa, renderer_add_light, renderer_remove_light,
     renderer_set_fog, renderer_fog, renderer_set_clouds, renderer_set_sky_overcast, renderer_set_shadow_distance, renderer_shadow_distance,
     renderer_set_ssao, renderer_ssao,
     skybox_create, skybox_free,
@@ -85,6 +85,12 @@ extern ae3d_posebank_bones(bank: ptr) -> int
 extern ae3d_posebank_data(bank: ptr) -> ptr
 extern ae3d_vk_shadow_end()
 extern ae3d_vk_resolve_scene_depth() -> int
+// A mesh's edit flag, which the refresh reads and clears. Declared here as
+// well as in the OpenGL module, so a program on Vulkan alone links.
+extern ae3d_mesh_dirty(mesh: ptr) -> int
+extern ae3d_mesh_clear_dirty(mesh: ptr)
+extern ae3d_vk_set_taa(on: int)
+extern ae3d_vk_taa() -> int
 extern ae3d_vk_set_ssr(on: int)
 extern ae3d_vk_set_ssao(on: int, radius: float, intensity: float)
 extern ae3d_vk_default_texture() -> int
@@ -172,6 +178,12 @@ struct VKRenderer {
     screen_handle: int
     initialized: bool
     failed_frames: int      // frames the device refused, reported once
+    // Temporal anti-aliasing: the frame's count, for the jitter sequence,
+    // and the last frame's view-projection, unjittered, for the temporal
+    // pass to find each pixel's history by.
+    taa_frame: int
+    prev_vp: Mat4
+    prev_vp_valid: bool
     last_draw_calls: int
     last_shadow_ms: float
     last_scene_ms: float
@@ -275,6 +287,8 @@ offscreen_height() -> int {
 renderer_new() -> *VKRenderer {
     r = heap.new(VKRenderer)
     r.failed_frames = 0
+    r.taa_frame = 0
+    r.prev_vp_valid = false
     r.models = list.new()
     r.lights = list.new()
     r.textures = list.new()
@@ -469,6 +483,52 @@ renderer_set_ssr(r: *VKRenderer, on: bool) {
     flag = 0
     if on { flag = 1 }
     ae3d_vk_set_ssr(flag)
+}
+
+// Temporal anti-aliasing on or off: the projection nudged a fraction of a
+// pixel each frame through an eight-frame Halton sequence, and each frame
+// folded into a history the temporal pass reprojects by the scene's
+// depth. On, the post chain runs.
+renderer_set_taa(r: *VKRenderer, on: bool) {
+    flag = 0
+    if on { flag = 1 }
+    ae3d_vk_set_taa(flag)
+    if !on { r.prev_vp_valid = false }
+}
+
+renderer_taa(r: *VKRenderer) -> bool { return ae3d_vk_taa() == 1 }
+
+// The Halton sequence: the k-th point of the base, in 0..1, spread as
+// evenly as k points can be. Bases 2 and 3 give a pixel's eight offsets.
+halton(index: int, base: int) -> float {
+    result = 0.0
+    f = 1.0 / (base as float)
+    i = index
+    while i > 0 {
+        result = result + f * ((i % base) as float)
+        i = i / base
+        f = f / (base as float)
+    }
+    return result
+}
+
+// The frame's view-projection: the camera's, nudged this frame's fraction
+// of a pixel when the temporal pass is on, so that over eight frames every
+// pixel sees its surface at eight points within itself. The nudge is a
+// translation in clip space, applied after the projection.
+frame_view_projection(r: *VKRenderer, cam: *Camera) -> Mat4 {
+    vp = core.camera_view_projection(cam)
+    if ae3d_vk_taa() != 1 { return vp }
+    width = ae3d_vk_frame_width() as float
+    height = ae3d_vk_frame_height() as float
+    if width <= 0.0 || height <= 0.0 { return vp }
+    k = r.taa_frame % 8 + 1
+    jx = (halton(k, 2) - 0.5) * 2.0 / width
+    jy = (halton(k, 3) - 0.5) * 2.0 / height
+    // Said to the temporal pass in texture space; Vulkan's y runs down.
+    ae3d_vk_scene_set_float(vkscene.OFF_JITTER, jx * 0.5)
+    ae3d_vk_scene_set_float(vkscene.OFF_JITTER + 4, 0.0 - jy * 0.5)
+    return core.mat4_mul(core.mat4_translate(jx, jy, 0.0), vp)
 }
 
 // Ambient occlusion on or off: `radius` is how far, in metres, a thing
@@ -1419,18 +1479,25 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     draw_skybox(r, cam)
     ae3d_vk_mark_sky_done()
 
-    view_projection = core.camera_view_projection(cam)
+    unjittered = core.camera_view_projection(cam)
+    view_projection = frame_view_projection(r, cam)
+    // The last frame's view-projection, for the temporal pass to find each
+    // pixel's history by; this frame's, when there was no last frame.
+    previous = unjittered
+    if r.prev_vp_valid { previous = r.prev_vp }
     programs = ae3d_vk_program_count()
     i = 0
     ssr_on = ae3d_vk_ssr() == 1
     ssao_on = ae3d_vk_ssao() == 1
-    depth_ready = ae3d_vk_scene_depth_ready() == 1 && (ssr_on || ssao_on || wants_scene_depth(r))
+    taa_on = ae3d_vk_taa() == 1
+    depth_ready = ae3d_vk_scene_depth_ready() == 1 && (ssr_on || ssao_on || taa_on || wants_scene_depth(r))
     while i < programs {
         ae3d_vk_set_program(i)
         ae3d_vk_scene_set_clip_mat4(vkscene.OFF_VIEWPROJECTION, &view_projection)
         if ssr_on || depth_ready {
             ae3d_vk_scene_set_inv_viewproj(vkscene.OFF_INVVIEWPROJECTION, &view_projection)
         }
+        if taa_on { ae3d_vk_scene_set_clip_mat4(vkscene.OFF_PREVVIEWPROJECTION, &previous) }
         // What a water surface needs to read the depth under it back into
         // a position: whether there is one, and the frame's size in pixels.
         has_depth = 0
@@ -1468,6 +1535,9 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
     r.last_pipeline_binds = ae3d_vk_pipeline_binds()
     r.last_set_binds = ae3d_vk_set_binds()
     if ae3d_vk_frame_end() != 1 { report_failed_frame(r) }
+    r.prev_vp = unjittered
+    r.prev_vp_valid = true
+    r.taa_frame = r.taa_frame + 1
     r.last_cpu_work_ms = (platform.time() - work_started) * 1000.0
     // The stamps read back at the start of this frame describe the frame that
     // used this slot last, which is the most recent one the GPU has finished.

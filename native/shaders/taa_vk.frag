@@ -144,46 +144,60 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float impostorWidth;
     float impostorHeight;
 };
-layout(set = 0, binding = 1) uniform sampler2D textureSampler;
-layout(set = 0, binding = 2) uniform sampler2D shadowMap;
-layout(set = 0, binding = 3) uniform sampler2D normalMap;
-layout(set = 0, binding = 4) uniform sampler2D poseBank;
-layout(location = 0) in vec3 inPosition;
-layout(location = 3) in mat4 instanceModel;
-layout(location = 8) in vec4 inJoints;
-layout(location = 9) in vec4 inWeights;
-layout(location = 11) in float instancePhase;
+layout(set = 0, binding = 1) uniform sampler2D screenTexture;
+layout(set = 0, binding = 2) uniform sampler2D depthTexture;
+layout(set = 0, binding = 3) uniform sampler2D historyTexture;
+
+layout(location = 0) in vec2 TexCoords;
+layout(location = 0) out vec4 FragColor;
 
 
 
 
 
 
-mat4 boneAt(int bone, int frame) {
-    int x = bone * 4;
-    return mat4(texelFetch(poseBank, ivec2(x + 0, frame), 0),
-                texelFetch(poseBank, ivec2(x + 1, frame), 0),
-                texelFetch(poseBank, ivec2(x + 2, frame), 0),
-                texelFetch(poseBank, ivec2(x + 3, frame), 0));
-}
 
-mat4 skinAt(int frame) {
-    return inWeights.x * boneAt(int(inJoints.x), frame)
-         + inWeights.y * boneAt(int(inJoints.y), frame)
-         + inWeights.z * boneAt(int(inJoints.z), frame)
-         + inWeights.w * boneAt(int(inJoints.w), frame);
+
+
+
+// A stored scene depth as clip-space z: OpenGL keeps depth in 0..1 for a
+// clip range of -1..1, Vulkan's clip range is the 0..1 it stores.
+float taa_depth_clip(float depth) {
+    return depth;
 }
 
 void main() {
-    mat4 modelMatrix = model * instanceModel;
-    float fpos = instancePhase * float(poseBankFrames);
-    int frame0 = int(floor(fpos));
-    float blend = fpos - float(frame0);
-    if (frame0 < 0) { frame0 = 0; blend = 0.0; }
-    if (frame0 >= poseBankFrames) { frame0 = poseBankFrames - 1; blend = 0.0; }
-    int frame1 = frame0 + 1;
-    if (frame1 >= poseBankFrames) { frame1 = 0; }
-    mat4 skin = skinAt(frame0) * (1.0 - blend) + skinAt(frame1) * blend;
-    vec4 posed = skin * vec4(inPosition, 1.0);
-    gl_Position = lightSpaceMatrix * modelMatrix * posed;
+    vec2 uv = TexCoords;
+    vec2 px = 1.0 / screenSize;
+    vec3 current = texture(screenTexture, uv).rgb;
+    if (taaBlend >= 0.999) { FragColor = vec4(current, 1.0); return; }
+
+    // Where this pixel's surface was on the screen last frame.
+    float depth = texture(depthTexture, uv).r;
+    vec4 clip = vec4(uv * 2.0 - 1.0, taa_depth_clip(depth), 1.0);
+    vec4 world = invViewProjection * clip;
+    vec4 prev = prevViewProjection * (world / world.w);
+    if (prev.w <= 0.0) { FragColor = vec4(current, 1.0); return; }
+    vec2 prevUV = prev.xy / prev.w * 0.5 + 0.5;
+    if (prevUV.x < 0.0 || prevUV.x > 1.0 || prevUV.y < 0.0 || prevUV.y > 1.0) {
+        FragColor = vec4(current, 1.0);
+        return;
+    }
+    vec3 history = texture(historyTexture, prevUV).rgb;
+
+    // The neighbourhood's range this frame, and the history held to it.
+    vec3 low = current;
+    vec3 high = current;
+    for (int y = -1; y <= 1; y++) {
+        for (int x = -1; x <= 1; x++) {
+            vec3 c = texture(screenTexture, uv + vec2(float(x), float(y)) * px).rgb;
+            low = min(low, c);
+            high = max(high, c);
+        }
+    }
+    history = clamp(history, low, high);
+    // A history that had to be moved far -- a fast pan -- is trusted less.
+    float travel = length((prevUV - uv) * screenSize);
+    float blend = clamp(taaBlend + travel * 0.02, taaBlend, 1.0);
+    FragColor = vec4(mix(history, current, blend), 1.0);
 }

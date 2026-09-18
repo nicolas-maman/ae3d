@@ -115,6 +115,24 @@
   inverse binds where `skeleton_bind` would derive them from the pose.
 - `native/ae3d_blob.c`: a file as bytes and the little-endian numbers in it.
 
+### Temporal anti-aliasing
+
+- `engine_set_taa(e, on)` (`AE3D_TAA=1` in any scene): on Vulkan the
+  projection is nudged a fraction of a pixel each frame through an
+  eight-frame Halton sequence, and a temporal pass folds every frame into a
+  history found by reprojection -- each pixel's world position from the
+  scene's resolved depth, projected with the last frame's view-projection
+  -- and held to the range of the pixel's neighbourhood this frame, so a
+  walking figure trails no ghost and a sky pixel holds its place as the
+  camera turns. The result is what the post chain composites and the next
+  frame reads back. `tests/test_taa`: a tilted bar's edge goes from a
+  staircase to a ramp (496 to 1,241 in-between pixels at 320x240) with
+  the same light overall, holds still once the history has filled, and
+  leaves no trail under a panning camera. OpenGL keeps the request and
+  draws as before for now. What DLSS (#324) still needs on top is
+  per-object motion vectors; the jitter, the history and the depth
+  reprojection are in place.
+
 ### Wet surfaces
 
 - `engine_set_wetness(e, amount)`: rain on the scene. Every surface that

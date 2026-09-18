@@ -1,0 +1,181 @@
+// Temporal anti-aliasing: an edge supersampled over frames, and a picture
+// that holds still.
+//
+// A thin bright bar, tilted so its edges cut across the pixel grid, over a
+// black scene, on Vulkan. Drawn plain, an edge is a staircase of steps
+// between black and white with a few in-between pixels from the
+// multisampling. Drawn with the temporal pass for a dozen frames -- the
+// projection nudged a fraction of a pixel a frame and each frame folded
+// into the history -- the same edge is a ramp: many more in-between
+// pixels, the same amount of light overall (the pass moves nothing, it
+// only averages), and a frame the same as the one before it once the
+// history has filled. Off again, the plain picture comes back.
+
+import std.mem
+import ae3d.core
+import ae3d.vk
+import ae3d.loader
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern memcpy(dst: ptr, src: ptr, bytes: int) -> ptr
+
+const WIDTH = 320
+const HEIGHT = 240
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// The frame just drawn, copied out: the target hands back one buffer.
+frame(backend: *Backend, cam: *Camera, light: *Light) -> ptr {
+    core.backend_render(backend, cam, light)
+    core.backend_frame_pixels(backend)
+    pixels = core.backend_frame_pixels(backend)
+    kept = calloc(WIDTH * HEIGHT, 4)
+    memcpy(kept, pixels, WIDTH * HEIGHT * 4)
+    return kept
+}
+
+luma(pixels: ptr, i: int) -> int {
+    return mem.get_byte(pixels, i * 4) + mem.get_byte(pixels, i * 4 + 1) + mem.get_byte(pixels, i * 4 + 2)
+}
+
+// How many pixels are neither the black nor the white: the edge's ramp.
+between(pixels: ptr) -> int {
+    count = 0
+    i = 0
+    while i < WIDTH * HEIGHT {
+        l = luma(pixels, i)
+        if l > 100 && l < 620 { count = count + 1 }
+        i = i + 1
+    }
+    return count
+}
+
+total(pixels: ptr) -> int {
+    sum = 0
+    i = 0
+    while i < WIDTH * HEIGHT {
+        sum = sum + luma(pixels, i)
+        i = i + 1
+    }
+    return sum
+}
+
+// The sum of every pixel's difference between two frames.
+difference(a: ptr, b: ptr) -> int {
+    sum = 0
+    i = 0
+    while i < WIDTH * HEIGHT * 4 {
+        d = mem.get_byte(a, i) - mem.get_byte(b, i)
+        if d < 0 { d = 0 - d }
+        sum = sum + d
+        i = i + 1
+    }
+    return sum
+}
+
+main() {
+    if !vk.available() {
+        println("taa: SKIP no Vulkan driver (${vk.last_error()})")
+        return
+    }
+    renderer = vk.renderer_new()
+    pass = vk.backend(renderer)
+    if !core.backend_init(&pass, null, WIDTH, HEIGHT) {
+        println("taa: SKIP Vulkan would not start (${vk.last_error()})")
+        return
+    }
+    core.backend_set_clear_color(&pass, 0.0, 0.0, 0.0)
+
+    // A long thin bar, tilted, glowing white on its own so no light shapes it.
+    bar = loader.cube(1.0)
+    core.model_set_scale(bar, 60.0, 0.5, 0.5)
+    core.model_set_rotation(bar, core.quat_rotate(0.12, core.vec3(0.0, 0.0, 1.0)))
+    core.model_set_position(bar, 0.0, 0.0, 0.0)
+    core.model_set_diffuse(bar, 1.0, 1.0, 1.0)
+    core.model_set_exposure(bar, 12.0)
+    core.backend_add_model(&pass, bar)
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 0.0, 40.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+    light = core.light_sun(core.vec3(0.0, 1.0, 0.0))
+
+    plain = frame(&pass, cam, light)
+    plain_between = between(plain)
+    plain_total = total(plain)
+    check("the plain bar has an edge", plain_between > 50 && plain_total > 100000)
+
+    vk.renderer_set_taa(renderer, true)
+    check("the temporal pass turns on", vk.renderer_taa(renderer))
+    i = 0
+    settled = null
+    last = null
+    while i < 12 {
+        if last != null { free(last) }
+        last = settled
+        settled = frame(&pass, cam, light)
+        i = i + 1
+    }
+    taa_between = between(settled)
+    taa_total = total(settled)
+    drift = difference(settled, last)
+    println("  taa: in-between pixels ${plain_between} plain, ${taa_between} temporal; light ${plain_total} -> ${taa_total}; frame-to-frame ${drift}")
+    check("the edge is a ramp: many more in-between pixels", taa_between > plain_between * 3 / 2)
+    check("the same light overall: the pass averages, it does not move", taa_total > plain_total * 9 / 10 && taa_total < plain_total * 11 / 10)
+    // Each frame folds a new nudge in, so the ramp breathes a little: under
+    // a level a channel over the frame.
+    check("the picture holds still once the history has filled", drift < WIDTH * HEIGHT * 4)
+
+    // A camera on the move: the history is found by reprojection, so a
+    // pan leaves no trail. Panned a little a frame for a dozen frames, the
+    // bar under the temporal pass carries the light a plain frame at the
+    // same place carries, and no more in-between pixels than the still one.
+    i = 0
+    while i < 12 {
+        core.camera_set_position(cam, core.vec3(0.03 * ((i + 1) as float), 0.0, 40.0))
+        core.camera_look_at(cam, core.vec3(0.03 * ((i + 1) as float), 0.0, 0.0))
+        if last != null { free(last) }
+        last = settled
+        settled = frame(&pass, cam, light)
+        i = i + 1
+    }
+    vk.renderer_set_taa(renderer, false)
+    core.backend_render(&pass, cam, light)
+    moved_plain = frame(&pass, cam, light)
+    println("  taa: on the move, in-between pixels ${between(settled)}; light ${total(moved_plain)} plain, ${total(settled)} temporal")
+    check("a panning camera leaves no trail", between(settled) < taa_between * 2 && total(settled) > total(moved_plain) * 9 / 10 && total(settled) < total(moved_plain) * 11 / 10)
+    free(moved_plain)
+
+    core.camera_set_position(cam, core.vec3(0.0, 0.0, 40.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+    core.backend_render(&pass, cam, light)
+    back = frame(&pass, cam, light)
+    check("off again, the plain picture comes back", difference(back, plain) < WIDTH * HEIGHT / 4)
+
+    free(plain)
+    free(settled)
+    if last != null { free(last) }
+    free(back)
+    core.backend_remove_model(&pass, bar)
+    core.model_free(bar)
+    core.camera_free(cam)
+    core.light_free(light)
+    core.backend_cleanup(&pass)
+    vk.renderer_free(renderer)
+
+    if failures == 0 {
+        println("taa: all checks passed")
+    } else {
+        println("taa: ${failures} failure(s)")
+    }
+}

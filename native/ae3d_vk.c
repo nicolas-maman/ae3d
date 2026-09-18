@@ -331,6 +331,17 @@ static struct {
     VkRenderPass ssr_pass;
     VkFramebuffer ssr_framebuffer;
     int ssr_reflect_texture;
+    /* Temporal anti-aliasing: the frame folded into a history, in two
+       textures written in turn -- this frame's result from the last
+       frame's -- through the same post-format pass the reflection uses.
+       The history is empty at the start and after a resize. */
+    int taa_enabled;
+    VkPipeline taa_pipeline;
+    int taa_texture[2];
+    VkFramebuffer taa_framebuffer[2];
+    VkDescriptorSet taa_set[2][AE3D_VK_FRAMES];
+    int taa_history_valid;
+    int taa_current;
     float scene_clear[4];
     VkFramebuffer scene_framebuffer;
     VkFramebuffer *post_framebuffers;
@@ -1562,6 +1573,21 @@ static void ae3d_vk_destroy_camdepth_target(void) {
         ae3d_vk_texture_destroy(vk.ssr_reflect_texture);
         vk.ssr_reflect_texture = 0;
     }
+    {
+        int k, f;
+        for (k = 0; k < 2; k++) {
+            if (vk.taa_framebuffer[k]) {
+                ae3d_vkDestroyFramebuffer(vk.device, vk.taa_framebuffer[k], NULL);
+                vk.taa_framebuffer[k] = VK_NULL_HANDLE;
+            }
+            if (vk.taa_texture[k]) {
+                ae3d_vk_texture_destroy(vk.taa_texture[k]);
+                vk.taa_texture[k] = 0;
+            }
+            for (f = 0; f < AE3D_VK_FRAMES; f++) vk.taa_set[k][f] = VK_NULL_HANDLE;
+        }
+        vk.taa_history_valid = 0;
+    }
     // The SSR sets sample this target; force them to be reallocated and
     // rewritten against the new one when SSR is next drawn.
     {
@@ -1669,8 +1695,82 @@ static int ae3d_vk_create_camdepth_target(int width, int height) {
             return ae3d_vk_fail("ssr-reflect vkCreateFramebuffer failed");
         }
     }
+    if (vk.taa_enabled && vk.ssr_pass) {
+        int k;
+        for (k = 0; k < 2; k++) {
+            ae3d_vk_texture *tex = NULL;
+            VkSamplerCreateInfo tsampler;
+            VkImageView tattach[1];
+            VkFramebufferCreateInfo tinfo;
+            int slot;
+            for (slot = 0; slot < AE3D_VK_MAX_TEXTURES; slot++) {
+                if (!vk.textures[slot].in_use) { tex = &vk.textures[slot]; break; }
+            }
+            if (!tex) return ae3d_vk_fail("texture table full");
+            if (!ae3d_vk_create_image(width, height, 1, vk.color_format, VK_SAMPLE_COUNT_1_BIT,
+                                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                      VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_TILING_OPTIMAL,
+                                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                      &tex->image, &tex->memory, &tex->view)) {
+                return 0;
+            }
+            memset(&tsampler, 0, sizeof(tsampler));
+            tsampler.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+            tsampler.magFilter = VK_FILTER_LINEAR;
+            tsampler.minFilter = VK_FILTER_LINEAR;
+            tsampler.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            tsampler.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            tsampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            tsampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+            tsampler.maxLod = 1.0f;
+            if (ae3d_vkCreateSampler(vk.device, &tsampler, NULL, &tex->sampler) != VK_SUCCESS) {
+                return ae3d_vk_fail("taa vkCreateSampler failed");
+            }
+            tex->width = width;
+            tex->height = height;
+            tex->in_use = 1;
+            vk.taa_texture[k] = slot + 1;
+
+            tattach[0] = tex->view;
+            memset(&tinfo, 0, sizeof(tinfo));
+            tinfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            tinfo.renderPass = vk.ssr_pass;
+            tinfo.attachmentCount = 1;
+            tinfo.pAttachments = tattach;
+            tinfo.width = (unsigned)width;
+            tinfo.height = (unsigned)height;
+            tinfo.layers = 1;
+            if (ae3d_vkCreateFramebuffer(vk.device, &tinfo, NULL, &vk.taa_framebuffer[k]) != VK_SUCCESS) {
+                return ae3d_vk_fail("taa vkCreateFramebuffer failed");
+            }
+        }
+        vk.taa_history_valid = 0;
+        vk.taa_current = 0;
+    }
     return 1;
 }
+
+/* Temporal anti-aliasing on or off. It reads the scene's depth, so the
+   target that holds it is made the same way, with the two history textures
+   beside it; and it composites through the post chain, which is turned on
+   by it. */
+void ae3d_vk_set_taa(int on) {
+    on = on ? 1 : 0;
+    if (vk.taa_enabled == on) return;
+    vk.taa_enabled = on;
+    if (!vk.ready) return;
+    ae3d_vkDeviceWaitIdle(vk.device);
+    ae3d_vk_destroy_camdepth_target();
+    if (on || vk.ssr_enabled || vk.ssao_enabled || vk.scene_depth_wanted) {
+        ae3d_vk_create_camdepth_target((int)vk.extent.width, (int)vk.extent.height);
+    }
+}
+
+int ae3d_vk_taa(void) { return vk.taa_enabled; }
+
+/* Whether this frame's temporal pass will fold a history in, or take the
+   frame as it is: what the blend uniform is set from. */
+int ae3d_vk_taa_history(void) { return vk.taa_enabled && vk.taa_history_valid; }
 
 // The composite pass reads what the scene pass produced, so it takes a single
 // resolved colour attachment and no depth.
@@ -2865,6 +2965,9 @@ static int ae3d_vk_create_pass_pipelines(void) {
         { ae3d_vk_screen_vert_spv, sizeof(ae3d_vk_screen_vert_spv),
           ae3d_vk_depth_resolve_frag_spv, sizeof(ae3d_vk_depth_resolve_frag_spv),
           0, 1, 1, 0, 0, VK_NULL_HANDLE, NULL },
+        { ae3d_vk_screen_vert_spv, sizeof(ae3d_vk_screen_vert_spv),
+          ae3d_vk_taa_frag_spv, sizeof(ae3d_vk_taa_frag_spv),
+          0, 0, 0, 0, 0, VK_NULL_HANDLE, NULL },
     };
     unsigned i;
 
@@ -2889,6 +2992,7 @@ static int ae3d_vk_create_pass_pipelines(void) {
         builds[13].frag_size = sizeof(ae3d_vk_depth_copy_frag_spv);
     }
     builds[13].pass = vk.camdepth_pass; builds[13].out = &vk.depth_resolve_pipeline;
+    builds[14].pass = vk.ssr_pass; builds[14].out = &vk.taa_pipeline;
 
     for (i = 0; i < sizeof(builds) / sizeof(builds[0]); i++) {
         VkShaderModule vertex_module = ae3d_vk_shader(builds[i].vert, builds[i].vert_size);
@@ -3303,7 +3407,7 @@ int ae3d_vk_frame_begin(double r, double g, double b, double a) {
     vk.scene_clear[2] = (float)b;
     vk.scene_clear[3] = (float)a;
 
-    vk.post_active = (vk.fxaa || vk.bloom || vk.ssr_enabled) && vk.screen_quad > 0 && vk.post_texture > 0;
+    vk.post_active = (vk.fxaa || vk.bloom || vk.ssr_enabled || vk.taa_enabled) && vk.screen_quad > 0 && vk.post_texture > 0;
     vk.pass_open = 0;
     vk.in_shadow_pass = 0;
     /* Two halves when something reads the scene's depth this frame: the
@@ -3312,7 +3416,7 @@ int ae3d_vk_frame_begin(double r, double g, double b, double a) {
        the swapchain, here, so the first frame that needs it has it. */
     vk.depth_split = 0;
     vk.depth_resolved = 0;
-    if ((vk.ssr_enabled || vk.scene_depth_wanted || vk.ssao_enabled) && vk.depth_resolve_pipeline) {
+    if ((vk.ssr_enabled || vk.scene_depth_wanted || vk.ssao_enabled || vk.taa_enabled) && vk.depth_resolve_pipeline) {
         if (!vk.camdepth_framebuffer ||
             vk.camdepth_width != (int)vk.extent.width ||
             vk.camdepth_height != (int)vk.extent.height) {
@@ -3679,7 +3783,8 @@ void ae3d_vk_shadow_end(void) {
 // light-space slot the depth shader reads), end -- into the full-size camdepth
 // target the SSR pass samples. Only when SSR is on and the target exists.
 static void ae3d_vk_draw_screen_with(VkPipeline pipeline, VkDescriptorSet *set_slot,
-                                     VkImageView view, VkSampler sampler, VkImageLayout layout);
+                                     VkImageView view, VkSampler sampler, VkImageLayout layout,
+                                     VkImageView third, VkSampler third_sampler);
 
 /* The scene's depth, as the opaque draws left it, resolved into the camera-
    depth image the occlusion, the reflection and the water read. Called by
@@ -3729,7 +3834,7 @@ int ae3d_vk_resolve_scene_depth(void) {
     vk.program = AE3D_VK_PROGRAM_SCENE;
     ae3d_vk_draw_screen_with(vk.depth_resolve_pipeline, &vk.depth_resolve_set[(int)vk.frame],
                              vk.depth_view, vk.camdepth_sampler,
-                             VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+                             VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, VK_NULL_HANDLE, VK_NULL_HANDLE);
     ae3d_vkCmdEndRenderPass(vk.command_buffers[vk.frame]);
     vk.pass_open = 0;
     return 1;
@@ -3772,9 +3877,10 @@ void ae3d_vk_set_ssr_params(double road_height, double strength) {
 // the frame set. Written every draw because both images are remade on resize.
 /* A full-screen draw with `view` at binding 1 -- the colour source of a
    composite, or the frame's depth for the resolve -- the camera depth at 2
-   and the default texture at 3. */
+   and at 3 `third` (the temporal pass's history) or the default texture. */
 static void ae3d_vk_draw_screen_with(VkPipeline pipeline, VkDescriptorSet *set_slot,
-                                     VkImageView view, VkSampler sampler, VkImageLayout layout) {
+                                     VkImageView view, VkSampler sampler, VkImageLayout layout,
+                                     VkImageView third, VkSampler third_sampler) {
     VkDescriptorSetAllocateInfo alloc;
     VkDescriptorBufferInfo buffer;
     VkDescriptorImageInfo scene_img, depth_img, def_img;
@@ -3824,8 +3930,8 @@ static void ae3d_vk_draw_screen_with(VkPipeline pipeline, VkDescriptorSet *set_s
 
     memset(&def_img, 0, sizeof(def_img));
     def_img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    def_img.imageView = vk.textures[vk.default_texture - 1].view;
-    def_img.sampler = vk.textures[vk.default_texture - 1].sampler;
+    def_img.imageView = third ? third : vk.textures[vk.default_texture - 1].view;
+    def_img.sampler = third_sampler ? third_sampler : vk.textures[vk.default_texture - 1].sampler;
 
     memset(writes, 0, sizeof(writes));
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -3868,7 +3974,7 @@ static void ae3d_vk_draw_screen(VkPipeline pipeline, VkDescriptorSet *set_slot, 
     scene_tex = &vk.textures[colour_texture - 1];
     if (!scene_tex->in_use) return;
     ae3d_vk_draw_screen_with(pipeline, set_slot, scene_tex->view, scene_tex->sampler,
-                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_NULL_HANDLE, VK_NULL_HANDLE);
 }
 
 // The post uniforms live in the shared scene block, so both the reflective
@@ -3938,6 +4044,7 @@ int ae3d_vk_frame_end(void) {
         int ssr_now = vk.ssr_enabled && vk.post_pipelines[3] &&
                       vk.ssr_framebuffer && vk.camdepth_framebuffer &&
                       vk.ssr_reflect_texture > 0;
+        int source;
 
         memset(&viewport, 0, sizeof(viewport));
         viewport.width = (float)vk.extent.width;
@@ -3963,6 +4070,38 @@ int ae3d_vk_frame_end(void) {
             vk.pass_open = 0;
         }
 
+        source = ssr_now ? vk.ssr_reflect_texture : vk.post_texture;
+
+        /* The temporal pass: this frame folded into the history, written
+           into the other history texture, which the composite then reads
+           and the next frame reads back as its history. */
+        if (vk.taa_enabled && vk.taa_pipeline && vk.taa_framebuffer[0] && vk.taa_framebuffer[1] &&
+            vk.camdepth_framebuffer && source > 0) {
+            int cur = vk.taa_current;
+            int old = 1 - cur;
+            ae3d_vk_texture *history = &vk.textures[vk.taa_texture[old] - 1];
+            ae3d_vk_texture *src = &vk.textures[source - 1];
+            ae3d_vk_set_float(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_TAABLEND,
+                              vk.taa_history_valid ? 0.1f : 1.0f);
+            memset(&pass, 0, sizeof(pass));
+            pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            pass.renderPass = vk.ssr_pass;
+            pass.framebuffer = vk.taa_framebuffer[cur];
+            pass.renderArea.extent = vk.extent;
+            ae3d_vkCmdBeginRenderPass(vk.command_buffers[vk.frame], &pass, VK_SUBPASS_CONTENTS_INLINE);
+            vk.pass_open = 1;
+            ae3d_vkCmdSetViewport(vk.command_buffers[vk.frame], 0, 1, &viewport);
+            ae3d_vkCmdSetScissor(vk.command_buffers[vk.frame], 0, 1, &scissor);
+            ae3d_vk_draw_screen_with(vk.taa_pipeline, &vk.taa_set[cur][frame_slot],
+                                     src->view, src->sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                     history->view, history->sampler);
+            ae3d_vkCmdEndRenderPass(vk.command_buffers[vk.frame]);
+            vk.pass_open = 0;
+            source = vk.taa_texture[cur];
+            vk.taa_history_valid = 1;
+            vk.taa_current = old;
+        }
+
         memset(&pass, 0, sizeof(pass));
         pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         pass.renderPass = vk.post_pass;
@@ -3972,7 +4111,7 @@ int ae3d_vk_frame_end(void) {
         vk.pass_open = 1;
         ae3d_vkCmdSetViewport(vk.command_buffers[vk.frame], 0, 1, &viewport);
         ae3d_vkCmdSetScissor(vk.command_buffers[vk.frame], 0, 1, &scissor);
-        ae3d_vk_draw_composite(ssr_now ? vk.ssr_reflect_texture : vk.post_texture);
+        ae3d_vk_draw_composite(source);
         ae3d_vkCmdEndRenderPass(vk.command_buffers[vk.frame]);
         vk.pass_open = 0;
     }
@@ -4852,6 +4991,7 @@ void ae3d_vk_shutdown(void) {
     if (vk.sky_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.sky_pipeline, NULL);
     if (vk.ssao_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.ssao_pipeline, NULL);
     if (vk.depth_resolve_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.depth_resolve_pipeline, NULL);
+    if (vk.taa_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.taa_pipeline, NULL);
     if (vk.point_pipeline_blend) ae3d_vkDestroyPipeline(vk.device, vk.point_pipeline_blend, NULL);
     if (vk.point_pipeline[0]) ae3d_vkDestroyPipeline(vk.device, vk.point_pipeline[0], NULL);
     if (vk.point_pipeline[1]) ae3d_vkDestroyPipeline(vk.device, vk.point_pipeline[1], NULL);

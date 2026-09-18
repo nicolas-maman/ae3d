@@ -35,7 +35,7 @@ exports (
     engine_set_size, engine_set_title, engine_set_msaa, engine_set_decorated, engine_set_post,
     engine_set_render_scale, engine_set_shadows, engine_shadows, engine_set_fog, engine_fog, engine_set_shadow_distance, engine_shadow_distance,
     engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
-    engine_set_skybox, engine_set_sky, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_set_sky_overcast, engine_set_ssao, engine_set_capture_channel, engine_set_wetness, engine_load_texture,
+    engine_set_skybox, engine_set_sky, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_set_sky_overcast, engine_set_ssao, engine_set_capture_channel, engine_set_wetness, engine_set_taa, engine_taa, engine_load_texture,
     engine_set_time_of_day, engine_time_of_day,
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
     engine_render_ms, engine_render_frames,
@@ -158,6 +158,8 @@ struct Engine {
     // the end -- the device's own time in each pass, the CPU's in
     // submitting, the draws -- so a scene is measured by the same numbers
     // wherever it runs and a change to the engine is a change in them.
+    // Temporal anti-aliasing, asked for; applied when the backend is up.
+    taa: bool
     perf_on: bool
     perf_frames: int
     perf_shadow_ms: float
@@ -730,6 +732,21 @@ engine_set_capture_channel(e: *Engine, channel: int) {
 // darker, smoother and a mirror at a grazing angle, the way a road does in
 // rain; walls hardly, water runs off them. The weather sets it with the
 // rain and takes it back with the clear.
+// Temporal anti-aliasing: the projection nudged a fraction of a pixel a
+// frame through an eight-frame sequence and every frame folded into a
+// history found by reprojection, so an edge is supersampled over time and
+// the shading's aliasing with it. Vulkan; on OpenGL the request is kept
+// and nothing changes yet. AE3D_TAA=1 turns it on in any scene.
+engine_set_taa(e: *Engine, on: bool) {
+    e.taa = on
+    if e.backend_state == null { return }
+    if e.api == platform.API_VULKAN {
+        vk.renderer_set_taa(e.backend_state as *VKRenderer, on)
+    }
+}
+
+engine_taa(e: *Engine) -> bool { return e.taa }
+
 engine_set_wetness(e: *Engine, amount: float) {
     if e.backend_state == null { return }
     if e.api == platform.API_VULKAN {
@@ -919,6 +936,9 @@ engine_start(e: *Engine, x: int, y: int) -> bool {
     platform.window_set_cursor_mode(e.window, platform.CURSOR_NORMAL)
     e.running = true
     apply_ssao(e)
+    // Asked for before the backend was up, or by AE3D_TAA=1.
+    if core.env_int("AE3D_TAA", 0) == 1 { e.taa = true }
+    if e.taa { engine_set_taa(e, true) }
     if e.time_of_day >= 0.0 { engine_set_sky(e, core.SKY_PROCEDURAL) }
     return true
 }
