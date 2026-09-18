@@ -126,6 +126,11 @@
     X(vkCmdBindVertexBuffers) \
     X(vkCmdBindIndexBuffer) \
     X(vkCmdDrawIndexed) \
+    X(vkCmdDrawIndexedIndirect) \
+    X(vkCmdDispatch) \
+    X(vkCmdFillBuffer) \
+    X(vkCmdUpdateBuffer) \
+    X(vkCreateComputePipelines) \
     X(vkCmdPushConstants) \
     X(vkCmdSetViewport) \
     X(vkCmdSetScissor) \
@@ -173,6 +178,31 @@ AE3D_VK_SURFACE_FUNCS(AE3D_VK_DECLARE)
 AE3D_VK_DEVICE_FUNCS(AE3D_VK_DECLARE)
 AE3D_VK_SWAPCHAIN_FUNCS(AE3D_VK_DECLARE)
 #undef AE3D_VK_DECLARE
+
+/* A crowd on the device: the figures' state as eight floats each in a
+   host-visible buffer a frame, three tier streams the sort writes and the
+   draws read, and the three draw commands. */
+#define AE3D_VK_MAX_CROWDS 8
+#define AE3D_VK_CROWD_TIERS 3
+typedef struct {
+    int in_use;
+    int capacity;
+    int count;                         /* figures uploaded this frame */
+    VkBuffer state[AE3D_VK_FRAMES];
+    VkDeviceMemory state_memory[AE3D_VK_FRAMES];
+    void *state_mapped[AE3D_VK_FRAMES];
+    VkBuffer tier[AE3D_VK_CROWD_TIERS];
+    VkDeviceMemory tier_memory[AE3D_VK_CROWD_TIERS];
+    VkBuffer draws;
+    VkDeviceMemory draws_memory;
+    unsigned *draws_mapped;            /* host-visible: the counts can be read back */
+    VkDescriptorSet set[AE3D_VK_FRAMES];
+    int sorted;                        /* the sort ran this frame */
+    float scale[AE3D_VK_CROWD_TIERS][4];
+    unsigned indices[AE3D_VK_CROWD_TIERS];        /* a tier's mesh's index count */
+    unsigned shadow_indices[AE3D_VK_CROWD_TIERS]; /* its depth proxy's, for the shadow draw */
+} ae3d_vk_crowd;
+#define AE3D_VK_CROWD_DRAWS (AE3D_VK_CROWD_TIERS * 2)
 
 typedef struct {
     VkBuffer vertex_buffer;
@@ -298,6 +328,7 @@ static struct {
     int depth_resolved;   /* ...and the resolve has run: the second half is open or next */
     VkPipeline depth_resolve_pipeline;
     VkDescriptorSet depth_resolve_set[AE3D_VK_FRAMES];
+    ae3d_vk_crowd crowds[AE3D_VK_MAX_CROWDS];
     VkRenderPass camdepth_pass;
     VkFramebuffer camdepth_framebuffer;
     VkImage camdepth_image;
@@ -396,6 +427,12 @@ static struct {
     int cull;
     VkDescriptorSetLayout set_layout;
     VkDescriptorPool descriptor_pool;
+    /* The crowd sorted on the device: a compute pipeline over storage
+       buffers with its own layout and pool (crowd_sort_vk.comp). */
+    VkDescriptorSetLayout crowd_sort_set_layout;
+    VkDescriptorPool crowd_sort_pool;
+    VkPipelineLayout crowd_sort_layout;
+    VkPipeline crowd_sort_pipeline;
     VkCommandPool command_pool;
 
     ae3d_vk_uniform_ring uniforms[AE3D_VK_FRAMES];
@@ -953,6 +990,9 @@ void ae3d_vk_texture_destroy(int handle);
 
 static void ae3d_vk_destroy_shadow_target(void);
 static void ae3d_vk_destroy_camdepth_target(void);
+static int ae3d_vk_create_crowd_pipeline(void);
+static VkPipeline ae3d_vk_pipeline_for(int handle, int points);
+static int ae3d_vk_instances_are_points(int instance_handle, int instance_count);
 
 static void ae3d_vk_destroy_swapchain(void) {
     unsigned i;
@@ -3272,6 +3312,7 @@ int ae3d_vk_init(void *win, int width, int height) {
     if (!ae3d_vk_create_descriptors()) return 0;
     if (!ae3d_vk_create_defaults()) return 0;
     if (!ae3d_vk_create_pipeline()) return 0;
+    if (!ae3d_vk_create_crowd_pipeline()) return 0;
 
     snprintf(g_vk_error, sizeof(g_vk_error), "%s", "");
     vk.ready = 1;
@@ -3408,6 +3449,10 @@ int ae3d_vk_frame_begin(double r, double g, double b, double a) {
     vk.scene_clear[3] = (float)a;
 
     vk.post_active = (vk.fxaa || vk.bloom || vk.ssr_enabled || vk.taa_enabled) && vk.screen_quad > 0 && vk.post_texture > 0;
+    {
+        int k;
+        for (k = 0; k < AE3D_VK_MAX_CROWDS; k++) { vk.crowds[k].sorted = 0; vk.crowds[k].count = 0; }
+    }
     vk.pass_open = 0;
     vk.in_shadow_pass = 0;
     /* Two halves when something reads the scene's depth this frame: the
@@ -3514,6 +3559,62 @@ static void ae3d_vk_draw_pipeline(VkPipeline pipeline, int handle, int texture_h
     vk.draw_calls++;
 }
 
+/* The draw of a mesh with an instance stream and an instance count the
+   device wrote: the stream at binding 1, the count read from the draw
+   command at `offset` in `draws`. The pipeline is the one the mesh and
+   the pose bank would have chosen for a lit draw, or the crowd's shadow
+   one in the shadow pass. */
+static void ae3d_vk_draw_pipeline_indirect(int handle, int texture_handle, VkBuffer instances,
+                                           VkBuffer draws, VkDeviceSize offset, int shadow) {
+    ae3d_vk_uniform_ring *ring;
+    VkDescriptorSet set;
+    VkDeviceSize offsets[1];
+    ae3d_vk_mesh *mesh;
+    VkPipeline pipeline;
+    unsigned slot, dynamic_offset;
+
+    if (!vk.recording || handle <= 0 || handle > vk.mesh_capacity) return;
+    if (!shadow) ae3d_vk_open_scene_pass();
+    mesh = &vk.meshes[handle - 1];
+    if (!mesh->in_use || mesh->index_count == 0) return;
+    if (shadow) {
+        pipeline = vk.pose_bank > 0 && vk.crowd_shadow_pipeline ? vk.crowd_shadow_pipeline
+                 : (mesh->skinned && vk.skinned_shadow_pipeline ? vk.skinned_shadow_pipeline : vk.shadow_pipeline);
+        vk.program = AE3D_VK_PROGRAM_SCENE;
+    } else {
+        pipeline = ae3d_vk_pipeline_for(handle, 0);
+    }
+    if (!pipeline) return;
+    if (texture_handle < 1 || texture_handle > AE3D_VK_MAX_TEXTURES) texture_handle = vk.default_texture;
+    if (!vk.textures[texture_handle - 1].in_use) texture_handle = vk.default_texture;
+
+    ring = &vk.uniforms[vk.frame];
+    if (ring->used >= ring->capacity) return;
+    slot = ring->used++;
+    dynamic_offset = slot * ring->stride;
+    memcpy(ring->mapped + dynamic_offset, vk.scene[vk.program].bytes, AE3D_VK_SCENE_SIZE);
+    set = ae3d_vk_set_for((int)vk.frame, texture_handle, vk.normal_map, vk.pose_bank);
+    if (set == VK_NULL_HANDLE) return;
+    if (pipeline != vk.bound_pipeline) {
+        ae3d_vkCmdBindPipeline(vk.command_buffers[vk.frame], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        vk.bound_pipeline = pipeline;
+        vk.pipeline_binds++;
+    }
+    ae3d_vkCmdBindDescriptorSets(vk.command_buffers[vk.frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                 vk.pipeline_layout, 0, 1, &set, 1, &dynamic_offset);
+    offsets[0] = 0;
+    ae3d_vkCmdBindVertexBuffers(vk.command_buffers[vk.frame], 0, 1, &mesh->vertex_buffer, offsets);
+    ae3d_vkCmdBindVertexBuffers(vk.command_buffers[vk.frame], 1, 1, &instances, offsets);
+    if (mesh->skinned && mesh->skin_buffer) {
+        ae3d_vkCmdBindVertexBuffers(vk.command_buffers[vk.frame], 2, 1, &mesh->skin_buffer, offsets);
+    } else {
+        ae3d_vkCmdBindVertexBuffers(vk.command_buffers[vk.frame], 2, 1, &vk.empty_skin, offsets);
+    }
+    ae3d_vkCmdBindIndexBuffer(vk.command_buffers[vk.frame], mesh->index_buffer, 0, VK_INDEX_TYPE_UINT32);
+    ae3d_vkCmdDrawIndexedIndirect(vk.command_buffers[vk.frame], draws, offset, 1, 5 * sizeof(unsigned));
+    vk.draw_calls++;
+}
+
 // Which family of pipelines the next draws use. A program the backend does not
 // have falls back to the scene one, which is what the OpenGL backend does with
 // a shader that fails to compile.
@@ -3530,13 +3631,15 @@ static int ae3d_vk_instances_are_points(int instance_handle, int instance_count)
     return vk.meshes[instance_handle - 1].in_use && vk.meshes[instance_handle - 1].points;
 }
 
-void ae3d_vk_draw(int handle, int texture_handle, int instance_handle, int instance_count) {
+/* The pipeline a lit draw of `handle` takes: by the mesh (skinned or not),
+   the pose bank (a crowd), the program (water), the instances (points) and
+   the blend state. */
+static VkPipeline ae3d_vk_pipeline_for(int handle, int points) {
     VkPipeline opaque = vk.pipeline[vk.cull];
     VkPipeline blended = vk.pipeline_blend;
     int skinned = handle > 0 && handle <= vk.mesh_capacity && vk.meshes[handle - 1].skinned;
 
-    if (ae3d_vk_instances_are_points(instance_handle, instance_count)
-        && vk.point_pipeline[vk.cull] && vk.point_pipeline_blend) {
+    if (points && vk.point_pipeline[vk.cull] && vk.point_pipeline_blend) {
         opaque = vk.point_pipeline[vk.cull];
         blended = vk.point_pipeline_blend;
     } else if (vk.program == AE3D_VK_PROGRAM_WATER && vk.water_pipeline[vk.cull]
@@ -3551,8 +3654,392 @@ void ae3d_vk_draw(int handle, int texture_handle, int instance_handle, int insta
         opaque = vk.skinned_pipeline[vk.cull];
         blended = vk.skinned_pipeline_blend;
     }
-    ae3d_vk_draw_pipeline(vk.blend ? blended : opaque, handle, texture_handle,
-                          instance_handle, instance_count);
+    return vk.blend ? blended : opaque;
+}
+
+void ae3d_vk_draw(int handle, int texture_handle, int instance_handle, int instance_count) {
+    ae3d_vk_draw_pipeline(ae3d_vk_pipeline_for(handle, ae3d_vk_instances_are_points(instance_handle, instance_count)),
+                          handle, texture_handle, instance_handle, instance_count);
+}
+
+/* The crowd sort's descriptor set layout (five storage buffers), pool,
+   pipeline layout (a push-constant block of forty bytes) and pipeline. */
+static int ae3d_vk_create_crowd_pipeline(void) {
+    VkDescriptorSetLayoutBinding bindings[5];
+    VkDescriptorSetLayoutCreateInfo layout;
+    VkDescriptorPoolSize size;
+    VkDescriptorPoolCreateInfo pool;
+    VkPushConstantRange range;
+    VkPipelineLayoutCreateInfo plinfo;
+    VkComputePipelineCreateInfo info;
+    VkShaderModule module;
+    int i;
+
+    memset(bindings, 0, sizeof(bindings));
+    for (i = 0; i < 5; i++) {
+        bindings[i].binding = (unsigned)i;
+        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[i].descriptorCount = 1;
+        bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    memset(&layout, 0, sizeof(layout));
+    layout.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layout.bindingCount = 5;
+    layout.pBindings = bindings;
+    if (ae3d_vkCreateDescriptorSetLayout(vk.device, &layout, NULL, &vk.crowd_sort_set_layout) != VK_SUCCESS) {
+        return ae3d_vk_fail("crowd vkCreateDescriptorSetLayout failed");
+    }
+    memset(&size, 0, sizeof(size));
+    size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    size.descriptorCount = 5 * AE3D_VK_MAX_CROWDS * AE3D_VK_FRAMES;
+    memset(&pool, 0, sizeof(pool));
+    pool.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool.maxSets = AE3D_VK_MAX_CROWDS * AE3D_VK_FRAMES;
+    pool.poolSizeCount = 1;
+    pool.pPoolSizes = &size;
+    if (ae3d_vkCreateDescriptorPool(vk.device, &pool, NULL, &vk.crowd_sort_pool) != VK_SUCCESS) {
+        return ae3d_vk_fail("crowd vkCreateDescriptorPool failed");
+    }
+    memset(&range, 0, sizeof(range));
+    range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    range.size = 80;
+    memset(&plinfo, 0, sizeof(plinfo));
+    plinfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    plinfo.setLayoutCount = 1;
+    plinfo.pSetLayouts = &vk.crowd_sort_set_layout;
+    plinfo.pushConstantRangeCount = 1;
+    plinfo.pPushConstantRanges = &range;
+    if (ae3d_vkCreatePipelineLayout(vk.device, &plinfo, NULL, &vk.crowd_sort_layout) != VK_SUCCESS) {
+        return ae3d_vk_fail("crowd vkCreatePipelineLayout failed");
+    }
+    module = ae3d_vk_shader(ae3d_vk_crowd_sort_comp_spv, (unsigned)sizeof(ae3d_vk_crowd_sort_comp_spv));
+    if (!module) return ae3d_vk_fail("crowd vkCreateShaderModule failed");
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    info.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    info.stage.module = module;
+    info.stage.pName = "main";
+    info.layout = vk.crowd_sort_layout;
+    if (ae3d_vkCreateComputePipelines(vk.device, VK_NULL_HANDLE, 1, &info, NULL, &vk.crowd_sort_pipeline) != VK_SUCCESS) {
+        ae3d_vkDestroyShaderModule(vk.device, module, NULL);
+        return ae3d_vk_fail("crowd vkCreateComputePipelines failed");
+    }
+    ae3d_vkDestroyShaderModule(vk.device, module, NULL);
+    return 1;
+}
+
+static void ae3d_vk_crowd_free(ae3d_vk_crowd *c) {
+    int i;
+    if (!c->in_use) return;
+    for (i = 0; i < AE3D_VK_FRAMES; i++) {
+        if (c->state_mapped[i]) ae3d_vkUnmapMemory(vk.device, c->state_memory[i]);
+        if (c->state[i]) ae3d_vkDestroyBuffer(vk.device, c->state[i], NULL);
+        if (c->state_memory[i]) ae3d_vkFreeMemory(vk.device, c->state_memory[i], NULL);
+    }
+    for (i = 0; i < AE3D_VK_CROWD_TIERS; i++) {
+        if (c->tier[i]) ae3d_vkDestroyBuffer(vk.device, c->tier[i], NULL);
+        if (c->tier_memory[i]) ae3d_vkFreeMemory(vk.device, c->tier_memory[i], NULL);
+    }
+    if (c->draws_mapped) ae3d_vkUnmapMemory(vk.device, c->draws_memory);
+    if (c->draws) ae3d_vkDestroyBuffer(vk.device, c->draws, NULL);
+    if (c->draws_memory) ae3d_vkFreeMemory(vk.device, c->draws_memory, NULL);
+    memset(c, 0, sizeof(*c));
+}
+
+/* A crowd of up to `capacity` figures on the device: its state buffers,
+   its three tier streams and its draw commands. Returns the handle, or 0
+   when the device has no compute for it. */
+int ae3d_vk_crowd_create(int capacity) {
+    ae3d_vk_crowd *c = NULL;
+    VkDescriptorSetAllocateInfo alloc;
+    int slot, i, t;
+    if (!vk.ready || !vk.crowd_sort_pipeline || capacity <= 0) return 0;
+    for (slot = 0; slot < AE3D_VK_MAX_CROWDS; slot++) {
+        if (!vk.crowds[slot].in_use) { c = &vk.crowds[slot]; break; }
+    }
+    if (!c) { ae3d_vk_fail("crowd table full"); return 0; }
+    memset(c, 0, sizeof(*c));
+    c->in_use = 1;
+    c->capacity = capacity;
+    for (i = 0; i < AE3D_VK_FRAMES; i++) {
+        /* The state is written by the CPU and read by the sort: in the
+           device's own memory where the host can see it (the BAR: sixteen
+           megabytes a frame at half a million, which read from system
+           memory over the bus cost the sort more than the sort), and in
+           system memory where it cannot. */
+        VkDeviceSize bytes = (VkDeviceSize)capacity * 8 * sizeof(float);
+        VkMemoryPropertyFlags host = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        if (!ae3d_vk_create_buffer(bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | host,
+                                   &c->state[i], &c->state_memory[i])) {
+            g_vk_error[0] = 0;
+            if (!ae3d_vk_create_buffer(bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host,
+                                       &c->state[i], &c->state_memory[i])) { ae3d_vk_crowd_free(c); return 0; }
+        }
+        if (ae3d_vkMapMemory(vk.device, c->state_memory[i], 0, VK_WHOLE_SIZE, 0, &c->state_mapped[i]) != VK_SUCCESS) {
+            ae3d_vk_crowd_free(c); return 0;
+        }
+    }
+    for (t = 0; t < AE3D_VK_CROWD_TIERS; t++) {
+        if (!ae3d_vk_create_buffer((VkDeviceSize)capacity * 20 * sizeof(float),
+                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                   &c->tier[t], &c->tier_memory[t])) { ae3d_vk_crowd_free(c); return 0; }
+    }
+    if (!ae3d_vk_create_buffer(AE3D_VK_CROWD_DRAWS * 5 * sizeof(unsigned),
+                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
+                               VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                               &c->draws, &c->draws_memory)) { ae3d_vk_crowd_free(c); return 0; }
+    if (ae3d_vkMapMemory(vk.device, c->draws_memory, 0, VK_WHOLE_SIZE, 0, (void **)&c->draws_mapped) != VK_SUCCESS) {
+        ae3d_vk_crowd_free(c); return 0;
+    }
+    for (i = 0; i < AE3D_VK_FRAMES; i++) {
+        VkDescriptorBufferInfo buffers[5];
+        VkWriteDescriptorSet writes[5];
+        int b;
+        memset(&alloc, 0, sizeof(alloc));
+        alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        alloc.descriptorPool = vk.crowd_sort_pool;
+        alloc.descriptorSetCount = 1;
+        alloc.pSetLayouts = &vk.crowd_sort_set_layout;
+        if (ae3d_vkAllocateDescriptorSets(vk.device, &alloc, &c->set[i]) != VK_SUCCESS) { ae3d_vk_crowd_free(c); return 0; }
+        memset(buffers, 0, sizeof(buffers));
+        buffers[0].buffer = c->state[i];
+        buffers[1].buffer = c->tier[0];
+        buffers[2].buffer = c->tier[1];
+        buffers[3].buffer = c->tier[2];
+        buffers[4].buffer = c->draws;
+        memset(writes, 0, sizeof(writes));
+        for (b = 0; b < 5; b++) {
+            buffers[b].range = VK_WHOLE_SIZE;
+            writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[b].dstSet = c->set[i];
+            writes[b].dstBinding = (unsigned)b;
+            writes[b].descriptorCount = 1;
+            writes[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[b].pBufferInfo = &buffers[b];
+        }
+        ae3d_vkUpdateDescriptorSets(vk.device, 5, writes, 0, NULL);
+    }
+    return slot + 1;
+}
+
+/* How many figures the sort last put in `tier`: read from the draw
+   command, so it is the count of the last frame the device finished, a
+   frame or two behind the one being recorded. A diagnostic and a
+   statistic, not a synchronised read. */
+int ae3d_vk_crowd_count(int handle, int tier) {
+    ae3d_vk_crowd *c;
+    if (handle <= 0 || handle > AE3D_VK_MAX_CROWDS || tier < 0 || tier >= AE3D_VK_CROWD_TIERS) return 0;
+    c = &vk.crowds[handle - 1];
+    if (!c->in_use || !c->draws_mapped) return 0;
+    return (int)c->draws_mapped[tier * 5 + 1];
+}
+
+void ae3d_vk_crowd_destroy(int handle) {
+    if (handle <= 0 || handle > AE3D_VK_MAX_CROWDS) return;
+    ae3d_vkDeviceWaitIdle(vk.device);
+    ae3d_vk_crowd_free(&vk.crowds[handle - 1]);
+}
+
+/* A tier's model: its scale, which the sort bakes into the matrices it
+   writes, and the index counts its lit draw and its shadow draw (the depth
+   proxy's mesh) take. */
+void ae3d_vk_crowd_set_tier(int handle, int tier, double sx, double sy, double sz,
+                            int indices, int shadow_indices) {
+    ae3d_vk_crowd *c;
+    if (handle <= 0 || handle > AE3D_VK_MAX_CROWDS || tier < 0 || tier >= AE3D_VK_CROWD_TIERS) return;
+    c = &vk.crowds[handle - 1];
+    if (!c->in_use) return;
+    c->scale[tier][0] = (float)sx;
+    c->scale[tier][1] = (float)sy;
+    c->scale[tier][2] = (float)sz;
+    c->scale[tier][3] = 0.0f;
+    c->indices[tier] = indices > 0 ? (unsigned)indices : 0u;
+    c->shadow_indices[tier] = shadow_indices > 0 ? (unsigned)shadow_indices : c->indices[tier];
+}
+
+typedef struct {
+    float *out;
+    const double *pos, *yaw, *phase, *col;
+    int start;
+} ae3d_vk_crowd_fill_job;
+
+static void ae3d_vk_crowd_fill_run(void *ctx, int begin, int end) {
+    ae3d_vk_crowd_fill_job *job = (ae3d_vk_crowd_fill_job *)ctx;
+    int i;
+    for (i = begin; i < end; i++) {
+        int f = job->start + i;
+        float *o = job->out + (size_t)i * 8;
+        o[0] = (float)job->pos[f * 3];
+        o[1] = (float)job->pos[f * 3 + 1];
+        o[2] = (float)job->pos[f * 3 + 2];
+        o[3] = (float)job->yaw[f];
+        o[4] = (float)job->phase[f];
+        if (job->col) {
+            o[5] = (float)job->col[f * 3];
+            o[6] = (float)job->col[f * 3 + 1];
+            o[7] = (float)job->col[f * 3 + 2];
+        } else {
+            o[5] = 1.0f; o[6] = 1.0f; o[7] = 1.0f;
+        }
+    }
+}
+
+/* The crowd's figures from `start`, `n` of them, into this frame's state
+   buffer: thirty-two bytes a figure, converted over every core. Between
+   frame_begin and the sort. Returns the count taken. */
+int ae3d_vk_crowd_fill(int handle, const double *pos, const double *yaw, const double *phase,
+                       const double *col, int start, int n) {
+    ae3d_vk_crowd *c;
+    ae3d_vk_crowd_fill_job job;
+    if (!vk.ready || !vk.recording || handle <= 0 || handle > AE3D_VK_MAX_CROWDS) return 0;
+    c = &vk.crowds[handle - 1];
+    if (!c->in_use || !pos || !yaw || !phase || n <= 0) return 0;
+    if (n > c->capacity) n = c->capacity;
+    job.out = (float *)c->state_mapped[vk.frame];
+    job.pos = pos; job.yaw = yaw; job.phase = phase; job.col = col;
+    job.start = start;
+    ae3d_jobs_for(n, 8192, ae3d_vk_crowd_fill_run, &job);
+    c->count = n;
+    return n;
+}
+
+/* The sort, recorded into this frame's command buffer before any pass
+   opens: the draw commands reset with each tier's index count, the last
+   frame's reads of the streams waited for, one thread a figure, and the
+   streams and the commands made visible to the vertex input and the
+   indirect read that follow. */
+int ae3d_vk_crowd_sort(int handle, double cx, double cz, double near_dist, double mid_dist,
+                       double cull_dist) {
+    ae3d_vk_crowd *c;
+    VkBufferMemoryBarrier before, after[2];
+    VkBufferCopy counts[AE3D_VK_CROWD_TIERS];
+    unsigned commands[AE3D_VK_CROWD_DRAWS * 5];
+    struct { unsigned count, three; float cx, cz, near2, mid2, cull2, pad; float scale[AE3D_VK_CROWD_TIERS][4]; } params;
+    VkCommandBuffer command;
+    int t;
+    if (!vk.recording || vk.pass_open || handle <= 0 || handle > AE3D_VK_MAX_CROWDS) return 0;
+    c = &vk.crowds[handle - 1];
+    if (!c->in_use || c->count <= 0 || !vk.crowd_sort_pipeline) return 0;
+    command = vk.command_buffers[vk.frame];
+
+    /* The streams and the commands of the frame before may still be read. */
+    memset(&before, 0, sizeof(before));
+    before.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    before.srcAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+    before.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    before.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    before.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    before.buffer = c->draws;
+    before.size = VK_WHOLE_SIZE;
+    ae3d_vkCmdPipelineBarrier(command,
+                              VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                              0, 0, NULL, 1, &before, 0, NULL);
+
+    memset(commands, 0, sizeof(commands));
+    for (t = 0; t < AE3D_VK_CROWD_TIERS; t++) {
+        commands[t * 5] = c->indices[t];
+        commands[(AE3D_VK_CROWD_TIERS + t) * 5] = c->shadow_indices[t];
+    }
+    ae3d_vkCmdUpdateBuffer(command, c->draws, 0, sizeof(commands), commands);
+    memset(&before, 0, sizeof(before));
+    before.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    before.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    before.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    before.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    before.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    before.buffer = c->draws;
+    before.size = VK_WHOLE_SIZE;
+    ae3d_vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                              0, 0, NULL, 1, &before, 0, NULL);
+
+    params.count = (unsigned)c->count;
+    params.three = mid_dist > 0.0 ? 1u : 0u;
+    params.cx = (float)cx;
+    params.cz = (float)cz;
+    params.near2 = (float)(near_dist * near_dist);
+    params.mid2 = (float)(mid_dist * mid_dist);
+    params.cull2 = (float)(cull_dist > 0.0 ? cull_dist * cull_dist : 0.0);
+    params.pad = 0.0f;
+    memcpy(params.scale, c->scale, sizeof(params.scale));
+    ae3d_vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, vk.crowd_sort_pipeline);
+    ae3d_vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, vk.crowd_sort_layout, 0, 1,
+                                 &c->set[vk.frame], 0, NULL);
+    ae3d_vkCmdPushConstants(command, vk.crowd_sort_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
+    ae3d_vkCmdDispatch(command, ((unsigned)c->count + 255u) / 256u, 1, 1);
+
+    /* The counts the sort wrote, copied from the lit commands to the shadow
+       ones: the shadow draw is over the same stream with the proxy's index
+       count, and an atomic can only count into one place. */
+    memset(after, 0, sizeof(after));
+    after[0].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    after[0].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    after[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    after[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    after[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    after[0].buffer = c->draws;
+    after[0].size = VK_WHOLE_SIZE;
+    ae3d_vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                              0, 0, NULL, 1, after, 0, NULL);
+    for (t = 0; t < AE3D_VK_CROWD_TIERS; t++) {
+        counts[t].srcOffset = ((VkDeviceSize)t * 5 + 1) * sizeof(unsigned);
+        counts[t].dstOffset = ((VkDeviceSize)(AE3D_VK_CROWD_TIERS + t) * 5 + 1) * sizeof(unsigned);
+        counts[t].size = sizeof(unsigned);
+    }
+    ae3d_vkCmdCopyBuffer(command, c->draws, c->draws, AE3D_VK_CROWD_TIERS, counts);
+    memset(&after[0], 0, sizeof(after[0]));
+    after[0].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    after[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    after[0].dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+    after[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    after[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    after[0].buffer = c->draws;
+    after[0].size = VK_WHOLE_SIZE;
+    ae3d_vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                              VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                              0, 0, NULL, 1, after, 0, NULL);
+    {
+        for (t = 0; t < AE3D_VK_CROWD_TIERS; t++) {
+            memset(&after[0], 0, sizeof(after[0]));
+            after[0].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            after[0].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            after[0].dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+            after[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            after[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            after[0].buffer = c->tier[t];
+            after[0].size = VK_WHOLE_SIZE;
+            ae3d_vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                      VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 0, NULL, 1, &after[0], 0, NULL);
+        }
+    }
+    c->sorted = 1;
+    return 1;
+}
+
+/* A draw of `mesh_handle` with tier `tier` of crowd `handle` as its
+   instances, as many as the sort counted, through the current pipeline
+   family: the lit draw. */
+void ae3d_vk_draw_crowd_tier(int mesh_handle, int texture_handle, int handle, int tier) {
+    ae3d_vk_crowd *c;
+    if (handle <= 0 || handle > AE3D_VK_MAX_CROWDS || tier < 0 || tier >= AE3D_VK_CROWD_TIERS) return;
+    c = &vk.crowds[handle - 1];
+    if (!c->in_use || !c->sorted) return;
+    ae3d_vk_draw_pipeline_indirect(mesh_handle, texture_handle, c->tier[tier], c->draws,
+                                   (VkDeviceSize)tier * 5 * sizeof(unsigned), 0);
+}
+
+void ae3d_vk_shadow_draw_crowd_tier(int mesh_handle, int handle, int tier) {
+    ae3d_vk_crowd *c;
+    if (handle <= 0 || handle > AE3D_VK_MAX_CROWDS || tier < 0 || tier >= AE3D_VK_CROWD_TIERS) return;
+    c = &vk.crowds[handle - 1];
+    if (!c->in_use || !c->sorted) return;
+    if (!vk.shadow_pipeline || !vk.in_shadow_pass) return;
+    ae3d_vk_draw_pipeline_indirect(mesh_handle, vk.default_texture, c->tier[tier], c->draws,
+                                   (VkDeviceSize)(AE3D_VK_CROWD_TIERS + tier) * 5 * sizeof(unsigned), 1);
 }
 
 // A flat sky needs no geometry: the clear colour already fills every pixel the
@@ -5001,6 +5488,14 @@ void ae3d_vk_shutdown(void) {
     if (vk.sky_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.sky_pipeline, NULL);
     if (vk.ssao_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.ssao_pipeline, NULL);
     if (vk.depth_resolve_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.depth_resolve_pipeline, NULL);
+    {
+        int k;
+        for (k = 0; k < AE3D_VK_MAX_CROWDS; k++) ae3d_vk_crowd_free(&vk.crowds[k]);
+    }
+    if (vk.crowd_sort_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.crowd_sort_pipeline, NULL);
+    if (vk.crowd_sort_layout) ae3d_vkDestroyPipelineLayout(vk.device, vk.crowd_sort_layout, NULL);
+    if (vk.crowd_sort_pool) ae3d_vkDestroyDescriptorPool(vk.device, vk.crowd_sort_pool, NULL);
+    if (vk.crowd_sort_set_layout) ae3d_vkDestroyDescriptorSetLayout(vk.device, vk.crowd_sort_set_layout, NULL);
     if (vk.taa_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.taa_pipeline, NULL);
     if (vk.point_pipeline_blend) ae3d_vkDestroyPipeline(vk.device, vk.point_pipeline_blend, NULL);
     if (vk.point_pipeline[0]) ae3d_vkDestroyPipeline(vk.device, vk.point_pipeline[0], NULL);

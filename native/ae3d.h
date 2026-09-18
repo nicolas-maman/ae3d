@@ -95,6 +95,7 @@ void   ae3d_crowd_tiers(const double *pos, const double *yaw, const double *phas
                         double *mp, double *my, double *mph, double *mcol,
                         double *fp, double *fy, double *fph, double *fcol,
                         double *counts_out);
+void   ae3d_crowd_audit(const double *pos, double *prev, int n, double limit, double *out);
 void   ae3d_gl_upload_skin(void *mesh, int vbo);
 void  *ae3d_skinrows_create(int count);
 void   ae3d_skinrows_destroy(void *rows);
@@ -388,6 +389,20 @@ void   ae3d_vk_set_pose_bank(int texture_handle);
 void   ae3d_vk_set_scene_depth(int on);
 int    ae3d_vk_scene_depth_ready(void);
 int    ae3d_vk_resolve_scene_depth(void);
+/* A crowd sorted on the device (crowd_sort_vk.comp): its figures' state
+   written as eight floats each into the frame's buffer, the sort dispatched
+   before the passes, and the tiers drawn by the counts it wrote. */
+int    ae3d_vk_crowd_create(int capacity);
+void   ae3d_vk_crowd_destroy(int handle);
+int    ae3d_vk_crowd_count(int handle, int tier);
+void   ae3d_vk_crowd_set_tier(int handle, int tier, double sx, double sy, double sz,
+                              int indices, int shadow_indices);
+int    ae3d_vk_crowd_fill(int handle, const double *pos, const double *yaw, const double *phase,
+                          const double *col, int start, int n);
+int    ae3d_vk_crowd_sort(int handle, double cx, double cz, double near_dist, double mid_dist,
+                          double cull_dist);
+void   ae3d_vk_draw_crowd_tier(int mesh_handle, int texture_handle, int handle, int tier);
+void   ae3d_vk_shadow_draw_crowd_tier(int mesh_handle, int handle, int tier);
 void   ae3d_vk_set_taa(int on);
 int    ae3d_vk_taa(void);
 int    ae3d_vk_taa_history(void);

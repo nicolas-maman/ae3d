@@ -41,6 +41,7 @@ exports (
     env_int, material_new, material_default, material_clone, material_equals, material_free,
     model_new, model_free,
     model_clone, model_set_casts_shadow, model_set_billboard, model_set_depth_proxy, model_set_impostor, model_is_impostor,
+    DeviceCrowd, model_set_device_crowd,
     model_set_position, model_set_scale, model_set_rotation, model_rotate,
     model_update_matrix, model_recalculate_bounds, model_mark_dirty, model_set_diffuse,
     model_set_parent, model_parent, model_sync_transform, model_world_position,
@@ -329,6 +330,35 @@ struct Uniform {
     block_offset: int
 }
 
+// A crowd sorted on the device: the figures' state -- position, yaw,
+// phase, tint -- read straight from the simulation's columns each frame,
+// converted and sorted by distance into the tiers' instance streams by a
+// compute pass, and the tiers drawn by the counts the sort wrote, so no
+// per-figure matrix is built, sorted or uploaded on the CPU. The models
+// that draw the tiers point at it (model_set_device_crowd); the renderer
+// runs the sort at the frame's start from what device_crowd_update set.
+// Vulkan only: a backend without compute gives no handle, and the caller
+// keeps the CPU sort (crowd_tiers).
+struct DeviceCrowd {
+    handle: int             // the backend's
+    capacity: int
+    // This frame's figures: `count` from `start` of the columns below,
+    // each xyz / yaw / phase / rgb a double.
+    pos: ptr
+    yaw: ptr
+    phase: ptr
+    col: ptr
+    start: int
+    count: int
+    // The camera's ground position and the tier bands, as crowd_tiers takes them.
+    cx: float
+    cz: float
+    near_dist: float
+    mid_dist: float
+    cull_dist: float
+    sorted_serial: int      // the renderer's frame the sort last ran in
+}
+
 struct Model {
     model_matrix: Mat4
     position: Vec3
@@ -410,6 +440,10 @@ struct Model {
     // OpenGL's second vertex array for that: the proxy's mesh over this
     // model's instance stream, made the first time the depth pass needs it.
     depth_proxy_vao: int
+    // The crowd sorted on the device this model draws a tier of (a
+    // *DeviceCrowd, null for none) and which tier: 0 near, 1 mid, 2 far.
+    device_crowd: ptr
+    device_tier: int
 
     id: int
     name: string
@@ -2504,6 +2538,17 @@ model_set_depth_proxy(m: *Model, proxy: *Model) {
     // A vertex array made over the old proxy is left for the renderer to
     // drop: it is checked against the proxy it was made for at each draw.
     m.depth_proxy_vao = 0
+}
+
+// Draw this crowd model as tier `tier` (0 near, 1 mid, 2 far) of a crowd
+// sorted on the device: its instances come from the sort's stream for
+// that tier, as many as the sort counted, and its own instance stream is
+// not consulted. The model stays a crowd model -- instanced, phased, with
+// its pose bank -- so it takes the crowd's draw; the sort bakes the
+// model's scale into the matrices it writes.
+model_set_device_crowd(m: *Model, crowd: *DeviceCrowd, tier: int) {
+    m.device_crowd = crowd as ptr
+    m.device_tier = tier
 }
 
 // Draw this crowd model's instances as impostors: upright quads `width`

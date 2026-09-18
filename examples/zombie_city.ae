@@ -112,6 +112,10 @@ struct Figure {
     walk: float             // the gait cycle's length, seconds
     start: int              // its run of the crowd: [start, start + count)
     count: int
+    // The crowd sorted on the device (Vulkan): its figures' tiers picked,
+    // packed and counted by a compute pass each frame; null keeps the CPU
+    // sort (crowd_tiers) and the per-tier uploads.
+    device: *DeviceCrowd
     near_tris: int
     cloth_tris: int
     far_tris: int
@@ -143,6 +147,7 @@ var g_tiercount: *Column = null   // the three counts the sort writes
 var g_count = CROWD_DEFAULT
 var g_near_dist = NEAR_DIST   // AE3D_NEAR overrides, a knob for the LOD sweep
 var g_impostor_dist = IMPOSTOR_DIST   // AE3D_IMPOSTOR overrides; 0 is off
+var g_gpu_crowd = true                // AE3D_GPU_CROWD=0 keeps the CPU sort on Vulkan
 var g_cull_dist = CULL_DIST   // AE3D_CULL overrides; 0 keeps the whole crowd
 // Separation is the crowd's heaviest pass, so it runs every SEP_INTERVAL
 // frames rather than every frame -- see the note at its call site. AE3D_SEPN
@@ -242,6 +247,32 @@ bake_zombie(m: *Manifest, entry: *Entry, fig: *Figure) -> ptr {
     return bank
 }
 
+// The CPU sort's per-tier buffers, sized to the whole crowd -- a tier may
+// hold all of it -- and made only for a figure the CPU sorts: a hundred
+// megabytes at half a million that the device sort never touches.
+tier_scratch() {
+    if g_nb_pos != null { return }
+    g_nb_pos = ecs.column_new(g_count, 3)
+    g_nb_yaw = ecs.column_new(g_count, 1)
+    g_nb_phase = ecs.column_new(g_count, 1)
+    g_nb_col = ecs.column_new(g_count, 3)
+    g_fb_pos = ecs.column_new(g_count, 3)
+    g_fb_yaw = ecs.column_new(g_count, 1)
+    g_fb_phase = ecs.column_new(g_count, 1)
+    g_fb_col = ecs.column_new(g_count, 3)
+    g_ib_pos = ecs.column_new(g_count, 3)
+    g_ib_yaw = ecs.column_new(g_count, 1)
+    g_ib_phase = ecs.column_new(g_count, 1)
+    g_ib_col = ecs.column_new(g_count, 3)
+}
+
+// A tier model's instance stream: the whole crowd when the CPU sorts into
+// it, one slot when the device does and the stream is never written.
+crowd_capacity(fig: *Figure) -> int {
+    if fig.device != null { return 1 }
+    return g_count
+}
+
 // Wire a figure as an instanced, pose-bank-posed crowd, reserving room for the
 // whole count -- a distance tier fills it with as many as fall in its band each
 // frame. `cell > 0` first decimates the mesh to a crowd LOD at that cell; `cell
@@ -249,7 +280,7 @@ bake_zombie(m: *Manifest, entry: *Entry, fig: *Figure) -> ptr {
 // are two coincident meshes, and decimating them independently pulls their
 // vertices apart so the skin pokes through the cloth in patches. Only the far
 // tier, metres off and fogged, can afford the decimation. Returns the tri count.
-setup_crowd(model: *Model, cell: float, bank: ptr) -> int {
+setup_crowd(model: *Model, cell: float, bank: ptr, capacity: int) -> int {
     if cell > 0.0 {
         src = core.model_mesh(model)
         lod = core.mesh_decimate(src, cell)
@@ -260,7 +291,7 @@ setup_crowd(model: *Model, cell: float, bank: ptr) -> int {
     // zombie. Keeps the texture; only the shine goes.
     core.model_set_specular(model, 0.03, 0.03, 0.03)
     core.model_set_pbr(model, 0.0, 0.95)
-    core.model_enable_instancing(model, g_count)
+    core.model_enable_instancing(model, capacity)
     core.model_set_pose_bank(model, bank, FRAMES)
     core.model_enable_instance_phases(model)
     core.model_enable_instance_colors(model)
@@ -311,7 +342,7 @@ impostor_for(m: *Manifest, figure: string, fig: *Figure) -> *Model {
     core.model_recalculate_bounds(quad)
     core.model_set_texture(quad, "${directory}impostor_${figure}.png")
     core.material_set_normal_path(quad.material, "${directory}impostor_${figure}_normal.png")
-    setup_crowd(quad, 0.0, fig.bank)
+    setup_crowd(quad, 0.0, fig.bank, crowd_capacity(fig))
     core.model_set_impostor(quad, cols, rows, metres, metres)
     fig.impostor_metres = metres
     return quad
@@ -481,6 +512,8 @@ on_start(state: ptr, e: *Engine) {
     g_sepn = core.env_int("AE3D_SEPN", SEP_INTERVAL)
     g_strip_props = core.env_int("AE3D_NOPROPS", 0) != 0
     g_impostor_dist = core.env_int("AE3D_IMPOSTOR", IMPOSTOR_DIST as int) as float
+    g_gpu_crowd = core.env_int("AE3D_GPU_CROWD", 1) == 1
+    g_teleport_check = core.env_int("AE3D_TELEPORT", 1) != 0
     g_perf_sim = core.env_int("AE3D_PERF", 0) == 1
 
     // A camera down at the road, looking back along it so the horde walks out of
@@ -648,18 +681,6 @@ on_start(state: ptr, e: *Engine) {
     g_phase = ecs.column_new(g_count, 1)
     g_yaw = ecs.column_new(g_count, 1)
     g_color = ecs.column_new(g_count, 3)
-    g_nb_pos = ecs.column_new(g_count, 3)
-    g_nb_yaw = ecs.column_new(g_count, 1)
-    g_nb_phase = ecs.column_new(g_count, 1)
-    g_nb_col = ecs.column_new(g_count, 3)
-    g_fb_pos = ecs.column_new(g_count, 3)
-    g_fb_yaw = ecs.column_new(g_count, 1)
-    g_fb_phase = ecs.column_new(g_count, 1)
-    g_fb_col = ecs.column_new(g_count, 3)
-    g_ib_pos = ecs.column_new(g_count, 3)
-    g_ib_yaw = ecs.column_new(g_count, 1)
-    g_ib_phase = ecs.column_new(g_count, 1)
-    g_ib_col = ecs.column_new(g_count, 3)
     g_tiercount = ecs.column_new(1, 3)
     i = 0
     while i < g_count {
@@ -693,15 +714,25 @@ on_start(state: ptr, e: *Engine) {
     k = 0
     while k < figures {
         fig = list.get_raw(g_figures, k) as *Figure
-        fig.near_tris = setup_crowd(fig.near_body, LOD_NEAR, fig.bank)
+        // The sort on the device where the backend has compute (Vulkan):
+        // the figure's run is then never packed or uploaded from here.
+        fig.device = null
+        if g_gpu_crowd { fig.device = crowd.device_crowd_new(fig.count) }
+        if fig.device == null { tier_scratch() }
+        fig.near_tris = setup_crowd(fig.near_body, LOD_NEAR, fig.bank, crowd_capacity(fig))
         fig.cloth_tris = 0
-        if fig.near_clothes != null { fig.cloth_tris = setup_crowd(fig.near_clothes, LOD_NEAR, fig.bank) }
+        if fig.near_clothes != null { fig.cloth_tris = setup_crowd(fig.near_clothes, LOD_NEAR, fig.bank, crowd_capacity(fig)) }
         // AE3D_LODFAR (hundredths of a metre) decimates the far tier in the
         // engine; with the exported stand-in that is off unless asked for.
         far_default = (LOD_FAR * 100.0) as int
         if fig.far_exported { far_default = 0 }
         far_cell = core.env_int("AE3D_LODFAR", far_default) as float / 100.0
-        fig.far_tris = setup_crowd(fig.far_body, far_cell, fig.bank)
+        fig.far_tris = setup_crowd(fig.far_body, far_cell, fig.bank, crowd_capacity(fig))
+        if fig.device != null {
+            crowd.device_crowd_bind(fig.device, fig.near_body, 0)
+            if fig.near_clothes != null { crowd.device_crowd_bind(fig.device, fig.near_clothes, 0) }
+            crowd.device_crowd_bind(fig.device, fig.far_body, 1)
+        }
         // The near tier casts its shadow and writes its depth from the far
         // tier's mesh: the shadow map and the camera depth read a figure's
         // silhouette, never its face, and the full mesh through the two
@@ -716,7 +747,10 @@ on_start(state: ptr, e: *Engine) {
             suffix = ""
             if k == 1 { suffix = "_B" }
             fig.impostor = impostor_for(m, "Zombie_Body${suffix}", fig)
-            if fig.impostor != null { engine.engine_add_model(e, fig.impostor) }
+            if fig.impostor != null {
+                if fig.device != null { crowd.device_crowd_bind(fig.device, fig.impostor, 2) }
+                engine.engine_add_model(e, fig.impostor)
+            }
         }
         k = k + 1
     }
@@ -739,7 +773,9 @@ log_scene(e: *Engine, cam: *Camera) {
         if fig.far_exported { far_from = "the build's own LOD" }
         picture = "no impostor"
         if fig.impostor != null { picture = "impostor a ${fig.impostor.impostor_cols}x${fig.impostor.impostor_rows} atlas at ${fig.impostor_metres}m" }
-        println("zombie_city[diag] figure ${k}: zombies ${fig.start}..${fig.start + fig.count - 1}; near ${fig.near_tris}+${fig.cloth_tris} tris (full mesh), far ${fig.far_tris} tris, ${far_from}; ${picture}; ${FRAMES} pose bank")
+        sorter = "sorted on the CPU (crowd_tiers)"
+        if fig.device != null { sorter = "sorted on the device (compute, AE3D_GPU_CROWD)" }
+        println("zombie_city[diag] figure ${k}: zombies ${fig.start}..${fig.start + fig.count - 1}; near ${fig.near_tris}+${fig.cloth_tris} tris (full mesh), far ${fig.far_tris} tris, ${far_from}; ${picture}; ${FRAMES} pose bank; ${sorter}")
         // The walk the bank carries: how far the clip's root travels over
         // its length, and the pace that sets. In place, so that travel is
         // the crowd's motion and not the mesh's; zero here means the clip
@@ -779,42 +815,45 @@ log_scene(e: *Engine, cam: *Camera) {
 // every 60 frames and each offender past the threshold (capped so a broken
 // frame cannot flood the log). AE3D_TELEPORT=0 turns it off.
 var g_prev_pos: *Column = null
+var g_audit: *Column = null       // what crowd_audit reports, eight doubles
+var g_teleport_check = true
 var g_tp_worst = 0.0
 var g_tp_worst_id = 0
 var g_tp_count = 0
 detect_teleports(delta: float) {
-    if core.env_int("AE3D_TELEPORT", 1) == 0 { return }
+    if !g_teleport_check { return }
     if g_prev_pos == null {
         g_prev_pos = ecs.column_new(g_count, 3)
+        g_audit = ecs.column_new(1, 8)
         i = 0
         while i < g_count { ecs.column_set3(g_prev_pos, i, ecs.column_get3(g_pos, i)); i = i + 1 }
         return
     }
     // The furthest a zombie may move in a frame, with headroom for a clamp.
     limit = MAX_SPEED * delta * 3.0 + 0.05
+    // The scan is native, over the job pool: every figure against its
+    // last position, the worst step, the offenders, and the crowd's extent
+    // across the road, so a zombie on the pavement shows up as a number
+    // past the kerb rather than as a perspective to argue about in a still.
+    // The previous positions are this frame's when it returns.
+    crowd.crowd_audit(ecs.column_data(g_pos), ecs.column_data(g_prev_pos), g_count, limit,
+                      ecs.column_data(g_audit))
+    worst = ecs.column_get(g_audit, 0, 0)
+    if worst > g_tp_worst {
+        g_tp_worst = worst
+        g_tp_worst_id = ecs.column_get(g_audit, 0, 1) as int
+    }
+    jumps = ecs.column_get(g_audit, 0, 2) as int
+    g_tp_count = g_tp_count + jumps
+    z_lo = ecs.column_get(g_audit, 0, 3)
+    z_hi = ecs.column_get(g_audit, 0, 4)
     shown = 0
-    // The crowd's extent across the road, so a zombie on the pavement shows
-    // up as a number past the kerb rather than as a perspective to argue
-    // about in a still.
-    z_lo = 1000.0
-    z_hi = 0.0 - 1000.0
-    i = 0
-    while i < g_count {
-        p = ecs.column_get3(g_pos, i)
-        q = ecs.column_get3(g_prev_pos, i)
-        d = core.v3_len(core.v3_sub(p, q))
-        if d > g_tp_worst { g_tp_worst = d; g_tp_worst_id = i }
-        if p.z < z_lo { z_lo = p.z }
-        if p.z > z_hi { z_hi = p.z }
-        if d > limit {
-            g_tp_count = g_tp_count + 1
-            if shown < 3 {
-                println("zombie_city[teleport] frame ${g_frame} zombie ${i}: (${q.x}, ${q.z}) -> (${p.x}, ${p.z}) jumped ${d}m (limit ${limit})")
-                shown = shown + 1
-            }
-        }
-        ecs.column_set3(g_prev_pos, i, p)
-        i = i + 1
+    while shown < 3 && shown < jumps {
+        who = ecs.column_get(g_audit, 0, 5 + shown) as int
+        if who < 0 { break }
+        p = ecs.column_get3(g_pos, who)
+        println("zombie_city[teleport] frame ${g_frame} zombie ${who}: now (${p.x}, ${p.z}) stepped further than ${limit}m")
+        shown = shown + 1
     }
     if g_frame % 60 == 0 {
         println("zombie_city[teleport] frames ${g_frame - 59}..${g_frame}: worst step ${g_tp_worst}m by zombie ${g_tp_worst_id}, jumps so far ${g_tp_count}; crowd z ${z_lo}..${z_hi} (road ${ROAD_Z0}..${ROAD_Z1})")
@@ -913,6 +952,7 @@ on_update(state: ptr, e: *Engine, delta: float) {
     mark = platform.time()
     detect_teleports(delta)
     g_t_teleport = g_t_teleport + lap(mark)
+    mark = platform.time()
     log_materials_once()
     // Each figure's run sorted into its tiers in one pass: the near mesh
     // within the near distance, the far mesh within the impostor distance,
@@ -925,6 +965,21 @@ on_update(state: ptr, e: *Engine, delta: float) {
         fig = list.get_raw(g_figures, k) as *Figure
         picture_from = 0.0
         if fig.impostor != null { picture_from = g_impostor_dist }
+        // On the device, the whole of the above is a note of where the run
+        // is and where the camera stands; the renderer sorts when it draws.
+        if fig.device != null {
+            crowd.device_crowd_update(fig.device, ecs.column_data(g_pos), ecs.column_data(g_yaw),
+                                      ecs.column_data(g_phase), ecs.column_data(g_color),
+                                      fig.start, fig.count, cam.position.x, cam.position.z,
+                                      g_near_dist, picture_from, g_cull_dist)
+            g_t_bucket = g_t_bucket + lap(mark)
+            mark = platform.time()
+            if g_perf_sim && g_t_frames == 119 {
+                println("zombie_city[perf] figure ${k} device tiers: near ${crowd.device_crowd_count(fig.device, 0)} far ${crowd.device_crowd_count(fig.device, 1)} impostor ${crowd.device_crowd_count(fig.device, 2)} of ${fig.count}")
+            }
+            k = k + 1
+            continue
+        }
         crowd.crowd_tiers(ecs.column_data(g_pos), ecs.column_data(g_yaw), ecs.column_data(g_phase),
                           ecs.column_data(g_color), fig.start, fig.count, cam.position.x, cam.position.z,
                           g_near_dist, picture_from, g_cull_dist,
@@ -935,6 +990,9 @@ on_update(state: ptr, e: *Engine, delta: float) {
         nn = ecs.column_get(g_tiercount, 0, 0) as int
         nf = ecs.column_get(g_tiercount, 0, 1) as int
         ni = ecs.column_get(g_tiercount, 0, 2) as int
+        if g_perf_sim && g_t_frames == 119 {
+            println("zombie_city[perf] figure ${k} tiers: near ${nn} far ${nf} impostor ${ni} of ${fig.count}")
+        }
         g_t_bucket = g_t_bucket + lap(mark)
         mark = platform.time()
         upload_tier(fig.near_body, g_nb_pos, g_nb_yaw, g_nb_phase, g_nb_col, nn)

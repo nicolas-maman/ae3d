@@ -123,13 +123,34 @@ pass instead of a pass and a pass over the far tier's output. On a
 | 500,000 | 4 | 69 | 12.0 | 0.6 | 1.7 | 2.2 | 3.2 | 4.4 |
 | 500,000 | 24 | 79 | 8.0 | 0.4 | 1.7 | 1.0 | 2.8 | 2.3 |
 
-What does not scale is what is bound by memory rather than arithmetic:
-the sort and the upload write each figure's eight doubles, its sixty-four
+What did not scale was what is bound by memory rather than arithmetic:
+the sort and the upload wrote each figure's eight doubles, its sixty-four
 bytes of matrix and its eighty bytes of instance stream every frame, a
-hundred-odd megabytes, and the shove's grid is still built on one thread.
-The next step for those is not more threads but fewer copies: the
-positions, headings and phases uploaded as they are and the matrices
-built and the tiers chosen on the device (#274).
+hundred-odd megabytes. (The "sort" column above also counted the
+teleport audit, a scan of every figure against its last position; on its
+own the sort was 1.5 ms, and the audit is native over the pool now, 0.4.)
+
+So on Vulkan the sort is the device's (`crowd.device_crowd_new`; see
+docs/rendering.md, "The crowd sorted on the device"): the CPU converts the
+figures' state to thirty-two bytes each into a buffer in the device's
+memory, and a compute pass picks the tiers, builds the matrices, packs the
+streams and counts the draws, which are indirect. Same machine, same
+scene (`AE3D_CROWD=500000 AE3D_NEAR=3 AE3D_NOPROPS=1 AE3D_SEPN=4`):
+
+| crowd | sort | fps | update ms | cpu ms | sort + upload ms | gpu shadow ms | gpu scene ms |
+|---|---|---|---|---|---|---|---|
+| 500,000 | CPU, 24 threads | 75 | 7.4 | 3.3 | 1.6 + 2.5 | 3.4 | 9.2 |
+| 500,000 | device | 90 | 3.1 | 2.4 | 0 + 0 | 3.0 | 8.1 |
+
+The state buffer's memory matters: read by the sort from system memory
+over the bus, sixteen megabytes a frame cost the device 1.7 ms -- more
+than the sort -- and the frame rate fell below the CPU sort's. In the
+device's own host-visible memory (the BAR; the engine falls back to
+system memory where there is none) the sort is under 0.2 ms and the
+frame is the draw's. What is left on the CPU at half a million is the
+simulation itself -- the shove 1.7 ms, the step 0.8, the heading 0.3 --
+and the conversion, about a millisecond; the shove's grid is still built
+on one thread.
 
 The table found a stall as well: `lights` spent 6.9 ms of CPU a frame, at
 nine draws, because a batched model that moves had its instance buffer

@@ -23,8 +23,13 @@ exports (
     posebank_travel, posebank_speed,
     horde_seek,
     HordeGrid, grid_new, grid_free, horde_separate,
-    crowd_wander, crowd_step, crowd_bucket, crowd_tiers
+    crowd_wander, crowd_step, crowd_bucket, crowd_tiers, crowd_audit,
+    device_crowd_new, device_crowd_free, device_crowd_bind, device_crowd_update, device_crowd_count
 )
+
+extern ae3d_vk_crowd_create(capacity: int) -> int
+extern ae3d_vk_crowd_destroy(handle: int)
+extern ae3d_vk_crowd_count(handle: int, tier: int) -> int
 
 extern ae3d_posebank_create(frames: int, bones: int) -> ptr
 extern ae3d_posebank_destroy(bank: ptr)
@@ -52,6 +57,7 @@ extern ae3d_crowd_tiers(pos: ptr, yaw: ptr, phase: ptr, col: ptr, start: int, n:
                         mp: ptr, my: ptr, mph: ptr, mcol: ptr,
                         fp: ptr, fy: ptr, fph: ptr, fcol: ptr,
                         counts_out: ptr)
+extern ae3d_crowd_audit(pos: ptr, prev: ptr, n: int, limit: float, out: ptr)
 extern ae3d_crowd_bucket(pos: ptr, yaw: ptr, phase: ptr, col: ptr, start: int, n: int,
                          cx: float, cz: float, near_dist: float, cull_dist: float,
                          np: ptr, ny: ptr, nph: ptr, ncol: ptr,
@@ -289,4 +295,70 @@ crowd_tiers(pos: ptr, yaw: ptr, phase: ptr, col: ptr, start: int, n: int, cx: fl
             fp: ptr, fy: ptr, fph: ptr, fcol: ptr, counts_out: ptr) {
     ae3d_crowd_tiers(pos, yaw, phase, col, start, n, cx, cz, near_dist, mid_dist, cull_dist,
                      np, ny, nph, ncol, mp, my, mph, mcol, fp, fy, fph, fcol, counts_out)
+}
+
+// The crowd's steps audited against where it stood the frame before
+// (`prev`, xyz doubles, which become this frame's positions): out takes
+// eight doubles -- the largest step and which figure took it, how many
+// stepped further than `limit`, the crowd's z extent, and the first three
+// offenders (-1 for none). Over the job pool: a check that runs every
+// frame is on the hot path however diagnostic it is.
+crowd_audit(pos: ptr, prev: ptr, n: int, limit: float, out: ptr) {
+    ae3d_crowd_audit(pos, prev, n, limit, out)
+}
+
+// The same sort on the device, for up to `capacity` figures: the CPU's
+// part of a frame is then thirty-two bytes a figure converted into a
+// mapped buffer, and the matrices, the sort, the compaction and the
+// counts are the GPU's. Null when the backend has no compute (OpenGL,
+// or Vulkan not up), and the caller keeps crowd_tiers. Bind each tier's
+// model with device_crowd_bind, then each frame device_crowd_update says
+// which figures and where the camera is; the renderer does the rest.
+device_crowd_new(capacity: int) -> *DeviceCrowd {
+    if capacity <= 0 { return null }
+    handle = ae3d_vk_crowd_create(capacity)
+    if handle == 0 { return null }
+    dc = heap.new(DeviceCrowd)
+    dc.handle = handle
+    dc.capacity = capacity
+    return dc
+}
+
+// How many figures the sort last put in `tier`: the count of the last
+// frame the device finished, a frame or two behind. For a diagnostic.
+device_crowd_count(dc: *DeviceCrowd, tier: int) -> int {
+    if dc == null { return 0 }
+    return ae3d_vk_crowd_count(dc.handle, tier)
+}
+
+device_crowd_free(dc: *DeviceCrowd) {
+    if dc == null { return }
+    if dc.handle != 0 { ae3d_vk_crowd_destroy(dc.handle) }
+    heap.free(dc)
+}
+
+// `m` draws tier `tier` (0 near, 1 mid, 2 far) of the crowd. Two models can
+// share a tier -- a body and its clothes over the same figures.
+device_crowd_bind(dc: *DeviceCrowd, m: *Model, tier: int) {
+    core.model_set_device_crowd(m, dc, tier)
+}
+
+// This frame's crowd: `n` figures from `start` of the columns (xyz, yaw,
+// phase, rgb doubles), the camera at (cx, cz) on the ground, the tiers'
+// bands as crowd_tiers takes them. The sort runs when the frame is drawn.
+device_crowd_update(dc: *DeviceCrowd, pos: ptr, yaw: ptr, phase: ptr, col: ptr, start: int, n: int,
+                    cx: float, cz: float, near_dist: float, mid_dist: float, cull_dist: float) {
+    if dc == null { return }
+    dc.pos = pos
+    dc.yaw = yaw
+    dc.phase = phase
+    dc.col = col
+    dc.start = start
+    dc.count = n
+    if dc.count > dc.capacity { dc.count = dc.capacity }
+    dc.cx = cx
+    dc.cz = cz
+    dc.near_dist = near_dist
+    dc.mid_dist = mid_dist
+    dc.cull_dist = cull_dist
 }

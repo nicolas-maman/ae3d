@@ -73,6 +73,11 @@ const SHADOW_SIZE = 2048
 
 extern ae3d_vk_shadow_begin() -> int
 extern ae3d_vk_shadow_draw(mesh: int, instances: int, instance_count: int)
+extern ae3d_vk_crowd_set_tier(handle: int, tier: int, sx: float, sy: float, sz: float, indices: int, shadow_indices: int)
+extern ae3d_vk_crowd_fill(handle: int, pos: ptr, yaw: ptr, phase: ptr, col: ptr, start: int, n: int) -> int
+extern ae3d_vk_crowd_sort(handle: int, cx: float, cz: float, near_dist: float, mid_dist: float, cull_dist: float) -> int
+extern ae3d_vk_draw_crowd_tier(mesh: int, texture: int, handle: int, tier: int)
+extern ae3d_vk_shadow_draw_crowd_tier(mesh: int, handle: int, tier: int)
 extern ae3d_vk_texture_create_float(width: int, height: int, rgba: ptr) -> int
 extern ae3d_vk_texture_create_rgba(width: int, height: int, depth: int, rgba: ptr) -> int
 extern ae3d_vk_set_pose_bank(texture: int)
@@ -158,6 +163,8 @@ struct VKBatch {
 struct VKRenderer {
     models: ptr
     lights: ptr
+    // Counts the frames, so a crowd two models draw tiers of is sorted once a frame.
+    sort_serial: int
     // How hard normal maps push, for the whole scene. A look, not a surface.
     normal_strength: float
     occlusion_strength: float
@@ -739,11 +746,53 @@ render_shadow_pass(r: *VKRenderer, light: *Light, cam: *Camera) {
     ae3d_vk_shadow_end()
 }
 
+// The crowds sorted on the device, once a frame each, before any pass
+// opens: each tier's model says its scale and its index counts (its own
+// for the lit draw, its depth proxy's for the shadow), then the crowd's
+// figures go into the frame's state buffer and the sort is recorded. The
+// tier draws that follow, lit and shadow, read the streams and the counts
+// it wrote.
+sort_device_crowds(r: *VKRenderer) {
+    r.sort_serial = r.sort_serial + 1
+    count = list.size(r.models)
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        if m != null && m.visible && m.device_crowd != null {
+            dc = m.device_crowd as *DeviceCrowd
+            core.model_sync_transform(m)
+            shadow_mesh = m.mesh
+            if m.depth_proxy != null {
+                proxy = m.depth_proxy as *Model
+                shadow_mesh = proxy.mesh
+            }
+            ae3d_vk_crowd_set_tier(dc.handle, m.device_tier, m.scale.x, m.scale.y, m.scale.z,
+                                   core.mesh_index_count(m.mesh), core.mesh_index_count(shadow_mesh))
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < count {
+        m = list.get_raw(r.models, i) as *Model
+        if m != null && m.visible && m.device_crowd != null {
+            dc = m.device_crowd as *DeviceCrowd
+            if dc.sorted_serial != r.sort_serial {
+                dc.sorted_serial = r.sort_serial
+                if dc.count > 0 && ae3d_vk_crowd_fill(dc.handle, dc.pos, dc.yaw, dc.phase, dc.col, dc.start, dc.count) > 0 {
+                    ae3d_vk_crowd_sort(dc.handle, dc.cx, dc.cz, dc.near_dist, dc.mid_dist, dc.cull_dist)
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
 shadow_draw_model(m: *Model) {
     instances = 0
     if m.is_instanced { instances = core.model_instance_count(m) }
     instanced = 0
     if instances > 0 { instanced = 1 }
+    if m.device_crowd != null { instanced = 1 }
     // The same rule as the lit draw: an instanced model's transform is
     // already in every instance, so the model matrix goes as the identity
     // or the scale is applied twice. Sent as the model's own, a grid of
@@ -776,6 +825,11 @@ shadow_draw_model(m: *Model) {
         proxy = m.depth_proxy as *Model
         if proxy.vbo != 0 { vbo = proxy.vbo }
     }
+    if m.device_crowd != null {
+        dc = m.device_crowd as *DeviceCrowd
+        ae3d_vk_shadow_draw_crowd_tier(vbo, dc.handle, m.device_tier)
+        return
+    }
     ae3d_vk_shadow_draw(vbo, m.instance_vbo, instances)
 }
 
@@ -799,6 +853,7 @@ point_frame(m: *Model) -> Mat4 {
 // of its bind pose; it draws on its own.
 shadow_batchable(m: *Model) -> bool {
     if m.skeleton != null || ae3d_vk_mesh_shared(m.vbo) == 0 { return false }
+    if m.device_crowd != null { return false }
     return !(m.is_instanced && core.model_instance_count(m) > 0)
 }
 
@@ -1242,6 +1297,9 @@ refresh_instances(m: *Model) {
 set_scene_uniforms(r: *VKRenderer, m: *Model) {
     instanced = 0
     if m.is_instanced && core.model_instance_count(m) > 0 { instanced = 1 }
+    // A device crowd's tier has its instances on the device, however many
+    // the sort counted: an instanced draw with an empty CPU stream.
+    if m.device_crowd != null { instanced = 1 }
 
     // CRITICAL: an instanced model's transform is already in every instance.
     // model_set_instance_position fills each instance's matrix from the model's
@@ -1466,6 +1524,8 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
         i = i + 1
     }
 
+    sort_device_crowds(r)
+
     render_shadow_pass(r, active_light, cam)
     // Filled from this camera every frame rather than cached behind a flag. The
     // flag was one boolean for the whole program while the frustum it guarded
@@ -1564,6 +1624,7 @@ batchable(m: *Model) -> bool {
     if !core.draw_merging() { return false }
     if m == null || !m.visible || m.vbo == 0 { return false }
     if m.is_instanced && core.model_instance_count(m) > 0 { return false }
+    if m.device_crowd != null { return false }
     if core.model_group_count(m) > 0 { return false }
     if core.model_uniform_count(m) > 0 { return false }
     if core.shader_valid(&m.shader) { return false }
@@ -1728,7 +1789,9 @@ draw_model(r: *VKRenderer, m: *Model, transparent_pass: bool) {
     // Before the cull, because a skinned mesh's own bounds are the bind pose's
     // and say nothing about where its bones have carried it.
     if m.skeleton != null { skin.skeleton_fit(m.skeleton as *Skeleton, m) }
-    if core.frustum_culling() &&
+    // A device crowd's bounds are its figures', which the CPU never sees:
+    // the sort's distance cull is its cull, and the sphere test is skipped.
+    if m.device_crowd == null && core.frustum_culling() &&
        !core.frustum_sphere_visible(r.frustum, m.bounding_center, m.bounding_radius) {
         return
     }
@@ -1755,7 +1818,7 @@ draw_model(r: *VKRenderer, m: *Model, transparent_pass: bool) {
                 set_material_uniforms(material)
                 texture = 0
                 if material != null { texture = texture_for(r, material) }
-                ae3d_vk_draw(m.vbo, texture, m.instance_vbo, instances)
+                draw_instances(m, texture, instances)
             }
             i = i + 1
         }
@@ -1766,6 +1829,17 @@ draw_model(r: *VKRenderer, m: *Model, transparent_pass: bool) {
     apply_normal_map(r, m.material)
     texture = 0
     if m.material != null { texture = texture_for(r, m.material) }
+    draw_instances(m, texture, instances)
+}
+
+// The draw itself: a device crowd's tier by the count the sort wrote, or
+// the model's own instances.
+draw_instances(m: *Model, texture: int, instances: int) {
+    if m.device_crowd != null {
+        dc = m.device_crowd as *DeviceCrowd
+        ae3d_vk_draw_crowd_tier(m.vbo, texture, dc.handle, m.device_tier)
+        return
+    }
     ae3d_vk_draw(m.vbo, texture, m.instance_vbo, instances)
 }
 
