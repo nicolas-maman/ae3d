@@ -1,0 +1,215 @@
+// A glTF file loaded into models, a skeleton and clips, checked against the
+// numbers the file was written from.
+//
+// The fixture (tools/make_gltf_fixture.py) is a two-bone arm: a box two
+// units tall, its lower half bound to a root bone at the origin and its upper
+// half to a child bone one unit up. "Bend" turns the child bone ninety
+// degrees about Z over one second; "Lift" steps the root up by one unit at
+// half a second. The same arm is read as a .glb and as a .gltf beside its
+// .bin, and both have to give the same arm. What is checked is where the
+// palette puts a vertex once the clips have played, not that something
+// moved.
+
+import std.list
+import std.string
+import ae3d.core
+import ae3d.skin
+import ae3d.anim
+import ae3d.gltf
+
+const EPSILON = 0.001
+
+extern cos(x: float) -> float
+extern sin(x: float) -> float
+
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, condition: bool) {
+    g_checks = g_checks + 1
+    if condition {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        g_failures = g_failures + 1
+    }
+}
+
+near(a: float, b: float) -> bool {
+    d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    return d < EPSILON
+}
+
+posed_by(s: *Skeleton, bone: int, p: Vec3) -> Vec3 {
+    palette = skin.skeleton_palette(s)
+    m = core.mat4_ident()
+    m.m0  = core.palette_get(palette, bone, 0)
+    m.m1  = core.palette_get(palette, bone, 1)
+    m.m2  = core.palette_get(palette, bone, 2)
+    m.m3  = core.palette_get(palette, bone, 3)
+    m.m4  = core.palette_get(palette, bone, 4)
+    m.m5  = core.palette_get(palette, bone, 5)
+    m.m6  = core.palette_get(palette, bone, 6)
+    m.m7  = core.palette_get(palette, bone, 7)
+    m.m8  = core.palette_get(palette, bone, 8)
+    m.m9  = core.palette_get(palette, bone, 9)
+    m.m10 = core.palette_get(palette, bone, 10)
+    m.m11 = core.palette_get(palette, bone, 11)
+    m.m12 = core.palette_get(palette, bone, 12)
+    m.m13 = core.palette_get(palette, bone, 13)
+    m.m14 = core.palette_get(palette, bone, 14)
+    m.m15 = core.palette_get(palette, bone, 15)
+    return core.mat4_transform_point(m, p)
+}
+
+turned_about_z(v: Vec3, angle: float) -> Vec3 {
+    c = cos(angle)
+    sn = sin(angle)
+    return core.vec3(v.x * c - v.y * sn, v.x * sn + v.y * c, v.z)
+}
+
+// The arm from one file, through every check.
+exercise(path: string, label: string) {
+    scene = gltf.load(path)
+    check("${label}: the file loads (${gltf.last_error()})", scene != null)
+    if scene == null { return }
+    check("${label}: no warnings", gltf.warning_count(scene) == 0)
+    i = 0
+    while i < gltf.warning_count(scene) {
+        println("       warning: ${gltf.warning(scene, i)}")
+        i = i + 1
+    }
+
+    // The tree: four nodes and the arm's one primitive.
+    check("${label}: five models, four nodes and a primitive", gltf.model_count(scene) == 5)
+    check("${label}: one root", gltf.root_count(scene) == 1)
+    arm = gltf.find(scene, "Arm")
+    check("${label}: the Arm node is there", arm != null)
+    upper = gltf.find(scene, "Upper")
+    check("${label}: the Upper bone stands one unit up", upper != null && near(upper.position.y, 1.0))
+
+    // The primitive: twelve vertices, twelve triangles, red, skinned.
+    check("${label}: one primitive", gltf.primitive_count(scene) == 1)
+    if gltf.primitive_count(scene) != 1 { return }
+    part = gltf.primitive(scene, 0)
+    check("${label}: twelve vertices", core.mesh_vertex_count(part.mesh) == 12)
+    check("${label}: sixteen triangles", core.mesh_index_count(part.mesh) == 48)
+    check("${label}: the mesh is skinned", core.mesh_is_skinned(part.mesh))
+    check("${label}: the material is red", part.material != null && near(part.material.diffuse.x, 0.8) && near(part.material.diffuse.y, 0.1))
+    check("${label}: roughness read", part.material != null && near(part.material.roughness, 0.5))
+    // A skinned primitive is placed by its joints alone, as the file's rule
+    // says, so it stands at the root rather than under its node.
+    check("${label}: the skinned primitive stands at the root", part.parent == null)
+    top = core.mesh_position(part.mesh, 8)
+    check("${label}: the top ring is two units up", near(top.y, 2.0))
+    // Where the elbow bend takes that vertex: a turn about Z around the
+    // joint one unit up, computed here rather than copied from the file.
+    joint = core.vec3(0.0, 1.0, 0.0)
+    off = core.v3_sub(top, joint)
+
+    // The skin: two bones, the child's inverse bind one unit down.
+    check("${label}: one skeleton", gltf.skeleton_count(scene) == 1)
+    s = gltf.skeleton(scene, 0)
+    check("${label}: two bones", skin.skeleton_count(s) == 2)
+    check("${label}: the primitive is posed by it", part.skeleton == s as ptr)
+    // In the bind pose every bone's palette entry is the identity: the top
+    // ring stays where it is.
+    p = posed_by(s, 1, top)
+    check("${label}: the bind pose leaves the top vertex where it is", near(p.x, top.x) && near(p.y, top.y) && near(p.z, top.z))
+
+    // The clips: Bend drives Upper, Lift drives Root.
+    check("${label}: two animations", gltf.animation_count(scene) == 2)
+    check("${label}: named Bend and Lift", gltf.animation_name(scene, 0) == "Bend" && gltf.animation_name(scene, 1) == "Lift")
+    check("${label}: two clips, one node each", gltf.clip_count(scene) == 2)
+    registry = anim.registry_new()
+    made = gltf.play(scene, "Bend", registry, false)
+    check("${label}: Bend makes one player", made == 1)
+    // Halfway: forty-five degrees about Z at the elbow one unit up.
+    anim.registry_advance(registry, 0.5)
+    anim.registry_apply(registry)
+    skin.skeleton_update(s)
+    p = posed_by(s, 1, top)
+    want = core.v3_add(joint, turned_about_z(off, 0.7853982))
+    check("${label}: half a Bend turns the top vertex forty-five degrees about the elbow", near(p.x, want.x) && near(p.y, want.y) && near(p.z, want.z))
+    // The whole bend: ninety degrees, the upper half lying along -X.
+    anim.registry_advance(registry, 0.5)
+    anim.registry_apply(registry)
+    skin.skeleton_update(s)
+    p = posed_by(s, 1, top)
+    want = core.v3_add(joint, turned_about_z(off, 1.5707963))
+    check("${label}: a full Bend turns it ninety", near(p.x, want.x) && near(p.y, want.y) && near(p.z, want.z))
+    // The lower half never moved.
+    base = core.mesh_position(part.mesh, 0)
+    p = posed_by(s, 0, base)
+    check("${label}: the base is still on the ground", near(p.y, 0.0))
+
+    // Lift steps the root, and every bone under it, up one unit at 0.5s.
+    lifted = anim.registry_new()
+    made = gltf.play(scene, "Lift", lifted, false)
+    check("${label}: Lift makes one player", made == 1)
+    anim.registry_advance(lifted, 0.25)
+    anim.registry_apply(lifted)
+    skin.skeleton_update(s)
+    p = posed_by(s, 0, base)
+    check("${label}: before the step the base is on the ground", near(p.y, 0.0))
+    anim.registry_advance(lifted, 0.5)
+    anim.registry_apply(lifted)
+    skin.skeleton_update(s)
+    p = posed_by(s, 0, base)
+    check("${label}: after the step the base is one unit up", near(p.y, 1.0))
+
+    anim.registry_free(registry)
+    anim.registry_free(lifted)
+    gltf.scene_destroy(scene)
+}
+
+// A file from the world: the Khronos Fox, a textured, skinned figure with
+// three animation cycles, its texture embedded in the binary.
+fox() {
+    scene = gltf.load("tests/fixtures/gltf/Fox.glb")
+    check("fox: the file loads (${gltf.last_error()})", scene != null)
+    if scene == null { return }
+    check("fox: nothing left unread", gltf.warning_count(scene) == 0)
+    i = 0
+    while i < gltf.warning_count(scene) {
+        println("       warning: ${gltf.warning(scene, i)}")
+        i = i + 1
+    }
+    check("fox: one skinned mesh", gltf.primitive_count(scene) == 1 && gltf.primitive(scene, 0).skeleton != null)
+    check("fox: one skin of more than twenty joints", gltf.skeleton_count(scene) == 1 && skin.skeleton_count(gltf.skeleton(scene, 0)) > 20)
+    check("fox: three animations", gltf.animation_count(scene) == 3)
+    part = gltf.primitive(scene, 0)
+    check("fox: the embedded texture is registered under the file's name",
+          part.material != null && part.material.texture_path != "" && string.starts_with(part.material.texture_path, "tests/fixtures/gltf/Fox.glb#image") == 1)
+    check("fox: the mesh has its triangles", core.mesh_index_count(part.mesh) > 1000)
+    registry = anim.registry_new()
+    made = gltf.play(scene, "Run", registry, true)
+    check("fox: Run drives more than ten nodes", made > 10)
+    // A second of running moves a joint: the palette after is not the
+    // palette before.
+    s = gltf.skeleton(scene, 0)
+    before = posed_by(s, 5, core.vec3(0.0, 10.0, 0.0))
+    anim.registry_advance(registry, 0.4)
+    anim.registry_apply(registry)
+    skin.skeleton_update(s)
+    after = posed_by(s, 5, core.vec3(0.0, 10.0, 0.0))
+    check("fox: the run moves a joint", !near(before.x, after.x) || !near(before.y, after.y) || !near(before.z, after.z))
+    anim.registry_free(registry)
+    gltf.scene_destroy(scene)
+}
+
+main() {
+    exercise("tests/fixtures/gltf/arm.glb", "glb")
+    exercise("tests/fixtures/gltf/arm.gltf", "gltf")
+    fox()
+
+    missing = gltf.load("tests/fixtures/gltf/no_such.glb")
+    check("a missing file is refused with a reason", missing == null && gltf.last_error() != "")
+
+    if g_failures == 0 {
+        println("gltf: all checks passed (${g_checks})")
+        return
+    }
+    println("gltf: ${g_failures} failure(s) of ${g_checks}")
+}

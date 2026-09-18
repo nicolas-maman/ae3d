@@ -106,6 +106,40 @@ judged at full size with `tools/crop.ae` (a region of a frame, by pixel),
 and in numbers with `tools/probe_image.ae` (the mean colour and greyness of
 each band of a frame, and what moved between two).
 
+## Models from anywhere: glTF
+
+![The Khronos Fox walking on a floor, its shadow under it](gltf-fox.png)
+
+The pipeline above is for scenes built here. A figure from anywhere else --
+Mixamo, Sketchfab, a Quaternius pack, another engine's export -- comes in
+through `ae3d.gltf`, which reads glTF 2.0 (`.gltf` with its `.bin` beside
+it, or `.glb`) into the same models, skeletons and clips the pipeline
+produces:
+
+```aether
+scene = gltf.load("Soldier.glb")
+i = 0
+while i < gltf.primitive_count(scene) { engine.engine_add_model(e, gltf.primitive(scene, i)) ; i = i + 1 }
+gltf.play(scene, "Walk", engine.engine_animations(e) as *Registry, true)
+```
+
+Every node is a model placed by its TRS (or its matrix, decomposed) and
+parented as the tree says; every mesh primitive is a model of its own, with
+position, normal, texture coordinate, joints and weights; a material's base
+colour, metallic, roughness, base colour texture and normal map; every skin
+a skeleton over its joint nodes with the inverse bind matrices the file
+gives (a skinned primitive stands at the origin and is placed by its
+joints alone, as the format's rule says); every animation one clip per node
+it drives, named `<animation>:<node>`, STEP, LINEAR and CUBICSPLINE alike.
+Images embedded in a `.glb` are decoded and registered under
+`<file>#image<n>`, a name any texture path resolves. What is not read --
+sparse accessors, `data:` URIs, morph targets -- is named in the scene's
+warnings, and the rest of the file loads. The palette holds ninety-six
+bones, which is a Mixamo rig with its fingers. `examples/gltf_viewer.ae`
+frames any file on a floor and plays one of its animations;
+`tests/test_gltf` holds the loader to a two-bone arm it can do the
+arithmetic for, and to the Khronos Fox.
+
 ## Driving it from a program
 
 An engine started with `AE3D_AGENT` answers questions about itself over a

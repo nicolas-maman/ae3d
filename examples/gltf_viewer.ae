@@ -1,0 +1,147 @@
+// Any glTF, on a ground, under a sun, playing one of its animations.
+//
+//   ./build/gltf_viewer path/to/model.glb [animation]
+//   AE3D_ANIM=Run ./build/gltf_viewer Fox.glb
+//
+// A figure from Mixamo, Sketchfab, a Quaternius pack or another engine's
+// export is dropped in and looked at, its skins bending and its clips
+// playing, without passing through Blender first. With no animation named,
+// the file's first one plays; the rest are listed. The camera frames the
+// model from its bounds, so a fox at its own scale and a giant at its are
+// both in view.
+import std.string
+import std.os
+import ae3d.core
+import ae3d.engine
+import ae3d.loader
+import ae3d.gltf
+import ae3d.anim
+import ae3d.skin
+
+var g_path = ""
+var g_animation = ""
+var g_scene: ptr = null
+var g_floor: ptr = null
+var g_light: ptr = null
+
+extern fmin(a: float, b: float) -> float
+extern fmax(a: float, b: float) -> float
+
+on_start(state: ptr, e: *Engine) {
+    scene = gltf.load(g_path)
+    if scene == null {
+        println("gltf_viewer: ${gltf.last_error()}")
+        return
+    }
+    g_scene = scene as ptr
+    i = 0
+    while i < gltf.warning_count(scene) {
+        println("gltf_viewer: not read: ${gltf.warning(scene, i)}")
+        i = i + 1
+    }
+    println("gltf_viewer: ${g_path}: ${gltf.model_count(scene)} nodes, ${gltf.primitive_count(scene)} meshes, ${gltf.skeleton_count(scene)} skins, ${gltf.animation_count(scene)} animations")
+
+    // Every primitive into the scene, and the bounds they span.
+    lo = core.vec3(1000000000.0, 1000000000.0, 1000000000.0)
+    hi = core.vec3(0.0 - 1000000000.0, 0.0 - 1000000000.0, 0.0 - 1000000000.0)
+    i = 0
+    while i < gltf.primitive_count(scene) {
+        m = gltf.primitive(scene, i)
+        engine.engine_add_model(e, m)
+        core.model_sync_transform(m)
+        if m.skeleton != null {
+            // A skinned mesh stands where its joints put it, so its joints
+            // are its bounds: the vertices are in the file's own space,
+            // which for a Mixamo figure is centimetres on a rig scaled to
+            // metres.
+            sk = m.skeleton as *Skeleton
+            b = 0
+            while b < skin.skeleton_count(sk) {
+                bone = skin.skeleton_bone(sk, b)
+                core.model_sync_transform(bone)
+                p = bone.world_position
+                lo = core.vec3(fmin(lo.x, p.x), fmin(lo.y, p.y), fmin(lo.z, p.z))
+                hi = core.vec3(fmax(hi.x, p.x), fmax(hi.y, p.y), fmax(hi.z, p.z))
+                b = b + 1
+            }
+        } else {
+            // Every vertex through the node's transform: a bounding sphere
+            // would put the floor a body's width under the feet.
+            v = 0
+            vcount = core.mesh_vertex_count(m.mesh)
+            while v < vcount {
+                p = core.mat4_transform_point(m.model_matrix, core.mesh_position(m.mesh, v))
+                lo = core.vec3(fmin(lo.x, p.x), fmin(lo.y, p.y), fmin(lo.z, p.z))
+                hi = core.vec3(fmax(hi.x, p.x), fmax(hi.y, p.y), fmax(hi.z, p.z))
+                v = v + 1
+            }
+        }
+        i = i + 1
+    }
+    if gltf.primitive_count(scene) == 0 {
+        lo = core.vec3(0.0 - 1.0, 0.0, 0.0 - 1.0)
+        hi = core.vec3(1.0, 2.0, 1.0)
+    }
+    size = core.v3_sub(hi, lo)
+    extent = fmax(size.x, fmax(size.y, size.z))
+    centre = core.v3_mul(core.v3_add(lo, hi), 0.5)
+    println("gltf_viewer: bounds ${lo.x},${lo.y},${lo.z} to ${hi.x},${hi.y},${hi.z}")
+
+    // The animation: the one asked for, else the first.
+    a = 0
+    while a < gltf.animation_count(scene) {
+        println("gltf_viewer: animation '${gltf.animation_name(scene, a)}'")
+        a = a + 1
+    }
+    if gltf.animation_count(scene) > 0 {
+        wanted = g_animation
+        if wanted == "" { wanted = gltf.animation_name(scene, 0) }
+        made = gltf.play(scene, wanted, engine.engine_animations(e) as *Registry, true)
+        println("gltf_viewer: playing '${wanted}' on ${made} nodes")
+    }
+
+    // A floor under the lowest point, a sun, and a camera that frames it.
+    ground = loader.plane(2, extent * 6.0)
+    core.model_set_position(ground, centre.x - extent * 3.0, lo.y, centre.z - extent * 3.0)
+    core.model_matte(ground, 0.32, 0.33, 0.35)
+    core.model_set_pbr(ground, 0.0, 0.85)
+    engine.engine_add_model(e, ground)
+    g_floor = ground as ptr
+
+    light = core.light_directional(core.vec3(0.0 - 0.45, 0.0 - 1.0, 0.0 - 0.3), core.vec3(1.0, 0.97, 0.92), 2.4)
+    engine.engine_set_light(e, light)
+    g_light = light as ptr
+    engine.engine_set_shadows(e, true)
+    engine.engine_set_shadow_distance(e, extent * 4.0)
+    engine.engine_set_time_of_day(e, 14.0)
+
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(centre.x + extent * 1.4, centre.y + extent * 0.6, centre.z + extent * 1.8))
+    core.camera_look_at(cam, centre)
+    core.camera_set_speed(cam, extent)
+    core.camera_set_far(cam, extent * 40.0)
+}
+
+main() {
+    g_path = "tests/fixtures/gltf/arm.glb"
+    if os.aether_args_count() > 1 { g_path = os.aether_args_get(1) }
+    if os.aether_args_count() > 2 { g_animation = os.aether_args_get(2) }
+    env_anim = os.getenv("AE3D_ANIM")
+    if env_anim != null { g_animation = core.text(env_anim) }
+
+    e = engine.engine_new()
+    engine.engine_set_size(e, 1280, 800)
+    engine.engine_set_title(e, "ae3d: glTF")
+    engine.engine_set_camera_input(e, true)
+    engine.engine_set_post(e, true, true, 1.0, 0.5)
+    program = engine.behaviour_new("gltf viewer", null)
+    program.start = on_start
+    engine.engine_add_behaviour(e, program)
+    if !engine.engine_run(e) { println("gltf_viewer: no window") }
+    engine.engine_free(e)
+    // After the engine: freeing the renderer released the GPU handles the
+    // models were given.
+    if g_scene != null { gltf.scene_destroy(g_scene as *GltfScene) }
+    if g_floor != null { core.model_free(g_floor as *Model) }
+    if g_light != null { core.light_free(g_light as *Light) }
+}

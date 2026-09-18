@@ -142,7 +142,7 @@ fi
 PLATFORM_LIBS="$(ae3d_platform_libs "$(uname -s)")"
 PIC="$(ae3d_native_pic_flag)"
 
-NATIVE_SOURCES="native/ae3d_agent.c native/ae3d_client.c native/ae3d_script.c native/ae3d_capture.c native/ae3d_glapi.c native/ae3d_platform.c native/ae3d_mesh.c native/ae3d_skin.c native/ae3d_horde.c native/ae3d_meshfile.c native/ae3d_image.c native/ae3d_png.c native/ae3d_gl.c native/ae3d_offscreen.c native/ae3d_vk.c native/ae3d_cloudnoise.c"
+NATIVE_SOURCES="native/ae3d_agent.c native/ae3d_client.c native/ae3d_script.c native/ae3d_capture.c native/ae3d_glapi.c native/ae3d_platform.c native/ae3d_mesh.c native/ae3d_skin.c native/ae3d_horde.c native/ae3d_meshfile.c native/ae3d_image.c native/ae3d_png.c native/ae3d_gl.c native/ae3d_offscreen.c native/ae3d_vk.c native/ae3d_cloudnoise.c native/ae3d_blob.c"
 if [ "$(uname -s)" = "Darwin" ]; then
     NATIVE_SOURCES="$NATIVE_SOURCES native/ae3d_vk_surface.m"
 fi

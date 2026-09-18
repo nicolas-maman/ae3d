@@ -1,0 +1,1058 @@
+// glTF 2.0: meshes, materials, the node tree, skins and animations, loaded
+// into the same models, skeletons and clips the Blender pipeline produces,
+// so a figure from anywhere -- Mixamo, Sketchfab, a Quaternius pack, another
+// engine's export -- stands in a scene, bends on its skeleton and plays its
+// clips exactly as the pipeline's own zombie does.
+//
+//   scene = gltf.load("figure.glb")            // .gltf with a .bin beside it, or .glb
+//   gltf.add_to_engine(e, scene)               // every mesh, placed by its node
+//   players = gltf.play(scene, "Walk", registry, true)
+//
+// What is read: every node as a model (its TRS, or its matrix decomposed),
+// parented as the tree says; every mesh primitive as a model of its own under
+// the node that carries it, triangles only, with position, normal, texture
+// coordinate, joints and weights (a primitive with no normals gets flat
+// ones); the material's base colour, its texture where it is a file, its
+// metallic and roughness; every skin as a skeleton whose bones are the joint
+// nodes, with the inverse bind matrices the file gives; every animation as
+// one clip per node it drives, named "<animation>:<node>", STEP, LINEAR and
+// CUBICSPLINE alike. Buffers come from files beside the .gltf or from the
+// .glb's binary chunk. Not read: sparse accessors, data: URIs, embedded
+// images, morph targets, cameras and lights -- each is named in the error
+// when met, and none of them stops the rest of the file from loading.
+import std.heap
+import std.json
+import std.list
+import std.string
+import std.file as fs
+import ae3d.core
+import ae3d.skin
+import ae3d.anim
+
+exports (
+    GltfScene, load, scene_free, scene_destroy, last_error,
+    model_count, model, find, root_count, root,
+    skeleton_count, skeleton,
+    animation_count, animation_name, clip_count, clip,
+    play, add_to_engine_models, warning_count, warning, primitive_count, primitive
+)
+
+extern ae3d_blob_read(path: string) -> ptr
+extern ae3d_blob_last_size() -> long
+extern ae3d_blob_free(blob: ptr)
+extern ae3d_blob_f32(blob: ptr, offset: long) -> float
+extern ae3d_blob_u32(blob: ptr, offset: long) -> int
+extern ae3d_blob_u16(blob: ptr, offset: long) -> int
+extern ae3d_blob_u8(blob: ptr, offset: long) -> int
+extern ae3d_blob_i16(blob: ptr, offset: long) -> int
+extern ae3d_blob_i8(blob: ptr, offset: long) -> int
+extern ae3d_blob_text(blob: ptr, offset: long, length: long) -> string
+extern ae3d_blob_slice(blob: ptr, offset: long) -> ptr
+extern ae3d_image_from_memory(data: ptr, length: int) -> ptr
+extern ae3d_image_pixels(handle: ptr) -> ptr
+extern ae3d_image_width(handle: ptr) -> int
+extern ae3d_image_height(handle: ptr) -> int
+extern ae3d_image_free(handle: ptr)
+extern ae3d_image_register(name: string, rgba: ptr, width: int, height: int) -> int
+extern sqrt(x: float) -> float
+
+const COMPONENT_BYTE = 5120
+const COMPONENT_UBYTE = 5121
+const COMPONENT_SHORT = 5122
+const COMPONENT_USHORT = 5123
+const COMPONENT_UINT = 5125
+const COMPONENT_FLOAT = 5126
+
+const GLB_MAGIC = 0x46546C67        // "glTF"
+const GLB_CHUNK_JSON = 0x4E4F534A   // "JSON"
+const GLB_CHUNK_BIN = 0x004E4942    // "BIN\0"
+
+struct GltfScene {
+    // Every node, in the file's order, as a model; a node carrying a mesh
+    // has one child model per primitive, which are in `models` as well.
+    nodes: ptr
+    models: ptr
+    // The models that draw: one per mesh primitive, each under its node,
+    // and the node each came from.
+    primitives: ptr
+    primitive_nodes: ptr
+    roots: ptr
+    // One skeleton per skin, in the file's order.
+    skeletons: ptr
+    // The animations' names, and every clip of every animation, each named
+    // "<animation>:<node>" and carrying the node it drives.
+    animation_names: ptr
+    clips: ptr
+    clip_nodes: ptr
+    source: string
+    directory: string
+    // What could not be read, if anything; the rest loaded.
+    warnings: ptr
+    // The names the file's embedded images are registered under.
+    registered: ptr
+}
+
+var g_error = ""
+var g_error_owned = false
+
+last_error() -> string { return g_error }
+
+set_error(reason: string, detail: string) {
+    if g_error_owned { string.free(g_error) }
+    g_error = string.concat(reason, detail)
+    g_error_owned = true
+}
+
+// ---------------------------------------------------------------------------
+// The buffers behind the accessors.
+// ---------------------------------------------------------------------------
+
+struct Buffer {
+    bytes: ptr
+    size: long
+}
+
+// A string in a list: a warning, an animation's name.
+struct Text {
+    text: string
+}
+
+text_new(value: string) -> ptr {
+    t = heap.new(Text)
+    t.text = string.copy(value)
+    return t as ptr
+}
+
+text_of(item: ptr) -> string {
+    return (item as *Text).text
+}
+
+// heap.free releases the struct's string with it (docs/string_ownership.md).
+text_free(item: ptr) {
+    heap.free(item as *Text)
+}
+
+struct Reader {
+    root: ptr
+    buffers: ptr        // list of *Buffer, in the file's order
+    scene: *GltfScene
+}
+
+warn(r: *Reader, what: string) {
+    list.add_raw(r.scene.warnings, text_new(what))
+}
+
+directory_of(path: string) -> string {
+    cut = 0 - 1
+    i = 0
+    length = string.length(path)
+    while i < length {
+        c = string.char_at(path, i)
+        if c == 47 || c == 92 { cut = i }
+        i = i + 1
+    }
+    if cut < 0 { return string.copy("") }
+    return string.substring(path, 0, cut + 1)
+}
+
+join(directory: string, name: string) -> string {
+    if directory == "" { return string.copy(name) }
+    return string.concat(directory, name)
+}
+
+text_field(node: ptr, name: string) -> string {
+    if node == null { return "" }
+    found = json.object_get_raw(node, name)
+    if found == null { return "" }
+    return string.copy(json.get_string_raw(found))
+}
+
+int_field(node: ptr, name: string, fallback: int) -> int {
+    if node == null { return fallback }
+    found = json.object_get_raw(node, name)
+    if found == null { return fallback }
+    return json.get_int(found)
+}
+
+number_field(node: ptr, name: string, fallback: float) -> float {
+    if node == null { return fallback }
+    found = json.object_get_raw(node, name)
+    if found == null { return fallback }
+    return json.get_number(found)
+}
+
+component(values: ptr, index: int, fallback: float) -> float {
+    if values == null { return fallback }
+    if index >= json.array_size(values) { return fallback }
+    return json.get_number(json.array_get_raw(values, index))
+}
+
+array_field(root: ptr, name: string) -> ptr {
+    if root == null { return null }
+    return json.object_get_raw(root, name)
+}
+
+array_count(node: ptr) -> int {
+    if node == null { return 0 }
+    return json.array_size(node)
+}
+
+// A buffer's bytes: the .glb's binary chunk for a buffer with no uri, else
+// the file the uri names beside the .gltf.
+load_buffers(r: *Reader, glb_bin: ptr, glb_bin_size: long) {
+    buffers = array_field(r.root, "buffers")
+    count = array_count(buffers)
+    i = 0
+    while i < count {
+        node = json.array_get_raw(buffers, i)
+        uri = text_field(node, "uri")
+        b = heap.new(Buffer)
+        b.bytes = null
+        b.size = 0
+        if uri == "" {
+            if glb_bin != null && i == 0 {
+                b.bytes = glb_bin
+                b.size = glb_bin_size
+            } else {
+                warn(r, "a buffer with no uri and no binary chunk")
+            }
+        } else if string.starts_with(uri, "data:") == 1 {
+            warn(r, "a data: uri buffer (write the .bin beside the .gltf, or use .glb)")
+        } else {
+            path = join(r.scene.directory, uri)
+            b.bytes = ae3d_blob_read(path)
+            b.size = ae3d_blob_last_size()
+            if b.bytes == null { warn(r, string.concat("cannot read buffer ", uri)) }
+            string.free(path)
+        }
+        string.free(uri)
+        list.add_raw(r.buffers, b as ptr)
+        i = i + 1
+    }
+}
+
+// Where an accessor's elements are: the buffer, the byte offset of the
+// first, the stride between them, the component type and the components an
+// element has. Returns false for an accessor that cannot be read here.
+struct Accessor {
+    bytes: ptr
+    size: long
+    offset: long
+    stride: long
+    component_type: int
+    components: int
+    count: int
+    normalized: bool
+    component_size: int
+}
+
+type_components(kind: string) -> int {
+    if kind == "SCALAR" { return 1 }
+    if kind == "VEC2" { return 2 }
+    if kind == "VEC3" { return 3 }
+    if kind == "VEC4" { return 4 }
+    if kind == "MAT4" { return 16 }
+    if kind == "MAT3" { return 9 }
+    if kind == "MAT2" { return 4 }
+    return 0
+}
+
+component_bytes(component_type: int) -> int {
+    if component_type == COMPONENT_BYTE || component_type == COMPONENT_UBYTE { return 1 }
+    if component_type == COMPONENT_SHORT || component_type == COMPONENT_USHORT { return 2 }
+    return 4
+}
+
+// The accessor, on the heap for the caller to free, or null for one that
+// cannot be read here.
+accessor_open(r: *Reader, index: int) -> *Accessor {
+    accessors = array_field(r.root, "accessors")
+    if index < 0 || index >= array_count(accessors) { return null }
+    node = json.array_get_raw(accessors, index)
+    if json.object_get_raw(node, "sparse") != null {
+        warn(r, "a sparse accessor")
+        return null
+    }
+    view_index = int_field(node, "bufferView", 0 - 1)
+    views = array_field(r.root, "bufferViews")
+    if view_index < 0 || view_index >= array_count(views) { return null }
+    view = json.array_get_raw(views, view_index)
+    buffer_index = int_field(view, "buffer", 0)
+    if buffer_index < 0 || buffer_index >= list.size(r.buffers) { return null }
+    b = list.get_raw(r.buffers, buffer_index) as *Buffer
+    if b.bytes == null { return null }
+    out = heap.new(Accessor)
+    kind = text_field(node, "type")
+    out.components = type_components(kind)
+    string.free(kind)
+    out.component_type = int_field(node, "componentType", COMPONENT_FLOAT)
+    out.component_size = component_bytes(out.component_type)
+    out.count = int_field(node, "count", 0)
+    out.normalized = int_field(node, "normalized", 0) == 1
+    out.bytes = b.bytes
+    out.size = b.size
+    out.offset = (int_field(view, "byteOffset", 0) + int_field(node, "byteOffset", 0)) as long
+    stride = int_field(view, "byteStride", 0)
+    if stride == 0 { stride = out.components * out.component_size }
+    out.stride = stride as long
+    if out.components == 0 || out.count < 0 {
+        heap.free(out)
+        return null
+    }
+    needed = out.offset + ((out.count - 1) as long) * out.stride + (out.components * out.component_size) as long
+    if out.count > 0 && needed > out.size {
+        warn(r, "an accessor reaching past its buffer")
+        heap.free(out)
+        return null
+    }
+    return out
+}
+
+accessor_close(a: *Accessor) {
+    if a != null { heap.free(a) }
+}
+
+// Component `c` of element `i`, as a number: floats as they are, integers
+// as themselves, or scaled to 0..1 (-1..1) when the accessor is normalized.
+accessor_get(a: *Accessor, i: int, c: int) -> float {
+    at = a.offset + (i as long) * a.stride + (c * a.component_size) as long
+    if a.component_type == COMPONENT_FLOAT { return ae3d_blob_f32(a.bytes, at) }
+    if a.component_type == COMPONENT_UINT { return ae3d_blob_u32(a.bytes, at) as float }
+    if a.component_type == COMPONENT_USHORT {
+        v = ae3d_blob_u16(a.bytes, at) as float
+        if a.normalized { return v / 65535.0 }
+        return v
+    }
+    if a.component_type == COMPONENT_UBYTE {
+        v = ae3d_blob_u8(a.bytes, at) as float
+        if a.normalized { return v / 255.0 }
+        return v
+    }
+    if a.component_type == COMPONENT_SHORT {
+        v = ae3d_blob_i16(a.bytes, at) as float
+        if a.normalized { return core.clampf(v / 32767.0, 0.0 - 1.0, 1.0) }
+        return v
+    }
+    v = ae3d_blob_i8(a.bytes, at) as float
+    if a.normalized { return core.clampf(v / 127.0, 0.0 - 1.0, 1.0) }
+    return v
+}
+
+accessor_get_int(a: *Accessor, i: int, c: int) -> int {
+    at = a.offset + (i as long) * a.stride + (c * a.component_size) as long
+    if a.component_type == COMPONENT_UINT { return ae3d_blob_u32(a.bytes, at) }
+    if a.component_type == COMPONENT_USHORT { return ae3d_blob_u16(a.bytes, at) }
+    if a.component_type == COMPONENT_UBYTE { return ae3d_blob_u8(a.bytes, at) }
+    if a.component_type == COMPONENT_SHORT { return ae3d_blob_i16(a.bytes, at) }
+    if a.component_type == COMPONENT_BYTE { return ae3d_blob_i8(a.bytes, at) }
+    return ae3d_blob_f32(a.bytes, at) as int
+}
+
+// ---------------------------------------------------------------------------
+// Meshes and materials.
+// ---------------------------------------------------------------------------
+
+// A primitive as a model: its vertices pushed once each (glTF vertices are
+// already unique per attribute set, the way the mesh wants them), its
+// triangles from the index accessor or from the vertex order, its skin from
+// JOINTS_0 and WEIGHTS_0, its material's factors and texture.
+load_primitive(r: *Reader, primitive: ptr, name: string) -> *Model {
+    mode = int_field(primitive, "mode", 4)
+    if mode != 4 {
+        warn(r, string.concat("a primitive that is not triangles: ", name))
+        return null
+    }
+    attributes = json.object_get_raw(primitive, "attributes")
+    if attributes == null { return null }
+    positions = accessor_open(r, int_field(attributes, "POSITION", 0 - 1))
+    if positions == null {
+        warn(r, string.concat("a primitive with no readable POSITION: ", name))
+        return null
+    }
+    normals = accessor_open(r, int_field(attributes, "NORMAL", 0 - 1))
+    has_normals = normals != null
+    uvs = accessor_open(r, int_field(attributes, "TEXCOORD_0", 0 - 1))
+    has_uvs = uvs != null
+    joints = accessor_open(r, int_field(attributes, "JOINTS_0", 0 - 1))
+    weights = accessor_open(r, int_field(attributes, "WEIGHTS_0", 0 - 1))
+    has_skin = joints != null && weights != null
+
+    mesh = core.mesh_create()
+    core.mesh_reserve(mesh, positions.count, positions.count)
+    i = 0
+    while i < positions.count {
+        p = core.vec3(accessor_get(positions, i, 0), accessor_get(positions, i, 1), accessor_get(positions, i, 2))
+        n = core.vec3(0.0, 1.0, 0.0)
+        if has_normals {
+            n = core.vec3(accessor_get(normals, i, 0), accessor_get(normals, i, 1), accessor_get(normals, i, 2))
+        }
+        u = 0.0
+        v = 0.0
+        if has_uvs {
+            u = accessor_get(uvs, i, 0)
+            // glTF's v runs down the image, the engine's up: the same flip
+            // the OBJ loader makes.
+            v = 1.0 - accessor_get(uvs, i, 1)
+        }
+        core.mesh_push_vertex(mesh, p, u, v, n)
+        if has_skin {
+            core.mesh_set_skin(mesh, i,
+                accessor_get_int(joints, i, 0), accessor_get_int(joints, i, 1),
+                accessor_get_int(joints, i, 2), accessor_get_int(joints, i, 3),
+                accessor_get(weights, i, 0), accessor_get(weights, i, 1),
+                accessor_get(weights, i, 2), accessor_get(weights, i, 3))
+        }
+        i = i + 1
+    }
+    indices = accessor_open(r, int_field(primitive, "indices", 0 - 1))
+    if indices != null {
+        i = 0
+        while i + 2 < indices.count {
+            core.mesh_push_triangle(mesh, accessor_get_int(indices, i, 0),
+                                    accessor_get_int(indices, i + 1, 0),
+                                    accessor_get_int(indices, i + 2, 0))
+            i = i + 3
+        }
+    } else {
+        i = 0
+        while i + 2 < positions.count {
+            core.mesh_push_triangle(mesh, i, i + 1, i + 2)
+            i = i + 3
+        }
+    }
+    if !has_normals { core.mesh_recalculate_normals(mesh) }
+    accessor_close(positions)
+    accessor_close(normals)
+    accessor_close(uvs)
+    accessor_close(joints)
+    accessor_close(weights)
+    accessor_close(indices)
+
+    m = core.model_new()
+    core.model_set_name(m, name)
+    core.model_set_mesh(m, mesh)
+    apply_material(r, m, int_field(primitive, "material", 0 - 1))
+    return m
+}
+
+apply_material(r: *Reader, m: *Model, index: int) {
+    materials = array_field(r.root, "materials")
+    if index < 0 || index >= array_count(materials) {
+        core.model_matte(m, 0.8, 0.8, 0.8)
+        return
+    }
+    material = json.array_get_raw(materials, index)
+    pbr = json.object_get_raw(material, "pbrMetallicRoughness")
+    colour = null
+    if pbr != null { colour = json.object_get_raw(pbr, "baseColorFactor") }
+    core.model_set_diffuse(m, component(colour, 0, 1.0), component(colour, 1, 1.0), component(colour, 2, 1.0))
+    alpha = component(colour, 3, 1.0)
+    if alpha < 1.0 { core.model_set_alpha(m, alpha) }
+    core.model_set_pbr(m, number_field(pbr, "metallicFactor", 1.0), number_field(pbr, "roughnessFactor", 1.0))
+    texture = null
+    if pbr != null { texture = json.object_get_raw(pbr, "baseColorTexture") }
+    if texture != null {
+        path = image_path(r, int_field(texture, "index", 0 - 1))
+        if path != "" { core.model_set_texture(m, path) }
+        string.free(path)
+    }
+    normal_map = json.object_get_raw(material, "normalTexture")
+    if normal_map != null {
+        path = image_path(r, int_field(normal_map, "index", 0 - 1))
+        if path != "" {
+            core.model_ensure_material(m)
+            core.material_set_normal_path(m.material, path)
+        }
+        string.free(path)
+    }
+}
+
+// What a texture's image is, as a path a material takes: the file beside
+// the .gltf, or, for an image embedded in a buffer (every .glb's), the
+// name it is registered under once decoded -- "<file>#image<n>", which
+// any texture path resolves to the pixels in memory, as the engine's own
+// painted images are.
+image_path(r: *Reader, texture_index: int) -> string {
+    textures = array_field(r.root, "textures")
+    if texture_index < 0 || texture_index >= array_count(textures) { return string.copy("") }
+    source = int_field(json.array_get_raw(textures, texture_index), "source", 0 - 1)
+    images = array_field(r.root, "images")
+    if source < 0 || source >= array_count(images) { return string.copy("") }
+    image = json.array_get_raw(images, source)
+    uri = text_field(image, "uri")
+    if uri != "" && string.starts_with(uri, "data:") == 0 {
+        path = join(r.scene.directory, uri)
+        string.free(uri)
+        return path
+    }
+    string.free(uri)
+    view_index = int_field(image, "bufferView", 0 - 1)
+    if view_index < 0 {
+        warn(r, "an image as a data: uri (write it beside the .gltf, or use .glb)")
+        return string.copy("")
+    }
+    name = string.concat(r.scene.source, string.concat("#image", string.from_int(source)))
+    if list_has_text(r.scene.registered, name) { return name }
+    views = array_field(r.root, "bufferViews")
+    if view_index >= array_count(views) { return string.copy("") }
+    view = json.array_get_raw(views, view_index)
+    buffer_index = int_field(view, "buffer", 0)
+    if buffer_index < 0 || buffer_index >= list.size(r.buffers) { return string.copy("") }
+    b = list.get_raw(r.buffers, buffer_index) as *Buffer
+    if b.bytes == null { return string.copy("") }
+    offset = int_field(view, "byteOffset", 0)
+    length = int_field(view, "byteLength", 0)
+    decoded = ae3d_image_from_memory(ae3d_blob_slice(b.bytes, offset as long), length)
+    if decoded == null {
+        warn(r, string.concat("an image that would not decode: ", name))
+        return string.copy("")
+    }
+    ok = ae3d_image_register(name, ae3d_image_pixels(decoded), ae3d_image_width(decoded), ae3d_image_height(decoded)) == 1
+    ae3d_image_free(decoded)
+    if !ok {
+        warn(r, string.concat("an image that would not register: ", name))
+        return string.copy("")
+    }
+    list.add_raw(r.scene.registered, text_new(name))
+    return name
+}
+
+list_has_text(items: ptr, value: string) -> bool {
+    i = 0
+    while i < list.size(items) {
+        if text_of(list.get_raw(items, i)) == value { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// ---------------------------------------------------------------------------
+// Nodes.
+// ---------------------------------------------------------------------------
+
+// A node's transform onto its model: TRS where the file gives them, else
+// its matrix decomposed -- translation from the last column, scale from the
+// length of each axis, rotation from the axes with the scale taken out.
+place_node(node: ptr, m: *Model) {
+    matrix = json.object_get_raw(node, "matrix")
+    if matrix != null && json.array_size(matrix) == 16 {
+        c0 = core.vec3(component(matrix, 0, 1.0), component(matrix, 1, 0.0), component(matrix, 2, 0.0))
+        c1 = core.vec3(component(matrix, 4, 0.0), component(matrix, 5, 1.0), component(matrix, 6, 0.0))
+        c2 = core.vec3(component(matrix, 8, 0.0), component(matrix, 9, 0.0), component(matrix, 10, 1.0))
+        sx = core.v3_len(c0)
+        sy = core.v3_len(c1)
+        sz = core.v3_len(c2)
+        if sx > 0.0 { c0 = core.v3_mul(c0, 1.0 / sx) }
+        if sy > 0.0 { c1 = core.v3_mul(c1, 1.0 / sy) }
+        if sz > 0.0 { c2 = core.v3_mul(c2, 1.0 / sz) }
+        core.model_set_position(m, component(matrix, 12, 0.0), component(matrix, 13, 0.0), component(matrix, 14, 0.0))
+        core.model_set_scale(m, sx, sy, sz)
+        core.model_set_rotation(m, quat_from_axes(c0, c1, c2))
+        return
+    }
+    t = json.object_get_raw(node, "translation")
+    core.model_set_position(m, component(t, 0, 0.0), component(t, 1, 0.0), component(t, 2, 0.0))
+    s = json.object_get_raw(node, "scale")
+    core.model_set_scale(m, component(s, 0, 1.0), component(s, 1, 1.0), component(s, 2, 1.0))
+    q = json.object_get_raw(node, "rotation")
+    core.model_set_rotation(m, core.quat(component(q, 0, 0.0), component(q, 1, 0.0), component(q, 2, 0.0), component(q, 3, 1.0)))
+}
+
+// The rotation whose columns are these three unit axes.
+quat_from_axes(c0: Vec3, c1: Vec3, c2: Vec3) -> Quat {
+    trace = c0.x + c1.y + c2.z
+    if trace > 0.0 {
+        s = sqrt(trace + 1.0) * 2.0
+        return core.quat_normalize(core.quat((c1.z - c2.y) / s, (c2.x - c0.z) / s, (c0.y - c1.x) / s, 0.25 * s))
+    }
+    if c0.x > c1.y && c0.x > c2.z {
+        s = sqrt(1.0 + c0.x - c1.y - c2.z) * 2.0
+        return core.quat_normalize(core.quat(0.25 * s, (c1.x + c0.y) / s, (c2.x + c0.z) / s, (c1.z - c2.y) / s))
+    }
+    if c1.y > c2.z {
+        s = sqrt(1.0 + c1.y - c0.x - c2.z) * 2.0
+        return core.quat_normalize(core.quat((c1.x + c0.y) / s, 0.25 * s, (c2.y + c1.z) / s, (c2.x - c0.z) / s))
+    }
+    s = sqrt(1.0 + c2.z - c0.x - c1.y) * 2.0
+    return core.quat_normalize(core.quat((c2.x + c0.z) / s, (c2.y + c1.z) / s, 0.25 * s, (c0.y - c1.x) / s))
+}
+
+load_nodes(r: *Reader) {
+    nodes = array_field(r.root, "nodes")
+    count = array_count(nodes)
+    meshes = array_field(r.root, "meshes")
+    i = 0
+    while i < count {
+        node = json.array_get_raw(nodes, i)
+        m = core.model_new()
+        name = text_field(node, "name")
+        if name == "" {
+            string.free(name)
+            name = string.concat("node_", string.from_int(i))
+        }
+        core.model_set_name(m, name)
+        place_node(node, m)
+        list.add_raw(r.scene.nodes, m as ptr)
+        list.add_raw(r.scene.models, m as ptr)
+        // The node's mesh: one model per primitive, each a child at the
+        // node's origin, so the node moves them all and a skin poses them.
+        mesh_index = int_field(node, "mesh", 0 - 1)
+        skinned = int_field(node, "skin", 0 - 1) >= 0
+        if mesh_index >= 0 && mesh_index < array_count(meshes) {
+            mesh = json.array_get_raw(meshes, mesh_index)
+            primitives = json.object_get_raw(mesh, "primitives")
+            pcount = array_count(primitives)
+            p = 0
+            while p < pcount {
+                pname = name
+                if pcount > 1 { pname = string.concat(name, string.concat("/", string.from_int(p))) }
+                part = load_primitive(r, json.array_get_raw(primitives, p), pname)
+                if part != null {
+                    // A skinned primitive stands at the origin and is placed
+                    // by its joints alone: the file's rule is that the
+                    // transform of a skinned mesh's node is ignored, the
+                    // joints' world transforms carrying everything. Under
+                    // its node as well, a Mixamo figure whose armature is
+                    // scaled to centimetres came out a hundredth its size.
+                    if !skinned { core.model_set_parent(part, m) }
+                    list.add_raw(r.scene.models, part as ptr)
+                    list.add_raw(r.scene.primitives, part as ptr)
+                    list.add_raw(r.scene.primitive_nodes, m as ptr)
+                }
+                p = p + 1
+            }
+        }
+        string.free(name)
+        i = i + 1
+    }
+    // Parents after every node exists.
+    i = 0
+    while i < count {
+        node = json.array_get_raw(nodes, i)
+        children = json.object_get_raw(node, "children")
+        ccount = array_count(children)
+        c = 0
+        while c < ccount {
+            child = json.get_int(json.array_get_raw(children, c))
+            if child >= 0 && child < count {
+                core.model_set_parent(list.get_raw(r.scene.nodes, child) as *Model,
+                                      list.get_raw(r.scene.nodes, i) as *Model)
+            }
+            c = c + 1
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < count {
+        m = list.get_raw(r.scene.nodes, i) as *Model
+        if m.parent == null { list.add_raw(r.scene.roots, m as ptr) }
+        i = i + 1
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Skins.
+// ---------------------------------------------------------------------------
+
+// Every skin as a skeleton over the joint nodes, in the skin's order (which
+// is the order the vertices' joint indices count in), with the inverse bind
+// matrices the file gives, and every primitive of a node that names the skin
+// posed by it.
+load_skins(r: *Reader) {
+    skins = array_field(r.root, "skins")
+    count = array_count(skins)
+    nodes = array_field(r.root, "nodes")
+    i = 0
+    while i < count {
+        skin_node = json.array_get_raw(skins, i)
+        joints = json.object_get_raw(skin_node, "joints")
+        jcount = array_count(joints)
+        s = skin.skeleton_new()
+        if jcount > skin.MAX_BONES {
+            warn(r, string.concat("a skin with more joints than the palette holds: ", string.from_int(jcount)))
+        }
+        ibm = accessor_open(r, int_field(skin_node, "inverseBindMatrices", 0 - 1))
+        has_ibm = ibm != null
+        j = 0
+        while j < jcount {
+            node_index = json.get_int(json.array_get_raw(joints, j))
+            if node_index >= 0 && node_index < list.size(r.scene.nodes) {
+                bone = list.get_raw(r.scene.nodes, node_index) as *Model
+                index = skin.skeleton_add(s, bone)
+                if index >= 0 && has_ibm && j < ibm.count {
+                    inverse = core.mat4_ident()
+                    inverse.m0 = accessor_get(ibm, j, 0)
+                    inverse.m1 = accessor_get(ibm, j, 1)
+                    inverse.m2 = accessor_get(ibm, j, 2)
+                    inverse.m3 = accessor_get(ibm, j, 3)
+                    inverse.m4 = accessor_get(ibm, j, 4)
+                    inverse.m5 = accessor_get(ibm, j, 5)
+                    inverse.m6 = accessor_get(ibm, j, 6)
+                    inverse.m7 = accessor_get(ibm, j, 7)
+                    inverse.m8 = accessor_get(ibm, j, 8)
+                    inverse.m9 = accessor_get(ibm, j, 9)
+                    inverse.m10 = accessor_get(ibm, j, 10)
+                    inverse.m11 = accessor_get(ibm, j, 11)
+                    inverse.m12 = accessor_get(ibm, j, 12)
+                    inverse.m13 = accessor_get(ibm, j, 13)
+                    inverse.m14 = accessor_get(ibm, j, 14)
+                    inverse.m15 = accessor_get(ibm, j, 15)
+                    skin.skeleton_set_inverse_bind(s, index, inverse)
+                }
+            }
+            j = j + 1
+        }
+        if has_ibm { skin.skeleton_settle(s) } else { skin.skeleton_bind(s) }
+        accessor_close(ibm)
+        list.add_raw(r.scene.skeletons, s as ptr)
+        i = i + 1
+    }
+    // The primitives of every skinned node take their skin.
+    ncount = array_count(nodes)
+    n = 0
+    while n < ncount {
+        skin_index = int_field(json.array_get_raw(nodes, n), "skin", 0 - 1)
+        if skin_index >= 0 && skin_index < list.size(r.scene.skeletons) {
+            s = list.get_raw(r.scene.skeletons, skin_index) as *Skeleton
+            owner = list.get_raw(r.scene.nodes, n) as *Model
+            k = 0
+            pcount = list.size(r.scene.primitives)
+            while k < pcount {
+                if list.get_raw(r.scene.primitive_nodes, k) == owner as ptr {
+                    core.model_set_skeleton(list.get_raw(r.scene.primitives, k) as *Model, s as ptr)
+                }
+                k = k + 1
+            }
+        }
+        n = n + 1
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Animations.
+// ---------------------------------------------------------------------------
+
+// A sampler's keys onto a channel: STEP and LINEAR as they are, CUBICSPLINE
+// with the in-tangent, the value and the out-tangent the output holds for
+// each key, in that order.
+read_sampler(r: *Reader, sampler: ptr, target: int) -> *AnimChannel {
+    input = accessor_open(r, int_field(sampler, "input", 0 - 1))
+    if input == null { return null }
+    output = accessor_open(r, int_field(sampler, "output", 0 - 1))
+    if output == null {
+        accessor_close(input)
+        return null
+    }
+    mode = text_field(sampler, "interpolation")
+    interpolation = anim.LINEAR
+    if mode == "STEP" { interpolation = anim.STEP }
+    if mode == "CUBICSPLINE" { interpolation = anim.CUBIC }
+    string.free(mode)
+    c = anim.channel_new(target, interpolation)
+    width = output.components
+    k = 0
+    while k < input.count {
+        t = accessor_get(input, k, 0)
+        if interpolation == anim.CUBIC {
+            base = k * 3
+            if base + 2 < output.count {
+                anim.channel_add_cubic_key(c, t,
+                    accessor_get(output, base + 1, 0), accessor_get(output, base + 1, 1),
+                    accessor_get(output, base + 1, 2), value_w(output, base + 1, width),
+                    accessor_get(output, base, 0), accessor_get(output, base, 1),
+                    accessor_get(output, base, 2), value_w(output, base, width),
+                    accessor_get(output, base + 2, 0), accessor_get(output, base + 2, 1),
+                    accessor_get(output, base + 2, 2), value_w(output, base + 2, width))
+            }
+        } else if k < output.count {
+            anim.channel_add_key(c, t, accessor_get(output, k, 0), accessor_get(output, k, 1),
+                                 accessor_get(output, k, 2), value_w(output, k, width))
+        }
+        k = k + 1
+    }
+    accessor_close(input)
+    accessor_close(output)
+    return c
+}
+
+value_w(a: *Accessor, i: int, width: int) -> float {
+    if width < 4 { return 0.0 }
+    return accessor_get(a, i, 3)
+}
+
+load_animations(r: *Reader) {
+    animations = array_field(r.root, "animations")
+    count = array_count(animations)
+    a = 0
+    while a < count {
+        animation = json.array_get_raw(animations, a)
+        name = text_field(animation, "name")
+        if name == "" {
+            string.free(name)
+            name = string.concat("animation_", string.from_int(a))
+        }
+        list.add_raw(r.scene.animation_names, text_new(name))
+        samplers = json.object_get_raw(animation, "samplers")
+        channels = json.object_get_raw(animation, "channels")
+        ccount = array_count(channels)
+        // One clip per node the animation drives, gathering its channels.
+        c = 0
+        while c < ccount {
+            channel = json.array_get_raw(channels, c)
+            target = json.object_get_raw(channel, "target")
+            node_index = int_field(target, "node", 0 - 1)
+            path = text_field(target, "path")
+            kind = 0 - 1
+            if path == "translation" { kind = anim.TRANSLATION }
+            if path == "rotation" { kind = anim.ROTATION }
+            if path == "scale" { kind = anim.SCALE }
+            if path == "weights" { warn(r, "a morph target animation") }
+            string.free(path)
+            sampler_index = int_field(channel, "sampler", 0 - 1)
+            if kind >= 0 && node_index >= 0 && node_index < list.size(r.scene.nodes) &&
+               sampler_index >= 0 && sampler_index < array_count(samplers) {
+                track = read_sampler(r, json.array_get_raw(samplers, sampler_index), kind)
+                if track != null {
+                    node = list.get_raw(r.scene.nodes, node_index) as *Model
+                    clip = clip_for(r, name, node)
+                    anim.clip_add_channel(clip, track)
+                }
+            }
+            c = c + 1
+        }
+        string.free(name)
+        a = a + 1
+    }
+}
+
+// The clip of `animation` driving `node`, made on first use.
+clip_for(r: *Reader, animation: string, node: *Model) -> *Clip {
+    full = string.concat(animation, string.concat(":", node.name))
+    i = 0
+    count = list.size(r.scene.clips)
+    while i < count {
+        existing = list.get_raw(r.scene.clips, i) as *Clip
+        if list.get_raw(r.scene.clip_nodes, i) == node as ptr && anim.clip_name(existing) == full {
+            string.free(full)
+            return existing
+        }
+        i = i + 1
+    }
+    clip = anim.clip_new(full)
+    string.free(full)
+    list.add_raw(r.scene.clips, clip as ptr)
+    list.add_raw(r.scene.clip_nodes, node as ptr)
+    return clip
+}
+
+// ---------------------------------------------------------------------------
+// The file.
+// ---------------------------------------------------------------------------
+
+load(path: string) -> *GltfScene {
+    blob = ae3d_blob_read(path)
+    size = ae3d_blob_last_size()
+    if blob == null {
+        set_error("cannot read ", path)
+        return null
+    }
+    text = ""
+    glb_bin = null
+    glb_bin_size = 0 as long
+    if size >= 12 && ae3d_blob_u32(blob, 0) == GLB_MAGIC {
+        // A .glb: a 12-byte header, then chunks, each a length, a type and
+        // its bytes; the JSON first, the binary buffer after.
+        at = 12 as long
+        while at + 8 <= size {
+            length = ae3d_blob_u32(blob, at) as long
+            kind = ae3d_blob_u32(blob, at + 4)
+            if at + 8 + length > size { at = size } else {
+                if kind == GLB_CHUNK_JSON && text == "" { text = ae3d_blob_text(blob, at + 8, length) }
+                if kind == GLB_CHUNK_BIN && glb_bin == null {
+                    // The chunk stays where it is in the file's bytes; the
+                    // scene keeps the whole file for as long as it needs it.
+                    glb_bin = ae3d_blob_slice(blob, at + 8)
+                    glb_bin_size = length
+                }
+                at = at + 8 + length
+            }
+        }
+        if text == "" {
+            ae3d_blob_free(blob)
+            set_error("no JSON chunk in ", path)
+            return null
+        }
+    } else {
+        text = ae3d_blob_text(blob, 0, size)
+    }
+    root = json.parse_raw(text)
+    string.free(text)
+    if root == null {
+        ae3d_blob_free(blob)
+        set_error("cannot parse ", path)
+        return null
+    }
+
+    scene = heap.new(GltfScene)
+    scene.nodes = list.new()
+    scene.models = list.new()
+    scene.primitives = list.new()
+    scene.primitive_nodes = list.new()
+    scene.roots = list.new()
+    scene.skeletons = list.new()
+    scene.animation_names = list.new()
+    scene.clips = list.new()
+    scene.clip_nodes = list.new()
+    scene.warnings = list.new()
+    scene.registered = list.new()
+    scene.source = string.copy(path)
+    scene.directory = directory_of(path)
+
+    r = heap.new(Reader)
+    r.root = root
+    r.buffers = list.new()
+    r.scene = scene
+    load_buffers(r, glb_bin, glb_bin_size)
+    load_nodes(r)
+    load_skins(r)
+    load_animations(r)
+
+    // The buffers are read into the meshes and clips; nothing keeps them.
+    i = 0
+    while i < list.size(r.buffers) {
+        b = list.get_raw(r.buffers, i) as *Buffer
+        if b.bytes != null && b.bytes != glb_bin { ae3d_blob_free(b.bytes) }
+        heap.free(b)
+        i = i + 1
+    }
+    list.free(r.buffers)
+    heap.free(r)
+    json.free(root)
+    ae3d_blob_free(blob)
+    return scene
+}
+
+scene_free(s: *GltfScene) {
+    if s == null { return }
+    i = 0
+    while i < list.size(s.clips) {
+        anim.clip_free(list.get_raw(s.clips, i) as *Clip)
+        i = i + 1
+    }
+    list.free(s.clips)
+    list.free(s.clip_nodes)
+    i = 0
+    while i < list.size(s.skeletons) {
+        skin.skeleton_free(list.get_raw(s.skeletons, i) as *Skeleton)
+        i = i + 1
+    }
+    list.free(s.skeletons)
+    i = 0
+    while i < list.size(s.animation_names) {
+        text_free(list.get_raw(s.animation_names, i))
+        i = i + 1
+    }
+    list.free(s.animation_names)
+    i = 0
+    while i < list.size(s.warnings) {
+        text_free(list.get_raw(s.warnings, i))
+        i = i + 1
+    }
+    list.free(s.warnings)
+    i = 0
+    while i < list.size(s.registered) {
+        text_free(list.get_raw(s.registered, i))
+        i = i + 1
+    }
+    list.free(s.registered)
+    // The models are the caller's once handed to an engine; the lists go,
+    // the models stay, as with a manifest's. scene_destroy frees them too.
+    list.free(s.models)
+    list.free(s.primitives)
+    list.free(s.primitive_nodes)
+    list.free(s.nodes)
+    list.free(s.roots)
+    heap.free(s)
+}
+
+// The scene and every model in it: for a program that never handed them
+// to an engine, or has freed the engine that held them. The primitives go
+// first, then the nodes from the leaves up, since a node is a parent to
+// the ones after it in the file.
+scene_destroy(s: *GltfScene) {
+    if s == null { return }
+    i = list.size(s.primitives) - 1
+    while i >= 0 {
+        core.model_free(list.get_raw(s.primitives, i) as *Model)
+        i = i - 1
+    }
+    i = list.size(s.nodes) - 1
+    while i >= 0 {
+        core.model_free(list.get_raw(s.nodes, i) as *Model)
+        i = i - 1
+    }
+    scene_free(s)
+}
+
+model_count(s: *GltfScene) -> int { return list.size(s.models) }
+primitive_count(s: *GltfScene) -> int { return list.size(s.primitives) }
+primitive(s: *GltfScene, index: int) -> *Model { return list.get_raw(s.primitives, index) as *Model }
+model(s: *GltfScene, index: int) -> *Model { return list.get_raw(s.models, index) as *Model }
+root_count(s: *GltfScene) -> int { return list.size(s.roots) }
+root(s: *GltfScene, index: int) -> *Model { return list.get_raw(s.roots, index) as *Model }
+skeleton_count(s: *GltfScene) -> int { return list.size(s.skeletons) }
+skeleton(s: *GltfScene, index: int) -> *Skeleton { return list.get_raw(s.skeletons, index) as *Skeleton }
+animation_count(s: *GltfScene) -> int { return list.size(s.animation_names) }
+animation_name(s: *GltfScene, index: int) -> string { return text_of(list.get_raw(s.animation_names, index)) }
+clip_count(s: *GltfScene) -> int { return list.size(s.clips) }
+clip(s: *GltfScene, index: int) -> *Clip { return list.get_raw(s.clips, index) as *Clip }
+warning_count(s: *GltfScene) -> int { return list.size(s.warnings) }
+warning(s: *GltfScene, index: int) -> string { return text_of(list.get_raw(s.warnings, index)) }
+
+// The first model of that name, node or primitive.
+find(s: *GltfScene, name: string) -> *Model {
+    i = 0
+    count = list.size(s.models)
+    while i < count {
+        m = list.get_raw(s.models, i) as *Model
+        if m.name == name { return m }
+        i = i + 1
+    }
+    return null
+}
+
+// Every clip of the named animation bound to the node it drives, as players
+// in the registry, looping or not. Returns how many were made.
+play(s: *GltfScene, animation: string, registry: *Registry, looping: bool) -> int {
+    made = 0
+    prefix = string.concat(animation, ":")
+    i = 0
+    count = list.size(s.clips)
+    while i < count {
+        c = list.get_raw(s.clips, i) as *Clip
+        if string.starts_with(anim.clip_name(c), prefix) == 1 {
+            p = anim.player_new(c)
+            anim.player_set_looping(p, looping)
+            anim.player_play(p)
+            anim.registry_add(registry, anim.clip_name(c), p, list.get_raw(s.clip_nodes, i) as *Model)
+            made = made + 1
+        }
+        i = i + 1
+    }
+    string.free(prefix)
+    return made
+}
+
+// The models that draw -- the primitives -- in a list the caller adds to an
+// engine; the nodes above them carry no mesh and need no adding, the
+// primitives compose onto them.
+add_to_engine_models(s: *GltfScene) -> ptr {
+    out = list.new()
+    i = 0
+    count = list.size(s.primitives)
+    while i < count {
+        list.add_raw(out, list.get_raw(s.primitives, i))
+        i = i + 1
+    }
+    return out
+}

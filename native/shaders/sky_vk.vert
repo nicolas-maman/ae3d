@@ -22,7 +22,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 viewProjection;
     mat4 lightSpaceMatrix;
     bool isSkinned;
-    mat4 bones[48];
+    mat4 bones[96];
     int lightCount;
     vec3 viewPos;
     float viewDistance;
