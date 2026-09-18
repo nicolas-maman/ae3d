@@ -1,0 +1,261 @@
+// A crowd sorted on the device: its figures' state handed to the backend
+// as eight doubles each, a compute pass picking every figure's tier by
+// its distance to the camera, packing its instance and counting it, and
+// the tiers drawn by those counts through indirect draws. Vulkan only --
+// OpenGL 4.1 has no compute, and on it device_crowd_new says so with a
+// null, which is the first check.
+//
+// The counts the device wrote are read back and held against the CPU
+// sort's (crowd_tiers) over the same figures, band by band, with and
+// without a cull; then the frame is read: a figure in the near band is
+// drawn where it stands, turned as its yaw says (a quad seen edge-on
+// vanishes), tinted as its colour says, and gone when it is culled.
+
+import std.mem
+import std.os
+import ae3d.core
+import ae3d.gl
+import ae3d.vk
+import ae3d.ecs
+import ae3d.crowd
+import ae3d.offscreen
+
+extern ae3d_posebank_create(frames: int, bones: int) -> ptr
+extern ae3d_posebank_destroy(bank: ptr)
+
+const WIDTH = 160
+const HEIGHT = 120
+const FRAMES = 4
+const COUNT = 1000
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// A crowd model: one upright quad, x -0.5..0.5 by y 0..1 in the XY plane,
+// with a skin so it takes the crowd's draw, posed by a bank it never moves
+// in, its own instance stream one slot it never fills.
+tier_model(bank: ptr, r: float, g: float, b: float) -> *Model {
+    quad = core.model_new()
+    normal = core.vec3(0.0, 0.0, 1.0)
+    core.mesh_reserve(quad.mesh, 4, 6)
+    core.mesh_push_vertex(quad.mesh, core.vec3(0.0 - 0.5, 0.0, 0.0), 0.0, 0.0, normal)
+    core.mesh_push_vertex(quad.mesh, core.vec3(0.5, 0.0, 0.0), 1.0, 0.0, normal)
+    core.mesh_push_vertex(quad.mesh, core.vec3(0.5, 1.0, 0.0), 1.0, 1.0, normal)
+    core.mesh_push_vertex(quad.mesh, core.vec3(0.0 - 0.5, 1.0, 0.0), 0.0, 1.0, normal)
+    core.mesh_push_triangle(quad.mesh, 0, 1, 2)
+    core.mesh_push_triangle(quad.mesh, 0, 2, 3)
+    i = 0
+    while i < 4 {
+        core.mesh_set_skin(quad.mesh, i, 0, 0, 0, 0, 1.0, 0.0, 0.0, 0.0)
+        i = i + 1
+    }
+    core.model_update_matrix(quad)
+    core.model_recalculate_bounds(quad)
+    core.model_set_diffuse(quad, r, g, b)
+    core.model_enable_instancing(quad, 1)
+    core.model_set_pose_bank(quad, bank, FRAMES)
+    core.model_enable_instance_phases(quad)
+    core.model_enable_instance_colors(quad)
+    return quad
+}
+
+// The pixel at (x, y) of the frame just drawn. The sort's counts come from
+// the frame the device finished, so the frame is drawn twice before it is
+// read and the counts are read after it.
+pixel(backend: *Backend, cam: *Camera, light: *Light, x: int, y: int) -> Vec3 {
+    core.backend_render(backend, cam, light)
+    core.backend_render(backend, cam, light)
+    pixels = core.backend_frame_pixels(backend)
+    at = (y * WIDTH + x) * 4
+    return core.vec3(mem.get_byte(pixels, at) as float, mem.get_byte(pixels, at + 1) as float, mem.get_byte(pixels, at + 2) as float)
+}
+
+near(c: Vec3, r: float, g: float, b: float) -> bool {
+    return c.x > r - 12.0 && c.x < r + 12.0 && c.y > g - 12.0 && c.y < g + 12.0 && c.z > b - 12.0 && c.z < b + 12.0
+}
+
+// The CPU sort's counts over the same figures: near, far (the mid tier, when
+// there is no picture) and the picture tier.
+cpu_counts(pos: *Column, yaw: *Column, phase: *Column, col: *Column, cx: float, cz: float,
+           near_dist: float, mid_dist: float, cull_dist: float, counts: *Column) {
+    crowd.crowd_tiers(ecs.column_data(pos), ecs.column_data(yaw), ecs.column_data(phase), ecs.column_data(col),
+                      0, COUNT, cx, cz, near_dist, mid_dist, cull_dist,
+                      null, null, null, null, null, null, null, null, null, null, null, null,
+                      ecs.column_data(counts))
+}
+
+run_checks(backend: *Backend, vk_r: *VKRenderer) {
+    println("  vulkan: starting")
+    core.backend_set_clear_color(backend, 0.0, 0.0, 0.0)
+    cam = core.camera_new(WIDTH, HEIGHT)
+    // Six metres out along +Z, looking back at the origin: the quad there,
+    // facing +Z, is twenty-four pixels tall around the frame's centre.
+    core.camera_set_position(cam, core.vec3(0.0, 0.5, 6.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.5, 0.0))
+    light = core.light_directional(core.vec3(0.0, 0.3, 1.0), core.vec3(1.0, 1.0, 1.0), 2.0)
+    light.ambient_strength = 0.2
+    vk.renderer_set_capture_channel(vk_r, 1)
+
+    dc = crowd.device_crowd_new(COUNT)
+    check("vulkan the device takes a crowd", dc != null)
+    if dc == null { return }
+
+    bank = ae3d_posebank_create(FRAMES, 1)
+    near_model = tier_model(bank, 1.0, 0.0, 0.0)
+    far_model = tier_model(bank, 0.0, 1.0, 0.0)
+    picture = tier_model(bank, 0.0, 0.0, 1.0)
+    crowd.device_crowd_bind(dc, near_model, 0)
+    crowd.device_crowd_bind(dc, far_model, 1)
+    crowd.device_crowd_bind(dc, picture, 2)
+    core.backend_add_model(backend, near_model)
+    core.backend_add_model(backend, far_model)
+    core.backend_add_model(backend, picture)
+
+    // The figures: the first at the origin facing the camera (yaw 0 faces
+    // +X; the quad is drawn in the XY plane, so it faces +Z as it stands),
+    // the rest spread along +X from twelve metres out to a hundred and
+    // twelve, one every tenth of a metre, all facing the same way.
+    pos = ecs.column_new(COUNT, 3)
+    yaw = ecs.column_new(COUNT, 1)
+    phase = ecs.column_new(COUNT, 1)
+    col = ecs.column_new(COUNT, 3)
+    counts = ecs.column_new(1, 3)
+    i = 0
+    while i < COUNT {
+        x = 12.0 + (i as float) * 0.1
+        if i == 0 { x = 0.0 }
+        ecs.column_set3(pos, i, core.vec3(x, 0.0, 0.0))
+        ecs.column_set(yaw, i, 0, 0.0)
+        ecs.column_set(phase, i, 0, 0.0)
+        ecs.column_set3(col, i, core.vec3(1.0, 1.0, 1.0))
+        i = i + 1
+    }
+    cx = 0.0
+    cz = 6.0
+    cy = HEIGHT / 2
+    centre = WIDTH / 2
+
+    // Two bands: near within ten metres, far beyond, no picture, no cull.
+    crowd.device_crowd_update(dc, ecs.column_data(pos), ecs.column_data(yaw), ecs.column_data(phase),
+                              ecs.column_data(col), 0, COUNT, cx, cz, 10.0, 0.0, 0.0)
+    cpu_counts(pos, yaw, phase, col, cx, cz, 10.0, 0.0, 0.0, counts)
+    c = pixel(backend, cam, light, centre, cy)
+    check("vulkan near tier counts as the CPU sort does (${crowd.device_crowd_count(dc, 0)} of ${ecs.column_get(counts, 0, 0) as int})",
+          crowd.device_crowd_count(dc, 0) == ecs.column_get(counts, 0, 0) as int)
+    check("vulkan far tier counts as the CPU sort does (${crowd.device_crowd_count(dc, 1)} of ${ecs.column_get(counts, 0, 1) as int})",
+          crowd.device_crowd_count(dc, 1) == ecs.column_get(counts, 0, 1) as int)
+    check("vulkan no picture tier without a picture band", crowd.device_crowd_count(dc, 2) == 0)
+    check("vulkan the near figure is drawn where it stands, in the near model's red", near(c, 255.0, 0.0, 0.0))
+    c = pixel(backend, cam, light, centre + 40, cy)
+    check("vulkan and beside it the background", near(c, 0.0, 0.0, 0.0))
+
+    // Three bands, with a cull: near within ten, far to fifty, pictures
+    // beyond, nothing past eighty.
+    crowd.device_crowd_update(dc, ecs.column_data(pos), ecs.column_data(yaw), ecs.column_data(phase),
+                              ecs.column_data(col), 0, COUNT, cx, cz, 10.0, 50.0, 80.0)
+    cpu_counts(pos, yaw, phase, col, cx, cz, 10.0, 50.0, 80.0, counts)
+    pixel(backend, cam, light, centre, cy)
+    check("vulkan three bands and a cull: near as the CPU sort (${crowd.device_crowd_count(dc, 0)})",
+          crowd.device_crowd_count(dc, 0) == ecs.column_get(counts, 0, 0) as int)
+    check("vulkan far as the CPU sort (${crowd.device_crowd_count(dc, 1)} of ${ecs.column_get(counts, 0, 1) as int})",
+          crowd.device_crowd_count(dc, 1) == ecs.column_get(counts, 0, 1) as int)
+    check("vulkan pictures as the CPU sort (${crowd.device_crowd_count(dc, 2)} of ${ecs.column_get(counts, 0, 2) as int})",
+          crowd.device_crowd_count(dc, 2) == ecs.column_get(counts, 0, 2) as int)
+    total = crowd.device_crowd_count(dc, 0) + crowd.device_crowd_count(dc, 1) + crowd.device_crowd_count(dc, 2)
+    check("vulkan the cull dropped the figures past eighty metres (${total} kept)", total < COUNT && total > 0)
+
+    // The yaw: a quarter turn about the world's up and the quad is edge-on.
+    ecs.column_set(yaw, 0, 0, 1.5707963)
+    crowd.device_crowd_update(dc, ecs.column_data(pos), ecs.column_data(yaw), ecs.column_data(phase),
+                              ecs.column_data(col), 0, COUNT, cx, cz, 10.0, 0.0, 0.0)
+    c = pixel(backend, cam, light, centre, cy)
+    check("vulkan turned a quarter, the figure is edge-on and gone", near(c, 0.0, 0.0, 0.0))
+    ecs.column_set(yaw, 0, 0, 0.0)
+
+    // The tint: the stream carries the figure's colour into the albedo.
+    ecs.column_set3(col, 0, core.vec3(0.5, 1.0, 1.0))
+    crowd.device_crowd_update(dc, ecs.column_data(pos), ecs.column_data(yaw), ecs.column_data(phase),
+                              ecs.column_data(col), 0, COUNT, cx, cz, 10.0, 0.0, 0.0)
+    c = pixel(backend, cam, light, centre, cy)
+    check("vulkan the figure's colour tints it", near(c, 128.0, 0.0, 0.0))
+    ecs.column_set3(col, 0, core.vec3(1.0, 1.0, 1.0))
+
+    // The far tier draws with its own model: the near band pulled in to
+    // nothing, the figure at the origin is the far model's green.
+    crowd.device_crowd_update(dc, ecs.column_data(pos), ecs.column_data(yaw), ecs.column_data(phase),
+                              ecs.column_data(col), 0, COUNT, cx, cz, 1.0, 0.0, 0.0)
+    c = pixel(backend, cam, light, centre, cy)
+    check("vulkan past the near band the far model draws it, green", near(c, 0.0, 255.0, 0.0))
+    check("vulkan and the near tier is empty", crowd.device_crowd_count(dc, 0) == 0)
+
+    // Culled: nothing within four metres of the camera survives a cull of one.
+    crowd.device_crowd_update(dc, ecs.column_data(pos), ecs.column_data(yaw), ecs.column_data(phase),
+                              ecs.column_data(col), 0, COUNT, cx, cz, 10.0, 0.0, 1.0)
+    c = pixel(backend, cam, light, centre, cy)
+    check("vulkan culled, the figure is gone", near(c, 0.0, 0.0, 0.0))
+    check("vulkan and every tier is empty", crowd.device_crowd_count(dc, 0) + crowd.device_crowd_count(dc, 1) == 0)
+
+    core.backend_remove_model(backend, near_model)
+    core.backend_remove_model(backend, far_model)
+    core.backend_remove_model(backend, picture)
+    core.model_free(near_model)
+    core.model_free(far_model)
+    core.model_free(picture)
+    crowd.device_crowd_free(dc)
+    ae3d_posebank_destroy(bank)
+    ecs.column_free(pos)
+    ecs.column_free(yaw)
+    ecs.column_free(phase)
+    ecs.column_free(col)
+    ecs.column_free(counts)
+    core.camera_free(cam)
+    core.light_free(light)
+    println("  vulkan: done")
+}
+
+main() {
+    // Without Vulkan up there is no device to sort on, and the caller is
+    // told so rather than handed a crowd that draws nothing.
+    check("no backend up: no device crowd", crowd.device_crowd_new(8) == null)
+
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context != null {
+        renderer = gl.renderer_new()
+        gl_pass = gl.backend(renderer)
+        if core.backend_init(&gl_pass, context, WIDTH, HEIGHT) {
+            check("opengl: no device crowd, the CPU sort stays", crowd.device_crowd_new(8) == null)
+            core.backend_cleanup(&gl_pass)
+        }
+        gl.renderer_free(renderer)
+        offscreen.context_destroy(context)
+    }
+
+    if !vk.available() {
+        println("device_crowd: SKIP no Vulkan driver (${vk.last_error()})")
+        return
+    }
+    vk_renderer = vk.renderer_new()
+    vk_pass = vk.backend(vk_renderer)
+    if !core.backend_init(&vk_pass, null, WIDTH, HEIGHT) {
+        println("device_crowd: SKIP Vulkan would not start (${vk.last_error()})")
+        vk.renderer_free(vk_renderer)
+        return
+    }
+    run_checks(&vk_pass, vk_renderer)
+    core.backend_cleanup(&vk_pass)
+    vk.renderer_free(vk_renderer)
+
+    if failures == 0 {
+        println("device_crowd: all checks passed")
+    } else {
+        println("device_crowd: ${failures} failure(s)")
+    }
+}

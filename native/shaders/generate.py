@@ -408,6 +408,14 @@ AUXILIARY = [
 ]
 
 
+# Compute shaders carry their own layout -- storage buffers and push
+# constants, nothing from the scene block -- so they are compiled as they
+# are written, not rewritten around the block.
+COMPUTE = [
+    ("crowd_sort_vk.comp", "COMPUTE_CROWD_SORT"),
+]
+
+
 def main():
     vertex = block("VERTEX_DEFAULT")
     fragment = block("FRAGMENT_DEFAULT")
@@ -444,6 +452,8 @@ def main():
                                   light_members)
 
     written = {"scene_vk.vert": vk_vertex, "scene_vk.frag": vk_fragment}
+    for name, source in COMPUTE:
+        written[name] = block(source)
     for name, source, stage, samplers, vin, vout in AUXILIARY:
         # These pipelines reuse the scene's vertex input, so their attributes
         # are renamed onto it rather than described a second time.
@@ -483,7 +493,8 @@ def main():
     total = 0
     for name in written:
         path = OUT_DIR / name
-        checked += verify_offsets(path, placed)
+        if not name.endswith(".comp"):
+            checked += verify_offsets(path, placed)
         data = spirv(path, name.rsplit(".", 1)[1])
         total += len(data)
         header += [carray("ae3d_vk_" + name.replace("_vk.", "_").replace(".", "_") + "_spv", data), ""]

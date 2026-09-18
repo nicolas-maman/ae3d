@@ -636,3 +636,74 @@ int ae3d_crowd_bucket(const double *pos, const double *yaw, const double *phase,
     if (far_out) far_out[0] = counts[1];
     return (int)counts[0];
 }
+
+/* The crowd's steps audited: every figure's position against where it
+   stood the frame before, the largest step and who took it, how many
+   stepped further than `limit` (a teleport, which no sim should let
+   happen) and the first three of them, and the crowd's extent in z. The
+   previous positions are then this frame's. Over the job pool, each run
+   its own partial, merged in order so the offenders named are the lowest
+   numbered. out: worst, worst_id, jumps, z_lo, z_hi, offender[0..2]
+   (-1 for none). A diagnostic, but one that runs every frame at half a
+   million, so it does not run on one thread. */
+#define AE3D_AUDIT_GRAIN 8192
+typedef struct { double worst, z_lo, z_hi; int worst_id, jumps, offender[3]; } ae3d_audit_part;
+typedef struct {
+    const double *pos;
+    double *prev;
+    double limit;
+    ae3d_audit_part *parts;
+} ae3d_audit_job;
+
+static void ae3d_crowd_audit_run(void *ctx, int start, int end) {
+    ae3d_audit_job *job = (ae3d_audit_job *)ctx;
+    ae3d_audit_part *part = &job->parts[start / AE3D_AUDIT_GRAIN];
+    int i;
+    part->worst = 0.0; part->worst_id = 0; part->jumps = 0;
+    part->z_lo = 1000.0; part->z_hi = -1000.0;
+    part->offender[0] = part->offender[1] = part->offender[2] = -1;
+    for (i = start; i < end; i++) {
+        const double *p = job->pos + (size_t)i * 3;
+        double *q = job->prev + (size_t)i * 3;
+        double dx = p[0] - q[0], dy = p[1] - q[1], dz = p[2] - q[2];
+        double d = sqrt(dx * dx + dy * dy + dz * dz);
+        if (d > part->worst) { part->worst = d; part->worst_id = i; }
+        if (p[2] < part->z_lo) part->z_lo = p[2];
+        if (p[2] > part->z_hi) part->z_hi = p[2];
+        if (d > job->limit) {
+            if (part->jumps < 3) part->offender[part->jumps] = i;
+            part->jumps++;
+        }
+        q[0] = p[0]; q[1] = p[1]; q[2] = p[2];
+    }
+}
+
+void ae3d_crowd_audit(const double *pos, double *prev, int n, double limit, double *out) {
+    static ae3d_audit_part *parts = NULL;
+    static int capacity = 0;
+    ae3d_audit_job job;
+    int runs, r, named = 0;
+    out[0] = 0.0; out[1] = 0.0; out[2] = 0.0; out[3] = 1000.0; out[4] = -1000.0;
+    out[5] = -1.0; out[6] = -1.0; out[7] = -1.0;
+    if (!pos || !prev || n <= 0) return;
+    runs = (n + AE3D_AUDIT_GRAIN - 1) / AE3D_AUDIT_GRAIN;
+    if (runs > capacity) {
+        free(parts);
+        parts = (ae3d_audit_part *)calloc((size_t)runs, sizeof(*parts));
+        capacity = parts ? runs : 0;
+        if (!parts) return;
+    }
+    job.pos = pos; job.prev = prev; job.limit = limit; job.parts = parts;
+    ae3d_jobs_for(n, AE3D_AUDIT_GRAIN, ae3d_crowd_audit_run, &job);
+    for (r = 0; r < runs; r++) {
+        ae3d_audit_part *part = &parts[r];
+        int k;
+        if (part->worst > out[0]) { out[0] = part->worst; out[1] = (double)part->worst_id; }
+        out[2] += (double)part->jumps;
+        if (part->z_lo < out[3]) out[3] = part->z_lo;
+        if (part->z_hi > out[4]) out[4] = part->z_hi;
+        for (k = 0; k < 3 && named < 3; k++) {
+            if (part->offender[k] >= 0) out[5 + named++] = (double)part->offender[k];
+        }
+    }
+}

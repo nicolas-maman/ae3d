@@ -1,0 +1,80 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer CrowdState { float figures[]; };
+// The streams as vec4s: five a figure, each a sixteen-byte store.
+layout(std430, set = 0, binding = 1) writeonly buffer NearTier { vec4 nearOut[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer MidTier { vec4 midOut[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer FarTier { vec4 farOut[]; };
+// VkDrawIndexedIndirectCommands: indexCount, instanceCount, firstIndex,
+// vertexOffset, firstInstance -- five uints a command, the second the
+// counter. The first three commands are the tiers' lit draws, the ones the
+// sort counts into; the three after are their shadow draws, over the same
+// streams with the depth proxy's index count, given the counts afterwards.
+layout(std430, set = 0, binding = 4) buffer Draws { uint draws[]; };
+
+layout(push_constant) uniform CrowdParams {
+    uint crowdCount;
+    uint crowdThree;      // a mid tier as well as near and far
+    float crowdCx;
+    float crowdCz;
+    float crowdNear2;
+    float crowdMid2;
+    float crowdCull2;
+    float crowdPad;
+    vec4 crowdScale[3];   // a tier's model's scale, xyz
+} params;
+
+void put(uint tier, uint at, vec4 v) {
+    if (tier == 0u) nearOut[at] = v;
+    else if (tier == 1u) midOut[at] = v;
+    else farOut[at] = v;
+}
+
+// The slots are taken a workgroup at a time: each thread counts into the
+// group's own three tallies, the group takes one run of each tier's
+// stream with one atomic on the draw command, and the thread's slot is
+// its place in that run. Half a million atomics on three addresses,
+// serialised across the device, were two milliseconds; two thousand are
+// nothing. The order within a tier is then the workgroups' and not the
+// figures', which the draw does not care about.
+shared uint groupCount[3];
+shared uint groupBase[3];
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint lane = gl_LocalInvocationID.x;
+    if (lane < 3u) groupCount[lane] = 0u;
+    barrier();
+    bool keep = i < params.crowdCount;
+    float x = 0.0, y = 0.0, z = 0.0, yaw = 0.0, phase = 0.0;
+    uint f = i * 8u;
+    uint tier = 0u;
+    uint slot = 0u;
+    if (keep) {
+        x = figures[f]; y = figures[f + 1u]; z = figures[f + 2u];
+        yaw = figures[f + 3u]; phase = figures[f + 4u];
+        float dx = x - params.crowdCx, dz = z - params.crowdCz;
+        float d2 = dx * dx + dz * dz;
+        if (params.crowdCull2 > 0.0 && d2 > params.crowdCull2) keep = false;
+        if (d2 >= params.crowdNear2) tier = (params.crowdThree == 0u || d2 < params.crowdMid2) ? 1u : 2u;
+    }
+    if (keep) slot = atomicAdd(groupCount[tier], 1u);
+    barrier();
+    if (lane < 3u && groupCount[lane] > 0u) groupBase[lane] = atomicAdd(draws[lane * 5u + 1u], groupCount[lane]);
+    barrier();
+    if (!keep) return;
+    uint at = (groupBase[tier] + slot) * 5u;
+    float c = cos(yaw), s = sin(yaw);
+    vec3 sc = params.crowdScale[tier].xyz;
+    // The matrix the crowd's stream carries, column by column: yaw about
+    // the world's up, the tier's scale, the figure's position -- the same
+    // matrix ae3d_inst_set_positions_yaw builds on the CPU -- then the
+    // tint and the phase.
+    put(tier, at + 0u, vec4(c * sc.x, 0.0, -s * sc.x, 0.0));
+    put(tier, at + 1u, vec4(0.0, sc.y, 0.0, 0.0));
+    put(tier, at + 2u, vec4(s * sc.z, 0.0, c * sc.z, 0.0));
+    put(tier, at + 3u, vec4(x, y, z, 1.0));
+    put(tier, at + 4u, vec4(figures[f + 5u], figures[f + 6u], figures[f + 7u], phase));
+}

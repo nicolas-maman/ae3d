@@ -132,6 +132,30 @@ picture the same. The transparent pixels of an atlas carry the colour of
 the nearest opaque ones (bled outward at the bake), so the texture's filter
 and mip levels never blend a key colour into an edge.
 
+### The crowd sorted on the device
+
+On Vulkan a crowd's per-frame sort into its tiers is a compute pass. The
+simulation keeps its columns -- a figure's position, yaw, phase and tint
+-- and hands them to the device as eight floats a figure
+(`device_crowd_update`); `crowd_sort_vk.comp` runs one thread a figure:
+its distance to the camera on the ground, dropped past the cull, its tier
+by the near and mid bands, its instance matrix from its yaw and the
+tier's model's scale (the same matrix the CPU path builds), packed with
+its colour and phase into that tier's stream, and counted into the tier's
+draw command -- a workgroup at a time, so half a million figures are two
+thousand atomics and not half a million. The tiers' models
+(`device_crowd_bind`; two can share a tier, a body and its clothes) draw
+by those counts through `vkCmdDrawIndexedIndirect`, the shadow pass too
+over the same streams with the depth proxy's index count, and nothing
+about the sort comes back to the CPU: no matrix is built, sorted or
+uploaded there. The renderer records the fill and the sort at the frame's
+start, before the shadow pass, once per crowd however many models draw
+its tiers, with the barriers between last frame's reads, the reset of the
+commands, the dispatch, the copy of the counts to the shadow commands and
+the draws. `device_crowd_count` reads the counts of the last frame the
+device finished, for a diagnostic. OpenGL 4.1 has no compute and keeps the
+CPU sort (`crowd_tiers`); `device_crowd_new` returns null there.
+
 ### Temporal anti-aliasing
 
 `engine_set_taa(e, on)`, or `AE3D_TAA=1`. The projection is nudged a

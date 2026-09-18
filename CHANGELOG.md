@@ -115,6 +115,38 @@
   inverse binds where `skeleton_bind` would derive them from the pose.
 - `native/ae3d_blob.c`: a file as bytes and the little-endian numbers in it.
 
+### The crowd sorted on the device
+
+- On Vulkan the horde's per-frame sort is a compute pass. The simulation's
+  columns -- each figure's position, yaw, phase and tint, eight doubles --
+  go to the device as eight floats a figure (`ae3d_vk_crowd_fill`, over the
+  job pool, into a buffer in the device's own memory where the host can
+  see it), and `crowd_sort_vk.comp` picks every figure's tier by its
+  distance to the camera, drops the ones past the cull, builds the instance
+  matrix from the yaw and the tier's scale, packs it with the colour and
+  the phase into the tier's stream and counts it into the tier's draw
+  command -- a workgroup at a time, one atomic per tier per workgroup. The
+  tiers draw by those counts, indirectly (`vkCmdDrawIndexedIndirect`), the
+  shadow pass too over the same streams with the depth proxy's index count;
+  nothing about the sort comes back to the CPU. `crowd.device_crowd_new
+  (capacity)` makes one (null without Vulkan up, and the caller keeps
+  `crowd_tiers`), `device_crowd_bind(dc, model, tier)` names the models
+  that draw its tiers, `device_crowd_update(...)` says each frame which
+  figures and where the camera is, `device_crowd_count(dc, tier)` reads
+  back what the last frame sorted. `zombie_city` uses it on Vulkan
+  (`AE3D_GPU_CROWD=0` keeps the CPU sort); the OpenGL path is unchanged.
+  Half a million: the CPU's update 8.3 to 3.1 ms, its frame 3.3 to 2.4,
+  the matrices, the sort and the upload gone from it; 75 to 90 fps.
+- The horde's teleport audit -- every figure's step against its last
+  position, every frame -- is native and over the job pool
+  (`crowd.crowd_audit`), 1.3 ms to 0.4 at half a million. Its timing had
+  also been counted into the sort's: the "sort" column of the job pool
+  table was the sort plus the audit.
+- `tests/test_device_crowd.ae`: the device's counts against the CPU
+  sort's over the same figures, band by band and with a cull; a figure
+  drawn where it stands, turned by its yaw, tinted by its colour, by its
+  tier's model, and gone when culled; and no device crowd without Vulkan.
+
 ### Billboards: the weather as sprites
 
 - `model_set_billboard(m, mode)`: a point-instanced model's mesh turned to
