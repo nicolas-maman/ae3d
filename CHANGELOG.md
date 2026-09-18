@@ -54,6 +54,17 @@
   afresh. `lights`, five spinning spheres, went from 6.9 ms of CPU a frame
   to 0.1. `scripts/perf.sh` reads a stage time printed in exponent form.
 
+### The editor's look
+
+- A neutral dark palette: greys three tones apart for the viewport's ground,
+  the panels and the bars, one accent, no blue cast. The viewport opens at
+  the width the panels leave it, so the right panel and its scrollbar sit
+  inside the window. With aether-ui's win32 fixes (widgets on the ground
+  behind them, a scrollview that scrolls, hidden sections taking no room,
+  labels refitting when their text or font changes) the editor on Windows
+  looks as it does on the other platforms; `docs/editor-windows.png` is the
+  window as captured there.
+
 ### The viewport
 
 - The scene is drawn straight into the window's own GL context. aether-ui had

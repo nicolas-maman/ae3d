@@ -64,9 +64,9 @@ const BLOOM_INTENSITY = 0.4
 // The viewport's ground. Near black makes a scene look like it is floating in
 // a void rather than standing in a room, and an empty one is the first thing
 // the editor shows.
-const VIEWPORT_R = 0.137
-const VIEWPORT_G = 0.149
-const VIEWPORT_B = 0.176
+const VIEWPORT_R = 0.110
+const VIEWPORT_G = 0.110
+const VIEWPORT_B = 0.114
 const BUTTON_H = 23
 const CONSOLE_LINES = 7
 // A seed is a whole number carried through a row that holds floats, so the
@@ -134,7 +134,10 @@ var g_held = false
 // framebuffer aether-ui hands over, which on a HiDPI screen is twice the
 // canvas: the blit path could only ever render at the canvas's own point size,
 // so the viewport was half resolution there and is not here.
-var g_view_w = 900
+// It starts at the width the window leaves between the panels: a weighted
+// pane's first size is its minimum, so a viewport that opened wider than
+// that pushed the right panel's edge, and its scrollbar, off the window.
+var g_view_w = WINDOW_W - PANEL_LEFT - PANEL_RIGHT
 var g_view_h = 620
 // The canvas over it, in POINTS. The gizmo is drawn and picked in these, and
 // mixing the two puts the handles at half the distance from the origin on a
@@ -809,7 +812,7 @@ refresh_swatch() {
     m = selected_model()
     if m == null || m.material == null {
         ui.set_text(g_swatch, "")
-        if g_chip != 0 { ui.style_bg_color(g_chip, 0.09, 0.10, 0.12, 1.0) }
+        if g_chip != 0 { ui.style_bg_color(g_chip, 0.09, 0.09, 0.09, 1.0) }
         return
     }
     ui.set_text(g_swatch, "#${hex_byte(m.material.diffuse.x)}${hex_byte(m.material.diffuse.y)}${hex_byte(m.material.diffuse.z)}")
@@ -830,10 +833,10 @@ chip_rgb() -> int {
 // The theme's own colours, as the sheet sets them. Written here rather than
 // read back from the sheet on purpose: a check that asks the sheet what it
 // contains agrees with itself no matter what reached the screen.
-const STYLE_ACTION = 0x2C313A
+const STYLE_ACTION = 0x333333
 const STYLE_PRIMARY = 0x2F6FEB
-const STYLE_DANGER = 0x38262B
-const STYLE_FIELD = 0x14171C
+const STYLE_DANGER = 0x3A2628
+const STYLE_FIELD = 0x171717
 
 // How many styled widgets are not painted the colour their class asks for.
 // A class the sheet never defines, or a name that does not match it, styles
@@ -1132,7 +1135,7 @@ paint_selection() {
         if i == g_selected {
             ui.style_bg_color(handle, 0.153, 0.310, 0.573, 1.0)
         } else {
-            ui.style_bg_color(handle, 0.145, 0.165, 0.200, 1.0)
+            ui.style_bg_color(handle, 0.149, 0.149, 0.149, 1.0)
         }
         i = i + 1
     }
@@ -3281,10 +3284,14 @@ model_flag(m: *Model, name: string) -> int {
 theme() -> ptr {
     sheet = ui.create_styles()
 
-    // The viewport clears to 0x14161A, so the panels sit a clear step lighter
-    // and the chrome around them a step darker: three tones, not one flat grey.
-    ui.st_bg(sheet, "panel", 0x252A33)
-    ui.st_border(sheet, "panel", 1.0, 0x30363F)
+    // Neutral dark greys, the palette of Unity's and Blender's dark themes
+    // and Unreal's: a grey with a blue cast read as a colour of its own
+    // next to the scene, and put a tint on every material chip and swatch
+    // beside it. The viewport clears to 0x1C1C1D, so the panels sit a clear
+    // step lighter and the chrome around them a step darker: three tones,
+    // not one flat grey; the one colour in the chrome is the accent.
+    ui.st_bg(sheet, "panel", 0x262626)
+    ui.st_border(sheet, "panel", 1.0, 0x363636)
     ui.st_insets(sheet, "panel", 12.0, 14.0, 12.0, 14.0)
 
     // The stack inside a panel is only as tall as what it holds, so a border on
@@ -3292,15 +3299,15 @@ theme() -> ptr {
     // the panel reads as a card that stopped short of the window. The frame
     // belongs to the scroll view, which is the full height; the stack inside it
     // carries the same ground and the padding, and no edges of its own.
-    ui.st_bg(sheet, "panel-body", 0x252A33)
+    ui.st_bg(sheet, "panel-body", 0x262626)
     // No horizontal inset. A section bar and a rule reach both edges of the
     // column, which is what makes a panel read as docked chrome rather than a
     // stack of cards, and it is what Unreal, Unity and Godot all draw. The
     // gutter belongs to the rows instead, so anything that needs one says so.
     ui.st_insets(sheet, "panel-body", 12.0, 0.0, 12.0, 0.0)
 
-    ui.st_bg(sheet, "sunken", 0x191D23)
-    ui.st_border(sheet, "sunken", 1.0, 0x30363F)
+    ui.st_bg(sheet, "sunken", 0x1B1B1B)
+    ui.st_border(sheet, "sunken", 1.0, 0x363636)
     ui.st_insets(sheet, "sunken", 8.0, 14.0, 8.0, 14.0)
 
 
@@ -3309,50 +3316,50 @@ theme() -> ptr {
     // column while everything inside them still lines up.
     ui.st_insets(sheet, "row", 0.0, 14.0, 0.0, 14.0)
 
-    ui.st_bg(sheet, "bar", 0x1B1F25)
+    ui.st_bg(sheet, "bar", 0x1E1E1E)
     ui.st_insets(sheet, "bar", 6.0, 14.0, 6.0, 14.0)
 
     // The bar a section caption sits on. It spans the column, so the padding
     // that keeps the caption off the edge is a margin on the caption itself.
-    ui.st_bg(sheet, "heading", 0x1C2027)
+    ui.st_bg(sheet, "heading", 0x1F1F1F)
     ui.st_insets(sheet, "heading", 3.0, 0.0, 3.0, 0.0)
 
     // A section's typography without its bar, for a caption sharing a row.
-    ui.st_color(sheet, "caption", 0x9AA5B5)
+    ui.st_color(sheet, "caption", 0xA6A6A6)
     ui.st_bold(sheet, "caption")
     ui.st_font_size(sheet, "caption", 10.0)
 
-    ui.st_color(sheet, "title", 0xE6E9EF)
+    ui.st_color(sheet, "title", 0xEBEBEB)
     ui.st_bold(sheet, "title")
     ui.st_font_size(sheet, "title", 13.0)
 
-    ui.st_color(sheet, "console", 0x9FB3C8)
+    ui.st_color(sheet, "console", 0xB4B4B4)
     ui.st_font_family(sheet, "console", "Menlo")
     ui.st_font_size(sheet, "console", 11.0)
 
 
-    ui.st_color(sheet, "label", 0x8A919E)
+    ui.st_color(sheet, "label", 0x9C9C9C)
     ui.st_font_size(sheet, "label", 11.0)
 
-    ui.st_color(sheet, "value", 0xDDE3EC)
+    ui.st_color(sheet, "value", 0xE3E3E3)
     ui.st_font_size(sheet, "value", 11.0)
 
-    ui.st_color(sheet, "stats", 0x7F8896)
+    ui.st_color(sheet, "stats", 0x8C8C8C)
     ui.st_font_size(sheet, "stats", 11.0)
 
-    ui.st_border(sheet, "chip", 1.0, 0x0E1013)
+    ui.st_border(sheet, "chip", 1.0, 0x0F0F0F)
     ui.st_radius(sheet, "chip", 3.0)
 
     // A field is sunk into the panel rather than raised off it, so it reads as
     // something to type into next to a button that reads as something to press.
-    ui.st_bg(sheet, "field", 0x14171C)
-    ui.st_color(sheet, "field", 0xE6E9EF)
-    ui.st_border(sheet, "field", 1.0, 0x3A4150)
+    ui.st_bg(sheet, "field", 0x171717)
+    ui.st_color(sheet, "field", 0xEBEBEB)
+    ui.st_border(sheet, "field", 1.0, 0x3F3F3F)
     ui.st_radius(sheet, "field", 4.0)
     ui.st_font_family(sheet, "field", "Menlo")
     ui.st_font_size(sheet, "field", 11.0)
     ui.st_insets(sheet, "field", 4.0, 6.0, 4.0, 6.0)
-    ui.st_hover(sheet, "field", 0x1B1F26)
+    ui.st_hover(sheet, "field", 0x1F1F1F)
 
     // The axis colours every 3D editor uses, so a vector row is read without
     // looking at the letters.
@@ -3369,16 +3376,16 @@ theme() -> ptr {
     // Buttons carry an edge for the same reason the fields do. A flat fill on
     // a panel one step darker reads as a soft block rather than as something
     // to press, and a panel of them had no lines in it at all.
-    ui.st_bg(sheet, "action", 0x2C313A)
-    ui.st_border(sheet, "action", 1.0, 0x3D4453)
-    ui.st_color(sheet, "action", 0xD7DAE0)
+    ui.st_bg(sheet, "action", 0x333333)
+    ui.st_border(sheet, "action", 1.0, 0x454545)
+    ui.st_color(sheet, "action", 0xDCDCDC)
     ui.st_radius(sheet, "action", 5.0)
     ui.st_insets(sheet, "action", 4.0, 10.0, 4.0, 10.0)
-    ui.st_hover(sheet, "action", 0x3A4150)
-    ui.st_active(sheet, "action", 0x4B5263)
+    ui.st_hover(sheet, "action", 0x3F3F3F)
+    ui.st_active(sheet, "action", 0x4B4B4B)
 
-    ui.st_bg(sheet, "danger", 0x38262B)
-    ui.st_border(sheet, "danger", 1.0, 0x5A3B42)
+    ui.st_bg(sheet, "danger", 0x3A2628)
+    ui.st_border(sheet, "danger", 1.0, 0x5C3A3E)
     ui.st_color(sheet, "danger", 0xE79A9A)
     ui.st_radius(sheet, "danger", 5.0)
     ui.st_insets(sheet, "danger", 4.0, 10.0, 4.0, 10.0)
