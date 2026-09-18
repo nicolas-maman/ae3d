@@ -35,7 +35,7 @@ exports (
     engine_set_size, engine_set_title, engine_set_msaa, engine_set_decorated, engine_set_post,
     engine_set_render_scale, engine_set_shadows, engine_shadows, engine_set_fog, engine_fog, engine_set_shadow_distance, engine_shadow_distance,
     engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
-    engine_set_skybox, engine_set_sky, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_clouds, engine_cloud_wind, engine_set_sky_overcast, engine_sky_overcast, engine_sky_overcast_color, engine_set_ssao, engine_set_capture_channel, engine_set_wetness, engine_set_taa, engine_taa, engine_set_dlss, engine_dlss, engine_ray_query, engine_set_ray_shadows, engine_ray_shadows, engine_load_texture,
+    engine_set_skybox, engine_set_sky, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_clouds, engine_cloud_wind, engine_set_sky_overcast, engine_sky_overcast, engine_sky_overcast_color, engine_set_ssao, engine_set_capture_channel, engine_set_wetness, engine_set_taa, engine_taa, engine_set_dlss, engine_dlss, engine_ray_query, engine_set_ray_shadows, engine_ray_shadows, engine_set_sun_size, engine_sun_size, engine_load_texture,
     engine_set_time_of_day, engine_time_of_day,
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
     engine_render_ms, engine_render_frames,
@@ -174,6 +174,8 @@ struct Engine {
     // runtime is loaded before the backend starts when one is wanted.
     dlss_mode: int
     ray_shadows: bool
+    // The sun's size for the rays' penumbra, in degrees; zero is a point.
+    sun_size: float
     perf_on: bool
     perf_frames: int
     perf_shadow_ms: float
@@ -876,6 +878,20 @@ engine_set_ray_shadows(e: *Engine, on: bool) {
 
 engine_ray_shadows(e: *Engine) -> bool { return e.ray_shadows && engine_ray_query(e) }
 
+// The sun's size, as the angle its disc subtends in degrees, for the
+// ray-traced shadows' penumbra: zero is a point sun and a hard edge; the
+// real sun is about half a degree. AE3D_SUN_SIZE=n sets it from outside, in
+// tenths of a degree (5 is the sun).
+engine_set_sun_size(e: *Engine, degrees: float) {
+    if degrees < 0.0 { degrees = 0.0 }
+    e.sun_size = degrees
+    if e.backend_state != null && e.api == platform.API_VULKAN {
+        vk.renderer_set_sun_size(e.backend_state as *VKRenderer, degrees)
+    }
+}
+
+engine_sun_size(e: *Engine) -> float { return e.sun_size }
+
 engine_set_wetness(e: *Engine, amount: float) {
     if e.backend_state == null { return }
     if e.api == platform.API_VULKAN {
@@ -1080,6 +1096,9 @@ engine_start(e: *Engine, x: int, y: int) -> bool {
     if core.env_int("AE3D_TAA", 0) == 1 { e.taa = true }
     if e.taa { engine_set_taa(e, true) }
     if core.env_int("AE3D_RAYS", 0) == 1 { e.ray_shadows = true }
+    tenths = core.env_int("AE3D_SUN_SIZE", 0 - 1)
+    if tenths >= 0 { e.sun_size = (tenths as float) / 10.0 }
+    if e.sun_size > 0.0 { engine_set_sun_size(e, e.sun_size) }
     if e.ray_shadows {
         engine_set_ray_shadows(e, true)
         if engine_ray_query(e) { println("ae3d: shadows by ray") } else { println("ae3d: no ray query on this device; the shadow map stands") }

@@ -157,6 +157,14 @@
   draws and the scene from 2.96 to 1.57 ms (one ray in place of nine
   map taps); at half a million, where the crowd stays in the map, the
   rays cost two or three per cent.
+- The sun has a size for the rays: `engine_set_sun_size(e, degrees)` /
+  `AE3D_SUN_SIZE=n` (tenths of a degree). Four rays a pixel into the
+  cone the sun's disc subtends, on a spiral turned by a per-pixel noise
+  and the frame's jitter, so the temporal pass folds them into a smooth
+  penumbra: sharp at the caster, soft far from it. `tests/test_ray_shadows`
+  holds a wide sun to a half-lit edge and a dark middle, and
+  `AE3D_RAY_DUMP=<dir>` writes its frames. About a millisecond of scene
+  time in the city at 720p.
 - The crowd in the rays: `crowd.device_crowd_rays(dc, far, bank)` builds
   a bottom-level structure per frame of the pose bank from the far
   tier's mesh (`ae3d_vk_pose_blas_create`), and the device sort writes a
