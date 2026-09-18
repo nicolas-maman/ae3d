@@ -63,6 +63,13 @@
   stamps the sky's end all the same, so its opaque draws are no longer
   charged to the sky.
 
+### The front page
+
+- The README is a front page: a feature table, the scenes, a quick start, a
+  program, the pipeline, the editor, the examples and the layout, with the
+  reasoning behind each feature moved to `docs/rendering.md` and the
+  pipeline, the critique and the agent channel to `docs/pipeline.md`.
+
 ### The editor's look
 
 - A neutral dark palette: greys three tones apart for the viewport's ground,
