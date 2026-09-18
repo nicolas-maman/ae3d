@@ -15,6 +15,14 @@
   that go white. `tools/blender/make_zombie_street.py` shades the road
   smooth: flat, every quad of its wear took its own tilt and a raking light
   read it as bands across the street (needs a Blender export to take).
+- The city's lit windows glow. A lit block's panes were handed an exposure
+  of 8 to 16, and the emissive path opens past ten: a quarter of the lit
+  blocks were bright paint that the shading darkened, and with the third
+  that went dark most of a night city had no light in its windows. Lit
+  blocks are 80% now and always past ten. The panes also sit 22 cm back
+  in their reveals, so a look along the street sees slivers where real
+  sashes sit 8 cm in; `make_zombie_street.py` moves them (the same export
+  as the road).
 
 ### Game objects and scripts, the Unity shape
 
