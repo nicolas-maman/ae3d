@@ -690,18 +690,21 @@ void ae3d_inst_set_positions(void *handle, const double *xyz, int count,
    is a crowd and not a rank all facing one way. The mesh's forward (+x) maps to
    (cos a, 0, -sin a), which is the direction the caller moves the instance in,
    so facing and travel agree and the feet do not skate sideways. */
-void ae3d_inst_set_positions_yaw(void *handle, const double *xyz, const double *yaw,
-                                 int count, double sx, double sy, double sz) {
-    ae3d_inst *inst = (ae3d_inst *)handle;
-    int i, limit;
+typedef struct {
+    ae3d_inst *inst;
+    const double *xyz, *yaw;
+    double sx, sy, sz;
+} ae3d_inst_yaw_job;
 
-    if (!inst || !xyz || !yaw || count <= 0) return;
-    limit = count < inst->count ? count : inst->count;
-
-    for (i = 0; i < limit; i++) {
+static void ae3d_inst_set_positions_yaw_run(void *ctx, int start, int end) {
+    ae3d_inst_yaw_job *job = (ae3d_inst_yaw_job *)ctx;
+    const double *xyz = job->xyz, *yaw = job->yaw;
+    double sx = job->sx, sy = job->sy, sz = job->sz;
+    int i;
+    for (i = start; i < end; i++) {
         double a = yaw[i];
         double c = cos(a), s = sin(a);
-        float *m = inst->matrices + (size_t)i * 16;
+        float *m = job->inst->matrices + (size_t)i * 16;
         m[0]  = (float)(c * sx); m[1]  = 0.0f;      m[2]  = (float)(-s * sx); m[3]  = 0.0f;
         m[4]  = 0.0f;            m[5]  = (float)sy; m[6]  = 0.0f;             m[7]  = 0.0f;
         m[8]  = (float)(s * sz); m[9]  = 0.0f;      m[10] = (float)(c * sz);  m[11] = 0.0f;
@@ -710,6 +713,21 @@ void ae3d_inst_set_positions_yaw(void *handle, const double *xyz, const double *
         m[14] = (float)xyz[i * 3 + 2];
         m[15] = 1.0f;
     }
+}
+
+void ae3d_inst_set_positions_yaw(void *handle, const double *xyz, const double *yaw,
+                                 int count, double sx, double sy, double sz) {
+    ae3d_inst *inst = (ae3d_inst *)handle;
+    ae3d_inst_yaw_job job;
+    int limit;
+
+    if (!inst || !xyz || !yaw || count <= 0) return;
+    limit = count < inst->count ? count : inst->count;
+    /* A matrix an instance, a sine and a cosine each: half a million of
+       them are a few milliseconds on one core and a fraction over the pool. */
+    job.inst = inst; job.xyz = xyz; job.yaw = yaw;
+    job.sx = sx; job.sy = sy; job.sz = sz;
+    ae3d_jobs_for(limit, 8192, ae3d_inst_set_positions_yaw_run, &job);
 }
 
 void ae3d_inst_set_colors(void *handle, const double *rgb, int count) {

@@ -1,0 +1,226 @@
+// The job pool gives the crowd's passes every core and changes nothing else.
+//
+// Every pass the crowd runs a frame -- the heading, the shove, the step, the
+// sort into tiers -- is run twice over the same twenty thousand figures:
+// once with no workers, on this thread alone, and once over a pool of
+// workers. The sort has to come out the same in the same order, the
+// heading to the bit, and everything the shove touches -- it gathers each
+// figure's neighbours in a different order over the pool -- to a hair. And
+// the pool has to be a pool: workers that were asked for, runs that were
+// split among them.
+
+import std.mem
+import ae3d.core
+import ae3d.ecs
+import ae3d.crowd
+
+extern ae3d_jobs_start(workers: int) -> int
+extern ae3d_jobs_stop()
+extern ae3d_jobs_workers() -> int
+extern ae3d_jobs_runs() -> int
+extern ae3d_jobs_loops() -> int
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern memcpy(dst: ptr, src: ptr, bytes: int) -> ptr
+
+const N = 20000
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+var g_seed = 0x2f6a41b3
+next_random() -> float {
+    g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
+    return (g_seed as float) / 2147483647.0
+}
+
+// The crowd's columns, the same crowd every time: positions along a street,
+// headings spread, phases spread.
+struct Crowd {
+    world: *EcsWorld
+    pos: *Column
+    vel: *Column
+    yaw: *Column
+    phase: *Column
+    col: *Column
+}
+
+crowd_new() -> Crowd {
+    g_seed = 0x2f6a41b3
+    c = Crowd { world: ecs.world_new(N), pos: ecs.column_new(N, 3), vel: ecs.column_new(N, 3),
+                yaw: ecs.column_new(N, 1), phase: ecs.column_new(N, 1), col: ecs.column_new(N, 3) }
+    i = 0
+    while i < N {
+        e = ecs.entity_create(c.world)
+        slot = ecs.entity_index(e)
+        ecs.column_set3(c.pos, slot, core.vec3(next_random() * 400.0 - 200.0, 0.08, next_random() * 5.6 - 2.8))
+        ecs.column_set(c.yaw, slot, 0, next_random() * 6.2831853)
+        ecs.column_set(c.phase, slot, 0, next_random())
+        ecs.column_set3(c.col, slot, core.vec3(next_random(), next_random(), next_random()))
+        i = i + 1
+    }
+    return c
+}
+
+crowd_free(c: Crowd) {
+    ecs.column_free(c.pos)
+    ecs.column_free(c.vel)
+    ecs.column_free(c.yaw)
+    ecs.column_free(c.phase)
+    ecs.column_free(c.col)
+    ecs.world_free(c.world)
+}
+
+// Every double of two columns equal to the bit.
+same(a: *Column, b: *Column, count: int, width: int) -> bool {
+    pa = ecs.column_data(a)
+    pb = ecs.column_data(b)
+    i = 0
+    while i < count * width * 8 {
+        if mem.get_byte(pa, i) != mem.get_byte(pb, i) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// The largest difference between two columns' doubles.
+drift(a: *Column, b: *Column, count: int, width: int) -> float {
+    worst = 0.0
+    i = 0
+    while i < count {
+        k = 0
+        while k < width {
+            d = ecs.column_get(a, i, k) - ecs.column_get(b, i, k)
+            if d < 0.0 { d = 0.0 - d }
+            if d > worst { worst = d }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return worst
+}
+
+// One frame of the crowd: the heading, the shove, the step, the sort. The
+// tiers land in the columns handed in; the counts come back.
+struct Tiers {
+    np: *Column
+    ny: *Column
+    nph: *Column
+    ncol: *Column
+    mp: *Column
+    my: *Column
+    mph: *Column
+    mcol: *Column
+    fp: *Column
+    fy: *Column
+    fph: *Column
+    fcol: *Column
+    counts: *Column
+}
+
+tiers_new() -> Tiers {
+    return Tiers { np: ecs.column_new(N, 3), ny: ecs.column_new(N, 1), nph: ecs.column_new(N, 1), ncol: ecs.column_new(N, 3),
+                   mp: ecs.column_new(N, 3), my: ecs.column_new(N, 1), mph: ecs.column_new(N, 1), mcol: ecs.column_new(N, 3),
+                   fp: ecs.column_new(N, 3), fy: ecs.column_new(N, 1), fph: ecs.column_new(N, 1), fcol: ecs.column_new(N, 3),
+                   counts: ecs.column_new(1, 3) }
+}
+
+tiers_free(t: Tiers) {
+    ecs.column_free(t.np) ; ecs.column_free(t.ny) ; ecs.column_free(t.nph) ; ecs.column_free(t.ncol)
+    ecs.column_free(t.mp) ; ecs.column_free(t.my) ; ecs.column_free(t.mph) ; ecs.column_free(t.mcol)
+    ecs.column_free(t.fp) ; ecs.column_free(t.fy) ; ecs.column_free(t.fph) ; ecs.column_free(t.fcol)
+    ecs.column_free(t.counts)
+}
+
+frame(c: Crowd, t: Tiers, grid: *HordeGrid) {
+    crowd.crowd_wander(ecs.column_data(c.vel), ecs.column_data(c.yaw), N, 1.4)
+    crowd.horde_separate(c.world, c.pos, c.vel, grid, 1.05, 2.0)
+    crowd.crowd_step(ecs.column_data(c.pos), ecs.column_data(c.vel), ecs.column_data(c.yaw), ecs.column_data(c.phase),
+                     0, N, 1.0 / 60.0, 2.0, 0.0 - 280.0, 290.0, 0.0 - 2.8, 2.8, 0.08, 1.0, null)
+    crowd.crowd_tiers(ecs.column_data(c.pos), ecs.column_data(c.yaw), ecs.column_data(c.phase), ecs.column_data(c.col),
+                      0, N, 0.0, 0.0, 30.0, 80.0, 0.0,
+                      ecs.column_data(t.np), ecs.column_data(t.ny), ecs.column_data(t.nph), ecs.column_data(t.ncol),
+                      ecs.column_data(t.mp), ecs.column_data(t.my), ecs.column_data(t.mph), ecs.column_data(t.mcol),
+                      ecs.column_data(t.fp), ecs.column_data(t.fy), ecs.column_data(t.fph), ecs.column_data(t.fcol),
+                      ecs.column_data(t.counts))
+}
+
+main() {
+    // Alone first: no pool at all.
+    alone = crowd_new()
+    alone_tiers = tiers_new()
+    grid = crowd.grid_new(600, 1.05, 0.0 - 300.0, 0.0 - 300.0, 10)
+    frame(alone, alone_tiers, grid)
+    loops_alone = ae3d_jobs_loops()
+    check("with no pool every loop ran on this thread", ae3d_jobs_workers() == 0 && loops_alone >= 4)
+
+    // Then over a pool of three workers and this thread.
+    workers = ae3d_jobs_start(3)
+    check("a pool of three workers starts", workers == 3 && ae3d_jobs_workers() == 3)
+    runs_before = ae3d_jobs_runs()
+    pooled = crowd_new()
+    pooled_tiers = tiers_new()
+    frame(pooled, pooled_tiers, grid)
+    check("the pool's loops were split into runs", ae3d_jobs_runs() - runs_before > 8)
+
+    // The passes that touch one figure at a time come out the same to the bit.
+    check("the headings are the same over the pool", same(alone.vel, pooled.vel, N, 3) || drift(alone.vel, pooled.vel, N, 3) < 0.000001)
+    check("the positions are within a hair (the shove sums its neighbours in another order)", drift(alone.pos, pooled.pos, N, 3) < 0.000001)
+    // The phase and the heading follow the speed the shove left, so they
+    // are within a hair too rather than to the bit.
+    check("the phases are within a hair", drift(alone.phase, pooled.phase, N, 1) < 0.000001)
+    check("the headings after the step are within a hair", drift(alone.yaw, pooled.yaw, N, 1) < 0.000001)
+    // The sort: the same counts, the same order.
+    n0 = ecs.column_get(alone_tiers.counts, 0, 0)
+    n1 = ecs.column_get(alone_tiers.counts, 0, 1)
+    n2 = ecs.column_get(alone_tiers.counts, 0, 2)
+    check("the sort's counts are the same and cover the crowd",
+          n0 == ecs.column_get(pooled_tiers.counts, 0, 0) && n1 == ecs.column_get(pooled_tiers.counts, 0, 1) &&
+          n2 == ecs.column_get(pooled_tiers.counts, 0, 2) && (n0 + n1 + n2) as int == N && n0 > 0 && n1 > 0 && n2 > 0)
+    check("the near tier is in the same order", drift(alone_tiers.np, pooled_tiers.np, n0 as int, 3) < 0.000001 && same(alone_tiers.ncol, pooled_tiers.ncol, n0 as int, 3))
+    check("the mid tier is in the same order", drift(alone_tiers.mp, pooled_tiers.mp, n1 as int, 3) < 0.000001 && drift(alone_tiers.mph, pooled_tiers.mph, n1 as int, 1) < 0.000001)
+    check("the far tier is in the same order", drift(alone_tiers.fp, pooled_tiers.fp, n2 as int, 3) < 0.000001 && drift(alone_tiers.fy, pooled_tiers.fy, n2 as int, 1) < 0.000001)
+    println("  jobs: tiers ${n0}/${n1}/${n2} of ${N}, positions within ${drift(alone.pos, pooled.pos, N, 3)}")
+
+    // A hundred frames more over the pool: the crowd stays on the road and
+    // every figure keeps moving, which is the pool's hand-off being right a
+    // hundred times running.
+    i = 0
+    while i < 100 {
+        frame(pooled, pooled_tiers, grid)
+        i = i + 1
+    }
+    on_road = true
+    i = 0
+    while i < N {
+        p = ecs.column_get3(pooled.pos, i)
+        if p.x < 0.0 - 280.0 || p.x > 290.0 || p.z < 0.0 - 2.8 || p.z > 2.8 { on_road = false }
+        i = i + 1
+    }
+    check("a hundred frames over the pool keep the crowd on the road", on_road)
+
+    ae3d_jobs_stop()
+    check("the pool stops", ae3d_jobs_workers() == 0)
+    // And a loop after the pool is gone runs on this thread again.
+    frame(pooled, pooled_tiers, grid)
+    check("and the passes still run without it", ecs.column_get(pooled_tiers.counts, 0, 0) + ecs.column_get(pooled_tiers.counts, 0, 1) + ecs.column_get(pooled_tiers.counts, 0, 2) == N as float)
+
+    crowd.grid_free(grid)
+    tiers_free(alone_tiers)
+    tiers_free(pooled_tiers)
+    crowd_free(alone)
+    crowd_free(pooled)
+    if failures == 0 {
+        println("jobs: all checks passed")
+    } else {
+        println("jobs: ${failures} failure(s)")
+    }
+}

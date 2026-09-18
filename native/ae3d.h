@@ -88,6 +88,13 @@ int    ae3d_crowd_bucket(const double *pos, const double *yaw, const double *pha
                          double *np, double *ny, double *nph, double *ncol,
                          double *fp, double *fy, double *fph, double *fcol,
                          double *far_out);
+void   ae3d_crowd_tiers(const double *pos, const double *yaw, const double *phase,
+                        const double *col, int start, int n,
+                        double cx, double cz, double near_dist, double mid_dist, double cull_dist,
+                        double *np, double *ny, double *nph, double *ncol,
+                        double *mp, double *my, double *mph, double *mcol,
+                        double *fp, double *fy, double *fph, double *fcol,
+                        double *counts_out);
 void   ae3d_gl_upload_skin(void *mesh, int vbo);
 void  *ae3d_skinrows_create(int count);
 void   ae3d_skinrows_destroy(void *rows);
@@ -422,6 +429,17 @@ void ae3d_capture_release(void);
 int  ae3d_capture_adopt(const unsigned char *pixels, int width, int height);
 int  ae3d_capture_copy_keyed(unsigned char *atlas, int atlas_width, int atlas_height, int dst_x, int dst_y, int cell, int kr, int kg, int kb, int tolerance);
 int  ae3d_capture_bleed(unsigned char *atlas, int width, int height);
+
+/* A pool of worker threads and a parallel for (native/ae3d_jobs.c): the
+   range [0, count) in runs of `grain` elements over the workers and the
+   caller, done when it returns. Without a pool the caller does it alone. */
+typedef void (*ae3d_job_fn)(void *ctx, int start, int end);
+int  ae3d_jobs_start(int workers);     /* < 0: one per hardware thread but the caller's; 0: none */
+void ae3d_jobs_stop(void);
+int  ae3d_jobs_workers(void);
+void ae3d_jobs_for(int count, int grain, ae3d_job_fn fn, void *ctx);
+long long ae3d_jobs_loops(void);
+long long ae3d_jobs_runs(void);
 /* How many numbers the fixed-size answers -- a pixel, a region, a diff -- are
    written into. A grid is as long as it has cells and says so. */
 #define AE3D_CAPTURE_SLOTS 8

@@ -102,9 +102,34 @@ figures are the cost and not the road's density:
 | 500,000 | off | 21 | 28.8 | 19.1 |
 | 500,000 | past 80 m | 35 | 8.0 | 2.7 |
 
-At half a million the frame is 29 ms of which the device draws 11: the
-rest is the simulation stepping half a million figures on one thread,
-which is where the horde's cost is now.
+(Measured before the job pool below; with it, half a million are 79 fps.)
+
+At half a million the device draws its frame in 11 ms. What was left
+was the simulation: 25 ms of one thread stepping half a million figures
+(`update_ms`, and `zombie_city[perf] sim` names the passes -- the
+heading 2.1, the shove 2.3, the step 8.6, the sort 4.3, the matrices and
+the upload 10.0). Every one of those passes is the same few lines on every
+figure with nothing shared but the arrays, so they run over the engine's
+job pool now (`native/ae3d_jobs.c`: a worker for every hardware thread
+but the main one, `ae3d_jobs_for` handing runs of a few thousand figures
+to the workers and the caller alike; `AE3D_JOBS=n` sets the thread count,
+1 is the main thread alone) and the sort goes into its three tiers in one
+pass instead of a pass and a pass over the far tier's output. On a
+24-thread machine:
+
+| crowd | threads | fps | update ms | heading | shove | step | sort | upload |
+|---|---|---|---|---|---|---|---|---|
+| 500,000 | 1 | 36 | 24.4 | 2.2 | 2.3 | 8.8 | 4.5 | 6.9 |
+| 500,000 | 4 | 69 | 12.0 | 0.6 | 1.7 | 2.2 | 3.2 | 4.4 |
+| 500,000 | 24 | 79 | 8.0 | 0.4 | 1.7 | 1.0 | 2.8 | 2.3 |
+
+What does not scale is what is bound by memory rather than arithmetic:
+the sort and the upload write each figure's eight doubles, its sixty-four
+bytes of matrix and its eighty bytes of instance stream every frame, a
+hundred-odd megabytes, and the shove's grid is still built on one thread.
+The next step for those is not more threads but fewer copies: the
+positions, headings and phases uploaded as they are and the matrices
+built and the tiers chosen on the device (#274).
 
 The table found a stall as well: `lights` spent 6.9 ms of CPU a frame, at
 nine draws, because a batched model that moves had its instance buffer

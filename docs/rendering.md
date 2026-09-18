@@ -107,8 +107,9 @@ The feature list in full, with the reasoning behind each. The [README](../README
 *`AE3D_CROWD=20000 AE3D_NEAR=28 ./build/zombie_city`: the near tier draws the
 full mesh, the far tier the build's own 168-triangle stand-in, and past
 eighty metres each zombie is a picture; the draw count does not change with
-the crowd. Twenty thousand hold ~120 fps on an RTX 4070 Ti at 1280x720
-with the GPU shared, half a million 35.*
+the crowd, and the simulation runs over the engine's job pool on every
+core. Twenty thousand hold ~120 fps on an RTX 4070 Ti at 1280x720 with
+the GPU shared, half a million 79.*
 
 ### Impostors
 

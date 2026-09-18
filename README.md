@@ -27,7 +27,7 @@ skinned instanced crowds, and an engine that can be interrogated while it runs.
 | **A sky by the hour** | `engine_set_time_of_day(hours)` places the sun and derives the key light, fog and a procedural sky from it. Volumetric clouds from baked Perlin-Worley textures, lit through a sun march, shadowing the ground: ~1.5 ms a frame. |
 | **Weather** | Rain, snow, dust and storm over any scene (`ae3d.weather`): a hundred thousand point-instanced particles stepped in C around the camera, wind, the sky and clouds gone overcast, the fog and the sun to match, lightning in a storm. |
 | **Water** | A Gerstner sea with dispersion, fresnel, GGX glitter, whitecaps, depth-based shallows and a foam line, and caustics from underneath. |
-| **Crowds** | A figure's walk baked into a pose bank; every instance posed in the vertex shader from its own phase, three tiers by distance: the full mesh, a 168-triangle stand-in, and past that an impostor -- a picture baked from the figure's albedo and normals, lit by the scene's lights. Half a million zombies in six draws, feet planted. |
+| **Crowds** | A figure's walk baked into a pose bank; every instance posed in the vertex shader from its own phase, three tiers by distance: the full mesh, a 168-triangle stand-in, and past that an impostor -- a picture baked from the figure's albedo and normals, lit by the scene's lights. The horde's simulation runs over a job pool on every core. Half a million zombies in six draws at 79 fps, feet planted. |
 | **Instancing and ECS** | Instances as matrices or as eight-float points (a million grains of sand in a 32 MB stream); `ae3d.ecs` keeps components in dense columns the crowd systems walk in C. |
 | **Voxels and terrain** | Voxel worlds meshed as only the faces that show with baked corner sky; surface nets over a signed distance field for smooth terrain; Perlin heightfields. |
 | **Self-painted assets** | Skies, sand, palettes and albedos generated from the engine's own noise and registered as textures. Nothing downloaded. |
@@ -51,7 +51,7 @@ The full list, with the reasoning behind each feature, is in
 
 ![Twenty thousand zombies filling the street](docs/zombie-horde.png)
 
-<sub>`AE3D_CROWD=20000 ./build/zombie_city`: the near tier draws the full mesh, the far tier a 168-triangle stand-in, and past eighty metres every zombie is a picture baked from the figure and lit by the scene's lights. The draw count does not change with the crowd: ~120 fps at twenty thousand on an RTX 4070 Ti at 1280×720 with the GPU shared, 35 at half a million.</sub>
+<sub>`AE3D_CROWD=20000 ./build/zombie_city`: the near tier draws the full mesh, the far tier a 168-triangle stand-in, and past eighty metres every zombie is a picture baked from the figure and lit by the scene's lights. The draw count does not change with the crowd, and the simulation runs over every core: ~120 fps at twenty thousand on an RTX 4070 Ti at 1280×720 with the GPU shared, 79 at half a million.</sub>
 
 Every scene is verified the way the engine is: from a sweep of camera
 positions and by numbers read back over the channel, not from one still.

@@ -18,13 +18,16 @@ import ae3d.behaviour
 import std.os
 
 extern calloc(count: int, size: int) -> ptr
+extern ae3d_jobs_start(workers: int) -> int
+extern ae3d_jobs_stop()
+extern ae3d_jobs_workers() -> int
 extern free(block: ptr)
 
 exports (
     Engine, Behaviour,
     behaviour_new, engine_add_behaviour, engine_remove_behaviour, engine_behaviour_count, engine_behaviour,
     engine_add_scene, engine_remove_scene,
-    engine_new, engine_new_with, engine_free, engine_run, engine_run_at, engine_start, engine_loop, engine_shutdown,
+    engine_new, engine_new_with, engine_free, engine_run, engine_run_at, engine_start, engine_loop, engine_shutdown, engine_jobs,
     engine_stop,
     engine_add_model, engine_remove_model, engine_set_light, engine_light,
     engine_add_light, engine_remove_light,
@@ -333,6 +336,12 @@ engine_new_with(api: int) -> *Engine {
     e.perf_on = core.env_int("AE3D_PERF", 0) == 1
     e.perf_stage_ms = calloc(vk.STAGE_COUNT, 8)
     e.animations = anim.registry_new() as ptr
+    // The job pool the crowd's passes and the instance uploads run over: a
+    // worker for every hardware thread but this one. AE3D_JOBS=n is the
+    // thread count, this one included; 1 is this thread alone, which is
+    // the measure everything else is against.
+    threads = core.env_int("AE3D_JOBS", 0)
+    if threads <= 0 { ae3d_jobs_start(0 - 1) } else { ae3d_jobs_start(threads - 1) }
 
     if api == platform.API_VULKAN {
         vulkan_state = vk.renderer_new()
@@ -520,7 +529,15 @@ engine_free(e: *Engine) {
     } else {
         gl.renderer_free(e.backend_state as *GLRenderer)
     }
+    ae3d_jobs_stop()
     heap.free(e)
+}
+
+// How many worker threads the engine's job pool has beside the calling
+// thread: what the crowd's passes are spread over.
+engine_jobs(e: *Engine) -> int {
+    if e == null { return 0 }
+    return ae3d_jobs_workers()
 }
 
 engine_set_size(e: *Engine, width: int, height: int) {

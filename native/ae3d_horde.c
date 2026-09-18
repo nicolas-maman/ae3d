@@ -23,12 +23,24 @@
  * crowd is taken as the compact range [0, n) -- a crowd that only ever spawns,
  * which is what a horde is; a store that recycles slots would pass its live
  * count and compaction instead.
+ *
+ * Every pass here runs over the crowd through the job pool (ae3d_jobs_for):
+ * the heading, the shove, the step and the sort by distance are the same
+ * few lines on every figure with nothing shared but the arrays, so a frame
+ * of half a million figures takes the machine's cores rather than one. A
+ * run is a few thousand figures -- enough that the pool's hand-off is
+ * nothing beside the work, few enough that the cores share it evenly.
  */
 
 #include "ae3d.h"
 
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
+
+/* Figures a run: a few thousand, so a loop over half a million is a
+   hundred-odd runs across the cores. */
+#define AE3D_CROWD_GRAIN 4096
 
 /* Facing and heading for a crowd is trig per zombie per frame -- a cos and a
  * sin to point the velocity along the heading, an atan2 to face the zombie
@@ -143,6 +155,59 @@ static int ae3d_horde_reserve(ae3d_horde_grid *g, long long n) {
     return 1;
 }
 
+/* The gather form of the pair loop, a run of cell rows at a time: every
+   entity of every cell in the rows [start, end) takes the push of each
+   neighbour in the nine cells around it, into its own accumulator. */
+typedef struct {
+    ae3d_horde_grid *g;
+    int cols;
+    double r2;
+    double radius;
+} ae3d_horde_gather_job;
+
+static void ae3d_horde_gather_rows(void *ctx, int start, int end) {
+    ae3d_horde_gather_job *job = (ae3d_horde_gather_job *)ctx;
+    ae3d_horde_grid *g = job->g;
+    int cols = job->cols;
+    double r2 = job->r2, radius = job->radius;
+    int cz, cx, dz, dx;
+    for (cz = start; cz < end; cz++) {
+        for (cx = 0; cx < cols; cx++) {
+            long long c = (long long)cz * cols + cx;
+            long long a = g->off[c], b = g->off[c + 1], s, ns;
+            for (s = a; s < b; s++) {
+                double px = g->px[s], py = g->py[s], pz = g->pz[s];
+                double sx = 0.0, sy = 0.0, sz = 0.0;
+                for (dz = -1; dz <= 1; dz++) {
+                    int ncz = cz + dz;
+                    if (ncz < 0 || ncz >= cols) continue;
+                    for (dx = -1; dx <= 1; dx++) {
+                        int ncx = cx + dx;
+                        long long nc, ne;
+                        if (ncx < 0 || ncx >= cols) continue;
+                        nc = (long long)ncz * cols + ncx;
+                        ne = g->off[nc + 1];
+                        for (ns = g->off[nc]; ns < ne; ns++) {
+                            double ddx = px - g->px[ns];
+                            double ddy = py - g->py[ns];
+                            double ddz = pz - g->pz[ns];
+                            double dsq = ddx * ddx + ddy * ddy + ddz * ddz;
+                            if (ns != s && dsq > 0.00000001 && dsq < r2) {
+                                double dist = sqrt(dsq);
+                                double fc = (radius - dist) / (dist * radius);
+                                sx += ddx * fc; sy += ddy * fc; sz += ddz * fc;
+                            }
+                        }
+                    }
+                }
+                g->pux[s] += sx;
+                g->puy[s] += sy;
+                g->puz[s] += sz;
+            }
+        }
+    }
+}
+
 void ae3d_horde_separate(void *handle, double *pos, double *vel, int n,
                          double ox, double oz, double cell_size,
                          double radius, double strength) {
@@ -207,16 +272,29 @@ void ae3d_horde_separate(void *handle, double *pos, double *vel, int n,
         }
     }
 
-    /* Push apart every pair of entities closer than the radius, each pair once.
-     * A pair pushes both members equally and oppositely (Newton's third law),
-     * so scanning only the forward half of the neighbourhood -- entries later
-     * in the same cell, and the four cells that sort after this one -- visits
-     * every unordered pair exactly once and halves the work. Both the read of
-     * the neighbour and the equal-and-opposite write land in the packed arrays,
-     * so a cell's run stays a sequential sweep; the accumulated push is
-     * scattered back to velocity once, afterwards. The four forward cells are
-     * (+1,0), (-1,+1), (0,+1), (+1,+1): the rest of this row and the whole next
-     * row, which are exactly the neighbours whose cell index exceeds c. */
+    /* Push apart every pair of entities closer than the radius. With the job
+     * pool, every core takes rows of cells and each entity gathers the push
+     * of all its neighbours in the nine cells around it, writing only its
+     * own accumulator: twice the pair tests of the half scan below, spread
+     * over every core, and no two threads ever write the same entry. */
+    if (ae3d_jobs_workers() > 0) {
+        ae3d_horde_gather_job job;
+        job.g = g;
+        job.cols = cols;
+        job.r2 = r2;
+        job.radius = radius;
+        ae3d_jobs_for(cols, 2, ae3d_horde_gather_rows, &job);
+    } else
+    /* Alone: each pair once. A pair pushes both members equally and
+     * oppositely (Newton's third law), so scanning only the forward half of
+     * the neighbourhood -- entries later in the same cell, and the four cells
+     * that sort after this one -- visits every unordered pair exactly once
+     * and halves the work. Both the read of the neighbour and the
+     * equal-and-opposite write land in the packed arrays, so a cell's run
+     * stays a sequential sweep; the accumulated push is scattered back to
+     * velocity once, afterwards. The four forward cells are (+1,0), (-1,+1),
+     * (0,+1), (+1,+1): the rest of this row and the whole next row, which
+     * are exactly the neighbours whose cell index exceeds c. */
     {
         static const int FDX[4] = { 1, -1, 0, 1 };
         static const int FDZ[4] = { 0, 1, 1, 1 };
@@ -302,15 +380,24 @@ void ae3d_horde_separate(void *handle, double *pos, double *vel, int n,
 
 /* Point each zombie's velocity along its heading at `speed`. Separation adds to
  * this afterwards; the step below reads the sum. */
-void ae3d_crowd_wander(double *vel, const double *yaw, int n, double speed) {
+typedef struct { double *vel; const double *yaw; double speed; } ae3d_crowd_wander_job;
+
+static void ae3d_crowd_wander_run(void *ctx, int start, int end) {
+    ae3d_crowd_wander_job *job = (ae3d_crowd_wander_job *)ctx;
     int i;
-    if (!vel || !yaw) return;
-    for (i = 0; i < n; i++) {
-        double a = yaw[i];
-        vel[i * 3]     = fast_cos(a) * speed;
-        vel[i * 3 + 1] = 0.0;
-        vel[i * 3 + 2] = -fast_sin(a) * speed;
+    for (i = start; i < end; i++) {
+        double a = job->yaw[i];
+        job->vel[i * 3]     = fast_cos(a) * job->speed;
+        job->vel[i * 3 + 1] = 0.0;
+        job->vel[i * 3 + 2] = -fast_sin(a) * job->speed;
     }
+}
+
+void ae3d_crowd_wander(double *vel, const double *yaw, int n, double speed) {
+    ae3d_crowd_wander_job job;
+    if (!vel || !yaw) return;
+    job.vel = vel; job.yaw = yaw; job.speed = speed;
+    ae3d_jobs_for(n, AE3D_CROWD_GRAIN, ae3d_crowd_wander_run, &job);
 }
 
 /* Each zombie's own pace through the walk, so a crowd does not march in lock
@@ -335,17 +422,22 @@ static double crowd_pace(int i) {
  * The velocity the wander and the shove built still says which way; only how
  * fast is the clip's. Without a bank the velocity is taken as given and the
  * clip plays in real time. */
-void ae3d_crowd_step(double *pos, const double *vel, double *yaw, double *phase,
-                     int start, int n, double dt, double max_speed,
-                     double x0, double x1, double z0, double z1,
-                     double road_y, double walk, void *bank) {
-    int i;
+typedef struct {
+    double *pos; const double *vel; double *yaw; double *phase;
+    int first;
+    double dt, max_speed, x0, x1, z0, z1, road_y, walk, step_scale;
+    void *bank;
+} ae3d_crowd_step_job;
+
+static void ae3d_crowd_step_run(void *ctx, int start, int end) {
+    ae3d_crowd_step_job *job = (ae3d_crowd_step_job *)ctx;
+    double *pos = job->pos, *yaw = job->yaw, *phase = job->phase;
+    const double *vel = job->vel;
     double pi = 3.14159265358979323846;
-    double step_scale = walk > 0.0 ? dt / walk : dt;
-    if (!pos || !vel || !yaw || !phase) return;
-    /* From `start`, `n` of them, so a crowd of two figures steps each
-     * figure's run at its own bank's pace. */
-    for (i = start; i < start + n; i++) {
+    double dt = job->dt, max_speed = job->max_speed, walk = job->walk;
+    void *bank = job->bank;
+    int i;
+    for (i = job->first + start; i < job->first + end; i++) {
         double vx = vel[i * 3];
         double vz = vel[i * 3 + 2];
         double sp = sqrt(vx * vx + vz * vz);
@@ -367,21 +459,39 @@ void ae3d_crowd_step(double *pos, const double *vel, double *yaw, double *phase,
         }
         nx = pos[i * 3] + vx * dt;
         nz = pos[i * 3 + 2] + vz * dt;
-        if (nx < x0) { nx = x0; a = pi - a; bounced = 1; }
-        if (nx > x1) { nx = x1; a = pi - a; bounced = 1; }
-        if (nz < z0) { nz = z0; a = -a; bounced = 1; }
-        if (nz > z1) { nz = z1; a = -a; bounced = 1; }
+        if (nx < job->x0) { nx = job->x0; a = pi - a; bounced = 1; }
+        if (nx > job->x1) { nx = job->x1; a = pi - a; bounced = 1; }
+        if (nz < job->z0) { nz = job->z0; a = -a; bounced = 1; }
+        if (nz > job->z1) { nz = job->z1; a = -a; bounced = 1; }
         pos[i * 3]     = nx;
-        pos[i * 3 + 1] = road_y;
+        pos[i * 3 + 1] = job->road_y;
         pos[i * 3 + 2] = nz;
         if (bounced) yaw[i] = a;
         else if (sp > 0.1) yaw[i] = fast_atan2(-vz, vx);
         /* The walk advances at the zombie's pace when the clip is driving,
          * and by its old speed-scaled rate when it is not. */
-        ph = phase[i] + step_scale * (bank ? pace : 0.35 + sp * 0.3);
+        ph = phase[i] + job->step_scale * (bank ? pace : 0.35 + sp * 0.3);
         while (ph >= 1.0) ph -= 1.0;
         phase[i] = ph;
     }
+}
+
+void ae3d_crowd_step(double *pos, const double *vel, double *yaw, double *phase,
+                     int start, int n, double dt, double max_speed,
+                     double x0, double x1, double z0, double z1,
+                     double road_y, double walk, void *bank) {
+    ae3d_crowd_step_job job;
+    if (!pos || !vel || !yaw || !phase) return;
+    /* From `start`, `n` of them, so a crowd of two figures steps each
+     * figure's run at its own bank's pace. */
+    job.pos = pos; job.vel = vel; job.yaw = yaw; job.phase = phase;
+    job.first = start;
+    job.dt = dt; job.max_speed = max_speed;
+    job.x0 = x0; job.x1 = x1; job.z0 = z0; job.z1 = z1;
+    job.road_y = road_y; job.walk = walk;
+    job.step_scale = walk > 0.0 ? dt / walk : dt;
+    job.bank = bank;
+    ae3d_jobs_for(n, AE3D_CROWD_GRAIN, ae3d_crowd_step_run, &job);
 }
 
 /* Sort the crowd into the near and far draw buffers by distance to the camera,
@@ -391,40 +501,138 @@ void ae3d_crowd_step(double *pos, const double *vel, double *yaw, double *phase,
  * zombie's distance in hand, so the cull is free. Returns the near count and
  * writes the far count into far_out[0]; a zombie is near, far, or culled, so
  * the two no longer sum to n. `cull_dist <= 0` keeps the whole crowd. */
+/* The sort by distance in two passes over the same runs of the crowd: the
+   first counts each run's near, mid and far, the offsets are summed run by
+   run, and the second writes each run's figures at its own offsets -- so
+   every core writes its own stretch of the compacted buffers and the order
+   is the order one core would have written. The runs are fixed at
+   AE3D_CROWD_GRAIN figures so the two passes cut the crowd the same way.
+   Three tiers in the one pass: within near_dist, within mid_dist, beyond;
+   a mid_dist of zero puts everything past near in the mid tier and leaves
+   the far one empty, which is the two-tier sort the crowd had before its
+   far tier was a picture. */
+typedef struct {
+    const double *pos, *yaw, *phase, *col;
+    int first;
+    double cx, cz, nd2, md2, cd2;
+    int cull, three;
+    int *count;                     /* [3][runs]: a run's counts, then its offsets */
+    int runs;
+    double *p[3], *y[3], *ph[3], *c[3];
+} ae3d_crowd_tiers_job;
+
+static int ae3d_crowd_tier_of(const ae3d_crowd_tiers_job *job, int i) {
+    double dx = job->pos[i * 3] - job->cx;
+    double dz = job->pos[i * 3 + 2] - job->cz;
+    double d2 = dx * dx + dz * dz;
+    if (job->cull && d2 > job->cd2) return -1;
+    if (d2 < job->nd2) return 0;
+    if (!job->three || d2 < job->md2) return 1;
+    return 2;
+}
+
+static void ae3d_crowd_tiers_count(void *ctx, int start, int end) {
+    ae3d_crowd_tiers_job *job = (ae3d_crowd_tiers_job *)ctx;
+    int run = start / AE3D_CROWD_GRAIN, i, n[3] = {0, 0, 0};
+    for (i = job->first + start; i < job->first + end; i++) {
+        int t = ae3d_crowd_tier_of(job, i);
+        if (t >= 0) n[t]++;
+    }
+    job->count[run] = n[0];
+    job->count[job->runs + run] = n[1];
+    job->count[job->runs * 2 + run] = n[2];
+}
+
+static void ae3d_crowd_tiers_write(void *ctx, int start, int end) {
+    ae3d_crowd_tiers_job *job = (ae3d_crowd_tiers_job *)ctx;
+    int run = start / AE3D_CROWD_GRAIN, i;
+    int at[3];
+    const double *pos = job->pos, *yaw = job->yaw, *phase = job->phase, *col = job->col;
+    at[0] = job->count[run];
+    at[1] = job->count[job->runs + run];
+    at[2] = job->count[job->runs * 2 + run];
+    for (i = job->first + start; i < job->first + end; i++) {
+        int t = ae3d_crowd_tier_of(job, i), k;
+        double *p, *c;
+        if (t < 0 || !job->p[t]) continue;
+        k = at[t]++;
+        p = job->p[t];
+        p[k * 3] = pos[i * 3]; p[k * 3 + 1] = pos[i * 3 + 1]; p[k * 3 + 2] = pos[i * 3 + 2];
+        job->y[t][k] = yaw[i];
+        job->ph[t][k] = phase[i];
+        c = job->c[t];
+        if (col && c) { c[k * 3] = col[i * 3]; c[k * 3 + 1] = col[i * 3 + 1]; c[k * 3 + 2] = col[i * 3 + 2]; }
+    }
+}
+
+/* The crowd's figures from `start`, `n` of them, sorted by distance to
+   (cx, cz) into up to three compacted tiers -- near within near_dist, mid
+   within mid_dist, far beyond -- each tier its own position, yaw, phase and
+   colour buffers, and the figures past cull_dist (when it is above zero)
+   dropped. counts_out[0..2] take the three counts. A tier whose buffers are
+   null is counted and not written. */
+void ae3d_crowd_tiers(const double *pos, const double *yaw, const double *phase,
+                      const double *col, int start, int n,
+                      double cx, double cz, double near_dist, double mid_dist, double cull_dist,
+                      double *np, double *ny, double *nph, double *ncol,
+                      double *mp, double *my, double *mph, double *mcol,
+                      double *fp, double *fy, double *fph, double *fcol,
+                      double *counts_out) {
+    static int *counts = NULL;
+    static int capacity = 0;
+    ae3d_crowd_tiers_job job;
+    int runs, r, t, total[3] = {0, 0, 0};
+    if (counts_out) { counts_out[0] = 0.0; counts_out[1] = 0.0; counts_out[2] = 0.0; }
+    if (!pos || !yaw || !phase || n <= 0) return;
+    runs = (n + AE3D_CROWD_GRAIN - 1) / AE3D_CROWD_GRAIN;
+    if (runs * 3 > capacity) {
+        int *grown = (int *)realloc(counts, (size_t)runs * 3 * sizeof(int));
+        if (!grown) return;
+        counts = grown;
+        capacity = runs * 3;
+    }
+    job.pos = pos; job.yaw = yaw; job.phase = phase; job.col = col;
+    job.first = start;
+    job.cx = cx; job.cz = cz;
+    job.nd2 = near_dist * near_dist;
+    job.md2 = mid_dist * mid_dist;
+    job.cd2 = cull_dist * cull_dist;
+    job.cull = cull_dist > 0.0;
+    job.three = mid_dist > 0.0;
+    job.count = counts;
+    job.runs = runs;
+    job.p[0] = np; job.y[0] = ny; job.ph[0] = nph; job.c[0] = ncol;
+    job.p[1] = mp; job.y[1] = my; job.ph[1] = mph; job.c[1] = mcol;
+    job.p[2] = fp; job.y[2] = fy; job.ph[2] = fph; job.c[2] = fcol;
+    ae3d_jobs_for(n, AE3D_CROWD_GRAIN, ae3d_crowd_tiers_count, &job);
+    for (t = 0; t < 3; t++) {
+        for (r = 0; r < runs; r++) {
+            int here = counts[t * runs + r];
+            counts[t * runs + r] = total[t];
+            total[t] += here;
+        }
+    }
+    /* A tier without buffers is counted and not written. */
+    for (t = 0; t < 3; t++) {
+        if (!job.y[t] || !job.ph[t]) job.p[t] = NULL;
+    }
+    ae3d_jobs_for(n, AE3D_CROWD_GRAIN, ae3d_crowd_tiers_write, &job);
+    if (counts_out) {
+        counts_out[0] = (double)total[0];
+        counts_out[1] = (double)total[1];
+        counts_out[2] = (double)total[2];
+    }
+}
+
 int ae3d_crowd_bucket(const double *pos, const double *yaw, const double *phase,
                       const double *col, int start, int n,
                       double cx, double cz, double near_dist, double cull_dist,
                       double *np, double *ny, double *nph, double *ncol,
                       double *fp, double *fy, double *fph, double *fcol,
                       double *far_out) {
-    int i, nn = 0, nf = 0;
-    double nd2 = near_dist * near_dist;
-    double cd2 = cull_dist * cull_dist;
-    int cull = cull_dist > 0.0;
-    if (!pos || !yaw || !phase) { if (far_out) far_out[0] = 0.0; return 0; }
-    /* From `start`, `n` of them: a crowd of two figures keeps each figure's
-     * zombies in its own run of the columns and buckets each run into its
-     * own tiers. */
-    for (i = start; i < start + n; i++) {
-        double x = pos[i * 3];
-        double y = pos[i * 3 + 1];
-        double z = pos[i * 3 + 2];
-        double dx = x - cx;
-        double dz = z - cz;
-        double d2 = dx * dx + dz * dz;
-        if (cull && d2 > cd2) { continue; }
-        if (d2 < nd2) {
-            np[nn * 3] = x; np[nn * 3 + 1] = y; np[nn * 3 + 2] = z;
-            ny[nn] = yaw[i]; nph[nn] = phase[i];
-            if (col && ncol) { ncol[nn * 3] = col[i * 3]; ncol[nn * 3 + 1] = col[i * 3 + 1]; ncol[nn * 3 + 2] = col[i * 3 + 2]; }
-            nn++;
-        } else {
-            fp[nf * 3] = x; fp[nf * 3 + 1] = y; fp[nf * 3 + 2] = z;
-            fy[nf] = yaw[i]; fph[nf] = phase[i];
-            if (col && fcol) { fcol[nf * 3] = col[i * 3]; fcol[nf * 3 + 1] = col[i * 3 + 1]; fcol[nf * 3 + 2] = col[i * 3 + 2]; }
-            nf++;
-        }
-    }
-    if (far_out) far_out[0] = (double)nf;
-    return nn;
+    double counts[3];
+    ae3d_crowd_tiers(pos, yaw, phase, col, start, n, cx, cz, near_dist, 0.0, cull_dist,
+                     np, ny, nph, ncol, fp, fy, fph, fcol, NULL, NULL, NULL, NULL, counts);
+    if (far_out) far_out[0] = counts[1];
+    return (int)counts[0];
 }
