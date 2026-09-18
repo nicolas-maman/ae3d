@@ -434,7 +434,7 @@ done
 step "examples build and run"
 # The benchmark is built in the same pass: build_together starts from a clean
 # status directory, so a later call would forget that the examples built.
-build_together examples/*.ae tools/ae3d_bench.ae tools/measure_scene.ae tools/ae3d_agent.ae tools/zombie_street.ae tools/bake_impostor.ae
+build_together examples/*.ae tools/ae3d_bench.ae tools/measure_scene.ae tools/ae3d_agent.ae tools/ae3d_view.ae tools/zombie_street.ae tools/bake_impostor.ae
 for example in examples/*.ae; do
     name="$(basename "$example" .ae)"
     if ! built_ok "$name"; then
@@ -515,6 +515,11 @@ run_measure() {   # run_measure <backend> <port>
     wait "$measure_scene" 2>/dev/null
     rm -f "$measure_log" "$measure_scene_log"
 }
+if ! built_ok ae3d_view; then
+    fail "ae3d_view (build)"
+else
+    pass "ae3d_view (build)"
+fi
 if ! built_ok measure_scene; then
     fail "measure_scene (build)"
 elif ! have_display; then

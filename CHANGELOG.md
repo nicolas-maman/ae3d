@@ -115,6 +115,17 @@
   inverse binds where `skeleton_bind` would derive them from the pose.
 - `native/ae3d_blob.c`: a file as bytes and the little-endian numbers in it.
 
+### The frame as characters, in Aether
+
+- `tools/ae3d_view.ae` replaces `tools/ae3d_view.py`: `frame.grid` as a page
+  of characters, densest where the frame is brightest, stretched over the
+  range the frame uses (`--absolute` for 0 to 1), `--coverage` for how much
+  of each cell is not the background, `--isolate <model>` for one model's
+  silhouette, `--region x,y,w,h` for a window at a cell a pixel, `--time`
+  to seek the clips first. The kept connection it was built on is
+  `ae3d.probe`; what is left of #272 in Python is the critique and the
+  editor driver.
+
 ### Temporal anti-aliasing
 
 - `engine_set_taa(e, on)` (`AE3D_TAA=1` in any scene), on both backends:
