@@ -15,6 +15,7 @@ import ae3d.platform
 import ae3d.rendering
 import ae3d.vkscene
 import ae3d.skin
+import ae3d.shaders
 
 exports (
     VKRenderer,
@@ -1251,6 +1252,18 @@ renderer_release_texture(r: *VKRenderer, handle: int) {
 
 renderer_add_model(r: *VKRenderer, m: *Model) {
     if m == null || !r.initialized { return }
+
+    // A shader written as GLSL text by the program (core.shader_new) has no
+    // SPIR-V: this backend compiles nothing at run time, and the model
+    // would be drawn by the scene program in silence -- the black hole
+    // was a black frame at 150 fps for as long as Vulkan had been the
+    // default. Said once per model instead.
+    if core.shader_valid(&m.shader) && m.shader.kind == core.SHADER_CUSTOM &&
+       m.shader.fragment_source != shaders.FRAGMENT_DEFAULT {
+        who = core.text(m.name)
+        if who == "" { who = "a model" }
+        println("ae3d: ${who} carries a custom GLSL shader, which the Vulkan backend cannot compile at run time; it is drawn with the scene shader instead. Run the program with AE3D_API=opengl, or make the engine with engine_new_with(platform.API_GL).")
+    }
 
     handle = ae3d_vk_upload_mesh(m.mesh)
     if handle == 0 {

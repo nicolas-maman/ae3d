@@ -143,6 +143,12 @@
   `tests/test_gltf` checks a generated two-bone arm against the arithmetic
   and loads the Khronos Fox. The skin palette holds 96 bones (was 48), a
   Mixamo rig with its fingers.
+- The black hole draws again by default: it makes its engine on OpenGL,
+  since its picture is one GLSL fragment shader and the Vulkan backend
+  compiles no GLSL at run time -- with Vulkan the default it had been a
+  black frame at 150 fps that said nothing (#352). The Vulkan backend now
+  says, once per model, when a custom GLSL shader lands on it and is drawn
+  with the scene shader instead.
 - CI builds and drives the editor on Linux: the workflow fetches aether-ui
   at a pinned commit (`AETHER_UI_REF`) with GTK4 and hands `ci.sh` the
   checkout, so the bounded runs on both backends, the roundtrip scene,

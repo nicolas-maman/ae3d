@@ -12,6 +12,12 @@ somebody else derived, so it can be checked rather than admired.
 ./build.sh examples/black_hole.ae && ./build/black_hole
 ```
 
+It runs on OpenGL: the whole picture is one fragment shader written as
+GLSL in `examples/lib/blackhole/module.ae`, and the Vulkan backend compiles
+no GLSL at run time (its shaders are SPIR-V generated at build time). Asked
+for Vulkan (`AE3D_API=vulkan`) the backend says so and draws the quad with
+the scene shader.
+
 | key | |
 |---|---|
 | `SPACE` | hand the camera to WASD and the mouse, and back |
