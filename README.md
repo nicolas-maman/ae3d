@@ -193,8 +193,8 @@ native/      C: window and input, OpenGL entry points, the Vulkan backend, mesh 
 src/ae3d/    Aether modules: core, gl, vk, shaders, engine, skin, anim, crowd, ecs,
              assets, agent, loader, noise, voxel, water, scene, sky, behaviour, ...
 editor/      the scene editor
-tools/       ae3d_agent.ae (client), ae3d_bench.ae (frame budget), blender/ (the pipeline)
-scripts/     export, critique, measurement, perf
+tools/       ae3d_agent.ae (client), ae3d_bench.ae (frame budget), measure_scene.ae, blender/ (the pipeline)
+scripts/     export, critique, perf
 tests/       one program per suite, each printing its own verdict
 benchmarks/  per-frame cost measured without a window
 examples/    runnable scenes

@@ -72,6 +72,12 @@
   changes with it in the same build. `--docs` writes `docs/agent.md` from
   the schema on stdin around the text in `tools/agent_doc_text.md`;
   `scripts/gen_agent_docs.sh` builds and runs it and needs no Python.
+- `tools/measure_scene.ae` replaces `scripts/measure_scene.py`, the same
+  measurements (every model on screen and its images loaded, the traces,
+  each surface's colour alone against the sky, the depth test's stability
+  under half a millimetre, the animation reaching the picture) against a
+  scene `ci.sh` starts, on OpenGL and on Vulkan; the numbers it reports
+  are the Python's to the last digit.
 
 ### glTF
 

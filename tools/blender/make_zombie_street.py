@@ -724,7 +724,7 @@ def build_street(parts, surfaces):
     # slab): a block whose buildings stopped twenty-five metres short of
     # each end tiled into a city that was two fifths empty lots.
     # The end shells come last so the original five keep their names: the
-    # measurement (scripts/measure_scene.py) reads Street_BlockL0 as brick
+    # measurement (tools/measure_scene.ae) reads Street_BlockL0 as brick
     # and L1 as concrete.
     far = ((-22.0, 7.0, 12.5, "brick"), (-9.0, 8.0, 9.0, "concrete"),
            (2.0, 6.5, 13.5, "brick"), (13.0, 7.5, 10.0, "concrete"),

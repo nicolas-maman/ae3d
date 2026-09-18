@@ -37,9 +37,10 @@ generated="$(mktemp)"
 }
 
 if [ "${1:-}" = "--check" ]; then
-    # cmp rather than diff, which a minimal MSYS2 does not ship: a missing
-    # tool read as "out of date" and reported a change nobody had made.
-    if cmp -s docs/agent.md "$generated"; then
+    # Compared by the shell, byte for byte: a minimal MSYS2 ships neither
+    # diff nor cmp, and a missing tool read as "out of date" and reported a
+    # change nobody had made.
+    if [ "$(cat docs/agent.md)" = "$(cat "$generated")" ]; then
         rm -f "$generated"
         exit 0
     fi
