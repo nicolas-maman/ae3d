@@ -1059,9 +1059,14 @@ def animate(rig, gait=None):
     for frame in range(1, TOTAL + 1):
         step = phase(frame)
         hit = strike(frame)
-        # The head is late to everything, and the chest a little late too.
-        late = phase(frame - 3.0)
-        chest_late = phase(frame - 1.5)
+        # The head is late to everything, and the chest a little late too:
+        # the hips' sway arrives at the chest three frames on and at the
+        # head five, which is what a spine does with a turn (#333). A chain
+        # model of these terms (the joints' heights, the rolls summed up
+        # the spine) puts the head's side-to-side motion two frames behind
+        # the hips' at these lags, and the critique asks for at least one.
+        late = phase(frame - 5.0)
+        chest_late = phase(frame - 3.0)
 
         swing_l = math.sin(step)
         swing_r = math.sin(step + math.pi)
@@ -1070,24 +1075,30 @@ def animate(rig, gait=None):
         # side that is not carrying itself.
         drop = -0.080 - 0.022 * math.cos(step * 2.0) - 0.014 * max(0.0, swing_r)
         lean = gait["lean"] + 0.34 * hit
-        roll = 0.075 * math.sin(step) - 0.02
+        roll = 0.04 * math.sin(step) - 0.02
         yaw = -0.10 * math.sin(step) - 0.05
+        # The body sways over the leg that takes the weight -- the way the
+        # pelvis tilts, since a roll about the forward axis carries what is
+        # above it the other way -- and the sway is what the spine follows.
+        sway = -0.022 * math.sin(step)
 
         pose.set("Hips", _compose(_turn(Y, lean * 0.42), _turn(X, roll),
                                   _turn(Z, yaw)),
-                 shift=(0.0, 0.0, drop))
+                 shift=(0.0, sway, drop))
         pose.set("Spine", _compose(_turn(Y, lean * 0.30),
                                    _turn(Z, -yaw * 0.55),
                                    _turn(X, -roll * 0.35)))
-        # The shoulders turn against the pelvis, and later than it.
+        # The shoulders turn against the pelvis, and later than it; and the
+        # sway arrives here late, as a roll the chest makes after the hips.
         pose.set("Chest", _compose(_turn(Y, lean * 0.34 + 0.10 * hit),
                                    _turn(Z, 0.16 * math.sin(chest_late) - yaw * 0.4),
-                                   _turn(X, -roll * 0.5)))
+                                   _turn(X, -roll * 0.5 + 0.07 * math.sin(chest_late))))
         pose.set("Neck", _compose(_turn(Y, -lean * 0.30 + 0.16 * hit),
-                                  _turn(Z, 0.09 * math.sin(late))))
+                                  _turn(Z, 0.09 * math.sin(late)),
+                                  _turn(X, 0.05 * math.sin(late))))
         pose.set("Head", _compose(_turn(Y, -lean * 0.34 + gait["head"] - 0.34 * hit),
                                   _turn(Z, 0.13 * math.sin(late)),
-                                  _turn(X, 0.10 * math.sin(late * 0.5) + 0.06)))
+                                  _turn(X, 0.10 * math.sin(late * 0.5) + 0.06 + 0.03 * math.sin(late))))
 
         # Where the figure is, rather than what it is doing. This goes on a
         # bone rather than on the armature because a bone is what the engine is
