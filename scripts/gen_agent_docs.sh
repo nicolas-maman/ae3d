@@ -41,7 +41,7 @@ if [ "${1:-}" = "--check" ]; then
     # a missing tool read as "out of date" and reported a change nobody had
     # made. Carriage returns are dropped first, since a Windows checkout
     # may carry them and the generator writes none.
-    if [ "$(tr -d '' < docs/agent.md)" = "$(tr -d '' < "$generated")" ]; then
+    if [ "$(tr -d '\r' < docs/agent.md)" = "$(tr -d '\r' < "$generated")" ]; then
         rm -f "$generated"
         exit 0
     fi
