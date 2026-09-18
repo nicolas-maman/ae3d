@@ -143,6 +143,11 @@
   `tests/test_gltf` checks a generated two-bone arm against the arithmetic
   and loads the Khronos Fox. The skin palette holds 96 bones (was 48), a
   Mixamo rig with its fingers.
+- CI builds and drives the editor on Linux: the workflow fetches aether-ui
+  at a pinned commit (`AETHER_UI_REF`) with GTK4 and hands `ci.sh` the
+  checkout, so the bounded runs on both backends, the roundtrip scene,
+  the name check and the widget driver run on every dispatch. The editor
+  had gone unrun in CI for want of the checkout.
 - The device sort draws each part of a tier's figure whole: an indirect
   command per part (`AE3D_VK_CROWD_PARTS`, sixteen a tier), with its own
   index count, the sort's count copied into every one. It held one count

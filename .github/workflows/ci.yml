@@ -9,6 +9,16 @@ name: ci
 on:
   workflow_dispatch:
 
+env:
+  # The aether-ui the editor is built against on the Linux runner. A commit,
+  # not a branch: the editor's CI should say what the editor did, not what
+  # the toolkit did that morning. Bumped by hand when aether-ui lands
+  # something the editor needs; each bump gets a line here saying why.
+  #   ef9be50 2026-09-18  win32 textfield_get_text hands back a heap string
+  #                       (aether-ui#156); the ground/scrollview and layout
+  #                       work of #149..#155 before it. First pin.
+  AETHER_UI_REF: ef9be50
+
 jobs:
   build:
     strategy:
@@ -80,7 +90,20 @@ jobs:
           # mesa-vulkan-drivers is lavapipe, a software device. Without an ICD
           # the loader is present and reports no device, so the Vulkan half of
           # the suite would skip rather than run.
-          sudo apt-get install -y libglfw3-dev libvulkan-dev mesa-vulkan-drivers xvfb gdb
+          # libgtk-4-dev is for the editor: aether-ui's Linux backend is GTK4,
+          # and ci.sh builds and drives the editor when it finds a checkout.
+          sudo apt-get install -y libglfw3-dev libvulkan-dev mesa-vulkan-drivers xvfb gdb libgtk-4-dev
+
+      # The editor's toolkit, so the editor is built, run bounded on both
+      # backends, and driven through its widgets here rather than only on
+      # the machine the change was written on. It went unrun in CI for want
+      # of this checkout, and a crash in the first report that read a field
+      # back (a toolkit bug, aether-ui#156) stood at HEAD for weeks.
+      - name: Fetch aether-ui (linux)
+        if: runner.os == 'Linux'
+        run: |
+          git clone https://github.com/aether-lang-dev/aether-ui.git "$RUNNER_TEMP/aether-ui"
+          git -C "$RUNNER_TEMP/aether-ui" checkout --quiet "$AETHER_UI_REF"
 
       # The Vulkan backend opens the loader at run time but still needs the
       # headers to compile, the same way the Linux job gets them from
@@ -145,7 +168,7 @@ jobs:
           # AE3D_SKIP_LEAKS would be redundant, and CI is documented never to
           # set it. Only Linux needs a display server.
           if [ "$RUNNER_OS" = "Linux" ]; then
-            xvfb-run -a ./ci.sh
+            AETHER_UI_ROOT="$RUNNER_TEMP/aether-ui" xvfb-run -a ./ci.sh
           else
             ./ci.sh
           fi
