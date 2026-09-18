@@ -105,7 +105,13 @@ const REFLECTION_ON = 0.8
 const REFLECTION_LAMP_LIFT = 1.4
 const SSR_ROAD_HEIGHT = 0.115
 const SSR_STRENGTH = 1.5
-const SSR_LAMP_LIFT = 1.15
+// The wet road is not a mirror: puddles are, the damp tarmac between them
+// reflects dimmer and blurred, and a camera above the road sees less of it
+// than one at its level. So the reflection is not counted as cells that go
+// white but as cells that get lighter: the share of the road band the
+// mirrored windows and lamps lift by a visible step.
+const SSR_LIFT_STEP = 0.03
+const SSR_LIFTED_SHARE = 0.05
 const SSR_FIGURE_SMEAR = 0.20
 const SSR_BLOOM_COEXIST_LIFT = 1.05
 // Held still, the frame must not move: Vulkan is bit-exact, OpenGL within
@@ -1615,15 +1621,32 @@ wet_road_ssr(at: float) {
     println("")
     println("== the wet road mirrors the scene (SSR) ==")
     did(with_number(with_flag(request("render.set"), "ssr", false), "bloom_intensity", 0.0))
-    off = road_bright()
+    off = grid_read(64, 48)
     set_ssr_full()
-    on = road_bright()
+    on = grid_read(64, 48)
     did(with_number(with_flag(request("render.set"), "ssr", state.ssr), "bloom_intensity", state.bloom))
-    println("  the road carries ${on} bright cells with SSR mirroring the scene, ${off} without")
-    divisor = off
+    lifted = 0
+    band = 0
+    if off.cells != null && on.cells != null {
+        y = (on.rows as float * 0.60) as int
+        while y < on.rows {
+            x = 0
+            while x < on.columns {
+                if lum(on, x, y) - lum(off, x, y) >= SSR_LIFT_STEP { lifted = lifted + 1 }
+                band = band + 1
+                x = x + 1
+            }
+            y = y + 1
+        }
+    }
+    grid_free(off)
+    grid_free(on)
+    divisor = band
     if divisor < 1 { divisor = 1 }
-    check("screen-space reflection mirrors the scene onto the wet road", (on as float) >= (off as float) * SSR_LAMP_LIFT,
-          "${on} bright cells with SSR on against ${off} off (${fmt((on as float) / (divisor as float), 2)}x, wanted ${fmt(SSR_LAMP_LIFT, 2)}x)")
+    share = (lifted as float) / (divisor as float)
+    println("  SSR lifts ${lifted} of the road band's ${band} cells by ${fmt(SSR_LIFT_STEP, 2)} or more")
+    check("screen-space reflection mirrors the scene onto the wet road", share >= SSR_LIFTED_SHARE,
+          "${fmt(share * 100.0, 1)}% of the road band lifted by the mirrored scene, wanted ${fmt(SSR_LIFTED_SHARE * 100.0, 0)}%")
 }
 
 // That the figure's reflection on the wet road is a figure, not a smear:

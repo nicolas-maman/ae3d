@@ -46,6 +46,18 @@ The feature list in full, with the reasoning behind each. The [README](../README
   the hour or a painted one, fog applied after tone mapping, MSAA, FXAA and
   bloom. Screen-space reflections on wet surfaces on
   Vulkan.
+- **A wet road, not a mirror.** The reflection (`engine_set_ssr(e, on,
+  road_height, strength)`) is Fresnel-weighted -- little from a camera
+  looking down at the road, most at a grazing look -- over a puddle mask in
+  the road's own metres: still water in the puddles mirrors sharply, the
+  damp tarmac between them dimmer and blurred by a cone over the distance
+  the ray travelled (eight taps on a disc turned per pixel). The base
+  reflectance sits above water's 0.02 because the frame is display values:
+  a lamp is white in it, and two percent of white is nothing where two
+  percent of the lamp is the streak every wet street has. The critique
+  counts the reflection as the share of the road band the mirrored scene
+  lifts by a visible step (13.6% in the street, wanted 5%), not as cells
+  that go white -- the mirror did that; a wet road does not.
 - **Models compose.** A model keeps its own transform and composes it onto its
   parent's, so bones are ordinary models: a clip exported from Blender drives a
   bone exactly as it drives a part, and `ae3d.ik` solves a limb of bones
