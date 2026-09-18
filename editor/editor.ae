@@ -31,6 +31,7 @@ import ae3d.water
 import ae3d.voxel
 import ae3d.script
 import ae3d.terrain
+import ae3d.sky
 import ae3d.rendering
 
 const PANEL_LEFT = 240
@@ -226,6 +227,13 @@ var g_style_buttons: ptr = null
 // column heights the terrain had when it was pressed, so releasing can
 // record one undo step for the whole drag.
 var g_sculpt_buttons: ptr = null
+// The sun by the hour: when on, the sky is drawn from the sun at the hour
+// on the row and the key light takes the sun's direction, colour, strength
+// and fill, so the sky, the clouds and the light agree.
+var g_sun_by_time = false
+var g_sun_by_time_toggle = 0
+var g_time_of_day = 14.0
+var g_sun_sky: ptr = null
 var g_sculpt = 0  // SCULPT_OFF, which is declared below the globals
 var g_brush_radius = 12.0
 var g_sculpting = false
@@ -971,26 +979,26 @@ extern malloc(size: int) -> ptr
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 
-const ROWS = 33
+const ROWS = 34
 // Past every inspector row, because a turn of the gizmo is not a row: it is
 // recorded as the angle the drag has turned through so far, and undone by
 // turning back through it.
-const ROTATE_FIRST_SLOT = 33
-// Past the rotation axes, which take 33 through 35. A behaviour is a property
+const ROTATE_FIRST_SLOT = 34
+// Past the rotation axes, which take 34 through 36. A behaviour is a property
 // of a model like any other as far as undo is concerned, so it travels as a
 // property step in a slot no row uses.
-const SCRIPT_SLOT = 36
+const SCRIPT_SLOT = 37
 // A terrain's shape. A choice rather than a number, so it travels the way a
 // behaviour does rather than as a row.
-const TERRAIN_BIOME_SLOT = 37
+const TERRAIN_BIOME_SLOT = 38
 // A terrain's style. Blocks are voxels drawn one cube per cell; smooth meshes
 // the same field into one surface. Voxels are a kind of terrain rather than
 // what terrain is.
-const TERRAIN_STYLE_SLOT = 38
+const TERRAIN_STYLE_SLOT = 39
 // A stroke of the sculpting brush: one undo step from press to release,
 // whose before and after are the terrain's column heights, kept in a list
 // of strokes the step indexes.
-const SCULPT_SLOT = 39
+const SCULPT_SLOT = 40
 // The brush: what it does to the ground under the cursor while it is held.
 const SCULPT_OFF = 0
 const SCULPT_RAISE = 1
@@ -1033,6 +1041,8 @@ const SSAO_ROW = 30
 const SSAO_RADIUS_ROW = 31
 // The sculpting brush's reach, in metres.
 const BRUSH_ROW = 32
+// The hour of the day the sun is set by, when the sky is drawn from it.
+const TIME_ROW = 33
 const SCRIPT_NONE = 0
 // A behaviour is a script found on disk, not a case in this file. Zero is
 // always "none"; the rest are whatever resources/scripts holds, in the order
@@ -2140,6 +2150,14 @@ row_reaches_its_target(index: int) -> bool {
         return moved
     }
 
+    if index == TIME_ROW {
+        before = g_time_of_day
+        apply_property(index, before + 0.25)
+        moved = core.abs_of(g_time_of_day - (before + 0.25)) < 0.001
+        apply_property(index, before)
+        return moved
+    }
+
     if index == TERRAIN_SEED_ROW {
         // A seed is a whole number and regenerating is the whole of what it
         // does, so it moves by one rather than by the quarter every other row
@@ -2841,6 +2859,40 @@ apply_sky() {
     paint_soon()
 }
 
+// The sun where the hour puts it: the key light takes its direction,
+// colour, strength and fill, and the sky is drawn from the same sun. Off,
+// the sky is the clear colour again and the light stays where the hour
+// last left it, to be edited like any light.
+apply_time_of_day() {
+    if g_renderer == null { return }
+    backend = viewport_backend()
+    if g_sun_by_time {
+        light = g_light as *Light
+        if light != null {
+            light.direction = sky.sun_direction(g_time_of_day)
+            light.color = sky.sun_color(g_time_of_day)
+            light.intensity = sky.sun_intensity(g_time_of_day)
+            light.ambient_strength = sky.ambient_strength(g_time_of_day)
+        }
+        // One sky, made once and kept: the renderer draws whatever it was
+        // last handed, and the hour reaches the shader through the light.
+        if g_sun_sky == null {
+            if g_vulkan {
+                g_sun_sky = vk.skybox_create(g_renderer as *VKRenderer, core.SKY_PROCEDURAL) as ptr
+            } else {
+                g_sun_sky = gl.skybox_create(g_renderer as *GLRenderer, core.SKY_PROCEDURAL) as ptr
+            }
+        }
+        core.backend_set_skybox(&backend, g_sun_sky)
+        refresh_light_rows()
+    } else {
+        core.backend_set_skybox(&backend, null)
+        apply_sky()
+    }
+    mark_dirty()
+    paint_soon()
+}
+
 
 light_value(index: int) -> float {
     light = active_light()
@@ -2923,6 +2975,15 @@ apply_property(index: int, value: float) {
         history.history_record(g_history, history.STEP_PROPERTY, null, index, g_brush_radius, value)
         g_last_edit = seconds()
         g_brush_radius = value
+        show_row(index, value)
+        return
+    }
+
+    if index == TIME_ROW {
+        history.history_record(g_history, history.STEP_PROPERTY, null, index, g_time_of_day, value)
+        g_last_edit = seconds()
+        g_time_of_day = value
+        apply_time_of_day()
         show_row(index, value)
         return
     }
@@ -3539,6 +3600,8 @@ current_view() -> View {
     v.ssr_strength = SSR_STRENGTH
     v.clouds = g_clouds
     v.cloud_cover = g_cloud_cover
+    v.sky_time = 0.0 - 1.0
+    if g_sun_by_time { v.sky_time = g_time_of_day }
     v.ssao = g_ssao
     v.ssao_radius = g_ssao_radius
     v.ssao_intensity = g_ssao_intensity
@@ -3675,6 +3738,11 @@ load_scene() {
     g_sky_b = view.sky_b
     apply_sky()
     refresh_sky_rows()
+    g_sun_by_time = view.sky_time >= 0.0
+    if g_sun_by_time { g_time_of_day = view.sky_time }
+    show_row(TIME_ROW, g_time_of_day)
+    if g_sun_by_time_toggle != 0 { ui.set_toggle(g_sun_by_time_toggle, flag_of(g_sun_by_time)) }
+    apply_time_of_day()
     g_fxaa = view.fxaa
     g_bloom = view.bloom
     g_ssr = view.ssr
@@ -5109,6 +5177,19 @@ main() {
         inspector_row(sky_body, "red", 0.0, 1.0, VIEWPORT_R, SKY_FIRST_ROW)
         inspector_row(sky_body, "green", 0.0, 1.0, VIEWPORT_G, SKY_FIRST_ROW + 1)
         inspector_row(sky_body, "blue", 0.0, 1.0, VIEWPORT_B, SKY_LAST_ROW)
+
+        sun_row = ui.hstack(sky_body, 8)
+        as_row(sun_row)
+        sun_caption = ui.text(sun_row, "Sun by time")
+        ui.add_css_class(sun_caption, "label")
+        ui.spacer(sun_row)
+        g_sun_by_time_toggle = ui.toggle(sun_row, "") callback |on: bool| {
+            g_sun_by_time = on
+            apply_time_of_day()
+            if on { say("the sun at ${sky.hour_name(g_time_of_day)}: the sky is drawn from it") }
+            else { say("the sky is the colour above, the light the scene's own") }
+        }
+        inspector_row(sky_body, "time of day", 0.0, 24.0, 14.0, TIME_ROW)
 
         ui.divider(right)
         rendering_body = fold_section(right, "RENDERING")

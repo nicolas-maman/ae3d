@@ -142,7 +142,12 @@ scale (how many times longer than the table's kilometre swells the waves
 are), and the shore -- the metres of water the bottom shows through and the
 metres the foam line runs out over. Rendering has the clouds switch and,
 under it, the cover: how much of the sky they take, a slider like any row,
-undone like one, and saved with the scene; and the ambient occlusion switch
+undone like one, and saved with the scene; the sky section has, under its
+three colour channels, a **Sun by time** switch and the hour: on, the key
+light takes the sun's direction, colour, strength and fill for that hour
+and the sky is drawn from the same sun, so a scene can be dragged from noon
+to dusk to night and back, and the scene file carries the hour; and the
+ambient occlusion switch
 with its two rows, how dark the occlusion goes and how far in metres a thing
 shadows what stands beside it. Occlusion is the view's, not a model's: it is
 drawn from the scene's depth over everything opaque, by either backend.

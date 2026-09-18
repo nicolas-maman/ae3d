@@ -1123,6 +1123,11 @@ renderer_set_clouds(r: *GLRenderer, cover: float, wind: float) {
     r.cloud_wind = wind
 }
 
+flag_int(on: bool) -> int {
+    if on { return 1 }
+    return 0
+}
+
 // Ambient occlusion on or off: `radius` is how far, in metres, a thing
 // shadows what stands beside it, `intensity` how dark that shadow goes
 // (1.0 is the full occlusion the depth finds, 0 none).
@@ -1551,7 +1556,11 @@ renderer_set_skybox(r: *GLRenderer, skybox: ptr) {
 skybox_create(r: *GLRenderer, path: string) -> *Skybox {
     if path == "" { return core.skybox_solid(0.5, 0.7, 1.0) }
 
-    texture = renderer_load_texture(r, path)
+    // The sky drawn from the sun binds the renderer's own default texture,
+    // since the shader reads one whether or not it is used.
+    procedural = string.equals(path, core.SKY_PROCEDURAL) == 1
+    texture = r.default_texture
+    if !procedural { texture = renderer_load_texture(r, path) }
     if texture == 0 {
         println("ae3d: skybox texture unavailable, falling back to a solid sky")
         return core.skybox_solid(0.5, 0.7, 1.0)
@@ -1559,12 +1568,14 @@ skybox_create(r: *GLRenderer, path: string) -> *Skybox {
 
     sky = core.skybox_solid(0.5, 0.7, 1.0)
     sky.texture = texture
+    sky.procedural = procedural
     sky.program = compile_program(shaders.VERTEX_SKYBOX, shaders.FRAGMENT_SKYBOX, "skybox")
     if sky.program == 0 {
-        renderer_release_texture(r, texture)
+        if !procedural { renderer_release_texture(r, texture) }
         sky.texture = 0
         return sky
     }
+    sky.u_sky_procedural = ae3d_gl_uniform_location(sky.program, "skyProcedural")
 
     sky.u_view = ae3d_gl_uniform_location(sky.program, "view")
     sky.u_projection = ae3d_gl_uniform_location(sky.program, "projection")
@@ -1592,7 +1603,7 @@ skybox_free(r: *GLRenderer, sky: *Skybox) {
     if sky.vao != 0 { ae3d_gl_vao_delete(sky.vao) }
     if sky.vbo != 0 { ae3d_gl_buffer_delete(sky.vbo) }
     if sky.program != 0 { ae3d_gl_program_delete(sky.program) }
-    if sky.texture != 0 { renderer_release_texture(r, sky.texture) }
+    if sky.texture != 0 && !sky.procedural { renderer_release_texture(r, sky.texture) }
     if sky.mesh != null { core.mesh_destroy(sky.mesh) }
     heap.free(sky)
 }
@@ -1605,6 +1616,7 @@ render_skybox(r: *GLRenderer, cam: *Camera, light: *Light) {
     if sky == null || sky.texture == 0 || sky.vao == 0 { return }
 
     use_program(r, sky.program)
+    ae3d_gl_uniform_int(sky.u_sky_procedural, flag_int(sky.procedural))
     // The clouds over the image, lit by the scene's key light.
     ae3d_gl_uniform_float(sky.u_cloud_cover, r.cloud_cover)
     ae3d_gl_uniform_float(sky.u_cloud_time, r.scene_time * r.cloud_wind)

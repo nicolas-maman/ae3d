@@ -21,7 +21,7 @@ import std.string
 import ae3d.platform
 
 exports (
-    mesh_push_skybox_cube, skybox_solid, skybox_texture, mesh_normal,
+    mesh_push_skybox_cube, skybox_solid, skybox_texture, SKY_PROCEDURAL, mesh_normal,
     mesh_set_skin, mesh_is_skinned, mesh_skin_joint, mesh_skin_weight, mesh_decimate,
     mesh_surface_area, mesh_uv_area, mesh_distinct_planes, mesh_size,
     palette_create, palette_destroy, palette_bones, palette_set, palette_get,
@@ -422,11 +422,19 @@ struct Skybox {
     u_cloud_sun: int
     u_cloud_sun_color: int
     u_cloud_eye: int
+    u_sky_procedural: int
+    // Drawn from the sun rather than read from an image: the texture bound
+    // is whatever the renderer had, and is not the skybox's to release.
+    procedural: bool
     size: float
     red: float
     green: float
     blue: float
 }
+
+// The sky path that asks for the sky drawn from the sun instead of an
+// image: engine_set_time_of_day sets it, and a scene file may name it.
+const SKY_PROCEDURAL = "sky://procedural"
 
 // Distance haze: what a scene fades into, and where the fading begins and
 // ends. The colour is the one the eye sees, applied after tone mapping, so it
@@ -2376,6 +2384,7 @@ mesh_push_screen_quad(mesh: ptr) {
 // scene does not cover, so drawing a cube over it would be pure waste.
 skybox_solid(red: float, green: float, blue: float) -> *Skybox {
     sky = heap.new(Skybox)
+    sky.procedural = false
     sky.red = red
     sky.green = green
     sky.blue = blue

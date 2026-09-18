@@ -1,0 +1,112 @@
+// The sun by the hour, and the sky it makes.
+//
+// A painted sky is one time of day for good, and a scene's light has to be
+// set to agree with it by hand. This is the other way round: the hour says
+// where the sun is, and the sun says what colour it is, how strong, how much
+// the sky fills the shadows, and what the sky looks like -- the skybox shader
+// draws it from the same sun, and the water reflects it. Both renderers read
+// the same numbers, so a scene at half past five looks the same on each.
+//
+// The model is a day at a temperate latitude: the sun rises in the east at
+// six, stands high in the south at noon and sets in the west at six, and the
+// night has a moon's worth of light so nothing is black. The colours are
+// what a clear sky does as the sun goes down, not a measurement of one.
+import ae3d.core
+
+exports (
+    sun_direction, sun_color, sun_intensity, ambient_strength, dayness,
+    zenith_color, horizon_color, hour_name
+)
+
+const PI = 3.14159265
+
+// Where the sun is, as the direction TOWARD it, for an hour of the day
+// (0 to 24, fractional). East is +x, up is +y, south is -z; the arc leans
+// south the way a northern sky's does, so noon is not straight overhead.
+sun_direction(hours: float) -> Vec3 {
+    t = (wrap(hours) - 6.0) / 12.0 * PI
+    x = core.cos_of(t)
+    y = core.sin_of(t) * 0.92
+    z = 0.0 - 0.40
+    return core.v3_normalize(core.vec3(x, y, z))
+}
+
+// How much of a day it is: one in full daylight, zero at night, with the
+// twilight between as the sun crosses the horizon.
+dayness(hours: float) -> float {
+    elevation = sun_direction(hours).y
+    return smooth(0.0 - 0.14, 0.06, elevation)
+}
+
+// The sun's colour: white high up, gold and then red as it nears the
+// horizon, and the moon's blue-grey once it is under.
+sun_color(hours: float) -> Vec3 {
+    elevation = sun_direction(hours).y
+    low = smooth(0.35, 0.0 - 0.05, elevation)   // 1 at the horizon, 0 high up
+    day = core.vec3(1.0, 0.96, 0.90)
+    setting = core.vec3(1.0, 0.58, 0.28)
+    lit = core.v3_lerp(day, setting, low * low)
+    // The moon's, once the sun is well under, and not before: the setting
+    // sun is orange to the last.
+    moon = core.vec3(0.55, 0.65, 0.95)
+    under = smooth(0.0, 0.0 - 0.12, elevation)
+    return core.v3_lerp(lit, moon, under)
+}
+
+// How strong the sun is, in the units a light takes: a full day's sun is
+// what the scenes are lit by at noon, and the moon is a twentieth of it.
+sun_intensity(hours: float) -> float {
+    elevation = sun_direction(hours).y
+    high = core.clampf(elevation / 0.6, 0.0, 1.0)
+    return core.lerpf(0.05, 1.0, dayness(hours) * (0.55 + 0.45 * high))
+}
+
+// How much the sky fills the shadows: a blue day fills them well, a dusk
+// hardly, a night by moonlight a little.
+ambient_strength(hours: float) -> float {
+    return core.lerpf(0.06, 0.28, dayness(hours))
+}
+
+// The sky straight up and at the horizon, for whatever mirrors the sky
+// without drawing it -- the water when it has no image to reflect.
+zenith_color(hours: float) -> Vec3 {
+    day = core.vec3(0.20, 0.42, 0.85)
+    night = core.vec3(0.02, 0.03, 0.08)
+    return core.v3_lerp(night, day, dayness(hours))
+}
+
+horizon_color(hours: float) -> Vec3 {
+    elevation = sun_direction(hours).y
+    low = smooth(0.35, 0.0 - 0.05, elevation)
+    day = core.vec3(0.72, 0.82, 0.93)
+    dusk = core.vec3(1.0, 0.52, 0.22)
+    night = core.vec3(0.06, 0.07, 0.13)
+    lit = core.v3_lerp(day, dusk, low * 0.6)
+    return core.v3_lerp(night, lit, dayness(hours))
+}
+
+// "17:30", for a console or a title.
+hour_name(hours: float) -> string {
+    h = wrap(hours)
+    whole = h as int
+    minutes = ((h - (whole as float)) * 60.0 + 0.5) as int
+    if minutes >= 60 { minutes = 59 }
+    text = "${whole}:"
+    if minutes < 10 { text = "${text}0" }
+    return "${text}${minutes}"
+}
+
+wrap(hours: float) -> float {
+    h = hours
+    while h < 0.0 { h = h + 24.0 }
+    while h >= 24.0 { h = h - 24.0 }
+    return h
+}
+
+// A smooth step from `edge0` to `edge1`, in either order.
+smooth(edge0: float, edge1: float, x: float) -> float {
+    t = (x - edge0) / (edge1 - edge0)
+    if t < 0.0 { t = 0.0 }
+    if t > 1.0 { t = 1.0 }
+    return t * t * (3.0 - 2.0 * t)
+}

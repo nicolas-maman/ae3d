@@ -3435,6 +3435,10 @@ void ae3d_vk_set_ssao(int on, double radius, double intensity) {
 
 int ae3d_vk_ssao(void) { return vk.ssao_enabled; }
 
+/* The one-pixel white texture every set falls back to, for a draw that has
+   to bind an image it does not read: the sky drawn from the sun. */
+int ae3d_vk_default_texture(void) { return vk.default_texture; }
+
 /* The camera depth drawn for its own sake: a water surface reads the scene's
    depth under it for its shore, whether or not the road reflects. The same
    target the reflection uses, made the same way. */

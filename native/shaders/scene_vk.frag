@@ -87,6 +87,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     mat4 projection;
     mat4 view;
     vec3 cloudSunColor;
+    int skyProcedural;
     vec2 texelSize;
     float edgeThreshold;
     float edgeThresholdMin;
@@ -994,12 +995,25 @@ void main() {
 
     // Every light in the scene contributes; the loop stops at lightCount, so a
     // scene with one light costs what it did before there could be four.
+    // A shadow takes the direct light and leaves the sky's fill alone:
+    // multiplied over the whole colour, ambient included, as it was, a
+    // shadow went to a third of black and the shadowed side of a hill at
+    // dusk was a hole in the picture. The one shadow map is the key
+    // light's, and it is applied to every light's direct term all the
+    // same: a lamp has no map of its own, and what stands in the key
+    // light's shadow is what stands in the way of the lamp too, near
+    // enough that a figure on a lamp-lit road keeps a shadow under it.
+    // The clouds' shadow is the key light's alone.
+    float shaded = 1.0;
+    if (hasShadowMap && enableShadows) shaded = shadow_factor();
+    float sunlit = cloudShadow(FragPos);
     vec3 Lo = vec3(0.0);
     for (int i = 0; i < 4; i++) {
         if (i >= lightCount) {
             break;
         }
-        Lo += direct_light(lights[i], norm, viewDir, albedo, F0, NdotV, adjustedRoughness);
+        vec3 lit = direct_light(lights[i], norm, viewDir, albedo, F0, NdotV, adjustedRoughness);
+        Lo += (i == 0 ? lit * sunlit : lit) * shaded;
     }
 
     // Ambient belongs to the scene rather than to each light, so it comes from
@@ -1015,7 +1029,7 @@ void main() {
     vec3 fillLightContrib = vec3(0.0);
 
     // The direct light, under the clouds' shadow where a cloud drifts over.
-    vec3 color = ambient + fillLightContrib + Lo * cloudShadow(FragPos);
+    vec3 color = ambient + fillLightContrib + Lo;
     
 	// Calculate distance for performance scaling (CRITICAL for voxel terrain performance)
 	float distanceToCamera = length(FragPos - viewPos);
@@ -1042,14 +1056,6 @@ void main() {
     
     // HDR exposure and tone mapping for normal objects
     color = color * exposure;
-    // GPU Gems Chapter 9 & 11: Apply shadows with proper sun behavior
-    // Without a map there is nothing to compare against, and the light-space
-    // position is meaningless: dividing it by a w of zero used to leave the
-    // whole surface darkened by whatever the sampler happened to return.
-    if (hasShadowMap && enableShadows) {
-        color = color * shadow_factor();
-    }
-    
     // Apply bloom effect
     if (enableBloom) {
         // Extract bright areas for bloom

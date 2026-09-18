@@ -31,6 +31,11 @@ can be interrogated while it runs. See [Credits](#credits).
   occlusion and instances placed as points. They agree to within 0.7% of
   channels, and CI fails if the generated Vulkan shaders fall behind the GLSL
   they are made from.
+- **The sun by the hour.** `engine_set_time_of_day(hours)` puts the sun where
+  the hour does and sets the key light, the fog and a sky drawn from the same
+  sun -- blue at noon, gold and red at dusk, moonlit at night -- so the sky,
+  the clouds and the light agree; the editor has it as a switch and a slider,
+  and the scene file carries the hour.
 - **Instances as matrices or as points.** An instanced model carries a
   matrix, a colour and a phase per instance, or -- `model_enable_point_instancing`
   -- a position, a scale, a colour and a phase in eight floats, with the
@@ -52,8 +57,9 @@ can be interrogated while it runs. See [Credits](#credits).
   directional or point lights, normal mapping, baked per-vertex occlusion and
   screen-space ambient occlusion from the scene's depth (`engine_set_ssao`,
   both backends), shadow mapping with a texel-snapped light box (both
-  backends), volumetric clouds and their shadows, fog applied after tone
-  mapping, MSAA, FXAA and bloom. Screen-space reflections on wet surfaces on
+  backends), volumetric clouds and their shadows, a sky drawn from the sun by
+  the hour or a painted one, fog applied after tone mapping, MSAA, FXAA and
+  bloom. Screen-space reflections on wet surfaces on
   Vulkan.
 - **Models compose.** A model keeps its own transform and composes it onto its
   parent's, so bones are ordinary models: a clip exported from Blender drives a
@@ -308,8 +314,8 @@ git clone https://github.com/aether-lang-dev/aether-ui.git ../aether-ui
 | `caustics.ae` | The seabed under the swell: a diver's height off the sand, murk with distance, the water's light web on the sand and the rocks |
 | `sand.ae` | A desert: a million grains with a tint each, falling onto a heap of sand that is itself a heightfield; hold the button and a ball under the cursor ploughs it, the sand out to a rim that slumps to its angle of repose, the grains shoved aside. Grains at rest live in a tier uploaded only when it changes, so the settled pile costs the draw and nothing else, and every grain is a point instance, so the pour streams eight floats a grain: ~85 fps with all million falling and ~140 settled on an RTX 4070 Ti (OpenGL; Vulkan close behind) |
 | `black_hole.ae` | Kerr geodesics integrated per pixel: a spinning hole, its asymmetric shadow, a lensed disc and sky; `tests/test_blackhole` measures the shadow against sqrt(27) M. [docs/black-hole.md](docs/black-hole.md) |
-| `voxel_world.ae` | 3.9 million voxels of Perlin terrain as an island in a sea, meshed as the 259,000 faces that show with the sky each corner sees baked in, a forest on its grass, one draw call |
-| `smooth_terrain.ae` | A volcanic island meshed with surface nets, its albedo baked from its own height and slope, in a sea that mirrors the painted sky |
+| `voxel_world.ae` | 3.9 million voxels of Perlin terrain as an island in a sea, meshed as the 259,000 faces that show with the sky each corner sees baked in, a forest on its grass, one draw call; lit by the morning sun (`AE3D_TIME=HHMM` for another hour) |
+| `smooth_terrain.ae` | A volcanic island meshed with surface nets, its albedo baked from its own height and slope, in a sea under a sky drawn from the sun an hour before sunset (`AE3D_TIME=HHMM` for another hour, `-1` for the painted sky) |
 | `models.ae` | OBJ loading, including a multi-material model drawn as one group per material |
 | `lights.ae` | Material presets cycling with the light type, bloom, transparency |
 | `blender_pipeline.ae` | A model authored and keyed in Blender, exported, loaded and played |

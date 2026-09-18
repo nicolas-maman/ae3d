@@ -87,6 +87,7 @@ extern ae3d_vk_camdepth_begin() -> int
 extern ae3d_vk_camdepth_end()
 extern ae3d_vk_set_ssr(on: int)
 extern ae3d_vk_set_ssao(on: int, radius: float, intensity: float)
+extern ae3d_vk_default_texture() -> int
 extern ae3d_vk_ssao() -> int
 extern ae3d_vk_draw_ssao()
 extern ae3d_vk_ssr() -> int
@@ -764,7 +765,11 @@ renderer_set_skybox(r: *VKRenderer, skybox: ptr) {
 skybox_create(r: *VKRenderer, path: string) -> *Skybox {
     if path == "" { return core.skybox_solid(0.5, 0.7, 1.0) }
 
-    texture = renderer_load_texture(r, path)
+    // The sky drawn from the sun binds the renderer's own default texture,
+    // since the pipeline reads one whether or not it is used.
+    procedural = string.equals(path, core.SKY_PROCEDURAL) == 1
+    texture = ae3d_vk_default_texture()
+    if !procedural { texture = renderer_load_texture(r, path) }
     if texture == 0 {
         println("ae3d: skybox texture unavailable, falling back to a solid sky")
         return core.skybox_solid(0.5, 0.7, 1.0)
@@ -772,6 +777,7 @@ skybox_create(r: *VKRenderer, path: string) -> *Skybox {
 
     sky = core.skybox_solid(0.5, 0.7, 1.0)
     sky.texture = texture
+    sky.procedural = procedural
     sky.mesh = core.mesh_create()
     core.mesh_push_skybox_cube(sky.mesh, sky.size)
     sky.vbo = ae3d_vk_upload_mesh(sky.mesh)
@@ -781,7 +787,7 @@ skybox_create(r: *VKRenderer, path: string) -> *Skybox {
 skybox_free(r: *VKRenderer, sky: *Skybox) {
     if sky == null { return }
     if sky.vbo != 0 { ae3d_vk_free_mesh(sky.vbo) }
-    if sky.texture != 0 { renderer_release_texture(r, sky.texture) }
+    if sky.texture != 0 && !sky.procedural { renderer_release_texture(r, sky.texture) }
     if sky.mesh != null { core.mesh_destroy(sky.mesh) }
     heap.free(sky)
 }
@@ -800,6 +806,9 @@ draw_skybox(r: *VKRenderer, cam: *Camera) {
 
     ae3d_vk_scene_set_mat4(vkscene.OFF_VIEW, &view)
     ae3d_vk_scene_set_clip_mat4(vkscene.OFF_PROJECTION, &projection)
+    procedural = 0
+    if sky.procedural { procedural = 1 }
+    ae3d_vk_scene_set_int(vkscene.OFF_SKYPROCEDURAL, procedural)
     ae3d_vk_draw_sky(sky.vbo, sky.texture)
 }
 
