@@ -40,7 +40,7 @@ exports (
     UNIFORM_FLOAT, UNIFORM_INT, UNIFORM_VEC3, UNIFORM_FLOAT_ARRAY, UNIFORM_VEC3_ARRAY,
     env_int, material_new, material_default, material_clone, material_equals, material_free,
     model_new, model_free,
-    model_clone, model_set_casts_shadow, model_set_depth_proxy, model_set_impostor, model_is_impostor,
+    model_clone, model_set_casts_shadow, model_set_billboard, model_set_depth_proxy, model_set_impostor, model_is_impostor,
     model_set_position, model_set_scale, model_set_rotation, model_rotate,
     model_update_matrix, model_recalculate_bounds, model_mark_dirty, model_set_diffuse,
     model_set_parent, model_parent, model_sync_transform, model_world_position,
@@ -390,6 +390,9 @@ struct Model {
     instance_phases_updated: bool
     visible: bool
     casts_shadow: bool
+    // Point instances drawn as billboards turned to the eye: 0 as the
+    // mesh is, 1 upright (a streak of rain), 2 full (a flake).
+    billboard: int
     // An impostor: the model's instances drawn as upright quads turned to
     // the camera, each showing a cell of its texture -- an atlas of
     // impostor_cols views around a figure by impostor_rows frames of its
@@ -2474,6 +2477,15 @@ mesh_push_skybox_cube(mesh: ptr, size: float) {
 
 // A model that should receive light without blocking it, a ground plane or a
 // water surface, can be kept out of the depth pass.
+// Draw this model's point instances as billboards: each turned to the
+// camera, `mode` 1 upright -- spun about the world's up alone, so a streak
+// of rain stays a streak -- or 2 full, tipped to face the eye as well, for
+// a flake or a mote. The model's scale stays; its rotation gives way to
+// the turn. Zero draws the mesh as it is.
+model_set_billboard(m: *Model, mode: int) {
+    m.billboard = mode
+}
+
 model_set_casts_shadow(m: *Model, on: bool) {
     m.casts_shadow = on
 }

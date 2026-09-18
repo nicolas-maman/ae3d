@@ -15,15 +15,16 @@ typedef struct {
 #define AE3D_VK_OFF_ISINSTANCED 320
 #define AE3D_VK_OFF_USEINSTANCECOLOR 324
 #define AE3D_VK_OFF_INSTANCEPOINTS 328
-#define AE3D_VK_OFF_MODEL 336
-#define AE3D_VK_OFF_VIEWPROJECTION 400
-#define AE3D_VK_OFF_LIGHTSPACEMATRIX 464
-#define AE3D_VK_OFF_ISSKINNED 528
-#define AE3D_VK_OFF_BONES 544
-#define AE3D_VK_OFF_LIGHTCOUNT 6688
-#define AE3D_VK_OFF_IMPOSTOR 6692
-#define AE3D_VK_OFF_CAPTURECHANNEL 6696
-#define AE3D_VK_OFF_VIEWPOS 6704
+#define AE3D_VK_OFF_INSTANCEBILLBOARD 332
+#define AE3D_VK_OFF_VIEWPOS 336
+#define AE3D_VK_OFF_MODEL 352
+#define AE3D_VK_OFF_VIEWPROJECTION 416
+#define AE3D_VK_OFF_LIGHTSPACEMATRIX 480
+#define AE3D_VK_OFF_ISSKINNED 544
+#define AE3D_VK_OFF_BONES 560
+#define AE3D_VK_OFF_LIGHTCOUNT 6704
+#define AE3D_VK_OFF_IMPOSTOR 6708
+#define AE3D_VK_OFF_CAPTURECHANNEL 6712
 #define AE3D_VK_OFF_VIEWDISTANCE 6716
 #define AE3D_VK_OFF_DIFFUSECOLOR 6720
 #define AE3D_VK_OFF_SPECULARCOLOR 6736
@@ -162,8 +163,8 @@ typedef struct {
 static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "bloomIntensity", 6908 },
     { "bloomThreshold", 6904 },
-    { "bones", 544 },
-    { "captureChannel", 6696 },
+    { "bones", 560 },
+    { "captureChannel", 6712 },
     { "causticsDepth", 7012 },
     { "causticsIntensity", 6996 },
     { "causticsScale", 7000 },
@@ -211,25 +212,26 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "hasSkyTexture", 7924 },
     { "horizonColor", 7904 },
     { "iblIntensity", 6868 },
-    { "impostor", 6692 },
+    { "impostor", 6708 },
     { "impostorCols", 7960 },
     { "impostorHeight", 7972 },
     { "impostorRows", 7964 },
     { "impostorWidth", 7968 },
+    { "instanceBillboard", 332 },
     { "instancePoints", 328 },
     { "invViewProjection", 7232 },
     { "isInstanced", 320 },
-    { "isSkinned", 528 },
+    { "isSkinned", 544 },
     { "jitter", 7392 },
     { "lightColor", 7840 },
-    { "lightCount", 6688 },
+    { "lightCount", 6704 },
     { "lightDirection", 7824 },
     { "lightIntensity", 7852 },
     { "lightPos", 7808 },
-    { "lightSpaceMatrix", 464 },
+    { "lightSpaceMatrix", 480 },
     { "materialAlpha", 6780 },
     { "metallic", 6748 },
-    { "model", 336 },
+    { "model", 352 },
     { "noiseIntensity", 6988 },
     { "noiseOctaves", 6984 },
     { "noiseScale", 6980 },
@@ -264,8 +266,8 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "useInstanceColor", 324 },
     { "view", 7088 },
     { "viewDistance", 6716 },
-    { "viewPos", 6704 },
-    { "viewProjection", 400 },
+    { "viewPos", 336 },
+    { "viewProjection", 416 },
     { "volumetricIntensity", 6876 },
     { "volumetricScattering", 6884 },
     { "volumetricSteps", 6880 },
@@ -290,7 +292,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "wetness", 6788 },
 };
 
-#define AE3D_VK_UNIFORM_SLOT_COUNT 128
+#define AE3D_VK_UNIFORM_SLOT_COUNT 129
 
 static inline int ae3d_vk_uniform_offset(const char *name) {
     int low = 0;

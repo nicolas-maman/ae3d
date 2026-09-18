@@ -147,6 +147,14 @@ ramp, and the shading's own aliasing goes with it. On both backends; the
 pass runs between the reflection and the composite, and the two history
 textures are written in turn.
 
+### Billboards
+
+`model_set_billboard(m, mode)` turns a point-instanced model's mesh to the
+eye at every point: upright (mode 1), spun about the world's up alone, so
+a streak of rain stays a streak; or full (mode 2), tipped to face the eye
+as well, for a flake or a mote. The weather's particles are a quad with a
+soft disc for a texture, drawn this way.
+
 ### Rain on the surfaces
 
 `engine_set_wetness(e, amount)` is rain on the scene: every surface that

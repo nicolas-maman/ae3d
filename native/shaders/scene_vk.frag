@@ -19,6 +19,8 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     bool isInstanced;
     bool useInstanceColor;
     bool instancePoints;
+    int instanceBillboard;
+    vec3 viewPos;
     mat4 model;
     mat4 viewProjection;
     mat4 lightSpaceMatrix;
@@ -27,7 +29,6 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     int lightCount;
     bool impostor;
     int captureChannel;
-    vec3 viewPos;
     float viewDistance;
     vec3 diffuseColor;
     vec3 specularColor;
