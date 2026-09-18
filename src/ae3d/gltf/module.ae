@@ -7,6 +7,7 @@
 //   scene = gltf.load("figure.glb")            // .gltf with a .bin beside it, or .glb
 //   gltf.add_to_engine(e, scene)               // every mesh, placed by its node
 //   players = gltf.play(scene, "Walk", registry, true)
+//   bank = gltf.bake_bank(scene, "Walk", 48)  // the walk as a crowd's pose bank
 //
 // What is read: every node as a model (its TRS, or its matrix decomposed),
 // parented as the tree says; every mesh primitive as a model of its own under
@@ -28,13 +29,15 @@ import std.file as fs
 import ae3d.core
 import ae3d.skin
 import ae3d.anim
+import ae3d.crowd
 
 exports (
     GltfScene, load, scene_free, scene_destroy, last_error,
     model_count, model, find, root_count, root,
     skeleton_count, skeleton,
     animation_count, animation_name, clip_count, clip,
-    play, add_to_engine_models, warning_count, warning, primitive_count, primitive
+    play, add_to_engine_models, warning_count, warning, primitive_count, primitive,
+    animation_duration, bake_bank, bake_root
 )
 
 extern ae3d_blob_read(path: string) -> ptr
@@ -1044,6 +1047,69 @@ play(s: *GltfScene, animation: string, registry: *Registry, looping: bool) -> in
     }
     string.free(prefix)
     return made
+}
+
+// How long an animation runs: the longest of its clips, one per node.
+animation_duration(s: *GltfScene, animation: string) -> float {
+    longest = 0.0
+    prefix = string.concat(animation, ":")
+    i = 0
+    count = list.size(s.clips)
+    while i < count {
+        c = list.get_raw(s.clips, i) as *Clip
+        if string.starts_with(anim.clip_name(c), prefix) == 1 {
+            d = anim.clip_duration(c)
+            if d > longest { longest = d }
+        }
+        i = i + 1
+    }
+    string.free(prefix)
+    return longest
+}
+
+// The bone that carries a figure's travel, for a bake in place: a Root or
+// a Hips by name, as Mixamo, Blender and most packs call it, else the
+// skin's first joint, which is the root of the tree it lists. -1 without
+// a skeleton.
+bake_root(s: *GltfScene) -> int {
+    if list.size(s.skeletons) == 0 { return 0 - 1 }
+    skel = list.get_raw(s.skeletons, 0) as *Skeleton
+    root = skin.skeleton_find(skel, "Root")
+    if root < 0 { root = skin.skeleton_find(skel, "Hips") }
+    if root < 0 { root = skin.skeleton_find(skel, "mixamorig:Hips") }
+    if root < 0 { root = skin.skeleton_find(skel, "root") }
+    if root < 0 { root = 0 }
+    return root
+}
+
+// One of the file's animations baked into a pose bank of `frames` poses
+// over the first skin, in place -- the travel on the root bone taken out
+// and recorded, the way the pipeline's zombie is baked -- so a figure from
+// anywhere joins a crowd: every primitive of the file, instanced with the
+// bank (`model_set_pose_bank`), is posed by its own phase in the vertex
+// shader. The clip's whole length is the cycle; a walk exported as one
+// cycle loops without a seam. Null, with the error set, when the file has
+// no skin or no animation of that name; the caller frees the bank
+// (`crowd.posebank_free`).
+bake_bank(s: *GltfScene, animation: string, frames: int) -> ptr {
+    if s == null { return null }
+    if list.size(s.skeletons) == 0 {
+        set_error("bake_bank: ", "the file has no skin to bake a bank over")
+        return null
+    }
+    skel = list.get_raw(s.skeletons, 0) as *Skeleton
+    reg = anim.registry_new()
+    made = play(s, animation, reg, true)
+    if made == 0 {
+        anim.registry_free(reg)
+        set_error("bake_bank: no animation named ", animation)
+        return null
+    }
+    duration = animation_duration(s, animation)
+    if duration <= 0.0 { duration = 1.0 }
+    bank = crowd.posebank_bake_in_place(reg, skel, frames, 0.0, duration, bake_root(s))
+    anim.registry_free(reg)
+    return bank
 }
 
 // The models that draw -- the primitives -- in a list the caller adds to an

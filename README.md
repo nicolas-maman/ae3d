@@ -31,7 +31,7 @@ skinned instanced crowds, and an engine that can be interrogated while it runs.
 | **Instancing and ECS** | Instances as matrices or as eight-float points (a million grains of sand in a 32 MB stream); `ae3d.ecs` keeps components in dense columns the crowd systems walk in C. |
 | **Voxels and terrain** | Voxel worlds meshed as only the faces that show with baked corner sky; surface nets over a signed distance field for smooth terrain; Perlin heightfields. |
 | **Self-painted assets** | Skies, sand, palettes and albedos generated from the engine's own noise and registered as textures. Nothing downloaded. |
-| **Models from anywhere** | A glTF 2.0 loader (`ae3d.gltf`): meshes, materials and textures, the node tree, skins with their inverse binds, and every animation as clips, from `.gltf` or `.glb`. A Mixamo figure walks in the engine without passing through Blender. |
+| **Models from anywhere** | A glTF 2.0 loader (`ae3d.gltf`): meshes, materials and textures, the node tree, skins with their inverse binds, and every animation as clips, from `.gltf` or `.glb`. A Mixamo figure walks in the engine without passing through Blender, and `gltf.bake_bank` strikes any of its clips into a pose bank, so a figure from a public pack is a horde in one call. |
 | **An engine you can ask** | `AE3D_AGENT=port` opens a JSON channel: read and change the scene, hold a frame, read its pixels, trace a model from its Blender object to the pixels it landed on. |
 | **An editor** | Hierarchy, inspector, gizmos, terrain sculpting, undo, scene files; one dark theme on every platform. |
 
@@ -48,6 +48,10 @@ The full list, with the reasoning behind each feature, is in
 | `smooth_terrain` — surface nets over a distance field, albedo baked from slope | `voxel_world` — 3.9 million voxels as 259,000 faces in one draw |
 | ![Material presets under a night sky](docs/materials.png) | ![A Kerr black hole](docs/black-hole.png) |
 | `lights` — the material presets under the painted night | `black_hole` — Kerr geodesics per pixel, the shadow checked against √27 M |
+
+![Three hundred survivors from a CC0 glTF walking a field](docs/gltf-crowd.png)
+
+<sub>`./build/gltf_crowd adventurer.glb`: a rigged figure from a public Quaternius pack (CC0), its `Walk` baked into a pose bank by `gltf.bake_bank` and three hundred of it instanced over the bank, each at its own phase and heading -- fifteen parts a figure, thirty-three draws, no Blender in the path.</sub>
 
 ![Twenty thousand zombies filling the street](docs/zombie-horde.png)
 
@@ -185,6 +189,7 @@ git clone https://github.com/aether-lang-dev/aether-ui.git ../aether-ui
 | `lights.ae` | Material presets, light types, bloom, transparency |
 | `blender_pipeline.ae` | A model authored and keyed in Blender, exported, loaded and played |
 | `gltf_viewer.ae` | Any glTF on a floor under a sun, playing one of its animations: `./build/gltf_viewer Fox.glb Run` |
+| `gltf_crowd.ae` | Any glTF figure as a crowd: its walk baked into a pose bank, hundreds of it walking a field: `AE3D_CROWD=500 ./build/gltf_crowd figure.glb Walk` |
 | `backend_switch.ae` | The same scene through either renderer |
 | `spinning_cube.ae` | The smallest complete program |
 

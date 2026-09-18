@@ -1,0 +1,160 @@
+// A glTF figure's walk baked into a pose bank, and a crowd of it drawn:
+// gltf.bake_bank over the Khronos Fox. The bank has a pose per frame over
+// every joint of the skin; the poses differ across the cycle, since a walk
+// moves; an animation the file lacks is refused with its name; and thirty
+// foxes instanced over the bank draw as one instanced draw, the way the
+// pipeline's zombie does. Hidden, four frames, on OpenGL.
+
+import ae3d.core
+import ae3d.platform
+import ae3d.engine
+import ae3d.gltf
+import ae3d.crowd
+import ae3d.ecs
+import ae3d.skin
+
+var g_checks = 0
+var g_failures = 0
+var g_scene: ptr = null
+var g_bank: ptr = null
+var g_pos: ptr = null
+var g_yaw: ptr = null
+var g_phase: ptr = null
+var g_color: ptr = null
+var g_draws_seen = 0
+
+const FRAMES = 24
+const COUNT = 30
+
+check(name: string, condition: bool) {
+    g_checks = g_checks + 1
+    if condition {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        g_failures = g_failures + 1
+    }
+}
+
+// Whether two frames of the bank differ anywhere over a bone's matrix.
+poses_differ(bank: ptr, a: int, b: int, bone: int) -> bool {
+    i = 0
+    while i < 16 {
+        if core.abs_of(crowd.posebank_get(bank, a, bone, i) - crowd.posebank_get(bank, b, bone, i)) > 0.0001 { return true }
+        i = i + 1
+    }
+    return false
+}
+
+on_start(state: ptr, e: *Engine) {
+    scene = gltf.load("tests/fixtures/gltf/Fox.glb")
+    check("the fox loads", scene != null)
+    if scene == null { engine.engine_stop(e) ; return }
+    g_scene = scene as ptr
+
+    check("an animation the file lacks is refused", gltf.bake_bank(scene, "Moonwalk", FRAMES) == null)
+    check("and the refusal names it", gltf.last_error() == "bake_bank: no animation named Moonwalk")
+    check("the walk lasts under a second (${gltf.animation_duration(scene, "Walk")})",
+          gltf.animation_duration(scene, "Walk") > 0.5 && gltf.animation_duration(scene, "Walk") < 1.0)
+    check("the root to bake in place around is a joint", gltf.bake_root(scene) >= 0)
+
+    bank = gltf.bake_bank(scene, "Walk", FRAMES)
+    check("the walk bakes into a bank", bank != null)
+    if bank == null { engine.engine_stop(e) ; return }
+    g_bank = bank
+    skel = gltf.skeleton(scene, 0)
+    check("a pose per frame", crowd.posebank_frames(bank) == FRAMES)
+    check("over every joint of the skin (${crowd.posebank_bones(bank)})", crowd.posebank_bones(bank) == skin.skeleton_count(skel))
+    // A walk moves: some bone is posed differently half a cycle on.
+    moving = false
+    b = 0
+    while b < crowd.posebank_bones(bank) {
+        if poses_differ(bank, 0, FRAMES / 2, b) { moving = true }
+        b = b + 1
+    }
+    check("the poses differ across the cycle", moving)
+
+    // Thirty foxes over the bank, each at its own phase.
+    g_pos = ecs.column_new(COUNT, 3)
+    g_yaw = ecs.column_new(COUNT, 1)
+    g_phase = ecs.column_new(COUNT, 1)
+    g_color = ecs.column_new(COUNT, 3)
+    i = 0
+    while i < COUNT {
+        ecs.column_set3(g_pos, i, core.vec3(((i % 6) as float) * 150.0 - 375.0, 0.0, ((i / 6) as float) * 150.0 - 300.0))
+        ecs.column_set(g_yaw, i, 0, (i as float) * 0.7)
+        ecs.column_set(g_phase, i, 0, (i as float) / (COUNT as float))
+        ecs.column_set3(g_color, i, core.vec3(1.0, 1.0, 1.0))
+        i = i + 1
+    }
+    parts = 0
+    p = 0
+    while p < gltf.primitive_count(scene) {
+        m = gltf.primitive(scene, p)
+        if m.skeleton != null {
+            core.model_set_parent(m, null)
+            core.model_set_position(m, 0.0, 0.0, 0.0)
+            core.model_set_scale(m, 1.0, 1.0, 1.0)
+            core.model_set_rotation(m, core.quat_ident())
+            core.model_update_matrix(m)
+            core.model_enable_instancing(m, COUNT)
+            core.model_set_pose_bank(m, bank, FRAMES)
+            core.model_enable_instance_phases(m)
+            core.model_enable_instance_colors(m)
+            engine.engine_add_model(e, m)
+            core.model_set_instance_draw_count(m, COUNT)
+            core.model_set_instance_positions_yaw(m, ecs.column_data(g_pos), ecs.column_data(g_yaw), COUNT)
+            core.model_set_instance_phases(m, ecs.column_data(g_phase), COUNT)
+            core.model_set_instance_colors(m, ecs.column_data(g_color), COUNT)
+            parts = parts + 1
+        }
+        p = p + 1
+    }
+    check("the fox is one skinned part", parts == 1)
+
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(0.0, 300.0, 900.0))
+    core.camera_look_at(cam, core.vec3(0.0, 50.0, 0.0))
+    core.camera_set_far(cam, 5000.0)
+}
+
+on_update(state: ptr, e: *Engine, delta: float) {
+    draws = engine.engine_draw_calls(e)
+    if draws > g_draws_seen { g_draws_seen = draws }
+}
+
+main() {
+    e = engine.engine_new_with(platform.API_GL)
+    engine.engine_set_size(e, 320, 200)
+    engine.engine_set_title(e, "ae3d glTF crowd test")
+    engine.engine_set_frame_limit(e, 4)
+    engine.engine_set_camera_input(e, false)
+    engine.engine_set_vsync(e, 0)
+    light = core.light_directional(core.vec3(0.3, 0.8, 0.5), core.vec3(1.0, 1.0, 1.0), 2.0)
+    engine.engine_set_light(e, light)
+
+    program = engine.behaviour_new("gltf crowd test", null)
+    program.start = on_start
+    program.update = on_update
+    engine.engine_add_behaviour(e, program)
+    if !engine.engine_run(e) {
+        println("gltf_crowd: SKIP no window")
+        engine.engine_free(e)
+        core.light_free(light)
+        return
+    }
+    // The crowd is one instanced draw of the fox, plus whatever the frame
+    // draws around it (the shadow pass, the sky): more than none, and not
+    // one a fox.
+    check("the crowd draws (${g_draws_seen} draws for ${COUNT} foxes)", g_draws_seen > 0 && g_draws_seen < COUNT)
+    engine.engine_free(e)
+    core.light_free(light)
+    if g_bank != null { crowd.posebank_free(g_bank) }
+    if g_scene != null { gltf.scene_destroy(g_scene as *GltfScene) }
+
+    if g_failures == 0 {
+        println("gltf_crowd: all checks passed (${g_checks})")
+    } else {
+        println("gltf_crowd: ${g_failures} failure(s)")
+    }
+}

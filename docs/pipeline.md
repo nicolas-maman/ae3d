@@ -150,6 +150,23 @@ frames any file on a floor and plays one of its animations;
 `tests/test_gltf` holds the loader to a two-bone arm it can do the
 arithmetic for, and to the Khronos Fox.
 
+A figure from a file joins a crowd the way the pipeline's zombie does:
+`gltf.bake_bank(scene, "Walk", 48)` plays the named animation over the
+first skin and strikes its poses into a pose bank in place (the root's
+travel taken out and recorded, `gltf.bake_root` naming a Root or Hips
+joint, else the skin's first), and every skinned primitive of the file,
+instanced with `model_set_pose_bank` and its phases, is posed in the
+vertex shader from the bank exactly as the zombie's tiers are. The
+primitive stands at the origin with no transform of its own -- the bank's
+palette carries the rig's placement and scale, the instance stream the
+crowd's -- and the file's facing (+Z for glTF, +X for the pipeline) is
+added to the crowd's headings when they are uploaded.
+`examples/gltf_crowd.ae` walks a few hundred of any figure over a field
+(`AE3D_CROWD`, `AE3D_ANIM`, `AE3D_FACING`); `tests/test_gltf_crowd` bakes
+the Fox's walk and draws thirty of it as one instanced draw. What the
+zombie has that a file's figure does not yet: the far tier's decimated
+mesh and the impostor, which the pipeline bakes in Blender (#342).
+
 ## Driving it from a program
 
 An engine started with `AE3D_AGENT` answers questions about itself over a
