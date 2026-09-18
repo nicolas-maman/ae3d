@@ -196,6 +196,36 @@ upscaler that knows more than a bilinear sample -- DLSS (#324) -- sits
 where the composite samples, handed the scene's colour, depth and motion
 vectors at the scaled size and asked for the window's.
 
+### Ray-traced shadows
+
+`engine_set_ray_shadows(e, on)`, or `AE3D_RAYS=1`, on Vulkan where the
+device has `VK_KHR_ray_query` (`engine_ray_query(e)` says): a ray from
+every lit surface toward the sun through the scene's acceleration
+structure, in the shadow map's place for the static scene. Every static
+mesh gets a bottom-level structure at upload, from the same vertex and
+index buffers the draws use; each frame the renderer adds the traced
+models -- the ones that cast, drawn on their own or through a matrix
+stream -- with their matrices, and the top-level structure is built
+from them before any pass, in a ring of two. The scene fragment's
+ray-query variant (`scene_rq_vk.frag`, GLSL 4.60, SPIR-V 1.4, the
+structure at binding 5) traces one opaque ray, first hit, from a
+little off the surface: lit, or the shadow's share of the light, exact
+at any distance and with no map's texel to fit the world into. What the
+structure does not hold -- a skinned figure, a crowd, a point stream --
+stays in the shadow map, which is drawn with those alone while the rays
+are on, and the two shadows combine, the darker winning. Off, or on a
+device that does not trace, nothing changes; `AE3D_NO_RAYS=1` keeps the
+extensions off. `tests/test_ray_shadows` holds the rays' shadow to the
+map's -- the same ground shaded to the same depth, the same edge -- and
+past the edge, a ray's ground fully lit where a map's filtered edge is
+still part way.
+
+What is left for the rays to do next: the crowd (a structure per baked
+pose of the bank, the sort's instances referring to them) and the
+skinned, so the map goes; a sun with a size, several rays a pixel folded
+by the temporal pass, for a penumbra; occlusion and reflections by ray
+(#323).
+
 ### DLSS
 
 NVIDIA's DLSS, through Streamline, on Vulkan: `engine_set_dlss(e, mode)`

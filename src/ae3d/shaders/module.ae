@@ -490,6 +490,14 @@ uniform vec3 shadowDirection;
 // scales with the box it was fitted to, and this is the number that says by how
 // much.
 uniform float shadowTexelWorld;
+// Shadows by ray: where the Vulkan device has ray queries and the renderer
+// has built the scene's acceleration structure, a ray from the surface
+// toward the sun says what stands in the way, exactly, at any distance,
+// with no map's texel to fit the world into. The map stays for what the
+// structure does not hold (the crowd, the skinned) and for OpenGL; the
+// two are combined, the darker winning. The block below is compiled into
+// the Vulkan ray-query variant of this shader alone.
+uniform int rayShadows;
 uniform mat4 lightSpaceMatrix;
 
 // GPU Gems Chapter 5: Improved Perlin Noise Support
@@ -580,6 +588,28 @@ float shadow_factor() {
 
     return mix(shadowIntensity, 1.0, lit);
 }
+
+#ifdef AE3D_RAY_QUERY
+// One ray toward the sun from just off the surface: lit, or the shadow's
+// share of the light. The origin steps out along the normal by a little
+// more than the surface's own tessellation error, so a face does not
+// shadow itself, and the ray is opaque-only and stops at its first hit.
+float ray_shadow_factor() {
+    vec3 surface = normalize(Normal);
+    vec3 toLight = normalize(-shadowDirection);
+    if (dot(surface, toLight) <= 0.0) return shadowIntensity;
+    vec3 origin = FragPos + surface * 0.02;
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, sceneAS,
+                          gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+                          0xFF, origin, 0.01, toLight, 500.0);
+    rayQueryProceedEXT(query);
+    if (rayQueryGetIntersectionTypeEXT(query, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+        return shadowIntensity;
+    }
+    return 1.0;
+}
+#endif
 
 vec3 kelvinToRGB(float kelvin) {
     kelvin = clamp(kelvin, 1000.0, 12000.0);
@@ -1310,6 +1340,9 @@ void main() {
     // The clouds' shadow is the key light's alone.
     float shaded = 1.0;
     if (hasShadowMap && enableShadows) shaded = shadow_factor();
+#ifdef AE3D_RAY_QUERY
+    if (rayShadows == 1 && enableShadows) shaded = min(shaded, ray_shadow_factor());
+#endif
     float sunlit = cloudShadow(FragPos);
     vec3 Lo = vec3(0.0);
     for (int i = 0; i < MAX_LIGHTS; i++) {

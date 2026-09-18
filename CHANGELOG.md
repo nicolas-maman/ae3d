@@ -115,6 +115,29 @@
   inverse binds where `skeleton_bind` would derive them from the pose.
 - `native/ae3d_blob.c`: a file as bytes and the little-endian numbers in it.
 
+### Ray-traced shadows
+
+- On Vulkan where the device has `VK_KHR_ray_query`: `engine_set_ray_shadows(e, on)`
+  / `AE3D_RAYS=1`. A bottom-level acceleration structure per static mesh
+  at upload; each frame the traced models' matrices into a top-level
+  structure built before the passes; the scene fragment's ray-query
+  variant traces one ray toward the sun per lit pixel and combines it
+  with the shadow map, which keeps only what the structure does not hold
+  (the skinned, the crowd, points) while the rays are on. The instance
+  is Vulkan 1.2 where the loader has it, the device enables the
+  acceleration-structure, ray-query, deferred-host-operations and
+  buffer-device-address extensions where present, and the descriptor
+  layout carries the structure at binding 5 there; nowhere else does
+  anything change (`AE3D_NO_RAYS=1` keeps it all off).
+  `engine_ray_query(e)` says whether the device traces.
+- `tests/test_ray_shadows`: the rays' shadow against the map's on a ball
+  over a plane (same depth, same edge, fully lit past a ray's edge),
+  off again; skips where the device does not trace.
+- Measured: the city's shadow pass at 400 zombies goes from 419 to 246
+  draws and the scene from 2.96 to 1.57 ms (one ray in place of nine
+  map taps); at half a million, where the crowd stays in the map, the
+  rays cost two or three per cent.
+
 ### DLSS
 
 - NVIDIA DLSS through Streamline, on Vulkan: `engine_set_dlss(e, mode)`

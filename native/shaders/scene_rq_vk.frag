@@ -1,5 +1,8 @@
 // Modern PBR-inspired Fragment Shader
-#version 450
+#version 460
+#extension GL_EXT_ray_query : require
+#define AE3D_RAY_QUERY 1
+layout(set = 0, binding = 5) uniform accelerationStructureEXT sceneAS;
 
 struct Light {
     vec3 position;

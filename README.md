@@ -23,7 +23,7 @@ skinned instanced crowds, and an engine that can be interrogated while it runs.
 | | |
 |---|---|
 | **Two renderers, one interface** | Vulkan by default, OpenGL 4.1 at parity; `tests/test_backend_parity` draws the same scene through both and holds them to 0.7% of channels. DirectX 12 and Metal are on the roadmap ([#311](https://github.com/nicolas-maman/ae3d/issues/311), [#312](https://github.com/nicolas-maman/ae3d/issues/312)). |
-| **Physically based shading** | Metallic/roughness materials, four lights, normal mapping, texel-snapped shadow maps, SSAO, screen-space reflections, MSAA, temporal anti-aliasing, DLSS (NVIDIA Streamline on Vulkan), FXAA, bloom, ACES tone mapping, fog, wet surfaces. |
+| **Physically based shading** | Metallic/roughness materials, four lights, normal mapping, texel-snapped shadow maps, SSAO, screen-space reflections, ray-traced shadows (Vulkan ray query), MSAA, temporal anti-aliasing, DLSS (NVIDIA Streamline on Vulkan), FXAA, bloom, ACES tone mapping, fog, wet surfaces. |
 | **A sky by the hour** | `engine_set_time_of_day(hours)` places the sun and derives the key light, fog and a procedural sky from it. Volumetric clouds from baked Perlin-Worley textures, lit through a sun march, shadowing the ground: ~1.5 ms a frame. |
 | **Weather** | Rain, snow, dust and storm over any scene (`ae3d.weather`): a hundred thousand point-instanced particles stepped in C around the camera, wind, the sky and clouds gone overcast, the fog and the sun to match, lightning in a storm. |
 | **Water** | A Gerstner sea with dispersion, fresnel, GGX glitter, whitecaps, depth-based shallows and a foam line, and caustics from underneath. |
@@ -83,6 +83,7 @@ Every program honours a few environment variables:
 | `AE3D_HIDDEN=1` | no window on screen; rendering still happens |
 | `AE3D_PERF=1` | print the frame's cost by stage at exit ([docs/performance.md](docs/performance.md)) |
 | `AE3D_API=opengl` | run through OpenGL instead of Vulkan |
+| `AE3D_RAYS=1` | shadows by ray through the scene's acceleration structure, where the Vulkan device has ray queries ([docs/rendering.md](docs/rendering.md#ray-traced-shadows)) |
 | `AE3D_DLSS=n` | DLSS at mode `n` (1 performance, 2 balanced, 3 quality, 6 DLAA) on Vulkan, with the Streamline runtime beside the program or in `AE3D_STREAMLINE` ([docs/rendering.md](docs/rendering.md#dlss)) |
 | `AE3D_RENDER_SCALE=50` | draw the scene at half the window's size, the composite scaling it up |
 | `AE3D_AGENT=port` | open the control channel on loopback ([docs/agent.md](docs/agent.md)) |

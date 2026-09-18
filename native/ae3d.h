@@ -407,6 +407,17 @@ int    ae3d_vk_dlss_available(void);
 int    ae3d_vk_set_dlss(int mode);
 int    ae3d_vk_dlss(void);
 int    ae3d_vk_dlss_failed(void);
+/* Rays (VK_KHR_ray_query): whether the device traces; the frame's instances
+   for the scene's structure, added before the passes and built once; and
+   the shadows traced through it (docs/rendering.md, "Ray-traced shadows"). */
+int    ae3d_vk_ray_query(void);
+void   ae3d_vk_ray_begin(void);
+void   ae3d_vk_ray_add(int mesh_handle, const float *matrices, int count);
+void   ae3d_vk_ray_add_one(int mesh_handle, const double *matrix);
+int    ae3d_vk_ray_build(void);
+void   ae3d_vk_set_ray_shadows(int on);
+int    ae3d_vk_ray_shadows(void);
+int    ae3d_vk_ray_shadows_now(void);
 void   ae3d_vk_dlss_camera(const double *view, const double *projection,
                            const double *prev_view, const double *prev_projection,
                            double jitter_x, double jitter_y,

@@ -1,0 +1,151 @@
+// Shadows by ray, on Vulkan where the device has VK_KHR_ray_query: a ray
+// from every lit surface toward the sun through the scene's acceleration
+// structure, in the shadow map's place for the static scene. Where the
+// device does not trace the suite says so and skips.
+//
+// A ball over a plane under a sun from straight above: with the map, the
+// ground under the ball is dark and the ground beside it is lit. With the
+// rays it is the same picture -- the shadow where it was, the lit ground
+// as lit -- and its edge is a ray's: a pixel a little way past the ball's
+// silhouette is fully lit, where the map's filtered edge is still part
+// way. Turned off again, the map's picture comes back.
+
+import std.mem
+import ae3d.core
+import ae3d.vk
+import ae3d.loader
+import ae3d.rendering
+
+const WIDTH = 320
+const HEIGHT = 240
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// The frame after two draws (the readback is a frame behind), and its
+// brightness at (x, y).
+frame(backend: *Backend, cam: *Camera, light: *Light) -> ptr {
+    core.backend_render(backend, cam, light)
+    core.backend_render(backend, cam, light)
+    return core.backend_frame_pixels(backend)
+}
+
+level(pixels: ptr, x: int, y: int) -> int {
+    at = (y * WIDTH + x) * 4
+    return mem.get_byte(pixels, at) + mem.get_byte(pixels, at + 1) + mem.get_byte(pixels, at + 2)
+}
+
+// Where the shadow's edge is along a row: the first x from the left where
+// the ground is within a tenth of fully lit, scanning from the shadow's
+// middle outward.
+edge_of(pixels: ptr, y: int, from_x: int, lit: int) -> int {
+    x = from_x
+    while x < WIDTH {
+        if level(pixels, x, y) > lit - lit / 10 { return x }
+        x = x + 1
+    }
+    return WIDTH
+}
+
+main() {
+    if !vk.available() {
+        println("ray_shadows: SKIP no Vulkan driver (${vk.last_error()})")
+        return
+    }
+    renderer = vk.renderer_new()
+    backend = vk.backend(renderer)
+    if !core.backend_init(&backend, null, WIDTH, HEIGHT) {
+        println("ray_shadows: SKIP Vulkan would not start (${vk.last_error()})")
+        vk.renderer_free(renderer)
+        return
+    }
+    if !vk.renderer_ray_query(renderer) {
+        println("ray_shadows: SKIP the device does not trace rays (no VK_KHR_ray_query)")
+        core.backend_cleanup(&backend)
+        vk.renderer_free(renderer)
+        return
+    }
+    core.backend_set_clear_color(&backend, 0.0, 0.0, 0.0)
+
+    ground = loader.plane(24, 16.0)
+    core.model_set_position(ground, 0.0 - 192.0, 0.0, 0.0 - 192.0)
+    core.model_matte(ground, 0.85, 0.85, 0.85)
+    core.backend_add_model(&backend, ground)
+    ball = loader.sphere(1.0, 32, 24)
+    core.model_set_scale(ball, 30.0, 30.0, 30.0)
+    core.model_set_position(ball, 0.0, 60.0, 0.0)
+    core.model_matte(ball, 0.8, 0.3, 0.2)
+    core.backend_add_model(&backend, ball)
+    config = rendering.default_config()
+    config.advanced_shadows = true
+    config.shadow_intensity = 0.25
+    config.shadow_softness = 1.0
+    rendering.apply(ground, config)
+    rendering.apply(ball, config)
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 220.0, 1.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+    light = core.light_sun(core.vec3(0.0, 1.0, 0.0))
+    light.ambient_strength = 0.35
+    core.backend_set_shadows(&backend, true)
+
+    // The map's picture: the ball's shadow under it, from above, is a disc
+    // the ball hides -- so the shadow is read just past the ball's rim, and
+    // the lit ground well beyond it.
+    cx = WIDTH / 2
+    cy = HEIGHT / 2
+    mapped = frame(&backend, cam, light)
+    lit_map = level(mapped, cx + 120, cy)
+    // The ball hides its own shadow from straight above; the sun a little
+    // to the side moves the shadow out from under it.
+    light = core.light_sun(core.vec3(0.6, 1.0, 0.0))
+    light.ambient_strength = 0.35
+    mapped = frame(&backend, cam, light)
+    lit_map = level(mapped, cx + 130, cy)
+    shadow_x = cx - 62
+    shade_map = level(mapped, shadow_x, cy)
+    check("the map shadows the ground beside the ball (${shade_map} against ${lit_map})", shade_map < lit_map - 50 && lit_map > 200)
+    edge_map = edge_of(mapped, cy, shadow_x, lit_map)
+
+    vk.renderer_set_ray_shadows(renderer, true)
+    check("the rays are on", vk.renderer_ray_shadows(renderer))
+    traced = frame(&backend, cam, light)
+    lit_ray = level(traced, cx + 130, cy)
+    shade_ray = level(traced, shadow_x, cy)
+    check("the rays shadow the same ground (${shade_ray} against the map's ${shade_map})", shade_ray < lit_ray - 50 && shade_ray > shade_map - 20 && shade_ray < shade_map + 20)
+    check("and leave the lit ground as lit (${lit_ray} against ${lit_map})", lit_ray > lit_map - 12 && lit_ray < lit_map + 12)
+    edge_ray = edge_of(traced, cy, shadow_x, lit_ray)
+    drift = edge_ray - edge_map
+    if drift < 0 { drift = 0 - drift }
+    check("the shadow's edge is where the map's was, within a texel or two (${edge_map} vs ${edge_ray})", drift <= 4)
+    // A ray's edge: one pixel past it the ground is fully lit; the map's
+    // filtered edge takes more than one.
+    past_ray = level(traced, edge_ray + 2, cy)
+    check("past the edge a ray leaves the ground fully lit (${past_ray})", past_ray > lit_ray - lit_ray / 20)
+
+    vk.renderer_set_ray_shadows(renderer, false)
+    back = frame(&backend, cam, light)
+    check("off again, the map's shadow is back (${level(back, shadow_x, cy)})", level(back, shadow_x, cy) < lit_map - 50)
+
+    core.backend_cleanup(&backend)
+    core.model_free(ground)
+    core.model_free(ball)
+    vk.renderer_free(renderer)
+    core.camera_free(cam)
+    core.light_free(light)
+
+    if failures == 0 {
+        println("ray_shadows: all checks passed")
+    } else {
+        println("ray_shadows: ${failures} failure(s)")
+    }
+}
