@@ -154,7 +154,10 @@ by the near and mid bands, its instance matrix from its yaw and the
 tier's model's scale (the same matrix the CPU path builds), packed with
 its colour and phase into that tier's stream, and counted into the tier's
 draw command -- a workgroup at a time, so half a million figures are two
-thousand atomics and not half a million. The tiers' models
+thousand atomics and not half a million. Every model that draws a tier
+-- a body and its clothes, the fifteen parts of a modular character --
+is a part with an indirect command of its own, its own index count over
+the tier's instances, the sort's count copied into each. The tiers' models
 (`device_crowd_bind`; two can share a tier, a body and its clothes) draw
 by those counts through `vkCmdDrawIndexedIndirect`, the shadow pass too
 over the same streams with the depth proxy's index count, and nothing
@@ -248,11 +251,12 @@ the top-level build then takes the whole room, since the instance count
 cannot come from the device on hardware without indirect builds.
 `tests/test_ray_shadows` stands a device-sorted figure beside the ball
 and checks the ground it shades by ray against the map's shadow of it.
-Measured in the city: at 400 figures nothing changes; at half a million
-the frame goes from 75 to 60 fps with the whole visible horde in the
-rays -- that scene packs a thousand figures a square metre, so a shadow
-ray crosses hundreds of overlapping structures, a density no game scene
-has -- and 20,000 stays at 140.
+Measured in the city (`AE3D_NEAR=3 AE3D_NOPROPS=1 AE3D_SEPN=4`, the
+device sort drawing every part whole): at 400 figures nothing changes;
+at half a million the frame goes from 78 to 63 fps with the whole visible
+horde in the rays -- that scene packs a thousand figures a square metre,
+so a shadow ray crosses hundreds of overlapping structures, a density no
+game scene has -- and 20,000 at a 28 m near band stays at 110.
 
 The sun has a size: `engine_set_sun_size(e, degrees)`, the angle its
 disc subtends (`AE3D_SUN_SIZE=n` in tenths of a degree; the real sun is

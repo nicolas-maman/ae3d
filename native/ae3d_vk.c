@@ -199,6 +199,10 @@ AE3D_VK_RAY_FUNCS(AE3D_VK_DECLARE)
    draws read, and the three draw commands. */
 #define AE3D_VK_MAX_CROWDS 8
 #define AE3D_VK_CROWD_TIERS 3
+/* How many models may draw one tier: a figure's parts -- a body and its
+   clothes, or the fifteen pieces of a modular character -- each with its
+   own index count, over the same sorted instances. */
+#define AE3D_VK_CROWD_PARTS 16
 typedef struct {
     int in_use;
     int capacity;
@@ -214,8 +218,11 @@ typedef struct {
     VkDescriptorSet set[AE3D_VK_FRAMES];
     int sorted;                        /* the sort ran this frame */
     float scale[AE3D_VK_CROWD_TIERS][4];
-    unsigned indices[AE3D_VK_CROWD_TIERS];        /* a tier's mesh's index count */
-    unsigned shadow_indices[AE3D_VK_CROWD_TIERS]; /* its depth proxy's, for the shadow draw */
+    /* Each part's index counts: its lit draw's and its depth proxy's for
+       the shadow draw; and how many parts a tier has. */
+    unsigned indices[AE3D_VK_CROWD_TIERS][AE3D_VK_CROWD_PARTS];
+    unsigned shadow_indices[AE3D_VK_CROWD_TIERS][AE3D_VK_CROWD_PARTS];
+    int parts[AE3D_VK_CROWD_TIERS];
     int poses;                    /* the pose structures its rays use (a handle), 0 for none */
     unsigned ray_base;            /* this frame's first instance slot, when the sort wrote them */
     int ray_written;
@@ -236,7 +243,14 @@ typedef struct {
     VkBuffer addresses;
     VkDeviceMemory address_memory;
 } ae3d_vk_pose_blas;
-#define AE3D_VK_CROWD_DRAWS (AE3D_VK_CROWD_TIERS * 2)
+/* The indirect commands, five unsigneds each: the sort's own three, whose
+   instance counts it writes (offsets the shader knows), three the shadow
+   pass once read, and then a lit and a shadow command per part of every
+   tier, their counts copied from the sort's after it ran. */
+#define AE3D_VK_CROWD_SORT_DRAWS (AE3D_VK_CROWD_TIERS * 2)
+#define AE3D_VK_CROWD_DRAWS (AE3D_VK_CROWD_SORT_DRAWS + AE3D_VK_CROWD_TIERS * AE3D_VK_CROWD_PARTS * 2)
+#define AE3D_VK_CROWD_PART_DRAW(tier, part, shadow) \
+    (AE3D_VK_CROWD_SORT_DRAWS + ((tier) * AE3D_VK_CROWD_PARTS + (part)) * 2 + (shadow))
 
 typedef struct {
     VkBuffer vertex_buffer;
@@ -4354,27 +4368,35 @@ int ae3d_vk_crowd_count(int handle, int tier) {
     return (int)c->draws_mapped[tier * 5 + 1];
 }
 
+/* After the renderer has shut down there is no device and the record is
+   already gone with it: a program freeing its crowd after its engine (the
+   natural order, the engine drew from it) must find nothing to do, not a
+   wait on a null device. */
 void ae3d_vk_crowd_destroy(int handle) {
     if (handle <= 0 || handle > AE3D_VK_MAX_CROWDS) return;
+    if (!vk.device) { memset(&vk.crowds[handle - 1], 0, sizeof(vk.crowds[handle - 1])); return; }
     ae3d_vkDeviceWaitIdle(vk.device);
     ae3d_vk_crowd_free(&vk.crowds[handle - 1]);
 }
 
-/* A tier's model: its scale, which the sort bakes into the matrices it
-   writes, and the index counts its lit draw and its shadow draw (the depth
-   proxy's mesh) take. */
-void ae3d_vk_crowd_set_tier(int handle, int tier, double sx, double sy, double sz,
+/* One part of a tier's figure: the tier's scale, which the sort bakes into
+   the matrices it writes (a figure's parts share it), and the index counts
+   the part's lit draw and its shadow draw (the depth proxy's mesh) take.
+   A part past the room is dropped: it is drawn with nothing. */
+void ae3d_vk_crowd_set_tier(int handle, int tier, int part, double sx, double sy, double sz,
                             int indices, int shadow_indices) {
     ae3d_vk_crowd *c;
     if (handle <= 0 || handle > AE3D_VK_MAX_CROWDS || tier < 0 || tier >= AE3D_VK_CROWD_TIERS) return;
+    if (part < 0 || part >= AE3D_VK_CROWD_PARTS) return;
     c = &vk.crowds[handle - 1];
     if (!c->in_use) return;
     c->scale[tier][0] = (float)sx;
     c->scale[tier][1] = (float)sy;
     c->scale[tier][2] = (float)sz;
     c->scale[tier][3] = 0.0f;
-    c->indices[tier] = indices > 0 ? (unsigned)indices : 0u;
-    c->shadow_indices[tier] = shadow_indices > 0 ? (unsigned)shadow_indices : c->indices[tier];
+    c->indices[tier][part] = indices > 0 ? (unsigned)indices : 0u;
+    c->shadow_indices[tier][part] = shadow_indices > 0 ? (unsigned)shadow_indices : c->indices[tier][part];
+    if (part + 1 > c->parts[tier]) c->parts[tier] = part + 1;
 }
 
 typedef struct {
@@ -4432,8 +4454,9 @@ int ae3d_vk_crowd_sort(int handle, double cx, double cz, double near_dist, doubl
                        double cull_dist) {
     ae3d_vk_crowd *c;
     VkBufferMemoryBarrier before, after[2];
-    VkBufferCopy counts[AE3D_VK_CROWD_TIERS];
+    VkBufferCopy counts[AE3D_VK_CROWD_TIERS * (1 + AE3D_VK_CROWD_PARTS * 2)];
     unsigned commands[AE3D_VK_CROWD_DRAWS * 5];
+    int copies, p;
     struct { unsigned count, three; float cx, cz, near2, mid2, cull2, ray2; float scale[AE3D_VK_CROWD_TIERS][4];
              unsigned ray_base, ray_frames; } params;
     VkCommandBuffer command;
@@ -4459,8 +4482,14 @@ int ae3d_vk_crowd_sort(int handle, double cx, double cz, double near_dist, doubl
 
     memset(commands, 0, sizeof(commands));
     for (t = 0; t < AE3D_VK_CROWD_TIERS; t++) {
-        commands[t * 5] = c->indices[t];
-        commands[(AE3D_VK_CROWD_TIERS + t) * 5] = c->shadow_indices[t];
+        /* The sort's own commands carry the first part's counts, so a
+           crowd of one part a tier reads as it always did. */
+        commands[t * 5] = c->indices[t][0];
+        commands[(AE3D_VK_CROWD_TIERS + t) * 5] = c->shadow_indices[t][0];
+        for (p = 0; p < c->parts[t]; p++) {
+            commands[AE3D_VK_CROWD_PART_DRAW(t, p, 0) * 5] = c->indices[t][p];
+            commands[AE3D_VK_CROWD_PART_DRAW(t, p, 1) * 5] = c->shadow_indices[t][p];
+        }
     }
     ae3d_vkCmdUpdateBuffer(command, c->draws, 0, sizeof(commands), commands);
     memset(&before, 0, sizeof(before));
@@ -4538,12 +4567,26 @@ int ae3d_vk_crowd_sort(int handle, double cx, double cz, double near_dist, doubl
     after[0].size = VK_WHOLE_SIZE;
     ae3d_vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                               0, 0, NULL, 1, after, 0, NULL);
+    /* The sort's count of each tier into the shadow command and into
+       every part's lit and shadow command. */
+    copies = 0;
     for (t = 0; t < AE3D_VK_CROWD_TIERS; t++) {
-        counts[t].srcOffset = ((VkDeviceSize)t * 5 + 1) * sizeof(unsigned);
-        counts[t].dstOffset = ((VkDeviceSize)(AE3D_VK_CROWD_TIERS + t) * 5 + 1) * sizeof(unsigned);
-        counts[t].size = sizeof(unsigned);
+        counts[copies].srcOffset = ((VkDeviceSize)t * 5 + 1) * sizeof(unsigned);
+        counts[copies].dstOffset = ((VkDeviceSize)(AE3D_VK_CROWD_TIERS + t) * 5 + 1) * sizeof(unsigned);
+        counts[copies].size = sizeof(unsigned);
+        copies++;
+        for (p = 0; p < c->parts[t]; p++) {
+            counts[copies].srcOffset = ((VkDeviceSize)t * 5 + 1) * sizeof(unsigned);
+            counts[copies].dstOffset = ((VkDeviceSize)AE3D_VK_CROWD_PART_DRAW(t, p, 0) * 5 + 1) * sizeof(unsigned);
+            counts[copies].size = sizeof(unsigned);
+            copies++;
+            counts[copies].srcOffset = ((VkDeviceSize)t * 5 + 1) * sizeof(unsigned);
+            counts[copies].dstOffset = ((VkDeviceSize)AE3D_VK_CROWD_PART_DRAW(t, p, 1) * 5 + 1) * sizeof(unsigned);
+            counts[copies].size = sizeof(unsigned);
+            copies++;
+        }
     }
-    ae3d_vkCmdCopyBuffer(command, c->draws, c->draws, AE3D_VK_CROWD_TIERS, counts);
+    ae3d_vkCmdCopyBuffer(command, c->draws, c->draws, (uint32_t)copies, counts);
     memset(&after[0], 0, sizeof(after[0]));
     after[0].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
     after[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
@@ -4722,23 +4765,25 @@ void ae3d_vk_crowd_set_poses(int handle, int poses) {
 /* A draw of `mesh_handle` with tier `tier` of crowd `handle` as its
    instances, as many as the sort counted, through the current pipeline
    family: the lit draw. */
-void ae3d_vk_draw_crowd_tier(int mesh_handle, int texture_handle, int handle, int tier) {
+void ae3d_vk_draw_crowd_tier(int mesh_handle, int texture_handle, int handle, int tier, int part) {
     ae3d_vk_crowd *c;
     if (handle <= 0 || handle > AE3D_VK_MAX_CROWDS || tier < 0 || tier >= AE3D_VK_CROWD_TIERS) return;
+    if (part < 0 || part >= AE3D_VK_CROWD_PARTS) return;
     c = &vk.crowds[handle - 1];
     if (!c->in_use || !c->sorted) return;
     ae3d_vk_draw_pipeline_indirect(mesh_handle, texture_handle, c->tier[tier], c->draws,
-                                   (VkDeviceSize)tier * 5 * sizeof(unsigned), 0);
+                                   (VkDeviceSize)AE3D_VK_CROWD_PART_DRAW(tier, part, 0) * 5 * sizeof(unsigned), 0);
 }
 
-void ae3d_vk_shadow_draw_crowd_tier(int mesh_handle, int handle, int tier) {
+void ae3d_vk_shadow_draw_crowd_tier(int mesh_handle, int handle, int tier, int part) {
     ae3d_vk_crowd *c;
     if (handle <= 0 || handle > AE3D_VK_MAX_CROWDS || tier < 0 || tier >= AE3D_VK_CROWD_TIERS) return;
+    if (part < 0 || part >= AE3D_VK_CROWD_PARTS) return;
     c = &vk.crowds[handle - 1];
     if (!c->in_use || !c->sorted) return;
     if (!vk.shadow_pipeline || !vk.in_shadow_pass) return;
     ae3d_vk_draw_pipeline_indirect(mesh_handle, vk.default_texture, c->tier[tier], c->draws,
-                                   (VkDeviceSize)(AE3D_VK_CROWD_TIERS + tier) * 5 * sizeof(unsigned), 1);
+                                   (VkDeviceSize)AE3D_VK_CROWD_PART_DRAW(tier, part, 1) * 5 * sizeof(unsigned), 1);
 }
 
 /* ---- Rays: the scene's acceleration structures ------------------------

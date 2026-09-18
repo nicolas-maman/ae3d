@@ -8,6 +8,14 @@
 //     ./build/bake_impostor                                   # the street's Zombie_Body
 //     ./build/bake_impostor resources/blender/zombie_street/manifest.json Zombie_Body_B
 //     ./build/bake_impostor <manifest> <figure> <out.png>   # and <out>_normal.png
+//     ./build/bake_impostor --gltf figure.glb [Walk] [out.png] [facing]   # a glTF figure
+//
+// A glTF figure is baked the same way from its file alone: the named
+// animation into the bank (gltf.bake_bank), every skinned primitive posed
+// by it, the figure turned by `facing` degrees first (90, the default,
+// for glTF's +Z front) so column 0 is its front the way examples/gltf_crowd
+// turns its instances. The atlas lands beside the file as
+// <stem>_impostor.png unless an output is named.
 //
 // The figure is posed exactly the way the crowd poses it: its gait baked in
 // place into a pose bank (ae3d.crowd), one instance of it at the origin at
@@ -42,6 +50,7 @@ import ae3d.assets
 import ae3d.anim
 import ae3d.skin
 import ae3d.crowd
+import ae3d.gltf
 
 extern ae3d_capture_frame(width: int, height: int) -> int
 extern ae3d_capture_copy_keyed(atlas: ptr, atlas_width: int, atlas_height: int, dst_x: int, dst_y: int,
@@ -69,6 +78,10 @@ const KEY_B = 255
 var g_manifest = "resources/blender/zombie_street/manifest.json"
 var g_figure = "Zombie_Body"
 var g_out = ""
+var g_gltf = ""
+var g_animation = "Walk"
+var g_facing = 90.0
+var g_scene: ptr = null
 var g_atlas = null
 var g_normals = null
 var g_cell = 0
@@ -83,6 +96,7 @@ var g_ok = false
 // which cells and how badly.
 var g_kept: ptr = null
 var g_skipped = 0
+var g_warmed = false
 
 entry_named(m: *Manifest, name: string) -> *Entry {
     i = 0
@@ -201,7 +215,95 @@ directory_of(path: string) -> string {
     return string.substring(path, 0, cut + 1)
 }
 
+// The figure's height from its skin's joints at rest: a skinned
+// primitive's vertices are in the file's own space, and its joints are
+// what place it.
+figure_height(scene: *GltfScene) -> float {
+    skel = gltf.skeleton(scene, 0)
+    lo = 1000000000.0
+    hi = 0.0 - 1000000000.0
+    b = 0
+    while b < skin.skeleton_count(skel) {
+        bone = skin.skeleton_bone(skel, b)
+        core.model_sync_transform(bone)
+        y = bone.world_position.y
+        if y < lo { lo = y }
+        if y > hi { hi = y }
+        b = b + 1
+    }
+    if hi <= lo { return 0.0 }
+    return hi - lo
+}
+
+// A glTF figure: its animation into the bank, its skinned primitives as the
+// models, turned to face +X.
+start_gltf(e: *Engine) -> bool {
+    scene = gltf.load(g_gltf)
+    if scene == null {
+        println("bake_impostor: ${gltf.last_error()}")
+        return false
+    }
+    g_scene = scene as ptr
+    g_bank = gltf.bake_bank(scene, g_animation, FRAMES)
+    if g_bank == null {
+        println("bake_impostor: ${gltf.last_error()}")
+        return false
+    }
+    // The head is a joint's height with the mesh's crown over it: a
+    // margin over the joints, and the bake's own margin over that.
+    g_metres = figure_height(scene) * 1.12 * MARGIN
+    g_models = list.new()
+    turn = core.quat_rotate(core.deg_to_rad(g_facing), core.vec3(0.0, 1.0, 0.0))
+    i = 0
+    while i < gltf.primitive_count(scene) {
+        model = gltf.primitive(scene, i)
+        if model.skeleton != null {
+            core.model_set_parent(model, null)
+            core.model_set_position(model, 0.0, 0.0, 0.0)
+            core.model_set_scale(model, 1.0, 1.0, 1.0)
+            core.model_set_rotation(model, turn)
+            core.model_update_matrix(model)
+            list.add_raw(g_models, model as ptr)
+        }
+        i = i + 1
+    }
+    if list.size(g_models) == 0 {
+        println("bake_impostor: ${g_gltf} has no skinned mesh")
+        return false
+    }
+    return true
+}
+
 on_start(state: ptr, e: *Engine) {
+    if g_gltf != "" {
+        if !start_gltf(e) {
+            engine.engine_stop(e)
+            return
+        }
+        if g_metres < 0.5 { g_metres = 2.0 }
+        i = 0
+        while i < list.size(g_models) {
+            model = list.get_raw(g_models, i) as *Model
+            as_crowd_of_one(model)
+            engine.engine_add_model(e, model)
+            i = i + 1
+        }
+        println("bake_impostor: ${g_gltf} '${g_animation}': ${list.size(g_models)} models, a cell ${g_metres}m, ${COLS}x${ROWS} cells of ${CELL}px, facing ${g_facing}")
+        light = core.light_directional(core.vec3(0.3, 0.9, 0.5), core.vec3(1.0, 1.0, 1.0), 1.0)
+        engine.engine_set_light(e, light)
+        engine.engine_set_shadows(e, false)
+        engine.engine_set_clear_color(e, 1.0, 0.0, 1.0)
+        engine.engine_set_capture_channel(e, 1)
+        core.camera_set_fov(engine.engine_camera(e), FOV)
+        g_atlas = calloc(COLS * CELL * ROWS * CELL, 4)
+        g_normals = calloc(COLS * CELL * ROWS * CELL, 4)
+        g_kept = calloc(COLS * ROWS * 2, 8)
+        g_cell = 0
+        g_channel = 1
+        prepare_cell(e, 0)
+        g_ok = true
+        return
+    }
     m = assets.manifest_load(g_manifest)
     if m == null {
         println("bake_impostor: ${assets.last_error()}")
@@ -321,8 +423,11 @@ on_late(state: ptr, e: *Engine, delta: float) {
         return
     }
     // The first frame the engine draws is before the camera above has taken
-    // hold everywhere; what it drew is discarded and the cell drawn again.
-    if delta <= 0.0 { g_skipped = g_skipped + 1 ; return }
+    // hold everywhere, and before a texture the file embeds has reached the
+    // device -- a glTF figure's first cell came out black, its albedo
+    // drawn before its image was uploaded; what it drew is discarded and
+    // the cell drawn again.
+    if delta <= 0.0 || !g_warmed { g_warmed = true ; g_skipped = g_skipped + 1 ; return }
     // The whole frame, whatever size the window system gave the window; the
     // copy takes its centre square into the cell.
     if ae3d_capture_frame(e.width, e.height) != 1 {
@@ -350,10 +455,28 @@ on_late(state: ptr, e: *Engine, delta: float) {
 }
 
 main() {
-    if os.aether_args_count() > 1 { g_manifest = os.aether_args_get(1) }
-    if os.aether_args_count() > 2 { g_figure = os.aether_args_get(2) }
-    if os.aether_args_count() > 3 { g_out = os.aether_args_get(3) }
-    if g_out == "" { g_out = "${directory_of(g_manifest)}impostor_${g_figure}.png" }
+    if os.aether_args_count() > 1 && os.aether_args_get(1) == "--gltf" {
+        if os.aether_args_count() > 2 { g_gltf = os.aether_args_get(2) }
+        if os.aether_args_count() > 3 { g_animation = os.aether_args_get(3) }
+        if os.aether_args_count() > 4 { g_out = os.aether_args_get(4) }
+        if os.aether_args_count() > 5 { g_facing = string.string_get_float(os.aether_args_get(5)) }
+        if g_gltf == "" {
+            println("bake_impostor: --gltf needs a file")
+            return
+        }
+        g_figure = g_gltf
+        if g_out == "" {
+            stem = g_gltf
+            length = string.length(g_gltf)
+            if length > 4 { stem = string.substring(g_gltf, 0, length - 4) }
+            g_out = "${stem}_impostor.png"
+        }
+    } else {
+        if os.aether_args_count() > 1 { g_manifest = os.aether_args_get(1) }
+        if os.aether_args_count() > 2 { g_figure = os.aether_args_get(2) }
+        if os.aether_args_count() > 3 { g_out = os.aether_args_get(3) }
+        if g_out == "" { g_out = "${directory_of(g_manifest)}impostor_${g_figure}.png" }
+    }
     // OpenGL, for the frame readback the bake is made of.
     e = engine.engine_new_with(platform.API_GL)
     // A cell's size; AE3D_BAKE_WINDOW=512 draws through a larger window
@@ -380,5 +503,6 @@ main() {
     if g_normals != null { free(g_normals) }
     if g_kept != null { free(g_kept) }
     if g_bank != null { crowd.posebank_free(g_bank) }
+    if g_scene != null { gltf.scene_destroy(g_scene as *GltfScene) }
     assets.provenance_release()
 }

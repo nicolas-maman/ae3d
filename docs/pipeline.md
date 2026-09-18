@@ -161,11 +161,16 @@ primitive stands at the origin with no transform of its own -- the bank's
 palette carries the rig's placement and scale, the instance stream the
 crowd's -- and the file's facing (+Z for glTF, +X for the pipeline) is
 added to the crowd's headings when they are uploaded.
-`examples/gltf_crowd.ae` walks a few hundred of any figure over a field
-(`AE3D_CROWD`, `AE3D_ANIM`, `AE3D_FACING`); `tests/test_gltf_crowd` bakes
-the Fox's walk and draws thirty of it as one instanced draw. What the
-zombie has that a file's figure does not yet: the far tier's decimated
-mesh and the impostor, which the pipeline bakes in Blender (#342).
+`examples/gltf_crowd.ae` walks any figure over a field in the zombie's
+three tiers (`AE3D_CROWD`, `AE3D_ANIM`, `AE3D_FACING`, `AE3D_NEAR`,
+`AE3D_IMPOSTOR`): the file's meshes near, the same decimated by
+`mesh_decimate` past the near band, and past the impostor band the
+picture `tools/bake_impostor --gltf figure.glb Walk` writes beside the
+file from the file alone, the figure turned to face +X so the atlas's
+first column is its front the way the crowd turns it. A hundred thousand
+of a fifteen-part Quaternius figure run at 130 fps hidden, sorted on the
+device, every part with its own indirect command. `tests/test_gltf_crowd`
+bakes the Fox's walk and draws thirty of it as one instanced draw.
 
 ## Driving it from a program
 

@@ -357,6 +357,11 @@ struct DeviceCrowd {
     mid_dist: float
     cull_dist: float
     sorted_serial: int      // the renderer's frame the sort last ran in
+    // How many models draw each tier: a figure's parts, each with its
+    // own mesh over the same sorted instances.
+    parts_near: int
+    parts_mid: int
+    parts_far: int
     // The crowd in the rays: its pose structures (a backend handle, 0 for
     // none), and the frame its figures were last counted for.
     poses: int
@@ -448,6 +453,9 @@ struct Model {
     // *DeviceCrowd, null for none) and which tier: 0 near, 1 mid, 2 far.
     device_crowd: ptr
     device_tier: int
+    // Which part of the tier's figure this model is: its own draw command,
+    // with its own index count, over the tier's instances.
+    device_part: int
     // For the motion vectors: the matrix the model was drawn with this
     // frame (what the renderer sent as `model`), and last frame's, which
     // the renderer takes at the frame's end (model_frame_done). A model
@@ -2589,6 +2597,11 @@ model_set_crowd_walk(m: *Model, seconds: float) {
 model_set_device_crowd(m: *Model, crowd: *DeviceCrowd, tier: int) {
     m.device_crowd = crowd as ptr
     m.device_tier = tier
+    m.device_part = 0
+    if crowd == null { return }
+    if tier == 0 { m.device_part = crowd.parts_near ; crowd.parts_near = crowd.parts_near + 1 }
+    if tier == 1 { m.device_part = crowd.parts_mid ; crowd.parts_mid = crowd.parts_mid + 1 }
+    if tier == 2 { m.device_part = crowd.parts_far ; crowd.parts_far = crowd.parts_far + 1 }
 }
 
 // Draw this crowd model's instances as impostors: upright quads `width`
