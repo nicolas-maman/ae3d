@@ -19,7 +19,11 @@ On Vulkan the frame is split by eight timestamps -- the start, and the end
 of the shadow pass, the camera-depth prepass, the sky, the opaque draws,
 the occlusion, the transparent draws and the post chain -- so the second
 line says which stage a frame's cost is in. The same split is in the
-editor's stats bar and in the agent channel's `frame.stats`.
+editor's stats bar and in the agent channel's `frame.stats`. `update_ms`
+is the behaviours' own time -- the fixed updates, the updates, the clips
+advancing: the simulation -- which is where a frame goes once the device
+is done with it: half a million zombies are 8 ms of device and 25 of
+simulation.
 
 `scripts/perf.sh [scene ...]` runs each scene hidden on Vulkan for
 `AE3D_PERF_FRAMES` frames (240) `AE3D_PERF_RUNS` times (3) and keeps the
@@ -61,12 +65,46 @@ and its crowd into the shadow map. Those two are where the frame is now.
 The crowd's depth-only passes were its cost. At `AE3D_CROWD=2000` the
 shadow pass and the camera-depth prepass were 10 ms each and the opaque
 draws 13, because the near tier's 26,636-triangle figure went through all
-three; a shadow and an occluder read a figure's silhouette, not its face,
-so the near tier now casts and writes depth from the far tier's
-168-triangle stand-in (`model_set_depth_proxy`): 2,000 figures 30 to 68
-fps, 20,000 at `AE3D_NEAR=28` 54 to 91, and the 400 of the default scene
-lose their 2.2 ms shadow pass. On OpenGL the proxy is not yet taken (a VAO
-binds a mesh to its instance stream) and the full mesh is drawn as before.
+three; a shadow reads a figure's silhouette, not its face, so the near
+tier now casts from the far tier's 168-triangle stand-in
+(`model_set_depth_proxy`): 2,000 figures 30 to 68 fps, 20,000 at
+`AE3D_NEAR=28` 54 to 91, and the 400 of the default scene lose their 2.2
+ms shadow pass. On OpenGL, where a vertex array binds a mesh to its
+instance stream, the model keeps a second array over the proxy's mesh and
+its own stream, made the first time the shadow pass needs it.
+
+The camera-depth prepass itself is gone on Vulkan. It drew every visible
+triangle a second time so the occlusion, the reflection and the water had
+a depth to read, and it could only be given the proxy -- whose silhouette,
+a few pixels out from the mesh's, put the figure behind into the occlusion
+of the figure in front. The depth those read is the frame's own now,
+resolved after the opaque draws (the nearest of the samples a pixel, in a
+full-screen pass between the two halves the scene pass is drawn in), the
+way OpenGL has blitted its depth all along: 20,000 at `AE3D_NEAR=28` 100
+to 120 fps, 1,193 draws to 419, the `camdepth` stage 4.8 ms to nothing. A
+change to the engine that adds a depth-only draw is a change the stage
+table shows.
+
+Past the far tier the horde is pictures. `model_set_impostor` draws a
+crowd model's instances as upright quads showing, from an atlas
+`tools/bake_impostor` made of the figure, the cell for the angle the
+camera sees the figure from and the frame of its walk -- two triangles a
+figure, lit by the scene's lights through the figure's baked albedo and
+normals, so the mesh and the picture beside it match under the same lamp.
+`zombie_city` swaps at `AE3D_IMPOSTOR` metres (80). With the near band
+small (`AE3D_NEAR=3`, props off, separation every fourth frame), so the
+figures are the cost and not the road's density:
+
+| crowd | pictures | fps | scene ms | shadow ms |
+|---|---|---|---|---|
+| 100,000 | off | 95 | 6.2 | 3.9 |
+| 100,000 | past 80 m | 138 | 2.1 | 0.6 |
+| 500,000 | off | 21 | 28.8 | 19.1 |
+| 500,000 | past 80 m | 35 | 8.0 | 2.7 |
+
+At half a million the frame is 29 ms of which the device draws 11: the
+rest is the simulation stepping half a million figures on one thread,
+which is where the horde's cost is now.
 
 The table found a stall as well: `lights` spent 6.9 ms of CPU a frame, at
 nine draws, because a batched model that moves had its instance buffer

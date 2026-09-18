@@ -140,39 +140,18 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float impostorWidth;
     float impostorHeight;
 };
-layout(set = 0, binding = 1) uniform sampler2D screenTexture;
+layout(set = 0, binding = 1) uniform sampler2DMS depthSamples;
 
 layout(location = 0) in vec2 TexCoords;
-layout(location = 0) out vec4 FragColor;
-
-
 
 
 
 
 void main() {
-    vec3 color = texture(screenTexture, TexCoords).rgb;
-    
-    // Calculate luminance
-    float luma = dot(color, vec3(0.299, 0.587, 0.114));
-    
-    // Extract bright parts only
-    vec3 brightColor = vec3(0.0);
-    if (luma > bloomThreshold) {
-        brightColor = color * (luma - bloomThreshold) / (1.0 - bloomThreshold + 0.001);
+    ivec2 pixel = ivec2(gl_FragCoord.xy);
+    float nearest = 1.0;
+    for (int s = 0; s < depthSampleCount; s++) {
+        nearest = min(nearest, texelFetch(depthSamples, pixel, s).r);
     }
-    
-    // Simple 4-tap box blur on bright areas only (very fast)
-    vec3 blur = brightColor;
-    float offset = 2.0;
-    blur += texture(screenTexture, TexCoords + vec2(texelSize.x * offset, 0.0)).rgb;
-    blur += texture(screenTexture, TexCoords - vec2(texelSize.x * offset, 0.0)).rgb;
-    blur += texture(screenTexture, TexCoords + vec2(0.0, texelSize.y * offset)).rgb;
-    blur += texture(screenTexture, TexCoords - vec2(0.0, texelSize.y * offset)).rgb;
-    blur *= 0.2; // Average of 5 samples
-    
-    // Combine: original + bloom glow
-    vec3 finalColor = color + blur * bloomIntensity;
-    
-    FragColor = vec4(finalColor, 1.0);
+    gl_FragDepth = nearest;
 }

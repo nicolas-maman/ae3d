@@ -25,6 +25,8 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     bool isSkinned;
     mat4 bones[96];
     int lightCount;
+    bool impostor;
+    int captureChannel;
     vec3 viewPos;
     float viewDistance;
     vec3 diffuseColor;
@@ -100,6 +102,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     vec2 screenSize;
     float ssaoRadius;
     float ssaoIntensity;
+    int depthSampleCount;
     float time;
     float waveSpeedMultiplier;
     float waveHeightMultiplier;
@@ -133,6 +136,10 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     bool enableWaterNormalMapping;
     float waterNormalIntensity;
     int poseBankFrames;
+    int impostorCols;
+    int impostorRows;
+    float impostorWidth;
+    float impostorHeight;
 };
 layout(set = 0, binding = 1) uniform sampler2D textureSampler;
 layout(set = 0, binding = 2) uniform sampler2D shadowMap;
@@ -153,6 +160,16 @@ layout(location = 5) in float Occlusion;
 
 
 
+
+// The crowd's far tier as pictures (see VERTEX_CROWD): a picture is cut out
+// by its alpha, and its colour is the figure's albedo and its normal map
+// the figure's own normals, so it is lit below by the scene's lights the
+// way the mesh beside it is.
+
+// What a bake reads back instead of the lit picture: 1 the albedo -- the
+// texture, the material and the tint, the surface's own colour before any
+// light -- 2 the normal, world space, packed 0..1. Zero is the picture.
+// tools/bake_impostor.ae draws its atlases through these.
 
 
 // How far this camera can see. Everything that fades a feature out with distance
@@ -948,11 +965,28 @@ void main() {
         FragColor = vec4(pow(emissive, vec3(1.0 / 2.2)), 1.0);
         return;
     }
-    
+
     // Pre-calculate expensive operations once
     vec3 norm = normalize(Normal);
-    if (hasNormalMap) {
+    if (impostor) {
+        // The picture: cut out by its alpha, its normal read from its own
+        // atlas in the figure's frame (x its facing, y up, z to its right)
+        // and turned into the world by the facing the vertex carried, and
+        // lit from there as any surface is.
+        if (texColor.a < 0.5) discard;
+        vec3 facing = normalize(Normal);
+        vec3 baked = texture(normalMap, fragTexCoord).xyz * 2.0 - 1.0;
+        norm = normalize(baked.x * facing + vec3(0.0, baked.y, 0.0) + baked.z * vec3(-facing.z, 0.0, facing.x));
+    } else if (hasNormalMap) {
         norm = mapped_normal(norm, FragPos, fragTexCoord);
+    }
+    if (captureChannel == 1) {
+        FragColor = vec4(diffuseColor * texColor.rgb * InstanceColor, texColor.a);
+        return;
+    }
+    if (captureChannel == 2) {
+        FragColor = vec4(norm * 0.5 + 0.5, 1.0);
+        return;
     }
     vec3 viewDir = normalize(viewPos - FragPos);
 

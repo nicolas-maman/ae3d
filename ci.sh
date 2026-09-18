@@ -434,7 +434,7 @@ done
 step "examples build and run"
 # The benchmark is built in the same pass: build_together starts from a clean
 # status directory, so a later call would forget that the examples built.
-build_together examples/*.ae tools/ae3d_bench.ae tools/measure_scene.ae tools/ae3d_agent.ae tools/zombie_street.ae
+build_together examples/*.ae tools/ae3d_bench.ae tools/measure_scene.ae tools/ae3d_agent.ae tools/zombie_street.ae tools/bake_impostor.ae
 for example in examples/*.ae; do
     name="$(basename "$example" .ae)"
     if ! built_ok "$name"; then
@@ -524,6 +524,35 @@ elif ! built_ok zombie_street; then
 else
     run_measure opengl 7913
     run_measure vulkan 7914
+fi
+
+step "the impostor atlas rebakes"
+# The crowd's far tier draws from atlases baked out of the figure by
+# tools/bake_impostor: the figure seen from eight angles by eight frames of
+# its walk, its albedo and its normals. The atlases are committed beside the
+# export; this bakes them again to a scratch path and holds the bake to what
+# it has to produce -- every cell with a figure in it -- so the tool and the
+# capture channel it reads through stay working on every runner with a
+# display.
+if ! built_ok bake_impostor; then
+    fail "bake_impostor (build)"
+    sed 's/^/        /' "$BUILD_DIR/bake_impostor.log" | head -20
+elif ! have_display; then
+    skip "bake_impostor" "no display"
+else
+    bake_out="$(mktemp -d)"
+    bounded "$RUN_LIMIT" ./build/bake_impostor resources/blender/zombie_street/manifest.json Zombie_Body "$bake_out/impostor.png" >/tmp/ae3d_bake.log 2>&1
+    bake_status=$?
+    if grep -q "no window" /tmp/ae3d_bake.log; then
+        skip "bake_impostor" "the bake could not open a window"
+    elif [ "$bake_status" -eq 0 ] && grep -q ", 0 empty cells" /tmp/ae3d_bake.log        && [ -s "$bake_out/impostor.png" ] && [ -s "$bake_out/impostor_normal.png" ] && [ -s "$bake_out/impostor.json" ]; then
+        pass "bake_impostor"
+        grep "bake_impostor: wrote" /tmp/ae3d_bake.log | sed 's/^/      /'
+    else
+        fail "bake_impostor"
+        sed 's/^/        /' /tmp/ae3d_bake.log | tail -30
+    fi
+    rm -rf "$bake_out"
 fi
 
 step "the demo scene, held to what a scene has to look like"

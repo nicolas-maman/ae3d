@@ -60,6 +60,16 @@ What makes the pipeline usable by a program rather than a person:
   faces sharing a plane, which is what z-fighting is; `ci.sh` runs it on every
   exported scene.
 
+- **The crowd's pictures are baked by the engine.** `./build/bake_impostor
+  <manifest> <figure>` draws the figure the way the crowd draws it -- its
+  gait baked in place, one instance at the origin -- from eight angles by
+  eight frames of its walk, and writes `impostor_<figure>.png` (its
+  albedo), `impostor_<figure>_normal.png` (its normals) and a `.json` with
+  the grid and the metres a cell spans, beside the export. `zombie_city`
+  draws every zombie past `AE3D_IMPOSTOR` metres from them; `ci.sh` rebakes
+  one on every build and holds it to every cell filled. A change to the
+  figure or its walk in Blender is a re-export and a rebake, both scripts.
+
 ### Holding the scene to a standard
 
 Two programs run on every build. `tools/measure_scene.ae` asks the engine

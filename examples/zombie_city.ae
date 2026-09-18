@@ -9,6 +9,8 @@
 import std.heap
 import std.list
 import std.string
+import std.fs
+import std.json
 import ae3d.core
 import ae3d.platform
 import ae3d.engine
@@ -75,6 +77,14 @@ const LOD_FAR = 0.5
 // camera zooms, dozens cross the line at once -- it read as the crowd
 // teleporting. AE3D_NEAR pulls the band in when the count needs the far tier.
 const NEAR_DIST = 600.0
+// The third band: past IMPOSTOR_DIST a zombie is a picture -- an upright
+// quad showing the cell of a baked atlas (tools/bake_impostor.ae) for the
+// angle it is seen from and the frame of its walk -- two triangles instead
+// of a hundred and sixty-eight. At eighty metres a figure is twenty pixels
+// tall and half fogged, and the far mesh and the picture read the same;
+// what changes is that a horde of half a million is drawn. AE3D_IMPOSTOR
+// (metres) moves the band; 0 turns it off.
+const IMPOSTOR_DIST = 80.0
 // No distance cull at the inspectable count. A cull sphere is a hard edge that
 // travels with the camera: zombies were popping into and out of existence
 // wherever it swept, and with a free camera that is everywhere -- it read as
@@ -96,6 +106,8 @@ struct Figure {
     near_clothes: *Model
     far_body: *Model        // cheap body only, for the ones far off
     far_exported: bool      // ...the build's own LOD, or decimated here
+    impostor: *Model        // a picture of the figure, for the ones furthest off
+    impostor_metres: float  // the width and height the picture is drawn at
     bank: ptr
     walk: float             // the gait cycle's length, seconds
     start: int              // its run of the crowd: [start, start + count)
@@ -122,8 +134,20 @@ var g_fb_pos: *Column = null
 var g_fb_yaw: *Column = null
 var g_fb_phase: *Column = null
 var g_fb_col: *Column = null
+// The far band split again at the impostor distance: the mesh tier and the
+// picture tier, each its own compacted run.
+var g_mb_pos: *Column = null
+var g_mb_yaw: *Column = null
+var g_mb_phase: *Column = null
+var g_mb_col: *Column = null
+var g_ib_pos: *Column = null
+var g_ib_yaw: *Column = null
+var g_ib_phase: *Column = null
+var g_ib_col: *Column = null
+var g_impcount: *Column = null
 var g_count = CROWD_DEFAULT
 var g_near_dist = NEAR_DIST   // AE3D_NEAR overrides, a knob for the LOD sweep
+var g_impostor_dist = IMPOSTOR_DIST   // AE3D_IMPOSTOR overrides; 0 is off
 var g_cull_dist = CULL_DIST   // AE3D_CULL overrides; 0 keeps the whole crowd
 var g_farcount: *Column = null   // one slot the native bucket writes the far count into
 // Separation is the crowd's heaviest pass, so it runs every SEP_INTERVAL
@@ -247,6 +271,56 @@ setup_crowd(model: *Model, cell: float, bank: ptr) -> int {
     core.model_enable_instance_phases(model)
     core.model_enable_instance_colors(model)
     return core.mesh_index_count(core.model_mesh(model)) / 3
+}
+
+// The figure's impostor: a crowd model whose mesh is one upright quad, x
+// -0.5..0.5 by y 0..1, with a skin so it takes the crowd's stream, its
+// texture and normal map the atlases tools/bake_impostor.ae wrote beside
+// the export -- the figure's albedo and its normals, so the scene's lights
+// light the picture as they light the mesh -- and the atlas's own note of
+// its grid and its metres. The shader turns the quad to the eye and picks
+// the cell. Null when the export has no atlas.
+impostor_for(m: *Manifest, figure: string, fig: *Figure) -> *Model {
+    directory = assets.manifest_directory(m)
+    note_path = "${directory}impostor_${figure}.json"
+    text, err = fs.read(note_path)
+    if err != "" {
+        println("zombie_city: no impostor atlas for ${figure} (${note_path}) -- bake one with tools/bake_impostor")
+        return null
+    }
+    note = json.parse_raw(text)
+    string.free(text)
+    if note == null { println("zombie_city: ${note_path} would not parse"); return null }
+    cols = json.get_int(json.object_get_raw(note, "cols"))
+    rows = json.get_int(json.object_get_raw(note, "rows"))
+    metres = json.get_number(json.object_get_raw(note, "metres"))
+    json.free(note)
+    if cols <= 0 || rows <= 0 || metres <= 0.0 { println("zombie_city: ${note_path} has no grid"); return null }
+
+    quad = core.model_new()
+    facing = core.vec3(1.0, 0.0, 0.0)
+    core.mesh_reserve(quad.mesh, 4, 6)
+    core.mesh_push_vertex(quad.mesh, core.vec3(0.0 - 0.5, 0.0, 0.0), 0.0, 0.0, facing)
+    core.mesh_push_vertex(quad.mesh, core.vec3(0.5, 0.0, 0.0), 1.0, 0.0, facing)
+    core.mesh_push_vertex(quad.mesh, core.vec3(0.5, 1.0, 0.0), 1.0, 1.0, facing)
+    core.mesh_push_vertex(quad.mesh, core.vec3(0.0 - 0.5, 1.0, 0.0), 0.0, 1.0, facing)
+    core.mesh_push_triangle(quad.mesh, 0, 1, 2)
+    core.mesh_push_triangle(quad.mesh, 0, 2, 3)
+    // Every vertex on bone zero, whole: the crowd program's vertex layout,
+    // which the picture never poses by.
+    i = 0
+    while i < 4 {
+        core.mesh_set_skin(quad.mesh, i, 0, 0, 0, 0, 1.0, 0.0, 0.0, 0.0)
+        i = i + 1
+    }
+    core.model_update_matrix(quad)
+    core.model_recalculate_bounds(quad)
+    core.model_set_texture(quad, "${directory}impostor_${figure}.png")
+    core.material_set_normal_path(quad.material, "${directory}impostor_${figure}_normal.png")
+    setup_crowd(quad, 0.0, fig.bank)
+    core.model_set_impostor(quad, cols, rows, metres, metres)
+    fig.impostor_metres = metres
+    return quad
 }
 
 // A flat slab, face up, `length` along the street by `width` across it, its
@@ -412,6 +486,8 @@ on_start(state: ptr, e: *Engine) {
     g_cull_dist = core.env_int("AE3D_CULL", CULL_DIST as int) as float
     g_sepn = core.env_int("AE3D_SEPN", SEP_INTERVAL)
     g_strip_props = core.env_int("AE3D_NOPROPS", 0) != 0
+    g_impostor_dist = core.env_int("AE3D_IMPOSTOR", IMPOSTOR_DIST as int) as float
+    g_perf_sim = core.env_int("AE3D_PERF", 0) == 1
 
     // A camera down at the road, looking back along it so the horde walks out of
     // the far dark toward the lamps and the viewer.
@@ -557,6 +633,8 @@ on_start(state: ptr, e: *Engine) {
         fig.near_clothes = null
         clothes_entry = entry_named(m, "Zombie_Clothes${suffix}")
         if clothes_entry != null { fig.near_clothes = assets.entry_load_model(m, clothes_entry) }
+        fig.impostor = null
+        fig.impostor_metres = 0.0
         list.add_raw(g_figures, fig as ptr)
         k = k + 1
     }
@@ -585,6 +663,15 @@ on_start(state: ptr, e: *Engine) {
     g_fb_phase = ecs.column_new(g_count, 1)
     g_fb_col = ecs.column_new(g_count, 3)
     g_farcount = ecs.column_new(1, 1)
+    g_mb_pos = ecs.column_new(g_count, 3)
+    g_mb_yaw = ecs.column_new(g_count, 1)
+    g_mb_phase = ecs.column_new(g_count, 1)
+    g_mb_col = ecs.column_new(g_count, 3)
+    g_ib_pos = ecs.column_new(g_count, 3)
+    g_ib_yaw = ecs.column_new(g_count, 1)
+    g_ib_phase = ecs.column_new(g_count, 1)
+    g_ib_col = ecs.column_new(g_count, 3)
+    g_impcount = ecs.column_new(1, 1)
     i = 0
     while i < g_count {
         ent = ecs.entity_create(g_world)
@@ -636,6 +723,12 @@ on_start(state: ptr, e: *Engine) {
         engine.engine_add_model(e, fig.near_body)
         if fig.near_clothes != null { engine.engine_add_model(e, fig.near_clothes) }
         engine.engine_add_model(e, fig.far_body)
+        if g_impostor_dist > 0.0 {
+            suffix = ""
+            if k == 1 { suffix = "_B" }
+            fig.impostor = impostor_for(m, "Zombie_Body${suffix}", fig)
+            if fig.impostor != null { engine.engine_add_model(e, fig.impostor) }
+        }
         k = k + 1
     }
 
@@ -655,7 +748,9 @@ log_scene(e: *Engine, cam: *Camera) {
         fig = list.get_raw(g_figures, k) as *Figure
         far_from = "decimated in the engine (AE3D_LODFAR)"
         if fig.far_exported { far_from = "the build's own LOD" }
-        println("zombie_city[diag] figure ${k}: zombies ${fig.start}..${fig.start + fig.count - 1}; near ${fig.near_tris}+${fig.cloth_tris} tris (full mesh), far ${fig.far_tris} tris, ${far_from}; ${FRAMES} pose bank")
+        picture = "no impostor"
+        if fig.impostor != null { picture = "impostor a ${fig.impostor.impostor_cols}x${fig.impostor.impostor_rows} atlas at ${fig.impostor_metres}m" }
+        println("zombie_city[diag] figure ${k}: zombies ${fig.start}..${fig.start + fig.count - 1}; near ${fig.near_tris}+${fig.cloth_tris} tris (full mesh), far ${fig.far_tris} tris, ${far_from}; ${picture}; ${FRAMES} pose bank")
         // The walk the bank carries: how far the clip's root travels over
         // its length, and the pace that sets. In place, so that travel is
         // the crowd's motion and not the mesh's; zero here means the clip
@@ -664,7 +759,7 @@ log_scene(e: *Engine, cam: *Camera) {
         println("zombie_city[diag] figure ${k} walk: ${fig.walk}s cycle, root travels ${total}m in place => ${total / fig.walk}m/s mean; at phase 0.25 ${crowd.posebank_speed(fig.bank, 0.25, fig.walk)}m/s, at 0.75 ${crowd.posebank_speed(fig.bank, 0.75, fig.walk)}m/s")
         k = k + 1
     }
-    println("zombie_city[diag] LOD: near<${g_near_dist}m detailed, beyond far; cull ${g_cull_dist}m")
+    println("zombie_city[diag] LOD: near<${g_near_dist}m detailed, beyond far, past ${g_impostor_dist}m a picture (0 = never); cull ${g_cull_dist}m")
     println("zombie_city[diag] city: ${TILES} blocks, block ${BLOCK_LEN}m, street x[${STREET_X0}..${STREET_X1}], road z[${ROAD_Z0}..${ROAD_Z1}] y=${ROAD_Y}")
     cp = cam.position
     println("zombie_city[diag] camera: pos(${cp.x}, ${cp.y}, ${cp.z}) view=${core.env_int("AE3D_VIEW", 0)} far=300")
@@ -763,9 +858,36 @@ log_materials_once() {
     }
 }
 
+// The simulation's own split, under AE3D_PERF=1: what each pass of the
+// frame's update costs at this count, said every 120 frames, so the wall a
+// horde hits is named rather than guessed at.
+var g_perf_sim = false
+var g_t_wander = 0.0
+var g_t_separate = 0.0
+var g_t_step = 0.0
+var g_t_teleport = 0.0
+var g_t_bucket = 0.0
+var g_t_upload = 0.0
+var g_t_frames = 0
+
+lap(since: float) -> float { return (platform.time() - since) * 1000.0 }
+
+say_sim_perf() {
+    n = g_t_frames as float
+    println("zombie_city[perf] sim ms/frame: wander ${g_t_wander / n} separate ${g_t_separate / n} step ${g_t_step / n} teleport ${g_t_teleport / n} bucket ${g_t_bucket / n} upload ${g_t_upload / n} (${g_count} zombies, ${g_t_frames} frames)")
+    g_t_wander = 0.0
+    g_t_separate = 0.0
+    g_t_step = 0.0
+    g_t_teleport = 0.0
+    g_t_bucket = 0.0
+    g_t_upload = 0.0
+    g_t_frames = 0
+}
+
 on_update(state: ptr, e: *Engine, delta: float) {
     if g_figures == null || list.size(g_figures) == 0 { return }
     cam = engine.engine_camera(e)
+    mark = platform.time()
 
     // The whole per-frame crowd update is native now (crowd/module.ae -> C):
     // point each velocity along its heading, shove neighbours apart, step and
@@ -773,6 +895,8 @@ on_update(state: ptr, e: *Engine, delta: float) {
     // near and far draw buffers. At a city's worth of zombies the Aether loops
     // this replaces were the wall, not the GPU.
     crowd.crowd_wander(ecs.column_data(g_vel), ecs.column_data(g_yaw), g_count, SPEED)
+    g_t_wander = g_t_wander + lap(mark)
+    mark = platform.time()
     // Separation is the crowd's heaviest pass by far -- a full grid rebuild and
     // neighbour scan over every zombie, ~two thirds of the sim at half a
     // million. But a zombie drifts only centimetres a frame, so the pack does
@@ -783,6 +907,8 @@ on_update(state: ptr, e: *Engine, delta: float) {
         crowd.horde_separate(g_world, g_pos, g_vel, g_grid, SEP_RADIUS,
                              SEP_STRENGTH * (g_sepn as float))
     }
+    g_t_separate = g_t_separate + lap(mark)
+    mark = platform.time()
     // Each figure's run stepped at its own bank's pace: a zombie moves at
     // the speed its pose is walking at, so the feet plant rather than skate
     // (see crowd_step).
@@ -794,7 +920,10 @@ on_update(state: ptr, e: *Engine, delta: float) {
                          STREET_X0, STREET_X1, ROAD_Z0, ROAD_Z1, ROAD_Y, fig.walk, fig.bank)
         k = k + 1
     }
+    g_t_step = g_t_step + lap(mark)
+    mark = platform.time()
     detect_teleports(delta)
+    g_t_teleport = g_t_teleport + lap(mark)
     log_materials_once()
     // Each figure's run bucketed into its own tiers. The near and far
     // buffers are shared scratch, sized for the whole crowd, filled and
@@ -810,11 +939,31 @@ on_update(state: ptr, e: *Engine, delta: float) {
         // The cull drops the fogged-out zombies, so far is what the bucket
         // counted, not the leftover of the run.
         nf = ecs.column_get(g_farcount, 0, 0) as int
+        g_t_bucket = g_t_bucket + lap(mark)
+        mark = platform.time()
         upload_tier(fig.near_body, g_nb_pos, g_nb_yaw, g_nb_phase, g_nb_col, nn)
         if fig.near_clothes != null { upload_tier(fig.near_clothes, g_nb_pos, g_nb_yaw, g_nb_phase, g_nb_col, nn) }
-        upload_tier(fig.far_body, g_fb_pos, g_fb_yaw, g_fb_phase, g_fb_col, nf)
+        if fig.impostor != null {
+            // The far band split again: within the impostor distance the
+            // mesh, beyond it the picture. The same bucket, run over the
+            // far buffers with no cull -- the first pass culled already.
+            nm = crowd.crowd_bucket(ecs.column_data(g_fb_pos), ecs.column_data(g_fb_yaw), ecs.column_data(g_fb_phase),
+                                    ecs.column_data(g_fb_col), 0, nf, cam.position.x, cam.position.z, g_impostor_dist, 0.0,
+                                    ecs.column_data(g_mb_pos), ecs.column_data(g_mb_yaw), ecs.column_data(g_mb_phase), ecs.column_data(g_mb_col),
+                                    ecs.column_data(g_ib_pos), ecs.column_data(g_ib_yaw), ecs.column_data(g_ib_phase), ecs.column_data(g_ib_col),
+                                    ecs.column_data(g_impcount))
+            ni = ecs.column_get(g_impcount, 0, 0) as int
+            upload_tier(fig.far_body, g_mb_pos, g_mb_yaw, g_mb_phase, g_mb_col, nm)
+            upload_tier(fig.impostor, g_ib_pos, g_ib_yaw, g_ib_phase, g_ib_col, ni)
+        } else {
+            upload_tier(fig.far_body, g_fb_pos, g_fb_yaw, g_fb_phase, g_fb_col, nf)
+        }
+        g_t_upload = g_t_upload + lap(mark)
+        mark = platform.time()
         k = k + 1
     }
+    g_t_frames = g_t_frames + 1
+    if g_perf_sim && g_t_frames >= 120 { say_sim_perf() }
 }
 
 upload_tier(model: *Model, pos: *Column, yaw: *Column, phase: *Column, col: *Column, count: int) {

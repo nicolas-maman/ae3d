@@ -105,9 +105,40 @@ The feature list in full, with the reasoning behind each. The [README](../README
 ![Twenty thousand zombies filling the street from end to end, seen from above the pavement](zombie-horde.png)
 
 *`AE3D_CROWD=20000 AE3D_NEAR=28 ./build/zombie_city`: the near tier draws the
-full mesh, the far tier the build's own 168-triangle stand-in, and the draw
-count does not change with the crowd. Twenty thousand hold ~38 fps on an
-RTX 4070 Ti at 1280x720 with the GPU shared.*
+full mesh, the far tier the build's own 168-triangle stand-in, and past
+eighty metres each zombie is a picture; the draw count does not change with
+the crowd. Twenty thousand hold ~120 fps on an RTX 4070 Ti at 1280x720
+with the GPU shared, half a million 35.*
+
+### Impostors
+
+The third tier of a crowd is a picture. `tools/bake_impostor` bakes a
+figure into an atlas: the figure seen from eight angles around it by eight
+frames of its walk, posed exactly as the crowd poses it (its gait baked in
+place into a pose bank, one instance at the origin), through a lens narrow
+enough that the picture is near orthographic. Two atlases, read back
+through the engine's capture channel (`engine_set_capture_channel`): the
+figure's **albedo**, before any light, and its **normals** in its own
+frame. A crowd model whose mesh is one upright quad, given the atlases and
+`model_set_impostor(m, cols, rows, width, height)`, draws each instance as
+that quad turned to the camera, showing the cell for the angle the camera
+sees the instance from (measured around its facing, the instance's own +X,
+which is the crowd's yaw zero) and the frame its phase is at; the fragment
+cuts it out by the atlas's alpha, turns the baked normal into the world by
+the facing, and lights it with the scene's lights, shadow, occlusion and
+fog like any surface. A lamp that warms the mesh beside it warms the
+picture the same. The transparent pixels of an atlas carry the colour of
+the nearest opaque ones (bled outward at the bake), so the texture's filter
+and mip levels never blend a key colour into an edge.
+
+### The scene's depth
+
+The occlusion, the reflection and the water read the scene's depth. On
+OpenGL it is blitted out of the frame after the opaque draws; on Vulkan the
+frame's multisampled depth is resolved into a one-sample target between
+the two halves the scene pass is drawn in, the nearest of the samples a
+pixel. Both are the depth of what was drawn -- the near figure's real
+silhouette, the picture of a far one -- and neither draws anything twice.
 
 ## How it is put together
 

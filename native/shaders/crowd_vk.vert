@@ -24,6 +24,8 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     bool isSkinned;
     mat4 bones[96];
     int lightCount;
+    bool impostor;
+    int captureChannel;
     vec3 viewPos;
     float viewDistance;
     vec3 diffuseColor;
@@ -99,6 +101,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     vec2 screenSize;
     float ssaoRadius;
     float ssaoIntensity;
+    int depthSampleCount;
     float time;
     float waveSpeedMultiplier;
     float waveHeightMultiplier;
@@ -132,6 +135,10 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     bool enableWaterNormalMapping;
     float waterNormalIntensity;
     int poseBankFrames;
+    int impostorCols;
+    int impostorRows;
+    float impostorWidth;
+    float impostorHeight;
 };
 layout(set = 0, binding = 1) uniform sampler2D textureSampler;
 layout(set = 0, binding = 2) uniform sampler2D shadowMap;
@@ -154,6 +161,20 @@ layout(location = 11) in float instancePhase; // where in the walk this one is, 
 
 // The baked walk: bones*4 texels wide (four texels a bone matrix), `frames`
 // rows tall. Sampled by exact texel, never filtered between poses.
+
+
+
+// The crowd's far tier as impostors: the figure baked into an atlas of
+// impostorCols views around it by impostorRows frames of its walk, and each
+// instance an upright quad turned to the camera, impostorWidth by
+// impostorHeight metres, showing the cell for the angle the camera sees it
+// from and the frame its phase is at. Twenty thousand figures at a hundred
+// and sixty-eight triangles are three million; as impostors they are forty
+// thousand, and the horde can be twenty times the size.
+
+
+
+
 
 
 
@@ -184,6 +205,40 @@ mat4 skinAt(int frame) {
 void main() {
     Occlusion = inOcclusion;
     mat4 modelMatrix = model * instanceModel;
+
+    if (impostor) {
+        // Where the figure stands and which way it faces: the instance
+        // matrix's origin and its local +X, on the ground plane -- the
+        // crowd's yaw is measured from +X, and a figure walking that way is
+        // at yaw zero, so the bake's first column is the figure seen from
+        // its own +X.
+        vec3 origin = vec3(modelMatrix[3]);
+        vec3 facing = normalize(vec3(modelMatrix[0].x, 0.0, modelMatrix[0].z));
+        vec3 toEye = viewPos - origin;
+        vec3 level = normalize(vec3(toEye.x, 0.0, toEye.z));
+        // The angle the camera sees the figure from, measured around its
+        // facing: the cell column, with the bake's first view from the front.
+        float angle = atan(dot(level, vec3(-facing.z, 0.0, facing.x)), dot(level, facing));
+        float turn = fract(angle / 6.28318530718 + 1.0);
+        int column = int(floor(turn * float(impostorCols) + 0.5)) % impostorCols;
+        int row = int(floor(fract(instancePhase) * float(impostorRows))) % impostorRows;
+        // An upright quad facing the eye: the mesh's x across it, y up it.
+        vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), level));
+        vec3 world = origin + right * (inPosition.x * impostorWidth) + vec3(0.0, inPosition.y * impostorHeight, 0.0);
+        FragPos = world;
+        // The picture's normals were baked in the figure's own frame; the
+        // fragment turns them into the world by the facing, carried here.
+        Normal = facing;
+        // The cell in the atlas. The atlas is written with row 0 at its top
+        // and loaded flipped, as every texture is, so a row counts down from
+        // the top of texture space.
+        fragTexCoord = vec2((float(column) + inTexCoord.x) / float(impostorCols),
+                            1.0 - (float(row) + (1.0 - inTexCoord.y)) / float(impostorRows));
+        InstanceColor = instanceColor;
+        FragPosLightSpace = lightSpaceMatrix * vec4(world, 1.0);
+        gl_Position = viewProjection * vec4(world, 1.0);
+        return;
+    }
 
     // The phase lands between two baked poses; blend them, so the walk is
     // continuous instead of snapping frame to frame. The clip loops, so the

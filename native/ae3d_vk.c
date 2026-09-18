@@ -286,6 +286,18 @@ static struct {
     // sample and sampleable by construction (the shadow map's pattern), which
     // is why it does not have to resolve the multisampled scene depth.
     int ssr_enabled;
+    /* The scene pass in two halves, when something reads the scene's depth:
+       the first ends after the opaque draws with the frame's depth kept and
+       readable, the resolve copies it into the camera-depth image, and the
+       second loads what the first drew and goes on with the occlusion and
+       the transparent draws. Compatible with the whole pass, so every
+       pipeline built for that serves in these. */
+    VkRenderPass render_pass_first, render_pass_rest;
+    VkRenderPass scene_pass_first, scene_pass_rest;
+    int depth_split;      /* this frame is drawn in two halves */
+    int depth_resolved;   /* ...and the resolve has run: the second half is open or next */
+    VkPipeline depth_resolve_pipeline;
+    VkDescriptorSet depth_resolve_set[AE3D_VK_FRAMES];
     VkRenderPass camdepth_pass;
     VkFramebuffer camdepth_framebuffer;
     VkImage camdepth_image;
@@ -296,7 +308,6 @@ static struct {
     int camdepth_height;
     int pass_open;
     int in_shadow_pass;
-    int in_camdepth;
     /* Whether something other than the reflection wants the camera depth
        drawn: a water surface reading the ground under it. */
     int scene_depth_wanted;
@@ -1085,7 +1096,8 @@ static int ae3d_vk_create_depth(void) {
     image.arrayLayers = 1;
     image.samples = vk.samples;
     image.tiling = VK_IMAGE_TILING_OPTIMAL;
-    image.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    /* Sampled as well: the depth resolve reads it after the opaque draws. */
+    image.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     image.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     image.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
@@ -1268,11 +1280,14 @@ static int ae3d_vk_create_swapchain(int width, int height) {
     return ae3d_vk_create_depth();
 }
 
-static int ae3d_vk_build_render_pass(VkImageLayout present_layout, VkRenderPass *out) {
+/* `part`: 0 the whole scene in one pass; 1 its first half, which keeps its
+   colour and depth and ends with the depth readable by a shader; 2 the rest,
+   which loads both and finishes the frame. */
+static int ae3d_vk_build_render_pass(VkImageLayout present_layout, int part, VkRenderPass *out) {
     VkAttachmentDescription attachments[3];
     VkAttachmentReference colour_ref, depth_ref, resolve_ref;
     VkSubpassDescription subpass;
-    VkSubpassDependency dependency;
+    VkSubpassDependency dependencies[2];
     VkRenderPassCreateInfo info;
     int multisampled = vk.samples != VK_SAMPLE_COUNT_1_BIT;
     unsigned count = multisampled ? 3u : 2u;
@@ -1322,6 +1337,25 @@ static int ae3d_vk_build_render_pass(VkImageLayout present_layout, VkRenderPass 
     resolve_ref.attachment = 2;
     resolve_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
+    if (part == 1) {
+        /* The first half keeps what it drew for the second: the colour
+           stays in its attachment layout, the depth ends readable. The
+           multisampled colour is not resolved yet; the second half does
+           that once, at the end. */
+        attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        attachments[0].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[2].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        resolve_ref.attachment = VK_ATTACHMENT_UNUSED;
+    } else if (part == 2) {
+        attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        attachments[0].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        attachments[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    }
+
     memset(&subpass, 0, sizeof(subpass));
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1;
@@ -1329,15 +1363,34 @@ static int ae3d_vk_build_render_pass(VkImageLayout present_layout, VkRenderPass 
     subpass.pDepthStencilAttachment = &depth_ref;
     if (multisampled) subpass.pResolveAttachments = &resolve_ref;
 
-    memset(&dependency, 0, sizeof(dependency));
-    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-    dependency.dstSubpass = 0;
-    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-                               VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    memset(dependencies, 0, sizeof(dependencies));
+    dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[0].dstSubpass = 0;
+    dependencies[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                   VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                   VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    if (part == 2) {
+        /* After the resolve read the depth and the first half wrote both. */
+        dependencies[0].srcStageMask |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                        VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT |
+                                        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        dependencies[0].dstAccessMask |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+    }
+    /* The first half's depth, written here, is read by the resolve's shader. */
+    dependencies[1].srcSubpass = 0;
+    dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+                                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencies[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+                                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
     memset(&info, 0, sizeof(info));
     info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -1345,8 +1398,8 @@ static int ae3d_vk_build_render_pass(VkImageLayout present_layout, VkRenderPass 
     info.pAttachments = attachments;
     info.subpassCount = 1;
     info.pSubpasses = &subpass;
-    info.dependencyCount = 1;
-    info.pDependencies = &dependency;
+    info.dependencyCount = part == 1 ? 2 : 1;
+    info.pDependencies = dependencies;
 
     if (ae3d_vkCreateRenderPass(vk.device, &info, NULL, out) != VK_SUCCESS) {
         return ae3d_vk_fail("vkCreateRenderPass failed");
@@ -1513,7 +1566,10 @@ static void ae3d_vk_destroy_camdepth_target(void) {
     // rewritten against the new one when SSR is next drawn.
     {
         int f;
-        for (f = 0; f < AE3D_VK_FRAMES; f++) { vk.ssr_set[f] = VK_NULL_HANDLE; vk.ssao_set[f] = VK_NULL_HANDLE; }
+        for (f = 0; f < AE3D_VK_FRAMES; f++) {
+            vk.ssr_set[f] = VK_NULL_HANDLE; vk.ssao_set[f] = VK_NULL_HANDLE;
+            vk.depth_resolve_set[f] = VK_NULL_HANDLE;
+        }
     }
 }
 
@@ -1673,8 +1729,12 @@ static int ae3d_vk_build_post_pass(VkImageLayout present_layout, VkRenderPass *o
 static int ae3d_vk_create_render_pass(void) {
     VkImageLayout present_layout = vk.offscreen ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
                                                 : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    if (!ae3d_vk_build_render_pass(present_layout, &vk.render_pass)) return 0;
-    if (!ae3d_vk_build_render_pass(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, &vk.scene_pass)) return 0;
+    if (!ae3d_vk_build_render_pass(present_layout, 0, &vk.render_pass)) return 0;
+    if (!ae3d_vk_build_render_pass(present_layout, 1, &vk.render_pass_first)) return 0;
+    if (!ae3d_vk_build_render_pass(present_layout, 2, &vk.render_pass_rest)) return 0;
+    if (!ae3d_vk_build_render_pass(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, &vk.scene_pass)) return 0;
+    if (!ae3d_vk_build_render_pass(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1, &vk.scene_pass_first)) return 0;
+    if (!ae3d_vk_build_render_pass(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 2, &vk.scene_pass_rest)) return 0;
     if (!ae3d_vk_build_shadow_pass()) return 0;
     if (!ae3d_vk_build_camdepth_pass()) return 0;
     // The reflective composite writes into an off-screen colour target the
@@ -2689,7 +2749,7 @@ static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
     memset(&multisample, 0, sizeof(multisample));
     multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     multisample.rasterizationSamples = vk.samples;
-    if (render_pass == vk.post_pass || render_pass == vk.shadow_pass) {
+    if (render_pass == vk.post_pass || render_pass == vk.shadow_pass || render_pass == vk.camdepth_pass) {
         multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
     }
 
@@ -2721,7 +2781,7 @@ static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
     colour_blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     // As many blend attachments as the subpass has colour attachments, which
     // for the shadow pass is none: it writes depth and nothing else.
-    colour_blend.attachmentCount = (render_pass == vk.shadow_pass) ? 0 : 1;
+    colour_blend.attachmentCount = (render_pass == vk.shadow_pass || render_pass == vk.camdepth_pass) ? 0 : 1;
     colour_blend.pAttachments = &blend_attachment;
 
     dynamic_states[0] = VK_DYNAMIC_STATE_VIEWPORT;
@@ -2802,6 +2862,9 @@ static int ae3d_vk_create_pass_pipelines(void) {
         { ae3d_vk_depth_vert_spv, sizeof(ae3d_vk_depth_vert_spv),
           ae3d_vk_depth_frag_spv, sizeof(ae3d_vk_depth_frag_spv),
           0, 1, 1, 0, 0, VK_NULL_HANDLE, NULL },
+        { ae3d_vk_screen_vert_spv, sizeof(ae3d_vk_screen_vert_spv),
+          ae3d_vk_depth_resolve_frag_spv, sizeof(ae3d_vk_depth_resolve_frag_spv),
+          0, 1, 1, 0, 0, VK_NULL_HANDLE, NULL },
     };
     unsigned i;
 
@@ -2818,6 +2881,14 @@ static int ae3d_vk_create_pass_pipelines(void) {
     builds[10].pass = vk.shadow_pass; builds[10].out = &vk.crowd_shadow_pipeline;
     builds[11].pass = vk.render_pass; builds[11].out = &vk.ssao_pipeline;
     builds[12].pass = vk.shadow_pass; builds[12].out = &vk.point_shadow_pipeline;
+    /* The depth resolve draws into the camera-depth pass, depth only, from
+       the frame's multisampled depth -- or a plain copy of it when the
+       frame has one sample. */
+    if (vk.samples == VK_SAMPLE_COUNT_1_BIT) {
+        builds[13].frag = ae3d_vk_depth_copy_frag_spv;
+        builds[13].frag_size = sizeof(ae3d_vk_depth_copy_frag_spv);
+    }
+    builds[13].pass = vk.camdepth_pass; builds[13].out = &vk.depth_resolve_pipeline;
 
     for (i = 0; i < sizeof(builds) / sizeof(builds[0]); i++) {
         VkShaderModule vertex_module = ae3d_vk_shader(builds[i].vert, builds[i].vert_size);
@@ -3157,6 +3228,10 @@ static void ae3d_vk_open_scene_pass(void) {
     memset(&pass, 0, sizeof(pass));
     pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     pass.renderPass = vk.post_active ? vk.scene_pass : vk.render_pass;
+    if (vk.depth_split) {
+        if (vk.depth_resolved) pass.renderPass = vk.post_active ? vk.scene_pass_rest : vk.render_pass_rest;
+        else pass.renderPass = vk.post_active ? vk.scene_pass_first : vk.render_pass_first;
+    }
     pass.framebuffer = vk.post_active ? vk.scene_framebuffer : vk.framebuffers[vk.image_index];
     pass.renderArea.extent = vk.extent;
     pass.clearValueCount = 2;
@@ -3231,6 +3306,22 @@ int ae3d_vk_frame_begin(double r, double g, double b, double a) {
     vk.post_active = (vk.fxaa || vk.bloom || vk.ssr_enabled) && vk.screen_quad > 0 && vk.post_texture > 0;
     vk.pass_open = 0;
     vk.in_shadow_pass = 0;
+    /* Two halves when something reads the scene's depth this frame: the
+       renderer says what wants it before the frame (ae3d_vk_set_scene_depth,
+       the occlusion, the reflection), and the target is made at the size of
+       the swapchain, here, so the first frame that needs it has it. */
+    vk.depth_split = 0;
+    vk.depth_resolved = 0;
+    if ((vk.ssr_enabled || vk.scene_depth_wanted || vk.ssao_enabled) && vk.depth_resolve_pipeline) {
+        if (!vk.camdepth_framebuffer ||
+            vk.camdepth_width != (int)vk.extent.width ||
+            vk.camdepth_height != (int)vk.extent.height) {
+            ae3d_vkDeviceWaitIdle(vk.device);
+            ae3d_vk_destroy_camdepth_target();
+            ae3d_vk_create_camdepth_target((int)vk.extent.width, (int)vk.extent.height);
+        }
+        vk.depth_split = vk.camdepth_framebuffer != VK_NULL_HANDLE;
+    }
 
     vk.uniforms[vk.frame].used = 0;
     vk.draw_calls = 0;
@@ -3499,8 +3590,11 @@ void ae3d_vk_set_scene_depth(int on) {
     }
 }
 
+/* Whether the depth the occlusion, the reflection and the water read will
+   be there this frame: the frame is drawn in two halves with the resolve
+   between them. */
 int ae3d_vk_scene_depth_ready(void) {
-    return vk.camdepth_framebuffer != VK_NULL_HANDLE && vk.camdepth_view != VK_NULL_HANDLE;
+    return vk.depth_split && vk.camdepth_framebuffer != VK_NULL_HANDLE && vk.camdepth_view != VK_NULL_HANDLE;
 }
 
 // The pass leaves the map in shader-read layout, so the scene pass that follows
@@ -3544,10 +3638,7 @@ int ae3d_vk_shadow_begin(void) {
 
 void ae3d_vk_shadow_draw(int mesh_handle, int instance_handle, int instance_count) {
     VkPipeline pipeline = vk.shadow_pipeline;
-    // Also draws in the camera-depth prepass: it is depth-only from the same
-    // geometry, and its render pass is compatible with the shadow one, so the
-    // shadow depth pipeline is exactly the pipeline it wants.
-    if (!vk.shadow_pipeline || (!vk.in_shadow_pass && !vk.in_camdepth)) return;
+    if (!vk.shadow_pipeline || !vk.in_shadow_pass) return;
     if (ae3d_vk_instances_are_points(instance_handle, instance_count) && vk.point_shadow_pipeline) {
         pipeline = vk.point_shadow_pipeline;
     } else if (mesh_handle > 0 && mesh_handle <= vk.mesh_capacity
@@ -3587,30 +3678,34 @@ void ae3d_vk_shadow_end(void) {
 // depth-only pass, draw the casters (with the camera view-projection in the
 // light-space slot the depth shader reads), end -- into the full-size camdepth
 // target the SSR pass samples. Only when SSR is on and the target exists.
-int ae3d_vk_camdepth_begin(void) {
+static void ae3d_vk_draw_screen_with(VkPipeline pipeline, VkDescriptorSet *set_slot,
+                                     VkImageView view, VkSampler sampler, VkImageLayout layout);
+
+/* The scene's depth, as the opaque draws left it, resolved into the camera-
+   depth image the occlusion, the reflection and the water read. Called by
+   the renderer between its opaque and its transparent draws: the first half
+   of the scene pass is ended, the frame's depth -- multisampled, so not a
+   thing a blit can copy -- is drawn into the target through the resolve
+   shader, and the second half opens at the next draw. Nothing when no one
+   reads the depth this frame. It used to be a prepass that drew the whole
+   visible scene again, depth only, before the sky: a second pass over every
+   triangle, and one that could not draw a picture of a figure (an impostor)
+   or a near figure's real silhouette without paying for it again. */
+int ae3d_vk_resolve_scene_depth(void) {
     VkRenderPassBeginInfo pass;
     VkClearValue clear;
     VkViewport viewport;
     VkRect2D scissor;
 
-    if (!vk.recording || !(vk.ssr_enabled || vk.scene_depth_wanted || vk.ssao_enabled)) return 0;
-    /* The target is made when a feature that reads it is turned on, but a
-       scene turns the occlusion on at start, before there is a swapchain
-       to size it by; so it is made here too, at the frame that first
-       needs it, and remade when the swapchain has changed size. */
-    if (!vk.camdepth_framebuffer ||
-        vk.camdepth_width != (int)vk.extent.width ||
-        vk.camdepth_height != (int)vk.extent.height) {
-        ae3d_vkDeviceWaitIdle(vk.device);
-        ae3d_vk_destroy_camdepth_target();
-        if (!ae3d_vk_create_camdepth_target((int)vk.extent.width, (int)vk.extent.height)) return 0;
-    }
-    if (!vk.camdepth_framebuffer) return 0;
-    if (vk.pass_open) return 0;
+    if (!vk.recording || !vk.depth_split || vk.depth_resolved) return 0;
+    if (!vk.camdepth_framebuffer || !vk.depth_resolve_pipeline) return 0;
+    ae3d_vk_open_scene_pass();
+    ae3d_vkCmdEndRenderPass(vk.command_buffers[vk.frame]);
+    vk.pass_open = 0;
+    vk.depth_resolved = 1;
 
     memset(&clear, 0, sizeof(clear));
     clear.depthStencil.depth = 1.0f;
-
     memset(&pass, 0, sizeof(pass));
     pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     pass.renderPass = vk.camdepth_pass;
@@ -3619,29 +3714,25 @@ int ae3d_vk_camdepth_begin(void) {
     pass.clearValueCount = 1;
     pass.pClearValues = &clear;
     ae3d_vkCmdBeginRenderPass(vk.command_buffers[vk.frame], &pass, VK_SUBPASS_CONTENTS_INLINE);
+    vk.pass_open = 1;
 
     memset(&viewport, 0, sizeof(viewport));
     viewport.width = (float)vk.extent.width;
     viewport.height = (float)vk.extent.height;
     viewport.maxDepth = 1.0f;
     ae3d_vkCmdSetViewport(vk.command_buffers[vk.frame], 0, 1, &viewport);
-
     memset(&scissor, 0, sizeof(scissor));
     scissor.extent = vk.extent;
     ae3d_vkCmdSetScissor(vk.command_buffers[vk.frame], 0, 1, &scissor);
-    vk.in_camdepth = 1;
-    vk.pass_open = 1;
-    return 1;
-}
 
-void ae3d_vk_camdepth_end(void) {
-    if (!vk.recording || !vk.in_camdepth) return;
+    ae3d_vk_set_int(&vk.scene[AE3D_VK_PROGRAM_SCENE], AE3D_VK_OFF_DEPTHSAMPLECOUNT, (int)vk.samples);
+    vk.program = AE3D_VK_PROGRAM_SCENE;
+    ae3d_vk_draw_screen_with(vk.depth_resolve_pipeline, &vk.depth_resolve_set[(int)vk.frame],
+                             vk.depth_view, vk.camdepth_sampler,
+                             VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
     ae3d_vkCmdEndRenderPass(vk.command_buffers[vk.frame]);
-    vk.in_camdepth = 0;
     vk.pass_open = 0;
-    ae3d_vk_stamp_through(2);
-    // Viewport and scissor are already the full extent; the scene pass sets its
-    // own besides.
+    return 1;
 }
 
 void ae3d_vk_set_post(int fxaa, int bloom, double threshold, double intensity) {
@@ -3679,7 +3770,11 @@ void ae3d_vk_set_ssr_params(double road_height, double strength) {
 // shadow map), and it reads the same uniform block as everything else, so the
 // SSR shader gets viewProjection, invViewProjection and the road parameters
 // the frame set. Written every draw because both images are remade on resize.
-static void ae3d_vk_draw_screen(VkPipeline pipeline, VkDescriptorSet *set_slot, int colour_texture) {
+/* A full-screen draw with `view` at binding 1 -- the colour source of a
+   composite, or the frame's depth for the resolve -- the camera depth at 2
+   and the default texture at 3. */
+static void ae3d_vk_draw_screen_with(VkPipeline pipeline, VkDescriptorSet *set_slot,
+                                     VkImageView view, VkSampler sampler, VkImageLayout layout) {
     VkDescriptorSetAllocateInfo alloc;
     VkDescriptorBufferInfo buffer;
     VkDescriptorImageInfo scene_img, depth_img, def_img;
@@ -3687,16 +3782,13 @@ static void ae3d_vk_draw_screen(VkPipeline pipeline, VkDescriptorSet *set_slot, 
     VkDeviceSize offsets[1];
     ae3d_vk_uniform_ring *ring;
     ae3d_vk_mesh *mesh;
-    ae3d_vk_texture *scene_tex;
     VkDescriptorSet set;
     unsigned slot, dynamic_offset;
 
     if (!pipeline || vk.screen_quad <= 0 || vk.screen_quad > vk.mesh_capacity) return;
-    if (!vk.camdepth_view || colour_texture <= 0 || colour_texture > AE3D_VK_MAX_TEXTURES) return;
+    if (!vk.camdepth_view || !view || !sampler) return;
     mesh = &vk.meshes[vk.screen_quad - 1];
     if (!mesh->in_use || mesh->index_count == 0) return;
-    scene_tex = &vk.textures[colour_texture - 1];
-    if (!scene_tex->in_use) return;
 
     if (!*set_slot) {
         memset(&alloc, 0, sizeof(alloc));
@@ -3721,9 +3813,9 @@ static void ae3d_vk_draw_screen(VkPipeline pipeline, VkDescriptorSet *set_slot, 
     buffer.range = AE3D_VK_SCENE_SIZE;
 
     memset(&scene_img, 0, sizeof(scene_img));
-    scene_img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    scene_img.imageView = scene_tex->view;
-    scene_img.sampler = scene_tex->sampler;
+    scene_img.imageLayout = layout;
+    scene_img.imageView = view;
+    scene_img.sampler = sampler;
 
     memset(&depth_img, 0, sizeof(depth_img));
     depth_img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -3768,6 +3860,15 @@ static void ae3d_vk_draw_screen(VkPipeline pipeline, VkDescriptorSet *set_slot, 
     ae3d_vkCmdBindIndexBuffer(vk.command_buffers[vk.frame], mesh->index_buffer, 0, VK_INDEX_TYPE_UINT32);
     ae3d_vkCmdDrawIndexed(vk.command_buffers[vk.frame], mesh->index_count, 1, 0, 0, 0);
     vk.draw_calls++;
+}
+
+static void ae3d_vk_draw_screen(VkPipeline pipeline, VkDescriptorSet *set_slot, int colour_texture) {
+    ae3d_vk_texture *scene_tex;
+    if (colour_texture <= 0 || colour_texture > AE3D_VK_MAX_TEXTURES) return;
+    scene_tex = &vk.textures[colour_texture - 1];
+    if (!scene_tex->in_use) return;
+    ae3d_vk_draw_screen_with(pipeline, set_slot, scene_tex->view, scene_tex->sampler,
+                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
 // The post uniforms live in the shared scene block, so both the reflective
@@ -4735,6 +4836,7 @@ void ae3d_vk_shutdown(void) {
     if (vk.crowd_shadow_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.crowd_shadow_pipeline, NULL);
     if (vk.sky_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.sky_pipeline, NULL);
     if (vk.ssao_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.ssao_pipeline, NULL);
+    if (vk.depth_resolve_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.depth_resolve_pipeline, NULL);
     if (vk.point_pipeline_blend) ae3d_vkDestroyPipeline(vk.device, vk.point_pipeline_blend, NULL);
     if (vk.point_pipeline[0]) ae3d_vkDestroyPipeline(vk.device, vk.point_pipeline[0], NULL);
     if (vk.point_pipeline[1]) ae3d_vkDestroyPipeline(vk.device, vk.point_pipeline[1], NULL);
@@ -4746,7 +4848,11 @@ void ae3d_vk_shutdown(void) {
 
     ae3d_vk_destroy_swapchain();
     if (vk.render_pass) ae3d_vkDestroyRenderPass(vk.device, vk.render_pass, NULL);
+    if (vk.render_pass_first) ae3d_vkDestroyRenderPass(vk.device, vk.render_pass_first, NULL);
+    if (vk.render_pass_rest) ae3d_vkDestroyRenderPass(vk.device, vk.render_pass_rest, NULL);
     if (vk.scene_pass) ae3d_vkDestroyRenderPass(vk.device, vk.scene_pass, NULL);
+    if (vk.scene_pass_first) ae3d_vkDestroyRenderPass(vk.device, vk.scene_pass_first, NULL);
+    if (vk.scene_pass_rest) ae3d_vkDestroyRenderPass(vk.device, vk.scene_pass_rest, NULL);
     if (vk.post_pass) ae3d_vkDestroyRenderPass(vk.device, vk.post_pass, NULL);
     if (vk.ssr_pass) ae3d_vkDestroyRenderPass(vk.device, vk.ssr_pass, NULL);
     if (vk.shadow_pass) ae3d_vkDestroyRenderPass(vk.device, vk.shadow_pass, NULL);

@@ -1,0 +1,384 @@
+// Bake a crowd figure into impostor atlases: the figure seen from COLS
+// angles around it by ROWS frames of its gait, each a CELL-pixel picture,
+// written as two PNGs the crowd's far tier draws itself from -- its albedo
+// and its normals, so the scene's lights light the picture the way they
+// light the mesh -- with a JSON beside them saying how the atlas is laid
+// out and how many metres a cell is.
+//
+//     ./build/bake_impostor                                   # the street's Zombie_Body
+//     ./build/bake_impostor resources/blender/zombie_street/manifest.json Zombie_Body_B
+//     ./build/bake_impostor <manifest> <figure> <out.png>   # and <out>_normal.png
+//
+// The figure is posed exactly the way the crowd poses it: its gait baked in
+// place into a pose bank (ae3d.crowd), one instance of it at the origin at
+// yaw zero, phased a row at a time -- so the picture in a cell is the frame
+// the far tier would have drawn. The camera looks in from far away through
+// a narrow lens, which is as near orthographic as a perspective camera
+// gets, so the figure's near and far halves land at the same scale and a
+// flat quad shows it undistorted. The frame is read back through the
+// engine's capture channel -- the albedo, then the normals -- against a
+// colour nothing in a zombie is, which the cell's alpha is cut from; the
+// colour is then bled outward under the transparent pixels, so the
+// texture's filter and its mip levels have nothing of the key to blend in.
+//
+// A frame a cell: the phase and the camera are set for the next cell after
+// each capture, so the loop runs COLS*ROWS frames a channel and one more.
+// Column 0 is the figure seen from its own +X, which is its front -- the
+// crowd's yaw is measured from +X, and a figure walking that way is at yaw
+// zero -- and the camera turns from there toward the figure's +Z, the way
+// VERTEX_CROWD reads the atlas back.
+//
+// Written with the engine rather than a paint program so the picture is the
+// engine's own reading of the figure, and so it can be re-baked in a build
+// when the figure or its walk changes.
+import std.list
+import std.os
+import std.string
+import std.fs
+import ae3d.core
+import ae3d.platform
+import ae3d.engine
+import ae3d.assets
+import ae3d.anim
+import ae3d.skin
+import ae3d.crowd
+
+extern ae3d_capture_frame(width: int, height: int) -> int
+extern ae3d_capture_copy_keyed(atlas: ptr, atlas_width: int, atlas_height: int, dst_x: int, dst_y: int,
+                               cell: int, kr: int, kg: int, kb: int, tolerance: int) -> int
+extern ae3d_capture_bleed(atlas: ptr, width: int, height: int) -> int
+extern ae3d_png_write(path: string, rgba: ptr, width: int, height: int) -> int
+extern ae3d_mesh_extent(mesh: ptr, axis: int) -> float
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern cos(x: float) -> float
+extern sin(x: float) -> float
+
+const COLS = 8
+const ROWS = 8
+const CELL = 128
+const FRAMES = 48
+const FOV = 8.0
+const TAN_HALF_FOV = 0.0699268
+// Room around the figure in a cell: its arms swing past its bind-pose width.
+const MARGIN = 1.15
+const KEY_R = 255
+const KEY_G = 0
+const KEY_B = 255
+
+var g_manifest = "resources/blender/zombie_street/manifest.json"
+var g_figure = "Zombie_Body"
+var g_out = ""
+var g_atlas = null
+var g_normals = null
+var g_cell = 0
+var g_channel = 1   // 1 albedo, then 2 normals
+var g_empty = 0
+var g_metres = 2.0
+var g_bank = null
+var g_models = null
+var g_ok = false
+// How many pixels each cell kept, a channel at a time: printed with the
+// result, so a bake that went wrong on a machine no one is watching says
+// which cells and how badly.
+var g_kept: ptr = null
+var g_skipped = 0
+
+entry_named(m: *Manifest, name: string) -> *Entry {
+    i = 0
+    while i < assets.manifest_count(m) {
+        entry = assets.manifest_entry(m, i)
+        if assets.entry_object(entry) == name { return entry }
+        i = i + 1
+    }
+    return null
+}
+
+// The gait baked in place into a bank, the way examples/zombie_city.ae
+// bakes it for the crowd: the clip's travel taken off the Root bone, one
+// stride between the export's gait markers, FRAMES poses across it.
+bake_bank(m: *Manifest, entry: *Entry) -> ptr {
+    bones = assets.entry_load_skeleton(m, entry)
+    if bones == null { return null }
+    skel = skin.skeleton_new()
+    i = 0
+    while i < list.size(bones) {
+        skin.skeleton_add(skel, list.get_raw(bones, i) as *Model)
+        i = i + 1
+    }
+    skin.skeleton_bind(skel)
+    clips = assets.entry_load_bone_clips(m, entry)
+    reg = anim.registry_new()
+    duration = 0.0
+    i = 0
+    while clips != null && i < list.size(clips) {
+        clip = list.get_raw(clips, i) as *Clip
+        index = skin.skeleton_find(skel, anim.clip_name(clip))
+        if index >= 0 {
+            anim.registry_add(reg, anim.clip_name(clip), anim.player_new(clip), skin.skeleton_bone(skel, index))
+            if anim.clip_duration(clip) > duration { duration = anim.clip_duration(clip) }
+        }
+        i = i + 1
+    }
+    if clips != null { list.free(clips) }
+    if duration <= 0.0 { duration = 1.0 }
+    gait = assets.manifest_marker(m, "gait", 0.0)
+    gait_end = assets.manifest_marker(m, "gait_end", duration)
+    if gait_end <= gait { gait = 0.0 ; gait_end = duration }
+    root = skin.skeleton_find(skel, "Root")
+    if root < 0 { root = skin.skeleton_find(skel, "Hips") }
+    bank = crowd.posebank_bake_in_place(reg, skel, FRAMES, gait, gait_end - gait, root)
+    println("bake_impostor: ${list.size(bones)} bones, gait ${gait}..${gait_end}s in ${FRAMES} frames")
+    anim.registry_free(reg)
+    skin.skeleton_free(skel)
+    i = 0
+    while i < list.size(bones) {
+        core.model_free(list.get_raw(bones, i) as *Model)
+        i = i + 1
+    }
+    list.free(bones)
+    return bank
+}
+
+// One instance of the figure at the origin, at yaw zero, posed by the bank.
+as_crowd_of_one(m: *Model) {
+    core.model_set_specular(m, 0.03, 0.03, 0.03)
+    core.model_set_pbr(m, 0.0, 0.95)
+    core.model_enable_instancing(m, 1)
+    core.model_set_pose_bank(m, g_bank, FRAMES)
+    core.model_enable_instance_phases(m)
+    core.model_enable_instance_colors(m)
+    core.model_set_instance_position(m, 0, core.vec3(0.0, 0.0, 0.0))
+    core.model_set_instance_color(m, 0, 1.0, 1.0, 1.0)
+    core.model_set_instance_phase(m, 0, 0.0)
+}
+
+// The camera for cell `column`: on a circle around the figure at half its
+// height, the first on its +X, turning toward its +Z, far enough that a
+// cell spans g_metres at the figure.
+place_camera(e: *Engine, column: int) {
+    cam = engine.engine_camera(e)
+    angle = (column as float) * 6.28318530718 / (COLS as float)
+    distance = (g_metres * 0.5) / TAN_HALF_FOV
+    centre = g_metres * 0.5
+    core.camera_set_position(cam, core.vec3(cos(angle) * distance, centre, sin(angle) * distance))
+    core.camera_look_at(cam, core.vec3(0.0, centre, 0.0))
+}
+
+// The gait at the phase of cell row `row`, on every model of the figure.
+set_phase(row: int) {
+    phase = (row as float) / (ROWS as float)
+    i = 0
+    while i < list.size(g_models) {
+        core.model_set_instance_phase(list.get_raw(g_models, i) as *Model, 0, phase)
+        i = i + 1
+    }
+}
+
+prepare_cell(e: *Engine, cell: int) {
+    place_camera(e, cell % COLS)
+    set_phase(cell / COLS)
+}
+
+// The atlas's layout, beside it, for the scene that draws from it.
+write_sidecar(path: string) {
+    text = "{\"figure\": \"${g_figure}\", \"cols\": ${COLS}, \"rows\": ${ROWS}, \"cell\": ${CELL}, \"metres\": ${g_metres}, \"facing\": \"+x\"}\n"
+    err = fs.write(path, text)
+    if err != "" { println("bake_impostor: could not write ${path}: ${err}") }
+}
+
+// The path up to and including its last slash, or "" for a bare name.
+directory_of(path: string) -> string {
+    cut = 0 - 1
+    i = 0
+    length = string.length(path)
+    while i < length {
+        c = string.char_at(path, i)
+        if c == 47 || c == 92 { cut = i }
+        i = i + 1
+    }
+    if cut < 0 { return "" }
+    return string.substring(path, 0, cut + 1)
+}
+
+on_start(state: ptr, e: *Engine) {
+    m = assets.manifest_load(g_manifest)
+    if m == null {
+        println("bake_impostor: ${assets.last_error()}")
+        engine.engine_stop(e)
+        return
+    }
+    entry = entry_named(m, g_figure)
+    if entry == null {
+        println("bake_impostor: the export has no ${g_figure}")
+        assets.manifest_free(m)
+        engine.engine_stop(e)
+        return
+    }
+    g_bank = bake_bank(m, entry)
+    body = assets.entry_load_model(m, entry)
+    if g_bank == null || body == null {
+        println("bake_impostor: ${g_figure} would not load: ${assets.last_error()}")
+        assets.manifest_free(m)
+        engine.engine_stop(e)
+        return
+    }
+    g_models = list.new()
+    list.add_raw(g_models, body as ptr)
+    // The clothes of a figure named Zombie_Body<suffix> are Zombie_Clothes<suffix>.
+    if string.starts_with(g_figure, "Zombie_Body") == 1 {
+        suffix = string.substring(g_figure, 11, string.length(g_figure))
+        clothes_entry = entry_named(m, "Zombie_Clothes${suffix}")
+        if clothes_entry != null {
+            clothes = assets.entry_load_model(m, clothes_entry)
+            if clothes != null { list.add_raw(g_models, clothes as ptr) }
+        }
+    }
+    // The cell spans the figure's height with a margin, in both directions,
+    // and the shader draws the quad that many metres wide and tall.
+    g_metres = ae3d_mesh_extent(core.model_mesh(body), 1) * MARGIN
+    if g_metres < 0.5 { g_metres = 2.0 }
+    i = 0
+    while i < list.size(g_models) {
+        model = list.get_raw(g_models, i) as *Model
+        as_crowd_of_one(model)
+        engine.engine_add_model(e, model)
+        i = i + 1
+    }
+    println("bake_impostor: ${g_figure}: ${list.size(g_models)} models, a cell ${g_metres}m, ${COLS}x${ROWS} cells of ${CELL}px")
+    assets.manifest_free(m)
+
+    // No light shapes what is read back -- the albedo is before any light,
+    // and the normal is the surface itself -- but the engine wants one.
+    light = core.light_directional(core.vec3(0.3, 0.9, 0.5), core.vec3(1.0, 1.0, 1.0), 1.0)
+    engine.engine_set_light(e, light)
+    engine.engine_set_shadows(e, false)
+    engine.engine_set_clear_color(e, 1.0, 0.0, 1.0)
+    engine.engine_set_capture_channel(e, 1)
+    core.camera_set_fov(engine.engine_camera(e), FOV)
+    g_atlas = calloc(COLS * CELL * ROWS * CELL, 4)
+    g_normals = calloc(COLS * CELL * ROWS * CELL, 4)
+    g_kept = calloc(COLS * ROWS * 2, 8)
+    g_cell = 0
+    g_channel = 1
+    prepare_cell(e, 0)
+    g_ok = true
+}
+
+// The cells' kept pixel counts, a row a line, for one channel.
+print_kept(channel: int) {
+    counts = g_kept as int[]
+    row = 0
+    while row < ROWS {
+        line = "bake_impostor:   "
+        column = 0
+        while column < COLS {
+            line = "${line} ${counts[(channel - 1) * COLS * ROWS + row * COLS + column]}"
+            column = column + 1
+        }
+        println(line)
+        row = row + 1
+    }
+}
+
+// The two atlases written, bled and noted.
+finish() {
+    stem = string.substring(g_out, 0, string.length(g_out) - 4)
+    normals_out = "${stem}_normal.png"
+    bled = ae3d_capture_bleed(g_atlas, COLS * CELL, ROWS * CELL)
+    ae3d_capture_bleed(g_normals, COLS * CELL, ROWS * CELL)
+    if ae3d_png_write(g_out, g_atlas, COLS * CELL, ROWS * CELL) != 1 {
+        println("bake_impostor: could not write ${g_out}")
+        return
+    }
+    if ae3d_png_write(normals_out, g_normals, COLS * CELL, ROWS * CELL) != 1 {
+        println("bake_impostor: could not write ${normals_out}")
+        return
+    }
+    println("bake_impostor: wrote ${g_out} and ${normals_out} (${COLS * CELL}x${ROWS * CELL}), ${g_empty} empty cells, ${bled} pixels bled, ${g_skipped} frames skipped")
+    println("bake_impostor: pixels kept a cell, albedo:")
+    print_kept(1)
+    println("bake_impostor: pixels kept a cell, normals:")
+    print_kept(2)
+    write_sidecar("${stem}.json")
+}
+
+// After each frame is drawn and before it is swapped away: the cell it
+// shows goes into the atlas, and the next cell is set up.
+on_late(state: ptr, e: *Engine, delta: float) {
+    if !g_ok { return }
+    if g_cell >= COLS * ROWS {
+        if g_channel == 1 {
+            // The albedo done: the same cells again, reading the normals.
+            g_channel = 2
+            g_cell = 0
+            engine.engine_set_capture_channel(e, 2)
+            prepare_cell(e, 0)
+            return
+        }
+        finish()
+        engine.engine_stop(e)
+        return
+    }
+    // The first frame the engine draws is before the camera above has taken
+    // hold everywhere; what it drew is discarded and the cell drawn again.
+    if delta <= 0.0 { g_skipped = g_skipped + 1 ; return }
+    // The whole frame, whatever size the window system gave the window; the
+    // copy takes its centre square into the cell.
+    if ae3d_capture_frame(e.width, e.height) != 1 {
+        println("bake_impostor: the frame could not be read back")
+        engine.engine_stop(e)
+        return
+    }
+    if g_cell == 0 && g_channel == 1 && (e.width != CELL || e.height != CELL) {
+        println("bake_impostor: the window is ${e.width}x${e.height}, not ${CELL}x${CELL}; its centre square is taken")
+    }
+    column = g_cell % COLS
+    row = g_cell / COLS
+    into = g_atlas
+    if g_channel == 2 { into = g_normals }
+    kept = ae3d_capture_copy_keyed(into, COLS * CELL, ROWS * CELL, column * CELL, row * CELL, CELL, KEY_R, KEY_G, KEY_B, 40)
+    counts = g_kept as int[]
+    counts[(g_channel - 1) * COLS * ROWS + g_cell] = kept
+    if kept <= 0 {
+        cam = engine.engine_camera(e)
+        println("bake_impostor: cell ${column},${row} is empty (camera ${cam.position.x}, ${cam.position.y}, ${cam.position.z})")
+        g_empty = g_empty + 1
+    }
+    g_cell = g_cell + 1
+    if g_cell < COLS * ROWS { prepare_cell(e, g_cell) }
+}
+
+main() {
+    if os.aether_args_count() > 1 { g_manifest = os.aether_args_get(1) }
+    if os.aether_args_count() > 2 { g_figure = os.aether_args_get(2) }
+    if os.aether_args_count() > 3 { g_out = os.aether_args_get(3) }
+    if g_out == "" { g_out = "${directory_of(g_manifest)}impostor_${g_figure}.png" }
+    // OpenGL, for the frame readback the bake is made of.
+    e = engine.engine_new_with(platform.API_GL)
+    // A cell's size; AE3D_BAKE_WINDOW=512 draws through a larger window
+    // and takes its centre square, the way a bare X server makes the tool
+    // work, to check that path where the window comes out as asked.
+    window = core.env_int("AE3D_BAKE_WINDOW", CELL)
+    engine.engine_set_size(e, window, window)
+    engine.engine_set_title(e, "ae3d: impostor bake")
+    engine.engine_set_camera_input(e, false)
+    engine.engine_set_vsync(e, 0)
+    engine.engine_set_post(e, false, false, 1.0, 0.0)
+    // No multisampling: a blended edge is the figure mixed with the key colour,
+    // a magenta fringe no cutout can take off. A hard edge at this size is
+    // finer than the pixels the impostor is drawn at.
+    engine.engine_set_msaa(e, 0)
+    engine.engine_set_frame_limit(e, COLS * ROWS * 2 + 8)
+    program = engine.behaviour_new("impostor bake", null)
+    program.start = on_start
+    program.late_update = on_late
+    engine.engine_add_behaviour(e, program)
+    if !engine.engine_run(e) { println("bake_impostor: no window") }
+    engine.engine_free(e)
+    if g_atlas != null { free(g_atlas) }
+    if g_normals != null { free(g_normals) }
+    if g_kept != null { free(g_kept) }
+    if g_bank != null { crowd.posebank_free(g_bank) }
+    assets.provenance_release()
+}

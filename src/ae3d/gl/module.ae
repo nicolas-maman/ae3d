@@ -35,7 +35,7 @@ exports (
     renderer_material_texture_size, renderer_set_normal_strength,
     renderer_shadow_ms, renderer_scene_ms, renderer_post_ms, renderer_post_active, device_name,
     renderer_program_binds, renderer_material_binds, renderer_texture_binds,
-    renderer_set_occlusion_strength,
+    renderer_set_occlusion_strength, renderer_set_capture_channel,
     renderer_frame_pixels, read_pixel, snapshot
 )
 
@@ -69,6 +69,8 @@ extern ae3d_gl_setup_vertex_attribs()
 extern ae3d_gl_upload_skin(mesh: ptr, vbo: int)
 extern ae3d_gl_uniform_mat4v(loc: int, count: int, values: ptr)
 extern ae3d_gl_setup_instance_attribs(inst: ptr, matrix_vbo: int, color_vbo: int)
+extern ae3d_gl_setup_proxy_vao(vao: int, mesh_vbo: int, mesh_ebo: int, skin_vbo: int,
+                               matrix_vbo: int, color_vbo: int, phase_vbo: int)
 extern ae3d_inst_is_points(inst: ptr) -> int
 extern ae3d_gl_setup_instance_phase(inst: ptr, phase_vbo: int)
 extern ae3d_gl_update_instance_phases(inst: ptr, phase_vbo: int)
@@ -189,10 +191,16 @@ struct ProgramSlots {
     bones: int
     pose_bank: int
     pose_bank_frames: int
+    impostor: int
+    impostor_cols: int
+    impostor_rows: int
+    impostor_width: int
+    impostor_height: int
     normal_sampler: int
     has_normal_map: int
     normal_strength: int
     occlusion_strength: int
+    capture_channel: int
     caustics_time: int
     fog_enabled: int
     shadow_direction: int
@@ -314,6 +322,7 @@ struct GLRenderer {
     // material one, because it is a look and not a surface.
     normal_strength: float
     occlusion_strength: float
+    capture_channel: int
     bound_instance_color: int
 
     post_fbo: int
@@ -370,6 +379,7 @@ renderer_new() -> *GLRenderer {
     // plastic. 2.5 is 0.10, which is relief.
     r.normal_strength = 2.5
     r.occlusion_strength = 1.0
+    r.capture_channel = 0
     r.bound_normal = 0 - 1
     r.fog = core.fog_none()
     r.clear_r = 0.0
@@ -525,6 +535,11 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
     s.bones = ae3d_gl_uniform_location(program, "bones")
     s.pose_bank = ae3d_gl_uniform_location(program, "poseBank")
     s.pose_bank_frames = ae3d_gl_uniform_location(program, "poseBankFrames")
+    s.impostor = ae3d_gl_uniform_location(program, "impostor")
+    s.impostor_cols = ae3d_gl_uniform_location(program, "impostorCols")
+    s.impostor_rows = ae3d_gl_uniform_location(program, "impostorRows")
+    s.impostor_width = ae3d_gl_uniform_location(program, "impostorWidth")
+    s.impostor_height = ae3d_gl_uniform_location(program, "impostorHeight")
     s.scene_depth = ae3d_gl_uniform_location(program, "sceneDepth")
     s.cloud_cover = ae3d_gl_uniform_location(program, "cloudCover")
     s.cloud_time = ae3d_gl_uniform_location(program, "cloudTime")
@@ -536,6 +551,7 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
     s.has_normal_map = ae3d_gl_uniform_location(program, "hasNormalMap")
     s.normal_strength = ae3d_gl_uniform_location(program, "normalStrength")
     s.occlusion_strength = ae3d_gl_uniform_location(program, "occlusionStrength")
+    s.capture_channel = ae3d_gl_uniform_location(program, "captureChannel")
     s.caustics_time = ae3d_gl_uniform_location(program, "causticsTime")
     s.shadow_direction = ae3d_gl_uniform_location(program, "shadowDirection")
     s.shadow_texel_world = ae3d_gl_uniform_location(program, "shadowTexelWorld")
@@ -705,6 +721,16 @@ bind_pose_bank(r: *GLRenderer, slots: *ProgramSlots, m: *Model) {
     ae3d_gl_texture_bind(3, m.pose_bank_texture)
     ae3d_gl_uniform_int(slots.pose_bank, 3)
     ae3d_gl_uniform_int(slots.pose_bank_frames, m.pose_bank_frames)
+    // The impostor's atlas grid and size, off for a crowd drawn as itself.
+    on = 0
+    if core.model_is_impostor(m) { on = 1 }
+    ae3d_gl_uniform_int(slots.impostor, on)
+    if on == 1 {
+        ae3d_gl_uniform_int(slots.impostor_cols, m.impostor_cols)
+        ae3d_gl_uniform_int(slots.impostor_rows, m.impostor_rows)
+        ae3d_gl_uniform_float(slots.impostor_width, m.impostor_width)
+        ae3d_gl_uniform_float(slots.impostor_height, m.impostor_height)
+    }
 }
 
 renderer_init(r: *GLRenderer, window: ptr, width: int, height: int) -> int {
@@ -843,6 +869,13 @@ renderer_release_texture(r: *GLRenderer, id: int) {
 // How hard normal maps push, for the whole scene.
 renderer_set_normal_strength(r: *GLRenderer, strength: float) {
     if r != null { r.normal_strength = strength }
+}
+
+// What the frame is drawn as: 0 the lit picture, 1 every surface's albedo,
+// 2 its normals -- what a bake reads back, and a view for finding out why
+// a surface lights the way it does.
+renderer_set_capture_channel(r: *GLRenderer, channel: int) {
+    if r != null { r.capture_channel = channel }
 }
 
 renderer_set_occlusion_strength(r: *GLRenderer, strength: float) {
@@ -1043,6 +1076,7 @@ renderer_remove_model(r: *GLRenderer, m: *Model) {
         ae3d_gl_buffer_delete(m.instance_color_vbo)
         m.instance_color_vbo = 0
     }
+    if m.depth_proxy_vao != 0 { ae3d_gl_vao_delete(m.depth_proxy_vao) ; m.depth_proxy_vao = 0 }
 
     count = list.size(r.models)
     i = 0
@@ -1381,7 +1415,7 @@ render_shadow_pass(r: *GLRenderer, light: *Light, cam: *Camera) {
                 ae3d_gl_uniform_mat4(model_slot, &m.model_matrix)
             }
             pose_depth(skinned_slot, bones_slot, m)
-            ae3d_gl_vao_bind(m.vao)
+            ae3d_gl_vao_bind(depth_vao(m))
             draw_depth(r, m, instanced)
         }
         i = i + 1
@@ -1476,15 +1510,41 @@ render_crowd_shadows(r: *GLRenderer) {
         // shadow cast through the model matrix as well was scaled twice.
         crowd_identity = core.mat4_ident()
         ae3d_gl_uniform_mat4(model_loc, &crowd_identity)
-        ae3d_gl_vao_bind(m.vao)
-        ae3d_gl_draw_elements_instanced(core.mesh_index_count(m.mesh), 0,
+        // Through the proxy's mesh where the model has one: the near tier
+        // casts from the far tier's hundred and sixty-eight triangles.
+        ae3d_gl_vao_bind(depth_vao(m))
+        ae3d_gl_draw_elements_instanced(core.mesh_index_count(depth_mesh(m)), 0,
                                         core.model_instance_count(m))
         r.last_draw_calls = r.last_draw_calls + 1
     }
 }
 
+// The vertex array a depth-only draw of `m` binds: its own, or one over
+// its proxy's mesh and its own instance stream where it has a proxy that
+// is registered (model_set_depth_proxy). A vertex array binds a mesh to an
+// instance stream, so the proxy needs a second one, made here the first
+// time and kept with the model; it is dropped and remade if the proxy's
+// buffers are not the ones it was made over.
+depth_vao(m: *Model) -> int {
+    if m.depth_proxy == null || !m.is_instanced || m.instance_vbo == 0 { return m.vao }
+    proxy = m.depth_proxy as *Model
+    if proxy.vbo == 0 || proxy.ebo == 0 || proxy.shares_geometry { return m.vao }
+    if m.depth_proxy_vao == 0 {
+        m.depth_proxy_vao = ae3d_gl_vao_create()
+        ae3d_gl_setup_proxy_vao(m.depth_proxy_vao, proxy.vbo, proxy.ebo, proxy.skin_vbo,
+                                m.instance_vbo, m.instance_color_vbo, m.instance_phase_vbo)
+    }
+    return m.depth_proxy_vao
+}
+
+// The mesh that array draws: the proxy's where the array is the proxy's.
+depth_mesh(m: *Model) -> ptr {
+    if m.depth_proxy_vao != 0 && m.depth_proxy != null { return (m.depth_proxy as *Model).mesh }
+    return m.mesh
+}
+
 draw_depth(r: *GLRenderer, m: *Model, instanced: int) {
-    indices = core.mesh_index_count(m.mesh)
+    indices = core.mesh_index_count(depth_mesh(m))
     if indices == 0 { return }
     if instanced == 1 {
         ae3d_gl_draw_elements_instanced(indices, 0, core.model_instance_count(m))
@@ -2305,6 +2365,7 @@ set_frame_uniforms(r: *GLRenderer, slots: *ProgramSlots, view_projection: *Mat4,
     ae3d_gl_uniform_mat4(slots.view_projection, view_projection)
     ae3d_gl_uniform_float(slots.normal_strength, r.normal_strength)
     ae3d_gl_uniform_float(slots.occlusion_strength, r.occlusion_strength)
+    ae3d_gl_uniform_int(slots.capture_channel, r.capture_channel)
 
     upload_lights(slots, lights, light)
 
@@ -2857,6 +2918,7 @@ renderer_cleanup(r: *GLRenderer) {
                 ae3d_gl_buffer_delete(m.instance_color_vbo)
                 m.instance_color_vbo = 0
             }
+            if m.depth_proxy_vao != 0 { ae3d_gl_vao_delete(m.depth_proxy_vao) ; m.depth_proxy_vao = 0 }
         }
         i = i + 1
     }

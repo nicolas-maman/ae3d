@@ -1,0 +1,194 @@
+// A depth proxy casts the model's shadow from another mesh.
+//
+// A big sphere floats over a ground plane under a sun overhead, drawn as
+// one instance of an instanced model, the way a crowd's tier is. Its shadow
+// darkens a patch of the ground. Given a proxy -- a small sphere, registered
+// with the renderer and hidden -- the model still draws as itself, but its
+// shadow is the proxy's: a much smaller patch. Without a shadow of its own
+// size, the near tier of a crowd casts from its far tier's mesh, and the
+// shadow pass costs what the far tier costs. On both backends.
+
+import std.mem
+import ae3d.core
+import ae3d.gl
+import ae3d.vk
+import ae3d.offscreen
+import ae3d.loader
+import ae3d.rendering
+
+const WIDTH = 320
+const HEIGHT = 240
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+frame_of(backend: *Backend) -> ptr {
+    core.backend_frame_pixels(backend)
+    return core.backend_frame_pixels(backend)
+}
+
+luma(pixels: ptr, x: int, y: int) -> int {
+    index = (y * WIDTH + x) * 4
+    return mem.get_byte(pixels, index) + mem.get_byte(pixels, index + 1) + mem.get_byte(pixels, index + 2)
+}
+
+// How many pixels of the frame are darker than they were when nothing cast
+// a shadow: the shadow's area on the ground, in pixels.
+shadowed_pixels(lit: ptr, now: ptr) -> int {
+    count = 0
+    y = 0
+    while y < HEIGHT {
+        x = 0
+        while x < WIDTH {
+            if luma(lit, x, y) - luma(now, x, y) > 24 { count = count + 1 }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return count
+}
+
+// The frame's pixels, copied: the target hands back one buffer, and the next
+// render overwrites it.
+copy_frame(backend: *Backend) -> ptr {
+    pixels = frame_of(backend)
+    if pixels == null { return null }
+    kept = calloc(WIDTH * HEIGHT, 4)
+    memcpy(kept, pixels, WIDTH * HEIGHT * 4)
+    return kept
+}
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern memcpy(dst: ptr, src: ptr, bytes: int) -> ptr
+
+run_checks(backend: *Backend, name: string) {
+    core.backend_set_clear_color(backend, 0.0, 0.0, 0.0)
+
+    ground = loader.plane(24, 16.0)
+    core.model_set_position(ground, 0.0 - 192.0, 0.0, 0.0 - 192.0)
+    core.model_matte(ground, 0.85, 0.85, 0.85)
+    core.backend_add_model(backend, ground)
+
+    // The caster: one instance of a sphere thirty metres across, high up.
+    blocker = loader.sphere(1.0, 32, 24)
+    core.model_set_scale(blocker, 30.0, 30.0, 30.0)
+    core.model_matte(blocker, 0.8, 0.3, 0.2)
+    core.model_enable_instancing(blocker, 1)
+    core.model_set_instance_position(blocker, 0, core.vec3(0.0, 130.0, 0.0))
+    core.backend_add_model(backend, blocker)
+
+    // The proxy: a sphere a fifth the size, registered so its mesh is on the
+    // device, and never drawn as itself. Smaller in its mesh, not its scale:
+    // the proxy's mesh is drawn in the model's own instance frame, scale and
+    // all, the way a crowd's far tier stands in for its near one.
+    proxy = loader.sphere(0.2, 16, 12)
+    core.model_enable_instancing(proxy, 1)
+    core.model_set_instance_position(proxy, 0, core.vec3(0.0, 130.0, 0.0))
+    core.backend_add_model(backend, proxy)
+    proxy.visible = false
+
+    config = rendering.default_config()
+    config.advanced_shadows = true
+    config.shadow_intensity = 0.25
+    config.shadow_softness = 1.0
+    rendering.apply(ground, config)
+    rendering.apply(blocker, config)
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 150.0, 260.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+    light = core.light_sun(core.vec3(0.0, 1.0, 0.0))
+    light.ambient_strength = 0.35
+
+    core.backend_render(backend, cam, light)
+    lit = copy_frame(backend)
+    if lit == null { println("  ${name}: SKIP no pixels") ; return }
+
+    core.backend_set_shadows(backend, true)
+    core.backend_render(backend, cam, light)
+    own = copy_frame(backend)
+    own_area = shadowed_pixels(lit, own)
+    check("${name} the sphere casts a shadow of its own size", own_area > 400)
+
+    core.model_set_depth_proxy(blocker, proxy)
+    core.backend_render(backend, cam, light)
+    core.backend_render(backend, cam, light)
+    proxied = copy_frame(backend)
+    proxied_area = shadowed_pixels(lit, proxied)
+    check("${name} with a proxy the shadow is the proxy's, a fraction the size",
+          proxied_area > 8 && proxied_area * 4 < own_area)
+    // The model itself still draws: the sphere's pixels are where they were.
+    check("${name} and the model is still drawn as itself",
+          luma(proxied, WIDTH / 2, HEIGHT / 3) == luma(own, WIDTH / 2, HEIGHT / 3))
+
+    core.model_set_depth_proxy(blocker, null)
+    core.backend_render(backend, cam, light)
+    core.backend_render(backend, cam, light)
+    back = copy_frame(backend)
+    check("${name} and taking the proxy away gives the shadow back", shadowed_pixels(lit, back) == own_area)
+    println("  ${name}: shadow ${own_area} px as itself, ${proxied_area} px through the proxy")
+
+    free(lit)
+    free(own)
+    free(proxied)
+    free(back)
+    core.backend_set_shadows(backend, false)
+    core.backend_remove_model(backend, ground)
+    core.backend_remove_model(backend, blocker)
+    core.backend_remove_model(backend, proxy)
+    core.model_free(ground)
+    core.model_free(blocker)
+    core.model_free(proxy)
+    core.camera_free(cam)
+    core.light_free(light)
+}
+
+main() {
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("depth proxy: SKIP no OpenGL context")
+        return
+    }
+    renderer = gl.renderer_new()
+    gl_pass = gl.backend(renderer)
+    if !core.backend_init(&gl_pass, context, WIDTH, HEIGHT) {
+        println("depth proxy: SKIP the OpenGL backend would not initialise")
+        return
+    }
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    run_checks(&gl_pass, "opengl")
+    core.backend_cleanup(&gl_pass)
+    offscreen.target_destroy(target)
+    gl.renderer_free(renderer)
+    offscreen.context_destroy(context)
+
+    if !vk.available() {
+        println("depth proxy: no Vulkan driver (${vk.last_error()}), checked OpenGL only")
+    } else {
+        vk_renderer = vk.renderer_new()
+        vk_pass = vk.backend(vk_renderer)
+        if !core.backend_init(&vk_pass, null, WIDTH, HEIGHT) {
+            println("depth proxy: SKIP Vulkan would not start (${vk.last_error()})")
+        } else {
+            run_checks(&vk_pass, "vulkan")
+            core.backend_cleanup(&vk_pass)
+        }
+        vk.renderer_free(vk_renderer)
+    }
+
+    if failures == 0 {
+        println("depth proxy: all checks passed")
+    } else {
+        println("depth proxy: ${failures} failure(s)")
+    }
+}
