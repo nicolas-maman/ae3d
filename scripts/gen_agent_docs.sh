@@ -37,10 +37,11 @@ generated="$(mktemp)"
 }
 
 if [ "${1:-}" = "--check" ]; then
-    # Compared by the shell, byte for byte: a minimal MSYS2 ships neither
-    # diff nor cmp, and a missing tool read as "out of date" and reported a
-    # change nobody had made.
-    if [ "$(cat docs/agent.md)" = "$(cat "$generated")" ]; then
+    # Compared by the shell: a minimal MSYS2 ships neither diff nor cmp, and
+    # a missing tool read as "out of date" and reported a change nobody had
+    # made. Carriage returns are dropped first, since a Windows checkout
+    # may carry them and the generator writes none.
+    if [ "$(tr -d '' < docs/agent.md)" = "$(tr -d '' < "$generated")" ]; then
         rm -f "$generated"
         exit 0
     fi
