@@ -4016,6 +4016,16 @@ void ae3d_vk_draw_ssao(void) {
 // SSR ran a stage before it.
 static void ae3d_vk_draw_composite(int source_texture) {
     int index = vk.bloom && vk.post_pipelines[2] ? 2 : (vk.fxaa && vk.post_pipelines[1] ? 1 : 0);
+    /* AE3D_VK_SHOW_DEPTH=1 composites the resolved scene depth in place of
+       the frame: what the occlusion, the reflection and the water read,
+       looked at. */
+    if (getenv("AE3D_VK_SHOW_DEPTH") && vk.camdepth_view && vk.camdepth_sampler && vk.post_pipelines[0]) {
+        static VkDescriptorSet show_set[AE3D_VK_FRAMES];
+        ae3d_vk_draw_screen_with(vk.post_pipelines[0], &show_set[(int)vk.frame], vk.camdepth_view,
+                                 vk.camdepth_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                 VK_NULL_HANDLE, VK_NULL_HANDLE);
+        return;
+    }
     ae3d_vk_draw_pipeline(vk.post_pipelines[index], vk.screen_quad, source_texture, 0, 1);
 }
 

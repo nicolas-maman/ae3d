@@ -73,7 +73,7 @@ What makes the pipeline usable by a program rather than a person:
 ### Holding the scene to a standard
 
 Two programs run on every build. `tools/measure_scene.ae` asks the engine
-what it drew; `scripts/critique_scene.py` asks whether it is any good, which a
+what it drew; `tools/critique_scene.ae` asks whether it is any good, which a
 screenshot cannot answer:
 
 ```

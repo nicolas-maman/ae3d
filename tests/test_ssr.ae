@@ -1,0 +1,167 @@
+// Screen-space reflection mirrors what is drawn onto the wet plane.
+//
+// A dark plane at the road's height, a bright glowing block standing on
+// it, a camera low and looking across the plane at the block. With the
+// reflection off, the plane under the block is the plane; with it on, the
+// block's light comes back on the plane in front of it -- more light in
+// the plane's part of the frame, and the pixels that changed are under the
+// block, not above it. Vulkan, which is where the reflection is; it reads
+// the scene's resolved depth, so it is also the check that the depth the
+// occlusion and the water read comes back right.
+
+import std.mem
+import std.string
+import ae3d.core
+import ae3d.vk
+import ae3d.loader
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern memcpy(dst: ptr, src: ptr, bytes: int) -> ptr
+
+const WIDTH = 320
+const HEIGHT = 240
+const ROAD = 0.115
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+frame(backend: *Backend, cam: *Camera, light: *Light) -> ptr {
+    core.backend_render(backend, cam, light)
+    core.backend_frame_pixels(backend)
+    pixels = core.backend_frame_pixels(backend)
+    kept = calloc(WIDTH * HEIGHT, 4)
+    memcpy(kept, pixels, WIDTH * HEIGHT * 4)
+    return kept
+}
+
+luma(pixels: ptr, x: int, y: int) -> int {
+    i = (y * WIDTH + x) * 4
+    return mem.get_byte(pixels, i) + mem.get_byte(pixels, i + 1) + mem.get_byte(pixels, i + 2)
+}
+
+// The light in the rows from `from` down: the plane's part of the frame.
+light_below(pixels: ptr, from: int) -> int {
+    sum = 0
+    y = from
+    while y < HEIGHT {
+        x = 0
+        while x < WIDTH {
+            sum = sum + luma(pixels, x, y)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return sum
+}
+
+main() {
+    if !vk.available() {
+        println("ssr: SKIP no Vulkan driver (${vk.last_error()})")
+        return
+    }
+    if string.contains(vk.device_name(), "llvmpipe") == 1 {
+        println("ssr: SKIP software Vulkan cannot read its frame back")
+        return
+    }
+    renderer = vk.renderer_new()
+    pass = vk.backend(renderer)
+    if !core.backend_init(&pass, null, WIDTH, HEIGHT) {
+        println("ssr: SKIP Vulkan would not start (${vk.last_error()})")
+        return
+    }
+    core.backend_set_clear_color(&pass, 0.0, 0.0, 0.0)
+
+    // The plane: dark, matte, at the road's height.
+    ground = loader.plane(2, 40.0)
+    core.model_set_position(ground, 0.0 - 40.0, ROAD, 0.0 - 40.0)
+    core.model_set_diffuse(ground, 0.06, 0.06, 0.07)
+    core.model_set_pbr(ground, 0.0, 0.9)
+    core.backend_add_model(&pass, ground)
+
+    // The block: glowing white, standing on the plane ahead.
+    block = loader.cube(1.0)
+    core.model_set_scale(block, 2.0, 3.0, 0.5)
+    core.model_set_position(block, 0.0, ROAD + 1.5, 0.0 - 8.0)
+    core.model_set_diffuse(block, 1.0, 1.0, 1.0)
+    core.model_set_exposure(block, 12.0)
+    core.backend_add_model(&pass, block)
+
+    cam = core.camera_new(WIDTH, HEIGHT)
+    core.camera_set_position(cam, core.vec3(0.0, 1.2, 4.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.8, 0.0 - 8.0))
+    light = core.light_sun(core.vec3(0.2, 1.0, 0.3))
+    light.intensity = 0.2
+    light.ambient_strength = 0.1
+
+    vk.renderer_set_ssr(renderer, false)
+    core.backend_render(&pass, cam, light)
+    off = frame(&pass, cam, light)
+    vk.renderer_set_ssr_params(renderer, ROAD, 1.5)
+    vk.renderer_set_ssr(renderer, true)
+    core.backend_render(&pass, cam, light)
+    on = frame(&pass, cam, light)
+
+    // The block stands in the upper half; its reflection lies below the
+    // horizon. The light under the horizon rises with the reflection.
+    horizon = HEIGHT / 2
+    below_off = light_below(off, horizon)
+    below_on = light_below(on, horizon)
+    // Where the pixels changed: none above the block's base, many below.
+    above = 0
+    below = 0
+    y = 0
+    while y < HEIGHT {
+        x = 0
+        while x < WIDTH {
+            d = luma(on, x, y) - luma(off, x, y)
+            if d < 0 { d = 0 - d }
+            if d > 24 {
+                if y < horizon - 10 { above = above + 1 } else { below = below + 1 }
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    println("  ssr: light under the horizon ${below_off} off, ${below_on} on; pixels changed ${below} below the horizon, ${above} above")
+    check("the reflection brightens the plane under the block", below_on > below_off * 11 / 10)
+    check("and changes the plane, not the block or the sky", below > 200 && above < 50)
+
+    vk.renderer_set_ssr(renderer, false)
+    core.backend_render(&pass, cam, light)
+    back = frame(&pass, cam, light)
+    diff = 0
+    i = 0
+    while i < WIDTH * HEIGHT * 4 {
+        d = mem.get_byte(back, i) - mem.get_byte(off, i)
+        if d < 0 { d = 0 - d }
+        diff = diff + d
+        i = i + 1
+    }
+    check("off again, the plane is the plane", diff < WIDTH * HEIGHT / 4)
+
+    free(off)
+    free(on)
+    free(back)
+    core.backend_remove_model(&pass, ground)
+    core.backend_remove_model(&pass, block)
+    core.model_free(ground)
+    core.model_free(block)
+    core.camera_free(cam)
+    core.light_free(light)
+    core.backend_cleanup(&pass)
+    vk.renderer_free(renderer)
+    if failures == 0 {
+        println("ssr: all checks passed")
+    } else {
+        println("ssr: ${failures} failure(s)")
+    }
+}

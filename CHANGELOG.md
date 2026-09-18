@@ -115,6 +115,29 @@
   inverse binds where `skeleton_bind` would derive them from the pose.
 - `native/ae3d_blob.c`: a file as bytes and the little-endian numbers in it.
 
+### The critique, in Aether
+
+- `tools/critique_scene.ae` replaces `scripts/critique_scene.py`, standard
+  for standard with the same numbers: texel density, relief, the figure's
+  geometry and proportion, the frame's budget, the surfaces' normal maps
+  and occlusion reaching the picture, a held frame holding still, the
+  night's contrast and warmth, the pools of light, the wet road's analytic
+  and screen-space reflections, the figure's reflection, bloom and shadows
+  proven by turning them off, the fast pose reading true, spins, the
+  head's carriage, the walk's planted feet, the weight shift, the strike,
+  the silhouette and its islands, the leg count. `ci.sh` launches the
+  scene and attaches it, as it does `measure_scene`. One standard, the
+  head's follow-through, was found never to have measured anything (both
+  bones' sway is zero and the Python ranked noise) and is a note until the
+  clip has one (#333). What is left of #272 in Python is the editor driver
+  and the Blender scripts.
+- `tests/test_ssr`: the reflection mirrors a glowing block onto the wet
+  plane under it, on Vulkan; the first check of the reflection outside the
+  critique, and of the resolved depth it reads.
+- `AE3D_VK_SHOW_DEPTH=1` composites the resolved scene depth in place of
+  the frame on Vulkan, for looking at what the occlusion, the reflection
+  and the water read.
+
 ### The frame as characters, in Aether
 
 - `tools/ae3d_view.ae` replaces `tools/ae3d_view.py`: `frame.grid` as a page

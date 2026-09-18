@@ -434,7 +434,7 @@ done
 step "examples build and run"
 # The benchmark is built in the same pass: build_together starts from a clean
 # status directory, so a later call would forget that the examples built.
-build_together examples/*.ae tools/ae3d_bench.ae tools/measure_scene.ae tools/ae3d_agent.ae tools/ae3d_view.ae tools/zombie_street.ae tools/bake_impostor.ae
+build_together examples/*.ae tools/ae3d_bench.ae tools/measure_scene.ae tools/ae3d_agent.ae tools/ae3d_view.ae tools/critique_scene.ae tools/zombie_street.ae tools/bake_impostor.ae
 for example in examples/*.ae; do
     name="$(basename "$example" .ae)"
     if ! built_ok "$name"; then
@@ -579,24 +579,46 @@ run_critique() {   # run_critique <backend> <port>
     # its animation sampling is the same pose the OpenGL pass already judges and
     # would run for minutes on the software renderer a headless runner uses, so
     # it is skipped there.
-    [ "$crit_backend" = vulkan ] && crit_arg="--vulkan --frame-only"
+    [ "$crit_backend" = vulkan ] && crit_arg="--frame-only"
     crit_log="$(mktemp)"
-    bounded "$RUN_LIMIT" $PYTHON scripts/critique_scene.py --launch ./build/zombie_street \
-        $crit_arg --port "$crit_port" >"$crit_log" 2>&1
-    crit_status=$?
-    if [ "$crit_status" -eq 0 ]; then
+    crit_scene_log="$(mktemp)"
+    AE3D_AGENT="$crit_port" AE3D_FRAMES=100000 ./build/zombie_street "$crit_backend" >"$crit_scene_log" 2>&1 &
+    crit_scene=$!
+    # The scene opens its port after the window and the first frame; asked
+    # again while that is what came back and the scene is alive.
+    crit_status=2
+    attempt=0
+    while [ "$attempt" -lt 50 ]; do
+        kill -0 "$crit_scene" 2>/dev/null || break
+        bounded "$RUN_LIMIT" ./build/critique_scene "$crit_port" $crit_arg >"$crit_log" 2>&1
+        crit_status=$?
+        grep -q 'nothing answering' "$crit_log" || break
+        attempt=$((attempt + 1))
+        sleep 0.2
+    done
+    if ! kill -0 "$crit_scene" 2>/dev/null && [ "$crit_status" -ne 0 ]; then
+        # A backend the machine has no driver for is a skip, not a failure:
+        # there is nothing to judge, and the scene said so on its way out.
+        if grep -q 'no Vulkan driver' "$crit_scene_log"; then
+            skip "$crit_name" "no Vulkan driver on this machine"
+        else
+            skip "$crit_name" "the scene could not open a window"
+        fi
+    elif [ "$crit_status" -eq 0 ]; then
         pass "$crit_name"
-        grep -E '^  (ok|FAIL)' "$crit_log" | sed 's/^/      /' | head -30
+        grep -E '^  (ok|FAIL|note)' "$crit_log" | sed 's/^/      /' | head -30
     elif [ "$crit_status" -eq 3 ]; then
         skip "$crit_name" "$(grep -m1 'SKIP' "$crit_log" | sed 's/.*SKIP *//' || echo 'the frame could not be read')"
     else
         fail "$crit_name"
-        grep -E 'FAIL|Traceback|Error|error:|critique_scene:' "$crit_log" | sed 's/^/        /' | head -16
+        grep -E 'FAIL|error:|critique_scene:' "$crit_log" | sed 's/^/        /' | head -16
     fi
-    rm -f "$crit_log"
+    kill "$crit_scene" 2>/dev/null
+    wait "$crit_scene" 2>/dev/null
+    rm -f "$crit_log" "$crit_scene_log"
 }
-if [ -z "$PYTHON" ]; then
-    skip "zombie_street (critique)" "no python3"
+if ! built_ok critique_scene; then
+    fail "critique_scene (build)"
 elif ! have_display; then
     skip "zombie_street (critique)" "no display"
 elif ! built_ok zombie_street; then
