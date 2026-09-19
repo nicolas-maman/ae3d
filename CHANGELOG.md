@@ -2,6 +2,22 @@
 
 ## [current]
 
+### Input as a game names it
+
+- `ae3d.input`: actions and axes bound once to keys, mouse buttons and a
+  gamepad (`bind_key`, `bind_mouse`, `bind_button`, `bind_axis` for a
+  key pair, `bind_pad_axis`, `bind_mouse_axis`), read by name from any
+  script -- `held`, `pressed`, `released` (edges between two frames),
+  `axis` (-1..1 from keys and sticks, pixels from the mouse). The engine
+  owns one (`engine_input`) and polls it once a frame before the scripts'
+  updates, so every script in a frame reads the same state. The camera's
+  own controls are actions in it -- "forward", "strafe", "rise", "sprint",
+  "look", "look_x/y" -- so a gamepad flies every example and a game rebinds
+  them. Gamepads through GLFW's mapping (`ae3d_gamepad_*`). Anything can
+  be injected (`inject_key`, `inject_button`, `inject_pad_axis`, ...):
+  `tests/test_input` drives it with no window and then through the
+  engine, and the channel's `input.set`/`input.get` let an agent play.
+
 ### The clouds' dither, folded by the temporal pass
 
 - The cloud march's per-pixel dither turns with the frame when a temporal

@@ -15,6 +15,7 @@ import ae3d.agent
 import ae3d.anim
 import ae3d.sky
 import ae3d.behaviour
+import ae3d.input
 import std.os
 
 extern calloc(count: int, size: int) -> ptr
@@ -27,7 +28,7 @@ exports (
     Engine, Behaviour,
     behaviour_new, engine_add_behaviour, engine_remove_behaviour, engine_behaviour_count, engine_behaviour,
     engine_add_scene, engine_remove_scene,
-    object, script, destroy, running, of, engine_scene,
+    object, script, destroy, running, of, engine_scene, engine_input,
     engine_new, engine_new_with, engine_over, engine_update, engine_free, engine_run, engine_run_at, engine_start, engine_loop, engine_shutdown, engine_jobs,
     engine_stop,
     engine_add_model, engine_remove_model, engine_set_light, engine_light,
@@ -187,6 +188,10 @@ struct Engine {
     agent_on: bool
     agent_ctx: ptr
     animations: ptr
+    // The input service (ae3d.input): the actions a game binds, polled
+    // once a frame before the updates. The camera's own controls are
+    // actions in it, "forward", "strafe", "rise", "sprint" and "look".
+    input: ptr
     agent_steps_left: int
     frame_limit: int
 
@@ -281,6 +286,55 @@ engine_add_scene(e: *Engine, scene: *Scene) -> *Behaviour {
 
 // The engine's own scene: what `object` puts objects in.
 engine_scene(e: *Engine) -> *Scene { return e.scene as *Scene }
+
+// The engine's input: bind actions on it, read them from any script.
+engine_input(e: *Engine) -> *Input { return e.input as *Input }
+
+// The camera's controls as actions, the way every example has flown: WASD
+// and the sticks, space and control for up and down, shift to sprint, the
+// right mouse button to look. A game rebinds or unbinds them.
+default_input() -> *Input {
+    i = input.input_new(null)
+    input.bind_axis(i, "forward", platform.KEY_W, platform.KEY_S)
+    input.bind_pad_axis(i, "forward", input.PAD_LEFT_Y, 0.0 - 1.0)
+    input.bind_axis(i, "strafe", platform.KEY_D, platform.KEY_A)
+    input.bind_pad_axis(i, "strafe", input.PAD_LEFT_X, 1.0)
+    input.bind_axis(i, "rise", platform.KEY_SPACE, platform.KEY_LEFT_CONTROL)
+    input.bind_pad_axis(i, "rise", input.PAD_RIGHT_TRIGGER, 1.0)
+    input.bind_key(i, "sprint", platform.KEY_LEFT_SHIFT)
+    input.bind_key(i, "sprint", platform.KEY_RIGHT_SHIFT)
+    input.bind_button(i, "sprint", input.PAD_LEFT_THUMB)
+    input.bind_mouse(i, "look", platform.MOUSE_RIGHT)
+    input.bind_pad_axis(i, "look_x", input.PAD_RIGHT_X, 1.0)
+    input.bind_pad_axis(i, "look_y", input.PAD_RIGHT_Y, 1.0)
+    return i
+}
+
+// The camera flown by the actions: the heading added up from the axes
+// and scaled once, so the diagonal is no faster than an axis; the look
+// from the mouse while its button is held, and from the right stick.
+fly_camera(e: *Engine, cam: *Camera, delta: float) {
+    i = e.input as *Input
+    velocity = cam.speed * delta
+    if input.held(i, "sprint") { velocity = velocity * 2.5 }
+    heading = core.vec3(0.0, 0.0, 0.0)
+    heading = core.v3_add(heading, core.v3_mul(cam.front, input.axis(i, "forward")))
+    heading = core.v3_add(heading, core.v3_mul(cam.right, input.axis(i, "strafe")))
+    heading = core.v3_add(heading, core.v3_mul(cam.world_up, input.axis(i, "rise")))
+    core.camera_move(cam, heading, velocity)
+
+    if input.held(i, "look") {
+        process_mouse_look(e, cam)
+    } else {
+        e.first_mouse = true
+    }
+    turn_x = input.axis(i, "look_x")
+    turn_y = input.axis(i, "look_y")
+    if turn_x != 0.0 || turn_y != 0.0 {
+        // A full deflection turns at a steady rate, whatever the frame.
+        core.camera_process_mouse(cam, turn_x * 120.0 * delta, 0.0 - turn_y * 120.0 * delta, true)
+    }
+}
 
 // A game object in the engine's scene, drawn by `model` (null for an
 // object with no mesh -- a game manager, a camera rig). The model is the
@@ -438,6 +492,7 @@ engine_new_with(api: int) -> *Engine {
     e.pending_models = list.new()
     e.scene = behaviour.scene_new() as ptr
     engine_add_scene(e, e.scene as *Scene)
+    e.input = default_input() as ptr
     e.api = api
     e.width = 1024
     e.height = 768
@@ -494,6 +549,7 @@ engine_over(renderer: ptr, api: int, camera: *Camera, light: *Light) -> *Engine 
     e.pending_models = list.new()
     e.scene = behaviour.scene_new() as ptr
     engine_add_scene(e, e.scene as *Scene)
+    e.input = default_input() as ptr
     e.api = api
     e.borrowed = true
     e.width = 1024
@@ -702,6 +758,10 @@ engine_free(e: *Engine) {
         e.scene = null
     }
     if e.pending_models != null { list.free(e.pending_models) ; e.pending_models = null }
+    if e.input != null {
+        input.input_free(e.input as *Input)
+        e.input = null
+    }
     if e.animations != null {
         anim.registry_free(e.animations as *Registry)
         e.animations = null
@@ -1226,6 +1286,7 @@ engine_start(e: *Engine, x: int, y: int) -> bool {
         platform.shutdown()
         return false
     }
+    input.input_set_window(e.input as *Input, e.window)
 
     if x < 0 || y < 0 {
         platform.window_center(e.window)
@@ -1329,6 +1390,7 @@ pump_agent(e: *Engine) {
 
     c.camera = e.camera
     c.light = e.light
+    c.input = e.input
     c.gl_renderer = e.gl_renderer
     c.animations = e.animations
     c.on_pose = poses_for_agent as fn(ptr)
@@ -1641,14 +1703,10 @@ engine_loop(e: *Engine) {
             last_height = height
         }
 
-        if e.camera_input {
-            core.camera_process_keyboard(cam, e.window, delta)
-            if platform.mouse_down(e.window, platform.MOUSE_RIGHT) {
-                process_mouse_look(e, cam)
-            } else {
-                e.first_mouse = true
-            }
-        }
+        // The input first, so every script in the frame reads the same
+        // state and an edge (pressed, released) is between two frames.
+        input.poll(e.input as *Input)
+        if e.camera_input { fly_camera(e, cam, delta) }
 
         // The accumulator was drained a step at a time and nothing was called
         // in between, so the fixed step was a number the engine subtracted from

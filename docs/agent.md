@@ -54,6 +54,8 @@ interleaved with the first.
 | `light.list` |  | Every light: kind, position, direction, colour, intensity and ambient. |
 | `model.set` | `index, [position], [rotation], [scale], [diffuse], [metallic], [roughness], [reflectivity], [alpha], [visible], [casts_shadow], [name]` | Change a model. Only the fields present are written; answers with the model as it now is. |
 | `camera.set` | `[position], [look_at], [fov], [near], [far]` | Move or reframe the camera. |
+| `input.set` | `[key], [mouse], [button], [axis], [value], [down], [clear]` | Press or release a key, mouse button or pad button, hold a pad axis at a value, or clear every injection: what the engine's input reads next frame beside the real devices. |
+| `input.get` |  | Every bound action with its state this frame: down, pressed, released, value. |
 | `light.set` | `[index], [position], [direction], [color], [intensity], [ambient]` | Change a light. |
 | `scene.save` | `path, [mesh_directory]` | Write the scene to JSON, with generated geometry beside it. |
 | `scene.load` | `path` | Replace the scene with one from a file, and reframe the camera as it was saved. |
