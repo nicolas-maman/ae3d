@@ -18,6 +18,7 @@ import ae3d.vk
 import ae3d.anim
 import ae3d.assets
 import ae3d.scene
+import ae3d.input
 
 exports (
     Context, context_new, context_free,
@@ -89,6 +90,9 @@ struct Deferred {
 struct Context {
     camera: ptr
     light: ptr
+    // The engine's input service, for an agent that plays: keys, mouse
+    // buttons, pad buttons and sticks pressed over the channel.
+    input: ptr
     gl_renderer: ptr
     animations: ptr
     vk_renderer: ptr
@@ -434,6 +438,10 @@ help_result() -> ptr {
         "Change a model. Only the fields present are written; answers with the model as it now is."))
     json.array_add_raw(ops, describe("camera.set", "[position], [look_at], [fov], [near], [far]",
         "Move or reframe the camera."))
+    json.array_add_raw(ops, describe("input.set", "[key], [mouse], [button], [axis], [value], [down], [clear]",
+        "Press or release a key, mouse button or pad button, hold a pad axis at a value, or clear every injection: what the engine's input reads next frame beside the real devices."))
+    json.array_add_raw(ops, describe("input.get", "",
+        "Every bound action with its state this frame: down, pressed, released, value."))
     json.array_add_raw(ops, describe("light.set", "[index], [position], [direction], [color], [intensity], [ambient]",
         "Change a light."))
     json.array_add_raw(ops, describe("scene.save", "path, [mesh_directory]",
@@ -852,6 +860,29 @@ lights_result(c: *Context) -> ptr {
     out = json.obj()
     json.object_set_raw(out, "count", json.from_int(count))
     json.object_set_raw(out, "lights", items)
+    return out
+}
+
+// Every action and what it read at the last poll.
+input_result(service: *Input) -> ptr {
+    items = json.arr()
+    count = input.action_count(service)
+    k = 0
+    while k < count {
+        a = input.action_at(service, k)
+        item = json.obj()
+        json.object_set_raw(item, "name", json.str(a.name))
+        json.object_set_raw(item, "down", json.boolean(a.down))
+        json.object_set_raw(item, "pressed", json.boolean(a.down && !a.was_down))
+        json.object_set_raw(item, "released", json.boolean(!a.down && a.was_down))
+        json.object_set_raw(item, "value", json.num(a.value))
+        json.array_add_raw(items, item)
+        k = k + 1
+    }
+    out = json.obj()
+    json.object_set_raw(out, "count", json.from_int(count))
+    json.object_set_raw(out, "actions", items)
+    json.object_set_raw(out, "gamepad", json.boolean(input.gamepad_present(service)))
     return out
 }
 
@@ -1873,6 +1904,37 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
         }
         apply_model_write(m, request)
         answer(id, model_result(m, index))
+        return false
+    }
+
+    if op == "input.set" {
+        if c.input == null {
+            fail(id, "there is no input service")
+            return false
+        }
+        service = c.input as *Input
+        down = true
+        if has_field(request, "down") { down = json.get_bool(json.object_get_raw(request, "down")) == 1 }
+        if has_field(request, "clear") && json.get_bool(json.object_get_raw(request, "clear")) == 1 {
+            input.inject_clear(service)
+        }
+        if has_field(request, "key") { input.inject_key(service, json.get_int(json.object_get_raw(request, "key")), down) }
+        if has_field(request, "mouse") { input.inject_mouse(service, json.get_int(json.object_get_raw(request, "mouse")), down) }
+        if has_field(request, "button") { input.inject_button(service, json.get_int(json.object_get_raw(request, "button")), down) }
+        if has_field(request, "axis") {
+            input.inject_pad_axis(service, json.get_int(json.object_get_raw(request, "axis")),
+                                  number_at(request, "value", 0.0), down)
+        }
+        answer(id, input_result(service))
+        return false
+    }
+
+    if op == "input.get" {
+        if c.input == null {
+            fail(id, "there is no input service")
+            return false
+        }
+        answer(id, input_result(c.input as *Input))
         return false
     }
 

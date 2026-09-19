@@ -34,6 +34,7 @@ skinned instanced crowds, and an engine that can be interrogated while it runs.
 | **Models from anywhere** | A glTF 2.0 loader (`ae3d.gltf`): meshes, materials and textures, the node tree, skins with their inverse binds, and every animation as clips, from `.gltf` or `.glb`. A Mixamo figure walks in the engine without passing through Blender, and `gltf.bake_bank` strikes any of its clips into a pose bank, so a figure from a public pack is a horde in one call. |
 | **An engine you can ask** | `AE3D_AGENT=port` opens a JSON channel: read and change the scene, hold a frame, read its pixels, trace a model from its Blender object to the pixels it landed on. |
 | **An editor** | Hierarchy, inspector, gizmos, terrain sculpting, undo, scene files; one dark theme on every platform. |
+| **Input as a game names it** | `ae3d.input`: actions and axes bound once to keys, mouse buttons and a gamepad, read by name from any script (`pressed`, `held`, `axis`), polled by the engine before the scripts run. The camera's own controls are actions in it, so a gamepad flies every example; anything can be injected -- a test, a replay, an agent over the channel (`input.set`). |
 
 The full list, with the reasoning behind each feature, is in
 [docs/rendering.md](docs/rendering.md).
@@ -136,7 +137,9 @@ main() {
 
 `engine.object` puts a game object in the engine's scene and its model in the
 renderer (on the first frame, if the window is not up yet); `engine.script`
-puts a script on it. Every phase gets the script's state and the object it
+puts a script on it. `engine.engine_input(e)` is the input service: bind
+`"jump"` to a key and a pad button once, ask `input.pressed(in, "jump")`
+from any script. Every phase gets the script's state and the object it
 is on, the way a MonoBehaviour has `this` and `gameObject`; the engine is
 `engine.of(go)`. The phases each frame, in order: `fixed_update` as many
 times as the fixed step fits, `update` once, `late_update` after every
@@ -227,7 +230,7 @@ Vulkan; the tooling, the scene language and the shaders in Aether
 native/      C: window and input, OpenGL entry points, the Vulkan backend, mesh and
              instance buffers, pose banks, the crowd step, image decoding, the socket
 src/ae3d/    Aether modules: core, gl, vk, shaders, engine, skin, anim, crowd, ecs,
-             assets, agent, loader, noise, voxel, water, scene, sky, behaviour, ...
+             assets, agent, loader, noise, voxel, water, scene, sky, behaviour, input, ...
 editor/      the scene editor
 tools/       ae3d_agent.ae (client), ae3d_view.ae (a frame as characters), ae3d_bench.ae (frame budget), measure_scene.ae, bake_impostor.ae, blender/ (the pipeline)
 scripts/     export, critique, perf

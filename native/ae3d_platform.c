@@ -258,6 +258,42 @@ int ae3d_mouse_down(void *win, int button) {
     return win && glfwGetMouseButton((GLFWwindow *)win, button) == GLFW_PRESS;
 }
 
+/* A gamepad through GLFW's mapping (3.3+): a joystick the database knows as
+ * a gamepad reads by the standard buttons and axes whatever the make. An
+ * older GLFW, or no pad, reads as nothing rather than as a fault. */
+int ae3d_gamepad_present(int id) {
+#ifdef GLFW_GAMEPAD_AXIS_LAST
+    return glfwJoystickIsGamepad(id) ? 1 : 0;
+#else
+    (void)id;
+    return 0;
+#endif
+}
+
+int ae3d_gamepad_button(int id, int button) {
+#ifdef GLFW_GAMEPAD_AXIS_LAST
+    GLFWgamepadstate state;
+    if (button < 0 || button > GLFW_GAMEPAD_BUTTON_LAST) return 0;
+    if (!glfwJoystickIsGamepad(id) || !glfwGetGamepadState(id, &state)) return 0;
+    return state.buttons[button] == GLFW_PRESS ? 1 : 0;
+#else
+    (void)id; (void)button;
+    return 0;
+#endif
+}
+
+double ae3d_gamepad_axis(int id, int axis) {
+#ifdef GLFW_GAMEPAD_AXIS_LAST
+    GLFWgamepadstate state;
+    if (axis < 0 || axis > GLFW_GAMEPAD_AXIS_LAST) return 0.0;
+    if (!glfwJoystickIsGamepad(id) || !glfwGetGamepadState(id, &state)) return 0.0;
+    return (double)state.axes[axis];
+#else
+    (void)id; (void)axis;
+    return 0.0;
+#endif
+}
+
 double ae3d_cursor_x(void *win) {
     double x = 0.0, y = 0.0;
     if (win) glfwGetCursorPos((GLFWwindow *)win, &x, &y);

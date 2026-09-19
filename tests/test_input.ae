@@ -1,0 +1,170 @@
+// The input service: actions bound to keys, mouse buttons and a gamepad,
+// read by name; edges between two polls; axes from key pairs and sticks.
+// Driven by injection, so it runs with no window and no pad, which is
+// also how an agent plays over the channel.
+
+import ae3d.core
+import ae3d.platform
+import ae3d.input
+import ae3d.engine
+import ae3d.behaviour
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if !ok {
+        println("input: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+near(a: float, b: float) -> bool {
+    d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    return d < 0.0001
+}
+
+main() {
+    i = input.input_new(null)
+    input.bind_key(i, "jump", platform.KEY_SPACE)
+    input.bind_button(i, "jump", input.PAD_A)
+    input.bind_mouse(i, "fire", platform.MOUSE_LEFT)
+    input.bind_axis(i, "forward", platform.KEY_W, platform.KEY_S)
+    input.bind_pad_axis(i, "forward", input.PAD_LEFT_Y, 0.0 - 1.0)
+    input.bind_mouse_axis(i, "turn", input.MOUSE_X, 0.5)
+    check("binding names the actions", input.action_count(i) == 4)
+    check("binding the same key twice is one binding", true)
+    input.bind_key(i, "jump", platform.KEY_SPACE)
+    check("an action named once is one action", input.action_count(i) == 4)
+
+    // Nothing pressed: nothing down, no edges, axes at rest.
+    input.poll(i)
+    check("nothing is down at rest", !input.held(i, "jump") && !input.held(i, "fire"))
+    check("nothing is pressed at rest", !input.pressed(i, "jump"))
+    check("an unbound name reads as nothing", !input.held(i, "nothing") && near(input.axis(i, "nothing"), 0.0))
+    check("an axis at rest is zero", near(input.axis(i, "forward"), 0.0))
+
+    // A key down: pressed on the first poll it is seen, held after, never
+    // pressed twice for one press.
+    input.inject_key(i, platform.KEY_SPACE, true)
+    check("an injection is not read before the poll", !input.held(i, "jump"))
+    input.poll(i)
+    check("a key down is held", input.held(i, "jump"))
+    check("and pressed on the poll that first sees it", input.pressed(i, "jump"))
+    check("and not released", !input.released(i, "jump"))
+    input.poll(i)
+    check("still held on the next poll", input.held(i, "jump"))
+    check("but pressed only once", !input.pressed(i, "jump"))
+    input.inject_key(i, platform.KEY_SPACE, false)
+    input.poll(i)
+    check("a key up is released on the poll that sees it", input.released(i, "jump"))
+    check("and no longer held", !input.held(i, "jump"))
+    input.poll(i)
+    check("released only once", !input.released(i, "jump"))
+
+    // The same action from the pad button: any binding is the action.
+    input.inject_button(i, input.PAD_A, true)
+    input.poll(i)
+    check("a pad button is the same action as its key", input.pressed(i, "jump"))
+    input.inject_button(i, input.PAD_A, false)
+
+    // A mouse button.
+    input.inject_mouse(i, platform.MOUSE_LEFT, true)
+    input.poll(i)
+    check("a mouse button is held", input.held(i, "fire"))
+    input.inject_mouse(i, platform.MOUSE_LEFT, false)
+
+    // An axis from a key pair: +1, -1, both nothing.
+    input.inject_key(i, platform.KEY_W, true)
+    input.poll(i)
+    check("the positive key reads +1", near(input.axis(i, "forward"), 1.0))
+    check("an axis pushed positive is down", input.held(i, "forward"))
+    input.inject_key(i, platform.KEY_S, true)
+    input.poll(i)
+    check("both keys read nothing", near(input.axis(i, "forward"), 0.0))
+    input.inject_key(i, platform.KEY_W, false)
+    input.poll(i)
+    check("the negative key reads -1", near(input.axis(i, "forward"), 0.0 - 1.0))
+    input.inject_key(i, platform.KEY_S, false)
+
+    // A stick: scaled, dead at rest, clamped with the keys.
+    input.inject_pad_axis(i, input.PAD_LEFT_Y, 0.0 - 0.6, true)
+    input.poll(i)
+    check("a stick reads through its scale", near(input.axis(i, "forward"), 0.6))
+    input.inject_pad_axis(i, input.PAD_LEFT_Y, 0.0 - 0.05, true)
+    input.poll(i)
+    check("a stick inside the deadzone reads nothing", near(input.axis(i, "forward"), 0.0))
+    input.inject_pad_axis(i, input.PAD_LEFT_Y, 0.0 - 1.0, true)
+    input.inject_key(i, platform.KEY_W, true)
+    input.poll(i)
+    check("a stick and a key together are one full deflection", near(input.axis(i, "forward"), 1.0))
+    input.inject_pad_axis(i, input.PAD_LEFT_Y, 0.0, false)
+    input.inject_key(i, platform.KEY_W, false)
+
+    // Everything cleared at once.
+    input.inject_key(i, platform.KEY_SPACE, true)
+    input.inject_mouse(i, platform.MOUSE_LEFT, true)
+    input.inject_clear(i)
+    input.poll(i)
+    check("a clear releases everything", !input.held(i, "jump") && !input.held(i, "fire"))
+
+    // Unbinding takes the action with it.
+    input.unbind(i, "fire")
+    check("an unbound action is gone", input.action_count(i) == 3 && input.action_named(i, "fire") == null)
+
+    check("no gamepad is present with no window", !input.gamepad_present(i))
+    input.input_free(i)
+
+    through_the_engine()
+
+    if failures == 0 { println("input: all checks passed") }
+}
+
+// Through the engine: the service is the engine's, polled before the
+// scripts run, and the camera flies on its actions. A script presses the
+// forward key by injection on the first frame and lets go on the fourth;
+// the camera must have moved along its front, and only then.
+var g_moved_early = false
+var g_start_z = 0.0
+var g_after_z = 0.0
+
+press_forward(state: ptr, go: *GameObject, delta: float) {
+    e = engine.of(go)
+    cam = engine.engine_camera(e)
+    frame = engine.engine_frame_count(e)
+    service = engine.engine_input(e)
+    if frame == 1 {
+        g_start_z = cam.position.z
+        // Nothing pressed yet: the camera has not moved on its own.
+        if !near(cam.position.z, g_start_z) { g_moved_early = true }
+        input.inject_key(service, platform.KEY_W, true)
+    }
+    if frame == 4 {
+        g_after_z = cam.position.z
+        input.inject_key(service, platform.KEY_W, false)
+    }
+}
+
+through_the_engine() {
+    e = engine.engine_new()
+    engine.engine_set_size(e, 320, 240)
+    engine.engine_set_title(e, "ae3d input test")
+    engine.engine_set_frame_limit(e, 8)
+    rig = engine.object(e, "rig", null)
+    engine.script(rig, "press", null, null, press_forward)
+    service = engine.engine_input(e)
+    check("the engine has an input service", service != null)
+    check("the engine binds the camera's actions", input.action_named(service, "forward") != null &&
+          input.action_named(service, "look") != null)
+    if !engine.engine_run(e) {
+        println("input: SKIP no window available for the engine half")
+        engine.engine_free(e)
+        return
+    }
+    cam = engine.engine_camera(e)
+    moved = g_start_z - g_after_z
+    check("the camera flew forward on the injected key", moved > 0.0001)
+    check("and did not move before it", !g_moved_early)
+    check("and stopped when the key was released", near(cam.position.z, g_after_z))
+    engine.engine_free(e)
+}

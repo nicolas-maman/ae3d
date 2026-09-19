@@ -1,0 +1,464 @@
+// The input as a game names it: actions and axes, bound once to keys,
+// mouse buttons and a gamepad, read by name from any script -- Unity's
+// Input, gopher3D's input manager.
+//
+//     in = engine.engine_input(e)
+//     input.bind_key(in, "jump", platform.KEY_SPACE)
+//     input.bind_button(in, "jump", input.PAD_A)
+//     input.bind_axis(in, "throttle", platform.KEY_W, platform.KEY_S)
+//     input.bind_pad_axis(in, "throttle", input.PAD_LEFT_Y, -1.0)
+//
+//     if input.pressed(in, "jump") { ... }       // went down this frame
+//     if input.held(in, "fire") { ... }           // down now
+//     speed = input.axis(in, "throttle")          // -1 to 1, keys or stick
+//     turn = input.mouse_dx(in)                   // pixels this frame
+//
+// The engine polls it once a frame, before the scripts' updates, so
+// `pressed` and `released` are edges between two frames and every script
+// in the frame reads the same state. The engine's own bindings -- the
+// camera's forward, strafe, rise, sprint, look -- are actions like any
+// other, so a gamepad flies every example and a game can rebind them.
+//
+// Anything can be injected: a test with no window, an agent over the
+// channel (`input.set`), a replay. An injected key is down until it is
+// released, on top of whatever the keyboard says.
+import std.list
+import std.heap
+import std.string
+import ae3d.core
+import ae3d.platform
+
+exports (
+    Input, Action,
+    PAD_A, PAD_B, PAD_X, PAD_Y, PAD_LEFT_BUMPER, PAD_RIGHT_BUMPER, PAD_BACK, PAD_START,
+    PAD_LEFT_THUMB, PAD_RIGHT_THUMB, PAD_UP, PAD_RIGHT, PAD_DOWN, PAD_LEFT,
+    PAD_LEFT_X, PAD_LEFT_Y, PAD_RIGHT_X, PAD_RIGHT_Y, PAD_LEFT_TRIGGER, PAD_RIGHT_TRIGGER,
+    MOUSE_X, MOUSE_Y,
+    input_new, input_free, input_set_window, input_set_deadzone,
+    bind_key, bind_mouse, bind_button, bind_axis, bind_pad_axis, bind_mouse_axis, unbind,
+    poll, held, pressed, released, axis, mouse_x, mouse_y, mouse_dx, mouse_dy, scroll,
+    gamepad_present, action_count, action_at, action_named,
+    inject_key, inject_mouse, inject_button, inject_pad_axis, inject_clear
+)
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern ae3d_gamepad_present(id: int) -> int
+extern ae3d_gamepad_button(id: int, button: int) -> int
+extern ae3d_gamepad_axis(id: int, axis: int) -> float
+
+// GLFW's gamepad buttons and axes, by their names.
+const PAD_A = 0
+const PAD_B = 1
+const PAD_X = 2
+const PAD_Y = 3
+const PAD_LEFT_BUMPER = 4
+const PAD_RIGHT_BUMPER = 5
+const PAD_BACK = 6
+const PAD_START = 7
+const PAD_LEFT_THUMB = 9
+const PAD_RIGHT_THUMB = 10
+const PAD_UP = 11
+const PAD_RIGHT = 12
+const PAD_DOWN = 13
+const PAD_LEFT = 14
+const PAD_LEFT_X = 0
+const PAD_LEFT_Y = 1
+const PAD_RIGHT_X = 2
+const PAD_RIGHT_Y = 3
+const PAD_LEFT_TRIGGER = 4
+const PAD_RIGHT_TRIGGER = 5
+// The mouse's movement as an axis, in pixels a frame.
+const MOUSE_X = 0
+const MOUSE_Y = 1
+
+const NONE = 0 - 1
+const PAD_BUTTONS = 15
+const PAD_AXES = 6
+// Below this a stick at rest reads as nothing: a worn stick reports a few
+// percent off centre and a camera that took it drifted.
+const DEADZONE = 0.15
+
+// One named thing a game asks about. A button-like action is down when any
+// of its keys, mouse buttons or pad buttons is; an axis is the sum of its
+// key pairs (+1/-1), its pad axes (scaled) and its mouse axis, clamped to
+// -1..1 for the sticks and keys and left in pixels for the mouse.
+struct Action {
+    name: string
+    keys: ptr           // int[] of key codes (the positive side of an axis)
+    key_count: int
+    negatives: ptr      // int[] of key codes, the negative side
+    negative_count: int
+    mouse_buttons: ptr  // int[]
+    mouse_count: int
+    buttons: ptr        // int[] of pad buttons
+    button_count: int
+    pad_axis: int       // NONE or a PAD_* axis
+    pad_scale: float
+    mouse_axis: int     // NONE, MOUSE_X or MOUSE_Y
+    mouse_scale: float
+    // What the last two polls read.
+    down: bool
+    was_down: bool
+    value: float
+}
+
+struct Input {
+    window: ptr
+    actions: ptr        // list of *Action
+    gamepad: int        // the joystick id polled, 0
+    deadzone: float
+    // The mouse, this frame and last.
+    mx: float
+    my: float
+    last_mx: float
+    last_my: float
+    dx: float
+    dy: float
+    scroll_y: float
+    first: bool
+    // Injected state, on top of the platform's: keys and mouse buttons by
+    // code, pad buttons and axes by index.
+    injected_keys: ptr      // int[512]
+    injected_mouse: ptr     // int[8]
+    injected_buttons: ptr   // int[PAD_BUTTONS]
+    injected_axes: ptr      // float[PAD_AXES]
+    injected_axis_set: ptr  // int[PAD_AXES]: whether an axis was injected
+}
+
+const KEY_CODES = 512
+const MOUSE_CODES = 8
+const SLOTS = 8
+
+input_new(window: ptr) -> *Input {
+    i = heap.new(Input)
+    i.window = window
+    i.actions = list.new()
+    i.gamepad = 0
+    i.deadzone = DEADZONE
+    i.first = true
+    i.injected_keys = calloc(KEY_CODES, 4)
+    i.injected_mouse = calloc(MOUSE_CODES, 4)
+    i.injected_buttons = calloc(PAD_BUTTONS, 4)
+    i.injected_axes = calloc(PAD_AXES, 8)
+    i.injected_axis_set = calloc(PAD_AXES, 4)
+    return i
+}
+
+input_free(i: *Input) {
+    if i == null { return }
+    count = list.size(i.actions)
+    k = 0
+    while k < count {
+        action_free(list.get_raw(i.actions, k) as *Action)
+        k = k + 1
+    }
+    list.free(i.actions)
+    free(i.injected_keys)
+    free(i.injected_mouse)
+    free(i.injected_buttons)
+    free(i.injected_axes)
+    free(i.injected_axis_set)
+    heap.free(i)
+}
+
+// The window the keys and the mouse are read from; none reads nothing but
+// what is injected, which is how a test drives it.
+input_set_window(i: *Input, window: ptr) { i.window = window }
+input_set_deadzone(i: *Input, deadzone: float) { i.deadzone = deadzone }
+
+action_new(name: string) -> *Action {
+    a = heap.new(Action)
+    a.name = string.copy(name)
+    a.keys = calloc(SLOTS, 4)
+    a.negatives = calloc(SLOTS, 4)
+    a.mouse_buttons = calloc(SLOTS, 4)
+    a.buttons = calloc(SLOTS, 4)
+    a.pad_axis = NONE
+    a.pad_scale = 1.0
+    a.mouse_axis = NONE
+    a.mouse_scale = 1.0
+    return a
+}
+
+action_free(a: *Action) {
+    if a == null { return }
+    free(a.keys)
+    free(a.negatives)
+    free(a.mouse_buttons)
+    free(a.buttons)
+    heap.free(a)
+}
+
+action_count(i: *Input) -> int { return list.size(i.actions) }
+action_at(i: *Input, index: int) -> *Action {
+    if index < 0 || index >= list.size(i.actions) { return null }
+    return list.get_raw(i.actions, index) as *Action
+}
+
+action_named(i: *Input, name: string) -> *Action {
+    count = list.size(i.actions)
+    k = 0
+    while k < count {
+        a = list.get_raw(i.actions, k) as *Action
+        if string.equals(a.name, name) == 1 { return a }
+        k = k + 1
+    }
+    return null
+}
+
+// The action by name, made on first mention: binding is naming.
+action_for(i: *Input, name: string) -> *Action {
+    a = action_named(i, name)
+    if a != null { return a }
+    a = action_new(name)
+    list.add_raw(i.actions, a)
+    return a
+}
+
+add_code(codes: ptr, count: int, code: int) -> int {
+    if count >= SLOTS { return count }
+    slots = codes as int[]
+    k = 0
+    while k < count {
+        if slots[k] == code { return count }
+        k = k + 1
+    }
+    slots[count] = code
+    return count + 1
+}
+
+bind_key(i: *Input, name: string, key: int) {
+    a = action_for(i, name)
+    a.key_count = add_code(a.keys, a.key_count, key)
+}
+
+bind_mouse(i: *Input, name: string, button: int) {
+    a = action_for(i, name)
+    a.mouse_count = add_code(a.mouse_buttons, a.mouse_count, button)
+}
+
+bind_button(i: *Input, name: string, button: int) {
+    a = action_for(i, name)
+    a.button_count = add_code(a.buttons, a.button_count, button)
+}
+
+// A key pair as an axis: `positive` reads +1, `negative` -1, both nothing.
+bind_axis(i: *Input, name: string, positive: int, negative: int) {
+    a = action_for(i, name)
+    a.key_count = add_code(a.keys, a.key_count, positive)
+    a.negative_count = add_code(a.negatives, a.negative_count, negative)
+}
+
+// A gamepad axis, scaled: -1.0 turns a stick whose up is negative into an
+// axis whose forward is positive.
+bind_pad_axis(i: *Input, name: string, pad_axis: int, scale: float) {
+    a = action_for(i, name)
+    a.pad_axis = pad_axis
+    a.pad_scale = scale
+}
+
+// The mouse's movement, in pixels a frame times the scale.
+bind_mouse_axis(i: *Input, name: string, mouse_axis: int, scale: float) {
+    a = action_for(i, name)
+    a.mouse_axis = mouse_axis
+    a.mouse_scale = scale
+}
+
+// The action gone with every binding it had.
+unbind(i: *Input, name: string) {
+    count = list.size(i.actions)
+    k = 0
+    while k < count {
+        a = list.get_raw(i.actions, k) as *Action
+        if string.equals(a.name, name) == 1 {
+            list.remove(i.actions, k)
+            action_free(a)
+            return
+        }
+        k = k + 1
+    }
+}
+
+gamepad_present(i: *Input) -> bool { return ae3d_gamepad_present(i.gamepad) == 1 }
+
+// What the platform and the injections say about one code.
+key_is_down(i: *Input, key: int) -> bool {
+    if key >= 0 && key < KEY_CODES {
+        keys = i.injected_keys as int[]
+        if keys[key] == 1 { return true }
+    }
+    if i.window == null { return false }
+    return platform.key_down(i.window, key)
+}
+
+mouse_is_down(i: *Input, button: int) -> bool {
+    if button >= 0 && button < MOUSE_CODES {
+        buttons = i.injected_mouse as int[]
+        if buttons[button] == 1 { return true }
+    }
+    if i.window == null { return false }
+    return platform.mouse_down(i.window, button)
+}
+
+button_is_down(i: *Input, button: int) -> bool {
+    if button < 0 || button >= PAD_BUTTONS { return false }
+    buttons = i.injected_buttons as int[]
+    if buttons[button] == 1 { return true }
+    return ae3d_gamepad_button(i.gamepad, button) == 1
+}
+
+pad_axis_value(i: *Input, pad_axis: int) -> float {
+    if pad_axis < 0 || pad_axis >= PAD_AXES { return 0.0 }
+    value = 0.0
+    marks = i.injected_axis_set as int[]
+    if marks[pad_axis] == 1 {
+        axes = i.injected_axes as float[]
+        value = axes[pad_axis]
+    } else {
+        value = ae3d_gamepad_axis(i.gamepad, pad_axis)
+    }
+    if value > 0.0 - i.deadzone && value < i.deadzone { return 0.0 }
+    return value
+}
+
+any_down(i: *Input, codes: ptr, count: int, kind: int) -> bool {
+    slots = codes as int[]
+    k = 0
+    while k < count {
+        if kind == 0 && key_is_down(i, slots[k]) { return true }
+        if kind == 1 && mouse_is_down(i, slots[k]) { return true }
+        if kind == 2 && button_is_down(i, slots[k]) { return true }
+        k = k + 1
+    }
+    return false
+}
+
+// Once a frame, before anything reads: every action's state from the
+// keyboard, the mouse, the gamepad and the injections, and the mouse's
+// movement since the last poll.
+poll(i: *Input) {
+    if i.window != null {
+        i.mx = platform.cursor_x(i.window)
+        i.my = platform.cursor_y(i.window)
+        i.scroll_y = platform.scroll_delta(i.window)
+    }
+    if i.first {
+        i.last_mx = i.mx
+        i.last_my = i.my
+        i.first = false
+    }
+    i.dx = i.mx - i.last_mx
+    i.dy = i.my - i.last_my
+    i.last_mx = i.mx
+    i.last_my = i.my
+
+    count = list.size(i.actions)
+    k = 0
+    while k < count {
+        a = list.get_raw(i.actions, k) as *Action
+        a.was_down = a.down
+        positive = any_down(i, a.keys, a.key_count, 0) ||
+                   any_down(i, a.mouse_buttons, a.mouse_count, 1) ||
+                   any_down(i, a.buttons, a.button_count, 2)
+        negative = any_down(i, a.negatives, a.negative_count, 0)
+        value = 0.0
+        if positive { value = value + 1.0 }
+        if negative { value = value - 1.0 }
+        if a.pad_axis != NONE { value = value + pad_axis_value(i, a.pad_axis) * a.pad_scale }
+        if a.mouse_axis == MOUSE_X { value = value + i.dx * a.mouse_scale }
+        if a.mouse_axis == MOUSE_Y { value = value + i.dy * a.mouse_scale }
+        // Keys and sticks add up to at most a full deflection; the mouse is
+        // pixels and keeps them.
+        if a.mouse_axis == NONE {
+            if value > 1.0 { value = 1.0 }
+            if value < 0.0 - 1.0 { value = 0.0 - 1.0 }
+        }
+        a.value = value
+        a.down = positive || (a.pad_axis != NONE && value > 0.5)
+        k = k + 1
+    }
+}
+
+held(i: *Input, name: string) -> bool {
+    a = action_named(i, name)
+    if a == null { return false }
+    return a.down
+}
+
+pressed(i: *Input, name: string) -> bool {
+    a = action_named(i, name)
+    if a == null { return false }
+    return a.down && !a.was_down
+}
+
+released(i: *Input, name: string) -> bool {
+    a = action_named(i, name)
+    if a == null { return false }
+    return !a.down && a.was_down
+}
+
+axis(i: *Input, name: string) -> float {
+    a = action_named(i, name)
+    if a == null { return 0.0 }
+    return a.value
+}
+
+mouse_x(i: *Input) -> float { return i.mx }
+mouse_y(i: *Input) -> float { return i.my }
+mouse_dx(i: *Input) -> float { return i.dx }
+mouse_dy(i: *Input) -> float { return i.dy }
+scroll(i: *Input) -> float { return i.scroll_y }
+
+// Injection: what a test, a replay or an agent presses. Held until
+// released; read at the next poll like a real key.
+inject_key(i: *Input, key: int, down: bool) {
+    if key < 0 || key >= KEY_CODES { return }
+    flag = 0
+    if down { flag = 1 }
+    keys = i.injected_keys as int[]
+    keys[key] = flag
+}
+
+inject_mouse(i: *Input, button: int, down: bool) {
+    if button < 0 || button >= MOUSE_CODES { return }
+    flag = 0
+    if down { flag = 1 }
+    buttons = i.injected_mouse as int[]
+    buttons[button] = flag
+}
+
+inject_button(i: *Input, button: int, down: bool) {
+    if button < 0 || button >= PAD_BUTTONS { return }
+    flag = 0
+    if down { flag = 1 }
+    buttons = i.injected_buttons as int[]
+    buttons[button] = flag
+}
+
+// A stick held at a value; `set` false hands the axis back to the gamepad.
+inject_pad_axis(i: *Input, pad_axis: int, value: float, set: bool) {
+    if pad_axis < 0 || pad_axis >= PAD_AXES { return }
+    flag = 0
+    if set { flag = 1 }
+    marks = i.injected_axis_set as int[]
+    marks[pad_axis] = flag
+    axes = i.injected_axes as float[]
+    axes[pad_axis] = value
+}
+
+// Everything injected released.
+inject_clear(i: *Input) {
+    keys = i.injected_keys as int[]
+    k = 0
+    while k < KEY_CODES { keys[k] = 0 ; k = k + 1 }
+    mouse = i.injected_mouse as int[]
+    k = 0
+    while k < MOUSE_CODES { mouse[k] = 0 ; k = k + 1 }
+    buttons = i.injected_buttons as int[]
+    k = 0
+    while k < PAD_BUTTONS { buttons[k] = 0 ; k = k + 1 }
+    marks = i.injected_axis_set as int[]
+    k = 0
+    while k < PAD_AXES { marks[k] = 0 ; k = k + 1 }
+}
