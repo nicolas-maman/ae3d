@@ -1788,6 +1788,7 @@ skybox_create(r: *GLRenderer, path: string) -> *Skybox {
     sky.u_sky_overcast = ae3d_gl_uniform_location(sky.program, "skyOvercast")
     sky.u_sky_overcast_color = ae3d_gl_uniform_location(sky.program, "skyOvercastColor")
     sky.u_cloud_time = ae3d_gl_uniform_location(sky.program, "cloudTime")
+    sky.u_cloud_frame = ae3d_gl_uniform_location(sky.program, "cloudFrame")
     sky.u_cloud_sun = ae3d_gl_uniform_location(sky.program, "cloudSun")
     sky.u_cloud_sun_color = ae3d_gl_uniform_location(sky.program, "cloudSunColor")
     sky.u_cloud_eye = ae3d_gl_uniform_location(sky.program, "viewPos")
@@ -1828,6 +1829,11 @@ render_skybox(r: *GLRenderer, cam: *Camera, light: *Light) {
     ae3d_gl_uniform_float(sky.u_sky_overcast, r.sky_overcast)
     ae3d_gl_uniform_vec3(sky.u_sky_overcast_color, r.sky_overcast_color.x, r.sky_overcast_color.y, r.sky_overcast_color.z)
     ae3d_gl_uniform_float(sky.u_cloud_time, r.scene_time * r.cloud_wind)
+    // The frame for the march's dither only when the temporal pass will
+    // fold it; still otherwise.
+    cloud_frame = 0
+    if r.enable_taa { cloud_frame = r.taa_frame % 64 + 1 }
+    ae3d_gl_uniform_int(sky.u_cloud_frame, cloud_frame)
     ae3d_gl_uniform_vec3(sky.u_cloud_eye, cam.position.x, cam.position.y, cam.position.z)
     sun = key_light(r.lights, light)
     if sun != null {
