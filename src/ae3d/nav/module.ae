@@ -1,0 +1,139 @@
+// Navigation for a horde: a flow field over the ground, built once per
+// target, read by every zombie every frame.
+//
+//     field = nav.flow_new(x0, z0, x1, z1, 1.0)        // the ground, metres, a cell a metre
+//     nav.flow_block_model(field, building)             // what nothing walks through
+//     nav.flow_build(field, core.vec3(px, 0.0, pz))     // the target: the player
+//     nav.flow_steer(field, positions, yaws, count, 2.0 * delta)   // every heading toward it
+//
+// A path per zombie is a search per zombie; a hundred thousand of them want
+// one search. The field is the cost from every cell to the target, found by
+// one flood from the target outward over the cells nothing stands in, and a
+// direction per cell toward the cheapest neighbour. A zombie reads the
+// direction under its feet and turns toward it by at most `turn` a step, so
+// the horde swings round rather than snapping; where the field says nothing
+// -- a blocked cell, one the target cannot be reached from, the target's
+// own -- it keeps its heading and the wander and separation passes carry
+// on. The flood is native (native/ae3d_nav.c), a few milliseconds for a
+// city, paid once each time the target crosses a cell.
+import std.heap
+import ae3d.core
+
+exports (
+    FlowField,
+    flow_new, flow_free, flow_block, flow_block_model, flow_clear, flow_blocked,
+    flow_build, flow_cost, flow_direction, flow_has_direction, flow_steer,
+    flow_width, flow_height, flow_cell, flow_target
+)
+
+extern ae3d_flow_new(w: int, h: int, x0: float, z0: float, cell: float) -> ptr
+extern ae3d_flow_free(field: ptr)
+extern ae3d_flow_width(field: ptr) -> int
+extern ae3d_flow_height(field: ptr) -> int
+extern ae3d_flow_block(field: ptr, bx0: float, bz0: float, bx1: float, bz1: float)
+extern ae3d_flow_clear(field: ptr)
+extern ae3d_flow_blocked_at(field: ptr, x: float, z: float) -> int
+extern ae3d_flow_build(field: ptr, tx: float, tz: float) -> int
+extern ae3d_flow_cost(field: ptr, x: float, z: float) -> float
+extern ae3d_flow_dir_x(field: ptr, x: float, z: float) -> float
+extern ae3d_flow_dir_z(field: ptr, x: float, z: float) -> float
+extern ae3d_flow_steer(field: ptr, pos: ptr, yaw: ptr, n: int, turn: float)
+
+struct FlowField {
+    native: ptr
+    x0: float
+    z0: float
+    cell: float
+    // Where it was last built for, so a caller can tell whether the target
+    // has crossed into another cell and the flood is worth paying again.
+    target: Vec3
+    built: bool
+    reached: int
+}
+
+// The ground from (x0, z0) to (x1, z1), in cells `cell` metres across.
+flow_new(x0: float, z0: float, x1: float, z1: float, cell: float) -> *FlowField {
+    if cell <= 0.0 { return null }
+    w = ((x1 - x0) / cell) as int + 1
+    h = ((z1 - z0) / cell) as int + 1
+    if w < 1 || h < 1 { return null }
+    native = ae3d_flow_new(w, h, x0, z0, cell)
+    if native == null { return null }
+    f = heap.new(FlowField)
+    f.native = native
+    f.x0 = x0
+    f.z0 = z0
+    f.cell = cell
+    f.target = core.vec3(0.0, 0.0, 0.0)
+    f.built = false
+    f.reached = 0
+    return f
+}
+
+flow_free(f: *FlowField) {
+    if f == null { return }
+    ae3d_flow_free(f.native)
+    heap.free(f)
+}
+
+flow_width(f: *FlowField) -> int { return ae3d_flow_width(f.native) }
+flow_height(f: *FlowField) -> int { return ae3d_flow_height(f.native) }
+flow_cell(f: *FlowField) -> float { return f.cell }
+flow_target(f: *FlowField) -> Vec3 { return f.target }
+
+// A footprint on the ground nothing walks through, world metres.
+flow_block(f: *FlowField, x0: float, z0: float, x1: float, z1: float) {
+    ae3d_flow_block(f.native, x0, z0, x1, z1)
+}
+
+// A model's footprint: its bounding sphere's square on the ground. A
+// sphere overstates a long building's corners by a little, which keeps
+// the horde off its walls, and understates nothing.
+flow_block_model(f: *FlowField, m: *Model) {
+    if m == null { return }
+    r = m.bounding_radius
+    c = m.bounding_center
+    ae3d_flow_block(f.native, c.x - r, c.z - r, c.x + r, c.z + r)
+}
+
+flow_clear(f: *FlowField) {
+    ae3d_flow_clear(f.native)
+    f.built = false
+}
+
+flow_blocked(f: *FlowField, x: float, z: float) -> bool {
+    return ae3d_flow_blocked_at(f.native, x, z) == 1
+}
+
+// The flood from the target; how many cells can reach it (0 for a target
+// off the field or inside a footprint).
+flow_build(f: *FlowField, target: Vec3) -> int {
+    f.target = target
+    f.reached = ae3d_flow_build(f.native, target.x, target.z)
+    f.built = f.reached > 0
+    return f.reached
+}
+
+// The walk from a point to the target in metres, -1 where it cannot reach.
+flow_cost(f: *FlowField, x: float, z: float) -> float {
+    return ae3d_flow_cost(f.native, x, z)
+}
+
+flow_has_direction(f: *FlowField, x: float, z: float) -> bool {
+    dx = ae3d_flow_dir_x(f.native, x, z)
+    dz = ae3d_flow_dir_z(f.native, x, z)
+    return dx != 0.0 || dz != 0.0
+}
+
+// The way to walk from a point, unit, on the ground; zero where there is
+// none.
+flow_direction(f: *FlowField, x: float, z: float) -> Vec3 {
+    return core.vec3(ae3d_flow_dir_x(f.native, x, z), 0.0, ae3d_flow_dir_z(f.native, x, z))
+}
+
+// Every heading turned toward the field under it by at most `turn`
+// radians: `pos` and `yaw` are the crowd's packed columns (xyz a zombie,
+// one yaw a zombie), as crowd.crowd_wander reads them.
+flow_steer(f: *FlowField, pos: ptr, yaw: ptr, n: int, turn: float) {
+    ae3d_flow_steer(f.native, pos, yaw, n, turn)
+}
