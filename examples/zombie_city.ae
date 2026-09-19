@@ -22,6 +22,7 @@ import ae3d.skin
 import ae3d.crowd
 import ae3d.ecs
 import ae3d.weather
+import ae3d.nav
 import std.os
 
 const MANIFEST = "resources/blender/zombie_street/manifest.json"
@@ -99,6 +100,13 @@ const CULL_DIST = 0.0
 var g_scene: ptr = null
 var g_lamps: ptr = null
 var g_weather: ptr = null
+// The hunt: a flow field over the street the horde follows to the camera
+// (AE3D_HUNT=1), rebuilt whenever the camera crosses into another cell.
+var g_hunt: ptr = null
+var g_hunt_cell_x = 0
+var g_hunt_cell_z = 0
+var g_hunt_start_distance = 0.0 - 1.0
+const HUNT_TURN = 1.6        // radians a second a zombie can swing its heading
 // One figure of the horde: a body walked in one gait. The build ships two
 // (Zombie_Body and Zombie_Body_B, the second dragging the other leg, bent
 // further, head down, arms lower) so the crowd is not one zombie copied at
@@ -551,7 +559,18 @@ add_tile(e: *Engine, m: *Manifest, off_x: float, flip: bool, street_only: bool) 
 start(state: ptr, go: *GameObject) {
     e = engine.of(go)
     g_count = core.env_int("AE3D_CROWD", CROWD_DEFAULT)
-    g_near_dist = core.env_int("AE3D_NEAR", NEAR_DIST as int) as float
+    // The near band follows the count: the whole street at the inspectable
+    // four hundred, and drawn in as the crowd grows so the full mesh is
+    // spent on about the same number of figures whatever the count -- the
+    // band is a distance, the cost is a count, and the density is the
+    // count over the street. Twenty thousand with the band left at the
+    // street's length drew every one from the full mesh, at 22 fps; at
+    // the band this gives them, 12 m, over 100. AE3D_NEAR overrides.
+    band = NEAR_DIST
+    if g_count > CROWD_DEFAULT {
+        band = core.clampf(NEAR_DIST * (CROWD_DEFAULT as float) / (g_count as float), 8.0, NEAR_DIST)
+    }
+    g_near_dist = core.env_int("AE3D_NEAR", band as int) as float
     g_cull_dist = core.env_int("AE3D_CULL", CULL_DIST as int) as float
     g_sepn = core.env_int("AE3D_SEPN", SEP_INTERVAL)
     g_strip_props = core.env_int("AE3D_NOPROPS", 0) != 0
@@ -638,6 +657,15 @@ start(state: ptr, go: *GameObject) {
         // Down the street, from the far end toward the camera.
         weather.weather_set_wind(w, core.vec3(1.0, 0.0, 0.15), 7.0)
         weather.weather_set(w, kind, core.env_int("AE3D_WEATHER_LEVEL", 70) as float / 100.0)
+    }
+
+    // The hunt: the street as a field a cell a metre, the road's width and
+    // a block past each end, nothing in it to block (the crowd is kept to
+    // the road by its step; the props stand on the pavements). The target
+    // is the camera: the horde closes on whoever is looking at it.
+    if core.env_int("AE3D_HUNT", 0) == 1 {
+        g_hunt = nav.flow_new(STREET_X0 - BLOCK_LEN, ROAD_Z0, STREET_X1 + BLOCK_LEN, ROAD_Z1, 1.0) as ptr
+        println("zombie_city[diag] hunt: field ${nav.flow_width(g_hunt as *FlowField)}x${nav.flow_height(g_hunt as *FlowField)} cells")
     }
 
     m = assets.manifest_load(MANIFEST)
@@ -881,6 +909,22 @@ var g_teleport_check = true
 var g_tp_worst = 0.0
 var g_tp_worst_id = 0
 var g_tp_count = 0
+// How far the horde stands from the camera on average, along the street:
+// what the hunt is measured by. Printed at the end beside where it began.
+hunt_distance(eye: Vec3) -> float {
+    if g_count <= 0 { return 0.0 }
+    total = 0.0
+    i = 0
+    while i < g_count {
+        p = ecs.column_get3(g_pos, i)
+        dx = p.x - eye.x
+        dz = p.z - eye.z
+        total = total + core.sqrt_of(dx * dx + dz * dz)
+        i = i + 1
+    }
+    return total / (g_count as float)
+}
+
 detect_teleports(delta: float) {
     if !g_teleport_check { return }
     if g_prev_pos == null {
@@ -984,6 +1028,26 @@ update(state: ptr, go: *GameObject, delta: float) {
     // bounce and advance the walk, then sort by distance to the camera into the
     // near and far draw buffers. At a city's worth of zombies the Aether loops
     // this replaces were the wall, not the GPU.
+    // The hunt turns every heading toward the camera along the field
+    // before the wander points the velocities down them; the field is
+    // flooded again only when the camera has crossed a cell.
+    if g_hunt != null {
+        field = g_hunt as *FlowField
+        eye = engine.engine_camera(e).position
+        cell_x = (eye.x - field.x0) as int
+        cell_z = (eye.z - field.z0) as int
+        if !field.built || cell_x != g_hunt_cell_x || cell_z != g_hunt_cell_z {
+            // A camera above or beside the road hunts from the nearest
+            // point of the road, so a field with no target is never built.
+            target = core.vec3(core.clampf(eye.x, STREET_X0 - BLOCK_LEN + 0.5, STREET_X1 + BLOCK_LEN - 0.5),
+                               0.0, core.clampf(eye.z, ROAD_Z0 + 0.5, ROAD_Z1 - 0.5))
+            nav.flow_build(field, target)
+            g_hunt_cell_x = cell_x
+            g_hunt_cell_z = cell_z
+        }
+        nav.flow_steer(field, ecs.column_data(g_pos), ecs.column_data(g_yaw), g_count, HUNT_TURN * delta)
+        if g_hunt_start_distance < 0.0 { g_hunt_start_distance = hunt_distance(eye) }
+    }
     crowd.crowd_wander(ecs.column_data(g_vel), ecs.column_data(g_yaw), g_count, SPEED)
     g_t_wander = g_t_wander + lap(mark)
     mark = platform.time()
@@ -1122,4 +1186,8 @@ main() {
     engine.engine_run(e)
 
     println("zombie_city: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps, ${engine.engine_draw_calls(e)} draws")
+    if g_hunt != null {
+        println("zombie_city[diag] hunt: the horde stood ${g_hunt_start_distance} m from the camera on average at the start, ${hunt_distance(engine.engine_camera(e).position)} at the end")
+        nav.flow_free(g_hunt as *FlowField)
+    }
 }

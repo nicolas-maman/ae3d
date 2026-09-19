@@ -34,6 +34,7 @@ skinned instanced crowds, and an engine that can be interrogated while it runs.
 | **Models from anywhere** | A glTF 2.0 loader (`ae3d.gltf`): meshes, materials and textures, the node tree, skins with their inverse binds, and every animation as clips, from `.gltf` or `.glb`. A Mixamo figure walks in the engine without passing through Blender, and `gltf.bake_bank` strikes any of its clips into a pose bank, so a figure from a public pack is a horde in one call. |
 | **An engine you can ask** | `AE3D_AGENT=port` opens a JSON channel: read and change the scene, hold a frame, read its pixels, trace a model from its Blender object to the pixels it landed on. |
 | **An editor** | Hierarchy, inspector, gizmos, terrain sculpting, undo, scene files; one dark theme on every platform. |
+| **Navigation for a horde** | `ae3d.nav`: a flow field over the ground -- one flood from the target over the cells nothing stands in, a direction per cell -- read by every zombie every frame and paid once per target move; `flow_steer` turns a crowd's headings toward it. The city's horde hunts the camera with it. |
 | **Input as a game names it** | `ae3d.input`: actions and axes bound once to keys, mouse buttons and a gamepad, read by name from any script (`pressed`, `held`, `axis`), polled by the engine before the scripts run. The camera's own controls are actions in it, so a gamepad flies every example; anything can be injected -- a test, a replay, an agent over the channel (`input.set`). |
 
 The full list, with the reasoning behind each feature, is in
@@ -56,7 +57,7 @@ The full list, with the reasoning behind each feature, is in
 
 ![Twenty thousand zombies filling the street](docs/zombie-horde.png)
 
-<sub>`AE3D_CROWD=20000 ./build/zombie_city`: the near tier draws the full mesh, the far tier a 168-triangle stand-in, and past eighty metres every zombie is a picture baked from the figure and lit by the scene's lights. The draw count does not change with the crowd, and the simulation runs over every core: ~110 fps at twenty thousand on an RTX 4070 Ti at 1280×720 with the GPU shared, 78 at half a million with the sort on the device and the near band at three metres.</sub>
+<sub>`AE3D_CROWD=20000 ./build/zombie_city`: the near tier draws the full mesh, the far tier a 168-triangle stand-in, and past eighty metres every zombie is a picture baked from the figure and lit by the scene's lights. The draw count does not change with the crowd, and the simulation runs over every core; the near band draws in as the count grows, so the full mesh is spent on about the same few hundred figures whatever the crowd: 81 fps at twenty thousand on an RTX 4070 Ti at 1280×720 with the GPU shared, rays, lamp shadows and the wet road on; 78 at half a million with the sort on the device and the near band at three metres. `AE3D_HUNT=1` and the horde closes on the camera over a flow field (`ae3d.nav`).</sub>
 
 Every scene is verified the way the engine is: from a sweep of camera
 positions and by numbers read back over the channel, not from one still.
@@ -188,7 +189,7 @@ git clone https://github.com/aether-lang-dev/aether-ui.git ../aether-ui
 
 | Example | What it shows |
 |---|---|
-| `zombie_city.ae` | The city and its horde; `AE3D_CROWD` sets the count, `AE3D_WEATHER=rain\|storm` puts the weather over it |
+| `zombie_city.ae` | The city and its horde; `AE3D_CROWD` sets the count, `AE3D_WEATHER=rain\|storm` puts the weather over it, `AE3D_HUNT=1` sends the horde after the camera |
 | `caustics.ae` | The seabed under the swell, the water's light on the sand |
 | `sand.ae` | A million point-instanced grains falling onto a heap you plough |
 | `black_hole.ae` | Kerr geodesics per pixel ([docs/black-hole.md](docs/black-hole.md)) |

@@ -2,6 +2,29 @@
 
 ## [current]
 
+### Navigation for a horde
+
+- `ae3d.nav`: a flow field over the ground (`flow_new`, `flow_block`,
+  `flow_block_model`, `flow_build`, `flow_direction`, `flow_cost`,
+  `flow_steer`). One Dijkstra flood from the target over the cells nothing
+  stands in, eight ways with no corner cut past a wall, a direction per
+  cell toward the cheapest neighbour; `flow_steer` turns every heading in
+  a crowd's packed columns toward the field under it by at most a turn a
+  step, so a horde swings round rather than snapping. Native
+  (`native/ae3d_nav.c`); a city's field floods in a few milliseconds, once
+  per target move; the read is a lookup. `tests/test_nav` walls a field
+  off with a gap, follows the field round the wall to the target and
+  checks every step lowers the cost.
+- The city hunts: `AE3D_HUNT=1` builds the field over the street and
+  turns the horde toward the camera whenever it crosses a cell; the run
+  prints how far the horde stood from the camera at the start and the
+  end. The second item of #326's Simulation section.
+- The city's near band follows the count: the whole street at the
+  inspectable four hundred, drawn in as the crowd grows so the full mesh
+  is spent on about the same number of figures. Twenty thousand at the
+  street-length default drew every one from the full mesh at 22 fps; at
+  the 12 m the count gives them, 81. `AE3D_NEAR` still overrides.
+
 ### Input as a game names it
 
 - `ae3d.input`: actions and axes bound once to keys, mouse buttons and a

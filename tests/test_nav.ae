@@ -1,0 +1,115 @@
+// The flow field: a flood from the target over the open ground, a direction
+// per cell toward it, and the horde's headings turned by it. Headless.
+
+import std.string
+import ae3d.core
+import ae3d.nav
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if !ok {
+        println("nav: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+near(a: float, b: float) -> bool {
+    d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    return d < 0.0001
+}
+
+main() {
+    // Twenty metres square, a cell a metre; a wall across the middle with a
+    // gap at one end, the target beyond it.
+    f = nav.flow_new(0.0, 0.0, 19.0, 19.0, 1.0)
+    check("the field has a cell a metre", nav.flow_width(f) == 20 && nav.flow_height(f) == 20)
+    check("an unbuilt field has no direction", !nav.flow_has_direction(f, 5.0, 5.0))
+    check("and no cost", nav.flow_cost(f, 5.0, 5.0) < 0.0)
+
+    nav.flow_block(f, 0.0, 10.0, 15.9, 10.9)  // the wall: x 0..15, the row at z 10
+    check("a blocked cell is blocked", nav.flow_blocked(f, 5.5, 10.5))
+    check("the gap is open", !nav.flow_blocked(f, 18.5, 10.5))
+    check("off the field is blocked", nav.flow_blocked(f, 0.0 - 3.0, 5.0))
+
+    reached = nav.flow_build(f, core.vec3(5.5, 0.0, 15.5))
+    check("the flood reaches every open cell", reached == 400 - 16)
+    check("the wall is one row", nav.flow_blocked(f, 5.5, 10.5) && !nav.flow_blocked(f, 5.5, 9.5) && !nav.flow_blocked(f, 5.5, 11.5))
+    check("the target's own cell has no direction", !nav.flow_has_direction(f, 5.5, 15.5))
+    check("a wall cell has none", !nav.flow_has_direction(f, 5.5, 10.5))
+    check("the target is at no cost", near(nav.flow_cost(f, 5.5, 15.5), 0.0))
+
+    // Beside the target: straight at it, one metre away.
+    d = nav.flow_direction(f, 6.5, 15.5)
+    check("beside the target the way is straight at it", near(d.x, 0.0 - 1.0) && near(d.z, 0.0))
+    check("and a metre off costs a metre", near(nav.flow_cost(f, 6.5, 15.5), 1.0))
+    check("two metres off costs two", near(nav.flow_cost(f, 7.5, 15.5), 2.0))
+    check("a diagonal step costs its length", near(nav.flow_cost(f, 6.5, 16.5), 1.4))
+
+    // Below the wall, right under the target: the way is not straight up
+    // through the wall but off toward the gap, and the cost is the walk
+    // round.
+    d = nav.flow_direction(f, 5.5, 5.5)
+    check("under the wall the way is not straight through it", d.x > 0.5)
+    check("and a cell just under the wall points along it", nav.flow_direction(f, 5.5, 9.5).x > 0.99)
+    check("and the cost is the walk round, not the crow's flight", nav.flow_cost(f, 5.5, 5.5) > 20.0)
+
+    // Costs fall along the direction: following the field from anywhere
+    // reaches the target.
+    x = 1.5
+    z = 1.5
+    steps = 0
+    while steps < 200 && nav.flow_has_direction(f, x, z) {
+        d = nav.flow_direction(f, x, z)
+        before = nav.flow_cost(f, x, z)
+        // To the centre of the cell the direction points at.
+        x = ((x + d.x * 1.01) as int) as float + 0.5
+        z = ((z + d.z * 1.01) as int) as float + 0.5
+        check("every step lowers the cost", nav.flow_cost(f, x, z) < before)
+        steps = steps + 1
+    }
+    check("following the field arrives", near(x, 5.5) && near(z, 15.5))
+    check("in the walk's length", steps > 20 && steps < 60)
+
+    // A target inside the wall, or off the field, floods nothing.
+    check("a target in a wall reaches nothing", nav.flow_build(f, core.vec3(5.5, 0.0, 10.5)) == 0)
+    check("a target off the field reaches nothing", nav.flow_build(f, core.vec3(50.0, 0.0, 5.0)) == 0)
+    nav.flow_build(f, core.vec3(5.5, 0.0, 15.5))
+
+    // The steer: three zombies' headings, packed like the crowd's columns,
+    // turned toward the field under them by at most the turn given.
+    pos_block = calloc(9, 8)
+    yaw_block = calloc(3, 8)
+    pos = pos_block as float[]
+    yaw = yaw_block as float[]
+    pos[0] = 7.5 ; pos[1] = 0.0 ; pos[2] = 15.5     // beside the target: wants pi (west)
+    pos[3] = 5.5 ; pos[4] = 0.0 ; pos[5] = 10.5     // in the wall: keeps its heading
+    pos[6] = 5.5 ; pos[7] = 0.0 ; pos[8] = 15.5     // on the target: keeps its heading
+    yaw[0] = 0.0
+    yaw[1] = 1.0
+    yaw[2] = 2.0
+    nav.flow_steer(f, pos_block, yaw_block, 3, 0.5)
+    check("a heading turns toward the field by the turn allowed", near(yaw[0], 0.5))
+    check("a zombie in a wall keeps its heading", near(yaw[1], 1.0))
+    check("a zombie on the target keeps its heading", near(yaw[2], 2.0))
+    k = 0
+    while k < 20 { nav.flow_steer(f, pos_block, yaw_block, 3, 0.5) ; k = k + 1 }
+    check("and settles on it", near(yaw[0], 3.14159265))
+    free(pos_block)
+    free(yaw_block)
+
+    // A cleared field forgets its walls.
+    nav.flow_clear(f)
+    check("a clear opens the wall", !nav.flow_blocked(f, 5.5, 10.5))
+    reached = nav.flow_build(f, core.vec3(5.5, 0.0, 15.5))
+    check("and the flood reaches every cell", reached == 400)
+    d = nav.flow_direction(f, 5.5, 5.5)
+    check("with the wall gone the way is straight up", near(d.x, 0.0) && near(d.z, 1.0))
+
+    nav.flow_free(f)
+    if failures == 0 { println("nav: all checks passed") }
+}
