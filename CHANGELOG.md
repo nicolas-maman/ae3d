@@ -2,6 +2,17 @@
 
 ## [current]
 
+### The city's lamps, set for the rays
+
+- The city's lamps were tuned on the map path, where every lamp is damped
+  by the moon's shadow map (a lamp has no map of its own, and the key
+  light's is applied to every light's direct term). By ray a lamp throws
+  its own shadow and nothing else dims it, so the same 3.2 blew the
+  facades to white: the top of a side-on frame at 206 of 255 against 89
+  on the map. 1.8 at a 7 m reach, set for the rays, the path the city runs
+  on; the facades fall to the moon between the pools again and the street
+  reads as night. `docs/zombie-city.png` re-rendered.
+
 ### The weather over the city
 
 - `AE3D_WEATHER=rain|snow|dust|storm` (and `AE3D_WEATHER_LEVEL`) over the
