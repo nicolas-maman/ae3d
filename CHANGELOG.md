@@ -2,6 +2,17 @@
 
 ## [current]
 
+### The clouds' dither, folded by the temporal pass
+
+- The cloud march's per-pixel dither turns with the frame when a temporal
+  pass (TAA, DLSS) is on, on both backends (`cloudFrame` uniform), so the
+  pass averages several frames' steps into one frame's picture; without a
+  pass it stays still, since a turning dither with nothing to fold it is
+  grain that crawls. Measured sunward over the island at 85% cover: the
+  horizon band's grain 0.120 → 0.111 -- small, because the baked cloud
+  textures of #314 had already taken most of it. `AE3D_CLOUDS=0..100` sets
+  the island's cover.
+
 ### The city's lamps, set for the rays
 
 - The city's lamps were tuned on the map path, where every lamp is damped

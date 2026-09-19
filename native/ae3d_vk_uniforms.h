@@ -97,8 +97,9 @@ typedef struct {
 #define AE3D_VK_OFF_PROJECTION 8160
 #define AE3D_VK_OFF_VIEW 8224
 #define AE3D_VK_OFF_CLOUDSUNCOLOR 8288
-#define AE3D_VK_OFF_SKYPROCEDURAL 8300
-#define AE3D_VK_OFF_SKYOVERCAST 8304
+#define AE3D_VK_OFF_CLOUDFRAME 8300
+#define AE3D_VK_OFF_SKYPROCEDURAL 8304
+#define AE3D_VK_OFF_SKYOVERCAST 8308
 #define AE3D_VK_OFF_SKYOVERCASTCOLOR 8320
 #define AE3D_VK_OFF_TEXELSIZE 8336
 #define AE3D_VK_OFF_EDGETHRESHOLD 8344
@@ -183,6 +184,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "clearcoatIntensity", 7916 },
     { "clearcoatRoughness", 7912 },
     { "cloudCover", 7864 },
+    { "cloudFrame", 8300 },
     { "cloudSun", 7872 },
     { "cloudSunColor", 8288 },
     { "cloudTime", 7868 },
@@ -267,9 +269,9 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "sheenColor", 7936 },
     { "sheenRoughness", 7948 },
     { "skyColor", 8944 },
-    { "skyOvercast", 8304 },
+    { "skyOvercast", 8308 },
     { "skyOvercastColor", 8320 },
-    { "skyProcedural", 8300 },
+    { "skyProcedural", 8304 },
     { "specularColor", 7840 },
     { "ssaoIntensity", 8444 },
     { "ssaoRadius", 8440 },
@@ -310,7 +312,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "wetness", 7892 },
 };
 
-#define AE3D_VK_UNIFORM_SLOT_COUNT 138
+#define AE3D_VK_UNIFORM_SLOT_COUNT 139
 
 static inline int ae3d_vk_uniform_offset(const char *name) {
     int low = 0;
