@@ -8,9 +8,9 @@ OpenGL, a Blender-to-engine asset pipeline, a scene editor, and a control
 channel through which a program, a test or an AI agent builds a scene, reads
 back what was drawn and checks the frame by number rather than by eye.
 
-![A horde of skinned zombies on a lamp-lit street at night, the wet road reflecting the lamps](docs/zombie-city.png)
+![The seabed under the swell, caustics on the sand](docs/caustics.png)
 
-<sub>`examples/zombie_city.ae`: seven blocks and a horde of skinned figures, each walking its own gait from a baked pose bank, two instanced draws per figure; a lamp under every lamp head, the road wet, and on Vulkan every shadow -- the moon's with its penumbra, each lamp's, the occlusion under every foot -- by ray. Every asset was modelled, textured and animated by a script in Blender; the sky was painted by the engine.</sub>
+<sub>`examples/caustics.ae`: the seabed a diver's height off the sand under a Gerstner swell, the light refracted through the surface onto the rocks and the floor, every frame; the sand and the sky are the engine's own, painted from noise.</sub>
 
 ae3d is written in [Aether](https://github.com/aether-lang-dev/aether) with a
 thin C layer for the GPU, windowing and image decoding. It is the successor to
@@ -34,6 +34,7 @@ skinned instanced crowds, and an engine that can be interrogated while it runs.
 | **Models from anywhere** | A glTF 2.0 loader (`ae3d.gltf`): meshes, materials and textures, the node tree, skins with their inverse binds, and every animation as clips, from `.gltf` or `.glb`. A Mixamo figure walks in the engine without passing through Blender, and `gltf.bake_bank` strikes any of its clips into a pose bank, so a figure from a public pack is a horde in one call. |
 | **An engine you can ask** | `AE3D_AGENT=port` opens a JSON channel: read and change the scene, hold a frame, read its pixels, trace a model from its Blender object to the pixels it landed on. |
 | **An editor** | Hierarchy, inspector, gizmos, terrain sculpting, undo, scene files; one dark theme on every platform. |
+| **Physics, on its way** | [aephysics](https://github.com/aether-lang-dev/aephysics), a rigid body engine written in Aether on Box3D's design: hulls, meshes, height fields, compounds, a character mover, joints of every kind, sensors, continuous collision, a wide contact solver; every layer tested against the reference and benchmarked beside it. The integration into ae3d's scenes is next, and the active ragdolls of the NaturalMotion line after it ([#365](https://github.com/nicolas-maman/ae3d/issues/365)). |
 | **Navigation for a horde** | `ae3d.nav`: a flow field over the ground -- one flood from the target over the cells nothing stands in, a direction per cell -- read by every zombie every frame and paid once per target move; `flow_steer` turns a crowd's headings toward it. The city's horde hunts the camera with it. |
 | **Input as a game names it** | `ae3d.input`: actions and axes bound once to keys, mouse buttons and a gamepad, read by name from any script (`pressed`, `held`, `axis`), polled by the engine before the scripts run. The camera's own controls are actions in it, so a gamepad flies every example; anything can be injected -- a test, a replay, an agent over the channel (`input.set`). |
 
@@ -44,8 +45,8 @@ The full list, with the reasoning behind each feature, is in
 
 | | |
 |---|---|
-| ![The seabed under the swell](docs/caustics.png) | ![A million grains of sand](docs/sand.png) |
-| `caustics` — the seabed under the swell, a diver's height off the sand | `sand` — a million grains you plough into a heap that slumps to its angle of repose |
+| ![Rain, a storm, dust and snow over an island](docs/weather.png) | ![A million grains of sand](docs/sand.png) |
+| `AE3D_WEATHER=rain|storm|dust|snow smooth_terrain` — the same island under each, the sky and fog to match | `sand` — a million grains you plough into a heap that slumps to its angle of repose |
 | ![A volcanic island under an afternoon sky](docs/smooth-terrain.png) | ![A voxel island with a forest](docs/voxel-world.png) |
 | `smooth_terrain` — surface nets over a distance field, albedo baked from slope | `voxel_world` — 3.9 million voxels as 259,000 faces in one draw |
 | ![Material presets under a night sky](docs/materials.png) | ![A Kerr black hole](docs/black-hole.png) |
@@ -55,9 +56,18 @@ The full list, with the reasoning behind each feature, is in
 
 <sub>`AE3D_CROWD=100000 ./build/gltf_crowd adventurer.glb`: a rigged figure from a public Quaternius pack (CC0), its `Walk` baked into a pose bank by `gltf.bake_bank`, a hundred thousand of it sorted on the device into the file's own meshes, the same decimated, and a picture baked by `tools/bake_impostor --gltf` -- fifteen parts a figure, each with its own indirect command, 130 fps hidden, no Blender in the path.</sub>
 
-![Twenty thousand zombies filling the street](docs/zombie-horde.png)
-
-<sub>`AE3D_CROWD=20000 ./build/zombie_city`: the near tier draws the full mesh, the far tier a 168-triangle stand-in, and past eighty metres every zombie is a picture baked from the figure and lit by the scene's lights. The draw count does not change with the crowd, and the simulation runs over every core; the near band draws in as the count grows, so the full mesh is spent on about the same few hundred figures whatever the crowd: 81 fps at twenty thousand on an RTX 4070 Ti at 1280×720 with the GPU shared, rays, lamp shadows and the wet road on; 78 at half a million with the sort on the device and the near band at three metres. `AE3D_HUNT=1` and the horde closes on the camera over a flow field (`ae3d.nav`).</sub>
+The same tiers carry `examples/zombie_city.ae`'s horde: the near tier draws
+the full mesh, the far tier a 168-triangle stand-in, and past eighty metres
+every figure is a picture baked from it and lit by the scene's lights. The
+draw count does not change with the crowd, and the simulation runs over every
+core; the near band draws in as the count grows, so the full mesh is spent on
+about the same few hundred figures whatever the crowd: 81 fps at twenty
+thousand on an RTX 4070 Ti at 1280×720 with the GPU shared, rays, lamp shadows
+and the wet road on; 78 at half a million with the sort on the device and the
+near band at three metres. `AE3D_HUNT=1` and the horde closes on the camera
+over a flow field (`ae3d.nav`). The zombie itself is still the placeholder the
+pipeline below builds; the figure it will be is the subject of
+[#270](https://github.com/nicolas-maman/ae3d/issues/270).
 
 Every scene is verified the way the engine is: from a sweep of camera
 positions and by numbers read back over the channel, not from one still.
@@ -158,8 +168,6 @@ a headless Blender, and `ae3d_export.py` writes a deterministic, manifested
 export the engine loads. Every build then runs a critique that holds the scene
 to a standard (texel density, normal maps, planted feet, lit windows) and a
 frame budget that fails on one extra triangle.
-
-![The hero zombie under a lamp, its shadow on the wet road](docs/zombie-street-vulkan.png)
 
 ```bash
 blender --background --factory-startup --python tools/blender/make_zombie_street.py -- --out resources/blender/zombie_street.blend
