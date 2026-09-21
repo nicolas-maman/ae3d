@@ -56,7 +56,12 @@ text, flat, as every editor's outliner searches. A click selects one
 object; holding shift or command adds to the selection; selecting an
 object under a closed parent opens the way to it. Delete takes an object
 out with everything under it, Duplicate copies the subtree with its
-parents kept. The inspector shows the last object clicked and an edit
+parents kept. **Group selection** (Cmd+G) puts what is selected under a
+new group at its centre, each object staying where it is in the world;
+**Ungroup** (Shift+Cmd+G) takes a group's contents out from under it and
+the group away; Add has a **Group** of its own, empty, for what is put
+under it later. Either is one edit to undo, however many parents it
+changed. The inspector shows the last object clicked and an edit
 reaches everything selected, so typing a height with three objects
 selected puts all three at that height. The grid and the selection
 outlines are the editor's own geometry: the renderer draws them, but
