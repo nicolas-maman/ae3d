@@ -34,18 +34,25 @@ import aephysics.dynamics
 import aephysics.physics_world
 import aephysics.human
 import ae3d.core
+import ae3d.jobs
 import ae3d.behaviour
 import ae3d.engine
 import ae3d.loader
+import ae3d.skin
+import std.strarr
 
 exports (
-    Physics, Rigidbody, Ragdoll,
-    DYNAMIC, KINEMATIC, STATIC, KIND_RIGIDBODY,
+    Physics, Rigidbody, Ragdoll, Vehicle,
+    DYNAMIC, KINEMATIC, STATIC, KIND_RIGIDBODY, WHEEL_COUNT,
     attach, of, physics_free, physics_world_id, physics_step_count, physics_set_gravity, physics_body_count,
     material, rigidbody, rigidbody_of, rigidbody_body, rigidbody_set_velocity, rigidbody_velocity,
-    rigidbody_apply_impulse, rigidbody_apply_force, rigidbody_is_awake,
-    box_collider, sphere_collider, capsule_collider, mesh_collider,
-    ragdoll, ragdoll_free, ragdoll_bone, ragdoll_human, ragdoll_set_velocity, ragdoll_kick
+    rigidbody_apply_impulse, rigidbody_apply_force, rigidbody_is_awake, rigidbody_set_damping, rigidbody_enable_hit_events,
+    box_collider, sphere_collider, capsule_collider, mesh_collider, hull_collider,
+    hull_of_mesh, mesh_of_mesh, convex_collider_of_model, mesh_collider_of_model,
+    vehicle, vehicle_free, vehicle_drive, vehicle_speed, vehicle_chassis, vehicle_wheel,
+    ragdoll, ragdoll_free, ragdoll_bone, ragdoll_human, ragdoll_set_velocity, ragdoll_kick,
+    ragdoll_stand, ragdoll_release, ragdoll_is_standing, ragdoll_turn, ragdoll_of_shape, hit_event_count, hit_event,
+    ragdoll_dress, ragdoll_dress_named, ragdoll_is_dressed, humanoid_bone
 )
 
 extern calloc(count: int, size: int) -> ptr
@@ -79,23 +86,63 @@ struct Rigidbody {
     kind: int
 }
 
-// A ragdoll: aephysics's human, and a game object per bone.
+// A ragdoll: aephysics's human, and a game object per bone. Standing,
+// its pelvis is sprung upright to the ground (human_align_spring) until
+// released, when it falls as the figure it is.
 struct Ragdoll {
     physics: ptr
     human: Human
     bones: ptr                     // list of *GameObject, in human's bone order
+    standing: bool
+    rig: ptr                       // *Rig, the skinned figure the ragdoll drives, or null
+}
+
+// A skinned figure worn by a ragdoll: a rig bone per ragdoll bone, each
+// with the rotation that takes the body's frame to the bone's, and the
+// rig's root carried by the pelvis.
+struct RigBone {
+    model: ptr                     // *Model, the rig bone
+    offset: Quat                   // body rotation * offset = the bone's world rotation
+}
+
+struct Rig {
+    skeleton: ptr                  // *Skeleton
+    root: ptr                      // *Model, the rig's root
+    bones: ptr                     // RigBone[human.BONE_COUNT]
+    root_offset_p: Vec3            // the root from the pelvis, in the pelvis's frame
+    root_offset_q: Quat
+}
+
+// A car: a chassis and four wheels on wheel joints (Box3D's: the
+// suspension along the chassis's up, the spin about the axle, the front
+// pair steered), driven by a throttle, a steering angle and a brake.
+const WHEEL_COUNT = 4
+const WHEEL_FRONT_LEFT = 0
+const WHEEL_FRONT_RIGHT = 1
+const WHEEL_REAR_LEFT = 2
+const WHEEL_REAR_RIGHT = 3
+
+struct Vehicle {
+    physics: ptr
+    chassis: ptr                   // *Rigidbody
+    wheels: ptr                    // *Rigidbody[WHEEL_COUNT]
+    joints: ptr                    // JointId[WHEEL_COUNT]
+    max_torque: float
+    max_speed: float               // the spin motor's speed at full throttle, radians a second
+    max_steer: float               // radians
 }
 
 var g_attached: ptr = null         // list of *Physics, to find an engine's
 
 // The world in the engine's loop: gravity down, four sub-steps a fixed
-// step, stepped over the engine's thread budget (AE3D_JOBS: this thread
+// step, stepped on the engine's own job pool (AE3D_JOBS: this thread
 // and the job workers), the same at any count to the bit.
 attach(e: *Engine) -> *Physics {
     p = heap.new(Physics)
     p.engine = e as ptr
     wdef = dynamics.default_world_def()
-    wdef.worker_count = engine.engine_jobs(e) + 1
+    wdef.scheduler = jobs.scheduler()
+    wdef.worker_count = jobs.threads()
     p.world_id = dynamics.create_world(&wdef)
     p.rigidbodies = list.new()
     p.ragdolls = list.new()
@@ -160,7 +207,9 @@ on_fixed_update(state: ptr, e: *Engine, step: float) {
     count = list.size(p.ragdolls)
     i = 0
     while i < count {
-        pull_ragdoll(list.get_raw(p.ragdolls, i) as *Ragdoll)
+        r = list.get_raw(p.ragdolls, i) as *Ragdoll
+        pull_ragdoll(r)
+        if r.rig != null { pose_rig(r) }
         i = i + 1
     }
 }
@@ -276,6 +325,29 @@ rigidbody_velocity(rb: *Rigidbody) -> Vec3 { return dynamics.body_get_linear_vel
 rigidbody_apply_impulse(rb: *Rigidbody, impulse: Vec3) { dynamics.body_apply_linear_impulse_to_center(rb.body_id, impulse, true) }
 rigidbody_apply_force(rb: *Rigidbody, force: Vec3) { dynamics.body_apply_force_to_center(rb.body_id, force, true) }
 rigidbody_is_awake(rb: *Rigidbody) -> bool { return dynamics.body_is_awake(rb.body_id) }
+rigidbody_set_damping(rb: *Rigidbody, linear: float, angular: float) {
+    dynamics.body_set_linear_damping(rb.body_id, linear)
+    dynamics.body_set_angular_damping(rb.body_id, angular)
+}
+
+// Hit events on every shape of the body: what it strikes faster than
+// the world's threshold is reported by hit_event after the step.
+rigidbody_enable_hit_events(rb: *Rigidbody, flag: bool) {
+    p = rb.physics as *Physics
+    ids_block = calloc(64, sizeof(ShapeId))
+    ids = ids_block as ShapeId[]
+    count = dynamics.body_get_shapes(rb.body_id, ids, 64)
+    i = 0
+    while i < count {
+        dynamics.shape_enable_hit_events(ids[i], flag)
+        i = i + 1
+    }
+    free(ids_block)
+    physics_world.set_hit_event_threshold(p.world_id, 1.0)
+}
+
+hit_event_count(p: *Physics) -> int { return physics_world.contact_hit_event_count(p.world_id) }
+hit_event(p: *Physics, index: int) -> ContactHitEvent { return physics_world.contact_hit_event(p.world_id, index) }
 
 // The body a collider goes on: the object's, or a static one made for
 // it, as a Unity collider without a Rigidbody is static.
@@ -320,17 +392,214 @@ capsule_collider(o: *GameObject, center1: Vec3, center2: Vec3, radius: float, m:
     return dynamics.create_capsule_shape(rb.body_id, &sdef, manifold.capsule(center1, center2, radius))
 }
 
-// A triangle mesh (static: a mesh shape on a body that moves is the
-// reference's ground, not a dynamic shape). The mesh is the world's
-// from here on, freed with the physics.
-mesh_collider(o: *GameObject, md: *MeshData, m: SurfaceMaterial) -> ShapeId {
+// A convex hull in the object's frame; the hull is the world's from
+// here on, freed with the physics.
+hull_collider(o: *GameObject, h: *HullData, m: SurfaceMaterial, density: float = 1.0) -> ShapeId {
     rb = body_for_collider(o)
-    if rb == null { return dynamics.null_shape_id() }
+    if rb == null || h == null { return dynamics.null_shape_id() }
+    p = rb.physics as *Physics
+    list.add_raw(p.hulls, h as ptr)
+    sdef = shape_def(m, density)
+    return dynamics.create_hull_shape(rb.body_id, &sdef, h)
+}
+
+// A triangle mesh (static: a mesh shape on a body that moves is the
+// reference's ground, not a dynamic shape), at a scale. The mesh is the
+// world's from here on, freed with the physics.
+mesh_collider(o: *GameObject, md: *MeshData, m: SurfaceMaterial, scale: Vec3 = math.vec3_one()) -> ShapeId {
+    rb = body_for_collider(o)
+    if rb == null || md == null { return dynamics.null_shape_id() }
     p = rb.physics as *Physics
     list.add_raw(p.meshes, md as ptr)
     sdef = dynamics.default_shape_def()
     sdef.base_material = m
-    return dynamics.create_mesh_shape(rb.body_id, &sdef, md, math.vec3_one())
+    return dynamics.create_mesh_shape(rb.body_id, &sdef, md, scale)
+}
+
+// The convex hull of a drawn mesh's vertices, scaled: what a crate, a
+// bin or a bench collides as. Null for a mesh with no volume.
+hull_of_mesh(drawn: ptr, scale: Vec3) -> *HullData {
+    count = core.mesh_vertex_count(drawn)
+    if count < 4 { return null }
+    block = calloc(count, sizeof(Vec3))
+    points = block as Vec3[]
+    i = 0
+    while i < count {
+        v = core.mesh_position(drawn, i)
+        points[i] = math.vec3(v.x * scale.x, v.y * scale.y, v.z * scale.z)
+        i = i + 1
+    }
+    h = hull.create_hull(points, count, hull.MAX_HULL_VERTICES)
+    free(block)
+    return h
+}
+
+// A drawn mesh as a collision mesh: its triangles, unscaled (the mesh
+// collider takes the scale).
+mesh_of_mesh(drawn: ptr) -> *MeshData {
+    vertex_count = core.mesh_vertex_count(drawn)
+    index_count = core.mesh_index_count(drawn)
+    if vertex_count < 3 || index_count < 3 { return null }
+    vertices_block = calloc(vertex_count, sizeof(Vec3))
+    vertices = vertices_block as Vec3[]
+    i = 0
+    while i < vertex_count {
+        vertices[i] = core.mesh_position(drawn, i)
+        i = i + 1
+    }
+    indices_block = calloc(index_count, 4)
+    indices = indices_block as int[]
+    i = 0
+    while i < index_count {
+        indices[i] = core.mesh_index_at(drawn, i)
+        i = i + 1
+    }
+    def = mesh.mesh_def()
+    def.vertices = vertices_block
+    def.indices = indices_block
+    def.vertex_count = vertex_count
+    def.triangle_count = index_count / 3
+    def.weld_vertices = true
+    def.weld_tolerance = 0.0001
+    md = mesh.create_mesh(&def, null, 0)
+    free(indices_block)
+    free(vertices_block)
+    return md
+}
+
+// The object's own model as its collider: convex (a prop, dynamic or
+// not) from the hull of its vertices at the model's scale.
+convex_collider_of_model(o: *GameObject, m: SurfaceMaterial, density: float = 1.0) -> ShapeId {
+    model = behaviour.object_model(o)
+    if model == null || model.mesh == null { return dynamics.null_shape_id() }
+    return hull_collider(o, hull_of_mesh(model.mesh, model.scale), m, density)
+}
+
+// The object's own model as its collider: its triangles, for the static
+// world (a building, a kerb, a lamp post).
+mesh_collider_of_model(o: *GameObject, m: SurfaceMaterial) -> ShapeId {
+    model = behaviour.object_model(o)
+    if model == null || model.mesh == null { return dynamics.null_shape_id() }
+    return mesh_collider(o, mesh_of_mesh(model.mesh), m, model.scale)
+}
+
+// --- vehicles ------------------------------------------------------------------------------------------------
+
+// A car from its objects: the chassis (a rigidbody with its colliders
+// already on it) and four wheel objects, each a dynamic body with its
+// collider about its origin (a sphere, as the reference's driving
+// sample has them: a faceted cylinder sits on a facet and will not
+// roll), placed where its axle goes in the chassis's frame (front
+// left, front right, rear left, rear right); the axle is the wheel's
+// own x. The joints spring the wheels along the chassis's up
+// (suspension), spin them about the axle with a motor, and steer the
+// front pair. Both joint frames are the same basis -- x up, z along
+// the axle -- so the wheel rests where the joint has no rotation to
+// undo. The rear wheels are driven; the fronts roll free unless braked.
+vehicle(chassis_o: *GameObject, wheel_objects: ptr, mounts: ptr, suspension_hertz: float, suspension_damping: float,
+        travel: float, max_torque: float, max_speed: float, max_steer: float) -> *Vehicle {
+    chassis = rigidbody_of(chassis_o)
+    if chassis == null { return null }
+    p = chassis.physics as *Physics
+    v = heap.new(Vehicle)
+    v.physics = p as ptr
+    v.chassis = chassis as ptr
+    v.wheels = calloc(WHEEL_COUNT, 8)
+    v.joints = calloc(WHEEL_COUNT, sizeof(JointId))
+    v.max_torque = max_torque
+    v.max_speed = max_speed
+    v.max_steer = max_steer
+    wheels = v.wheels as ptr[]
+    joints = v.joints as JointId[]
+    objects = wheel_objects as ptr[]
+    mount_points = mounts as Vec3[]
+    chassis_q = dynamics.body_get_rotation(chassis.body_id)
+    chassis_p = dynamics.body_get_position(chassis.body_id)
+    // The joint's frame in both bodies: x up (the suspension), z along the axle, y = z cross x.
+    frame_q = math.make_quat_from_matrix(Matrix3 { cx: math.vec3(0.0, 1.0, 0.0), cy: math.vec3(0.0, 0.0, 1.0), cz: math.vec3(1.0, 0.0, 0.0) })
+    i = 0
+    while i < WHEEL_COUNT {
+        o = objects[i] as *GameObject
+        rb = rigidbody_of(o)
+        if rb == null { rb = rigidbody(o, DYNAMIC) }
+        wheels[i] = rb as ptr
+        world_mount = math.add(chassis_p, math.rotate_vector(chassis_q, mount_points[i]))
+        dynamics.body_set_transform(rb.body_id, world_mount, chassis_q)
+        jdef = dynamics.default_wheel_joint_def()
+        jdef.base.body_id_a = chassis.body_id
+        jdef.base.body_id_b = rb.body_id
+        jdef.base.local_frame_a.p = mount_points[i]
+        jdef.base.local_frame_a.q = frame_q
+        jdef.base.local_frame_b.p = math.vec3_zero()
+        jdef.base.local_frame_b.q = frame_q
+        jdef.enable_suspension_spring = true
+        jdef.suspension_hertz = suspension_hertz
+        jdef.suspension_damping_ratio = suspension_damping
+        jdef.enable_suspension_limit = true
+        jdef.lower_suspension_limit = 0.0 - travel
+        jdef.upper_suspension_limit = travel
+        jdef.enable_spin_motor = true
+        jdef.max_spin_torque = 0.0
+        jdef.spin_speed = 0.0
+        jdef.enable_steering = i < 2
+        jdef.steering_hertz = 8.0
+        jdef.steering_damping_ratio = 1.0
+        jdef.target_steering_angle = 0.0
+        jdef.max_steering_torque = 20.0 * max_torque
+        jdef.enable_steering_limit = i < 2
+        jdef.lower_steering_limit = 0.0 - max_steer
+        jdef.upper_steering_limit = max_steer
+        joints[i] = dynamics.create_wheel_joint(p.world_id, &jdef)
+        pull_transform(rb)
+        i = i + 1
+    }
+    return v
+}
+
+vehicle_chassis(v: *Vehicle) -> *Rigidbody { return v.chassis as *Rigidbody }
+vehicle_wheel(v: *Vehicle, index: int) -> *Rigidbody { wheels = v.wheels as ptr[]; return wheels[index] as *Rigidbody }
+
+// The controls this step: throttle -1..1 (reverse to forward), steer
+// -1..1 (right to left), brake 0..1. The rear wheels drive; braking
+// is the motors holding every wheel still at full torque; a wheel
+// neither driven nor braked rolls free (a motor holding a wheel still
+// is a brake, which is what kept a first car crawling).
+vehicle_drive(v: *Vehicle, throttle: float, steer: float, brake: float) {
+    joints = v.joints as JointId[]
+    t = math.clamp_float(throttle, 0.0 - 1.0, 1.0)
+    s = math.clamp_float(steer, 0.0 - 1.0, 1.0)
+    b = math.clamp_float(brake, 0.0, 1.0)
+    i = 0
+    while i < WHEEL_COUNT {
+        driven = i >= 2
+        if b > 0.0 {
+            joint_solver.wheel_joint_set_spin_motor_speed(joints[i], 0.0)
+            joint_solver.wheel_joint_set_max_spin_torque(joints[i], b * v.max_torque)
+        } else if driven && t != 0.0 {
+            // A negative spin about the axle (the chassis's x) rolls the wheel toward -z, forward.
+            joint_solver.wheel_joint_set_spin_motor_speed(joints[i], 0.0 - t * v.max_speed)
+            joint_solver.wheel_joint_set_max_spin_torque(joints[i], v.max_torque)
+        } else {
+            joint_solver.wheel_joint_set_spin_motor_speed(joints[i], 0.0)
+            joint_solver.wheel_joint_set_max_spin_torque(joints[i], 0.0)
+        }
+        if i < 2 { joint_solver.wheel_joint_set_target_steering_angle(joints[i], s * v.max_steer) }
+        i = i + 1
+    }
+    dynamics.body_set_awake((v.chassis as *Rigidbody).body_id, true)
+}
+
+// The chassis's speed along its heading, metres a second (negative in reverse).
+vehicle_speed(v: *Vehicle) -> float {
+    chassis = v.chassis as *Rigidbody
+    forward = math.rotate_vector(dynamics.body_get_rotation(chassis.body_id), math.vec3(0.0, 0.0, 0.0 - 1.0))
+    return math.dot(dynamics.body_get_linear_velocity(chassis.body_id), forward)
+}
+
+vehicle_free(v: *Vehicle) {
+    free(v.wheels)
+    free(v.joints)
+    heap.free(v)
 }
 
 // --- ragdolls ------------------------------------------------------------------------------------------------
@@ -345,7 +614,9 @@ ragdoll(e: *Engine, name: string, position: Vec3, friction_torque: float, hertz:
     r = heap.new(Ragdoll)
     r.physics = p as ptr
     r.human = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
-    human.create_human(&r.human, p.world_id, position, friction_torque, hertz, damping_ratio, list.size(p.ragdolls) + 1, null)
+    r.standing = false
+    r.rig = null
+    human.create_human(&r.human, p.world_id, position, friction_torque, hertz, damping_ratio, list.size(p.ragdolls) + 1, r as ptr)
     r.bones = list.new()
     i = 0
     while i < human.BONE_COUNT {
@@ -392,8 +663,9 @@ bone_model(body_id: BodyId, index: int) -> *Model {
     free(ids_block)
     core.model_update_matrix(m)
     core.model_recalculate_bounds(m)
-    skin = 0.9 - 0.06 * ((index % 4) as float)
-    core.model_matte(m, skin, skin * 0.85, skin * 0.7)
+    // Clothed rather than bare: a dull warm grey, the torso and limbs a shade apart.
+    tone = 0.58 - 0.05 * ((index % 4) as float)
+    core.model_matte(m, tone, tone * 0.92, tone * 0.85)
     return m
 }
 
@@ -409,6 +681,62 @@ pull_ragdoll(r: *Ragdoll) {
 }
 
 ragdoll_bone(r: *Ragdoll, index: int) -> *GameObject { return list.get_raw(r.bones, index) as *GameObject }
+
+// The figure standing: its pelvis sprung upright to the ground's body by
+// a parallel joint at `hertz`, and every bone held at its pose by a
+// kinematic anchor through a parallel joint (the pose drive of an
+// active ragdoll, rotation only), so it stands until released.
+ragdoll_stand(r: *Ragdoll, ground: *Rigidbody, hertz: float, damping_ratio: float) {
+    if r.standing { return }
+    p = r.physics as *Physics
+    human.human_align_spring(&r.human, p.world_id, ground.body_id, hertz, damping_ratio)
+    human.human_create_parallel_anchors(&r.human, p.world_id)
+    r.standing = true
+}
+
+// The springs and anchors let go: the figure is a ragdoll from here.
+ragdoll_release(r: *Ragdoll) {
+    if r.standing == false { return }
+    pelvis = human.bone_at(&r.human, human.BONE_PELVIS)
+    dynamics.destroy_joint(pelvis.joint_id, true)
+    pelvis.joint_id = dynamics.null_joint_id()
+    human.human_destroy_anchors(&r.human)
+    r.standing = false
+}
+
+ragdoll_is_standing(r: *Ragdoll) -> bool { return r.standing }
+
+// The whole figure turned about its pelvis by `yaw` about y, as one
+// piece: every bone body moved and rotated together, so its joints are
+// as they were. For a figure before it stands; a standing one is held
+// by its anchors.
+ragdoll_turn(r: *Ragdoll, yaw: float) {
+    pelvis = human.bone_at(&r.human, human.BONE_PELVIS)
+    pivot = dynamics.body_get_position(pelvis.body_id)
+    turn = core.quat_rotate(yaw, core.vec3(0.0, 1.0, 0.0))
+    i = 0
+    while i < human.BONE_COUNT {
+        bone = human.bone_at(&r.human, i)
+        t = dynamics.body_get_transform(bone.body_id)
+        p = core.v3_add(pivot, core.quat_apply(turn, core.v3_sub(t.p, pivot)))
+        dynamics.body_set_transform(bone.body_id, p, core.quat_normalize(core.quat_mul(turn, t.q)))
+        i = i + 1
+    }
+    pull_ragdoll(r)
+}
+
+// The ragdoll a shape belongs to, or null: every bone's body carries it.
+ragdoll_of_shape(p: *Physics, id: ShapeId) -> *Ragdoll {
+    data = dynamics.body_get_user_data(dynamics.shape_get_body(id))
+    if data == null { return null }
+    n = list.size(p.ragdolls)
+    i = 0
+    while i < n {
+        if list.get_raw(p.ragdolls, i) == data { return data as *Ragdoll }
+        i = i + 1
+    }
+    return null
+}
 ragdoll_human(r: *Ragdoll) -> *Human { return &r.human }
 ragdoll_set_velocity(r: *Ragdoll, v: Vec3) { human.human_set_velocity(&r.human, v) }
 ragdoll_kick(r: *Ragdoll, angular_impulse: Vec3) { human.human_apply_angular_impulse(&r.human, angular_impulse) }
@@ -424,5 +752,293 @@ ragdoll_free(r: *Ragdoll) {
         i = i + 1
     }
     list.free(r.bones)
+    if r.rig != null {
+        rig = r.rig as *Rig
+        free(rig.bones)
+        heap.free(rig)
+    }
     heap.free(r)
+}
+
+// --- a figure on the ragdoll -------------------------------------------------------------------------------------
+
+// The rig bone that stands for each of the ragdoll's twelve, in the
+// ragdoll's bone order, as the engine's own Blender pipeline names them.
+humanoid_bone(index: int) -> string {
+    if index == human.BONE_PELVIS { return "Hips" }
+    if index == human.BONE_SPINE_01 { return "Spine" }
+    if index == human.BONE_SPINE_03 { return "Chest" }
+    if index == human.BONE_NECK { return "Neck" }
+    if index == human.BONE_THIGH_L { return "ThighL" }
+    if index == human.BONE_CALF_L { return "KneeL" }
+    if index == human.BONE_THIGH_R { return "ThighR" }
+    if index == human.BONE_CALF_R { return "KneeR" }
+    if index == human.BONE_UPPER_ARM_L { return "ShoulderL" }
+    if index == human.BONE_LOWER_ARM_L { return "ElbowL" }
+    if index == human.BONE_UPPER_ARM_R { return "ShoulderR" }
+    return "ElbowR"
+}
+
+// The skinned figure worn by the ragdoll, its rig named as the pipeline
+// names one: every fixed step from here the rig's bones take the bodies'
+// rotations and the root rides the pelvis, so the mesh weighted to the
+// rig stands, falls and lies as the ragdoll does. The ragdoll's own
+// capsule models are hidden; its objects stay for scripts.
+ragdoll_dress(r: *Ragdoll, skeleton: *Skeleton) -> bool {
+    names = strarr.new()
+    i = 0
+    while i < human.BONE_COUNT {
+        strarr.push(names, humanoid_bone(i))
+        i = i + 1
+    }
+    ok = ragdoll_dress_named(r, skeleton, strarr.array(names))
+    strarr.free(names)
+    return ok
+}
+
+ragdoll_is_dressed(r: *Ragdoll) -> bool { return r.rig != null }
+
+// With the rig's own names for the twelve bones (a glTF rig names them
+// its way). Answers false, dressing nothing, when a name is not in the
+// skeleton or the skeleton has no root.
+//
+// The two rest poses are not the same figure: the rig is in its bind
+// pose, the ragdoll in the reference's. So at dressing each rig bone is
+// first turned so that it points where the body's bone does (from its
+// joint toward its child's, or along its capsule), and the rotation
+// between the body's frame and the bone's turned frame is what the body
+// carries from then on. The figure is faced the ragdoll's way first,
+// from where each one's foot points, so that turn is about a bone's own
+// length and not a half-turn of the whole figure.
+ragdoll_dress_named(r: *Ragdoll, skeleton: *Skeleton, names: string[]) -> bool {
+    if r == null || skeleton == null || skin.skeleton_count(skeleton) == 0 { return false }
+    indices = calloc(human.BONE_COUNT, 4) as int[]
+    i = 0
+    while i < human.BONE_COUNT {
+        indices[i] = skin.skeleton_find(skeleton, names[i])
+        if indices[i] < 0 {
+            free(indices)
+            return false
+        }
+        i = i + 1
+    }
+    root = rig_root(skeleton)
+    if root == null { free(indices); return false }
+    rig = heap.new(Rig)
+    rig.skeleton = skeleton as ptr
+    rig.root = root as ptr
+    rig.bones = calloc(human.BONE_COUNT, sizeof(RigBone))
+    bones = rig.bones as RigBone[]
+
+    // The figure faced as the ragdoll is, from the feet.
+    pelvis = human.bone_at(&r.human, human.BONE_PELVIS)
+    pelvis_t = dynamics.body_get_transform(pelvis.body_id)
+    rig_facing = rig_foot_direction(skeleton, indices[human.BONE_CALF_L])
+    body_facing = body_foot_direction(r, human.BONE_CALF_L)
+    if core.v3_len(rig_facing) > 0.0001 && core.v3_len(body_facing) > 0.0001 {
+        turn = core.quat_from_to(rig_facing, body_facing)
+        core.model_set_rotation(root, core.quat_mul(turn, root.rotation))
+    }
+    // And stood where it is: the rig's pelvis on the ragdoll's.
+    core.model_sync_transform(root)
+    hips = skin.skeleton_bone(skeleton, indices[human.BONE_PELVIS])
+    core.model_sync_transform(hips)
+    shift = core.v3_sub(pelvis_t.p, hips.world_position)
+    core.model_set_position(root, root.position.x + shift.x, root.position.y + shift.y, root.position.z + shift.z)
+    core.model_sync_transform(root)
+
+    // Each bone's offset from its body, with the bone turned to the body's direction.
+    i = 0
+    while i < human.BONE_COUNT {
+        bone = skin.skeleton_bone(skeleton, indices[i])
+        core.model_sync_transform(bone)
+        body = human.bone_at(&r.human, i)
+        body_t = dynamics.body_get_transform(body.body_id)
+        along_body = body_bone_direction(r, i)
+        along_rig = rig_bone_direction(skeleton, indices[i])
+        aligned = bone.world_rotation
+        if core.v3_len(along_body) > 0.0001 && core.v3_len(along_rig) > 0.0001 {
+            aligned = core.quat_mul(core.quat_from_to(along_rig, along_body), bone.world_rotation)
+        }
+        bones[i].model = bone as ptr
+        bones[i].offset = core.quat_normalize(core.quat_mul(core.quat_conjugate(body_t.q), aligned))
+        i = i + 1
+    }
+    // The root from the pelvis.
+    inverse_pelvis = core.quat_conjugate(pelvis_t.q)
+    rig.root_offset_p = core.quat_apply(inverse_pelvis, core.v3_sub(root.world_position, pelvis_t.p))
+    rig.root_offset_q = core.quat_normalize(core.quat_mul(inverse_pelvis, root.world_rotation))
+    free(indices)
+
+    // The capsules go unseen; the figure is the ragdoll now.
+    i = 0
+    while i < human.BONE_COUNT {
+        o = list.get_raw(r.bones, i) as *GameObject
+        capsule = behaviour.object_model(o)
+        if capsule != null { capsule.visible = false }
+        i = i + 1
+    }
+    r.rig = rig as ptr
+    pose_rig(r)
+    return true
+}
+
+// The rig's root: the bone with no parent among the skeleton's bones, or
+// the parent chain's top from the first bone.
+rig_root(skeleton: *Skeleton) -> *Model {
+    first = skin.skeleton_bone(skeleton, 0)
+    if first == null { return null }
+    top = first
+    while core.model_parent(top) != null { top = core.model_parent(top) }
+    return top
+}
+
+// Where a rig bone points: toward its first child in the skeleton, in the world.
+rig_bone_direction(skeleton: *Skeleton, index: int) -> Vec3 {
+    bone = skin.skeleton_bone(skeleton, index)
+    count = skin.skeleton_count(skeleton)
+    i = 0
+    while i < count {
+        other = skin.skeleton_bone(skeleton, i)
+        if other != null && core.model_parent(other) == bone {
+            core.model_sync_transform(other)
+            return core.v3_sub(other.world_position, bone.world_position)
+        }
+        i = i + 1
+    }
+    return core.vec3(0.0, 0.0, 0.0)
+}
+
+// Where the rig's foot points, along the ground: from the calf's child
+// (the ankle) to that one's child (the toe).
+rig_foot_direction(skeleton: *Skeleton, calf_index: int) -> Vec3 {
+    calf = skin.skeleton_bone(skeleton, calf_index)
+    count = skin.skeleton_count(skeleton)
+    ankle = null as *Model
+    i = 0
+    while i < count && ankle == null {
+        other = skin.skeleton_bone(skeleton, i)
+        if other != null && core.model_parent(other) == calf { ankle = other }
+        i = i + 1
+    }
+    if ankle == null { return core.vec3(0.0, 0.0, 0.0) }
+    i = 0
+    while i < count {
+        other = skin.skeleton_bone(skeleton, i)
+        if other != null && core.model_parent(other) == ankle {
+            core.model_sync_transform(other)
+            core.model_sync_transform(ankle)
+            d = core.v3_sub(other.world_position, ankle.world_position)
+            return core.vec3(d.x, 0.0, d.z)
+        }
+        i = i + 1
+    }
+    return core.vec3(0.0, 0.0, 0.0)
+}
+
+// Where a ragdoll bone points, in the world: from its joint (the body's
+// origin) toward its child's joint, or, for a bone with no child, along
+// its capsule to the end farther from the joint.
+body_bone_direction(r: *Ragdoll, index: int) -> Vec3 {
+    body = human.bone_at(&r.human, index)
+    t = dynamics.body_get_transform(body.body_id)
+    local = core.vec3(0.0, 0.0, 0.0)
+    found = false
+    i = 0
+    while i < human.BONE_COUNT {
+        child = human.bone_at(&r.human, i)
+        if child.parent_index == index && found == false {
+            local = child.local_frame_a.p
+            found = true
+        }
+        i = i + 1
+    }
+    if found == false {
+        c = first_capsule(body.body_id)
+        if core.v3_len(c.center1) > core.v3_len(c.center2) { local = c.center1 } else { local = c.center2 }
+    }
+    return core.quat_apply(t.q, local)
+}
+
+// Where the ragdoll's foot points, along the ground: the calf's second
+// capsule is the foot, its end farther off the leg's line the toe.
+body_foot_direction(r: *Ragdoll, calf_index: int) -> Vec3 {
+    body = human.bone_at(&r.human, calf_index)
+    t = dynamics.body_get_transform(body.body_id)
+    ids_block = calloc(4, sizeof(ShapeId))
+    ids = ids_block as ShapeId[]
+    count = dynamics.body_get_shapes(body.body_id, ids, 4)
+    direction = core.vec3(0.0, 0.0, 0.0)
+    if count >= 2 {
+        leg = dynamics.shape_get_capsule(ids[0])
+        foot = dynamics.shape_get_capsule(ids[1])
+        axis = core.v3_normalize(core.v3_sub(leg.center2, leg.center1))
+        off1 = core.v3_len(core.v3_sub(core.v3_sub(foot.center1, leg.center1), core.v3_mul(axis, core.v3_dot(core.v3_sub(foot.center1, leg.center1), axis))))
+        off2 = core.v3_len(core.v3_sub(core.v3_sub(foot.center2, leg.center1), core.v3_mul(axis, core.v3_dot(core.v3_sub(foot.center2, leg.center1), axis))))
+        local = core.v3_sub(foot.center1, foot.center2)
+        if off2 > off1 { local = core.v3_sub(foot.center2, foot.center1) }
+        d = core.quat_apply(t.q, local)
+        direction = core.vec3(d.x, 0.0, d.z)
+    }
+    free(ids_block)
+    return direction
+}
+
+first_capsule(body_id: BodyId) -> Capsule {
+    ids_block = calloc(4, sizeof(ShapeId))
+    ids = ids_block as ShapeId[]
+    count = dynamics.body_get_shapes(body_id, ids, 4)
+    c = manifold.capsule(math.vec3(0.0, 0.0, 0.0), math.vec3(0.0, 0.0, 0.0), 0.0)
+    if count > 0 { c = dynamics.shape_get_capsule(ids[0]) }
+    free(ids_block)
+    return c
+}
+
+// The rig after the step: the root where the pelvis carries it, every
+// mapped bone at its body's rotation, parents before children so a
+// child's local rotation is taken against its parent's new one; the
+// unmapped bones (a wrist, a toe, the crown) keep their own and follow.
+pose_rig(r: *Ragdoll) {
+    rig = r.rig as *Rig
+    bones = rig.bones as RigBone[]
+    skeleton = rig.skeleton as *Skeleton
+    root = rig.root as *Model
+    pelvis_t = dynamics.body_get_transform(human.bone_at(&r.human, human.BONE_PELVIS).body_id)
+    root_p = core.v3_add(pelvis_t.p, core.quat_apply(pelvis_t.q, rig.root_offset_p))
+    root_q = core.quat_mul(pelvis_t.q, rig.root_offset_q)
+    set_world_rotation(root, root_q)
+    parent = core.model_parent(root)
+    if parent == null {
+        core.model_set_position(root, root_p.x, root_p.y, root_p.z)
+    } else {
+        core.model_sync_transform(parent)
+        local = core.quat_apply(core.quat_conjugate(parent.world_rotation), core.v3_sub(root_p, parent.world_position))
+        core.model_set_position(root, local.x / parent.world_scale.x, local.y / parent.world_scale.y, local.z / parent.world_scale.z)
+    }
+    count = skin.skeleton_count(skeleton)
+    i = 0
+    while i < count {
+        bone = skin.skeleton_bone(skeleton, i)
+        k = 0
+        while k < human.BONE_COUNT {
+            if bones[k].model == bone as ptr {
+                t = dynamics.body_get_transform(human.bone_at(&r.human, k).body_id)
+                set_world_rotation(bone, core.quat_mul(t.q, bones[k].offset))
+                break
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+}
+
+// A model's local rotation for a world one, against its parent's current world rotation.
+set_world_rotation(m: *Model, world: Quat) {
+    parent = core.model_parent(m)
+    if parent == null {
+        core.model_set_rotation(m, core.quat_normalize(world))
+        return
+    }
+    core.model_sync_transform(parent)
+    core.model_set_rotation(m, core.quat_normalize(core.quat_mul(core.quat_conjugate(parent.world_rotation), world)))
 }

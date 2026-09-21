@@ -8,7 +8,7 @@
 // it: every frame the particles step and wrap around the camera, the wind
 // blows them, a storm throws its lightning. The particles are point instances
 // -- a position, a scale, a colour and a phase each, streamed the way the
-// sand's grains are -- stepped in C (native/ae3d_weather.c), so a hundred
+// sand's grains are -- stepped over the engine's pool, so a hundred
 // thousand drops are a fraction of a millisecond of the frame. Rain streaks
 // are a thin box falling fast; snow a small one drifting and swaying; dust a
 // sphere the size of a fist carried by the wind through a haze. A storm is
@@ -20,6 +20,8 @@
 // intensity by the end of every flash.
 import std.heap
 import ae3d.core
+import ae3d.jobs
+import ae3d.png
 import ae3d.engine
 import ae3d.loader
 
@@ -30,12 +32,113 @@ exports (
 )
 
 extern ae3d_image_register(name: string, rgba: ptr, width: int, height: int) -> int
-extern ae3d_rgba_set(pixels: ptr, index: int, r: float, g: float, b: float, a: float)
-extern ae3d_weather_scatter(xyz: ptr, phases: ptr, count: int, cx: float, cy: float, cz: float,
-                            hx: float, hy: float, hz: float, seed: int)
-extern ae3d_weather_step(xyz: ptr, phases: ptr, count: int, dt: float, fall: float,
-                         wx: float, wy: float, wz: float, sway: float, time: float,
-                         cx: float, cy: float, cz: float, hx: float, hy: float, hz: float) -> int
+extern cos(x: float) -> float
+extern sin(x: float) -> float
+
+// --- the particles ---------------------------------------------------------------------------------------------
+//
+// Rain, snow and dust are point instances -- a position a particle,
+// streamed to the GPU every frame the way the sand's grains are -- and
+// the step that moves them is one pass over a packed xyz array: fall,
+// drift with the wind, a sway for the flakes, and a wrap that keeps
+// every particle inside a box that travels with the camera, so the
+// weather is wherever the eye is and costs the same however big the
+// world. A hundred thousand drops are a sine and a cosine each, a
+// millisecond on one core and a fraction over the engine's pool.
+
+const TWO_PI = 6.283185307
+
+// A cheap, deterministic hash to 0..1 for scattering: 32-bit arithmetic
+// carried in a long, masked to stay unsigned.
+hash01(n: long) -> float {
+    m = 4294967295 as long
+    x = n & m
+    x = x ^ (x >> 16)
+    x = (x * (2146121005 as long)) & m
+    x = x ^ (x >> 15)
+    x = (x * (2221713035 as long)) & m
+    x = x ^ (x >> 16)
+    return (x as float) / 4294967296.0
+}
+
+// Scatters `count` particles through the box of half-extents around a
+// centre; `phases` (may be null) get a phase each for the sway. `seed`
+// tells one system's scatter from another's.
+scatter(xyz: ptr, phases: ptr, count: int, centre: Vec3, half_x: float, half_y: float, half_z: float, seed: int) {
+    if xyz == null || count <= 0 { return }
+    p = xyz as float[]
+    ph = phases as float[]
+    i = 0
+    while i < count {
+        n = (((i as long) * (2654435761 as long)) + (seed as long)) & (4294967295 as long)
+        p[i * 3] = centre.x + (hash01(n) * 2.0 - 1.0) * half_x
+        p[i * 3 + 1] = centre.y + (hash01(n + (1 as long)) * 2.0 - 1.0) * half_y
+        p[i * 3 + 2] = centre.z + (hash01(n + (2 as long)) * 2.0 - 1.0) * half_z
+        if phases != null { ph[i] = hash01(n + (3 as long)) * TWO_PI }
+        i = i + 1
+    }
+}
+
+// One step's constants, shared by the pass's blocks.
+struct WeatherStepJob {
+    xyz: ptr
+    phases: ptr
+    dt: float
+    fall: float
+    wind: Vec3
+    sway: float
+    time: float
+    centre: Vec3
+    half_x: float
+    half_y: float
+    half_z: float
+}
+
+// A block of particles: each falls at `fall` metres a second, drifts
+// with the wind, sways sideways at its own phase (a flake's flutter, a
+// drop's none), and is wrapped back into the box: one leaving the
+// bottom comes in at the top at a fresh x and z, one leaving a side
+// comes in at the other.
+step_block(start: int, end: int, worker: int, context: ptr) {
+    j = context as *WeatherStepJob
+    p = j.xyz as float[]
+    ph = j.phases as float[]
+    dt = j.dt
+    time = j.time
+    i = start
+    while i < end {
+        phase = 0.0
+        if j.phases != null { phase = ph[i] }
+        sx = j.sway * cos(time * 1.7 + phase) * dt
+        sz = j.sway * sin(time * 1.3 + phase * 1.31) * dt
+        x = p[i * 3] + j.wind.x * dt + sx
+        y = p[i * 3 + 1] + (j.wind.y - j.fall) * dt
+        z = p[i * 3 + 2] + j.wind.z * dt + sz
+        if y < j.centre.y - j.half_y {
+            n = (((i as long) * (2246822519 as long)) + ((time * 1000.0) as long)) & (4294967295 as long)
+            y = y + 2.0 * j.half_y
+            x = j.centre.x + (hash01(n) * 2.0 - 1.0) * j.half_x
+            z = j.centre.z + (hash01(n + (1 as long)) * 2.0 - 1.0) * j.half_z
+        } else if y > j.centre.y + j.half_y {
+            y = y - 2.0 * j.half_y
+        }
+        if x < j.centre.x - j.half_x { x = x + 2.0 * j.half_x } else if x > j.centre.x + j.half_x { x = x - 2.0 * j.half_x }
+        if z < j.centre.z - j.half_z { z = z + 2.0 * j.half_z } else if z > j.centre.z + j.half_z { z = z - 2.0 * j.half_z }
+        p[i * 3] = x
+        p[i * 3 + 1] = y
+        p[i * 3 + 2] = z
+        i = i + 1
+    }
+}
+
+// One step of `dt` seconds over the engine's pool; `time` is the clock the sway runs on.
+step_particles(xyz: ptr, phases: ptr, count: int, dt: float, fall: float, wind: Vec3, sway: float, time: float,
+               centre: Vec3, half_x: float, half_y: float, half_z: float) {
+    if xyz == null || count <= 0 { return }
+    job = WeatherStepJob { xyz: xyz, phases: phases, dt: dt, fall: fall, wind: wind, sway: sway, time: time,
+                    centre: centre, half_x: half_x, half_y: half_y, half_z: half_z }
+    jobs.parallel_for(step_block, count, 8192, (&job) as ptr)
+}
 extern calloc(count: int, size: int) -> ptr
 extern free(p: ptr)
 extern sin(x: float) -> float
@@ -245,7 +348,7 @@ weather_set(w: *Weather, kind: int, intensity: float) {
         engine.engine_set_sky_overcast(e, 0.5 + 0.5 * w.intensity, core.vec3(0.80, 0.62, 0.40))
     }
     if w.count > MAX_PARTICLES { w.count = MAX_PARTICLES }
-    ae3d_weather_scatter(w.xyz, w.phases, w.count, at.x, at.y, at.z, w.half_x, w.half_y, w.half_z, kind * 977 + 13)
+    scatter(w.xyz, w.phases, w.count, at, w.half_x, w.half_y, w.half_z, kind * 977 + 13)
     core.model_set_instance_draw_count(m, w.count)
     core.model_set_instance_positions(m, w.xyz, w.count)
     m.visible = true
@@ -303,7 +406,7 @@ soft_disc() -> string {
             r = core.sqrt_of(dx * dx + dy * dy) * 2.0
             a = 1.0 - r * r
             if a < 0.0 { a = 0.0 }
-            ae3d_rgba_set(pixels, y * DISC + x, 1.0, 1.0, 1.0, a)
+            png.rgba_set(pixels, y * DISC + x, 1.0, 1.0, 1.0, a)
             x = x + 1
         }
         y = y + 1
@@ -368,8 +471,7 @@ weather_step(w: *Weather, delta: float) {
     if w.kind == STORM { fall = 14.0 ; wind = core.v3_mul(w.wind_dir, w.wind_speed * 1.8) }
     if w.kind == SNOW { fall = 1.1 ; sway = 0.7 }
     if w.kind == DUST { fall = 0.25 ; sway = 1.2 }
-    ae3d_weather_step(w.xyz, w.phases, w.count, delta, fall, wind.x, wind.y, wind.z, sway, w.clock,
-                      centre.x, centre.y, centre.z, w.half_x, w.half_y, w.half_z)
+    step_particles(w.xyz, w.phases, w.count, delta, fall, wind, sway, w.clock, centre, w.half_x, w.half_y, w.half_z)
     core.model_set_instance_positions(w.particles as *Model, w.xyz, w.count)
 
     if w.kind == STORM { lightning(w, e, delta) }

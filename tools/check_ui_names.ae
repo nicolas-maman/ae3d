@@ -1,0 +1,167 @@
+// Refuse a name the editor shares with the toolkit it imports.
+//
+// The editor defines undo() and redo(); aether-ui exports names of its
+// own for stepping the toolkit's command stack. Inside the ui.window
+// block a bare call bound to the toolkit's, so the Undo button stepped
+// an empty stack and did nothing, while the editor's own check called
+// the same name from the top level, got its own function, and reported
+// a working undo.
+//
+// Nothing warns about that, in either direction, and it comes back
+// whenever either side gains a name. So it is checked: no function the
+// editor defines may share a name with something `ui` exports.
+//
+//     ./build/check_ui_names [--ui PATH] [--editor PATH]
+//
+// The toolkit's module is AETHER_UI_ROOT/ui/module.ae (../aether-ui by
+// default); the editor's is editor/editor.ae. Exits 0 when no name
+// clashes, 1 naming each that does, and 0 with a note when the toolkit
+// is not checked out.
+import std.os
+import std.file
+import std.list
+import std.string
+
+is_lower(c: int) -> bool { return c >= 97 && c <= 122 }
+is_name_char(c: int) -> bool { return is_lower(c) || c == 95 || (c >= 48 && c <= 57) }
+is_space(c: int) -> bool { return c == 32 || c == 9 || c == 13 }
+
+// The names in the module's `exports ( ... )` block, one per comma. Null
+// when the module has no such block.
+exported_names(source: string) -> ptr {
+    start = string.string_index_of(source, "exports")
+    if start < 0 { return null }
+    open = string.string_index_of_from(source, "(", start)
+    if open < 0 { return null }
+    close = string.string_index_of_from(source, "\n)", open)
+    if close < 0 { return null }
+    body = string.substring(source, open + 1, close)
+    names = list.new()
+    parts = string.split(body, ",")
+    n = string.array_size(parts)
+    i = 0
+    while i < n {
+        raw = part_at(parts, i)
+        // The list adopts a heap string it is handed; nothing here frees it.
+        trimmed = string.trim(raw)
+        if string.length(trimmed) > 0 { list.add(names, trimmed) }
+        i = i + 1
+    }
+    string.array_free(parts)
+    string.free(body)
+    return names
+}
+
+part_at(parts: ptr, i: int) -> string { return string.string_array_get(parts, i) }
+name_at(names: ptr, i: int) -> string { return list.get_raw(names, i) }
+
+// Every function the file defines: a lower-case name at the start of a
+// line followed by `(`.
+defined_names(source: string) -> ptr {
+    names = list.new()
+    lines = string.split(source, "\n")
+    n = string.array_size(lines)
+    i = 0
+    while i < n {
+        line = part_at(lines, i)
+        length = string.length(line)
+        if length > 0 && (is_lower(string.char_at(line, 0)) || string.char_at(line, 0) == 95) {
+            end = 1
+            while end < length && is_name_char(string.char_at(line, end)) { end = end + 1 }
+            after = end
+            while after < length && is_space(string.char_at(line, after)) { after = after + 1 }
+            if after < length && string.char_at(line, after) == 40 {
+                name = string.substring(line, 0, end)
+                list.add(names, name)
+            }
+        }
+        i = i + 1
+    }
+    string.array_free(lines)
+    return names
+}
+
+contains_name(names: ptr, name: string) -> bool {
+    n = list.size(names)
+    i = 0
+    while i < n {
+        if name_at(names, i) == name { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// Insertion into byte order, once each, so the report reads the same on every run.
+add_sorted(sorted: ptr, name: string) {
+    if contains_name(sorted, name) { return }
+    list.add(sorted, name)
+    i = list.size(sorted) - 1
+    added = list.get_raw(sorted, i)
+    while i > 0 && string.compare(name_at(sorted, i - 1), name) > 0 {
+        list.list_set(sorted, i, list.get_raw(sorted, i - 1))
+        i = i - 1
+    }
+    list.list_set(sorted, i, added)
+}
+
+main() {
+    ui_root = os.getenv("AETHER_UI_ROOT")
+    if ui_root == null || ui_root == "" { ui_root = "../aether-ui" }
+    ui_path = string.concat(ui_root, "/ui/module.ae")
+    editor_path = "editor/editor.ae"
+    argc = os.args_count()
+    i = 1
+    while i + 1 < argc {
+        flag = os.args_get(i)
+        if flag == "--ui" { ui_path = os.args_get(i + 1) }
+        if flag == "--editor" { editor_path = os.args_get(i + 1) }
+        i = i + 2
+    }
+    if file.file_exists(ui_path) == 0 {
+        println("skip: aether-ui not found at ${ui_path}")
+        return
+    }
+    ui_source, ui_err = file.read(ui_path)
+    if ui_err != "" {
+        println("cannot read ${ui_path}")
+        os.exit(1)
+    }
+    exported = exported_names(ui_source)
+    if exported == null {
+        println("no exports block in ${ui_path}")
+        os.exit(1)
+    }
+    // The check can only work if the exports parsed; a silent empty set
+    // would make it pass forever.
+    if list.size(exported) < 50 {
+        println("only ${list.size(exported)} exports parsed from ${ui_path}; the check would be vacuous")
+        os.exit(1)
+    }
+    editor_source, editor_err = file.read(editor_path)
+    if editor_err != "" {
+        println("cannot read ${editor_path}")
+        os.exit(1)
+    }
+    defined = defined_names(editor_source)
+    clashes = list.new()
+    n = list.size(defined)
+    i = 0
+    while i < n {
+        name = name_at(defined, i)
+        if contains_name(exported, name) { add_sorted(clashes, name) }
+        i = i + 1
+    }
+    if list.size(clashes) == 0 {
+        println("no editor function shares a name with a ui export (${list.size(exported)} exports checked)")
+        return
+    }
+    println("${list.size(clashes)} name(s) the editor defines and ui also exports:")
+    n = list.size(clashes)
+    i = 0
+    while i < n {
+        println("    ${name_at(clashes, i)}")
+        i = i + 1
+    }
+    println("A bare call to one of these inside the ui.window block binds the toolkit's, not the editor's, and nothing says so.")
+    os.exit(1)
+}

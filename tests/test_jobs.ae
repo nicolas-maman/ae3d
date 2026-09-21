@@ -11,14 +11,10 @@
 
 import std.mem
 import ae3d.core
+import ae3d.jobs
 import ae3d.ecs
 import ae3d.crowd
 
-extern ae3d_jobs_start(workers: int) -> int
-extern ae3d_jobs_stop()
-extern ae3d_jobs_workers() -> int
-extern ae3d_jobs_runs() -> int
-extern ae3d_jobs_loops() -> int
 extern calloc(count: int, size: int) -> ptr
 extern free(p: ptr)
 extern memcpy(dst: ptr, src: ptr, bytes: int) -> ptr
@@ -140,7 +136,7 @@ tiers_free(t: Tiers) {
     ecs.column_free(t.counts)
 }
 
-frame(c: Crowd, t: Tiers, grid: *HordeGrid) {
+frame(c: Crowd, t: Tiers, grid: *CrowdGrid) {
     crowd.crowd_wander(ecs.column_data(c.vel), ecs.column_data(c.yaw), N, 1.4)
     crowd.horde_separate(c.world, c.pos, c.vel, grid, 1.05, 2.0)
     crowd.crowd_step(ecs.column_data(c.pos), ecs.column_data(c.vel), ecs.column_data(c.yaw), ecs.column_data(c.phase),
@@ -159,17 +155,16 @@ main() {
     alone_tiers = tiers_new()
     grid = crowd.grid_new(600, 1.05, 0.0 - 300.0, 0.0 - 300.0, 10)
     frame(alone, alone_tiers, grid)
-    loops_alone = ae3d_jobs_loops()
-    check("with no pool every loop ran on this thread", ae3d_jobs_workers() == 0 && loops_alone >= 4)
+    check("with no pool every loop ran on this thread", jobs.workers() == 0 && jobs.passes() >= 4)
 
     // Then over a pool of three workers and this thread.
-    workers = ae3d_jobs_start(3)
-    check("a pool of three workers starts", workers == 3 && ae3d_jobs_workers() == 3)
-    runs_before = ae3d_jobs_runs()
+    jobs.start(4)
+    check("a pool of three workers starts", jobs.workers() == 3 && jobs.threads() == 4)
+    blocks_before = jobs.blocks()
     pooled = crowd_new()
     pooled_tiers = tiers_new()
     frame(pooled, pooled_tiers, grid)
-    check("the pool's loops were split into runs", ae3d_jobs_runs() - runs_before > 8)
+    check("the pool's loops were split into blocks", jobs.blocks() - blocks_before > 8)
 
     // The passes that touch one figure at a time come out the same to the bit.
     check("the headings are the same over the pool", same(alone.vel, pooled.vel, N, 3) || drift(alone.vel, pooled.vel, N, 3) < 0.000001)
@@ -207,8 +202,8 @@ main() {
     }
     check("a hundred frames over the pool keep the crowd on the road", on_road)
 
-    ae3d_jobs_stop()
-    check("the pool stops", ae3d_jobs_workers() == 0)
+    jobs.stop()
+    check("the pool stops", jobs.workers() == 0)
     // And a loop after the pool is gone runs on this thread again.
     frame(pooled, pooled_tiers, grid)
     check("and the passes still run without it", ecs.column_get(pooled_tiers.counts, 0, 0) + ecs.column_get(pooled_tiers.counts, 0, 1) + ecs.column_get(pooled_tiers.counts, 0, 2) == N as float)

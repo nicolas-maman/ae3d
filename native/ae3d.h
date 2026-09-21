@@ -8,54 +8,6 @@
 #define AE3D_CURSOR_HIDDEN   1
 #define AE3D_CURSOR_DISABLED 2
 
-int    ae3d_platform_init(void);
-void   ae3d_platform_shutdown(void);
-const char *ae3d_platform_error(void);
-
-void  *ae3d_window_create(int width, int height, const char *title,
-                          int api, int msaa, int decorated, int visible,
-                          int depth_bits);
-void   ae3d_window_destroy(void *win);
-int    ae3d_window_should_close(void *win);
-void   ae3d_window_close(void *win);
-void   ae3d_window_swap(void *win);
-void   ae3d_window_make_current(void *win);
-void   ae3d_window_set_vsync(int interval);
-int    ae3d_window_width(void *win);
-int    ae3d_window_height(void *win);
-int    ae3d_window_fb_width(void *win);
-int    ae3d_window_fb_height(void *win);
-void   ae3d_window_set_pos(void *win, int x, int y);
-void   ae3d_window_center(void *win);
-void   ae3d_window_set_title(void *win, const char *title);
-void   ae3d_window_set_cursor_mode(void *win, int mode);
-int    ae3d_monitor_width(void);
-int    ae3d_monitor_height(void);
-void   ae3d_poll_events(void);
-double ae3d_time(void);
-int    ae3d_key_down(void *win, int key);
-int    ae3d_gamepad_present(int id);
-/* A flow field for the horde (native/ae3d_nav.c). */
-void  *ae3d_flow_new(int w, int h, double x0, double z0, double cell);
-void   ae3d_flow_free(void *field);
-int    ae3d_flow_width(void *field);
-int    ae3d_flow_height(void *field);
-void   ae3d_flow_block(void *field, double bx0, double bz0, double bx1, double bz1);
-void   ae3d_flow_clear(void *field);
-int    ae3d_flow_blocked_at(void *field, double x, double z);
-int    ae3d_flow_build(void *field, double tx, double tz);
-double ae3d_flow_cost(void *field, double x, double z);
-int    ae3d_flow_direction(void *field, double x, double z, double *dx, double *dz);
-double ae3d_flow_dir_x(void *field, double x, double z);
-double ae3d_flow_dir_z(void *field, double x, double z);
-void   ae3d_flow_steer(void *field, const double *pos, double *yaw, int n, double turn);
-int    ae3d_gamepad_button(int id, int button);
-double ae3d_gamepad_axis(int id, int axis);
-int    ae3d_mouse_down(void *win, int button);
-double ae3d_cursor_x(void *win);
-double ae3d_cursor_y(void *win);
-double ae3d_scroll_delta(void *win);
-
 void  *ae3d_mesh_create(void);
 void  *ae3d_mesh_clone(void *mesh);
 void  *ae3d_mesh_decimate(void *mesh, double cell_size);
@@ -89,30 +41,6 @@ double ae3d_posebank_speed(void *bank, double phase, double duration);
 int    ae3d_gl_posebank_texture(void *bank);
 void   ae3d_gl_setup_instance_phase(void *inst, int phase_vbo);
 void   ae3d_gl_update_instance_phases(void *inst, int phase_vbo);
-void  *ae3d_horde_grid_create(int cols, int per_cell);
-void   ae3d_horde_grid_destroy(void *grid);
-void   ae3d_horde_separate(void *grid, double *pos, double *vel, int n,
-                           double ox, double oz, double cell_size,
-                           double radius, double strength);
-void   ae3d_crowd_wander(double *vel, const double *yaw, int n, double speed);
-void   ae3d_crowd_step(double *pos, const double *vel, double *yaw, double *phase,
-                       int start, int n, double dt, double max_speed,
-                       double x0, double x1, double z0, double z1,
-                       double road_y, double walk, void *bank);
-int    ae3d_crowd_bucket(const double *pos, const double *yaw, const double *phase,
-                         const double *col, int start, int n,
-                         double cx, double cz, double near_dist, double cull_dist,
-                         double *np, double *ny, double *nph, double *ncol,
-                         double *fp, double *fy, double *fph, double *fcol,
-                         double *far_out);
-void   ae3d_crowd_tiers(const double *pos, const double *yaw, const double *phase,
-                        const double *col, int start, int n,
-                        double cx, double cz, double near_dist, double mid_dist, double cull_dist,
-                        double *np, double *ny, double *nph, double *ncol,
-                        double *mp, double *my, double *mph, double *mcol,
-                        double *fp, double *fy, double *fph, double *fcol,
-                        double *counts_out);
-void   ae3d_crowd_audit(const double *pos, double *prev, int n, double limit, double *out);
 void   ae3d_gl_upload_skin(void *mesh, int vbo);
 void  *ae3d_skinrows_create(int count);
 void   ae3d_skinrows_destroy(void *rows);
@@ -155,13 +83,6 @@ int    ae3d_mesh_dirty(void *mesh);
 
 /* Scripts: a compiled Aether source opened as a shared library, with the
  * object it is attached to passed in on every call. */
-void  *ae3d_script_open(const char *path);
-int    ae3d_script_has_start(void *script);
-void   ae3d_script_start(void *script, void *state, void *object);
-void   ae3d_script_update(void *script, void *state, void *object, double delta);
-void   ae3d_script_close(void *script);
-const char *ae3d_script_error(void);
-const char *ae3d_script_suffix(void);
 void   ae3d_mesh_clear_dirty(void *mesh);
 
 void  *ae3d_inst_create(void);
@@ -224,9 +145,6 @@ int    ae3d_image_height(void *img);
 const char *ae3d_image_error(void);
 
 int    ae3d_gl_load(void);
-/* Whether a GL context is current on this thread; cleanup that can outlive the
-   window checks this before deleting GL objects. */
-int    ae3d_gl_context_current(void);
 const char *ae3d_gl_version(void);
 const char *ae3d_gl_renderer(void);
 int    ae3d_gl_error(void);
@@ -243,8 +161,6 @@ void   ae3d_gl_set_blend_multiply(void);
 int    ae3d_gl_texture_rgba(int width, int height, const unsigned char *rgba);
 int    ae3d_gl_texture3d_rgba(int size, const unsigned char *rgba);
 void   ae3d_gl_texture3d_bind(int unit, int texture);
-int    ae3d_cloudnoise_shape(int size, unsigned char *out);
-int    ae3d_cloudnoise_weather(int size, unsigned char *out);
 void   ae3d_gl_set_multisample(int on);
 void   ae3d_gl_set_wireframe(int on);
 int    ae3d_gl_viewport_width(void);
@@ -340,9 +256,7 @@ int    ae3d_offscreen_byte_size(void *target);
 void  *ae3d_offscreen_read(void *target);
 void  *ae3d_offscreen_read_pipelined(void *target);
 
-int    ae3d_png_write(const char *path, const void *rgba, int width, int height);
-void   ae3d_rgba_set(void *rgba, int index, double r, double g, double b, double a);
-int    ae3d_gl_snapshot(const char *path, int width, int height);
+void  *ae3d_gl_read_frame(int width, int height);
 void   ae3d_offscreen_destroy(void *target);
 
 int    ae3d_meshfile_save(const char *path, void *mesh, void *instances);
@@ -486,12 +400,6 @@ const char *ae3d_agent_error(void);
 
 /* The asking end of the same channel, so a tool that measures a scene can be
    written against the engine rather than against a copy of the protocol. */
-void        ae3d_client_init(void);
-int         ae3d_client_connect(const char *host, int port);
-int         ae3d_client_send(int handle, const char *line);
-const char *ae3d_client_read(int handle);
-void        ae3d_client_close(int handle);
-const char *ae3d_client_error(void);
 
 int  ae3d_capture_frame(int width, int height);
 int  ae3d_capture_width(void);

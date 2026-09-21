@@ -1,0 +1,730 @@
+// The street, driven: a car on wheel joints through the zombie street
+// at night, its crates, bins and benches loose on the pavements and its
+// bystanders standing until the car reaches them. The whole block is
+// the physics engine's: the buildings, kerbs and road collide as their
+// own triangles, every prop as the convex hull of its own mesh, the
+// car as a chassis and four wheels on aephysics's wheel joints
+// (suspension, a spin motor, steering), and the bystanders as ragdolls
+// sprung upright that let go when struck. The engine's fixed step
+// drives the world over every hardware thread and the world's
+// transforms drive the draw; nothing here is animated by hand.
+//
+//   ./build.sh examples/street_drive.ae && ./build/street_drive
+//
+//   W / S      throttle and reverse        A / D   steer
+//   space      brake                       shift   handbrake turn
+//
+// Left alone for three seconds the car drives itself up and down the
+// street, so the scene runs unattended (AE3D_FRAMES=n for a fixed run).
+import std.string
+import std.list
+import ae3d.core
+import ae3d.platform
+import ae3d.engine
+import ae3d.behaviour
+import ae3d.input
+import ae3d.loader
+import ae3d.assets
+import ae3d.physics
+import ae3d.skin
+import aephysics.math
+import aephysics.hull
+import aephysics.dynamics
+import aephysics.shape
+import aephysics.physics_world
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+const MANIFEST = "resources/blender/zombie_street/manifest.json"
+const SKY_R = 0.075
+const SKY_G = 0.088
+const SKY_B = 0.125
+const BLOCK_LEN = 84.0           // the block's ground slab, Street_Ground: x -36..48
+const BLOCK_CX = 6.0             // its centre; the road and the mirror axis sit here
+const TILES = 3                  // blocks along the street, centred on the middle one
+const ROAD_Y = 0.08
+const PAVEMENT_Y = 0.16
+const STREET_END = 136.0         // well past the last block's end, where the autopilot turns on the open tarmac
+
+// The car's measure: a hatchback's. The chassis is a box and a cabin,
+// forward is -z as every object's is.
+const CHASSIS_HX = 0.86
+const CHASSIS_HY = 0.30
+const CHASSIS_HZ = 2.05
+const CABIN_HX = 0.74
+const CABIN_HY = 0.34
+const CABIN_HZ = 0.95
+const WHEEL_RADIUS = 0.36
+const WHEEL_WIDTH = 0.24
+const AXLE_X = 0.92
+const AXLE_Y = 0.0 - 0.28
+const FRONT_Z = 0.0 - 1.35
+const REAR_Z = 1.35
+
+// What the scene keeps between steps.
+struct Game {
+    vehicle: ptr                   // *Vehicle
+    chassis: ptr                   // *GameObject
+    ground: ptr                    // *Rigidbody, the road the bystanders stand on
+    bystanders: ptr                // list of *Ragdoll
+    seconds: float
+    idle: float                    // seconds since the last input
+    direction: float               // the autopilot's way along x, +1 or -1
+    turning: bool                  // the U-turn past the street's end
+    camera_pos: Vec3
+    camera_aim: Vec3
+    headlights: ptr                // *Light[2]
+    tail_lights: ptr               // *Light[2]
+    knocked: int
+    props: int
+}
+
+var g_seed = 0x2545F491
+var g_diag = false
+
+next_random() -> float {
+    g_seed = (g_seed * 1103515245 + 12345) & 2147483647
+    return ((g_seed % 100000) as float) / 100000.0
+}
+
+// --- the street -----------------------------------------------------------------------------------------------
+
+is_prop(name: string) -> bool {
+    return string.contains(name, "Bin") == 1 || string.contains(name, "Crate") == 1 ||
+           string.contains(name, "Sack") == 1 || string.contains(name, "Bench") == 1
+}
+
+is_ground(name: string) -> bool {
+    return string.contains(name, "Street_Road") == 1 || string.contains(name, "Kerb") == 1 ||
+           string.contains(name, "Street_Path") == 1 || string.contains(name, "Street_Ground") == 1
+}
+
+is_fixed(name: string) -> bool {
+    return string.contains(name, "Street_Block") == 1 || string.contains(name, "Bollard") == 1 ||
+           string.contains(name, "Street_Lamp") == 1
+}
+
+lamp_under(head: Vec3) -> *Light {
+    return core.light_point(core.vec3(head.x, head.y - 0.20, head.z), core.vec3(1.0, 0.74, 0.42), 1.8, 7.0)
+}
+
+// One block of the street at off_x, every other one mirrored: the
+// ground and the buildings static as their triangles, the props loose
+// as their hulls, the lamp heads lit. The road's body is the one the
+// bystanders are sprung to.
+add_tile(g: *Game, e: *Engine, m: *Manifest, off_x: float, flip: bool) {
+    models = assets.manifest_load_scene(m)
+    count = assets.manifest_count(m)
+    road = physics.material(0.9, 0.0)
+    wood = physics.material(0.6, 0.1)
+    i = 0
+    while i < count {
+        name = assets.entry_object(assets.manifest_entry(m, i))
+        model = list.get_raw(models, i) as *Model
+        if model == null {
+            i = i + 1
+            continue
+        }
+        if string.contains(name, "Zombie") == 1 {
+            core.model_free(model)
+            i = i + 1
+            continue
+        }
+        if core.model_parent(model) != null {
+            // Trim, glass, lids and lamp heads ride on their parents.
+            if string.contains(name, "LampHead") == 1 { core.model_set_exposure(model, 16.0) }
+            else if string.contains(name, "_Lit") == 1 { core.model_set_exposure(model, 11.0 + next_random() * 5.0) }
+            engine.engine_add_model(e, model)
+            i = i + 1
+            continue
+        }
+        wp = core.model_world_position(model)
+        nx = wp.x + off_x
+        if flip { nx = off_x + (2.0 * BLOCK_CX - wp.x) }
+        core.model_set_position(model, nx, wp.y, wp.z)
+        if is_ground(name) {
+            extent = core.mesh_size(core.model_mesh(model), core.vec3(1.0, 1.0, 1.0))
+            if string.contains(name, "Street_Ground") == 0 && extent.x > 1.0 { core.model_set_scale(model, BLOCK_LEN / extent.x, 1.0, 1.0) }
+            if string.contains(name, "Road") == 1 { core.model_set_reflectivity(model, 0.5) } else { core.model_set_reflectivity(model, 0.12) }
+            if string.contains(name, "Street_Ground") == 1 {
+                core.model_set_texture(model, "resources/blender/zombie_street/PavingSlab.png")
+                core.model_set_pbr(model, 0.0, 0.95)
+            }
+            o = engine.object(e, name, model)
+            physics.mesh_collider_of_model(o, road)
+            if string.contains(name, "Street_Road") == 1 && g.ground == null { g.ground = physics.rigidbody_of(o) as ptr }
+        } else if is_fixed(name) {
+            if string.contains(name, "Street_Block") == 1 {
+                bright = 0.80 + next_random() * 0.34
+                warm = (next_random() - 0.5) * 0.14
+                core.model_set_diffuse(model, bright * (1.0 + warm), bright, bright * (1.0 - warm))
+            }
+            o = engine.object(e, name, model)
+            physics.mesh_collider_of_model(o, road)
+        } else if is_prop(name) {
+            o = engine.object(e, name, model)
+            physics.rigidbody(o, physics.DYNAMIC)
+            density = 60.0
+            if string.contains(name, "Sack") == 1 { density = 120.0 }
+            if string.contains(name, "Bench") == 1 { density = 200.0 }
+            physics.convex_collider_of_model(o, wood, density)
+            g.props = g.props + 1
+        } else {
+            engine.engine_add_model(e, model)
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < count {
+        name = assets.entry_object(assets.manifest_entry(m, i))
+        model = list.get_raw(models, i) as *Model
+        if model != null && string.contains(name, "LampHead") == 1 {
+            engine.engine_add_light(e, lamp_under(core.model_world_position(model)))
+        }
+        i = i + 1
+    }
+    list.free(models)
+}
+
+// The ground under the whole city: dark tarmac past the block's edges,
+// so the street ends on a car park and not a cliff (two centimetres
+// under the block's own slab, a kerb's worth of step).
+base_slab(e: *Engine) {
+    m = core.model_new()
+    up = core.vec3(0.0, 1.0, 0.0)
+    length = 900.0
+    core.mesh_reserve(m.mesh, 4, 6)
+    core.mesh_push_vertex(m.mesh, core.vec3(0.0, 0.0, 0.0), 0.0, 0.0, up)
+    core.mesh_push_vertex(m.mesh, core.vec3(length, 0.0, 0.0), 150.0, 0.0, up)
+    core.mesh_push_vertex(m.mesh, core.vec3(length, 0.0, length), 150.0, 150.0, up)
+    core.mesh_push_vertex(m.mesh, core.vec3(0.0, 0.0, length), 0.0, 150.0, up)
+    core.mesh_push_triangle(m.mesh, 0, 2, 1)
+    core.mesh_push_triangle(m.mesh, 0, 3, 2)
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    core.model_set_texture(m, "resources/blender/zombie_street/RoadTarmac.png")
+    core.model_set_diffuse(m, 0.42, 0.40, 0.36)
+    core.model_set_specular(m, 0.0, 0.0, 0.0)
+    core.model_set_pbr(m, 0.0, 1.0)
+    o = engine.object(e, "Tarmac", m)
+    behaviour.object_set_position(o, core.vec3(0.0 - 450.0, 0.0 - 0.02, 0.0 - 450.0))
+    physics.mesh_collider_of_model(o, physics.material(0.9, 0.0))
+}
+
+// --- the car --------------------------------------------------------------------------------------------------
+
+// A box of these half extents about an offset, pushed into a mesh with
+// its normals out and a texture square on every face; the car's model
+// is two of them in one mesh, so it is not a scaled cube with a child
+// (a child inherits its parent's scale).
+push_box(m: ptr, half: Vec3, offset: Vec3) {
+    i = 0
+    while i < 6 {
+        axis = i / 2
+        sign = 1.0
+        if i % 2 == 1 { sign = 0.0 - 1.0 }
+        n = core.vec3(0.0, 0.0, 0.0)
+        u = core.vec3(0.0, 0.0, 0.0)
+        v = core.vec3(0.0, 0.0, 0.0)
+        if axis == 0 { n = core.vec3(sign, 0.0, 0.0); u = core.vec3(0.0, 0.0, 0.0 - sign); v = core.vec3(0.0, 1.0, 0.0) }
+        if axis == 1 { n = core.vec3(0.0, sign, 0.0); u = core.vec3(1.0, 0.0, 0.0); v = core.vec3(0.0, 0.0, 0.0 - sign) }
+        if axis == 2 { n = core.vec3(0.0, 0.0, sign); u = core.vec3(sign, 0.0, 0.0); v = core.vec3(0.0, 1.0, 0.0) }
+        base = core.mesh_vertex_count(m)
+        k = 0
+        while k < 4 {
+            su = 1.0
+            if k == 0 || k == 3 { su = 0.0 - 1.0 }
+            sv = 1.0
+            if k < 2 { sv = 0.0 - 1.0 }
+            p = core.vec3(offset.x + half.x * (n.x + su * u.x + sv * v.x), offset.y + half.y * (n.y + su * u.y + sv * v.y), offset.z + half.z * (n.z + su * u.z + sv * v.z))
+            core.mesh_push_vertex(m, p, 0.5 + 0.5 * su, 0.5 + 0.5 * sv, n)
+            k = k + 1
+        }
+        core.mesh_push_triangle(m, base, base + 1, base + 2)
+        core.mesh_push_triangle(m, base, base + 2, base + 3)
+        i = i + 1
+    }
+}
+
+box_model(half: Vec3, offset: Vec3) -> *Model {
+    m = core.model_new()
+    core.mesh_reserve(m.mesh, 24, 36)
+    push_box(m.mesh, half, offset)
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    return m
+}
+
+// A convex hull drawn as itself: every face a fan with the face's own
+// normal, so the body that collides is the body that is seen.
+hull_model(h: *HullData) -> *Model {
+    m = core.model_new()
+    points = hull.hull_points(h)
+    edges = hull.hull_edges(h)
+    faces = hull.hull_faces(h)
+    planes = hull.hull_planes(h)
+    core.mesh_reserve(m.mesh, h.edge_count, 3 * h.edge_count)
+    f = 0
+    while f < h.face_count {
+        n = planes[f].normal
+        base = core.mesh_vertex_count(m.mesh)
+        count = 0
+        first = faces[f]
+        edge = first
+        while true {
+            p = points[edges[edge].origin]
+            core.mesh_push_vertex(m.mesh, p, 0.5 + 0.5 * p.x, 0.5 + 0.5 * p.y, n)
+            count = count + 1
+            edge = edges[edge].next
+            if edge == first { break }
+        }
+        k = 1
+        while k + 1 < count {
+            core.mesh_push_triangle(m.mesh, base, base + k, base + k + 1)
+            k = k + 1
+        }
+        f = f + 1
+    }
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    return m
+}
+
+// The car's body as a point cloud: a low nose, a flat bonnet, the sills,
+// a boot; and its cabin, a wedge with a raked windscreen and rear glass.
+body_hull() -> *HullData {
+    block = calloc(16, sizeof(Vec3))
+    p = block as Vec3[]
+    i = 0
+    while i < 2 {
+        sx = CHASSIS_HX
+        if i == 1 { sx = 0.0 - CHASSIS_HX }
+        p[8 * i + 0] = core.vec3(sx, 0.0 - CHASSIS_HY, 0.0 - CHASSIS_HZ)
+        p[8 * i + 1] = core.vec3(sx, 0.0 - CHASSIS_HY, CHASSIS_HZ)
+        p[8 * i + 2] = core.vec3(sx, 0.05, 0.0 - CHASSIS_HZ)
+        p[8 * i + 3] = core.vec3(sx, CHASSIS_HY, 0.0 - CHASSIS_HZ + 0.7)
+        p[8 * i + 4] = core.vec3(sx, CHASSIS_HY, CHASSIS_HZ - 0.15)
+        p[8 * i + 5] = core.vec3(sx, 0.12, CHASSIS_HZ)
+        p[8 * i + 6] = core.vec3(sx * 0.97, CHASSIS_HY + 0.03, 0.0)
+        p[8 * i + 7] = core.vec3(sx * 0.9, 0.0 - CHASSIS_HY - 0.02, 0.0)
+        i = i + 1
+    }
+    h = hull.create_hull(p, 16, 32)
+    free(block)
+    return h
+}
+
+cabin_hull() -> *HullData {
+    block = calloc(8, sizeof(Vec3))
+    p = block as Vec3[]
+    i = 0
+    while i < 2 {
+        sx = CABIN_HX
+        if i == 1 { sx = 0.0 - CABIN_HX }
+        p[4 * i + 0] = core.vec3(sx, CHASSIS_HY, 0.0 - 0.75)
+        p[4 * i + 1] = core.vec3(sx, CHASSIS_HY, 1.65)
+        p[4 * i + 2] = core.vec3(sx * 0.9, CHASSIS_HY + 2.0 * CABIN_HY, 0.0 - 0.05)
+        p[4 * i + 3] = core.vec3(sx * 0.9, CHASSIS_HY + 2.0 * CABIN_HY, 1.25)
+        i = i + 1
+    }
+    h = hull.create_hull(p, 8, 16)
+    free(block)
+    return h
+}
+
+// A wheel's drawn mesh: a cylinder along x, the axle; its collider is
+// a sphere of the same radius inside it.
+wheel_model(radius: float, width: float) -> *Model {
+    m = core.model_new()
+    sides = 20
+    half = 0.5 * width
+    core.mesh_reserve(m.mesh, 4 * sides + 2, 12 * sides)
+    top = core.mesh_push_vertex(m.mesh, core.vec3(half, 0.0, 0.0), 0.5, 0.5, core.vec3(1.0, 0.0, 0.0))
+    bottom = core.mesh_push_vertex(m.mesh, core.vec3(0.0 - half, 0.0, 0.0), 0.5, 0.5, core.vec3(0.0 - 1.0, 0.0, 0.0))
+    i = 0
+    while i < sides {
+        a = 6.283185307 * (i as float) / (sides as float)
+        c = core.cos_of(a)
+        s = core.sin_of(a)
+        // Two rims for the tread (their normals outward), two for the caps.
+        core.mesh_push_vertex(m.mesh, core.vec3(half, radius * c, radius * s), (i as float) / (sides as float), 0.0, core.vec3(0.0, c, s))
+        core.mesh_push_vertex(m.mesh, core.vec3(0.0 - half, radius * c, radius * s), (i as float) / (sides as float), 1.0, core.vec3(0.0, c, s))
+        core.mesh_push_vertex(m.mesh, core.vec3(half, radius * c, radius * s), 0.5 + 0.5 * c, 0.5 + 0.5 * s, core.vec3(1.0, 0.0, 0.0))
+        core.mesh_push_vertex(m.mesh, core.vec3(0.0 - half, radius * c, radius * s), 0.5 + 0.5 * c, 0.5 + 0.5 * s, core.vec3(0.0 - 1.0, 0.0, 0.0))
+        i = i + 1
+    }
+    i = 0
+    while i < sides {
+        j = (i + 1) % sides
+        a0 = 2 + 4 * i
+        b0 = 2 + 4 * j
+        core.mesh_push_triangle(m.mesh, a0, a0 + 1, b0)
+        core.mesh_push_triangle(m.mesh, b0, a0 + 1, b0 + 1)
+        core.mesh_push_triangle(m.mesh, top, a0 + 2, b0 + 2)
+        core.mesh_push_triangle(m.mesh, bottom, b0 + 3, a0 + 3)
+        i = i + 1
+    }
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    core.model_matte(m, 0.08, 0.08, 0.085)
+    return m
+}
+
+// The car at a position facing -x down the street: the chassis with
+// its cabin on it, four wheels, the vehicle on the joints.
+make_car(g: *Game, e: *Engine, position: Vec3) {
+    body_shape = body_hull()
+    cabin_shape = cabin_hull()
+    body = hull_model(body_shape)
+    core.model_glossy(body, 0.72, 0.12, 0.10)
+    chassis = engine.object(e, "Car", body)
+    behaviour.object_set_position(chassis, position)
+    // Nose toward -x: the object's forward is -z, turned a quarter to the left.
+    facing = math.make_quat_from_axis_angle(math.vec3_axis_y(), 0.5 * 3.14159265358979)
+    behaviour.object_set_rotation(chassis, facing)
+    cabin = hull_model(cabin_shape)
+    core.model_glass(cabin, 0.35, 0.42, 0.5, 0.75)
+    core.model_set_parent(cabin, body)
+    engine.engine_add_model(e, cabin)
+    rb = physics.rigidbody(chassis, physics.DYNAMIC)
+    paint = physics.material(0.5, 0.05)
+    physics.hull_collider(chassis, body_shape, paint, 260.0)
+    physics.hull_collider(chassis, cabin_shape, paint, 40.0)
+    physics.rigidbody_set_damping(rb, 0.05, 0.4)
+    physics.rigidbody_enable_hit_events(rb, true)
+    tyre = physics.material(1.1, 0.0)
+    wheels_block = calloc(physics.WHEEL_COUNT, 8)
+    wheels = wheels_block as ptr[]
+    mounts_block = calloc(physics.WHEEL_COUNT, sizeof(Vec3))
+    mounts = mounts_block as Vec3[]
+    mounts[0] = core.vec3(0.0 - AXLE_X, AXLE_Y, FRONT_Z)
+    mounts[1] = core.vec3(AXLE_X, AXLE_Y, FRONT_Z)
+    mounts[2] = core.vec3(0.0 - AXLE_X, AXLE_Y, REAR_Z)
+    mounts[3] = core.vec3(AXLE_X, AXLE_Y, REAR_Z)
+    i = 0
+    while i < physics.WHEEL_COUNT {
+        w = engine.object(e, "Wheel ${i}", wheel_model(WHEEL_RADIUS, WHEEL_WIDTH))
+        behaviour.object_set_position(w, math.add(position, math.rotate_vector(facing, mounts[i])))
+        physics.rigidbody(w, physics.DYNAMIC)
+        physics.sphere_collider(w, WHEEL_RADIUS, tyre, 250.0)
+        wheels[i] = w as ptr
+        i = i + 1
+    }
+    g.vehicle = physics.vehicle(chassis, wheels_block, mounts_block, 3.0, 0.8, 0.12, 900.0, 42.0, 0.55) as ptr
+    g.chassis = chassis as ptr
+    // Headlights and tail lights, riding on the car. The headlights are
+    // spot lights: a cone down the road, whole within twelve degrees of
+    // the axis and gone at twenty-eight, dipped a little, reaching thirty
+    // metres. As point lights they lit the facades either side to white
+    // by ray, where nothing damps a lamp but its own reach.
+    g.headlights = calloc(2, 8)
+    g.tail_lights = calloc(2, 8)
+    heads = g.headlights as ptr[]
+    tails = g.tail_lights as ptr[]
+    i = 0
+    while i < 2 {
+        heads[i] = core.light_spot(position, core.vec3(0.0, 0.0 - 0.08, 0.0 - 1.0), core.vec3(1.0, 0.95, 0.85), 3.0, 30.0, 12.0, 28.0) as ptr
+        engine.engine_add_light(e, heads[i] as *Light)
+        tails[i] = core.light_spot(position, core.vec3(0.0, 0.0 - 0.2, 1.0), core.vec3(1.0, 0.1, 0.05), 0.6, 4.0, 30.0, 60.0) as ptr
+        engine.engine_add_light(e, tails[i] as *Light)
+        i = i + 1
+    }
+    free(wheels_block)
+    free(mounts_block)
+}
+
+// --- the bystanders ------------------------------------------------------------------------------------------
+
+// Ten on the pavements and three in the road, each a ragdoll whose
+// joints are sprung to its pose stiffly enough to stand and whose
+// pelvis is sprung upright to the road; a hit lets the pelvis go.
+// The bystanders: the pipeline's zombie figure, its skin and its clothes
+// weighted to a rig of its own for each, worn by a ragdoll sprung
+// upright on the pavement. The ragdoll drives the rig every step, so the
+// figure stands as the ragdoll stands and, struck, falls as it falls.
+make_bystanders(g: *Game, e: *Engine, m: *Manifest) {
+    ground = g.ground as *Rigidbody
+    if ground == null { return }
+    body_entry = assets.manifest_find_by_object(m, "Zombie_Body")
+    cloth_entry = assets.manifest_find_by_object(m, "Zombie_Clothes")
+    i = 0
+    while i < 13 {
+        side = 1.0
+        if i % 2 == 1 { side = 0.0 - 1.0 }
+        x = 0.0 - 70.0 + 12.0 * (i as float) + 6.0 * (next_random() - 0.5)
+        z = side * (4.6 + 1.2 * next_random())
+        // Three of them in the road, on the way the car sets off.
+        if i >= 10 {
+            x = 20.0 - 22.0 * ((i - 10) as float)
+            z = side * 1.2 * next_random()
+        }
+        r = physics.ragdoll(e, "Bystander ${i}", core.vec3(x, PAVEMENT_Y, z), 8.0, 8.0, 1.0)
+        // Facing the road, or along the pavement, figure by figure; turned
+        // before it is stood, since standing holds it where it is.
+        yaw = 0.0
+        if i % 3 == 0 { yaw = 0.0 - side * 1.5707963 }
+        if i % 3 == 1 { yaw = 3.14159265 * next_random() }
+        physics.ragdoll_turn(r, yaw)
+        physics.ragdoll_stand(r, ground, 25.0, 1.0)
+        if body_entry != null { dress_bystander(e, m, body_entry, cloth_entry, r) }
+        list.add_raw(g.bystanders, r as ptr)
+        i = i + 1
+    }
+}
+
+// One figure: a fresh rig from the export, the two surfaces over it, and
+// the ragdoll wearing it.
+dress_bystander(e: *Engine, m: *Manifest, body_entry: *Entry, cloth_entry: *Entry, r: *Ragdoll) {
+    bones = assets.entry_load_skeleton(m, body_entry)
+    if bones == null { return }
+    skeleton = skin.skeleton_new()
+    i = 0
+    while i < list.size(bones) {
+        bone = list.get_raw(bones, i) as *Model
+        skin.skeleton_add(skeleton, bone)
+        i = i + 1
+    }
+    list.free(bones)
+    skin.skeleton_bind(skeleton)
+    body = assets.entry_load_model(m, body_entry)
+    if body != null {
+        core.model_set_skeleton(body, skeleton as ptr)
+        engine.engine_add_model(e, body)
+    }
+    if cloth_entry != null {
+        cloth = assets.entry_load_model(m, cloth_entry)
+        if cloth != null {
+            core.model_set_skeleton(cloth, skeleton as ptr)
+            engine.engine_add_model(e, cloth)
+        }
+    }
+    if physics.ragdoll_dress(r, skeleton) == false {
+        println("street_drive: the figure could not be dressed on its ragdoll")
+    }
+}
+
+// A wall of the street's own crates across the road, for the car to
+// scatter: the crate model loaded again per crate, each its own body.
+crate_wall(g: *Game, e: *Engine, m: *Manifest, x: float) {
+    entry = assets.manifest_find_by_object(m, "Street_Crate0_0")
+    if entry == null { return }
+    wood = physics.material(0.6, 0.1)
+    row = 0
+    while row < 3 {
+        k = 0
+        while k < 4 - row {
+            model = assets.entry_load_model(m, entry)
+            if model == null { return }
+            size = core.mesh_size(core.model_mesh(model), model.scale)
+            o = engine.object(e, "Road crate", model)
+            behaviour.object_set_position(o, core.vec3(x + 0.04 * (next_random() - 0.5), 0.02 + ROAD_Y + (size.y + 0.02) * (row as float),
+                                                        ((k as float) - 1.5 + 0.5 * (row as float)) * (size.z + 0.03)))
+            physics.rigidbody(o, physics.DYNAMIC)
+            physics.convex_collider_of_model(o, wood, 60.0)
+            g.props = g.props + 1
+            k = k + 1
+        }
+        row = row + 1
+    }
+}
+
+// --- the loop ------------------------------------------------------------------------------------------------
+
+start(state: ptr, go: *GameObject) {
+    g = state as *Game
+    e = engine.of(go)
+    m = assets.manifest_load(MANIFEST)
+    if m == null {
+        println("street_drive: ${assets.last_error()}")
+        return
+    }
+    base_slab(e)
+    t = 0
+    while t < TILES {
+        k = t - TILES / 2
+        add_tile(g, e, m, BLOCK_LEN * (k as float), (k % 2) != 0)
+        t = t + 1
+    }
+    crate_wall(g, e, m, 0.0 - 30.0)
+    crate_wall(g, e, m, 80.0)
+    make_car(g, e, core.vec3(40.0, WHEEL_RADIUS - AXLE_Y + ROAD_Y + 0.02, 0.0))
+    make_bystanders(g, e, m)
+    assets.manifest_free(m)
+    keys = engine.engine_input(e)
+    input.bind_axis(keys, "throttle", platform.KEY_W, platform.KEY_S)
+    input.bind_axis(keys, "steer", platform.KEY_A, platform.KEY_D)
+    input.bind_key(keys, "brake", platform.KEY_SPACE)
+    input.bind_key(keys, "handbrake", platform.KEY_LEFT_SHIFT)
+    cam = engine.engine_camera(e)
+    core.camera_set_far(cam, 300.0)
+    g.camera_pos = core.vec3(52.0, 4.0, 6.0)
+    g.camera_aim = core.vec3(40.0, 1.0, 0.0)
+}
+
+// The car's heading about y, from its rotation: 0 along -z, growing to the left.
+heading_of(q: Quat) -> float {
+    f = math.rotate_vector(q, math.vec3(0.0, 0.0, 0.0 - 1.0))
+    return core.atan2_of(0.0 - f.x, 0.0 - f.z)
+}
+
+fixed_update(state: ptr, go: *GameObject, step: float) {
+    g = state as *Game
+    if g.vehicle == null { return }
+    e = engine.of(go)
+    v = g.vehicle as *Vehicle
+    keys = engine.engine_input(e)
+    throttle = input.axis(keys, "throttle")
+    steer = input.axis(keys, "steer")
+    brake = 0.0
+    if input.held(keys, "brake") { brake = 1.0 }
+    handbrake = input.held(keys, "handbrake")
+    g.seconds = g.seconds + step
+    if throttle != 0.0 || steer != 0.0 || brake != 0.0 || handbrake { g.idle = 0.0 } else { g.idle = g.idle + step }
+    if g.idle > 3.0 {
+        // The autopilot: down the middle of the road one way, a U-turn on
+        // the open tarmac past the last block (the road is narrower than
+        // the car's turning circle), then the other way.
+        chassis = physics.vehicle_chassis(v)
+        p = dynamics.body_get_position(chassis.body_id)
+        speed = physics.vehicle_speed(v)
+        // Facing -x is a heading of +pi/2 (heading_of), so the way along x is its negative.
+        wanted = 0.0 - 0.5 * 3.14159265358979 * g.direction
+        error = wanted - heading_of(dynamics.body_get_rotation(chassis.body_id))
+        while error > 3.14159265358979 { error = error - 6.28318530717959 }
+        while error < 0.0 - 3.14159265358979 { error = error + 6.28318530717959 }
+        if g.turning == false && p.x * g.direction > STREET_END {
+            g.turning = true
+            g.direction = 0.0 - g.direction
+        }
+        if g.turning {
+            // Full lock at a walking pace until the nose points back down the street.
+            throttle = 0.3
+            steer = 1.0
+            if speed > 2.5 { throttle = 0.0; brake = 0.6 }
+            if math.abs_float(error) < 0.3 { g.turning = false }
+        } else {
+            // Cruising: aim back toward the centre line (hard when far off it, on
+            // the tarmac after a turn; gently on the road), then at the heading.
+            aim = wanted + math.clamp_float(0.12 * p.z * g.direction, 0.0 - 0.9, 0.9)
+            aim_error = aim - heading_of(dynamics.body_get_rotation(chassis.body_id))
+            while aim_error > 3.14159265358979 { aim_error = aim_error - 6.28318530717959 }
+            while aim_error < 0.0 - 3.14159265358979 { aim_error = aim_error + 6.28318530717959 }
+            steer = math.clamp_float(1.6 * aim_error, 0.0 - 1.0, 1.0)
+            throttle = 0.7
+            if math.abs_float(p.z) > 3.0 && speed > 4.0 { throttle = 0.15 }
+            if speed > 11.0 { throttle = 0.2 }
+        }
+    }
+    if handbrake {
+        // The handbrake locks the rear wheels: the tail steps out.
+        physics.vehicle_drive(v, 0.0, steer, 1.0)
+    } else {
+        physics.vehicle_drive(v, throttle, steer, brake)
+    }
+    if g_diag && physics.physics_step_count(physics.of(e)) % 60 == 0 {
+        chassis = physics.vehicle_chassis(v)
+        cp = dynamics.body_get_position(chassis.body_id)
+        wheel = physics.vehicle_wheel(v, 2)
+        wv = dynamics.body_get_angular_velocity(wheel.body_id)
+        wp = dynamics.body_get_position(wheel.body_id)
+        axle = math.rotate_vector(dynamics.body_get_rotation(wheel.body_id), math.vec3_axis_y())
+        println("street_drive[diag]   rear-left axle in the world (${axle.x}, ${axle.y}, ${axle.z})")
+        println("street_drive[diag] t=${g.seconds} car (${cp.x}, ${cp.y}, ${cp.z}) speed ${physics.vehicle_speed(v)} throttle ${throttle} steer ${steer} brake ${brake} rear-left at (${wp.x}, ${wp.y}, ${wp.z}) spinning (${wv.x}, ${wv.y}, ${wv.z})")
+        // What is under the car: a ray down from above it.
+        world_id = physics.physics_world_id(physics.of(e))
+        under = physics_world.cast_ray_closest(world_id, wp, core.vec3(0.0, 0.0 - 2.0, 0.0), shape.default_query_filter())
+        if under.hit {
+            body = dynamics.shape_get_body(under.shape_id)
+            println("street_drive[diag]   under the car: y=${under.point.y} normal (${under.normal.x}, ${under.normal.y}, ${under.normal.z}) shape type ${dynamics.shape_get_type(under.shape_id)} body kind ${dynamics.body_get_type(body)}")
+        } else { println("street_drive[diag]   nothing under the car") }
+    }
+    // What the car struck this step: a standing bystander lets go.
+    p = physics.of(e)
+    n = physics.hit_event_count(p)
+    i = 0
+    while i < n {
+        hit = physics.hit_event(p, i)
+        r = physics.ragdoll_of_shape(p, hit.shape_id_a)
+        if r == null { r = physics.ragdoll_of_shape(p, hit.shape_id_b) }
+        if r != null && physics.ragdoll_is_standing(r) && hit.approach_speed > 1.5 {
+            physics.ragdoll_release(r)
+            g.knocked = g.knocked + 1
+        }
+        i = i + 1
+    }
+}
+
+update(state: ptr, go: *GameObject, delta: float) {
+    g = state as *Game
+    if g.chassis == null { return }
+    e = engine.of(go)
+    chassis = g.chassis as *GameObject
+    pos = behaviour.object_position(chassis)
+    forward = behaviour.object_forward(chassis)
+    // Level the chase: the car's heading without its pitch and roll.
+    flat = core.vec3(forward.x, 0.0, forward.z)
+    len = core.sqrt_of(flat.x * flat.x + flat.z * flat.z)
+    if len > 0.001 { flat = core.vec3(flat.x / len, 0.0, flat.z / len) }
+    wanted = core.vec3(pos.x - 7.5 * flat.x, pos.y + 2.8, pos.z - 7.5 * flat.z)
+    aim = core.vec3(pos.x + 5.0 * flat.x, pos.y + 0.8, pos.z + 5.0 * flat.z)
+    // The chase eases in over a quarter second, whatever the frame rate.
+    k = math.min_float(1.0, 4.0 * delta)
+    g.camera_pos = core.v3_add(g.camera_pos, core.v3_mul(core.v3_sub(wanted, g.camera_pos), k))
+    g.camera_aim = core.v3_add(g.camera_aim, core.v3_mul(core.v3_sub(aim, g.camera_aim), k))
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, g.camera_pos)
+    core.camera_look_at(cam, g.camera_aim)
+    // The lights where the car's corners are now.
+    q = behaviour.object_rotation(chassis)
+    heads = g.headlights as ptr[]
+    tails = g.tail_lights as ptr[]
+    i = 0
+    while i < 2 {
+        side = 0.6
+        if i == 1 { side = 0.0 - 0.6 }
+        head = heads[i] as *Light
+        head.position = core.v3_add(pos, core.quat_apply(q, core.vec3(side, 0.05, 0.0 - CHASSIS_HZ - 0.15)))
+        head.direction = core.quat_apply(q, core.vec3(0.0, 0.0 - 0.08, 0.0 - 1.0))
+        tail = tails[i] as *Light
+        tail.position = core.v3_add(pos, core.quat_apply(q, core.vec3(side, 0.1, CHASSIS_HZ + 0.12)))
+        tail.direction = core.quat_apply(q, core.vec3(0.0, 0.0 - 0.2, 1.0))
+        i = i + 1
+    }
+}
+
+main() {
+    e = engine.engine_new()
+    engine.engine_set_size(e, 1280, 720)
+    engine.engine_set_title(e, "ae3d - street drive")
+    engine.engine_set_face_culling(e, true)
+    engine.engine_set_camera_input(e, false)
+    engine.engine_set_post(e, true, true, 0.85, 0.85)
+    engine.engine_set_fog(e, core.fog_distance(12.0, 150.0, core.vec3(SKY_R, SKY_G, SKY_B), 0.95))
+    engine.engine_set_shadow_distance(e, 48.0)
+    engine.engine_set_frustum_culling(e, true)
+    if core.env_int("AE3D_RAYS", 1) == 1 {
+        engine.engine_set_ray_shadows(e, true)
+        engine.engine_set_sun_size(e, 0.5)
+        engine.engine_set_lamp_size(e, 0.25)
+        engine.engine_set_ray_occlusion(e, core.env_int("AE3D_RAY_AO", 1) == 1)
+    }
+    engine.engine_set_ssr(e, core.env_int("AE3D_SSR", 1) == 1, ROAD_Y, 0.75)
+    if core.env_int("AE3D_TAA", 1) == 1 { engine.engine_set_taa(e, true) }
+    engine.engine_set_time_of_day(e, 22.0)
+    g_diag = core.env_int("AE3D_DIAG", 0) == 1
+    physics.attach(e)
+    g = Game { vehicle: null, chassis: null, ground: null, bystanders: list.new(), seconds: 0.0, idle: 10.0, direction: 0.0 - 1.0,
+               turning: false, camera_pos: core.vec3(0.0, 0.0, 0.0), camera_aim: core.vec3(0.0, 0.0, 0.0),
+               headlights: null, tail_lights: null, knocked: 0, props: 0 }
+    game = engine.object(e, "Game", null)
+    engine.script(game, "street drive", (&g) as ptr, start, update, fixed_update)
+    engine.engine_run(e)
+    p = physics.of(e)
+    println("street_drive: ${physics.physics_body_count(p)} bodies (${g.props} props, ${list.size(g.bystanders)} bystanders, ${g.knocked} knocked down), ${physics.physics_step_count(p)} steps, ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps")
+    if g.vehicle != null { physics.vehicle_free(g.vehicle as *Vehicle) }
+    if g.headlights != null { free(g.headlights) }
+    if g.tail_lights != null { free(g.tail_lights) }
+    physics.physics_free(p)
+    engine.engine_free(e)
+}

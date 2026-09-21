@@ -12,8 +12,12 @@ import ae3d.engine
 import ae3d.behaviour
 import ae3d.loader
 import ae3d.physics
+import ae3d.skin
 import aephysics.math
 import aephysics.dynamics
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
 
 var failures = 0
 
@@ -38,10 +42,66 @@ struct Fixture {
     target: ptr                    // the crate the ball hits
     ball: ptr
     ragdoll: ptr                   // *Ragdoll
+    stander: ptr                   // *Ragdoll, sprung upright
+    hull_crate: ptr                // a crate collided as its own model's hull
+    victim: ptr                    // *Ragdoll, the figure the car hits, wearing a rig
+    rig: ptr                       // *Skeleton, the rig it wears
+    vehicle: ptr                   // *Vehicle
+    car: ptr                       // its chassis object
+    car_start_x: float
     head_start_y: float
     steps: int
     fired: bool
+    hits: int                      // hit events the car's body reported
     crate_body_matched: bool       // every step, the object's position was the body's
+}
+
+// A humanoid rig the pipeline's shape: a root turned as Blender's are,
+// and a bone model per joint, parented and placed as a standing figure's,
+// with the children the bones point at. Nothing is weighted to it here;
+// what is checked is that the ragdoll carries it.
+rig_bone(rig: *Skeleton, name: string, parent: *Model, x: float, y: float, z: float) -> *Model {
+    m = core.model_new()
+    core.model_set_name(m, name)
+    core.model_set_position(m, x, y, z)
+    if parent != null { core.model_set_parent(m, parent) }
+    skin.skeleton_add(rig, m)
+    return m
+}
+
+humanoid_rig() -> *Skeleton {
+    rig = skin.skeleton_new()
+    root = rig_bone(rig, "Root", null, 0.0, 0.0, 0.0)
+    hips = rig_bone(rig, "Hips", root, 0.0, 1.0, 0.0)
+    spine = rig_bone(rig, "Spine", hips, 0.0, 0.13, 0.0)
+    chest = rig_bone(rig, "Chest", spine, 0.0, 0.26, 0.0)
+    neck = rig_bone(rig, "Neck", chest, 0.0, 0.22, 0.0)
+    rig_bone(rig, "Head", neck, 0.0, 0.09, 0.0)
+    shoulder_l = rig_bone(rig, "ShoulderL", chest, 0.17, 0.14, 0.0)
+    elbow_l = rig_bone(rig, "ElbowL", shoulder_l, 0.0, 0.0 - 0.29, 0.0)
+    rig_bone(rig, "WristL", elbow_l, 0.0, 0.0 - 0.26, 0.0)
+    shoulder_r = rig_bone(rig, "ShoulderR", chest, 0.0 - 0.17, 0.14, 0.0)
+    elbow_r = rig_bone(rig, "ElbowR", shoulder_r, 0.0, 0.0 - 0.29, 0.0)
+    rig_bone(rig, "WristR", elbow_r, 0.0, 0.0 - 0.26, 0.0)
+    thigh_l = rig_bone(rig, "ThighL", hips, 0.1, 0.0 - 0.07, 0.0)
+    knee_l = rig_bone(rig, "KneeL", thigh_l, 0.0, 0.0 - 0.44, 0.0)
+    ankle_l = rig_bone(rig, "AnkleL", knee_l, 0.0, 0.0 - 0.42, 0.0)
+    rig_bone(rig, "ToeL", ankle_l, 0.0, 0.0 - 0.05, 0.0 - 0.15)
+    thigh_r = rig_bone(rig, "ThighR", hips, 0.0 - 0.1, 0.0 - 0.07, 0.0)
+    knee_r = rig_bone(rig, "KneeR", thigh_r, 0.0, 0.0 - 0.44, 0.0)
+    ankle_r = rig_bone(rig, "AnkleR", knee_r, 0.0, 0.0 - 0.42, 0.0)
+    rig_bone(rig, "ToeR", ankle_r, 0.0, 0.0 - 0.05, 0.0 - 0.15)
+    skin.skeleton_bind(rig)
+    return rig
+}
+
+// A wheel object: a dynamic body with a sphere collider, as the vehicle wants it.
+wheel(e: *Engine, name: string, position: Vec3) -> *GameObject {
+    w = engine.object(e, name, loader.sphere(0.35, 10, 6))
+    behaviour.object_set_position(w, position)
+    physics.rigidbody(w, physics.DYNAMIC)
+    physics.sphere_collider(w, 0.35, physics.material(1.0, 0.0), 250.0)
+    return w
 }
 
 start(state: ptr, e: *Engine) {
@@ -81,6 +141,62 @@ start(state: ptr, e: *Engine) {
     physics.sphere_collider(ball, 0.5, physics.material(0.6, 0.0), 4.0)
     s.ball = ball as ptr
 
+    // A standing figure: sprung upright to the ground, its joints held stiffly.
+    stander = physics.ragdoll(e, "Stander", core.vec3(0.0 - 20.0, 0.02, 8.0), 8.0, 8.0, 1.0)
+    physics.ragdoll_stand(stander, physics.rigidbody_of(ground), 25.0, 1.0)
+    check_true("a ragdoll sprung upright is standing", physics.ragdoll_is_standing(stander))
+    s.stander = stander as ptr
+
+    // A crate collided as the hull of its own drawn cube, at the model's scale.
+    hc = engine.object(e, "Hull crate", loader.cube(1.0))
+    behaviour.object_set_scale(hc, core.vec3(1.0, 0.6, 1.0))
+    behaviour.object_set_position(hc, core.vec3(0.0 - 20.0, 3.0, 0.0 - 8.0))
+    physics.rigidbody(hc, physics.DYNAMIC)
+    check_true("a convex collider comes from the model", physics.convex_collider_of_model(hc, physics.material(0.6, 0.0)).index1 != 0)
+    s.hull_crate = hc as ptr
+
+    // A car: a chassis box on four sphere wheels, driven forward from a standstill.
+    car = engine.object(e, "Car", loader.cube(1.0))
+    behaviour.object_set_scale(car, core.vec3(1.6, 0.5, 3.6))
+    behaviour.object_set_position(car, core.vec3(0.0, 0.7, 20.0))
+    rb = physics.rigidbody(car, physics.DYNAMIC)
+    physics.box_collider(car, core.vec3(0.8, 0.25, 1.8), physics.material(0.5, 0.0), 250.0)
+    physics.rigidbody_enable_hit_events(rb, true)
+    wheels_block = calloc(physics.WHEEL_COUNT, 8)
+    wheels = wheels_block as ptr[]
+    mounts_block = calloc(physics.WHEEL_COUNT, sizeof(Vec3))
+    mounts = mounts_block as Vec3[]
+    mounts[0] = core.vec3(0.0 - 0.9, 0.0 - 0.35, 0.0 - 1.2)
+    mounts[1] = core.vec3(0.9, 0.0 - 0.35, 0.0 - 1.2)
+    mounts[2] = core.vec3(0.0 - 0.9, 0.0 - 0.35, 1.2)
+    mounts[3] = core.vec3(0.9, 0.0 - 0.35, 1.2)
+    i = 0
+    while i < physics.WHEEL_COUNT {
+        wheels[i] = wheel(e, "Wheel ${i}", core.v3_add(core.vec3(0.0, 0.7, 20.0), mounts[i])) as ptr
+        i = i + 1
+    }
+    v = physics.vehicle(car, wheels_block, mounts_block, 3.0, 0.8, 0.12, 600.0, 30.0, 0.5)
+    check_true("a vehicle from a chassis and four wheels", v != null && physics.vehicle_chassis(v) == rb)
+    free(wheels_block)
+    free(mounts_block)
+    s.vehicle = v as ptr
+    s.car = car as ptr
+    s.car_start_x = 0.0
+    // A standing figure in the car's way, twelve metres on.
+    victim = physics.ragdoll(e, "Victim", core.vec3(0.0, 0.02, 14.0), 8.0, 8.0, 1.0)
+    physics.ragdoll_stand(victim, physics.rigidbody_of(ground), 25.0, 1.0)
+    // Wearing a rig: a skeleton named as the pipeline names one, bone
+    // models parented as a figure's are, and the ragdoll driving it.
+    rig = humanoid_rig()
+    check_true("a ragdoll dresses in a rig named as the pipeline names one", physics.ragdoll_dress(victim, rig))
+    hips = skin.skeleton_bone(rig, skin.skeleton_find(rig, "Hips"))
+    pelvis = behaviour.object_position(physics.ragdoll_bone(victim, 0))
+    check_near("dressed, the rig's hips are on the ragdoll's pelvis", core.v3_len(core.v3_sub(core.model_world_position(hips), pelvis)), 0.0, 0.02)
+    head = skin.skeleton_bone(rig, skin.skeleton_find(rig, "Head"))
+    check_true("and its head is up (${core.model_world_position(head).y})", core.model_world_position(head).y > 1.5)
+    s.victim = victim as ptr
+    s.rig = rig as ptr
+
     r = physics.ragdoll(e, "Ragdoll", core.vec3(20.0, 2.0, 0.0), 5.0, 1.0, 0.7)
     check_true("a ragdoll is twelve objects", r != null && physics.ragdoll_bone(r, 11) != null)
     check_true("a ragdoll's bone objects are in the scene", behaviour.scene_find(engine.engine_scene(e), "Ragdoll/neck") == physics.ragdoll_bone(r, 3))
@@ -98,6 +214,20 @@ fixed_update(state: ptr, e: *Engine, step: float) {
     if s.steps == 30 && s.fired == false {
         physics.rigidbody_set_velocity(physics.rigidbody_of(s.ball as *GameObject), core.vec3(0.0, 0.0, 12.0))
         s.fired = true
+    }
+    // Full throttle, straight on; what the car strikes is counted.
+    if s.vehicle != null {
+        physics.vehicle_drive(s.vehicle as *Vehicle, 1.0, 0.0, 0.0)
+        p = physics.of(e)
+        n = physics.hit_event_count(p)
+        i = 0
+        while i < n {
+            hit = physics.hit_event(p, i)
+            r = physics.ragdoll_of_shape(p, hit.shape_id_a)
+            if r == null { r = physics.ragdoll_of_shape(p, hit.shape_id_b) }
+            if r != null && physics.ragdoll_is_standing(r) { physics.ragdoll_release(r); s.hits = s.hits + 1 }
+            i = i + 1
+        }
     }
 }
 
@@ -121,7 +251,8 @@ main() {
     engine.engine_set_frame_limit(e, 240)
     light = core.light_sun(core.vec3(0.3, 0.8, 0.5))
     engine.engine_set_light(e, light)
-    scene = Fixture { crate: null, lift: null, rider: null, target: null, ball: null, ragdoll: null, head_start_y: 0.0, steps: 0, fired: false, crate_body_matched: false }
+    scene = Fixture { crate: null, lift: null, rider: null, target: null, ball: null, ragdoll: null, stander: null, hull_crate: null, victim: null, rig: null,
+                      vehicle: null, car: null, car_start_x: 0.0, head_start_y: 0.0, steps: 0, fired: false, hits: 0, crate_body_matched: false }
     b = engine.behaviour_new("scene", (&scene) as ptr)
     b.start = start
     b.fixed_update = fixed_update
@@ -150,9 +281,29 @@ main() {
     check_true("the ball knocked the target crate along (${target_z})", target_z > 0.5)
     head_y = behaviour.object_position(physics.ragdoll_bone(scene.ragdoll as *Ragdoll, 3)).y
     check_true("the ragdoll fell (${scene.head_start_y} -> ${head_y})", head_y < scene.head_start_y - 1.0 && head_y > 0.0)
+    stander_head_y = behaviour.object_position(physics.ragdoll_bone(scene.stander as *Ragdoll, 3)).y
+    check_true("the sprung ragdoll is still standing after four seconds (${stander_head_y})", stander_head_y > 1.2 && physics.ragdoll_is_standing(scene.stander as *Ragdoll))
+    hull_crate_y = behaviour.object_position(scene.hull_crate as *GameObject).y
+    check_near("the crate collided as its own scaled hull rests on its half height", hull_crate_y, 0.3, 0.03)
+    car_z = behaviour.object_position(scene.car as *GameObject).z
+    check_true("the car drove forward on its wheel joints (${car_z})", car_z < 20.0 - 4.0)
+    car_x = behaviour.object_position(scene.car as *GameObject).x
+    check_true("and straight (${car_x})", core.abs_of(car_x) < 1.0)
+    check_true("the car's hits were reported and the figure in its way let go (${scene.hits})", scene.hits >= 1)
+    rig = scene.rig as *Skeleton
+    victim = scene.victim as *Ragdoll
+    hips = skin.skeleton_bone(rig, skin.skeleton_find(rig, "Hips"))
+    pelvis = behaviour.object_position(physics.ragdoll_bone(victim, 0))
+    check_near("struck, the rig's hips still ride the ragdoll's pelvis", core.v3_len(core.v3_sub(core.model_world_position(hips), pelvis)), 0.0, 0.02)
+    head = skin.skeleton_bone(rig, skin.skeleton_find(rig, "Head"))
+    neck = behaviour.object_position(physics.ragdoll_bone(victim, 3))
+    check_true("and its head went down with the ragdoll's (${core.model_world_position(head).y} against the neck body at ${neck.y})",
+               core.model_world_position(head).y < 1.2 && core.abs_of(core.model_world_position(head).y - neck.y) < 0.45)
+    physics.vehicle_free(scene.vehicle as *Vehicle)
 
     bodies_before = physics.physics_body_count(p)
-    check_true("the bodies are counted (${bodies_before})", bodies_before == 6 + 12)
+    // The stander's twelve anchors stand with it; the victim's went with its release.
+    check_true("the bodies are counted (${bodies_before})", bodies_before == 6 + 12 + 24 + 1 + 5 + 12)
     physics.physics_free(p)
     check_true("freed: no physics on the engine", physics.of(e) == null)
     check_true("freed: the objects are still the scene's", behaviour.scene_find(engine.engine_scene(e), "Crate") == scene.crate as *GameObject)

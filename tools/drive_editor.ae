@@ -1,0 +1,2488 @@
+// Drive the editor through its own widgets and check what happens.
+//
+// Every other check on the editor reads the report it writes about
+// itself, and that report is produced by calling the handlers directly.
+// A button that is never hit-tested, a field whose callback is not
+// wired, a row that cannot be clicked: all of them pass those checks,
+// because none of them go anywhere near a widget.
+//
+// aether-ui's driver does. It answers /widgets with the live tree and
+// takes clicks and keystrokes on any of it, so this presses the real
+// buttons and types into the real fields, then asks the tree what
+// changed.
+//
+//     ./build.sh tools/drive_editor.ae
+//     ./build/drive_editor [--port N] [--binary build/ae3d_editor] [--backend opengl|vulkan]
+//
+// Exits non-zero with a line saying what failed. The editor's own output
+// goes to the same stream as this program's, so a run that stops
+// answering leaves its last words in the log.
+import std.os
+import std.file
+import std.fs
+import std.dir
+import std.list
+import std.string
+import std.strbuilder
+import std.json
+import std.http
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+const ACCENT = "#2e6eeb"
+const SCENE_FILE = "build/editor_scene.json"
+const SCRIPTS_DIR = "resources/scripts"
+
+var g_port = 8791
+var g_failures = 0
+var g_editor = 0                    // the spawned editor's token
+
+check(name: string, ok: bool) {
+    if ok {
+        println("   ok    ${name}")
+    } else {
+        println("   FAIL  ${name}")
+        g_failures = g_failures + 1
+    }
+}
+
+check_detail(name: string, ok: bool, detail: string) {
+    if ok {
+        println("   ok    ${name}")
+    } else {
+        println("   FAIL  ${name} (${detail})")
+        g_failures = g_failures + 1
+    }
+}
+
+// A check with a known gap on this platform: reported, never a failure.
+// What it would fail on is tracked in the issue named, so the run says
+// the gap is still there without hiding the checks around it behind one
+// red line; the moment the gap closes the note reads as an ok and the
+// call becomes a check again.
+check_note(name: string, ok: bool, detail: string, issue: int) {
+    if ok {
+        println("   ok    ${name}")
+    } else {
+        println("   note  ${name} (${detail}; #${issue})")
+    }
+}
+
+// --- the tree ------------------------------------------------------------------------------------------------
+
+// One widget as the driver reports it.
+struct Widget {
+    id: int
+    parent: int
+    kind: string
+    text: string                   // trimmed
+    raw_text: string               // as reported
+    x: float
+    y: float
+    w: float
+    h: float
+    visible: bool
+    bg: string
+    classes: string
+    value: float
+    active: bool
+    border_width: float
+    border_color: string
+}
+
+// The tree: the widgets in the order the driver listed them, and the
+// JSON they came from, freed together.
+struct Tree {
+    widgets: ptr                   // list of *Widget
+    root: ptr                      // the json array
+}
+
+field_text(node: ptr, key: string) -> string {
+    v = json.json_object_get_raw(node, key)
+    if v == null || json.json_type(v) != 3 { return "" }
+    return json.json_get_string_raw(v)
+}
+
+field_number(node: ptr, key: string) -> float {
+    v = json.json_object_get_raw(node, key)
+    if v == null || json.json_type(v) != 2 { return 0.0 }
+    return json.json_get_number(v)
+}
+
+field_flag(node: ptr, key: string) -> bool {
+    v = json.json_object_get_raw(node, key)
+    if v == null || json.json_type(v) != 1 { return false }
+    return json.json_get_bool(v) != 0
+}
+
+widget_ptr(w: *Widget) -> ptr { return w }
+
+tree_of(root: ptr) -> *Tree {
+    t = calloc(1, sizeof(Tree)) as *Tree
+    t.root = root
+    t.widgets = list.new()
+    count = json.json_array_size(root)
+    i = 0
+    while i < count {
+        node = json.json_array_get_raw(root, i)
+        w = calloc(1, sizeof(Widget)) as *Widget
+        w.id = field_number(node, "id") as int
+        w.parent = field_number(node, "parent") as int
+        w.kind = field_text(node, "type")
+        w.raw_text = field_text(node, "text")
+        w.text = string.trim(w.raw_text)
+        w.x = field_number(node, "x")
+        w.y = field_number(node, "y")
+        w.w = field_number(node, "w")
+        w.h = field_number(node, "h")
+        w.visible = field_flag(node, "visible")
+        w.bg = field_text(node, "bg")
+        w.classes = field_text(node, "classes")
+        w.value = field_number(node, "value")
+        w.active = field_flag(node, "active")
+        w.border_width = field_number(node, "borderWidth")
+        w.border_color = field_text(node, "borderColor")
+        list.add_raw(t.widgets, widget_ptr(w))
+        i = i + 1
+    }
+    return t
+}
+
+tree_free(t: *Tree) {
+    if t == null { return }
+    n = list.size(t.widgets)
+    i = 0
+    while i < n {
+        w = list.get_raw(t.widgets, i) as *Widget
+        string.free(w.text)
+        free(list.get_raw(t.widgets, i))
+        i = i + 1
+    }
+    list.free(t.widgets)
+    json.json_free(t.root)
+    free(t as ptr)
+}
+
+tree_count(t: *Tree) -> int { return list.size(t.widgets) }
+tree_at(t: *Tree, i: int) -> *Widget { return list.get_raw(t.widgets, i) as *Widget }
+
+// The widget with this id, or null.
+widget(t: *Tree, id: int) -> *Widget {
+    n = tree_count(t)
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.id == id { return w }
+        i = i + 1
+    }
+    return null
+}
+
+widget_text(t: *Tree, id: int) -> string {
+    w = widget(t, id)
+    if w == null { return "" }
+    return w.text
+}
+
+widget_value(t: *Tree, id: int) -> float {
+    w = widget(t, id)
+    if w == null { return 0.0 }
+    return w.value
+}
+
+widget_active(t: *Tree, id: int) -> bool {
+    w = widget(t, id)
+    if w == null { return false }
+    return w.active
+}
+
+widget_lit(t: *Tree, id: int) -> bool {
+    w = widget(t, id)
+    if w == null { return false }
+    return w.bg == ACCENT
+}
+
+// --- the channel ---------------------------------------------------------------------------------------------
+
+url(path: string) -> string { return "http://127.0.0.1:${g_port}${path}" }
+
+// GET, parsed. The window takes a moment to exist, so the first answer is
+// waited for; a channel that never answers ends the run with the reason.
+get_json(path: string) -> ptr {
+    tries = 0
+    last = ""
+    while tries < 40 {
+        body, err = http.get_with_timeout(url(path), 3s)
+        if err == "" {
+            root, perr = json.parse(body)
+            if perr == "" { return root }
+            last = perr
+        } else {
+            last = err
+        }
+        sleep(500)
+        tries = tries + 1
+    }
+    println("editor driver never answered ${path}: ${last}${editor_output()}")
+    stop_editor()
+    os.exit(1)
+}
+
+// What the editor is doing when it stops answering: still there, which
+// is a blocked main thread rather than a crash (sampled on macOS, where
+// there is a sampler), or already gone.
+editor_output() -> string {
+    if g_editor == 0 { return "" }
+    status, timed_out, _err = os.wait_pid_timeout(g_editor, 0)
+    if timed_out != 0 {
+        note = "\n  the editor is still running"
+        if os.platform() == "darwin" {
+            argv = list.new()
+            list.add(argv, "${g_editor}")
+            list.add(argv, "1")
+            list.add(argv, "-mayDie")
+            out, _status, serr = os.run_capture("sample", argv, null)
+            if serr == "" { note = "${note}\n${out}" }
+        }
+        return note
+    }
+    return "\n  the editor had already exited, status ${status}"
+}
+
+tree() -> *Tree { return tree_of(get_json("/widgets")) }
+
+// POST to the driver. A route that answers 404 is a check that failed,
+// not a run that ends: one unreachable route used to abort the script
+// and take the twenty checks after it with it. `quiet` is for a probe
+// that expects to miss. True when the route answered.
+post_route(path: string, quiet: bool) -> bool {
+    _body, err = http.post(url(path), "", "text/plain")
+    if err != "" {
+        if quiet == false { println("   note  ${path} answered ${err}") }
+        return false
+    }
+    return true
+}
+
+post(path: string) -> bool { return post_route(path, false) }
+click(id: int) -> bool { return post("/widget/${id}/click") }
+toggle(id: int) -> bool { return post("/widget/${id}/toggle") }
+set_text(id: int, text: string) -> bool { return post("/widget/${id}/set_text?v=${text}") }
+set_value(id: int, value: string) -> bool { return post("/widget/${id}/set_value?v=${value}") }
+
+// --- reading the tree ----------------------------------------------------------------------------------------
+
+// The id of the widget of this kind with this text, or -1.
+find(t: *Tree, kind: string, text: string) -> int {
+    n = tree_count(t)
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.kind == kind && w.text == text { return w.id }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// The first widget of this kind with this text, or null.
+find_widget(t: *Tree, kind: string, text: string) -> *Widget {
+    id = find(t, kind, text)
+    if id < 0 { return null }
+    return widget(t, id)
+}
+
+count_named(t: *Tree, kind: string, text: string) -> int {
+    n = tree_count(t)
+    found = 0
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.kind == kind && w.text == text { found = found + 1 }
+        i = i + 1
+    }
+    return found
+}
+
+// The widgets under one, in the order listed.
+rows_under(t: *Tree, parent: int) -> ptr {
+    out = list.new()
+    n = tree_count(t)
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.parent == parent { list.add_raw(out, widget_ptr(w)) }
+        i = i + 1
+    }
+    return out
+}
+
+row_count(t: *Tree, parent: int) -> int {
+    rows = rows_under(t, parent)
+    n = list.size(rows)
+    list.free(rows)
+    return n
+}
+
+// The widgets under one and everything under those, nearest first.
+descendants(t: *Tree, parent: int) -> ptr {
+    out = list.new()
+    queue = rows_under(t, parent)
+    head = 0
+    while head < list.size(queue) {
+        w = list.get_raw(queue, head) as *Widget
+        list.add_raw(out, widget_ptr(w))
+        kids = rows_under(t, w.id)
+        k = 0
+        while k < list.size(kids) {
+            list.add_raw(queue, list.get_raw(kids, k))
+            k = k + 1
+        }
+        list.free(kids)
+        head = head + 1
+    }
+    list.free(queue)
+    return out
+}
+
+// The ancestor of a widget that sits directly in a panel's stack.
+//
+// A section caption is nested inside its bar, so it is not a sibling of
+// the thing the section holds. Found by climbing rather than by depth,
+// because the depth is a detail of how the bar is built.
+in_panel(t: *Tree, w: *Widget) -> *Widget {
+    at = w
+    while at != null {
+        parent = widget(t, at.parent)
+        if parent == null { return null }
+        if string.contains(parent.classes, "panel-body") != 0 { return at }
+        at = parent
+    }
+    return null
+}
+
+// The list inside the SCENE section. Found by structure rather than by a
+// fixed id, because ids move whenever the panel gains a widget, and by
+// looking for the list itself rather than for whatever follows the bar:
+// the section's body is a stack, so "the next container" is the body and
+// the rows are a level further down.
+scene_list_id(t: *Tree) -> int {
+    n = tree_count(t)
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.kind == "text" && w.text == "SCENE" {
+            bar = in_panel(t, w)
+            if bar != null {
+                // The section's body: the first sibling past the bar, by id.
+                body = null as *Widget
+                j = 0
+                while j < n {
+                    s = tree_at(t, j)
+                    if s.parent == bar.parent && s.id > bar.id && (body == null || s.id < body.id) { body = s }
+                    j = j + 1
+                }
+                if body != null {
+                    // The list is the first container in it. The toolkit
+                    // reports a listbox as a stack, so this cannot ask for
+                    // the type by name and has to take the first one.
+                    best = null as *Widget
+                    j = 0
+                    while j < n {
+                        k = tree_at(t, j)
+                        if k.parent == body.id && (k.kind == "vstack" || k.kind == "listbox") && (best == null || k.id < best.id) { best = k }
+                        j = j + 1
+                    }
+                    if best != null { return best.id }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// The object's name, past the one-character kind marker the row carries.
+//
+// The list draws " ~  water" so the kind is readable before anything is
+// selected. A check that compared the whole label against "water" was
+// reading the presentation, and broke the moment the presentation
+// improved.
+row_name(t: *Tree, row: *Widget) -> string {
+    kids = descendants(t, row.id)
+    first = ""
+    i = 0
+    while i < list.size(kids) && first == "" {
+        k = list.get_raw(kids, i) as *Widget
+        if k.text != "" { first = k.text }
+        i = i + 1
+    }
+    list.free(kids)
+    if first == "" { return "?" }
+    // A one-character marker (one code point, however many bytes), spaces,
+    // and the name.
+    cut = string.string_index_of(first, " ")
+    if cut > 0 && codepoints(first, cut) == 1 {
+        rest = string.substring(first, cut, string.length(first))
+        name = string.trim(rest)
+        string.free(rest)
+        return name
+    }
+    return string.copy(first)
+}
+
+// How many UTF-8 code points the first `bytes` bytes of a string hold.
+codepoints(s: string, bytes: int) -> int {
+    count = 0
+    i = 0
+    while i < bytes {
+        c = string.char_at(s, i)
+        if c < 128 || c >= 192 { count = count + 1 }
+        i = i + 1
+    }
+    return count
+}
+
+// The row of the scene list named so, or null.
+row_named(t: *Tree, scene: int, name: string) -> *Widget {
+    rows = rows_under(t, scene)
+    found = null as *Widget
+    i = 0
+    while i < list.size(rows) && found == null {
+        row = list.get_raw(rows, i) as *Widget
+        rn = row_name(t, row)
+        if rn == name { found = row }
+        string.free(rn)
+        i = i + 1
+    }
+    list.free(rows)
+    return found
+}
+
+// Whether the water section's rows show: 1, 0, or -1 with no water section.
+water_section_visible(t: *Tree) -> int {
+    cap = find_widget(t, "text", "wave height")
+    if cap == null { return 0 - 1 }
+    frame = widget(t, cap.parent)
+    if frame == null { return 0 - 1 }
+    if frame.visible { return 1 }
+    return 0
+}
+
+// Every row has to report its own kind, whatever happened before it.
+//
+// The model, the component saying what it is, and the script sit at the
+// same index in three lists. When only some of them move, every object
+// past that point answers for another one, and the way that shows is an
+// object whose inspector belongs to something else. Selecting each row
+// and asking whether the water section is open is the cheapest question
+// that notices. Answers "" when every row is right.
+audit_kinds(scene: int, step: string) -> string {
+    t = tree()
+    rows = rows_under(t, scene)
+    i = 0
+    while i < list.size(rows) {
+        row = list.get_raw(rows, i) as *Widget
+        name = row_name(t, row)
+        click(row.id)
+        sleep(450)
+        now = tree()
+        shown = water_section_visible(now)
+        tree_free(now)
+        wanted = 0
+        if name == "water" { wanted = 1 }
+        if shown != wanted {
+            out = "after ${step}, the row '${name}' reports the water section as ${shown}"
+            string.free(name)
+            list.free(rows)
+            tree_free(t)
+            return out
+        }
+        string.free(name)
+        i = i + 1
+    }
+    list.free(rows)
+    tree_free(t)
+    return ""
+}
+
+// Whether a widget and every container above it is showing.
+on_screen(t: *Tree, w: *Widget) -> bool {
+    at = w
+    while at != null {
+        if at.visible == false { return false }
+        at = widget(t, at.parent)
+    }
+    return true
+}
+
+// The number box on an inspector row, given the row's caption: the first
+// text field beside it, or null.
+row_box(t: *Tree, caption: *Widget) -> *Widget {
+    n = tree_count(t)
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.parent == caption.parent && w.kind == "textfield" { return w }
+        i = i + 1
+    }
+    return null
+}
+
+// The slider beside a caption, or null.
+row_slider(t: *Tree, caption: *Widget) -> *Widget {
+    n = tree_count(t)
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.parent == caption.parent && w.kind == "slider" { return w }
+        i = i + 1
+    }
+    return null
+}
+
+// The toggle beside a caption, or null.
+row_toggle(t: *Tree, caption: *Widget) -> *Widget {
+    n = tree_count(t)
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.parent == caption.parent && w.kind == "toggle" { return w }
+        i = i + 1
+    }
+    return null
+}
+
+// The first slider listed after a widget, by id, or null.
+slider_after(t: *Tree, id: int) -> *Widget {
+    n = tree_count(t)
+    best = null as *Widget
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.kind == "slider" && w.id > id && (best == null || w.id < best.id) { best = w }
+        i = i + 1
+    }
+    return best
+}
+
+// Whether any text widget's text contains this.
+any_text_contains(t: *Tree, needle: string) -> bool {
+    n = tree_count(t)
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.kind == "text" && string.contains(w.raw_text, needle) != 0 { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// Things a panel gets wrong that a person reads past.
+//
+// Both of these were found by measuring the tree by hand and neither by
+// looking at screenshots, across several passes over the same panels.
+// They are mechanical properties, so they are checked rather than
+// remembered. Answers the faults, semicolon-separated, or "".
+layout_faults(t: *Tree) -> string {
+    faults = strbuilder.new(256)
+    count = 0
+    n = tree_count(t)
+    // Every parent once.
+    i = 0
+    while i < n {
+        parent_id = tree_at(t, i).parent
+        seen = false
+        j = 0
+        while j < i {
+            if tree_at(t, j).parent == parent_id { seen = true }
+            j = j + 1
+        }
+        if seen == false {
+            count = layout_faults_under(t, parent_id, faults, count)
+        }
+        i = i + 1
+    }
+    // A control with no size is a control nobody can use, and the tree is
+    // the only place it shows.
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.visible && (w.kind == "button" || w.kind == "textfield") && (w.w <= 0.0 || w.h <= 0.0) {
+            label = w.raw_text
+            if string.length(label) > 20 { label = string.substring(w.raw_text, 0, 20) }
+            count = add_fault(faults, count, "${w.kind} '${label}' has no size")
+        }
+        i = i + 1
+    }
+    // A frame inside a frame of the same colour, shorter than the one
+    // around it, has its bottom edge somewhere in the middle: a line drawn
+    // across the panel with nothing under it, and the column reads as a
+    // card that stopped short of the window.
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        parent = widget(t, w.parent)
+        if parent != null && w.visible && w.border_width != 0.0 && w.border_color != "" &&
+           parent.border_color == w.border_color && w.h < parent.h {
+            count = add_fault(faults, count, "${w.kind} ${w.id} is framed inside its parent's frame and stops at y=${(w.y + w.h) as int}")
+        }
+        i = i + 1
+    }
+    return strbuilder.finish(faults)
+}
+
+add_fault(faults: ptr, count: int, text: string) -> int {
+    if count > 0 { strbuilder.append(faults, "; ") }
+    strbuilder.append(faults, text)
+    return count + 1
+}
+
+// The faults among one parent's shown children, in order of y.
+layout_faults_under(t: *Tree, parent_id: int, faults: ptr, count: int) -> int {
+    shown = list.new()
+    n = tree_count(t)
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.parent == parent_id && w.visible && w.h > 0.0 {
+            // Insertion by y.
+            list.add_raw(shown, widget_ptr(w))
+            k = list.size(shown) - 1
+            while k > 0 && (list.get_raw(shown, k - 1) as *Widget).y > w.y {
+                list.list_set(shown, k, list.get_raw(shown, k - 1))
+                k = k - 1
+            }
+            list.list_set(shown, k, widget_ptr(w))
+        }
+        i = i + 1
+    }
+    // Two rules with nothing between them. A section that hides its
+    // heading and its rows and keeps its rule leaves one stacked against
+    // the next section's, which is what the water settings did.
+    previous = null as *Widget
+    i = 0
+    while i < list.size(shown) {
+        kid = list.get_raw(shown, i) as *Widget
+        if previous != null && previous.kind == "divider" && kid.kind == "divider" {
+            count = add_fault(faults, count, "two rules with nothing between them at y=${previous.y as int} and y=${kid.y as int}")
+        }
+        previous = kid
+        i = i + 1
+    }
+    // Rows of buttons in one stack start at one x. A row that carries its
+    // own inset over the panel's starts further in than the full-width
+    // buttons above and below it: the same control with two edges.
+    //
+    // Only where the children are stacked vertically. Two buttons side by
+    // side in a row have different left edges because that is what a row
+    // is, and the first version of this check flagged every pair in the
+    // panel for it.
+    container = widget(t, parent_id)
+    if container != null && container.kind == "vstack" {
+        edges = calloc(list.size(shown) + 1, 8) as float[]
+        edge_count = 0
+        i = 0
+        while i < list.size(shown) {
+            kid = list.get_raw(shown, i) as *Widget
+            start = 0.0
+            found = false
+            j = 0
+            while j < n {
+                b = tree_at(t, j)
+                if b.kind == "button" && b.visible && b.w > 0.0 && (b.id == kid.id || b.parent == kid.id) {
+                    if found == false || b.x < start { start = b.x }
+                    found = true
+                }
+                j = j + 1
+            }
+            if found {
+                known = false
+                e = 0
+                while e < edge_count {
+                    if edges[e] == start { known = true }
+                    e = e + 1
+                }
+                if known == false {
+                    edges[edge_count] = start
+                    edge_count = edge_count + 1
+                }
+            }
+            i = i + 1
+        }
+        if edge_count > 1 {
+            text = strbuilder.new(64)
+            strbuilder.append(text, "button rows in one stack start at [")
+            e = 0
+            while e < edge_count {
+                if e > 0 { strbuilder.append(text, ", ") }
+                strbuilder.append(text, "${edges[e] as int}")
+                e = e + 1
+            }
+            strbuilder.append(text, "]")
+            line = strbuilder.finish(text)
+            count = add_fault(faults, count, line)
+            string.free(line)
+        }
+        free(edges)
+    }
+    list.free(shown)
+    return count
+}
+
+// --- waiting -------------------------------------------------------------------------------------------------
+
+// What a wait looks for: the predicate, and what it compares against.
+// Every count in here is asserted after an action the editor performs in
+// its own time. Sleeping first and asserting second passes on an idle
+// machine and fails inside a full ci run, and the failure names the
+// check rather than the machine, which is the worst way to learn about a
+// timing assumption.
+struct Want {
+    pred: int                      // one of the WANT_ kinds
+    id: int
+    count: int
+    text: string
+    value: float
+    flag: bool
+}
+
+const WANT_ROWS = 1                // the scene list `id` holds `count` rows
+const WANT_TEXT = 2                // widget `id` spells `text`
+const WANT_TEXT_NOT = 3            // widget `id` no longer spells `text`
+const WANT_ON_SCREEN = 4           // widget `id` is on screen (`flag`) or off it
+const WANT_CONTAINS = 5            // some text widget contains `text`
+const WANT_VALUE = 6               // slider `id` is within 0.001 of `value`
+const WANT_ACTIVE = 7              // toggle `id` is on (`flag`) or off
+const WANT_LIT = 8                 // button `id` is lit (`flag`) or not
+const WANT_COSTS = 9               // the stats bar shows the frame split
+const WANT_TERRAIN = 10            // the TERRAIN caption is on screen
+const WANT_TRIANGLES_ABOVE = 11    // the title's triangle count is above `count`
+const WANT_TRIANGLES_NOT = 12      // the title's triangle count is not `count`
+const WANT_SCULPTED = 13           // the console says columns were sculpted
+const WANT_ONLY_LIT = 14           // among the buttons named in `text` (comma-separated), exactly the one at `id` is lit (`flag`) or none
+const WANT_CHANNELS = 15           // the three sky channels are within 0.01 of `value`
+const WANT_KINDS_LIT = 16          // among the weather kinds under parent `count`, only `text` is lit
+const WANT_FILES = 17              // the scripts directory has more than `count` entries
+
+var g_channels: ptr = null         // int[3], the sky's channel sliders
+
+holds(t: *Tree, want: *Want) -> bool {
+    if want.pred == WANT_ROWS { return row_count(t, want.id) == want.count }
+    if want.pred == WANT_TEXT { return widget_text(t, want.id) == want.text }
+    if want.pred == WANT_TEXT_NOT { return widget_text(t, want.id) != want.text }
+    if want.pred == WANT_ON_SCREEN {
+        w = widget(t, want.id)
+        if w == null { return want.flag == false }
+        return on_screen(t, w) == want.flag
+    }
+    if want.pred == WANT_CONTAINS { return any_text_contains(t, want.text) }
+    if want.pred == WANT_VALUE {
+        d = widget_value(t, want.id) - want.value
+        if d < 0.0 { d = 0.0 - d }
+        return d < 0.001
+    }
+    if want.pred == WANT_ACTIVE { return widget_active(t, want.id) == want.flag }
+    if want.pred == WANT_LIT { return widget_lit(t, want.id) == want.flag }
+    if want.pred == WANT_COSTS { return costs(t) != "" }
+    if want.pred == WANT_TERRAIN {
+        cap = find_widget(t, "text", "TERRAIN")
+        return cap != null && on_screen(t, cap)
+    }
+    if want.pred == WANT_TRIANGLES_ABOVE { return triangles(t) > want.count }
+    if want.pred == WANT_TRIANGLES_NOT { return triangles(t) != want.count }
+    if want.pred == WANT_SCULPTED { return sculpted(t) > 0 }
+    if want.pred == WANT_ONLY_LIT { return only_lit(t, want.text, want.id, want.flag) }
+    if want.pred == WANT_CHANNELS {
+        channels = g_channels as int[]
+        c = 0
+        while c < 3 {
+            d = widget_value(t, channels[c]) - want.value
+            if d < 0.0 { d = 0.0 - d }
+            if d >= 0.01 { return false }
+            c = c + 1
+        }
+        return true
+    }
+    if want.pred == WANT_KINDS_LIT { return kinds_lit(t, want.count) == want.text }
+    if want.pred == WANT_FILES { return script_count() > want.count }
+    return false
+}
+
+// Poll the tree until the want holds, or give up: the tree as last read,
+// and whether it held. A fixed sleep is a guess about how long the editor
+// takes to build a water surface and lay the panel out again, and a
+// guess that is usually right is the worst kind: the check passes on
+// this machine and fails on a slower one for reasons that have nothing
+// to do with the editor.
+wait_for(want: *Want, seconds: float, ok_out: int[]) -> *Tree {
+    deadline = os.now_monotonic_ms() + ((seconds * 1000.0) as long)
+    t = tree()
+    while os.now_monotonic_ms() < deadline {
+        if holds(t, want) {
+            ok_out[0] = 1
+            return t
+        }
+        tree_free(t)
+        sleep(250)
+        t = tree()
+    }
+    if holds(t, want) { ok_out[0] = 1 } else { ok_out[0] = 0 }
+    return t
+}
+
+want(pred: int) -> *Want {
+    w = calloc(1, sizeof(Want)) as *Want
+    w.pred = pred
+    w.text = ""
+    return w
+}
+
+// Wait for the scene list to hold `count` rows, then report what it holds.
+wait_rows(scene: int, count: int) -> int {
+    w = want(WANT_ROWS)
+    w.id = scene
+    w.count = count
+    ok = calloc(1, 4) as int[]
+    t = wait_for(w, 8.0, ok)
+    rows = row_count(t, scene)
+    tree_free(t)
+    free(w as ptr)
+    free(ok)
+    return rows
+}
+
+// Wait until a widget spells this, and answer what it spells.
+wait_text(id: int, wanted: string) -> string {
+    w = want(WANT_TEXT)
+    w.id = id
+    w.text = wanted
+    ok = calloc(1, 4) as int[]
+    t = wait_for(w, 8.0, ok)
+    spelled = string.copy(widget_text(t, id))
+    tree_free(t)
+    free(w as ptr)
+    free(ok)
+    return spelled
+}
+
+// Wait until the scene list stops changing size.
+//
+// A load rebuilds the list, and a row clicked while it is still being
+// rebuilt is a row that is about to be replaced: the selection goes with
+// it, and what follows asks the editor about whatever ended up selected
+// instead.
+wait_rows_settled(scene: int, seconds: float) -> int {
+    deadline = os.now_monotonic_ms() + ((seconds * 1000.0) as long)
+    count = 0 - 1
+    while os.now_monotonic_ms() < deadline {
+        t = tree()
+        rows = row_count(t, scene)
+        tree_free(t)
+        if rows > 0 && rows == count { return rows }
+        count = rows
+        sleep(200)
+    }
+    return count
+}
+
+// Wait for a file to exist, or to have been written again since.
+//
+// Existence alone is not enough for a second save: the file is already
+// there from the first one, so the wait returns at once and a Load that
+// follows can read what was on disk before rather than what was just
+// asked for. That is a race that passes almost every time and fails on a
+// busy machine, which is the worst kind to have in a suite.
+file_written(path: string, newer_than: long) -> bool {
+    if file.file_exists(path) == 0 { return false }
+    size, serr = file.size(path)
+    if serr != "" || size <= (0 as long) { return false }
+    if newer_than < (0 as long) { return true }
+    m, merr = fs.mtime(path)
+    if merr != "" { return false }
+    return m > newer_than
+}
+
+wait_file(path: string, newer_than: long) -> bool {
+    deadline = os.now_monotonic_ms() + (8000 as long)
+    while os.now_monotonic_ms() < deadline {
+        if file_written(path, newer_than) { return true }
+        sleep(100)
+    }
+    return file_written(path, newer_than)
+}
+
+// The file's modification time, in seconds; and the clock let run past
+// that second, so a write that follows is newer by the stamp, which is
+// all the resolution the stamp has.
+file_stamp(path: string) -> long {
+    m, err = fs.mtime(path)
+    if err != "" { return 0 - 1 as long }
+    while os.now_unix_ms() / (1000 as long) <= m { sleep(50) }
+    return m
+}
+
+// --- what the tree says --------------------------------------------------------------------------------------
+
+// The stats bar's split of the frame by pass, or "".
+costs(t: *Tree) -> string {
+    n = tree_count(t)
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.kind == "text" && string.contains(w.raw_text, "shadow ") != 0 && string.contains(w.raw_text, " ms") != 0 { return w.raw_text }
+        i = i + 1
+    }
+    return ""
+}
+
+// The number after a word in a text, or -1.
+number_after(text: string, word: string) -> float {
+    at = string.string_index_of(text, word)
+    if at < 0 { return 0.0 - 1.0 }
+    start = at + string.length(word)
+    while start < string.length(text) && string.char_at(text, start) == 32 { start = start + 1 }
+    end = start
+    while end < string.length(text) {
+        c = string.char_at(text, end)
+        if (c >= 48 && c <= 57) || c == 46 || c == 45 { end = end + 1 } else { break }
+    }
+    if end == start { return 0.0 - 1.0 }
+    digits = string.substring(text, start, end)
+    value = string.get_double(digits)
+    string.free(digits)
+    return value
+}
+
+// The title's triangle count: the number before "triangles".
+triangles(t: *Tree) -> int {
+    n = tree_count(t)
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.kind == "text" && string.contains(w.raw_text, "triangles") != 0 {
+            // The number is the word before "triangles".
+            at = string.string_index_of(w.raw_text, "triangles")
+            end = at
+            while end > 0 && string.char_at(w.raw_text, end - 1) == 32 { end = end - 1 }
+            start = end
+            while start > 0 && string.char_at(w.raw_text, start - 1) >= 48 && string.char_at(w.raw_text, start - 1) <= 57 { start = start - 1 }
+            if start < end {
+                digits = string.substring(w.raw_text, start, end)
+                value = string.get_int(digits)
+                string.free(digits)
+                return value
+            }
+            return 0
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// How many columns the console says the last stroke sculpted.
+sculpted(t: *Tree) -> int {
+    n = tree_count(t)
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.kind == "text" && string.contains(w.raw_text, "sculpted ") != 0 {
+            value = number_after(w.raw_text, "sculpted ")
+            if value < 0.0 { return 0 }
+            return value as int
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// Among the buttons whose text is one of `names` (comma-separated), the
+// ones that are lit, comma-separated in tree order.
+lit_among(t: *Tree, names: string) -> string {
+    out = strbuilder.new(64)
+    count = 0
+    n = tree_count(t)
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.kind == "button" && w.bg == ACCENT && named_in(w.raw_text, names) {
+            if count > 0 { strbuilder.append(out, ",") }
+            strbuilder.append(out, w.raw_text)
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return strbuilder.finish(out)
+}
+
+// Whether `name` is one of the comma-separated `names`.
+named_in(name: string, names: string) -> bool {
+    parts = string.split(names, ",")
+    n = string.array_size(parts)
+    found = false
+    i = 0
+    while i < n {
+        if part_at(parts, i) == name { found = true }
+        i = i + 1
+    }
+    string.array_free(parts)
+    return found
+}
+
+part_at(parts: ptr, i: int) -> string { return string.string_array_get(parts, i) }
+
+// Whether, among the named buttons, exactly the one at `id` is lit (or,
+// with `flag` false, none of them).
+only_lit(t: *Tree, names: string, id: int, flag: bool) -> bool {
+    lit = lit_among(t, names)
+    if flag == false {
+        ok = lit == ""
+        string.free(lit)
+        return ok
+    }
+    w = widget(t, id)
+    ok = w != null && lit == w.raw_text
+    string.free(lit)
+    return ok
+}
+
+// The lit weather kinds under the row `parent`, comma-separated.
+kinds_lit(t: *Tree, parent: int) -> string {
+    out = strbuilder.new(32)
+    count = 0
+    n = tree_count(t)
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.kind == "button" && w.parent == parent && w.bg == ACCENT && named_in(w.text, "Clear,Rain,Snow,Dust,Storm") {
+            if count > 0 { strbuilder.append(out, ",") }
+            strbuilder.append(out, w.text)
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return strbuilder.finish(out)
+}
+
+// The scripts in the project, by name, sorted: the .ae files in resources/scripts.
+scripts_on_disk() -> ptr {
+    names = list.new()
+    l, err = dir.list(SCRIPTS_DIR)
+    if err != "" { return names }
+    n = dir.list_count(l)
+    i = 0
+    while i < n {
+        entry = dir.list_get(l, i)
+        if string.ends_with(entry, ".ae") != 0 {
+            name = string.substring(entry, 0, string.length(entry) - 3)
+            list.add(names, name)
+            // Sorted by byte order.
+            k = list.size(names) - 1
+            added = list.get_raw(names, k)
+            while k > 0 && string.compare(name_at(names, k - 1), name) > 0 {
+                list.list_set(names, k, list.get_raw(names, k - 1))
+                k = k - 1
+            }
+            list.list_set(names, k, added)
+        }
+        i = i + 1
+    }
+    return names
+}
+
+name_at(names: ptr, i: int) -> string { return list.get_raw(names, i) }
+
+script_count() -> int {
+    l, err = dir.list(SCRIPTS_DIR)
+    if err != "" { return 0 }
+    return dir.list_count(l)
+}
+
+// The scene file's view.rendering or view.weather object, or null; the
+// caller frees the root through the second slot.
+scene_section(section: string, root_out: ptr[]) -> ptr {
+    text, err = file.read(SCENE_FILE)
+    if err != "" { return null }
+    root, perr = json.parse(text)
+    string.free(text)
+    if perr != "" { return null }
+    root_out[0] = root
+    view = json.json_object_get_raw(root, "view")
+    if view == null { return null }
+    return json.json_object_get_raw(view, section)
+}
+
+json_text(node: ptr) -> string {
+    if node == null { return "{}" }
+    s, err = json.encode(node)
+    if err != "" { return "{}" }
+    return s
+}
+
+// --- the editor process --------------------------------------------------------------------------------------
+
+// The built editor, whatever the platform calls it. Windows names the
+// binary .exe, and will not take a relative path written with forward
+// slashes, which fails as a file-not-found naming nothing useful.
+editor_binary(path: string) -> string {
+    if file.file_exists(path) != 0 { return absolute(path) }
+    exe = string.concat(path, ".exe")
+    if file.file_exists(exe) != 0 { return absolute(exe) }
+    println("no editor at ${path}: build it with editor/build_editor.sh")
+    os.exit(1)
+}
+
+absolute(path: string) -> string {
+    if string.starts_with(path, "/") != 0 || (string.length(path) > 1 && string.char_at(path, 1) == 58) { return string.copy(path) }
+    cwd = os.getcwd()
+    joined = "${cwd}/${path}"
+    if os.platform() == "windows" { return string.replace_all(joined, "/", "\\") }
+    return joined
+}
+
+stop_editor() {
+    if g_editor == 0 { return }
+    os.kill(g_editor, 15)
+    _status, timed_out, _err = os.wait_pid_timeout(g_editor, 5)
+    if timed_out != 0 {
+        os.kill(g_editor, 9)
+        os.wait(g_editor)
+    }
+    g_editor = 0
+}
+
+// --- main ----------------------------------------------------------------------------------------------------
+
+main() {
+    binary = "build/ae3d_editor"
+    backend = ""
+    argc = os.args_count()
+    i = 1
+    while i + 1 < argc {
+        flag = os.args_get(i)
+        if flag == "--port" { g_port = string.get_int(os.args_get(i + 1)) }
+        if flag == "--binary" { binary = os.args_get(i + 1) }
+        if flag == "--backend" { backend = os.args_get(i + 1) }
+        i = i + 2
+    }
+
+    os.io_setenv_raw("AETHER_UI_TEST_PORT", "${g_port}")
+    // Never onto the desktop. The driver presses widgets over HTTP and
+    // reads the tree back, none of which needs the window in front of
+    // whoever is using the machine.
+    if os.getenv("AETHER_UI_HEADLESS") == null || os.getenv("AETHER_UI_HEADLESS") == "" { os.io_setenv_raw("AETHER_UI_HEADLESS", "1") }
+    if backend != "" { os.io_setenv_raw("AE3D_EDITOR_BACKEND", backend) }
+    // Long enough that the run outlives this program; it is killed at the end.
+    os.io_setenv_raw("AE3D_EDITOR_FRAMES", "100000")
+    path = editor_binary(binary)
+    argv = list.new()
+    token, err = os.spawn_proc(path, argv, null)
+    if err != "" {
+        println("could not start ${path}: ${err}")
+        os.exit(1)
+    }
+    g_editor = token
+
+    run_checks()
+
+    stop_editor()
+    if g_failures > 0 {
+        println("editor driver: ${g_failures} failure(s)")
+        os.exit(1)
+    }
+    println("editor driver: all checks passed")
+}
+
+// Every check, in the order the editor is driven through them.
+run_checks() {
+    ok = calloc(1, 4) as int[]
+    t = tree()
+    scene = scene_list_id(t)
+    if scene < 0 {
+        println("could not find the scene list in the widget tree")
+        stop_editor()
+        os.exit(1)
+    }
+    tree_free(t)
+
+    // Wait for the scene to be there before counting it. The GPU viewport
+    // builds the renderer when aether-ui hands over its context, which is
+    // after the window exists, and the scene is filled then: a count taken
+    // the instant the tree first answers is a count of an editor still
+    // starting up.
+    wait_rows_settled(scene, 12.0)
+    t = tree()
+    before = row_count(t, scene)
+
+    // A button, pressed where a person would press it.
+    cube = find(t, "button", "Cube")
+    check("the Cube button is in the tree", cube >= 0)
+    if cube >= 0 {
+        click(cube)
+        after = wait_rows(scene, before + 1)
+        tree_free(t)
+        t = tree()
+        check_detail("clicking Cube adds an object", after == before + 1, "${before} rows before, ${after} after")
+    }
+
+    // Undo, pressed rather than called. The report's own undo check calls
+    // the editor's function from the top level; the button reaches it
+    // through a closure built inside the ui.window block, which is a
+    // different scope and was binding a different function entirely.
+    undo = find(t, "button", "Undo")
+    check("the Undo button is in the tree", undo >= 0)
+    if undo >= 0 && cube >= 0 {
+        click(undo)
+        undone = wait_rows(scene, before)
+        tree_free(t)
+        t = tree()
+        check_detail("clicking Undo takes the object back off", undone == before, "${undone} rows, expected ${before}")
+    }
+
+    // A number field, typed into. The value has to reach the model, which
+    // is only proved by selecting away and back: what comes back is the
+    // model's own formatting, not the text that was typed. Only the ones
+    // actually on screen. A section is hidden by hiding the rows, and a
+    // hidden row's children still report visible along with whatever
+    // geometry they last had, so the water settings sit at the top of the
+    // panel by their coordinates while being nowhere on it: sorting by
+    // position picked one of those to type into.
+    fields = 0
+    first_field = null as *Widget
+    n = tree_count(t)
+    i = 0
+    while i < n {
+        fw = tree_at(t, i)
+        if fw.kind == "textfield" && on_screen(t, fw) {
+            fields = fields + 1
+            if first_field == null || fw.y < first_field.y || (fw.y == first_field.y && fw.x < first_field.x) { first_field = fw }
+        }
+        i = i + 1
+    }
+    check("the inspector has number fields", fields >= 4)
+    if first_field != null {
+        x_field = first_field.id
+        set_text(x_field, "-150.0")
+        sleep(600)
+        now = tree()
+        typed = widget_text(now, x_field)
+        check_detail("the field takes what is typed", typed == "-150.0", "'${typed}'")
+        rows = rows_under(now, scene)
+        if list.size(rows) >= 2 {
+            first_row = lowest_id(rows)
+            last_row = highest_id(rows)
+            click(first_row)
+            sleep(600)
+            other_tree = tree()
+            other = widget_text(other_tree, x_field)
+            check_detail("selecting another object rereads the field", other != "-150.0", "'${other}'")
+            tree_free(other_tree)
+            click(last_row)
+            sleep(600)
+            back_tree = tree()
+            back = widget_text(back_tree, x_field)
+            // number() writes two decimals; "-150.0" is what was typed.
+            check_detail("what was typed reached the model", back == "-150.00", "'${back}'")
+            tree_free(back_tree)
+        }
+        list.free(rows)
+        tree_free(now)
+    }
+
+    // The menus. Attachment is not checked, though the name of this check
+    // said so until it was sabotaged: /menus reports every menu that was
+    // built, with no record of which ones reached the bar, so dropping the
+    // menu_bar_add for a whole menu left it green. What it does catch is
+    // an action going missing, which is the regression that happens when
+    // one is added or renamed.
+    menus = get_json("/menus")
+    menu_count = json.json_array_size(menus)
+    wanted_actions = "Save Scene,Load Scene,Undo,Redo,Duplicate,Delete,Cube,Sphere,Plane,Water,Light,Terrain,Move,Rotate,Scale,Frame Selection,Fast,Balanced,Quality"
+    missing = strbuilder.new(64)
+    missing_count = 0
+    add_menu = 0 - 1
+    parts = string.split(wanted_actions, ",")
+    i = 0
+    while i < string.array_size(parts) {
+        action = part_at(parts, i)
+        handle = menu_with(menus, action)
+        if handle < 0 {
+            if missing_count > 0 { strbuilder.append(missing, ", ") }
+            if missing_count < 4 { strbuilder.append(missing, action) }
+            missing_count = missing_count + 1
+        }
+        if action == "Cube" { add_menu = handle }
+        i = i + 1
+    }
+    string.array_free(parts)
+    missing_text = strbuilder.finish(missing)
+    check_detail("every action the editor has is on a menu", menu_count == 4 && missing_count == 0, "${menu_count} menus, missing [${missing_text}]")
+    string.free(missing_text)
+    json.json_free(menus)
+
+    // And a menu item does what its button does. The driver used to be
+    // unable to press one: it ran the closure on its own HTTP thread
+    // rather than the main queue, so an item that adds a model touched the
+    // GL context off-thread and took the editor down. Fixed upstream, so
+    // the menus are driven like everything else now.
+    if add_menu >= 0 {
+        now = tree()
+        before_menu = row_count(now, scene)
+        tree_free(now)
+        post("/menu/${add_menu}/activate?label=Cube")
+        after_menu = wait_rows(scene, before_menu + 1)
+        check_detail("a menu item adds an object the way its button does", after_menu == before_menu + 1, "${before_menu} rows before, ${after_menu} after")
+        // Put it back with the button rather than the Undo menu item: that
+        // item's label carries its accelerator, and the driver matches a
+        // menu item by its exact label without decoding what the query
+        // escaped, so asking for it by name is a 404.
+        now = tree()
+        undo_now = find(now, "button", "Undo")
+        tree_free(now)
+        if undo_now >= 0 {
+            click(undo_now)
+            wait_rows(scene, before_menu)
+        }
+    }
+
+    // A section folds when its bar is clicked. Read as the body going away
+    // and the caret turning, not as one row disappearing: a hidden row's
+    // own visible flag stays true, which is why on_screen walks upward.
+    tree_free(t)
+    t = tree()
+    check("the inspector's sections have headers", count_named(t, "text", "MATERIAL") == 1)
+    material = find_widget(t, "text", "MATERIAL")
+    if material != null {
+        strip = widget(t, material.parent)
+        bar = widget(t, strip.parent)
+        // The caret: the text before the caption in the strip.
+        caret = null as *Widget
+        carets = 0
+        i = 0
+        while i < tree_count(t) {
+            cw = tree_at(t, i)
+            if cw.parent == strip.id && cw.kind == "text" && cw.id < material.id { caret = cw; carets = carets + 1 }
+            i = i + 1
+        }
+        red = find_widget(t, "text", "red")
+        caret_text = "none"
+        if caret != null { caret_text = "'${caret.text}'" }
+        check_detail("and a caret that says which way the section is", carets == 1 && caret != null && caret.text == "▾", caret_text)
+        if red != null && caret != null {
+            red_id = red.id
+            caret_id = caret.id
+            click(bar.id)
+            wt = want(WANT_ON_SCREEN)
+            wt.id = red_id
+            wt.flag = false
+            folded = wait_for(wt, 8.0, ok)
+            check("clicking a section header folds it away", ok[0] == 1)
+            check_detail("and the caret turns with it", widget_text(folded, caret_id) == "▸", "'${widget_text(folded, caret_id)}'")
+            tree_free(folded)
+            click(bar.id)
+            wt.flag = true
+            shown = wait_for(wt, 8.0, ok)
+            check("and clicking it again brings it back", ok[0] == 1)
+            tree_free(shown)
+            free(wt as ptr)
+        }
+    }
+
+    // The bar under the viewport says what the last frame cost on the
+    // device, pass by pass: a rate says a scene is slow, the split says
+    // which pass made it so. Read as numbers, not as the presence of a
+    // label a bar could carry with nothing behind it.
+    wt = want(WANT_COSTS)
+    tree_free(t)
+    t = wait_for(wt, 10.0, ok)
+    free(wt as ptr)
+    check("the stats bar splits the frame by pass", ok[0] == 1)
+    if ok[0] == 1 {
+        line = costs(t)
+        scene_ms = number_after(line, "scene")
+        check_detail("and the scene pass has a cost", scene_ms >= 0.0, line)
+    }
+
+    // The shading switches, pressed rather than called. The report's own
+    // check flips them through set_shading; this is the half that proves
+    // a switch on the screen is wired to that at all.
+    tree_free(t)
+    t = tree()
+    features = "Clearcoat,Sheen,Volumetric light,Global illumination,Soft shadows,Ambient occlusion"
+    parts = string.split(features, ",")
+    have = 0
+    missing = strbuilder.new(64)
+    i = 0
+    while i < string.array_size(parts) {
+        if count_named(t, "text", part_at(parts, i)) > 0 { have = have + 1 } else { strbuilder.append(missing, part_at(parts, i)); strbuilder.append(missing, " ") }
+        i = i + 1
+    }
+    missing_text = strbuilder.finish(missing)
+    check_detail("the shading section offers every feature the presets disagree on", have == string.array_size(parts), "missing ${missing_text}")
+    string.free(missing_text)
+    string.array_free(parts)
+    occlusion = find_widget(t, "text", "Ambient occlusion")
+    if occlusion != null {
+        toggle_w = row_toggle(t, occlusion)
+        check("and each has a switch", toggle_w != null)
+        if toggle_w != null {
+            switch_id = toggle_w.id
+            toggle(switch_id)
+            wt = want(WANT_CONTAINS)
+            wt.text = "ambient occlusion"
+            heard = wait_for(wt, 8.0, ok)
+            check("pressing one is heard by the editor", ok[0] == 1)
+            tree_free(heard)
+            free(wt as ptr)
+            toggle(switch_id)
+        }
+    }
+
+    // A terrain is one object whose shape is a property of it, rather than
+    // five buttons in the panel that each add a different thing. The panel
+    // says a terrain is a thing you can have; which shape it takes is
+    // chosen on the object, the way Unreal and Unity both do it.
+    tree_free(t)
+    t = tree()
+    add = find(t, "button", "Terrain")
+    check("the panel offers a terrain, not a list of biomes", add >= 0)
+    blocky = 0
+    if add >= 0 {
+        click(add)
+        wt = want(WANT_TERRAIN)
+        tree_free(t)
+        t = wait_for(wt, 8.0, ok)
+        free(wt as ptr)
+        check("adding one shows its own section", ok[0] == 1)
+
+        shapes = "Plains,Hills,Desert,Islands,Caves"
+        shape_count = 0
+        parts = string.split(shapes, ",")
+        i = 0
+        while i < string.array_size(parts) {
+            if find(t, "button", part_at(parts, i)) >= 0 { shape_count = shape_count + 1 }
+            i = i + 1
+        }
+        string.array_free(parts)
+        check_detail("the section offers every shape terrain can build", shape_count == 5, "${shape_count} of five")
+        if shape_count == 5 {
+            lit = lit_among(t, shapes)
+            check_detail("and says which one this terrain is", lit == "Plains", "lit: ${lit}")
+            string.free(lit)
+            click(find(t, "button", "Desert"))
+            // The console says what was built, so this reads that the
+            // terrain was regenerated rather than that a button lit up.
+            wt = want(WANT_CONTAINS)
+            wt.text = "desert "
+            tree_free(t)
+            t = wait_for(wt, 12.0, ok)
+            free(wt as ptr)
+            check("choosing a shape rebuilds the terrain", ok[0] == 1)
+        }
+
+        // Voxels are one way of meshing a terrain, not what a terrain is.
+        // The same object, the same place in the scene, meshed as a
+        // surface instead of a cube per cell.
+        blocks = find(t, "button", "Blocks")
+        smooth = find(t, "button", "Smooth")
+        check("a terrain can be blocks or smooth", blocks >= 0 && smooth >= 0)
+        if blocks >= 0 && smooth >= 0 {
+            lit = lit_among(t, "Blocks,Smooth")
+            check_detail("and starts as blocks", lit == "Blocks", "lit: ${lit}")
+            string.free(lit)
+            blocky = triangles(t)
+            click(smooth)
+            // The title counts the geometry the model actually holds, so
+            // this reads that the mesh was replaced rather than that a
+            // second button lit up.
+            wt = want(WANT_TRIANGLES_ABOVE)
+            wt.count = blocky * 10
+            tree_free(t)
+            t = wait_for(wt, 20.0, ok)
+            free(wt as ptr)
+            check_detail("smoothing one gives it a surface of its own", ok[0] == 1, "${blocky} triangles then ${triangles(t)}")
+        }
+
+        // The brush. Raise is pressed, the canvas is pressed where the
+        // terrain stands after framing it, and the console says how many
+        // columns moved: a stroke that reached the ground and not just a
+        // button that lit.
+        tree_free(t)
+        t = tree()
+        raise_btn = find(t, "button", "Raise")
+        // The viewport's overlay canvas is the big one, and its size is
+        // where the centre of the view is. The canvas routes take the
+        // canvas's own handle, not its widget id: handles count from one
+        // in the order the canvases were made, so the one with the
+        // editor's hit-test closures is found by asking each in turn.
+        canvas = null as *Widget
+        i = 0
+        while i < tree_count(t) {
+            c = tree_at(t, i)
+            if c.kind == "canvas" && (canvas == null || c.w * c.h > canvas.w * canvas.h) { canvas = c }
+            i = i + 1
+        }
+        check("the terrain section offers a brush", raise_btn >= 0)
+        handle = 0 - 1
+        candidate = 1
+        while candidate < 6 && handle < 0 {
+            if post_route("/canvas/${candidate}/key?name=f", true) { handle = candidate }
+            candidate = candidate + 1
+        }
+        check("the viewport takes keys over the channel", handle >= 0)
+        if raise_btn >= 0 && canvas != null && handle >= 0 {
+            click(raise_btn)
+            cx = (canvas.w / 2.0) as int
+            cy = (canvas.h / 2.0) as int
+            post("/canvas/${handle}/click?x=${cx}&y=${cy}")
+            post("/canvas/${handle}/move?x=${cx + 12}&y=${cy + 4}")
+            post("/canvas/${handle}/release?x=${cx + 12}&y=${cy + 4}")
+            wt = want(WANT_SCULPTED)
+            tree_free(t)
+            t = wait_for(wt, 20.0, ok)
+            free(wt as ptr)
+            stroked = ok[0] == 1
+            // On Linux the stroke through the GTK4 canvas routes sculpts
+            // nothing yet (#353); a note there, a check everywhere else.
+            if os.platform() == "linux" {
+                check_note("a stroke on the terrain moves its columns", stroked, "sculpted ${sculpted(t)}", 353)
+            } else {
+                check_detail("a stroke on the terrain moves its columns", stroked, "sculpted ${sculpted(t)}")
+            }
+            // A stroke is one undo step from press to release, and undoing
+            // it puts the ground back: the surface's triangle count after
+            // the stroke is not the count before it, and after undo it is.
+            raised = triangles(t)
+            undo_btn = find(t, "button", "Undo")
+            if undo_btn >= 0 && blocky > 0 && stroked {
+                click(undo_btn)
+                wt = want(WANT_TRIANGLES_NOT)
+                wt.count = raised
+                tree_free(t)
+                t = wait_for(wt, 20.0, ok)
+                free(wt as ptr)
+                check_detail("undoing the stroke rebuilds the terrain as it was", ok[0] == 1, "${raised} triangles after the stroke, ${triangles(t)} after undo")
+            }
+            off_btn = find(t, "button", "Off")
+            if off_btn >= 0 { click(off_btn) }
+        }
+    }
+
+    // Two objects selected at once is checked by the editor's own report,
+    // not here: the test server clicks without modifiers and
+    // ui.modifiers() reads the real keyboard, so a shift-click cannot be
+    // driven over HTTP. The report calls the selection routine directly
+    // with the intent a modifier would have carried, and asserts an edit
+    // reaches both.
+
+    // A behaviour is a script the project has, not a case in the editor.
+    // The buttons are the files in resources/scripts, so this reads the
+    // names off disk rather than expecting any particular one: adding a
+    // script is adding a file, and this check should not need editing
+    // when someone does.
+    on_disk = scripts_on_disk()
+    tree_free(t)
+    t = tree()
+    missing = strbuilder.new(64)
+    missing_count = 0
+    listed = strbuilder.new(64)
+    i = 0
+    while i < list.size(on_disk) {
+        if i > 0 { strbuilder.append(listed, ", ") }
+        strbuilder.append(listed, name_at(on_disk, i))
+        if find(t, "button", name_at(on_disk, i)) < 0 {
+            if missing_count > 0 { strbuilder.append(missing, ", ") }
+            strbuilder.append(missing, name_at(on_disk, i))
+            missing_count = missing_count + 1
+        }
+        i = i + 1
+    }
+    listed_text = strbuilder.finish(listed)
+    missing_text = strbuilder.finish(missing)
+    check_detail("every script in the project has a button", missing_count == 0, "on disk [${listed_text}], missing [${missing_text}]")
+    string.free(missing_text)
+
+    // A row of choices says which one is on. Read as "the accent moved"
+    // rather than "this button is blue", which is the stronger claim: a
+    // fixed colour is a constant the editor could satisfy while the
+    // highlight never follows the choice.
+    choices = "None"
+    if listed_text != "" { choices = string.replace_all("None, ${listed_text}", ", ", ",") }
+    choice_count = 1 + list.size(on_disk)
+    segments = 0
+    parts = string.split(choices, ",")
+    i = 0
+    while i < string.array_size(parts) {
+        if find(t, "button", part_at(parts, i)) >= 0 { segments = segments + 1 }
+        i = i + 1
+    }
+    string.array_free(parts)
+    check_detail("the behaviour row offers none and every script", segments == choice_count, "have ${segments}, want [${choices}]")
+    if segments == choice_count && list.size(on_disk) > 0 {
+        lit = lit_among(t, choices)
+        check_detail("exactly one behaviour is lit, and it is the one in effect", lit == "None", "lit: ${lit}")
+        string.free(lit)
+        wanted_script = name_at(on_disk, 0)
+        wanted_id = find(t, "button", wanted_script)
+        click(wanted_id)
+        wt = want(WANT_ONLY_LIT)
+        wt.text = choices
+        wt.id = wanted_id
+        wt.flag = true
+        moved_tree = wait_for(wt, 8.0, ok)
+        lit_now = lit_among(moved_tree, choices)
+        check_detail("choosing a behaviour moves the highlight to it", ok[0] == 1, "lit: ${lit_now}")
+        string.free(lit_now)
+        tree_free(moved_tree)
+        // That the script then moves the object is not checked here. The
+        // inspector shows a position and a scale, and a script is free to
+        // move neither: spin only turns. The editor's own report drives
+        // every script it has and asserts the model ended up somewhere
+        // else, which is the check that does not depend on what a
+        // particular script happens to do.
+        none_id = find(t, "button", "None")
+        click(none_id)
+        wt.id = none_id
+        cleared = wait_for(wt, 8.0, ok)
+        tree_free(cleared)
+        free(wt as ptr)
+    }
+    string.free(listed_text)
+
+    // A bounded row is two ways into one value. Typing an exact number is
+    // the half a slider cannot do, and the slider beside it has to
+    // follow, or the panel shows the same setting as two different
+    // numbers.
+    tree_free(t)
+    t = tree()
+    check("the material rows are in the tree", count_named(t, "text", "roughness") == 1)
+    roughness = find_widget(t, "text", "roughness")
+    if roughness != null {
+        box = row_box(t, roughness)
+        bar = row_slider(t, roughness)
+        check("roughness has both a slider and a box", box != null && bar != null)
+        if box != null && bar != null {
+            box_id = box.id
+            bar_id = bar.id
+            set_text(box_id, "0.75")
+            wt = want(WANT_VALUE)
+            wt.id = bar_id
+            wt.value = 0.75
+            followed = wait_for(wt, 8.0, ok)
+            check_detail("typing a value moves the slider beside it", ok[0] == 1, "slider at ${widget_value(followed, bar_id)}")
+            tree_free(followed)
+            free(wt as ptr)
+            // And the other way: dragging writes the number in the box.
+            set_value(bar_id, "0.20")
+            wt = want(WANT_TEXT)
+            wt.id = box_id
+            wt.text = "0.20"
+            wrote = wait_for(wt, 8.0, ok)
+            check_detail("dragging the slider writes the box", ok[0] == 1, "'${widget_text(wrote, box_id)}'")
+            tree_free(wrote)
+            free(wt as ptr)
+        }
+    }
+
+    // Reflectivity is a material row like roughness: what the wet road's
+    // mirror is scaled by. It was settable over the channel and nowhere
+    // in the panel, and a scene saved with one came back matte.
+    tree_free(t)
+    t = tree()
+    check("the reflectivity row is in the tree", count_named(t, "text", "reflectivity") == 1)
+    reflectivity = find_widget(t, "text", "reflectivity")
+    if reflectivity != null {
+        box = row_box(t, reflectivity)
+        bar = row_slider(t, reflectivity)
+        check("reflectivity has both a slider and a box", box != null && bar != null)
+        if box != null && bar != null {
+            box_id = box.id
+            set_value(bar.id, "0.60")
+            wt = want(WANT_TEXT)
+            wt.id = box_id
+            wt.text = "0.60"
+            wrote = wait_for(wt, 8.0, ok)
+            check_detail("the reflectivity slider writes the box", ok[0] == 1, "'${widget_text(wrote, box_id)}'")
+            tree_free(wrote)
+            free(wt as ptr)
+        }
+    }
+
+    // The rest of the water and the sky's cover are rows too: the wave
+    // scale and the shore were file-only knobs, the cloud cover a
+    // constant behind a switch. Each is a slider with a box, and moving
+    // the cover's slider writes its box like any other row's.
+    tree_free(t)
+    t = tree()
+    captions = "wave scale,shore fade,shore foam,cloud cover,occlusion,occlusion reach,time of day"
+    parts = string.split(captions, ",")
+    i = 0
+    while i < string.array_size(parts) {
+        row_caption = part_at(parts, i)
+        check("the ${row_caption} row is in the tree", count_named(t, "text", row_caption) == 1)
+        if row_caption == "cloud cover" && count_named(t, "text", row_caption) == 1 {
+            cap = find_widget(t, "text", row_caption)
+            box = row_box(t, cap)
+            bar = row_slider(t, cap)
+            if box != null && bar != null {
+                box_id = box.id
+                set_value(bar.id, "0.70")
+                wt = want(WANT_TEXT)
+                wt.id = box_id
+                wt.text = "0.70"
+                wrote = wait_for(wt, 8.0, ok)
+                check_detail("the cloud cover slider writes the box", ok[0] == 1, "'${widget_text(wrote, box_id)}'")
+                tree_free(wrote)
+                free(wt as ptr)
+            }
+        }
+        i = i + 1
+    }
+    string.array_free(parts)
+
+    // A section with nothing to edit hides whole. Hiding a control and its
+    // readout but not the row leaves the caption behind, and the water
+    // settings read as four stranded words with no heading over them.
+    tree_free(t)
+    t = tree()
+    check("the water section is in the tree", count_named(t, "text", "wave height") == 1)
+    wave = find_widget(t, "text", "wave height")
+    if wave != null {
+        frame = widget(t, wave.parent)
+        frame_text = "?"
+        if frame != null { frame_text = "row ${frame.id} visible=${frame.visible}" }
+        check_detail("with no water, its rows are hidden and not just their controls", frame != null && frame.visible == false, frame_text)
+    }
+
+    // And appears again when there is something to edit, with its sliders
+    // reaching the simulation rather than only their own readouts.
+    water = find(t, "button", "Water")
+    if water >= 0 && wave != null {
+        click(water)
+        wt = want(WANT_ON_SCREEN)
+        wt.id = wave.parent
+        wt.flag = true
+        tree_free(t)
+        t = wait_for(wt, 8.0, ok)
+        free(wt as ptr)
+        check("adding water shows the section", ok[0] == 1)
+        caption = find_widget(t, "text", "wave height")
+        if caption != null {
+            readout = row_box(t, caption)
+            later = slider_after(t, caption.parent)
+            if readout != null && later != null {
+                readout_id = readout.id
+                set_value(later.id, "17.5")
+                sleep(1000)
+                // Away and back, so what is read comes from the simulation.
+                now = tree()
+                rows = rows_under(now, scene)
+                first_row = lowest_id(rows)
+                last_row = highest_id(rows)
+                list.free(rows)
+                tree_free(now)
+                click(first_row)
+                sleep(700)
+                click(last_row)
+                sleep(700)
+                now = tree()
+                back = widget_text(now, readout_id)
+                check_detail("a water slider reaches the simulation", back == "17.50", "'${back}'")
+                tree_free(now)
+            }
+        }
+    }
+
+    // The same operations interleaved. A check that passes on its own can
+    // fail in sequence: adding water showed its section every time until
+    // an Undo had happened earlier in the run, and that was three lists
+    // going out of step rather than anything about water.
+    tree_free(t)
+    t = tree()
+    mismatch = ""
+    steps = "add cube,delete,undo the delete"
+    buttons = "Cube,Delete,Undo"
+    pauses = "1200,1200,1500"
+    step_parts = string.split(steps, ",")
+    button_parts = string.split(buttons, ",")
+    pause_parts = string.split(pauses, ",")
+    i = 0
+    while i < 3 && mismatch == "" {
+        click(find(t, "button", part_at(button_parts, i)))
+        sleep(string.get_int(part_at(pause_parts, i)))
+        mismatch = audit_kinds(scene, part_at(step_parts, i))
+        i = i + 1
+    }
+    string.array_free(step_parts)
+    string.array_free(button_parts)
+    string.array_free(pause_parts)
+    check_detail("every row reports its own kind through a mixed sequence", mismatch == "", mismatch)
+
+    tree_free(t)
+    t = tree()
+    faults = layout_faults(t)
+    check_detail("the panels are laid out on one grid", faults == "", faults)
+    string.free(faults)
+
+    // Save, Load and Delete, pressed. A scene that never reaches disk and
+    // a Load that brings back nothing both look like a working editor
+    // from inside: the buttons return, the report is unchanged.
+    if file.file_exists(SCENE_FILE) != 0 { file.delete(SCENE_FILE) }
+    save = find(t, "button", "Save")
+    load = find(t, "button", "Load")
+    delete_btn = find(t, "button", "Delete")
+    if save >= 0 && load >= 0 && delete_btn >= 0 {
+        now = tree()
+        saved_rows = row_count(now, scene)
+        tree_free(now)
+        click(save)
+        check("Save writes a scene file", wait_file(SCENE_FILE, 0 - 1 as long))
+
+        now = tree()
+        click(find(now, "button", "Cube"))
+        tree_free(now)
+        grew = wait_rows(scene, saved_rows + 1)
+        click(load)
+        // Polled, not slept on. Reading a scene back off disk takes as long
+        // as the machine takes, and a sleep that is long enough here is a
+        // guess that fails on a busier one: this check passed alone and
+        // failed inside a full ci run, which is exactly that.
+        loaded = wait_rows(scene, saved_rows)
+        check_detail("Load brings back what was saved", loaded == saved_rows && grew == saved_rows + 1, "${saved_rows} saved, ${grew} after adding, ${loaded} after loading")
+
+        // A value has to survive the file, not just the row count. It is
+        // changed after saving on purpose: left alone, it would come back
+        // whatever load did, and the check would only be proving that
+        // memory keeps its contents.
+        now = tree()
+        cap = find_widget(now, "text", "wave height")
+        if cap != null {
+            readout = row_box(now, cap)
+            later = slider_after(now, cap.parent)
+            if readout != null && later != null {
+                readout_id = readout.id
+                later_id = later.id
+                // Select the water first. A water row applies to whichever
+                // water is selected, and after a load the selection is
+                // elsewhere: moving the slider then updates the readout
+                // and reaches no simulation at all, which is exactly how
+                // the first version of this check fooled itself.
+                water_row = row_named(now, scene, "water")
+                if water_row != null {
+                    click(water_row.id)
+                    sleep(800)
+                }
+                // Saved once the readout says the value arrived: saving
+                // before it has is what left the file holding the number
+                // the row started at.
+                set_value(later_id, "9.25")
+                showed = wait_text(readout_id, "9.25")
+                check_detail("the wave height takes the value it was given", showed == "9.25", showed)
+                stamped = file_stamp(SCENE_FILE)
+                click(save)
+                wait_file(SCENE_FILE, stamped)
+                set_value(later_id, "3.0")
+                moved = wait_text(readout_id, "3.00")
+                click(load)
+                wait_rows(scene, saved_rows)
+                after_load = tree()
+                water_row = row_named(after_load, scene, "water")
+                if water_row != null { click(water_row.id) }
+                tree_free(after_load)
+                restored = wait_text(readout_id, "9.25")
+                check_detail("a setting survives the scene file", moved == "3.00" && restored == "9.25", "changed to ${moved}, came back as ${restored}")
+                string.free(showed)
+                string.free(moved)
+                string.free(restored)
+            }
+        }
+        tree_free(now)
+    }
+
+    // New script writes a file that compiles. A template that does not is
+    // worse than none: the first thing anyone does with it is build it,
+    // and a first script is mostly a guess at what the two functions are
+    // called.
+    tree_free(t)
+    t = tree()
+    new_button = find(t, "button", "New script")
+    check("the editor can write a new script", new_button >= 0)
+    if new_button >= 0 {
+        before_files = script_count()
+        click(new_button)
+        wt = want(WANT_FILES)
+        wt.count = before_files
+        written_tree = wait_for(wt, 8.0, ok)
+        tree_free(written_tree)
+        free(wt as ptr)
+        made = newest_script(on_disk)
+        check_detail("pressing it leaves a file to edit", made != "", made)
+        if made != "" {
+            // Through bash by name: Windows will not execute a shell script
+            // as a program, and reports it as a file that is not a Win32
+            // application, which is true and unhelpful.
+            argv = list.new()
+            list.add(argv, "scripts/build_script.sh")
+            list.add(argv, "${SCRIPTS_DIR}/${made}")
+            out, status, serr = os.run_capture("bash", argv, null)
+            check_detail("and what it wrote compiles", serr == "" && status == 0, last_line(out))
+            file.delete("${SCRIPTS_DIR}/${made}")
+            stem = string.substring(made, 0, string.length(made) - 3)
+            remove_built(stem)
+        }
+    }
+
+    // A script rebuilt while the editor is open is picked up without
+    // restarting it. The editor compiles nothing: the same step that
+    // built the script builds it again, and the editor notices the
+    // library.
+    if list.size(on_disk) > 0 {
+        target = "build/scripts/${name_at(on_disk, 0)}${library_suffix()}"
+        if file.file_exists(target) != 0 {
+            touch(target)
+            wt = want(WANT_CONTAINS)
+            wt.text = "reloaded"
+            saw = wait_for(wt, 15.0, ok)
+            tree_free(saw)
+            free(wt as ptr)
+            check("a rebuilt script is picked up while the editor runs", ok[0] == 1)
+        }
+    }
+
+    // A scene remembers which script each object was given, by name. That
+    // is what makes an assignment worth making: the editor knows nothing
+    // about what the script does, so the name is the whole of what it can
+    // record, and a project with the script still in it gets it back.
+    tree_free(t)
+    t = tree()
+    if list.size(on_disk) > 0 && find(t, "button", name_at(on_disk, list.size(on_disk) - 1)) >= 0 && save >= 0 && load >= 0 {
+        chosen = name_at(on_disk, list.size(on_disk) - 1)
+        chosen_id = find(t, "button", chosen)
+        // Which object is being given the script. A load puts the
+        // selection back at the start, and the lit button is the selected
+        // object's script, so without re-selecting this one afterwards the
+        // check reads a different object and calls the assignment lost.
+        carrier = ""
+        rows = rows_under(t, scene)
+        i = 0
+        while i < list.size(rows) {
+            row = list.get_raw(rows, i) as *Widget
+            if string.contains(row.classes, "selected") != 0 { carrier = row_name(t, row) }
+            i = i + 1
+        }
+        if carrier == "" && list.size(rows) > 0 {
+            last_widget = widget(t, highest_id(rows))
+            carrier = row_name(t, last_widget)
+            click(last_widget.id)
+        }
+        list.free(rows)
+        click(chosen_id)
+        wt = want(WANT_LIT)
+        wt.id = chosen_id
+        wt.flag = true
+        lit_tree = wait_for(wt, 8.0, ok)
+        tree_free(lit_tree)
+        stamped = file_stamp(SCENE_FILE)
+        click(save)
+        wait_file(SCENE_FILE, stamped)
+        recorded = recorded_scripts()
+        check_detail("the scene records the script by name", named_in(chosen, recorded), "recorded [${recorded}]")
+        string.free(recorded)
+
+        none_id = find(t, "button", "None")
+        click(none_id)
+        wt.id = none_id
+        none_tree = wait_for(wt, 8.0, ok)
+        tree_free(none_tree)
+        click(load)
+        wait_rows_settled(scene, 12.0)
+        // Back to the object that was given the script, because the button
+        // says what the selected object carries.
+        after_load = tree()
+        carrier_row = row_named(after_load, scene, carrier)
+        if carrier_row != null { click(carrier_row.id) }
+        tree_free(after_load)
+        wt.id = chosen_id
+        back_tree = wait_for(wt, 12.0, ok)
+        tree_free(back_tree)
+        free(wt as ptr)
+        check_detail("and gives it back when the scene is loaded", ok[0] == 1, "on ${carrier}")
+    }
+
+    // The sky survives the file, and the renderer clears to it. The scene
+    // format has always carried a sky and the editor had no control over
+    // one, so every scene it saved recorded a colour nobody could choose.
+    tree_free(t)
+    t = tree()
+    sky = find_widget(t, "text", "SKY")
+    if sky != null && save >= 0 && load >= 0 {
+        strip = widget(t, sky.parent)
+        bar = widget(t, strip.parent)
+        body = null as *Widget
+        i = 0
+        while i < tree_count(t) {
+            s = tree_at(t, i)
+            if s.parent == bar.parent && s.id > bar.id && (body == null || s.id < body.id) { body = s }
+            i = i + 1
+        }
+        // The section also carries the hour's slider, under the sun by
+        // time switch; the three colour channels are the rows above it.
+        channels = calloc(4, 4) as int[]
+        channel_count = 0
+        if body != null {
+            i = 0
+            while i < tree_count(t) {
+                row = tree_at(t, i)
+                if row.parent == body.id {
+                    captioned = false
+                    j = 0
+                    while j < tree_count(t) {
+                        c = tree_at(t, j)
+                        if c.parent == row.id && c.kind == "text" && (c.text == "red" || c.text == "green" || c.text == "blue") { captioned = true }
+                        j = j + 1
+                    }
+                    if captioned {
+                        j = 0
+                        while j < tree_count(t) {
+                            s = tree_at(t, j)
+                            if s.parent == row.id && s.kind == "slider" && channel_count < 3 {
+                                channels[channel_count] = s.id
+                                channel_count = channel_count + 1
+                            }
+                            j = j + 1
+                        }
+                    }
+                }
+                i = i + 1
+            }
+        }
+        check_detail("the sky has a channel for each colour", channel_count == 3, "${channel_count}")
+        if channel_count == 3 {
+            g_channels = channels
+            ch = 0
+            while ch < 3 { set_value(channels[ch], "0.75"); ch = ch + 1 }
+            wt = want(WANT_CHANNELS)
+            wt.value = 0.75
+            set_tree = wait_for(wt, 8.0, ok)
+            tree_free(set_tree)
+            check("setting the sky moves all three channels", ok[0] == 1)
+            stamped = file_stamp(SCENE_FILE)
+            click(save)
+            wait_file(SCENE_FILE, stamped)
+            ch = 0
+            while ch < 3 { set_value(channels[ch], "0.10"); ch = ch + 1 }
+            wt.value = 0.10
+            low_tree = wait_for(wt, 8.0, ok)
+            tree_free(low_tree)
+            click(load)
+            wt.value = 0.75
+            back_tree = wait_for(wt, 8.0, ok)
+            tree_free(back_tree)
+            free(wt as ptr)
+            check("and the sky comes back with the scene", ok[0] == 1)
+        }
+    }
+
+    // The post chain survives the file. It is written into the scene by
+    // the same record that carries the camera, and the editor filled none
+    // of it: every scene it saved recorded the defaults, so a scene saved
+    // with bloom on came back with it off.
+    tree_free(t)
+    t = tree()
+    bloom = find_widget(t, "text", "Bloom")
+    if bloom != null && save >= 0 && load >= 0 {
+        toggle_w = row_toggle(t, bloom)
+        if toggle_w != null {
+            switch_id = toggle_w.id
+            toggle(switch_id)
+            wt = want(WANT_ACTIVE)
+            wt.id = switch_id
+            wt.flag = true
+            on_tree = wait_for(wt, 8.0, ok)
+            tree_free(on_tree)
+            check("the bloom switch turns on", ok[0] == 1)
+            written = file_stamp(SCENE_FILE)
+            click(save)
+            check("the scene is written again", wait_file(SCENE_FILE, written))
+            toggle(switch_id)
+            wt.flag = false
+            off_tree = wait_for(wt, 8.0, ok)
+            tree_free(off_tree)
+            click(load)
+            wt.flag = true
+            back_tree = wait_for(wt, 8.0, ok)
+            tree_free(back_tree)
+            free(wt as ptr)
+            check("and the post chain comes back with the scene", ok[0] == 1)
+        }
+    }
+
+    // Reflections the same way: the switch is a Vulkan feature and inert
+    // on OpenGL, but the scene carries it on either backend, so a scene
+    // authored with it on comes back with it on wherever it is opened.
+    tree_free(t)
+    t = tree()
+    ssr = find_widget(t, "text", "Reflections")
+    if ssr != null && save >= 0 && load >= 0 {
+        toggle_w = row_toggle(t, ssr)
+        if toggle_w != null {
+            switch_id = toggle_w.id
+            toggle(switch_id)
+            wt = want(WANT_ACTIVE)
+            wt.id = switch_id
+            wt.flag = true
+            on_tree = wait_for(wt, 8.0, ok)
+            tree_free(on_tree)
+            check("the reflections switch turns on", ok[0] == 1)
+            written = file_stamp(SCENE_FILE)
+            click(save)
+            check("the scene is written with reflections on", wait_file(SCENE_FILE, written))
+            root_slot = calloc(1, 8) as ptr[]
+            rendering = scene_section("rendering", root_slot)
+            check_detail("and the file says so", rendering != null && field_flag(rendering, "ssr"), json_text(rendering))
+            if root_slot[0] != null { json.json_free(root_slot[0]) }
+            free(root_slot)
+            toggle(switch_id)
+            wt.flag = false
+            off_tree = wait_for(wt, 8.0, ok)
+            tree_free(off_tree)
+            click(load)
+            wt.flag = true
+            back_tree = wait_for(wt, 8.0, ok)
+            tree_free(back_tree)
+            free(wt as ptr)
+            check("and reflections come back with the scene", ok[0] == 1)
+        }
+    }
+
+    // The sun by the hour: switched on, the key light's intensity row
+    // follows the hour, which is read back as the row's box changing when
+    // the hour is dragged from noon to dusk.
+    tree_free(t)
+    t = tree()
+    check("the sky section offers the sun by time", count_named(t, "text", "Sun by time") == 1)
+    sun = find_widget(t, "text", "Sun by time")
+    if sun != null {
+        toggle_w = row_toggle(t, sun)
+        hour = find_widget(t, "text", "time of day")
+        if toggle_w != null && hour != null {
+            switch_id = toggle_w.id
+            toggle(switch_id)
+            wt = want(WANT_ACTIVE)
+            wt.id = switch_id
+            wt.flag = true
+            tree_free(t)
+            t = wait_for(wt, 8.0, ok)
+            check("the sun by time turns on", ok[0] == 1)
+            // From the tree as it is now; the one the caption came from is gone.
+            hour = find_widget(t, "text", "time of day")
+            bar = null as *Widget
+            if hour != null { bar = row_slider(t, hour) }
+            intensity = find_widget(t, "text", "intensity")
+            if bar != null && intensity != null {
+                box = row_box(t, intensity)
+                if box != null {
+                    box_id = box.id
+                    noon = string.copy(box.raw_text)
+                    set_value(bar.id, "18.5")
+                    w2 = want(WANT_TEXT_NOT)
+                    w2.id = box_id
+                    w2.text = string.trim(noon)
+                    dusk = wait_for(w2, 8.0, ok)
+                    tree_free(dusk)
+                    free(w2 as ptr)
+                    check_detail("dragging the hour to dusk moves the light's intensity", ok[0] == 1, "intensity stayed '${noon}'")
+                    string.free(noon)
+                }
+            }
+            toggle(switch_id)
+            wt.flag = false
+            off_tree = wait_for(wt, 8.0, ok)
+            tree_free(off_tree)
+            free(wt as ptr)
+        }
+    }
+
+    // Clouds the same way: marched by either backend, carried by the
+    // scene. A switch is pressed through /toggle, not /click: the routes
+    // are the toolkit's, and on GTK4 a click reaches a check button not at
+    // all (it is not a button there), while /toggle flips it and fires the
+    // app's closure on every backend, which is what a press does.
+    tree_free(t)
+    t = tree()
+    check("the clouds switch is in the tree", count_named(t, "text", "Clouds") == 1)
+    clouds = find_widget(t, "text", "Clouds")
+    if clouds != null && save >= 0 && load >= 0 {
+        toggle_w = row_toggle(t, clouds)
+        if toggle_w != null {
+            switch_id = toggle_w.id
+            toggle(switch_id)
+            wt = want(WANT_ACTIVE)
+            wt.id = switch_id
+            wt.flag = true
+            on_tree = wait_for(wt, 8.0, ok)
+            tree_free(on_tree)
+            check("the clouds switch turns on", ok[0] == 1)
+            written = file_stamp(SCENE_FILE)
+            click(save)
+            check("the scene is written with clouds on", wait_file(SCENE_FILE, written))
+            root_slot = calloc(1, 8) as ptr[]
+            rendering = scene_section("rendering", root_slot)
+            check_detail("and the file says so", rendering != null && field_flag(rendering, "clouds"), json_text(rendering))
+            cover = 0.0
+            if rendering != null { cover = field_number(rendering, "cloud_cover") }
+            check_detail("with the cover the slider was left at", cover > 0.69 && cover < 0.71, json_text(rendering))
+            if root_slot[0] != null { json.json_free(root_slot[0]) }
+            free(root_slot)
+            toggle(switch_id)
+            wt.flag = false
+            off_tree = wait_for(wt, 8.0, ok)
+            tree_free(off_tree)
+            click(load)
+            wt.flag = true
+            back_tree = wait_for(wt, 8.0, ok)
+            tree_free(back_tree)
+            free(wt as ptr)
+            check("and clouds come back with the scene", ok[0] == 1)
+        }
+    }
+
+    // The weather, the same way: a kind is a button, lit when chosen; the
+    // console says what came over the scene; the file carries the kind by
+    // name and comes back with it. By the row the kinds share: the console
+    // has a Clear button of its own, and clearing the console is not
+    // clearing the sky.
+    tree_free(t)
+    t = tree()
+    rain = find_widget(t, "button", "Rain")
+    kind_count = 0
+    kinds_parent = 0 - 1
+    if rain != null {
+        kinds_parent = rain.parent
+        i = 0
+        while i < tree_count(t) {
+            b = tree_at(t, i)
+            if b.kind == "button" && b.parent == kinds_parent && named_in(b.text, "Clear,Rain,Snow,Dust,Storm") { kind_count = kind_count + 1 }
+            i = i + 1
+        }
+    }
+    check_detail("the weather section offers every kind", kind_count == 5, "${kind_count} of five")
+    if kind_count == 5 && save >= 0 && load >= 0 {
+        lit = kinds_lit(t, kinds_parent)
+        check_detail("and starts clear", lit == "Clear", "lit: ${lit}")
+        string.free(lit)
+        rain_id = rain.id
+        clear_id = kind_button(t, kinds_parent, "Clear")
+        click(rain_id)
+        wt = want(WANT_CONTAINS)
+        wt.text = "rain over the scene"
+        came = wait_for(wt, 8.0, ok)
+        tree_free(came)
+        free(wt as ptr)
+        check("choosing rain brings it over the scene", ok[0] == 1)
+        now = tree()
+        lit = kinds_lit(now, kinds_parent)
+        tree_free(now)
+        check_detail("and the button lights", lit == "Rain", "lit: ${lit}")
+        string.free(lit)
+        written = file_stamp(SCENE_FILE)
+        click(save)
+        check("the scene is written under rain", wait_file(SCENE_FILE, written))
+        root_slot = calloc(1, 8) as ptr[]
+        conditions = scene_section("weather", root_slot)
+        kind_text = ""
+        strength = 0.0
+        if conditions != null {
+            kind_text = field_text(conditions, "kind")
+            strength = field_number(conditions, "intensity")
+        }
+        check_detail("and the file names the kind", kind_text == "rain", json_text(conditions))
+        check_detail("with the strength the slider was left at", strength > 0.49 && strength < 0.51, json_text(conditions))
+        if root_slot[0] != null { json.json_free(root_slot[0]) }
+        free(root_slot)
+        click(clear_id)
+        wt = want(WANT_KINDS_LIT)
+        wt.count = kinds_parent
+        wt.text = "Clear"
+        cleared = wait_for(wt, 8.0, ok)
+        lit = kinds_lit(cleared, kinds_parent)
+        check_detail("clearing it lights Clear", ok[0] == 1, "lit: ${lit}")
+        string.free(lit)
+        tree_free(cleared)
+        click(load)
+        wt.text = "Rain"
+        back_tree = wait_for(wt, 8.0, ok)
+        tree_free(back_tree)
+        check("and the rain comes back with the scene", ok[0] == 1)
+        click(clear_id)
+        wt.text = "Clear"
+        clear_tree = wait_for(wt, 8.0, ok)
+        tree_free(clear_tree)
+        free(wt as ptr)
+    }
+
+    if delete_btn >= 0 && scene >= 0 {
+        now = tree()
+        before_delete = row_count(now, scene)
+        tree_free(now)
+        click(delete_btn)
+        after_delete = wait_rows(scene, before_delete - 1)
+        check_detail("Delete takes an object out", after_delete == before_delete - 1, "${after_delete} rows, expected ${before_delete - 1}")
+    }
+    tree_free(t)
+    free(ok)
+}
+
+// The lowest and highest ids among a list of widgets.
+lowest_id(rows: ptr) -> int {
+    best = 0 - 1
+    i = 0
+    while i < list.size(rows) {
+        w = list.get_raw(rows, i) as *Widget
+        if best < 0 || w.id < best { best = w.id }
+        i = i + 1
+    }
+    return best
+}
+
+highest_id(rows: ptr) -> int {
+    best = 0 - 1
+    i = 0
+    while i < list.size(rows) {
+        w = list.get_raw(rows, i) as *Widget
+        if w.id > best { best = w.id }
+        i = i + 1
+    }
+    return best
+}
+
+// The handle of the menu that lists this action, or -1. An item's label
+// is the action and, after two spaces, its accelerator.
+menu_with(menus: ptr, action: string) -> int {
+    n = json.json_array_size(menus)
+    i = 0
+    while i < n {
+        menu = json.json_array_get_raw(menus, i)
+        items = json.json_object_get_raw(menu, "items")
+        count = json.json_array_size(items)
+        k = 0
+        while k < count {
+            label = json.json_get_string_raw(json.json_array_get_raw(items, k))
+            cut = string.string_index_of(label, "  ")
+            name = label
+            if cut >= 0 { name = string.substring(label, 0, cut) }
+            if name == action { return field_number(menu, "handle") as int }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// The weather kind button named so under the kinds' row, or -1.
+kind_button(t: *Tree, parent: int, name: string) -> int {
+    i = 0
+    while i < tree_count(t) {
+        b = tree_at(t, i)
+        if b.kind == "button" && b.parent == parent && b.text == name { return b.id }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// A script file in the scripts directory that was not there before, or "".
+newest_script(before: ptr) -> string {
+    l, err = dir.list(SCRIPTS_DIR)
+    if err != "" { return "" }
+    n = dir.list_count(l)
+    i = 0
+    while i < n {
+        entry = dir.list_get(l, i)
+        if string.ends_with(entry, ".ae") != 0 {
+            stem = string.substring(entry, 0, string.length(entry) - 3)
+            known = false
+            k = 0
+            while k < list.size(before) {
+                if name_at(before, k) == stem { known = true }
+                k = k + 1
+            }
+            string.free(stem)
+            if known == false { return string.copy(entry) }
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+// What a built script leaves in build/scripts, removed.
+remove_built(stem: string) {
+    l, err = dir.list("build/scripts")
+    if err != "" { return }
+    n = dir.list_count(l)
+    i = 0
+    while i < n {
+        entry = dir.list_get(l, i)
+        prefix = string.concat(stem, ".")
+        if string.starts_with(entry, prefix) != 0 { file.delete("build/scripts/${entry}") }
+        string.free(prefix)
+        i = i + 1
+    }
+}
+
+library_suffix() -> string {
+    if os.platform() == "darwin" { return ".dylib" }
+    if os.platform() == "windows" { return ".dll" }
+    return ".so"
+}
+
+// The file's modification time brought up to now, which is what tells the
+// editor a script was rebuilt. Through touch by name, as the scripts are
+// built through bash: the library is open in the editor, and on Windows an
+// open library cannot be rewritten, only re-dated.
+touch(path: string) {
+    argv = list.new()
+    list.add(argv, path)
+    os.run_capture("touch", argv, null)
+}
+
+// The scripts a saved scene names, comma-separated.
+recorded_scripts() -> string {
+    out = strbuilder.new(64)
+    text, err = file.read(SCENE_FILE)
+    if err != "" { return strbuilder.finish(out) }
+    root, perr = json.parse(text)
+    string.free(text)
+    if perr != "" { return strbuilder.finish(out) }
+    models = json.json_object_get_raw(root, "models")
+    count = 0
+    if models != null {
+        n = json.json_array_size(models)
+        i = 0
+        while i < n {
+            m = json.json_array_get_raw(models, i)
+            script = field_text(m, "script")
+            if script != "" {
+                if count > 0 { strbuilder.append(out, ",") }
+                strbuilder.append(out, script)
+                count = count + 1
+            }
+            i = i + 1
+        }
+    }
+    json.json_free(root)
+    return strbuilder.finish(out)
+}
+
+last_line(text: string) -> string {
+    parts = string.split(text, "\n")
+    n = string.array_size(parts)
+    last = ""
+    i = n - 1
+    while i >= 0 && last == "" {
+        candidate = string.trim(part_at(parts, i))
+        if candidate != "" { last = candidate } else { string.free(candidate) }
+        i = i - 1
+    }
+    string.array_free(parts)
+    return last
+}

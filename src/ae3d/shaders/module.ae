@@ -12,7 +12,7 @@ exports (
     VERTEX_CROWD, VERTEX_CROWD_DEPTH,
     VERTEX_WATER, FRAGMENT_WATER,
     VERTEX_DEPTH, FRAGMENT_DEPTH,
-    VERTEX_SKYBOX, FRAGMENT_SKYBOX, FRAGMENT_SKYBOX_SOLID,
+    VERTEX_SKYBOX, FRAGMENT_SKYBOX,
     VERTEX_SCREEN, FRAGMENT_FXAA, FRAGMENT_BLOOM, FRAGMENT_PASSTHROUGH, FRAGMENT_SSR,
     default_shader, water_shader
 )
@@ -378,12 +378,17 @@ struct Light {
     float intensity;
     float ambientStrength;  // Configurable ambient strength
     float temperature;      // Color temperature in Kelvin (2000-10000)
-    int isDirectional;      // 0 = point light, 1 = directional light
-    vec3 direction;         // Direction for directional lights
+    int isDirectional;      // 0 = point light, 1 = directional light, 2 = spot light
+    vec3 direction;         // Direction for directional lights; the axis of a spot light's cone
     // Attenuation factors for point lights
     float constantAtten;
     float linearAtten;
     float quadraticAtten;
+    // A spot light's cone: the cosine of the angle off its axis where its
+    // light is gone, and the cosine where it is whole; the fall-off between
+    // them is smooth. A headlight is a point light with a cone.
+    float spotCosOuter;
+    float spotCosInner;
 };
 
 uniform Light lights[MAX_LIGHTS];
@@ -1030,7 +1035,7 @@ vec3 getGradient(int hash) {
 // the world, is the weather field: a fractal of tileable 2D value noise
 // gathered into banks by a slower one, a tile of CLOUD_TILE metres that
 // repeats without a seam. The sky reads it from the weather texture the
-// engine bakes from this very function (native/ae3d_cloudnoise.c); the
+// engine bakes from this very function (ae3d.cloudnoise); the
 // ground computes it here for its cloud shadow, so the shadow under a
 // cloud is the cloud. Both use the one hash, in integers, exact on both
 // backends.
@@ -1262,6 +1267,12 @@ vec3 direct_light(Light L, vec3 norm, vec3 viewDir, vec3 albedo, vec3 F0,
         float distance = length(lightVec);
         lightDir = lightVec / distance; // More precise than normalize()
         attenuation = 1.0 / (L.constantAtten + L.linearAtten * distance + L.quadraticAtten * distance * distance);
+        if (L.isDirectional == 2) {
+            // Off the cone's axis the light fades out, and past the outer
+            // angle there is none.
+            float onAxis = dot(-lightDir, normalize(L.direction));
+            attenuation *= smoothstep(L.spotCosOuter, L.spotCosInner, onAxis);
+        }
     }
 
     vec3 halfwayDir = normalize(lightDir + viewDir);
@@ -1465,18 +1476,21 @@ void main() {
         if (i >= lightCount) {
             break;
         }
-        if (lights[i].isDirectional == 0) {
+        if (lights[i].isDirectional != 1) {
             // Past the lamp's reach it gives this pixel less than a
             // hundredth of its light: not worth the shading, nor a ray.
             vec3 gap = lights[i].position - FragPos;
             if (dot(gap, gap) * lights[i].quadraticAtten > 64.0) continue;
+            // Nor outside a spot light's cone.
+            if (lights[i].isDirectional == 2 &&
+                dot(normalize(-gap), normalize(lights[i].direction)) < lights[i].spotCosOuter) continue;
         }
         vec3 lit = direct_light(lights[i], norm, viewDir, albedo, F0, NdotV, adjustedRoughness);
         float shade = shaded;
 #ifdef AE3D_RAY_QUERY
         // By ray a lamp throws its own shadow, where it reaches: past the
         // lamp's fall-off there is no light to shadow and no ray is cast.
-        if (i > 0 && rayShadows == 1 && enableShadows && lights[i].isDirectional == 0) {
+        if (i > 0 && rayShadows == 1 && enableShadows && lights[i].isDirectional != 1) {
             if (dot(lit, vec3(0.333)) > 0.002) shade = ray_lamp_factor(lights[i].position, rayLampRadius);
             else shade = 1.0;
         }
@@ -2488,7 +2502,7 @@ uniform vec3 skyOvercastColor;
 // the world, is the weather field: a fractal of tileable 2D value noise
 // gathered into banks by a slower one, a tile of CLOUD_TILE metres that
 // repeats without a seam. The sky reads it from the weather texture the
-// engine bakes from this very function (native/ae3d_cloudnoise.c); the
+// engine bakes from this very function (ae3d.cloudnoise); the
 // ground computes it here for its cloud shadow, so the shadow under a
 // cloud is the cloud. Both use the one hash, in integers, exact on both
 // backends.
@@ -2815,17 +2829,6 @@ void main() {
     sky = sky * (1.0 - clouds.a) + clouds.rgb;
     FragColor = vec4(sky, 1.0);
     outVelocity = velocity(ClipNow, ClipPrev, vec2(0.0));
-}
-GLSL_END
-
-const FRAGMENT_SKYBOX_SOLID = <<GLSL_END
-#version 330 core
-out vec4 FragColor;
-
-uniform vec3 skyColor;
-
-void main() {
-    FragColor = vec4(skyColor, 1.0);
 }
 GLSL_END
 

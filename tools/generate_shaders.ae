@@ -1,0 +1,1390 @@
+// Generate the Vulkan shaders and their uniform block from the OpenGL sources.
+//
+//     ./build.sh tools/generate_shaders.ae
+//     ./build/generate_shaders            # regenerate, compile, verify against glslang
+//     ./build/generate_shaders --check    # is what is checked in what the source produces?
+//
+// The OpenGL GLSL in src/ae3d/shaders/module.ae is the single source of
+// truth. The Vulkan variants differ only in how uniforms are declared,
+// so they are derived rather than written twice: a second copy of a
+// seven-hundred-line lighting model would drift the first time either
+// was touched.
+//
+// The same declarations produce the std140 uniform block the shader
+// reads, the C struct the renderer fills and the Aether module the
+// renderer names uniforms through, so the three cannot disagree about
+// layout; glslang is asked for its own offsets and the generator stops
+// on the first disagreement.
+//
+// Run from the repository root, as build.sh and ci.sh do. Needs
+// glslangValidator on PATH except for --check, which compares text.
+import std.os
+import std.file
+import std.list
+import std.string
+import std.strbuilder
+import std.mem
+import ae3d.blob
+
+const SHADERS = "src/ae3d/shaders/module.ae"
+const OUT_DIR = "native/gpu/shaders"
+const GPU = "native/gpu"
+const VKSCENE = "src/ae3d/vkscene/module.ae"
+const GENERATOR = "tools/generate_shaders.ae"
+
+const MAX_LIGHTS = 16
+const ARRAY_STRIDE = 16
+
+// --- text helpers ----------------------------------------------------------------------------------------------
+
+is_word_char(c: int) -> bool {
+    if c >= 48 && c <= 57 { return true }
+    if c >= 65 && c <= 90 { return true }
+    if c >= 97 && c <= 122 { return true }
+    return c == 95
+}
+
+is_digit(c: int) -> bool { return c >= 48 && c <= 57 }
+
+// The characters Python's \s matches in ASCII.
+is_space(c: int) -> bool { return c == 32 || c == 9 || c == 10 || c == 13 || c == 12 || c == 11 }
+
+// A line's characters, by an explicit length so a scan is not a strlen a character.
+struct Cursor {
+    text: string
+    length: int
+}
+
+at(c: *Cursor, i: int) -> int {
+    if i < 0 || i >= c.length { return 0 }
+    return string.string_char_at_n(c.text, c.length, i)
+}
+
+cursor(text: string) -> Cursor { return Cursor { text: text, length: string.length(text) } }
+
+skip_space(c: *Cursor, i: int) -> int {
+    while i < c.length && is_space(at(c, i)) { i = i + 1 }
+    return i
+}
+
+word_end(c: *Cursor, i: int) -> int {
+    while i < c.length && is_word_char(at(c, i)) { i = i + 1 }
+    return i
+}
+
+digits_end(c: *Cursor, i: int) -> int {
+    while i < c.length && is_digit(at(c, i)) { i = i + 1 }
+    return i
+}
+
+// Whether `word` sits at `i` followed by at least one space.
+word_at(c: *Cursor, i: int, word: string) -> bool {
+    n = string.length(word)
+    k = 0
+    while k < n {
+        if at(c, i + k) != string.char_at(word, k) { return false }
+        k = k + 1
+    }
+    return true
+}
+
+slice(c: *Cursor, start: int, end: int) -> string { return string.string_substring_n(c.text, c.length, start, end) }
+
+// The text's lines, split on newlines; the last element is what follows
+// the final newline (empty when the text ends with one), so a join on
+// newlines gives the text back.
+split_lines(text: string) -> ptr { return string.split(text, "\n") }
+
+// --- the source ------------------------------------------------------------------------------------------------
+
+// A GLSL block out of the shaders module: the lines between
+// `const NAME = <<GLSL_END` and the `GLSL_END` that ends it, each with
+// its newline.
+block(source: string, name: string) -> string {
+    header = string.concat("const ", name)
+    header2 = string.concat(header, " = <<GLSL_END")
+    parts = split_lines(source)
+    n = string.array_size(parts)
+    i = 0
+    while i < n && string.equals(line_at(parts, i), header2) == 0 { i = i + 1 }
+    if i == n {
+        println("generate: ${name} not found in ${SHADERS}")
+        os.exit(1)
+    }
+    b = strbuilder.new(16384)
+    i = i + 1
+    while i < n {
+        line = line_at(parts, i)
+        if string.equals(line, "GLSL_END") != 0 { break }
+        strbuilder.append(b, line)
+        strbuilder.append(b, "\n")
+        i = i + 1
+    }
+    string.array_free(parts)
+    string.free(header)
+    string.free(header2)
+    text = strbuilder.finish(b)
+    resolved = resolve_bones(text)
+    string.free(text)
+    return resolved
+}
+
+// The bone array is sized by a #define, and everything downstream reads
+// array sizes as literals: the uniform block generated from them, the C
+// offsets generated beside it, and the scan that lifts a uniform into
+// the block. The number is taken from the GLSL rather than repeated
+// here, so the shader stays the one place it is written down.
+resolve_bones(text: string) -> string {
+    parts = split_lines(text)
+    n = string.array_size(parts)
+    count = ""
+    i = 0
+    while i < n {
+        line = line_at(parts, i)
+        if string.starts_with(line, "#define MAX_BONES ") != 0 {
+            c = cursor(line)
+            start = 18
+            end = digits_end(&c, start)
+            if end > start && end == c.length {
+                if count == "" { count = slice(&c, start, end) }
+            }
+        }
+        i = i + 1
+    }
+    if count == "" {
+        string.array_free(parts)
+        return string.copy(text)
+    }
+    b = strbuilder.new(string.length(text))
+    i = 0
+    first = true
+    while i < n {
+        line = line_at(parts, i)
+        dropped = false
+        if string.starts_with(line, "#define MAX_BONES ") != 0 {
+            c = cursor(line)
+            end = digits_end(&c, 18)
+            if end > 18 && end == c.length { dropped = true }
+        }
+        if dropped == false {
+            if first == false { strbuilder.append(b, "\n") }
+            strbuilder.append(b, line)
+            first = false
+        }
+        i = i + 1
+    }
+    string.array_free(parts)
+    joined = strbuilder.finish(b)
+    out = string.replace_all(joined, "MAX_BONES", count)
+    string.free(joined)
+    string.free(count)
+    return out
+}
+
+// --- declarations ----------------------------------------------------------------------------------------------
+
+// A uniform or a struct member: its GLSL type, its name and, for an
+// array, its count (0 otherwise).
+struct Member {
+    kind: string
+    name: string
+    count: int
+}
+
+// Its own copies of the names: a caller's local is released when the
+// caller reassigns or leaves it, and the member outlives both.
+member(kind: string, name: string, count: int) -> *Member {
+    m = heap_member()
+    m.kind = string.copy(kind)
+    m.name = string.copy(name)
+    m.count = count
+    return m
+}
+
+extern calloc(count: int, size: int) -> ptr
+heap_member() -> *Member { return calloc(1, sizeof(Member)) as *Member }
+
+is_scalar(kind: string) -> bool { return kind == "float" || kind == "int" || kind == "bool" }
+is_vector(kind: string) -> bool { return kind == "vec2" || kind == "vec3" || kind == "vec4" || kind == "mat4" }
+is_block_kind(kind: string) -> bool { return is_scalar(kind) || is_vector(kind) }
+is_light_kind(kind: string) -> bool { return is_scalar(kind) || kind == "vec2" || kind == "vec3" || kind == "vec4" }
+
+// `uniform <kind> <name>[ [N] ];` at the start of a line: the kind, the
+// name, the count, and where the `;` ends. Nothing when the line is
+// something else.
+parse_uniform(line: string, out: *Member) -> int {
+    c = cursor(line)
+    if string.starts_with(line, "uniform") == 0 { return 0 - 1 }
+    i = skip_space(&c, 7)
+    if i == 7 { return 0 - 1 }
+    k = word_end(&c, i)
+    kind = slice(&c, i, k)
+    if is_block_kind(kind) == false || skip_space(&c, k) == k { string.free(kind); return 0 - 1 }
+    i = skip_space(&c, k)
+    n = word_end(&c, i)
+    if n == i { string.free(kind); return 0 - 1 }
+    name = slice(&c, i, n)
+    i = skip_space(&c, n)
+    count = 0
+    if at(&c, i) == 91 {
+        d = digits_end(&c, i + 1)
+        if d == i + 1 || at(&c, d) != 93 { string.free(kind); string.free(name); return 0 - 1 }
+        digits = slice(&c, i + 1, d)
+        count = string.get_int(digits)
+        string.free(digits)
+        i = skip_space(&c, d + 1)
+    }
+    if at(&c, i) != 59 { string.free(kind); string.free(name); return 0 - 1 }
+    out.kind = kind
+    out.name = name
+    out.count = count
+    return i + 1
+}
+
+// `uniform sampler2D|3D|2DMS <name>;` at the start of a line.
+is_sampler_uniform(line: string) -> bool {
+    c = cursor(line)
+    if string.starts_with(line, "uniform") == 0 { return false }
+    i = skip_space(&c, 7)
+    if i == 7 { return false }
+    k = word_end(&c, i)
+    kind = slice(&c, i, k)
+    ok = kind == "sampler2D" || kind == "sampler3D" || kind == "sampler2DMS"
+    string.free(kind)
+    if ok == false || skip_space(&c, k) == k { return false }
+    i = skip_space(&c, k)
+    n = word_end(&c, i)
+    if n == i { return false }
+    i = skip_space(&c, n)
+    return at(&c, i) == 59
+}
+
+// `<keyword> <kind> <name>;` at the start of a line, for `in` and `out`:
+// the kind and the name, and where the `;` ends.
+parse_varying(line: string, keyword: string, out: *Member) -> int {
+    c = cursor(line)
+    if string.starts_with(line, keyword) == 0 { return 0 - 1 }
+    k0 = string.length(keyword)
+    i = skip_space(&c, k0)
+    if i == k0 { return 0 - 1 }
+    k = word_end(&c, i)
+    if k == i { return 0 - 1 }
+    kind = slice(&c, i, k)
+    i = skip_space(&c, k)
+    if i == k { string.free(kind); return 0 - 1 }
+    n = word_end(&c, i)
+    if n == i { string.free(kind); return 0 - 1 }
+    name = slice(&c, i, n)
+    i = skip_space(&c, n)
+    if at(&c, i) != 59 { string.free(kind); string.free(name); return 0 - 1 }
+    out.kind = kind
+    out.name = name
+    out.count = 0
+    return i + 1
+}
+
+// Every non-sampler uniform in a source, arrays included, appended to
+// `members`. The light array is separate.
+collect_uniforms(source: string, members: ptr) {
+    parts = split_lines(source)
+    n = string.array_size(parts)
+    i = 0
+    while i < n {
+        m = heap_member()
+        if parse_uniform(line_at(parts, i), m) >= 0 {
+            list.add_raw(members, member_ptr(m))
+        } else {
+            free_member(m)
+        }
+        i = i + 1
+    }
+    string.array_free(parts)
+}
+
+extern free(p: ptr)
+
+// The language converts between a pointer and a typed pointer or a
+// string at a call or a return, not through `as`.
+line_at(parts: ptr, i: int) -> string { return string.string_array_get(parts, i) }
+string_at(l: ptr, i: int) -> string { return list.get_raw(l, i) }
+member_ptr(m: *Member) -> ptr { return m }
+placed_ptr(p: *Placed) -> ptr { return p }
+derived_ptr(d: *Derived) -> ptr { return d }
+output_ptr(o: *Output) -> ptr { return o }
+free_member(m: *Member) { free(member_ptr(m)) }
+free_ints(a: int[]) { free(ints_ptr(a)) }
+ints_ptr(a: int[]) -> ptr { return a }
+
+// The Light struct's members, in declaration order: every `<kind> <name>;`
+// between `struct Light {` and the `};` that closes it. Null when the
+// source has no Light.
+light_struct(source: string) -> ptr {
+    start = string.string_index_of(source, "struct Light {")
+    if start < 0 { return null }
+    end = string.string_index_of_from(source, "};", start)
+    if end < 0 { return null }
+    body = string.substring(source, start + 14, end)
+    c = cursor(body)
+    members = list.new()
+    i = 0
+    while i < c.length {
+        if is_word_char(at(&c, i)) && (i == 0 || is_word_char(at(&c, i - 1)) == false) {
+            k = word_end(&c, i)
+            kind = slice(&c, i, k)
+            taken = false
+            if is_light_kind(kind) && skip_space(&c, k) > k {
+                j = skip_space(&c, k)
+                n = word_end(&c, j)
+                if n > j {
+                    s = skip_space(&c, n)
+                    if at(&c, s) == 59 {
+                        list.add_raw(members, member_ptr(member(kind, slice(&c, j, n), 0)))
+                        taken = true
+                        i = s + 1
+                    }
+                }
+            }
+            if taken == false { string.free(kind); i = k }
+        } else {
+            i = i + 1
+        }
+    }
+    string.free(body)
+    return members
+}
+
+// --- std140 ----------------------------------------------------------------------------------------------------
+
+// A member placed in the block: its byte offset.
+struct Placed {
+    name: string
+    kind: string
+    offset: int
+}
+
+alignment_of(kind: string) -> int {
+    if kind == "vec2" { return 8 }
+    if kind == "vec3" || kind == "vec4" || kind == "mat4" { return 16 }
+    return 4
+}
+
+size_of(kind: string) -> int {
+    if kind == "vec2" { return 8 }
+    if kind == "vec3" { return 12 }
+    if kind == "vec4" { return 16 }
+    if kind == "mat4" { return 64 }
+    return 4
+}
+
+round16(v: int) -> int { return (v + 15) / 16 * 16 }
+
+// std140 offsets from `base`, appended to `placed`; the total size, rounded to 16.
+//
+// A member may carry a count. An array's element stride is the element
+// rounded up to 16, so a run of floats or vec3s costs 16 bytes each --
+// which is why the wave tables cannot be written as a flat run of floats
+// -- and a run of mat4s costs the 64 each of them already is.
+std140(members: ptr, base: int, placed: ptr) -> int {
+    offset = base
+    n = list.size(members)
+    i = 0
+    while i < n {
+        m = list.get_raw(members, i) as *Member
+        align = alignment_of(m.kind)
+        size = size_of(m.kind)
+        if m.count > 0 {
+            align = ARRAY_STRIDE
+            element = round16(size)
+            if element < ARRAY_STRIDE { element = ARRAY_STRIDE }
+            size = element * m.count
+        }
+        offset = (offset + align - 1) / align * align
+        p = calloc(1, sizeof(Placed)) as *Placed
+        p.name = m.name
+        p.kind = m.kind
+        p.offset = offset
+        list.add_raw(placed, placed_ptr(p))
+        offset = offset + size
+        i = i + 1
+    }
+    return round16(offset)
+}
+
+// std140 offsets within one Light, and the array stride: the struct's
+// size rounded up to 16, which is what makes the C side able to step
+// through the array with one multiply.
+light_layout(light_members: ptr, placed: ptr) -> int {
+    return round16(std140(light_members, 0, placed))
+}
+
+// How many bytes the light array occupies at the head of the block.
+light_bytes(light_members: ptr) -> int {
+    if light_members == null { return 0 }
+    scratch = list.new()
+    stride = light_layout(light_members, scratch)
+    free_placed(scratch)
+    return stride * MAX_LIGHTS
+}
+
+free_placed(placed: ptr) {
+    n = list.size(placed)
+    i = 0
+    while i < n { free(list.get_raw(placed, i)); i = i + 1 }
+    list.free(placed)
+}
+
+// --- the rewrite -----------------------------------------------------------------------------------------------
+
+// `#version NNN core` at the start of a line becomes `#version 450`,
+// the rest of the line kept.
+rewrite_version(line: string) -> string {
+    c = cursor(line)
+    if string.starts_with(line, "#version") == 0 { return string.copy(line) }
+    i = skip_space(&c, 8)
+    if i == 8 { return string.copy(line) }
+    d = digits_end(&c, i)
+    if d == i { return string.copy(line) }
+    j = skip_space(&c, d)
+    if j == d || word_at(&c, j, "core") == false { return string.copy(line) }
+    rest = slice(&c, j + 4, c.length)
+    out = string.concat("#version 450", rest)
+    string.free(rest)
+    return out
+}
+
+// The struct and its array are re-emitted inside the block, so the
+// source's own declarations go: `#define MAX_LIGHTS n` lines, the first
+// `struct Light { ... };` and its newline, the `uniform Light lights[MAX_LIGHTS];` line.
+strip_light_declarations(text: string) -> string {
+    parts = split_lines(text)
+    n = string.array_size(parts)
+    b = strbuilder.new(string.length(text))
+    first = true
+    i = 0
+    while i < n {
+        line = line_at(parts, i)
+        drop = false
+        if string.starts_with(line, "#define MAX_LIGHTS ") != 0 {
+            c = cursor(line)
+            e = digits_end(&c, 19)
+            if e > 19 && e == c.length { drop = true }
+        }
+        if string.equals(line, "uniform Light lights[MAX_LIGHTS];") != 0 { drop = true }
+        if drop == false {
+            if first == false { strbuilder.append(b, "\n") }
+            strbuilder.append(b, line)
+            first = false
+        }
+        i = i + 1
+    }
+    string.array_free(parts)
+    joined = strbuilder.finish(b)
+    start = string.string_index_of(joined, "struct Light {")
+    if start < 0 { return joined }
+    end = string.string_index_of_from(joined, "};\n", start)
+    if end < 0 { return joined }
+    head = string.substring(joined, 0, start)
+    tail = string.substring(joined, end + 3, string.length(joined))
+    out = string.concat(head, tail)
+    string.free(head)
+    string.free(tail)
+    string.free(joined)
+    return out
+}
+
+// Every occurrence replaced. The callers assign the result back over
+// the text they passed, and that assignment releases the previous value:
+// a local that holds a heap string is freed when it is reassigned, so a
+// helper that freed its argument too would free it twice.
+replaced(text: string, old: string, new: string) -> string {
+    return string.replace_all(text, old, new)
+}
+
+// Whether a member with this kind and name is in the list; its index or -1.
+index_of_member(members: ptr, kind: string, name: string) -> int {
+    n = list.size(members)
+    i = 0
+    while i < n {
+        m = list.get_raw(members, i) as *Member
+        if m.kind == kind && m.name == name { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// Rewrite an OpenGL shader for Vulkan.
+//
+// The uniforms move into an UNNAMED block, so its members keep their
+// original names in global scope and every reference in the body still
+// resolves. Naming the block would mean rewriting each reference, and
+// the lighting model has function parameters that share a uniform's
+// name, so that rewrite cannot be done without scope analysis.
+//
+// `placed` receives the block's members with their offsets; the return
+// is the rewritten source and, through `size_out`, the block's size.
+to_vulkan(source: string, stage: string, members: ptr, samplers: ptr, varyings_in: ptr, varyings_out: ptr,
+          light_members: ptr, placed: ptr, size_out: int[]) -> string {
+    // The version line, the light declarations, the count.
+    parts = split_lines(source)
+    n = string.array_size(parts)
+    b = strbuilder.new(string.length(source))
+    i = 0
+    while i < n {
+        if i > 0 { strbuilder.append(b, "\n") }
+        v = rewrite_version(line_at(parts, i))
+        strbuilder.append(b, v)
+        string.free(v)
+        i = i + 1
+    }
+    string.array_free(parts)
+    versioned = strbuilder.finish(b)
+    text = strip_light_declarations(versioned)
+    string.free(versioned)
+    text = replaced(text, "MAX_LIGHTS", "16")
+
+    // OpenGL clip depth spans -1..1 and needs the half-scale; Vulkan clip
+    // depth is already the 0..1 the shadow map stores.
+    text = replaced(text, "return clipZ * 0.5 + 0.5;", "return clipZ;")
+    text = replaced(text, "return depth * 2.0 - 1.0;", "return depth;")
+    // OpenGL's screen y runs up, Vulkan's down: a normal built from the
+    // screen's axes comes out facing the other way.
+    text = replaced(text, "return 1.0; /* screen y up */", "return -1.0; /* screen y down */")
+
+    // The uniform lines go (the line stays, empty); the varyings take
+    // their locations; the fragment output is the one varying the source
+    // leaves unnumbered.
+    parts = split_lines(text)
+    n = string.array_size(parts)
+    b = strbuilder.new(string.length(text))
+    scratch = heap_member()
+    i = 0
+    while i < n {
+        line = line_at(parts, i)
+        if i > 0 { strbuilder.append(b, "\n") }
+        end = parse_uniform(line, scratch)
+        if end >= 0 {
+            string.free(scratch.kind)
+            string.free(scratch.name)
+        } else if is_sampler_uniform(line) {
+            // gone
+        } else {
+            done = false
+            out_end = parse_varying(line, "out", scratch)
+            if out_end >= 0 {
+                index = index_of_member(varyings_out, scratch.kind, scratch.name)
+                if index >= 0 {
+                    strbuilder.append(b, "layout(location = ${index}) out ${scratch.kind} ${scratch.name};")
+                    done = true
+                } else if stage == "frag" && scratch.kind == "vec4" {
+                    rest = string.substring(line, out_end, string.length(line))
+                    strbuilder.append(b, "layout(location = 0) out vec4 ${scratch.name};")
+                    strbuilder.append(b, rest)
+                    string.free(rest)
+                    done = true
+                }
+                string.free(scratch.kind)
+                string.free(scratch.name)
+            }
+            if done == false {
+                in_end = parse_varying(line, "in", scratch)
+                if in_end >= 0 {
+                    index = index_of_member(varyings_in, scratch.kind, scratch.name)
+                    if index >= 0 {
+                        strbuilder.append(b, "layout(location = ${index}) in ${scratch.kind} ${scratch.name};")
+                        done = true
+                    }
+                    string.free(scratch.kind)
+                    string.free(scratch.name)
+                }
+            }
+            if done == false { strbuilder.append(b, line) }
+        }
+        i = i + 1
+    }
+    free_member(scratch)
+    string.array_free(parts)
+    string.free(text)
+    text = strbuilder.finish(b)
+
+    // The block, after the first `#version 450`.
+    size = std140(members, light_bytes(light_members), placed)
+    size_out[0] = size
+    b = strbuilder.new(8192)
+    strbuilder.append(b, "#version 450\n\n")
+    if light_members != null {
+        // The array leads the block, so its offset is zero and the C side
+        // steps through it with a stride rather than a table of offsets.
+        strbuilder.append(b, "struct Light {\n")
+        k = list.size(light_members)
+        i = 0
+        while i < k {
+            m = list.get_raw(light_members, i) as *Member
+            strbuilder.append(b, "    ${m.kind} ${m.name};\n")
+            i = i + 1
+        }
+        strbuilder.append(b, "};\n\n")
+    }
+    strbuilder.append(b, "layout(std140, set = 0, binding = 0) uniform SceneBlock {\n")
+    if light_members != null { strbuilder.append(b, "    Light lights[${MAX_LIGHTS}];\n") }
+    k = list.size(members)
+    i = 0
+    while i < k {
+        m = list.get_raw(members, i) as *Member
+        if m.count > 0 {
+            strbuilder.append(b, "    ${m.kind} ${m.name}[${m.count}];\n")
+        } else {
+            strbuilder.append(b, "    ${m.kind} ${m.name};\n")
+        }
+        i = i + 1
+    }
+    strbuilder.append(b, "};")
+    // Every shader shares one descriptor set layout, so whichever sampler
+    // a shader names sits at binding 1 and the renderer binds the right
+    // texture. A sampler is 2D unless named "name:3D", as the clouds'
+    // shape is, or "name:2DMS", as the frame's multisampled depth is to
+    // its resolve.
+    k = list.size(samplers)
+    i = 0
+    while i < k {
+        sampler = string_at(samplers, i)
+        colon = string.string_index_of(sampler, ":")
+        name = sampler
+        kind = "2D"
+        if colon >= 0 {
+            name = string.substring(sampler, 0, colon)
+            kind = string.substring(sampler, colon + 1, string.length(sampler))
+        }
+        strbuilder.append(b, "\nlayout(set = 0, binding = ${i + 1}) uniform sampler${kind} ${name};")
+        if colon >= 0 { string.free(name); string.free(kind) }
+        i = i + 1
+    }
+    header = strbuilder.finish(b)
+    at_version = string.string_index_of(text, "#version 450")
+    if at_version < 0 {
+        string.free(header)
+        return text
+    }
+    head = string.substring(text, 0, at_version)
+    tail = string.substring(text, at_version + 12, string.length(text))
+    joined = string.concat(head, header)
+    out = string.concat(joined, tail)
+    string.free(head)
+    string.free(tail)
+    string.free(joined)
+    string.free(header)
+    string.free(text)
+    return out
+}
+
+// The skybox and the fullscreen passes name their attributes differently
+// from the scene shader. Renaming them onto the scene's names lets every
+// pipeline share one vertex input description and one descriptor set
+// layout, so the renderer has a single binding path instead of one per
+// pass.
+rename_attributes(text: string) -> string {
+    out = replace_declaration(text, "in vec2 aPos", "in vec3 inPosition;")
+    out = replaced(out, "vec4(aPos, 0.0, 1.0)", "vec4(inPosition.xy, 0.0, 1.0)")
+    out = replace_word(out, "aTexCoords", "inTexCoord")
+    out = replace_word(out, "aTexCoord", "inTexCoord")
+    out = replace_word(out, "aNormal", "inNormal")
+    out = replace_word(out, "aPos", "inPosition")
+    return out
+}
+
+// `prefix`, any spacing, `;` -> replacement, wherever it occurs.
+replace_declaration(text: string, prefix: string, replacement: string) -> string {
+    c = cursor(text)
+    b = strbuilder.new(c.length)
+    from = 0
+    at_hit = string.string_index_of_from(text, prefix, 0)
+    while at_hit >= 0 {
+        end = skip_space(&c, at_hit + string.length(prefix))
+        if at(&c, end) == 59 {
+            piece = slice(&c, from, at_hit)
+            strbuilder.append(b, piece)
+            string.free(piece)
+            strbuilder.append(b, replacement)
+            from = end + 1
+            at_hit = string.string_index_of_from(text, prefix, from)
+        } else {
+            at_hit = string.string_index_of_from(text, prefix, at_hit + 1)
+        }
+    }
+    piece = slice(&c, from, c.length)
+    strbuilder.append(b, piece)
+    string.free(piece)
+    return strbuilder.finish(b)
+}
+
+// `word` as a whole word -> replacement, wherever it occurs.
+replace_word(text: string, word: string, replacement: string) -> string {
+    c = cursor(text)
+    n = string.length(word)
+    b = strbuilder.new(c.length)
+    from = 0
+    at_hit = string.string_index_of_from(text, word, 0)
+    while at_hit >= 0 {
+        before = at_hit == 0 || is_word_char(at(&c, at_hit - 1)) == false
+        after = is_word_char(at(&c, at_hit + n)) == false
+        if before && after {
+            piece = slice(&c, from, at_hit)
+            strbuilder.append(b, piece)
+            string.free(piece)
+            strbuilder.append(b, replacement)
+            from = at_hit + n
+        }
+        at_hit = string.string_index_of_from(text, word, at_hit + 1)
+    }
+    piece = slice(&c, from, c.length)
+    strbuilder.append(b, piece)
+    string.free(piece)
+    return strbuilder.finish(b)
+}
+
+// --- the generated sources -------------------------------------------------------------------------------------
+
+upper(s: string) -> string { return string.string_to_upper(s) }
+
+// The C header: the block's size, the offsets, the sorted name table the
+// renderer looks a model's uniforms up in, and the setters.
+c_struct(placed: ptr, size: int, light_placed: ptr, light_stride: int) -> string {
+    b = strbuilder.new(16384)
+    strbuilder.append(b, "/* Generated by ${GENERATOR} - do not edit. */\n")
+    strbuilder.append(b, "#ifndef AE3D_VK_UNIFORMS_H\n#define AE3D_VK_UNIFORMS_H\n\n#include <string.h>\n\n")
+    strbuilder.append(b, "#define AE3D_VK_SCENE_SIZE ${size}\n\n")
+    strbuilder.append(b, "/* std140 layout, offsets computed from the same declarations the shader\n")
+    strbuilder.append(b, "   block is generated from, so the two cannot disagree. */\n")
+    strbuilder.append(b, "typedef struct {\n    unsigned char bytes[${size}];\n} ae3d_vk_scene;\n\n")
+    n = list.size(placed)
+    i = 0
+    while i < n {
+        p = list.get_raw(placed, i) as *Placed
+        u = upper(p.name)
+        strbuilder.append(b, "#define AE3D_VK_OFF_${u} ${p.offset}\n")
+        string.free(u)
+        i = i + 1
+    }
+    if light_placed != null && list.size(light_placed) > 0 {
+        strbuilder.append(b, "\n#define AE3D_VK_MAX_LIGHTS ${MAX_LIGHTS}\n#define AE3D_VK_LIGHT_STRIDE ${light_stride}\n")
+        k = list.size(light_placed)
+        i = 0
+        while i < k {
+            p = list.get_raw(light_placed, i) as *Placed
+            u = upper(p.name)
+            strbuilder.append(b, "#define AE3D_VK_LIGHT_${u} ${p.offset}\n")
+            string.free(u)
+            i = i + 1
+        }
+    }
+    // A model carries uniforms by name, so the renderer needs the reverse
+    // of the table above. Sorted, so the lookup is a binary search rather
+    // than a walk.
+    strbuilder.append(b, "\ntypedef struct {\n    const char *name;\n    int offset;\n} ae3d_vk_uniform_slot;\n\n")
+    strbuilder.append(b, "static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {\n")
+    order = sorted_indices(placed)
+    i = 0
+    while i < n {
+        p = list.get_raw(placed, order[i]) as *Placed
+        strbuilder.append(b, "    { \"${p.name}\", ${p.offset} },\n")
+        i = i + 1
+    }
+    free_ints(order)
+    strbuilder.append(b, "};\n\n#define AE3D_VK_UNIFORM_SLOT_COUNT ${n}\n\n")
+    strbuilder.append(b, "static inline int ae3d_vk_uniform_offset(const char *name) {\n")
+    strbuilder.append(b, "    int low = 0;\n    int high = AE3D_VK_UNIFORM_SLOT_COUNT - 1;\n    if (!name) return -1;\n")
+    strbuilder.append(b, "    while (low <= high) {\n        int mid = (low + high) / 2;\n")
+    strbuilder.append(b, "        int order = strcmp(name, ae3d_vk_uniform_slots[mid].name);\n")
+    strbuilder.append(b, "        if (order == 0) return ae3d_vk_uniform_slots[mid].offset;\n")
+    strbuilder.append(b, "        if (order < 0) high = mid - 1; else low = mid + 1;\n    }\n    return -1;\n}\n\n")
+    strbuilder.append(b, "static inline void ae3d_vk_set_float(ae3d_vk_scene *s, int offset, float v) {\n")
+    strbuilder.append(b, "    memcpy(s->bytes + offset, &v, sizeof(v));\n}\n")
+    strbuilder.append(b, "static inline void ae3d_vk_set_int(ae3d_vk_scene *s, int offset, int v) {\n")
+    strbuilder.append(b, "    memcpy(s->bytes + offset, &v, sizeof(v));\n}\n")
+    strbuilder.append(b, "static inline void ae3d_vk_set_vec3(ae3d_vk_scene *s, int offset, double x, double y, double z) {\n")
+    strbuilder.append(b, "    float v[3];\n    v[0] = (float)x; v[1] = (float)y; v[2] = (float)z;\n")
+    strbuilder.append(b, "    memcpy(s->bytes + offset, v, sizeof(v));\n}\n")
+    strbuilder.append(b, "static inline void ae3d_vk_set_mat4(ae3d_vk_scene *s, int offset, const double *m) {\n")
+    strbuilder.append(b, "    float v[16];\n    int i;\n    for (i = 0; i < 16; i++) v[i] = (float)m[i];\n")
+    strbuilder.append(b, "    memcpy(s->bytes + offset, v, sizeof(v));\n}\n\n#endif\n")
+    return strbuilder.finish(b)
+}
+
+// The members' indices in byte order of their names (an insertion sort;
+// there are a few hundred).
+sorted_indices(placed: ptr) -> int[] {
+    n = list.size(placed)
+    order = calloc(n + 1, 4) as int[]
+    i = 0
+    while i < n {
+        j = i
+        while j > 0 {
+            a = list.get_raw(placed, order[j - 1]) as *Placed
+            p = list.get_raw(placed, i) as *Placed
+            if string.compare(a.name, p.name) <= 0 { break }
+            order[j] = order[j - 1]
+            j = j - 1
+        }
+        order[j] = i
+        i = i + 1
+    }
+    return order
+}
+
+// The same offsets as an Aether module, so the renderer names uniforms.
+aether_offsets(placed: ptr, size: int, light_placed: ptr, light_stride: int) -> string {
+    n = list.size(placed)
+    has_lights = light_placed != null && list.size(light_placed) > 0
+    b = strbuilder.new(8192)
+    strbuilder.append(b, "// Generated by ${GENERATOR} - do not edit.\n//\n")
+    strbuilder.append(b, "// Byte offsets into the scene uniform block, from the same declarations\n")
+    strbuilder.append(b, "// that generate the shader's block and the C struct behind it.\n\nexports (\n")
+    // The names in rows of at most 92 columns, as the module's own style has them.
+    rows = Rows { out: b, row: strbuilder.new(128), index: 0, count: n + 1 }
+    if has_lights { rows.count = rows.count + 2 + list.size(light_placed) }
+    strbuilder.append(rows.row, "   ")
+    i = 0
+    while i < n {
+        p = list.get_raw(placed, i) as *Placed
+        u = upper(p.name)
+        row_name(&rows, "OFF_", u)
+        string.free(u)
+        i = i + 1
+    }
+    if has_lights {
+        row_name(&rows, "", "MAX_LIGHTS")
+        row_name(&rows, "", "LIGHT_STRIDE")
+        k = list.size(light_placed)
+        i = 0
+        while i < k {
+            p = list.get_raw(light_placed, i) as *Placed
+            u = upper(p.name)
+            row_name(&rows, "LIGHT_", u)
+            string.free(u)
+            i = i + 1
+        }
+    }
+    row_name(&rows, "", "SCENE_SIZE")
+    line = strbuilder.finish(rows.row)
+    strbuilder.append(b, line)
+    strbuilder.append(b, "\n)\n\n")
+    string.free(line)
+    i = 0
+    while i < n {
+        p = list.get_raw(placed, i) as *Placed
+        u = upper(p.name)
+        strbuilder.append(b, "const OFF_${u} = ${p.offset}\n")
+        string.free(u)
+        i = i + 1
+    }
+    if has_lights {
+        strbuilder.append(b, "const MAX_LIGHTS = ${MAX_LIGHTS}\nconst LIGHT_STRIDE = ${light_stride}\n")
+        k = list.size(light_placed)
+        i = 0
+        while i < k {
+            p = list.get_raw(light_placed, i) as *Placed
+            u = upper(p.name)
+            strbuilder.append(b, "const LIGHT_${u} = ${p.offset}\n")
+            string.free(u)
+            i = i + 1
+        }
+    }
+    strbuilder.append(b, "const SCENE_SIZE = ${size}\n")
+    return strbuilder.finish(b)
+}
+
+// The exports rows as they are built: the row so far, which name is
+// next, and how many there are (the last takes no comma).
+struct Rows {
+    out: ptr
+    row: ptr
+    index: int
+    count: int
+}
+
+row_name(r: *Rows, prefix: string, name: string) {
+    piece_length = string.length(prefix) + string.length(name)
+    if r.index < r.count - 1 { piece_length = piece_length + 1 }
+    if strbuilder.length(r.row) + piece_length + 1 > 92 {
+        line = strbuilder.finish(r.row)
+        strbuilder.append(r.out, line)
+        strbuilder.append(r.out, "\n")
+        string.free(line)
+        r.row = strbuilder.new(128)
+        strbuilder.append(r.row, "   ")
+    }
+    strbuilder.append(r.row, " ")
+    strbuilder.append(r.row, prefix)
+    strbuilder.append(r.row, name)
+    if r.index < r.count - 1 { strbuilder.append(r.row, ",") }
+    r.index = r.index + 1
+}
+
+// --- glslang ---------------------------------------------------------------------------------------------------
+
+// A shader that traces rays needs SPIR-V 1.4 and a Vulkan 1.2 device;
+// the rest stay at the 1.0 every device takes.
+add_target(argv: ptr, name: string) {
+    if string.contains(name, "_rq_") != 0 {
+        list.add(argv, "--target-env")
+        list.add(argv, "vulkan1.2")
+    }
+}
+
+// Check the computed std140 offsets against the ones glslang assigns.
+//
+// The C side writes at these offsets and the shader reads at glslang's,
+// so a disagreement is a silent corruption of every uniform after the
+// first bad one. Asking the compiler is cheap; assuming is not. Returns
+// how many offsets it reported.
+verify_offsets(name: string, placed: ptr) -> int {
+    path = string.concat("${OUT_DIR}/", name)
+    reflect = string.concat(path, ".reflect")
+    argv = list.new()
+    list.add(argv, "-V")
+    list.add(argv, "-q")
+    add_target(argv, name)
+    list.add(argv, "-o")
+    list.add(argv, reflect)
+    list.add(argv, path)
+    out, _status, err = os.run_capture("glslangValidator", argv, null)
+    file.delete(reflect)
+    if err != "" {
+        println("generate: glslangValidator could not be run (${err}); is the Vulkan SDK on PATH?")
+        os.exit(1)
+    }
+    // `name: offset N, type X, size N, index 0,` per reported uniform.
+    reported = 0
+    mismatched = 0
+    parts = split_lines(out)
+    n = string.array_size(parts)
+    i = 0
+    while i < n {
+        line = line_at(parts, i)
+        c = cursor(line)
+        e = word_end(&c, 0)
+        if e > 0 && word_at(&c, e, ": offset ") {
+            j = e + 9
+            neg = false
+            if at(&c, j) == 45 { neg = true; j = j + 1 }
+            d = digits_end(&c, j)
+            if d > j && word_at(&c, d, ", type ") {
+                t = word_end(&c, d + 7)
+                if t > d + 7 && word_at(&c, t, ", size ") {
+                    s = digits_end(&c, t + 7)
+                    if s > t + 7 && word_at(&c, s, ", index 0,") && neg == false {
+                        uniform_name = slice(&c, 0, e)
+                        digits = slice(&c, j, d)
+                        offset = string.get_int(digits)
+                        string.free(digits)
+                        reported = reported + 1
+                        ours = offset_of(placed, uniform_name)
+                        if ours >= 0 && ours != offset {
+                            println("generate: ${uniform_name} at ${ours}, glslang says ${offset}")
+                            mismatched = mismatched + 1
+                        }
+                        string.free(uniform_name)
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    string.array_free(parts)
+    string.free(path)
+    string.free(reflect)
+    if mismatched > 0 {
+        println("generate: std140 layout disagrees with the compiler")
+        os.exit(1)
+    }
+    return reported
+}
+
+offset_of(placed: ptr, name: string) -> int {
+    n = list.size(placed)
+    i = 0
+    while i < n {
+        p = list.get_raw(placed, i) as *Placed
+        if p.name == name { return p.offset }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// The shader compiled to SPIR-V beside it; the bytes, and their count through `size_out`.
+spirv(name: string, size_out: int[]) -> ptr {
+    path = string.concat("${OUT_DIR}/", name)
+    out_path = string.concat(path, ".spv")
+    argv = list.new()
+    list.add(argv, "-V")
+    add_target(argv, name)
+    list.add(argv, path)
+    list.add(argv, "-o")
+    list.add(argv, out_path)
+    out, status, err = os.run_capture("glslangValidator", argv, null)
+    if err != "" || status != 0 {
+        print(out)
+        println("generate: ${name} failed to compile")
+        os.exit(1)
+    }
+    data = blob.read(out_path)
+    if data == null {
+        println("generate: ${out_path} was not written")
+        os.exit(1)
+    }
+    size_out[0] = blob.last_size() as int
+    string.free(path)
+    string.free(out_path)
+    return data
+}
+
+// `static const unsigned char NAME[] = { ... };`, twelve bytes a line.
+carray(b: ptr, name: string, data: ptr, size: int) {
+    strbuilder.append(b, "static const unsigned char ${name}[] = {\n")
+    i = 0
+    while i < size {
+        strbuilder.append(b, "    ")
+        k = 0
+        while k < 12 && i + k < size {
+            if k > 0 { strbuilder.append(b, ", ") }
+            strbuilder.append_int(b, mem.get_uint8(data, i + k))
+            k = k + 1
+        }
+        strbuilder.append(b, ",\n")
+        i = i + 12
+    }
+    strbuilder.append(b, "};")
+}
+
+// --- files -----------------------------------------------------------------------------------------------------
+
+// Written in binary so the generated sources end lines the way the
+// repository does wherever this happens to be run.
+write_text(path: string, text: string) {
+    handle, err = file.open(path, "wb")
+    if err != "" {
+        println("generate: cannot write ${path}")
+        os.exit(1)
+    }
+    file.file_write_raw(handle, text, string.length(text))
+    file.file_close(handle)
+}
+
+read_text(path: string) -> string {
+    text, err = file.read(path)
+    if err != "" { return "" }
+    return text
+}
+
+// --- the tables ------------------------------------------------------------------------------------------------
+
+// One derived shader: its file, the block it comes from, its stage, its
+// samplers in binding order, and its varyings in and out.
+struct Derived {
+    name: string
+    source: string
+    stage: string
+    samplers: ptr
+    varyings_in: ptr
+    varyings_out: ptr
+}
+
+strings(count: int, a: string, b: string, c: string, d: string) -> ptr {
+    l = list.new()
+    if count > 0 { list.add(l, a) }
+    if count > 1 { list.add(l, b) }
+    if count > 2 { list.add(l, c) }
+    if count > 3 { list.add(l, d) }
+    return l
+}
+
+varying(l: ptr, kind: string, name: string) { list.add_raw(l, member_ptr(member(kind, name, 0))) }
+
+scene_out() -> ptr {
+    l = list.new()
+    varying(l, "vec2", "fragTexCoord")
+    varying(l, "vec3", "Normal")
+    varying(l, "vec3", "FragPos")
+    varying(l, "vec3", "InstanceColor")
+    varying(l, "vec4", "FragPosLightSpace")
+    varying(l, "float", "Occlusion")
+    varying(l, "vec4", "ClipNow")
+    varying(l, "vec4", "ClipPrev")
+    return l
+}
+
+sky_out() -> ptr {
+    l = list.new()
+    varying(l, "vec3", "TexCoords")
+    varying(l, "vec4", "ClipNow")
+    varying(l, "vec4", "ClipPrev")
+    return l
+}
+
+screen_out() -> ptr {
+    l = list.new()
+    varying(l, "vec2", "TexCoords")
+    return l
+}
+
+water_out() -> ptr {
+    l = list.new()
+    varying(l, "vec2", "fragTexCoord")
+    varying(l, "vec3", "fragNormal")
+    varying(l, "vec3", "fragPosition")
+    varying(l, "vec4", "ClipNow")
+    varying(l, "vec4", "ClipPrev")
+    return l
+}
+
+derived(l: ptr, name: string, source: string, stage: string, samplers: ptr, varyings_in: ptr, varyings_out: ptr) {
+    d = calloc(1, sizeof(Derived)) as *Derived
+    d.name = name
+    d.source = source
+    d.stage = stage
+    d.samplers = samplers
+    d.varyings_in = varyings_in
+    d.varyings_out = varyings_out
+    list.add_raw(l, derived_ptr(d))
+}
+
+empty_list() -> ptr { return list.new() }
+
+// The auxiliary pipelines, in the order their SPIR-V lands in the header.
+auxiliary() -> ptr {
+    l = list.new()
+    derived(l, "depth_vk.vert", "VERTEX_DEPTH", "vert", empty_list(), empty_list(), empty_list())
+    derived(l, "depth_vk.frag", "FRAGMENT_DEPTH", "frag", empty_list(), empty_list(), empty_list())
+    derived(l, "sky_vk.vert", "VERTEX_SKYBOX", "vert", empty_list(), empty_list(), sky_out())
+    // The sky reads the clouds' weather at binding 3 and their shape at 4,
+    // the slots a model draw keeps its normal map and pose bank in.
+    derived(l, "sky_vk.frag", "FRAGMENT_SKYBOX", "frag", strings(4, "skybox", "shadowMap", "cloudWeather", "cloudShape:3D"), sky_out(), empty_list())
+    derived(l, "screen_vk.vert", "VERTEX_SCREEN", "vert", empty_list(), empty_list(), screen_out())
+    derived(l, "passthrough_vk.frag", "FRAGMENT_PASSTHROUGH", "frag", strings(1, "screenTexture", "", "", ""), screen_out(), empty_list())
+    derived(l, "fxaa_vk.frag", "FRAGMENT_FXAA", "frag", strings(1, "screenTexture", "", "", ""), screen_out(), empty_list())
+    derived(l, "bloom_vk.frag", "FRAGMENT_BLOOM", "frag", strings(1, "screenTexture", "", "", ""), screen_out(), empty_list())
+    derived(l, "ssr_vk.frag", "FRAGMENT_SSR", "frag", strings(2, "screenTexture", "depthTexture", "", ""), screen_out(), empty_list())
+    derived(l, "ssao_vk.frag", "FRAGMENT_SSAO", "frag", strings(2, "screenTexture", "depthTexture", "", ""), screen_out(), empty_list())
+    // The depth resolve reads the frame's own depth at binding 1, where
+    // the screen draws put their colour source.
+    derived(l, "depth_resolve_vk.frag", "FRAGMENT_DEPTH_RESOLVE", "frag", strings(1, "depthSamples:2DMS", "", "", ""), screen_out(), empty_list())
+    derived(l, "depth_copy_vk.frag", "FRAGMENT_DEPTH_COPY", "frag", strings(1, "depthSamples", "", "", ""), screen_out(), empty_list())
+    // The temporal pass reads the frame at 1, the depth at 2 and its own
+    // history at 3, the slot a screen draw otherwise fills with the default.
+    derived(l, "taa_vk.frag", "FRAGMENT_TAA", "frag", strings(4, "screenTexture", "depthTexture", "historyTexture", "velocityTexture"), screen_out(), empty_list())
+    derived(l, "water_vk.vert", "VERTEX_WATER", "vert", empty_list(), empty_list(), water_out())
+    // The water reads the scene depth at binding 4, the slot the crowd's
+    // pose bank takes: whichever auxiliary image a draw needs sits there.
+    derived(l, "water_vk.frag", "FRAGMENT_WATER", "frag", strings(4, "textureSampler", "shadowMap", "normalMap", "sceneDepth"), water_out(), empty_list())
+    // The crowd's vertex shaders read the pose bank, a sampler in the
+    // vertex stage, at binding 4: past the three the fragment shader has,
+    // so the one descriptor set layout serves them too. The three before
+    // it are named so the bank lands on 4, not so the vertex shader reads
+    // them.
+    derived(l, "crowd_vk.vert", "VERTEX_CROWD", "vert", strings(4, "textureSampler", "shadowMap", "normalMap", "poseBank"), empty_list(), scene_out())
+    derived(l, "crowd_depth_vk.vert", "VERTEX_CROWD_DEPTH", "vert", strings(4, "textureSampler", "shadowMap", "normalMap", "poseBank"), empty_list(), empty_list())
+    return l
+}
+
+// A generated file: where it goes and what it holds.
+struct Output {
+    path: string
+    text: string
+}
+
+output(l: ptr, path: string, text: string) {
+    o = calloc(1, sizeof(Output)) as *Output
+    o.path = string.copy(path)
+    o.text = string.copy(text)
+    list.add_raw(l, output_ptr(o))
+}
+
+// `scene_vk.vert` -> `ae3d_vk_scene_vert_spv`.
+array_name(name: string) -> string {
+    a = string.replace_all(name, "_vk.", "_")
+    b = string.replace_all(a, ".", "_")
+    c = string.concat("ae3d_vk_", b)
+    d = string.concat(c, "_spv")
+    string.free(a)
+    string.free(b)
+    string.free(c)
+    return d
+}
+
+// --- main ------------------------------------------------------------------------------------------------------
+
+main() {
+    check = os.args_count() > 1 && os.args_get(1) == "--check"
+    source = read_text(SHADERS)
+    if source == "" {
+        println("generate: cannot read ${SHADERS}; run from the repository root")
+        os.exit(1)
+    }
+    vertex = block(source, "VERTEX_DEFAULT")
+    fragment = block(source, "FRAGMENT_DEFAULT")
+    light_members = light_struct(fragment)
+
+    // One block serves every pipeline, so a name declared twice has to
+    // mean the same thing in both. Two shaders disagreeing about a type
+    // would lay the block out for one of them and corrupt what the other
+    // reads.
+    all = list.new()
+    collect_uniforms(vertex, all)
+    collect_uniforms(fragment, all)
+    aux = auxiliary()
+    aux_count = list.size(aux)
+    i = 0
+    while i < aux_count {
+        d = list.get_raw(aux, i) as *Derived
+        text = block(source, d.source)
+        collect_uniforms(text, all)
+        string.free(text)
+        i = i + 1
+    }
+    ordered = list.new()
+    n = list.size(all)
+    i = 0
+    while i < n {
+        m = list.get_raw(all, i) as *Member
+        seen = first_named(ordered, m.name)
+        if seen == null {
+            list.add_raw(ordered, member_ptr(m))
+        } else if seen.kind != m.kind || seen.count != m.count {
+            println("generate: ${m.name} declared as ${seen.kind}[${seen.count}] and ${m.kind}[${m.count}]")
+            os.exit(1)
+        }
+        i = i + 1
+    }
+
+    // The vertex inputs already carry explicit locations in the OpenGL
+    // source, so they pass through untouched; only the varyings need
+    // numbering.
+    vertex_out = scene_out()
+    size_slot = calloc(1, 4) as int[]
+    placed = list.new()
+    vk_vertex = to_vulkan(vertex, "vert", ordered, empty_list(), empty_list(), vertex_out, light_members, placed, size_slot)
+    size = size_slot[0]
+    scratch = list.new()
+    vk_fragment = to_vulkan(fragment, "frag", ordered, strings(3, "textureSampler", "shadowMap", "normalMap", ""), vertex_out, empty_list(), light_members, scratch, size_slot)
+    free_placed(scratch)
+
+    // The scene fragment twice: as it is, and tracing rays through the
+    // scene's acceleration structure at binding 5 where the device has
+    // VK_KHR_ray_query -- the same source, with its ray-query block
+    // compiled in (AE3D_RAY_QUERY) and the extension it needs.
+    vk_fragment_rq = string.replace(vk_fragment, "#version 450",
+        "#version 460\n#extension GL_EXT_ray_query : require\n#define AE3D_RAY_QUERY 1\nlayout(set = 0, binding = 5) uniform accelerationStructureEXT sceneAS;")
+
+    written = list.new()                 // *Output, the shaders in header order
+    output(written, "scene_vk.vert", vk_vertex)
+    output(written, "scene_vk.frag", vk_fragment)
+    output(written, "scene_rq_vk.frag", vk_fragment_rq)
+    // Compute shaders carry their own layout -- storage buffers and push
+    // constants, nothing from the scene block -- so they are compiled as
+    // they are written, not rewritten around the block.
+    compute = block(source, "COMPUTE_CROWD_SORT")
+    output(written, "crowd_sort_vk.comp", compute)
+    i = 0
+    while i < aux_count {
+        d = list.get_raw(aux, i) as *Derived
+        // These pipelines reuse the scene's vertex input, so their
+        // attributes are renamed onto it rather than described a second
+        // time.
+        text = block(source, d.source)
+        renamed = rename_attributes(text)
+        string.free(text)
+        scratch = list.new()
+        code = to_vulkan(renamed, d.stage, ordered, d.samplers, d.varyings_in, d.varyings_out, light_members, scratch, size_slot)
+        free_placed(scratch)
+        string.free(renamed)
+        output(written, d.name, code)
+        i = i + 1
+    }
+
+    light_placed = list.new()
+    light_stride = 0
+    if light_members != null { light_stride = light_layout(light_members, light_placed) }
+    outputs = list.new()                 // *Output, every generated text
+    shader_count = list.size(written)
+    i = 0
+    while i < shader_count {
+        w = list.get_raw(written, i) as *Output
+        shader_path = string.concat("${OUT_DIR}/", w.path)
+        output(outputs, shader_path, w.text)
+        i = i + 1
+    }
+    uniforms_header = c_struct(placed, size, light_placed, light_stride)
+    output(outputs, "${GPU}/vulkan_uniforms.h", uniforms_header)
+    offsets_module = aether_offsets(placed, size, light_placed, light_stride)
+    output(outputs, VKSCENE, offsets_module)
+
+    // --check: is what is checked in what the shader source produces? An
+    // edit to the GLSL without this program run after it leaves Vulkan on
+    // the previous shader, which then fails parity in ways that look like
+    // real bugs. Needs no glslang, so it runs wherever the source does.
+    output_count = list.size(outputs)
+    if check {
+        stale = 0
+        i = 0
+        while i < output_count {
+            o = list.get_raw(outputs, i) as *Output
+            current = read_text(o.path)
+            if current == "" || string.equals(current, o.text) == 0 {
+                println("generate: stale ${o.path}")
+                stale = stale + 1
+            }
+            string.free(current)
+            i = i + 1
+        }
+        if stale > 0 {
+            println("generate: run ${GENERATOR} and commit the result")
+            os.exit(1)
+        }
+        println("generate: ${output_count} generated files are current")
+        return
+    }
+
+    i = 0
+    while i < output_count {
+        o = list.get_raw(outputs, i) as *Output
+        write_text(o.path, o.text)
+        i = i + 1
+    }
+
+    checked = 0
+    total = 0
+    header = strbuilder.new(1048576)
+    strbuilder.append(header, "/* Generated by ${GENERATOR} - do not edit. */\n")
+    strbuilder.append(header, "#ifndef AE3D_VK_SCENE_SHADERS_H\n#define AE3D_VK_SCENE_SHADERS_H\n\n")
+    i = 0
+    while i < shader_count {
+        w = list.get_raw(written, i) as *Output
+        name = w.path
+        if string.ends_with(name, ".comp") == 0 { checked = checked + verify_offsets(name, placed) }
+        data = spirv(name, size_slot)
+        bytes_count = size_slot[0]
+        total = total + bytes_count
+        array = array_name(name)
+        carray(header, array, data, bytes_count)
+        strbuilder.append(header, "\n\n")
+        string.free(array)
+        blob.free_bytes(data)
+        i = i + 1
+    }
+    strbuilder.append(header, "#endif\n")
+    header_text = strbuilder.finish(header)
+    write_text("${GPU}/vulkan_shaders.h", header_text)
+    string.free(header_text)
+
+    println("generate: ${list.size(ordered)} uniforms, block ${size} bytes, ${checked} offsets verified against glslang, ${shader_count} shaders, ${total}B of SPIR-V")
+}
+
+first_named(members: ptr, name: string) -> *Member {
+    n = list.size(members)
+    i = 0
+    while i < n {
+        m = list.get_raw(members, i) as *Member
+        if m.name == name { return m }
+        i = i + 1
+    }
+    return null
+}

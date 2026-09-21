@@ -49,6 +49,25 @@ ae3d_native_link_flags() {
     printf '%s' "-Lbuild -lae3d_native $(ae3d_native_rpath "${1:-.}")"
 }
 
+# Where GLFW is: the named flags first, then pkg-config, then a bare -lglfw.
+# A Windows checkout outside MSYS2 has no pkg-config and a hand-built GLFW in
+# a prefix of its own, and the fallback -- a bare -lglfw with no include path
+# -- cannot find it; naming the flags is then the only way in. Sets
+# GLFW_CFLAGS and GLFW_LIBS. Every program links GLFW, not only the engine's
+# library: the window and input layer (ae3d.platform) calls GLFW from Aether,
+# and a Windows DLL cannot lend its imports to the program that loads it.
+ae3d_glfw_flags() {
+    if [ -n "${GLFW_CFLAGS:-}" ] || [ -n "${GLFW_LIBS:-}" ]; then
+        GLFW_CFLAGS="${GLFW_CFLAGS:-}"
+        GLFW_LIBS="${GLFW_LIBS:-}"
+    elif command -v pkg-config >/dev/null 2>&1 && pkg-config --exists glfw3; then
+        GLFW_CFLAGS="$(pkg-config --cflags glfw3)"
+        GLFW_LIBS="$(pkg-config --libs glfw3)"
+    else
+        GLFW_CFLAGS=""
+        GLFW_LIBS="-lglfw"
+    fi
+}
 ae3d_native_library() {
     printf '%s' "build/libae3d_native$(ae3d_native_suffix)"
 }
@@ -95,8 +114,8 @@ ae3d_native_build() {
         $ae3d_extra_libs $(ae3d_platform_libs "$(uname -s)") -o "$ae3d_lib"
 }
 
-# DLSS through NVIDIA Streamline: the C++ shim (native/ae3d_dlss.cpp) when
-# AE3D_STREAMLINE_ROOT names the SDK, the stub (native/ae3d_dlss_stub.c),
+# DLSS through NVIDIA Streamline: the C++ shim (native/dlss/streamline.cpp) when
+# AE3D_STREAMLINE_ROOT names the SDK, the stub (native/dlss/stub.c),
 # which says DLSS was not built in, otherwise. Whichever is built, the
 # other's object is dropped from the object directory so the library links
 # one of them.
@@ -104,11 +123,11 @@ ae3d_native_build() {
 #   ae3d_dlss_source <object directory>
 ae3d_dlss_source() {
     if [ -n "${AE3D_STREAMLINE_ROOT:-}" ] && [ -f "$AE3D_STREAMLINE_ROOT/include/sl.h" ]; then
-        rm -f "$1/ae3d_dlss_stub.o"
-        printf '%s' "native/ae3d_dlss.cpp"
+        rm -f "$1/stub.o"
+        printf '%s' "native/dlss/streamline.cpp"
     else
-        rm -f "$1/ae3d_dlss.o"
-        printf '%s' "native/ae3d_dlss_stub.c"
+        rm -f "$1/streamline.o"
+        printf '%s' "native/dlss/stub.c"
     fi
 }
 

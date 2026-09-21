@@ -57,20 +57,10 @@ case " $AETHER_COMPILE_FLAGS " in
     *) AETHER_COMPILE_FLAGS="$AETHER_COMPILE_FLAGS -fwrapv" ;;
 esac
 
-# Same precedence as build.sh: named flags win, then pkg-config, then a bare
-# -lglfw. A Windows checkout outside MSYS2 has no pkg-config and a prefix of
-# its own, and the two scripts disagreeing about how to find GLFW is how one of
-# them ends up unbuildable.
-if [ -n "${GLFW_CFLAGS:-}" ] || [ -n "${GLFW_LIBS:-}" ]; then
-    GLFW_CFLAGS="${GLFW_CFLAGS:-}"
-    GLFW_LIBS="${GLFW_LIBS:-}"
-elif command -v pkg-config >/dev/null 2>&1 && pkg-config --exists glfw3; then
-    GLFW_CFLAGS="$(pkg-config --cflags glfw3)"
-    GLFW_LIBS="$(pkg-config --libs glfw3)"
-else
-    GLFW_CFLAGS=""
-    GLFW_LIBS="-lglfw"
-fi
+# The same GLFW as build.sh finds, from the same function: the two scripts
+# disagreeing about how to find it is how one of them ends up unbuildable.
+. "$ROOT/scripts/native.sh"
+ae3d_glfw_flags
 
 if [ -n "${ZLIB_CFLAGS:-}" ] || [ -n "${ZLIB_LIBS:-}" ]; then
     ZLIB_CFLAGS="${ZLIB_CFLAGS:-}"
@@ -101,7 +91,6 @@ elif [ -n "${VULKAN_SDK:-}" ]; then
 fi
 
 . "$ROOT/scripts/platform.sh"
-. "$ROOT/scripts/native.sh"
 PIC="$(ae3d_native_pic_flag)"
 
 OS="$(uname -s)"
@@ -110,7 +99,7 @@ case "$OS" in
         UI_SOURCES="$UI_ROOT/backend/aether_ui_macos.m $UI_ROOT/backend/aether_ui_test_server.c $UI_ROOT/backend/aether_ui_system_extras.c"
         UI_FLAGS="-fobjc-arc"
         PLATFORM_LIBS="-framework AppKit -framework Foundation -framework QuartzCore -framework CoreText -framework ImageIO -framework Cocoa -framework IOKit -framework CoreVideo -framework Metal -framework OpenGL"
-        NATIVE_EXTRA="native/ae3d_vk_surface.m"
+        NATIVE_EXTRA="native/platform/metal_surface.m"
         ;;
     Linux|FreeBSD)
         if ! pkg-config --exists gtk4 2>/dev/null; then
@@ -150,12 +139,20 @@ case "$OS" in
         ;;
 esac
 
-NATIVE_SOURCES="native/ae3d_agent.c native/ae3d_script.c native/ae3d_capture.c native/ae3d_png.c native/ae3d_glapi.c native/ae3d_platform.c native/ae3d_mesh.c native/ae3d_skin.c native/ae3d_meshfile.c native/ae3d_image.c native/ae3d_gl.c native/ae3d_offscreen.c native/ae3d_vk.c native/ae3d_cloudnoise.c native/ae3d_blob.c native/ae3d_weather.c native/ae3d_nav.c native/ae3d_jobs.c $(ae3d_dlss_source "$OBJ_DIR") $NATIVE_EXTRA"
+# The physics engine's one C file goes in as it does in build.sh: the
+# engine's job pool is aephysics's scheduler, so every ae3d program
+# links it.
+AEPHYSICS="$ROOT/deps/aephysics"
+if [ ! -f "$AEPHYSICS/aephysics/native/aephysics_native.c" ]; then
+    echo "ae3d: deps/aephysics is empty; run: git submodule update --init" >&2
+    exit 1
+fi
+NATIVE_SOURCES="native/agent/channel.c native/gpu/capture.c native/gpu/opengl_api.c native/platform/crash.c native/geometry/mesh.c native/geometry/skin.c native/geometry/meshfile.c native/image/image.c native/gpu/opengl.c native/gpu/offscreen.c native/gpu/vulkan.c native/gpu/jobs.c $AEPHYSICS/aephysics/native/aephysics_native.c $(ae3d_dlss_source "$OBJ_DIR") $NATIVE_EXTRA"
 
 # Every header, not a list of three: the generated ones carry the shaders and
 # the uniform offsets, so leaving them out linked the previous shaders.
 newest_header=""
-for header in native/*.h; do
+for header in native/*.h native/*/*.h; do
     if [ -z "$newest_header" ] || [ "$header" -nt "$newest_header" ]; then
         newest_header="$header"
     fi
@@ -167,20 +164,21 @@ for src in $NATIVE_SOURCES; do
     extra="$(ae3d_native_extra_flags "$src")"
     compiler="$(ae3d_native_compiler "$CC" "$src")"
     if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ] || [ "$newest_header" -nt "$obj" ]; then
-        "$compiler" -c $CFLAGS $WARN $PIC $extra $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o "$obj"
+        "$compiler" -c $CFLAGS $WARN $PIC -Inative $extra $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o "$obj"
     fi
 done
 
 ae3d_native_build "$CC" "$OBJ_DIR" "$CFLAGS" "$GLFW_LIBS $ZLIB_LIBS"
 
-# Both module trees on the search path: ae3d.* out of src/, ui and vg.* out of
-# the aether-ui checkout.
-export AETHER_LIB_DIR="$ROOT/src:$UI_ROOT"
+# Every module tree on the search path: ae3d.* out of src/, ui and vg.* out
+# of the aether-ui checkout, aephysics.* out of its submodule.
+export AETHER_LIB_DIR="$ROOT/src:$UI_ROOT:$AEPHYSICS"
 aetherc "$SOURCE" "$GEN"
 
-# GLFW and zlib belong to the engine, which is a library of its own now and
-# names them on its own link line. PLATFORM_LIBS here is aether-ui's.
-"$CC" $CFLAGS $UI_FLAGS "$GEN" $UI_SOURCES $(ae3d_native_link_flags) \
+# zlib belongs to the engine, which is a library of its own and names it on its
+# own link line; GLFW is named, since the engine's Aether calls it
+# (ae3d.platform). PLATFORM_LIBS here is aether-ui's.
+"$CC" $CFLAGS $UI_FLAGS "$GEN" $UI_SOURCES $(ae3d_native_link_flags) $GLFW_LIBS \
     $AETHER_COMPILE_FLAGS $AETHER_LIBS $PLATFORM_LIBS \
     -o "$OUT"
 

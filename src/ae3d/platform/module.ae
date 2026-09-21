@@ -1,4 +1,23 @@
-// Window, input and timing. Thin binding over the GLFW layer in native/.
+// Window, input and timing, over GLFW.
+//
+// GLFW is called as it is: the window, its hints, the events, the keys,
+// the cursor, the gamepad through the library's own mapping (3.3 or
+// later: a joystick the database knows as a gamepad reads by the
+// standard buttons and axes whatever the make), and the scroll wheel
+// gathered by a callback into a count the frame reads and clears. The
+// two structures GLFW answers with -- a video mode, a gamepad state --
+// are read by offset. The clock is the process's monotonic one, not
+// GLFW's, which reads zero until glfwInit runs: anything that renders
+// without opening a window, an offscreen context or a test, would run
+// on a clock that never moves.
+//
+// The renderers' C (native/gpu) calls GLFW too, for the surface and the
+// GL entry points, so GLFW has to be one library shared by the program
+// and the engine's: the shared library every package manager ships. A
+// static GLFW linked into both would be two copies with two states, and
+// the renderer's copy would know nothing of the window.
+import std.os
+import std.mem
 
 exports (
     API_GL, API_VULKAN,
@@ -17,38 +36,74 @@ exports (
     window_width, window_height, window_fb_width, window_fb_height,
     window_set_pos, window_center, window_set_title, window_set_cursor_mode,
     monitor_width, monitor_height, poll_events, time,
-    key_down, mouse_down, cursor_x, cursor_y, scroll_delta
+    key_down, mouse_down, cursor_x, cursor_y, scroll_delta,
+    gamepad_present, gamepad_button, gamepad_axis
 )
 
-extern ae3d_platform_init() -> int
-extern ae3d_platform_shutdown()
-extern ae3d_platform_error() -> string
-extern ae3d_window_create(width: int, height: int, title: string,
-                          api: int, msaa: int, decorated: int, visible: int,
-                          depth_bits: int) -> ptr
-extern ae3d_window_destroy(win: ptr)
-extern ae3d_window_should_close(win: ptr) -> int
-extern ae3d_window_close(win: ptr)
-extern ae3d_window_swap(win: ptr)
-extern ae3d_window_make_current(win: ptr)
-extern ae3d_window_set_vsync(interval: int)
-extern ae3d_window_width(win: ptr) -> int
-extern ae3d_window_height(win: ptr) -> int
-extern ae3d_window_fb_width(win: ptr) -> int
-extern ae3d_window_fb_height(win: ptr) -> int
-extern ae3d_window_set_pos(win: ptr, x: int, y: int)
-extern ae3d_window_center(win: ptr)
-extern ae3d_window_set_title(win: ptr, title: string)
-extern ae3d_window_set_cursor_mode(win: ptr, mode: int)
-extern ae3d_monitor_width() -> int
-extern ae3d_monitor_height() -> int
-extern ae3d_poll_events()
-extern ae3d_time() -> float
-extern ae3d_key_down(win: ptr, key: int) -> int
-extern ae3d_mouse_down(win: ptr, button: int) -> int
-extern ae3d_cursor_x(win: ptr) -> float
-extern ae3d_cursor_y(win: ptr) -> float
-extern ae3d_scroll_delta(win: ptr) -> float
+extern glfwInit() -> int
+extern glfwTerminate()
+extern glfwSetErrorCallback(handler: ptr) -> ptr
+extern glfwDefaultWindowHints()
+extern glfwWindowHint(hint: int, value: int)
+extern glfwCreateWindow(width: int, height: int, title: string, monitor: ptr, share: ptr) -> ptr
+extern glfwDestroyWindow(win: ptr)
+extern glfwSetWindowUserPointer(win: ptr, pointer: ptr)
+extern glfwGetWindowUserPointer(win: ptr) -> ptr
+extern glfwSetScrollCallback(win: ptr, handler: ptr) -> ptr
+extern glfwMakeContextCurrent(win: ptr)
+extern glfwGetCurrentContext() -> ptr
+extern glfwWindowShouldClose(win: ptr) -> int
+extern glfwSetWindowShouldClose(win: ptr, value: int)
+extern glfwSwapBuffers(win: ptr)
+extern glfwSwapInterval(interval: int)
+extern glfwGetWindowSize(win: ptr, width: ptr, height: ptr)
+extern glfwGetFramebufferSize(win: ptr, width: ptr, height: ptr)
+extern glfwSetWindowPos(win: ptr, x: int, y: int)
+extern glfwSetWindowTitle(win: ptr, title: string)
+extern glfwSetInputMode(win: ptr, mode: int, value: int)
+extern glfwGetPrimaryMonitor() -> ptr
+extern glfwGetVideoMode(monitor: ptr) -> ptr
+extern glfwPollEvents()
+extern glfwGetKey(win: ptr, key: int) -> int
+extern glfwGetMouseButton(win: ptr, button: int) -> int
+extern glfwGetCursorPos(win: ptr, x: ptr, y: ptr)
+extern glfwJoystickIsGamepad(id: int) -> int
+extern glfwGetGamepadState(id: int, pad: ptr) -> int
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern memcpy(dst: ptr, src: ptr, n: long) -> ptr
+extern memset(dst: ptr, value: int, n: long) -> ptr
+extern strlen(s: ptr) -> long
+
+// GLFW's own numbers (glfw3.h), the few the engine sets or reads.
+const GLFW_TRUE = 1
+const GLFW_FALSE = 0
+const GLFW_PRESS = 1
+const GLFW_FOCUSED = 131073
+const GLFW_RESIZABLE = 131075
+const GLFW_VISIBLE = 131076
+const GLFW_DECORATED = 131077
+const GLFW_FOCUS_ON_SHOW = 131084
+const GLFW_DEPTH_BITS = 135173
+const GLFW_SAMPLES = 135181
+const GLFW_CLIENT_API = 139265
+const GLFW_CONTEXT_VERSION_MAJOR = 139266
+const GLFW_CONTEXT_VERSION_MINOR = 139267
+const GLFW_OPENGL_FORWARD_COMPAT = 139270
+const GLFW_OPENGL_PROFILE = 139272
+const GLFW_NO_API = 0
+const GLFW_OPENGL_API = 196609
+const GLFW_OPENGL_CORE_PROFILE = 204801
+const GLFW_CURSOR = 208897
+const GLFW_CURSOR_NORMAL = 213505
+const GLFW_CURSOR_HIDDEN = 213506
+const GLFW_CURSOR_DISABLED = 213507
+const GLFW_GAMEPAD_BUTTON_LAST = 14
+const GLFW_GAMEPAD_AXIS_LAST = 5
+// GLFWgamepadstate: fifteen button bytes, then six floats at the next
+// four-byte boundary; forty bytes in all.
+const GAMEPAD_AXES_AT = 16
+const GAMEPAD_STATE_SIZE = 40
 
 const API_GL = 0
 const API_VULKAN = 1
@@ -116,117 +171,246 @@ const MOUSE_LEFT = 0
 const MOUSE_RIGHT = 1
 const MOUSE_MIDDLE = 2
 
+// The last GLFW error, for the message a failed init or window gives:
+// its code and its text, as GLFW gave them.
+var g_error_code = 0
+var g_error: ptr = null           // char[512]
+var g_scratch: ptr = null         // two ints or two doubles, for the calls that answer through pointers
+var g_gamepad: ptr = null         // a GLFWgamepadstate
+
+// The two callbacks GLFW calls: each a C symbol of its own, so its
+// address is what a C caller expects (an Aether function value is a
+// closure, which is not).
+extern on_glfw_error(code: int, description: ptr)
+extern on_glfw_scroll(win: ptr, xoffset: float, yoffset: float)
+
+// The description is GLFW's own C string, kept as bytes: a script (a
+// shared library of Aether) links no runtime of its own, so nothing
+// here may touch a string; the message is made when it is asked for.
+@c_callback("on_glfw_error")
+error_callback(code: int, description: ptr) {
+    if g_error == null { g_error = calloc(512, 1) }
+    g_error_code = code
+    n = 0 as long
+    if description != null { n = strlen(description) }
+    if n > (511 as long) { n = 511 as long }
+    if n > (0 as long) { memcpy(g_error, description, n) }
+    memset(g_error + (n as int), 0, 1 as long)
+}
+
+// The wheel's turns since the frame last asked, kept on the window.
+@c_callback("on_glfw_scroll")
+scroll_callback(win: ptr, xoffset: float, yoffset: float) {
+    acc = glfwGetWindowUserPointer(win)
+    if acc == null { return }
+    total = acc as float[]
+    total[0] = total[0] + yoffset
+}
+
+scratch() -> ptr {
+    if g_scratch == null { g_scratch = calloc(2, 8) }
+    return g_scratch
+}
+
+// glfwInit answers true when it has already run, so this is safe to call
+// again after an offscreen context (native/gpu/offscreen.c) took GLFW
+// down with it.
 init() -> bool {
-    return ae3d_platform_init() == 1
+    if g_error == null { g_error = calloc(512, 1) }
+    glfwSetErrorCallback((&on_glfw_error) as ptr)
+    return glfwInit() == GLFW_TRUE
 }
 
 shutdown() {
-    ae3d_platform_shutdown()
+    glfwTerminate()
 }
 
 error() -> string {
-    return ae3d_platform_error()
+    if g_error == null || g_error_code == 0 { return "" }
+    text = aether_bytes_string_from_ptr(g_error, strlen(g_error) as int)
+    return "glfw error ${g_error_code}: ${text}"
 }
+
+extern aether_bytes_string_from_ptr(src: ptr, length: int) -> string @heap
 
 window_create(width: int, height: int, title: string,
               api: int, msaa: int, decorated: bool, visible: bool,
               depth_bits: int) -> ptr {
-    frame = 0
-    if decorated { frame = 1 }
-    shown = 0
-    if visible { shown = 1 }
-    return ae3d_window_create(width, height, title, api, msaa, frame, shown,
-                              depth_bits)
+    glfwDefaultWindowHints()
+    if decorated { glfwWindowHint(GLFW_DECORATED, GLFW_TRUE) } else { glfwWindowHint(GLFW_DECORATED, GLFW_FALSE) }
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE)
+    // An invisible window still has a framebuffer and still renders; it
+    // just never reaches the screen or the taskbar, and cannot take focus
+    // away from whatever the machine is actually being used for.
+    if visible {
+        glfwWindowHint(GLFW_VISIBLE, GLFW_TRUE)
+    } else {
+        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE)
+        glfwWindowHint(GLFW_FOCUSED, GLFW_FALSE)
+        glfwWindowHint(GLFW_FOCUS_ON_SHOW, GLFW_FALSE)
+    }
+    if depth_bits > 0 { glfwWindowHint(GLFW_DEPTH_BITS, depth_bits) }
+    if msaa > 0 { glfwWindowHint(GLFW_SAMPLES, msaa) }
+    if api == API_VULKAN {
+        glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API)
+    } else {
+        glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_API)
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4)
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1)
+        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE)
+        glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE)
+    }
+    name = title
+    if name == "" { name = "ae3d" }
+    win = glfwCreateWindow(width, height, name, null, null)
+    if win == null { return null }
+    glfwSetWindowUserPointer(win, calloc(1, 8))
+    glfwSetScrollCallback(win, (&on_glfw_scroll) as ptr)
+    if api != API_VULKAN { glfwMakeContextCurrent(win) }
+    return win
 }
 
 window_destroy(win: ptr) {
-    ae3d_window_destroy(win)
+    if win == null { return }
+    acc = glfwGetWindowUserPointer(win)
+    if acc != null { free(acc) }
+    glfwDestroyWindow(win)
 }
 
 window_should_close(win: ptr) -> bool {
-    return ae3d_window_should_close(win) == 1
+    if win == null { return true }
+    return glfwWindowShouldClose(win) != 0
 }
 
 window_close(win: ptr) {
-    ae3d_window_close(win)
+    if win != null { glfwSetWindowShouldClose(win, GLFW_TRUE) }
 }
 
 window_swap(win: ptr) {
-    ae3d_window_swap(win)
+    if win != null { glfwSwapBuffers(win) }
 }
 
 window_make_current(win: ptr) {
-    ae3d_window_make_current(win)
+    if win != null { glfwMakeContextCurrent(win) }
 }
 
 window_set_vsync(interval: int) {
-    ae3d_window_set_vsync(interval)
+    glfwSwapInterval(interval)
 }
 
-window_width(win: ptr) -> int {
-    return ae3d_window_width(win)
+size_of(win: ptr, framebuffer: bool, index: int) -> int {
+    if win == null { return 0 }
+    p = scratch()
+    mem.set_int(p, 0, 0)
+    mem.set_int(p, 4, 0)
+    if framebuffer { glfwGetFramebufferSize(win, p, p + 4) } else { glfwGetWindowSize(win, p, p + 4) }
+    return mem.get_int(p, index * 4)
 }
 
-window_height(win: ptr) -> int {
-    return ae3d_window_height(win)
-}
-
-window_fb_width(win: ptr) -> int {
-    return ae3d_window_fb_width(win)
-}
-
-window_fb_height(win: ptr) -> int {
-    return ae3d_window_fb_height(win)
-}
+window_width(win: ptr) -> int { return size_of(win, false, 0) }
+window_height(win: ptr) -> int { return size_of(win, false, 1) }
+window_fb_width(win: ptr) -> int { return size_of(win, true, 0) }
+window_fb_height(win: ptr) -> int { return size_of(win, true, 1) }
 
 window_set_pos(win: ptr, x: int, y: int) {
-    ae3d_window_set_pos(win, x, y)
+    if win != null { glfwSetWindowPos(win, x, y) }
+}
+
+// A GLFWvidmode begins with its width and height, two ints.
+mode_size(index: int) -> int {
+    monitor = glfwGetPrimaryMonitor()
+    if monitor == null { return 0 }
+    mode = glfwGetVideoMode(monitor)
+    if mode == null { return 0 }
+    return mem.get_int(mode, index * 4)
 }
 
 window_center(win: ptr) {
-    ae3d_window_center(win)
+    if win == null { return }
+    mw = mode_size(0)
+    mh = mode_size(1)
+    if mw == 0 || mh == 0 { return }
+    glfwSetWindowPos(win, (mw - window_width(win)) / 2, (mh - window_height(win)) / 2)
 }
 
 window_set_title(win: ptr, title: string) {
-    ae3d_window_set_title(win, title)
+    if win != null { glfwSetWindowTitle(win, title) }
 }
 
 window_set_cursor_mode(win: ptr, mode: int) {
-    ae3d_window_set_cursor_mode(win, mode)
+    if win == null { return }
+    value = GLFW_CURSOR_NORMAL
+    if mode == CURSOR_HIDDEN { value = GLFW_CURSOR_HIDDEN }
+    if mode == CURSOR_DISABLED { value = GLFW_CURSOR_DISABLED }
+    glfwSetInputMode(win, GLFW_CURSOR, value)
 }
 
-monitor_width() -> int {
-    return ae3d_monitor_width()
-}
-
-monitor_height() -> int {
-    return ae3d_monitor_height()
-}
+monitor_width() -> int { return mode_size(0) }
+monitor_height() -> int { return mode_size(1) }
 
 poll_events() {
-    ae3d_poll_events()
+    glfwPollEvents()
 }
 
+// Seconds on the process's monotonic clock.
 time() -> float {
-    return ae3d_time()
+    return (os.now_monotonic_ns() as float) * 0.000000001
 }
 
 key_down(win: ptr, key: int) -> bool {
-    return ae3d_key_down(win, key) == 1
+    if win == null { return false }
+    return glfwGetKey(win, key) == GLFW_PRESS
 }
 
 mouse_down(win: ptr, button: int) -> bool {
-    return ae3d_mouse_down(win, button) == 1
+    if win == null { return false }
+    return glfwGetMouseButton(win, button) == GLFW_PRESS
 }
 
-cursor_x(win: ptr) -> float {
-    return ae3d_cursor_x(win)
+cursor(win: ptr, index: int) -> float {
+    if win == null { return 0.0 }
+    p = scratch()
+    mem.set_float64(p, 0, 0.0)
+    mem.set_float64(p, 8, 0.0)
+    glfwGetCursorPos(win, p, p + 8)
+    return mem.get_float64(p, index * 8)
 }
 
-cursor_y(win: ptr) -> float {
-    return ae3d_cursor_y(win)
-}
+cursor_x(win: ptr) -> float { return cursor(win, 0) }
+cursor_y(win: ptr) -> float { return cursor(win, 1) }
 
 scroll_delta(win: ptr) -> float {
-    return ae3d_scroll_delta(win)
+    if win == null { return 0.0 }
+    acc = glfwGetWindowUserPointer(win)
+    if acc == null { return 0.0 }
+    total = acc as float[]
+    value = total[0]
+    total[0] = 0.0
+    return value
+}
+
+// A gamepad through GLFW's mapping. No pad reads as nothing rather than as a fault.
+gamepad_present(id: int) -> bool {
+    return glfwJoystickIsGamepad(id) == GLFW_TRUE
+}
+
+gamepad_state(id: int) -> ptr {
+    if glfwJoystickIsGamepad(id) != GLFW_TRUE { return null }
+    if g_gamepad == null { g_gamepad = calloc(GAMEPAD_STATE_SIZE, 1) }
+    if glfwGetGamepadState(id, g_gamepad) != GLFW_TRUE { return null }
+    return g_gamepad
+}
+
+gamepad_button(id: int, button: int) -> bool {
+    if button < 0 || button > GLFW_GAMEPAD_BUTTON_LAST { return false }
+    pad = gamepad_state(id)
+    if pad == null { return false }
+    return mem.get_uint8(pad, button) == GLFW_PRESS
+}
+
+gamepad_axis(id: int, axis: int) -> float {
+    if axis < 0 || axis > GLFW_GAMEPAD_AXIS_LAST { return 0.0 }
+    pad = gamepad_state(id)
+    if pad == null { return 0.0 }
+    return mem.get_float32(pad, GAMEPAD_AXES_AT + axis * 4)
 }

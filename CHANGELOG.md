@@ -2,6 +2,83 @@
 
 ## [current]
 
+### The engine in Aether
+
+- Eight of the native C files are Aether modules now, each measured against
+  the C it replaced in the same run: `ae3d.horde` (the crowd's kernels;
+  half a million separated in 51.4 ms against 51.5), `ae3d.nav` (the flow
+  field; the flood 8.2 ms against 8.3), `ae3d.weather`'s particle step,
+  `ae3d.cloudnoise` (the weather map byte for byte the same), `ae3d.png`,
+  `ae3d.blob`, `ae3d.script` (over `std.dl`) and `ae3d.probe` (the agent
+  channel's asking side, over `std.tcp`; 359 ms against 356 for a request
+  and its answer).
+- `ae3d.jobs`: one job pool for the engine, aephysics's scheduler, lent to
+  the physics world (`WorldDef.scheduler`) and run under the horde, the
+  weather and the flow field's steer. `AE3D_JOBS=n`. The renderers' own
+  float32 loops keep the C pool, sized the same, until Aether has a 32-bit
+  float ([aether#2134](https://github.com/aether-lang-dev/aether/issues/2134)).
+- `ae3d.platform` calls GLFW itself: the window, its hints, the events,
+  the keys, the cursor, the gamepad through GLFW's mapping, the scroll
+  wheel through a callback (`@c_callback`), the clock the process's
+  monotonic one. `native/platform/window.c` is gone; what stays in
+  `platform/` is the crash handler and the Metal surface. Every program
+  names GLFW on its link line (`ae3d_glfw_flags` in `scripts/native.sh`).
+- `native/` is by role -- `gpu/`, `geometry/`, `image/`, `platform/`,
+  `agent/`, `dlss/` -- with the file names for what they are and a README
+  saying why each file is still C.
+
+### The street driven
+
+- `physics.ragdoll_dress(r, skeleton)`: a skinned figure worn by a
+  ragdoll. The rig's bones are retargeted onto the bodies at dressing
+  (faced from the feet, each bone turned to where its body's points) and
+  driven from them every step, the root on the pelvis; `ragdoll_turn`
+  faces a figure before it stands. The street's bystanders are the
+  pipeline's zombie, skin and clothes on a rig each, and fall as their
+  ragdolls do; `tests/test_physics` checks a rig's hips ride the pelvis
+  before and after the strike and its head goes down with the neck.
+
+- Spot lights: `core.light_spot(position, direction, color, intensity,
+  range, inner_degrees, outer_degrees)`, a point light confined to a cone,
+  on both backends and in the ray-traced lamp shadows; `tests/test_lights`
+  checks a spot aimed at the ball lights it and aimed away lights nothing.
+  The street's headlights are spots down the road: as point lights they
+  lit the facades either side to white by ray (the top of the frame at 157
+  of 255; 91 with the cones).
+
+- `ae3d.physics`: `Vehicle` (a chassis and four wheels on aephysics's wheel
+  joints: suspension, a spin motor, steering; `vehicle`, `vehicle_drive`,
+  `vehicle_speed`), hull colliders and mesh colliders from a model's own
+  mesh (`convex_collider_of_model`, `mesh_collider_of_model`), standing
+  ragdolls (`ragdoll_stand`, `ragdoll_release`), hit events
+  (`rigidbody_enable_hit_events`, `hit_event`, `ragdoll_of_shape`),
+  damping. The world steps on the engine's pool.
+- `examples/street_drive.ae`: the zombie street with every building and
+  prop in the physics world, a car driven by hand or by its own autopilot,
+  bystanders that stand until struck. 501 bodies at 144 fps hidden, the
+  physics 0.09 ms of the frame.
+- `tests/test_physics` checks the car drives forward and straight on its
+  joints, the sprung figure stands for four seconds, the hits are reported
+  and the struck figure lets go.
+
+### The gate without Python
+
+- `tools/drive_editor.ae` drives the editor through its widgets in Aether:
+  the same ninety-six checks in the same order as the Python it replaces
+  (proved by running both against the same editor on both backends), the
+  editor's own output kept in the log, a scene file's stamp waited past
+  its second. `ci.sh` needs no Python at all now; `tools/blender/` is the
+  only Python left, and it runs inside Blender.
+
+### Documentation
+
+- `docs/` is a documentation set with an index: architecture, building,
+  physics, crowds and navigation, testing and verification, writing
+  Aether, beside the rendering, pipeline, agent, editor and performance
+  pages; the pictures are in `docs/images/`. The README is a front page.
+- `ae3d.png` writes a PNG that decodes again: a heap string's bytes cross
+  through `std.bytes`.
+
 ### Navigation for a horde
 
 - `ae3d.nav`: a flow field over the ground (`flow_new`, `flow_block`,

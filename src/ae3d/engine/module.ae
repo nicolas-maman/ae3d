@@ -8,6 +8,7 @@ import std.heap
 import std.list
 import std.string
 import ae3d.core
+import ae3d.jobs
 import ae3d.platform
 import ae3d.gl
 import ae3d.vk
@@ -516,12 +517,15 @@ engine_new_with(api: int) -> *Engine {
     e.perf_on = core.env_int("AE3D_PERF", 0) == 1
     e.perf_stage_ms = calloc(vk.STAGE_COUNT, 8)
     e.animations = anim.registry_new() as ptr
-    // The job pool the crowd's passes and the instance uploads run over: a
-    // worker for every hardware thread but this one. AE3D_JOBS=n is the
-    // thread count, this one included; 1 is this thread alone, which is
-    // the measure everything else is against.
+    // The job pool the crowd's passes, the weather and the physics run
+    // over: a worker for every hardware thread but this one. AE3D_JOBS=n
+    // is the thread count, this one included; 1 is this thread alone,
+    // which is the measure everything else is against. The renderer's
+    // own C loops (the instance packing, float32 work Aether cannot
+    // express yet, aether#2134) run on the native pool, sized the same.
     threads = core.env_int("AE3D_JOBS", 0)
-    if threads <= 0 { ae3d_jobs_start(0 - 1) } else { ae3d_jobs_start(threads - 1) }
+    jobs.start(threads)
+    ae3d_jobs_start(jobs.workers())
 
     if api == platform.API_VULKAN {
         vulkan_state = vk.renderer_new()
@@ -791,6 +795,7 @@ engine_free(e: *Engine) {
         gl.renderer_free(e.backend_state as *GLRenderer)
     }
     ae3d_jobs_stop()
+    jobs.stop()
     heap.free(e)
 }
 
@@ -798,7 +803,7 @@ engine_free(e: *Engine) {
 // thread: what the crowd's passes are spread over.
 engine_jobs(e: *Engine) -> int {
     if e == null { return 0 }
-    return ae3d_jobs_workers()
+    return jobs.workers()
 }
 
 engine_set_size(e: *Engine, width: int, height: int) {

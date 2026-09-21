@@ -1,0 +1,343 @@
+// Look for surfaces that would fight over the same depth, in the geometry.
+//
+// Z-fighting is two faces in one plane, close enough in depth that
+// rounding decides which is in front. It is usually looked for on
+// screen, where it shows as a shimmer that depends on where the camera
+// happens to be; here it is looked for in the scene, where either two
+// faces share a plane and overlap or they do not.
+//
+//     ./build.sh tools/check_coplanar.ae && ./build/check_coplanar resources/blender/zombie_street
+//
+// Every exported object is read back with the transform the manifest
+// recorded, which is what the loader will place it with. Rotated objects
+// are reported and skipped: their faces are not axis aligned, so this
+// test does not apply to them and saying so is better than passing them
+// silently. Exits 0 when no two faces share a plane, 1 naming each pair
+// that does, 2 when the export cannot be read.
+import std.os
+import std.file
+import std.list
+import std.string
+import std.json
+import std.heap
+
+const TOLERANCE = 0.0001
+const OVERLAP = 0.001
+
+extern fabs(x: float) -> float
+
+// An axis-aligned face: the axis it is normal to, where along it, and
+// its extent on the other two axes (in axis order).
+struct Face {
+    axis: int
+    plane: float
+    lo0: float
+    hi0: float
+    lo1: float
+    hi1: float
+}
+
+// An object's axis-aligned faces in the world.
+struct Surface {
+    name: string
+    faces: ptr                     // list of *Face
+}
+
+face_ptr(f: *Face) -> ptr { return f }
+surface_ptr(s: *Surface) -> ptr { return s }
+field(fields: ptr, index: int) -> string { return string.string_array_get(fields, index) }
+
+// The mesh's positions and faces out of its OBJ: `v x y z` and `f a b c ...`
+// lines, an index per corner before any slash. True when the file was read.
+struct Obj {
+    positions: float[]             // three per vertex
+    vertex_count: int
+    corners: int[]                 // the faces' corners, each face's count first
+    corner_count: int
+    face_count: int
+}
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+load_obj(path: string, o: *Obj) -> bool {
+    text, err = file.read(path)
+    if err != "" { return false }
+    lines = string.split(text, "\n")
+    n = string.array_size(lines)
+    // Room for the whole file: a line is at least two characters per number.
+    o.positions = calloc(n * 3 + 3, 8) as float[]
+    o.corners = calloc(n * 8 + 8, 4) as int[]
+    o.vertex_count = 0
+    o.corner_count = 0
+    o.face_count = 0
+    i = 0
+    while i < n {
+        line = field(lines, i)
+        if string.starts_with(line, "v ") != 0 {
+            words = string.split(line, " ")
+            w = string.array_size(words)
+            axis = 0
+            k = 1
+            while k < w && axis < 3 {
+                word = field(words, k)
+                if string.length(word) > 0 {
+                    o.positions[o.vertex_count * 3 + axis] = string.get_double(word)
+                    axis = axis + 1
+                }
+                k = k + 1
+            }
+            o.vertex_count = o.vertex_count + 1
+            string.array_free(words)
+        } else if string.starts_with(line, "f ") != 0 {
+            words = string.split(line, " ")
+            w = string.array_size(words)
+            at = o.corner_count
+            o.corners[at] = 0
+            o.corner_count = o.corner_count + 1
+            k = 1
+            while k < w {
+                word = field(words, k)
+                if string.length(word) > 0 {
+                    slash = string.string_index_of(word, "/")
+                    index = word
+                    if slash >= 0 { index = string.substring(word, 0, slash) }
+                    o.corners[o.corner_count] = string.get_int(index) - 1
+                    o.corner_count = o.corner_count + 1
+                    o.corners[at] = o.corners[at] + 1
+                }
+                k = k + 1
+            }
+            o.face_count = o.face_count + 1
+            string.array_free(words)
+        }
+        i = i + 1
+    }
+    string.array_free(lines)
+    return true
+}
+
+number_at(array: ptr, i: int) -> float { return json.json_get_number(json.json_array_get_raw(array, i)) }
+
+is_identity(rotation: ptr) -> bool {
+    x = number_at(rotation, 0)
+    y = number_at(rotation, 1)
+    z = number_at(rotation, 2)
+    w = number_at(rotation, 3)
+    return fabs(x) < TOLERANCE && fabs(y) < TOLERANCE && fabs(z) < TOLERANCE && fabs(fabs(w) - 1.0) < TOLERANCE
+}
+
+// Each face as (axis, plane, box), for the faces that are axis aligned,
+// placed as the manifest's transform places the object.
+world_faces(o: *Obj, location: ptr, scale: ptr) -> ptr {
+    out = list.new()
+    lx = number_at(location, 0)
+    ly = number_at(location, 1)
+    lz = number_at(location, 2)
+    sx = number_at(scale, 0)
+    sy = number_at(scale, 1)
+    sz = number_at(scale, 2)
+    at = 0
+    f = 0
+    while f < o.face_count {
+        count = o.corners[at]
+        // The face's extent on each axis.
+        lo0 = 0.0
+        hi0 = 0.0
+        lo1 = 0.0
+        hi1 = 0.0
+        lo2 = 0.0
+        hi2 = 0.0
+        c = 0
+        while c < count {
+            v = o.corners[at + 1 + c]
+            x = o.positions[v * 3] * sx + lx
+            y = o.positions[v * 3 + 1] * sy + ly
+            z = o.positions[v * 3 + 2] * sz + lz
+            if c == 0 {
+                lo0 = x; hi0 = x
+                lo1 = y; hi1 = y
+                lo2 = z; hi2 = z
+            } else {
+                if x < lo0 { lo0 = x }
+                if x > hi0 { hi0 = x }
+                if y < lo1 { lo1 = y }
+                if y > hi1 { hi1 = y }
+                if z < lo2 { lo2 = z }
+                if z > hi2 { hi2 = z }
+            }
+            c = c + 1
+        }
+        axis = 0
+        while axis < 3 {
+            extent = hi0 - lo0
+            if axis == 1 { extent = hi1 - lo1 }
+            if axis == 2 { extent = hi2 - lo2 }
+            if extent <= TOLERANCE {
+                // The other two axes, in order: the box the face covers.
+                face = heap.new(Face)
+                face.axis = axis
+                if axis == 0 {
+                    face.plane = lo0
+                    face.lo0 = lo1; face.hi0 = hi1
+                    face.lo1 = lo2; face.hi1 = hi2
+                } else if axis == 1 {
+                    face.plane = lo1
+                    face.lo0 = lo0; face.hi0 = hi0
+                    face.lo1 = lo2; face.hi1 = hi2
+                } else {
+                    face.plane = lo2
+                    face.lo0 = lo0; face.hi0 = hi0
+                    face.lo1 = lo1; face.hi1 = hi1
+                }
+                if face.hi0 - face.lo0 > OVERLAP && face.hi1 - face.lo1 > OVERLAP {
+                    list.add_raw(out, face_ptr(face))
+                } else {
+                    heap.free(face)
+                }
+                break
+            }
+            axis = axis + 1
+        }
+        at = at + 1 + count
+        f = f + 1
+    }
+    return out
+}
+
+min_float(a: float, b: float) -> float { if a < b { return a } return b }
+max_float(a: float, b: float) -> float { if a > b { return a } return b }
+
+overlaps(a: *Face, b: *Face) -> bool {
+    if min_float(a.hi0, b.hi0) - max_float(a.lo0, b.lo0) <= OVERLAP { return false }
+    if min_float(a.hi1, b.hi1) - max_float(a.lo1, b.lo1) <= OVERLAP { return false }
+    return true
+}
+
+surface_at(surfaces: ptr, i: int) -> *Surface { return list.get_raw(surfaces, i) as *Surface }
+
+// Insertion by name, so the report reads the same on every run.
+add_surface(surfaces: ptr, s: *Surface) {
+    list.add_raw(surfaces, surface_ptr(s))
+    i = list.size(surfaces) - 1
+    while i > 0 && string.compare(surface_at(surfaces, i - 1).name, s.name) > 0 {
+        list.list_set(surfaces, i, list.get_raw(surfaces, i - 1))
+        i = i - 1
+    }
+    list.list_set(surfaces, i, surface_ptr(s))
+}
+
+axis_name(axis: int) -> string {
+    if axis == 0 { return "x" }
+    if axis == 1 { return "y" }
+    return "z"
+}
+
+main() {
+    if os.args_count() < 2 {
+        println("usage: check_coplanar <exported directory>")
+        os.exit(2)
+    }
+    directory = os.args_get(1)
+    manifest_path = string.concat(directory, "/manifest.json")
+    text, err = file.read(manifest_path)
+    if err != "" {
+        println("check_coplanar: cannot read ${manifest_path}")
+        os.exit(2)
+    }
+    root, parse_err = json.parse(text)
+    if parse_err != "" {
+        println("check_coplanar: ${manifest_path}: ${parse_err}")
+        os.exit(2)
+    }
+    objects = json.json_object_get_raw(root, "objects")
+    if objects == null {
+        println("check_coplanar: ${manifest_path} has no objects")
+        os.exit(2)
+    }
+    surfaces = list.new()
+    skipped = 0
+    count = json.json_array_size(objects)
+    i = 0
+    while i < count {
+        entry = json.json_array_get_raw(objects, i)
+        name = json.json_get_string_raw(json.json_object_get_raw(entry, "object"))
+        transform = json.json_object_get_raw(entry, "transform")
+        files = json.json_object_get_raw(entry, "files")
+        parent = json.json_object_get_raw(entry, "parent")
+        has_parent = parent != null && json.json_type(parent) == 3 && string.length(json.json_get_string_raw(parent)) > 0
+        // A skinned figure is drawn posed by its bones, never in the bind
+        // pose its faces are exported in, and the crowd draws it thousands
+        // of times wherever the simulation puts it: two figures exported on
+        // the same spot share every plane and fight over none of them.
+        skinned = files != null && json.json_object_get_raw(files, "skin") != null
+        if is_identity(json.json_object_get_raw(transform, "rotation")) == false || has_parent || skinned {
+            skipped = skipped + 1
+        } else {
+            mesh_path = string.concat("${directory}/", json.json_get_string_raw(json.json_object_get_raw(files, "mesh")))
+            o = heap.new(Obj)
+            if load_obj(mesh_path, o) == false {
+                println("check_coplanar: cannot read ${mesh_path}")
+                os.exit(2)
+            }
+            s = heap.new(Surface)
+            s.name = string.copy(name)
+            s.faces = world_faces(o, json.json_object_get_raw(transform, "location"), json.json_object_get_raw(transform, "scale"))
+            add_surface(surfaces, s)
+            string.free(mesh_path)
+        }
+        i = i + 1
+    }
+
+    clashes = 0
+    println("check_coplanar: ${list.size(surfaces)} objects checked, ${skipped} skipped as rotated, parented or skinned")
+    n = list.size(surfaces)
+    i = 0
+    while i < n {
+        first = surface_at(surfaces, i)
+        j = i + 1
+        while j < n {
+            second = surface_at(surfaces, j)
+            found = false
+            a = 0
+            fa = list.size(first.faces)
+            while a < fa && found == false {
+                face_a = list.get_raw(first.faces, a) as *Face
+                b = 0
+                fb = list.size(second.faces)
+                while b < fb {
+                    face_b = list.get_raw(second.faces, b) as *Face
+                    if face_a.axis == face_b.axis && fabs(face_a.plane - face_b.plane) <= TOLERANCE && overlaps(face_a, face_b) {
+                        found = true
+                        println("  ${first.name} and ${second.name} share the plane ${axis_name(face_a.axis)} = ${plane_text(face_a.plane)} and overlap there")
+                        clashes = clashes + 1
+                        break
+                    }
+                    b = b + 1
+                }
+                a = a + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if clashes > 0 {
+        println("check_coplanar: ${clashes} coplanar overlap(s)")
+        os.exit(1)
+    }
+    println("check_coplanar: no two faces share a plane")
+}
+
+// A plane's position to four decimals.
+plane_text(v: float) -> string {
+    scaled = v * 10000.0
+    if scaled >= 0.0 { scaled = scaled + 0.5 } else { scaled = scaled - 0.5 }
+    whole = scaled as long
+    sign = ""
+    if whole < (0 as long) { sign = "-"; whole = 0 - whole }
+    units = whole / (10000 as long)
+    fraction = whole % (10000 as long)
+    digits = "${fraction}"
+    while string.length(digits) < 4 { digits = string.concat("0", digits) }
+    return "${sign}${units}.${digits}"
+}

@@ -47,14 +47,6 @@ pass() { printf '   ok    %s\n' "$1"; }
 fail() { printf '   FAIL  %s\n' "$1"; failures=$((failures + 1)); }
 skip() { printf '   skip  %s (%s)\n' "$1" "$2"; skipped=$((skipped + 1)); }
 
-# Windows ships a python3 on PATH whose only purpose is to open the Microsoft
-# Store, and it answers command -v exactly like an interpreter would. Asking it
-# to run something is the only way to tell them apart.
-PYTHON=""
-for candidate in python3 python "py -3"; do
-    if $candidate -c "" >/dev/null 2>&1; then PYTHON="$candidate"; break; fi
-done
-
 have_display() {
     case "$(uname -s)" in
         Darwin) return 0 ;;
@@ -138,12 +130,12 @@ trace_crash() {   # trace_crash <status> <binary> [args...]
 
 # A PNG's size, without a decoder: the IHDR width and height are two big-endian
 # 32-bit words at a fixed offset, after the signature and the chunk header.
-# od's --endian is GNU-only and this has to read the same on macOS.
-# Unquoted, as everywhere else: "py -3" is two words.
+# od's -j, -N and -t x1 are POSIX, so this reads the same on macOS; the
+# words are put together by hand since --endian is GNU-only.
 snapshot_size() {
-    $PYTHON -c 'import struct,sys
-d = open(sys.argv[1], "rb").read(24)
-print("%dx%d" % struct.unpack(">II", d[16:24]) if len(d) >= 24 else "")' "$1" 2>/dev/null
+    set -- $(od -An -t x1 -j 16 -N 8 "$1" 2>/dev/null)
+    [ $# -eq 8 ] || return 0
+    echo "$((0x$1$2$3$4))x$((0x$5$6$7$8))"
 }
 
 snapshot_is() {
@@ -228,17 +220,18 @@ step "no two surfaces share a plane"
 # camera happens to be; looked for in the geometry, either two faces share a
 # plane and overlap or they do not. Runs against the committed export, so it
 # needs no Blender.
-if [ -n "$PYTHON" ]; then
+if ! ./build.sh tools/check_coplanar.ae >/tmp/ae3d_coplanar.log 2>&1; then
+    fail "check_coplanar (build)"
+    sed 's/^/        /' /tmp/ae3d_coplanar.log | head -12
+else
     for exported in resources/blender/zombie_street resources/blender/showcase; do
-        if $PYTHON tools/blender/check_coplanar.py "$exported" >/tmp/ae3d_coplanar.log 2>&1; then
+        if ./build/check_coplanar "$exported" >/tmp/ae3d_coplanar.log 2>&1; then
             pass "$exported has no coplanar overlaps"
         else
             fail "$exported has surfaces that would fight over the same depth"
             sed 's/^/        /' /tmp/ae3d_coplanar.log | head -12
         fi
     done
-else
-    skip "coplanar surfaces" "no python3"
 fi
 
 step "docs/agent.md matches the engine's command table"
@@ -264,12 +257,13 @@ fi
 # Vulkan on the previous shader, which fails parity in ways that look like
 # real bugs; the check is that the checked-in files are what the source makes.
 step "Vulkan shaders regenerated"
-if [ -z "$PYTHON" ]; then
-    skip "Vulkan shaders" "no python"
-elif $PYTHON native/shaders/generate.py --check >/tmp/ae3d_shaders.log 2>&1; then
-    pass "native/shaders and vkscene are what src/ae3d/shaders produces"
+if ! ./build.sh tools/generate_shaders.ae >/tmp/ae3d_shaders.log 2>&1; then
+    fail "generate_shaders (build)"
+    sed "s/^/        /" /tmp/ae3d_shaders.log | head -12
+elif ./build/generate_shaders --check >/tmp/ae3d_shaders.log 2>&1; then
+    pass "native/gpu/shaders and vkscene are what src/ae3d/shaders produces"
 else
-    fail "generated Vulkan shaders are out of date; run native/shaders/generate.py"
+    fail "generated Vulkan shaders are out of date; run build/generate_shaders"
     sed "s/^/        /" /tmp/ae3d_shaders.log | head -12
 fi
 
@@ -297,8 +291,8 @@ if pkg-config --exists vulkan 2>/dev/null; then
 elif [ -d /opt/homebrew/include/vulkan ]; then
     VULKAN_CFLAGS="-I/opt/homebrew/include"
 fi
-for src in native/*.c; do
-    if "$CC" -c -O2 -Wall -Wextra -Werror $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o /dev/null 2>/tmp/ae3d_cc.log; then
+for src in native/*/*.c; do
+    if "$CC" -c -O2 -Wall -Wextra -Werror -Inative $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o /dev/null 2>/tmp/ae3d_cc.log; then
         pass "$src"
     else
         fail "$src"
@@ -306,10 +300,10 @@ for src in native/*.c; do
     fi
 done
 if [ "$(uname -s)" = "Darwin" ]; then
-    if "$CC" -c -O2 -Wall -Wextra -Werror -fobjc-arc $GLFW_CFLAGS native/ae3d_vk_surface.m -o /dev/null 2>/tmp/ae3d_cc.log; then
-        pass "native/ae3d_vk_surface.m"
+    if "$CC" -c -O2 -Wall -Wextra -Werror -fobjc-arc $GLFW_CFLAGS -Inative native/platform/metal_surface.m -o /dev/null 2>/tmp/ae3d_cc.log; then
+        pass "native/platform/metal_surface.m"
     else
-        fail "native/ae3d_vk_surface.m"
+        fail "native/platform/metal_surface.m"
         sed 's/^/        /' /tmp/ae3d_cc.log | head -20
     fi
 fi
@@ -916,29 +910,28 @@ else
         # A name the editor shares with the toolkit it imports is bound
         # differently inside the ui.window block than outside it, silently, and
         # that is how the Undo button came to step the toolkit's empty stack.
-        if [ -n "$PYTHON" ]; then
-            collide_log="$(mktemp)"
-            if AETHER_UI_ROOT="$UI_ROOT" $PYTHON tools/check_ui_name_collisions.py \
-                    >"$collide_log" 2>&1; then
-                pass "ae3d_editor (names)"
-            else
-                fail "ae3d_editor (names)"
-                sed 's/^/        /' "$collide_log" | head -12
-            fi
-            rm -f "$collide_log"
+        collide_log="$(mktemp)"
+        if ! ./build.sh tools/check_ui_names.ae >"$collide_log" 2>&1; then
+            fail "ae3d_editor (names, build)"
+            sed 's/^/        /' "$collide_log" | head -12
+        elif AETHER_UI_ROOT="$UI_ROOT" ./build/check_ui_names >"$collide_log" 2>&1; then
+            pass "ae3d_editor (names)"
         else
-            skip "ae3d_editor (names)" "no python3"
+            fail "ae3d_editor (names)"
+            sed 's/^/        /' "$collide_log" | head -12
         fi
+        rm -f "$collide_log"
 
         # Everything above reads the report the editor writes about itself, and
         # that report comes from calling the handlers directly. A button that
         # cannot be hit, a field whose callback is not wired, a row that does
         # not respond to a click: all of them pass. So this presses the real
         # widgets through aether-ui's driver and asks the tree what changed.
-        if [ -z "$PYTHON" ]; then
-            skip "ae3d_editor (driver)" "no python3"
-        elif ! have_display; then
+        if ! have_display; then
             skip "ae3d_editor (driver)" "no display"
+        elif ! ./build.sh tools/drive_editor.ae >/tmp/ae3d_driver_build.log 2>&1; then
+            fail "ae3d_editor (driver, build)"
+            sed 's/^/        /' /tmp/ae3d_driver_build.log | head -12
         else
             # Both backends. The report checks have always run on each, but
             # nothing had ever pressed a widget on the Vulkan one, and the
@@ -946,7 +939,7 @@ else
             # a real click exercises.
             for driver_backend in opengl vulkan; do
                 driver_log="$(mktemp)"
-                if $PYTHON tools/drive_editor.py --backend "$driver_backend" \
+                if ./build/drive_editor --backend "$driver_backend" \
                         --port 8797 >"$driver_log" 2>&1; then
                     pass "ae3d_editor (driver, $driver_backend)"
                 else
@@ -955,7 +948,7 @@ else
                     # more checks than that now, so the head of its log is all
                     # the ones that passed and a failure two thirds of the way
                     # down was reported as a wall of ok with no reason in it.
-                    grep -E 'FAIL|Traceback|Error|error:' "$driver_log" \
+                    grep -E 'FAIL|Error|error:' "$driver_log" \
                         | sed 's/^/        /' | head -12
                     # And the driver's own last words, which say WHY when the
                     # run never got to a check: "never answered /widgets" and

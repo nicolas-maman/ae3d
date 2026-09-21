@@ -22,6 +22,8 @@
 import std.list
 import std.heap
 import std.string
+import std.os
+import std.dl
 import ae3d.core
 import ae3d.behaviour
 
@@ -31,16 +33,13 @@ exports (
     script_path, script_has_start, library_path, last_error
 )
 
-extern ae3d_script_open(path: string) -> ptr
-extern ae3d_script_has_start(script: ptr) -> int
-extern ae3d_script_start(script: ptr, memory: ptr, object: ptr)
-extern ae3d_script_update(script: ptr, memory: ptr, object: ptr, delta: float)
-extern ae3d_script_close(script: ptr)
-extern ae3d_script_error() -> string
-extern ae3d_script_suffix() -> string
-
+// A loaded script: its library, and its phases resolved once, called
+// through their C signatures (the script's state, the game object it is
+// on, and for update the frame).
 struct Script {
     handle: ptr
+    start: ptr                     // the library's start, or null: a script that only moves something has no setup
+    update: ptr                    // its update, what makes a library a script
     path: string
 }
 
@@ -48,11 +47,18 @@ var g_error = ""
 
 last_error() -> string { return g_error }
 
-// Where the library for a named script lives. The suffix is the platform's,
-// and knowing which belongs here rather than in every caller that wants to
-// open one.
+// What a loadable library is called on this platform: knowing which
+// belongs here rather than in every caller that wants to open one.
+library_suffix() -> string {
+    platform = os.platform()
+    if platform == "windows" { return ".dll" }
+    if platform == "darwin" { return ".dylib" }
+    return ".so"
+}
+
+// Where the library for a named script lives.
 library_path(directory: string, name: string) -> string {
-    tail = string.concat(name, ae3d_script_suffix())
+    tail = string.concat(name, library_suffix())
     path = string.concat(directory, tail)
     string.free(tail)
     return path
@@ -62,23 +68,38 @@ library_path(directory: string, name: string) -> string {
 // a library with no update in it is a file that is not a script, and a
 // caller that gets one back would call into nothing every frame.
 script_open(path: string) -> *Script {
-    handle = ae3d_script_open(path)
+    g_error = ""
+    if path == "" {
+        g_error = "no script path"
+        return null
+    }
+    handle = dl.open_raw(path)
     if handle == null {
-        g_error = ae3d_script_error()
+        reason = dl.last_error_raw()
+        if reason == "" { reason = "the library would not load" }
+        g_error = "${path}: ${reason}"
+        return null
+    }
+    update = dl.symbol_raw(handle, "update")
+    if update == null {
+        dl.close_raw(handle)
+        g_error = "${path}: no update in it"
         return null
     }
     s = heap.new(Script)
     s.handle = handle
+    s.update = update
+    s.start = dl.symbol_raw(handle, "start")
     s.path = path
     return s
 }
 
 // CRITICAL: the path is not freed here. A struct owns its string fields and
 // heap.free releases them, so freeing it as well is a double free, and this
-// aborted on the first script it closed. See docs/string_ownership.md.
+// aborted on the first script it closed. See docs/writing-aether.md.
 script_close(s: *Script) {
     if s == null { return }
-    if s.handle != null { ae3d_script_close(s.handle) }
+    if s.handle != null { dl.close_raw(s.handle) }
     heap.free(s)
 }
 
@@ -92,15 +113,17 @@ script_path(s: *Script) -> string {
 // crash rather than a no-op.
 script_has_start(s: *Script) -> bool {
     if s == null { return false }
-    return ae3d_script_has_start(s.handle) == 1
+    return s.start != null
 }
 
 script_start(s: *Script, state: ptr, go: *GameObject) {
-    if s == null || go == null { return }
-    ae3d_script_start(s.handle, state, go as ptr)
+    if s == null || go == null || s.start == null { return }
+    start = s.start as fn(ptr, ptr) -> void
+    start(state, go as ptr)
 }
 
 script_update(s: *Script, state: ptr, go: *GameObject, delta: float) {
-    if s == null || go == null { return }
-    ae3d_script_update(s.handle, state, go as ptr, delta)
+    if s == null || go == null || s.update == null { return }
+    update = s.update as fn(ptr, ptr, float) -> void
+    update(state, go as ptr, delta)
 }

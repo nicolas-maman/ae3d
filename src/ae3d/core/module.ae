@@ -19,6 +19,7 @@ import std.heap
 import std.os
 import std.string
 import ae3d.platform
+import ae3d.cloudnoise
 
 exports (
     mesh_push_skybox_cube, skybox_solid, skybox_texture, SKY_PROCEDURAL, mesh_normal,
@@ -61,7 +62,7 @@ exports (
     model_enable_point_instancing, model_instance_points, model_set_instance_scales,
     model_set_pose_bank, model_pose_bank, model_enable_instance_phases, model_set_instance_phase,
     model_set_instance_phases,
-    model_instance_count, model_set_instance_draw_count, model_remove_instance, light_new, light_directional, light_point, nearest_lights,
+    model_instance_count, model_set_instance_draw_count, model_remove_instance, light_new, light_directional, light_point, light_spot, light_set_cone, nearest_lights,
     light_warm, light_cool, light_sun, light_free, shader_new, shader_named, shader_valid,
     SHADER_CUSTOM, SHADER_WATER, debug_enabled,
     set_debug, frustum_culling, set_frustum_culling, face_culling, set_face_culling,
@@ -82,8 +83,6 @@ exports (
     frustum_intersects_sphere, plane_distance, camera_screen_to_world
 )
 
-extern ae3d_cloudnoise_shape(size: int, out: ptr) -> int
-extern ae3d_cloudnoise_weather(size: int, out: ptr) -> int
 extern calloc(count: int, size: int) -> ptr
 extern sqrt(x: float) -> float
 extern sin(x: float) -> float
@@ -482,6 +481,8 @@ struct Light {
     constant_atten: float
     linear_atten: float
     quadratic_atten: float
+    spot_cos_outer: float          // a spot light's cone (MODE_SPOT): cos of the angle its light ends at
+    spot_cos_inner: float          // and cos of the angle it is whole within
     kind: int
     mode: int
     name: string
@@ -536,7 +537,7 @@ var g_cloud_weather: ptr = null
 cloud_shape_bytes() -> ptr {
     if g_cloud_shape == null {
         g_cloud_shape = calloc(CLOUD_SHAPE_SIZE * CLOUD_SHAPE_SIZE * CLOUD_SHAPE_SIZE * 4, 1)
-        if g_cloud_shape != null { ae3d_cloudnoise_shape(CLOUD_SHAPE_SIZE, g_cloud_shape) }
+        if g_cloud_shape != null { cloudnoise.shape(CLOUD_SHAPE_SIZE, g_cloud_shape) }
     }
     return g_cloud_shape
 }
@@ -544,7 +545,7 @@ cloud_shape_bytes() -> ptr {
 cloud_weather_bytes() -> ptr {
     if g_cloud_weather == null {
         g_cloud_weather = calloc(CLOUD_WEATHER_SIZE * CLOUD_WEATHER_SIZE * 4, 1)
-        if g_cloud_weather != null { ae3d_cloudnoise_weather(CLOUD_WEATHER_SIZE, g_cloud_weather) }
+        if g_cloud_weather != null { cloudnoise.weather(CLOUD_WEATHER_SIZE, g_cloud_weather) }
     }
     return g_cloud_weather
 }
@@ -2124,6 +2125,25 @@ light_point(position: Vec3, color: Vec3, intensity: float, range: float) -> *Lig
         l.quadratic_atten = 1.0 / (range * range)
     }
     return l
+}
+
+// A spot light: a point light whose light is confined to a cone about
+// `direction`, whole within `inner_degrees` of the axis and gone at
+// `outer_degrees`, with a smooth fall-off between. A headlight, a
+// torch, a stage lamp.
+light_spot(position: Vec3, direction: Vec3, color: Vec3, intensity: float, range: float,
+           inner_degrees: float, outer_degrees: float) -> *Light {
+    l = light_point(position, color, intensity, range)
+    l.mode = MODE_SPOT
+    l.direction = v3_normalize(direction)
+    light_set_cone(l, inner_degrees, outer_degrees)
+    return l
+}
+
+light_set_cone(l: *Light, inner_degrees: float, outer_degrees: float) {
+    if outer_degrees < inner_degrees + 0.01 { outer_degrees = inner_degrees + 0.01 }
+    l.spot_cos_inner = cos_of(inner_degrees * 3.14159265 / 180.0)
+    l.spot_cos_outer = cos_of(outer_degrees * 3.14159265 / 180.0)
 }
 
 light_warm(position: Vec3, intensity: float) -> *Light {

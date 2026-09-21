@@ -30,7 +30,7 @@ SOFTWARE.
 
 ## stb_image
 
-`native/stb_image.h` is vendored verbatim from https://github.com/nothings/stb.
+`native/image/stb_image.h` is vendored verbatim from https://github.com/nothings/stb.
 It is dual licensed as MIT and public domain; ae3d uses it under the MIT
 terms.
 

@@ -12,6 +12,7 @@ import std.list
 import std.heap
 import std.string
 import ae3d.core
+import ae3d.png
 import ae3d.platform
 import ae3d.rendering
 import ae3d.shaders
@@ -142,7 +143,7 @@ extern ae3d_gl_fbo_attach_shadow_map(fbo: int, size: int) -> int
 extern ae3d_gl_renderbuffer_delete(rbo: int)
 extern ae3d_gl_fbo_complete() -> int
 extern ae3d_gl_read_pixel(x: int, y: int) -> int
-extern ae3d_gl_snapshot(path: string, width: int, height: int) -> int
+extern ae3d_gl_read_frame(width: int, height: int) -> ptr
 extern ae3d_offscreen_bind(target: ptr)
 extern ae3d_offscreen_unbind()
 extern ae3d_image_load(path: string) -> ptr
@@ -155,7 +156,7 @@ extern ae3d_image_error() -> string
 const MAX_FBO_DIMENSION = 8192
 const SHADOW_SIZE = 2048
 const MAX_LIGHTS = 16
-const LIGHT_SLOTS = 10
+const LIGHT_SLOTS = 12
 
 struct ProgramSlots {
     program: int
@@ -556,6 +557,8 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
         slots_of[base + 7] = ae3d_gl_uniform_location(program, "lights[${n}].constantAtten")
         slots_of[base + 8] = ae3d_gl_uniform_location(program, "lights[${n}].linearAtten")
         slots_of[base + 9] = ae3d_gl_uniform_location(program, "lights[${n}].quadraticAtten")
+        slots_of[base + 10] = ae3d_gl_uniform_location(program, "lights[${n}].spotCosOuter")
+        slots_of[base + 11] = ae3d_gl_uniform_location(program, "lights[${n}].spotCosInner")
         n = n + 1
     }
     s.light_count = ae3d_gl_uniform_location(program, "lightCount")
@@ -1722,8 +1725,13 @@ read_pixel(x: int, y: int) -> int {
 // The bound framebuffer, written out as a PNG. For a windowed program the frame
 // is only there between the last draw and the buffer swap, so this has to be
 // called in that window.
+// The frame on screen, written out as a PNG.
 snapshot(path: string, width: int, height: int) -> bool {
-    return ae3d_gl_snapshot(path, width, height) == 1
+    pixels = ae3d_gl_read_frame(width, height)
+    if pixels == null { return false }
+    ok = png.write(path, pixels, width, height)
+    free(pixels)
+    return ok
 }
 
 renderer_default_program(r: *GLRenderer) -> int {
@@ -2605,14 +2613,17 @@ upload_light(slots_of: int[], index: int, l: *Light) {
     ae3d_gl_uniform_float(slots_of[base + 3], l.ambient_strength)
     ae3d_gl_uniform_float(slots_of[base + 4], l.temperature)
 
-    directional = 0
-    if l.mode == core.MODE_DIRECTIONAL { directional = 1 }
-    ae3d_gl_uniform_int(slots_of[base + 5], directional)
+    kind = 0
+    if l.mode == core.MODE_DIRECTIONAL { kind = 1 }
+    if l.mode == core.MODE_SPOT { kind = 2 }
+    ae3d_gl_uniform_int(slots_of[base + 5], kind)
 
     ae3d_gl_uniform_vec3(slots_of[base + 6], l.direction.x, l.direction.y, l.direction.z)
     ae3d_gl_uniform_float(slots_of[base + 7], l.constant_atten)
     ae3d_gl_uniform_float(slots_of[base + 8], l.linear_atten)
     ae3d_gl_uniform_float(slots_of[base + 9], l.quadratic_atten)
+    ae3d_gl_uniform_float(slots_of[base + 10], l.spot_cos_outer)
+    ae3d_gl_uniform_float(slots_of[base + 11], l.spot_cos_inner)
 }
 
 // Unit 1, because unit 0 is the material's own texture and changes per group.

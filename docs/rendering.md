@@ -33,13 +33,16 @@ The feature list in full, with the reasoning behind each. The [README](../README
   snaps at the loop.
 - **A data-oriented ECS** (`ae3d.ecs`): entities as integer handles, components
   in dense columns a system walks in one pass, a crowd rendering straight from
-  the position column's buffer. The native crowd step, separation grid and
-  distance bucketing are C over those columns.
+  the position column's buffer. The crowd step, separation grid and
+  distance bucketing are `ae3d.horde`, over those columns and the job pool.
 - **Physically based shading**: metallic/roughness materials, sixteen
-  directional or point lights a frame -- the key light and, of every light
-  the scene registers, the fifteen nearest the camera, picked each frame
-  (`core.nearest_lights`), a point light past its fall-off skipped before
-  it is shaded -- normal mapping, baked per-vertex occlusion and
+  directional, point or spot lights a frame -- the key light and, of every
+  light the scene registers, the fifteen nearest the camera, picked each
+  frame (`core.nearest_lights`), a point light past its fall-off and a spot
+  light outside its cone skipped before they are shaded; a spot light
+  (`core.light_spot`) is a point light confined to a cone about its
+  direction, whole within an inner angle and gone at an outer with a smooth
+  fall-off between, which is what a headlight is -- normal mapping, baked per-vertex occlusion and
   screen-space ambient occlusion from the scene's depth (`engine_set_ssao`,
   both backends), shadow mapping with a texel-snapped light box (both
   backends), volumetric clouds and their shadows, a sky drawn from the sun by
@@ -81,7 +84,7 @@ The feature list in full, with the reasoning behind each. The [README](../README
   sample is lit by the sun through the cloud over it, in three octaves of
   Beer's law with the powder darkening and a two-lobe phase, and by the
   sky. The noise is baked once at start into a 2D and a 3D texture
-  (`native/ae3d_cloudnoise.c`), so the march is a fetch a sample and the
+  (`ae3d.cloudnoise`), so the march is a fetch a sample and the
   clouds are a millisecond and a half of the frame. The ground computes
   the same weather field where the sun's ray meets the layer, so their
   shadows cross the terrain as they drift. One call,
@@ -89,7 +92,7 @@ The feature list in full, with the reasoning behind each. The [README](../README
 - **Weather.** `ae3d.weather` puts rain, snow, dust or a storm over any
   scene with one call: `weather_set(w, STORM, 0.8)`. The particles are point
   instances -- a position, a scale, a colour and a phase each, the stream
-  the sand's grains use -- stepped in C in a box that rides ahead of the
+  the sand's grains use -- stepped over the job pool in a box that rides ahead of the
   camera, so a hundred thousand drops cost a fraction of a millisecond
   wherever the eye goes; rain is a thin streak falling fast, snow a flake
   swaying down, dust a mote carried by the wind. Each kind sets the fog it
@@ -111,7 +114,7 @@ The feature list in full, with the reasoning behind each. The [README](../README
   `overcast`, `overcast_color`) so a frame under it can be held against
   the clear one.
 
-  ![Rain, storm, dust and snow over the island](weather.png)
+  ![Rain, storm, dust and snow over the island](images/weather.png)
 
 - **Voxel worlds as a face mesh.** Only the faces that show, each corner
   carrying the sky it can see from the three voxels that crowd it -- the
@@ -127,7 +130,7 @@ The feature list in full, with the reasoning behind each. The [README](../README
   everything attached to them, a scene editor, and `AE3D_API=vulkan` to run
   any program on the other renderer.
 
-![Twenty thousand zombies filling the street from end to end, seen from above the pavement](zombie-horde.png)
+![Twenty thousand zombies filling the street from end to end, seen from above the pavement](images/zombie-horde.png)
 
 *`AE3D_CROWD=20000 AE3D_NEAR=28 ./build/zombie_city`: the near tier draws the
 full mesh, the far tier the build's own 168-triangle stand-in, and past
@@ -345,8 +348,8 @@ colour, its resolved depth and its motion vectors, in the temporal pass's
 place, with the same nudged projection (more phases: eight times the
 square of the scale). The composite samples what it wrote.
 
-How it is wired (`native/ae3d_dlss.cpp`, C++ against the SDK's headers,
-behind the C surface of `native/ae3d_dlss.h`): the Streamline runtime is
+How it is wired (`native/dlss/streamline.cpp`, C++ against the SDK's headers,
+behind the C surface of `native/dlss/streamline.h`): the Streamline runtime is
 loaded before Vulkan starts and its interposer stands in for the Vulkan
 loader, so the instance and the device made through it carry what DLSS
 needs; each frame the camera's matrices (column-major here, row-major and

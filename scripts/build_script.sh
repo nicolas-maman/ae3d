@@ -52,9 +52,12 @@ if [ ! -f "$(ae3d_native_library)" ]; then
     ./build.sh --natives >/dev/null
 fi
 
-# A script sits in build/scripts, one directory below the library.
+# A script sits in build/scripts, one directory below the library. It names
+# GLFW as a program does: the engine's Aether it imports calls GLFW
+# (ae3d.platform), and on Windows a DLL resolves everything at its link.
+ae3d_glfw_flags
 # shellcheck disable=SC2086
 $CC -O2 -fwrapv $(ae3d_native_pic_flag) $AETHER_CFLAGS -Inative $LINK_FLAGS \
-    "$GEN" $(ae3d_native_link_flags ..) -o "$LIB"
+    "$GEN" $(ae3d_native_link_flags ..) $GLFW_LIBS -o "$LIB"
 
 echo "built: $LIB"

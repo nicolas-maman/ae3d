@@ -6,7 +6,7 @@ git clone https://github.com/aether-lang-dev/aether-ui.git ../aether-ui
 ./build/ae3d_editor
 ```
 
-![the editor on Windows](editor-windows.png)
+![the editor on Windows](images/editor-windows.png)
 
 The chrome is one dark theme on every platform: neutral greys, three tones
 apart -- the viewport's ground, the panels a step lighter, the bars and
@@ -247,7 +247,7 @@ The editor takes a few environment variables, which is how CI drives it.
 The Linux job fetches aether-ui at the commit `.github/workflows/ci.yml`
 pins (`AETHER_UI_REF`) and GTK4, builds the editor against it, runs it
 bounded on both backends and the roundtrip scene, and presses its
-widgets through `tools/drive_editor.py`; the other runners have no
+widgets through `tools/drive_editor.ae`; the other runners have no
 toolkit checkout and skip it, and so does a machine without one.
 
 | | |
@@ -265,6 +265,8 @@ cannot rasterize widgets to pixels, so `GET /widgets` and its geometry is the
 only way to tell whether a panel is where it should be.
 
 ## How the viewport works
+
+![The viewport: the scene drawn into the toolkit's GPU view, the gizmo on a canvas over it](images/editor-viewport.png)
 
 aether-ui hosts a real GL context
 ([aether-ui#92](https://github.com/aether-lang-dev/aether-ui/issues/92)), so the

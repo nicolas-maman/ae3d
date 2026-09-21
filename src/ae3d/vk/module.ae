@@ -11,6 +11,7 @@ import std.list
 import std.heap
 import std.string
 import ae3d.core
+import ae3d.png
 import ae3d.platform
 import ae3d.rendering
 import ae3d.vkscene
@@ -149,7 +150,6 @@ extern ae3d_vk_capture_ready() -> int
 extern ae3d_vk_capture_pixels() -> ptr
 extern ae3d_vk_capture_width() -> int
 extern ae3d_vk_capture_height() -> int
-extern ae3d_png_write(path: string, rgba: ptr, width: int, height: int) -> int
 extern ae3d_vk_scene_offset(name: string) -> int
 extern ae3d_vk_scene_set_float_array(offset: int, handle: ptr)
 extern ae3d_vk_scene_set_vec3_array(offset: int, handle: ptr)
@@ -325,8 +325,7 @@ snapshot(path: string) -> bool {
         println("ae3d: the captured Vulkan frame could not be read")
         return false
     }
-    return ae3d_png_write(path, pixels, ae3d_vk_capture_width(),
-                          ae3d_vk_capture_height()) == 1
+    return png.write(path, pixels, ae3d_vk_capture_width(), ae3d_vk_capture_height())
 }
 
 offscreen_width() -> int {
@@ -1702,14 +1701,17 @@ upload_light(index: int, l: *Light) {
     ae3d_vk_scene_set_float(base + vkscene.LIGHT_AMBIENTSTRENGTH, l.ambient_strength)
     ae3d_vk_scene_set_float(base + vkscene.LIGHT_TEMPERATURE, l.temperature)
 
-    directional = 0
-    if l.mode == core.MODE_DIRECTIONAL { directional = 1 }
-    ae3d_vk_scene_set_int(base + vkscene.LIGHT_ISDIRECTIONAL, directional)
+    kind = 0
+    if l.mode == core.MODE_DIRECTIONAL { kind = 1 }
+    if l.mode == core.MODE_SPOT { kind = 2 }
+    ae3d_vk_scene_set_int(base + vkscene.LIGHT_ISDIRECTIONAL, kind)
 
     ae3d_vk_scene_set_vec3(base + vkscene.LIGHT_DIRECTION, l.direction.x, l.direction.y, l.direction.z)
     ae3d_vk_scene_set_float(base + vkscene.LIGHT_CONSTANTATTEN, l.constant_atten)
     ae3d_vk_scene_set_float(base + vkscene.LIGHT_LINEARATTEN, l.linear_atten)
     ae3d_vk_scene_set_float(base + vkscene.LIGHT_QUADRATICATTEN, l.quadratic_atten)
+    ae3d_vk_scene_set_float(base + vkscene.LIGHT_SPOTCOSOUTER, l.spot_cos_outer)
+    ae3d_vk_scene_set_float(base + vkscene.LIGHT_SPOTCOSINNER, l.spot_cos_inner)
 }
 
 // A model's own uniforms, written straight into the block. The offset is

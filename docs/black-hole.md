@@ -1,6 +1,6 @@
 # The black hole demo
 
-![the hole](black-hole.png)
+![the hole](images/black-hole.png)
 
 A Kerr black hole with an accretion disc, drawn by integrating null geodesics
 one per pixel. It is a tech demo rather than an engine feature, and it earns its

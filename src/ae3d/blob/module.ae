@@ -1,0 +1,81 @@
+// A file as bytes, and the little-endian numbers in it.
+//
+// Aether's string is a C string, so a file read through it stops at the
+// first zero byte; a glTF buffer is nothing but zero bytes. This reads a
+// whole file into memory the caller owns (the C library's own fopen and
+// fread, no wrapper of ours between) and decodes the numbers a glTF
+// accessor is made of -- float32, uint8/16/32 -- at a byte offset,
+// little-endian as glTF requires whatever the machine is (std.mem's
+// _le accessors), the float through the runtime's float32 load.
+//
+//   bytes = blob.read("figure.glb")
+//   size = blob.last_size()
+//   x = blob.f32(bytes, 12)
+//   json = bytes.string_from_ptr(blob.slice(bytes, 20), length)   // a chunk as a string (std.bytes)
+//   blob.free_bytes(bytes)
+import std.mem
+
+exports (
+    read, last_size, free_bytes, slice, f32, u32, u16, u8, i16, i8
+)
+
+extern fopen(path: string, mode: string) -> ptr
+extern fclose(f: ptr) -> int
+extern fread(buffer: ptr, size: long, count: long, f: ptr) -> long
+extern fseek(f: ptr, offset: long, whence: int) -> int
+extern ftell(f: ptr) -> long
+extern malloc(size: long) -> ptr
+extern free(p: ptr)
+
+const SEEK_SET = 0
+const SEEK_END = 2
+
+var g_last_size: long = 0
+
+// The size of the last file read, for a caller that has no out-parameter to hand it.
+last_size() -> long { return g_last_size }
+
+// The whole file, zero-terminated after its last byte; null when it
+// cannot be read. The caller frees it.
+read(path: string) -> ptr {
+    g_last_size = 0 as long
+    if path == "" { return null }
+    f = fopen(path, "rb")
+    if f == null { return null }
+    if fseek(f, 0 as long, SEEK_END) != 0 { fclose(f); return null }
+    size = ftell(f)
+    if size < (0 as long) { fclose(f); return null }
+    fseek(f, 0 as long, SEEK_SET)
+    bytes = malloc(size + (1 as long))
+    if bytes == null { fclose(f); return null }
+    if size > (0 as long) && fread(bytes, 1 as long, size, f) != size {
+        free(bytes)
+        fclose(f)
+        return null
+    }
+    mem.set_uint8(bytes, size as int, 0)
+    fclose(f)
+    g_last_size = size
+    return bytes
+}
+
+free_bytes(bytes: ptr) { if bytes != null { free(bytes) } }
+
+// The bytes from `offset` on, as a pointer into the same allocation: a
+// .glb's binary chunk inside the file's bytes.
+slice(bytes: ptr, offset: long) -> ptr { return bytes + (offset as int) }
+
+f32(bytes: ptr, offset: long) -> float { return mem.get_float32(bytes, offset as int) }
+u32(bytes: ptr, offset: long) -> int { return mem.get_u32_le(bytes, offset as int) as int }
+u16(bytes: ptr, offset: long) -> int { return mem.get_u16_le(bytes, offset as int) }
+u8(bytes: ptr, offset: long) -> int { return mem.get_uint8(bytes, offset as int) }
+i16(bytes: ptr, offset: long) -> int {
+    v = u16(bytes, offset)
+    if v >= 32768 { return v - 65536 }
+    return v
+}
+i8(bytes: ptr, offset: long) -> int {
+    v = u8(bytes, offset)
+    if v >= 128 { return v - 256 }
+    return v
+}
