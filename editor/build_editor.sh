@@ -150,7 +150,15 @@ case "$OS" in
         ;;
 esac
 
-NATIVE_SOURCES="native/agent/channel.c native/gpu/capture.c native/gpu/opengl_api.c native/platform/window.c native/geometry/mesh.c native/geometry/skin.c native/geometry/meshfile.c native/image/image.c native/gpu/opengl.c native/gpu/offscreen.c native/gpu/vulkan.c native/gpu/jobs.c $(ae3d_dlss_source "$OBJ_DIR") $NATIVE_EXTRA"
+# The physics engine's one C file goes in as it does in build.sh: the
+# engine's job pool is aephysics's scheduler, so every ae3d program
+# links it.
+AEPHYSICS="$ROOT/deps/aephysics"
+if [ ! -f "$AEPHYSICS/aephysics/native/aephysics_native.c" ]; then
+    echo "ae3d: deps/aephysics is empty; run: git submodule update --init" >&2
+    exit 1
+fi
+NATIVE_SOURCES="native/agent/channel.c native/gpu/capture.c native/gpu/opengl_api.c native/platform/window.c native/geometry/mesh.c native/geometry/skin.c native/geometry/meshfile.c native/image/image.c native/gpu/opengl.c native/gpu/offscreen.c native/gpu/vulkan.c native/gpu/jobs.c $AEPHYSICS/aephysics/native/aephysics_native.c $(ae3d_dlss_source "$OBJ_DIR") $NATIVE_EXTRA"
 
 # Every header, not a list of three: the generated ones carry the shaders and
 # the uniform offsets, so leaving them out linked the previous shaders.
@@ -173,9 +181,9 @@ done
 
 ae3d_native_build "$CC" "$OBJ_DIR" "$CFLAGS" "$GLFW_LIBS $ZLIB_LIBS"
 
-# Both module trees on the search path: ae3d.* out of src/, ui and vg.* out of
-# the aether-ui checkout.
-export AETHER_LIB_DIR="$ROOT/src:$UI_ROOT"
+# Every module tree on the search path: ae3d.* out of src/, ui and vg.* out
+# of the aether-ui checkout, aephysics.* out of its submodule.
+export AETHER_LIB_DIR="$ROOT/src:$UI_ROOT:$AEPHYSICS"
 aetherc "$SOURCE" "$GEN"
 
 # GLFW and zlib belong to the engine, which is a library of its own now and
