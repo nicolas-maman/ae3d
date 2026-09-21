@@ -98,16 +98,8 @@ esac
 # include path -- cannot find it. Naming the flags is then the only way in, and
 # not having one meant the build could not be done at all rather than done
 # awkwardly.
-if [ -n "${GLFW_CFLAGS:-}" ] || [ -n "${GLFW_LIBS:-}" ]; then
-    GLFW_CFLAGS="${GLFW_CFLAGS:-}"
-    GLFW_LIBS="${GLFW_LIBS:-}"
-elif command -v pkg-config >/dev/null 2>&1 && pkg-config --exists glfw3; then
-    GLFW_CFLAGS="$(pkg-config --cflags glfw3)"
-    GLFW_LIBS="$(pkg-config --libs glfw3)"
-else
-    GLFW_CFLAGS=""
-    GLFW_LIBS="-lglfw"
-fi
+. "$ROOT/scripts/native.sh"
+ae3d_glfw_flags
 
 # native/geometry/meshfile.c includes <zlib.h> and calls gzopen/gzread/gzclose, so
 # zlib is ours to link and always has been. It was never named here: on Linux
@@ -140,11 +132,10 @@ elif [ -n "${VULKAN_SDK:-}" ]; then
 fi
 
 . "$ROOT/scripts/platform.sh"
-. "$ROOT/scripts/native.sh"
 PLATFORM_LIBS="$(ae3d_platform_libs "$(uname -s)")"
 PIC="$(ae3d_native_pic_flag)"
 
-NATIVE_SOURCES="native/agent/channel.c native/gpu/capture.c native/platform/window.c native/geometry/mesh.c native/geometry/skin.c native/geometry/meshfile.c native/image/image.c native/gpu/opengl_api.c native/gpu/opengl.c native/gpu/offscreen.c native/gpu/vulkan.c native/gpu/jobs.c $(ae3d_dlss_source "$OBJ_DIR")"
+NATIVE_SOURCES="native/agent/channel.c native/gpu/capture.c native/platform/crash.c native/geometry/mesh.c native/geometry/skin.c native/geometry/meshfile.c native/image/image.c native/gpu/opengl_api.c native/gpu/opengl.c native/gpu/offscreen.c native/gpu/vulkan.c native/gpu/jobs.c $(ae3d_dlss_source "$OBJ_DIR")"
 
 # The physics engine, aephysics, is a git submodule under deps/: Aether
 # modules the compiler finds through AETHER_LIB_DIR below, plus its one C
@@ -221,12 +212,12 @@ fi
 # examples/lib/, and aephysics.* in its submodule.
 export AETHER_LIB_DIR="$ROOT/src:$ROOT/examples/lib:$AEPHYSICS"
 "$AETHERC" "$SOURCE" "$GEN"
-# GLFW and zlib are the engine's, and the engine is a library of its own now
-# that names them on its own link line. Naming them again here is not harmless:
-# where the Aether toolchain is built against zlib its --libs already carries
-# -lz, Apple's ld warns about a duplicate library, and ci.sh reads a warning in
-# a build log as a failure.
-"$CC" $CFLAGS "$GEN" $(ae3d_native_link_flags) $AETHER_COMPILE_FLAGS $AETHER_LIBS $PLATFORM_LIBS -o "$OUT"
+# zlib is the engine's, and the engine is a library of its own that names it
+# on its own link line. Naming it again here is not harmless: where the Aether
+# toolchain is built against zlib its --libs already carries -lz, Apple's ld
+# warns about a duplicate library, and ci.sh reads a warning in a build log as
+# a failure. GLFW is named: the program's own Aether calls it (ae3d.platform).
+"$CC" $CFLAGS "$GEN" $(ae3d_native_link_flags) $GLFW_LIBS $AETHER_COMPILE_FLAGS $AETHER_LIBS $PLATFORM_LIBS -o "$OUT"
 
 # MinGW gcc appends .exe to an output name that has no extension, so the file
 # is not at the path this asked for. Name the one that exists.

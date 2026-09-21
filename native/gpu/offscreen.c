@@ -94,7 +94,9 @@ void ae3d_offscreen_context_destroy(void *context) {
 void *ae3d_offscreen_context(int width, int height) {
     GLFWwindow *window;
 
-    if (!ae3d_platform_init()) return NULL;
+    /* glfwInit answers true when it has already run, and the window's
+       platform layer (ae3d.platform) calls it again after this terminates. */
+    if (!glfwInit()) return NULL;
 
     glfwDefaultWindowHints();
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
@@ -117,7 +119,7 @@ void *ae3d_offscreen_context(int width, int height) {
 void ae3d_offscreen_context_destroy(void *context) {
     if (!context) return;
     glfwDestroyWindow((GLFWwindow *)context);
-    ae3d_platform_shutdown();
+    glfwTerminate();
 }
 
 #endif

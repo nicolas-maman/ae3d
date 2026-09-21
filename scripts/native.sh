@@ -49,6 +49,25 @@ ae3d_native_link_flags() {
     printf '%s' "-Lbuild -lae3d_native $(ae3d_native_rpath "${1:-.}")"
 }
 
+# Where GLFW is: the named flags first, then pkg-config, then a bare -lglfw.
+# A Windows checkout outside MSYS2 has no pkg-config and a hand-built GLFW in
+# a prefix of its own, and the fallback -- a bare -lglfw with no include path
+# -- cannot find it; naming the flags is then the only way in. Sets
+# GLFW_CFLAGS and GLFW_LIBS. Every program links GLFW, not only the engine's
+# library: the window and input layer (ae3d.platform) calls GLFW from Aether,
+# and a Windows DLL cannot lend its imports to the program that loads it.
+ae3d_glfw_flags() {
+    if [ -n "${GLFW_CFLAGS:-}" ] || [ -n "${GLFW_LIBS:-}" ]; then
+        GLFW_CFLAGS="${GLFW_CFLAGS:-}"
+        GLFW_LIBS="${GLFW_LIBS:-}"
+    elif command -v pkg-config >/dev/null 2>&1 && pkg-config --exists glfw3; then
+        GLFW_CFLAGS="$(pkg-config --cflags glfw3)"
+        GLFW_LIBS="$(pkg-config --libs glfw3)"
+    else
+        GLFW_CFLAGS=""
+        GLFW_LIBS="-lglfw"
+    fi
+}
 ae3d_native_library() {
     printf '%s' "build/libae3d_native$(ae3d_native_suffix)"
 }

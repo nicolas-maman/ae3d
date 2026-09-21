@@ -17,6 +17,12 @@
   weather and the flow field's steer. `AE3D_JOBS=n`. The renderers' own
   float32 loops keep the C pool, sized the same, until Aether has a 32-bit
   float ([aether#2134](https://github.com/aether-lang-dev/aether/issues/2134)).
+- `ae3d.platform` calls GLFW itself: the window, its hints, the events,
+  the keys, the cursor, the gamepad through GLFW's mapping, the scroll
+  wheel through a callback (`@c_callback`), the clock the process's
+  monotonic one. `native/platform/window.c` is gone; what stays in
+  `platform/` is the crash handler and the Metal surface. Every program
+  names GLFW on its link line (`ae3d_glfw_flags` in `scripts/native.sh`).
 - `native/` is by role -- `gpu/`, `geometry/`, `image/`, `platform/`,
   `agent/`, `dlss/` -- with the file names for what they are and a README
   saying why each file is still C.

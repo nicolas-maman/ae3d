@@ -11,9 +11,12 @@ honours.
   cross-platform tests were proved at that version and the engine follows it.
 - A C compiler (`cc`, `gcc` or `clang`), for the C under `native/` and for
   the C Aether generates.
-- GLFW 3, zlib, `pkg-config`, and the Vulkan headers. The Vulkan loader is
-  opened at run time; a Vulkan driver is optional (the engine falls back to
-  OpenGL when `AE3D_API=opengl`, and the tests run on either).
+- GLFW 3.3 or later as a shared library (the one every package manager
+  ships: the window layer calls it from Aether and the renderers from C,
+  and a static copy in each would be two libraries with two states), zlib,
+  `pkg-config`, and the Vulkan headers. The Vulkan loader is opened at run
+  time; a Vulkan driver is optional (the engine falls back to OpenGL when
+  `AE3D_API=opengl`, and the tests run on either).
 - Python 3 only for Blender's own scripts under `tools/blender/`, which run
   inside Blender; nothing else in the build or at run time.
 

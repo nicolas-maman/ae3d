@@ -106,7 +106,7 @@ says what it is for and why it is shaped as it is.
 
 | Area | Modules |
 |---|---|
-| Foundation | `core` (linear algebra, scene types, camera, the backend vtable), `platform` (the window, input and timing over GLFW), `engine` (the loop, behaviours, the window), `behaviour` (game objects and components), `input` (actions and axes), `jobs` (the pool) |
+| Foundation | `core` (linear algebra, scene types, camera, the backend vtable), `platform` (the window, input and timing, over GLFW called directly), `engine` (the loop, behaviours, the window), `behaviour` (game objects and components), `input` (actions and axes), `jobs` (the pool) |
 | Rendering | `vk`, `gl`, `shaders` (the GLSL), `vkscene` (generated), `rendering` (shading presets), `offscreen` (a frame to a buffer), `sky` (the sun by the hour), `cloudnoise` (the clouds' textures), `water` (a Gerstner sea), `weather` (rain, snow, dust, storm) |
 | Geometry and assets | `loader` (OBJ, primitives), `gltf`, `assets` (the Blender export), `blob` (a file as bytes), `png` (a frame as a file), `noise`, `voxel`, `terrain`, `raycast`, `skin`, `anim`, `ik` |
 | Simulation | `physics` (aephysics in the loop), `crowd` (pose banks, the device crowd), `horde` (the crowd's kernels), `nav` (the flow field), `ecs` (dense columns for crowds too large to be objects) |
@@ -122,7 +122,7 @@ role, and each folder is there for one reason, stated in
 |---|---|
 | `gpu/`, `geometry/` | Aether has no 32-bit float, and everything a GPU reads is one: vertex buffers, instance transforms, bone palettes, uniform blocks, every Vulkan and OpenGL structure with a float member. Writing a float32 from Aether today is a runtime call per element; at half a million figures that is eight million calls a frame. The ask is [aether#2134](https://github.com/aether-lang-dev/aether/issues/2134). |
 | `image/` | a third-party decoder (stb_image); a decoder of our own is a project of its own |
-| `platform/` | the window and input over GLFW, and the Objective-C surface MoltenVK draws into on macOS |
+| `platform/` | the crash handler (a signal handler may call only what is async-signal-safe, and it is installed when the library loads), and the Objective-C surface MoltenVK draws into on macOS |
 | `agent/` | the listening socket: `std.tcp` cannot yet bind loopback only or poll a listener ([aether#2136](https://github.com/aether-lang-dev/aether/issues/2136)) |
 | `dlss/` | the Streamline SDK's interface is C++ |
 
@@ -132,8 +132,9 @@ machine: the crowd's kernels (`ae3d.horde`: half a million separated in
 51.4 ms against the C's 51.5), the flow field (`ae3d.nav`: the flood 8.2 ms
 against 8.3), the weather's particles, the clouds' noise (the weather map
 byte for byte the same, the shape within one count in 22 texels of a
-million), the PNG writer, the file reader, the script loader and the
-channel's asking side (a request and its answer 359 ms against 356).
+million), the PNG writer, the file reader, the script loader, the
+channel's asking side (a request and its answer 359 ms against 356) and
+the window, input and timing layer, which calls GLFW itself.
 
 `native/ae3d.h` is the C API the Aether modules bind through `extern`;
 `native/internal.h` is what the C files share with each other. Every C

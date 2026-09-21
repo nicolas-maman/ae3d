@@ -57,20 +57,10 @@ case " $AETHER_COMPILE_FLAGS " in
     *) AETHER_COMPILE_FLAGS="$AETHER_COMPILE_FLAGS -fwrapv" ;;
 esac
 
-# Same precedence as build.sh: named flags win, then pkg-config, then a bare
-# -lglfw. A Windows checkout outside MSYS2 has no pkg-config and a prefix of
-# its own, and the two scripts disagreeing about how to find GLFW is how one of
-# them ends up unbuildable.
-if [ -n "${GLFW_CFLAGS:-}" ] || [ -n "${GLFW_LIBS:-}" ]; then
-    GLFW_CFLAGS="${GLFW_CFLAGS:-}"
-    GLFW_LIBS="${GLFW_LIBS:-}"
-elif command -v pkg-config >/dev/null 2>&1 && pkg-config --exists glfw3; then
-    GLFW_CFLAGS="$(pkg-config --cflags glfw3)"
-    GLFW_LIBS="$(pkg-config --libs glfw3)"
-else
-    GLFW_CFLAGS=""
-    GLFW_LIBS="-lglfw"
-fi
+# The same GLFW as build.sh finds, from the same function: the two scripts
+# disagreeing about how to find it is how one of them ends up unbuildable.
+. "$ROOT/scripts/native.sh"
+ae3d_glfw_flags
 
 if [ -n "${ZLIB_CFLAGS:-}" ] || [ -n "${ZLIB_LIBS:-}" ]; then
     ZLIB_CFLAGS="${ZLIB_CFLAGS:-}"
@@ -101,7 +91,6 @@ elif [ -n "${VULKAN_SDK:-}" ]; then
 fi
 
 . "$ROOT/scripts/platform.sh"
-. "$ROOT/scripts/native.sh"
 PIC="$(ae3d_native_pic_flag)"
 
 OS="$(uname -s)"
@@ -158,7 +147,7 @@ if [ ! -f "$AEPHYSICS/aephysics/native/aephysics_native.c" ]; then
     echo "ae3d: deps/aephysics is empty; run: git submodule update --init" >&2
     exit 1
 fi
-NATIVE_SOURCES="native/agent/channel.c native/gpu/capture.c native/gpu/opengl_api.c native/platform/window.c native/geometry/mesh.c native/geometry/skin.c native/geometry/meshfile.c native/image/image.c native/gpu/opengl.c native/gpu/offscreen.c native/gpu/vulkan.c native/gpu/jobs.c $AEPHYSICS/aephysics/native/aephysics_native.c $(ae3d_dlss_source "$OBJ_DIR") $NATIVE_EXTRA"
+NATIVE_SOURCES="native/agent/channel.c native/gpu/capture.c native/gpu/opengl_api.c native/platform/crash.c native/geometry/mesh.c native/geometry/skin.c native/geometry/meshfile.c native/image/image.c native/gpu/opengl.c native/gpu/offscreen.c native/gpu/vulkan.c native/gpu/jobs.c $AEPHYSICS/aephysics/native/aephysics_native.c $(ae3d_dlss_source "$OBJ_DIR") $NATIVE_EXTRA"
 
 # Every header, not a list of three: the generated ones carry the shaders and
 # the uniform offsets, so leaving them out linked the previous shaders.
@@ -186,9 +175,10 @@ ae3d_native_build "$CC" "$OBJ_DIR" "$CFLAGS" "$GLFW_LIBS $ZLIB_LIBS"
 export AETHER_LIB_DIR="$ROOT/src:$UI_ROOT:$AEPHYSICS"
 aetherc "$SOURCE" "$GEN"
 
-# GLFW and zlib belong to the engine, which is a library of its own now and
-# names them on its own link line. PLATFORM_LIBS here is aether-ui's.
-"$CC" $CFLAGS $UI_FLAGS "$GEN" $UI_SOURCES $(ae3d_native_link_flags) \
+# zlib belongs to the engine, which is a library of its own and names it on its
+# own link line; GLFW is named, since the engine's Aether calls it
+# (ae3d.platform). PLATFORM_LIBS here is aether-ui's.
+"$CC" $CFLAGS $UI_FLAGS "$GEN" $UI_SOURCES $(ae3d_native_link_flags) $GLFW_LIBS \
     $AETHER_COMPILE_FLAGS $AETHER_LIBS $PLATFORM_LIBS \
     -o "$OUT"
 

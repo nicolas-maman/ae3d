@@ -97,7 +97,13 @@ whose data began with a magic number.
 - A string does not cast to a pointer or back; see above.
 - A raw C function pointer is called through a cast:
   `sym as fn(ptr, ptr, float) -> void` (how `ae3d.script` calls into a
-  loaded library).
+  loaded library). The other way, an Aether function handed to C as a
+  callback, is a `@c_callback("name")` function beside an `extern name(...)`
+  declaration, passed as `(&name) as ptr`: an Aether function value is a
+  closure, which is not what a C caller expects (`ae3d.platform`'s GLFW
+  callbacks). Such a callback touches no string and no `std.mem`: a script
+  is a shared library of Aether that links no runtime of its own, and on
+  Windows a shared library resolves everything at its link.
 
 ## Modules and the standard library
 

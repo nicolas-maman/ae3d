@@ -8,40 +8,6 @@
 #define AE3D_CURSOR_HIDDEN   1
 #define AE3D_CURSOR_DISABLED 2
 
-int    ae3d_platform_init(void);
-void   ae3d_platform_shutdown(void);
-const char *ae3d_platform_error(void);
-
-void  *ae3d_window_create(int width, int height, const char *title,
-                          int api, int msaa, int decorated, int visible,
-                          int depth_bits);
-void   ae3d_window_destroy(void *win);
-int    ae3d_window_should_close(void *win);
-void   ae3d_window_close(void *win);
-void   ae3d_window_swap(void *win);
-void   ae3d_window_make_current(void *win);
-void   ae3d_window_set_vsync(int interval);
-int    ae3d_window_width(void *win);
-int    ae3d_window_height(void *win);
-int    ae3d_window_fb_width(void *win);
-int    ae3d_window_fb_height(void *win);
-void   ae3d_window_set_pos(void *win, int x, int y);
-void   ae3d_window_center(void *win);
-void   ae3d_window_set_title(void *win, const char *title);
-void   ae3d_window_set_cursor_mode(void *win, int mode);
-int    ae3d_monitor_width(void);
-int    ae3d_monitor_height(void);
-void   ae3d_poll_events(void);
-double ae3d_time(void);
-int    ae3d_key_down(void *win, int key);
-int    ae3d_gamepad_present(int id);
-int    ae3d_gamepad_button(int id, int button);
-double ae3d_gamepad_axis(int id, int axis);
-int    ae3d_mouse_down(void *win, int button);
-double ae3d_cursor_x(void *win);
-double ae3d_cursor_y(void *win);
-double ae3d_scroll_delta(void *win);
-
 void  *ae3d_mesh_create(void);
 void  *ae3d_mesh_clone(void *mesh);
 void  *ae3d_mesh_decimate(void *mesh, double cell_size);
@@ -179,9 +145,6 @@ int    ae3d_image_height(void *img);
 const char *ae3d_image_error(void);
 
 int    ae3d_gl_load(void);
-/* Whether a GL context is current on this thread; cleanup that can outlive the
-   window checks this before deleting GL objects. */
-int    ae3d_gl_context_current(void);
 const char *ae3d_gl_version(void);
 const char *ae3d_gl_renderer(void);
 int    ae3d_gl_error(void);

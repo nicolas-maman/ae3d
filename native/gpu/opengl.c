@@ -2,6 +2,13 @@
 #include "internal.h"
 #include "opengl_api.h"
 
+/* For glfwGetCurrentContext alone: whether a GL context is current on this
+   thread, which cleanup that can outlive the window asks before deleting GL
+   objects. Deleting with no context is undefined: a desktop driver returns
+   early, llvmpipe dereferences the missing context and crashes. */
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -928,7 +935,7 @@ void ae3d_gl_passtimer_destroy(void *handle) {
        after shutting the engine down, or a test that destroys its offscreen
        context first -- the queries died with the context, and calling
        glDeleteQueries against no context segfaults on llvmpipe. */
-    if (ae3d_gl_context_current()) {
+    if (glfwGetCurrentContext() != NULL) {
         for (slot = 0; slot < AE3D_GL_TIMER_DEPTH; slot++)
             for (pass = 0; pass < AE3D_GL_PASSES; pass++)
                 if (timer->id[slot][pass]) glDeleteQueries(1, &timer->id[slot][pass]);
