@@ -5,8 +5,16 @@
 // object's transform is the body's); a kinematic slab moved by the game
 // carries the world with it; a sphere fired at a crate knocks it; a
 // ragdoll is twelve objects that fall with their bones; and freeing the
-// physics leaves the scene's objects and no bodies.
+// physics leaves the scene's objects and no bodies. The scene file
+// carries the bodies: a crate made from a scene record falls like the
+// one made by hand, and the world written as a scene reads back with a
+// record on every body.
 import ae3d.core
+import ae3d.scene
+import std.list
+import std.string
+import std.fs
+import std.heap
 import ae3d.platform
 import ae3d.engine
 import ae3d.behaviour
@@ -57,6 +65,8 @@ struct Fixture {
     fired: bool
     hits: int                      // hit events the car's body reported
     crate_body_matched: bool       // every step, the object's position was the body's
+    spec_crate: ptr                // a crate given its body by a scene record
+    scene_written: bool            // the world was written as a scene on its first frame
 }
 
 // A humanoid rig the pipeline's shape: a root turned as Blender's are,
@@ -120,12 +130,22 @@ start(state: ptr, e: *Engine) {
     physics.box_collider(ground, core.vec3(40.0, 0.5, 40.0), physics.material(0.6, 0.0))
     check_true("a collider without a Rigidbody makes a static one", physics.rigidbody_of(ground) != null && physics.rigidbody_of(ground).kind == physics.STATIC)
 
+    // Beside the car's lane down x = 0: four seconds in, the car reaches
+    // the origin.
     crate = engine.object(e, "Crate", loader.cube(1.0))
-    behaviour.object_set_position(crate, core.vec3(0.0, 3.0, 0.0))
+    behaviour.object_set_position(crate, core.vec3(0.0 - 5.0, 3.0, 0.0 - 5.0))
     rb = physics.rigidbody(crate, physics.DYNAMIC)
     check_true("a Rigidbody is a component of its object", physics.rigidbody_of(crate) == rb)
     physics.box_collider(crate, core.vec3(0.5, 0.5, 0.5), physics.material(0.6, 0.0))
     s.crate = crate as ptr
+
+    // The same crate from the scene file's record of one.
+    sc = engine.object(e, "Spec crate", loader.cube(1.0))
+    behaviour.object_set_position(sc, core.vec3(6.0, 3.0, 6.0))
+    spec = scene.physics_spec_new("dynamic", "box", 0.6, 0.0, 1.0)
+    check_true("a body comes from a scene record", physics.apply_spec(sc, spec) != null)
+    heap.free(spec)
+    s.spec_crate = sc as ptr
 
     lift = engine.object(e, "Lift", loader.cube(1.0))
     behaviour.object_set_position(lift, core.vec3(10.0, 0.5, 0.0))
@@ -224,9 +244,15 @@ start(state: ptr, e: *Engine) {
     s.crate_body_matched = true
 }
 
+// Four seconds of the world, however fast or slow the frames come: the run
+// ends on the fixed step's count, not the frame's, so a runner that draws
+// three hundred frames a second and one that draws thirty step the same.
+const STEPS = 240
+
 fixed_update(state: ptr, e: *Engine, step: float) {
     s = state as *Fixture
     s.steps = s.steps + 1
+    if s.steps >= STEPS { engine.engine_stop(e) }
     // The lift rises a metre a second; the game moves the object, the world follows.
     lift = s.lift as *GameObject
     behaviour.object_set_position(lift, core.v3_add(behaviour.object_position(lift), core.vec3(0.0, step, 0.0)))
@@ -260,11 +286,54 @@ fixed_update(state: ptr, e: *Engine, step: float) {
 
 late_update(state: ptr, e: *Engine, delta: float) {
     s = state as *Fixture
+    if s.scene_written == false {
+        // The world as the program built it, written the way AE3D_SCENE_OUT
+        // writes any program's.
+        fs.fs_mkdir_p_raw("build/physics_scene/")
+        s.scene_written = engine.engine_save_scene(e, "build/physics_scene/scene.json", "build/physics_scene/")
+        check_true("the world was written as a scene", s.scene_written)
+    }
     crate = s.crate as *GameObject
     rb = physics.rigidbody_of(crate)
     body = dynamics.body_get_position(physics.rigidbody_body(rb))
     object = behaviour.object_position(crate)
     if core.abs_of(body.y - object.y) > 0.000001 { s.crate_body_matched = false }
+}
+
+// The scene written on the first frame reads back with a physics record
+// on the crate, and one on every object that had a body.
+check_scene_file(crate: *GameObject) {
+    loaded = scene.scene_load("build/physics_scene/scene.json")
+    check_true("the written scene loads", loaded != null)
+    if loaded == null { return }
+    back = scene.scene_load_attachments("build/physics_scene/scene.json", loaded)
+    check_true("the written scene carries attachments", back != null)
+    recorded = 0
+    crate_recorded = false
+    if back != null {
+        n = list.size(back)
+        i = 0
+        while i < n {
+            a = list.get_raw(back, i) as *Attachment
+            spec = scene.attachment_physics(a)
+            if spec != null {
+                recorded = recorded + 1
+                m = scene.attachment_model(a)
+                if string.equals(core.text(m.name), "Crate") == 1 {
+                    crate_recorded = spec.body == "dynamic" && spec.collider == "box" && core.abs_of(spec.friction - 0.6) < 0.0001
+                }
+            }
+            i = i + 1
+        }
+        scene.attachments_free(back)
+    }
+    // The ground, two crates, the lift, its rider, the target, the ball,
+    // the hull crate, the car and its four wheels: thirteen bodies with
+    // colliders on a model of their own. A ragdoll's bones are the
+    // ragdoll's and are not recorded one by one.
+    check_true("every body on a model was recorded (${recorded})", recorded == 13)
+    check_true("the crate's record is its body and collider", crate_recorded)
+    scene.scene_free(loaded)
 }
 
 main() {
@@ -273,13 +342,15 @@ main() {
     engine.engine_set_title(e, "ae3d physics test")
     engine.engine_set_camera_input(e, false)
     // The fixed step is a sixtieth; the frames run as fast as they can and the
-    // world takes as many steps as their time covers.
+    // world takes as many steps as their time covers, and stops the run at
+    // STEPS of them. The frame limit is a backstop for a frame that never
+    // covers a step.
     engine.engine_set_fixed_step(e, 1.0 / 60.0)
-    engine.engine_set_frame_limit(e, 240)
+    engine.engine_set_frame_limit(e, 100000)
     light = core.light_sun(core.vec3(0.3, 0.8, 0.5))
     engine.engine_set_light(e, light)
     scene = Fixture { crate: null, lift: null, rider: null, target: null, ball: null, ragdoll: null, stander: null, hull_crate: null, victim: null, rig: null, victim_start_z: 0.0, victim_walked_z: 0.0,
-                      vehicle: null, car: null, car_start_x: 0.0, head_start_y: 0.0, steps: 0, fired: false, hits: 0, crate_body_matched: false }
+                      vehicle: null, car: null, car_start_x: 0.0, head_start_y: 0.0, steps: 0, fired: false, hits: 0, crate_body_matched: false, spec_crate: null, scene_written: false }
     b = engine.behaviour_new("scene", (&scene) as ptr)
     b.start = start
     b.fixed_update = fixed_update
@@ -295,11 +366,25 @@ main() {
 
     p = physics.of(e)
     check_true("the physics is the engine's", p != null)
-    check_true("the world stepped as often as the fixed step ran (${physics.physics_step_count(p)}, ${scene.steps})", physics.physics_step_count(p) == scene.steps && scene.steps > 60)
+    check_true("the world stepped as often as the fixed step ran (${physics.physics_step_count(p)}, ${scene.steps})", physics.physics_step_count(p) == scene.steps && scene.steps == STEPS)
     crate_y = behaviour.object_position(scene.crate as *GameObject).y
     check_near("the crate fell onto the slab and rests on it", crate_y, 0.5, 0.02)
     check_true("the crate's object followed its body every frame", scene.crate_body_matched)
     check_true("the crate is asleep at rest", physics.rigidbody_is_awake(physics.rigidbody_of(scene.crate as *GameObject)) == false)
+    spec_crate_y = behaviour.object_position(scene.spec_crate as *GameObject).y
+    check_near("the crate made from a scene record fell and rests like it", spec_crate_y, 0.5, 0.02)
+    crate_spec = physics.spec_of(scene.crate as *GameObject)
+    check_true("a body answers its scene record", crate_spec != null)
+    if crate_spec != null {
+        check_true("the record's body kind is the body's", crate_spec.body == "dynamic")
+        check_true("the record's collider is the one put on it", crate_spec.collider == "box")
+        check_near("the record's friction is the material's", crate_spec.friction, 0.6, 0.0001)
+        heap.free(crate_spec)
+    }
+    hull_spec = physics.spec_of(scene.hull_crate as *GameObject)
+    check_true("a hull collider is recorded as one", hull_spec != null && hull_spec.collider == "hull")
+    if hull_spec != null { heap.free(hull_spec) }
+    check_scene_file(scene.crate as *GameObject)
     lift_y = behaviour.object_position(scene.lift as *GameObject).y
     rider_y = behaviour.object_position(scene.rider as *GameObject).y
     check_true("the kinematic lift rose (${lift_y})", lift_y > 1.4)
@@ -336,10 +421,11 @@ main() {
 
     bodies_before = physics.physics_body_count(p)
     // The stander's twelve anchors stand with it; the victim's went with its release.
-    check_true("the bodies are counted (${bodies_before})", bodies_before == 6 + 12 + 24 + 1 + 5 + 12)
+    check_true("the bodies are counted (${bodies_before})", bodies_before == 7 + 12 + 24 + 1 + 5 + 12)
     physics.physics_free(p)
     check_true("freed: no physics on the engine", physics.of(e) == null)
     check_true("freed: the objects are still the scene's", behaviour.scene_find(engine.engine_scene(e), "Crate") == scene.crate as *GameObject)
+    check_true("freed: the objects have no Rigidbody left on them", physics.rigidbody_of(scene.crate as *GameObject) == null)
 
     core.light_free(light)
     engine.engine_free(e)

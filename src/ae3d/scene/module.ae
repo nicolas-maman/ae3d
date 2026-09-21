@@ -22,7 +22,8 @@ exports (
     scene_save, scene_load, scene_load_lights, scene_load_attachments,
     scene_load_view, view_defaults, View, Attachment, attachment_new,
     attachment_model, attachment_component, attachment_script, attachment_water,
-    attachment_world,
+    attachment_world, attachment_physics, attachment_set_physics,
+    PhysicsSpec, physics_spec_new,
     attachments_free, scene_free, last_error
 )
 
@@ -41,6 +42,42 @@ struct Attachment {
     script: string
     water: ptr
     world: ptr
+    physics: ptr                   // *PhysicsSpec, or null
+}
+
+// What the physics engine is told about a model: the kind of body it is
+// and the collider its own mesh gives it, with the surface's material and
+// the body's density. The scene file carries it as the model's "physics"
+// record, and the editor and every program that exports its scene write
+// the same one, so a scene built by a program opens in the editor with
+// its bodies.
+struct PhysicsSpec {
+    body: string                   // "static", "kinematic" or "dynamic"
+    collider: string               // "box", "sphere", "capsule", "hull" or "mesh"
+    friction: float
+    restitution: float
+    density: float
+}
+
+physics_spec_new(body: string, collider: string, friction: float, restitution: float, density: float) -> *PhysicsSpec {
+    s = heap.new(PhysicsSpec)
+    s.body = string.copy(body)
+    s.collider = string.copy(collider)
+    s.friction = friction
+    s.restitution = restitution
+    s.density = density
+    return s
+}
+
+attachment_physics(a: *Attachment) -> *PhysicsSpec {
+    if a == null { return null }
+    return a.physics as *PhysicsSpec
+}
+
+attachment_set_physics(a: *Attachment, spec: *PhysicsSpec) {
+    if a == null { return }
+    if a.physics != null { heap.free(a.physics as *PhysicsSpec) }
+    a.physics = spec as ptr
 }
 
 // What a scene records besides its models and lights: where the camera stood,
@@ -270,9 +307,19 @@ scene_load_attachments(path: string, models: ptr) -> ptr {
             }
         }
 
-        if component != "" || script != "" || sim != null || world != null {
-            list.add_raw(attachments,
-                         attachment_new(m, component, script, sim, world) as ptr)
+        // The physics record, on any model that has one.
+        spec = null as *PhysicsSpec
+        spec_json = json.object_get_raw(entry, "physics")
+        if spec_json != null {
+            spec = physics_spec_new(field_string(spec_json, "body"), field_string(spec_json, "collider"),
+                                    field_number(spec_json, "friction", 0.6), field_number(spec_json, "restitution", 0.0),
+                                    field_number(spec_json, "density", 1.0))
+        }
+
+        if component != "" || script != "" || sim != null || world != null || spec != null {
+            a = attachment_new(m, component, script, sim, world)
+            a.physics = spec as ptr
+            list.add_raw(attachments, a as ptr)
         }
         i = i + 1
     }
@@ -487,6 +534,7 @@ attachment_new(m: *Model, component: string, script: string,
     a.script = string.copy(script)
     a.water = w as ptr
     a.world = world as ptr
+    a.physics = null
     return a
 }
 
@@ -501,6 +549,12 @@ attachment_world(a: *Attachment) -> *VoxelWorld { return a.world as *VoxelWorld 
 attachments_free(attachments: ptr) {
     if attachments == null { return }
     count = list.size(attachments)
+    i = 0
+    while i < count {
+        a = list.get_raw(attachments, i) as *Attachment
+        if a != null && a.physics != null { heap.free(a.physics as *PhysicsSpec) }
+        i = i + 1
+    }
     i = 0
     while i < count {
         // heap.free releases the two names with it; releasing them by hand
@@ -797,6 +851,16 @@ scene_save(models: ptr, lights: ptr, attachments: ptr, view: *View,
                 if attached.component != "" {
                     json.object_set_raw(entry, "component", json.str(attached.component))
                 }
+                if attached.physics != null {
+                    spec = attached.physics as *PhysicsSpec
+                    spec_json = json.obj()
+                    json.object_set_raw(spec_json, "body", json.str(spec.body))
+                    json.object_set_raw(spec_json, "collider", json.str(spec.collider))
+                    json.object_set_raw(spec_json, "friction", json.num(spec.friction))
+                    json.object_set_raw(spec_json, "restitution", json.num(spec.restitution))
+                    json.object_set_raw(spec_json, "density", json.num(spec.density))
+                    json.object_set_raw(entry, "physics", spec_json)
+                }
                 if attached.script != "" {
                     json.object_set_raw(entry, "script", json.str(attached.script))
                 }
@@ -889,16 +953,21 @@ scene_load(path: string) -> ptr {
     }
 
     models = list.new()
+    // Each source file is read once, however many entries share it: a
+    // street of a thousand props from two hundred files reads two hundred
+    // files, and every entry is a copy of the one read.
+    sources = list.new()
     count = json.array_size(entries)
     i = 0
     while i < count {
         entry = json.array_get_raw(entries, i)
         if entry != null {
-            m = load_entry(entry)
+            m = load_entry(entry, sources)
             if m != null { list.add_raw(models, m) }
         }
         i = i + 1
     }
+    sources_free(sources)
 
     json.free(root)
 
@@ -913,17 +982,54 @@ scene_load(path: string) -> ptr {
     return models
 }
 
-load_entry(entry: ptr) -> *Model {
+// A source file read once for the entries that share it: the model as the
+// file gave it, never handed out, copied for each entry.
+struct Source {
+    path: string
+    model: ptr                     // *Model
+}
+
+source_model(sources: ptr, path: string) -> *Model {
+    count = list.size(sources)
+    i = 0
+    while i < count {
+        s = list.get_raw(sources, i) as *Source
+        if string.equals(s.path, path) == 1 { return s.model as *Model }
+        i = i + 1
+    }
+    m = loader.load_obj(path, false)
+    if m == null { return null }
+    s = heap.new(Source)
+    s.path = string.copy(path)
+    s.model = m as ptr
+    list.add_raw(sources, s as ptr)
+    return m
+}
+
+sources_free(sources: ptr) {
+    count = list.size(sources)
+    i = 0
+    while i < count {
+        s = list.get_raw(sources, i) as *Source
+        core.model_free(s.model as *Model)
+        heap.free(s)
+        i = i + 1
+    }
+    list.free(sources)
+}
+
+load_entry(entry: ptr, sources: ptr) -> *Model {
     source = field_string(entry, "source_path")
     mesh_file = field_string(entry, "mesh_file")
 
     m = null as *Model
     if source != "" {
-        m = loader.load_obj(source, false)
-        if m == null {
+        read = source_model(sources, source)
+        if read == null {
             set_error("cannot reload ", source)
             return null
         }
+        m = core.model_clone(read)
     } else if mesh_file != "" {
         handle = ae3d_meshfile_load(mesh_file)
         if handle == null {

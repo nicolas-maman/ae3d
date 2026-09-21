@@ -57,10 +57,27 @@ so the draw reads what the world wrote.
 | `rigidbody_set_velocity`, `rigidbody_apply_impulse`, `rigidbody_apply_force`, `rigidbody_set_damping` | the usual |
 | `rigidbody_enable_hit_events(rb, true)`; `hit_event_count(p)`, `hit_event(p, i)` | contacts above the world's hit speed, reported after each step with the shapes, the point, the normal and the approach speed |
 | `physics_body_count`, `physics_step_count`, `physics_set_gravity` | the world's counters and gravity |
-| `physics_free(p)` | the world and its shape data; the objects stay the scene's |
+| `physics_free(p)` | the world and its shape data; the objects stay the scene's, without their Rigidbody components |
+| `spec_of(o)`, `apply_spec(o, spec)`, `attachments(p)` | the scene file's record of a body, and a body from one (below) |
 
 Hulls and meshes are held by the world by reference; `physics_free`
 releases them after the world, so a program never frees one itself.
+
+### The scene file
+
+A body is recorded on its model in the scene file (`ae3d.scene`,
+`PhysicsSpec`): the body's kind, its first collider's kind as one of the
+five the object's own mesh can make -- `box` (its bounds), `sphere`,
+`capsule`, `hull` (its vertices), `mesh` (its triangles) -- and the
+surface's friction and restitution and the density. `spec_of(o)` answers
+it for an object with a body; `apply_spec(o, spec)` gives an object a body
+and a collider from one, which is what the editor's Simulate does for
+every object with a record. `attach` registers the module as one of the
+engine's attachment providers, so `engine_save_scene` -- and
+`AE3D_SCENE_OUT=path`, which writes any program's scene on its first
+frame -- carries the record of every body, and the street opens in the
+editor with its 299 bodies ([docs/editor.md](editor.md)). A ragdoll's
+bones are the ragdoll's and are not recorded one by one.
 
 ## Ragdolls
 
@@ -188,8 +205,11 @@ ragdoll fell; a sprung ragdoll is still standing after four seconds; a
 scaled hull rests on its half height; a car drove forward on its wheel
 joints and straight; its hits were reported and the figure in its way let
 go; the rig that figure wears sits on its pelvis when dressed and still
-does after the strike, its head down with the ragdoll's neck; and after
-`physics_free` the objects are still the scene's. The
+does after the strike, its head down with the ragdoll's neck; a crate
+made from a scene record fell and rests like the one made by hand; the
+world written as a scene reads back with a record on every body; and
+after `physics_free` the objects are still the scene's, with no
+Rigidbody left on them. The
 physics engine's own suites (`scripts/test.sh` in the submodule) hold each
 layer to the reference.
 

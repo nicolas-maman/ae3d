@@ -39,6 +39,7 @@ import ae3d.behaviour
 import ae3d.engine
 import ae3d.loader
 import ae3d.skin
+import ae3d.scene
 import std.strarr
 
 exports (
@@ -53,7 +54,8 @@ exports (
     ragdoll, ragdoll_free, ragdoll_bone, ragdoll_human, ragdoll_set_velocity, ragdoll_kick,
     ragdoll_stand, ragdoll_release, ragdoll_is_standing, ragdoll_turn, ragdoll_of_shape, hit_event_count, hit_event,
     ragdoll_dress, ragdoll_dress_named, ragdoll_is_dressed, humanoid_bone,
-    ragdoll_follow, ragdoll_is_following
+    ragdoll_follow, ragdoll_is_following,
+    spec_of, apply_spec, attachments
 )
 
 extern calloc(count: int, size: int) -> ptr
@@ -85,6 +87,10 @@ struct Rigidbody {
     object: ptr                    // *GameObject
     body_id: BodyId
     kind: int
+    collider: int                  // the first collider's kind (COLLIDER_BOX ...), or 0 for none yet
+    friction: float
+    restitution: float
+    density: float
 }
 
 // A ragdoll: aephysics's human, and a game object per bone. Standing,
@@ -152,6 +158,7 @@ attach(e: *Engine) -> *Physics {
     p.hulls = list.new()
     p.meshes = list.new()
     p.sub_steps = 4
+    engine.engine_set_attachment_provider(e, physics_attachments, p as ptr)
     p.step_count = 0
     b = engine.behaviour_new("physics", p as ptr)
     b.fixed_update = on_fixed_update
@@ -240,11 +247,24 @@ push_transform(rb: *Rigidbody, step: float) {
 }
 
 // The world, its bodies and the shapes' data. The objects stay the
-// scene's; their Rigidbody components are left pointing at nothing, so
-// free the physics after the scene or not at all.
+// scene's, where they are, without their Rigidbody components: freed
+// while its objects are still the scene's (before the scene), so that
+// the components can be taken off them -- and so that the same objects
+// can be given bodies again, as the editor's simulation does.
 physics_free(p: *Physics) {
     if p == null { return }
-    if p.behaviour != null { engine.engine_remove_behaviour(p.engine as *Engine, p.behaviour as *Behaviour) }
+    e = p.engine as *Engine
+    if p.behaviour != null { engine.engine_remove_behaviour(e, p.behaviour as *Behaviour) }
+    engine.engine_remove_attachment_provider(e, p as ptr)
+    count = list.size(p.rigidbodies)
+    i = 0
+    while i < count {
+        rb = list.get_raw(p.rigidbodies, i) as *Rigidbody
+        o = rb.object as *GameObject
+        c = behaviour.object_find_component(o, KIND_RIGIDBODY)
+        if c != null { behaviour.object_remove_component(o, c) }
+        i = i + 1
+    }
     count = list.size(p.ragdolls)
     i = 0
     while i < count {
@@ -378,6 +398,31 @@ shape_def(m: SurfaceMaterial, density: float) -> ShapeDef {
     return sdef
 }
 
+// The collider kinds the scene file names.
+const COLLIDER_BOX = 1
+const COLLIDER_SPHERE = 2
+const COLLIDER_CAPSULE = 3
+const COLLIDER_HULL = 4
+const COLLIDER_MESH = 5
+
+collider_name(kind: int) -> string {
+    if kind == COLLIDER_BOX { return "box" }
+    if kind == COLLIDER_SPHERE { return "sphere" }
+    if kind == COLLIDER_CAPSULE { return "capsule" }
+    if kind == COLLIDER_HULL { return "hull" }
+    if kind == COLLIDER_MESH { return "mesh" }
+    return ""
+}
+
+// The first collider's kind and material, kept on the body for the scene file.
+note_collider(rb: *Rigidbody, kind: int, m: SurfaceMaterial, density: float) {
+    if rb.collider != 0 { return }
+    rb.collider = kind
+    rb.friction = m.friction
+    rb.restitution = m.restitution
+    rb.density = density
+}
+
 // A box of these half extents about the object's origin.
 box_collider(o: *GameObject, half_extents: Vec3, m: SurfaceMaterial, density: float = 1.0) -> ShapeId {
     rb = body_for_collider(o)
@@ -386,6 +431,7 @@ box_collider(o: *GameObject, half_extents: Vec3, m: SurfaceMaterial, density: fl
     box = hull.make_box_hull(half_extents.x, half_extents.y, half_extents.z)
     list.add_raw(p.hulls, box as ptr)
     sdef = shape_def(m, density)
+    note_collider(rb, COLLIDER_BOX, m, density)
     return dynamics.create_hull_shape(rb.body_id, &sdef, box)
 }
 
@@ -393,6 +439,7 @@ sphere_collider(o: *GameObject, radius: float, m: SurfaceMaterial, density: floa
     rb = body_for_collider(o)
     if rb == null { return dynamics.null_shape_id() }
     sdef = shape_def(m, density)
+    note_collider(rb, COLLIDER_SPHERE, m, density)
     return dynamics.create_sphere_shape(rb.body_id, &sdef, manifold.sphere(math.vec3_zero(), radius))
 }
 
@@ -401,6 +448,7 @@ capsule_collider(o: *GameObject, center1: Vec3, center2: Vec3, radius: float, m:
     rb = body_for_collider(o)
     if rb == null { return dynamics.null_shape_id() }
     sdef = shape_def(m, density)
+    note_collider(rb, COLLIDER_CAPSULE, m, density)
     return dynamics.create_capsule_shape(rb.body_id, &sdef, manifold.capsule(center1, center2, radius))
 }
 
@@ -412,6 +460,7 @@ hull_collider(o: *GameObject, h: *HullData, m: SurfaceMaterial, density: float =
     p = rb.physics as *Physics
     list.add_raw(p.hulls, h as ptr)
     sdef = shape_def(m, density)
+    note_collider(rb, COLLIDER_HULL, m, density)
     return dynamics.create_hull_shape(rb.body_id, &sdef, h)
 }
 
@@ -425,7 +474,89 @@ mesh_collider(o: *GameObject, md: *MeshData, m: SurfaceMaterial, scale: Vec3 = m
     list.add_raw(p.meshes, md as ptr)
     sdef = dynamics.default_shape_def()
     sdef.base_material = m
+    note_collider(rb, COLLIDER_MESH, m, 0.0)
     return dynamics.create_mesh_shape(rb.body_id, &sdef, md, scale)
+}
+
+// --- the scene file --------------------------------------------------------------------------------------------
+
+// What the scene file records of an object's physics, or null when it
+// has no body: the body's kind and its first collider's kind and
+// material. The record is the scene's (`scene.PhysicsSpec`) and belongs
+// to the caller.
+spec_of(o: *GameObject) -> *PhysicsSpec {
+    rb = rigidbody_of(o)
+    if rb == null || rb.collider == 0 { return null }
+    body = "dynamic"
+    if rb.kind == KINEMATIC { body = "kinematic" }
+    if rb.kind == STATIC { body = "static" }
+    return scene.physics_spec_new(body, collider_name(rb.collider), rb.friction, rb.restitution, rb.density)
+}
+
+// A body and its collider on an object from the scene file's record: the
+// collider from the object's own mesh -- a box of its bounds, a sphere or
+// a capsule of them, the hull of its vertices, or its triangles. Answers
+// the rigidbody, or null when the object has no mesh to make it from.
+apply_spec(o: *GameObject, spec: *PhysicsSpec) -> *Rigidbody {
+    if o == null || spec == null { return null }
+    model = behaviour.object_model(o)
+    if model == null || model.mesh == null { return null }
+    kind = DYNAMIC
+    if spec.body == "kinematic" { kind = KINEMATIC }
+    if spec.body == "static" { kind = STATIC }
+    rb = rigidbody(o, kind)
+    if rb == null { return null }
+    m = material(spec.friction, spec.restitution)
+    size = core.mesh_size(model.mesh, model.scale)
+    half = math.vec3(size.x * 0.5, size.y * 0.5, size.z * 0.5)
+    if spec.collider == "sphere" {
+        radius = half.x
+        if half.y > radius { radius = half.y }
+        if half.z > radius { radius = half.z }
+        sphere_collider(o, radius, m, spec.density)
+    } else if spec.collider == "capsule" {
+        radius = half.x
+        if half.z > radius { radius = half.z }
+        reach = half.y - radius
+        if reach < 0.0 { reach = 0.0 }
+        capsule_collider(o, math.vec3(0.0, 0.0 - reach, 0.0), math.vec3(0.0, reach, 0.0), radius, m, spec.density)
+    } else if spec.collider == "hull" {
+        convex_collider_of_model(o, m, spec.density)
+    } else if spec.collider == "mesh" {
+        mesh_collider_of_model(o, m)
+    } else {
+        box_collider(o, half, m, spec.density)
+    }
+    return rb
+}
+
+// Every object with a body, as the scene's attachments (a model and its
+// physics record each): what a scene file records of this world. The
+// list is the caller's, freed with scene.attachments_free.
+attachments(p: *Physics) -> ptr {
+    out = list.new()
+    count = list.size(p.rigidbodies)
+    i = 0
+    while i < count {
+        rb = list.get_raw(p.rigidbodies, i) as *Rigidbody
+        o = rb.object as *GameObject
+        model = behaviour.object_model(o)
+        spec = spec_of(o)
+        if model != null && spec != null {
+            a = scene.attachment_new(model, "", "", null, null)
+            scene.attachment_set_physics(a, spec)
+            list.add_raw(out, a as ptr)
+        } else if spec != null {
+            heap.free(spec)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// The provider the engine asks when a scene is written.
+physics_attachments(state: ptr) -> ptr {
+    return attachments(state as *Physics)
 }
 
 // The convex hull of a drawn mesh's vertices, scaled: what a crate, a

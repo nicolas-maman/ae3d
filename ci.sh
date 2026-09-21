@@ -749,8 +749,17 @@ check_editor_run() {
     elif [ "$(sed -n 's/^water //p' "$report")" != "1" ] || \
          [ "$(sed -n 's/^voxels //p' "$report")" != "1" ] || \
          [ "$(sed -n 's/^lights //p' "$report")" != "1" ] || \
-         [ "$(sed -n 's/^scripted //p' "$report")" != "1" ]; then
+         [ "$(sed -n 's/^scripted //p' "$report")" != "1" ] || \
+         [ "$(sed -n 's/^bodies //p' "$report")" != "1" ]; then
+        # The bodies count is the physics record on the cube: in the
+        # roundtrip scene it has been through the file and back.
         fail "$name (component types did not build)"
+        sed 's/^/        /' "$report"
+    elif [ "$(sed -n 's/^simulation_stuck //p' "$report")" != "0" ]; then
+        # Simulate runs the scene's bodies in the editor's engine and, stopped,
+        # puts every model back where it stood. The cube either did not fall
+        # (the world never stepped under the editor) or did not come back.
+        fail "$name (the simulation did not run, or did not put the scene back)"
         sed 's/^/        /' "$report"
     elif [ "$(sed -n 's/^viewport_path //p' "$report")" = "gpu-unbuilt" ]; then
         # The GPU path was taken and the renderer was never built on it, so the

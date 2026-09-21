@@ -2,6 +2,30 @@
 
 ## [current]
 
+### Every program's scene, in the editor
+
+- `AE3D_SCENE_OUT=path` writes any program's scene on its first frame --
+  the models, the lights, the view as the program set it, and the body on
+  every object that has one (`engine_save_scene`; the physics module is an
+  attachment provider of the engine's, `physics.spec_of` / `apply_spec`).
+  The scene file carries a `physics` record per model: the body's kind,
+  its collider from its own mesh (box, sphere, capsule, hull, mesh), the
+  friction, the bounce and the density. The agent channel's `scene.save`
+  writes the same.
+- The editor opens a scene file (`./build/ae3d_editor path`, or
+  `AE3D_SCENE`) and saves back to it; the street's 1,347 models and 299
+  bodies open in a few seconds, since a source file shared by many
+  entries is read once and copied (a copy keeps its material groups now,
+  which `model_clone` dropped), and the hierarchy is built once for the
+  load rather than once per model. The inspector has a PHYSICS section --
+  the kind, the collider, friction, bounce, density, each an undo step --
+  and a Simulate button runs the bodies in the viewport through the
+  editor's engine (`engine_update` runs the fixed step now) and, stopped,
+  puts every model back. CI drives it: the cube falls and comes back.
+- `physics_free` takes the Rigidbody components off the objects, so the
+  same objects can be given bodies again; a model made by `engine.object`
+  is named after its object.
+
 ### The street, walked
 
 - `physics.ragdoll_follow(r)`: the rig drives the ragdoll through its

@@ -35,7 +35,7 @@ kernels; what remains in C is there for one stated reason each
 | **Voxels and terrain** | Voxel worlds as only the faces that show; surface nets over a distance field for smooth terrain. |
 | **An engine you can ask** | `AE3D_AGENT=port` opens a JSON channel: read and change the scene, hold a frame, read its pixels, trace a model from its Blender object to the pixels it landed on. |
 | **Input as a game names it** | Actions and axes bound once to keys, mouse and gamepad, read by name from any script, injectable from a test or an agent. |
-| **An editor** | Hierarchy, inspector, gizmos, terrain sculpting, undo, scene files; one dark theme on every platform. |
+| **An editor** | Hierarchy, inspector, gizmos, terrain sculpting, physics bodies and a Simulate button, undo, scene files; opens any program's scene (`AE3D_SCENE_OUT`); one dark theme on every platform. |
 
 Each row is a page in [docs/](docs/README.md) with the reasoning and the
 measurement behind it.
@@ -161,12 +161,16 @@ lit windows) and a frame budget that fails on one extra triangle
 `editor/` is a scene editor whose chrome is
 [aether-ui](https://github.com/aether-lang-dev/aether-ui): a hierarchy, an
 asset browser, an inspector, a viewport you orbit and click in, a gizmo, a
-sculpting brush, behaviours on objects, undo
-([docs/editor.md](docs/editor.md)).
+sculpting brush, behaviours on objects, bodies and colliders with a
+Simulate button that runs the physics in the viewport and puts the scene
+back, undo ([docs/editor.md](docs/editor.md)). Any program's scene opens
+in it: `AE3D_SCENE_OUT=path` writes the scene a program built, bodies
+included, and the editor takes the file as its argument.
 
 ```bash
 git clone https://github.com/aether-lang-dev/aether-ui.git ../aether-ui
 ./editor/build_editor.sh && ./build/ae3d_editor
+AE3D_SCENE_OUT=build/street.json ./build/street_drive && ./build/ae3d_editor build/street.json
 ```
 
 ## Layout
