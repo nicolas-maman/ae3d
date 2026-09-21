@@ -917,19 +917,17 @@ else
         # A name the editor shares with the toolkit it imports is bound
         # differently inside the ui.window block than outside it, silently, and
         # that is how the Undo button came to step the toolkit's empty stack.
-        if [ -n "$PYTHON" ]; then
-            collide_log="$(mktemp)"
-            if AETHER_UI_ROOT="$UI_ROOT" $PYTHON tools/check_ui_name_collisions.py \
-                    >"$collide_log" 2>&1; then
-                pass "ae3d_editor (names)"
-            else
-                fail "ae3d_editor (names)"
-                sed 's/^/        /' "$collide_log" | head -12
-            fi
-            rm -f "$collide_log"
+        collide_log="$(mktemp)"
+        if ! ./build.sh tools/check_ui_names.ae >"$collide_log" 2>&1; then
+            fail "ae3d_editor (names, build)"
+            sed 's/^/        /' "$collide_log" | head -12
+        elif AETHER_UI_ROOT="$UI_ROOT" ./build/check_ui_names >"$collide_log" 2>&1; then
+            pass "ae3d_editor (names)"
         else
-            skip "ae3d_editor (names)" "no python3"
+            fail "ae3d_editor (names)"
+            sed 's/^/        /' "$collide_log" | head -12
         fi
+        rm -f "$collide_log"
 
         # Everything above reads the report the editor writes about itself, and
         # that report comes from calling the handlers directly. A button that

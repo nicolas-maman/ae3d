@@ -45,9 +45,9 @@ whole idiom: a helper that also frees its argument frees it twice. A
 struct that keeps a string a caller handed it takes its own copy
 (`string.copy`), because the caller's local goes with the caller; a
 field assigned from a local in the same function (`mk.name = key`) is a
-move and needs no copy. A `std.list` of strings borrows them; keep the
-strings somewhere that outlives the list, or keep structs in the list
-instead.
+move and needs no copy. `list.add` takes its own reference to a string
+(`list_add_string_owned`) and `list.free` releases it; `list.add_raw`
+borrows.
 
 A string's bytes are not addressable from Aether: a literal is a C string
 and a string off the heap is an `AetherString`, a header and then its

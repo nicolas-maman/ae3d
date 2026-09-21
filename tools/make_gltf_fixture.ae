@@ -1,0 +1,412 @@
+// Write the glTF fixtures tests/test_gltf reads: a two-bone arm, once as
+// a .glb and once as a .gltf beside its .bin, from the same numbers.
+//
+// The arm is a box two units tall on the Y axis, its lower four vertices
+// bound to the root bone and its upper four to a child bone one unit up.
+// "Bend" turns the child bone ninety degrees about Z over one second,
+// linearly, so at the end the upper half lies along -X; "Lift" steps the
+// root up by one unit at half a second. The material is red, metallic 0,
+// roughness 0.5.
+//
+//     ./build.sh tools/make_gltf_fixture.ae && ./build/make_gltf_fixture tests/fixtures/gltf
+import std.os
+import std.list
+import std.string
+import std.json
+import std.mem
+import std.bytes
+
+extern malloc(size: long) -> ptr
+extern free(p: ptr)
+extern fopen(path: string, mode: string) -> ptr
+extern fwrite(buffer: ptr, size: long, count: long, f: ptr) -> long
+extern fclose(f: ptr) -> int
+extern sin(x: float) -> float
+
+const FLOAT = 5126
+const UNSIGNED_BYTE = 5121
+const UNSIGNED_SHORT = 5123
+const ARRAY_BUFFER = 34962
+const ELEMENT_ARRAY_BUFFER = 34963
+const CAPACITY = 65536
+
+// The one buffer every accessor reads, and the document's views and
+// accessors as they are added.
+struct Fixture {
+    blob: ptr
+    size: int
+    views: ptr                     // json array
+    accessors: ptr                 // json array
+}
+
+pad4(f: *Fixture) {
+    while f.size % 4 != 0 {
+        mem.set_uint8(f.blob, f.size, 0)
+        f.size = f.size + 1
+    }
+}
+
+// A buffer view over the bytes `data_size` from here, and an accessor on
+// it: the index of the accessor. `rows` are the values as floats; the
+// component type says how each is written. With `minmax`, the accessor
+// carries the per-component minimum and maximum, which the positions
+// and the animation inputs have to.
+add(f: *Fixture, rows: float[], count: int, width: int, component: int, kind: string, target: int, minmax: bool) -> int {
+    pad4(f)
+    start = f.size
+    i = 0
+    while i < count * width {
+        v = rows[i]
+        if component == FLOAT {
+            mem.set_float32(f.blob, f.size, v)
+            f.size = f.size + 4
+        } else if component == UNSIGNED_SHORT {
+            mem.set_uint16(f.blob, f.size, v as int)
+            f.size = f.size + 2
+        } else {
+            mem.set_uint8(f.blob, f.size, v as int)
+            f.size = f.size + 1
+        }
+        i = i + 1
+    }
+    view = json.obj()
+    json.set(view, "buffer", json.from_int(0 as long))
+    json.set(view, "byteOffset", json.from_int(start as long))
+    json.set(view, "byteLength", json.from_int((f.size - start) as long))
+    if target != 0 { json.set(view, "target", json.from_int(target as long)) }
+    json.push(f.views, view)
+    accessor = json.obj()
+    json.set(accessor, "bufferView", json.from_int((json.json_array_size(f.views) - 1) as long))
+    json.set(accessor, "componentType", json.from_int(component as long))
+    json.set(accessor, "count", json.from_int(count as long))
+    json.set(accessor, "type", json.str(kind))
+    if minmax {
+        lows = json.arr()
+        highs = json.arr()
+        c = 0
+        while c < width {
+            low = rows[c]
+            high = rows[c]
+            r = 1
+            while r < count {
+                v = rows[r * width + c]
+                if v < low { low = v }
+                if v > high { high = v }
+                r = r + 1
+            }
+            json.push(lows, json.num(low))
+            json.push(highs, json.num(high))
+            c = c + 1
+        }
+        json.set(accessor, "min", lows)
+        json.set(accessor, "max", highs)
+    }
+    json.push(f.accessors, accessor)
+    return json.json_array_size(f.accessors) - 1
+}
+
+floats(count: int) -> float[] { return malloc((count * 8) as long) as float[] }
+
+node(name: string) -> ptr {
+    n = json.obj()
+    json.set(n, "name", json.str(name))
+    return n
+}
+
+vec3_json(x: float, y: float, z: float) -> ptr {
+    a = json.arr()
+    json.push(a, json.num(x))
+    json.push(a, json.num(y))
+    json.push(a, json.num(z))
+    return a
+}
+
+ints_json(a0: int, a1: int, count: int) -> ptr {
+    a = json.arr()
+    json.push(a, json.from_int(a0 as long))
+    if count > 1 { json.push(a, json.from_int(a1 as long)) }
+    return a
+}
+
+write_file(path: string, head: ptr, head_size: int, body: ptr, body_size: int) {
+    f = fopen(path, "wb")
+    if f == null {
+        println("make_gltf_fixture: cannot write ${path}")
+        os.exit(1)
+    }
+    if head_size > 0 { fwrite(head, 1 as long, head_size as long, f) }
+    if body_size > 0 { fwrite(body, 1 as long, body_size as long, f) }
+    fclose(f)
+}
+
+// A string's bytes into a buffer, through std.bytes, which reads a heap
+// string's bytes past its header.
+copy_string(dst: ptr, at: int, s: string, length: int) {
+    b = bytes.new(length)
+    bytes.copy_from_string(b, 0, s, length)
+    mem.copy(dst + at, bytes.data(b), length as long)
+    bytes.free(b)
+}
+
+main() {
+    out_dir = "tests/fixtures/gltf"
+    if os.args_count() > 1 { out_dir = os.args_get(1) }
+
+    // Lower half (0..1) on bone 0, upper half (1..2) on bone 1; a quad per
+    // face would be nicer, but twelve vertices and sixteen triangles are
+    // enough for a loader to be checked against.
+    positions = floats(12 * 3)
+    normals = floats(12 * 3)
+    uvs = floats(12 * 2)
+    joints = floats(12 * 4)
+    weights = floats(12 * 4)
+    v = 0
+    ring = 0
+    while ring < 3 {
+        y = ring as float
+        corner = 0
+        while corner < 4 {
+            x = 0.0 - 0.5
+            z = 0.0 - 0.5
+            if corner == 1 { x = 0.5 }
+            if corner == 2 { x = 0.5; z = 0.5 }
+            if corner == 3 { z = 0.5 }
+            positions[v * 3] = x
+            positions[v * 3 + 1] = y
+            positions[v * 3 + 2] = z
+            normals[v * 3] = 0.0
+            normals[v * 3 + 1] = 1.0
+            normals[v * 3 + 2] = 0.0
+            uvs[v * 2] = x + 0.5
+            uvs[v * 2 + 1] = y / 2.0
+            bone = 0.0
+            if y >= 1.0 { bone = 1.0 }
+            joints[v * 4] = bone
+            joints[v * 4 + 1] = 0.0
+            joints[v * 4 + 2] = 0.0
+            joints[v * 4 + 3] = 0.0
+            weights[v * 4] = 1.0
+            weights[v * 4 + 1] = 0.0
+            weights[v * 4 + 2] = 0.0
+            weights[v * 4 + 3] = 0.0
+            v = v + 1
+            corner = corner + 1
+        }
+        ring = ring + 1
+    }
+    indices = floats(2 * 4 * 6)
+    n = 0
+    ring = 0
+    while ring < 8 {
+        k = 0
+        while k < 4 {
+            a = ring + k
+            b = ring + (k + 1) % 4
+            c = a + 4
+            d = b + 4
+            indices[n] = a as float
+            indices[n + 1] = b as float
+            indices[n + 2] = c as float
+            indices[n + 3] = b as float
+            indices[n + 4] = d as float
+            indices[n + 5] = c as float
+            n = n + 6
+            k = k + 1
+        }
+        ring = ring + 4
+    }
+
+    f = Fixture { blob: malloc(CAPACITY as long), size: 0, views: json.arr(), accessors: json.arr() }
+    a_pos = add(&f, positions, 12, 3, FLOAT, "VEC3", ARRAY_BUFFER, true)
+    a_nrm = add(&f, normals, 12, 3, FLOAT, "VEC3", ARRAY_BUFFER, false)
+    a_uv = add(&f, uvs, 12, 2, FLOAT, "VEC2", ARRAY_BUFFER, false)
+    a_jnt = add(&f, joints, 12, 4, UNSIGNED_BYTE, "VEC4", ARRAY_BUFFER, false)
+    a_wgt = add(&f, weights, 12, 4, FLOAT, "VEC4", ARRAY_BUFFER, false)
+    a_idx = add(&f, indices, 48, 1, UNSIGNED_SHORT, "SCALAR", ELEMENT_ARRAY_BUFFER, false)
+    // Inverse bind matrices: bone 0 at the origin, bone 1 at (0, 1, 0).
+    ibm = floats(32)
+    i = 0
+    while i < 32 { ibm[i] = 0.0; i = i + 1 }
+    ibm[0] = 1.0
+    ibm[5] = 1.0
+    ibm[10] = 1.0
+    ibm[15] = 1.0
+    ibm[16] = 1.0
+    ibm[21] = 1.0
+    ibm[26] = 1.0
+    ibm[29] = 0.0 - 1.0
+    ibm[31] = 1.0
+    a_ibm = add(&f, ibm, 2, 16, FLOAT, "MAT4", 0, false)
+    // Bend: the child bone's rotation, 0 -> 90 degrees about Z, linear.
+    half = sin(3.14159265358979323846 / 4.0)
+    bend_t = floats(2)
+    bend_t[0] = 0.0
+    bend_t[1] = 1.0
+    bend_q = floats(8)
+    i = 0
+    while i < 8 { bend_q[i] = 0.0; i = i + 1 }
+    bend_q[3] = 1.0
+    bend_q[6] = half
+    bend_q[7] = half
+    a_bend_t = add(&f, bend_t, 2, 1, FLOAT, "SCALAR", 0, true)
+    a_bend_q = add(&f, bend_q, 2, 4, FLOAT, "VEC4", 0, false)
+    // Lift: the root's translation stepping up at half a second.
+    lift_t = floats(3)
+    lift_t[0] = 0.0
+    lift_t[1] = 0.5
+    lift_t[2] = 1.0
+    lift_v = floats(9)
+    i = 0
+    while i < 9 { lift_v[i] = 0.0; i = i + 1 }
+    lift_v[4] = 1.0
+    lift_v[7] = 1.0
+    a_lift_t = add(&f, lift_t, 3, 1, FLOAT, "SCALAR", 0, true)
+    a_lift_v = add(&f, lift_v, 3, 3, FLOAT, "VEC3", 0, false)
+
+    doc = json.obj()
+    asset = json.obj()
+    json.set(asset, "version", json.str("2.0"))
+    json.set(asset, "generator", json.str("ae3d tools/make_gltf_fixture.ae"))
+    json.set(doc, "asset", asset)
+    json.set(doc, "scene", json.from_int(0 as long))
+    scenes = json.arr()
+    scene = json.obj()
+    json.set(scene, "nodes", ints_json(0, 0, 1))
+    json.push(scenes, scene)
+    json.set(doc, "scenes", scenes)
+    nodes = json.arr()
+    root = node("Root")
+    json.set(root, "children", ints_json(1, 2, 2))
+    json.set(root, "translation", vec3_json(0.0, 0.0, 0.0))
+    json.push(nodes, root)
+    arm = node("Arm")
+    json.set(arm, "mesh", json.from_int(0 as long))
+    json.set(arm, "skin", json.from_int(0 as long))
+    json.push(nodes, arm)
+    lower = node("Lower")
+    json.set(lower, "children", ints_json(3, 0, 1))
+    json.set(lower, "translation", vec3_json(0.0, 0.0, 0.0))
+    json.push(nodes, lower)
+    upper = node("Upper")
+    json.set(upper, "translation", vec3_json(0.0, 1.0, 0.0))
+    json.push(nodes, upper)
+    json.set(doc, "nodes", nodes)
+    meshes = json.arr()
+    mesh = json.obj()
+    json.set(mesh, "name", json.str("ArmMesh"))
+    primitives = json.arr()
+    primitive = json.obj()
+    attributes = json.obj()
+    json.set(attributes, "POSITION", json.from_int(a_pos as long))
+    json.set(attributes, "NORMAL", json.from_int(a_nrm as long))
+    json.set(attributes, "TEXCOORD_0", json.from_int(a_uv as long))
+    json.set(attributes, "JOINTS_0", json.from_int(a_jnt as long))
+    json.set(attributes, "WEIGHTS_0", json.from_int(a_wgt as long))
+    json.set(primitive, "attributes", attributes)
+    json.set(primitive, "indices", json.from_int(a_idx as long))
+    json.set(primitive, "material", json.from_int(0 as long))
+    json.set(primitive, "mode", json.from_int(4 as long))
+    json.push(primitives, primitive)
+    json.set(mesh, "primitives", primitives)
+    json.push(meshes, mesh)
+    json.set(doc, "meshes", meshes)
+    skins = json.arr()
+    skin = json.obj()
+    json.set(skin, "name", json.str("ArmSkin"))
+    json.set(skin, "joints", ints_json(2, 3, 2))
+    json.set(skin, "inverseBindMatrices", json.from_int(a_ibm as long))
+    json.set(skin, "skeleton", json.from_int(2 as long))
+    json.push(skins, skin)
+    json.set(doc, "skins", skins)
+    materials = json.arr()
+    material = json.obj()
+    json.set(material, "name", json.str("Red"))
+    pbr = json.obj()
+    base = json.arr()
+    json.push(base, json.num(0.8))
+    json.push(base, json.num(0.1))
+    json.push(base, json.num(0.1))
+    json.push(base, json.num(1.0))
+    json.set(pbr, "baseColorFactor", base)
+    json.set(pbr, "metallicFactor", json.num(0.0))
+    json.set(pbr, "roughnessFactor", json.num(0.5))
+    json.set(material, "pbrMetallicRoughness", pbr)
+    json.push(materials, material)
+    json.set(doc, "materials", materials)
+    animations = json.arr()
+    json.push(animations, animation("Bend", a_bend_t, a_bend_q, "LINEAR", 3, "rotation"))
+    json.push(animations, animation("Lift", a_lift_t, a_lift_v, "STEP", 0, "translation"))
+    json.set(doc, "animations", animations)
+    json.set(doc, "bufferViews", f.views)
+    json.set(doc, "accessors", f.accessors)
+
+    // .gltf beside its .bin: the buffer by name.
+    buffers = json.arr()
+    buffer = json.obj()
+    json.set(buffer, "byteLength", json.from_int(f.size as long))
+    json.set(buffer, "uri", json.str("arm.bin"))
+    json.push(buffers, buffer)
+    json.set(doc, "buffers", buffers)
+    text, err = json.encode(doc)
+    if err != "" {
+        println("make_gltf_fixture: ${err}")
+        os.exit(1)
+    }
+    text_size = string.length(text)
+    text_bytes = malloc((text_size + 4) as long)
+    copy_string(text_bytes, 0, text, text_size)
+    mem.set_uint8(text_bytes, text_size, 10)
+    write_file("${out_dir}/arm.gltf", text_bytes, text_size + 1, null, 0)
+    write_file("${out_dir}/arm.bin", f.blob, f.size, null, 0)
+
+    // .glb: header, JSON chunk (space padded to 4), BIN chunk (zero padded).
+    glb_buffers = json.arr()
+    glb_buffer = json.obj()
+    json.set(glb_buffer, "byteLength", json.from_int(f.size as long))
+    json.push(glb_buffers, glb_buffer)
+    json.set(doc, "buffers", glb_buffers)
+    glb_text, glb_err = json.encode(doc)
+    if glb_err != "" {
+        println("make_gltf_fixture: ${glb_err}")
+        os.exit(1)
+    }
+    json_size = string.length(glb_text)
+    json_padded = (json_size + 3) / 4 * 4
+    pad4(&f)
+    total = 12 + 8 + json_padded + 8 + f.size
+    head = malloc((28 + json_padded) as long)
+    mem.set_uint32(head, 0, 1179937895 as long)         // "glTF"
+    mem.set_uint32(head, 4, 2 as long)
+    mem.set_uint32(head, 8, total as long)
+    mem.set_uint32(head, 12, json_padded as long)
+    mem.set_uint32(head, 16, 1313821514 as long)        // "JSON"
+    copy_string(head, 20, glb_text, json_size)
+    i = json_size
+    while i < json_padded { mem.set_uint8(head, 20 + i, 32); i = i + 1 }
+    mem.set_uint32(head, 20 + json_padded, f.size as long)
+    mem.set_uint32(head, 24 + json_padded, 5130562 as long)  // "BIN\0"
+    write_file("${out_dir}/arm.glb", head, 28 + json_padded, f.blob, f.size)
+    println("wrote ${out_dir} arm.gltf arm.bin arm.glb ${f.size} bytes of buffer")
+}
+
+animation(name: string, input: int, output: int, interpolation: string, target_node: int, path: string) -> ptr {
+    a = json.obj()
+    json.set(a, "name", json.str(name))
+    samplers = json.arr()
+    sampler = json.obj()
+    json.set(sampler, "input", json.from_int(input as long))
+    json.set(sampler, "output", json.from_int(output as long))
+    json.set(sampler, "interpolation", json.str(interpolation))
+    json.push(samplers, sampler)
+    json.set(a, "samplers", samplers)
+    channels = json.arr()
+    channel = json.obj()
+    json.set(channel, "sampler", json.from_int(0 as long))
+    target = json.obj()
+    json.set(target, "node", json.from_int(target_node as long))
+    json.set(target, "path", json.str(path))
+    json.set(channel, "target", target)
+    json.push(channels, channel)
+    json.set(a, "channels", channels)
+    return a
+}
