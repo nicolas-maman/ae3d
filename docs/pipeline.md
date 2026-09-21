@@ -55,7 +55,7 @@ What makes the pipeline usable by a program rather than a person:
 - **Bezier easing is preserved and checked.** The exporter converts Blender's
   curves to cubic segments and records what Blender evaluated them to;
   `tests/test_assets` holds the engine to it (currently within 1.4e-4).
-- **Coplanar faces are caught at export.** `tools/blender/check_coplanar.py`
+- **Coplanar faces are caught at export.** `tools/check_coplanar.ae`
   reads the exported scene back with its transforms and reports any pair of
   faces sharing a plane, which is what z-fighting is; `ci.sh` runs it on every
   exported scene.

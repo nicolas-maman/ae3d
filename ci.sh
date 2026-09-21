@@ -138,12 +138,12 @@ trace_crash() {   # trace_crash <status> <binary> [args...]
 
 # A PNG's size, without a decoder: the IHDR width and height are two big-endian
 # 32-bit words at a fixed offset, after the signature and the chunk header.
-# od's --endian is GNU-only and this has to read the same on macOS.
-# Unquoted, as everywhere else: "py -3" is two words.
+# od's -j, -N and -t x1 are POSIX, so this reads the same on macOS; the
+# words are put together by hand since --endian is GNU-only.
 snapshot_size() {
-    $PYTHON -c 'import struct,sys
-d = open(sys.argv[1], "rb").read(24)
-print("%dx%d" % struct.unpack(">II", d[16:24]) if len(d) >= 24 else "")' "$1" 2>/dev/null
+    set -- $(od -An -t x1 -j 16 -N 8 "$1" 2>/dev/null)
+    [ $# -eq 8 ] || return 0
+    echo "$((0x$1$2$3$4))x$((0x$5$6$7$8))"
 }
 
 snapshot_is() {
@@ -228,17 +228,18 @@ step "no two surfaces share a plane"
 # camera happens to be; looked for in the geometry, either two faces share a
 # plane and overlap or they do not. Runs against the committed export, so it
 # needs no Blender.
-if [ -n "$PYTHON" ]; then
+if ! ./build.sh tools/check_coplanar.ae >/tmp/ae3d_coplanar.log 2>&1; then
+    fail "check_coplanar (build)"
+    sed 's/^/        /' /tmp/ae3d_coplanar.log | head -12
+else
     for exported in resources/blender/zombie_street resources/blender/showcase; do
-        if $PYTHON tools/blender/check_coplanar.py "$exported" >/tmp/ae3d_coplanar.log 2>&1; then
+        if ./build/check_coplanar "$exported" >/tmp/ae3d_coplanar.log 2>&1; then
             pass "$exported has no coplanar overlaps"
         else
             fail "$exported has surfaces that would fight over the same depth"
             sed 's/^/        /' /tmp/ae3d_coplanar.log | head -12
         fi
     done
-else
-    skip "coplanar surfaces" "no python3"
 fi
 
 step "docs/agent.md matches the engine's command table"
