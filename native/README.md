@@ -20,7 +20,7 @@ against the C it replaced.
 
 | folder | what | why still C |
 |---|---|---|
-| `gpu/` | `vulkan.c`, the Vulkan renderer; `opengl.c` and `opengl_api.c`, the OpenGL one and its entry points; `offscreen.c` and `capture.c`, the offscreen targets and frame readback; `jobs.c`, the pool the renderers' own loops run over; `shaders/`, the GLSL and SPIR-V, and `generate.py`, which derives the Vulkan shaders and the uniform block from the OpenGL sources in `src/ae3d/shaders` (`vulkan_shaders.h` and `vulkan_uniforms.h` are its output) | Vulkan and OpenGL structures with float members; float32 uploads |
+| `gpu/` | `vulkan.c`, the Vulkan renderer; `opengl.c` and `opengl_api.c`, the OpenGL one and its entry points; `offscreen.c` and `capture.c`, the offscreen targets and frame readback; `jobs.c`, the pool the renderers' own loops run over; `shaders/`, the Vulkan GLSL that `tools/generate_shaders.ae` derives from the OpenGL sources in `src/ae3d/shaders` (`vulkan_shaders.h`, the SPIR-V, and `vulkan_uniforms.h`, the uniform block, are its output too) | Vulkan and OpenGL structures with float members; float32 uploads |
 | `geometry/` | `mesh.c`, the interleaved float32 vertex store; `skin.c`, bone palettes and pose banks; `meshfile.c`, meshes read into those | float32 buffers |
 | `image/` | `image.c`, decoding through the vendored `stb_image.h` | a third-party decoder (see `THIRD_PARTY_LICENSES.md`); a decoder of our own is an Aether project of its own |
 | `platform/` | `window.c`, the window, input and timing over GLFW; `metal_surface.m`, the CAMetalLayer MoltenVK draws into on macOS | the Objective-C runtime; the GLFW layer is portable and next to move |

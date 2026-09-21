@@ -264,12 +264,13 @@ fi
 # Vulkan on the previous shader, which fails parity in ways that look like
 # real bugs; the check is that the checked-in files are what the source makes.
 step "Vulkan shaders regenerated"
-if [ -z "$PYTHON" ]; then
-    skip "Vulkan shaders" "no python"
-elif $PYTHON native/gpu/shaders/generate.py --check >/tmp/ae3d_shaders.log 2>&1; then
+if ! ./build.sh tools/generate_shaders.ae >/tmp/ae3d_shaders.log 2>&1; then
+    fail "generate_shaders (build)"
+    sed "s/^/        /" /tmp/ae3d_shaders.log | head -12
+elif ./build/generate_shaders --check >/tmp/ae3d_shaders.log 2>&1; then
     pass "native/gpu/shaders and vkscene are what src/ae3d/shaders produces"
 else
-    fail "generated Vulkan shaders are out of date; run native/gpu/shaders/generate.py"
+    fail "generated Vulkan shaders are out of date; run build/generate_shaders"
     sed "s/^/        /" /tmp/ae3d_shaders.log | head -12
 fi
 

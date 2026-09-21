@@ -73,7 +73,7 @@ the camera -- and a `Backend` vtable. Two backends implement it:
 
 Which one runs is a constructor argument (`engine_new_with`) or
 `AE3D_API=opengl`; nothing else in a program changes. The GLSL lives in
-`ae3d.shaders`, and `native/gpu/shaders/generate.py` derives the Vulkan
+`ae3d.shaders`, and `tools/generate_shaders.ae` derives the Vulkan
 SPIR-V and the uniform block layout from it, so one source feeds both
 (`ci.sh` fails if the derived files are stale). DirectX 12 and Metal are on
 the roadmap as further implementations of the same vtable

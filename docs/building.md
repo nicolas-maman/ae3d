@@ -14,8 +14,8 @@ honours.
 - GLFW 3, zlib, `pkg-config`, and the Vulkan headers. The Vulkan loader is
   opened at run time; a Vulkan driver is optional (the engine falls back to
   OpenGL when `AE3D_API=opengl`, and the tests run on either).
-- Python 3 only for Blender's own scripts under `tools/blender/` and for the
-  shader generator; nothing at run time.
+- Python 3 only for Blender's own scripts under `tools/blender/`, which run
+  inside Blender; nothing else in the build or at run time.
 
 ```bash
 brew install glfw molten-vk vulkan-loader                        # macOS
@@ -44,7 +44,7 @@ git submodule update --init                 # deps/aephysics, the physics engine
 
 `build.sh` compiles the C under `native/` into `build/obj/` (only what
 changed, every file under `-Wall -Wextra`), links it as the engine library,
-regenerates the Vulkan shaders if `src/ae3d/shaders` is newer than them,
+says so if `src/ae3d/shaders` is newer than the generated Vulkan shaders,
 compiles the program with `aetherc` to `build/<name>.c` and links the
 result. `--natives` builds the library and stops, for a script (a shared
 library loaded by `ae3d.script`) that links the same engine its host does.
@@ -74,12 +74,19 @@ builds the editor against, and each bump carries a line saying why.
 ## The shaders
 
 `src/ae3d/shaders/module.ae` holds the GLSL, written once for OpenGL.
-`native/gpu/shaders/generate.py` derives the Vulkan versions -- the
-uniform block layout in `native/gpu/vulkan_uniforms.h`, the SPIR-V in
-`native/gpu/vulkan_shaders.h` and the offsets in `src/ae3d/vkscene` -- and
-needs `glslc` from the Vulkan SDK on `PATH`. `build.sh` runs it when the
-source is newer than its output; `generate.py --check` says whether the
-committed output is current, and `ci.sh` fails when it is not.
+`tools/generate_shaders.ae` derives the Vulkan versions -- the uniform
+block layout in `native/gpu/vulkan_uniforms.h`, the SPIR-V in
+`native/gpu/vulkan_shaders.h` and the offsets in `src/ae3d/vkscene` --
+asks `glslangValidator` (the Vulkan SDK, on `PATH`) for its own std140
+offsets and stops on the first disagreement:
+
+```bash
+./build.sh tools/generate_shaders.ae && ./build/generate_shaders
+./build/generate_shaders --check            # is the committed output current? (no SDK needed)
+```
+
+`build.sh` says when the source is newer than the output, and `ci.sh`
+runs the check and fails when it is stale.
 
 ## DLSS
 

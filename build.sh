@@ -167,10 +167,8 @@ fi
 # run after it leaves Vulkan on the previous shaders, which then fail parity
 # in ways that look like real bugs. Said here, once, at every build, since
 # CI's --check only says so after the push.
-if [ -f native/gpu/shaders/generate.py ] && [ -f native/gpu/vulkan_shaders.h ]; then
-    if [ src/ae3d/shaders/module.ae -nt native/gpu/vulkan_shaders.h ]; then
-        echo "build: src/ae3d/shaders/module.ae is newer than the generated Vulkan shaders; run native/gpu/shaders/generate.py" >&2
-    fi
+if [ -f native/gpu/vulkan_shaders.h ] && [ src/ae3d/shaders/module.ae -nt native/gpu/vulkan_shaders.h ]; then
+    echo "build: src/ae3d/shaders/module.ae is newer than the generated Vulkan shaders; run ./build.sh tools/generate_shaders.ae && ./build/generate_shaders" >&2
 fi
 
 # Every header, not a list of three. The generated ones carry the shaders and
