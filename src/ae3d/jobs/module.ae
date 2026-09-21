@@ -22,11 +22,20 @@
 import aephysics.native
 import aephysics.parallel
 
+extern calloc(count: int, size: int) -> ptr
+
 exports (
-    start, stop, scheduler, workers, threads, parallel_for
+    start, stop, scheduler, workers, threads, parallel_for, parallel_for_fixed, passes, blocks
 )
 
 var g_scheduler: ptr = null        // *Scheduler
+var g_passes = 0                   // parallel loops run, pool or not
+var g_blocks = 0                   // the blocks they were cut into
+
+// How many parallel loops have run, and how many blocks the pool cut
+// them into: a test's proof that the pool was a pool.
+passes() -> int { return g_passes }
+blocks() -> int { return g_blocks }
 
 // The pool, `count` threads including the calling one; 0 or less is one
 // per hardware thread. Starting twice keeps the first pool.
@@ -58,9 +67,91 @@ threads() -> int { return workers() + 1 }
 // thread alone when there is no pool.
 parallel_for(body: fn(int, int, int, ptr) -> void, count: int, grain: int, context: ptr) {
     if count <= 0 { return }
+    g_passes = g_passes + 1
     if g_scheduler == null {
         body(0, count, 0, context)
+        g_blocks = g_blocks + 1
         return
     }
-    parallel.parallel_for(g_scheduler as *Scheduler, body, count, grain, context)
+    g_blocks = g_blocks + parallel.parallel_for(g_scheduler as *Scheduler, body, count, grain, context)
+}
+
+// --- fixed runs --------------------------------------------------------------------------------------------------
+
+// The same, in runs of exactly `block_size` items: for a pass whose
+// blocks each write a slot of their own indexed by their start (the
+// crowd's sort counts a run, then writes it at the run's offset), so
+// the two passes cut the crowd the same way. The pool's parallel_for
+// grows its blocks past a count; this never does.
+struct JobsFixedShared {
+    next: int                      // atomic: the next block to claim
+    block_count: int
+    block_size: int
+    item_count: int
+    body: fn(int, int, int, ptr) -> void
+    context: ptr
+}
+
+struct JobsFixedTask {
+    shared: *JobsFixedShared
+    worker: int
+}
+
+fixed_trampoline(context: ptr) {
+    t = context as *JobsFixedTask
+    shared = t.shared
+    while true {
+        block = native.atomic_add((&shared.next) as ptr, 1)
+        if block >= shared.block_count { break }
+        start = block * shared.block_size
+        end = start + shared.block_size
+        if end > shared.item_count { end = shared.item_count }
+        shared.body(start, end, t.worker, shared.context)
+    }
+}
+
+var g_fixed_tasks: ptr = null      // JobsFixedTask[MAX_WORKERS]
+var g_fixed_handles: ptr = null    // *Task[MAX_WORKERS]
+
+parallel_for_fixed(body: fn(int, int, int, ptr) -> void, count: int, block_size: int, context: ptr) {
+    if count <= 0 || block_size <= 0 { return }
+    block_count = (count + block_size - 1) / block_size
+    g_passes = g_passes + 1
+    g_blocks = g_blocks + block_count
+    if g_scheduler == null || threads() <= 1 {
+        b = 0
+        while b < block_count {
+            start = b * block_size
+            end = start + block_size
+            if end > count { end = count }
+            body(start, end, 0, context)
+            b = b + 1
+        }
+        return
+    }
+    if g_fixed_tasks == null {
+        g_fixed_tasks = calloc(parallel.MAX_WORKERS, sizeof(JobsFixedTask))
+        g_fixed_handles = calloc(parallel.MAX_WORKERS, 8)
+    }
+    shared = JobsFixedShared { next: 0, block_count: block_count, block_size: block_size, item_count: count, body: body, context: context }
+    task_count = threads()
+    if block_count < task_count { task_count = block_count }
+    s = g_scheduler as *Scheduler
+    parallel.begin_round(s)
+    tasks = g_fixed_tasks as JobsFixedTask[]
+    handles = g_fixed_handles as ptr[]
+    i = 1
+    while i < task_count {
+        tasks[i] = JobsFixedTask { shared: &shared, worker: i }
+        handles[i] = parallel.enqueue(s, fixed_trampoline, g_fixed_tasks + i * sizeof(JobsFixedTask), i) as ptr
+        i = i + 1
+    }
+    tasks[0] = JobsFixedTask { shared: &shared, worker: 0 }
+    native.set_worker_index(0)
+    fixed_trampoline(g_fixed_tasks)
+    i = 1
+    while i < task_count {
+        parallel.finish(s, handles[i] as *Task)
+        i = i + 1
+    }
 }

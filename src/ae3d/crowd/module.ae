@@ -13,6 +13,7 @@
 
 import std.heap
 import ae3d.core
+import ae3d.horde
 import ae3d.anim
 import ae3d.skin
 import ae3d.ecs
@@ -22,7 +23,7 @@ exports (
     posebank_frames, posebank_bones, posebank_get, posebank_data,
     posebank_travel, posebank_speed,
     horde_seek,
-    HordeGrid, grid_new, grid_free, horde_separate,
+    CrowdGrid, grid_new, grid_free, horde_separate,
     crowd_wander, crowd_step, crowd_bucket, crowd_tiers, crowd_audit,
     device_crowd_new, device_crowd_free, device_crowd_bind, device_crowd_update, device_crowd_count,
     device_crowd_rays
@@ -46,28 +47,6 @@ extern ae3d_posebank_data(bank: ptr) -> ptr
 extern ae3d_posebank_set_travel(bank: ptr, frame: int, distance: float)
 extern ae3d_posebank_travel(bank: ptr, frame: int) -> float
 extern ae3d_posebank_speed(bank: ptr, phase: float, duration: float) -> float
-extern ae3d_horde_grid_create(cols: int, per_cell: int) -> ptr
-extern ae3d_horde_grid_destroy(grid: ptr)
-extern ae3d_horde_separate(grid: ptr, pos: ptr, vel: ptr, n: int,
-                           ox: float, oz: float, cell_size: float,
-                           radius: float, strength: float)
-extern ae3d_crowd_wander(vel: ptr, yaw: ptr, n: int, speed: float)
-extern ae3d_crowd_step(pos: ptr, vel: ptr, yaw: ptr, phase: ptr, start: int, n: int,
-                       dt: float, max_speed: float,
-                       x0: float, x1: float, z0: float, z1: float,
-                       road_y: float, walk: float, bank: ptr)
-extern ae3d_crowd_tiers(pos: ptr, yaw: ptr, phase: ptr, col: ptr, start: int, n: int,
-                        cx: float, cz: float, near_dist: float, mid_dist: float, cull_dist: float,
-                        np: ptr, ny: ptr, nph: ptr, ncol: ptr,
-                        mp: ptr, my: ptr, mph: ptr, mcol: ptr,
-                        fp: ptr, fy: ptr, fph: ptr, fcol: ptr,
-                        counts_out: ptr)
-extern ae3d_crowd_audit(pos: ptr, prev: ptr, n: int, limit: float, out: ptr)
-extern ae3d_crowd_bucket(pos: ptr, yaw: ptr, phase: ptr, col: ptr, start: int, n: int,
-                         cx: float, cz: float, near_dist: float, cull_dist: float,
-                         np: ptr, ny: ptr, nph: ptr, ncol: ptr,
-                         fp: ptr, fy: ptr, fph: ptr, fcol: ptr,
-                         far_out: ptr) -> int
 
 // Bake `frames` evenly spaced poses across `duration` seconds of the clip the
 // registry's players carry, into a bank the whole crowd will share. Each frame
@@ -204,22 +183,20 @@ horde_seek(world: *EcsWorld, position: *Column, velocity: *Column,
 // A uniform spatial grid over the XZ ground, so a horde's separation is O(N)
 // rather than every zombie testing every other. `cols` x `cols` cells of
 // `cell_size` from the corner (ox, oz), each holding up to `per_cell` entities.
-// The grid's arrays and the whole separation pass live in native C: at half a
-// million entities the neighbour tests number in the tens of millions a frame,
-// too many for a per-element language loop, so this is a thin handle over the
-// kernel in ae3d_horde.c.
-struct HordeGrid {
-    native: ptr
+// The grid's arrays and the whole separation pass are ae3d.horde's kernel;
+// this is the handle the ECS side keeps.
+struct CrowdGrid {
+    native: ptr                    // *HordeGrid, ae3d.horde's
     cols: int
     cell_size: float
     ox: float
     oz: float
 }
 
-grid_new(cols: int, cell_size: float, ox: float, oz: float, per_cell: int) -> *HordeGrid {
+grid_new(cols: int, cell_size: float, ox: float, oz: float, per_cell: int) -> *CrowdGrid {
     if cols <= 0 || cell_size <= 0.0 || per_cell <= 0 { return null }
-    g = heap.new(HordeGrid)
-    g.native = ae3d_horde_grid_create(cols, per_cell)
+    g = heap.new(CrowdGrid)
+    g.native = horde.grid_new(cols, per_cell) as ptr
     if g.native == null { heap.free(g); return null }
     g.cols = cols
     g.cell_size = cell_size
@@ -228,9 +205,9 @@ grid_new(cols: int, cell_size: float, ox: float, oz: float, per_cell: int) -> *H
     return g
 }
 
-grid_free(g: *HordeGrid) {
+grid_free(g: *CrowdGrid) {
     if g == null { return }
-    if g.native != null { ae3d_horde_grid_destroy(g.native) }
+    if g.native != null { horde.grid_free(g.native as *HordeGrid) }
     heap.free(g)
 }
 
@@ -240,27 +217,24 @@ grid_free(g: *HordeGrid) {
 // neighbours in its own and the eight adjacent cells; `strength` scales the push
 // added to the velocity. Pair after horde_seek and before ecs.integrate3.
 //
-// The whole pass is the native kernel, run straight over the position and
+// The whole pass is ae3d.horde's kernel, run straight over the position and
 // velocity columns' own buffers -- the crowd is taken as the compact range
-// [0, world_slot_count), which is a horde that only spawns. It moves the
-// separation of half a million entities from a fifth of a second in Aether to a
-// few milliseconds.
+// [0, world_slot_count), which is a horde that only spawns.
 horde_separate(world: *EcsWorld, position: *Column, velocity: *Column,
-               g: *HordeGrid, radius: float, strength: float) {
+               g: *CrowdGrid, radius: float, strength: float) {
     if g == null { return }
-    ae3d_horde_separate(g.native, ecs.column_data(position), ecs.column_data(velocity),
-                        ecs.world_slot_count(world), g.ox, g.oz, g.cell_size,
-                        radius, strength)
+    horde.separate(g.native as *HordeGrid, ecs.column_data(position), ecs.column_data(velocity),
+                   ecs.world_slot_count(world), g.ox, g.oz, g.cell_size, radius, strength)
 }
 
-// The crowd's per-frame motion and its distance sort, native. These run over
+// The crowd's per-frame motion and its distance sort (ae3d.horde). These run over
 // the ECS columns' own buffers (ecs.column_data) rather than the EcsWorld: the
 // crowd is the compact range [0, n), a horde that only spawns.
 
 // Point every zombie's velocity along its heading at `speed`, before the
 // separation pass adds its shove.
 crowd_wander(vel: ptr, yaw: ptr, n: int, speed: float) {
-    ae3d_crowd_wander(vel, yaw, n, speed)
+    horde.wander(vel, yaw, n, speed)
 }
 
 // Cap the speed, step, bounce off the street's edges (turning the heading so the
@@ -269,7 +243,7 @@ crowd_wander(vel: ptr, yaw: ptr, n: int, speed: float) {
 crowd_step(pos: ptr, vel: ptr, yaw: ptr, phase: ptr, start: int, n: int, dt: float,
            max_speed: float, x0: float, x1: float, z0: float, z1: float,
            road_y: float, walk: float, bank: ptr) {
-    ae3d_crowd_step(pos, vel, yaw, phase, start, n, dt, max_speed, x0, x1, z0, z1, road_y, walk, bank)
+    horde.step(pos, vel, yaw, phase, start, n, dt, max_speed, x0, x1, z0, z1, road_y, walk, bank)
 }
 
 // Sort the crowd into the near and far draw buffers by distance to the camera,
@@ -282,8 +256,8 @@ crowd_step(pos: ptr, vel: ptr, yaw: ptr, phase: ptr, start: int, n: int, dt: flo
 crowd_bucket(pos: ptr, yaw: ptr, phase: ptr, col: ptr, start: int, n: int, cx: float, cz: float,
              near_dist: float, cull_dist: float, np: ptr, ny: ptr, nph: ptr, ncol: ptr,
              fp: ptr, fy: ptr, fph: ptr, fcol: ptr, far_out: ptr) -> int {
-    return ae3d_crowd_bucket(pos, yaw, phase, col, start, n, cx, cz, near_dist, cull_dist,
-                             np, ny, nph, ncol, fp, fy, fph, fcol, far_out)
+    return horde.bucket(pos, yaw, phase, col, start, n, cx, cz, near_dist, cull_dist,
+                        np, ny, nph, ncol, fp, fy, fph, fcol, far_out)
 }
 
 // The crowd from `start`, `n` of them, sorted by distance to (cx, cz) into
@@ -298,8 +272,8 @@ crowd_tiers(pos: ptr, yaw: ptr, phase: ptr, col: ptr, start: int, n: int, cx: fl
             np: ptr, ny: ptr, nph: ptr, ncol: ptr,
             mp: ptr, my: ptr, mph: ptr, mcol: ptr,
             fp: ptr, fy: ptr, fph: ptr, fcol: ptr, counts_out: ptr) {
-    ae3d_crowd_tiers(pos, yaw, phase, col, start, n, cx, cz, near_dist, mid_dist, cull_dist,
-                     np, ny, nph, ncol, mp, my, mph, mcol, fp, fy, fph, fcol, counts_out)
+    horde.tiers(pos, yaw, phase, col, start, n, cx, cz, near_dist, mid_dist, cull_dist,
+                np, ny, nph, ncol, mp, my, mph, mcol, fp, fy, fph, fcol, counts_out)
 }
 
 // The crowd's steps audited against where it stood the frame before
@@ -309,7 +283,7 @@ crowd_tiers(pos: ptr, yaw: ptr, phase: ptr, col: ptr, start: int, n: int, cx: fl
 // offenders (-1 for none). Over the job pool: a check that runs every
 // frame is on the hot path however diagnostic it is.
 crowd_audit(pos: ptr, prev: ptr, n: int, limit: float, out: ptr) {
-    ae3d_crowd_audit(pos, prev, n, limit, out)
+    horde.audit(pos, prev, n, limit, out)
 }
 
 // The same sort on the device, for up to `capacity` figures: the CPU's

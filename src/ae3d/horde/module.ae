@@ -1,0 +1,841 @@
+// The horde's passes: the separation, the motion, the sort by distance
+// and the audit, over the crowd's packed columns and the engine's pool.
+//
+// Pushing a crowd apart is the one super-linear pass in the horde
+// update: every entity against the neighbours in the nine cells around
+// it. At a few thousand that is nothing; at half a million the tens of
+// millions of neighbour tests a frame want the same care a C kernel
+// gets, and this is that kernel in Aether: a counting sort that packs
+// the positions themselves cell by cell (a CSR layout: a per-cell offset
+// table over packed arrays), so the neighbour scan walks a cell's
+// entities as one contiguous run and the hot loop reads straight down
+// memory instead of chasing indices. The only scattered access left is
+// one write of the accumulated push back to each entity's velocity,
+// once. A cell keeps at most `per_cell` entities, so a jammed cell --
+// half a million zombies in a street pack tens into one -- costs a
+// bounded number of tests instead of quadratic; the rest are not
+// pushed this frame, and the sort order shifts next frame, so it is a
+// different few each time and the crowd still spreads.
+//
+// The other passes are the same few lines on every figure with nothing
+// shared but the arrays: the heading, the step, the sort by distance
+// (two passes over fixed runs, so every worker writes its own stretch
+// of the compacted buffers and the order is the order one thread would
+// have written), the audit. Each runs over the engine's pool in runs of
+// a few thousand figures -- enough that a block's hand-off is nothing
+// beside its work, few enough that the cores share it evenly.
+//
+// The columns are doubles (Aether's float): three per position and
+// velocity, one per heading and phase. The trigonometry is approximate
+// on purpose: a figure's facing needs to be right to a degree, not to a
+// bit, and a polynomial atan2 and a quadratic sine are several times
+// cheaper than libm's at half a million a frame.
+import std.heap
+import ae3d.jobs
+
+exports (
+    HordeGrid,
+    grid_new, grid_free, separate,
+    wander, step, tiers, bucket, audit,
+    fast_sin, fast_cos, fast_atan2, GRAIN
+)
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern sqrt(x: float) -> float
+extern floor(x: float) -> float
+extern fabs(x: float) -> float
+extern ae3d_posebank_speed(bank: ptr, phase: float, duration: float) -> float
+
+// Figures a run: a few thousand, so a loop over half a million is a
+// hundred-odd runs across the cores. The sort's two passes cut the
+// crowd the same way, so the runs are fixed at this.
+const GRAIN = 4096
+const AUDIT_GRAIN = 8192
+const PI = 3.14159265358979324
+const HALF_PI = 1.57079632679489662
+
+// --- the trigonometry -----------------------------------------------------------------------------------------
+
+// Polynomial atan2, max error ~0.0038 rad: the public-domain DSP standard.
+fast_atan2(y: float, x: float) -> float {
+    ax = fabs(x)
+    ay = fabs(y)
+    mx = ay
+    mn = ax
+    if ax > ay { mx = ax; mn = ay }
+    a = mn / (mx + 0.000000000000000001)   // 0..1; guarded against 0/0 at the origin
+    s = a * a
+    r = ((0.0 - 0.0464964749 * s + 0.15931422) * s - 0.327622764) * s * a + a
+    if ay > ax { r = HALF_PI - r }
+    if x < 0.0 { r = PI - r }
+    if y < 0.0 { r = 0.0 - r }
+    return r
+}
+
+// Bhaskara-style sine on [-pi, pi], error < 0.2%, and its cosine by phase.
+fast_sin(angle: float) -> float {
+    a = angle
+    if a < 0.0 - PI || a > PI {
+        t = a * (1.0 / (2.0 * PI))
+        a = a - 2.0 * PI * floor(t + 0.5)
+    }
+    b = 4.0 / PI
+    c = 0.0 - 4.0 / (PI * PI)
+    y = b * a + c * a * fabs(a)
+    return 0.225 * (y * fabs(y) - y) + y   // the precision refinement term
+}
+
+fast_cos(a: float) -> float { return fast_sin(a + HALF_PI) }
+
+// --- the grid and the separation ----------------------------------------------------------------------------
+
+// A uniform grid over the XZ ground: cols x cols cells, each holding
+// up to per_cell entities, the entities packed cell by cell.
+struct HordeGrid {
+    off: ptr                       // long[cells + 1]: cell offsets into the packed arrays (CSR)
+    cur: ptr                       // long[cells]: within-cell write cursor during the scatter
+    px: ptr                        // float[cap]: packed positions, cell-major, so a cell's entities are one run
+    py: ptr
+    pz: ptr
+    pux: ptr                       // float[cap]: accumulated push per packed entity, scattered to velocity once at the end
+    puy: ptr
+    puz: ptr
+    pidx: ptr                      // long[cap]: the entity's original index, packed the same way
+    cols: int
+    per_cell: int                  // neighbours considered per cell, so the cost is bounded
+    cap: long                      // capacity of the packed arrays, in entities
+}
+
+grid_new(cols: int, per_cell: int) -> *HordeGrid {
+    if cols <= 0 { return null }
+    g = heap.new(HordeGrid)
+    cells = cols * cols
+    g.off = calloc(cells + 1, 8)
+    g.cur = calloc(cells, 8)
+    g.cols = cols
+    g.per_cell = 24
+    if per_cell > 0 { g.per_cell = per_cell }
+    g.cap = 0 as long
+    return g
+}
+
+grid_free(g: *HordeGrid) {
+    if g == null { return }
+    free(g.off)
+    free(g.cur)
+    free_packed(g)
+    heap.free(g)
+}
+
+free_packed(g: *HordeGrid) {
+    if g.px != null { free(g.px) }
+    if g.py != null { free(g.py) }
+    if g.pz != null { free(g.pz) }
+    if g.pux != null { free(g.pux) }
+    if g.puy != null { free(g.puy) }
+    if g.puz != null { free(g.puz) }
+    if g.pidx != null { free(g.pidx) }
+    g.px = null
+    g.py = null
+    g.pz = null
+    g.pux = null
+    g.puy = null
+    g.puz = null
+    g.pidx = null
+}
+
+// The packed arrays grown to hold at least n entities, keeping nothing
+// (they are rewritten in full each frame).
+reserve(g: *HordeGrid, n: int) {
+    if (n as long) <= g.cap { return }
+    free_packed(g)
+    g.px = calloc(n, 8)
+    g.py = calloc(n, 8)
+    g.pz = calloc(n, 8)
+    g.pux = calloc(n, 8)
+    g.puy = calloc(n, 8)
+    g.puz = calloc(n, 8)
+    g.pidx = calloc(n, 8)
+    g.cap = n as long
+}
+
+// The gather form of the pair loop, a run of cell rows at a time: every
+// entity of every cell in the rows [start, end) takes the push of each
+// neighbour in the nine cells around it, into its own accumulator.
+struct HordeGatherJob {
+    g: *HordeGrid
+    cols: int
+    r2: float
+    radius: float
+}
+
+gather_rows(start: int, end: int, worker: int, context: ptr) {
+    job = context as *HordeGatherJob
+    g = job.g
+    cols = job.cols
+    r2 = job.r2
+    radius = job.radius
+    off = g.off as long[]
+    px = g.px as float[]
+    py = g.py as float[]
+    pz = g.pz as float[]
+    pux = g.pux as float[]
+    puy = g.puy as float[]
+    puz = g.puz as float[]
+    cz = start
+    while cz < end {
+        cx = 0
+        while cx < cols {
+            c = cz * cols + cx
+            a = off[c]
+            b = off[c + 1]
+            s = a
+            while s < b {
+                si = s as int
+                x = px[si]
+                y = py[si]
+                z = pz[si]
+                sx = 0.0
+                sy = 0.0
+                sz = 0.0
+                dz = 0 - 1
+                while dz <= 1 {
+                    ncz = cz + dz
+                    if ncz >= 0 && ncz < cols {
+                        dx = 0 - 1
+                        while dx <= 1 {
+                            ncx = cx + dx
+                            if ncx >= 0 && ncx < cols {
+                                nc = ncz * cols + ncx
+                                ns = off[nc]
+                                ne = off[nc + 1]
+                                while ns < ne {
+                                    ni = ns as int
+                                    ddx = x - px[ni]
+                                    ddy = y - py[ni]
+                                    ddz = z - pz[ni]
+                                    dsq = ddx * ddx + ddy * ddy + ddz * ddz
+                                    if ns != s && dsq > 0.00000001 && dsq < r2 {
+                                        dist = sqrt(dsq)
+                                        fc = (radius - dist) / (dist * radius)
+                                        sx = sx + ddx * fc
+                                        sy = sy + ddy * fc
+                                        sz = sz + ddz * fc
+                                    }
+                                    ns = ns + (1 as long)
+                                }
+                            }
+                            dx = dx + 1
+                        }
+                    }
+                    dz = dz + 1
+                }
+                pux[si] = pux[si] + sx
+                puy[si] = puy[si] + sy
+                puz[si] = puz[si] + sz
+                s = s + (1 as long)
+            }
+            cx = cx + 1
+        }
+        cz = cz + 1
+    }
+}
+
+// The cell an entity is in, clamped to the grid.
+cell_coord(v: float, origin: float, inv: float, cols: int) -> int {
+    c = ((v - origin) * inv) as int
+    if c < 0 { c = 0 }
+    if c >= cols { c = cols - 1 }
+    return c
+}
+
+// Push apart every pair of entities closer than `radius`: the grid
+// rebuilt from the positions, each entity pushed off the neighbours in
+// its own and the eight adjacent cells, `strength` times the push added
+// to its velocity. The crowd is the compact range [0, n) -- a crowd that
+// only ever spawns, which is what a horde is.
+separate(g: *HordeGrid, pos: ptr, vel: ptr, n: int, ox: float, oz: float, cell_size: float, radius: float, strength: float) {
+    if g == null || pos == null || vel == null || n <= 0 || cell_size <= 0.0 { return }
+    cols = g.cols
+    cells = cols * cols
+    inv = 1.0 / cell_size
+    r2 = radius * radius
+    reserve(g, n)
+    off = g.off as long[]
+    cur = g.cur as long[]
+    px = g.px as float[]
+    py = g.py as float[]
+    pz = g.pz as float[]
+    pux = g.pux as float[]
+    puy = g.puy as float[]
+    puz = g.puz as float[]
+    pidx = g.pidx as long[]
+    p = pos as float[]
+    v = vel as float[]
+
+    // Histogram: how many entities fall in each cell. off[cell+1] is the
+    // counter, so the prefix sum below turns it straight into the start.
+    c = 0
+    while c <= cells {
+        off[c] = 0 as long
+        c = c + 1
+    }
+    i = 0
+    while i < n {
+        cx = cell_coord(p[i * 3], ox, inv, cols)
+        cz = cell_coord(p[i * 3 + 2], oz, inv, cols)
+        k = cz * cols + cx + 1
+        off[k] = off[k] + (1 as long)
+        i = i + 1
+    }
+    // Prefix sum, capped at per_cell.
+    c = 0
+    while c < cells {
+        full = off[c + 1]
+        cap = full
+        if (g.per_cell as long) < full { cap = g.per_cell as long }
+        off[c + 1] = off[c] + cap
+        cur[c] = off[c]
+        c = c + 1
+    }
+    // Scatter every entity's position and index into its cell's run, and clear its push.
+    i = 0
+    while i < n {
+        cx = cell_coord(p[i * 3], ox, inv, cols)
+        cz = cell_coord(p[i * 3 + 2], oz, inv, cols)
+        cell = cz * cols + cx
+        slot = cur[cell]
+        if slot < off[cell + 1] {   // room in this cell, up to the cap
+            cur[cell] = slot + (1 as long)
+            si = slot as int
+            px[si] = p[i * 3]
+            py[si] = p[i * 3 + 1]
+            pz[si] = p[i * 3 + 2]
+            pidx[si] = i as long
+            pux[si] = 0.0
+            puy[si] = 0.0
+            puz[si] = 0.0
+        }
+        i = i + 1
+    }
+
+    if jobs.workers() > 0 {
+        // Every core takes rows of cells and each entity gathers the push
+        // of all its neighbours, writing only its own accumulator: twice
+        // the pair tests of the half scan below, spread over every core,
+        // and no two threads ever write the same entry.
+        job = HordeGatherJob { g: g, cols: cols, r2: r2, radius: radius }
+        jobs.parallel_for(gather_rows, cols, 2, (&job) as ptr)
+    } else {
+        // Alone: each pair once. A pair pushes both members equally and
+        // oppositely, so scanning only the forward half of the
+        // neighbourhood -- entries later in the same cell, and the four
+        // cells that sort after this one: (+1,0), (-1,+1), (0,+1), (+1,+1)
+        // -- visits every unordered pair exactly once and halves the work.
+        c = 0
+        while c < cells {
+            cx = c % cols
+            cz = c / cols
+            a = off[c]
+            b = off[c + 1]
+            s = a
+            while s < b {
+                si = s as int
+                x = px[si]
+                y = py[si]
+                z = pz[si]
+                sx = 0.0
+                sy = 0.0
+                sz = 0.0
+                ns = s + (1 as long)
+                while ns < b {
+                    ni = ns as int
+                    ddx = x - px[ni]
+                    ddy = y - py[ni]
+                    ddz = z - pz[ni]
+                    dsq = ddx * ddx + ddy * ddy + ddz * ddz
+                    if dsq > 0.00000001 && dsq < r2 {
+                        dist = sqrt(dsq)
+                        fc = (radius - dist) / (dist * radius)
+                        fx = ddx * fc
+                        fy = ddy * fc
+                        fz = ddz * fc
+                        sx = sx + fx
+                        sy = sy + fy
+                        sz = sz + fz
+                        pux[ni] = pux[ni] - fx
+                        puy[ni] = puy[ni] - fy
+                        puz[ni] = puz[ni] - fz
+                    }
+                    ns = ns + (1 as long)
+                }
+                f = 0
+                while f < 4 {
+                    fdx = 1
+                    fdz = 0
+                    if f == 1 { fdx = 0 - 1; fdz = 1 }
+                    if f == 2 { fdx = 0; fdz = 1 }
+                    if f == 3 { fdx = 1; fdz = 1 }
+                    ncx = cx + fdx
+                    ncz = cz + fdz
+                    if ncx >= 0 && ncx < cols && ncz >= 0 && ncz < cols {
+                        nc = ncz * cols + ncx
+                        ns = off[nc]
+                        ne = off[nc + 1]
+                        while ns < ne {
+                            ni = ns as int
+                            ddx = x - px[ni]
+                            ddy = y - py[ni]
+                            ddz = z - pz[ni]
+                            dsq = ddx * ddx + ddy * ddy + ddz * ddz
+                            if dsq > 0.00000001 && dsq < r2 {
+                                dist = sqrt(dsq)
+                                fc = (radius - dist) / (dist * radius)
+                                fx = ddx * fc
+                                fy = ddy * fc
+                                fz = ddz * fc
+                                sx = sx + fx
+                                sy = sy + fy
+                                sz = sz + fz
+                                pux[ni] = pux[ni] - fx
+                                puy[ni] = puy[ni] - fy
+                                puz[ni] = puz[ni] - fz
+                            }
+                            ns = ns + (1 as long)
+                        }
+                    }
+                    f = f + 1
+                }
+                pux[si] = pux[si] + sx
+                puy[si] = puy[si] + sy
+                puz[si] = puz[si] + sz
+                s = s + (1 as long)
+            }
+            c = c + 1
+        }
+    }
+
+    // Scatter the accumulated push back to each entity's velocity. Only
+    // the packed entities are walked -- off[cells] of them, which the
+    // per-cell cap holds below n when cells overflow.
+    packed = off[cells]
+    q = 0 as long
+    while q < packed {
+        qi = q as int
+        who = pidx[qi] as int
+        v[who * 3] = v[who * 3] + pux[qi] * strength
+        v[who * 3 + 1] = v[who * 3 + 1] + puy[qi] * strength
+        v[who * 3 + 2] = v[who * 3 + 2] + puz[qi] * strength
+        q = q + (1 as long)
+    }
+}
+
+// --- the motion -------------------------------------------------------------------------------------------------
+
+// Point each figure's velocity along its heading at `speed`. The
+// separation adds to this afterwards; the step reads the sum.
+struct HordeWanderJob {
+    vel: ptr
+    yaw: ptr
+    speed: float
+}
+
+wander_run(start: int, end: int, worker: int, context: ptr) {
+    job = context as *HordeWanderJob
+    v = job.vel as float[]
+    yaw = job.yaw as float[]
+    i = start
+    while i < end {
+        a = yaw[i]
+        v[i * 3] = fast_cos(a) * job.speed
+        v[i * 3 + 1] = 0.0
+        v[i * 3 + 2] = 0.0 - fast_sin(a) * job.speed
+        i = i + 1
+    }
+}
+
+wander(vel: ptr, yaw: ptr, n: int, speed: float) {
+    if vel == null || yaw == null { return }
+    job = HordeWanderJob { vel: vel, yaw: yaw, speed: speed }
+    jobs.parallel_for(wander_run, n, GRAIN, (&job) as ptr)
+}
+
+// Each figure's own pace through the walk, so a crowd does not march
+// in lock step: a fixed spread of 0.85 to 1.15 of the clip's speed,
+// hashed from the index so it is the same figure every frame with no
+// column to carry it.
+pace_of(i: int) -> float {
+    t = (i as float) * 0.6180339887498949
+    t = t - ((t as long) as float)
+    return 0.85 + 0.30 * t
+}
+
+// Cap the speed, step along the velocity, bounce off the street's edges
+// (which turns the heading so the figure walks back in), keep it on
+// the road, face it along its heading, and advance its walk with its
+// pace. With a bank, the walk drives the motion: the clip advances at
+// the figure's pace and it moves at exactly the speed the clip's root
+// was travelling at that point of the walk, which is what plants the
+// feet. Without a bank the velocity is taken as given and the clip
+// plays in real time.
+struct HordeStepJob {
+    pos: ptr
+    vel: ptr
+    yaw: ptr
+    phase: ptr
+    first: int
+    dt: float
+    max_speed: float
+    x0: float
+    x1: float
+    z0: float
+    z1: float
+    road_y: float
+    walk: float
+    step_scale: float
+    bank: ptr
+}
+
+step_run(start: int, end: int, worker: int, context: ptr) {
+    job = context as *HordeStepJob
+    pos = job.pos as float[]
+    vel = job.vel as float[]
+    yaw = job.yaw as float[]
+    phase = job.phase as float[]
+    dt = job.dt
+    max_speed = job.max_speed
+    bank = job.bank
+    i = job.first + start
+    last = job.first + end
+    while i < last {
+        vx = vel[i * 3]
+        vz = vel[i * 3 + 2]
+        sp = sqrt(vx * vx + vz * vz)
+        a = yaw[i]
+        pace = 1.0
+        bounced = false
+        if bank != null {
+            pace = pace_of(i)
+            if sp > 0.000000001 {
+                want = ae3d_posebank_speed(bank, phase[i], job.walk) * pace
+                s = want / sp
+                vx = vx * s
+                vz = vz * s
+                sp = want
+            }
+        }
+        if sp > max_speed && sp > 0.000000001 {
+            s = max_speed / sp
+            vx = vx * s
+            vz = vz * s
+            sp = max_speed
+        }
+        nx = pos[i * 3] + vx * dt
+        nz = pos[i * 3 + 2] + vz * dt
+        if nx < job.x0 { nx = job.x0; a = PI - a; bounced = true }
+        if nx > job.x1 { nx = job.x1; a = PI - a; bounced = true }
+        if nz < job.z0 { nz = job.z0; a = 0.0 - a; bounced = true }
+        if nz > job.z1 { nz = job.z1; a = 0.0 - a; bounced = true }
+        pos[i * 3] = nx
+        pos[i * 3 + 1] = job.road_y
+        pos[i * 3 + 2] = nz
+        if bounced { yaw[i] = a } else if sp > 0.1 { yaw[i] = fast_atan2(0.0 - vz, vx) }
+        // The walk advances at the figure's pace when the clip is driving,
+        // and by its old speed-scaled rate when it is not.
+        rate = 0.35 + sp * 0.3
+        if bank != null { rate = pace }
+        ph = phase[i] + job.step_scale * rate
+        while ph >= 1.0 { ph = ph - 1.0 }
+        phase[i] = ph
+        i = i + 1
+    }
+}
+
+// From `start`, `n` of them, so a crowd of two figures steps each
+// figure's run at its own bank's pace.
+step(pos: ptr, vel: ptr, yaw: ptr, phase: ptr, start: int, n: int, dt: float, max_speed: float,
+     x0: float, x1: float, z0: float, z1: float, road_y: float, walk: float, bank: ptr) {
+    if pos == null || vel == null || yaw == null || phase == null { return }
+    step_scale = dt
+    if walk > 0.0 { step_scale = dt / walk }
+    job = HordeStepJob { pos: pos, vel: vel, yaw: yaw, phase: phase, first: start, dt: dt, max_speed: max_speed,
+                    x0: x0, x1: x1, z0: z0, z1: z1, road_y: road_y, walk: walk, step_scale: step_scale, bank: bank }
+    jobs.parallel_for(step_run, n, GRAIN, (&job) as ptr)
+}
+
+// --- the sort by distance ---------------------------------------------------------------------------------------
+
+// The sort in two passes over the same fixed runs of the crowd: the
+// first counts each run's near, mid and far, the offsets are summed run
+// by run, and the second writes each run's figures at its own offsets --
+// so every core writes its own stretch of the compacted buffers and the
+// order is the order one core would have written. Three tiers: within
+// near_dist, within mid_dist, beyond; a mid_dist of zero puts everything
+// past near in the mid tier and leaves the far one empty.
+struct HordeTiersJob {
+    pos: ptr
+    yaw: ptr
+    phase: ptr
+    col: ptr
+    first: int
+    cx: float
+    cz: float
+    nd2: float
+    md2: float
+    cd2: float
+    cull: bool
+    three: bool
+    count: ptr                     // int[3 * runs]: a run's counts, then its offsets
+    runs: int
+    p0: ptr
+    y0: ptr
+    ph0: ptr
+    c0: ptr
+    p1: ptr
+    y1: ptr
+    ph1: ptr
+    c1: ptr
+    p2: ptr
+    y2: ptr
+    ph2: ptr
+    c2: ptr
+}
+
+tier_of(job: *HordeTiersJob, pos: float[], i: int) -> int {
+    dx = pos[i * 3] - job.cx
+    dz = pos[i * 3 + 2] - job.cz
+    d2 = dx * dx + dz * dz
+    if job.cull && d2 > job.cd2 { return 0 - 1 }
+    if d2 < job.nd2 { return 0 }
+    if job.three == false || d2 < job.md2 { return 1 }
+    return 2
+}
+
+tiers_count(start: int, end: int, worker: int, context: ptr) {
+    job = context as *HordeTiersJob
+    pos = job.pos as float[]
+    count = job.count as int[]
+    run = start / GRAIN
+    n0 = 0
+    n1 = 0
+    n2 = 0
+    i = job.first + start
+    last = job.first + end
+    while i < last {
+        t = tier_of(job, pos, i)
+        if t == 0 { n0 = n0 + 1 } else if t == 1 { n1 = n1 + 1 } else if t == 2 { n2 = n2 + 1 }
+        i = i + 1
+    }
+    count[run] = n0
+    count[job.runs + run] = n1
+    count[job.runs * 2 + run] = n2
+}
+
+// A tier's buffers, or none: written only when its yaw and phase are there.
+tier_write(p: ptr, y: ptr, ph: ptr, c: ptr, k: int, pos: float[], yaw: float[], phase: float[], col: ptr, i: int) {
+    tp = p as float[]
+    tp[k * 3] = pos[i * 3]
+    tp[k * 3 + 1] = pos[i * 3 + 1]
+    tp[k * 3 + 2] = pos[i * 3 + 2]
+    ty = y as float[]
+    ty[k] = yaw[i]
+    tph = ph as float[]
+    tph[k] = phase[i]
+    if col != null && c != null {
+        source = col as float[]
+        tc = c as float[]
+        tc[k * 3] = source[i * 3]
+        tc[k * 3 + 1] = source[i * 3 + 1]
+        tc[k * 3 + 2] = source[i * 3 + 2]
+    }
+}
+
+tiers_write(start: int, end: int, worker: int, context: ptr) {
+    job = context as *HordeTiersJob
+    pos = job.pos as float[]
+    yaw = job.yaw as float[]
+    phase = job.phase as float[]
+    count = job.count as int[]
+    run = start / GRAIN
+    at0 = count[run]
+    at1 = count[job.runs + run]
+    at2 = count[job.runs * 2 + run]
+    i = job.first + start
+    last = job.first + end
+    while i < last {
+        t = tier_of(job, pos, i)
+        if t == 0 && job.p0 != null {
+            tier_write(job.p0, job.y0, job.ph0, job.c0, at0, pos, yaw, phase, job.col, i)
+            at0 = at0 + 1
+        } else if t == 1 && job.p1 != null {
+            tier_write(job.p1, job.y1, job.ph1, job.c1, at1, pos, yaw, phase, job.col, i)
+            at1 = at1 + 1
+        } else if t == 2 && job.p2 != null {
+            tier_write(job.p2, job.y2, job.ph2, job.c2, at2, pos, yaw, phase, job.col, i)
+            at2 = at2 + 1
+        }
+        i = i + 1
+    }
+}
+
+var g_counts: ptr = null           // int[3 * runs], grown to the largest crowd
+var g_counts_capacity = 0
+
+// The crowd's figures from `start`, `n` of them, sorted by distance to
+// (cx, cz) into up to three compacted tiers -- near within near_dist,
+// mid within mid_dist, far beyond -- each tier its own position, yaw,
+// phase and colour buffers, and the figures past cull_dist (when it is
+// above zero) dropped. counts_out takes the three counts as doubles. A
+// tier whose buffers are null is counted and not written.
+tiers(pos: ptr, yaw: ptr, phase: ptr, col: ptr, start: int, n: int, cx: float, cz: float,
+      near_dist: float, mid_dist: float, cull_dist: float,
+      np: ptr, ny: ptr, nph: ptr, ncol: ptr, mp: ptr, my: ptr, mph: ptr, mcol: ptr,
+      fp: ptr, fy: ptr, fph: ptr, fcol: ptr, counts_out: ptr) {
+    out = counts_out as float[]
+    if counts_out != null { out[0] = 0.0; out[1] = 0.0; out[2] = 0.0 }
+    if pos == null || yaw == null || phase == null || n <= 0 { return }
+    runs = (n + GRAIN - 1) / GRAIN
+    if runs * 3 > g_counts_capacity {
+        if g_counts != null { free(g_counts) }
+        g_counts = calloc(runs * 3, 4)
+        g_counts_capacity = runs * 3
+    }
+    job = HordeTiersJob { pos: pos, yaw: yaw, phase: phase, col: col, first: start, cx: cx, cz: cz,
+                     nd2: near_dist * near_dist, md2: mid_dist * mid_dist, cd2: cull_dist * cull_dist,
+                     cull: cull_dist > 0.0, three: mid_dist > 0.0, count: g_counts, runs: runs,
+                     p0: np, y0: ny, ph0: nph, c0: ncol, p1: mp, y1: my, ph1: mph, c1: mcol, p2: fp, y2: fy, ph2: fph, c2: fcol }
+    // A tier without buffers is counted and not written.
+    if job.y0 == null || job.ph0 == null { job.p0 = null }
+    if job.y1 == null || job.ph1 == null { job.p1 = null }
+    if job.y2 == null || job.ph2 == null { job.p2 = null }
+    jobs.parallel_for_fixed(tiers_count, n, GRAIN, (&job) as ptr)
+    count = g_counts as int[]
+    t = 0
+    while t < 3 {
+        total = 0
+        r = 0
+        while r < runs {
+            here = count[t * runs + r]
+            count[t * runs + r] = total
+            total = total + here
+            r = r + 1
+        }
+        if counts_out != null { out[t] = total as float }
+        t = t + 1
+    }
+    jobs.parallel_for_fixed(tiers_write, n, GRAIN, (&job) as ptr)
+}
+
+// The two-tier sort: near within near_dist, the rest far. Returns the
+// near count and writes the far count into far_out[0].
+bucket(pos: ptr, yaw: ptr, phase: ptr, col: ptr, start: int, n: int, cx: float, cz: float, near_dist: float, cull_dist: float,
+       np: ptr, ny: ptr, nph: ptr, ncol: ptr, fp: ptr, fy: ptr, fph: ptr, fcol: ptr, far_out: ptr) -> int {
+    counts_block = calloc(3, 8)
+    counts = counts_block as float[]
+    tiers(pos, yaw, phase, col, start, n, cx, cz, near_dist, 0.0, cull_dist, np, ny, nph, ncol, fp, fy, fph, fcol, null, null, null, null, counts_block)
+    if far_out != null {
+        far = far_out as float[]
+        far[0] = counts[1]
+    }
+    near = counts[0] as int
+    free(counts_block)
+    return near
+}
+
+// --- the audit --------------------------------------------------------------------------------------------------
+
+// Every figure's position against where it stood the frame before: the
+// largest step and who took it, how many stepped further than `limit`
+// (a teleport, which no sim should let happen) and the first three of
+// them, and the crowd's extent in z. The previous positions are then
+// this frame's. Over the pool, each run its own partial, merged in
+// order so the offenders named are the lowest numbered. out: worst,
+// worst_id, jumps, z_lo, z_hi, offender[0..2] (-1 for none).
+struct HordeAuditPart {
+    worst: float
+    z_lo: float
+    z_hi: float
+    worst_id: int
+    jumps: int
+    offender0: int
+    offender1: int
+    offender2: int
+}
+
+struct HordeAuditJob {
+    pos: ptr
+    prev: ptr
+    limit: float
+    parts: ptr                     // HordeAuditPart[runs]
+}
+
+audit_run(start: int, end: int, worker: int, context: ptr) {
+    job = context as *HordeAuditJob
+    part = (job.parts + (start / AUDIT_GRAIN) * sizeof(HordeAuditPart)) as *HordeAuditPart
+    pos = job.pos as float[]
+    prev = job.prev as float[]
+    part.worst = 0.0
+    part.worst_id = 0
+    part.jumps = 0
+    part.z_lo = 1000.0
+    part.z_hi = 0.0 - 1000.0
+    part.offender0 = 0 - 1
+    part.offender1 = 0 - 1
+    part.offender2 = 0 - 1
+    i = start
+    while i < end {
+        dx = pos[i * 3] - prev[i * 3]
+        dy = pos[i * 3 + 1] - prev[i * 3 + 1]
+        dz = pos[i * 3 + 2] - prev[i * 3 + 2]
+        d = sqrt(dx * dx + dy * dy + dz * dz)
+        if d > part.worst { part.worst = d; part.worst_id = i }
+        if pos[i * 3 + 2] < part.z_lo { part.z_lo = pos[i * 3 + 2] }
+        if pos[i * 3 + 2] > part.z_hi { part.z_hi = pos[i * 3 + 2] }
+        if d > job.limit {
+            if part.jumps == 0 { part.offender0 = i } else if part.jumps == 1 { part.offender1 = i } else if part.jumps == 2 { part.offender2 = i }
+            part.jumps = part.jumps + 1
+        }
+        prev[i * 3] = pos[i * 3]
+        prev[i * 3 + 1] = pos[i * 3 + 1]
+        prev[i * 3 + 2] = pos[i * 3 + 2]
+        i = i + 1
+    }
+}
+
+var g_parts: ptr = null
+var g_parts_capacity = 0
+
+audit(pos: ptr, prev: ptr, n: int, limit: float, out_block: ptr) {
+    out = out_block as float[]
+    out[0] = 0.0
+    out[1] = 0.0
+    out[2] = 0.0
+    out[3] = 1000.0
+    out[4] = 0.0 - 1000.0
+    out[5] = 0.0 - 1.0
+    out[6] = 0.0 - 1.0
+    out[7] = 0.0 - 1.0
+    if pos == null || prev == null || n <= 0 { return }
+    runs = (n + AUDIT_GRAIN - 1) / AUDIT_GRAIN
+    if runs > g_parts_capacity {
+        if g_parts != null { free(g_parts) }
+        g_parts = calloc(runs, sizeof(HordeAuditPart))
+        g_parts_capacity = runs
+    }
+    job = HordeAuditJob { pos: pos, prev: prev, limit: limit, parts: g_parts }
+    jobs.parallel_for_fixed(audit_run, n, AUDIT_GRAIN, (&job) as ptr)
+    named = 0
+    r = 0
+    while r < runs {
+        part = (g_parts + r * sizeof(HordeAuditPart)) as *HordeAuditPart
+        if part.worst > out[0] { out[0] = part.worst; out[1] = part.worst_id as float }
+        out[2] = out[2] + (part.jumps as float)
+        if part.z_lo < out[3] { out[3] = part.z_lo }
+        if part.z_hi > out[4] { out[4] = part.z_hi }
+        if part.offender0 >= 0 && named < 3 { out[5 + named] = part.offender0 as float; named = named + 1 }
+        if part.offender1 >= 0 && named < 3 { out[5 + named] = part.offender1 as float; named = named + 1 }
+        if part.offender2 >= 0 && named < 3 { out[5 + named] = part.offender2 as float; named = named + 1 }
+        r = r + 1
+    }
+}

@@ -89,30 +89,6 @@ double ae3d_posebank_speed(void *bank, double phase, double duration);
 int    ae3d_gl_posebank_texture(void *bank);
 void   ae3d_gl_setup_instance_phase(void *inst, int phase_vbo);
 void   ae3d_gl_update_instance_phases(void *inst, int phase_vbo);
-void  *ae3d_horde_grid_create(int cols, int per_cell);
-void   ae3d_horde_grid_destroy(void *grid);
-void   ae3d_horde_separate(void *grid, double *pos, double *vel, int n,
-                           double ox, double oz, double cell_size,
-                           double radius, double strength);
-void   ae3d_crowd_wander(double *vel, const double *yaw, int n, double speed);
-void   ae3d_crowd_step(double *pos, const double *vel, double *yaw, double *phase,
-                       int start, int n, double dt, double max_speed,
-                       double x0, double x1, double z0, double z1,
-                       double road_y, double walk, void *bank);
-int    ae3d_crowd_bucket(const double *pos, const double *yaw, const double *phase,
-                         const double *col, int start, int n,
-                         double cx, double cz, double near_dist, double cull_dist,
-                         double *np, double *ny, double *nph, double *ncol,
-                         double *fp, double *fy, double *fph, double *fcol,
-                         double *far_out);
-void   ae3d_crowd_tiers(const double *pos, const double *yaw, const double *phase,
-                        const double *col, int start, int n,
-                        double cx, double cz, double near_dist, double mid_dist, double cull_dist,
-                        double *np, double *ny, double *nph, double *ncol,
-                        double *mp, double *my, double *mph, double *mcol,
-                        double *fp, double *fy, double *fph, double *fcol,
-                        double *counts_out);
-void   ae3d_crowd_audit(const double *pos, double *prev, int n, double limit, double *out);
 void   ae3d_gl_upload_skin(void *mesh, int vbo);
 void  *ae3d_skinrows_create(int count);
 void   ae3d_skinrows_destroy(void *rows);
