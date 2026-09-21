@@ -17,8 +17,8 @@ honours.
   `pkg-config`, and the Vulkan headers. The Vulkan loader is opened at run
   time; a Vulkan driver is optional (the engine falls back to OpenGL when
   `AE3D_API=opengl`, and the tests run on either).
-- Python 3 only for Blender's own scripts under `tools/blender/`, which run
-  inside Blender; nothing else in the build or at run time.
+- No Python: the build, the gate and every tool are Aether. `tools/blender/`
+  is Python because it runs inside Blender.
 
 ```bash
 brew install glfw molten-vk vulkan-loader                        # macOS

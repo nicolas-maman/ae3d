@@ -47,14 +47,6 @@ pass() { printf '   ok    %s\n' "$1"; }
 fail() { printf '   FAIL  %s\n' "$1"; failures=$((failures + 1)); }
 skip() { printf '   skip  %s (%s)\n' "$1" "$2"; skipped=$((skipped + 1)); }
 
-# Windows ships a python3 on PATH whose only purpose is to open the Microsoft
-# Store, and it answers command -v exactly like an interpreter would. Asking it
-# to run something is the only way to tell them apart.
-PYTHON=""
-for candidate in python3 python "py -3"; do
-    if $candidate -c "" >/dev/null 2>&1; then PYTHON="$candidate"; break; fi
-done
-
 have_display() {
     case "$(uname -s)" in
         Darwin) return 0 ;;
@@ -935,10 +927,11 @@ else
         # cannot be hit, a field whose callback is not wired, a row that does
         # not respond to a click: all of them pass. So this presses the real
         # widgets through aether-ui's driver and asks the tree what changed.
-        if [ -z "$PYTHON" ]; then
-            skip "ae3d_editor (driver)" "no python3"
-        elif ! have_display; then
+        if ! have_display; then
             skip "ae3d_editor (driver)" "no display"
+        elif ! ./build.sh tools/drive_editor.ae >/tmp/ae3d_driver_build.log 2>&1; then
+            fail "ae3d_editor (driver, build)"
+            sed 's/^/        /' /tmp/ae3d_driver_build.log | head -12
         else
             # Both backends. The report checks have always run on each, but
             # nothing had ever pressed a widget on the Vulkan one, and the
@@ -946,7 +939,7 @@ else
             # a real click exercises.
             for driver_backend in opengl vulkan; do
                 driver_log="$(mktemp)"
-                if $PYTHON tools/drive_editor.py --backend "$driver_backend" \
+                if ./build/drive_editor --backend "$driver_backend" \
                         --port 8797 >"$driver_log" 2>&1; then
                     pass "ae3d_editor (driver, $driver_backend)"
                 else
@@ -955,7 +948,7 @@ else
                     # more checks than that now, so the head of its log is all
                     # the ones that passed and a failure two thirds of the way
                     # down was reported as a wall of ok with no reason in it.
-                    grep -E 'FAIL|Traceback|Error|error:' "$driver_log" \
+                    grep -E 'FAIL|Error|error:' "$driver_log" \
                         | sed 's/^/        /' | head -12
                     # And the driver's own last words, which say WHY when the
                     # run never got to a check: "never answered /widgets" and

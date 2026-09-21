@@ -61,6 +61,15 @@
   joints, the sprung figure stands for four seconds, the hits are reported
   and the struck figure lets go.
 
+### The gate without Python
+
+- `tools/drive_editor.ae` drives the editor through its widgets in Aether:
+  the same ninety-six checks in the same order as the Python it replaces
+  (proved by running both against the same editor on both backends), the
+  editor's own output kept in the log, a scene file's stamp waited past
+  its second. `ci.sh` needs no Python at all now; `tools/blender/` is the
+  only Python left, and it runs inside Blender.
+
 ### Documentation
 
 - `docs/` is a documentation set with an index: architecture, building,
