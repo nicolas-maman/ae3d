@@ -8,6 +8,7 @@
 // region is clamped to the frame. Several frames' regions are compared by
 // cropping each and laying them out with tools/montage.
 import ae3d.core
+import ae3d.png
 import std.os
 import std.string
 
@@ -17,8 +18,6 @@ extern ae3d_image_width(img: ptr) -> int
 extern ae3d_image_height(img: ptr) -> int
 extern ae3d_image_pixels(img: ptr) -> ptr
 extern ae3d_image_error() -> string
-extern ae3d_png_write(path: string, rgba: ptr, width: int, height: int) -> int
-extern ae3d_rgba_set(rgba: ptr, index: int, r: float, g: float, b: float, a: float)
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 
@@ -59,7 +58,7 @@ main() {
             // The loader flips rows so row 0 is the bottom; the crop is
             // written top row first, like the frame it came from.
             at = ((h - 1 - (y0 + y)) * w + x0 + x) * 4
-            ae3d_rgba_set(pixels, y * cw + x,
+            png.rgba_set(pixels, y * cw + x,
                           (channel(src, at) as float) / 255.0,
                           (channel(src, at + 1) as float) / 255.0,
                           (channel(src, at + 2) as float) / 255.0, 1.0)
@@ -68,7 +67,7 @@ main() {
         y = y + 1
     }
     ae3d_image_free(img)
-    if ae3d_png_write(os.args_get(1), pixels, cw, ch) == 1 {
+    if png.write(os.args_get(1), pixels, cw, ch) {
         println("crop: wrote ${os.args_get(1)} (${cw}x${ch} at ${x0},${y0} of ${w}x${h})")
     } else {
         println("crop: could not write ${os.args_get(1)}")

@@ -1,0 +1,159 @@
+// Writing an RGBA frame out as a PNG.
+//
+// A program that renders can already be checked for not crashing and
+// for the number of draws it issued. Neither says what it drew, and the
+// difference matters: an example that renders a flat wash of one colour
+// exits zero and counts its draws exactly like one that renders the
+// scene it is named after.
+//
+// std.zlib does the compression; what is here is the chunk framing PNG
+// puts around it (RFC 2083): the signature, IHDR, one IDAT of the
+// filtered rows, IEND, each chunk with its CRC-32 (the table-driven
+// one, ISO 3309, as zlib's crc32 computes it). The bytes go out through
+// the C library's own fopen and fwrite.
+//
+//   pixels = calloc(width * height, 4)
+//   png.rgba_set(pixels, y * width + x, r, g, b, a)   // channels 0..1, clamped
+//   png.write("frame.png", pixels, width, height)
+import std.mem
+import std.bytes
+import std.zlib
+
+exports (
+    write, rgba_set
+)
+
+extern fopen(path: string, mode: string) -> ptr
+extern fclose(f: ptr) -> int
+extern fwrite(buffer: ptr, size: long, count: long, f: ptr) -> long
+extern malloc(size: long) -> ptr
+extern free(p: ptr)
+extern calloc(count: long, size: long) -> ptr
+// The C library's memcpy declared with a string source: the bytes of a
+// string into a buffer, since a string does not cast to a pointer.
+extern memcpy(dst: ptr, src: string, n: long) -> ptr
+
+var g_crc_table: ptr = null        // long[256]
+
+crc_table() -> long[] {
+    if g_crc_table == null {
+        g_crc_table = calloc(256 as long, 8 as long)
+        table = g_crc_table as long[]
+        n = 0
+        while n < 256 {
+            c = n as long
+            k = 0
+            while k < 8 {
+                if (c & (1 as long)) != (0 as long) { c = (3988292384 as long) ^ (c >> 1) } else { c = c >> 1 }
+                k = k + 1
+            }
+            table[n] = c
+            n = n + 1
+        }
+    }
+    return g_crc_table as long[]
+}
+
+// The CRC-32 of `length` bytes, continued from `crc` (0 to start).
+crc32(crc: long, data: ptr, length: int) -> long {
+    table = crc_table()
+    c = crc ^ (4294967295 as long)
+    i = 0
+    while i < length {
+        c = table[((c ^ (mem.get_uint8(data, i) as long)) & (255 as long)) as int] ^ (c >> 8)
+        i = i + 1
+    }
+    return c ^ (4294967295 as long)
+}
+
+put_be32(out: ptr, at: int, value: long) {
+    mem.set_uint8(out, at, ((value >> 24) & (255 as long)) as int)
+    mem.set_uint8(out, at + 1, ((value >> 16) & (255 as long)) as int)
+    mem.set_uint8(out, at + 2, ((value >> 8) & (255 as long)) as int)
+    mem.set_uint8(out, at + 3, (value & (255 as long)) as int)
+}
+
+// A chunk: its length, its four-letter type, its data and the CRC over the type and data.
+write_chunk(f: ptr, kind: string, data: ptr, length: int) -> bool {
+    header = malloc(8 as long)
+    put_be32(header, 0, length as long)
+    memcpy(header + 4, kind, 4 as long)
+    ok = fwrite(header, 1 as long, 8 as long, f) == (8 as long)
+    if ok && length > 0 { ok = fwrite(data, 1 as long, length as long, f) == (length as long) }
+    crc = crc32(0 as long, header + 4, 4)
+    if length > 0 { crc = crc32(crc, data, length) }
+    put_be32(header, 0, crc)
+    if ok { ok = fwrite(header, 1 as long, 4 as long, f) == (4 as long) }
+    free(header)
+    return ok
+}
+
+// `rgba` is width*height*4 bytes, top row first. True when the file is written.
+write(path: string, rgba: ptr, width: int, height: int) -> bool {
+    if path == "" || rgba == null || width <= 0 || height <= 0 { return false }
+    row_bytes = width * 4
+    // One filter byte per row, and filter 0 throughout: the rows come off a
+    // framebuffer rather than out of a paint program, so choosing a filter per
+    // row would cost a pass over the image to save space nothing here needs.
+    raw_size = (row_bytes + 1) * height
+    raw = malloc(raw_size as long)
+    if raw == null { return false }
+    y = 0
+    while y < height {
+        mem.set_uint8(raw, (row_bytes + 1) * y, 0)
+        mem.copy(raw + (row_bytes + 1) * y + 1, rgba + row_bytes * y, row_bytes as long)
+        y = y + 1
+    }
+    // The compressor takes a string: the rows as one, zero bytes and all.
+    rows = bytes.string_from_ptr(raw, raw_size)
+    free(raw)
+    packed, packed_size, err = zlib.deflate(rows, raw_size, 6)
+    if err != "" { return false }
+    idat = malloc(packed_size as long)
+    memcpy(idat, packed, packed_size as long)
+    f = fopen(path, "wb")
+    if f == null { free(idat); return false }
+    signature = malloc(8 as long)
+    mem.set_uint8(signature, 0, 137)
+    mem.set_uint8(signature, 1, 80)
+    mem.set_uint8(signature, 2, 78)
+    mem.set_uint8(signature, 3, 71)
+    mem.set_uint8(signature, 4, 13)
+    mem.set_uint8(signature, 5, 10)
+    mem.set_uint8(signature, 6, 26)
+    mem.set_uint8(signature, 7, 10)
+    ihdr = malloc(13 as long)
+    put_be32(ihdr, 0, width as long)
+    put_be32(ihdr, 4, height as long)
+    mem.set_uint8(ihdr, 8, 8)      // bits per channel
+    mem.set_uint8(ihdr, 9, 6)      // colour type: RGBA
+    mem.set_uint8(ihdr, 10, 0)     // deflate
+    mem.set_uint8(ihdr, 11, 0)     // adaptive filtering
+    mem.set_uint8(ihdr, 12, 0)     // no interlace
+    ok = fwrite(signature, 1 as long, 8 as long, f) == (8 as long) &&
+         write_chunk(f, "IHDR", ihdr, 13) &&
+         write_chunk(f, "IDAT", idat, packed_size) &&
+         write_chunk(f, "IEND", null, 0)
+    if fclose(f) != 0 { ok = false }
+    free(idat)
+    free(ihdr)
+    free(signature)
+    return ok
+}
+
+// One pixel of an RGBA buffer: Aether's arrays are of its own numeric
+// types, so a tool that builds an image writes each pixel through
+// here. Channels are 0..1, clamped.
+channel_byte(v: float) -> int {
+    if v <= 0.0 { return 0 }
+    if v >= 1.0 { return 255 }
+    return (v * 255.0 + 0.5) as int
+}
+
+rgba_set(rgba: ptr, index: int, r: float, g: float, b: float, a: float) {
+    at = index * 4
+    mem.set_uint8(rgba, at, channel_byte(r))
+    mem.set_uint8(rgba, at + 1, channel_byte(g))
+    mem.set_uint8(rgba, at + 2, channel_byte(b))
+    mem.set_uint8(rgba, at + 3, channel_byte(a))
+}

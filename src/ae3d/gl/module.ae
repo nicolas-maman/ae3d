@@ -12,6 +12,7 @@ import std.list
 import std.heap
 import std.string
 import ae3d.core
+import ae3d.png
 import ae3d.platform
 import ae3d.rendering
 import ae3d.shaders
@@ -142,7 +143,7 @@ extern ae3d_gl_fbo_attach_shadow_map(fbo: int, size: int) -> int
 extern ae3d_gl_renderbuffer_delete(rbo: int)
 extern ae3d_gl_fbo_complete() -> int
 extern ae3d_gl_read_pixel(x: int, y: int) -> int
-extern ae3d_gl_snapshot(path: string, width: int, height: int) -> int
+extern ae3d_gl_read_frame(width: int, height: int) -> ptr
 extern ae3d_offscreen_bind(target: ptr)
 extern ae3d_offscreen_unbind()
 extern ae3d_image_load(path: string) -> ptr
@@ -1722,8 +1723,13 @@ read_pixel(x: int, y: int) -> int {
 // The bound framebuffer, written out as a PNG. For a windowed program the frame
 // is only there between the last draw and the buffer swap, so this has to be
 // called in that window.
+// The frame on screen, written out as a PNG.
 snapshot(path: string, width: int, height: int) -> bool {
-    return ae3d_gl_snapshot(path, width, height) == 1
+    pixels = ae3d_gl_read_frame(width, height)
+    if pixels == null { return false }
+    ok = png.write(path, pixels, width, height)
+    free(pixels)
+    return ok
 }
 
 renderer_default_program(r: *GLRenderer) -> int {
