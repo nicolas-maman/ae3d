@@ -33,13 +33,16 @@ The feature list in full, with the reasoning behind each. The [README](../README
   snaps at the loop.
 - **A data-oriented ECS** (`ae3d.ecs`): entities as integer handles, components
   in dense columns a system walks in one pass, a crowd rendering straight from
-  the position column's buffer. The native crowd step, separation grid and
-  distance bucketing are C over those columns.
+  the position column's buffer. The crowd step, separation grid and
+  distance bucketing are `ae3d.horde`, over those columns and the job pool.
 - **Physically based shading**: metallic/roughness materials, sixteen
-  directional or point lights a frame -- the key light and, of every light
-  the scene registers, the fifteen nearest the camera, picked each frame
-  (`core.nearest_lights`), a point light past its fall-off skipped before
-  it is shaded -- normal mapping, baked per-vertex occlusion and
+  directional, point or spot lights a frame -- the key light and, of every
+  light the scene registers, the fifteen nearest the camera, picked each
+  frame (`core.nearest_lights`), a point light past its fall-off and a spot
+  light outside its cone skipped before they are shaded; a spot light
+  (`core.light_spot`) is a point light confined to a cone about its
+  direction, whole within an inner angle and gone at an outer with a smooth
+  fall-off between, which is what a headlight is -- normal mapping, baked per-vertex occlusion and
   screen-space ambient occlusion from the scene's depth (`engine_set_ssao`,
   both backends), shadow mapping with a texel-snapped light box (both
   backends), volumetric clouds and their shadows, a sky drawn from the sun by

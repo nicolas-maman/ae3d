@@ -164,6 +164,8 @@ typedef struct {
 #define AE3D_VK_LIGHT_CONSTANTATTEN 60
 #define AE3D_VK_LIGHT_LINEARATTEN 64
 #define AE3D_VK_LIGHT_QUADRATICATTEN 68
+#define AE3D_VK_LIGHT_SPOTCOSOUTER 72
+#define AE3D_VK_LIGHT_SPOTCOSINNER 76
 
 typedef struct {
     const char *name;

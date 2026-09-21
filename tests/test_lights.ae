@@ -150,7 +150,30 @@ main() {
     }
     list.free(far_lamps)
 
-    println("  one light ${one_light}, two lights ${two_lights}")
+    // A spot light is a point light with a cone. Beside the camera and aimed
+    // at the ball it lights the face the key misses, as the fill did; aimed
+    // away from it, it lights nothing, though the ball is well inside its
+    // range: the cone is what is checked, not the reach.
+    spot = core.light_spot(core.vec3(0.0, 0.0, 120.0), core.vec3(0.0, 0.0, 0.0 - 1.0),
+                           core.vec3(1.0, 0.9, 0.7), 3.0, 400.0, 20.0, 30.0)
+    spot.ambient_strength = 0.05
+    gl.renderer_add_light(renderer, spot)
+    core.backend_render(&backend, cam, key)
+    pixels = offscreen.target_pixels(target)
+    aimed = frame_total(pixels)
+    check("a spot light aimed at the ball lights it (${aimed} against ${one_light})",
+          aimed - one_light > one_light / 20)
+    spot.direction = core.vec3(0.0, 0.0, 1.0)
+    core.backend_render(&backend, cam, key)
+    pixels = offscreen.target_pixels(target)
+    away = frame_total(pixels)
+    drift = away - one_light
+    if drift < 0 { drift = 0 - drift }
+    check("and aimed away it lights nothing (${away} against ${one_light})", drift <= one_light / 10000)
+    gl.renderer_remove_light(renderer, spot)
+    core.light_free(spot)
+
+    println("  one light ${one_light}, two lights ${two_lights}, spot aimed ${aimed}, away ${away}")
 
     core.backend_cleanup(&backend)
     offscreen.target_destroy(target)

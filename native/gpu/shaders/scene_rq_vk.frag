@@ -15,6 +15,8 @@ struct Light {
     float constantAtten;
     float linearAtten;
     float quadraticAtten;
+    float spotCosOuter;
+    float spotCosInner;
 };
 
 layout(std140, set = 0, binding = 0) uniform SceneBlock {
@@ -1063,6 +1065,12 @@ vec3 direct_light(Light L, vec3 norm, vec3 viewDir, vec3 albedo, vec3 F0,
         float distance = length(lightVec);
         lightDir = lightVec / distance; // More precise than normalize()
         attenuation = 1.0 / (L.constantAtten + L.linearAtten * distance + L.quadraticAtten * distance * distance);
+        if (L.isDirectional == 2) {
+            // Off the cone's axis the light fades out, and past the outer
+            // angle there is none.
+            float onAxis = dot(-lightDir, normalize(L.direction));
+            attenuation *= smoothstep(L.spotCosOuter, L.spotCosInner, onAxis);
+        }
     }
 
     vec3 halfwayDir = normalize(lightDir + viewDir);
@@ -1266,18 +1274,21 @@ void main() {
         if (i >= lightCount) {
             break;
         }
-        if (lights[i].isDirectional == 0) {
+        if (lights[i].isDirectional != 1) {
             // Past the lamp's reach it gives this pixel less than a
             // hundredth of its light: not worth the shading, nor a ray.
             vec3 gap = lights[i].position - FragPos;
             if (dot(gap, gap) * lights[i].quadraticAtten > 64.0) continue;
+            // Nor outside a spot light's cone.
+            if (lights[i].isDirectional == 2 &&
+                dot(normalize(-gap), normalize(lights[i].direction)) < lights[i].spotCosOuter) continue;
         }
         vec3 lit = direct_light(lights[i], norm, viewDir, albedo, F0, NdotV, adjustedRoughness);
         float shade = shaded;
 #ifdef AE3D_RAY_QUERY
         // By ray a lamp throws its own shadow, where it reaches: past the
         // lamp's fall-off there is no light to shadow and no ray is cast.
-        if (i > 0 && rayShadows == 1 && enableShadows && lights[i].isDirectional == 0) {
+        if (i > 0 && rayShadows == 1 && enableShadows && lights[i].isDirectional != 1) {
             if (dot(lit, vec3(0.333)) > 0.002) shade = ray_lamp_factor(lights[i].position, rayLampRadius);
             else shade = 1.0;
         }

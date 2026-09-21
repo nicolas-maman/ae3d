@@ -29,6 +29,14 @@
 
 ### The street driven
 
+- Spot lights: `core.light_spot(position, direction, color, intensity,
+  range, inner_degrees, outer_degrees)`, a point light confined to a cone,
+  on both backends and in the ray-traced lamp shadows; `tests/test_lights`
+  checks a spot aimed at the ball lights it and aimed away lights nothing.
+  The street's headlights are spots down the road: as point lights they
+  lit the facades either side to white by ray (the top of the frame at 157
+  of 255; 91 with the cones).
+
 - `ae3d.physics`: `Vehicle` (a chassis and four wheels on aephysics's wheel
   joints: suspension, a spin motor, steering; `vehicle`, `vehicle_drive`,
   `vehicle_speed`), hull colliders and mesh colliders from a model's own
