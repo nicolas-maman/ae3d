@@ -126,6 +126,21 @@ W / S   throttle and reverse      A / D   steer
 space   brake                     shift   handbrake turn
 ```
 
+## Which examples use it
+
+Every example was audited for bodies the physics engine should own.
+`physics` and `street_drive` are physics scenes. The others are not, each
+for a reason: `spinning_cube`, `models`, `lights`, `backend_switch`,
+`blender_pipeline` and `gltf_viewer` show the renderer and the loaders
+and have nothing that falls or collides; `caustics`, `smooth_terrain`,
+`voxel_world` and `black_hole` are environments with no moving body;
+`sand` is a million point instances slumping to an angle of repose, a
+particle rule of its own that a rigid body per grain would be a
+thousand times the cost of; and the hordes of `zombie_city` and
+`gltf_crowd` are the crowd's packed columns, separated and steered by
+`ae3d.horde` and `ae3d.nav`, which is what a crowd of that size can be.
+A figure that meets a car is a ragdoll, and the street shows that seam.
+
 ## What is checked
 
 `tests/test_physics.ae` drives a scene for a fixed number of steps and
