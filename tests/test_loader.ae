@@ -125,6 +125,23 @@ test_earth() {
     }
     check_true("groups resolved their materials", named == groups)
 
+    // A copy keeps the groups, on materials of its own: a scene of many
+    // props from one file is copies of the file's model, and a copy that
+    // lost its groups drew every one with its first material.
+    copy = core.model_clone(m)
+    check_true("a copy keeps the material groups", core.model_group_count(copy) == groups)
+    own = true
+    i = 0
+    while i < core.model_group_count(copy) {
+        g = core.model_group(copy, i)
+        original = core.model_group(m, i)
+        if g.material == null || g.material == original.material { own = false }
+        if g.index_start != original.index_start || g.index_count != original.index_count { own = false }
+        i = i + 1
+    }
+    check_true("a copy's groups are its own materials over the same indices", own)
+    core.model_free(copy)
+
     println("  Earth.obj: ${core.mesh_vertex_count(m.mesh)} vertices, ${groups} material groups in ${elapsed} ms")
     core.model_free(m)
 }

@@ -428,6 +428,13 @@ main() {
     check_true("instanced model built", blocks != null)
     list.add_raw(models, blocks)
 
+    // A second model from the same file: the file is read once and both
+    // come back, each with its own transform and its own mesh.
+    twin = loader.load_obj("resources/obj/Cube.obj", false)
+    core.model_set_position(twin, 30.0, 0.0, 0.0)
+    core.model_matte(twin, 0.1, 0.1, 0.1)
+    list.add_raw(models, twin)
+
     source_vertices = core.mesh_vertex_count(generated.mesh)
     source_indices = core.mesh_index_count(generated.mesh)
     source_instances = core.model_instance_count(blocks)
@@ -452,7 +459,16 @@ main() {
         println("  ${scene.last_error()}")
         return
     }
-    check_int("model count", list.size(restored), 3)
+    check_int("model count", list.size(restored), 4)
+    if list.size(restored) == 4 {
+        back_twin = list.get_raw(restored, 3) as *Model
+        first = list.get_raw(restored, 0) as *Model
+        check_near("the second model from the file keeps its own position", back_twin.position.x, 30.0)
+        check_near("and its own material", back_twin.material.diffuse.x, 0.1)
+        check_near("the first keeps its own", first.material.diffuse.x, 0.2)
+        check_true("the two have meshes of their own", back_twin.mesh != first.mesh)
+        check_int("with the same vertices", core.mesh_vertex_count(back_twin.mesh), core.mesh_vertex_count(first.mesh))
+    }
 
     beams = scene.scene_load_lights(scene_path)
     check_true("the scene came back with its lights", beams != null)
@@ -524,6 +540,7 @@ main() {
     core.model_free(loaded)
     core.model_free(generated)
     core.model_free(blocks)
+    core.model_free(twin)
     voxel.world_free(world)
 
     // A file that lists models and produces none did not load, whatever it says
@@ -560,7 +577,7 @@ main() {
             partial = scene.scene_load(partial_path)
             check_true("a scene keeps the models it can build", partial != null)
             if partial != null {
-                check_int("partial model count", list.size(partial), 3)
+                check_int("partial model count", list.size(partial), 4)
                 i = 0
                 while i < list.size(partial) {
                     core.model_free(list.get_raw(partial, i) as *Model)

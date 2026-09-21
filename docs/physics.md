@@ -57,10 +57,27 @@ so the draw reads what the world wrote.
 | `rigidbody_set_velocity`, `rigidbody_apply_impulse`, `rigidbody_apply_force`, `rigidbody_set_damping` | the usual |
 | `rigidbody_enable_hit_events(rb, true)`; `hit_event_count(p)`, `hit_event(p, i)` | contacts above the world's hit speed, reported after each step with the shapes, the point, the normal and the approach speed |
 | `physics_body_count`, `physics_step_count`, `physics_set_gravity` | the world's counters and gravity |
-| `physics_free(p)` | the world and its shape data; the objects stay the scene's |
+| `physics_free(p)` | the world and its shape data; the objects stay the scene's, without their Rigidbody components |
+| `spec_of(o)`, `apply_spec(o, spec)`, `attachments(p)` | the scene file's record of a body, and a body from one (below) |
 
 Hulls and meshes are held by the world by reference; `physics_free`
 releases them after the world, so a program never frees one itself.
+
+### The scene file
+
+A body is recorded on its model in the scene file (`ae3d.scene`,
+`PhysicsSpec`): the body's kind, its first collider's kind as one of the
+five the object's own mesh can make -- `box` (its bounds), `sphere`,
+`capsule`, `hull` (its vertices), `mesh` (its triangles) -- and the
+surface's friction and restitution and the density. `spec_of(o)` answers
+it for an object with a body; `apply_spec(o, spec)` gives an object a body
+and a collider from one, which is what the editor's Simulate does for
+every object with a record. `attach` registers the module as one of the
+engine's attachment providers, so `engine_save_scene` -- and
+`AE3D_SCENE_OUT=path`, which writes any program's scene on its first
+frame -- carries the record of every body, and the street opens in the
+editor with its 299 bodies ([docs/editor.md](editor.md)). A ragdoll's
+bones are the ragdoll's and are not recorded one by one.
 
 ## Ragdolls
 
@@ -92,9 +109,21 @@ carries from then on. Every fixed step the root rides the pelvis and each
 mapped bone takes its body's rotation, parents before children, and the
 unmapped bones (wrists, toes, the crown) follow their parents, so the
 mesh weighted to the rig stands, falls and lies as the ragdoll does with
-its own bone lengths intact. The ragdoll's capsule models go unseen. The
-active ragdolls of the NaturalMotion line -- balance, bracing, getting
-up, a walk driving the anchors -- are the next step
+its own bone lengths intact. The ragdoll's capsule models go unseen.
+
+`ragdoll_follow(r)` turns it round: the rig drives the ragdoll. Every
+fixed step each mapped bone's kinematic anchor is driven to where the
+rig has the bone (the dressing's offsets, inverted), and the bodies
+follow through their joints' springs -- the pose drive of an active
+ragdoll. So a rig animated by a clip walks its figure as an animated
+character while the figure collides as the ragdoll it is, and
+`ragdoll_release` -- on the car's hit event -- lets the anchors go and
+the bodies drive the rig again from wherever they were: the character
+animated until the moment it is struck is the ragdoll that falls. The
+street's walkers are this: the export's gait cycle on a player per bone,
+the root placed each step where the walker has got to at the clip's own
+pace (0.85 m/s), the ragdoll a step behind. Balance, bracing and getting
+up -- the NaturalMotion line -- are the next step
 ([#365](https://github.com/nicolas-maman/ae3d/issues/365)).
 
 ## Vehicles
@@ -130,12 +159,16 @@ wave of ground), `ragdolls` (eight figures falling onto a torus) and
 **`examples/street_drive.ae`** is the street driven. The city block from
 the Blender pipeline is loaded three tiles long, its ground, buildings and
 kerbs as mesh colliders, its crates, bins and benches as dynamic bodies
-with the convex hull of their own mesh; a car is built from hulls and
+with the convex hull of their own mesh (built to the vertex budget a hull
+holds: a bevelled crate is 56 corners and more edges than the limit, so
+its hull is the tightest 32-vertex one); a car is built from hulls and
 driven on wheel joints; thirteen bystanders -- the pipeline's zombie
 figure, skin and clothes weighted to a rig of its own for each, worn by
-a ragdoll -- stand on the pavements and three in the road, sprung
-upright until the car's hit events name them, and fall as their
-ragdolls fall. Left
+a ragdoll -- stand on the pavements and in the road or walk the
+pavements on the export's gait cycle, sprung or driven until the car's
+hit events name them, and fall as their ragdolls fall. The street is
+five blocks into a fog whole by 230 m; `AE3D_CAMX/Y/Z` and
+`AE3D_AIMX/Y/Z` place the camera by number. Left
 alone for three seconds the car drives itself up and down the street with
 a lane controller and a U-turn on the open tarmac at each end, so the
 scene runs unattended and `AE3D_FRAMES=n` gives a fixed run; `AE3D_DIAG=1`
@@ -172,8 +205,11 @@ ragdoll fell; a sprung ragdoll is still standing after four seconds; a
 scaled hull rests on its half height; a car drove forward on its wheel
 joints and straight; its hits were reported and the figure in its way let
 go; the rig that figure wears sits on its pelvis when dressed and still
-does after the strike, its head down with the ragdoll's neck; and after
-`physics_free` the objects are still the scene's. The
+does after the strike, its head down with the ragdoll's neck; a crate
+made from a scene record fell and rests like the one made by hand; the
+world written as a scene reads back with a record on every body; and
+after `physics_free` the objects are still the scene's, with no
+Rigidbody left on them. The
 physics engine's own suites (`scripts/test.sh` in the submodule) hold each
 layer to the reference.
 

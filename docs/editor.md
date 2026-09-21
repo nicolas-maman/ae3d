@@ -3,7 +3,9 @@
 ```bash
 git clone https://github.com/aether-lang-dev/aether-ui.git ../aether-ui
 ./editor/build_editor.sh
-./build/ae3d_editor
+./build/ae3d_editor                         # the scene it last saved
+./build/ae3d_editor build/street.json       # a scene file
+AE3D_SCENE_OUT=build/street.json ./build/street_drive   # any program writes one
 ```
 
 ![the editor on Windows](images/editor-windows.png)
@@ -140,9 +142,21 @@ CRITICAL: build a script with the tree that will run it. A script carries its
 own copy of the Aether it imported, so it and the editor agree about what a
 `Model` is only while both were built from the same sources.
 
-**Edit** is undo, redo, duplicate, frame, delete, and saving or loading the scene
-as `build/editor_scene.json`. Loading replaces the scene rather than merging into
-it, and clears the history, since the steps in it refer to models that are gone.
+**Edit** is undo, redo, duplicate, frame, delete, and saving or loading the
+scene. The file is the one the editor was opened on -- its argument, or
+`AE3D_SCENE` -- and `build/editor_scene.json` otherwise; meshes that came
+from no file are written beside it, in a directory named after it. Loading
+replaces the scene rather than merging into it, and clears the history,
+since the steps in it refer to models that are gone.
+
+**Simulate** (also File, Cmd+P) runs the scene's bodies: `ae3d.physics` is
+attached to the editor's engine, every object with a body gets one from
+its record (see the physics section below), and the frame steps the world
+the way a program's loop does, so crates fall, cars roll off kerbs and
+towers topple in the viewport. Pressed again it stops, the world goes, and
+every model is put back exactly where it stood: the simulation is for
+looking at, and what it did to the scene is not kept. Loading a scene
+while one runs stops it first.
 
 **Console** keeps the last few messages. The status line under the viewport
 carries the newest, and the stats bar beside it says what the last frame
@@ -150,10 +164,26 @@ cost: the rate, then the device's own time for each pass -- the shadow map,
 the scene, the effects -- in milliseconds, then draws, triangles and the
 size. A rate says a scene is slow; the split says which pass made it so.
 
-**Inspector** changes with what is selected. Transform and material are always
-there (colour, metallic, roughness, and reflectivity -- how much of the wet
-road's mirror a surface gets on Vulkan, under Reflections); water, light,
-camera, behaviour and rendering sections appear when they apply. A section is the rows that belong to it rather than a run of them: the
+**Inspector** changes with what is selected. Transform, material and
+physics are always there (colour, metallic, roughness, and reflectivity --
+how much of the wet road's mirror a surface gets on Vulkan, under
+Reflections); water, light, camera, behaviour and rendering sections
+appear when they apply.
+
+The physics section is the body an object is, as the scene file records
+one and `ae3d.physics` reads it back: four buttons for the kind -- None,
+Static, Kinematic, Dynamic -- and five for the collider, which is made
+from the object's own mesh: Box (its bounds), Sphere and Capsule (of them),
+Hull (the convex hull of its vertices, what a prop wants) and Mesh (its
+triangles, for the static world -- a building, a kerb). Under them, three
+rows: the surface's friction and bounce, and the density the collider
+weighs. A kind is one undo step, as the weather's is; the rows undo like
+any row. The record is a component of the object (`mesh · dynamic body`
+under its name), so it is duplicated, deleted and undone with it, and the
+scene file carries it as the model's `physics` record -- the same record a
+program's scene writes (`AE3D_SCENE_OUT`), so a scene built by a program
+opens here with its bodies and one built here loads into a program with
+them. A section is the rows that belong to it rather than a run of them: the
 water rows are not contiguous, because the foam, wave scale and shore rows
 were added after the row indices below them were spoken for, so which section
 a row is in is a question asked of the row and not of its number. The water
@@ -220,6 +250,7 @@ wave table nothing reads:
 |---|---|
 | component | `water`, `voxel`, `light` or `mesh` |
 | script | the behaviour running on it, if any |
+| physics | the body it is (`static`, `kinematic`, `dynamic`), its collider from its own mesh (`box`, `sphere`, `capsule`, `hull`, `mesh`), the surface's `friction` and `restitution`, and the `density` |
 | water | every knob of the simulation driving it, the wave scale, the shore and the sky image it reflects included |
 | material | colour, metallic, roughness, reflectivity, alpha, and the texture and normal map paths |
 | rendering | FXAA, bloom, reflections (SSR), clouds and their cover, the overcast, ambient occlusion with its strength and reach -- the view menu's switches, applied on the backend that has them |
@@ -241,6 +272,18 @@ again before the run starts, so the report describes what came back rather than
 what was built. CI asserts the same component counts for it as for the scene
 built directly, which is what catches a component the file does not carry.
 
+A scene written by a program is the same file. `AE3D_SCENE_OUT=path` makes
+any program write its scene on its first frame -- once every script has
+started and built its objects, before anything moves -- with every model
+the renderer draws, the lights, the view as the program set it (the
+camera, the sky's hour, the post chain, the occlusion) and the body on
+every object that has one, which `ae3d.physics` answers through the
+engine's attachment providers. `./build/ae3d_editor path` opens it: the
+street of `examples/street_drive.ae` is 1,347 models and 299 bodies, and
+opens in a few seconds, since a source file shared by many entries is read
+once and copied. The agent channel's `scene.save` writes the same file
+from a running program.
+
 ## Running it bounded
 
 The editor takes a few environment variables, which is how CI drives it.
@@ -257,6 +300,7 @@ toolkit checkout and skip it, and so does a machine without one.
 | `AE3D_EDITOR_REPORT=path` | write what the editor built to a text file |
 | `AE3D_EDITOR_SCENE=components` | start with water, voxels, a light and a behaviour |
 | `AE3D_EDITOR_SCENE=roundtrip` | the same, saved and loaded again before the run |
+| `AE3D_SCENE=path` | open this scene file (or pass it as the argument); Save writes it back |
 | `AE3D_EDITOR_DRIVER=1` | serve the widget tree on `127.0.0.1:9222` |
 | `AE3D_EDITOR_BACKEND=opengl` | use the OpenGL renderer; Vulkan is the default where a driver exists |
 

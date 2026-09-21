@@ -1637,8 +1637,46 @@ model_clone(src: *Model) -> *Model {
     model_set_name(copy, text(src.name))
     model_set_source_path(copy, text(src.source_path))
     copy_uniforms(copy, src)
+    copy_groups(copy, src)
     model_update_matrix(copy)
     return copy
+}
+
+// The material groups (an OBJ's usemtl runs) onto the copy, each on a copy
+// of its material: one copy per material the source owns, however many
+// groups share it, so the copy owns each once as the source does. Without
+// this a copy of a multi-material model drew every group with its one
+// material.
+copy_groups(copy: *Model, src: *Model) {
+    owned = list.size(src.materials)
+    clones = list.new()
+    i = 0
+    while i < owned {
+        original = list.get_raw(src.materials, i) as *Material
+        cloned = null as *Material
+        // The model's own material was copied already; a group that shares
+        // it shares the copy.
+        if original == src.material { cloned = copy.material }
+        if cloned == null { cloned = model_own_material(copy, material_clone(original)) }
+        list.add_raw(clones, cloned as ptr)
+        i = i + 1
+    }
+    count = list.size(src.groups)
+    g = 0
+    while g < count {
+        group = list.get_raw(src.groups, g) as *MaterialGroup
+        material = group.material
+        i = 0
+        while i < owned {
+            if list.get_raw(src.materials, i) as *Material == group.material {
+                material = list.get_raw(clones, i) as *Material
+            }
+            i = i + 1
+        }
+        model_add_group(copy, material, group.index_start, group.index_count)
+        g = g + 1
+    }
+    list.free(clones)
 }
 
 // A copy of a model shades like the model it was copied from. Its settings live

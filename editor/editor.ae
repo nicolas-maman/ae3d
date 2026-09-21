@@ -35,6 +35,7 @@ import ae3d.sky
 import ae3d.rendering
 import ae3d.engine
 import ae3d.weather
+import ae3d.physics
 
 const PANEL_LEFT = 240
 const PANEL_RIGHT = 360
@@ -348,6 +349,26 @@ var g_wind_heading = 0.0
 var g_wind_speed = 3.0
 var g_weather_buttons: ptr = null
 const WEATHER_KINDS = 5
+// The physics section: the body's kind and the collider's, a button each,
+// and the section's widgets so it can be hidden whole when nothing is
+// selected. The simulation runs the scene's bodies in the editor's engine
+// (physics.attach over it, stepped by the frame) and, stopped, puts every
+// model back where it stood: what was simulated is looked at, not kept.
+var g_body_buttons: ptr = null
+var g_collider_buttons: ptr = null
+var g_physics_bar = 0
+var g_physics_section = 0
+var g_physics_divider = 0
+var g_simulating = false
+var g_simulate_btn = 0
+var g_rest: ptr = null             // list of *Rest, the models' transforms before the simulation
+
+// Where a model stood before the simulation moved it.
+struct Rest {
+    model: ptr
+    position: Vec3
+    rotation: Quat
+}
 const SSR_ROAD_HEIGHT = 0.0
 const SSR_STRENGTH = 0.6
 // The first frame rate the bar ever showed. A driver cannot see it: by the
@@ -980,6 +1001,17 @@ refresh_parts() {
         string.free(joined)
         string.free(name)
     }
+    // The body is a component too: "mesh · dynamic body".
+    spec = selected_spec()
+    if spec != null {
+        joined = string.concat(parts, " · ")
+        string.free(parts)
+        parts = string.concat(joined, body_kind_name(body_kind_of(spec)))
+        string.free(joined)
+        with_body = string.concat(parts, " body")
+        string.free(parts)
+        parts = with_body
+    }
     ui.set_text(g_parts, parts)
     string.free(parts)
 }
@@ -1114,6 +1146,23 @@ apply_orbit() {
     core.camera_look_at(cam, focus)
 }
 
+// The orbit from where the camera stands and looks: its pivot a way ahead
+// along its line of sight, the eye behind it on that line. A scene's own
+// view is kept this way, or the next turn of the orbit would snap the
+// camera back to the editor's default.
+const ORBIT_AHEAD = 40.0
+orbit_from_camera(cam: *Camera) {
+    core.camera_update_vectors(cam)
+    front = cam.front
+    g_focus_x = cam.position.x + front.x * ORBIT_AHEAD
+    g_focus_y = cam.position.y + front.y * ORBIT_AHEAD
+    g_focus_z = cam.position.z + front.z * ORBIT_AHEAD
+    g_orbit_distance = ORBIT_AHEAD
+    g_orbit_yaw = cam.yaw + 180.0
+    g_orbit_pitch = 0.0 - cam.pitch
+    apply_orbit()
+}
+
 // Frames the selection, the way pressing F does in every editor.
 focus_selection() {
     m = selected_model()
@@ -1164,28 +1213,54 @@ const WEATHER_ROW = 34
 const WIND_HEADING_ROW = 35
 const WIND_SPEED_ROW = 36
 const OVERCAST_ROW = 37
-const ROWS = 38
+// A body on the object, as the scene file records one (ae3d.physics): the
+// friction and the bounce of its surface, and the density its collider
+// weighs. The body's kind and the collider's are choices, undone the way
+// the weather's kind is.
+const FRICTION_ROW = 38
+const RESTITUTION_ROW = 39
+const DENSITY_ROW = 40
+const ROWS = 41
 // Past every inspector row, because a turn of the gizmo is not a row: it is
 // recorded as the angle the drag has turned through so far, and undone by
 // turning back through it.
-const ROTATE_FIRST_SLOT = 38
-// Past the rotation axes, which take 38 through 40. A behaviour is a property
+const ROTATE_FIRST_SLOT = 41
+// Past the rotation axes, which take 41 through 43. A behaviour is a property
 // of a model like any other as far as undo is concerned, so it travels as a
 // property step in a slot no row uses.
-const SCRIPT_SLOT = 41
+const SCRIPT_SLOT = 44
 // A terrain's shape. A choice rather than a number, so it travels the way a
 // behaviour does rather than as a row.
-const TERRAIN_BIOME_SLOT = 42
+const TERRAIN_BIOME_SLOT = 45
 // A terrain's style. Blocks are voxels drawn one cube per cell; smooth meshes
 // the same field into one surface. Voxels are a kind of terrain rather than
 // what terrain is.
-const TERRAIN_STYLE_SLOT = 43
+const TERRAIN_STYLE_SLOT = 46
 // A stroke of the sculpting brush: one undo step from press to release,
 // whose before and after are the terrain's column heights, kept in a list
 // of strokes the step indexes.
-const SCULPT_SLOT = 44
+const SCULPT_SLOT = 47
 // The weather's kind: a choice, undone the way a terrain's style is.
-const WEATHER_KIND_SLOT = 45
+const WEATHER_KIND_SLOT = 48
+// The body's kind and its collider's, on the selected object.
+const BODY_KIND_SLOT = 49
+const COLLIDER_KIND_SLOT = 50
+// The kinds of body an object can be, in the order the buttons draw them:
+// none, or the physics module's three.
+const BODY_NONE = 0
+const BODY_STATIC = 1
+const BODY_KINEMATIC = 2
+const BODY_DYNAMIC = 3
+const BODY_KINDS = 4
+// The colliders the scene file names, from the object's own mesh: a box of
+// its bounds, a sphere or a capsule of them, the hull of its vertices, or
+// its triangles (static bodies only).
+const COLLIDER_BOX = 0
+const COLLIDER_SPHERE = 1
+const COLLIDER_CAPSULE = 2
+const COLLIDER_HULL = 3
+const COLLIDER_MESH = 4
+const COLLIDER_KINDS = 5
 // The brush: what it does to the ground under the cursor while it is held.
 const SCULPT_OFF = 0
 const SCULPT_RAISE = 1
@@ -1245,7 +1320,11 @@ const MAX_SCRIPTS = 32
 const RELOAD_INTERVAL = 0.25
 const BOB_HEIGHT = 14.0
 const BOB_RATE = 1.6
-const SCENE_PATH = "build/editor_scene.json"
+// Where the scene is saved and loaded from: the file the editor was opened
+// on (its argument, or AE3D_SCENE), or this one. A scene's meshes that
+// came from no file go beside it, in a directory named after it.
+const DEFAULT_SCENE_PATH = "build/editor_scene.json"
+var g_scene_path = ""
 
 // Widget handles are not contiguous: a row creates a stack, two labels and a
 // slider, so the next row's slider is not this one's handle plus one. They are
@@ -1416,9 +1495,12 @@ sync_inspector() {
         if g_parts != 0 { ui.set_text(g_parts, "") }
         show_water_section(false)
         show_terrain_section(false)
+        show_physics_section(false)
         return
     }
     refresh_title()
+    show_physics_section(true)
+    refresh_physics_section()
     // The chip and the hex beside it are the material too, and nothing was
     // refreshing them when the selection changed: the three sliders under them
     // moved to the new object and the colour above stayed on the old one, so
@@ -1607,21 +1689,29 @@ free_object(o: *GameObject) {
 
 add_component_model(m: *Model, name: string, kind: int, state: ptr) {
     if m == null { return }
+    place_model(m, name, kind, state)
+    rebuild_rows()
+    select_object(row_count() - 1)
+    say("added ${core.text(m.name)}")
+}
+
+// The model into the scene and the viewport, without the hierarchy rebuilt
+// or the selection moved: what adding one does, less what a scene of a
+// thousand does once at the end. Rebuilding the rows per model made opening
+// a street a million widgets.
+place_model(m: *Model, name: string, kind: int, state: ptr) {
+    if m == null { return }
     core.model_set_name(m, name)
     // Everything after this reads the model's own name, never the argument.
     // Loading a scene calls this with `core.text(m.name)`, so the argument is
     // the very string the setter just released, and using it again is a
     // use-after-free: the editor crashed drawing the hierarchy row for the
     // first model of every scene it opened.
-    named = core.text(m.name)
     backend = viewport_backend()
     core.backend_add_model(&backend, m)
-    add_object(m, named, kind, state)
+    add_object(m, core.text(m.name), kind, state)
     history.history_record(g_history, history.STEP_ADD, m as ptr, 0, 0.0, 0.0)
     apply_shading_to(m)
-    rebuild_rows()
-    select_object(row_count() - 1)
-    say("added ${named}")
 }
 
 remove_selected() {
@@ -2011,6 +2101,306 @@ attachment_on(attachments: ptr, m: *Model) -> *Attachment {
     return null
 }
 
+// The body the scene file records on an object (ae3d.scene's PhysicsSpec),
+// kept as a component of the object so it moves, is deleted and comes back
+// with it. Null when the object has no body.
+record_of(o: *GameObject) -> *PhysicsSpec {
+    if o == null { return null }
+    c = behaviour.object_find_component(o, behaviour.KIND_COLLIDER)
+    if c == null { return null }
+    return behaviour.component_state(c) as *PhysicsSpec
+}
+
+spec_at(index: int) -> *PhysicsSpec { return record_of(row_object(index)) }
+
+selected_spec() -> *PhysicsSpec { return spec_at(g_selected) }
+
+// The first row with a body, or -1: what the checks select to drive the
+// physics rows against.
+index_of_spec() -> int {
+    i = 0
+    while i < row_count() {
+        if spec_at(i) != null { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// How many objects carry a body.
+spec_count() -> int {
+    total = 0
+    i = 0
+    while i < row_count() {
+        if spec_at(i) != null { total = total + 1 }
+        i = i + 1
+    }
+    return total
+}
+
+free_spec(state: ptr, go: *GameObject) {
+    if state != null { heap.free(state as *PhysicsSpec) }
+}
+
+// The record on the object, replacing one it had. The object owns it from
+// here: it goes when the object does.
+give_spec(o: *GameObject, spec: *PhysicsSpec) {
+    if o == null || spec == null { return }
+    existing = behaviour.object_find_component(o, behaviour.KIND_COLLIDER)
+    if existing != null { behaviour.object_remove_component(o, existing) }
+    c = behaviour.component_new("Physics", behaviour.KIND_COLLIDER, spec as ptr)
+    c.destroy = free_spec
+    behaviour.object_add_component(o, c)
+}
+
+take_spec(o: *GameObject) {
+    if o == null { return }
+    existing = behaviour.object_find_component(o, behaviour.KIND_COLLIDER)
+    if existing != null { behaviour.object_remove_component(o, existing) }
+}
+
+body_kind_of(spec: *PhysicsSpec) -> int {
+    if spec == null { return BODY_NONE }
+    if string.equals(spec.body, "static") == 1 { return BODY_STATIC }
+    if string.equals(spec.body, "kinematic") == 1 { return BODY_KINEMATIC }
+    return BODY_DYNAMIC
+}
+
+body_kind_name(kind: int) -> string {
+    if kind == BODY_STATIC { return "static" }
+    if kind == BODY_KINEMATIC { return "kinematic" }
+    return "dynamic"
+}
+
+collider_kind_of(spec: *PhysicsSpec) -> int {
+    if spec == null { return 0 - 1 }
+    if string.equals(spec.collider, "sphere") == 1 { return COLLIDER_SPHERE }
+    if string.equals(spec.collider, "capsule") == 1 { return COLLIDER_CAPSULE }
+    if string.equals(spec.collider, "hull") == 1 { return COLLIDER_HULL }
+    if string.equals(spec.collider, "mesh") == 1 { return COLLIDER_MESH }
+    return COLLIDER_BOX
+}
+
+collider_kind_name(kind: int) -> string {
+    if kind == COLLIDER_SPHERE { return "sphere" }
+    if kind == COLLIDER_CAPSULE { return "capsule" }
+    if kind == COLLIDER_HULL { return "hull" }
+    if kind == COLLIDER_MESH { return "mesh" }
+    return "box"
+}
+
+// The body's kind onto the object: none takes the record away, a kind on
+// an object without one gives it a record with the defaults a prop wants
+// (a box of its bounds, a wooden surface, water's density).
+apply_body_kind(o: *GameObject, kind: int) {
+    if o == null { return }
+    if kind == BODY_NONE { take_spec(o); return }
+    spec = record_of(o)
+    if spec == null {
+        give_spec(o, scene.physics_spec_new(body_kind_name(kind), "box", 0.6, 0.0, 1.0))
+        return
+    }
+    spec.body = core.set_owned(spec.body, body_kind_name(kind))
+}
+
+apply_collider_kind(o: *GameObject, kind: int) {
+    spec = record_of(o)
+    if spec == null { return }
+    spec.collider = core.set_owned(spec.collider, collider_kind_name(kind))
+}
+
+// The kind chosen for the selected object: one undo step, the section
+// repainted, the record changed.
+set_body_kind(kind: int) {
+    o = row_object(g_selected)
+    m = selected_model()
+    if o == null || m == null { return }
+    was = body_kind_of(record_of(o))
+    if kind == was { return }
+    history.history_record(g_history, history.STEP_PROPERTY, m as ptr, BODY_KIND_SLOT,
+                           (was) as float, (kind) as float)
+    history.history_close(g_history)
+    g_last_edit = seconds()
+    apply_body_kind(o, kind)
+    refresh_physics_section()
+    refresh_parts()
+    if kind == BODY_NONE { say("no body on ${core.text(m.name)}") } else { say("${body_kind_name(kind)} body on ${core.text(m.name)}") }
+}
+
+set_collider_kind(kind: int) {
+    o = row_object(g_selected)
+    m = selected_model()
+    if o == null || m == null { return }
+    spec = record_of(o)
+    if spec == null {
+        say("give ${core.text(m.name)} a body first")
+        return
+    }
+    was = collider_kind_of(spec)
+    if kind == was { return }
+    history.history_record(g_history, history.STEP_PROPERTY, m as ptr, COLLIDER_KIND_SLOT,
+                           (was) as float, (kind) as float)
+    history.history_close(g_history)
+    g_last_edit = seconds()
+    apply_collider_kind(o, kind)
+    refresh_physics_section()
+    say("${collider_kind_name(kind)} collider on ${core.text(m.name)}")
+}
+
+is_physics_row(index: int) -> bool {
+    return index == FRICTION_ROW || index == RESTITUTION_ROW || index == DENSITY_ROW
+}
+
+physics_value(index: int) -> float {
+    spec = selected_spec()
+    if spec == null { return 0.0 }
+    if index == FRICTION_ROW { return spec.friction }
+    if index == RESTITUTION_ROW { return spec.restitution }
+    if index == DENSITY_ROW { return spec.density }
+    return 0.0
+}
+
+write_physics(spec: *PhysicsSpec, index: int, value: float) {
+    if spec == null { return }
+    if index == FRICTION_ROW { spec.friction = value }
+    if index == RESTITUTION_ROW { spec.restitution = value }
+    if index == DENSITY_ROW { spec.density = value }
+}
+
+show_physics_section(on: bool) {
+    if g_physics_bar != 0 { ui.set_hidden(g_physics_bar, hidden_flag(on)) }
+    if g_physics_section != 0 { ui.set_hidden(g_physics_section, hidden_flag(on)) }
+    if g_physics_divider != 0 { ui.set_hidden(g_physics_divider, hidden_flag(on)) }
+}
+
+// The section as the selected object has it: its kind lit, its collider
+// lit when it has a body, the rows on the record's numbers.
+refresh_physics_section() {
+    spec = selected_spec()
+    paint_segments(g_body_buttons, BODY_KINDS, body_kind_of(spec))
+    paint_segments(g_collider_buttons, COLLIDER_KINDS, collider_kind_of(spec))
+    show_row(FRICTION_ROW, physics_value(FRICTION_ROW))
+    show_row(RESTITUTION_ROW, physics_value(RESTITUTION_ROW))
+    show_row(DENSITY_ROW, physics_value(DENSITY_ROW))
+}
+
+// --- the simulation ----------------------------------------------------------------------------------------
+
+// The scene's bodies, run: physics over the editor's engine, a body on
+// every object with a record (from its own mesh, as the record says), the
+// frame stepping the world. Every model's transform is kept first.
+start_simulation() {
+    if g_simulating { return }
+    start_weather()
+    if g_engine == null {
+        say("nothing to simulate with yet")
+        return
+    }
+    e = g_engine as *Engine
+    if physics.of(e) == null { physics.attach(e) }
+    g_rest = list.new()
+    bodies = 0
+    count = row_count()
+    i = 0
+    while i < count {
+        o = row_object(i)
+        m = model_at(i)
+        spec = spec_at(i)
+        if o != null && m != null && spec != null {
+            rest = heap.new(Rest)
+            rest.model = m as ptr
+            rest.position = m.position
+            rest.rotation = m.rotation
+            list.add_raw(g_rest, rest as ptr)
+            if physics.apply_spec(o, spec) != null { bodies = bodies + 1 }
+        }
+        i = i + 1
+    }
+    g_simulating = true
+    if g_simulate_btn != 0 { ui.set_text(g_simulate_btn, "Stop") }
+    mark_dirty()
+    say("simulating ${bodies} bodies")
+}
+
+// The world gone, and every model back where it stood: the simulation is
+// for looking at, and the scene is what it was before it ran. A model
+// deleted while it ran is not put back.
+stop_simulation() {
+    if !g_simulating { return }
+    e = g_engine as *Engine
+    p = physics.of(e)
+    if p != null { physics.physics_free(p) }
+    count = list.size(g_rest)
+    i = 0
+    while i < count {
+        rest = list.get_raw(g_rest, i) as *Rest
+        if row_of_model(rest.model) >= 0 {
+            m = rest.model as *Model
+            core.model_set_position(m, rest.position.x, rest.position.y, rest.position.z)
+            core.model_set_rotation(m, rest.rotation)
+        }
+        heap.free(rest)
+        i = i + 1
+    }
+    list.free(g_rest)
+    g_rest = null
+    g_simulating = false
+    if g_simulate_btn != 0 { ui.set_text(g_simulate_btn, "Simulate") }
+    mark_dirty()
+    sync_inspector()
+    say("the simulation stopped; the scene is as it was")
+}
+
+// Whether the world stepped at least this often since the simulation began.
+physics_stepped(steps: int) -> bool {
+    if g_engine == null { return false }
+    p = physics.of(g_engine as *Engine)
+    if p == null { return false }
+    return physics.physics_step_count(p) >= steps
+}
+
+toggle_simulation() {
+    if g_simulating { stop_simulation() } else { start_simulation() }
+}
+
+// The first row with a body that moves on its own, or -1.
+index_of_dynamic() -> int {
+    i = 0
+    while i < row_count() {
+        if body_kind_of(spec_at(i)) == BODY_DYNAMIC { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// A dynamic body falls, or rests on what it stands on: the check runs the
+// simulation for a second of fixed steps and asks the first dynamic body
+// whether the world took it (it moved, or it was left exactly where it
+// stood because something held it up -- either way the world stepped),
+// then stops it and asks whether it is back where it stood. Nought when
+// both hold, or when nothing in the scene has a dynamic body to ask.
+simulation_stuck() -> int {
+    index = index_of_dynamic()
+    if index < 0 { return 0 }
+    m = model_at(index)
+    was = m.position
+    start_simulation()
+    if !g_simulating { return 1 }
+    steps = 0
+    while steps < 60 {
+        engine.engine_update(g_engine as *Engine, 1.0 / 60.0)
+        steps = steps + 1
+    }
+    moved = core.abs_of(m.position.y - was.y) > 0.05 || physics_stepped(60)
+    stop_simulation()
+    restored = core.abs_of(m.position.y - was.y) < 0.0001 &&
+               core.abs_of(m.position.x - was.x) < 0.0001 &&
+               core.abs_of(m.position.z - was.z) < 0.0001
+    wrong = 0
+    if !moved { wrong = wrong + 1 }
+    if !restored { wrong = wrong + 1 }
+    return wrong
+}
+
 selected_water() -> *Simulation {
     c = component_at(g_selected)
     if c == null || c.kind != behaviour.KIND_WATER { return null }
@@ -2165,12 +2555,15 @@ draw_frame() {
         // running at: the bar opened on 2 fps while the frames were arriving
         // sixty times a second.
         //
-        // And a gap longer than a quarter second is a stall rather than a
-        // frame, which is the same rule the simulation step above uses and for
-        // the same reason. The first gap of a run that opens a scene spans
-        // reading it off disk, so the bar opened on 4 fps in a roundtrip run
-        // while the editor was drawing at sixty.
-        if elapsed > 0.0 && elapsed < 0.25 {
+        // And a gap longer than a second is a stall rather than a frame:
+        // the first gap of a run that opens a scene spans reading it off
+        // disk, so the bar opened on 4 fps in a roundtrip run while the
+        // editor was drawing at sixty. The simulation step above draws its
+        // line at a quarter second; the rate's line is looser, because a
+        // software rasteriser on a loaded CI runner draws a frame in a
+        // quarter second or a little more, and with the step's rule every
+        // frame of such a run was a stall and the bar never opened at all.
+        if elapsed > 0.0 && elapsed < 1.0 {
             if g_fps <= 0.0 {
                 g_fps = 1.0 / elapsed
             } else {
@@ -2367,6 +2760,15 @@ row_reaches_its_target(index: int) -> bool {
         before = water_value(index)
         apply_property(index, before + 0.5)
         moved = core.abs_of(water_value(index) - (before + 0.5)) < 0.001
+        apply_property(index, before)
+        return moved
+    }
+
+    if is_physics_row(index) {
+        if selected_spec() == null { return true }
+        before = physics_value(index)
+        apply_property(index, before + 0.25)
+        moved = core.abs_of(physics_value(index) - (before + 0.25)) < 0.001
         apply_property(index, before)
         return moved
     }
@@ -2642,6 +3044,7 @@ rows_that_do_nothing() -> int {
     was_selected = g_selected
     water_index = index_of_kind(behaviour.KIND_WATER)
     ground_index = index_of_kind(behaviour.KIND_VOXEL)
+    body_index = index_of_spec()
 
     stuck = 0
     index = 0
@@ -2650,6 +3053,7 @@ rows_that_do_nothing() -> int {
         // of object is selected, or it reports nothing either way.
         wants = 0 - 1
         if is_water_row(index) { wants = water_index }
+        if is_physics_row(index) { wants = body_index }
         if index == TERRAIN_SEED_ROW { wants = ground_index }
         if wants >= 0 { select_object(wants) }
         if row_control(index) != 0 && !row_reaches_its_target(index) {
@@ -2736,6 +3140,10 @@ report_state() {
     lines = string.concat(lines, string.from_int(kind_count(behaviour.KIND_LIGHT)))
     lines = string.concat(lines, "\nscripted ")
     lines = string.concat(lines, string.from_int(scripted_count()))
+    lines = string.concat(lines, "\nbodies ")
+    lines = string.concat(lines, string.from_int(spec_count()))
+    lines = string.concat(lines, "\nsimulation_stuck ")
+    lines = string.concat(lines, string.from_int(simulation_stuck()))
     lines = string.concat(lines, "\ntriangles ")
     lines = string.concat(lines, string.from_int(scene_triangles()))
     lines = string.concat(lines, "\nselected ")
@@ -2846,6 +3254,19 @@ replay(step: *EditStep, backwards: bool) {
             refresh_weather_buttons()
             apply_weather()
             if g_weather_kind == weather.CLEAR { apply_post() }
+        } else if step.slot == BODY_KIND_SLOT {
+            select_model_pointer(step.subject)
+            apply_body_kind(row_object(g_selected), (target) as int)
+            refresh_physics_section()
+            refresh_parts()
+        } else if step.slot == COLLIDER_KIND_SLOT {
+            select_model_pointer(step.subject)
+            apply_collider_kind(row_object(g_selected), (target) as int)
+            refresh_physics_section()
+        } else if is_physics_row(step.slot) {
+            select_model_pointer(step.subject)
+            write_physics(selected_spec(), step.slot, target)
+            show_row(step.slot, target)
         } else if step.slot == TERRAIN_STYLE_SLOT {
             select_model_pointer(step.subject)
             regenerate_terrain(terrain_seed(), terrain_biome(), (target) as int)
@@ -3284,6 +3705,21 @@ apply_property(index: int, value: float) {
         return
     }
 
+    if is_physics_row(index) {
+        spec = selected_spec()
+        if spec != null {
+            // Recorded against the model rather than the record: a body taken
+            // off and put back is a new record, and the step finds it by the
+            // model it is on.
+            history.history_record(g_history, history.STEP_PROPERTY, selected_model() as ptr, index,
+                                   physics_value(index), value)
+            g_last_edit = seconds()
+            write_physics(spec, index, value)
+        }
+        show_row(index, value)
+        return
+    }
+
     if is_water_row(index) {
         sim = selected_water()
         if sim != null {
@@ -3343,6 +3779,7 @@ mark_dirty() {
 // Water and attached behaviours move every frame, so a scene holding either is
 // never still.
 scene_animates() -> bool {
+    if g_simulating { return true }
     if g_weather_kind != weather.CLEAR { return true }
     if kind_count(behaviour.KIND_WATER) > 0 { return true }
     return scripted_count() > 0
@@ -3829,6 +4266,8 @@ build_scene() {
         add_voxels()
         add_light()
         set_script(0, script_from_name("spin"))
+        // The cube a dynamic body: what the simulation check drops.
+        apply_body_kind(row_object(0), BODY_DYNAMIC)
     }
 
     // Save the scene and open it again before the run starts, so the report
@@ -3836,6 +4275,12 @@ build_scene() {
     // does not carry shows up here as a count that dropped.
     if env_is("AE3D_EDITOR_SCENE", "roundtrip") {
         save_scene()
+        load_scene()
+    }
+
+    // Opened on a scene file: the editor's argument, or AE3D_SCENE. A
+    // program's scene (AE3D_SCENE_OUT) opens here with its bodies.
+    if string.equals(g_scene_path, DEFAULT_SCENE_PATH) != 1 && fs.file_exists(g_scene_path) == 1 {
         load_scene()
     }
 
@@ -3913,13 +4358,25 @@ current_attachments() -> ptr {
         }
         script = script_name(script_at(i))
         if string.equals(script, "none") == 1 { script = "" }
-        if kind != behaviour.KIND_MESH || script != "" || sim != null || world != null {
-            list.add_raw(attachments,
-                         scene.attachment_new(m, kind_name(kind), script, sim, world) as ptr)
+        spec = spec_at(i)
+        if kind != behaviour.KIND_MESH || script != "" || sim != null || world != null || spec != null {
+            a = scene.attachment_new(m, kind_name(kind), script, sim, world)
+            // A copy: the attachment's record is freed with the list, the
+            // object keeps its own.
+            if spec != null {
+                scene.attachment_set_physics(a, scene.physics_spec_new(spec.body, spec.collider, spec.friction, spec.restitution, spec.density))
+            }
+            list.add_raw(attachments, a as ptr)
         }
         i = i + 1
     }
     return attachments
+}
+
+// The directory a scene's own meshes are written to: beside the file,
+// named after it, the way a program's AE3D_SCENE_OUT writes them.
+mesh_directory_of(path: string) -> string {
+    return string.concat(path, "_meshes/")
 }
 
 save_scene() {
@@ -3928,13 +4385,16 @@ save_scene() {
     attachments = current_attachments()
     view = current_view()
     models = scene_models()
-    saved = scene.scene_save(models, lights, attachments, &view, SCENE_PATH, "build/")
+    directory = mesh_directory_of(g_scene_path)
+    fs.fs_mkdir_p_raw(directory)
+    saved = scene.scene_save(models, lights, attachments, &view, g_scene_path, directory)
+    string.free(directory)
     list.free(models)
     scene.attachments_free(attachments)
     list.free(lights)
 
     if saved {
-        say("saved ${SCENE_PATH}")
+        say("saved ${g_scene_path}")
     } else {
         say("save failed: ${scene.last_error()}")
     }
@@ -3943,7 +4403,7 @@ save_scene() {
 // Loading replaces the scene rather than merging into it, which is what a
 // scene file means, so everything currently in it goes first.
 load_scene() {
-    loaded = scene.scene_load(SCENE_PATH)
+    loaded = scene.scene_load(g_scene_path)
     if loaded == null {
         say("load failed: ${scene.last_error()}")
         return
@@ -3954,7 +4414,7 @@ load_scene() {
     // The lights first: a light marker's row holds the light it stands for, so
     // it has to exist before the models are added. A file written before scenes
     // carried lights has none, and the scene keeps the one it is already using.
-    beams = scene.scene_load_lights(SCENE_PATH)
+    beams = scene.scene_load_lights(g_scene_path)
     if beams != null {
         if list.size(beams) > 0 {
             if g_light != null { core.light_free(g_light as *Light) }
@@ -3973,7 +4433,7 @@ load_scene() {
     // What was attached to each model, so a surface comes back as the water it
     // is rather than as a plain mesh: a KIND_MESH row has no water section and
     // nothing drives its waves.
-    attachments = scene.scene_load_attachments(SCENE_PATH, loaded)
+    attachments = scene.scene_load_attachments(g_scene_path, loaded)
 
     count = list.size(loaded)
     i = 0
@@ -3993,18 +4453,29 @@ load_scene() {
             // The light marker carries the light itself, which was read back
             // separately: without it the row is a sphere that lights nothing.
             if kind == behaviour.KIND_LIGHT { state = g_light }
-            add_component_model(m, core.text(m.name), kind, state)
+            place_model(m, core.text(m.name), kind, state)
             if a != null {
-                set_script(row_count() - 1,
-                           script_from_name(scene.attachment_script(a)))
+                slot = row_slot(row_count() - 1)
+                if slot != null { slot[0] = script_from_name(scene.attachment_script(a)) }
+                // The body the file records, onto the object: a copy, since
+                // the attachments are freed below.
+                spec = scene.attachment_physics(a)
+                if spec != null {
+                    give_spec(row_object(row_count() - 1),
+                              scene.physics_spec_new(spec.body, spec.collider, spec.friction, spec.restitution, spec.density))
+                }
             }
         }
         i = i + 1
     }
     scene.attachments_free(attachments)
     list.free(loaded)
+    // The hierarchy once, for every model, and the first one selected.
+    rebuild_rows()
+    if row_count() > 0 { select_object(0) }
+    refresh_script_buttons()
 
-    view = scene.scene_load_view(SCENE_PATH)
+    view = scene.scene_load_view(g_scene_path)
     cam = g_camera as *Camera
     if cam != null {
         core.camera_set_position(cam, core.vec3(view.camera_x, view.camera_y, view.camera_z))
@@ -4015,6 +4486,7 @@ load_scene() {
         core.camera_set_near(cam, view.near)
         core.camera_set_far(cam, view.far)
         core.camera_set_speed(cam, view.speed)
+        orbit_from_camera(cam)
     }
     core.set_face_culling(view.face_culling)
     core.set_frustum_culling(view.frustum_culling)
@@ -4065,10 +4537,12 @@ load_scene() {
     read_shading()
 
     history.history_clear(g_history)
-    say("loaded ${count} models from ${SCENE_PATH}")
+    say("loaded ${count} models from ${g_scene_path}")
 }
 
 clear_scene() {
+    // The bodies go before the objects they are on.
+    if g_simulating { stop_simulation() }
     backend = viewport_backend()
     while row_count() > 0 {
         o = row_object(0)
@@ -4944,6 +5418,9 @@ main() {
 
     g_snapshot = env("AE3D_EDITOR_SNAPSHOT")
     g_report = env("AE3D_EDITOR_REPORT")
+    g_scene_path = DEFAULT_SCENE_PATH
+    if env("AE3D_SCENE") != "" { g_scene_path = env("AE3D_SCENE") }
+    if os.args_count() >= 2 { g_scene_path = os.args_get(1) }
     g_scene = behaviour.scene_new() as ptr
     g_rows = list.new()
     g_section_bodies = calloc(SECTIONS, 4)
@@ -4961,6 +5438,8 @@ main() {
     scan_scripts()
     g_preset_buttons = calloc(PRESET_KINDS, 4)
     g_weather_buttons = calloc(WEATHER_KINDS, 4)
+    g_body_buttons = calloc(BODY_KINDS, 4)
+    g_collider_buttons = calloc(COLLIDER_KINDS, 4)
     g_sliders = calloc(ROWS, 4)
     g_fields = calloc(ROWS, 4)
     g_row_frames = calloc(ROWS, 4)
@@ -5117,6 +5596,9 @@ main() {
         g_probe_primary = save_btn
         load_btn = ui.btn(scene_row, "Load") callback { load_scene() }
         style_button(load_btn, "action")
+        // The scene's bodies run, and stopped, put back: the same button.
+        g_simulate_btn = ui.btn(panel_row(edit_body), "Simulate") callback { toggle_simulation() }
+        style_button(g_simulate_btn, "action")
         ui.spacer(left)
 
         stage = ui.vstack(body, 0)
@@ -5428,6 +5910,48 @@ main() {
         inspector_row(g_water_body, "shore fade", 0.0, 40.0, 0.0, SHORE_FADE_ROW)
         inspector_row(g_water_body, "shore foam", 0.0, 15.0, 0.0, SHORE_FOAM_ROW)
 
+        // The object's body, as the scene file records it and the physics
+        // module reads it back: its kind, its collider from its own mesh,
+        // its surface and its density.
+        g_physics_divider = ui.divider(right)
+        g_physics_section = fold_section(right, "PHYSICS")
+        g_physics_bar = section_bar(g_section_count - 1)
+        body_row = as_row(ui.hstack(g_physics_section, 6))
+        no_body_btn = ui.btn(body_row, "No body") callback { set_body_kind(BODY_NONE) }
+        style_button(no_body_btn, "action")
+        static_btn = ui.btn(body_row, "Static") callback { set_body_kind(BODY_STATIC) }
+        style_button(static_btn, "action")
+        kinematic_btn = ui.btn(body_row, "Kinematic") callback { set_body_kind(BODY_KINEMATIC) }
+        style_button(kinematic_btn, "action")
+        dynamic_btn = ui.btn(body_row, "Dynamic") callback { set_body_kind(BODY_DYNAMIC) }
+        style_button(dynamic_btn, "action")
+        bodies = g_body_buttons as int[]
+        bodies[BODY_NONE] = no_body_btn
+        bodies[BODY_STATIC] = static_btn
+        bodies[BODY_KINEMATIC] = kinematic_btn
+        bodies[BODY_DYNAMIC] = dynamic_btn
+        collider_row = as_row(ui.hstack(g_physics_section, 6))
+        box_btn = ui.btn(collider_row, "Box") callback { set_collider_kind(COLLIDER_BOX) }
+        style_button(box_btn, "action")
+        sphere_btn = ui.btn(collider_row, "Sphere") callback { set_collider_kind(COLLIDER_SPHERE) }
+        style_button(sphere_btn, "action")
+        capsule_btn = ui.btn(collider_row, "Capsule") callback { set_collider_kind(COLLIDER_CAPSULE) }
+        style_button(capsule_btn, "action")
+        hull_btn = ui.btn(collider_row, "Hull") callback { set_collider_kind(COLLIDER_HULL) }
+        style_button(hull_btn, "action")
+        mesh_btn = ui.btn(collider_row, "Mesh") callback { set_collider_kind(COLLIDER_MESH) }
+        style_button(mesh_btn, "action")
+        colliders = g_collider_buttons as int[]
+        colliders[COLLIDER_BOX] = box_btn
+        colliders[COLLIDER_SPHERE] = sphere_btn
+        colliders[COLLIDER_CAPSULE] = capsule_btn
+        colliders[COLLIDER_HULL] = hull_btn
+        colliders[COLLIDER_MESH] = mesh_btn
+        inspector_row(g_physics_section, "friction", 0.0, 2.0, 0.6, FRICTION_ROW)
+        inspector_row(g_physics_section, "bounce", 0.0, 1.0, 0.0, RESTITUTION_ROW)
+        field_row(g_physics_section, "density", 1.0, DENSITY_ROW)
+        refresh_physics_section()
+
         ui.divider(right)
         camera_body = fold_section(right, "CAMERA")
         inspector_row(camera_body, "field of view", 20.0, 110.0, 60.0, 17)
@@ -5638,6 +6162,8 @@ build_menus() {
     file_menu = ui.menu("File")
     ui.menu_item_accel(file_menu, "Save Scene", "Cmd+S") callback { save_scene() }
     ui.menu_item_accel(file_menu, "Load Scene", "Cmd+O") callback { load_scene() }
+    ui.menu_separator(file_menu)
+    ui.menu_item_accel(file_menu, "Simulate", "Cmd+P") callback { toggle_simulation() }
     ui.menu_bar_add(bar, file_menu)
 
     edit_menu = ui.menu("Edit")

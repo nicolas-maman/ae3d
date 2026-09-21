@@ -250,6 +250,26 @@ main() {
     check("straightening it puts the mesh back exactly",
           differing(bind_pixels, offscreen.target_pixels(target)) == 0)
 
+    // A figure carried off by its bones is drawn where its bones are, with
+    // the camera on it and the origin behind the camera. Its model's own
+    // bounds are the bind pose's at the origin; the merge pass culled by
+    // those, and a figure that had walked up the street vanished the moment
+    // the origin left the view.
+    culling_was = core.frustum_culling()
+    core.set_frustum_culling(true)
+    root = list.get_raw(bones, 0) as *Model
+    core.model_set_position(root, 0.0, 0.0, 0.0 - 60.0)
+    core.camera_set_position(cam, core.vec3(0.0, 2.0, 0.0 - 53.0))
+    core.camera_look_at(cam, core.vec3(0.0, 2.0, 0.0 - 60.0))
+    core.backend_render(&gl_pass, cam, light)
+    carried = lit(offscreen.target_pixels(target))
+    check("a figure carried away by its bones is drawn where they are, with the origin out of view (${carried} lit)", carried > bind_lit / 2)
+    core.model_set_position(root, 0.0, 0.0, 0.0)
+    core.camera_set_position(cam, core.vec3(0.0, 2.0, 7.0))
+    core.camera_look_at(cam, core.vec3(0.0, 2.0, 0.0))
+    core.set_frustum_culling(culling_was)
+    core.backend_render(&gl_pass, cam, light)
+
     // The same thing through Vulkan, which reaches the palette by a different
     // road: a uniform block at a generated offset rather than a uniform array,
     // and a second pipeline rather than a branch on a bound attribute.
@@ -315,6 +335,20 @@ main() {
     if spread < 0 { spread = 0 - spread }
     println("  bent: opengl ${bent_gl} channels, vulkan ${bent_vk}")
     check("and by the same pose", spread < bent_gl / 4 + 64)
+
+    // Carried off with the origin out of view, on Vulkan too: this is the
+    // renderer that merged the figure into a static batch and culled it by
+    // the bind pose's bounds.
+    bend(vk_bones, 0.0)
+    core.set_frustum_culling(true)
+    vk_root = list.get_raw(vk_bones, 0) as *Model
+    core.model_set_position(vk_root, 0.0, 0.0, 0.0 - 60.0)
+    core.camera_set_position(cam, core.vec3(0.0, 2.0, 0.0 - 53.0))
+    core.camera_look_at(cam, core.vec3(0.0, 2.0, 0.0 - 60.0))
+    core.backend_render(&vk_pass, cam, light)
+    vk_carried = lit(vk.offscreen_pixels())
+    check("vulkan draws a figure carried away by its bones with the origin out of view (${vk_carried} lit)", vk_carried > bind_lit / 2)
+    core.set_frustum_culling(culling_was)
 
     free(vk_bind_pixels)
     free(vk_rigid_pixels)

@@ -101,6 +101,9 @@ struct Context {
     // it. anim.track replays a pose exactly as a drawn frame builds it, which
     // means running this on top of the clips at each sampled time.
     on_pose: fn(ptr)
+    // What the engine's systems record of the models beside what the
+    // renderer draws (a body on each that has one), for scene.save.
+    on_attachments: fn(ptr) -> ptr
     user_data: ptr
 
     frame_count: int
@@ -1004,8 +1007,11 @@ save_scene(c: *Context, path: string, mesh_directory: string) -> bool {
         i = i + 1
     }
 
+    attachments = null as ptr
+    if c.on_attachments != null { attachments = c.on_attachments(c.user_data) }
     view = view_from_camera(c)
-    ok = scene.scene_save(models, lights, null, &view, path, mesh_directory)
+    ok = scene.scene_save(models, lights, attachments, &view, path, mesh_directory)
+    scene.attachments_free(attachments)
     list.free(models)
     list.free(lights)
     return ok

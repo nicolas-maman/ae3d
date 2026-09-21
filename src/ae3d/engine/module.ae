@@ -17,7 +17,9 @@ import ae3d.anim
 import ae3d.sky
 import ae3d.behaviour
 import ae3d.input
+import ae3d.scene
 import std.os
+import std.fs
 
 extern calloc(count: int, size: int) -> ptr
 extern ae3d_jobs_start(workers: int) -> int
@@ -44,7 +46,8 @@ exports (
     engine_render_ms, engine_render_frames,
     engine_set_debug, engine_set_frustum_culling, engine_set_face_culling,
     engine_add_animation, engine_animations,
-    engine_gl_renderer, engine_vk_renderer, engine_mouse_x, engine_mouse_y, engine_mouse_down, engine_key_down
+    engine_gl_renderer, engine_vk_renderer, engine_mouse_x, engine_mouse_y, engine_mouse_down, engine_key_down,
+    engine_set_attachment_provider, engine_remove_attachment_provider, engine_attachments, engine_models, engine_lights, engine_save_scene
 )
 
 // A program is written the way a Unity or gopher3D game is: game objects
@@ -151,6 +154,12 @@ struct Engine {
     ssao_on: bool
     ssao_radius: float
     ssao_intensity: float
+    // The post chain and the clear colour as last set, for the scene file.
+    post_fxaa: bool
+    post_bloom: bool
+    post_threshold: float
+    post_intensity: float
+    clear_color: Vec3
     // The hour the sun is set by, when it is; under zero when the scene
     // lights itself.
     time_of_day: float
@@ -189,6 +198,11 @@ struct Engine {
     agent_on: bool
     agent_ctx: ptr
     animations: ptr
+    // The systems that record more of a model than the renderer knows --
+    // physics, its bodies -- each answer, when the scene is written, the
+    // attachments the file carries beside the models (see engine_save_scene).
+    attachment_providers: ptr      // list of *AttachmentProvider, or null
+    scene_written: bool            // AE3D_SCENE_OUT was answered, on the first frame
     // The input service (ae3d.input): the actions a game binds, polled
     // once a frame before the updates. The camera's own controls are
     // actions in it, "forward", "strafe", "rise", "sprint" and "look".
@@ -346,6 +360,9 @@ object(e: *Engine, name: string, model: *Model) -> *GameObject {
     if model != null {
         behaviour.object_set_model(o, model)
         o.owns_model = true
+        // The model is known by the object's name -- in the editor, in the
+        // scene file, over the agent channel -- unless it brought its own.
+        if core.text(model.name) == "" { core.model_set_name(model, name) }
         if e.running { e.backend_add_model(e.backend_state, model) }
         else { list.add_raw(e.pending_models, model as ptr) }
     }
@@ -471,6 +488,10 @@ run_late_updates(e: *Engine, delta: float) {
 
 // The agent seeks a pose and wants it solved: the pose phase, from outside
 // the loop.
+attachments_for_agent(data: ptr) -> ptr {
+    return engine_attachments(data as *Engine)
+}
+
 poses_for_agent(data: ptr) {
     run_poses(data as *Engine)
 }
@@ -581,8 +602,17 @@ engine_over(renderer: ptr, api: int, camera: *Camera, light: *Light) -> *Engine 
 
 // One frame of the behaviours, for an engine whose owner runs the loop:
 // the starts not yet run, then every update with the frame's seconds.
+// One frame of an engine driven from outside (the editor's, over its own
+// renderer): the fixed steps the frame's time covers, then the update
+// phase, the way the loop runs them -- so physics steps under the editor
+// as it steps under a program.
 engine_update(e: *Engine, delta: float) {
     e.delta_time = delta
+    e.fixed_accumulator = e.fixed_accumulator + delta
+    while e.fixed_accumulator >= e.fixed_step {
+        e.fixed_accumulator = e.fixed_accumulator - e.fixed_step
+        run_fixed_updates(e, e.fixed_step)
+    }
     run_updates(e, delta)
     e.frame_count = e.frame_count + 1
 }
@@ -821,6 +851,10 @@ engine_set_msaa(e: *Engine, samples: int) { e.msaa = samples }
 // Post-processing is a backend capability rather than a renderer-specific call,
 // so switching backends does not change what a scene looks like.
 engine_set_post(e: *Engine, fxaa: bool, bloom: bool, threshold: float, intensity: float) {
+    e.post_fxaa = fxaa
+    e.post_bloom = bloom
+    e.post_threshold = threshold
+    e.post_intensity = intensity
     if e.backend_state == null { return }
     fx = 0
     if fxaa { fx = 1 }
@@ -944,6 +978,7 @@ engine_time_of_day(e: *Engine) -> float { return e.time_of_day }
 // The colour behind everything, where no sky or model is: what a scene
 // fades to at its horizon.
 engine_set_clear_color(e: *Engine, red: float, green: float, blue: float) {
+    e.clear_color = core.vec3(red, green, blue)
     if e.backend_state == null { return }
     e.backend_set_clear_color(e.backend_state, red, green, blue)
 }
@@ -1252,6 +1287,179 @@ engine_stop(e: *Engine) {
     if e.window != null { platform.window_close(e.window) }
 }
 
+// --- the scene file ------------------------------------------------------------------------------------------
+
+// A system that holds more of a model than the renderer draws: asked, when
+// the scene is written, for the attachments (ae3d.scene) it records of the
+// models it holds. Physics registers one when it is attached, so a scene
+// a program built with bodies opens in the editor with the same bodies.
+struct AttachmentProvider {
+    answer: fn(ptr) -> ptr         // state -> list of *Attachment, the engine's to free
+    state: ptr
+}
+
+engine_set_attachment_provider(e: *Engine, answer: fn(ptr) -> ptr, state: ptr) {
+    if e.attachment_providers == null { e.attachment_providers = list.new() }
+    p = heap.new(AttachmentProvider)
+    p.answer = answer
+    p.state = state
+    list.add_raw(e.attachment_providers, p as ptr)
+}
+
+// A system that is going: its provider with it, before its state is freed.
+engine_remove_attachment_provider(e: *Engine, state: ptr) {
+    if e.attachment_providers == null { return }
+    i = 0
+    while i < list.size(e.attachment_providers) {
+        p = list.get_raw(e.attachment_providers, i) as *AttachmentProvider
+        if p.state == state {
+            list.remove(e.attachment_providers, i)
+            heap.free(p)
+        } else {
+            i = i + 1
+        }
+    }
+}
+
+// Every provider's attachments in one list, or null when nothing holds
+// more than the renderer does. The caller's, freed with
+// scene.attachments_free.
+engine_attachments(e: *Engine) -> ptr {
+    if e.attachment_providers == null { return null }
+    out = list.new()
+    count = list.size(e.attachment_providers)
+    i = 0
+    while i < count {
+        p = list.get_raw(e.attachment_providers, i) as *AttachmentProvider
+        answered = p.answer(p.state)
+        if answered != null {
+            n = list.size(answered)
+            k = 0
+            while k < n {
+                list.add_raw(out, list.get_raw(answered, k))
+                k = k + 1
+            }
+            list.free(answered)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// The models the renderer draws, in its order: the same list the agent
+// channel's scene.tree walks. Borrowed; the list is the caller's.
+engine_models(e: *Engine) -> ptr {
+    out = list.new()
+    if e.api == platform.API_VULKAN && e.backend_state != null {
+        vkr = e.backend_state as *VKRenderer
+        i = 0
+        while i < vk.renderer_model_count(vkr) {
+            m = vk.renderer_model(vkr, i)
+            if m != null { list.add_raw(out, m as ptr) }
+            i = i + 1
+        }
+    } else if e.gl_renderer != null {
+        renderer = e.gl_renderer as *GLRenderer
+        i = 0
+        while i < gl.renderer_model_count(renderer) {
+            m = gl.renderer_model(renderer, i)
+            if m != null { list.add_raw(out, m as ptr) }
+            i = i + 1
+        }
+    }
+    return out
+}
+
+// The scene's light and then the lights added to it, as the scene file
+// lists them. Borrowed; the list is the caller's.
+engine_lights(e: *Engine) -> ptr {
+    out = list.new()
+    if e.light != null { list.add_raw(out, e.light) }
+    if e.api == platform.API_VULKAN && e.backend_state != null {
+        vkr = e.backend_state as *VKRenderer
+        i = 0
+        while i < vk.renderer_light_count(vkr) {
+            l = vk.renderer_light(vkr, i)
+            if l != null { list.add_raw(out, l as ptr) }
+            i = i + 1
+        }
+    } else if e.gl_renderer != null {
+        renderer = e.gl_renderer as *GLRenderer
+        i = 0
+        while i < gl.renderer_light_count(renderer) {
+            l = gl.renderer_light(renderer, i)
+            if l != null { list.add_raw(out, l as ptr) }
+            i = i + 1
+        }
+    }
+    return out
+}
+
+// The running program's scene as a scene file the editor opens: every
+// model the renderer draws, the lights, the camera's view, and what the
+// systems record of the models (a body and its collider on each that has
+// one). Meshes that came from no file are written beside it, into
+// `mesh_directory`. AE3D_SCENE_OUT=path writes it on the first frame,
+// once the program's scripts have started -- the scene as the program
+// built it, before it moves -- so any example is a scene the editor
+// loads and modifies.
+engine_save_scene(e: *Engine, path: string, mesh_directory: string) -> bool {
+    models = engine_models(e)
+    lights = engine_lights(e)
+    attachments = engine_attachments(e)
+    cam = e.camera as *Camera
+    // The view as the program set it: the camera, the sky's hour or its
+    // colour, the post chain, the occlusion, the clouds and the overcast.
+    view = scene.view_defaults()
+    if cam != null {
+        view.camera_x = cam.position.x
+        view.camera_y = cam.position.y
+        view.camera_z = cam.position.z
+        view.yaw = cam.yaw
+        view.pitch = cam.pitch
+        view.fov = cam.fov
+        view.near = cam.near
+        view.far = cam.far
+        view.speed = cam.speed
+    }
+    view.sky_r = e.clear_color.x
+    view.sky_g = e.clear_color.y
+    view.sky_b = e.clear_color.z
+    view.sky_time = e.time_of_day
+    view.fxaa = e.post_fxaa
+    view.bloom = e.post_bloom
+    view.bloom_threshold = e.post_threshold
+    view.bloom_intensity = e.post_intensity
+    view.ssao = e.ssao_on
+    view.ssao_radius = e.ssao_radius
+    view.ssao_intensity = e.ssao_intensity
+    view.clouds = e.cloud_cover > 0.0
+    view.cloud_cover = e.cloud_cover
+    view.overcast = e.overcast
+    view.frustum_culling = core.frustum_culling()
+    view.face_culling = core.face_culling()
+    ok = scene.scene_save(models, lights, attachments, &view, path, mesh_directory)
+    if !ok { println("ae3d: the scene could not be written to ${path}: ${scene.last_error()}") }
+    scene.attachments_free(attachments)
+    list.free(models)
+    list.free(lights)
+    return ok
+}
+
+// AE3D_SCENE_OUT=path writes the scene on the first frame, once every
+// script has started; the meshes go beside it, in a directory named after
+// the file.
+scene_out_from_env(e: *Engine) {
+    path = core.text(os.getenv("AE3D_SCENE_OUT"))
+    if path == "" { return }
+    directory = string.concat(path, "_meshes/")
+    fs.fs_mkdir_p_raw(directory)
+    if engine_save_scene(e, path, directory) {
+        println("ae3d: scene written to ${path}")
+    }
+    string.free(directory)
+}
+
 engine_mouse_x(e: *Engine) -> float { return platform.cursor_x(e.window) }
 engine_mouse_y(e: *Engine) -> float { return platform.cursor_y(e.window) }
 engine_mouse_down(e: *Engine, button: int) -> bool { return platform.mouse_down(e.window, button) }
@@ -1399,6 +1607,7 @@ pump_agent(e: *Engine) {
     c.gl_renderer = e.gl_renderer
     c.animations = e.animations
     c.on_pose = poses_for_agent as fn(ptr)
+    c.on_attachments = attachments_for_agent as fn(ptr) -> ptr
     c.user_data = e as ptr
     c.vk_renderer = null
     if e.api == platform.API_VULKAN { c.vk_renderer = e.backend_state }
@@ -1741,15 +1950,22 @@ engine_loop(e: *Engine) {
         // is a pose it wants solved, or it is looking at half an answer.
         run_poses(e)
         e.update_seconds = platform.time() - update_started
+        // The scene file of the first frame: every script has started and
+        // built its objects, and nothing has moved yet.
+        if e.frame_count == 0 && !e.scene_written && !held {
+            e.scene_written = true
+            scene_out_from_env(e)
+        }
 
         // A Vulkan frame is copied out as it is submitted, so any read of it --
         // a snapshot, or an agent grid or pixel read -- has to be armed on this
         // frame, before backend_render records the copy that the servicing
-        // below then reads. A snapshot arms on the frame before the last; an
-        // agent capture arms whenever one is waiting.
-        last_frame = e.frame_limit > 0 && e.frame_count + 1 >= e.frame_limit
+        // below then reads. A snapshot arms on each of the frames it is
+        // written on -- the last, or the last N of a burst; an agent capture
+        // arms whenever one is waiting.
+        shot_frame = e.frame_limit > 0 && e.frame_count + 1 > e.frame_limit - snapshot_burst(e)
         if e.api == platform.API_VULKAN {
-            want_shot = last_frame && snapshot_path(e) != ""
+            want_shot = shot_frame && snapshot_path(e) != ""
             want_read = e.agent_on && (agent_wants_capture(e) || agent_wants_snapshot(e))
             if want_shot || want_read {
                 if !vk.request_capture() { println("ae3d: Vulkan would not arm a capture") }

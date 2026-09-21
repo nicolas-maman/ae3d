@@ -17,6 +17,7 @@
 // Left alone for three seconds the car drives itself up and down the
 // street, so the scene runs unattended (AE3D_FRAMES=n for a fixed run).
 import std.string
+import std.os
 import std.list
 import ae3d.core
 import ae3d.platform
@@ -27,6 +28,8 @@ import ae3d.loader
 import ae3d.assets
 import ae3d.physics
 import ae3d.skin
+import ae3d.anim
+import std.heap
 import aephysics.math
 import aephysics.hull
 import aephysics.dynamics
@@ -42,10 +45,10 @@ const SKY_G = 0.088
 const SKY_B = 0.125
 const BLOCK_LEN = 84.0           // the block's ground slab, Street_Ground: x -36..48
 const BLOCK_CX = 6.0             // its centre; the road and the mirror axis sit here
-const TILES = 3                  // blocks along the street, centred on the middle one
+const TILES = 5                  // blocks along the street, centred on the middle one: the ends are in the fog
 const ROAD_Y = 0.08
 const PAVEMENT_Y = 0.16
-const STREET_END = 136.0         // well past the last block's end, where the autopilot turns on the open tarmac
+const STREET_END = 220.0         // well past the last block's end, where the autopilot turns on the open tarmac
 
 // The car's measure: a hatchback's. The chassis is a box and a cabin,
 // forward is -z as every object's is.
@@ -68,6 +71,7 @@ struct Game {
     chassis: ptr                   // *GameObject
     ground: ptr                    // *Rigidbody, the road the bystanders stand on
     bystanders: ptr                // list of *Ragdoll
+    walkers: ptr                   // list of *Walker, the bystanders that walk
     seconds: float
     idle: float                    // seconds since the last input
     direction: float               // the autopilot's way along x, +1 or -1
@@ -439,10 +443,34 @@ make_car(g: *Game, e: *Engine, position: Vec3) {
 // Ten on the pavements and three in the road, each a ragdoll whose
 // joints are sprung to its pose stiffly enough to stand and whose
 // pelvis is sprung upright to the road; a hit lets the pelvis go.
+// A bystander that walks: its rig animated by the walk cycle the export
+// carries, its ragdoll following the rig through its anchors, and the
+// figure carried along the pavement at the walk's own pace. Struck, the
+// anchors let go and the ragdoll drives the rig instead: the character
+// animated until the moment of the strike is the ragdoll that falls.
+struct Walker {
+    ragdoll: ptr                   // *Ragdoll
+    players: ptr                   // list of *Player, one per animated bone
+    targets: ptr                   // list of *Model, the bone each player poses
+    root: ptr                      // *Model, the rig's root: placed here, not by the clip
+    root_q: Quat                   // the root's rotation, facing the way it walks
+    root_y: float
+    forward: Vec3                  // along the pavement
+    x: float
+    z: float
+    time: float                    // into the gait cycle
+    gait_start: float
+    gait_length: float
+    pace: float                    // metres a second, the clip's own
+    from_x: float                  // the pavement's stretch it walks, turning at the ends
+    to_x: float
+    walking: bool
+}
+
 // The bystanders: the pipeline's zombie figure, its skin and its clothes
-// weighted to a rig of its own for each, worn by a ragdoll sprung
-// upright on the pavement. The ragdoll drives the rig every step, so the
-// figure stands as the ragdoll stands and, struck, falls as it falls.
+// weighted to a rig of its own for each, worn by a ragdoll. Some stand,
+// sprung upright; the rest walk the pavement, the rig driving the
+// ragdoll. Struck, either falls as its ragdoll falls.
 make_bystanders(g: *Game, e: *Engine, m: *Manifest) {
     ground = g.ground as *Rigidbody
     if ground == null { return }
@@ -459,25 +487,135 @@ make_bystanders(g: *Game, e: *Engine, m: *Manifest) {
             x = 20.0 - 22.0 * ((i - 10) as float)
             z = side * 1.2 * next_random()
         }
+        // On the pavement the walkers keep to a lane between the lamps at
+        // the kerb and the benches at the wall.
+        walks = i < 10 && i % 3 != 0
+        if walks { z = side * 4.4 }
         r = physics.ragdoll(e, "Bystander ${i}", core.vec3(x, PAVEMENT_Y, z), 8.0, 8.0, 1.0)
         // Facing the road, or along the pavement, figure by figure; turned
-        // before it is stood, since standing holds it where it is.
+        // before it is stood, since standing holds it where it is. The
+        // ragdoll's rest pose faces -z; a walker faces along the pavement,
+        // the way it sets off, up the street or down it.
         yaw = 0.0
-        if i % 3 == 0 { yaw = 0.0 - side * 1.5707963 }
-        if i % 3 == 1 { yaw = 3.14159265 * next_random() }
+        if side < 0.0 { yaw = 3.14159265 }
+        if walks {
+            yaw = 0.0 - 1.5707963
+            if i % 2 == 1 { yaw = 1.5707963 }
+        } else if i >= 10 {
+            yaw = 6.2831853 * next_random()
+        }
         physics.ragdoll_turn(r, yaw)
         physics.ragdoll_stand(r, ground, 25.0, 1.0)
-        if body_entry != null { dress_bystander(e, m, body_entry, cloth_entry, r) }
+        if body_entry != null {
+            skeleton = dress_bystander(e, m, body_entry, cloth_entry, r)
+            if walks && skeleton != null { start_walking(g, m, body_entry, r, skeleton, x, z) }
+        }
         list.add_raw(g.bystanders, r as ptr)
         i = i + 1
     }
 }
 
+// The walk: the gait cycle's window of the export's take (the manifest's
+// markers), a player per bone but the root, and the root placed by hand
+// each step where the walker is, since the clip's own root carries the
+// take up the street and this figure walks its own way.
+start_walking(g: *Game, m: *Manifest, body_entry: *Entry, r: *Ragdoll, skeleton: *Skeleton, x: float, z: float) {
+    clips = assets.entry_load_bone_clips(m, body_entry)
+    if clips == null { return }
+    w = heap.new(Walker)
+    w.ragdoll = r as ptr
+    w.players = list.new()
+    w.targets = list.new()
+    w.gait_start = assets.manifest_marker(m, "gait", 0.0)
+    w.gait_length = assets.manifest_marker(m, "gait_end", 1.666667) - w.gait_start
+    if w.gait_length <= 0.01 { w.gait_length = 1.666667 }
+    root = null as *Model
+    i = 0
+    while i < list.size(clips) {
+        clip = list.get_raw(clips, i) as *Clip
+        index = skin.skeleton_find(skeleton, anim.clip_name(clip))
+        if index >= 0 {
+            bone = skin.skeleton_bone(skeleton, index)
+            if core.model_parent(bone) == null {
+                root = bone
+                // The root's translation over one cycle is the walk's travel,
+                // and travel over time its pace.
+                c = 0
+                while c < anim.clip_channel_count(clip) {
+                    channel = anim.clip_channel(clip, c)
+                    if anim.channel_target(channel) == anim.TRANSLATION {
+                        from = anim.sample_vec3(channel, w.gait_start)
+                        to = anim.sample_vec3(channel, w.gait_start + w.gait_length)
+                        w.pace = core.v3_len(core.v3_sub(to, from)) / w.gait_length
+                    }
+                    c = c + 1
+                }
+            } else {
+                list.add_raw(w.players, anim.player_new(clip) as ptr)
+                list.add_raw(w.targets, bone as ptr)
+            }
+        }
+        i = i + 1
+    }
+    list.free(clips)
+    if root == null || w.pace <= 0.01 { heap.free(w); return }
+    core.model_sync_transform(root)
+    w.root = root as ptr
+    w.root_q = root.rotation
+    w.root_y = root.position.y
+    // The figure walks the way its root's x points, the way the take
+    // walks: the root was faced the ragdoll's way at the dressing.
+    f = core.quat_apply(root.rotation, core.vec3(1.0, 0.0, 0.0))
+    w.forward = core.v3_normalize(core.vec3(f.x, 0.0, f.z))
+    w.x = x
+    w.z = z
+    w.time = next_random() * w.gait_length
+    w.from_x = x - 30.0 - 20.0 * next_random()
+    w.to_x = x + 30.0 + 20.0 * next_random()
+    w.walking = physics.ragdoll_follow(r)
+    list.add_raw(g.walkers, w as ptr)
+}
+
+// One fixed step of every walker: the cycle's pose on the rig, the root
+// where the walker has got to, and the turn at the pavement's end. A
+// walker whose ragdoll was let go (struck) stops here; the bodies drive
+// its rig from then on.
+walk(g: *Game, step: float) {
+    n = list.size(g.walkers)
+    i = 0
+    while i < n {
+        w = list.get_raw(g.walkers, i) as *Walker
+        if w.walking && physics.ragdoll_is_following(w.ragdoll as *Ragdoll) == false { w.walking = false }
+        if w.walking {
+            w.time = w.time + step
+            while w.time >= w.gait_length { w.time = w.time - w.gait_length }
+            k = 0
+            count = list.size(w.players)
+            while k < count {
+                player = list.get_raw(w.players, k) as *Player
+                anim.player_set_time(player, w.gait_start + w.time)
+                anim.apply(player, list.get_raw(w.targets, k) as *Model)
+                k = k + 1
+            }
+            w.x = w.x + w.forward.x * w.pace * step
+            w.z = w.z + w.forward.z * w.pace * step
+            if (w.forward.x > 0.0 && w.x > w.to_x) || (w.forward.x < 0.0 && w.x < w.from_x) {
+                w.forward = core.v3_mul(w.forward, 0.0 - 1.0)
+                w.root_q = core.quat_normalize(core.quat_mul(core.quat_rotate(3.14159265, core.vec3(0.0, 1.0, 0.0)), w.root_q))
+            }
+            root = w.root as *Model
+            core.model_set_position(root, w.x, w.root_y, w.z)
+            core.model_set_rotation(root, w.root_q)
+        }
+        i = i + 1
+    }
+}
+
 // One figure: a fresh rig from the export, the two surfaces over it, and
-// the ragdoll wearing it.
-dress_bystander(e: *Engine, m: *Manifest, body_entry: *Entry, cloth_entry: *Entry, r: *Ragdoll) {
+// the ragdoll wearing it. Answers the rig, or null.
+dress_bystander(e: *Engine, m: *Manifest, body_entry: *Entry, cloth_entry: *Entry, r: *Ragdoll) -> *Skeleton {
     bones = assets.entry_load_skeleton(m, body_entry)
-    if bones == null { return }
+    if bones == null { return null }
     skeleton = skin.skeleton_new()
     i = 0
     while i < list.size(bones) {
@@ -501,7 +639,9 @@ dress_bystander(e: *Engine, m: *Manifest, body_entry: *Entry, cloth_entry: *Entr
     }
     if physics.ragdoll_dress(r, skeleton) == false {
         println("street_drive: the figure could not be dressed on its ragdoll")
+        return null
     }
+    return skeleton
 }
 
 // A wall of the street's own crates across the road, for the car to
@@ -638,9 +778,22 @@ fixed_update(state: ptr, go: *GameObject, step: float) {
             body = dynamics.shape_get_body(under.shape_id)
             println("street_drive[diag]   under the car: y=${under.point.y} normal (${under.normal.x}, ${under.normal.y}, ${under.normal.z}) shape type ${dynamics.shape_get_type(under.shape_id)} body kind ${dynamics.body_get_type(body)}")
         } else { println("street_drive[diag]   nothing under the car") }
+        // The first walker: where it means to be, and where its pelvis is.
+        if list.size(g.walkers) > 0 {
+            w = list.get_raw(g.walkers, 0) as *Walker
+            wr = w.ragdoll as *Ragdoll
+            pelvis = behaviour.object_position(physics.ragdoll_bone(wr, 0))
+            println("street_drive[diag]   walker 0 walking=${w.walking} pace ${w.pace} at (${w.x}, ${w.z}) forward (${w.forward.x}, ${w.forward.z}); pelvis (${pelvis.x}, ${pelvis.y}, ${pelvis.z})")
+            root = w.root as *Model
+            core.model_sync_transform(root)
+            head = list.get_raw(w.targets, 4) as *Model
+            core.model_sync_transform(head)
+            println("street_drive[diag]   walker 0 root at (${root.world_position.x}, ${root.world_position.y}, ${root.world_position.z}) bone 4 '${head.name}' at (${head.world_position.x}, ${head.world_position.y}, ${head.world_position.z})")
+        }
     }
     // What the car struck this step: a standing bystander lets go.
     p = physics.of(e)
+    walk(g, step)
     n = physics.hit_event_count(p)
     i = 0
     while i < n {
@@ -673,6 +826,12 @@ update(state: ptr, go: *GameObject, delta: float) {
     g.camera_pos = core.v3_add(g.camera_pos, core.v3_mul(core.v3_sub(wanted, g.camera_pos), k))
     g.camera_aim = core.v3_add(g.camera_aim, core.v3_mul(core.v3_sub(aim, g.camera_aim), k))
     cam = engine.engine_camera(e)
+    // A camera placed by number, for a sweep (AE3D_CAMX/Y/Z and
+    // AE3D_AIMX/Y/Z, metres): the chase camera gives way to it.
+    if os.getenv("AE3D_CAMX") != null {
+        g.camera_pos = core.vec3(core.env_int("AE3D_CAMX", 0) as float, core.env_int("AE3D_CAMY", 2) as float, core.env_int("AE3D_CAMZ", 0) as float)
+        g.camera_aim = core.vec3(core.env_int("AE3D_AIMX", 0) as float, core.env_int("AE3D_AIMY", 1) as float, core.env_int("AE3D_AIMZ", 0) as float)
+    }
     core.camera_set_position(cam, g.camera_pos)
     core.camera_look_at(cam, g.camera_aim)
     // The lights where the car's corners are now.
@@ -700,7 +859,10 @@ main() {
     engine.engine_set_face_culling(e, true)
     engine.engine_set_camera_input(e, false)
     engine.engine_set_post(e, true, true, 0.85, 0.85)
-    engine.engine_set_fog(e, core.fog_distance(12.0, 150.0, core.vec3(SKY_R, SKY_G, SKY_B), 0.95))
+    // The fog is whole by 230 metres: the street runs 420 and the
+    // tarmac past it 900, and nothing of either's end is to be seen from
+    // a car that moves, which is where a world's edge shows.
+    engine.engine_set_fog(e, core.fog_distance(15.0, 230.0, core.vec3(SKY_R, SKY_G, SKY_B), 1.0))
     engine.engine_set_shadow_distance(e, 48.0)
     engine.engine_set_frustum_culling(e, true)
     if core.env_int("AE3D_RAYS", 1) == 1 {
@@ -714,7 +876,7 @@ main() {
     engine.engine_set_time_of_day(e, 22.0)
     g_diag = core.env_int("AE3D_DIAG", 0) == 1
     physics.attach(e)
-    g = Game { vehicle: null, chassis: null, ground: null, bystanders: list.new(), seconds: 0.0, idle: 10.0, direction: 0.0 - 1.0,
+    g = Game { vehicle: null, chassis: null, ground: null, bystanders: list.new(), walkers: list.new(), seconds: 0.0, idle: 10.0, direction: 0.0 - 1.0,
                turning: false, camera_pos: core.vec3(0.0, 0.0, 0.0), camera_aim: core.vec3(0.0, 0.0, 0.0),
                headlights: null, tail_lights: null, knocked: 0, props: 0 }
     game = engine.object(e, "Game", null)

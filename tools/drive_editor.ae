@@ -1047,6 +1047,7 @@ only_lit(t: *Tree, names: string, id: int, flag: bool) -> bool {
 }
 
 // The lit weather kinds under the row `parent`, comma-separated.
+// The lit buttons of a row of kinds (the weather's, the body's), by name.
 kinds_lit(t: *Tree, parent: int) -> string {
     out = strbuilder.new(32)
     count = 0
@@ -1054,7 +1055,7 @@ kinds_lit(t: *Tree, parent: int) -> string {
     i = 0
     while i < n {
         w = tree_at(t, i)
-        if w.kind == "button" && w.parent == parent && w.bg == ACCENT && named_in(w.text, "Clear,Rain,Snow,Dust,Storm") {
+        if w.kind == "button" && w.parent == parent && w.bg == ACCENT {
             if count > 0 { strbuilder.append(out, ",") }
             strbuilder.append(out, w.text)
             count = count + 1
@@ -1110,6 +1111,28 @@ scene_section(section: string, root_out: ptr[]) -> ptr {
     view = json.json_object_get_raw(root, "view")
     if view == null { return null }
     return json.json_object_get_raw(view, section)
+}
+
+// How many models of the scene file carry a dynamic body's record.
+scene_models_with_body(root_out: ptr[]) -> int {
+    text, err = file.read(SCENE_FILE)
+    if err != "" { return 0 }
+    root, perr = json.parse(text)
+    string.free(text)
+    if perr != "" { return 0 }
+    root_out[0] = root
+    models = json.json_object_get_raw(root, "models")
+    if models == null { return 0 }
+    found = 0
+    count = json.json_array_size(models)
+    i = 0
+    while i < count {
+        entry = json.json_array_get_raw(models, i)
+        body_record = json.json_object_get_raw(entry, "physics")
+        if body_record != null && field_text(body_record, "body") == "dynamic" { found = found + 1 }
+        i = i + 1
+    }
+    return found
 }
 
 json_text(node: ptr) -> string {
@@ -2318,6 +2341,54 @@ run_checks() {
         wt.text = "Clear"
         clear_tree = wait_for(wt, 8.0, ok)
         tree_free(clear_tree)
+        free(wt as ptr)
+    }
+
+    // The body: a kind is a button, lit when chosen, the way the weather's
+    // is; the file carries the body's record on the model and comes back
+    // with it; No body takes it away.
+    tree_free(t)
+    t = tree()
+    kinematic = find_widget(t, "button", "Kinematic")
+    body_count = 0
+    bodies_parent = 0 - 1
+    if kinematic != null {
+        bodies_parent = kinematic.parent
+        i = 0
+        while i < tree_count(t) {
+            b = tree_at(t, i)
+            if b.kind == "button" && b.parent == bodies_parent && named_in(b.text, "No body,Static,Kinematic,Dynamic") { body_count = body_count + 1 }
+            i = i + 1
+        }
+    }
+    check_detail("the physics section offers every kind of body", body_count == 4, "${body_count} of four")
+    if body_count == 4 && save >= 0 {
+        dynamic_id = kind_button(t, bodies_parent, "Dynamic")
+        no_body_id = kind_button(t, bodies_parent, "No body")
+        click(dynamic_id)
+        wt = want(WANT_KINDS_LIT)
+        wt.count = bodies_parent
+        wt.text = "Dynamic"
+        lit_tree = wait_for(wt, 8.0, ok)
+        lit = kinds_lit(lit_tree, bodies_parent)
+        tree_free(lit_tree)
+        check_detail("choosing a dynamic body lights Dynamic", ok[0] == 1, "lit: ${lit}")
+        string.free(lit)
+        written = file_stamp(SCENE_FILE)
+        click(save)
+        check("the scene is written with the body", wait_file(SCENE_FILE, written))
+        root_slot = calloc(1, 8) as ptr[]
+        body_records = scene_models_with_body(root_slot)
+        check_detail("and the file records a dynamic body on a model", body_records >= 1, "${body_records} recorded")
+        if root_slot[0] != null { json.json_free(root_slot[0]) }
+        free(root_slot)
+        click(no_body_id)
+        wt.text = "No body"
+        none_tree = wait_for(wt, 8.0, ok)
+        lit = kinds_lit(none_tree, bodies_parent)
+        tree_free(none_tree)
+        check_detail("No body takes it away and lights", ok[0] == 1, "lit: ${lit}")
+        string.free(lit)
         free(wt as ptr)
     }
 
