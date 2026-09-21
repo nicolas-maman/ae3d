@@ -13,6 +13,9 @@
 import std.heap
 import std.json
 import std.string
+import std.mem
+import std.bytes
+import std.tcp
 import ae3d.core
 
 exports (
@@ -21,38 +24,118 @@ exports (
     number, integer, text, flag, field, last_error
 )
 
-extern ae3d_client_init()
-extern ae3d_client_connect(host: string, port: int) -> int
-extern ae3d_client_send(handle: int, line: string) -> int
-extern ae3d_client_read(handle: int) -> string
-extern ae3d_client_close(handle: int)
-extern ae3d_client_error() -> string
+extern malloc(size: long) -> ptr
+extern realloc(p: ptr, size: long) -> ptr
+extern free(p: ptr)
+// The C library's memcpy with a string source: a received chunk into the pending bytes.
+extern memcpy(dst: ptr, src: string, n: long) -> ptr
 
+const CHUNK = 4096
+const MOST = 16777216              // a single answer larger than this is a protocol fault: the grid read is capped well below it
+
+// A connection: its socket, and the bytes received past the last line.
 struct Probe {
-    handle: int
+    sock: ptr
+    pending: ptr
+    used: int
+    capacity: int
     next_id: int
 }
+
+var g_error = ""
 
 // Loopback only. The channel is a debugging surface with no authentication of
 // any kind, and the engine binds it to 127.0.0.1 for the same reason.
 open(port: int) -> *Probe {
-    ae3d_client_init()
-    handle = ae3d_client_connect("127.0.0.1", port)
-    if handle == 0 { return null }
+    g_error = ""
+    if port <= 0 || port > 65535 {
+        g_error = "a port between 1 and 65535"
+        return null
+    }
+    sock, _err = tcp.connect("127.0.0.1", port)
+    if sock == null {
+        g_error = "nothing answered on that port"
+        return null
+    }
     p = heap.new(Probe)
-    p.handle = handle
+    p.sock = sock
+    p.capacity = 8192
+    p.pending = malloc(p.capacity as long)
+    p.used = 0
     p.next_id = 1
     return p
 }
 
 close(p: *Probe) {
     if p == null { return }
-    if p.handle != 0 { ae3d_client_close(p.handle) }
+    if p.sock != null { tcp.tcp_close(p.sock) }
+    if p.pending != null { free(p.pending) }
     heap.free(p)
 }
 
 last_error() -> string {
-    return ae3d_client_error()
+    return g_error
+}
+
+// The line and its terminator in one write. One, not two: every request
+// is a small line whose answer is wanted now, and a terminator sent on
+// its own would wait on Nagle for the acknowledgement of the line before
+// it -- the forty milliseconds a delayed acknowledgement takes, added to
+// every question. One write is one packet, and the socket needs no
+// option set.
+send_line(p: *Probe, line: string) -> bool {
+    whole = string.concat(line, "
+")
+    n, err = tcp.write(p.sock, whole)
+    ok = err == "" && n >= string.length(whole)
+    string.free(whole)
+    if ok == false { g_error = "the connection closed while sending" }
+    return ok
+}
+
+// The length of the next line in the pending bytes (its terminator
+// excluded, a carriage return before it too), reading more until one
+// is there; -1 when the connection ends first.
+read_line(p: *Probe) -> int {
+    while true {
+        i = 0
+        while i < p.used {
+            if mem.get_uint8(p.pending, i) == 10 {
+                length = i
+                if length > 0 && mem.get_uint8(p.pending, length - 1) == 13 { length = length - 1 }
+                return length
+            }
+            i = i + 1
+        }
+        if p.used + CHUNK > p.capacity {
+            wanted = p.capacity * 2
+            while wanted < p.used + CHUNK { wanted = wanted * 2 }
+            if wanted > MOST {
+                g_error = "the answer never ended"
+                return 0 - 1
+            }
+            p.pending = realloc(p.pending, wanted as long)
+            p.capacity = wanted
+        }
+        chunk, got, err = tcp.read_n(p.sock, CHUNK)
+        if err != "" || got <= 0 {
+            g_error = "the connection closed while reading"
+            return 0 - 1
+        }
+        memcpy(p.pending + p.used, chunk, got as long)
+        p.used = p.used + got
+    }
+    return 0 - 1
+}
+
+// The line and its terminator taken off the front of the pending bytes.
+consume_line(p: *Probe, length: int) {
+    // The terminator itself, and a carriage return before it.
+    end = length
+    while end < p.used && mem.get_uint8(p.pending, end) != 10 { end = end + 1 }
+    if end < p.used { end = end + 1 }
+    mem.copy(p.pending, p.pending + end, (p.used - end) as long)
+    p.used = p.used - end
 }
 
 // Sends a request object and answers with the whole answered, or null if the
@@ -65,16 +148,19 @@ last_error() -> string {
 // into something already released.
 ask(p: *Probe, request: ptr) -> ptr {
     if p == null || request == null { return null }
+    g_error = ""
 
     json.object_set_raw(request, "id", json.from_int(p.next_id))
     p.next_id = p.next_id + 1
 
     line = json.stringify_raw(request)
-    if ae3d_client_send(p.handle, line) == 0 { return null }
+    if send_line(p, line) == false { return null }
 
-    answer = ae3d_client_read(p.handle)
-    if answer == null { return null }
-
+    length = read_line(p)
+    if length < 0 { return null }
+    // The answer as a string of this scope's; the pending bytes move on.
+    answer = bytes.string_from_ptr(p.pending, length)
+    consume_line(p, length)
     return json.parse_raw(answer)
 }
 

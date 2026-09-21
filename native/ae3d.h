@@ -437,12 +437,6 @@ const char *ae3d_agent_error(void);
 
 /* The asking end of the same channel, so a tool that measures a scene can be
    written against the engine rather than against a copy of the protocol. */
-void        ae3d_client_init(void);
-int         ae3d_client_connect(const char *host, int port);
-int         ae3d_client_send(int handle, const char *line);
-const char *ae3d_client_read(int handle);
-void        ae3d_client_close(int handle);
-const char *ae3d_client_error(void);
 
 int  ae3d_capture_frame(int width, int height);
 int  ae3d_capture_width(void);
