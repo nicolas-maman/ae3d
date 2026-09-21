@@ -8,16 +8,28 @@
 //
 // A path per zombie is a search per zombie; a hundred thousand of them want
 // one search. The field is the cost from every cell to the target, found by
-// one flood from the target outward over the cells nothing stands in, and a
-// direction per cell toward the cheapest neighbour. A zombie reads the
-// direction under its feet and turns toward it by at most `turn` a step, so
-// the horde swings round rather than snapping; where the field says nothing
-// -- a blocked cell, one the target cannot be reached from, the target's
-// own -- it keeps its heading and the wander and separation passes carry
-// on. The flood is native (native/ae3d_nav.c), a few milliseconds for a
-// city, paid once each time the target crosses a cell.
+// one flood from the target outward over the cells nothing stands in (a
+// Dijkstra, eight ways, a straight step 10 and a diagonal 14 -- tenths of a
+// cell, integers, so the frontier is a ring and not a heap -- and no
+// diagonal past a blocked corner, so nothing is told to walk through the
+// edge of a wall), and a direction per cell toward the cheapest neighbour.
+// A zombie reads the direction under its feet and turns toward it by at
+// most `turn` a step, so the horde swings round rather than snapping;
+// where the field says nothing -- a blocked cell, one the target cannot
+// be reached from, the target's own -- it keeps its heading and the
+// wander and separation passes carry on. The flood is a few milliseconds
+// for a city, paid once each time the target crosses a cell; the steer
+// runs over the engine's pool.
+//
+// What blocks a cell is a footprint -- a building, a bin, a lamp post --
+// given as a rectangle on the ground. The cells' costs and their blocked
+// and queued marks are ints (a byte would halve the memory, but a byte
+// in Aether is a runtime call per read and the flood took twice as long
+// on it), the directions doubles: twenty-eight bytes a cell, a few
+// megabytes for a city.
 import std.heap
 import ae3d.core
+import ae3d.jobs
 
 exports (
     FlowField,
@@ -26,24 +38,26 @@ exports (
     flow_width, flow_height, flow_cell, flow_target
 )
 
-extern ae3d_flow_new(w: int, h: int, x0: float, z0: float, cell: float) -> ptr
-extern ae3d_flow_free(field: ptr)
-extern ae3d_flow_width(field: ptr) -> int
-extern ae3d_flow_height(field: ptr) -> int
-extern ae3d_flow_block(field: ptr, bx0: float, bz0: float, bx1: float, bz1: float)
-extern ae3d_flow_clear(field: ptr)
-extern ae3d_flow_blocked_at(field: ptr, x: float, z: float) -> int
-extern ae3d_flow_build(field: ptr, tx: float, tz: float) -> int
-extern ae3d_flow_cost(field: ptr, x: float, z: float) -> float
-extern ae3d_flow_dir_x(field: ptr, x: float, z: float) -> float
-extern ae3d_flow_dir_z(field: ptr, x: float, z: float) -> float
-extern ae3d_flow_steer(field: ptr, pos: ptr, yaw: ptr, n: int, turn: float)
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern memset(block: ptr, value: int, size: int) -> ptr
+extern floor(x: float) -> float
+extern sqrt(x: float) -> float
+extern atan2(y: float, x: float) -> float
+
+const PI = 3.14159265358979323846
 
 struct FlowField {
-    native: ptr
+    w: int
+    h: int
     x0: float
     z0: float
     cell: float
+    blocked: ptr                   // int[w*h]: 1 where nothing can walk
+    cost: ptr                      // int[w*h]: tenths of a cell to the target, -1 unreachable
+    dir: ptr                       // float[w*h*2]: the way to walk, unit, or 0,0
+    queue: ptr                     // int[w*h + 1]: the flood's frontier, a ring (one over: a full ring is not an empty one)
+    queued: ptr                    // int[w*h]: whether a cell waits in the frontier
     // Where it was last built for, so a caller can tell whether the target
     // has crossed into another cell and the flood is worth paying again.
     target: Vec3
@@ -57,13 +71,24 @@ flow_new(x0: float, z0: float, x1: float, z1: float, cell: float) -> *FlowField 
     w = ((x1 - x0) / cell) as int + 1
     h = ((z1 - z0) / cell) as int + 1
     if w < 1 || h < 1 { return null }
-    native = ae3d_flow_new(w, h, x0, z0, cell)
-    if native == null { return null }
     f = heap.new(FlowField)
-    f.native = native
+    f.w = w
+    f.h = h
     f.x0 = x0
     f.z0 = z0
     f.cell = cell
+    n = w * h
+    f.blocked = calloc(n, 4)
+    f.cost = calloc(n, 4)
+    f.dir = calloc(n * 2, 8)
+    f.queue = calloc(n + 1, 4)
+    f.queued = calloc(n, 4)
+    cost = f.cost as int[]
+    i = 0
+    while i < n {
+        cost[i] = 0 - 1
+        i = i + 1
+    }
     f.target = core.vec3(0.0, 0.0, 0.0)
     f.built = false
     f.reached = 0
@@ -72,18 +97,49 @@ flow_new(x0: float, z0: float, x1: float, z1: float, cell: float) -> *FlowField 
 
 flow_free(f: *FlowField) {
     if f == null { return }
-    ae3d_flow_free(f.native)
+    free(f.blocked)
+    free(f.cost)
+    free(f.dir)
+    free(f.queue)
+    free(f.queued)
     heap.free(f)
 }
 
-flow_width(f: *FlowField) -> int { return ae3d_flow_width(f.native) }
-flow_height(f: *FlowField) -> int { return ae3d_flow_height(f.native) }
+flow_width(f: *FlowField) -> int { return f.w }
+flow_height(f: *FlowField) -> int { return f.h }
 flow_cell(f: *FlowField) -> float { return f.cell }
 flow_target(f: *FlowField) -> Vec3 { return f.target }
 
+col_of(f: *FlowField, x: float) -> int { return floor((x - f.x0) / f.cell) as int }
+row_of(f: *FlowField, z: float) -> int { return floor((z - f.z0) / f.cell) as int }
+is_blocked(f: *FlowField, at: int) -> bool { blocked = f.blocked as int[]; return blocked[at] != 0 }
+
 // A footprint on the ground nothing walks through, world metres.
 flow_block(f: *FlowField, x0: float, z0: float, x1: float, z1: float) {
-    ae3d_flow_block(f.native, x0, z0, x1, z1)
+    bx0 = x0
+    bx1 = x1
+    bz0 = z0
+    bz1 = z1
+    if bx1 < bx0 { bx0 = x1; bx1 = x0 }
+    if bz1 < bz0 { bz0 = z1; bz1 = z0 }
+    c0 = col_of(f, bx0)
+    c1 = col_of(f, bx1)
+    r0 = row_of(f, bz0)
+    r1 = row_of(f, bz1)
+    if c0 < 0 { c0 = 0 }
+    if r0 < 0 { r0 = 0 }
+    if c1 >= f.w { c1 = f.w - 1 }
+    if r1 >= f.h { r1 = f.h - 1 }
+    blocked = f.blocked as int[]
+    r = r0
+    while r <= r1 {
+        c = c0
+        while c <= c1 {
+            blocked[r * f.w + c] = 1
+            c = c + 1
+        }
+        r = r + 1
+    }
 }
 
 // A model's footprint: its bounding sphere's square on the ground. A
@@ -93,47 +149,229 @@ flow_block_model(f: *FlowField, m: *Model) {
     if m == null { return }
     r = m.bounding_radius
     c = m.bounding_center
-    ae3d_flow_block(f.native, c.x - r, c.z - r, c.x + r, c.z + r)
+    flow_block(f, c.x - r, c.z - r, c.x + r, c.z + r)
 }
 
 flow_clear(f: *FlowField) {
-    ae3d_flow_clear(f.native)
+    memset(f.blocked, 0, f.w * f.h * 4)
     f.built = false
 }
 
 flow_blocked(f: *FlowField, x: float, z: float) -> bool {
-    return ae3d_flow_blocked_at(f.native, x, z) == 1
+    c = col_of(f, x)
+    r = row_of(f, z)
+    if c < 0 || r < 0 || c >= f.w || r >= f.h { return true }
+    return is_blocked(f, r * f.w + c)
+}
+
+// The eight ways, straight first then diagonal, and each one's cost:
+// tables, filled once.
+var g_dc: ptr = null
+var g_dr: ptr = null
+var g_step: ptr = null
+
+steps_ready() {
+    if g_dc != null { return }
+    g_dc = calloc(8, 4)
+    g_dr = calloc(8, 4)
+    g_step = calloc(8, 4)
+    dc = g_dc as int[]
+    dr = g_dr as int[]
+    st = g_step as int[]
+    dc[0] = 1; dc[1] = 0 - 1; dc[2] = 0; dc[3] = 0; dc[4] = 1; dc[5] = 1; dc[6] = 0 - 1; dc[7] = 0 - 1
+    dr[0] = 0; dr[1] = 0; dr[2] = 1; dr[3] = 0 - 1; dr[4] = 1; dr[5] = 0 - 1; dr[6] = 1; dr[7] = 0 - 1
+    st[0] = 10; st[1] = 10; st[2] = 10; st[3] = 10; st[4] = 14; st[5] = 14; st[6] = 14; st[7] = 14
 }
 
 // The flood from the target; how many cells can reach it (0 for a target
-// off the field or inside a footprint).
+// off the field or inside a footprint). Two step weights on a FIFO settle
+// a cell more than once in the worst case; a cell already waiting in the
+// frontier is not queued twice, so the ring never holds more than every
+// cell once, and the relaxations are bounded since a cost only falls.
 flow_build(f: *FlowField, target: Vec3) -> int {
     f.target = target
-    f.reached = ae3d_flow_build(f.native, target.x, target.z)
+    f.reached = flood(f, target.x, target.z)
     f.built = f.reached > 0
     return f.reached
 }
 
-// The walk from a point to the target in metres, -1 where it cannot reach.
-flow_cost(f: *FlowField, x: float, z: float) -> float {
-    return ae3d_flow_cost(f.native, x, z)
+flood(f: *FlowField, tx: float, tz: float) -> int {
+    steps_ready()
+    dc = g_dc as int[]
+    dr = g_dr as int[]
+    st = g_step as int[]
+    w = f.w
+    h = f.h
+    n = w * h
+    cost = f.cost as int[]
+    queue = f.queue as int[]
+    queued = f.queued as int[]
+    blocked = f.blocked as int[]
+    dir = f.dir as float[]
+    i = 0
+    while i < n {
+        cost[i] = 0 - 1
+        dir[i * 2] = 0.0
+        dir[i * 2 + 1] = 0.0
+        i = i + 1
+    }
+    c = col_of(f, tx)
+    r = row_of(f, tz)
+    if c < 0 || r < 0 || c >= w || r >= h { return 0 }
+    target = r * w + c
+    if blocked[target] != 0 { return 0 }
+    memset(f.queued, 0, n * 4)
+    cost[target] = 0
+    head = 0
+    tail = 0
+    queue[tail] = target
+    tail = tail + 1
+    queued[target] = 1
+    while head != tail {
+        at = queue[head]
+        head = head + 1
+        ar = at / w
+        ac = at % w
+        base = cost[at]
+        if head == n + 1 { head = 0 }
+        queued[at] = 0
+        k = 0
+        while k < 8 {
+            nc = ac + dc[k]
+            nr = ar + dr[k]
+            if nc >= 0 && nr >= 0 && nc < w && nr < h {
+                to = nr * w + nc
+                // No diagonal between two blocked cells' corner.
+                passable = blocked[to] == 0
+                if passable && k >= 4 && (blocked[ar * w + nc] != 0 || blocked[nr * w + ac] != 0) { passable = false }
+                if passable {
+                    total = base + st[k]
+                    if cost[to] < 0 || cost[to] > total {
+                        cost[to] = total
+                        if queued[to] == 0 {
+                            queued[to] = 1
+                            queue[tail] = to
+                            tail = tail + 1
+                            if tail == n + 1 { tail = 0 }
+                        }
+                    }
+                }
+            }
+            k = k + 1
+        }
+    }
+    // Every open cell points at its cheapest neighbour; the target's own cell points nowhere.
+    reached = 0
+    r = 0
+    while r < h {
+        c = 0
+        while c < w {
+            at = r * w + c
+            if cost[at] >= 0 && at != target {
+                reached = reached + 1
+                best = 0 - 1
+                best_cost = cost[at]
+                k = 0
+                while k < 8 {
+                    nc = c + dc[k]
+                    nr = r + dr[k]
+                    if nc >= 0 && nr >= 0 && nc < w && nr < h {
+                        to = nr * w + nc
+                        if cost[to] >= 0 {
+                            open = true
+                            if k >= 4 && (blocked[r * w + nc] != 0 || blocked[nr * w + c] != 0) { open = false }
+                            if open && cost[to] < best_cost { best_cost = cost[to]; best = k }
+                        }
+                    }
+                    k = k + 1
+                }
+                if best >= 0 {
+                    dx = dc[best] as float
+                    dz = dr[best] as float
+                    len = sqrt(dx * dx + dz * dz)
+                    dir[at * 2] = dx / len
+                    dir[at * 2 + 1] = dz / len
+                }
+            }
+            c = c + 1
+        }
+        r = r + 1
+    }
+    return reached + 1   // the target's cell
 }
 
-flow_has_direction(f: *FlowField, x: float, z: float) -> bool {
-    dx = ae3d_flow_dir_x(f.native, x, z)
-    dz = ae3d_flow_dir_z(f.native, x, z)
-    return dx != 0.0 || dz != 0.0
+// The walk from a point to the target in metres, -1 where it cannot reach.
+flow_cost(f: *FlowField, x: float, z: float) -> float {
+    c = col_of(f, x)
+    r = row_of(f, z)
+    if c < 0 || r < 0 || c >= f.w || r >= f.h { return 0.0 - 1.0 }
+    cost = f.cost as int[]
+    at = cost[r * f.w + c]
+    if at < 0 { return 0.0 - 1.0 }
+    return (at as float) * 0.1 * f.cell
 }
 
 // The way to walk from a point, unit, on the ground; zero where there is
-// none.
+// none (off the field, blocked, unreachable, or on the target).
 flow_direction(f: *FlowField, x: float, z: float) -> Vec3 {
-    return core.vec3(ae3d_flow_dir_x(f.native, x, z), 0.0, ae3d_flow_dir_z(f.native, x, z))
+    c = col_of(f, x)
+    r = row_of(f, z)
+    if c < 0 || r < 0 || c >= f.w || r >= f.h { return core.vec3(0.0, 0.0, 0.0) }
+    dir = f.dir as float[]
+    at = r * f.w + c
+    return core.vec3(dir[at * 2], 0.0, dir[at * 2 + 1])
+}
+
+flow_has_direction(f: *FlowField, x: float, z: float) -> bool {
+    d = flow_direction(f, x, z)
+    return d.x != 0.0 || d.z != 0.0
 }
 
 // Every heading turned toward the field under it by at most `turn`
 // radians: `pos` and `yaw` are the crowd's packed columns (xyz a zombie,
-// one yaw a zombie), as crowd.crowd_wander reads them.
+// one yaw a zombie), as crowd.crowd_wander reads them. A zombie on a
+// cell with no direction keeps its heading.
+struct NavSteerJob {
+    pos: ptr
+    yaw: ptr
+    f: *FlowField
+    turn: float
+}
+
+steer_run(start: int, end: int, worker: int, context: ptr) {
+    job = context as *NavSteerJob
+    f = job.f
+    pos = job.pos as float[]
+    yaw = job.yaw as float[]
+    dir = f.dir as float[]
+    i = start
+    while i < end {
+        c = col_of(f, pos[i * 3])
+        r = row_of(f, pos[i * 3 + 2])
+        if c >= 0 && r >= 0 && c < f.w && r < f.h {
+            at = r * f.w + c
+            dx = dir[at * 2]
+            dz = dir[at * 2 + 1]
+            if dx != 0.0 || dz != 0.0 {
+                // The yaw convention: velocity (cos a, 0, -sin a), so a = atan2(-dz, dx).
+                // The + 0.0 turns a negated zero back into a positive one: atan2(-0, -1)
+                // is -pi, the same heading as +pi but the long way round for the turn.
+                want = atan2(0.0 - dz + 0.0, dx)
+                have = yaw[i]
+                diff = want - have
+                while diff > PI { diff = diff - 2.0 * PI }
+                while diff < 0.0 - PI { diff = diff + 2.0 * PI }
+                if diff > job.turn { diff = job.turn }
+                if diff < 0.0 - job.turn { diff = 0.0 - job.turn }
+                yaw[i] = have + diff
+            }
+        }
+        i = i + 1
+    }
+}
+
 flow_steer(f: *FlowField, pos: ptr, yaw: ptr, n: int, turn: float) {
-    ae3d_flow_steer(f.native, pos, yaw, n, turn)
+    if f == null || pos == null || yaw == null || n <= 0 { return }
+    job = NavSteerJob { pos: pos, yaw: yaw, f: f, turn: turn }
+    jobs.parallel_for(steer_run, n, 4096, (&job) as ptr)
 }
