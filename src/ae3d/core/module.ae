@@ -73,7 +73,7 @@ exports (
     backend_set_render_scale,
     backend_shadows,
     backend_add_light, backend_remove_light, backend_draw_calls, backend_frame_pixels,
-    backend_cleanup, Camera, Plane, Frustum, camera_new,
+    backend_cleanup, Camera, FrustumPlane, Frustum, camera_new,
     camera_free, camera_update_projection, camera_set_fov, camera_set_near, camera_set_far,
     camera_far,
     camera_set_aspect, camera_set_position, camera_set_speed, camera_view,
@@ -621,18 +621,18 @@ struct Camera {
     name: string
 }
 
-struct Plane {
+struct FrustumPlane {
     normal: Vec3
     distance: float
 }
 
 struct Frustum {
-    left: Plane
-    right: Plane
-    bottom: Plane
-    top: Plane
-    near: Plane
-    far: Plane
+    left: FrustumPlane
+    right: FrustumPlane
+    bottom: FrustumPlane
+    top: FrustumPlane
+    near: FrustumPlane
+    far: FrustumPlane
 }
 
 vec2(x: float, y: float) -> Vec2 {
@@ -2296,11 +2296,11 @@ camera_look_at(c: *Camera, target: Vec3) {
     camera_update_vectors(c)
 }
 
-normalize_plane(p: Plane) -> Plane {
+normalize_plane(p: FrustumPlane) -> FrustumPlane {
     length = v3_len(p.normal)
     if length < 0.000000000001 { return p }
     inv = 1.0 / length
-    return Plane { normal: v3_mul(p.normal, inv), distance: p.distance * inv }
+    return FrustumPlane { normal: v3_mul(p.normal, inv), distance: p.distance * inv }
 }
 
 // Screen position of a world point, in the pixel convention the canvas uses:
@@ -2320,34 +2320,34 @@ camera_world_to_screen(c: *Camera, p: Vec3, width: int, height: int) -> Vec4 {
 camera_frustum(c: *Camera) -> Frustum {
     vp = camera_view_projection(c)
     return Frustum {
-        left: normalize_plane(Plane {
+        left: normalize_plane(FrustumPlane {
             normal: vec3(vp.m3 + vp.m0, vp.m7 + vp.m4, vp.m11 + vp.m8),
             distance: vp.m15 + vp.m12
         }),
-        right: normalize_plane(Plane {
+        right: normalize_plane(FrustumPlane {
             normal: vec3(vp.m3 - vp.m0, vp.m7 - vp.m4, vp.m11 - vp.m8),
             distance: vp.m15 - vp.m12
         }),
-        bottom: normalize_plane(Plane {
+        bottom: normalize_plane(FrustumPlane {
             normal: vec3(vp.m3 + vp.m1, vp.m7 + vp.m5, vp.m11 + vp.m9),
             distance: vp.m15 + vp.m13
         }),
-        top: normalize_plane(Plane {
+        top: normalize_plane(FrustumPlane {
             normal: vec3(vp.m3 - vp.m1, vp.m7 - vp.m5, vp.m11 - vp.m9),
             distance: vp.m15 - vp.m13
         }),
-        near: normalize_plane(Plane {
+        near: normalize_plane(FrustumPlane {
             normal: vec3(vp.m3 + vp.m2, vp.m7 + vp.m6, vp.m11 + vp.m10),
             distance: vp.m15 + vp.m14
         }),
-        far: normalize_plane(Plane {
+        far: normalize_plane(FrustumPlane {
             normal: vec3(vp.m3 - vp.m2, vp.m7 - vp.m6, vp.m11 - vp.m10),
             distance: vp.m15 - vp.m14
         })
     }
 }
 
-plane_distance(p: *Plane, point: Vec3) -> float {
+plane_distance(p: *FrustumPlane, point: Vec3) -> float {
     return v3_dot(p.normal, point) + p.distance
 }
 

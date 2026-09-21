@@ -13,7 +13,7 @@ import ae3d.core
 
 exports (
     load_obj, load_obj_skinned, load_obj_baked, load_obj_instanced, load_mtl, materials_free,
-    cube, sphere, plane, water_surface, quad, grid, box_outline,
+    cube, sphere, capsule, push_capsule, plane, water_surface, quad, grid, box_outline,
     last_error
 )
 
@@ -680,6 +680,80 @@ sphere(radius: float, segments: int, rings: int) -> *Model {
     core.model_update_matrix(m)
     core.model_recalculate_bounds(m)
     return m
+}
+
+// A capsule between two centres: a tube of `segments` sides capped by
+// hemispheres of `rings` latitude rows each, its axis wherever the two
+// centres point. push_capsule adds one to a mesh being built (a bone
+// with a shin and a foot is two in one model); capsule is a model of one.
+capsule(center1: Vec3, center2: Vec3, radius: float, segments: int, rings: int) -> *Model {
+    m = core.model_new()
+    push_capsule(m.mesh, center1, center2, radius, segments, rings)
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    return m
+}
+
+push_capsule(mesh: ptr, center1: Vec3, center2: Vec3, radius: float, segments: int, rings: int) {
+    columns = segments
+    if columns < 3 { columns = 3 }
+    rows = rings
+    if rows < 1 { rows = 1 }
+    axis = core.v3_sub(center2, center1)
+    length = core.v3_len(axis)
+    up = core.vec3(0.0, 1.0, 0.0)
+    if length > 0.000001 { up = core.v3_mul(axis, 1.0 / length) }
+    // An orthonormal frame about the axis.
+    seed = core.vec3(1.0, 0.0, 0.0)
+    if core.abs_of(up.x) > 0.9 { seed = core.vec3(0.0, 0.0, 1.0) }
+    side = core.v3_normalize(core.v3_cross(up, seed))
+    front = core.v3_cross(side, up)
+    base = core.mesh_vertex_count(mesh)
+    // Latitude rows from the top pole over center2, the equator split at
+    // the two centres so the tube is straight, to the bottom pole under
+    // center1: 2 * rows + 2 rows of columns + 1 vertices.
+    total_rows = 2 * rows + 2
+    row = 0
+    while row < total_rows {
+        // The hemisphere angle: 0 at the pole, pi/2 at the equator.
+        cap_row = row
+        center = center2
+        sign = 1.0
+        if row > rows {
+            cap_row = total_rows - 1 - row
+            center = center1
+            sign = 0.0 - 1.0
+        }
+        phi = core.HALF_PI * (cap_row * 1.0) / (rows * 1.0)
+        ring_radius = core.sin_of(phi)
+        height = core.cos_of(phi) * sign
+        column = 0
+        while column <= columns {
+            theta = core.TWO_PI * (column * 1.0) / (columns * 1.0)
+            c = core.cos_of(theta)
+            sn = core.sin_of(theta)
+            normal = core.v3_add(core.v3_add(core.v3_mul(side, ring_radius * c), core.v3_mul(front, ring_radius * sn)), core.v3_mul(up, height))
+            position = core.v3_add(center, core.v3_mul(normal, radius))
+            core.mesh_push_vertex(mesh, position, (column * 1.0) / (columns * 1.0), (row * 1.0) / ((total_rows - 1) * 1.0), normal)
+            column = column + 1
+        }
+        row = row + 1
+    }
+    stride = columns + 1
+    row = 0
+    while row < total_rows - 1 {
+        column = 0
+        while column < columns {
+            top_left = base + row * stride + column
+            top_right = top_left + 1
+            bottom_left = top_left + stride
+            bottom_right = bottom_left + 1
+            core.mesh_push_triangle(mesh, top_left, bottom_right, bottom_left)
+            core.mesh_push_triangle(mesh, top_left, top_right, bottom_right)
+            column = column + 1
+        }
+        row = row + 1
+    }
 }
 
 plane(grid_size: int, spacing: float) -> *Model {

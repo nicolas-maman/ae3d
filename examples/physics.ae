@@ -1,0 +1,313 @@
+// The physics engine in the scene: aephysics through ae3d.physics, in
+// the shape every program here takes -- game objects with a Rigidbody
+// and colliders, ragdolls as objects per bone, the engine's fixed step
+// driving the world and the world's transforms driving the draw.
+//
+//   ./build.sh examples/physics.ae && ./build/physics
+//   AE3D_PHYSICS_SCENE=pyramid|pile|ragdolls|cloth ./build/physics
+//
+// Four scenes: a pyramid of crates and a
+// cannonball through it; a pile of spheres, capsules and crates dropped
+// on a wave of ground; ragdolls falling onto a torus; a cloth of
+// spheres on spherical joints with a ball rolling through. Every scene
+// is the reference's benchmark scene or test scene (bench/RESULTS.md in
+// aephysics) rather than one made to look good, and every body is
+// drawn from the physics engine's own transform each fixed step.
+import std.string
+import std.os
+import ae3d.core
+import ae3d.platform
+import ae3d.engine
+import ae3d.behaviour
+import ae3d.loader
+import ae3d.physics
+import aephysics.math
+import aephysics.mesh
+import aephysics.manifold
+import aephysics.shape
+import aephysics.dynamics
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+const SCENE_PYRAMID = 0
+const SCENE_PILE = 1
+const SCENE_RAGDOLLS = 2
+const SCENE_CLOTH = 3
+
+// The director: which scene, the camera's slow orbit, and the events
+// the scene scripts on its clock (the cannonball, the kick, the ball).
+struct Director {
+    scene: int
+    seconds: float
+    fired: bool
+    ball: ptr                      // *Rigidbody, the cannonball or the cloth's ball
+    orbit_radius: float
+    orbit_height: float
+    look_at: Vec3
+}
+
+var g_director: ptr = null
+
+scene_from_env() -> int {
+    name = core.text(os.getenv("AE3D_PHYSICS_SCENE"))
+    if name == "pile" { return SCENE_PILE }
+    if name == "ragdolls" { return SCENE_RAGDOLLS }
+    if name == "cloth" { return SCENE_CLOTH }
+    return SCENE_PYRAMID
+}
+
+// --- the objects ---------------------------------------------------------------------------------------------
+
+crate_model(size: Vec3, r: float, g: float, b: float) -> *Model {
+    m = loader.cube(1.0)
+    core.model_set_scale(m, size.x, size.y, size.z)
+    core.model_matte(m, r, g, b)
+    return m
+}
+
+ball_model(radius: float, r: float, g: float, b: float) -> *Model {
+    m = loader.sphere(radius, 24, 16)
+    core.model_polished_metal(m, r, g, b)
+    return m
+}
+
+// A crate: a box collider on a dynamic body, drawn as a cube of that size.
+crate(e: *Engine, name: string, position: Vec3, half: Vec3, r: float, g: float, b: float) -> *GameObject {
+    o = engine.object(e, name, crate_model(core.vec3(2.0 * half.x, 2.0 * half.y, 2.0 * half.z), r, g, b))
+    behaviour.object_set_position(o, position)
+    physics.rigidbody(o, physics.DYNAMIC)
+    physics.box_collider(o, half, physics.material(0.6, 0.0))
+    return o
+}
+
+ball(e: *Engine, name: string, position: Vec3, radius: float, density: float, r: float, g: float, b: float) -> *GameObject {
+    o = engine.object(e, name, ball_model(radius, r, g, b))
+    behaviour.object_set_position(o, position)
+    physics.rigidbody(o, physics.DYNAMIC)
+    physics.sphere_collider(o, radius, physics.material(0.6, 0.0), density)
+    return o
+}
+
+// A slab of ground: a static box collider under a flat cube.
+slab(e: *Engine, half: Vec3, y: float) -> *GameObject {
+    o = engine.object(e, "Ground", crate_model(core.vec3(2.0 * half.x, 2.0 * half.y, 2.0 * half.z), 0.55, 0.53, 0.5))
+    behaviour.object_set_position(o, core.vec3(0.0, y, 0.0))
+    physics.box_collider(o, half, physics.material(0.6, 0.0))
+    return o
+}
+
+// A triangle mesh as ground: drawn from its own vertices, collided as itself.
+mesh_ground(e: *Engine, name: string, md: *MeshData, position: Vec3, r: float, g: float, b: float) -> *GameObject {
+    m = core.model_new()
+    vertices = mesh.mesh_vertices(md)
+    triangles = mesh.mesh_triangles(md)
+    core.mesh_reserve(m.mesh, md.triangle_count * 3, md.triangle_count * 3)
+    i = 0
+    while i < md.triangle_count {
+        t = triangles[i]
+        a = vertices[t.index1]
+        bv = vertices[t.index2]
+        c = vertices[t.index3]
+        normal = math.normalize(math.cross(math.sub(bv, a), math.sub(c, a)))
+        base = core.mesh_vertex_count(m.mesh)
+        core.mesh_push_vertex(m.mesh, a, 0.0, 0.0, normal)
+        core.mesh_push_vertex(m.mesh, bv, 1.0, 0.0, normal)
+        core.mesh_push_vertex(m.mesh, c, 0.0, 1.0, normal)
+        core.mesh_push_triangle(m.mesh, base, base + 1, base + 2)
+        i = i + 1
+    }
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    core.model_matte(m, r, g, b)
+    o = engine.object(e, name, m)
+    behaviour.object_set_position(o, position)
+    physics.mesh_collider(o, md, physics.material(0.6, 0.0))
+    return o
+}
+
+// --- the scenes ----------------------------------------------------------------------------------------------
+
+// A pyramid of crates twelve wide, and a cannonball fired through it after two seconds.
+build_pyramid(e: *Engine, d: *Director) {
+    slab(e, core.vec3(30.0, 0.5, 30.0), 0.0 - 0.5)
+    base_count = 12
+    extent = 0.5
+    i = 0
+    while i < base_count {
+        y = (2.0 * (i as float) + 1.0) * extent
+        j = i
+        while j < base_count {
+            x = ((i as float) + 1.0) * extent + 2.0 * ((j - i) as float) * extent - (base_count as float) * extent
+            tint = 0.35 + 0.05 * ((i + j) % 6) as float
+            crate(e, "Crate", core.vec3(x, y, 0.0), core.vec3(extent, extent, extent), 0.8 * tint + 0.15, 0.45 * tint + 0.1, 0.25 * tint)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    // Iron: eight times the crates' density, so it goes through rather than bouncing off.
+    shot = ball(e, "Cannonball", core.vec3(0.0, 3.0, 0.0 - 14.0), 0.9, 8.0, 0.3, 0.3, 0.32)
+    d.ball = physics.rigidbody_of(shot) as ptr
+    d.orbit_radius = 22.0
+    d.orbit_height = 8.0
+    d.look_at = core.vec3(0.0, 3.0, 0.0)
+}
+
+// The wave pile: a hundred spheres, capsules and crates dropped on a wave of ground.
+build_pile(e: *Engine, d: *Director) {
+    slab(e, core.vec3(60.0, 0.5, 60.0), 0.0 - 1.2)
+    wave = mesh.create_wave_mesh(40, 40, 1.0, 0.5, 0.1, 0.2)
+    mesh_ground(e, "Wave", wave, core.vec3(0.0 - 20.0, 0.0, 0.0 - 20.0), 0.45, 0.5, 0.42)
+    seed = 52977
+    index = 0
+    layer = 0
+    while layer < 4 {
+        i = 0
+        while i < 5 {
+            j = 0
+            while j < 5 {
+                seed = (seed * 1103515245 + 12345) & 2147483647
+                jx = ((seed % 1000) as float) / 1000.0 - 0.5
+                seed = (seed * 1103515245 + 12345) & 2147483647
+                jz = ((seed % 1000) as float) / 1000.0 - 0.5
+                position = core.vec3(1.7 * ((i as float) - 2.0) + 0.6 * jx, 3.5 + 1.6 * (layer as float), 1.7 * ((j as float) - 2.0) + 0.6 * jz)
+                kind = index % 3
+                if kind == 0 {
+                    ball(e, "Sphere", position, 0.5, 1.0, 0.75, 0.2, 0.15)
+                } else if kind == 1 {
+                    o = engine.object(e, "Capsule", loader.capsule(core.vec3(0.0, 0.0 - 0.3, 0.0), core.vec3(0.0, 0.3, 0.0), 0.35, 16, 6))
+                    core.model_matte(behaviour.object_model(o), 0.2, 0.55, 0.75)
+                    behaviour.object_set_position(o, position)
+                    physics.rigidbody(o, physics.DYNAMIC)
+                    physics.capsule_collider(o, core.vec3(0.0, 0.0 - 0.3, 0.0), core.vec3(0.0, 0.3, 0.0), 0.35, physics.material(0.6, 0.0))
+                } else {
+                    crate(e, "Crate", position, core.vec3(0.45, 0.3, 0.55), 0.85, 0.7, 0.3)
+                }
+                index = index + 1
+                j = j + 1
+            }
+            i = i + 1
+        }
+        layer = layer + 1
+    }
+    d.orbit_radius = 18.0
+    d.orbit_height = 9.0
+    d.look_at = core.vec3(0.0, 1.5, 0.0)
+}
+
+// Eight ragdolls falling onto a torus on a grid of ground, the reference's determinism scene.
+build_ragdolls(e: *Engine, d: *Director) {
+    slab(e, core.vec3(60.0, 0.5, 60.0), 0.0 - 0.55)
+    grid = mesh.create_grid_mesh(8, 8, 15.0 / 8.0, 0, true)
+    torus = mesh.create_torus_mesh(16, 16, 3.75, 1.0)
+    mesh_ground(e, "Grid", grid, core.vec3(0.0 - 7.5, 0.0, 0.0 - 7.5), 0.45, 0.48, 0.45)
+    mesh_ground(e, "Torus", torus, core.vec3(0.0, 0.0, 0.0), 0.5, 0.42, 0.38)
+    i = 0
+    while i < 8 {
+        angle = 0.785398 * (i as float)
+        r = physics.ragdoll(e, "Ragdoll ${i}", core.vec3(3.0 * core.cos_of(angle), 6.0 + 1.5 * (i as float), 3.0 * core.sin_of(angle)), 5.0, 1.0, 0.7)
+        physics.ragdoll_kick(r, core.vec3(2.0 * core.sin_of(angle), 0.0, 2.0 * core.cos_of(angle)))
+        i = i + 1
+    }
+    d.orbit_radius = 14.0
+    d.orbit_height = 7.0
+    d.look_at = core.vec3(0.0, 2.0, 0.0)
+}
+
+// A cloth of spheres on spherical joints, its top row pinned, and a heavy ball rolled into it.
+build_cloth(e: *Engine, d: *Director) {
+    slab(e, core.vec3(30.0, 0.5, 30.0), 0.0 - 0.5)
+    p = physics.of(e)
+    world_id = physics.physics_world_id(p)
+    n = 24
+    ids_block = calloc(n * n, sizeof(BodyId))
+    ids = ids_block as BodyId[]
+    index = 0
+    k = 0
+    while k < n {
+        i = 0
+        while i < n {
+            o = engine.object(e, "Bead", ball_model(0.22, 0.85, 0.85, 0.9))
+            behaviour.object_set_position(o, core.vec3(0.5 * ((k as float) - 0.5 * (n as float)), 12.0 - 0.5 * (i as float), 0.0))
+            kind = physics.DYNAMIC
+            if i == 0 { kind = physics.STATIC }
+            rb = physics.rigidbody(o, kind)
+            physics.sphere_collider(o, 0.2, physics.material(0.4, 0.0))
+            body = physics.rigidbody_body(rb)
+            if i > 0 { link(world_id, ids[index - 1], body, core.vec3(0.0, 0.0 - 0.25, 0.0), core.vec3(0.0, 0.25, 0.0)) }
+            if k > 0 { link(world_id, ids[index - n], body, core.vec3(0.25, 0.0, 0.0), core.vec3(0.0 - 0.25, 0.0, 0.0)) }
+            ids[index] = body
+            index = index + 1
+            i = i + 1
+        }
+        k = k + 1
+    }
+    free(ids_block)
+    heavy = ball(e, "Ball", core.vec3(0.0, 4.0, 0.0 - 12.0), 1.5, 3.0, 0.75, 0.25, 0.2)
+    d.ball = physics.rigidbody_of(heavy) as ptr
+    d.orbit_radius = 20.0
+    d.orbit_height = 6.0
+    d.look_at = core.vec3(0.0, 5.0, 0.0)
+}
+
+link(world_id: WorldId, a: BodyId, b: BodyId, anchor_a: Vec3, anchor_b: Vec3) {
+    jdef = dynamics.default_spherical_joint_def()
+    jdef.base.body_id_a = a
+    jdef.base.body_id_b = b
+    jdef.base.local_frame_a.p = anchor_a
+    jdef.base.local_frame_b.p = anchor_b
+    dynamics.create_spherical_joint(world_id, &jdef)
+}
+
+// --- the loop ------------------------------------------------------------------------------------------------
+
+start(state: ptr, e: *Engine) {
+    d = state as *Director
+    engine.engine_set_time_of_day(e, 15.5)
+    if d.scene == SCENE_PYRAMID { build_pyramid(e, d) }
+    if d.scene == SCENE_PILE { build_pile(e, d) }
+    if d.scene == SCENE_RAGDOLLS { build_ragdolls(e, d) }
+    if d.scene == SCENE_CLOTH { build_cloth(e, d) }
+}
+
+fixed_update(state: ptr, e: *Engine, step: float) {
+    d = state as *Director
+    d.seconds = d.seconds + step
+    if d.fired == false && d.seconds > 2.0 && d.ball != null {
+        rb = d.ball as *Rigidbody
+        if d.scene == SCENE_PYRAMID { physics.rigidbody_set_velocity(rb, core.vec3(0.0, 4.0, 26.0)) }
+        if d.scene == SCENE_CLOTH { physics.rigidbody_set_velocity(rb, core.vec3(0.0, 3.0, 12.0)) }
+        d.fired = true
+    }
+}
+
+update(state: ptr, e: *Engine, delta: float) {
+    d = state as *Director
+    angle = 0.5 + 0.06 * d.seconds
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(d.orbit_radius * core.sin_of(angle), d.orbit_height, d.orbit_radius * core.cos_of(angle)))
+    core.camera_look_at(cam, d.look_at)
+}
+
+main() {
+    e = engine.engine_new()
+    engine.engine_set_size(e, 1280, 720)
+    engine.engine_set_title(e, "ae3d - physics")
+    light = core.light_sun(core.vec3(0.4, 0.8, 0.3))
+    engine.engine_set_light(e, light)
+    physics.attach(e)
+    d = Director { scene: scene_from_env(), seconds: 0.0, fired: false, ball: null, orbit_radius: 20.0, orbit_height: 8.0, look_at: core.vec3(0.0, 2.0, 0.0) }
+    g_director = (&d) as ptr
+    b = engine.behaviour_new("director", (&d) as ptr)
+    b.start = start
+    b.fixed_update = fixed_update
+    b.update = update
+    engine.engine_add_behaviour(e, b)
+    engine.engine_run(e)
+    p = physics.of(e)
+    counters = physics.physics_body_count(p)
+    println("physics: ${counters} bodies, ${physics.physics_step_count(p)} steps")
+    physics.physics_free(p)
+    core.light_free(light)
+    engine.engine_free(e)
+}

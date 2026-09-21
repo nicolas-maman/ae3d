@@ -34,7 +34,7 @@ skinned instanced crowds, and an engine that can be interrogated while it runs.
 | **Models from anywhere** | A glTF 2.0 loader (`ae3d.gltf`): meshes, materials and textures, the node tree, skins with their inverse binds, and every animation as clips, from `.gltf` or `.glb`. A Mixamo figure walks in the engine without passing through Blender, and `gltf.bake_bank` strikes any of its clips into a pose bank, so a figure from a public pack is a horde in one call. |
 | **An engine you can ask** | `AE3D_AGENT=port` opens a JSON channel: read and change the scene, hold a frame, read its pixels, trace a model from its Blender object to the pixels it landed on. |
 | **An editor** | Hierarchy, inspector, gizmos, terrain sculpting, undo, scene files; one dark theme on every platform. |
-| **Physics, on its way** | [aephysics](https://github.com/aether-lang-dev/aephysics), a rigid body engine written in Aether on Box3D's design: hulls, meshes, height fields, compounds, a character mover, joints of every kind, sensors, continuous collision, a wide contact solver; every layer tested against the reference and benchmarked beside it. The integration into ae3d's scenes is next, and the active ragdolls of the NaturalMotion line after it ([#365](https://github.com/nicolas-maman/ae3d/issues/365)). |
+| **Physics** | [aephysics](https://github.com/aether-lang-dev/aephysics), a rigid body engine written in Aether on Box3D's design (hulls, meshes, height fields, compounds, a character mover, joints of every kind, sensors, continuous collision, a wide contact solver, every layer tested against the reference and benchmarked beside it), in the scene through `ae3d.physics`: a `Rigidbody` component and box, sphere, capsule and mesh colliders on game objects, ragdolls as an object per bone, the engine's fixed step driving the world and the world's transforms driving the draw. `examples/physics.ae` runs four of the reference's scenes. The active ragdolls of the NaturalMotion line come next ([#365](https://github.com/nicolas-maman/ae3d/issues/365)). |
 | **Navigation for a horde** | `ae3d.nav`: a flow field over the ground -- one flood from the target over the cells nothing stands in, a direction per cell -- read by every zombie every frame and paid once per target move; `flow_steer` turns a crowd's headings toward it. The city's horde hunts the camera with it. |
 | **Input as a game names it** | `ae3d.input`: actions and axes bound once to keys, mouse buttons and a gamepad, read by name from any script (`pressed`, `held`, `axis`), polled by the engine before the scripts run. The camera's own controls are actions in it, so a gamepad flies every example; anything can be injected -- a test, a replay, an agent over the channel (`input.set`). |
 
@@ -42,6 +42,11 @@ The full list, with the reasoning behind each feature, is in
 [docs/rendering.md](docs/rendering.md).
 
 ## Scenes
+
+![A pyramid of crates scattered by a cannonball](docs/physics-pyramid.png)
+
+<sub>`AE3D_PHYSICS_SCENE=pyramid ./build/physics`: seventy-eight crates on a static slab and an iron ball through them, every body a game object whose transform is the physics world's each fixed step. The other scenes: `pile` (spheres, capsules and crates on a wave of ground), `ragdolls` (eight twelve-bone figures falling onto a torus), `cloth` (a grid of spheres on spherical joints, a ball rolled into it).</sub>
+
 
 | | |
 |---|---|
@@ -85,6 +90,7 @@ pacman -S mingw-w64-ucrt-x86_64-{gcc,glfw,zlib,pkgconf,vulkan-headers,vulkan-loa
 ```
 
 ```bash
+git submodule update --init                                       # deps/aephysics, the physics engine
 ./build.sh examples/spinning_cube.ae && ./build/spinning_cube
 ./build.sh examples/zombie_city.ae   && ./build/zombie_city
 AE3D_API=opengl ./build/zombie_city                               # the other renderer

@@ -1,0 +1,425 @@
+// Physics: aephysics's world in the engine's loop, in the shape Unity
+// gives it. A Physics is a behaviour on the engine: at every fixed step
+// it steps the world and writes each simulated body's transform onto
+// the game object that carries it. A Rigidbody is the component that
+// puts an object in that world (dynamic, kinematic or static, as
+// Unity's Rigidbody and its absence mean); colliders add the shapes --
+// a box, a sphere, a capsule, a triangle mesh -- with a material; a
+// Ragdoll is aephysics's twelve-bone human, each bone a game object of
+// its own so the renderer draws it and a script can reach it.
+//
+//     p = physics.attach(e)
+//     ground = engine.object(e, "Ground", loader.cube(1.0))
+//     physics.box_collider(ground, core.vec3(20.0, 0.5, 20.0), physics.material(0.6, 0.0))
+//     crate = engine.object(e, "Crate", loader.cube(1.0))
+//     physics.rigidbody(crate, physics.DYNAMIC)
+//     physics.box_collider(crate, core.vec3(0.5, 0.5, 0.5), physics.material(0.6, 0.0))
+//
+// The physics engine is aephysics (deps/aephysics), a rigid body engine
+// written in Aether on Box3D's design; its own tests and benchmarks
+// hold it to the reference, and this module is only the seam: the
+// objects' transforms in, the bodies' transforms out, once per fixed
+// step. Its math types (Vec3, Quat) are the engine's own, defined the
+// same way, so a transform crosses without conversion.
+import std.list
+import std.heap
+import std.string
+import aephysics.math
+import aephysics.hull
+import aephysics.manifold
+import aephysics.mesh
+import aephysics.material
+import aephysics.shape
+import aephysics.dynamics
+import aephysics.physics_world
+import aephysics.human
+import ae3d.core
+import ae3d.behaviour
+import ae3d.engine
+import ae3d.loader
+
+exports (
+    Physics, Rigidbody, Ragdoll,
+    DYNAMIC, KINEMATIC, STATIC, KIND_RIGIDBODY,
+    attach, of, physics_free, physics_world_id, physics_step_count, physics_set_gravity, physics_body_count,
+    material, rigidbody, rigidbody_of, rigidbody_body, rigidbody_set_velocity, rigidbody_velocity,
+    rigidbody_apply_impulse, rigidbody_apply_force, rigidbody_is_awake,
+    box_collider, sphere_collider, capsule_collider, mesh_collider,
+    ragdoll, ragdoll_free, ragdoll_bone, ragdoll_human, ragdoll_set_velocity, ragdoll_kick
+)
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+const DYNAMIC = 0
+const KINEMATIC = 1
+const STATIC = 2
+
+// The component kind of a Rigidbody, after the behaviour module's own.
+const KIND_RIGIDBODY = 9
+
+// The world and what it drives.
+struct Physics {
+    engine: ptr                    // *Engine
+    behaviour: ptr                 // *Behaviour, the step in the loop
+    world_id: WorldId
+    rigidbodies: ptr               // list of *Rigidbody
+    ragdolls: ptr                  // list of *Ragdoll
+    hulls: ptr                     // list of *HullData the world holds by reference; freed with it
+    meshes: ptr                    // list of *MeshData, likewise
+    sub_steps: int
+    step_count: int
+}
+
+// A body on a game object.
+struct Rigidbody {
+    physics: ptr                   // *Physics
+    object: ptr                    // *GameObject
+    body_id: BodyId
+    kind: int
+}
+
+// A ragdoll: aephysics's human, and a game object per bone.
+struct Ragdoll {
+    physics: ptr
+    human: Human
+    bones: ptr                     // list of *GameObject, in human's bone order
+}
+
+var g_attached: ptr = null         // list of *Physics, to find an engine's
+
+// The world in the engine's loop: gravity down, four sub-steps a fixed step.
+attach(e: *Engine) -> *Physics {
+    p = heap.new(Physics)
+    p.engine = e as ptr
+    wdef = dynamics.default_world_def()
+    p.world_id = dynamics.create_world(&wdef)
+    p.rigidbodies = list.new()
+    p.ragdolls = list.new()
+    p.hulls = list.new()
+    p.meshes = list.new()
+    p.sub_steps = 4
+    p.step_count = 0
+    b = engine.behaviour_new("physics", p as ptr)
+    b.fixed_update = on_fixed_update
+    engine.engine_add_behaviour(e, b)
+    p.behaviour = b as ptr
+    if g_attached == null { g_attached = list.new() }
+    list.add_raw(g_attached, p as ptr)
+    return p
+}
+
+// The physics attached to an engine, or null.
+of(e: *Engine) -> *Physics {
+    if g_attached == null { return null }
+    count = list.size(g_attached)
+    i = 0
+    while i < count {
+        p = list.get_raw(g_attached, i) as *Physics
+        if p.engine == e as ptr { return p }
+        i = i + 1
+    }
+    return null
+}
+
+physics_world_id(p: *Physics) -> WorldId { return p.world_id }
+physics_step_count(p: *Physics) -> int { return p.step_count }
+physics_body_count(p: *Physics) -> int { return physics_world.get_counters(p.world_id).body_count }
+physics_set_gravity(p: *Physics, gravity: Vec3) { physics_world.set_gravity(p.world_id, gravity) }
+
+// The step, and every simulated body's transform onto its object. A
+// kinematic body goes the other way: the object's transform is where
+// the game put it, and the body is driven there over the step -- as a
+// velocity, so the solver sees it move and what rides on it comes along.
+on_fixed_update(state: ptr, e: *Engine, step: float) {
+    p = state as *Physics
+    count = list.size(p.rigidbodies)
+    i = 0
+    while i < count {
+        rb = list.get_raw(p.rigidbodies, i) as *Rigidbody
+        if rb.kind == KINEMATIC { push_transform(rb, step) }
+        i = i + 1
+    }
+    physics_world.step(p.world_id, step, p.sub_steps)
+    p.step_count = p.step_count + 1
+    i = 0
+    while i < count {
+        rb = list.get_raw(p.rigidbodies, i) as *Rigidbody
+        if rb.kind == DYNAMIC { pull_transform(rb) }
+        i = i + 1
+    }
+    i = 0
+    while i < count {
+        rb = list.get_raw(p.rigidbodies, i) as *Rigidbody
+        if rb.kind == KINEMATIC { pull_transform(rb) }
+        i = i + 1
+    }
+    count = list.size(p.ragdolls)
+    i = 0
+    while i < count {
+        pull_ragdoll(list.get_raw(p.ragdolls, i) as *Ragdoll)
+        i = i + 1
+    }
+}
+
+pull_transform(rb: *Rigidbody) {
+    o = rb.object as *GameObject
+    t = dynamics.body_get_transform(rb.body_id)
+    behaviour.object_set_position(o, t.p)
+    behaviour.object_set_rotation(o, t.q)
+}
+
+push_transform(rb: *Rigidbody, step: float) {
+    o = rb.object as *GameObject
+    target = Transform { p: behaviour.object_position(o), q: behaviour.object_rotation(o) }
+    dynamics.body_set_target_transform(rb.body_id, target, step, true)
+}
+
+// The world, its bodies and the shapes' data. The objects stay the
+// scene's; their Rigidbody components are left pointing at nothing, so
+// free the physics after the scene or not at all.
+physics_free(p: *Physics) {
+    if p == null { return }
+    if p.behaviour != null { engine.engine_remove_behaviour(p.engine as *Engine, p.behaviour as *Behaviour) }
+    count = list.size(p.ragdolls)
+    i = 0
+    while i < count {
+        r = list.get_raw(p.ragdolls, i) as *Ragdoll
+        human.destroy_human(&r.human)
+        list.free(r.bones)
+        heap.free(r)
+        i = i + 1
+    }
+    dynamics.destroy_world(p.world_id)
+    count = list.size(p.hulls)
+    i = 0
+    while i < count {
+        hull.destroy_hull(list.get_raw(p.hulls, i) as *HullData)
+        i = i + 1
+    }
+    count = list.size(p.meshes)
+    i = 0
+    while i < count {
+        mesh.destroy_mesh(list.get_raw(p.meshes, i) as *MeshData)
+        i = i + 1
+    }
+    count = list.size(p.rigidbodies)
+    i = 0
+    while i < count {
+        heap.free(list.get_raw(p.rigidbodies, i) as *Rigidbody)
+        i = i + 1
+    }
+    list.free(p.rigidbodies)
+    list.free(p.ragdolls)
+    list.free(p.hulls)
+    list.free(p.meshes)
+    if g_attached != null {
+        n = list.size(g_attached)
+        i = 0
+        while i < n {
+            if list.get_raw(g_attached, i) == p as ptr { list.remove(g_attached, i); break }
+            i = i + 1
+        }
+    }
+    heap.free(p)
+}
+
+// --- rigid bodies --------------------------------------------------------------------------------------------
+
+// A surface: Coulomb friction, restitution (the bounce), no rolling resistance.
+material(friction: float, restitution: float) -> SurfaceMaterial {
+    m = material.default_surface_material()
+    m.friction = friction
+    m.restitution = restitution
+    return m
+}
+
+// The object in the world: a body at its position and rotation, of the
+// kind asked (a dynamic one falls and collides, a kinematic one is moved
+// by the game and pushes, a static one never moves). Unity's AddComponent
+// of a Rigidbody; the colliders below give it shapes and therefore mass.
+rigidbody(o: *GameObject, kind: int) -> *Rigidbody {
+    e = engine.of(o)
+    p = of(e)
+    if p == null { return null }
+    existing = rigidbody_of(o)
+    if existing != null { return existing }
+    rb = heap.new(Rigidbody)
+    rb.physics = p as ptr
+    rb.object = o as ptr
+    rb.kind = kind
+    bdef = dynamics.default_body_def()
+    bdef.kind = dynamics.BODY_DYNAMIC
+    if kind == KINEMATIC { bdef.kind = dynamics.BODY_KINEMATIC }
+    if kind == STATIC { bdef.kind = dynamics.BODY_STATIC }
+    bdef.position = behaviour.object_position(o)
+    bdef.rotation = behaviour.object_rotation(o)
+    rb.body_id = dynamics.create_body(p.world_id, &bdef)
+    c = behaviour.component_new("Rigidbody", KIND_RIGIDBODY, rb as ptr)
+    behaviour.object_add_component(o, c)
+    list.add_raw(p.rigidbodies, rb as ptr)
+    return rb
+}
+
+rigidbody_of(o: *GameObject) -> *Rigidbody {
+    c = behaviour.object_find_component(o, KIND_RIGIDBODY)
+    if c == null { return null }
+    return c.state as *Rigidbody
+}
+
+rigidbody_body(rb: *Rigidbody) -> BodyId { return rb.body_id }
+rigidbody_set_velocity(rb: *Rigidbody, v: Vec3) { dynamics.body_set_linear_velocity(rb.body_id, v) }
+rigidbody_velocity(rb: *Rigidbody) -> Vec3 { return dynamics.body_get_linear_velocity(rb.body_id) }
+rigidbody_apply_impulse(rb: *Rigidbody, impulse: Vec3) { dynamics.body_apply_linear_impulse_to_center(rb.body_id, impulse, true) }
+rigidbody_apply_force(rb: *Rigidbody, force: Vec3) { dynamics.body_apply_force_to_center(rb.body_id, force, true) }
+rigidbody_is_awake(rb: *Rigidbody) -> bool { return dynamics.body_is_awake(rb.body_id) }
+
+// The body a collider goes on: the object's, or a static one made for
+// it, as a Unity collider without a Rigidbody is static.
+body_for_collider(o: *GameObject) -> *Rigidbody {
+    rb = rigidbody_of(o)
+    if rb != null { return rb }
+    return rigidbody(o, STATIC)
+}
+
+// A shape's definition: its material, and its density (the body's mass
+// comes from its shapes' volumes and densities; water is 1).
+shape_def(m: SurfaceMaterial, density: float) -> ShapeDef {
+    sdef = dynamics.default_shape_def()
+    sdef.base_material = m
+    sdef.density = density
+    return sdef
+}
+
+// A box of these half extents about the object's origin.
+box_collider(o: *GameObject, half_extents: Vec3, m: SurfaceMaterial, density: float = 1.0) -> ShapeId {
+    rb = body_for_collider(o)
+    if rb == null { return dynamics.null_shape_id() }
+    p = rb.physics as *Physics
+    box = hull.make_box_hull(half_extents.x, half_extents.y, half_extents.z)
+    list.add_raw(p.hulls, box as ptr)
+    sdef = shape_def(m, density)
+    return dynamics.create_hull_shape(rb.body_id, &sdef, box)
+}
+
+sphere_collider(o: *GameObject, radius: float, m: SurfaceMaterial, density: float = 1.0) -> ShapeId {
+    rb = body_for_collider(o)
+    if rb == null { return dynamics.null_shape_id() }
+    sdef = shape_def(m, density)
+    return dynamics.create_sphere_shape(rb.body_id, &sdef, manifold.sphere(math.vec3_zero(), radius))
+}
+
+// A capsule between two centres in the object's frame.
+capsule_collider(o: *GameObject, center1: Vec3, center2: Vec3, radius: float, m: SurfaceMaterial, density: float = 1.0) -> ShapeId {
+    rb = body_for_collider(o)
+    if rb == null { return dynamics.null_shape_id() }
+    sdef = shape_def(m, density)
+    return dynamics.create_capsule_shape(rb.body_id, &sdef, manifold.capsule(center1, center2, radius))
+}
+
+// A triangle mesh (static: a mesh shape on a body that moves is the
+// reference's ground, not a dynamic shape). The mesh is the world's
+// from here on, freed with the physics.
+mesh_collider(o: *GameObject, md: *MeshData, m: SurfaceMaterial) -> ShapeId {
+    rb = body_for_collider(o)
+    if rb == null { return dynamics.null_shape_id() }
+    p = rb.physics as *Physics
+    list.add_raw(p.meshes, md as ptr)
+    sdef = dynamics.default_shape_def()
+    sdef.base_material = m
+    return dynamics.create_mesh_shape(rb.body_id, &sdef, md, math.vec3_one())
+}
+
+// --- ragdolls ------------------------------------------------------------------------------------------------
+
+// The twelve-bone human standing at a position, its joints sprung toward
+// its pose at `hertz` with friction torque, and a game object per bone
+// drawn as its capsule (the calves as shin and foot): the objects are the
+// engine's, named "<name>/<bone>", and follow their bones every step.
+ragdoll(e: *Engine, name: string, position: Vec3, friction_torque: float, hertz: float, damping_ratio: float) -> *Ragdoll {
+    p = of(e)
+    if p == null { return null }
+    r = heap.new(Ragdoll)
+    r.physics = p as ptr
+    r.human = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
+    human.create_human(&r.human, p.world_id, position, friction_torque, hertz, damping_ratio, list.size(p.ragdolls) + 1, null)
+    r.bones = list.new()
+    i = 0
+    while i < human.BONE_COUNT {
+        bone = human.bone_at(&r.human, i)
+        o = engine.object(e, "${name}/${bone_name(i)}", bone_model(bone.body_id, i))
+        list.add_raw(r.bones, o as ptr)
+        i = i + 1
+    }
+    list.add_raw(p.ragdolls, r as ptr)
+    pull_ragdoll(r)
+    return r
+}
+
+bone_name(index: int) -> string {
+    if index == human.BONE_PELVIS { return "pelvis" }
+    if index == human.BONE_SPINE_01 { return "spine_01" }
+    if index == human.BONE_SPINE_03 { return "spine_03" }
+    if index == human.BONE_NECK { return "neck" }
+    if index == human.BONE_THIGH_L { return "thigh_l" }
+    if index == human.BONE_CALF_L { return "calf_l" }
+    if index == human.BONE_THIGH_R { return "thigh_r" }
+    if index == human.BONE_CALF_R { return "calf_r" }
+    if index == human.BONE_UPPER_ARM_L { return "upper_arm_l" }
+    if index == human.BONE_LOWER_ARM_L { return "lower_arm_l" }
+    if index == human.BONE_UPPER_ARM_R { return "upper_arm_r" }
+    return "lower_arm_r"
+}
+
+// A bone's model: its capsule shapes, each a capsule mesh placed in the
+// body's frame, merged into one model.
+bone_model(body_id: BodyId, index: int) -> *Model {
+    m = core.model_new()
+    ids_block = calloc(4, sizeof(ShapeId))
+    ids = ids_block as ShapeId[]
+    count = dynamics.body_get_shapes(body_id, ids, 4)
+    i = 0
+    while i < count {
+        if dynamics.shape_get_type(ids[i]) == shape.SHAPE_CAPSULE {
+            c = dynamics.shape_get_capsule(ids[i])
+            loader.push_capsule(m.mesh, c.center1, c.center2, c.radius, 12, 6)
+        }
+        i = i + 1
+    }
+    free(ids_block)
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    skin = 0.9 - 0.06 * ((index % 4) as float)
+    core.model_matte(m, skin, skin * 0.85, skin * 0.7)
+    return m
+}
+
+pull_ragdoll(r: *Ragdoll) {
+    i = 0
+    while i < human.BONE_COUNT {
+        o = list.get_raw(r.bones, i) as *GameObject
+        t = dynamics.body_get_transform(human.bone_at(&r.human, i).body_id)
+        behaviour.object_set_position(o, t.p)
+        behaviour.object_set_rotation(o, t.q)
+        i = i + 1
+    }
+}
+
+ragdoll_bone(r: *Ragdoll, index: int) -> *GameObject { return list.get_raw(r.bones, index) as *GameObject }
+ragdoll_human(r: *Ragdoll) -> *Human { return &r.human }
+ragdoll_set_velocity(r: *Ragdoll, v: Vec3) { human.human_set_velocity(&r.human, v) }
+ragdoll_kick(r: *Ragdoll, angular_impulse: Vec3) { human.human_apply_angular_impulse(&r.human, angular_impulse) }
+
+// The ragdoll out of the world; its bone objects stay the scene's to remove.
+ragdoll_free(r: *Ragdoll) {
+    p = r.physics as *Physics
+    human.destroy_human(&r.human)
+    n = list.size(p.ragdolls)
+    i = 0
+    while i < n {
+        if list.get_raw(p.ragdolls, i) == r as ptr { list.remove(p.ragdolls, i); break }
+        i = i + 1
+    }
+    list.free(r.bones)
+    heap.free(r)
+}

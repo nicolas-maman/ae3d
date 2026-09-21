@@ -319,7 +319,9 @@ for module in src/ae3d/*/; do
     name="$(basename "$module")"
     probe="$(mktemp -t ae3d_probe.XXXXXX).ae"
     printf 'import ae3d.%s\nmain() { println("ok") }\n' "$name" > "$probe"
-    if aetherc "$probe" "${probe%.ae}.c" >/tmp/ae3d_mod.log 2>&1; then
+    # The same search path build.sh gives every program: the engine, and
+    # the physics engine in its submodule, which ae3d.physics imports.
+    if AETHER_LIB_DIR="$PWD/src:$PWD/deps/aephysics" aetherc "$probe" "${probe%.ae}.c" >/tmp/ae3d_mod.log 2>&1; then
         pass "ae3d.$name"
     else
         fail "ae3d.$name"

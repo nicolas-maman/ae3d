@@ -3901,14 +3901,14 @@ current_attachments() -> ptr {
         c = component_at(i)
         kind = behaviour.KIND_MESH
         sim = null as *Simulation
-        world = null as *World
+        world = null as *VoxelWorld
         if c != null {
             kind = c.kind
             if kind == behaviour.KIND_WATER {
                 sim = behaviour.component_state(c) as *Simulation
             }
             if kind == behaviour.KIND_VOXEL {
-                world = behaviour.component_state(c) as *World
+                world = behaviour.component_state(c) as *VoxelWorld
             }
         }
         script = script_name(script_at(i))
@@ -4193,10 +4193,10 @@ add_terrain() {
 }
 
 // The world behind the selected object, or null where it is not a terrain.
-selected_world() -> *World {
+selected_world() -> *VoxelWorld {
     c = component_at(g_selected)
     if c == null || c.kind != behaviour.KIND_VOXEL { return null }
-    return behaviour.component_state(c) as *World
+    return behaviour.component_state(c) as *VoxelWorld
 }
 
 // Fill it again and rebuild the instances on the model that is already there.
@@ -4262,7 +4262,7 @@ style_name(style: int) -> string {
 // instances of one cube, smooth as one surface. The model leaves the backend
 // and comes back, keeping its pointer and with it the selection, the
 // component beside it and its place in the history.
-rebuild_terrain_model(w: *World, m: *Model) -> bool {
+rebuild_terrain_model(w: *VoxelWorld, m: *Model) -> bool {
     backend = viewport_backend()
     core.backend_remove_model(&backend, m)
     built = true
@@ -4325,7 +4325,7 @@ sculpt_cell(x: float, y: float) -> bool {
 }
 
 // The heights of every column, as one array the stroke keeps.
-column_heights(w: *World) -> ptr {
+column_heights(w: *VoxelWorld) -> ptr {
     sx = voxel.world_size_x(w)
     sz = voxel.world_size_z(w)
     heights = calloc(sx * sz, 4)
@@ -4373,7 +4373,7 @@ sculpt_move(x: float, y: float) {
 // lower; smooth pulls each toward the mean of its neighbours. Then the
 // terrain is built again.
 sculpt_apply() {
-    w = g_stroke_world as *World
+    w = g_stroke_world as *VoxelWorld
     m = g_stroke_model as *Model
     if w == null || m == null { return }
     size = voxel.world_voxel_size(w)
@@ -4436,7 +4436,7 @@ sculpt_apply() {
 
 sculpt_end() {
     g_sculpting = false
-    w = g_stroke_world as *World
+    w = g_stroke_world as *VoxelWorld
     m = g_stroke_model as *Model
     if w == null || m == null || g_stroke_before == null { return }
     stroke = heap.new(Stroke)
@@ -4467,7 +4467,7 @@ sculpt_end() {
 apply_stroke(index: int, backwards: bool) {
     if index < 0 || index >= list.size(g_strokes) { return }
     stroke = list.get_raw(g_strokes, index) as *Stroke
-    w = stroke.world as *World
+    w = stroke.world as *VoxelWorld
     m = stroke.model as *Model
     if w == null || m == null { return }
     heights = stroke.after

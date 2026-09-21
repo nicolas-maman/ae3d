@@ -111,7 +111,7 @@ set_error(reason: string, detail: string) {
 // The buffers behind the accessors.
 // ---------------------------------------------------------------------------
 
-struct Buffer {
+struct GltfBuffer {
     bytes: ptr
     size: long
 }
@@ -138,7 +138,7 @@ text_free(item: ptr) {
 
 struct Reader {
     root: ptr
-    buffers: ptr        // list of *Buffer, in the file's order
+    buffers: ptr        // list of *GltfBuffer, in the file's order
     scene: *GltfScene
 }
 
@@ -210,7 +210,7 @@ load_buffers(r: *Reader, glb_bin: ptr, glb_bin_size: long) {
     while i < count {
         node = json.array_get_raw(buffers, i)
         uri = text_field(node, "uri")
-        b = heap.new(Buffer)
+        b = heap.new(GltfBuffer)
         b.bytes = null
         b.size = 0
         if uri == "" {
@@ -283,7 +283,7 @@ accessor_open(r: *Reader, index: int) -> *Accessor {
     view = json.array_get_raw(views, view_index)
     buffer_index = int_field(view, "buffer", 0)
     if buffer_index < 0 || buffer_index >= list.size(r.buffers) { return null }
-    b = list.get_raw(r.buffers, buffer_index) as *Buffer
+    b = list.get_raw(r.buffers, buffer_index) as *GltfBuffer
     if b.bytes == null { return null }
     out = heap.new(Accessor)
     kind = text_field(node, "type")
@@ -502,7 +502,7 @@ image_path(r: *Reader, texture_index: int) -> string {
     view = json.array_get_raw(views, view_index)
     buffer_index = int_field(view, "buffer", 0)
     if buffer_index < 0 || buffer_index >= list.size(r.buffers) { return string.copy("") }
-    b = list.get_raw(r.buffers, buffer_index) as *Buffer
+    b = list.get_raw(r.buffers, buffer_index) as *GltfBuffer
     if b.bytes == null { return string.copy("") }
     offset = int_field(view, "byteOffset", 0)
     length = int_field(view, "byteLength", 0)
@@ -926,7 +926,7 @@ load(path: string) -> *GltfScene {
     // The buffers are read into the meshes and clips; nothing keeps them.
     i = 0
     while i < list.size(r.buffers) {
-        b = list.get_raw(r.buffers, i) as *Buffer
+        b = list.get_raw(r.buffers, i) as *GltfBuffer
         if b.bytes != null && b.bytes != glb_bin { ae3d_blob_free(b.bytes) }
         heap.free(b)
         i = i + 1
