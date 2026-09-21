@@ -1745,11 +1745,12 @@ engine_loop(e: *Engine) {
         // A Vulkan frame is copied out as it is submitted, so any read of it --
         // a snapshot, or an agent grid or pixel read -- has to be armed on this
         // frame, before backend_render records the copy that the servicing
-        // below then reads. A snapshot arms on the frame before the last; an
-        // agent capture arms whenever one is waiting.
-        last_frame = e.frame_limit > 0 && e.frame_count + 1 >= e.frame_limit
+        // below then reads. A snapshot arms on each of the frames it is
+        // written on -- the last, or the last N of a burst; an agent capture
+        // arms whenever one is waiting.
+        shot_frame = e.frame_limit > 0 && e.frame_count + 1 > e.frame_limit - snapshot_burst(e)
         if e.api == platform.API_VULKAN {
-            want_shot = last_frame && snapshot_path(e) != ""
+            want_shot = shot_frame && snapshot_path(e) != ""
             want_read = e.agent_on && (agent_wants_capture(e) || agent_wants_snapshot(e))
             if want_shot || want_read {
                 if !vk.request_capture() { println("ae3d: Vulkan would not arm a capture") }

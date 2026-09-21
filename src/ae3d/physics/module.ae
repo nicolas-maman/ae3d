@@ -429,7 +429,19 @@ hull_of_mesh(drawn: ptr, scale: Vec3) -> *HullData {
         points[i] = math.vec3(v.x * scale.x, v.y * scale.y, v.z * scale.z)
         i = i + 1
     }
-    h = hull.create_hull(points, count, hull.MAX_HULL_VERTICES)
+    // The hull with the most vertices the engine's hull holds. A drawn
+    // mesh is not made for collision: a bevelled crate has 56 corners and
+    // more edges than a hull may carry (128), so the builder refuses it
+    // whole. Quickhull takes the points farthest from the hull first, so
+    // a smaller vertex budget is the tightest hull of that many corners
+    // -- the crate's box with its bevels a centimetre inside it -- and
+    // the budget is halved until one builds.
+    budget = hull.MAX_HULL_VERTICES
+    h = null as *HullData
+    while h == null && budget >= 8 {
+        h = hull.create_hull(points, count, budget)
+        budget = budget / 2
+    }
     free(block)
     return h
 }

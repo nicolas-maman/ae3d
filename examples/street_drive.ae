@@ -17,6 +17,7 @@
 // Left alone for three seconds the car drives itself up and down the
 // street, so the scene runs unattended (AE3D_FRAMES=n for a fixed run).
 import std.string
+import std.os
 import std.list
 import ae3d.core
 import ae3d.platform
@@ -42,10 +43,10 @@ const SKY_G = 0.088
 const SKY_B = 0.125
 const BLOCK_LEN = 84.0           // the block's ground slab, Street_Ground: x -36..48
 const BLOCK_CX = 6.0             // its centre; the road and the mirror axis sit here
-const TILES = 3                  // blocks along the street, centred on the middle one
+const TILES = 5                  // blocks along the street, centred on the middle one: the ends are in the fog
 const ROAD_Y = 0.08
 const PAVEMENT_Y = 0.16
-const STREET_END = 136.0         // well past the last block's end, where the autopilot turns on the open tarmac
+const STREET_END = 220.0         // well past the last block's end, where the autopilot turns on the open tarmac
 
 // The car's measure: a hatchback's. The chassis is a box and a cabin,
 // forward is -z as every object's is.
@@ -673,6 +674,12 @@ update(state: ptr, go: *GameObject, delta: float) {
     g.camera_pos = core.v3_add(g.camera_pos, core.v3_mul(core.v3_sub(wanted, g.camera_pos), k))
     g.camera_aim = core.v3_add(g.camera_aim, core.v3_mul(core.v3_sub(aim, g.camera_aim), k))
     cam = engine.engine_camera(e)
+    // A camera placed by number, for a sweep (AE3D_CAMX/Y/Z and
+    // AE3D_AIMX/Y/Z, metres): the chase camera gives way to it.
+    if os.getenv("AE3D_CAMX") != null {
+        g.camera_pos = core.vec3(core.env_int("AE3D_CAMX", 0) as float, core.env_int("AE3D_CAMY", 2) as float, core.env_int("AE3D_CAMZ", 0) as float)
+        g.camera_aim = core.vec3(core.env_int("AE3D_AIMX", 0) as float, core.env_int("AE3D_AIMY", 1) as float, core.env_int("AE3D_AIMZ", 0) as float)
+    }
     core.camera_set_position(cam, g.camera_pos)
     core.camera_look_at(cam, g.camera_aim)
     // The lights where the car's corners are now.
@@ -700,7 +707,10 @@ main() {
     engine.engine_set_face_culling(e, true)
     engine.engine_set_camera_input(e, false)
     engine.engine_set_post(e, true, true, 0.85, 0.85)
-    engine.engine_set_fog(e, core.fog_distance(12.0, 150.0, core.vec3(SKY_R, SKY_G, SKY_B), 0.95))
+    // The fog is whole by 230 metres: the street runs 420 and the
+    // tarmac past it 900, and nothing of either's end is to be seen from
+    // a car that moves, which is where a world's edge shows.
+    engine.engine_set_fog(e, core.fog_distance(15.0, 230.0, core.vec3(SKY_R, SKY_G, SKY_B), 1.0))
     engine.engine_set_shadow_distance(e, 48.0)
     engine.engine_set_frustum_culling(e, true)
     if core.env_int("AE3D_RAYS", 1) == 1 {

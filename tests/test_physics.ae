@@ -15,6 +15,7 @@ import ae3d.physics
 import ae3d.skin
 import aephysics.math
 import aephysics.dynamics
+import aephysics.hull
 
 extern calloc(count: int, size: int) -> ptr
 extern free(p: ptr)
@@ -95,6 +96,11 @@ humanoid_rig() -> *Skeleton {
     return rig
 }
 
+ball_hull_verts(h: *HullData) -> int {
+    if h == null { return 0 }
+    return h.vertex_count
+}
+
 // A wheel object: a dynamic body with a sphere collider, as the vehicle wants it.
 wheel(e: *Engine, name: string, position: Vec3) -> *GameObject {
     w = engine.object(e, name, loader.sphere(0.35, 10, 6))
@@ -154,6 +160,13 @@ start(state: ptr, e: *Engine) {
     physics.rigidbody(hc, physics.DYNAMIC)
     check_true("a convex collider comes from the model", physics.convex_collider_of_model(hc, physics.material(0.6, 0.0)).index1 != 0)
     s.hull_crate = hc as ptr
+    // A drawn mesh with more corners than a hull holds -- a sphere of 32
+    // by 24, seven hundred vertices, far past the hull's 128 edges -- still
+    // gives a hull: the tightest one of a vertex budget the builder takes.
+    // The street's bevelled crates were such meshes, and had no collider.
+    ball_mesh = core.model_mesh(loader.sphere(1.0, 32, 24))
+    ball_hull = physics.hull_of_mesh(ball_mesh, core.vec3(1.0, 1.0, 1.0))
+    check_true("a mesh past the hull's limits still gives a hull (${ball_hull_verts(ball_hull)} vertices)", ball_hull != null && ball_hull.vertex_count >= 8 && ball_hull.vertex_count <= 128)
 
     // A car: a chassis box on four sphere wheels, driven forward from a standstill.
     car = engine.object(e, "Car", loader.cube(1.0))
