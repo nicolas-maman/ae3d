@@ -22,6 +22,15 @@
   fails to load no longer shifts the attachments of those after it.
 - Aether 0.704: aephysics's native file goes with the library
   (`@source`), so no build names it.
+- The street's car is the pipeline's (`tools/blender/make_car.py`,
+  `resources/blender/car`): a saloon with a flaked red paint, dark glass,
+  tyres with hubs and lamps that glow, in place of the two hulls drawn as
+  themselves. The body that collides is the hull of the body that is
+  seen.
+- A stalled frame is not a frame: the loop hands the simulation at most a
+  quarter second at a time, so the frame the scripts load in no longer
+  runs the world for the seconds it took (the car was thirty metres down
+  the road on the eighth frame).
 
 ### The physics engine, faster
 

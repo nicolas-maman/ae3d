@@ -634,6 +634,9 @@ api_from_env(asked: int) -> int {
     return asked
 }
 
+// The most simulated time one frame may carry (see engine_loop).
+const MAX_FRAME_SECONDS = 0.25
+
 // AE3D_FRAMES caps the loop so any example doubles as a smoke test that
 // terminates on its own; unset or zero means run until the window closes.
 frame_limit_from_env() -> int {
@@ -1909,6 +1912,14 @@ engine_loop(e: *Engine) {
         now = platform.time()
         delta = now - last_time
         last_time = now
+        // A stall is not a frame. The frame in which the scripts start
+        // spans whatever they load (the street reads its export in it), a
+        // window dragged or a debugger held stops the clock for seconds,
+        // and handing that to the simulation ran it all at once: the car
+        // was thirty metres down the road on the eighth frame. Past a
+        // quarter second the world takes a quarter second and the rest is
+        // let go, the way every game loop does.
+        if delta > MAX_FRAME_SECONDS { delta = MAX_FRAME_SECONDS }
 
         // A held frame still draws, so the window stays alive and the scene can
         // be queried and snapshotted; it just does not advance. Time stops and

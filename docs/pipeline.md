@@ -18,6 +18,16 @@ blender --background --factory-startup --python tools/blender/make_zombie_street
 ./scripts/export_assets.sh resources/blender/zombie_street.blend resources/blender/zombie_street
 ```
 
+The car the street is driven in is the pipeline's too: `tools/blender/make_car.py`
+builds a saloon at the scale of the street's physics -- the body lofted
+from a side profile and narrowing toward the roof, the cabin's glass and
+the roof as parts of their own, four wheels each with a hub, the lamps as
+emissive blocks -- with a flaked red paint and a tyre's rubber from the
+same texture generator, into `resources/blender/car`. `examples/street_drive.ae`
+assembles it by name: the body is the chassis, the hull of its own mesh
+its collider and the hull of the glass the cabin's; the parts ride on the
+body; each wheel is a body of its own with its hub riding on it.
+
 ![The hero zombie walking a night street under a lamp, its shadow on the wet road](images/zombie-street.png)
 
 *`tools/zombie_street.ae`: the same export as one figure, the rig the

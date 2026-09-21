@@ -46,6 +46,7 @@ if [ $# -eq 0 ]; then
     "$0" tests/fixtures/spin.blend tests/fixtures/exported || exit 1
     "$0" resources/blender/showcase.blend resources/blender/showcase || exit 1
     "$0" resources/blender/zombie_street.blend resources/blender/zombie_street || exit 1
+    "$0" resources/blender/car.blend resources/blender/car || exit 1
     exit 0
 fi
 
@@ -59,6 +60,7 @@ if [ ! -f "$SOURCE" ]; then
         tests/fixtures/spin.blend)        builder=tools/blender/make_fixture.py ;;
         resources/blender/showcase.blend) builder=tools/blender/make_showcase.py ;;
         resources/blender/zombie_street.blend) builder=tools/blender/make_zombie_street.py ;;
+        resources/blender/car.blend)      builder=tools/blender/make_car.py ;;
         *)                                builder="" ;;
     esac
     if [ -n "$builder" ]; then
