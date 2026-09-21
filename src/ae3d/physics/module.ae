@@ -34,6 +34,7 @@ import aephysics.dynamics
 import aephysics.physics_world
 import aephysics.human
 import ae3d.core
+import ae3d.jobs
 import ae3d.behaviour
 import ae3d.engine
 import ae3d.loader
@@ -114,13 +115,14 @@ struct Vehicle {
 var g_attached: ptr = null         // list of *Physics, to find an engine's
 
 // The world in the engine's loop: gravity down, four sub-steps a fixed
-// step, stepped over the engine's thread budget (AE3D_JOBS: this thread
+// step, stepped on the engine's own job pool (AE3D_JOBS: this thread
 // and the job workers), the same at any count to the bit.
 attach(e: *Engine) -> *Physics {
     p = heap.new(Physics)
     p.engine = e as ptr
     wdef = dynamics.default_world_def()
-    wdef.worker_count = engine.engine_jobs(e) + 1
+    wdef.scheduler = jobs.scheduler()
+    wdef.worker_count = jobs.threads()
     p.world_id = dynamics.create_world(&wdef)
     p.rigidbodies = list.new()
     p.ragdolls = list.new()

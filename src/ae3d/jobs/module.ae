@@ -1,0 +1,66 @@
+// The engine's job pool: one scheduler for everything a frame spreads
+// over the machine's cores -- the crowd's passes, the weather's step,
+// the physics world's stages -- so the engine has one set of worker
+// threads, not one per subsystem competing for the same cores.
+//
+// The scheduler is aephysics.parallel's (Box3D's scheduler.c: threads
+// made once that wait on a semaphore, tasks claimed by compare-and-swap,
+// the calling thread helping while it waits): the physics engine wrote
+// it for its own step and lends its world a host's scheduler
+// (WorldDef.scheduler), which is what the engine hands it. A pass over a
+// range is parallel_for: blocks of at least `grain` items claimed by the
+// workers and the calling thread alike, so a run that finishes early
+// takes the next block rather than waiting.
+//
+//     jobs.start(threads)                  // this thread and threads - 1 more; 0 for the machine's count
+//     jobs.parallel_for(step, count, 4096, ctx)
+//     jobs.stop()
+//
+// The pass's body gets (start, end, worker, context): the block, which
+// worker runs it (0 is the calling thread; per-worker scratch goes by
+// it) and the context the caller passed.
+import aephysics.native
+import aephysics.parallel
+
+exports (
+    start, stop, scheduler, workers, threads, parallel_for
+)
+
+var g_scheduler: ptr = null        // *Scheduler
+
+// The pool, `count` threads including the calling one; 0 or less is one
+// per hardware thread. Starting twice keeps the first pool.
+start(count: int) {
+    if g_scheduler != null { return }
+    n = count
+    if n <= 0 { n = native.processor_count() }
+    g_scheduler = parallel.create_scheduler(n) as ptr
+}
+
+stop() {
+    if g_scheduler == null { return }
+    parallel.destroy_scheduler(g_scheduler as *Scheduler)
+    g_scheduler = null
+}
+
+// The scheduler itself, for a subsystem that steps on it (the physics world).
+scheduler() -> ptr { return g_scheduler }
+
+// The threads beside the calling one, and with it.
+workers() -> int {
+    if g_scheduler == null { return 0 }
+    return parallel.scheduler_worker_count(g_scheduler as *Scheduler) - 1
+}
+
+threads() -> int { return workers() + 1 }
+
+// [0, count) in blocks of at least `grain` over the pool; on the calling
+// thread alone when there is no pool.
+parallel_for(body: fn(int, int, int, ptr) -> void, count: int, grain: int, context: ptr) {
+    if count <= 0 { return }
+    if g_scheduler == null {
+        body(0, count, 0, context)
+        return
+    }
+    parallel.parallel_for(g_scheduler as *Scheduler, body, count, grain, context)
+}
