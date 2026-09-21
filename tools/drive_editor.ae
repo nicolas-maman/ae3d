@@ -443,6 +443,18 @@ codepoints(s: string, bytes: int) -> int {
     return count
 }
 
+// The window's width: the root widget's.
+window_width(t: *Tree) -> int {
+    n = tree_count(t)
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.parent == 0 { return w.w }
+        i = i + 1
+    }
+    return 0
+}
+
 // The row of the scene list named so, or null.
 row_named(t: *Tree, scene: int, name: string) -> *Widget {
     rows = rows_under(t, scene)
@@ -1276,7 +1288,9 @@ run_checks() {
     i = 0
     while i < n {
         fw = tree_at(t, i)
-        if fw.kind == "textfield" && on_screen(t, fw) {
+        // The inspector's fields are on the right of the window; the
+        // hierarchy's filter box, a textfield too, sits top left.
+        if fw.kind == "textfield" && on_screen(t, fw) && fw.x > window_width(t) / 2 {
             fields = fields + 1
             if first_field == null || fw.y < first_field.y || (fw.y == first_field.y && fw.x < first_field.x) { first_field = fw }
         }
@@ -2390,6 +2404,30 @@ run_checks() {
         check_detail("No body takes it away and lights", ok[0] == 1, "lit: ${lit}")
         string.free(lit)
         free(wt as ptr)
+    }
+
+    // The hierarchy's filter: typing narrows the rows to the objects whose
+    // names have the text, and clearing it brings every row back.
+    if scene >= 0 {
+        now = tree()
+        filter_box = 0 - 1
+        i = 0
+        while i < tree_count(now) {
+            fw = tree_at(now, i)
+            if fw.kind == "textfield" && on_screen(now, fw) && fw.x < window_width(now) / 2 && (filter_box < 0 || fw.y < widget(now, filter_box).y) { filter_box = fw.id }
+            i = i + 1
+        }
+        all_rows = row_count(now, scene)
+        tree_free(now)
+        check("the hierarchy has a filter box", filter_box >= 0)
+        if filter_box >= 0 && all_rows >= 2 {
+            set_text(filter_box, "sphere")
+            narrowed = wait_rows(scene, 1)
+            check_detail("typing in the filter narrows the hierarchy to the matches", narrowed == 1, "${narrowed} rows for 'sphere' of ${all_rows}")
+            set_text(filter_box, "")
+            widened = wait_rows(scene, all_rows)
+            check_detail("clearing the filter brings every row back", widened == all_rows, "${widened} rows, had ${all_rows}")
+        }
     }
 
     if delete_btn >= 0 && scene >= 0 {

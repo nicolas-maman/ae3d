@@ -43,12 +43,24 @@ against its bounding sphere first, so selection stays cheap with a full scene.
 
 ## Panels
 
-**Scene** lists what is in the scene. A click selects one object; holding shift
-or command adds to the selection. The inspector shows the last object clicked
-and an edit reaches everything selected, so typing a height with three objects
-selected puts all three at that height. The grid and the selection outlines are the
-editor's own geometry: the renderer draws them, but they are not objects and do
-not appear here.
+**Scene** is the hierarchy: a tree of the scene's objects, roots in scene
+order, an object's children under it behind a disclosure, closed until
+opened -- the street of `examples/street_drive.ae` opens as its five
+blocks, its car, its crate walls and its bystanders, ten rows for 1,212
+models, and expands where you look. A parent is any object another's
+model is parented to; a **group** is an object with a transform and
+nothing to draw (`engine.object(e, "Block 3", null)`), the way a program
+folders what it builds, and the scene file carries the parents. The
+filter box above the tree narrows it to the objects whose names have the
+text, flat, as every editor's outliner searches. A click selects one
+object; holding shift or command adds to the selection; selecting an
+object under a closed parent opens the way to it. Delete takes an object
+out with everything under it, Duplicate copies the subtree with its
+parents kept. The inspector shows the last object clicked and an edit
+reaches everything selected, so typing a height with three objects
+selected puts all three at that height. The grid and the selection
+outlines are the editor's own geometry: the renderer draws them, but
+they are not objects and do not appear here.
 
 **Add** creates a cube, sphere, plane, water surface, light or terrain.
 
@@ -190,7 +202,9 @@ a row is in is a question asked of the row and not of its number. The water
 section is the whole simulation: amplitude, speed, opacity, foam, the wave
 scale (how many times longer than the table's kilometre swells the waves
 are), and the shore -- the metres of water the bottom shows through and the
-metres the foam line runs out over. Rendering has the clouds switch and,
+metres the foam line runs out over. Rendering has the fog switch with
+its two rows, where the fog starts and where it is whole in metres (its
+colour is the sky's), the clouds switch and,
 under it, the cover: how much of the sky they take, a slider like any row,
 undone like one, and saved with the scene, and the overcast, 0 to 1, that
 pulls the sky toward a flat grey; the sky section has, under its
@@ -257,7 +271,12 @@ wave table nothing reads:
 | weather | the kind by name (`clear`, `rain`, `snow`, `dust`, `storm`), its strength, the wind's heading in degrees and its speed |
 
 and the file records the view: where the camera stood, its field of view and
-clip planes, and whether face and frustum culling were on.
+clip planes, whether face and frustum culling were on, the reflections'
+road height and strength, and the fog -- whether, where it starts and is
+whole, and its colour, the sky's. Each model names its `parent` by index,
+and a `group` is a model with no mesh: a transform its children are
+placed by. A system's own models -- a ragdoll's bone capsules -- are not
+in the file at all; the program makes them again.
 
 A voxel world is written as what it takes to fill one again, its size and its
 seed and its terrain, rather than as its grid: six numbers reproduce it exactly,

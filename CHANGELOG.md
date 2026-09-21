@@ -2,6 +2,27 @@
 
 ## [current]
 
+### The editor on a scene of a thousand objects
+
+- The hierarchy is a tree: the scene file carries each model's `parent`
+  and its groups (a model with no mesh: a transform, the way a program
+  folders what it builds -- `engine.object(e, "Block 3", null)` and
+  `core.model_set_parent`), children sit under parents behind a
+  disclosure, closed until opened, and a filter box narrows the tree by
+  name. Delete takes a subtree, Duplicate copies one. The street opens
+  as ten rows for 1,212 models in a third of the time.
+- A system's internals stay internal: a ragdoll's bone capsules are the
+  physics module's and are not written to the scene file. Physics reads
+  and writes world transforms for objects under a parent, so a group
+  can be moved and simulated.
+- The view carries the fog (with a Fog switch and two rows in the
+  editor, in the sky's colour) and the reflections' road height and
+  strength, so a program's scene opens looking as the program drew it.
+- The models the loader hands back keep their entry: an entry that
+  fails to load no longer shifts the attachments of those after it.
+- Aether 0.704: aephysics's native file goes with the library
+  (`@source`), so no build names it.
+
 ### The physics engine, faster
 
 - aephysics at 1204c7e: the wide contacts are prepared by the native

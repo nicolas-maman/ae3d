@@ -22,7 +22,7 @@ exports (
     scene_save, scene_load, scene_load_lights, scene_load_attachments,
     scene_load_view, view_defaults, View, Attachment, attachment_new,
     attachment_model, attachment_component, attachment_script, attachment_water,
-    attachment_world, attachment_physics, attachment_set_physics,
+    attachment_world, attachment_physics, attachment_set_physics, attachment_internal, attachment_set_internal, index_of_model,
     PhysicsSpec, physics_spec_new,
     attachments_free, scene_free, last_error
 )
@@ -43,6 +43,18 @@ struct Attachment {
     water: ptr
     world: ptr
     physics: ptr                   // *PhysicsSpec, or null
+    internal: bool                 // a system's own model, not the scene's: not written
+}
+
+// A model a system made for itself (a ragdoll's bone capsules): the
+// scene file leaves it out, since the system makes it again.
+attachment_set_internal(a: *Attachment, internal: bool) {
+    if a != null { a.internal = internal }
+}
+
+attachment_internal(a: *Attachment) -> bool {
+    if a == null { return false }
+    return a.internal
 }
 
 // What the physics engine is told about a model: the kind of body it is
@@ -133,8 +145,20 @@ struct View {
     ssao_intensity: float
     face_culling: bool
     frustum_culling: bool
+    // Distance fog, the scene's own: whether, where it starts and where it
+    // is whole, in metres, how far toward its colour it goes, and the
+    // colour -- the sky's, as a rule.
+    fog: bool
+    fog_start: float
+    fog_end: float
+    fog_intensity: float
+    fog_r: float
+    fog_g: float
+    fog_b: float
 }
 
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
 extern ae3d_meshfile_save(path: string, mesh: ptr, instances: ptr) -> int
 extern ae3d_meshfile_load(path: string) -> ptr
 extern ae3d_meshfile_mesh(handle: ptr) -> ptr
@@ -241,10 +265,16 @@ scene_load_attachments(path: string, models: ptr) -> ptr {
 
     attachments = list.new()
     count = json.array_size(entries)
-    if count > list.size(models) { count = list.size(models) }
+    loaded = list.size(models)
     i = 0
-    while i < count {
-        entry = json.array_get_raw(entries, i)
+    while i < loaded {
+        // The entry this model came from: the last load's record of which
+        // entries loaded, so a model that did not (its file gone) shifts
+        // nothing after it.
+        entry_index = i
+        if g_loaded_entries != null && i < g_loaded_count { entry_index = (g_loaded_entries as int[])[i] }
+        if entry_index >= count { break }
+        entry = json.array_get_raw(entries, entry_index)
         m = list.get_raw(models, i) as *Model
         component = field_string(entry, "component")
         script = field_string(entry, "script")
@@ -389,6 +419,19 @@ scene_load_view(path: string) -> View {
         v.weather_intensity = field_number(conditions, "intensity", v.weather_intensity)
         v.wind_heading = field_number(conditions, "wind_heading", v.wind_heading)
         v.wind_speed = field_number(conditions, "wind_speed", v.wind_speed)
+    }
+    haze = json.object_get_raw(node, "fog")
+    if haze != null {
+        v.fog = field_bool(haze, "on", v.fog)
+        v.fog_start = field_number(haze, "start", v.fog_start)
+        v.fog_end = field_number(haze, "end", v.fog_end)
+        v.fog_intensity = field_number(haze, "intensity", v.fog_intensity)
+        tint = json.object_get_raw(haze, "color")
+        if tint != null {
+            v.fog_r = number_at(tint, 0)
+            v.fog_g = number_at(tint, 1)
+            v.fog_b = number_at(tint, 2)
+        }
     }
     json.free(root)
     return v
@@ -535,6 +578,7 @@ attachment_new(m: *Model, component: string, script: string,
     a.water = w as ptr
     a.world = world as ptr
     a.physics = null
+    a.internal = false
     return a
 }
 
@@ -591,7 +635,8 @@ view_defaults() -> View {
         clouds: false, cloud_cover: 0.4, overcast: 0.0,
         weather_kind: 0, weather_intensity: 0.5, wind_heading: 0.0, wind_speed: 3.0,
         ssao: false, ssao_radius: 3.0, ssao_intensity: 1.0,
-        face_culling: false, frustum_culling: false
+        face_culling: false, frustum_culling: false,
+        fog: false, fog_start: 20.0, fog_end: 300.0, fog_intensity: 1.0, fog_r: 0.0, fog_g: 0.0, fog_b: 0.0
     }
 }
 
@@ -642,6 +687,18 @@ view_json(v: *View) -> ptr {
     json.object_set_raw(conditions, "wind_heading", json.num(v.wind_heading))
     json.object_set_raw(conditions, "wind_speed", json.num(v.wind_speed))
     json.object_set_raw(out, "weather", conditions)
+
+    haze = json.obj()
+    json.object_set_raw(haze, "on", json.boolean(v.fog))
+    json.object_set_raw(haze, "start", json.num(v.fog_start))
+    json.object_set_raw(haze, "end", json.num(v.fog_end))
+    json.object_set_raw(haze, "intensity", json.num(v.fog_intensity))
+    tint = json.arr()
+    json.array_add_raw(tint, json.num(v.fog_r))
+    json.array_add_raw(tint, json.num(v.fog_g))
+    json.array_add_raw(tint, json.num(v.fog_b))
+    json.object_set_raw(haze, "color", tint)
+    json.object_set_raw(out, "fog", haze)
     return out
 }
 
@@ -832,10 +889,23 @@ scene_save(models: ptr, lights: ptr, attachments: ptr, view: *View,
     json.object_set_raw(root, "version", json.from_int(1))
     entries = json.arr()
 
+    // What is written: every model but a system's internals (a ragdoll's
+    // bone capsules, the physics module's own -- the program makes them
+    // again). The parents are named by their place among these.
+    written = list.new()
     count = list.size(models)
     i = 0
     while i < count {
         m = list.get_raw(models, i) as *Model
+        attached = attachment_for(attachments, m)
+        if m != null && (attached == null || attached.internal == false) { list.add_raw(written, m as ptr) }
+        i = i + 1
+    }
+
+    count = list.size(written)
+    i = 0
+    while i < count {
+        m = list.get_raw(written, i) as *Model
         if m != null {
             entry = json.obj()
             json.object_set_raw(entry, "name", json.str(core.text(m.name)))
@@ -845,6 +915,12 @@ scene_save(models: ptr, lights: ptr, attachments: ptr, view: *View,
             json.object_set_raw(entry, "instanced", json.boolean(m.is_instanced))
             json.object_set_raw(entry, "visible", json.boolean(m.visible))
             json.object_set_raw(entry, "casts_shadow", json.boolean(m.casts_shadow))
+            // The hierarchy: the parent's place in this list. A parent that
+            // is not in the list (a program's own, never handed over) is
+            // no parent here, and the model's transform is its local one
+            // either way.
+            parent_index = index_of_model(written, core.model_parent(m))
+            if parent_index >= 0 { json.object_set_raw(entry, "parent", json.from_int(parent_index)) }
             json.object_set_raw(entry, "uniforms", uniforms_json(m))
             attached = attachment_for(attachments, m)
             if attached != null {
@@ -885,12 +961,17 @@ scene_save(models: ptr, lights: ptr, attachments: ptr, view: *View,
 
             if core.text(m.source_path) != "" {
                 json.object_set_raw(entry, "source_path", json.str(m.source_path))
+            } else if core.mesh_vertex_count(m.mesh) == 0 {
+                // A transform and nothing to draw: a group, what its
+                // children are placed by.
+                json.object_set_raw(entry, "group", json.boolean(true))
             } else {
                 mesh_path = mesh_file_for(mesh_directory, i)
                 if ae3d_meshfile_save(mesh_path, m.mesh, m.instances) != 1 {
                     set_error("cannot write the mesh: ", ae3d_meshfile_error())
                     string.free(mesh_path)
                     json.free(root)
+                    list.free(written)
                     return false
                 }
                 json.object_set_raw(entry, "mesh_file", json.str(mesh_path))
@@ -903,6 +984,7 @@ scene_save(models: ptr, lights: ptr, attachments: ptr, view: *View,
     }
 
     json.object_set_raw(root, "models", entries)
+    list.free(written)
 
     if lights != null {
         beams = json.arr()
@@ -958,16 +1040,46 @@ scene_load(path: string) -> ptr {
     // files, and every entry is a copy of the one read.
     sources = list.new()
     count = json.array_size(entries)
+    // The model of each entry, or null for one that did not load: what
+    // the parents and the attachments are resolved by, since the list
+    // handed back skips the failures.
+    by_entry = list.new()
+    if g_loaded_entries != null { free(g_loaded_entries) }
+    g_loaded_entries = calloc(count + 1, 4)
+    loaded_entries = g_loaded_entries as int[]
+    g_loaded_count = 0
     i = 0
     while i < count {
         entry = json.array_get_raw(entries, i)
-        if entry != null {
-            m = load_entry(entry, sources)
-            if m != null { list.add_raw(models, m) }
+        m = null as *Model
+        if entry != null { m = load_entry(entry, sources) }
+        list.add_raw(by_entry, m as ptr)
+        if m != null {
+            list.add_raw(models, m)
+            loaded_entries[g_loaded_count] = i
+            g_loaded_count = g_loaded_count + 1
         }
         i = i + 1
     }
     sources_free(sources)
+    // The hierarchy, once every model is in: an entry's parent is another
+    // entry, by index; the local transforms read above are relative to it.
+    i = 0
+    while i < count {
+        entry = json.array_get_raw(entries, i)
+        m = list.get_raw(by_entry, i) as *Model
+        if entry != null && m != null {
+            parent_node = json.object_get_raw(entry, "parent")
+            if parent_node != null {
+                parent_index = json.get_int(parent_node)
+                if parent_index >= 0 && parent_index < count {
+                    core.model_set_parent(m, list.get_raw(by_entry, parent_index) as *Model)
+                }
+            }
+        }
+        i = i + 1
+    }
+    list.free(by_entry)
 
     json.free(root)
 
@@ -980,6 +1092,24 @@ scene_load(path: string) -> ptr {
         return null
     }
     return models
+}
+
+// Which entries the last scene_load produced a model for, in order: the
+// attachments are read by entry, and a model that failed to load must not
+// hand its record to the next.
+var g_loaded_entries: ptr = null   // int[g_loaded_count], entry indices
+var g_loaded_count = 0
+
+// A model's place in a list, or -1.
+index_of_model(models: ptr, m: *Model) -> int {
+    if m == null { return 0 - 1 }
+    count = list.size(models)
+    i = 0
+    while i < count {
+        if list.get_raw(models, i) == m as ptr { return i }
+        i = i + 1
+    }
+    return 0 - 1
 }
 
 // A source file read once for the entries that share it: the model as the
@@ -1023,7 +1153,10 @@ load_entry(entry: ptr, sources: ptr) -> *Model {
     mesh_file = field_string(entry, "mesh_file")
 
     m = null as *Model
-    if source != "" {
+    group = json.object_get_raw(entry, "group")
+    if group != null && json.get_bool(group) == 1 {
+        m = core.model_new()
+    } else if source != "" {
         read = source_model(sources, source)
         if read == null {
             set_error("cannot reload ", source)

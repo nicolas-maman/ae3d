@@ -117,7 +117,12 @@ lamp_under(head: Vec3) -> *Light {
 // ground and the buildings static as their triangles, the props loose
 // as their hulls, the lamp heads lit. The road's body is the one the
 // bystanders are sprung to.
-add_tile(g: *Game, e: *Engine, m: *Manifest, off_x: float, flip: bool) {
+// A block of the street: every model the export gives, placed along the
+// street and, whatever it is, under the block's group -- an object with
+// a transform and nothing to draw, what the scene file and the editor
+// know the block by. The group stays where it is made, at the origin.
+add_tile(g: *Game, e: *Engine, m: *Manifest, name: string, off_x: float, flip: bool) {
+    block = behaviour.object_transform(engine.object(e, name, null))
     models = assets.manifest_load_scene(m)
     count = assets.manifest_count(m)
     road = physics.material(0.9, 0.0)
@@ -147,6 +152,7 @@ add_tile(g: *Game, e: *Engine, m: *Manifest, off_x: float, flip: bool) {
         nx = wp.x + off_x
         if flip { nx = off_x + (2.0 * BLOCK_CX - wp.x) }
         core.model_set_position(model, nx, wp.y, wp.z)
+        core.model_set_parent(model, block)
         if is_ground(name) {
             extent = core.mesh_size(core.model_mesh(model), core.vec3(1.0, 1.0, 1.0))
             if string.contains(name, "Street_Ground") == 0 && extent.x > 1.0 { core.model_set_scale(model, BLOCK_LEN / extent.x, 1.0, 1.0) }
@@ -409,7 +415,9 @@ make_car(g: *Game, e: *Engine, position: Vec3) {
     i = 0
     while i < physics.WHEEL_COUNT {
         w = engine.object(e, "Wheel ${i}", wheel_model(WHEEL_RADIUS, WHEEL_WIDTH))
-        behaviour.object_set_position(w, math.add(position, math.rotate_vector(facing, mounts[i])))
+        // Under the car in the scene; a body of its own in the world.
+        core.model_set_parent(behaviour.object_model(w), body)
+        behaviour.object_set_world_position(w, math.add(position, math.rotate_vector(facing, mounts[i])))
         physics.rigidbody(w, physics.DYNAMIC)
         physics.sphere_collider(w, WHEEL_RADIUS, tyre, 250.0)
         wheels[i] = w as ptr
@@ -476,6 +484,7 @@ make_bystanders(g: *Game, e: *Engine, m: *Manifest) {
     if ground == null { return }
     body_entry = assets.manifest_find_by_object(m, "Zombie_Body")
     cloth_entry = assets.manifest_find_by_object(m, "Zombie_Clothes")
+    crowd = behaviour.object_transform(engine.object(e, "Bystanders", null))
     i = 0
     while i < 13 {
         side = 1.0
@@ -507,7 +516,12 @@ make_bystanders(g: *Game, e: *Engine, m: *Manifest) {
         physics.ragdoll_turn(r, yaw)
         physics.ragdoll_stand(r, ground, 25.0, 1.0)
         if body_entry != null {
-            skeleton = dress_bystander(e, m, body_entry, cloth_entry, r)
+            // The figure's skin and clothes under a group of its own, in
+            // the crowd's; its ragdoll's bones are the physics module's
+            // and are not in the scene file at all.
+            figure = behaviour.object_transform(engine.object(e, "Bystander ${i}", null))
+            core.model_set_parent(figure, crowd)
+            skeleton = dress_bystander(e, m, body_entry, cloth_entry, r, figure)
             if walks && skeleton != null { start_walking(g, m, body_entry, r, skeleton, x, z) }
         }
         list.add_raw(g.bystanders, r as ptr)
@@ -613,7 +627,7 @@ walk(g: *Game, step: float) {
 
 // One figure: a fresh rig from the export, the two surfaces over it, and
 // the ragdoll wearing it. Answers the rig, or null.
-dress_bystander(e: *Engine, m: *Manifest, body_entry: *Entry, cloth_entry: *Entry, r: *Ragdoll) -> *Skeleton {
+dress_bystander(e: *Engine, m: *Manifest, body_entry: *Entry, cloth_entry: *Entry, r: *Ragdoll, figure: *Model) -> *Skeleton {
     bones = assets.entry_load_skeleton(m, body_entry)
     if bones == null { return null }
     skeleton = skin.skeleton_new()
@@ -628,12 +642,14 @@ dress_bystander(e: *Engine, m: *Manifest, body_entry: *Entry, cloth_entry: *Entr
     body = assets.entry_load_model(m, body_entry)
     if body != null {
         core.model_set_skeleton(body, skeleton as ptr)
+        core.model_set_parent(body, figure)
         engine.engine_add_model(e, body)
     }
     if cloth_entry != null {
         cloth = assets.entry_load_model(m, cloth_entry)
         if cloth != null {
             core.model_set_skeleton(cloth, skeleton as ptr)
+            core.model_set_parent(cloth, figure)
             engine.engine_add_model(e, cloth)
         }
     }
@@ -650,6 +666,7 @@ crate_wall(g: *Game, e: *Engine, m: *Manifest, x: float) {
     entry = assets.manifest_find_by_object(m, "Street_Crate0_0")
     if entry == null { return }
     wood = physics.material(0.6, 0.1)
+    wall = behaviour.object_transform(engine.object(e, "Crate wall", null))
     row = 0
     while row < 3 {
         k = 0
@@ -657,7 +674,8 @@ crate_wall(g: *Game, e: *Engine, m: *Manifest, x: float) {
             model = assets.entry_load_model(m, entry)
             if model == null { return }
             size = core.mesh_size(core.model_mesh(model), model.scale)
-            o = engine.object(e, "Road crate", model)
+            core.model_set_parent(model, wall)
+            o = engine.object(e, "Crate", model)
             behaviour.object_set_position(o, core.vec3(x + 0.04 * (next_random() - 0.5), 0.02 + ROAD_Y + (size.y + 0.02) * (row as float),
                                                         ((k as float) - 1.5 + 0.5 * (row as float)) * (size.z + 0.03)))
             physics.rigidbody(o, physics.DYNAMIC)
@@ -683,7 +701,7 @@ start(state: ptr, go: *GameObject) {
     t = 0
     while t < TILES {
         k = t - TILES / 2
-        add_tile(g, e, m, BLOCK_LEN * (k as float), (k % 2) != 0)
+        add_tile(g, e, m, "Block ${k}", BLOCK_LEN * (k as float), (k % 2) != 0)
         t = t + 1
     }
     crate_wall(g, e, m, 0.0 - 30.0)

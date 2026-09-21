@@ -39,6 +39,7 @@ exports (
     object_set_model, object_model, object_active, object_set_active,
     object_position, object_set_position, object_translate,
     object_rotation, object_set_rotation, object_scale, object_set_scale,
+    object_world_position, object_world_rotation, object_set_world_position, object_set_world_rotation, object_transform,
     object_forward, object_up, object_right,
     scene_new, scene_free, scene_add, scene_remove, scene_detach, scene_destroy_later,
     scene_find, scene_find_by_tag, scene_count, scene_object,
@@ -163,9 +164,19 @@ object_model(o: *GameObject) -> *Model {
     return o.model as *Model
 }
 
+// The model that holds the object's transform: its own, or an empty one
+// made for it -- an object with nothing to draw (a group) still has a
+// place, and what is parented to it is placed by it.
+object_transform(o: *GameObject) -> *Model { return ensure_transform(o) }
+
 ensure_transform(o: *GameObject) -> *Model {
     if o.model == null {
-        o.model = core.model_new() as ptr
+        // A transform and nothing to draw -- a group -- is a model too,
+        // one the renderer never sees; it carries the object's name, so
+        // the scene file and the editor know the group by it.
+        m = core.model_new()
+        core.model_set_name(m, core.text(o.name))
+        o.model = m as ptr
         o.owns_model = true
     }
     return o.model as *Model
@@ -259,6 +270,44 @@ object_rotation(o: *GameObject) -> Quat {
 
 object_set_rotation(o: *GameObject, rotation: Quat) {
     core.model_set_rotation(ensure_transform(o), rotation)
+}
+
+// Where the object is in the world, under whatever it is parented to:
+// what physics reads and writes, since a body lives in the world and an
+// object may live in a group. For an object with no parent these are
+// the local ones. A parent's scale is not undone: a group is at unit
+// scale, and a body under a scaled parent is not a case this serves.
+object_world_position(o: *GameObject) -> Vec3 {
+    return core.model_world_position(ensure_transform(o))
+}
+
+object_world_rotation(o: *GameObject) -> Quat {
+    m = ensure_transform(o)
+    core.model_sync_transform(m)
+    return m.world_rotation
+}
+
+object_set_world_position(o: *GameObject, position: Vec3) {
+    m = ensure_transform(o)
+    parent = core.model_parent(m)
+    if parent == null {
+        core.model_set_position(m, position.x, position.y, position.z)
+        return
+    }
+    core.model_sync_transform(parent)
+    local = core.quat_apply(core.quat_conjugate(parent.world_rotation), core.v3_sub(position, parent.world_position))
+    core.model_set_position(m, local.x, local.y, local.z)
+}
+
+object_set_world_rotation(o: *GameObject, rotation: Quat) {
+    m = ensure_transform(o)
+    parent = core.model_parent(m)
+    if parent == null {
+        core.model_set_rotation(m, rotation)
+        return
+    }
+    core.model_sync_transform(parent)
+    core.model_set_rotation(m, core.quat_normalize(core.quat_mul(core.quat_conjugate(parent.world_rotation), rotation)))
 }
 
 object_scale(o: *GameObject) -> Vec3 {

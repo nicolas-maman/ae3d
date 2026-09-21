@@ -361,8 +361,9 @@ object(e: *Engine, name: string, model: *Model) -> *GameObject {
         behaviour.object_set_model(o, model)
         o.owns_model = true
         // The model is known by the object's name -- in the editor, in the
-        // scene file, over the agent channel -- unless it brought its own.
-        if core.text(model.name) == "" { core.model_set_name(model, name) }
+        // scene file, over the agent channel: a crate loaded from
+        // Street_Crate0_0.obj and made "Crate" is a crate.
+        core.model_set_name(model, name)
         if e.running { e.backend_add_model(e.backend_state, model) }
         else { list.add_raw(e.pending_models, model as ptr) }
     }
@@ -1367,6 +1368,18 @@ engine_models(e: *Engine) -> ptr {
             i = i + 1
         }
     }
+    // The scene's objects that hold a transform and nothing to draw --
+    // groups, made by engine.object(e, name, null) -- are models the
+    // renderer never saw; the file needs them, since what is under one is
+    // placed by it.
+    scene_objects = behaviour.scene_count(e.scene as *Scene)
+    k = 0
+    while k < scene_objects {
+        o = behaviour.scene_object(e.scene as *Scene, k)
+        m = behaviour.object_model(o)
+        if m != null && core.mesh_vertex_count(m.mesh) == 0 && scene.index_of_model(out, m) < 0 { list.add_raw(out, m as ptr) }
+        k = k + 1
+    }
     return out
 }
 
@@ -1438,6 +1451,16 @@ engine_save_scene(e: *Engine, path: string, mesh_directory: string) -> bool {
     view.overcast = e.overcast
     view.frustum_culling = core.frustum_culling()
     view.face_culling = core.face_culling()
+    view.ssr = e.ssr_on
+    view.ssr_road_height = e.ssr_road_height
+    view.ssr_strength = e.ssr_strength
+    view.fog = e.fog.enabled
+    view.fog_start = e.fog.start
+    view.fog_end = e.fog.end
+    view.fog_intensity = e.fog.intensity
+    view.fog_r = e.fog.color.x
+    view.fog_g = e.fog.color.y
+    view.fog_b = e.fog.color.z
     ok = scene.scene_save(models, lights, attachments, &view, path, mesh_directory)
     if !ok { println("ae3d: the scene could not be written to ${path}: ${scene.last_error()}") }
     scene.attachments_free(attachments)
