@@ -46,7 +46,12 @@ where its object was put (as a velocity, so the solver sees it move and
 what rides on it comes along), steps the world, and writes each dynamic
 body's transform onto its object and each ragdoll's bones onto theirs.
 The object keeps no transform of its own -- it points at its model's --
-so the draw reads what the world wrote.
+so the draw reads what the world wrote. A body lives in the world and
+an object may live in a group (its model parented to another's), so the
+transforms cross in world space: `object_world_position` in, and back
+to the object's local place under its parent
+(`object_set_world_position`); a group can be moved and its bodies still
+fall where it is.
 
 | | |
 |---|---|

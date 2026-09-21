@@ -40,6 +40,7 @@ extern calloc(count: int, size: int) -> ptr
 extern free(p: ptr)
 
 const MANIFEST = "resources/blender/zombie_street/manifest.json"
+const CAR_MANIFEST = "resources/blender/car/manifest.json"
 const SKY_R = 0.075
 const SKY_G = 0.088
 const SKY_B = 0.125
@@ -52,11 +53,8 @@ const STREET_END = 220.0         // well past the last block's end, where the au
 
 // The car's measure: a hatchback's. The chassis is a box and a cabin,
 // forward is -z as every object's is.
-const CHASSIS_HX = 0.86
-const CHASSIS_HY = 0.30
+// The body's half length, for where the lamps' lights sit on it.
 const CHASSIS_HZ = 2.05
-const CABIN_HX = 0.74
-const CABIN_HY = 0.34
 const CABIN_HZ = 0.95
 const WHEEL_RADIUS = 0.36
 const WHEEL_WIDTH = 0.24
@@ -117,7 +115,12 @@ lamp_under(head: Vec3) -> *Light {
 // ground and the buildings static as their triangles, the props loose
 // as their hulls, the lamp heads lit. The road's body is the one the
 // bystanders are sprung to.
-add_tile(g: *Game, e: *Engine, m: *Manifest, off_x: float, flip: bool) {
+// A block of the street: every model the export gives, placed along the
+// street and, whatever it is, under the block's group -- an object with
+// a transform and nothing to draw, what the scene file and the editor
+// know the block by. The group stays where it is made, at the origin.
+add_tile(g: *Game, e: *Engine, m: *Manifest, name: string, off_x: float, flip: bool) {
+    block = behaviour.object_transform(engine.object(e, name, null))
     models = assets.manifest_load_scene(m)
     count = assets.manifest_count(m)
     road = physics.material(0.9, 0.0)
@@ -147,6 +150,7 @@ add_tile(g: *Game, e: *Engine, m: *Manifest, off_x: float, flip: bool) {
         nx = wp.x + off_x
         if flip { nx = off_x + (2.0 * BLOCK_CX - wp.x) }
         core.model_set_position(model, nx, wp.y, wp.z)
+        core.model_set_parent(model, block)
         if is_ground(name) {
             extent = core.mesh_size(core.model_mesh(model), core.vec3(1.0, 1.0, 1.0))
             if string.contains(name, "Street_Ground") == 0 && extent.x > 1.0 { core.model_set_scale(model, BLOCK_LEN / extent.x, 1.0, 1.0) }
@@ -260,141 +264,70 @@ box_model(half: Vec3, offset: Vec3) -> *Model {
     return m
 }
 
-// A convex hull drawn as itself: every face a fan with the face's own
-// normal, so the body that collides is the body that is seen.
-hull_model(h: *HullData) -> *Model {
-    m = core.model_new()
-    points = hull.hull_points(h)
-    edges = hull.hull_edges(h)
-    faces = hull.hull_faces(h)
-    planes = hull.hull_planes(h)
-    core.mesh_reserve(m.mesh, h.edge_count, 3 * h.edge_count)
-    f = 0
-    while f < h.face_count {
-        n = planes[f].normal
-        base = core.mesh_vertex_count(m.mesh)
-        count = 0
-        first = faces[f]
-        edge = first
-        while true {
-            p = points[edges[edge].origin]
-            core.mesh_push_vertex(m.mesh, p, 0.5 + 0.5 * p.x, 0.5 + 0.5 * p.y, n)
-            count = count + 1
-            edge = edges[edge].next
-            if edge == first { break }
-        }
-        k = 1
-        while k + 1 < count {
-            core.mesh_push_triangle(m.mesh, base, base + k, base + k + 1)
-            k = k + 1
-        }
-        f = f + 1
-    }
-    core.model_update_matrix(m)
-    core.model_recalculate_bounds(m)
-    return m
+// The export's names for the wheels and their hubs, in the mounts' order:
+// front left, front right, rear left, rear right.
+wheel_name(i: int) -> string {
+    if i == 0 { return "Car_Wheel_FL" }
+    if i == 1 { return "Car_Wheel_FR" }
+    if i == 2 { return "Car_Wheel_RL" }
+    return "Car_Wheel_RR"
 }
 
-// The car's body as a point cloud: a low nose, a flat bonnet, the sills,
-// a boot; and its cabin, a wedge with a raked windscreen and rear glass.
-body_hull() -> *HullData {
-    block = calloc(16, sizeof(Vec3))
-    p = block as Vec3[]
-    i = 0
-    while i < 2 {
-        sx = CHASSIS_HX
-        if i == 1 { sx = 0.0 - CHASSIS_HX }
-        p[8 * i + 0] = core.vec3(sx, 0.0 - CHASSIS_HY, 0.0 - CHASSIS_HZ)
-        p[8 * i + 1] = core.vec3(sx, 0.0 - CHASSIS_HY, CHASSIS_HZ)
-        p[8 * i + 2] = core.vec3(sx, 0.05, 0.0 - CHASSIS_HZ)
-        p[8 * i + 3] = core.vec3(sx, CHASSIS_HY, 0.0 - CHASSIS_HZ + 0.7)
-        p[8 * i + 4] = core.vec3(sx, CHASSIS_HY, CHASSIS_HZ - 0.15)
-        p[8 * i + 5] = core.vec3(sx, 0.12, CHASSIS_HZ)
-        p[8 * i + 6] = core.vec3(sx * 0.97, CHASSIS_HY + 0.03, 0.0)
-        p[8 * i + 7] = core.vec3(sx * 0.9, 0.0 - CHASSIS_HY - 0.02, 0.0)
-        i = i + 1
-    }
-    h = hull.create_hull(p, 16, 32)
-    free(block)
-    return h
+hub_name(i: int) -> string {
+    if i == 0 { return "Car_Hub_FL" }
+    if i == 1 { return "Car_Hub_FR" }
+    if i == 2 { return "Car_Hub_RL" }
+    return "Car_Hub_RR"
 }
 
-cabin_hull() -> *HullData {
-    block = calloc(8, sizeof(Vec3))
-    p = block as Vec3[]
-    i = 0
-    while i < 2 {
-        sx = CABIN_HX
-        if i == 1 { sx = 0.0 - CABIN_HX }
-        p[4 * i + 0] = core.vec3(sx, CHASSIS_HY, 0.0 - 0.75)
-        p[4 * i + 1] = core.vec3(sx, CHASSIS_HY, 1.65)
-        p[4 * i + 2] = core.vec3(sx * 0.9, CHASSIS_HY + 2.0 * CABIN_HY, 0.0 - 0.05)
-        p[4 * i + 3] = core.vec3(sx * 0.9, CHASSIS_HY + 2.0 * CABIN_HY, 1.25)
-        i = i + 1
-    }
-    h = hull.create_hull(p, 8, 16)
-    free(block)
-    return h
-}
-
-// A wheel's drawn mesh: a cylinder along x, the axle; its collider is
-// a sphere of the same radius inside it.
-wheel_model(radius: float, width: float) -> *Model {
-    m = core.model_new()
-    sides = 20
-    half = 0.5 * width
-    core.mesh_reserve(m.mesh, 4 * sides + 2, 12 * sides)
-    top = core.mesh_push_vertex(m.mesh, core.vec3(half, 0.0, 0.0), 0.5, 0.5, core.vec3(1.0, 0.0, 0.0))
-    bottom = core.mesh_push_vertex(m.mesh, core.vec3(0.0 - half, 0.0, 0.0), 0.5, 0.5, core.vec3(0.0 - 1.0, 0.0, 0.0))
-    i = 0
-    while i < sides {
-        a = 6.283185307 * (i as float) / (sides as float)
-        c = core.cos_of(a)
-        s = core.sin_of(a)
-        // Two rims for the tread (their normals outward), two for the caps.
-        core.mesh_push_vertex(m.mesh, core.vec3(half, radius * c, radius * s), (i as float) / (sides as float), 0.0, core.vec3(0.0, c, s))
-        core.mesh_push_vertex(m.mesh, core.vec3(0.0 - half, radius * c, radius * s), (i as float) / (sides as float), 1.0, core.vec3(0.0, c, s))
-        core.mesh_push_vertex(m.mesh, core.vec3(half, radius * c, radius * s), 0.5 + 0.5 * c, 0.5 + 0.5 * s, core.vec3(1.0, 0.0, 0.0))
-        core.mesh_push_vertex(m.mesh, core.vec3(0.0 - half, radius * c, radius * s), 0.5 + 0.5 * c, 0.5 + 0.5 * s, core.vec3(0.0 - 1.0, 0.0, 0.0))
-        i = i + 1
-    }
-    i = 0
-    while i < sides {
-        j = (i + 1) % sides
-        a0 = 2 + 4 * i
-        b0 = 2 + 4 * j
-        core.mesh_push_triangle(m.mesh, a0, a0 + 1, b0)
-        core.mesh_push_triangle(m.mesh, b0, a0 + 1, b0 + 1)
-        core.mesh_push_triangle(m.mesh, top, a0 + 2, b0 + 2)
-        core.mesh_push_triangle(m.mesh, bottom, b0 + 3, a0 + 3)
-        i = i + 1
-    }
-    core.model_update_matrix(m)
-    core.model_recalculate_bounds(m)
-    core.model_matte(m, 0.08, 0.08, 0.085)
-    return m
-}
-
-// The car at a position facing -x down the street: the chassis with
-// its cabin on it, four wheels, the vehicle on the joints.
+// The car at a position facing -x down the street: the pipeline's saloon
+// (tools/blender/make_car.py, exported to resources/blender/car), its
+// body the chassis with the cabin's hull on it, its glass, roof and
+// lamps riding on the body, four wheels each with its hub, the vehicle
+// on the joints. The body that collides is the hull of the body that is
+// seen, and the cabin's the hull of its glass.
 make_car(g: *Game, e: *Engine, position: Vec3) {
-    body_shape = body_hull()
-    cabin_shape = cabin_hull()
-    body = hull_model(body_shape)
-    core.model_glossy(body, 0.72, 0.12, 0.10)
+    cm = assets.manifest_load(CAR_MANIFEST)
+    if cm == null {
+        println("street_drive: ${assets.last_error()}")
+        return
+    }
+    body_entry = assets.manifest_find_by_object(cm, "Car_Body")
+    body = assets.entry_load_model(cm, body_entry)
+    if body == null {
+        println("street_drive: ${assets.last_error()}")
+        assets.manifest_free(cm)
+        return
+    }
     chassis = engine.object(e, "Car", body)
     behaviour.object_set_position(chassis, position)
     // Nose toward -x: the object's forward is -z, turned a quarter to the left.
     facing = math.make_quat_from_axis_angle(math.vec3_axis_y(), 0.5 * 3.14159265358979)
     behaviour.object_set_rotation(chassis, facing)
-    cabin = hull_model(cabin_shape)
-    core.model_glass(cabin, 0.35, 0.42, 0.5, 0.75)
-    core.model_set_parent(cabin, body)
-    engine.engine_add_model(e, cabin)
     rb = physics.rigidbody(chassis, physics.DYNAMIC)
     paint = physics.material(0.5, 0.05)
-    physics.hull_collider(chassis, body_shape, paint, 260.0)
-    physics.hull_collider(chassis, cabin_shape, paint, 40.0)
+    physics.hull_collider(chassis, physics.hull_of_mesh(core.model_mesh(body), body.scale), paint, 260.0)
+    // What rides on the body: the glass (whose hull is the cabin's
+    // collider), the roof, the lamps, each where the export put it.
+    count = assets.manifest_count(cm)
+    i = 0
+    while i < count {
+        entry = assets.manifest_entry(cm, i)
+        if assets.entry_parent(entry) == "Car_Body" {
+            part = assets.entry_load_model(cm, entry)
+            if part != null {
+                name = assets.entry_object(entry)
+                core.model_set_parent(part, body)
+                if string.contains(name, "Lamp") == 1 { core.model_set_exposure(part, 16.0) }
+                if string.contains(name, "Tail") == 1 { core.model_set_exposure(part, 10.0) }
+                if name == "Car_Glass" {
+                    physics.hull_collider(chassis, physics.hull_of_mesh(core.model_mesh(part), part.scale), paint, 40.0)
+                }
+                engine.engine_add_model(e, part)
+            }
+        }
+        i = i + 1
+    }
     physics.rigidbody_set_damping(rb, 0.05, 0.4)
     physics.rigidbody_enable_hit_events(rb, true)
     tyre = physics.material(1.1, 0.0)
@@ -408,13 +341,31 @@ make_car(g: *Game, e: *Engine, position: Vec3) {
     mounts[3] = core.vec3(AXLE_X, AXLE_Y, REAR_Z)
     i = 0
     while i < physics.WHEEL_COUNT {
-        w = engine.object(e, "Wheel ${i}", wheel_model(WHEEL_RADIUS, WHEEL_WIDTH))
-        behaviour.object_set_position(w, math.add(position, math.rotate_vector(facing, mounts[i])))
+        wheel_entry = assets.manifest_find_by_object(cm, wheel_name(i))
+        tyre_model = assets.entry_load_model(cm, wheel_entry)
+        if tyre_model == null {
+            println("street_drive: ${assets.last_error()}")
+            assets.manifest_free(cm)
+            return
+        }
+        w = engine.object(e, "Wheel ${i}", tyre_model)
+        // Under the car in the scene; a body of its own in the world.
+        core.model_set_parent(tyre_model, body)
+        behaviour.object_set_world_position(w, math.add(position, math.rotate_vector(facing, mounts[i])))
+        behaviour.object_set_world_rotation(w, facing)
+        // The hub rides on the tyre.
+        hub_entry = assets.manifest_find_by_object(cm, hub_name(i))
+        hub = assets.entry_load_model(cm, hub_entry)
+        if hub != null {
+            core.model_set_parent(hub, tyre_model)
+            engine.engine_add_model(e, hub)
+        }
         physics.rigidbody(w, physics.DYNAMIC)
         physics.sphere_collider(w, WHEEL_RADIUS, tyre, 250.0)
         wheels[i] = w as ptr
         i = i + 1
     }
+    assets.manifest_free(cm)
     g.vehicle = physics.vehicle(chassis, wheels_block, mounts_block, 3.0, 0.8, 0.12, 900.0, 42.0, 0.55) as ptr
     g.chassis = chassis as ptr
     // Headlights and tail lights, riding on the car. The headlights are
@@ -476,6 +427,7 @@ make_bystanders(g: *Game, e: *Engine, m: *Manifest) {
     if ground == null { return }
     body_entry = assets.manifest_find_by_object(m, "Zombie_Body")
     cloth_entry = assets.manifest_find_by_object(m, "Zombie_Clothes")
+    crowd = behaviour.object_transform(engine.object(e, "Bystanders", null))
     i = 0
     while i < 13 {
         side = 1.0
@@ -507,7 +459,12 @@ make_bystanders(g: *Game, e: *Engine, m: *Manifest) {
         physics.ragdoll_turn(r, yaw)
         physics.ragdoll_stand(r, ground, 25.0, 1.0)
         if body_entry != null {
-            skeleton = dress_bystander(e, m, body_entry, cloth_entry, r)
+            // The figure's skin and clothes under a group of its own, in
+            // the crowd's; its ragdoll's bones are the physics module's
+            // and are not in the scene file at all.
+            figure = behaviour.object_transform(engine.object(e, "Bystander ${i}", null))
+            core.model_set_parent(figure, crowd)
+            skeleton = dress_bystander(e, m, body_entry, cloth_entry, r, figure)
             if walks && skeleton != null { start_walking(g, m, body_entry, r, skeleton, x, z) }
         }
         list.add_raw(g.bystanders, r as ptr)
@@ -613,7 +570,7 @@ walk(g: *Game, step: float) {
 
 // One figure: a fresh rig from the export, the two surfaces over it, and
 // the ragdoll wearing it. Answers the rig, or null.
-dress_bystander(e: *Engine, m: *Manifest, body_entry: *Entry, cloth_entry: *Entry, r: *Ragdoll) -> *Skeleton {
+dress_bystander(e: *Engine, m: *Manifest, body_entry: *Entry, cloth_entry: *Entry, r: *Ragdoll, figure: *Model) -> *Skeleton {
     bones = assets.entry_load_skeleton(m, body_entry)
     if bones == null { return null }
     skeleton = skin.skeleton_new()
@@ -628,12 +585,14 @@ dress_bystander(e: *Engine, m: *Manifest, body_entry: *Entry, cloth_entry: *Entr
     body = assets.entry_load_model(m, body_entry)
     if body != null {
         core.model_set_skeleton(body, skeleton as ptr)
+        core.model_set_parent(body, figure)
         engine.engine_add_model(e, body)
     }
     if cloth_entry != null {
         cloth = assets.entry_load_model(m, cloth_entry)
         if cloth != null {
             core.model_set_skeleton(cloth, skeleton as ptr)
+            core.model_set_parent(cloth, figure)
             engine.engine_add_model(e, cloth)
         }
     }
@@ -650,6 +609,7 @@ crate_wall(g: *Game, e: *Engine, m: *Manifest, x: float) {
     entry = assets.manifest_find_by_object(m, "Street_Crate0_0")
     if entry == null { return }
     wood = physics.material(0.6, 0.1)
+    wall = behaviour.object_transform(engine.object(e, "Crate wall", null))
     row = 0
     while row < 3 {
         k = 0
@@ -657,7 +617,8 @@ crate_wall(g: *Game, e: *Engine, m: *Manifest, x: float) {
             model = assets.entry_load_model(m, entry)
             if model == null { return }
             size = core.mesh_size(core.model_mesh(model), model.scale)
-            o = engine.object(e, "Road crate", model)
+            core.model_set_parent(model, wall)
+            o = engine.object(e, "Crate", model)
             behaviour.object_set_position(o, core.vec3(x + 0.04 * (next_random() - 0.5), 0.02 + ROAD_Y + (size.y + 0.02) * (row as float),
                                                         ((k as float) - 1.5 + 0.5 * (row as float)) * (size.z + 0.03)))
             physics.rigidbody(o, physics.DYNAMIC)
@@ -683,7 +644,7 @@ start(state: ptr, go: *GameObject) {
     t = 0
     while t < TILES {
         k = t - TILES / 2
-        add_tile(g, e, m, BLOCK_LEN * (k as float), (k % 2) != 0)
+        add_tile(g, e, m, "Block ${k}", BLOCK_LEN * (k as float), (k % 2) != 0)
         t = t + 1
     }
     crate_wall(g, e, m, 0.0 - 30.0)

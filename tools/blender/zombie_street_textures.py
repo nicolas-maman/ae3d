@@ -714,3 +714,42 @@ def wet_tarmac(size=1024, seed=37):
                 numpy.clip(patch * 1.4 - 0.35, 0.0, 1.0))
     rgb *= (0.80 + grit[:, :, None] * 0.40)
     return _image("RoadTarmac", size, _rgba(rgb))
+
+
+def car_paint(size=512, seed=163):
+    """A car's paint: a deep red under a clear coat, the metallic flake in
+    it a fine grain that catches the light, and the odd scuff where the
+    street has had it."""
+    rng = random.Random(seed)
+    flake = _noise(rng, size, 6, 24)
+    scuff = _noise(rng, size, 3, 3)
+    rgb = _tint((0.52, 0.045, 0.05), (0.62, 0.08, 0.07),
+                numpy.clip(flake * 1.8 - 0.6, 0.0, 1.0))
+    rgb *= (0.94 + (scuff[:, :, None] - 0.5) * 0.10)
+    return _image("CarPaint", size, _rgba(rgb))
+
+
+def car_paint_normal(size=512, seed=163):
+    rng = random.Random(seed)
+    height = _noise(rng, size, 2, 3)
+    return _normal_from_height(height, 0.35, "CarPaintNormal")
+
+
+def rubber(size=512, seed=167):
+    """A tyre: black rubber, its tread in the normal map, dusted grey at
+    the shoulders where the road has worn it."""
+    rng = random.Random(seed)
+    wear = _noise(rng, size, 4, 6)
+    rgb = _tint((0.035, 0.035, 0.037), (0.09, 0.09, 0.09),
+                numpy.clip(wear * 1.5 - 0.6, 0.0, 1.0))
+    return _image("CarTyre", size, _rgba(rgb))
+
+
+def rubber_normal(size=512, seed=167):
+    rng = random.Random(seed)
+    # Tread: ridges across the image, the way a tyre's run around it.
+    rows = numpy.linspace(0.0, 1.0, size, endpoint=False, dtype=numpy.float32)
+    ridges = 0.5 + 0.5 * numpy.sin(rows * math.pi * 2.0 * 36.0)
+    height = ridges[:, None] * numpy.ones((1, size), dtype=numpy.float32) * 0.7 + _noise(rng, size, 5, 9) * 0.3
+    return _normal_from_height(height, 2.2, "CarTyreNormal")
+

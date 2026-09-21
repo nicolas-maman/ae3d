@@ -158,17 +158,6 @@ signed(value: float) -> string {
 
 pct(value: float) -> string { return fmt(value * 100.0, 0) }
 
-// A standard the scene is known not to meet yet, with an issue for it:
-// said as a note rather than counted, so the build says it every run
-// without failing on a content gap that is already tracked.
-check_note(name: string, ok: bool, detail: string, issue: string) {
-    if ok {
-        check(name, true, detail)
-        return
-    }
-    println("  note ${name} (${detail}; #${issue})")
-}
-
 check(name: string, ok: bool, detail: string) {
     tag = "FAIL"
     if ok { tag = "ok  " }
@@ -1268,8 +1257,17 @@ hand_to_target(mesh: string, seconds: float, fps: int, strike_from: float, strik
           "the strike extends the arm ${fmt(peak - walk, 3)} m past the walk, wanted ${fmt(STRIKE_REACH, 2)}")
 }
 
-// Whether the upper body follows the hips: the lag at which the head's
-// side-to-side motion lines up best with the hips'.
+// Whether the upper body follows the hips: the lag at which the
+// shoulders' turn lines up best with the hips'. A turn is read off two
+// bones a line apart -- the thighs' heads for the pelvis, the shoulders
+// for the chest -- as the heading of that line across the ground; a
+// body's turn arrives at the shoulders a beat after the hips, against
+// them, and that beat is what makes a figure read as a body and not a
+// rig (#333). The head has no line to read a turn from (its bones are a
+// column), so the shoulders stand for the upper body. The alignment is
+// ranked by its strength whichever way it goes (the shoulders turn
+// against the pelvis), each sum normalised by its length so a longer lag
+// is not a shorter sum.
 secondary_motion(mesh: string, seconds: float, fps: int) {
     println("")
     println("== does the body follow through ==")
@@ -1279,25 +1277,29 @@ secondary_motion(mesh: string, seconds: float, fps: int) {
     free(times)
     if tr.count == 0 { track_free(tr) ; return }
     hips = calloc(tr.count, 8)
-    head = calloc(tr.count, 8)
+    shoulders = calloc(tr.count, 8)
     hp = hips as float[]
-    hd = head as float[]
+    sh = shoulders as float[]
     hips_mean = 0.0
-    head_mean = 0.0
+    shoulders_mean = 0.0
     i = 0
     while i < tr.count {
-        a = bone_at(tr, i, "Hips")
+        tl = bone_at(tr, i, "ThighL")
         had = g_found
-        b = bone_at(tr, i, "Head")
-        if !had || !g_found { check("the head follows the body", false, "no Head and Hips to read") ; free(hips) ; free(head) ; track_free(tr) ; return }
-        hp[i] = a.z
-        hd[i] = b.z
-        hips_mean = hips_mean + a.z
-        head_mean = head_mean + b.z
+        tr_ = bone_at(tr, i, "ThighR")
+        had = had && g_found
+        sl = bone_at(tr, i, "ShoulderL")
+        had = had && g_found
+        sr = bone_at(tr, i, "ShoulderR")
+        if !had || !g_found { check("the shoulders follow the hips", false, "no thighs and shoulders to read a turn from") ; free(hips) ; free(shoulders) ; track_free(tr) ; return }
+        hp[i] = core.atan2_of(tr_.z - tl.z, tr_.x - tl.x)
+        sh[i] = core.atan2_of(sr.z - sl.z, sr.x - sl.x)
+        hips_mean = hips_mean + hp[i]
+        shoulders_mean = shoulders_mean + sh[i]
         i = i + 1
     }
     hips_mean = hips_mean / (tr.count as float)
-    head_mean = head_mean / (tr.count as float)
+    shoulders_mean = shoulders_mean / (tr.count as float)
     best_lag = 0
     best = 0.0 - 1.0
     lag = 0
@@ -1305,21 +1307,18 @@ secondary_motion(mesh: string, seconds: float, fps: int) {
         total = 0.0
         i = 0
         while i < tr.count - lag {
-            total = total + (hp[i] - hips_mean) * (hd[i + lag] - head_mean)
+            total = total + (hp[i] - hips_mean) * (sh[i + lag] - shoulders_mean)
             i = i + 1
         }
-        if total > best { best = total ; best_lag = lag }
+        strength = core.abs_of(total) / ((tr.count - lag) as float)
+        if strength > best { best = strength ; best_lag = lag }
         lag = lag + 1
     }
     free(hips)
-    free(head)
+    free(shoulders)
     track_free(tr)
-    println("  the head's turn lines up best ${best_lag} frames behind the hips")
-    // A note, not a check, until the clip has a follow-through to measure:
-    // on this walk the head moves rigidly with the pelvis on every axis
-    // (the Python critique's "11 frames" ranked noise of 1e-17), which is
-    // the clip's to fix in Blender (#333).
-    check_note("the head follows the body rather than leading it", best_lag >= FOLLOW_LAG, "best alignment at a lag of ${best_lag} frames, wanted at least ${FOLLOW_LAG}", "333")
+    println("  the shoulders' turn lines up best ${best_lag} frames behind the hips'")
+    check("the shoulders follow the hips rather than turning with them", best_lag >= FOLLOW_LAG, "best alignment at a lag of ${best_lag} frames, wanted at least ${FOLLOW_LAG}")
 }
 
 // Whether the frame reads as a night, off the rendered grid: contrast, warm

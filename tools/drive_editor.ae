@@ -361,6 +361,31 @@ in_panel(t: *Tree, w: *Widget) -> *Widget {
     return null
 }
 
+// The SCENE section's body, or -1: what the hierarchy's list and its
+// filter box are children of.
+scene_body_id(t: *Tree) -> int {
+    n = tree_count(t)
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.kind == "text" && w.text == "SCENE" {
+            bar = in_panel(t, w)
+            if bar != null {
+                body = null as *Widget
+                j = 0
+                while j < n {
+                    s = tree_at(t, j)
+                    if s.parent == bar.parent && s.id > bar.id && (body == null || s.id < body.id) { body = s }
+                    j = j + 1
+                }
+                if body != null { return body.id }
+            }
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
 // The list inside the SCENE section. Found by structure rather than by a
 // fixed id, because ids move whenever the panel gains a widget, and by
 // looking for the list itself rather than for whatever follows the bar:
@@ -1276,7 +1301,9 @@ run_checks() {
     i = 0
     while i < n {
         fw = tree_at(t, i)
-        if fw.kind == "textfield" && on_screen(t, fw) {
+        // The inspector's fields, not the hierarchy's filter box, which is
+        // a textfield too: the one in the SCENE section's body.
+        if fw.kind == "textfield" && on_screen(t, fw) && fw.parent != scene_body_id(t) {
             fields = fields + 1
             if first_field == null || fw.y < first_field.y || (fw.y == first_field.y && fw.x < first_field.x) { first_field = fw }
         }
@@ -2390,6 +2417,30 @@ run_checks() {
         check_detail("No body takes it away and lights", ok[0] == 1, "lit: ${lit}")
         string.free(lit)
         free(wt as ptr)
+    }
+
+    // The hierarchy's filter: typing narrows the rows to the objects whose
+    // names have the text, and clearing it brings every row back.
+    if scene >= 0 {
+        now = tree()
+        filter_box = 0 - 1
+        i = 0
+        while i < tree_count(now) {
+            fw = tree_at(now, i)
+            if fw.kind == "textfield" && fw.parent == scene_body_id(now) { filter_box = fw.id }
+            i = i + 1
+        }
+        all_rows = row_count(now, scene)
+        tree_free(now)
+        check("the hierarchy has a filter box", filter_box >= 0)
+        if filter_box >= 0 && all_rows >= 2 {
+            set_text(filter_box, "sphere")
+            narrowed = wait_rows(scene, 1)
+            check_detail("typing in the filter narrows the hierarchy to the matches", narrowed == 1, "${narrowed} rows for 'sphere' of ${all_rows}")
+            set_text(filter_box, "")
+            widened = wait_rows(scene, all_rows)
+            check_detail("clearing the filter brings every row back", widened == all_rows, "${widened} rows, had ${all_rows}")
+        }
     }
 
     if delete_btn >= 0 && scene >= 0 {

@@ -371,6 +371,80 @@ voxel_roundtrip() {
     list.free(lights)
 }
 
+// The hierarchy: a child's entry names its parent by index, its transform
+// is the local one, and the parent comes back. An entry that fails to
+// load shifts nothing: the parents and the attachments of the models
+// after it are resolved by entry, not by position in the list.
+hierarchy_roundtrip() {
+    path = "build/scene_roundtrip/hierarchy.json"
+    directory = "build/scene_roundtrip/"
+    parent = loader.cube(1.0)
+    core.model_set_name(parent, "parent")
+    core.model_set_position(parent, 10.0, 0.0, 0.0)
+    child = loader.cube(0.5)
+    core.model_set_name(child, "child")
+    core.model_set_parent(child, parent)
+    core.model_set_position(child, 0.0, 2.0, 0.0)
+    orphan = loader.cube(0.25)
+    core.model_set_name(orphan, "orphan")
+    models = list.new()
+    list.add_raw(models, orphan as ptr)
+    list.add_raw(models, parent as ptr)
+    list.add_raw(models, child as ptr)
+    attachments = list.new()
+    list.add_raw(attachments, scene.attachment_new(child, "mesh", "spin", null, null) as ptr)
+    lights = list.new()
+    if !scene.scene_save(models, lights, attachments, null, path, directory) {
+        record_failure("hierarchy scene did not save: ${scene.last_error()}")
+        return
+    }
+    loaded = scene.scene_load(path)
+    check_true("the hierarchy scene loads", loaded != null)
+    if loaded != null {
+        check_int("hierarchy model count", list.size(loaded), 3)
+        if list.size(loaded) == 3 {
+            back_parent = list.get_raw(loaded, 1) as *Model
+            back_child = list.get_raw(loaded, 2) as *Model
+            check_true("the child came back under its parent", core.model_parent(back_child) == back_parent)
+            check_near("the child's transform is local", back_child.position.y, 2.0)
+            check_near("and its world place follows the parent", core.model_world_position(back_child).x, 10.0)
+            check_true("the orphan has no parent", core.model_parent(list.get_raw(loaded, 0) as *Model) == null)
+        }
+        scene.scene_free(loaded)
+    }
+    // The orphan's entry made unloadable: the parent and the child shift
+    // down the list, and both still find each other and the child's script.
+    text, read_err = fs.read(path)
+    if read_err == "" {
+        patched = string.replace(text, "\"mesh_file\":\"build/scene_roundtrip/model_0.mesh\"", "\"mesh_file\":\"build/scene_roundtrip/gone.mesh\"")
+        string.free(text)
+        broken = "build/scene_roundtrip/hierarchy_broken.json"
+        fs.write(broken, patched)
+        string.free(patched)
+        partial = scene.scene_load(broken)
+        check_true("the scene without its orphan loads", partial != null)
+        if partial != null {
+            check_int("two of three came back", list.size(partial), 2)
+            if list.size(partial) == 2 {
+                back_parent = list.get_raw(partial, 0) as *Model
+                back_child = list.get_raw(partial, 1) as *Model
+                check_true("the child still finds its parent by entry", core.model_parent(back_child) == back_parent)
+                back = scene.scene_load_attachments(broken, partial)
+                check_true("the attachments still pair by entry", back != null && list.size(back) == 1 &&
+                           scene.attachment_model(list.get_raw(back, 0) as *Attachment) == back_child)
+                scene.attachments_free(back)
+            }
+            scene.scene_free(partial)
+        }
+    }
+    scene.attachments_free(attachments)
+    list.free(models)
+    list.free(lights)
+    core.model_free(child)
+    core.model_free(parent)
+    core.model_free(orphan)
+}
+
 main() {
     directory = "build/scene_roundtrip/"
     fs.mkdir_p(directory)
@@ -592,6 +666,7 @@ main() {
     water_roundtrip()
     components_roundtrip()
     voxel_roundtrip()
+    hierarchy_roundtrip()
 
     if failures == 0 {
         println("scene io: all checks passed")

@@ -66,6 +66,7 @@ struct Fixture {
     hits: int                      // hit events the car's body reported
     crate_body_matched: bool       // every step, the object's position was the body's
     spec_crate: ptr                // a crate given its body by a scene record
+    grouped: ptr                   // a crate under a group object a hundred metres out
     scene_written: bool            // the world was written as a scene on its first frame
 }
 
@@ -146,6 +147,24 @@ start(state: ptr, e: *Engine) {
     check_true("a body comes from a scene record", physics.apply_spec(sc, spec) != null)
     heap.free(spec)
     s.spec_crate = sc as ptr
+
+    // A crate under a group: the group stands a hundred metres out, the
+    // crate three metres up in the group's frame. The body lives in the
+    // world, so it falls where the group is, and its object stays a
+    // child with a local transform.
+    group = engine.object(e, "Far group", null)
+    behaviour.object_set_position(group, core.vec3(100.0, 0.0, 0.0))
+    grouped = engine.object(e, "Grouped crate", loader.cube(1.0))
+    core.model_set_parent(behaviour.object_model(grouped), behaviour.object_model(group))
+    behaviour.object_set_position(grouped, core.vec3(0.0, 3.0, 0.0))
+    physics.rigidbody(grouped, physics.DYNAMIC)
+    physics.box_collider(grouped, core.vec3(0.5, 0.5, 0.5), physics.material(0.6, 0.0))
+    check_near("a grouped crate's body starts where the group puts it", dynamics.body_get_position(physics.rigidbody_body(physics.rigidbody_of(grouped))).x, 100.0, 0.001)
+    s.grouped = grouped as ptr
+    // Under a slab of its own, a hundred metres out.
+    far_ground = engine.object(e, "Far ground", loader.cube(1.0))
+    behaviour.object_set_position(far_ground, core.vec3(100.0, 0.0 - 0.5, 0.0))
+    physics.box_collider(far_ground, core.vec3(5.0, 0.5, 5.0), physics.material(0.6, 0.0))
 
     lift = engine.object(e, "Lift", loader.cube(1.0))
     behaviour.object_set_position(lift, core.vec3(10.0, 0.5, 0.0))
@@ -310,6 +329,18 @@ check_scene_file(crate: *GameObject) {
     check_true("the written scene carries attachments", back != null)
     recorded = 0
     crate_recorded = false
+    bones_written = 0
+    grouped_parented = false
+    i = 0
+    while i < list.size(loaded) {
+        m = list.get_raw(loaded, i) as *Model
+        if string.contains(core.text(m.name), "/") == 1 { bones_written = bones_written + 1 }
+        if string.equals(core.text(m.name), "Grouped crate") == 1 {
+            parent = core.model_parent(m)
+            grouped_parented = parent != null && string.equals(core.text(parent.name), "Far group") == 1
+        }
+        i = i + 1
+    }
     if back != null {
         n = list.size(back)
         i = 0
@@ -327,11 +358,13 @@ check_scene_file(crate: *GameObject) {
         }
         scene.attachments_free(back)
     }
-    // The ground, two crates, the lift, its rider, the target, the ball,
-    // the hull crate, the car and its four wheels: thirteen bodies with
-    // colliders on a model of their own. A ragdoll's bones are the
-    // ragdoll's and are not recorded one by one.
-    check_true("every body on a model was recorded (${recorded})", recorded == 13)
+    // The ground, three crates, the far slab, the lift, its rider, the
+    // target, the ball, the hull crate, the car and its four wheels:
+    // fifteen bodies with colliders on a model of their own. A ragdoll's
+    // bones are the ragdoll's, internal, and not in the file at all.
+    check_true("every body on a model was recorded (${recorded})", recorded == 15)
+    check_true("no ragdoll bone was written", bones_written == 0)
+    check_true("the grouped crate's entry names its group as its parent", grouped_parented)
     check_true("the crate's record is its body and collider", crate_recorded)
     scene.scene_free(loaded)
 }
@@ -350,7 +383,7 @@ main() {
     light = core.light_sun(core.vec3(0.3, 0.8, 0.5))
     engine.engine_set_light(e, light)
     scene = Fixture { crate: null, lift: null, rider: null, target: null, ball: null, ragdoll: null, stander: null, hull_crate: null, victim: null, rig: null, victim_start_z: 0.0, victim_walked_z: 0.0,
-                      vehicle: null, car: null, car_start_x: 0.0, head_start_y: 0.0, steps: 0, fired: false, hits: 0, crate_body_matched: false, spec_crate: null, scene_written: false }
+                      vehicle: null, car: null, car_start_x: 0.0, head_start_y: 0.0, steps: 0, fired: false, hits: 0, crate_body_matched: false, spec_crate: null, grouped: null, scene_written: false }
     b = engine.behaviour_new("scene", (&scene) as ptr)
     b.start = start
     b.fixed_update = fixed_update
@@ -371,6 +404,11 @@ main() {
     check_near("the crate fell onto the slab and rests on it", crate_y, 0.5, 0.02)
     check_true("the crate's object followed its body every frame", scene.crate_body_matched)
     check_true("the crate is asleep at rest", physics.rigidbody_is_awake(physics.rigidbody_of(scene.crate as *GameObject)) == false)
+    grouped_world = behaviour.object_world_position(scene.grouped as *GameObject)
+    grouped_local = behaviour.object_position(scene.grouped as *GameObject)
+    check_near("the grouped crate fell where the group is, in the world", grouped_world.x, 100.0, 0.02)
+    check_near("and rests on the far slab", grouped_world.y, 0.5, 0.02)
+    check_near("its object is still the group's child, at a local place", grouped_local.x, 0.0, 0.02)
     spec_crate_y = behaviour.object_position(scene.spec_crate as *GameObject).y
     check_near("the crate made from a scene record fell and rests like it", spec_crate_y, 0.5, 0.02)
     crate_spec = physics.spec_of(scene.crate as *GameObject)
@@ -421,7 +459,7 @@ main() {
 
     bodies_before = physics.physics_body_count(p)
     // The stander's twelve anchors stand with it; the victim's went with its release.
-    check_true("the bodies are counted (${bodies_before})", bodies_before == 7 + 12 + 24 + 1 + 5 + 12)
+    check_true("the bodies are counted (${bodies_before})", bodies_before == 9 + 12 + 24 + 1 + 5 + 12)
     physics.physics_free(p)
     check_true("freed: no physics on the engine", physics.of(e) == null)
     check_true("freed: the objects are still the scene's", behaviour.scene_find(engine.engine_scene(e), "Crate") == scene.crate as *GameObject)

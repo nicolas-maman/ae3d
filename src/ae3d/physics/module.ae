@@ -233,16 +233,18 @@ on_fixed_update(state: ptr, e: *Engine, step: float) {
     }
 }
 
+// A body lives in the world; its object may live in a group (a parent
+// at some place), so the transforms cross in world space either way.
 pull_transform(rb: *Rigidbody) {
     o = rb.object as *GameObject
     t = dynamics.body_get_transform(rb.body_id)
-    behaviour.object_set_position(o, t.p)
-    behaviour.object_set_rotation(o, t.q)
+    behaviour.object_set_world_position(o, t.p)
+    behaviour.object_set_world_rotation(o, t.q)
 }
 
 push_transform(rb: *Rigidbody, step: float) {
     o = rb.object as *GameObject
-    target = Transform { p: behaviour.object_position(o), q: behaviour.object_rotation(o) }
+    target = Transform { p: behaviour.object_world_position(o), q: behaviour.object_world_rotation(o) }
     dynamics.body_set_target_transform(rb.body_id, target, step, true)
 }
 
@@ -336,8 +338,8 @@ rigidbody(o: *GameObject, kind: int) -> *Rigidbody {
     bdef.kind = dynamics.BODY_DYNAMIC
     if kind == KINEMATIC { bdef.kind = dynamics.BODY_KINEMATIC }
     if kind == STATIC { bdef.kind = dynamics.BODY_STATIC }
-    bdef.position = behaviour.object_position(o)
-    bdef.rotation = behaviour.object_rotation(o)
+    bdef.position = behaviour.object_world_position(o)
+    bdef.rotation = behaviour.object_world_rotation(o)
     rb.body_id = dynamics.create_body(p.world_id, &bdef)
     c = behaviour.component_new("Rigidbody", KIND_RIGIDBODY, rb as ptr)
     behaviour.object_add_component(o, c)
@@ -550,6 +552,24 @@ attachments(p: *Physics) -> ptr {
             heap.free(spec)
         }
         i = i + 1
+    }
+    // A ragdoll's bone capsules are this module's, made again with the
+    // ragdoll: the scene file leaves them out.
+    ragdolls = list.size(p.ragdolls)
+    k = 0
+    while k < ragdolls {
+        r = list.get_raw(p.ragdolls, k) as *Ragdoll
+        b = 0
+        while b < list.size(r.bones) {
+            bone_model = behaviour.object_model(list.get_raw(r.bones, b) as *GameObject)
+            if bone_model != null {
+                a = scene.attachment_new(bone_model, "", "", null, null)
+                scene.attachment_set_internal(a, true)
+                list.add_raw(out, a as ptr)
+            }
+            b = b + 1
+        }
+        k = k + 1
     }
     return out
 }

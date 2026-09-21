@@ -210,6 +210,7 @@ if command -v blender >/dev/null 2>&1 || [ -n "${BLENDER:-}" ]; then
     check_exported tests/fixtures/spin.blend tests/fixtures/exported
     check_exported resources/blender/showcase.blend resources/blender/showcase
     check_exported resources/blender/zombie_street.blend resources/blender/zombie_street
+    check_exported resources/blender/car.blend resources/blender/car
 else
     skip "exported fixtures" "no Blender"
 fi
@@ -224,7 +225,7 @@ if ! ./build.sh tools/check_coplanar.ae >/tmp/ae3d_coplanar.log 2>&1; then
     fail "check_coplanar (build)"
     sed 's/^/        /' /tmp/ae3d_coplanar.log | head -12
 else
-    for exported in resources/blender/zombie_street resources/blender/showcase; do
+    for exported in resources/blender/zombie_street resources/blender/showcase resources/blender/car; do
         if ./build/check_coplanar "$exported" >/tmp/ae3d_coplanar.log 2>&1; then
             pass "$exported has no coplanar overlaps"
         else

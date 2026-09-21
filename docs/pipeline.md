@@ -18,6 +18,16 @@ blender --background --factory-startup --python tools/blender/make_zombie_street
 ./scripts/export_assets.sh resources/blender/zombie_street.blend resources/blender/zombie_street
 ```
 
+The car the street is driven in is the pipeline's too: `tools/blender/make_car.py`
+builds a saloon at the scale of the street's physics -- the body lofted
+from a side profile and narrowing toward the roof, the cabin's glass and
+the roof as parts of their own, four wheels each with a hub, the lamps as
+emissive blocks -- with a flaked red paint and a tyre's rubber from the
+same texture generator, into `resources/blender/car`. `examples/street_drive.ae`
+assembles it by name: the body is the chassis, the hull of its own mesh
+its collider and the hull of the glass the cabin's; the parts ride on the
+body; each wheel is a body of its own with its hub riding on it.
+
 ![The hero zombie walking a night street under a lamp, its shadow on the wet road](images/zombie-street.png)
 
 *`tools/zombie_street.ae`: the same export as one figure, the rig the
@@ -86,7 +96,7 @@ critique_scene: the scene meets every standard
   ok   no foot sinks through the road (the lowest foot is +0.116, allowed 0.030)
   ok   a planted foot stays planted (worst 0.000 m in a frame, allowed 0.025)
   ok   the strike reaches past anything the walk does (0.138 m past the walk, wanted 0.120)
-  ok   the head follows the body rather than leading it (a lag of 11 frames)
+  ok   the shoulders follow the hips rather than turning with them (best alignment at a lag of 2 frames, wanted at least 1)
 ```
 
 `tools/ae3d_bench.ae` records what a frame of the scene costs (draws,

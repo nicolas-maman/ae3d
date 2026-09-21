@@ -308,6 +308,19 @@ var g_mode_hint = 0
 // A list with nothing marked is the same list whatever is selected, and the
 // inspector was the only thing that said which object it was describing.
 var g_hier_rows: ptr = null
+// The hierarchy is a tree of the scene's objects: roots in scene order,
+// an expanded parent's children under it, depth first -- what a person
+// navigates a scene of a thousand props by, where a flat list is not.
+// The rows are the objects shown, in the order shown; a row's object is
+// looked up here, never by the row's position in the scene. While a
+// filter is typed the tree gives way to every object whose name has the
+// text, flat.
+var g_visible: ptr = null          // int[g_visible_count]: the object of each row
+var g_visible_count = 0
+var g_visible_room = 0
+var g_expanded: ptr = null         // list of *Model: the parents shown open
+var g_filter = ""
+var g_filter_field = 0
 var g_history: ptr = null
 // When the last property edit was recorded. A drag delivers a callback per
 // frame, so edits that stop arriving mean the adjustment is over and the undo
@@ -330,6 +343,16 @@ var g_bloom = false
 // inert on OpenGL, but the scene carries it either way (#267).
 var g_ssr_toggle = 0
 var g_ssr = false
+// The reflection's road height and strength, the scene's (the view
+// carries them; a program's scene sets its own road).
+var g_ssr_road_height = 0.0
+var g_ssr_strength = 0.6
+// Distance fog, the scene's own, in the sky's colour.
+var g_fog = false
+var g_fog_toggle = 0
+var g_fog_start = 20.0
+var g_fog_end = 300.0
+var g_fog_intensity = 1.0
 // Clouds over the sky: a switch, at the cover a scene's sky usually wants.
 var g_clouds = false
 var g_clouds_toggle = 0
@@ -369,8 +392,6 @@ struct Rest {
     position: Vec3
     rotation: Quat
 }
-const SSR_ROAD_HEIGHT = 0.0
-const SSR_STRENGTH = 0.6
 // The first frame rate the bar ever showed. A driver cannot see it: by the
 // time anything can ask, the average has climbed to something plausible and a
 // check on what the bar says now passes against a bar that opened on nothing.
@@ -863,8 +884,9 @@ apply_post() {
     core.backend_set_post(&backend, g_fxaa, g_bloom, BLOOM_THRESHOLD, BLOOM_INTENSITY)
     if g_vulkan {
         vk.renderer_set_ssr(g_renderer as *VKRenderer, g_ssr)
-        vk.renderer_set_ssr_params(g_renderer as *VKRenderer, SSR_ROAD_HEIGHT, SSR_STRENGTH)
+        vk.renderer_set_ssr_params(g_renderer as *VKRenderer, g_ssr_road_height, g_ssr_strength)
     }
+    apply_fog()
     cover = 0.0
     if g_clouds { cover = g_cloud_cover }
     // The sky is the weather's while there is weather: the clouds and the
@@ -909,6 +931,16 @@ start_weather() {
     behaviour.scene_set_host(g_scene as *Scene, g_engine)
     g_weather = weather.weather_new(g_engine as *Engine) as ptr
     apply_weather()
+}
+
+// The fog onto the viewport: the scene's, in the sky's colour, or none.
+apply_fog() {
+    if g_renderer == null { return }
+    backend = viewport_backend()
+    haze = core.fog_none()
+    if g_fog { haze = core.fog_distance(g_fog_start, g_fog_end, core.vec3(g_sky_r, g_sky_g, g_sky_b), g_fog_intensity) }
+    core.backend_set_fog(&backend, &haze)
+    mark_dirty()
 }
 
 // The section's state onto the weather: the wind first, since a kind
@@ -992,6 +1024,10 @@ refresh_parts() {
         return
     }
     parts = string.copy(kind_name(c.kind))
+    if is_group(g_selected) {
+        string.free(parts)
+        parts = string.copy("group")
+    }
     attached = script_at(g_selected)
     if attached != SCRIPT_NONE {
         name = script_name(attached)
@@ -1199,7 +1235,7 @@ row_label(index: int) -> string {
     if m == null { return "" }
     name = core.text(m.name)
     if name == "" { name = "object ${m.id}" }
-    return " ${row_marker(index)}  ${name}"
+    return "${row_marker(index)}  ${name}"
 }
 
 extern malloc(size: int) -> ptr
@@ -1220,31 +1256,35 @@ const OVERCAST_ROW = 37
 const FRICTION_ROW = 38
 const RESTITUTION_ROW = 39
 const DENSITY_ROW = 40
-const ROWS = 41
+// The scene's fog: where it starts and where it is whole, in metres. The
+// view's, like the occlusion; its colour is the sky's.
+const FOG_START_ROW = 41
+const FOG_END_ROW = 42
+const ROWS = 43
 // Past every inspector row, because a turn of the gizmo is not a row: it is
 // recorded as the angle the drag has turned through so far, and undone by
 // turning back through it.
-const ROTATE_FIRST_SLOT = 41
-// Past the rotation axes, which take 41 through 43. A behaviour is a property
+const ROTATE_FIRST_SLOT = 43
+// Past the rotation axes, which take 43 through 45. A behaviour is a property
 // of a model like any other as far as undo is concerned, so it travels as a
 // property step in a slot no row uses.
-const SCRIPT_SLOT = 44
+const SCRIPT_SLOT = 46
 // A terrain's shape. A choice rather than a number, so it travels the way a
 // behaviour does rather than as a row.
-const TERRAIN_BIOME_SLOT = 45
+const TERRAIN_BIOME_SLOT = 47
 // A terrain's style. Blocks are voxels drawn one cube per cell; smooth meshes
 // the same field into one surface. Voxels are a kind of terrain rather than
 // what terrain is.
-const TERRAIN_STYLE_SLOT = 46
+const TERRAIN_STYLE_SLOT = 48
 // A stroke of the sculpting brush: one undo step from press to release,
 // whose before and after are the terrain's column heights, kept in a list
 // of strokes the step indexes.
-const SCULPT_SLOT = 47
+const SCULPT_SLOT = 49
 // The weather's kind: a choice, undone the way a terrain's style is.
-const WEATHER_KIND_SLOT = 48
+const WEATHER_KIND_SLOT = 50
 // The body's kind and its collider's, on the selected object.
-const BODY_KIND_SLOT = 49
-const COLLIDER_KIND_SLOT = 50
+const BODY_KIND_SLOT = 51
+const COLLIDER_KIND_SLOT = 52
 // The kinds of body an object can be, in the order the buttons draw them:
 // none, or the physics module's three.
 const BODY_NONE = 0
@@ -1395,7 +1435,8 @@ paint_selection() {
     while i < count {
         slot = list.get_raw(g_hier_rows, i) as int[]
         handle = slot[0]
-        if i == g_selected {
+        shown = object_of_row(i)
+        if shown >= 0 && (shown == g_selected || is_selected(shown)) {
             ui.style_bg_color(handle, 0.153, 0.310, 0.573, 1.0)
         } else {
             ui.style_bg_color(handle, 0.149, 0.149, 0.149, 1.0)
@@ -1420,14 +1461,183 @@ rebuild_rows() {
     if g_rows == null { g_rows = list.new() }
     release_rows()
     release_hier_rows()
-    count = row_count()
-    i = 0
-    while i < count {
-        list.add_raw(g_rows, index_handle(i))
-        i = i + 1
+    build_visible()
+    k = 0
+    while k < g_visible_count {
+        list.add_raw(g_rows, index_handle(object_of_row(k)))
+        k = k + 1
     }
     if g_hierarchy != null { ui.listbox_update(g_hierarchy, g_rows) }
     paint_selection()
+}
+
+// --- the hierarchy's tree ----------------------------------------------------------------------------------
+
+// The object whose model is this one's parent, or -1: a parent outside the
+// scene (a program's own) makes the object a root here.
+parent_index_of(index: int) -> int {
+    m = model_at(index)
+    if m == null { return 0 - 1 }
+    parent = core.model_parent(m)
+    if parent == null { return 0 - 1 }
+    return row_of_model(parent as ptr)
+}
+
+has_children(index: int) -> bool {
+    count = row_count()
+    i = 0
+    while i < count {
+        if i != index && parent_index_of(i) == index { return true }
+        i = i + 1
+    }
+    return false
+}
+
+is_expanded(index: int) -> bool {
+    m = model_at(index)
+    if m == null || g_expanded == null { return false }
+    count = list.size(g_expanded)
+    i = 0
+    while i < count {
+        if list.get_raw(g_expanded, i) == m as ptr { return true }
+        i = i + 1
+    }
+    return false
+}
+
+set_expanded(index: int, on: bool) {
+    m = model_at(index)
+    if m == null { return }
+    if g_expanded == null { g_expanded = list.new() }
+    count = list.size(g_expanded)
+    i = 0
+    while i < count {
+        if list.get_raw(g_expanded, i) == m as ptr {
+            if !on { list.remove(g_expanded, i) }
+            return
+        }
+        i = i + 1
+    }
+    if on { list.add_raw(g_expanded, m as ptr) }
+}
+
+toggle_expanded(index: int) {
+    set_expanded(index, !is_expanded(index))
+    rebuild_rows()
+}
+
+// A group is an object with a transform and nothing to draw.
+is_group(index: int) -> bool {
+    m = model_at(index)
+    return m != null && core.mesh_vertex_count(m.mesh) == 0
+}
+
+depth_of(index: int) -> int {
+    depth = 0
+    up = parent_index_of(index)
+    while up >= 0 && depth < 32 {
+        depth = depth + 1
+        up = parent_index_of(up)
+    }
+    return depth
+}
+
+push_visible(index: int) {
+    if g_visible_count >= g_visible_room {
+        g_visible_room = g_visible_room * 2 + 64
+        grown = calloc(g_visible_room, 4)
+        if g_visible != null {
+            memcpy(grown, g_visible, g_visible_count * 4)
+            free(g_visible)
+        }
+        g_visible = grown
+    }
+    (g_visible as int[])[g_visible_count] = index
+    g_visible_count = g_visible_count + 1
+}
+
+// An object and, when it is shown open, what is under it, depth first.
+push_subtree(index: int) {
+    push_visible(index)
+    if !is_expanded(index) { return }
+    count = row_count()
+    i = 0
+    while i < count {
+        if i != index && parent_index_of(i) == index { push_subtree(i) }
+        i = i + 1
+    }
+}
+
+// The rows: the tree, or the filter's matches.
+build_visible() {
+    g_visible_count = 0
+    count = row_count()
+    i = 0
+    while i < count {
+        if g_filter != "" {
+            m = model_at(i)
+            if m != null && string.contains(core.text(m.name), g_filter) == 1 { push_visible(i) }
+        } else if parent_index_of(i) < 0 {
+            push_subtree(i)
+        }
+        i = i + 1
+    }
+}
+
+// The object shown on a row, or -1.
+object_of_row(row: int) -> int {
+    if g_visible == null || row < 0 || row >= g_visible_count { return 0 - 1 }
+    return (g_visible as int[])[row]
+}
+
+// The row an object is shown on, or -1 (under a collapsed parent, or
+// outside the filter).
+row_of_object(index: int) -> int {
+    if g_visible == null { return 0 - 1 }
+    rows = g_visible as int[]
+    k = 0
+    while k < g_visible_count {
+        if rows[k] == index { return k }
+        k = k + 1
+    }
+    return 0 - 1
+}
+
+// Every parent above the object shown open, so its row exists.
+reveal(index: int) {
+    up = parent_index_of(index)
+    changed = false
+    while up >= 0 {
+        if !is_expanded(up) {
+            set_expanded(up, true)
+            changed = true
+        }
+        up = parent_index_of(up)
+    }
+    if changed { rebuild_rows() }
+}
+
+// The objects of a subtree, the root first, in scene order below it.
+subtree_of(index: int) -> ptr {
+    out = list.new()
+    list.add_raw(out, index_handle(index))
+    head = 0
+    while head < list.size(out) {
+        at = (list.get_raw(out, head) as int[])[0]
+        count = row_count()
+        i = 0
+        while i < count {
+            if i != at && parent_index_of(i) == at { list.add_raw(out, index_handle(i)) }
+            i = i + 1
+        }
+        head = head + 1
+    }
+    return out
+}
+
+set_filter(text: string) {
+    g_filter = string.copy(text)
+    rebuild_rows()
 }
 
 // The inspector reads the selected model rather than keeping its own copy, so a
@@ -1632,9 +1842,13 @@ select_object_adding(index: int, adding: bool) {
     sync_inspector()
 
     if g_hierarchy != null && index >= 0 && !g_syncing {
-        g_syncing = true
-        ui.listbox_select(g_hierarchy, index)
-        g_syncing = false
+        reveal(index)
+        row = row_of_object(index)
+        if row >= 0 {
+            g_syncing = true
+            ui.listbox_select(g_hierarchy, row)
+            g_syncing = false
+        }
     }
 }
 
@@ -1707,21 +1921,46 @@ place_model(m: *Model, name: string, kind: int, state: ptr) {
     // the very string the setter just released, and using it again is a
     // use-after-free: the editor crashed drawing the hierarchy row for the
     // first model of every scene it opened.
-    backend = viewport_backend()
-    core.backend_add_model(&backend, m)
+    // A group -- a transform and nothing to draw -- is the scene's, not
+    // the renderer's.
+    if core.mesh_vertex_count(m.mesh) > 0 {
+        backend = viewport_backend()
+        core.backend_add_model(&backend, m)
+    }
     add_object(m, core.text(m.name), kind, state)
     history.history_record(g_history, history.STEP_ADD, m as ptr, 0, 0.0, 0.0)
     apply_shading_to(m)
 }
 
+// The object and everything under it: a group goes with its contents,
+// each a step of its own, undone in turn.
 remove_selected() {
     m = selected_model()
     if m == null { return }
 
     backend = viewport_backend()
-    core.backend_remove_model(&backend, m)
-    detach_at(g_selected)
-    history.history_record(g_history, history.STEP_REMOVE, m as ptr, 0, 0.0, 0.0)
+    members = subtree_of(g_selected)
+    // Deepest first: taking a row out moves the rows after it, so the
+    // indices are resolved from the bottom of the list up.
+    taken = list.new()
+    i = 0
+    while i < list.size(members) {
+        list.add_raw(taken, model_at((list.get_raw(members, i) as int[])[0]) as ptr)
+        i = i + 1
+    }
+    i = list.size(taken) - 1
+    while i >= 0 {
+        member = list.get_raw(taken, i) as *Model
+        at = row_of_model(member as ptr)
+        if at >= 0 {
+            core.backend_remove_model(&backend, member)
+            detach_at(at)
+            history.history_record(g_history, history.STEP_REMOVE, member as ptr, 0, 0.0, 0.0)
+        }
+        i = i - 1
+    }
+    release_index_list(members)
+    list.free(taken)
 
     g_selected = g_selected - 1
     if g_selected < 0 && row_count() > 0 { g_selected = 0 }
@@ -3331,20 +3570,74 @@ replay(step: *EditStep, backwards: bool) {
     if backwards { say("undo") } else { say("redo") }
 }
 
+// The object and everything under it, copied: the copies are parented as
+// the originals are, and the root of the copy is set a little aside.
 duplicate_selected() {
     m = selected_model()
     if m == null { return }
+    members = subtree_of(g_selected)
+    originals = list.new()
+    copies = list.new()
+    i = 0
+    while i < list.size(members) {
+        at = (list.get_raw(members, i) as int[])[0]
+        original = model_at(at)
+        copy = core.model_clone(original)
+        if copy != null {
+            list.add_raw(originals, original as ptr)
+            list.add_raw(copies, copy as ptr)
+        }
+        i = i + 1
+    }
+    release_index_list(members)
+    // The parents among the copies, by the originals' relation.
+    i = 0
+    while i < list.size(copies) {
+        original = list.get_raw(originals, i) as *Model
+        parent = core.model_parent(original)
+        k = 0
+        while k < list.size(originals) {
+            if list.get_raw(originals, k) == parent as ptr {
+                core.model_set_parent(list.get_raw(copies, i) as *Model, list.get_raw(copies, k) as *Model)
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    if list.size(copies) > 0 {
+        root = list.get_raw(copies, 0) as *Model
+        core.model_set_position(root, m.position.x + 20.0, m.position.y, m.position.z + 20.0)
+    }
+    i = 0
+    while i < list.size(copies) {
+        copy = list.get_raw(copies, i) as *Model
+        suffix = ""
+        if i == 0 { suffix = " copy" }
+        place_model(copy, "${core.text(copy.name)}${suffix}", behaviour.KIND_MESH, null)
+        i = i + 1
+    }
+    list.free(originals)
+    list.free(copies)
+    rebuild_rows()
+    select_object(row_count() - 1)
+    say("duplicated")
+}
 
-    copy = core.model_clone(m)
-    if copy == null { return }
-    core.model_set_position(copy, m.position.x + 20.0, m.position.y, m.position.z + 20.0)
-    add_model(copy, "${core.text(m.name)} copy")
+release_index_list(members: ptr) {
+    i = 0
+    while i < list.size(members) {
+        free(list.get_raw(members, i))
+        i = i + 1
+    }
+    list.free(members)
 }
 
 attach_model(m: *Model) {
     if m == null { return }
-    backend = viewport_backend()
-    core.backend_add_model(&backend, m)
+    if core.mesh_vertex_count(m.mesh) > 0 {
+        backend = viewport_backend()
+        core.backend_add_model(&backend, m)
+    }
     if !reattach(m as ptr) {
         add_object(m, core.text(m.name), behaviour.KIND_MESH, null)
     }
@@ -3452,6 +3745,8 @@ water_value(index: int) -> float {
 // and overcast, the occlusion, the weather and its wind. Read back from
 // the editor's own state, which is what they set.
 view_value(index: int) -> float {
+    if index == FOG_START_ROW { return g_fog_start }
+    if index == FOG_END_ROW { return g_fog_end }
     if index == CLOUD_COVER_ROW { return g_cloud_cover }
     if index == OVERCAST_ROW { return g_overcast }
     if index == SSAO_ROW { return g_ssao_intensity }
@@ -3464,6 +3759,7 @@ view_value(index: int) -> float {
 
 is_view_row(index: int) -> bool {
     return index == CLOUD_COVER_ROW || index == OVERCAST_ROW || index == SSAO_ROW || index == SSAO_RADIUS_ROW ||
+           index == FOG_START_ROW || index == FOG_END_ROW ||
            index == WEATHER_ROW || index == WIND_HEADING_ROW || index == WIND_SPEED_ROW
 }
 
@@ -3514,6 +3810,11 @@ refresh_sky_rows() {
 
 // The renderer clears to this, so the sky is what the scene is drawn on rather
 // than a colour behind it.
+apply_sky_and_fog() {
+    apply_sky()
+    apply_fog()
+}
+
 apply_sky() {
     if g_renderer == null { return }
     backend = viewport_backend()
@@ -3682,6 +3983,17 @@ apply_property(index: int, value: float) {
         return
     }
 
+    if index == FOG_START_ROW || index == FOG_END_ROW {
+        was = g_fog_start
+        if index == FOG_END_ROW { was = g_fog_end }
+        history.history_record(g_history, history.STEP_PROPERTY, null, index, was, value)
+        g_last_edit = seconds()
+        if index == FOG_START_ROW { g_fog_start = value } else { g_fog_end = value }
+        apply_fog()
+        show_row(index, value)
+        return
+    }
+
     if index == SSAO_ROW || index == SSAO_RADIUS_ROW {
         was = g_ssao_intensity
         if index == SSAO_RADIUS_ROW { was = g_ssao_radius }
@@ -3700,7 +4012,7 @@ apply_property(index: int, value: float) {
         if index == SKY_FIRST_ROW { g_sky_r = value }
         if index == SKY_FIRST_ROW + 1 { g_sky_g = value }
         if index == SKY_LAST_ROW { g_sky_b = value }
-        apply_sky()
+        apply_sky_and_fog()
         show_row(index, value)
         return
     }
@@ -4282,6 +4594,7 @@ build_scene() {
     // program's scene (AE3D_SCENE_OUT) opens here with its bodies.
     if string.equals(g_scene_path, DEFAULT_SCENE_PATH) != 1 && fs.file_exists(g_scene_path) == 1 {
         load_scene()
+        return
     }
 
     select_object(1)
@@ -4318,8 +4631,15 @@ current_view() -> View {
     v.bloom_threshold = BLOOM_THRESHOLD
     v.bloom_intensity = BLOOM_INTENSITY
     v.ssr = g_ssr
-    v.ssr_road_height = SSR_ROAD_HEIGHT
-    v.ssr_strength = SSR_STRENGTH
+    v.ssr_road_height = g_ssr_road_height
+    v.ssr_strength = g_ssr_strength
+    v.fog = g_fog
+    v.fog_start = g_fog_start
+    v.fog_end = g_fog_end
+    v.fog_intensity = g_fog_intensity
+    v.fog_r = g_sky_r
+    v.fog_g = g_sky_g
+    v.fog_b = g_sky_b
     v.clouds = g_clouds
     v.cloud_cover = g_cloud_cover
     v.overcast = g_overcast
@@ -4470,9 +4790,10 @@ load_scene() {
     }
     scene.attachments_free(attachments)
     list.free(loaded)
-    // The hierarchy once, for every model, and the first one selected.
+    // The hierarchy once, for every model, and its first root selected:
+    // the tree opens closed.
     rebuild_rows()
-    if row_count() > 0 { select_object(0) }
+    if g_visible_count > 0 { select_object(object_of_row(0)) }
     refresh_script_buttons()
 
     view = scene.scene_load_view(g_scene_path)
@@ -4503,6 +4824,15 @@ load_scene() {
     g_fxaa = view.fxaa
     g_bloom = view.bloom
     g_ssr = view.ssr
+    g_ssr_road_height = view.ssr_road_height
+    g_ssr_strength = view.ssr_strength
+    g_fog = view.fog
+    g_fog_start = view.fog_start
+    g_fog_end = view.fog_end
+    g_fog_intensity = view.fog_intensity
+    show_row(FOG_START_ROW, g_fog_start)
+    show_row(FOG_END_ROW, g_fog_end)
+    if g_fog_toggle != 0 { ui.set_toggle(g_fog_toggle, flag_of(g_fog)) }
     g_clouds = view.clouds
     g_cloud_cover = view.cloud_cover
     show_row(CLOUD_COVER_ROW, g_cloud_cover)
@@ -5515,13 +5845,40 @@ main() {
         // index is mangled in the signature and not in the body by the
         // current compiler (aether#2087), and on Linux the body then reads
         // libc's index().
+        // Typing here narrows the tree to the objects whose names have the
+        // text, the way every editor's outliner searches.
+        g_filter_field = ui.textfield(scene_body, "filter") callback |text: string| {
+            set_filter(text)
+        }
+        ui.add_css_class(g_filter_field, "field")
+        ui.fill_width(g_filter_field)
+
+        // A row is an object of the tree, indented by its depth, with a
+        // disclosure for a parent; the object is the row's, carried in the
+        // item, never the row's position in the scene.
         g_hierarchy = ui.listbox(scene_body, 4) callback |item: ptr, at: int, row: int| {
-            entry = ui.text(as_row(ui.hstack(row, 0)), row_label(at))
+            shown = (item as int[])[0]
+            row_line = as_row(ui.hstack(row, 2))
+            depth = 0
+            if g_filter == "" { depth = depth_of(shown) }
+            if g_filter == "" && has_children(shown) {
+                glyph = SHUT_CARET
+                if is_expanded(shown) { glyph = OPEN_CARET }
+                caret = ui.btn(row_line, glyph) callback { toggle_expanded(shown) }
+                ui.style_flat(caret)
+                ui.width(caret, CARET_W + 6)
+                if depth > 0 { ui.margin_of(caret, 0, 0, 0, 14 * depth) }
+            } else {
+                blank = ui.text(row_line, " ")
+                ui.width(blank, CARET_W + 6)
+                if depth > 0 { ui.margin_of(blank, 0, 0, 0, 14 * depth) }
+            }
+            entry = ui.text(row_line, row_label(shown))
             ui.add_css_class(entry, "value")
             list.add_raw(g_hier_rows, index_handle(row))
         }
         ui.on_select(g_hierarchy) callback |at: int| {
-            select_object(at)
+            select_object(object_of_row(at))
         }
 
         ui.divider(left)
@@ -6094,6 +6451,19 @@ main() {
             if g_vulkan { say("reflections ${on}") }
             else { say("reflections ${on} (drawn on the Vulkan backend)") }
         }
+
+        fog_row = ui.hstack(shading_body, 8)
+        as_row(fog_row)
+        fog_caption = ui.text(fog_row, "Fog")
+        ui.add_css_class(fog_caption, "label")
+        ui.spacer(fog_row)
+        g_fog_toggle = ui.toggle(fog_row, "") callback |on: bool| {
+            g_fog = on
+            apply_fog()
+            say("fog ${on}")
+        }
+        inspector_row(shading_body, "fog start", 0.0, 500.0, 20.0, FOG_START_ROW)
+        inspector_row(shading_body, "fog end", 1.0, 2000.0, 300.0, FOG_END_ROW)
 
         clouds_row = ui.hstack(shading_body, 8)
         as_row(clouds_row)
