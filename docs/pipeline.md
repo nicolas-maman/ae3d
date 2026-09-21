@@ -18,14 +18,14 @@ blender --background --factory-startup --python tools/blender/make_zombie_street
 ./scripts/export_assets.sh resources/blender/zombie_street.blend resources/blender/zombie_street
 ```
 
-![The hero zombie walking a night street under a lamp, its shadow on the wet road](zombie-street.png)
+![The hero zombie walking a night street under a lamp, its shadow on the wet road](images/zombie-street.png)
 
 *`tools/zombie_street.ae`: the same export as one figure, the rig the
 engine is measured on. 225 objects, every surface textured to one texel
 density, the figure one skinned surface with a face, and the wet road taking
 the lamp.*
 
-![The same street through Vulkan: the wet road mirrors the lit windows, the lamp and the figure](zombie-street-vulkan.png)
+![The same street through Vulkan: the wet road mirrors the lit windows, the lamp and the figure](images/zombie-street-vulkan.png)
 
 *The same rig through Vulkan, where the wet road is a screen-space reflection
 of what is drawn: the windows, the lamp and the figure, mirrored. The march has
@@ -118,7 +118,7 @@ each band of a frame, and what moved between two).
 
 ## Models from anywhere: glTF
 
-![The Khronos Fox walking on a floor, its shadow under it](gltf-fox.png)
+![The Khronos Fox walking on a floor, its shadow under it](images/gltf-fox.png)
 
 The pipeline above is for scenes built here. A figure from anywhere else --
 Mixamo, Sketchfab, a Quaternius pack, another engine's export -- comes in

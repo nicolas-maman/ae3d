@@ -6,7 +6,7 @@ git clone https://github.com/aether-lang-dev/aether-ui.git ../aether-ui
 ./build/ae3d_editor
 ```
 
-![the editor on Windows](editor-windows.png)
+![the editor on Windows](images/editor-windows.png)
 
 The chrome is one dark theme on every platform: neutral greys, three tones
 apart -- the viewport's ground, the panels a step lighter, the bars and
@@ -265,6 +265,8 @@ cannot rasterize widgets to pixels, so `GET /widgets` and its geometry is the
 only way to tell whether a panel is where it should be.
 
 ## How the viewport works
+
+![The viewport: the scene drawn into the toolkit's GPU view, the gizmo on a canvas over it](images/editor-viewport.png)
 
 aether-ui hosts a real GL context
 ([aether-ui#92](https://github.com/aether-lang-dev/aether-ui/issues/92)), so the

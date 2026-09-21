@@ -110,10 +110,10 @@ was the simulation: 25 ms of one thread stepping half a million figures
 heading 2.1, the shove 2.3, the step 8.6, the sort 4.3, the matrices and
 the upload 10.0). Every one of those passes is the same few lines on every
 figure with nothing shared but the arrays, so they run over the engine's
-job pool now (`native/ae3d_jobs.c`: a worker for every hardware thread
-but the main one, `ae3d_jobs_for` handing runs of a few thousand figures
-to the workers and the caller alike; `AE3D_JOBS=n` sets the thread count,
-1 is the main thread alone) and the sort goes into its three tiers in one
+job pool now (`ae3d.jobs`, aephysics's scheduler: a worker for every
+hardware thread but the main one, `jobs.parallel_for` handing runs of a
+few thousand figures to the workers and the caller alike; `AE3D_JOBS=n`
+sets the thread count, 1 is the main thread alone) and the sort goes into its three tiers in one
 pass instead of a pass and a pass over the far tier's output. On a
 24-thread machine:
 

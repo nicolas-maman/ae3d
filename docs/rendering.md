@@ -89,7 +89,7 @@ The feature list in full, with the reasoning behind each. The [README](../README
 - **Weather.** `ae3d.weather` puts rain, snow, dust or a storm over any
   scene with one call: `weather_set(w, STORM, 0.8)`. The particles are point
   instances -- a position, a scale, a colour and a phase each, the stream
-  the sand's grains use -- stepped in C in a box that rides ahead of the
+  the sand's grains use -- stepped over the job pool in a box that rides ahead of the
   camera, so a hundred thousand drops cost a fraction of a millisecond
   wherever the eye goes; rain is a thin streak falling fast, snow a flake
   swaying down, dust a mote carried by the wind. Each kind sets the fog it
@@ -111,7 +111,7 @@ The feature list in full, with the reasoning behind each. The [README](../README
   `overcast`, `overcast_color`) so a frame under it can be held against
   the clear one.
 
-  ![Rain, storm, dust and snow over the island](weather.png)
+  ![Rain, storm, dust and snow over the island](images/weather.png)
 
 - **Voxel worlds as a face mesh.** Only the faces that show, each corner
   carrying the sky it can see from the three voxels that crowd it -- the
@@ -127,7 +127,7 @@ The feature list in full, with the reasoning behind each. The [README](../README
   everything attached to them, a scene editor, and `AE3D_API=vulkan` to run
   any program on the other renderer.
 
-![Twenty thousand zombies filling the street from end to end, seen from above the pavement](zombie-horde.png)
+![Twenty thousand zombies filling the street from end to end, seen from above the pavement](images/zombie-horde.png)
 
 *`AE3D_CROWD=20000 AE3D_NEAR=28 ./build/zombie_city`: the near tier draws the
 full mesh, the far tier the build's own 168-triangle stand-in, and past
@@ -345,8 +345,8 @@ colour, its resolved depth and its motion vectors, in the temporal pass's
 place, with the same nudged projection (more phases: eight times the
 square of the scale). The composite samples what it wrote.
 
-How it is wired (`native/ae3d_dlss.cpp`, C++ against the SDK's headers,
-behind the C surface of `native/ae3d_dlss.h`): the Streamline runtime is
+How it is wired (`native/dlss/streamline.cpp`, C++ against the SDK's headers,
+behind the C surface of `native/dlss/streamline.h`): the Streamline runtime is
 loaded before Vulkan starts and its interposer stands in for the Vulkan
 loader, so the instance and the device made through it carry what DLSS
 needs; each frame the camera's matrices (column-major here, row-major and

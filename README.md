@@ -3,85 +3,49 @@
 [![ci](https://github.com/nicolas-maman/ae3d/actions/workflows/ci.yml/badge.svg)](https://github.com/nicolas-maman/ae3d/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**A 3D engine built to be driven by programs.** One scene API over Vulkan and
-OpenGL, a Blender-to-engine asset pipeline, a scene editor, and a control
-channel through which a program, a test or an AI agent builds a scene, reads
-back what was drawn and checks the frame by number rather than by eye.
+**A 3D engine written in Aether, built to be driven by programs.** One
+scene API over Vulkan and OpenGL; a rigid body engine of its own in the
+loop; skinned crowds of half a million; a Blender-to-engine pipeline; a
+scene editor; and a control channel through which a program, a test or an
+AI agent builds a scene, reads back what was drawn and checks the frame by
+number rather than by eye.
 
-![The seabed under the swell, caustics on the sand](docs/caustics.png)
+![A car on wheel joints driving the zombie street at night, crates and bystanders on the pavements](docs/images/street-drive.png)
 
-<sub>`examples/caustics.ae`: the seabed a diver's height off the sand under a Gerstner swell, the light refracted through the surface onto the rocks and the floor, every frame; the sand and the sky are the engine's own, painted from noise.</sub>
+<sub>`examples/street_drive.ae`: the street from the Blender pipeline, every building and kerb colliding as its own triangles, every crate and bench as the convex hull of its mesh, a car on suspension, drive and steering joints, and bystanders standing as sprung ragdolls until the car reaches them. 501 bodies stepped over every core; 144 fps hidden on an RTX 4070 Ti at 1280×720 with ray-traced shadows on, the physics 0.09 ms of the frame.</sub>
 
-ae3d is written in [Aether](https://github.com/aether-lang-dev/aether) with a
-thin C layer for the GPU, windowing and image decoding. It is the successor to
-[Gopher3D](https://github.com/nicolas-maman/gopher3D), the same author's Go
-engine, rebuilt and taken further: a Vulkan renderer at parity with OpenGL,
-skinned instanced crowds, and an engine that can be interrogated while it runs.
+ae3d is the successor to [Gopher3D](https://github.com/nicolas-maman/gopher3D),
+the same author's Go engine, rebuilt in [Aether](https://github.com/aether-lang-dev/aether)
+and taken further. The engine is Aether from the loop to the crowd's
+kernels; what remains in C is there for one stated reason each
+([native/README.md](native/README.md)).
 
-## Features
+## What it does
 
 | | |
 |---|---|
-| **Two renderers, one interface** | Vulkan by default, OpenGL 4.1 at parity; `tests/test_backend_parity` draws the same scene through both and holds them to 0.7% of channels. DirectX 12 and Metal are on the roadmap ([#311](https://github.com/nicolas-maman/ae3d/issues/311), [#312](https://github.com/nicolas-maman/ae3d/issues/312)). |
-| **Physically based shading** | Metallic/roughness materials, sixteen lights a frame (the nearest of any number), normal mapping, texel-snapped shadow maps, SSAO, screen-space reflections, ray-traced shadows with penumbrae, every lamp's own shadow and ambient occlusion by ray (Vulkan ray query), MSAA, temporal anti-aliasing, DLSS (NVIDIA Streamline on Vulkan), FXAA, bloom, ACES tone mapping, fog, wet surfaces. |
-| **A sky by the hour** | `engine_set_time_of_day(hours)` places the sun and derives the key light, fog and a procedural sky from it. Volumetric clouds from baked Perlin-Worley textures, lit through a sun march, shadowing the ground: ~1.5 ms a frame. |
-| **Weather** | Rain, snow, dust and storm over any scene (`ae3d.weather`): a hundred thousand point-instanced particles stepped in C around the camera, wind, the sky and clouds gone overcast, the fog and the sun to match, lightning in a storm. |
-| **Water** | A Gerstner sea with dispersion, fresnel, GGX glitter, whitecaps, depth-based shallows and a foam line, and caustics from underneath. |
-| **Crowds** | A figure's walk baked into a pose bank; every instance posed in the vertex shader from its own phase, three tiers by distance: the full mesh, a 168-triangle stand-in, and past that an impostor -- a picture baked from the figure's albedo and normals, lit by the scene's lights. The horde's simulation runs over a job pool on every core, and on Vulkan the sort into the tiers is a compute pass drawing through indirect commands, a command per part of the figure. Half a million zombies in a handful of draws at 78 fps, feet planted. |
-| **Instancing and ECS** | Instances as matrices or as eight-float points (a million grains of sand in a 32 MB stream); `ae3d.ecs` keeps components in dense columns the crowd systems walk in C. |
-| **Voxels and terrain** | Voxel worlds meshed as only the faces that show with baked corner sky; surface nets over a signed distance field for smooth terrain; Perlin heightfields. |
-| **Self-painted assets** | Skies, sand, palettes and albedos generated from the engine's own noise and registered as textures. Nothing downloaded. |
-| **Models from anywhere** | A glTF 2.0 loader (`ae3d.gltf`): meshes, materials and textures, the node tree, skins with their inverse binds, and every animation as clips, from `.gltf` or `.glb`. A Mixamo figure walks in the engine without passing through Blender, and `gltf.bake_bank` strikes any of its clips into a pose bank, so a figure from a public pack is a horde in one call. |
+| **Two renderers, one interface** | Vulkan by default, OpenGL 4.1 at parity: one test draws the same scene through both and holds them to 0.7% of channels. DirectX 12 and Metal are the next implementations of the same vtable. |
+| **Physically based shading** | Metallic/roughness materials, sixteen lights a frame from any number, normal mapping, texel-snapped shadow maps, SSAO, screen-space reflections, ray-traced shadows with penumbrae and ambient occlusion by ray (Vulkan ray query), MSAA, TAA, DLSS, FXAA, bloom, ACES, fog, wet surfaces. |
+| **A sky by the hour** | `engine_set_time_of_day(hours)` places the sun and derives the light, the fog and a procedural sky. Volumetric clouds from baked Perlin-Worley textures, lit through a sun march and shadowing the ground, in about 1.5 ms. |
+| **Weather and water** | Rain, snow, dust and storm over any scene: a hundred thousand particles stepped over the job pool, the sky gone overcast, lightning. A Gerstner sea with dispersion, fresnel, whitecaps and caustics from underneath. |
+| **Physics** | [aephysics](https://github.com/aether-lang-dev/aephysics), a rigid body engine written in Aether on Box3D's design -- hulls, meshes, joints of every kind, ragdolls, vehicles, continuous collision, a parallel step that is the same to the bit at any thread count -- in the scene as a `Rigidbody` component and colliders on game objects. |
+| **Crowds** | A figure's walk baked into a pose bank, every instance posed in the vertex shader from its own phase, three tiers by distance ending in an impostor lit by the scene's lights, the sort on the device and the draws indirect. Half a million zombies in a handful of draws at 79 fps, feet planted, the simulation over every core. |
+| **Navigation** | A flow field over the ground: one flood from the target, a direction per cell, read by every figure every frame. |
+| **Models from anywhere** | glTF 2.0 with skins and animations, OBJ, and the engine's own Blender export with a manifest; any glTF figure is a horde in one call. Skies, sand and palettes painted from the engine's own noise. |
+| **Voxels and terrain** | Voxel worlds as only the faces that show; surface nets over a distance field for smooth terrain. |
 | **An engine you can ask** | `AE3D_AGENT=port` opens a JSON channel: read and change the scene, hold a frame, read its pixels, trace a model from its Blender object to the pixels it landed on. |
+| **Input as a game names it** | Actions and axes bound once to keys, mouse and gamepad, read by name from any script, injectable from a test or an agent. |
 | **An editor** | Hierarchy, inspector, gizmos, terrain sculpting, undo, scene files; one dark theme on every platform. |
-| **Physics** | [aephysics](https://github.com/aether-lang-dev/aephysics), a rigid body engine written in Aether on Box3D's design (hulls, meshes, height fields, compounds, a character mover, joints of every kind, sensors, continuous collision, a wide contact solver, the step in parallel over the engine's thread budget and the same to the bit at any count, every layer tested against the reference and benchmarked beside it), in the scene through `ae3d.physics`: a `Rigidbody` component and box, sphere, capsule and mesh colliders on game objects, ragdolls as an object per bone, the engine's fixed step driving the world and the world's transforms driving the draw. `examples/physics.ae` runs four of the reference's scenes. The active ragdolls of the NaturalMotion line come next ([#365](https://github.com/nicolas-maman/ae3d/issues/365)). |
-| **Navigation for a horde** | `ae3d.nav`: a flow field over the ground -- one flood from the target over the cells nothing stands in, a direction per cell -- read by every zombie every frame and paid once per target move; `flow_steer` turns a crowd's headings toward it. The city's horde hunts the camera with it. |
-| **Input as a game names it** | `ae3d.input`: actions and axes bound once to keys, mouse buttons and a gamepad, read by name from any script (`pressed`, `held`, `axis`), polled by the engine before the scripts run. The camera's own controls are actions in it, so a gamepad flies every example; anything can be injected -- a test, a replay, an agent over the channel (`input.set`). |
 
-The full list, with the reasoning behind each feature, is in
-[docs/rendering.md](docs/rendering.md).
-
-## Scenes
-
-![A pyramid of crates scattered by a cannonball](docs/physics-pyramid.png)
-
-<sub>`AE3D_PHYSICS_SCENE=pyramid ./build/physics`: seventy-eight crates on a static slab and an iron ball through them, every body a game object whose transform is the physics world's each fixed step. The other scenes: `pile` (spheres, capsules and crates on a wave of ground), `ragdolls` (eight twelve-bone figures falling onto a torus), `cloth` (a grid of spheres on spherical joints, a ball rolled into it).</sub>
-
-
-| | |
-|---|---|
-| ![Rain, a storm, dust and snow over an island](docs/weather.png) | ![A million grains of sand](docs/sand.png) |
-| `AE3D_WEATHER=rain|storm|dust|snow smooth_terrain` — the same island under each, the sky and fog to match | `sand` — a million grains you plough into a heap that slumps to its angle of repose |
-| ![A volcanic island under an afternoon sky](docs/smooth-terrain.png) | ![A voxel island with a forest](docs/voxel-world.png) |
-| `smooth_terrain` — surface nets over a distance field, albedo baked from slope | `voxel_world` — 3.9 million voxels as 259,000 faces in one draw |
-| ![Material presets under a night sky](docs/materials.png) | ![A Kerr black hole](docs/black-hole.png) |
-| `lights` — the material presets under the painted night | `black_hole` — Kerr geodesics per pixel, the shadow checked against √27 M |
-
-![A hundred thousand survivors from a CC0 glTF walking a field](docs/gltf-crowd.png)
-
-<sub>`AE3D_CROWD=100000 ./build/gltf_crowd adventurer.glb`: a rigged figure from a public Quaternius pack (CC0), its `Walk` baked into a pose bank by `gltf.bake_bank`, a hundred thousand of it sorted on the device into the file's own meshes, the same decimated, and a picture baked by `tools/bake_impostor --gltf` -- fifteen parts a figure, each with its own indirect command, 130 fps hidden, no Blender in the path.</sub>
-
-The same tiers carry `examples/zombie_city.ae`'s horde: the near tier draws
-the full mesh, the far tier a 168-triangle stand-in, and past eighty metres
-every figure is a picture baked from it and lit by the scene's lights. The
-draw count does not change with the crowd, and the simulation runs over every
-core; the near band draws in as the count grows, so the full mesh is spent on
-about the same few hundred figures whatever the crowd: 81 fps at twenty
-thousand on an RTX 4070 Ti at 1280×720 with the GPU shared, rays, lamp shadows
-and the wet road on; 78 at half a million with the sort on the device and the
-near band at three metres. `AE3D_HUNT=1` and the horde closes on the camera
-over a flow field (`ae3d.nav`). The zombie itself is still the placeholder the
-pipeline below builds; the figure it will be is the subject of
-[#270](https://github.com/nicolas-maman/ae3d/issues/270).
-
-Every scene is verified the way the engine is: from a sweep of camera
-positions and by numbers read back over the channel, not from one still.
+Each row is a page in [docs/](docs/README.md) with the reasoning and the
+measurement behind it.
 
 ## Quick start
 
 Requirements: the [Aether toolchain](https://github.com/aether-lang-dev/aether)
-(`ae`, `aetherc`) on `PATH`, a C compiler, GLFW 3, zlib, `pkg-config` and the
-Vulkan headers (the loader is opened at runtime; a driver is optional).
+(`ae`, `aetherc`) on `PATH`, a C compiler, GLFW 3, zlib, `pkg-config` and
+the Vulkan headers. The Vulkan loader is opened at run time; a driver is
+optional.
 
 ```bash
 brew install glfw molten-vk vulkan-loader                        # macOS
@@ -92,35 +56,26 @@ pacman -S mingw-w64-ucrt-x86_64-{gcc,glfw,zlib,pkgconf,vulkan-headers,vulkan-loa
 ```bash
 git submodule update --init                                       # deps/aephysics, the physics engine
 ./build.sh examples/spinning_cube.ae && ./build/spinning_cube
-./build.sh examples/zombie_city.ae   && ./build/zombie_city
+./build.sh examples/street_drive.ae  && ./build/street_drive      # W/S A/D space shift; drives itself if left alone
+./build.sh examples/zombie_city.ae   && AE3D_CROWD=100000 ./build/zombie_city
 AE3D_API=opengl ./build/zombie_city                               # the other renderer
 ```
 
-Every program honours a few environment variables:
-
-| Variable | Effect |
-|---|---|
-| `AE3D_FRAMES=n` | stop after `n` frames, so any example is a smoke test |
-| `AE3D_SNAPSHOT=path.png` | write the last frame (`AE3D_SNAPSHOT_BURST=k` for the last `k`) |
-| `AE3D_HIDDEN=1` | no window on screen; rendering still happens |
-| `AE3D_PERF=1` | print the frame's cost by stage at exit ([docs/performance.md](docs/performance.md)) |
-| `AE3D_API=opengl` | run through OpenGL instead of Vulkan |
-| `AE3D_RAYS=1` | shadows by ray through the scene's acceleration structure, where the Vulkan device has ray queries ([docs/rendering.md](docs/rendering.md#ray-traced-shadows)) |
-| `AE3D_SUN_SIZE=n` | the sun's size for the rays' penumbra, in tenths of a degree (5 is the sun; 0, the default, a point) |
-| `AE3D_RAY_AO=1` | ambient occlusion by ray in the screen-space pass's place, with the rays and the occlusion on |
-| `AE3D_DLSS=n` | DLSS at mode `n` (1 performance, 2 balanced, 3 quality, 6 DLAA) on Vulkan, with the Streamline runtime beside the program or in `AE3D_STREAMLINE` ([docs/rendering.md](docs/rendering.md#dlss)) |
-| `AE3D_RENDER_SCALE=50` | draw the scene at half the window's size, the composite scaling it up |
-| `AE3D_AGENT=port` | open the control channel on loopback ([docs/agent.md](docs/agent.md)) |
-
-`./ci.sh` builds with warnings as errors, type-checks every module, runs every
-test, benchmark and example, checks the headless ones for leaks, critiques the
-demo scene on both backends and holds it to its recorded frame cost.
+Every program honours the same environment: `AE3D_FRAMES=n` to stop after
+`n` frames, `AE3D_HIDDEN=1` for no window, `AE3D_SNAPSHOT=frame.png` for
+the last frame, `AE3D_PERF=1` for the frame's cost by stage, `AE3D_RAYS=1`
+for ray-traced shadows, `AE3D_DLSS=n`, `AE3D_AGENT=port` for the channel.
+The full list, the build's options and the CI gate are in
+[docs/building.md](docs/building.md). `./ci.sh` is the whole gate: every
+module type-checked, every suite and benchmark run, every example driven
+hidden, the demo scene critiqued on both backends and held to its recorded
+frame cost.
 
 ## Writing a program
 
 A program is written the way a Unity or gopher3D game is: game objects in
-the engine's scene, and scripts on them with Unity's phases, by Unity's
-names. The engine calls the phases; the program never calls them itself.
+the engine's scene, scripts on them with Unity's phases under Unity's
+names, and the engine calling the phases.
 
 ```aether
 import ae3d.core
@@ -145,124 +100,131 @@ main() {
     cube = loader.cube(1.0)
     core.model_set_scale(cube, 20.0, 20.0, 20.0)
     spinner = Spinner { pitch: 18.0, yaw: 30.0 }
-    object = engine.object(e, "Cube", cube)             // a game object with a mesh
+    object = engine.object(e, "Cube", cube)                     // a game object with a mesh
     engine.script(object, "Spinner", &spinner, start, update)   // AddComponent
     engine.engine_run(e)
-    engine.engine_free(e)                               // the scene and its models go with it
+    engine.engine_free(e)                                       // the scene and its models go with it
 }
 ```
 
-`engine.object` puts a game object in the engine's scene and its model in the
-renderer (on the first frame, if the window is not up yet); `engine.script`
-puts a script on it. `engine.engine_input(e)` is the input service: bind
-`"jump"` to a key and a pad button once, ask `input.pressed(in, "jump")`
-from any script. Every phase gets the script's state and the object it
-is on, the way a MonoBehaviour has `this` and `gameObject`; the engine is
-`engine.of(go)`. The phases each frame, in order: `fixed_update` as many
-times as the fixed step fits, `update` once, `late_update` after every
-object has updated. `start` runs once, on the first frame the object is in
-the scene; `engine.destroy` takes an object out at the end of the frame.
-Underneath, the scene is a behaviour (`engine.behaviour_new`,
-`engine_add_behaviour`) with the engine handed to every phase, which is what
-the engine's own systems -- the weather, the crowd tools -- are written as.
+The phases each frame: `fixed_update` as many times as the fixed step
+fits, `update` once, `late_update` after the draw; `start` once on the
+first frame the object is in the scene. Physics is one more component:
 
-## The pipeline
-
-The zombie street is not a downloaded asset: `tools/blender/make_zombie_street.py`
-builds the buildings, the road, the rigged and textured zombie and its walk in
-a headless Blender, and `ae3d_export.py` writes a deterministic, manifested
-export the engine loads. Every build then runs a critique that holds the scene
-to a standard (texel density, normal maps, planted feet, lit windows) and a
-frame budget that fails on one extra triangle.
-
-```bash
-blender --background --factory-startup --python tools/blender/make_zombie_street.py -- --out resources/blender/zombie_street.blend
-./scripts/export_assets.sh resources/blender/zombie_street.blend resources/blender/zombie_street
+```aether
+p = physics.attach(e)
+physics.rigidbody(crate, physics.DYNAMIC)
+physics.box_collider(crate, core.vec3(0.5, 0.5, 0.5), physics.material(0.6, 0.0))
 ```
 
-How the export is made reproducible, what the critique measures and how the
-agent channel traces a model to its pixels: [docs/pipeline.md](docs/pipeline.md).
+How the loop, the behaviours, the renderers and the job pool fit
+together: [docs/architecture.md](docs/architecture.md).
 
-## Editor
+## Scenes
 
-![The editor: dark panels either side of the Vulkan viewport](docs/editor-windows.png)
+| | |
+|---|---|
+| ![The city at night, its horde under the lamps](docs/images/zombie-city.png) | ![The seabed under the swell, caustics on the sand](docs/images/caustics.png) |
+| `zombie_city` -- the city and its horde, three tiers by distance, `AE3D_HUNT=1` and it closes on the camera over the flow field | `caustics` -- the seabed under a Gerstner swell, the light refracted through the surface every frame |
+| ![A pyramid of crates scattered by a cannonball](docs/images/physics-pyramid.png) | ![A hundred thousand survivors from a CC0 glTF](docs/images/gltf-crowd.png) |
+| `physics` -- four of the physics engine's reference scenes, every body a game object | `gltf_crowd` -- a public glTF figure, its walk baked, a hundred thousand of it sorted on the device |
+| ![Rain, a storm, dust and snow over an island](docs/images/weather.png) | ![A million grains of sand](docs/images/sand.png) |
+| `smooth_terrain` under `AE3D_WEATHER=rain\|storm\|dust\|snow` | `sand` -- a million grains you plough into a heap that slumps to its angle of repose |
+| ![A voxel island with a forest](docs/images/voxel-world.png) | ![A Kerr black hole](docs/images/black-hole.png) |
+| `voxel_world` -- 3.9 million voxels as 259,000 faces in one draw | `black_hole` -- Kerr geodesics per pixel, the shadow checked against √27 M |
+
+| Example | What it shows |
+|---|---|
+| `street_drive.ae` | The street driven: mesh and hull colliders, a car on wheel joints, sprung ragdolls, hit events ([docs/physics.md](docs/physics.md)) |
+| `physics.ae` | `AE3D_PHYSICS_SCENE=pyramid\|pile\|ragdolls\|cloth`, the reference's scenes |
+| `zombie_city.ae` | The city and its horde; `AE3D_CROWD` sets the count, `AE3D_WEATHER` the weather, `AE3D_HUNT=1` the hunt |
+| `gltf_crowd.ae` | Any glTF figure as a horde: `AE3D_CROWD=100000 ./build/gltf_crowd figure.glb Walk` |
+| `gltf_viewer.ae` | Any glTF on a floor under a sun, playing one of its animations |
+| `caustics.ae`, `smooth_terrain.ae`, `voxel_world.ae`, `sand.ae` | Water, terrain, voxels, a million point instances |
+| `black_hole.ae` | Kerr geodesics per pixel ([docs/black-hole.md](docs/black-hole.md)) |
+| `lights.ae`, `models.ae`, `blender_pipeline.ae`, `backend_switch.ae`, `spinning_cube.ae` | Materials and lights, OBJ, the Blender export, the two renderers, the smallest program |
+
+Every scene is verified the way the engine is: from a sweep of camera
+positions and by numbers read back over the channel, not from one still
+([docs/testing.md](docs/testing.md)).
+
+## The pipeline and the editor
+
+The zombie street is not a downloaded asset: `tools/blender/make_zombie_street.py`
+builds the buildings, the road, the rigged and textured zombie and its
+walk in a headless Blender, and `ae3d_export.py` writes a deterministic,
+manifested export the engine loads. Every build then runs a critique that
+holds the scene to a standard (texel density, normal maps, planted feet,
+lit windows) and a frame budget that fails on one extra triangle
+([docs/pipeline.md](docs/pipeline.md)).
 
 `editor/` is a scene editor whose chrome is
 [aether-ui](https://github.com/aether-lang-dev/aether-ui): a hierarchy, an
-asset browser, a console, an inspector that changes with the selection, a
-viewport you orbit and click in, a transform gizmo, a sculpting brush for
-terrain, behaviours attached to objects, and undo. See
-[docs/editor.md](docs/editor.md).
+asset browser, an inspector, a viewport you orbit and click in, a gizmo, a
+sculpting brush, behaviours on objects, undo
+([docs/editor.md](docs/editor.md)).
 
 ```bash
 git clone https://github.com/aether-lang-dev/aether-ui.git ../aether-ui
 ./editor/build_editor.sh && ./build/ae3d_editor
 ```
 
-## Examples
+## Layout
 
-| Example | What it shows |
-|---|---|
-| `zombie_city.ae` | The city and its horde; `AE3D_CROWD` sets the count, `AE3D_WEATHER=rain\|storm` puts the weather over it, `AE3D_HUNT=1` sends the horde after the camera |
-| `caustics.ae` | The seabed under the swell, the water's light on the sand |
-| `sand.ae` | A million point-instanced grains falling onto a heap you plough |
-| `black_hole.ae` | Kerr geodesics per pixel ([docs/black-hole.md](docs/black-hole.md)) |
-| `voxel_world.ae` | A voxel island with a forest, under the morning sun |
-| `smooth_terrain.ae` | A volcanic island in a sea, an hour before sunset (`AE3D_TIME=HHMM`); `AE3D_WEATHER=rain\|snow\|dust\|storm` over it |
-| `models.ae` | OBJ loading, one group per material |
-| `lights.ae` | Material presets, light types, bloom, transparency |
-| `blender_pipeline.ae` | A model authored and keyed in Blender, exported, loaded and played |
-| `gltf_viewer.ae` | Any glTF on a floor under a sun, playing one of its animations: `./build/gltf_viewer Fox.glb Run` |
-| `gltf_crowd.ae` | Any glTF figure as a horde: its walk baked into a pose bank, three tiers by distance (its meshes, the same decimated, an impostor baked by `tools/bake_impostor --gltf`): `AE3D_CROWD=100000 ./build/gltf_crowd figure.glb Walk` |
-| `backend_switch.ae` | The same scene through either renderer |
-| `spinning_cube.ae` | The smallest complete program |
+```
+src/ae3d/     the engine: core, engine, behaviour, input, jobs, vk, gl, shaders, physics,
+              crowd, horde, nav, ecs, gltf, assets, weather, water, sky, voxel, terrain,
+              agent, probe, script, scene, ... one module a directory
+native/       the C that remains, by role: gpu/, geometry/, image/, platform/, agent/, dlss/
+deps/         aephysics, the physics engine, as a submodule
+examples/     runnable scenes            tests/       one program a suite
+benchmarks/   per-frame cost, no window  tools/       the agent client, viewer, critique, bench, bakers
+scripts/      export, critique, perf     editor/      the scene editor
+docs/         the documentation, docs/images/ its pictures
+```
 
-`tools/zombie_street.ae` is the measuring rig the critique and the frame
-budget run on: one block, one zombie, held to their standards on every build.
+## Documentation
 
-## Roadmap
+[Architecture](docs/architecture.md) ·
+[Building](docs/building.md) ·
+[Rendering](docs/rendering.md) ·
+[Physics](docs/physics.md) ·
+[Crowds and navigation](docs/crowds.md) ·
+[Pipeline](docs/pipeline.md) ·
+[Agent channel](docs/agent.md) ·
+[Editor](docs/editor.md) ·
+[Performance](docs/performance.md) ·
+[Testing](docs/testing.md) ·
+[Writing Aether](docs/writing-aether.md) ·
+[Changelog](CHANGELOG.md)
+
+## Status and roadmap
 
 The engine is built toward an open-world game it has to carry -- hordes of
 the real animated zombie, extreme weather, the best picture the hardware
 gives, multiplayer -- and the map of what that still needs is
-[#326](https://github.com/nicolas-maman/ae3d/issues/326): every line becomes
-an issue when it is next, and lands as measured, tested pull requests. Done
-on that map: the crowd's sort on the device and its indirect draws, motion
-vectors, render scale, DLSS, ray-traced shadows with the crowd in them,
-weather. Next: the skinned in the ray-traced scene and occlusion by ray
-([#323](https://github.com/nicolas-maman/ae3d/issues/323)), a clustered
-lighting path, streaming tiles, physics, navigation, audio, input mapping,
-multiplayer; DirectX 12 ([#311](https://github.com/nicolas-maman/ae3d/issues/311))
-and Metal ([#312](https://github.com/nicolas-maman/ae3d/issues/312)) beside
-Vulkan; the tooling, the scene language and the shaders in Aether
-([#272](https://github.com/nicolas-maman/ae3d/issues/272),
-[#275](https://github.com/nicolas-maman/ae3d/issues/275),
-[#276](https://github.com/nicolas-maman/ae3d/issues/276)).
-
-## Layout
-
-```
-native/      C: window and input, OpenGL entry points, the Vulkan backend, mesh and
-             instance buffers, pose banks, the crowd step, image decoding, the socket
-src/ae3d/    Aether modules: core, gl, vk, shaders, engine, skin, anim, crowd, ecs,
-             assets, agent, loader, noise, voxel, water, scene, sky, behaviour, input, ...
-editor/      the scene editor
-tools/       ae3d_agent.ae (client), ae3d_view.ae (a frame as characters), ae3d_bench.ae (frame budget), measure_scene.ae, bake_impostor.ae, blender/ (the pipeline)
-scripts/     export, critique, perf
-tests/       one program per suite, each printing its own verdict
-benchmarks/  per-frame cost measured without a window
-examples/    runnable scenes
-docs/        rendering, pipeline, agent, editor, performance
-```
+[#326](https://github.com/nicolas-maman/ae3d/issues/326): every line
+becomes an issue when it is next and lands as a measured, tested pull
+request. Done on that map: the crowd's sort on the device and its indirect
+draws, motion vectors, render scale, DLSS, ray-traced shadows with the
+crowd in them, weather, physics, navigation, input mapping, the engine's
+kernels in Aether. Next: active ragdolls
+([#365](https://github.com/nicolas-maman/ae3d/issues/365)), the skinned in
+the ray-traced scene ([#323](https://github.com/nicolas-maman/ae3d/issues/323)),
+clustered lighting, streaming tiles, audio, multiplayer; DirectX 12
+([#311](https://github.com/nicolas-maman/ae3d/issues/311)) and Metal
+([#312](https://github.com/nicolas-maman/ae3d/issues/312)) beside Vulkan;
+the last of the C once Aether has a 32-bit float
+([aether#2134](https://github.com/aether-lang-dev/aether/issues/2134)).
 
 ## Credits
 
 ae3d continues [Gopher3D](https://github.com/nicolas-maman/gopher3D) (MIT),
-the same author's earlier Go engine: the architecture, the GLSL programs, the
-material and lighting model and the OBJ loader's behaviour carry over; the Go
-served as the reference and none of it was copied. Built with
-[GLFW](https://www.glfw.org/), [Vulkan](https://www.vulkan.org/) (MoltenVK on
-macOS) and [stb_image](https://github.com/nothings/stb); see [NOTICE](NOTICE)
+the same author's earlier Go engine: the architecture, the GLSL programs,
+the material and lighting model and the OBJ loader's behaviour carry over;
+the Go served as the reference and none of it was copied. Built with
+[GLFW](https://www.glfw.org/), [Vulkan](https://www.vulkan.org/) (MoltenVK
+on macOS) and [stb_image](https://github.com/nothings/stb); see [NOTICE](NOTICE)
 and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 
 ## License
