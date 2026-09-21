@@ -38,6 +38,8 @@ import ae3d.jobs
 import ae3d.behaviour
 import ae3d.engine
 import ae3d.loader
+import ae3d.skin
+import std.strarr
 
 exports (
     Physics, Rigidbody, Ragdoll, Vehicle,
@@ -49,7 +51,8 @@ exports (
     hull_of_mesh, mesh_of_mesh, convex_collider_of_model, mesh_collider_of_model,
     vehicle, vehicle_free, vehicle_drive, vehicle_speed, vehicle_chassis, vehicle_wheel,
     ragdoll, ragdoll_free, ragdoll_bone, ragdoll_human, ragdoll_set_velocity, ragdoll_kick,
-    ragdoll_stand, ragdoll_release, ragdoll_is_standing, ragdoll_of_shape, hit_event_count, hit_event
+    ragdoll_stand, ragdoll_release, ragdoll_is_standing, ragdoll_turn, ragdoll_of_shape, hit_event_count, hit_event,
+    ragdoll_dress, ragdoll_dress_named, ragdoll_is_dressed, humanoid_bone
 )
 
 extern calloc(count: int, size: int) -> ptr
@@ -91,6 +94,23 @@ struct Ragdoll {
     human: Human
     bones: ptr                     // list of *GameObject, in human's bone order
     standing: bool
+    rig: ptr                       // *Rig, the skinned figure the ragdoll drives, or null
+}
+
+// A skinned figure worn by a ragdoll: a rig bone per ragdoll bone, each
+// with the rotation that takes the body's frame to the bone's, and the
+// rig's root carried by the pelvis.
+struct RigBone {
+    model: ptr                     // *Model, the rig bone
+    offset: Quat                   // body rotation * offset = the bone's world rotation
+}
+
+struct Rig {
+    skeleton: ptr                  // *Skeleton
+    root: ptr                      // *Model, the rig's root
+    bones: ptr                     // RigBone[human.BONE_COUNT]
+    root_offset_p: Vec3            // the root from the pelvis, in the pelvis's frame
+    root_offset_q: Quat
 }
 
 // A car: a chassis and four wheels on wheel joints (Box3D's: the
@@ -187,7 +207,9 @@ on_fixed_update(state: ptr, e: *Engine, step: float) {
     count = list.size(p.ragdolls)
     i = 0
     while i < count {
-        pull_ragdoll(list.get_raw(p.ragdolls, i) as *Ragdoll)
+        r = list.get_raw(p.ragdolls, i) as *Ragdoll
+        pull_ragdoll(r)
+        if r.rig != null { pose_rig(r) }
         i = i + 1
     }
 }
@@ -593,6 +615,7 @@ ragdoll(e: *Engine, name: string, position: Vec3, friction_torque: float, hertz:
     r.physics = p as ptr
     r.human = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
     r.standing = false
+    r.rig = null
     human.create_human(&r.human, p.world_id, position, friction_torque, hertz, damping_ratio, list.size(p.ragdolls) + 1, r as ptr)
     r.bones = list.new()
     i = 0
@@ -683,6 +706,25 @@ ragdoll_release(r: *Ragdoll) {
 
 ragdoll_is_standing(r: *Ragdoll) -> bool { return r.standing }
 
+// The whole figure turned about its pelvis by `yaw` about y, as one
+// piece: every bone body moved and rotated together, so its joints are
+// as they were. For a figure before it stands; a standing one is held
+// by its anchors.
+ragdoll_turn(r: *Ragdoll, yaw: float) {
+    pelvis = human.bone_at(&r.human, human.BONE_PELVIS)
+    pivot = dynamics.body_get_position(pelvis.body_id)
+    turn = core.quat_rotate(yaw, core.vec3(0.0, 1.0, 0.0))
+    i = 0
+    while i < human.BONE_COUNT {
+        bone = human.bone_at(&r.human, i)
+        t = dynamics.body_get_transform(bone.body_id)
+        p = core.v3_add(pivot, core.quat_apply(turn, core.v3_sub(t.p, pivot)))
+        dynamics.body_set_transform(bone.body_id, p, core.quat_normalize(core.quat_mul(turn, t.q)))
+        i = i + 1
+    }
+    pull_ragdoll(r)
+}
+
 // The ragdoll a shape belongs to, or null: every bone's body carries it.
 ragdoll_of_shape(p: *Physics, id: ShapeId) -> *Ragdoll {
     data = dynamics.body_get_user_data(dynamics.shape_get_body(id))
@@ -710,5 +752,293 @@ ragdoll_free(r: *Ragdoll) {
         i = i + 1
     }
     list.free(r.bones)
+    if r.rig != null {
+        rig = r.rig as *Rig
+        free(rig.bones)
+        heap.free(rig)
+    }
     heap.free(r)
+}
+
+// --- a figure on the ragdoll -------------------------------------------------------------------------------------
+
+// The rig bone that stands for each of the ragdoll's twelve, in the
+// ragdoll's bone order, as the engine's own Blender pipeline names them.
+humanoid_bone(index: int) -> string {
+    if index == human.BONE_PELVIS { return "Hips" }
+    if index == human.BONE_SPINE_01 { return "Spine" }
+    if index == human.BONE_SPINE_03 { return "Chest" }
+    if index == human.BONE_NECK { return "Neck" }
+    if index == human.BONE_THIGH_L { return "ThighL" }
+    if index == human.BONE_CALF_L { return "KneeL" }
+    if index == human.BONE_THIGH_R { return "ThighR" }
+    if index == human.BONE_CALF_R { return "KneeR" }
+    if index == human.BONE_UPPER_ARM_L { return "ShoulderL" }
+    if index == human.BONE_LOWER_ARM_L { return "ElbowL" }
+    if index == human.BONE_UPPER_ARM_R { return "ShoulderR" }
+    return "ElbowR"
+}
+
+// The skinned figure worn by the ragdoll, its rig named as the pipeline
+// names one: every fixed step from here the rig's bones take the bodies'
+// rotations and the root rides the pelvis, so the mesh weighted to the
+// rig stands, falls and lies as the ragdoll does. The ragdoll's own
+// capsule models are hidden; its objects stay for scripts.
+ragdoll_dress(r: *Ragdoll, skeleton: *Skeleton) -> bool {
+    names = strarr.new()
+    i = 0
+    while i < human.BONE_COUNT {
+        strarr.push(names, humanoid_bone(i))
+        i = i + 1
+    }
+    ok = ragdoll_dress_named(r, skeleton, strarr.array(names))
+    strarr.free(names)
+    return ok
+}
+
+ragdoll_is_dressed(r: *Ragdoll) -> bool { return r.rig != null }
+
+// With the rig's own names for the twelve bones (a glTF rig names them
+// its way). Answers false, dressing nothing, when a name is not in the
+// skeleton or the skeleton has no root.
+//
+// The two rest poses are not the same figure: the rig is in its bind
+// pose, the ragdoll in the reference's. So at dressing each rig bone is
+// first turned so that it points where the body's bone does (from its
+// joint toward its child's, or along its capsule), and the rotation
+// between the body's frame and the bone's turned frame is what the body
+// carries from then on. The figure is faced the ragdoll's way first,
+// from where each one's foot points, so that turn is about a bone's own
+// length and not a half-turn of the whole figure.
+ragdoll_dress_named(r: *Ragdoll, skeleton: *Skeleton, names: string[]) -> bool {
+    if r == null || skeleton == null || skin.skeleton_count(skeleton) == 0 { return false }
+    indices = calloc(human.BONE_COUNT, 4) as int[]
+    i = 0
+    while i < human.BONE_COUNT {
+        indices[i] = skin.skeleton_find(skeleton, names[i])
+        if indices[i] < 0 {
+            free(indices)
+            return false
+        }
+        i = i + 1
+    }
+    root = rig_root(skeleton)
+    if root == null { free(indices); return false }
+    rig = heap.new(Rig)
+    rig.skeleton = skeleton as ptr
+    rig.root = root as ptr
+    rig.bones = calloc(human.BONE_COUNT, sizeof(RigBone))
+    bones = rig.bones as RigBone[]
+
+    // The figure faced as the ragdoll is, from the feet.
+    pelvis = human.bone_at(&r.human, human.BONE_PELVIS)
+    pelvis_t = dynamics.body_get_transform(pelvis.body_id)
+    rig_facing = rig_foot_direction(skeleton, indices[human.BONE_CALF_L])
+    body_facing = body_foot_direction(r, human.BONE_CALF_L)
+    if core.v3_len(rig_facing) > 0.0001 && core.v3_len(body_facing) > 0.0001 {
+        turn = core.quat_from_to(rig_facing, body_facing)
+        core.model_set_rotation(root, core.quat_mul(turn, root.rotation))
+    }
+    // And stood where it is: the rig's pelvis on the ragdoll's.
+    core.model_sync_transform(root)
+    hips = skin.skeleton_bone(skeleton, indices[human.BONE_PELVIS])
+    core.model_sync_transform(hips)
+    shift = core.v3_sub(pelvis_t.p, hips.world_position)
+    core.model_set_position(root, root.position.x + shift.x, root.position.y + shift.y, root.position.z + shift.z)
+    core.model_sync_transform(root)
+
+    // Each bone's offset from its body, with the bone turned to the body's direction.
+    i = 0
+    while i < human.BONE_COUNT {
+        bone = skin.skeleton_bone(skeleton, indices[i])
+        core.model_sync_transform(bone)
+        body = human.bone_at(&r.human, i)
+        body_t = dynamics.body_get_transform(body.body_id)
+        along_body = body_bone_direction(r, i)
+        along_rig = rig_bone_direction(skeleton, indices[i])
+        aligned = bone.world_rotation
+        if core.v3_len(along_body) > 0.0001 && core.v3_len(along_rig) > 0.0001 {
+            aligned = core.quat_mul(core.quat_from_to(along_rig, along_body), bone.world_rotation)
+        }
+        bones[i].model = bone as ptr
+        bones[i].offset = core.quat_normalize(core.quat_mul(core.quat_conjugate(body_t.q), aligned))
+        i = i + 1
+    }
+    // The root from the pelvis.
+    inverse_pelvis = core.quat_conjugate(pelvis_t.q)
+    rig.root_offset_p = core.quat_apply(inverse_pelvis, core.v3_sub(root.world_position, pelvis_t.p))
+    rig.root_offset_q = core.quat_normalize(core.quat_mul(inverse_pelvis, root.world_rotation))
+    free(indices)
+
+    // The capsules go unseen; the figure is the ragdoll now.
+    i = 0
+    while i < human.BONE_COUNT {
+        o = list.get_raw(r.bones, i) as *GameObject
+        capsule = behaviour.object_model(o)
+        if capsule != null { capsule.visible = false }
+        i = i + 1
+    }
+    r.rig = rig as ptr
+    pose_rig(r)
+    return true
+}
+
+// The rig's root: the bone with no parent among the skeleton's bones, or
+// the parent chain's top from the first bone.
+rig_root(skeleton: *Skeleton) -> *Model {
+    first = skin.skeleton_bone(skeleton, 0)
+    if first == null { return null }
+    top = first
+    while core.model_parent(top) != null { top = core.model_parent(top) }
+    return top
+}
+
+// Where a rig bone points: toward its first child in the skeleton, in the world.
+rig_bone_direction(skeleton: *Skeleton, index: int) -> Vec3 {
+    bone = skin.skeleton_bone(skeleton, index)
+    count = skin.skeleton_count(skeleton)
+    i = 0
+    while i < count {
+        other = skin.skeleton_bone(skeleton, i)
+        if other != null && core.model_parent(other) == bone {
+            core.model_sync_transform(other)
+            return core.v3_sub(other.world_position, bone.world_position)
+        }
+        i = i + 1
+    }
+    return core.vec3(0.0, 0.0, 0.0)
+}
+
+// Where the rig's foot points, along the ground: from the calf's child
+// (the ankle) to that one's child (the toe).
+rig_foot_direction(skeleton: *Skeleton, calf_index: int) -> Vec3 {
+    calf = skin.skeleton_bone(skeleton, calf_index)
+    count = skin.skeleton_count(skeleton)
+    ankle = null as *Model
+    i = 0
+    while i < count && ankle == null {
+        other = skin.skeleton_bone(skeleton, i)
+        if other != null && core.model_parent(other) == calf { ankle = other }
+        i = i + 1
+    }
+    if ankle == null { return core.vec3(0.0, 0.0, 0.0) }
+    i = 0
+    while i < count {
+        other = skin.skeleton_bone(skeleton, i)
+        if other != null && core.model_parent(other) == ankle {
+            core.model_sync_transform(other)
+            core.model_sync_transform(ankle)
+            d = core.v3_sub(other.world_position, ankle.world_position)
+            return core.vec3(d.x, 0.0, d.z)
+        }
+        i = i + 1
+    }
+    return core.vec3(0.0, 0.0, 0.0)
+}
+
+// Where a ragdoll bone points, in the world: from its joint (the body's
+// origin) toward its child's joint, or, for a bone with no child, along
+// its capsule to the end farther from the joint.
+body_bone_direction(r: *Ragdoll, index: int) -> Vec3 {
+    body = human.bone_at(&r.human, index)
+    t = dynamics.body_get_transform(body.body_id)
+    local = core.vec3(0.0, 0.0, 0.0)
+    found = false
+    i = 0
+    while i < human.BONE_COUNT {
+        child = human.bone_at(&r.human, i)
+        if child.parent_index == index && found == false {
+            local = child.local_frame_a.p
+            found = true
+        }
+        i = i + 1
+    }
+    if found == false {
+        c = first_capsule(body.body_id)
+        if core.v3_len(c.center1) > core.v3_len(c.center2) { local = c.center1 } else { local = c.center2 }
+    }
+    return core.quat_apply(t.q, local)
+}
+
+// Where the ragdoll's foot points, along the ground: the calf's second
+// capsule is the foot, its end farther off the leg's line the toe.
+body_foot_direction(r: *Ragdoll, calf_index: int) -> Vec3 {
+    body = human.bone_at(&r.human, calf_index)
+    t = dynamics.body_get_transform(body.body_id)
+    ids_block = calloc(4, sizeof(ShapeId))
+    ids = ids_block as ShapeId[]
+    count = dynamics.body_get_shapes(body.body_id, ids, 4)
+    direction = core.vec3(0.0, 0.0, 0.0)
+    if count >= 2 {
+        leg = dynamics.shape_get_capsule(ids[0])
+        foot = dynamics.shape_get_capsule(ids[1])
+        axis = core.v3_normalize(core.v3_sub(leg.center2, leg.center1))
+        off1 = core.v3_len(core.v3_sub(core.v3_sub(foot.center1, leg.center1), core.v3_mul(axis, core.v3_dot(core.v3_sub(foot.center1, leg.center1), axis))))
+        off2 = core.v3_len(core.v3_sub(core.v3_sub(foot.center2, leg.center1), core.v3_mul(axis, core.v3_dot(core.v3_sub(foot.center2, leg.center1), axis))))
+        local = core.v3_sub(foot.center1, foot.center2)
+        if off2 > off1 { local = core.v3_sub(foot.center2, foot.center1) }
+        d = core.quat_apply(t.q, local)
+        direction = core.vec3(d.x, 0.0, d.z)
+    }
+    free(ids_block)
+    return direction
+}
+
+first_capsule(body_id: BodyId) -> Capsule {
+    ids_block = calloc(4, sizeof(ShapeId))
+    ids = ids_block as ShapeId[]
+    count = dynamics.body_get_shapes(body_id, ids, 4)
+    c = manifold.capsule(math.vec3(0.0, 0.0, 0.0), math.vec3(0.0, 0.0, 0.0), 0.0)
+    if count > 0 { c = dynamics.shape_get_capsule(ids[0]) }
+    free(ids_block)
+    return c
+}
+
+// The rig after the step: the root where the pelvis carries it, every
+// mapped bone at its body's rotation, parents before children so a
+// child's local rotation is taken against its parent's new one; the
+// unmapped bones (a wrist, a toe, the crown) keep their own and follow.
+pose_rig(r: *Ragdoll) {
+    rig = r.rig as *Rig
+    bones = rig.bones as RigBone[]
+    skeleton = rig.skeleton as *Skeleton
+    root = rig.root as *Model
+    pelvis_t = dynamics.body_get_transform(human.bone_at(&r.human, human.BONE_PELVIS).body_id)
+    root_p = core.v3_add(pelvis_t.p, core.quat_apply(pelvis_t.q, rig.root_offset_p))
+    root_q = core.quat_mul(pelvis_t.q, rig.root_offset_q)
+    set_world_rotation(root, root_q)
+    parent = core.model_parent(root)
+    if parent == null {
+        core.model_set_position(root, root_p.x, root_p.y, root_p.z)
+    } else {
+        core.model_sync_transform(parent)
+        local = core.quat_apply(core.quat_conjugate(parent.world_rotation), core.v3_sub(root_p, parent.world_position))
+        core.model_set_position(root, local.x / parent.world_scale.x, local.y / parent.world_scale.y, local.z / parent.world_scale.z)
+    }
+    count = skin.skeleton_count(skeleton)
+    i = 0
+    while i < count {
+        bone = skin.skeleton_bone(skeleton, i)
+        k = 0
+        while k < human.BONE_COUNT {
+            if bones[k].model == bone as ptr {
+                t = dynamics.body_get_transform(human.bone_at(&r.human, k).body_id)
+                set_world_rotation(bone, core.quat_mul(t.q, bones[k].offset))
+                break
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+}
+
+// A model's local rotation for a world one, against its parent's current world rotation.
+set_world_rotation(m: *Model, world: Quat) {
+    parent = core.model_parent(m)
+    if parent == null {
+        core.model_set_rotation(m, core.quat_normalize(world))
+        return
+    }
+    core.model_sync_transform(parent)
+    core.model_set_rotation(m, core.quat_normalize(core.quat_mul(core.quat_conjugate(parent.world_rotation), world)))
 }

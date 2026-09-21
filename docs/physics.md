@@ -74,10 +74,27 @@ its pelvis is sprung upright to the ground's body and every bone is held
 at its pose by a kinematic anchor through a parallel joint -- the pose
 drive of an active ragdoll, rotation only -- so it stands, and stays
 standing, until `ragdoll_release` lets the springs and anchors go and it
-falls as the figure it is. `ragdoll_of_shape(p, shape)` answers which
-ragdoll a hit event's shape belongs to, which is how a car knows what it
-struck. The active ragdolls of the NaturalMotion line -- balance,
-bracing, getting up -- are the next step
+falls as the figure it is. `ragdoll_turn(r, yaw)` turns the whole figure
+about its pelvis before it stands. `ragdoll_of_shape(p, shape)` answers
+which ragdoll a hit event's shape belongs to, which is how a car knows
+what it struck.
+
+`ragdoll_dress(r, skeleton)` puts a skinned figure on the ragdoll: a
+`skin.Skeleton` whose bones are named as the engine's Blender pipeline
+names them (`Hips`, `Spine`, `Chest`, `Neck`, `ThighL`, `KneeL`,
+`ShoulderL`, `ElbowL`, ...; `ragdoll_dress_named` takes another rig's
+names). The two rest poses are not the same figure, so at dressing each
+rig bone is first turned to point where the body's bone does -- from its
+joint toward its child's, or along its capsule -- after the figure has
+been faced the ragdoll's way from where each one's foot points; the
+rotation left between the body's frame and the bone's is what the body
+carries from then on. Every fixed step the root rides the pelvis and each
+mapped bone takes its body's rotation, parents before children, and the
+unmapped bones (wrists, toes, the crown) follow their parents, so the
+mesh weighted to the rig stands, falls and lies as the ragdoll does with
+its own bone lengths intact. The ragdoll's capsule models go unseen. The
+active ragdolls of the NaturalMotion line -- balance, bracing, getting
+up, a walk driving the anchors -- are the next step
 ([#365](https://github.com/nicolas-maman/ae3d/issues/365)).
 
 ## Vehicles
@@ -114,8 +131,11 @@ wave of ground), `ragdolls` (eight figures falling onto a torus) and
 the Blender pipeline is loaded three tiles long, its ground, buildings and
 kerbs as mesh colliders, its crates, bins and benches as dynamic bodies
 with the convex hull of their own mesh; a car is built from hulls and
-driven on wheel joints; thirteen bystanders stand on the pavements as
-sprung ragdolls that let go when the car's hit events name them. Left
+driven on wheel joints; thirteen bystanders -- the pipeline's zombie
+figure, skin and clothes weighted to a rig of its own for each, worn by
+a ragdoll -- stand on the pavements and three in the road, sprung
+upright until the car's hit events name them, and fall as their
+ragdolls fall. Left
 alone for three seconds the car drives itself up and down the street with
 a lane controller and a U-turn on the open tarmac at each end, so the
 scene runs unattended and `AE3D_FRAMES=n` gives a fixed run; `AE3D_DIAG=1`
@@ -151,7 +171,9 @@ kinematic lift rose and its rider rode it; a ball knocked a crate along; a
 ragdoll fell; a sprung ragdoll is still standing after four seconds; a
 scaled hull rests on its half height; a car drove forward on its wheel
 joints and straight; its hits were reported and the figure in its way let
-go; and after `physics_free` the objects are still the scene's. The
+go; the rig that figure wears sits on its pelvis when dressed and still
+does after the strike, its head down with the ragdoll's neck; and after
+`physics_free` the objects are still the scene's. The
 physics engine's own suites (`scripts/test.sh` in the submodule) hold each
 layer to the reference.
 

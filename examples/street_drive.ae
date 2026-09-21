@@ -26,6 +26,7 @@ import ae3d.input
 import ae3d.loader
 import ae3d.assets
 import ae3d.physics
+import ae3d.skin
 import aephysics.math
 import aephysics.hull
 import aephysics.dynamics
@@ -438,20 +439,68 @@ make_car(g: *Game, e: *Engine, position: Vec3) {
 // Ten on the pavements and three in the road, each a ragdoll whose
 // joints are sprung to its pose stiffly enough to stand and whose
 // pelvis is sprung upright to the road; a hit lets the pelvis go.
-make_bystanders(g: *Game, e: *Engine) {
+// The bystanders: the pipeline's zombie figure, its skin and its clothes
+// weighted to a rig of its own for each, worn by a ragdoll sprung
+// upright on the pavement. The ragdoll drives the rig every step, so the
+// figure stands as the ragdoll stands and, struck, falls as it falls.
+make_bystanders(g: *Game, e: *Engine, m: *Manifest) {
     ground = g.ground as *Rigidbody
     if ground == null { return }
+    body_entry = assets.manifest_find_by_object(m, "Zombie_Body")
+    cloth_entry = assets.manifest_find_by_object(m, "Zombie_Clothes")
     i = 0
     while i < 13 {
         side = 1.0
         if i % 2 == 1 { side = 0.0 - 1.0 }
         x = 0.0 - 70.0 + 12.0 * (i as float) + 6.0 * (next_random() - 0.5)
         z = side * (4.6 + 1.2 * next_random())
-        if i >= 10 { z = side * 1.2 * next_random() }
+        // Three of them in the road, on the way the car sets off.
+        if i >= 10 {
+            x = 20.0 - 22.0 * ((i - 10) as float)
+            z = side * 1.2 * next_random()
+        }
         r = physics.ragdoll(e, "Bystander ${i}", core.vec3(x, PAVEMENT_Y, z), 8.0, 8.0, 1.0)
+        // Facing the road, or along the pavement, figure by figure; turned
+        // before it is stood, since standing holds it where it is.
+        yaw = 0.0
+        if i % 3 == 0 { yaw = 0.0 - side * 1.5707963 }
+        if i % 3 == 1 { yaw = 3.14159265 * next_random() }
+        physics.ragdoll_turn(r, yaw)
         physics.ragdoll_stand(r, ground, 25.0, 1.0)
+        if body_entry != null { dress_bystander(e, m, body_entry, cloth_entry, r) }
         list.add_raw(g.bystanders, r as ptr)
         i = i + 1
+    }
+}
+
+// One figure: a fresh rig from the export, the two surfaces over it, and
+// the ragdoll wearing it.
+dress_bystander(e: *Engine, m: *Manifest, body_entry: *Entry, cloth_entry: *Entry, r: *Ragdoll) {
+    bones = assets.entry_load_skeleton(m, body_entry)
+    if bones == null { return }
+    skeleton = skin.skeleton_new()
+    i = 0
+    while i < list.size(bones) {
+        bone = list.get_raw(bones, i) as *Model
+        skin.skeleton_add(skeleton, bone)
+        i = i + 1
+    }
+    list.free(bones)
+    skin.skeleton_bind(skeleton)
+    body = assets.entry_load_model(m, body_entry)
+    if body != null {
+        core.model_set_skeleton(body, skeleton as ptr)
+        engine.engine_add_model(e, body)
+    }
+    if cloth_entry != null {
+        cloth = assets.entry_load_model(m, cloth_entry)
+        if cloth != null {
+            core.model_set_skeleton(cloth, skeleton as ptr)
+            engine.engine_add_model(e, cloth)
+        }
+    }
+    if physics.ragdoll_dress(r, skeleton) == false {
+        println("street_drive: the figure could not be dressed on its ragdoll")
     }
 }
 
@@ -499,9 +548,9 @@ start(state: ptr, go: *GameObject) {
     }
     crate_wall(g, e, m, 0.0 - 30.0)
     crate_wall(g, e, m, 80.0)
-    assets.manifest_free(m)
     make_car(g, e, core.vec3(40.0, WHEEL_RADIUS - AXLE_Y + ROAD_Y + 0.02, 0.0))
-    make_bystanders(g, e)
+    make_bystanders(g, e, m)
+    assets.manifest_free(m)
     keys = engine.engine_input(e)
     input.bind_axis(keys, "throttle", platform.KEY_W, platform.KEY_S)
     input.bind_axis(keys, "steer", platform.KEY_A, platform.KEY_D)

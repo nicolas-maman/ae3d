@@ -29,6 +29,15 @@
 
 ### The street driven
 
+- `physics.ragdoll_dress(r, skeleton)`: a skinned figure worn by a
+  ragdoll. The rig's bones are retargeted onto the bodies at dressing
+  (faced from the feet, each bone turned to where its body's points) and
+  driven from them every step, the root on the pelvis; `ragdoll_turn`
+  faces a figure before it stands. The street's bystanders are the
+  pipeline's zombie, skin and clothes on a rig each, and fall as their
+  ragdolls do; `tests/test_physics` checks a rig's hips ride the pelvis
+  before and after the strike and its head goes down with the neck.
+
 - Spot lights: `core.light_spot(position, direction, color, intensity,
   range, inner_degrees, outer_degrees)`, a point light confined to a cone,
   on both backends and in the ray-traced lamp shadows; `tests/test_lights`

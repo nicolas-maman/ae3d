@@ -12,7 +12,7 @@ number rather than by eye.
 
 ![A car on wheel joints driving the zombie street at night, crates and bystanders on the pavements](docs/images/street-drive.png)
 
-<sub>`examples/street_drive.ae`: the street from the Blender pipeline, every building and kerb colliding as its own triangles, every crate and bench as the convex hull of its mesh, a car on suspension, drive and steering joints, and bystanders standing as sprung ragdolls until the car reaches them. 501 bodies stepped over every core; 144 fps hidden on an RTX 4070 Ti at 1280×720 with ray-traced shadows on, the physics 0.09 ms of the frame.</sub>
+<sub>`examples/street_drive.ae`: the street from the Blender pipeline, every building and kerb colliding as its own triangles, every crate and bench as the convex hull of its mesh, a car on suspension, drive and steering joints, and the pipeline's zombie figures standing as sprung ragdolls that wear them -- the rig driven by the bodies -- until the car reaches them. 501 bodies stepped over every core; 144 fps hidden on an RTX 4070 Ti at 1280×720 with ray-traced shadows on, the physics 0.09 ms of the frame.</sub>
 
 ae3d is the successor to [Gopher3D](https://github.com/nicolas-maman/gopher3D),
 the same author's Go engine, rebuilt in [Aether](https://github.com/aether-lang-dev/aether)
@@ -28,7 +28,7 @@ kernels; what remains in C is there for one stated reason each
 | **Physically based shading** | Metallic/roughness materials, sixteen directional, point or spot lights a frame from any number, normal mapping, texel-snapped shadow maps, SSAO, screen-space reflections, ray-traced shadows with penumbrae and ambient occlusion by ray (Vulkan ray query), MSAA, TAA, DLSS, FXAA, bloom, ACES, fog, wet surfaces. |
 | **A sky by the hour** | `engine_set_time_of_day(hours)` places the sun and derives the light, the fog and a procedural sky. Volumetric clouds from baked Perlin-Worley textures, lit through a sun march and shadowing the ground, in about 1.5 ms. |
 | **Weather and water** | Rain, snow, dust and storm over any scene: a hundred thousand particles stepped over the job pool, the sky gone overcast, lightning. A Gerstner sea with dispersion, fresnel, whitecaps and caustics from underneath. |
-| **Physics** | [aephysics](https://github.com/aether-lang-dev/aephysics), a rigid body engine written in Aether on Box3D's design -- hulls, meshes, joints of every kind, ragdolls, vehicles, continuous collision, a parallel step that is the same to the bit at any thread count -- in the scene as a `Rigidbody` component and colliders on game objects. |
+| **Physics** | [aephysics](https://github.com/aether-lang-dev/aephysics), a rigid body engine written in Aether on Box3D's design -- hulls, meshes, joints of every kind, ragdolls that wear a skinned figure, vehicles, continuous collision, a parallel step that is the same to the bit at any thread count -- in the scene as a `Rigidbody` component and colliders on game objects. |
 | **Crowds** | A figure's walk baked into a pose bank, every instance posed in the vertex shader from its own phase, three tiers by distance ending in an impostor lit by the scene's lights, the sort on the device and the draws indirect. Half a million zombies in a handful of draws at 79 fps, feet planted, the simulation over every core. |
 | **Navigation** | A flow field over the ground: one flood from the target, a direction per cell, read by every figure every frame. |
 | **Models from anywhere** | glTF 2.0 with skins and animations, OBJ, and the engine's own Blender export with a manifest; any glTF figure is a horde in one call. Skies, sand and palettes painted from the engine's own noise. |
@@ -135,7 +135,7 @@ together: [docs/architecture.md](docs/architecture.md).
 
 | Example | What it shows |
 |---|---|
-| `street_drive.ae` | The street driven: mesh and hull colliders, a car on wheel joints, sprung ragdolls, hit events ([docs/physics.md](docs/physics.md)) |
+| `street_drive.ae` | The street driven: mesh and hull colliders, a car on wheel joints, skinned figures worn by sprung ragdolls, hit events ([docs/physics.md](docs/physics.md)) |
 | `physics.ae` | `AE3D_PHYSICS_SCENE=pyramid\|pile\|ragdolls\|cloth`, the reference's scenes |
 | `zombie_city.ae` | The city and its horde; `AE3D_CROWD` sets the count, `AE3D_WEATHER` the weather, `AE3D_HUNT=1` the hunt |
 | `gltf_crowd.ae` | Any glTF figure as a horde: `AE3D_CROWD=100000 ./build/gltf_crowd figure.glb Walk` |
