@@ -24,7 +24,7 @@ extern ae3d_image_unregister(name: string)
 extern ae3d_rgba_set(rgba: ptr, index: int, r: float, g: float, b: float, a: float)
 
 exports (
-    World, Palette,
+    VoxelWorld, Palette,
     EMPTY, GRASS, DIRT, STONE, SAND, WOOD, LEAF,
     world_new, world_free,
     world_set, world_get, world_solid, world_in_bounds,
@@ -58,7 +58,7 @@ struct Palette {
     blue: float
 }
 
-struct World {
+struct VoxelWorld {
     voxels: ptr
     sdf: ptr
     palette: ptr
@@ -83,10 +83,10 @@ struct World {
 
 var g_palettes_named = 0
 
-world_new(size_x: int, size_z: int, max_height: int, voxel_size: float) -> *World {
+world_new(size_x: int, size_z: int, max_height: int, voxel_size: float) -> *VoxelWorld {
     if size_x <= 0 || size_z <= 0 || max_height <= 0 { return null }
 
-    w = heap.new(World)
+    w = heap.new(VoxelWorld)
     w.base_y = 0.0
     w.palette_name = ""
     w.size_x = size_x
@@ -103,7 +103,7 @@ world_new(size_x: int, size_z: int, max_height: int, voxel_size: float) -> *Worl
     return w
 }
 
-world_free(w: *World) {
+world_free(w: *VoxelWorld) {
     if w == null { return }
     if w.voxels != null { free(w.voxels) }
     if w.sdf != null { free(w.sdf) }
@@ -120,35 +120,35 @@ world_free(w: *World) {
     heap.free(w)
 }
 
-world_size_x(w: *World) -> int { return w.size_x }
-world_size_z(w: *World) -> int { return w.size_z }
-world_max_height(w: *World) -> int { return w.max_height }
-world_voxel_size(w: *World) -> float { return w.voxel_size }
-world_active_count(w: *World) -> int { return w.active }
+world_size_x(w: *VoxelWorld) -> int { return w.size_x }
+world_size_z(w: *VoxelWorld) -> int { return w.size_z }
+world_max_height(w: *VoxelWorld) -> int { return w.max_height }
+world_voxel_size(w: *VoxelWorld) -> float { return w.voxel_size }
+world_active_count(w: *VoxelWorld) -> int { return w.active }
 
-world_in_bounds(w: *World, x: int, y: int, z: int) -> bool {
+world_in_bounds(w: *VoxelWorld, x: int, y: int, z: int) -> bool {
     return x >= 0 && y >= 0 && z >= 0 && x < w.size_x && y < w.max_height && z < w.size_z
 }
 
 // Index so that a column of constant (x, z) is contiguous: terrain generation
 // and the exposed-face scan both walk y innermost.
-voxel_index(w: *World, x: int, y: int, z: int) -> int {
+voxel_index(w: *VoxelWorld, x: int, y: int, z: int) -> int {
     return (x * w.size_z + z) * w.max_height + y
 }
 
-world_get(w: *World, x: int, y: int, z: int) -> int {
+world_get(w: *VoxelWorld, x: int, y: int, z: int) -> int {
     if !world_in_bounds(w, x, y, z) { return EMPTY }
     data = w.voxels as int[]
     return data[voxel_index(w, x, y, z)]
 }
 
-world_solid(w: *World, x: int, y: int, z: int) -> bool {
+world_solid(w: *VoxelWorld, x: int, y: int, z: int) -> bool {
     if !world_in_bounds(w, x, y, z) { return false }
     data = w.voxels as int[]
     return data[voxel_index(w, x, y, z)] != EMPTY
 }
 
-world_set(w: *World, x: int, y: int, z: int, id: int) {
+world_set(w: *VoxelWorld, x: int, y: int, z: int, id: int) {
     if !world_in_bounds(w, x, y, z) { return }
     data = w.voxels as int[]
     index = voxel_index(w, x, y, z)
@@ -160,7 +160,7 @@ world_set(w: *World, x: int, y: int, z: int, id: int) {
     if previous != EMPTY && id == EMPTY { w.active = w.active - 1 }
 }
 
-world_fill_column(w: *World, x: int, z: int, height: int, id: int) {
+world_fill_column(w: *VoxelWorld, x: int, z: int, height: int, id: int) {
     top = height
     if top > w.max_height { top = w.max_height }
     y = 0
@@ -172,7 +172,7 @@ world_fill_column(w: *World, x: int, z: int, height: int, id: int) {
 
 // How tall a column stands: one past the highest solid cell, zero for an
 // empty column. What a brush reads before it raises or lowers the ground.
-world_column_height(w: *World, x: int, z: int) -> int {
+world_column_height(w: *VoxelWorld, x: int, z: int) -> int {
     if x < 0 || z < 0 || x >= w.size_x || z >= w.size_z { return 0 }
     y = w.max_height - 1
     while y >= 0 {
@@ -186,7 +186,7 @@ world_column_height(w: *World, x: int, z: int) -> int {
 // cell that was the top, so grass stays grass as a hill grows and sand
 // stays sand; an empty column grows as dirt. Lowered, the cells above are
 // cleared, and what was buried is the top now.
-world_set_column_height(w: *World, x: int, z: int, height: int) {
+world_set_column_height(w: *VoxelWorld, x: int, z: int, height: int) {
     if x < 0 || z < 0 || x >= w.size_x || z >= w.size_z { return }
     if height < 0 { height = 0 }
     if height > w.max_height { height = w.max_height }
@@ -209,12 +209,12 @@ world_set_column_height(w: *World, x: int, z: int, height: int) {
     }
 }
 
-world_clear(w: *World) {
+world_clear(w: *VoxelWorld) {
     memset(w.voxels, 0, w.size_x * w.max_height * w.size_z * 4)
     w.active = 0
 }
 
-world_generate(w: *World, generator: fn(ptr, int, int, int) -> int, state: ptr) {
+world_generate(w: *VoxelWorld, generator: fn(ptr, int, int, int) -> int, state: ptr) {
     x = 0
     while x < w.size_x {
         z = 0
@@ -232,17 +232,17 @@ world_generate(w: *World, generator: fn(ptr, int, int, int) -> int, state: ptr) 
 
 // Recorded by whatever filled the world, and read back by whatever wants to
 // fill another one the same way. The voxel module does not act on either.
-world_set_base_height(w: *World, y: float) { w.base_y = y }
+world_set_base_height(w: *VoxelWorld, y: float) { w.base_y = y }
 
-world_set_origin(w: *World, seed: long, kind: int) {
+world_set_origin(w: *VoxelWorld, seed: long, kind: int) {
     w.origin_seed = seed
     w.origin_kind = kind
 }
 
-world_origin_seed(w: *World) -> long { return w.origin_seed }
-world_origin_kind(w: *World) -> int { return w.origin_kind }
+world_origin_seed(w: *VoxelWorld) -> long { return w.origin_seed }
+world_origin_kind(w: *VoxelWorld) -> int { return w.origin_kind }
 
-palette_set(w: *World, id: int, red: float, green: float, blue: float) {
+palette_set(w: *VoxelWorld, id: int, red: float, green: float, blue: float) {
     count = list.size(w.palette)
     i = 0
     while i < count {
@@ -263,7 +263,7 @@ palette_set(w: *World, id: int, red: float, green: float, blue: float) {
     list.add_raw(w.palette, entry)
 }
 
-palette_reset(w: *World) {
+palette_reset(w: *VoxelWorld) {
     count = list.size(w.palette)
     i = 0
     while i < count {
@@ -274,7 +274,7 @@ palette_reset(w: *World) {
     list.clear(w.palette)
 }
 
-palette_color(w: *World, id: int) -> Vec3 {
+palette_color(w: *VoxelWorld, id: int) -> Vec3 {
     count = list.size(w.palette)
     i = 0
     while i < count {
@@ -298,7 +298,7 @@ palette_color(w: *World, id: int) -> Vec3 {
 // A voxel on the world boundary is always exposed; inside, the six neighbours
 // are fixed offsets from the voxel's own index, so the scan needs no coordinate
 // arithmetic and no bounds test per neighbour.
-exposed_at(data: int[], w: *World, x: int, y: int, z: int, index: int) -> bool {
+exposed_at(data: int[], w: *VoxelWorld, x: int, y: int, z: int, index: int) -> bool {
     if x == 0 || y == 0 || z == 0 { return true }
     if x == w.size_x - 1 || y == w.max_height - 1 || z == w.size_z - 1 { return true }
 
@@ -314,7 +314,7 @@ exposed_at(data: int[], w: *World, x: int, y: int, z: int, index: int) -> bool {
     return false
 }
 
-world_visible_count(w: *World) -> int {
+world_visible_count(w: *VoxelWorld) -> int {
     data = w.voxels as int[]
     visible = 0
     total = w.size_x * w.size_z * w.max_height
@@ -337,7 +337,7 @@ world_visible_count(w: *World) -> int {
 
 // `base` supplies the geometry every voxel instance draws; it becomes the
 // instanced model and the world takes ownership of it.
-world_build(w: *World, base: *Model) -> *Model {
+world_build(w: *VoxelWorld, base: *Model) -> *Model {
     if base == null { return null }
 
     visible = world_visible_count(w)
@@ -402,7 +402,7 @@ const PALETTE_CELL = 8
 // The palette as an image, registered under the world's own name so the
 // mesh can be textured with it by both backends, and rewritten by the next
 // build if the palette changed in between.
-world_palette_texture(w: *World) -> string {
+world_palette_texture(w: *VoxelWorld) -> string {
     if w.palette_name == "" {
         g_palettes_named = g_palettes_named + 1
         w.palette_name = "ae3d://voxel-palette/${g_palettes_named}"
@@ -433,7 +433,7 @@ world_palette_texture(w: *World) -> string {
 
 // Whether a voxel is there, with the world's edges as air and the ground
 // under it as rock, so the sides of the block show and its underside does not.
-filled(data: int[], w: *World, x: int, y: int, z: int) -> bool {
+filled(data: int[], w: *VoxelWorld, x: int, y: int, z: int) -> bool {
     if y < 0 { return true }
     if x < 0 || z < 0 || y >= w.max_height || x >= w.size_x || z >= w.size_z { return false }
     return data[(x * w.size_z + z) * w.max_height + y] != EMPTY
@@ -442,7 +442,7 @@ filled(data: int[], w: *World, x: int, y: int, z: int) -> bool {
 // How much sky a face's corner sees, 0..3, from the three voxels beside it
 // on the face's own side: the two along its edges and the diagonal one.
 // Both edge voxels present is a corner the diagonal cannot open further.
-corner_sky(data: int[], w: *World, x: int, y: int, z: int,
+corner_sky(data: int[], w: *VoxelWorld, x: int, y: int, z: int,
            ux: int, uy: int, uz: int, vx: int, vy: int, vz: int) -> int {
     side_u = 0
     if filled(data, w, x + ux, y + uy, z + uz) { side_u = 1 }
@@ -465,7 +465,7 @@ sky_to_light(sky: int) -> float {
 // shading does not streak one way along a run of faces. The tangents u and
 // v are positive axes; the face's low corner is the voxel's own, pushed to
 // its far side where the normal is positive.
-emit_face(m: *Model, data: int[], w: *World, x: int, y: int, z: int, kind: int,
+emit_face(m: *Model, data: int[], w: *VoxelWorld, x: int, y: int, z: int, kind: int,
           nx: int, ny: int, nz: int, ux: int, uy: int, uz: int, vx: int, vy: int, vz: int) {
     size = w.voxel_size
     normal = core.vec3(nx as float, ny as float, nz as float)
@@ -520,7 +520,7 @@ emit_face(m: *Model, data: int[], w: *World, x: int, y: int, z: int, kind: int,
 
 // The faces the world shows, as one mesh with the palette for its texture,
 // or null when the world is empty or the memory is not there.
-world_build_mesh(w: *World) -> *Model {
+world_build_mesh(w: *VoxelWorld) -> *Model {
     data = w.voxels as int[]
     total = w.size_x * w.size_z * w.max_height
     column = w.max_height
@@ -589,7 +589,7 @@ world_build_mesh(w: *World) -> *Model {
 
 const SDF_OUTSIDE = 1.0
 
-world_sdf_enable(w: *World) -> bool {
+world_sdf_enable(w: *VoxelWorld) -> bool {
     if w.sdf != null { return true }
     total = w.size_x * w.max_height * w.size_z
     w.sdf = calloc(total, 8)
@@ -604,13 +604,13 @@ world_sdf_enable(w: *World) -> bool {
     return true
 }
 
-world_sdf_set(w: *World, x: int, y: int, z: int, value: float) {
+world_sdf_set(w: *VoxelWorld, x: int, y: int, z: int, value: float) {
     if w.sdf == null || !world_in_bounds(w, x, y, z) { return }
     field = w.sdf as float[]
     field[voxel_index(w, x, y, z)] = value
 }
 
-world_sdf_get(w: *World, x: int, y: int, z: int) -> float {
+world_sdf_get(w: *VoxelWorld, x: int, y: int, z: int) -> float {
     if w.sdf == null || !world_in_bounds(w, x, y, z) { return SDF_OUTSIDE }
     field = w.sdf as float[]
     return field[voxel_index(w, x, y, z)]
@@ -618,7 +618,7 @@ world_sdf_get(w: *World, x: int, y: int, z: int) -> float {
 
 // A solid voxel is inside the surface and an empty one is outside, which gives a
 // coarse field good enough to smooth a blocky world.
-world_sdf_from_voxels(w: *World) -> bool {
+world_sdf_from_voxels(w: *VoxelWorld) -> bool {
     if !world_sdf_enable(w) { return false }
 
     data = w.voxels as int[]
@@ -642,7 +642,7 @@ inside(value: float) -> bool {
 }
 
 // Central differences on the field, which points away from the surface.
-surface_normal(w: *World, x: int, y: int, z: int) -> Vec3 {
+surface_normal(w: *VoxelWorld, x: int, y: int, z: int) -> Vec3 {
     dx = world_sdf_get(w, x + 1, y, z) - world_sdf_get(w, x - 1, y, z)
     dy = world_sdf_get(w, x, y + 1, z) - world_sdf_get(w, x, y - 1, z)
     dz = world_sdf_get(w, x, y, z + 1) - world_sdf_get(w, x, y, z - 1)
@@ -662,7 +662,7 @@ crossing(a: float, b: float) -> float {
 
 // Averages the crossings on the twelve edges of one cell. Returns false when the
 // cell does not straddle the surface.
-cell_vertex(w: *World, x: int, y: int, z: int) -> bool {
+cell_vertex(w: *VoxelWorld, x: int, y: int, z: int) -> bool {
     corner000 = world_sdf_get(w, x, y, z)
     corner100 = world_sdf_get(w, x + 1, y, z)
     corner010 = world_sdf_get(w, x, y + 1, z)
@@ -760,7 +760,7 @@ cell_vertex(w: *World, x: int, y: int, z: int) -> bool {
     return true
 }
 
-world_build_surface(w: *World) -> *Model {
+world_build_surface(w: *VoxelWorld) -> *Model {
     if w.sdf == null { return null }
 
     cells_x = w.size_x - 1
@@ -829,7 +829,7 @@ world_build_surface(w: *World) -> *Model {
 // cells in a fixed order whose natural normal is +x, -y and +z respectively, so
 // the y ring flips on the opposite condition to the other two for the whole mesh
 // to face outward.
-emit_quads(w: *World, m: *Model, cells: int[], cells_x: int, cells_y: int, cells_z: int) {
+emit_quads(w: *VoxelWorld, m: *Model, cells: int[], cells_x: int, cells_y: int, cells_z: int) {
     plane = cells_y * cells_z
 
     // Every corner from the first, not the second. A quad around the edge

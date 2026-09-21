@@ -1,0 +1,167 @@
+// Physics through the engine: the seam between aephysics and the scene.
+//
+// A crate with a Rigidbody and a box collider falls onto a slab and comes
+// to rest on it, its game object moved by the world every fixed step (the
+// object's transform is the body's); a kinematic slab moved by the game
+// carries the world with it; a sphere fired at a crate knocks it; a
+// ragdoll is twelve objects that fall with their bones; and freeing the
+// physics leaves the scene's objects and no bodies.
+import ae3d.core
+import ae3d.platform
+import ae3d.engine
+import ae3d.behaviour
+import ae3d.loader
+import ae3d.physics
+import aephysics.math
+import aephysics.dynamics
+
+var failures = 0
+
+check_true(name: string, ok: bool) {
+    if !ok {
+        println("physics: FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+check_near(name: string, got: float, want: float, tolerance: float) {
+    if core.abs_of(got - want) > tolerance {
+        println("physics: FAIL ${name}: got ${got} want ${want}")
+        failures = failures + 1
+    }
+}
+
+struct Fixture {
+    crate: ptr                     // *GameObject
+    lift: ptr                      // the kinematic slab
+    rider: ptr                     // the crate on it
+    target: ptr                    // the crate the ball hits
+    ball: ptr
+    ragdoll: ptr                   // *Ragdoll
+    head_start_y: float
+    steps: int
+    fired: bool
+    crate_body_matched: bool       // every step, the object's position was the body's
+}
+
+start(state: ptr, e: *Engine) {
+    s = state as *Fixture
+    physics.attach(e)
+    ground = engine.object(e, "Ground", loader.cube(1.0))
+    behaviour.object_set_position(ground, core.vec3(0.0, 0.0 - 0.5, 0.0))
+    physics.box_collider(ground, core.vec3(40.0, 0.5, 40.0), physics.material(0.6, 0.0))
+    check_true("a collider without a Rigidbody makes a static one", physics.rigidbody_of(ground) != null && physics.rigidbody_of(ground).kind == physics.STATIC)
+
+    crate = engine.object(e, "Crate", loader.cube(1.0))
+    behaviour.object_set_position(crate, core.vec3(0.0, 3.0, 0.0))
+    rb = physics.rigidbody(crate, physics.DYNAMIC)
+    check_true("a Rigidbody is a component of its object", physics.rigidbody_of(crate) == rb)
+    physics.box_collider(crate, core.vec3(0.5, 0.5, 0.5), physics.material(0.6, 0.0))
+    s.crate = crate as ptr
+
+    lift = engine.object(e, "Lift", loader.cube(1.0))
+    behaviour.object_set_position(lift, core.vec3(10.0, 0.5, 0.0))
+    physics.rigidbody(lift, physics.KINEMATIC)
+    physics.box_collider(lift, core.vec3(2.0, 0.5, 2.0), physics.material(0.6, 0.0))
+    s.lift = lift as ptr
+    rider = engine.object(e, "Rider", loader.cube(1.0))
+    behaviour.object_set_position(rider, core.vec3(10.0, 1.5, 0.0))
+    physics.rigidbody(rider, physics.DYNAMIC)
+    physics.box_collider(rider, core.vec3(0.5, 0.5, 0.5), physics.material(0.6, 0.0))
+    s.rider = rider as ptr
+
+    target = engine.object(e, "Target", loader.cube(1.0))
+    behaviour.object_set_position(target, core.vec3(0.0 - 10.0, 0.5, 0.0))
+    physics.rigidbody(target, physics.DYNAMIC)
+    physics.box_collider(target, core.vec3(0.5, 0.5, 0.5), physics.material(0.6, 0.0))
+    s.target = target as ptr
+    ball = engine.object(e, "Ball", loader.sphere(0.5, 12, 8))
+    behaviour.object_set_position(ball, core.vec3(0.0 - 10.0, 0.5, 0.0 - 6.0))
+    physics.rigidbody(ball, physics.DYNAMIC)
+    physics.sphere_collider(ball, 0.5, physics.material(0.6, 0.0), 4.0)
+    s.ball = ball as ptr
+
+    r = physics.ragdoll(e, "Ragdoll", core.vec3(20.0, 2.0, 0.0), 5.0, 1.0, 0.7)
+    check_true("a ragdoll is twelve objects", r != null && physics.ragdoll_bone(r, 11) != null)
+    check_true("a ragdoll's bone objects are in the scene", behaviour.scene_find(engine.engine_scene(e), "Ragdoll/neck") == physics.ragdoll_bone(r, 3))
+    s.ragdoll = r as ptr
+    s.head_start_y = behaviour.object_position(physics.ragdoll_bone(r, 3)).y
+    s.crate_body_matched = true
+}
+
+fixed_update(state: ptr, e: *Engine, step: float) {
+    s = state as *Fixture
+    s.steps = s.steps + 1
+    // The lift rises a metre a second; the game moves the object, the world follows.
+    lift = s.lift as *GameObject
+    behaviour.object_set_position(lift, core.v3_add(behaviour.object_position(lift), core.vec3(0.0, step, 0.0)))
+    if s.steps == 30 && s.fired == false {
+        physics.rigidbody_set_velocity(physics.rigidbody_of(s.ball as *GameObject), core.vec3(0.0, 0.0, 12.0))
+        s.fired = true
+    }
+}
+
+late_update(state: ptr, e: *Engine, delta: float) {
+    s = state as *Fixture
+    crate = s.crate as *GameObject
+    rb = physics.rigidbody_of(crate)
+    body = dynamics.body_get_position(physics.rigidbody_body(rb))
+    object = behaviour.object_position(crate)
+    if core.abs_of(body.y - object.y) > 0.000001 { s.crate_body_matched = false }
+}
+
+main() {
+    e = engine.engine_new()
+    engine.engine_set_size(e, 320, 240)
+    engine.engine_set_title(e, "ae3d physics test")
+    engine.engine_set_camera_input(e, false)
+    // The fixed step is a sixtieth; the frames run as fast as they can and the
+    // world takes as many steps as their time covers.
+    engine.engine_set_fixed_step(e, 1.0 / 60.0)
+    engine.engine_set_frame_limit(e, 240)
+    light = core.light_sun(core.vec3(0.3, 0.8, 0.5))
+    engine.engine_set_light(e, light)
+    scene = Fixture { crate: null, lift: null, rider: null, target: null, ball: null, ragdoll: null, head_start_y: 0.0, steps: 0, fired: false, crate_body_matched: false }
+    b = engine.behaviour_new("scene", (&scene) as ptr)
+    b.start = start
+    b.fixed_update = fixed_update
+    b.late_update = late_update
+    engine.engine_add_behaviour(e, b)
+
+    if !engine.engine_run(e) {
+        println("physics: SKIP no window available")
+        core.light_free(light)
+        engine.engine_free(e)
+        return
+    }
+
+    p = physics.of(e)
+    check_true("the physics is the engine's", p != null)
+    check_true("the world stepped as often as the fixed step ran (${physics.physics_step_count(p)}, ${scene.steps})", physics.physics_step_count(p) == scene.steps && scene.steps > 60)
+    crate_y = behaviour.object_position(scene.crate as *GameObject).y
+    check_near("the crate fell onto the slab and rests on it", crate_y, 0.5, 0.02)
+    check_true("the crate's object followed its body every frame", scene.crate_body_matched)
+    check_true("the crate is asleep at rest", physics.rigidbody_is_awake(physics.rigidbody_of(scene.crate as *GameObject)) == false)
+    lift_y = behaviour.object_position(scene.lift as *GameObject).y
+    rider_y = behaviour.object_position(scene.rider as *GameObject).y
+    check_true("the kinematic lift rose (${lift_y})", lift_y > 1.4)
+    check_near("the rider rode the lift", rider_y - lift_y, 1.0, 0.05)
+    target_z = behaviour.object_position(scene.target as *GameObject).z
+    check_true("the ball knocked the target crate along (${target_z})", target_z > 0.5)
+    head_y = behaviour.object_position(physics.ragdoll_bone(scene.ragdoll as *Ragdoll, 3)).y
+    check_true("the ragdoll fell (${scene.head_start_y} -> ${head_y})", head_y < scene.head_start_y - 1.0 && head_y > 0.0)
+
+    bodies_before = physics.physics_body_count(p)
+    check_true("the bodies are counted (${bodies_before})", bodies_before == 6 + 12)
+    physics.physics_free(p)
+    check_true("freed: no physics on the engine", physics.of(e) == null)
+    check_true("freed: the objects are still the scene's", behaviour.scene_find(engine.engine_scene(e), "Crate") == scene.crate as *GameObject)
+
+    core.light_free(light)
+    engine.engine_free(e)
+    if failures == 0 {
+        println("physics: all checks passed (${scene.steps} fixed steps)")
+    } else {
+        println("physics: ${failures} failure(s)")
+    }
+}
