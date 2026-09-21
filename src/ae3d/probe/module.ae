@@ -27,8 +27,7 @@ exports (
 extern malloc(size: long) -> ptr
 extern realloc(p: ptr, size: long) -> ptr
 extern free(p: ptr)
-// The C library's memcpy with a string source: a received chunk into the pending bytes.
-extern memcpy(dst: ptr, src: string, n: long) -> ptr
+extern memcpy(dst: ptr, src: ptr, n: long) -> ptr
 
 const CHUNK = 4096
 const MOST = 16777216              // a single answer larger than this is a protocol fault: the grid read is capped well below it
@@ -40,6 +39,7 @@ struct Probe {
     used: int
     capacity: int
     next_id: int
+    chunk: ptr                     // a std.bytes buffer: a received chunk's bytes, since a string's are not addressable
 }
 
 var g_error = ""
@@ -70,6 +70,7 @@ close(p: *Probe) {
     if p == null { return }
     if p.sock != null { tcp.tcp_close(p.sock) }
     if p.pending != null { free(p.pending) }
+    if p.chunk != null { bytes.free(p.chunk) }
     heap.free(p)
 }
 
@@ -122,7 +123,9 @@ read_line(p: *Probe) -> int {
             g_error = "the connection closed while reading"
             return 0 - 1
         }
-        memcpy(p.pending + p.used, chunk, got as long)
+        if p.chunk == null { p.chunk = bytes.new(CHUNK) }
+        bytes.copy_from_string(p.chunk, 0, chunk, got)
+        memcpy(p.pending + p.used, bytes.data(p.chunk), got as long)
         p.used = p.used + got
     }
     return 0 - 1

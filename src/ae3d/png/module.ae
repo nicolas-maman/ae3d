@@ -18,6 +18,7 @@
 import std.mem
 import std.bytes
 import std.zlib
+import std.string
 
 exports (
     write, rgba_set
@@ -29,9 +30,6 @@ extern fwrite(buffer: ptr, size: long, count: long, f: ptr) -> long
 extern malloc(size: long) -> ptr
 extern free(p: ptr)
 extern calloc(count: long, size: long) -> ptr
-// The C library's memcpy declared with a string source: the bytes of a
-// string into a buffer, since a string does not cast to a pointer.
-extern memcpy(dst: ptr, src: string, n: long) -> ptr
 
 var g_crc_table: ptr = null        // long[256]
 
@@ -77,7 +75,11 @@ put_be32(out: ptr, at: int, value: long) {
 write_chunk(f: ptr, kind: string, data: ptr, length: int) -> bool {
     header = malloc(8 as long)
     put_be32(header, 0, length as long)
-    memcpy(header + 4, kind, 4 as long)
+    n = 0
+    while n < 4 {
+        mem.set_uint8(header + 4, n, string.char_at(kind, n))
+        n = n + 1
+    }
     ok = fwrite(header, 1 as long, 8 as long, f) == (8 as long)
     if ok && length > 0 { ok = fwrite(data, 1 as long, length as long, f) == (length as long) }
     crc = crc32(0 as long, header + 4, 4)
@@ -105,14 +107,19 @@ write(path: string, rgba: ptr, width: int, height: int) -> bool {
         y = y + 1
     }
     // The compressor takes a string: the rows as one, zero bytes and all.
+    // Its answer is a string too, and a string's bytes are not
+    // addressable from here, so they cross into a std.bytes buffer
+    // (which reads a heap string's bytes past its header) and the
+    // chunk is written from that.
     rows = bytes.string_from_ptr(raw, raw_size)
     free(raw)
     packed, packed_size, err = zlib.deflate(rows, raw_size, 6)
     if err != "" { return false }
-    idat = malloc(packed_size as long)
-    memcpy(idat, packed, packed_size as long)
+    idat_bytes = bytes.new(packed_size)
+    if bytes.copy_from_string(idat_bytes, 0, packed, packed_size) == 0 { bytes.free(idat_bytes); return false }
+    idat = bytes.data(idat_bytes)
     f = fopen(path, "wb")
-    if f == null { free(idat); return false }
+    if f == null { bytes.free(idat_bytes); return false }
     signature = malloc(8 as long)
     mem.set_uint8(signature, 0, 137)
     mem.set_uint8(signature, 1, 80)
@@ -135,7 +142,7 @@ write(path: string, rgba: ptr, width: int, height: int) -> bool {
          write_chunk(f, "IDAT", idat, packed_size) &&
          write_chunk(f, "IEND", null, 0)
     if fclose(f) != 0 { ok = false }
-    free(idat)
+    bytes.free(idat_bytes)
     free(ihdr)
     free(signature)
     return ok
