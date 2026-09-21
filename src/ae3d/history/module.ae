@@ -11,15 +11,18 @@ import std.heap
 
 exports (
     EditStep, History,
-    STEP_PROPERTY, STEP_ADD, STEP_REMOVE,
-    history_new, history_free, history_record, history_undo, history_redo,
+    STEP_PROPERTY, STEP_ADD, STEP_REMOVE, STEP_PARENT,
+    history_new, history_free, history_record, history_record_parent, history_undo, history_redo,
     history_depth, history_redo_depth, history_top, history_clear,
-    history_begin_replay, history_end_replay, history_close
+    history_begin_replay, history_end_replay, history_close,
+    history_group_begin, history_group_end, history_undo_group, history_redo_group
 )
-
 const STEP_PROPERTY = 0
 const STEP_ADD = 1
 const STEP_REMOVE = 2
+// A model moved under another (or out from under one): the parents before
+// and after are the step's `from` and `to`.
+const STEP_PARENT = 3
 const HISTORY_LIMIT = 64
 
 struct EditStep {
@@ -28,6 +31,12 @@ struct EditStep {
     slot: int
     before: float
     after: float
+    from: ptr                      // STEP_PARENT: the parent before, or null
+    to: ptr                        // STEP_PARENT: the parent after, or null
+    // Steps recorded between history_group_begin and history_group_end
+    // share a group and undo together: grouping five objects is one edit
+    // to the person who did it, however many parents it changed.
+    group: int
 }
 
 struct History {
@@ -35,6 +44,8 @@ struct History {
     redo: ptr
     replaying: bool
     open: bool
+    grouping: int                  // the group steps are being recorded into, or 0
+    groups: int                    // how many groups have been begun
 }
 
 history_new() -> *History {
@@ -43,6 +54,8 @@ history_new() -> *History {
     h.redo = list.new()
     h.replaying = false
     h.open = false
+    h.grouping = 0
+    h.groups = 0
     return h
 }
 
@@ -121,6 +134,9 @@ history_record(h: *History, kind: int, subject: ptr, slot: int,
     step.slot = slot
     step.before = before
     step.after = after
+    step.from = null
+    step.to = null
+    step.group = h.grouping
     list.add_raw(h.undo, step)
     h.open = kind == STEP_PROPERTY
 
@@ -130,6 +146,51 @@ history_record(h: *History, kind: int, subject: ptr, slot: int,
         heap.free(stale)
     }
     drain(h.redo)
+}
+
+// A model's parent changed: from one (or none) to another (or none).
+history_record_parent(h: *History, subject: ptr, from: ptr, to: ptr) {
+    if h == null || h.replaying { return }
+    step = heap.new(EditStep)
+    step.kind = STEP_PARENT
+    step.subject = subject
+    step.slot = 0
+    step.before = 0.0
+    step.after = 0.0
+    step.from = from
+    step.to = to
+    step.group = h.grouping
+    list.add_raw(h.undo, step)
+    h.open = false
+    while list.size(h.undo) > HISTORY_LIMIT {
+        stale = list.get_raw(h.undo, 0) as *EditStep
+        list.remove(h.undo, 0)
+        heap.free(stale)
+    }
+    drain(h.redo)
+}
+
+// The steps recorded until history_group_end undo and redo together.
+history_group_begin(h: *History) {
+    if h == null { return }
+    h.groups = h.groups + 1
+    h.grouping = h.groups
+}
+
+history_group_end(h: *History) {
+    if h != null { h.grouping = 0 ; h.open = false }
+}
+
+// Whether the next step to undo (or redo) belongs to the same group as
+// the one just handed over: the caller keeps going while it does.
+history_undo_group(h: *History, group: int) -> bool {
+    if h == null || group == 0 || list.size(h.undo) == 0 { return false }
+    return (list.get_raw(h.undo, list.size(h.undo) - 1) as *EditStep).group == group
+}
+
+history_redo_group(h: *History, group: int) -> bool {
+    if h == null || group == 0 || list.size(h.redo) == 0 { return false }
+    return (list.get_raw(h.redo, list.size(h.redo) - 1) as *EditStep).group == group
 }
 
 // The caller applies the step; this only moves it between the two stacks and

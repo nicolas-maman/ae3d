@@ -3464,12 +3464,22 @@ limit_from_env() -> int {
 // nothing whatever. The report's check calls this from the top level, where the
 // editor's own definition wins, which is why it passed while the button was
 // dead.
+// A step, and the rest of its group with it: grouping five objects was
+// one edit to the person who did it, and comes back as one.
 undo_step() {
-    replay(history.history_undo(g_history), true)
+    step = history.history_undo(g_history)
+    replay(step, true)
+    while step != null && history.history_undo_group(g_history, step.group) {
+        replay(history.history_undo(g_history), true)
+    }
 }
 
 redo_step() {
-    replay(history.history_redo(g_history), false)
+    step = history.history_redo(g_history)
+    replay(step, false)
+    while step != null && history.history_redo_group(g_history, step.group) {
+        replay(history.history_redo(g_history), false)
+    }
 }
 
 // The history hands a step back; applying it in the right direction is the
@@ -3557,6 +3567,13 @@ replay(step: *EditStep, backwards: bool) {
             paint_soon()
         }
     }
+    if step.kind == history.STEP_PARENT {
+        parent = step.to
+        if backwards { parent = step.from }
+        reparent_keeping_world(step.subject as *Model, parent as *Model)
+        rebuild_rows()
+        select_model_pointer(step.subject)
+    }
     if (step.kind == history.STEP_ADD && backwards) ||
        (step.kind == history.STEP_REMOVE && !backwards) {
         detach_model(step.subject as *Model)
@@ -3621,6 +3638,110 @@ duplicate_selected() {
     rebuild_rows()
     select_object(row_count() - 1)
     say("duplicated")
+}
+
+// A model under another parent, staying where it is in the world: its
+// local transform is rederived under the new parent.
+reparent_keeping_world(m: *Model, parent: *Model) {
+    if m == null || m == parent { return }
+    core.model_sync_transform(m)
+    world_p = m.world_position
+    world_q = m.world_rotation
+    if !core.model_set_parent(m, parent) { return }
+    o = row_object(row_of_model(m as ptr))
+    if o == null { return }
+    behaviour.object_set_world_position(o, world_p)
+    behaviour.object_set_world_rotation(o, world_q)
+}
+
+// An empty group: a transform and nothing to draw, at the origin, for
+// what is put under it later.
+add_group() {
+    m = core.model_new()
+    add_component_model(m, "group", behaviour.KIND_MESH, null)
+}
+
+// The selection under a new group at its centre: the objects stay where
+// they are in the world, and the group is the one edit to undo.
+group_selection() {
+    members = list.new()
+    centre = core.vec3(0.0, 0.0, 0.0)
+    i = 0
+    while i < row_count() {
+        if is_selected(i) || i == g_selected {
+            m = model_at(i)
+            if m != null {
+                list.add_raw(members, m as ptr)
+                centre = core.v3_add(centre, core.model_world_position(m))
+            }
+        }
+        i = i + 1
+    }
+    if list.size(members) == 0 {
+        list.free(members)
+        say("nothing selected to group")
+        return
+    }
+    centre = core.v3_mul(centre, 1.0 / (list.size(members) as float))
+    history.history_group_begin(g_history)
+    group = core.model_new()
+    // Under whatever the first member was under, so grouping inside a
+    // group stays inside it.
+    first = list.get_raw(members, 0) as *Model
+    common = core.model_parent(first)
+    place_model(group, "group", behaviour.KIND_MESH, null)
+    if common != null { core.model_set_parent(group, common) }
+    behaviour.object_set_world_position(row_object(row_of_model(group as ptr)), centre)
+    i = 0
+    while i < list.size(members) {
+        m = list.get_raw(members, i) as *Model
+        history.history_record_parent(g_history, m as ptr, core.model_parent(m) as ptr, group as ptr)
+        reparent_keeping_world(m, group)
+        i = i + 1
+    }
+    history.history_group_end(g_history)
+    count = list.size(members)
+    list.free(members)
+    rebuild_rows()
+    select_object(row_of_model(group as ptr))
+    say("grouped ${count}")
+}
+
+// The selected group's contents out from under it, where they are in the
+// world, and the group gone; one edit.
+ungroup_selected() {
+    m = selected_model()
+    if m == null { return }
+    if !is_group(g_selected) || !has_children(g_selected) {
+        say("select a group to ungroup")
+        return
+    }
+    above = core.model_parent(m)
+    members = subtree_of(g_selected)
+    history.history_group_begin(g_history)
+    freed = 0
+    i = 1
+    while i < list.size(members) {
+        at = (list.get_raw(members, i) as int[])[0]
+        child = model_at(at)
+        if child != null && core.model_parent(child) == m {
+            history.history_record_parent(g_history, child as ptr, m as ptr, above as ptr)
+            reparent_keeping_world(child, above)
+            freed = freed + 1
+        }
+        i = i + 1
+    }
+    release_index_list(members)
+    backend = viewport_backend()
+    core.backend_remove_model(&backend, m)
+    at = row_of_model(m as ptr)
+    detach_at(at)
+    history.history_record(g_history, history.STEP_REMOVE, m as ptr, 0, 0.0, 0.0)
+    history.history_group_end(g_history)
+    g_selected = 0 - 1
+    rebuild_rows()
+    if row_count() > 0 { select_object(object_of_row(0)) }
+    say("ungrouped ${freed}")
 }
 
 release_index_list(members: ptr) {
@@ -5914,6 +6035,10 @@ main() {
         terrain_btn = ui.btn(panel_row(add_body), "Terrain") callback { add_terrain() }
         style_button(terrain_btn, "action")
 
+        // A group: nothing to draw, a place to put things under.
+        group_add_btn = ui.btn(panel_row(add_body), "Group") callback { add_group() }
+        style_button(group_add_btn, "action")
+
         ui.divider(left)
         assets_body = fold_section(left, "ASSETS")
         g_asset_browser = ui.listbox(assets_body, 4) callback |item: ptr, at: int, row: int| {
@@ -5942,6 +6067,13 @@ main() {
         style_button(delete_btn, "danger")
         g_probe_danger = delete_btn
         g_probe_action = duplicate_btn
+
+        group_row = ui.hstack(edit_body, 6)
+        as_row(group_row)
+        group_btn = ui.btn(group_row, "Group selection") callback { group_selection() }
+        style_button(group_btn, "action")
+        ungroup_btn = ui.btn(group_row, "Ungroup") callback { ungroup_selected() }
+        style_button(ungroup_btn, "action")
 
         frame_btn = ui.btn(panel_row(edit_body), "Frame selection") callback { focus_selection() }
         style_button(frame_btn, "action")
@@ -6542,6 +6674,9 @@ build_menus() {
     ui.menu_separator(edit_menu)
     ui.menu_item_accel(edit_menu, "Duplicate", "Cmd+D") callback { duplicate_selected() }
     ui.menu_item_accel(edit_menu, "Delete", "Cmd+Backspace") callback { remove_selected() }
+    ui.menu_separator(edit_menu)
+    ui.menu_item_accel(edit_menu, "Group Selection", "Cmd+G") callback { group_selection() }
+    ui.menu_item_accel(edit_menu, "Ungroup", "Shift+Cmd+G") callback { ungroup_selected() }
     ui.menu_bar_add(bar, edit_menu)
 
     add_menu = ui.menu("Add")
@@ -6551,6 +6686,7 @@ build_menus() {
     ui.menu_item(add_menu, "Water") callback { add_water() }
     ui.menu_item(add_menu, "Light") callback { add_light() }
     ui.menu_item(add_menu, "Terrain") callback { add_terrain() }
+    ui.menu_item(add_menu, "Group") callback { add_group() }
     ui.menu_bar_add(bar, add_menu)
 
     // The transform modes carry no accelerator here: W, E, R and F already

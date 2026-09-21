@@ -439,7 +439,9 @@ row_name(t: *Tree, row: *Widget) -> string {
     i = 0
     while i < list.size(kids) && first == "" {
         k = list.get_raw(kids, i) as *Widget
-        if k.text != "" { first = k.text }
+        // The disclosure of a row with children is a glyph before the
+        // label, not the name.
+        if k.text != "" && k.text != "▸" && k.text != "▾" { first = k.text }
         i = i + 1
     }
     list.free(kids)
@@ -1136,6 +1138,27 @@ scene_section(section: string, root_out: ptr[]) -> ptr {
     view = json.json_object_get_raw(root, "view")
     if view == null { return null }
     return json.json_object_get_raw(view, section)
+}
+
+// How many models of the scene file name a parent.
+scene_models_parented(root_out: ptr[]) -> int {
+    text, err = file.read(SCENE_FILE)
+    if err != "" { return 0 }
+    root, perr = json.parse(text)
+    string.free(text)
+    if perr != "" { return 0 }
+    root_out[0] = root
+    models = json.json_object_get_raw(root, "models")
+    if models == null { return 0 }
+    found = 0
+    count = json.json_array_size(models)
+    i = 0
+    while i < count {
+        entry = json.json_array_get_raw(models, i)
+        if json.json_object_get_raw(entry, "parent") != null { found = found + 1 }
+        i = i + 1
+    }
+    return found
 }
 
 // How many models of the scene file carry a dynamic body's record.
@@ -2441,6 +2464,40 @@ run_checks() {
             widened = wait_rows(scene, all_rows)
             check_detail("clearing the filter brings every row back", widened == all_rows, "${widened} rows, had ${all_rows}")
         }
+    }
+
+    // Grouping: the selected object goes under a new group, where it was
+    // in the world; the file records the parent; Ungroup and undo bring
+    // it back out.
+    group_btn = find(t, "button", "Group selection")
+    ungroup_btn = find(t, "button", "Ungroup")
+    check("the editor can group a selection", group_btn >= 0 && ungroup_btn >= 0)
+    if group_btn >= 0 && ungroup_btn >= 0 && scene >= 0 && save >= 0 {
+        now = tree()
+        rows_before = row_count(now, scene)
+        tree_free(now)
+        click(group_btn)
+        sleep(600)
+        now = tree()
+        grouped_rows = row_count(now, scene)
+        grouped = row_named(now, scene, "group") != null
+        tree_free(now)
+        check_detail("grouping puts a group where the object was", grouped && grouped_rows == rows_before, "${grouped_rows} rows after, ${rows_before} before; group row ${grouped}")
+        written = file_stamp(SCENE_FILE)
+        click(save)
+        check("the scene is written with the group", wait_file(SCENE_FILE, written))
+        root_slot = calloc(1, 8) as ptr[]
+        parented = scene_models_parented(root_slot)
+        check_detail("and the file has the object under its group", parented >= 1, "${parented} with a parent")
+        if root_slot[0] != null { json.json_free(root_slot[0]) }
+        free(root_slot)
+        click(ungroup_btn)
+        sleep(600)
+        now = tree()
+        after_ungroup = row_count(now, scene)
+        still_grouped = row_named(now, scene, "group") != null
+        tree_free(now)
+        check_detail("ungrouping takes the group away and leaves the object", !still_grouped && after_ungroup == rows_before, "${after_ungroup} rows, group row ${still_grouped}")
     }
 
     if delete_btn >= 0 && scene >= 0 {

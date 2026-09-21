@@ -2,6 +2,9 @@
 
 import ae3d.history
 
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
 var failures = 0
 
 check(name: string, ok: bool) {
@@ -16,6 +19,7 @@ check(name: string, ok: bool) {
 main() {
     h = history.history_new()
     subject = h as ptr
+    other = calloc(1, 8)
 
     check("a fresh history has nothing to undo", history.history_depth(h) == 0)
     check("undo on an empty history yields nothing", history.history_undo(h) == null)
@@ -67,6 +71,32 @@ main() {
     history.history_clear(h)
     check("clear empties both stacks",
           history.history_depth(h) == 0 && history.history_redo_depth(h) == 0)
+
+    // A parent step carries the parents before and after; steps recorded
+    // in a group undo together, and one outside it does not.
+    parent_a = calloc(1, 8)
+    parent_b = calloc(1, 8)
+    history.history_record(h, history.STEP_PROPERTY, subject, 3, 1.0, 2.0)
+    history.history_close(h)
+    history.history_group_begin(h)
+    history.history_record(h, history.STEP_ADD, parent_b, 0, 0.0, 0.0)
+    history.history_record_parent(h, subject, parent_a, parent_b)
+    history.history_record_parent(h, other, null, parent_b)
+    history.history_group_end(h)
+    check("a group's steps are recorded one each", history.history_depth(h) == 4)
+    step = history.history_undo(h)
+    check("the last step of the group comes first", step.kind == history.STEP_PARENT && step.subject == other && step.from == null && step.to == parent_b)
+    check("and says the group goes on", history.history_undo_group(h, step.group))
+    second = history.history_undo(h)
+    check("the parent step reads its parents", second.kind == history.STEP_PARENT && second.from == parent_a && second.to == parent_b)
+    check("the group goes on to its add", history.history_undo_group(h, step.group))
+    history.history_undo(h)
+    check("and ends before the step outside it", !history.history_undo_group(h, step.group))
+    check("the step outside the group is still there", history.history_depth(h) == 1)
+    redone = history.history_redo(h)
+    check("redo hands the group's first step back", redone.kind == history.STEP_ADD && history.history_redo_group(h, redone.group))
+    free(parent_a)
+    free(parent_b)
 
     history.history_free(h)
 
