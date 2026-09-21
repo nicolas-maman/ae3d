@@ -198,8 +198,6 @@ void   ae3d_gl_set_blend_multiply(void);
 int    ae3d_gl_texture_rgba(int width, int height, const unsigned char *rgba);
 int    ae3d_gl_texture3d_rgba(int size, const unsigned char *rgba);
 void   ae3d_gl_texture3d_bind(int unit, int texture);
-int    ae3d_cloudnoise_shape(int size, unsigned char *out);
-int    ae3d_cloudnoise_weather(int size, unsigned char *out);
 void   ae3d_gl_set_multisample(int on);
 void   ae3d_gl_set_wireframe(int on);
 int    ae3d_gl_viewport_width(void);

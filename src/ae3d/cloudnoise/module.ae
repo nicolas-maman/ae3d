@@ -1,0 +1,272 @@
+// The noise the clouds are made of, baked once into textures.
+//
+// A cloud marched in the sky shader used to evaluate its noise in the
+// shader, a fractal of value noise at every step and again at every step
+// of the march toward the sun: forty hashes a sample, thousands a pixel,
+// six milliseconds of a seven-millisecond frame. The same noise as
+// textures is one fetch a sample, which is how every production sky does
+// it (Schneider, "The Real-time Volumetric Cloudscapes of Horizon: Zero
+// Dawn").
+//
+// Two textures. The SHAPE is a tileable 3D texture of four channels: R is
+// Perlin-Worley -- Perlin noise remapped by Worley cells, which is what
+// gives a cloud both a billowing body and cellular edges -- and G, B, A
+// are Worley noise at three rising frequencies, read as a fractal that
+// erodes the body into detail at its edges. The WEATHER map is a 2D
+// texture over the world: R is where cloud is, the same fractal the
+// ground's cloud shadow computes in its shader, so the shadow under a
+// cloud is the cloud; G is the cloud's kind, from a low flat stratus to
+// a tall cumulus. Every function here is periodic in its texture, so a
+// texture repeats across the sky without a seam.
+//
+// The hashes are the shaders' own, 32-bit arithmetic carried in a long
+// and masked; the arithmetic between them is in doubles where the
+// shaders' is in floats, which moves a texel by a count in a few
+// thousand and nothing a cloud shows.
+import std.mem
+
+exports (
+    shape, weather
+)
+
+extern floor(x: float) -> float
+extern sqrt(x: float) -> float
+
+const MASK32 = 4294967295
+
+// A hash on an integer lattice point, the same bit mixing the shaders use
+// on theirs, so a value here is exact and not a driver's sine.
+mix(n: long) -> long {
+    m = MASK32 as long
+    x = n & m
+    x = x ^ (x >> 16)
+    x = (x * (2146121005 as long)) & m
+    x = x ^ (x >> 15)
+    x = (x * (2221713035 as long)) & m
+    x = x ^ (x >> 16)
+    return x
+}
+
+u32(v: long) -> long { return v & (MASK32 as long) }
+
+// Exactly the shaders' cloudHash(vec3(x, y, z)): the seed of a field rides
+// in z, which is where the shaders put it too.
+hash3(x: int, y: int, z: int, seed: int) -> float {
+    n = u32(u32((x as long) * (1597334677 as long)) ^ u32((y as long) * (3812015801 as long)) ^ u32(((z + seed) as long) * (2798796415 as long)))
+    return (mix(u32(n * (1597334677 as long))) as float) * (1.0 / 4294967296.0)
+}
+
+wrap(v: int, period: int) -> int {
+    w = v % period
+    if w < 0 { return w + period }
+    return w
+}
+
+// The gradient a corner's hash picks: one of the twelve edge centres.
+gradient_x(h: int) -> float {
+    if h < 8 { if (h & 1) != 0 { return 0.0 - 1.0 } return 1.0 }
+    return 0.0
+}
+gradient_y(h: int) -> float {
+    if h < 4 { if (h & 2) != 0 { return 0.0 - 1.0 } return 1.0 }
+    if h >= 8 { if (h & 1) != 0 { return 0.0 - 1.0 } return 1.0 }
+    return 0.0
+}
+gradient_z(h: int) -> float {
+    if h >= 4 && h < 8 { if (h & 2) != 0 { return 0.0 - 1.0 } return 1.0 }
+    if h >= 8 { if (h & 2) != 0 { return 0.0 - 1.0 } return 1.0 }
+    return 0.0
+}
+
+fade(t: float) -> float { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0) }
+
+// Perlin noise on a lattice of `period` cells, tileable, in -1..1.
+perlin(x: float, y: float, z: float, period: int, seed: int) -> float {
+    ix = floor(x) as int
+    iy = floor(y) as int
+    iz = floor(z) as int
+    fx = x - (ix as float)
+    fy = y - (iy as float)
+    fz = z - (iz as float)
+    ux = fade(fx)
+    uy = fade(fy)
+    uz = fade(fz)
+    corners = calloc_corners()
+    c = 0
+    while c < 8 {
+        cx = c & 1
+        cy = (c >> 1) & 1
+        cz = (c >> 2) & 1
+        px = wrap(ix + cx, period)
+        py = wrap(iy + cy, period)
+        pz = wrap(iz + cz, period)
+        h = (mix(u32((px as long) * (1597334677 as long)) ^ u32((py as long) * (3812015801 as long)) ^ u32((pz as long) * (2798796415 as long)) ^ (seed as long)) % (12 as long)) as int
+        dx = fx - (cx as float)
+        dy = fy - (cy as float)
+        dz = fz - (cz as float)
+        corners[c] = gradient_x(h) * dx + gradient_y(h) * dy + gradient_z(h) * dz
+        c = c + 1
+    }
+    x00 = corners[0] + (corners[1] - corners[0]) * ux
+    x10 = corners[2] + (corners[3] - corners[2]) * ux
+    x01 = corners[4] + (corners[5] - corners[4]) * ux
+    x11 = corners[6] + (corners[7] - corners[6]) * ux
+    y0 = x00 + (x10 - x00) * uy
+    y1 = x01 + (x11 - x01) * uy
+    return y0 + (y1 - y0) * uz
+}
+
+var g_corners: ptr = null          // float[8], the corners' scratch (the bake is one thread)
+
+calloc_corners() -> float[] {
+    if g_corners == null { g_corners = calloc(8, 8) }
+    return g_corners as float[]
+}
+
+extern calloc(count: int, size: int) -> ptr
+
+// Worley (cellular) noise, tileable: the distance to the nearest of one
+// feature point a cell, inverted so a cell's centre is 1 and its edge 0,
+// which is the shape a cloud puff has.
+worley(x: float, y: float, z: float, period: int, seed: int) -> float {
+    ix = floor(x) as int
+    iy = floor(y) as int
+    iz = floor(z) as int
+    best = 1000000000.0
+    dz = 0 - 1
+    while dz <= 1 {
+        dy = 0 - 1
+        while dy <= 1 {
+            dx = 0 - 1
+            while dx <= 1 {
+                cx = ix + dx
+                cy = iy + dy
+                cz = iz + dz
+                px = wrap(cx, period)
+                py = wrap(cy, period)
+                pz = wrap(cz, period)
+                fx = (cx as float) + hash3(px, py, pz, seed)
+                fy = (cy as float) + hash3(px, py, pz, seed + 7)
+                fz = (cz as float) + hash3(px, py, pz, seed + 13)
+                ex = fx - x
+                ey = fy - y
+                ez = fz - z
+                d = ex * ex + ey * ey + ez * ez
+                if d < best { best = d }
+                dx = dx + 1
+            }
+            dy = dy + 1
+        }
+        dz = dz + 1
+    }
+    best = sqrt(best)
+    if best > 1.0 { best = 1.0 }
+    return 1.0 - best
+}
+
+clamp01(v: float) -> float {
+    if v < 0.0 { return 0.0 }
+    if v > 1.0 { return 1.0 }
+    return v
+}
+
+byte_of(v: float) -> int { return (clamp01(v) * 255.0 + 0.5) as int }
+
+// The shape texture: `size` cubed texels, four bytes each. True when baked.
+shape(size: int, out: ptr) -> bool {
+    if size < 8 || out == null { return false }
+    z = 0
+    while z < size {
+        y = 0
+        while y < size {
+            x = 0
+            while x < size {
+                u = (x as float) / (size as float)
+                v = (y as float) / (size as float)
+                w = (z as float) / (size as float)
+                at = ((z * size * size) + (y * size) + x) * 4
+                // Perlin as a fractal of three octaves, tileable at 4, 8, 16
+                // cells; the Worley cells at 4, 8, 16 as well.
+                p = perlin(u * 4.0, v * 4.0, w * 4.0, 4, 11) * 0.625 +
+                    perlin(u * 8.0, v * 8.0, w * 8.0, 8, 23) * 0.25 +
+                    perlin(u * 16.0, v * 16.0, w * 16.0, 16, 37) * 0.125
+                worley_low = worley(u * 4.0, v * 4.0, w * 4.0, 4, 101)
+                worley_mid = worley(u * 8.0, v * 8.0, w * 8.0, 8, 203)
+                worley_high = worley(u * 16.0, v * 16.0, w * 16.0, 16, 307)
+                worley_fbm = worley_low * 0.625 + worley_mid * 0.25 + worley_high * 0.125
+                // Perlin-Worley: Perlin spread over 0..1 (a gradient fractal
+                // sits within about -0.6..0.6), its low end lifted by the
+                // Worley fbm, so the noise billows where Perlin does and is
+                // cellular where it does not.
+                perlin01 = clamp01(p * 0.8 + 0.5)
+                pw = clamp01((perlin01 - (worley_fbm - 1.0)) / (2.0 - worley_fbm))
+                mem.set_uint8(out, at, byte_of(pw))
+                mem.set_uint8(out, at + 1, byte_of(worley_low))
+                mem.set_uint8(out, at + 2, byte_of(worley_mid))
+                mem.set_uint8(out, at + 3, byte_of(worley_high))
+                x = x + 1
+            }
+            y = y + 1
+        }
+        z = z + 1
+    }
+    return true
+}
+
+// Value noise on a 2D lattice, tileable at `period`, the way the shaders'
+// cloudNoise is on its 3D one with z fixed -- the weather map has to be
+// the field the ground shader computes for its cloud shadow.
+value2(x: float, y: float, zslice: float, period: int, seed: int) -> float {
+    ix = floor(x) as int
+    iy = floor(y) as int
+    fx = x - (ix as float)
+    fy = y - (iy as float)
+    ux = fx * fx * (3.0 - 2.0 * fx)
+    uy = fy * fy * (3.0 - 2.0 * fy)
+    zi = zslice as int
+    a = hash3(wrap(ix, period), wrap(iy, period), zi, seed)
+    b = hash3(wrap(ix + 1, period), wrap(iy, period), zi, seed)
+    c = hash3(wrap(ix, period), wrap(iy + 1, period), zi, seed)
+    d = hash3(wrap(ix + 1, period), wrap(iy + 1, period), zi, seed)
+    return (a + (b - a) * ux) + ((c + (d - c) * ux) - (a + (b - a) * ux)) * uy
+}
+
+// The weather map: `size` squared texels, four bytes each. R is the cloud
+// field before the cover threshold, in 0..1, as a stretched fractal of
+// value noise with slow banks; G the cloud kind. Tileable across the
+// world at `size` texels to one weather tile.
+weather(size: int, out: ptr) -> bool {
+    if size < 8 || out == null { return false }
+    y = 0
+    while y < size {
+        x = 0
+        while x < size {
+            u = (x as float) / (size as float)
+            v = (y as float) / (size as float)
+            at = (y * size + x) * 4
+            // The same five octaves the scene shader's cloudField sums for
+            // the ground's cloud shadow: value noise on lattices of 6, 12,
+            // 24, 48 and 96 cells to the tile, each octave's seed in z.
+            field = 0.0
+            a = 0.5
+            freq = 6.0
+            o = 0
+            while o < 5 {
+                field = field + a * value2(u * freq, v * freq, (41 + o * 17) as float, freq as int, 0)
+                a = a * 0.5
+                freq = freq * 2.0
+                o = o + 1
+            }
+            field = clamp01((field - 0.3) / 0.4)
+            bank = value2(u * 3.0, v * 3.0, 8.0, 3, 0)
+            kind = value2(u * 4.0, v * 4.0, 5.0, 4, 0)
+            mem.set_uint8(out, at, byte_of(field))
+            mem.set_uint8(out, at + 1, byte_of(kind))
+            mem.set_uint8(out, at + 2, byte_of(bank))
+            mem.set_uint8(out, at + 3, 255)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return true
+}
