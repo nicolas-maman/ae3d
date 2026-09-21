@@ -2,6 +2,15 @@
 
 ## [current]
 
+### The physics engine, faster
+
+- aephysics at 1204c7e: the wide contacts are prepared by the native
+  lanes straight into the floats the solve reads (aephysics#40; the
+  per-step pack is gone): the reference's large pyramid steps in 12.5
+  ms against 14.1, many pyramids 28.4 against 31.6, the same to the
+  bit. Its tests live in `tests/` (aephysics#38); the plan to the
+  reference's numbers is aephysics#37.
+
 ### Every program's scene, in the editor
 
 - `AE3D_SCENE_OUT=path` writes any program's scene on its first frame --
