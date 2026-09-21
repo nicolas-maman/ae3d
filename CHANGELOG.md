@@ -27,6 +27,10 @@
   tyres with hubs and lamps that glow, in place of the two hulls drawn as
   themselves. The body that collides is the hull of the body that is
   seen.
+- The critique's follow-through is a check again (#333): it reads the
+  turn of the shoulders' line against the hips' and finds the shoulders
+  two frames behind, where correlating the head's position with the
+  pelvis's found them rigid at every lag (the head sits on the pelvis).
 - A stalled frame is not a frame: the loop hands the simulation at most a
   quarter second at a time, so the frame the scripts load in no longer
   runs the world for the seconds it took (the car was thirty metres down

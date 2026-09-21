@@ -96,7 +96,7 @@ critique_scene: the scene meets every standard
   ok   no foot sinks through the road (the lowest foot is +0.116, allowed 0.030)
   ok   a planted foot stays planted (worst 0.000 m in a frame, allowed 0.025)
   ok   the strike reaches past anything the walk does (0.138 m past the walk, wanted 0.120)
-  ok   the head follows the body rather than leading it (a lag of 11 frames)
+  ok   the shoulders follow the hips rather than turning with them (best alignment at a lag of 2 frames, wanted at least 1)
 ```
 
 `tools/ae3d_bench.ae` records what a frame of the scene costs (draws,
