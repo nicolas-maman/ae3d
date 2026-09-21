@@ -266,10 +266,10 @@ fi
 step "Vulkan shaders regenerated"
 if [ -z "$PYTHON" ]; then
     skip "Vulkan shaders" "no python"
-elif $PYTHON native/shaders/generate.py --check >/tmp/ae3d_shaders.log 2>&1; then
-    pass "native/shaders and vkscene are what src/ae3d/shaders produces"
+elif $PYTHON native/gpu/shaders/generate.py --check >/tmp/ae3d_shaders.log 2>&1; then
+    pass "native/gpu/shaders and vkscene are what src/ae3d/shaders produces"
 else
-    fail "generated Vulkan shaders are out of date; run native/shaders/generate.py"
+    fail "generated Vulkan shaders are out of date; run native/gpu/shaders/generate.py"
     sed "s/^/        /" /tmp/ae3d_shaders.log | head -12
 fi
 
@@ -297,8 +297,8 @@ if pkg-config --exists vulkan 2>/dev/null; then
 elif [ -d /opt/homebrew/include/vulkan ]; then
     VULKAN_CFLAGS="-I/opt/homebrew/include"
 fi
-for src in native/*.c; do
-    if "$CC" -c -O2 -Wall -Wextra -Werror $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o /dev/null 2>/tmp/ae3d_cc.log; then
+for src in native/*/*.c; do
+    if "$CC" -c -O2 -Wall -Wextra -Werror -Inative $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o /dev/null 2>/tmp/ae3d_cc.log; then
         pass "$src"
     else
         fail "$src"
@@ -306,10 +306,10 @@ for src in native/*.c; do
     fi
 done
 if [ "$(uname -s)" = "Darwin" ]; then
-    if "$CC" -c -O2 -Wall -Wextra -Werror -fobjc-arc $GLFW_CFLAGS native/ae3d_vk_surface.m -o /dev/null 2>/tmp/ae3d_cc.log; then
-        pass "native/ae3d_vk_surface.m"
+    if "$CC" -c -O2 -Wall -Wextra -Werror -fobjc-arc $GLFW_CFLAGS -Inative native/platform/metal_surface.m -o /dev/null 2>/tmp/ae3d_cc.log; then
+        pass "native/platform/metal_surface.m"
     else
-        fail "native/ae3d_vk_surface.m"
+        fail "native/platform/metal_surface.m"
         sed 's/^/        /' /tmp/ae3d_cc.log | head -20
     fi
 fi

@@ -1,5 +1,5 @@
 #include "ae3d.h"
-#include "ae3d_internal.h"
+#include "internal.h"
 
 #include <stdlib.h>
 #include <string.h>

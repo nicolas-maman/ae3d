@@ -1,5 +1,5 @@
 #include "ae3d.h"
-#include "ae3d_glapi.h"
+#include "opengl_api.h"
 
 #include <stdlib.h>
 #include <math.h>

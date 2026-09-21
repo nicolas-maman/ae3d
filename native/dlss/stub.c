@@ -2,7 +2,7 @@
    native/ae3d_dlss.cpp when AE3D_STREAMLINE_ROOT is not set (build.sh), so
    the engine builds the same on a machine without the SDK, a Linux runner
    or a Mac, and a program asking for DLSS is told it was not built in. */
-#include "ae3d_dlss.h"
+#include "streamline.h"
 
 int ae3d_dlss_built(void) { return 0; }
 int ae3d_dlss_load(const char *directory) { (void)directory; return 0; }

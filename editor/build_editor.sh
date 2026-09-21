@@ -110,7 +110,7 @@ case "$OS" in
         UI_SOURCES="$UI_ROOT/backend/aether_ui_macos.m $UI_ROOT/backend/aether_ui_test_server.c $UI_ROOT/backend/aether_ui_system_extras.c"
         UI_FLAGS="-fobjc-arc"
         PLATFORM_LIBS="-framework AppKit -framework Foundation -framework QuartzCore -framework CoreText -framework ImageIO -framework Cocoa -framework IOKit -framework CoreVideo -framework Metal -framework OpenGL"
-        NATIVE_EXTRA="native/ae3d_vk_surface.m"
+        NATIVE_EXTRA="native/platform/metal_surface.m"
         ;;
     Linux|FreeBSD)
         if ! pkg-config --exists gtk4 2>/dev/null; then
@@ -150,12 +150,12 @@ case "$OS" in
         ;;
 esac
 
-NATIVE_SOURCES="native/ae3d_agent.c native/ae3d_capture.c native/ae3d_glapi.c native/ae3d_platform.c native/ae3d_mesh.c native/ae3d_skin.c native/ae3d_meshfile.c native/ae3d_image.c native/ae3d_gl.c native/ae3d_offscreen.c native/ae3d_vk.c native/ae3d_jobs.c $(ae3d_dlss_source "$OBJ_DIR") $NATIVE_EXTRA"
+NATIVE_SOURCES="native/agent/channel.c native/gpu/capture.c native/gpu/opengl_api.c native/platform/window.c native/geometry/mesh.c native/geometry/skin.c native/geometry/meshfile.c native/image/image.c native/gpu/opengl.c native/gpu/offscreen.c native/gpu/vulkan.c native/gpu/jobs.c $(ae3d_dlss_source "$OBJ_DIR") $NATIVE_EXTRA"
 
 # Every header, not a list of three: the generated ones carry the shaders and
 # the uniform offsets, so leaving them out linked the previous shaders.
 newest_header=""
-for header in native/*.h; do
+for header in native/*.h native/*/*.h; do
     if [ -z "$newest_header" ] || [ "$header" -nt "$newest_header" ]; then
         newest_header="$header"
     fi
@@ -167,7 +167,7 @@ for src in $NATIVE_SOURCES; do
     extra="$(ae3d_native_extra_flags "$src")"
     compiler="$(ae3d_native_compiler "$CC" "$src")"
     if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ] || [ "$newest_header" -nt "$obj" ]; then
-        "$compiler" -c $CFLAGS $WARN $PIC $extra $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o "$obj"
+        "$compiler" -c $CFLAGS $WARN $PIC -Inative $extra $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o "$obj"
     fi
 done
 

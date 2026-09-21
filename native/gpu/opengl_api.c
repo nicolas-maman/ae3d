@@ -1,4 +1,4 @@
-#include "ae3d_glapi.h"
+#include "opengl_api.h"
 
 /* dlfcn.h is POSIX; Windows has no such header, so an unconditional include
  * ended the build before anything else could be tried:

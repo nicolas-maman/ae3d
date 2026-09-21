@@ -95,8 +95,8 @@ ae3d_native_build() {
         $ae3d_extra_libs $(ae3d_platform_libs "$(uname -s)") -o "$ae3d_lib"
 }
 
-# DLSS through NVIDIA Streamline: the C++ shim (native/ae3d_dlss.cpp) when
-# AE3D_STREAMLINE_ROOT names the SDK, the stub (native/ae3d_dlss_stub.c),
+# DLSS through NVIDIA Streamline: the C++ shim (native/dlss/streamline.cpp) when
+# AE3D_STREAMLINE_ROOT names the SDK, the stub (native/dlss/stub.c),
 # which says DLSS was not built in, otherwise. Whichever is built, the
 # other's object is dropped from the object directory so the library links
 # one of them.
@@ -104,11 +104,11 @@ ae3d_native_build() {
 #   ae3d_dlss_source <object directory>
 ae3d_dlss_source() {
     if [ -n "${AE3D_STREAMLINE_ROOT:-}" ] && [ -f "$AE3D_STREAMLINE_ROOT/include/sl.h" ]; then
-        rm -f "$1/ae3d_dlss_stub.o"
-        printf '%s' "native/ae3d_dlss.cpp"
+        rm -f "$1/stub.o"
+        printf '%s' "native/dlss/streamline.cpp"
     else
-        rm -f "$1/ae3d_dlss.o"
-        printf '%s' "native/ae3d_dlss_stub.c"
+        rm -f "$1/streamline.o"
+        printf '%s' "native/dlss/stub.c"
     fi
 }
 

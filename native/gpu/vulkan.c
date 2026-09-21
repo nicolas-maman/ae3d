@@ -1,8 +1,8 @@
 #include "ae3d.h"
-#include "ae3d_internal.h"
-#include "ae3d_vk_scene_shaders.h"
-#include "ae3d_vk_uniforms.h"
-#include "ae3d_dlss.h"
+#include "internal.h"
+#include "vulkan_shaders.h"
+#include "vulkan_uniforms.h"
+#include "../dlss/streamline.h"
 
 #include <stdio.h>
 #include <stdlib.h>

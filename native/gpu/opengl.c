@@ -1,6 +1,6 @@
 #include "ae3d.h"
-#include "ae3d_internal.h"
-#include "ae3d_glapi.h"
+#include "internal.h"
+#include "opengl_api.h"
 
 #include <stdlib.h>
 #include <string.h>

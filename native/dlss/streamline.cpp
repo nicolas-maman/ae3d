@@ -1,7 +1,7 @@
 /* DLSS through NVIDIA Streamline, on Vulkan. The C surface is in
-   native/ae3d_dlss.h; this is the half that speaks the SDK's C++. Built
+   native/dlss/streamline.h; this is the half that speaks the SDK's C++. Built
    only when AE3D_STREAMLINE_ROOT names the SDK (build.sh); the stub in
-   native/ae3d_dlss_stub.c stands in otherwise.
+   native/dlss/stub.c stands in otherwise.
 
    The runtime is loaded by hand -- sl.interposer.dll, opened from the
    directory asked for, AE3D_STREAMLINE, or beside the program -- and every
@@ -9,7 +9,7 @@
    library links nothing of NVIDIA's: a machine without the runtime or the
    card is told so and draws without DLSS. No standard library: plain C
    idioms in a .cpp, so the engine's shared library links as before. */
-#include "ae3d_dlss.h"
+#include "streamline.h"
 
 #include <stdio.h>
 #include <string.h>

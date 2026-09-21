@@ -81,7 +81,7 @@ The feature list in full, with the reasoning behind each. The [README](../README
   sample is lit by the sun through the cloud over it, in three octaves of
   Beer's law with the powder darkening and a two-lobe phase, and by the
   sky. The noise is baked once at start into a 2D and a 3D texture
-  (`native/ae3d_cloudnoise.c`), so the march is a fetch a sample and the
+  (`ae3d.cloudnoise`), so the march is a fetch a sample and the
   clouds are a millisecond and a half of the frame. The ground computes
   the same weather field where the sun's ray meets the layer, so their
   shadows cross the terrain as they drift. One call,

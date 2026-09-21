@@ -52,6 +52,8 @@ fi
 AETHERC="${AETHERC:-aetherc}"
 CFLAGS="${CFLAGS:--O2}"
 WARN="-Wall -Wextra"
+# The natives include the shared headers at native/ by name from their folders.
+NATIVE_INCLUDE="-Inative"
 
 if ! command -v "$AETHERC" >/dev/null 2>&1; then
     echo "ae3d: '$AETHERC' not found; install the Aether toolchain first" >&2
@@ -107,13 +109,13 @@ else
     GLFW_LIBS="-lglfw"
 fi
 
-# native/ae3d_meshfile.c includes <zlib.h> and calls gzopen/gzread/gzclose, so
+# native/geometry/meshfile.c includes <zlib.h> and calls gzopen/gzread/gzclose, so
 # zlib is ours to link and always has been. It was never named here: on Linux
 # `ae cflags --libs` happens to carry -lz, because the Aether toolchain there is
 # built against zlib, and that transitive flag covered for us. A Windows Aether
 # built without zlib emits no -lz, and the link fails on every gz* call:
 #
-#   ae3d_meshfile.o: undefined reference to `gzclose'
+#   meshfile.o: undefined reference to `gzclose'
 #
 # Depending on another project's link line for a library we use directly is the
 # actual bug; the platform only decided when it surfaced.
@@ -142,7 +144,7 @@ fi
 PLATFORM_LIBS="$(ae3d_platform_libs "$(uname -s)")"
 PIC="$(ae3d_native_pic_flag)"
 
-NATIVE_SOURCES="native/ae3d_agent.c native/ae3d_capture.c native/ae3d_glapi.c native/ae3d_platform.c native/ae3d_mesh.c native/ae3d_skin.c native/ae3d_meshfile.c native/ae3d_image.c native/ae3d_gl.c native/ae3d_offscreen.c native/ae3d_vk.c native/ae3d_jobs.c $(ae3d_dlss_source "$OBJ_DIR")"
+NATIVE_SOURCES="native/agent/channel.c native/gpu/capture.c native/platform/window.c native/geometry/mesh.c native/geometry/skin.c native/geometry/meshfile.c native/image/image.c native/gpu/opengl_api.c native/gpu/opengl.c native/gpu/offscreen.c native/gpu/vulkan.c native/gpu/jobs.c $(ae3d_dlss_source "$OBJ_DIR")"
 
 # The physics engine, aephysics, is a git submodule under deps/: Aether
 # modules the compiler finds through AETHER_LIB_DIR below, plus its one C
@@ -157,7 +159,7 @@ if [ ! -f "$AEPHYSICS/aephysics/native/aephysics_native.c" ]; then
 fi
 NATIVE_SOURCES="$NATIVE_SOURCES $AEPHYSICS/aephysics/native/aephysics_native.c"
 if [ "$(uname -s)" = "Darwin" ]; then
-    NATIVE_SOURCES="$NATIVE_SOURCES native/ae3d_vk_surface.m"
+    NATIVE_SOURCES="$NATIVE_SOURCES native/platform/metal_surface.m"
 fi
 
 # The Vulkan shaders are generated from the GLSL in src/ae3d/shaders and
@@ -165,9 +167,9 @@ fi
 # run after it leaves Vulkan on the previous shaders, which then fail parity
 # in ways that look like real bugs. Said here, once, at every build, since
 # CI's --check only says so after the push.
-if [ -f native/shaders/generate.py ] && [ -f native/ae3d_vk_scene_shaders.h ]; then
-    if [ src/ae3d/shaders/module.ae -nt native/ae3d_vk_scene_shaders.h ]; then
-        echo "build: src/ae3d/shaders/module.ae is newer than the generated Vulkan shaders; run native/shaders/generate.py" >&2
+if [ -f native/gpu/shaders/generate.py ] && [ -f native/gpu/vulkan_shaders.h ]; then
+    if [ src/ae3d/shaders/module.ae -nt native/gpu/vulkan_shaders.h ]; then
+        echo "build: src/ae3d/shaders/module.ae is newer than the generated Vulkan shaders; run native/gpu/shaders/generate.py" >&2
     fi
 fi
 
@@ -175,7 +177,7 @@ fi
 # the uniform offsets, so leaving them out meant regenerating the shaders and
 # linking the previous ones, with nothing to say so.
 newest_header=""
-for header in native/*.h; do
+for header in native/*.h native/*/*.h; do
     if [ -z "$newest_header" ] || [ "$header" -nt "$newest_header" ]; then
         newest_header="$header"
     fi
@@ -187,7 +189,7 @@ for src in $NATIVE_SOURCES; do
     extra="$(ae3d_native_extra_flags "$src")"
     compiler="$(ae3d_native_compiler "$CC" "$src")"
     if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ] || [ "$newest_header" -nt "$obj" ]; then
-        "$compiler" -c $CFLAGS $WARN $PIC $extra $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o "$obj"
+        "$compiler" -c $CFLAGS $WARN $PIC $NATIVE_INCLUDE $extra $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o "$obj"
     fi
 done
 

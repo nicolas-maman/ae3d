@@ -14,7 +14,7 @@
 #   VULKAN_CFLAGS   headers only; the loader is opened at run time, never linked
 #   ZLIB_CFLAGS     ZLIB_LIBS
 #   PLATFORM_LIBS   what the platform itself wants linked
-#   NATIVE_EXTRA    platform-only sources built alongside native/*.c
+#   NATIVE_EXTRA    platform-only sources built alongside the C under native/
 #
 # and defines ae3d_have_display.
 
@@ -112,7 +112,7 @@ NATIVE_EXTRA=""
 case "$AE3D_OS" in
     macos)
         PLATFORM_LIBS="-framework Cocoa -framework IOKit -framework CoreVideo -framework QuartzCore -framework Metal -framework OpenGL"
-        NATIVE_EXTRA="native/ae3d_vk_surface.m"
+        NATIVE_EXTRA="native/platform/metal_surface.m"
         ;;
     linux)
         PLATFORM_LIBS="-ldl -lm -lpthread"

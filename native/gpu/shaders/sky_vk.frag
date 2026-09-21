@@ -201,7 +201,7 @@ layout(location = 2) in vec4 ClipPrev;
 // the world, is the weather field: a fractal of tileable 2D value noise
 // gathered into banks by a slower one, a tile of CLOUD_TILE metres that
 // repeats without a seam. The sky reads it from the weather texture the
-// engine bakes from this very function (native/ae3d_cloudnoise.c); the
+// engine bakes from this very function (ae3d.cloudnoise); the
 // ground computes it here for its cloud shadow, so the shadow under a
 // cloud is the cloud. Both use the one hash, in integers, exact on both
 // backends.

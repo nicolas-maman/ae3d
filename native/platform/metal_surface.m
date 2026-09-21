@@ -1,4 +1,4 @@
-#include "ae3d_internal.h"
+#include "internal.h"
 
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
