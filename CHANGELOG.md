@@ -2,6 +2,24 @@
 
 ## [current]
 
+### The street, walked
+
+- `physics.ragdoll_follow(r)`: the rig drives the ragdoll through its
+  anchors (aephysics#35, `human_set_anchor_target`), so an animated
+  character collides as its ragdoll and, released on a hit, falls as it.
+  The street's bystanders walk the pavements on the export's gait cycle
+  at the clip's own pace and are knocked down mid-stride.
+- A drawn mesh's collision hull is built to the vertex budget a hull
+  holds: the street's bevelled props had no collider at all (the hull of
+  56 corners exceeds the edge limit, as the reference refuses it too) and
+  the car drove through the crate wall. It scatters it now.
+- A skinned figure is never merged into a static batch: the merge pass
+  culled it by its bind pose's bounds at the origin, and every figure
+  vanished the moment the origin left the view (test_skinned_render
+  carries one sixty metres off with the origin behind the camera).
+- Five blocks and a fog whole by 230 m, so the world's end never shows
+  from the car; a Vulkan snapshot burst arms its capture on every frame.
+
 ### The engine in Aether
 
 - Eight of the native C files are Aether modules now, each measured against

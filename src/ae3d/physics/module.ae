@@ -52,7 +52,8 @@ exports (
     vehicle, vehicle_free, vehicle_drive, vehicle_speed, vehicle_chassis, vehicle_wheel,
     ragdoll, ragdoll_free, ragdoll_bone, ragdoll_human, ragdoll_set_velocity, ragdoll_kick,
     ragdoll_stand, ragdoll_release, ragdoll_is_standing, ragdoll_turn, ragdoll_of_shape, hit_event_count, hit_event,
-    ragdoll_dress, ragdoll_dress_named, ragdoll_is_dressed, humanoid_bone
+    ragdoll_dress, ragdoll_dress_named, ragdoll_is_dressed, humanoid_bone,
+    ragdoll_follow, ragdoll_is_following
 )
 
 extern calloc(count: int, size: int) -> ptr
@@ -95,6 +96,7 @@ struct Ragdoll {
     bones: ptr                     // list of *GameObject, in human's bone order
     standing: bool
     rig: ptr                       // *Rig, the skinned figure the ragdoll drives, or null
+    following: bool                // the other way round: the rig drives the ragdoll, through its anchors
 }
 
 // A skinned figure worn by a ragdoll: a rig bone per ragdoll bone, each
@@ -103,6 +105,7 @@ struct Ragdoll {
 struct RigBone {
     model: ptr                     // *Model, the rig bone
     offset: Quat                   // body rotation * offset = the bone's world rotation
+    offset_p: Vec3                 // the bone's head from the body's origin, in the body's frame
 }
 
 struct Rig {
@@ -190,6 +193,15 @@ on_fixed_update(state: ptr, e: *Engine, step: float) {
         if rb.kind == KINEMATIC { push_transform(rb, step) }
         i = i + 1
     }
+    // A ragdoll that follows its rig takes the rig's pose as its anchors'
+    // targets for this step, before the world moves.
+    ragdoll_count = list.size(p.ragdolls)
+    k = 0
+    while k < ragdoll_count {
+        r = list.get_raw(p.ragdolls, k) as *Ragdoll
+        if r.following { drive_anchors(r, step) }
+        k = k + 1
+    }
     physics_world.step(p.world_id, step, p.sub_steps)
     p.step_count = p.step_count + 1
     i = 0
@@ -209,7 +221,7 @@ on_fixed_update(state: ptr, e: *Engine, step: float) {
     while i < count {
         r = list.get_raw(p.ragdolls, i) as *Ragdoll
         pull_ragdoll(r)
-        if r.rig != null { pose_rig(r) }
+        if r.rig != null && r.following == false { pose_rig(r) }
         i = i + 1
     }
 }
@@ -628,6 +640,7 @@ ragdoll(e: *Engine, name: string, position: Vec3, friction_torque: float, hertz:
     r.human = Human { bones: null, filter_joints: null, filter_joint_count: 0, friction_torque: 0.0, is_spawned: false }
     r.standing = false
     r.rig = null
+    r.following = false
     human.create_human(&r.human, p.world_id, position, friction_torque, hertz, damping_ratio, list.size(p.ragdolls) + 1, r as ptr)
     r.bones = list.new()
     i = 0
@@ -706,14 +719,62 @@ ragdoll_stand(r: *Ragdoll, ground: *Rigidbody, hertz: float, damping_ratio: floa
     r.standing = true
 }
 
-// The springs and anchors let go: the figure is a ragdoll from here.
+// The springs and anchors let go: the figure is a ragdoll from here,
+// and a rig it wore follows its bodies.
 ragdoll_release(r: *Ragdoll) {
-    if r.standing == false { return }
+    if r.standing == false && r.following == false { return }
     pelvis = human.bone_at(&r.human, human.BONE_PELVIS)
-    dynamics.destroy_joint(pelvis.joint_id, true)
-    pelvis.joint_id = dynamics.null_joint_id()
+    if dynamics.joint_is_valid(pelvis.joint_id) {
+        dynamics.destroy_joint(pelvis.joint_id, true)
+        pelvis.joint_id = dynamics.null_joint_id()
+    }
     human.human_destroy_anchors(&r.human)
     r.standing = false
+    r.following = false
+}
+
+// The rig drives the ragdoll: from here every fixed step the bodies'
+// anchors are driven to where the rig's bones are, and the figure walks
+// as the rig is animated, colliding as the ragdoll it is. A standing
+// figure's springs are exchanged for the anchors that carry it; the rig
+// is no longer posed from the bodies. `ragdoll_release` ends it, and
+// the bodies drive the rig again from wherever they were -- the way a
+// character animated until the moment it is struck becomes the ragdoll
+// that falls. False when the ragdoll wears no rig.
+ragdoll_follow(r: *Ragdoll) -> bool {
+    if r.rig == null { return false }
+    if r.following { return true }
+    p = r.physics as *Physics
+    pelvis = human.bone_at(&r.human, human.BONE_PELVIS)
+    if dynamics.joint_is_valid(pelvis.joint_id) {
+        dynamics.destroy_joint(pelvis.joint_id, true)
+        pelvis.joint_id = dynamics.null_joint_id()
+    }
+    human.human_destroy_anchors(&r.human)
+    human.human_create_motor_anchors(&r.human, p.world_id)
+    r.standing = true
+    r.following = true
+    return true
+}
+
+ragdoll_is_following(r: *Ragdoll) -> bool { return r.following }
+
+// Each mapped bone's body where the rig has it: the rig bone's world
+// rotation less the offset the dressing found, and its origin back from
+// the bone's head by the same offset. The anchors are driven there over
+// the step.
+drive_anchors(r: *Ragdoll, step: float) {
+    rig = r.rig as *Rig
+    bones = rig.bones as RigBone[]
+    i = 0
+    while i < human.BONE_COUNT {
+        bone = bones[i].model as *Model
+        core.model_sync_transform(bone)
+        q = core.quat_normalize(core.quat_mul(bone.world_rotation, core.quat_conjugate(bones[i].offset)))
+        p = core.v3_sub(bone.world_position, core.quat_apply(q, bones[i].offset_p))
+        human.human_set_anchor_target(&r.human, i, Transform { p: p, q: q }, step)
+        i = i + 1
+    }
 }
 
 ragdoll_is_standing(r: *Ragdoll) -> bool { return r.standing }
@@ -845,8 +906,9 @@ ragdoll_dress_named(r: *Ragdoll, skeleton: *Skeleton, names: string[]) -> bool {
     // The figure faced as the ragdoll is, from the feet.
     pelvis = human.bone_at(&r.human, human.BONE_PELVIS)
     pelvis_t = dynamics.body_get_transform(pelvis.body_id)
-    rig_facing = rig_foot_direction(skeleton, indices[human.BONE_CALF_L])
-    body_facing = body_foot_direction(r, human.BONE_CALF_L)
+    // Both feet, summed: a rest pose's feet splay, and the two splays cancel.
+    rig_facing = core.v3_add(rig_foot_direction(skeleton, indices[human.BONE_CALF_L]), rig_foot_direction(skeleton, indices[human.BONE_CALF_R]))
+    body_facing = core.v3_add(body_foot_direction(r, human.BONE_CALF_L), body_foot_direction(r, human.BONE_CALF_R))
     if core.v3_len(rig_facing) > 0.0001 && core.v3_len(body_facing) > 0.0001 {
         turn = core.quat_from_to(rig_facing, body_facing)
         core.model_set_rotation(root, core.quat_mul(turn, root.rotation))
@@ -874,6 +936,7 @@ ragdoll_dress_named(r: *Ragdoll, skeleton: *Skeleton, names: string[]) -> bool {
         }
         bones[i].model = bone as ptr
         bones[i].offset = core.quat_normalize(core.quat_mul(core.quat_conjugate(body_t.q), aligned))
+        bones[i].offset_p = core.quat_apply(core.quat_conjugate(body_t.q), core.v3_sub(bone.world_position, body_t.p))
         i = i + 1
     }
     // The root from the pelvis.

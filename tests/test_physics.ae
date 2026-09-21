@@ -47,6 +47,8 @@ struct Fixture {
     hull_crate: ptr                // a crate collided as its own model's hull
     victim: ptr                    // *Ragdoll, the figure the car hits, wearing a rig
     rig: ptr                       // *Skeleton, the rig it wears
+    victim_start_z: float
+    victim_walked_z: float         // the pelvis, when the rig had walked it half a metre
     vehicle: ptr                   // *Vehicle
     car: ptr                       // its chassis object
     car_start_x: float
@@ -209,6 +211,10 @@ start(state: ptr, e: *Engine) {
     check_true("and its head is up (${core.model_world_position(head).y})", core.model_world_position(head).y > 1.5)
     s.victim = victim as ptr
     s.rig = rig as ptr
+    // And the rig drives the ragdoll: the figure is walked toward the car
+    // by its rig's root, its bodies following through their anchors.
+    check_true("a dressed ragdoll follows its rig", physics.ragdoll_follow(victim))
+    s.victim_start_z = behaviour.object_position(physics.ragdoll_bone(victim, 0)).z
 
     r = physics.ragdoll(e, "Ragdoll", core.vec3(20.0, 2.0, 0.0), 5.0, 1.0, 0.7)
     check_true("a ragdoll is twelve objects", r != null && physics.ragdoll_bone(r, 11) != null)
@@ -227,6 +233,14 @@ fixed_update(state: ptr, e: *Engine, step: float) {
     if s.steps == 30 && s.fired == false {
         physics.rigidbody_set_velocity(physics.rigidbody_of(s.ball as *GameObject), core.vec3(0.0, 0.0, 12.0))
         s.fired = true
+    }
+    // The rig walks its figure toward the car, a centimetre a step, for
+    // as long as the ragdoll follows it; the fiftieth step notes where the
+    // pelvis has got to.
+    if s.rig != null && physics.ragdoll_is_following(s.victim as *Ragdoll) {
+        root = skin.skeleton_bone(s.rig as *Skeleton, skin.skeleton_find(s.rig as *Skeleton, "Root"))
+        core.model_set_position(root, root.position.x, root.position.y, root.position.z - 0.01)
+        if s.steps == 50 { s.victim_walked_z = behaviour.object_position(physics.ragdoll_bone(s.victim as *Ragdoll, 0)).z }
     }
     // Full throttle, straight on; what the car strikes is counted.
     if s.vehicle != null {
@@ -264,7 +278,7 @@ main() {
     engine.engine_set_frame_limit(e, 240)
     light = core.light_sun(core.vec3(0.3, 0.8, 0.5))
     engine.engine_set_light(e, light)
-    scene = Fixture { crate: null, lift: null, rider: null, target: null, ball: null, ragdoll: null, stander: null, hull_crate: null, victim: null, rig: null,
+    scene = Fixture { crate: null, lift: null, rider: null, target: null, ball: null, ragdoll: null, stander: null, hull_crate: null, victim: null, rig: null, victim_start_z: 0.0, victim_walked_z: 0.0,
                       vehicle: null, car: null, car_start_x: 0.0, head_start_y: 0.0, steps: 0, fired: false, hits: 0, crate_body_matched: false }
     b = engine.behaviour_new("scene", (&scene) as ptr)
     b.start = start
@@ -307,6 +321,9 @@ main() {
     victim = scene.victim as *Ragdoll
     hips = skin.skeleton_bone(rig, skin.skeleton_find(rig, "Hips"))
     pelvis = behaviour.object_position(physics.ragdoll_bone(victim, 0))
+    check_true("following its rig, the figure walked with it (pelvis z ${scene.victim_start_z} -> ${scene.victim_walked_z} in fifty steps)",
+               scene.victim_walked_z < scene.victim_start_z - 0.35 && scene.victim_walked_z > scene.victim_start_z - 0.65)
+    check_true("struck, it stopped following", physics.ragdoll_is_following(victim) == false)
     check_near("struck, the rig's hips still ride the ragdoll's pelvis", core.v3_len(core.v3_sub(core.model_world_position(hips), pelvis)), 0.0, 0.02)
     head = skin.skeleton_bone(rig, skin.skeleton_find(rig, "Head"))
     neck = behaviour.object_position(physics.ragdoll_bone(victim, 3))

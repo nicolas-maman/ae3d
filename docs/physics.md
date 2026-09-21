@@ -92,9 +92,21 @@ carries from then on. Every fixed step the root rides the pelvis and each
 mapped bone takes its body's rotation, parents before children, and the
 unmapped bones (wrists, toes, the crown) follow their parents, so the
 mesh weighted to the rig stands, falls and lies as the ragdoll does with
-its own bone lengths intact. The ragdoll's capsule models go unseen. The
-active ragdolls of the NaturalMotion line -- balance, bracing, getting
-up, a walk driving the anchors -- are the next step
+its own bone lengths intact. The ragdoll's capsule models go unseen.
+
+`ragdoll_follow(r)` turns it round: the rig drives the ragdoll. Every
+fixed step each mapped bone's kinematic anchor is driven to where the
+rig has the bone (the dressing's offsets, inverted), and the bodies
+follow through their joints' springs -- the pose drive of an active
+ragdoll. So a rig animated by a clip walks its figure as an animated
+character while the figure collides as the ragdoll it is, and
+`ragdoll_release` -- on the car's hit event -- lets the anchors go and
+the bodies drive the rig again from wherever they were: the character
+animated until the moment it is struck is the ragdoll that falls. The
+street's walkers are this: the export's gait cycle on a player per bone,
+the root placed each step where the walker has got to at the clip's own
+pace (0.85 m/s), the ragdoll a step behind. Balance, bracing and getting
+up -- the NaturalMotion line -- are the next step
 ([#365](https://github.com/nicolas-maman/ae3d/issues/365)).
 
 ## Vehicles
@@ -130,12 +142,16 @@ wave of ground), `ragdolls` (eight figures falling onto a torus) and
 **`examples/street_drive.ae`** is the street driven. The city block from
 the Blender pipeline is loaded three tiles long, its ground, buildings and
 kerbs as mesh colliders, its crates, bins and benches as dynamic bodies
-with the convex hull of their own mesh; a car is built from hulls and
+with the convex hull of their own mesh (built to the vertex budget a hull
+holds: a bevelled crate is 56 corners and more edges than the limit, so
+its hull is the tightest 32-vertex one); a car is built from hulls and
 driven on wheel joints; thirteen bystanders -- the pipeline's zombie
 figure, skin and clothes weighted to a rig of its own for each, worn by
-a ragdoll -- stand on the pavements and three in the road, sprung
-upright until the car's hit events name them, and fall as their
-ragdolls fall. Left
+a ragdoll -- stand on the pavements and in the road or walk the
+pavements on the export's gait cycle, sprung or driven until the car's
+hit events name them, and fall as their ragdolls fall. The street is
+five blocks into a fog whole by 230 m; `AE3D_CAMX/Y/Z` and
+`AE3D_AIMX/Y/Z` place the camera by number. Left
 alone for three seconds the car drives itself up and down the street with
 a lane controller and a U-turn on the open tarmac at each end, so the
 scene runs unattended and `AE3D_FRAMES=n` gives a fixed run; `AE3D_DIAG=1`
