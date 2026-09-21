@@ -39,6 +39,16 @@ A `@heap` string returned through a wrapper is freed at the wrapper's
 exit, so a string that has to outlive the call that made it is built at
 the call site, not returned from a helper.
 
+A local that holds a heap string releases it when it is reassigned or
+goes out of scope, so `text = string.replace_all(text, a, b)` is the
+whole idiom: a helper that also frees its argument frees it twice. A
+struct that keeps a string a caller handed it takes its own copy
+(`string.copy`), because the caller's local goes with the caller; a
+field assigned from a local in the same function (`mk.name = key`) is a
+move and needs no copy. A `std.list` of strings borrows them; keep the
+strings somewhere that outlives the list, or keep structs in the list
+instead.
+
 A string's bytes are not addressable from Aether: a literal is a C string
 and a string off the heap is an `AetherString`, a header and then its
 bytes, and an `extern` declared with a `string` parameter is handed
