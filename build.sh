@@ -145,16 +145,17 @@ PIC="$(ae3d_native_pic_flag)"
 NATIVE_SOURCES="native/ae3d_agent.c native/ae3d_client.c native/ae3d_script.c native/ae3d_capture.c native/ae3d_glapi.c native/ae3d_platform.c native/ae3d_mesh.c native/ae3d_skin.c native/ae3d_horde.c native/ae3d_meshfile.c native/ae3d_image.c native/ae3d_png.c native/ae3d_gl.c native/ae3d_offscreen.c native/ae3d_vk.c native/ae3d_cloudnoise.c native/ae3d_blob.c native/ae3d_weather.c native/ae3d_nav.c native/ae3d_jobs.c $(ae3d_dlss_source "$OBJ_DIR")"
 
 # The physics engine, aephysics, is a git submodule under deps/: Aether
-# modules the compiler finds through AETHER_LIB_DIR below, plus one C file,
-# the contact solver's vector lanes, which is part of the engine's native
-# library like any of ours. An empty deps/aephysics means the submodule was
-# not fetched; say so rather than fail on a missing import.
+# modules the compiler finds through AETHER_LIB_DIR below, plus its one C
+# file (the threads' helpers Aether has not, and the contact solver's
+# vector lanes), which is part of the engine's native library like any of
+# ours. An empty deps/aephysics means the submodule was not fetched; say
+# so rather than fail on a missing import.
 AEPHYSICS="$ROOT/deps/aephysics"
-if [ ! -f "$AEPHYSICS/aephysics/contact_solver_wide/lanes.c" ]; then
+if [ ! -f "$AEPHYSICS/aephysics/native/aephysics_native.c" ]; then
     echo "ae3d: deps/aephysics is empty; run: git submodule update --init" >&2
     exit 1
 fi
-NATIVE_SOURCES="$NATIVE_SOURCES $AEPHYSICS/aephysics/contact_solver_wide/lanes.c"
+NATIVE_SOURCES="$NATIVE_SOURCES $AEPHYSICS/aephysics/native/aephysics_native.c"
 if [ "$(uname -s)" = "Darwin" ]; then
     NATIVE_SOURCES="$NATIVE_SOURCES native/ae3d_vk_surface.m"
 fi
@@ -188,6 +189,19 @@ for src in $NATIVE_SOURCES; do
     if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ] || [ "$newest_header" -nt "$obj" ]; then
         "$compiler" -c $CFLAGS $WARN $PIC $extra $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o "$obj"
     fi
+done
+
+# The library links every object in the directory, so one left by a source
+# that has since been renamed or removed would be linked twice or as a
+# ghost: objects without a source go.
+for obj in "$OBJ_DIR"/*.o; do
+    [ -e "$obj" ] || continue
+    keep=0
+    for src in $NATIVE_SOURCES; do
+        base="$(basename "$src")"
+        [ "$obj" = "$OBJ_DIR/${base%.*}.o" ] && keep=1
+    done
+    [ "$keep" = 1 ] || rm -f "$obj"
 done
 
 ae3d_native_build "$CC" "$OBJ_DIR" "$CFLAGS" "$GLFW_LIBS $ZLIB_LIBS"
