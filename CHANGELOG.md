@@ -11,6 +11,11 @@
   disclosure, closed until opened, and a filter box narrows the tree by
   name. Delete takes a subtree, Duplicate copies one. The street opens
   as ten rows for 1,212 models in a third of the time.
+- The light section is the light: Sun / Point / Spot, its reach in
+  metres and a spot's cone, on the selected light or the scene's key
+  light; Add has a Spot light. `core.light_range`, `light_set_range`,
+  `light_inner_degrees` and `light_outer_degrees` read a light's shape
+  back out.
 - Visible and Casts shadow switches on the object, in the transform
   section, reaching everything selected and undone as properties.
 - The inspector has the object's name: typing into it renames the

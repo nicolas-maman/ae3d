@@ -67,7 +67,8 @@ selected puts all three at that height. The grid and the selection
 outlines are the editor's own geometry: the renderer draws them, but
 they are not objects and do not appear here.
 
-**Add** creates a cube, sphere, plane, water surface, light or terrain.
+**Add** creates a cube, sphere, plane, water surface, light, spot light,
+group or terrain.
 
 One terrain, not five. Which shape a terrain takes is a property of the terrain,
 chosen in its own inspector section and changed there afterwards, the way a
@@ -242,6 +243,15 @@ the editor holds an `engine.engine_over` -- an Engine wrapped around the
 viewport's renderer, camera and light, with no window or loop of its own,
 stepped by the frame with `engine_update` -- so what is written for the
 engine runs in the editor unchanged.
+
+The light section is the light itself: three buttons for its kind -- Sun
+(directional, over the whole scene), Point (a lamp in a room) and Spot (a
+headlight down a street) -- then its intensity, ambient and colour, its
+reach in metres, and, for a spot, the cone: the angle its light is whole
+within and the angle it is gone at. The rows act on the selected light,
+or on the scene's key light when none is selected, and the cone rows are
+there only when there is a cone. The kind is one undo step; the scene
+file has carried the mode, the attenuation and the cone all along.
 
 ## Undo
 

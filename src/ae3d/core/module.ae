@@ -38,6 +38,7 @@ exports (
     mat4_at, deg_to_rad, rad_to_deg, clampf, lerpf, PI, TWO_PI, HALF_PI, sin_of, cos_of,
     tan_of, atan2_of, acos_of, sqrt_of, abs_of, Material, MaterialGroup, Model, Light, Shader,
     Backend, Uniform, LIGHT_STATIC, LIGHT_DYNAMIC, MODE_POINT, MODE_DIRECTIONAL, MODE_SPOT,
+    light_range, light_set_range, light_inner_degrees, light_outer_degrees,
     UNIFORM_FLOAT, UNIFORM_INT, UNIFORM_VEC3, UNIFORM_FLOAT_ARRAY, UNIFORM_VEC3_ARRAY,
     env_int, material_new, material_default, material_clone, material_equals, material_free,
     model_new, model_free,
@@ -2176,6 +2177,37 @@ light_spot(position: Vec3, direction: Vec3, color: Vec3, intensity: float, range
     l.direction = v3_normalize(direction)
     light_set_cone(l, inner_degrees, outer_degrees)
     return l
+}
+
+// The reach a point or spot light was made with: the range its
+// attenuation was built from (light_point), or zero for a light that
+// never fades.
+light_range(l: *Light) -> float {
+    if l == null || l.quadratic_atten <= 0.0 { return 0.0 }
+    return sqrt(1.0 / l.quadratic_atten)
+}
+
+light_set_range(l: *Light, range: float) {
+    if l == null { return }
+    l.constant_atten = 1.0
+    l.linear_atten = 0.0
+    l.quadratic_atten = 0.0
+    if range > 0.0 {
+        l.linear_atten = 2.0 / range
+        l.quadratic_atten = 1.0 / (range * range)
+    }
+}
+
+// A spot's cone, back in degrees: the angle its light is whole within
+// and the angle it is gone at.
+light_inner_degrees(l: *Light) -> float {
+    if l == null { return 0.0 }
+    return acos_of(clampf(l.spot_cos_inner, 0.0 - 1.0, 1.0)) * 180.0 / 3.14159265
+}
+
+light_outer_degrees(l: *Light) -> float {
+    if l == null { return 0.0 }
+    return acos_of(clampf(l.spot_cos_outer, 0.0 - 1.0, 1.0)) * 180.0 / 3.14159265
 }
 
 light_set_cone(l: *Light, inner_degrees: float, outer_degrees: float) {
