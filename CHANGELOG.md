@@ -4,6 +4,10 @@
 
 ### The editor on a scene of a thousand objects
 
+- The sky is chosen in the editor: None, Desert, Dusk or Night, a button
+  each under the sky's colour, lit like the weather's kinds and undone the
+  same way. A scene that arrives with a sky the list does not have keeps it
+  and spells it out instead.
 - A scene keeps the sky it is drawn under. `engine.engine_set_sky` is
   written into the file as `skybox.image` and read back when it opens,
   so `examples/lights.ae` opens in the editor under its own starfield

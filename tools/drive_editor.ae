@@ -2369,6 +2369,73 @@ run_checks() {
         }
     }
 
+    // The sky the scene is drawn under: one of the engine's images or
+    // none, a button each, lit like the weather's kinds. Chosen here, the
+    // file carries the image and the scene comes back under it -- which is
+    // what a scene written by a program brings, and what the editor used to
+    // drop on the way in.
+    tree_free(t)
+    t = tree()
+    dusk = find_widget(t, "button", "Dusk")
+    sky_count = 0
+    sky_parent = 0 - 1
+    if dusk != null {
+        sky_parent = dusk.parent
+        i = 0
+        while i < tree_count(t) {
+            b = tree_at(t, i)
+            if b.kind == "button" && b.parent == sky_parent && named_in(b.text, "None,Desert,Dusk,Night") { sky_count = sky_count + 1 }
+            i = i + 1
+        }
+    }
+    check_detail("the sky section offers the engine's skies", sky_count == 4, "${sky_count} of four")
+    if sky_count == 4 && save >= 0 && load >= 0 {
+        lit = kinds_lit(t, sky_parent)
+        check_detail("and starts on none of them", lit == "None", "lit: ${lit}")
+        string.free(lit)
+        dusk_id = dusk.id
+        none_id = kind_button(t, sky_parent, "None")
+        click(dusk_id)
+        wt = want(WANT_CONTAINS)
+        wt.text = "the sky is Dusk"
+        sky_said = wait_for(wt, 8.0, ok)
+        tree_free(sky_said)
+        free(wt as ptr)
+        check("choosing a sky says which", ok[0] == 1)
+        now = tree()
+        lit = kinds_lit(now, sky_parent)
+        tree_free(now)
+        check_detail("and the button lights", lit == "Dusk", "lit: ${lit}")
+        string.free(lit)
+        written = file_stamp(SCENE_FILE)
+        click(save)
+        check("the scene is written under that sky", wait_file(SCENE_FILE, written))
+        root_slot = calloc(1, 8) as ptr[]
+        firmament = scene_section("skybox", root_slot)
+        image = ""
+        if firmament != null { image = field_text(firmament, "image") }
+        check_detail("and the file names the image", image == "resources/sky/dusk.png", json_text(firmament))
+        if root_slot[0] != null { json.json_free(root_slot[0]) }
+        free(root_slot)
+        click(none_id)
+        wt = want(WANT_KINDS_LIT)
+        wt.count = sky_parent
+        wt.text = "None"
+        cleared = wait_for(wt, 8.0, ok)
+        tree_free(cleared)
+        check("putting it back to none lights None", ok[0] == 1)
+        click(load)
+        wt.text = "Dusk"
+        sky_back = wait_for(wt, 8.0, ok)
+        tree_free(sky_back)
+        check("and the sky comes back with the scene", ok[0] == 1)
+        click(none_id)
+        wt.text = "None"
+        sky_plain = wait_for(wt, 8.0, ok)
+        tree_free(sky_plain)
+        free(wt as ptr)
+    }
+
     // The weather, the same way: a kind is a button, lit when chosen; the
     // console says what came over the scene; the file carries the kind by
     // name and comes back with it. By the row the kinds share: the console

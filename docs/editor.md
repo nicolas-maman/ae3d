@@ -289,6 +289,14 @@ wave table nothing reads:
 | rendering | FXAA, bloom, reflections (SSR), clouds and their cover, the overcast, ambient occlusion with its strength and reach -- the view menu's switches, applied on the backend that has them |
 | weather | the kind by name (`clear`, `rain`, `snow`, `dust`, `storm`), its strength, the wind's heading in degrees and its speed |
 
+The SKY section is the sky: three colour channels, the image it is drawn
+from -- None, Desert, Dusk or Night, the skies that ship with the engine --
+and Sun by time, which draws it from the sun at the hour beside it and
+takes the viewport while it is on. A scene that arrives with a sky of its
+own that is none of those keeps it: no button is lit and the path is
+spelled out under them, so opening a program's scene and saving it never
+trades its sky for one of these.
+
 and the file records the view: where the camera stood, its field of view and
 clip planes, whether face and frustum culling were on, the reflections'
 road height and strength, the fog -- whether, where it starts and is
