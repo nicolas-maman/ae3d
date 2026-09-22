@@ -183,7 +183,9 @@ size. A rate says a scene is slow; the split says which pass made it so.
 
 **Inspector** changes with what is selected. Under the title, the name:
 typing into it renames the object, its row follows, and the letters
-typed are one edit to undo. Transform, material and
+typed are one edit to undo. Transform (with **Visible** and **Casts
+shadow** switches on the object, each an undo step reaching everything
+selected), material and
 physics are always there (colour, metallic, roughness, and reflectivity --
 how much of the wet road's mirror a surface gets on Vulkan, under
 Reflections); water, light, camera, behaviour and rendering sections

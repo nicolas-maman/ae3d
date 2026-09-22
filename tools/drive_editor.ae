@@ -1145,6 +1145,28 @@ scene_section(section: string, root_out: ptr[]) -> ptr {
     return json.json_object_get_raw(view, section)
 }
 
+// How many models of the scene file are not visible.
+scene_models_hidden(root_out: ptr[]) -> int {
+    text, err = file.read(SCENE_FILE)
+    if err != "" { return 0 }
+    root, perr = json.parse(text)
+    string.free(text)
+    if perr != "" { return 0 }
+    root_out[0] = root
+    models = json.json_object_get_raw(root, "models")
+    if models == null { return 0 }
+    found = 0
+    count = json.json_array_size(models)
+    i = 0
+    while i < count {
+        entry = json.json_array_get_raw(models, i)
+        shown = json.json_object_get_raw(entry, "visible")
+        if shown != null && !field_flag(entry, "visible") { found = found + 1 }
+        i = i + 1
+    }
+    return found
+}
+
 // How many models of the scene file name a parent.
 scene_models_parented(root_out: ptr[]) -> int {
     text, err = file.read(SCENE_FILE)
@@ -2468,6 +2490,45 @@ run_checks() {
             set_text(filter_box, "")
             widened = wait_rows(scene, all_rows)
             check_detail("clearing the filter brings every row back", widened == all_rows, "${widened} rows, had ${all_rows}")
+        }
+    }
+
+    // The object's switches: Visible off hides the selected object and the
+    // file says so; undo shows it again.
+    tree_free(t)
+    t = tree()
+    visible_caption = find_widget(t, "text", "Visible")
+    if visible_caption != null && save >= 0 && undo >= 0 && scene >= 0 {
+        toggle_w = row_toggle(t, visible_caption)
+        check("the inspector has a Visible switch", toggle_w != null)
+        if toggle_w != null {
+            switch_id = toggle_w.id
+            now = tree()
+            rows = rows_under(now, scene)
+            if list.size(rows) > 0 { click(lowest_id(rows)) ; sleep(400) }
+            list.free(rows)
+            tree_free(now)
+            toggle(switch_id)
+            wt = want(WANT_ACTIVE)
+            wt.id = switch_id
+            wt.flag = false
+            off_tree = wait_for(wt, 8.0, ok)
+            tree_free(off_tree)
+            check("Visible switches off", ok[0] == 1)
+            written = file_stamp(SCENE_FILE)
+            click(save)
+            check("the scene is written with the object hidden", wait_file(SCENE_FILE, written))
+            root_slot = calloc(1, 8) as ptr[]
+            hidden = scene_models_hidden(root_slot)
+            check_detail("and the file says the object is not visible", hidden >= 1, "${hidden} hidden")
+            if root_slot[0] != null { json.json_free(root_slot[0]) }
+            free(root_slot)
+            click(undo)
+            wt.flag = true
+            on_tree = wait_for(wt, 8.0, ok)
+            tree_free(on_tree)
+            free(wt as ptr)
+            check("undo shows it again", ok[0] == 1)
         }
     }
 
