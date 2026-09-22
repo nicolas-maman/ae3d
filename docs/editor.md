@@ -318,6 +318,16 @@ not what the seed makes, as x, z and height, which is a few numbers for a
 stroke of the brush and nothing at all for a world nobody touched. Loading
 fills the world from its seed and then sets those columns.
 
+The bar under the viewport is what the frame cost: the backend's name, the
+rate, the renderer's passes (shadow, scene, post), the readback where the
+viewport is blitted rather than presented, the draw calls, the triangles
+and the size it was rendered at. A bounded run writes the same figures to
+`AE3D_EDITOR_REPORT` as `fps`, `first_fps`, `paint_ms` (the editor's whole
+frame callback), `passes`, `draws` and `blit_ms`. `first_fps` is the first
+frame after a scene opens and carries its upload to the GPU -- the street
+shows 4 fps there and settles at 90 -- so it answers "did the viewport
+ever draw", not "how fast is it".
+
 `AE3D_EDITOR_SCENE=roundtrip` builds the component scene, saves it and opens it
 again before the run starts, so the report describes what came back rather than
 what was built. CI asserts the same component counts for it as for the scene

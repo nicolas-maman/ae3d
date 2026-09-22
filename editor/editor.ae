@@ -406,6 +406,18 @@ struct Rest {
 // check on what the bar says now passes against a bar that opened on nothing.
 // So the editor writes down what it showed first.
 var g_first_fps = 0 - 1
+// What the frame costs after the renderer is done with it: reading the
+// framebuffer back off the GPU and handing it to the canvas. On the blit
+// path that is the whole difference between what the renderer measures
+// and what the editor shows, and nothing in the bar said so -- the
+// street opened at nine frames a second with every pass reading under a
+// millisecond. A smoothed average, like the frame rate beside it.
+var g_blit_ms = 0.0
+// And what the whole frame callback costs, so a frame rate that does not
+// match the passes says where the rest of it went: inside this (the
+// scene's own CPU work, the scripts, the outline) or outside it, in the
+// toolkit's own painting.
+var g_paint_ms = 0.0
 var g_stats = 0
 var g_title = 0
 var g_visible_toggle = 0
@@ -3001,6 +3013,17 @@ seconds() -> float {
 }
 
 draw_frame() {
+    paint_started = seconds()
+    draw_frame_body()
+    paint_spent = (seconds() - paint_started) * 1000.0
+    if g_paint_ms <= 0.0 {
+        g_paint_ms = paint_spent
+    } else {
+        g_paint_ms = g_paint_ms * 0.9 + paint_spent * 0.1
+    }
+}
+
+draw_frame_body() {
     if g_renderer == null { return }
 
     settle_layout()
@@ -3082,6 +3105,7 @@ draw_frame() {
 
     core.backend_render(&backend, g_camera as *Camera, g_light as *Light)
 
+    blit_started = seconds()
     pixels = core.backend_frame_pixels(&backend)
     if pixels == null { return }
 
@@ -3098,6 +3122,12 @@ draw_frame() {
                                       pixels, g_view_w * g_view_h * 4)
     draw_gizmo()
     ui.canvas_redraw(g_canvas)
+    spent = (seconds() - blit_started) * 1000.0
+    if g_blit_ms <= 0.0 {
+        g_blit_ms = spent
+    } else {
+        g_blit_ms = g_blit_ms * 0.9 + spent * 0.1
+    }
     frame_finished(&backend)
 }
 
@@ -3191,6 +3221,9 @@ pass_costs() -> string {
         post = gl.renderer_post_ms(g_renderer as *GLRenderer)
     }
     costs = "shadow ${number(shadow)} scene ${number(scene)} post ${number(post)} ms"
+    // The readback and the blit, where the viewport is a picture the CPU
+    // carries rather than a surface the GPU presents into.
+    if g_gpu == 0 { costs = string.concat(costs, "  readback ${number(g_blit_ms)} ms") }
     // The scene's own split, where the backend stamps it: the same figures
     // AE3D_PERF prints and scripts/perf.sh tables, read off the bar.
     if g_vulkan {
@@ -3655,6 +3688,23 @@ report_state() {
     lines = string.concat(lines, string.from_int(unreached_by_edit()))
     lines = string.concat(lines, "\nunundone_scripts ")
     lines = string.concat(lines, string.from_int(unundone_scripts()))
+    // What the renderer says the frame cost, beside what the editor
+    // measured around it: a viewport slow in its passes and one slow
+    // in the readback look the same from outside.
+    lines = string.concat(lines, "\npaint_ms ")
+    lines = string.concat(lines, number(g_paint_ms))
+    lines = string.concat(lines, "\npasses ")
+    lines = string.concat(lines, pass_costs())
+    lines = string.concat(lines, "\ndraws ")
+    shown = viewport_backend()
+    lines = string.concat(lines, string.from_int(core.backend_draw_calls(&shown)))
+    lines = string.concat(lines, "\nblit_ms ")
+    lines = string.concat(lines, number(g_blit_ms))
+    // The rate the run settled at, beside the first one it showed: the
+    // first frame after a scene opens carries its upload to the GPU,
+    // which is not what the editor runs at.
+    lines = string.concat(lines, "\nfps ")
+    lines = string.concat(lines, string.from_int((g_fps) as int))
     lines = string.concat(lines, "\nfirst_fps ")
     lines = string.concat(lines, string.from_int(g_first_fps))
     lines = string.concat(lines, "\nshading_disagrees ")
