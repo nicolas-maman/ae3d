@@ -108,6 +108,12 @@ struct View {
     speed: float
 
     sky_r: float
+    // The image the sky is drawn from, or "" for the clear colour: an
+    // equirectangular map (`engine_set_sky`), which five of the examples
+    // set and no scene file carried, so a scene opened in the editor lost
+    // its sky. A view read from a file borrows the loader's copy, which
+    // stands until the next view is read; a caller that keeps it copies it.
+    sky_image: string
     // The hour the sun is set by, when the sky is drawn from the sun; under
     // zero for the clear colour and the scene's own light.
     sky_time: float
@@ -174,6 +180,24 @@ extern ae3d_farr_set(arr: ptr, i: int, v: float)
 
 var g_error = ""
 var g_error_owned = false
+
+// The sky image the last view read. `field_string` points into the parsed
+// file, which is freed before the view is returned, so a view that carried
+// that pointer handed its reader freed memory: the string is copied here
+// and the view borrows this one, which stands until the next view is read.
+var g_view_sky = ""
+var g_view_sky_owned = false
+
+keep_view_sky(image: string) -> string {
+    if g_view_sky_owned { string.free(g_view_sky) }
+    g_view_sky = ""
+    g_view_sky_owned = false
+    if image != "" {
+        g_view_sky = string.copy(image)
+        g_view_sky_owned = true
+    }
+    return g_view_sky
+}
 
 last_error() -> string {
     return g_error
@@ -393,6 +417,7 @@ scene_load_view(path: string) -> View {
             v.sky_b = number_at(colour, 2)
         }
         v.sky_time = field_number(sky, "time", v.sky_time)
+        v.sky_image = keep_view_sky(field_string(sky, "image"))
     }
 
     render = json.object_get_raw(node, "rendering")
@@ -628,7 +653,7 @@ view_defaults() -> View {
         camera_x: 0.0, camera_y: 0.0, camera_z: 0.0,
         yaw: 0.0 - 90.0, pitch: 0.0, fov: 45.0,
         near: 0.1, far: 10000.0, speed: 100.0,
-        sky_r: 0.0, sky_g: 0.0, sky_b: 0.0, sky_time: 0.0 - 1.0,
+        sky_r: 0.0, sky_g: 0.0, sky_b: 0.0, sky_image: "", sky_time: 0.0 - 1.0,
         fxaa: false, bloom: false,
         bloom_threshold: 1.0, bloom_intensity: 1.0,
         ssr: false, ssr_road_height: 0.0, ssr_strength: 0.6,
@@ -661,6 +686,7 @@ view_json(v: *View) -> ptr {
     json.array_add_raw(colour, json.num(v.sky_b))
     json.object_set_raw(sky, "color", colour)
     json.object_set_raw(sky, "time", json.num(v.sky_time))
+    if v.sky_image != "" { json.object_set_raw(sky, "image", json.str(v.sky_image)) }
     json.object_set_raw(out, "skybox", sky)
 
     render = json.obj()

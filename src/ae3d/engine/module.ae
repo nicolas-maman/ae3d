@@ -40,7 +40,7 @@ exports (
     engine_set_size, engine_set_title, engine_set_msaa, engine_set_decorated, engine_set_post,
     engine_set_render_scale, engine_set_shadows, engine_shadows, engine_set_fog, engine_fog, engine_set_shadow_distance, engine_shadow_distance,
     engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
-    engine_set_skybox, engine_set_sky, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_clouds, engine_cloud_wind, engine_set_sky_overcast, engine_sky_overcast, engine_sky_overcast_color, engine_set_ssao, engine_set_capture_channel, engine_set_wetness, engine_set_taa, engine_taa, engine_set_dlss, engine_dlss, engine_ray_query, engine_set_ray_shadows, engine_ray_shadows, engine_set_sun_size, engine_sun_size, engine_set_ray_occlusion, engine_ray_occlusion, engine_set_lamp_size, engine_set_ssr, engine_load_texture,
+    engine_set_skybox, engine_set_sky, engine_sky_path, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_clouds, engine_cloud_wind, engine_set_sky_overcast, engine_sky_overcast, engine_sky_overcast_color, engine_set_ssao, engine_set_capture_channel, engine_set_wetness, engine_set_taa, engine_taa, engine_set_dlss, engine_dlss, engine_ray_query, engine_set_ray_shadows, engine_ray_shadows, engine_set_sun_size, engine_sun_size, engine_set_ray_occlusion, engine_ray_occlusion, engine_set_lamp_size, engine_set_ssr, engine_load_texture,
     engine_set_time_of_day, engine_time_of_day,
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
     engine_render_ms, engine_render_frames,
@@ -155,6 +155,9 @@ struct Engine {
     ssao_radius: float
     ssao_intensity: float
     // The post chain and the clear colour as last set, for the scene file.
+    // The image the sky is drawn from, as last set: the scene file's, so
+    // a program's scene opens under the sky the program gave it.
+    sky_path: string
     post_fxaa: bool
     post_bloom: bool
     post_threshold: float
@@ -938,6 +941,7 @@ engine_set_skybox(e: *Engine, skybox: ptr) {
 // could not be read.
 engine_set_sky(e: *Engine, path: string) -> bool {
     if e.backend_state == null { return false }
+    e.sky_path = core.set_owned(e.sky_path, path)
     sky = null as ptr
     if e.api == platform.API_VULKAN {
         sky = vk.skybox_create(e.backend_state as *VKRenderer, path) as ptr
@@ -981,6 +985,9 @@ engine_time_of_day(e: *Engine) -> float { return e.time_of_day }
 
 // The colour behind everything, where no sky or model is: what a scene
 // fades to at its horizon.
+// The image the sky is drawn from, or "" when it is the clear colour.
+engine_sky_path(e: *Engine) -> string { return core.text(e.sky_path) }
+
 engine_set_clear_color(e: *Engine, red: float, green: float, blue: float) {
     e.clear_color = core.vec3(red, green, blue)
     if e.backend_state == null { return }
@@ -1438,6 +1445,7 @@ engine_save_scene(e: *Engine, path: string, mesh_directory: string) -> bool {
         view.far = cam.far
         view.speed = cam.speed
     }
+    view.sky_image = core.text(e.sky_path)
     view.sky_r = e.clear_color.x
     view.sky_g = e.clear_color.y
     view.sky_b = e.clear_color.z

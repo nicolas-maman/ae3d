@@ -4,6 +4,18 @@
 
 ### The editor on a scene of a thousand objects
 
+- The sky is chosen in the editor: None, Desert, Dusk or Night, a button
+  each under the sky's colour, lit like the weather's kinds and undone the
+  same way. A scene that arrives with a sky the list does not have keeps it
+  and spells it out instead.
+- A scene keeps the sky it is drawn under. `engine.engine_set_sky` is
+  written into the file as `skybox.image` and read back when it opens,
+  so `examples/lights.ae` opens in the editor under its own starfield
+  rather than the clear colour, and Save keeps it. Five of the examples
+  set a sky and none of it survived the file. `engine.engine_sky_path`
+  reads back the image an engine was given; the editor reports it as
+  `sky` for a bounded run, and the roundtrip run asserts it came back.
+
 - The hierarchy is a tree: the scene file carries each model's `parent`
   and its groups (a model with no mesh: a transform, the way a program
   folders what it builds -- `engine.object(e, "Block 3", null)` and

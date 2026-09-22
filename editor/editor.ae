@@ -245,6 +245,13 @@ var g_sun_by_time = false
 var g_sun_by_time_toggle = 0
 var g_time_of_day = 14.0
 var g_sun_sky: ptr = null
+// The image the scene is drawn under, or "" for the clear colour. Five of
+// the examples set one with `engine_set_sky` and the scene file carried
+// none of it, so a program's scene opened here lost its sky. It is kept
+// beside the sun's own sky, which takes the viewport while the hour drives
+// it and gives it back.
+var g_scene_sky: ptr = null
+var g_sky_image = ""
 var g_sculpt = 0  // SCULPT_OFF, which is declared below the globals
 var g_brush_radius = 12.0
 var g_sculpting = false
@@ -371,6 +378,8 @@ var g_weather_intensity = 0.5
 var g_wind_heading = 0.0
 var g_wind_speed = 3.0
 var g_weather_buttons: ptr = null
+var g_sky_buttons: ptr = null
+var g_sky_caption = 0
 const WEATHER_KINDS = 5
 // The physics section: the body's kind and the collider's, a button each,
 // and the section's widgets so it can be hidden whole when nothing is
@@ -997,6 +1006,40 @@ refresh_weather_buttons() {
     paint_segments(g_weather_buttons, WEATHER_KINDS, g_weather_kind)
 }
 
+// The sky the scene is drawn under, chosen: the row lights the one it is
+// on, and a sky the list does not have is spelled out beside them rather
+// than dropped.
+refresh_sky_buttons() {
+    paint_segments(g_sky_buttons, SKY_IMAGES, sky_image_index(g_sky_image))
+    if g_sky_caption == 0 { return }
+    if sky_image_index(g_sky_image) >= 0 {
+        ui.set_text(g_sky_caption, "")
+    } else {
+        ui.set_text(g_sky_caption, g_sky_image)
+    }
+}
+
+set_sky_image(index: int) {
+    was = sky_image_index(g_sky_image)
+    if index == was { return }
+    if set_scene_sky(sky_image_path(index)) == false { return }
+    // A sky the list does not have is recorded as None, which is what
+    // undoing back past it can put back: the file's own path is the
+    // scene's, not a step's.
+    from = was
+    if from < 0 { from = 0 }
+    history.history_record(g_history, history.STEP_PROPERTY, null, SKY_IMAGE_SLOT,
+                           (from) as float, (index) as float)
+    history.history_close(g_history)
+    g_last_edit = seconds()
+    refresh_sky_buttons()
+    if index == 0 {
+        say("the sky is the colour above")
+    } else {
+        say("the sky is ${sky_image_name(index)}")
+    }
+}
+
 // The three channel sliders never show the colour they add up to, so the
 // inspector shows it twice: a chip painted with it and the hex spelled out
 // beside it, which is how all three of the editors this borrows from draw a
@@ -1307,6 +1350,40 @@ const SHADOW_SLOT = 57
 // Which kind of light the selected one is: a choice, undone the way the
 // weather's kind is.
 const LIGHT_MODE_SLOT = 58
+// Which image the sky is drawn from, by its place in the list below:
+// the picker's choice, undone the way the weather's kind is. A scene that
+// arrives with a sky of its own that is not in the list keeps it and no
+// button is lit, so choosing never silently loses what a program set.
+const SKY_IMAGE_SLOT = 59
+// The skies that ship with the engine, in the order the buttons draw
+// them. The first is no image at all: the colour above, or the sun's own
+// sky while the sun drives it.
+const SKY_IMAGES = 4
+
+sky_image_path(index: int) -> string {
+    if index == 1 { return "resources/sky/desert.png" }
+    if index == 2 { return "resources/sky/dusk.png" }
+    if index == 3 { return "resources/sky/night.png" }
+    return ""
+}
+
+sky_image_name(index: int) -> string {
+    if index == 1 { return "Desert" }
+    if index == 2 { return "Dusk" }
+    if index == 3 { return "Night" }
+    return "None"
+}
+
+// Where a path sits in that list, or -1 for a sky the list does not have.
+sky_image_index(path: string) -> int {
+    i = 0
+    while i < SKY_IMAGES {
+        if string.equals(sky_image_path(i), path) == 1 { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
 // The kinds of light an object can be, in the order the buttons draw
 // them: the sun (directional), a point, a spot.
 const LIGHT_SUN = 0
@@ -3496,6 +3573,15 @@ report_state() {
     lines = string.concat(lines, string.from_int(kind_count(behaviour.KIND_LIGHT)))
     lines = string.concat(lines, "\nscripted ")
     lines = string.concat(lines, string.from_int(scripted_count()))
+    // The scene's sky image, or "-" for the clear colour: a roundtrip
+    // run reads it after the file, where a sky the file does not carry
+    // shows up as the dash.
+    lines = string.concat(lines, "\nsky ")
+    if g_sky_image == "" {
+        lines = string.concat(lines, "-")
+    } else {
+        lines = string.concat(lines, g_sky_image)
+    }
     lines = string.concat(lines, "\nbodies ")
     lines = string.concat(lines, string.from_int(spec_count()))
     lines = string.concat(lines, "\nsimulation_stuck ")
@@ -3620,6 +3706,9 @@ replay(step: *EditStep, backwards: bool) {
             refresh_weather_buttons()
             apply_weather()
             if g_weather_kind == weather.CLEAR { apply_post() }
+        } else if step.slot == SKY_IMAGE_SLOT {
+            set_scene_sky(sky_image_path((target) as int))
+            refresh_sky_buttons()
         } else if step.slot == LIGHT_MODE_SLOT {
             apply_light_mode(step.subject as *Light, (target) as int)
             refresh_light_section()
@@ -4114,12 +4203,62 @@ apply_time_of_day() {
         }
         core.backend_set_skybox(&backend, g_sun_sky)
         refresh_light_rows()
+    } else if g_scene_sky != null {
+        core.backend_set_skybox(&backend, g_scene_sky)
+        // The clear colour still fills what the sky leaves, and the fog
+        // takes its colour from it.
+        core.backend_set_clear_color(&backend, g_sky_r, g_sky_g, g_sky_b)
     } else {
         core.backend_set_skybox(&backend, null)
         apply_sky()
     }
     mark_dirty()
     paint_soon()
+}
+
+// The sky the renderer is no longer holding. A backend frees the sky it was
+// last handed with itself; one it has given up is ours to free.
+free_sky(s: ptr) {
+    if s == null || g_renderer == null { return }
+    if g_vulkan {
+        vk.skybox_free(g_renderer as *VKRenderer, s as *Skybox)
+    } else {
+        gl.skybox_free(g_renderer as *GLRenderer, s as *Skybox)
+    }
+}
+
+// The image the scene is drawn under, made on the viewport's renderer; ""
+// for the clear colour. False when the image could not be read, and then
+// the sky is left as it was.
+set_scene_sky(path: string) -> bool {
+    if g_renderer == null { return false }
+    made = null as ptr
+    if path != "" {
+        if g_vulkan {
+            made = vk.skybox_create(g_renderer as *VKRenderer, path) as ptr
+        } else {
+            made = gl.skybox_create(g_renderer as *GLRenderer, path) as ptr
+        }
+        if made == null {
+            say("the sky image ${path} could not be read")
+            return false
+        }
+    }
+    old = g_scene_sky
+    g_scene_sky = made
+    if g_sky_image != "" { string.free(g_sky_image) }
+    if path == "" {
+        g_sky_image = ""
+    } else {
+        g_sky_image = string.copy(path)
+    }
+    // Whichever sky it is now, the viewport takes it here: the sun's wins
+    // while the hour drives it, and the image is what shows otherwise. The
+    // old one goes after, once the renderer has let go of it.
+    apply_time_of_day()
+    free_sky(old)
+    refresh_sky_buttons()
+    return true
 }
 
 
@@ -4962,6 +5101,9 @@ build_scene() {
     // describes what came BACK rather than what was built. A component the file
     // does not carry shows up here as a count that dropped.
     if env_is("AE3D_EDITOR_SCENE", "roundtrip") {
+        // A sky from an image, which is what a program's scene brings and
+        // what the file dropped before it carried one.
+        set_scene_sky("resources/sky/dusk.png")
         save_scene()
         load_scene()
     }
@@ -4999,6 +5141,7 @@ current_view() -> View {
     // the editor filled none of it: every scene it saved recorded the defaults,
     // so a scene saved with bloom on came back with it off whatever the file
     // was for.
+    v.sky_image = g_sky_image
     v.sky_r = g_sky_r
     v.sky_g = g_sky_g
     v.sky_b = g_sky_b
@@ -5196,6 +5339,7 @@ load_scene() {
     if g_sun_by_time { g_time_of_day = view.sky_time }
     show_row(TIME_ROW, g_time_of_day)
     if g_sun_by_time_toggle != 0 { ui.set_toggle(g_sun_by_time_toggle, flag_of(g_sun_by_time)) }
+    set_scene_sky(view.sky_image)
     apply_time_of_day()
     g_fxaa = view.fxaa
     g_bloom = view.bloom
@@ -6159,6 +6303,7 @@ main() {
     scan_scripts()
     g_preset_buttons = calloc(PRESET_KINDS, 4)
     g_weather_buttons = calloc(WEATHER_KINDS, 4)
+    g_sky_buttons = calloc(SKY_IMAGES, 4)
     g_light_buttons = calloc(LIGHT_MODES, 4)
     g_body_buttons = calloc(BODY_KINDS, 4)
     g_collider_buttons = calloc(COLLIDER_KINDS, 4)
@@ -6785,6 +6930,22 @@ main() {
         inspector_row(sky_body, "red", 0.0, 1.0, VIEWPORT_R, SKY_FIRST_ROW)
         inspector_row(sky_body, "green", 0.0, 1.0, VIEWPORT_G, SKY_FIRST_ROW + 1)
         inspector_row(sky_body, "blue", 0.0, 1.0, VIEWPORT_B, SKY_LAST_ROW)
+
+        image_row = ui.hstack(sky_body, 6)
+        as_row(image_row)
+        skies = g_sky_buttons as int[]
+        which = 0
+        while which < SKY_IMAGES {
+            sky_btn = ui.btn(image_row, sky_image_name(which)) callback {
+                set_sky_image(which)
+            }
+            style_button(sky_btn, "action")
+            skies[which] = sky_btn
+            which = which + 1
+        }
+        g_sky_caption = ui.text(sky_body, "")
+        ui.add_css_class(g_sky_caption, "label")
+        refresh_sky_buttons()
 
         sun_row = ui.hstack(sky_body, 8)
         as_row(sun_row)

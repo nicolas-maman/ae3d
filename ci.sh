@@ -756,6 +756,13 @@ check_editor_run() {
         # roundtrip scene it has been through the file and back.
         fail "$name (component types did not build)"
         sed 's/^/        /' "$report"
+    elif [ "$editor_scene" = "roundtrip" ] && \
+         [ "$(sed -n 's/^sky //p' "$report")" != "resources/sky/dusk.png" ]; then
+        # The scene was given a sky from an image before it was saved. A dash
+        # here is the file dropping it, which is what every program's scene
+        # (five of the examples set a sky) lost on the way into the editor.
+        fail "$name (the sky image did not survive the file: $(sed -n 's/^sky //p' "$report"))"
+        sed 's/^/        /' "$report"
     elif [ "$(sed -n 's/^simulation_stuck //p' "$report")" != "0" ]; then
         # Simulate runs the scene's bodies in the editor's engine and, stopped,
         # puts every model back where it stood. The cube either did not fall
