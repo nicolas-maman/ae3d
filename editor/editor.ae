@@ -401,6 +401,9 @@ var g_stats = 0
 var g_title = 0
 var g_visible_toggle = 0
 var g_shadow_toggle = 0
+// The light section's kind buttons, and the rows that are a spot's.
+var g_light_buttons: ptr = null
+var g_cone_rows: ptr = null
 // The name of the selected object, typed into: a rename, undone as one.
 var g_name_field = 0
 // The object's components, under its name: what Unity's inspector lists
@@ -1266,35 +1269,50 @@ const DENSITY_ROW = 40
 // view's, like the occlusion; its colour is the sky's.
 const FOG_START_ROW = 41
 const FOG_END_ROW = 42
-const ROWS = 43
+// A light's reach in metres, and a spot's cone: the angle its light is
+// whole within and the angle it is gone at. The light the rows act on is
+// the selected one, or the scene's key light.
+const LIGHT_RANGE_ROW = 43
+const LIGHT_INNER_ROW = 44
+const LIGHT_OUTER_ROW = 45
+const ROWS = 46
 // Past every inspector row, because a turn of the gizmo is not a row: it is
 // recorded as the angle the drag has turned through so far, and undone by
 // turning back through it.
-const ROTATE_FIRST_SLOT = 43
+const ROTATE_FIRST_SLOT = 46
 // Past the rotation axes, which take 43 through 45. A behaviour is a property
 // of a model like any other as far as undo is concerned, so it travels as a
 // property step in a slot no row uses.
-const SCRIPT_SLOT = 46
+const SCRIPT_SLOT = 49
 // A terrain's shape. A choice rather than a number, so it travels the way a
 // behaviour does rather than as a row.
-const TERRAIN_BIOME_SLOT = 47
+const TERRAIN_BIOME_SLOT = 50
 // A terrain's style. Blocks are voxels drawn one cube per cell; smooth meshes
 // the same field into one surface. Voxels are a kind of terrain rather than
 // what terrain is.
-const TERRAIN_STYLE_SLOT = 48
+const TERRAIN_STYLE_SLOT = 51
 // A stroke of the sculpting brush: one undo step from press to release,
 // whose before and after are the terrain's column heights, kept in a list
 // of strokes the step indexes.
-const SCULPT_SLOT = 49
+const SCULPT_SLOT = 52
 // The weather's kind: a choice, undone the way a terrain's style is.
-const WEATHER_KIND_SLOT = 50
+const WEATHER_KIND_SLOT = 53
 // The body's kind and its collider's, on the selected object.
-const BODY_KIND_SLOT = 51
-const COLLIDER_KIND_SLOT = 52
+const BODY_KIND_SLOT = 54
+const COLLIDER_KIND_SLOT = 55
 // Whether the object is drawn, and whether it casts a shadow: switches
 // on the object, undone as a property whose value is 0 or 1.
-const VISIBLE_SLOT = 53
-const SHADOW_SLOT = 54
+const VISIBLE_SLOT = 56
+const SHADOW_SLOT = 57
+// Which kind of light the selected one is: a choice, undone the way the
+// weather's kind is.
+const LIGHT_MODE_SLOT = 58
+// The kinds of light an object can be, in the order the buttons draw
+// them: the sun (directional), a point, a spot.
+const LIGHT_SUN = 0
+const LIGHT_POINT = 1
+const LIGHT_SPOT = 2
+const LIGHT_MODES = 3
 // The kinds of body an object can be, in the order the buttons draw them:
 // none, or the physics module's three.
 const BODY_NONE = 0
@@ -1739,6 +1757,7 @@ sync_inspector() {
     show_row(19, camera_value(19))
 
     refresh_sky_rows()
+    refresh_light_section()
     refresh_script_buttons()
 
     ground = selected_world()
@@ -3119,6 +3138,16 @@ row_reaches_its_target(index: int) -> bool {
     // The view's rows read the editor's state rather than a model, so with
     // a model selected they fell through to the model's properties and
     // reported the cloud cover and the occlusion stuck, which they were not.
+    if is_light_shape_row(index) {
+        if active_light() == null { return true }
+        if (index == LIGHT_INNER_ROW || index == LIGHT_OUTER_ROW) && light_mode_of(active_light()) != LIGHT_SPOT { return true }
+        before = light_shape_value(index)
+        apply_property(index, before + 0.25)
+        moved = core.abs_of(light_shape_value(index) - (before + 0.25)) < 0.05
+        apply_property(index, before)
+        return moved
+    }
+
     if is_view_row(index) {
         before = view_value(index)
         apply_property(index, before + 0.25)
@@ -3591,6 +3620,14 @@ replay(step: *EditStep, backwards: bool) {
             refresh_weather_buttons()
             apply_weather()
             if g_weather_kind == weather.CLEAR { apply_post() }
+        } else if step.slot == LIGHT_MODE_SLOT {
+            apply_light_mode(step.subject as *Light, (target) as int)
+            refresh_light_section()
+        } else if is_light_shape_row(step.slot) {
+            write_light_shape(step.subject as *Light, step.slot, target)
+            relight_weather()
+            refresh_light_section()
+            paint_soon()
         } else if step.slot == VISIBLE_SLOT || step.slot == SHADOW_SLOT {
             if subject != null {
                 apply_object_flag(subject, step.slot, target != 0.0)
@@ -4086,6 +4123,104 @@ apply_time_of_day() {
 }
 
 
+// A light's kind as the buttons order them.
+light_mode_of(l: *Light) -> int {
+    if l == null { return LIGHT_POINT }
+    if l.mode == core.MODE_DIRECTIONAL { return LIGHT_SUN }
+    if l.mode == core.MODE_SPOT { return LIGHT_SPOT }
+    return LIGHT_POINT
+}
+
+light_mode_name(mode: int) -> string {
+    if mode == LIGHT_SUN { return "sun" }
+    if mode == LIGHT_SPOT { return "spot" }
+    return "point"
+}
+
+// The kind chosen for the light the inspector is showing: one undo step,
+// the section repainted. A light that becomes a point or a spot keeps
+// its place and colour and takes a reach; the sun keeps neither.
+set_light_mode(mode: int) {
+    l = active_light()
+    if l == null { return }
+    was = light_mode_of(l)
+    if mode == was { return }
+    history.history_record(g_history, history.STEP_PROPERTY, l as ptr, LIGHT_MODE_SLOT,
+                           (was) as float, (mode) as float)
+    history.history_close(g_history)
+    g_last_edit = seconds()
+    apply_light_mode(l, mode)
+    refresh_light_section()
+    say("${light_mode_name(mode)} light")
+}
+
+apply_light_mode(l: *Light, mode: int) {
+    if mode == LIGHT_SUN {
+        l.mode = core.MODE_DIRECTIONAL
+    } else {
+        // A point or a spot reaches only so far; a light that had no
+        // reach (the sun) takes a room's worth.
+        if core.light_range(l) <= 0.0 { core.light_set_range(l, 400.0) }
+        if mode == LIGHT_SPOT {
+            l.mode = core.MODE_SPOT
+            if l.spot_cos_outer >= 1.0 { core.light_set_cone(l, 20.0, 35.0) }
+        } else {
+            l.mode = core.MODE_POINT
+        }
+    }
+    relight_weather()
+    mark_dirty()
+}
+
+is_light_shape_row(index: int) -> bool {
+    return index == LIGHT_RANGE_ROW || index == LIGHT_INNER_ROW || index == LIGHT_OUTER_ROW
+}
+
+light_shape_value(index: int) -> float {
+    l = active_light()
+    if l == null { return 0.0 }
+    if index == LIGHT_RANGE_ROW { return core.light_range(l) }
+    if index == LIGHT_INNER_ROW { return core.light_inner_degrees(l) }
+    return core.light_outer_degrees(l)
+}
+
+write_light_shape(l: *Light, index: int, value: float) {
+    if l == null { return }
+    if index == LIGHT_RANGE_ROW {
+        core.light_set_range(l, value)
+        return
+    }
+    inner = core.light_inner_degrees(l)
+    outer = core.light_outer_degrees(l)
+    if index == LIGHT_INNER_ROW { inner = value } else { outer = value }
+    core.light_set_cone(l, inner, outer)
+}
+
+// The section as the light has it: its kind lit, its rows on its own
+// numbers, and the cone rows only where there is a cone.
+refresh_light_section() {
+    l = active_light()
+    paint_segments(g_light_buttons, LIGHT_MODES, light_mode_of(l))
+    show_row(LIGHT_RANGE_ROW, light_shape_value(LIGHT_RANGE_ROW))
+    show_row(LIGHT_INNER_ROW, light_shape_value(LIGHT_INNER_ROW))
+    show_row(LIGHT_OUTER_ROW, light_shape_value(LIGHT_OUTER_ROW))
+    spot = light_mode_of(l) == LIGHT_SPOT
+    show_cone_rows(spot)
+}
+
+show_cone_rows(on: bool) {
+    i = 0
+    while i < ROWS {
+        if i == LIGHT_INNER_ROW || i == LIGHT_OUTER_ROW {
+            control = row_control(i)
+            frame = row_frame(i)
+            if control != 0 { ui.set_hidden(control, hidden_flag(on)) }
+            if frame != 0 { ui.set_hidden(frame, hidden_flag(on)) }
+        }
+        i = i + 1
+    }
+}
+
 light_value(index: int) -> float {
     light = active_light()
     if light == null { return 0.0 }
@@ -4114,6 +4249,20 @@ apply_property(index: int, value: float) {
             if index == 9 { relight_weather() }
         }
         show_row(index, value)
+        paint_soon()
+        return
+    }
+
+    if is_light_shape_row(index) {
+        l = active_light()
+        if l != null {
+            history.history_record(g_history, history.STEP_PROPERTY, l as ptr, index,
+                                   light_shape_value(index), value)
+            g_last_edit = seconds()
+            write_light_shape(l, index, value)
+            relight_weather()
+        }
+        show_row(index, light_shape_value(index))
         paint_soon()
         return
     }
@@ -5159,6 +5308,21 @@ add_light() {
     add_component_model(marker, "light", behaviour.KIND_LIGHT, light as ptr)
 }
 
+// A spot light: a point light with a cone, pointed down at the scene.
+add_spot_light() {
+    light = core.light_spot(core.vec3(0.0, 90.0, 0.0), core.vec3(0.0, 0.0 - 1.0, 0.0),
+                            core.vec3(1.0, 0.92, 0.78), 2.0, 400.0, 20.0, 35.0)
+    if light == null { return }
+    marker = loader.sphere(1.0, 16, 12)
+    core.model_set_scale(marker, 6.0, 6.0, 6.0)
+    core.model_set_position(marker, light.position.x, light.position.y, light.position.z)
+    core.model_matte(marker, light.color.x, light.color.y, light.color.z)
+    core.model_set_exposure(marker, 3.0)
+    backend = viewport_backend()
+    core.backend_add_light(&backend, light)
+    add_component_model(marker, "spot light", behaviour.KIND_LIGHT, light as ptr)
+}
+
 selected_light() -> *Light {
     c = component_at(g_selected)
     if c == null || c.kind != behaviour.KIND_LIGHT { return null }
@@ -5995,6 +6159,7 @@ main() {
     scan_scripts()
     g_preset_buttons = calloc(PRESET_KINDS, 4)
     g_weather_buttons = calloc(WEATHER_KINDS, 4)
+    g_light_buttons = calloc(LIGHT_MODES, 4)
     g_body_buttons = calloc(BODY_KINDS, 4)
     g_collider_buttons = calloc(COLLIDER_KINDS, 4)
     g_sliders = calloc(ROWS, 4)
@@ -6136,6 +6301,8 @@ main() {
         // buttons above it and made the grid look unfinished.
         light_btn = ui.btn(panel_row(add_body), "Light") callback { add_light() }
         style_button(light_btn, "action")
+        spot_light_btn = ui.btn(panel_row(add_body), "Spot light") callback { add_spot_light() }
+        style_button(spot_light_btn, "action")
 
         // One terrain, not five biomes. What shape it takes is a property of
         // the object, edited in the inspector; five buttons in the panel made
@@ -6433,11 +6600,30 @@ main() {
 
         ui.divider(right)
         light_body = fold_section(right, "LIGHT")
+        // What kind of light it is: the sun over the whole scene, a point
+        // in a room, or a spot down a street. A lamp is a point and a
+        // headlight is a spot, and the engine has always drawn both; the
+        // editor could only make the one the Add button chose.
+        light_kind_row = as_row(ui.hstack(light_body, 6))
+        sun_btn = ui.btn(light_kind_row, "Sun") callback { set_light_mode(LIGHT_SUN) }
+        style_button(sun_btn, "action")
+        point_btn = ui.btn(light_kind_row, "Point") callback { set_light_mode(LIGHT_POINT) }
+        style_button(point_btn, "action")
+        spot_btn = ui.btn(light_kind_row, "Spot") callback { set_light_mode(LIGHT_SPOT) }
+        style_button(spot_btn, "action")
+        kinds_of_light = g_light_buttons as int[]
+        kinds_of_light[LIGHT_SUN] = sun_btn
+        kinds_of_light[LIGHT_POINT] = point_btn
+        kinds_of_light[LIGHT_SPOT] = spot_btn
         inspector_row(light_body, "intensity", 0.0, 4.0, 1.0, 9)
         inspector_row(light_body, "ambient", 0.0, 1.0, 0.2, 10)
         inspector_row(light_body, "light red", 0.0, 1.0, 1.0, 14)
         inspector_row(light_body, "light green", 0.0, 1.0, 1.0, 15)
         inspector_row(light_body, "light blue", 0.0, 1.0, 1.0, 16)
+        field_row(light_body, "reach", 400.0, LIGHT_RANGE_ROW)
+        inspector_row(light_body, "cone", 1.0, 80.0, 20.0, LIGHT_INNER_ROW)
+        inspector_row(light_body, "cone edge", 1.0, 89.0, 35.0, LIGHT_OUTER_ROW)
+        refresh_light_section()
 
         // A terrain's own settings, beside the object rather than in the panel
         // that made it. Unreal and Unity both put the shape of a landscape on
@@ -6800,6 +6986,7 @@ build_menus() {
     ui.menu_item(add_menu, "Plane") callback { add_plane() }
     ui.menu_item(add_menu, "Water") callback { add_water() }
     ui.menu_item(add_menu, "Light") callback { add_light() }
+    ui.menu_item(add_menu, "Spot Light") callback { add_spot_light() }
     ui.menu_item(add_menu, "Terrain") callback { add_terrain() }
     ui.menu_item(add_menu, "Group") callback { add_group() }
     ui.menu_bar_add(bar, add_menu)

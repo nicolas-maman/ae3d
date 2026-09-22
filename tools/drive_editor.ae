@@ -1145,6 +1145,28 @@ scene_section(section: string, root_out: ptr[]) -> ptr {
     return json.json_object_get_raw(view, section)
 }
 
+// How many of the scene file's lights are of this mode (0 point, 1
+// directional, 2 spot).
+scene_lights_of_kind(root_out: ptr[], mode: int) -> int {
+    text, err = file.read(SCENE_FILE)
+    if err != "" { return 0 }
+    root, perr = json.parse(text)
+    string.free(text)
+    if perr != "" { return 0 }
+    root_out[0] = root
+    lights = json.json_object_get_raw(root, "lights")
+    if lights == null { return 0 }
+    found = 0
+    count = json.json_array_size(lights)
+    i = 0
+    while i < count {
+        entry = json.json_array_get_raw(lights, i)
+        if (field_number(entry, "mode")) as int == mode { found = found + 1 }
+        i = i + 1
+    }
+    return found
+}
+
 // How many models of the scene file are not visible.
 scene_models_hidden(root_out: ptr[]) -> int {
     text, err = file.read(SCENE_FILE)
@@ -2491,6 +2513,51 @@ run_checks() {
             widened = wait_rows(scene, all_rows)
             check_detail("clearing the filter brings every row back", widened == all_rows, "${widened} rows, had ${all_rows}")
         }
+    }
+
+    // The light's kind: Spot lights the Spot button, shows the cone rows
+    // and the file carries the kind; Point hides them again.
+    tree_free(t)
+    t = tree()
+    spot_caption = find_widget(t, "button", "Spot")
+    point_caption = find_widget(t, "button", "Point")
+    if spot_caption != null && point_caption != null && save >= 0 {
+        kinds_parent = spot_caption.parent
+        lit = kinds_lit(t, kinds_parent)
+        check_detail("a light kind is lit to begin with", lit != "", "lit: ${lit}")
+        string.free(lit)
+        cone_before = find_widget(t, "text", "cone") != null && on_screen(t, find_widget(t, "text", "cone"))
+        click(spot_caption.id)
+        wt = want(WANT_KINDS_LIT)
+        wt.count = kinds_parent
+        wt.text = "Spot"
+        spot_tree = wait_for(wt, 8.0, ok)
+        tree_free(spot_tree)
+        check("choosing Spot lights it", ok[0] == 1)
+        now = tree()
+        cone = find_widget(now, "text", "cone")
+        cone_shown = cone != null && on_screen(now, cone)
+        tree_free(now)
+        check_detail("a spot shows its cone rows", cone_shown, "cone visible before ${cone_before}, after ${cone_shown}")
+        written = file_stamp(SCENE_FILE)
+        click(save)
+        check("the scene is written with the spot", wait_file(SCENE_FILE, written))
+        root_slot = calloc(1, 8) as ptr[]
+        spots = scene_lights_of_kind(root_slot, 2)
+        check_detail("and the file says the light is a spot", spots >= 1, "${spots} spot lights")
+        if root_slot[0] != null { json.json_free(root_slot[0]) }
+        free(root_slot)
+        click(point_caption.id)
+        wt.text = "Point"
+        point_tree = wait_for(wt, 8.0, ok)
+        tree_free(point_tree)
+        free(wt as ptr)
+        check("choosing Point lights it again", ok[0] == 1)
+        now = tree()
+        cone = find_widget(now, "text", "cone")
+        cone_hidden = cone == null || !on_screen(now, cone)
+        tree_free(now)
+        check("a point hides the cone rows", cone_hidden)
     }
 
     // The object's switches: Visible off hides the selected object and the

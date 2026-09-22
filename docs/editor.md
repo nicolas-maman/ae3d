@@ -67,7 +67,8 @@ selected puts all three at that height. The grid and the selection
 outlines are the editor's own geometry: the renderer draws them, but
 they are not objects and do not appear here.
 
-**Add** creates a cube, sphere, plane, water surface, light or terrain.
+**Add** creates a cube, sphere, plane, water surface, light, spot light,
+group or terrain.
 
 One terrain, not five. Which shape a terrain takes is a property of the terrain,
 chosen in its own inspector section and changed there afterwards, the way a
