@@ -399,6 +399,8 @@ struct Rest {
 var g_first_fps = 0 - 1
 var g_stats = 0
 var g_title = 0
+var g_visible_toggle = 0
+var g_shadow_toggle = 0
 // The name of the selected object, typed into: a rename, undone as one.
 var g_name_field = 0
 // The object's components, under its name: what Unity's inspector lists
@@ -1289,6 +1291,10 @@ const WEATHER_KIND_SLOT = 50
 // The body's kind and its collider's, on the selected object.
 const BODY_KIND_SLOT = 51
 const COLLIDER_KIND_SLOT = 52
+// Whether the object is drawn, and whether it casts a shadow: switches
+// on the object, undone as a property whose value is 0 or 1.
+const VISIBLE_SLOT = 53
+const SHADOW_SLOT = 54
 // The kinds of body an object can be, in the order the buttons draw them:
 // none, or the physics module's three.
 const BODY_NONE = 0
@@ -1751,6 +1757,7 @@ sync_inspector() {
         show_row(SHORE_FOAM_ROW, water.simulation_shore_foam(sim))
     }
 
+    refresh_object_flags()
     show_row(0, m.position.x)
     show_row(1, m.position.y)
     show_row(2, m.position.z)
@@ -2077,6 +2084,58 @@ set_script(index: int, script: int) {
     if m != null && was != script { restart_slot(index) }
     refresh_script_buttons()
     say("${script_name(script)} on ${core.text(model_at(index).name)}")
+}
+
+// A caption and a switch on one line, the shape the shading rows have.
+switch_row(parent: int, name: string, on_change: fn) -> int {
+    row = ui.hstack(parent, 8)
+    as_row(row)
+    caption = ui.text(row, name)
+    ui.add_css_class(caption, "label")
+    ui.spacer(row)
+    return ui.toggle(row, "", on_change)
+}
+
+// Whether an object is drawn, or casts a shadow: onto everything
+// selected, a step each, so the switch reaches the set the way a row
+// does.
+set_object_flag(slot: int, on: bool) {
+    if selected_model() == null { return }
+    count = row_count()
+    i = 0
+    while i < count {
+        if is_selected(i) || i == g_selected {
+            m = model_at(i)
+            if m != null {
+                was = object_flag(m, slot)
+                if was != flag_of(on) {
+                    history.history_record(g_history, history.STEP_PROPERTY, m as ptr, slot, was as float, flag_of(on) as float)
+                    apply_object_flag(m, slot, on)
+                }
+            }
+        }
+        i = i + 1
+    }
+    history.history_close(g_history)
+    g_last_edit = seconds()
+    mark_dirty()
+    if slot == VISIBLE_SLOT { say("visible ${on}") } else { say("casts shadow ${on}") }
+}
+
+object_flag(m: *Model, slot: int) -> int {
+    if slot == VISIBLE_SLOT { return flag_of(m.visible) }
+    return flag_of(m.casts_shadow)
+}
+
+apply_object_flag(m: *Model, slot: int, on: bool) {
+    if slot == VISIBLE_SLOT { m.visible = on } else { core.model_set_casts_shadow(m, on) }
+}
+
+refresh_object_flags() {
+    m = selected_model()
+    if m == null { return }
+    if g_visible_toggle != 0 { ui.set_toggle(g_visible_toggle, flag_of(m.visible)) }
+    if g_shadow_toggle != 0 { ui.set_toggle(g_shadow_toggle, flag_of(m.casts_shadow)) }
 }
 
 // The selected object renamed to what was typed: its model and its object
@@ -3532,6 +3591,13 @@ replay(step: *EditStep, backwards: bool) {
             refresh_weather_buttons()
             apply_weather()
             if g_weather_kind == weather.CLEAR { apply_post() }
+        } else if step.slot == VISIBLE_SLOT || step.slot == SHADOW_SLOT {
+            if subject != null {
+                apply_object_flag(subject, step.slot, target != 0.0)
+                select_model_pointer(step.subject)
+                refresh_object_flags()
+                mark_dirty()
+            }
         } else if step.slot == BODY_KIND_SLOT {
             select_model_pointer(step.subject)
             apply_body_kind(row_object(g_selected), (target) as int)
@@ -6334,6 +6400,8 @@ main() {
         transform_body = fold_section(right, "TRANSFORM")
         vector_row(transform_body, "position", 0)
         field_row(transform_body, "scale", 30.0, 3)
+        g_visible_toggle = switch_row(transform_body, "Visible") callback |on: bool| { set_object_flag(VISIBLE_SLOT, on) }
+        g_shadow_toggle = switch_row(transform_body, "Casts shadow") callback |on: bool| { set_object_flag(SHADOW_SLOT, on) }
 
         ui.divider(right)
         material_body = fold_section(right, "MATERIAL")
