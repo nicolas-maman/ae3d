@@ -363,12 +363,15 @@ in_panel(t: *Tree, w: *Widget) -> *Widget {
 
 // The SCENE section's body, or -1: what the hierarchy's list and its
 // filter box are children of.
-scene_body_id(t: *Tree) -> int {
+scene_body_id(t: *Tree) -> int { return section_body_id(t, "SCENE") }
+
+// A section's body by its caption, or -1.
+section_body_id(t: *Tree, caption: string) -> int {
     n = tree_count(t)
     i = 0
     while i < n {
         w = tree_at(t, i)
-        if w.kind == "text" && w.text == "SCENE" {
+        if w.kind == "text" && w.text == caption {
             bar = in_panel(t, w)
             if bar != null {
                 body = null as *Widget
@@ -440,8 +443,10 @@ row_name(t: *Tree, row: *Widget) -> string {
     while i < list.size(kids) && first == "" {
         k = list.get_raw(kids, i) as *Widget
         // The disclosure of a row with children is a glyph before the
-        // label, not the name.
-        if k.text != "" && k.text != "▸" && k.text != "▾" { first = k.text }
+        // label, and a leaf's is a blank the same width: neither is the name.
+        trimmed = string.trim(k.text)
+        if trimmed != "" && k.text != "▸" && k.text != "▾" { first = k.text }
+        string.free(trimmed)
         i = i + 1
     }
     list.free(kids)
@@ -1326,7 +1331,7 @@ run_checks() {
         fw = tree_at(t, i)
         // The inspector's fields, not the hierarchy's filter box, which is
         // a textfield too: the one in the SCENE section's body.
-        if fw.kind == "textfield" && on_screen(t, fw) && fw.parent != scene_body_id(t) {
+        if fw.kind == "textfield" && on_screen(t, fw) && fw.parent != scene_body_id(t) && fw.parent != section_body_id(t, "INSPECTOR") {
             fields = fields + 1
             if first_field == null || fw.y < first_field.y || (fw.y == first_field.y && fw.x < first_field.x) { first_field = fw }
         }
@@ -2463,6 +2468,50 @@ run_checks() {
             set_text(filter_box, "")
             widened = wait_rows(scene, all_rows)
             check_detail("clearing the filter brings every row back", widened == all_rows, "${widened} rows, had ${all_rows}")
+        }
+    }
+
+    // Renaming: the inspector's name field renames the selected object; the
+    // row follows, the file carries the name, undo brings the old one back.
+    if scene >= 0 && undo >= 0 {
+        now = tree()
+        name_field = 0 - 1
+        i = 0
+        while i < tree_count(now) {
+            fw = tree_at(now, i)
+            if fw.kind == "textfield" && fw.parent == section_body_id(now, "INSPECTOR") { name_field = fw.id }
+            i = i + 1
+        }
+        was_named = ""
+        rows = rows_under(now, scene)
+        i = 0
+        while i < list.size(rows) {
+            row = list.get_raw(rows, i) as *Widget
+            if string.contains(row.classes, "selected") != 0 { was_named = row_name(now, row) }
+            i = i + 1
+        }
+        list.free(rows)
+        tree_free(now)
+        check("the inspector has a name field", name_field >= 0)
+        if name_field >= 0 {
+            // The first row selected, so there is an object to rename.
+            now = tree()
+            rows = rows_under(now, scene)
+            if list.size(rows) > 0 { click(lowest_id(rows)) ; sleep(400) }
+            list.free(rows)
+            tree_free(now)
+            set_text(name_field, "renamed_thing")
+            sleep(600)
+            now = tree()
+            renamed = row_named(now, scene, "renamed_thing") != null
+            tree_free(now)
+            check("typing a name renames the selected object", renamed)
+            click(undo)
+            sleep(600)
+            now = tree()
+            name_gone = row_named(now, scene, "renamed_thing") == null
+            tree_free(now)
+            check_detail("undo brings the old name back", name_gone, "was '${was_named}'")
         }
     }
 
