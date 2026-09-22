@@ -8,6 +8,18 @@
   each under the sky's colour, lit like the weather's kinds and undone the
   same way. A scene that arrives with a sky the list does not have keeps it
   and spells it out instead.
+- The viewport's own cost is on the bar and in the report: what the
+  renderer's passes took, and beside them the readback -- reading the
+  frame off the GPU and handing it to the canvas -- which is the whole of
+  the blit path's overhead and was measured by nothing. With it, the
+  editor's speed on a real scene is a number rather than a feeling: the
+  1,221-model street of `examples/street_drive.ae` runs at 90 fps on
+  OpenGL (paint 4.4 ms a frame, readback 1.1) and 47 on Vulkan, where the
+  readback is 15.5 ms of a 17.2 ms frame because Vulkan has no context to
+  share with the canvas and copies every frame through staging (#374).
+  The report carries `fps` as well as `first_fps`: the first frame after
+  a scene opens carries its upload to the GPU, and reading that as the
+  editor's rate said 4 fps where it runs at 90.
 - A scene's lights all arrive. The file carries a light with the marker
   that stands for it, so a scene of twenty lamps opens as twenty lamps:
   `examples/street_drive.ae` written out with `AE3D_SCENE_OUT` opened
