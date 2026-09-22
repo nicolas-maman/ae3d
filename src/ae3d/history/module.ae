@@ -8,11 +8,12 @@
 
 import std.list
 import std.heap
+import std.string
 
 exports (
     EditStep, History,
-    STEP_PROPERTY, STEP_ADD, STEP_REMOVE, STEP_PARENT,
-    history_new, history_free, history_record, history_record_parent, history_undo, history_redo,
+    STEP_PROPERTY, STEP_ADD, STEP_REMOVE, STEP_PARENT, STEP_NAME,
+    history_new, history_free, history_record, history_record_parent, history_record_name, history_undo, history_redo,
     history_depth, history_redo_depth, history_top, history_clear,
     history_begin_replay, history_end_replay, history_close,
     history_group_begin, history_group_end, history_undo_group, history_redo_group
@@ -23,6 +24,9 @@ const STEP_REMOVE = 2
 // A model moved under another (or out from under one): the parents before
 // and after are the step's `from` and `to`.
 const STEP_PARENT = 3
+// A model renamed: the names before and after are the step's `from` and
+// `to`, strings the step owns.
+const STEP_NAME = 4
 const HISTORY_LIMIT = 64
 
 struct EditStep {
@@ -33,6 +37,8 @@ struct EditStep {
     after: float
     from: ptr                      // STEP_PARENT: the parent before, or null
     to: ptr                        // STEP_PARENT: the parent after, or null
+    name_from: string              // STEP_NAME: the names before and after, the step's own
+    name_to: string
     // Steps recorded between history_group_begin and history_group_end
     // share a group and undo together: grouping five objects is one edit
     // to the person who did it, however many parents it changed.
@@ -73,8 +79,13 @@ drain(stack: ptr) {
     while list.size(stack) > 0 {
         step = list.get_raw(stack, 0) as *EditStep
         list.remove(stack, 0)
-        heap.free(step)
+        free_step(step)
     }
+}
+
+// heap.free releases a step's names with it.
+free_step(step: *EditStep) {
+    heap.free(step)
 }
 
 // The edit that was being made has finished, so the next one starts a step of
@@ -143,7 +154,41 @@ history_record(h: *History, kind: int, subject: ptr, slot: int,
     while list.size(h.undo) > HISTORY_LIMIT {
         stale = list.get_raw(h.undo, 0) as *EditStep
         list.remove(h.undo, 0)
-        heap.free(stale)
+        free_step(stale)
+    }
+    drain(h.redo)
+}
+
+// A model renamed. Consecutive renames of one model while the step is
+// open are one step, as a name is typed a letter at a time.
+history_record_name(h: *History, subject: ptr, before: string, after: string) {
+    if h == null || h.replaying { return }
+    count = list.size(h.undo)
+    if h.open && count > 0 {
+        top = list.get_raw(h.undo, count - 1) as *EditStep
+        if top.kind == STEP_NAME && top.subject == subject {
+            if top.name_to != null { string.free(top.name_to) }
+            top.name_to = string.copy(after)
+            return
+        }
+    }
+    step = heap.new(EditStep)
+    step.kind = STEP_NAME
+    step.subject = subject
+    step.slot = 0
+    step.before = 0.0
+    step.after = 0.0
+    step.from = null
+    step.to = null
+    step.name_from = string.copy(before)
+    step.name_to = string.copy(after)
+    step.group = h.grouping
+    list.add_raw(h.undo, step)
+    h.open = true
+    while list.size(h.undo) > HISTORY_LIMIT {
+        stale = list.get_raw(h.undo, 0) as *EditStep
+        list.remove(h.undo, 0)
+        free_step(stale)
     }
     drain(h.redo)
 }
@@ -165,7 +210,7 @@ history_record_parent(h: *History, subject: ptr, from: ptr, to: ptr) {
     while list.size(h.undo) > HISTORY_LIMIT {
         stale = list.get_raw(h.undo, 0) as *EditStep
         list.remove(h.undo, 0)
-        heap.free(stale)
+        free_step(stale)
     }
     drain(h.redo)
 }

@@ -11,6 +11,8 @@
   disclosure, closed until opened, and a filter box narrows the tree by
   name. Delete takes a subtree, Duplicate copies one. The street opens
   as ten rows for 1,212 models in a third of the time.
+- The inspector has the object's name: typing into it renames the
+  object, and the letters typed are one edit to undo (`STEP_NAME`).
 - Group selection, Ungroup and an empty Group to add: the history has a
   parent step and undoes a grouping as one edit (`ae3d.history`:
   `STEP_PARENT`, `history_group_begin/end`).

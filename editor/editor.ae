@@ -399,6 +399,8 @@ struct Rest {
 var g_first_fps = 0 - 1
 var g_stats = 0
 var g_title = 0
+// The name of the selected object, typed into: a rename, undone as one.
+var g_name_field = 0
 // The object's components, under its name: what Unity's inspector lists
 // first. The kind it is, and the script on it when there is one.
 var g_parts = 0
@@ -1008,8 +1010,10 @@ refresh_title() {
     m = selected_model()
     if m == null {
         ui.set_text(g_title, "nothing selected")
+        if g_name_field != 0 && !g_renaming { ui.set_text(g_name_field, "") }
         return
     }
+    if g_name_field != 0 && !g_renaming { ui.set_text(g_name_field, core.text(m.name)) }
     ui.set_text(g_title, "${core.text(m.name)}   ${core.mesh_index_count(m.mesh) / 3} triangles")
     refresh_parts()
 }
@@ -2073,6 +2077,31 @@ set_script(index: int, script: int) {
     if m != null && was != script { restart_slot(index) }
     refresh_script_buttons()
     say("${script_name(script)} on ${core.text(model_at(index).name)}")
+}
+
+// The selected object renamed to what was typed: its model and its object
+// take the name, the row and the title follow. The field is not written
+// back to while it is typed into, or the caret would jump.
+var g_renaming = false
+
+rename_selected(text: string) {
+    m = selected_model()
+    o = row_object(g_selected)
+    if m == null || o == null { return }
+    was = core.text(m.name)
+    if string.equals(was, text) == 1 { return }
+    history.history_record_name(g_history, m as ptr, was, text)
+    g_last_edit = seconds()
+    apply_name(m, o, text)
+}
+
+apply_name(m: *Model, o: *GameObject, text: string) {
+    g_renaming = true
+    core.model_set_name(m, text)
+    behaviour.object_set_name(o, text)
+    rebuild_rows()
+    refresh_title()
+    g_renaming = false
 }
 
 // The inverse of script_name, for a scene that recorded one. A scene naming a
@@ -3565,6 +3594,17 @@ replay(step: *EditStep, backwards: bool) {
             show_row(step.slot, target)
             refresh_swatch()
             paint_soon()
+        }
+    }
+    if step.kind == history.STEP_NAME {
+        name = step.name_to
+        if backwards { name = step.name_from }
+        renamed = step.subject as *Model
+        at = row_of_model(step.subject)
+        if at >= 0 {
+            apply_name(renamed, row_object(at), name)
+            select_model_pointer(step.subject)
+            if g_name_field != 0 { ui.set_text(g_name_field, name) }
         }
     }
     if step.kind == history.STEP_PARENT {
@@ -5999,7 +6039,9 @@ main() {
             list.add_raw(g_hier_rows, index_handle(row))
         }
         ui.on_select(g_hierarchy) callback |at: int| {
-            select_object(object_of_row(at))
+            // A rebuild of the rows (a filter typed, a group opened) reports
+            // no row selected; the selection is the editor's, not the list's.
+            if at >= 0 { select_object(object_of_row(at)) }
         }
 
         ui.divider(left)
@@ -6280,6 +6322,11 @@ main() {
         inspector_body = fold_section(right, "INSPECTOR")
         g_title = ui.text(panel_row(inspector_body), "nothing selected")
         ui.add_css_class(g_title, "value")
+        g_name_field = ui.textfield(inspector_body, "name") callback |text: string| {
+            rename_selected(text)
+        }
+        ui.add_css_class(g_name_field, "field")
+        ui.fill_width(g_name_field)
         g_parts = ui.text(panel_row(inspector_body), "")
         ui.add_css_class(g_parts, "caption")
         ui.divider(right)
