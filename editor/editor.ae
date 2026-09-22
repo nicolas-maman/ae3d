@@ -1264,16 +1264,68 @@ orbit_from_camera(cam: *Camera) {
 }
 
 // Frames the selection, the way pressing F does in every editor.
+// The camera onto what is selected, with everything under it. A group is
+// a transform with no mesh of its own, so its bounds are the origin with
+// no reach: framing "Block 3" of a street flew the camera to 0,0,0 and
+// left the block where it was, which is most of what a hierarchy is for.
+//
+// The sphere is the box around every member's own sphere, which is wider
+// than a sphere fitted to them but never smaller, and it is what an
+// editor frames by.
 focus_selection() {
-    m = selected_model()
-    if m == null { return }
-    g_focus_x = m.bounding_center.x
-    g_focus_y = m.bounding_center.y
-    g_focus_z = m.bounding_center.z
-    g_orbit_distance = m.bounding_radius * 3.4
+    if g_selected < 0 || g_selected >= row_count() { return }
+    members = subtree_of(g_selected)
+    low = core.vec3(0.0, 0.0, 0.0)
+    high = core.vec3(0.0, 0.0, 0.0)
+    seen = 0
+    i = 0
+    while i < list.size(members) {
+        at = (list.get_raw(members, i) as int[])[0]
+        member = model_at(at)
+        if member != null {
+            reach = member.bounding_radius
+            centre = member.bounding_center
+            // A member with no mesh (another group, a marker) reaches
+            // nowhere; it still says where it stands.
+            if member.mesh == null {
+                centre = core.model_world_position(member)
+                reach = 0.0
+            }
+            if seen == 0 {
+                low = core.vec3(centre.x - reach, centre.y - reach, centre.z - reach)
+                high = core.vec3(centre.x + reach, centre.y + reach, centre.z + reach)
+            } else {
+                if centre.x - reach < low.x { low.x = centre.x - reach }
+                if centre.y - reach < low.y { low.y = centre.y - reach }
+                if centre.z - reach < low.z { low.z = centre.z - reach }
+                if centre.x + reach > high.x { high.x = centre.x + reach }
+                if centre.y + reach > high.y { high.y = centre.y + reach }
+                if centre.z + reach > high.z { high.z = centre.z + reach }
+            }
+            seen = seen + 1
+        }
+        i = i + 1
+    }
+    release_index_list(members)
+    if seen == 0 { return }
+
+    g_focus_x = (low.x + high.x) * 0.5
+    g_focus_y = (low.y + high.y) * 0.5
+    g_focus_z = (low.z + high.z) * 0.5
+    span = high.x - low.x
+    if high.y - low.y > span { span = high.y - low.y }
+    if high.z - low.z > span { span = high.z - low.z }
+    g_orbit_distance = span * 1.7
     if g_orbit_distance < 30.0 { g_orbit_distance = 30.0 }
     apply_orbit()
-    say("framed ${core.text(m.name)}")
+    name = "the selection"
+    m = selected_model()
+    if m != null { name = core.text(m.name) }
+    if seen > 1 {
+        say("framed ${name} and ${seen - 1} under it")
+    } else {
+        say("framed ${name}")
+    }
 }
 
 // What kind of thing a row is, in one character. An editor's outliner says

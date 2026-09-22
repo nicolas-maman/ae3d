@@ -32,7 +32,7 @@ The viewport has to have focus for a key to reach it, so click in it first.
 | `W` | translate gizmo |
 | `E` | rotate gizmo |
 | `R` | scale gizmo |
-| `F` | frame the selection |
+| `F` | frame the selection, and everything under it |
 | `D` | duplicate the selection |
 | `Z` | undo |
 | `Shift` `Z` | redo |
