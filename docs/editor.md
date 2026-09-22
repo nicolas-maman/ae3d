@@ -282,6 +282,7 @@ wave table nothing reads:
 | | |
 |---|---|
 | component | `water`, `voxel`, `light` or `mesh` |
+| light | the light a marker stands for: its kind, colour, strength, reach and a spot's cone -- its own, not the scene's key light |
 | script | the behaviour running on it, if any |
 | physics | the body it is (`static`, `kinematic`, `dynamic`), its collider from its own mesh (`box`, `sphere`, `capsule`, `hull`, `mesh`), the surface's `friction` and `restitution`, and the `density` |
 | water | every knob of the simulation driving it, the wave scale, the shore and the sky image it reflects included |

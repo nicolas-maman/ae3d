@@ -1147,6 +1147,9 @@ scene_section(section: string, root_out: ptr[]) -> ptr {
 
 // How many of the scene file's lights are of this mode (0 point, 1
 // directional, 2 spot).
+// The scene file's lights of a kind, wherever they are: the scene's key
+// light in the root array, and the light of every marker with the model
+// it stands for.
 scene_lights_of_kind(root_out: ptr[], mode: int) -> int {
     text, err = file.read(SCENE_FILE)
     if err != "" { return 0 }
@@ -1154,17 +1157,68 @@ scene_lights_of_kind(root_out: ptr[], mode: int) -> int {
     string.free(text)
     if perr != "" { return 0 }
     root_out[0] = root
-    lights = json.json_object_get_raw(root, "lights")
-    if lights == null { return 0 }
     found = 0
-    count = json.json_array_size(lights)
-    i = 0
-    while i < count {
-        entry = json.json_array_get_raw(lights, i)
-        if (field_number(entry, "mode")) as int == mode { found = found + 1 }
-        i = i + 1
+    lights = json.json_object_get_raw(root, "lights")
+    if lights != null {
+        count = json.json_array_size(lights)
+        i = 0
+        while i < count {
+            entry = json.json_array_get_raw(lights, i)
+            if (field_number(entry, "mode")) as int == mode { found = found + 1 }
+            i = i + 1
+        }
+    }
+    models = json.json_object_get_raw(root, "models")
+    if models != null {
+        model_count = json.json_array_size(models)
+        j = 0
+        while j < model_count {
+            beam = json.json_object_get_raw(json.json_array_get_raw(models, j), "light")
+            if beam != null && (field_number(beam, "mode")) as int == mode { found = found + 1 }
+            j = j + 1
+        }
     }
     return found
+}
+
+// The cones of the file's spot lights, as the cosine of the outer angle:
+// the widest of them, or 0 where the file has no spot. A cone the file
+// does not carry reads zero here, which is a spot that lights nothing.
+scene_widest_cone() -> float {
+    text, err = file.read(SCENE_FILE)
+    if err != "" { return 0.0 }
+    root, perr = json.parse(text)
+    string.free(text)
+    if perr != "" { return 0.0 }
+    widest = 0.0
+    lights = json.json_object_get_raw(root, "lights")
+    if lights != null {
+        light_count = json.json_array_size(lights)
+        i = 0
+        while i < light_count {
+            beam = json.json_array_get_raw(lights, i)
+            if (field_number(beam, "mode")) as int == 2 {
+                outer = field_number(beam, "cos_outer")
+                if outer > widest { widest = outer }
+            }
+            i = i + 1
+        }
+    }
+    models = json.json_object_get_raw(root, "models")
+    if models != null {
+        model_count = json.json_array_size(models)
+        j = 0
+        while j < model_count {
+            beam = json.json_object_get_raw(json.json_array_get_raw(models, j), "light")
+            if beam != null && (field_number(beam, "mode")) as int == 2 {
+                outer = field_number(beam, "cos_outer")
+                if outer > widest { widest = outer }
+            }
+            j = j + 1
+        }
+    }
+    json.json_free(root)
+    return widest
 }
 
 // How many models of the scene file are not visible.
@@ -2612,6 +2666,10 @@ run_checks() {
         root_slot = calloc(1, 8) as ptr[]
         spots = scene_lights_of_kind(root_slot, 2)
         check_detail("and the file says the light is a spot", spots >= 1, "${spots} spot lights")
+        // The cone with it: a spot whose cone the file drops comes back
+        // lighting everything around it.
+        cone_cos = scene_widest_cone()
+        check_detail("and carries the cone it was given", cone_cos > 0.1, "cos(outer) ${cone_cos}")
         if root_slot[0] != null { json.json_free(root_slot[0]) }
         free(root_slot)
         click(point_caption.id)

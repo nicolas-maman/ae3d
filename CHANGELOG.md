@@ -8,6 +8,16 @@
   each under the sky's colour, lit like the weather's kinds and undone the
   same way. A scene that arrives with a sky the list does not have keeps it
   and spells it out instead.
+- A scene's lights all arrive. The file carries a light with the marker
+  that stands for it, so a scene of twenty lamps opens as twenty lamps:
+  `examples/street_drive.ae` written out with `AE3D_SCENE_OUT` opened
+  under one light with the other nineteen freed on the way in, and now
+  opens with its street lit. A marker is sized by its light's reach, a
+  light object owns its light (out of the renderer and freed with the
+  object), and a spot's cone goes through the file, which it never did.
+  Choosing Spot on a light that had never been one gave it a cone of
+  ninety degrees -- the whole hemisphere -- and now gives it the
+  editor's 20/35.
 - A scene keeps the sky it is drawn under. `engine.engine_set_sky` is
   written into the file as `skybox.image` and read back when it opens,
   so `examples/lights.ae` opens in the editor under its own starfield

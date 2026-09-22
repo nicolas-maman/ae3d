@@ -22,7 +22,8 @@ exports (
     scene_save, scene_load, scene_load_lights, scene_load_attachments,
     scene_load_view, view_defaults, View, Attachment, attachment_new,
     attachment_model, attachment_component, attachment_script, attachment_water,
-    attachment_world, attachment_physics, attachment_set_physics, attachment_internal, attachment_set_internal, index_of_model,
+    attachment_world, attachment_physics, attachment_set_physics, attachment_light, attachment_set_light,
+    attachment_internal, attachment_set_internal, index_of_model,
     PhysicsSpec, physics_spec_new,
     attachments_free, scene_free, last_error
 )
@@ -43,7 +44,25 @@ struct Attachment {
     water: ptr
     world: ptr
     physics: ptr                   // *PhysicsSpec, or null
+    // The light a light marker stands for, or null. A scene's lights used
+    // to be one array at the root, so every marker in a loaded scene stood
+    // for the same light and only the first of a program's lights survived
+    // the way in. A marker's light is its own and travels with it; the
+    // root array is the scene's key light, the one the sun and the
+    // inspector's rows follow.
+    light: ptr
     internal: bool                 // a system's own model, not the scene's: not written
+}
+
+// The light a marker stands for. Borrowed, like the water and the voxel
+// world beside it: freeing the attachment never frees it.
+attachment_set_light(a: *Attachment, l: *Light) {
+    if a != null { a.light = l as ptr }
+}
+
+attachment_light(a: *Attachment) -> *Light {
+    if a == null { return null }
+    return a.light as *Light
 }
 
 // A model a system made for itself (a ragdoll's bone capsules): the
@@ -246,6 +265,10 @@ light_json(l: *Light) -> ptr {
     json.object_set_raw(out, "constant", json.num(l.constant_atten))
     json.object_set_raw(out, "linear", json.num(l.linear_atten))
     json.object_set_raw(out, "quadratic", json.num(l.quadratic_atten))
+    // A spot's cone, which the file did not carry: a spot saved from the
+    // editor came back lighting the whole room.
+    json.object_set_raw(out, "cos_outer", json.num(l.spot_cos_outer))
+    json.object_set_raw(out, "cos_inner", json.num(l.spot_cos_inner))
     return out
 }
 
@@ -264,6 +287,10 @@ load_light(node: ptr) -> *Light {
     l.constant_atten = field_number(node, "constant", 1.0)
     l.linear_atten = field_number(node, "linear", 0.0)
     l.quadratic_atten = field_number(node, "quadratic", 0.0)
+    // A file written before the cone was carried has neither field, and a
+    // cone of zero would light nothing: the defaults are a light_new's.
+    l.spot_cos_outer = field_number(node, "cos_outer", l.spot_cos_outer)
+    l.spot_cos_inner = field_number(node, "cos_inner", l.spot_cos_inner)
     return l
 }
 
@@ -370,9 +397,14 @@ scene_load_attachments(path: string, models: ptr) -> ptr {
                                     field_number(spec_json, "density", 1.0))
         }
 
-        if component != "" || script != "" || sim != null || world != null || spec != null {
+        // The light of a marker, its own. Belongs to the caller, like the
+        // simulation and the voxel world above it.
+        beam = load_light(json.object_get_raw(entry, "light"))
+
+        if component != "" || script != "" || sim != null || world != null || spec != null || beam != null {
             a = attachment_new(m, component, script, sim, world)
             a.physics = spec as ptr
+            a.light = beam as ptr
             list.add_raw(attachments, a as ptr)
         }
         i = i + 1
@@ -603,6 +635,7 @@ attachment_new(m: *Model, component: string, script: string,
     a.water = w as ptr
     a.world = world as ptr
     a.physics = null
+    a.light = null
     a.internal = false
     return a
 }
@@ -970,6 +1003,11 @@ scene_save(models: ptr, lights: ptr, attachments: ptr, view: *View,
                 if sim != null { json.object_set_raw(entry, "water", water_json(sim)) }
                 world = attachment_world(attached)
                 if world != null { json.object_set_raw(entry, "voxel", world_json(world)) }
+                // The light a marker stands for, with the marker: the root
+                // array is the scene's key light, and a marker that read its
+                // light from there stood for the same one as every other.
+                beam = attachment_light(attached)
+                if beam != null { json.object_set_raw(entry, "light", light_json(beam)) }
             }
             // Which shader draws it, for the named ones. The source text is not
             // written: a scene is not the place to carry a copy of the GLSL, and

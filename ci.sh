@@ -749,11 +749,14 @@ check_editor_run() {
         fail "$name (scene did not build)"
     elif [ "$(sed -n 's/^water //p' "$report")" != "1" ] || \
          [ "$(sed -n 's/^voxels //p' "$report")" != "1" ] || \
-         [ "$(sed -n 's/^lights //p' "$report")" != "1" ] || \
+         [ "$(sed -n 's/^lights //p' "$report")" != "2" ] || \
          [ "$(sed -n 's/^scripted //p' "$report")" != "1" ] || \
          [ "$(sed -n 's/^bodies //p' "$report")" != "1" ]; then
         # The bodies count is the physics record on the cube: in the
-        # roundtrip scene it has been through the file and back.
+        # roundtrip scene it has been through the file and back. The two
+        # lights are a point and a spot, each standing for a light of its
+        # own: every marker in a loaded scene used to stand for the same
+        # one, so a scene of many lights came back lit by one.
         fail "$name (component types did not build)"
         sed 's/^/        /' "$report"
     elif [ "$editor_scene" = "roundtrip" ] && \
