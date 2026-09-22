@@ -245,6 +245,13 @@ var g_sun_by_time = false
 var g_sun_by_time_toggle = 0
 var g_time_of_day = 14.0
 var g_sun_sky: ptr = null
+// The image the scene is drawn under, or "" for the clear colour. Five of
+// the examples set one with `engine_set_sky` and the scene file carried
+// none of it, so a program's scene opened here lost its sky. It is kept
+// beside the sun's own sky, which takes the viewport while the hour drives
+// it and gives it back.
+var g_scene_sky: ptr = null
+var g_sky_image = ""
 var g_sculpt = 0  // SCULPT_OFF, which is declared below the globals
 var g_brush_radius = 12.0
 var g_sculpting = false
@@ -3496,6 +3503,15 @@ report_state() {
     lines = string.concat(lines, string.from_int(kind_count(behaviour.KIND_LIGHT)))
     lines = string.concat(lines, "\nscripted ")
     lines = string.concat(lines, string.from_int(scripted_count()))
+    // The scene's sky image, or "-" for the clear colour: a roundtrip
+    // run reads it after the file, where a sky the file does not carry
+    // shows up as the dash.
+    lines = string.concat(lines, "\nsky ")
+    if g_sky_image == "" {
+        lines = string.concat(lines, "-")
+    } else {
+        lines = string.concat(lines, g_sky_image)
+    }
     lines = string.concat(lines, "\nbodies ")
     lines = string.concat(lines, string.from_int(spec_count()))
     lines = string.concat(lines, "\nsimulation_stuck ")
@@ -4114,12 +4130,61 @@ apply_time_of_day() {
         }
         core.backend_set_skybox(&backend, g_sun_sky)
         refresh_light_rows()
+    } else if g_scene_sky != null {
+        core.backend_set_skybox(&backend, g_scene_sky)
+        // The clear colour still fills what the sky leaves, and the fog
+        // takes its colour from it.
+        core.backend_set_clear_color(&backend, g_sky_r, g_sky_g, g_sky_b)
     } else {
         core.backend_set_skybox(&backend, null)
         apply_sky()
     }
     mark_dirty()
     paint_soon()
+}
+
+// The sky the renderer is no longer holding. A backend frees the sky it was
+// last handed with itself; one it has given up is ours to free.
+free_sky(s: ptr) {
+    if s == null || g_renderer == null { return }
+    if g_vulkan {
+        vk.skybox_free(g_renderer as *VKRenderer, s as *Skybox)
+    } else {
+        gl.skybox_free(g_renderer as *GLRenderer, s as *Skybox)
+    }
+}
+
+// The image the scene is drawn under, made on the viewport's renderer; ""
+// for the clear colour. False when the image could not be read, and then
+// the sky is left as it was.
+set_scene_sky(path: string) -> bool {
+    if g_renderer == null { return false }
+    made = null as ptr
+    if path != "" {
+        if g_vulkan {
+            made = vk.skybox_create(g_renderer as *VKRenderer, path) as ptr
+        } else {
+            made = gl.skybox_create(g_renderer as *GLRenderer, path) as ptr
+        }
+        if made == null {
+            say("the sky image ${path} could not be read")
+            return false
+        }
+    }
+    old = g_scene_sky
+    g_scene_sky = made
+    if g_sky_image != "" { string.free(g_sky_image) }
+    if path == "" {
+        g_sky_image = ""
+    } else {
+        g_sky_image = string.copy(path)
+    }
+    // Whichever sky it is now, the viewport takes it here: the sun's wins
+    // while the hour drives it, and the image is what shows otherwise. The
+    // old one goes after, once the renderer has let go of it.
+    apply_time_of_day()
+    free_sky(old)
+    return true
 }
 
 
@@ -4962,6 +5027,9 @@ build_scene() {
     // describes what came BACK rather than what was built. A component the file
     // does not carry shows up here as a count that dropped.
     if env_is("AE3D_EDITOR_SCENE", "roundtrip") {
+        // A sky from an image, which is what a program's scene brings and
+        // what the file dropped before it carried one.
+        set_scene_sky("resources/sky/dusk.png")
         save_scene()
         load_scene()
     }
@@ -4999,6 +5067,7 @@ current_view() -> View {
     // the editor filled none of it: every scene it saved recorded the defaults,
     // so a scene saved with bloom on came back with it off whatever the file
     // was for.
+    v.sky_image = g_sky_image
     v.sky_r = g_sky_r
     v.sky_g = g_sky_g
     v.sky_b = g_sky_b
@@ -5196,6 +5265,7 @@ load_scene() {
     if g_sun_by_time { g_time_of_day = view.sky_time }
     show_row(TIME_ROW, g_time_of_day)
     if g_sun_by_time_toggle != 0 { ui.set_toggle(g_sun_by_time_toggle, flag_of(g_sun_by_time)) }
+    set_scene_sky(view.sky_image)
     apply_time_of_day()
     g_fxaa = view.fxaa
     g_bloom = view.bloom

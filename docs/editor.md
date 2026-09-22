@@ -291,8 +291,12 @@ wave table nothing reads:
 
 and the file records the view: where the camera stood, its field of view and
 clip planes, whether face and frustum culling were on, the reflections'
-road height and strength, and the fog -- whether, where it starts and is
-whole, and its colour, the sky's. Each model names its `parent` by index,
+road height and strength, the fog -- whether, where it starts and is
+whole, and its colour, the sky's -- and the sky itself: its colour, the
+hour the sun is set by, and the image it is drawn from when it is drawn
+from one (`skybox.image`, what `engine.engine_set_sky` was given). A
+program that sets a sky -- five of the examples do -- had its scene open
+here under the clear colour until the file carried that name. Each model names its `parent` by index,
 and a `group` is a model with no mesh: a transform its children are
 placed by. A system's own models -- a ragdoll's bone capsules -- are not
 in the file at all; the program makes them again.
@@ -314,7 +318,7 @@ A scene written by a program is the same file. `AE3D_SCENE_OUT=path` makes
 any program write its scene on its first frame -- once every script has
 started and built its objects, before anything moves -- with every model
 the renderer draws, the lights, the view as the program set it (the
-camera, the sky's hour, the post chain, the occlusion) and the body on
+camera, the sky and its hour, the post chain, the occlusion) and the body on
 every object that has one, which `ae3d.physics` answers through the
 engine's attachment providers. `./build/ae3d_editor path` opens it: the
 street of `examples/street_drive.ae` is 1,347 models and 299 bodies, and
