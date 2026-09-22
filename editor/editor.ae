@@ -2004,8 +2004,47 @@ restart_slot(index: int) {
 free_object(o: *GameObject) {
     if o == null { return }
     c = behaviour.object_component(o, 1)
-    if c != null { free(behaviour.component_state(c)) }
+    if c != null {
+        // A light object's light is its own: out of the renderer, which
+        // holds a pointer to it, and then freed as a light (the name goes
+        // with it). Everything else's state is a plain block.
+        if c.kind == behaviour.KIND_LIGHT {
+            beam = behaviour.component_state(c) as *Light
+            if beam != null && beam != g_light as *Light {
+                if g_renderer != null {
+                    backend = viewport_backend()
+                    core.backend_remove_light(&backend, beam)
+                }
+                core.light_free(beam)
+            }
+        } else {
+            free(behaviour.component_state(c))
+        }
+    }
     behaviour.object_free(o)
+}
+
+// A light of the scene's own, with the marker that stands for it: what
+// Add > Light makes, and what every light of a loaded scene becomes.
+place_light(beam: *Light, name: string) {
+    if beam == null { return }
+    marker = loader.sphere(1.0, 16, 12)
+    // The marker is sized by the light's reach, not by the editor's own
+    // scene: a street lamp lights seven metres, and a six-metre ball at
+    // every lamp swallowed the road and the camera with it. The editor's
+    // own lights reach four hundred, so theirs is the same ball as before.
+    size = core.light_range(beam) * 0.015
+    if size < 0.15 { size = 0.15 }
+    if size > 6.0 { size = 6.0 }
+    core.model_set_scale(marker, size, size, size)
+    core.model_set_position(marker, beam.position.x, beam.position.y, beam.position.z)
+    core.model_matte(marker, beam.color.x, beam.color.y, beam.color.z)
+    core.model_set_exposure(marker, 3.0)
+    if g_renderer != null {
+        backend = viewport_backend()
+        core.backend_add_light(&backend, beam)
+    }
+    place_model(marker, name, behaviour.KIND_LIGHT, beam as ptr)
 }
 
 add_component_model(m: *Model, name: string, kind: int, state: ptr) {
@@ -4302,7 +4341,14 @@ apply_light_mode(l: *Light, mode: int) {
         if core.light_range(l) <= 0.0 { core.light_set_range(l, 400.0) }
         if mode == LIGHT_SPOT {
             l.mode = core.MODE_SPOT
-            if l.spot_cos_outer >= 1.0 { core.light_set_cone(l, 20.0, 35.0) }
+            // A light that was never a spot has no cone: the field is
+            // zero, which is the cosine of ninety degrees -- a spot
+            // lighting the whole hemisphere, which is what choosing Spot
+            // gave. A cone that is not a cone (zero, a closed one, or an
+            // inner angle wider than the outer) takes the default.
+            if l.spot_cos_outer <= 0.0 || l.spot_cos_outer >= 1.0 || l.spot_cos_inner < l.spot_cos_outer {
+                core.light_set_cone(l, 20.0, 35.0)
+            }
         } else {
             l.mode = core.MODE_POINT
         }
@@ -5092,6 +5138,10 @@ build_scene() {
         add_water()
         add_voxels()
         add_light()
+        // Two, and one of them a spot: a scene's lights used to collapse
+        // into one on the way back in, and a spot's cone was not written
+        // at all.
+        add_spot_light()
         set_script(0, script_from_name("spin"))
         // The cube a dynamic body: what the simulation check drops.
         apply_body_kind(row_object(0), BODY_DYNAMIC)
@@ -5200,6 +5250,12 @@ current_attachments() -> ptr {
         spec = spec_at(i)
         if kind != behaviour.KIND_MESH || script != "" || sim != null || world != null || spec != null {
             a = scene.attachment_new(m, kind_name(kind), script, sim, world)
+            // The light a marker stands for goes with it, so a scene of
+            // twenty lamps comes back as twenty lamps.
+            if kind == behaviour.KIND_LIGHT {
+                beam = behaviour.component_state(c) as *Light
+                if beam != null && beam != g_light as *Light { scene.attachment_set_light(a, beam) }
+            }
             // A copy: the attachment's record is freed with the list, the
             // object keeps its own.
             if spec != null {
@@ -5253,7 +5309,13 @@ load_scene() {
     // The lights first: a light marker's row holds the light it stands for, so
     // it has to exist before the models are added. A file written before scenes
     // carried lights has none, and the scene keeps the one it is already using.
+    //
+    // The first is the scene's key light, the one the sun and the LIGHT rows
+    // follow; the rest are lights of the scene in their own right and get a
+    // marker each below. They used to be freed on the way in, so a program's
+    // scene -- the street's twenty lamps and headlights -- opened lit by one.
     beams = scene.scene_load_lights(g_scene_path)
+    spare_beams = list.new()
     if beams != null {
         if list.size(beams) > 0 {
             if g_light != null { core.light_free(g_light as *Light) }
@@ -5263,7 +5325,7 @@ load_scene() {
         }
         spare = 1
         while spare < list.size(beams) {
-            core.light_free(list.get_raw(beams, spare) as *Light)
+            list.add_raw(spare_beams, list.get_raw(beams, spare))
             spare = spare + 1
         }
         list.free(beams)
@@ -5289,9 +5351,22 @@ load_scene() {
                 world = scene.attachment_world(a)
                 if world != null { state = world as ptr }
             }
-            // The light marker carries the light itself, which was read back
-            // separately: without it the row is a sphere that lights nothing.
-            if kind == behaviour.KIND_LIGHT { state = g_light }
+            // The light marker carries its own light, written with it. A
+            // file from before that has none, and the marker stands for the
+            // scene's key light as it always did.
+            if kind == behaviour.KIND_LIGHT {
+                own = null as *Light
+                if a != null { own = scene.attachment_light(a) }
+                if own != null {
+                    state = own as ptr
+                    if g_renderer != null {
+                        backend = viewport_backend()
+                        core.backend_add_light(&backend, own)
+                    }
+                } else {
+                    state = g_light
+                }
+            }
             place_model(m, core.text(m.name), kind, state)
             if a != null {
                 slot = row_slot(row_count() - 1)
@@ -5309,6 +5384,17 @@ load_scene() {
     }
     scene.attachments_free(attachments)
     list.free(loaded)
+
+    // A program writes its lights at the root, with no marker for any of
+    // them: each gets one here, so the scene is lit the way the program lit
+    // it and every lamp is a row that can be picked and moved.
+    extra = 0
+    while extra < list.size(spare_beams) {
+        beam = list.get_raw(spare_beams, extra) as *Light
+        place_light(beam, core.text(beam.name))
+        extra = extra + 1
+    }
+    list.free(spare_beams)
     // The hierarchy once, for every model, and its first root selected:
     // the tree opens closed.
     rebuild_rows()
@@ -5440,16 +5526,10 @@ add_plane() {
 add_light() {
     light = core.light_point(core.vec3(0.0, 90.0, 0.0), core.vec3(1.0, 0.92, 0.78), 1.6, 400.0)
     if light == null { return }
-
-    marker = loader.sphere(1.0, 16, 12)
-    core.model_set_scale(marker, 6.0, 6.0, 6.0)
-    core.model_set_position(marker, light.position.x, light.position.y, light.position.z)
-    core.model_matte(marker, light.color.x, light.color.y, light.color.z)
-    core.model_set_exposure(marker, 3.0)
-
-    backend = viewport_backend()
-    core.backend_add_light(&backend, light)
-    add_component_model(marker, "light", behaviour.KIND_LIGHT, light as ptr)
+    place_light(light, "light")
+    rebuild_rows()
+    select_object(row_count() - 1)
+    say("added light")
 }
 
 // A spot light: a point light with a cone, pointed down at the scene.
@@ -5457,14 +5537,10 @@ add_spot_light() {
     light = core.light_spot(core.vec3(0.0, 90.0, 0.0), core.vec3(0.0, 0.0 - 1.0, 0.0),
                             core.vec3(1.0, 0.92, 0.78), 2.0, 400.0, 20.0, 35.0)
     if light == null { return }
-    marker = loader.sphere(1.0, 16, 12)
-    core.model_set_scale(marker, 6.0, 6.0, 6.0)
-    core.model_set_position(marker, light.position.x, light.position.y, light.position.z)
-    core.model_matte(marker, light.color.x, light.color.y, light.color.z)
-    core.model_set_exposure(marker, 3.0)
-    backend = viewport_backend()
-    core.backend_add_light(&backend, light)
-    add_component_model(marker, "spot light", behaviour.KIND_LIGHT, light as ptr)
+    place_light(light, "spot light")
+    rebuild_rows()
+    select_object(row_count() - 1)
+    say("added spot light")
 }
 
 selected_light() -> *Light {
