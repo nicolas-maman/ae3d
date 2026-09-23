@@ -8,6 +8,12 @@
   each under the sky's colour, lit like the weather's kinds and undone the
   same way. A scene that arrives with a sky the list does not have keeps it
   and spells it out instead.
+- Frame selection frames what is selected and everything under it. A
+  group is a transform with no mesh of its own, so its bounds are the
+  origin with no reach: framing `Block 3` of the street flew the camera
+  to 0,0,0 and left the block where it stood, which is most of what a
+  hierarchy is for. The camera now goes to the box around the subtree and
+  stands back by its span, and the console says how many it framed.
 - The viewport's own cost is on the bar and in the report: what the
   renderer's passes took, and beside them the readback -- reading the
   frame off the GPU and handing it to the canvas -- which is the whole of

@@ -1221,6 +1221,62 @@ scene_widest_cone() -> float {
     return widest
 }
 
+// Where the scene file's view puts the camera, into `out` (x, y, z).
+// False where the file has no view.
+scene_camera(out: float[]) -> bool {
+    text, err = file.read(SCENE_FILE)
+    if err != "" { return false }
+    root, perr = json.parse(text)
+    string.free(text)
+    if perr != "" { return false }
+    view = json.json_object_get_raw(root, "view")
+    if view == null {
+        json.json_free(root)
+        return false
+    }
+    at = json.json_object_get_raw(view, "position")
+    if at == null {
+        json.json_free(root)
+        return false
+    }
+    out[0] = json.json_get_number(json.json_array_get_raw(at, 0))
+    out[1] = json.json_get_number(json.json_array_get_raw(at, 1))
+    out[2] = json.json_get_number(json.json_array_get_raw(at, 2))
+    json.json_free(root)
+    return true
+}
+
+// Where the scene file's first group stands, into `out`. A group is a
+// model with no mesh of its own.
+scene_group_at(out: float[]) -> bool {
+    text, err = file.read(SCENE_FILE)
+    if err != "" { return false }
+    root, perr = json.parse(text)
+    string.free(text)
+    if perr != "" { return false }
+    models = json.json_object_get_raw(root, "models")
+    found = false
+    if models != null {
+        count = json.json_array_size(models)
+        i = 0
+        while i < count && found == false {
+            entry = json.json_array_get_raw(models, i)
+            if json.json_object_get_raw(entry, "group") != null {
+                place = json.json_object_get_raw(entry, "position")
+                if place != null {
+                    out[0] = json.json_get_number(json.json_array_get_raw(place, 0))
+                    out[1] = json.json_get_number(json.json_array_get_raw(place, 1))
+                    out[2] = json.json_get_number(json.json_array_get_raw(place, 2))
+                    found = true
+                }
+            }
+            i = i + 1
+        }
+    }
+    json.json_free(root)
+    return found
+}
+
 // How many models of the scene file are not visible.
 scene_models_hidden(root_out: ptr[]) -> int {
     text, err = file.read(SCENE_FILE)
@@ -2793,6 +2849,53 @@ run_checks() {
         check_detail("and the file has the object under its group", parented >= 1, "${parented} with a parent")
         if root_slot[0] != null { json.json_free(root_slot[0]) }
         free(root_slot)
+        // Framing a group frames what is under it. A group is a transform
+        // with no mesh, so its own bounds are the origin with no reach:
+        // framing one used to fly the camera to 0,0,0 and leave the group
+        // where it was.
+        frame_btn = find(t, "button", "Frame selection")
+        check("the editor can frame the selection", frame_btn >= 0)
+        if frame_btn >= 0 {
+            before_at_block = calloc(3, 8)
+            before_at = before_at_block as float[]
+            after_at_block = calloc(3, 8)
+            after_at = after_at_block as float[]
+            group_at_block = calloc(3, 8)
+            group_at = group_at_block as float[]
+            had_before = scene_camera(before_at)
+            click(frame_btn)
+            wt = want(WANT_CONTAINS)
+            wt.text = "under it"
+            framed = wait_for(wt, 8.0, ok)
+            tree_free(framed)
+            free(wt as ptr)
+            check("framing a group says what it framed with it", ok[0] == 1)
+            written = file_stamp(SCENE_FILE)
+            click(save)
+            check("the framed view is written", wait_file(SCENE_FILE, written))
+            had_after = scene_camera(after_at)
+            had_group = scene_group_at(group_at)
+            flew = 0.0
+            if had_before && had_after {
+                dx = after_at[0] - before_at[0]
+                dy = after_at[1] - before_at[1]
+                dz = after_at[2] - before_at[2]
+                flew = dx * dx + dy * dy + dz * dz
+            }
+            check_detail("and the camera moved to it", flew > 1.0, "moved ${flew} squared units")
+            near = 0.0
+            if had_after && had_group {
+                gx = after_at[0] - group_at[0]
+                gy = after_at[1] - group_at[1]
+                gz = after_at[2] - group_at[2]
+                near = gx * gx + gy * gy + gz * gz
+            }
+            check_detail("and stands within sight of the group", had_group && near < 160000.0, "${near} squared units away")
+            free(before_at_block)
+            free(after_at_block)
+            free(group_at_block)
+        }
+
         click(ungroup_btn)
         sleep(600)
         now = tree()
