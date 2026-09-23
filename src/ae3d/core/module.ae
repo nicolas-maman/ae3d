@@ -16,6 +16,8 @@
 
 import std.list
 import std.heap
+import std.worker
+import std.strarr
 import std.os
 import std.string
 import ae3d.platform
@@ -52,6 +54,7 @@ exports (
     model_set_specular, model_set_pbr, model_set_exposure, model_set_reflectivity, model_set_alpha,
     model_set_texture, model_set_shader, model_set_name, model_set_source_path,
     material_set_texture_path, material_set_normal_path, material_set_name, light_set_name, camera_set_name, text,
+    preload_images, take_preloaded_image, release_preloaded_images, material_image_paths,
     set_owned, model_metallic, model_plastic, model_rough_metal,
     model_polished_metal, model_matte, model_glossy, model_glass, model_transparent_plastic,
     model_add_group, model_group, model_group_count, model_sort_groups_by_texture,
@@ -297,10 +300,133 @@ struct Material {
     normal_path: string
 }
 
+extern ae3d_image_load(path: string) -> ptr
+extern ae3d_image_free(img: ptr)
+
 struct MaterialGroup {
     material: *Material
     index_start: int
     index_count: int
+}
+
+// --- images decoded ahead ----------------------------------------------------
+//
+// A scene's textures were decoded one after another, on the thread that
+// opens the scene, each the moment its first model reached the renderer:
+// the street's thirty in 175 ms of stb_image on one core, most of what
+// placing its models cost. Decoding a file needs nothing from any other,
+// so a scene's are decoded together across the worker pool (std.worker)
+// once its models are read, and a renderer takes the decoded pixels here
+// instead of decoding them itself -- the same decoder, the same pixels,
+// uploaded where the renderer's context is, as before.
+struct PreloadedImage {
+    path: string
+    image: ptr                     // ae3d_image, or null when it did not decode
+}
+
+var g_preloaded: ptr = null        // list of *PreloadedImage
+
+// Decode every path in `paths` (a strarr, distinct) across the pool,
+// keeping what comes back for the renderer to take. What an earlier
+// preload left untaken is freed first.
+preload_images(paths: ptr) {
+    release_preloaded_images()
+    n = strarr.size(paths)
+    if n == 0 { return }
+    slots_block = calloc(n, 8)
+    slots = slots_block as ptr[]
+    i = 0
+    while i < n {
+        path = strarr.get(paths, i)
+        at = i
+        launched = worker.run(|| { return ae3d_image_load(path) }, |image: ptr| { slots[at] = image })
+        // No thread to run it on: the renderer decodes this one itself.
+        if !launched { slots[at] = null }
+        i = i + 1
+    }
+    // A host that delivers completions on its own loop thread has them, not
+    // this one, and wait says so: the slots then fill later, so they are
+    // left alive and nothing is preloaded -- the renderers decode as they
+    // always did. Neither ae3d's editor nor its programs install one.
+    if worker.wait() < 0 { return }
+    g_preloaded = list.new()
+    i = 0
+    while i < n {
+        entry = heap.new(PreloadedImage)
+        entry.path = string.copy(strarr.get(paths, i))
+        entry.image = slots[i]
+        list.add_raw(g_preloaded, entry as ptr)
+        i = i + 1
+    }
+    free(slots_block)
+}
+
+// The decoded image for `path`, handed over (the caller frees it as it
+// would one it decoded), or null when none was preloaded.
+take_preloaded_image(path: string) -> ptr {
+    if g_preloaded == null { return null }
+    i = 0
+    while i < list.size(g_preloaded) {
+        entry = list.get_raw(g_preloaded, i) as *PreloadedImage
+        if entry.image != null && string.equals(entry.path, path) == 1 {
+            image = entry.image
+            entry.image = null
+            return image
+        }
+        i = i + 1
+    }
+    return null
+}
+
+// Whatever was preloaded and never taken.
+release_preloaded_images() {
+    if g_preloaded == null { return }
+    i = 0
+    while i < list.size(g_preloaded) {
+        entry = list.get_raw(g_preloaded, i) as *PreloadedImage
+        if entry.image != null { ae3d_image_free(entry.image) }
+        heap.free(entry)
+        i = i + 1
+    }
+    list.free(g_preloaded)
+    g_preloaded = null
+}
+
+// The distinct image paths a set of models' materials name -- each model's
+// own and every group's -- pushed onto `out`, a strarr.
+material_image_paths(models: ptr, out: ptr) {
+    i = 0
+    while i < list.size(models) {
+        m = list.get_raw(models, i) as *Model
+        if m != null {
+            add_material_paths(m.material, out)
+            if m.groups != null {
+                k = 0
+                while k < list.size(m.groups) {
+                    group = list.get_raw(m.groups, k) as *MaterialGroup
+                    if group != null { add_material_paths(group.material, out) }
+                    k = k + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+add_material_paths(material: *Material, out: ptr) {
+    if material == null { return }
+    add_distinct(out, text(material.texture_path))
+    add_distinct(out, text(material.normal_path))
+}
+
+add_distinct(out: ptr, path: string) {
+    if path == "" { return }
+    i = 0
+    while i < strarr.size(out) {
+        if string.equals(strarr.get(out, i), path) == 1 { return }
+        i = i + 1
+    }
+    strarr.push_copy(out, path)
 }
 
 // Which uniform NAMES a model carries, order independent, so two models
