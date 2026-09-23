@@ -1,5 +1,7 @@
 // The OBJ/MTL loader against the real model files.
 
+import std.fs
+import std.string
 import ae3d.core
 import ae3d.loader
 
@@ -224,6 +226,76 @@ test_closed_winding() {
     core.model_free(sphere)
 }
 
+// An OBJ whose vertices are `values` (space-separated) as x, with y and z
+// zero, in triangles of three, loaded back.
+load_numbers(path: string, values: string) -> *Model {
+    fields = string.split(values, " ")
+    count = string.array_size(fields)
+    text = ""
+    i = 0
+    while i < count {
+        text = "${text}v ${string.array_get(fields, i)} 0 0
+"
+        i = i + 1
+    }
+    i = 0
+    while i + 2 < count {
+        text = "${text}f ${i + 1} ${i + 2} ${i + 3}
+"
+        i = i + 3
+    }
+    string.array_free(fields)
+    fs.write(path, text)
+    return load(path)
+}
+
+// The loader reads a number of fifteen significant digits or fewer, with a
+// power of ten within 10^22 either way, without a string (Clinger's fast
+// path), and must read it exactly as strtod does. Each value here is set
+// against its twin: the same number padded with zeros past fifteen digits,
+// which the fast path declines and the parser reads. Zeros, signs, a bare
+// point on either side, exponents at and past the edge, and more digits than
+// fit are all there.
+test_number_fast_path() {
+    fs.mkdir_p("build/loader_numbers")
+    plain = load_numbers("build/loader_numbers/plain.obj",
+        "0.1 -0.1 1 -0 -0.0 0.000001 123456.789 3.14159265358979 1e22 1e-22 1.5e-22 7.0E-10 +2.5 .5 5. -.25 1e23 1e-23 9007199254740993 000000000000000000001.5 0.30000000000000004 -1234.5678e3 2.5e+2 100 0.017453292519943295 42 -7e-3")
+    padded = load_numbers("build/loader_numbers/padded.obj",
+        "0.10000000000000000 -0.10000000000000000 1.0000000000000000 -0.0000000000000000 -0.00000000000000000 0.0000010000000000000000 123456.7890000000000000000 3.141592653589790000000000000 1.0000000000000000e22 1.0000000000000000e-22 1.50000000000000000e-22 7.00000000000000000E-10 +2.50000000000000000 .50000000000000000 5.0000000000000000 -.250000000000000000 1.0000000000000000e23 1.0000000000000000e-23 9007199254740993.0000000000000000 000000000000000000001.50000000000000000 0.300000000000000040000000000000000 -1234.56780000000000000000e3 2.50000000000000000e+2 100.0000000000000000 0.0174532925199432950000000000000000 42.0000000000000000 -7.0000000000000000e-3")
+    if plain == null || padded == null { return }
+    count = core.mesh_vertex_count(plain.mesh)
+    check_true("every number is a vertex", count == 27 && core.mesh_vertex_count(padded.mesh) == count)
+    i = 0
+    while i < count {
+        a = core.mesh_position(plain.mesh, i).x
+        b = core.mesh_position(padded.mesh, i).x
+        if a != b { record_failure("number ${i}: fast path read ${a}, the parser ${b}") }
+        i = i + 1
+    }
+    core.model_free(plain)
+    core.model_free(padded)
+
+    // What the fast path must decline and leave to the parser: a stray
+    // character, a hex float, an infinity, an exponent with no digits. Each
+    // is what the parser makes of it, and 0 where it makes nothing -- values
+    // a float holds exactly, so the mesh's own precision does not blur them.
+    odd = "1.5x 0x1p3 inf 1e 1e+ --1 . 2 4.25"
+    declined = load_numbers("build/loader_numbers/declined.obj", odd)
+    if declined == null { return }
+    fields = string.split(odd, " ")
+    i = 0
+    while i < string.array_size(fields) {
+        text = string.array_get(fields, i)
+        wanted, err = string.to_double(text)
+        if err != "" { wanted = 0.0 }
+        got = core.mesh_position(declined.mesh, i).x
+        if got != wanted { record_failure("\"${text}\": read ${got}, the parser makes ${wanted}") }
+        i = i + 1
+    }
+    string.array_free(fields)
+    core.model_free(declined)
+}
+
 main() {
     test_triangle()
     test_cube()
@@ -232,6 +304,7 @@ main() {
     test_missing()
     test_primitive_winding()
     test_closed_winding()
+    test_number_fast_path()
 
     if failures == 0 {
         println("loader: all checks passed")
