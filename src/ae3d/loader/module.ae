@@ -106,6 +106,7 @@ parse_float(text: string) -> float {
 
 var g_at = 0                       // where the scan stands in the line
 var g_number: ptr = null           // one double, the parser's out-value
+var g_powers: ptr = null           // 10^0 .. 10^22, each exact in a double
 
 is_blank(c: int) -> bool { return c == 32 || c == 9 || c == 13 }
 
@@ -115,17 +116,114 @@ skip_blanks(line: string, length: int) {
 
 // The next whitespace-separated number, as the general path read it: a field
 // that does not parse is 0.
+//
+// A number with at most fifteen significant digits and a power of ten no
+// larger than 10^22 either way -- every coordinate an exporter writes -- is
+// read here without a string: its digits are an integer a double holds
+// exactly, the power is exact too, and one multiplication or division of two
+// exact doubles is correctly rounded, which is what strtod returns (Clinger's
+// fast path). Anything else -- more digits, a larger exponent, "inf", a hex
+// float, a stray character -- is cut out and handed to the parser as before.
 next_float(line: string, length: int) -> float {
     skip_blanks(line, length)
     start = g_at
     while g_at < length && !is_blank(string.char_at(line, g_at)) { g_at = g_at + 1 }
     if g_at == start { return 0.0 }
+    fast = exact_float(line, start, g_at)
+    if g_exact { return fast }
     if g_number == null { g_number = calloc(1, 8) }
     text = string.substring(line, start, g_at)
     value = 0.0
     if string.to_double_raw(text, g_number) != 0 { value = (g_number as float[])[0] }
     string.free(text)
     return value
+}
+
+var g_exact = false                // whether exact_float read the field
+
+// The field [start, end) as a number when the fast path applies, g_exact
+// saying whether it did.
+exact_float(line: string, start: int, end: int) -> float {
+    g_exact = false
+    at = start
+    negative = false
+    c = string.char_at(line, at)
+    if c == 45 || c == 43 {
+        negative = c == 45
+        at = at + 1
+    }
+    mantissa = 0 as long
+    significant = 0  // digits in the mantissa past its leading zeros
+    digits = 0  // all of them, zeros included
+    scale = 0  // the power of ten the mantissa is off by
+    seen_point = false
+    while at < end {
+        c = string.char_at(line, at)
+        if c >= 48 && c <= 57 {
+            digits = digits + 1
+            if significant > 0 || c != 48 { significant = significant + 1 }
+            if significant > 15 { return 0.0 }
+            mantissa = mantissa * (10 as long) + ((c - 48) as long)
+            if seen_point { scale = scale - 1 }
+        } else if c == 46 && !seen_point {
+            seen_point = true
+        } else {
+            break
+        }
+        at = at + 1
+    }
+    if digits == 0 { return 0.0 }
+    if at < end {
+        c = string.char_at(line, at)
+        if c != 101 && c != 69 { return 0.0 }
+        at = at + 1
+        exponent_negative = false
+        if at < end {
+            c = string.char_at(line, at)
+            if c == 45 || c == 43 {
+                exponent_negative = c == 45
+                at = at + 1
+            }
+        }
+        exponent = 0
+        exponent_digits = 0
+        while at < end {
+            c = string.char_at(line, at)
+            if c < 48 || c > 57 { return 0.0 }
+            exponent = exponent * 10 + (c - 48)
+            exponent_digits = exponent_digits + 1
+            if exponent > 400 { return 0.0 }
+            at = at + 1
+        }
+        if exponent_digits == 0 { return 0.0 }
+        if exponent_negative { exponent = 0 - exponent }
+        scale = scale + exponent
+    }
+    if scale > 22 || scale < 0 - 22 { return 0.0 }
+    powers = exact_powers()
+    value = mantissa as float
+    if scale > 0 { value = value * powers[scale] }
+    if scale < 0 { value = value / powers[0 - scale] }
+    // strtod keeps the sign of a zero; multiplying keeps it too.
+    if negative { value = value * (0.0 - 1.0) }
+    g_exact = true
+    return value
+}
+
+// 10^0 .. 10^22, built by multiplying by ten: every one of them is exact in
+// a double, and so is each product on the way.
+exact_powers() -> float[] {
+    if g_powers == null {
+        g_powers = calloc(23, 8)
+        table = g_powers as float[]
+        table[0] = 1.0
+        k = 1
+        while k <= 22 {
+            table[k] = table[k - 1] * 10.0
+            k = k + 1
+        }
+    }
+    return g_powers as float[]
 }
 
 // A face's index as parse_index reads one, from the digits at the scan: -1
@@ -427,61 +525,66 @@ load_obj_baked(path: string, recalculate_normals: bool, skin: ptr,
     group_material = null as *Material
     have_group = false
 
-    lines = string.split(content, "\n")
-    line_count = string.array_size(lines)
-
-    i = 0
-    while i < line_count {
-        raw = field(lines, i)
-        i = i + 1
+    // The file is read line by line where it lies: a line is the span up to
+    // the next newline, and only one the general path takes becomes a string
+    // of its own. Splitting the file first made a string of every line, most
+    // of the allocations an OBJ cost.
+    content_length = string.length(content)
+    line_start = 0
+    while line_start < content_length {
+        line_end = string.index_of_from(content, "\n", line_start)
+        if line_end < 0 { line_end = content_length }
+        here = line_start
+        line_start = line_end + 1
         // The geometry lines, read where they lie.
-        raw_length = string.length(raw)
-        g_at = 0
-        skip_blanks(raw, raw_length)
-        if g_at >= raw_length { continue }
-        c0 = string.char_at(raw, g_at)
+        g_at = here
+        skip_blanks(content, line_end)
+        if g_at >= line_end { continue }
+        c0 = string.char_at(content, g_at)
         if c0 == 35 { continue }
         c1 = 0
-        if g_at + 1 < raw_length { c1 = string.char_at(raw, g_at + 1) }
+        if g_at + 1 < line_end { c1 = string.char_at(content, g_at + 1) }
         c2 = 0
-        if g_at + 2 < raw_length { c2 = string.char_at(raw, g_at + 2) }
+        if g_at + 2 < line_end { c2 = string.char_at(content, g_at + 2) }
         if c0 == 118 && is_blank(c1) {
             g_at = g_at + 1
-            if fields_ahead(raw, raw_length) < 3 { continue }
-            x = next_float(raw, raw_length)
-            y = next_float(raw, raw_length)
-            z = next_float(raw, raw_length)
+            if fields_ahead(content, line_end) < 3 { continue }
+            x = next_float(content, line_end)
+            y = next_float(content, line_end)
+            z = next_float(content, line_end)
             ae3d_objbuild_add_position(build, x, y, z)
             positions = positions + 1
             continue
         }
         if c0 == 118 && c1 == 116 && is_blank(c2) {
             g_at = g_at + 2
-            if fields_ahead(raw, raw_length) < 2 { continue }
-            u = next_float(raw, raw_length)
-            v = next_float(raw, raw_length)
+            if fields_ahead(content, line_end) < 2 { continue }
+            u = next_float(content, line_end)
+            v = next_float(content, line_end)
             ae3d_objbuild_add_uv(build, u, v)
             uvs = uvs + 1
             continue
         }
         if c0 == 118 && c1 == 110 && is_blank(c2) {
             g_at = g_at + 2
-            if fields_ahead(raw, raw_length) < 3 { continue }
-            x = next_float(raw, raw_length)
-            y = next_float(raw, raw_length)
-            z = next_float(raw, raw_length)
+            if fields_ahead(content, line_end) < 3 { continue }
+            x = next_float(content, line_end)
+            y = next_float(content, line_end)
+            z = next_float(content, line_end)
             ae3d_objbuild_add_normal(build, x, y, z)
             normals = normals + 1
             continue
         }
         if c0 == 102 && is_blank(c1) {
             g_at = g_at + 1
-            if fields_ahead(raw, raw_length) < 3 { continue }
-            emit_face_line(build, m.mesh, raw, raw_length, positions, uvs, normals)
+            if fields_ahead(content, line_end) < 3 { continue }
+            emit_face_line(build, m.mesh, content, line_end, positions, uvs, normals)
             continue
         }
 
+        raw = string.substring(content, here, line_end)
         line = string.trim(raw)
+        string.free(raw)
         if line == "" { continue }
         flattened = split_fields(line)
         fields = string.split(flattened, " ")
@@ -545,7 +648,6 @@ load_obj_baked(path: string, recalculate_normals: bool, skin: ptr,
         }
     }
 
-    string.array_free(lines)
     string.free(content)
     ae3d_objbuild_destroy(build)
 
