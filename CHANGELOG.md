@@ -8,6 +8,15 @@
   each under the sky's colour, lit like the weather's kinds and undone the
   same way. A scene that arrives with a sky the list does not have keeps it
   and spells it out instead.
+- A sky without clouds no longer makes the clouds. The cloud noise is
+  161 ms of CPU for the volume and 5 for the weather map, and every sky
+  generated it at creation whether the scene had clouds or not -- the
+  whole of the 168 ms a scene's sky cost to open, and the same in every
+  program with a sky and no clouds. A sky with no cover gets two
+  placeholders of the right types, which the shader never samples (the
+  march returns before it at zero cover), and the noise is made the
+  first time the cover is above zero. The street opens about 200 ms
+  sooner (ready_ms 1725 to ~1520 on OpenGL).
 - The report says how long the editor took to show its scene
   (`ready_ms`): from the start of the program to the first frame drawn
   with the scene in it. The street opens in about 1.7 s on this machine,

@@ -245,6 +245,7 @@ struct VKRenderer {
     // The clouds' noise as textures, made with the first sky and kept.
     cloud_shape_texture: int
     cloud_weather_texture: int
+    cloud_textures_real: bool      // the noise, not the placeholders
     last_pipeline_binds: int
     last_set_binds: int
     clear_r: float
@@ -497,6 +498,7 @@ renderer_shadows(r: *VKRenderer) -> bool {
 
 renderer_set_clouds(r: *VKRenderer, cover: float, wind: float) {
     r.cloud_cover = cover
+    if cover > 0.0 { ensure_cloud_textures(r, true) }
     r.cloud_wind = wind
 }
 
@@ -505,20 +507,37 @@ renderer_set_sky_overcast(r: *VKRenderer, amount: float, color: Vec3) {
     r.sky_overcast_color = color
 }
 
-// The clouds' textures, uploaded from the bytes core bakes once.
-ensure_cloud_textures(r: *VKRenderer) {
-    if r.cloud_shape_texture == 0 {
-        bytes = core.cloud_shape_bytes()
-        if bytes != null {
-            r.cloud_shape_texture = ae3d_vk_texture_create_rgba(core.CLOUD_SHAPE_SIZE, core.CLOUD_SHAPE_SIZE, core.CLOUD_SHAPE_SIZE, bytes)
+// The clouds' textures. The noise behind them is 161 ms of CPU for the
+// shape and 5 for the weather (core.cloud_shape_bytes, measured), and
+// every sky made them whether the scene had clouds or not -- the whole
+// of the 168 ms a scene's sky cost to open in the editor, and the same in
+// every program with a sky and no clouds. With no cover the sky shader
+// never samples them (cloudsAlong returns before the march), but the
+// draw still binds a texture of each kind, so a sky without clouds gets
+// two placeholders of the right types -- a 2x2x2 volume and a 1x1 image
+// -- and the noise is made the first time the cover is above zero.
+// On Vulkan a texture is made outside any frame, so the upgrade happens
+// when the cover is set rather than where the sky is drawn.
+ensure_cloud_textures(r: *VKRenderer, real: bool) {
+    if r.cloud_textures_real { return }
+    if !real {
+        if r.cloud_shape_texture == 0 || r.cloud_weather_texture == 0 {
+            blank = calloc(2 * 2 * 2 * 4, 1)
+            // depth 2, not 1: the native side makes a volume only past one layer.
+            if r.cloud_shape_texture == 0 { r.cloud_shape_texture = ae3d_vk_texture_create_rgba(2, 2, 2, blank) }
+            if r.cloud_weather_texture == 0 { r.cloud_weather_texture = ae3d_vk_texture_create_rgba(1, 1, 1, blank) }
+            free(blank)
         }
+        return
     }
-    if r.cloud_weather_texture == 0 {
-        bytes = core.cloud_weather_bytes()
-        if bytes != null {
-            r.cloud_weather_texture = ae3d_vk_texture_create_rgba(core.CLOUD_WEATHER_SIZE, core.CLOUD_WEATHER_SIZE, 1, bytes)
-        }
-    }
+    shape = core.cloud_shape_bytes()
+    weather = core.cloud_weather_bytes()
+    if shape == null || weather == null { return }
+    if r.cloud_shape_texture != 0 { ae3d_vk_texture_destroy(r.cloud_shape_texture) }
+    if r.cloud_weather_texture != 0 { ae3d_vk_texture_destroy(r.cloud_weather_texture) }
+    r.cloud_shape_texture = ae3d_vk_texture_create_rgba(core.CLOUD_SHAPE_SIZE, core.CLOUD_SHAPE_SIZE, core.CLOUD_SHAPE_SIZE, shape)
+    r.cloud_weather_texture = ae3d_vk_texture_create_rgba(core.CLOUD_WEATHER_SIZE, core.CLOUD_WEATHER_SIZE, 1, weather)
+    r.cloud_textures_real = true
 }
 
 // The impostor's atlas grid and size, for the crowd draw; off for every
@@ -1168,7 +1187,7 @@ skybox_create(r: *VKRenderer, path: string) -> *Skybox {
     sky = core.skybox_solid(0.5, 0.7, 1.0)
     sky.texture = texture
     sky.procedural = procedural
-    ensure_cloud_textures(r)
+    ensure_cloud_textures(r, r.cloud_cover > 0.0)
     sky.mesh = core.mesh_create()
     core.mesh_push_skybox_cube(sky.mesh, sky.size)
     sky.vbo = ae3d_vk_upload_mesh(sky.mesh)
