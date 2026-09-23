@@ -92,6 +92,123 @@ parse_float(text: string) -> float {
     return string.get_double(text)
 }
 
+// --- the geometry lines, read in place -----------------------------------------
+//
+// A vertex, a texture coordinate, a normal and a face are nearly every line of
+// an OBJ, and each used to go through a trimmed copy, a tab-flattened copy, a
+// split into a fresh array of fresh strings, a token lookup that walked that
+// array from the start for every field, and a number parsed twice (tried, then
+// read). The street's 245 sources -- 4.4 MB, half of it one character mesh --
+// took 275 ms that way. These four read the line where it lies instead: a
+// number is cut out once and parsed once, and a face's indices, being
+// integers, are read digit by digit with no string at all. Everything else
+// (mtllib, usemtl, the lines a loader ignores) still takes the general path.
+
+var g_at = 0                       // where the scan stands in the line
+var g_number: ptr = null           // one double, the parser's out-value
+
+is_blank(c: int) -> bool { return c == 32 || c == 9 || c == 13 }
+
+skip_blanks(line: string, length: int) {
+    while g_at < length && is_blank(string.char_at(line, g_at)) { g_at = g_at + 1 }
+}
+
+// The next whitespace-separated number, as the general path read it: a field
+// that does not parse is 0.
+next_float(line: string, length: int) -> float {
+    skip_blanks(line, length)
+    start = g_at
+    while g_at < length && !is_blank(string.char_at(line, g_at)) { g_at = g_at + 1 }
+    if g_at == start { return 0.0 }
+    if g_number == null { g_number = calloc(1, 8) }
+    text = string.substring(line, start, g_at)
+    value = 0.0
+    if string.to_double_raw(text, g_number) != 0 { value = (g_number as float[])[0] }
+    string.free(text)
+    return value
+}
+
+// A face's index as parse_index reads one, from the digits at the scan: -1
+// when there are none (the empty slot of "1//3") or they are not a number.
+// Stops at the '/' or the blank after it, leaving the scan there.
+next_index(line: string, length: int, present_count: int) -> int {
+    negative = false
+    if g_at < length && string.char_at(line, g_at) == 45 {
+        negative = true
+        g_at = g_at + 1
+    }
+    digits = 0
+    value = 0
+    valid = true
+    while g_at < length {
+        c = string.char_at(line, g_at)
+        if c == 47 || is_blank(c) { break }
+        if c >= 48 && c <= 57 {
+            value = value * 10 + (c - 48)
+            digits = digits + 1
+        } else {
+            valid = false
+        }
+        g_at = g_at + 1
+    }
+    if digits == 0 || !valid { return 0 - 1 }
+    if negative { value = 0 - value }
+    if value > 0 { return value - 1 }
+    if value < 0 { return present_count + value }
+    return 0 - 1
+}
+
+// How many whitespace-separated fields the line has from the scan on,
+// without moving it: the general path skipped a vertex line of fewer than
+// three numbers and a face of fewer than three references, and so must this.
+fields_ahead(line: string, length: int) -> int {
+    at = g_at
+    count = 0
+    while at < length {
+        while at < length && is_blank(string.char_at(line, at)) { at = at + 1 }
+        if at >= length { break }
+        count = count + 1
+        while at < length && !is_blank(string.char_at(line, at)) { at = at + 1 }
+    }
+    return count
+}
+
+// A face from the line's second field on, fanned into triangles exactly as
+// emit_face does it.
+emit_face_line(build: ptr, mesh: ptr, line: string, length: int,
+               positions: int, uvs: int, normals: int) {
+    first = 0 - 1
+    previous = 0 - 1
+    while true {
+        skip_blanks(line, length)
+        if g_at >= length { break }
+        v = next_index(line, length, positions)
+        vt = 0 - 1
+        vn = 0 - 1
+        if g_at < length && string.char_at(line, g_at) == 47 {
+            g_at = g_at + 1
+            vt = next_index(line, length, uvs)
+            if g_at < length && string.char_at(line, g_at) == 47 {
+                g_at = g_at + 1
+                vn = next_index(line, length, normals)
+            }
+        }
+        // Whatever else the reference carried, to its end.
+        while g_at < length && !is_blank(string.char_at(line, g_at)) { g_at = g_at + 1 }
+        if v < 0 { continue }
+        unified = ae3d_objbuild_emit(build, mesh, v, vt, vn)
+        if unified < 0 { continue }
+        if first < 0 {
+            first = unified
+        } else if previous < 0 {
+            previous = unified
+        } else {
+            core.mesh_push_triangle(mesh, first, previous, unified)
+            previous = unified
+        }
+    }
+}
+
 // OBJ indices are 1-based and may be negative, in which case they count back
 // from the end of the list read so far.
 parse_index(text: string, present_count: int) -> int {
@@ -316,11 +433,56 @@ load_obj_baked(path: string, recalculate_normals: bool, skin: ptr,
     i = 0
     while i < line_count {
         raw = field(lines, i)
-        line = string.trim(raw)
         i = i + 1
-        if line == "" { continue }
-        if string.char_at(line, 0) == 35 { continue }
+        // The geometry lines, read where they lie.
+        raw_length = string.length(raw)
+        g_at = 0
+        skip_blanks(raw, raw_length)
+        if g_at >= raw_length { continue }
+        c0 = string.char_at(raw, g_at)
+        if c0 == 35 { continue }
+        c1 = 0
+        if g_at + 1 < raw_length { c1 = string.char_at(raw, g_at + 1) }
+        c2 = 0
+        if g_at + 2 < raw_length { c2 = string.char_at(raw, g_at + 2) }
+        if c0 == 118 && is_blank(c1) {
+            g_at = g_at + 1
+            if fields_ahead(raw, raw_length) < 3 { continue }
+            x = next_float(raw, raw_length)
+            y = next_float(raw, raw_length)
+            z = next_float(raw, raw_length)
+            ae3d_objbuild_add_position(build, x, y, z)
+            positions = positions + 1
+            continue
+        }
+        if c0 == 118 && c1 == 116 && is_blank(c2) {
+            g_at = g_at + 2
+            if fields_ahead(raw, raw_length) < 2 { continue }
+            u = next_float(raw, raw_length)
+            v = next_float(raw, raw_length)
+            ae3d_objbuild_add_uv(build, u, v)
+            uvs = uvs + 1
+            continue
+        }
+        if c0 == 118 && c1 == 110 && is_blank(c2) {
+            g_at = g_at + 2
+            if fields_ahead(raw, raw_length) < 3 { continue }
+            x = next_float(raw, raw_length)
+            y = next_float(raw, raw_length)
+            z = next_float(raw, raw_length)
+            ae3d_objbuild_add_normal(build, x, y, z)
+            normals = normals + 1
+            continue
+        }
+        if c0 == 102 && is_blank(c1) {
+            g_at = g_at + 1
+            if fields_ahead(raw, raw_length) < 3 { continue }
+            emit_face_line(build, m.mesh, raw, raw_length, positions, uvs, normals)
+            continue
+        }
 
+        line = string.trim(raw)
+        if line == "" { continue }
         flattened = split_fields(line)
         fields = string.split(flattened, " ")
         field_count = token_count(fields)

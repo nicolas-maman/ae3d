@@ -8,6 +8,15 @@
   each under the sky's colour, lit like the weather's kinds and undone the
   same way. A scene that arrives with a sky the list does not have keeps it
   and spells it out instead.
+- OBJ files load 42% faster, to the same byte. A vertex, texture
+  coordinate, normal or face line -- nearly every line of an OBJ -- is
+  read where it lies: a number cut out once and parsed once, a face's
+  indices read digit by digit. They used to go through a trimmed copy, a
+  tab-flattened copy, a split into fresh strings, a token lookup that
+  walked the split from the start for every field and a number parsed
+  twice. The street's 245 sources (4.4 MB) load in 155-158 ms instead of
+  266-277, every mesh byte-identical to the old parser's, and the street
+  opens in the editor at ready_ms ~1470.
 - A sky without clouds no longer makes the clouds. The cloud noise is
   161 ms of CPU for the volume and 5 for the weather map, and every sky
   generated it at creation whether the scene had clouds or not -- the
