@@ -323,7 +323,11 @@ rate, the renderer's passes (shadow, scene, post), the readback where the
 viewport is blitted rather than presented, the draw calls, the triangles
 and the size it was rendered at. A bounded run writes the same figures to
 `AE3D_EDITOR_REPORT` as `fps`, `first_fps`, `paint_ms` (the editor's whole
-frame callback), `passes`, `draws` and `blit_ms`. `first_fps` is the first
+frame callback), `passes`, `draws` and `blit_ms`, and `ready_ms`: how long
+from the start of the program to the first frame drawn with the scene in
+it, which is what someone opening a scene waits for (the street of
+`examples/street_drive.ae`: about 1.7 s, against 0.84 s for the editor's
+own scene). `first_fps` is the first
 frame after a scene opens and carries its upload to the GPU -- the street
 shows 4 fps there and settles at 90 -- so it answers "did the viewport
 ever draw", not "how fast is it".
