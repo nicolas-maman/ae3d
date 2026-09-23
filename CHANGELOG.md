@@ -8,6 +8,11 @@
   each under the sky's colour, lit like the weather's kinds and undone the
   same way. A scene that arrives with a sky the list does not have keeps it
   and spells it out instead.
+- The report says how long the editor took to show its scene
+  (`ready_ms`): from the start of the program to the first frame drawn
+  with the scene in it. The street opens in about 1.7 s on this machine,
+  against 0.84 s for the editor's own scene; where the difference goes is
+  #388.
 - Frame selection frames what is selected and everything under it. A
   group is a transform with no mesh of its own, so its bounds are the
   origin with no reach: framing `Block 3` of the street flew the camera

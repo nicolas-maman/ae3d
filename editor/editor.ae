@@ -406,6 +406,13 @@ struct Rest {
 // check on what the bar says now passes against a bar that opened on nothing.
 // So the editor writes down what it showed first.
 var g_first_fps = 0 - 1
+// How long the editor took to show its scene: from the start of main to
+// the end of the first frame drawn after the scene was built or opened.
+// What someone opening a scene waits for, which no other figure said --
+// first_fps is a rate, and a bounded run's wall time includes its report.
+var g_started = 0.0
+var g_scene_ready = false
+var g_ready_ms = 0.0 - 1.0
 // What the frame costs after the renderer is done with it: reading the
 // framebuffer back off the GPU and handing it to the canvas. On the blit
 // path that is the whole difference between what the renderer measures
@@ -3200,6 +3207,7 @@ render_viewport() {
 // bounded run.
 frame_finished(backend: *Backend) {
     if !g_held { g_frames = g_frames + 1 }
+    if g_scene_ready && g_ready_ms < 0.0 { g_ready_ms = (seconds() - g_started) * 1000.0 }
 
     update_stats(backend)
 
@@ -3757,6 +3765,8 @@ report_state() {
     // which is not what the editor runs at.
     lines = string.concat(lines, "\nfps ")
     lines = string.concat(lines, string.from_int((g_fps) as int))
+    lines = string.concat(lines, "\nready_ms ")
+    lines = string.concat(lines, string.from_int((g_ready_ms) as int))
     lines = string.concat(lines, "\nfirst_fps ")
     lines = string.concat(lines, string.from_int(g_first_fps))
     lines = string.concat(lines, "\nshading_disagrees ")
@@ -5264,10 +5274,12 @@ build_scene() {
     // program's scene (AE3D_SCENE_OUT) opens here with its bodies.
     if string.equals(g_scene_path, DEFAULT_SCENE_PATH) != 1 && fs.file_exists(g_scene_path) == 1 {
         load_scene()
+        g_scene_ready = true
         return
     }
 
     select_object(1)
+    g_scene_ready = true
 }
 
 // Everything the scene is, not just its models: the simulations behind its
@@ -6454,6 +6466,7 @@ set_gizmo_mode(mode: int) {
 }
 
 main() {
+    g_started = seconds()
     g_frame_limit = limit_from_env()
     // Same switch as the engine, same cost when it is not set.
     g_agent_on = agent.start()
