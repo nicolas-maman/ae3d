@@ -1808,12 +1808,15 @@ const LIGHT_POINT = 1
 const LIGHT_SPOT = 2
 const LIGHT_MODES = 3
 // The kinds of body an object can be, in the order the buttons draw them:
-// none, or the physics module's three.
+// none, the physics module's three, or a character (a capsule that walks
+// the world, physics.character_controller, its collider always a capsule
+// of the mesh's bounds).
 const BODY_NONE = 0
 const BODY_STATIC = 1
 const BODY_KINEMATIC = 2
 const BODY_DYNAMIC = 3
-const BODY_KINDS = 4
+const BODY_CHARACTER = 4
+const BODY_KINDS = 5
 // The colliders the scene file names, from the object's own mesh: a box of
 // its bounds, a sphere or a capsule of them, the hull of its vertices, or
 // its triangles (static bodies only).
@@ -3092,12 +3095,14 @@ body_kind_of(spec: *PhysicsSpec) -> int {
     if spec == null { return BODY_NONE }
     if string.equals(spec.body, "static") == 1 { return BODY_STATIC }
     if string.equals(spec.body, "kinematic") == 1 { return BODY_KINEMATIC }
+    if string.equals(spec.body, "character") == 1 { return BODY_CHARACTER }
     return BODY_DYNAMIC
 }
 
 body_kind_name(kind: int) -> string {
     if kind == BODY_STATIC { return "static" }
     if kind == BODY_KINEMATIC { return "kinematic" }
+    if kind == BODY_CHARACTER { return "character" }
     return "dynamic"
 }
 
@@ -3126,10 +3131,14 @@ apply_body_kind(o: *GameObject, kind: int) {
     if kind == BODY_NONE { take_spec(o); return }
     spec = record_of(o)
     if spec == null {
-        give_spec(o, scene.physics_spec_new(body_kind_name(kind), "box", 0.6, 0.0, 1.0))
+        collider = "box"
+        if kind == BODY_CHARACTER { collider = "capsule" }
+        give_spec(o, scene.physics_spec_new(body_kind_name(kind), collider, 0.6, 0.0, 1.0))
         return
     }
     spec.body = core.set_owned(spec.body, body_kind_name(kind))
+    // A character is a capsule, whatever the body before it was.
+    if kind == BODY_CHARACTER { spec.collider = core.set_owned(spec.collider, "capsule") }
 }
 
 apply_collider_kind(o: *GameObject, kind: int) {
@@ -3241,7 +3250,7 @@ start_simulation() {
             rest.position = m.position
             rest.rotation = m.rotation
             list.add_raw(g_rest, rest as ptr)
-            if physics.apply_spec(o, spec) != null { bodies = bodies + 1 }
+            if physics.apply_spec(o, spec) != null || physics.character_of(o) != null { bodies = bodies + 1 }
         }
         i = i + 1
     }
@@ -7542,13 +7551,19 @@ main() {
         style_button(static_btn, "action")
         kinematic_btn = ui.btn(body_row, "Kinematic") callback { set_body_kind(BODY_KINEMATIC) }
         style_button(kinematic_btn, "action")
-        dynamic_btn = ui.btn(body_row, "Dynamic") callback { set_body_kind(BODY_DYNAMIC) }
+        // The ones that move, on a row of their own: five do not fit an
+        // inspector at its narrowest.
+        moving_row = as_row(ui.hstack(g_physics_section, 6))
+        dynamic_btn = ui.btn(moving_row, "Dynamic") callback { set_body_kind(BODY_DYNAMIC) }
         style_button(dynamic_btn, "action")
+        character_btn = ui.btn(moving_row, "Character") callback { set_body_kind(BODY_CHARACTER) }
+        style_button(character_btn, "action")
         bodies = g_body_buttons as int[]
         bodies[BODY_NONE] = no_body_btn
         bodies[BODY_STATIC] = static_btn
         bodies[BODY_KINEMATIC] = kinematic_btn
         bodies[BODY_DYNAMIC] = dynamic_btn
+        bodies[BODY_CHARACTER] = character_btn
         collider_row = as_row(ui.hstack(g_physics_section, 6))
         box_btn = ui.btn(collider_row, "Box") callback { set_collider_kind(COLLIDER_BOX) }
         style_button(box_btn, "action")
