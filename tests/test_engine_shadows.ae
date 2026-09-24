@@ -43,6 +43,9 @@ var g_shadowed_left = 0.0
 var g_shadowed_right = 0.0
 var g_lit_left = 0.0
 var g_lit_right = 0.0
+// The next frame, shadows still off: how far the frame moves by itself.
+var g_again_left = 0.0
+var g_again_right = 0.0
 
 check(name: string, condition: bool) {
     g_checks = g_checks + 1
@@ -88,18 +91,25 @@ on_start(state: ptr, e: *Engine) {
 on_render(state: ptr, e: *Engine, delta: float) {
     frame = engine.engine_frame_count(e)
 
-    if frame != 2 && frame != 4 { return }
+    // Past the first frames, whose picture is still settling (#394: on
+    // llvmpipe the whole frame came out 0.06 brighter at frame 2 than at
+    // frame 4, both halves, and a test comparing the two frames' halves
+    // read that as the shadow going the wrong way).
+    if frame != 4 && frame != 8 && frame != 9 { return }
     if ae3d_capture_frame(WIDTH, HEIGHT) == 0 { return }
 
     block = calloc(8, 8)
-    if frame == 2 {
+    if frame == 4 {
         g_shadowed_left = half_brightness(block, 0)
         g_shadowed_right = half_brightness(block, WIDTH / 2)
         engine.engine_set_shadows(e, false)
         g_reported_off = engine.engine_shadows(e)
-    } else {
+    } else if frame == 8 {
         g_lit_left = half_brightness(block, 0)
         g_lit_right = half_brightness(block, WIDTH / 2)
+    } else {
+        g_again_left = half_brightness(block, 0)
+        g_again_right = half_brightness(block, WIDTH / 2)
     }
     g_measured = g_measured + 1
     free(block)
@@ -110,7 +120,7 @@ main() {
     e = engine.engine_new_with(platform.API_GL)
     engine.engine_set_size(e, WIDTH, HEIGHT)
     engine.engine_set_title(e, "ae3d engine shadows test")
-    engine.engine_set_frame_limit(e, 6)
+    engine.engine_set_frame_limit(e, 10)
     engine.engine_set_camera_input(e, false)
     engine.engine_set_vsync(e, 0)
 
@@ -132,7 +142,7 @@ main() {
         return
     }
 
-    if g_measured < 2 {
+    if g_measured < 3 {
         println("engine shadows: SKIP no readable frames")
         core.light_free(light)
         engine.engine_free(e)
@@ -142,17 +152,23 @@ main() {
     check("shadows are on by default", g_default_on)
     check("turning them off is reported", !g_reported_off)
 
-    shadow_drop = g_lit_left - g_shadowed_left
-    control_drop = g_lit_right - g_shadowed_right
-    if control_drop < 0.0 { control_drop = 0.0 - control_drop }
+    // The shadow falls on the left half. What it does is how much the left
+    // half gains on the right when shadows go off: anything that moves the
+    // whole frame -- a first frame still settling, a driver's own drift --
+    // moves both halves alike and cancels out of it.
+    shadow_effect = (g_lit_left - g_lit_right) - (g_shadowed_left - g_shadowed_right)
+    // And how far the frame moves by itself, two frames in a row with
+    // nothing changed between them.
+    drift = (g_again_left - g_again_right) - (g_lit_left - g_lit_right)
+    if drift < 0.0 { drift = 0.0 - drift }
 
-    println("  left half ${g_shadowed_left} shadowed vs ${g_lit_left} lit, right half ${g_shadowed_right} vs ${g_lit_right}")
+    println("  left half ${g_shadowed_left} shadowed vs ${g_lit_left} lit, right half ${g_shadowed_right} vs ${g_lit_right}; effect ${shadow_effect}, drift ${drift}")
 
     // A shadow takes the sun's light and leaves the sky's fill, so the half
     // it falls on darkens by the sun's share of a few pixels, not by a
     // third of everything.
-    check("the engine's frame darkens where the shadow falls", shadow_drop > 0.002)
-    check("the half the shadow misses is left alone", shadow_drop > control_drop * 3.0)
+    check("the engine's frame darkens where the shadow falls", shadow_effect > 0.002)
+    check("by more than the frame moves by itself", shadow_effect > drift * 3.0)
 
     core.light_free(light)
     engine.engine_free(e)
