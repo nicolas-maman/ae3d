@@ -36,7 +36,7 @@ import ae3d.posing
 
 exports (
     HordeGrid,
-    grid_new, grid_free, separate,
+    grid_new, grid_free, separate, separate_exact,
     wander, step, tiers, bucket, audit,
     fast_sin, fast_cos, fast_atan2, GRAIN
 )
@@ -255,7 +255,27 @@ cell_coord(v: float, origin: float, inv: float, cols: int) -> int {
 // its own and the eight adjacent cells, `strength` times the push added
 // to its velocity. The crowd is the compact range [0, n) -- a crowd that
 // only ever spawns, which is what a horde is.
+//
+// Over the pool every figure gathers its own push; alone, each pair is
+// visited once and pushes both. The two add the same pushes in different
+// orders, so a figure's velocity can differ in its last bits between a
+// pool and none.
 separate(g: *HordeGrid, pos: ptr, vel: ptr, n: int, ox: float, oz: float, cell_size: float, radius: float, strength: float) {
+    separate_pass(g, pos, vel, n, ox, oz, cell_size, radius, strength, false)
+}
+
+// The same push, the same to the bit at any thread count, a pool or none:
+// every figure gathers its neighbours' pushes in one fixed order, the
+// nine cells row by row and each cell's figures as they were packed, and
+// writes only its own. Alone that is twice the pair tests of the half
+// scan. It is what a horde simulated on every peer steps by
+// (ae3d.nethorde), where one peer with a pool and one without must hold
+// the same crowd.
+separate_exact(g: *HordeGrid, pos: ptr, vel: ptr, n: int, ox: float, oz: float, cell_size: float, radius: float, strength: float) {
+    separate_pass(g, pos, vel, n, ox, oz, cell_size, radius, strength, true)
+}
+
+separate_pass(g: *HordeGrid, pos: ptr, vel: ptr, n: int, ox: float, oz: float, cell_size: float, radius: float, strength: float, exact: bool) {
     if g == null || pos == null || vel == null || n <= 0 || cell_size <= 0.0 { return }
     cols = g.cols
     cells = cols * cols
@@ -320,7 +340,7 @@ separate(g: *HordeGrid, pos: ptr, vel: ptr, n: int, ox: float, oz: float, cell_s
         i = i + 1
     }
 
-    if jobs.workers() > 0 {
+    if exact || jobs.workers() > 0 {
         // Every core takes rows of cells and each entity gathers the push
         // of all its neighbours, writing only its own accumulator: twice
         // the pair tests of the half scan below, spread over every core,

@@ -1,6 +1,6 @@
 # Networking
 
-`ae3d.net` puts multiplayer in the engine (#413). A game marks what is networked, and the engine keeps it in step between one host and its clients. This page describes what is built: transports, the handshake, server-owned objects replicated and interpolated, snapshots sent as deltas against what each client has acknowledged, relevance, players, each moved by its client's commands with prediction and reconciliation, events, and objects the host creates and destroys while the game runs. The rest of #413 (UDP, the horde) is built on it.
+`ae3d.net` puts multiplayer in the engine (#413). A game marks what is networked, and the engine keeps it in step between one host and its clients. This page describes what is built: transports, the handshake, server-owned objects replicated and interpolated, snapshots sent as deltas against what each client has acknowledged, relevance, players, each moved by its client's commands with prediction and reconciliation, events, objects the host creates and destroys while the game runs, and a horde every peer simulates rather than receives. The rest of #413 (UDP, a budget) is built on it.
 
 ## A session
 
@@ -39,7 +39,7 @@ A transport moves messages between the host and each peer. A message is either r
 
 | Message | Direction | Bytes |
 |---|---|---|
-| hello | client to host, reliable | `u8 1`, `u32 protocol` (3) |
+| hello | client to host, reliable | `u8 1`, `u32 protocol` (4) |
 | welcome | host to client, reliable | `u8 2`, `u32 client id`, `u32 tick rate` |
 | snapshot | host to each client, unreliable | `u8 3`, `u32 tick`, `f32 host time`, `u32 ack` (the client's newest command the host has applied), `u32 baseline` (the snapshot this one is a delta against; 0 for none), `u16 objects`, `u16 changed`, then per changed object `u16 index`, `f32 x y z`, `f32 qx qy qz qw`, `u8 character`, and for a character `f32 vy`, `u8 grounded` |
 | input | client to host, unreliable | `u8 4`, `u32 first seq`, `u8 count`, then per command `f32 walk x z`, `f32 jump` |
@@ -48,6 +48,7 @@ A transport moves messages between the host and each peer. A message is either r
 | event | either way, reliable | `u8 7`, `u16 event`, `u8 count`, then `count` `f32` numbers |
 | create | host to client, reliable | `u8 8`, `u32 net id`, `u16 kind`, `f32 host time`, `f32 x y z`, `f32 qx qy qz qw` |
 | destroy | host to client, reliable | `u8 9`, `u32 net id`, `f32 host time`, `f32 x y z`, `f32 qx qy qz qw`: when it went, and where it was |
+| event with bytes | either way, reliable | `u8 10`, `u16 event`, `u32 length`, then `length` bytes |
 
 Over TCP each message is framed by a `u32` length.
 
@@ -131,7 +132,9 @@ net.send_event(session, "whisper", 2, now, 1.0)                // the host, to c
 - **Four numbers.** An event carries up to four numbers (an id, an amount, a place), 32-bit floats on the wire, and only as many as the last one that isn't 0: a honk with one number is 8 bytes, with none 4. A handler reads them as `call.a` to `call.d`, 0 where the sender gave fewer.
 - **An id on the wire, not the name.** An event is its order among the registered: 2 bytes. That's why both sides register in the same order, as they mark the same objects networked.
 - **Who sent it.** `call.sender` is the client's id on the host, and `net.HOST` (0) on a client. A client sends only to the host; the host sends to one client or to `net.EVERYONE` it has welcomed, never to itself (its game calls its own code). A client that wants to reach the others sends to the host, which passes it on.
-- **When.** A handler is called in the step the event arrives. `send_event` is false when there is no such event or no one to send it to yet: a client before its welcome.
+- **When.** A handler is called in the step the event arrives, and `call.now` is this side's time in that step, what a reply is sent at. `send_event` is false when there is no such event or no one to send it to yet: a client before its welcome.
+- **Bytes.** An event can carry a block of bytes instead of numbers, a state too big for four of them: `net.send_event_bytes(session, "state", to, now, data, length)`, 7 bytes and the block. The handler reads `call.data` and `call.length`, the session's until it returns.
+- **A client that joins late.** `net.on_join(session, hook, context)` calls `hook(context, client, now)` on the host with every client it welcomes, after its welcome, its player and the objects alive are on their way, so what the game sends it from there arrives after them.
 
 ## Spawning
 
@@ -163,6 +166,35 @@ net.destroy_object(session, rocket, now)
 - **Late join.** A client the host welcomes is told every created object still alive, and none destroyed before it came.
 - **Ids aren't given again.** A destroyed object's id stays empty, so a snapshot or a delta that still names it, against an older baseline, finds nothing there, and a later object is never read as a change against the old one's state. A session creates up to 65,535 objects over its life, the limit of the snapshot's `u16` index.
 - **Letting go.** The unmaker is the game's (`engine.destroy`, as a game does); `net_free` calls it for every created object still alive. A null unmaker leaves the object to the game.
+
+## The horde
+
+A horde isn't sent a zombie at a time. A snapshot is 31 bytes an object, so three thousand zombies would be 2.7 MB a second to every client, and a city holds a hundred thousand. `ae3d.nethorde` sends what the horde's simulation can't know by itself, where it began and every change to what drives it, and every peer, the host among them, steps the same horde at the same fixed ticks and holds it to the bit.
+
+```aether
+import ae3d.nethorde
+
+field = nav.flow_new(x0, z0, x1, z1, 1.0)            // the same field on every side
+nav.flow_block_model(field, building)
+horde = nethorde.horde_new(session, field)           // both sides, at the same point among their registrations
+nethorde.attach(e, horde)                            // after net.attach: stepped every frame
+
+nethorde.start(horde, seed, 3000, x0, z0, x1, z1, now)   // the host
+nethorde.set_target(horde, player.x, player.z, now)      // when the player crosses a cell
+nethorde.kill(horde, index, now)                         // a zombie shot
+```
+
+A client reads its horde as the host does: `horde_count`, and the `positions`, `yaws` and `phases` columns, which the crowd's tiers and draws take as they are ([crowds.md](crowds.md)).
+
+- **The start.** The seed, the count, the ground, the rules (speed, turn, separation) and the tick rate (30 a second) as doubles, and the host's time at tick 0: 199 bytes. Each peer spawns the same horde from the seed with the horde's own integer generator.
+- **Inputs at a tick.** The target the flow field floods from, and a zombie killed, which leaves the horde (the last zombie takes its index). The host applies one at once and tells every client the tick it takes effect at, the next: 16 bytes a target, 12 a kill. What the game makes of a dead zombie, a body or a ragdoll, is a created object, sent as objects are.
+- **A seal a tick.** Every tick the host tells every client it has done it: 8 bytes. Reliable messages arrive in order, so a client holding the seal for a tick holds every input for it, and steps it only then. A client steps its horde to its view time, where it draws everything else, a tick at a time and never past the newest seal: it runs the view's 200 ms behind the host and never guesses.
+- **A hash.** Every `set_checks` ticks (30 by default, once a second) the seal carries 48 bits of a hash of the host's horde at that tick: 16 bytes. A client whose own differs asks for the horde's state and takes it.
+- **Late join.** A client welcomed after the start is sent the horde as it is: the rules, and 32 bytes a zombie (x, z, heading and phase, as the doubles they are). Replaying the inputs from tick 0 instead would be a few hundred bytes but a simulation of every tick since the game began: 4 seconds in, 119 ticks of 3,000 zombies, 21 ms here; an hour in, 108,000 ticks, 19 s of the joiner's time, while the state stays 95 KB. Replay wins the first seconds of a game (over a link of a megabyte a second the two cross about 18 s in, where sending the state takes as long as replaying the ticks); the state wins every game past them, and doesn't grow with it.
+
+**What makes a tick the same everywhere.** A tick is `ae3d.horde`'s and `ae3d.nav`'s passes in a fixed order: the headings turned toward the field (`flow_steer`), the velocities along them (`wander`), the separation, and the step, by 1 / the tick rate, never a frame's delta. Each pass works a figure at a time over the pool and writes only that figure, so the pool's size and its timing change nothing. With one exception, found on the way: the separation with no pool visits each pair once and pushes both, which adds the same pushes in another order than the pool's gather, and 1,773 of the 4,500 velocity components of a knot of 1,500 differ in their last bits. `horde.separate_exact` gathers at any thread count, and is what the horde steps by. The flow field's headings were libm's `atan2`, which isn't the same function on every platform; a cell points one of eight ways, so they are eight constants now. What is left of libm is `sqrt`, `floor` and `fabs`, exact everywhere, beside the horde's own polynomial sine and arctangent.
+
+The compiler has a part too: it mustn't fuse a multiply and an add into one instruction (an FMA rounds once where the pair rounds twice). x86-64 without `-march` has no such instruction, and the builds pass none, so GCC and Clang on Windows and Linux can't fuse. Clang on Apple silicon fuses within an expression by default (`-ffp-contract=on`), so a Mac and a PC may not hold the same horde until the Mac's build passes `-ffp-contract=off`; that isn't verified yet. aephysics's bit-exact traces are Linux against Windows for the same reason. A figure's pose bank (`set_figure`, when the walk drives the step) has to be the same bytes on every side too: its travel table is in the step.
 
 ## What it is held to
 
@@ -207,6 +239,21 @@ The walking error is under a centimetre except at three steps, where the host ca
 
 The drawing error is the geometry's, as in `tests/test_net.ae`: a rocket's arc is off the chord between two snapshots by g dt²/8, 1.36 mm at 30 a second and 5.45 mm across a lost one; a car's circle 1.39 and 5.55 mm. The seven steps over 6 mm are two snapshots lost in a row, 10 (1 − cos 1/20) = 12.5 mm. Over TCP on this machine, 20 honks reach the host once and in order, and a rocket is made on the client and goes when the host destroys it.
 
+`tests/test_net_horde.ae` runs a host and two clients, and a third that joins 4.5 s in, each with a horde of 3,000 and a flow field of its own, over 100 ms latency, 20 ms jitter and 2% loss, the seals hashed every tick. The target is set six times and forty zombies are killed:
+
+| | Measured | Held to |
+|---|---|---|
+| the same horde, 90 ticks alone and over four threads | 0 of 15,000 doubles differ | 0 |
+| a client's horde against the host's at the tick it is at, every frame | client 2: 495 frames at 224 ticks; the late client: 256 frames at 102 ticks; every one the same | all |
+| the seals' hashes | 224 ticks on client 2, 101 on the late client, none different | none |
+| every side at the host's last tick, the columns compared whole | the same to the bit, 2,960 zombies | |
+| client 1, one zombie nudged a millimetre | found at the next tick, the state asked for once, the host's horde again 15 frames (250 ms) later | once, 40 frames |
+| the late client | the state, 95,559 bytes for 2,980 zombies, 233 ms after it joined; its first tick checked 350 ms after | two trips (275 ms); 500 ms |
+| a client's horde, seals hashed every tick | 579 bytes a second, where snapshots of every zombie would be 2.6 MB | 1 KB |
+| a tick of 3,000 zombies on this machine, over four threads | 0.18 ms | |
+
+Over TCP on this machine, a client that joins half a second in takes the state framed on the stream, 95 KB, and both clients end at the host's last tick with its horde to the bit.
+
 ## Next
 
-As #413 lays out: a per-client budget and priorities within it, quantised positions, UDP (with a reliable channel of its own for events and created objects, which TCP and the loopback give for free), a destroyed object's id given again once every client has a snapshot without it, the editor's host-and-clients play, and a horde that is simulated on every client instead of sent.
+As #413 lays out: a per-client budget and priorities within it, quantised positions, UDP (with a reliable channel of its own for events and created objects, which TCP and the loopback give for free), a destroyed object's id given again once every client has a snapshot without it, and the editor's host-and-clients play. For the horde: a zombie hit (shoved, slowed) as an input beside a kill, the late joiner's state quantised (a position in 16 bits a coordinate is a third of the bytes), and a Mac's build against a PC's with `-ffp-contract=off`.

@@ -1,0 +1,444 @@
+// The horde simulated on every peer (#413): a host and two clients in one
+// process, and a third that joins late, each with a horde and a flow field
+// of its own, over a link with 100 ms latency, 20 ms jitter and 2% loss.
+// Nothing of the horde is sent a zombie at a time; the host sends the start,
+// the target changes, the kills and a seal a tick. Held to numbers:
+//
+//   - the same horde stepped with no pool and over four threads is the
+//     same to the bit (separate_exact), and the half scan of
+//     horde.separate is shown not to be;
+//   - every client's horde is the host's to the bit at every tick it
+//     reaches: its hash against the host's at that tick every frame, the
+//     seals' own hashes every tick, and the columns compared whole once
+//     every side has reached the host's last tick;
+//   - a client whose horde is disturbed finds it at the next tick, asks for
+//     the state, and holds the host's again;
+//   - the client that joins late holds the host's horde within a trip;
+//   - what it costs a client a second, against what snapshots of every
+//     zombie would;
+//   - over TCP, a client that joins late takes the state framed on the
+//     stream and holds the host's horde.
+//
+// The loopback run is on a clock of the test's own, 60 steps a second, so
+// it is the same every time; the TCP one is on the real clock. Headless:
+// the horde and the sessions only.
+
+import std.mem
+import ae3d.core
+import ae3d.horde
+import ae3d.jobs
+import ae3d.nav
+import ae3d.net
+import ae3d.nethorde
+import ae3d.platform
+
+extern calloc(count: int, size: int) -> ptr
+extern malloc(size: long) -> ptr
+extern memcpy(dst: ptr, src: ptr, n: long) -> ptr
+extern free(p: ptr)
+
+const COUNT = 3000                   // zombies
+const SEED = 20260924
+const STEPS = 480                    // eight seconds at 60 steps a second
+const STEP = 0.016666666666666666
+const BEGIN = 30                     // the step the host starts the horde: 0.5 s, after the welcomes
+const LATE = 270                     // the step the third client joins: 4.5 s
+const NUDGE = 360                    // the step client 1's horde is disturbed
+const SETTLE = 60                    // steps after the host stops for every client to reach its last tick
+const X0 = 0.0 - 60.0
+const Z0 = 0.0 - 20.0
+const X1 = 60.0
+const Z1 = 20.0
+
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, ok: bool) {
+    g_checks = g_checks + 1
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        g_failures = g_failures + 1
+        println("  FAIL ${name}")
+    }
+}
+
+// The same ground on every side: the street, and three buildings on it.
+field_new() -> *FlowField {
+    f = nav.flow_new(X0, Z0, X1, Z1, 1.0)
+    nav.flow_block(f, 0.0 - 40.0, 0.0 - 8.0, 0.0 - 30.0, 6.0)
+    nav.flow_block(f, 0.0 - 5.0, 2.0, 5.0, 14.0)
+    nav.flow_block(f, 25.0, 0.0 - 14.0, 38.0, 0.0 - 2.0)
+    return f
+}
+
+// --- the thread count ---------------------------------------------------------------------------
+
+// A horde alone on a host, stepped 90 ticks with two target changes; its
+// columns copied out (xyz, heading, phase: five doubles a zombie).
+solo_run() -> ptr {
+    hub = net.hub_new()
+    session = net.host_loopback(hub)
+    f = field_new()
+    h = nethorde.horde_new(session, f)
+    nethorde.set_target(h, 50.0, 10.0, 0.0)
+    nethorde.start(h, SEED, COUNT, X0, Z0, X1, Z1, 0.0)
+    tick = 1
+    while tick <= 90 {
+        if tick == 30 { nethorde.set_target(h, 0.0 - 50.0, 0.0 - 15.0, (tick as float) / 30.0) }
+        if tick == 60 { nethorde.set_target(h, 10.0, 0.0 - 18.0, (tick as float) / 30.0) }
+        nethorde.step(h, (tick as float) / 30.0)
+        tick = tick + 1
+    }
+    n = nethorde.horde_count(h)
+    out = malloc((n * 5 * 8) as long)
+    memcpy(out, nethorde.positions(h), (n * 3 * 8) as long)
+    memcpy(out + n * 3 * 8, nethorde.yaws(h), (n * 8) as long)
+    memcpy(out + n * 4 * 8, nethorde.phases(h), (n * 8) as long)
+    nethorde.horde_free(h)
+    nav.flow_free(f)
+    net.net_free(session)
+    net.hub_free(hub)
+    return out
+}
+
+// 1,500 figures in a four-metre knot, pushed apart once by the separation;
+// the velocities copied out.
+knot_velocities(exact: bool) -> ptr {
+    pos = calloc(1500 * 3, 8)
+    vel = calloc(1500 * 3, 8)
+    p = pos as float[]
+    seed = 77 as long
+    i = 0
+    while i < 1500 * 3 {
+        seed = seed * 6364136223846793005 + 1442695040888963407
+        bits = (seed / 4294967296) % 16777216
+        if bits < 0 { bits = 0 - bits }
+        p[i] = (bits as float) / 16777216.0 * 4.0
+        if i % 3 == 1 { p[i] = 0.0 }
+        i = i + 1
+    }
+    g = horde.grid_new(8, 64)
+    if exact {
+        horde.separate_exact(g, pos, vel, 1500, 0.0, 0.0, 1.0, 1.0, 1.0)
+    } else {
+        horde.separate(g, pos, vel, 1500, 0.0, 0.0, 1.0, 1.0, 1.0)
+    }
+    horde.grid_free(g)
+    free(pos)
+    return vel
+}
+
+// The doubles of two blocks that differ in their bits.
+differing(a: ptr, b: ptr, count: int) -> int {
+    wa = a as long[]
+    wb = b as long[]
+    n = 0
+    i = 0
+    while i < count {
+        if wa[i] != wb[i] { n = n + 1 }
+        i = i + 1
+    }
+    return n
+}
+
+threads_run() {
+    alone = solo_run()
+    half_alone = knot_velocities(false)
+    exact_alone = knot_velocities(true)
+    jobs.start(4)
+    pooled = solo_run()
+    half_pooled = knot_velocities(false)
+    exact_pooled = knot_velocities(true)
+    println("threads: a horde of ${COUNT} stepped 90 ticks alone, then over ${jobs.threads()} threads")
+    words = COUNT * 5
+    moved = differing(alone, pooled, words)
+    println("  the horde: ${moved} of ${words} doubles differ between one thread and four")
+    check("a horde steps to the same bits at any thread count", moved == 0)
+    half = differing(half_alone, half_pooled, 1500 * 3)
+    exact = differing(exact_alone, exact_pooled, 1500 * 3)
+    println("  a knot of 1,500 pushed apart: horde.separate's velocities differ in ${half} of 4,500 doubles, separate_exact's in ${exact}")
+    check("separate_exact pushes to the same bits at any thread count", exact == 0)
+    check("and the half scan of separate alone does not (why the net horde uses separate_exact)", half > 0)
+    free(alone)
+    free(pooled)
+    free(half_alone)
+    free(half_pooled)
+    free(exact_alone)
+    free(exact_pooled)
+}
+
+// --- over the network ---------------------------------------------------------------------------
+
+// One side: its session, its field and its horde.
+struct Side {
+    session: *Net
+    field: *FlowField
+    horde: *NetHorde
+    joined: float
+    started_at: float                // when its horde started (the late one's state arrived)
+    first_check: float               // when a seal's hash first matched its horde
+    frames: int                      // frames it was compared against the host at its tick
+    wrong: int                       // of those, the ones whose hash was not the host's
+    ticks_seen: int                  // the ticks it was compared at, counted once each
+    last_tick: int
+    state_bytes: long                // the late one: the start with the state
+}
+
+side_new(session: *Net, joined: float) -> *Side {
+    s = calloc(1, sizeof(Side)) as *Side
+    s.session = session
+    s.field = field_new()
+    s.horde = nethorde.horde_new(session, s.field)
+    nethorde.set_checks(s.horde, 1)
+    s.joined = joined
+    s.started_at = 0.0 - 1.0
+    s.first_check = 0.0 - 1.0
+    return s
+}
+
+side_free(s: *Side) {
+    if s == null { return }
+    nethorde.horde_free(s.horde)
+    nav.flow_free(s.field)
+    net.net_free(s.session)
+    free(s as ptr)
+}
+
+// The host's hash at every tick it reached, to compare each client with
+// at the tick it is at.
+var g_hashes: ptr = null             // long[ticks]
+var g_known: ptr = null              // int[ticks]
+
+// A client stepped this frame, against the host's hash at its tick.
+compare(s: *Side, now: float) {
+    if s == null { return }
+    h = s.horde
+    if s.started_at < 0.0 && nethorde.started(h) {
+        s.started_at = now
+        s.state_bytes = nethorde.horde_bytes(h)
+    }
+    if s.first_check < 0.0 && nethorde.checks(h) > 0 { s.first_check = now }
+    if !nethorde.started(h) { return }
+    tick = nethorde.horde_tick(h)
+    hashes = g_hashes as long[]
+    known = g_known as int[]
+    if tick < 1 || tick >= STEPS || known[tick] == 0 { return }
+    s.frames = s.frames + 1
+    if nethorde.checksum(h) != hashes[tick] { s.wrong = s.wrong + 1 }
+    if tick != s.last_tick {
+        s.ticks_seen = s.ticks_seen + 1
+        s.last_tick = tick
+    }
+}
+
+// Whether two hordes are the same to the bit: the count, and every column.
+same_bits(a: *NetHorde, b: *NetHorde) -> bool {
+    n = nethorde.horde_count(a)
+    if n != nethorde.horde_count(b) || nethorde.horde_tick(a) != nethorde.horde_tick(b) { return false }
+    return mem.compare(nethorde.positions(a), nethorde.positions(b), (n * 3 * 8) as long) == 0 &&
+           mem.compare(nethorde.yaws(a), nethorde.yaws(b), (n * 8) as long) == 0 &&
+           mem.compare(nethorde.phases(a), nethorde.phases(b), (n * 8) as long) == 0
+}
+
+loopback_run() {
+    g_hashes = calloc(STEPS, 8)
+    g_known = calloc(STEPS, 4)
+    hashes = g_hashes as long[]
+    known = g_known as int[]
+    hub = net.hub_new()
+    net.hub_set_conditions(hub, 0.1, 0.02, 0.02)
+    host = side_new(net.host_loopback(hub), 0.0)
+    one = side_new(net.join_loopback(hub), 0.0)
+    two = side_new(net.join_loopback(hub), 0.0)
+    three = null as *Side
+
+    targets = 0
+    kills = 0
+    host_seconds = 0.0
+    host_ticks = 0
+    late_ticks = 0
+    late_count = 0
+    late_inputs = 0
+    step = 0
+    while step < STEPS + SETTLE {
+        now = (step as float) * STEP
+        if step == LATE {
+            three = side_new(net.join_loopback(hub), now)
+            late_ticks = nethorde.horde_tick(host.horde)
+            late_count = nethorde.horde_count(host.horde)
+            // A target is 16 bytes on the wire (three numbers), a kill 12.
+            late_inputs = targets * 16 + kills * 12
+        }
+        running = step < STEPS
+        if step == BEGIN {
+            nethorde.set_target(host.horde, 50.0, 10.0, now)
+            targets = targets + 1
+            nethorde.start(host.horde, SEED, COUNT, X0, Z0, X1, Z1, now)
+        }
+        // The player the horde hunts crosses the street four times.
+        if running && step > BEGIN && step % 90 == 0 {
+            k = step / 90
+            tx = 50.0
+            tz = 10.0
+            if k % 4 == 1 { tx = 0.0 - 50.0; tz = 0.0 - 15.0 }
+            if k % 4 == 2 { tx = 10.0; tz = 0.0 - 18.0 }
+            if k % 4 == 3 { tx = 0.0 - 20.0; tz = 17.5 }
+            nethorde.set_target(host.horde, tx, tz, now)
+            targets = targets + 1
+        }
+        // Two zombies killed every third of a second, once it runs.
+        if running && step > BEGIN + 30 && step % 20 == 0 {
+            if nethorde.kill(host.horde, (step * 7) % nethorde.horde_count(host.horde), now) { kills = kills + 1 }
+            if nethorde.kill(host.horde, (step * 13) % nethorde.horde_count(host.horde), now) { kills = kills + 1 }
+        }
+        net.step(host.session, now)
+        if running {
+            mark = platform.time()
+            before = nethorde.horde_tick(host.horde)
+            nethorde.step(host.horde, now)
+            host_seconds = host_seconds + (platform.time() - mark)
+            host_ticks = host_ticks + (nethorde.horde_tick(host.horde) - before)
+            tick = nethorde.horde_tick(host.horde)
+            if tick > 0 && tick < STEPS && known[tick] == 0 {
+                hashes[tick] = nethorde.checksum(host.horde)
+                known[tick] = 1
+            }
+        }
+        net.step(one.session, now)
+        net.step(two.session, now)
+        if three != null { net.step(three.session, now) }
+        nethorde.step(one.horde, now)
+        nethorde.step(two.horde, now)
+        if three != null { nethorde.step(three.horde, now) }
+        // Client 1's horde disturbed: a zombie a millimetre off.
+        if step == NUDGE {
+            p = nethorde.positions(one.horde) as float[]
+            p[15] = p[15] + 0.001
+        }
+        compare(one, now)
+        compare(two, now)
+        compare(three, now)
+        step = step + 1
+    }
+
+    seconds = ((STEPS - BEGIN) as float) * STEP
+    last = nethorde.horde_tick(host.horde)
+    alive = nethorde.horde_count(host.horde)
+    println("horde: ${COUNT} zombies on a host and two clients, a third from ${(LATE as float) * STEP} s; 100 ms latency, 20 ms jitter, 2% loss")
+    println("  the host stepped ${last} ticks at 30 a second, ${targets} targets and ${kills} kills; ${alive} zombies left")
+    println("  a tick of ${COUNT} on the host took ${host_seconds / (host_ticks as float) * 1000.0} ms on this machine")
+    println("  client 1: ${one.frames} frames at ${one.ticks_seen} ticks against the host's hash, ${one.wrong} different; its seals checked ${nethorde.checks(one.horde)} ticks, ${nethorde.divergences(one.horde)} diverged, ${nethorde.resyncs(one.horde)} resync")
+    println("  client 2: ${two.frames} frames at ${two.ticks_seen} ticks, ${two.wrong} different; seals checked ${nethorde.checks(two.horde)} ticks, ${nethorde.divergences(two.horde)} diverged")
+    println("  client 3: ${three.frames} frames at ${three.ticks_seen} ticks, ${three.wrong} different; seals checked ${nethorde.checks(three.horde)} ticks, ${nethorde.divergences(three.horde)} diverged")
+    check("client 2 holds the host's horde at every tick it reaches, by hash and by seal",
+          two.ticks_seen > 200 && two.wrong == 0 && nethorde.checks(two.horde) > 200 && nethorde.divergences(two.horde) == 0)
+    // Client 1 is a millimetre off from the nudge until the state it asks
+    // for comes back: the frames in that trip are the only ones that differ.
+    check("client 1, disturbed, finds it at the next tick, asks once, and is put back",
+          nethorde.divergences(one.horde) == 1 && nethorde.resyncs(one.horde) == 1 && one.wrong > 0 && one.wrong < 40 && one.ticks_seen > 200)
+    check("the late client holds the host's horde at every tick from its state on",
+          three.ticks_seen > 80 && three.wrong == 0 && nethorde.checks(three.horde) > 80 && nethorde.divergences(three.horde) == 0)
+    check("every side ends at the host's last tick with its horde, column for column, to the bit",
+          same_bits(host.horde, one.horde) && same_bits(host.horde, two.horde) && same_bits(host.horde, three.horde) && alive == COUNT - kills)
+
+    joined = (LATE as float) * STEP
+    state_ms = (three.started_at - joined) * 1000.0
+    check_ms = (three.first_check - joined) * 1000.0
+    println("  the late client: the state (${three.state_bytes} bytes, ${late_count} zombies at tick ${late_ticks}) ${state_ms} ms after it joined, its first tick checked ${check_ms} ms after")
+    // The hello's trip, the welcome's and the state's with it: two one-way
+    // trips and their jitter, and the step each waits for.
+    check("the late client has the host's horde within two trips (275 ms), its first seal checked within the view's lag after (500 ms)",
+          three.started_at > 0.0 && state_ms <= 275.0 && three.first_check > 0.0 && check_ms <= 500.0)
+    replay_ms = (late_ticks as float) * host_seconds / (host_ticks as float) * 1000.0
+    println("  replaying the inputs instead: ${late_inputs} bytes, and ${late_ticks} ticks of simulation, ${replay_ms} ms on this machine now and growing with the game; the state stays ${late_count * 32} bytes and 199 of rules")
+
+    // What a client costs: everything it received (the session's own empty
+    // snapshots among it), the horde's share, and what a snapshot of every
+    // zombie would: 31 bytes each, 21 of header, 30 a second.
+    received = (net.bytes_received(two.session) as float) / (((STEPS + SETTLE) as float) * STEP)
+    horde_rate = (nethorde.horde_bytes(two.horde) as float) / seconds
+    snapshots = ((alive * 31 + 21) as float) * 30.0
+    println("  client 2 received ${received / 1024.0} KB a second, the horde's ${horde_rate} bytes a second of it; snapshots of every zombie would be ${snapshots / 1024.0} KB a second")
+    check("a client's horde costs under 1 KB a second, where snapshots of it would be 2.6 MB", horde_rate < 1024.0 && snapshots > 2.5 * 1024.0 * 1024.0)
+    println("  the host sent ${(net.bytes_sent(host.session) as float) / (((STEPS + SETTLE) as float) * STEP) / 1024.0} KB a second to three clients, the late one's state among it")
+
+    side_free(one)
+    side_free(two)
+    side_free(three)
+    side_free(host)
+    net.hub_free(hub)
+    free(g_hashes)
+    free(g_known)
+}
+
+// The same over TCP on this machine, on the real clock: the host starts
+// the horde, a client joins at once and another half a second later (the
+// state, 95 KB, framed on the stream), the target moves, and once the host
+// stops every side is at its last tick with the same horde.
+tcp_run() {
+    host_session = net.host_tcp("127.0.0.1", 0)
+    if host_session == null {
+        println("  tcp: SKIP ${net.last_error()}")
+        return
+    }
+    first_session = net.join_tcp("127.0.0.1", net.tcp_port(host_session))
+    if first_session == null {
+        println("  tcp: SKIP ${net.last_error()}")
+        net.net_free(host_session)
+        return
+    }
+    host = side_new(host_session, 0.0)
+    one = side_new(first_session, 0.0)
+    two = null as *Side
+    started = false
+    moved = false
+    begin = platform.time()
+    stop = 1.6
+    while platform.time() - begin < stop + 0.6 {
+        now = platform.time() - begin
+        if !started && now >= 0.2 && net.peer_count(host.session) == 1 {
+            nethorde.set_target(host.horde, 50.0, 10.0, now)
+            started = nethorde.start(host.horde, SEED, COUNT, X0, Z0, X1, Z1, now)
+        }
+        if two == null && now >= 0.7 {
+            second_session = net.join_tcp("127.0.0.1", net.tcp_port(host.session))
+            if second_session == null { break }
+            two = side_new(second_session, now)
+        }
+        if !moved && now >= 1.0 {
+            nethorde.set_target(host.horde, 0.0 - 50.0, 0.0 - 15.0, now)
+            moved = true
+        }
+        net.step(host.session, now)
+        if now < stop { nethorde.step(host.horde, now) }
+        net.step(one.session, now)
+        nethorde.step(one.horde, now)
+        if two != null {
+            net.step(two.session, now)
+            nethorde.step(two.horde, now)
+        }
+        sleep(2)
+    }
+    last = nethorde.horde_tick(host.horde)
+    println("  tcp: the host stepped ${last} ticks; client 1 at ${nethorde.horde_tick(one.horde)} (${nethorde.checks(one.horde)} checked, ${nethorde.divergences(one.horde)} diverged), client 2 from its state at ${nethorde.horde_tick(two.horde)} (${nethorde.checks(two.horde)} checked, ${nethorde.divergences(two.horde)} diverged, ${nethorde.horde_bytes(two.horde)} bytes)")
+    check("tcp: both clients, the late one from its state on the stream, hold the host's horde to the bit",
+          started && two != null && nethorde.started(two.horde) && last > 30 &&
+          same_bits(host.horde, one.horde) && same_bits(host.horde, two.horde) &&
+          nethorde.divergences(one.horde) == 0 && nethorde.divergences(two.horde) == 0)
+    side_free(one)
+    side_free(two)
+    side_free(host)
+}
+
+main() {
+    threads_run()
+    loopback_run()
+    tcp_run()
+    jobs.stop()
+    if g_failures == 0 {
+        println("horde: all checks passed (${g_checks})")
+    } else {
+        println("horde: ${g_failures} failure(s) of ${g_checks}")
+    }
+}

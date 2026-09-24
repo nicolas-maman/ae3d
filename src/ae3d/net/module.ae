@@ -17,7 +17,8 @@
 //     not (a snapshot: the next one supersedes it, so waiting for a lost one
 //     would only make it later);
 //   - the protocol: a hello, a welcome with the client's id, snapshots,
-//     and events (a game's own messages, reliable, either way);
+//     and events (a game's own messages, reliable, either way, four
+//     numbers or a block of bytes);
 //   - replication: net ids by the order objects are marked networked, the
 //     same on both sides for a scene both build, then by the order the host
 //     creates objects mid-game (a rocket, a car), told to each client as it
@@ -44,10 +45,10 @@ exports (
     ROLE_HOST, ROLE_CLIENT,
     hub_new, hub_free, hub_set_conditions,
     host_loopback, join_loopback, host_tcp, join_tcp, tcp_port,
-    networked, networked_count, step, attach, connected, client_id, peer_count, view_time,
+    networked, networked_count, step, attach, connected, hosting, client_id, peer_count, view_time,
     set_tick_rate, set_interpolation_delay, set_relevance, objects_sent, bytes_sent, bytes_received, snapshots_received,
     NetPlayer, set_player_maker, host_play, player_input, my_player, player_of, player_count, prediction_error, input_sent,
-    NetCall, HOST, EVERYONE, on_event, send_event,
+    NetCall, HOST, EVERYONE, on_event, send_event, send_event_bytes, on_join,
     object_kind, create_object, destroy_object, object_of, id_of,
     net_free, last_error
 )
@@ -66,7 +67,7 @@ const ROLE_CLIENT = 2
 const HOST = 0                       // an event's recipient: the host, the only one a client sends to
 const EVERYONE = 0 - 1               // an event's recipients: every client the host has welcomed
 
-const PROTOCOL = 3                   // 2: snapshots are deltas against an acknowledged one; 3: events, objects created mid-game
+const PROTOCOL = 4                   // 2: snapshots are deltas against an acknowledged one; 3: events, objects created mid-game; 4: events carrying bytes
 const MSG_HELLO = 1                  // client -> host: [u8][u32 protocol]
 const MSG_WELCOME = 2                // host -> client: [u8][u32 client id][u32 tick rate]
 // host -> client, unreliable: [u8][u32 tick][f32 time][u32 ack][u32 baseline][u16 objects][u16 changed],
@@ -83,6 +84,7 @@ const MSG_CREATE = 8
 // host -> client, reliable: [u8][u32 net id][f32 host time][f32 x y z][f32 qx qy qz qw], a created
 // object gone, and where it was last.
 const MSG_DESTROY = 9
+const MSG_EVENT_BYTES = 10           // either way, reliable: [u8][u16 event][u32 length], then length bytes
 
 const KIND_LOOP = 1
 const KIND_TCP = 2
@@ -357,7 +359,10 @@ struct NetObject {
 
 // What an event brings its handler: which event it is, who sent it (a
 // client's id on the host; HOST, 0, on a client), and the numbers it
-// carries, 0 where the sender gave fewer.
+// carries, 0 where the sender gave fewer. An event sent with bytes
+// (send_event_bytes) carries them instead: `data` and `length`, the
+// session's until the handler returns; null and 0 for one with numbers.
+// `now` is this side's time in the step it arrived, what a reply sends at.
 struct NetCall {
     event: int
     sender: int
@@ -365,6 +370,15 @@ struct NetCall {
     b: float
     c: float
     d: float
+    data: ptr
+    length: int
+    now: float
+}
+
+// Called on the host with every client it welcomes.
+struct NetJoinHook {
+    hook: fn(ptr, int, float)
+    context: ptr
 }
 
 // An event a game has registered: its name, and what is called with every
@@ -426,6 +440,7 @@ struct Net {
     objects_sent: long               // host: object states written, all clients
     handlers: ptr                    // list of *NetHandler, by event id - 1
     kinds: ptr                       // list of *NetKind, by kind id - 1
+    joins: ptr                       // host: list of *NetJoinHook
 }
 
 net_new(role: int, kind: int) -> *Net {
@@ -445,6 +460,7 @@ net_new(role: int, kind: int) -> *Net {
     n.received = list.new()
     n.handlers = list.new()
     n.kinds = list.new()
+    n.joins = list.new()
     return n
 }
 
@@ -1257,6 +1273,7 @@ handle(n: *Net, ev: *NetEvent, now: float) {
         deliver(n, p, true, b.data, b.length, now)
         host_player(n, p, now)
         tell_objects(n, p, now)
+        joined(n, p.id, now)
         return
     }
     if kind == MSG_EVENT {
@@ -1266,7 +1283,15 @@ handle(n: *Net, ev: *NetEvent, now: float) {
             p = peer_by_id(n, ev.peer)
             if p == null || !p.welcomed { return }
         }
-        take_event(n, ev.peer, &r)
+        take_event(n, ev.peer, &r, now)
+        return
+    }
+    if kind == MSG_EVENT_BYTES {
+        if n.role == ROLE_HOST {
+            p = peer_by_id(n, ev.peer)
+            if p == null || !p.welcomed { return }
+        }
+        take_event_bytes(n, ev.peer, &r, now)
         return
     }
     if n.role == ROLE_CLIENT && kind == MSG_CREATE {
@@ -1312,6 +1337,9 @@ connected(n: *Net) -> bool {
 }
 
 client_id(n: *Net) -> int { return n.my_id }
+
+// Whether this side is the host.
+hosting(n: *Net) -> bool { return n.role == ROLE_HOST }
 
 // The clients a host has welcomed and still hears.
 peer_count(n: *Net) -> int {
@@ -1671,8 +1699,79 @@ send_event(n: *Net, name: string, to: int, now: float, a: float = 0.0, b: float 
     return sent
 }
 
+// An event with a block of bytes instead of four numbers: a state too big
+// for numbers, sent once (a horde's, to a client that joins late). The
+// same event ids, the same rules for who sends to whom; the handler reads
+// `call.data` and `call.length`, which are the session's until it
+// returns. 7 bytes and the block.
+send_event_bytes(n: *Net, name: string, to: int, now: float, data: ptr, length: int) -> bool {
+    event = event_named(n, name)
+    if event == 0 {
+        g_error = "no event named ${name}"
+        return false
+    }
+    if length < 0 || (length > 0 && data == null) { return false }
+    out = n.out
+    out.length = 0
+    put_u8(out, MSG_EVENT_BYTES)
+    put_u16(out, event)
+    put_u32(out, length)
+    if length > 0 {
+        buf_reserve(out, length)
+        memcpy(out.data + out.length, data, length as long)
+        out.length = out.length + length
+    }
+    if n.role == ROLE_CLIENT {
+        if n.my_id == 0 { return false }
+        deliver(n, peer_by_id(n, 0), true, out.data, out.length, now)
+        return true
+    }
+    sent = false
+    i = 0
+    while i < list.size(n.peers) {
+        p = list.get_raw(n.peers, i) as *Peer
+        if p.welcomed && p.open && (to == EVERYONE || to == p.id) {
+            deliver(n, p, true, out.data, out.length, now)
+            sent = true
+        }
+        i = i + 1
+    }
+    return sent
+}
+
+take_event_bytes(n: *Net, sender: int, r: *NetReader, now: float) {
+    event = get_u16(r)
+    length = get_u32(r)
+    if !r.ok || length < 0 || r.at + length > r.length || event < 1 || event > list.size(n.handlers) { return }
+    h = list.get_raw(n.handlers, event - 1) as *NetHandler
+    call = NetCall { event: event, sender: sender, a: 0.0, b: 0.0, c: 0.0, d: 0.0, data: r.data + r.at, length: length, now: now }
+    handler = h.handler
+    handler(h.context, &call)
+}
+
+// On the host, `hook(context, client, now)` is called with every client
+// it welcomes, after the welcome, its player and the objects alive are on
+// their way, so what the game sends it from the hook arrives after them:
+// what a client that joins late needs of the game's own state.
+on_join(n: *Net, hook: fn(ptr, int, float), context: ptr) {
+    j = heap.new(NetJoinHook)
+    j.hook = hook
+    j.context = context
+    list.add_raw(n.joins, j as ptr)
+}
+
+joined(n: *Net, client: int, now: float) {
+    i = 0
+    while i < list.size(n.joins) {
+        j = list.get_raw(n.joins, i) as *NetJoinHook
+        hook = j.hook
+        hook(j.context, client, now)
+        i = i + 1
+    }
+}
+
 // An event that arrived, to its handler.
-take_event(n: *Net, sender: int, r: *NetReader) {
+take_event(n: *Net, sender: int, r: *NetReader, now: float) {
     event = get_u16(r)
     count = get_u8(r)
     if count > EVENT_VALUES { return }
@@ -1686,7 +1785,7 @@ take_event(n: *Net, sender: int, r: *NetReader) {
     if count > 3 { d = get_f32(r) }
     if !r.ok || event < 1 || event > list.size(n.handlers) { return }
     h = list.get_raw(n.handlers, event - 1) as *NetHandler
-    call = NetCall { event: event, sender: sender, a: a, b: b, c: c, d: d }
+    call = NetCall { event: event, sender: sender, a: a, b: b, c: c, d: d, data: null, length: 0, now: now }
     handler = h.handler
     handler(h.context, &call)
 }
@@ -1980,6 +2079,12 @@ net_free(n: *Net) {
         i = i + 1
     }
     list.free(n.kinds)
+    i = 0
+    while i < list.size(n.joins) {
+        heap.free(list.get_raw(n.joins, i) as *NetJoinHook)
+        i = i + 1
+    }
+    list.free(n.joins)
     i = 0
     while i < list.size(n.players) {
         free(list.get_raw(n.players, i))

@@ -2,6 +2,42 @@
 
 ## [current]
 
+### Multiplayer: the horde simulated on every peer
+
+- The horde isn't replicated a zombie at a time (#413). `ae3d.nethorde`
+  sends the start (the seed, the count, the ground, the rules and the tick
+  rate, 199 bytes), every change to the horde's inputs stamped with the
+  tick it takes effect at (the target the flow field floods from, 16
+  bytes; a zombie killed, 12), and a seal a tick (8 bytes); every peer,
+  the host among them, steps the same horde at 30 ticks a second and holds
+  it to the bit. A client steps to its view time and never past the newest
+  seal, which vouches that every input for that tick has arrived. Every
+  `set_checks` ticks the seal carries a 48-bit hash of the host's horde; a
+  client whose own differs asks for the state and takes it. A client that
+  joins late is sent the state once, 32 bytes a zombie, instead of
+  replaying every tick since the game began.
+- Determinism: `horde.separate_exact` pushes a crowd apart to the same bits
+  at any thread count; `separate`'s half scan with no pool adds the same
+  pushes in another order than the pool's gather and differs in the last
+  bits (1,773 of 4,500 velocity components of a knot). The flow field's
+  steer takes its eight headings from constants, not libm's `atan2`, which
+  isn't the same function on every platform. Windows and Linux on x86-64
+  can't fuse multiply-adds (no `-march`); Apple silicon's Clang does by
+  default, so a Mac against a PC wants `-ffp-contract=off`, not yet checked.
+- `ae3d.net`: an event can carry a block of bytes (`send_event_bytes`,
+  `call.data`, `call.length`), a handler gets its step's time
+  (`call.now`), `net.on_join` calls a hook on the host with every client
+  it welcomes, and `net.hosting` says which side this is. Protocol 4.
+- `tests/test_net_horde.ae`, 3,000 zombies on a host and two clients and a
+  third joining 4.5 s in, over 100 ms / 20 ms jitter / 2% loss: every
+  client's horde is the host's at every tick it reaches (224 ticks and 495
+  frames on client 2, none different), the columns the same to the bit at
+  the end; a zombie nudged a millimetre is found at the next tick and put
+  back 250 ms later; the late client has the state (95,559 bytes) 233 ms
+  after joining. A client's horde costs 579 bytes a second, where
+  snapshots of every zombie would be 2.6 MB. Over TCP, the late state
+  framed on the stream, the same.
+
 ### Multiplayer: events and objects created mid-game
 
 - Events (#413): a game registers a named event with a handler on both

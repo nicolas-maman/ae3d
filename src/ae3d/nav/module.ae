@@ -43,9 +43,14 @@ extern free(p: ptr)
 extern memset(block: ptr, value: int, size: int) -> ptr
 extern floor(x: float) -> float
 extern sqrt(x: float) -> float
-extern atan2(y: float, x: float) -> float
 
 const PI = 3.14159265358979323846
+// The headings of the eight ways a cell can point, rounded once: the
+// correctly rounded pi/4, pi/2, 3 pi/4 and pi.
+const QUARTER_PI = 0.7853981633974483
+const HALF_PI = 1.5707963267948966
+const THREE_QUARTER_PI = 2.356194490192345
+const HEADING_PI = 3.141592653589793
 
 struct FlowField {
     w: int
@@ -327,6 +332,30 @@ flow_has_direction(f: *FlowField, x: float, z: float) -> bool {
     return d.x != 0.0 || d.z != 0.0
 }
 
+// The heading of a cell's direction. The yaw convention is velocity
+// (cos a, 0, -sin a), so a = atan2(-dz, dx); a cell points one of eight
+// ways, so the angle is one of eight constants, looked up rather than
+// asked of libm. libm's atan2 is not the same function on every platform,
+// and a horde stepped on every peer (ae3d.nethorde) must turn by the same
+// bits on each. Straight west is +pi, not -pi, which is the way atan2
+// reads it (+0 over -1) and the short way round for the turn.
+heading_of(dx: float, dz: float) -> float {
+    if dz == 0.0 {
+        if dx > 0.0 { return 0.0 }
+        return HEADING_PI
+    }
+    if dx == 0.0 {
+        if dz > 0.0 { return 0.0 - HALF_PI }
+        return HALF_PI
+    }
+    if dx > 0.0 {
+        if dz > 0.0 { return 0.0 - QUARTER_PI }
+        return QUARTER_PI
+    }
+    if dz > 0.0 { return 0.0 - THREE_QUARTER_PI }
+    return THREE_QUARTER_PI
+}
+
 // Every heading turned toward the field under it by at most `turn`
 // radians: `pos` and `yaw` are the crowd's packed columns (xyz a zombie,
 // one yaw a zombie), as crowd.crowd_wander reads them. A zombie on a
@@ -353,10 +382,7 @@ steer_run(start: int, end: int, worker: int, context: ptr) {
             dx = dir[at * 2]
             dz = dir[at * 2 + 1]
             if dx != 0.0 || dz != 0.0 {
-                // The yaw convention: velocity (cos a, 0, -sin a), so a = atan2(-dz, dx).
-                // The + 0.0 turns a negated zero back into a positive one: atan2(-0, -1)
-                // is -pi, the same heading as +pi but the long way round for the turn.
-                want = atan2(0.0 - dz + 0.0, dx)
+                want = heading_of(dx, dz)
                 have = yaw[i]
                 diff = want - have
                 while diff > PI { diff = diff - 2.0 * PI }
