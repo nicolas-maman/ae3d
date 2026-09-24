@@ -178,12 +178,16 @@ fi
 # examples/lib/, and aephysics.* in its submodule.
 export AETHER_LIB_DIR="$ROOT/src:$ROOT/examples/lib:$AEPHYSICS"
 "$AETHERC" "$SOURCE" "$GEN"
+# C files a module compiles into the program with @source (contrib.vulkan's
+# loader, which contrib.vulkan.vk calls through): aetherc names them at the
+# top of what it generates, as `ae build` reads them.
+AETHER_SOURCES="$(sed -n 's|^// aether-source: ||p' "$GEN" | tr '\\' '/')"
 # zlib is the engine's, and the engine is a library of its own that names it
 # on its own link line. Naming it again here is not harmless: where the Aether
 # toolchain is built against zlib its --libs already carries -lz, Apple's ld
 # warns about a duplicate library, and ci.sh reads a warning in a build log as
 # a failure. GLFW is named: the program's own Aether calls it (ae3d.platform).
-"$CC" $CFLAGS "$GEN" $(ae3d_native_link_flags) $GLFW_LIBS $AETHER_COMPILE_FLAGS $AETHER_LIBS $PLATFORM_LIBS -o "$OUT"
+"$CC" $CFLAGS "$GEN" $AETHER_SOURCES $(ae3d_native_link_flags) $GLFW_LIBS $AETHER_COMPILE_FLAGS $AETHER_LIBS $PLATFORM_LIBS -o "$OUT"
 
 # MinGW gcc appends .exe to an output name that has no extension, so the file
 # is not at the path this asked for. Name the one that exists.
