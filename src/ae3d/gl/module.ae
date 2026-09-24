@@ -119,7 +119,7 @@ struct PassTimer {
     open: bool
 }
 
-ae3d_gl_passtimer_create() -> ptr {
+gl_passtimer_create() -> ptr {
     names = ["glGenQueries", "glDeleteQueries", "glBeginQuery", "glEndQuery", "glGetQueryObjectuiv", "glGetQueryObjectui64v"]
     i = 0
     while i < 6 {
@@ -139,7 +139,7 @@ ae3d_gl_passtimer_create() -> ptr {
     return t as ptr
 }
 
-ae3d_gl_passtimer_destroy(timer: ptr) {
+gl_passtimer_destroy(timer: ptr) {
     if timer == null { return }
     t = timer as *PassTimer
     // Only when a context is current to delete them in. When the window is
@@ -164,7 +164,7 @@ ae3d_gl_passtimer_destroy(timer: ptr) {
 // Moves to the slot this frame will write, collecting what that slot
 // measured the last time round. A pass that was not drawn reports nothing
 // rather than the last figure it happened to have.
-ae3d_gl_passtimer_frame(timer: ptr) {
+gl_passtimer_frame(timer: ptr) {
     if timer == null { return }
     t = timer as *PassTimer
     t.slot = (t.slot + 1) % TIMER_DEPTH
@@ -198,7 +198,7 @@ ae3d_gl_passtimer_frame(timer: ptr) {
     free(elapsed)
 }
 
-ae3d_gl_passtimer_begin(timer: ptr, pass: int) {
+gl_passtimer_begin(timer: ptr, pass: int) {
     if timer == null || pass < 0 || pass >= TIMER_PASSES { return }
     t = timer as *PassTimer
     if t.open { return }
@@ -210,7 +210,7 @@ ae3d_gl_passtimer_begin(timer: ptr, pass: int) {
     t.open = true
 }
 
-ae3d_gl_passtimer_end(timer: ptr) {
+gl_passtimer_end(timer: ptr) {
     if timer == null { return }
     t = timer as *PassTimer
     if !t.open { return }
@@ -218,16 +218,16 @@ ae3d_gl_passtimer_end(timer: ptr) {
     t.open = false
 }
 
-ae3d_gl_passtimer_ms(timer: ptr, pass: int) -> float {
+gl_passtimer_ms(timer: ptr, pass: int) -> float {
     if timer == null || pass < 0 || pass >= TIMER_PASSES { return 0.0 }
     return ((timer as *PassTimer).ms as float[])[pass]
 }
 
-ae3d_gl_fbo_create() -> int { return gl_name(NAME_FRAMEBUFFER) }
+gl_fbo_create() -> int { return gl_name(NAME_FRAMEBUFFER) }
 
-ae3d_gl_fbo_bind(fbo: int) { glapi.glBindFramebuffer(glapi.FRAMEBUFFER as uint32, fbo as uint32) }
+gl_fbo_bind(fbo: int) { glapi.glBindFramebuffer(glapi.FRAMEBUFFER as uint32, fbo as uint32) }
 
-ae3d_gl_fbo_delete(fbo: int) { gl_drop(NAME_FRAMEBUFFER, fbo) }
+gl_fbo_delete(fbo: int) { gl_drop(NAME_FRAMEBUFFER, fbo) }
 
 // A texture of `width` x `height` (at least one each way), empty, sampled
 // with `filter` and clamped: what a framebuffer draws into.
@@ -269,7 +269,7 @@ attach_renderbuffer(fbo: int, attachment: int, width: int, height: int, samples:
     return rbo
 }
 
-ae3d_gl_fbo_attach_color(fbo: int, width: int, height: int, hdr: int) -> int {
+gl_fbo_attach_color(fbo: int, width: int, height: int, hdr: int) -> int {
     internal = glapi.RGBA8
     kind = glapi.UNSIGNED_BYTE
     if hdr != 0 {
@@ -285,20 +285,20 @@ ae3d_gl_fbo_attach_color(fbo: int, width: int, height: int, hdr: int) -> int {
 // the framebuffer's second colour attachment, point sampled (a vector is not
 // blended between pixels), and its multisampled renderbuffer twin for the
 // frame that is drawn multisampled and resolved.
-ae3d_gl_fbo_attach_velocity(fbo: int, width: int, height: int) -> int {
+gl_fbo_attach_velocity(fbo: int, width: int, height: int) -> int {
     texture = target_texture(width, height, glapi.RG16F, glapi.RG, glapi.FLOAT, glapi.NEAREST)
     attach_texture(fbo, glapi.COLOR_ATTACHMENT1, texture, 0)
     return texture
 }
 
-ae3d_gl_fbo_attach_velocity_multisample(fbo: int, width: int, height: int, samples: int) -> int {
+gl_fbo_attach_velocity_multisample(fbo: int, width: int, height: int, samples: int) -> int {
     return attach_renderbuffer(fbo, glapi.COLOR_ATTACHMENT1, width, height, samples, glapi.RG16F)
 }
 
 // How many of the bound framebuffer's colour attachments the draws write,
 // from the first: two while the scene is drawn with its motion vectors, one
 // for the passes after, whose shaders have no second output.
-ae3d_gl_draw_buffers(count: int) {
+gl_draw_buffers(count: int) {
     n = count
     if n < 1 { n = 1 }
     if n > 2 { n = 2 }
@@ -311,7 +311,7 @@ ae3d_gl_draw_buffers(count: int) {
 
 // One colour attachment of the bound framebuffer cleared to a value of its
 // own: the motion vectors to zero, whatever the scene's clear colour.
-ae3d_gl_clear_attachment(index: int, r: float, g: float, b: float, a: float) {
+gl_clear_attachment(index: int, r: float, g: float, b: float, a: float) {
     value = calloc(4, 4)
     v = value as f32[]
     v[0] = r as f32
@@ -330,7 +330,7 @@ drain_errors() {
 
 // The multisample resolve of one colour attachment other than the first:
 // read and draw buffers set to it for the blit and put back after.
-ae3d_gl_fbo_resolve_attachment(source: int, destination: int, width: int, height: int, index: int) -> int {
+gl_fbo_resolve_attachment(source: int, destination: int, width: int, height: int, index: int) -> int {
     attachment = glapi.COLOR_ATTACHMENT0 + index
     drain_errors()
     glapi.glBindFramebuffer(glapi.READ_FRAMEBUFFER as uint32, source as uint32)
@@ -348,7 +348,7 @@ ae3d_gl_fbo_resolve_attachment(source: int, destination: int, width: int, height
 // A colour texture already made attached as the framebuffer's colour: the
 // temporal pass writes its two history textures in turn through the one
 // framebuffer.
-ae3d_gl_fbo_set_color(fbo: int, texture: int) {
+gl_fbo_set_color(fbo: int, texture: int) {
     attach_texture(fbo, glapi.COLOR_ATTACHMENT0, texture, 0)
 }
 
@@ -364,7 +364,7 @@ ae3d_gl_fbo_set_color(fbo: int, texture: int) {
 // surface shadows itself. Left in the default NONE compare mode: the lit
 // pass does its own comparison with a slope-scaled bias over a 3x3
 // neighbourhood, so it wants the stored depth rather than a pass/fail.
-ae3d_gl_fbo_attach_shadow_map(fbo: int, size: int) -> int {
+gl_fbo_attach_shadow_map(fbo: int, size: int) -> int {
     glapi.glActiveTexture(glapi.TEXTURE0 as uint32)
     texture = target_texture(size, size, glapi.DEPTH_COMPONENT32F, glapi.DEPTH_COMPONENT, glapi.FLOAT, glapi.NEAREST)
     texture_param(glapi.TEXTURE_2D, glapi.TEXTURE_COMPARE_MODE, glapi.NONE)
@@ -380,32 +380,32 @@ ae3d_gl_fbo_attach_shadow_map(fbo: int, size: int) -> int {
 // The scene pass renders into multisampled attachments and resolves down
 // into the single-sample texture the composite samples: up to four samples,
 // or 0 where the context has fewer than two.
-ae3d_gl_max_samples() -> int {
+gl_max_samples() -> int {
     most = gl_integer(glapi.MAX_SAMPLES, 0, 1)
     if most > 4 { most = 4 }
     if most > 1 { return most }
     return 0
 }
 
-ae3d_gl_fbo_attach_color_multisample(fbo: int, width: int, height: int, samples: int) -> int {
+gl_fbo_attach_color_multisample(fbo: int, width: int, height: int, samples: int) -> int {
     return attach_renderbuffer(fbo, glapi.COLOR_ATTACHMENT0, width, height, samples, glapi.RGBA8)
 }
 
-ae3d_gl_fbo_attach_depth_multisample(fbo: int, width: int, height: int, samples: int) -> int {
+gl_fbo_attach_depth_multisample(fbo: int, width: int, height: int, samples: int) -> int {
     return attach_renderbuffer(fbo, glapi.DEPTH_STENCIL_ATTACHMENT, width, height, samples, glapi.DEPTH24_STENCIL8)
 }
 
-ae3d_gl_fbo_attach_depth(fbo: int, width: int, height: int) -> int {
+gl_fbo_attach_depth(fbo: int, width: int, height: int) -> int {
     return attach_renderbuffer(fbo, glapi.DEPTH_STENCIL_ATTACHMENT, width, height, 0, glapi.DEPTH24_STENCIL8)
 }
 
-ae3d_gl_renderbuffer_delete(rbo: int) { gl_drop(NAME_RENDERBUFFER, rbo) }
+gl_renderbuffer_delete(rbo: int) { gl_drop(NAME_RENDERBUFFER, rbo) }
 
 // What the driver made of the blit, rather than leaving a rejected one to
 // show up as a black frame. A multisample resolve has more ways to be
 // refused than most calls: the two framebuffers have to agree about format
 // and size, and drivers differ in how much they will forgive.
-ae3d_gl_fbo_resolve(source: int, destination: int, width: int, height: int) -> int {
+gl_fbo_resolve(source: int, destination: int, width: int, height: int) -> int {
     drain_errors()
     glapi.glBindFramebuffer(glapi.READ_FRAMEBUFFER as uint32, source as uint32)
     glapi.glBindFramebuffer(glapi.DRAW_FRAMEBUFFER as uint32, destination as uint32)
@@ -420,7 +420,7 @@ ae3d_gl_fbo_resolve(source: int, destination: int, width: int, height: int) -> i
     return status
 }
 
-ae3d_gl_fbo_complete() -> int {
+gl_fbo_complete() -> int {
     if (glapi.glCheckFramebufferStatus(glapi.FRAMEBUFFER as uint32)) as int == glapi.FRAMEBUFFER_COMPLETE { return 1 }
     return 0
 }
@@ -436,7 +436,7 @@ var g_depth_texture = 0
 var g_depth_width = 0
 var g_depth_height = 0
 
-ae3d_gl_scene_depth_capture() -> int {
+gl_scene_depth_capture() -> int {
     x = gl_integer(glapi.VIEWPORT, 0, 4)
     y = gl_integer(glapi.VIEWPORT, 1, 4)
     width = gl_integer(glapi.VIEWPORT, 2, 4)
@@ -472,7 +472,7 @@ ae3d_gl_scene_depth_capture() -> int {
 
 // Packed 0xRRGGBB of one framebuffer pixel, for tests that must prove the
 // scene was drawn rather than merely cleared.
-ae3d_gl_read_pixel(x: int, y: int) -> int {
+gl_read_pixel(x: int, y: int) -> int {
     rgba = calloc(4, 1)
     glapi.glReadPixels(x, y, 1, 1, glapi.RGBA as uint32, glapi.UNSIGNED_BYTE as uint32, rgba)
     packed = (mem.get_uint8(rgba, 0) << 16) | (mem.get_uint8(rgba, 1) << 8) | mem.get_uint8(rgba, 2)
@@ -485,7 +485,7 @@ ae3d_gl_read_pixel(x: int, y: int) -> int {
 // program between its last draw and its buffer swap is the finished frame.
 // GL hands back rows bottom-up and every image format wants them the other
 // way, so the copy out walks them backwards.
-ae3d_gl_read_frame(width: int, height: int) -> ptr {
+gl_read_frame(width: int, height: int) -> ptr {
     if width <= 0 || height <= 0 { return null }
     row = width * 4
     pixels = calloc(row * height, 1)
@@ -537,7 +537,7 @@ struct GLMeter {
 
 var g_meter: ptr = null
 
-gl_meter() -> *GLMeter {
+the_meter() -> *GLMeter {
     if g_meter == null {
         m = calloc(1, sizeof(GLMeter)) as *GLMeter
         m.packs = calloc(METER_PACKS, 4)
@@ -613,9 +613,9 @@ meter_make(m: *GLMeter, width: int, height: int) {
     m.level_height = h
 }
 
-ae3d_gl_meter(source: int, width: int, height: int, out: ptr) -> int {
+gl_meter(source: int, width: int, height: int, out: ptr) -> int {
     if width < 1 || height < 1 || out == null { return 0 }
-    m = gl_meter()
+    m = the_meter()
     if width != m.width || height != m.height || m.texture == 0 { meter_make(m, width, height) }
     previous_read = gl_integer(READ_FRAMEBUFFER_BINDING, 0, 1)
     previous_draw = gl_integer(glapi.DRAW_FRAMEBUFFER_BINDING, 0, 1)
@@ -673,7 +673,7 @@ ae3d_gl_meter(source: int, width: int, height: int, out: ptr) -> int {
 var g_program_log = ""
 
 // Why the last program did not build: the stage and GL's own log.
-ae3d_gl_program_log() -> string { return g_program_log }
+gl_program_log() -> string { return g_program_log }
 
 // `count` of GL's info log, from `fetch` (the shader's or the program's).
 info_log(object: int, length: int, shader: bool) -> string {
@@ -719,7 +719,7 @@ compile_stage(kind: int, source: string, label: string) -> int {
     return shader
 }
 
-ae3d_gl_program_create(vertex_src: string, fragment_src: string) -> int {
+gl_program_create(vertex_src: string, fragment_src: string) -> int {
     g_program_log = ""
     if vertex_src == null || fragment_src == null {
         g_program_log = "missing shader source"
@@ -750,35 +750,35 @@ ae3d_gl_program_create(vertex_src: string, fragment_src: string) -> int {
     return program
 }
 
-ae3d_gl_program_delete(program: int) {
+gl_program_delete(program: int) {
     if program != 0 { glapi.glDeleteProgram(program as uint32) }
 }
 
-ae3d_gl_program_use(program: int) { glapi.glUseProgram(program as uint32) }
+gl_program_use(program: int) { glapi.glUseProgram(program as uint32) }
 
-ae3d_gl_uniform_location(program: int, name: string) -> int {
+gl_uniform_location(program: int, name: string) -> int {
     if program == 0 || name == null { return 0 - 1 }
     return glapi.glGetUniformLocation(program as uint32, name)
 }
 
-ae3d_gl_uniform_int(loc: int, v: int) {
+gl_uniform_int(loc: int, v: int) {
     if loc >= 0 { glapi.glUniform1i(loc, v) }
 }
 
-ae3d_gl_uniform_float(loc: int, v: float) {
+gl_uniform_float(loc: int, v: float) {
     if loc >= 0 { glapi.glUniform1f(loc, v as f32) }
 }
 
-ae3d_gl_uniform_vec2(loc: int, x: float, y: float) {
+gl_uniform_vec2(loc: int, x: float, y: float) {
     if loc >= 0 { glapi.glUniform2f(loc, x as f32, y as f32) }
 }
 
-ae3d_gl_uniform_vec3(loc: int, x: float, y: float, z: float) {
+gl_uniform_vec3(loc: int, x: float, y: float, z: float) {
     if loc >= 0 { glapi.glUniform3f(loc, x as f32, y as f32, z as f32) }
 }
 
 // Sixteen doubles, column-major, as sixteen floats.
-ae3d_gl_uniform_mat4(loc: int, m: ptr) {
+gl_uniform_mat4(loc: int, m: ptr) {
     if loc < 0 || m == null { return }
     values = calloc(16, 4)
     from = m as float[]
@@ -799,13 +799,13 @@ struct GLFloats {
     count: int
 }
 
-ae3d_gl_uniform_float_array(loc: int, arr: ptr) {
+gl_uniform_float_array(loc: int, arr: ptr) {
     if loc < 0 || arr == null { return }
     a = arr as *GLFloats
     glapi.glUniform1fv(loc, a.count, a.values)
 }
 
-ae3d_gl_uniform_vec3_array(loc: int, arr: ptr) {
+gl_uniform_vec3_array(loc: int, arr: ptr) {
     if loc < 0 || arr == null { return }
     a = arr as *GLFloats
     glapi.glUniform3fv(loc, a.count / 3, a.values)
@@ -835,7 +835,7 @@ texture_params(target: int, wrap: int, three: bool, mag: int, min: int) {
     texture_param(target, glapi.TEXTURE_MIN_FILTER, min)
 }
 
-ae3d_gl_texture_from_image(img: ptr, srgb: int, mipmap: int) -> int {
+gl_texture_from_image(img: ptr, srgb: int, mipmap: int) -> int {
     pixels = ae3d_image_pixels(img)
     width = ae3d_image_width(img)
     height = ae3d_image_height(img)
@@ -857,7 +857,7 @@ ae3d_gl_texture_from_image(img: ptr, srgb: int, mipmap: int) -> int {
 
 // A texture from raw RGBA bytes: linear, repeating, no mipmaps. What a
 // baked map -- the clouds' weather -- is uploaded as.
-ae3d_gl_texture_rgba(width: int, height: int, rgba: ptr) -> int {
+gl_texture_rgba(width: int, height: int, rgba: ptr) -> int {
     if rgba == null || width <= 0 || height <= 0 { return 0 }
     texture = new_texture(glapi.TEXTURE_2D)
     glapi.glTexImage2D(glapi.TEXTURE_2D as uint32, 0, glapi.RGBA, width, height, 0, glapi.RGBA as uint32,
@@ -869,7 +869,7 @@ ae3d_gl_texture_rgba(width: int, height: int, rgba: ptr) -> int {
 
 // A 3D texture, `size` cubed RGBA bytes: linear, repeating on every axis,
 // which is what a tileable noise the clouds are shaped by wants.
-ae3d_gl_texture3d_rgba(size: int, rgba: ptr) -> int {
+gl_texture3d_rgba(size: int, rgba: ptr) -> int {
     if rgba == null || size <= 0 { return 0 }
     texture = new_texture(glapi.TEXTURE_3D)
     glapi.glTexImage3D(glapi.TEXTURE_3D as uint32, 0, glapi.RGBA, size, size, size, 0, glapi.RGBA as uint32,
@@ -879,7 +879,7 @@ ae3d_gl_texture3d_rgba(size: int, rgba: ptr) -> int {
     return texture
 }
 
-ae3d_gl_texture3d_bind(unit: int, texture: int) {
+gl_texture3d_bind(unit: int, texture: int) {
     glapi.glActiveTexture((glapi.TEXTURE0 + unit) as uint32)
     glapi.glBindTexture(glapi.TEXTURE_3D as uint32, texture as uint32)
 }
@@ -890,7 +890,7 @@ ae3d_gl_texture3d_bind(unit: int, texture: int) {
 // no repacking. Nearest, clamped: the shader fetches exact texels by (bone
 // column, frame), never filters between them. 32-bit float, since a bone
 // matrix carries translations a 16-bit float would round the crowd apart on.
-ae3d_gl_posebank_texture(data: ptr, frames: int, bones: int) -> int {
+gl_posebank_texture(data: ptr, frames: int, bones: int) -> int {
     if data == null || frames <= 0 || bones <= 0 { return 0 }
     texture = new_texture(glapi.TEXTURE_2D)
     glapi.glTexImage2D(glapi.TEXTURE_2D as uint32, 0, RGBA32F, bones * 4, frames, 0, glapi.RGBA as uint32,
@@ -902,7 +902,7 @@ ae3d_gl_posebank_texture(data: ptr, frames: int, bones: int) -> int {
 
 const RGBA32F = 34836                // GL_RGBA32F, 0x8814
 
-ae3d_gl_texture_delete(texture: int) {
+gl_texture_delete(texture: int) {
     if texture == 0 { return }
     names = calloc(1, 4)
     (names as int[])[0] = texture
@@ -910,7 +910,7 @@ ae3d_gl_texture_delete(texture: int) {
     free(names)
 }
 
-ae3d_gl_texture_bind(unit: int, texture: int) {
+gl_texture_bind(unit: int, texture: int) {
     glapi.glActiveTexture((glapi.TEXTURE0 + unit) as uint32)
     glapi.glBindTexture(glapi.TEXTURE_2D as uint32, texture as uint32)
 }
@@ -986,7 +986,7 @@ geometry_of(vao: int) -> *GLGeometry {
 
 // The VAO the caller should draw with: the cached one when these bytes are
 // already up, else a new entry uploaded and its attributes set up once.
-ae3d_gl_geometry_acquire(mesh: ptr) -> int {
+gl_geometry_acquire(mesh: ptr) -> int {
     vertices = geometry.mesh_vertex_data(mesh)
     indices = geometry.mesh_index_data(mesh)
     vertex_count = geometry.mesh_vertex_count(mesh)
@@ -1013,34 +1013,34 @@ ae3d_gl_geometry_acquire(mesh: ptr) -> int {
     mem.copy(e.indices, indices, index_bytes as long)
     e.vertex_count = vertex_count
     e.index_count = index_count
-    e.vao = ae3d_gl_vao_create()
-    e.vbo = ae3d_gl_buffer_create()
-    e.ebo = ae3d_gl_buffer_create()
-    e.instance_vbo = ae3d_gl_buffer_create()
+    e.vao = gl_vao_create()
+    e.vbo = gl_buffer_create()
+    e.ebo = gl_buffer_create()
+    e.instance_vbo = gl_buffer_create()
     e.refs = 1
     list.add_raw(entries, e as ptr)
     glapi.glBindVertexArray(e.vao as uint32)
-    ae3d_gl_upload_mesh(mesh, e.vbo, e.ebo)
-    ae3d_gl_setup_vertex_attribs()
+    gl_upload_mesh(mesh, e.vbo, e.ebo)
+    gl_setup_vertex_attribs()
     glapi.glBindVertexArray(0)
     return e.vao
 }
 
-ae3d_gl_geometry_instance_vbo(vao: int) -> int {
+gl_geometry_instance_vbo(vao: int) -> int {
     e = geometry_of(vao)
     if e == null { return 0 }
     return e.instance_vbo
 }
 
-ae3d_gl_geometry_release(vao: int) {
+gl_geometry_release(vao: int) {
     e = geometry_of(vao)
     if e == null { return }
     e.refs = e.refs - 1
     if e.refs > 0 { return }
-    ae3d_gl_vao_delete(e.vao)
-    ae3d_gl_buffer_delete(e.vbo)
-    ae3d_gl_buffer_delete(e.ebo)
-    ae3d_gl_buffer_delete(e.instance_vbo)
+    gl_vao_delete(e.vao)
+    gl_buffer_delete(e.vbo)
+    gl_buffer_delete(e.ebo)
+    gl_buffer_delete(e.instance_vbo)
     entries = geometry_entries()
     i = 0
     while i < list.size(entries) {
@@ -1054,25 +1054,25 @@ ae3d_gl_geometry_release(vao: int) {
 
 // Only when nothing is holding geometry any more, so a second renderer in
 // the same process does not lose the buffers it is still drawing from.
-ae3d_gl_geometry_shutdown() {
+gl_geometry_shutdown() {
     if g_geometry == null { return }
     if list.size(g_geometry) > 0 { return }
     list.free(g_geometry)
     g_geometry = null
 }
 
-ae3d_gl_geometry_instance_capacity(vao: int) -> int {
+gl_geometry_instance_capacity(vao: int) -> int {
     e = geometry_of(vao)
     if e == null { return 0 }
     return e.instance_capacity
 }
 
-ae3d_gl_geometry_set_instance_capacity(vao: int, capacity: int) {
+gl_geometry_set_instance_capacity(vao: int, capacity: int) {
     e = geometry_of(vao)
     if e != null { e.instance_capacity = capacity }
 }
 
-ae3d_gl_upload_mesh(mesh: ptr, vbo: int, ebo: int) {
+gl_upload_mesh(mesh: ptr, vbo: int, ebo: int) {
     vertices = geometry.mesh_vertex_data(mesh)
     indices = geometry.mesh_index_data(mesh)
     vertex_count = geometry.mesh_vertex_count(mesh)
@@ -1085,7 +1085,7 @@ ae3d_gl_upload_mesh(mesh: ptr, vbo: int, ebo: int) {
     }
 }
 
-ae3d_gl_update_mesh_vertices(mesh: ptr, vbo: int) {
+gl_update_mesh_vertices(mesh: ptr, vbo: int) {
     vertices = geometry.mesh_vertex_data(mesh)
     vertex_count = geometry.mesh_vertex_count(mesh)
     if vbo == 0 || vertices == null || vertex_count <= 0 { return }
@@ -1097,7 +1097,7 @@ ae3d_gl_update_mesh_vertices(mesh: ptr, vbo: int) {
 // mesh that is not skinned uploads nothing extra and reads the stride it
 // always read. Slots 0-2 are the vertex, 3-6 the instance matrix and 7 its
 // colour.
-ae3d_gl_upload_skin(mesh: ptr, vbo: int) {
+gl_upload_skin(mesh: ptr, vbo: int) {
     skin = geometry.mesh_skin_data(mesh)
     vertex_count = geometry.mesh_vertex_count(mesh)
     if vbo == 0 || skin == null || vertex_count <= 0 { return }
@@ -1106,12 +1106,12 @@ ae3d_gl_upload_skin(mesh: ptr, vbo: int) {
     attrib(9, 4, SKIN_BYTES, 16)
 }
 
-ae3d_gl_uniform_mat4v(loc: int, count: int, values: ptr) {
+gl_uniform_mat4v(loc: int, count: int, values: ptr) {
     if loc < 0 || count <= 0 || values == null { return }
     glapi.glUniformMatrix4fv(loc, count, glapi.FALSE, values)
 }
 
-ae3d_gl_setup_vertex_attribs() {
+gl_setup_vertex_attribs() {
     attrib(0, 3, STRIDE_BYTES, 0)
     attrib(1, 2, STRIDE_BYTES, 12)
     attrib(2, 3, STRIDE_BYTES, 20)
@@ -1127,12 +1127,12 @@ ae3d_gl_setup_vertex_attribs() {
 // (model_set_depth_proxy). Nothing is uploaded; the attributes are pointed
 // at the buffers the two models keep, so the model's instance updates and
 // the proxy's mesh both reach this array without a copy.
-ae3d_gl_setup_proxy_vao(vao: int, mesh_vbo: int, mesh_ebo: int, skin_vbo: int,
+gl_setup_proxy_vao(vao: int, mesh_vbo: int, mesh_ebo: int, skin_vbo: int,
                         matrix_vbo: int, color_vbo: int, phase_vbo: int) {
     if vao == 0 || mesh_vbo == 0 || mesh_ebo == 0 || matrix_vbo == 0 { return }
     glapi.glBindVertexArray(vao as uint32)
     glapi.glBindBuffer(glapi.ARRAY_BUFFER as uint32, mesh_vbo as uint32)
-    ae3d_gl_setup_vertex_attribs()
+    gl_setup_vertex_attribs()
     glapi.glBindBuffer(glapi.ELEMENT_ARRAY_BUFFER as uint32, mesh_ebo as uint32)
     if skin_vbo != 0 {
         glapi.glBindBuffer(glapi.ARRAY_BUFFER as uint32, skin_vbo as uint32)
@@ -1166,7 +1166,7 @@ matrix_columns() {
 // 11, the animation phase VERTEX_CROWD reads to pick a pose-bank frame.
 // Called after the shared setup, so a crowd draw carries matrices, colours
 // and phases and an ordinary instanced draw carries only the first two.
-ae3d_gl_setup_instance_phase(inst: ptr, phase_vbo: int) {
+gl_setup_instance_phase(inst: ptr, phase_vbo: int) {
     if geometry.inst_is_points(inst) != 0 { return }
     phases = geometry.inst_phase_data(inst)
     count = geometry.inst_count(inst)
@@ -1190,7 +1190,7 @@ point_attribs() {
     attrib_per_instance(11, 1, POINT_BYTES, 28)
 }
 
-ae3d_gl_setup_instance_attribs(inst: ptr, matrix_vbo: int, color_vbo: int) {
+gl_setup_instance_attribs(inst: ptr, matrix_vbo: int, color_vbo: int) {
     count = geometry.inst_count(inst)
     if count <= 0 || matrix_vbo == 0 { return }
     if geometry.inst_is_points(inst) != 0 {
@@ -1214,7 +1214,7 @@ ae3d_gl_setup_instance_attribs(inst: ptr, matrix_vbo: int, color_vbo: int) {
 // A batch draws through the shared VAO with the matrices of the models it
 // merged. The colour attribute stays disabled, so the generic value set at
 // startup supplies white and the shader's per-instance tint is a no-op.
-ae3d_gl_batch_upload(vao: int, instance_vbo: int, inst: ptr, capacity_bytes: int) -> int {
+gl_batch_upload(vao: int, instance_vbo: int, inst: ptr, capacity_bytes: int) -> int {
     matrices = geometry.inst_matrix_data(inst)
     count = geometry.inst_count(inst)
     if vao == 0 || instance_vbo == 0 || count <= 0 || matrices == null { return capacity_bytes }
@@ -1238,11 +1238,11 @@ ae3d_gl_batch_upload(vao: int, instance_vbo: int, inst: ptr, capacity_bytes: int
 
 // Generic attribute values are context state, so one call covers every VAO
 // that leaves the per-instance colour array disabled.
-ae3d_gl_set_default_instance_color() {
+gl_set_default_instance_color() {
     glapi.glVertexAttrib3f(7, 1.0 as f32, 1.0 as f32, 1.0 as f32)
 }
 
-ae3d_gl_update_instances(inst: ptr, matrix_vbo: int, capacity_bytes: int) -> int {
+gl_update_instances(inst: ptr, matrix_vbo: int, capacity_bytes: int) -> int {
     count = geometry.inst_count(inst)
     if count <= 0 || matrix_vbo == 0 { return capacity_bytes }
     data = null as ptr
@@ -1271,7 +1271,7 @@ ae3d_gl_update_instances(inst: ptr, matrix_vbo: int, capacity_bytes: int) -> int
 // The colours are uploaded when the model is registered, which is the only
 // time they ever were: a colour set afterwards sat in the instance buffer
 // and never reached the GPU.
-ae3d_gl_update_instance_colors(inst: ptr, color_vbo: int) {
+gl_update_instance_colors(inst: ptr, color_vbo: int) {
     if geometry.inst_is_points(inst) != 0 { return }
     colors = geometry.inst_color_data(inst)
     count = geometry.inst_count(inst)
@@ -1282,7 +1282,7 @@ ae3d_gl_update_instance_colors(inst: ptr, color_vbo: int) {
 // The per-instance phases each frame -- a crowd's animation advances, so
 // unlike colours these change constantly. Just the data; the location-11
 // binding was set once at registration.
-ae3d_gl_update_instance_phases(inst: ptr, phase_vbo: int) {
+gl_update_instance_phases(inst: ptr, phase_vbo: int) {
     if geometry.inst_is_points(inst) != 0 { return }
     phases = geometry.inst_phase_data(inst)
     count = geometry.inst_count(inst)
@@ -1290,15 +1290,15 @@ ae3d_gl_update_instance_phases(inst: ptr, phase_vbo: int) {
     buffer_data(glapi.ARRAY_BUFFER, phase_vbo, count * 4, phases, glapi.DYNAMIC_DRAW)
 }
 
-ae3d_gl_draw_elements(count: int, byte_offset: int) {
+gl_draw_elements(count: int, byte_offset: int) {
     glapi.glDrawElements(glapi.TRIANGLES as uint32, count, glapi.UNSIGNED_INT as uint32, at_byte(byte_offset))
 }
 
-ae3d_gl_draw_elements_instanced(count: int, byte_offset: int, instances: int) {
+gl_draw_elements_instanced(count: int, byte_offset: int, instances: int) {
     glapi.glDrawElementsInstanced(glapi.TRIANGLES as uint32, count, glapi.UNSIGNED_INT as uint32, at_byte(byte_offset), instances)
 }
 
-ae3d_gl_draw_arrays(first: int, count: int) {
+gl_draw_arrays(first: int, count: int) {
     glapi.glDrawArrays(glapi.TRIANGLES as uint32, first, count)
 }
 
@@ -1317,7 +1317,7 @@ gl_string(name: int) -> string {
 
 // Whether the current context has every entry point ae3d calls: 0 when it
 // has, or how many it lacks. The version and the renderer are read once.
-ae3d_gl_load() -> int {
+gl_load() -> int {
     if g_loaded { return 0 }
     missing = glapi.missing()
     if missing == 0 {
@@ -1328,35 +1328,35 @@ ae3d_gl_load() -> int {
     return missing
 }
 
-ae3d_gl_version() -> string { return g_version }
-ae3d_gl_renderer() -> string { return g_renderer }
+gl_version() -> string { return g_version }
+gl_renderer() -> string { return g_renderer }
 
 // --- the GL state, in Aether (#398) ----------------------------------------------------------
 //
 // What native/gpu/opengl.c's first page was: the viewport, the clears, the
 // depth test, culling, blending, multisampling and wireframe, the viewport's
 // size, and the vertex arrays and buffers -- each a call or two into GL
-// through ae3d.glapi, named as the C API was so the calls below them read
-// the same.
+// through ae3d.glapi. The gl_ functions here are this module's own, under
+// the renderer's calls (the renderer_ ones) and over glapi's.
 
-ae3d_gl_error() -> int { return (glapi.glGetError()) as int }
+gl_error() -> int { return (glapi.glGetError()) as int }
 
-ae3d_gl_viewport(x: int, y: int, w: int, h: int) { glapi.glViewport(x, y, w, h) }
+gl_viewport(x: int, y: int, w: int, h: int) { glapi.glViewport(x, y, w, h) }
 
-ae3d_gl_clear_color(r: float, g: float, b: float, a: float) {
+gl_clear_color(r: float, g: float, b: float, a: float) {
     glapi.glClearColor(r as f32, g as f32, b as f32, a as f32)
 }
 
-ae3d_gl_clear(color: int, depth: int) {
+gl_clear(color: int, depth: int) {
     mask = 0
     if color != 0 { mask = mask | glapi.COLOR_BUFFER_BIT }
     if depth != 0 { mask = mask | glapi.DEPTH_BUFFER_BIT }
     if mask != 0 { glapi.glClear(mask as uint32) }
 }
 
-ae3d_gl_clear_depth(d: float) { glapi.glClearDepth(d) }
+gl_clear_depth(d: float) { glapi.glClearDepth(d) }
 
-ae3d_gl_set_depth_test(on: int) {
+gl_set_depth_test(on: int) {
     if on != 0 {
         glapi.glEnable(glapi.DEPTH_TEST as uint32)
         glapi.glDepthFunc(glapi.LEQUAL as uint32)
@@ -1366,11 +1366,11 @@ ae3d_gl_set_depth_test(on: int) {
     }
 }
 
-ae3d_gl_set_depth_mask(on: int) {
+gl_set_depth_mask(on: int) {
     if on != 0 { glapi.glDepthMask(glapi.TRUE) } else { glapi.glDepthMask(glapi.FALSE) }
 }
 
-ae3d_gl_set_face_culling(on: int) {
+gl_set_face_culling(on: int) {
     if on != 0 {
         glapi.glEnable(glapi.CULL_FACE as uint32)
         glapi.glCullFace(glapi.BACK as uint32)
@@ -1380,7 +1380,7 @@ ae3d_gl_set_face_culling(on: int) {
     }
 }
 
-ae3d_gl_set_blend(on: int) {
+gl_set_blend(on: int) {
     if on != 0 {
         glapi.glEnable(glapi.BLEND as uint32)
         glapi.glBlendFunc(glapi.SRC_ALPHA as uint32, glapi.ONE_MINUS_SRC_ALPHA as uint32)
@@ -1390,17 +1390,17 @@ ae3d_gl_set_blend(on: int) {
 }
 
 // What is drawn scales what is there: the occlusion pass darkening the
-// opaque scene under it. ae3d_gl_set_blend(1) puts the ordinary blend back.
-ae3d_gl_set_blend_multiply() {
+// opaque scene under it. gl_set_blend(1) puts the ordinary blend back.
+gl_set_blend_multiply() {
     glapi.glEnable(glapi.BLEND as uint32)
     glapi.glBlendFunc(glapi.DST_COLOR as uint32, glapi.ZERO as uint32)
 }
 
-ae3d_gl_set_multisample(on: int) {
+gl_set_multisample(on: int) {
     if on != 0 { glapi.glEnable(glapi.MULTISAMPLE as uint32) } else { glapi.glDisable(glapi.MULTISAMPLE as uint32) }
 }
 
-ae3d_gl_set_wireframe(on: int) {
+gl_set_wireframe(on: int) {
     mode = glapi.FILL
     if on != 0 { mode = glapi.LINE }
     glapi.glPolygonMode(glapi.FRONT_AND_BACK as uint32, mode as uint32)
@@ -1415,14 +1415,14 @@ gl_integer(name: int, index: int, count: int) -> int {
     return value
 }
 
-ae3d_gl_viewport_width() -> int { return gl_integer(glapi.VIEWPORT, 2, 4) }
-ae3d_gl_viewport_height() -> int { return gl_integer(glapi.VIEWPORT, 3, 4) }
+gl_viewport_width() -> int { return gl_integer(glapi.VIEWPORT, 2, 4) }
+gl_viewport_height() -> int { return gl_integer(glapi.VIEWPORT, 3, 4) }
 
 // The widest texture the context takes, a side.
-ae3d_gl_max_texture_size() -> int { return gl_integer(glapi.MAX_TEXTURE_SIZE, 0, 1) }
+gl_max_texture_size() -> int { return gl_integer(glapi.MAX_TEXTURE_SIZE, 0, 1) }
 
 // A name GL makes (glGenVertexArrays, glGenBuffers): one, into a word.
-ae3d_gl_vao_create() -> int {
+gl_vao_create() -> int {
     out = calloc(1, 4)
     glapi.glGenVertexArrays(1, out)
     id = (out as int[])[0]
@@ -1430,9 +1430,9 @@ ae3d_gl_vao_create() -> int {
     return id
 }
 
-ae3d_gl_vao_bind(vao: int) { glapi.glBindVertexArray(vao as uint32) }
+gl_vao_bind(vao: int) { glapi.glBindVertexArray(vao as uint32) }
 
-ae3d_gl_vao_delete(vao: int) {
+gl_vao_delete(vao: int) {
     if vao == 0 { return }
     names = calloc(1, 4)
     (names as int[])[0] = vao
@@ -1440,7 +1440,7 @@ ae3d_gl_vao_delete(vao: int) {
     free(names)
 }
 
-ae3d_gl_buffer_create() -> int {
+gl_buffer_create() -> int {
     out = calloc(1, 4)
     glapi.glGenBuffers(1, out)
     id = (out as int[])[0]
@@ -1448,7 +1448,7 @@ ae3d_gl_buffer_create() -> int {
     return id
 }
 
-ae3d_gl_buffer_delete(buffer: int) {
+gl_buffer_delete(buffer: int) {
     if buffer == 0 { return }
     names = calloc(1, 4)
     (names as int[])[0] = buffer
@@ -1759,7 +1759,7 @@ renderer_new() -> *GLRenderer {
 renderer_free(r: *GLRenderer) {
     if r == null { return }
     renderer_cleanup(r)
-    ae3d_gl_geometry_shutdown()
+    gl_geometry_shutdown()
     if r.models != null { list.free(r.models) }
     if r.lights != null { list.free(r.lights) }
     if r.programs != null {
@@ -1818,9 +1818,9 @@ backend(r: *GLRenderer) -> Backend {
 }
 
 compile_program(vertex_source: string, fragment_source: string, label: string) -> int {
-    program = ae3d_gl_program_create(vertex_source, fragment_source)
+    program = gl_program_create(vertex_source, fragment_source)
     if program == 0 {
-        println("ae3d: ${label} program failed: ${ae3d_gl_program_log()}")
+        println("ae3d: ${label} program failed: ${gl_program_log()}")
     }
     return program
 }
@@ -1840,13 +1840,13 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
     // often enough to skip the frame's uniforms entirely, and a program whose
     // view-projection was still zero rasterised nothing at all.
     s.frame_stamp = 0 - 1
-    s.view_projection = ae3d_gl_uniform_location(program, "viewProjection")
-    s.model = ae3d_gl_uniform_location(program, "model")
-    s.prev_model = ae3d_gl_uniform_location(program, "prevModel")
-    s.prev_view_projection = ae3d_gl_uniform_location(program, "prevViewProjection")
-    s.jitter = ae3d_gl_uniform_location(program, "jitter")
-    s.crowd_travel = ae3d_gl_uniform_location(program, "crowdTravel")
-    s.crowd_phase_step = ae3d_gl_uniform_location(program, "crowdPhaseStep")
+    s.view_projection = gl_uniform_location(program, "viewProjection")
+    s.model = gl_uniform_location(program, "model")
+    s.prev_model = gl_uniform_location(program, "prevModel")
+    s.prev_view_projection = gl_uniform_location(program, "prevViewProjection")
+    s.jitter = gl_uniform_location(program, "jitter")
+    s.crowd_travel = gl_uniform_location(program, "crowdTravel")
+    s.crowd_phase_step = gl_uniform_location(program, "crowdPhaseStep")
     // One lookup per light per program, done once, because an array of structs
     // gives no guarantee that element locations are contiguous.
     s.light_slots = calloc(MAX_LIGHTS * LIGHT_SLOTS, 4)
@@ -1854,78 +1854,78 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
     n = 0
     while n < MAX_LIGHTS {
         base = n * LIGHT_SLOTS
-        slots_of[base] = ae3d_gl_uniform_location(program, "lights[${n}].position")
-        slots_of[base + 1] = ae3d_gl_uniform_location(program, "lights[${n}].color")
-        slots_of[base + 2] = ae3d_gl_uniform_location(program, "lights[${n}].intensity")
-        slots_of[base + 3] = ae3d_gl_uniform_location(program, "lights[${n}].ambientStrength")
-        slots_of[base + 4] = ae3d_gl_uniform_location(program, "lights[${n}].temperature")
-        slots_of[base + 5] = ae3d_gl_uniform_location(program, "lights[${n}].isDirectional")
-        slots_of[base + 6] = ae3d_gl_uniform_location(program, "lights[${n}].direction")
-        slots_of[base + 7] = ae3d_gl_uniform_location(program, "lights[${n}].constantAtten")
-        slots_of[base + 8] = ae3d_gl_uniform_location(program, "lights[${n}].linearAtten")
-        slots_of[base + 9] = ae3d_gl_uniform_location(program, "lights[${n}].quadraticAtten")
-        slots_of[base + 10] = ae3d_gl_uniform_location(program, "lights[${n}].spotCosOuter")
-        slots_of[base + 11] = ae3d_gl_uniform_location(program, "lights[${n}].spotCosInner")
+        slots_of[base] = gl_uniform_location(program, "lights[${n}].position")
+        slots_of[base + 1] = gl_uniform_location(program, "lights[${n}].color")
+        slots_of[base + 2] = gl_uniform_location(program, "lights[${n}].intensity")
+        slots_of[base + 3] = gl_uniform_location(program, "lights[${n}].ambientStrength")
+        slots_of[base + 4] = gl_uniform_location(program, "lights[${n}].temperature")
+        slots_of[base + 5] = gl_uniform_location(program, "lights[${n}].isDirectional")
+        slots_of[base + 6] = gl_uniform_location(program, "lights[${n}].direction")
+        slots_of[base + 7] = gl_uniform_location(program, "lights[${n}].constantAtten")
+        slots_of[base + 8] = gl_uniform_location(program, "lights[${n}].linearAtten")
+        slots_of[base + 9] = gl_uniform_location(program, "lights[${n}].quadraticAtten")
+        slots_of[base + 10] = gl_uniform_location(program, "lights[${n}].spotCosOuter")
+        slots_of[base + 11] = gl_uniform_location(program, "lights[${n}].spotCosInner")
         n = n + 1
     }
-    s.light_count = ae3d_gl_uniform_location(program, "lightCount")
-    s.light_space = ae3d_gl_uniform_location(program, "lightSpaceMatrix")
-    s.shadow_map = ae3d_gl_uniform_location(program, "shadowMap")
-    s.has_shadow_map = ae3d_gl_uniform_location(program, "hasShadowMap")
-    s.compat_light_pos = ae3d_gl_uniform_location(program, "lightPos")
-    s.compat_light_color = ae3d_gl_uniform_location(program, "lightColor")
-    s.compat_light_intensity = ae3d_gl_uniform_location(program, "lightIntensity")
-    s.compat_light_direction = ae3d_gl_uniform_location(program, "lightDirection")
-    s.view_pos = ae3d_gl_uniform_location(program, "viewPos")
-    s.view_distance = ae3d_gl_uniform_location(program, "viewDistance")
-    s.diffuse_color = ae3d_gl_uniform_location(program, "diffuseColor")
-    s.specular_color = ae3d_gl_uniform_location(program, "specularColor")
-    s.metallic = ae3d_gl_uniform_location(program, "metallic")
-    s.roughness = ae3d_gl_uniform_location(program, "roughness")
-    s.exposure = ae3d_gl_uniform_location(program, "exposure")
-    s.reflectivity = ae3d_gl_uniform_location(program, "reflectivity")
-    s.material_alpha = ae3d_gl_uniform_location(program, "materialAlpha")
-    s.texture_sampler = ae3d_gl_uniform_location(program, "textureSampler")
-    s.is_instanced = ae3d_gl_uniform_location(program, "isInstanced")
-    s.instance_points = ae3d_gl_uniform_location(program, "instancePoints")
-    s.instance_billboard = ae3d_gl_uniform_location(program, "instanceBillboard")
-    s.use_instance_color = ae3d_gl_uniform_location(program, "useInstanceColor")
-    s.is_skinned = ae3d_gl_uniform_location(program, "isSkinned")
-    s.bones = ae3d_gl_uniform_location(program, "bones")
-    s.pose_bank = ae3d_gl_uniform_location(program, "poseBank")
-    s.pose_bank_frames = ae3d_gl_uniform_location(program, "poseBankFrames")
-    s.impostor = ae3d_gl_uniform_location(program, "impostor")
-    s.impostor_cols = ae3d_gl_uniform_location(program, "impostorCols")
-    s.impostor_rows = ae3d_gl_uniform_location(program, "impostorRows")
-    s.impostor_width = ae3d_gl_uniform_location(program, "impostorWidth")
-    s.impostor_height = ae3d_gl_uniform_location(program, "impostorHeight")
-    s.scene_depth = ae3d_gl_uniform_location(program, "sceneDepth")
-    s.cloud_cover = ae3d_gl_uniform_location(program, "cloudCover")
-    s.cloud_time = ae3d_gl_uniform_location(program, "cloudTime")
-    s.sky_overcast = ae3d_gl_uniform_location(program, "skyOvercast")
-    s.sky_overcast_color = ae3d_gl_uniform_location(program, "skyOvercastColor")
-    s.cloud_sun = ae3d_gl_uniform_location(program, "cloudSun")
-    s.has_scene_depth = ae3d_gl_uniform_location(program, "hasSceneDepth")
-    s.screen_size = ae3d_gl_uniform_location(program, "screenSize")
-    s.inv_view_projection = ae3d_gl_uniform_location(program, "invViewProjection")
-    s.normal_sampler = ae3d_gl_uniform_location(program, "normalMap")
-    s.has_normal_map = ae3d_gl_uniform_location(program, "hasNormalMap")
-    s.normal_strength = ae3d_gl_uniform_location(program, "normalStrength")
-    s.occlusion_strength = ae3d_gl_uniform_location(program, "occlusionStrength")
-    s.capture_channel = ae3d_gl_uniform_location(program, "captureChannel")
-    s.wetness = ae3d_gl_uniform_location(program, "wetness")
-    s.frame_exposure = ae3d_gl_uniform_location(program, "frameExposure")
-    s.caustics_time = ae3d_gl_uniform_location(program, "causticsTime")
-    s.shadow_direction = ae3d_gl_uniform_location(program, "shadowDirection")
-    s.shadow_texel_world = ae3d_gl_uniform_location(program, "shadowTexelWorld")
-    s.enable_shadows = ae3d_gl_uniform_location(program, "enableShadows")
-    s.shadow_intensity = ae3d_gl_uniform_location(program, "shadowIntensity")
-    s.shadow_softness = ae3d_gl_uniform_location(program, "shadowSoftness")
-    s.fog_enabled = ae3d_gl_uniform_location(program, "enableFog")
-    s.fog_start = ae3d_gl_uniform_location(program, "fogStart")
-    s.fog_end = ae3d_gl_uniform_location(program, "fogEnd")
-    s.fog_color = ae3d_gl_uniform_location(program, "fogColor")
-    s.fog_intensity = ae3d_gl_uniform_location(program, "fogIntensity")
+    s.light_count = gl_uniform_location(program, "lightCount")
+    s.light_space = gl_uniform_location(program, "lightSpaceMatrix")
+    s.shadow_map = gl_uniform_location(program, "shadowMap")
+    s.has_shadow_map = gl_uniform_location(program, "hasShadowMap")
+    s.compat_light_pos = gl_uniform_location(program, "lightPos")
+    s.compat_light_color = gl_uniform_location(program, "lightColor")
+    s.compat_light_intensity = gl_uniform_location(program, "lightIntensity")
+    s.compat_light_direction = gl_uniform_location(program, "lightDirection")
+    s.view_pos = gl_uniform_location(program, "viewPos")
+    s.view_distance = gl_uniform_location(program, "viewDistance")
+    s.diffuse_color = gl_uniform_location(program, "diffuseColor")
+    s.specular_color = gl_uniform_location(program, "specularColor")
+    s.metallic = gl_uniform_location(program, "metallic")
+    s.roughness = gl_uniform_location(program, "roughness")
+    s.exposure = gl_uniform_location(program, "exposure")
+    s.reflectivity = gl_uniform_location(program, "reflectivity")
+    s.material_alpha = gl_uniform_location(program, "materialAlpha")
+    s.texture_sampler = gl_uniform_location(program, "textureSampler")
+    s.is_instanced = gl_uniform_location(program, "isInstanced")
+    s.instance_points = gl_uniform_location(program, "instancePoints")
+    s.instance_billboard = gl_uniform_location(program, "instanceBillboard")
+    s.use_instance_color = gl_uniform_location(program, "useInstanceColor")
+    s.is_skinned = gl_uniform_location(program, "isSkinned")
+    s.bones = gl_uniform_location(program, "bones")
+    s.pose_bank = gl_uniform_location(program, "poseBank")
+    s.pose_bank_frames = gl_uniform_location(program, "poseBankFrames")
+    s.impostor = gl_uniform_location(program, "impostor")
+    s.impostor_cols = gl_uniform_location(program, "impostorCols")
+    s.impostor_rows = gl_uniform_location(program, "impostorRows")
+    s.impostor_width = gl_uniform_location(program, "impostorWidth")
+    s.impostor_height = gl_uniform_location(program, "impostorHeight")
+    s.scene_depth = gl_uniform_location(program, "sceneDepth")
+    s.cloud_cover = gl_uniform_location(program, "cloudCover")
+    s.cloud_time = gl_uniform_location(program, "cloudTime")
+    s.sky_overcast = gl_uniform_location(program, "skyOvercast")
+    s.sky_overcast_color = gl_uniform_location(program, "skyOvercastColor")
+    s.cloud_sun = gl_uniform_location(program, "cloudSun")
+    s.has_scene_depth = gl_uniform_location(program, "hasSceneDepth")
+    s.screen_size = gl_uniform_location(program, "screenSize")
+    s.inv_view_projection = gl_uniform_location(program, "invViewProjection")
+    s.normal_sampler = gl_uniform_location(program, "normalMap")
+    s.has_normal_map = gl_uniform_location(program, "hasNormalMap")
+    s.normal_strength = gl_uniform_location(program, "normalStrength")
+    s.occlusion_strength = gl_uniform_location(program, "occlusionStrength")
+    s.capture_channel = gl_uniform_location(program, "captureChannel")
+    s.wetness = gl_uniform_location(program, "wetness")
+    s.frame_exposure = gl_uniform_location(program, "frameExposure")
+    s.caustics_time = gl_uniform_location(program, "causticsTime")
+    s.shadow_direction = gl_uniform_location(program, "shadowDirection")
+    s.shadow_texel_world = gl_uniform_location(program, "shadowTexelWorld")
+    s.enable_shadows = gl_uniform_location(program, "enableShadows")
+    s.shadow_intensity = gl_uniform_location(program, "shadowIntensity")
+    s.shadow_softness = gl_uniform_location(program, "shadowSoftness")
+    s.fog_enabled = gl_uniform_location(program, "enableFog")
+    s.fog_start = gl_uniform_location(program, "fogStart")
+    s.fog_end = gl_uniform_location(program, "fogEnd")
+    s.fog_color = gl_uniform_location(program, "fogColor")
+    s.fog_intensity = gl_uniform_location(program, "fogIntensity")
     s.loaded_names = 0 as uint64
     // Nothing has been written into this program yet, so what it holds is
     // whatever GLSL leaves a uniform at, which is not what a default is.
@@ -1938,7 +1938,7 @@ set_face_culling(r: *GLRenderer, on: bool) {
     if r.face_culling_state == on { return }
     flag = 0
     if on { flag = 1 }
-    ae3d_gl_set_face_culling(flag)
+    gl_set_face_culling(flag)
     r.face_culling_state = on
 }
 
@@ -1946,7 +1946,7 @@ set_depth_test(r: *GLRenderer, on: bool) {
     if r.depth_test_state == on { return }
     flag = 0
     if on { flag = 1 }
-    ae3d_gl_set_depth_test(flag)
+    gl_set_depth_test(flag)
     r.depth_test_state = on
 }
 
@@ -1954,7 +1954,7 @@ set_blend(r: *GLRenderer, on: bool) {
     if r.blend_state == on { return }
     flag = 0
     if on { flag = 1 }
-    ae3d_gl_set_blend(flag)
+    gl_set_blend(flag)
     r.blend_state = on
 }
 
@@ -1962,7 +1962,7 @@ set_wireframe(r: *GLRenderer, on: bool) {
     if r.wireframe_state == on { return }
     flag = 0
     if on { flag = 1 }
-    ae3d_gl_set_wireframe(flag)
+    gl_set_wireframe(flag)
     r.wireframe_state = on
 }
 
@@ -1973,7 +1973,7 @@ use_program(r: *GLRenderer, program: int) {
     // Counted where the change happens, not where it is asked for: a budget on
     // how often the renderer is called is a budget on nothing.
     r.last_programs = r.last_programs + 1
-    ae3d_gl_program_use(program)
+    gl_program_use(program)
     r.current_program = program
     r.bound_material = null
     r.bound_material_set = false
@@ -2012,8 +2012,8 @@ apply_material(r: *GLRenderer, slots: *ProgramSlots, material: *Material) {
 apply_texture(r: *GLRenderer, slots: *ProgramSlots, texture: int) {
     if r.bound_texture == texture { return }
     r.last_textures = r.last_textures + 1
-    ae3d_gl_texture_bind(0, texture)
-    ae3d_gl_uniform_int(slots.texture_sampler, 0)
+    gl_texture_bind(0, texture)
+    gl_uniform_int(slots.texture_sampler, 0)
     r.bound_texture = texture
 }
 
@@ -2021,16 +2021,16 @@ apply_texture(r: *GLRenderer, slots: *ProgramSlots, texture: int) {
 apply_normal_map(r: *GLRenderer, slots: *ProgramSlots, normal: int) {
     if r.bound_normal == normal { return }
     if normal != 0 {
-        ae3d_gl_texture_bind(2, normal)
-        ae3d_gl_uniform_int(slots.normal_sampler, 2)
+        gl_texture_bind(2, normal)
+        gl_uniform_int(slots.normal_sampler, 2)
     }
-    ae3d_gl_uniform_int(slots.has_normal_map, normal != 0)
+    gl_uniform_int(slots.has_normal_map, normal != 0)
     r.bound_normal = normal
 }
 
 apply_instancing(r: *GLRenderer, slots: *ProgramSlots, instanced: int) {
     if r.bound_instanced == instanced { return }
-    ae3d_gl_uniform_int(slots.is_instanced, instanced)
+    gl_uniform_int(slots.is_instanced, instanced)
     r.bound_instanced = instanced
 }
 
@@ -2040,10 +2040,10 @@ apply_instancing(r: *GLRenderer, slots: *ProgramSlots, instanced: int) {
 apply_points(slots: *ProgramSlots, m: *Model) {
     points = 0
     if m.instances != null && geometry.inst_is_points(m.instances) == 1 { points = 1 }
-    ae3d_gl_uniform_int(slots.instance_points, points)
+    gl_uniform_int(slots.instance_points, points)
     billboard = 0
     if points == 1 { billboard = m.billboard }
-    ae3d_gl_uniform_int(slots.instance_billboard, billboard)
+    gl_uniform_int(slots.instance_billboard, billboard)
 }
 
 // A model's own instances carry a colour each; a merged draw does not, and its
@@ -2051,7 +2051,7 @@ apply_points(slots: *ProgramSlots, m: *Model) {
 // alone rather than read an attribute nothing filled in.
 apply_instance_color(r: *GLRenderer, slots: *ProgramSlots, on: int) {
     if r.bound_instance_color == on { return }
-    ae3d_gl_uniform_int(slots.use_instance_color, on)
+    gl_uniform_int(slots.use_instance_color, on)
     r.bound_instance_color = on
 }
 
@@ -2061,15 +2061,15 @@ apply_instance_color(r: *GLRenderer, slots: *ProgramSlots, on: int) {
 apply_skeleton(r: *GLRenderer, slots: *ProgramSlots, m: *Model) {
     if m.skeleton == null {
         if r.bound_skinned != 0 {
-            ae3d_gl_uniform_int(slots.is_skinned, 0)
+            gl_uniform_int(slots.is_skinned, 0)
             r.bound_skinned = 0
         }
         return
     }
     sk = m.skeleton as *Skeleton
     skin.skeleton_update(sk)
-    ae3d_gl_uniform_int(slots.is_skinned, 1)
-    ae3d_gl_uniform_mat4v(slots.bones, skin.skeleton_count(sk),
+    gl_uniform_int(slots.is_skinned, 1)
+    gl_uniform_mat4v(slots.bones, skin.skeleton_count(sk),
                           core.palette_data(skin.skeleton_palette(sk)))
     // Every skinned model carries its own palette, so this cannot be skipped
     // for a second one in the same frame the way a shared uniform could.
@@ -2082,11 +2082,11 @@ apply_skeleton(r: *GLRenderer, slots: *ProgramSlots, m: *Model) {
 // into a frame.
 bind_pose_bank(r: *GLRenderer, slots: *ProgramSlots, m: *Model) {
     if m.pose_bank_texture == 0 {
-        m.pose_bank_texture = ae3d_gl_posebank_texture(posing.posebank_data(m.pose_bank), posing.posebank_frames(m.pose_bank), posing.posebank_bones(m.pose_bank))
+        m.pose_bank_texture = gl_posebank_texture(posing.posebank_data(m.pose_bank), posing.posebank_frames(m.pose_bank), posing.posebank_bones(m.pose_bank))
     }
-    ae3d_gl_texture_bind(3, m.pose_bank_texture)
-    ae3d_gl_uniform_int(slots.pose_bank, 3)
-    ae3d_gl_uniform_int(slots.pose_bank_frames, m.pose_bank_frames)
+    gl_texture_bind(3, m.pose_bank_texture)
+    gl_uniform_int(slots.pose_bank, 3)
+    gl_uniform_int(slots.pose_bank_frames, m.pose_bank_frames)
     // For the motion vectors: how far a figure's walk and its position
     // moved this frame, from the model's walk cycle and the bank's travel.
     travel = 0.0
@@ -2095,35 +2095,35 @@ bind_pose_bank(r: *GLRenderer, slots: *ProgramSlots, m: *Model) {
         step = r.frame_seconds / m.crowd_walk
         travel = posing.posebank_travel(m.pose_bank, m.pose_bank_frames) * step
     }
-    ae3d_gl_uniform_float(slots.crowd_travel, travel)
-    ae3d_gl_uniform_float(slots.crowd_phase_step, step)
+    gl_uniform_float(slots.crowd_travel, travel)
+    gl_uniform_float(slots.crowd_phase_step, step)
     // The impostor's atlas grid and size, off for a crowd drawn as itself.
     on = 0
     if core.model_is_impostor(m) { on = 1 }
-    ae3d_gl_uniform_int(slots.impostor, on)
+    gl_uniform_int(slots.impostor, on)
     if on == 1 {
-        ae3d_gl_uniform_int(slots.impostor_cols, m.impostor_cols)
-        ae3d_gl_uniform_int(slots.impostor_rows, m.impostor_rows)
-        ae3d_gl_uniform_float(slots.impostor_width, m.impostor_width)
-        ae3d_gl_uniform_float(slots.impostor_height, m.impostor_height)
+        gl_uniform_int(slots.impostor_cols, m.impostor_cols)
+        gl_uniform_int(slots.impostor_rows, m.impostor_rows)
+        gl_uniform_float(slots.impostor_width, m.impostor_width)
+        gl_uniform_float(slots.impostor_height, m.impostor_height)
     }
 }
 
 renderer_init(r: *GLRenderer, window: ptr, width: int, height: int) -> int {
-    missing = ae3d_gl_load()
+    missing = gl_load()
     if missing != 0 {
         println("ae3d: ${missing} OpenGL entry point(s) unavailable")
         return 0
     }
 
-    println("ae3d: OpenGL ${ae3d_gl_version()} on ${ae3d_gl_renderer()}")
+    println("ae3d: OpenGL ${gl_version()} on ${gl_renderer()}")
 
     r.screen_width = width
     r.screen_height = height
     r.viewport_width = width
     r.viewport_height = height
-    ae3d_gl_viewport(0, 0, width, height)
-    ae3d_gl_clear_depth(1.0)
+    gl_viewport(0, 0, width, height)
+    gl_clear_depth(1.0)
 
     r.default_program = compile_program(shaders.VERTEX_DEFAULT, shaders.FRAGMENT_DEFAULT, "default")
     if r.default_program == 0 { return 0 }
@@ -2150,17 +2150,17 @@ renderer_init(r: *GLRenderer, window: ptr, width: int, height: int) -> int {
     // A merged draw leaves the per-instance colour array disabled, so the
     // generic value stands in for it. Without this the shader multiplies every
     // batched surface by black.
-    ae3d_gl_set_default_instance_color()
+    gl_set_default_instance_color()
 
-    ae3d_gl_set_face_culling(0)
+    gl_set_face_culling(0)
     r.face_culling_state = false
-    ae3d_gl_set_depth_test(1)
+    gl_set_depth_test(1)
     r.depth_test_state = true
-    ae3d_gl_set_blend(1)
+    gl_set_blend(1)
     r.blend_state = true
-    ae3d_gl_set_multisample(1)
+    gl_set_multisample(1)
     r.enable_msaa = true
-    ae3d_gl_set_wireframe(0)
+    gl_set_wireframe(0)
     r.wireframe_state = false
 
     init_post_processing(r, width, height)
@@ -2176,7 +2176,7 @@ create_default_texture(r: *GLRenderer) -> int {
         println("ae3d: default texture unavailable: ${ae3d_image_error()}")
         return 0
     }
-    id = ae3d_gl_texture_from_image(image, 0, 0)
+    id = gl_texture_from_image(image, 0, 0)
     ae3d_image_free(image)
     return id
 }
@@ -2203,9 +2203,9 @@ renderer_load_texture(r: *GLRenderer, path: string) -> int {
     }
     // Larger than the device takes (a 21,600-wide map on a device whose
     // textures stop at 16,384): drawn at the most it has, not refused.
-    halvings = ae3d_image_fit(image, ae3d_gl_max_texture_size())
+    halvings = ae3d_image_fit(image, gl_max_texture_size())
     if halvings > 0 { println("ae3d: ${path} is larger than this device's textures; halved ${halvings} time(s) to fit") }
-    id = ae3d_gl_texture_from_image(image, 0, 1)
+    id = gl_texture_from_image(image, 0, 1)
     // Read before the image is released. How many pixels an image has is half
     // of what decides whether a surface carries enough detail to be looked at
     // closely; the other half is how far its UVs stretch, and neither is
@@ -2238,7 +2238,7 @@ renderer_release_texture(r: *GLRenderer, id: int) {
         if entry != null && entry.id == id {
             entry.refs = entry.refs - 1
             if entry.refs <= 0 {
-                ae3d_gl_texture_delete(entry.id)
+                gl_texture_delete(entry.id)
                 list.remove(r.textures, i)
             heap.free(entry)
             }
@@ -2275,7 +2275,7 @@ renderer_set_frame_exposure(r: *GLRenderer, exposure: float) {
 // after the frame is drawn, with its framebuffer still bound.
 renderer_meter(r: *GLRenderer, out: ptr) -> bool {
     if r == null { return false }
-    return ae3d_gl_meter(0 - 1, r.viewport_width, r.viewport_height, out) == 1
+    return gl_meter(0 - 1, r.viewport_width, r.viewport_height, out) == 1
 }
 
 renderer_set_occlusion_strength(r: *GLRenderer, strength: float) {
@@ -2318,42 +2318,42 @@ renderer_add_model(r: *GLRenderer, m: *Model) {
     // -- a cache exists for repeated props, and a figure is not one.
     skinned = core.mesh_is_skinned(m.mesh)
     if (m.is_instanced && core.model_instance_count(m) > 0) || skinned {
-        m.vao = ae3d_gl_vao_create()
-        ae3d_gl_vao_bind(m.vao)
-        m.vbo = ae3d_gl_buffer_create()
-        m.ebo = ae3d_gl_buffer_create()
-        ae3d_gl_upload_mesh(m.mesh, m.vbo, m.ebo)
-        ae3d_gl_setup_vertex_attribs()
+        m.vao = gl_vao_create()
+        gl_vao_bind(m.vao)
+        m.vbo = gl_buffer_create()
+        m.ebo = gl_buffer_create()
+        gl_upload_mesh(m.mesh, m.vbo, m.ebo)
+        gl_setup_vertex_attribs()
         m.shares_geometry = false
     } else {
-        m.vao = ae3d_gl_geometry_acquire(m.mesh)
+        m.vao = gl_geometry_acquire(m.mesh)
         if m.vao == 0 {
-            m.vao = ae3d_gl_vao_create()
-            ae3d_gl_vao_bind(m.vao)
-            m.vbo = ae3d_gl_buffer_create()
-            m.ebo = ae3d_gl_buffer_create()
-            ae3d_gl_upload_mesh(m.mesh, m.vbo, m.ebo)
-            ae3d_gl_setup_vertex_attribs()
+            m.vao = gl_vao_create()
+            gl_vao_bind(m.vao)
+            m.vbo = gl_buffer_create()
+            m.ebo = gl_buffer_create()
+            gl_upload_mesh(m.mesh, m.vbo, m.ebo)
+            gl_setup_vertex_attribs()
             m.shares_geometry = false
         } else {
             m.vbo = 0
             m.ebo = 0
             m.shares_geometry = true
         }
-        ae3d_gl_vao_bind(m.vao)
+        gl_vao_bind(m.vao)
     }
 
     if skinned {
-        m.skin_vbo = ae3d_gl_buffer_create()
-        ae3d_gl_upload_skin(m.mesh, m.skin_vbo)
+        m.skin_vbo = gl_buffer_create()
+        gl_upload_skin(m.mesh, m.skin_vbo)
     }
 
     if m.is_instanced && core.model_instance_count(m) > 0 {
-        m.instance_vbo = ae3d_gl_buffer_create()
+        m.instance_vbo = gl_buffer_create()
         if core.model_instance_has_colors(m) {
-            m.instance_color_vbo = ae3d_gl_buffer_create()
+            m.instance_color_vbo = gl_buffer_create()
         }
-        ae3d_gl_setup_instance_attribs(m.instances, m.instance_vbo, m.instance_color_vbo)
+        gl_setup_instance_attribs(m.instances, m.instance_vbo, m.instance_color_vbo)
         m.instance_vbo_capacity = core.model_instance_count(m) * 64
         m.instances_updated = false
         m.instance_colors_updated = false
@@ -2361,13 +2361,13 @@ renderer_add_model(r: *GLRenderer, m: *Model) {
         // phase attribute at location 11, so the crowd program can pose each
         // instance from its own frame of the bank.
         if core.model_pose_bank(m) != null {
-            m.instance_phase_vbo = ae3d_gl_buffer_create()
-            ae3d_gl_setup_instance_phase(m.instances, m.instance_phase_vbo)
+            m.instance_phase_vbo = gl_buffer_create()
+            gl_setup_instance_phase(m.instances, m.instance_phase_vbo)
             m.instance_phases_updated = false
         }
     }
 
-    ae3d_gl_vao_bind(0)
+    gl_vao_bind(0)
 
     // Building a mesh marks it dirty, and what was just uploaded is not an edit
     // waiting to be sent: leaving it set gives every model a private buffer on
@@ -2456,27 +2456,27 @@ renderer_remove_model(r: *GLRenderer, m: *Model) {
 
     if m.shares_geometry {
         forget_batches(r, m.vao)
-        ae3d_gl_geometry_release(m.vao)
+        gl_geometry_release(m.vao)
         m.vao = 0
         m.vbo = 0
         m.ebo = 0
         m.shares_geometry = false
     } else {
         forget_batches(r, m.vao)
-        if m.vao != 0 { ae3d_gl_vao_delete(m.vao) ; m.vao = 0 }
-        if m.vbo != 0 { ae3d_gl_buffer_delete(m.vbo) ; m.vbo = 0 }
-        if m.ebo != 0 { ae3d_gl_buffer_delete(m.ebo) ; m.ebo = 0 }
+        if m.vao != 0 { gl_vao_delete(m.vao) ; m.vao = 0 }
+        if m.vbo != 0 { gl_buffer_delete(m.vbo) ; m.vbo = 0 }
+        if m.ebo != 0 { gl_buffer_delete(m.ebo) ; m.ebo = 0 }
     }
     if m.instance_vbo != 0 {
-        ae3d_gl_buffer_delete(m.instance_vbo)
+        gl_buffer_delete(m.instance_vbo)
         m.instance_vbo = 0
         m.instance_vbo_capacity = 0
     }
     if m.instance_color_vbo != 0 {
-        ae3d_gl_buffer_delete(m.instance_color_vbo)
+        gl_buffer_delete(m.instance_color_vbo)
         m.instance_color_vbo = 0
     }
-    if m.depth_proxy_vao != 0 { ae3d_gl_vao_delete(m.depth_proxy_vao) ; m.depth_proxy_vao = 0 }
+    if m.depth_proxy_vao != 0 { gl_vao_delete(m.depth_proxy_vao) ; m.depth_proxy_vao = 0 }
 
     count = list.size(r.models)
     i = 0
@@ -2531,7 +2531,7 @@ renderer_draw_calls(r: *GLRenderer) -> int {
 // What drew the frame. A frame cost recorded on one card says nothing about
 // the same frame on another, so a benchmark that compares times has to know
 // whether it is comparing like with like.
-device_name() -> string { return ae3d_gl_renderer() }
+device_name() -> string { return gl_renderer() }
 
 renderer_post_active(r: *GLRenderer) -> bool { return r.last_post_active }
 renderer_shadow_ms(r: *GLRenderer) -> float { return r.last_shadow_ms }
@@ -2590,8 +2590,8 @@ ensure_cloud_textures(r: *GLRenderer, real: bool) {
     if !real {
         if r.cloud_shape_texture == 0 || r.cloud_weather_texture == 0 {
             blank = calloc(2 * 2 * 2 * 4, 1)
-            if r.cloud_shape_texture == 0 { r.cloud_shape_texture = ae3d_gl_texture3d_rgba(2, blank) }
-            if r.cloud_weather_texture == 0 { r.cloud_weather_texture = ae3d_gl_texture_rgba(1, 1, blank) }
+            if r.cloud_shape_texture == 0 { r.cloud_shape_texture = gl_texture3d_rgba(2, blank) }
+            if r.cloud_weather_texture == 0 { r.cloud_weather_texture = gl_texture_rgba(1, 1, blank) }
             free(blank)
         }
         return
@@ -2599,10 +2599,10 @@ ensure_cloud_textures(r: *GLRenderer, real: bool) {
     shape = core.cloud_shape_bytes()
     weather = core.cloud_weather_bytes()
     if shape == null || weather == null { return }
-    if r.cloud_shape_texture != 0 { ae3d_gl_texture_delete(r.cloud_shape_texture) }
-    if r.cloud_weather_texture != 0 { ae3d_gl_texture_delete(r.cloud_weather_texture) }
-    r.cloud_shape_texture = ae3d_gl_texture3d_rgba(core.CLOUD_SHAPE_SIZE, shape)
-    r.cloud_weather_texture = ae3d_gl_texture_rgba(core.CLOUD_WEATHER_SIZE, core.CLOUD_WEATHER_SIZE, weather)
+    if r.cloud_shape_texture != 0 { gl_texture_delete(r.cloud_shape_texture) }
+    if r.cloud_weather_texture != 0 { gl_texture_delete(r.cloud_weather_texture) }
+    r.cloud_shape_texture = gl_texture3d_rgba(core.CLOUD_SHAPE_SIZE, shape)
+    r.cloud_weather_texture = gl_texture_rgba(core.CLOUD_WEATHER_SIZE, core.CLOUD_WEATHER_SIZE, weather)
     r.cloud_textures_real = true
 }
 
@@ -2647,8 +2647,8 @@ renderer_set_shadows(r: *GLRenderer, on: bool) {
     r.shadow_enabled = on
     if !on || !r.initialized || r.shadow_fbo != 0 { return }
 
-    r.shadow_fbo = ae3d_gl_fbo_create()
-    r.shadow_map = ae3d_gl_fbo_attach_shadow_map(r.shadow_fbo, SHADOW_SIZE)
+    r.shadow_fbo = gl_fbo_create()
+    r.shadow_map = gl_fbo_attach_shadow_map(r.shadow_fbo, SHADOW_SIZE)
     bind_output(r)
     if r.shadow_map == 0 { r.shadow_enabled = false }
 }
@@ -2759,30 +2759,30 @@ render_shadow_pass(r: *GLRenderer, light: *Light, cam: *Camera) {
 
     r.shadow_space = light_space_matrix(r, light, cam)
 
-    ae3d_gl_fbo_bind(r.shadow_fbo)
-    ae3d_gl_viewport(0, 0, SHADOW_SIZE, SHADOW_SIZE)
+    gl_fbo_bind(r.shadow_fbo)
+    gl_viewport(0, 0, SHADOW_SIZE, SHADOW_SIZE)
 
     // The post pass and the skybox both turn depth writes off, so the state they
     // leave behind would let this pass clear the map and then write nothing.
     set_depth_test(r, true)
-    ae3d_gl_set_depth_mask(1)
+    gl_set_depth_mask(1)
     set_blend(r, false)
     set_face_culling(r, false)
     // Depth only: the map has no colour attachment, and depth clears to the far
     // value the lit pass reads as "nothing between here and the light".
-    ae3d_gl_clear(0, 1)
+    gl_clear(0, 1)
 
     use_program(r, r.shadow_program)
-    space = ae3d_gl_uniform_location(r.shadow_program, "lightSpaceMatrix")
-    model_slot = ae3d_gl_uniform_location(r.shadow_program, "model")
-    instanced_slot = ae3d_gl_uniform_location(r.shadow_program, "isInstanced")
-    points_slot = ae3d_gl_uniform_location(r.shadow_program, "instancePoints")
-    billboard_slot = ae3d_gl_uniform_location(r.shadow_program, "instanceBillboard")
-    view_pos_slot = ae3d_gl_uniform_location(r.shadow_program, "viewPos")
-    ae3d_gl_uniform_vec3(view_pos_slot, cam.position.x, cam.position.y, cam.position.z)
-    skinned_slot = ae3d_gl_uniform_location(r.shadow_program, "isSkinned")
-    bones_slot = ae3d_gl_uniform_location(r.shadow_program, "bones")
-    ae3d_gl_uniform_mat4(space, &r.shadow_space)
+    space = gl_uniform_location(r.shadow_program, "lightSpaceMatrix")
+    model_slot = gl_uniform_location(r.shadow_program, "model")
+    instanced_slot = gl_uniform_location(r.shadow_program, "isInstanced")
+    points_slot = gl_uniform_location(r.shadow_program, "instancePoints")
+    billboard_slot = gl_uniform_location(r.shadow_program, "instanceBillboard")
+    view_pos_slot = gl_uniform_location(r.shadow_program, "viewPos")
+    gl_uniform_vec3(view_pos_slot, cam.position.x, cam.position.y, cam.position.z)
+    skinned_slot = gl_uniform_location(r.shadow_program, "isSkinned")
+    bones_slot = gl_uniform_location(r.shadow_program, "bones")
+    gl_uniform_mat4(space, &r.shadow_space)
 
     r.shadow_batch_count = 0
     identity = core.mat4_ident()
@@ -2818,11 +2818,11 @@ render_shadow_pass(r: *GLRenderer, light: *Light, cam: *Camera) {
         } else {
             instanced = 0
             if m.is_instanced && core.model_instance_count(m) > 0 { instanced = 1 }
-            ae3d_gl_uniform_int(instanced_slot, instanced)
+            gl_uniform_int(instanced_slot, instanced)
             points = 0
             if instanced == 1 && geometry.inst_is_points(m.instances) == 1 { points = 1 }
-            ae3d_gl_uniform_int(points_slot, points)
-            ae3d_gl_uniform_int(billboard_slot, points * m.billboard)
+            gl_uniform_int(points_slot, points)
+            gl_uniform_int(billboard_slot, points * m.billboard)
             // The same rule as set_model_matrix: an instanced model's
             // transform is already in every instance, so the model matrix
             // goes as the identity or the scale and the rotation are
@@ -2831,14 +2831,14 @@ render_shadow_pass(r: *GLRenderer, light: *Light, cam: *Camera) {
             // A point stream has the model's frame here instead.
             if points == 1 {
                 placed = point_frame(m)
-                ae3d_gl_uniform_mat4(model_slot, &placed)
+                gl_uniform_mat4(model_slot, &placed)
             } else if instanced == 1 {
-                ae3d_gl_uniform_mat4(model_slot, &identity)
+                gl_uniform_mat4(model_slot, &identity)
             } else {
-                ae3d_gl_uniform_mat4(model_slot, &m.model_matrix)
+                gl_uniform_mat4(model_slot, &m.model_matrix)
             }
             pose_depth(skinned_slot, bones_slot, m)
-            ae3d_gl_vao_bind(depth_vao(m))
+            gl_vao_bind(depth_vao(m))
             draw_depth(r, m, instanced)
         }
         i = i + 1
@@ -2851,34 +2851,34 @@ render_shadow_pass(r: *GLRenderer, light: *Light, cam: *Camera) {
         if b.stale { fill_batch(r, b) }
         first = b.first as *Model
         if b.count == 1 {
-            ae3d_gl_uniform_int(instanced_slot, 0)
-            ae3d_gl_uniform_int(points_slot, 0)
-            ae3d_gl_uniform_mat4(model_slot, &first.model_matrix)
+            gl_uniform_int(instanced_slot, 0)
+            gl_uniform_int(points_slot, 0)
+            gl_uniform_mat4(model_slot, &first.model_matrix)
             pose_depth(skinned_slot, bones_slot, first)
-            ae3d_gl_vao_bind(first.vao)
+            gl_vao_bind(first.vao)
             draw_depth(r, first, 0)
         } else if b.count > 1 {
-            ae3d_gl_uniform_int(instanced_slot, 1)
-            ae3d_gl_uniform_int(points_slot, 0)
-            ae3d_gl_uniform_int(skinned_slot, 0)
-            ae3d_gl_uniform_mat4(model_slot, &identity)
-            ae3d_gl_vao_bind(b.vao)
+            gl_uniform_int(instanced_slot, 1)
+            gl_uniform_int(points_slot, 0)
+            gl_uniform_int(skinned_slot, 0)
+            gl_uniform_mat4(model_slot, &identity)
+            gl_vao_bind(b.vao)
             if b.stale {
-                b.capacity_bytes = ae3d_gl_batch_upload(b.vao,
-                                                        ae3d_gl_geometry_instance_vbo(b.vao),
+                b.capacity_bytes = gl_batch_upload(b.vao,
+                                                        gl_geometry_instance_vbo(b.vao),
                                                         b.instances, b.capacity_bytes)
                 b.stale = false
             }
-            ae3d_gl_draw_elements_instanced(core.mesh_index_count(first.mesh), 0, b.count)
+            gl_draw_elements_instanced(core.mesh_index_count(first.mesh), 0, b.count)
             r.last_draw_calls = r.last_draw_calls + 1
         }
         i = i + 1
     }
     render_crowd_shadows(r)
 
-    ae3d_gl_vao_bind(0)
+    gl_vao_bind(0)
     bind_output(r)
-    ae3d_gl_viewport(0, 0, r.viewport_width, r.viewport_height)
+    gl_viewport(0, 0, r.viewport_width, r.viewport_height)
 }
 
 // The crowd's shadow sub-pass: every pose-bank model, posed by its instances'
@@ -2903,40 +2903,40 @@ render_crowd_shadows(r: *GLRenderer) {
         if !m.is_instanced || core.model_instance_count(m) <= 0 { continue }
         if bound == 0 {
             use_program(r, r.crowd_shadow_program)
-            space_loc = ae3d_gl_uniform_location(r.crowd_shadow_program, "lightSpaceMatrix")
-            model_loc = ae3d_gl_uniform_location(r.crowd_shadow_program, "model")
-            bank_loc = ae3d_gl_uniform_location(r.crowd_shadow_program, "poseBank")
-            frames_loc = ae3d_gl_uniform_location(r.crowd_shadow_program, "poseBankFrames")
-            ae3d_gl_uniform_mat4(space_loc, &r.shadow_space)
+            space_loc = gl_uniform_location(r.crowd_shadow_program, "lightSpaceMatrix")
+            model_loc = gl_uniform_location(r.crowd_shadow_program, "model")
+            bank_loc = gl_uniform_location(r.crowd_shadow_program, "poseBank")
+            frames_loc = gl_uniform_location(r.crowd_shadow_program, "poseBankFrames")
+            gl_uniform_mat4(space_loc, &r.shadow_space)
             bound = 1
         }
         core.model_sync_transform(m)
         // Bring the per-instance placement and walk phase current, then let the
         // lit pass skip re-uploading the same data this frame.
         if m.instances_updated {
-            m.instance_vbo_capacity = ae3d_gl_update_instances(m.instances, m.instance_vbo,
+            m.instance_vbo_capacity = gl_update_instances(m.instances, m.instance_vbo,
                                                                m.instance_vbo_capacity)
             m.instances_updated = false
         }
         if m.instance_phases_updated && m.instance_phase_vbo != 0 {
-            ae3d_gl_update_instance_phases(m.instances, m.instance_phase_vbo)
+            gl_update_instance_phases(m.instances, m.instance_phase_vbo)
             m.instance_phases_updated = false
         }
         if m.pose_bank_texture == 0 {
-            m.pose_bank_texture = ae3d_gl_posebank_texture(posing.posebank_data(m.pose_bank), posing.posebank_frames(m.pose_bank), posing.posebank_bones(m.pose_bank))
+            m.pose_bank_texture = gl_posebank_texture(posing.posebank_data(m.pose_bank), posing.posebank_frames(m.pose_bank), posing.posebank_bones(m.pose_bank))
         }
-        ae3d_gl_texture_bind(3, m.pose_bank_texture)
-        ae3d_gl_uniform_int(bank_loc, 3)
-        ae3d_gl_uniform_int(frames_loc, m.pose_bank_frames)
+        gl_texture_bind(3, m.pose_bank_texture)
+        gl_uniform_int(bank_loc, 3)
+        gl_uniform_int(frames_loc, m.pose_bank_frames)
         // The identity, as the lit crowd draw sends: each figure's placement
         // is its instance matrix, built from the model's own scale, and a
         // shadow cast through the model matrix as well was scaled twice.
         crowd_identity = core.mat4_ident()
-        ae3d_gl_uniform_mat4(model_loc, &crowd_identity)
+        gl_uniform_mat4(model_loc, &crowd_identity)
         // Through the proxy's mesh where the model has one: the near tier
         // casts from the far tier's hundred and sixty-eight triangles.
-        ae3d_gl_vao_bind(depth_vao(m))
-        ae3d_gl_draw_elements_instanced(core.mesh_index_count(depth_mesh(m)), 0,
+        gl_vao_bind(depth_vao(m))
+        gl_draw_elements_instanced(core.mesh_index_count(depth_mesh(m)), 0,
                                         core.model_instance_count(m))
         r.last_draw_calls = r.last_draw_calls + 1
     }
@@ -2953,8 +2953,8 @@ depth_vao(m: *Model) -> int {
     proxy = m.depth_proxy as *Model
     if proxy.vbo == 0 || proxy.ebo == 0 || proxy.shares_geometry { return m.vao }
     if m.depth_proxy_vao == 0 {
-        m.depth_proxy_vao = ae3d_gl_vao_create()
-        ae3d_gl_setup_proxy_vao(m.depth_proxy_vao, proxy.vbo, proxy.ebo, proxy.skin_vbo,
+        m.depth_proxy_vao = gl_vao_create()
+        gl_setup_proxy_vao(m.depth_proxy_vao, proxy.vbo, proxy.ebo, proxy.skin_vbo,
                                 m.instance_vbo, m.instance_color_vbo, m.instance_phase_vbo)
     }
     return m.depth_proxy_vao
@@ -2970,9 +2970,9 @@ draw_depth(r: *GLRenderer, m: *Model, instanced: int) {
     indices = core.mesh_index_count(depth_mesh(m))
     if indices == 0 { return }
     if instanced == 1 {
-        ae3d_gl_draw_elements_instanced(indices, 0, core.model_instance_count(m))
+        gl_draw_elements_instanced(indices, 0, core.model_instance_count(m))
     } else {
-        ae3d_gl_draw_elements(indices, 0)
+        gl_draw_elements(indices, 0)
     }
     r.last_draw_calls = r.last_draw_calls + 1
 }
@@ -3059,12 +3059,12 @@ renderer_set_msaa(r: *GLRenderer, on: bool) {
     r.enable_msaa = on
     flag = 0
     if on { flag = 1 }
-    ae3d_gl_set_multisample(flag)
+    gl_set_multisample(flag)
 }
 
 // Reads back one pixel of the default framebuffer as 0xRRGGBB.
 read_pixel(x: int, y: int) -> int {
-    return ae3d_gl_read_pixel(x, y)
+    return gl_read_pixel(x, y)
 }
 
 // The bound framebuffer, written out as a PNG. For a windowed program the frame
@@ -3072,7 +3072,7 @@ read_pixel(x: int, y: int) -> int {
 // called in that window.
 // The frame on screen, written out as a PNG.
 snapshot(path: string, width: int, height: int) -> bool {
-    pixels = ae3d_gl_read_frame(width, height)
+    pixels = gl_read_frame(width, height)
     if pixels == null { return false }
     ok = png.write(path, pixels, width, height)
     free(pixels)
@@ -3094,7 +3094,7 @@ bind_output(r: *GLRenderer) {
     if r.target != null {
         offscreen.target_bind(r.target)
     } else {
-        ae3d_gl_fbo_bind(0)
+        gl_fbo_bind(0)
     }
 }
 
@@ -3128,41 +3128,41 @@ skybox_create(r: *GLRenderer, path: string) -> *Skybox {
         sky.texture = 0
         return sky
     }
-    sky.u_sky_procedural = ae3d_gl_uniform_location(sky.program, "skyProcedural")
-    sky.u_cloud_weather = ae3d_gl_uniform_location(sky.program, "cloudWeather")
-    sky.u_cloud_shape = ae3d_gl_uniform_location(sky.program, "cloudShape")
+    sky.u_sky_procedural = gl_uniform_location(sky.program, "skyProcedural")
+    sky.u_cloud_weather = gl_uniform_location(sky.program, "cloudWeather")
+    sky.u_cloud_shape = gl_uniform_location(sky.program, "cloudShape")
     ensure_cloud_textures(r, r.cloud_cover > 0.0)
 
-    sky.u_view = ae3d_gl_uniform_location(sky.program, "view")
-    sky.u_projection = ae3d_gl_uniform_location(sky.program, "projection")
-    sky.u_prev_view_projection = ae3d_gl_uniform_location(sky.program, "prevViewProjection")
-    sky.u_sampler = ae3d_gl_uniform_location(sky.program, "skybox")
-    sky.u_cloud_cover = ae3d_gl_uniform_location(sky.program, "cloudCover")
-    sky.u_sky_overcast = ae3d_gl_uniform_location(sky.program, "skyOvercast")
-    sky.u_sky_overcast_color = ae3d_gl_uniform_location(sky.program, "skyOvercastColor")
-    sky.u_cloud_time = ae3d_gl_uniform_location(sky.program, "cloudTime")
-    sky.u_cloud_frame = ae3d_gl_uniform_location(sky.program, "cloudFrame")
-    sky.u_cloud_sun = ae3d_gl_uniform_location(sky.program, "cloudSun")
-    sky.u_cloud_sun_color = ae3d_gl_uniform_location(sky.program, "cloudSunColor")
-    sky.u_cloud_eye = ae3d_gl_uniform_location(sky.program, "viewPos")
+    sky.u_view = gl_uniform_location(sky.program, "view")
+    sky.u_projection = gl_uniform_location(sky.program, "projection")
+    sky.u_prev_view_projection = gl_uniform_location(sky.program, "prevViewProjection")
+    sky.u_sampler = gl_uniform_location(sky.program, "skybox")
+    sky.u_cloud_cover = gl_uniform_location(sky.program, "cloudCover")
+    sky.u_sky_overcast = gl_uniform_location(sky.program, "skyOvercast")
+    sky.u_sky_overcast_color = gl_uniform_location(sky.program, "skyOvercastColor")
+    sky.u_cloud_time = gl_uniform_location(sky.program, "cloudTime")
+    sky.u_cloud_frame = gl_uniform_location(sky.program, "cloudFrame")
+    sky.u_cloud_sun = gl_uniform_location(sky.program, "cloudSun")
+    sky.u_cloud_sun_color = gl_uniform_location(sky.program, "cloudSunColor")
+    sky.u_cloud_eye = gl_uniform_location(sky.program, "viewPos")
 
     sky.mesh = core.mesh_create()
     core.mesh_push_skybox_cube(sky.mesh, sky.size)
 
-    sky.vao = ae3d_gl_vao_create()
-    ae3d_gl_vao_bind(sky.vao)
-    sky.vbo = ae3d_gl_buffer_create()
-    ae3d_gl_upload_mesh(sky.mesh, sky.vbo, 0)
-    ae3d_gl_setup_vertex_attribs()
-    ae3d_gl_vao_bind(0)
+    sky.vao = gl_vao_create()
+    gl_vao_bind(sky.vao)
+    sky.vbo = gl_buffer_create()
+    gl_upload_mesh(sky.mesh, sky.vbo, 0)
+    gl_setup_vertex_attribs()
+    gl_vao_bind(0)
     return sky
 }
 
 skybox_free(r: *GLRenderer, sky: *Skybox) {
     if sky == null { return }
-    if sky.vao != 0 { ae3d_gl_vao_delete(sky.vao) }
-    if sky.vbo != 0 { ae3d_gl_buffer_delete(sky.vbo) }
-    if sky.program != 0 { ae3d_gl_program_delete(sky.program) }
+    if sky.vao != 0 { gl_vao_delete(sky.vao) }
+    if sky.vbo != 0 { gl_buffer_delete(sky.vbo) }
+    if sky.program != 0 { gl_program_delete(sky.program) }
     if sky.texture != 0 && !sky.procedural { renderer_release_texture(r, sky.texture) }
     if sky.mesh != null { core.mesh_destroy(sky.mesh) }
     heap.free(sky)
@@ -3176,25 +3176,25 @@ render_skybox(r: *GLRenderer, cam: *Camera, light: *Light) {
     if sky == null || sky.texture == 0 || sky.vao == 0 { return }
 
     use_program(r, sky.program)
-    ae3d_gl_uniform_int(sky.u_sky_procedural, flag_int(sky.procedural))
+    gl_uniform_int(sky.u_sky_procedural, flag_int(sky.procedural))
     // The clouds over the image, lit by the scene's key light.
-    ae3d_gl_uniform_float(sky.u_cloud_cover, r.cloud_cover)
-    ae3d_gl_uniform_float(sky.u_sky_overcast, r.sky_overcast)
-    ae3d_gl_uniform_vec3(sky.u_sky_overcast_color, r.sky_overcast_color.x, r.sky_overcast_color.y, r.sky_overcast_color.z)
-    ae3d_gl_uniform_float(sky.u_cloud_time, r.scene_time * r.cloud_wind)
+    gl_uniform_float(sky.u_cloud_cover, r.cloud_cover)
+    gl_uniform_float(sky.u_sky_overcast, r.sky_overcast)
+    gl_uniform_vec3(sky.u_sky_overcast_color, r.sky_overcast_color.x, r.sky_overcast_color.y, r.sky_overcast_color.z)
+    gl_uniform_float(sky.u_cloud_time, r.scene_time * r.cloud_wind)
     // The frame for the march's dither only when the temporal pass will
     // fold it; still otherwise.
     cloud_frame = 0
     if r.enable_taa { cloud_frame = r.taa_frame % 64 + 1 }
-    ae3d_gl_uniform_int(sky.u_cloud_frame, cloud_frame)
-    ae3d_gl_uniform_vec3(sky.u_cloud_eye, cam.position.x, cam.position.y, cam.position.z)
+    gl_uniform_int(sky.u_cloud_frame, cloud_frame)
+    gl_uniform_vec3(sky.u_cloud_eye, cam.position.x, cam.position.y, cam.position.z)
     sun = key_light(r.lights, light)
     if sun != null {
-        ae3d_gl_uniform_vec3(sky.u_cloud_sun, sun.direction.x, sun.direction.y, sun.direction.z)
-        ae3d_gl_uniform_vec3(sky.u_cloud_sun_color, sun.color.x * sun.intensity, sun.color.y * sun.intensity, sun.color.z * sun.intensity)
+        gl_uniform_vec3(sky.u_cloud_sun, sun.direction.x, sun.direction.y, sun.direction.z)
+        gl_uniform_vec3(sky.u_cloud_sun_color, sun.color.x * sun.intensity, sun.color.y * sun.intensity, sun.color.z * sun.intensity)
     } else {
-        ae3d_gl_uniform_vec3(sky.u_cloud_sun, 0.0, 1.0, 0.0)
-        ae3d_gl_uniform_vec3(sky.u_cloud_sun_color, 1.0, 1.0, 1.0)
+        gl_uniform_vec3(sky.u_cloud_sun, 0.0, 1.0, 0.0)
+        gl_uniform_vec3(sky.u_cloud_sun_color, 1.0, 1.0, 1.0)
     }
 
     view = core.camera_view(cam)
@@ -3203,31 +3203,31 @@ render_skybox(r: *GLRenderer, cam: *Camera, light: *Light) {
     view.m14 = 0.0
     projection = core.camera_projection(cam)
 
-    ae3d_gl_uniform_mat4(sky.u_view, &view)
-    ae3d_gl_uniform_mat4(sky.u_projection, &projection)
+    gl_uniform_mat4(sky.u_view, &view)
+    gl_uniform_mat4(sky.u_projection, &projection)
     // Last frame's view, for the sky's motion vector: the camera's turn.
     previous = core.camera_view_projection(cam)
     if r.prev_vp_valid { previous = r.prev_vp }
-    ae3d_gl_uniform_mat4(sky.u_prev_view_projection, &previous)
-    ae3d_gl_uniform_int(sky.u_sampler, 0)
+    gl_uniform_mat4(sky.u_prev_view_projection, &previous)
+    gl_uniform_int(sky.u_sampler, 0)
 
     if r.cloud_cover > 0.0 { ensure_cloud_textures(r, true) }
-    ae3d_gl_set_depth_mask(0)
-    ae3d_gl_texture_bind(0, sky.texture)
-    ae3d_gl_uniform_int(sky.u_cloud_weather, 1)
-    ae3d_gl_texture_bind(1, r.cloud_weather_texture)
-    ae3d_gl_uniform_int(sky.u_cloud_shape, 2)
-    ae3d_gl_texture3d_bind(2, r.cloud_shape_texture)
+    gl_set_depth_mask(0)
+    gl_texture_bind(0, sky.texture)
+    gl_uniform_int(sky.u_cloud_weather, 1)
+    gl_texture_bind(1, r.cloud_weather_texture)
+    gl_uniform_int(sky.u_cloud_shape, 2)
+    gl_texture3d_bind(2, r.cloud_shape_texture)
     r.bound_texture = 0 - 1
-    ae3d_gl_vao_bind(sky.vao)
-    ae3d_gl_draw_arrays(0, 36)
-    ae3d_gl_vao_bind(0)
-    ae3d_gl_set_depth_mask(1)
+    gl_vao_bind(sky.vao)
+    gl_draw_arrays(0, 36)
+    gl_vao_bind(0)
+    gl_set_depth_mask(1)
     r.last_draw_calls = r.last_draw_calls + 1
 }
 
 renderer_update_viewport(r: *GLRenderer, width: int, height: int) {
-    ae3d_gl_viewport(0, 0, width, height)
+    gl_viewport(0, 0, width, height)
     r.viewport_width = width
     r.viewport_height = height
     if r.target != null { offscreen.target_resize(r.target, width, height) }
@@ -3284,14 +3284,14 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
     // submit is the driver taking the work, not doing it, so a pass that
     // doubled on the GPU can read as unchanged; these brackets measure the
     // work. The timer is made on first use because it needs a live context.
-    if r.pass_timer == null { r.pass_timer = ae3d_gl_passtimer_create() }
-    ae3d_gl_passtimer_frame(r.pass_timer)
+    if r.pass_timer == null { r.pass_timer = gl_passtimer_create() }
+    gl_passtimer_frame(r.pass_timer)
 
-    ae3d_gl_passtimer_begin(r.pass_timer, PASS_SHADOW)
+    gl_passtimer_begin(r.pass_timer, PASS_SHADOW)
     render_shadow_pass(r, active_light, cam)
-    ae3d_gl_passtimer_end(r.pass_timer)
+    gl_passtimer_end(r.pass_timer)
 
-    ae3d_gl_passtimer_begin(r.pass_timer, PASS_SCENE)
+    gl_passtimer_begin(r.pass_timer, PASS_SCENE)
     bind_output(r)
     post_active = begin_post_processing(r)
     r.last_post_active = post_active
@@ -3306,11 +3306,11 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
     // geometry rejects this frame's, which is holes punched through whatever
     // was nearer a moment ago. render_shadow_pass already guards its own clear
     // for this reason.
-    ae3d_gl_set_depth_mask(1)
-    ae3d_gl_clear_color(r.clear_r, r.clear_g, r.clear_b, 1.0)
-    ae3d_gl_clear(1, 1)
+    gl_set_depth_mask(1)
+    gl_clear_color(r.clear_r, r.clear_g, r.clear_b, 1.0)
+    gl_clear(1, 1)
     // The motion vectors start at zero, whatever the clear colour is.
-    if post_active && r.post_velocity != 0 { ae3d_gl_clear_attachment(1, 0.0, 0.0, 0.0, 0.0) }
+    if post_active && r.post_velocity != 0 { gl_clear_attachment(1, 0.0, 0.0, 0.0, 0.0) }
 
     // The seconds since the last frame, for the crowd's motion vectors;
     // a pause or a first frame counts as a short one.
@@ -3341,7 +3341,7 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
     // temporal pass to find each pixel's history by. Copied once, only
     // when something will read it.
     r.scene_depth = 0
-    if wants_scene_depth(r) || r.ssao_enabled || r.enable_taa { r.scene_depth = ae3d_gl_scene_depth_capture() }
+    if wants_scene_depth(r) || r.ssao_enabled || r.enable_taa { r.scene_depth = gl_scene_depth_capture() }
     if r.ssao_enabled && r.scene_depth != 0 && r.capture_channel == 0 { draw_occlusion(r, cam) }
 
     count = list.size(r.models)
@@ -3352,9 +3352,9 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
         i = i + 1
     }
 
-    ae3d_gl_passtimer_end(r.pass_timer)
+    gl_passtimer_end(r.pass_timer)
 
-    ae3d_gl_passtimer_begin(r.pass_timer, PASS_POST)
+    gl_passtimer_begin(r.pass_timer, PASS_POST)
     if post_active { resolve_post_processing(r, cam, view_projection, unjittered) }
     r.prev_vp = unjittered
     r.prev_vp_valid = true
@@ -3366,13 +3366,13 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
         i = i + 1
     }
     r.taa_frame = r.taa_frame + 1
-    ae3d_gl_passtimer_end(r.pass_timer)
+    gl_passtimer_end(r.pass_timer)
 
     // Three frames behind, which is what makes the read free: by the time a
     // result is asked for the GPU finished with it long ago.
-    r.last_shadow_ms = ae3d_gl_passtimer_ms(r.pass_timer, PASS_SHADOW)
-    r.last_scene_ms = ae3d_gl_passtimer_ms(r.pass_timer, PASS_SCENE)
-    r.last_post_ms = ae3d_gl_passtimer_ms(r.pass_timer, PASS_POST)
+    r.last_shadow_ms = gl_passtimer_ms(r.pass_timer, PASS_SHADOW)
+    r.last_scene_ms = gl_passtimer_ms(r.pass_timer, PASS_SCENE)
+    r.last_post_ms = gl_passtimer_ms(r.pass_timer, PASS_POST)
 }
 
 // A model can join a merged draw when nothing about it is per-model except
@@ -3467,13 +3467,13 @@ batch_for(r: *GLRenderer, m: *Model) -> *GLBatch {
 // same work apply_skeleton does, against those locations.
 pose_depth(skinned_slot: int, bones_slot: int, m: *Model) {
     if m.skeleton == null {
-        ae3d_gl_uniform_int(skinned_slot, 0)
+        gl_uniform_int(skinned_slot, 0)
         return
     }
     sk = m.skeleton as *Skeleton
     skin.skeleton_update(sk)
-    ae3d_gl_uniform_int(skinned_slot, 1)
-    ae3d_gl_uniform_mat4v(bones_slot, skin.skeleton_count(sk),
+    gl_uniform_int(skinned_slot, 1)
+    gl_uniform_mat4v(bones_slot, skin.skeleton_count(sk),
                           core.palette_data(skin.skeleton_palette(sk)))
 }
 
@@ -3600,30 +3600,30 @@ draw_batch(r: *GLRenderer, b: *GLBatch, view_projection: *Mat4, light: *Light, c
     apply_texture(r, slots, texture_for(r, material))
     apply_normal_map(r, slots, normal_for(r, material))
     apply_instancing(r, slots, 1)
-    ae3d_gl_uniform_int(slots.instance_points, 0)
-    ae3d_gl_uniform_int(slots.instance_billboard, 0)
+    gl_uniform_int(slots.instance_points, 0)
+    gl_uniform_int(slots.instance_billboard, 0)
     apply_instance_color(r, slots, 0)
 
     // The shader reads the instanced transform as model * instanceModel, so the
     // group transform has to be identity: a batch's matrices are already the
     // world transforms of the models it merged.
     identity = core.mat4_ident()
-    ae3d_gl_uniform_mat4(slots.model, &identity)
+    gl_uniform_mat4(slots.model, &identity)
     // Its members stand still: last frame's matrix is this frame's.
-    ae3d_gl_uniform_mat4(slots.prev_model, &identity)
+    gl_uniform_mat4(slots.prev_model, &identity)
 
     // A batch's members carry no settings of their own, so the program must not
     // still be holding the ones the model before them asked for.
     apply_shading(r, slots, null, r.default_program)
 
-    ae3d_gl_vao_bind(b.vao)
+    gl_vao_bind(b.vao)
     if b.stale {
-        b.capacity_bytes = ae3d_gl_batch_upload(b.vao, ae3d_gl_geometry_instance_vbo(b.vao),
+        b.capacity_bytes = gl_batch_upload(b.vao, gl_geometry_instance_vbo(b.vao),
                                                 b.instances, b.capacity_bytes)
         b.stale = false
     }
-    ae3d_gl_draw_elements_instanced(core.mesh_index_count((b.first as *Model).mesh), 0, b.count)
-    ae3d_gl_vao_bind(0)
+    gl_draw_elements_instanced(core.mesh_index_count((b.first as *Model).mesh), 0, b.count)
+    gl_vao_bind(0)
     r.last_draw_calls = r.last_draw_calls + 1
 }
 
@@ -3673,36 +3673,36 @@ wants_scene_depth(r: *GLRenderer) -> bool {
 draw_occlusion(r: *GLRenderer, cam: *Camera) {
     if r.ssao_program == 0 || r.screen_vao == 0 { return }
     use_program(r, r.ssao_program)
-    ae3d_gl_texture_bind(1, r.scene_depth)
+    gl_texture_bind(1, r.scene_depth)
     r.bound_texture = 0 - 1
-    ae3d_gl_uniform_int(ae3d_gl_uniform_location(r.ssao_program, "depthTexture"), 1)
-    ae3d_gl_uniform_int(ae3d_gl_uniform_location(r.ssao_program, "screenTexture"), 0)
+    gl_uniform_int(gl_uniform_location(r.ssao_program, "depthTexture"), 1)
+    gl_uniform_int(gl_uniform_location(r.ssao_program, "screenTexture"), 0)
     view_projection = core.camera_view_projection(cam)
     inverse = core.mat4_inverse(view_projection)
-    ae3d_gl_uniform_mat4(ae3d_gl_uniform_location(r.ssao_program, "viewProjection"), &view_projection)
-    ae3d_gl_uniform_mat4(ae3d_gl_uniform_location(r.ssao_program, "invViewProjection"), &inverse)
-    ae3d_gl_uniform_vec3(ae3d_gl_uniform_location(r.ssao_program, "viewPos"),
+    gl_uniform_mat4(gl_uniform_location(r.ssao_program, "viewProjection"), &view_projection)
+    gl_uniform_mat4(gl_uniform_location(r.ssao_program, "invViewProjection"), &inverse)
+    gl_uniform_vec3(gl_uniform_location(r.ssao_program, "viewPos"),
                          cam.position.x, cam.position.y, cam.position.z)
-    ae3d_gl_uniform_vec2(ae3d_gl_uniform_location(r.ssao_program, "screenSize"),
-                         ae3d_gl_viewport_width() * 1.0, ae3d_gl_viewport_height() * 1.0)
-    ae3d_gl_uniform_float(ae3d_gl_uniform_location(r.ssao_program, "ssaoRadius"), r.ssao_radius)
-    ae3d_gl_uniform_float(ae3d_gl_uniform_location(r.ssao_program, "ssaoIntensity"), r.ssao_intensity)
+    gl_uniform_vec2(gl_uniform_location(r.ssao_program, "screenSize"),
+                         gl_viewport_width() * 1.0, gl_viewport_height() * 1.0)
+    gl_uniform_float(gl_uniform_location(r.ssao_program, "ssaoRadius"), r.ssao_radius)
+    gl_uniform_float(gl_uniform_location(r.ssao_program, "ssaoIntensity"), r.ssao_intensity)
 
     set_depth_test(r, false)
-    ae3d_gl_set_depth_mask(0)
+    gl_set_depth_mask(0)
     set_wireframe(r, false)
     // AE3D_SSAO_SHOW=1 draws the occlusion itself in place of the scene,
     // for looking at what the pass found.
-    if core.env_int("AE3D_SSAO_SHOW", 0) == 1 { ae3d_gl_set_blend(0) } else { ae3d_gl_set_blend_multiply() }
-    ae3d_gl_vao_bind(r.screen_vao)
-    ae3d_gl_draw_arrays(0, 6)
-    ae3d_gl_vao_bind(0)
+    if core.env_int("AE3D_SSAO_SHOW", 0) == 1 { gl_set_blend(0) } else { gl_set_blend_multiply() }
+    gl_vao_bind(r.screen_vao)
+    gl_draw_arrays(0, 6)
+    gl_vao_bind(0)
     r.last_draw_calls = r.last_draw_calls + 1
 
     // The ordinary blend back, whatever the cache says it was.
-    ae3d_gl_set_blend(1)
+    gl_set_blend(1)
     r.blend_state = true
-    ae3d_gl_set_depth_mask(1)
+    gl_set_depth_mask(1)
     set_depth_test(r, core.depth_test())
     set_wireframe(r, core.debug_enabled())
 }
@@ -3713,14 +3713,14 @@ bind_scene_depth(r: *GLRenderer, slots: *ProgramSlots, cam: *Camera) {
     if slots.scene_depth < 0 { return }
     has = 0
     if r.scene_depth != 0 {
-        ae3d_gl_texture_bind(4, r.scene_depth)
+        gl_texture_bind(4, r.scene_depth)
         has = 1
     }
-    ae3d_gl_uniform_int(slots.scene_depth, 4)
-    ae3d_gl_uniform_int(slots.has_scene_depth, has)
-    ae3d_gl_uniform_vec2(slots.screen_size, ae3d_gl_viewport_width() * 1.0, ae3d_gl_viewport_height() * 1.0)
+    gl_uniform_int(slots.scene_depth, 4)
+    gl_uniform_int(slots.has_scene_depth, has)
+    gl_uniform_vec2(slots.screen_size, gl_viewport_width() * 1.0, gl_viewport_height() * 1.0)
     inverse = core.mat4_inverse(core.camera_view_projection(cam))
-    ae3d_gl_uniform_mat4(slots.inv_view_projection, &inverse)
+    gl_uniform_mat4(slots.inv_view_projection, &inverse)
 }
 
 render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
@@ -3773,7 +3773,7 @@ render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
     apply_shading(r, slots, m, program)
     if is_crowd { bind_pose_bank(r, slots, m) }
 
-    ae3d_gl_vao_bind(m.vao)
+    gl_vao_bind(m.vao)
 
     groups = core.model_group_count(m)
     if groups > 0 {
@@ -3808,7 +3808,7 @@ render_model(r: *GLRenderer, m: *Model, view_projection: *Mat4,
         }
     }
 
-    ae3d_gl_vao_bind(0)
+    gl_vao_bind(0)
 }
 
 texture_for(r: *GLRenderer, material: *Material) -> int {
@@ -3821,10 +3821,10 @@ texture_for(r: *GLRenderer, material: *Material) -> int {
 apply_transparency(r: *GLRenderer, transparent: bool) {
     set_blend(r, true)
     if transparent {
-        ae3d_gl_set_depth_mask(0)
+        gl_set_depth_mask(0)
         set_face_culling(r, false)
     } else {
-        ae3d_gl_set_depth_mask(1)
+        gl_set_depth_mask(1)
         set_face_culling(r, core.face_culling())
     }
 }
@@ -3839,25 +3839,25 @@ draw(r: *GLRenderer, m: *Model, slots: *ProgramSlots, count: int, byte_offset: i
     if m.is_instanced && core.model_instance_count(m) <= 0 { return }
     if m.is_instanced && core.model_instance_count(m) > 0 {
         if m.instances_updated {
-            m.instance_vbo_capacity = ae3d_gl_update_instances(m.instances, m.instance_vbo,
+            m.instance_vbo_capacity = gl_update_instances(m.instances, m.instance_vbo,
                                                                m.instance_vbo_capacity)
             m.instances_updated = false
         }
         if m.instance_colors_updated {
-            ae3d_gl_update_instance_colors(m.instances, m.instance_color_vbo)
+            gl_update_instance_colors(m.instances, m.instance_color_vbo)
             m.instance_colors_updated = false
         }
         if m.instance_phases_updated && m.instance_phase_vbo != 0 {
-            ae3d_gl_update_instance_phases(m.instances, m.instance_phase_vbo)
+            gl_update_instance_phases(m.instances, m.instance_phase_vbo)
             m.instance_phases_updated = false
         }
         apply_instancing(r, slots, 1)
         apply_points(slots, m)
         apply_instance_color(r, slots, 1)
-        ae3d_gl_draw_elements_instanced(count, byte_offset, core.model_instance_count(m))
+        gl_draw_elements_instanced(count, byte_offset, core.model_instance_count(m))
     } else {
         apply_instancing(r, slots, 0)
-        ae3d_gl_draw_elements(count, byte_offset)
+        gl_draw_elements(count, byte_offset)
     }
     r.last_draw_calls = r.last_draw_calls + 1
 }
@@ -3868,43 +3868,43 @@ draw(r: *GLRenderer, m: *Model, slots: *ProgramSlots, count: int, byte_offset: i
 // actually differs between draws.
 set_frame_uniforms(r: *GLRenderer, slots: *ProgramSlots, view_projection: *Mat4,
                    light: *Light, lights: ptr, cam: *Camera) {
-    ae3d_gl_uniform_mat4(slots.view_projection, view_projection)
+    gl_uniform_mat4(slots.view_projection, view_projection)
     // Last frame's view, unjittered, and this frame's nudge: what every
     // scene shader writes its motion vector from.
     previous = core.camera_view_projection(cam)
     if r.prev_vp_valid { previous = r.prev_vp }
-    ae3d_gl_uniform_mat4(slots.prev_view_projection, &previous)
-    ae3d_gl_uniform_vec2(slots.jitter, r.jitter_x, r.jitter_y)
-    ae3d_gl_uniform_vec2(slots.screen_size, r.post_width * 1.0, r.post_height * 1.0)
-    ae3d_gl_uniform_float(slots.normal_strength, r.normal_strength)
-    ae3d_gl_uniform_float(slots.occlusion_strength, r.occlusion_strength)
-    ae3d_gl_uniform_int(slots.capture_channel, r.capture_channel)
-    ae3d_gl_uniform_float(slots.wetness, r.wetness)
-    ae3d_gl_uniform_float(slots.frame_exposure, r.frame_exposure)
+    gl_uniform_mat4(slots.prev_view_projection, &previous)
+    gl_uniform_vec2(slots.jitter, r.jitter_x, r.jitter_y)
+    gl_uniform_vec2(slots.screen_size, r.post_width * 1.0, r.post_height * 1.0)
+    gl_uniform_float(slots.normal_strength, r.normal_strength)
+    gl_uniform_float(slots.occlusion_strength, r.occlusion_strength)
+    gl_uniform_int(slots.capture_channel, r.capture_channel)
+    gl_uniform_float(slots.wetness, r.wetness)
+    gl_uniform_float(slots.frame_exposure, r.frame_exposure)
 
     upload_lights(slots, lights, light, cam.position)
 
-    ae3d_gl_uniform_vec3(slots.view_pos, cam.position.x, cam.position.y, cam.position.z)
-    ae3d_gl_uniform_float(slots.view_distance, core.camera_far(cam))
-    ae3d_gl_uniform_float(slots.caustics_time, r.scene_time)
-    ae3d_gl_uniform_float(slots.cloud_cover, r.cloud_cover)
-    ae3d_gl_uniform_float(slots.cloud_time, r.scene_time * r.cloud_wind)
-    ae3d_gl_uniform_float(slots.sky_overcast, r.sky_overcast)
-    ae3d_gl_uniform_vec3(slots.sky_overcast_color, r.sky_overcast_color.x, r.sky_overcast_color.y, r.sky_overcast_color.z)
+    gl_uniform_vec3(slots.view_pos, cam.position.x, cam.position.y, cam.position.z)
+    gl_uniform_float(slots.view_distance, core.camera_far(cam))
+    gl_uniform_float(slots.caustics_time, r.scene_time)
+    gl_uniform_float(slots.cloud_cover, r.cloud_cover)
+    gl_uniform_float(slots.cloud_time, r.scene_time * r.cloud_wind)
+    gl_uniform_float(slots.sky_overcast, r.sky_overcast)
+    gl_uniform_vec3(slots.sky_overcast_color, r.sky_overcast_color.x, r.sky_overcast_color.y, r.sky_overcast_color.z)
     sun = key_light(lights, light)
     if sun != null {
-        ae3d_gl_uniform_vec3(slots.cloud_sun, sun.direction.x, sun.direction.y, sun.direction.z)
+        gl_uniform_vec3(slots.cloud_sun, sun.direction.x, sun.direction.y, sun.direction.z)
     } else {
-        ae3d_gl_uniform_vec3(slots.cloud_sun, 0.0, 1.0, 0.0)
+        gl_uniform_vec3(slots.cloud_sun, 0.0, 1.0, 0.0)
     }
 
     enabled = 0
     if r.fog.enabled { enabled = 1 }
-    ae3d_gl_uniform_int(slots.fog_enabled, enabled)
-    ae3d_gl_uniform_float(slots.fog_start, r.fog.start)
-    ae3d_gl_uniform_float(slots.fog_end, r.fog.end)
-    ae3d_gl_uniform_vec3(slots.fog_color, r.fog.color.x, r.fog.color.y, r.fog.color.z)
-    ae3d_gl_uniform_float(slots.fog_intensity, r.fog.intensity)
+    gl_uniform_int(slots.fog_enabled, enabled)
+    gl_uniform_float(slots.fog_start, r.fog.start)
+    gl_uniform_float(slots.fog_end, r.fog.end)
+    gl_uniform_vec3(slots.fog_color, r.fog.color.x, r.fog.color.y, r.fog.color.z)
+    gl_uniform_float(slots.fog_intensity, r.fog.intensity)
 }
 
 // Every light the scene holds, capped at what the shader declares.
@@ -3935,14 +3935,14 @@ upload_lights(slots: *ProgramSlots, lights: ptr, key: *Light, eye: Vec3) {
         i = i + 1
     }
     list.free(taken)
-    ae3d_gl_uniform_int(slots.light_count, count)
+    gl_uniform_int(slots.light_count, count)
 
     first = key_light(lights, key)
     if first != null {
-        ae3d_gl_uniform_vec3(slots.compat_light_pos, first.position.x, first.position.y, first.position.z)
-        ae3d_gl_uniform_vec3(slots.compat_light_color, first.color.x, first.color.y, first.color.z)
-        ae3d_gl_uniform_float(slots.compat_light_intensity, first.intensity)
-        ae3d_gl_uniform_vec3(slots.compat_light_direction, first.direction.x, first.direction.y, first.direction.z)
+        gl_uniform_vec3(slots.compat_light_pos, first.position.x, first.position.y, first.position.z)
+        gl_uniform_vec3(slots.compat_light_color, first.color.x, first.color.y, first.color.z)
+        gl_uniform_float(slots.compat_light_intensity, first.intensity)
+        gl_uniform_vec3(slots.compat_light_direction, first.direction.x, first.direction.y, first.direction.z)
     }
 }
 
@@ -3957,23 +3957,23 @@ key_light(lights: ptr, key: *Light) -> *Light {
 upload_light(slots_of: int[], index: int, l: *Light) {
     if l == null { return }
     base = index * LIGHT_SLOTS
-    ae3d_gl_uniform_vec3(slots_of[base], l.position.x, l.position.y, l.position.z)
-    ae3d_gl_uniform_vec3(slots_of[base + 1], l.color.x, l.color.y, l.color.z)
-    ae3d_gl_uniform_float(slots_of[base + 2], l.intensity)
-    ae3d_gl_uniform_float(slots_of[base + 3], l.ambient_strength)
-    ae3d_gl_uniform_float(slots_of[base + 4], l.temperature)
+    gl_uniform_vec3(slots_of[base], l.position.x, l.position.y, l.position.z)
+    gl_uniform_vec3(slots_of[base + 1], l.color.x, l.color.y, l.color.z)
+    gl_uniform_float(slots_of[base + 2], l.intensity)
+    gl_uniform_float(slots_of[base + 3], l.ambient_strength)
+    gl_uniform_float(slots_of[base + 4], l.temperature)
 
     kind = 0
     if l.mode == core.MODE_DIRECTIONAL { kind = 1 }
     if l.mode == core.MODE_SPOT { kind = 2 }
-    ae3d_gl_uniform_int(slots_of[base + 5], kind)
+    gl_uniform_int(slots_of[base + 5], kind)
 
-    ae3d_gl_uniform_vec3(slots_of[base + 6], l.direction.x, l.direction.y, l.direction.z)
-    ae3d_gl_uniform_float(slots_of[base + 7], l.constant_atten)
-    ae3d_gl_uniform_float(slots_of[base + 8], l.linear_atten)
-    ae3d_gl_uniform_float(slots_of[base + 9], l.quadratic_atten)
-    ae3d_gl_uniform_float(slots_of[base + 10], l.spot_cos_outer)
-    ae3d_gl_uniform_float(slots_of[base + 11], l.spot_cos_inner)
+    gl_uniform_vec3(slots_of[base + 6], l.direction.x, l.direction.y, l.direction.z)
+    gl_uniform_float(slots_of[base + 7], l.constant_atten)
+    gl_uniform_float(slots_of[base + 8], l.linear_atten)
+    gl_uniform_float(slots_of[base + 9], l.quadratic_atten)
+    gl_uniform_float(slots_of[base + 10], l.spot_cos_outer)
+    gl_uniform_float(slots_of[base + 11], l.spot_cos_inner)
 }
 
 // Unit 1, because unit 0 is the material's own texture and changes per group.
@@ -3989,30 +3989,30 @@ upload_light(slots_of: int[], index: int, l: *Light) {
 // so this is also what keeps the two backends showing the same scene.
 bind_shadow_map(r: *GLRenderer, slots: *ProgramSlots) {
     if !r.shadow_enabled || r.shadow_map == 0 {
-        ae3d_gl_uniform_int(slots.has_shadow_map, 0)
+        gl_uniform_int(slots.has_shadow_map, 0)
         return
     }
-    ae3d_gl_uniform_int(slots.has_shadow_map, 1)
+    gl_uniform_int(slots.has_shadow_map, 1)
     // Turn the shadow term on with the map. The fragment shader gates it behind
     // enableShadows, and only the rendering.Config path and the water module
     // ever set that -- so an engine-API scene (its models made straight from
     // core) bound a shadow map the shader then ignored, and nothing cast a
     // shadow. Default it on, at a readable strength, whenever a real map is
     // bound; a model that wants no shadow still overrides these per draw.
-    ae3d_gl_uniform_int(slots.enable_shadows, 1)
-    ae3d_gl_uniform_float(slots.shadow_intensity, 0.32)
-    ae3d_gl_uniform_float(slots.shadow_softness, 0.35)
-    ae3d_gl_uniform_mat4(slots.light_space, &r.shadow_space)
-    ae3d_gl_uniform_vec3(slots.shadow_direction, r.shadow_direction.x,
+    gl_uniform_int(slots.enable_shadows, 1)
+    gl_uniform_float(slots.shadow_intensity, 0.32)
+    gl_uniform_float(slots.shadow_softness, 0.35)
+    gl_uniform_mat4(slots.light_space, &r.shadow_space)
+    gl_uniform_vec3(slots.shadow_direction, r.shadow_direction.x,
                          r.shadow_direction.y, r.shadow_direction.z)
-    ae3d_gl_uniform_float(slots.shadow_texel_world, r.shadow_texel_world)
-    ae3d_gl_texture_bind(1, r.shadow_map)
-    ae3d_gl_uniform_int(slots.shadow_map, 1)
+    gl_uniform_float(slots.shadow_texel_world, r.shadow_texel_world)
+    gl_texture_bind(1, r.shadow_map)
+    gl_uniform_int(slots.shadow_map, 1)
     // Leaves unit zero on the default texture, so the cache that decides
     // whether a model needs its own bound has to be told. Without this a model
     // whose texture matched the one before it kept the default instead: the
     // cache believed the texture was still there and skipped the bind.
-    ae3d_gl_texture_bind(0, r.default_texture)
+    gl_texture_bind(0, r.default_texture)
     r.bound_texture = r.default_texture
 }
 
@@ -4034,10 +4034,10 @@ set_model_matrix(slots: *ProgramSlots, m: *Model) {
             sent = core.mat4_ident()
         }
     }
-    ae3d_gl_uniform_mat4(slots.model, &sent)
+    gl_uniform_mat4(slots.model, &sent)
     // And last frame's, for the motion vectors.
     previous = core.model_prev_matrix(m, sent)
-    ae3d_gl_uniform_mat4(slots.prev_model, &previous)
+    gl_uniform_mat4(slots.prev_model, &previous)
 }
 
 // A model's matrix without its translation: what a point instance is
@@ -4052,22 +4052,22 @@ point_frame(m: *Model) -> Mat4 {
 
 set_material_uniforms(slots: *ProgramSlots, material: *Material) {
     if material == null {
-        ae3d_gl_uniform_vec3(slots.diffuse_color, 1.0, 1.0, 1.0)
-        ae3d_gl_uniform_vec3(slots.specular_color, 1.0, 1.0, 1.0)
-        ae3d_gl_uniform_float(slots.metallic, 0.0)
-        ae3d_gl_uniform_float(slots.roughness, 0.5)
-        ae3d_gl_uniform_float(slots.exposure, 1.0)
-        ae3d_gl_uniform_float(slots.reflectivity, 0.0)
-        ae3d_gl_uniform_float(slots.material_alpha, 1.0)
+        gl_uniform_vec3(slots.diffuse_color, 1.0, 1.0, 1.0)
+        gl_uniform_vec3(slots.specular_color, 1.0, 1.0, 1.0)
+        gl_uniform_float(slots.metallic, 0.0)
+        gl_uniform_float(slots.roughness, 0.5)
+        gl_uniform_float(slots.exposure, 1.0)
+        gl_uniform_float(slots.reflectivity, 0.0)
+        gl_uniform_float(slots.material_alpha, 1.0)
         return
     }
-    ae3d_gl_uniform_vec3(slots.diffuse_color, material.diffuse.x, material.diffuse.y, material.diffuse.z)
-    ae3d_gl_uniform_vec3(slots.specular_color, material.specular.x, material.specular.y, material.specular.z)
-    ae3d_gl_uniform_float(slots.metallic, material.metallic)
-    ae3d_gl_uniform_float(slots.roughness, material.roughness)
-    ae3d_gl_uniform_float(slots.exposure, material.exposure)
-    ae3d_gl_uniform_float(slots.reflectivity, material.reflectivity)
-    ae3d_gl_uniform_float(slots.material_alpha, material.alpha)
+    gl_uniform_vec3(slots.diffuse_color, material.diffuse.x, material.diffuse.y, material.diffuse.z)
+    gl_uniform_vec3(slots.specular_color, material.specular.x, material.specular.y, material.specular.z)
+    gl_uniform_float(slots.metallic, material.metallic)
+    gl_uniform_float(slots.roughness, material.roughness)
+    gl_uniform_float(slots.exposure, material.exposure)
+    gl_uniform_float(slots.reflectivity, material.reflectivity)
+    gl_uniform_float(slots.material_alpha, material.alpha)
 }
 
 // A mesh edited after the model was registered. The geometry cache hands the
@@ -4078,17 +4078,17 @@ refresh_geometry(r: *GLRenderer, m: *Model) {
     if m.vao == 0 || geometry.mesh_dirty(m.mesh) != 1 { return }
 
     if m.shares_geometry {
-        ae3d_gl_geometry_release(m.vao)
-        m.vao = ae3d_gl_vao_create()
-        ae3d_gl_vao_bind(m.vao)
-        m.vbo = ae3d_gl_buffer_create()
-        m.ebo = ae3d_gl_buffer_create()
-        ae3d_gl_upload_mesh(m.mesh, m.vbo, m.ebo)
-        ae3d_gl_setup_vertex_attribs()
+        gl_geometry_release(m.vao)
+        m.vao = gl_vao_create()
+        gl_vao_bind(m.vao)
+        m.vbo = gl_buffer_create()
+        m.ebo = gl_buffer_create()
+        gl_upload_mesh(m.mesh, m.vbo, m.ebo)
+        gl_setup_vertex_attribs()
         m.shares_geometry = false
     } else {
-        ae3d_gl_vao_bind(m.vao)
-        ae3d_gl_upload_mesh(m.mesh, m.vbo, m.ebo)
+        gl_vao_bind(m.vao)
+        gl_upload_mesh(m.mesh, m.vbo, m.ebo)
     }
     geometry.mesh_clear_dirty(m.mesh)
     core.model_recalculate_bounds(m)
@@ -4117,26 +4117,26 @@ set_model_uniforms(m: *Model, program: int) {
         uniform = core.model_uniform(m, i)
         if uniform != null {
             if uniform.cached_program != program {
-                uniform.location = ae3d_gl_uniform_location(program, uniform.name)
+                uniform.location = gl_uniform_location(program, uniform.name)
                 if uniform.location < 0 {
                     indexed = string.concat(uniform.name, "[0]")
-                    uniform.location = ae3d_gl_uniform_location(program, indexed)
+                    uniform.location = gl_uniform_location(program, indexed)
                     string.free(indexed)
                 }
                 uniform.cached_program = program
             }
             if uniform.location >= 0 {
                 if uniform.kind == core.UNIFORM_FLOAT {
-                    ae3d_gl_uniform_float(uniform.location, uniform.number)
+                    gl_uniform_float(uniform.location, uniform.number)
                 } else if uniform.kind == core.UNIFORM_INT {
-                    ae3d_gl_uniform_int(uniform.location, uniform.integer)
+                    gl_uniform_int(uniform.location, uniform.integer)
                 } else if uniform.kind == core.UNIFORM_VEC3 {
-                    ae3d_gl_uniform_vec3(uniform.location, uniform.vector.x,
+                    gl_uniform_vec3(uniform.location, uniform.vector.x,
                                          uniform.vector.y, uniform.vector.z)
                 } else if uniform.kind == core.UNIFORM_FLOAT_ARRAY {
-                    ae3d_gl_uniform_float_array(uniform.location, uniform.array)
+                    gl_uniform_float_array(uniform.location, uniform.array)
                 } else if uniform.kind == core.UNIFORM_VEC3_ARRAY {
-                    ae3d_gl_uniform_vec3_array(uniform.location, uniform.array)
+                    gl_uniform_vec3_array(uniform.location, uniform.array)
                 }
             }
         }
@@ -4145,40 +4145,40 @@ set_model_uniforms(m: *Model, program: int) {
 }
 
 init_post_processing(r: *GLRenderer, width: int, height: int) {
-    r.post_fbo = ae3d_gl_fbo_create()
-    r.post_texture = ae3d_gl_fbo_attach_color(r.post_fbo, width, height, 0)
-    r.post_velocity = ae3d_gl_fbo_attach_velocity(r.post_fbo, width, height)
-    r.post_depth = ae3d_gl_fbo_attach_depth(r.post_fbo, width, height)
-    if ae3d_gl_fbo_complete() != 1 {
+    r.post_fbo = gl_fbo_create()
+    r.post_texture = gl_fbo_attach_color(r.post_fbo, width, height, 0)
+    r.post_velocity = gl_fbo_attach_velocity(r.post_fbo, width, height)
+    r.post_depth = gl_fbo_attach_depth(r.post_fbo, width, height)
+    if gl_fbo_complete() != 1 {
         println("ae3d: post-processing framebuffer incomplete")
     }
-    ae3d_gl_fbo_bind(0)
+    gl_fbo_bind(0)
 
     // An effect otherwise runs over a frame with no antialiasing, since the
     // scene goes into this framebuffer rather than the multisampled default.
     r.post_width = width
     r.post_height = height
-    r.post_samples = ae3d_gl_max_samples()
+    r.post_samples = gl_max_samples()
     if r.post_samples > 0 {
-        r.post_ms_fbo = ae3d_gl_fbo_create()
+        r.post_ms_fbo = gl_fbo_create()
         attach_multisample_post(r, width, height)
     }
 
-    r.bloom_fbo = ae3d_gl_fbo_create()
-    r.bloom_texture = ae3d_gl_fbo_attach_color(r.bloom_fbo, width / 4, height / 4, 1)
-    if ae3d_gl_fbo_complete() != 1 {
+    r.bloom_fbo = gl_fbo_create()
+    r.bloom_texture = gl_fbo_attach_color(r.bloom_fbo, width / 4, height / 4, 1)
+    if gl_fbo_complete() != 1 {
         println("ae3d: bloom framebuffer incomplete")
     }
-    ae3d_gl_fbo_bind(0)
+    gl_fbo_bind(0)
 
     r.screen_mesh = core.mesh_create()
     core.mesh_push_screen_quad(r.screen_mesh)
-    r.screen_vao = ae3d_gl_vao_create()
-    ae3d_gl_vao_bind(r.screen_vao)
-    r.screen_vbo = ae3d_gl_buffer_create()
-    ae3d_gl_upload_mesh(r.screen_mesh, r.screen_vbo, 0)
-    ae3d_gl_setup_vertex_attribs()
-    ae3d_gl_vao_bind(0)
+    r.screen_vao = gl_vao_create()
+    gl_vao_bind(r.screen_vao)
+    r.screen_vbo = gl_buffer_create()
+    gl_upload_mesh(r.screen_mesh, r.screen_vbo, 0)
+    gl_setup_vertex_attribs()
+    gl_vao_bind(0)
 
     if r.post_samples > 0 && !multisample_resolve_works(r) {
         println("ae3d: this driver does not resolve a multisampled framebuffer, effects will run without it")
@@ -4201,22 +4201,22 @@ resize_post_processing(r: *GLRenderer, width: int, height: int) {
     if clamped_width > MAX_FBO_DIMENSION { clamped_width = MAX_FBO_DIMENSION }
     if clamped_height > MAX_FBO_DIMENSION { clamped_height = MAX_FBO_DIMENSION }
 
-    if r.post_texture != 0 { ae3d_gl_texture_delete(r.post_texture) }
-    if r.post_velocity != 0 { ae3d_gl_texture_delete(r.post_velocity) }
-    if r.post_depth != 0 { ae3d_gl_renderbuffer_delete(r.post_depth) }
-    if r.bloom_texture != 0 { ae3d_gl_texture_delete(r.bloom_texture) }
+    if r.post_texture != 0 { gl_texture_delete(r.post_texture) }
+    if r.post_velocity != 0 { gl_texture_delete(r.post_velocity) }
+    if r.post_depth != 0 { gl_renderbuffer_delete(r.post_depth) }
+    if r.bloom_texture != 0 { gl_texture_delete(r.bloom_texture) }
 
     r.post_width = clamped_width
     r.post_height = clamped_height
-    r.post_texture = ae3d_gl_fbo_attach_color(r.post_fbo, clamped_width, clamped_height, 0)
-    r.post_velocity = ae3d_gl_fbo_attach_velocity(r.post_fbo, clamped_width, clamped_height)
-    r.post_depth = ae3d_gl_fbo_attach_depth(r.post_fbo, clamped_width, clamped_height)
-    ae3d_gl_fbo_bind(0)
+    r.post_texture = gl_fbo_attach_color(r.post_fbo, clamped_width, clamped_height, 0)
+    r.post_velocity = gl_fbo_attach_velocity(r.post_fbo, clamped_width, clamped_height)
+    r.post_depth = gl_fbo_attach_depth(r.post_fbo, clamped_width, clamped_height)
+    gl_fbo_bind(0)
 
     if r.post_ms_fbo != 0 {
-        if r.post_ms_color != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_color) }
-        if r.post_ms_velocity != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_velocity) }
-        if r.post_ms_depth != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_depth) }
+        if r.post_ms_color != 0 { gl_renderbuffer_delete(r.post_ms_color) }
+        if r.post_ms_velocity != 0 { gl_renderbuffer_delete(r.post_ms_velocity) }
+        if r.post_ms_depth != 0 { gl_renderbuffer_delete(r.post_ms_depth) }
         attach_multisample_post(r, clamped_width, clamped_height)
     }
 
@@ -4224,8 +4224,8 @@ resize_post_processing(r: *GLRenderer, width: int, height: int) {
     bloom_height = clamped_height / 4
     if bloom_width < 1 { bloom_width = 1 }
     if bloom_height < 1 { bloom_height = 1 }
-    r.bloom_texture = ae3d_gl_fbo_attach_color(r.bloom_fbo, bloom_width, bloom_height, 1)
-    ae3d_gl_fbo_bind(0)
+    r.bloom_texture = gl_fbo_attach_color(r.bloom_fbo, bloom_width, bloom_height, 1)
+    gl_fbo_bind(0)
     resize_taa(r, clamped_width, clamped_height)
 }
 
@@ -4233,12 +4233,12 @@ resize_post_processing(r: *GLRenderer, width: int, height: int) {
 // attached to the one framebuffer in turn as the pass runs. A resize
 // empties the history.
 resize_taa(r: *GLRenderer, width: int, height: int) {
-    if r.taa_fbo == 0 { r.taa_fbo = ae3d_gl_fbo_create() }
-    if r.taa_texture0 != 0 { ae3d_gl_texture_delete(r.taa_texture0) }
-    if r.taa_texture1 != 0 { ae3d_gl_texture_delete(r.taa_texture1) }
-    r.taa_texture0 = ae3d_gl_fbo_attach_color(r.taa_fbo, width, height, 0)
-    r.taa_texture1 = ae3d_gl_fbo_attach_color(r.taa_fbo, width, height, 0)
-    ae3d_gl_fbo_bind(0)
+    if r.taa_fbo == 0 { r.taa_fbo = gl_fbo_create() }
+    if r.taa_texture0 != 0 { gl_texture_delete(r.taa_texture0) }
+    if r.taa_texture1 != 0 { gl_texture_delete(r.taa_texture1) }
+    r.taa_texture0 = gl_fbo_attach_color(r.taa_fbo, width, height, 0)
+    r.taa_texture1 = gl_fbo_attach_color(r.taa_fbo, width, height, 0)
+    gl_fbo_bind(0)
     r.taa_history_valid = false
     r.taa_current = 0
 }
@@ -4256,26 +4256,26 @@ draw_taa(r: *GLRenderer, cam: *Camera, view_projection: Mat4, unjittered: Mat4) 
     into = r.taa_texture0
     history = r.taa_texture1
     if r.taa_current == 1 { into = r.taa_texture1 ; history = r.taa_texture0 }
-    ae3d_gl_fbo_bind(r.taa_fbo)
-    ae3d_gl_fbo_set_color(r.taa_fbo, into)
-    ae3d_gl_viewport(0, 0, r.post_width, r.post_height)
+    gl_fbo_bind(r.taa_fbo)
+    gl_fbo_set_color(r.taa_fbo, into)
+    gl_viewport(0, 0, r.post_width, r.post_height)
     use_program(r, r.taa_program)
-    ae3d_gl_texture_bind(0, r.post_texture)
-    ae3d_gl_texture_bind(1, r.scene_depth)
-    ae3d_gl_texture_bind(2, history)
-    ae3d_gl_texture_bind(3, r.post_velocity)
+    gl_texture_bind(0, r.post_texture)
+    gl_texture_bind(1, r.scene_depth)
+    gl_texture_bind(2, history)
+    gl_texture_bind(3, r.post_velocity)
     r.bound_texture = 0 - 1
-    ae3d_gl_uniform_int(ae3d_gl_uniform_location(r.taa_program, "screenTexture"), 0)
-    ae3d_gl_uniform_int(ae3d_gl_uniform_location(r.taa_program, "depthTexture"), 1)
-    ae3d_gl_uniform_int(ae3d_gl_uniform_location(r.taa_program, "historyTexture"), 2)
-    ae3d_gl_uniform_int(ae3d_gl_uniform_location(r.taa_program, "velocityTexture"), 3)
-    ae3d_gl_uniform_vec2(ae3d_gl_uniform_location(r.taa_program, "screenSize"), r.post_width * 1.0, r.post_height * 1.0)
+    gl_uniform_int(gl_uniform_location(r.taa_program, "screenTexture"), 0)
+    gl_uniform_int(gl_uniform_location(r.taa_program, "depthTexture"), 1)
+    gl_uniform_int(gl_uniform_location(r.taa_program, "historyTexture"), 2)
+    gl_uniform_int(gl_uniform_location(r.taa_program, "velocityTexture"), 3)
+    gl_uniform_vec2(gl_uniform_location(r.taa_program, "screenSize"), r.post_width * 1.0, r.post_height * 1.0)
     blend = 1.0
     if r.taa_history_valid { blend = 0.1 }
-    ae3d_gl_uniform_float(ae3d_gl_uniform_location(r.taa_program, "taaBlend"), blend)
-    ae3d_gl_vao_bind(r.screen_vao)
-    ae3d_gl_draw_arrays(0, 6)
-    ae3d_gl_vao_bind(0)
+    gl_uniform_float(gl_uniform_location(r.taa_program, "taaBlend"), blend)
+    gl_vao_bind(r.screen_vao)
+    gl_draw_arrays(0, 6)
+    gl_vao_bind(0)
     r.last_draw_calls = r.last_draw_calls + 1
     r.taa_history_valid = true
     r.taa_current = 1 - r.taa_current
@@ -4291,8 +4291,8 @@ begin_post_processing(r: *GLRenderer) -> bool {
     if r.capture_channel != 0 && r.render_scale > 0.999 { return false }
     if r.post_fbo == 0 || r.post_texture == 0 || r.screen_vao == 0 { return false }
 
-    width = ae3d_gl_viewport_width()
-    height = ae3d_gl_viewport_height()
+    width = gl_viewport_width()
+    height = gl_viewport_height()
     if width <= 0 || height <= 0 { return false }
 
     if width != r.viewport_width || height != r.viewport_height {
@@ -4303,16 +4303,16 @@ begin_post_processing(r: *GLRenderer) -> bool {
 
     target_fbo = r.post_fbo
     if r.post_samples > 0 && r.post_ms_fbo != 0 { target_fbo = r.post_ms_fbo }
-    ae3d_gl_fbo_bind(target_fbo)
-    if ae3d_gl_fbo_complete() != 1 {
+    gl_fbo_bind(target_fbo)
+    if gl_fbo_complete() != 1 {
         bind_output(r)
         return false
     }
     // The scene writes its colour and its motion vectors.
-    if r.post_velocity != 0 { ae3d_gl_draw_buffers(2) }
+    if r.post_velocity != 0 { gl_draw_buffers(2) }
     // The scene is drawn at the buffer's size, which is the viewport's only when
     // the render scale is 1. resolve_post_processing puts the viewport back.
-    ae3d_gl_viewport(0, 0, r.post_width, r.post_height)
+    gl_viewport(0, 0, r.post_width, r.post_height)
     return true
 }
 
@@ -4328,69 +4328,69 @@ multisample_resolve_works(r: *GLRenderer) -> bool {
     // Drawn, not just cleared. A driver was found that resolves a buffer it
     // only had to clear and produces nothing from one that was drawn into,
     // which is the case that matters and the one that was coming out black.
-    ae3d_gl_fbo_bind(r.post_ms_fbo)
-    ae3d_gl_viewport(0, 0, r.post_width, r.post_height)
-    ae3d_gl_clear_color(0.0, 0.0, 0.0, 1.0)
-    ae3d_gl_clear(1, 1)
+    gl_fbo_bind(r.post_ms_fbo)
+    gl_viewport(0, 0, r.post_width, r.post_height)
+    gl_clear_color(0.0, 0.0, 0.0, 1.0)
+    gl_clear(1, 1)
     set_depth_test(r, false)
-    ae3d_gl_set_depth_mask(0)
+    gl_set_depth_mask(0)
     set_blend(r, false)
     use_program(r, r.passthrough_program)
-    ae3d_gl_uniform_int(ae3d_gl_uniform_location(r.passthrough_program, "screenTexture"), 0)
-    ae3d_gl_vao_bind(r.screen_vao)
-    ae3d_gl_texture_bind(0, r.default_texture)
+    gl_uniform_int(gl_uniform_location(r.passthrough_program, "screenTexture"), 0)
+    gl_vao_bind(r.screen_vao)
+    gl_texture_bind(0, r.default_texture)
     r.bound_texture = r.default_texture
-    ae3d_gl_draw_arrays(0, 6)
-    ae3d_gl_vao_bind(0)
+    gl_draw_arrays(0, 6)
+    gl_vao_bind(0)
 
-    refused = ae3d_gl_fbo_resolve(r.post_ms_fbo, r.post_fbo, r.post_width, r.post_height)
-    ae3d_gl_fbo_bind(r.post_fbo)
-    centre = ae3d_gl_read_pixel(r.post_width / 2, r.post_height / 2)
-    ae3d_gl_fbo_bind(0)
+    refused = gl_fbo_resolve(r.post_ms_fbo, r.post_fbo, r.post_width, r.post_height)
+    gl_fbo_bind(r.post_fbo)
+    centre = gl_read_pixel(r.post_width / 2, r.post_height / 2)
+    gl_fbo_bind(0)
 
     set_depth_test(r, true)
-    ae3d_gl_set_depth_mask(1)
+    gl_set_depth_mask(1)
     set_blend(r, true)
     return refused == 0 && centre == 0xFFFFFF
 }
 
 drop_multisample_post(r: *GLRenderer) {
-    if r.post_ms_color != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_color) ; r.post_ms_color = 0 }
-    if r.post_ms_velocity != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_velocity) ; r.post_ms_velocity = 0 }
-    if r.post_ms_depth != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_depth) ; r.post_ms_depth = 0 }
-    if r.post_ms_fbo != 0 { ae3d_gl_fbo_delete(r.post_ms_fbo) ; r.post_ms_fbo = 0 }
+    if r.post_ms_color != 0 { gl_renderbuffer_delete(r.post_ms_color) ; r.post_ms_color = 0 }
+    if r.post_ms_velocity != 0 { gl_renderbuffer_delete(r.post_ms_velocity) ; r.post_ms_velocity = 0 }
+    if r.post_ms_depth != 0 { gl_renderbuffer_delete(r.post_ms_depth) ; r.post_ms_depth = 0 }
+    if r.post_ms_fbo != 0 { gl_fbo_delete(r.post_ms_fbo) ; r.post_ms_fbo = 0 }
     r.post_samples = 0
 }
 
 attach_multisample_post(r: *GLRenderer, width: int, height: int) {
-    r.post_ms_color = ae3d_gl_fbo_attach_color_multisample(r.post_ms_fbo, width, height,
+    r.post_ms_color = gl_fbo_attach_color_multisample(r.post_ms_fbo, width, height,
                                                            r.post_samples)
-    r.post_ms_velocity = ae3d_gl_fbo_attach_velocity_multisample(r.post_ms_fbo, width, height,
+    r.post_ms_velocity = gl_fbo_attach_velocity_multisample(r.post_ms_fbo, width, height,
                                                                  r.post_samples)
-    r.post_ms_depth = ae3d_gl_fbo_attach_depth_multisample(r.post_ms_fbo, width, height,
+    r.post_ms_depth = gl_fbo_attach_depth_multisample(r.post_ms_fbo, width, height,
                                                            r.post_samples)
-    if ae3d_gl_fbo_complete() != 1 {
-        ae3d_gl_renderbuffer_delete(r.post_ms_color)
-        ae3d_gl_renderbuffer_delete(r.post_ms_velocity)
-        ae3d_gl_renderbuffer_delete(r.post_ms_depth)
+    if gl_fbo_complete() != 1 {
+        gl_renderbuffer_delete(r.post_ms_color)
+        gl_renderbuffer_delete(r.post_ms_velocity)
+        gl_renderbuffer_delete(r.post_ms_depth)
         r.post_ms_color = 0
         r.post_ms_velocity = 0
         r.post_ms_depth = 0
         r.post_samples = 0
     }
-    ae3d_gl_fbo_bind(0)
+    gl_fbo_bind(0)
 }
 
 resolve_post_processing(r: *GLRenderer, cam: *Camera, view_projection: Mat4, unjittered: Mat4) {
     // The scene is drawn; the passes after it write the colour alone.
-    if r.post_velocity != 0 { ae3d_gl_draw_buffers(1) }
+    if r.post_velocity != 0 { gl_draw_buffers(1) }
     if r.post_samples > 0 && r.post_ms_fbo != 0 {
         // The size the buffers were made at, not whatever the viewport says.
         // A resolve of the wrong rectangle leaves the effect reading a frame
         // nothing was written into.
-        refused = ae3d_gl_fbo_resolve(r.post_ms_fbo, r.post_fbo, r.post_width, r.post_height)
+        refused = gl_fbo_resolve(r.post_ms_fbo, r.post_fbo, r.post_width, r.post_height)
         if refused == 0 && r.post_ms_velocity != 0 {
-            refused = ae3d_gl_fbo_resolve_attachment(r.post_ms_fbo, r.post_fbo, r.post_width, r.post_height, 1)
+            refused = gl_fbo_resolve_attachment(r.post_ms_fbo, r.post_fbo, r.post_width, r.post_height, 1)
         }
         if refused != 0 && !r.post_resolve_reported {
             println("ae3d: the driver refused the multisample resolve (0x${refused}), effects will run without it")
@@ -4399,18 +4399,18 @@ resolve_post_processing(r: *GLRenderer, cam: *Camera, view_projection: Mat4, unj
         }
     }
     set_depth_test(r, false)
-    ae3d_gl_set_depth_mask(0)
+    gl_set_depth_mask(0)
     set_blend(r, false)
     set_wireframe(r, false)
     source = draw_taa(r, cam, view_projection, unjittered)
     bind_output(r)
     // Back to the full frame for the composite: the scene pass may have been
     // drawn smaller, and this is the step that puts it back on the window.
-    ae3d_gl_viewport(0, 0, r.viewport_width, r.viewport_height)
+    gl_viewport(0, 0, r.viewport_width, r.viewport_height)
 
-    ae3d_gl_clear(1, 0)
-    ae3d_gl_vao_bind(r.screen_vao)
-    ae3d_gl_texture_bind(0, source)
+    gl_clear(1, 0)
+    gl_vao_bind(r.screen_vao)
+    gl_texture_bind(0, source)
 
 
     // A texel of the texture being sampled, which is the post buffer, not the
@@ -4420,27 +4420,27 @@ resolve_post_processing(r: *GLRenderer, cam: *Camera, view_projection: Mat4, unj
 
     if r.enable_bloom && r.bloom_program != 0 {
         use_program(r, r.bloom_program)
-        ae3d_gl_uniform_int(ae3d_gl_uniform_location(r.bloom_program, "screenTexture"), 0)
-        ae3d_gl_uniform_vec2(ae3d_gl_uniform_location(r.bloom_program, "texelSize"), texel_x, texel_y)
-        ae3d_gl_uniform_float(ae3d_gl_uniform_location(r.bloom_program, "bloomThreshold"), r.bloom_threshold)
-        ae3d_gl_uniform_float(ae3d_gl_uniform_location(r.bloom_program, "bloomIntensity"), r.bloom_intensity)
+        gl_uniform_int(gl_uniform_location(r.bloom_program, "screenTexture"), 0)
+        gl_uniform_vec2(gl_uniform_location(r.bloom_program, "texelSize"), texel_x, texel_y)
+        gl_uniform_float(gl_uniform_location(r.bloom_program, "bloomThreshold"), r.bloom_threshold)
+        gl_uniform_float(gl_uniform_location(r.bloom_program, "bloomIntensity"), r.bloom_intensity)
     } else if r.enable_fxaa && r.fxaa_program != 0 {
         use_program(r, r.fxaa_program)
-        ae3d_gl_uniform_int(ae3d_gl_uniform_location(r.fxaa_program, "screenTexture"), 0)
-        ae3d_gl_uniform_vec2(ae3d_gl_uniform_location(r.fxaa_program, "texelSize"), texel_x, texel_y)
-        ae3d_gl_uniform_float(ae3d_gl_uniform_location(r.fxaa_program, "edgeThreshold"), 0.125)
-        ae3d_gl_uniform_float(ae3d_gl_uniform_location(r.fxaa_program, "edgeThresholdMin"), 0.0625)
-        ae3d_gl_uniform_float(ae3d_gl_uniform_location(r.fxaa_program, "subpixelQuality"), 0.75)
+        gl_uniform_int(gl_uniform_location(r.fxaa_program, "screenTexture"), 0)
+        gl_uniform_vec2(gl_uniform_location(r.fxaa_program, "texelSize"), texel_x, texel_y)
+        gl_uniform_float(gl_uniform_location(r.fxaa_program, "edgeThreshold"), 0.125)
+        gl_uniform_float(gl_uniform_location(r.fxaa_program, "edgeThresholdMin"), 0.0625)
+        gl_uniform_float(gl_uniform_location(r.fxaa_program, "subpixelQuality"), 0.75)
     } else {
         use_program(r, r.passthrough_program)
-        ae3d_gl_uniform_int(ae3d_gl_uniform_location(r.passthrough_program, "screenTexture"), 0)
+        gl_uniform_int(gl_uniform_location(r.passthrough_program, "screenTexture"), 0)
     }
 
-    ae3d_gl_draw_arrays(0, 6)
-    ae3d_gl_vao_bind(0)
+    gl_draw_arrays(0, 6)
+    gl_vao_bind(0)
 
     set_depth_test(r, true)
-    ae3d_gl_set_depth_mask(1)
+    gl_set_depth_mask(1)
     set_blend(r, true)
 }
 
@@ -4468,16 +4468,16 @@ renderer_cleanup(r: *GLRenderer) {
     // are gone, so a glDeleteQueries there dereferences a context that no longer
     // exists -- which a desktop driver shrugs off and llvmpipe segfaults on.
     if r.pass_timer != null {
-        ae3d_gl_passtimer_destroy(r.pass_timer)
+        gl_passtimer_destroy(r.pass_timer)
         r.pass_timer = null
     }
     // The clouds' textures, for the same reason.
     if r.cloud_shape_texture != 0 {
-        ae3d_gl_texture_delete(r.cloud_shape_texture)
+        gl_texture_delete(r.cloud_shape_texture)
         r.cloud_shape_texture = 0
     }
     if r.cloud_weather_texture != 0 {
-        ae3d_gl_texture_delete(r.cloud_weather_texture)
+        gl_texture_delete(r.cloud_weather_texture)
         r.cloud_weather_texture = 0
     }
 
@@ -4497,22 +4497,22 @@ renderer_cleanup(r: *GLRenderer) {
             // it here would take a vertex array other models are still drawing
             // from and leave the cache believing it still owns one.
             if m.shares_geometry {
-                ae3d_gl_geometry_release(m.vao)
+                gl_geometry_release(m.vao)
                 m.vao = 0
                 m.vbo = 0
                 m.ebo = 0
                 m.shares_geometry = false
             } else {
-                if m.vao != 0 { ae3d_gl_vao_delete(m.vao) ; m.vao = 0 }
-                if m.vbo != 0 { ae3d_gl_buffer_delete(m.vbo) ; m.vbo = 0 }
-                if m.ebo != 0 { ae3d_gl_buffer_delete(m.ebo) ; m.ebo = 0 }
+                if m.vao != 0 { gl_vao_delete(m.vao) ; m.vao = 0 }
+                if m.vbo != 0 { gl_buffer_delete(m.vbo) ; m.vbo = 0 }
+                if m.ebo != 0 { gl_buffer_delete(m.ebo) ; m.ebo = 0 }
             }
-            if m.instance_vbo != 0 { ae3d_gl_buffer_delete(m.instance_vbo) ; m.instance_vbo = 0 }
+            if m.instance_vbo != 0 { gl_buffer_delete(m.instance_vbo) ; m.instance_vbo = 0 }
             if m.instance_color_vbo != 0 {
-                ae3d_gl_buffer_delete(m.instance_color_vbo)
+                gl_buffer_delete(m.instance_color_vbo)
                 m.instance_color_vbo = 0
             }
-            if m.depth_proxy_vao != 0 { ae3d_gl_vao_delete(m.depth_proxy_vao) ; m.depth_proxy_vao = 0 }
+            if m.depth_proxy_vao != 0 { gl_vao_delete(m.depth_proxy_vao) ; m.depth_proxy_vao = 0 }
         }
         i = i + 1
     }
@@ -4523,7 +4523,7 @@ renderer_cleanup(r: *GLRenderer) {
     while i < count {
         entry = list.get_raw(r.textures, i) as *TextureEntry
         if entry != null {
-            ae3d_gl_texture_delete(entry.id)
+            gl_texture_delete(entry.id)
             heap.free(entry)
         }
         i = i + 1
@@ -4531,32 +4531,32 @@ renderer_cleanup(r: *GLRenderer) {
     list.clear(r.textures)
 
     if r.skybox != null { skybox_free(r, r.skybox as *Skybox) ; r.skybox = null }
-    if r.default_texture != 0 { ae3d_gl_texture_delete(r.default_texture) ; r.default_texture = 0 }
-    if r.screen_vao != 0 { ae3d_gl_vao_delete(r.screen_vao) ; r.screen_vao = 0 }
-    if r.screen_vbo != 0 { ae3d_gl_buffer_delete(r.screen_vbo) ; r.screen_vbo = 0 }
-    if r.post_texture != 0 { ae3d_gl_texture_delete(r.post_texture) ; r.post_texture = 0 }
-    if r.bloom_texture != 0 { ae3d_gl_texture_delete(r.bloom_texture) ; r.bloom_texture = 0 }
-    if r.post_depth != 0 { ae3d_gl_renderbuffer_delete(r.post_depth) ; r.post_depth = 0 }
-    if r.post_ms_color != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_color) ; r.post_ms_color = 0 }
-    if r.post_ms_velocity != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_velocity) ; r.post_ms_velocity = 0 }
-    if r.post_ms_depth != 0 { ae3d_gl_renderbuffer_delete(r.post_ms_depth) ; r.post_ms_depth = 0 }
-    if r.post_ms_fbo != 0 { ae3d_gl_fbo_delete(r.post_ms_fbo) ; r.post_ms_fbo = 0 }
-    if r.post_fbo != 0 { ae3d_gl_fbo_delete(r.post_fbo) ; r.post_fbo = 0 }
-    if r.bloom_fbo != 0 { ae3d_gl_fbo_delete(r.bloom_fbo) ; r.bloom_fbo = 0 }
-    if r.taa_texture0 != 0 { ae3d_gl_texture_delete(r.taa_texture0) ; r.taa_texture0 = 0 }
-    if r.taa_texture1 != 0 { ae3d_gl_texture_delete(r.taa_texture1) ; r.taa_texture1 = 0 }
-    if r.taa_fbo != 0 { ae3d_gl_fbo_delete(r.taa_fbo) ; r.taa_fbo = 0 }
-    if r.taa_program != 0 { ae3d_gl_program_delete(r.taa_program) ; r.taa_program = 0 }
-    if r.shadow_map != 0 { ae3d_gl_texture_delete(r.shadow_map) ; r.shadow_map = 0 }
-    if r.shadow_fbo != 0 { ae3d_gl_fbo_delete(r.shadow_fbo) ; r.shadow_fbo = 0 }
+    if r.default_texture != 0 { gl_texture_delete(r.default_texture) ; r.default_texture = 0 }
+    if r.screen_vao != 0 { gl_vao_delete(r.screen_vao) ; r.screen_vao = 0 }
+    if r.screen_vbo != 0 { gl_buffer_delete(r.screen_vbo) ; r.screen_vbo = 0 }
+    if r.post_texture != 0 { gl_texture_delete(r.post_texture) ; r.post_texture = 0 }
+    if r.bloom_texture != 0 { gl_texture_delete(r.bloom_texture) ; r.bloom_texture = 0 }
+    if r.post_depth != 0 { gl_renderbuffer_delete(r.post_depth) ; r.post_depth = 0 }
+    if r.post_ms_color != 0 { gl_renderbuffer_delete(r.post_ms_color) ; r.post_ms_color = 0 }
+    if r.post_ms_velocity != 0 { gl_renderbuffer_delete(r.post_ms_velocity) ; r.post_ms_velocity = 0 }
+    if r.post_ms_depth != 0 { gl_renderbuffer_delete(r.post_ms_depth) ; r.post_ms_depth = 0 }
+    if r.post_ms_fbo != 0 { gl_fbo_delete(r.post_ms_fbo) ; r.post_ms_fbo = 0 }
+    if r.post_fbo != 0 { gl_fbo_delete(r.post_fbo) ; r.post_fbo = 0 }
+    if r.bloom_fbo != 0 { gl_fbo_delete(r.bloom_fbo) ; r.bloom_fbo = 0 }
+    if r.taa_texture0 != 0 { gl_texture_delete(r.taa_texture0) ; r.taa_texture0 = 0 }
+    if r.taa_texture1 != 0 { gl_texture_delete(r.taa_texture1) ; r.taa_texture1 = 0 }
+    if r.taa_fbo != 0 { gl_fbo_delete(r.taa_fbo) ; r.taa_fbo = 0 }
+    if r.taa_program != 0 { gl_program_delete(r.taa_program) ; r.taa_program = 0 }
+    if r.shadow_map != 0 { gl_texture_delete(r.shadow_map) ; r.shadow_map = 0 }
+    if r.shadow_fbo != 0 { gl_fbo_delete(r.shadow_fbo) ; r.shadow_fbo = 0 }
 
-    if r.default_program != 0 { ae3d_gl_program_delete(r.default_program) ; r.default_program = 0 }
-    if r.shadow_program != 0 { ae3d_gl_program_delete(r.shadow_program) ; r.shadow_program = 0 }
-    if r.crowd_shadow_program != 0 { ae3d_gl_program_delete(r.crowd_shadow_program) ; r.crowd_shadow_program = 0 }
-    if r.fxaa_program != 0 { ae3d_gl_program_delete(r.fxaa_program) ; r.fxaa_program = 0 }
-    if r.bloom_program != 0 { ae3d_gl_program_delete(r.bloom_program) ; r.bloom_program = 0 }
+    if r.default_program != 0 { gl_program_delete(r.default_program) ; r.default_program = 0 }
+    if r.shadow_program != 0 { gl_program_delete(r.shadow_program) ; r.shadow_program = 0 }
+    if r.crowd_shadow_program != 0 { gl_program_delete(r.crowd_shadow_program) ; r.crowd_shadow_program = 0 }
+    if r.fxaa_program != 0 { gl_program_delete(r.fxaa_program) ; r.fxaa_program = 0 }
+    if r.bloom_program != 0 { gl_program_delete(r.bloom_program) ; r.bloom_program = 0 }
     if r.passthrough_program != 0 {
-        ae3d_gl_program_delete(r.passthrough_program)
+        gl_program_delete(r.passthrough_program)
         r.passthrough_program = 0
     }
 
