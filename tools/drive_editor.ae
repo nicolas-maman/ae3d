@@ -920,6 +920,33 @@ viewport_width(t: *Tree) -> float {
     return 0.0
 }
 
+// The height the editor renders the view at, off the same stats bar.
+viewport_height(t: *Tree) -> float {
+    n = tree_count(t)
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.kind == "text" && string.contains(w.raw_text, " tris ") != 0 {
+            text = w.raw_text
+            end = string.length(text)
+            start = end
+            while start > 0 && string.char_at(text, start - 1) != 32 { start = start - 1 }
+            size = string.substring(text, start, end)
+            cross = string.string_index_of(size, "x")
+            height = 0.0
+            if cross > 0 {
+                digits = string.substring(size, cross + 1, string.length(size))
+                height = string.get_double(digits)
+                string.free(digits)
+            }
+            string.free(size)
+            return height
+        }
+        i = i + 1
+    }
+    return 0.0
+}
+
 // The splitter inside the other one: the viewport against the inspector.
 inner_splitter(t: *Tree) -> *Widget {
     n = list.size(t.widgets)
@@ -2196,8 +2223,18 @@ run_checks() {
         check("the viewport takes keys over the channel", handle >= 0)
         if raise_btn >= 0 && canvas != null && handle >= 0 {
             click(raise_btn)
-            cx = (canvas.w / 2.0) as int
-            cy = (canvas.h / 2.0) as int
+            // The centre of the view. GTK reports the viewport's canvas as
+            // 0 x 0 (aether-ui#211), and a stroke at its "centre" was a
+            // stroke at the corner, over no terrain at all (#353): the size
+            // the editor renders at, off the stats bar, stands in for it.
+            view_w = canvas.w
+            view_h = canvas.h
+            if view_w <= 0.0 || view_h <= 0.0 {
+                view_w = viewport_width(t)
+                view_h = viewport_height(t)
+            }
+            cx = (view_w / 2.0) as int
+            cy = (view_h / 2.0) as int
             post("/canvas/${handle}/click?x=${cx}&y=${cy}")
             post("/canvas/${handle}/move?x=${cx + 12}&y=${cy + 4}")
             post("/canvas/${handle}/release?x=${cx + 12}&y=${cy + 4}")
@@ -2206,13 +2243,10 @@ run_checks() {
             t = wait_for(wt, 20.0, ok)
             free(wt as ptr)
             stroked = ok[0] == 1
-            // On Linux the stroke through the GTK4 canvas routes sculpts
-            // nothing yet (#353); a note there, a check everywhere else.
-            if os.platform() == "linux" {
-                check_note("a stroke on the terrain moves its columns", stroked, "sculpted ${sculpted(t)}", 353)
-            } else {
-                check_detail("a stroke on the terrain moves its columns", stroked, "sculpted ${sculpted(t)}")
-            }
+            // Held on Linux too: the stroke sculpted nothing there only
+            // because it was aimed at the centre of a canvas GTK reports as
+            // 0 x 0, the view's corner (#353).
+            check_detail("a stroke on the terrain moves its columns", stroked, "sculpted ${sculpted(t)}")
             // A stroke is one undo step from press to release, and undoing
             // it puts the ground back: the surface's triangle count after
             // the stroke is not the count before it, and after undo it is.
