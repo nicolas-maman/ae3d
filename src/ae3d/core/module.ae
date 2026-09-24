@@ -36,7 +36,7 @@ exports (
     v3_neg, v3_dot, v3_cross, v3_len, v3_len_sq, v3_normalize, v3_distance, v3_lerp, v3_eq,
     v3_zero, v4_from_v3, v4_xyz, quat_ident, quat_rotate, quat_mul, quat_apply,
     quat_normalize, quat_len, quat_is_zero, quat_from_euler, quat_mat4,
-    quat_conjugate, quat_from_to, mat4_ident,
+    quat_conjugate, quat_from_to, quat_slerp, mat4_ident,
     mat4_zero, mat4_mul, mat4_mul_v4, mat4_transform_point, mat4_translate, mat4_scale,
     mat4_perspective, mat4_ortho, mat4_look_at, mat4_inverse, mat4_transpose, mat4_col,
     mat4_at, deg_to_rad, rad_to_deg, clampf, lerpf, PI, TWO_PI, HALF_PI, sin_of, cos_of,
@@ -870,6 +870,24 @@ quat_apply(q: Quat, v: Vec3) -> Vec3 {
     qv = Vec3 { x: q.x, y: q.y, z: q.z }
     cross = v3_cross(qv, v)
     return v3_add(v3_add(v, v3_mul(cross, 2.0 * q.w)), v3_cross(v3_mul(qv, 2.0), cross))
+}
+
+// The rotation `t` of the way from a to b, along the shorter arc.
+quat_slerp(a: Quat, b: Quat, t: float) -> Quat {
+    d = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w
+    c = b
+    if d < 0.0 {
+        c = Quat { x: 0.0 - b.x, y: 0.0 - b.y, z: 0.0 - b.z, w: 0.0 - b.w }
+        d = 0.0 - d
+    }
+    if d > 0.9995 {
+        return quat_normalize(Quat { x: a.x + (c.x - a.x) * t, y: a.y + (c.y - a.y) * t,
+                                     z: a.z + (c.z - a.z) * t, w: a.w + (c.w - a.w) * t })
+    }
+    angle = acos(d)
+    s0 = sin(angle * (1.0 - t)) / sin(angle)
+    s1 = sin(angle * t) / sin(angle)
+    return Quat { x: a.x * s0 + c.x * s1, y: a.y * s0 + c.y * s1, z: a.z * s0 + c.z * s1, w: a.w * s0 + c.w * s1 }
 }
 
 quat_from_euler(pitch: float, yaw: float, roll: float) -> Quat {

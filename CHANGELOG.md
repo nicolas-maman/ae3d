@@ -2,6 +2,29 @@
 
 ## [current]
 
+### Getting up
+
+- A figure on the ground gets up (#414): `motion.get_up`, or by itself
+  `set_get_up` seconds after it settles. It goes up the way it lies. Face
+  up, it sits up, crouches over its feet and stands. Face down, it pushes
+  onto its hands and knees first. It ends on the animation's own pose,
+  moved to where it stands and turned the way it rose, so the hand-over is
+  seamless: 0°, 0 mm. On the way up, no drawn bone turns more than 4.6° in
+  a step. The way is keyed on the rig from the ragdoll's own bones, bent in
+  the frame its knees give it, and the bodies follow it as an animated
+  figure's do. The reference ragdoll's joints are too stiff to sit or
+  crouch on its muscles.
+- Two jumps gone:
+  - `POWERED` to `ANIMATED` blends over a quarter second.
+  - A figure powered from a rig that drove it (a walker struck, a figure
+    just up) is drawn going from the rig's pose to its bodies' over a
+    quarter second. The bodies follow a rig of other proportions only to
+    within about 10° a limb, and it showed.
+- A limp figure keeps the animation's pose it was let go from, so powering
+  it again plays the animation rather than the pose it fell in.
+- `street_drive`'s bystanders, knocked down, lie three seconds and get up.
+- `tests/test_get_up.ae`: face up, face down, limp, and a blend, 24 checks.
+
 ### Natural motion in the street
 
 - A powered figure is drawn as its bodies are (#414). The rig had shown

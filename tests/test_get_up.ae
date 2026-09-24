@@ -1,0 +1,390 @@
+// Getting up (#414): active ragdolls knocked down get up, held to numbers.
+// Four figures, each in a humanoid rig of its own, on one ground:
+//
+//   - the face-up, POWERED, knocked over backwards (a blow to the chest
+//     from in front): it gets up by itself half a second after it
+//     settles, sitting up and standing over its feet, and stays up,
+//     POWERED, facing the way its feet lay;
+//   - the face-down, POWERED and not protecting itself, tripped: its legs
+//     swept back and its chest pushed forward, so it lands on its front.
+//     Up the same way, onto its hands and knees first, facing the way its
+//     head lay;
+//   - the limp, LIMP from the start, crumpled where it stood: up by itself,
+//     ANIMATED at the end;
+//   - the blended, POWERED and standing, set ANIMATED: a quarter second's
+//     blend from its bodies to its animation.
+//
+// For each, from the moment it starts until a second after it ends: the
+// drawn rig's worst turn of any mapped bone in one step, and its hips'
+// worst move in one step -- a pop is either, and the hand-over to the
+// animation at the end is one of the steps; the lowest any of its bodies
+// goes; and, standing again, how upright it is and how high its pelvis.
+
+import ae3d.core
+import ae3d.engine
+import ae3d.behaviour
+import ae3d.loader
+import ae3d.physics
+import ae3d.skin
+import ae3d.motion
+import aephysics.human
+
+extern acos(x: float) -> float
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+const STEPS = 600                    // ten seconds at 60
+const FELL = 400.0                   // newton seconds: past the budget
+const FIGURES = 4
+const FACE_UP = 0
+const FACE_DOWN = 1
+const LIMP_ONE = 2
+const BLENDED = 3
+
+// Per figure, what was measured.
+const FIELDS = 14
+const STARTED = 0                    // the step it started getting up (or blending); -1 not yet
+const ENDED = 1                      // the step it ended; -1 not yet
+const WORST_TURN = 2                 // radians, any mapped rig bone in one step
+const WORST_MOVE = 3                 // metres, the drawn hips in one step
+const LOWEST = 4                     // metres, the lowest point of its bodies while it rose
+const WAY_X = 5                      // the way it should face standing, level
+const WAY_Z = 6
+const HANDOFF_TURN = 7               // radians, the worst in the step it handed over
+const HANDOFF_MOVE = 8
+const WORST_TILT_AFTER = 9           // radians, its lean in the second after
+const WATCHING = 10                  // 1 while measured
+const WORST_BONE = 11                // which bone turned the most, and when
+const WORST_STEP = 12
+const LAY_UP = 13                    // 1 when it lay face up as it started
+
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, ok: bool) {
+    g_checks = g_checks + 1
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        g_failures = g_failures + 1
+        println("  FAIL ${name}")
+    }
+}
+
+rig_bone(rig: *Skeleton, name: string, parent: *Model, x: float, y: float, z: float) -> *Model {
+    m = core.model_new()
+    core.model_set_name(m, name)
+    core.model_set_position(m, x, y, z)
+    if parent != null { core.model_set_parent(m, parent) }
+    skin.skeleton_add(rig, m)
+    return m
+}
+
+// A skeleton named and proportioned as the pipeline's figure is.
+humanoid_rig() -> *Skeleton {
+    rig = skin.skeleton_new()
+    root = rig_bone(rig, "Root", null, 0.0, 0.0, 0.0)
+    hips = rig_bone(rig, "Hips", root, 0.0, 1.0, 0.0)
+    spine = rig_bone(rig, "Spine", hips, 0.0, 0.13, 0.0)
+    chest = rig_bone(rig, "Chest", spine, 0.0, 0.26, 0.0)
+    neck = rig_bone(rig, "Neck", chest, 0.0, 0.22, 0.0)
+    rig_bone(rig, "Head", neck, 0.0, 0.09, 0.0)
+    shoulder_l = rig_bone(rig, "ShoulderL", chest, 0.17, 0.14, 0.0)
+    elbow_l = rig_bone(rig, "ElbowL", shoulder_l, 0.0, 0.0 - 0.29, 0.0)
+    rig_bone(rig, "WristL", elbow_l, 0.0, 0.0 - 0.26, 0.0)
+    shoulder_r = rig_bone(rig, "ShoulderR", chest, 0.0 - 0.17, 0.14, 0.0)
+    elbow_r = rig_bone(rig, "ElbowR", shoulder_r, 0.0, 0.0 - 0.29, 0.0)
+    rig_bone(rig, "WristR", elbow_r, 0.0, 0.0 - 0.26, 0.0)
+    thigh_l = rig_bone(rig, "ThighL", hips, 0.1, 0.0 - 0.07, 0.0)
+    knee_l = rig_bone(rig, "KneeL", thigh_l, 0.0, 0.0 - 0.44, 0.0)
+    ankle_l = rig_bone(rig, "AnkleL", knee_l, 0.0, 0.0 - 0.42, 0.0)
+    rig_bone(rig, "ToeL", ankle_l, 0.0, 0.0 - 0.05, 0.0 - 0.15)
+    thigh_r = rig_bone(rig, "ThighR", hips, 0.0 - 0.1, 0.0 - 0.07, 0.0)
+    knee_r = rig_bone(rig, "KneeR", thigh_r, 0.0, 0.0 - 0.44, 0.0)
+    ankle_r = rig_bone(rig, "AnkleR", knee_r, 0.0, 0.0 - 0.42, 0.0)
+    rig_bone(rig, "ToeR", ankle_r, 0.0, 0.0 - 0.05, 0.0 - 0.15)
+    skin.skeleton_bind(rig)
+    return rig
+}
+
+struct Stage {
+    figures: ptr                     // *Motion[FIGURES]
+    rigs: ptr                        // *Skeleton[FIGURES]
+    record: ptr                      // float[FIGURES * FIELDS]
+    last: ptr                        // float[FIGURES * (BONE_COUNT * 4 + 3)]: last step's drawn rotations and hips
+    pose: ptr                        // float[BONE_COUNT * POSE_STRIDE], scratch
+    steps: int
+    was_moving: ptr                  // int[FIGURES]: getting up or blending last step
+}
+
+figure(e: *Engine, name: string, x: float, s: *Stage, slot: int) -> *Motion {
+    r = physics.ragdoll(e, name, core.vec3(x, 0.02, 0.0), 8.0, 8.0, 1.0)
+    rig = humanoid_rig()
+    physics.ragdoll_dress(r, rig)
+    (s.rigs as ptr[])[slot] = rig as ptr
+    m = motion.active_ragdoll(r)
+    motion.attach(e, m)
+    (s.figures as ptr[])[slot] = m as ptr
+    record = s.record as float[]
+    record[slot * FIELDS + STARTED] = 0.0 - 1.0
+    record[slot * FIELDS + ENDED] = 0.0 - 1.0
+    record[slot * FIELDS + LOWEST] = 10.0
+    return m
+}
+
+hips_of(s: *Stage, slot: int) -> Vec3 {
+    rig = (s.rigs as ptr[])[slot] as *Skeleton
+    hips = skin.skeleton_bone(rig, skin.skeleton_find(rig, "Hips"))
+    core.model_sync_transform(hips)
+    return hips.world_position
+}
+
+pelvis_height(m: *Motion) -> float {
+    return behaviour.object_position(physics.ragdoll_bone(m.ragdoll, human.BONE_PELVIS)).y
+}
+
+start(state: ptr, e: *Engine) {
+    s = state as *Stage
+    physics.attach(e)
+    ground = engine.object(e, "Ground", loader.cube(1.0))
+    behaviour.object_set_position(ground, core.vec3(0.0, 0.0 - 0.5, 0.0))
+    physics.box_collider(ground, core.vec3(40.0, 0.5, 40.0), physics.material(0.8, 0.0))
+    up = figure(e, "FaceUp", 0.0 - 6.0, s, FACE_UP)
+    down = figure(e, "FaceDown", 0.0 - 2.0, s, FACE_DOWN)
+    limp = figure(e, "Limp", 2.0, s, LIMP_ONE)
+    blended = figure(e, "Blended", 6.0, s, BLENDED)
+    motion.set_mode(up, motion.POWERED)
+    motion.set_mode(down, motion.POWERED)
+    motion.set_protective(down, false)
+    motion.set_mode(blended, motion.POWERED)
+    motion.set_mode(limp, motion.LIMP)
+    motion.set_get_up(up, 0.5)
+    motion.set_get_up(down, 0.5)
+    motion.set_get_up(limp, 0.5)
+}
+
+// Knocked over backwards: a blow to the chest from in front, against the
+// way it faces.
+knock_back(m: *Motion) {
+    chest = behaviour.object_position(physics.ragdoll_bone(m.ragdoll, human.BONE_SPINE_03))
+    motion.hit(m, human.BONE_SPINE_03, chest, core.v3_mul(facing(m), 0.0 - FELL))
+}
+
+// Tripped: the shins swept back and the chest pushed on, the way it faces.
+trip(m: *Motion) {
+    ahead = facing(m)
+    chest = behaviour.object_position(physics.ragdoll_bone(m.ragdoll, human.BONE_SPINE_03))
+    motion.hit(m, human.BONE_SPINE_03, chest, core.v3_mul(ahead, FELL * 0.6))
+    k = 0
+    while k < 2 {
+        calf = human.BONE_CALF_L
+        if k == 1 { calf = human.BONE_CALF_R }
+        shin = behaviour.object_position(physics.ragdoll_bone(m.ragdoll, calf))
+        motion.hit(m, calf, shin, core.v3_mul(ahead, 0.0 - 60.0))
+        k = k + 1
+    }
+}
+
+quat_angle(a: Quat, b: Quat) -> float {
+    d = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w
+    if d < 0.0 { d = 0.0 - d }
+    if d > 1.0 { d = 1.0 }
+    return 2.0 * acos(d)
+}
+
+// The way a figure faces, level: the reference's forward turned as its
+// pelvis is turned from the reference's.
+facing(m: *Motion) -> Vec3 {
+    h = physics.ragdoll_human(m.ragdoll)
+    turned = core.quat_mul(physics.ragdoll_bone_rotation(m.ragdoll, human.BONE_PELVIS),
+                           core.quat_conjugate(human.bone_at(h, human.BONE_PELVIS).reference_frame.q))
+    f = core.quat_apply(turned, physics.ragdoll_rest_forward(m.ragdoll))
+    flat = core.vec3(f.x, 0.0, f.z)
+    if core.v3_len(flat) < 0.000001 { return flat }
+    return core.v3_normalize(flat)
+}
+
+// Where it should face once up, noted as it starts, with how it lay:
+// toward its feet lying face up, toward its head face down.
+note_way(s: *Stage, slot: int, m: *Motion) {
+    r = m.ragdoll
+    pelvis = behaviour.object_position(physics.ragdoll_bone(r, human.BONE_PELVIS))
+    toward = behaviour.object_position(physics.ragdoll_bone(r, human.BONE_NECK))
+    up = motion.face_up(m)
+    if up { (s.record as float[])[slot * FIELDS + LAY_UP] = 1.0 }
+    if up {
+        toward = core.v3_mul(core.v3_add(behaviour.object_position(physics.ragdoll_bone(r, human.BONE_CALF_L)),
+                                         behaviour.object_position(physics.ragdoll_bone(r, human.BONE_CALF_R))), 0.5)
+    }
+    way = core.v3_sub(toward, pelvis)
+    way = core.v3_normalize(core.vec3(way.x, 0.0, way.z))
+    record = s.record as float[]
+    record[slot * FIELDS + WAY_X] = way.x
+    record[slot * FIELDS + WAY_Z] = way.z
+}
+
+// A step of a figure watched: from the step it starts until a second after
+// it ends, the drawn rig's turn and the hips' move since the last step.
+watch(s: *Stage, slot: int) {
+    m = (s.figures as ptr[])[slot] as *Motion
+    record = s.record as float[]
+    at = slot * FIELDS
+    moving = motion.getting_up(m) || motion.blending(m)
+    was = (s.was_moving as int[])[slot]
+    if moving && record[at + STARTED] < 0.0 {
+        record[at + STARTED] = s.steps as float
+        record[at + WATCHING] = 1.0
+        if slot == FACE_UP || slot == FACE_DOWN { note_way(s, slot, m) }
+    }
+    handoff = !moving && was == 1
+    if handoff { record[at + ENDED] = s.steps as float }
+    (s.was_moving as int[])[slot] = 0
+    if moving { (s.was_moving as int[])[slot] = 1 }
+    if record[at + ENDED] >= 0.0 && (s.steps as float) > record[at + ENDED] + 60.0 { record[at + WATCHING] = 0.0 }
+    last = s.last as float[]
+    base = slot * (human.BONE_COUNT * 4 + 3)
+    hips = hips_of(s, slot)
+    turn = 0.0
+    i = 0
+    while i < human.BONE_COUNT {
+        q = physics.ragdoll_rig_bone_rotation(m.ragdoll, i)
+        b = base + i * 4
+        if s.steps > 1 {
+            d = quat_angle(q, core.quat(last[b], last[b + 1], last[b + 2], last[b + 3]))
+            if d > turn {
+                turn = d
+                if record[at + WATCHING] > 0.5 && d > record[at + WORST_TURN] {
+                    record[at + WORST_BONE] = i as float
+                    record[at + WORST_STEP] = s.steps as float
+                }
+            }
+        }
+        last[b] = q.x
+        last[b + 1] = q.y
+        last[b + 2] = q.z
+        last[b + 3] = q.w
+        i = i + 1
+    }
+    h = base + human.BONE_COUNT * 4
+    move = core.v3_len(core.v3_sub(hips, core.vec3(last[h], last[h + 1], last[h + 2])))
+    last[h] = hips.x
+    last[h + 1] = hips.y
+    last[h + 2] = hips.z
+    if record[at + WATCHING] < 0.5 || s.steps <= 1 { return }
+    if turn > record[at + WORST_TURN] { record[at + WORST_TURN] = turn }
+    if move > record[at + WORST_MOVE] { record[at + WORST_MOVE] = move }
+    if handoff {
+        record[at + HANDOFF_TURN] = turn
+        record[at + HANDOFF_MOVE] = move
+    }
+    if moving {
+        physics.ragdoll_body_pose(m.ragdoll, s.pose)
+        low = physics.ragdoll_pose_lowest(m.ragdoll, s.pose)
+        if low < record[at + LOWEST] { record[at + LOWEST] = low }
+    }
+    if record[at + ENDED] >= 0.0 && !handoff {
+        lean = motion.tilt(m)
+        if lean > record[at + WORST_TILT_AFTER] { record[at + WORST_TILT_AFTER] = lean }
+    }
+}
+
+fixed_update(state: ptr, e: *Engine, step: float) {
+    s = state as *Stage
+    s.steps = s.steps + 1
+    figures = s.figures as ptr[]
+    if s.steps == 60 {
+        knock_back(figures[FACE_UP] as *Motion)
+        trip(figures[FACE_DOWN] as *Motion)
+        motion.set_mode(figures[BLENDED] as *Motion, motion.ANIMATED)
+    }
+    k = 0
+    while k < FIGURES {
+        watch(s, k)
+        k = k + 1
+    }
+    if s.steps >= STEPS { engine.engine_stop(e) }
+}
+
+report(s: *Stage, slot: int, name: string) {
+    record = s.record as float[]
+    at = slot * FIELDS
+    m = (s.figures as ptr[])[slot] as *Motion
+    println("  ${name}: started at step ${record[at + STARTED]}, ended at ${record[at + ENDED]} (${motion.rise_seconds(m)} s); worst turn ${record[at + WORST_TURN] * 57.2958} deg a step (bone ${record[at + WORST_BONE]} at step ${record[at + WORST_STEP]}), worst hips move ${record[at + WORST_MOVE] * 1000.0} mm; at the hand-over ${record[at + HANDOFF_TURN] * 57.2958} deg, ${record[at + HANDOFF_MOVE] * 1000.0} mm; lowest ${record[at + LOWEST] * 1000.0} mm; after, leaning at most ${record[at + WORST_TILT_AFTER] * 57.2958} deg, pelvis ${pelvis_height(m)} m, mode ${motion.mode(m)}")
+}
+
+main() {
+    e = engine.engine_new()
+    engine.engine_set_size(e, 320, 240)
+    engine.engine_set_title(e, "ae3d get-up test")
+    engine.engine_set_camera_input(e, false)
+    engine.engine_set_fixed_step(e, 1.0 / 60.0)
+    engine.engine_set_frame_limit(e, 100000)
+    light = core.light_sun(core.vec3(0.3, 0.8, 0.5))
+    engine.engine_set_light(e, light)
+    stage = Stage { figures: calloc(FIGURES, 8), rigs: calloc(FIGURES, 8), record: calloc(FIGURES * FIELDS, 8),
+                    last: calloc(FIGURES * (human.BONE_COUNT * 4 + 3), 8), pose: calloc(human.BONE_COUNT * physics.POSE_STRIDE, 8),
+                    steps: 0, was_moving: calloc(FIGURES, 8) }
+    b = engine.behaviour_new("stage", (&stage) as ptr)
+    b.start = start
+    b.fixed_update = fixed_update
+    engine.engine_add_behaviour(e, b)
+    if !engine.engine_run(e) {
+        println("get_up: SKIP no window available")
+    } else {
+        println("get_up: ${stage.steps} fixed steps")
+        record = stage.record as float[]
+        figures = stage.figures as ptr[]
+        report(&stage, FACE_UP, "face up")
+        report(&stage, FACE_DOWN, "face down")
+        report(&stage, LIMP_ONE, "limp")
+        report(&stage, BLENDED, "blended")
+        w = 0
+        while w < 3 {
+            name = "face up"
+            if w == FACE_DOWN { name = "face down" }
+            if w == LIMP_ONE { name = "limp" }
+            at = w * FIELDS
+            m = figures[w] as *Motion
+            check("${name}: it gets up by itself", record[at + STARTED] > 60.0 && record[at + ENDED] > record[at + STARTED])
+            check("${name}: no bone turns more than 6 degrees in a step, the hand-over included", record[at + WORST_TURN] < 0.105)
+            check("${name}: the hips move no more than 40 mm in a step", record[at + WORST_MOVE] < 0.04)
+            check("${name}: the hand-over to the animation is seamless (under 1 degree, 5 mm)", record[at + HANDOFF_TURN] < 0.0175 && record[at + HANDOFF_MOVE] < 0.005)
+            check("${name}: nothing goes more than 3 cm into the ground on the way up", record[at + LOWEST] > 0.0 - 0.03)
+            check("${name}: up, it stays up (leaning under 10 degrees, pelvis >= 0.8 m)", record[at + WORST_TILT_AFTER] < 0.175 && pelvis_height(m) >= 0.8)
+            w = w + 1
+        }
+        check("face up and face down stay POWERED, the limp one ends ANIMATED",
+              motion.mode(figures[FACE_UP] as *Motion) == motion.POWERED && motion.mode(figures[FACE_DOWN] as *Motion) == motion.POWERED &&
+              motion.mode(figures[LIMP_ONE] as *Motion) == motion.ANIMATED)
+        up_face = facing(figures[FACE_UP] as *Motion)
+        down_face = facing(figures[FACE_DOWN] as *Motion)
+        up_dot = up_face.x * record[FACE_UP * FIELDS + WAY_X] + up_face.z * record[FACE_UP * FIELDS + WAY_Z]
+        down_dot = down_face.x * record[FACE_DOWN * FIELDS + WAY_X] + down_face.z * record[FACE_DOWN * FIELDS + WAY_Z]
+        check("the knocked-back one lay face up, the tripped one face down",
+              record[FACE_UP * FIELDS + LAY_UP] > 0.5 && record[FACE_DOWN * FIELDS + LAY_UP] < 0.5)
+        println("  facing: the face-up one ${acos(up_dot) * 57.2958} deg from where its feet lay, the face-down one ${acos(down_dot) * 57.2958} deg from where its head lay")
+        check("face up, it rises facing where its feet lay; face down, where its head lay (within 30 degrees)", up_dot > 0.866 && down_dot > 0.866)
+        at = BLENDED * FIELDS
+        check("blended: a quarter second's blend", record[at + ENDED] - record[at + STARTED] >= 14.0 && record[at + ENDED] - record[at + STARTED] <= 16.0)
+        check("blended: no bone turns more than 3 degrees in a step, nor the hips 10 mm", record[at + WORST_TURN] < 0.0524 && record[at + WORST_MOVE] < 0.01)
+        check("blended: ANIMATED at the end", motion.mode(figures[BLENDED] as *Motion) == motion.ANIMATED)
+    }
+    k = 0
+    while k < FIGURES {
+        motion.motion_free((stage.figures as ptr[])[k] as *Motion)
+        k = k + 1
+    }
+    core.light_free(light)
+    engine.engine_free(e)
+    free(stage.figures)
+    free(stage.rigs)
+    free(stage.record)
+    free(stage.last)
+    free(stage.pose)
+    free(stage.was_moving)
+    if g_failures == 0 {
+        println("get_up: all checks passed (${g_checks})")
+    } else {
+        println("get_up: ${g_failures} failure(s) of ${g_checks}")
+    }
+}
