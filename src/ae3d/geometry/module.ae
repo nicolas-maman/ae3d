@@ -30,7 +30,7 @@
 
 exports (
     GeoMesh, GeoInstances, VERTEX_FLOATS, SKIN_FLOATS, POINT_FLOATS,
-    mesh_create, mesh_clone, mesh_destroy, mesh_reserve, mesh_push_vertex, mesh_push_index,
+    mesh_create, mesh_clone, mesh_destroy, mesh_reserve, mesh_push_vertex, mesh_push_index, mesh_append_raw,
     mesh_set_skin, mesh_is_skinned, mesh_skin_data, mesh_skin_joint, mesh_skin_weight,
     mesh_set_occlusion, mesh_occlusion, mesh_vertex_count, mesh_index_count,
     mesh_pos_x, mesh_pos_y, mesh_pos_z, mesh_set_pos, mesh_set_uv, mesh_set_normal,
@@ -223,6 +223,27 @@ mesh_push_vertex(handle: ptr, px: float, py: float, pz: float, u: float, v: floa
     index = m.vertex_count
     m.vertex_count = m.vertex_count + 1
     return index
+}
+
+// Vertices (nine floats each, as mesh_vertex_data lays them out) and
+// indices appended in one copy each: how a mesh read back from a cache is
+// filled without a call a vertex.
+mesh_append_raw(handle: ptr, vertices: ptr, vertex_count: int, indices: ptr, index_count: int) -> int {
+    if handle == null { return 0 }
+    m = handle as *GeoMesh
+    if !grow_vertices(m, m.vertex_count + vertex_count) { return 0 }
+    if !grow_indices(m, m.index_count + index_count) { return 0 }
+    if vertex_count > 0 {
+        memcpy(m.vertices + m.vertex_count * VERTEX_FLOATS * 4, vertices, (vertex_count * VERTEX_FLOATS * 4) as long)
+        m.vertex_count = m.vertex_count + vertex_count
+    }
+    if index_count > 0 {
+        memcpy(m.indices + m.index_count * 4, indices, (index_count * 4) as long)
+        m.index_count = m.index_count + index_count
+    }
+    m.dirty = 1
+    m.local_known = 0
+    return 1
 }
 
 mesh_push_index(handle: ptr, index: int) -> int {

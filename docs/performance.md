@@ -202,3 +202,22 @@ now, like a model's own stream, and the scene's CPU time is a tenth of a
 millisecond. A number in the CPU column that is not near zero is that
 kind of thing: the engine's CPU work in a frame is small, so what shows
 up there is a wait.
+
+## Loading: the OBJ parse cache
+
+A text parse of an OBJ is fast for text (#396); not doing it again is faster (#411). After a parse, `ae3d.loader` keeps what it made -- the vertices and indices as they will be drawn, each group's index range and material name, the model's material name and the mtllib lines -- in a file of its own under `build/cache/meshes/`, headed by the source's absolute path, size and modification time. The next load of an unchanged source reads that file, copies the geometry in one go, and parses only the MTLs (they are small), binding their materials by name as the parse would have.
+
+- **Where.** `AE3D_MESH_CACHE` names the directory; without it the cache is `build/cache/meshes` when the program runs where there is a `build/` directory, and off otherwise. `AE3D_MESH_CACHE=off` turns it off.
+- **When it is written.** Not during the load: the files are queued, and handed to one worker (`std.worker`) when a scene has loaded and at the end of every frame (`loader.cache_flush()`). A few hundred small files written beside the parse cost it half again its time on Windows.
+- **What is never cached.** A skinned or baked load (its weights and occlusion are written per position, which only a parse can place), and a source modified within the two seconds before its parse began: modification times are to the second, so a write in that second could otherwise be read stale.
+- **What decides a hit.** The path, size and time in the file against the source's now. The directory is listed once, so a source without a cache file costs no disk probe (a missed probe is 40 µs on Windows).
+
+The street's 305 OBJs (`resources/blender/zombie_street`, 7.6 MB of text), loaded one after another, on Windows:
+
+| | ms |
+|---|---|
+| text parse, cache off | 115-125 |
+| first load, cache written after | 121 |
+| from the cache | 47 (stat 10, read 15, MTLs 17) |
+
+The meshes read from the cache are the parse to the byte: vertices, indices, groups and materials (`tests/test_obj_cache.ae`, and the street compared the same way).
