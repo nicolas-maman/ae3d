@@ -17,8 +17,6 @@ double ae3d_store_field(void *store, int which, int field);
 /* The finished frame's mean and brightest linear luminance, two frames late
    (native/gpu/opengl.c); 1 when `out` holds them. */
 void  *ae3d_gl_proc(const char *name);
-int    ae3d_gl_meter(int source_framebuffer, int width, int height, double *out);
-void   ae3d_gl_meter_release(void);
 
 /* Scripts: a compiled Aether source opened as a shared library, with the
  * object it is attached to passed in on every call. */
@@ -52,32 +50,7 @@ int    ae3d_farr_count(void *arr);
 
 
 /* GPU time per pass, read three frames late so the read never waits. */
-void  *ae3d_gl_passtimer_create(void);
-void   ae3d_gl_passtimer_destroy(void *handle);
-void   ae3d_gl_passtimer_frame(void *handle);
-void   ae3d_gl_passtimer_begin(void *handle, int pass);
-void   ae3d_gl_passtimer_end(void *handle);
-double ae3d_gl_passtimer_ms(void *handle, int pass);
 
-int    ae3d_gl_fbo_create(void);
-int    ae3d_gl_scene_depth_capture(void);
-void   ae3d_gl_fbo_bind(int fbo);
-void   ae3d_gl_fbo_delete(int fbo);
-int    ae3d_gl_fbo_attach_color(int fbo, int width, int height, int hdr);
-void   ae3d_gl_fbo_set_color(int fbo, int texture);
-int    ae3d_gl_fbo_attach_velocity(int fbo, int width, int height);
-int    ae3d_gl_fbo_attach_velocity_multisample(int fbo, int width, int height, int samples);
-void   ae3d_gl_draw_buffers(int count);
-void   ae3d_gl_clear_attachment(int index, double r, double g, double b, double a);
-int    ae3d_gl_fbo_resolve_attachment(int source, int destination, int width, int height, int index);
-int    ae3d_gl_fbo_attach_depth(int fbo, int width, int height);
-int    ae3d_gl_max_samples(void);
-int    ae3d_gl_fbo_attach_color_multisample(int fbo, int width, int height, int samples);
-int    ae3d_gl_fbo_attach_depth_multisample(int fbo, int width, int height, int samples);
-int    ae3d_gl_fbo_resolve(int source, int destination, int width, int height);
-void   ae3d_gl_renderbuffer_delete(int rbo);
-int    ae3d_gl_fbo_complete(void);
-int    ae3d_gl_read_pixel(int x, int y);
 
 void  *ae3d_offscreen_context(int width, int height);
 void   ae3d_offscreen_context_destroy(void *context);
@@ -91,7 +64,6 @@ int    ae3d_offscreen_byte_size(void *target);
 void  *ae3d_offscreen_read(void *target);
 void  *ae3d_offscreen_read_pipelined(void *target);
 
-void  *ae3d_gl_read_frame(int width, int height);
 void   ae3d_offscreen_destroy(void *target);
 
 
