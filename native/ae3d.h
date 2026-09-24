@@ -20,15 +20,10 @@ int    ae3d_gl_posebank_texture(const float *data, int frames, int bones);
 void  *ae3d_gl_proc(const char *name);
 int    ae3d_gl_meter(int source_framebuffer, int width, int height, double *out);
 void   ae3d_gl_meter_release(void);
-void   ae3d_gl_setup_instance_phase(void *inst, int phase_vbo);
-void   ae3d_gl_update_instance_phases(void *inst, int phase_vbo);
-void   ae3d_gl_upload_skin(void *mesh, int vbo);
-void   ae3d_gl_uniform_mat4v(int loc, int count, const void *values);
 
 /* Scripts: a compiled Aether source opened as a shared library, with the
  * object it is attached to passed in on every call. */
 
-void   ae3d_gl_update_instance_colors(void *inst, int color_vbo);
 int    ae3d_vk_update_instances(int handle, void *instances);
 
 
@@ -51,24 +46,6 @@ int    ae3d_gl_texture_rgba(int width, int height, const unsigned char *rgba);
 int    ae3d_gl_texture3d_rgba(int size, const unsigned char *rgba);
 void   ae3d_gl_texture3d_bind(int unit, int texture);
 
-int    ae3d_gl_geometry_acquire(void *mesh);
-int    ae3d_gl_geometry_instance_vbo(int vao);
-void   ae3d_gl_geometry_release(int vao);
-void   ae3d_gl_geometry_shutdown(void);
-int    ae3d_gl_batch_upload(int vao, int instance_vbo, void *inst, int capacity_bytes);
-void   ae3d_gl_set_default_instance_color(void);
-int    ae3d_gl_geometry_instance_capacity(int vao);
-void   ae3d_gl_geometry_set_instance_capacity(int vao, int capacity);
-void   ae3d_gl_upload_mesh(void *mesh, int vbo, int ebo);
-void   ae3d_gl_setup_vertex_attribs(void);
-void   ae3d_gl_setup_instance_attribs(void *inst, int matrix_vbo, int color_vbo);
-void   ae3d_gl_setup_proxy_vao(int vao, int mesh_vbo, int mesh_ebo, int skin_vbo,
-                               int matrix_vbo, int color_vbo, int phase_vbo);
-int    ae3d_gl_update_instances(void *inst, int matrix_vbo, int capacity_bytes);
-void   ae3d_gl_update_mesh_vertices(void *mesh, int vbo);
-void   ae3d_gl_draw_elements(int count, int byte_offset);
-void   ae3d_gl_draw_elements_instanced(int count, int byte_offset, int instances);
-void   ae3d_gl_draw_arrays(int first, int count);
 
 int    ae3d_gl_program_create(const char *vertex_src, const char *fragment_src);
 void   ae3d_gl_program_delete(int program);
