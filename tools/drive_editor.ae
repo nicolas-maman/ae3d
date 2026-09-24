@@ -999,8 +999,24 @@ check_splitters() {
         tree_free(t)
         tries = tries + 1
     }
-    check_detail("dragging the divider narrows the viewport by what the inspector took", after < before - 100.0 && after > before - 140.0,
-                 "${before} before, ${after} after a 120 px drag; the divider went from ${start} to ${moved}")
+    narrowed = after < before - 100.0 && after > before - 140.0
+    // What is still wider than the divider now allows, when the viewport
+    // did not follow: the widget whose width is holding the pane open.
+    holding = ""
+    if !narrowed {
+        t = tree()
+        i = 0
+        while i < tree_count(t) {
+            w = tree_at(t, i)
+            if w.w > (moved as float) + 2.0 && w.w < before + 40.0 && w.kind != "splitview" {
+                holding = "${holding} ${w.kind}#${w.id}(${w.w}, parent ${w.parent}, '${w.text}')"
+            }
+            i = i + 1
+        }
+        tree_free(t)
+    }
+    check_detail("dragging the divider narrows the viewport by what the inspector took", narrowed,
+                 "${before} before, ${after} after a 120 px drag; the divider went from ${start} to ${moved}; wider than it:${holding}")
     post("/widget/${inner_id}/split_position?px=${start}")
     back = after
     tries = 0
