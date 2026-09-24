@@ -13,7 +13,7 @@
 import std.mem
 import ae3d.core
 import ae3d.gl
-import ae3d.vk
+import ae3d.vulkan
 import ae3d.offscreen
 import ae3d.loader
 
@@ -69,7 +69,7 @@ run_checks(backend: *Backend, name: string, gl_r: *GLRenderer, vk_r: *VKRenderer
     cy = HEIGHT / 2
 
     if gl_r != null { gl.renderer_set_capture_channel(gl_r, 3) }
-    if vk_r != null { vk.renderer_set_capture_channel(vk_r, 3) }
+    if vk_r != null { vulkan.renderer_set_capture_channel(vk_r, 3) }
 
     // Two frames still: the first has no last frame and reads still by
     // definition; the second reads still because nothing moved.
@@ -111,9 +111,9 @@ run_checks(backend: *Backend, name: string, gl_r: *GLRenderer, vk_r: *VKRenderer
     // alone; one that reads the vector finds the background's history
     // there and leaves black.
     if gl_r != null { gl.renderer_set_capture_channel(gl_r, 0) }
-    if vk_r != null { vk.renderer_set_capture_channel(vk_r, 0) }
+    if vk_r != null { vulkan.renderer_set_capture_channel(vk_r, 0) }
     if gl_r != null { gl.renderer_set_taa(gl_r, true) }
-    if vk_r != null { vk.renderer_set_taa(vk_r, true) }
+    if vk_r != null { vulkan.renderer_set_taa(vk_r, true) }
     core.model_set_position(cube, 0.5, 0.0, 0.0)
     i = 0
     while i < 6 {
@@ -128,7 +128,7 @@ run_checks(backend: *Backend, name: string, gl_r: *GLRenderer, vk_r: *VKRenderer
     c = pixel(backend, cam, light, now, cy)
     check("${name} and where it is, it is drawn (${c.x})", c.x > 60.0)
     if gl_r != null { gl.renderer_set_taa(gl_r, false) }
-    if vk_r != null { vk.renderer_set_taa(vk_r, false) }
+    if vk_r != null { vulkan.renderer_set_taa(vk_r, false) }
 
     core.backend_remove_model(backend, cube)
     core.model_free(cube)
@@ -157,18 +157,18 @@ main() {
     gl.renderer_free(renderer)
     offscreen.context_destroy(context)
 
-    if !vk.available() {
-        println("velocity: no Vulkan driver (${vk.last_error()}), checked OpenGL only")
+    if !vulkan.available() {
+        println("velocity: no Vulkan driver (${vulkan.last_error()}), checked OpenGL only")
     } else {
-        vk_renderer = vk.renderer_new()
-        vk_pass = vk.backend(vk_renderer)
+        vk_renderer = vulkan.renderer_new()
+        vk_pass = vulkan.backend(vk_renderer)
         if !core.backend_init(&vk_pass, null, WIDTH, HEIGHT) {
-            println("velocity: SKIP Vulkan would not start (${vk.last_error()})")
+            println("velocity: SKIP Vulkan would not start (${vulkan.last_error()})")
         } else {
             run_checks(&vk_pass, "vulkan", null, vk_renderer)
             core.backend_cleanup(&vk_pass)
         }
-        vk.renderer_free(vk_renderer)
+        vulkan.renderer_free(vk_renderer)
     }
 
     if failures == 0 {

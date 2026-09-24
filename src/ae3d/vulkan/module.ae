@@ -17,6 +17,7 @@ import ae3d.rendering
 import ae3d.vkscene
 import ae3d.skin
 import ae3d.shaders
+import ae3d.vkmeter
 import ae3d.posing
 import ae3d.geometry
 
@@ -101,8 +102,6 @@ extern ae3d_vk_ray_empty() -> int
 extern ae3d_vk_set_ray_shadows(on: int)
 extern ae3d_vk_set_ray_reach(metres: float)
 extern ae3d_vk_set_ray_budget(figures: int)
-extern ae3d_vk_set_meter(on: int)
-extern ae3d_vk_meter(out: ptr) -> int
 extern ae3d_vk_ray_budget() -> int
 extern ae3d_vk_ray_figures() -> int
 extern ae3d_vk_ray_reach_now() -> float
@@ -1410,16 +1409,12 @@ renderer_set_frame_exposure(r: *VKRenderer, exposure: float) {
     if r != null { r.frame_exposure = exposure }
 }
 
-// Measure every frame's light (a blit and a copy after the last pass), and
-// the latest measure: the mean and brightest linear luminance into out[0]
-// and out[1], false until the first is back.
-renderer_set_meter(r: *VKRenderer, on: bool) {
-    flag = 0
-    if on { flag = 1 }
-    ae3d_vk_set_meter(flag)
-}
+// Measure every frame's light (a blit and a copy after the last pass,
+// ae3d.vkmeter), and the latest measure: the mean linear luminance and the
+// near-white share into out[0] and out[1], false until the first is back.
+renderer_set_meter(r: *VKRenderer, on: bool) { vkmeter.set_on(on) }
 
-renderer_meter(r: *VKRenderer, out: ptr) -> bool { return ae3d_vk_meter(out) == 1 }
+renderer_meter(r: *VKRenderer, out: ptr) -> bool { return vkmeter.measured(out) }
 
 renderer_set_occlusion_strength(r: *VKRenderer, strength: float) {
     if r != null { r.occlusion_strength = strength }

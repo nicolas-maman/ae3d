@@ -11,7 +11,7 @@ import ae3d.core
 import ae3d.jobs
 import ae3d.platform
 import ae3d.gl
-import ae3d.vk
+import ae3d.vulkan
 import ae3d.agent
 import ae3d.anim
 import ae3d.sky
@@ -512,8 +512,8 @@ engine_new() -> *Engine {
 
 engine_new_with(api: int) -> *Engine {
     api = api_from_env(api)
-    if api == platform.API_VULKAN && !vk.available() {
-        println("ae3d: no Vulkan driver (${vk.last_error()}), drawing through OpenGL")
+    if api == platform.API_VULKAN && !vulkan.available() {
+        println("ae3d: no Vulkan driver (${vulkan.last_error()}), drawing through OpenGL")
         api = platform.API_GL
     }
     e = heap.new(Engine)
@@ -543,7 +543,7 @@ engine_new_with(api: int) -> *Engine {
     e.first_mouse = true
     e.frame_limit = frame_limit_from_env()
     e.perf_on = core.env_int("AE3D_PERF", 0) == 1
-    e.perf_stage_ms = calloc(vk.STAGE_COUNT, 8)
+    e.perf_stage_ms = calloc(vulkan.STAGE_COUNT, 8)
     e.animations = anim.registry_new() as ptr
     // The job pool the crowd's passes, the weather and the physics run
     // over: a worker for every hardware thread but this one. AE3D_JOBS=n
@@ -554,10 +554,10 @@ engine_new_with(api: int) -> *Engine {
     jobs.start(threads)
 
     if api == platform.API_VULKAN {
-        vulkan_state = vk.renderer_new()
+        vulkan_state = vulkan.renderer_new()
         e.backend_state = vulkan_state as ptr
         e.gl_renderer = null
-        bind_backend(e, vk.backend(vulkan_state))
+        bind_backend(e, vulkan.backend(vulkan_state))
     } else {
         opengl_state = gl.renderer_new()
         e.backend_state = opengl_state as ptr
@@ -589,14 +589,14 @@ engine_over(renderer: ptr, api: int, camera: *Camera, light: *Light) -> *Engine 
     e.overcast_color = core.vec3(0.5, 0.5, 0.5)
     e.time_of_day = 0.0 - 1.0
     e.fixed_step = 1.0 / 60.0
-    e.perf_stage_ms = calloc(vk.STAGE_COUNT, 8)
+    e.perf_stage_ms = calloc(vulkan.STAGE_COUNT, 8)
     e.animations = anim.registry_new() as ptr
     e.camera = camera as ptr
     e.light = light as ptr
     e.backend_state = renderer
     if api == platform.API_VULKAN {
         e.gl_renderer = null
-        bind_backend(e, vk.backend(renderer as *VKRenderer))
+        bind_backend(e, vulkan.backend(renderer as *VKRenderer))
     } else {
         e.gl_renderer = renderer
         bind_backend(e, gl.backend(renderer as *GLRenderer))
@@ -628,8 +628,8 @@ engine_update(e: *Engine, delta: float) {
 api_from_env(asked: int) -> int {
     wanted = core.text(os.getenv("AE3D_API"))
     if wanted == "vulkan" {
-        if !vk.available() {
-            println("ae3d: AE3D_API=vulkan but no Vulkan driver: ${vk.last_error()}")
+        if !vulkan.available() {
+            println("ae3d: AE3D_API=vulkan but no Vulkan driver: ${vulkan.last_error()}")
             return asked
         }
         return platform.API_VULKAN
@@ -726,7 +726,7 @@ write_snapshot(e: *Engine) {
     if path == "" { return }
     if snapshot_burst(e) > 1 { path = burst_path(path, e.frame_count + 1) }
     if e.api == platform.API_VULKAN {
-        if !vk.snapshot(path) {
+        if !vulkan.snapshot(path) {
             println("ae3d: could not capture the Vulkan frame for ${path}")
         }
         return
@@ -845,7 +845,7 @@ engine_free(e: *Engine) {
         return
     }
     if e.api == platform.API_VULKAN {
-        vk.renderer_free(e.backend_state as *VKRenderer)
+        vulkan.renderer_free(e.backend_state as *VKRenderer)
     } else {
         gl.renderer_free(e.backend_state as *GLRenderer)
     }
@@ -944,7 +944,7 @@ engine_set_render_scale(e: *Engine, scale: float) -> float {
 // in place except the call: a program written against the engine surface could
 // not put a sky behind its scene or load a texture, whichever backend it ran
 // on. The Skybox itself is still made by the backend that will draw it
-// (gl.skybox_create / vk.skybox_create), the same way engine_gl_renderer is
+// (gl.skybox_create / vulkan.skybox_create), the same way engine_gl_renderer is
 // already how a program reaches backend-specific construction.
 engine_set_skybox(e: *Engine, skybox: ptr) {
     if e.backend_state == null { return }
@@ -961,7 +961,7 @@ engine_set_sky(e: *Engine, path: string) -> bool {
     e.sky_path = core.set_owned(e.sky_path, path)
     sky = null as ptr
     if e.api == platform.API_VULKAN {
-        sky = vk.skybox_create(e.backend_state as *VKRenderer, path) as ptr
+        sky = vulkan.skybox_create(e.backend_state as *VKRenderer, path) as ptr
     } else {
         sky = gl.skybox_create(e.gl_renderer as *GLRenderer, path) as ptr
     }
@@ -1021,7 +1021,7 @@ engine_set_clouds(e: *Engine, cover: float, wind: float) {
     e.cloud_wind = wind
     if e.backend_state == null { return }
     if e.api == platform.API_VULKAN {
-        vk.renderer_set_clouds(e.backend_state as *VKRenderer, cover, wind)
+        vulkan.renderer_set_clouds(e.backend_state as *VKRenderer, cover, wind)
     } else {
         gl.renderer_set_clouds(e.gl_renderer as *GLRenderer, cover, wind)
     }
@@ -1036,7 +1036,7 @@ engine_set_sky_overcast(e: *Engine, amount: float, color: Vec3) {
     e.overcast_color = color
     if e.backend_state == null { return }
     if e.api == platform.API_VULKAN {
-        vk.renderer_set_sky_overcast(e.backend_state as *VKRenderer, amount, color)
+        vulkan.renderer_set_sky_overcast(e.backend_state as *VKRenderer, amount, color)
     } else {
         gl.renderer_set_sky_overcast(e.gl_renderer as *GLRenderer, amount, color)
     }
@@ -1062,7 +1062,7 @@ engine_sky_overcast_color(e: *Engine) -> Vec3 { return e.overcast_color }
 engine_set_capture_channel(e: *Engine, channel: int) {
     if e.backend_state == null { return }
     if e.api == platform.API_VULKAN {
-        vk.renderer_set_capture_channel(e.backend_state as *VKRenderer, channel)
+        vulkan.renderer_set_capture_channel(e.backend_state as *VKRenderer, channel)
     } else {
         gl.renderer_set_capture_channel(e.gl_renderer as *GLRenderer, channel)
     }
@@ -1081,7 +1081,7 @@ engine_set_taa(e: *Engine, on: bool) {
     e.taa = on
     if e.backend_state == null { return }
     if e.api == platform.API_VULKAN {
-        vk.renderer_set_taa(e.backend_state as *VKRenderer, on)
+        vulkan.renderer_set_taa(e.backend_state as *VKRenderer, on)
     } else {
         gl.renderer_set_taa(e.gl_renderer as *GLRenderer, on)
     }
@@ -1106,9 +1106,9 @@ engine_set_dlss(e: *Engine, mode: int) -> int {
         return mode
     }
     if e.api != platform.API_VULKAN { e.dlss_mode = 0 ; return 0 }
-    e.dlss_mode = vk.renderer_set_dlss(e.backend_state as *VKRenderer, mode)
+    e.dlss_mode = vulkan.renderer_set_dlss(e.backend_state as *VKRenderer, mode)
     if mode > 0 && e.dlss_mode == 0 {
-        println("ae3d: DLSS: ${vk.last_error()}")
+        println("ae3d: DLSS: ${vulkan.last_error()}")
     }
     return e.dlss_mode
 }
@@ -1118,7 +1118,7 @@ engine_dlss(e: *Engine) -> int { return e.dlss_mode }
 // Whether the renderer traces rays (Vulkan with VK_KHR_ray_query).
 engine_ray_query(e: *Engine) -> bool {
     if e.backend_state == null || e.api != platform.API_VULKAN { return false }
-    return vk.renderer_ray_query(e.backend_state as *VKRenderer)
+    return vulkan.renderer_ray_query(e.backend_state as *VKRenderer)
 }
 
 // Shadows by ray, where the renderer traces: a ray toward the sun from
@@ -1130,7 +1130,7 @@ engine_ray_query(e: *Engine) -> bool {
 engine_set_ray_shadows(e: *Engine, on: bool) {
     e.ray_shadows = on
     if e.backend_state == null || e.api != platform.API_VULKAN { return }
-    vk.renderer_set_ray_shadows(e.backend_state as *VKRenderer, on)
+    vulkan.renderer_set_ray_shadows(e.backend_state as *VKRenderer, on)
 }
 
 engine_ray_shadows(e: *Engine) -> bool { return e.ray_shadows && engine_ray_query(e) }
@@ -1166,8 +1166,8 @@ apply_eye(e: *Engine) {
     if e.backend_state == null { return }
     on = e.eye != null
     if e.api == platform.API_VULKAN {
-        vk.renderer_set_meter(e.backend_state as *VKRenderer, on)
-        if !on { vk.renderer_set_frame_exposure(e.backend_state as *VKRenderer, 1.0) }
+        vulkan.renderer_set_meter(e.backend_state as *VKRenderer, on)
+        if !on { vulkan.renderer_set_frame_exposure(e.backend_state as *VKRenderer, 1.0) }
     } else {
         if !on { gl.renderer_set_frame_exposure(e.backend_state as *GLRenderer, 1.0) }
     }
@@ -1179,7 +1179,7 @@ adapt_eye(e: *Engine, delta: float) {
     if e.eye == null || e.backend_state == null { return }
     measured = false
     if e.api == platform.API_VULKAN {
-        measured = vk.renderer_meter(e.backend_state as *VKRenderer, e.eye_measure)
+        measured = vulkan.renderer_meter(e.backend_state as *VKRenderer, e.eye_measure)
     } else {
         measured = gl.renderer_meter(e.backend_state as *GLRenderer, e.eye_measure)
     }
@@ -1187,7 +1187,7 @@ adapt_eye(e: *Engine, delta: float) {
     m = e.eye_measure as float[]
     next = exposure.adaptation_step(e.eye as *Adaptation, m[0], m[1], delta)
     if e.api == platform.API_VULKAN {
-        vk.renderer_set_frame_exposure(e.backend_state as *VKRenderer, next)
+        vulkan.renderer_set_frame_exposure(e.backend_state as *VKRenderer, next)
     } else {
         gl.renderer_set_frame_exposure(e.backend_state as *GLRenderer, next)
     }
@@ -1201,18 +1201,18 @@ adapt_eye(e: *Engine, delta: float) {
 // takes every figure within the shadow distance.
 engine_set_ray_budget(e: *Engine, figures: int) {
     if e.api != platform.API_VULKAN { return }
-    vk.renderer_set_ray_budget(e.backend_state as *VKRenderer, figures)
+    vulkan.renderer_set_ray_budget(e.backend_state as *VKRenderer, figures)
 }
 
 // What the rays took last frame, and the reach that took them.
 engine_ray_figures(e: *Engine) -> int {
     if e.api != platform.API_VULKAN { return 0 }
-    return vk.renderer_ray_figures(e.backend_state as *VKRenderer)
+    return vulkan.renderer_ray_figures(e.backend_state as *VKRenderer)
 }
 
 engine_ray_reach(e: *Engine) -> float {
     if e.api != platform.API_VULKAN { return 0.0 }
-    return vk.renderer_ray_reach(e.backend_state as *VKRenderer)
+    return vulkan.renderer_ray_reach(e.backend_state as *VKRenderer)
 }
 
 // The sun's size, as the angle its disc subtends in degrees, for the
@@ -1223,7 +1223,7 @@ engine_set_sun_size(e: *Engine, degrees: float) {
     if degrees < 0.0 { degrees = 0.0 }
     e.sun_size = degrees
     if e.backend_state != null && e.api == platform.API_VULKAN {
-        vk.renderer_set_sun_size(e.backend_state as *VKRenderer, degrees)
+        vulkan.renderer_set_sun_size(e.backend_state as *VKRenderer, degrees)
     }
 }
 
@@ -1236,7 +1236,7 @@ engine_sun_size(e: *Engine) -> float { return e.sun_size }
 engine_set_ray_occlusion(e: *Engine, on: bool) {
     e.ray_occlusion = on
     if e.backend_state != null && e.api == platform.API_VULKAN {
-        vk.renderer_set_ray_occlusion(e.backend_state as *VKRenderer, on)
+        vulkan.renderer_set_ray_occlusion(e.backend_state as *VKRenderer, on)
     }
 }
 
@@ -1263,8 +1263,8 @@ engine_set_ssr(e: *Engine, on: bool, road_height: float, strength: float) {
 
 apply_ssr(e: *Engine) {
     if e.backend_state == null || e.api != platform.API_VULKAN { return }
-    vk.renderer_set_ssr_params(e.backend_state as *VKRenderer, e.ssr_road_height, e.ssr_strength)
-    vk.renderer_set_ssr(e.backend_state as *VKRenderer, e.ssr_on)
+    vulkan.renderer_set_ssr_params(e.backend_state as *VKRenderer, e.ssr_road_height, e.ssr_strength)
+    vulkan.renderer_set_ssr(e.backend_state as *VKRenderer, e.ssr_on)
 }
 
 // The size of a lamp's face in metres, for the lamp shadows the rays throw
@@ -1275,14 +1275,14 @@ apply_ssr(e: *Engine) {
 engine_set_lamp_size(e: *Engine, metres: float) {
     e.lamp_size = metres
     if e.backend_state != null && e.api == platform.API_VULKAN {
-        vk.renderer_set_lamp_size(e.backend_state as *VKRenderer, metres)
+        vulkan.renderer_set_lamp_size(e.backend_state as *VKRenderer, metres)
     }
 }
 
 engine_set_wetness(e: *Engine, amount: float) {
     if e.backend_state == null { return }
     if e.api == platform.API_VULKAN {
-        vk.renderer_set_wetness(e.backend_state as *VKRenderer, amount)
+        vulkan.renderer_set_wetness(e.backend_state as *VKRenderer, amount)
     } else {
         gl.renderer_set_wetness(e.gl_renderer as *GLRenderer, amount)
     }
@@ -1298,7 +1298,7 @@ engine_set_ssao(e: *Engine, on: bool, radius: float, intensity: float) {
 apply_ssao(e: *Engine) {
     if e.backend_state == null { return }
     if e.api == platform.API_VULKAN {
-        vk.renderer_set_ssao(e.backend_state as *VKRenderer, e.ssao_on, e.ssao_radius, e.ssao_intensity)
+        vulkan.renderer_set_ssao(e.backend_state as *VKRenderer, e.ssao_on, e.ssao_radius, e.ssao_intensity)
     } else {
         gl.renderer_set_ssao(e.gl_renderer as *GLRenderer, e.ssao_on, e.ssao_radius, e.ssao_intensity)
     }
@@ -1307,7 +1307,7 @@ apply_ssao(e: *Engine) {
 // How many draws the last frame took, from whichever backend drew it.
 engine_draw_calls(e: *Engine) -> int {
     if e.backend_state == null { return 0 }
-    if e.api == platform.API_VULKAN { return vk.renderer_draw_calls(e.backend_state as *VKRenderer) }
+    if e.api == platform.API_VULKAN { return vulkan.renderer_draw_calls(e.backend_state as *VKRenderer) }
     return gl.renderer_draw_calls(e.gl_renderer as *GLRenderer)
 }
 
@@ -1484,8 +1484,8 @@ engine_models(e: *Engine) -> ptr {
     if e.api == platform.API_VULKAN && e.backend_state != null {
         vkr = e.backend_state as *VKRenderer
         i = 0
-        while i < vk.renderer_model_count(vkr) {
-            m = vk.renderer_model(vkr, i)
+        while i < vulkan.renderer_model_count(vkr) {
+            m = vulkan.renderer_model(vkr, i)
             if m != null { list.add_raw(out, m as ptr) }
             i = i + 1
         }
@@ -1521,8 +1521,8 @@ engine_lights(e: *Engine) -> ptr {
     if e.api == platform.API_VULKAN && e.backend_state != null {
         vkr = e.backend_state as *VKRenderer
         i = 0
-        while i < vk.renderer_light_count(vkr) {
-            l = vk.renderer_light(vkr, i)
+        while i < vulkan.renderer_light_count(vkr) {
+            l = vulkan.renderer_light(vkr, i)
             if l != null { list.add_raw(out, l as ptr) }
             i = i + 1
         }
@@ -1676,10 +1676,10 @@ engine_start(e: *Engine, x: int, y: int) -> bool {
     // DLSS wanted, by the program or by AE3D_DLSS=n: the runtime before
     // the backend, since its interposer has to be the Vulkan loader.
     if core.env_int("AE3D_DLSS", 0) > 0 { e.dlss_mode = core.env_int("AE3D_DLSS", 0) }
-    if e.api == platform.API_VULKAN { vk.set_samples(e.msaa) }
+    if e.api == platform.API_VULKAN { vulkan.set_samples(e.msaa) }
     if e.dlss_mode > 0 && e.api == platform.API_VULKAN {
-        if !vk.request_dlss(core.text(os.getenv("AE3D_STREAMLINE"))) {
-            println("ae3d: DLSS: ${vk.last_error()}")
+        if !vulkan.request_dlss(core.text(os.getenv("AE3D_STREAMLINE"))) {
+            println("ae3d: DLSS: ${vulkan.last_error()}")
             e.dlss_mode = 0
         }
     }
@@ -1783,7 +1783,7 @@ pump_agent(e: *Engine) {
     c.post_active = false
     c.device = ""
     if e.api == platform.API_VULKAN {
-        c.device = vk.device_name()
+        c.device = vulkan.device_name()
     } else {
         c.device = gl.device_name()
     }
@@ -1815,16 +1815,16 @@ pump_agent(e: *Engine) {
     // texture handle and has no Vulkan equivalent worth inventing one for.
     if e.api == platform.API_VULKAN && e.backend_state != null {
         vkr = e.backend_state as *VKRenderer
-        c.shadow_ms = vk.renderer_shadow_ms(vkr)
-        c.scene_ms = vk.renderer_scene_ms(vkr)
-        c.post_ms = vk.renderer_post_ms(vkr)
-        c.cpu_work_ms = vk.renderer_cpu_work_ms(vkr)
-        c.post_active = vk.renderer_post_active(vkr)
-        c.program_binds = vk.renderer_program_binds(vkr)
-        c.material_binds = vk.renderer_material_binds(vkr)
+        c.shadow_ms = vulkan.renderer_shadow_ms(vkr)
+        c.scene_ms = vulkan.renderer_scene_ms(vkr)
+        c.post_ms = vulkan.renderer_post_ms(vkr)
+        c.cpu_work_ms = vulkan.renderer_cpu_work_ms(vkr)
+        c.post_active = vulkan.renderer_post_active(vkr)
+        c.program_binds = vulkan.renderer_program_binds(vkr)
+        c.material_binds = vulkan.renderer_material_binds(vkr)
         i = 0
-        while i < vk.renderer_model_count(vkr) {
-            m = vk.renderer_model(vkr, i)
+        while i < vulkan.renderer_model_count(vkr) {
+            m = vulkan.renderer_model(vkr, i)
             if m != null && m.visible {
                 c.triangles = c.triangles + core.mesh_index_count(m.mesh) / 3
             }
@@ -1844,8 +1844,8 @@ pump_agent(e: *Engine) {
     }
     if e.api == platform.API_VULKAN && e.backend_state != null {
         vkr = e.backend_state as *VKRenderer
-        c.draw_calls = vk.renderer_draw_calls(vkr)
-        c.light_count = vk.renderer_light_count(vkr)
+        c.draw_calls = vulkan.renderer_draw_calls(vkr)
+        c.light_count = vulkan.renderer_light_count(vkr)
     }
     c.shadows = engine_shadows(e)
     c.fog_enabled = e.fog.enabled
@@ -1918,11 +1918,11 @@ service_agent_capture(e: *Engine) {
             // Copied out as the frame was submitted; read it back and hand it
             // to the same capture the OpenGL path fills, so the agent sees the
             // Vulkan frame as numbers exactly as it sees the OpenGL one.
-            if vk.capture_ready() {
-                pixels = vk.capture_pixels()
+            if vulkan.capture_ready() {
+                pixels = vulkan.capture_pixels()
                 if pixels != null {
-                    captured = agent.capture_adopt(pixels, vk.capture_width(),
-                                                   vk.capture_height())
+                    captured = agent.capture_adopt(pixels, vulkan.capture_width(),
+                                                   vulkan.capture_height())
                 }
             }
         } else {
@@ -1946,7 +1946,7 @@ service_agent_snapshot(e: *Engine) {
     // capture was armed for a pending snapshot before backend_render; the
     // answer arrives with the file, the same as on OpenGL.
     if e.api == platform.API_VULKAN {
-        agent.answer_snapshot(c, path, vk.snapshot(path))
+        agent.answer_snapshot(c, path, vulkan.snapshot(path))
         string.free(path)
         return
     }
@@ -1967,14 +1967,14 @@ account_perf(e: *Engine) {
     cpu = 0.0
     if e.api == platform.API_VULKAN {
         vkr = e.backend_state as *VKRenderer
-        shadow = vk.renderer_shadow_ms(vkr)
-        scene = vk.renderer_scene_ms(vkr)
-        post = vk.renderer_post_ms(vkr)
-        cpu = vk.renderer_cpu_work_ms(vkr)
+        shadow = vulkan.renderer_shadow_ms(vkr)
+        scene = vulkan.renderer_scene_ms(vkr)
+        post = vulkan.renderer_post_ms(vkr)
+        cpu = vulkan.renderer_cpu_work_ms(vkr)
         stages = e.perf_stage_ms as float[]
         k = 0
-        while k < vk.STAGE_COUNT {
-            stages[k] = stages[k] + vk.renderer_stage_ms(vkr, k)
+        while k < vulkan.STAGE_COUNT {
+            stages[k] = stages[k] + vulkan.renderer_stage_ms(vkr, k)
             k = k + 1
         }
     } else {
@@ -2007,8 +2007,8 @@ say_perf(e: *Engine) {
         stages = e.perf_stage_ms as float[]
         line = "perf stages"
         k = 3
-        while k < vk.STAGE_COUNT {
-            line = "${line} ${vk.stage_name(k)}=${stages[k] / n}"
+        while k < vulkan.STAGE_COUNT {
+            line = "${line} ${vulkan.stage_name(k)}=${stages[k] / n}"
             k = k + 1
         }
         println(line)
@@ -2137,7 +2137,7 @@ engine_loop(e: *Engine) {
             want_shot = shot_frame && snapshot_path(e) != ""
             want_read = e.agent_on && (agent_wants_capture(e) || agent_wants_snapshot(e))
             if want_shot || want_read {
-                if !vk.request_capture() { println("ae3d: Vulkan would not arm a capture") }
+                if !vulkan.request_capture() { println("ae3d: Vulkan would not arm a capture") }
             }
         }
         render_started = platform.time()

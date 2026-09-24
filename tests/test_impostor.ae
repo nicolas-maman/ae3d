@@ -15,7 +15,7 @@ import std.os
 import ae3d.core
 import ae3d.png
 import ae3d.gl
-import ae3d.vk
+import ae3d.vulkan
 import ae3d.offscreen
 import ae3d.loader
 import ae3d.posing
@@ -163,7 +163,7 @@ run_checks(backend: *Backend, name: string, gl_r: *GLRenderer, vk_r: *VKRenderer
 
     // The albedo channel: the cell's colour, exactly.
     if gl_r != null { gl.renderer_set_capture_channel(gl_r, 1) }
-    if vk_r != null { vk.renderer_set_capture_channel(vk_r, 1) }
+    if vk_r != null { vulkan.renderer_set_capture_channel(vk_r, 1) }
     c = pixel(backend, cam, light, cx, cy)
     check("${name} seen from its front at phase 0, the first cell (red)", near(c, 255.0, 0.0, 0.0))
     c = pixel(backend, cam, light, cx + 9, cy)
@@ -202,7 +202,7 @@ run_checks(backend: *Backend, name: string, gl_r: *GLRenderer, vk_r: *VKRenderer
     // The normal channel: the atlas says +X in the figure's frame, and the
     // figure faces +X, so the world normal is +X: (255, 128, 128).
     if gl_r != null { gl.renderer_set_capture_channel(gl_r, 2) }
-    if vk_r != null { vk.renderer_set_capture_channel(vk_r, 2) }
+    if vk_r != null { vulkan.renderer_set_capture_channel(vk_r, 2) }
     c = pixel(backend, cam, light, cx, cy)
     check("${name} the normal channel reads the baked normal in the world", near(c, 255.0, 128.0, 128.0))
     // Turned to face +Z, the same baked normal is +Z in the world.
@@ -214,7 +214,7 @@ run_checks(backend: *Backend, name: string, gl_r: *GLRenderer, vk_r: *VKRenderer
     // The picture itself: lit, and by the light. Red under a white light
     // from the front is red; with the light off it is the ambient's red.
     if gl_r != null { gl.renderer_set_capture_channel(gl_r, 0) }
-    if vk_r != null { vk.renderer_set_capture_channel(vk_r, 0) }
+    if vk_r != null { vulkan.renderer_set_capture_channel(vk_r, 0) }
     lit = pixel(backend, cam, light, cx, cy)
     check("${name} the lit picture is red and lit", lit.x > 80.0 && lit.y < 60.0 && lit.z < 60.0)
     light.intensity = 0.0
@@ -254,18 +254,18 @@ main() {
     gl.renderer_free(renderer)
     offscreen.context_destroy(context)
 
-    if !vk.available() {
-        println("impostor: no Vulkan driver (${vk.last_error()}), checked OpenGL only")
+    if !vulkan.available() {
+        println("impostor: no Vulkan driver (${vulkan.last_error()}), checked OpenGL only")
     } else {
-        vk_renderer = vk.renderer_new()
-        vk_pass = vk.backend(vk_renderer)
+        vk_renderer = vulkan.renderer_new()
+        vk_pass = vulkan.backend(vk_renderer)
         if !core.backend_init(&vk_pass, null, WIDTH, HEIGHT) {
-            println("impostor: SKIP Vulkan would not start (${vk.last_error()})")
+            println("impostor: SKIP Vulkan would not start (${vulkan.last_error()})")
         } else {
             run_checks(&vk_pass, "vulkan", null, vk_renderer)
             core.backend_cleanup(&vk_pass)
         }
-        vk.renderer_free(vk_renderer)
+        vulkan.renderer_free(vk_renderer)
     }
 
     if failures == 0 {

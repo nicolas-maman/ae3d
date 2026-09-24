@@ -1,0 +1,479 @@
+// ae3d.vkmeter -- the frame's light, measured on the Vulkan backend: the
+// first of native/gpu/vulkan.c to move into Aether (#402), on Aether's own
+// Vulkan bindings (contrib.vulkan.vk).
+//
+// After the frame's last pass the finished image is blitted into an image
+// of its own at half size, halved level by level (each blit a box filter)
+// to no wider than 320 texels, and the last level copied into a buffer the
+// host can read -- one per frame in flight. When a frame slot's fence has
+// passed, the texels of its buffer are the measurement: their mean linear
+// luminance, and the share of them near white. Auto exposure reads it
+// (ae3d.exposure).
+//
+// The C backend owns the device, the frame's command buffer and its image;
+// this module owns the meter's image, its memory, and its buffers, and
+// frees them when the swapchain they were sized to goes. It reaches the
+// frame through the hooks vulkan.c calls (ae3d_vk_set_frame_hooks): record
+// after the last pass, collect after the fence, release with the swapchain.
+
+import contrib.vulkan.vk
+import std.mem
+
+exports (
+    set_on, is_on, measured
+)
+
+extern ae3d_vk_set_frame_hooks(record: ptr, collect: ptr, release: ptr, context: ptr)
+extern ae3d_vk_physical_device_handle() -> ptr
+extern ae3d_vk_device_handle() -> ptr
+extern ae3d_vk_frame_commands() -> ptr
+extern ae3d_vk_frame_slot() -> int
+extern ae3d_vk_frames_in_flight() -> int
+extern ae3d_vk_frame_image() -> ptr
+extern ae3d_vk_frame_width() -> int
+extern ae3d_vk_frame_height() -> int
+extern ae3d_vk_frame_offscreen() -> int
+extern ae3d_vk_frame_copyable() -> int
+// This module's own hooks, by their C names, for their addresses.
+extern ae3d_vkmeter_record(context: ptr)
+extern ae3d_vkmeter_collect(context: ptr)
+extern ae3d_vkmeter_release(context: ptr)
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern pow(x: float, y: float) -> float
+
+const SMALLEST = 320                 // texels: the widest the last level may be
+const MAX_FRAMES = 4                 // at least vulkan.c's AE3D_VK_FRAMES
+const NEAR_WHITE = 0.8               // linear luminance counted as near white
+
+struct Meter {
+    on: bool
+    hooked: bool
+    device: ptr                      // the device the meter's objects are made on
+    image: ptr                       // VkImage, the halving chain
+    memory: ptr                      // VkDeviceMemory
+    levels: int
+    width: int                       // level 0: half the frame
+    height: int
+    small_width: int                 // the last level
+    small_height: int
+    buffers: ptr                     // VkBuffer[MAX_FRAMES]
+    buffer_memory: ptr               // VkDeviceMemory[MAX_FRAMES]
+    mapped: ptr                      // ptr[MAX_FRAMES]
+    written: ptr                     // int[MAX_FRAMES]
+    have: bool
+    mean: float
+    white: float
+    linear: ptr                      // float[256]: an sRGB byte's linear light
+}
+
+var g_meter: ptr = null
+var g_loaded: ptr = null            // the device whose entry points contrib.vulkan.vk calls through
+
+meter() -> *Meter {
+    if g_meter == null {
+        m = calloc(1, sizeof(Meter)) as *Meter
+        m.buffers = calloc(MAX_FRAMES, 8)
+        m.buffer_memory = calloc(MAX_FRAMES, 8)
+        m.mapped = calloc(MAX_FRAMES, 8)
+        m.written = calloc(MAX_FRAMES, 8)
+        m.linear = calloc(256, 8)
+        table = m.linear as float[]
+        i = 0
+        while i < 256 {
+            v = (i as float) / 255.0
+            if v <= 0.04045 {
+                table[i] = v / 12.92
+            } else {
+                table[i] = pow((v + 0.055) / 1.055, 2.4)
+            }
+            i = i + 1
+        }
+        g_meter = m as ptr
+    }
+    return g_meter as *Meter
+}
+
+// The latest measurement into `out` (two floats: the mean linear luminance
+// and the near-white share); false before there is one.
+measured(out: ptr) -> bool {
+    m = meter()
+    if !m.have || out == null { return false }
+    o = out as float[]
+    o[0] = m.mean
+    o[1] = m.white
+    return true
+}
+
+// --- device objects --------------------------------------------------------------------------------
+
+// The index of a memory type `bits` allows with all of `wanted`, or -1.
+memory_type(bits: int, wanted: int) -> int {
+    props = calloc(1, sizeof(VkPhysicalDeviceMemoryProperties)) as *VkPhysicalDeviceMemoryProperties
+    vk.vkGetPhysicalDeviceMemoryProperties(ae3d_vk_physical_device_handle(), props as ptr)
+    found = 0 - 1
+    i = 0
+    while i < (props.memoryTypeCount) as int && found < 0 {
+        kind = (props as ptr + 4 + i * sizeof(VkMemoryType)) as *VkMemoryType
+        if (bits & (1 << i)) != 0 && ((kind.propertyFlags) as int & wanted) == wanted { found = i }
+        i = i + 1
+    }
+    free(props as ptr)
+    return found
+}
+
+// Memory of a kind `wanted` for what `requirements` asks; null when there
+// is none.
+allocate(requirements: *VkMemoryRequirements, wanted: int) -> ptr {
+    kind = memory_type((requirements.memoryTypeBits) as int, wanted)
+    if kind < 0 { return null }
+    info = calloc(1, sizeof(VkMemoryAllocateInfo)) as *VkMemoryAllocateInfo
+    info.sType = vk.STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO
+    info.allocationSize = requirements.size
+    info.memoryTypeIndex = kind
+    out = calloc(1, 8)
+    r = vk.vkAllocateMemory(ae3d_vk_device_handle(), info as ptr, null, out)
+    got = (out as ptr[])[0]
+    free(out)
+    free(info as ptr)
+    if r != vk.SUCCESS { return null }
+    return got
+}
+
+// The halving chain: `levels` levels from w x h, device-local, blitted to
+// and from.
+make_image(m: *Meter, w: int, h: int, levels: int) -> bool {
+    device = ae3d_vk_device_handle()
+    ci = calloc(1, sizeof(VkImageCreateInfo)) as *VkImageCreateInfo
+    ci.sType = vk.STRUCTURE_TYPE_IMAGE_CREATE_INFO
+    ci.imageType = vk.IMAGE_TYPE_2D
+    ci.format = vk.FORMAT_R8G8B8A8_UNORM
+    ci.extent.width = w
+    ci.extent.height = h
+    ci.extent.depth = 1
+    ci.mipLevels = levels
+    ci.arrayLayers = 1
+    ci.samples = vk.SAMPLE_COUNT_1_BIT
+    ci.tiling = vk.IMAGE_TILING_OPTIMAL
+    ci.usage = vk.IMAGE_USAGE_TRANSFER_SRC_BIT | vk.IMAGE_USAGE_TRANSFER_DST_BIT
+    ci.sharingMode = vk.SHARING_MODE_EXCLUSIVE
+    ci.initialLayout = vk.IMAGE_LAYOUT_UNDEFINED
+    out = calloc(1, 8)
+    r = vk.vkCreateImage(device, ci as ptr, null, out)
+    m.image = (out as ptr[])[0]
+    free(out)
+    free(ci as ptr)
+    if r != vk.SUCCESS {
+        m.image = null
+        return false
+    }
+    needs = calloc(1, sizeof(VkMemoryRequirements)) as *VkMemoryRequirements
+    vk.vkGetImageMemoryRequirements(device, m.image, needs as ptr)
+    m.memory = allocate(needs, vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+    free(needs as ptr)
+    if m.memory == null { return false }
+    return vk.vkBindImageMemory(device, m.image, m.memory, 0) == vk.SUCCESS
+}
+
+// A buffer the host reads, `bytes` long, into slot `f`: cached memory, the
+// CPU reading every byte every frame (from write-combined memory that read
+// halved the frame rate), or plain coherent where a device has no cached
+// kind. Mapped for good.
+make_buffer(m: *Meter, f: int, bytes: int) -> bool {
+    device = ae3d_vk_device_handle()
+    ci = calloc(1, sizeof(VkBufferCreateInfo)) as *VkBufferCreateInfo
+    ci.sType = vk.STRUCTURE_TYPE_BUFFER_CREATE_INFO
+    ci.size = bytes
+    ci.usage = vk.BUFFER_USAGE_TRANSFER_DST_BIT
+    ci.sharingMode = vk.SHARING_MODE_EXCLUSIVE
+    out = calloc(1, 8)
+    r = vk.vkCreateBuffer(device, ci as ptr, null, out)
+    buffer = (out as ptr[])[0]
+    free(ci as ptr)
+    if r != vk.SUCCESS {
+        free(out)
+        return false
+    }
+    (m.buffers as ptr[])[f] = buffer
+    needs = calloc(1, sizeof(VkMemoryRequirements)) as *VkMemoryRequirements
+    vk.vkGetBufferMemoryRequirements(device, buffer, needs as ptr)
+    visible = vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT
+    memory = allocate(needs, visible | vk.MEMORY_PROPERTY_HOST_CACHED_BIT)
+    if memory == null { memory = allocate(needs, visible) }
+    free(needs as ptr)
+    if memory == null {
+        free(out)
+        return false
+    }
+    (m.buffer_memory as ptr[])[f] = memory
+    vk.vkBindBufferMemory(device, buffer, memory, 0)
+    (out as ptr[])[0] = null
+    vk.vkMapMemory(device, memory, 0, bytes, 0, out)
+    (m.mapped as ptr[])[f] = (out as ptr[])[0]
+    free(out)
+    return true
+}
+
+// Everything the meter made, gone; it is made again at the next frame's
+// size.
+release(m: *Meter) {
+    device = m.device
+    if device == null { return }
+    if m.image != null { vk.vkDestroyImage(device, m.image, null) }
+    if m.memory != null { vk.vkFreeMemory(device, m.memory, null) }
+    m.image = null
+    m.memory = null
+    f = 0
+    while f < MAX_FRAMES {
+        memory = (m.buffer_memory as ptr[])[f]
+        if (m.mapped as ptr[])[f] != null { vk.vkUnmapMemory(device, memory) }
+        if (m.buffers as ptr[])[f] != null { vk.vkDestroyBuffer(device, (m.buffers as ptr[])[f], null) }
+        if memory != null { vk.vkFreeMemory(device, memory, null) }
+        (m.mapped as ptr[])[f] = null
+        (m.buffers as ptr[])[f] = null
+        (m.buffer_memory as ptr[])[f] = null
+        (m.written as int[])[f] = 0
+        f = f + 1
+    }
+    m.width = 0
+    m.height = 0
+    m.device = null
+}
+
+// The chain and the buffers for this frame's size.
+make_meter(m: *Meter) -> bool {
+    release(m)
+    device = ae3d_vk_device_handle()
+    if g_loaded != device {
+        // The device's commands through its own entry points, once a device.
+        vk.load_device(device)
+        g_loaded = device
+    }
+    m.device = device
+    w = half(ae3d_vk_frame_width())
+    h = half(ae3d_vk_frame_height())
+    levels = 1
+    // A level is half the one above it, rounded down, never under one.
+    sw = w
+    sh = h
+    while sw > SMALLEST {
+        sw = half(sw)
+        sh = half(sh)
+        levels = levels + 1
+    }
+    m.width = w
+    m.height = h
+    m.levels = levels
+    m.small_width = sw
+    m.small_height = sh
+    if !make_image(m, w, h, levels) {
+        release(m)
+        return false
+    }
+    frames = ae3d_vk_frames_in_flight()
+    f = 0
+    while f < frames && f < MAX_FRAMES {
+        if !make_buffer(m, f, sw * sh * 4) {
+            release(m)
+            return false
+        }
+        f = f + 1
+    }
+    return true
+}
+
+half(n: int) -> int {
+    if n / 2 > 0 { return n / 2 }
+    return 1
+}
+
+// --- the frame -------------------------------------------------------------------------------------
+
+// A layout change of one level (or all, `level` -1) of `image`, ahead of a
+// transfer.
+barrier(commands: ptr, image: ptr, level: int, from: int, to: int, src_access: int, dst_access: int, src_stage: int) {
+    b = calloc(1, sizeof(VkImageMemoryBarrier)) as *VkImageMemoryBarrier
+    b.sType = vk.STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER
+    b.oldLayout = from
+    b.newLayout = to
+    b.srcQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED
+    b.dstQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED
+    b.image = image
+    b.subresourceRange.aspectMask = vk.IMAGE_ASPECT_COLOR_BIT
+    if level < 0 {
+        b.subresourceRange.baseMipLevel = 0
+        b.subresourceRange.levelCount = vk.REMAINING_MIP_LEVELS
+    } else {
+        b.subresourceRange.baseMipLevel = level
+        b.subresourceRange.levelCount = 1
+    }
+    b.subresourceRange.layerCount = 1
+    b.srcAccessMask = src_access
+    b.dstAccessMask = dst_access
+    vk.vkCmdPipelineBarrier(commands, src_stage, vk.PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, 1, b as ptr)
+    free(b as ptr)
+}
+
+// A buffer-and-image-free barrier: `src` then `dst`, for the host's reads
+// and the copies'.
+memory_barrier(commands: ptr, src_stage: int, dst_stage: int, src_access: int, dst_access: int) {
+    b = calloc(1, sizeof(VkMemoryBarrier)) as *VkMemoryBarrier
+    b.sType = vk.STRUCTURE_TYPE_MEMORY_BARRIER
+    b.srcAccessMask = src_access
+    b.dstAccessMask = dst_access
+    vk.vkCmdPipelineBarrier(commands, src_stage, dst_stage, 0, 1, b as ptr, 0, null, 0, null)
+    free(b as ptr)
+}
+
+// One blit, `from` level `from_level` (fw x fh) into the chain's level
+// `to_level` (tw x th), filtered.
+blit(commands: ptr, m: *Meter, from: ptr, from_level: int, fw: int, fh: int, to_level: int, tw: int, th: int) {
+    region = calloc(1, sizeof(VkImageBlit)) as *VkImageBlit
+    region.srcSubresource.aspectMask = vk.IMAGE_ASPECT_COLOR_BIT
+    region.srcSubresource.mipLevel = from_level
+    region.srcSubresource.layerCount = 1
+    region.dstSubresource.aspectMask = vk.IMAGE_ASPECT_COLOR_BIT
+    region.dstSubresource.mipLevel = to_level
+    region.dstSubresource.layerCount = 1
+    // The far corners, the second of each pair of offsets (the first is 0).
+    far_src = (region as ptr + offset_of_src_far()) as *VkOffset3D
+    far_src.x = fw
+    far_src.y = fh
+    far_src.z = 1
+    far_dst = (region as ptr + offset_of_dst_far()) as *VkOffset3D
+    far_dst.x = tw
+    far_dst.y = th
+    far_dst.z = 1
+    vk.vkCmdBlitImage(commands, from, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m.image,
+                      vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, region as ptr, vk.FILTER_LINEAR)
+    free(region as ptr)
+}
+
+// VkImageBlit's layout: a subresource (16 bytes), two offsets (12 each), a
+// subresource, two offsets.
+offset_of_src_far() -> int { return sizeof(VkImageSubresourceLayers) + sizeof(VkOffset3D) }
+offset_of_dst_far() -> int { return 2 * sizeof(VkImageSubresourceLayers) + 3 * sizeof(VkOffset3D) }
+
+// Recorded after the frame's last pass: the finished image into the chain,
+// halved level by level, the last level into this frame's buffer. A
+// windowed frame's image is moved from presenting to transfer-source and
+// back; an offscreen frame's already is transfer-source.
+@c_callback("ae3d_vkmeter_record")
+record_hook(context: ptr) {
+    m = meter()
+    if !m.on || ae3d_vk_frame_copyable() != 1 { return }
+    frame_w = ae3d_vk_frame_width()
+    frame_h = ae3d_vk_frame_height()
+    if m.image == null || m.width != half(frame_w) || m.height != half(frame_h) || m.device != ae3d_vk_device_handle() {
+        if !make_meter(m) { return }
+    }
+    commands = ae3d_vk_frame_commands()
+    slot = ae3d_vk_frame_slot()
+    source = ae3d_vk_frame_image()
+    offscreen = ae3d_vk_frame_offscreen() == 1
+    if !offscreen {
+        barrier(commands, source, 0, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                0, vk.ACCESS_TRANSFER_READ_BIT, vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
+    }
+    // After the last frame's blits read the levels this one writes, not
+    // merely after nothing (#410).
+    barrier(commands, m.image, 0 - 1, vk.IMAGE_LAYOUT_UNDEFINED, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            0, vk.ACCESS_TRANSFER_WRITE_BIT, vk.PIPELINE_STAGE_TRANSFER_BIT)
+    blit(commands, m, source, 0, frame_w, frame_h, 0, m.width, m.height)
+    w = m.width
+    h = m.height
+    level = 1
+    while level < m.levels {
+        nw = half(w)
+        nh = half(h)
+        barrier(commands, m.image, level - 1, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                vk.ACCESS_TRANSFER_WRITE_BIT, vk.ACCESS_TRANSFER_READ_BIT, vk.PIPELINE_STAGE_TRANSFER_BIT)
+        blit(commands, m, m.image, level - 1, w, h, level, nw, nh)
+        w = nw
+        h = nh
+        level = level + 1
+    }
+    barrier(commands, m.image, m.levels - 1, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            vk.ACCESS_TRANSFER_WRITE_BIT, vk.ACCESS_TRANSFER_READ_BIT, vk.PIPELINE_STAGE_TRANSFER_BIT)
+    // This slot's buffer was written by the copy two frames ago and read by
+    // the host since: the copy waits for both, and what it writes is made
+    // visible to the host, which reads it after the fence (#410).
+    memory_barrier(commands, vk.PIPELINE_STAGE_TRANSFER_BIT | vk.PIPELINE_STAGE_HOST_BIT, vk.PIPELINE_STAGE_TRANSFER_BIT,
+                   vk.ACCESS_TRANSFER_WRITE_BIT | vk.ACCESS_HOST_READ_BIT, vk.ACCESS_TRANSFER_WRITE_BIT)
+    region = calloc(1, sizeof(VkBufferImageCopy)) as *VkBufferImageCopy
+    region.imageSubresource.aspectMask = vk.IMAGE_ASPECT_COLOR_BIT
+    region.imageSubresource.mipLevel = m.levels - 1
+    region.imageSubresource.layerCount = 1
+    region.imageExtent.width = m.small_width
+    region.imageExtent.height = m.small_height
+    region.imageExtent.depth = 1
+    vk.vkCmdCopyImageToBuffer(commands, m.image, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, (m.buffers as ptr[])[slot], 1, region as ptr)
+    free(region as ptr)
+    memory_barrier(commands, vk.PIPELINE_STAGE_TRANSFER_BIT, vk.PIPELINE_STAGE_HOST_BIT,
+                   vk.ACCESS_TRANSFER_WRITE_BIT, vk.ACCESS_HOST_READ_BIT)
+    if !offscreen {
+        back = calloc(1, sizeof(VkImageMemoryBarrier)) as *VkImageMemoryBarrier
+        back.sType = vk.STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER
+        back.oldLayout = vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+        back.newLayout = vk.IMAGE_LAYOUT_PRESENT_SRC_KHR
+        back.srcQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED
+        back.dstQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED
+        back.image = source
+        back.subresourceRange.aspectMask = vk.IMAGE_ASPECT_COLOR_BIT
+        back.subresourceRange.levelCount = 1
+        back.subresourceRange.layerCount = 1
+        back.srcAccessMask = vk.ACCESS_TRANSFER_READ_BIT
+        vk.vkCmdPipelineBarrier(commands, vk.PIPELINE_STAGE_TRANSFER_BIT, vk.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                0, 0, null, 0, null, 1, back as ptr)
+        free(back as ptr)
+    }
+    (m.written as int[])[slot] = 1
+}
+
+// This frame slot's measurement, its fence having passed: the mean linear
+// luminance of the last level's texels and the share of them near white.
+@c_callback("ae3d_vkmeter_collect")
+collect_hook(context: ptr) {
+    m = meter()
+    slot = ae3d_vk_frame_slot()
+    if slot < 0 || slot >= MAX_FRAMES { return }
+    written = m.written as int[]
+    texels = (m.mapped as ptr[])[slot]
+    if written[slot] == 0 || texels == null { return }
+    written[slot] = 0
+    count = m.small_width * m.small_height
+    if count <= 0 { return }
+    table = m.linear as float[]
+    sum = 0.0
+    white = 0
+    i = 0
+    while i < count {
+        at = i * 4
+        luma = 0.2126 * table[mem.get_uint8(texels, at)] + 0.7152 * table[mem.get_uint8(texels, at + 1)] +
+               0.0722 * table[mem.get_uint8(texels, at + 2)]
+        sum = sum + luma
+        if luma > NEAR_WHITE { white = white + 1 }
+        i = i + 1
+    }
+    m.mean = sum / (count as float)
+    m.white = (white as float) / (count as float)
+    m.have = true
+}
+
+@c_callback("ae3d_vkmeter_release")
+release_hook(context: ptr) {
+    release(meter())
+}
+
+// Measure every frame from now on, or stop. The hooks go in the first time.
+set_on(on: bool) {
+    m = meter()
+    m.on = on
+    if on && !m.hooked {
+        m.hooked = true
+        ae3d_vk_set_frame_hooks((&ae3d_vkmeter_record) as ptr, (&ae3d_vkmeter_collect) as ptr,
+                                (&ae3d_vkmeter_release) as ptr, null)
+    }
+}
+
+is_on() -> bool { return meter().on }

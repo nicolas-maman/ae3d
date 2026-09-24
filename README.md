@@ -178,7 +178,7 @@ AE3D_SCENE_OUT=build/street.json ./build/street_drive && ./build/ae3d_editor bui
 ## Layout
 
 ```
-src/ae3d/     the engine: core, engine, behaviour, input, jobs, vk, gl, shaders, physics,
+src/ae3d/     the engine: core, engine, behaviour, input, jobs, vulkan, gl, shaders, physics,
               crowd, horde, nav, ecs, gltf, assets, weather, water, sky, voxel, terrain,
               agent, probe, script, scene, ... one module a directory
 native/       the C that remains, by role: gpu/, image/, platform/, dlss/

@@ -11,7 +11,7 @@
 
 import std.mem
 import ae3d.core
-import ae3d.vk
+import ae3d.vulkan
 import ae3d.loader
 import ae3d.rendering
 
@@ -59,21 +59,21 @@ mean_level(pixels: ptr, x0: int, y0: int, x1: int, y1: int) -> int {
 }
 
 main() {
-    if !vk.available() {
-        println("ray_occlusion: SKIP no Vulkan driver (${vk.last_error()})")
+    if !vulkan.available() {
+        println("ray_occlusion: SKIP no Vulkan driver (${vulkan.last_error()})")
         return
     }
-    renderer = vk.renderer_new()
-    backend = vk.backend(renderer)
+    renderer = vulkan.renderer_new()
+    backend = vulkan.backend(renderer)
     if !core.backend_init(&backend, null, WIDTH, HEIGHT) {
-        println("ray_occlusion: SKIP Vulkan would not start (${vk.last_error()})")
-        vk.renderer_free(renderer)
+        println("ray_occlusion: SKIP Vulkan would not start (${vulkan.last_error()})")
+        vulkan.renderer_free(renderer)
         return
     }
-    if !vk.renderer_ray_query(renderer) {
+    if !vulkan.renderer_ray_query(renderer) {
         println("ray_occlusion: SKIP the device does not trace rays (no VK_KHR_ray_query)")
         core.backend_cleanup(&backend)
-        vk.renderer_free(renderer)
+        vulkan.renderer_free(renderer)
         return
     }
     core.backend_set_clear_color(&backend, 0.0, 0.0, 0.0)
@@ -114,7 +114,7 @@ main() {
     check("with no occlusion the wall's foot is as lit as the open ground (${foot_plain} against ${open_plain})", foot_plain > open_plain - 12 && foot_plain < open_plain + 12 && open_plain > 200)
 
     // The screen-space pass: the foot goes darker.
-    vk.renderer_set_ssao(renderer, true, 20.0, 1.0)
+    vulkan.renderer_set_ssao(renderer, true, 20.0, 1.0)
     screened = read_frame(&backend, cam, light)
     foot_screen = mean_level(screened, foot_x - 1, cy - 8, foot_x + 1, cy + 8)
     open_screen = mean_level(screened, open_x - 1, cy - 8, open_x + 1, cy + 8)
@@ -122,10 +122,10 @@ main() {
 
     // By ray: asked for, it waits on the rays; with them, the foot goes
     // darker by the half sky the wall takes, and the open ground stays.
-    vk.renderer_set_ray_occlusion(renderer, true)
-    check("occlusion by ray waits on the rays", !vk.renderer_ray_occlusion(renderer))
-    vk.renderer_set_ray_shadows(renderer, true)
-    check("and is on with them", vk.renderer_ray_occlusion(renderer))
+    vulkan.renderer_set_ray_occlusion(renderer, true)
+    check("occlusion by ray waits on the rays", !vulkan.renderer_ray_occlusion(renderer))
+    vulkan.renderer_set_ray_shadows(renderer, true)
+    check("and is on with them", vulkan.renderer_ray_occlusion(renderer))
     traced = read_frame(&backend, cam, light)
     foot_ray = mean_level(traced, foot_x - 1, cy - 8, foot_x + 1, cy + 8)
     open_ray = mean_level(traced, open_x - 1, cy - 8, open_x + 1, cy + 8)
@@ -137,18 +137,18 @@ main() {
     check("nor the wall's top (${top_ray} against ${top_plain})", top_ray > top_plain - 12 && top_ray < top_plain + 12)
 
     // Off again: the screen-space pass is back.
-    vk.renderer_set_ray_occlusion(renderer, false)
+    vulkan.renderer_set_ray_occlusion(renderer, false)
     back = read_frame(&backend, cam, light)
     foot_back = mean_level(back, foot_x - 1, cy - 8, foot_x + 1, cy + 8)
     check("off again, the screen-space pass darkens the foot (${foot_back})", foot_back < open_plain - 30)
-    vk.renderer_set_ray_shadows(renderer, false)
-    vk.renderer_set_ssao(renderer, false, 20.0, 1.0)
+    vulkan.renderer_set_ray_shadows(renderer, false)
+    vulkan.renderer_set_ssao(renderer, false, 20.0, 1.0)
     plain_again = read_frame(&backend, cam, light)
     foot_again = mean_level(plain_again, foot_x - 1, cy - 8, foot_x + 1, cy + 8)
     check("and with neither the foot is as lit as before (${foot_again} against ${foot_plain})", foot_again > foot_plain - 12 && foot_again < foot_plain + 12)
 
     core.backend_cleanup(&backend)
-    vk.renderer_free(renderer)
+    vulkan.renderer_free(renderer)
     core.model_free(ground)
     core.model_free(wall)
     core.camera_free(cam)

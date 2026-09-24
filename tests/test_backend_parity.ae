@@ -12,7 +12,7 @@ import std.mem
 import ae3d.core
 import ae3d.png
 import ae3d.gl
-import ae3d.vk
+import ae3d.vulkan
 import ae3d.offscreen
 import ae3d.loader
 import ae3d.rendering
@@ -287,8 +287,8 @@ compare_within(name: string, gl_pixels: ptr, vk_pixels: ptr, percent: int) -> in
 }
 
 main() {
-    if !vk.available() {
-        println("parity: SKIP no Vulkan driver (${vk.last_error()})")
+    if !vulkan.available() {
+        println("parity: SKIP no Vulkan driver (${vulkan.last_error()})")
         return
     }
 
@@ -314,31 +314,31 @@ main() {
     gl.renderer_set_clear_color(gl_renderer, 0.0, 0.0, 0.0)
     gl_metal, gl_textured, gl_grid, gl_glass = build_scene(&opengl_pass)
 
-    vk_renderer = vk.renderer_new()
-    vulkan_pass = vk.backend(vk_renderer)
+    vk_renderer = vulkan.renderer_new()
+    vulkan_pass = vulkan.backend(vk_renderer)
     // A loader without a device behind it reports itself available and then
     // fails to start. There is nothing to compare on a machine like that, and
     // nothing wrong with the renderer either.
     if !core.backend_init(&vulkan_pass, null, WIDTH, HEIGHT) {
-        println("parity: SKIP Vulkan would not start (${vk.last_error()})")
+        println("parity: SKIP Vulkan would not start (${vulkan.last_error()})")
         return
     }
-    vk.renderer_set_clear_color(vk_renderer, 0.0, 0.0, 0.0)
+    vulkan.renderer_set_clear_color(vk_renderer, 0.0, 0.0, 0.0)
     vk_metal, vk_textured, vk_grid, vk_glass = build_scene(&vulkan_pass)
 
-    check_true("vulkan target size", vk.offscreen_width() == WIDTH && vk.offscreen_height() == HEIGHT)
+    check_true("vulkan target size", vulkan.offscreen_width() == WIDTH && vulkan.offscreen_height() == HEIGHT)
 
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
     gl_pixels = offscreen.target_pixels(target)
-    vk_pixels = vk.offscreen_pixels()
+    vk_pixels = vulkan.offscreen_pixels()
     check_true("opengl produced pixels", gl_pixels != null)
     check_true("vulkan produced pixels", vk_pixels != null)
     if gl_pixels == null || vk_pixels == null { return }
     compare("materials, textures, instancing and transparency", gl_pixels, vk_pixels)
 
     gl_sky = gl.skybox_create(gl_renderer, TEXTURE)
-    vk_sky = vk.skybox_create(vk_renderer, TEXTURE)
+    vk_sky = vulkan.skybox_create(vk_renderer, TEXTURE)
     check_true("skybox textures loaded",
                core.skybox_texture(gl_sky) != 0 && core.skybox_texture(vk_sky) != 0)
     // Rendered here rather than read from whatever the last comparison left in
@@ -346,17 +346,17 @@ main() {
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
     bare_gl = frame_total(offscreen.target_pixels(target))
-    bare_vk = frame_total(vk.offscreen_pixels())
+    bare_vk = frame_total(vulkan.offscreen_pixels())
 
     core.backend_set_skybox(&opengl_pass, gl_sky as ptr)
     core.backend_set_skybox(&vulkan_pass, vk_sky as ptr)
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
-    compare("skybox", offscreen.target_pixels(target), vk.offscreen_pixels())
+    compare("skybox", offscreen.target_pixels(target), vulkan.offscreen_pixels())
     check_true("the skybox reaches the opengl frame",
                frame_total(offscreen.target_pixels(target)) != bare_gl)
     check_true("the skybox reaches the vulkan frame",
-               frame_total(vk.offscreen_pixels()) != bare_vk)
+               frame_total(vulkan.offscreen_pixels()) != bare_vk)
 
     // Clouds over the sky, marched in the sky shader, and their shadow on
     // the ground through the same coverage field: the one sky feature that
@@ -366,29 +366,29 @@ main() {
     // two clouds, and then there is nothing to compare.
     sky_gl = frame_total(offscreen.target_pixels(target))
     gl.renderer_set_clouds(gl_renderer, 0.9, 1.0)
-    vk.renderer_set_clouds(vk_renderer, 0.9, 1.0)
+    vulkan.renderer_set_clouds(vk_renderer, 0.9, 1.0)
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
-    compare_within("clouds over the skybox", offscreen.target_pixels(target), vk.offscreen_pixels(), 4)
+    compare_within("clouds over the skybox", offscreen.target_pixels(target), vulkan.offscreen_pixels(), 4)
     check_true("the clouds reach the frame", frame_total(offscreen.target_pixels(target)) != sky_gl)
     gl.renderer_set_clouds(gl_renderer, 0.0, 1.0)
-    vk.renderer_set_clouds(vk_renderer, 0.0, 1.0)
+    vulkan.renderer_set_clouds(vk_renderer, 0.0, 1.0)
 
     // The sky drawn from the sun in place of the image, at the hour the
     // key light says: the same sky on both, and not the image's.
     gl_sun_sky = gl.skybox_create(gl_renderer, core.SKY_PROCEDURAL)
-    vk_sun_sky = vk.skybox_create(vk_renderer, core.SKY_PROCEDURAL)
+    vk_sun_sky = vulkan.skybox_create(vk_renderer, core.SKY_PROCEDURAL)
     check_true("a sky drawn from the sun is a sky", gl_sun_sky.procedural && vk_sun_sky.procedural)
     core.backend_set_skybox(&opengl_pass, gl_sun_sky as ptr)
     core.backend_set_skybox(&vulkan_pass, vk_sun_sky as ptr)
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
-    sun_sky_lit = compare("the sky drawn from the sun", offscreen.target_pixels(target), vk.offscreen_pixels())
+    sun_sky_lit = compare("the sky drawn from the sun", offscreen.target_pixels(target), vulkan.offscreen_pixels())
     check_true("the sky drawn from the sun is not the image", sun_sky_lit != sky_gl)
     core.backend_set_skybox(&opengl_pass, gl_sky as ptr)
     core.backend_set_skybox(&vulkan_pass, vk_sky as ptr)
     gl.skybox_free(gl_renderer, gl_sun_sky)
-    vk.skybox_free(vk_renderer, vk_sun_sky)
+    vulkan.skybox_free(vk_renderer, vk_sun_sky)
 
     // The occlusion: a fullscreen multiply over the opaque pass, from the
     // scene's depth, which each backend captures its own way (a blit of the
@@ -398,19 +398,19 @@ main() {
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
     open_gl = frame_total(offscreen.target_pixels(target))
-    open_vk = frame_total(vk.offscreen_pixels())
+    open_vk = frame_total(vulkan.offscreen_pixels())
     // A reach of fifteen metres: the cubes stand eleven apart, and a
     // reach of three would find nothing between them to shadow.
     gl.renderer_set_ssao(gl_renderer, true, 15.0, 1.0)
-    vk.renderer_set_ssao(vk_renderer, true, 15.0, 1.0)
+    vulkan.renderer_set_ssao(vk_renderer, true, 15.0, 1.0)
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
-    compare_within("occlusion over the scene", offscreen.target_pixels(target), vk.offscreen_pixels(), 4)
-    println("  occlusion: opengl ${open_gl} -> ${frame_total(offscreen.target_pixels(target))}, vulkan ${open_vk} -> ${frame_total(vk.offscreen_pixels())}")
+    compare_within("occlusion over the scene", offscreen.target_pixels(target), vulkan.offscreen_pixels(), 4)
+    println("  occlusion: opengl ${open_gl} -> ${frame_total(offscreen.target_pixels(target))}, vulkan ${open_vk} -> ${frame_total(vulkan.offscreen_pixels())}")
     check_true("the occlusion darkens the opengl frame", frame_total(offscreen.target_pixels(target)) < open_gl)
-    check_true("the occlusion darkens the vulkan frame", frame_total(vk.offscreen_pixels()) < open_vk)
+    check_true("the occlusion darkens the vulkan frame", frame_total(vulkan.offscreen_pixels()) < open_vk)
     gl.renderer_set_ssao(gl_renderer, false, 15.0, 1.0)
-    vk.renderer_set_ssao(vk_renderer, false, 15.0, 1.0)
+    vulkan.renderer_set_ssao(vk_renderer, false, 15.0, 1.0)
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
 
@@ -425,7 +425,7 @@ main() {
     core.backend_add_model(&vulkan_pass, vk_matrices)
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
-    matrices_lit = compare("spheres placed by matrices", offscreen.target_pixels(target), vk.offscreen_pixels())
+    matrices_lit = compare("spheres placed by matrices", offscreen.target_pixels(target), vulkan.offscreen_pixels())
     memcpy(point_pixels, offscreen.target_pixels(target), WIDTH * HEIGHT * 4)
     core.backend_remove_model(&opengl_pass, gl_matrices)
     core.backend_remove_model(&vulkan_pass, vk_matrices)
@@ -437,7 +437,7 @@ main() {
     core.backend_add_model(&vulkan_pass, vk_points)
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
-    points_lit = compare("spheres placed by points", offscreen.target_pixels(target), vk.offscreen_pixels())
+    points_lit = compare("spheres placed by points", offscreen.target_pixels(target), vulkan.offscreen_pixels())
     compare("points against matrices", point_pixels, offscreen.target_pixels(target))
     check_true("the spheres are in the frame", matrices_lit != sky_gl && points_lit != sky_gl)
     core.backend_remove_model(&opengl_pass, gl_points)
@@ -449,39 +449,39 @@ main() {
     core.backend_render(&vulkan_pass, cam, light)
 
     plain_gl = frame_total(offscreen.target_pixels(target))
-    plain_vk = frame_total(vk.offscreen_pixels())
+    plain_vk = frame_total(vulkan.offscreen_pixels())
 
     core.backend_set_post(&opengl_pass, true, false, 0.8, 0.4)
     core.backend_set_post(&vulkan_pass, true, false, 0.8, 0.4)
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
-    compare("fxaa", offscreen.target_pixels(target), vk.offscreen_pixels())
+    compare("fxaa", offscreen.target_pixels(target), vulkan.offscreen_pixels())
     check_true("fxaa changes the opengl frame",
                frame_total(offscreen.target_pixels(target)) != plain_gl)
     check_true("fxaa changes the vulkan frame",
-               frame_total(vk.offscreen_pixels()) != plain_vk)
+               frame_total(vulkan.offscreen_pixels()) != plain_vk)
 
     core.backend_set_post(&opengl_pass, false, true, 0.8, 0.4)
     core.backend_set_post(&vulkan_pass, false, true, 0.8, 0.4)
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
-    compare("bloom", offscreen.target_pixels(target), vk.offscreen_pixels())
+    compare("bloom", offscreen.target_pixels(target), vulkan.offscreen_pixels())
     check_true("bloom changes the opengl frame",
                frame_total(offscreen.target_pixels(target)) != plain_gl)
     check_true("bloom changes the vulkan frame",
-               frame_total(vk.offscreen_pixels()) != plain_vk)
+               frame_total(vulkan.offscreen_pixels()) != plain_vk)
 
     // Shadows are the newest thing both backends do, and the one most likely to
     // diverge: two depth passes, two light-space matrices, two samplers.
     core.backend_set_post(&opengl_pass, false, false, 0.8, 0.4)
     core.backend_set_post(&vulkan_pass, false, false, 0.8, 0.4)
     gl.renderer_set_shadows(gl_renderer, true)
-    vk.renderer_set_shadows(vk_renderer, true)
+    vulkan.renderer_set_shadows(vk_renderer, true)
     check_true("both backends report shadows on",
-               gl.renderer_shadows(gl_renderer) && vk.renderer_shadows(vk_renderer))
+               gl.renderer_shadows(gl_renderer) && vulkan.renderer_shadows(vk_renderer))
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
-    one_light = compare("shadows", offscreen.target_pixels(target), vk.offscreen_pixels())
+    one_light = compare("shadows", offscreen.target_pixels(target), vulkan.offscreen_pixels())
 
     // Lights reach a renderer through the vtable, and the Vulkan side had a
     // list nothing could add to, so a second light changed the OpenGL frame and
@@ -497,7 +497,7 @@ main() {
     // pixel apart between the backends, and the lamp's light, cut by the
     // shadow like every light's, makes that pixel a bright one on one
     // side; so this case is allowed more than the usual disagreement.
-    two_lights = compare_within("two lights", offscreen.target_pixels(target), vk.offscreen_pixels(), 5)
+    two_lights = compare_within("two lights", offscreen.target_pixels(target), vulkan.offscreen_pixels(), 5)
     check_true("the second light reaches Vulkan", two_lights > one_light + one_light / 50)
 
     core.backend_remove_light(&opengl_pass, fill)
@@ -513,7 +513,7 @@ main() {
     rendering.apply(vk_textured, preset)
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
-    preset_lit = compare("shading preset", offscreen.target_pixels(target), vk.offscreen_pixels())
+    preset_lit = compare("shading preset", offscreen.target_pixels(target), vulkan.offscreen_pixels())
     check_true("the preset reaches Vulkan", preset_lit != two_lights)
 
     // Culling decides which triangles of every model survive, and which models
@@ -525,7 +525,7 @@ main() {
     core.set_face_culling(true)
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
-    compare("back faces culled", offscreen.target_pixels(target), vk.offscreen_pixels())
+    compare("back faces culled", offscreen.target_pixels(target), vulkan.offscreen_pixels())
     core.set_face_culling(false)
 
     // A Gerstner ocean is its own program on both backends, driven by a wave
@@ -549,7 +549,7 @@ main() {
     }
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
-    ocean_lit = compare("gerstner ocean", offscreen.target_pixels(target), vk.offscreen_pixels())
+    ocean_lit = compare("gerstner ocean", offscreen.target_pixels(target), vulkan.offscreen_pixels())
     check_true("the ocean changes the frame", ocean_lit != preset_lit)
 
     // The sea under an overcast: the surface reflects the sky the sky
@@ -557,13 +557,13 @@ main() {
     // alike -- the water program reads the overcast through its own
     // uniforms on OpenGL and through the shared block on Vulkan.
     gl.renderer_set_sky_overcast(gl_renderer, 0.9, core.vec3(0.62, 0.65, 0.70))
-    vk.renderer_set_sky_overcast(vk_renderer, 0.9, core.vec3(0.62, 0.65, 0.70))
+    vulkan.renderer_set_sky_overcast(vk_renderer, 0.9, core.vec3(0.62, 0.65, 0.70))
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
     gl_grey = channel_mean(offscreen.target_pixels(target), 2) - channel_mean(offscreen.target_pixels(target), 0)
-    compare("ocean under an overcast", offscreen.target_pixels(target), vk.offscreen_pixels())
+    compare("ocean under an overcast", offscreen.target_pixels(target), vulkan.offscreen_pixels())
     gl.renderer_set_sky_overcast(gl_renderer, 0.0, core.vec3(0.5, 0.5, 0.5))
-    vk.renderer_set_sky_overcast(vk_renderer, 0.0, core.vec3(0.5, 0.5, 0.5))
+    vulkan.renderer_set_sky_overcast(vk_renderer, 0.0, core.vec3(0.5, 0.5, 0.5))
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
     gl_blue = channel_mean(offscreen.target_pixels(target), 2) - channel_mean(offscreen.target_pixels(target), 0)
@@ -588,7 +588,7 @@ main() {
     core.backend_add_model(&vulkan_pass, vk_shelf)
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
-    shelf_lit = compare("a shelf under the ocean", offscreen.target_pixels(target), vk.offscreen_pixels())
+    shelf_lit = compare("a shelf under the ocean", offscreen.target_pixels(target), vulkan.offscreen_pixels())
     water.simulation_set_shore(gl_sim, 12.0, 8.0)
     water.simulation_set_shore(vk_sim, 12.0, 8.0)
     core.backend_render(&opengl_pass, cam, light)
@@ -596,7 +596,7 @@ main() {
     // Read off the frame's depth, which the two backends resolve from their
     // own anti-aliasing: every silhouette that meets the water is a pixel
     // apart, so this case is allowed twice the usual disagreement.
-    shore_lit = compare_within("shore from the scene depth", offscreen.target_pixels(target), vk.offscreen_pixels(), 4)
+    shore_lit = compare_within("shore from the scene depth", offscreen.target_pixels(target), vulkan.offscreen_pixels(), 4)
     check_true("the shore changes the frame", shore_lit != shelf_lit)
     water.simulation_set_shore(gl_sim, 0.0, 0.0)
     water.simulation_set_shore(vk_sim, 0.0, 0.0)
@@ -611,7 +611,7 @@ main() {
     core.backend_set_post(&vulkan_pass, true, false, 0.8, 0.4)
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
-    compare("ocean through fxaa", offscreen.target_pixels(target), vk.offscreen_pixels())
+    compare("ocean through fxaa", offscreen.target_pixels(target), vulkan.offscreen_pixels())
 
     // Resizing with a composite running rebuilds the Vulkan target and destroys
     // the post-processing texture with it. Descriptor sets are cached per
@@ -626,7 +626,7 @@ main() {
     core.backend_update_viewport(&vulkan_pass, WIDTH, HEIGHT)
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
-    compare("after a resize", offscreen.target_pixels(target), vk.offscreen_pixels())
+    compare("after a resize", offscreen.target_pixels(target), vulkan.offscreen_pixels())
 
     // The same resize with both composites running. The scene is drawn into
     // buffers of its own before an effect composites it, and OpenGL left those
@@ -642,7 +642,7 @@ main() {
     core.backend_render(&opengl_pass, cam, light)
     core.backend_render(&vulkan_pass, cam, light)
     compare_size("a resize with the composites running",
-                 offscreen.target_pixels(target), vk.offscreen_pixels(),
+                 offscreen.target_pixels(target), vulkan.offscreen_pixels(),
                  WIDTH / 2, HEIGHT / 2)
 
     core.backend_update_viewport(&opengl_pass, WIDTH, HEIGHT)
@@ -659,7 +659,7 @@ main() {
     // depth image with its own memory, a sampler and a framebuffer, which no
     // frame ever looks different for.
     check_true("a resize replaces the shadow target rather than adding one",
-               vk.live_shadow_targets() == 1)
+               vulkan.live_shadow_targets() == 1)
 
     core.backend_set_post(&opengl_pass, false, false, 0.8, 0.4)
     core.backend_set_post(&vulkan_pass, false, false, 0.8, 0.4)
@@ -678,7 +678,7 @@ main() {
         core.backend_add_model(&vulkan_pass, vk_chunk)
         core.backend_render(&opengl_pass, cam, light)
         core.backend_render(&vulkan_pass, cam, light)
-        compare("voxel chunk", offscreen.target_pixels(target), vk.offscreen_pixels())
+        compare("voxel chunk", offscreen.target_pixels(target), vulkan.offscreen_pixels())
         core.backend_remove_model(&opengl_pass, gl_chunk)
         core.backend_remove_model(&vulkan_pass, vk_chunk)
         core.model_free(gl_chunk)
@@ -716,7 +716,7 @@ main() {
     core.model_free(vk_glass)
 
     gl.renderer_free(gl_renderer)
-    vk.renderer_free(vk_renderer)
+    vulkan.renderer_free(vk_renderer)
     core.camera_free(cam)
     core.light_free(light)
 

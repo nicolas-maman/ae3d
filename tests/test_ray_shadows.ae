@@ -19,7 +19,7 @@ import std.mem
 import std.os
 import ae3d.core
 import ae3d.png
-import ae3d.vk
+import ae3d.vulkan
 import ae3d.ecs
 import ae3d.crowd
 import ae3d.loader
@@ -114,21 +114,21 @@ edge_of(pixels: ptr, y: int, from_x: int, lit: int) -> int {
 }
 
 main() {
-    if !vk.available() {
-        println("ray_shadows: SKIP no Vulkan driver (${vk.last_error()})")
+    if !vulkan.available() {
+        println("ray_shadows: SKIP no Vulkan driver (${vulkan.last_error()})")
         return
     }
-    renderer = vk.renderer_new()
-    backend = vk.backend(renderer)
+    renderer = vulkan.renderer_new()
+    backend = vulkan.backend(renderer)
     if !core.backend_init(&backend, null, WIDTH, HEIGHT) {
-        println("ray_shadows: SKIP Vulkan would not start (${vk.last_error()})")
-        vk.renderer_free(renderer)
+        println("ray_shadows: SKIP Vulkan would not start (${vulkan.last_error()})")
+        vulkan.renderer_free(renderer)
         return
     }
-    if !vk.renderer_ray_query(renderer) {
+    if !vulkan.renderer_ray_query(renderer) {
         println("ray_shadows: SKIP the device does not trace rays (no VK_KHR_ray_query)")
         core.backend_cleanup(&backend)
-        vk.renderer_free(renderer)
+        vulkan.renderer_free(renderer)
         return
     }
     core.backend_set_clear_color(&backend, 0.0, 0.0, 0.0)
@@ -174,8 +174,8 @@ main() {
     check("the map shadows the ground beside the ball (${shade_map} against ${lit_map})", shade_map < lit_map - 50 && lit_map > 200)
     edge_map = edge_of(mapped, cy, shadow_x, lit_map)
 
-    vk.renderer_set_ray_shadows(renderer, true)
-    check("the rays are on", vk.renderer_ray_shadows(renderer))
+    vulkan.renderer_set_ray_shadows(renderer, true)
+    check("the rays are on", vulkan.renderer_ray_shadows(renderer))
     traced = read_frame(&backend, cam, light)
     lit_ray = level(traced, cx + 130, cy)
     shade_ray = level(traced, shadow_x, cy)
@@ -195,9 +195,9 @@ main() {
     // penumbra runs some ten metres either side of the hard edge, seven
     // pixels here: the ground at the hard edge is half lit, the shadow's
     // middle under the ball is as dark as before, the far ground as lit.
-    check("the sun starts as a point", vk.renderer_sun_size(renderer) == 0.0)
-    vk.renderer_set_sun_size(renderer, 20.0)
-    check("the sun takes a size (${vk.renderer_sun_size(renderer)})", vk.renderer_sun_size(renderer) > 19.9 && vk.renderer_sun_size(renderer) < 20.1)
+    check("the sun starts as a point", vulkan.renderer_sun_size(renderer) == 0.0)
+    vulkan.renderer_set_sun_size(renderer, 20.0)
+    check("the sun takes a size (${vulkan.renderer_sun_size(renderer)})", vulkan.renderer_sun_size(renderer) > 19.9 && vulkan.renderer_sun_size(renderer) < 20.1)
     // AE3D_RAY_DUMP=<dir> writes the hard and the soft frame there, to look
     // at. The frame's pixels are the renderer's one buffer, so the hard
     // frame is written before the soft one is drawn over it.
@@ -211,7 +211,7 @@ main() {
     check("a sun with a size half-lights the hard edge (${at_edge} between ${shade_ray} and ${lit_ray})", at_edge > shade_ray + (lit_ray - shade_ray) / 5 && at_edge < lit_ray - (lit_ray - shade_ray) / 5)
     check("and leaves the shadow's middle as dark (${inside} against ${shade_ray})", inside < shade_ray + 20)
     check("and the far ground as lit (${outside} against ${lit_ray})", outside > lit_ray - 12)
-    vk.renderer_set_sun_size(renderer, 0.0)
+    vulkan.renderer_set_sun_size(renderer, 0.0)
     hard = read_frame(&backend, cam, light)
     check("a point sun again: the edge is hard (${level(hard, edge_ray + 2, cy)})", level(hard, edge_ray + 2, cy) > lit_ray - lit_ray / 20)
 
@@ -222,7 +222,7 @@ main() {
     // which with the sun out is none: the ground there is lit as the
     // ground under the lamp is. By ray the ball blocks the lamp and that
     // ground goes dark, and the ground under the lamp stays lit.
-    vk.renderer_set_ray_shadows(renderer, false)
+    vulkan.renderer_set_ray_shadows(renderer, false)
     dark = core.light_sun(core.vec3(0.6, 1.0, 0.0))
     dark.intensity = 0.0
     dark.ambient_strength = 0.12
@@ -232,25 +232,25 @@ main() {
     // lamp at (80, 120) throws the ball's shadow about x -80 m, and the
     // ground under the lamp is at x +30 m, clear of the ball.
     lamp = core.light_point(core.vec3(80.0, 120.0, 0.0), core.vec3(1.0, 0.9, 0.8), 12.0, 200.0)
-    vk.renderer_add_light(renderer, lamp)
+    vulkan.renderer_add_light(renderer, lamp)
     far_x = cx - 105
     near_x = cx + 40
     mapped_lamp = read_frame(&backend, cam, dark)
     near_map = level(mapped_lamp, near_x, cy)
     far_map = level(mapped_lamp, far_x, cy)
     check("on the map path a lamp throws no shadow of the ball (${far_map} against ${near_map})", far_map > near_map / 2 && near_map > 60)
-    vk.renderer_set_ray_shadows(renderer, true)
+    vulkan.renderer_set_ray_shadows(renderer, true)
     traced_lamp = read_frame(&backend, cam, dark)
     near_ray = level(traced_lamp, near_x, cy)
     far_ray = level(traced_lamp, far_x, cy)
     check("by ray the ball shadows the ground from the lamp (${far_ray} against ${far_map} unshadowed)", far_ray < far_map - 120)
     check("and the ground under the lamp stays lit (${near_ray} against ${near_map})", near_ray > near_map - 24 && near_ray < near_map + 24)
-    vk.renderer_set_ray_shadows(renderer, false)
-    vk.renderer_remove_light(renderer, lamp)
+    vulkan.renderer_set_ray_shadows(renderer, false)
+    vulkan.renderer_remove_light(renderer, lamp)
     core.light_free(lamp)
     core.light_free(dark)
 
-    vk.renderer_set_ray_shadows(renderer, false)
+    vulkan.renderer_set_ray_shadows(renderer, false)
     back = read_frame(&backend, cam, light)
     check("off again, the map's shadow is back (${level(back, shadow_x, cy)})", level(back, shadow_x, cy) < lit_map - 50)
 
@@ -299,12 +299,12 @@ main() {
 
         in_rays = crowd.device_crowd_rays(dc, figure, bank)
         check("the crowd goes into the rays", in_rays)
-        vk.renderer_set_ray_shadows(renderer, true)
+        vulkan.renderer_set_ray_shadows(renderer, true)
         traced = read_frame(&backend, cam, light)
         shade_crowd_ray = level(traced, sx, sy)
         check("the rays shadow it the same (${shade_crowd_ray})", shade_crowd_ray < lit_far - 50 && shade_crowd_ray > shade_crowd_map - 24 && shade_crowd_ray < shade_crowd_map + 24)
         check("and the ball's shadow still holds (${level(traced, shadow_x, cy)})", level(traced, shadow_x, cy) < lit_map - 50)
-        vk.renderer_set_ray_shadows(renderer, false)
+        vulkan.renderer_set_ray_shadows(renderer, false)
 
         core.backend_remove_model(&backend, figure)
         crowd.device_crowd_free(dc)
@@ -337,9 +337,9 @@ main() {
             ecs.column_set3(col, k, core.vec3(1.0, 1.0, 1.0))
             k = k + 1
         }
-        vk.renderer_set_shadow_distance(renderer, 200.0)
-        vk.renderer_set_ray_shadows(renderer, true)
-        vk.renderer_set_ray_budget(renderer, 50)
+        vulkan.renderer_set_shadow_distance(renderer, 200.0)
+        vulkan.renderer_set_ray_shadows(renderer, true)
+        vulkan.renderer_set_ray_budget(renderer, 50)
         frame = 0
         while frame < 24 {
             crowd.device_crowd_update(many, ecs.column_data(pos), ecs.column_data(yaw), ecs.column_data(phase),
@@ -347,11 +347,11 @@ main() {
             read_frame(&backend, cam, light)
             frame = frame + 1
         }
-        taken = vk.renderer_ray_figures(renderer)
-        reach = vk.renderer_ray_reach(renderer)
+        taken = vulkan.renderer_ray_figures(renderer)
+        reach = vulkan.renderer_ray_reach(renderer)
         check("a budget of fifty holds the rays near fifty (${taken} within ${reach} m)", taken > 10 && taken <= 100)
         check("by pulling the reach in from the shadow distance", reach < 200.0)
-        vk.renderer_set_ray_budget(renderer, 0)
+        vulkan.renderer_set_ray_budget(renderer, 0)
         frame = 0
         while frame < 6 {
             crowd.device_crowd_update(many, ecs.column_data(pos), ecs.column_data(yaw), ecs.column_data(phase),
@@ -359,9 +359,9 @@ main() {
             read_frame(&backend, cam, light)
             frame = frame + 1
         }
-        check("with no budget the rays take every figure in reach (${vk.renderer_ray_figures(renderer)})", vk.renderer_ray_figures(renderer) == 400)
-        vk.renderer_set_ray_budget(renderer, 2048)
-        vk.renderer_set_ray_shadows(renderer, false)
+        check("with no budget the rays take every figure in reach (${vulkan.renderer_ray_figures(renderer)})", vulkan.renderer_ray_figures(renderer) == 400)
+        vulkan.renderer_set_ray_budget(renderer, 2048)
+        vulkan.renderer_set_ray_shadows(renderer, false)
         core.backend_remove_model(&backend, figure)
         crowd.device_crowd_free(many)
         ecs.column_free(pos)
@@ -376,7 +376,7 @@ main() {
     core.backend_cleanup(&backend)
     core.model_free(ground)
     core.model_free(ball)
-    vk.renderer_free(renderer)
+    vulkan.renderer_free(renderer)
     core.camera_free(cam)
     core.light_free(light)
 

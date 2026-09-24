@@ -20,7 +20,7 @@ import std.mem
 import ae3d.core
 import ae3d.platform
 import ae3d.gl
-import ae3d.vk
+import ae3d.vulkan
 import ae3d.offscreen
 import ae3d.agent
 import ae3d.loader
@@ -809,8 +809,8 @@ apply_preset(name: string) {
 // the blit path makes both.
 start_renderer() -> bool {
     if g_vulkan {
-        renderer = vk.renderer_new()
-        backend = vk.backend(renderer)
+        renderer = vulkan.renderer_new()
+        backend = vulkan.backend(renderer)
         if !core.backend_init(&backend, null, g_view_w, g_view_h) {
             println("editor: the Vulkan backend would not initialise")
             return false
@@ -913,9 +913,9 @@ pump_agent() {
         c.want_capture = false
         captured = false
         if g_vulkan {
-            pixels = vk.offscreen_pixels()
+            pixels = vulkan.offscreen_pixels()
             if pixels != null {
-                captured = agent.capture_adopt(pixels, vk.offscreen_width(), vk.offscreen_height())
+                captured = agent.capture_adopt(pixels, vulkan.offscreen_width(), vulkan.offscreen_height())
             }
         } else if g_gpu != 0 {
             // Read from the framebuffer that has just been drawn. There is no
@@ -959,7 +959,7 @@ pump_agent() {
 }
 
 viewport_backend() -> Backend {
-    if g_vulkan { return vk.backend(g_renderer as *VKRenderer) }
+    if g_vulkan { return vulkan.backend(g_renderer as *VKRenderer) }
     return gl.backend(g_renderer as *GLRenderer)
 }
 
@@ -968,8 +968,8 @@ apply_post() {
     backend = viewport_backend()
     core.backend_set_post(&backend, g_fxaa, g_bloom, BLOOM_THRESHOLD, BLOOM_INTENSITY)
     if g_vulkan {
-        vk.renderer_set_ssr(g_renderer as *VKRenderer, g_ssr)
-        vk.renderer_set_ssr_params(g_renderer as *VKRenderer, g_ssr_road_height, g_ssr_strength)
+        vulkan.renderer_set_ssr(g_renderer as *VKRenderer, g_ssr)
+        vulkan.renderer_set_ssr_params(g_renderer as *VKRenderer, g_ssr_road_height, g_ssr_strength)
     }
     apply_fog()
     cover = 0.0
@@ -983,15 +983,15 @@ apply_post() {
             engine.engine_set_clouds(g_engine as *Engine, cover, 1.0)
             engine.engine_set_sky_overcast(g_engine as *Engine, g_overcast, overcast_grey())
         } else if g_vulkan {
-            vk.renderer_set_clouds(g_renderer as *VKRenderer, cover, 1.0)
-            vk.renderer_set_sky_overcast(g_renderer as *VKRenderer, g_overcast, overcast_grey())
+            vulkan.renderer_set_clouds(g_renderer as *VKRenderer, cover, 1.0)
+            vulkan.renderer_set_sky_overcast(g_renderer as *VKRenderer, g_overcast, overcast_grey())
         } else {
             gl.renderer_set_clouds(g_renderer as *GLRenderer, cover, 1.0)
             gl.renderer_set_sky_overcast(g_renderer as *GLRenderer, g_overcast, overcast_grey())
         }
     }
     if g_vulkan {
-        vk.renderer_set_ssao(g_renderer as *VKRenderer, g_ssao, g_ssao_radius, g_ssao_intensity)
+        vulkan.renderer_set_ssao(g_renderer as *VKRenderer, g_ssao, g_ssao_radius, g_ssao_intensity)
     } else {
         gl.renderer_set_ssao(g_renderer as *GLRenderer, g_ssao, g_ssao_radius, g_ssao_intensity)
     }
@@ -3706,9 +3706,9 @@ pass_costs() -> string {
     scene = 0.0
     post = 0.0
     if g_vulkan {
-        shadow = vk.renderer_shadow_ms(g_renderer as *VKRenderer)
-        scene = vk.renderer_scene_ms(g_renderer as *VKRenderer)
-        post = vk.renderer_post_ms(g_renderer as *VKRenderer)
+        shadow = vulkan.renderer_shadow_ms(g_renderer as *VKRenderer)
+        scene = vulkan.renderer_scene_ms(g_renderer as *VKRenderer)
+        post = vulkan.renderer_post_ms(g_renderer as *VKRenderer)
     } else {
         shadow = gl.renderer_shadow_ms(g_renderer as *GLRenderer)
         scene = gl.renderer_scene_ms(g_renderer as *GLRenderer)
@@ -3722,7 +3722,7 @@ pass_costs() -> string {
     // AE3D_PERF prints and scripts/perf.sh tables, read off the bar.
     if g_vulkan {
         r = g_renderer as *VKRenderer
-        costs = string.concat(costs, "  (depth ${number(vk.renderer_stage_ms(r, 3))} sky ${number(vk.renderer_stage_ms(r, 4))} opaque ${number(vk.renderer_stage_ms(r, 5))} ao ${number(vk.renderer_stage_ms(r, 6))} clear ${number(vk.renderer_stage_ms(r, 7))})")
+        costs = string.concat(costs, "  (depth ${number(vulkan.renderer_stage_ms(r, 3))} sky ${number(vulkan.renderer_stage_ms(r, 4))} opaque ${number(vulkan.renderer_stage_ms(r, 5))} ao ${number(vulkan.renderer_stage_ms(r, 6))} clear ${number(vulkan.renderer_stage_ms(r, 7))})")
     }
     return costs
 }
@@ -4788,7 +4788,7 @@ apply_time_of_day() {
         // last handed, and the hour reaches the shader through the light.
         if g_sun_sky == null {
             if g_vulkan {
-                g_sun_sky = vk.skybox_create(g_renderer as *VKRenderer, core.SKY_PROCEDURAL) as ptr
+                g_sun_sky = vulkan.skybox_create(g_renderer as *VKRenderer, core.SKY_PROCEDURAL) as ptr
             } else {
                 g_sun_sky = gl.skybox_create(g_renderer as *GLRenderer, core.SKY_PROCEDURAL) as ptr
             }
@@ -4813,7 +4813,7 @@ apply_time_of_day() {
 free_sky(s: ptr) {
     if s == null || g_renderer == null { return }
     if g_vulkan {
-        vk.skybox_free(g_renderer as *VKRenderer, s as *Skybox)
+        vulkan.skybox_free(g_renderer as *VKRenderer, s as *Skybox)
     } else {
         gl.skybox_free(g_renderer as *GLRenderer, s as *Skybox)
     }
@@ -4827,7 +4827,7 @@ set_scene_sky(path: string) -> bool {
     made = null as ptr
     if path != "" {
         if g_vulkan {
-            made = vk.skybox_create(g_renderer as *VKRenderer, path) as ptr
+            made = vulkan.skybox_create(g_renderer as *VKRenderer, path) as ptr
         } else {
             made = gl.skybox_create(g_renderer as *GLRenderer, path) as ptr
         }
@@ -6965,11 +6965,11 @@ main() {
     // Vulkan, as the engine's programs; AE3D_EDITOR_BACKEND=opengl for the
     // other renderer, and OpenGL where there is no Vulkan driver, said so.
     if !env_is("AE3D_EDITOR_BACKEND", "opengl") {
-        if vk.available() {
+        if vulkan.available() {
             g_vulkan = true
             g_backend_name = "vulkan"
         } else {
-            println("editor: no Vulkan driver (${vk.last_error()}), staying on OpenGL")
+            println("editor: no Vulkan driver (${vulkan.last_error()}), staying on OpenGL")
         }
     }
 
