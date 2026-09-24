@@ -13,6 +13,10 @@
   up a 0.3 m step, stopped by a 0.5 m one, still on 40 degrees, sliding on
   50, a jump to v^2/2g within 2%, nothing left more than 4.3 mm into the
   world. [docs/physics.md](docs/physics.md).
+- Out of the car: in `street_drive`, E by the stopped car gets out and the
+  street is walked first-person on a character controller (W/S A/D where
+  the eyes look, the mouse to look, shift to run, space to jump), E by the
+  car gets back in. `AE3D_ON_FOOT=1` starts on foot, `=2` walks alone.
 
 ### Natural motion
 

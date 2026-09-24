@@ -178,7 +178,7 @@ The capsule rides a step height (0.35 m) above the feet, so a kerb or a stair lo
 - a 5 m/s jump rising 1.29 m against v²/2g = 1.27 (within 2%);
 - no character more than 4.3 mm into the world at the end, within the solver's 5 mm slop.
 
-Pushing dynamic bodies, a Character body kind in the editor, and a first-person walk down the street on `ae3d.input` come next in #420.
+`street_drive` uses it. Press E by the car, stopped, to get out, and walk the street first-person: W/S and A/D where you look, the mouse to look, shift to run, space to jump. Press E by the car to get back in. `AE3D_ON_FOOT=1` starts on foot, and `AE3D_ON_FOOT=2` walks on its own for a run without a keyboard: 4.8 m in three seconds at a walk, on the road. Pushing dynamic bodies and a Character body kind in the editor come next in #420.
 
 ## The scenes
 

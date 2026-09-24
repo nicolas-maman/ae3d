@@ -80,6 +80,14 @@ struct Game {
     tail_lights: ptr               // *Light[2]
     knocked: int
     props: int
+    // On foot (E by a stopped car): a character controller walks the
+    // street and the camera is its eyes; E by the car gets back in.
+    on_foot: bool
+    walker_body: ptr               // *CharacterController, made the first time
+    look_yaw: float                // radians, 0 along -z
+    look_pitch: float
+    jumped: bool
+    walk_alone: bool               // AE3D_ON_FOOT=2
 }
 
 var g_seed = 0x2545F491
@@ -660,6 +668,7 @@ start(state: ptr, go: *GameObject) {
     input.bind_axis(keys, "steer", platform.KEY_A, platform.KEY_D)
     input.bind_key(keys, "brake", platform.KEY_SPACE)
     input.bind_key(keys, "handbrake", platform.KEY_LEFT_SHIFT)
+    input.bind_key(keys, "use", platform.KEY_E)
     cam = engine.engine_camera(e)
     core.camera_set_far(cam, 300.0)
     g.camera_pos = core.vec3(52.0, 4.0, 6.0)
@@ -672,12 +681,91 @@ heading_of(q: Quat) -> float {
     return core.atan2_of(0.0 - f.x, 0.0 - f.z)
 }
 
+// Out of the car, or back in: E by a car stopped enough to step out of,
+// or by the car on foot. On foot a character controller walks the street
+// (physics.character_controller, #420) and the mouse looks.
+toggle_on_foot(g: *Game, e: *Engine) {
+    v = g.vehicle as *Vehicle
+    chassis = g.chassis as *GameObject
+    car = behaviour.object_position(chassis)
+    if !g.on_foot {
+        if math.abs_float(physics.vehicle_speed(v)) > 2.0 { return }
+        // Out on the driver's side, beside the door, on the road.
+        side = core.quat_apply(behaviour.object_rotation(chassis), core.vec3(0.0 - 1.6, 0.0, 0.0))
+        spot = core.vec3(car.x + side.x, ROAD_Y + 0.02, car.z + side.z)
+        if g.walker_body == null {
+            body = engine.object(e, "Player", null)
+            behaviour.object_set_position(body, spot)
+            g.walker_body = physics.character_controller(body, 0.3, 1.8) as ptr
+        } else {
+            behaviour.object_set_position((g.walker_body as *CharacterController).object as *GameObject, spot)
+        }
+        g.look_yaw = heading_of(behaviour.object_rotation(chassis))
+        g.look_pitch = 0.0
+        g.on_foot = true
+        platform.window_set_cursor_mode(engine.engine_window(e), platform.CURSOR_DISABLED)
+        return
+    }
+    feet = behaviour.object_position((g.walker_body as *CharacterController).object as *GameObject)
+    if core.v3_len(core.v3_sub(feet, car)) > 3.5 { return }
+    g.on_foot = false
+    g.idle = 0.0
+    platform.window_set_cursor_mode(engine.engine_window(e), platform.CURSOR_NORMAL)
+}
+
+// A step on foot: W/S and A/D walk where the eyes look, shift runs, space
+// jumps from the ground.
+walk_on_foot(g: *Game, e: *Engine, step: float) {
+    keys = engine.engine_input(e)
+    c = g.walker_body as *CharacterController
+    ahead = input.axis(keys, "throttle")
+    left = input.axis(keys, "steer")
+    // AE3D_ON_FOOT=2 walks on its own: ahead and a little to the right,
+    // onto the pavement, for a run without a keyboard.
+    if g.walk_alone {
+        ahead = 1.0
+        left = 0.0 - 0.35
+    }
+    speed = 1.6
+    if input.held(keys, "handbrake") { speed = 4.5 }
+    fx = 0.0 - core.sin_of(g.look_yaw)
+    fz = 0.0 - core.cos_of(g.look_yaw)
+    wx = fx * ahead + fz * left
+    wz = fz * ahead - fx * left
+    len = core.sqrt_of(wx * wx + wz * wz)
+    if len > 1.0 {
+        wx = wx / len
+        wz = wz / len
+    }
+    jump = 0.0
+    if input.held(keys, "brake") && !g.jumped && physics.character_grounded(c) {
+        jump = 4.2
+        g.jumped = true
+    }
+    if !input.held(keys, "brake") { g.jumped = false }
+    physics.character_move(c, core.vec3(wx * speed, 0.0, wz * speed), jump, step)
+}
+
 fixed_update(state: ptr, go: *GameObject, step: float) {
     g = state as *Game
     if g.vehicle == null { return }
     e = engine.of(go)
     v = g.vehicle as *Vehicle
     keys = engine.engine_input(e)
+    // AE3D_ON_FOOT=1 starts out of the car, for a look at the street from
+    // the pavement without a keyboard.
+    if !g.on_foot && g.seconds == 0.0 && g.walker_body == null && core.env_int("AE3D_ON_FOOT", 0) >= 1 {
+        toggle_on_foot(g, e)
+        g.walk_alone = core.env_int("AE3D_ON_FOOT", 0) == 2
+    }
+    if input.pressed(keys, "use") { toggle_on_foot(g, e) }
+    if g.on_foot {
+        // The car waits with its brakes on; the street goes on around it.
+        physics.vehicle_drive(v, 0.0, 0.0, 1.0)
+        walk_on_foot(g, e, step)
+        walk(g, step)
+        return
+    }
     throttle = input.axis(keys, "throttle")
     steer = input.axis(keys, "steer")
     brake = 0.0
@@ -777,8 +865,27 @@ update(state: ptr, go: *GameObject, delta: float) {
     if g.chassis == null { return }
     e = engine.of(go)
     chassis = g.chassis as *GameObject
+    if g.on_foot && g.walker_body != null {
+        // The eyes: 1.65 m over the feet, turned by the mouse.
+        keys = engine.engine_input(e)
+        g.look_yaw = g.look_yaw - input.mouse_dx(keys) * 0.0025
+        g.look_pitch = math.clamp_float(g.look_pitch - input.mouse_dy(keys) * 0.0025, 0.0 - 1.4, 1.4)
+        feet = behaviour.object_position((g.walker_body as *CharacterController).object as *GameObject)
+        eye = core.vec3(feet.x, feet.y + 1.65, feet.z)
+        cp = core.cos_of(g.look_pitch)
+        look = core.vec3(0.0 - core.sin_of(g.look_yaw) * cp, core.sin_of(g.look_pitch), 0.0 - core.cos_of(g.look_yaw) * cp)
+        g.camera_pos = eye
+        g.camera_aim = core.v3_add(eye, look)
+        cam = engine.engine_camera(e)
+        core.camera_set_position(cam, eye)
+        core.camera_look_at(cam, g.camera_aim)
+    }
     pos = behaviour.object_position(chassis)
     forward = behaviour.object_forward(chassis)
+    if g.on_foot {
+        update_lights(g, chassis, pos)
+        return
+    }
     // Level the chase: the car's heading without its pitch and roll.
     flat = core.vec3(forward.x, 0.0, forward.z)
     len = core.sqrt_of(flat.x * flat.x + flat.z * flat.z)
@@ -798,7 +905,11 @@ update(state: ptr, go: *GameObject, delta: float) {
     }
     core.camera_set_position(cam, g.camera_pos)
     core.camera_look_at(cam, g.camera_aim)
-    // The lights where the car's corners are now.
+    update_lights(g, chassis, pos)
+}
+
+// The car's lamps where its corners are now.
+update_lights(g: *Game, chassis: *GameObject, pos: Vec3) {
     q = behaviour.object_rotation(chassis)
     heads = g.headlights as ptr[]
     tails = g.tail_lights as ptr[]
@@ -852,6 +963,11 @@ main() {
     engine.engine_run(e)
     p = physics.of(e)
     println("street_drive: ${physics.physics_body_count(p)} bodies (${g.props} props, ${list.size(g.bystanders)} bystanders, ${g.knocked} knocked down), ${physics.physics_step_count(p)} steps, ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps")
+    if g.walker_body != null {
+        c = g.walker_body as *CharacterController
+        feet = behaviour.object_position(c.object as *GameObject)
+        println("street_drive: on foot at (${feet.x}, ${feet.y}, ${feet.z}), grounded ${physics.character_grounded(c)}")
+    }
     if g.vehicle != null { physics.vehicle_free(g.vehicle as *Vehicle) }
     if g.headlights != null { free(g.headlights) }
     if g.tail_lights != null { free(g.tail_lights) }
