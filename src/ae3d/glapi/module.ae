@@ -14,8 +14,17 @@
 // has already refused a context missing any of them.
 
 extern ae3d_gl_proc(name: string) -> ptr
+// The bytes of a string, as C takes them. A call through a function pointer
+// hands a string over as it is -- a heap string is a header in front of its
+// bytes -- where an extern call passes the bytes: this is the conversion the
+// compiler makes at an extern, done by hand (a plain C string passes
+// through unchanged).
+extern aether_string_data(s: string) -> ptr @c_import
+
+cstr(s: string) -> ptr { return (aether_string_data(s)) as ptr }
 
 exports (
+    cstr,
     FALSE,
     TRUE,
     NO_ERROR,
@@ -667,8 +676,8 @@ glDeleteProgram(program: uint32) {
 var p_glGetUniformLocation: ptr = null
 glGetUniformLocation(program: uint32, name: string) -> int {
     if p_glGetUniformLocation == null { p_glGetUniformLocation = ae3d_gl_proc("glGetUniformLocation") }
-    f = p_glGetUniformLocation as fn(uint32, string) -> int
-    return f(program, name)
+    f = p_glGetUniformLocation as fn(uint32, ptr) -> int
+    return f(program, cstr(name))
 }
 
 var p_glUniform1i: ptr = null

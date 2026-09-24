@@ -14,21 +14,15 @@
 int    ae3d_store_size(int which);
 double ae3d_store_field(void *store, int which, int field);
 
-int    ae3d_gl_posebank_texture(const float *data, int frames, int bones);
 /* The finished frame's mean and brightest linear luminance, two frames late
    (native/gpu/opengl.c); 1 when `out` holds them. */
 void  *ae3d_gl_proc(const char *name);
 int    ae3d_gl_meter(int source_framebuffer, int width, int height, double *out);
 void   ae3d_gl_meter_release(void);
-void   ae3d_gl_setup_instance_phase(void *inst, int phase_vbo);
-void   ae3d_gl_update_instance_phases(void *inst, int phase_vbo);
-void   ae3d_gl_upload_skin(void *mesh, int vbo);
-void   ae3d_gl_uniform_mat4v(int loc, int count, const void *values);
 
 /* Scripts: a compiled Aether source opened as a shared library, with the
  * object it is attached to passed in on every call. */
 
-void   ae3d_gl_update_instance_colors(void *inst, int color_vbo);
 int    ae3d_vk_update_instances(int handle, void *instances);
 
 
@@ -47,42 +41,8 @@ int    ae3d_gl_load(void);
 const char *ae3d_gl_version(void);
 const char *ae3d_gl_renderer(void);
 
-int    ae3d_gl_texture_rgba(int width, int height, const unsigned char *rgba);
-int    ae3d_gl_texture3d_rgba(int size, const unsigned char *rgba);
-void   ae3d_gl_texture3d_bind(int unit, int texture);
 
-int    ae3d_gl_geometry_acquire(void *mesh);
-int    ae3d_gl_geometry_instance_vbo(int vao);
-void   ae3d_gl_geometry_release(int vao);
-void   ae3d_gl_geometry_shutdown(void);
-int    ae3d_gl_batch_upload(int vao, int instance_vbo, void *inst, int capacity_bytes);
-void   ae3d_gl_set_default_instance_color(void);
-int    ae3d_gl_geometry_instance_capacity(int vao);
-void   ae3d_gl_geometry_set_instance_capacity(int vao, int capacity);
-void   ae3d_gl_upload_mesh(void *mesh, int vbo, int ebo);
-void   ae3d_gl_setup_vertex_attribs(void);
-void   ae3d_gl_setup_instance_attribs(void *inst, int matrix_vbo, int color_vbo);
-void   ae3d_gl_setup_proxy_vao(int vao, int mesh_vbo, int mesh_ebo, int skin_vbo,
-                               int matrix_vbo, int color_vbo, int phase_vbo);
-int    ae3d_gl_update_instances(void *inst, int matrix_vbo, int capacity_bytes);
-void   ae3d_gl_update_mesh_vertices(void *mesh, int vbo);
-void   ae3d_gl_draw_elements(int count, int byte_offset);
-void   ae3d_gl_draw_elements_instanced(int count, int byte_offset, int instances);
-void   ae3d_gl_draw_arrays(int first, int count);
 
-int    ae3d_gl_program_create(const char *vertex_src, const char *fragment_src);
-void   ae3d_gl_program_delete(int program);
-void   ae3d_gl_program_use(int program);
-const char *ae3d_gl_program_log(void);
-int    ae3d_gl_uniform_location(int program, const char *name);
-void   ae3d_gl_uniform_int(int loc, int v);
-void   ae3d_gl_uniform_float(int loc, double v);
-void   ae3d_gl_uniform_vec2(int loc, double x, double y);
-void   ae3d_gl_uniform_vec3(int loc, double x, double y, double z);
-void   ae3d_gl_uniform_vec4(int loc, double x, double y, double z, double w);
-void   ae3d_gl_uniform_mat4(int loc, const double *m);
-void   ae3d_gl_uniform_float_array(int loc, void *arr);
-void   ae3d_gl_uniform_vec3_array(int loc, void *arr);
 
 void  *ae3d_farr_create(int count);
 void   ae3d_farr_destroy(void *arr);
@@ -90,11 +50,6 @@ void   ae3d_farr_set(void *arr, int i, double v);
 double ae3d_farr_get(void *arr, int i);
 int    ae3d_farr_count(void *arr);
 
-int    ae3d_gl_texture_from_image(void *img, int srgb, int mipmap);
-int    ae3d_gl_texture_cubemap_from_image(void *img);
-void   ae3d_gl_texture_delete(int texture);
-void   ae3d_gl_texture_bind(int unit, int texture);
-void   ae3d_gl_texture_bind_cubemap(int unit, int texture);
 
 /* GPU time per pass, read three frames late so the read never waits. */
 void  *ae3d_gl_passtimer_create(void);

@@ -11,6 +11,8 @@
 import std.list
 import std.heap
 import std.string
+import std.mem
+import std.bytes
 import ae3d.core
 import ae3d.png
 import ae3d.platform
@@ -44,44 +46,16 @@ exports (
 )
 
 extern calloc(count: int, size: int) -> ptr
+extern ae3d_image_pixels(img: ptr) -> ptr
+extern ae3d_image_width(img: ptr) -> int
+extern ae3d_image_height(img: ptr) -> int
 extern free(p: ptr)
 extern ae3d_offscreen_resize(target: ptr, width: int, height: int) -> int
 extern ae3d_offscreen_read_pipelined(target: ptr) -> ptr
 extern ae3d_gl_load() -> int
 extern ae3d_gl_version() -> string
 extern ae3d_gl_renderer() -> string
-extern ae3d_gl_upload_mesh(mesh: ptr, vbo: int, ebo: int)
-extern ae3d_gl_update_mesh_vertices(mesh: ptr, vbo: int)
-extern ae3d_gl_setup_vertex_attribs()
-extern ae3d_gl_upload_skin(mesh: ptr, vbo: int)
-extern ae3d_gl_uniform_mat4v(loc: int, count: int, values: ptr)
-extern ae3d_gl_setup_instance_attribs(inst: ptr, matrix_vbo: int, color_vbo: int)
-extern ae3d_gl_setup_proxy_vao(vao: int, mesh_vbo: int, mesh_ebo: int, skin_vbo: int,
-                               matrix_vbo: int, color_vbo: int, phase_vbo: int)
-extern ae3d_gl_setup_instance_phase(inst: ptr, phase_vbo: int)
-extern ae3d_gl_update_instance_phases(inst: ptr, phase_vbo: int)
 extern ae3d_gl_meter(source: int, width: int, height: int, out: ptr) -> int
-extern ae3d_gl_posebank_texture(data: ptr, frames: int, bones: int) -> int
-extern ae3d_gl_update_instances(inst: ptr, matrix_vbo: int, capacity_bytes: int) -> int
-extern ae3d_gl_update_instance_colors(inst: ptr, color_vbo: int)
-extern ae3d_gl_draw_elements(count: int, byte_offset: int)
-extern ae3d_gl_draw_elements_instanced(count: int, byte_offset: int, instances: int)
-extern ae3d_gl_draw_arrays(first: int, count: int)
-extern ae3d_gl_program_create(vertex_src: string, fragment_src: string) -> int
-extern ae3d_gl_program_delete(program: int)
-extern ae3d_gl_program_use(program: int)
-extern ae3d_gl_program_log() -> string
-extern ae3d_gl_uniform_location(program: int, name: string) -> int
-extern ae3d_gl_uniform_int(loc: int, v: int)
-extern ae3d_gl_uniform_float(loc: int, v: float)
-extern ae3d_gl_uniform_vec2(loc: int, x: float, y: float)
-extern ae3d_gl_uniform_vec3(loc: int, x: float, y: float, z: float)
-extern ae3d_gl_uniform_mat4(loc: int, m: ptr)
-extern ae3d_gl_uniform_float_array(loc: int, arr: ptr)
-extern ae3d_gl_uniform_vec3_array(loc: int, arr: ptr)
-extern ae3d_gl_texture_from_image(img: ptr, srgb: int, mipmap: int) -> int
-extern ae3d_gl_texture_delete(texture: int)
-extern ae3d_gl_texture_bind(unit: int, texture: int)
 extern ae3d_gl_passtimer_create() -> ptr
 extern ae3d_gl_passtimer_destroy(timer: ptr)
 extern ae3d_gl_passtimer_frame(timer: ptr)
@@ -91,9 +65,6 @@ extern ae3d_gl_passtimer_ms(timer: ptr, pass: int) -> float
 
 extern ae3d_gl_fbo_create() -> int
 extern ae3d_gl_scene_depth_capture() -> int
-extern ae3d_gl_texture_rgba(width: int, height: int, rgba: ptr) -> int
-extern ae3d_gl_texture3d_rgba(size: int, rgba: ptr) -> int
-extern ae3d_gl_texture3d_bind(unit: int, texture: int)
 extern ae3d_gl_fbo_bind(fbo: int)
 extern ae3d_gl_fbo_delete(fbo: int)
 extern ae3d_gl_fbo_attach_color(fbo: int, width: int, height: int, hdr: int) -> int
@@ -104,14 +75,6 @@ extern ae3d_gl_draw_buffers(count: int)
 extern ae3d_gl_clear_attachment(index: int, r: float, g: float, b: float, a: float)
 extern ae3d_gl_fbo_resolve_attachment(source: int, destination: int, width: int, height: int, index: int) -> int
 extern ae3d_gl_fbo_attach_depth(fbo: int, width: int, height: int) -> int
-extern ae3d_gl_geometry_acquire(mesh: ptr) -> int
-extern ae3d_gl_geometry_instance_vbo(vao: int) -> int
-extern ae3d_gl_geometry_release(vao: int)
-extern ae3d_gl_geometry_shutdown()
-extern ae3d_gl_geometry_instance_capacity(vao: int) -> int
-extern ae3d_gl_geometry_set_instance_capacity(vao: int, capacity: int)
-extern ae3d_gl_batch_upload(vao: int, instance_vbo: int, inst: ptr, capacity_bytes: int) -> int
-extern ae3d_gl_set_default_instance_color()
 extern ae3d_gl_max_samples() -> int
 extern ae3d_gl_fbo_attach_color_multisample(fbo: int, width: int, height: int, samples: int) -> int
 extern ae3d_gl_fbo_attach_depth_multisample(fbo: int, width: int, height: int, samples: int) -> int
@@ -130,6 +93,640 @@ extern ae3d_image_height(image: ptr) -> int
 extern ae3d_image_solid(width: int, height: int, r: int, g: int, b: int, a: int) -> ptr
 extern ae3d_image_free(img: ptr)
 extern ae3d_image_error() -> string
+
+// --- programs, uniforms and textures, in Aether (#398) ---------------------------------------
+
+var g_program_log = ""
+
+// Why the last program did not build: the stage and GL's own log.
+ae3d_gl_program_log() -> string { return g_program_log }
+
+// `count` of GL's info log, from `fetch` (the shader's or the program's).
+info_log(object: int, length: int, shader: bool) -> string {
+    if length <= 1 { return "" }
+    buffer = calloc(length + 1, 1)
+    if shader {
+        glapi.glGetShaderInfoLog(object as uint32, length, null, buffer)
+    } else {
+        glapi.glGetProgramInfoLog(object as uint32, length, null, buffer)
+    }
+    text = bytes.string_from_ptr(buffer, length - 1)
+    free(buffer)
+    return text
+}
+
+// One of GL's integers about a shader or a program.
+object_integer(object: int, name: int, shader: bool) -> int {
+    out = calloc(1, 4)
+    if shader {
+        glapi.glGetShaderiv(object as uint32, name as uint32, out)
+    } else {
+        glapi.glGetProgramiv(object as uint32, name as uint32, out)
+    }
+    value = (out as int[])[0]
+    free(out)
+    return value
+}
+
+// A stage compiled, or 0 with the log saying why.
+compile_stage(kind: int, source: string, label: string) -> int {
+    shader = (glapi.glCreateShader(kind as uint32)) as int
+    sources = calloc(1, 8)
+    (sources as ptr[])[0] = glapi.cstr(source)
+    glapi.glShaderSource(shader as uint32, 1, sources, null)
+    free(sources)
+    glapi.glCompileShader(shader as uint32)
+    if object_integer(shader, glapi.COMPILE_STATUS, true) == glapi.FALSE {
+        length = object_integer(shader, glapi.INFO_LOG_LENGTH, true)
+        g_program_log = "${label} shader: ${info_log(shader, length, true)}"
+        glapi.glDeleteShader(shader as uint32)
+        return 0
+    }
+    return shader
+}
+
+ae3d_gl_program_create(vertex_src: string, fragment_src: string) -> int {
+    g_program_log = ""
+    if vertex_src == null || fragment_src == null {
+        g_program_log = "missing shader source"
+        return 0
+    }
+    vertex = compile_stage(glapi.VERTEX_SHADER, vertex_src, "vertex")
+    if vertex == 0 { return 0 }
+    fragment = compile_stage(glapi.FRAGMENT_SHADER, fragment_src, "fragment")
+    if fragment == 0 {
+        glapi.glDeleteShader(vertex as uint32)
+        return 0
+    }
+    program = (glapi.glCreateProgram()) as int
+    glapi.glAttachShader(program as uint32, vertex as uint32)
+    glapi.glAttachShader(program as uint32, fragment as uint32)
+    glapi.glLinkProgram(program as uint32)
+    linked = object_integer(program, glapi.LINK_STATUS, false)
+    glapi.glDetachShader(program as uint32, vertex as uint32)
+    glapi.glDetachShader(program as uint32, fragment as uint32)
+    glapi.glDeleteShader(vertex as uint32)
+    glapi.glDeleteShader(fragment as uint32)
+    if linked == glapi.FALSE {
+        length = object_integer(program, glapi.INFO_LOG_LENGTH, false)
+        g_program_log = "link: ${info_log(program, length, false)}"
+        glapi.glDeleteProgram(program as uint32)
+        return 0
+    }
+    return program
+}
+
+ae3d_gl_program_delete(program: int) {
+    if program != 0 { glapi.glDeleteProgram(program as uint32) }
+}
+
+ae3d_gl_program_use(program: int) { glapi.glUseProgram(program as uint32) }
+
+ae3d_gl_uniform_location(program: int, name: string) -> int {
+    if program == 0 || name == null { return 0 - 1 }
+    return glapi.glGetUniformLocation(program as uint32, name)
+}
+
+ae3d_gl_uniform_int(loc: int, v: int) {
+    if loc >= 0 { glapi.glUniform1i(loc, v) }
+}
+
+ae3d_gl_uniform_float(loc: int, v: float) {
+    if loc >= 0 { glapi.glUniform1f(loc, v as f32) }
+}
+
+ae3d_gl_uniform_vec2(loc: int, x: float, y: float) {
+    if loc >= 0 { glapi.glUniform2f(loc, x as f32, y as f32) }
+}
+
+ae3d_gl_uniform_vec3(loc: int, x: float, y: float, z: float) {
+    if loc >= 0 { glapi.glUniform3f(loc, x as f32, y as f32, z as f32) }
+}
+
+// Sixteen doubles, column-major, as sixteen floats.
+ae3d_gl_uniform_mat4(loc: int, m: ptr) {
+    if loc < 0 || m == null { return }
+    values = calloc(16, 4)
+    from = m as float[]
+    to = values as f32[]
+    i = 0
+    while i < 16 {
+        to[i] = from[i] as f32
+        i = i + 1
+    }
+    glapi.glUniformMatrix4fv(loc, 1, glapi.FALSE, values)
+    free(values)
+}
+
+// A float array (core's ae3d_farr, still C while vulkan.c reads it): its
+// values and its count, as the C lays them out.
+struct GLFloats {
+    values: ptr
+    count: int
+}
+
+ae3d_gl_uniform_float_array(loc: int, arr: ptr) {
+    if loc < 0 || arr == null { return }
+    a = arr as *GLFloats
+    glapi.glUniform1fv(loc, a.count, a.values)
+}
+
+ae3d_gl_uniform_vec3_array(loc: int, arr: ptr) {
+    if loc < 0 || arr == null { return }
+    a = arr as *GLFloats
+    glapi.glUniform3fv(loc, a.count / 3, a.values)
+}
+
+// A texture name, made and bound to `target`, with byte rows unpadded.
+new_texture(target: int) -> int {
+    out = calloc(1, 4)
+    glapi.glGenTextures(1, out)
+    texture = (out as int[])[0]
+    free(out)
+    glapi.glBindTexture(target as uint32, texture as uint32)
+    glapi.glPixelStorei(glapi.UNPACK_ALIGNMENT as uint32, 1)
+    return texture
+}
+
+texture_param(target: int, name: int, value: int) {
+    glapi.glTexParameteri(target as uint32, name as uint32, value)
+}
+
+// Wrapping on s and t (and r, for a 3D one), and the filters.
+texture_params(target: int, wrap: int, three: bool, mag: int, min: int) {
+    texture_param(target, glapi.TEXTURE_WRAP_S, wrap)
+    texture_param(target, glapi.TEXTURE_WRAP_T, wrap)
+    if three { texture_param(target, glapi.TEXTURE_WRAP_R, wrap) }
+    texture_param(target, glapi.TEXTURE_MAG_FILTER, mag)
+    texture_param(target, glapi.TEXTURE_MIN_FILTER, min)
+}
+
+ae3d_gl_texture_from_image(img: ptr, srgb: int, mipmap: int) -> int {
+    pixels = ae3d_image_pixels(img)
+    width = ae3d_image_width(img)
+    height = ae3d_image_height(img)
+    if pixels == null || width <= 0 || height <= 0 { return 0 }
+    texture = new_texture(glapi.TEXTURE_2D)
+    internal = glapi.RGBA
+    if srgb != 0 { internal = glapi.SRGB8_ALPHA8 }
+    glapi.glTexImage2D(glapi.TEXTURE_2D as uint32, 0, internal, width, height, 0, glapi.RGBA as uint32,
+                       glapi.UNSIGNED_BYTE as uint32, pixels)
+    if mipmap != 0 {
+        texture_params(glapi.TEXTURE_2D, glapi.REPEAT, false, glapi.LINEAR, glapi.LINEAR_MIPMAP_LINEAR)
+        glapi.glGenerateMipmap(glapi.TEXTURE_2D as uint32)
+    } else {
+        texture_params(glapi.TEXTURE_2D, glapi.REPEAT, false, glapi.LINEAR, glapi.LINEAR)
+    }
+    glapi.glBindTexture(glapi.TEXTURE_2D as uint32, 0)
+    return texture
+}
+
+// A texture from raw RGBA bytes: linear, repeating, no mipmaps. What a
+// baked map -- the clouds' weather -- is uploaded as.
+ae3d_gl_texture_rgba(width: int, height: int, rgba: ptr) -> int {
+    if rgba == null || width <= 0 || height <= 0 { return 0 }
+    texture = new_texture(glapi.TEXTURE_2D)
+    glapi.glTexImage2D(glapi.TEXTURE_2D as uint32, 0, glapi.RGBA, width, height, 0, glapi.RGBA as uint32,
+                       glapi.UNSIGNED_BYTE as uint32, rgba)
+    texture_params(glapi.TEXTURE_2D, glapi.REPEAT, false, glapi.LINEAR, glapi.LINEAR)
+    glapi.glBindTexture(glapi.TEXTURE_2D as uint32, 0)
+    return texture
+}
+
+// A 3D texture, `size` cubed RGBA bytes: linear, repeating on every axis,
+// which is what a tileable noise the clouds are shaped by wants.
+ae3d_gl_texture3d_rgba(size: int, rgba: ptr) -> int {
+    if rgba == null || size <= 0 { return 0 }
+    texture = new_texture(glapi.TEXTURE_3D)
+    glapi.glTexImage3D(glapi.TEXTURE_3D as uint32, 0, glapi.RGBA, size, size, size, 0, glapi.RGBA as uint32,
+                       glapi.UNSIGNED_BYTE as uint32, rgba)
+    texture_params(glapi.TEXTURE_3D, glapi.REPEAT, true, glapi.LINEAR, glapi.LINEAR)
+    glapi.glBindTexture(glapi.TEXTURE_3D as uint32, 0)
+    return texture
+}
+
+ae3d_gl_texture3d_bind(unit: int, texture: int) {
+    glapi.glActiveTexture((glapi.TEXTURE0 + unit) as uint32)
+    glapi.glBindTexture(glapi.TEXTURE_3D as uint32, texture as uint32)
+}
+
+// A pose bank as a float texture the skinning shader samples per instance.
+// The bank is frame-major, bone-major, sixteen floats a bone -- one RGBA32F
+// row of `bones * 4` texels a frame -- so its bytes upload straight in with
+// no repacking. Nearest, clamped: the shader fetches exact texels by (bone
+// column, frame), never filters between them. 32-bit float, since a bone
+// matrix carries translations a 16-bit float would round the crowd apart on.
+ae3d_gl_posebank_texture(data: ptr, frames: int, bones: int) -> int {
+    if data == null || frames <= 0 || bones <= 0 { return 0 }
+    texture = new_texture(glapi.TEXTURE_2D)
+    glapi.glTexImage2D(glapi.TEXTURE_2D as uint32, 0, RGBA32F, bones * 4, frames, 0, glapi.RGBA as uint32,
+                       glapi.FLOAT as uint32, data)
+    texture_params(glapi.TEXTURE_2D, glapi.CLAMP_TO_EDGE, false, glapi.NEAREST, glapi.NEAREST)
+    glapi.glBindTexture(glapi.TEXTURE_2D as uint32, 0)
+    return texture
+}
+
+const RGBA32F = 34836                // GL_RGBA32F, 0x8814
+
+ae3d_gl_texture_delete(texture: int) {
+    if texture == 0 { return }
+    names = calloc(1, 4)
+    (names as int[])[0] = texture
+    glapi.glDeleteTextures(1, names)
+    free(names)
+}
+
+ae3d_gl_texture_bind(unit: int, texture: int) {
+    glapi.glActiveTexture((glapi.TEXTURE0 + unit) as uint32)
+    glapi.glBindTexture(glapi.TEXTURE_2D as uint32, texture as uint32)
+}
+
+// --- geometry, attributes and draws, in Aether (#398) ---------------------------------------
+//
+// What native/gpu/opengl.c's second part was. Strides in bytes: a vertex is
+// nine floats (position, uv, normal, baked occlusion), a skin eight (four
+// joints, four weights), an instance matrix sixteen, a colour three, a point
+// eight (position and scale, colour, phase).
+
+const STRIDE_BYTES = 36
+const SKIN_BYTES = 32
+const MATRIX_BYTES = 64
+const COLOR_BYTES = 12
+const POINT_BYTES = 32
+
+// An offset into a bound buffer, as GL takes it: a pointer.
+at_byte(n: int) -> ptr { return mem.long_to_ptr(n as long) }
+
+attrib(index: int, size: int, stride: int, offset: int) {
+    glapi.glVertexAttribPointer(index as uint32, size, glapi.FLOAT as uint32, glapi.FALSE, stride, at_byte(offset))
+    glapi.glEnableVertexAttribArray(index as uint32)
+}
+
+attrib_per_instance(index: int, size: int, stride: int, offset: int) {
+    glapi.glEnableVertexAttribArray(index as uint32)
+    glapi.glVertexAttribPointer(index as uint32, size, glapi.FLOAT as uint32, glapi.FALSE, stride, at_byte(offset))
+    glapi.glVertexAttribDivisor(index as uint32, 1)
+}
+
+// `bytes` from `data` into buffer `vbo` on `target`, as a whole new store.
+buffer_data(target: int, vbo: int, bytes: int, data: ptr, usage: int) {
+    glapi.glBindBuffer(target as uint32, vbo as uint32)
+    glapi.glBufferData(target as uint32, bytes as long, data, usage as uint32)
+}
+
+// Geometry that appears many times is uploaded once and drawn from one set
+// of buffers, which is what lets the renderer merge those models into a
+// single instanced draw. An entry keeps its own copy of the bytes it was
+// built from, so a match is an exact comparison rather than a hash that
+// could collide and hand back the wrong mesh.
+struct GLGeometry {
+    vertices: ptr
+    indices: ptr
+    vertex_count: int
+    index_count: int
+    vao: int
+    vbo: int
+    ebo: int
+    instance_vbo: int
+    instance_capacity: int
+    refs: int
+}
+
+var g_geometry: ptr = null         // list of *GLGeometry
+
+geometry_entries() -> ptr {
+    if g_geometry == null { g_geometry = list.new() }
+    return g_geometry
+}
+
+geometry_of(vao: int) -> *GLGeometry {
+    entries = geometry_entries()
+    i = 0
+    while i < list.size(entries) {
+        e = list.get_raw(entries, i) as *GLGeometry
+        if e.vao == vao && e.refs > 0 { return e }
+        i = i + 1
+    }
+    return null
+}
+
+// The VAO the caller should draw with: the cached one when these bytes are
+// already up, else a new entry uploaded and its attributes set up once.
+ae3d_gl_geometry_acquire(mesh: ptr) -> int {
+    vertices = geometry.mesh_vertex_data(mesh)
+    indices = geometry.mesh_index_data(mesh)
+    vertex_count = geometry.mesh_vertex_count(mesh)
+    index_count = geometry.mesh_index_count(mesh)
+    if vertices == null || indices == null || vertex_count <= 0 || index_count <= 0 { return 0 }
+    vertex_bytes = vertex_count * STRIDE_BYTES
+    index_bytes = index_count * 4
+    entries = geometry_entries()
+    i = 0
+    while i < list.size(entries) {
+        e = list.get_raw(entries, i) as *GLGeometry
+        if e.refs > 0 && e.vertex_count == vertex_count && e.index_count == index_count &&
+           mem.compare(e.vertices, vertices, vertex_bytes as long) == 0 &&
+           mem.compare(e.indices, indices, index_bytes as long) == 0 {
+            e.refs = e.refs + 1
+            return e.vao
+        }
+        i = i + 1
+    }
+    e = calloc(1, sizeof(GLGeometry)) as *GLGeometry
+    e.vertices = calloc(vertex_bytes, 1)
+    e.indices = calloc(index_bytes, 1)
+    mem.copy(e.vertices, vertices, vertex_bytes as long)
+    mem.copy(e.indices, indices, index_bytes as long)
+    e.vertex_count = vertex_count
+    e.index_count = index_count
+    e.vao = ae3d_gl_vao_create()
+    e.vbo = ae3d_gl_buffer_create()
+    e.ebo = ae3d_gl_buffer_create()
+    e.instance_vbo = ae3d_gl_buffer_create()
+    e.refs = 1
+    list.add_raw(entries, e as ptr)
+    glapi.glBindVertexArray(e.vao as uint32)
+    ae3d_gl_upload_mesh(mesh, e.vbo, e.ebo)
+    ae3d_gl_setup_vertex_attribs()
+    glapi.glBindVertexArray(0)
+    return e.vao
+}
+
+ae3d_gl_geometry_instance_vbo(vao: int) -> int {
+    e = geometry_of(vao)
+    if e == null { return 0 }
+    return e.instance_vbo
+}
+
+ae3d_gl_geometry_release(vao: int) {
+    e = geometry_of(vao)
+    if e == null { return }
+    e.refs = e.refs - 1
+    if e.refs > 0 { return }
+    ae3d_gl_vao_delete(e.vao)
+    ae3d_gl_buffer_delete(e.vbo)
+    ae3d_gl_buffer_delete(e.ebo)
+    ae3d_gl_buffer_delete(e.instance_vbo)
+    entries = geometry_entries()
+    i = 0
+    while i < list.size(entries) {
+        if list.get_raw(entries, i) == e as ptr { list.remove(entries, i); break }
+        i = i + 1
+    }
+    free(e.vertices)
+    free(e.indices)
+    free(e as ptr)
+}
+
+// Only when nothing is holding geometry any more, so a second renderer in
+// the same process does not lose the buffers it is still drawing from.
+ae3d_gl_geometry_shutdown() {
+    if g_geometry == null { return }
+    if list.size(g_geometry) > 0 { return }
+    list.free(g_geometry)
+    g_geometry = null
+}
+
+ae3d_gl_geometry_instance_capacity(vao: int) -> int {
+    e = geometry_of(vao)
+    if e == null { return 0 }
+    return e.instance_capacity
+}
+
+ae3d_gl_geometry_set_instance_capacity(vao: int, capacity: int) {
+    e = geometry_of(vao)
+    if e != null { e.instance_capacity = capacity }
+}
+
+ae3d_gl_upload_mesh(mesh: ptr, vbo: int, ebo: int) {
+    vertices = geometry.mesh_vertex_data(mesh)
+    indices = geometry.mesh_index_data(mesh)
+    vertex_count = geometry.mesh_vertex_count(mesh)
+    index_count = geometry.mesh_index_count(mesh)
+    if vbo != 0 && vertices != null && vertex_count > 0 {
+        buffer_data(glapi.ARRAY_BUFFER, vbo, vertex_count * STRIDE_BYTES, vertices, glapi.STATIC_DRAW)
+    }
+    if ebo != 0 && indices != null && index_count > 0 {
+        buffer_data(glapi.ELEMENT_ARRAY_BUFFER, ebo, index_count * 4, indices, glapi.STATIC_DRAW)
+    }
+}
+
+ae3d_gl_update_mesh_vertices(mesh: ptr, vbo: int) {
+    vertices = geometry.mesh_vertex_data(mesh)
+    vertex_count = geometry.mesh_vertex_count(mesh)
+    if vbo == 0 || vertices == null || vertex_count <= 0 { return }
+    glapi.glBindBuffer(glapi.ARRAY_BUFFER as uint32, vbo as uint32)
+    glapi.glBufferSubData(glapi.ARRAY_BUFFER as uint32, 0, (vertex_count * STRIDE_BYTES) as long, vertices)
+}
+
+// Joints and weights live in their own buffer on attributes 8 and 9, so a
+// mesh that is not skinned uploads nothing extra and reads the stride it
+// always read. Slots 0-2 are the vertex, 3-6 the instance matrix and 7 its
+// colour.
+ae3d_gl_upload_skin(mesh: ptr, vbo: int) {
+    skin = geometry.mesh_skin_data(mesh)
+    vertex_count = geometry.mesh_vertex_count(mesh)
+    if vbo == 0 || skin == null || vertex_count <= 0 { return }
+    buffer_data(glapi.ARRAY_BUFFER, vbo, vertex_count * SKIN_BYTES, skin, glapi.STATIC_DRAW)
+    attrib(8, 4, SKIN_BYTES, 0)
+    attrib(9, 4, SKIN_BYTES, 16)
+}
+
+ae3d_gl_uniform_mat4v(loc: int, count: int, values: ptr) {
+    if loc < 0 || count <= 0 || values == null { return }
+    glapi.glUniformMatrix4fv(loc, count, glapi.FALSE, values)
+}
+
+ae3d_gl_setup_vertex_attribs() {
+    attrib(0, 3, STRIDE_BYTES, 0)
+    attrib(1, 2, STRIDE_BYTES, 12)
+    attrib(2, 3, STRIDE_BYTES, 20)
+    // Slot 10, because 3-6 carry the instance matrix, 7 its colour and 8-9
+    // the skin. Baked occlusion rides with the vertex, so it needs no
+    // binding of its own and no pipeline that knows about it.
+    attrib(10, 1, STRIDE_BYTES, 32)
+}
+
+// A vertex array over buffers that already exist: a proxy mesh's vertices,
+// indices and skin with another model's instance matrices, colours and
+// phases, for a depth-only draw of that model through the proxy's mesh
+// (model_set_depth_proxy). Nothing is uploaded; the attributes are pointed
+// at the buffers the two models keep, so the model's instance updates and
+// the proxy's mesh both reach this array without a copy.
+ae3d_gl_setup_proxy_vao(vao: int, mesh_vbo: int, mesh_ebo: int, skin_vbo: int,
+                        matrix_vbo: int, color_vbo: int, phase_vbo: int) {
+    if vao == 0 || mesh_vbo == 0 || mesh_ebo == 0 || matrix_vbo == 0 { return }
+    glapi.glBindVertexArray(vao as uint32)
+    glapi.glBindBuffer(glapi.ARRAY_BUFFER as uint32, mesh_vbo as uint32)
+    ae3d_gl_setup_vertex_attribs()
+    glapi.glBindBuffer(glapi.ELEMENT_ARRAY_BUFFER as uint32, mesh_ebo as uint32)
+    if skin_vbo != 0 {
+        glapi.glBindBuffer(glapi.ARRAY_BUFFER as uint32, skin_vbo as uint32)
+        attrib(8, 4, SKIN_BYTES, 0)
+        attrib(9, 4, SKIN_BYTES, 16)
+    }
+    glapi.glBindBuffer(glapi.ARRAY_BUFFER as uint32, matrix_vbo as uint32)
+    matrix_columns()
+    if color_vbo != 0 {
+        glapi.glBindBuffer(glapi.ARRAY_BUFFER as uint32, color_vbo as uint32)
+        attrib_per_instance(7, 3, COLOR_BYTES, 0)
+    }
+    if phase_vbo != 0 {
+        glapi.glBindBuffer(glapi.ARRAY_BUFFER as uint32, phase_vbo as uint32)
+        attrib_per_instance(11, 1, 4, 0)
+    }
+    glapi.glBindVertexArray(0)
+}
+
+// The instance matrix's four columns on locations 3 to 6, from the bound
+// buffer.
+matrix_columns() {
+    i = 0
+    while i < 4 {
+        attrib_per_instance(3 + i, 4, MATRIX_BYTES, i * 16)
+        i = i + 1
+    }
+}
+
+// The crowd's extra instance attribute: one float an instance at location
+// 11, the animation phase VERTEX_CROWD reads to pick a pose-bank frame.
+// Called after the shared setup, so a crowd draw carries matrices, colours
+// and phases and an ordinary instanced draw carries only the first two.
+ae3d_gl_setup_instance_phase(inst: ptr, phase_vbo: int) {
+    if geometry.inst_is_points(inst) != 0 { return }
+    phases = geometry.inst_phase_data(inst)
+    count = geometry.inst_count(inst)
+    if count <= 0 || phase_vbo == 0 || phases == null || geometry.inst_has_phases(inst) == 0 { return }
+    buffer_data(glapi.ARRAY_BUFFER, phase_vbo, count * 4, phases, glapi.DYNAMIC_DRAW)
+    attrib_per_instance(11, 1, 4, 0)
+}
+
+// The point layout: eight floats an instance in the one buffer. Location 3
+// takes the position and the scale as a vec4, location 7 the colour and 11
+// the phase from the same stride; 4 to 6, the matrix's other columns, are
+// left disabled and the shader does not read them for a point.
+point_attribs() {
+    attrib_per_instance(3, 4, POINT_BYTES, 0)
+    i = 1
+    while i < 4 {
+        glapi.glDisableVertexAttribArray((3 + i) as uint32)
+        i = i + 1
+    }
+    attrib_per_instance(7, 3, POINT_BYTES, 16)
+    attrib_per_instance(11, 1, POINT_BYTES, 28)
+}
+
+ae3d_gl_setup_instance_attribs(inst: ptr, matrix_vbo: int, color_vbo: int) {
+    count = geometry.inst_count(inst)
+    if count <= 0 || matrix_vbo == 0 { return }
+    if geometry.inst_is_points(inst) != 0 {
+        points = geometry.inst_point_data(inst)
+        if points == null { return }
+        buffer_data(glapi.ARRAY_BUFFER, matrix_vbo, count * POINT_BYTES, points, glapi.DYNAMIC_DRAW)
+        point_attribs()
+        return
+    }
+    matrices = geometry.inst_matrix_data(inst)
+    if matrices == null { return }
+    buffer_data(glapi.ARRAY_BUFFER, matrix_vbo, count * MATRIX_BYTES, matrices, glapi.DYNAMIC_DRAW)
+    matrix_columns()
+    colors = geometry.inst_color_data(inst)
+    if color_vbo != 0 && colors != null && geometry.inst_has_colors(inst) != 0 {
+        buffer_data(glapi.ARRAY_BUFFER, color_vbo, count * COLOR_BYTES, colors, glapi.STATIC_DRAW)
+        attrib_per_instance(7, 3, COLOR_BYTES, 0)
+    }
+}
+
+// A batch draws through the shared VAO with the matrices of the models it
+// merged. The colour attribute stays disabled, so the generic value set at
+// startup supplies white and the shader's per-instance tint is a no-op.
+ae3d_gl_batch_upload(vao: int, instance_vbo: int, inst: ptr, capacity_bytes: int) -> int {
+    matrices = geometry.inst_matrix_data(inst)
+    count = geometry.inst_count(inst)
+    if vao == 0 || instance_vbo == 0 || count <= 0 || matrices == null { return capacity_bytes }
+    glapi.glBindVertexArray(vao as uint32)
+    glapi.glBindBuffer(glapi.ARRAY_BUFFER as uint32, instance_vbo as uint32)
+    wanted = count * MATRIX_BYTES
+    capacity = capacity_bytes
+    if capacity < wanted {
+        glapi.glBufferData(glapi.ARRAY_BUFFER as uint32, wanted as long, matrices, glapi.DYNAMIC_DRAW as uint32)
+        capacity = wanted
+    } else {
+        glapi.glBufferSubData(glapi.ARRAY_BUFFER as uint32, 0, wanted as long, matrices)
+    }
+    matrix_columns()
+    // Set with the batch's own vertex array bound, so it holds whether the
+    // driver treats a generic attribute value as context or per-array state.
+    glapi.glDisableVertexAttribArray(7)
+    glapi.glVertexAttrib3f(7, 1.0 as f32, 1.0 as f32, 1.0 as f32)
+    return capacity
+}
+
+// Generic attribute values are context state, so one call covers every VAO
+// that leaves the per-instance colour array disabled.
+ae3d_gl_set_default_instance_color() {
+    glapi.glVertexAttrib3f(7, 1.0 as f32, 1.0 as f32, 1.0 as f32)
+}
+
+ae3d_gl_update_instances(inst: ptr, matrix_vbo: int, capacity_bytes: int) -> int {
+    count = geometry.inst_count(inst)
+    if count <= 0 || matrix_vbo == 0 { return capacity_bytes }
+    data = null as ptr
+    needed = 0
+    if geometry.inst_is_points(inst) != 0 {
+        // The whole stream, position, scale, colour and phase in one: a
+        // point's colour and phase have no buffer of their own to refresh.
+        data = geometry.inst_point_data(inst)
+        needed = count * POINT_BYTES
+    } else {
+        data = geometry.inst_matrix_data(inst)
+        needed = count * MATRIX_BYTES
+    }
+    if data == null { return capacity_bytes }
+    glapi.glBindBuffer(glapi.ARRAY_BUFFER as uint32, matrix_vbo as uint32)
+    if needed > capacity_bytes {
+        grown = needed + needed / 2
+        glapi.glBufferData(glapi.ARRAY_BUFFER as uint32, grown as long, null, glapi.DYNAMIC_DRAW as uint32)
+        glapi.glBufferSubData(glapi.ARRAY_BUFFER as uint32, 0, needed as long, data)
+        return grown
+    }
+    glapi.glBufferSubData(glapi.ARRAY_BUFFER as uint32, 0, needed as long, data)
+    return capacity_bytes
+}
+
+// The colours are uploaded when the model is registered, which is the only
+// time they ever were: a colour set afterwards sat in the instance buffer
+// and never reached the GPU.
+ae3d_gl_update_instance_colors(inst: ptr, color_vbo: int) {
+    if geometry.inst_is_points(inst) != 0 { return }
+    colors = geometry.inst_color_data(inst)
+    count = geometry.inst_count(inst)
+    if count <= 0 || color_vbo == 0 || colors == null || geometry.inst_has_colors(inst) == 0 { return }
+    buffer_data(glapi.ARRAY_BUFFER, color_vbo, count * COLOR_BYTES, colors, glapi.DYNAMIC_DRAW)
+}
+
+// The per-instance phases each frame -- a crowd's animation advances, so
+// unlike colours these change constantly. Just the data; the location-11
+// binding was set once at registration.
+ae3d_gl_update_instance_phases(inst: ptr, phase_vbo: int) {
+    if geometry.inst_is_points(inst) != 0 { return }
+    phases = geometry.inst_phase_data(inst)
+    count = geometry.inst_count(inst)
+    if count <= 0 || phase_vbo == 0 || phases == null || geometry.inst_has_phases(inst) == 0 { return }
+    buffer_data(glapi.ARRAY_BUFFER, phase_vbo, count * 4, phases, glapi.DYNAMIC_DRAW)
+}
+
+ae3d_gl_draw_elements(count: int, byte_offset: int) {
+    glapi.glDrawElements(glapi.TRIANGLES as uint32, count, glapi.UNSIGNED_INT as uint32, at_byte(byte_offset))
+}
+
+ae3d_gl_draw_elements_instanced(count: int, byte_offset: int, instances: int) {
+    glapi.glDrawElementsInstanced(glapi.TRIANGLES as uint32, count, glapi.UNSIGNED_INT as uint32, at_byte(byte_offset), instances)
+}
+
+ae3d_gl_draw_arrays(first: int, count: int) {
+    glapi.glDrawArrays(glapi.TRIANGLES as uint32, first, count)
+}
 
 // --- the GL state, in Aether (#398) ----------------------------------------------------------
 //
