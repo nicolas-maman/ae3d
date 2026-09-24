@@ -2,6 +2,16 @@
 
 ## [current]
 
+### Loading
+
+- The OBJ parse cache (#411): a parse's vertices, indices, groups and
+  material names go to `build/cache/meshes/`, keyed by the source's path,
+  size and time, written by one worker after the load; the next load of an
+  unchanged source copies them in and parses only the MTLs. The street's 305
+  OBJs: 47 ms from the cache against 120 ms parsed, the first load no slower,
+  the meshes the same to the byte. `AE3D_MESH_CACHE` names the directory or
+  turns it off. `tests/test_obj_cache.ae`. [docs/performance.md](docs/performance.md#loading-the-obj-parse-cache).
+
 ### A character that walks the world
 
 - `physics.character_controller` (#420): a capsule over Box3D's mover that

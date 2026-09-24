@@ -1,0 +1,148 @@
+// The OBJ parse cache (#411), held to what it promises:
+//
+//   - a source parsed once is read from the cache the next time, and what
+//     it reads is the parse to the byte: vertices, indices, each group's
+//     range and material, the model's material;
+//   - a source changed since is parsed again, not read stale;
+//   - a source written moments before its parse is not cached at all (the
+//     modification time is to the second, so a write in that second could
+//     be missed).
+//
+// The sources are written by the test, under build/scratch, and aged by
+// waiting: two seconds before each load that should be cached.
+
+import std.fs
+import std.string
+import std.mem
+import ae3d.core
+import ae3d.loader
+import ae3d.geometry
+
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, ok: bool) {
+    g_checks = g_checks + 1
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        g_failures = g_failures + 1
+        println("  FAIL ${name}")
+    }
+}
+
+const DIR = "build/scratch/obj_cache_test"
+
+// Two quads, each its own material: two groups.
+const QUADS = "mtllib quads.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 2 0 0\nv 3 0 0\nv 3 1 0\nv 2 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nvn 0 0 1\nusemtl Red\nf 1/1/1 2/2/1 3/3/1 4/4/1\nusemtl Blue\nf 5/1/1 6/2/1 7/3/1 8/4/1\n"
+// And a third, after.
+const MORE = "v 4 0 0\nv 5 0 0\nv 5 1 0\nusemtl Red\nf 9/1/1 10/2/1 11/3/1\n"
+const MATERIALS = "newmtl Red\nKd 1 0 0\nnewmtl Blue\nKd 0 0 1\n"
+
+// A model as one line: counts, a hash of the geometry's bytes, groups and
+// materials by name.
+digest(m: *Model) -> string {
+    if m == null { return "null" }
+    v = core.mesh_vertex_count(m.mesh)
+    n = core.mesh_index_count(m.mesh)
+    h = 2166136261 as long
+    mask = 4294967295 as long
+    data = geometry.mesh_vertex_data(m.mesh)
+    i = 0
+    while i < v * 9 {
+        h = ((h ^ mem.get_u32_le(data, i * 4)) * (16777619 as long)) & mask
+        i = i + 1
+    }
+    indices = geometry.mesh_index_data(m.mesh)
+    i = 0
+    while i < n {
+        h = ((h ^ mem.get_u32_le(indices, i * 4)) * (16777619 as long)) & mask
+        i = i + 1
+    }
+    groups = ""
+    g = 0
+    while g < core.model_group_count(m) {
+        group = core.model_group(m, g)
+        name = "-"
+        if group.material != null { name = "${group.material.name} ${group.material.diffuse.x} ${group.material.diffuse.z}" }
+        groups = "${groups} [${group.index_start}+${group.index_count} ${name}]"
+        g = g + 1
+    }
+    return "${v} vertices, ${n} indices, ${h}${groups}"
+}
+
+load_digest(path: string) -> string {
+    m = loader.load_obj(path, false)
+    d = digest(m)
+    if m != null { core.model_free(m) }
+    return d
+}
+
+// The cache file for a source lands once the flushed writer has run: load
+// until the cache answers, a tenth of a second apart, for up to three.
+load_when_cached(path: string) -> string {
+    before = loader.cache_hits()
+    tries = 0
+    while tries < 30 {
+        d = load_digest(path)
+        if loader.cache_hits() > before { return d }
+        sleep(100)
+        tries = tries + 1
+    }
+    return "never cached"
+}
+
+main() {
+    if loader.cache_directory() == "" {
+        println("obj_cache: SKIP no cache directory (no build/ here)")
+        return
+    }
+    println("obj_cache: the cache at ${loader.cache_directory()}")
+    fs.mkdir_p(DIR)
+    quads = "${DIR}/quads.obj"
+    fs.write("${DIR}/quads.mtl", MATERIALS)
+    fs.write(quads, QUADS)
+    sleep(2100)
+
+    parsed = load_digest(quads)
+    check("the first load parses (no hit)", loader.cache_hits() == 0)
+    loader.cache_flush()
+    cached = load_when_cached(quads)
+    println("  parsed: ${parsed}")
+    println("  cached: ${cached}")
+    check("the next reads the cache, and it is the parse to the byte", cached == parsed)
+    check("two groups, Red then Blue", string.contains(parsed, "[0+6 Red 1 0]") == 1 && string.contains(parsed, "[6+6 Blue 0 1]") == 1)
+
+    // Changed: parsed again, not the stale cache.
+    fs.write(quads, "${QUADS}${MORE}")
+    sleep(2100)
+    hits = loader.cache_hits()
+    changed = load_digest(quads)
+    println("  changed: ${changed}")
+    check("a changed source is parsed again", loader.cache_hits() == hits && changed != parsed &&
+          string.starts_with(changed, "11 vertices, 15 indices") == 1)
+    loader.cache_flush()
+    recached = load_when_cached(quads)
+    check("and cached again, as its new parse", recached == changed)
+
+    // Fresh: written, then loaded at once; the writer declines it.
+    fresh = "${DIR}/fresh.obj"
+    fs.write(fresh, QUADS)
+    first = load_digest(fresh)
+    loader.cache_flush()
+    hits = loader.cache_hits()
+    same = true
+    tries = 0
+    while tries < 10 {
+        sleep(150)
+        if load_digest(fresh) != first { same = false }
+        tries = tries + 1
+    }
+    check("a source written moments before its parse is not cached (1.5 s of loads, no hit)", loader.cache_hits() == hits && same)
+
+    if g_failures == 0 {
+        println("obj_cache: all checks passed (${g_checks})")
+    } else {
+        println("obj_cache: ${g_failures} failure(s) of ${g_checks}")
+    }
+}

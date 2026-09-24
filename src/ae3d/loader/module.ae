@@ -9,11 +9,16 @@ import std.fs
 import std.list
 import std.heap
 import std.string
+import std.bytes
+import std.mem
+import std.os
+import std.worker
+import std.set
 import ae3d.core
 import ae3d.geometry
 
 exports (
-    load_obj, load_obj_skinned, load_obj_baked, load_obj_instanced, load_mtl, materials_free,
+    cache_flush, cache_hits, cache_directory, load_obj, load_obj_skinned, load_obj_baked, load_obj_instanced, load_mtl, materials_free,
     cube, sphere, capsule, push_capsule, plane, water_surface, quad, grid, box_outline,
     last_error
 )
@@ -663,6 +668,326 @@ materials_free(materials: ptr) {
     list.free(materials)
 }
 
+// --- the parse cache (#411) --------------------------------------------------------------------
+//
+// A text parse is fast for text; not doing it again is faster. After a
+// parse, what it made -- the vertices and indices as they will be drawn,
+// each group's index range and material name, the model's material name,
+// and the mtllib lines -- goes to a file of its own under the cache
+// directory, headed by the source's absolute path, size and modification
+// time. A load whose source still matches reads that instead, copies the
+// geometry in one go, and parses only the MTLs (they are small), binding
+// their materials to the groups by name as the parse would have.
+//
+// The directory is AE3D_MESH_CACHE, or build/cache/meshes when there is a
+// build/ directory where the program runs (an ae3d checkout, a game built
+// the same way), or none; AE3D_MESH_CACHE=off turns it off. A skinned or
+// baked load writes rows per position that only a parse can place, so it
+// never touches the cache. The modification time is to the second: a file
+// rewritten within the second at the same size reads the old parse.
+//
+// The file, little-endian: "OBJC", version, the source's size and time
+// (u64 each), whether normals were recalculated, the vertex, index and
+// group counts, the file's own length (u64: a torn file is shorter); then
+// strings (u32 length, bytes): the absolute path, the
+// model's material name, the mtllib names joined by newlines; a group each:
+// start, count, material name; then the vertices (nine f32 each) and the
+// indices (u32).
+
+const CACHE_MAGIC = 1128940111      // "OBJC" read little-endian, 0x434A424F
+const CACHE_VERSION = 1
+
+var g_cache_dir = ""
+var g_cache_known = false
+var g_cache_queue: ptr = null       // list of *CacheWrite, waiting for cache_flush
+var g_cache_hits = 0
+var g_cache_names: ptr = null       // std.set of the cache's files: a miss asked of the disk costs 40 us on Windows
+
+cache_dir() -> string {
+    if g_cache_known { return g_cache_dir }
+    g_cache_known = true
+    asked = os.getenv("AE3D_MESH_CACHE")
+    if asked != null {
+        // string.equals, not != : aether lowers a comparison with "0" to a
+        // pointer compare (aether-lang-dev/aether#2206).
+        if asked != "" && asked != "off" && string.equals(asked, "0") != 1 { g_cache_dir = asked }
+    } else if fs.dir_exists("build") != 0 {
+        g_cache_dir = "build/cache/meshes"
+    }
+    if g_cache_dir != "" {
+        if fs.mkdir_p(g_cache_dir) != "" { g_cache_dir = "" }
+    }
+    if g_cache_dir != "" {
+        g_cache_names = set.new()
+        listing, why = fs.list_dir(g_cache_dir)
+        if why == "" && listing != null {
+            i = 0
+            while i < fs.dir_list_count(listing) {
+                set.add(g_cache_names, "${g_cache_dir}/${fs.dir_list_get(listing, i)}")
+                i = i + 1
+            }
+            fs.dir_list_free(listing)
+        }
+    }
+    return g_cache_dir
+}
+
+// Loads the cache answered, since the program began.
+cache_hits() -> int { return g_cache_hits }
+
+// Where the cache is, or "" when there is none.
+cache_directory() -> string { return cache_dir() }
+
+// Two FNV-1a hashes of the path, 32 bits each, from different offsets: the
+// file's name. The path in the file is what decides; the name only finds it.
+cache_file(absolute: string) -> string {
+    a = 2166136261 as long
+    b = 84696351 as long
+    mask = 4294967295 as long
+    length = string.length(absolute)
+    i = 0
+    while i < length {
+        c = string.char_at(absolute, i) as long
+        a = ((a ^ c) * (16777619 as long)) & mask
+        b = ((b ^ c) * (16777619 as long)) & mask
+        i = i + 1
+    }
+    return "${cache_dir()}/${a}_${b}.bin"
+}
+
+// The path from the root: as given when it is, else under the working
+// directory. Not canonical -- "a/../b" and "b" are two entries -- which
+// costs a parse, never a wrong read, and saves the file open realpath is.
+absolute_of(path: string) -> string {
+    if fs.path_is_absolute(path) != 0 { return string.concat(path, "") }
+    here = os.getcwd()
+    under = string.concat(here, "/")
+    whole = string.concat(under, path)
+    string.free(under)
+    return whole
+}
+
+// A cache file's bytes and name, for the worker that writes it.
+struct CacheWrite {
+    data: ptr                        // std.bytes
+    total: int
+    name: ptr                        // std.bytes
+    name_length: int
+    source: ptr                      // std.bytes: the OBJ's path, as loaded
+    source_length: int
+    began: long                      // wall seconds when the parse began
+}
+
+// The queued cache files, to one worker that writes them all: called when
+// a scene has loaded, and every frame (where there is nothing to do but
+// look at an empty queue). Without a worker, here.
+cache_flush() {
+    if g_cache_queue == null || list.size(g_cache_queue) == 0 { return }
+    queue = g_cache_queue
+    g_cache_queue = list.new()
+    if !worker.run_detached(|| { return cache_write_all(queue) }) { cache_write_all(queue) }
+}
+
+cache_write_all(queue: ptr) -> ptr {
+    i = 0
+    while i < list.size(queue) {
+        cache_write_job(list.get_raw(queue, i))
+        i = i + 1
+    }
+    list.free(queue)
+    return null
+}
+
+cache_write_job(context: ptr) -> ptr {
+    job = context as *CacheWrite
+    name = bytes.to_string(job.name, job.name_length)
+    source = bytes.to_string(job.source, job.source_length)
+    // The source as it is now. Changed since the parse began (or within the
+    // second before, the clock's grain), what was parsed may not be what is
+    // there: no cache, and the next load parses again.
+    size, size_err = fs.size(source)
+    time, time_err = fs.mtime(source)
+    if size_err == "" && time_err == "" && time < job.began - (1 as long) {
+        bytes.set_le64(job.data, 8, size)
+        bytes.set_le64(job.data, 16, time)
+        text = bytes.to_string(job.data, job.total)
+        fs.write_binary(name, text, job.total)
+    }
+    bytes.free(job.data)
+    bytes.free(job.name)
+    bytes.free(job.source)
+    heap.free(job)
+    return null
+}
+
+cache_put_string(b: ptr, at: int, text: string) -> int {
+    length = string.length(text)
+    bytes.set_le32(b, at, length)
+    if length > 0 { bytes.copy_from_string(b, at + 4, text, length) }
+    return at + 4 + length
+}
+
+cache_get_string(raw: ptr, at: int, length: int) -> string {
+    return bytes.string_from_ptr(raw + at, length)
+}
+
+material_name(material: *Material) -> string {
+    if material == null { return "" }
+    return material.name
+}
+
+// A parse's model, and the mtllib names it read, to the cache.
+cache_write(file: string, path: string, absolute: string, began: long, recalculated: bool,
+            m: *Model, mtllibs: string) {
+    vertex_count = core.mesh_vertex_count(m.mesh)
+    index_count = core.mesh_index_count(m.mesh)
+    group_count = core.model_group_count(m)
+    model_material = material_name(m.material)
+    total = 48 + 12 + string.length(absolute) + string.length(model_material) + string.length(mtllibs)
+    g = 0
+    while g < group_count {
+        total = total + 12 + string.length(material_name(core.model_group(m, g).material))
+        g = g + 1
+    }
+    geometry_at = total
+    total = total + vertex_count * 36 + index_count * 4
+    b = bytes.new(total)
+    bytes.set_length(b, total)
+    bytes.set_le32(b, 0, CACHE_MAGIC)
+    bytes.set_le32(b, 4, CACHE_VERSION)
+    // The source's size and time are the writer's to fill in.
+    flags = 0
+    if recalculated { flags = 1 }
+    bytes.set_le32(b, 24, flags)
+    bytes.set_le32(b, 28, vertex_count)
+    bytes.set_le32(b, 32, index_count)
+    bytes.set_le32(b, 36, group_count)
+    bytes.set_le64(b, 40, total as long)
+    at = cache_put_string(b, 48, absolute)
+    at = cache_put_string(b, at, model_material)
+    at = cache_put_string(b, at, mtllibs)
+    g = 0
+    while g < group_count {
+        group = core.model_group(m, g)
+        bytes.set_le32(b, at, group.index_start)
+        bytes.set_le32(b, at + 4, group.index_count)
+        at = cache_put_string(b, at + 8, material_name(group.material))
+        g = g + 1
+    }
+    data = bytes.data(b)
+    mem.copy_at(data, geometry_at as long, geometry.mesh_vertex_data(m.mesh), 0 as long, (vertex_count * 36) as long)
+    mem.copy_at(data, (geometry_at + vertex_count * 36) as long, geometry.mesh_index_data(m.mesh), 0 as long, (index_count * 4) as long)
+    // Queued, and written by one worker when the loading is done
+    // (cache_flush): a few hundred small files written during a load cost it
+    // half again its parse, on this thread or beside it. Not atomic -- a torn
+    // or half-written file is shorter than its counts say, and cache_read
+    // turns it down.
+    set.add(g_cache_names, file)
+    job = heap.new(CacheWrite)
+    job.data = b
+    job.total = total
+    job.name_length = string.length(file)
+    job.name = bytes.new(job.name_length + 1)
+    bytes.set_length(job.name, job.name_length)
+    bytes.copy_from_string(job.name, 0, file, job.name_length)
+    job.source_length = string.length(path)
+    job.source = bytes.new(job.source_length + 1)
+    bytes.set_length(job.source, job.source_length)
+    bytes.copy_from_string(job.source, 0, path, job.source_length)
+    job.began = began
+    if g_cache_queue == null { g_cache_queue = list.new() }
+    list.add_raw(g_cache_queue, job as ptr)
+}
+
+// The model a cache file holds for this source, or null when there is none
+// or it no longer matches: another path, size, time or normals.
+cache_read(file: string, path: string, absolute: string, size: long, time: long,
+           recalculated: bool) -> *Model {
+    if !set.contains(g_cache_names, file) { return null }
+    content, length, err = fs.read_binary(file)
+    if err != "" || length < 60 { return null }
+    b = bytes.new(length + 4)
+    bytes.copy_from_string(b, 0, content, length)
+    raw = bytes.data(b)
+    flags = 0
+    if recalculated { flags = 1 }
+    if bytes.get_le32(b, 0) != CACHE_MAGIC || bytes.get_le32(b, 4) != CACHE_VERSION ||
+       bytes.get_le64(b, 8) != size || bytes.get_le64(b, 16) != time || bytes.get_le32(b, 24) != flags ||
+       bytes.get_le64(b, 40) != (length as long) {
+        bytes.free(b)
+        return null
+    }
+    vertex_count = bytes.get_le32(b, 28)
+    index_count = bytes.get_le32(b, 32)
+    group_count = bytes.get_le32(b, 36)
+    at = 48
+    path_length = bytes.get_le32(b, at)
+    if at + 4 + path_length > length || string.equals(cache_get_string(raw, at + 4, path_length), absolute) != 1 {
+        bytes.free(b)
+        return null
+    }
+    at = at + 4 + path_length
+    name_length = bytes.get_le32(b, at)
+    model_material = cache_get_string(raw, at + 4, name_length)
+    at = at + 4 + name_length
+    libs_length = bytes.get_le32(b, at)
+    mtllibs = cache_get_string(raw, at + 4, libs_length)
+    at = at + 4 + libs_length
+
+    m = core.model_new()
+    core.model_set_source_path(m, path)
+    base_name = basename_of(path)
+    core.model_set_name(m, base_name)
+    string.free(base_name)
+    materials = list.new()
+    if libs_length > 0 {
+        base = directory_of(path)
+        names = string.split(mtllibs, "\n")
+        i = 0
+        while i < string.array_size(names) {
+            mtl_path = string.concat(base, field(names, i))
+            loaded = load_mtl(mtl_path)
+            string.free(mtl_path)
+            merge_materials(materials, loaded)
+            list.free(loaded)
+            i = i + 1
+        }
+        string.array_free(names)
+        string.free(base)
+    }
+    g = 0
+    while g < group_count {
+        start = bytes.get_le32(b, at)
+        count = bytes.get_le32(b, at + 4)
+        group_length = bytes.get_le32(b, at + 8)
+        core.model_add_group(m, find_material(materials, cache_get_string(raw, at + 12, group_length)), start, count)
+        at = at + 12 + group_length
+        g = g + 1
+    }
+    if at + vertex_count * 36 + index_count * 4 > length {
+        bytes.free(b)
+        materials_free(materials)
+        core.model_free(m)
+        return null
+    }
+    geometry.mesh_append_raw(m.mesh, raw + at, vertex_count, raw + at + vertex_count * 36, index_count)
+    bytes.free(b)
+    if name_length > 0 { m.material = find_material(materials, model_material) }
+    if core.model_group_count(m) == 0 && m.material == null && list.size(materials) > 0 {
+        m.material = list.get_raw(materials, 0) as *Material
+    }
+    owned = list.size(materials)
+    i = 0
+    while i < owned {
+        core.model_own_material(m, list.get_raw(materials, i) as *Material)
+        i = i + 1
+    }
+    list.free(materials)
+    core.model_update_matrix(m)
+    core.model_recalculate_bounds(m)
+    return m
+}
+
 load_obj(path: string, recalculate_normals: bool) -> *Model {
     return load_obj_skinned(path, recalculate_normals, null)
 }
@@ -682,10 +1007,35 @@ load_obj_skinned(path: string, recalculate_normals: bool, skin: ptr) -> *Model {
 // only this knows which.
 load_obj_baked(path: string, recalculate_normals: bool, skin: ptr,
                occlusion: ptr) -> *Model {
+    // The cache first, for a load that only a parse's geometry makes.
+    cache = ""
+    absolute = ""
+    parse_began = 0 as long
+    if skin == null && occlusion == null && cache_dir() != "" {
+        absolute = absolute_of(path)
+        cache = cache_file(absolute)
+        // Only a source with a cache file is asked its size and time here;
+        // one without is parsed, and the writer asks.
+        if set.contains(g_cache_names, cache) {
+            _kind, size_read, time_read, why = fs.file_stat(path)
+            if why == "" {
+                cached = cache_read(cache, path, absolute, size_read, time_read, recalculate_normals)
+                if cached != null {
+                    g_cache_hits = g_cache_hits + 1
+                    string.free(cache)
+                    string.free(absolute)
+                    return cached
+                }
+            }
+        }
+        parse_began = os.wall_seconds()
+    }
+    mtllibs = ""
     content, err = fs.read(path)
     if err != "" {
         set_error("cannot read ", path)
         string.free(content)
+        if cache != "" { string.free(cache) ; string.free(absolute) }
         return null
     }
 
@@ -699,6 +1049,7 @@ load_obj_baked(path: string, recalculate_normals: bool, skin: ptr,
         set_error("out of memory loading ", path)
         string.free(content)
         core.model_free(m)
+        if cache != "" { string.free(cache) ; string.free(absolute) }
         return null
     }
 
@@ -800,6 +1151,16 @@ load_obj_baked(path: string, recalculate_normals: bool, skin: ptr,
         } else if string.equals(keyword, "f") == 1 && field_count >= 4 {
             emit_face(build as ptr, m.mesh, fields, field_count, positions, uvs, normals)
         } else if string.equals(keyword, "mtllib") == 1 && field_count >= 2 {
+            if cache != "" {
+                if mtllibs == "" {
+                    mtllibs = string.concat(token(fields, 1), "")
+                } else {
+                    joined = string.concat(mtllibs, "\n")
+                    string.free(mtllibs)
+                    mtllibs = string.concat(joined, token(fields, 1))
+                    string.free(joined)
+                }
+            }
             base = directory_of(path)
             mtl_path = string.concat(base, token(fields, 1))
             string.free(base)
@@ -841,6 +1202,8 @@ load_obj_baked(path: string, recalculate_normals: bool, skin: ptr,
 
     if core.mesh_vertex_count(m.mesh) == 0 {
         set_error("no geometry in ", path)
+        if cache != "" { string.free(cache) ; string.free(absolute) }
+        if mtllibs != "" { string.free(mtllibs) }
         stranded = list.size(materials)
         i = 0
         while i < stranded {
@@ -870,6 +1233,12 @@ load_obj_baked(path: string, recalculate_normals: bool, skin: ptr,
 
     core.model_update_matrix(m)
     core.model_recalculate_bounds(m)
+    if cache != "" {
+        cache_write(cache, path, absolute, parse_began, recalculate_normals, m, mtllibs)
+        string.free(cache)
+        string.free(absolute)
+    }
+    if mtllibs != "" { string.free(mtllibs) }
     return m
 }
 
