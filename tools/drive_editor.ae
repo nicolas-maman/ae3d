@@ -979,7 +979,17 @@ check_splitters() {
     }
     check_detail("the splitter says where its divider is", start > 0, "position ${start}")
     if start <= 0 { return }
-    post("/widget/${inner_id}/split_position?px=${start - 120}")
+    // Where the divider went, as the toolkit answers: short of where it was
+    // sent means something in a pane would not shrink.
+    moved = 0 - 1
+    moved_body, moved_err = http.post(url("/widget/${inner_id}/split_position?px=${start - 120}"), "", "text/plain")
+    if moved_err == "" {
+        answer, perr = json.parse(moved_body)
+        if perr == "" {
+            moved = field_number(answer, "position") as int
+            json.json_free(answer)
+        }
+    }
     after = before
     tries = 0
     while tries < 80 && after > before - 60.0 {
@@ -990,7 +1000,7 @@ check_splitters() {
         tries = tries + 1
     }
     check_detail("dragging the divider narrows the viewport by what the inspector took", after < before - 100.0 && after > before - 140.0,
-                 "${before} before, ${after} after a 120 px drag")
+                 "${before} before, ${after} after a 120 px drag; the divider went from ${start} to ${moved}")
     post("/widget/${inner_id}/split_position?px=${start}")
     back = after
     tries = 0
