@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 
 #define AE3D_STRIDE_BYTES (9 * (int)sizeof(float))
 #define AE3D_SKIN_BYTES (8 * (int)sizeof(float))
@@ -1317,3 +1318,140 @@ void *ae3d_gl_read_frame(int width, int height) {
     free(pixels);
     return flipped;
 }
+
+/* The frame's light, for the exposure that follows it (#378).
+ *
+ * What was drawn, measured: the finished frame copied at its own size into a
+ * texture (a blit at the same size is also what resolves a multisampled
+ * framebuffer, which a scaling blit may not read), its mip chain built, and
+ * the first level no wider than 320 texels read back -- an average of every
+ * pixel under each texel, fine enough that a lamp or a lit face covering a
+ * few dozen pixels still fills a texel. The read goes into one of three pixel buffers and
+ * the one filled two frames ago is mapped, so the CPU never waits on the
+ * frame it just asked for. The texels are the tone-mapped, gamma-encoded
+ * frame; `out` gets their mean linear luminance and the share of them near
+ * white (past 0.8 linear), which is what an exposure that follows the frame
+ * steers by. A source of -1
+ * reads the framebuffer the frame was drawn into. Returns 1 when `out` holds
+ * a measurement, 0 until the first one is back. */
+#ifndef GL_TEXTURE_MAX_LEVEL
+#define GL_TEXTURE_MAX_LEVEL 0x813D
+#endif
+#ifndef GL_READ_FRAMEBUFFER_BINDING
+#define GL_READ_FRAMEBUFFER_BINDING 0x8CAA
+#endif
+#define AE3D_METER_PACKS 3
+
+static struct {
+    GLuint texture, framebuffer, level_framebuffer;
+    GLuint pack[AE3D_METER_PACKS];
+    int width, height, level, level_width, level_height;
+    int index, filled;
+} g_meter;
+
+static void ae3d_gl_meter_free(void) {
+    if (g_meter.texture) glDeleteTextures(1, &g_meter.texture);
+    if (g_meter.framebuffer) glDeleteFramebuffers(1, &g_meter.framebuffer);
+    if (g_meter.level_framebuffer) glDeleteFramebuffers(1, &g_meter.level_framebuffer);
+    if (g_meter.pack[0]) glDeleteBuffers(AE3D_METER_PACKS, g_meter.pack);
+    memset(&g_meter, 0, sizeof(g_meter));
+}
+
+static int ae3d_gl_meter_make(int width, int height) {
+    int i, level = 0, w = width, h = height;
+    ae3d_gl_meter_free();
+    while (w > 320) { w = w / 2 > 0 ? w / 2 : 1; h = h / 2 > 0 ? h / 2 : 1; level++; }
+    glGenTextures(1, &g_meter.texture);
+    glBindTexture(GL_TEXTURE_2D, g_meter.texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, level);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glGenFramebuffers(1, &g_meter.framebuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_meter.framebuffer);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_meter.texture, 0);
+    glGenFramebuffers(1, &g_meter.level_framebuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_meter.level_framebuffer);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_meter.texture, level);
+    glGenBuffers(AE3D_METER_PACKS, g_meter.pack);
+    for (i = 0; i < AE3D_METER_PACKS; i++) {
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, g_meter.pack[i]);
+        glBufferData(GL_PIXEL_PACK_BUFFER, (GLsizeiptr)w * h * 4, NULL, GL_STREAM_READ);
+    }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    g_meter.width = width;
+    g_meter.height = height;
+    g_meter.level = level;
+    g_meter.level_width = w;
+    g_meter.level_height = h;
+    return 1;
+}
+
+/* sRGB-encoded byte to linear light, from a table made once: the meter
+   reads tens of thousands of texels a frame. */
+static double ae3d_meter_linear(unsigned char c) {
+    static double table[256];
+    static int made;
+    if (!made) {
+        int i;
+        for (i = 0; i < 256; i++) {
+            double v = i / 255.0;
+            table[i] = v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4);
+        }
+        made = 1;
+    }
+    return table[c];
+}
+
+int ae3d_gl_meter(int source_framebuffer, int width, int height, double *out) {
+    GLint previous_read = 0, previous_draw = 0;
+    int ready, x, count, got = 0;
+    const unsigned char *mapped;
+    if (width < 1 || height < 1 || !out) return 0;
+    if (width != g_meter.width || height != g_meter.height || !g_meter.texture) {
+        if (!ae3d_gl_meter_make(width, height)) return 0;
+    }
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw);
+    /* -1: whatever the frame was drawn into, the window or a target. */
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, source_framebuffer < 0 ? (GLuint)previous_draw : (GLuint)source_framebuffer);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_meter.framebuffer);
+    glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D, g_meter.texture);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, g_meter.level_framebuffer);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, g_meter.pack[g_meter.index]);
+    glReadPixels(0, 0, g_meter.level_width, g_meter.level_height, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    g_meter.filled++;
+    /* The one read two frames ago, when there has been one. */
+    if (g_meter.filled >= AE3D_METER_PACKS) {
+        ready = (g_meter.index + 1) % AE3D_METER_PACKS;
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, g_meter.pack[ready]);
+        mapped = (const unsigned char *)glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+        if (mapped) {
+            double sum = 0.0;
+            int white = 0;
+            count = g_meter.level_width * g_meter.level_height;
+            for (x = 0; x < count; x++) {
+                const unsigned char *p = mapped + (size_t)x * 4;
+                double luma = 0.2126 * ae3d_meter_linear(p[0]) + 0.7152 * ae3d_meter_linear(p[1]) +
+                              0.0722 * ae3d_meter_linear(p[2]);
+                sum += luma;
+                if (luma > 0.8) white++;
+            }
+            out[0] = sum / (double)count;
+            out[1] = (double)white / (double)count;
+            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+            got = 1;
+        }
+    }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    g_meter.index = (g_meter.index + 1) % AE3D_METER_PACKS;
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)previous_read);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)previous_draw);
+    return got;
+}
+
+void ae3d_gl_meter_release(void) { ae3d_gl_meter_free(); }

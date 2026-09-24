@@ -871,6 +871,178 @@ want(pred: int) -> *Want {
 }
 
 // Wait for the scene list to hold `count` rows, then report what it holds.
+// The viewport's pane: the inner splitter's first child, the stage the
+// viewport fills whatever it is drawn through (a canvas over a readback on
+// Windows and macOS, a GL area on GTK).
+viewport_width(t: *Tree) -> float {
+    // The size the editor renders the view at, off the stats bar ("... 3468
+    // tris   868x620"): the viewport following its pane is the point, and it
+    // is the same on every toolkit. A pane's own box is not -- GTK reports
+    // the paned's children under wrappers of its own, where they read 0.
+    n = tree_count(t)
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.kind == "text" && string.contains(w.raw_text, " tris ") != 0 {
+            text = w.raw_text
+            end = string.length(text)
+            start = end
+            while start > 0 && string.char_at(text, start - 1) != 32 { start = start - 1 }
+            size = string.substring(text, start, end)
+            cross = string.string_index_of(size, "x")
+            width = 0.0
+            if cross > 0 {
+                digits = string.substring(size, 0, cross)
+                width = string.get_double(digits)
+                string.free(digits)
+            }
+            string.free(size)
+            return width
+        }
+        i = i + 1
+    }
+    return 0.0
+}
+
+// The splitter inside the other one: the viewport against the inspector.
+inner_splitter(t: *Tree) -> *Widget {
+    n = list.size(t.widgets)
+    i = 0
+    while i < n {
+        w = list.get_raw(t.widgets, i) as *Widget
+        if w.kind == "splitview" {
+            parent = widget_by_id(t, w.parent)
+            if parent != null && parent.kind == "splitview" { return w }
+        }
+        i = i + 1
+    }
+    return null
+}
+
+widget_by_id(t: *Tree, id: int) -> *Widget {
+    n = list.size(t.widgets)
+    i = 0
+    while i < n {
+        w = list.get_raw(t.widgets, i) as *Widget
+        if w.id == id { return w }
+        i = i + 1
+    }
+    return null
+}
+
+// The panels are the user's to size: two splitters, the inner one dragged
+// a hundred and twenty pixels toward the viewport, and the viewport's pane
+// has to come out that much narrower, and back when the divider goes back.
+check_splitters() {
+    t = tree()
+    inner = inner_splitter(t)
+    check_detail("the viewport and the inspector share a splitter", inner != null, "no splitview inside a splitview")
+    if inner == null {
+        tree_free(t)
+        return
+    }
+    inner_id = inner.id
+    // The inspector beside the viewport, not over it: on win32 a layout the
+    // editor's settle re-entered left the second pane where an older pass put
+    // it, over the middle of the first (aether-ui#209). Where the toolkit
+    // reports the panes' boxes (GTK does not, see viewport_width).
+    first = null as *Widget
+    second = null as *Widget
+    i = 0
+    while i < tree_count(t) {
+        w = tree_at(t, i)
+        if w.parent == inner_id {
+            if first == null || w.id < first.id {
+                second = first
+                first = w
+            } else if second == null || w.id < second.id {
+                second = w
+            }
+        }
+        i = i + 1
+    }
+    if first != null && second != null && first.w > 0.0 && second.w > 0.0 {
+        check_detail("the inspector's pane starts where the viewport's ends", second.x >= first.x + first.w - 1.0,
+                     "viewport ${first.x}+${first.w}, inspector at ${second.x}")
+    }
+    before = viewport_width(t)
+    tree_free(t)
+    // Where the divider stands now, read by the route that moves it.
+    start = 0
+    body, err = http.post(url("/widget/${inner_id}/split_position?px=-1"), "", "text/plain")
+    if err == "" {
+        answer, perr = json.parse(body)
+        if perr == "" {
+            start = field_number(answer, "position") as int
+            json.json_free(answer)
+        }
+    }
+    check_detail("the splitter says where its divider is", start > 0, "position ${start}")
+    if start <= 0 { return }
+    // Where the divider went, as the toolkit answers: short of where it was
+    // sent means something in a pane would not shrink.
+    moved = 0 - 1
+    moved_body, moved_err = http.post(url("/widget/${inner_id}/split_position?px=${start - 120}"), "", "text/plain")
+    if moved_err == "" {
+        answer, perr = json.parse(moved_body)
+        if perr == "" {
+            moved = field_number(answer, "position") as int
+            json.json_free(answer)
+        }
+    }
+    after = before
+    tries = 0
+    while tries < 80 && after > before - 60.0 {
+        sleep(50)
+        t = tree()
+        after = viewport_width(t)
+        tree_free(t)
+        tries = tries + 1
+    }
+    narrowed = after < before - 100.0 && after > before - 140.0
+    // What is still wider than the divider now allows, when the viewport
+    // did not follow: the widget whose width is holding the pane open.
+    holding = ""
+    if !narrowed {
+        t = tree()
+        i = 0
+        while i < tree_count(t) {
+            w = tree_at(t, i)
+            if w.w > (moved as float) + 2.0 && w.w < before + 40.0 && w.kind != "splitview" {
+                holding = "${holding} ${w.kind}#${w.id}(${w.w}, parent ${w.parent}, '${w.text}')"
+            }
+            // And the viewport's own widgets, whatever their width: what
+            // the toolkit gave them against what the editor renders at.
+            if w.kind == "canvas" || w.kind == "gpuview" || w.kind == "glarea" {
+                holding = "${holding} [${w.kind}#${w.id} ${w.w}x${w.h}]"
+            }
+            i = i + 1
+        }
+        tree_free(t)
+    }
+    detail = "${before} before, ${after} after a 120 px drag; the divider went from ${start} to ${moved}; wider than it:${holding}"
+    // On GTK the divider moves but neither the viewport's canvas nor its GL
+    // area says it changed size, and both read 0 x 0 when asked, so the
+    // editor cannot follow it there yet (#412, aether-ui#211): a note on
+    // Linux, a check everywhere else.
+    if os.platform() == "linux" {
+        check_note("dragging the divider narrows the viewport by what the inspector took", narrowed, detail, 412)
+    } else {
+        check_detail("dragging the divider narrows the viewport by what the inspector took", narrowed, detail)
+    }
+    post("/widget/${inner_id}/split_position?px=${start}")
+    back = after
+    tries = 0
+    while tries < 80 && back < before - 2.0 {
+        sleep(50)
+        t = tree()
+        back = viewport_width(t)
+        tree_free(t)
+        tries = tries + 1
+    }
+    check_detail("and dragging it back gives the width back", back > before - 3.0 && back < before + 3.0, "${back} against ${before}")
+}
+
 wait_rows(scene: int, count: int) -> int {
     w = want(WANT_ROWS)
     w.id = scene
@@ -2055,6 +2227,7 @@ run_checks() {
     faults = layout_faults(t)
     check_detail("the panels are laid out on one grid", faults == "", faults)
     string.free(faults)
+    check_splitters()
 
     // Save, Load and Delete, pressed. A scene that never reaches disk and
     // a Load that brings back nothing both look like a working editor

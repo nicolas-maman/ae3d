@@ -46,6 +46,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float materialAlpha;
     float reflectivity;
     float wetness;
+    float frameExposure;
     bool hasNormalMap;
     float normalStrength;
     float occlusionStrength;
@@ -511,6 +512,9 @@ void waveField(vec2 p, float t, float dist, out vec3 normal, out vec3 swell,
     steep = clamp(length(vec2(dhx, dhz)) / max(slopeMax * 0.5, 0.0001), 0.0, 1.0);
 }
 
+// The frame's exposure, as the default shader has it.
+
+
 vec3 ACESFilm(vec3 x) {
     float a = 2.51;
     float b = 0.03;
@@ -689,7 +693,7 @@ void main() {
     float gpuGemsCaustics = generateCaustics(fragPosition, time);
     finalColor += gpuGemsCaustics * sun * 0.1;
 
-    finalColor = pow(ACESFilm(finalColor), vec3(1.0 / 2.2));
+    finalColor = pow(ACESFilm(finalColor * frameExposure), vec3(1.0 / 2.2));
 
     // The air between the eye and the surface, after the tone curve, the
     // same as the scene shader does it, so the sea and the shore fade alike.

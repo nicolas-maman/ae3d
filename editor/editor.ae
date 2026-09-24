@@ -39,6 +39,16 @@ import ae3d.physics
 
 const PANEL_LEFT = 240
 const PANEL_RIGHT = 360
+// The narrowest a panel may be dragged: its rows still read.
+const PANEL_FLOOR = 180
+// The width the viewport's GPU view and canvas are made at. Their pane gives
+// them the rest; this is only the least they ask for, and on GTK it is a hard
+// minimum -- made 900 wide, the viewport could not be narrowed and the
+// inspector's divider did not move (#221). Their height stays the view's:
+// it is what keeps the console under them the height it is.
+const VIEW_FLOOR_W = 320
+// A splitter's divider, which the pane widths do not include.
+const SPLIT_DIVIDER = 6
 const WINDOW_W = 1480
 const WINDOW_H = 860
 const ORBIT_SPEED = 0.35
@@ -126,6 +136,9 @@ var g_canvas = 0
 // The GPU view the scene is drawn into, or 0 when it is drawn into a
 // framebuffer of the editor's own and blitted into the canvas above.
 var g_gpu = 0
+var g_gpu_widget = 0               // the GPU view's widget handle
+var g_gpu_seen_w = 0               // its size, in points, when last looked at
+var g_gpu_seen_h = 0
 // Decided before the window, because the two paths build the renderer at
 // different moments: the editor's own context exists straight away, and
 // aether-ui's does not exist until the view is realised.
@@ -505,6 +518,8 @@ var g_last_time = 0.0
 var g_delta = 0.016
 var g_timer = 0
 var g_stage = 0
+var g_split_outer = 0              // the left panel | everything else
+var g_split_inner = 0              // the viewport | the inspector
 var g_left = 0
 var g_right = 0
 var g_layout_settled = false
@@ -3091,9 +3106,11 @@ resize_viewport(width: int, height: int) {
 // the window they had to fit in.
 settle_layout() {
     if g_layout_settled || g_stage == 0 { return }
-    ui.set_width(g_left, PANEL_LEFT)
-    ui.set_width(g_right, PANEL_RIGHT)
-    ui.weight(g_stage, 1)
+    // The dividers where the panels open: the left panel PANEL_LEFT wide, the
+    // inspector PANEL_RIGHT wide at the inner splitter's far end, the viewport
+    // the rest. Only positions, so a drag moves them afterwards.
+    if g_split_outer != 0 { ui.split_set_position(g_split_outer, PANEL_LEFT) }
+    if g_split_inner != 0 { ui.split_set_position(g_split_inner, WINDOW_W - PANEL_LEFT - PANEL_RIGHT - 2 * SPLIT_DIVIDER) }
     // The colour chip is painted here for the same reason the widths are: the
     // style sheet is applied to the tree after it is built, and a background
     // set before that is wiped by it. The chip was set during the first
@@ -3121,6 +3138,31 @@ seconds() -> float {
     return platform.time()
 }
 
+// The viewport changed size without its callback saying so. On GTK a GL area
+// and a canvas both report a new size only when they are drawn, and a still
+// scene draws nothing: a divider dragged across the viewport left the
+// renderer at the old size. The canvas's allocation is read here, which
+// every toolkit answers, and taken as its size; the GPU view is asked for a
+// frame, since drawing it is what delivers the size in pixels
+// (gpuview_on_resize).
+watch_view_size() {
+    if g_gpu == 0 {
+        if g_canvas == 0 { return }
+        view = ui.canvas_widget(g_canvas)
+        cw = ui.get_width(view)
+        ch = ui.get_height(view)
+        if cw > 0 && ch > 0 && (cw != g_canvas_w || ch != g_canvas_h) { resize_canvas(cw, ch) }
+        return
+    }
+    if g_gpu_widget == 0 { return }
+    w = ui.get_width(g_gpu_widget)
+    h = ui.get_height(g_gpu_widget)
+    if w == g_gpu_seen_w && h == g_gpu_seen_h { return }
+    g_gpu_seen_w = w
+    g_gpu_seen_h = h
+    mark_dirty()
+}
+
 draw_frame() {
     paint_started = seconds()
     draw_frame_body()
@@ -3134,8 +3176,6 @@ draw_frame() {
 
 draw_frame_body() {
     if g_renderer == null { return }
-
-    settle_layout()
 
     now = seconds()
     delta = 0.016
@@ -6597,17 +6637,22 @@ main() {
         ui.add_css_class(g_stats, "stats")
         ui.spacer(bar)
 
-        // An hstack with all three panes weighted, rather than nested
-        // splitviews: a splitview pins its first pane to the content width and
-        // split_set_position does not move it (aether-lang-dev/aether-ui#95),
-        // which collapsed the panels to 114 pixels.
-        body = ui.hstack(shell, 0)
+        // Two splitters, the way every editor lays out its panels: the left
+        // panel against the rest, and inside the rest the viewport against the
+        // inspector, each divider dragged to taste. The panels open at their
+        // widths (settle_layout) and cannot be dragged narrower than a floor
+        // that keeps their rows legible. Until aether-ui#95 and #136 a panel
+        // could be a width or draggable, never both, and the editor had three
+        // fixed widths in an hstack.
+        body = ui.splitview(shell, "h")
+        ui.fill_width(body)
         ui.fill_height(body)
+        g_split_outer = body
 
         // The panels scroll rather than stretch: an inspector that grows a
         // section must not push the viewport past the bottom of the window.
         left_scroll = ui.scrollview(body)
-        ui.set_width(left_scroll, PANEL_LEFT)
+        ui.set_min_width(left_scroll, PANEL_FLOOR)
         ui.fill_height(left_scroll)
         // The panel colour goes on the scroll view as well as the stack inside
         // it. The stack is only as tall as what it holds, and the left panel's
@@ -6751,7 +6796,12 @@ main() {
         style_button(g_simulate_btn, "action")
         ui.spacer(left)
 
-        stage = ui.vstack(body, 0)
+        // The rest of the window: the viewport, and the inspector beside it.
+        inner = ui.splitview(body, "h")
+        ui.fill_width(inner)
+        ui.fill_height(inner)
+        g_split_inner = inner
+        stage = ui.vstack(inner, 0)
         ui.fill_height(stage)
 
         // A strip over the viewport carrying the transform modes, the way
@@ -6782,8 +6832,9 @@ main() {
             ui.fill_height(layers)
             viewport_host = layers
 
-            g_gpu = ui.gpuview_create(layers, g_view_w, g_view_h)
+            g_gpu = ui.gpuview_create(layers, VIEW_FLOOR_W, g_view_h)
             gpu_view = ui.gpuview_widget(g_gpu)
+            g_gpu_widget = gpu_view
             ui.fill_width(gpu_view)
             ui.fill_height(gpu_view)
 
@@ -6808,9 +6859,9 @@ main() {
             }
         }
 
-        g_canvas = ui.canvas_create(viewport_host, g_view_w, g_view_h)
-        ui.fill_width(g_canvas)
-        ui.fill_height(g_canvas)
+        g_canvas = ui.canvas_create(viewport_host, VIEW_FLOOR_W, g_view_h)
+        ui.fill_width(ui.canvas_widget(g_canvas))
+        ui.fill_height(ui.canvas_widget(g_canvas))
         // Only on the blit path. Over a GPU view this would paint the scene
         // out, and the clear colour the renderer was given is the same one.
         if g_gpu == 0 {
@@ -6921,6 +6972,11 @@ main() {
         while line < CONSOLE_LINES {
             entry = ui.text(console_panel, "")
             ui.add_css_class(entry, "console")
+            // Cut at the pane's edge rather than widening it. On GTK a
+            // label's least width is its whole text, so a long line (a
+            // path the editor saved to) held the viewport's side of the
+            // splitter at its width and the divider could not move.
+            ui.text_truncate(entry, "tail")
             handles[line] = entry
             line = line + 1
         }
@@ -6930,10 +6986,11 @@ main() {
         ui.fill_width(footer)
         g_status = ui.text(footer, "drag to orbit, scroll to zoom, click to select")
         ui.add_css_class(g_status, "label")
+        ui.text_truncate(g_status, "tail")
         ui.spacer(footer)
 
-        right_scroll = ui.scrollview(body)
-        ui.set_width(right_scroll, PANEL_RIGHT)
+        right_scroll = ui.scrollview(inner)
+        ui.set_min_width(right_scroll, PANEL_FLOOR)
         ui.fill_height(right_scroll)
         ui.add_css_class(right_scroll, "panel")
         right = ui.vstack(right_scroll, 6)
@@ -7352,7 +7409,14 @@ main() {
             apply_orbit()
         }
 
+        // The layout is settled from the timer and nowhere else: a frame is
+        // also drawn from the viewport's resize callback, which runs inside
+        // the toolkit's layout pass, and a divider set from there was undone
+        // by the pass it interrupted (aether-ui#209), leaving the inspector
+        // over the middle of the viewport on Windows.
         g_timer = ui.timer(16) callback {
+            if g_renderer != null { settle_layout() }
+            watch_view_size()
             draw_frame()
         }
 

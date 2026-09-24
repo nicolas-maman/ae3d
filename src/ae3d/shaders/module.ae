@@ -431,6 +431,10 @@ uniform float reflectivity;
 // it in full, walls hardly at all: water runs off them. Set by the
 // weather; a scene without one is dry.
 uniform float wetness;
+// The frame's exposure, over the material's: what an exposure that follows
+// the frame (the engine's eye adaptation) scales the light by before the
+// tone curve. 1 is the scene as lit.
+uniform float frameExposure;
 
 // Modern PBR Extensions
 // The surface's shape rather than its colour. The tangent frame is worked out
@@ -1371,7 +1375,7 @@ void main() {
     // exposure is the emissive strength, scaled so the 10.0 that opens this
     // branch means 1x. Below that the surface is lit normally.
     if (exposure > 10.0) {
-        vec3 emissive = diffuseColor * texColor.rgb * InstanceColor * (exposure * 0.1);
+        vec3 emissive = diffuseColor * texColor.rgb * InstanceColor * (exposure * 0.1) * frameExposure;
         emissive = ACESFilm(emissive);
         FragColor = vec4(pow(emissive, vec3(1.0 / 2.2)), 1.0);
         return;
@@ -1551,7 +1555,7 @@ void main() {
 
     
     // HDR exposure and tone mapping for normal objects
-    color = color * exposure;
+    color = color * exposure * frameExposure;
     // Apply bloom effect
     if (enableBloom) {
         // Extract bright areas for bloom
@@ -2112,6 +2116,9 @@ void waveField(vec2 p, float t, float dist, out vec3 normal, out vec3 swell,
     steep = clamp(length(vec2(dhx, dhz)) / max(slopeMax * 0.5, 0.0001), 0.0, 1.0);
 }
 
+// The frame's exposure, as the default shader has it.
+uniform float frameExposure;
+
 vec3 ACESFilm(vec3 x) {
     float a = 2.51;
     float b = 0.03;
@@ -2290,7 +2297,7 @@ void main() {
     float gpuGemsCaustics = generateCaustics(fragPosition, time);
     finalColor += gpuGemsCaustics * sun * 0.1;
 
-    finalColor = pow(ACESFilm(finalColor), vec3(1.0 / 2.2));
+    finalColor = pow(ACESFilm(finalColor * frameExposure), vec3(1.0 / 2.2));
 
     // The air between the eye and the surface, after the tone curve, the
     // same as the scene shader does it, so the sea and the shore fade alike.

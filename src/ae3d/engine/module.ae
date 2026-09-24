@@ -18,6 +18,7 @@ import ae3d.sky
 import ae3d.behaviour
 import ae3d.input
 import ae3d.scene
+import ae3d.exposure
 import std.os
 import std.fs
 
@@ -37,7 +38,7 @@ exports (
     engine_set_size, engine_set_title, engine_set_msaa, engine_set_decorated, engine_set_post,
     engine_set_render_scale, engine_set_shadows, engine_shadows, engine_set_fog, engine_fog, engine_set_shadow_distance, engine_shadow_distance,
     engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
-    engine_set_skybox, engine_set_sky, engine_sky_path, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_clouds, engine_cloud_wind, engine_set_sky_overcast, engine_sky_overcast, engine_sky_overcast_color, engine_set_ssao, engine_set_capture_channel, engine_set_wetness, engine_set_taa, engine_taa, engine_set_dlss, engine_dlss, engine_ray_query, engine_set_ray_shadows, engine_ray_shadows, engine_set_sun_size, engine_sun_size, engine_set_ray_occlusion, engine_ray_occlusion, engine_set_lamp_size, engine_set_ray_budget, engine_ray_figures, engine_ray_reach, engine_set_ssr, engine_load_texture,
+    engine_set_skybox, engine_set_sky, engine_sky_path, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_clouds, engine_cloud_wind, engine_set_sky_overcast, engine_sky_overcast, engine_sky_overcast_color, engine_set_ssao, engine_set_capture_channel, engine_set_wetness, engine_set_taa, engine_taa, engine_set_dlss, engine_dlss, engine_ray_query, engine_set_ray_shadows, engine_ray_shadows, engine_set_sun_size, engine_sun_size, engine_set_ray_occlusion, engine_ray_occlusion, engine_set_lamp_size, engine_set_ray_budget, engine_ray_figures, engine_ray_reach, engine_set_eye_adaptation, engine_eye_adaptation, engine_frame_exposure, engine_set_ssr, engine_load_texture,
     engine_set_time_of_day, engine_time_of_day,
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
     engine_render_ms, engine_render_frames,
@@ -220,6 +221,10 @@ struct Engine {
     // runtime is loaded before the backend starts when one is wanted.
     dlss_mode: int
     ray_shadows: bool
+    // The exposure following the frame (engine_set_eye_adaptation), and the
+    // controller that steers it; null when it is off.
+    eye: ptr
+    eye_measure: ptr                   // float[2]: the meter's mean and brightest
     // The sun's size for the rays' penumbra, in degrees; zero is a point.
     sun_size: float
     // Occlusion by ray, asked for: with the rays and the occlusion on, the
@@ -804,6 +809,12 @@ engine_free(e: *Engine) {
     }
     if e.camera != null && !e.borrowed { core.camera_free(e.camera as *Camera) }
     if e.perf_stage_ms != null { free(e.perf_stage_ms) }
+    if e.eye != null {
+        exposure.adaptation_free(e.eye as *Adaptation)
+        free(e.eye_measure)
+        e.eye = null
+        e.eye_measure = null
+    }
     // The behaviours are the program's: their states are freed by whoever
     // made them; the list and the records the engine made are the engine's.
     if e.behaviours != null {
@@ -1111,6 +1122,64 @@ engine_set_ray_shadows(e: *Engine, on: bool) {
 }
 
 engine_ray_shadows(e: *Engine) -> bool { return e.ray_shadows && engine_ray_query(e) }
+
+// The exposure follows the frame, the way an eye adapts (ae3d.exposure):
+// the renderer measures what it drew, and the frame's exposure is steered
+// from it, part of the way toward a mid-grey key, down whenever a region
+// nears white, over a second or so. Off by default: a scene lit for its
+// exposure keeps it, and a test's pixels do not move under it.
+engine_set_eye_adaptation(e: *Engine, on: bool) {
+    if on && e.eye == null {
+        e.eye = exposure.adaptation_new() as ptr
+        e.eye_measure = calloc(2, 8)
+    }
+    if !on && e.eye != null {
+        exposure.adaptation_free(e.eye as *Adaptation)
+        free(e.eye_measure)
+        e.eye = null
+        e.eye_measure = null
+    }
+    apply_eye(e)
+}
+
+engine_eye_adaptation(e: *Engine) -> bool { return e.eye != null }
+
+// The exposure the frame is drawn at now: 1 with eye adaptation off.
+engine_frame_exposure(e: *Engine) -> float {
+    if e.eye == null { return 1.0 }
+    return exposure.adaptation_exposure(e.eye as *Adaptation)
+}
+
+apply_eye(e: *Engine) {
+    if e.backend_state == null { return }
+    on = e.eye != null
+    if e.api == platform.API_VULKAN {
+        vk.renderer_set_meter(e.backend_state as *VKRenderer, on)
+        if !on { vk.renderer_set_frame_exposure(e.backend_state as *VKRenderer, 1.0) }
+    } else {
+        if !on { gl.renderer_set_frame_exposure(e.backend_state as *GLRenderer, 1.0) }
+    }
+}
+
+// After the frame is drawn: what it looked like, and the exposure the next
+// one is drawn at.
+adapt_eye(e: *Engine, delta: float) {
+    if e.eye == null || e.backend_state == null { return }
+    measured = false
+    if e.api == platform.API_VULKAN {
+        measured = vk.renderer_meter(e.backend_state as *VKRenderer, e.eye_measure)
+    } else {
+        measured = gl.renderer_meter(e.backend_state as *GLRenderer, e.eye_measure)
+    }
+    if !measured { return }
+    m = e.eye_measure as float[]
+    next = exposure.adaptation_step(e.eye as *Adaptation, m[0], m[1], delta)
+    if e.api == platform.API_VULKAN {
+        vk.renderer_set_frame_exposure(e.backend_state as *VKRenderer, next)
+    } else {
+        gl.renderer_set_frame_exposure(e.backend_state as *GLRenderer, next)
+    }
+}
 
 // How many of a crowd's figures the rays take a frame (Vulkan): the nearest
 // that many, however dense the crowd -- every figure in the rays is one
@@ -1604,6 +1673,7 @@ engine_start(e: *Engine, x: int, y: int) -> bool {
     }
     list.clear(e.pending_models)
     apply_ssao(e)
+    apply_eye(e)
     // Asked for before the backend was up, or by AE3D_TAA=1.
     if core.env_int("AE3D_TAA", 0) == 1 { e.taa = true }
     if e.taa { engine_set_taa(e, true) }
@@ -1612,6 +1682,8 @@ engine_start(e: *Engine, x: int, y: int) -> bool {
     if tenths >= 0 { e.sun_size = (tenths as float) / 10.0 }
     if e.sun_size > 0.0 { engine_set_sun_size(e, e.sun_size) }
     if core.env_int("AE3D_RAY_AO", 0) == 1 { e.ray_occlusion = true }
+    // AE3D_EYE=1: the exposure follows the frame (engine_set_eye_adaptation).
+    if core.env_int("AE3D_EYE", 0) == 1 { engine_set_eye_adaptation(e, true) }
     if e.ray_occlusion { engine_set_ray_occlusion(e, true) }
     if e.lamp_size > 0.0 { engine_set_lamp_size(e, e.lamp_size) }
     if e.ssr_on { apply_ssr(e) }
@@ -2033,6 +2105,7 @@ engine_loop(e: *Engine) {
         e.backend_render(e.backend_state, cam, e.light)
         e.render_seconds = e.render_seconds + (platform.time() - render_started)
         e.render_frames = e.render_frames + 1
+        adapt_eye(e, delta)
 
         run_late_updates(e, delta)
 
