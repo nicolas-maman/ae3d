@@ -34,6 +34,7 @@ import ae3d.core
 import ae3d.behaviour
 import ae3d.engine
 import ae3d.platform
+import ae3d.physics
 
 exports (
     Net, NetObject, LoopHub,
@@ -42,6 +43,7 @@ exports (
     host_loopback, join_loopback, host_tcp, join_tcp, tcp_port,
     networked, networked_count, step, attach, connected, client_id, peer_count, view_time,
     set_tick_rate, set_interpolation_delay, bytes_sent, bytes_received, snapshots_received,
+    NetPlayer, set_player_maker, host_play, player_input, my_player, player_of, player_count, prediction_error, input_sent,
     net_free, last_error
 )
 
@@ -59,7 +61,9 @@ const ROLE_CLIENT = 2
 const PROTOCOL = 1
 const MSG_HELLO = 1                  // client -> host: [u8][u32 protocol]
 const MSG_WELCOME = 2                // host -> client: [u8][u32 client id][u32 tick rate]
-const MSG_SNAPSHOT = 3               // host -> client: [u8][u32 tick][f32 time][u16 count], then an object each: [u32 id][f32 x y z][f32 qx qy qz qw]
+const MSG_SNAPSHOT = 3               // host -> client: [u8][u32 tick][f32 time][u32 ack][u16 count], then an object each: [u32 id][f32 x y z][f32 qx qy qz qw][u8 character][f32 vy][u8 grounded]
+const MSG_INPUT = 4                  // client -> host, unreliable: [u8][u32 first seq][u8 count], then a command each: [f32 walk x z][f32 jump]
+const MSG_SPAWN = 5                  // host -> client, reliable: [u8][u32 net id][u32 owner]
 
 const KIND_LOOP = 1
 const KIND_TCP = 2
@@ -72,6 +76,11 @@ const HISTORY = 32                   // samples an object keeps: a second at 30 
 const SAMPLE = 8                     // floats a sample: the host's time, x y z, qx qy qz qw
 const TCP_CHUNK = 65536
 const HUB_ENDPOINTS = 64
+const COMMANDS = 128                 // a client's commands kept until the host has applied them
+const COMMAND = 4                    // floats a command: seq, walk x, walk z, jump
+const RESENT = 4                     // the unacknowledged commands every input message carries: four lost in a row costs a correction
+const PLAYER_STEP = 0.016666666666666666   // a command's step, seconds: the fixed step's
+const QUEUE_DEPTH = 3                // host: the commands a client's queue holds before it catches up
 
 var g_error = ""
 
@@ -268,6 +277,16 @@ struct Peer {
     pending_capacity: int
     welcomed: bool
     open: bool
+    last_input: int                  // host: the newest command of this client's it has applied
+    player: ptr                      // host: this client's *NetPlayer
+    // Host: the client's commands received and not yet applied, a ring of
+    // float[COMMANDS * COMMAND]. One is applied a host step, so a player
+    // moves in the host's world at the pace it walked, whatever the link's
+    // jitter did to when the commands arrived.
+    queued: ptr
+    queued_first: int
+    queued_count: int
+    last_queued: int
 }
 
 struct NetEvent {
@@ -275,6 +294,17 @@ struct NetEvent {
     peer: int
     data: ptr
     length: int
+}
+
+// A player: a character controller on a networked object, owned by a
+// client. The host moves it by the client's commands; the owning client
+// moves its own ahead of the host (prediction) and puts it back where the
+// host says it was, replaying what the host has not applied yet
+// (reconciliation); every other client draws it interpolated.
+struct NetPlayer {
+    client: int
+    net_id: int
+    controller: *CharacterController
 }
 
 struct NetObject {
@@ -307,6 +337,21 @@ struct Net {
     sent: long
     got: long
     snapshots: int
+    // Players: made by the game's maker, on the host for every client it
+    // welcomes and on a client for every spawn it is told of.
+    player_maker: fn(ptr, int) -> *CharacterController
+    maker_context: ptr
+    players: ptr                     // list of *NetPlayer
+    mine: ptr                        // client: its own *NetPlayer, or null
+    commands: ptr                    // client: float[COMMANDS * COMMAND], a ring of the unacknowledged
+    command_count: int
+    command_first: int               // the ring's oldest slot
+    next_seq: int
+    acked: int                       // client: the host's newest applied command
+    worst_correction: float          // client: the most a reconciliation moved its player, metres
+    inputs_sent: int
+    player_clock: float              // host: time since the first step, less the player steps taken
+    player_started: bool
 }
 
 net_new(role: int, kind: int) -> *Net {
@@ -320,6 +365,9 @@ net_new(role: int, kind: int) -> *Net {
     n.interpolation_delay = 0.1
     n.last_step = 0.0 - 1.0
     n.out = buf_new(2048)
+    n.players = list.new()
+    n.commands = calloc(COMMANDS * COMMAND, 8)
+    n.next_seq = 1
     return n
 }
 
@@ -612,21 +660,58 @@ object_by_id(n: *Net, id: int) -> *NetObject {
     return list.get_raw(n.objects, id - 1) as *NetObject
 }
 
-// The host's snapshot of every networked object, to every welcomed client.
+// A networked object at a given id, as a spawn names it: the list grows to
+// it, and an id already taken is left as it is.
+networked_at(n: *Net, o: *GameObject, id: int) {
+    while list.size(n.objects) < id { list.add_raw(n.objects, null) }
+    if list.get_raw(n.objects, id - 1) != null { return }
+    no = calloc(1, sizeof(NetObject)) as *NetObject
+    no.id = id
+    no.object = o
+    no.history = calloc(HISTORY * SAMPLE, 8)
+    list.set(n.objects, id - 1, no as ptr)
+}
+
+// The host's snapshot of every networked object, to every welcomed client:
+// written once a peer, since each carries the newest of that client's
+// commands the host has applied.
 send_snapshot(n: *Net, now: float) {
+    i = 0
+    while i < list.size(n.peers) {
+        p = list.get_raw(n.peers, i) as *Peer
+        if p.welcomed { snapshot_to(n, p, now) }
+        i = i + 1
+    }
+}
+
+snapshot_to(n: *Net, p: *Peer, now: float) {
     b = n.out
     b.length = 0
     put_u8(b, MSG_SNAPSHOT)
     put_u32(b, n.tick)
     put_f32(b, now)
+    put_u32(b, p.last_input)
     count = list.size(n.objects)
     put_u16(b, count)
     i = 0
     while i < count {
         no = list.get_raw(n.objects, i) as *NetObject
-        m = behaviour.object_model(no.object)
-        put_u32(b, no.id)
-        if m != null {
+        put_u32(b, i + 1)
+        m = null as *Model
+        if no != null { m = behaviour.object_model(no.object) }
+        if no != null && m == null {
+            // An object with no model (a player, a trigger): where its game
+            // object is, turned as it is.
+            where = behaviour.object_position(no.object)
+            turn = behaviour.object_rotation(no.object)
+            put_f32(b, where.x)
+            put_f32(b, where.y)
+            put_f32(b, where.z)
+            put_f32(b, turn.x)
+            put_f32(b, turn.y)
+            put_f32(b, turn.z)
+            put_f32(b, turn.w)
+        } else if m != null {
             put_f32(b, m.position.x)
             put_f32(b, m.position.y)
             put_f32(b, m.position.z)
@@ -642,14 +727,17 @@ send_snapshot(n: *Net, now: float) {
             }
             put_f32(b, 1.0)
         }
+        player = player_by_id(n, i + 1)
+        if player != null {
+            put_u8(b, 1)
+            put_f32(b, player.controller.velocity.y)
+            if player.controller.grounded { put_u8(b, 1) } else { put_u8(b, 0) }
+        } else {
+            put_u8(b, 0)
+        }
         i = i + 1
     }
-    i = 0
-    while i < list.size(n.peers) {
-        p = list.get_raw(n.peers, i) as *Peer
-        if p.welcomed { deliver(n, p, false, b.data, b.length, now) }
-        i = i + 1
-    }
+    deliver(n, p, false, b.data, b.length, now)
 }
 
 // A snapshot into each object's history. One no newer than the newest held
@@ -657,6 +745,7 @@ send_snapshot(n: *Net, now: float) {
 take_snapshot(n: *Net, r: *NetReader, now: float) {
     get_u32(r)
     host_time = get_f32(r)
+    ack = get_u32(r)
     count = get_u16(r)
     if !r.ok { return }
     n.snapshots = n.snapshots + 1
@@ -677,7 +766,20 @@ take_snapshot(n: *Net, r: *NetReader, now: float) {
         qy = get_f32(r)
         qz = get_f32(r)
         qw = get_f32(r)
+        character = get_u8(r)
+        vy = 0.0
+        grounded = false
+        if character == 1 {
+            vy = get_f32(r)
+            grounded = get_u8(r) == 1
+        }
         if !r.ok { return }
+        mine = n.mine as *NetPlayer
+        if mine != null && id == mine.net_id {
+            reconcile(n, core.vec3(x, y, z), vy, grounded, ack)
+            i = i + 1
+            continue
+        }
         no = object_by_id(n, id)
         if no != null {
             h = no.history as float[]
@@ -719,8 +821,12 @@ interpolate(n: *Net, now: float) {
     i = 0
     while i < list.size(n.objects) {
         no = list.get_raw(n.objects, i) as *NetObject
-        m = behaviour.object_model(no.object)
-        if m != null && no.count > 0 {
+        m = null as *Model
+        if no != null { m = behaviour.object_model(no.object) }
+        if no != null && m == null && no.count > 0 {
+            h = no.history as float[]
+            place_interpolated(no, h, at)
+        } else if m != null && no.count > 0 {
             h = no.history as float[]
             after = 0 - 1
             before = 0 - 1
@@ -750,6 +856,34 @@ interpolate(n: *Net, now: float) {
         }
         i = i + 1
     }
+}
+
+// An object with no model (a remote player) at the interpolated position.
+place_interpolated(no: *NetObject, h: float[], at: float) {
+    after = 0 - 1
+    before = 0 - 1
+    k = 0
+    while k < no.count {
+        slot = (no.newest - k + HISTORY) % HISTORY
+        if h[slot * SAMPLE] > at {
+            after = slot
+        } else {
+            before = slot
+            break
+        }
+        k = k + 1
+    }
+    if before < 0 { before = after }
+    if after < 0 { after = before }
+    a = before * SAMPLE
+    c = after * SAMPLE
+    t = 0.0
+    if h[c] > h[a] { t = (at - h[a]) / (h[c] - h[a]) }
+    if t < 0.0 { t = 0.0 }
+    if t > 1.0 { t = 1.0 }
+    behaviour.object_set_position(no.object, core.vec3(h[a + 1] + (h[c + 1] - h[a + 1]) * t,
+                                                       h[a + 2] + (h[c + 2] - h[a + 2]) * t,
+                                                       h[a + 3] + (h[c + 3] - h[a + 3]) * t))
 }
 
 // Between two rotations (four floats of `h` at `a` and at `c`) the short way
@@ -788,6 +922,7 @@ step(n: *Net, now: float) {
     }
     clear_events(n)
     if n.role == ROLE_HOST {
+        step_players(n, delta)
         // A tick is due a whole interval after the last, to within a
         // thousandth of one: steps of 1/60 add up to a hair under 1/30
         // often enough that a strict comparison skipped every few ticks,
@@ -829,6 +964,20 @@ handle(n: *Net, ev: *NetEvent, now: float) {
         put_u32(b, p.id)
         put_u32(b, (n.tick_rate) as int)
         deliver(n, p, true, b.data, b.length, now)
+        host_player(n, p, now)
+        return
+    }
+    if n.role == ROLE_HOST && kind == MSG_INPUT {
+        p = peer_by_id(n, ev.peer)
+        if p == null || p.player == null { return }
+        apply_inputs(n, p, &r)
+        return
+    }
+    if n.role == ROLE_CLIENT && kind == MSG_SPAWN {
+        id = get_u32(&r)
+        owner = get_u32(&r)
+        if !r.ok { return }
+        client_spawn(n, id, owner)
         return
     }
     if n.role == ROLE_CLIENT && kind == MSG_WELCOME {
@@ -870,6 +1019,258 @@ set_interpolation_delay(n: *Net, seconds: float) {
     if seconds >= 0.0 { n.interpolation_delay = seconds }
 }
 
+// --- players ---------------------------------------------------------------------------------
+
+// How a player is made, on either side: `maker(context, client)` returns a
+// character controller on a game object of its own, where the game wants a
+// player to begin. The host calls it for every client it welcomes, a client
+// for every player it is told of -- its own included.
+set_player_maker(n: *Net, maker: fn(ptr, int) -> *CharacterController, context: ptr) {
+    n.player_maker = maker
+    n.maker_context = context
+}
+
+player_by_id(n: *Net, id: int) -> *NetPlayer {
+    i = 0
+    while i < list.size(n.players) {
+        pl = list.get_raw(n.players, i) as *NetPlayer
+        if pl.net_id == id { return pl }
+        i = i + 1
+    }
+    return null
+}
+
+// The player a client owns, or null.
+player_of(n: *Net, client: int) -> *NetPlayer {
+    i = 0
+    while i < list.size(n.players) {
+        pl = list.get_raw(n.players, i) as *NetPlayer
+        if pl.client == client { return pl }
+        i = i + 1
+    }
+    return null
+}
+
+player_count(n: *Net) -> int { return list.size(n.players) }
+
+// A client's own player, once the host has spawned it; null before.
+my_player(n: *Net) -> *NetPlayer { return n.mine as *NetPlayer }
+
+// The most a reconciliation has had to move this client's player, metres:
+// 0 where the client's world and the host's agree, as they should.
+prediction_error(n: *Net) -> float { return n.worst_correction }
+
+input_sent(n: *Net) -> int { return n.inputs_sent }
+
+make_player(n: *Net, client: int, id: int) -> *NetPlayer {
+    maker = n.player_maker
+    if maker == null { return null }
+    controller = maker(n.maker_context, client)
+    if controller == null { return null }
+    pl = calloc(1, sizeof(NetPlayer)) as *NetPlayer
+    pl.client = client
+    pl.net_id = id
+    pl.controller = controller
+    list.add_raw(n.players, pl as ptr)
+    networked_at(n, controller.object as *GameObject, id)
+    return pl
+}
+
+// A welcomed client's player on the host, and every player told to every
+// client: the new one to all, the ones before it to the newcomer.
+host_player(n: *Net, p: *Peer, now: float) {
+    if n.player_maker == null { return }
+    pl = make_player(n, p.id, list.size(n.objects) + 1)
+    if pl == null { return }
+    p.player = pl as ptr
+    i = 0
+    while i < list.size(n.peers) {
+        other = list.get_raw(n.peers, i) as *Peer
+        if other.welcomed {
+            if other == p {
+                k = 0
+                while k < list.size(n.players) {
+                    tell_spawn(n, other, list.get_raw(n.players, k) as *NetPlayer, now)
+                    k = k + 1
+                }
+            } else {
+                tell_spawn(n, other, pl, now)
+            }
+        }
+        i = i + 1
+    }
+}
+
+tell_spawn(n: *Net, p: *Peer, pl: *NetPlayer, now: float) {
+    b = n.out
+    b.length = 0
+    put_u8(b, MSG_SPAWN)
+    put_u32(b, pl.net_id)
+    put_u32(b, pl.client)
+    deliver(n, p, true, b.data, b.length, now)
+}
+
+client_spawn(n: *Net, id: int, owner: int) {
+    if player_by_id(n, id) != null { return }
+    pl = make_player(n, owner, id)
+    if pl != null && owner == n.my_id { n.mine = pl as ptr }
+}
+
+// The host applies a client's commands it has not applied yet, oldest
+// first, a fixed step each: the same moves the client made ahead of it.
+apply_inputs(n: *Net, p: *Peer, r: *NetReader) {
+    if p.queued == null { p.queued = calloc(COMMANDS * COMMAND, 8) }
+    q = p.queued as float[]
+    first = get_u32(r)
+    count = get_u8(r)
+    i = 0
+    while i < count {
+        seq = first + i
+        wx = get_f32(r)
+        wz = get_f32(r)
+        jump = get_f32(r)
+        if !r.ok { return }
+        // Newer than the last queued: in order, and past a gap only when
+        // RESENT messages in a row were lost (the client reconciles then).
+        if seq > p.last_queued && p.queued_count < COMMANDS {
+            slot = ((p.queued_first + p.queued_count) % COMMANDS) * COMMAND
+            q[slot] = (seq) as float
+            q[slot + 1] = wx
+            q[slot + 2] = wz
+            q[slot + 3] = jump
+            p.queued_count = p.queued_count + 1
+            p.last_queued = seq
+        }
+        i = i + 1
+    }
+}
+
+// The oldest of a client's queued commands, applied to its player.
+apply_queued(p: *Peer) {
+    pl = p.player as *NetPlayer
+    q = p.queued as float[]
+    slot = p.queued_first * COMMAND
+    physics.character_move(pl.controller, core.vec3(q[slot + 1], 0.0, q[slot + 2]), q[slot + 3], PLAYER_STEP)
+    p.last_input = (q[slot]) as int
+    p.queued_first = (p.queued_first + 1) % COMMANDS
+    p.queued_count = p.queued_count - 1
+}
+
+// The host's player steps due by `now`: a command a client each, and a
+// second where a client's queue has grown past QUEUE_DEPTH (it fell behind
+// while the link held its commands back).
+step_players(n: *Net, delta: float) {
+    if !n.player_started {
+        n.player_started = true
+        return
+    }
+    n.player_clock = n.player_clock + delta
+    while n.player_clock >= PLAYER_STEP * 0.999 {
+        n.player_clock = n.player_clock - PLAYER_STEP
+        i = 0
+        while i < list.size(n.peers) {
+            p = list.get_raw(n.peers, i) as *Peer
+            if p.player != null && p.queued_count > 0 {
+                apply_queued(p)
+                if p.queued_count > QUEUE_DEPTH { apply_queued(p) }
+            }
+            i = i + 1
+        }
+    }
+}
+
+// The host plays too (a listen server): a player of its own, client 0,
+// made now and told to every client as any player is. Its commands move it
+// directly -- the host's world is the authority, so there is nothing to
+// predict. Null without a player maker.
+host_play(n: *Net, now: float) -> *NetPlayer {
+    if n.role != ROLE_HOST { return null }
+    if n.mine != null { return n.mine as *NetPlayer }
+    pl = make_player(n, 0, list.size(n.objects) + 1)
+    if pl == null { return null }
+    n.mine = pl as ptr
+    i = 0
+    while i < list.size(n.peers) {
+        p = list.get_raw(n.peers, i) as *Peer
+        if p.welcomed { tell_spawn(n, p, pl, now) }
+        i = i + 1
+    }
+    return pl
+}
+
+// A client's command for this fixed step: its own player moves by it now,
+// ahead of the host, and it goes to the host with the ones the host has not
+// yet acknowledged (so a lost message costs nothing). Before the host has
+// spawned the player, nothing. On the host, its own player (host_play)
+// moves, and that is all.
+player_input(n: *Net, walk: Vec3, jump: float, now: float) {
+    mine = n.mine as *NetPlayer
+    if mine == null { return }
+    if n.role == ROLE_HOST {
+        physics.character_move(mine.controller, core.vec3(walk.x, 0.0, walk.z), jump, PLAYER_STEP)
+        return
+    }
+    if n.command_count >= COMMANDS { return }
+    seq = n.next_seq
+    n.next_seq = n.next_seq + 1
+    cmds = n.commands as float[]
+    slot = ((n.command_first + n.command_count) % COMMANDS) * COMMAND
+    cmds[slot] = (seq) as float
+    cmds[slot + 1] = walk.x
+    cmds[slot + 2] = walk.z
+    cmds[slot + 3] = jump
+    n.command_count = n.command_count + 1
+    physics.character_move(mine.controller, core.vec3(walk.x, 0.0, walk.z), jump, PLAYER_STEP)
+    // The newest RESENT of the unacknowledged.
+    b = n.out
+    b.length = 0
+    put_u8(b, MSG_INPUT)
+    first = n.command_count - RESENT
+    if first < 0 { first = 0 }
+    put_u32(b, (cmds[((n.command_first + first) % COMMANDS) * COMMAND]) as int)
+    put_u8(b, n.command_count - first)
+    k = first
+    while k < n.command_count {
+        at = ((n.command_first + k) % COMMANDS) * COMMAND
+        put_f32(b, cmds[at + 1])
+        put_f32(b, cmds[at + 2])
+        put_f32(b, cmds[at + 3])
+        k = k + 1
+    }
+    deliver(n, peer_by_id(n, 0), false, b.data, b.length, now)
+    n.inputs_sent = n.inputs_sent + 1
+}
+
+// The host says where this client's player was after command `ack`: the
+// player is put there, the acknowledged commands dropped, and the rest
+// replayed on top -- so the client stays ahead of the host and agrees with
+// it. How far that moved the player from where the client had it is the
+// prediction's error.
+reconcile(n: *Net, at: Vec3, vy: float, grounded: bool, ack: int) {
+    mine = n.mine as *NetPlayer
+    if ack < n.acked { return }
+    n.acked = ack
+    c = mine.controller
+    o = c.object as *GameObject
+    had = behaviour.object_position(o)
+    cmds = n.commands as float[]
+    while n.command_count > 0 && (cmds[n.command_first * COMMAND]) as int <= ack {
+        n.command_first = (n.command_first + 1) % COMMANDS
+        n.command_count = n.command_count - 1
+    }
+    behaviour.object_set_position(o, at)
+    c.velocity = core.vec3(c.velocity.x, vy, c.velocity.z)
+    c.grounded = grounded
+    k = 0
+    while k < n.command_count {
+        slot = ((n.command_first + k) % COMMANDS) * COMMAND
+        physics.character_move(c, core.vec3(cmds[slot + 1], 0.0, cmds[slot + 2]), cmds[slot + 3], PLAYER_STEP)
+        k = k + 1
+    }
+    moved = core.v3_len(core.v3_sub(behaviour.object_position(o), had))
+    if moved > n.worst_correction { n.worst_correction = moved }
+}
+
 bytes_sent(n: *Net) -> long { return n.sent }
 bytes_received(n: *Net) -> long { return n.got }
 snapshots_received(n: *Net) -> int { return n.snapshots }
@@ -896,6 +1297,7 @@ net_free(n: *Net) {
         p = list.get_raw(n.peers, i) as *Peer
         if p.socket != null { tcp.tcp_close(p.socket) }
         if p.pending != null { free(p.pending) }
+        if p.queued != null { free(p.queued) }
         free(p as ptr)
         i = i + 1
     }
@@ -903,11 +1305,20 @@ net_free(n: *Net) {
     i = 0
     while i < list.size(n.objects) {
         no = list.get_raw(n.objects, i) as *NetObject
-        free(no.history)
-        free(no as ptr)
+        if no != null {
+            free(no.history)
+            free(no as ptr)
+        }
         i = i + 1
     }
     list.free(n.objects)
+    i = 0
+    while i < list.size(n.players) {
+        free(list.get_raw(n.players, i))
+        i = i + 1
+    }
+    list.free(n.players)
+    free(n.commands)
     if n.server != null { tcp.tcp_server_close(n.server) }
     if n.kind == KIND_LOOP && n.role == ROLE_HOST && n.hub != null { n.hub.host_open = false }
     buf_free(n.out)

@@ -1,0 +1,236 @@
+// Networked players (#413): a host and two clients in one process, each
+// with a world of its own, the same ground in each. Every client walks its
+// player by commands; the host moves the authoritative players by them; a
+// client moves its own ahead of the host and reconciles when the host's
+// snapshots come back. Over a link with 100 ms latency, 20 ms jitter and
+// 2% loss, held to numbers:
+//
+//   - every side has every player, the host's own among them (it plays
+//     too), and each client knows which is its own;
+//   - a client's command moves its player the step it is given, not a
+//     round trip later;
+//   - no reconciliation moves a player more than a centimetre: what the
+//     client predicted is what the host did;
+//   - once the walking stops, each client's own player is where the host
+//     has it, within a millimetre, and each client draws the other's where
+//     the host has it, within a centimetre;
+//   - while walking, a client draws the other's player where the host had
+//     it at the client's view time, within a centimetre on 95% of steps
+//     and within a command's step always (the rest are the host catching
+//     up a queue the link let grow);
+//   - a jump predicted on the client is the host's jump;
+//   - a client's commands cost it under 4 KB a second.
+//
+// The clock is the test's own, 60 steps a second, so a run is the same
+// every time.
+
+import ae3d.core
+import ae3d.engine
+import ae3d.behaviour
+import ae3d.loader
+import ae3d.physics
+import ae3d.net
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+const STEPS = 240                    // four seconds
+const STEP = 0.016666666666666666
+const STOP = 3.0                     // seconds: the walking ends
+
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, ok: bool) {
+    g_checks = g_checks + 1
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        g_failures = g_failures + 1
+        println("  FAIL ${name}")
+    }
+}
+
+// A world: an engine never run, its physics, a ground 80 m across.
+world() -> *Engine {
+    e = engine.engine_new()
+    physics.attach(e)
+    ground = engine.object(e, "Ground", loader.cube(1.0))
+    behaviour.object_set_position(ground, core.vec3(0.0, 0.0 - 0.5, 0.0))
+    physics.box_collider(ground, core.vec3(40.0, 0.5, 40.0), physics.material(0.8, 0.0))
+    return e
+}
+
+// The game's player: a capsule on the ground, the host's (client 0) at
+// x -6, client 1's at x 0, client 2's at x 6, whichever world asks.
+make_player(context: ptr, client: int) -> *CharacterController {
+    e = context as *Engine
+    o = engine.object(e, "Player ${client}", null)
+    behaviour.object_set_position(o, core.vec3(((client - 1) * 6) as float, 0.0, 0.0))
+    return physics.character_controller(o, 0.3, 1.8)
+}
+
+// What client 1 does at time t: along +z at 3 m/s, then +x at 2, a jump at
+// 2.2 s, and still from STOP.
+walk_one(t: float) -> Vec3 {
+    if t < 0.5 || t >= STOP { return core.vec3(0.0, 0.0, 0.0) }
+    if t < 1.5 { return core.vec3(0.0, 0.0, 3.0) }
+    return core.vec3(2.0, 0.0, 0.0)
+}
+
+// The host's: along +x at 1 m/s.
+walk_host(t: float) -> Vec3 {
+    if t < 0.5 || t >= STOP { return core.vec3(0.0, 0.0, 0.0) }
+    return core.vec3(1.0, 0.0, 0.0)
+}
+
+// And client 2: along -z at 2 m/s.
+walk_two(t: float) -> Vec3 {
+    if t < 0.5 || t >= STOP { return core.vec3(0.0, 0.0, 0.0) }
+    return core.vec3(0.0, 0.0, 0.0 - 2.0)
+}
+
+// The players' controllers are the game's, made by its maker: freed by it.
+free_players(n: *Net) {
+    i = 0
+    while i <= 2 {
+        pl = net.player_of(n, i)
+        if pl != null { physics.character_free(pl.controller) }
+        i = i + 1
+    }
+}
+
+where(pl: *NetPlayer) -> Vec3 {
+    return behaviour.object_position(pl.controller.object as *GameObject)
+}
+
+apart(a: Vec3, b: Vec3) -> float {
+    return core.v3_len(core.v3_sub(a, b))
+}
+
+main() {
+    host_world = world()
+    one_world = world()
+    two_world = world()
+    hub = net.hub_new()
+    net.hub_set_conditions(hub, 0.1, 0.02, 0.02)
+    host = net.host_loopback(hub)
+    net.set_player_maker(host, make_player, host_world as ptr)
+    // The host plays too, before anyone joins.
+    net.host_play(host, 0.0)
+    one = net.join_loopback(hub)
+    net.set_player_maker(one, make_player, one_world as ptr)
+    two = net.join_loopback(hub)
+    net.set_player_maker(two, make_player, two_world as ptr)
+
+    // Where the host had player 1, every step: x y z.
+    record = calloc(STEPS * 3, 8)
+    rec = record as float[]
+    first_move = 0.0 - 1.0
+    watched_worst = 0.0
+    watched = 0
+    watched_close = 0
+    host_peak = 0.0
+    one_peak = 0.0
+    step = 0
+    while step < STEPS {
+        now = (step as float) * STEP
+        mine = net.my_player(one)
+        if mine != null {
+            before = where(mine)
+            jump = 0.0
+            if step == 132 { jump = 4.2 }
+            net.player_input(one, walk_one(now), jump, now)
+            moved = apart(where(mine), before)
+            if first_move < 0.0 && now >= 0.5 { first_move = moved }
+            if where(mine).y > one_peak { one_peak = where(mine).y }
+        }
+        if net.my_player(two) != null { net.player_input(two, walk_two(now), 0.0, now) }
+        net.player_input(host, walk_host(now), 0.0, now)
+        net.step(one, now)
+        net.step(two, now)
+        net.step(host, now)
+        authoritative = net.player_of(host, 1)
+        if authoritative != null {
+            at = where(authoritative)
+            rec[step * 3] = at.x
+            rec[step * 3 + 1] = at.y
+            rec[step * 3 + 2] = at.z
+            if at.y > host_peak { host_peak = at.y }
+        }
+        // Client 2's drawing of player 1 against where the host had it at
+        // client 2's view time, while it walks.
+        seen = net.player_of(two, 1)
+        view = net.view_time(two, now)
+        if seen != null && view >= 0.6 && now < STOP {
+            k = (view / STEP) as int
+            f = view / STEP - (k as float)
+            if k >= 0 && k + 1 <= step {
+                a = k * 3
+                c = (k + 1) * 3
+                truth = core.vec3(rec[a] + (rec[c] - rec[a]) * f, rec[a + 1] + (rec[c + 1] - rec[a + 1]) * f,
+                                  rec[a + 2] + (rec[c + 2] - rec[a + 2]) * f)
+                d = apart(where(seen), truth)
+                if d > watched_worst { watched_worst = d }
+                if d <= 0.01 { watched_close = watched_close + 1 }
+                watched = watched + 1
+            }
+        }
+        step = step + 1
+    }
+
+    println("players: a host and two clients, 100 ms latency, 20 ms jitter, 2% loss, ${STEPS} steps")
+    check("the host has its own and both clients' players, and so has each client",
+          net.player_count(host) == 3 && net.player_count(one) == 3 && net.player_count(two) == 3)
+    check("each client knows its own", net.my_player(one) != null && net.my_player(one).client == 1 &&
+          net.my_player(two) != null && net.my_player(two).client == 2)
+    println("  the first walking command moved client 1's player ${first_move * 1000.0} mm the step it was given")
+    check("a command moves the player the step it is given (3 m/s: 50 mm)", first_move > 0.049 && first_move < 0.051)
+    worst_one = net.prediction_error(one)
+    worst_two = net.prediction_error(two)
+    println("  reconciliation moved client 1's player at most ${worst_one * 1000.0} mm, client 2's ${worst_two * 1000.0} mm")
+    check("what each client predicted is what the host did, within a centimetre", worst_one <= 0.01 && worst_two <= 0.01)
+    host_one = where(net.player_of(host, 1))
+    host_two = where(net.player_of(host, 2))
+    own_one = apart(where(net.my_player(one)), host_one)
+    own_two = apart(where(net.my_player(two)), host_two)
+    println("  at rest: client 1's own player ${own_one * 1000.0} mm from the host's, client 2's ${own_two * 1000.0} mm; player 1 at (${host_one.x}, ${host_one.y}, ${host_one.z})")
+    check("at rest each client's own player is where the host has it, within a millimetre", own_one <= 0.001 && own_two <= 0.001)
+    other_one = apart(where(net.player_of(two, 1)), host_one)
+    other_two = apart(where(net.player_of(one, 2)), host_two)
+    println("  at rest: client 2 draws player 1 ${other_one * 1000.0} mm from the host's, client 1 draws player 2 ${other_two * 1000.0} mm")
+    check("and draws the other's where the host has it, within a centimetre", other_one <= 0.01 && other_two <= 0.01)
+    host_own = where(net.player_of(host, 0))
+    seen_host = apart(where(net.player_of(one, 0)), host_own)
+    println("  at rest: the host's own player at (${host_own.x}, ${host_own.y}, ${host_own.z}), client 1 draws it ${seen_host * 1000.0} mm from there")
+    check("the host plays too: it walked, and a client draws it where it is, within a centimetre", host_own.x > 0.0 - 3.6 && host_own.x < 0.0 - 3.4 && seen_host <= 0.01)
+    println("  walking: client 2 drew player 1 within 1 cm of where the host had it on ${watched_close} of ${watched} steps, at most ${watched_worst * 1000.0} mm")
+    // Off by more only where the host caught up a queue the link had let
+    // grow, two commands in one step: at most a command's step, 50 mm at
+    // 3 m/s.
+    check("while walking, the other's player is drawn where the host had it: within 1 cm on 95% of steps, within a step always",
+          watched > 60 && (watched_close as float) >= 0.95 * (watched as float) && watched_worst <= 0.05)
+    println("  jump: client 1 predicted a peak of ${one_peak} m, the host's was ${host_peak} m")
+    check("a jump predicted is the host's jump", one_peak > 0.8 && apart(core.vec3(0.0, one_peak, 0.0), core.vec3(0.0, host_peak, 0.0)) <= 0.01)
+    inputs = net.bytes_sent(one)
+    per_second = (inputs as float) / ((STEPS as float) * STEP)
+    println("  client 1 sent ${net.input_sent(one)} input messages, ${per_second / 1024.0} KB a second")
+    check("a client's commands cost it under 4 KB a second", per_second < 4.0 * 1024.0)
+
+    free(record)
+    free_players(host)
+    free_players(one)
+    free_players(two)
+    net.net_free(one)
+    net.net_free(two)
+    net.net_free(host)
+    net.hub_free(hub)
+    engine.engine_free(host_world)
+    engine.engine_free(one_world)
+    engine.engine_free(two_world)
+    if g_failures == 0 {
+        println("players: all checks passed (${g_checks})")
+    } else {
+        println("players: ${g_failures} failure(s) of ${g_checks}")
+    }
+}

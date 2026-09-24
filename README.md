@@ -35,7 +35,7 @@ kernels; what remains in C is there for one stated reason each
 | **Voxels and terrain** | Voxel worlds as only the faces that show; surface nets over a distance field for smooth terrain. |
 | **An engine you can ask** | `AE3D_AGENT=port` opens a JSON channel: read and change the scene, hold a frame, read its pixels, trace a model from its Blender object to the pixels it landed on. |
 | **Natural motion** | `ae3d.motion`, an active ragdoll on any dressed figure: the animation played by joint motors within an adult's torque budget, a blow that knocks it off its pose and back or down, a struck limb that goes weak and recovers ([docs/motion.md](docs/motion.md)). |
-| **Multiplayer in the engine** | `ae3d.net`: host or join over TCP or an in-process loopback with simulated latency, jitter and loss; networked objects replicated and interpolated, held to within a millimetre and a half of the host over a perfect link ([docs/networking.md](docs/networking.md)). |
+| **Multiplayer in the engine** | `ae3d.net`: host or join over TCP or an in-process loopback with simulated latency, jitter and loss; networked objects replicated and interpolated, held to within a millimetre and a half of the host over a perfect link; players that walk the instant their client asks, predicted and reconciled against the host ([docs/networking.md](docs/networking.md)). |
 | **Input as a game names it** | Actions and axes bound once to keys, mouse and gamepad, read by name from any script, injectable from a test or an agent. |
 | **An editor** | Hierarchy, inspector, gizmos, terrain sculpting, physics bodies and a Simulate button, undo, scene files; opens any program's scene (`AE3D_SCENE_OUT`); one dark theme on every platform. |
 
