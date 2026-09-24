@@ -32,3 +32,8 @@
   recorded nothing had its undo take back the last object the scene added,
   and the check passed with that object gone. That hid the arm figure from
   the figure check.
+- `test_motion_figure` also covers a figure from a file: the box man
+  fixture, its Idle playing, turned a quarter turn. Through
+  `motion.on_figure` it faces within 2.3° of its turn and stands on its
+  muscles. `test_humanoid_fixture` checks that the engine reads its
+  naming as Mixamo's.
