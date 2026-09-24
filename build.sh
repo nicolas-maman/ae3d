@@ -100,15 +100,7 @@ esac
 # awkwardly.
 . "$ROOT/scripts/native.sh"
 ae3d_glfw_flags
-
-VULKAN_CFLAGS=""
-if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists vulkan; then
-    VULKAN_CFLAGS="$(pkg-config --cflags vulkan)"
-elif [ -d /opt/homebrew/include/vulkan ]; then
-    VULKAN_CFLAGS="-I/opt/homebrew/include"
-elif [ -n "${VULKAN_SDK:-}" ]; then
-    VULKAN_CFLAGS="-I$VULKAN_SDK/include"
-fi
+ae3d_vulkan_flags
 
 . "$ROOT/scripts/platform.sh"
 PLATFORM_LIBS="$(ae3d_platform_libs "$(uname -s)")"

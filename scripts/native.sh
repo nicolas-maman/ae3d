@@ -68,6 +68,34 @@ ae3d_glfw_flags() {
         GLFW_LIBS="-lglfw"
     fi
 }
+# The Vulkan headers. GLFW is included with GLFW_INCLUDE_VULKAN, so vulkan.h
+# has to be found even though nothing links against the loader (it is opened
+# at run time). VULKAN_CFLAGS in the environment wins, as GLFW's flags do;
+# then pkg-config, Homebrew's prefix, and the LunarG SDK, which spells the
+# directory Include on Windows and include everywhere else and arrives there
+# as a Windows path.
+ae3d_vulkan_flags() {
+    if [ -n "${VULKAN_CFLAGS:-}" ]; then
+        return
+    fi
+    VULKAN_CFLAGS=""
+    if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists vulkan; then
+        VULKAN_CFLAGS="$(pkg-config --cflags vulkan)"
+    elif [ -d /opt/homebrew/include/vulkan ]; then
+        VULKAN_CFLAGS="-I/opt/homebrew/include"
+    elif [ -n "${VULKAN_SDK:-}" ]; then
+        ae3d_vk_sdk="$VULKAN_SDK"
+        if command -v cygpath >/dev/null 2>&1; then ae3d_vk_sdk="$(cygpath -u "$VULKAN_SDK")"; fi
+        for ae3d_vk_inc in "$ae3d_vk_sdk/include" "$ae3d_vk_sdk/Include"; do
+            if [ -d "$ae3d_vk_inc/vulkan" ]; then
+                VULKAN_CFLAGS="-I$ae3d_vk_inc"
+                break
+            fi
+        done
+        unset ae3d_vk_sdk ae3d_vk_inc
+    fi
+}
+
 ae3d_native_library() {
     printf '%s' "build/libae3d_native$(ae3d_native_suffix)"
 }

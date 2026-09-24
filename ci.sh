@@ -272,19 +272,13 @@ if [ -z "${CC:-}" ]; then
     done
 fi
 CC="${CC:-cc}"
-# Same precedence as build.sh. Without this the native step is the one part
-# of CI that cannot be run on a machine with no pkg-config, and it fails with
-# "GLFW/glfw3.h: No such file or directory" while every other step passes --
-# which reads as a broken checkout rather than a missing tool.
-if [ -z "${GLFW_CFLAGS:-}" ]; then
-    GLFW_CFLAGS="$(pkg-config --cflags glfw3 2>/dev/null || true)"
-fi
-VULKAN_CFLAGS=""
-if pkg-config --exists vulkan 2>/dev/null; then
-    VULKAN_CFLAGS="$(pkg-config --cflags vulkan)"
-elif [ -d /opt/homebrew/include/vulkan ]; then
-    VULKAN_CFLAGS="-I/opt/homebrew/include"
-fi
+# The flags build.sh and the editor's build use, from the same functions: a
+# probe of its own here found GLFW only through pkg-config and Vulkan never
+# through the SDK, so the native step could fail on a machine every other
+# step built on (#408).
+. "$ROOT/scripts/native.sh"
+ae3d_glfw_flags
+ae3d_vulkan_flags
 for src in native/*/*.c; do
     if "$CC" -c -O2 -Wall -Wextra -Werror -Inative $GLFW_CFLAGS $VULKAN_CFLAGS "$src" -o /dev/null 2>/tmp/ae3d_cc.log; then
         pass "$src"
