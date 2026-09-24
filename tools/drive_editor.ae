@@ -871,6 +871,97 @@ want(pred: int) -> *Want {
 }
 
 // Wait for the scene list to hold `count` rows, then report what it holds.
+// The widest visible canvas: the viewport.
+viewport_width(t: *Tree) -> float {
+    best = 0.0
+    n = list.size(t.widgets)
+    i = 0
+    while i < n {
+        w = list.get_raw(t.widgets, i) as *Widget
+        if w.visible && w.kind == "canvas" && w.w > best { best = w.w }
+        i = i + 1
+    }
+    return best
+}
+
+// The splitter inside the other one: the viewport against the inspector.
+inner_splitter(t: *Tree) -> *Widget {
+    n = list.size(t.widgets)
+    i = 0
+    while i < n {
+        w = list.get_raw(t.widgets, i) as *Widget
+        if w.kind == "splitview" {
+            parent = widget_by_id(t, w.parent)
+            if parent != null && parent.kind == "splitview" { return w }
+        }
+        i = i + 1
+    }
+    return null
+}
+
+widget_by_id(t: *Tree, id: int) -> *Widget {
+    n = list.size(t.widgets)
+    i = 0
+    while i < n {
+        w = list.get_raw(t.widgets, i) as *Widget
+        if w.id == id { return w }
+        i = i + 1
+    }
+    return null
+}
+
+// The panels are the user's to size: two splitters, the inner one dragged
+// a hundred and twenty pixels toward the viewport, and the viewport has to
+// come out that much narrower -- the render target following the pane, not
+// a canvas stretched over it -- and back when the divider goes back.
+check_splitters() {
+    t = tree()
+    inner = inner_splitter(t)
+    check_detail("the viewport and the inspector share a splitter", inner != null, "no splitview inside a splitview")
+    if inner == null {
+        tree_free(t)
+        return
+    }
+    inner_id = inner.id
+    before = viewport_width(t)
+    tree_free(t)
+    // Where the divider stands now, read by the route that moves it.
+    start = 0
+    body, err = http.post(url("/widget/${inner_id}/split_position?px=-1"), "", "text/plain")
+    if err == "" {
+        answer, perr = json.parse(body)
+        if perr == "" {
+            start = field_number(answer, "position") as int
+            json.json_free(answer)
+        }
+    }
+    check_detail("the splitter says where its divider is", start > 0, "position ${start}")
+    if start <= 0 { return }
+    post("/widget/${inner_id}/split_position?px=${start - 120}")
+    after = before
+    tries = 0
+    while tries < 40 && after > before - 60.0 {
+        sleep(50)
+        t = tree()
+        after = viewport_width(t)
+        tree_free(t)
+        tries = tries + 1
+    }
+    check_detail("dragging the divider narrows the viewport by what the inspector took", after < before - 100.0 && after > before - 140.0,
+                 "${before} before, ${after} after a 120 px drag")
+    post("/widget/${inner_id}/split_position?px=${start}")
+    back = after
+    tries = 0
+    while tries < 40 && back < before - 2.0 {
+        sleep(50)
+        t = tree()
+        back = viewport_width(t)
+        tree_free(t)
+        tries = tries + 1
+    }
+    check_detail("and dragging it back gives the width back", back > before - 3.0 && back < before + 3.0, "${back} against ${before}")
+}
+
 wait_rows(scene: int, count: int) -> int {
     w = want(WANT_ROWS)
     w.id = scene
@@ -2055,6 +2146,7 @@ run_checks() {
     faults = layout_faults(t)
     check_detail("the panels are laid out on one grid", faults == "", faults)
     string.free(faults)
+    check_splitters()
 
     // Save, Load and Delete, pressed. A scene that never reaches disk and
     // a Load that brings back nothing both look like a working editor

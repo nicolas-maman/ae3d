@@ -39,6 +39,10 @@ import ae3d.physics
 
 const PANEL_LEFT = 240
 const PANEL_RIGHT = 360
+// The narrowest a panel may be dragged: its rows still read.
+const PANEL_FLOOR = 180
+// A splitter's divider, which the pane widths do not include.
+const SPLIT_DIVIDER = 6
 const WINDOW_W = 1480
 const WINDOW_H = 860
 const ORBIT_SPEED = 0.35
@@ -505,6 +509,8 @@ var g_last_time = 0.0
 var g_delta = 0.016
 var g_timer = 0
 var g_stage = 0
+var g_split_outer = 0              // the left panel | everything else
+var g_split_inner = 0              // the viewport | the inspector
 var g_left = 0
 var g_right = 0
 var g_layout_settled = false
@@ -3091,9 +3097,11 @@ resize_viewport(width: int, height: int) {
 // the window they had to fit in.
 settle_layout() {
     if g_layout_settled || g_stage == 0 { return }
-    ui.set_width(g_left, PANEL_LEFT)
-    ui.set_width(g_right, PANEL_RIGHT)
-    ui.weight(g_stage, 1)
+    // The dividers where the panels open: the left panel PANEL_LEFT wide, the
+    // inspector PANEL_RIGHT wide at the inner splitter's far end, the viewport
+    // the rest. Only positions, so a drag moves them afterwards.
+    if g_split_outer != 0 { ui.split_set_position(g_split_outer, PANEL_LEFT) }
+    if g_split_inner != 0 { ui.split_set_position(g_split_inner, WINDOW_W - PANEL_LEFT - PANEL_RIGHT - 2 * SPLIT_DIVIDER) }
     // The colour chip is painted here for the same reason the widths are: the
     // style sheet is applied to the tree after it is built, and a background
     // set before that is wiped by it. The chip was set during the first
@@ -6597,17 +6605,22 @@ main() {
         ui.add_css_class(g_stats, "stats")
         ui.spacer(bar)
 
-        // An hstack with all three panes weighted, rather than nested
-        // splitviews: a splitview pins its first pane to the content width and
-        // split_set_position does not move it (aether-lang-dev/aether-ui#95),
-        // which collapsed the panels to 114 pixels.
-        body = ui.hstack(shell, 0)
+        // Two splitters, the way every editor lays out its panels: the left
+        // panel against the rest, and inside the rest the viewport against the
+        // inspector, each divider dragged to taste. The panels open at their
+        // widths (settle_layout) and cannot be dragged narrower than a floor
+        // that keeps their rows legible. Until aether-ui#95 and #136 a panel
+        // could be a width or draggable, never both, and the editor had three
+        // fixed widths in an hstack.
+        body = ui.splitview(shell, "h")
+        ui.fill_width(body)
         ui.fill_height(body)
+        g_split_outer = body
 
         // The panels scroll rather than stretch: an inspector that grows a
         // section must not push the viewport past the bottom of the window.
         left_scroll = ui.scrollview(body)
-        ui.set_width(left_scroll, PANEL_LEFT)
+        ui.set_min_width(left_scroll, PANEL_FLOOR)
         ui.fill_height(left_scroll)
         // The panel colour goes on the scroll view as well as the stack inside
         // it. The stack is only as tall as what it holds, and the left panel's
@@ -6751,7 +6764,12 @@ main() {
         style_button(g_simulate_btn, "action")
         ui.spacer(left)
 
-        stage = ui.vstack(body, 0)
+        // The rest of the window: the viewport, and the inspector beside it.
+        inner = ui.splitview(body, "h")
+        ui.fill_width(inner)
+        ui.fill_height(inner)
+        g_split_inner = inner
+        stage = ui.vstack(inner, 0)
         ui.fill_height(stage)
 
         // A strip over the viewport carrying the transform modes, the way
@@ -6932,8 +6950,8 @@ main() {
         ui.add_css_class(g_status, "label")
         ui.spacer(footer)
 
-        right_scroll = ui.scrollview(body)
-        ui.set_width(right_scroll, PANEL_RIGHT)
+        right_scroll = ui.scrollview(inner)
+        ui.set_min_width(right_scroll, PANEL_FLOOR)
         ui.fill_height(right_scroll)
         ui.add_css_class(right_scroll, "panel")
         right = ui.vstack(right_scroll, 6)
