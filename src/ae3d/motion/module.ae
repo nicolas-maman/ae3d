@@ -28,7 +28,8 @@
 // default): when it leans past FALL_TILT it stops fighting for its
 // balance, its arms reach down, straight, toward where it is falling and
 // its head tucks away from it -- so its hands meet the ground before its
-// head does, and its head meets it slower, as a person's does.
+// head does, and its head meets it slower, as a person's does. Landed
+// (leaning past LYING_TILT), it lets go and lies.
 //
 // Balance that steps to catch a fall, writhing and getting up are the
 // controllers the next slices of #414 put on top of this.
@@ -44,7 +45,7 @@ exports (
     Motion, ANIMATED, POWERED, LIMP,
     active_ragdoll, motion_free, set_mode, mode, set_strength, strength, set_recovery,
     hit, bone_weakness, motion_step, attach, tracking_error, tilt, muscle, full_assist,
-    set_protective, protective, falling
+    set_protective, protective, falling, lying
 )
 
 extern calloc(count: int, size: int) -> ptr
@@ -73,6 +74,14 @@ const WEAK_NEAR = 0.5                 // and the bones joined to it
 const FALL_TILT = 0.35
 const REACH_DOWN = 0.7
 const TUCK = 0.5
+// Leaning past LYING_TILT and still -- the lean changing by less than
+// SETTLED a step for SETTLE_STEPS steps -- it has landed: the reach and the
+// tuck let go and the muscles keep a share of their budget, as a person on
+// the ground lies rather than holding a pose.
+const LYING_TILT = 1.2
+const SETTLED = 0.005
+const SETTLE_STEPS = 10
+const LYING_MUSCLE = 0.15
 
 struct Motion {
     ragdoll: *Ragdoll
@@ -82,6 +91,9 @@ struct Motion {
     weakness: ptr                      // float[BONE_COUNT]: the share of each bone's budget a hit took
     protective: bool                   // reaches for the ground when it falls
     falling: bool
+    lying: bool                        // fell, and is on the ground
+    last_lean: float
+    still_steps: int                   // steps the lean has barely changed
 }
 
 full_assist() -> float { return FULL_ASSIST }
@@ -121,6 +133,8 @@ motion_free(m: *Motion) {
 
 set_mode(m: *Motion, to: int) {
     m.falling = false
+    m.lying = false
+    m.still_steps = 0
     physics.ragdoll_clear_aims(m.ragdoll)
     if to == ANIMATED {
         physics.ragdoll_follow(m.ragdoll)
@@ -196,6 +210,13 @@ apply_budget(m: *Motion) {
     assist = FULL_ASSIST * m.strength * (1.0 - weak[human.BONE_PELVIS])
     // Falling: no fight for a balance that is lost.
     if m.falling { assist = 0.0 }
+    if m.lying {
+        i = 0
+        while i < human.BONE_COUNT {
+            physics.ragdoll_set_bone_drive(m.ragdoll, i, muscle(i) * m.strength * LYING_MUSCLE * (1.0 - weak[i]))
+            i = i + 1
+        }
+    }
     physics.ragdoll_set_balance_assist(m.ragdoll, assist)
 }
 
@@ -212,6 +233,9 @@ protective(m: *Motion) -> bool { return m.protective }
 
 // Whether it is falling and protecting itself.
 falling(m: *Motion) -> bool { return m.falling }
+
+// Whether it fell and lies on the ground.
+lying(m: *Motion) -> bool { return m.lying }
 
 // The way the figure is falling, level: where its pelvis's up leans to, or
 // failing a lean, where its centre of mass is going.
@@ -257,6 +281,18 @@ protect(m: *Motion) {
         apply_budget(m)
     } else if lean < FALL_TILT * 0.5 {
         m.falling = false
+        m.lying = false
+        physics.ragdoll_clear_aims(m.ragdoll)
+        apply_budget(m)
+        return
+    }
+    change = lean - m.last_lean
+    if change < 0.0 { change = 0.0 - change }
+    m.last_lean = lean
+    if lean > LYING_TILT && change < SETTLED { m.still_steps = m.still_steps + 1 } else { m.still_steps = 0 }
+    if m.lying { return }
+    if m.still_steps >= SETTLE_STEPS {
+        m.lying = true
         physics.ragdoll_clear_aims(m.ragdoll)
         apply_budget(m)
         return

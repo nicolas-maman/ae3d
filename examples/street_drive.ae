@@ -29,6 +29,8 @@ import ae3d.assets
 import ae3d.physics
 import ae3d.skin
 import ae3d.anim
+import ae3d.motion
+import aephysics.human
 import std.heap
 import aephysics.math
 import aephysics.hull
@@ -69,6 +71,8 @@ struct Game {
     chassis: ptr                   // *GameObject
     ground: ptr                    // *Rigidbody, the road the bystanders stand on
     bystanders: ptr                // list of *Ragdoll
+    motions: ptr                   // list of *Motion, one a bystander (null for one with no figure)
+    struck_at: ptr                 // float[13]: when each was last struck, seconds; -1 never
     walkers: ptr                   // list of *Walker, the bystanders that walk
     seconds: float
     idle: float                    // seconds since the last input
@@ -78,7 +82,7 @@ struct Game {
     camera_aim: Vec3
     headlights: ptr                // *Light[2]
     tail_lights: ptr               // *Light[2]
-    knocked: int
+    knocked: int                   // blows the car dealt
     props: int
     // On foot (E by a stopped car): a character controller walks the
     // street and the camera is its eyes; E by the car gets back in.
@@ -439,6 +443,12 @@ make_bystanders(g: *Game, e: *Engine, m: *Manifest) {
     body_entry = assets.manifest_find_by_object(m, "Zombie_Body")
     cloth_entry = assets.manifest_find_by_object(m, "Zombie_Clothes")
     crowd = behaviour.object_transform(engine.object(e, "Bystanders", null))
+    struck = g.struck_at as float[]
+    k = 0
+    while k < 16 {
+        struck[k] = 0.0 - 1.0
+        k = k + 1
+    }
     i = 0
     while i < 13 {
         side = 1.0
@@ -477,6 +487,23 @@ make_bystanders(g: *Game, e: *Engine, m: *Manifest) {
             core.model_set_parent(figure, crowd)
             skeleton = dress_bystander(e, m, body_entry, cloth_entry, r, figure)
             if walks && skeleton != null { start_walking(g, m, body_entry, r, skeleton, x, z) }
+            // An active ragdoll (ae3d.motion, #414): one that stands holds
+            // itself up by its muscles and its balance, so a car that nudges
+            // it knocks it back and it recovers, and one that hits it hard
+            // knocks it down -- falling the way a person falls, hands to the
+            // ground. A walker walks by its animation until it is struck.
+            if skeleton != null {
+                active = motion.active_ragdoll(r)
+                if active != null {
+                    motion.attach(e, active)
+                    if !walks { motion.set_mode(active, motion.POWERED) }
+                }
+                list.add_raw(g.motions, active as ptr)
+            } else {
+                list.add_raw(g.motions, null)
+            }
+        } else {
+            list.add_raw(g.motions, null)
         }
         list.add_raw(g.bystanders, r as ptr)
         i = i + 1
@@ -843,7 +870,7 @@ fixed_update(state: ptr, go: *GameObject, step: float) {
             println("street_drive[diag]   walker 0 root at (${root.world_position.x}, ${root.world_position.y}, ${root.world_position.z}) bone 4 '${head.name}' at (${head.world_position.x}, ${head.world_position.y}, ${head.world_position.z})")
         }
     }
-    // What the car struck this step: a standing bystander lets go.
+    // What the car struck this step.
     p = physics.of(e)
     walk(g, step)
     n = physics.hit_event_count(p)
@@ -852,10 +879,58 @@ fixed_update(state: ptr, go: *GameObject, step: float) {
         hit = physics.hit_event(p, i)
         r = physics.ragdoll_of_shape(p, hit.shape_id_a)
         if r == null { r = physics.ragdoll_of_shape(p, hit.shape_id_b) }
-        if r != null && physics.ragdoll_is_standing(r) && hit.approach_speed > 1.5 {
-            physics.ragdoll_release(r)
-            g.knocked = g.knocked + 1
-        }
+        if r != null && hit.approach_speed > 1.5 { strike(g, v, r, hit.point, hit.approach_speed) }
+        i = i + 1
+    }
+}
+
+// A bystander the car ran into at `speed` m/s. An active one takes the blow
+// on its muscles (a walker's animation stops first): a nudge knocks it back
+// and it recovers, a hit knocks it down. Without a figure the ragdoll just
+// lets go. A second contact within a second is the same blow.
+strike(g: *Game, v: *Vehicle, r: *Ragdoll, point: Vec3, speed: float) {
+    index = 0
+    while index < list.size(g.bystanders) {
+        if list.get_raw(g.bystanders, index) == r as ptr { break }
+        index = index + 1
+    }
+    if index >= list.size(g.bystanders) { return }
+    struck = g.struck_at as float[]
+    if struck[index] >= 0.0 && g.seconds - struck[index] < 1.0 { return }
+    struck[index] = g.seconds
+    g.knocked = g.knocked + 1
+    if g_diag { println("street_drive[diag] struck bystander ${index} at ${speed} m/s, ${g.seconds} s") }
+    active = list.get_raw(g.motions, index) as *Motion
+    if active == null {
+        physics.ragdoll_release(r)
+        return
+    }
+    if motion.mode(active) == motion.ANIMATED {
+        // A walker: its walk stops and its muscles take over.
+        stop_walker(g, r)
+        motion.set_mode(active, motion.POWERED)
+    }
+    // The blow along the way the car goes, about 60 N s a metre a second it
+    // was closing at: a crawl is a shove, a hit is past the 400 N s that
+    // fells. Past 4 m/s it lands on the pelvis, which takes the balance
+    // with it (a struck bone's budget and half its neighbours'), and the
+    // figure goes down the way a person does, reaching for the road; under,
+    // it lands on the spine, and the figure is knocked back and recovers.
+    chassis = g.chassis as *GameObject
+    ahead = core.quat_apply(behaviour.object_rotation(chassis), core.vec3(0.0, 0.0, 0.0 - 1.0))
+    if physics.vehicle_speed(v) < 0.0 { ahead = core.v3_mul(ahead, 0.0 - 1.0) }
+    impulse = core.v3_mul(core.v3_normalize(core.vec3(ahead.x, 0.0, ahead.z)), 60.0 * speed)
+    bone = human.BONE_SPINE_01
+    if speed > 4.0 { bone = human.BONE_PELVIS }
+    motion.hit(active, bone, point, impulse)
+}
+
+// A walker the car struck stops walking: its rig holds the last pose.
+stop_walker(g: *Game, r: *Ragdoll) {
+    i = 0
+    while i < list.size(g.walkers) {
+        w = list.get_raw(g.walkers, i) as *Walker
+        if w.ragdoll == r as ptr { w.walking = false }
         i = i + 1
     }
 }
@@ -955,14 +1030,29 @@ main() {
     engine.engine_set_time_of_day(e, 22.0)
     g_diag = core.env_int("AE3D_DIAG", 0) == 1
     physics.attach(e)
-    g = Game { vehicle: null, chassis: null, ground: null, bystanders: list.new(), walkers: list.new(), seconds: 0.0, idle: 10.0, direction: 0.0 - 1.0,
+    g = Game { vehicle: null, chassis: null, ground: null, bystanders: list.new(), motions: list.new(), struck_at: calloc(16, 8), walkers: list.new(), seconds: 0.0, idle: 10.0, direction: 0.0 - 1.0,
                turning: false, camera_pos: core.vec3(0.0, 0.0, 0.0), camera_aim: core.vec3(0.0, 0.0, 0.0),
                headlights: null, tail_lights: null, knocked: 0, props: 0 }
     game = engine.object(e, "Game", null)
     engine.script(game, "street drive", (&g) as ptr, start, update, fixed_update)
     engine.engine_run(e)
     p = physics.of(e)
-    println("street_drive: ${physics.physics_body_count(p)} bodies (${g.props} props, ${list.size(g.bystanders)} bystanders, ${g.knocked} knocked down), ${physics.physics_step_count(p)} steps, ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps")
+    // How the bystanders ended: down (the pelvis near the ground, or the
+    // figure leaning past 60 degrees -- over a bonnet, say) or standing.
+    down = 0
+    k = 0
+    while k < list.size(g.bystanders) {
+        pelvis = behaviour.object_position(physics.ragdoll_bone(list.get_raw(g.bystanders, k) as *Ragdoll, 0))
+        active = list.get_raw(g.motions, k) as *Motion
+        leaning = false
+        if active != null { leaning = motion.tilt(active) > 1.05 }
+        if pelvis.y < PAVEMENT_Y + 0.5 || leaning { down = down + 1 }
+        if g_diag && active != null && (g.struck_at as float[])[k] >= 0.0 {
+            println("street_drive[diag] bystander ${k}: pelvis at (${pelvis.x}, ${pelvis.y - PAVEMENT_Y}, ${pelvis.z}), leaning ${motion.tilt(active) * 57.3} deg, falling ${motion.falling(active)}")
+        }
+        k = k + 1
+    }
+    println("street_drive: ${physics.physics_body_count(p)} bodies (${g.props} props, ${list.size(g.bystanders)} bystanders, ${g.knocked} struck, ${down} down), ${physics.physics_step_count(p)} steps, ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps")
     if g.walker_body != null {
         c = g.walker_body as *CharacterController
         feet = behaviour.object_position(c.object as *GameObject)

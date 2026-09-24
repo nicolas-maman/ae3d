@@ -2,6 +2,21 @@
 
 ## [current]
 
+### Natural motion in the street
+
+- A powered figure is drawn as its bodies are (#414). The rig had shown
+  the animation's pose whatever the bodies did, so a figure knocked down
+  was drawn standing. The physics module now keeps the animation's pose
+  beside the rig: it takes what the animation wrote, bone by bone, drives
+  the joints toward it, and writes the bodies back for drawing.
+- A figure that falls and lands lets go and lies (`motion.lying`).
+- `street_drive`'s bystanders are active ragdolls. The standing ones hold
+  themselves up on their muscles; the walkers walk until struck. A nudge
+  knocks them back and they recover; a hit past 4 m/s puts them down,
+  reaching for the road. The autopilot's run strikes the three in the road
+  at 7 to 10 m/s and all three go down. `tests/test_motion.ae`, now 25
+  checks, holds the drawn pose and the lying to numbers.
+
 ### Multiplayer: deltas and relevance
 
 - Snapshots are deltas against the newest one each client has acknowledged
