@@ -124,6 +124,17 @@ struct Ragdoll {
     powered: bool                  // following through its joints' motors within a torque budget, the root free
     friction: float                // newton metres: the joints' motors' friction when not powered
     aims: ptr                      // float[BONE_COUNT * 5]: per bone, aimed (0/1) and a world rotation; null when none ever was
+    // Powered, the rig is drawn as the bodies are; the animation's pose,
+    // which the muscles track, is kept beside it: each mapped bone's local
+    // rotation and the root's local position and rotation as the animation
+    // last set them (anim), the world rotations the joints are driven to
+    // (targets), and what the bodies last wrote into the rig (written), so
+    // what the animation wrote since can be told from it.
+    anim: ptr                      // float[(BONE_COUNT + 1) * 7]: quat, then position (the root's)
+    written: ptr                   // float[(BONE_COUNT + 1) * 7]
+    written_valid: bool
+    targets: ptr                   // float[BONE_COUNT * 4]
+    targets_valid: bool
 }
 
 // A skinned figure worn by a ragdoll: a rig bone per ragdoll bone, each
@@ -229,6 +240,7 @@ on_fixed_update(state: ptr, e: *Engine, step: float) {
     while k < ragdoll_count {
         r = list.get_raw(p.ragdolls, k) as *Ragdoll
         if r.powered && r.following {
+            if r.rig != null { refresh_targets(r) }
             drive_joints(r, step)
         } else if r.following {
             drive_anchors(r, step)
@@ -263,6 +275,7 @@ on_fixed_update(state: ptr, e: *Engine, step: float) {
         r = list.get_raw(p.ragdolls, i) as *Ragdoll
         pull_ragdoll(r)
         if r.rig != null && r.following == false { pose_rig(r) }
+        if r.rig != null && r.powered && r.following { show_bodies(r) }
         i = i + 1
     }
 }
@@ -1048,6 +1061,11 @@ ragdoll_power(r: *Ragdoll, max_torque: float, assist: float) -> bool {
     r.standing = true
     r.following = true
     r.powered = true
+    // The animation's pose is the rig's as it is now; the bodies have not
+    // written it yet.
+    r.written_valid = false
+    r.targets_valid = false
+    refresh_targets(r)
     drive_joints(r, 1.0 / 60.0)
     return true
 }
@@ -1269,11 +1287,106 @@ ragdoll_bone_rotation(r: *Ragdoll, index: int) -> Quat {
 // to. The body's own when the ragdoll wears no rig.
 ragdoll_bone_target(r: *Ragdoll, index: int) -> Quat {
     if r.rig == null { return ragdoll_bone_rotation(r, index) }
+    if r.powered && r.targets_valid {
+        t = r.targets as float[]
+        return core.quat(t[index * 4], t[index * 4 + 1], t[index * 4 + 2], t[index * 4 + 3])
+    }
+    return rig_bone_target(r, index)
+}
+
+// The rotation the rig's own pose gives a bone's body now.
+rig_bone_target(r: *Ragdoll, index: int) -> Quat {
     rig = r.rig as *Rig
     bones = rig.bones as RigBone[]
     bone = bones[index].model as *Model
     core.model_sync_transform(bone)
     return core.quat_normalize(core.quat_mul(bone.world_rotation, core.quat_conjugate(bones[index].offset)))
+}
+
+// --- a powered ragdoll's two poses ----------------------------------------------------------------
+
+// The rig's model for mapped bone `k`, or its root for k == BONE_COUNT.
+rig_model(r: *Ragdoll, k: int) -> *Model {
+    rig = r.rig as *Rig
+    if k == human.BONE_COUNT { return rig.root as *Model }
+    return (rig.bones as RigBone[])[k].model as *Model
+}
+
+// What the animation has set on the rig since the bodies last wrote it,
+// bone by bone, into the animation's pose: a bone the animation did not
+// touch keeps the pose it had, so a clip that moves the chest alone leaves
+// the legs where the animation last put them rather than where they fell.
+capture_animation(r: *Ragdoll) {
+    if r.anim == null { r.anim = calloc((human.BONE_COUNT + 1) * 7, 8) }
+    if r.written == null { r.written = calloc((human.BONE_COUNT + 1) * 7, 8) }
+    anim = r.anim as float[]
+    written = r.written as float[]
+    k = 0
+    while k <= human.BONE_COUNT {
+        m = rig_model(r, k)
+        at = k * 7
+        q = m.rotation
+        p = m.position
+        if !r.written_valid || q.x != written[at] || q.y != written[at + 1] || q.z != written[at + 2] ||
+           q.w != written[at + 3] || p.x != written[at + 4] || p.y != written[at + 5] || p.z != written[at + 6] {
+            anim[at] = q.x
+            anim[at + 1] = q.y
+            anim[at + 2] = q.z
+            anim[at + 3] = q.w
+            anim[at + 4] = p.x
+            anim[at + 5] = p.y
+            anim[at + 6] = p.z
+        }
+        k = k + 1
+    }
+}
+
+// The joints' targets from the animation's pose: the rig set to it, read,
+// and left for the bodies to write over after the step.
+refresh_targets(r: *Ragdoll) {
+    capture_animation(r)
+    anim = r.anim as float[]
+    k = 0
+    while k <= human.BONE_COUNT {
+        m = rig_model(r, k)
+        at = k * 7
+        core.model_set_rotation(m, core.quat(anim[at], anim[at + 1], anim[at + 2], anim[at + 3]))
+        if k == human.BONE_COUNT { core.model_set_position(m, anim[at + 4], anim[at + 5], anim[at + 6]) }
+        k = k + 1
+    }
+    if r.targets == null { r.targets = calloc(human.BONE_COUNT * 4, 8) }
+    t = r.targets as float[]
+    i = 0
+    while i < human.BONE_COUNT {
+        q = rig_bone_target(r, i)
+        t[i * 4] = q.x
+        t[i * 4 + 1] = q.y
+        t[i * 4 + 2] = q.z
+        t[i * 4 + 3] = q.w
+        i = i + 1
+    }
+    r.targets_valid = true
+}
+
+// The rig as the bodies are, for drawing, and what that wrote remembered.
+show_bodies(r: *Ragdoll) {
+    pose_rig(r)
+    if r.written == null { r.written = calloc((human.BONE_COUNT + 1) * 7, 8) }
+    written = r.written as float[]
+    k = 0
+    while k <= human.BONE_COUNT {
+        m = rig_model(r, k)
+        at = k * 7
+        written[at] = m.rotation.x
+        written[at + 1] = m.rotation.y
+        written[at + 2] = m.rotation.z
+        written[at + 3] = m.rotation.w
+        written[at + 4] = m.position.x
+        written[at + 5] = m.position.y
+        written[at + 6] = m.position.z
+        k = k + 1
+    }
+    r.written_valid = true
 }
 
 // The figure's centre of mass in the world, and its mass.
@@ -1370,6 +1483,9 @@ ragdoll_free(r: *Ragdoll) {
     }
     list.free(r.bones)
     if r.aims != null { free(r.aims) }
+    if r.anim != null { free(r.anim) }
+    if r.written != null { free(r.written) }
+    if r.targets != null { free(r.targets) }
     if r.rig != null {
         rig = r.rig as *Rig
         free(rig.bones)

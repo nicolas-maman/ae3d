@@ -15,8 +15,8 @@
 //   - three pairs, a protected and an unprotected figure, felled by the
 //     felled's blow from the front (over backwards), from behind and from
 //     the side: all fall; each protected one's hands reach the ground
-//     before its head does, and its head meets the ground slower than its
-//     unprotected twin's.
+//     before its head does, its head meets the ground slower than its
+//     unprotected twin's, and once it has landed it lets go and lies.
 
 import ae3d.core
 import ae3d.engine
@@ -326,6 +326,19 @@ main() {
     felled = stage.felled as *Motion
     println("  felled (${FELL} N s): pelvis ${pelvis_height(felled)} m")
     check("a blow past the budget fells it", pelvis_height(felled) < 0.5)
+    // And it is drawn down: a powered figure's rig shows its bodies, its
+    // muscles tracking the animation's pose kept beside it. (It showed the
+    // animation, standing, whatever the bodies did.)
+    felled_rig = (stage.rigs as ptr[])[2] as *Skeleton
+    hips = skin.skeleton_bone(felled_rig, skin.skeleton_find(felled_rig, "Hips"))
+    core.model_sync_transform(hips)
+    drawn = hips.world_position.y
+    println("  felled: its drawn hips at ${drawn} m")
+    check("and is drawn down, as its bodies are", drawn < 0.5 && drawn > 0.0 - 0.1)
+    tracked_rig = (stage.rigs as ptr[])[0] as *Skeleton
+    tracked_hips = skin.skeleton_bone(tracked_rig, skin.skeleton_find(tracked_rig, "Hips"))
+    core.model_sync_transform(tracked_hips)
+    check("while a standing one is drawn standing", tracked_hips.world_position.y > 0.8)
 
     struck = stage.struck as *Motion
     full = motion.muscle(human.BONE_UPPER_ARM_R)
@@ -356,6 +369,7 @@ main() {
         check("${name}: the protected one's hands reach the ground before its head", record[at + HAND_STEP] > 0.0 &&
               (record[at + HEAD_STEP] < 0.0 || record[at + HAND_STEP] < record[at + HEAD_STEP]))
         check("${name}: and its head meets the ground slower than its twin's", record[at + HEAD_SPEED] < record[twin + HEAD_SPEED])
+        check("${name}: landed, it lets go and lies", motion.lying(guarded))
         way = way + 1
     }
 
