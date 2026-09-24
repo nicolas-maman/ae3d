@@ -12,6 +12,7 @@ import std.list
 import std.heap
 import std.string
 import std.mem
+import std.bytes
 import ae3d.core
 import ae3d.png
 import ae3d.platform
@@ -45,6 +46,9 @@ exports (
 )
 
 extern calloc(count: int, size: int) -> ptr
+extern ae3d_image_pixels(img: ptr) -> ptr
+extern ae3d_image_width(img: ptr) -> int
+extern ae3d_image_height(img: ptr) -> int
 extern free(p: ptr)
 extern ae3d_offscreen_resize(target: ptr, width: int, height: int) -> int
 extern ae3d_offscreen_read_pipelined(target: ptr) -> ptr
@@ -52,22 +56,6 @@ extern ae3d_gl_load() -> int
 extern ae3d_gl_version() -> string
 extern ae3d_gl_renderer() -> string
 extern ae3d_gl_meter(source: int, width: int, height: int, out: ptr) -> int
-extern ae3d_gl_posebank_texture(data: ptr, frames: int, bones: int) -> int
-extern ae3d_gl_program_create(vertex_src: string, fragment_src: string) -> int
-extern ae3d_gl_program_delete(program: int)
-extern ae3d_gl_program_use(program: int)
-extern ae3d_gl_program_log() -> string
-extern ae3d_gl_uniform_location(program: int, name: string) -> int
-extern ae3d_gl_uniform_int(loc: int, v: int)
-extern ae3d_gl_uniform_float(loc: int, v: float)
-extern ae3d_gl_uniform_vec2(loc: int, x: float, y: float)
-extern ae3d_gl_uniform_vec3(loc: int, x: float, y: float, z: float)
-extern ae3d_gl_uniform_mat4(loc: int, m: ptr)
-extern ae3d_gl_uniform_float_array(loc: int, arr: ptr)
-extern ae3d_gl_uniform_vec3_array(loc: int, arr: ptr)
-extern ae3d_gl_texture_from_image(img: ptr, srgb: int, mipmap: int) -> int
-extern ae3d_gl_texture_delete(texture: int)
-extern ae3d_gl_texture_bind(unit: int, texture: int)
 extern ae3d_gl_passtimer_create() -> ptr
 extern ae3d_gl_passtimer_destroy(timer: ptr)
 extern ae3d_gl_passtimer_frame(timer: ptr)
@@ -77,9 +65,6 @@ extern ae3d_gl_passtimer_ms(timer: ptr, pass: int) -> float
 
 extern ae3d_gl_fbo_create() -> int
 extern ae3d_gl_scene_depth_capture() -> int
-extern ae3d_gl_texture_rgba(width: int, height: int, rgba: ptr) -> int
-extern ae3d_gl_texture3d_rgba(size: int, rgba: ptr) -> int
-extern ae3d_gl_texture3d_bind(unit: int, texture: int)
 extern ae3d_gl_fbo_bind(fbo: int)
 extern ae3d_gl_fbo_delete(fbo: int)
 extern ae3d_gl_fbo_attach_color(fbo: int, width: int, height: int, hdr: int) -> int
@@ -108,6 +93,253 @@ extern ae3d_image_height(image: ptr) -> int
 extern ae3d_image_solid(width: int, height: int, r: int, g: int, b: int, a: int) -> ptr
 extern ae3d_image_free(img: ptr)
 extern ae3d_image_error() -> string
+
+// --- programs, uniforms and textures, in Aether (#398) ---------------------------------------
+
+var g_program_log = ""
+
+// Why the last program did not build: the stage and GL's own log.
+ae3d_gl_program_log() -> string { return g_program_log }
+
+// `count` of GL's info log, from `fetch` (the shader's or the program's).
+info_log(object: int, length: int, shader: bool) -> string {
+    if length <= 1 { return "" }
+    buffer = calloc(length + 1, 1)
+    if shader {
+        glapi.glGetShaderInfoLog(object as uint32, length, null, buffer)
+    } else {
+        glapi.glGetProgramInfoLog(object as uint32, length, null, buffer)
+    }
+    text = bytes.string_from_ptr(buffer, length - 1)
+    free(buffer)
+    return text
+}
+
+// One of GL's integers about a shader or a program.
+object_integer(object: int, name: int, shader: bool) -> int {
+    out = calloc(1, 4)
+    if shader {
+        glapi.glGetShaderiv(object as uint32, name as uint32, out)
+    } else {
+        glapi.glGetProgramiv(object as uint32, name as uint32, out)
+    }
+    value = (out as int[])[0]
+    free(out)
+    return value
+}
+
+// A stage compiled, or 0 with the log saying why.
+compile_stage(kind: int, source: string, label: string) -> int {
+    shader = (glapi.glCreateShader(kind as uint32)) as int
+    sources = calloc(1, 8)
+    (sources as ptr[])[0] = glapi.cstr(source)
+    glapi.glShaderSource(shader as uint32, 1, sources, null)
+    free(sources)
+    glapi.glCompileShader(shader as uint32)
+    if object_integer(shader, glapi.COMPILE_STATUS, true) == glapi.FALSE {
+        length = object_integer(shader, glapi.INFO_LOG_LENGTH, true)
+        g_program_log = "${label} shader: ${info_log(shader, length, true)}"
+        glapi.glDeleteShader(shader as uint32)
+        return 0
+    }
+    return shader
+}
+
+ae3d_gl_program_create(vertex_src: string, fragment_src: string) -> int {
+    g_program_log = ""
+    if vertex_src == null || fragment_src == null {
+        g_program_log = "missing shader source"
+        return 0
+    }
+    vertex = compile_stage(glapi.VERTEX_SHADER, vertex_src, "vertex")
+    if vertex == 0 { return 0 }
+    fragment = compile_stage(glapi.FRAGMENT_SHADER, fragment_src, "fragment")
+    if fragment == 0 {
+        glapi.glDeleteShader(vertex as uint32)
+        return 0
+    }
+    program = (glapi.glCreateProgram()) as int
+    glapi.glAttachShader(program as uint32, vertex as uint32)
+    glapi.glAttachShader(program as uint32, fragment as uint32)
+    glapi.glLinkProgram(program as uint32)
+    linked = object_integer(program, glapi.LINK_STATUS, false)
+    glapi.glDetachShader(program as uint32, vertex as uint32)
+    glapi.glDetachShader(program as uint32, fragment as uint32)
+    glapi.glDeleteShader(vertex as uint32)
+    glapi.glDeleteShader(fragment as uint32)
+    if linked == glapi.FALSE {
+        length = object_integer(program, glapi.INFO_LOG_LENGTH, false)
+        g_program_log = "link: ${info_log(program, length, false)}"
+        glapi.glDeleteProgram(program as uint32)
+        return 0
+    }
+    return program
+}
+
+ae3d_gl_program_delete(program: int) {
+    if program != 0 { glapi.glDeleteProgram(program as uint32) }
+}
+
+ae3d_gl_program_use(program: int) { glapi.glUseProgram(program as uint32) }
+
+ae3d_gl_uniform_location(program: int, name: string) -> int {
+    if program == 0 || name == null { return 0 - 1 }
+    return glapi.glGetUniformLocation(program as uint32, name)
+}
+
+ae3d_gl_uniform_int(loc: int, v: int) {
+    if loc >= 0 { glapi.glUniform1i(loc, v) }
+}
+
+ae3d_gl_uniform_float(loc: int, v: float) {
+    if loc >= 0 { glapi.glUniform1f(loc, v as f32) }
+}
+
+ae3d_gl_uniform_vec2(loc: int, x: float, y: float) {
+    if loc >= 0 { glapi.glUniform2f(loc, x as f32, y as f32) }
+}
+
+ae3d_gl_uniform_vec3(loc: int, x: float, y: float, z: float) {
+    if loc >= 0 { glapi.glUniform3f(loc, x as f32, y as f32, z as f32) }
+}
+
+// Sixteen doubles, column-major, as sixteen floats.
+ae3d_gl_uniform_mat4(loc: int, m: ptr) {
+    if loc < 0 || m == null { return }
+    values = calloc(16, 4)
+    from = m as float[]
+    to = values as f32[]
+    i = 0
+    while i < 16 {
+        to[i] = from[i] as f32
+        i = i + 1
+    }
+    glapi.glUniformMatrix4fv(loc, 1, glapi.FALSE, values)
+    free(values)
+}
+
+// A float array (core's ae3d_farr, still C while vulkan.c reads it): its
+// values and its count, as the C lays them out.
+struct GLFloats {
+    values: ptr
+    count: int
+}
+
+ae3d_gl_uniform_float_array(loc: int, arr: ptr) {
+    if loc < 0 || arr == null { return }
+    a = arr as *GLFloats
+    glapi.glUniform1fv(loc, a.count, a.values)
+}
+
+ae3d_gl_uniform_vec3_array(loc: int, arr: ptr) {
+    if loc < 0 || arr == null { return }
+    a = arr as *GLFloats
+    glapi.glUniform3fv(loc, a.count / 3, a.values)
+}
+
+// A texture name, made and bound to `target`, with byte rows unpadded.
+new_texture(target: int) -> int {
+    out = calloc(1, 4)
+    glapi.glGenTextures(1, out)
+    texture = (out as int[])[0]
+    free(out)
+    glapi.glBindTexture(target as uint32, texture as uint32)
+    glapi.glPixelStorei(glapi.UNPACK_ALIGNMENT as uint32, 1)
+    return texture
+}
+
+texture_param(target: int, name: int, value: int) {
+    glapi.glTexParameteri(target as uint32, name as uint32, value)
+}
+
+// Wrapping on s and t (and r, for a 3D one), and the filters.
+texture_params(target: int, wrap: int, three: bool, mag: int, min: int) {
+    texture_param(target, glapi.TEXTURE_WRAP_S, wrap)
+    texture_param(target, glapi.TEXTURE_WRAP_T, wrap)
+    if three { texture_param(target, glapi.TEXTURE_WRAP_R, wrap) }
+    texture_param(target, glapi.TEXTURE_MAG_FILTER, mag)
+    texture_param(target, glapi.TEXTURE_MIN_FILTER, min)
+}
+
+ae3d_gl_texture_from_image(img: ptr, srgb: int, mipmap: int) -> int {
+    pixels = ae3d_image_pixels(img)
+    width = ae3d_image_width(img)
+    height = ae3d_image_height(img)
+    if pixels == null || width <= 0 || height <= 0 { return 0 }
+    texture = new_texture(glapi.TEXTURE_2D)
+    internal = glapi.RGBA
+    if srgb != 0 { internal = glapi.SRGB8_ALPHA8 }
+    glapi.glTexImage2D(glapi.TEXTURE_2D as uint32, 0, internal, width, height, 0, glapi.RGBA as uint32,
+                       glapi.UNSIGNED_BYTE as uint32, pixels)
+    if mipmap != 0 {
+        texture_params(glapi.TEXTURE_2D, glapi.REPEAT, false, glapi.LINEAR, glapi.LINEAR_MIPMAP_LINEAR)
+        glapi.glGenerateMipmap(glapi.TEXTURE_2D as uint32)
+    } else {
+        texture_params(glapi.TEXTURE_2D, glapi.REPEAT, false, glapi.LINEAR, glapi.LINEAR)
+    }
+    glapi.glBindTexture(glapi.TEXTURE_2D as uint32, 0)
+    return texture
+}
+
+// A texture from raw RGBA bytes: linear, repeating, no mipmaps. What a
+// baked map -- the clouds' weather -- is uploaded as.
+ae3d_gl_texture_rgba(width: int, height: int, rgba: ptr) -> int {
+    if rgba == null || width <= 0 || height <= 0 { return 0 }
+    texture = new_texture(glapi.TEXTURE_2D)
+    glapi.glTexImage2D(glapi.TEXTURE_2D as uint32, 0, glapi.RGBA, width, height, 0, glapi.RGBA as uint32,
+                       glapi.UNSIGNED_BYTE as uint32, rgba)
+    texture_params(glapi.TEXTURE_2D, glapi.REPEAT, false, glapi.LINEAR, glapi.LINEAR)
+    glapi.glBindTexture(glapi.TEXTURE_2D as uint32, 0)
+    return texture
+}
+
+// A 3D texture, `size` cubed RGBA bytes: linear, repeating on every axis,
+// which is what a tileable noise the clouds are shaped by wants.
+ae3d_gl_texture3d_rgba(size: int, rgba: ptr) -> int {
+    if rgba == null || size <= 0 { return 0 }
+    texture = new_texture(glapi.TEXTURE_3D)
+    glapi.glTexImage3D(glapi.TEXTURE_3D as uint32, 0, glapi.RGBA, size, size, size, 0, glapi.RGBA as uint32,
+                       glapi.UNSIGNED_BYTE as uint32, rgba)
+    texture_params(glapi.TEXTURE_3D, glapi.REPEAT, true, glapi.LINEAR, glapi.LINEAR)
+    glapi.glBindTexture(glapi.TEXTURE_3D as uint32, 0)
+    return texture
+}
+
+ae3d_gl_texture3d_bind(unit: int, texture: int) {
+    glapi.glActiveTexture((glapi.TEXTURE0 + unit) as uint32)
+    glapi.glBindTexture(glapi.TEXTURE_3D as uint32, texture as uint32)
+}
+
+// A pose bank as a float texture the skinning shader samples per instance.
+// The bank is frame-major, bone-major, sixteen floats a bone -- one RGBA32F
+// row of `bones * 4` texels a frame -- so its bytes upload straight in with
+// no repacking. Nearest, clamped: the shader fetches exact texels by (bone
+// column, frame), never filters between them. 32-bit float, since a bone
+// matrix carries translations a 16-bit float would round the crowd apart on.
+ae3d_gl_posebank_texture(data: ptr, frames: int, bones: int) -> int {
+    if data == null || frames <= 0 || bones <= 0 { return 0 }
+    texture = new_texture(glapi.TEXTURE_2D)
+    glapi.glTexImage2D(glapi.TEXTURE_2D as uint32, 0, RGBA32F, bones * 4, frames, 0, glapi.RGBA as uint32,
+                       glapi.FLOAT as uint32, data)
+    texture_params(glapi.TEXTURE_2D, glapi.CLAMP_TO_EDGE, false, glapi.NEAREST, glapi.NEAREST)
+    glapi.glBindTexture(glapi.TEXTURE_2D as uint32, 0)
+    return texture
+}
+
+const RGBA32F = 34836                // GL_RGBA32F, 0x8814
+
+ae3d_gl_texture_delete(texture: int) {
+    if texture == 0 { return }
+    names = calloc(1, 4)
+    (names as int[])[0] = texture
+    glapi.glDeleteTextures(1, names)
+    free(names)
+}
+
+ae3d_gl_texture_bind(unit: int, texture: int) {
+    glapi.glActiveTexture((glapi.TEXTURE0 + unit) as uint32)
+    glapi.glBindTexture(glapi.TEXTURE_2D as uint32, texture as uint32)
+}
 
 // --- geometry, attributes and draws, in Aether (#398) ---------------------------------------
 //

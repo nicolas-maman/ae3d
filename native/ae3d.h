@@ -14,7 +14,6 @@
 int    ae3d_store_size(int which);
 double ae3d_store_field(void *store, int which, int field);
 
-int    ae3d_gl_posebank_texture(const float *data, int frames, int bones);
 /* The finished frame's mean and brightest linear luminance, two frames late
    (native/gpu/opengl.c); 1 when `out` holds them. */
 void  *ae3d_gl_proc(const char *name);
@@ -42,24 +41,8 @@ int    ae3d_gl_load(void);
 const char *ae3d_gl_version(void);
 const char *ae3d_gl_renderer(void);
 
-int    ae3d_gl_texture_rgba(int width, int height, const unsigned char *rgba);
-int    ae3d_gl_texture3d_rgba(int size, const unsigned char *rgba);
-void   ae3d_gl_texture3d_bind(int unit, int texture);
 
 
-int    ae3d_gl_program_create(const char *vertex_src, const char *fragment_src);
-void   ae3d_gl_program_delete(int program);
-void   ae3d_gl_program_use(int program);
-const char *ae3d_gl_program_log(void);
-int    ae3d_gl_uniform_location(int program, const char *name);
-void   ae3d_gl_uniform_int(int loc, int v);
-void   ae3d_gl_uniform_float(int loc, double v);
-void   ae3d_gl_uniform_vec2(int loc, double x, double y);
-void   ae3d_gl_uniform_vec3(int loc, double x, double y, double z);
-void   ae3d_gl_uniform_vec4(int loc, double x, double y, double z, double w);
-void   ae3d_gl_uniform_mat4(int loc, const double *m);
-void   ae3d_gl_uniform_float_array(int loc, void *arr);
-void   ae3d_gl_uniform_vec3_array(int loc, void *arr);
 
 void  *ae3d_farr_create(int count);
 void   ae3d_farr_destroy(void *arr);
@@ -67,11 +50,6 @@ void   ae3d_farr_set(void *arr, int i, double v);
 double ae3d_farr_get(void *arr, int i);
 int    ae3d_farr_count(void *arr);
 
-int    ae3d_gl_texture_from_image(void *img, int srgb, int mipmap);
-int    ae3d_gl_texture_cubemap_from_image(void *img);
-void   ae3d_gl_texture_delete(int texture);
-void   ae3d_gl_texture_bind(int unit, int texture);
-void   ae3d_gl_texture_bind_cubemap(int unit, int texture);
 
 /* GPU time per pass, read three frames late so the read never waits. */
 void  *ae3d_gl_passtimer_create(void);
