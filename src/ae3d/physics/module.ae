@@ -33,6 +33,7 @@ import aephysics.shape
 import aephysics.dynamics
 import aephysics.physics_world
 import aephysics.human
+import aephysics.joint_solver
 import ae3d.core
 import ae3d.jobs
 import ae3d.behaviour
@@ -54,10 +55,22 @@ exports (
     ragdoll, ragdoll_free, ragdoll_bone, ragdoll_human, ragdoll_set_velocity, ragdoll_kick,
     ragdoll_stand, ragdoll_release, ragdoll_is_standing, ragdoll_turn, ragdoll_of_shape, hit_event_count, hit_event,
     ragdoll_dress, ragdoll_dress_named, ragdoll_is_dressed, humanoid_bone,
-    ragdoll_follow, ragdoll_is_following,
+    ragdoll_follow, ragdoll_is_following, ragdoll_power, ragdoll_is_powered, ragdoll_set_bone_drive,
+    ragdoll_bone_drive_torque, ragdoll_set_balance_assist, ragdoll_balance_assist,
+    ragdoll_apply_impulse, ragdoll_bone_rotation, ragdoll_bone_target,
+    ragdoll_center_of_mass, ragdoll_mass, ragdoll_joint_error, ragdoll_tilt,
     spec_of, apply_spec, attachments
 )
 
+// A powered joint's motor closes the gap to its pose in this many seconds,
+// at no more than POWER_SPIN radians a second.
+const POWER_TAU = 0.05
+const POWER_SPIN = 20.0
+const POWER_ASSIST_HERTZ = 60.0
+
+extern sqrt(x: float) -> float
+extern acos(x: float) -> float
+extern atan2(y: float, x: float) -> float
 extern calloc(count: int, size: int) -> ptr
 extern free(p: ptr)
 
@@ -103,6 +116,8 @@ struct Ragdoll {
     standing: bool
     rig: ptr                       // *Rig, the skinned figure the ragdoll drives, or null
     following: bool                // the other way round: the rig drives the ragdoll, through its anchors
+    powered: bool                  // following through its joints' motors within a torque budget, the root free
+    friction: float                // newton metres: the joints' motors' friction when not powered
 }
 
 // A skinned figure worn by a ragdoll: a rig bone per ragdoll bone, each
@@ -206,7 +221,11 @@ on_fixed_update(state: ptr, e: *Engine, step: float) {
     k = 0
     while k < ragdoll_count {
         r = list.get_raw(p.ragdolls, k) as *Ragdoll
-        if r.following { drive_anchors(r, step) }
+        if r.powered && r.following {
+            drive_joints(r, step)
+        } else if r.following {
+            drive_anchors(r, step)
+        }
         k = k + 1
     }
     physics_world.step(p.world_id, step, p.sub_steps)
@@ -793,6 +812,7 @@ ragdoll(e: *Engine, name: string, position: Vec3, friction_torque: float, hertz:
     r.rig = null
     r.following = false
     human.create_human(&r.human, p.world_id, position, friction_torque, hertz, damping_ratio, list.size(p.ragdolls) + 1, r as ptr)
+    r.friction = friction_torque
     r.bones = list.new()
     i = 0
     while i < human.BONE_COUNT {
@@ -880,6 +900,7 @@ ragdoll_release(r: *Ragdoll) {
         pelvis.joint_id = dynamics.null_joint_id()
     }
     human.human_destroy_anchors(&r.human)
+    unpower(r)
     r.standing = false
     r.following = false
 }
@@ -894,7 +915,7 @@ ragdoll_release(r: *Ragdoll) {
 // that falls. False when the ragdoll wears no rig.
 ragdoll_follow(r: *Ragdoll) -> bool {
     if r.rig == null { return false }
-    if r.following { return true }
+    if r.following && !r.powered { return true }
     p = r.physics as *Physics
     pelvis = human.bone_at(&r.human, human.BONE_PELVIS)
     if dynamics.joint_is_valid(pelvis.joint_id) {
@@ -902,6 +923,7 @@ ragdoll_follow(r: *Ragdoll) -> bool {
         pelvis.joint_id = dynamics.null_joint_id()
     }
     human.human_destroy_anchors(&r.human)
+    unpower(r)
     human.human_create_motor_anchors(&r.human, p.world_id)
     r.standing = true
     r.following = true
@@ -909,6 +931,256 @@ ragdoll_follow(r: *Ragdoll) -> bool {
 }
 
 ragdoll_is_following(r: *Ragdoll) -> bool { return r.following }
+
+// The rig drives the ragdoll the way muscles drive a body. Every joint's
+// motor -- internal, between a bone and its parent, as a muscle is -- is
+// driven each fixed step toward the pose the rig gives the two bones: at
+// the relative angular velocity that would close the gap in POWER_TAU
+// seconds, with no more torque than `max_torque` newton metres (a bone's
+// share of it, set per bone by ragdoll_set_bone_drive). A motor is a hard
+// constraint within its budget, so a figure carries its own weight on its
+// knees and gives only when what pushes it is more than they have; a
+// spring is soft and would have it sag at any stiffness. The pelvis alone
+// is held to the rig's rotation from outside, by an anchor whose torque is
+// capped at `assist`: the balance a standing figure keeps, which a blow
+// past it overcomes. Nothing holds the figure's position. False when the
+// ragdoll wears no rig.
+ragdoll_power(r: *Ragdoll, max_torque: float, assist: float) -> bool {
+    if r.rig == null { return false }
+    p = r.physics as *Physics
+    pelvis = human.bone_at(&r.human, human.BONE_PELVIS)
+    if dynamics.joint_is_valid(pelvis.joint_id) {
+        dynamics.destroy_joint(pelvis.joint_id, true)
+        pelvis.joint_id = dynamics.null_joint_id()
+    }
+    human.human_destroy_anchors(&r.human)
+    human.human_create_parallel_anchors(&r.human, p.world_id)
+    // Only the pelvis keeps its anchor; every other bone is its joint's.
+    i = 0
+    while i < human.BONE_COUNT {
+        bone = human.bone_at(&r.human, i)
+        if i != human.BONE_PELVIS {
+            if dynamics.joint_is_valid(bone.anchor_joint_id) { dynamics.destroy_joint(bone.anchor_joint_id, true) }
+            if dynamics.body_is_valid(bone.anchor_id) { dynamics.destroy_body(bone.anchor_id) }
+            bone.anchor_joint_id = dynamics.null_joint_id()
+            bone.anchor_id = dynamics.null_body_id()
+            set_joint_spring(bone, false)
+            ragdoll_set_bone_drive(r, i, max_torque)
+        }
+        i = i + 1
+    }
+    // The assist is stiff: its torque cap is what limits it, as a muscle's
+    // is, not the softness a spring has against the pelvis's own mass --
+    // at the anchors' 8 Hz the whole figure toppled with 300 N m to spare.
+    joint_solver.parallel_joint_set_spring_hertz(pelvis.anchor_joint_id, POWER_ASSIST_HERTZ)
+    joint_solver.parallel_joint_set_spring_damping_ratio(pelvis.anchor_joint_id, 1.0)
+    ragdoll_set_balance_assist(r, assist)
+    r.standing = true
+    r.following = true
+    r.powered = true
+    drive_joints(r, 1.0 / 60.0)
+    return true
+}
+
+ragdoll_is_powered(r: *Ragdoll) -> bool { return r.powered && r.following }
+
+// A joint's spring on or off, whichever kind it is.
+set_joint_spring(bone: *HumanBone, on: bool) {
+    if !dynamics.joint_is_valid(bone.joint_id) { return }
+    if bone.joint_kind == dynamics.JOINT_REVOLUTE {
+        joint_solver.revolute_joint_enable_spring(bone.joint_id, on)
+    } else if bone.joint_kind == dynamics.JOINT_SPHERICAL {
+        joint_solver.spherical_joint_enable_spring(bone.joint_id, on)
+    }
+}
+
+// A bone's muscle: the most torque its joint's motor may use, in newton
+// metres. The pelvis has no joint; its muscle is the balance assist.
+ragdoll_set_bone_drive(r: *Ragdoll, index: int, max_torque: float) {
+    bone = human.bone_at(&r.human, index)
+    if !dynamics.joint_is_valid(bone.joint_id) || index == human.BONE_PELVIS { return }
+    if bone.joint_kind == dynamics.JOINT_REVOLUTE {
+        joint_solver.revolute_joint_set_max_motor_torque(bone.joint_id, max_torque)
+    } else if bone.joint_kind == dynamics.JOINT_SPHERICAL {
+        joint_solver.spherical_joint_set_max_motor_torque(bone.joint_id, max_torque)
+    }
+}
+
+// A bone's muscle as it stands, in newton metres. 0 for the pelvis.
+ragdoll_bone_drive_torque(r: *Ragdoll, index: int) -> float {
+    bone = human.bone_at(&r.human, index)
+    if !dynamics.joint_is_valid(bone.joint_id) || index == human.BONE_PELVIS { return 0.0 }
+    if bone.joint_kind == dynamics.JOINT_REVOLUTE { return joint_solver.revolute_joint_get_max_motor_torque(bone.joint_id) }
+    if bone.joint_kind == dynamics.JOINT_SPHERICAL { return joint_solver.spherical_joint_get_max_motor_torque(bone.joint_id) }
+    return 0.0
+}
+
+// The torque, in newton metres, the pelvis may use to keep the figure's
+// balance; 0 lets it go.
+ragdoll_set_balance_assist(r: *Ragdoll, torque: float) {
+    pelvis = human.bone_at(&r.human, human.BONE_PELVIS)
+    if !dynamics.joint_is_valid(pelvis.anchor_joint_id) { return }
+    joint_solver.parallel_joint_set_max_torque(pelvis.anchor_joint_id, torque)
+}
+
+ragdoll_balance_assist(r: *Ragdoll) -> float {
+    pelvis = human.bone_at(&r.human, human.BONE_PELVIS)
+    if !dynamics.joint_is_valid(pelvis.anchor_joint_id) { return 0.0 }
+    return joint_solver.parallel_joint_get_max_torque(pelvis.anchor_joint_id)
+}
+
+// Every joint's motor toward the rig's pose, and the pelvis's anchor. The
+// relative rotation of the joint's frames the two bones' targets make is
+// compared with the one they have: the rotation between (in the parent
+// frame's space) over POWER_TAU is the relative angular velocity asked of
+// a spherical joint's motor, turned into the world; the angle between is
+// the hinge's speed. Capped at POWER_SPIN radians a second.
+drive_joints(r: *Ragdoll, step: float) {
+    i = 0
+    while i < human.BONE_COUNT {
+        bone = human.bone_at(&r.human, i)
+        if i == human.BONE_PELVIS {
+            q = ragdoll_bone_target(r, i)
+            xf = dynamics.body_get_transform(bone.body_id)
+            human.human_set_anchor_target(&r.human, i, Transform { p: xf.p, q: q }, step)
+        } else if dynamics.joint_is_valid(bone.joint_id) && bone.parent_index >= 0 {
+            parent_body = human.bone_at(&r.human, bone.parent_index).body_id
+            wa = core.quat_mul(ragdoll_bone_target(r, bone.parent_index), bone.local_frame_a.q)
+            wb = core.quat_mul(ragdoll_bone_target(r, i), bone.local_frame_b.q)
+            want = core.quat_normalize(core.quat_mul(core.quat_conjugate(wa), wb))
+            ha = core.quat_mul(dynamics.body_get_rotation(parent_body), bone.local_frame_a.q)
+            hb = core.quat_mul(dynamics.body_get_rotation(bone.body_id), bone.local_frame_b.q)
+            have = core.quat_normalize(core.quat_mul(core.quat_conjugate(ha), hb))
+            if bone.joint_kind == dynamics.JOINT_SPHERICAL {
+                gap = core.quat_normalize(core.quat_mul(want, core.quat_conjugate(have)))
+                if gap.w < 0.0 { gap = core.quat(0.0 - gap.x, 0.0 - gap.y, 0.0 - gap.z, 0.0 - gap.w) }
+                s = sqrt(gap.x * gap.x + gap.y * gap.y + gap.z * gap.z)
+                spin = core.vec3(0.0, 0.0, 0.0)
+                if s > 0.000001 {
+                    angle = 2.0 * atan2(s, gap.w)
+                    speed = angle / POWER_TAU
+                    if speed > POWER_SPIN { speed = POWER_SPIN }
+                    spin = core.vec3(gap.x / s * speed, gap.y / s * speed, gap.z / s * speed)
+                }
+                joint_solver.spherical_joint_set_motor_velocity(bone.joint_id, core.quat_apply(ha, spin))
+            } else if bone.joint_kind == dynamics.JOINT_REVOLUTE {
+                target = 2.0 * atan2(want.z, want.w)
+                current = 2.0 * atan2(have.z, have.w)
+                speed = (target - current) / POWER_TAU
+                if speed > POWER_SPIN { speed = POWER_SPIN }
+                if speed < 0.0 - POWER_SPIN { speed = 0.0 - POWER_SPIN }
+                joint_solver.revolute_joint_set_motor_speed(bone.joint_id, speed)
+            }
+        }
+        i = i + 1
+    }
+}
+
+// How far bone `index` is from the pose the rig gives it, relative to its
+// parent -- the joint's error, in radians: what the muscles answer for. The
+// pelvis's is its rotation's in the world.
+ragdoll_joint_error(r: *Ragdoll, index: int) -> float {
+    bone = human.bone_at(&r.human, index)
+    if index == human.BONE_PELVIS || bone.parent_index < 0 {
+        return quat_angle(ragdoll_bone_rotation(r, index), ragdoll_bone_target(r, index))
+    }
+    wa = core.quat_mul(ragdoll_bone_target(r, bone.parent_index), bone.local_frame_a.q)
+    wb = core.quat_mul(ragdoll_bone_target(r, index), bone.local_frame_b.q)
+    want = core.quat_mul(core.quat_conjugate(wa), wb)
+    ha = core.quat_mul(ragdoll_bone_rotation(r, bone.parent_index), bone.local_frame_a.q)
+    hb = core.quat_mul(ragdoll_bone_rotation(r, index), bone.local_frame_b.q)
+    have = core.quat_mul(core.quat_conjugate(ha), hb)
+    return quat_angle(want, have)
+}
+
+// How far the figure leans: the angle between the pelvis's up and the up
+// the rig gives it, in radians. A turn about the vertical is no lean.
+ragdoll_tilt(r: *Ragdoll) -> float {
+    up = core.vec3(0.0, 1.0, 0.0)
+    have = core.quat_apply(ragdoll_bone_rotation(r, human.BONE_PELVIS), up)
+    want = core.quat_apply(ragdoll_bone_target(r, human.BONE_PELVIS), up)
+    d = core.v3_dot(core.v3_normalize(have), core.v3_normalize(want))
+    if d > 1.0 { d = 1.0 }
+    if d < 0.0 - 1.0 { d = 0.0 - 1.0 }
+    return acos(d)
+}
+
+quat_angle(a: Quat, b: Quat) -> float {
+    d = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w
+    if d < 0.0 { d = 0.0 - d }
+    if d > 1.0 { d = 1.0 }
+    return 2.0 * acos(d)
+}
+
+// The joints' motors back to friction: no speed asked, the friction's
+// torque, the springs on as the figure was made.
+unpower(r: *Ragdoll) {
+    if !r.powered { return }
+    i = 0
+    while i < human.BONE_COUNT {
+        bone = human.bone_at(&r.human, i)
+        if i != human.BONE_PELVIS && dynamics.joint_is_valid(bone.joint_id) {
+            if bone.joint_kind == dynamics.JOINT_SPHERICAL {
+                joint_solver.spherical_joint_set_motor_velocity(bone.joint_id, core.vec3(0.0, 0.0, 0.0))
+            } else if bone.joint_kind == dynamics.JOINT_REVOLUTE {
+                joint_solver.revolute_joint_set_motor_speed(bone.joint_id, 0.0)
+            }
+            ragdoll_set_bone_drive(r, i, bone.joint_friction * r.friction)
+            set_joint_spring(bone, true)
+        }
+        i = i + 1
+    }
+    r.powered = false
+}
+
+// A blow: `impulse` (newton seconds) on a bone at `point`, in the world.
+ragdoll_apply_impulse(r: *Ragdoll, index: int, impulse: Vec3, point: Vec3) {
+    bone = human.bone_at(&r.human, index)
+    dynamics.body_apply_linear_impulse(bone.body_id, impulse, point, true)
+}
+
+// A bone body's rotation in the world, now.
+ragdoll_bone_rotation(r: *Ragdoll, index: int) -> Quat {
+    return dynamics.body_get_rotation(human.bone_at(&r.human, index).body_id)
+}
+
+// The rotation the rig gives a bone's body now: what its anchor is driven
+// to. The body's own when the ragdoll wears no rig.
+ragdoll_bone_target(r: *Ragdoll, index: int) -> Quat {
+    if r.rig == null { return ragdoll_bone_rotation(r, index) }
+    rig = r.rig as *Rig
+    bones = rig.bones as RigBone[]
+    bone = bones[index].model as *Model
+    core.model_sync_transform(bone)
+    return core.quat_normalize(core.quat_mul(bone.world_rotation, core.quat_conjugate(bones[index].offset)))
+}
+
+// The figure's centre of mass in the world, and its mass.
+ragdoll_center_of_mass(r: *Ragdoll) -> Vec3 {
+    sum = core.vec3(0.0, 0.0, 0.0)
+    total = 0.0
+    i = 0
+    while i < human.BONE_COUNT {
+        id = human.bone_at(&r.human, i).body_id
+        mass = dynamics.body_get_mass(id)
+        c = dynamics.body_get_world_center(id)
+        sum = core.v3_add(sum, core.v3_mul(c, mass))
+        total = total + mass
+        i = i + 1
+    }
+    if total <= 0.0 { return sum }
+    return core.v3_mul(sum, 1.0 / total)
+}
+
+ragdoll_mass(r: *Ragdoll) -> float {
+    total = 0.0
+    i = 0
+    while i < human.BONE_COUNT {
+        total = total + dynamics.body_get_mass(human.bone_at(&r.human, i).body_id)
+        i = i + 1
+    }
+    return total
+}
 
 // Each mapped bone's body where the rig has it: the rig bone's world
 // rotation less the offset the dressing found, and its origin back from

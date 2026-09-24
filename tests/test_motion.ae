@@ -1,0 +1,244 @@
+// Natural motion (#414): active ragdolls on the engine's figure, held to
+// numbers. Five figures, each dressed in a humanoid rig of its own, on one
+// ground:
+//
+//   - the tracker, POWERED, its rig bowing the chest forward and back: the
+//     chest follows the bow within a bound, and the figure stays upright on
+//     its feet;
+//   - the shoved, POWERED, a blow to the chest within its budget: knocked
+//     off its pose, and back on it, upright and standing three seconds
+//     later (turned, perhaps: a turn about the vertical is no lean);
+//   - the felled, POWERED, the same blow past its budget: down;
+//   - the struck, POWERED, a blow to the right upper arm: the arm's muscle
+//     goes weak with its neighbours' and comes back over the recovery time;
+//   - the limp, LIMP from the start: down.
+
+import ae3d.core
+import ae3d.engine
+import ae3d.behaviour
+import ae3d.loader
+import ae3d.physics
+import ae3d.skin
+import ae3d.motion
+import aephysics.human
+
+extern sin(x: float) -> float
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+const STEPS = 240                    // four seconds at 60
+const SHOVE = 60.0                   // newton seconds: within the budget
+const FELL = 400.0                   // past it
+
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, ok: bool) {
+    g_checks = g_checks + 1
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        g_failures = g_failures + 1
+        println("  FAIL ${name}")
+    }
+}
+
+rig_bone(rig: *Skeleton, name: string, parent: *Model, x: float, y: float, z: float) -> *Model {
+    m = core.model_new()
+    core.model_set_name(m, name)
+    core.model_set_position(m, x, y, z)
+    if parent != null { core.model_set_parent(m, parent) }
+    skin.skeleton_add(rig, m)
+    return m
+}
+
+// A skeleton named and proportioned as the pipeline's figure is.
+humanoid_rig() -> *Skeleton {
+    rig = skin.skeleton_new()
+    root = rig_bone(rig, "Root", null, 0.0, 0.0, 0.0)
+    hips = rig_bone(rig, "Hips", root, 0.0, 1.0, 0.0)
+    spine = rig_bone(rig, "Spine", hips, 0.0, 0.13, 0.0)
+    chest = rig_bone(rig, "Chest", spine, 0.0, 0.26, 0.0)
+    neck = rig_bone(rig, "Neck", chest, 0.0, 0.22, 0.0)
+    rig_bone(rig, "Head", neck, 0.0, 0.09, 0.0)
+    shoulder_l = rig_bone(rig, "ShoulderL", chest, 0.17, 0.14, 0.0)
+    elbow_l = rig_bone(rig, "ElbowL", shoulder_l, 0.0, 0.0 - 0.29, 0.0)
+    rig_bone(rig, "WristL", elbow_l, 0.0, 0.0 - 0.26, 0.0)
+    shoulder_r = rig_bone(rig, "ShoulderR", chest, 0.0 - 0.17, 0.14, 0.0)
+    elbow_r = rig_bone(rig, "ElbowR", shoulder_r, 0.0, 0.0 - 0.29, 0.0)
+    rig_bone(rig, "WristR", elbow_r, 0.0, 0.0 - 0.26, 0.0)
+    thigh_l = rig_bone(rig, "ThighL", hips, 0.1, 0.0 - 0.07, 0.0)
+    knee_l = rig_bone(rig, "KneeL", thigh_l, 0.0, 0.0 - 0.44, 0.0)
+    ankle_l = rig_bone(rig, "AnkleL", knee_l, 0.0, 0.0 - 0.42, 0.0)
+    rig_bone(rig, "ToeL", ankle_l, 0.0, 0.0 - 0.05, 0.0 - 0.15)
+    thigh_r = rig_bone(rig, "ThighR", hips, 0.0 - 0.1, 0.0 - 0.07, 0.0)
+    knee_r = rig_bone(rig, "KneeR", thigh_r, 0.0, 0.0 - 0.44, 0.0)
+    ankle_r = rig_bone(rig, "AnkleR", knee_r, 0.0, 0.0 - 0.42, 0.0)
+    rig_bone(rig, "ToeR", ankle_r, 0.0, 0.0 - 0.05, 0.0 - 0.15)
+    skin.skeleton_bind(rig)
+    return rig
+}
+
+struct Stage {
+    tracker: ptr                     // *Motion
+    tracker_rig: ptr                 // *Skeleton
+    shoved: ptr
+    felled: ptr
+    struck: ptr
+    limp: ptr
+    rigs: ptr                        // *Skeleton[5], freed at the end
+    steps: int
+    worst_track: float               // radians, the tracker's chest after the first half second
+    worst_tilt: float                // radians, the tracker's lean
+    tracker_low: float               // the tracker's pelvis, its lowest
+    shoved_off: float                // radians, the shoved chest's furthest from its pose
+    struck_weak: float               // the struck arm's weakness just after the blow
+    struck_near: float               // and its parent's
+    struck_torque: float             // the arm's muscle just after the blow, N m
+}
+
+figure(e: *Engine, name: string, x: float, s: *Stage, slot: int) -> *Motion {
+    r = physics.ragdoll(e, name, core.vec3(x, 0.02, 0.0), 8.0, 8.0, 1.0)
+    rig = humanoid_rig()
+    physics.ragdoll_dress(r, rig)
+    rigs = s.rigs as ptr[]
+    rigs[slot] = rig as ptr
+    m = motion.active_ragdoll(r)
+    motion.attach(e, m)
+    return m
+}
+
+pelvis_height(m: *Motion) -> float {
+    return behaviour.object_position(physics.ragdoll_bone(m.ragdoll, human.BONE_PELVIS)).y
+}
+
+start(state: ptr, e: *Engine) {
+    s = state as *Stage
+    physics.attach(e)
+    ground = engine.object(e, "Ground", loader.cube(1.0))
+    behaviour.object_set_position(ground, core.vec3(0.0, 0.0 - 0.5, 0.0))
+    physics.box_collider(ground, core.vec3(40.0, 0.5, 40.0), physics.material(0.8, 0.0))
+    s.tracker = figure(e, "Tracker", 0.0 - 8.0, s, 0) as ptr
+    s.shoved = figure(e, "Shoved", 0.0 - 4.0, s, 1) as ptr
+    s.felled = figure(e, "Felled", 0.0, s, 2) as ptr
+    s.struck = figure(e, "Struck", 4.0, s, 3) as ptr
+    s.limp = figure(e, "Limp", 8.0, s, 4) as ptr
+    check("an active ragdoll on a dressed ragdoll", s.tracker != null && s.limp != null)
+    rigs = s.rigs as ptr[]
+    s.tracker_rig = rigs[0]
+    motion.set_mode(s.tracker as *Motion, motion.POWERED)
+    motion.set_mode(s.shoved as *Motion, motion.POWERED)
+    motion.set_mode(s.felled as *Motion, motion.POWERED)
+    motion.set_mode(s.struck as *Motion, motion.POWERED)
+    motion.set_mode(s.limp as *Motion, motion.LIMP)
+    check("the powered ones are powered", physics.ragdoll_is_powered((s.tracker as *Motion).ragdoll))
+    s.tracker_low = 10.0
+}
+
+fixed_update(state: ptr, e: *Engine, step: float) {
+    s = state as *Stage
+    s.steps = s.steps + 1
+    t = (s.steps as float) / 60.0
+    tracker = s.tracker as *Motion
+    // The tracker's rig bows the chest forward and back, 0.26 rad (15
+    // degrees) at half a turn a second, well inside the spine's cone.
+    rig = s.tracker_rig as *Skeleton
+    bowed = skin.skeleton_bone(rig, skin.skeleton_find(rig, "Chest"))
+    core.model_set_rotation(bowed, core.quat_rotate(0.26 * sin(t * 3.1416), core.vec3(1.0, 0.0, 0.0)))
+    if s.steps > 30 {
+        err = motion.tracking_error(tracker, human.BONE_SPINE_03)
+        if err > s.worst_track { s.worst_track = err }
+        lean = motion.tilt(tracker)
+        if lean > s.worst_tilt { s.worst_tilt = lean }
+        h = pelvis_height(tracker)
+        if h < s.tracker_low { s.tracker_low = h }
+    }
+    // The blows, a second in: the chests shoved from the front, the arm
+    // from the side.
+    if s.steps == 60 {
+        shoved = s.shoved as *Motion
+        chest = behaviour.object_position(physics.ragdoll_bone(shoved.ragdoll, human.BONE_SPINE_03))
+        motion.hit(shoved, human.BONE_SPINE_03, chest, core.vec3(0.0, 0.0, 0.0 - SHOVE))
+        felled = s.felled as *Motion
+        chest = behaviour.object_position(physics.ragdoll_bone(felled.ragdoll, human.BONE_SPINE_03))
+        motion.hit(felled, human.BONE_SPINE_03, chest, core.vec3(0.0, 0.0, 0.0 - FELL))
+        struck = s.struck as *Motion
+        arm = behaviour.object_position(physics.ragdoll_bone(struck.ragdoll, human.BONE_UPPER_ARM_R))
+        motion.hit(struck, human.BONE_UPPER_ARM_R, arm, core.vec3(0.0 - 8.0, 0.0, 0.0))
+        s.struck_weak = motion.bone_weakness(struck, human.BONE_UPPER_ARM_R)
+        s.struck_near = motion.bone_weakness(struck, human.BONE_LOWER_ARM_R)
+        s.struck_torque = physics.ragdoll_bone_drive_torque(struck.ragdoll, human.BONE_UPPER_ARM_R)
+    }
+    if s.steps > 60 {
+        off = motion.tracking_error(s.shoved as *Motion, human.BONE_SPINE_03)
+        if off > s.shoved_off { s.shoved_off = off }
+    }
+    if s.steps >= STEPS { engine.engine_stop(e) }
+}
+
+main() {
+    e = engine.engine_new()
+    engine.engine_set_size(e, 320, 240)
+    engine.engine_set_title(e, "ae3d motion test")
+    engine.engine_set_camera_input(e, false)
+    engine.engine_set_fixed_step(e, 1.0 / 60.0)
+    engine.engine_set_frame_limit(e, 100000)
+    light = core.light_sun(core.vec3(0.3, 0.8, 0.5))
+    engine.engine_set_light(e, light)
+    rigs_block = calloc(5, 8)
+    stage = Stage { tracker: null, tracker_rig: null, shoved: null, felled: null, struck: null, limp: null,
+                    rigs: rigs_block, steps: 0, worst_track: 0.0, worst_tilt: 0.0, tracker_low: 0.0, shoved_off: 0.0,
+                    struck_weak: 0.0, struck_near: 0.0, struck_torque: 0.0 }
+    b = engine.behaviour_new("stage", (&stage) as ptr)
+    b.start = start
+    b.fixed_update = fixed_update
+    engine.engine_add_behaviour(e, b)
+    if !engine.engine_run(e) {
+        println("motion: SKIP no window available")
+        core.light_free(light)
+        engine.engine_free(e)
+        free(rigs_block)
+        return
+    }
+
+    println("motion: active ragdolls, ${stage.steps} fixed steps")
+    println("  tracker: the chest's worst ${stage.worst_track * 57.2958} deg off its pose; the lean's worst ${stage.worst_tilt * 57.2958} deg; the pelvis's lowest ${stage.tracker_low} m")
+    check("POWERED, the chest plays the rig's bow within 5 degrees", stage.worst_track < 0.0873)
+    check("and the figure stays upright on its feet (lean under 10 degrees, pelvis >= 0.8 m)", stage.worst_tilt < 0.175 && stage.tracker_low >= 0.8)
+
+    shoved = stage.shoved as *Motion
+    back = motion.tracking_error(shoved, human.BONE_SPINE_03)
+    lean = motion.tilt(shoved)
+    println("  shoved (${SHOVE} N s): the chest knocked ${stage.shoved_off * 57.2958} deg off its pose, ${back * 57.2958} deg at the end; leaning ${lean * 57.2958} deg; pelvis ${pelvis_height(shoved)} m")
+    check("a shove within the budget knocks the chest off its pose", stage.shoved_off > 0.05)
+    check("and three seconds later it is back on it, upright and on its feet", back < 0.09 && lean < 0.175 && pelvis_height(shoved) >= 0.8)
+
+    felled = stage.felled as *Motion
+    println("  felled (${FELL} N s): pelvis ${pelvis_height(felled)} m")
+    check("a blow past the budget fells it", pelvis_height(felled) < 0.5)
+
+    struck = stage.struck as *Motion
+    full = motion.muscle(human.BONE_UPPER_ARM_R)
+    end_torque = physics.ragdoll_bone_drive_torque(struck.ragdoll, human.BONE_UPPER_ARM_R)
+    println("  struck: the arm ${stage.struck_weak} weak, the forearm ${stage.struck_near}, the arm's muscle ${stage.struck_torque} of ${full} N m; at the end ${motion.bone_weakness(struck, human.BONE_UPPER_ARM_R)} and ${end_torque} N m")
+    check("a struck arm goes weak, its forearm by half", stage.struck_weak > 0.9 && stage.struck_near >= 0.49 && stage.struck_torque < full * 0.1)
+    check("and comes back to its full muscle", motion.bone_weakness(struck, human.BONE_UPPER_ARM_R) == 0.0 && end_torque >= full * 0.99)
+
+    limp = stage.limp as *Motion
+    println("  limp: pelvis ${pelvis_height(limp)} m")
+    check("LIMP, it falls", pelvis_height(limp) < 0.5)
+
+    motion.motion_free(stage.tracker as *Motion)
+    motion.motion_free(stage.shoved as *Motion)
+    motion.motion_free(stage.felled as *Motion)
+    motion.motion_free(stage.struck as *Motion)
+    motion.motion_free(stage.limp as *Motion)
+    core.light_free(light)
+    engine.engine_free(e)
+    free(rigs_block)
+    if g_failures == 0 {
+        println("motion: all checks passed (${g_checks})")
+    } else {
+        println("motion: ${g_failures} failure(s) of ${g_checks}")
+    }
+}
