@@ -54,7 +54,10 @@ DLSS, meter or crowd paths a GPU takes, so this runs on a GPU before a
 renderer change is pushed -- and once more on Mesa's lavapipe
 (`VK_DRIVER_FILES=<its lvp_icd json> scripts/validate.sh`, `AE3D_VALIDATE_FRAMES=8`
 since it is slow), which takes the paths a device without ray queries
-takes and has the smaller limits many real devices have.
+takes and has the smaller limits many real devices have. `AE3D_VALIDATE_SYNC=1`
+adds the layer's synchronization validation, and every example is clean
+under it too: a hazard is ordering a GPU forgives today and a driver that
+overlaps more will not.
 
 A number in a document is quoted with its pair from the same run on the
 same machine, because two runs on a shared GPU differ by more than most

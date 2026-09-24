@@ -1654,8 +1654,10 @@ static void ae3d_vk_meter_record(void) {
         ae3d_vk_meter_barrier(source, 0, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                               0, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
     }
+    /* After the last frame's blits read the levels this one writes, not
+       merely after nothing (#410). */
     ae3d_vk_meter_barrier(vk.meter_image, -1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                          0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
+                          0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     ae3d_vk_meter_blit(source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0, (int)vk.extent.width, (int)vk.extent.height,
                        0, vk.meter_width, vk.meter_height);
     w = vk.meter_width;
@@ -1680,8 +1682,30 @@ static void ae3d_vk_meter_record(void) {
     region.imageExtent.width = (unsigned)vk.meter_small_width;
     region.imageExtent.height = (unsigned)vk.meter_small_height;
     region.imageExtent.depth = 1;
+    /* This frame slot's buffer was written by the copy two frames ago and
+       read by the host since: the copy waits for both, and what it writes is
+       made visible to the host, which reads it after the fence (#410). */
+    {
+        VkMemoryBarrier before;
+        memset(&before, 0, sizeof(before));
+        before.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        before.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_READ_BIT;
+        before.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        ae3d_vkCmdPipelineBarrier(vk.command_buffers[vk.frame],
+                                  VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+                                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, NULL, 0, NULL);
+    }
     ae3d_vkCmdCopyImageToBuffer(vk.command_buffers[vk.frame], vk.meter_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                 vk.meter_buffer[vk.frame], 1, &region);
+    {
+        VkMemoryBarrier after;
+        memset(&after, 0, sizeof(after));
+        after.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        after.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        ae3d_vkCmdPipelineBarrier(vk.command_buffers[vk.frame], VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                  VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &after, 0, NULL, 0, NULL);
+    }
     if (!vk.offscreen) {
         VkImageMemoryBarrier back;
         memset(&back, 0, sizeof(back));
@@ -2228,11 +2252,34 @@ static int ae3d_vk_build_render_pass(VkImageLayout present_layout, int part, VkR
 // Depth written as colour, so the main pass samples it like any other texture.
 // The attachment ends in shader-read layout, which is what lets the very next
 // pass in the same submission read it without a barrier of its own.
+/* A depth-only pass's dependencies. In: its clear and the layout transition
+   from UNDEFINED wait for the previous frame's sampling of the image and its
+   last depth write, which on one queue are otherwise unordered against them
+   (#410). Out: the depth written here is read by a fragment shader after. */
+static void ae3d_vk_depth_pass_dependencies(VkSubpassDependency *dependencies) {
+    memset(dependencies, 0, 2 * sizeof(VkSubpassDependency));
+    dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[0].dstSubpass = 0;
+    dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                   VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    dependencies[0].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    dependencies[0].dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                                   VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    dependencies[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    dependencies[1].srcSubpass = 0;
+    dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    dependencies[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+}
+
 static int ae3d_vk_build_shadow_pass(void) {
     VkAttachmentDescription attachments[2];
     VkAttachmentReference colour_ref, depth_ref;
     VkSubpassDescription subpass;
-    VkSubpassDependency dependency;
+    VkSubpassDependency dependencies[2];
     VkRenderPassCreateInfo info;
 
     // Depth, and nothing else. The pass used to write gl_FragCoord.z into an
@@ -2264,13 +2311,7 @@ static int ae3d_vk_build_shadow_pass(void) {
     subpass.pDepthStencilAttachment = &depth_ref;
 
     // The write to wait on is the depth store, not a colour one.
-    memset(&dependency, 0, sizeof(dependency));
-    dependency.srcSubpass = 0;
-    dependency.dstSubpass = VK_SUBPASS_EXTERNAL;
-    dependency.srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-    dependency.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    dependency.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    dependency.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    ae3d_vk_depth_pass_dependencies(dependencies);
 
     memset(&info, 0, sizeof(info));
     info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -2278,8 +2319,8 @@ static int ae3d_vk_build_shadow_pass(void) {
     info.pAttachments = attachments;
     info.subpassCount = 1;
     info.pSubpasses = &subpass;
-    info.dependencyCount = 1;
-    info.pDependencies = &dependency;
+    info.dependencyCount = 2;
+    info.pDependencies = dependencies;
 
     if (ae3d_vkCreateRenderPass(vk.device, &info, NULL, &vk.shadow_pass) != VK_SUCCESS) {
         return ae3d_vk_fail("shadow vkCreateRenderPass failed");
@@ -2295,7 +2336,7 @@ static int ae3d_vk_build_camdepth_pass(void) {
     VkAttachmentDescription attachment;
     VkAttachmentReference depth_ref;
     VkSubpassDescription subpass;
-    VkSubpassDependency dependency;
+    VkSubpassDependency dependencies[2];
     VkRenderPassCreateInfo info;
 
     memset(&attachment, 0, sizeof(attachment));
@@ -2317,13 +2358,7 @@ static int ae3d_vk_build_camdepth_pass(void) {
     subpass.colorAttachmentCount = 0;
     subpass.pDepthStencilAttachment = &depth_ref;
 
-    memset(&dependency, 0, sizeof(dependency));
-    dependency.srcSubpass = 0;
-    dependency.dstSubpass = VK_SUBPASS_EXTERNAL;
-    dependency.srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-    dependency.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    dependency.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    dependency.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    ae3d_vk_depth_pass_dependencies(dependencies);
 
     memset(&info, 0, sizeof(info));
     info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -2331,8 +2366,8 @@ static int ae3d_vk_build_camdepth_pass(void) {
     info.pAttachments = &attachment;
     info.subpassCount = 1;
     info.pSubpasses = &subpass;
-    info.dependencyCount = 1;
-    info.pDependencies = &dependency;
+    info.dependencyCount = 2;
+    info.pDependencies = dependencies;
 
     if (ae3d_vkCreateRenderPass(vk.device, &info, NULL, &vk.camdepth_pass) != VK_SUCCESS) {
         return ae3d_vk_fail("camera-depth vkCreateRenderPass failed");
@@ -2586,6 +2621,7 @@ static int ae3d_vk_build_post_pass(VkImageLayout present_layout, VkRenderPass *o
     VkAttachmentReference colour_ref;
     VkSubpassDescription subpass;
     VkSubpassDependency dependency;
+    VkSubpassDependency handed[2];
     VkRenderPassCreateInfo info;
 
     memset(&attachment, 0, sizeof(attachment));
@@ -2607,13 +2643,30 @@ static int ae3d_vk_build_post_pass(VkImageLayout present_layout, VkRenderPass *o
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &colour_ref;
 
+    /* What it samples was written as an attachment before it, and what it
+       writes -- cleared of nothing, from UNDEFINED -- was written and read
+       by the passes of the frame before: both orders, or the layout
+       transition races the last frame's reads (#410). */
     memset(&dependency, 0, sizeof(dependency));
     dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
     dependency.dstSubpass = 0;
-    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     dependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    dependency.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    dependency.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                              VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
+                               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    /* And out: what it wrote is sampled by the next pass or blitted and
+       copied by the meter and the capture, after its final transition. */
+    handed[0] = dependency;
+    memset(&handed[1], 0, sizeof(handed[1]));
+    handed[1].srcSubpass = 0;
+    handed[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+    handed[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    handed[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    handed[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+    handed[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
 
     memset(&info, 0, sizeof(info));
     info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -2621,8 +2674,8 @@ static int ae3d_vk_build_post_pass(VkImageLayout present_layout, VkRenderPass *o
     info.pAttachments = &attachment;
     info.subpassCount = 1;
     info.pSubpasses = &subpass;
-    info.dependencyCount = 1;
-    info.pDependencies = &dependency;
+    info.dependencyCount = 2;
+    info.pDependencies = handed;
 
     if (ae3d_vkCreateRenderPass(vk.device, &info, NULL, out) != VK_SUCCESS) {
         return ae3d_vk_fail("post vkCreateRenderPass failed");
@@ -4895,10 +4948,20 @@ int ae3d_vk_crowd_sort(int handle, double cx, double cz, double near_dist, doubl
     before.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     before.buffer = c->draws;
     before.size = VK_WHOLE_SIZE;
-    ae3d_vkCmdPipelineBarrier(command,
-                              VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
-                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
-                              0, 0, NULL, 1, &before, 0, NULL);
+    /* And the frame before's sort wrote the same streams: this one's writes
+       come after those, not merely after their reads (#410). */
+    {
+        VkMemoryBarrier sorted;
+        memset(&sorted, 0, sizeof(sorted));
+        sorted.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        sorted.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        sorted.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        ae3d_vkCmdPipelineBarrier(command,
+                                  VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT |
+                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                  0, 1, &sorted, 1, &before, 0, NULL);
+    }
 
     memset(commands, 0, sizeof(commands));
     for (t = 0; t < AE3D_VK_CROWD_TIERS; t++) {

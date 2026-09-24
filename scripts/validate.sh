@@ -9,10 +9,14 @@
 # layer on. Prints each scene's error count, the first few distinct VUIDs of
 # any that has errors, and exits non-zero if any scene had one. It needs the
 # Vulkan SDK's layer: VK_LAYER_PATH pointing at it where the loader does not
-# find it itself (on Windows, the SDK's Bin directory).
+# find it itself (on Windows, the SDK's Bin directory). AE3D_VALIDATE_SYNC=1
+# adds the layer's synchronization validation, whose hazards count as
+# errors (#410).
 set -uo pipefail
 
 frames="${AE3D_VALIDATE_FRAMES:-40}"
+enables=""
+[ "${AE3D_VALIDATE_SYNC:-0}" = 1 ] && enables="VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT"
 scenes=("$@")
 if [ "${#scenes[@]}" -eq 0 ]; then
     for f in examples/*.ae; do scenes+=("$(basename "$f" .ae)"); done
@@ -27,7 +31,7 @@ for scene in "${scenes[@]}"; do
     fi
     bin="./build/$scene"
     [ -x "$bin" ] || bin="$bin.exe"
-    out="$(VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation AE3D_API=vulkan AE3D_HIDDEN=1 \
+    out="$(VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation VK_LAYER_ENABLES="$enables" AE3D_API=vulkan AE3D_HIDDEN=1 \
            AE3D_FRAMES="$frames" timeout 180 "$bin" 2>&1)"
     if ! printf '%s\n' "$out" | grep -q '^ae3d: Vulkan on'; then
         printf '%-24s did not start on Vulkan\n' "$scene"
@@ -37,7 +41,7 @@ for scene in "${scenes[@]}"; do
     printf '%-24s %s\n' "$scene" "$errors"
     if [ "$errors" != 0 ]; then
         failed=1
-        printf '%s\n' "$out" | grep -o 'VUID-[A-Za-z0-9_-]*' | sort | uniq -c | sort -rn | head -5 | sed 's/^/    /'
+        printf '%s\n' "$out" | grep -o 'VUID-[A-Za-z0-9_-]*\|SYNC-HAZARD-[A-Z_-]*' | sort | uniq -c | sort -rn | head -5 | sed 's/^/    /'
     fi
 done
 exit "$failed"
