@@ -19,6 +19,7 @@ import ae3d.shaders
 import ae3d.skin
 import ae3d.posing
 import ae3d.geometry
+import ae3d.glapi
 
 exports (
     GLRenderer, ProgramSlots, TextureEntry, Skybox,
@@ -49,23 +50,6 @@ extern ae3d_offscreen_read_pipelined(target: ptr) -> ptr
 extern ae3d_gl_load() -> int
 extern ae3d_gl_version() -> string
 extern ae3d_gl_renderer() -> string
-extern ae3d_gl_viewport(x: int, y: int, w: int, h: int)
-extern ae3d_gl_clear_color(r: float, g: float, b: float, a: float)
-extern ae3d_gl_clear(color: int, depth: int)
-extern ae3d_gl_clear_depth(d: float)
-extern ae3d_gl_set_depth_test(on: int)
-extern ae3d_gl_set_depth_mask(on: int)
-extern ae3d_gl_set_face_culling(on: int)
-extern ae3d_gl_set_blend(on: int)
-extern ae3d_gl_set_multisample(on: int)
-extern ae3d_gl_set_wireframe(on: int)
-extern ae3d_gl_viewport_width() -> int
-extern ae3d_gl_viewport_height() -> int
-extern ae3d_gl_vao_create() -> int
-extern ae3d_gl_vao_bind(vao: int)
-extern ae3d_gl_vao_delete(vao: int)
-extern ae3d_gl_buffer_create() -> int
-extern ae3d_gl_buffer_delete(buffer: int)
 extern ae3d_gl_upload_mesh(mesh: ptr, vbo: int, ebo: int)
 extern ae3d_gl_update_mesh_vertices(mesh: ptr, vbo: int)
 extern ae3d_gl_setup_vertex_attribs()
@@ -107,7 +91,6 @@ extern ae3d_gl_passtimer_ms(timer: ptr, pass: int) -> float
 
 extern ae3d_gl_fbo_create() -> int
 extern ae3d_gl_scene_depth_capture() -> int
-extern ae3d_gl_set_blend_multiply()
 extern ae3d_gl_texture_rgba(width: int, height: int, rgba: ptr) -> int
 extern ae3d_gl_texture3d_rgba(size: int, rgba: ptr) -> int
 extern ae3d_gl_texture3d_bind(unit: int, texture: int)
@@ -129,7 +112,6 @@ extern ae3d_gl_geometry_instance_capacity(vao: int) -> int
 extern ae3d_gl_geometry_set_instance_capacity(vao: int, capacity: int)
 extern ae3d_gl_batch_upload(vao: int, instance_vbo: int, inst: ptr, capacity_bytes: int) -> int
 extern ae3d_gl_set_default_instance_color()
-extern ae3d_gl_error() -> int
 extern ae3d_gl_max_samples() -> int
 extern ae3d_gl_fbo_attach_color_multisample(fbo: int, width: int, height: int, samples: int) -> int
 extern ae3d_gl_fbo_attach_depth_multisample(fbo: int, width: int, height: int, samples: int) -> int
@@ -143,12 +125,136 @@ extern ae3d_offscreen_bind(target: ptr)
 extern ae3d_offscreen_unbind()
 extern ae3d_image_load(path: string) -> ptr
 extern ae3d_image_fit(img: ptr, limit: int) -> int
-extern ae3d_gl_max_texture_size() -> int
 extern ae3d_image_width(image: ptr) -> int
 extern ae3d_image_height(image: ptr) -> int
 extern ae3d_image_solid(width: int, height: int, r: int, g: int, b: int, a: int) -> ptr
 extern ae3d_image_free(img: ptr)
 extern ae3d_image_error() -> string
+
+// --- the GL state, in Aether (#398) ----------------------------------------------------------
+//
+// What native/gpu/opengl.c's first page was: the viewport, the clears, the
+// depth test, culling, blending, multisampling and wireframe, the viewport's
+// size, and the vertex arrays and buffers -- each a call or two into GL
+// through ae3d.glapi, named as the C API was so the calls below them read
+// the same.
+
+ae3d_gl_error() -> int { return (glapi.glGetError()) as int }
+
+ae3d_gl_viewport(x: int, y: int, w: int, h: int) { glapi.glViewport(x, y, w, h) }
+
+ae3d_gl_clear_color(r: float, g: float, b: float, a: float) {
+    glapi.glClearColor(r as f32, g as f32, b as f32, a as f32)
+}
+
+ae3d_gl_clear(color: int, depth: int) {
+    mask = 0
+    if color != 0 { mask = mask | glapi.COLOR_BUFFER_BIT }
+    if depth != 0 { mask = mask | glapi.DEPTH_BUFFER_BIT }
+    if mask != 0 { glapi.glClear(mask as uint32) }
+}
+
+ae3d_gl_clear_depth(d: float) { glapi.glClearDepth(d) }
+
+ae3d_gl_set_depth_test(on: int) {
+    if on != 0 {
+        glapi.glEnable(glapi.DEPTH_TEST as uint32)
+        glapi.glDepthFunc(glapi.LEQUAL as uint32)
+        glapi.glDepthMask(glapi.TRUE)
+    } else {
+        glapi.glDisable(glapi.DEPTH_TEST as uint32)
+    }
+}
+
+ae3d_gl_set_depth_mask(on: int) {
+    if on != 0 { glapi.glDepthMask(glapi.TRUE) } else { glapi.glDepthMask(glapi.FALSE) }
+}
+
+ae3d_gl_set_face_culling(on: int) {
+    if on != 0 {
+        glapi.glEnable(glapi.CULL_FACE as uint32)
+        glapi.glCullFace(glapi.BACK as uint32)
+        glapi.glFrontFace(glapi.CCW as uint32)
+    } else {
+        glapi.glDisable(glapi.CULL_FACE as uint32)
+    }
+}
+
+ae3d_gl_set_blend(on: int) {
+    if on != 0 {
+        glapi.glEnable(glapi.BLEND as uint32)
+        glapi.glBlendFunc(glapi.SRC_ALPHA as uint32, glapi.ONE_MINUS_SRC_ALPHA as uint32)
+    } else {
+        glapi.glDisable(glapi.BLEND as uint32)
+    }
+}
+
+// What is drawn scales what is there: the occlusion pass darkening the
+// opaque scene under it. ae3d_gl_set_blend(1) puts the ordinary blend back.
+ae3d_gl_set_blend_multiply() {
+    glapi.glEnable(glapi.BLEND as uint32)
+    glapi.glBlendFunc(glapi.DST_COLOR as uint32, glapi.ZERO as uint32)
+}
+
+ae3d_gl_set_multisample(on: int) {
+    if on != 0 { glapi.glEnable(glapi.MULTISAMPLE as uint32) } else { glapi.glDisable(glapi.MULTISAMPLE as uint32) }
+}
+
+ae3d_gl_set_wireframe(on: int) {
+    mode = glapi.FILL
+    if on != 0 { mode = glapi.LINE }
+    glapi.glPolygonMode(glapi.FRONT_AND_BACK as uint32, mode as uint32)
+}
+
+// One of GL's integers (glGetIntegerv), the `index`th of what it answers.
+gl_integer(name: int, index: int, count: int) -> int {
+    out = calloc(count, 4)
+    glapi.glGetIntegerv(name as uint32, out)
+    value = (out as int[])[index]
+    free(out)
+    return value
+}
+
+ae3d_gl_viewport_width() -> int { return gl_integer(glapi.VIEWPORT, 2, 4) }
+ae3d_gl_viewport_height() -> int { return gl_integer(glapi.VIEWPORT, 3, 4) }
+
+// The widest texture the context takes, a side.
+ae3d_gl_max_texture_size() -> int { return gl_integer(glapi.MAX_TEXTURE_SIZE, 0, 1) }
+
+// A name GL makes (glGenVertexArrays, glGenBuffers): one, into a word.
+ae3d_gl_vao_create() -> int {
+    out = calloc(1, 4)
+    glapi.glGenVertexArrays(1, out)
+    id = (out as int[])[0]
+    free(out)
+    return id
+}
+
+ae3d_gl_vao_bind(vao: int) { glapi.glBindVertexArray(vao as uint32) }
+
+ae3d_gl_vao_delete(vao: int) {
+    if vao == 0 { return }
+    names = calloc(1, 4)
+    (names as int[])[0] = vao
+    glapi.glDeleteVertexArrays(1, names)
+    free(names)
+}
+
+ae3d_gl_buffer_create() -> int {
+    out = calloc(1, 4)
+    glapi.glGenBuffers(1, out)
+    id = (out as int[])[0]
+    free(out)
+    return id
+}
+
+ae3d_gl_buffer_delete(buffer: int) {
+    if buffer == 0 { return }
+    names = calloc(1, 4)
+    (names as int[])[0] = buffer
+    glapi.glDeleteBuffers(1, names)
+    free(names)
+}
 
 const MAX_FBO_DIMENSION = 8192
 const SHADOW_SIZE = 2048

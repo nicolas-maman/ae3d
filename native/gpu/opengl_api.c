@@ -34,6 +34,10 @@ static void *ae3d_gl_symbol(const char *name) {
     return symbol;
 }
 
+/* The same resolver, for ae3d.glapi: the renderer's GL calls from Aether
+   resolve their entry points through it (#398). */
+void *ae3d_gl_proc(const char *name) { return ae3d_gl_symbol(name); }
+
 #define AE3D_GL_DEF(ret, name, args) ae3d_pfn_##name ae3d_##name;
 AE3D_GL_FUNCS(AE3D_GL_DEF)
 #undef AE3D_GL_DEF
