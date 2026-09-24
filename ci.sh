@@ -456,6 +456,36 @@ for example in examples/*.ae; do
     fi
 done
 
+step "a character wanders the street"
+# The on-foot character walks, runs and jumps 10,000 random moves through
+# street_drive's street, pushing the props it meets, and after every move is
+# asked how deep it is into the street itself -- kerbs, steps, buildings --
+# and whether it fell through. (Not into what moves: a walker that walks into
+# it, on the runner's own clock, is the world moving, and the next move
+# answers it.) Resting contact keeps up to the solver's 5 mm slop; past 6 mm, or
+# under the street, is a bug (#420).
+if built_ok street_drive && have_display; then
+    AE3D_ON_FOOT=3 bounded "$RUN_LIMIT" ./build/street_drive >/tmp/ae3d_wander.log 2>&1
+    wander_line="$(grep "street_drive: wandered" /tmp/ae3d_wander.log)"
+    if [ -z "$wander_line" ] && grep -q "could not create window\|failed to initialise\| 0 steps, 0 frames" /tmp/ae3d_wander.log; then
+        # A runner with a display but no GL or Vulkan it can open (the macOS
+        # and Windows hosted ones) runs the examples to an empty window and
+        # this to nothing.
+        skip "street_drive wander" "the scene could not open a window here"
+    elif [ -z "$wander_line" ]; then
+        fail "street_drive wander (no report)"
+        sed 's/^/        /' /tmp/ae3d_wander.log | tail -10
+    elif echo "$wander_line" | grep -q " 0 over 6 mm; 0 falls through"; then
+        pass "street_drive wander"
+        echo "        $wander_line"
+    else
+        fail "street_drive wander"
+        echo "        $wander_line"
+    fi
+else
+    skip "street_drive wander" "no display or no build"
+fi
+
 step "the demo scene, measured through the channel"
 # The scene the engine is demonstrated with, asked what it drew rather than
 # looked at: what every model is made of, whether the image its material names
