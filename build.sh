@@ -135,8 +135,6 @@ fi
 PLATFORM_LIBS="$(ae3d_platform_libs "$(uname -s)")"
 PIC="$(ae3d_native_pic_flag)"
 
-NATIVE_SOURCES="native/gpu/capture.c native/platform/crash.c native/geometry/mesh.c native/geometry/skin.c native/geometry/meshfile.c native/image/image.c native/gpu/opengl_api.c native/gpu/opengl.c native/gpu/offscreen.c native/gpu/vulkan.c native/gpu/jobs.c $(ae3d_dlss_source "$OBJ_DIR")"
-
 # The physics engine, aephysics, is a git submodule under deps/: Aether
 # modules the compiler finds through AETHER_LIB_DIR below, plus its one C
 # file (the threads' helpers Aether has not, and the contact solver's
@@ -148,10 +146,7 @@ if [ ! -f "$AEPHYSICS/aephysics/native/aephysics_native.c" ]; then
     echo "ae3d: deps/aephysics is empty; run: git submodule update --init" >&2
     exit 1
 fi
-NATIVE_SOURCES="$NATIVE_SOURCES $AEPHYSICS/aephysics/native/aephysics_native.c"
-if [ "$(uname -s)" = "Darwin" ]; then
-    NATIVE_SOURCES="$NATIVE_SOURCES native/platform/metal_surface.m"
-fi
+NATIVE_SOURCES="$(ae3d_native_sources "$OBJ_DIR" "$AEPHYSICS")"
 
 # The Vulkan shaders are generated from the GLSL in src/ae3d/shaders and
 # compiled into the native library; an edit to the GLSL without the generator

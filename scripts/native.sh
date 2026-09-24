@@ -131,6 +131,23 @@ ae3d_dlss_source() {
     fi
 }
 
+# The engine's native sources: every file the native library is built from,
+# the DLSS shim or its stub by what the machine has, and aephysics's one C
+# file (the threads' helpers and the contact solver's vector lanes). One list
+# for build.sh and editor/build_editor.sh alike: two copies of it drifted, and
+# a file removed from one was still compiled by the other.
+#
+#   ae3d_native_sources <object directory> <aephysics root>
+ae3d_native_sources() {
+    list="native/gpu/capture.c native/gpu/opengl_api.c native/gpu/opengl.c native/gpu/offscreen.c native/gpu/vulkan.c native/gpu/jobs.c"
+    list="$list native/platform/crash.c native/geometry/mesh.c native/geometry/skin.c native/geometry/meshfile.c native/image/image.c"
+    list="$list $(ae3d_dlss_source "$1") $2/aephysics/native/aephysics_native.c"
+    if [ "$(uname -s)" = "Darwin" ]; then
+        list="$list native/platform/metal_surface.m"
+    fi
+    printf '%s' "$list"
+}
+
 # The compiler and the flags a native source takes: C++ for the shim, with
 # the SDK's headers and without the runtime the engine's library does not
 # link (no exceptions, no RTTI, nothing from the standard library).

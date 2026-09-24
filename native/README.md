@@ -14,18 +14,17 @@ What was C for any other reason has moved: the crowd's kernels
 (`ae3d.horde`), the flow field (`ae3d.nav`), the weather's particles
 (`ae3d.weather`), the clouds' noise (`ae3d.cloudnoise`), the PNG writer
 (`ae3d.png`), the file-as-bytes reader (`ae3d.blob`), the script loader
-(`ae3d.script`), the agent channel's asking side (`ae3d.probe`), the job
-pool (`ae3d.jobs`, on aephysics's scheduler) and the window, input and
+(`ae3d.script`), the agent channel, both sides (`ae3d.channel`, `ae3d.probe`), the job
+pool (`ae3d.jobs`, on aephysics's scheduler, which the native loops run on too) and the window, input and
 timing layer (`ae3d.platform`, calling GLFW itself) are Aether, each
 measured against the C it replaced.
 
 | folder | what | why still C |
 |---|---|---|
-| `gpu/` | `vulkan.c`, the Vulkan renderer; `opengl.c` and `opengl_api.c`, the OpenGL one and its entry points; `offscreen.c` and `capture.c`, the offscreen targets and frame readback; `jobs.c`, the pool the renderers' own loops run over; `shaders/`, the Vulkan GLSL that `tools/generate_shaders.ae` derives from the OpenGL sources in `src/ae3d/shaders` (`vulkan_shaders.h`, the SPIR-V, and `vulkan_uniforms.h`, the uniform block, are its output too) | Vulkan and OpenGL structures with float members; float32 uploads |
+| `gpu/` | `vulkan.c`, the Vulkan renderer; `opengl.c` and `opengl_api.c`, the OpenGL one and its entry points; `offscreen.c` and `capture.c`, the offscreen targets and frame readback; `jobs.c`, the door through which the renderers' own loops reach `ae3d.jobs`; `shaders/`, the Vulkan GLSL that `tools/generate_shaders.ae` derives from the OpenGL sources in `src/ae3d/shaders` (`vulkan_shaders.h`, the SPIR-V, and `vulkan_uniforms.h`, the uniform block, are its output too) | Vulkan and OpenGL structures with float members; float32 uploads |
 | `geometry/` | `mesh.c`, the interleaved float32 vertex store; `skin.c`, bone palettes and pose banks; `meshfile.c`, meshes read into those | float32 buffers |
 | `image/` | `image.c`, decoding through the vendored `stb_image.h` | a third-party decoder (see `THIRD_PARTY_LICENSES.md`); a decoder of our own is an Aether project of its own |
 | `platform/` | `crash.c`, the native stack printed on a crash; `metal_surface.m`, the CAMetalLayer MoltenVK draws into on macOS | a signal handler may call only what is async-signal-safe and has to be installed when the library loads, before any entry point; the Objective-C runtime |
-| `agent/` | `channel.c`, the loopback socket a running scene answers JSON on | `std.tcp` cannot yet bind loopback only, poll a listening socket or set `TCP_NODELAY` ([aether#2136](https://github.com/aether-lang-dev/aether/issues/2136)) |
 | `dlss/` | `streamline.cpp`, DLSS through NVIDIA Streamline; `stub.c`, what is built without the SDK | the SDK's interface is C++ |
 
 GLFW is called from both sides -- the window and input from Aether, the
