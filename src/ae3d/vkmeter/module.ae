@@ -16,7 +16,7 @@
 // frame through the hooks vulkan.c calls (ae3d_vk_set_frame_hooks): record
 // after the last pass, collect after the fence, release with the swapchain.
 
-import contrib.vulkan.vk as vkapi
+import contrib.vulkan.vk
 import std.mem
 
 exports (
@@ -106,7 +106,7 @@ measured(out: ptr) -> bool {
 // The index of a memory type `bits` allows with all of `wanted`, or -1.
 memory_type(bits: int, wanted: int) -> int {
     props = calloc(1, sizeof(VkPhysicalDeviceMemoryProperties)) as *VkPhysicalDeviceMemoryProperties
-    vkapi.vkGetPhysicalDeviceMemoryProperties(ae3d_vk_physical_device_handle(), props as ptr)
+    vk.vkGetPhysicalDeviceMemoryProperties(ae3d_vk_physical_device_handle(), props as ptr)
     found = 0 - 1
     i = 0
     while i < (props.memoryTypeCount) as int && found < 0 {
@@ -124,15 +124,15 @@ allocate(requirements: *VkMemoryRequirements, wanted: int) -> ptr {
     kind = memory_type((requirements.memoryTypeBits) as int, wanted)
     if kind < 0 { return null }
     info = calloc(1, sizeof(VkMemoryAllocateInfo)) as *VkMemoryAllocateInfo
-    info.sType = vkapi.STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO
+    info.sType = vk.STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO
     info.allocationSize = requirements.size
     info.memoryTypeIndex = kind
     out = calloc(1, 8)
-    r = vkapi.vkAllocateMemory(ae3d_vk_device_handle(), info as ptr, null, out)
+    r = vk.vkAllocateMemory(ae3d_vk_device_handle(), info as ptr, null, out)
     got = (out as ptr[])[0]
     free(out)
     free(info as ptr)
-    if r != vkapi.SUCCESS { return null }
+    if r != vk.SUCCESS { return null }
     return got
 }
 
@@ -141,34 +141,34 @@ allocate(requirements: *VkMemoryRequirements, wanted: int) -> ptr {
 make_image(m: *Meter, w: int, h: int, levels: int) -> bool {
     device = ae3d_vk_device_handle()
     ci = calloc(1, sizeof(VkImageCreateInfo)) as *VkImageCreateInfo
-    ci.sType = vkapi.STRUCTURE_TYPE_IMAGE_CREATE_INFO
-    ci.imageType = vkapi.IMAGE_TYPE_2D
-    ci.format = vkapi.FORMAT_R8G8B8A8_UNORM
+    ci.sType = vk.STRUCTURE_TYPE_IMAGE_CREATE_INFO
+    ci.imageType = vk.IMAGE_TYPE_2D
+    ci.format = vk.FORMAT_R8G8B8A8_UNORM
     ci.extent.width = w
     ci.extent.height = h
     ci.extent.depth = 1
     ci.mipLevels = levels
     ci.arrayLayers = 1
-    ci.samples = vkapi.SAMPLE_COUNT_1_BIT
-    ci.tiling = vkapi.IMAGE_TILING_OPTIMAL
-    ci.usage = vkapi.IMAGE_USAGE_TRANSFER_SRC_BIT | vkapi.IMAGE_USAGE_TRANSFER_DST_BIT
-    ci.sharingMode = vkapi.SHARING_MODE_EXCLUSIVE
-    ci.initialLayout = vkapi.IMAGE_LAYOUT_UNDEFINED
+    ci.samples = vk.SAMPLE_COUNT_1_BIT
+    ci.tiling = vk.IMAGE_TILING_OPTIMAL
+    ci.usage = vk.IMAGE_USAGE_TRANSFER_SRC_BIT | vk.IMAGE_USAGE_TRANSFER_DST_BIT
+    ci.sharingMode = vk.SHARING_MODE_EXCLUSIVE
+    ci.initialLayout = vk.IMAGE_LAYOUT_UNDEFINED
     out = calloc(1, 8)
-    r = vkapi.vkCreateImage(device, ci as ptr, null, out)
+    r = vk.vkCreateImage(device, ci as ptr, null, out)
     m.image = (out as ptr[])[0]
     free(out)
     free(ci as ptr)
-    if r != vkapi.SUCCESS {
+    if r != vk.SUCCESS {
         m.image = null
         return false
     }
     needs = calloc(1, sizeof(VkMemoryRequirements)) as *VkMemoryRequirements
-    vkapi.vkGetImageMemoryRequirements(device, m.image, needs as ptr)
-    m.memory = allocate(needs, vkapi.MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+    vk.vkGetImageMemoryRequirements(device, m.image, needs as ptr)
+    m.memory = allocate(needs, vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
     free(needs as ptr)
     if m.memory == null { return false }
-    return vkapi.vkBindImageMemory(device, m.image, m.memory, 0) == vkapi.SUCCESS
+    return vk.vkBindImageMemory(device, m.image, m.memory, 0) == vk.SUCCESS
 }
 
 // A buffer the host reads, `bytes` long, into slot `f`: cached memory, the
@@ -178,23 +178,23 @@ make_image(m: *Meter, w: int, h: int, levels: int) -> bool {
 make_buffer(m: *Meter, f: int, bytes: int) -> bool {
     device = ae3d_vk_device_handle()
     ci = calloc(1, sizeof(VkBufferCreateInfo)) as *VkBufferCreateInfo
-    ci.sType = vkapi.STRUCTURE_TYPE_BUFFER_CREATE_INFO
+    ci.sType = vk.STRUCTURE_TYPE_BUFFER_CREATE_INFO
     ci.size = bytes
-    ci.usage = vkapi.BUFFER_USAGE_TRANSFER_DST_BIT
-    ci.sharingMode = vkapi.SHARING_MODE_EXCLUSIVE
+    ci.usage = vk.BUFFER_USAGE_TRANSFER_DST_BIT
+    ci.sharingMode = vk.SHARING_MODE_EXCLUSIVE
     out = calloc(1, 8)
-    r = vkapi.vkCreateBuffer(device, ci as ptr, null, out)
+    r = vk.vkCreateBuffer(device, ci as ptr, null, out)
     buffer = (out as ptr[])[0]
     free(ci as ptr)
-    if r != vkapi.SUCCESS {
+    if r != vk.SUCCESS {
         free(out)
         return false
     }
     (m.buffers as ptr[])[f] = buffer
     needs = calloc(1, sizeof(VkMemoryRequirements)) as *VkMemoryRequirements
-    vkapi.vkGetBufferMemoryRequirements(device, buffer, needs as ptr)
-    visible = vkapi.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vkapi.MEMORY_PROPERTY_HOST_COHERENT_BIT
-    memory = allocate(needs, visible | vkapi.MEMORY_PROPERTY_HOST_CACHED_BIT)
+    vk.vkGetBufferMemoryRequirements(device, buffer, needs as ptr)
+    visible = vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT
+    memory = allocate(needs, visible | vk.MEMORY_PROPERTY_HOST_CACHED_BIT)
     if memory == null { memory = allocate(needs, visible) }
     free(needs as ptr)
     if memory == null {
@@ -202,9 +202,9 @@ make_buffer(m: *Meter, f: int, bytes: int) -> bool {
         return false
     }
     (m.buffer_memory as ptr[])[f] = memory
-    vkapi.vkBindBufferMemory(device, buffer, memory, 0)
+    vk.vkBindBufferMemory(device, buffer, memory, 0)
     (out as ptr[])[0] = null
-    vkapi.vkMapMemory(device, memory, 0, bytes, 0, out)
+    vk.vkMapMemory(device, memory, 0, bytes, 0, out)
     (m.mapped as ptr[])[f] = (out as ptr[])[0]
     free(out)
     return true
@@ -215,16 +215,16 @@ make_buffer(m: *Meter, f: int, bytes: int) -> bool {
 release(m: *Meter) {
     device = m.device
     if device == null { return }
-    if m.image != null { vkapi.vkDestroyImage(device, m.image, null) }
-    if m.memory != null { vkapi.vkFreeMemory(device, m.memory, null) }
+    if m.image != null { vk.vkDestroyImage(device, m.image, null) }
+    if m.memory != null { vk.vkFreeMemory(device, m.memory, null) }
     m.image = null
     m.memory = null
     f = 0
     while f < MAX_FRAMES {
         memory = (m.buffer_memory as ptr[])[f]
-        if (m.mapped as ptr[])[f] != null { vkapi.vkUnmapMemory(device, memory) }
-        if (m.buffers as ptr[])[f] != null { vkapi.vkDestroyBuffer(device, (m.buffers as ptr[])[f], null) }
-        if memory != null { vkapi.vkFreeMemory(device, memory, null) }
+        if (m.mapped as ptr[])[f] != null { vk.vkUnmapMemory(device, memory) }
+        if (m.buffers as ptr[])[f] != null { vk.vkDestroyBuffer(device, (m.buffers as ptr[])[f], null) }
+        if memory != null { vk.vkFreeMemory(device, memory, null) }
         (m.mapped as ptr[])[f] = null
         (m.buffers as ptr[])[f] = null
         (m.buffer_memory as ptr[])[f] = null
@@ -242,7 +242,7 @@ make_meter(m: *Meter) -> bool {
     device = ae3d_vk_device_handle()
     if g_loaded != device {
         // The device's commands through its own entry points, once a device.
-        vkapi.load_device(device)
+        vk.load_device(device)
         g_loaded = device
     }
     m.device = device
@@ -289,16 +289,16 @@ half(n: int) -> int {
 // transfer.
 barrier(commands: ptr, image: ptr, level: int, from: int, to: int, src_access: int, dst_access: int, src_stage: int) {
     b = calloc(1, sizeof(VkImageMemoryBarrier)) as *VkImageMemoryBarrier
-    b.sType = vkapi.STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER
+    b.sType = vk.STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER
     b.oldLayout = from
     b.newLayout = to
-    b.srcQueueFamilyIndex = vkapi.QUEUE_FAMILY_IGNORED
-    b.dstQueueFamilyIndex = vkapi.QUEUE_FAMILY_IGNORED
+    b.srcQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED
+    b.dstQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED
     b.image = image
-    b.subresourceRange.aspectMask = vkapi.IMAGE_ASPECT_COLOR_BIT
+    b.subresourceRange.aspectMask = vk.IMAGE_ASPECT_COLOR_BIT
     if level < 0 {
         b.subresourceRange.baseMipLevel = 0
-        b.subresourceRange.levelCount = vkapi.REMAINING_MIP_LEVELS
+        b.subresourceRange.levelCount = vk.REMAINING_MIP_LEVELS
     } else {
         b.subresourceRange.baseMipLevel = level
         b.subresourceRange.levelCount = 1
@@ -306,7 +306,7 @@ barrier(commands: ptr, image: ptr, level: int, from: int, to: int, src_access: i
     b.subresourceRange.layerCount = 1
     b.srcAccessMask = src_access
     b.dstAccessMask = dst_access
-    vkapi.vkCmdPipelineBarrier(commands, src_stage, vkapi.PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, 1, b as ptr)
+    vk.vkCmdPipelineBarrier(commands, src_stage, vk.PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, 1, b as ptr)
     free(b as ptr)
 }
 
@@ -314,10 +314,10 @@ barrier(commands: ptr, image: ptr, level: int, from: int, to: int, src_access: i
 // and the copies'.
 memory_barrier(commands: ptr, src_stage: int, dst_stage: int, src_access: int, dst_access: int) {
     b = calloc(1, sizeof(VkMemoryBarrier)) as *VkMemoryBarrier
-    b.sType = vkapi.STRUCTURE_TYPE_MEMORY_BARRIER
+    b.sType = vk.STRUCTURE_TYPE_MEMORY_BARRIER
     b.srcAccessMask = src_access
     b.dstAccessMask = dst_access
-    vkapi.vkCmdPipelineBarrier(commands, src_stage, dst_stage, 0, 1, b as ptr, 0, null, 0, null)
+    vk.vkCmdPipelineBarrier(commands, src_stage, dst_stage, 0, 1, b as ptr, 0, null, 0, null)
     free(b as ptr)
 }
 
@@ -325,10 +325,10 @@ memory_barrier(commands: ptr, src_stage: int, dst_stage: int, src_access: int, d
 // `to_level` (tw x th), filtered.
 blit(commands: ptr, m: *Meter, from: ptr, from_level: int, fw: int, fh: int, to_level: int, tw: int, th: int) {
     region = calloc(1, sizeof(VkImageBlit)) as *VkImageBlit
-    region.srcSubresource.aspectMask = vkapi.IMAGE_ASPECT_COLOR_BIT
+    region.srcSubresource.aspectMask = vk.IMAGE_ASPECT_COLOR_BIT
     region.srcSubresource.mipLevel = from_level
     region.srcSubresource.layerCount = 1
-    region.dstSubresource.aspectMask = vkapi.IMAGE_ASPECT_COLOR_BIT
+    region.dstSubresource.aspectMask = vk.IMAGE_ASPECT_COLOR_BIT
     region.dstSubresource.mipLevel = to_level
     region.dstSubresource.layerCount = 1
     // The far corners, the second of each pair of offsets (the first is 0).
@@ -340,8 +340,8 @@ blit(commands: ptr, m: *Meter, from: ptr, from_level: int, fw: int, fh: int, to_
     far_dst.x = tw
     far_dst.y = th
     far_dst.z = 1
-    vkapi.vkCmdBlitImage(commands, from, vkapi.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m.image,
-                      vkapi.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, region as ptr, vkapi.FILTER_LINEAR)
+    vk.vkCmdBlitImage(commands, from, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m.image,
+                      vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, region as ptr, vk.FILTER_LINEAR)
     free(region as ptr)
 }
 
@@ -368,13 +368,13 @@ record_hook(context: ptr) {
     source = ae3d_vk_frame_image()
     offscreen = ae3d_vk_frame_offscreen() == 1
     if !offscreen {
-        barrier(commands, source, 0, vkapi.IMAGE_LAYOUT_PRESENT_SRC_KHR, vkapi.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                0, vkapi.ACCESS_TRANSFER_READ_BIT, vkapi.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
+        barrier(commands, source, 0, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                0, vk.ACCESS_TRANSFER_READ_BIT, vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
     }
     // After the last frame's blits read the levels this one writes, not
     // merely after nothing (#410).
-    barrier(commands, m.image, 0 - 1, vkapi.IMAGE_LAYOUT_UNDEFINED, vkapi.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            0, vkapi.ACCESS_TRANSFER_WRITE_BIT, vkapi.PIPELINE_STAGE_TRANSFER_BIT)
+    barrier(commands, m.image, 0 - 1, vk.IMAGE_LAYOUT_UNDEFINED, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            0, vk.ACCESS_TRANSFER_WRITE_BIT, vk.PIPELINE_STAGE_TRANSFER_BIT)
     blit(commands, m, source, 0, frame_w, frame_h, 0, m.width, m.height)
     w = m.width
     h = m.height
@@ -382,44 +382,44 @@ record_hook(context: ptr) {
     while level < m.levels {
         nw = half(w)
         nh = half(h)
-        barrier(commands, m.image, level - 1, vkapi.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, vkapi.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                vkapi.ACCESS_TRANSFER_WRITE_BIT, vkapi.ACCESS_TRANSFER_READ_BIT, vkapi.PIPELINE_STAGE_TRANSFER_BIT)
+        barrier(commands, m.image, level - 1, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                vk.ACCESS_TRANSFER_WRITE_BIT, vk.ACCESS_TRANSFER_READ_BIT, vk.PIPELINE_STAGE_TRANSFER_BIT)
         blit(commands, m, m.image, level - 1, w, h, level, nw, nh)
         w = nw
         h = nh
         level = level + 1
     }
-    barrier(commands, m.image, m.levels - 1, vkapi.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, vkapi.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            vkapi.ACCESS_TRANSFER_WRITE_BIT, vkapi.ACCESS_TRANSFER_READ_BIT, vkapi.PIPELINE_STAGE_TRANSFER_BIT)
+    barrier(commands, m.image, m.levels - 1, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            vk.ACCESS_TRANSFER_WRITE_BIT, vk.ACCESS_TRANSFER_READ_BIT, vk.PIPELINE_STAGE_TRANSFER_BIT)
     // This slot's buffer was written by the copy two frames ago and read by
     // the host since: the copy waits for both, and what it writes is made
     // visible to the host, which reads it after the fence (#410).
-    memory_barrier(commands, vkapi.PIPELINE_STAGE_TRANSFER_BIT | vkapi.PIPELINE_STAGE_HOST_BIT, vkapi.PIPELINE_STAGE_TRANSFER_BIT,
-                   vkapi.ACCESS_TRANSFER_WRITE_BIT | vkapi.ACCESS_HOST_READ_BIT, vkapi.ACCESS_TRANSFER_WRITE_BIT)
+    memory_barrier(commands, vk.PIPELINE_STAGE_TRANSFER_BIT | vk.PIPELINE_STAGE_HOST_BIT, vk.PIPELINE_STAGE_TRANSFER_BIT,
+                   vk.ACCESS_TRANSFER_WRITE_BIT | vk.ACCESS_HOST_READ_BIT, vk.ACCESS_TRANSFER_WRITE_BIT)
     region = calloc(1, sizeof(VkBufferImageCopy)) as *VkBufferImageCopy
-    region.imageSubresource.aspectMask = vkapi.IMAGE_ASPECT_COLOR_BIT
+    region.imageSubresource.aspectMask = vk.IMAGE_ASPECT_COLOR_BIT
     region.imageSubresource.mipLevel = m.levels - 1
     region.imageSubresource.layerCount = 1
     region.imageExtent.width = m.small_width
     region.imageExtent.height = m.small_height
     region.imageExtent.depth = 1
-    vkapi.vkCmdCopyImageToBuffer(commands, m.image, vkapi.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, (m.buffers as ptr[])[slot], 1, region as ptr)
+    vk.vkCmdCopyImageToBuffer(commands, m.image, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, (m.buffers as ptr[])[slot], 1, region as ptr)
     free(region as ptr)
-    memory_barrier(commands, vkapi.PIPELINE_STAGE_TRANSFER_BIT, vkapi.PIPELINE_STAGE_HOST_BIT,
-                   vkapi.ACCESS_TRANSFER_WRITE_BIT, vkapi.ACCESS_HOST_READ_BIT)
+    memory_barrier(commands, vk.PIPELINE_STAGE_TRANSFER_BIT, vk.PIPELINE_STAGE_HOST_BIT,
+                   vk.ACCESS_TRANSFER_WRITE_BIT, vk.ACCESS_HOST_READ_BIT)
     if !offscreen {
         back = calloc(1, sizeof(VkImageMemoryBarrier)) as *VkImageMemoryBarrier
-        back.sType = vkapi.STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER
-        back.oldLayout = vkapi.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
-        back.newLayout = vkapi.IMAGE_LAYOUT_PRESENT_SRC_KHR
-        back.srcQueueFamilyIndex = vkapi.QUEUE_FAMILY_IGNORED
-        back.dstQueueFamilyIndex = vkapi.QUEUE_FAMILY_IGNORED
+        back.sType = vk.STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER
+        back.oldLayout = vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+        back.newLayout = vk.IMAGE_LAYOUT_PRESENT_SRC_KHR
+        back.srcQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED
+        back.dstQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED
         back.image = source
-        back.subresourceRange.aspectMask = vkapi.IMAGE_ASPECT_COLOR_BIT
+        back.subresourceRange.aspectMask = vk.IMAGE_ASPECT_COLOR_BIT
         back.subresourceRange.levelCount = 1
         back.subresourceRange.layerCount = 1
-        back.srcAccessMask = vkapi.ACCESS_TRANSFER_READ_BIT
-        vkapi.vkCmdPipelineBarrier(commands, vkapi.PIPELINE_STAGE_TRANSFER_BIT, vkapi.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        back.srcAccessMask = vk.ACCESS_TRANSFER_READ_BIT
+        vk.vkCmdPipelineBarrier(commands, vk.PIPELINE_STAGE_TRANSFER_BIT, vk.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                                 0, 0, null, 0, null, 1, back as ptr)
         free(back as ptr)
     }
