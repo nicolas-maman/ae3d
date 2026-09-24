@@ -1,0 +1,120 @@
+// Multiplayer (#413): eight cars round a ring, moved by the host and drawn
+// by every client from what the host sent.
+//
+//   ./build.sh examples/net_cars.ae
+//   ./build/net_cars                                  # host, on 127.0.0.1:7777
+//   AE3D_NET=join:127.0.0.1 ./build/net_cars          # a client, in another terminal
+//   AE3D_NET_BIND=0.0.0.0 ./build/net_cars            # host for the whole network
+//
+// Both sides build the same scene and mark the same objects networked in the
+// same order, which is what gives them the same ids. The host's script moves
+// the cars; a client runs no script on them, since the session puts them
+// where the host had them a tenth of a second ago, between two snapshots.
+
+import ae3d.core
+import ae3d.platform
+import ae3d.engine
+import ae3d.behaviour
+import ae3d.loader
+import ae3d.net
+import std.os
+import std.string
+
+extern cos(x: float) -> float
+extern sin(x: float) -> float
+
+const CARS = 8
+const RING = 40.0
+
+struct Ring {
+    cars: ptr                        // *GameObject[CARS]
+    time: float
+}
+
+// The host's script: round the ring, a car every eighth of it, each facing
+// the way it goes.
+drive(state: ptr, go: *GameObject, delta: float) {
+    ring = state as *Ring
+    ring.time = ring.time + delta
+    cars = ring.cars as ptr[]
+    i = 0
+    while i < CARS {
+        a = ring.time * 0.4 + (i as float) * 6.2832 / (CARS as float)
+        m = behaviour.object_model(cars[i] as *GameObject)
+        core.model_set_position(m, RING * cos(a), 4.0, RING * sin(a))
+        core.model_set_rotation(m, core.quat_rotate(0.0 - a, core.vec3(0.0, 1.0, 0.0)))
+        i = i + 1
+    }
+}
+
+look(state: ptr, go: *GameObject) {
+    cam = engine.engine_camera(engine.of(go))
+    core.camera_set_position(cam, core.vec3(0.0, 70.0, 90.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+}
+
+main() {
+    mode = core.text(os.getenv("AE3D_NET"))
+    session = null as *Net
+    hosting = string.starts_with(mode, "join:") != 1
+    if hosting {
+        bind = core.text(os.getenv("AE3D_NET_BIND"))
+        if bind == "" { bind = "127.0.0.1" }
+        session = net.host_tcp(bind, 7777)
+    } else {
+        address = string.substring(mode, 5, string.length(mode))
+        session = net.join_tcp(address, 7777)
+    }
+    if session == null {
+        println("net_cars: ${net.last_error()}")
+        return
+    }
+
+    e = engine.engine_new()
+    engine.engine_set_size(e, 1024, 640)
+    if hosting {
+        engine.engine_set_title(e, "ae3d - net cars (host)")
+    } else {
+        engine.engine_set_title(e, "ae3d - net cars (client)")
+    }
+    light = core.light_sun(core.vec3(0.4, 0.8, 0.5))
+    engine.engine_set_light(e, light)
+
+    ground = loader.plane(2, 200.0)
+    core.model_set_position(ground, 0.0 - 100.0, 0.0, 0.0 - 100.0)
+    core.model_matte(ground, 0.28, 0.3, 0.32)
+    engine.object(e, "Ground", ground)
+
+    cars_block = calloc(CARS, 8)
+    cars = cars_block as ptr[]
+    i = 0
+    while i < CARS {
+        body = loader.cube(1.0)
+        core.model_set_scale(body, 8.0, 4.0, 4.0)
+        hue = (i as float) / (CARS as float)
+        core.model_glossy(body, 0.3 + 0.7 * hue, 0.25, 1.0 - 0.7 * hue)
+        car = engine.object(e, "Car", body)
+        net.networked(session, car)
+        cars[i] = car as ptr
+        i = i + 1
+    }
+
+    ring = Ring { cars: cars_block, time: 0.0 }
+    director = engine.object(e, "Director", null)
+    if hosting {
+        engine.script(director, "Ring", &ring, look, drive)
+    } else {
+        engine.script(director, "Camera", &ring, look, null)
+    }
+    net.attach(e, session)
+
+    engine.engine_run(e)
+
+    engine.engine_free(e)
+    net.net_free(session)
+    free(cars_block)
+    core.light_free(light)
+}
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)

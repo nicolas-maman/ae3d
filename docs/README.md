@@ -16,6 +16,7 @@ at the root is the front page; this is the map.
 | [Crowds and navigation](crowds.md) | Pose banks, the horde's kernels, the flow field, the ECS, the job pool the simulation runs on |
 | [The asset pipeline](pipeline.md) | Blender to engine: the exporter, the manifest, the critique, glTF from anywhere |
 | [The agent channel](agent.md) | The JSON channel a program, a test or an AI agent drives a running scene through |
+| [Networking](networking.md) | `ae3d.net`: a host and its clients, the transports (loopback with simulated conditions, TCP), replication and interpolation, and the numbers they are held to |
 | [The editor](editor.md) | The scene editor: panels, controls, undo, scene files, how the viewport is drawn |
 | [Performance](performance.md) | How a frame is measured, and where the frames are on the machine the numbers were taken on |
 | [Testing and verification](testing.md) | The suites, the benchmarks, the critique, the frame budget, and how a scene is verified by number rather than by eye |

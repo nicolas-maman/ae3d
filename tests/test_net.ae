@@ -1,0 +1,223 @@
+// Multiplayer (#413): a host and a client in one process, the host moving
+// its networked objects along known paths, the client drawing them from the
+// snapshots it received. Held to numbers:
+//
+//   - the client is welcomed;
+//   - what it draws is where the host had each object at the moment the
+//     client draws (view_time), within a bound: over a perfect link, over a
+//     link with 100 ms latency, 20 ms jitter and 2% loss, and over TCP;
+//   - the snapshots arrive at the tick rate, less what the link lost;
+//   - the bytes a client costs a second, for sixteen objects, stay under a
+//     budget.
+//
+// The loopback runs are on a clock of the test's own, so they are the same
+// every run; the TCP one is on the real clock, over this machine's loopback
+// interface.
+
+import ae3d.core
+import ae3d.behaviour
+import ae3d.net
+import ae3d.platform
+
+extern cos(x: float) -> float
+extern sin(x: float) -> float
+extern sqrt(x: float) -> float
+
+const OBJECTS = 16
+const RADIUS = 10.0
+
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, ok: bool) {
+    g_checks = g_checks + 1
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        g_failures = g_failures + 1
+        println("  FAIL ${name}")
+    }
+}
+
+// Object i at time t: round a circle a radian a second, each a radian
+// further on, at its own height, turned to face along the circle.
+path_x(i: int, t: float) -> float { return RADIUS * cos(t + (i as float)) }
+path_y(i: int, t: float) -> float { return (i as float) * 0.5 }
+path_z(i: int, t: float) -> float { return RADIUS * sin(t + (i as float)) }
+
+place(o: *GameObject, i: int, t: float) {
+    m = behaviour.object_model(o)
+    core.model_set_position(m, path_x(i, t), path_y(i, t), path_z(i, t))
+    core.model_set_rotation(m, core.quat_rotate(t + (i as float), core.vec3(0.0, 1.0, 0.0)))
+}
+
+// The scene both sides build, the same objects marked networked in the same
+// order, so their ids agree.
+build_scene(n: *Net, objects: ptr) {
+    list = objects as ptr[]
+    i = 0
+    while i < OBJECTS {
+        o = behaviour.object_new("car")
+        behaviour.object_set_model(o, core.model_new())
+        net.networked(n, o)
+        list[i] = o as ptr
+        i = i + 1
+    }
+}
+
+free_scene(objects: ptr) {
+    list = objects as ptr[]
+    i = 0
+    while i < OBJECTS {
+        o = list[i] as *GameObject
+        core.model_free(behaviour.object_model(o))
+        behaviour.object_free(o)
+        i = i + 1
+    }
+}
+
+// How far the client's drawing of every object is from where the host had
+// it at the client's view time, the worst of them, in metres.
+worst_error(client: *Net, drawn: ptr, now: float) -> float {
+    t = net.view_time(client, now)
+    if t < 0.0 { return 0.0 - 1.0 }
+    list = drawn as ptr[]
+    worst = 0.0
+    i = 0
+    while i < OBJECTS {
+        m = behaviour.object_model(list[i] as *GameObject)
+        dx = m.position.x - path_x(i, t)
+        dy = m.position.y - path_y(i, t)
+        dz = m.position.z - path_z(i, t)
+        d = sqrt(dx * dx + dy * dy + dz * dz)
+        if d > worst { worst = d }
+        i = i + 1
+    }
+    return worst
+}
+
+// Two seconds of a session over a loopback hub with these conditions, at
+// 60 steps a second on the test's clock. The worst error after the first
+// half second, and the snapshots the client took.
+loopback_run(label: string, latency: float, jitter: float, loss: float, bound: float) {
+    hub = net.hub_new()
+    net.hub_set_conditions(hub, latency, jitter, loss)
+    host = net.host_loopback(hub)
+    client = net.join_loopback(hub)
+    host_objects = calloc(OBJECTS, 8)
+    client_objects = calloc(OBJECTS, 8)
+    build_scene(host, host_objects)
+    build_scene(client, client_objects)
+    worst = 0.0
+    measured = 0
+    step = 0
+    while step < 120 {
+        now = (step as float) / 60.0
+        hl = host_objects as ptr[]
+        i = 0
+        while i < OBJECTS {
+            place(hl[i] as *GameObject, i, now)
+            i = i + 1
+        }
+        net.step(host, now)
+        net.step(client, now)
+        if now >= 0.5 {
+            e = worst_error(client, client_objects, now)
+            if e < 0.0 { e = 1000.0 }
+            if e > worst { worst = e }
+            measured = measured + 1
+        }
+        step = step + 1
+    }
+    snaps = net.snapshots_received(client)
+    sent = net.bytes_sent(host)
+    println("  ${label}: worst ${worst * 1000.0} mm over ${measured} steps; ${snaps} snapshots; host sent ${sent} bytes in 2 s")
+    check("${label}: the client is welcomed", net.connected(client) && net.client_id(client) == 1 && net.peer_count(host) == 1)
+    check("${label}: the client draws each object where the host had it, within ${bound * 1000.0} mm", worst <= bound && measured > 0)
+    // 30 a second for two seconds, less the first before the hello came
+    // back, less what the link lost.
+    wanted = (60.0 * (1.0 - loss) - 10.0) as int
+    check("${label}: snapshots arrive at the tick rate, less the link's losses (${snaps} of 60)", snaps >= wanted)
+    if loss == 0.0 && latency == 0.0 {
+        per_second = (sent as float) / 2.0
+        check("sixteen objects cost a client ${per_second / 1024.0} KB a second, under 20", per_second < 20.0 * 1024.0)
+    }
+    free_scene(host_objects)
+    free_scene(client_objects)
+    free(host_objects)
+    free(client_objects)
+    net.net_free(client)
+    net.net_free(host)
+    net.hub_free(hub)
+}
+
+// The same over TCP on this machine, on the real clock for a second and a
+// half.
+tcp_run() {
+    host = net.host_tcp("127.0.0.1", 0)
+    if host == null {
+        println("  tcp: SKIP ${net.last_error()}")
+        return
+    }
+    client = net.join_tcp("127.0.0.1", net.tcp_port(host))
+    if client == null {
+        println("  tcp: SKIP ${net.last_error()}")
+        net.net_free(host)
+        return
+    }
+    host_objects = calloc(OBJECTS, 8)
+    client_objects = calloc(OBJECTS, 8)
+    build_scene(host, host_objects)
+    build_scene(client, client_objects)
+    start = platform.time()
+    worst = 0.0
+    measured = 0
+    while platform.time() - start < 1.5 {
+        now = platform.time() - start
+        hl = host_objects as ptr[]
+        i = 0
+        while i < OBJECTS {
+            place(hl[i] as *GameObject, i, now)
+            i = i + 1
+        }
+        net.step(host, now)
+        net.step(client, now)
+        if now >= 0.5 {
+            e = worst_error(client, client_objects, now)
+            if e >= 0.0 {
+                if e > worst { worst = e }
+                measured = measured + 1
+            }
+        }
+        sleep(2)
+    }
+    println("  tcp: worst ${worst * 1000.0} mm over ${measured} steps; ${net.snapshots_received(client)} snapshots")
+    check("tcp: the client is welcomed", net.connected(client) && net.peer_count(host) == 1)
+    check("tcp: the client draws each object where the host had it, within 10 mm", measured > 0 && worst <= 0.01)
+    free_scene(host_objects)
+    free_scene(client_objects)
+    free(host_objects)
+    free(client_objects)
+    net.net_free(client)
+    net.net_free(host)
+}
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+main() {
+    println("net: a host and a client, in one process")
+    // A perfect link: the only error is the chord of the circle between two
+    // snapshots, r (1 - cos(w dt / 2)) = 10 (1 - cos(1/60)) = 1.39 mm at 30
+    // a second. Measured: 1.389.
+    loopback_run("perfect link", 0.0, 0.0, 0.0, 0.0015)
+    // 100 ms, 20 ms of jitter, 2% lost: a lost snapshot doubles the interval
+    // the client draws across, 10 (1 - cos(1/30)) = 5.55 mm. Measured: 5.555.
+    loopback_run("100 ms, 20 ms jitter, 2% loss", 0.1, 0.02, 0.02, 0.006)
+    tcp_run()
+    if g_failures == 0 {
+        println("net: all checks passed (${g_checks})")
+    } else {
+        println("net: ${g_failures} failure(s) of ${g_checks}")
+    }
+}
