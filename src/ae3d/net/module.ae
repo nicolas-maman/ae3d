@@ -16,16 +16,19 @@
 //     message is reliable (never lost, in order: the handshake, events) or
 //     not (a snapshot: the next one supersedes it, so waiting for a lost one
 //     would only make it later);
-//   - the protocol: a hello, a welcome with the client's id, snapshots;
+//   - the protocol: a hello, a welcome with the client's id, snapshots,
+//     and events (a game's own messages, reliable, either way);
 //   - replication: net ids by the order objects are marked networked, the
-//     same on both sides for a scene both build, and a history of samples a
-//     client interpolates from.
+//     same on both sides for a scene both build, then by the order the host
+//     creates objects mid-game (a rocket, a car), told to each client as it
+//     does; and a history of samples a client interpolates from.
 //
 // Time is passed in (seconds, any origin): the engine passes its clock, a
 // test a clock of its own, so a run under simulated conditions is the same
 // every time.
 
 import std.bytes
+import std.heap
 import std.list
 import std.mem
 import std.string
@@ -44,6 +47,8 @@ exports (
     networked, networked_count, step, attach, connected, client_id, peer_count, view_time,
     set_tick_rate, set_interpolation_delay, set_relevance, objects_sent, bytes_sent, bytes_received, snapshots_received,
     NetPlayer, set_player_maker, host_play, player_input, my_player, player_of, player_count, prediction_error, input_sent,
+    NetCall, HOST, EVERYONE, on_event, send_event,
+    object_kind, create_object, destroy_object, object_of, id_of,
     net_free, last_error
 )
 
@@ -58,7 +63,10 @@ extern sqrt(x: float) -> float
 const ROLE_HOST = 1
 const ROLE_CLIENT = 2
 
-const PROTOCOL = 2                   // 2: snapshots are deltas against an acknowledged one
+const HOST = 0                       // an event's recipient: the host, the only one a client sends to
+const EVERYONE = 0 - 1               // an event's recipients: every client the host has welcomed
+
+const PROTOCOL = 3                   // 2: snapshots are deltas against an acknowledged one; 3: events, objects created mid-game
 const MSG_HELLO = 1                  // client -> host: [u8][u32 protocol]
 const MSG_WELCOME = 2                // host -> client: [u8][u32 client id][u32 tick rate]
 // host -> client, unreliable: [u8][u32 tick][f32 time][u32 ack][u32 baseline][u16 objects][u16 changed],
@@ -68,6 +76,13 @@ const MSG_SNAPSHOT = 3
 const MSG_INPUT = 4                  // client -> host, unreliable: [u8][u32 first seq][u8 count], then a command each: [f32 walk x z][f32 jump]
 const MSG_SPAWN = 5                  // host -> client, reliable: [u8][u32 net id][u32 owner]
 const MSG_ACK = 6                    // client -> host, unreliable: [u8][u32 tick], a snapshot it has
+const MSG_EVENT = 7                  // either way, reliable: [u8][u16 event][u8 count], then count f32 values
+// host -> client, reliable: [u8][u32 net id][u16 kind][f32 host time][f32 x y z][f32 qx qy qz qw],
+// an object the host created, where it has it now.
+const MSG_CREATE = 8
+// host -> client, reliable: [u8][u32 net id][f32 host time][f32 x y z][f32 qx qy qz qw], a created
+// object gone, and where it was last.
+const MSG_DESTROY = 9
 
 const KIND_LOOP = 1
 const KIND_TCP = 2
@@ -87,6 +102,7 @@ const COMMAND = 4                    // floats a command: seq, walk x, walk z, j
 const RESENT = 4                     // the unacknowledged commands every input message carries: four lost in a row costs a correction
 const PLAYER_STEP = 0.016666666666666666   // a command's step, seconds: the fixed step's
 const QUEUE_DEPTH = 3                // host: the commands a client's queue holds before it catches up
+const EVENT_VALUES = 4               // the numbers an event carries at most
 
 var g_error = ""
 
@@ -334,6 +350,38 @@ struct NetObject {
     history: ptr                     // float[HISTORY * SAMPLE], a ring
     count: int                       // samples held
     newest: int                      // the newest one's slot
+    kind: int                        // a created object's kind id; 0 for one the scene marked, or a player
+    leaving: bool                    // client: the host has destroyed it, and it goes at `leaves`
+    leaves: float                    // the host's time it was destroyed
+}
+
+// What an event brings its handler: which event it is, who sent it (a
+// client's id on the host; HOST, 0, on a client), and the numbers it
+// carries, 0 where the sender gave fewer.
+struct NetCall {
+    event: int
+    sender: int
+    a: float
+    b: float
+    c: float
+    d: float
+}
+
+// An event a game has registered: its name, and what is called with every
+// one that arrives.
+struct NetHandler {
+    name: string
+    handler: fn(ptr, *NetCall)
+    context: ptr
+}
+
+// A kind of object the host creates mid-game: its name, and how the game
+// makes one and lets one go, the same on both sides.
+struct NetKind {
+    name: string
+    maker: fn(ptr, int) -> *GameObject
+    unmaker: fn(ptr, *GameObject)
+    context: ptr
 }
 
 struct Net {
@@ -376,6 +424,8 @@ struct Net {
     received: ptr                    // client: list of *Snapshot, oldest first, rebuilt from their deltas
     relevance: float                 // host: metres around a client's player beyond which it is not sent anything; 0 for all
     objects_sent: long               // host: object states written, all clients
+    handlers: ptr                    // list of *NetHandler, by event id - 1
+    kinds: ptr                       // list of *NetKind, by kind id - 1
 }
 
 net_new(role: int, kind: int) -> *Net {
@@ -393,6 +443,8 @@ net_new(role: int, kind: int) -> *Net {
     n.commands = calloc(COMMANDS * COMMAND, 8)
     n.next_seq = 1
     n.received = list.new()
+    n.handlers = list.new()
+    n.kinds = list.new()
     return n
 }
 
@@ -751,8 +803,35 @@ networked_at(n: *Net, o: *GameObject, id: int) {
     list.set(n.objects, id - 1, no as ptr)
 }
 
+// Where a networked object is: its model's place, or for an object with no
+// model (a player, a trigger) its game object's.
+position_of(o: *GameObject) -> Vec3 {
+    m = behaviour.object_model(o)
+    if m != null { return m.position }
+    return behaviour.object_position(o)
+}
+
+rotation_of(o: *GameObject) -> Quat {
+    m = behaviour.object_model(o)
+    if m != null { return m.rotation }
+    return behaviour.object_rotation(o)
+}
+
+// A networked object put somewhere, the same way round: its model, or its
+// game object when it has none.
+set_transform(o: *GameObject, where: Vec3, turn: Quat) {
+    m = behaviour.object_model(o)
+    if m != null {
+        core.model_set_position(m, where.x, where.y, where.z)
+        core.model_set_rotation(m, turn)
+    } else {
+        behaviour.object_set_position(o, where)
+        behaviour.object_set_rotation(o, turn)
+    }
+}
+
 // Every networked object's state now: STATE floats each, and whether there
-// is an object at that id at all.
+// is an object at that id at all (a destroyed one's id has none).
 current_states(n: *Net) -> *Snapshot {
     count = list.size(n.objects)
     shot = snapshot_new(n.tick, count)
@@ -763,18 +842,8 @@ current_states(n: *Net) -> *Snapshot {
         no = list.get_raw(n.objects, i) as *NetObject
         if no != null {
             at = i * STATE
-            m = behaviour.object_model(no.object)
-            where = core.vec3(0.0, 0.0, 0.0)
-            turn = core.quat(0.0, 0.0, 0.0, 1.0)
-            if m != null {
-                where = m.position
-                turn = m.rotation
-            } else {
-                // An object with no model (a player, a trigger): where its
-                // game object is, turned as it is.
-                where = behaviour.object_position(no.object)
-                turn = behaviour.object_rotation(no.object)
-            }
+            where = position_of(no.object)
+            turn = rotation_of(no.object)
             states[at] = where.x
             states[at + 1] = where.y
             states[at + 2] = where.z
@@ -842,6 +911,8 @@ snapshot_to(n: *Net, p: *Peer, now_states: *Snapshot, now: float) {
     }
     // What this client is told: the objects within its relevance as they
     // are now, the rest as it was last told them (or nothing, never told).
+    // A destroyed object is not told at all: its id is never given again,
+    // so no later object is read as a change against its old state.
     changed = 0
     i = 0
     while i < count {
@@ -853,7 +924,7 @@ snapshot_to(n: *Net, p: *Peer, now_states: *Snapshot, now: float) {
                 k = k + 1
             }
             told_known[i] = 1
-        } else if base != null && i < base_count && base_known[i] == 1 {
+        } else if known[i] == 1 && base != null && i < base_count && base_known[i] == 1 {
             k = 0
             while k < STATE {
                 told_states[at + k] = base_states[at + k]
@@ -996,27 +1067,33 @@ take_snapshot(n: *Net, r: *NetReader, now: float) {
             if mine != null && id == mine.net_id {
                 reconcile(n, core.vec3(states[at], states[at + 1], states[at + 2]), states[at + 8], states[at + 9] > 0.5, ack)
             } else {
+                // An id with no object here -- destroyed, or created and not
+                // told of yet -- has nothing to draw; a leaving one has its
+                // last sample already.
                 no = object_by_id(n, id)
-                if no != null {
-                    h = no.history as float[]
-                    if no.count == 0 || host_time > h[no.newest * SAMPLE] {
-                        slot = (no.newest + 1) % HISTORY
-                        if no.count == 0 { slot = 0 }
-                        hs = slot * SAMPLE
-                        h[hs] = host_time
-                        k = 0
-                        while k < 7 {
-                            h[hs + 1 + k] = states[at + k]
-                            k = k + 1
-                        }
-                        no.newest = slot
-                        if no.count < HISTORY { no.count = no.count + 1 }
-                    }
-                }
+                if no != null && !no.leaving { add_sample(no, host_time, states, at) }
             }
         }
         i = i + 1
     }
+}
+
+// A sample of an object at the host's time `host_time`, the seven floats of
+// `values` at `at`, into its history: kept when newer than the newest held.
+add_sample(no: *NetObject, host_time: float, values: float[], at: int) {
+    h = no.history as float[]
+    if no.count > 0 && host_time <= h[no.newest * SAMPLE] { return }
+    slot = (no.newest + 1) % HISTORY
+    if no.count == 0 { slot = 0 }
+    hs = slot * SAMPLE
+    h[hs] = host_time
+    k = 0
+    while k < 7 {
+        h[hs + 1 + k] = values[at + k]
+        k = k + 1
+    }
+    no.newest = slot
+    if no.count < HISTORY { no.count = no.count + 1 }
 }
 
 view_time(n: *Net, now: float) -> float {
@@ -1150,6 +1227,7 @@ step(n: *Net, now: float) {
         }
     } else {
         interpolate(n, now)
+        let_go(n, now)
     }
 }
 
@@ -1178,6 +1256,25 @@ handle(n: *Net, ev: *NetEvent, now: float) {
         put_u32(b, (n.tick_rate) as int)
         deliver(n, p, true, b.data, b.length, now)
         host_player(n, p, now)
+        tell_objects(n, p, now)
+        return
+    }
+    if kind == MSG_EVENT {
+        // On the host, from a client it has welcomed; on a client, from the
+        // host (the only peer it has).
+        if n.role == ROLE_HOST {
+            p = peer_by_id(n, ev.peer)
+            if p == null || !p.welcomed { return }
+        }
+        take_event(n, ev.peer, &r)
+        return
+    }
+    if n.role == ROLE_CLIENT && kind == MSG_CREATE {
+        client_create(n, &r)
+        return
+    }
+    if n.role == ROLE_CLIENT && kind == MSG_DESTROY {
+        client_destroy(n, &r)
         return
     }
     if n.role == ROLE_HOST && kind == MSG_INPUT {
@@ -1493,6 +1590,338 @@ reconcile(n: *Net, at: Vec3, vy: float, grounded: bool, ack: int) {
     if moved > n.worst_correction { n.worst_correction = moved }
 }
 
+// --- events ----------------------------------------------------------------------------------
+//
+// A game's own messages: a horn honked, a hit, a door opened. An event is
+// reliable, so it arrives once and in order with everything else reliable
+// the same side sent the same peer: an event the host sends after creating
+// an object arrives after the object is there. It carries up to four
+// numbers (an id, an amount, a place), 32-bit floats on the wire, and only
+// as many as the last one that is not 0.
+
+// An event this side handles: `handler(context, call)` is called with
+// every one that arrives, in the step it arrives. On the wire an event is
+// its order among the registered, so both sides register the same events
+// in the same order, as they mark the same objects networked. Returns the
+// event's id.
+on_event(n: *Net, name: string, handler: fn(ptr, *NetCall), context: ptr) -> int {
+    h = heap.new(NetHandler)
+    h.name = core.set_owned(h.name, name)
+    h.handler = handler
+    h.context = context
+    list.add_raw(n.handlers, h as ptr)
+    return list.size(n.handlers)
+}
+
+event_named(n: *Net, name: string) -> int {
+    i = 0
+    while i < list.size(n.handlers) {
+        h = list.get_raw(n.handlers, i) as *NetHandler
+        if string.equals(h.name, name) == 1 { return i + 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+// Send an event. A client's go to the host (`to` is HOST); the host's go
+// to one client, by its id, or to EVERYONE it has welcomed -- not to the
+// host itself, whose game calls its own code. False when there is no such
+// event, or no one to send it to yet (a client before its welcome).
+send_event(n: *Net, name: string, to: int, now: float, a: float = 0.0, b: float = 0.0, c: float = 0.0, d: float = 0.0) -> bool {
+    event = event_named(n, name)
+    if event == 0 {
+        g_error = "no event named ${name}"
+        return false
+    }
+    count = 4
+    if d == 0.0 {
+        count = 3
+        if c == 0.0 {
+            count = 2
+            if b == 0.0 {
+                count = 1
+                if a == 0.0 { count = 0 }
+            }
+        }
+    }
+    out = n.out
+    out.length = 0
+    put_u8(out, MSG_EVENT)
+    put_u16(out, event)
+    put_u8(out, count)
+    if count > 0 { put_f32(out, a) }
+    if count > 1 { put_f32(out, b) }
+    if count > 2 { put_f32(out, c) }
+    if count > 3 { put_f32(out, d) }
+    if n.role == ROLE_CLIENT {
+        if n.my_id == 0 { return false }
+        deliver(n, peer_by_id(n, 0), true, out.data, out.length, now)
+        return true
+    }
+    sent = false
+    i = 0
+    while i < list.size(n.peers) {
+        p = list.get_raw(n.peers, i) as *Peer
+        if p.welcomed && p.open && (to == EVERYONE || to == p.id) {
+            deliver(n, p, true, out.data, out.length, now)
+            sent = true
+        }
+        i = i + 1
+    }
+    return sent
+}
+
+// An event that arrived, to its handler.
+take_event(n: *Net, sender: int, r: *NetReader) {
+    event = get_u16(r)
+    count = get_u8(r)
+    if count > EVENT_VALUES { return }
+    a = 0.0
+    b = 0.0
+    c = 0.0
+    d = 0.0
+    if count > 0 { a = get_f32(r) }
+    if count > 1 { b = get_f32(r) }
+    if count > 2 { c = get_f32(r) }
+    if count > 3 { d = get_f32(r) }
+    if !r.ok || event < 1 || event > list.size(n.handlers) { return }
+    h = list.get_raw(n.handlers, event - 1) as *NetHandler
+    call = NetCall { event: event, sender: sender, a: a, b: b, c: c, d: d }
+    handler = h.handler
+    handler(h.context, &call)
+}
+
+// --- objects created mid-game ------------------------------------------------------------------
+//
+// The scene's networked objects are known by the order both sides mark
+// them. An object the host creates while the game runs (a rocket, a car
+// driven in) is known by the id the host gives it, the next after every id
+// so far, and by its kind: the host tells every client the id, the kind
+// and where it is, and each client makes its own with the kind's maker.
+// An id is never given again, so a snapshot or a delta that still names a
+// destroyed object finds nothing there.
+
+// A kind of object the host creates: `maker(context, id)` returns a new
+// game object for net id `id` (the session places it), and
+// `unmaker(context, o)` lets one go (engine.destroy, as a game does; null
+// to keep it). Both sides register the same kinds in the same order: on the
+// wire a kind is that order. Returns the kind's id.
+object_kind(n: *Net, name: string, maker: fn(ptr, int) -> *GameObject, unmaker: fn(ptr, *GameObject), context: ptr) -> int {
+    k = heap.new(NetKind)
+    k.name = core.set_owned(k.name, name)
+    k.maker = maker
+    k.unmaker = unmaker
+    k.context = context
+    list.add_raw(n.kinds, k as ptr)
+    return list.size(n.kinds)
+}
+
+kind_named(n: *Net, name: string) -> int {
+    i = 0
+    while i < list.size(n.kinds) {
+        k = list.get_raw(n.kinds, i) as *NetKind
+        if string.equals(k.name, name) == 1 { return i + 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+// A new object of a kind, on the host, at `position` turned by `rotation`:
+// made by the kind's maker, networked, and told to every client now, each
+// making its own and placing it the same. From the next tick the snapshots
+// carry it like any. Null on a client, or with no such kind.
+create_object(n: *Net, name: string, position: Vec3, rotation: Quat, now: float) -> *GameObject {
+    if n.role != ROLE_HOST { return null }
+    kind = kind_named(n, name)
+    if kind == 0 {
+        g_error = "no object kind named ${name}"
+        return null
+    }
+    k = list.get_raw(n.kinds, kind - 1) as *NetKind
+    id = list.size(n.objects) + 1
+    maker = k.maker
+    o = maker(k.context, id)
+    if o == null { return null }
+    set_transform(o, position, rotation)
+    networked_at(n, o, id)
+    no = object_by_id(n, id)
+    no.kind = kind
+    i = 0
+    while i < list.size(n.peers) {
+        p = list.get_raw(n.peers, i) as *Peer
+        if p.welcomed { tell_object(n, p, no, now) }
+        i = i + 1
+    }
+    return o
+}
+
+// An object the host created, gone: every client told when and where it
+// was last, then the kind's unmaker lets it go here. A client draws it to
+// that place and lets its own go when its view reaches that moment, so the
+// object lives the same stretch of the host's time on every side.
+destroy_object(n: *Net, o: *GameObject, now: float) {
+    if n.role != ROLE_HOST || o == null { return }
+    no = null as *NetObject
+    i = 0
+    while i < list.size(n.objects) {
+        candidate = list.get_raw(n.objects, i) as *NetObject
+        if candidate != null && candidate.object == o && candidate.kind > 0 { no = candidate }
+        i = i + 1
+    }
+    if no == null { return }
+    where = position_of(o)
+    turn = rotation_of(o)
+    out = n.out
+    out.length = 0
+    put_u8(out, MSG_DESTROY)
+    put_u32(out, no.id)
+    put_f32(out, now)
+    put_f32(out, where.x)
+    put_f32(out, where.y)
+    put_f32(out, where.z)
+    put_f32(out, turn.x)
+    put_f32(out, turn.y)
+    put_f32(out, turn.z)
+    put_f32(out, turn.w)
+    i = 0
+    while i < list.size(n.peers) {
+        p = list.get_raw(n.peers, i) as *Peer
+        if p.welcomed { deliver(n, p, true, out.data, out.length, now) }
+        i = i + 1
+    }
+    forget(n, no)
+}
+
+// The game object at a net id, or null (none, or destroyed).
+object_of(n: *Net, id: int) -> *GameObject {
+    no = object_by_id(n, id)
+    if no == null { return null }
+    return no.object
+}
+
+// A networked object's net id, or 0: what an event names it by.
+id_of(n: *Net, o: *GameObject) -> int {
+    i = 0
+    while i < list.size(n.objects) {
+        no = list.get_raw(n.objects, i) as *NetObject
+        if no != null && no.object == o { return no.id }
+        i = i + 1
+    }
+    return 0
+}
+
+// A created object told to one client: its id, its kind, and where it is
+// now, at the host's time.
+tell_object(n: *Net, p: *Peer, no: *NetObject, now: float) {
+    where = position_of(no.object)
+    turn = rotation_of(no.object)
+    out = n.out
+    out.length = 0
+    put_u8(out, MSG_CREATE)
+    put_u32(out, no.id)
+    put_u16(out, no.kind)
+    put_f32(out, now)
+    put_f32(out, where.x)
+    put_f32(out, where.y)
+    put_f32(out, where.z)
+    put_f32(out, turn.x)
+    put_f32(out, turn.y)
+    put_f32(out, turn.z)
+    put_f32(out, turn.w)
+    deliver(n, p, true, out.data, out.length, now)
+}
+
+// Every created object still here, to a client just welcomed: one that
+// joins late has what the others have, and nothing destroyed before it
+// came.
+tell_objects(n: *Net, p: *Peer, now: float) {
+    i = 0
+    while i < list.size(n.objects) {
+        no = list.get_raw(n.objects, i) as *NetObject
+        if no != null && no.kind > 0 { tell_object(n, p, no, now) }
+        i = i + 1
+    }
+}
+
+// A client told of a created object makes its own with the kind's maker,
+// places it where the host has it, and keeps that as its first sample, so
+// it is drawn from there to wherever the snapshots take it.
+client_create(n: *Net, r: *NetReader) {
+    id = get_u32(r)
+    kind = get_u16(r)
+    host_time = get_f32(r)
+    values = calloc(7, 8)
+    v = values as float[]
+    k = 0
+    while k < 7 {
+        v[k] = get_f32(r)
+        k = k + 1
+    }
+    if r.ok && kind >= 1 && kind <= list.size(n.kinds) && object_by_id(n, id) == null {
+        nk = list.get_raw(n.kinds, kind - 1) as *NetKind
+        maker = nk.maker
+        o = maker(nk.context, id)
+        if o != null {
+            set_transform(o, core.vec3(v[0], v[1], v[2]), core.quat(v[3], v[4], v[5], v[6]))
+            networked_at(n, o, id)
+            no = object_by_id(n, id)
+            no.kind = kind
+            add_sample(no, host_time, v, 0)
+        }
+    }
+    free(values)
+}
+
+// The host destroyed an object: its last place is its last sample. A
+// snapshot cannot say an object is gone (one it leaves out is as it was),
+// so any sample from after that moment is the old state carried on and is
+// dropped. The object goes when this side's view reaches the moment.
+client_destroy(n: *Net, r: *NetReader) {
+    id = get_u32(r)
+    host_time = get_f32(r)
+    values = calloc(7, 8)
+    v = values as float[]
+    k = 0
+    while k < 7 {
+        v[k] = get_f32(r)
+        k = k + 1
+    }
+    no = object_by_id(n, id)
+    if r.ok && no != null && no.kind > 0 && !no.leaving {
+        h = no.history as float[]
+        while no.count > 0 && h[no.newest * SAMPLE] >= host_time {
+            no.newest = (no.newest - 1 + HISTORY) % HISTORY
+            no.count = no.count - 1
+        }
+        add_sample(no, host_time, v, 0)
+        no.leaving = true
+        no.leaves = host_time
+    }
+    free(values)
+}
+
+// The leaving objects whose moment this side's view has reached, let go.
+let_go(n: *Net, now: float) {
+    at = view_time(n, now)
+    i = 0
+    while i < list.size(n.objects) {
+        no = list.get_raw(n.objects, i) as *NetObject
+        if no != null && no.leaving && (at >= no.leaves || !n.offset_known) { forget(n, no) }
+        i = i + 1
+    }
+}
+
+// A created object let go: its kind's unmaker called, and its id left
+// empty for good.
+forget(n: *Net, no: *NetObject) {
+    k = list.get_raw(n.kinds, no.kind - 1) as *NetKind
+    unmaker = k.unmaker
+    if unmaker != null { unmaker(k.context, no.object) }
+    list.set(n.objects, no.id - 1, null)
+    free(no.history)
+    free(no as ptr)
+}
+
 bytes_sent(n: *Net) -> long { return n.sent }
 bytes_received(n: *Net) -> long { return n.got }
 snapshots_received(n: *Net) -> int { return n.snapshots }
@@ -1525,16 +1954,32 @@ net_free(n: *Net) {
         i = i + 1
     }
     list.free(n.peers)
+    // The objects the session created it lets go, by their kinds' unmakers;
+    // the scene's and the players' are the game's.
     i = 0
     while i < list.size(n.objects) {
         no = list.get_raw(n.objects, i) as *NetObject
-        if no != null {
+        if no != null && no.kind > 0 {
+            forget(n, no)
+        } else if no != null {
             free(no.history)
             free(no as ptr)
         }
         i = i + 1
     }
     list.free(n.objects)
+    i = 0
+    while i < list.size(n.handlers) {
+        heap.free(list.get_raw(n.handlers, i) as *NetHandler)
+        i = i + 1
+    }
+    list.free(n.handlers)
+    i = 0
+    while i < list.size(n.kinds) {
+        heap.free(list.get_raw(n.kinds, i) as *NetKind)
+        i = i + 1
+    }
+    list.free(n.kinds)
     i = 0
     while i < list.size(n.players) {
         free(list.get_raw(n.players, i))

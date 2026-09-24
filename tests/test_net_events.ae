@@ -1,0 +1,535 @@
+// Events and objects created mid-game (#413): a host and two clients in one
+// process, and a third client that joins later, each with a world of its
+// own, over a link with 100 ms latency, 20 ms jitter and 2% loss. Held to
+// numbers:
+//
+//   - every event arrives once and in order, from whom it was sent and with
+//     the numbers it was sent with, the loss notwithstanding: each client's
+//     honks to the host, the host's scores to everyone, and its whispers to
+//     one client (and not to the other);
+//   - an object the host creates -- nine rockets, two cars -- appears on
+//     each client within a one-way trip and a step, is drawn where the host
+//     had it at the client's view time within the geometry's bound, and
+//     goes when the client's view reaches the moment the host destroyed it;
+//   - the client that joins late is told every object alive then, and none
+//     destroyed before it came, and draws them where the host has them;
+//   - what it costs, in bytes;
+//   - over TCP, the honks and a created object framed on the stream.
+//
+// The loopback run is on a clock of the test's own, 60 steps a second, so
+// it is the same every time; the TCP one is on the real clock.
+
+import ae3d.core
+import ae3d.engine
+import ae3d.behaviour
+import ae3d.net
+import ae3d.platform
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern cos(x: float) -> float
+extern sin(x: float) -> float
+
+const STEPS = 330                    // five and a half seconds
+const STEP = 0.016666666666666666
+const IDS = 16                       // the net ids the host gives, at most
+const ROCKET = 1
+const CAR = 2
+const LIFE = 54                      // the steps a rocket flies: 0.9 s
+const LATE = 160                     // the step the third client joins: 2.67 s, after the last rocket and between two going
+
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, ok: bool) {
+    g_checks = g_checks + 1
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        g_failures = g_failures + 1
+        println("  FAIL ${name}")
+    }
+}
+
+// What the host did with every id: what it is, when it was created and
+// destroyed (-1: not yet), and the step it is due to go (0: never). Every
+// side reads it, so a client can tell how long an object took to reach it.
+struct Ledger {
+    now: float
+    kinds: ptr                       // int[IDS + 1]
+    born: ptr                        // float[IDS + 1]
+    died: ptr                        // float[IDS + 1]
+    ends: ptr                        // int[IDS + 1]
+}
+
+// One side of the session, and what reached it.
+struct Party {
+    ledger: *Ledger
+    world: *Engine
+    session: *Net
+    client: int                      // 0 for the host
+    joined: float                    // when it joined
+    made: int                        // objects its makers made
+    live: int                        // and still here
+    seen: ptr                        // int[IDS + 1]: 1 where it made that id
+    appear_worst: float              // seconds from the host's create to the maker here
+    gone_worst: float                // from the host's destroy to the unmaker here
+    gone: int                        // objects let go here that the host destroyed
+    worst: float                     // metres: the most a drawn object was from where the host had it
+    measured: int
+    close: int                       // of those, within 6 mm
+    lingering: int                   // steps an object was still here after its moment
+    honks: int
+    honk_next: ptr                   // int[4]: the number next expected from each client
+    scores: int
+    score_next: int                  // 0 before the first (a late joiner takes whichever comes first)
+    whispers: int
+    whisper_next: int
+    wrong: int                       // events out of order, twice, from the wrong sender or with the wrong numbers
+    event_worst: float               // seconds from sent to handled
+}
+
+// Where the host has object `id` at time t: a rocket flies from x = id on
+// an arc, 10 m/s along z and 5 m/s up under gravity; a car goes round a
+// circle of 10 m at a radian a second.
+truth(l: *Ledger, id: int, t: float) -> Vec3 {
+    kinds = l.kinds as int[]
+    born = l.born as float[]
+    if kinds[id] == ROCKET {
+        s = t - born[id]
+        return core.vec3(id as float, 1.0 + 5.0 * s - 4.905 * s * s, 10.0 * s)
+    }
+    return core.vec3(10.0 * cos(t + (id as float)), 0.0, 10.0 * sin(t + (id as float)))
+}
+
+// The game's maker for both kinds, on every side: a model in its world.
+make_thing(context: ptr, id: int) -> *GameObject {
+    p = context as *Party
+    o = engine.object(p.world, "Thing ${id}", core.model_new())
+    p.made = p.made + 1
+    p.live = p.live + 1
+    if id >= 1 && id <= IDS {
+        seen = p.seen as int[]
+        seen[id] = 1
+        born = p.ledger.born as float[]
+        if p.client > 0 && born[id] >= p.joined {
+            delay = p.ledger.now - born[id]
+            if delay > p.appear_worst { p.appear_worst = delay }
+        }
+    }
+    return o
+}
+
+// And its unmaker: out of the world, as a game does.
+unmake_thing(context: ptr, o: *GameObject) {
+    p = context as *Party
+    p.live = p.live - 1
+    id = net.id_of(p.session, o)
+    if p.client > 0 && id >= 1 && id <= IDS {
+        died = p.ledger.died as float[]
+        if died[id] >= 0.0 {
+            delay = p.ledger.now - died[id]
+            if delay > p.gone_worst { p.gone_worst = delay }
+            p.gone = p.gone + 1
+        }
+    }
+    engine.destroy(p.world, o)
+}
+
+arrived(p: *Party, sent: float) {
+    delay = p.ledger.now - sent
+    if delay > p.event_worst { p.event_worst = delay }
+}
+
+// A client's honk, on the host: numbered from 1, the time it was sent, and
+// three times the number.
+honk(context: ptr, call: *NetCall) {
+    p = context as *Party
+    if call.sender < 1 || call.sender > 3 {
+        p.wrong = p.wrong + 1
+        return
+    }
+    next = p.honk_next as int[]
+    number = (call.a) as int
+    if number != next[call.sender] || call.c != call.a * 3.0 || call.d != 0.0 { p.wrong = p.wrong + 1 }
+    next[call.sender] = number + 1
+    p.honks = p.honks + 1
+    arrived(p, call.b)
+}
+
+// The host's score, to everyone: numbered from 1, and the time it was sent.
+score(context: ptr, call: *NetCall) {
+    p = context as *Party
+    number = (call.a) as int
+    if call.sender != net.HOST || (p.score_next != 0 && number != p.score_next) { p.wrong = p.wrong + 1 }
+    p.score_next = number + 1
+    p.scores = p.scores + 1
+    arrived(p, call.b)
+}
+
+// The host's whisper, to client 2 alone: all four numbers.
+whisper(context: ptr, call: *NetCall) {
+    p = context as *Party
+    number = (call.a) as int
+    if call.sender != net.HOST || number != p.whisper_next || call.c != 1.0 || call.d != 7.0 { p.wrong = p.wrong + 1 }
+    p.whisper_next = number + 1
+    p.whispers = p.whispers + 1
+    arrived(p, call.b)
+}
+
+party(l: *Ledger, client: int, joined: float) -> *Party {
+    p = calloc(1, sizeof(Party)) as *Party
+    p.ledger = l
+    p.world = engine.engine_new()
+    p.client = client
+    p.joined = joined
+    p.seen = calloc(IDS + 1, 4)
+    p.honk_next = calloc(4, 4)
+    next = p.honk_next as int[]
+    next[1] = 1
+    next[2] = 1
+    next[3] = 1
+    p.whisper_next = 1
+    if joined == 0.0 { p.score_next = 1 }
+    return p
+}
+
+// What every side registers, in the same order, so the ids agree.
+register(p: *Party) {
+    net.on_event(p.session, "honk", honk, p as ptr)
+    net.on_event(p.session, "score", score, p as ptr)
+    net.on_event(p.session, "whisper", whisper, p as ptr)
+    net.object_kind(p.session, "rocket", make_thing, unmake_thing, p as ptr)
+    net.object_kind(p.session, "car", make_thing, unmake_thing, p as ptr)
+}
+
+party_free(p: *Party) {
+    net.net_free(p.session)
+    engine.engine_free(p.world)
+    free(p.seen)
+    free(p.honk_next)
+    free(p as ptr)
+}
+
+// The host creates an object of a kind now, at where it is to be; the
+// ledger has it first, under the id the host is about to give it.
+create(l: *Ledger, host: *Party, kind: int, now: float, ends: int) -> bool {
+    id = net.networked_count(host.session) + 1
+    if id > IDS { return false }
+    kinds = l.kinds as int[]
+    born = l.born as float[]
+    until = l.ends as int[]
+    kinds[id] = kind
+    born[id] = now
+    until[id] = ends
+    o = null as *GameObject
+    if kind == ROCKET {
+        o = net.create_object(host.session, "rocket", truth(l, id, now), core.quat(0.0, 0.0, 0.0, 1.0), now)
+    } else {
+        o = net.create_object(host.session, "car", truth(l, id, now), core.quat(0.0, 0.0, 0.0, 1.0), now)
+    }
+    return o != null && net.id_of(host.session, o) == id
+}
+
+// Every object the host has, moved to where it is now.
+move(l: *Ledger, host: *Party, now: float) {
+    id = 1
+    while id <= IDS {
+        o = net.object_of(host.session, id)
+        if o != null {
+            at = truth(l, id, now)
+            core.model_set_position(behaviour.object_model(o), at.x, at.y, at.z)
+        }
+        id = id + 1
+    }
+}
+
+// How far each object a client draws is from where the host had it at the
+// client's view time, once the view has reached its creation (and, for a
+// late joiner, the view has settled); and whether any is still there after
+// its moment.
+measure(p: *Party, now: float) {
+    if p == null { return }
+    view = net.view_time(p.session, now)
+    if view < 0.0 { return }
+    l = p.ledger
+    kinds = l.kinds as int[]
+    born = l.born as float[]
+    died = l.died as float[]
+    id = 1
+    while id <= IDS {
+        o = net.object_of(p.session, id)
+        if o != null && kinds[id] != 0 {
+            if died[id] >= 0.0 && view > died[id] + 0.001 {
+                p.lingering = p.lingering + 1
+            } else if view >= born[id] && view >= p.joined + 0.3 {
+                d = core.v3_len(core.v3_sub(behaviour.object_model(o).position, truth(l, id, view)))
+                if d > p.worst { p.worst = d }
+                if d <= 0.006 { p.close = p.close + 1 }
+                p.measured = p.measured + 1
+            }
+        }
+        id = id + 1
+    }
+}
+
+ledger_new() -> *Ledger {
+    l = calloc(1, sizeof(Ledger)) as *Ledger
+    l.kinds = calloc(IDS + 1, 4)
+    l.born = calloc(IDS + 1, 8)
+    l.died = calloc(IDS + 1, 8)
+    l.ends = calloc(IDS + 1, 4)
+    died = l.died as float[]
+    k = 0
+    while k <= IDS {
+        died[k] = 0.0 - 1.0
+        k = k + 1
+    }
+    return l
+}
+
+ledger_free(l: *Ledger) {
+    free(l.kinds)
+    free(l.born)
+    free(l.died)
+    free(l.ends)
+    free(l as ptr)
+}
+
+// The same over TCP on this machine, on the real clock for a second: a
+// client's honks, and a rocket created and destroyed, framed on the stream.
+tcp_run() {
+    host_session = net.host_tcp("127.0.0.1", 0)
+    if host_session == null {
+        println("  tcp: SKIP ${net.last_error()}")
+        return
+    }
+    client_session = net.join_tcp("127.0.0.1", net.tcp_port(host_session))
+    if client_session == null {
+        println("  tcp: SKIP ${net.last_error()}")
+        net.net_free(host_session)
+        return
+    }
+    l = ledger_new()
+    died = l.died as float[]
+    host = party(l, 0, 0.0)
+    host.session = host_session
+    register(host)
+    one = party(l, 1, 0.0)
+    one.session = client_session
+    register(one)
+    sent = 0
+    created = false
+    rocket = 0
+    start = platform.time()
+    while platform.time() - start < 1.0 {
+        now = platform.time() - start
+        l.now = now
+        move(l, host, now)
+        if net.connected(one.session) && sent < 20 {
+            if net.send_event(one.session, "honk", net.HOST, now, (sent + 1) as float, now, ((sent + 1) * 3) as float) { sent = sent + 1 }
+        }
+        if !created && now >= 0.2 {
+            rocket = net.networked_count(host.session) + 1
+            created = create(l, host, ROCKET, now, 0)
+        }
+        o = net.object_of(host.session, rocket)
+        if created && o != null && now >= 0.5 {
+            died[rocket] = now
+            net.destroy_object(host.session, o, now)
+        }
+        net.step(host.session, now)
+        net.step(one.session, now)
+        sleep(2)
+    }
+    println("  tcp: ${host.honks} of ${sent} honks handled, ${host.wrong} out of order or wrong; the rocket made ${one.made} and let go ${one.gone} on the client")
+    check("tcp: every honk reaches the host once and in order", sent == 20 && host.honks == sent && host.wrong == 0)
+    check("tcp: a created object is made on the client and goes when the host destroys it", created && one.made == 1 && one.gone == 1 && one.live == 0)
+    party_free(one)
+    party_free(host)
+    ledger_free(l)
+}
+
+loopback_run() {
+    l = ledger_new()
+    died = l.died as float[]
+    hub = net.hub_new()
+    net.hub_set_conditions(hub, 0.1, 0.02, 0.02)
+    host = party(l, 0, 0.0)
+    host.session = net.host_loopback(hub)
+    register(host)
+    one = party(l, 1, 0.0)
+    one.session = net.join_loopback(hub)
+    register(one)
+    two = party(l, 2, 0.0)
+    two.session = net.join_loopback(hub)
+    register(two)
+    three = null as *Party
+
+    sent_one = 0
+    sent_two = 0
+    scores_sent = 0
+    whispers_sent = 0
+    refused = 0
+    created_ok = true
+    created = 0
+    step = 0
+    while step < STEPS {
+        now = (step as float) * STEP
+        l.now = now
+        if step == LATE {
+            three = party(l, 3, now)
+            three.session = net.join_loopback(hub)
+            register(three)
+        }
+        move(l, host, now)
+        // What is due to go goes, where it is now; then what is due comes:
+        // a rocket every quarter second from 0.5 s to 2.5 s, each flying
+        // 0.9 s, and two cars, the first gone after a second.
+        until = l.ends as int[]
+        id = 1
+        while id <= IDS {
+            o = net.object_of(host.session, id)
+            if o != null && until[id] == step {
+                died[id] = now
+                net.destroy_object(host.session, o, now)
+            }
+            id = id + 1
+        }
+        if step >= 30 && step <= 150 && (step - 30) % 15 == 0 {
+            if !create(l, host, ROCKET, now, step + LIFE) { created_ok = false }
+            created = created + 1
+        }
+        if step == 60 {
+            if !create(l, host, CAR, now, 120) { created_ok = false }
+            created = created + 1
+        }
+        if step == 90 {
+            if !create(l, host, CAR, now, 0) { created_ok = false }
+            created = created + 1
+        }
+        // Events: client 1 honks every step for two seconds, twice every
+        // tenth step; client 2 every other step; the host whispers to
+        // client 2 every fifth step, and scores to everyone every third
+        // step for four seconds.
+        if step >= 30 && step < 150 {
+            if net.send_event(one.session, "honk", net.HOST, now, (sent_one + 1) as float, now, ((sent_one + 1) * 3) as float) { sent_one = sent_one + 1 } else { refused = refused + 1 }
+            if step % 10 == 0 {
+                if net.send_event(one.session, "honk", net.HOST, now, (sent_one + 1) as float, now, ((sent_one + 1) * 3) as float) { sent_one = sent_one + 1 } else { refused = refused + 1 }
+            }
+            if step % 2 == 0 {
+                if net.send_event(two.session, "honk", net.HOST, now, (sent_two + 1) as float, now, ((sent_two + 1) * 3) as float) { sent_two = sent_two + 1 } else { refused = refused + 1 }
+            }
+            if step % 5 == 0 {
+                if net.send_event(host.session, "whisper", 2, now, (whispers_sent + 1) as float, now, 1.0, 7.0) { whispers_sent = whispers_sent + 1 } else { refused = refused + 1 }
+            }
+        }
+        if step >= 30 && step < 270 && step % 3 == 0 {
+            if net.send_event(host.session, "score", net.EVERYONE, now, (scores_sent + 1) as float, now) { scores_sent = scores_sent + 1 } else { refused = refused + 1 }
+        }
+        net.step(host.session, now)
+        net.step(one.session, now)
+        net.step(two.session, now)
+        if three != null { net.step(three.session, now) }
+        measure(one, now)
+        measure(two, now)
+        measure(three, now)
+        step = step + 1
+    }
+
+    println("events: a host and two clients, a third from ${(LATE as float) * STEP} s; 100 ms latency, 20 ms jitter, 2% loss, ${STEPS} steps")
+    println("  honks: ${sent_one} sent by client 1 and ${sent_two} by client 2, ${host.honks} handled on the host; ${host.wrong} out of order or wrong")
+    check("every honk reaches the host once, in order, with its numbers and its sender", refused == 0 && host.honks == sent_one + sent_two && host.wrong == 0)
+    println("  scores: ${scores_sent} sent to everyone; client 1 handled ${one.scores}, client 2 ${two.scores}, the late client ${three.scores} (the last it handled: ${three.score_next - 1})")
+    check("every score reaches every client once and in order", one.scores == scores_sent && two.scores == scores_sent && one.wrong == 0 && two.wrong == 0)
+    check("a client that joins late has the scores from its welcome on, in order, to the last", three.scores > 0 && three.wrong == 0 && three.score_next == scores_sent + 1)
+    println("  whispers: ${whispers_sent} sent to client 2; client 2 handled ${two.whispers}, client 1 ${one.whispers}")
+    check("a whisper reaches its client with all four numbers, and not the other", two.whispers == whispers_sent && one.whispers == 0)
+    worst_event = host.event_worst
+    if one.event_worst > worst_event { worst_event = one.event_worst }
+    if two.event_worst > worst_event { worst_event = two.event_worst }
+    println("  an event took at most ${worst_event * 1000.0} ms from sent to handled")
+    // A one-way trip, its jitter, and the step it waits for: 100 + 20 + 16.7.
+    check("an event is handled within a one-way trip and a step (137 ms)", worst_event <= 0.137)
+
+    println("  objects: the host created ${created} (9 rockets, 2 cars); made ${host.made}, ${one.made} on client 1, ${two.made} on client 2; ${host.live}, ${one.live} and ${two.live} left")
+    check("every object the host creates is made on every client", created_ok && host.made == 11 && one.made == 11 && two.made == 11)
+    worst_appear = one.appear_worst
+    if two.appear_worst > worst_appear { worst_appear = two.appear_worst }
+    println("  an object appeared on a client at most ${worst_appear * 1000.0} ms after the host created it")
+    check("and appears within a one-way trip and a step (137 ms)", worst_appear > 0.0 && worst_appear <= 0.137)
+    println("  drawn against where the host had it at the client's view time: client 1 within 6 mm on ${one.close} of ${one.measured} object-steps, at most ${one.worst * 1000.0} mm; client 2 on ${two.close} of ${two.measured}, at most ${two.worst * 1000.0} mm")
+    // A rocket's arc between two snapshots is off its chord by g dt^2 / 8:
+    // 1.36 mm at 30 a second, 5.45 mm across one lost, 12.3 mm across two
+    // lost in a row; a car's circle by 10 (1 - cos(w dt / 2)): 1.39, 5.55
+    // and 12.5 mm, as tests/test_net.ae measures.
+    check("a created object is drawn where the host had it: within 6 mm on 99% of steps, within 13 mm always",
+          one.measured > 300 && two.measured > 300 &&
+          (one.close as float) >= 0.99 * (one.measured as float) && (two.close as float) >= 0.99 * (two.measured as float) &&
+          one.worst <= 0.013 && two.worst <= 0.013)
+    worst_gone = one.gone_worst
+    if two.gone_worst > worst_gone { worst_gone = two.gone_worst }
+    println("  ${one.gone} and ${two.gone} objects went, at most ${worst_gone * 1000.0} ms after the host destroyed them; ${one.lingering + two.lingering} object-steps drawn past their moment")
+    // Gone when the view reaches the moment: the view is the least delay
+    // seen (100 ms) and the interpolation delay (100 ms) behind, and a step.
+    check("a destroyed object goes on every client, when its view reaches the moment (within 237 ms)",
+          one.gone == 10 && two.gone == 10 && one.live == 1 && two.live == 1 && host.live == 1 &&
+          one.lingering + two.lingering == 0 && worst_gone >= 0.2 && worst_gone <= 0.237)
+
+    // What was alive when the third client joined, and what was not.
+    kinds = l.kinds as int[]
+    born = l.born as float[]
+    joined = (LATE as float) * STEP
+    seen = three.seen as int[]
+    alive = 0
+    alive_seen = 0
+    dead_seen = 0
+    id = 1
+    while id <= IDS {
+        if kinds[id] != 0 {
+            if died[id] >= 0.0 && died[id] < joined {
+                if seen[id] == 1 { dead_seen = dead_seen + 1 }
+            } else if born[id] < joined {
+                alive = alive + 1
+                if seen[id] == 1 { alive_seen = alive_seen + 1 }
+            }
+        }
+        id = id + 1
+    }
+    println("  late client: ${alive} objects alive when it joined, ${alive_seen} made there, ${dead_seen} of the ${created - alive} destroyed before made there; ${three.live} left, drawn at most ${three.worst * 1000.0} mm off over ${three.measured} object-steps")
+    check("a client that joins late is told every object alive, and none destroyed before it came",
+          alive == 4 && alive_seen == alive && dead_seen == 0 && three.made == alive)
+    check("and draws them where the host has them, and lets them go with everyone else",
+          three.worst <= 0.013 && three.measured > 60 && three.live == 1 && three.gone == 3 && three.lingering == 0)
+
+    seconds = (STEPS as float) * STEP
+    host_rate = (net.bytes_sent(host.session) as float) / seconds
+    one_bytes = net.bytes_sent(one.session)
+    one_rate = (one_bytes as float) / seconds
+    // A honk with three numbers is 16 bytes (a type, a u16 event, a count,
+    // three f32); an acknowledgement is 5.
+    println("  bytes: the host sent ${host_rate / 1024.0} KB a second to three clients; client 1 sent ${one_bytes} bytes, ${sent_one * 16} of them its ${sent_one} honks: ${one_rate / 1024.0} KB a second")
+    check("a client's honks and acknowledgements cost it under 1 KB a second", one_rate < 1024.0)
+    // At the busiest six objects are alive, four rockets and both cars: 21
+    // bytes of header and 31 an object, 30 times a second to each client,
+    // 6 KB a second a client. Averaged over the run, a car alone for its
+    // last two seconds, less.
+    check("the host's snapshots, events and objects for three clients, under 10 KB a second", host_rate < 10.0 * 1024.0)
+
+    party_free(one)
+    party_free(two)
+    party_free(three)
+    party_free(host)
+    net.hub_free(hub)
+    ledger_free(l)
+}
+
+main() {
+    loopback_run()
+    tcp_run()
+    if g_failures == 0 {
+        println("events: all checks passed (${g_checks})")
+    } else {
+        println("events: ${g_failures} failure(s) of ${g_checks}")
+    }
+}
