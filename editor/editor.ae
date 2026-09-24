@@ -3138,13 +3138,23 @@ seconds() -> float {
     return platform.time()
 }
 
-// The GPU view changed size without a frame to say so. On GTK a GL area
-// reports its new size only when it is drawn, and a still scene draws
-// nothing: a divider dragged across the viewport left the renderer at the
-// old size, the picture stretched to the new one. A frame is asked for, and
-// drawing it is what delivers the size (gpuview_on_resize).
+// The viewport changed size without its callback saying so. On GTK a GL area
+// and a canvas both report a new size only when they are drawn, and a still
+// scene draws nothing: a divider dragged across the viewport left the
+// renderer at the old size. The canvas's allocation is read here, which
+// every toolkit answers, and taken as its size; the GPU view is asked for a
+// frame, since drawing it is what delivers the size in pixels
+// (gpuview_on_resize).
 watch_view_size() {
-    if g_gpu == 0 || g_gpu_widget == 0 { return }
+    if g_gpu == 0 {
+        if g_canvas == 0 { return }
+        view = ui.canvas_widget(g_canvas)
+        cw = ui.get_width(view)
+        ch = ui.get_height(view)
+        if cw > 0 && ch > 0 && (cw != g_canvas_w || ch != g_canvas_h) { resize_canvas(cw, ch) }
+        return
+    }
+    if g_gpu_widget == 0 { return }
     w = ui.get_width(g_gpu_widget)
     h = ui.get_height(g_gpu_widget)
     if w == g_gpu_seen_w && h == g_gpu_seen_h { return }
@@ -6850,8 +6860,8 @@ main() {
         }
 
         g_canvas = ui.canvas_create(viewport_host, VIEW_FLOOR_W, g_view_h)
-        ui.fill_width(g_canvas)
-        ui.fill_height(g_canvas)
+        ui.fill_width(ui.canvas_widget(g_canvas))
+        ui.fill_height(ui.canvas_widget(g_canvas))
         // Only on the blit path. Over a GPU view this would paint the scene
         // out, and the clear colour the renderer was given is the same one.
         if g_gpu == 0 {
