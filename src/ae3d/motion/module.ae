@@ -31,8 +31,21 @@
 // head does, and its head meets it slower, as a person's does. Landed
 // (leaning past LYING_TILT), it lets go and lies.
 //
-// Balance that steps to catch a fall, writhing and getting up are the
-// controllers the next slices of #414 put on top of this.
+// Down, it gets up (`get_up`, or by itself `set_get_up` seconds after it
+// settles): GETTING_UP, a way up matched to how it lies -- face up it sits
+// up, draws its feet in and stands over them; face down it pushes up onto
+// its hands and knees, brings its feet under it and stands -- ending on
+// the animation's own pose, moved to where it stands and turned the way it
+// rose, so the animation takes over with nothing to jump. The way up is
+// the rig's, keyed through the figure's bodies' frames and drawn exactly;
+// the bodies follow it as an ANIMATED figure's do, so it collides as it
+// rises. (The reference ragdoll's hips and knees bend too little to sit or
+// crouch, so a get-up played by its muscles could not be one.)
+// A POWERED figure set ANIMATED blends into the animation over a quarter
+// second from where its bodies are, instead of jumping there.
+//
+// Balance that steps to catch a fall and writhing are the controllers the
+// next slices of #414 put on top of this.
 
 import std.list
 import aephysics.human
@@ -42,10 +55,11 @@ import ae3d.engine
 import ae3d.physics
 
 exports (
-    Motion, ANIMATED, POWERED, LIMP,
+    Motion, ANIMATED, POWERED, LIMP, GETTING_UP,
     active_ragdoll, motion_free, set_mode, mode, set_strength, strength, set_recovery,
     hit, bone_weakness, motion_step, attach, tracking_error, tilt, muscle, full_assist,
-    set_protective, protective, falling, lying
+    set_protective, protective, falling, lying,
+    get_up, set_get_up, getting_up, down, face_up, blending, rise_seconds
 )
 
 extern calloc(count: int, size: int) -> ptr
@@ -54,6 +68,7 @@ extern free(p: ptr)
 const ANIMATED = 1
 const POWERED = 2
 const LIMP = 3
+const GETTING_UP = 4                   // not set, but got to: get_up()
 
 // The torque the pelvis may use to keep the figure's balance at strength 1,
 // in newton metres; the joints' own are in `muscle`. Measured on the
@@ -83,6 +98,58 @@ const SETTLED = 0.005
 const SETTLE_STEPS = 10
 const LYING_MUSCLE = 0.15
 
+// Getting up: three stages from the pose it lies in, each RISE_STAGE
+// seconds, eased in and out; a blend back into the animation, BLEND. On
+// the ground is leaning past DOWN_TILT, or the pelvis within DOWN_HEIGHT
+// of the figure's lowest point (crumpled where it stood); settled there
+// is the pelvis moving less than REST_MOVE a step for SETTLE_STEPS.
+const RISE_STAGE = 0.7
+const RISE_KEYS = 4
+const BLEND = 0.25
+const DOWN_TILT = 1.0
+const DOWN_HEIGHT = 0.45
+const REST_MOVE = 0.002
+
+// The ways up, as the lean of each bone from standing, in degrees, about
+// the axis across the figure: for a bone that hangs (a thigh, a shin, an
+// arm), positive swings its lower end back; for one that stands (the
+// pelvis, the spine, the head), positive leans it forward. In the human's
+// bone order: pelvis, spine, chest, head, left thigh, shin, right thigh,
+// shin, left arm, forearm, right arm, forearm.
+//
+// Sitting, face up: the trunk up, the knees drawn up, the hands behind.
+// On hands and knees, face down: the trunk along the ground, the thighs
+// down, the shins back, the arms straight down. Crouching, either way:
+// the trunk leant over the thighs, the arms out in front.
+const SIT = 1
+const KNEEL = 2
+const CROUCH = 3
+
+fill_leans(out: float[], way: int) {
+    if way == SIT {
+        twelve(out, 0.0 - 15.0, 5.0, 10.0, 10.0, 0.0 - 110.0, 0.0 - 30.0, 0.0 - 110.0, 0.0 - 30.0, 35.0, 35.0, 35.0, 35.0)
+    } else if way == KNEEL {
+        twelve(out, 75.0, 80.0, 80.0, 55.0, 0.0, 90.0, 0.0, 90.0, 0.0, 0.0, 0.0, 0.0)
+    } else {
+        twelve(out, 50.0, 45.0, 40.0, 20.0, 0.0 - 95.0, 30.0, 0.0 - 95.0, 30.0, 0.0 - 40.0, 0.0 - 60.0, 0.0 - 40.0, 0.0 - 60.0)
+    }
+}
+
+twelve(out: float[], a: float, b: float, c: float, d: float, e: float, f: float, g: float, h: float, i: float, j: float, k: float, l: float) {
+    out[0] = a
+    out[1] = b
+    out[2] = c
+    out[3] = d
+    out[4] = e
+    out[5] = f
+    out[6] = g
+    out[7] = h
+    out[8] = i
+    out[9] = j
+    out[10] = k
+    out[11] = l
+}
+
 struct Motion {
     ragdoll: *Ragdoll
     mode: int
@@ -94,6 +161,23 @@ struct Motion {
     lying: bool                        // fell, and is on the ground
     last_lean: float
     still_steps: int                   // steps the lean has barely changed
+    rest_steps: int                    // steps the pelvis has barely moved
+    last_pelvis: Vec3
+    settled: bool                      // on the ground and still there
+    down_seconds: float                // settled on the ground this long
+    get_up_after: float                // seconds settled before it gets up by itself; 0 never
+    // A way from the bodies to the animation: its keyed poses (pelvis
+    // transform and every bone's rotation, physics.POSE_STRIDE floats a
+    // bone), how many, how long each stage takes, how far along it is, the
+    // mode it ends in and the pose it is drawn in now.
+    keys: ptr                          // float[RISE_KEYS * BONE_COUNT * POSE_STRIDE]
+    key_count: int
+    stage_seconds: float
+    along: float                       // seconds into the way
+    ends_in: int                          // the mode at its end
+    blending: bool                     // a blend back, not a get-up
+    now: ptr                           // float[BONE_COUNT * POSE_STRIDE]
+    rise_seconds: float                // how long the last get-up took
 }
 
 full_assist() -> float { return FULL_ASSIST }
@@ -121,6 +205,8 @@ active_ragdoll(r: *Ragdoll) -> *Motion {
     m.recovery = 0.8
     m.protective = true
     m.weakness = calloc(human.BONE_COUNT, 8)
+    m.keys = calloc(RISE_KEYS * human.BONE_COUNT * physics.POSE_STRIDE, 8)
+    m.now = calloc(human.BONE_COUNT * physics.POSE_STRIDE, 8)
     set_mode(m, ANIMATED)
     return m
 }
@@ -128,15 +214,33 @@ active_ragdoll(r: *Ragdoll) -> *Motion {
 motion_free(m: *Motion) {
     if m == null { return }
     free(m.weakness)
+    free(m.keys)
+    free(m.now)
     free(m as ptr)
 }
 
 set_mode(m: *Motion, to: int) {
+    was = m.mode
     m.falling = false
     m.lying = false
     m.still_steps = 0
+    m.down_seconds = 0.0
+    m.rest_steps = 0
+    m.settled = false
+    m.key_count = 0
+    m.blending = false
     physics.ragdoll_clear_aims(m.ragdoll)
     if to == ANIMATED {
+        if was == POWERED {
+            // From where the bodies are to the animation, over BLEND.
+            key_bodies(m, 0)
+            physics.ragdoll_animation_pose(m.ragdoll, key_at(m, 1))
+            physics.ragdoll_follow(m.ragdoll)
+            start_way(m, 2, BLEND, ANIMATED)
+            m.blending = true
+            m.mode = ANIMATED
+            return
+        }
         physics.ragdoll_follow(m.ragdoll)
     } else if to == POWERED {
         physics.ragdoll_power(m.ragdoll, 0.0, FULL_ASSIST * m.strength)
@@ -152,6 +256,285 @@ set_mode(m: *Motion, to: int) {
 }
 
 mode(m: *Motion) -> int { return m.mode }
+
+// --- getting up --------------------------------------------------------------------------------------
+
+// Seconds settled on the ground before it gets up by itself; 0, the
+// default, leaves it down until get_up.
+set_get_up(m: *Motion, seconds: float) {
+    if seconds < 0.0 { seconds = 0.0 }
+    m.get_up_after = seconds
+}
+
+getting_up(m: *Motion) -> bool { return m.mode == GETTING_UP }
+
+// Whether it is on the ground and settled there, POWERED or LIMP.
+down(m: *Motion) -> bool { return m.settled }
+
+// Whether it is on the ground: leaning past DOWN_TILT, or its pelvis
+// within DOWN_HEIGHT of its lowest point.
+on_ground(m: *Motion) -> bool {
+    if tilt(m) > DOWN_TILT { return true }
+    physics.ragdoll_body_pose(m.ragdoll, m.now)
+    low = physics.ragdoll_pose_lowest(m.ragdoll, m.now)
+    return pose_position(m.now, human.BONE_PELVIS).y - low < DOWN_HEIGHT
+}
+
+// Whether it is blending back into its animation.
+blending(m: *Motion) -> bool { return m.blending && m.key_count > 0 }
+
+// How long the last get-up took, seconds.
+rise_seconds(m: *Motion) -> float { return m.rise_seconds }
+
+key_at(m: *Motion, k: int) -> ptr {
+    return m.keys + k * human.BONE_COUNT * physics.POSE_STRIDE * 8
+}
+
+key_bodies(m: *Motion, k: int) {
+    physics.ragdoll_body_pose(m.ragdoll, key_at(m, k))
+}
+
+start_way(m: *Motion, count: int, stage: float, ends_in: int) {
+    m.key_count = count
+    m.stage_seconds = stage
+    m.along = 0.0
+    m.ends_in = ends_in
+    pose_between(m, 0, 0.0)
+    physics.ragdoll_show_pose(m.ragdoll, m.now)
+}
+
+// Get up from the ground, to the mode it was in (POWERED stays POWERED,
+// anything else ends ANIMATED). False when it is not on the ground, or
+// wears no figure to key the way up on.
+get_up(m: *Motion) -> bool {
+    if m.mode == GETTING_UP { return true }
+    if !physics.ragdoll_is_dressed(m.ragdoll) || !on_ground(m) { return false }
+    ends_in = ANIMATED
+    if m.mode == POWERED { ends_in = POWERED }
+    r = m.ragdoll
+    h = physics.ragdoll_human(r)
+    key_bodies(m, 0)
+    lying = key_at(m, 0)
+    ground = physics.ragdoll_pose_lowest(r, lying)
+    pelvis = pose_position(lying, human.BONE_PELVIS)
+    // Which way it lies: its chest's front, turned from standing, to the
+    // sky or the ground (the chest's, not the pelvis's: propped on its
+    // arms, a figure's pelvis can point anywhere). Face up it rises toward
+    // its feet; face down, toward its head.
+    rest_pelvis = human.bone_at(h, human.BONE_PELVIS).reference_frame.q
+    forward_rest = rest_forward(m)
+    front = lying_front(m, lying)
+    face_up = front.y > 0.0
+    ankles = core.v3_mul(core.v3_add(physics.ragdoll_pose_end(r, lying, human.BONE_CALF_L), physics.ragdoll_pose_end(r, lying, human.BONE_CALF_R)), 0.5)
+    head = pose_position(lying, human.BONE_NECK)
+    way = level(core.v3_sub(head, pelvis))
+    if face_up { way = level(core.v3_sub(ankles, pelvis)) }
+    if core.v3_len(way) < 0.5 { way = level(front) }
+    if core.v3_len(way) < 0.5 { way = forward_rest }
+    // The first key where it lies; where its feet will stand is where its
+    // feet are sitting, or where its knees are kneeling.
+    first = KNEEL
+    if face_up { first = SIT }
+    key_bent(m, 1, first, way, pelvis, ground)
+    stand = core.v3_mul(core.v3_add(pose_position(key_at(m, 1), human.BONE_CALF_L), pose_position(key_at(m, 1), human.BONE_CALF_R)), 0.5)
+    if face_up {
+        stand = core.v3_mul(core.v3_add(physics.ragdoll_pose_end(r, key_at(m, 1), human.BONE_CALF_L), physics.ragdoll_pose_end(r, key_at(m, 1), human.BONE_CALF_R)), 0.5)
+    }
+    key_bent(m, 2, CROUCH, way, pelvis, ground)
+    plant(m, 2, stand)
+    // The last, the animation's pose: turned to face the way it rose,
+    // its feet where it stands, on the ground.
+    last = key_at(m, 3)
+    physics.ragdoll_animation_pose(r, last)
+    anim_pelvis = pose_position(last, human.BONE_PELVIS)
+    anim_front = level(core.quat_apply(core.quat_mul(pose_rotation(last, human.BONE_PELVIS), core.quat_conjugate(rest_pelvis)), forward_rest))
+    turn = core.quat_ident()
+    if core.v3_len(anim_front) > 0.5 { turn = core.quat_from_to(anim_front, way) }
+    physics.ragdoll_move_animation(r, anim_pelvis, turn, core.vec3(0.0, 0.0, 0.0))
+    physics.ragdoll_animation_pose(r, last)
+    feet = core.v3_mul(core.v3_add(physics.ragdoll_pose_end(r, last, human.BONE_CALF_L), physics.ragdoll_pose_end(r, last, human.BONE_CALF_R)), 0.5)
+    shift = core.vec3(stand.x - feet.x, ground - physics.ragdoll_pose_lowest(r, last), stand.z - feet.z)
+    physics.ragdoll_move_animation(r, core.vec3(0.0, 0.0, 0.0), core.quat_ident(), shift)
+    physics.ragdoll_animation_pose(r, last)
+    // Its bodies follow the way up, as an animated figure's follow its rig.
+    m.falling = false
+    m.lying = false
+    physics.ragdoll_clear_aims(r)
+    physics.ragdoll_follow(r)
+    m.mode = GETTING_UP
+    m.blending = false
+    start_way(m, RISE_KEYS, RISE_STAGE, ends_in)
+    return true
+}
+
+// The front of a pose's chest: the way the figure faces standing, turned
+// as its chest is turned from standing.
+lying_front(m: *Motion, pose: ptr) -> Vec3 {
+    h = physics.ragdoll_human(m.ragdoll)
+    rest = human.bone_at(h, human.BONE_SPINE_03).reference_frame.q
+    return core.quat_apply(core.quat_mul(pose_rotation(pose, human.BONE_SPINE_03), core.quat_conjugate(rest)), rest_forward(m))
+}
+
+// Whether it lies face up: its chest's front to the sky. For a figure on
+// the ground.
+face_up(m: *Motion) -> bool {
+    physics.ragdoll_body_pose(m.ragdoll, m.now)
+    return lying_front(m, m.now).y > 0.0
+}
+
+// A keyed pose from a way's leans (the constants above), facing `way`,
+// its pelvis over `pelvis`, its lowest point on `ground`.
+key_bent(m: *Motion, k: int, leans: int, way: Vec3, pelvis: Vec3, ground: float) {
+    r = m.ragdoll
+    h = physics.ragdoll_human(r)
+    pose = key_at(m, k)
+    forward_rest = rest_forward(m)
+    face = core.quat_from_to(forward_rest, way)
+    across = core.v3_normalize(core.v3_cross(core.vec3(0.0, 1.0, 0.0), forward_rest))
+    angles_block = calloc(human.BONE_COUNT, 8)
+    angles = angles_block as float[]
+    fill_leans(angles, leans)
+    i = 0
+    while i < human.BONE_COUNT {
+        bend = core.quat_rotate(angles[i] * 0.0174533, across)
+        q = core.quat_normalize(core.quat_mul(face, core.quat_mul(bend, human.bone_at(h, i).reference_frame.q)))
+        set_rotation(pose, i, q)
+        i = i + 1
+    }
+    free(angles_block)
+    set_position(pose, human.BONE_PELVIS, core.vec3(pelvis.x, 0.0, pelvis.z))
+    chain(m, pose)
+    lift(m, pose, ground - physics.ragdoll_pose_lowest(r, pose))
+}
+
+// A keyed pose moved level so its ankles are over `stand`.
+plant(m: *Motion, k: int, stand: Vec3) {
+    r = m.ragdoll
+    pose = key_at(m, k)
+    feet = core.v3_mul(core.v3_add(physics.ragdoll_pose_end(r, pose, human.BONE_CALF_L), physics.ragdoll_pose_end(r, pose, human.BONE_CALF_R)), 0.5)
+    shift = core.vec3(stand.x - feet.x, 0.0, stand.z - feet.z)
+    i = 0
+    while i < human.BONE_COUNT {
+        set_position(pose, i, core.v3_add(pose_position(pose, i), shift))
+        i = i + 1
+    }
+}
+
+lift(m: *Motion, pose: ptr, by: float) {
+    i = 0
+    while i < human.BONE_COUNT {
+        at = pose_position(pose, i)
+        set_position(pose, i, core.vec3(at.x, at.y + by, at.z))
+        i = i + 1
+    }
+}
+
+// Every bone placed from its parent through their joint, from the pelvis
+// out: the joint's point on the parent is its point on the child.
+chain(m: *Motion, pose: ptr) {
+    h = physics.ragdoll_human(m.ragdoll)
+    i = 0
+    while i < human.BONE_COUNT {
+        bone = human.bone_at(h, i)
+        if bone.parent_index >= 0 {
+            parent = bone.parent_index
+            joint = core.v3_add(pose_position(pose, parent), core.quat_apply(pose_rotation(pose, parent), bone.local_frame_a.p))
+            set_position(pose, i, core.v3_sub(joint, core.quat_apply(pose_rotation(pose, i), bone.local_frame_b.p)))
+        }
+        i = i + 1
+    }
+}
+
+// The way the figure faces standing in the reference's pose: where its
+// feet point.
+rest_forward(m: *Motion) -> Vec3 {
+    toes = level(physics.ragdoll_rest_forward(m.ragdoll))
+    if core.v3_len(toes) < 0.5 { return core.vec3(0.0, 0.0, 1.0) }
+    return toes
+}
+
+level(v: Vec3) -> Vec3 {
+    flat = core.vec3(v.x, 0.0, v.z)
+    if core.v3_len(flat) < 0.000001 { return core.vec3(0.0, 0.0, 0.0) }
+    return core.v3_normalize(flat)
+}
+
+pose_position(pose: ptr, i: int) -> Vec3 {
+    p = pose as float[]
+    at = i * physics.POSE_STRIDE
+    return core.vec3(p[at + 4], p[at + 5], p[at + 6])
+}
+
+pose_rotation(pose: ptr, i: int) -> Quat {
+    p = pose as float[]
+    at = i * physics.POSE_STRIDE
+    return core.quat(p[at], p[at + 1], p[at + 2], p[at + 3])
+}
+
+set_position(block: ptr, i: int, v: Vec3) {
+    pose = block as float[]
+    at = i * physics.POSE_STRIDE
+    pose[at + 4] = v.x
+    pose[at + 5] = v.y
+    pose[at + 6] = v.z
+}
+
+set_rotation(block: ptr, i: int, q: Quat) {
+    pose = block as float[]
+    at = i * physics.POSE_STRIDE
+    pose[at] = q.x
+    pose[at + 1] = q.y
+    pose[at + 2] = q.z
+    pose[at + 3] = q.w
+}
+
+// The pose `u` (0..1) of the way from key `k` to key `k + 1`, eased, into
+// `now`: every bone's rotation turned that far, the pelvis carried that
+// far. (The rig is drawn from the pelvis and the rotations alone.)
+pose_between(m: *Motion, k: int, u: float) {
+    e = u * u * (3.0 - 2.0 * u)
+    a = key_at(m, k)
+    b = key_at(m, k)
+    if k + 1 < m.key_count { b = key_at(m, k + 1) }
+    now = m.now
+    i = 0
+    while i < human.BONE_COUNT {
+        set_rotation(now, i, core.quat_slerp(pose_rotation(a, i), pose_rotation(b, i), e))
+        set_position(now, i, core.v3_lerp(pose_position(a, i), pose_position(b, i), e))
+        i = i + 1
+    }
+}
+
+// A fixed step along the way: the rig drawn at the pose it has reached,
+// and at its end the animation's own and the mode it ends in.
+step_way(m: *Motion, step: float) {
+    m.along = m.along + step
+    stages = m.key_count - 1
+    total = m.stage_seconds * (stages as float)
+    if m.along >= total {
+        physics.ragdoll_restore_animation(m.ragdoll)
+        if !m.blending { m.rise_seconds = m.along }
+        ends_in = m.ends_in
+        m.key_count = 0
+        m.blending = false
+        if ends_in == POWERED {
+            set_mode(m, POWERED)
+        } else {
+            m.mode = ANIMATED
+        }
+        return
+    }
+    k = floor_int(m.along / m.stage_seconds)
+    u = (m.along - (k as float) * m.stage_seconds) / m.stage_seconds
+    pose_between(m, k, u)
+    physics.ragdoll_show_pose(m.ragdoll, m.now)
+}
+
+floor_int(x: float) -> int {
+    n = x as int
+    if (n as float) > x { n = n - 1 }
+    return n
+}
 
 // The share of the figure's full muscle it has, 0..1.
 set_strength(m: *Motion, s: float) {
@@ -314,7 +697,17 @@ protect(m: *Motion) {
 // A fixed step's recovery: every weakened bone a step's share closer to
 // its full budget.
 motion_step(m: *Motion, step: float) {
+    if m.key_count > 0 {
+        step_way(m, step)
+        return
+    }
     protect(m)
+    if m.mode != ANIMATED { settle(m) }
+    if down(m) { m.down_seconds = m.down_seconds + step } else { m.down_seconds = 0.0 }
+    if m.get_up_after > 0.0 && m.down_seconds >= m.get_up_after && m.mode != ANIMATED {
+        get_up(m)
+        return
+    }
     weak = m.weakness as float[]
     changed = false
     i = 0
@@ -327,6 +720,19 @@ motion_step(m: *Motion, step: float) {
         i = i + 1
     }
     if changed { apply_budget(m) }
+}
+
+// Whether it has come to rest on the ground: its pelvis barely moving,
+// step on step, for SETTLE_STEPS; and no longer, once it is off it.
+settle(m: *Motion) {
+    pelvis = behaviour.object_position(physics.ragdoll_bone(m.ragdoll, human.BONE_PELVIS))
+    if core.v3_len(core.v3_sub(pelvis, m.last_pelvis)) < REST_MOVE { m.rest_steps = m.rest_steps + 1 } else { m.rest_steps = 0 }
+    m.last_pelvis = pelvis
+    if m.settled {
+        if !on_ground(m) { m.settled = false }
+    } else if m.rest_steps >= SETTLE_STEPS && on_ground(m) {
+        m.settled = true
+    }
 }
 
 // How far bone `index` is from the pose the animation gives it, relative to

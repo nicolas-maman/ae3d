@@ -61,6 +61,8 @@ exports (
     ragdoll_bone_drive_torque, ragdoll_set_balance_assist, ragdoll_aim, ragdoll_clear_aim, ragdoll_clear_aims, ragdoll_is_aimed, ragdoll_balance_assist,
     ragdoll_apply_impulse, ragdoll_bone_rotation, ragdoll_bone_target,
     ragdoll_center_of_mass, ragdoll_mass, ragdoll_joint_error, ragdoll_tilt,
+    POSE_STRIDE, ragdoll_body_pose, ragdoll_animation_pose, ragdoll_move_animation, ragdoll_show_pose,
+    ragdoll_restore_animation, ragdoll_pose_lowest, ragdoll_pose_end, ragdoll_rig_bone_rotation, ragdoll_rest_forward,
     CharacterController, character_controller, character_of, character_feet, character_move, character_grounded, character_velocity,
     character_ground_normal, character_free, character_set_slope_limit, character_set_step_height, character_overlap,
     spec_of, apply_spec, attachments
@@ -71,6 +73,7 @@ exports (
 const POWER_TAU = 0.05
 const POWER_SPIN = 20.0
 const POWER_ASSIST_HERTZ = 60.0
+const POWER_BLEND = 0.25
 
 extern sqrt(x: float) -> float
 extern acos(x: float) -> float
@@ -135,6 +138,13 @@ struct Ragdoll {
     written_valid: bool
     targets: ptr                   // float[BONE_COUNT * 4]
     targets_valid: bool
+    // Powered from a rig that drove it, the drawing goes from the rig's
+    // pose to the bodies' over POWER_BLEND rather than at once: the
+    // bodies follow a rig of other proportions only so closely (ten
+    // degrees, a limb), and a figure drawn one way and then the other
+    // would jump. The rig's pose it goes from, and the seconds left.
+    shown_from: ptr                // float[(BONE_COUNT + 1) * 7], the rig's locals
+    shown_left: float
 }
 
 // A skinned figure worn by a ragdoll: a rig bone per ragdoll bone, each
@@ -274,8 +284,8 @@ on_fixed_update(state: ptr, e: *Engine, step: float) {
     while i < count {
         r = list.get_raw(p.ragdolls, i) as *Ragdoll
         pull_ragdoll(r)
-        if r.rig != null && r.following == false { pose_rig(r) }
-        if r.rig != null && r.powered && r.following { show_bodies(r) }
+        if r.rig != null && r.following == false { show_bodies(r, step) }
+        if r.rig != null && r.powered && r.following { show_bodies(r, step) }
         i = i + 1
     }
 }
@@ -977,6 +987,12 @@ ragdoll_stand(r: *Ragdoll, ground: *Rigidbody, hertz: float, damping_ratio: floa
 // and a rig it wore follows its bodies.
 ragdoll_release(r: *Ragdoll) {
     if r.standing == false && r.following == false { return }
+    // Let go while the rig drove it, the rig is the animation's pose:
+    // kept, as a powered figure keeps it, for whatever brings it back.
+    if r.rig != null && r.following && !r.powered {
+        r.written_valid = false
+        capture_animation(r)
+    }
     pelvis = human.bone_at(&r.human, human.BONE_PELVIS)
     if dynamics.joint_is_valid(pelvis.joint_id) {
         dynamics.destroy_joint(pelvis.joint_id, true)
@@ -1030,6 +1046,7 @@ ragdoll_is_following(r: *Ragdoll) -> bool { return r.following }
 // ragdoll wears no rig.
 ragdoll_power(r: *Ragdoll, max_torque: float, assist: float) -> bool {
     if r.rig == null { return false }
+    was_following = r.following && !r.powered
     p = r.physics as *Physics
     pelvis = human.bone_at(&r.human, human.BONE_PELVIS)
     if dynamics.joint_is_valid(pelvis.joint_id) {
@@ -1061,9 +1078,15 @@ ragdoll_power(r: *Ragdoll, max_torque: float, assist: float) -> bool {
     r.standing = true
     r.following = true
     r.powered = true
-    // The animation's pose is the rig's as it is now; the bodies have not
-    // written it yet.
-    r.written_valid = false
+    // The animation's pose is the rig's when the rig drove the bodies
+    // until now; drawn from the bodies (limp, or getting up), the rig is
+    // theirs, and the animation's pose is the one kept.
+    if was_following {
+        r.written_valid = false
+        if r.shown_from == null { r.shown_from = calloc((human.BONE_COUNT + 1) * 7, 8) }
+        read_rig_locals(r, r.shown_from as float[])
+        r.shown_left = POWER_BLEND
+    }
     r.targets_valid = false
     refresh_targets(r)
     drive_joints(r, 1.0 / 60.0)
@@ -1368,9 +1391,31 @@ refresh_targets(r: *Ragdoll) {
     r.targets_valid = true
 }
 
-// The rig as the bodies are, for drawing, and what that wrote remembered.
-show_bodies(r: *Ragdoll) {
+// The rig as the bodies are, for drawing -- blended in from the rig's own
+// pose for the first POWER_BLEND of a figure powered from it -- and what
+// that wrote remembered.
+show_bodies(r: *Ragdoll, step: float) {
     pose_rig(r)
+    if r.shown_left > 0.0 && r.powered {
+        r.shown_left = r.shown_left - step
+        u = 1.0 - r.shown_left / POWER_BLEND
+        if u > 1.0 { u = 1.0 }
+        if r.shown_left <= 0.0 { r.shown_left = 0.0 }
+        w = u * u * (3.0 - 2.0 * u)
+        from = r.shown_from as float[]
+        k = 0
+        while k <= human.BONE_COUNT {
+            m = rig_model(r, k)
+            at = k * 7
+            core.model_set_rotation(m, core.quat_slerp(core.quat(from[at], from[at + 1], from[at + 2], from[at + 3]), m.rotation, w))
+            if k == human.BONE_COUNT {
+                core.model_set_position(m, from[at + 4] + (m.position.x - from[at + 4]) * w,
+                                        from[at + 5] + (m.position.y - from[at + 5]) * w,
+                                        from[at + 6] + (m.position.z - from[at + 6]) * w)
+            }
+            k = k + 1
+        }
+    }
     if r.written == null { r.written = calloc((human.BONE_COUNT + 1) * 7, 8) }
     written = r.written as float[]
     k = 0
@@ -1387,6 +1432,201 @@ show_bodies(r: *Ragdoll) {
         k = k + 1
     }
     r.written_valid = true
+}
+
+// --- a pose as data ----------------------------------------------------------------------------------
+//
+// A pose is every bone body's transform in the world, POSE_STRIDE floats a
+// bone in the human's bone order: its rotation (x, y, z, w), then its
+// position. What ae3d.motion keys a get-up with: the bodies' pose as it
+// lies, the animation's standing where it will stand, and the rig drawn
+// from any pose between.
+
+const POSE_STRIDE = 7
+
+pose_set(pose: float[], i: int, t: Transform) {
+    at = i * POSE_STRIDE
+    pose[at] = t.q.x
+    pose[at + 1] = t.q.y
+    pose[at + 2] = t.q.z
+    pose[at + 3] = t.q.w
+    pose[at + 4] = t.p.x
+    pose[at + 5] = t.p.y
+    pose[at + 6] = t.p.z
+}
+
+pose_get(pose: float[], i: int) -> Transform {
+    at = i * POSE_STRIDE
+    return Transform { p: core.vec3(pose[at + 4], pose[at + 5], pose[at + 6]),
+                       q: core.quat(pose[at], pose[at + 1], pose[at + 2], pose[at + 3]) }
+}
+
+// The bodies as they are, into `out` (BONE_COUNT * POSE_STRIDE floats).
+ragdoll_body_pose(r: *Ragdoll, out: ptr) {
+    pose = out as float[]
+    i = 0
+    while i < human.BONE_COUNT {
+        pose_set(pose, i, dynamics.body_get_transform(human.bone_at(&r.human, i).body_id))
+        i = i + 1
+    }
+}
+
+// Where the animation's pose puts the bodies, into `out`: the rig set to
+// the pose the animation last gave it (what the kept pose has, with
+// whatever the animation has written since), each body read off its bone
+// as the anchors would be driven to it, and the rig put back as it was.
+// False when the ragdoll wears no rig.
+ragdoll_animation_pose(r: *Ragdoll, out: ptr) -> bool {
+    if r.rig == null { return false }
+    capture_animation(r)
+    saved = calloc((human.BONE_COUNT + 1) * 7, 8)
+    keep = saved as float[]
+    read_rig_locals(r, keep)
+    set_rig_locals(r, r.anim as float[])
+    pose = out as float[]
+    rig = r.rig as *Rig
+    bones = rig.bones as RigBone[]
+    i = 0
+    while i < human.BONE_COUNT {
+        bone = bones[i].model as *Model
+        core.model_sync_transform(bone)
+        q = core.quat_normalize(core.quat_mul(bone.world_rotation, core.quat_conjugate(bones[i].offset)))
+        p = core.v3_sub(bone.world_position, core.quat_apply(q, bones[i].offset_p))
+        pose_set(pose, i, Transform { p: p, q: q })
+        i = i + 1
+    }
+    set_rig_locals(r, keep)
+    free(saved)
+    return true
+}
+
+// The rig's bones' and root's locals, into `out`.
+read_rig_locals(r: *Ragdoll, out: float[]) {
+    k = 0
+    while k <= human.BONE_COUNT {
+        m = rig_model(r, k)
+        at = k * 7
+        out[at] = m.rotation.x
+        out[at + 1] = m.rotation.y
+        out[at + 2] = m.rotation.z
+        out[at + 3] = m.rotation.w
+        out[at + 4] = m.position.x
+        out[at + 5] = m.position.y
+        out[at + 6] = m.position.z
+        k = k + 1
+    }
+}
+
+// The rig's bones and root to a kept pose: each mapped bone's local
+// rotation, the root's local rotation and position.
+set_rig_locals(r: *Ragdoll, locals: float[]) {
+    k = 0
+    while k <= human.BONE_COUNT {
+        m = rig_model(r, k)
+        at = k * 7
+        core.model_set_rotation(m, core.quat(locals[at], locals[at + 1], locals[at + 2], locals[at + 3]))
+        if k == human.BONE_COUNT { core.model_set_position(m, locals[at + 4], locals[at + 5], locals[at + 6]) }
+        k = k + 1
+    }
+}
+
+// The animation's pose moved as one piece: its root turned by `turn`
+// about `pivot` and carried by `shift`, in the world. Where a figure that
+// fell gets up to: the animation's pose where it now is, facing the way it
+// rises.
+ragdoll_move_animation(r: *Ragdoll, pivot: Vec3, turn: Quat, shift: Vec3) {
+    if r.rig == null { return }
+    capture_animation(r)
+    anim = r.anim as float[]
+    at = human.BONE_COUNT * 7
+    rig = r.rig as *Rig
+    root = rig.root as *Model
+    local_q = core.quat(anim[at], anim[at + 1], anim[at + 2], anim[at + 3])
+    local_p = core.vec3(anim[at + 4], anim[at + 5], anim[at + 6])
+    parent = core.model_parent(root)
+    world_q = local_q
+    world_p = local_p
+    if parent != null {
+        core.model_sync_transform(parent)
+        world_q = core.quat_mul(parent.world_rotation, local_q)
+        scaled = core.vec3(local_p.x * parent.world_scale.x, local_p.y * parent.world_scale.y, local_p.z * parent.world_scale.z)
+        world_p = core.v3_add(parent.world_position, core.quat_apply(parent.world_rotation, scaled))
+    }
+    world_q = core.quat_normalize(core.quat_mul(turn, world_q))
+    world_p = core.v3_add(core.v3_add(pivot, core.quat_apply(turn, core.v3_sub(world_p, pivot))), shift)
+    local_q = world_q
+    local_p = world_p
+    if parent != null {
+        local_q = core.quat_normalize(core.quat_mul(core.quat_conjugate(parent.world_rotation), world_q))
+        back = core.quat_apply(core.quat_conjugate(parent.world_rotation), core.v3_sub(world_p, parent.world_position))
+        local_p = core.vec3(back.x / parent.world_scale.x, back.y / parent.world_scale.y, back.z / parent.world_scale.z)
+    }
+    anim[at] = local_q.x
+    anim[at + 1] = local_q.y
+    anim[at + 2] = local_q.z
+    anim[at + 3] = local_q.w
+    anim[at + 4] = local_p.x
+    anim[at + 5] = local_p.y
+    anim[at + 6] = local_p.z
+}
+
+// The rig drawn from a pose: the root where the pose's pelvis carries it,
+// every mapped bone at its body's rotation in the pose. A rig that drives
+// the bodies (following) takes them there.
+ragdoll_show_pose(r: *Ragdoll, pose: ptr) {
+    if r.rig == null { return }
+    pose_rig_from(r, pose)
+}
+
+// The rig back to the animation's pose: what the figure hands back to its
+// animation with.
+ragdoll_restore_animation(r: *Ragdoll) {
+    if r.rig == null || r.anim == null { return }
+    set_rig_locals(r, r.anim as float[])
+}
+
+// The lowest point of a pose: every bone's capsules where the pose puts
+// its body, the lowest of their ends less their radius.
+ragdoll_pose_lowest(r: *Ragdoll, pose: ptr) -> float {
+    lowest = 1000000.0
+    ids_block = calloc(4, sizeof(ShapeId))
+    ids = ids_block as ShapeId[]
+    i = 0
+    while i < human.BONE_COUNT {
+        t = pose_get(pose as float[], i)
+        count = dynamics.body_get_shapes(human.bone_at(&r.human, i).body_id, ids, 4)
+        k = 0
+        while k < count {
+            c = dynamics.shape_get_capsule(ids[k])
+            low = t.p.y + core.quat_apply(t.q, c.center1).y
+            other = t.p.y + core.quat_apply(t.q, c.center2).y
+            if other < low { low = other }
+            low = low - c.radius
+            if low < lowest { lowest = low }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    free(ids_block)
+    return lowest
+}
+
+// A bone's far end where a pose puts it: the end of its capsule away from
+// its joint (a calf's is the ankle, a forearm's the wrist).
+ragdoll_pose_end(r: *Ragdoll, pose: ptr, index: int) -> Vec3 {
+    t = pose_get(pose as float[], index)
+    c = first_capsule(human.bone_at(&r.human, index).body_id)
+    far = c.center1
+    if core.v3_len(c.center2) > core.v3_len(c.center1) { far = c.center2 }
+    return core.v3_add(t.p, core.quat_apply(t.q, far))
+}
+
+// A mapped rig bone's rotation in the world, as drawn now.
+ragdoll_rig_bone_rotation(r: *Ragdoll, index: int) -> Quat {
+    if r.rig == null { return ragdoll_bone_rotation(r, index) }
+    m = rig_model(r, index)
+    core.model_sync_transform(m)
+    return m.world_rotation
 }
 
 // The figure's centre of mass in the world, and its mass.
@@ -1486,6 +1726,7 @@ ragdoll_free(r: *Ragdoll) {
     if r.anim != null { free(r.anim) }
     if r.written != null { free(r.written) }
     if r.targets != null { free(r.targets) }
+    if r.shown_from != null { free(r.shown_from) }
     if r.rig != null {
         rig = r.rig as *Rig
         free(rig.bones)
@@ -1699,8 +1940,18 @@ body_bone_direction(r: *Ragdoll, index: int) -> Vec3 {
 // Where the ragdoll's foot points, along the ground: the calf's second
 // capsule is the foot, its end farther off the leg's line the toe.
 body_foot_direction(r: *Ragdoll, calf_index: int) -> Vec3 {
+    return foot_direction_at(r, calf_index, dynamics.body_get_rotation(human.bone_at(&r.human, calf_index).body_id))
+}
+
+// Where the figure's feet point standing in the reference's pose: the way
+// it faces.
+ragdoll_rest_forward(r: *Ragdoll) -> Vec3 {
+    return foot_direction_at(r, human.BONE_CALF_L, human.bone_at(&r.human, human.BONE_CALF_L).reference_frame.q)
+}
+
+// Where a calf's foot points, along the ground, were the calf at `rotation`.
+foot_direction_at(r: *Ragdoll, calf_index: int, rotation: Quat) -> Vec3 {
     body = human.bone_at(&r.human, calf_index)
-    t = dynamics.body_get_transform(body.body_id)
     ids_block = calloc(4, sizeof(ShapeId))
     ids = ids_block as ShapeId[]
     count = dynamics.body_get_shapes(body.body_id, ids, 4)
@@ -1713,7 +1964,7 @@ body_foot_direction(r: *Ragdoll, calf_index: int) -> Vec3 {
         off2 = core.v3_len(core.v3_sub(core.v3_sub(foot.center2, leg.center1), core.v3_mul(axis, core.v3_dot(core.v3_sub(foot.center2, leg.center1), axis))))
         local = core.v3_sub(foot.center1, foot.center2)
         if off2 > off1 { local = core.v3_sub(foot.center2, foot.center1) }
-        d = core.quat_apply(t.q, local)
+        d = core.quat_apply(rotation, local)
         direction = core.vec3(d.x, 0.0, d.z)
     }
     free(ids_block)
@@ -1735,11 +1986,17 @@ first_capsule(body_id: BodyId) -> Capsule {
 // child's local rotation is taken against its parent's new one; the
 // unmapped bones (a wrist, a toe, the crown) keep their own and follow.
 pose_rig(r: *Ragdoll) {
+    pose_rig_from(r, null)
+}
+
+// The rig from a pose (BONE_COUNT * POSE_STRIDE floats), or from the
+// bodies as they are when `pose` is null.
+pose_rig_from(r: *Ragdoll, pose: ptr) {
     rig = r.rig as *Rig
     bones = rig.bones as RigBone[]
     skeleton = rig.skeleton as *Skeleton
     root = rig.root as *Model
-    pelvis_t = dynamics.body_get_transform(human.bone_at(&r.human, human.BONE_PELVIS).body_id)
+    pelvis_t = pose_or_body(r, pose, human.BONE_PELVIS)
     root_p = core.v3_add(pelvis_t.p, core.quat_apply(pelvis_t.q, rig.root_offset_p))
     root_q = core.quat_mul(pelvis_t.q, rig.root_offset_q)
     set_world_rotation(root, root_q)
@@ -1758,7 +2015,7 @@ pose_rig(r: *Ragdoll) {
         k = 0
         while k < human.BONE_COUNT {
             if bones[k].model == bone as ptr {
-                t = dynamics.body_get_transform(human.bone_at(&r.human, k).body_id)
+                t = pose_or_body(r, pose, k)
                 set_world_rotation(bone, core.quat_mul(t.q, bones[k].offset))
                 break
             }
@@ -1766,6 +2023,11 @@ pose_rig(r: *Ragdoll) {
         }
         i = i + 1
     }
+}
+
+pose_or_body(r: *Ragdoll, pose: ptr, index: int) -> Transform {
+    if pose == null { return dynamics.body_get_transform(human.bone_at(&r.human, index).body_id) }
+    return pose_get(pose as float[], index)
 }
 
 // A model's local rotation for a world one, against its parent's current world rotation.
