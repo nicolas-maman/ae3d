@@ -64,7 +64,7 @@ exports (
     POSE_STRIDE, ragdoll_body_pose, ragdoll_animation_pose, ragdoll_move_animation, ragdoll_show_pose,
     ragdoll_restore_animation, ragdoll_pose_lowest, ragdoll_pose_end, ragdoll_rig_bone_rotation, ragdoll_rest_forward,
     CharacterController, character_controller, character_of, character_feet, character_move, character_grounded, character_velocity,
-    character_ground_normal, character_free, character_set_slope_limit, character_set_step_height, character_overlap,
+    character_ground_normal, character_free, character_set_slope_limit, character_set_step_height, character_overlap, character_overlap_world,
     spec_of, apply_spec, attachments
 )
 
@@ -2108,6 +2108,7 @@ struct CharacterController {
     pushed_count: int
     lift: float                    // the object's origin above its feet: 0 for a figure whose origin is its feet
     driven: bool                   // something has moved it (character_move); until then the world stands it
+    world_only: bool               // an overlap query of the static world alone
     owned: bool                    // made from a scene record: the world's to free
 }
 
@@ -2202,6 +2203,7 @@ character_capsule(c: *CharacterController) -> Capsule {
 // the far side by the ground -- through a 0.5 m step it should stop at.
 character_plane_visitor(shape_id: ShapeId, results: PlaneResult[], count: int, context: ptr) -> bool {
     c = context as *CharacterController
+    if c.world_only && dynamics.body_get_type(dynamics.shape_get_body(shape_id)) != dynamics.BODY_STATIC { return true }
     planes = c.planes as CollisionPlane[]
     i = 0
     while i < count && c.plane_count < CHARACTER_PLANES {
@@ -2289,6 +2291,16 @@ character_overlap(c: *CharacterController) -> float {
     return deepest
 }
 
+// How deep the capsule is into the static world alone -- the buildings,
+// kerbs and steps it walks among, not a crate it leans on or a figure that
+// walks into it -- in metres.
+character_overlap_world(c: *CharacterController) -> float {
+    c.world_only = true
+    deepest = character_overlap(c)
+    c.world_only = false
+    return deepest
+}
+
 // One move of `delta` seconds: `walk` is the horizontal velocity asked for
 // (metres a second; its y is ignored), `jump` a vertical speed to leave the
 // ground at (0 for none, and only from the ground). Gravity pulls a
@@ -2356,6 +2368,9 @@ character_step(c: *CharacterController, walk: Vec3, jump: float, delta: float) {
         // buildings, a slot between crates), and putting the feet on it put
         // the capsule 72 mm into a wall. Where it cannot get down, it stays
         // up, off the ground, and falls as far as its next move lets it.
+        // Up onto it only where its head fits too: a step under an awning
+        // put the capsule 250 mm into the awning. Where it cannot get up,
+        // the step is a wall.
         drop = hit.point.y - feet.y
         fits = true
         if drop < 0.0 {
@@ -2365,6 +2380,10 @@ character_step(c: *CharacterController, walk: Vec3, jump: float, delta: float) {
                 fits = false
                 feet = core.vec3(feet.x, feet.y + drop * fraction, feet.z)
             }
+        } else if drop > 0.001 {
+            fraction = physics_world.cast_mover(p.world_id, feet, capsule, core.vec3(0.0, drop, 0.0), filter, false,
+                                                character_cast_filter, null)
+            if fraction < 0.999 { fits = false }
         }
         if fits {
             feet = core.vec3(feet.x, hit.point.y, feet.z)
@@ -2373,5 +2392,14 @@ character_step(c: *CharacterController, walk: Vec3, jump: float, delta: float) {
             c.velocity = core.vec3(c.velocity.x, 0.0, c.velocity.z)
         }
     }
+    // The ray is one line under the capsule's middle; the capsule is round
+    // and wide. Where two floors overlap a centimetre apart (an alley's
+    // floor over the ground beneath it), the ray found the lower and the
+    // capsule sat 10 mm into the upper, standing or landing: out of
+    // whatever it ends in, by the planes it touches, as a move is.
+    c.plane_count = 0
+    physics_world.collide_mover(p.world_id, feet, capsule, filter, character_plane_visitor, c as ptr)
+    out = mover.solve_planes(core.vec3(0.0, 0.0, 0.0), c.planes as CollisionPlane[], c.plane_count)
+    feet = core.v3_add(feet, out.delta)
     behaviour.object_set_position(o, core.vec3(feet.x, feet.y + c.lift, feet.z))
 }

@@ -98,7 +98,7 @@ struct Game {
     wander_moves: int
     wander_heading: float
     wander_speed: float
-    wander_deepest: float          // metres: the deepest into anything after any move
+    wander_deepest: float          // metres: the deepest into the street after any move
     wander_over_mm: int            // moves that ended more than a millimetre into something
     wander_over_slop: int          // and more than the solver's 5 mm slop and one more
     wander_falls: int              // moves that ended under the street (a fall through it)
@@ -790,9 +790,9 @@ walk_on_foot(g: *Game, e: *Engine, step: float) {
 // AE3D_ON_FOOT=3: WANDER random moves through the street, WANDER_BURST a
 // fixed step (so it takes seconds, not minutes), each a fixed step's worth
 // of walking: a heading that turns every half second, a pace from a stroll
-// to a run, a jump now and then. After every move, how deep the capsule is
-// into anything -- buildings, kerbs, steps, the props it pushes -- and
-// whether it has fallen through the street. Wandering off the street puts it
+// to a run, a jump now and then, pushing the props it meets. After every
+// move, how deep the capsule is into the street itself -- buildings, kerbs,
+// steps -- and whether it has fallen through it. Wandering off the street puts it
 // back where it started.
 const WANDER = 10000
 const WANDER_BURST = 10
@@ -817,7 +817,10 @@ wander(g: *Game, e: *Engine, step: float) {
         walk = core.vec3(core.cos_of(g.wander_heading) * g.wander_speed, 0.0, core.sin_of(g.wander_heading) * g.wander_speed)
         physics.character_move(c, walk, jump, step)
         feet = behaviour.object_position(c.object as *GameObject)
-        deep = physics.character_overlap(c)
+        // Into the street itself: the buildings, kerbs and steps. (A walker
+        // or a pushed crate pressing into it is the world moving, and the
+        // next move answers it.)
+        deep = physics.character_overlap_world(c)
         if deep > g.wander_deepest { g.wander_deepest = deep }
         if deep > 0.001 { g.wander_over_mm = g.wander_over_mm + 1 }
         if deep > 0.006 {
@@ -1132,7 +1135,7 @@ main() {
         feet = behaviour.object_position(c.object as *GameObject)
         println("street_drive: on foot at (${feet.x}, ${feet.y}, ${feet.z}), grounded ${physics.character_grounded(c)}")
         if g.wander {
-            println("street_drive: wandered ${g.wander_moves} moves (${g.wander_jumps} jumps): deepest ${g.wander_deepest * 1000.0} mm into anything; ${g.wander_over_mm} moves over 1 mm, ${g.wander_over_slop} over 6 mm; ${g.wander_falls} falls through")
+            println("street_drive: wandered ${g.wander_moves} moves (${g.wander_jumps} jumps): deepest ${g.wander_deepest * 1000.0} mm into the street; ${g.wander_over_mm} moves over 1 mm, ${g.wander_over_slop} over 6 mm; ${g.wander_falls} falls through")
         }
     }
     if g.vehicle != null { physics.vehicle_free(g.vehicle as *Vehicle) }

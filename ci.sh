@@ -458,9 +458,11 @@ done
 
 step "a character wanders the street"
 # The on-foot character walks, runs and jumps 10,000 random moves through
-# street_drive's street -- kerbs, steps, buildings, the props it pushes -- and
-# after every move is asked how deep it is into anything and whether it fell
-# through. Resting contact keeps up to the solver's 5 mm slop; past 6 mm, or
+# street_drive's street, pushing the props it meets, and after every move is
+# asked how deep it is into the street itself -- kerbs, steps, buildings --
+# and whether it fell through. (Not into what moves: a walker that walks into
+# it, on the runner's own clock, is the world moving, and the next move
+# answers it.) Resting contact keeps up to the solver's 5 mm slop; past 6 mm, or
 # under the street, is a bug (#420).
 if built_ok street_drive && have_display; then
     AE3D_ON_FOOT=3 bounded "$RUN_LIMIT" ./build/street_drive >/tmp/ae3d_wander.log 2>&1
