@@ -139,8 +139,8 @@ ae3d_dlss_source() {
 #
 #   ae3d_native_sources <object directory> <aephysics root>
 ae3d_native_sources() {
-    list="native/gpu/capture.c native/gpu/opengl_api.c native/gpu/opengl.c native/gpu/offscreen.c native/gpu/vulkan.c native/gpu/jobs.c"
-    list="$list native/platform/crash.c native/geometry/mesh.c native/geometry/skin.c native/geometry/meshfile.c native/image/image.c"
+    list="native/gpu/capture.c native/gpu/opengl_api.c native/gpu/opengl.c native/gpu/offscreen.c native/gpu/vulkan.c native/gpu/jobs.c native/gpu/stores.c"
+    list="$list native/platform/crash.c native/image/image.c"
     list="$list $(ae3d_dlss_source "$1") $2/aephysics/native/aephysics_native.c"
     if [ "$(uname -s)" = "Darwin" ]; then
         list="$list native/platform/metal_surface.m"

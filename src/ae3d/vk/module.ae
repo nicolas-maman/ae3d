@@ -18,6 +18,7 @@ import ae3d.vkscene
 import ae3d.skin
 import ae3d.shaders
 import ae3d.posing
+import ae3d.geometry
 
 exports (
     VKRenderer,
@@ -48,10 +49,6 @@ extern ae3d_vk_frame_end() -> int
 extern ae3d_vk_upload_mesh(mesh: ptr) -> int
 extern ae3d_vk_upload_instances(instances: ptr) -> int
 extern ae3d_vk_update_instances(handle: int, instances: ptr) -> int
-extern ae3d_inst_create() -> ptr
-extern ae3d_inst_destroy(inst: ptr)
-extern ae3d_inst_resize(inst: ptr, count: int) -> int
-extern ae3d_inst_set_matrix(inst: ptr, i: int, m: *Mat4)
 extern ae3d_vk_free_mesh(handle: int)
 extern ae3d_vk_texture_create(width: int, height: int, rgba: ptr) -> int
 extern ae3d_vk_texture_destroy(handle: int)
@@ -104,7 +101,6 @@ extern ae3d_vk_set_ray_shadows(on: int)
 extern ae3d_vk_set_ray_reach(metres: float)
 extern ae3d_vk_ray_shadows() -> int
 extern ae3d_vk_ray_shadows_now() -> int
-extern ae3d_inst_matrix_data(inst: ptr) -> ptr
 extern ae3d_vk_dlss_available() -> int
 extern ae3d_vk_set_dlss(mode: int) -> int
 extern ae3d_vk_dlss() -> int
@@ -117,8 +113,6 @@ extern ae3d_vk_shadow_end()
 extern ae3d_vk_resolve_scene_depth() -> int
 // A mesh's edit flag, which the refresh reads and clears. Declared here as
 // well as in the OpenGL module, so a program on Vulkan alone links.
-extern ae3d_mesh_dirty(mesh: ptr) -> int
-extern ae3d_mesh_clear_dirty(mesh: ptr)
 extern ae3d_vk_set_taa(on: int)
 extern ae3d_vk_taa() -> int
 extern ae3d_vk_set_ssr(on: int)
@@ -693,7 +687,7 @@ build_ray_scene(r: *VKRenderer) {
         if traced(m) {
             core.model_sync_transform(m)
             if m.is_instanced && core.model_instance_count(m) > 0 {
-                ae3d_vk_ray_add(m.vbo, ae3d_inst_matrix_data(m.instances), core.model_instance_count(m))
+                ae3d_vk_ray_add(m.vbo, geometry.inst_matrix_data(m.instances), core.model_instance_count(m))
             } else if !m.is_instanced {
                 ae3d_vk_ray_add_one(m.vbo, &m.model_matrix)
             }
@@ -1131,7 +1125,7 @@ shadow_batch_for(r: *VKRenderer, m: *Model) -> *VKBatch {
 
     if r.shadow_batch_count >= list.size(r.shadow_batches) {
         fresh = heap.new(VKBatch)
-        fresh.instances = ae3d_inst_create()
+        fresh.instances = geometry.inst_create()
         fresh.members = list.new()
         fresh.handle = 0
         fresh.count = 0
@@ -1305,7 +1299,7 @@ renderer_add_model(r: *VKRenderer, m: *Model) {
     m.shares_geometry = ae3d_vk_mesh_shared(handle) == 1
     // Building a mesh marks it dirty, and what was just uploaded is not an edit
     // waiting to be sent.
-    ae3d_mesh_clear_dirty(m.mesh)
+    geometry.mesh_clear_dirty(m.mesh)
 
     if m.is_instanced && core.model_instance_count(m) > 0 {
         m.instance_vbo = ae3d_vk_upload_instances(m.instances)
@@ -1546,11 +1540,11 @@ apply_shading(r: *VKRenderer, m: *Model, program: int) {
 // the new shape uploaded on its own: writing over the shared one would reshape
 // every other model drawing what this one used to be.
 refresh_geometry(m: *Model) {
-    if m.vbo == 0 || ae3d_mesh_dirty(m.mesh) != 1 { return }
+    if m.vbo == 0 || geometry.mesh_dirty(m.mesh) != 1 { return }
 
     ae3d_vk_free_mesh(m.vbo)
     m.vbo = ae3d_vk_upload_mesh(m.mesh)
-    ae3d_mesh_clear_dirty(m.mesh)
+    geometry.mesh_clear_dirty(m.mesh)
     core.model_recalculate_bounds(m)
 }
 
@@ -1985,7 +1979,7 @@ batch_for(r: *VKRenderer, m: *Model) -> *VKBatch {
 
     if r.batch_count >= list.size(r.batches) {
         fresh = heap.new(VKBatch)
-        fresh.instances = ae3d_inst_create()
+        fresh.instances = geometry.inst_create()
         fresh.members = list.new()
         fresh.handle = 0
         fresh.count = 0
@@ -2059,11 +2053,11 @@ draw_opaque(r: *VKRenderer) {
 sync_batch_instances(b: *VKBatch) {
     if !b.stale { return }
     while list.size(b.members) > b.count { list.remove(b.members, list.size(b.members) - 1) }
-    ae3d_inst_resize(b.instances, b.count)
+    geometry.inst_resize(b.instances, b.count)
     i = 0
     while i < b.count {
         m = list.get_raw(b.members, i) as *Model
-        ae3d_inst_set_matrix(b.instances, i, &m.model_matrix)
+        geometry.inst_set_matrix(b.instances, i, &m.model_matrix)
         i = i + 1
     }
     if b.handle == 0 || ae3d_vk_update_instances(b.handle, b.instances) != 1 {
@@ -2198,7 +2192,7 @@ free_batches(batches: ptr) {
         b = list.get_raw(batches, i) as *VKBatch
         if b != null {
             if b.handle != 0 { ae3d_vk_free_mesh(b.handle) }
-            if b.instances != null { ae3d_inst_destroy(b.instances) }
+            if b.instances != null { geometry.inst_destroy(b.instances) }
             if b.members != null { list.free(b.members) }
             heap.free(b)
         }

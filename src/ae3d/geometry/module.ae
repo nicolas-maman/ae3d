@@ -1,0 +1,1541 @@
+// ae3d.geometry -- the stores a renderer draws from: a mesh's interleaved
+// float32 vertices and its indices, and a model's instances.
+//
+// A mesh vertex is nine float32s: position, texture coordinate, normal, and
+// how much of the sky it can see (occlusion rides in the vertex the way a
+// normal does -- it is a property of where the surface sits among the rest of
+// the scene -- and every mesh has one whether or not anything baked it). A
+// skinned mesh has four joints and four weights a vertex in an array of its
+// own, so a mesh that is not skinned never allocates it and the stride every
+// unskinned draw reads stays nine. Instances are a 4x4 matrix each, with a
+// colour and an animation phase when they are asked for; or, as points,
+// eight floats each -- x, y, z, scale, r, g, b, phase -- so a million grains
+// are 32 MB a frame and not 80.
+//
+// The renderers are C (native/gpu) and read these stores in place: GeoMesh
+// and GeoInstances have exactly the layout of ae3d_mesh and ae3d_inst in
+// native/gpu/stores.h, and test_geometry holds the two to each other
+// field by field. They were C themselves (native/geometry/mesh.c) until
+// Aether had a 32-bit float (aether#2134); the arithmetic here is the C's,
+// single precision where it was single and double where it was double, so
+// every vertex written is the same bits it was.
+//
+// A mesh or an instance store is a handle (ptr), as it was across the C
+// boundary.
+
+import ae3d.jobs
+
+exports (
+    GeoMesh, GeoInstances, VERTEX_FLOATS, SKIN_FLOATS, POINT_FLOATS,
+    mesh_create, mesh_clone, mesh_destroy, mesh_reserve, mesh_push_vertex, mesh_push_index,
+    mesh_set_skin, mesh_is_skinned, mesh_skin_data, mesh_skin_joint, mesh_skin_weight,
+    mesh_set_occlusion, mesh_occlusion, mesh_vertex_count, mesh_index_count,
+    mesh_pos_x, mesh_pos_y, mesh_pos_z, mesh_set_pos, mesh_set_uv, mesh_set_normal,
+    mesh_norm_x, mesh_norm_y, mesh_norm_z, mesh_index_at, mesh_recalc_normals,
+    mesh_compute_bounds, mesh_bound_x, mesh_bound_y, mesh_bound_z, mesh_bound_radius,
+    mesh_dirty, mesh_clear_dirty, mesh_vertex_data, mesh_index_data,
+    mesh_surface_area, mesh_uv_area, mesh_distinct_planes, mesh_extent, mesh_decimate,
+    inst_create, inst_destroy, inst_enable_points, inst_is_points, inst_point_data,
+    inst_resize, inst_count, inst_set_count, inst_set_trs, inst_set_positions,
+    inst_set_positions_yaw, inst_set_colors, inst_set_point_scales, inst_enable_phases,
+    inst_has_phases, inst_phase_data, inst_set_phases, inst_set_phase, inst_set_matrix,
+    inst_remove, inst_enable_colors, inst_has_colors, inst_set_color, inst_compute_bounds,
+    inst_bound_x, inst_bound_y, inst_bound_z, inst_bound_radius, inst_matrix_data,
+    inst_color_data,
+    skinrows_create, skinrows_destroy, skinrows_count, skinrows_set, skinrows_apply
+)
+
+extern calloc(count: int, size: int) -> ptr
+extern malloc(size: long) -> ptr
+extern realloc(p: ptr, size: long) -> ptr
+extern free(p: ptr)
+extern memcpy(dst: ptr, src: ptr, n: long) -> ptr
+extern memmove(dst: ptr, src: ptr, n: long) -> ptr
+extern memset(dst: ptr, value: int, n: long) -> ptr
+extern sqrtf(x: f32) -> f32
+extern sqrt(x: float) -> float
+extern fabs(x: float) -> float
+extern sin(x: float) -> float
+extern cos(x: float) -> float
+
+const VERTEX_FLOATS = 9
+const SKIN_FLOATS = 8
+const POINT_FLOATS = 8
+
+// ae3d_mesh in native/gpu/stores.h, field for field.
+struct GeoMesh {
+    vertices: ptr                  // f32[vertex_capacity * 9]
+    indices: ptr                   // u32[index_capacity], written through int[]
+    skin: ptr                      // f32[vertex_capacity * 8], or null
+    skin_dirty: int
+    vertex_count: int
+    vertex_capacity: int
+    index_count: int
+    index_capacity: int
+    dirty: int
+    bound_x: f32                   // the world bounding sphere, from compute_bounds
+    bound_y: f32
+    bound_z: f32
+    radius: f32
+    local_x: f32                   // the mesh's own centre and reach, worked out once
+    local_y: f32
+    local_z: f32
+    local_radius: f32
+    local_known: int
+}
+
+// ae3d_inst in native/gpu/stores.h, field for field.
+struct GeoInstances {
+    matrices: ptr                  // f32[capacity * 16]
+    colors: ptr                    // f32[capacity * 3], when has_colors
+    phases: ptr                    // f32[capacity], when has_phases
+    points: ptr                    // f32[capacity * 8], when is_points
+    is_points: int
+    count: int
+    capacity: int
+    has_colors: int
+    has_phases: int
+    bound_x: f32
+    bound_y: f32
+    bound_z: f32
+    radius: f32
+}
+
+// The largest integer not above x, for the cells the decimation and the
+// plane count bucket into. Not libm's floor: a bare extern floor was
+// resolved against a program's locals named floor (aether#2173).
+floor_long(x: float) -> long {
+    i = x as long
+    if (i as float) > x { i = i - (1 as long) }
+    return i
+}
+
+// --- meshes --------------------------------------------------------------------------------------------------------
+
+mesh_create() -> ptr {
+    return calloc(1, sizeof(GeoMesh))
+}
+
+mesh_clone(handle: ptr) -> ptr {
+    if handle == null { return null }
+    src = handle as *GeoMesh
+    copy = calloc(1, sizeof(GeoMesh)) as *GeoMesh
+    if copy == null { return null }
+    if src.vertex_count > 0 {
+        bytes = (src.vertex_count * VERTEX_FLOATS * 4) as long
+        copy.vertices = malloc(bytes)
+        memcpy(copy.vertices, src.vertices, bytes)
+        copy.vertex_count = src.vertex_count
+        copy.vertex_capacity = src.vertex_count
+    }
+    if src.index_count > 0 {
+        bytes = (src.index_count * 4) as long
+        copy.indices = malloc(bytes)
+        memcpy(copy.indices, src.indices, bytes)
+        copy.index_count = src.index_count
+        copy.index_capacity = src.index_count
+    }
+    if src.skin != null && src.vertex_count > 0 {
+        copy.skin = calloc(src.vertex_count * SKIN_FLOATS, 4)
+        memcpy(copy.skin, src.skin, (src.vertex_count * SKIN_FLOATS * 4) as long)
+        copy.skin_dirty = 1
+    }
+    copy.dirty = src.dirty
+    copy.bound_x = src.bound_x
+    copy.bound_y = src.bound_y
+    copy.bound_z = src.bound_z
+    copy.radius = src.radius
+    return copy as ptr
+}
+
+mesh_destroy(handle: ptr) {
+    if handle == null { return }
+    m = handle as *GeoMesh
+    if m.vertices != null { free(m.vertices) }
+    if m.indices != null { free(m.indices) }
+    if m.skin != null { free(m.skin) }
+    free(handle)
+}
+
+grow_vertices(m: *GeoMesh, needed: int) -> bool {
+    if needed <= m.vertex_capacity { return true }
+    capacity = m.vertex_capacity
+    if capacity == 0 { capacity = 64 }
+    while capacity < needed { capacity = capacity * 2 }
+    grown = realloc(m.vertices, (capacity * VERTEX_FLOATS * 4) as long)
+    if grown == null { return false }
+    m.vertices = grown
+    if m.skin != null {
+        skin = realloc(m.skin, (capacity * SKIN_FLOATS * 4) as long)
+        if skin == null { return false }
+        memset(skin + m.vertex_capacity * SKIN_FLOATS * 4, 0, ((capacity - m.vertex_capacity) * SKIN_FLOATS * 4) as long)
+        m.skin = skin
+    }
+    m.vertex_capacity = capacity
+    return true
+}
+
+grow_indices(m: *GeoMesh, needed: int) -> bool {
+    if needed <= m.index_capacity { return true }
+    capacity = m.index_capacity
+    if capacity == 0 { capacity = 64 }
+    while capacity < needed { capacity = capacity * 2 }
+    grown = realloc(m.indices, (capacity * 4) as long)
+    if grown == null { return false }
+    m.indices = grown
+    m.index_capacity = capacity
+    return true
+}
+
+mesh_reserve(handle: ptr, vertices: int, indices: int) -> int {
+    if handle == null { return 0 }
+    m = handle as *GeoMesh
+    if vertices > 0 && !grow_vertices(m, vertices) { return 0 }
+    if indices > 0 && !grow_indices(m, indices) { return 0 }
+    return 1
+}
+
+mesh_push_vertex(handle: ptr, px: float, py: float, pz: float, u: float, v: float,
+                 nx: float, ny: float, nz: float) -> int {
+    if handle == null { return 0 - 1 }
+    m = handle as *GeoMesh
+    if !grow_vertices(m, m.vertex_count + 1) { return 0 - 1 }
+    s = m.vertices as f32[]
+    at = m.vertex_count * VERTEX_FLOATS
+    s[at] = px
+    s[at + 1] = py
+    s[at + 2] = pz
+    s[at + 3] = u
+    s[at + 4] = v
+    s[at + 5] = nx
+    s[at + 6] = ny
+    s[at + 7] = nz
+    // Unoccluded until something says otherwise, so a mesh nobody baked is
+    // lit exactly as it was before occlusion existed.
+    s[at + 8] = 1.0
+    m.dirty = 1
+    m.local_known = 0
+    index = m.vertex_count
+    m.vertex_count = m.vertex_count + 1
+    return index
+}
+
+mesh_push_index(handle: ptr, index: int) -> int {
+    if handle == null { return 0 - 1 }
+    m = handle as *GeoMesh
+    if !grow_indices(m, m.index_count + 1) { return 0 - 1 }
+    (m.indices as int[])[m.index_count] = index
+    at = m.index_count
+    m.index_count = m.index_count + 1
+    return at
+}
+
+// Weights arrive as authored and are normalised here, because a renderer that
+// trusts them cannot tell a mesh whose weights sum to 0.98 from one that is
+// meant to shrink. A vertex with no weight at all is bound rigidly to joint
+// 0, which is what an unweighted vertex on a skinned mesh means.
+mesh_set_skin(handle: ptr, i: int, j0: int, j1: int, j2: int, j3: int,
+              w0: float, w1: float, w2: float, w3: float) -> int {
+    if handle == null { return 0 }
+    m = handle as *GeoMesh
+    if i < 0 || i >= m.vertex_count { return 0 }
+    if m.skin == null {
+        m.skin = calloc(m.vertex_capacity * SKIN_FLOATS, 4)
+        if m.skin == null { return 0 }
+    }
+    s = m.skin as f32[]
+    at = i * SKIN_FLOATS
+    s[at] = j0
+    s[at + 1] = j1
+    s[at + 2] = j2
+    s[at + 3] = j3
+    total = w0 + w1 + w2 + w3
+    if total > 0.000001 {
+        s[at + 4] = w0 / total
+        s[at + 5] = w1 / total
+        s[at + 6] = w2 / total
+        s[at + 7] = w3 / total
+    } else {
+        s[at + 4] = 1.0
+        s[at + 5] = 0.0
+        s[at + 6] = 0.0
+        s[at + 7] = 0.0
+        s[at] = 0.0
+    }
+    m.skin_dirty = 1
+    return 1
+}
+
+mesh_is_skinned(handle: ptr) -> int {
+    if handle == null { return 0 }
+    if (handle as *GeoMesh).skin != null { return 1 }
+    return 0
+}
+
+mesh_skin_data(handle: ptr) -> ptr {
+    if handle == null { return null }
+    return (handle as *GeoMesh).skin
+}
+
+mesh_skin_joint(handle: ptr, i: int, slot: int) -> float {
+    if handle == null { return 0.0 }
+    m = handle as *GeoMesh
+    if m.skin == null || i < 0 || i >= m.vertex_count || slot < 0 || slot > 3 { return 0.0 }
+    return (m.skin as f32[])[i * SKIN_FLOATS + slot] as float
+}
+
+mesh_skin_weight(handle: ptr, i: int, slot: int) -> float {
+    if handle == null { return 0.0 }
+    m = handle as *GeoMesh
+    if m.skin == null || i < 0 || i >= m.vertex_count || slot < 0 || slot > 3 { return 0.0 }
+    return (m.skin as f32[])[i * SKIN_FLOATS + 4 + slot] as float
+}
+
+// The vertex's first float, or -1 when there is no such vertex.
+slot_of(handle: ptr, i: int) -> int {
+    if handle == null { return 0 - 1 }
+    m = handle as *GeoMesh
+    if i < 0 || i >= m.vertex_count { return 0 - 1 }
+    return i * VERTEX_FLOATS
+}
+
+// How much of the sky a vertex can see: one is open, zero is buried. Baked
+// against the whole scene rather than the mesh it belongs to, because what
+// darkens the foot of a wall is the pavement, a different object.
+mesh_set_occlusion(handle: ptr, i: int, value: float) {
+    at = slot_of(handle, i)
+    if at < 0 { return }
+    v = value
+    if v < 0.0 { v = 0.0 }
+    if v > 1.0 { v = 1.0 }
+    m = handle as *GeoMesh
+    (m.vertices as f32[])[at + 8] = v
+    m.dirty = 1
+}
+
+mesh_occlusion(handle: ptr, i: int) -> float {
+    at = slot_of(handle, i)
+    if at < 0 { return 1.0 }
+    return ((handle as *GeoMesh).vertices as f32[])[at + 8] as float
+}
+
+mesh_vertex_count(handle: ptr) -> int {
+    if handle == null { return 0 }
+    return (handle as *GeoMesh).vertex_count
+}
+
+mesh_index_count(handle: ptr) -> int {
+    if handle == null { return 0 }
+    return (handle as *GeoMesh).index_count
+}
+
+vertex_float(handle: ptr, i: int, k: int, missing: float) -> float {
+    at = slot_of(handle, i)
+    if at < 0 { return missing }
+    return ((handle as *GeoMesh).vertices as f32[])[at + k] as float
+}
+
+mesh_pos_x(handle: ptr, i: int) -> float { return vertex_float(handle, i, 0, 0.0) }
+mesh_pos_y(handle: ptr, i: int) -> float { return vertex_float(handle, i, 1, 0.0) }
+mesh_pos_z(handle: ptr, i: int) -> float { return vertex_float(handle, i, 2, 0.0) }
+
+// The twin of set_normal. A mesh built by generated geometry, a surface out
+// of a field most of all, can only be checked for facing the right way if
+// what it wrote can be read back.
+mesh_norm_x(handle: ptr, i: int) -> float { return vertex_float(handle, i, 5, 0.0) }
+mesh_norm_y(handle: ptr, i: int) -> float { return vertex_float(handle, i, 6, 0.0) }
+mesh_norm_z(handle: ptr, i: int) -> float { return vertex_float(handle, i, 7, 0.0) }
+
+set_three(handle: ptr, i: int, k: int, a: float, b: float, c: float) {
+    at = slot_of(handle, i)
+    if at < 0 { return }
+    m = handle as *GeoMesh
+    s = m.vertices as f32[]
+    s[at + k] = a
+    s[at + k + 1] = b
+    if k != 3 { s[at + k + 2] = c }
+    m.dirty = 1
+}
+
+mesh_set_pos(handle: ptr, i: int, x: float, y: float, z: float) { set_three(handle, i, 0, x, y, z) }
+mesh_set_uv(handle: ptr, i: int, u: float, v: float) { set_three(handle, i, 3, u, v, 0.0) }
+mesh_set_normal(handle: ptr, i: int, x: float, y: float, z: float) { set_three(handle, i, 5, x, y, z) }
+
+mesh_index_at(handle: ptr, i: int) -> int {
+    if handle == null { return 0 - 1 }
+    m = handle as *GeoMesh
+    if i < 0 || i >= m.index_count { return 0 - 1 }
+    return (m.indices as int[])[i]
+}
+
+// Every normal the area-weighted sum of the faces around it, in single
+// precision as the vertices are.
+mesh_recalc_normals(handle: ptr) {
+    if handle == null { return }
+    m = handle as *GeoMesh
+    if m.vertex_count == 0 { return }
+    s = m.vertices as f32[]
+    idx = m.indices as int[]
+    i = 0
+    while i < m.vertex_count {
+        at = i * VERTEX_FLOATS
+        s[at + 5] = 0.0
+        s[at + 6] = 0.0
+        s[at + 7] = 0.0
+        i = i + 1
+    }
+    i = 0
+    while i + 2 < m.index_count {
+        ia = idx[i]
+        ib = idx[i + 1]
+        ic = idx[i + 2]
+        i = i + 3
+        if ia < 0 || ib < 0 || ic < 0 || ia >= m.vertex_count || ib >= m.vertex_count || ic >= m.vertex_count { continue }
+        a = ia * VERTEX_FLOATS
+        b = ib * VERTEX_FLOATS
+        c = ic * VERTEX_FLOATS
+        f32 ux = s[b] - s[a]
+        f32 uy = s[b + 1] - s[a + 1]
+        f32 uz = s[b + 2] - s[a + 2]
+        f32 vx = s[c] - s[a]
+        f32 vy = s[c + 1] - s[a + 1]
+        f32 vz = s[c + 2] - s[a + 2]
+        f32 nx = uy * vz - uz * vy
+        f32 ny = uz * vx - ux * vz
+        f32 nz = ux * vy - uy * vx
+        s[a + 5] = s[a + 5] + nx
+        s[a + 6] = s[a + 6] + ny
+        s[a + 7] = s[a + 7] + nz
+        s[b + 5] = s[b + 5] + nx
+        s[b + 6] = s[b + 6] + ny
+        s[b + 7] = s[b + 7] + nz
+        s[c + 5] = s[c + 5] + nx
+        s[c + 6] = s[c + 6] + ny
+        s[c + 7] = s[c + 7] + nz
+    }
+    i = 0
+    while i < m.vertex_count {
+        at = i * VERTEX_FLOATS
+        f32 len = sqrtf(s[at + 5] * s[at + 5] + s[at + 6] * s[at + 6] + s[at + 7] * s[at + 7])
+        if len > 0.00000001 {
+            s[at + 5] = s[at + 5] / len
+            s[at + 6] = s[at + 6] / len
+            s[at + 7] = s[at + 7] / len
+        } else {
+            s[at + 5] = 0.0
+            s[at + 6] = 1.0
+            s[at + 7] = 0.0
+        }
+        i = i + 1
+    }
+    m.dirty = 1
+}
+
+// The mesh's own centre and the furthest vertex from it, worked out once. A
+// transform cannot change what this says, so it survives every move the
+// model makes and is redone only when the vertices themselves change.
+local_bounds(m: *GeoMesh) {
+    if m.local_known != 0 { return }
+    m.local_known = 1
+    if m.vertex_count == 0 {
+        m.local_x = 0.0
+        m.local_y = 0.0
+        m.local_z = 0.0
+        m.local_radius = 0.0
+        return
+    }
+    s = m.vertices as f32[]
+    cx = 0.0
+    cy = 0.0
+    cz = 0.0
+    i = 0
+    while i < m.vertex_count {
+        at = i * VERTEX_FLOATS
+        cx = cx + (s[at] as float)
+        cy = cy + (s[at + 1] as float)
+        cz = cz + (s[at + 2] as float)
+        i = i + 1
+    }
+    n = m.vertex_count as float
+    cx = cx / n
+    cy = cy / n
+    cz = cz / n
+    worst = 0.0
+    i = 0
+    while i < m.vertex_count {
+        at = i * VERTEX_FLOATS
+        dx = (s[at] as float) - cx
+        dy = (s[at + 1] as float) - cy
+        dz = (s[at + 2] as float) - cz
+        distance = dx * dx + dy * dy + dz * dz
+        if distance > worst { worst = distance }
+        i = i + 1
+    }
+    m.local_x = cx
+    m.local_y = cy
+    m.local_z = cz
+    m.local_radius = sqrt(worst)
+}
+
+// An affine transform commutes with averaging, so the world centre is the
+// local centre put through the same transform. Rotation moves every vertex
+// the same distance around that centre, so only scale can change the
+// radius, and the largest scale factor is the one that has to fit.
+mesh_compute_bounds(handle: ptr, px: float, py: float, pz: float,
+                    sx: float, sy: float, sz: float,
+                    qx: float, qy: float, qz: float, qw: float) {
+    if handle == null { return }
+    m = handle as *GeoMesh
+    if m.vertex_count == 0 {
+        m.bound_x = px
+        m.bound_y = py
+        m.bound_z = pz
+        m.radius = 1.0
+        return
+    }
+    local_bounds(m)
+    // The local centre scaled, as float32, then turned by the rotation in
+    // double and rounded to float32 again: the C's ae3d_quat_rotate.
+    f32 scaled_x = (m.local_x as float) * sx
+    f32 scaled_y = (m.local_y as float) * sy
+    f32 scaled_z = (m.local_z as float) * sz
+    vx = scaled_x as float
+    vy = scaled_y as float
+    vz = scaled_z as float
+    tx = 2.0 * (qy * vz - qz * vy)
+    ty = 2.0 * (qz * vx - qx * vz)
+    tz = 2.0 * (qx * vy - qy * vx)
+    f32 rotated_x = vx + qw * tx + (qy * tz - qz * ty)
+    f32 rotated_y = vy + qw * ty + (qz * tx - qx * tz)
+    f32 rotated_z = vz + qw * tz + (qx * ty - qy * tx)
+    m.bound_x = (rotated_x as float) + px
+    m.bound_y = (rotated_y as float) + py
+    m.bound_z = (rotated_z as float) + pz
+    largest = fabs(sx)
+    if fabs(sy) > largest { largest = fabs(sy) }
+    if fabs(sz) > largest { largest = fabs(sz) }
+    m.radius = (m.local_radius as float) * largest
+}
+
+mesh_bound_x(handle: ptr) -> float {
+    if handle == null { return 0.0 }
+    return (handle as *GeoMesh).bound_x as float
+}
+
+mesh_bound_y(handle: ptr) -> float {
+    if handle == null { return 0.0 }
+    return (handle as *GeoMesh).bound_y as float
+}
+
+mesh_bound_z(handle: ptr) -> float {
+    if handle == null { return 0.0 }
+    return (handle as *GeoMesh).bound_z as float
+}
+
+mesh_bound_radius(handle: ptr) -> float {
+    if handle == null { return 0.0 }
+    return (handle as *GeoMesh).radius as float
+}
+
+mesh_dirty(handle: ptr) -> int {
+    if handle == null { return 0 }
+    return (handle as *GeoMesh).dirty
+}
+
+mesh_clear_dirty(handle: ptr) {
+    if handle == null { return }
+    (handle as *GeoMesh).dirty = 0
+}
+
+mesh_vertex_data(handle: ptr) -> ptr {
+    if handle == null { return null }
+    return (handle as *GeoMesh).vertices
+}
+
+mesh_index_data(handle: ptr) -> ptr {
+    if handle == null { return null }
+    return (handle as *GeoMesh).indices
+}
+
+// --- what a surface is made of --------------------------------------------------------------------------------------
+//
+// Texel density decides whether a wall reads as brick or as a photograph of
+// brick seen from an inch away: how many times the texture repeats across a
+// metre of the surface, a property of the UVs and the geometry together.
+// Distinct planes stand in for relief. Rotation and translation change no
+// area, so the world transform enters only as its scale.
+
+mesh_surface_area(handle: ptr, sx: float, sy: float, sz: float) -> float {
+    if handle == null { return 0.0 }
+    m = handle as *GeoMesh
+    if m.vertices == null || m.indices == null { return 0.0 }
+    s = m.vertices as f32[]
+    idx = m.indices as int[]
+    total = 0.0
+    i = 0
+    while i + 2 < m.index_count {
+        a = idx[i] * VERTEX_FLOATS
+        b = idx[i + 1] * VERTEX_FLOATS
+        c = idx[i + 2] * VERTEX_FLOATS
+        ax = (s[a] as float) * sx
+        ay = (s[a + 1] as float) * sy
+        az = (s[a + 2] as float) * sz
+        ux = (s[b] as float) * sx - ax
+        uy = (s[b + 1] as float) * sy - ay
+        uz = (s[b + 2] as float) * sz - az
+        vx = (s[c] as float) * sx - ax
+        vy = (s[c + 1] as float) * sy - ay
+        vz = (s[c + 2] as float) * sz - az
+        cx = uy * vz - uz * vy
+        cy = uz * vx - ux * vz
+        cz = ux * vy - uy * vx
+        total = total + 0.5 * sqrt(cx * cx + cy * cy + cz * cz)
+        i = i + 3
+    }
+    return total
+}
+
+mesh_uv_area(handle: ptr) -> float {
+    if handle == null { return 0.0 }
+    m = handle as *GeoMesh
+    if m.vertices == null || m.indices == null { return 0.0 }
+    s = m.vertices as f32[]
+    idx = m.indices as int[]
+    total = 0.0
+    i = 0
+    while i + 2 < m.index_count {
+        a = idx[i] * VERTEX_FLOATS
+        b = idx[i + 1] * VERTEX_FLOATS
+        c = idx[i + 2] * VERTEX_FLOATS
+        // Single-precision differences, then double, as the C had them.
+        ux = (s[b + 3] - s[a + 3]) as float
+        uy = (s[b + 4] - s[a + 4]) as float
+        vx = (s[c + 3] - s[a + 3]) as float
+        vy = (s[c + 4] - s[a + 4]) as float
+        total = total + 0.5 * fabs(ux * vy - uy * vx)
+        i = i + 3
+    }
+    return total
+}
+
+const NORMAL_SLOTS = 8192
+
+// Distinct planes, which is what relief is. Directions alone cannot tell a
+// box from a facade -- a wall with recessed windows is built from faces
+// pointing the same six ways as the box -- so the key is the normal and the
+// distance along it, quantised together.
+mesh_distinct_planes(handle: ptr, tolerance: float) -> int {
+    if handle == null { return 0 }
+    m = handle as *GeoMesh
+    if m.vertices == null || m.indices == null { return 0 }
+    t = tolerance
+    if t < 0.0001 { t = 0.0001 }
+    step = 1.0 / t
+    keys_block = calloc(NORMAL_SLOTS, 4)
+    keys = keys_block as int[]
+    s = m.vertices as f32[]
+    idx = m.indices as int[]
+    distinct = 0
+    i = 0
+    while i + 2 < m.index_count {
+        a = idx[i] * VERTEX_FLOATS
+        b = idx[i + 1] * VERTEX_FLOATS
+        c = idx[i + 2] * VERTEX_FLOATS
+        i = i + 3
+        ax = s[a] as float
+        ay = s[a + 1] as float
+        az = s[a + 2] as float
+        ux = (s[b] as float) - ax
+        uy = (s[b + 1] as float) - ay
+        uz = (s[b + 2] as float) - az
+        vx = (s[c] as float) - ax
+        vy = (s[c + 1] as float) - ay
+        vz = (s[c + 2] as float) - az
+        cx = uy * vz - uz * vy
+        cy = uz * vx - ux * vz
+        cz = ux * vy - uy * vx
+        length = sqrt(cx * cx + cy * cy + cz * cz)
+        if length < 0.000000001 { continue }
+        cx = cx / length
+        cy = cy / length
+        cz = cz / length
+        qx = floor_long(cx * step + 0.5) as int
+        qy = floor_long(cy * step + 0.5) as int
+        qz = floor_long(cz * step + 0.5) as int
+        // How far the plane stands off the origin along its own normal, in
+        // centimetres: two faces pointing the same way a window's depth
+        // apart are two planes.
+        offset = ax * cx + ay * cy + az * cz
+        qd = floor_long(offset * 100.0 + 0.5) as int
+        if qd < 0 - 32768 { qd = 0 - 32768 }
+        if qd > 32767 { qd = 32767 }
+        // Never zero, so a filled slot is told from an empty one. The
+        // products wrap in 32 bits (the build's -fwrapv), as the C's did.
+        key = (((qx + 4096) * 8209 + (qy + 4096)) * 8209 + (qz + 4096)) * 65537 + qd + 1
+        slot = (key * (0 - 1640531535)) & (NORMAL_SLOTS - 1)
+        guard = 0
+        while guard < NORMAL_SLOTS {
+            if keys[slot] == 0 {
+                keys[slot] = key
+                distinct = distinct + 1
+                break
+            }
+            if keys[slot] == key { break }
+            slot = (slot + 1) & (NORMAL_SLOTS - 1)
+            guard = guard + 1
+        }
+    }
+    free(keys_block)
+    return distinct
+}
+
+// How far a mesh reaches along one of its own axes, in its own space:
+// proportion is a ratio of extents, and a head is judged against a height.
+mesh_extent(handle: ptr, axis: int) -> float {
+    if handle == null { return 0.0 }
+    m = handle as *GeoMesh
+    if m.vertices == null || m.vertex_count <= 0 || axis < 0 || axis > 2 { return 0.0 }
+    s = m.vertices as f32[]
+    low = s[axis] as float
+    high = low
+    i = 1
+    while i < m.vertex_count {
+        v = s[i * VERTEX_FLOATS + axis] as float
+        if v < low { low = v }
+        if v > high { high = v }
+        i = i + 1
+    }
+    return high - low
+}
+
+// --- decimation, for the crowd's far figures ------------------------------------------------------------------------
+//
+// A crowd cannot draw the hero mesh: half a million times twenty-six thousand
+// triangles is thirteen billion a frame. It draws a stand-in decimated here,
+// so any mesh the engine loads gets a crowd LOD with no round trip through a
+// DCC tool. Vertex clustering: bucket the vertices into a grid of
+// `cell_size`, collapse every vertex sharing a cell to one representative
+// (the cell's average position, normal and texcoord), rewrite the triangles
+// onto the representatives and drop the ones that fold to a line. O(n), no
+// holes, and it carries the skin: a representative's weights are the sum of
+// its cell's, the four heaviest kept (and renormalised by set_skin), so the
+// coarse figure bends on the same skeleton. A cell's key includes its
+// vertices' dominant joint, so the inner faces of two legs never merge into
+// a vertex the walk would drag into a spike. Occlusion is left at its
+// default: a crowd is lit by the scene. A new mesh the caller owns, or null.
+
+const DECIMATE_JOINTS = 16
+
+mesh_decimate(handle: ptr, cell_size: float) -> ptr {
+    if handle == null || cell_size <= 0.0 { return null }
+    src = handle as *GeoMesh
+    n = src.vertex_count
+    if n <= 0 { return null }
+    ic = src.index_count
+    inv = 1.0 / cell_size
+    skinned = src.skin != null
+    cap = 64
+    while cap < n * 2 { cap = cap * 2 }
+
+    remap_block = calloc(n, 4)
+    acc_block = calloc(n * 8, 8)
+    count_block = calloc(n, 4)
+    key_block = calloc(cap, 8)
+    value_block = calloc(cap, 4)
+    used_block = calloc(cap, 4)
+    joint_block = null as ptr
+    weight_block = null as ptr
+    joints_used_block = null as ptr
+    if skinned {
+        joint_block = calloc(n * DECIMATE_JOINTS, 4)
+        weight_block = calloc(n * DECIMATE_JOINTS, 8)
+        joints_used_block = calloc(n, 4)
+    }
+    remap = remap_block as int[]
+    acc = acc_block as float[]
+    counts = count_block as int[]
+    hkey = key_block as long[]
+    hval = value_block as int[]
+    hused = used_block as int[]
+    sj = joint_block as int[]
+    sw = weight_block as float[]
+    nj = joints_used_block as int[]
+    vs = src.vertices as f32[]
+    sk = src.skin as f32[]
+    mask = (cap - 1) as long
+
+    reps = 0
+    i = 0
+    while i < n {
+        at = i * VERTEX_FLOATS
+        cx = floor_long((vs[at] as float) * inv)
+        cy = floor_long((vs[at + 1] as float) * inv)
+        cz = floor_long((vs[at + 2] as float) * inv)
+        dom = 0 as long
+        if skinned {
+            best = 0.0 - 1.0
+            t = 0
+            while t < 4 {
+                w = sk[i * SKIN_FLOATS + 4 + t] as float
+                if w > best {
+                    best = w
+                    dom = sk[i * SKIN_FLOATS + t] as long
+                }
+                t = t + 1
+            }
+        }
+        key = ((dom & (32767 as long)) << 48) | ((cx & (65535 as long)) << 32) | ((cy & (65535 as long)) << 16) | (cz & (65535 as long))
+        h = ((key * (1103515245 as long) + (12345 as long)) & mask) as int
+        while hused[h] != 0 && hkey[h] != key { h = (h + 1) & (cap - 1) }
+        r = 0
+        if hused[h] == 0 {
+            hused[h] = 1
+            hkey[h] = key
+            hval[h] = reps
+            r = reps
+            reps = reps + 1
+        } else {
+            r = hval[h]
+        }
+        remap[i] = r
+        k = 0
+        while k < 8 {
+            acc[r * 8 + k] = acc[r * 8 + k] + (vs[at + k] as float)
+            k = k + 1
+        }
+        counts[r] = counts[r] + 1
+        if skinned {
+            k = 0
+            while k < 4 {
+                j = sk[i * SKIN_FLOATS + k] as int
+                w = sk[i * SKIN_FLOATS + 4 + k] as float
+                if w > 0.0 {
+                    found = false
+                    q = 0
+                    while q < nj[r] {
+                        if sj[r * DECIMATE_JOINTS + q] == j {
+                            sw[r * DECIMATE_JOINTS + q] = sw[r * DECIMATE_JOINTS + q] + w
+                            found = true
+                            break
+                        }
+                        q = q + 1
+                    }
+                    if !found && nj[r] < DECIMATE_JOINTS {
+                        sj[r * DECIMATE_JOINTS + nj[r]] = j
+                        sw[r * DECIMATE_JOINTS + nj[r]] = w
+                        nj[r] = nj[r] + 1
+                    }
+                }
+                k = k + 1
+            }
+        }
+        i = i + 1
+    }
+
+    out = mesh_create()
+    mesh_reserve(out, reps, ic)
+    // One vertex a representative: the cell's average, its normal renormalised.
+    r = 0
+    while r < reps {
+        c = 1.0
+        if counts[r] > 0 { c = counts[r] as float }
+        base = r * 8
+        nx = acc[base + 5]
+        ny = acc[base + 6]
+        nz = acc[base + 7]
+        nl = sqrt(nx * nx + ny * ny + nz * nz)
+        if nl > 0.00000001 {
+            nx = nx / nl
+            ny = ny / nl
+            nz = nz / nl
+        } else {
+            nx = 0.0
+            ny = 1.0
+            nz = 0.0
+        }
+        mesh_push_vertex(out, acc[base] / c, acc[base + 1] / c, acc[base + 2] / c,
+                         acc[base + 3] / c, acc[base + 4] / c, nx, ny, nz)
+        r = r + 1
+    }
+    // The skin: the four heaviest joints of each representative's cell.
+    if skinned {
+        top_block = calloc(4, 4)
+        tw_block = calloc(4, 8)
+        top = top_block as int[]
+        tw = tw_block as float[]
+        r = 0
+        while r < reps {
+            t = 0
+            while t < 4 {
+                top[t] = 0
+                tw[t] = 0.0
+                t = t + 1
+            }
+            q = 0
+            while q < nj[r] {
+                smallest = 0
+                t = 1
+                while t < 4 {
+                    if tw[t] < tw[smallest] { smallest = t }
+                    t = t + 1
+                }
+                if sw[r * DECIMATE_JOINTS + q] > tw[smallest] {
+                    tw[smallest] = sw[r * DECIMATE_JOINTS + q]
+                    top[smallest] = sj[r * DECIMATE_JOINTS + q]
+                }
+                q = q + 1
+            }
+            mesh_set_skin(out, r, top[0], top[1], top[2], top[3], tw[0], tw[1], tw[2], tw[3])
+            r = r + 1
+        }
+        free(top_block)
+        free(tw_block)
+    }
+    // The triangles onto the representatives, less the ones that fold.
+    idx = src.indices as int[]
+    i = 0
+    while i + 2 < ic {
+        r0 = remap[idx[i]]
+        r1 = remap[idx[i + 1]]
+        r2 = remap[idx[i + 2]]
+        i = i + 3
+        if r0 == r1 || r1 == r2 || r0 == r2 { continue }
+        mesh_push_index(out, r0)
+        mesh_push_index(out, r1)
+        mesh_push_index(out, r2)
+    }
+
+    free(remap_block)
+    free(acc_block)
+    free(count_block)
+    free(key_block)
+    free(value_block)
+    free(used_block)
+    if skinned {
+        free(joint_block)
+        free(weight_block)
+        free(joints_used_block)
+    }
+    return out
+}
+
+// --- instances -----------------------------------------------------------------------------------------------------
+
+inst_create() -> ptr {
+    return calloc(1, sizeof(GeoInstances))
+}
+
+inst_destroy(handle: ptr) {
+    if handle == null { return }
+    n = handle as *GeoInstances
+    if n.matrices != null { free(n.matrices) }
+    if n.colors != null { free(n.colors) }
+    if n.phases != null { free(n.phases) }
+    if n.points != null { free(n.points) }
+    free(handle)
+}
+
+// A point with nothing set: at the origin, scale one, white, phase zero.
+blank_point(p: f32[], at: int) {
+    p[at] = 0.0
+    p[at + 1] = 0.0
+    p[at + 2] = 0.0
+    p[at + 3] = 1.0
+    p[at + 4] = 1.0
+    p[at + 5] = 1.0
+    p[at + 6] = 1.0
+    p[at + 7] = 0.0
+}
+
+// Instances as points from now on: every instance so far becomes the point
+// at its matrix's translation.
+inst_enable_points(handle: ptr) -> int {
+    if handle == null { return 0 }
+    n = handle as *GeoInstances
+    if n.is_points != 0 { return 1 }
+    capacity = n.capacity
+    if capacity <= 0 { capacity = 16 }
+    grown = realloc(n.points, (capacity * POINT_FLOATS * 4) as long)
+    if grown == null { return 0 }
+    n.points = grown
+    p = grown as f32[]
+    m = n.matrices as f32[]
+    i = 0
+    while i < capacity {
+        at = i * POINT_FLOATS
+        blank_point(p, at)
+        if i < n.count && n.matrices != null {
+            p[at] = m[i * 16 + 12]
+            p[at + 1] = m[i * 16 + 13]
+            p[at + 2] = m[i * 16 + 14]
+        }
+        i = i + 1
+    }
+    n.is_points = 1
+    return 1
+}
+
+inst_is_points(handle: ptr) -> int {
+    if handle == null { return 0 }
+    return (handle as *GeoInstances).is_points
+}
+
+inst_point_data(handle: ptr) -> ptr {
+    if handle == null { return null }
+    return (handle as *GeoInstances).points
+}
+
+inst_resize(handle: ptr, count: int) -> int {
+    if handle == null || count < 0 { return 0 }
+    n = handle as *GeoInstances
+    if count > n.capacity {
+        capacity = n.capacity
+        if capacity == 0 { capacity = 16 }
+        while capacity < count { capacity = capacity * 2 }
+        grown = realloc(n.matrices, (capacity * 16 * 4) as long)
+        if grown == null { return 0 }
+        n.matrices = grown
+        if n.has_colors != 0 {
+            grown = realloc(n.colors, (capacity * 3 * 4) as long)
+            if grown == null { return 0 }
+            n.colors = grown
+        }
+        if n.has_phases != 0 {
+            grown = realloc(n.phases, (capacity * 4) as long)
+            if grown == null { return 0 }
+            n.phases = grown
+        }
+        if n.is_points != 0 {
+            grown = realloc(n.points, (capacity * POINT_FLOATS * 4) as long)
+            if grown == null { return 0 }
+            n.points = grown
+        }
+        n.capacity = capacity
+    }
+    m = n.matrices as f32[]
+    c = n.colors as f32[]
+    ph = n.phases as f32[]
+    p = n.points as f32[]
+    i = n.count
+    while i < count {
+        memset(n.matrices + i * 64, 0, 64 as long)
+        m[i * 16] = 1.0
+        m[i * 16 + 5] = 1.0
+        m[i * 16 + 10] = 1.0
+        m[i * 16 + 15] = 1.0
+        if n.has_colors != 0 {
+            c[i * 3] = 1.0
+            c[i * 3 + 1] = 1.0
+            c[i * 3 + 2] = 1.0
+        }
+        if n.has_phases != 0 { ph[i] = 0.0 }
+        if n.is_points != 0 { blank_point(p, i * POINT_FLOATS) }
+        i = i + 1
+    }
+    n.count = count
+    return 1
+}
+
+inst_count(handle: ptr) -> int {
+    if handle == null { return 0 }
+    return (handle as *GeoInstances).count
+}
+
+// Draw fewer instances than the buffer holds, without freeing the rest: a
+// distance LOD fills a model with a different number of near figures each
+// frame. Clamped to the capacity, so it can never read off the end.
+inst_set_count(handle: ptr, count: int) {
+    if handle == null { return }
+    n = handle as *GeoInstances
+    c = count
+    if c < 0 { c = 0 }
+    if c > n.capacity { c = n.capacity }
+    n.count = c
+}
+
+// The rotation part of a TRS matrix, scaled, into `out` (nine doubles,
+// column by column): what set_trs and set_positions both write.
+trs_basis(out: float[], sx: float, sy: float, sz: float, qx: float, qy: float, qz: float, qw: float) {
+    xx = qx * qx
+    yy = qy * qy
+    zz = qz * qz
+    xy = qx * qy
+    xz = qx * qz
+    yz = qy * qz
+    wx = qw * qx
+    wy = qw * qy
+    wz = qw * qz
+    out[0] = (1.0 - 2.0 * (yy + zz)) * sx
+    out[1] = (2.0 * (xy + wz)) * sx
+    out[2] = (2.0 * (xz - wy)) * sx
+    out[3] = (2.0 * (xy - wz)) * sy
+    out[4] = (1.0 - 2.0 * (xx + zz)) * sy
+    out[5] = (2.0 * (yz + wx)) * sy
+    out[6] = (2.0 * (xz + wy)) * sz
+    out[7] = (2.0 * (yz - wx)) * sz
+    out[8] = (1.0 - 2.0 * (xx + yy)) * sz
+}
+
+// The basis into instance `i`'s matrix, with the translation (px, py, pz).
+write_trs(m: f32[], i: int, basis: float[], px: float, py: float, pz: float) {
+    at = i * 16
+    m[at] = basis[0]
+    m[at + 1] = basis[1]
+    m[at + 2] = basis[2]
+    m[at + 3] = 0.0
+    m[at + 4] = basis[3]
+    m[at + 5] = basis[4]
+    m[at + 6] = basis[5]
+    m[at + 7] = 0.0
+    m[at + 8] = basis[6]
+    m[at + 9] = basis[7]
+    m[at + 10] = basis[8]
+    m[at + 11] = 0.0
+    m[at + 12] = px
+    m[at + 13] = py
+    m[at + 14] = pz
+    m[at + 15] = 1.0
+}
+
+var g_basis: ptr = null            // float[9]: the scratch basis of the calling thread
+
+basis_scratch() -> float[] {
+    if g_basis == null { g_basis = calloc(9, 8) }
+    return g_basis as float[]
+}
+
+inst_set_trs(handle: ptr, i: int, px: float, py: float, pz: float,
+             sx: float, sy: float, sz: float, qx: float, qy: float, qz: float, qw: float) {
+    if handle == null { return }
+    n = handle as *GeoInstances
+    if i < 0 || i >= n.count { return }
+    basis = basis_scratch()
+    trs_basis(basis, sx, sy, sz, qx, qy, qz, qw)
+    write_trs(n.matrices as f32[], i, basis, px, py, pz)
+}
+
+// One call a frame instead of one an instance: a particle system that moves
+// every instance each frame would otherwise spend the frame in call overhead.
+// Every instance shares the model's scale and rotation.
+inst_set_positions(handle: ptr, xyz: ptr, count: int, sx: float, sy: float, sz: float,
+                   qx: float, qy: float, qz: float, qw: float) {
+    if handle == null || xyz == null || count <= 0 { return }
+    n = handle as *GeoInstances
+    limit = count
+    if n.count < limit { limit = n.count }
+    src = xyz as float[]
+    if n.is_points != 0 {
+        p = n.points as f32[]
+        i = 0
+        while i < limit {
+            at = i * POINT_FLOATS
+            p[at] = src[i * 3]
+            p[at + 1] = src[i * 3 + 1]
+            p[at + 2] = src[i * 3 + 2]
+            i = i + 1
+        }
+        return
+    }
+    wide = basis_scratch()
+    trs_basis(wide, sx, sy, sz, qx, qy, qz, qw)
+    // The basis rounded to float32 once, as the C kept it, and copied into
+    // every matrix.
+    f32 b0 = wide[0]
+    f32 b1 = wide[1]
+    f32 b2 = wide[2]
+    f32 b3 = wide[3]
+    f32 b4 = wide[4]
+    f32 b5 = wide[5]
+    f32 b6 = wide[6]
+    f32 b7 = wide[7]
+    f32 b8 = wide[8]
+    m = n.matrices as f32[]
+    i = 0
+    while i < limit {
+        at = i * 16
+        m[at] = b0
+        m[at + 1] = b1
+        m[at + 2] = b2
+        m[at + 3] = 0.0
+        m[at + 4] = b3
+        m[at + 5] = b4
+        m[at + 6] = b5
+        m[at + 7] = 0.0
+        m[at + 8] = b6
+        m[at + 9] = b7
+        m[at + 10] = b8
+        m[at + 11] = 0.0
+        m[at + 12] = src[i * 3]
+        m[at + 13] = src[i * 3 + 1]
+        m[at + 14] = src[i * 3 + 2]
+        m[at + 15] = 1.0
+        i = i + 1
+    }
+}
+
+// Per-instance facing: each instance turned about Y by its own yaw, so a
+// crowd is a crowd and not a rank all facing one way. The mesh's forward
+// (+x) maps to (cos a, 0, -sin a), the direction the caller moves the
+// instance in, so facing and travel agree and the feet do not skate. A
+// matrix, a sine and a cosine an instance: half a million are a few
+// milliseconds on one core, so the range goes over the job pool.
+struct YawPass {
+    matrices: ptr
+    xyz: ptr
+    yaw: ptr
+    sx: float
+    sy: float
+    sz: float
+}
+
+yaw_block(start: int, end: int, worker: int, context: ptr) {
+    pass = context as *YawPass
+    m = pass.matrices as f32[]
+    xyz = pass.xyz as float[]
+    yaw = pass.yaw as float[]
+    sx = pass.sx
+    sy = pass.sy
+    sz = pass.sz
+    i = start
+    while i < end {
+        a = yaw[i]
+        c = cos(a)
+        s = sin(a)
+        at = i * 16
+        m[at] = c * sx
+        m[at + 1] = 0.0
+        m[at + 2] = (0.0 - s) * sx
+        m[at + 3] = 0.0
+        m[at + 4] = 0.0
+        m[at + 5] = sy
+        m[at + 6] = 0.0
+        m[at + 7] = 0.0
+        m[at + 8] = s * sz
+        m[at + 9] = 0.0
+        m[at + 10] = c * sz
+        m[at + 11] = 0.0
+        m[at + 12] = xyz[i * 3]
+        m[at + 13] = xyz[i * 3 + 1]
+        m[at + 14] = xyz[i * 3 + 2]
+        m[at + 15] = 1.0
+        i = i + 1
+    }
+}
+
+inst_set_positions_yaw(handle: ptr, xyz: ptr, yaw: ptr, count: int, sx: float, sy: float, sz: float) {
+    if handle == null || xyz == null || yaw == null || count <= 0 { return }
+    n = handle as *GeoInstances
+    limit = count
+    if n.count < limit { limit = n.count }
+    pass = YawPass { matrices: n.matrices, xyz: xyz, yaw: yaw, sx: sx, sy: sy, sz: sz }
+    jobs.parallel_for(yaw_block, limit, 8192, (&pass) as ptr)
+}
+
+inst_set_colors(handle: ptr, rgb: ptr, count: int) {
+    if handle == null || rgb == null || count <= 0 { return }
+    n = handle as *GeoInstances
+    limit = count
+    if n.count < limit { limit = n.count }
+    src = rgb as float[]
+    if n.is_points != 0 {
+        p = n.points as f32[]
+        i = 0
+        while i < limit {
+            at = i * POINT_FLOATS
+            p[at + 4] = src[i * 3]
+            p[at + 5] = src[i * 3 + 1]
+            p[at + 6] = src[i * 3 + 2]
+            i = i + 1
+        }
+        return
+    }
+    if n.has_colors == 0 { return }
+    c = n.colors as f32[]
+    i = 0
+    while i < limit {
+        c[i * 3] = src[i * 3]
+        c[i * 3 + 1] = src[i * 3 + 1]
+        c[i * 3 + 2] = src[i * 3 + 2]
+        i = i + 1
+    }
+}
+
+// A point's scale, the one number of its own a point has beyond where it
+// is: a grain of sand is not all the same grain.
+inst_set_point_scales(handle: ptr, scales: ptr, count: int) {
+    if handle == null || scales == null || count <= 0 { return }
+    n = handle as *GeoInstances
+    if n.is_points == 0 { return }
+    limit = count
+    if n.count < limit { limit = n.count }
+    src = scales as float[]
+    p = n.points as f32[]
+    i = 0
+    while i < limit {
+        p[i * POINT_FLOATS + 3] = src[i]
+        i = i + 1
+    }
+}
+
+// A phase an instance, where in its baked walk it is, so the skinning
+// shader poses each from a different frame of the pose bank.
+inst_enable_phases(handle: ptr, count: int) -> int {
+    if handle == null { return 0 }
+    n = handle as *GeoInstances
+    capacity = n.capacity
+    if count > capacity { capacity = count }
+    if capacity <= 0 { capacity = 16 }
+    grown = realloc(n.phases, (capacity * 4) as long)
+    if grown == null { return 0 }
+    n.phases = grown
+    ph = grown as f32[]
+    i = 0
+    if n.has_phases != 0 { i = n.count }
+    while i < capacity {
+        ph[i] = 0.0
+        i = i + 1
+    }
+    n.has_phases = 1
+    return 1
+}
+
+inst_has_phases(handle: ptr) -> int {
+    if handle == null { return 0 }
+    return (handle as *GeoInstances).has_phases
+}
+
+inst_phase_data(handle: ptr) -> ptr {
+    if handle == null { return null }
+    return (handle as *GeoInstances).phases
+}
+
+inst_set_phases(handle: ptr, phases: ptr, count: int) {
+    if handle == null || phases == null || count <= 0 { return }
+    n = handle as *GeoInstances
+    limit = count
+    if n.count < limit { limit = n.count }
+    src = phases as float[]
+    if n.is_points != 0 {
+        p = n.points as f32[]
+        i = 0
+        while i < limit {
+            p[i * POINT_FLOATS + 7] = src[i]
+            i = i + 1
+        }
+        return
+    }
+    if n.has_phases == 0 { return }
+    ph = n.phases as f32[]
+    i = 0
+    while i < limit {
+        ph[i] = src[i]
+        i = i + 1
+    }
+}
+
+inst_set_phase(handle: ptr, i: int, phase: float) {
+    if handle == null { return }
+    n = handle as *GeoInstances
+    if n.has_phases == 0 || i < 0 || i >= n.count { return }
+    (n.phases as f32[])[i] = phase
+}
+
+inst_set_matrix(handle: ptr, i: int, src: ptr) {
+    if handle == null || src == null { return }
+    n = handle as *GeoInstances
+    if i < 0 || i >= n.count { return }
+    m = n.matrices as f32[]
+    values = src as float[]
+    k = 0
+    while k < 16 {
+        m[i * 16 + k] = values[k]
+        k = k + 1
+    }
+}
+
+inst_remove(handle: ptr, i: int) {
+    if handle == null { return }
+    n = handle as *GeoInstances
+    if i < 0 || i >= n.count { return }
+    tail = n.count - i - 1
+    if tail > 0 {
+        memmove(n.matrices + i * 64, n.matrices + (i + 1) * 64, (tail * 64) as long)
+        if n.has_colors != 0 {
+            memmove(n.colors + i * 12, n.colors + (i + 1) * 12, (tail * 12) as long)
+        }
+    }
+    n.count = n.count - 1
+}
+
+inst_enable_colors(handle: ptr, count: int) -> int {
+    if handle == null { return 0 }
+    n = handle as *GeoInstances
+    capacity = n.capacity
+    if count > capacity { capacity = count }
+    if capacity <= 0 { capacity = 16 }
+    grown = realloc(n.colors, (capacity * 3 * 4) as long)
+    if grown == null { return 0 }
+    n.colors = grown
+    c = grown as f32[]
+    i = 0
+    if n.has_colors != 0 { i = n.count }
+    while i < capacity {
+        c[i * 3] = 1.0
+        c[i * 3 + 1] = 1.0
+        c[i * 3 + 2] = 1.0
+        i = i + 1
+    }
+    n.has_colors = 1
+    return 1
+}
+
+inst_has_colors(handle: ptr) -> int {
+    if handle == null { return 0 }
+    return (handle as *GeoInstances).has_colors
+}
+
+inst_set_color(handle: ptr, i: int, r: float, g: float, b: float) {
+    if handle == null { return }
+    n = handle as *GeoInstances
+    if n.has_colors == 0 || i < 0 || i >= n.count { return }
+    c = n.colors as f32[]
+    c[i * 3] = r
+    c[i * 3 + 1] = g
+    c[i * 3 + 2] = b
+}
+
+// The instances' centre and the furthest of them from it.
+inst_compute_bounds(handle: ptr) {
+    if handle == null { return }
+    n = handle as *GeoInstances
+    if n.count == 0 { return }
+    data = n.matrices as f32[]
+    stride = 16
+    first = 12
+    if n.is_points != 0 {
+        data = n.points as f32[]
+        stride = POINT_FLOATS
+        first = 0
+    }
+    cx = 0.0
+    cy = 0.0
+    cz = 0.0
+    i = 0
+    while i < n.count {
+        at = i * stride + first
+        cx = cx + (data[at] as float)
+        cy = cy + (data[at + 1] as float)
+        cz = cz + (data[at + 2] as float)
+        i = i + 1
+    }
+    count = n.count as float
+    cx = cx / count
+    cy = cy / count
+    cz = cz / count
+    worst = 0.0
+    i = 0
+    while i < n.count {
+        at = i * stride + first
+        dx = (data[at] as float) - cx
+        dy = (data[at + 1] as float) - cy
+        dz = (data[at + 2] as float) - cz
+        distance = dx * dx + dy * dy + dz * dz
+        if distance > worst { worst = distance }
+        i = i + 1
+    }
+    n.bound_x = cx
+    n.bound_y = cy
+    n.bound_z = cz
+    n.radius = sqrt(worst)
+}
+
+inst_bound_x(handle: ptr) -> float {
+    if handle == null { return 0.0 }
+    return (handle as *GeoInstances).bound_x as float
+}
+
+inst_bound_y(handle: ptr) -> float {
+    if handle == null { return 0.0 }
+    return (handle as *GeoInstances).bound_y as float
+}
+
+inst_bound_z(handle: ptr) -> float {
+    if handle == null { return 0.0 }
+    return (handle as *GeoInstances).bound_z as float
+}
+
+inst_bound_radius(handle: ptr) -> float {
+    if handle == null { return 0.0 }
+    return (handle as *GeoInstances).radius as float
+}
+
+inst_matrix_data(handle: ptr) -> ptr {
+    if handle == null { return null }
+    return (handle as *GeoInstances).matrices
+}
+
+inst_color_data(handle: ptr) -> ptr {
+    if handle == null { return null }
+    return (handle as *GeoInstances).colors
+}
+
+// --- skin rows: the weights an OBJ's positions carry, on the way in ----------------------------------------------
+//
+// A loaded mesh has more vertices than the OBJ has positions -- a position
+// with two normals across a hard edge is two vertices, and only the loader
+// knows which -- so the weights are handed to the loader keyed by position,
+// and it writes each onto whatever vertices that position became. Eight
+// float32s a row: four joints, four weights. Nothing is kept afterwards, and
+// a mesh loaded without a skin allocates none of it.
+
+struct SkinRows {
+    rows: ptr                      // f32[count * 8]
+    count: int
+}
+
+skinrows_create(count: int) -> ptr {
+    if count <= 0 { return null }
+    r = calloc(1, sizeof(SkinRows)) as *SkinRows
+    r.rows = calloc(count * 8, 4)
+    r.count = count
+    return r as ptr
+}
+
+skinrows_destroy(handle: ptr) {
+    if handle == null { return }
+    free((handle as *SkinRows).rows)
+    free(handle)
+}
+
+skinrows_count(handle: ptr) -> int {
+    if handle == null { return 0 }
+    return (handle as *SkinRows).count
+}
+
+skinrows_set(handle: ptr, i: int, j0: int, j1: int, j2: int, j3: int,
+             w0: float, w1: float, w2: float, w3: float) {
+    if handle == null { return }
+    r = handle as *SkinRows
+    if i < 0 || i >= r.count { return }
+    row = r.rows as f32[]
+    at = i * 8
+    row[at] = j0
+    row[at + 1] = j1
+    row[at + 2] = j2
+    row[at + 3] = j3
+    row[at + 4] = w0
+    row[at + 5] = w1
+    row[at + 6] = w2
+    row[at + 7] = w3
+}
+
+// Position `position`'s row onto mesh vertex `vertex`.
+skinrows_apply(handle: ptr, mesh: ptr, vertex: int, position: int) {
+    if handle == null || mesh == null { return }
+    r = handle as *SkinRows
+    if position < 0 || position >= r.count { return }
+    row = r.rows as f32[]
+    at = position * 8
+    mesh_set_skin(mesh, vertex, row[at] as int, row[at + 1] as int, row[at + 2] as int, row[at + 3] as int,
+                  row[at + 4] as float, row[at + 5] as float, row[at + 6] as float, row[at + 7] as float)
+}

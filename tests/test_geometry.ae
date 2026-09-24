@@ -1,0 +1,206 @@
+// The mesh and instance stores, and the contract that lets the renderers read
+// them in place.
+//
+// ae3d.geometry writes the stores in Aether; the renderers (native/gpu) read
+// them as the C structs in native/gpu/stores.h. The two layouts have to be
+// the same to the byte, and nothing but this test says so: every field is
+// written through the Aether struct and read back through the C one
+// (ae3d_store_field, which reads them the way the renderers do). Then the
+// stores themselves: a mesh built, grown, cloned, recalculated, bounded and
+// decimated, and instances resized, coloured, phased, turned into points
+// and removed, each checked against what the C they replaced produced.
+
+import ae3d.core
+import ae3d.geometry
+
+extern ae3d_store_size(which: int) -> int
+extern ae3d_store_field(store: ptr, which: int, field: int) -> float
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, ok: bool) {
+    g_checks = g_checks + 1
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        g_failures = g_failures + 1
+        println("  FAIL ${name}")
+    }
+}
+
+near(a: float, b: float) -> bool {
+    d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    return d < 0.000001
+}
+
+test_layout() {
+    check("a mesh store is the size C says", sizeof(GeoMesh) == ae3d_store_size(0))
+    check("an instance store is the size C says", sizeof(GeoInstances) == ae3d_store_size(1))
+
+    // Every field a distinct value, written through Aether, read through C.
+    mesh = geometry.mesh_create()
+    geometry.mesh_push_vertex(mesh, 2.5, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+    geometry.mesh_push_index(mesh, 7)
+    geometry.mesh_set_skin(mesh, 0, 1, 0, 0, 0, 1.0, 0.0, 0.0, 0.0)
+    m = mesh as *GeoMesh
+    m.skin_dirty = 3
+    m.dirty = 5
+    m.bound_x = 1.25
+    m.bound_y = 2.25
+    m.bound_z = 3.25
+    m.radius = 4.25
+    m.local_x = 5.25
+    m.local_radius = 6.25
+    m.local_known = 9
+    ok = ae3d_store_field(mesh, 0, 0) == 1.0 && ae3d_store_field(mesh, 0, 1) == 1.0 &&
+         ae3d_store_field(mesh, 0, 2) == 1.0 && ae3d_store_field(mesh, 0, 3) == 3.0 &&
+         ae3d_store_field(mesh, 0, 4) == 1.0 && ae3d_store_field(mesh, 0, 5) == (m.vertex_capacity as float) &&
+         ae3d_store_field(mesh, 0, 6) == 1.0 && ae3d_store_field(mesh, 0, 7) == (m.index_capacity as float) &&
+         ae3d_store_field(mesh, 0, 8) == 5.0 && ae3d_store_field(mesh, 0, 9) == 1.25 &&
+         ae3d_store_field(mesh, 0, 10) == 2.25 && ae3d_store_field(mesh, 0, 11) == 3.25 &&
+         ae3d_store_field(mesh, 0, 12) == 4.25 && ae3d_store_field(mesh, 0, 13) == 5.25 &&
+         ae3d_store_field(mesh, 0, 14) == 6.25 && ae3d_store_field(mesh, 0, 15) == 9.0 &&
+         ae3d_store_field(mesh, 0, 16) == 2.5 && ae3d_store_field(mesh, 0, 17) == 7.0
+    check("every mesh field C reads is the one Aether wrote", ok)
+    geometry.mesh_destroy(mesh)
+
+    inst = geometry.inst_create()
+    geometry.inst_resize(inst, 3)
+    geometry.inst_enable_colors(inst, 3)
+    geometry.inst_enable_phases(inst, 3)
+    geometry.inst_set_trs(inst, 0, 11.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    n = inst as *GeoInstances
+    n.bound_x = 1.5
+    n.bound_y = 2.5
+    n.bound_z = 3.5
+    n.radius = 4.5
+    ok = ae3d_store_field(inst, 1, 0) == 1.0 && ae3d_store_field(inst, 1, 1) == 1.0 &&
+         ae3d_store_field(inst, 1, 2) == 1.0 && ae3d_store_field(inst, 1, 3) == 0.0 &&
+         ae3d_store_field(inst, 1, 4) == 0.0 && ae3d_store_field(inst, 1, 5) == 3.0 &&
+         ae3d_store_field(inst, 1, 6) == (n.capacity as float) && ae3d_store_field(inst, 1, 7) == 1.0 &&
+         ae3d_store_field(inst, 1, 8) == 1.0 && ae3d_store_field(inst, 1, 9) == 1.5 &&
+         ae3d_store_field(inst, 1, 10) == 2.5 && ae3d_store_field(inst, 1, 11) == 3.5 &&
+         ae3d_store_field(inst, 1, 12) == 4.5 && ae3d_store_field(inst, 1, 13) == 11.0
+    check("every instance field C reads is the one Aether wrote", ok)
+    geometry.inst_destroy(inst)
+}
+
+test_mesh() {
+    mesh = geometry.mesh_create()
+    // A unit quad in the XZ plane, wound to face up, then grown past the
+    // first allocation so the store has to move.
+    geometry.mesh_push_vertex(mesh, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    geometry.mesh_push_vertex(mesh, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+    geometry.mesh_push_vertex(mesh, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0)
+    geometry.mesh_push_vertex(mesh, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+    geometry.mesh_push_index(mesh, 0)
+    geometry.mesh_push_index(mesh, 2)
+    geometry.mesh_push_index(mesh, 1)
+    geometry.mesh_push_index(mesh, 0)
+    geometry.mesh_push_index(mesh, 3)
+    geometry.mesh_push_index(mesh, 2)
+    i = 0
+    while i < 200 {
+        geometry.mesh_push_vertex(mesh, 5.0, 5.0, 5.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+        i = i + 1
+    }
+    check("a mesh holds what was pushed", geometry.mesh_vertex_count(mesh) == 204 && geometry.mesh_index_count(mesh) == 6)
+    check("positions read back", geometry.mesh_pos_x(mesh, 2) == 1.0 && geometry.mesh_pos_z(mesh, 2) == 1.0)
+    check("a vertex starts unoccluded", geometry.mesh_occlusion(mesh, 1) == 1.0)
+    geometry.mesh_set_occlusion(mesh, 1, 1.5)
+    check("occlusion is held to 0..1", geometry.mesh_occlusion(mesh, 1) == 1.0)
+
+    geometry.mesh_recalc_normals(mesh)
+    check("recalculated normals face up", near(geometry.mesh_norm_y(mesh, 0), 1.0) && near(geometry.mesh_norm_y(mesh, 2), 1.0))
+    check("an unreferenced vertex gets the default normal", geometry.mesh_norm_y(mesh, 100) == 1.0)
+
+    area = geometry.mesh_surface_area(mesh, 2.0, 1.0, 3.0)
+    check("surface area follows the scale (1 m2 at x2, z3 is 6 m2)", near(area, 6.0))
+    check("the uv area of the quad is one", near(geometry.mesh_uv_area(mesh), 1.0))
+    check("a flat quad is one plane", geometry.mesh_distinct_planes(mesh, 0.01) == 1)
+    check("the extent along x reaches the far vertices", near(geometry.mesh_extent(mesh, 0), 5.0))
+
+    copy = geometry.mesh_clone(mesh)
+    check("a clone has the same vertices and indices", geometry.mesh_vertex_count(copy) == 204 && geometry.mesh_index_at(copy, 4) == 3)
+    geometry.mesh_set_pos(copy, 0, 9.0, 9.0, 9.0)
+    check("and is its own", geometry.mesh_pos_x(mesh, 0) == 0.0)
+    geometry.mesh_destroy(copy)
+
+    // Bounds: the local centre put through a scale, a quarter turn about Y
+    // and a move, the radius by the largest scale.
+    geometry.mesh_compute_bounds(mesh, 10.0, 0.0, 0.0, 2.0, 2.0, 2.0, 0.0, 0.7071067811865476, 0.0, 0.7071067811865476)
+    check("the world bound is placed and turned", geometry.mesh_bound_x(mesh) > 10.0 && geometry.mesh_bound_radius(mesh) > 0.0)
+
+    // Skin weights are normalised, and no weight at all binds to joint 0.
+    geometry.mesh_set_skin(mesh, 0, 2, 3, 0, 0, 3.0, 1.0, 0.0, 0.0)
+    check("skin weights are normalised", near(geometry.mesh_skin_weight(mesh, 0, 0), 0.75) && geometry.mesh_skin_joint(mesh, 0, 1) == 3.0)
+    geometry.mesh_set_skin(mesh, 1, 4, 0, 0, 0, 0.0, 0.0, 0.0, 0.0)
+    check("an unweighted vertex binds rigidly to joint 0", geometry.mesh_skin_joint(mesh, 1, 0) == 0.0 && geometry.mesh_skin_weight(mesh, 1, 0) == 1.0)
+
+    // Decimation: two cells a metre apart, the far pile of vertices one.
+    coarse = geometry.mesh_decimate(mesh, 2.0)
+    check("decimation collapses a cell's vertices to one", coarse != null && geometry.mesh_vertex_count(coarse) < 10)
+    check("and keeps the skin", geometry.mesh_is_skinned(coarse) == 1)
+    geometry.mesh_destroy(coarse)
+    geometry.mesh_destroy(mesh)
+}
+
+test_instances() {
+    inst = geometry.inst_create()
+    geometry.inst_resize(inst, 4)
+    m = geometry.inst_matrix_data(inst) as f32[]
+    check("new instances are identity", m[0] == 1.0 && m[5] == 1.0 && m[12] == 0.0 && m[15] == 1.0)
+
+    xyz_block = calloc(12, 8)
+    xyz = xyz_block as float[]
+    i = 0
+    while i < 12 {
+        xyz[i] = i as float
+        i = i + 1
+    }
+    geometry.inst_set_positions(inst, xyz_block, 4, 2.0, 2.0, 2.0, 0.0, 0.0, 0.0, 1.0)
+    m = geometry.inst_matrix_data(inst) as f32[]
+    check("positions set the translations and share the scale", m[16 + 12] == 3.0 && m[16 + 0] == 2.0)
+
+    yaw_block = calloc(4, 8)
+    (yaw_block as float[])[1] = 1.5707963267948966
+    geometry.inst_set_positions_yaw(inst, xyz_block, yaw_block, 4, 1.0, 1.0, 1.0)
+    m = geometry.inst_matrix_data(inst) as f32[]
+    check("a quarter turn maps forward to -z", near(m[16 + 2] as float, 0.0 - 1.0) && near(m[16 + 0] as float, 0.0))
+
+    geometry.inst_enable_colors(inst, 4)
+    geometry.inst_set_color(inst, 2, 0.5, 0.25, 0.125)
+    c = geometry.inst_color_data(inst) as f32[]
+    check("colours default to white and take a set", c[0] == 1.0 && c[6] == 0.5 && c[8] == 0.125)
+    geometry.inst_remove(inst, 1)
+    c = geometry.inst_color_data(inst) as f32[]
+    check("removing an instance moves the rest down, colours too", geometry.inst_count(inst) == 3 && c[3] == 0.5)
+
+    geometry.inst_compute_bounds(inst)
+    check("the instances' bound is their centre", geometry.inst_bound_radius(inst) > 0.0)
+
+    geometry.inst_enable_points(inst)
+    p = geometry.inst_point_data(inst) as f32[]
+    check("instances become points at their translations", geometry.inst_is_points(inst) == 1 && p[0] == 0.0 && p[8] == 6.0 && p[11] == 1.0)
+    geometry.inst_set_count(inst, 99)
+    check("a count is clamped to the capacity", geometry.inst_count(inst) <= (inst as *GeoInstances).capacity)
+    free(xyz_block)
+    free(yaw_block)
+    geometry.inst_destroy(inst)
+}
+
+main() {
+    println("geometry: the stores and their layout")
+    test_layout()
+    test_mesh()
+    test_instances()
+    if g_failures == 0 {
+        println("geometry: all checks passed (${g_checks})")
+    } else {
+        println("geometry: ${g_failures} failure(s) of ${g_checks}")
+    }
+}

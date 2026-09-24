@@ -55,7 +55,7 @@ Module resolution is relative to the repository root, so the script always
 runs from there whatever directory it was called from.
 
 The variables the script reads, each with a default that finds the usual
-install: `CC`, `CFLAGS`, `GLFW_CFLAGS`/`GLFW_LIBS`, `ZLIB_CFLAGS`/`ZLIB_LIBS`,
+install: `CC`, `CFLAGS`, `GLFW_CFLAGS`/`GLFW_LIBS`,
 `VULKAN_SDK` (for the headers when `pkg-config` does not know Vulkan), and
 `AE3D_STREAMLINE_ROOT` for DLSS (below).
 

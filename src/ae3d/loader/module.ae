@@ -10,6 +10,7 @@ import std.list
 import std.heap
 import std.string
 import ae3d.core
+import ae3d.geometry
 
 exports (
     load_obj, load_obj_skinned, load_obj_baked, load_obj_instanced, load_mtl, materials_free,
@@ -17,14 +18,11 @@ exports (
     last_error
 )
 
-extern ae3d_objbuild_create() -> ptr
-extern ae3d_objbuild_set_skin(build: ptr, rows: ptr)
-extern ae3d_objbuild_set_occlusion(build: ptr, values: ptr)
-extern ae3d_objbuild_destroy(build: ptr)
-extern ae3d_objbuild_add_position(build: ptr, x: float, y: float, z: float) -> int
-extern ae3d_objbuild_add_uv(build: ptr, u: float, v: float) -> int
-extern ae3d_objbuild_add_normal(build: ptr, x: float, y: float, z: float) -> int
-extern ae3d_objbuild_emit(build: ptr, mesh: ptr, v: int, vt: int, vn: int) -> int
+extern ae3d_farr_count(values: ptr) -> int
+extern ae3d_farr_get(values: ptr, i: int) -> float
+extern calloc(count: int, size: int) -> ptr
+extern realloc(p: ptr, size: long) -> ptr
+extern free(p: ptr)
 
 var g_error = ""
 var g_error_owned = false
@@ -90,6 +88,196 @@ split_fields(line: string) -> string {
 parse_float(text: string) -> float {
     if string.try_double(text) == 0 { return 0.0 }
     return string.get_double(text)
+}
+
+// --- the builder: what the lines are read into ------------------------------------------------------------------
+//
+// An OBJ face vertex is a (position, uv, normal) triplet of indices into
+// three lists, and a GPU vertex is one of each: the same triplet reaching
+// emit twice must be one vertex, or the index buffer grows without bound on
+// a large model. So the three lists are kept as read (float32, as the mesh
+// keeps them), and a hash of the triplets seen maps each to the vertex it
+// became -- open addressing, grown at three quarters full. Vertices come
+// out in the order their triplets are first seen, whatever the table's
+// layout. It was C (native/geometry/mesh.c) until Aether had a 32-bit
+// float (aether#2134).
+
+struct ObjBuild {
+    positions: ptr                 // f32[], three a position
+    uvs: ptr                       // f32[], two a coordinate
+    normals: ptr                   // f32[], three a normal
+    position_count: int            // floats, not positions
+    position_capacity: int
+    uv_count: int
+    uv_capacity: int
+    normal_count: int
+    normal_capacity: int
+    table: ptr                     // int[slots * 4]: v, vt, vn, the vertex (-1 when empty)
+    table_mask: int
+    table_used: int
+    // Borrowed for one load: written per position, onto the vertices each
+    // position becomes, which only the loader knows.
+    skin: ptr                      // geometry skin rows, or null
+    occlusion: ptr                 // a float array of one value a position, or null
+}
+
+objbuild_create() -> *ObjBuild {
+    b = calloc(1, sizeof(ObjBuild)) as *ObjBuild
+    objbuild_grow_table(b)
+    return b
+}
+
+objbuild_destroy(b: *ObjBuild) {
+    if b == null { return }
+    if b.positions != null { free(b.positions) }
+    if b.uvs != null { free(b.uvs) }
+    if b.normals != null { free(b.normals) }
+    if b.table != null { free(b.table) }
+    free(b as ptr)
+}
+
+// FNV-1a over the three indices, in 32 bits.
+objkey_hash(v: int, vt: int, vn: int) -> int {
+    h = 0 - 2128831035
+    h = (h ^ v) * 16777619
+    h = (h ^ vt) * 16777619
+    h = (h ^ vn) * 16777619
+    return h
+}
+
+objbuild_grow_table(b: *ObjBuild) {
+    old = b.table
+    old_capacity = b.table_mask + 1
+    capacity = 1024
+    if old != null { capacity = old_capacity * 2 }
+    fresh_block = calloc(capacity * 4, 4)
+    fresh = fresh_block as int[]
+    i = 0
+    while i < capacity {
+        fresh[i * 4 + 3] = 0 - 1
+        i = i + 1
+    }
+    b.table = fresh_block
+    b.table_mask = capacity - 1
+    if old == null { return }
+    previous = old as int[]
+    i = 0
+    while i < old_capacity {
+        at = i * 4
+        if previous[at + 3] >= 0 {
+            slot = objkey_hash(previous[at], previous[at + 1], previous[at + 2]) & b.table_mask
+            while fresh[slot * 4 + 3] >= 0 { slot = (slot + 1) & b.table_mask }
+            fresh[slot * 4] = previous[at]
+            fresh[slot * 4 + 1] = previous[at + 1]
+            fresh[slot * 4 + 2] = previous[at + 2]
+            fresh[slot * 4 + 3] = previous[at + 3]
+        }
+        i = i + 1
+    }
+    free(old)
+}
+
+// `values` float32s onto one of the builder's lists, grown as needed; the
+// list's new length in floats.
+objbuild_push(block: ptr, count: int, capacity: int, a: float, b: float, c: float, n: int) -> ptr {
+    list = block
+    if count + n > capacity { return null }
+    f = list as f32[]
+    f[count] = a
+    f[count + 1] = b
+    if n == 3 { f[count + 2] = c }
+    return list
+}
+
+// The capacity a list of `count` floats needs to take `n` more.
+objbuild_room(count: int, capacity: int, n: int) -> int {
+    if count + n <= capacity { return capacity }
+    size = capacity
+    if size == 0 { size = 256 }
+    while size < count + n { size = size * 2 }
+    return size
+}
+
+objbuild_add_position(b: *ObjBuild, x: float, y: float, z: float) {
+    room = objbuild_room(b.position_count, b.position_capacity, 3)
+    if room != b.position_capacity {
+        b.positions = realloc(b.positions, (room * 4) as long)
+        b.position_capacity = room
+    }
+    objbuild_push(b.positions, b.position_count, b.position_capacity, x, y, z, 3)
+    b.position_count = b.position_count + 3
+}
+
+objbuild_add_uv(b: *ObjBuild, u: float, v: float) {
+    room = objbuild_room(b.uv_count, b.uv_capacity, 2)
+    if room != b.uv_capacity {
+        b.uvs = realloc(b.uvs, (room * 4) as long)
+        b.uv_capacity = room
+    }
+    objbuild_push(b.uvs, b.uv_count, b.uv_capacity, u, v, 0.0, 2)
+    b.uv_count = b.uv_count + 2
+}
+
+objbuild_add_normal(b: *ObjBuild, x: float, y: float, z: float) {
+    room = objbuild_room(b.normal_count, b.normal_capacity, 3)
+    if room != b.normal_capacity {
+        b.normals = realloc(b.normals, (room * 4) as long)
+        b.normal_capacity = room
+    }
+    objbuild_push(b.normals, b.normal_count, b.normal_capacity, x, y, z, 3)
+    b.normal_count = b.normal_count + 3
+}
+
+// The mesh vertex for the triplet (v, vt, vn), made the first time it is
+// seen; -1 when the mesh could not take one.
+objbuild_emit(b: *ObjBuild, mesh: ptr, v: int, vt: int, vn: int) -> int {
+    if b == null || mesh == null { return 0 - 1 }
+    if (b.table_used + 1) * 4 >= (b.table_mask + 1) * 3 { objbuild_grow_table(b) }
+    table = b.table as int[]
+    slot = objkey_hash(v, vt, vn) & b.table_mask
+    while table[slot * 4 + 3] >= 0 {
+        if table[slot * 4] == v && table[slot * 4 + 1] == vt && table[slot * 4 + 2] == vn {
+            return table[slot * 4 + 3]
+        }
+        slot = (slot + 1) & b.table_mask
+    }
+    px = 0.0
+    py = 0.0
+    pz = 0.0
+    u = 0.0
+    tv = 0.0
+    nx = 0.0
+    ny = 1.0
+    nz = 0.0
+    if v >= 0 && v * 3 + 2 < b.position_count {
+        p = b.positions as f32[]
+        px = p[v * 3] as float
+        py = p[v * 3 + 1] as float
+        pz = p[v * 3 + 2] as float
+    }
+    if vt >= 0 && vt * 2 + 1 < b.uv_count {
+        t = b.uvs as f32[]
+        u = t[vt * 2] as float
+        tv = t[vt * 2 + 1] as float
+    }
+    if vn >= 0 && vn * 3 + 2 < b.normal_count {
+        n = b.normals as f32[]
+        nx = n[vn * 3] as float
+        ny = n[vn * 3 + 1] as float
+        nz = n[vn * 3 + 2] as float
+    }
+    unified = geometry.mesh_push_vertex(mesh, px, py, pz, u, tv, nx, ny, nz)
+    if unified < 0 { return 0 - 1 }
+    if b.skin != null { geometry.skinrows_apply(b.skin, mesh, unified, v) }
+    if b.occlusion != null && v >= 0 && v < ae3d_farr_count(b.occlusion) {
+        geometry.mesh_set_occlusion(mesh, unified, ae3d_farr_get(b.occlusion, v))
+    }
+    table[slot * 4] = v
+    table[slot * 4 + 1] = vt
+    table[slot * 4 + 2] = vn
+    table[slot * 4 + 3] = unified
+    b.table_used = b.table_used + 1
+    return unified
 }
 
 // --- the geometry lines, read in place -----------------------------------------
@@ -294,7 +482,7 @@ emit_face_line(build: ptr, mesh: ptr, line: string, length: int,
         // Whatever else the reference carried, to its end.
         while g_at < length && !is_blank(string.char_at(line, g_at)) { g_at = g_at + 1 }
         if v < 0 { continue }
-        unified = ae3d_objbuild_emit(build, mesh, v, vt, vn)
+        unified = objbuild_emit(build as *ObjBuild, mesh, v, vt, vn)
         if unified < 0 { continue }
         if first < 0 {
             first = unified
@@ -506,7 +694,7 @@ load_obj_baked(path: string, recalculate_normals: bool, skin: ptr,
     base_name = basename_of(path)
     core.model_set_name(m, base_name)
     string.free(base_name)
-    build = ae3d_objbuild_create()
+    build = objbuild_create()
     if build == null {
         set_error("out of memory loading ", path)
         string.free(content)
@@ -514,8 +702,8 @@ load_obj_baked(path: string, recalculate_normals: bool, skin: ptr,
         return null
     }
 
-    ae3d_objbuild_set_skin(build, skin)
-    ae3d_objbuild_set_occlusion(build, occlusion)
+    build.skin = skin
+    build.occlusion = occlusion
 
     materials = list.new()
     positions = 0
@@ -552,7 +740,7 @@ load_obj_baked(path: string, recalculate_normals: bool, skin: ptr,
             x = next_float(content, line_end)
             y = next_float(content, line_end)
             z = next_float(content, line_end)
-            ae3d_objbuild_add_position(build, x, y, z)
+            objbuild_add_position(build, x, y, z)
             positions = positions + 1
             continue
         }
@@ -561,7 +749,7 @@ load_obj_baked(path: string, recalculate_normals: bool, skin: ptr,
             if fields_ahead(content, line_end) < 2 { continue }
             u = next_float(content, line_end)
             v = next_float(content, line_end)
-            ae3d_objbuild_add_uv(build, u, v)
+            objbuild_add_uv(build, u, v)
             uvs = uvs + 1
             continue
         }
@@ -571,14 +759,14 @@ load_obj_baked(path: string, recalculate_normals: bool, skin: ptr,
             x = next_float(content, line_end)
             y = next_float(content, line_end)
             z = next_float(content, line_end)
-            ae3d_objbuild_add_normal(build, x, y, z)
+            objbuild_add_normal(build, x, y, z)
             normals = normals + 1
             continue
         }
         if c0 == 102 && is_blank(c1) {
             g_at = g_at + 1
             if fields_ahead(content, line_end) < 3 { continue }
-            emit_face_line(build, m.mesh, content, line_end, positions, uvs, normals)
+            emit_face_line(build as ptr, m.mesh, content, line_end, positions, uvs, normals)
             continue
         }
 
@@ -593,24 +781,24 @@ load_obj_baked(path: string, recalculate_normals: bool, skin: ptr,
         keyword = token(fields, 0)
 
         if string.equals(keyword, "v") == 1 && field_count >= 4 {
-            ae3d_objbuild_add_position(build,
+            objbuild_add_position(build,
                 parse_float(token(fields, 1)),
                 parse_float(token(fields, 2)),
                 parse_float(token(fields, 3)))
             positions = positions + 1
         } else if string.equals(keyword, "vt") == 1 && field_count >= 3 {
-            ae3d_objbuild_add_uv(build,
+            objbuild_add_uv(build,
                 parse_float(token(fields, 1)),
                 parse_float(token(fields, 2)))
             uvs = uvs + 1
         } else if string.equals(keyword, "vn") == 1 && field_count >= 4 {
-            ae3d_objbuild_add_normal(build,
+            objbuild_add_normal(build,
                 parse_float(token(fields, 1)),
                 parse_float(token(fields, 2)),
                 parse_float(token(fields, 3)))
             normals = normals + 1
         } else if string.equals(keyword, "f") == 1 && field_count >= 4 {
-            emit_face(build, m.mesh, fields, field_count, positions, uvs, normals)
+            emit_face(build as ptr, m.mesh, fields, field_count, positions, uvs, normals)
         } else if string.equals(keyword, "mtllib") == 1 && field_count >= 2 {
             base = directory_of(path)
             mtl_path = string.concat(base, token(fields, 1))
@@ -649,7 +837,7 @@ load_obj_baked(path: string, recalculate_normals: bool, skin: ptr,
     }
 
     string.free(content)
-    ae3d_objbuild_destroy(build)
+    objbuild_destroy(build)
 
     if core.mesh_vertex_count(m.mesh) == 0 {
         set_error("no geometry in ", path)
@@ -724,7 +912,7 @@ emit_face(build: ptr, mesh: ptr, fields: ptr, field_count: int,
         string.array_free(parts)
 
         if v < 0 { continue }
-        unified = ae3d_objbuild_emit(build, mesh, v, vt, vn)
+        unified = objbuild_emit(build as *ObjBuild, mesh, v, vt, vn)
         if unified < 0 { continue }
 
         if first < 0 {
