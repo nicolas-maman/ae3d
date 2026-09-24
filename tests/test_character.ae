@@ -7,6 +7,9 @@
 //   - the stander: on a 40 degree ramp with no input, it stays put;
 //   - the slider: on a 50 degree ramp, past its 45 degree limit, it slides;
 //   - the jumper: leaves the ground at 5 m/s and peaks at v^2 / 2g, within 2%;
+//   - the pusher: walks into a 20 kg crate, which slides ahead of it;
+//   - the blocked: walks into an 800 kg crate, which a person's 400 N
+//     against its friction does not move, and is stopped by it;
 //   - and none is left inside what it walks on or into: every character's
 //     overlap with the world, measured at the end, under a millimetre past
 //     the solver's slop.
@@ -52,6 +55,12 @@ struct Lanes {
     jump_peak: float
     jumped: bool
     climber_high: float              // the climber's feet, their highest
+    pusher: ptr
+    blocked: ptr
+    light: ptr                       // *GameObject, the 20 kg crate
+    heavy: ptr                       // and the 800 kg one
+    light_start: float
+    heavy_start: float
 }
 
 character(e: *Engine, name: string, at: Vec3) -> *CharacterController {
@@ -91,6 +100,22 @@ start(state: ptr, e: *Engine) {
     s.stander = character(e, "Stander", core.vec3(4.0, 3.52, 10.0)) as ptr
     s.slider = character(e, "Slider", core.vec3(8.0, 4.95, 10.0)) as ptr
     s.jumper = character(e, "Jumper", core.vec3(12.0, 0.0, 0.0)) as ptr
+    // The crates, 2 m ahead of their characters, a metre on a side: 20 kg
+    // and 800 kg.
+    s.light = crate(e, "Light crate", core.vec3(16.0, 0.5, 2.0), 20.0) as ptr
+    s.heavy = crate(e, "Heavy crate", core.vec3(20.0, 0.5, 2.0), 800.0) as ptr
+    s.light_start = behaviour.object_position(s.light as *GameObject).z
+    s.heavy_start = behaviour.object_position(s.heavy as *GameObject).z
+    s.pusher = character(e, "Pusher", core.vec3(16.0, 0.0, 0.0)) as ptr
+    s.blocked = character(e, "Blocked", core.vec3(20.0, 0.0, 0.0)) as ptr
+}
+
+crate(e: *Engine, name: string, at: Vec3, density: float) -> *GameObject {
+    o = engine.object(e, name, loader.cube(1.0))
+    behaviour.object_set_position(o, at)
+    physics.rigidbody(o, physics.DYNAMIC)
+    physics.box_collider(o, core.vec3(0.5, 0.5, 0.5), physics.material(0.6, 0.0), density)
+    return o
 }
 
 fixed_update(state: ptr, e: *Engine, step: float) {
@@ -127,6 +152,8 @@ fixed_update(state: ptr, e: *Engine, step: float) {
         s.jumped = true
     }
     physics.character_move(jumper, still, jump, step)
+    physics.character_move(s.pusher as *CharacterController, ahead, 0.0, step)
+    physics.character_move(s.blocked as *CharacterController, ahead, 0.0, step)
     if s.jumped && feet(jumper).y > s.jump_peak { s.jump_peak = feet(jumper).y }
     if s.steps >= STEPS { engine.engine_stop(e) }
 }
@@ -140,7 +167,8 @@ main() {
     engine.engine_set_frame_limit(e, 100000)
     lanes = Lanes { walker: null, climber: null, stopped: null, stander: null, slider: null, jumper: null, steps: 0,
                     walker_start: 0.0, walker_after_second: 0.0, stander_start: 0.0, slider_start: 0.0,
-                    jump_ground: 0.0, jump_peak: 0.0, jumped: false, climber_high: 0.0 }
+                    jump_ground: 0.0, jump_peak: 0.0, jumped: false, climber_high: 0.0,
+                    pusher: null, blocked: null, light: null, heavy: null, light_start: 0.0, heavy_start: 0.0 }
     b = engine.behaviour_new("lanes", (&lanes) as ptr)
     b.start = start
     b.fixed_update = fixed_update
@@ -179,10 +207,20 @@ main() {
     println("  jumper: rose ${rose} m, v^2/2g = ${wanted} m")
     check("a jump peaks at v^2/2g, within 2%", lanes.jumped && rose > wanted * 0.98 && rose < wanted * 1.02)
 
+    light_moved = behaviour.object_position(lanes.light as *GameObject).z - lanes.light_start
+    heavy_moved = behaviour.object_position(lanes.heavy as *GameObject).z - lanes.heavy_start
+    blocked_at = feet(lanes.blocked as *CharacterController).z
+    println("  pusher: the 20 kg crate moved ${light_moved} m; blocked: the 800 kg one ${heavy_moved} m, the character stopped at z ${blocked_at}")
+    pusher_walked = feet(lanes.pusher as *CharacterController).z
+    println("  the pusher walked to z ${pusher_walked}, its front 0.3 m ahead; the crate's near face at z ${lanes.light_start + light_moved - 0.5}")
+    check("walked into, a 20 kg crate slides ahead of it", light_moved > 1.0)
+    check("at the character's pace, no faster: its near face within 10 cm of the character's front", lanes.light_start + light_moved - 0.5 - (pusher_walked + 0.3) < 0.1)
+    check("and an 800 kg one does not, and stops it at its face", heavy_moved < 0.05 && blocked_at < 1.25)
+
     deepest = 0.0
-    characters = [lanes.walker, lanes.climber, lanes.stopped, lanes.stander, lanes.slider, lanes.jumper]
+    characters = [lanes.walker, lanes.climber, lanes.stopped, lanes.stander, lanes.slider, lanes.jumper, lanes.pusher, lanes.blocked]
     k = 0
-    while k < 6 {
+    while k < 8 {
         d = physics.character_overlap(characters[k] as *CharacterController)
         if d > deepest { deepest = d }
         k = k + 1
@@ -196,6 +234,8 @@ main() {
     physics.character_free(lanes.stander as *CharacterController)
     physics.character_free(lanes.slider as *CharacterController)
     physics.character_free(lanes.jumper as *CharacterController)
+    physics.character_free(lanes.pusher as *CharacterController)
+    physics.character_free(lanes.blocked as *CharacterController)
     engine.engine_free(e)
     if g_failures == 0 {
         println("character: all checks passed (${g_checks})")

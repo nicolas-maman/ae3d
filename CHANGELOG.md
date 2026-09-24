@@ -13,6 +13,9 @@
   up a 0.3 m step, stopped by a 0.5 m one, still on 40 degrees, sliding on
   50, a jump to v^2/2g within 2%, nothing left more than 4.3 mm into the
   world. [docs/physics.md](docs/physics.md).
+- A character pushes what it walks into with a person's 400 N, no faster
+  than its own pace: a 20 kg crate slides ahead of it, an 800 kg one stops
+  it at its face.
 - Out of the car: in `street_drive`, E by the stopped car gets out and the
   street is walked first-person on a character controller (W/S A/D where
   the eyes look, the mouse to look, shift to run, space to jump), E by the

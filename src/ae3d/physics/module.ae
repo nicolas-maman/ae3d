@@ -1574,6 +1574,12 @@ struct CharacterController {
     ground_normal: Vec3
     planes: ptr                    // CollisionPlane[CHARACTER_PLANES]
     plane_count: int
+    push_force: float              // newtons: what it pushes a dynamic body it walks into with
+    pushing: bool                  // this move's first contact pass, when pushes are applied
+    origin: Vec3                   // the feet the planes are relative to, this pass
+    step_seconds: float
+    pushed: ptr                    // BodyId[CHARACTER_PLANES]: pushed already this move
+    pushed_count: int
 }
 
 // A character controller on `o`, whose position is the feet: a capsule of
@@ -1592,12 +1598,15 @@ character_controller(o: *GameObject, radius: float, height: float) -> *Character
     c.velocity = core.vec3(0.0, 0.0, 0.0)
     c.ground_normal = core.vec3(0.0, 1.0, 0.0)
     c.planes = calloc(CHARACTER_PLANES, sizeof(CollisionPlane))
+    c.pushed = calloc(CHARACTER_PLANES, sizeof(BodyId))
+    c.push_force = 400.0
     return c
 }
 
 character_free(c: *CharacterController) {
     if c == null { return }
     free(c.planes)
+    free(c.pushed)
     heap.free(c)
 }
 
@@ -1651,7 +1660,47 @@ character_plane_visitor(shape_id: ShapeId, results: PlaneResult[], count: int, c
         c.plane_count = c.plane_count + 1
         i = i + 1
     }
+    // A dynamic body it walks into is pushed, with a person's force, along
+    // the character's own motion into it -- once a move -- and moves if that
+    // is more than what holds it; a crate slides and the character follows
+    // at its pace, a car does not and is a wall.
+    if c.pushing && count > 0 && c.push_force > 0.0 {
+        body = dynamics.shape_get_body(shape_id)
+        if dynamics.body_get_type(body) == dynamics.BODY_DYNAMIC && !already_pushed(c, body) {
+            n = results[0].plane.normal
+            flat = sqrt(n.x * n.x + n.z * n.z)
+            into = core.v3_dot(c.velocity, core.vec3(0.0 - n.x, 0.0, 0.0 - n.z))
+            if flat > 0.0001 && into > 0.0 {
+                // No more than it takes to bring the body up to the
+                // character's pace: a person leans on a crate at a walk,
+                // not throws it.
+                dir = core.vec3(0.0 - n.x / flat, 0.0, 0.0 - n.z / flat)
+                lag = into - core.v3_dot(dynamics.body_get_linear_velocity(body), dir)
+                push = c.push_force * c.step_seconds
+                needed = dynamics.body_get_mass(body) * lag
+                if needed < push { push = needed }
+                if push < 0.0 { push = 0.0 }
+                impulse = core.v3_mul(dir, push)
+                dynamics.body_apply_linear_impulse(body, impulse, core.v3_add(c.origin, results[0].point), true)
+                marks = c.pushed as BodyId[]
+                if c.pushed_count < CHARACTER_PLANES {
+                    marks[c.pushed_count] = body
+                    c.pushed_count = c.pushed_count + 1
+                }
+            }
+        }
+    }
     return true
+}
+
+already_pushed(c: *CharacterController, body: BodyId) -> bool {
+    marks = c.pushed as BodyId[]
+    i = 0
+    while i < c.pushed_count {
+        if marks[i].index1 == body.index1 && marks[i].world0 == body.world0 && marks[i].generation == body.generation { return true }
+        i = i + 1
+    }
+    return false
 }
 
 character_cast_filter(shape_id: ShapeId, context: ptr) -> bool { return true }
@@ -1662,6 +1711,7 @@ character_overlap(c: *CharacterController) -> float {
     p = c.physics as *Physics
     grounded = c.grounded
     c.grounded = false              // the planes as they are, none laid flat
+    c.pushing = false
     c.plane_count = 0
     physics_world.collide_mover(p.world_id, behaviour.object_position(c.object as *GameObject), character_capsule(c),
                                 shape.default_query_filter(), character_plane_visitor, c as ptr)
@@ -1704,12 +1754,17 @@ character_move(c: *CharacterController, walk: Vec3, jump: float, delta: float) {
     // capsule a few millimetres into a wall each step, and through it in a
     // second.
     remaining = core.v3_mul(c.velocity, delta)
+    c.step_seconds = delta
+    c.pushed_count = 0
     iteration = 0
     while iteration < CHARACTER_ITERATIONS {
         fraction = physics_world.cast_mover(p.world_id, feet, capsule, remaining, filter, false, character_cast_filter, null)
         feet = core.v3_add(feet, core.v3_mul(remaining, fraction))
         c.plane_count = 0
+        c.pushing = true
+        c.origin = feet
         physics_world.collide_mover(p.world_id, feet, capsule, filter, character_plane_visitor, c as ptr)
+        c.pushing = false
         solved = mover.solve_planes(core.vec3(0.0, 0.0, 0.0), c.planes as CollisionPlane[], c.plane_count)
         feet = core.v3_add(feet, solved.delta)
         remaining = mover.clip_vector(core.v3_mul(remaining, 1.0 - fraction), c.planes as CollisionPlane[], c.plane_count)
