@@ -136,6 +136,9 @@ var g_canvas = 0
 // The GPU view the scene is drawn into, or 0 when it is drawn into a
 // framebuffer of the editor's own and blitted into the canvas above.
 var g_gpu = 0
+var g_gpu_widget = 0               // the GPU view's widget handle
+var g_gpu_seen_w = 0               // its size, in points, when last looked at
+var g_gpu_seen_h = 0
 // Decided before the window, because the two paths build the renderer at
 // different moments: the editor's own context exists straight away, and
 // aether-ui's does not exist until the view is realised.
@@ -3133,6 +3136,21 @@ settle_layout() {
 // 62 fps.
 seconds() -> float {
     return platform.time()
+}
+
+// The GPU view changed size without a frame to say so. On GTK a GL area
+// reports its new size only when it is drawn, and a still scene draws
+// nothing: a divider dragged across the viewport left the renderer at the
+// old size, the picture stretched to the new one. A frame is asked for, and
+// drawing it is what delivers the size (gpuview_on_resize).
+watch_view_size() {
+    if g_gpu == 0 || g_gpu_widget == 0 { return }
+    w = ui.get_width(g_gpu_widget)
+    h = ui.get_height(g_gpu_widget)
+    if w == g_gpu_seen_w && h == g_gpu_seen_h { return }
+    g_gpu_seen_w = w
+    g_gpu_seen_h = h
+    mark_dirty()
 }
 
 draw_frame() {
@@ -6806,6 +6824,7 @@ main() {
 
             g_gpu = ui.gpuview_create(layers, VIEW_FLOOR_W, g_view_h)
             gpu_view = ui.gpuview_widget(g_gpu)
+            g_gpu_widget = gpu_view
             ui.fill_width(gpu_view)
             ui.fill_height(gpu_view)
 
@@ -7387,6 +7406,7 @@ main() {
         // over the middle of the viewport on Windows.
         g_timer = ui.timer(16) callback {
             if g_renderer != null { settle_layout() }
+            watch_view_size()
             draw_frame()
         }
 
