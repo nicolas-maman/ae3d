@@ -92,6 +92,18 @@ struct Game {
     look_pitch: float
     jumped: bool
     walk_alone: bool               // AE3D_ON_FOOT=2
+    // AE3D_ON_FOOT=3: the character wanders the street at random, WANDER
+    // moves, measuring as it goes (#420).
+    wander: bool
+    wander_moves: int
+    wander_heading: float
+    wander_speed: float
+    wander_deepest: float          // metres: the deepest into anything after any move
+    wander_over_mm: int            // moves that ended more than a millimetre into something
+    wander_over_slop: int          // and more than the solver's 5 mm slop and one more
+    wander_falls: int              // moves that ended under the street (a fall through it)
+    wander_jumps: int
+    wander_start: Vec3
 }
 
 var g_seed = 0x2545F491
@@ -775,6 +787,54 @@ walk_on_foot(g: *Game, e: *Engine, step: float) {
     physics.character_move(c, core.vec3(wx * speed, 0.0, wz * speed), jump, step)
 }
 
+// AE3D_ON_FOOT=3: WANDER random moves through the street, WANDER_BURST a
+// fixed step (so it takes seconds, not minutes), each a fixed step's worth
+// of walking: a heading that turns every half second, a pace from a stroll
+// to a run, a jump now and then. After every move, how deep the capsule is
+// into anything -- buildings, kerbs, steps, the props it pushes -- and
+// whether it has fallen through the street. Wandering off the street puts it
+// back where it started.
+const WANDER = 10000
+const WANDER_BURST = 10
+
+wander(g: *Game, e: *Engine, step: float) {
+    c = g.walker_body as *CharacterController
+    if g.wander_moves >= WANDER {
+        engine.engine_stop(e)
+        return
+    }
+    k = 0
+    while k < WANDER_BURST && g.wander_moves < WANDER {
+        if g.wander_moves % 30 == 0 {
+            g.wander_heading = next_random() * 6.2831853
+            g.wander_speed = 1.0 + 4.0 * next_random()
+        }
+        jump = 0.0
+        if physics.character_grounded(c) && next_random() < 0.01 {
+            jump = 4.2
+            g.wander_jumps = g.wander_jumps + 1
+        }
+        walk = core.vec3(core.cos_of(g.wander_heading) * g.wander_speed, 0.0, core.sin_of(g.wander_heading) * g.wander_speed)
+        physics.character_move(c, walk, jump, step)
+        feet = behaviour.object_position(c.object as *GameObject)
+        deep = physics.character_overlap(c)
+        if deep > g.wander_deepest { g.wander_deepest = deep }
+        if deep > 0.001 { g.wander_over_mm = g.wander_over_mm + 1 }
+        if deep > 0.006 {
+            g.wander_over_slop = g.wander_over_slop + 1
+            if g_diag { println("street_drive[diag] wander move ${g.wander_moves}: ${deep * 1000.0} mm deep at (${feet.x}, ${feet.y}, ${feet.z}), grounded ${physics.character_grounded(c)}, pushing ${c.pushed_count}") }
+        }
+        if feet.y < ROAD_Y - 1.0 {
+            g.wander_falls = g.wander_falls + 1
+            behaviour.object_set_position(c.object as *GameObject, g.wander_start)
+        } else if math.abs_float(feet.x) > STREET_END || math.abs_float(feet.z) > 30.0 {
+            behaviour.object_set_position(c.object as *GameObject, g.wander_start)
+        }
+        g.wander_moves = g.wander_moves + 1
+        k = k + 1
+    }
+}
+
 fixed_update(state: ptr, go: *GameObject, step: float) {
     g = state as *Game
     if g.vehicle == null { return }
@@ -786,11 +846,20 @@ fixed_update(state: ptr, go: *GameObject, step: float) {
     if !g.on_foot && g.seconds == 0.0 && g.walker_body == null && core.env_int("AE3D_ON_FOOT", 0) >= 1 {
         toggle_on_foot(g, e)
         g.walk_alone = core.env_int("AE3D_ON_FOOT", 0) == 2
+        g.wander = core.env_int("AE3D_ON_FOOT", 0) == 3
+        if g.wander && g.walker_body != null {
+            g.wander_start = behaviour.object_position((g.walker_body as *CharacterController).object as *GameObject)
+        }
     }
     if input.pressed(keys, "use") { toggle_on_foot(g, e) }
     if g.on_foot {
         // The car waits with its brakes on; the street goes on around it.
         physics.vehicle_drive(v, 0.0, 0.0, 1.0)
+        if g.wander {
+            wander(g, e, step)
+            walk(g, step)
+            return
+        }
         walk_on_foot(g, e, step)
         walk(g, step)
         return
@@ -1062,6 +1131,9 @@ main() {
         c = g.walker_body as *CharacterController
         feet = behaviour.object_position(c.object as *GameObject)
         println("street_drive: on foot at (${feet.x}, ${feet.y}, ${feet.z}), grounded ${physics.character_grounded(c)}")
+        if g.wander {
+            println("street_drive: wandered ${g.wander_moves} moves (${g.wander_jumps} jumps): deepest ${g.wander_deepest * 1000.0} mm into anything; ${g.wander_over_mm} moves over 1 mm, ${g.wander_over_slop} over 6 mm; ${g.wander_falls} falls through")
+        }
     }
     if g.vehicle != null { physics.vehicle_free(g.vehicle as *Vehicle) }
     if g.headlights != null { free(g.headlights) }

@@ -2,6 +2,16 @@
 
 ## [current]
 
+### A character wanders the street
+
+- `AE3D_ON_FOOT=3 street_drive` walks the character through 10,000 random
+  moves and measures each one: how deep it is into anything, and whether it
+  fell through (#420). It found the one bug: the snap down onto the ground
+  was a ray, so the pavement at the foot of an alley narrower than the
+  capsule put it 72 mm into the walls. The capsule is now cast down the drop
+  first. Deepest after the fix: 5 mm, the solver's slop; none past 6 mm, no
+  falls. `ci.sh` runs it.
+
 ### Multiplayer: events and objects created mid-game
 
 - Events (#413): a game registers a named event with a handler on both

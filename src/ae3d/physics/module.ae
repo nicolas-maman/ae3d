@@ -2351,10 +2351,27 @@ character_step(c: *CharacterController, walk: Vec3, jump: float, delta: float) {
     hit = physics_world.cast_ray_closest(p.world_id, origin, core.vec3(0.0, 0.0 - reach, 0.0), filter)
     c.grounded = false
     if hit.hit && hit.normal.y >= c.slope_cos && c.velocity.y <= 0.0 {
-        feet = core.vec3(feet.x, hit.point.y, feet.z)
-        c.grounded = true
-        c.ground_normal = hit.normal
-        c.velocity = core.vec3(c.velocity.x, 0.0, c.velocity.z)
+        // Down onto it only as far as the capsule fits: a ray finds the
+        // floor of a gap narrower than the capsule (an alley between two
+        // buildings, a slot between crates), and putting the feet on it put
+        // the capsule 72 mm into a wall. Where it cannot get down, it stays
+        // up, off the ground, and falls as far as its next move lets it.
+        drop = hit.point.y - feet.y
+        fits = true
+        if drop < 0.0 {
+            fraction = physics_world.cast_mover(p.world_id, feet, capsule, core.vec3(0.0, drop, 0.0), filter, false,
+                                                character_cast_filter, null)
+            if fraction < 0.999 {
+                fits = false
+                feet = core.vec3(feet.x, feet.y + drop * fraction, feet.z)
+            }
+        }
+        if fits {
+            feet = core.vec3(feet.x, hit.point.y, feet.z)
+            c.grounded = true
+            c.ground_normal = hit.normal
+            c.velocity = core.vec3(c.velocity.x, 0.0, c.velocity.z)
+        }
     }
     behaviour.object_set_position(o, core.vec3(feet.x, feet.y + c.lift, feet.z))
 }

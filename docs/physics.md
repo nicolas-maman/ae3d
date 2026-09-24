@@ -174,7 +174,7 @@ The mover is Box3D's, driven the way its documentation lays out (`reference/box3
 
 The first version solved the whole move against the planes before casting. The solver's slop then took the capsule a few millimetres into a wall each step, and through a half-metre step in a second.
 
-The capsule rides a step height (0.35 m) above the feet, so a kerb or a stair lower than that passes under it. A ray from there down finds the ground, and walkable ground (flatter than the slope limit, 45°) puts the feet on it. To a character on the ground, a plane too steep to walk on is a wall. Its normal is laid flat, keeping the separation it measures, so the round bottom of the capsule against a step's edge doesn't lift it over. In the air a steep slope is what it is, and is slid down.
+The capsule rides a step height (0.35 m) above the feet, so a kerb or a stair lower than that passes under it. A ray from there down finds the ground, and walkable ground (flatter than the slope limit, 45°) puts the feet on it. To a character on the ground, a plane too steep to walk on is a wall. Its normal is laid flat, keeping the separation it measures, so the round bottom of the capsule against a step's edge doesn't lift it over. In the air a steep slope is what it is, and is slid down. The snap down onto the ground is a cast of the capsule, not a jump: a ray can find a floor the capsule can't reach, like the pavement at the foot of a gap narrower than the capsule between two buildings, and snapping to it put the capsule 72 mm into their walls. Now the capsule is cast down the drop first and stops where it touches.
 
 `tests/test_character.ae` holds it to numbers:
 - 3.00 m walked in a second at 3 m/s;
@@ -183,6 +183,8 @@ The capsule rides a step height (0.35 m) above the feet, so a kerb or a stair lo
 - no drift in 2.75 s on a 40° ramp, and 4.6 m slid down a 50° one;
 - a 5 m/s jump rising 1.29 m against v²/2g = 1.27 (within 2%);
 - no character more than 4.3 mm into the world at the end, within the solver's 5 mm slop.
+
+`AE3D_ON_FOOT=3 street_drive` wanders: 10,000 random moves through the street, strolling to running, turning every half second, jumping now and then, into the kerbs, steps, buildings and props. After every move it measures how deep the capsule is into anything and whether it fell through the street. The last run: deepest 5 mm (the slop), 787 moves between 1 and 5 mm, none past 6 mm, no falls. `ci.sh` runs it and fails on any move past 6 mm or any fall (#420).
 
 `street_drive` uses it. Press E by the car, stopped, to get out, and walk the street first-person: W/S and A/D where you look, the mouse to look, shift to run, space to jump. Press E by the car to get back in. `AE3D_ON_FOOT=1` starts on foot, and `AE3D_ON_FOOT=2` walks on its own for a run without a keyboard: 4.8 m in three seconds at a walk, on the road. A dynamic body the character walks into is pushed with a person's force (`push_force`, 400 N). The push is capped at what brings the body up to the character's pace, so a person leans on a crate at a walk rather than throwing it: a 20 kg crate slides ahead with its near face at the character's front. What 400 N can't move against its friction, such as an 800 kg crate, stops the character at its face like a wall.
 
