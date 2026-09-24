@@ -355,14 +355,21 @@ for script_source in resources/scripts/*.ae; do
     script_lib="build/scripts/$script_name$(ae3d_native_suffix)"
     case "$(uname -s)" in
         MINGW*|MSYS*|CYGWIN*|Windows_NT)
-            # nm cannot answer it here. Linking against an import library leaves
-            # a thunk in .text under the imported name, and a DLL that exports
-            # nothing explicitly exports those too, so every imported call reads
-            # as a definition. The import table is what settles it.
-            if command -v objdump >/dev/null 2>&1 && [ -f "$script_lib" ]; then
+            # nm alone cannot answer it here. Linking against an import library
+            # leaves a thunk in .text under the imported name, and a DLL that
+            # exports nothing explicitly exports those too, so every imported
+            # call reads as a definition. So: a script that imports the engine
+            # library gets its C from there; one that does not must have none
+            # of the engine's C in it at all. (A script that calls only what is
+            # Aether now -- the mesh and instance stores, since #398 -- needs no
+            # native call and imports no engine library, which is fine.)
+            if command -v objdump >/dev/null 2>&1 && command -v nm >/dev/null 2>&1 && [ -f "$script_lib" ]; then
                 if ! objdump -p "$script_lib" 2>/dev/null | grep -q "libae3d_native.dll"; then
-                    fail "script $script_name (does not import the engine library)"
-                    continue
+                    own="$(nm -g "$script_lib" 2>/dev/null | grep -c ' T _\{0,1\}ae3d_' || true)"
+                    if [ "${own:-0}" -ne 0 ]; then
+                        fail "script $script_name (carries its own copy of $own engine calls)"
+                        continue
+                    fi
                 fi
             fi
             ;;
