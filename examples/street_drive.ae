@@ -497,6 +497,8 @@ make_bystanders(g: *Game, e: *Engine, m: *Manifest) {
                 if active != null {
                     motion.attach(e, active)
                     if !walks { motion.set_mode(active, motion.POWERED) }
+                    // Knocked down, it lies three seconds and gets up.
+                    motion.set_get_up(active, 3.0)
                 }
                 list.add_raw(g.motions, active as ptr)
             } else {
@@ -1038,8 +1040,10 @@ main() {
     engine.engine_run(e)
     p = physics.of(e)
     // How the bystanders ended: down (the pelvis near the ground, or the
-    // figure leaning past 60 degrees -- over a bonnet, say) or standing.
+    // figure leaning past 60 degrees -- over a bonnet, say) or standing;
+    // and how many got up again.
     down = 0
+    rose = 0
     k = 0
     while k < list.size(g.bystanders) {
         pelvis = behaviour.object_position(physics.ragdoll_bone(list.get_raw(g.bystanders, k) as *Ragdoll, 0))
@@ -1047,12 +1051,13 @@ main() {
         leaning = false
         if active != null { leaning = motion.tilt(active) > 1.05 }
         if pelvis.y < PAVEMENT_Y + 0.5 || leaning { down = down + 1 }
+        if active != null && motion.rise_seconds(active) > 0.0 { rose = rose + 1 }
         if g_diag && active != null && (g.struck_at as float[])[k] >= 0.0 {
             println("street_drive[diag] bystander ${k}: pelvis at (${pelvis.x}, ${pelvis.y - PAVEMENT_Y}, ${pelvis.z}), leaning ${motion.tilt(active) * 57.3} deg, falling ${motion.falling(active)}")
         }
         k = k + 1
     }
-    println("street_drive: ${physics.physics_body_count(p)} bodies (${g.props} props, ${list.size(g.bystanders)} bystanders, ${g.knocked} struck, ${down} down), ${physics.physics_step_count(p)} steps, ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps")
+    println("street_drive: ${physics.physics_body_count(p)} bodies (${g.props} props, ${list.size(g.bystanders)} bystanders, ${g.knocked} struck, ${down} down, ${rose} got up), ${physics.physics_step_count(p)} steps, ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps")
     if g.walker_body != null {
         c = g.walker_body as *CharacterController
         feet = behaviour.object_position(c.object as *GameObject)

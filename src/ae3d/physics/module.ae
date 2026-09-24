@@ -1943,10 +1943,39 @@ body_foot_direction(r: *Ragdoll, calf_index: int) -> Vec3 {
     return foot_direction_at(r, calf_index, dynamics.body_get_rotation(human.bone_at(&r.human, calf_index).body_id))
 }
 
-// Where the figure's feet point standing in the reference's pose: the way
-// it faces.
+// The way the figure faces standing in the reference's pose, level: the
+// way its knees do not bend. Each knee's hinge is bent a little toward
+// the limit it has room to bend to, and where the ankle goes is behind;
+// the two knees' behinds, averaged and turned round, are its front. (Not
+// its toes: they splay, 23 degrees on the reference's figure, and a bow
+// about an axis that far off would bend the knees sideways.)
 ragdoll_rest_forward(r: *Ragdoll) -> Vec3 {
-    return foot_direction_at(r, human.BONE_CALF_L, human.bone_at(&r.human, human.BONE_CALF_L).reference_frame.q)
+    back = core.v3_add(knee_back(r, human.BONE_CALF_L), knee_back(r, human.BONE_CALF_R))
+    flat = core.vec3(0.0 - back.x, 0.0, 0.0 - back.z)
+    if core.v3_len(flat) < 0.000001 { return core.vec3(0.0, 0.0, 1.0) }
+    return core.v3_normalize(flat)
+}
+
+// Where a knee's bend takes its ankle, in the reference's pose, level.
+knee_back(r: *Ragdoll, calf_index: int) -> Vec3 {
+    calf = human.bone_at(&r.human, calf_index)
+    thigh = human.bone_at(&r.human, calf.parent_index)
+    qa = core.quat_mul(thigh.reference_frame.q, calf.local_frame_a.q)
+    qb = core.quat_mul(calf.reference_frame.q, calf.local_frame_b.q)
+    rel = core.quat_mul(core.quat_conjugate(qa), qb)
+    angle = 2.0 * atan2(rel.z, rel.w)
+    // Toward whichever limit is further: the way it bends.
+    toward = 0.5
+    if calf.twist_limit.y - angle < angle - calf.twist_limit.x { toward = 0.0 - 0.5 }
+    axis = core.quat_apply(qa, core.vec3(0.0, 0.0, 1.0))
+    knee = core.v3_add(thigh.reference_frame.p, core.quat_apply(thigh.reference_frame.q, calf.local_frame_a.p))
+    leg = first_capsule(calf.body_id)
+    far = leg.center1
+    if core.v3_len(leg.center2) > core.v3_len(leg.center1) { far = leg.center2 }
+    shin = core.v3_sub(core.v3_add(calf.reference_frame.p, core.quat_apply(calf.reference_frame.q, far)), knee)
+    moved = core.quat_apply(core.quat_rotate(toward, axis), shin)
+    d = core.v3_sub(moved, shin)
+    return core.vec3(d.x, 0.0, d.z)
 }
 
 // Where a calf's foot points, along the ground, were the calf at `rotation`.
