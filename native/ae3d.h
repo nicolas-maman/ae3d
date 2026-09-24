@@ -237,6 +237,10 @@ void   ae3d_vk_ray_add_one(int mesh_handle, const double *matrix);
 int    ae3d_vk_ray_build(void);
 void   ae3d_vk_set_ray_shadows(int on);
 void   ae3d_vk_set_ray_reach(double metres);
+void   ae3d_vk_set_ray_budget(int figures);
+int    ae3d_vk_ray_budget(void);
+int    ae3d_vk_ray_figures(void);
+double ae3d_vk_ray_reach_now(void);
 int    ae3d_vk_ray_shadows(void);
 int    ae3d_vk_ray_shadows_now(void);
 void   ae3d_vk_dlss_camera(const double *view, const double *projection,

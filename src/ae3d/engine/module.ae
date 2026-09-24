@@ -37,7 +37,7 @@ exports (
     engine_set_size, engine_set_title, engine_set_msaa, engine_set_decorated, engine_set_post,
     engine_set_render_scale, engine_set_shadows, engine_shadows, engine_set_fog, engine_fog, engine_set_shadow_distance, engine_shadow_distance,
     engine_set_vsync, engine_set_camera_input, engine_set_fixed_step,
-    engine_set_skybox, engine_set_sky, engine_sky_path, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_clouds, engine_cloud_wind, engine_set_sky_overcast, engine_sky_overcast, engine_sky_overcast_color, engine_set_ssao, engine_set_capture_channel, engine_set_wetness, engine_set_taa, engine_taa, engine_set_dlss, engine_dlss, engine_ray_query, engine_set_ray_shadows, engine_ray_shadows, engine_set_sun_size, engine_sun_size, engine_set_ray_occlusion, engine_ray_occlusion, engine_set_lamp_size, engine_set_ssr, engine_load_texture,
+    engine_set_skybox, engine_set_sky, engine_sky_path, engine_set_clear_color, engine_draw_calls, engine_set_clouds, engine_clouds, engine_cloud_wind, engine_set_sky_overcast, engine_sky_overcast, engine_sky_overcast_color, engine_set_ssao, engine_set_capture_channel, engine_set_wetness, engine_set_taa, engine_taa, engine_set_dlss, engine_dlss, engine_ray_query, engine_set_ray_shadows, engine_ray_shadows, engine_set_sun_size, engine_sun_size, engine_set_ray_occlusion, engine_ray_occlusion, engine_set_lamp_size, engine_set_ray_budget, engine_ray_figures, engine_ray_reach, engine_set_ssr, engine_load_texture,
     engine_set_time_of_day, engine_time_of_day,
     engine_delta_time, engine_frame_count, engine_fps, engine_set_frame_limit,
     engine_render_ms, engine_render_frames,
@@ -1111,6 +1111,28 @@ engine_set_ray_shadows(e: *Engine, on: bool) {
 }
 
 engine_ray_shadows(e: *Engine) -> bool { return e.ray_shadows && engine_ray_query(e) }
+
+// How many of a crowd's figures the rays take a frame (Vulkan): the nearest
+// that many, however dense the crowd -- every figure in the rays is one
+// more instance in the frame's structure and one more surface every shadow
+// and occlusion ray is tested against, and half a million in a street put
+// tens of thousands inside even a short reach (#401). 2048 unless set; 0
+// takes every figure within the shadow distance.
+engine_set_ray_budget(e: *Engine, figures: int) {
+    if e.api != platform.API_VULKAN { return }
+    vk.renderer_set_ray_budget(e.backend_state as *VKRenderer, figures)
+}
+
+// What the rays took last frame, and the reach that took them.
+engine_ray_figures(e: *Engine) -> int {
+    if e.api != platform.API_VULKAN { return 0 }
+    return vk.renderer_ray_figures(e.backend_state as *VKRenderer)
+}
+
+engine_ray_reach(e: *Engine) -> float {
+    if e.api != platform.API_VULKAN { return 0.0 }
+    return vk.renderer_ray_reach(e.backend_state as *VKRenderer)
+}
 
 // The sun's size, as the angle its disc subtends in degrees, for the
 // ray-traced shadows' penumbra: zero is a point sun and a hard edge; the

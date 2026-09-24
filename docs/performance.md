@@ -159,6 +159,41 @@ simulation itself -- the shove 1.7 ms, the step 0.8, the heading 0.3 --
 and the conversion, about a millisecond; the shove's grid is still built
 on one thread.
 
+### The crowd in the rays
+
+The rows above are the map path. Since the city's lamps (commit
+efda433) `zombie_city` runs with the rays on where the device traces, and
+the same scene measured 12 fps with 84 ms of device time (#401): the
+crowd's figures within the shadow distance -- 48 m, which on a street of
+half a million is 39,000 of them -- were instances in every frame's
+structure and surfaces every shadow, lamp and occlusion ray was tested
+against, and every pixel of the quarter of a million impostors past them
+traced its rays too, each under the others. Two things now:
+
+- the rays take a crowd's nearest figures up to a budget
+  (`engine_set_ray_budget`, 2048 unless set): the reach follows the
+  crowd's density frame by frame -- 5.5 m at half a million, the whole
+  48 m at twenty thousand -- instead of a fixed distance that takes 40
+  figures one day and 40,000 the next;
+- a pixel past the shadow distance is not traced at all (`rayReach`), as
+  the shadow map covers nothing past it either.
+
+Same scene (`AE3D_NEAR=3 AE3D_NOPROPS=1 AE3D_SEPN=4`, 1280x720, the
+4070 Ti):
+
+| crowd | rays | fps before | fps | gpu scene ms before | gpu scene ms |
+|---|---|---|---|---|---|
+| 500,000 | on | 12 | 35 | 83.9 | 28.4 |
+| 100,000 | on | 70 | 103 | 14.0 | 9.4 |
+| 20,000 | on | 143 | 144 | 4.0 | 3.6 |
+| 500,000 | off | 61 | 61 | 13.4 | 13.5 |
+
+What the rays still cost at half a million is the tracing itself: inside
+48 m the street is figures from kerb to kerb, and every pixel there takes
+its sun ray, its lamps' and four occlusion rays. `AE3D_RAYS=0` is the map
+path's 61 fps; the device time of that path grew from the 9.9 ms above to
+13.4 ms with the city's lamps and wet road.
+
 The table found a stall as well: `lights` spent 6.9 ms of CPU a frame, at
 nine draws, because a batched model that moves had its instance buffer
 freed and re-uploaded every frame, and freeing a buffer the device may

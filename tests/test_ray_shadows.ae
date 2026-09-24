@@ -313,6 +313,62 @@ main() {
         ecs.column_free(phase)
         ecs.column_free(col)
     }
+
+    // The budget: four hundred figures on a 20 by 20 grid a metre apart
+    // around the camera's ground point, the rays asked to take fifty. The
+    // reach follows the count down from the shadow distance, and after a
+    // few frames the rays hold about fifty -- the nearest -- however many
+    // stand inside the shadow distance. Budget off, they take every one.
+    many = crowd.device_crowd_new(400)
+    check("the device takes four hundred", many != null)
+    if many != null {
+        crowd.device_crowd_bind(many, figure, 1)
+        core.backend_add_model(&backend, figure)
+        crowd.device_crowd_rays(many, figure, bank)
+        pos = ecs.column_new(400, 3)
+        yaw = ecs.column_new(400, 1)
+        phase = ecs.column_new(400, 1)
+        col = ecs.column_new(400, 3)
+        k = 0
+        while k < 400 {
+            ecs.column_set3(pos, k, core.vec3(((k % 20) as float) - 10.0, 0.0, 210.0 + ((k / 20) as float)))
+            ecs.column_set(yaw, k, 0, 0.0)
+            ecs.column_set(phase, k, 0, 0.0)
+            ecs.column_set3(col, k, core.vec3(1.0, 1.0, 1.0))
+            k = k + 1
+        }
+        vk.renderer_set_shadow_distance(renderer, 200.0)
+        vk.renderer_set_ray_shadows(renderer, true)
+        vk.renderer_set_ray_budget(renderer, 50)
+        frame = 0
+        while frame < 24 {
+            crowd.device_crowd_update(many, ecs.column_data(pos), ecs.column_data(yaw), ecs.column_data(phase),
+                                      ecs.column_data(col), 0, 400, 0.0, 220.0, 1.0, 0.0, 0.0)
+            read_frame(&backend, cam, light)
+            frame = frame + 1
+        }
+        taken = vk.renderer_ray_figures(renderer)
+        reach = vk.renderer_ray_reach(renderer)
+        check("a budget of fifty holds the rays near fifty (${taken} within ${reach} m)", taken > 10 && taken <= 100)
+        check("by pulling the reach in from the shadow distance", reach < 200.0)
+        vk.renderer_set_ray_budget(renderer, 0)
+        frame = 0
+        while frame < 6 {
+            crowd.device_crowd_update(many, ecs.column_data(pos), ecs.column_data(yaw), ecs.column_data(phase),
+                                      ecs.column_data(col), 0, 400, 0.0, 220.0, 1.0, 0.0, 0.0)
+            read_frame(&backend, cam, light)
+            frame = frame + 1
+        }
+        check("with no budget the rays take every figure in reach (${vk.renderer_ray_figures(renderer)})", vk.renderer_ray_figures(renderer) == 400)
+        vk.renderer_set_ray_budget(renderer, 2048)
+        vk.renderer_set_ray_shadows(renderer, false)
+        core.backend_remove_model(&backend, figure)
+        crowd.device_crowd_free(many)
+        ecs.column_free(pos)
+        ecs.column_free(yaw)
+        ecs.column_free(phase)
+        ecs.column_free(col)
+    }
     core.model_free(figure)
     core.palette_destroy(palette)
     posing.posebank_destroy(bank)

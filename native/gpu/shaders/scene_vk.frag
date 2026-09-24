@@ -88,6 +88,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float rayOcclusion;
     float rayOcclusionStrength;
     float rayLampRadius;
+    float rayReach;
     int rayFrame;
     bool enablePerlinNoise;
     float noiseScale;
@@ -314,6 +315,14 @@ layout(location = 5) in float Occlusion;
 
 // The size of a lamp's face, in metres, for the rays' lamp shadows: the
 // larger, the softer the shadow it throws.
+
+// How far from the camera a pixel is traced: the shadow distance, what the
+// shadow map covers when the rays are off. Past it a pixel takes no shadow
+// ray, no lamp ray and no occlusion ray -- a street of half a million
+// figures is a quarter of a million alpha-tested quads out there, each
+// pixel of each shaded under the rest, and tracing them cost more than the
+// rest of the frame for shadows no camera resolves at that range (#401).
+// Zero traces everything.
 
 // The frame's number, for the rays' spirals: each frame turns every
 // pixel's taps by the golden angle, so the temporal pass folds successive
@@ -1263,7 +1272,8 @@ void main() {
     float shaded = 1.0;
     if (hasShadowMap && enableShadows) shaded = shadow_factor();
 #ifdef AE3D_RAY_QUERY
-    if (rayShadows == 1 && enableShadows) shaded = min(shaded, ray_shadow_factor());
+    bool traced = rayShadows == 1 && (rayReach <= 0.0 || distance(FragPos, viewPos) < rayReach);
+    if (traced && enableShadows) shaded = min(shaded, ray_shadow_factor());
 #endif
     float sunlit = cloudShadow(FragPos);
     vec3 Lo = vec3(0.0);
@@ -1285,7 +1295,7 @@ void main() {
 #ifdef AE3D_RAY_QUERY
         // By ray a lamp throws its own shadow, where it reaches: past the
         // lamp's fall-off there is no light to shadow and no ray is cast.
-        if (i > 0 && rayShadows == 1 && enableShadows && lights[i].isDirectional != 1) {
+        if (i > 0 && traced && enableShadows && lights[i].isDirectional != 1) {
             if (dot(lit, vec3(0.333)) > 0.002) shade = ray_lamp_factor(lights[i].position, rayLampRadius);
             else shade = 1.0;
         }
@@ -1310,7 +1320,7 @@ void main() {
 #ifdef AE3D_RAY_QUERY
     // The occlusion by ray darkens what the screen-space pass would have,
     // the whole of the lit surface, so the two pictures agree.
-    if (rayShadows == 1 && rayOcclusion > 0.0) color *= ray_occlusion_factor();
+    if (traced && rayOcclusion > 0.0) color *= ray_occlusion_factor();
 #endif
 
 	// Calculate distance for performance scaling (CRITICAL for voxel terrain performance)
