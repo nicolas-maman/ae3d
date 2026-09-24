@@ -2,6 +2,17 @@
 
 ## [current]
 
+### Multiplayer: deltas and relevance
+
+- Snapshots are deltas against the newest one each client has acknowledged
+  (#413): only what changed since is sent, a lost snapshot costs nothing,
+  and an object standing still is sent until the client has it and never
+  again. `set_relevance(session, metres)` sends a client only what is near
+  its player. `tests/test_net.ae`: 64 objects, 48 of them still, over
+  100 ms / 20 ms jitter / 2% loss, cost 19.2 KB a second and 1,232 object
+  states in two seconds against 3,840 for everything every time;
+  `tests/test_players.ae`: a crate 200 m off is never sent. Protocol 2.
+
 ### The OpenGL renderer in Aether
 
 - `native/gpu/opengl.c` moves into `ae3d.gl` (#398), in four slices: the GL

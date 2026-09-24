@@ -100,6 +100,19 @@ free_players(n: *Net) {
     }
 }
 
+// A crate at x `x`, networked on `n`, in world `e`.
+crate(e: *Engine, n: *Net, x: float) -> *GameObject {
+    o = engine.object(e, "Crate", null)
+    behaviour.object_set_position(o, core.vec3(x, 0.0, 0.0))
+    net.networked(n, o)
+    return o
+}
+
+slide(o: *GameObject, t: float) {
+    at = behaviour.object_position(o)
+    behaviour.object_set_position(o, core.vec3(at.x, 0.0, t))
+}
+
 where(pl: *NetPlayer) -> Vec3 {
     return behaviour.object_position(pl.controller.object as *GameObject)
 }
@@ -115,12 +128,22 @@ main() {
     hub = net.hub_new()
     net.hub_set_conditions(hub, 0.1, 0.02, 0.02)
     host = net.host_loopback(hub)
+    // Two crates on every side, networked before any player so their ids
+    // agree: one among the players, one 200 m off. The host sends a client
+    // only what is within 40 m of its player.
+    near_host = crate(host_world, host, 10.0)
+    far_host = crate(host_world, host, 200.0)
+    net.set_relevance(host, 40.0)
     net.set_player_maker(host, make_player, host_world as ptr)
     // The host plays too, before anyone joins.
     net.host_play(host, 0.0)
     one = net.join_loopback(hub)
+    near_one = crate(one_world, one, 10.0)
+    far_one = crate(one_world, one, 200.0)
     net.set_player_maker(one, make_player, one_world as ptr)
     two = net.join_loopback(hub)
+    crate(two_world, two, 10.0)
+    crate(two_world, two, 200.0)
     net.set_player_maker(two, make_player, two_world as ptr)
 
     // Where the host had player 1, every step: x y z.
@@ -147,6 +170,11 @@ main() {
         }
         if net.my_player(two) != null { net.player_input(two, walk_two(now), 0.0, now) }
         net.player_input(host, walk_host(now), 0.0, now)
+        // The crates slide along z on the host, a metre a second, until STOP.
+        if now < STOP {
+            slide(near_host, now)
+            slide(far_host, now)
+        }
         net.step(one, now)
         net.step(two, now)
         net.step(host, now)
@@ -212,6 +240,13 @@ main() {
           watched > 60 && (watched_close as float) >= 0.95 * (watched as float) && watched_worst <= 0.05)
     println("  jump: client 1 predicted a peak of ${one_peak} m, the host's was ${host_peak} m")
     check("a jump predicted is the host's jump", one_peak > 0.8 && apart(core.vec3(0.0, one_peak, 0.0), core.vec3(0.0, host_peak, 0.0)) <= 0.01)
+    near_seen = behaviour.object_position(near_one)
+    far_seen = behaviour.object_position(far_one)
+    near_true = behaviour.object_position(near_host)
+    far_true = behaviour.object_position(far_host)
+    println("  relevance 40 m: the near crate at z ${near_true.z} on the host, ${near_seen.z} on client 1; the far one at z ${far_true.z} on the host, ${far_seen.z} on client 1")
+    check("a client is sent what is near its player", apart(near_seen, near_true) <= 0.01)
+    check("and not what is beyond its relevance: the far crate never moved for it", far_seen.z == 0.0 && far_true.z > 2.0)
     inputs = net.bytes_sent(one)
     per_second = (inputs as float) / ((STEPS as float) * STEP)
     println("  client 1 sent ${net.input_sent(one)} input messages, ${per_second / 1024.0} KB a second")

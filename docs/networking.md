@@ -1,6 +1,6 @@
 # Networking
 
-`ae3d.net` puts multiplayer in the engine (#413). A game marks what is networked, and the engine keeps it in step between one host and its clients. This page describes what is built: transports, the handshake, server-owned objects replicated and interpolated, and players, each moved by its client's commands with prediction and reconciliation. The rest of #413 (relevance, delta compression, the horde) is built on it.
+`ae3d.net` puts multiplayer in the engine (#413). A game marks what is networked, and the engine keeps it in step between one host and its clients. This page describes what is built: transports, the handshake, server-owned objects replicated and interpolated, snapshots sent as deltas against what each client has acknowledged, relevance, and players, each moved by its client's commands with prediction and reconciliation. The rest of #413 (UDP, events, the horde) is built on it.
 
 ## A session
 
@@ -41,9 +41,10 @@ A transport moves messages between the host and each peer. A message is either r
 |---|---|---|
 | hello | client to host, reliable | `u8 1`, `u32 protocol` |
 | welcome | host to client, reliable | `u8 2`, `u32 client id`, `u32 tick rate` |
-| snapshot | host to each client, unreliable | `u8 3`, `u32 tick`, `f32 host time`, `u32 ack` (the client's newest command the host has applied), `u16 count`, then per object `u32 id`, `f32 x y z`, `f32 qx qy qz qw`, `u8 character`, and for a character `f32 vy`, `u8 grounded` |
+| snapshot | host to each client, unreliable | `u8 3`, `u32 tick`, `f32 host time`, `u32 ack` (the client's newest command the host has applied), `u32 baseline` (the snapshot this one is a delta against; 0 for none), `u16 objects`, `u16 changed`, then per changed object `u16 index`, `f32 x y z`, `f32 qx qy qz qw`, `u8 character`, and for a character `f32 vy`, `u8 grounded` |
 | input | client to host, unreliable | `u8 4`, `u32 first seq`, `u8 count`, then per command `f32 walk x z`, `f32 jump` |
 | spawn | host to client, reliable | `u8 5`, `u32 net id`, `u32 owner` |
+| ack | client to host, unreliable | `u8 6`, `u32 tick`: a snapshot the client has, so the next can be a delta against it |
 
 Over TCP each message is framed by a `u32` length.
 
@@ -54,6 +55,14 @@ The host sends a snapshot every network tick: 30 a second by default (`set_tick_
 A client estimates the host's clock from the least-delayed snapshot it has seen: a snapshot can arrive later than its stamp, never earlier. It draws every object at that clock less the interpolation delay (`set_interpolation_delay`, 100 ms by default), between the two snapshots around that moment. `view_time(session, now)` is that moment, in the host's time. It is what lag compensation will rewind to.
 
 The delay has to cover a snapshot interval and the link's jitter. When snapshots stop coming, the objects hold at the newest one.
+
+## Deltas and relevance
+
+A snapshot carries only what the client doesn't already have. Each is a **delta** against the newest snapshot the client has acknowledged: the objects that changed since then are listed, and everything else is as it was. The client keeps the last 32 snapshots it received. It rebuilds each new one from its baseline, keeps it, and acknowledges it (`ack`), and the host's next snapshot is a delta against that. A lost snapshot costs nothing: the host never deltas against one the client hasn't confirmed. An object that stands still is sent until the client's first acknowledgement comes back, and never again.
+
+**Relevance.** `set_relevance(session, metres)` sends a client only what is within that distance of its player. What lies farther keeps the state the client was last told, so it costs nothing until it comes back within reach, and then it's sent as any change is. Its own player is always relevant. Without a radius, or without a player, everything is sent.
+
+`objects_sent(session)` is how many object states the host has written, all clients together.
 
 ## Players
 
@@ -104,7 +113,7 @@ With `AE3D_NET_AUTOWALK=1` each walks five seconds round a circle by itself, and
 | 100 ms, 20 ms jitter, 2% loss | 5.555 mm | a lost snapshot doubles the interval, 10 (1 − cos 1/30) = 5.55 mm |
 | TCP on this machine | 2.8 mm | real-time steps, ticks not aligned to them |
 
-Sixteen objects cost a client 15.6 KB a second (33 bytes an object a snapshot, before delta compression).
+Sixteen moving objects cost a client 14.9 KB a second (31 bytes an object a snapshot). With 48 more that stand still, over the lossy link, it costs 19.2 KB a second. The still ones are drawn exactly where they stand, and are sent only until the first acknowledgement is back: 1,232 object states in two seconds, where sending every object every snapshot would be 3,840.
 
 `tests/test_players.ae` runs a host and two clients, each with a world of its own, over 100 ms latency, 20 ms jitter and 2% loss. The host plays and walks; client 1 walks, turns and jumps; client 2 walks:
 
@@ -117,10 +126,11 @@ Sixteen objects cost a client 15.6 KB a second (33 bytes an object a snapshot, b
 | the other client's player while walking, against the host at view time | within 1 cm on 128 of 131 steps, 35 mm at worst | 1 cm on 95%, a step (50 mm) always |
 | the host's own player at rest, drawn by a client | 10⁻¹¹ mm | 1 cm |
 | a jump's peak, client against host | 0.9172 m and 0.9172 m | 1 cm |
-| a client's commands | 2.95 KB a second | 4 KB |
+| a client's commands (and its acknowledgements) | 3.08 KB a second | 4 KB |
+| relevance 40 m: a crate among the players, one 200 m off | the near one where the host has it; the far one never sent | |
 
 The walking error is under a centimetre except at three steps, where the host caught up a queue the link had let grow, applying two commands in one step. Applying commands as they arrived, instead of one a host step, made it 52.7 mm.
 
 ## Next
 
-As #413 lays out: relevance and a per-client budget, delta compression against the acknowledged snapshot, spawning and despawning, reliable events and RPCs, UDP, the editor's host-and-clients play, and a horde that is simulated on every client instead of sent.
+As #413 lays out: a per-client budget and priorities within it, quantised positions, spawning and despawning, reliable events and RPCs, UDP, the editor's host-and-clients play, and a horde that is simulated on every client instead of sent.

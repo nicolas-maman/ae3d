@@ -24,6 +24,7 @@ extern sin(x: float) -> float
 extern sqrt(x: float) -> float
 
 const OBJECTS = 16
+const STILL = 48
 const RADIUS = 10.0
 
 var g_checks = 0
@@ -153,6 +154,86 @@ loopback_run(label: string, latency: float, jitter: float, loss: float, bound: f
 
 // The same over TCP on this machine, on the real clock for a second and a
 // half.
+// Sixteen objects moving and 48 standing still, over the lossy link: the
+// snapshots are deltas against what the client has acknowledged, so the
+// still ones are sent once and never again. What it costs against the
+// sixteen alone, and that the still ones are drawn where they stand.
+static_run() {
+    hub = net.hub_new()
+    net.hub_set_conditions(hub, 0.1, 0.02, 0.02)
+    host = net.host_loopback(hub)
+    client = net.join_loopback(hub)
+    host_objects = calloc(OBJECTS, 8)
+    client_objects = calloc(OBJECTS, 8)
+    build_scene(host, host_objects)
+    build_scene(client, client_objects)
+    still_host = calloc(STILL, 8)
+    still_client = calloc(STILL, 8)
+    k = 0
+    while k < STILL {
+        a = behaviour.object_new("crate")
+        behaviour.object_set_model(a, core.model_new())
+        core.model_set_position(behaviour.object_model(a), (k as float) * 2.0, 0.0, 30.0)
+        net.networked(host, a)
+        (still_host as ptr[])[k] = a as ptr
+        c = behaviour.object_new("crate")
+        behaviour.object_set_model(c, core.model_new())
+        net.networked(client, c)
+        (still_client as ptr[])[k] = c as ptr
+        k = k + 1
+    }
+    step = 0
+    while step < 120 {
+        now = (step as float) / 60.0
+        hl = host_objects as ptr[]
+        i = 0
+        while i < OBJECTS {
+            place(hl[i] as *GameObject, i, now)
+            i = i + 1
+        }
+        net.step(host, now)
+        net.step(client, now)
+        step = step + 1
+    }
+    per_second = (net.bytes_sent(host) as float) / 2.0
+    worst_still = 0.0
+    k = 0
+    while k < STILL {
+        m = behaviour.object_model((still_client as ptr[])[k] as *GameObject)
+        d = sqrt((m.position.x - (k as float) * 2.0) * (m.position.x - (k as float) * 2.0) + (m.position.z - 30.0) * (m.position.z - 30.0))
+        if d > worst_still { worst_still = d }
+        k = k + 1
+    }
+    sent = net.objects_sent(host)
+    println("  64 objects, 48 still, lossy link: ${per_second / 1024.0} KB a second; ${sent} object states sent in 2 s (every object every snapshot would be 3,840)")
+    check("still objects are drawn where they stand", worst_still < 0.000001)
+    check("and cost next to nothing: 64 objects, 48 of them still, under 20 KB a second", per_second < 20.0 * 1024.0)
+    // The sixteen moving ones every snapshot, 61 in two seconds: 976. A still
+    // one rides along until the client's first acknowledgement is back -- a
+    // 200 ms round trip and the jitter, eight snapshots at most -- and never
+    // after: 48 x 8 = 384 more at most.
+    check("a still object is sent until the client has it, and not after (under 1,360 states)", sent < 1360)
+    k = 0
+    while k < STILL {
+        a = (still_host as ptr[])[k] as *GameObject
+        c = (still_client as ptr[])[k] as *GameObject
+        core.model_free(behaviour.object_model(a))
+        behaviour.object_free(a)
+        core.model_free(behaviour.object_model(c))
+        behaviour.object_free(c)
+        k = k + 1
+    }
+    free(still_host)
+    free(still_client)
+    free_scene(host_objects)
+    free_scene(client_objects)
+    free(host_objects)
+    free(client_objects)
+    net.net_free(client)
+    net.net_free(host)
+    net.hub_free(hub)
+}
+
 tcp_run() {
     host = net.host_tcp("127.0.0.1", 0)
     if host == null {
@@ -214,6 +295,7 @@ main() {
     // 100 ms, 20 ms of jitter, 2% lost: a lost snapshot doubles the interval
     // the client draws across, 10 (1 - cos(1/30)) = 5.55 mm. Measured: 5.555.
     loopback_run("100 ms, 20 ms jitter, 2% loss", 0.1, 0.02, 0.02, 0.006)
+    static_run()
     tcp_run()
     if g_failures == 0 {
         println("net: all checks passed (${g_checks})")
