@@ -38,7 +38,7 @@ exports (
     renderer_material_texture_size, renderer_set_normal_strength,
     renderer_shadow_ms, renderer_scene_ms, renderer_post_ms, renderer_post_active, device_name,
     renderer_program_binds, renderer_material_binds, renderer_texture_binds,
-    renderer_set_occlusion_strength, renderer_set_capture_channel, renderer_set_wetness,
+    renderer_set_occlusion_strength, renderer_set_capture_channel, renderer_set_wetness, renderer_set_frame_exposure, renderer_meter,
     renderer_frame_pixels, read_pixel, snapshot, renderer_add_model, renderer_remove_model
 )
 
@@ -76,6 +76,7 @@ extern ae3d_gl_setup_proxy_vao(vao: int, mesh_vbo: int, mesh_ebo: int, skin_vbo:
                                matrix_vbo: int, color_vbo: int, phase_vbo: int)
 extern ae3d_gl_setup_instance_phase(inst: ptr, phase_vbo: int)
 extern ae3d_gl_update_instance_phases(inst: ptr, phase_vbo: int)
+extern ae3d_gl_meter(source: int, width: int, height: int, out: ptr) -> int
 extern ae3d_gl_posebank_texture(data: ptr, frames: int, bones: int) -> int
 extern ae3d_gl_update_instances(inst: ptr, matrix_vbo: int, capacity_bytes: int) -> int
 extern ae3d_gl_update_instance_colors(inst: ptr, color_vbo: int)
@@ -214,6 +215,7 @@ struct ProgramSlots {
     occlusion_strength: int
     capture_channel: int
     wetness: int
+    frame_exposure: int
     caustics_time: int
     fog_enabled: int
     shadow_direction: int
@@ -354,6 +356,7 @@ struct GLRenderer {
     occlusion_strength: float
     capture_channel: int
     wetness: float
+    frame_exposure: float              // the eye adaptation's, 1 when it is off
     bound_instance_color: int
 
     post_fbo: int
@@ -419,6 +422,7 @@ renderer_new() -> *GLRenderer {
     r.occlusion_strength = 1.0
     r.capture_channel = 0
     r.wetness = 0.0
+    r.frame_exposure = 1.0
     r.bound_normal = 0 - 1
     r.fog = core.fog_none()
     r.clear_r = 0.0
@@ -602,6 +606,7 @@ slots_for(r: *GLRenderer, program: int) -> *ProgramSlots {
     s.occlusion_strength = ae3d_gl_uniform_location(program, "occlusionStrength")
     s.capture_channel = ae3d_gl_uniform_location(program, "captureChannel")
     s.wetness = ae3d_gl_uniform_location(program, "wetness")
+    s.frame_exposure = ae3d_gl_uniform_location(program, "frameExposure")
     s.caustics_time = ae3d_gl_uniform_location(program, "causticsTime")
     s.shadow_direction = ae3d_gl_uniform_location(program, "shadowDirection")
     s.shadow_texel_world = ae3d_gl_uniform_location(program, "shadowTexelWorld")
@@ -946,6 +951,19 @@ renderer_set_capture_channel(r: *GLRenderer, channel: int) {
 // How wet the scene is, 0..1: rain on every surface that faces up.
 renderer_set_wetness(r: *GLRenderer, amount: float) {
     if r != null { r.wetness = amount }
+}
+
+// The frame's exposure over every material's (eye adaptation; 1 is off).
+renderer_set_frame_exposure(r: *GLRenderer, exposure: float) {
+    if r != null { r.frame_exposure = exposure }
+}
+
+// The finished frame's mean and brightest linear luminance into out[0] and
+// out[1], two frames late: false until the first measure is back. Called
+// after the frame is drawn, with its framebuffer still bound.
+renderer_meter(r: *GLRenderer, out: ptr) -> bool {
+    if r == null { return false }
+    return ae3d_gl_meter(0 - 1, r.viewport_width, r.viewport_height, out) == 1
 }
 
 renderer_set_occlusion_strength(r: *GLRenderer, strength: float) {
@@ -2550,6 +2568,7 @@ set_frame_uniforms(r: *GLRenderer, slots: *ProgramSlots, view_projection: *Mat4,
     ae3d_gl_uniform_float(slots.occlusion_strength, r.occlusion_strength)
     ae3d_gl_uniform_int(slots.capture_channel, r.capture_channel)
     ae3d_gl_uniform_float(slots.wetness, r.wetness)
+    ae3d_gl_uniform_float(slots.frame_exposure, r.frame_exposure)
 
     upload_lights(slots, lights, light, cam.position)
 

@@ -47,6 +47,7 @@ layout(std140, set = 0, binding = 0) uniform SceneBlock {
     float materialAlpha;
     float reflectivity;
     float wetness;
+    float frameExposure;
     bool hasNormalMap;
     float normalStrength;
     float occlusionStrength;
@@ -226,6 +227,10 @@ layout(location = 5) in float Occlusion;
 // wet road the way they never do a dry one. Upward-facing surfaces take
 // it in full, walls hardly at all: water runs off them. Set by the
 // weather; a scene without one is dry.
+
+// The frame's exposure, over the material's: what an exposure that follows
+// the frame (the engine's eye adaptation) scales the light by before the
+// tone curve. 1 is the scene as lit.
 
 
 // Modern PBR Extensions
@@ -1167,7 +1172,7 @@ void main() {
     // exposure is the emissive strength, scaled so the 10.0 that opens this
     // branch means 1x. Below that the surface is lit normally.
     if (exposure > 10.0) {
-        vec3 emissive = diffuseColor * texColor.rgb * InstanceColor * (exposure * 0.1);
+        vec3 emissive = diffuseColor * texColor.rgb * InstanceColor * (exposure * 0.1) * frameExposure;
         emissive = ACESFilm(emissive);
         FragColor = vec4(pow(emissive, vec3(1.0 / 2.2)), 1.0);
         return;
@@ -1347,7 +1352,7 @@ void main() {
 
     
     // HDR exposure and tone mapping for normal objects
-    color = color * exposure;
+    color = color * exposure * frameExposure;
     // Apply bloom effect
     if (enableBloom) {
         // Extract bright areas for bloom

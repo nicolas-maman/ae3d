@@ -1,0 +1,108 @@
+// ae3d.exposure -- an exposure that follows the frame, the way an eye adapts.
+//
+// A scene lit for a noon sun and a street lit by lamps want different
+// exposures, and a figure stepping into a headlight beam wants less than the
+// street behind it. Tuning each scene's lights to one exposure is tuning the
+// next scene all over again (#378). So the renderer measures what it drew --
+// the finished frame's mean linear luminance and its brightest region's
+// (ae3d_gl_meter, ae3d_vk_meter, two frames late: its mean linear luminance
+// and the share of it near white) -- and this steers the frame's exposure
+// from that, in stops:
+//
+//   - toward a key, the mean a frame is meant to settle at, but only part of
+//     the way (`strength`), and never up while any bright spot is in view: a
+//     night street is meant to stay darker than noon, its lamps lamps, not
+//     turned into day;
+//   - down, whatever the mean says, when more than a sliver of the frame is
+//     near white: a face in the beam keeps its shading instead of going flat
+//     white, the frame darkening by half a stop for every doubling of the
+//     white past `white_budget`;
+//   - over time, faster to darken than to brighten, as the eye does (a
+//     second or so up, a third of that down), from wherever it was;
+//   - between `least` and `most` stops, so an empty frame or a lamp filling
+//     the view does not send it off the scale.
+//
+// The measure is of the frame drawn with the exposure of two frames ago, so
+// this is a loop: the adapted exposure changes the next measure, and the
+// time constants are what keep it from hunting. Pure arithmetic, so a test
+// can drive it with numbers.
+
+exports (
+    Adaptation, adaptation_new, adaptation_free, adaptation_step, adaptation_exposure, adaptation_reset
+)
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern log2(x: float) -> float
+extern exp2(x: float) -> float
+extern exp(x: float) -> float
+
+struct Adaptation {
+    stops: float                   // log2 of the exposure now
+    key: float                     // the mean linear luminance a frame settles toward
+    strength: float                // how much of the way toward the key, 0..1
+    white_budget: float            // the share of the frame near white it tolerates
+    brighten_seconds: float        // most of a gap closed upward in about this long
+    darken_seconds: float          // and downward
+    least: float                   // stops
+    most: float
+}
+
+adaptation_new() -> *Adaptation {
+    a = calloc(1, sizeof(Adaptation)) as *Adaptation
+    a.stops = 0.0
+    a.key = 0.12
+    a.strength = 0.3
+    a.white_budget = 0.002
+    a.brighten_seconds = 1.2
+    a.darken_seconds = 0.4
+    a.least = 0.0 - 2.0
+    a.most = 1.5
+    return a
+}
+
+adaptation_free(a: *Adaptation) {
+    if a != null { free(a as ptr) }
+}
+
+adaptation_reset(a: *Adaptation) {
+    if a != null { a.stops = 0.0 }
+}
+
+adaptation_exposure(a: *Adaptation) -> float {
+    if a == null { return 1.0 }
+    return exp2(a.stops)
+}
+
+// One frame's step from a measure (the frame's `mean` linear luminance and
+// the share of it near `white`, as drawn) over `delta` seconds; the exposure
+// to draw with next.
+adaptation_step(a: *Adaptation, mean: float, white: float, delta: float) -> float {
+    if a == null { return 1.0 }
+    m = mean
+    if m < 0.0001 { m = 0.0001 }
+    // How many stops off the key the frame is, taken part of the way.
+    want = a.strength * log2(a.key / m)
+    // More of the frame near white than it tolerates: down, half a stop a
+    // doubling past the budget, whatever the mean would have it do.
+    if white > a.white_budget {
+        down = (0.0 - 0.5) * log2(white / a.white_budget) - 0.1
+        if down < want { want = down }
+    }
+    // And never up while lamps or a lit face are in view at all: brightening
+    // a dark frame with its bright spots in it is what whites them out, and
+    // a night street's lamps are the point of it.
+    if want > 0.0 && white > a.white_budget * 0.25 { want = 0.0 }
+    seconds = a.brighten_seconds
+    if want < 0.0 { seconds = a.darken_seconds }
+    step = delta
+    if step < 0.0 { step = 0.0 }
+    if step > 0.25 { step = 0.25 }
+    // The share of the gap a frame of `step` seconds closes, the same
+    // however the frames fall.
+    share = 1.0 - exp(0.0 - step / seconds)
+    a.stops = a.stops + want * share
+    if a.stops < a.least { a.stops = a.least }
+    if a.stops > a.most { a.stops = a.most }
+    return exp2(a.stops)
+}

@@ -41,13 +41,14 @@ typedef struct {
 #define AE3D_VK_OFF_MATERIALALPHA 7884
 #define AE3D_VK_OFF_REFLECTIVITY 7888
 #define AE3D_VK_OFF_WETNESS 7892
-#define AE3D_VK_OFF_HASNORMALMAP 7896
-#define AE3D_VK_OFF_NORMALSTRENGTH 7900
-#define AE3D_VK_OFF_OCCLUSIONSTRENGTH 7904
-#define AE3D_VK_OFF_ENABLECLEARCOAT 7908
-#define AE3D_VK_OFF_CLEARCOATROUGHNESS 7912
-#define AE3D_VK_OFF_CLEARCOATINTENSITY 7916
-#define AE3D_VK_OFF_ENABLESHEEN 7920
+#define AE3D_VK_OFF_FRAMEEXPOSURE 7896
+#define AE3D_VK_OFF_HASNORMALMAP 7900
+#define AE3D_VK_OFF_NORMALSTRENGTH 7904
+#define AE3D_VK_OFF_OCCLUSIONSTRENGTH 7908
+#define AE3D_VK_OFF_ENABLECLEARCOAT 7912
+#define AE3D_VK_OFF_CLEARCOATROUGHNESS 7916
+#define AE3D_VK_OFF_CLEARCOATINTENSITY 7920
+#define AE3D_VK_OFF_ENABLESHEEN 7924
 #define AE3D_VK_OFF_SHEENCOLOR 7936
 #define AE3D_VK_OFF_SHEENROUGHNESS 7948
 #define AE3D_VK_OFF_ENABLETRANSMISSION 7952
@@ -184,8 +185,8 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "causticsSpeed", 8136 },
     { "causticsTime", 8148 },
     { "causticsWaterLevel", 8140 },
-    { "clearcoatIntensity", 7916 },
-    { "clearcoatRoughness", 7912 },
+    { "clearcoatIntensity", 7920 },
+    { "clearcoatRoughness", 7916 },
     { "cloudCover", 7864 },
     { "cloudFrame", 8300 },
     { "cloudSun", 7872 },
@@ -199,7 +200,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "edgeThresholdMin", 8348 },
     { "enableBloom", 8004 },
     { "enableCaustics", 8124 },
-    { "enableClearcoat", 7908 },
+    { "enableClearcoat", 7912 },
     { "enableEnergyConservation", 7964 },
     { "enableFoam", 8928 },
     { "enableFog", 8016 },
@@ -208,7 +209,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "enableMultipleScattering", 7960 },
     { "enablePerlinNoise", 8108 },
     { "enableShadows", 8048 },
-    { "enableSheen", 7920 },
+    { "enableSheen", 7924 },
     { "enableTransmission", 7952 },
     { "enableVolumetricLighting", 7976 },
     { "enableWaterDistortion", 8996 },
@@ -220,9 +221,10 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "fogEnd", 8024 },
     { "fogIntensity", 8044 },
     { "fogStart", 8020 },
+    { "frameExposure", 7896 },
     { "giBounces", 8000 },
     { "giIntensity", 7996 },
-    { "hasNormalMap", 7896 },
+    { "hasNormalMap", 7900 },
     { "hasSceneDepth", 8984 },
     { "hasShadowMap", 8052 },
     { "hasSkyTexture", 8980 },
@@ -251,8 +253,8 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "noiseIntensity", 8120 },
     { "noiseOctaves", 8116 },
     { "noiseScale", 8112 },
-    { "normalStrength", 7900 },
-    { "occlusionStrength", 7904 },
+    { "normalStrength", 7904 },
+    { "occlusionStrength", 7908 },
     { "poseBankFrames", 9012 },
     { "prevModel", 1504 },
     { "prevViewProjection", 1568 },
@@ -316,7 +318,7 @@ static const ae3d_vk_uniform_slot ae3d_vk_uniform_slots[] = {
     { "wetness", 7892 },
 };
 
-#define AE3D_VK_UNIFORM_SLOT_COUNT 140
+#define AE3D_VK_UNIFORM_SLOT_COUNT 141
 
 static inline int ae3d_vk_uniform_offset(const char *name) {
     int low = 0;

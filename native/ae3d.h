@@ -15,6 +15,10 @@ int    ae3d_store_size(int which);
 double ae3d_store_field(void *store, int which, int field);
 
 int    ae3d_gl_posebank_texture(const float *data, int frames, int bones);
+/* The finished frame's mean and brightest linear luminance, two frames late
+   (native/gpu/opengl.c); 1 when `out` holds them. */
+int    ae3d_gl_meter(int source_framebuffer, int width, int height, double *out);
+void   ae3d_gl_meter_release(void);
 void   ae3d_gl_setup_instance_phase(void *inst, int phase_vbo);
 void   ae3d_gl_update_instance_phases(void *inst, int phase_vbo);
 void   ae3d_gl_upload_skin(void *mesh, int vbo);
@@ -237,6 +241,8 @@ void   ae3d_vk_ray_add_one(int mesh_handle, const double *matrix);
 int    ae3d_vk_ray_build(void);
 void   ae3d_vk_set_ray_shadows(int on);
 void   ae3d_vk_set_ray_reach(double metres);
+void   ae3d_vk_set_meter(int on);
+int    ae3d_vk_meter(double *out);
 void   ae3d_vk_set_ray_budget(int figures);
 int    ae3d_vk_ray_budget(void);
 int    ae3d_vk_ray_figures(void);

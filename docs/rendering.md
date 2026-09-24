@@ -389,6 +389,44 @@ was a staircase is a ramp, and the shading's own aliasing goes with it.
 On both backends; the pass runs between the reflection and the composite,
 and the two history textures are written in turn.
 
+### An exposure that follows the frame
+
+A scene lit for a noon sun and a street lit by lamps want different
+exposures, and a figure stepping into a headlight beam wants less than the
+street behind it: tuning each scene's lights to one exposure is tuning the
+next scene all over again (#378). With `engine_set_eye_adaptation(e, true)`
+(`AE3D_EYE=1` for any program) the renderer measures what it drew and the
+frame's exposure is steered from it, the way an eye adapts:
+
+- the measure: the finished frame blitted into a texture and mip-chained
+  down to 320 texels across (OpenGL: a blit and `glGenerateMipmap`; Vulkan:
+  a blit chain after the last pass), read back two frames late through a
+  ring of buffers, so nothing waits on the frame just drawn -- its mean
+  linear luminance and the share of it near white;
+- the steering (`ae3d.exposure`, arithmetic a test drives by numbers): part
+  of the way toward a mid-grey key (a night street stays night), down half a
+  stop for every doubling of the near-white share past 0.2% of the frame,
+  never up while lamps or a lit face are in view, faster down (0.4 s) than
+  up (1.2 s), between two stops under and one and a half over;
+- the result, `frameExposure`, multiplies every material's exposure before
+  the tone curve, in the default shader and the sea's.
+
+The street's chase frame, 240 frames in, 1280x720:
+
+| | clipped pixels (>= 250) | mean |
+|---|---|---|
+| Vulkan, fixed | 1,076 | 57.9 |
+| Vulkan, adapting | 10 | 35.9 |
+| OpenGL, fixed | 1,016 | 42.4 |
+| OpenGL, adapting | 454 | 32.4 |
+
+It costs nothing a frame can see (Vulkan 142.5 fps against 142.6). The
+meter's buffer is in cached memory: read from the write-combined kind, the
+quarter megabyte it is halved the frame rate. `street_drive` and
+`zombie_city` run with it; it is off by default, so a scene lit for its
+exposure keeps it and a test's pixels do not move under it
+(`tests/test_exposure`).
+
 ### Billboards
 
 `model_set_billboard(m, mode)` turns a point-instanced model's mesh to the

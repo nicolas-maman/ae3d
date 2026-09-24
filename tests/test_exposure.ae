@@ -1,0 +1,136 @@
+// An exposure that follows the frame (#378): the controller by numbers, and
+// the engine measuring its own frames and steering by them on both backends.
+//
+// The controller: a dark frame is brought up but only part of the way to the
+// key; a frame with too much of it near white comes down whatever its mean;
+// a frame with its bright spots in view is never brought up; it stays inside
+// its stops; and it comes down faster than it goes up, as an eye does.
+//
+// The engine: a white plane filling the view under a strong sun is the frame
+// an eye squints at. With the adaptation on, the renderer's meter has to
+// report it, and the frame's exposure has to have come down below one within
+// a second of frames, on OpenGL and on Vulkan where there is a device.
+
+import ae3d.core
+import ae3d.engine
+import ae3d.exposure
+import ae3d.loader
+import ae3d.platform
+
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, ok: bool) {
+    g_checks = g_checks + 1
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        g_failures = g_failures + 1
+        println("  FAIL ${name}")
+    }
+}
+
+// `frames` sixtieths of a second at one measure.
+settle(a: *Adaptation, mean: float, white: float, frames: int) -> float {
+    e = 1.0
+    i = 0
+    while i < frames {
+        e = exposure.adaptation_step(a, mean, white, 1.0 / 60.0)
+        i = i + 1
+    }
+    return e
+}
+
+test_controller() {
+    a = exposure.adaptation_new()
+    // A dark frame (mean 0.02, nothing white) for two seconds: up, but not
+    // all the way to the key -- a quarter of the stops or so, not six times.
+    dark = settle(a, 0.02, 0.0, 120)
+    check("a dark frame is brought up (${dark})", dark > 1.2)
+    check("but only part of the way to the key", dark < 3.0)
+    exposure.adaptation_reset(a)
+
+    // A bright frame with a tenth of it near white: down, fast.
+    down = settle(a, 0.3, 0.1, 30)
+    check("a frame with too much white comes down within half a second (${down})", down < 0.6)
+    exposure.adaptation_reset(a)
+
+    // A dark frame with lamps in it (white just past a quarter of the
+    // budget): the mean says up, the lamps say no.
+    held = settle(a, 0.02, 0.001, 120)
+    check("a dark frame with its lamps in view is not brought up (${held})", held <= 1.0001)
+    exposure.adaptation_reset(a)
+
+    // Bounds: a black frame for ten seconds, a white one for ten.
+    most = settle(a, 0.0, 0.0, 600)
+    check("never past its most (${most})", most <= 2.8285)
+    least = settle(a, 1.0, 1.0, 600)
+    check("never under its least (${least})", least >= 0.2499)
+    exposure.adaptation_reset(a)
+
+    // Down faster than up: a stop's worth of gap each way, a quarter second.
+    up = settle(a, 0.12 / 4.0, 0.0, 15)
+    exposure.adaptation_reset(a)
+    dn = settle(a, 0.12 * 4.0, 0.0, 15)
+    check("it darkens faster than it brightens (${up} up, ${dn} down)", (1.0 / dn) > up)
+    exposure.adaptation_free(a)
+}
+
+var g_exposure = 1.0
+
+// The scene once the renderer is up: a white plane filling the view.
+place(state: ptr, e: *Engine) {
+    ground = loader.plane(4, 400.0)
+    core.model_set_position(ground, 0.0 - 200.0, 0.0, 0.0 - 200.0)
+    core.model_matte(ground, 1.0, 1.0, 1.0)
+    engine.engine_add_model(e, ground)
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(0.0, 30.0, 40.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+}
+
+watch(state: ptr, e: *Engine, delta: float) {
+    if engine.engine_frame_count(e) == 70 { g_exposure = engine.engine_frame_exposure(e) }
+}
+
+test_engine(api: int, name: string) {
+    e = engine.engine_new_with(api)
+    engine.engine_set_size(e, 320, 180)
+    engine.engine_set_title(e, "ae3d exposure test")
+    engine.engine_set_frame_limit(e, 72)
+    engine.engine_set_camera_input(e, false)
+    engine.engine_set_vsync(e, 0)
+    light = core.light_sun(core.vec3(0.3, 1.0, 0.2))
+    light.intensity = 6.0
+    light.ambient_strength = 0.9
+    engine.engine_set_light(e, light)
+    engine.engine_set_clear_color(e, 1.0, 1.0, 1.0)
+    engine.engine_set_eye_adaptation(e, true)
+    check("${name}: the adaptation is on", engine.engine_eye_adaptation(e))
+    program = engine.behaviour_new("exposure test", null)
+    program.start = place
+    program.late_update = watch
+    engine.engine_add_behaviour(e, program)
+    g_exposure = 1.0
+    if !engine.engine_run(e) {
+        println("  ${name}: SKIP no window")
+        core.light_free(light)
+        engine.engine_free(e)
+        return
+    }
+    check("${name}: a white frame under a strong sun comes down (${g_exposure})", g_exposure < 0.95)
+    core.light_free(light)
+    engine.engine_free(e)
+}
+
+main() {
+    println("exposure: the controller and the engine")
+    test_controller()
+    test_engine(platform.API_GL, "opengl")
+    test_engine(platform.API_VULKAN, "vulkan")
+    if g_failures == 0 {
+        println("exposure: all checks passed (${g_checks})")
+    } else {
+        println("exposure: ${g_failures} failure(s) of ${g_checks}")
+    }
+}
