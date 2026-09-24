@@ -3143,8 +3143,6 @@ draw_frame() {
 draw_frame_body() {
     if g_renderer == null { return }
 
-    settle_layout()
-
     now = seconds()
     delta = 0.016
     if g_last_time > 0.0 {
@@ -7370,7 +7368,13 @@ main() {
             apply_orbit()
         }
 
+        // The layout is settled from the timer and nowhere else: a frame is
+        // also drawn from the viewport's resize callback, which runs inside
+        // the toolkit's layout pass, and a divider set from there was undone
+        // by the pass it interrupted (aether-ui#209), leaving the inspector
+        // over the middle of the viewport on Windows.
         g_timer = ui.timer(16) callback {
+            if g_renderer != null { settle_layout() }
             draw_frame()
         }
 

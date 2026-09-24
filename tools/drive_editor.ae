@@ -875,18 +875,33 @@ want(pred: int) -> *Want {
 // viewport fills whatever it is drawn through (a canvas over a readback on
 // Windows and macOS, a GL area on GTK).
 viewport_width(t: *Tree) -> float {
-    inner = inner_splitter(t)
-    if inner == null { return 0.0 }
-    first = null as *Widget
-    n = list.size(t.widgets)
+    // The size the editor renders the view at, off the stats bar ("... 3468
+    // tris   868x620"): the viewport following its pane is the point, and it
+    // is the same on every toolkit. A pane's own box is not -- GTK reports
+    // the paned's children under wrappers of its own, where they read 0.
+    n = tree_count(t)
     i = 0
     while i < n {
-        w = list.get_raw(t.widgets, i) as *Widget
-        if w.parent == inner.id && (first == null || w.id < first.id) { first = w }
+        w = tree_at(t, i)
+        if w.kind == "text" && string.contains(w.raw_text, " tris ") != 0 {
+            text = w.raw_text
+            end = string.length(text)
+            start = end
+            while start > 0 && string.char_at(text, start - 1) != 32 { start = start - 1 }
+            size = string.substring(text, start, end)
+            cross = string.string_index_of(size, "x")
+            width = 0.0
+            if cross > 0 {
+                digits = string.substring(size, 0, cross)
+                width = string.get_double(digits)
+                string.free(digits)
+            }
+            string.free(size)
+            return width
+        }
         i = i + 1
     }
-    if first == null { return 0.0 }
-    return first.w
+    return 0.0
 }
 
 // The splitter inside the other one: the viewport against the inspector.
@@ -927,6 +942,29 @@ check_splitters() {
         return
     }
     inner_id = inner.id
+    // The inspector beside the viewport, not over it: on win32 a layout the
+    // editor's settle re-entered left the second pane where an older pass put
+    // it, over the middle of the first (aether-ui#209). Where the toolkit
+    // reports the panes' boxes (GTK does not, see viewport_width).
+    first = null as *Widget
+    second = null as *Widget
+    i = 0
+    while i < tree_count(t) {
+        w = tree_at(t, i)
+        if w.parent == inner_id {
+            if first == null || w.id < first.id {
+                second = first
+                first = w
+            } else if second == null || w.id < second.id {
+                second = w
+            }
+        }
+        i = i + 1
+    }
+    if first != null && second != null && first.w > 0.0 && second.w > 0.0 {
+        check_detail("the inspector's pane starts where the viewport's ends", second.x >= first.x + first.w - 1.0,
+                     "viewport ${first.x}+${first.w}, inspector at ${second.x}")
+    }
     before = viewport_width(t)
     tree_free(t)
     // Where the divider stands now, read by the route that moves it.
@@ -944,7 +982,7 @@ check_splitters() {
     post("/widget/${inner_id}/split_position?px=${start - 120}")
     after = before
     tries = 0
-    while tries < 40 && after > before - 60.0 {
+    while tries < 80 && after > before - 60.0 {
         sleep(50)
         t = tree()
         after = viewport_width(t)
@@ -956,7 +994,7 @@ check_splitters() {
     post("/widget/${inner_id}/split_position?px=${start}")
     back = after
     tries = 0
-    while tries < 40 && back < before - 2.0 {
+    while tries < 80 && back < before - 2.0 {
         sleep(50)
         t = tree()
         back = viewport_width(t)
