@@ -25,6 +25,29 @@ typedef struct {
 } ae3d_farr;
 
 static char g_program_log[4096];
+
+/* A vertex array and a buffer, for the C below that still makes them. */
+static int ae3d_gl_gen_vao(void) {
+    GLuint vao = 0;
+    glGenVertexArrays(1, &vao);
+    return (int)vao;
+}
+
+static int ae3d_gl_gen_buffer(void) {
+    GLuint buffer = 0;
+    glGenBuffers(1, &buffer);
+    return (int)buffer;
+}
+
+static void ae3d_gl_drop_vao(int vao) {
+    GLuint id = (GLuint)vao;
+    if (id) glDeleteVertexArrays(1, &id);
+}
+
+static void ae3d_gl_drop_buffer(int buffer) {
+    GLuint id = (GLuint)buffer;
+    if (id) glDeleteBuffers(1, &id);
+}
 static char g_gl_version[128];
 static char g_gl_renderer[128];
 static int  g_loaded;
@@ -45,111 +68,8 @@ int ae3d_gl_load(void) {
 
 const char *ae3d_gl_version(void) { return g_gl_version; }
 const char *ae3d_gl_renderer(void) { return g_gl_renderer; }
-int ae3d_gl_error(void) { return (int)glGetError(); }
-
-void ae3d_gl_viewport(int x, int y, int w, int h) { glViewport(x, y, w, h); }
-
-void ae3d_gl_clear_color(double r, double g, double b, double a) {
-    glClearColor((GLfloat)r, (GLfloat)g, (GLfloat)b, (GLfloat)a);
-}
-
-void ae3d_gl_clear(int color, int depth) {
-    GLbitfield mask = 0;
-    if (color) mask |= GL_COLOR_BUFFER_BIT;
-    if (depth) mask |= GL_DEPTH_BUFFER_BIT;
-    if (mask) glClear(mask);
-}
-
-void ae3d_gl_clear_depth(double d) { glClearDepth(d); }
-
-void ae3d_gl_set_depth_test(int on) {
-    if (on) {
-        glEnable(GL_DEPTH_TEST);
-        glDepthFunc(GL_LEQUAL);
-        glDepthMask(GL_TRUE);
-    } else {
-        glDisable(GL_DEPTH_TEST);
-    }
-}
-
-void ae3d_gl_set_depth_mask(int on) { glDepthMask(on ? GL_TRUE : GL_FALSE); }
-
-void ae3d_gl_set_face_culling(int on) {
-    if (on) {
-        glEnable(GL_CULL_FACE);
-        glCullFace(GL_BACK);
-        glFrontFace(GL_CCW);
-    } else {
-        glDisable(GL_CULL_FACE);
-    }
-}
-
-void ae3d_gl_set_blend(int on) {
-    if (on) {
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    } else {
-        glDisable(GL_BLEND);
-    }
-}
-
-/* What is drawn scales what is there: the occlusion pass darkening the
-   opaque scene under it. ae3d_gl_set_blend(1) puts the ordinary blend back. */
-void ae3d_gl_set_blend_multiply(void) {
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_DST_COLOR, GL_ZERO);
-}
-
-void ae3d_gl_set_multisample(int on) {
-    if (on) glEnable(GL_MULTISAMPLE); else glDisable(GL_MULTISAMPLE);
-}
-
-void ae3d_gl_set_wireframe(int on) {
-    glPolygonMode(GL_FRONT_AND_BACK, on ? GL_LINE : GL_FILL);
-}
-
-int ae3d_gl_viewport_width(void) {
-    GLint viewport[4] = {0, 0, 0, 0};
-    glGetIntegerv(GL_VIEWPORT, viewport);
-    return viewport[2];
-}
-
-int ae3d_gl_viewport_height(void) {
-    GLint viewport[4] = {0, 0, 0, 0};
-    glGetIntegerv(GL_VIEWPORT, viewport);
-    return viewport[3];
-}
-
-/* The widest texture the context takes, a side. */
-int ae3d_gl_max_texture_size(void) {
-    GLint size = 0;
-    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &size);
-    return (int)size;
-}
-
-int ae3d_gl_vao_create(void) {
-    GLuint vao = 0;
-    glGenVertexArrays(1, &vao);
-    return (int)vao;
-}
-
-void ae3d_gl_vao_bind(int vao) { glBindVertexArray((GLuint)vao); }
-
-void ae3d_gl_vao_delete(int vao) {
-    GLuint id = (GLuint)vao;
-    if (id) glDeleteVertexArrays(1, &id);
-}
-
-int ae3d_gl_buffer_create(void) {
-    GLuint buffer = 0;
-    glGenBuffers(1, &buffer);
-    return (int)buffer;
-}
-
-void ae3d_gl_buffer_delete(int buffer) {
-    GLuint id = (GLuint)buffer;
-    if (id) glDeleteBuffers(1, &id);
-}
+/* The state calls -- viewport, clears, depth, culling, blending, the
+   vertex arrays and buffers -- are ae3d.gl's, in Aether (#398). */
 
 // Geometry that appears many times is uploaded once and drawn from one set of
 // buffers, which is what lets the renderer merge those models into a single
@@ -236,10 +156,10 @@ int ae3d_gl_geometry_acquire(void *mesh) {
     entry->vertex_count = vertex_count;
     entry->index_count = index_count;
 
-    entry->vao = ae3d_gl_vao_create();
-    entry->vbo = ae3d_gl_buffer_create();
-    entry->ebo = ae3d_gl_buffer_create();
-    entry->instance_vbo = ae3d_gl_buffer_create();
+    entry->vao = ae3d_gl_gen_vao();
+    entry->vbo = ae3d_gl_gen_buffer();
+    entry->ebo = ae3d_gl_gen_buffer();
+    entry->instance_vbo = ae3d_gl_gen_buffer();
     entry->instance_capacity = 0;
     entry->refs = 1;
 
@@ -264,10 +184,10 @@ void ae3d_gl_geometry_release(int vao) {
     for (i = 0; i < g_geometry_count; i++) {
         if (g_geometry[i].vao != vao || g_geometry[i].refs <= 0) continue;
         if (--g_geometry[i].refs > 0) return;
-        ae3d_gl_vao_delete(g_geometry[i].vao);
-        ae3d_gl_buffer_delete(g_geometry[i].vbo);
-        ae3d_gl_buffer_delete(g_geometry[i].ebo);
-        ae3d_gl_buffer_delete(g_geometry[i].instance_vbo);
+        ae3d_gl_drop_vao(g_geometry[i].vao);
+        ae3d_gl_drop_buffer(g_geometry[i].vbo);
+        ae3d_gl_drop_buffer(g_geometry[i].ebo);
+        ae3d_gl_drop_buffer(g_geometry[i].instance_vbo);
         free(g_geometry[i].vertices);
         free(g_geometry[i].indices);
         memset(&g_geometry[i], 0, sizeof(g_geometry[i]));

@@ -1,0 +1,945 @@
+// ae3d.glapi -- the OpenGL entry points ae3d calls, from Aether (#398).
+//
+// Each is resolved the first time it is called, through the resolver the
+// C side has always used (native/gpu/opengl_api.c: the process first, then
+// the window system's), and called through the pointer from then on. The
+// list is the one native/gpu/opengl_api.h names for the C that still draws
+// with GL; as the renderer's C moves here, this is what it calls, and when
+// the last of it has moved the C list goes and this is the only one.
+//
+// Types as the header has them: GLenum, GLuint and GLbitfield are uint32,
+// GLint and GLsizei int, GLboolean an int (0 or 1), GLfloat f32, GLdouble a
+// float, GLsizeiptr and GLintptr long, and every pointer a ptr. A command
+// the context does not have is null and crashes when called: ae3d_gl_load
+// has already refused a context missing any of them.
+
+extern ae3d_gl_proc(name: string) -> ptr
+
+exports (
+    FALSE,
+    TRUE,
+    NO_ERROR,
+    POINTS,
+    LINES,
+    TRIANGLES,
+    DEPTH_BUFFER_BIT,
+    STENCIL_BUFFER_BIT,
+    COLOR_BUFFER_BIT,
+    NEVER,
+    LESS,
+    EQUAL,
+    LEQUAL,
+    PACK_ALIGNMENT,
+    PIXEL_PACK_BUFFER,
+    STREAM_READ,
+    READ_ONLY,
+    SRC_ALPHA,
+    ONE_MINUS_SRC_ALPHA,
+    DST_COLOR,
+    ONE,
+    ZERO,
+    FRONT,
+    BACK,
+    FRONT_AND_BACK,
+    CW,
+    CCW,
+    CULL_FACE,
+    DEPTH_TEST,
+    BLEND,
+    VIEWPORT,
+    MAX_TEXTURE_SIZE,
+    MULTISAMPLE,
+    LINE_SMOOTH,
+    PROGRAM_POINT_SIZE,
+    TEXTURE_CUBE_MAP_SEAMLESS,
+    POINT,
+    LINE,
+    FILL,
+    BYTE,
+    UNSIGNED_BYTE,
+    SHORT,
+    UNSIGNED_SHORT,
+    INT,
+    UNSIGNED_INT,
+    FLOAT,
+    VENDOR,
+    RENDERER,
+    VERSION,
+    RED,
+    RGB,
+    RGBA,
+    RGBA16F,
+    R32F,
+    RGB16F,
+    SRGB8_ALPHA8,
+    TEXTURE_2D,
+    TEXTURE_3D,
+    TEXTURE_WRAP_R,
+    TEXTURE_CUBE_MAP,
+    TEXTURE_CUBE_MAP_POSITIVE_X,
+    TEXTURE0,
+    NEAREST,
+    LINEAR,
+    LINEAR_MIPMAP_LINEAR,
+    TEXTURE_MAG_FILTER,
+    TEXTURE_MIN_FILTER,
+    TEXTURE_WRAP_S,
+    TEXTURE_WRAP_T,
+    TEXTURE_WRAP_R,
+    REPEAT,
+    CLAMP_TO_EDGE,
+    UNPACK_ALIGNMENT,
+    ARRAY_BUFFER,
+    ELEMENT_ARRAY_BUFFER,
+    STATIC_DRAW,
+    DYNAMIC_DRAW,
+    STREAM_DRAW,
+    FRAGMENT_SHADER,
+    VERTEX_SHADER,
+    COMPILE_STATUS,
+    LINK_STATUS,
+    INFO_LOG_LENGTH,
+    FRAMEBUFFER,
+    READ_FRAMEBUFFER,
+    DRAW_FRAMEBUFFER,
+    DRAW_FRAMEBUFFER_BINDING,
+    MAX_SAMPLES,
+    RGBA8,
+    RENDERBUFFER,
+    COLOR_ATTACHMENT0,
+    COLOR_ATTACHMENT1,
+    COLOR,
+    RG,
+    RG16F,
+    DEPTH_STENCIL_ATTACHMENT,
+    DEPTH24_STENCIL8,
+    DEPTH_STENCIL,
+    UNSIGNED_INT_24_8,
+    FRAMEBUFFER_COMPLETE,
+    DEPTH_ATTACHMENT,
+    DEPTH_COMPONENT,
+    DEPTH_COMPONENT32F,
+    TEXTURE_COMPARE_MODE,
+    NONE,
+    DEPTH_CLAMP,
+    glGetString,
+    glGetError,
+    glGetIntegerv,
+    glViewport,
+    glClearColor,
+    glClearDepth,
+    glClear,
+    glEnable,
+    glDisable,
+    glDepthFunc,
+    glDepthMask,
+    glCullFace,
+    glFrontFace,
+    glBlendFunc,
+    glPolygonMode,
+    glPixelStorei,
+    glGenVertexArrays,
+    glBindVertexArray,
+    glDeleteVertexArrays,
+    glGenBuffers,
+    glBindBuffer,
+    glBufferData,
+    glBufferSubData,
+    glDeleteBuffers,
+    glMapBuffer,
+    glFinish,
+    glUnmapBuffer,
+    glVertexAttribPointer,
+    glEnableVertexAttribArray,
+    glDisableVertexAttribArray,
+    glVertexAttribDivisor,
+    glVertexAttrib3f,
+    glDrawArrays,
+    glDrawElements,
+    glDrawElementsInstanced,
+    glCreateShader,
+    glShaderSource,
+    glCompileShader,
+    glGetShaderiv,
+    glGetShaderInfoLog,
+    glDeleteShader,
+    glCreateProgram,
+    glAttachShader,
+    glDetachShader,
+    glLinkProgram,
+    glGetProgramiv,
+    glGetProgramInfoLog,
+    glUseProgram,
+    glDeleteProgram,
+    glGetUniformLocation,
+    glUniform1i,
+    glUniform1f,
+    glUniform2f,
+    glUniform3f,
+    glUniform4f,
+    glUniform1fv,
+    glUniform3fv,
+    glUniformMatrix4fv,
+    glGenTextures,
+    glBindTexture,
+    glTexImage2D,
+    glTexImage3D,
+    glTexParameteri,
+    glDeleteTextures,
+    glActiveTexture,
+    glGenerateMipmap,
+    glGenFramebuffers,
+    glBindFramebuffer,
+    glFramebufferTexture2D,
+    glCheckFramebufferStatus,
+    glDeleteFramebuffers,
+    glGenRenderbuffers,
+    glBindRenderbuffer,
+    glRenderbufferStorage,
+    glRenderbufferStorageMultisample,
+    glBlitFramebuffer,
+    glDrawBuffers,
+    glClearBufferfv,
+    glFramebufferRenderbuffer,
+    glDeleteRenderbuffers,
+    glReadPixels,
+    glDrawBuffer,
+    glReadBuffer,
+    glGenQueries,
+    glDeleteQueries,
+    glBeginQuery,
+    glEndQuery,
+    glGetQueryObjectuiv,
+    glGetQueryObjectui64v
+)
+
+// The header's constants, without their GL_ (glapi.TRIANGLES).
+const FALSE = 0
+const TRUE = 1
+const NO_ERROR = 0
+const POINTS = 0
+const LINES = 1
+const TRIANGLES = 4
+const DEPTH_BUFFER_BIT = 256
+const STENCIL_BUFFER_BIT = 1024
+const COLOR_BUFFER_BIT = 16384
+const NEVER = 512
+const LESS = 513
+const EQUAL = 514
+const LEQUAL = 515
+const PACK_ALIGNMENT = 3333
+const PIXEL_PACK_BUFFER = 35051
+const STREAM_READ = 35041
+const READ_ONLY = 35000
+const SRC_ALPHA = 770
+const ONE_MINUS_SRC_ALPHA = 771
+const DST_COLOR = 774
+const ONE = 1
+const ZERO = 0
+const FRONT = 1028
+const BACK = 1029
+const FRONT_AND_BACK = 1032
+const CW = 2304
+const CCW = 2305
+const CULL_FACE = 2884
+const DEPTH_TEST = 2929
+const BLEND = 3042
+const VIEWPORT = 2978
+const MAX_TEXTURE_SIZE = 3379
+const MULTISAMPLE = 32925
+const LINE_SMOOTH = 2848
+const PROGRAM_POINT_SIZE = 34370
+const TEXTURE_CUBE_MAP_SEAMLESS = 34895
+const POINT = 6912
+const LINE = 6913
+const FILL = 6914
+const BYTE = 5120
+const UNSIGNED_BYTE = 5121
+const SHORT = 5122
+const UNSIGNED_SHORT = 5123
+const INT = 5124
+const UNSIGNED_INT = 5125
+const FLOAT = 5126
+const VENDOR = 7936
+const RENDERER = 7937
+const VERSION = 7938
+const RED = 6403
+const RGB = 6407
+const RGBA = 6408
+const RGBA16F = 34842
+const R32F = 33326
+const RGB16F = 34843
+const SRGB8_ALPHA8 = 35907
+const TEXTURE_2D = 3553
+const TEXTURE_3D = 32879
+const TEXTURE_WRAP_R = 32882
+const TEXTURE_CUBE_MAP = 34067
+const TEXTURE_CUBE_MAP_POSITIVE_X = 34069
+const TEXTURE0 = 33984
+const NEAREST = 9728
+const LINEAR = 9729
+const LINEAR_MIPMAP_LINEAR = 9987
+const TEXTURE_MAG_FILTER = 10240
+const TEXTURE_MIN_FILTER = 10241
+const TEXTURE_WRAP_S = 10242
+const TEXTURE_WRAP_T = 10243
+const TEXTURE_WRAP_R = 32882
+const REPEAT = 10497
+const CLAMP_TO_EDGE = 33071
+const UNPACK_ALIGNMENT = 3317
+const ARRAY_BUFFER = 34962
+const ELEMENT_ARRAY_BUFFER = 34963
+const STATIC_DRAW = 35044
+const DYNAMIC_DRAW = 35048
+const STREAM_DRAW = 35040
+const FRAGMENT_SHADER = 35632
+const VERTEX_SHADER = 35633
+const COMPILE_STATUS = 35713
+const LINK_STATUS = 35714
+const INFO_LOG_LENGTH = 35716
+const FRAMEBUFFER = 36160
+const READ_FRAMEBUFFER = 36008
+const DRAW_FRAMEBUFFER = 36009
+const DRAW_FRAMEBUFFER_BINDING = 36006
+const MAX_SAMPLES = 36183
+const RGBA8 = 32856
+const RENDERBUFFER = 36161
+const COLOR_ATTACHMENT0 = 36064
+const COLOR_ATTACHMENT1 = 36065
+const COLOR = 6144
+const RG = 33319
+const RG16F = 33327
+const DEPTH_STENCIL_ATTACHMENT = 33306
+const DEPTH24_STENCIL8 = 35056
+const DEPTH_STENCIL = 34041
+const UNSIGNED_INT_24_8 = 34042
+const FRAMEBUFFER_COMPLETE = 36053
+const DEPTH_ATTACHMENT = 36096
+const DEPTH_COMPONENT = 6402
+const DEPTH_COMPONENT32F = 36012
+const TEXTURE_COMPARE_MODE = 34892
+const NONE = 0
+const DEPTH_CLAMP = 34383
+
+var p_glGetString: ptr = null
+glGetString(name: uint32) -> ptr {
+    if p_glGetString == null { p_glGetString = ae3d_gl_proc("glGetString") }
+    f = p_glGetString as fn(uint32) -> ptr
+    return f(name)
+}
+
+var p_glGetError: ptr = null
+glGetError() -> uint32 {
+    if p_glGetError == null { p_glGetError = ae3d_gl_proc("glGetError") }
+    f = p_glGetError as fn() -> uint32
+    return f()
+}
+
+var p_glGetIntegerv: ptr = null
+glGetIntegerv(pname: uint32, data_: ptr) {
+    if p_glGetIntegerv == null { p_glGetIntegerv = ae3d_gl_proc("glGetIntegerv") }
+    f = p_glGetIntegerv as fn(uint32, ptr)
+    f(pname, data_)
+}
+
+var p_glViewport: ptr = null
+glViewport(x: int, y: int, w: int, h: int) {
+    if p_glViewport == null { p_glViewport = ae3d_gl_proc("glViewport") }
+    f = p_glViewport as fn(int, int, int, int)
+    f(x, y, w, h)
+}
+
+var p_glClearColor: ptr = null
+glClearColor(r: f32, g: f32, b: f32, a: f32) {
+    if p_glClearColor == null { p_glClearColor = ae3d_gl_proc("glClearColor") }
+    f = p_glClearColor as fn(f32, f32, f32, f32)
+    f(r, g, b, a)
+}
+
+var p_glClearDepth: ptr = null
+glClearDepth(d: float) {
+    if p_glClearDepth == null { p_glClearDepth = ae3d_gl_proc("glClearDepth") }
+    f = p_glClearDepth as fn(float)
+    f(d)
+}
+
+var p_glClear: ptr = null
+glClear(mask: uint32) {
+    if p_glClear == null { p_glClear = ae3d_gl_proc("glClear") }
+    f = p_glClear as fn(uint32)
+    f(mask)
+}
+
+var p_glEnable: ptr = null
+glEnable(cap: uint32) {
+    if p_glEnable == null { p_glEnable = ae3d_gl_proc("glEnable") }
+    f = p_glEnable as fn(uint32)
+    f(cap)
+}
+
+var p_glDisable: ptr = null
+glDisable(cap: uint32) {
+    if p_glDisable == null { p_glDisable = ae3d_gl_proc("glDisable") }
+    f = p_glDisable as fn(uint32)
+    f(cap)
+}
+
+var p_glDepthFunc: ptr = null
+glDepthFunc(func: uint32) {
+    if p_glDepthFunc == null { p_glDepthFunc = ae3d_gl_proc("glDepthFunc") }
+    f = p_glDepthFunc as fn(uint32)
+    f(func)
+}
+
+var p_glDepthMask: ptr = null
+glDepthMask(flag: int) {
+    if p_glDepthMask == null { p_glDepthMask = ae3d_gl_proc("glDepthMask") }
+    f = p_glDepthMask as fn(int)
+    f(flag)
+}
+
+var p_glCullFace: ptr = null
+glCullFace(mode_: uint32) {
+    if p_glCullFace == null { p_glCullFace = ae3d_gl_proc("glCullFace") }
+    f = p_glCullFace as fn(uint32)
+    f(mode_)
+}
+
+var p_glFrontFace: ptr = null
+glFrontFace(mode_: uint32) {
+    if p_glFrontFace == null { p_glFrontFace = ae3d_gl_proc("glFrontFace") }
+    f = p_glFrontFace as fn(uint32)
+    f(mode_)
+}
+
+var p_glBlendFunc: ptr = null
+glBlendFunc(sfactor: uint32, dfactor: uint32) {
+    if p_glBlendFunc == null { p_glBlendFunc = ae3d_gl_proc("glBlendFunc") }
+    f = p_glBlendFunc as fn(uint32, uint32)
+    f(sfactor, dfactor)
+}
+
+var p_glPolygonMode: ptr = null
+glPolygonMode(face: uint32, mode_: uint32) {
+    if p_glPolygonMode == null { p_glPolygonMode = ae3d_gl_proc("glPolygonMode") }
+    f = p_glPolygonMode as fn(uint32, uint32)
+    f(face, mode_)
+}
+
+var p_glPixelStorei: ptr = null
+glPixelStorei(pname: uint32, param: int) {
+    if p_glPixelStorei == null { p_glPixelStorei = ae3d_gl_proc("glPixelStorei") }
+    f = p_glPixelStorei as fn(uint32, int)
+    f(pname, param)
+}
+
+var p_glGenVertexArrays: ptr = null
+glGenVertexArrays(n: int, arrays: ptr) {
+    if p_glGenVertexArrays == null { p_glGenVertexArrays = ae3d_gl_proc("glGenVertexArrays") }
+    f = p_glGenVertexArrays as fn(int, ptr)
+    f(n, arrays)
+}
+
+var p_glBindVertexArray: ptr = null
+glBindVertexArray(array: uint32) {
+    if p_glBindVertexArray == null { p_glBindVertexArray = ae3d_gl_proc("glBindVertexArray") }
+    f = p_glBindVertexArray as fn(uint32)
+    f(array)
+}
+
+var p_glDeleteVertexArrays: ptr = null
+glDeleteVertexArrays(n: int, arrays: ptr) {
+    if p_glDeleteVertexArrays == null { p_glDeleteVertexArrays = ae3d_gl_proc("glDeleteVertexArrays") }
+    f = p_glDeleteVertexArrays as fn(int, ptr)
+    f(n, arrays)
+}
+
+var p_glGenBuffers: ptr = null
+glGenBuffers(n: int, buffers: ptr) {
+    if p_glGenBuffers == null { p_glGenBuffers = ae3d_gl_proc("glGenBuffers") }
+    f = p_glGenBuffers as fn(int, ptr)
+    f(n, buffers)
+}
+
+var p_glBindBuffer: ptr = null
+glBindBuffer(target: uint32, buffer: uint32) {
+    if p_glBindBuffer == null { p_glBindBuffer = ae3d_gl_proc("glBindBuffer") }
+    f = p_glBindBuffer as fn(uint32, uint32)
+    f(target, buffer)
+}
+
+var p_glBufferData: ptr = null
+glBufferData(target: uint32, size: long, data_: ptr, usage: uint32) {
+    if p_glBufferData == null { p_glBufferData = ae3d_gl_proc("glBufferData") }
+    f = p_glBufferData as fn(uint32, long, ptr, uint32)
+    f(target, size, data_, usage)
+}
+
+var p_glBufferSubData: ptr = null
+glBufferSubData(target: uint32, offset: long, size: long, data_: ptr) {
+    if p_glBufferSubData == null { p_glBufferSubData = ae3d_gl_proc("glBufferSubData") }
+    f = p_glBufferSubData as fn(uint32, long, long, ptr)
+    f(target, offset, size, data_)
+}
+
+var p_glDeleteBuffers: ptr = null
+glDeleteBuffers(n: int, buffers: ptr) {
+    if p_glDeleteBuffers == null { p_glDeleteBuffers = ae3d_gl_proc("glDeleteBuffers") }
+    f = p_glDeleteBuffers as fn(int, ptr)
+    f(n, buffers)
+}
+
+var p_glMapBuffer: ptr = null
+glMapBuffer(target: uint32, access: uint32) -> ptr {
+    if p_glMapBuffer == null { p_glMapBuffer = ae3d_gl_proc("glMapBuffer") }
+    f = p_glMapBuffer as fn(uint32, uint32) -> ptr
+    return f(target, access)
+}
+
+var p_glFinish: ptr = null
+glFinish() {
+    if p_glFinish == null { p_glFinish = ae3d_gl_proc("glFinish") }
+    f = p_glFinish as fn()
+    f()
+}
+
+var p_glUnmapBuffer: ptr = null
+glUnmapBuffer(target: uint32) -> int {
+    if p_glUnmapBuffer == null { p_glUnmapBuffer = ae3d_gl_proc("glUnmapBuffer") }
+    f = p_glUnmapBuffer as fn(uint32) -> int
+    return f(target) & 255
+}
+
+var p_glVertexAttribPointer: ptr = null
+glVertexAttribPointer(index_: uint32, size: int, type_: uint32, norm: int, stride: int, ptr_: ptr) {
+    if p_glVertexAttribPointer == null { p_glVertexAttribPointer = ae3d_gl_proc("glVertexAttribPointer") }
+    f = p_glVertexAttribPointer as fn(uint32, int, uint32, int, int, ptr)
+    f(index_, size, type_, norm, stride, ptr_)
+}
+
+var p_glEnableVertexAttribArray: ptr = null
+glEnableVertexAttribArray(index_: uint32) {
+    if p_glEnableVertexAttribArray == null { p_glEnableVertexAttribArray = ae3d_gl_proc("glEnableVertexAttribArray") }
+    f = p_glEnableVertexAttribArray as fn(uint32)
+    f(index_)
+}
+
+var p_glDisableVertexAttribArray: ptr = null
+glDisableVertexAttribArray(index_: uint32) {
+    if p_glDisableVertexAttribArray == null { p_glDisableVertexAttribArray = ae3d_gl_proc("glDisableVertexAttribArray") }
+    f = p_glDisableVertexAttribArray as fn(uint32)
+    f(index_)
+}
+
+var p_glVertexAttribDivisor: ptr = null
+glVertexAttribDivisor(index_: uint32, divisor: uint32) {
+    if p_glVertexAttribDivisor == null { p_glVertexAttribDivisor = ae3d_gl_proc("glVertexAttribDivisor") }
+    f = p_glVertexAttribDivisor as fn(uint32, uint32)
+    f(index_, divisor)
+}
+
+var p_glVertexAttrib3f: ptr = null
+glVertexAttrib3f(index_: uint32, x: f32, y: f32, z: f32) {
+    if p_glVertexAttrib3f == null { p_glVertexAttrib3f = ae3d_gl_proc("glVertexAttrib3f") }
+    f = p_glVertexAttrib3f as fn(uint32, f32, f32, f32)
+    f(index_, x, y, z)
+}
+
+var p_glDrawArrays: ptr = null
+glDrawArrays(mode_: uint32, first: int, count: int) {
+    if p_glDrawArrays == null { p_glDrawArrays = ae3d_gl_proc("glDrawArrays") }
+    f = p_glDrawArrays as fn(uint32, int, int)
+    f(mode_, first, count)
+}
+
+var p_glDrawElements: ptr = null
+glDrawElements(mode_: uint32, count: int, type_: uint32, indices: ptr) {
+    if p_glDrawElements == null { p_glDrawElements = ae3d_gl_proc("glDrawElements") }
+    f = p_glDrawElements as fn(uint32, int, uint32, ptr)
+    f(mode_, count, type_, indices)
+}
+
+var p_glDrawElementsInstanced: ptr = null
+glDrawElementsInstanced(mode_: uint32, count: int, type_: uint32, indices: ptr, primcount: int) {
+    if p_glDrawElementsInstanced == null { p_glDrawElementsInstanced = ae3d_gl_proc("glDrawElementsInstanced") }
+    f = p_glDrawElementsInstanced as fn(uint32, int, uint32, ptr, int)
+    f(mode_, count, type_, indices, primcount)
+}
+
+var p_glCreateShader: ptr = null
+glCreateShader(type_: uint32) -> uint32 {
+    if p_glCreateShader == null { p_glCreateShader = ae3d_gl_proc("glCreateShader") }
+    f = p_glCreateShader as fn(uint32) -> uint32
+    return f(type_)
+}
+
+var p_glShaderSource: ptr = null
+glShaderSource(shader: uint32, count: int, string_: ptr, length: ptr) {
+    if p_glShaderSource == null { p_glShaderSource = ae3d_gl_proc("glShaderSource") }
+    f = p_glShaderSource as fn(uint32, int, ptr, ptr)
+    f(shader, count, string_, length)
+}
+
+var p_glCompileShader: ptr = null
+glCompileShader(shader: uint32) {
+    if p_glCompileShader == null { p_glCompileShader = ae3d_gl_proc("glCompileShader") }
+    f = p_glCompileShader as fn(uint32)
+    f(shader)
+}
+
+var p_glGetShaderiv: ptr = null
+glGetShaderiv(shader: uint32, pname: uint32, params: ptr) {
+    if p_glGetShaderiv == null { p_glGetShaderiv = ae3d_gl_proc("glGetShaderiv") }
+    f = p_glGetShaderiv as fn(uint32, uint32, ptr)
+    f(shader, pname, params)
+}
+
+var p_glGetShaderInfoLog: ptr = null
+glGetShaderInfoLog(shader: uint32, bufSize: int, length: ptr, infoLog: ptr) {
+    if p_glGetShaderInfoLog == null { p_glGetShaderInfoLog = ae3d_gl_proc("glGetShaderInfoLog") }
+    f = p_glGetShaderInfoLog as fn(uint32, int, ptr, ptr)
+    f(shader, bufSize, length, infoLog)
+}
+
+var p_glDeleteShader: ptr = null
+glDeleteShader(shader: uint32) {
+    if p_glDeleteShader == null { p_glDeleteShader = ae3d_gl_proc("glDeleteShader") }
+    f = p_glDeleteShader as fn(uint32)
+    f(shader)
+}
+
+var p_glCreateProgram: ptr = null
+glCreateProgram() -> uint32 {
+    if p_glCreateProgram == null { p_glCreateProgram = ae3d_gl_proc("glCreateProgram") }
+    f = p_glCreateProgram as fn() -> uint32
+    return f()
+}
+
+var p_glAttachShader: ptr = null
+glAttachShader(program: uint32, shader: uint32) {
+    if p_glAttachShader == null { p_glAttachShader = ae3d_gl_proc("glAttachShader") }
+    f = p_glAttachShader as fn(uint32, uint32)
+    f(program, shader)
+}
+
+var p_glDetachShader: ptr = null
+glDetachShader(program: uint32, shader: uint32) {
+    if p_glDetachShader == null { p_glDetachShader = ae3d_gl_proc("glDetachShader") }
+    f = p_glDetachShader as fn(uint32, uint32)
+    f(program, shader)
+}
+
+var p_glLinkProgram: ptr = null
+glLinkProgram(program: uint32) {
+    if p_glLinkProgram == null { p_glLinkProgram = ae3d_gl_proc("glLinkProgram") }
+    f = p_glLinkProgram as fn(uint32)
+    f(program)
+}
+
+var p_glGetProgramiv: ptr = null
+glGetProgramiv(program: uint32, pname: uint32, params: ptr) {
+    if p_glGetProgramiv == null { p_glGetProgramiv = ae3d_gl_proc("glGetProgramiv") }
+    f = p_glGetProgramiv as fn(uint32, uint32, ptr)
+    f(program, pname, params)
+}
+
+var p_glGetProgramInfoLog: ptr = null
+glGetProgramInfoLog(program: uint32, bufSize: int, length: ptr, infoLog: ptr) {
+    if p_glGetProgramInfoLog == null { p_glGetProgramInfoLog = ae3d_gl_proc("glGetProgramInfoLog") }
+    f = p_glGetProgramInfoLog as fn(uint32, int, ptr, ptr)
+    f(program, bufSize, length, infoLog)
+}
+
+var p_glUseProgram: ptr = null
+glUseProgram(program: uint32) {
+    if p_glUseProgram == null { p_glUseProgram = ae3d_gl_proc("glUseProgram") }
+    f = p_glUseProgram as fn(uint32)
+    f(program)
+}
+
+var p_glDeleteProgram: ptr = null
+glDeleteProgram(program: uint32) {
+    if p_glDeleteProgram == null { p_glDeleteProgram = ae3d_gl_proc("glDeleteProgram") }
+    f = p_glDeleteProgram as fn(uint32)
+    f(program)
+}
+
+var p_glGetUniformLocation: ptr = null
+glGetUniformLocation(program: uint32, name: string) -> int {
+    if p_glGetUniformLocation == null { p_glGetUniformLocation = ae3d_gl_proc("glGetUniformLocation") }
+    f = p_glGetUniformLocation as fn(uint32, string) -> int
+    return f(program, name)
+}
+
+var p_glUniform1i: ptr = null
+glUniform1i(loc: int, v0: int) {
+    if p_glUniform1i == null { p_glUniform1i = ae3d_gl_proc("glUniform1i") }
+    f = p_glUniform1i as fn(int, int)
+    f(loc, v0)
+}
+
+var p_glUniform1f: ptr = null
+glUniform1f(loc: int, v0: f32) {
+    if p_glUniform1f == null { p_glUniform1f = ae3d_gl_proc("glUniform1f") }
+    f = p_glUniform1f as fn(int, f32)
+    f(loc, v0)
+}
+
+var p_glUniform2f: ptr = null
+glUniform2f(loc: int, v0: f32, v1: f32) {
+    if p_glUniform2f == null { p_glUniform2f = ae3d_gl_proc("glUniform2f") }
+    f = p_glUniform2f as fn(int, f32, f32)
+    f(loc, v0, v1)
+}
+
+var p_glUniform3f: ptr = null
+glUniform3f(loc: int, v0: f32, v1: f32, v2: f32) {
+    if p_glUniform3f == null { p_glUniform3f = ae3d_gl_proc("glUniform3f") }
+    f = p_glUniform3f as fn(int, f32, f32, f32)
+    f(loc, v0, v1, v2)
+}
+
+var p_glUniform4f: ptr = null
+glUniform4f(loc: int, v0: f32, v1: f32, v2: f32, v3: f32) {
+    if p_glUniform4f == null { p_glUniform4f = ae3d_gl_proc("glUniform4f") }
+    f = p_glUniform4f as fn(int, f32, f32, f32, f32)
+    f(loc, v0, v1, v2, v3)
+}
+
+var p_glUniform1fv: ptr = null
+glUniform1fv(loc: int, count: int, value: ptr) {
+    if p_glUniform1fv == null { p_glUniform1fv = ae3d_gl_proc("glUniform1fv") }
+    f = p_glUniform1fv as fn(int, int, ptr)
+    f(loc, count, value)
+}
+
+var p_glUniform3fv: ptr = null
+glUniform3fv(loc: int, count: int, value: ptr) {
+    if p_glUniform3fv == null { p_glUniform3fv = ae3d_gl_proc("glUniform3fv") }
+    f = p_glUniform3fv as fn(int, int, ptr)
+    f(loc, count, value)
+}
+
+var p_glUniformMatrix4fv: ptr = null
+glUniformMatrix4fv(loc: int, count: int, transpose: int, value: ptr) {
+    if p_glUniformMatrix4fv == null { p_glUniformMatrix4fv = ae3d_gl_proc("glUniformMatrix4fv") }
+    f = p_glUniformMatrix4fv as fn(int, int, int, ptr)
+    f(loc, count, transpose, value)
+}
+
+var p_glGenTextures: ptr = null
+glGenTextures(n: int, textures: ptr) {
+    if p_glGenTextures == null { p_glGenTextures = ae3d_gl_proc("glGenTextures") }
+    f = p_glGenTextures as fn(int, ptr)
+    f(n, textures)
+}
+
+var p_glBindTexture: ptr = null
+glBindTexture(target: uint32, texture: uint32) {
+    if p_glBindTexture == null { p_glBindTexture = ae3d_gl_proc("glBindTexture") }
+    f = p_glBindTexture as fn(uint32, uint32)
+    f(target, texture)
+}
+
+var p_glTexImage2D: ptr = null
+glTexImage2D(target: uint32, level: int, internalformat: int, w: int, h: int, border: int, format: uint32, type_: uint32, pixels: ptr) {
+    if p_glTexImage2D == null { p_glTexImage2D = ae3d_gl_proc("glTexImage2D") }
+    f = p_glTexImage2D as fn(uint32, int, int, int, int, int, uint32, uint32, ptr)
+    f(target, level, internalformat, w, h, border, format, type_, pixels)
+}
+
+var p_glTexImage3D: ptr = null
+glTexImage3D(target: uint32, level: int, internalformat: int, w: int, h: int, d: int, border: int, format: uint32, type_: uint32, pixels: ptr) {
+    if p_glTexImage3D == null { p_glTexImage3D = ae3d_gl_proc("glTexImage3D") }
+    f = p_glTexImage3D as fn(uint32, int, int, int, int, int, int, uint32, uint32, ptr)
+    f(target, level, internalformat, w, h, d, border, format, type_, pixels)
+}
+
+var p_glTexParameteri: ptr = null
+glTexParameteri(target: uint32, pname: uint32, param: int) {
+    if p_glTexParameteri == null { p_glTexParameteri = ae3d_gl_proc("glTexParameteri") }
+    f = p_glTexParameteri as fn(uint32, uint32, int)
+    f(target, pname, param)
+}
+
+var p_glDeleteTextures: ptr = null
+glDeleteTextures(n: int, textures: ptr) {
+    if p_glDeleteTextures == null { p_glDeleteTextures = ae3d_gl_proc("glDeleteTextures") }
+    f = p_glDeleteTextures as fn(int, ptr)
+    f(n, textures)
+}
+
+var p_glActiveTexture: ptr = null
+glActiveTexture(texture: uint32) {
+    if p_glActiveTexture == null { p_glActiveTexture = ae3d_gl_proc("glActiveTexture") }
+    f = p_glActiveTexture as fn(uint32)
+    f(texture)
+}
+
+var p_glGenerateMipmap: ptr = null
+glGenerateMipmap(target: uint32) {
+    if p_glGenerateMipmap == null { p_glGenerateMipmap = ae3d_gl_proc("glGenerateMipmap") }
+    f = p_glGenerateMipmap as fn(uint32)
+    f(target)
+}
+
+var p_glGenFramebuffers: ptr = null
+glGenFramebuffers(n: int, ids: ptr) {
+    if p_glGenFramebuffers == null { p_glGenFramebuffers = ae3d_gl_proc("glGenFramebuffers") }
+    f = p_glGenFramebuffers as fn(int, ptr)
+    f(n, ids)
+}
+
+var p_glBindFramebuffer: ptr = null
+glBindFramebuffer(target: uint32, framebuffer: uint32) {
+    if p_glBindFramebuffer == null { p_glBindFramebuffer = ae3d_gl_proc("glBindFramebuffer") }
+    f = p_glBindFramebuffer as fn(uint32, uint32)
+    f(target, framebuffer)
+}
+
+var p_glFramebufferTexture2D: ptr = null
+glFramebufferTexture2D(target: uint32, attachment: uint32, textarget: uint32, texture: uint32, level: int) {
+    if p_glFramebufferTexture2D == null { p_glFramebufferTexture2D = ae3d_gl_proc("glFramebufferTexture2D") }
+    f = p_glFramebufferTexture2D as fn(uint32, uint32, uint32, uint32, int)
+    f(target, attachment, textarget, texture, level)
+}
+
+var p_glCheckFramebufferStatus: ptr = null
+glCheckFramebufferStatus(target: uint32) -> uint32 {
+    if p_glCheckFramebufferStatus == null { p_glCheckFramebufferStatus = ae3d_gl_proc("glCheckFramebufferStatus") }
+    f = p_glCheckFramebufferStatus as fn(uint32) -> uint32
+    return f(target)
+}
+
+var p_glDeleteFramebuffers: ptr = null
+glDeleteFramebuffers(n: int, framebuffers: ptr) {
+    if p_glDeleteFramebuffers == null { p_glDeleteFramebuffers = ae3d_gl_proc("glDeleteFramebuffers") }
+    f = p_glDeleteFramebuffers as fn(int, ptr)
+    f(n, framebuffers)
+}
+
+var p_glGenRenderbuffers: ptr = null
+glGenRenderbuffers(n: int, renderbuffers: ptr) {
+    if p_glGenRenderbuffers == null { p_glGenRenderbuffers = ae3d_gl_proc("glGenRenderbuffers") }
+    f = p_glGenRenderbuffers as fn(int, ptr)
+    f(n, renderbuffers)
+}
+
+var p_glBindRenderbuffer: ptr = null
+glBindRenderbuffer(target: uint32, renderbuffer: uint32) {
+    if p_glBindRenderbuffer == null { p_glBindRenderbuffer = ae3d_gl_proc("glBindRenderbuffer") }
+    f = p_glBindRenderbuffer as fn(uint32, uint32)
+    f(target, renderbuffer)
+}
+
+var p_glRenderbufferStorage: ptr = null
+glRenderbufferStorage(target: uint32, internalformat: uint32, w: int, h: int) {
+    if p_glRenderbufferStorage == null { p_glRenderbufferStorage = ae3d_gl_proc("glRenderbufferStorage") }
+    f = p_glRenderbufferStorage as fn(uint32, uint32, int, int)
+    f(target, internalformat, w, h)
+}
+
+var p_glRenderbufferStorageMultisample: ptr = null
+glRenderbufferStorageMultisample(target: uint32, samples: int, internalformat: uint32, w: int, h: int) {
+    if p_glRenderbufferStorageMultisample == null { p_glRenderbufferStorageMultisample = ae3d_gl_proc("glRenderbufferStorageMultisample") }
+    f = p_glRenderbufferStorageMultisample as fn(uint32, int, uint32, int, int)
+    f(target, samples, internalformat, w, h)
+}
+
+var p_glBlitFramebuffer: ptr = null
+glBlitFramebuffer(sx0: int, sy0: int, sx1: int, sy1: int, dx0: int, dy0: int, dx1: int, dy1: int, mask: uint32, filter: uint32) {
+    if p_glBlitFramebuffer == null { p_glBlitFramebuffer = ae3d_gl_proc("glBlitFramebuffer") }
+    f = p_glBlitFramebuffer as fn(int, int, int, int, int, int, int, int, uint32, uint32)
+    f(sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1, mask, filter)
+}
+
+var p_glDrawBuffers: ptr = null
+glDrawBuffers(n: int, bufs: ptr) {
+    if p_glDrawBuffers == null { p_glDrawBuffers = ae3d_gl_proc("glDrawBuffers") }
+    f = p_glDrawBuffers as fn(int, ptr)
+    f(n, bufs)
+}
+
+var p_glClearBufferfv: ptr = null
+glClearBufferfv(buffer: uint32, drawbuffer: int, value: ptr) {
+    if p_glClearBufferfv == null { p_glClearBufferfv = ae3d_gl_proc("glClearBufferfv") }
+    f = p_glClearBufferfv as fn(uint32, int, ptr)
+    f(buffer, drawbuffer, value)
+}
+
+var p_glFramebufferRenderbuffer: ptr = null
+glFramebufferRenderbuffer(target: uint32, attachment: uint32, rbtarget: uint32, renderbuffer: uint32) {
+    if p_glFramebufferRenderbuffer == null { p_glFramebufferRenderbuffer = ae3d_gl_proc("glFramebufferRenderbuffer") }
+    f = p_glFramebufferRenderbuffer as fn(uint32, uint32, uint32, uint32)
+    f(target, attachment, rbtarget, renderbuffer)
+}
+
+var p_glDeleteRenderbuffers: ptr = null
+glDeleteRenderbuffers(n: int, renderbuffers: ptr) {
+    if p_glDeleteRenderbuffers == null { p_glDeleteRenderbuffers = ae3d_gl_proc("glDeleteRenderbuffers") }
+    f = p_glDeleteRenderbuffers as fn(int, ptr)
+    f(n, renderbuffers)
+}
+
+var p_glReadPixels: ptr = null
+glReadPixels(x: int, y: int, w: int, h: int, format: uint32, type_: uint32, pixels: ptr) {
+    if p_glReadPixels == null { p_glReadPixels = ae3d_gl_proc("glReadPixels") }
+    f = p_glReadPixels as fn(int, int, int, int, uint32, uint32, ptr)
+    f(x, y, w, h, format, type_, pixels)
+}
+
+var p_glDrawBuffer: ptr = null
+glDrawBuffer(buf: uint32) {
+    if p_glDrawBuffer == null { p_glDrawBuffer = ae3d_gl_proc("glDrawBuffer") }
+    f = p_glDrawBuffer as fn(uint32)
+    f(buf)
+}
+
+var p_glReadBuffer: ptr = null
+glReadBuffer(src: uint32) {
+    if p_glReadBuffer == null { p_glReadBuffer = ae3d_gl_proc("glReadBuffer") }
+    f = p_glReadBuffer as fn(uint32)
+    f(src)
+}
+
+var p_glGenQueries: ptr = null
+glGenQueries(n: int, ids: ptr) {
+    if p_glGenQueries == null { p_glGenQueries = ae3d_gl_proc("glGenQueries") }
+    f = p_glGenQueries as fn(int, ptr)
+    f(n, ids)
+}
+
+var p_glDeleteQueries: ptr = null
+glDeleteQueries(n: int, ids: ptr) {
+    if p_glDeleteQueries == null { p_glDeleteQueries = ae3d_gl_proc("glDeleteQueries") }
+    f = p_glDeleteQueries as fn(int, ptr)
+    f(n, ids)
+}
+
+var p_glBeginQuery: ptr = null
+glBeginQuery(target: uint32, id: uint32) {
+    if p_glBeginQuery == null { p_glBeginQuery = ae3d_gl_proc("glBeginQuery") }
+    f = p_glBeginQuery as fn(uint32, uint32)
+    f(target, id)
+}
+
+var p_glEndQuery: ptr = null
+glEndQuery(target: uint32) {
+    if p_glEndQuery == null { p_glEndQuery = ae3d_gl_proc("glEndQuery") }
+    f = p_glEndQuery as fn(uint32)
+    f(target)
+}
+
+var p_glGetQueryObjectuiv: ptr = null
+glGetQueryObjectuiv(id: uint32, pname: uint32, params: ptr) {
+    if p_glGetQueryObjectuiv == null { p_glGetQueryObjectuiv = ae3d_gl_proc("glGetQueryObjectuiv") }
+    f = p_glGetQueryObjectuiv as fn(uint32, uint32, ptr)
+    f(id, pname, params)
+}
+
+var p_glGetQueryObjectui64v: ptr = null
+glGetQueryObjectui64v(id: uint32, pname: uint32, params: ptr) {
+    if p_glGetQueryObjectui64v == null { p_glGetQueryObjectui64v = ae3d_gl_proc("glGetQueryObjectui64v") }
+    f = p_glGetQueryObjectui64v as fn(uint32, uint32, ptr)
+    f(id, pname, params)
+}

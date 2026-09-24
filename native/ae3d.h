@@ -17,6 +17,7 @@ double ae3d_store_field(void *store, int which, int field);
 int    ae3d_gl_posebank_texture(const float *data, int frames, int bones);
 /* The finished frame's mean and brightest linear luminance, two frames late
    (native/gpu/opengl.c); 1 when `out` holds them. */
+void  *ae3d_gl_proc(const char *name);
 int    ae3d_gl_meter(int source_framebuffer, int width, int height, double *out);
 void   ae3d_gl_meter_release(void);
 void   ae3d_gl_setup_instance_phase(void *inst, int phase_vbo);
@@ -45,31 +46,11 @@ const char *ae3d_image_error(void);
 int    ae3d_gl_load(void);
 const char *ae3d_gl_version(void);
 const char *ae3d_gl_renderer(void);
-int    ae3d_gl_error(void);
 
-void   ae3d_gl_viewport(int x, int y, int w, int h);
-void   ae3d_gl_clear_color(double r, double g, double b, double a);
-void   ae3d_gl_clear(int color, int depth);
-void   ae3d_gl_clear_depth(double d);
-void   ae3d_gl_set_depth_test(int on);
-void   ae3d_gl_set_depth_mask(int on);
-void   ae3d_gl_set_face_culling(int on);
-void   ae3d_gl_set_blend(int on);
-void   ae3d_gl_set_blend_multiply(void);
 int    ae3d_gl_texture_rgba(int width, int height, const unsigned char *rgba);
 int    ae3d_gl_texture3d_rgba(int size, const unsigned char *rgba);
 void   ae3d_gl_texture3d_bind(int unit, int texture);
-void   ae3d_gl_set_multisample(int on);
-void   ae3d_gl_set_wireframe(int on);
-int    ae3d_gl_viewport_width(void);
-int    ae3d_gl_max_texture_size(void);
-int    ae3d_gl_viewport_height(void);
 
-int    ae3d_gl_vao_create(void);
-void   ae3d_gl_vao_bind(int vao);
-void   ae3d_gl_vao_delete(int vao);
-int    ae3d_gl_buffer_create(void);
-void   ae3d_gl_buffer_delete(int buf);
 int    ae3d_gl_geometry_acquire(void *mesh);
 int    ae3d_gl_geometry_instance_vbo(int vao);
 void   ae3d_gl_geometry_release(int vao);
