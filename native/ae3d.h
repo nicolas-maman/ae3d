@@ -14,11 +14,9 @@
 int    ae3d_store_size(int which);
 double ae3d_store_field(void *store, int which, int field);
 
-/* The finished frame's mean and brightest linear luminance, two frames late
-   (native/gpu/opengl.c); 1 when `out` holds them. */
+/* An OpenGL entry point by name, from the process or the window system:
+   what ae3d.glapi resolves every GL call it makes through (#398). */
 void  *ae3d_gl_proc(const char *name);
-int    ae3d_gl_meter(int source_framebuffer, int width, int height, double *out);
-void   ae3d_gl_meter_release(void);
 
 /* Scripts: a compiled Aether source opened as a shared library, with the
  * object it is attached to passed in on every call. */
@@ -37,62 +35,18 @@ int    ae3d_image_height(void *img);
 int    ae3d_image_fit(void *img, int limit);
 const char *ae3d_image_error(void);
 
-int    ae3d_gl_load(void);
-const char *ae3d_gl_version(void);
-const char *ae3d_gl_renderer(void);
 
 
 
 
-void  *ae3d_farr_create(int count);
-void   ae3d_farr_destroy(void *arr);
-void   ae3d_farr_set(void *arr, int i, double v);
-double ae3d_farr_get(void *arr, int i);
-int    ae3d_farr_count(void *arr);
 
 
 /* GPU time per pass, read three frames late so the read never waits. */
-void  *ae3d_gl_passtimer_create(void);
-void   ae3d_gl_passtimer_destroy(void *handle);
-void   ae3d_gl_passtimer_frame(void *handle);
-void   ae3d_gl_passtimer_begin(void *handle, int pass);
-void   ae3d_gl_passtimer_end(void *handle);
-double ae3d_gl_passtimer_ms(void *handle, int pass);
 
-int    ae3d_gl_fbo_create(void);
-int    ae3d_gl_scene_depth_capture(void);
-void   ae3d_gl_fbo_bind(int fbo);
-void   ae3d_gl_fbo_delete(int fbo);
-int    ae3d_gl_fbo_attach_color(int fbo, int width, int height, int hdr);
-void   ae3d_gl_fbo_set_color(int fbo, int texture);
-int    ae3d_gl_fbo_attach_velocity(int fbo, int width, int height);
-int    ae3d_gl_fbo_attach_velocity_multisample(int fbo, int width, int height, int samples);
-void   ae3d_gl_draw_buffers(int count);
-void   ae3d_gl_clear_attachment(int index, double r, double g, double b, double a);
-int    ae3d_gl_fbo_resolve_attachment(int source, int destination, int width, int height, int index);
-int    ae3d_gl_fbo_attach_depth(int fbo, int width, int height);
-int    ae3d_gl_max_samples(void);
-int    ae3d_gl_fbo_attach_color_multisample(int fbo, int width, int height, int samples);
-int    ae3d_gl_fbo_attach_depth_multisample(int fbo, int width, int height, int samples);
-int    ae3d_gl_fbo_resolve(int source, int destination, int width, int height);
-void   ae3d_gl_renderbuffer_delete(int rbo);
-int    ae3d_gl_fbo_complete(void);
-int    ae3d_gl_read_pixel(int x, int y);
 
 void  *ae3d_offscreen_context(int width, int height);
 void   ae3d_offscreen_context_destroy(void *context);
-void  *ae3d_offscreen_create(int width, int height);
-int    ae3d_offscreen_resize(void *target, int width, int height);
-void   ae3d_offscreen_bind(void *target);
-void   ae3d_offscreen_unbind(void);
-int    ae3d_offscreen_width(void *target);
-int    ae3d_offscreen_height(void *target);
-int    ae3d_offscreen_byte_size(void *target);
-void  *ae3d_offscreen_read(void *target);
-void  *ae3d_offscreen_read_pipelined(void *target);
 
-void  *ae3d_gl_read_frame(int width, int height);
-void   ae3d_offscreen_destroy(void *target);
 
 
 int    ae3d_vk_available(void);
@@ -229,21 +183,6 @@ int    ae3d_vk_capture_height(void);
 /* The asking end of the same channel, so a tool that measures a scene can be
    written against the engine rather than against a copy of the protocol. */
 
-int  ae3d_capture_frame(int width, int height);
-int  ae3d_capture_width(void);
-int  ae3d_capture_height(void);
-int  ae3d_capture_pixel(int x, int y, double *out);
-int  ae3d_capture_region(int x, int y, int width, int height,
-                         int background, int tolerance, double *out);
-int  ae3d_capture_grid(int left, int top, int width, int height,
-                       int columns, int rows, int background, int tolerance,
-                       double *out);
-int  ae3d_capture_hold_reference(void);
-int  ae3d_capture_diff(int tolerance, double *out);
-void ae3d_capture_release(void);
-int  ae3d_capture_adopt(const unsigned char *pixels, int width, int height);
-int  ae3d_capture_copy_keyed(unsigned char *atlas, int atlas_width, int atlas_height, int dst_x, int dst_y, int cell, int kr, int kg, int kb, int tolerance);
-int  ae3d_capture_bleed(unsigned char *atlas, int width, int height);
 
 /* A parallel for over the engine's job pool (native/gpu/jobs.c): the range
    [0, count) in blocks of at least `grain` elements, done when it returns.
@@ -256,8 +195,5 @@ void ae3d_job_call(ae3d_job_fn fn, void *ctx, int start, int end);
 void ae3d_jobs_for(int count, int grain, ae3d_job_fn fn, void *ctx);
 /* How many numbers the fixed-size answers -- a pixel, a region, a diff -- are
    written into. A grid is as long as it has cells and says so. */
-#define AE3D_CAPTURE_SLOTS 8
-double ae3d_capture_slot(const double *block, int index);
-double ae3d_capture_slot_of(const double *block, int index, int count);
 
 #endif

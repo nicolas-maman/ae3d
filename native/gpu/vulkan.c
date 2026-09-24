@@ -3658,6 +3658,21 @@ int ae3d_vk_scene_offset(const char *name) {
     return ae3d_vk_uniform_offset(name);
 }
 
+/* A float array as ae3d.core lays one out (FloatValues): the values, 32-bit,
+   then their count. Read here directly: the arrays are Aether's (#398). */
+typedef struct {
+    float *values;
+    int count;
+} ae3d_farr;
+
+static int ae3d_farr_count(void *handle) { return handle ? ((ae3d_farr *)handle)->count : 0; }
+
+static double ae3d_farr_get(void *handle, int i) {
+    ae3d_farr *arr = (ae3d_farr *)handle;
+    if (!arr || i < 0 || i >= arr->count) return 0.0;
+    return arr->values[i];
+}
+
 // std140 gives every array element a 16-byte slot whatever it holds, so a wave
 // table cannot be memcpy'd in as a flat run of floats.
 void ae3d_vk_scene_set_float_array(int offset, void *handle) {

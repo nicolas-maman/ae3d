@@ -22,6 +22,7 @@ import ae3d.skin
 import ae3d.posing
 import ae3d.geometry
 import ae3d.glapi
+import ae3d.offscreen
 
 exports (
     GLRenderer, ProgramSlots, TextureEntry, Skybox,
@@ -47,45 +48,13 @@ exports (
 
 extern calloc(count: int, size: int) -> ptr
 extern ae3d_image_pixels(img: ptr) -> ptr
+extern glfwGetCurrentContext() -> ptr
+extern strlen(s: ptr) -> int
+extern pow(x: float, y: float) -> float
 extern ae3d_image_width(img: ptr) -> int
 extern ae3d_image_height(img: ptr) -> int
 extern free(p: ptr)
-extern ae3d_offscreen_resize(target: ptr, width: int, height: int) -> int
-extern ae3d_offscreen_read_pipelined(target: ptr) -> ptr
-extern ae3d_gl_load() -> int
-extern ae3d_gl_version() -> string
-extern ae3d_gl_renderer() -> string
-extern ae3d_gl_meter(source: int, width: int, height: int, out: ptr) -> int
-extern ae3d_gl_passtimer_create() -> ptr
-extern ae3d_gl_passtimer_destroy(timer: ptr)
-extern ae3d_gl_passtimer_frame(timer: ptr)
-extern ae3d_gl_passtimer_begin(timer: ptr, pass: int)
-extern ae3d_gl_passtimer_end(timer: ptr)
-extern ae3d_gl_passtimer_ms(timer: ptr, pass: int) -> float
 
-extern ae3d_gl_fbo_create() -> int
-extern ae3d_gl_scene_depth_capture() -> int
-extern ae3d_gl_fbo_bind(fbo: int)
-extern ae3d_gl_fbo_delete(fbo: int)
-extern ae3d_gl_fbo_attach_color(fbo: int, width: int, height: int, hdr: int) -> int
-extern ae3d_gl_fbo_set_color(fbo: int, texture: int)
-extern ae3d_gl_fbo_attach_velocity(fbo: int, width: int, height: int) -> int
-extern ae3d_gl_fbo_attach_velocity_multisample(fbo: int, width: int, height: int, samples: int) -> int
-extern ae3d_gl_draw_buffers(count: int)
-extern ae3d_gl_clear_attachment(index: int, r: float, g: float, b: float, a: float)
-extern ae3d_gl_fbo_resolve_attachment(source: int, destination: int, width: int, height: int, index: int) -> int
-extern ae3d_gl_fbo_attach_depth(fbo: int, width: int, height: int) -> int
-extern ae3d_gl_max_samples() -> int
-extern ae3d_gl_fbo_attach_color_multisample(fbo: int, width: int, height: int, samples: int) -> int
-extern ae3d_gl_fbo_attach_depth_multisample(fbo: int, width: int, height: int, samples: int) -> int
-extern ae3d_gl_fbo_resolve(source: int, destination: int, width: int, height: int) -> int
-extern ae3d_gl_fbo_attach_shadow_map(fbo: int, size: int) -> int
-extern ae3d_gl_renderbuffer_delete(rbo: int)
-extern ae3d_gl_fbo_complete() -> int
-extern ae3d_gl_read_pixel(x: int, y: int) -> int
-extern ae3d_gl_read_frame(width: int, height: int) -> ptr
-extern ae3d_offscreen_bind(target: ptr)
-extern ae3d_offscreen_unbind()
 extern ae3d_image_load(path: string) -> ptr
 extern ae3d_image_fit(img: ptr, limit: int) -> int
 extern ae3d_image_width(image: ptr) -> int
@@ -93,6 +62,611 @@ extern ae3d_image_height(image: ptr) -> int
 extern ae3d_image_solid(width: int, height: int, r: int, g: int, b: int, a: int) -> ptr
 extern ae3d_image_free(img: ptr)
 extern ae3d_image_error() -> string
+
+// --- pass timers, framebuffers, readback and the meter, in Aether (#398) ---------------------
+
+// A name GL makes (a framebuffer, a renderbuffer, a texture, a query): one.
+gl_name(kind: int) -> int {
+    out = calloc(1, 4)
+    if kind == 0 { glapi.glGenFramebuffers(1, out) }
+    if kind == 1 { glapi.glGenRenderbuffers(1, out) }
+    if kind == 2 { glapi.glGenTextures(1, out) }
+    if kind == 3 { glapi.glGenQueries(1, out) }
+    id = (out as int[])[0]
+    free(out)
+    return id
+}
+
+// And one gone.
+gl_drop(kind: int, id: int) {
+    if id == 0 { return }
+    names = calloc(1, 4)
+    (names as int[])[0] = id
+    if kind == 0 { glapi.glDeleteFramebuffers(1, names) }
+    if kind == 1 { glapi.glDeleteRenderbuffers(1, names) }
+    if kind == 2 { glapi.glDeleteTextures(1, names) }
+    if kind == 3 { glapi.glDeleteQueries(1, names) }
+    free(names)
+}
+
+const NAME_FRAMEBUFFER = 0
+const NAME_RENDERBUFFER = 1
+const NAME_TEXTURE = 2
+const NAME_QUERY = 3
+
+// A pass costs what the GPU spends on it, and the CPU time around a submit
+// is not that number: the driver returns from a draw call long before the
+// work is done, so a pass that doubled in cost on the GPU can read as
+// unchanged. GL_TIME_ELAPSED brackets the work itself.
+//
+// The result is read a frame or two later, never in the frame that issued
+// it. Asking for it immediately is a stall: the CPU waits for the GPU to
+// drain, which both costs the frame time it is trying to measure and
+// changes it.
+const TIME_ELAPSED = 35007           // 0x88BF
+const QUERY_RESULT = 34918           // 0x8866
+const QUERY_RESULT_AVAILABLE = 34919 // 0x8867
+const TIMER_PASSES = 3
+// Deep enough that a result is always read long after the GPU has finished
+// with it, so the read never waits.
+const TIMER_DEPTH = 3
+
+struct PassTimer {
+    ids: ptr                         // int[TIMER_DEPTH * TIMER_PASSES]
+    issued: ptr                      // int[TIMER_DEPTH * TIMER_PASSES]
+    ms: ptr                          // float[TIMER_PASSES]
+    slot: int
+    open: bool
+}
+
+ae3d_gl_passtimer_create() -> ptr {
+    names = ["glGenQueries", "glDeleteQueries", "glBeginQuery", "glEndQuery", "glGetQueryObjectuiv", "glGetQueryObjectui64v"]
+    i = 0
+    while i < 6 {
+        if !glapi.has(names[i]) { return null }
+        i = i + 1
+    }
+    t = calloc(1, sizeof(PassTimer)) as *PassTimer
+    t.ids = calloc(TIMER_DEPTH * TIMER_PASSES, 4)
+    t.issued = calloc(TIMER_DEPTH * TIMER_PASSES, 4)
+    t.ms = calloc(TIMER_PASSES, 8)
+    ids = t.ids as int[]
+    k = 0
+    while k < TIMER_DEPTH * TIMER_PASSES {
+        ids[k] = gl_name(NAME_QUERY)
+        k = k + 1
+    }
+    return t as ptr
+}
+
+ae3d_gl_passtimer_destroy(timer: ptr) {
+    if timer == null { return }
+    t = timer as *PassTimer
+    // Only when a context is current to delete them in. When the window is
+    // already gone -- a program that frees its renderer after shutting the
+    // engine down, or a test that destroys its offscreen context first --
+    // the queries died with the context, and glDeleteQueries against no
+    // context segfaults on llvmpipe.
+    if glfwGetCurrentContext() != null {
+        ids = t.ids as int[]
+        k = 0
+        while k < TIMER_DEPTH * TIMER_PASSES {
+            gl_drop(NAME_QUERY, ids[k])
+            k = k + 1
+        }
+    }
+    free(t.ids)
+    free(t.issued)
+    free(t.ms)
+    free(timer)
+}
+
+// Moves to the slot this frame will write, collecting what that slot
+// measured the last time round. A pass that was not drawn reports nothing
+// rather than the last figure it happened to have.
+ae3d_gl_passtimer_frame(timer: ptr) {
+    if timer == null { return }
+    t = timer as *PassTimer
+    t.slot = (t.slot + 1) % TIMER_DEPTH
+    ids = t.ids as int[]
+    issued = t.issued as int[]
+    ms = t.ms as float[]
+    ready = calloc(1, 4)
+    elapsed = calloc(1, 8)
+    pass = 0
+    while pass < TIMER_PASSES {
+        at = t.slot * TIMER_PASSES + pass
+        if issued[at] == 0 {
+            ms[pass] = 0.0
+        } else {
+            issued[at] = 0
+            if ids[at] != 0 {
+                (ready as int[])[0] = 0
+                glapi.glGetQueryObjectuiv(ids[at] as uint32, QUERY_RESULT_AVAILABLE as uint32, ready)
+                if (ready as int[])[0] != 0 {
+                    glapi.glGetQueryObjectui64v(ids[at] as uint32, QUERY_RESULT as uint32, elapsed)
+                    // Nanoseconds. A double carries every integer to 2^53, so
+                    // the conversion to milliseconds loses nothing a timer can
+                    // measure.
+                    ms[pass] = ((elapsed as long[])[0] as float) / 1000000.0
+                }
+            }
+        }
+        pass = pass + 1
+    }
+    free(ready)
+    free(elapsed)
+}
+
+ae3d_gl_passtimer_begin(timer: ptr, pass: int) {
+    if timer == null || pass < 0 || pass >= TIMER_PASSES { return }
+    t = timer as *PassTimer
+    if t.open { return }
+    at = t.slot * TIMER_PASSES + pass
+    id = (t.ids as int[])[at]
+    if id == 0 { return }
+    glapi.glBeginQuery(TIME_ELAPSED as uint32, id as uint32)
+    (t.issued as int[])[at] = 1
+    t.open = true
+}
+
+ae3d_gl_passtimer_end(timer: ptr) {
+    if timer == null { return }
+    t = timer as *PassTimer
+    if !t.open { return }
+    glapi.glEndQuery(TIME_ELAPSED as uint32)
+    t.open = false
+}
+
+ae3d_gl_passtimer_ms(timer: ptr, pass: int) -> float {
+    if timer == null || pass < 0 || pass >= TIMER_PASSES { return 0.0 }
+    return ((timer as *PassTimer).ms as float[])[pass]
+}
+
+ae3d_gl_fbo_create() -> int { return gl_name(NAME_FRAMEBUFFER) }
+
+ae3d_gl_fbo_bind(fbo: int) { glapi.glBindFramebuffer(glapi.FRAMEBUFFER as uint32, fbo as uint32) }
+
+ae3d_gl_fbo_delete(fbo: int) { gl_drop(NAME_FRAMEBUFFER, fbo) }
+
+// A texture of `width` x `height` (at least one each way), empty, sampled
+// with `filter` and clamped: what a framebuffer draws into.
+target_texture(width: int, height: int, internal: int, format: int, kind: int, filter: int) -> int {
+    w = width
+    h = height
+    if w < 1 { w = 1 }
+    if h < 1 { h = 1 }
+    texture = gl_name(NAME_TEXTURE)
+    glapi.glBindTexture(glapi.TEXTURE_2D as uint32, texture as uint32)
+    glapi.glTexImage2D(glapi.TEXTURE_2D as uint32, 0, internal, w, h, 0, format as uint32, kind as uint32, null)
+    texture_params(glapi.TEXTURE_2D, glapi.CLAMP_TO_EDGE, false, filter, filter)
+    return texture
+}
+
+attach_texture(fbo: int, attachment: int, texture: int, level: int) {
+    glapi.glBindFramebuffer(glapi.FRAMEBUFFER as uint32, fbo as uint32)
+    glapi.glFramebufferTexture2D(glapi.FRAMEBUFFER as uint32, attachment as uint32, glapi.TEXTURE_2D as uint32,
+                                 texture as uint32, level)
+}
+
+// A renderbuffer of `width` x `height`, `samples` of them a pixel (0: not
+// multisampled), attached to `fbo` at `attachment`.
+attach_renderbuffer(fbo: int, attachment: int, width: int, height: int, samples: int, internal: int) -> int {
+    w = width
+    h = height
+    if w < 1 { w = 1 }
+    if h < 1 { h = 1 }
+    rbo = gl_name(NAME_RENDERBUFFER)
+    glapi.glBindRenderbuffer(glapi.RENDERBUFFER as uint32, rbo as uint32)
+    if samples > 0 {
+        glapi.glRenderbufferStorageMultisample(glapi.RENDERBUFFER as uint32, samples, internal as uint32, w, h)
+    } else {
+        glapi.glRenderbufferStorage(glapi.RENDERBUFFER as uint32, internal as uint32, w, h)
+    }
+    glapi.glBindFramebuffer(glapi.FRAMEBUFFER as uint32, fbo as uint32)
+    glapi.glFramebufferRenderbuffer(glapi.FRAMEBUFFER as uint32, attachment as uint32, glapi.RENDERBUFFER as uint32,
+                                    rbo as uint32)
+    return rbo
+}
+
+ae3d_gl_fbo_attach_color(fbo: int, width: int, height: int, hdr: int) -> int {
+    internal = glapi.RGBA8
+    kind = glapi.UNSIGNED_BYTE
+    if hdr != 0 {
+        internal = glapi.RGBA16F
+        kind = glapi.FLOAT
+    }
+    texture = target_texture(width, height, internal, glapi.RGBA, kind, glapi.LINEAR)
+    attach_texture(fbo, glapi.COLOR_ATTACHMENT0, texture, 0)
+    return texture
+}
+
+// The motion vectors beside the colour: a two-channel half-float texture at
+// the framebuffer's second colour attachment, point sampled (a vector is not
+// blended between pixels), and its multisampled renderbuffer twin for the
+// frame that is drawn multisampled and resolved.
+ae3d_gl_fbo_attach_velocity(fbo: int, width: int, height: int) -> int {
+    texture = target_texture(width, height, glapi.RG16F, glapi.RG, glapi.FLOAT, glapi.NEAREST)
+    attach_texture(fbo, glapi.COLOR_ATTACHMENT1, texture, 0)
+    return texture
+}
+
+ae3d_gl_fbo_attach_velocity_multisample(fbo: int, width: int, height: int, samples: int) -> int {
+    return attach_renderbuffer(fbo, glapi.COLOR_ATTACHMENT1, width, height, samples, glapi.RG16F)
+}
+
+// How many of the bound framebuffer's colour attachments the draws write,
+// from the first: two while the scene is drawn with its motion vectors, one
+// for the passes after, whose shaders have no second output.
+ae3d_gl_draw_buffers(count: int) {
+    n = count
+    if n < 1 { n = 1 }
+    if n > 2 { n = 2 }
+    buffers = calloc(2, 4)
+    (buffers as int[])[0] = glapi.COLOR_ATTACHMENT0
+    (buffers as int[])[1] = glapi.COLOR_ATTACHMENT1
+    glapi.glDrawBuffers(n, buffers)
+    free(buffers)
+}
+
+// One colour attachment of the bound framebuffer cleared to a value of its
+// own: the motion vectors to zero, whatever the scene's clear colour.
+ae3d_gl_clear_attachment(index: int, r: float, g: float, b: float, a: float) {
+    value = calloc(4, 4)
+    v = value as f32[]
+    v[0] = r as f32
+    v[1] = g as f32
+    v[2] = b as f32
+    v[3] = a as f32
+    glapi.glClearBufferfv(glapi.COLOR as uint32, index, value)
+    free(value)
+}
+
+// Every error GL has queued, gone, so the next glGetError is about what
+// follows.
+drain_errors() {
+    while (glapi.glGetError()) as int != glapi.NO_ERROR { }
+}
+
+// The multisample resolve of one colour attachment other than the first:
+// read and draw buffers set to it for the blit and put back after.
+ae3d_gl_fbo_resolve_attachment(source: int, destination: int, width: int, height: int, index: int) -> int {
+    attachment = glapi.COLOR_ATTACHMENT0 + index
+    drain_errors()
+    glapi.glBindFramebuffer(glapi.READ_FRAMEBUFFER as uint32, source as uint32)
+    glapi.glBindFramebuffer(glapi.DRAW_FRAMEBUFFER as uint32, destination as uint32)
+    glapi.glReadBuffer(attachment as uint32)
+    glapi.glDrawBuffer(attachment as uint32)
+    glapi.glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, glapi.COLOR_BUFFER_BIT as uint32, glapi.NEAREST as uint32)
+    status = (glapi.glGetError()) as int
+    glapi.glReadBuffer(glapi.COLOR_ATTACHMENT0 as uint32)
+    glapi.glDrawBuffer(glapi.COLOR_ATTACHMENT0 as uint32)
+    glapi.glBindFramebuffer(glapi.FRAMEBUFFER as uint32, 0)
+    return status
+}
+
+// A colour texture already made attached as the framebuffer's colour: the
+// temporal pass writes its two history textures in turn through the one
+// framebuffer.
+ae3d_gl_fbo_set_color(fbo: int, texture: int) {
+    attach_texture(fbo, glapi.COLOR_ATTACHMENT0, texture, 0)
+}
+
+// A shadow map wants different sampling from a post-processing colour
+// buffer: point sampling, because the comparison is done per texel with
+// explicit offsets, and an edge clamp so a fragment projecting outside the
+// light's view reads the cleared far value rather than wrapping.
+//
+// The DEPTH attachment, and nothing else: with no colour attachment the
+// driver takes its depth-only path, and a depth texture sampled with .r
+// gives back what a colour buffer would have held. 32-bit float depth: eight
+// bits is 256 steps across the whole light-space box, coarse enough that a
+// surface shadows itself. Left in the default NONE compare mode: the lit
+// pass does its own comparison with a slope-scaled bias over a 3x3
+// neighbourhood, so it wants the stored depth rather than a pass/fail.
+ae3d_gl_fbo_attach_shadow_map(fbo: int, size: int) -> int {
+    glapi.glActiveTexture(glapi.TEXTURE0 as uint32)
+    texture = target_texture(size, size, glapi.DEPTH_COMPONENT32F, glapi.DEPTH_COMPONENT, glapi.FLOAT, glapi.NEAREST)
+    texture_param(glapi.TEXTURE_2D, glapi.TEXTURE_COMPARE_MODE, glapi.NONE)
+    attach_texture(fbo, glapi.DEPTH_ATTACHMENT, texture, 0)
+    // A framebuffer with no colour attachment is incomplete unless it is told
+    // there is no colour to draw or read.
+    glapi.glDrawBuffer(glapi.NONE as uint32)
+    glapi.glReadBuffer(glapi.NONE as uint32)
+    glapi.glBindFramebuffer(glapi.FRAMEBUFFER as uint32, 0)
+    return texture
+}
+
+// The scene pass renders into multisampled attachments and resolves down
+// into the single-sample texture the composite samples: up to four samples,
+// or 0 where the context has fewer than two.
+ae3d_gl_max_samples() -> int {
+    most = gl_integer(glapi.MAX_SAMPLES, 0, 1)
+    if most > 4 { most = 4 }
+    if most > 1 { return most }
+    return 0
+}
+
+ae3d_gl_fbo_attach_color_multisample(fbo: int, width: int, height: int, samples: int) -> int {
+    return attach_renderbuffer(fbo, glapi.COLOR_ATTACHMENT0, width, height, samples, glapi.RGBA8)
+}
+
+ae3d_gl_fbo_attach_depth_multisample(fbo: int, width: int, height: int, samples: int) -> int {
+    return attach_renderbuffer(fbo, glapi.DEPTH_STENCIL_ATTACHMENT, width, height, samples, glapi.DEPTH24_STENCIL8)
+}
+
+ae3d_gl_fbo_attach_depth(fbo: int, width: int, height: int) -> int {
+    return attach_renderbuffer(fbo, glapi.DEPTH_STENCIL_ATTACHMENT, width, height, 0, glapi.DEPTH24_STENCIL8)
+}
+
+ae3d_gl_renderbuffer_delete(rbo: int) { gl_drop(NAME_RENDERBUFFER, rbo) }
+
+// What the driver made of the blit, rather than leaving a rejected one to
+// show up as a black frame. A multisample resolve has more ways to be
+// refused than most calls: the two framebuffers have to agree about format
+// and size, and drivers differ in how much they will forgive.
+ae3d_gl_fbo_resolve(source: int, destination: int, width: int, height: int) -> int {
+    drain_errors()
+    glapi.glBindFramebuffer(glapi.READ_FRAMEBUFFER as uint32, source as uint32)
+    glapi.glBindFramebuffer(glapi.DRAW_FRAMEBUFFER as uint32, destination as uint32)
+    status = (glapi.glCheckFramebufferStatus(glapi.READ_FRAMEBUFFER as uint32)) as int
+    if status != glapi.FRAMEBUFFER_COMPLETE {
+        glapi.glBindFramebuffer(glapi.FRAMEBUFFER as uint32, 0)
+        return status
+    }
+    glapi.glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, glapi.COLOR_BUFFER_BIT as uint32, glapi.NEAREST as uint32)
+    status = (glapi.glGetError()) as int
+    glapi.glBindFramebuffer(glapi.FRAMEBUFFER as uint32, 0)
+    return status
+}
+
+ae3d_gl_fbo_complete() -> int {
+    if (glapi.glCheckFramebufferStatus(glapi.FRAMEBUFFER as uint32)) as int == glapi.FRAMEBUFFER_COMPLETE { return 1 }
+    return 0
+}
+
+// The scene's depth as drawn so far, copied into a texture the transparent
+// pass can read: what a water surface asks to know how much water lies
+// between it and the ground. One framebuffer and one depth texture, kept at
+// the size of whatever is being drawn into and remade when that changes;
+// the copy resolves a multisampled frame to one sample, which for depth
+// takes the nearest. The texture, or 0 when the copy failed.
+var g_depth_fbo = 0
+var g_depth_texture = 0
+var g_depth_width = 0
+var g_depth_height = 0
+
+ae3d_gl_scene_depth_capture() -> int {
+    x = gl_integer(glapi.VIEWPORT, 0, 4)
+    y = gl_integer(glapi.VIEWPORT, 1, 4)
+    width = gl_integer(glapi.VIEWPORT, 2, 4)
+    height = gl_integer(glapi.VIEWPORT, 3, 4)
+    if width < 1 || height < 1 { return 0 }
+    source = gl_integer(glapi.DRAW_FRAMEBUFFER_BINDING, 0, 1)
+    if g_depth_fbo == 0 { g_depth_fbo = gl_name(NAME_FRAMEBUFFER) }
+    if g_depth_texture == 0 || width != g_depth_width || height != g_depth_height {
+        gl_drop(NAME_TEXTURE, g_depth_texture)
+        glapi.glActiveTexture(glapi.TEXTURE0 as uint32)
+        // The same depth-stencil format the frame is drawn with: a blit of
+        // depth is refused between formats that differ, and both the window
+        // and the post-processing target carry 24 bits of depth with 8 of
+        // stencil.
+        g_depth_texture = target_texture(width, height, glapi.DEPTH24_STENCIL8, glapi.DEPTH_STENCIL,
+                                         glapi.UNSIGNED_INT_24_8, glapi.NEAREST)
+        texture_param(glapi.TEXTURE_2D, glapi.TEXTURE_COMPARE_MODE, glapi.NONE)
+        attach_texture(g_depth_fbo, glapi.DEPTH_STENCIL_ATTACHMENT, g_depth_texture, 0)
+        glapi.glDrawBuffer(glapi.NONE as uint32)
+        glapi.glReadBuffer(glapi.NONE as uint32)
+        g_depth_width = width
+        g_depth_height = height
+    }
+    drain_errors()
+    glapi.glBindFramebuffer(glapi.READ_FRAMEBUFFER as uint32, source as uint32)
+    glapi.glBindFramebuffer(glapi.DRAW_FRAMEBUFFER as uint32, g_depth_fbo as uint32)
+    glapi.glBlitFramebuffer(x, y, x + width, y + height, 0, 0, width, height, glapi.DEPTH_BUFFER_BIT as uint32,
+                            glapi.NEAREST as uint32)
+    glapi.glBindFramebuffer(glapi.FRAMEBUFFER as uint32, source as uint32)
+    if (glapi.glGetError()) as int != glapi.NO_ERROR { return 0 }
+    return g_depth_texture
+}
+
+// Packed 0xRRGGBB of one framebuffer pixel, for tests that must prove the
+// scene was drawn rather than merely cleared.
+ae3d_gl_read_pixel(x: int, y: int) -> int {
+    rgba = calloc(4, 1)
+    glapi.glReadPixels(x, y, 1, 1, glapi.RGBA as uint32, glapi.UNSIGNED_BYTE as uint32, rgba)
+    packed = (mem.get_uint8(rgba, 0) << 16) | (mem.get_uint8(rgba, 1) << 8) | mem.get_uint8(rgba, 2)
+    free(rgba)
+    return packed
+}
+
+// The frame on screen as RGBA bytes, top row first, in a buffer the caller
+// frees: read from whatever framebuffer is bound, which for a windowed
+// program between its last draw and its buffer swap is the finished frame.
+// GL hands back rows bottom-up and every image format wants them the other
+// way, so the copy out walks them backwards.
+ae3d_gl_read_frame(width: int, height: int) -> ptr {
+    if width <= 0 || height <= 0 { return null }
+    row = width * 4
+    pixels = calloc(row * height, 1)
+    flipped = calloc(row * height, 1)
+    glapi.glPixelStorei(glapi.PACK_ALIGNMENT as uint32, 1)
+    glapi.glReadPixels(0, 0, width, height, glapi.RGBA as uint32, glapi.UNSIGNED_BYTE as uint32, pixels)
+    y = 0
+    while y < height {
+        mem.copy_at(flipped, (row * y) as long, pixels, (row * (height - 1 - y)) as long, row as long)
+        y = y + 1
+    }
+    free(pixels)
+    return flipped
+}
+
+// The frame's light, for the exposure that follows it (#378).
+//
+// What was drawn, measured: the finished frame copied at its own size into
+// a texture (a blit at the same size is also what resolves a multisampled
+// framebuffer, which a scaling blit may not read), its mip chain built, and
+// the first level no wider than 320 texels read back -- an average of every
+// pixel under each texel, fine enough that a lamp or a lit face covering a
+// few dozen pixels still fills a texel. The read goes into one of three
+// pixel buffers and the one filled two frames ago is mapped, so the CPU
+// never waits on the frame it just asked for. The texels are the
+// tone-mapped, gamma-encoded frame; `out` gets their mean linear luminance
+// and the share of them near white (past 0.8 linear), which is what an
+// exposure that follows the frame steers by. A source of -1 reads the
+// framebuffer the frame was drawn into. True when `out` holds a
+// measurement, false until the first one is back.
+const METER_PACKS = 3
+const TEXTURE_MAX_LEVEL = 33085       // 0x813D
+const READ_FRAMEBUFFER_BINDING = 36010 // 0x8CAA
+
+struct GLMeter {
+    texture: int
+    framebuffer: int
+    level_framebuffer: int
+    packs: ptr                       // int[METER_PACKS], pixel pack buffers
+    width: int
+    height: int
+    level: int
+    level_width: int
+    level_height: int
+    index: int
+    filled: int
+    linear: ptr                      // float[256]: an sRGB byte's linear light
+}
+
+var g_meter: ptr = null
+
+gl_meter() -> *GLMeter {
+    if g_meter == null {
+        m = calloc(1, sizeof(GLMeter)) as *GLMeter
+        m.packs = calloc(METER_PACKS, 4)
+        m.linear = calloc(256, 8)
+        table = m.linear as float[]
+        i = 0
+        while i < 256 {
+            v = (i as float) / 255.0
+            if v <= 0.04045 { table[i] = v / 12.92 } else { table[i] = pow((v + 0.055) / 1.055, 2.4) }
+            i = i + 1
+        }
+        g_meter = m as ptr
+    }
+    return g_meter as *GLMeter
+}
+
+meter_free(m: *GLMeter) {
+    gl_drop(NAME_TEXTURE, m.texture)
+    gl_drop(NAME_FRAMEBUFFER, m.framebuffer)
+    gl_drop(NAME_FRAMEBUFFER, m.level_framebuffer)
+    packs = m.packs as int[]
+    if packs[0] != 0 { glapi.glDeleteBuffers(METER_PACKS, m.packs) }
+    i = 0
+    while i < METER_PACKS {
+        packs[i] = 0
+        i = i + 1
+    }
+    m.texture = 0
+    m.framebuffer = 0
+    m.level_framebuffer = 0
+    m.width = 0
+    m.height = 0
+    m.index = 0
+    m.filled = 0
+}
+
+meter_make(m: *GLMeter, width: int, height: int) {
+    meter_free(m)
+    level = 0
+    w = width
+    h = height
+    while w > 320 {
+        w = w / 2
+        h = h / 2
+        if w < 1 { w = 1 }
+        if h < 1 { h = 1 }
+        level = level + 1
+    }
+    m.texture = gl_name(NAME_TEXTURE)
+    glapi.glBindTexture(glapi.TEXTURE_2D as uint32, m.texture as uint32)
+    glapi.glTexImage2D(glapi.TEXTURE_2D as uint32, 0, glapi.RGBA, width, height, 0, glapi.RGBA as uint32,
+                       glapi.UNSIGNED_BYTE as uint32, null)
+    texture_param(glapi.TEXTURE_2D, TEXTURE_MAX_LEVEL, level)
+    glapi.glGenerateMipmap(glapi.TEXTURE_2D as uint32)
+    glapi.glBindTexture(glapi.TEXTURE_2D as uint32, 0)
+    m.framebuffer = gl_name(NAME_FRAMEBUFFER)
+    attach_texture(m.framebuffer, glapi.COLOR_ATTACHMENT0, m.texture, 0)
+    m.level_framebuffer = gl_name(NAME_FRAMEBUFFER)
+    attach_texture(m.level_framebuffer, glapi.COLOR_ATTACHMENT0, m.texture, level)
+    glapi.glGenBuffers(METER_PACKS, m.packs)
+    packs = m.packs as int[]
+    i = 0
+    while i < METER_PACKS {
+        glapi.glBindBuffer(glapi.PIXEL_PACK_BUFFER as uint32, packs[i] as uint32)
+        glapi.glBufferData(glapi.PIXEL_PACK_BUFFER as uint32, (w * h * 4) as long, null, glapi.STREAM_READ as uint32)
+        i = i + 1
+    }
+    glapi.glBindBuffer(glapi.PIXEL_PACK_BUFFER as uint32, 0)
+    m.width = width
+    m.height = height
+    m.level = level
+    m.level_width = w
+    m.level_height = h
+}
+
+ae3d_gl_meter(source: int, width: int, height: int, out: ptr) -> int {
+    if width < 1 || height < 1 || out == null { return 0 }
+    m = gl_meter()
+    if width != m.width || height != m.height || m.texture == 0 { meter_make(m, width, height) }
+    previous_read = gl_integer(READ_FRAMEBUFFER_BINDING, 0, 1)
+    previous_draw = gl_integer(glapi.DRAW_FRAMEBUFFER_BINDING, 0, 1)
+    // -1: whatever the frame was drawn into, the window or a target.
+    from = source
+    if from < 0 { from = previous_draw }
+    glapi.glBindFramebuffer(glapi.READ_FRAMEBUFFER as uint32, from as uint32)
+    glapi.glBindFramebuffer(glapi.DRAW_FRAMEBUFFER as uint32, m.framebuffer as uint32)
+    glapi.glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, glapi.COLOR_BUFFER_BIT as uint32, glapi.NEAREST as uint32)
+    glapi.glBindTexture(glapi.TEXTURE_2D as uint32, m.texture as uint32)
+    glapi.glGenerateMipmap(glapi.TEXTURE_2D as uint32)
+    glapi.glBindTexture(glapi.TEXTURE_2D as uint32, 0)
+    glapi.glBindFramebuffer(glapi.READ_FRAMEBUFFER as uint32, m.level_framebuffer as uint32)
+    glapi.glPixelStorei(glapi.PACK_ALIGNMENT as uint32, 1)
+    packs = m.packs as int[]
+    glapi.glBindBuffer(glapi.PIXEL_PACK_BUFFER as uint32, packs[m.index] as uint32)
+    glapi.glReadPixels(0, 0, m.level_width, m.level_height, glapi.RGBA as uint32, glapi.UNSIGNED_BYTE as uint32, null)
+    m.filled = m.filled + 1
+    got = 0
+    // The one read two frames ago, when there has been one.
+    if m.filled >= METER_PACKS {
+        ready = (m.index + 1) % METER_PACKS
+        glapi.glBindBuffer(glapi.PIXEL_PACK_BUFFER as uint32, packs[ready] as uint32)
+        texels = glapi.glMapBuffer(glapi.PIXEL_PACK_BUFFER as uint32, glapi.READ_ONLY as uint32)
+        if texels != null {
+            table = m.linear as float[]
+            count = m.level_width * m.level_height
+            sum = 0.0
+            white = 0
+            i = 0
+            while i < count {
+                at = i * 4
+                luma = 0.2126 * table[mem.get_uint8(texels, at)] + 0.7152 * table[mem.get_uint8(texels, at + 1)] +
+                       0.0722 * table[mem.get_uint8(texels, at + 2)]
+                sum = sum + luma
+                if luma > 0.8 { white = white + 1 }
+                i = i + 1
+            }
+            o = out as float[]
+            o[0] = sum / (count as float)
+            o[1] = (white as float) / (count as float)
+            glapi.glUnmapBuffer(glapi.PIXEL_PACK_BUFFER as uint32)
+            got = 1
+        }
+    }
+    glapi.glBindBuffer(glapi.PIXEL_PACK_BUFFER as uint32, 0)
+    m.index = (m.index + 1) % METER_PACKS
+    glapi.glBindFramebuffer(glapi.READ_FRAMEBUFFER as uint32, previous_read as uint32)
+    glapi.glBindFramebuffer(glapi.DRAW_FRAMEBUFFER as uint32, previous_draw as uint32)
+    return got
+}
 
 // --- programs, uniforms and textures, in Aether (#398) ---------------------------------------
 
@@ -727,6 +1301,35 @@ ae3d_gl_draw_elements_instanced(count: int, byte_offset: int, instances: int) {
 ae3d_gl_draw_arrays(first: int, count: int) {
     glapi.glDrawArrays(glapi.TRIANGLES as uint32, first, count)
 }
+
+// --- the context's entry points, its version and its renderer (#398) -----------------------
+
+var g_loaded = false
+var g_version = ""
+var g_renderer = ""
+
+// One of GL's strings (glGetString), as an Aether string.
+gl_string(name: int) -> string {
+    p = glapi.glGetString(name as uint32)
+    if p == null { return "" }
+    return bytes.string_from_ptr(p, strlen(p))
+}
+
+// Whether the current context has every entry point ae3d calls: 0 when it
+// has, or how many it lacks. The version and the renderer are read once.
+ae3d_gl_load() -> int {
+    if g_loaded { return 0 }
+    missing = glapi.missing()
+    if missing == 0 {
+        g_version = gl_string(glapi.VERSION)
+        g_renderer = gl_string(glapi.RENDERER)
+        g_loaded = true
+    }
+    return missing
+}
+
+ae3d_gl_version() -> string { return g_version }
+ae3d_gl_renderer() -> string { return g_renderer }
 
 // --- the GL state, in Aether (#398) ----------------------------------------------------------
 //
@@ -2489,7 +3092,7 @@ renderer_set_target(r: *GLRenderer, target: ptr) {
 
 bind_output(r: *GLRenderer) {
     if r.target != null {
-        ae3d_offscreen_bind(r.target)
+        offscreen.target_bind(r.target)
     } else {
         ae3d_gl_fbo_bind(0)
     }
@@ -2627,7 +3230,7 @@ renderer_update_viewport(r: *GLRenderer, width: int, height: int) {
     ae3d_gl_viewport(0, 0, width, height)
     r.viewport_width = width
     r.viewport_height = height
-    if r.target != null { ae3d_offscreen_resize(r.target, width, height) }
+    if r.target != null { offscreen.target_resize(r.target, width, height) }
 
     // The scene is drawn into the post buffers before an effect composites it,
     // and they are resized lazily by comparing the viewport against the size
@@ -2653,7 +3256,7 @@ vtable_set_shadows(r: *GLRenderer, on: int) {
 
 renderer_frame_pixels(r: *GLRenderer) -> ptr {
     if r.target == null { return null }
-    return ae3d_offscreen_read_pipelined(r.target)
+    return offscreen.target_pixels_pipelined(r.target)
 }
 
 renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
