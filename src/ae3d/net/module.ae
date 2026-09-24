@@ -43,7 +43,7 @@ exports (
     host_loopback, join_loopback, host_tcp, join_tcp, tcp_port,
     networked, networked_count, step, attach, connected, client_id, peer_count, view_time,
     set_tick_rate, set_interpolation_delay, bytes_sent, bytes_received, snapshots_received,
-    NetPlayer, set_player_maker, player_input, my_player, player_of, player_count, prediction_error, input_sent,
+    NetPlayer, set_player_maker, host_play, player_input, my_player, player_of, player_count, prediction_error, input_sent,
     net_free, last_error
 )
 
@@ -1179,13 +1179,37 @@ step_players(n: *Net, delta: float) {
     }
 }
 
+// The host plays too (a listen server): a player of its own, client 0,
+// made now and told to every client as any player is. Its commands move it
+// directly -- the host's world is the authority, so there is nothing to
+// predict. Null without a player maker.
+host_play(n: *Net, now: float) -> *NetPlayer {
+    if n.role != ROLE_HOST { return null }
+    if n.mine != null { return n.mine as *NetPlayer }
+    pl = make_player(n, 0, list.size(n.objects) + 1)
+    if pl == null { return null }
+    n.mine = pl as ptr
+    i = 0
+    while i < list.size(n.peers) {
+        p = list.get_raw(n.peers, i) as *Peer
+        if p.welcomed { tell_spawn(n, p, pl, now) }
+        i = i + 1
+    }
+    return pl
+}
+
 // A client's command for this fixed step: its own player moves by it now,
 // ahead of the host, and it goes to the host with the ones the host has not
 // yet acknowledged (so a lost message costs nothing). Before the host has
-// spawned the player, nothing.
+// spawned the player, nothing. On the host, its own player (host_play)
+// moves, and that is all.
 player_input(n: *Net, walk: Vec3, jump: float, now: float) {
     mine = n.mine as *NetPlayer
-    if n.role != ROLE_CLIENT || mine == null { return }
+    if mine == null { return }
+    if n.role == ROLE_HOST {
+        physics.character_move(mine.controller, core.vec3(walk.x, 0.0, walk.z), jump, PLAYER_STEP)
+        return
+    }
     if n.command_count >= COMMANDS { return }
     seq = n.next_seq
     n.next_seq = n.next_seq + 1
