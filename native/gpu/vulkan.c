@@ -4034,11 +4034,22 @@ int ae3d_vk_init(void *win, int width, int height) {
     float bloom_threshold = vk.bloom_threshold, bloom_intensity = vk.bloom_intensity;
     int dlss_loaded = vk.dlss_loaded;
     double render_scale = vk.render_scale;
+    /* The frame hooks an Aether module installed (ae3d.vkmeter switches
+       itself on when the engine asks, which can be before the device is
+       made): kept, as the settings above are. */
+    void (*hook_record)(void *) = vk.hook_record;
+    void (*hook_collect)(void *) = vk.hook_collect;
+    void (*hook_release)(void *) = vk.hook_release;
+    void *hook_context = vk.hook_context;
 
     if (vk.ready) return 1;
     if (!ae3d_vk_available()) return 0;
 
     memset(&vk, 0, sizeof(vk));
+    vk.hook_record = hook_record;
+    vk.hook_collect = hook_collect;
+    vk.hook_release = hook_release;
+    vk.hook_context = hook_context;
     vk.shadow_enabled = shadows;
     vk.dlss_loaded = dlss_loaded;
     vk.render_scale = render_scale;
@@ -7455,5 +7466,17 @@ void ae3d_vk_shutdown(void) {
     if (vk.surface && ae3d_vkDestroySurfaceKHR) ae3d_vkDestroySurfaceKHR(vk.instance, vk.surface, NULL);
     if (vk.instance) ae3d_vkDestroyInstance(vk.instance, NULL);
 
-    memset(&vk, 0, sizeof(vk));
+    {
+        /* The hooks outlive the device: installed once a process, they are
+           the next device's too. */
+        void (*hook_record)(void *) = vk.hook_record;
+        void (*hook_collect)(void *) = vk.hook_collect;
+        void (*hook_release)(void *) = vk.hook_release;
+        void *hook_context = vk.hook_context;
+        memset(&vk, 0, sizeof(vk));
+        vk.hook_record = hook_record;
+        vk.hook_collect = hook_collect;
+        vk.hook_release = hook_release;
+        vk.hook_context = hook_context;
+    }
 }

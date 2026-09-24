@@ -144,11 +144,15 @@ ae3d_native_build "$CC" "$OBJ_DIR" "$CFLAGS" "$GLFW_LIBS"
 # of the aether-ui checkout, aephysics.* out of its submodule.
 export AETHER_LIB_DIR="$ROOT/src:$UI_ROOT:$AEPHYSICS"
 aetherc "$SOURCE" "$GEN"
+# C files a module compiles into the program with @source (contrib.vulkan's
+# loader, which ae3d.vkmeter's contrib.vulkan.vk calls through), as build.sh
+# links them.
+AETHER_SOURCES="$(sed -n 's|^// aether-source: ||p' "$GEN" | tr '\\' '/')"
 
 # zlib belongs to the engine, which is a library of its own and names it on its
 # own link line; GLFW is named, since the engine's Aether calls it
 # (ae3d.platform). PLATFORM_LIBS here is aether-ui's.
-"$CC" $CFLAGS $UI_FLAGS "$GEN" $UI_SOURCES $(ae3d_native_link_flags) $GLFW_LIBS \
+"$CC" $CFLAGS $UI_FLAGS "$GEN" $UI_SOURCES $AETHER_SOURCES $(ae3d_native_link_flags) $GLFW_LIBS \
     $AETHER_COMPILE_FLAGS $AETHER_LIBS $PLATFORM_LIBS \
     -o "$OUT"
 
