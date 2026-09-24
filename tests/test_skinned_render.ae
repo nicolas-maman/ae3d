@@ -17,7 +17,7 @@ import std.mem
 import std.string
 import ae3d.core
 import ae3d.gl
-import ae3d.vk
+import ae3d.vulkan
 import ae3d.offscreen
 import ae3d.loader
 import ae3d.skin
@@ -273,10 +273,10 @@ main() {
     // The same thing through Vulkan, which reaches the palette by a different
     // road: a uniform block at a generated offset rather than a uniform array,
     // and a second pipeline rather than a branch on a bound attribute.
-    vk_renderer = vk.renderer_new()
-    vk_pass = vk.backend(vk_renderer)
+    vk_renderer = vulkan.renderer_new()
+    vk_pass = vulkan.backend(vk_renderer)
     if !core.backend_init(&vk_pass, null, WIDTH, HEIGHT) {
-        println("  skip Vulkan would not start (${vk.last_error()})")
+        println("  skip Vulkan would not start (${vulkan.last_error()})")
         free(bind_pixels)
         free(rigid_pixels)
         core.backend_remove_model(&gl_pass, posed)
@@ -288,13 +288,13 @@ main() {
         skin.skeleton_free(skeleton)
         free_bones(bones)
         gl.renderer_free(gl_renderer)
-        vk.renderer_free(vk_renderer)
+        vulkan.renderer_free(vk_renderer)
         core.light_free(light)
         core.camera_free(cam)
         report()
         return
     }
-    vk.renderer_set_clear_color(vk_renderer, 0.0, 0.0, 0.0)
+    vulkan.renderer_set_clear_color(vk_renderer, 0.0, 0.0, 0.0)
 
     vk_bones = build_bones()
     vk_skeleton = skin.skeleton_new()
@@ -310,7 +310,7 @@ main() {
     core.backend_add_model(&vk_pass, vk_rigid)
     core.backend_render(&vk_pass, cam, light)
     vk_rigid_pixels = calloc(WIDTH * HEIGHT, 4)
-    memcpy(vk_rigid_pixels, vk.offscreen_pixels(), WIDTH * HEIGHT * 4)
+    memcpy(vk_rigid_pixels, vulkan.offscreen_pixels(), WIDTH * HEIGHT * 4)
     core.backend_remove_model(&vk_pass, vk_rigid)
 
     vk_posed = core.model_new()
@@ -319,13 +319,13 @@ main() {
     core.backend_add_model(&vk_pass, vk_posed)
     core.backend_render(&vk_pass, cam, light)
     check("vulkan draws a bind pose the way it draws an unskinned mesh",
-          differing(vk_rigid_pixels, vk.offscreen_pixels()) == 0)
+          differing(vk_rigid_pixels, vulkan.offscreen_pixels()) == 0)
 
     vk_bind_pixels = calloc(WIDTH * HEIGHT, 4)
-    memcpy(vk_bind_pixels, vk.offscreen_pixels(), WIDTH * HEIGHT * 4)
+    memcpy(vk_bind_pixels, vulkan.offscreen_pixels(), WIDTH * HEIGHT * 4)
     bend(vk_bones, QUARTER_TURN / 6.0)
     core.backend_render(&vk_pass, cam, light)
-    bent_vk = differing(vk_bind_pixels, vk.offscreen_pixels())
+    bent_vk = differing(vk_bind_pixels, vulkan.offscreen_pixels())
     check("vulkan bends it too", bent_vk > WIDTH * HEIGHT / 20)
 
     // Both backends were given the same bend, so they have to have moved about
@@ -346,7 +346,7 @@ main() {
     core.camera_set_position(cam, core.vec3(0.0, 2.0, 0.0 - 53.0))
     core.camera_look_at(cam, core.vec3(0.0, 2.0, 0.0 - 60.0))
     core.backend_render(&vk_pass, cam, light)
-    vk_carried = lit(vk.offscreen_pixels())
+    vk_carried = lit(vulkan.offscreen_pixels())
     check("vulkan draws a figure carried away by its bones with the origin out of view (${vk_carried} lit)", vk_carried > bind_lit / 2)
     core.set_frustum_culling(culling_was)
 
@@ -376,7 +376,7 @@ main() {
     free_bones(bones)
 
     gl.renderer_free(gl_renderer)
-    vk.renderer_free(vk_renderer)
+    vulkan.renderer_free(vk_renderer)
     core.light_free(light)
     core.camera_free(cam)
     report()

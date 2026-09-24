@@ -15,7 +15,7 @@
 import std.mem
 import std.os
 import ae3d.core
-import ae3d.vk
+import ae3d.vulkan
 import ae3d.loader
 
 const WIDTH = 640
@@ -74,27 +74,27 @@ lit_at(pixels: ptr, x: int, y: int) -> bool {
 }
 
 main() {
-    if !vk.available() {
-        println("dlss: SKIP no Vulkan driver (${vk.last_error()})")
+    if !vulkan.available() {
+        println("dlss: SKIP no Vulkan driver (${vulkan.last_error()})")
         return
     }
     // Before the backend: the runtime becomes the Vulkan loader.
-    if !vk.request_dlss(core.text(os.getenv("AE3D_STREAMLINE"))) {
-        println("dlss: SKIP ${vk.last_error()}")
+    if !vulkan.request_dlss(core.text(os.getenv("AE3D_STREAMLINE"))) {
+        println("dlss: SKIP ${vulkan.last_error()}")
         return
     }
-    vk.set_samples(0)
-    renderer = vk.renderer_new()
-    backend = vk.backend(renderer)
+    vulkan.set_samples(0)
+    renderer = vulkan.renderer_new()
+    backend = vulkan.backend(renderer)
     if !core.backend_init(&backend, null, WIDTH, HEIGHT) {
-        println("dlss: SKIP Vulkan would not start (${vk.last_error()})")
-        vk.renderer_free(renderer)
+        println("dlss: SKIP Vulkan would not start (${vulkan.last_error()})")
+        vulkan.renderer_free(renderer)
         return
     }
     if ae3d_vk_dlss_available() != 1 {
-        println("dlss: SKIP not for this device (${vk.last_error()})")
+        println("dlss: SKIP not for this device (${vulkan.last_error()})")
         core.backend_cleanup(&backend)
-        vk.renderer_free(renderer)
+        vulkan.renderer_free(renderer)
         return
     }
     core.backend_set_clear_color(&backend, 0.02, 0.02, 0.05)
@@ -125,7 +125,7 @@ main() {
     native = sharpness(frame(&backend, cam, light, 24))
 
     // DLSS performance, the same render size: half the frame each way.
-    got = vk.renderer_set_dlss(renderer, 1)
+    got = vulkan.renderer_set_dlss(renderer, 1)
     check("performance mode is the mode in force (${got})", got == 1)
     if got == 1 {
         pixels = frame(&backend, cam, light, 40)
@@ -134,8 +134,8 @@ main() {
         println("  sharpness: composite at half ${plain}, native ${native}, DLSS performance ${upscaled}")
         check("DLSS from half the pixels is sharper than the composite's scaling of them", upscaled > plain * 1.1)
         check("and within reach of the native frame", upscaled > native * 0.8)
-        off = vk.renderer_set_dlss(renderer, 0)
-        check("off again", off == 0 && vk.renderer_dlss(renderer) == 0)
+        off = vulkan.renderer_set_dlss(renderer, 0)
+        check("off again", off == 0 && vulkan.renderer_dlss(renderer) == 0)
         again = sharpness(frame(&backend, cam, light, 8))
         drift = again - native
         if drift < 0.0 { drift = 0.0 - drift }
@@ -143,7 +143,7 @@ main() {
     }
 
     core.backend_cleanup(&backend)
-    vk.renderer_free(renderer)
+    vulkan.renderer_free(renderer)
     core.camera_free(cam)
     core.light_free(light)
 

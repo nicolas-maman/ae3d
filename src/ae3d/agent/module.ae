@@ -14,7 +14,7 @@ import std.list
 import ae3d.core
 import ae3d.gl
 import ae3d.skin
-import ae3d.vk
+import ae3d.vulkan
 import ae3d.anim
 import ae3d.assets
 import ae3d.scene
@@ -494,8 +494,8 @@ stats_result(c: *Context) -> ptr {
     if c.vk_renderer != null {
         stages = json.obj()
         k = 3
-        while k < vk.STAGE_COUNT {
-            json.object_set_raw(stages, vk.stage_name(k), json.num(vk.renderer_stage_ms(c.vk_renderer as *VKRenderer, k)))
+        while k < vulkan.STAGE_COUNT {
+            json.object_set_raw(stages, vulkan.stage_name(k), json.num(vulkan.renderer_stage_ms(c.vk_renderer as *VKRenderer, k)))
             k = k + 1
         }
         json.object_set_raw(out, "stages_ms", stages)
@@ -525,7 +525,7 @@ stats_result(c: *Context) -> ptr {
     json.object_set_raw(render, "post", json.boolean(c.post_active))
     bloom = 0.0
     if c.vk_renderer != null {
-        bloom = vk.renderer_bloom_intensity(c.vk_renderer as *VKRenderer)
+        bloom = vulkan.renderer_bloom_intensity(c.vk_renderer as *VKRenderer)
     } else if c.gl_renderer != null {
         bloom = gl.renderer_bloom_intensity(c.gl_renderer as *GLRenderer)
     }
@@ -534,7 +534,7 @@ stats_result(c: *Context) -> ptr {
     // is never on, so the flag reads false there rather than being absent.
     reflecting = false
     if c.vk_renderer != null {
-        reflecting = vk.renderer_ssr(c.vk_renderer as *VKRenderer)
+        reflecting = vulkan.renderer_ssr(c.vk_renderer as *VKRenderer)
     }
     json.object_set_raw(render, "ssr", json.boolean(reflecting))
     json.object_set_raw(out, "render", render)
@@ -557,13 +557,13 @@ camera_result(c: *Context) -> ptr {
 
 model_count(c: *Context) -> int {
     if c.gl_renderer != null { return gl.renderer_model_count(c.gl_renderer) }
-    if c.vk_renderer != null { return vk.renderer_model_count(c.vk_renderer) }
+    if c.vk_renderer != null { return vulkan.renderer_model_count(c.vk_renderer) }
     return 0
 }
 
 model_at(c: *Context, index: int) -> *Model {
     if c.gl_renderer != null { return gl.renderer_model(c.gl_renderer, index) }
-    if c.vk_renderer != null { return vk.renderer_model(c.vk_renderer, index) }
+    if c.vk_renderer != null { return vulkan.renderer_model(c.vk_renderer, index) }
     return null
 }
 
@@ -680,7 +680,7 @@ audit_model(c: *Context, m: *Model, entry: ptr) {
     if c.gl_renderer != null {
         size = gl.renderer_material_texture_size(c.gl_renderer as *GLRenderer, model_surface(m))
     } else if c.vk_renderer != null {
-        size = vk.renderer_material_texture_size(c.vk_renderer as *VKRenderer, model_surface(m))
+        size = vulkan.renderer_material_texture_size(c.vk_renderer as *VKRenderer, model_surface(m))
     }
     if size.x > 0.0 {
         json.object_set_raw(entry, "texture_pixels", json.from_int(size.x as int))
@@ -796,13 +796,13 @@ model_result(m: *Model, index: int) -> ptr {
 
 extra_light_count(c: *Context) -> int {
     if c.gl_renderer != null { return gl.renderer_light_count(c.gl_renderer) }
-    if c.vk_renderer != null { return vk.renderer_light_count(c.vk_renderer) }
+    if c.vk_renderer != null { return vulkan.renderer_light_count(c.vk_renderer) }
     return 0
 }
 
 extra_light_at(c: *Context, index: int) -> *Light {
     if c.gl_renderer != null { return gl.renderer_light(c.gl_renderer, index) }
-    if c.vk_renderer != null { return vk.renderer_light(c.vk_renderer, index) }
+    if c.vk_renderer != null { return vulkan.renderer_light(c.vk_renderer, index) }
     return null
 }
 
@@ -948,12 +948,12 @@ apply_light_write(l: *Light, request: ptr) {
 
 remove_model_from_renderer(c: *Context, m: *Model) {
     if c.gl_renderer != null { gl.renderer_remove_model(c.gl_renderer, m) }
-    if c.vk_renderer != null { vk.renderer_remove_model(c.vk_renderer, m) }
+    if c.vk_renderer != null { vulkan.renderer_remove_model(c.vk_renderer, m) }
 }
 
 add_model_to_renderer(c: *Context, m: *Model) {
     if c.gl_renderer != null { gl.renderer_add_model(c.gl_renderer, m) }
-    if c.vk_renderer != null { vk.renderer_add_model(c.vk_renderer, m) }
+    if c.vk_renderer != null { vulkan.renderer_add_model(c.vk_renderer, m) }
 }
 
 view_from_camera(c: *Context) -> View {
@@ -1667,7 +1667,7 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
                 gl.renderer_set_clouds(c.gl_renderer as *GLRenderer, cover, wind)
             }
             if c.vk_renderer != null {
-                vk.renderer_set_clouds(c.vk_renderer as *VKRenderer, cover, wind)
+                vulkan.renderer_set_clouds(c.vk_renderer as *VKRenderer, cover, wind)
             }
             json.object_set_raw(out, "clouds", json.num(cover))
             json.object_set_raw(out, "cloud_wind", json.num(wind))
@@ -1685,7 +1685,7 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
                 gl.renderer_set_sky_overcast(c.gl_renderer as *GLRenderer, amount, tint)
             }
             if c.vk_renderer != null {
-                vk.renderer_set_sky_overcast(c.vk_renderer as *VKRenderer, amount, tint)
+                vulkan.renderer_set_sky_overcast(c.vk_renderer as *VKRenderer, amount, tint)
             }
             json.object_set_raw(out, "overcast", json.num(amount))
             json.object_set_raw(out, "overcast_color", vec3_json(tint.x, tint.y, tint.z))
@@ -1696,7 +1696,7 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
                 gl.renderer_set_normal_strength(c.gl_renderer as *GLRenderer, strength)
             }
             if c.vk_renderer != null {
-                vk.renderer_set_normal_strength(c.vk_renderer as *VKRenderer, strength)
+                vulkan.renderer_set_normal_strength(c.vk_renderer as *VKRenderer, strength)
             }
             json.object_set_raw(out, "normal_strength", json.num(strength))
         }
@@ -1706,7 +1706,7 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
                 gl.renderer_set_occlusion_strength(c.gl_renderer as *GLRenderer, strength)
             }
             if c.vk_renderer != null {
-                vk.renderer_set_occlusion_strength(c.vk_renderer as *VKRenderer, strength)
+                vulkan.renderer_set_occlusion_strength(c.vk_renderer as *VKRenderer, strength)
             }
             json.object_set_raw(out, "occlusion_strength", json.num(strength))
         }
@@ -1716,7 +1716,7 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
                 gl.renderer_set_bloom_intensity(c.gl_renderer as *GLRenderer, strength)
             }
             if c.vk_renderer != null {
-                vk.renderer_set_bloom_intensity(c.vk_renderer as *VKRenderer, strength)
+                vulkan.renderer_set_bloom_intensity(c.vk_renderer as *VKRenderer, strength)
             }
             json.object_set_raw(out, "bloom_intensity", json.num(strength))
         }
@@ -1726,7 +1726,7 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
                 gl.renderer_set_shadows(c.gl_renderer as *GLRenderer, on)
             }
             if c.vk_renderer != null {
-                vk.renderer_set_shadows(c.vk_renderer as *VKRenderer, on)
+                vulkan.renderer_set_shadows(c.vk_renderer as *VKRenderer, on)
             }
             json.object_set_raw(out, "shadows", json.boolean(on))
         }
@@ -1738,7 +1738,7 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
             strength = 0.6
             if ssr_str != null { strength = json.get_number(ssr_str) }
             if c.vk_renderer != null {
-                vk.renderer_set_ssr_params(c.vk_renderer as *VKRenderer, height, strength)
+                vulkan.renderer_set_ssr_params(c.vk_renderer as *VKRenderer, height, strength)
             }
             json.object_set_raw(out, "ssr_road_height", json.num(height))
             json.object_set_raw(out, "ssr_strength", json.num(strength))
@@ -1746,7 +1746,7 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
         if reflecting != null {
             on = json.get_bool(reflecting) == 1
             if c.vk_renderer != null {
-                vk.renderer_set_ssr(c.vk_renderer as *VKRenderer, on)
+                vulkan.renderer_set_ssr(c.vk_renderer as *VKRenderer, on)
             }
             json.object_set_raw(out, "ssr", json.boolean(on))
         }

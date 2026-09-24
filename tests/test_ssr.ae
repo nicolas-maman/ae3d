@@ -11,7 +11,7 @@
 
 import std.mem
 import ae3d.core
-import ae3d.vk
+import ae3d.vulkan
 import ae3d.loader
 
 extern calloc(count: int, size: int) -> ptr
@@ -63,14 +63,14 @@ light_below(pixels: ptr, from: int) -> int {
 }
 
 main() {
-    if !vk.available() {
-        println("ssr: SKIP no Vulkan driver (${vk.last_error()})")
+    if !vulkan.available() {
+        println("ssr: SKIP no Vulkan driver (${vulkan.last_error()})")
         return
     }
-    renderer = vk.renderer_new()
-    pass = vk.backend(renderer)
+    renderer = vulkan.renderer_new()
+    pass = vulkan.backend(renderer)
     if !core.backend_init(&pass, null, WIDTH, HEIGHT) {
-        println("ssr: SKIP Vulkan would not start (${vk.last_error()})")
+        println("ssr: SKIP Vulkan would not start (${vulkan.last_error()})")
         return
     }
     core.backend_set_clear_color(&pass, 0.0, 0.0, 0.0)
@@ -97,11 +97,11 @@ main() {
     light.intensity = 0.2
     light.ambient_strength = 0.1
 
-    vk.renderer_set_ssr(renderer, false)
+    vulkan.renderer_set_ssr(renderer, false)
     core.backend_render(&pass, cam, light)
     off = frame(&pass, cam, light)
-    vk.renderer_set_ssr_params(renderer, ROAD, 1.5)
-    vk.renderer_set_ssr(renderer, true)
+    vulkan.renderer_set_ssr_params(renderer, ROAD, 1.5)
+    vulkan.renderer_set_ssr(renderer, true)
     core.backend_render(&pass, cam, light)
     on = frame(&pass, cam, light)
 
@@ -130,7 +130,7 @@ main() {
     check("the reflection brightens the plane under the block", below_on > below_off * 11 / 10)
     check("and changes the plane, not the block or the sky", below > 200 && above < 50)
 
-    vk.renderer_set_ssr(renderer, false)
+    vulkan.renderer_set_ssr(renderer, false)
     core.backend_render(&pass, cam, light)
     back = frame(&pass, cam, light)
     diff = 0
@@ -153,7 +153,7 @@ main() {
     core.camera_free(cam)
     core.light_free(light)
     core.backend_cleanup(&pass)
-    vk.renderer_free(renderer)
+    vulkan.renderer_free(renderer)
     if failures == 0 {
         println("ssr: all checks passed")
     } else {

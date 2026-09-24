@@ -63,7 +63,7 @@ after `n` frames, which is what makes every example a smoke test.
 `ae3d.core` defines the scene types -- models, meshes, materials, lights,
 the camera -- and a `Backend` vtable. Two backends implement it:
 
-- **`ae3d.vk`** (Vulkan, the default), the renderer the engine is built
+- **`ae3d.vulkan`** (Vulkan, the default), the renderer the engine is built
   toward: shadow pass, camera-depth prepass, sky, opaque, occlusion,
   transparent and post, with ray queries where the device has them, the
   crowd sorted by compute and drawn through indirect commands, DLSS
@@ -107,7 +107,7 @@ says what it is for and why it is shaped as it is.
 | Area | Modules |
 |---|---|
 | Foundation | `core` (linear algebra, scene types, camera, the backend vtable), `platform` (the window, input and timing, over GLFW called directly), `engine` (the loop, behaviours, the window), `behaviour` (game objects and components), `input` (actions and axes), `jobs` (the pool) |
-| Rendering | `vk`, `gl`, `shaders` (the GLSL), `vkscene` (generated), `rendering` (shading presets), `offscreen` (a frame to a buffer), `sky` (the sun by the hour), `cloudnoise` (the clouds' textures), `water` (a Gerstner sea), `weather` (rain, snow, dust, storm) |
+| Rendering | `vulkan`, `gl`, `vkmeter` (the frame's light, on contrib.vulkan.vk), `shaders` (the GLSL), `vkscene` (generated), `rendering` (shading presets), `offscreen` (a frame to a buffer), `sky` (the sun by the hour), `cloudnoise` (the clouds' textures), `water` (a Gerstner sea), `weather` (rain, snow, dust, storm) |
 | Geometry and assets | `geometry` (the mesh and instance stores the renderers read), `posing` (bone palettes, pose banks), `loader` (OBJ, primitives), `gltf`, `assets` (the Blender export), `blob` (a file as bytes), `png` (a frame as a file), `noise`, `voxel`, `terrain`, `raycast`, `skin`, `anim`, `ik` |
 | Simulation | `physics` (aephysics in the loop), `crowd` (pose banks, the device crowd), `horde` (the crowd's kernels), `nav` (the flow field), `ecs` (dense columns for crowds too large to be objects) |
 | Tooling | `agent` (the channel's requests), `channel` (its socket and thread), `probe` (the channel, asking side), `script` (a script as a shared library), `scene` (scene files), `history` (undo) |

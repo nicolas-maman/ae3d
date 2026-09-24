@@ -33,7 +33,7 @@ import ae3d.core
 import ae3d.platform
 import ae3d.engine
 import ae3d.gl
-import ae3d.vk
+import ae3d.vulkan
 import ae3d.assets
 import ae3d.anim
 import ae3d.ik
@@ -108,8 +108,8 @@ chosen_api() -> int {
         return platform.API_GL
     }
     if os.aether_args_count() > 1 && string.equals(os.aether_args_get(1), "vulkan") == 1 {
-        if !vk.available() {
-            println("zombie_street: no Vulkan driver available: ${vk.last_error()}")
+        if !vulkan.available() {
+            println("zombie_street: no Vulkan driver available: ${vulkan.last_error()}")
             os.exit(1)
         }
     }
@@ -175,7 +175,7 @@ report_cost(e: *Engine) {
     if renderer != null {
         draws = gl.renderer_draw_calls(renderer as *GLRenderer)
     } else {
-        draws = vk.renderer_draw_calls(engine.engine_vk_renderer(e))
+        draws = vulkan.renderer_draw_calls(engine.engine_vk_renderer(e))
     }
     println("zombie_street: ${engine.engine_render_ms(e)} ms per frame over ${frames} frames, ${draws} draws, ${triangles()} triangles")
 }
@@ -251,15 +251,15 @@ on_start(state: ptr, e: *Engine) {
         g_sky = gl.skybox_create(renderer as *GLRenderer, SKY)
     } else {
         vulkan = engine.engine_vk_renderer(e)
-        vk.renderer_set_clear_color(vulkan, SKY_R, SKY_G, SKY_B)
-        g_sky = vk.skybox_create(vulkan, SKY)
+        vulkan.renderer_set_clear_color(vulkan, SKY_R, SKY_G, SKY_B)
+        g_sky = vulkan.skybox_create(vulkan, SKY)
         // The wet road mirrors the lit street back at the camera. It is a
         // Vulkan-only pass, so it lives on this branch; it composites before the
         // bloom, so the mirrored lamps bloom along with the real ones. The plane
         // sits at the road's height; the strength is dialled for a wet sheen
         // rather than a mirror.
-        vk.renderer_set_ssr_params(vulkan, 0.115, 1.2)
-        vk.renderer_set_ssr(vulkan, true)
+        vulkan.renderer_set_ssr_params(vulkan, 0.115, 1.2)
+        vulkan.renderer_set_ssr(vulkan, true)
     }
     engine.engine_set_skybox(e, g_sky as ptr)
 

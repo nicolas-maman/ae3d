@@ -170,6 +170,20 @@ jobs:
             (cd "$RUNNER_TEMP/aether" && ./install.sh)
           fi
 
+      # install.sh trims contrib/vulkan/aether_vulkan.c from the install, and
+      # contrib.vulkan.vk, which ae3d.vkmeter imports, names it with @source
+      # (aether-lang-dev/aether#2208). Until the installer keeps it, it is
+      # fetched from the commit the toolchain was built from, into every
+      # contrib/vulkan the install holds.
+      - name: Restore contrib.vulkan's C (aether#2208)
+        run: |
+          for dir in $(find "$HOME/.aether" -type d -path "*share/aether/contrib/vulkan"); do
+            if [ ! -f "$dir/aether_vulkan.c" ]; then
+              curl -fsSL "https://raw.githubusercontent.com/aether-lang-dev/aether/${{ steps.aether.outputs.sha }}/contrib/vulkan/aether_vulkan.c" -o "$dir/aether_vulkan.c"
+              echo "restored $dir/aether_vulkan.c"
+            fi
+          done
+
       - name: Run CI
         run: |
           # PATH is set here rather than through GITHUB_PATH. setup-msys2
