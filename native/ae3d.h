@@ -245,6 +245,7 @@ void   ae3d_vk_set_ray_shadows(int on);
 void   ae3d_vk_set_ray_reach(double metres);
 int    ae3d_vk_ray_empty(void);
 int    ae3d_vk_max_texture_size(void);
+void   ae3d_vk_flush_uploads(void);
 void   ae3d_vk_set_meter(int on);
 int    ae3d_vk_meter(double *out);
 void   ae3d_vk_set_ray_budget(int figures);

@@ -522,6 +522,19 @@ static struct {
     VkQueryPool timestamps;
     double timestamp_ms;          /* milliseconds per tick, from the device */
     unsigned max_image_2d;        /* the widest 2D image the device creates */
+    /* Meshes' uploads and structures recorded together and submitted once
+       (ae3d_vk_flush_uploads) rather than a submit and a wait each: a
+       scene of 250 distinct meshes waited on the queue 750 times. */
+    int batching;                 /* inside ae3d_vk_upload_mesh */
+    VkCommandBuffer batch;        /* the recording batch, or null */
+    VkBuffer batch_staging[64];   /* its staging chunks, freed at the flush */
+    VkDeviceMemory batch_staging_memory[64];
+    unsigned char *batch_staging_mapped;
+    VkDeviceSize batch_staging_size, batch_staging_used;
+    int batch_chunks;
+    VkBuffer *batch_scratch;      /* the structures' scratch buffers, freed at the flush */
+    VkDeviceMemory *batch_scratch_memory;
+    int batch_scratch_count, batch_scratch_capacity;
     int timestamps_usable;        /* the graphics queue reports valid bits */
     int stamped[AE3D_VK_FRAMES];  /* this frame's four stamps were all written */
     int stamp_next;               /* how many of this frame's stamps are written */
@@ -1188,9 +1201,121 @@ static int ae3d_vk_create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
     return 1;
 }
 
+/* The batch's command buffer, begun the first time something is recorded
+   into it. */
+static VkCommandBuffer ae3d_vk_batch_command(void) {
+    VkCommandBufferAllocateInfo allocation;
+    VkCommandBufferBeginInfo begin;
+    if (vk.batch) return vk.batch;
+    memset(&allocation, 0, sizeof(allocation));
+    allocation.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocation.commandPool = vk.command_pool;
+    allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocation.commandBufferCount = 1;
+    if (ae3d_vkAllocateCommandBuffers(vk.device, &allocation, &vk.batch) != VK_SUCCESS) {
+        vk.batch = VK_NULL_HANDLE;
+        return VK_NULL_HANDLE;
+    }
+    memset(&begin, 0, sizeof(begin));
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    ae3d_vkBeginCommandBuffer(vk.batch, &begin);
+    return vk.batch;
+}
+
+/* `size` bytes of host-visible staging for the batch, from the current chunk
+   or a new one (16 MB, or the size when larger); null when none can be had,
+   and the caller uploads on its own instead. */
+static VkBuffer ae3d_vk_batch_stage(VkDeviceSize size, VkDeviceSize *offset, unsigned char **at) {
+    VkDeviceSize aligned = (vk.batch_staging_used + 15) & ~(VkDeviceSize)15;
+    if (!vk.batch_chunks || aligned + size > vk.batch_staging_size) {
+        VkDeviceSize chunk = size > (16u << 20) ? size : (16u << 20);
+        int n = vk.batch_chunks;
+        void *mapped = NULL;
+        if (n >= 64) return VK_NULL_HANDLE;
+        if (vk.batch_staging_mapped) ae3d_vkUnmapMemory(vk.device, vk.batch_staging_memory[n - 1]);
+        vk.batch_staging_mapped = NULL;
+        if (!ae3d_vk_create_buffer(chunk, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                   &vk.batch_staging[n], &vk.batch_staging_memory[n])) {
+            g_vk_error[0] = 0;
+            return VK_NULL_HANDLE;
+        }
+        if (ae3d_vkMapMemory(vk.device, vk.batch_staging_memory[n], 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {
+            ae3d_vkDestroyBuffer(vk.device, vk.batch_staging[n], NULL);
+            ae3d_vkFreeMemory(vk.device, vk.batch_staging_memory[n], NULL);
+            return VK_NULL_HANDLE;
+        }
+        vk.batch_chunks = n + 1;
+        vk.batch_staging_mapped = (unsigned char *)mapped;
+        vk.batch_staging_size = chunk;
+        aligned = 0;
+    }
+    *offset = aligned;
+    *at = vk.batch_staging_mapped + aligned;
+    vk.batch_staging_used = aligned + size;
+    return vk.batch_staging[vk.batch_chunks - 1];
+}
+
+/* A structure's scratch, kept until the batch that builds it has run. */
+static void ae3d_vk_batch_keep_scratch(VkBuffer buffer, VkDeviceMemory memory) {
+    if (vk.batch_scratch_count == vk.batch_scratch_capacity) {
+        int grown = vk.batch_scratch_capacity ? vk.batch_scratch_capacity * 2 : 64;
+        VkBuffer *buffers = (VkBuffer *)realloc(vk.batch_scratch, (size_t)grown * sizeof(VkBuffer));
+        VkDeviceMemory *memories;
+        if (!buffers) return;
+        vk.batch_scratch = buffers;
+        memories = (VkDeviceMemory *)realloc(vk.batch_scratch_memory, (size_t)grown * sizeof(VkDeviceMemory));
+        if (!memories) return;
+        vk.batch_scratch_memory = memories;
+        vk.batch_scratch_capacity = grown;
+    }
+    vk.batch_scratch[vk.batch_scratch_count] = buffer;
+    vk.batch_scratch_memory[vk.batch_scratch_count] = memory;
+    vk.batch_scratch_count++;
+}
+
+/* Submit what the batch recorded and wait for it once, then free its
+   staging and scratch. Called before a frame is begun and before one is
+   submitted (the frame reads what the batch wrote), before a mesh is freed
+   (the batch may name its buffers) and at shutdown. Nothing to do when
+   nothing was recorded. */
+void ae3d_vk_flush_uploads(void) {
+    int i;
+    if (vk.batch) {
+        VkSubmitInfo submit;
+        ae3d_vkEndCommandBuffer(vk.batch);
+        memset(&submit, 0, sizeof(submit));
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &vk.batch;
+        ae3d_vkQueueSubmit(vk.graphics_queue, 1, &submit, VK_NULL_HANDLE);
+        ae3d_vkQueueWaitIdle(vk.graphics_queue);
+        ae3d_vkFreeCommandBuffers(vk.device, vk.command_pool, 1, &vk.batch);
+        vk.batch = VK_NULL_HANDLE;
+    }
+    if (vk.batch_staging_mapped && vk.batch_chunks > 0) {
+        ae3d_vkUnmapMemory(vk.device, vk.batch_staging_memory[vk.batch_chunks - 1]);
+    }
+    vk.batch_staging_mapped = NULL;
+    for (i = 0; i < vk.batch_chunks; i++) {
+        ae3d_vkDestroyBuffer(vk.device, vk.batch_staging[i], NULL);
+        ae3d_vkFreeMemory(vk.device, vk.batch_staging_memory[i], NULL);
+    }
+    vk.batch_chunks = 0;
+    vk.batch_staging_size = 0;
+    vk.batch_staging_used = 0;
+    for (i = 0; i < vk.batch_scratch_count; i++) {
+        ae3d_vkDestroyBuffer(vk.device, vk.batch_scratch[i], NULL);
+        ae3d_vkFreeMemory(vk.device, vk.batch_scratch_memory[i], NULL);
+    }
+    vk.batch_scratch_count = 0;
+}
+
 // Uploads through a host-visible staging buffer so the resident copy stays
 // device-local: on a discrete GPU that is the difference between reading vertices
-// over PCIe every frame and reading them from VRAM.
+// over PCIe every frame and reading them from VRAM. Inside a mesh's upload the
+// copy is recorded into the batch instead of submitted and waited on.
 static int ae3d_vk_upload_buffer(const void *data, VkDeviceSize size,
                                  VkBufferUsageFlags usage,
                                  VkBuffer *buffer, VkDeviceMemory *memory) {
@@ -1202,6 +1327,25 @@ static int ae3d_vk_upload_buffer(const void *data, VkDeviceSize size,
     VkSubmitInfo submit;
     VkBufferCopy region;
     void *mapped = NULL;
+
+    if (vk.batching) {
+        VkDeviceSize offset = 0;
+        unsigned char *at = NULL;
+        VkBuffer source = ae3d_vk_batch_stage(size, &offset, &at);
+        VkCommandBuffer batch = source ? ae3d_vk_batch_command() : VK_NULL_HANDLE;
+        if (batch) {
+            if (!ae3d_vk_create_buffer(size, usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, buffer, memory)) {
+                return 0;
+            }
+            memcpy(at, data, (size_t)size);
+            memset(&region, 0, sizeof(region));
+            region.srcOffset = offset;
+            region.size = size;
+            ae3d_vkCmdCopyBuffer(batch, source, *buffer, 1, &region);
+            return 1;
+        }
+    }
 
     if (!ae3d_vk_create_buffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -4189,6 +4333,7 @@ int ae3d_vk_frame_begin(double r, double g, double b, double a) {
     VkResult result;
 
     if (!vk.ready || vk.recording) return 0;
+    ae3d_vk_flush_uploads();
 
     if (vk.needs_resize) {
         if (!ae3d_vk_rebuild_swapchain(vk.pending_width, vk.pending_height)) return 0;
@@ -5169,13 +5314,30 @@ static void ae3d_vk_build_blas_with(ae3d_vk_mesh *slot, VkDeviceSize stride) {
     range.primitiveCount = triangles;
     ranges[0] = &range;
 
-    command = ae3d_vk_begin_once();
+    /* In a mesh's upload the build goes into the batch after the copies it
+       reads, behind a barrier from the copies' writes to the build's reads,
+       and its scratch is kept until the batch has run. */
+    command = vk.batching ? ae3d_vk_batch_command() : VK_NULL_HANDLE;
     if (command) {
+        VkMemoryBarrier written;
+        memset(&written, 0, sizeof(written));
+        written.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        written.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        written.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+        ae3d_vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                  VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &written,
+                                  0, NULL, 0, NULL);
         ae3d_vkCmdBuildAccelerationStructuresKHR(command, 1, &build, ranges);
-        ae3d_vk_end_once(command);
+        ae3d_vk_batch_keep_scratch(scratch, scratch_memory);
+    } else {
+        command = ae3d_vk_begin_once();
+        if (command) {
+            ae3d_vkCmdBuildAccelerationStructuresKHR(command, 1, &build, ranges);
+            ae3d_vk_end_once(command);
+        }
+        ae3d_vkDestroyBuffer(vk.device, scratch, NULL);
+        ae3d_vkFreeMemory(vk.device, scratch_memory, NULL);
     }
-    ae3d_vkDestroyBuffer(vk.device, scratch, NULL);
-    ae3d_vkFreeMemory(vk.device, scratch_memory, NULL);
 
     memset(&address, 0, sizeof(address));
     address.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
@@ -6088,6 +6250,9 @@ int ae3d_vk_frame_end(void) {
     int frame_slot = (int)vk.frame;
 
     if (!vk.recording) return 0;
+    /* A model added while the frame was recorded is drawn by it: its
+       buffers are written before the frame is submitted. */
+    ae3d_vk_flush_uploads();
 
     ae3d_vk_open_scene_pass();
     ae3d_vkCmdEndRenderPass(vk.command_buffers[vk.frame]);
@@ -6963,9 +7128,14 @@ int ae3d_vk_upload_mesh(void *mesh) {
         vk.mesh_capacity = grown;
     }
 
+    /* The copies and the structure recorded into the batch, which is
+       submitted before the next frame begins, or before this one is
+       submitted when a frame is being recorded. */
+    vk.batching = 1;
     if (!ae3d_vk_upload_buffer(vertices, (VkDeviceSize)vertex_count * AE3D_VK_STRIDE,
                                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | ae3d_vk_ray_input_usage(),
                                &slot->vertex_buffer, &slot->vertex_memory)) {
+        vk.batching = 0;
         free(sequential);
         return 0;
     }
@@ -6975,6 +7145,7 @@ int ae3d_vk_upload_mesh(void *mesh) {
                                    (VkDeviceSize)vertex_count * AE3D_VK_SKIN_STRIDE,
                                    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                                    &slot->skin_buffer, &slot->skin_memory)) {
+            vk.batching = 0;
             free(sequential);
             return 0;
         }
@@ -6983,6 +7154,8 @@ int ae3d_vk_upload_mesh(void *mesh) {
     if (!ae3d_vk_upload_buffer(indices, (VkDeviceSize)index_count * sizeof(unsigned),
                                VK_BUFFER_USAGE_INDEX_BUFFER_BIT | ae3d_vk_ray_input_usage(),
                                &slot->index_buffer, &slot->index_memory)) {
+        vk.batching = 0;
+        ae3d_vk_flush_uploads();
         ae3d_vkDestroyBuffer(vk.device, slot->vertex_buffer, NULL);
         ae3d_vkFreeMemory(vk.device, slot->vertex_memory, NULL);
         memset(slot, 0, sizeof(*slot));
@@ -6997,6 +7170,7 @@ int ae3d_vk_upload_mesh(void *mesh) {
     /* Its bottom-level structure, for the rays: a skinned mesh's pose is
        not in its buffers, so it has none and stays in the shadow map. */
     if (vk.ray_query && !slot->skinned) ae3d_vk_build_blas(slot);
+    vk.batching = 0;
     slot->vertices = (float *)malloc((size_t)vertex_count * AE3D_VK_STRIDE);
     slot->indices = (unsigned *)malloc((size_t)index_count * sizeof(unsigned));
     if (slot->vertices && slot->indices) {
@@ -7240,6 +7414,7 @@ void ae3d_vk_free_mesh(int handle) {
     if (!mesh->in_use) return;
     if (mesh->shared && --mesh->refs > 0) return;
 
+    ae3d_vk_flush_uploads();
     ae3d_vkDeviceWaitIdle(vk.device);
     free(mesh->vertices);
     free(mesh->indices);
@@ -7269,6 +7444,12 @@ void ae3d_vk_shutdown(void) {
     g_readback_copy_size = 0;
 
     if (!vk.ready) return;
+    ae3d_vk_flush_uploads();
+    free(vk.batch_scratch);
+    free(vk.batch_scratch_memory);
+    vk.batch_scratch = NULL;
+    vk.batch_scratch_memory = NULL;
+    vk.batch_scratch_capacity = 0;
     ae3d_vkDeviceWaitIdle(vk.device);
     ae3d_vk_meter_free();
 
