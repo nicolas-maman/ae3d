@@ -100,6 +100,10 @@ The flood is paid once each time the target crosses a cell: 8.2 ms for
 the city's field against the C's 8.3 (the marks as ints; as bytes read
 through `std.mem` the flood took twice as long, a runtime call a read).
 The steer runs over the pool: 1.7 ms for 200,000 figures on one thread.
+A cell points one of eight ways, so the heading it asks for is one of
+eight constants, not libm's `atan2`, which isn't the same function on
+every platform: a horde stepped on every peer of a game
+([networking.md](networking.md#the-horde)) turns by the same bits on each.
 `AE3D_HUNT=1` sends the city's horde after the camera with it.
 
 ## What is checked
@@ -113,5 +117,10 @@ checks the directions and the headings turned by them; `test_posebank`
 checks each baked frame against the skeleton driven live to the same
 time; `test_crowd_ecs` and `test_ecs*` the store; `test_device_crowd` the
 device sort against the CPU's; `test_jobs` the pool's pass and block
-counts at one thread and many. Every pass gives the same answer at any thread
-count, and the tests run at both.
+counts at one thread and many; `test_net_horde` a horde stepped alone and
+over four threads, compared bit for bit. Every pass but one gives the same
+bits at any thread count: the separation with no pool visits each pair once
+and pushes both, the same pushes added in another order than the pool's
+gather, so its velocities can differ in their last bits (1,773 of the 4,500
+velocity components of a knot of 1,500). `horde.separate_exact` gathers alone too, at twice the pair tests, and
+is what a networked horde steps by. The tests run at one thread and many.

@@ -1,0 +1,703 @@
+// ae3d.nethorde -- a horde every peer simulates (#413).
+//
+// A horde is not sent a zombie at a time. Thirty-one bytes an object a
+// snapshot is nearly a megabyte a second for a thousand zombies at 30 a
+// second, and a city holds a hundred thousand. What the host sends is what the
+// horde's simulation cannot know by itself: where it began, and every
+// change to what drives it. Every peer, the host among them, steps the
+// same horde at the same fixed ticks from the same inputs, and holds the
+// same horde to the bit.
+//
+//   - The start: the seed the horde is spawned from, how many, the ground
+//     it walks, its rules (speed, separation, turn), the tick rate, and the
+//     host's time at tick 0. Each peer spawns the same horde from the seed.
+//   - Inputs, each stamped with the tick it takes effect at: the target the
+//     flow field floods from (the player the horde hunts), and a zombie
+//     killed, which leaves the horde on every peer at that tick. What the
+//     game makes of a dead zombie (a body, a ragdoll) is a created object
+//     (net.create_object), sent as objects are.
+//   - A seal every tick: "tick T is done". Reliable messages arrive in the
+//     order they were sent, so a client holding the seal for T holds every
+//     input for T, and steps T only then. A client draws the horde at its
+//     view time, as it draws every other object, a tick at a time up to
+//     the newest seal. Every `check_every` ticks the seal carries a
+//     48-bit hash of the host's horde at that tick, and a client whose
+//     hash differs asks for the state and is put back.
+//   - A client that joins late is sent the horde's state once: 32 bytes a
+//     zombie, x, z, heading and phase as the doubles they are. Replaying
+//     the inputs from tick 0 would be a few hundred bytes, but the
+//     simulation of every tick since the game began, which grows with the
+//     game; the state is the same size an hour in as a second in.
+//
+// A tick is the passes of ae3d.horde and ae3d.nav in a fixed order: the
+// heading turned toward the flow field, the velocity along it, the
+// separation (separate_exact: the same bits at any thread count), and the
+// step. Each pass works a figure at a time over the pool, writing only
+// that figure, so the pool's size and its timing change nothing; the
+// step's dt is 1 / the tick rate, never a frame's delta.
+//
+// Both sides make the horde at the same point among their registrations
+// (horde_new registers five events), and build the same flow field: the
+// same ground, the same footprints blocked.
+import std.heap
+import std.mem
+import ae3d.core
+import ae3d.engine
+import ae3d.horde
+import ae3d.nav
+import ae3d.net
+import ae3d.platform
+
+exports (
+    NetHorde,
+    horde_new, horde_free, attach,
+    set_tick_rate, set_motion, set_separation, set_height, set_checks, set_figure,
+    start, set_target, kill, step,
+    started, horde_tick, horde_count, positions, yaws, phases, checksum,
+    checks, divergences, resyncs, horde_bytes
+)
+
+extern calloc(count: int, size: int) -> ptr
+extern realloc(p: ptr, size: long) -> ptr
+extern free(p: ptr)
+
+const PI = 3.141592653589793
+const VERSION = 1                    // the start's layout
+const HEADER = 24                    // doubles in the start before the state
+const FIGURE = 4                     // doubles a zombie in the state: x, z, heading, phase
+const INPUT = 4                      // floats an input: tick, what, a, b
+const INPUT_TARGET = 1
+const INPUT_KILL = 2
+const SUMS = 128                     // the host's hashes a client keeps until it reaches their ticks
+
+struct NetHorde {
+    session: *Net
+    field: *FlowField                // null: the horde wanders, and has no target
+    grid: *HordeGrid
+    bank: ptr                        // the figure's pose bank, when its walk drives the step
+    walk: float
+    // The rules, the same on every peer: the host's own, a client's from
+    // the start. What the start carries is doubles, so they are the host's
+    // to the bit.
+    seed: long
+    spawned: int
+    count: int                       // alive: the compact range [0, count)
+    rate: int                        // ticks a second
+    start_time: float                // the host's time at tick 0
+    x0: float                        // the ground it walks, and is spawned on
+    z0: float
+    x1: float
+    z1: float
+    road_y: float
+    speed: float
+    max_speed: float
+    turn: float                      // radians a second a heading swings toward the field
+    radius: float                    // the separation's
+    strength: float
+    per_cell: int
+    check_every: int                 // ticks between the hashes the seals carry
+    has_target: bool
+    target_x: float
+    target_z: float
+    // The columns: xyz a zombie, a heading and a phase; the velocity is
+    // each tick's scratch (the wander writes it whole).
+    pos: ptr
+    vel: ptr
+    yaw: ptr
+    phase: ptr
+    started: bool
+    tick: int                        // the tick the horde is at
+    sealed: int                      // client: the newest tick the host has sealed
+    // Client: the inputs arrived and not yet applied, oldest first,
+    // float[INPUT] each, and the host's hashes waiting for their ticks.
+    inputs: ptr
+    input_first: int
+    input_count: int
+    input_capacity: int
+    sums: ptr                        // float[SUMS * 3]: tick, high 24 bits, low 24 bits
+    sum_first: int
+    sum_count: int
+    checks: int                      // client: ticks whose hash it compared
+    divergences: int                 // of those, the ones that differed
+    resyncing: bool                  // client: asked for the state, and waiting
+    resyncs: int                     // client: states taken after the first
+    got: long                        // client: the horde's bytes it received
+    scratch: ptr                     // 8 bytes: a double rounded through f32
+}
+
+// A horde on a session, both sides alike: `field` the flow field it hunts
+// by (built the same on every side), or null. The host starts it; a
+// client's starts when the host's start arrives.
+horde_new(session: *Net, field: *FlowField) -> *NetHorde {
+    if session == null { return null }
+    h = heap.new(NetHorde)
+    h.session = session
+    h.field = field
+    h.rate = 30
+    h.speed = 1.4
+    h.max_speed = 2.0
+    h.turn = 1.6
+    h.radius = 1.05
+    h.strength = 2.0
+    h.per_cell = 16
+    h.check_every = 30
+    h.inputs = calloc(64 * INPUT, 8)
+    h.input_capacity = 64
+    h.sums = calloc(SUMS * 3, 8)
+    h.scratch = calloc(1, 8)
+    net.on_event(session, "horde.start", on_start, h as ptr)
+    net.on_event(session, "horde.target", on_target, h as ptr)
+    net.on_event(session, "horde.kill", on_kill, h as ptr)
+    net.on_event(session, "horde.tick", on_seal, h as ptr)
+    net.on_event(session, "horde.resync", on_resync, h as ptr)
+    net.on_join(session, on_joined, h as ptr)
+    return h
+}
+
+horde_free(h: *NetHorde) {
+    if h == null { return }
+    if h.grid != null { horde.grid_free(h.grid) }
+    free_columns(h)
+    free(h.inputs)
+    free(h.sums)
+    free(h.scratch)
+    heap.free(h)
+}
+
+free_columns(h: *NetHorde) {
+    if h.pos != null { free(h.pos) }
+    if h.vel != null { free(h.vel) }
+    if h.yaw != null { free(h.yaw) }
+    if h.phase != null { free(h.phase) }
+    h.pos = null
+    h.vel = null
+    h.yaw = null
+    h.phase = null
+}
+
+// --- the rules, on the host before it starts --------------------------------------------------
+
+// Ticks a second (30 by default). A tick is a step of the whole horde on
+// every peer, and a seal on the wire.
+set_tick_rate(h: *NetHorde, per_second: int) {
+    if !h.started && per_second > 0 { h.rate = per_second }
+}
+
+// How fast a zombie shambles and at most moves (m/s), and how fast its
+// heading swings toward the field (radians a second).
+set_motion(h: *NetHorde, speed: float, max_speed: float, turn: float) {
+    if h.started { return }
+    h.speed = speed
+    h.max_speed = max_speed
+    h.turn = turn
+}
+
+// The separation: zombies closer than `radius` push apart, by `strength`.
+set_separation(h: *NetHorde, radius: float, strength: float) {
+    if h.started || radius <= 0.0 { return }
+    h.radius = radius
+    h.strength = strength
+}
+
+// The height the horde walks at: the road's.
+set_height(h: *NetHorde, y: float) {
+    if !h.started { h.road_y = y }
+}
+
+// The seals carry the horde's hash every `every` ticks (30 by default, a
+// second): what a client checks itself against.
+set_checks(h: *NetHorde, every: int) {
+    if !h.started && every > 0 { h.check_every = every }
+}
+
+// The figure whose walk drives the step (ae3d.horde.step): its pose bank
+// and the walk's length in seconds. On every side, the same bank.
+set_figure(h: *NetHorde, bank: ptr, walk: float) {
+    h.bank = bank
+    h.walk = walk
+}
+
+// --- reading it -----------------------------------------------------------------------------
+
+started(h: *NetHorde) -> bool { return h.started }
+horde_tick(h: *NetHorde) -> int { return h.tick }
+horde_count(h: *NetHorde) -> int { return h.count }
+positions(h: *NetHorde) -> ptr { return h.pos }       // xyz doubles a zombie
+yaws(h: *NetHorde) -> ptr { return h.yaw }
+phases(h: *NetHorde) -> ptr { return h.phase }
+checks(h: *NetHorde) -> int { return h.checks }
+divergences(h: *NetHorde) -> int { return h.divergences }
+resyncs(h: *NetHorde) -> int { return h.resyncs }
+horde_bytes(h: *NetHorde) -> long { return h.got }
+
+// A hash of the horde as it is: every zombie's position, heading and
+// phase, their bits, and how many. FNV-1a over the doubles' words.
+checksum(h: *NetHorde) -> long {
+    hash = 1469598103934665603 as long
+    prime = 1099511628211 as long
+    if h.pos != null {
+        words = h.pos as long[]
+        k = 0
+        while k < h.count * 3 {
+            hash = (hash ^ words[k]) * prime
+            k = k + 1
+        }
+        words = h.yaw as long[]
+        k = 0
+        while k < h.count {
+            hash = (hash ^ words[k]) * prime
+            k = k + 1
+        }
+        words = h.phase as long[]
+        k = 0
+        while k < h.count {
+            hash = (hash ^ words[k]) * prime
+            k = k + 1
+        }
+    }
+    return (hash ^ (h.count as long)) * prime
+}
+
+// The hash's two halves the wire carries: 24 bits each, which a 32-bit
+// float holds exactly.
+hash_high(hash: long) -> int { return ((hash >> 40) & 16777215) as int }
+hash_low(hash: long) -> int { return ((hash >> 16) & 16777215) as int }
+
+// A number as a 32-bit float carries it, so the host uses what its
+// clients will read.
+as_f32(h: *NetHorde, x: float) -> float {
+    mem.set_float32(h.scratch, 0, x)
+    return mem.get_float32(h.scratch, 0)
+}
+
+// --- the simulation -------------------------------------------------------------------------
+
+columns(h: *NetHorde, capacity: int) {
+    free_columns(h)
+    n = capacity
+    if n < 1 { n = 1 }
+    h.pos = calloc(n * 3, 8)
+    h.vel = calloc(n * 3, 8)
+    h.yaw = calloc(n, 8)
+    h.phase = calloc(n, 8)
+    if h.grid != null { horde.grid_free(h.grid) }
+    // A cell as wide as the separation's reach, over the whole ground.
+    span = h.x1 - h.x0
+    if h.z1 - h.z0 > span { span = h.z1 - h.z0 }
+    h.grid = horde.grid_new((span / h.radius) as int + 2, h.per_cell)
+}
+
+// A uniform number in [0, 1) from the horde's own generator: integers
+// only, so every platform draws the same.
+next_random(h: *NetHorde) -> float {
+    h.seed = h.seed * 6364136223846793005 + 1442695040888963407
+    bits = (h.seed / 4294967296) % 16777216
+    if bits < 0 { bits = 0 - bits }
+    return (bits as float) / 16777216.0
+}
+
+// The horde at tick 0, from the seed: spread over the ground, each heading
+// and each phase of the walk drawn.
+seed_horde(h: *NetHorde) {
+    pos = h.pos as float[]
+    yaw = h.yaw as float[]
+    phase = h.phase as float[]
+    i = 0
+    while i < h.count {
+        pos[i * 3] = h.x0 + next_random(h) * (h.x1 - h.x0)
+        pos[i * 3 + 1] = h.road_y
+        pos[i * 3 + 2] = h.z0 + next_random(h) * (h.z1 - h.z0)
+        yaw[i] = (next_random(h) - 0.5) * 2.0 * PI
+        phase[i] = next_random(h)
+        i = i + 1
+    }
+}
+
+// One tick of the whole horde: the headings turned toward the field, the
+// velocities along them, pushed apart, and the step.
+simulate(h: *NetHorde) {
+    dt = 1.0 / (h.rate as float)
+    if h.field != null && h.has_target { nav.flow_steer(h.field, h.pos, h.yaw, h.count, h.turn * dt) }
+    horde.wander(h.vel, h.yaw, h.count, h.speed)
+    horde.separate_exact(h.grid, h.pos, h.vel, h.count, h.x0, h.z0, h.radius, h.radius, h.strength)
+    horde.step(h.pos, h.vel, h.yaw, h.phase, 0, h.count, dt, h.max_speed,
+               h.x0, h.x1, h.z0, h.z1, h.road_y, h.walk, h.bank)
+}
+
+// A zombie out of the horde: the last takes its place, so the horde stays
+// one compact range. Every peer does it at the same tick, so the same
+// zombie lands in the same place on every one.
+remove(h: *NetHorde, index: int) {
+    if index < 0 || index >= h.count { return }
+    last = h.count - 1
+    pos = h.pos as float[]
+    yaw = h.yaw as float[]
+    phase = h.phase as float[]
+    pos[index * 3] = pos[last * 3]
+    pos[index * 3 + 1] = pos[last * 3 + 1]
+    pos[index * 3 + 2] = pos[last * 3 + 2]
+    yaw[index] = yaw[last]
+    phase[index] = phase[last]
+    h.count = last
+}
+
+aim(h: *NetHorde, x: float, z: float) {
+    h.has_target = true
+    h.target_x = x
+    h.target_z = z
+    if h.field != null { nav.flow_build(h.field, core.vec3(x, 0.0, z)) }
+}
+
+// --- the host ---------------------------------------------------------------------------------
+
+// The host starts the horde now: `count` zombies from `seed`, spread over
+// the ground from (x0, z0) to (x1, z1), which is also where they walk.
+// Every client the host has welcomed is told, and every one it welcomes
+// later is sent the horde as it is then. False on a client, or started.
+start(h: *NetHorde, seed: int, count: int, x0: float, z0: float, x1: float, z1: float, now: float) -> bool {
+    if h.started || count <= 0 || !net.hosting(h.session) { return false }
+    h.seed = seed as long
+    h.spawned = count
+    h.count = count
+    h.x0 = x0
+    h.z0 = z0
+    h.x1 = x1
+    h.z1 = z1
+    h.start_time = now
+    h.tick = 0
+    columns(h, count)
+    seed_horde(h)
+    h.seed = seed as long
+    h.started = true
+    send_start(h, net.EVERYONE, now)
+    return true
+}
+
+is_host(h: *NetHorde) -> bool { return net.hosting(h.session) }
+
+// Where the horde hunts: the flow field floods from (x, z), on the host
+// now and on every client at the next tick. The flood is paid each time,
+// so a game calls it when its target has crossed a cell, as
+// examples/zombie_city.ae does. The host keeps the target as a 32-bit
+// float carries it, which is what its clients read.
+set_target(h: *NetHorde, x: float, z: float, now: float) {
+    if !is_host(h) { return }
+    tx = as_f32(h, x)
+    tz = as_f32(h, z)
+    aim(h, tx, tz)
+    if h.started { net.send_event(h.session, "horde.target", net.EVERYONE, now, (h.tick + 1) as float, tx, tz) }
+}
+
+// A zombie killed: out of the horde on the host now and on every client
+// at the next tick. The last zombie takes its index. False for no such
+// zombie.
+kill(h: *NetHorde, index: int, now: float) -> bool {
+    if !is_host(h) || !h.started || index < 0 || index >= h.count { return false }
+    remove(h, index)
+    net.send_event(h.session, "horde.kill", net.EVERYONE, now, (h.tick + 1) as float, index as float)
+    return true
+}
+
+// The start, to one client or to EVERYONE: the rules as doubles, and once
+// the horde has moved (a tick stepped, a zombie killed) the horde as it is.
+send_start(h: *NetHorde, to: int, now: float) {
+    with_state = h.tick > 0 || h.count != h.spawned
+    length = HEADER * 8
+    if with_state { length = length + h.count * FIGURE * 8 }
+    block = calloc(length, 1)
+    head = block as float[]
+    head[0] = VERSION as float
+    head[1] = h.seed as float
+    head[2] = h.spawned as float
+    head[3] = h.count as float
+    head[4] = h.tick as float
+    head[5] = h.rate as float
+    head[6] = h.start_time
+    head[7] = h.x0
+    head[8] = h.z0
+    head[9] = h.x1
+    head[10] = h.z1
+    head[11] = h.road_y
+    head[12] = h.speed
+    head[13] = h.max_speed
+    head[14] = h.turn
+    head[15] = h.radius
+    head[16] = h.strength
+    head[17] = h.per_cell as float
+    head[18] = h.check_every as float
+    head[19] = 0.0
+    if h.has_target { head[19] = 1.0 }
+    head[20] = h.target_x
+    head[21] = h.target_z
+    head[22] = 0.0
+    if with_state { head[22] = 1.0 }
+    head[23] = h.walk
+    if with_state {
+        pos = h.pos as float[]
+        yaw = h.yaw as float[]
+        phase = h.phase as float[]
+        i = 0
+        while i < h.count {
+            at = HEADER + i * FIGURE
+            head[at] = pos[i * 3]
+            head[at + 1] = pos[i * 3 + 2]
+            head[at + 2] = yaw[i]
+            head[at + 3] = phase[i]
+            i = i + 1
+        }
+    }
+    net.send_event_bytes(h.session, "horde.start", to, now, block, length)
+    free(block)
+}
+
+// The host's ticks due by `now`, each sealed to every client.
+host_step(h: *NetHorde, now: float) {
+    due = ((now - h.start_time) * (h.rate as float) + 0.001) as int
+    while h.tick < due {
+        simulate(h)
+        h.tick = h.tick + 1
+        if h.tick % h.check_every == 0 {
+            hash = checksum(h)
+            net.send_event(h.session, "horde.tick", net.EVERYONE, now, h.tick as float,
+                           (hash_high(hash) + 1) as float, hash_low(hash) as float)
+        } else {
+            net.send_event(h.session, "horde.tick", net.EVERYONE, now, h.tick as float)
+        }
+    }
+}
+
+// A client welcomed after the start is sent the horde as it is.
+on_joined(context: ptr, client: int, now: float) {
+    h = context as *NetHorde
+    if h.started { send_start(h, client, now) }
+}
+
+// A client that found its horde differs asks for it again.
+on_resync(context: ptr, call: *NetCall) {
+    h = context as *NetHorde
+    if !is_host(h) || !h.started || call.sender < 1 { return }
+    send_start(h, call.sender, call.now)
+}
+
+// --- a client -------------------------------------------------------------------------------
+
+// The bytes an event with numbers took on the wire: its header and as
+// many numbers as the last one that is not 0, as send_event wrote it.
+wire(call: *NetCall) -> long {
+    count = 0
+    if call.a != 0.0 { count = 1 }
+    if call.b != 0.0 { count = 2 }
+    if call.c != 0.0 { count = 3 }
+    if call.d != 0.0 { count = 4 }
+    return (4 + count * 4) as long
+}
+
+// The horde's start, or its state: the rules, and the horde spawned from
+// the seed or as the host had it at its tick. Whatever inputs came before
+// it are in that state already (the host applied them when it sent them),
+// so they are dropped.
+on_start(context: ptr, call: *NetCall) {
+    h = context as *NetHorde
+    if is_host(h) || call.length < HEADER * 8 { return }
+    h.got = h.got + ((7 + call.length) as long)
+    data = call.data
+    if (mem.get_float64(data, 0)) as int != VERSION { return }
+    with_state = mem.get_float64(data, 22 * 8) > 0.5
+    count = (mem.get_float64(data, 3 * 8)) as int
+    if with_state && call.length < (HEADER + count * FIGURE) * 8 { return }
+    first = !h.started
+    h.seed = (mem.get_float64(data, 8)) as long
+    h.spawned = (mem.get_float64(data, 2 * 8)) as int
+    h.count = count
+    h.tick = (mem.get_float64(data, 4 * 8)) as int
+    h.rate = (mem.get_float64(data, 5 * 8)) as int
+    h.start_time = mem.get_float64(data, 6 * 8)
+    h.x0 = mem.get_float64(data, 7 * 8)
+    h.z0 = mem.get_float64(data, 8 * 8)
+    h.x1 = mem.get_float64(data, 9 * 8)
+    h.z1 = mem.get_float64(data, 10 * 8)
+    h.road_y = mem.get_float64(data, 11 * 8)
+    h.speed = mem.get_float64(data, 12 * 8)
+    h.max_speed = mem.get_float64(data, 13 * 8)
+    h.turn = mem.get_float64(data, 14 * 8)
+    h.radius = mem.get_float64(data, 15 * 8)
+    h.strength = mem.get_float64(data, 16 * 8)
+    h.per_cell = (mem.get_float64(data, 17 * 8)) as int
+    h.check_every = (mem.get_float64(data, 18 * 8)) as int
+    h.walk = mem.get_float64(data, 23 * 8)
+    if h.pos == null || h.grid == null { columns(h, h.spawned) }
+    if with_state {
+        pos = h.pos as float[]
+        yaw = h.yaw as float[]
+        phase = h.phase as float[]
+        i = 0
+        while i < count {
+            at = (HEADER + i * FIGURE) * 8
+            pos[i * 3] = mem.get_float64(data, at)
+            pos[i * 3 + 1] = h.road_y
+            pos[i * 3 + 2] = mem.get_float64(data, at + 8)
+            yaw[i] = mem.get_float64(data, at + 16)
+            phase[i] = mem.get_float64(data, at + 24)
+            i = i + 1
+        }
+    } else {
+        h.count = h.spawned
+        seed_horde(h)
+        h.count = count
+    }
+    h.has_target = false
+    if mem.get_float64(data, 19 * 8) > 0.5 { aim(h, mem.get_float64(data, 20 * 8), mem.get_float64(data, 21 * 8)) }
+    if h.sealed < h.tick { h.sealed = h.tick }
+    h.input_first = 0
+    h.input_count = 0
+    while h.sum_count > 0 && sum_tick(h) <= h.tick { drop_sum(h) }
+    h.started = true
+    if !first { h.resyncs = h.resyncs + 1 }
+    h.resyncing = false
+}
+
+// An input, kept until the tick it takes effect at.
+queue_input(h: *NetHorde, tick: float, what: int, a: float, b: float) {
+    if h.input_first + h.input_count >= h.input_capacity {
+        if h.input_first > 0 {
+            // The applied ones off the front, before growing.
+            q = h.inputs as float[]
+            k = 0
+            while k < h.input_count * INPUT {
+                q[k] = q[h.input_first * INPUT + k]
+                k = k + 1
+            }
+            h.input_first = 0
+        }
+        if h.input_count >= h.input_capacity {
+            h.input_capacity = h.input_capacity * 2
+            h.inputs = realloc(h.inputs, (h.input_capacity * INPUT * 8) as long)
+        }
+    }
+    q = h.inputs as float[]
+    at = (h.input_first + h.input_count) * INPUT
+    q[at] = tick
+    q[at + 1] = what as float
+    q[at + 2] = a
+    q[at + 3] = b
+    h.input_count = h.input_count + 1
+}
+
+on_target(context: ptr, call: *NetCall) {
+    h = context as *NetHorde
+    if is_host(h) { return }
+    h.got = h.got + wire(call)
+    if h.started { queue_input(h, call.a, INPUT_TARGET, call.b, call.c) }
+}
+
+on_kill(context: ptr, call: *NetCall) {
+    h = context as *NetHorde
+    if is_host(h) { return }
+    h.got = h.got + wire(call)
+    if h.started { queue_input(h, call.a, INPUT_KILL, call.b, 0.0) }
+}
+
+// A seal: the host has done tick `a`, and every input for it is here. With
+// a hash (b, the high half and one, so it is never 0; c, the low half),
+// kept until this side reaches the tick.
+on_seal(context: ptr, call: *NetCall) {
+    h = context as *NetHorde
+    if is_host(h) { return }
+    h.got = h.got + wire(call)
+    if !h.started { return }
+    tick = (call.a) as int
+    if tick > h.sealed { h.sealed = tick }
+    if call.b != 0.0 && tick > h.tick {
+        if h.sum_count == SUMS { drop_sum(h) }
+        s = h.sums as float[]
+        at = ((h.sum_first + h.sum_count) % SUMS) * 3
+        s[at] = call.a
+        s[at + 1] = call.b - 1.0
+        s[at + 2] = call.c
+        h.sum_count = h.sum_count + 1
+    }
+}
+
+sum_tick(h: *NetHorde) -> int {
+    s = h.sums as float[]
+    return (s[h.sum_first * 3]) as int
+}
+
+drop_sum(h: *NetHorde) {
+    h.sum_first = (h.sum_first + 1) % SUMS
+    h.sum_count = h.sum_count - 1
+}
+
+// The inputs due at `tick`, in the order they came.
+apply_inputs(h: *NetHorde, tick: int) {
+    q = h.inputs as float[]
+    while h.input_count > 0 {
+        at = h.input_first * INPUT
+        if (q[at]) as int > tick { break }
+        what = (q[at + 1]) as int
+        if what == INPUT_TARGET { aim(h, q[at + 2], q[at + 3]) }
+        if what == INPUT_KILL { remove(h, (q[at + 2]) as int) }
+        h.input_first = h.input_first + 1
+        h.input_count = h.input_count - 1
+    }
+    if h.input_count == 0 { h.input_first = 0 }
+}
+
+// This tick's hash against the host's, when the host sent one for it. A
+// horde that differs asks the host for its state, once, and is counted.
+compare(h: *NetHorde, now: float) {
+    while h.sum_count > 0 && sum_tick(h) < h.tick { drop_sum(h) }
+    if h.sum_count == 0 || sum_tick(h) != h.tick { return }
+    s = h.sums as float[]
+    at = h.sum_first * 3
+    hash = checksum(h)
+    same = (hash_high(hash) as float) == s[at + 1] && (hash_low(hash) as float) == s[at + 2]
+    drop_sum(h)
+    h.checks = h.checks + 1
+    if same || h.resyncing { return }
+    h.divergences = h.divergences + 1
+    h.resyncing = true
+    net.send_event(h.session, "horde.resync", net.HOST, now, 1.0)
+}
+
+// A client steps its horde to its view time, the moment it draws every
+// other object at, a tick at a time and never past the newest seal.
+client_step(h: *NetHorde, now: float) {
+    view = net.view_time(h.session, now)
+    if view < 0.0 { return }
+    want = h.tick
+    if view > h.start_time { want = ((view - h.start_time) * (h.rate as float) + 0.001) as int }
+    if want > h.sealed { want = h.sealed }
+    while h.tick < want {
+        apply_inputs(h, h.tick + 1)
+        simulate(h)
+        h.tick = h.tick + 1
+        compare(h, now)
+    }
+}
+
+// --- the step -------------------------------------------------------------------------------
+
+// The horde's ticks due by `now`, on either side: the host's by its clock,
+// sealed as they go; a client's up to its view time and the newest seal.
+// Call it after net.step, every frame (attach), or from a test's clock.
+step(h: *NetHorde, now: float) {
+    if h == null || !h.started { return }
+    if is_host(h) {
+        host_step(h, now)
+    } else {
+        client_step(h, now)
+    }
+}
+
+nethorde_update(state: ptr, e: *Engine, delta: float) {
+    step(state as *NetHorde, platform.time())
+}
+
+// The horde stepped by the engine every frame, on the engine's clock,
+// after the session (attach it after net.attach).
+attach(e: *Engine, h: *NetHorde) {
+    b = engine.behaviour_new("nethorde", h as ptr)
+    b.update = nethorde_update
+    engine.engine_add_behaviour(e, b)
+}
