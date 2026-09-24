@@ -18,6 +18,8 @@ import ae3d.crowd
 extern calloc(count: int, size: int) -> ptr
 extern free(p: ptr)
 extern memcpy(dst: ptr, src: ptr, bytes: int) -> ptr
+extern memcmp(a: ptr, b: ptr, bytes: int) -> int
+extern ae3d_inst_matrix_data(inst: ptr) -> ptr
 
 const N = 20000
 
@@ -149,6 +151,36 @@ frame(c: Crowd, t: Tiers, grid: *CrowdGrid) {
                       ecs.column_data(t.counts))
 }
 
+// A native loop -- the instance matrices a crowd's positions and headings
+// make, in native/geometry/mesh.c -- on the same pool: the matrices of
+// NATIVE instances, set from the same positions and headings, into a copy
+// of 16 floats each for the caller to compare.
+const NATIVE = 50000
+
+native_matrices() -> ptr {
+    m = core.model_new()
+    core.model_enable_instancing(m, NATIVE)
+    xyz_block = calloc(NATIVE * 3, 8)
+    yaw_block = calloc(NATIVE, 8)
+    xyz = xyz_block as float[]
+    yaw = yaw_block as float[]
+    i = 0
+    while i < NATIVE {
+        xyz[i * 3] = (i % 700) as float * 0.5
+        xyz[i * 3 + 1] = 0.0
+        xyz[i * 3 + 2] = (i / 700) as float * 0.5
+        yaw[i] = (i % 360) as float * 0.0174533
+        i = i + 1
+    }
+    core.model_set_instance_positions_yaw(m, xyz_block, yaw_block, NATIVE)
+    out = calloc(NATIVE * 16, 4)
+    memcpy(out, ae3d_inst_matrix_data(m.instances), NATIVE * 16 * 4)
+    free(xyz_block)
+    free(yaw_block)
+    core.model_free(m)
+    return out
+}
+
 main() {
     // Alone first: no pool at all.
     alone = crowd_new()
@@ -156,6 +188,7 @@ main() {
     grid = crowd.grid_new(600, 1.05, 0.0 - 300.0, 0.0 - 300.0, 10)
     frame(alone, alone_tiers, grid)
     check("with no pool every loop ran on this thread", jobs.workers() == 0 && jobs.passes() >= 4)
+    alone_matrices = native_matrices()
 
     // Then over a pool of three workers and this thread.
     jobs.start(4)
@@ -165,6 +198,15 @@ main() {
     pooled_tiers = tiers_new()
     frame(pooled, pooled_tiers, grid)
     check("the pool's loops were split into blocks", jobs.blocks() - blocks_before > 8)
+
+    // The native layer's loops run on this pool too, not on threads of
+    // their own, and a matrix is the same to the bit whichever thread made it.
+    passes_before = jobs.passes()
+    pooled_matrices = native_matrices()
+    check("a native loop runs on the pool", jobs.passes() == passes_before + 1)
+    check("and its instance matrices are the same to the bit", memcmp(alone_matrices, pooled_matrices, NATIVE * 16 * 4) == 0)
+    free(alone_matrices)
+    free(pooled_matrices)
 
     // The passes that touch one figure at a time come out the same to the bit.
     check("the headings are the same over the pool", same(alone.vel, pooled.vel, N, 3) || drift(alone.vel, pooled.vel, N, 3) < 0.000001)

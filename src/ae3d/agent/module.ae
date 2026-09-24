@@ -19,6 +19,7 @@ import ae3d.anim
 import ae3d.assets
 import ae3d.scene
 import ae3d.input
+import ae3d.channel
 
 exports (
     Context, context_new, context_free,
@@ -29,13 +30,6 @@ exports (
     schema_json, last_error
 )
 
-extern ae3d_agent_start() -> int
-extern ae3d_agent_active() -> int
-extern ae3d_agent_port() -> int
-extern ae3d_agent_next_request() -> string
-extern ae3d_agent_respond(line: string)
-extern ae3d_agent_stop()
-extern ae3d_agent_error() -> string
 
 extern ae3d_capture_frame(width: int, height: int) -> int
 extern ae3d_capture_width() -> int
@@ -347,16 +341,16 @@ context_free(c: *Context) {
 }
 
 start() -> bool {
-    if ae3d_agent_start() != 0 { return true }
-    g_error = ae3d_agent_error()
+    if channel.start() { return true }
+    g_error = channel.last_error()
     return false
 }
 
-active() -> bool { return ae3d_agent_active() != 0 }
+active() -> bool { return channel.active() }
 
-port() -> int { return ae3d_agent_port() }
+port() -> int { return channel.port() }
 
-stop() { ae3d_agent_stop() }
+stop() { channel.stop() }
 
 ok_envelope(id: int, result: ptr) -> ptr {
     out = json.obj()
@@ -372,14 +366,14 @@ fail(id: int, reason: string) {
     json.object_set_raw(out, "ok", json.boolean(false))
     json.object_set_raw(out, "error", json.str(reason))
     text = json.stringify_raw(out)
-    ae3d_agent_respond(text)
+    channel.respond(text)
     json.free(out)
 }
 
 answer(id: int, result: ptr) {
     out = ok_envelope(id, result)
     text = json.stringify_raw(out)
-    ae3d_agent_respond(text)
+    channel.respond(text)
     json.free(out)
 }
 
@@ -2203,8 +2197,8 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
 
 pump(c: *Context) {
     while true {
-        line = ae3d_agent_next_request()
-        if line == null { return }
+        line = channel.next_request()
+        if line == "" { return }
 
         request = json.parse_raw(line)
         if request == null {

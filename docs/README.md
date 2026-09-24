@@ -26,7 +26,7 @@ at the root is the front page; this is the map.
 
 ```
 src/ae3d/     the engine, one module a directory (docs: architecture.md)
-native/       the C that remains, by role: gpu/, geometry/, image/, platform/, agent/, dlss/ (native/README.md)
+native/       the C that remains, by role: gpu/, geometry/, image/, platform/, dlss/ (native/README.md)
 deps/         aephysics, the physics engine, as a submodule
 examples/     runnable scenes; examples/lib/ what they share
 tests/        one program a suite, each printing its own verdict

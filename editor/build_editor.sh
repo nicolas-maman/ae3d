@@ -99,7 +99,6 @@ case "$OS" in
         UI_SOURCES="$UI_ROOT/backend/aether_ui_macos.m $UI_ROOT/backend/aether_ui_test_server.c $UI_ROOT/backend/aether_ui_system_extras.c"
         UI_FLAGS="-fobjc-arc"
         PLATFORM_LIBS="-framework AppKit -framework Foundation -framework QuartzCore -framework CoreText -framework ImageIO -framework Cocoa -framework IOKit -framework CoreVideo -framework Metal -framework OpenGL"
-        NATIVE_EXTRA="native/platform/metal_surface.m"
         ;;
     Linux|FreeBSD)
         if ! pkg-config --exists gtk4 2>/dev/null; then
@@ -115,7 +114,6 @@ case "$OS" in
         # backend, and gtk4.pc names neither epoxy's headers nor its library.
         UI_FLAGS="$(pkg-config --cflags gtk4) $(pkg-config --cflags epoxy 2>/dev/null) -Wno-deprecated-declarations"
         PLATFORM_LIBS="$(pkg-config --libs gtk4) $(pkg-config --libs epoxy 2>/dev/null) -ldl -lm -lpthread"
-        NATIVE_EXTRA=""
         ;;
     MINGW*|MSYS*|CYGWIN*|Windows_NT)
         # aether-ui has had a Win32 backend for some time; this script did not
@@ -131,7 +129,6 @@ case "$OS" in
         PLATFORM_LIBS="-luser32 -lgdi32 -lgdiplus -lmsimg32 -lcomctl32 -lcomdlg32 \
 -lshell32 -lole32 -loleaut32 -luuid -loleacc -ldwmapi -luxtheme \
 -lopengl32 -lws2_32 -lbcrypt -lm"
-        NATIVE_EXTRA=""
         ;;
     *)
         echo "ae3d: the editor has no build recipe for $OS yet" >&2
@@ -147,7 +144,7 @@ if [ ! -f "$AEPHYSICS/aephysics/native/aephysics_native.c" ]; then
     echo "ae3d: deps/aephysics is empty; run: git submodule update --init" >&2
     exit 1
 fi
-NATIVE_SOURCES="native/agent/channel.c native/gpu/capture.c native/gpu/opengl_api.c native/platform/crash.c native/geometry/mesh.c native/geometry/skin.c native/geometry/meshfile.c native/image/image.c native/gpu/opengl.c native/gpu/offscreen.c native/gpu/vulkan.c native/gpu/jobs.c $AEPHYSICS/aephysics/native/aephysics_native.c $(ae3d_dlss_source "$OBJ_DIR") $NATIVE_EXTRA"
+NATIVE_SOURCES="$(ae3d_native_sources "$OBJ_DIR" "$AEPHYSICS")"
 
 # Every header, not a list of three: the generated ones carry the shaders and
 # the uniform offsets, so leaving them out linked the previous shaders.

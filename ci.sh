@@ -163,10 +163,6 @@ check_platform MINGW64_NT-10.0   "-lopengl32"
 check_platform MINGW64_NT-10.0   "-lgdi32"
 check_platform MSYS_NT-10.0      "-lopengl32"
 check_platform Windows_NT        "-lopengl32"
-# The agent channel's own dependencies, named rather than borrowed from whatever
-# the Aether toolchain happens to link.
-check_platform Linux             "-lpthread"
-check_platform MINGW64_NT-10.0   "-lws2_32"
 
 step "the agent channel stays behind its gate"
 # The one property the channel's whole design rests on, and the one thing a

@@ -11,7 +11,9 @@
 //
 //   idle      the drain when the channel is open and no client is asking. This
 //             is what a debugging session pays per frame for having the channel
-//             there. It takes the queue lock, finds nothing, and returns.
+//             there. It loads the ring's head and tail, finds them equal,
+//             and returns (ae3d.channel: the socket is read by the channel's
+//             own thread, never by the frame).
 //
 // Both are per frame, not per model. A frame at 60Hz has 16,666,000ns in it;
 // the bounds below are three orders of magnitude under that, and are set to
@@ -20,7 +22,7 @@
 // which is why the bounds are generous: they are there to catch a syscall or an
 // allocation appearing in the drain, not to grade the hardware. The inactive
 // drain doubles as the floor -- it is a call that does nothing, so anything the
-// idle drain costs above it is the queue lock and nothing else.
+// idle drain costs above it is the ring's two atomic loads and nothing else.
 //
 // No window and no driver. This is the engine's own cost, and it runs where
 // there is no display.
@@ -33,8 +35,8 @@ extern clock_ns() -> long
 
 const ITERATIONS = 200000
 
-// Generous by design. A drain that takes the lock, looks at a null head and
-// returns is tens of nanoseconds; a drain that allocates or makes a syscall is
+// Generous by design. A drain that loads two atomics, finds the ring empty
+// and returns is tens of nanoseconds; a drain that allocates or makes a syscall is
 // hundreds or thousands. The bound sits between those, not near either.
 const IDLE_BOUND_NS = 2000
 const INACTIVE_BOUND_NS = 2000

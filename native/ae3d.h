@@ -387,16 +387,6 @@ void  *ae3d_vk_capture_pixels(void);
 int    ae3d_vk_capture_width(void);
 int    ae3d_vk_capture_height(void);
 
-// The agent channel: a localhost NDJSON socket an agent drives the engine
-// through. ae3d_agent_active() is what every hot path tests, and it is zero
-// until AE3D_AGENT asks for the channel. See native/ae3d_agent.c.
-int         ae3d_agent_start(void);
-int         ae3d_agent_active(void);
-int         ae3d_agent_port(void);
-const char *ae3d_agent_next_request(void);
-void        ae3d_agent_respond(const char *line);
-void        ae3d_agent_stop(void);
-const char *ae3d_agent_error(void);
 
 /* The asking end of the same channel, so a tool that measures a scene can be
    written against the engine rather than against a copy of the protocol. */
@@ -417,16 +407,15 @@ int  ae3d_capture_adopt(const unsigned char *pixels, int width, int height);
 int  ae3d_capture_copy_keyed(unsigned char *atlas, int atlas_width, int atlas_height, int dst_x, int dst_y, int cell, int kr, int kg, int kb, int tolerance);
 int  ae3d_capture_bleed(unsigned char *atlas, int width, int height);
 
-/* A pool of worker threads and a parallel for (native/ae3d_jobs.c): the
-   range [0, count) in runs of `grain` elements over the workers and the
-   caller, done when it returns. Without a pool the caller does it alone. */
+/* A parallel for over the engine's job pool (native/gpu/jobs.c): the range
+   [0, count) in blocks of at least `grain` elements, done when it returns.
+   The pool is ae3d.jobs; the engine installs the runner that reaches it,
+   and without one the calling thread does the range alone. */
 typedef void (*ae3d_job_fn)(void *ctx, int start, int end);
-int  ae3d_jobs_start(int workers);     /* < 0: one per hardware thread but the caller's; 0: none */
-void ae3d_jobs_stop(void);
-int  ae3d_jobs_workers(void);
+typedef void (*ae3d_jobs_runner_fn)(int count, int grain, ae3d_job_fn fn, void *ctx);
+void ae3d_jobs_set_runner(ae3d_jobs_runner_fn runner);
+void ae3d_job_call(ae3d_job_fn fn, void *ctx, int start, int end);
 void ae3d_jobs_for(int count, int grain, ae3d_job_fn fn, void *ctx);
-long long ae3d_jobs_loops(void);
-long long ae3d_jobs_runs(void);
 /* How many numbers the fixed-size answers -- a pixel, a region, a diff -- are
    written into. A grid is as long as it has cells and says so. */
 #define AE3D_CAPTURE_SLOTS 8
