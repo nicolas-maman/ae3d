@@ -796,8 +796,12 @@ const WANT_ONLY_LIT = 14           // among the buttons named in `text` (comma-s
 const WANT_CHANNELS = 15           // the three sky channels are within 0.01 of `value`
 const WANT_KINDS_LIT = 16          // among the weather kinds under parent `count`, only `text` is lit
 const WANT_FILES = 17              // the scripts directory has more than `count` entries
+const WANT_COLOUR = 18             // the material's three channels are within 0.02 of g_colour_want
 
 var g_channels: ptr = null         // int[3], the sky's channel sliders
+var g_material_channels: ptr = null  // int[3], the material's channel sliders
+var g_colour_want: ptr = null      // float[3], the colour WANT_COLOUR waits for
+var g_ok: ptr = null               // int[1], what the picker's waits report
 
 holds(t: *Tree, want: *Want) -> bool {
     if want.pred == WANT_ROWS { return row_count(t, want.id) == want.count }
@@ -838,6 +842,18 @@ holds(t: *Tree, want: *Want) -> bool {
     }
     if want.pred == WANT_KINDS_LIT { return kinds_lit(t, want.count) == want.text }
     if want.pred == WANT_FILES { return script_count() > want.count }
+    if want.pred == WANT_COLOUR {
+        channels = g_material_channels as int[]
+        wanted = g_colour_want as float[]
+        c = 0
+        while c < 3 {
+            d = widget_value(t, channels[c]) - wanted[c]
+            if d < 0.0 { d = 0.0 - d }
+            if d >= 0.02 { return false }
+            c = c + 1
+        }
+        return true
+    }
     return false
 }
 
@@ -1041,6 +1057,231 @@ check_splitters() {
         tries = tries + 1
     }
     check_detail("and dragging it back gives the width back", back > before - 3.0 && back < before + 3.0, "${back} against ${before}")
+}
+
+// --- the colour picker (#407) ------------------------------------------------------
+//
+// The square and the strip under the material's chip, driven through the
+// canvas routes the way a mouse drives them, and judged three ways: the
+// sliders the colour has to reach, the hex beside the chip, and the pixels
+// the picker painted.
+
+// The picker's canvas handle. The canvas routes take a canvas's own handle,
+// which counts from one in the order the canvases were made, and widget ids
+// count up in the same order; so the handle is the picker's rank among the
+// tree's canvases, the picker being the canvas in the MATERIAL section. (The
+// canvases' own debug route reports 0 x 0 for all of them in a hidden run.)
+picker_handle() -> int {
+    t = tree()
+    body = section_body_id(t, "MATERIAL")
+    picker = 0 - 1
+    n = tree_count(t)
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.kind == "canvas" && w.parent == body { picker = w.id }
+        i = i + 1
+    }
+    rank = 0
+    if picker >= 0 {
+        i = 0
+        while i < n {
+            w = tree_at(t, i)
+            if w.kind == "canvas" && w.id <= picker { rank = rank + 1 }
+            i = i + 1
+        }
+    }
+    tree_free(t)
+    if picker < 0 { return 0 - 1 }
+    return rank
+}
+
+// The material's red, green and blue sliders into g_material_channels, and
+// its hex field; false where any is missing. The sky has rows with the same
+// captions, so each caption is taken only from the MATERIAL section's body.
+material_colour_rows(t: *Tree, hex_out: int[]) -> bool {
+    body = section_body_id(t, "MATERIAL")
+    if body < 0 { return false }
+    channels = g_material_channels as int[]
+    names = string.split("red,green,blue", ",")
+    found = 0
+    n = tree_count(t)
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.kind == "text" {
+            row = widget(t, w.parent)
+            if row != null && row.parent == body {
+                c = 0
+                while c < 3 {
+                    if w.text == part_at(names, c) {
+                        slider = row_slider(t, w)
+                        if slider != null { channels[c] = slider.id ; found = found + 1 }
+                    }
+                    c = c + 1
+                }
+                if w.text == "colour" {
+                    box = row_box(t, w)
+                    if box != null { hex_out[0] = box.id }
+                }
+            }
+        }
+        i = i + 1
+    }
+    string.array_free(names)
+    return found == 3 && hex_out[0] > 0
+}
+
+// The picker canvas's width as laid out, off the tree.
+picker_width(t: *Tree) -> float {
+    body = section_body_id(t, "MATERIAL")
+    n = tree_count(t)
+    i = 0
+    while i < n {
+        w = tree_at(t, i)
+        if w.kind == "canvas" && w.parent == body { return w.w }
+        i = i + 1
+    }
+    return 0.0
+}
+
+// A press and a release at one point of the picker.
+picker_click(handle: int, x: float, y: float) {
+    xi = (x + 0.5) as int
+    yi = (y + 0.5) as int
+    post("/canvas/${handle}/click?x=${xi}&y=${yi}")
+    post("/canvas/${handle}/release?x=${xi}&y=${yi}")
+}
+
+// Wait for the material's colour to read (r, g, b).
+wait_colour(r: float, g: float, b: float) -> bool {
+    wanted = g_colour_want as float[]
+    wanted[0] = r
+    wanted[1] = g
+    wanted[2] = b
+    wt = want(WANT_COLOUR)
+    t = wait_for(wt, 8.0, g_ok as int[])
+    free(wt as ptr)
+    tree_free(t)
+    ok = g_ok as int[]
+    return ok[0] == 1
+}
+
+// One painted pixel of the picker as 0xRRGGBB, or -1. The route packs it
+// 0xAARRGGBB into a signed int, so an opaque pixel arrives negative.
+picker_pixel(handle: int, x: int, y: int, w: int) -> long {
+    info = get_json("/canvas/${handle}/pixel?x=${x}&y=${y}&w=${w}&h=122")
+    value = field_number(info, "pixel")
+    json.json_free(info)
+    if value == 0.0 - 1.0 { return 0 - 1 }
+    packed = (value) as long
+    if packed < 0 { packed = packed + 4294967296 }
+    return packed % 16777216
+}
+
+// Whether a pixel is within `slack` of (r, g, b) in bytes.
+pixel_near(pixel: long, r: int, g: int, b: int, slack: int) -> bool {
+    if pixel < 0 { return false }
+    pr = ((pixel / 65536) % 256) as int
+    pg = ((pixel / 256) % 256) as int
+    pb = (pixel % 256) as int
+    return abs_int(pr - r) <= slack && abs_int(pg - g) <= slack && abs_int(pb - b) <= slack
+}
+
+// A hex digit's value, or -1.
+hex_digit_at(text: string, at: int) -> int {
+    c = string.char_at(text, at)
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 65 && c <= 70 { return c - 55 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    return 0 - 1
+}
+
+// Whether "#RRGGBB" is within `slack` of (r, g, b) in bytes.
+hex_near(text: string, r: int, g: int, b: int, slack: int) -> bool {
+    if string.length(text) != 7 || string.char_at(text, 0) != 35 { return false }
+    block = calloc(3, 4)
+    wanted = block as int[]
+    wanted[0] = r
+    wanted[1] = g
+    wanted[2] = b
+    ok = true
+    c = 0
+    while c < 3 {
+        high = hex_digit_at(text, 1 + c * 2)
+        low = hex_digit_at(text, 2 + c * 2)
+        if high < 0 || low < 0 || abs_int(high * 16 + low - wanted[c]) > slack { ok = false }
+        c = c + 1
+    }
+    free(block)
+    return ok
+}
+
+abs_int(v: int) -> int {
+    if v < 0 { return 0 - v }
+    return v
+}
+
+check_colour_picker() {
+    handle = picker_handle()
+    check_detail("the material has a colour picker", handle > 0, "no canvas in the MATERIAL section")
+    if handle <= 0 { return }
+    if g_material_channels == null { g_material_channels = calloc(3, 4) }
+    if g_colour_want == null { g_colour_want = calloc(3, 8) }
+    if g_ok == null { g_ok = calloc(1, 4) }
+    t = tree()
+    hex_block = calloc(1, 4)
+    hex_box = hex_block as int[]
+    rows = material_colour_rows(t, hex_box)
+    width = picker_width(t)
+    tree_free(t)
+    check_detail("beside the channel sliders and a hex field", rows, "the material's red, green, blue or hex is missing")
+    check_detail("and laid out across the panel", width > 150.0, "${width} points wide")
+    if !rows || width <= 150.0 {
+        free(hex_block)
+        return
+    }
+    span = width - 1.0
+    hex = hex_box[0]
+
+    // The hex, typed: the sliders follow, and the picker's hue with them --
+    // the top right of the square, full saturation and value, is then red.
+    set_text(hex, "#FF0000")
+    check("a colour typed into the hex field sets the material", wait_colour(1.0, 0.0, 0.0))
+    top_right = picker_pixel(handle, (span - 2.0) as int, 2, (width) as int)
+    check_detail("and the picker's square is painted at its hue", pixel_near(top_right, 253, 0, 0, 12),
+                 "top right pixel ${top_right}")
+
+    // The strip a third of the way along is green; the square's top right
+    // corner is then the pure hue.
+    picker_click(handle, span / 3.0, 116.0)
+    picker_click(handle, span, 0.0)
+    check("the strip picks the hue and the square the colour", wait_colour(0.0, 1.0, 0.0))
+
+    // The middle of the square: half the saturation, half the value.
+    picker_click(handle, span / 2.0, 51.5)
+    check("the middle of the square is half saturation, half value", wait_colour(0.25, 0.5, 0.25))
+    t = tree()
+    hex_now = string.copy(widget_text(t, hex))
+    tree_free(t)
+    check_detail("and the hex beside the chip says so", hex_near(hex_now, 64, 128, 64, 4), "'${hex_now}'")
+    string.free(hex_now)
+
+    // A drag is one step: one Undo puts the colour back from before it.
+    undo = find_in_tree("button", "Undo")
+    if undo >= 0 {
+        click(undo)
+        check("one Undo takes a whole drag back", wait_colour(0.0, 1.0, 0.0))
+    }
+    free(hex_block)
+}
+
+// The id of the first widget of this kind with this text in a fresh tree.
+find_in_tree(kind: string, text: string) -> int {
+    t = tree()
+    id = find(t, kind, text)
+    tree_free(t)
+    return id
 }
 
 wait_rows(scene: int, count: int) -> int {
@@ -1791,6 +2032,8 @@ run_checks() {
             free(wt as ptr)
         }
     }
+
+    check_colour_picker()
 
     // The bar under the viewport says what the last frame cost on the
     // device, pass by pass: a rate says a scene is slow, the split says

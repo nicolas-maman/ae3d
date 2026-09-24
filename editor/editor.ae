@@ -15,6 +15,7 @@ import std.os
 import std.list
 import std.fs
 import std.string
+import std.mem
 
 import ae3d.core
 import ae3d.platform
@@ -232,6 +233,27 @@ var g_line5 = ""
 var g_line6 = ""
 var g_swatch = 0
 var g_chip = 0
+// The colour picker (#407): a saturation-value square over a hue strip on a
+// canvas of their own, the chip and a hex field above them. The canvas is as
+// wide as the panel lets it be; the square and the strip keep their heights.
+const PICKER_W = 240
+const PICKER_SQUARE_H = 104
+const PICKER_GAP = 6
+const PICKER_STRIP_H = 12
+const PICKER_H = 122                   // the square, the gap and the strip
+const PICKER_NONE = 0
+const PICKER_SQUARE = 1
+const PICKER_STRIP = 2
+var g_picker = 0                       // the canvas id, 0 until it is built
+var g_picker_w = 240                   // its width now, in points
+var g_picker_pixels: ptr = null        // the square and the strip, RGBA, g_picker_w wide
+var g_picker_painted = 0.0 - 1.0       // the hue the pixels were painted for
+var g_picker_hue = 0.0                 // 0..1 around the wheel
+var g_picker_sat = 0.0
+var g_picker_val = 0.0
+var g_picker_drag = 0                  // PICKER_NONE, _SQUARE or _STRIP
+var g_picker_before: ptr = null        // each selected model's colour when the drag began
+var g_hex_typing = false
 // One widget of each styled kind, kept so the report can ask what the theme
 // actually put on screen. A class that is never defined, or a name that does
 // not match the sheet, styles nothing and says nothing: the widget renders in
@@ -1082,9 +1104,8 @@ set_sky_image(index: int) {
 // The three channel sliders never show the colour they add up to, so the
 // inspector shows it twice: a chip painted with it and the hex spelled out
 // beside it, which is how all three of the editors this borrows from draw a
-// colour property. The chip is a fixed-size label with a background colour,
-// not a canvas: a second canvas in a panel collapses it
-// (aether-lang-dev/aether-ui#98), and a background is all a chip needs.
+// colour property. The chip is a fixed-size label with a background colour:
+// a background is all a chip needs. The picker under it is the canvas.
 //
 // ui.styled_bg answers from the layer that actually paints rather than from
 // the value that was set, which is what makes it worth checking against.
@@ -1147,16 +1168,313 @@ refresh_swatch() {
     if g_swatch == 0 { return }
     m = selected_model()
     if m == null || m.material == null {
-        ui.set_text(g_swatch, "")
+        if !g_hex_typing { ui.set_text(g_swatch, "") }
         if g_chip != 0 { ui.style_bg_color(g_chip, 0.09, 0.09, 0.09, 1.0) }
         return
     }
-    ui.set_text(g_swatch, "#${hex_byte(m.material.diffuse.x)}${hex_byte(m.material.diffuse.y)}${hex_byte(m.material.diffuse.z)}")
+    if !g_hex_typing {
+        ui.set_text(g_swatch, "#${hex_byte(m.material.diffuse.x)}${hex_byte(m.material.diffuse.y)}${hex_byte(m.material.diffuse.z)}")
+    }
     if g_chip != 0 {
         ui.style_bg_color(g_chip, core.clampf(m.material.diffuse.x, 0.0, 1.0),
                                   core.clampf(m.material.diffuse.y, 0.0, 1.0),
                                   core.clampf(m.material.diffuse.z, 0.0, 1.0), 1.0)
     }
+    // The picker follows the colour however it was set -- a slider, the hex,
+    // an undo -- except while it is the one setting it: a drag down to black
+    // would otherwise lose its hue and saturation to the round trip.
+    if g_picker_drag == PICKER_NONE {
+        hsv = rgb_hsv(core.clampf(m.material.diffuse.x, 0.0, 1.0),
+                      core.clampf(m.material.diffuse.y, 0.0, 1.0),
+                      core.clampf(m.material.diffuse.z, 0.0, 1.0))
+        // Grey has no hue and black no saturation: keep the ones it had.
+        if hsv.y > 0.0001 && hsv.z > 0.0001 { g_picker_hue = hsv.x }
+        if hsv.z > 0.0001 { g_picker_sat = hsv.y }
+        g_picker_val = hsv.z
+    }
+    paint_picker()
+}
+
+// --- the colour picker (#407) ---------------------------------------------------
+//
+// Saturation left to right and value top to bottom in the square, at the hue
+// the strip under it picks; what Unity, Unreal and Blender draw for a colour.
+// Dragging either sets the colour of everything selected as it moves, and
+// letting go records one step for the whole drag, so an undo puts back the
+// colour the drag started from rather than the last few pixels of it.
+
+// A hue, saturation and value (each 0..1) as linear-free RGB, 0..1.
+hsv_rgb(h: float, sat: float, v: float) -> Vec3 {
+    k = h * 6.0
+    i = (k) as int
+    if i > 5 { i = 5 }
+    if i < 0 { i = 0 }
+    f = k - (i) as float
+    p = v * (1.0 - sat)
+    q = v * (1.0 - sat * f)
+    t = v * (1.0 - sat * (1.0 - f))
+    if i == 0 { return core.vec3(v, t, p) }
+    if i == 1 { return core.vec3(q, v, p) }
+    if i == 2 { return core.vec3(p, v, t) }
+    if i == 3 { return core.vec3(p, q, v) }
+    if i == 4 { return core.vec3(t, p, v) }
+    return core.vec3(v, p, q)
+}
+
+// The inverse: (hue, saturation, value) in x, y, z.
+rgb_hsv(r: float, g: float, b: float) -> Vec3 {
+    high = r
+    if g > high { high = g }
+    if b > high { high = b }
+    low = r
+    if g < low { low = g }
+    if b < low { low = b }
+    span = high - low
+    h = 0.0
+    if span > 0.00001 {
+        if high == r {
+            h = (g - b) / span
+            if h < 0.0 { h = h + 6.0 }
+        } else if high == g {
+            h = (b - r) / span + 2.0
+        } else {
+            h = (r - g) / span + 4.0
+        }
+        h = h / 6.0
+    }
+    sat = 0.0
+    if high > 0.00001 { sat = span / high }
+    return core.vec3(h, sat, high)
+}
+
+picker_byte(x: float) -> long {
+    return (core.clampf(x, 0.0, 1.0) * 255.0 + 0.5) as long
+}
+
+// One opaque pixel, as the canvas reads its bytes: red first.
+picker_pixel(r: float, g: float, b: float) -> long {
+    return picker_byte(r) + picker_byte(g) * 256 + picker_byte(b) * 65536 + (255 as long) * 16777216
+}
+
+// The square at the picker's hue, the gap in the panel's colour, and the
+// strip. Repainted when the hue or the width changes, not on every move.
+paint_picker_pixels() {
+    w = g_picker_w
+    if g_picker_pixels == null { g_picker_pixels = calloc(w * PICKER_H, 4) }
+    top = hsv_rgb(g_picker_hue, 1.0, 1.0)
+    y = 0
+    while y < PICKER_SQUARE_H {
+        v = 1.0 - (y) as float / (PICKER_SQUARE_H - 1) as float
+        x = 0
+        while x < w {
+            sat = (x) as float / (w - 1) as float
+            // v * lerp(white, the pure hue, saturation)
+            r = v * (1.0 - sat + sat * top.x)
+            g = v * (1.0 - sat + sat * top.y)
+            b = v * (1.0 - sat + sat * top.z)
+            mem.set_u32_le(g_picker_pixels, (y * w + x) * 4, picker_pixel(r, g, b))
+            x = x + 1
+        }
+        y = y + 1
+    }
+    panel = picker_pixel(0.149, 0.149, 0.149)
+    while y < PICKER_SQUARE_H + PICKER_GAP {
+        x = 0
+        while x < w {
+            mem.set_u32_le(g_picker_pixels, (y * w + x) * 4, panel)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    x = 0
+    while x < w {
+        c = hsv_rgb((x) as float / (w - 1) as float, 1.0, 1.0)
+        packed = picker_pixel(c.x, c.y, c.z)
+        row = PICKER_SQUARE_H + PICKER_GAP
+        while row < PICKER_H {
+            mem.set_u32_le(g_picker_pixels, (row * w + x) * 4, packed)
+            row = row + 1
+        }
+        x = x + 1
+    }
+    g_picker_painted = g_picker_hue
+}
+
+// The picture and the two markers: a ring where the colour is in the square
+// and a bar where its hue is on the strip, each drawn light over dark so it
+// reads on white and on black.
+paint_picker() {
+    if g_picker == 0 { return }
+    if g_picker_pixels == null || g_picker_painted != g_picker_hue { paint_picker_pixels() }
+    ui.canvas_clear(g_picker)
+    ui.canvas_draw_image_ptr(g_picker, 0.0, 0.0, g_picker_w, PICKER_H, g_picker_pixels, g_picker_w * PICKER_H * 4)
+    w = (g_picker_w - 1) as float
+    cx = g_picker_sat * w
+    cy = (1.0 - g_picker_val) * (PICKER_SQUARE_H - 1) as float
+    ui.canvas_begin_path(g_picker)
+    ui.canvas_arc(g_picker, cx, cy, 5.5, 0.0, 6.2832)
+    ui.canvas_stroke(g_picker, 0.0, 0.0, 0.0, 0.7, 3.0)
+    ui.canvas_begin_path(g_picker)
+    ui.canvas_arc(g_picker, cx, cy, 5.5, 0.0, 6.2832)
+    ui.canvas_stroke(g_picker, 1.0, 1.0, 1.0, 1.0, 1.5)
+    hx = g_picker_hue * w
+    strip = (PICKER_SQUARE_H + PICKER_GAP) as float
+    ui.canvas_fill_rect(g_picker, hx - 2.5, strip - 2.0, 5.0, (PICKER_STRIP_H + 4) as float, 0.0, 0.0, 0.0, 0.7)
+    ui.canvas_fill_rect(g_picker, hx - 1.0, strip - 1.0, 2.0, (PICKER_STRIP_H + 2) as float, 1.0, 1.0, 1.0, 1.0)
+    ui.canvas_redraw(g_picker)
+}
+
+// The canvas took a new width from the panel: the pixels are remade for it.
+resize_picker(width: int) {
+    if width < 32 || width == g_picker_w { return }
+    g_picker_w = width
+    if g_picker_pixels != null { free(g_picker_pixels) }
+    g_picker_pixels = null
+    paint_picker()
+}
+
+// Where a point on the canvas puts the picker, by which part the drag began in.
+picker_at(x: float, y: float) {
+    w = (g_picker_w - 1) as float
+    if g_picker_drag == PICKER_SQUARE {
+        g_picker_sat = core.clampf(x / w, 0.0, 1.0)
+        g_picker_val = core.clampf(1.0 - y / (PICKER_SQUARE_H - 1) as float, 0.0, 1.0)
+    }
+    if g_picker_drag == PICKER_STRIP {
+        g_picker_hue = core.clampf(x / w, 0.0, 1.0)
+    }
+    c = hsv_rgb(g_picker_hue, g_picker_sat, g_picker_val)
+    colour_selection(c.x, c.y, c.z)
+}
+
+picker_press(x: float, y: float) {
+    m = selected_model()
+    if m == null { return }
+    g_picker_drag = PICKER_SQUARE
+    if y > (PICKER_SQUARE_H + PICKER_GAP / 2) as float { g_picker_drag = PICKER_STRIP }
+    remember_colours()
+    picker_at(x, y)
+}
+
+picker_move(x: float, y: float) {
+    if g_picker_drag == PICKER_NONE { return }
+    picker_at(x, y)
+}
+
+picker_release(x: float, y: float) {
+    if g_picker_drag == PICKER_NONE { return }
+    picker_at(x, y)
+    record_colours()
+    g_picker_drag = PICKER_NONE
+}
+
+// Each selected model's colour as the drag begins, three floats a row.
+remember_colours() {
+    if g_picker_before != null { free(g_picker_before) }
+    count = row_count()
+    g_picker_before = calloc(count * 3 + 3, 8)
+    before = g_picker_before as float[]
+    i = 0
+    while i < count {
+        target = model_at(i)
+        if is_selected(i) && target != null && target.material != null {
+            before[i * 3] = target.material.diffuse.x
+            before[i * 3 + 1] = target.material.diffuse.y
+            before[i * 3 + 2] = target.material.diffuse.z
+        } else {
+            before[i * 3] = 0.0 - 1.0
+        }
+        i = i + 1
+    }
+}
+
+// The drag as one step: every selected model, every channel, undone together.
+record_colours() {
+    if g_picker_before == null { return }
+    before = g_picker_before as float[]
+    history.history_group_begin(g_history)
+    count = row_count()
+    i = 0
+    while i < count {
+        target = model_at(i)
+        if is_selected(i) && target != null && target.material != null && before[i * 3] >= 0.0 {
+            ch = 0
+            while ch < 3 {
+                history.history_record(g_history, history.STEP_PROPERTY, target as ptr, 4 + ch,
+                                       before[i * 3 + ch], property_value(target, 4 + ch))
+                ch = ch + 1
+            }
+        }
+        i = i + 1
+    }
+    history.history_group_end(g_history)
+    g_last_edit = seconds()
+    free(g_picker_before)
+    g_picker_before = null
+}
+
+// The colour of everything selected, without a step: the drag and the hex
+// field record their own.
+colour_selection(r: float, g: float, b: float) {
+    count = row_count()
+    i = 0
+    while i < count {
+        target = model_at(i)
+        if is_selected(i) && target != null {
+            core.model_ensure_material(target)
+            core.model_set_diffuse(target, r, g, b)
+            follow_marker(i, target)
+        }
+        i = i + 1
+    }
+    show_row(4, r)
+    show_row(5, g)
+    show_row(6, b)
+    refresh_swatch()
+    paint_soon()
+}
+
+// A hex digit's value, or -1.
+hex_digit(text: string, at: int) -> int {
+    c = string.char_at(text, at)
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 65 && c <= 70 { return c - 55 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    return 0 - 1
+}
+
+// "#3366CC" or "3366cc" typed into the field: the colour, one step. Anything
+// else is a colour still being typed and is left alone.
+hex_typed(text: string) {
+    m = selected_model()
+    if m == null { return }
+    start = 0
+    if string.length(text) == 7 && string.char_at(text, 0) == 35 { start = 1 }
+    if string.length(text) - start != 6 { return }
+    block = calloc(3, 8)
+    channels = block as float[]
+    ch = 0
+    while ch < 3 {
+        high = hex_digit(text, start + ch * 2)
+        low = hex_digit(text, start + ch * 2 + 1)
+        if high < 0 || low < 0 {
+            free(block)
+            return
+        }
+        channels[ch] = (high * 16 + low) as float / 255.0
+        ch = ch + 1
+    }
+    if m.material != null && hex_byte(m.material.diffuse.x) == hex_byte(channels[0]) &&
+       hex_byte(m.material.diffuse.y) == hex_byte(channels[1]) && hex_byte(m.material.diffuse.z) == hex_byte(channels[2]) {
+        free(block)
+        return
+    }
+    remember_colours()
+    g_hex_typing = true
+    colour_selection(channels[0], channels[1], channels[2])
+    g_hex_typing = false
+    record_colours()
+    free(block)
 }
 
 // What the chip is actually painted, read back off the widget rather than from
@@ -7028,11 +7346,33 @@ main() {
         ui.add_css_class(g_chip, "chip")
         ui.width(g_chip, 30)
         ui.height(g_chip, 14)
-        g_swatch = ui.text(swatch_row, "")
-        ui.add_css_class(g_swatch, "value")
+        // The hex is a field: a colour copied from anywhere else is typed or
+        // pasted in whole.
+        g_swatch = ui.textfield(swatch_row, "#RRGGBB") callback |text: string| {
+            hex_typed(text)
+        }
+        ui.add_css_class(g_swatch, "field")
         // Wider than a number's column: a hex colour is seven characters and
         // the value column is sized for four, so it came out cut off.
         ui.width(g_swatch, HEX_COLUMN)
+
+        g_picker = ui.canvas_create(material_body, PICKER_W, PICKER_H)
+        picker_widget = ui.canvas_widget(g_picker)
+        ui.canvas_size(g_picker, PICKER_W, PICKER_H)
+        ui.fill_width(picker_widget)
+        ui.canvas_on_resize(g_picker) callback |w: float, h: float| {
+            resize_picker((w) as int)
+        }
+        ui.canvas_on_click(g_picker) callback |x: float, y: float| {
+            picker_press(x, y)
+        }
+        ui.canvas_on_move(g_picker) callback |x: float, y: float| {
+            picker_move(x, y)
+        }
+        ui.canvas_on_release(g_picker) callback |x: float, y: float| {
+            picker_release(x, y)
+        }
+        paint_picker()
 
         inspector_row(material_body, "red", 0.0, 1.0, 0.8, 4)
         inspector_row(material_body, "green", 0.0, 1.0, 0.5, 5)
