@@ -637,20 +637,13 @@ static struct {
     // a readback stalls the frame it reads, so it is off by default and armed
     // for the one frame a snapshot or an agent grid needs.
     int can_capture;      /* the surface allows a transfer-source swapchain */
-    /* The frame's light, measured (ae3d_vk_meter): the finished image blitted
-       into a small image and halved level by level to 320 texels across or
-       fewer, the last level copied to a buffer of the frame's own, read when
-       that frame's fence has passed. */
-    int meter_on;
-    VkImage meter_image;
-    VkDeviceMemory meter_memory;
-    int meter_levels, meter_width, meter_height, meter_small_width, meter_small_height;
-    VkBuffer meter_buffer[AE3D_VK_FRAMES];
-    VkDeviceMemory meter_buffer_memory[AE3D_VK_FRAMES];
-    void *meter_mapped[AE3D_VK_FRAMES];
-    int meter_written[AE3D_VK_FRAMES];
-    int meter_have;
-    double meter_mean, meter_white;  /* mean linear luminance; share of texels near white */
+    /* An Aether module's part of the frame (ae3d_vk_set_frame_hooks, #402):
+       recorded after the frame's last pass, collected once its fence has
+       passed, released with the swapchain it was sized to. */
+    void (*hook_record)(void *);
+    void (*hook_collect)(void *);
+    void (*hook_release)(void *);
+    void *hook_context;
     int capture_request;  /* copy the next frame that is submitted */
     int capture_slot;     /* which staging buffer holds the last capture, or -1 */
 
@@ -1425,29 +1418,10 @@ static int ae3d_vk_mat4_invert(const double *c, double *inv);
 static VkPipeline ae3d_vk_pipeline_for(int handle, int points);
 static int ae3d_vk_instances_are_points(int instance_handle, int instance_count);
 
-static void ae3d_vk_meter_free(void) {
-    int f;
-    if (vk.meter_image) ae3d_vkDestroyImage(vk.device, vk.meter_image, NULL);
-    if (vk.meter_memory) ae3d_vkFreeMemory(vk.device, vk.meter_memory, NULL);
-    vk.meter_image = VK_NULL_HANDLE;
-    vk.meter_memory = VK_NULL_HANDLE;
-    for (f = 0; f < AE3D_VK_FRAMES; f++) {
-        if (vk.meter_mapped[f]) ae3d_vkUnmapMemory(vk.device, vk.meter_buffer_memory[f]);
-        if (vk.meter_buffer[f]) ae3d_vkDestroyBuffer(vk.device, vk.meter_buffer[f], NULL);
-        if (vk.meter_buffer_memory[f]) ae3d_vkFreeMemory(vk.device, vk.meter_buffer_memory[f], NULL);
-        vk.meter_mapped[f] = NULL;
-        vk.meter_buffer[f] = VK_NULL_HANDLE;
-        vk.meter_buffer_memory[f] = VK_NULL_HANDLE;
-        vk.meter_written[f] = 0;
-    }
-    vk.meter_width = 0;
-    vk.meter_height = 0;
-}
-
 static void ae3d_vk_destroy_swapchain(void) {
     unsigned i;
 
-    ae3d_vk_meter_free();
+    if (vk.hook_release) vk.hook_release(vk.hook_context);
 
     if (vk.framebuffers) {
         for (i = 0; i < vk.image_count; i++) {
@@ -1537,227 +1511,36 @@ static void ae3d_vk_destroy_swapchain(void) {
     vk.image_count = 0;
 }
 
-/* sRGB-encoded byte to linear light, from a table made once. */
-static double ae3d_vk_meter_linear(unsigned char c) {
-    static double table[256];
-    static int made;
-    if (!made) {
-        int i;
-        for (i = 0; i < 256; i++) {
-            double v = i / 255.0;
-            table[i] = v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4);
-        }
-        made = 1;
-    }
-    return table[c];
+/* The seam the Vulkan backend's move into Aether goes through (#402): an
+   Aether module registers what it records into the frame and when, and
+   reads the handles it records with. Everything here is the C state's; the
+   module owns what it makes with them and frees it in its release. */
+void ae3d_vk_set_frame_hooks(void *record, void *collect, void *release, void *context) {
+    vk.hook_record = (void (*)(void *))record;
+    vk.hook_collect = (void (*)(void *))collect;
+    vk.hook_release = (void (*)(void *))release;
+    vk.hook_context = context;
 }
 
-static int ae3d_vk_meter_make(void) {
-    int f, levels = 1, w, h;
-    VkDeviceSize bytes;
-    ae3d_vk_meter_free();
-    vk.meter_width = (int)(vk.extent.width / 2 > 0 ? vk.extent.width / 2 : 1);
-    vk.meter_height = (int)(vk.extent.height / 2 > 0 ? vk.extent.height / 2 : 1);
-    w = vk.meter_width;
-    h = vk.meter_height;
-    /* A level is half the one above it, rounded down, never under one. */
-    while (w > 320) { w = w / 2 > 0 ? w / 2 : 1; h = h / 2 > 0 ? h / 2 : 1; levels++; }
-    vk.meter_levels = levels;
-    vk.meter_small_width = w;
-    vk.meter_small_height = h;
-    if (!ae3d_vk_create_image(vk.meter_width, vk.meter_height, levels, VK_FORMAT_R8G8B8A8_UNORM,
-                              VK_SAMPLE_COUNT_1_BIT,
-                              VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-                              VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_TILING_OPTIMAL,
-                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                              &vk.meter_image, &vk.meter_memory, NULL)) {
-        vk.meter_width = 0;
-        return 0;
-    }
-    bytes = (VkDeviceSize)w * (VkDeviceSize)h * 4;
-    for (f = 0; f < AE3D_VK_FRAMES; f++) {
-        /* Cached: the CPU reads every byte of it every frame, and a read from
-           write-combined memory is uncached -- the meter's quarter megabyte
-           read that way halved the frame rate. Plain coherent memory where a
-           device has no cached kind. */
-        if (!ae3d_vk_create_buffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
-                                   VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
-                                   &vk.meter_buffer[f], &vk.meter_buffer_memory[f]) &&
-            !ae3d_vk_create_buffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                   &vk.meter_buffer[f], &vk.meter_buffer_memory[f])) {
-            ae3d_vk_meter_free();
-            return 0;
-        }
-        ae3d_vkMapMemory(vk.device, vk.meter_buffer_memory[f], 0, bytes, 0, &vk.meter_mapped[f]);
-    }
-    return 1;
+void *ae3d_vk_instance_handle(void) { return (void *)vk.instance; }
+void *ae3d_vk_physical_device_handle(void) { return (void *)vk.physical; }
+void *ae3d_vk_device_handle(void) { return (void *)vk.device; }
+/* The frame being recorded: its command buffer, its slot among the frames
+   in flight, how many there are, and the image it finishes in -- the
+   offscreen target, or the swapchain image it acquired. */
+void *ae3d_vk_frame_commands(void) { return (void *)vk.command_buffers[vk.frame]; }
+int ae3d_vk_frame_slot(void) { return (int)vk.frame; }
+int ae3d_vk_frames_in_flight(void) { return AE3D_VK_FRAMES; }
+void *ae3d_vk_frame_image(void) {
+    if (!vk.images) return NULL;
+    return (void *)(vk.offscreen ? vk.images[0] : vk.images[vk.image_index]);
 }
-
-static void ae3d_vk_meter_barrier(VkImage image, int level, VkImageLayout from, VkImageLayout to,
-                                  VkAccessFlags src_access, VkAccessFlags dst_access,
-                                  VkPipelineStageFlags src_stage) {
-    VkImageMemoryBarrier b;
-    memset(&b, 0, sizeof(b));
-    b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    b.oldLayout = from;
-    b.newLayout = to;
-    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b.image = image;
-    b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    b.subresourceRange.baseMipLevel = level < 0 ? 0 : (unsigned)level;
-    b.subresourceRange.levelCount = level < 0 ? VK_REMAINING_MIP_LEVELS : 1;
-    b.subresourceRange.layerCount = 1;
-    b.srcAccessMask = src_access;
-    b.dstAccessMask = dst_access;
-    ae3d_vkCmdPipelineBarrier(vk.command_buffers[vk.frame], src_stage, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                              0, 0, NULL, 0, NULL, 1, &b);
-}
-
-static void ae3d_vk_meter_blit(VkImage from, VkImageLayout from_layout, int from_level, int fw, int fh,
-                               int to_level, int tw, int th) {
-    VkImageBlit blit;
-    memset(&blit, 0, sizeof(blit));
-    blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    blit.srcSubresource.mipLevel = (unsigned)from_level;
-    blit.srcSubresource.layerCount = 1;
-    blit.srcOffsets[1].x = fw;
-    blit.srcOffsets[1].y = fh;
-    blit.srcOffsets[1].z = 1;
-    blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    blit.dstSubresource.mipLevel = (unsigned)to_level;
-    blit.dstSubresource.layerCount = 1;
-    blit.dstOffsets[1].x = tw;
-    blit.dstOffsets[1].y = th;
-    blit.dstOffsets[1].z = 1;
-    ae3d_vkCmdBlitImage(vk.command_buffers[vk.frame], from, from_layout, vk.meter_image,
-                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
-}
-
-/* Recorded after the frame's last pass: the finished image into the meter,
-   halved level by level, the last level into this frame's buffer. A windowed
-   frame's image is moved from presenting to transfer-source and back, as the
-   capture moves it; an offscreen frame's already is transfer-source. */
-static void ae3d_vk_meter_record(void) {
-    VkImage source;
-    VkBufferImageCopy region;
-    int level, w, h, nw, nh;
-    if (!vk.offscreen && !vk.can_capture) return;
-    if (vk.meter_width != (int)(vk.extent.width / 2 > 0 ? vk.extent.width / 2 : 1) ||
-        vk.meter_height != (int)(vk.extent.height / 2 > 0 ? vk.extent.height / 2 : 1) || !vk.meter_image) {
-        if (!ae3d_vk_meter_make()) return;
-    }
-    source = vk.offscreen ? vk.images[0] : vk.images[vk.image_index];
-    if (!vk.offscreen) {
-        ae3d_vk_meter_barrier(source, 0, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                              0, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-    }
-    /* After the last frame's blits read the levels this one writes, not
-       merely after nothing (#410). */
-    ae3d_vk_meter_barrier(vk.meter_image, -1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                          0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-    ae3d_vk_meter_blit(source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0, (int)vk.extent.width, (int)vk.extent.height,
-                       0, vk.meter_width, vk.meter_height);
-    w = vk.meter_width;
-    h = vk.meter_height;
-    for (level = 1; level < vk.meter_levels; level++) {
-        nw = w / 2 > 0 ? w / 2 : 1;
-        nh = h / 2 > 0 ? h / 2 : 1;
-        ae3d_vk_meter_barrier(vk.meter_image, level - 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
-                              VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-        ae3d_vk_meter_blit(vk.meter_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, level - 1, w, h, level, nw, nh);
-        w = nw;
-        h = nh;
-    }
-    ae3d_vk_meter_barrier(vk.meter_image, vk.meter_levels - 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
-                          VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-    memset(&region, 0, sizeof(region));
-    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    region.imageSubresource.mipLevel = (unsigned)(vk.meter_levels - 1);
-    region.imageSubresource.layerCount = 1;
-    region.imageExtent.width = (unsigned)vk.meter_small_width;
-    region.imageExtent.height = (unsigned)vk.meter_small_height;
-    region.imageExtent.depth = 1;
-    /* This frame slot's buffer was written by the copy two frames ago and
-       read by the host since: the copy waits for both, and what it writes is
-       made visible to the host, which reads it after the fence (#410). */
-    {
-        VkMemoryBarrier before;
-        memset(&before, 0, sizeof(before));
-        before.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        before.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_READ_BIT;
-        before.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        ae3d_vkCmdPipelineBarrier(vk.command_buffers[vk.frame],
-                                  VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-                                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, NULL, 0, NULL);
-    }
-    ae3d_vkCmdCopyImageToBuffer(vk.command_buffers[vk.frame], vk.meter_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                vk.meter_buffer[vk.frame], 1, &region);
-    {
-        VkMemoryBarrier after;
-        memset(&after, 0, sizeof(after));
-        after.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        after.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-        ae3d_vkCmdPipelineBarrier(vk.command_buffers[vk.frame], VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                  VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &after, 0, NULL, 0, NULL);
-    }
-    if (!vk.offscreen) {
-        VkImageMemoryBarrier back;
-        memset(&back, 0, sizeof(back));
-        back.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        back.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        back.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        back.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        back.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        back.image = source;
-        back.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        back.subresourceRange.levelCount = 1;
-        back.subresourceRange.layerCount = 1;
-        back.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        ae3d_vkCmdPipelineBarrier(vk.command_buffers[vk.frame], VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                  VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &back);
-    }
-    vk.meter_written[vk.frame] = 1;
-}
-
-/* This frame slot's measurement, its fence having passed: the mean linear
-   luminance of the last level's texels and the share of them near white. */
-static void ae3d_vk_meter_collect(void) {
-    const unsigned char *p;
-    double sum = 0.0;
-    int i, count, white = 0;
-    if (!vk.meter_written[vk.frame] || !vk.meter_mapped[vk.frame]) return;
-    vk.meter_written[vk.frame] = 0;
-    p = (const unsigned char *)vk.meter_mapped[vk.frame];
-    count = vk.meter_small_width * vk.meter_small_height;
-    if (count <= 0) return;
-    for (i = 0; i < count; i++) {
-        const unsigned char *t = p + (size_t)i * 4;
-        double luma = 0.2126 * ae3d_vk_meter_linear(t[0]) + 0.7152 * ae3d_vk_meter_linear(t[1]) +
-                      0.0722 * ae3d_vk_meter_linear(t[2]);
-        sum += luma;
-        if (luma > 0.8) white++;
-    }
-    vk.meter_mean = sum / (double)count;
-    vk.meter_white = (double)white / (double)count;
-    vk.meter_have = 1;
-}
-
-/* Measure every frame from now on (or stop), and the latest measurement:
-   1 when `out` holds the mean linear luminance and the near-white share. */
-void ae3d_vk_set_meter(int on) { vk.meter_on = on ? 1 : 0; }
-
-int ae3d_vk_meter(double *out) {
-    if (!out || !vk.meter_have) return 0;
-    out[0] = vk.meter_mean;
-    out[1] = vk.meter_white;
-    return 1;
-}
+/* (Its size: ae3d_vk_frame_width and _height, below.) Whether the frame's
+   image can be copied from: an offscreen target always
+   is; a swapchain's only when its usage allowed it. A windowed frame's
+   image is presenting when the hooks see it, and goes back to presenting. */
+int ae3d_vk_frame_offscreen(void) { return vk.offscreen ? 1 : 0; }
+int ae3d_vk_frame_copyable(void) { return (vk.offscreen || vk.can_capture) ? 1 : 0; }
 
 static int ae3d_vk_choose_surface_format(void) {
     VkSurfaceFormatKHR *formats;
@@ -4409,7 +4192,7 @@ int ae3d_vk_frame_begin(double r, double g, double b, double a) {
 
     ae3d_vkWaitForFences(vk.device, 1, &vk.in_flight[vk.frame], VK_TRUE, UINT64_MAX);
     ae3d_vk_collect_stamps();
-    ae3d_vk_meter_collect();
+    if (vk.hook_collect) vk.hook_collect(vk.hook_context);
 
     if (vk.offscreen) {
         vk.image_index = 0;
@@ -6531,7 +6314,7 @@ int ae3d_vk_frame_end(void) {
         vk.capture_request = 0;
     }
 
-    if (vk.meter_on) ae3d_vk_meter_record();
+    if (vk.hook_record) vk.hook_record(vk.hook_context);
 
     ae3d_vk_stamp_through(7);
     vk.stamped[vk.frame] = vk.stamp_next == AE3D_VK_STAMPS;
@@ -7546,7 +7329,6 @@ void ae3d_vk_shutdown(void) {
     vk.batch_scratch_memory = NULL;
     vk.batch_scratch_capacity = 0;
     ae3d_vkDeviceWaitIdle(vk.device);
-    ae3d_vk_meter_free();
 
     for (i = 0; i < (unsigned)vk.mesh_capacity; i++) {
         if (vk.meshes[i].in_use) {
