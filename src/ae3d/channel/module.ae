@@ -2,13 +2,26 @@
 // both ways, and nothing at all in a frame when AE3D_AGENT is unset.
 //
 // ae3d.agent is what a request means; this is how it arrives and how the
-// answer leaves. The engine asks for requests at one point in its frame
-// (agent.pump), and that is where this reads: whatever the socket holds is
-// taken without waiting -- a client that connected is accepted, the bytes
-// it sent are appended to the pending ones, and every complete line is a
-// request. There is no thread and no lock, because nothing is done with a
-// request anywhere but that one point in the frame: a thread that read
-// ahead only filled a queue the frame emptied. It was C once
+// answer leaves. A thread of the channel's own waits on the socket --
+// accepts a client, reads what it sends, cuts it into lines -- and hands
+// each line to the frame through a ring: the thread writes a slot and then
+// moves the tail, the frame takes slots up to the tail and moves the head,
+// each index written by one side only. The engine drains the ring at one
+// point in its frame (agent.pump), and an idle drain is two atomic loads:
+// no lock, no syscall. Reading the socket from the frame instead cost a
+// poll a frame -- 0.9 microseconds on Windows, 27 on macOS's CI runner.
+//
+// Answers are written from the frame, on the socket the thread reads, and
+// the thread is what closes it when the client goes -- so a close must
+// never land under a write. Two atomics settle it: the frame raises
+// `writing` and then looks at `attached`; the thread lowers `attached` and
+// then waits for `writing` to fall before it closes. Both are sequentially
+// consistent, so either the frame sees the client gone and does not write,
+// or the thread sees the write and waits it out. A second client while one
+// is attached is told so and closed.
+//
+// Stopping asks the thread to finish and waits for it; every wait of the
+// thread's is bounded (POLL_MS), so it notices within one. It was C once
 // (native/agent/channel.c), for want of a std.tcp that could listen on
 // loopback only, poll a listener and set TCP_NODELAY (aether#2136).
 //
@@ -21,6 +34,8 @@ import std.mem
 import std.os
 import std.string
 import std.tcp
+import std.worker
+import aephysics.native
 
 exports (
     start, active, port, next_request, respond, stop, last_error
@@ -28,20 +43,40 @@ exports (
 
 extern malloc(size: long) -> ptr
 extern realloc(p: ptr, size: long) -> ptr
+extern calloc(count: int, size: int) -> ptr
 extern free(p: ptr)
 extern memcpy(dst: ptr, src: ptr, n: long) -> ptr
 
 const CHUNK = 4096
 const MOST = 4194304               // a request longer than this is a protocol fault, and the client goes
+const SLOTS = 256                  // requests in flight between the thread and the frame
+const POLL_MS = 100                // the longest the thread waits before looking at `stopping`
 
+// What the thread and the frame share. The ints are atomics, touched only
+// through native.atomic_*; each has one writer.
+struct ChannelShared {
+    head: int                      // written by the frame: the next slot it takes
+    tail: int                      // written by the thread: one past the last slot it filled
+    attached: int                  // written by the thread: a client is there to answer
+    writing: int                   // written by the frame: an answer is going out
+    stopping: int                  // written by the frame: finish now
+}
+
+var g_shared: ptr = null           // *ChannelShared
+var g_slots: ptr = null            // ptr[SLOTS]: each a line, [length: 8 bytes][bytes]
+var g_exited: ptr = null           // semaphore the thread signals on its way out
 var g_server: ptr = null           // the listening socket, while the channel is open
-var g_client: ptr = null           // the one client attached, or null
+var g_client: ptr = null           // the attached client; set by the thread before `attached`
 var g_port = 0
 var g_error = ""
-var g_pending: ptr = null          // bytes received past the last complete line
+
+// The thread's own: bytes received past the last complete line.
+var g_pending: ptr = null
 var g_used = 0
 var g_capacity = 0
 var g_chunk: ptr = null            // a std.bytes buffer: a received chunk's bytes, a string's not being addressable
+
+shared() -> *ChannelShared { return g_shared as *ChannelShared }
 
 active() -> bool { return g_server != null }
 
@@ -73,36 +108,53 @@ start() -> bool {
         g_error = "cannot listen on 127.0.0.1:${requested}"
         return false
     }
-    g_server = server
-    g_port = tcp.tcp_server_port_raw(server)
+    g_shared = calloc(1, sizeof(ChannelShared))
+    g_slots = calloc(SLOTS, 8)
+    g_exited = native.semaphore_new(0)
     g_capacity = 8192
     g_pending = malloc(g_capacity as long)
     g_used = 0
+    g_server = server
+    g_port = tcp.tcp_server_port_raw(server)
+    if !worker.run_detached(| _c: ptr | { serve() }) {
+        g_error = "cannot start the channel's thread"
+        tcp.tcp_server_close(server)
+        g_server = null
+        release()
+        return false
+    }
     println("ae3d: agent channel on 127.0.0.1:${g_port}")
     port_file = os.getenv("AE3D_AGENT_PORT_FILE")
     if port_file != "" { fs.write(port_file, "${g_port}\n") }
     return true
 }
 
-// The next request, or "" when none has arrived whole. Reads what the
-// socket holds first, without waiting.
+// The next request, or "" when none has arrived whole.
 next_request() -> string {
     if g_server == null { return "" }
-    take_waiting()
-    while true {
-        length = line_length()
-        if length < 0 { return "" }
-        line = bytes.string_from_ptr(g_pending, length)
-        consume_line(length)
-        if string.length(line) > 0 { return line }
-    }
-    return ""
+    s = shared()
+    head = native.atomic_load((&s.head) as ptr)
+    if head == native.atomic_load((&s.tail) as ptr) { return "" }
+    slots = g_slots as ptr[]
+    block = slots[head % SLOTS]
+    slots[head % SLOTS] = null
+    length = (block as int[])[0]
+    line = bytes.string_from_ptr(block + 8, length)
+    free(block)
+    native.atomic_store((&s.head) as ptr, head + 1)
+    return line
 }
 
 // One answer, and its terminator in the same write: a terminator sent on
 // its own would wait on the acknowledgement of the line before it.
 respond(line: string) {
-    if g_client == null { return }
+    if g_server == null { return }
+    s = shared()
+    native.atomic_store((&s.writing) as ptr, 1)
+    if native.atomic_load((&s.attached) as ptr) == 0 {
+        native.atomic_store((&s.writing) as ptr, 0)
+        return
+    }
     whole = string.concat(line, "\n")
     total = string.length(whole)
     sent, err = tcp.write_n(g_client, whole, total)
@@ -116,15 +168,35 @@ respond(line: string) {
         string.free(rest)
     }
     string.free(whole)
-    if err != "" { drop_client() }
+    native.atomic_store((&s.writing) as ptr, 0)
 }
 
 stop() {
     if g_server == null { return }
-    drop_client()
+    s = shared()
+    native.atomic_store((&s.stopping) as ptr, 1)
+    native.semaphore_wait(g_exited)
     tcp.tcp_server_close(g_server)
     g_server = null
     g_port = 0
+    release()
+}
+
+release() {
+    if g_slots != null {
+        slots = g_slots as ptr[]
+        i = 0
+        while i < SLOTS {
+            if slots[i] != null { free(slots[i]) }
+            i = i + 1
+        }
+        free(g_slots)
+    }
+    g_slots = null
+    if g_shared != null { free(g_shared) }
+    g_shared = null
+    if g_exited != null { native.semaphore_free(g_exited) }
+    g_exited = null
     if g_pending != null { free(g_pending) }
     g_pending = null
     g_used = 0
@@ -133,47 +205,97 @@ stop() {
     g_chunk = null
 }
 
-// --- the socket, read without waiting -------------------------------------------------------------------------------
+// --- the thread ------------------------------------------------------------------------------------------------------
 
-// A client that connected is attached, a second one told there is one
-// already, and the attached one's bytes appended to the pending ones.
-take_waiting() {
-    while tcp.tcp_server_poll_raw(g_server, 0) > 0 {
-        client = tcp.tcp_accept_raw(g_server)
-        if client == null { break }
-        if g_client != null {
-            refusal = "{\"ok\":false,\"error\":\"another client is attached\"}\n"
-            tcp.write_n(client, refusal, string.length(refusal))
-            tcp.tcp_close(client)
+stopping() -> bool { return native.atomic_load((&shared().stopping) as ptr) != 0 }
+
+serve() {
+    while !stopping() {
+        if g_client == null {
+            if tcp.tcp_server_poll_raw(g_server, POLL_MS) > 0 { attach() }
             continue
         }
-        tcp.tcp_set_nodelay_raw(client, 1)
-        g_client = client
+        refuse_others()
+        if tcp.tcp_poll_raw(g_client, POLL_MS) <= 0 { continue }
+        // The client went, or broke the protocol. What it sent before is
+        // still on the ring.
+        if !take_lines() { detach() }
     }
+    detach()
+    native.semaphore_signal(g_exited, 1)
+}
+
+attach() {
+    client = tcp.tcp_accept_raw(g_server)
+    if client == null { return }
+    tcp.tcp_set_nodelay_raw(client, 1)
+    g_client = client
+    g_used = 0
+    native.atomic_store((&shared().attached) as ptr, 1)
+}
+
+// No more answers to this client; once one already going out is done, the
+// socket closes.
+detach() {
     if g_client == null { return }
-    while tcp.tcp_poll_raw(g_client, 0) > 0 {
-        if g_used + CHUNK > g_capacity {
-            wanted = g_capacity * 2
-            while wanted < g_used + CHUNK { wanted = wanted * 2 }
-            if wanted > MOST {
-                drop_client()
-                return
-            }
-            g_pending = realloc(g_pending, wanted as long)
-            g_capacity = wanted
-        }
-        chunk, got, err = tcp.read_n(g_client, CHUNK)
-        if err == "timeout" { return }
-        if err != "" || got <= 0 {
-            // Closed. What it sent before closing is still requests.
-            drop_client()
-            return
-        }
-        if g_chunk == null { g_chunk = bytes.new(CHUNK) }
-        bytes.copy_from_string(g_chunk, 0, chunk, got)
-        memcpy(g_pending + g_used, bytes.data(g_chunk), got as long)
-        g_used = g_used + got
+    s = shared()
+    native.atomic_store((&s.attached) as ptr, 0)
+    while native.atomic_load((&s.writing) as ptr) != 0 { native.yield_thread() }
+    tcp.tcp_close(g_client)
+    g_client = null
+}
+
+// A client that connected while one is attached is told so and closed.
+refuse_others() {
+    while tcp.tcp_server_poll_raw(g_server, 0) > 0 {
+        client = tcp.tcp_accept_raw(g_server)
+        if client == null { return }
+        refusal = "{\"ok\":false,\"error\":\"another client is attached\"}\n"
+        tcp.write_n(client, refusal, string.length(refusal))
+        tcp.tcp_close(client)
     }
+}
+
+// One read's worth into the pending bytes, and every complete line in them
+// onto the ring. False when the client has closed or sent a line too long.
+take_lines() -> bool {
+    if g_used + CHUNK > g_capacity {
+        wanted = g_capacity * 2
+        while wanted < g_used + CHUNK { wanted = wanted * 2 }
+        if wanted > MOST { return false }
+        g_pending = realloc(g_pending, wanted as long)
+        g_capacity = wanted
+    }
+    chunk, got, err = tcp.read_n(g_client, CHUNK)
+    if err == "timeout" { return true }
+    if err != "" || got <= 0 { return false }
+    if g_chunk == null { g_chunk = bytes.new(CHUNK) }
+    bytes.copy_from_string(g_chunk, 0, chunk, got)
+    memcpy(g_pending + g_used, bytes.data(g_chunk), got as long)
+    g_used = g_used + got
+    while true {
+        length = line_length()
+        if length < 0 { return true }
+        if length > 0 { hand_over(length) }
+        consume_line(length)
+    }
+    return true
+}
+
+// The first pending line into a block of its own, onto the ring. A full
+// ring -- a client far ahead of the frame -- waits for the frame.
+hand_over(length: int) {
+    s = shared()
+    tail = native.atomic_load((&s.tail) as ptr)
+    while tail - native.atomic_load((&s.head) as ptr) >= SLOTS {
+        if stopping() { return }
+        native.yield_thread()
+    }
+    block = malloc((8 + length) as long)
+    (block as int[])[0] = length
+    memcpy(block + 8, g_pending, length as long)
+    (g_slots as ptr[])[tail % SLOTS] = block
+    native.atomic_store((&s.tail) as ptr, tail + 1)
 }
 
 // The length of the first complete line in the pending bytes, a carriage
@@ -198,19 +320,4 @@ consume_line(length: int) {
     if end < g_used { end = end + 1 }
     mem.copy(g_pending, g_pending + end, (g_used - end) as long)
     g_used = g_used - end
-}
-
-// The client goes. What it left unread is read first: a socket closed with
-// bytes still in its receive queue sends a reset, and the client would lose
-// the last answer it was sent.
-drop_client() {
-    if g_client == null { return }
-    drained = 0
-    while drained < 64 && tcp.tcp_poll_raw(g_client, 0) > 0 {
-        _chunk, got, err = tcp.read_n(g_client, CHUNK)
-        if err != "" || got <= 0 { break }
-        drained = drained + 1
-    }
-    tcp.tcp_close(g_client)
-    g_client = null
 }
