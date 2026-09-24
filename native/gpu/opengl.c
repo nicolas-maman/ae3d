@@ -822,10 +822,7 @@ void ae3d_gl_texture3d_bind(int unit, int texture) {
 #ifndef GL_RGBA32F
 #define GL_RGBA32F 0x8814
 #endif
-int ae3d_gl_posebank_texture(void *bank) {
-    const float *data = ae3d_posebank_data(bank);
-    int frames = ae3d_posebank_frames(bank);
-    int bones = ae3d_posebank_bones(bank);
+int ae3d_gl_posebank_texture(const float *data, int frames, int bones) {
     GLuint texture = 0;
 
     if (!data || frames <= 0 || bones <= 0) return 0;

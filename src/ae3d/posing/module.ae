@@ -1,0 +1,208 @@
+// ae3d.posing -- bone palettes and pose banks: the float32 matrices a skinned draw is
+// posed by, kept in the layout the GPU reads so nothing is converted
+// between the write and the upload.
+//
+// A palette is one matrix per bone: where that bone is now, times the
+// inverse of where it was when the mesh was bound to it. A vertex weighted
+// to a bone is moved by the difference between those two, which is why a
+// mesh in its bind pose comes out of a skinned draw exactly where it went
+// in. A pose bank is `frames` palettes baked from a clip and laid end to
+// end, frame-major (frame f's bones start at f * bones * 16): a crowd
+// shares one, each instance posed from the slice its own phase picks, so
+// the upload is fixed at `frames` poses however many figures sample it.
+//
+// Both start at identity, so bones never written draw the bind pose
+// rather than collapsing the mesh to the origin. They were C
+// (native/geometry/skin.c) until Aether had a 32-bit float (aether#2134).
+//
+// A palette or a bank is a handle (ptr) as it was across the C boundary;
+// palette_data and posebank_data are the float32 arrays themselves, which
+// is what the renderers upload.
+
+exports (
+    palette_create, palette_destroy, palette_bones, palette_set, palette_get, palette_data,
+    posebank_create, posebank_destroy, posebank_frames, posebank_bones,
+    posebank_set_travel, posebank_travel, posebank_speed, posebank_capture,
+    posebank_get, posebank_data
+)
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern memcpy(dst: ptr, src: ptr, n: long) -> ptr
+
+struct Palette {
+    values: ptr                    // f32[bones * 16]
+    bones: int
+}
+
+struct PoseBank {
+    values: ptr                    // f32[frames * bones * 16]
+    frames: int
+    bones: int
+    // How far the clip's root has travelled across the ground by each
+    // frame, frames + 1 entries so the last spans the loop back to the
+    // first. Filled by an in-place bake, which takes that travel out of the
+    // poses; the crowd step puts it back as motion, so a figure moves
+    // exactly as fast as its pose is walking and its feet plant.
+    travel: ptr                    // float[frames + 1]
+}
+
+// `count` matrices of identity into a float32 block.
+identities(count: int) -> ptr {
+    block = calloc(count * 16, 4)
+    if block == null { return null }
+    m = block as f32[]
+    i = 0
+    while i < count {
+        at = i * 16
+        m[at] = 1.0
+        m[at + 5] = 1.0
+        m[at + 10] = 1.0
+        m[at + 15] = 1.0
+        i = i + 1
+    }
+    return block
+}
+
+// --- palettes ----------------------------------------------------------------------------------------------------
+
+palette_create(bones: int) -> ptr {
+    if bones <= 0 { return null }
+    values = identities(bones)
+    if values == null { return null }
+    p = calloc(1, sizeof(Palette)) as *Palette
+    p.values = values
+    p.bones = bones
+    return p as ptr
+}
+
+palette_destroy(handle: ptr) {
+    if handle == null { return }
+    p = handle as *Palette
+    free(p.values)
+    free(handle)
+}
+
+palette_bones(handle: ptr) -> int {
+    if handle == null { return 0 }
+    return (handle as *Palette).bones
+}
+
+// One bone's matrix, from 16 doubles (column-major, as core's Mat4).
+palette_set(handle: ptr, bone: int, m: ptr) {
+    if handle == null || m == null { return }
+    p = handle as *Palette
+    if bone < 0 || bone >= p.bones { return }
+    src = m as float[]
+    dst = p.values as f32[]
+    at = bone * 16
+    i = 0
+    while i < 16 {
+        dst[at + i] = src[i]
+        i = i + 1
+    }
+}
+
+palette_get(handle: ptr, bone: int, i: int) -> float {
+    if handle == null { return 0.0 }
+    p = handle as *Palette
+    if bone < 0 || bone >= p.bones || i < 0 || i >= 16 { return 0.0 }
+    return (p.values as f32[])[bone * 16 + i] as float
+}
+
+palette_data(handle: ptr) -> ptr {
+    if handle == null { return null }
+    return (handle as *Palette).values
+}
+
+// --- pose banks ----------------------------------------------------------------------------------------------------
+
+posebank_create(frames: int, bones: int) -> ptr {
+    if frames <= 0 || bones <= 0 { return null }
+    values = identities(frames * bones)
+    if values == null { return null }
+    travel = calloc(frames + 1, 8)
+    if travel == null {
+        free(values)
+        return null
+    }
+    b = calloc(1, sizeof(PoseBank)) as *PoseBank
+    b.values = values
+    b.frames = frames
+    b.bones = bones
+    b.travel = travel
+    return b as ptr
+}
+
+posebank_destroy(handle: ptr) {
+    if handle == null { return }
+    b = handle as *PoseBank
+    free(b.travel)
+    free(b.values)
+    free(handle)
+}
+
+posebank_frames(handle: ptr) -> int {
+    if handle == null { return 0 }
+    return (handle as *PoseBank).frames
+}
+
+posebank_bones(handle: ptr) -> int {
+    if handle == null { return 0 }
+    return (handle as *PoseBank).bones
+}
+
+// The root's travel at frame k (0..frames, the last being the loop point),
+// relative to wherever the bake chose as zero.
+posebank_set_travel(handle: ptr, frame: int, distance: float) {
+    if handle == null { return }
+    b = handle as *PoseBank
+    if frame < 0 || frame > b.frames { return }
+    (b.travel as float[])[frame] = distance
+}
+
+posebank_travel(handle: ptr, frame: int) -> float {
+    if handle == null { return 0.0 }
+    b = handle as *PoseBank
+    if frame < 0 || frame > b.frames { return 0.0 }
+    return (b.travel as float[])[frame]
+}
+
+// How fast the root is walking at `phase` (0..1 through the clip) when the
+// clip plays over `duration` seconds: the travel across the frame the phase
+// falls in, over that frame's time. A bank baked as authored has no travel
+// recorded and answers zero.
+posebank_speed(handle: ptr, phase: float, duration: float) -> float {
+    if handle == null || duration <= 0.0 { return 0.0 }
+    b = handle as *PoseBank
+    if b.frames <= 0 { return 0.0 }
+    at = phase
+    if at < 0.0 { at = 0.0 }
+    f = (at * (b.frames as float)) as int
+    if f >= b.frames { f = b.frames - 1 }
+    travel = b.travel as float[]
+    return (travel[f + 1] - travel[f]) * (b.frames as float) / duration
+}
+
+// A filled palette copied into one frame of the bank: the live skeleton
+// posed at that frame's time, kept as a snapshot.
+posebank_capture(handle: ptr, frame: int, palette: ptr) {
+    if handle == null || palette == null { return }
+    b = handle as *PoseBank
+    if frame < 0 || frame >= b.frames { return }
+    bones = palette_bones(palette)
+    if bones > b.bones { bones = b.bones }
+    memcpy(b.values + frame * b.bones * 16 * 4, palette_data(palette), (bones * 16 * 4) as long)
+}
+
+posebank_get(handle: ptr, frame: int, bone: int, i: int) -> float {
+    if handle == null { return 0.0 }
+    b = handle as *PoseBank
+    if frame < 0 || frame >= b.frames || bone < 0 || bone >= b.bones || i < 0 || i >= 16 { return 0.0 }
+    return (b.values as f32[])[(frame * b.bones + bone) * 16 + i] as float
+}
+
+posebank_data(handle: ptr) -> ptr {
+    if handle == null { return null }
+    return (handle as *PoseBank).values
+}

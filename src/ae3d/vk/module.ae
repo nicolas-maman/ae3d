@@ -17,6 +17,7 @@ import ae3d.rendering
 import ae3d.vkscene
 import ae3d.skin
 import ae3d.shaders
+import ae3d.posing
 
 exports (
     VKRenderer,
@@ -110,12 +111,8 @@ extern ae3d_vk_dlss() -> int
 extern ae3d_vk_dlss_camera(view: *Mat4, projection: *Mat4, prev_view: *Mat4, prev_projection: *Mat4,
                            jitter_x: float, jitter_y: float, near: float, far: float, fov: float, aspect: float,
                            position: *Vec3, up: *Vec3, right: *Vec3, forward: *Vec3)
-extern ae3d_posebank_frames(bank: ptr) -> int
-extern ae3d_posebank_travel(bank: ptr, frame: int) -> float
 extern ae3d_vk_velocity_texture() -> int
 extern ae3d_vk_set_capture_bypass(on: int)
-extern ae3d_posebank_bones(bank: ptr) -> int
-extern ae3d_posebank_data(bank: ptr) -> ptr
 extern ae3d_vk_shadow_end()
 extern ae3d_vk_resolve_scene_depth() -> int
 // A mesh's edit flag, which the refresh reads and clears. Declared here as
@@ -1635,9 +1632,9 @@ pose(m: *Model) {
     // draws through its own pipeline.
     if m.pose_bank != null {
         if m.pose_bank_texture == 0 {
-            m.pose_bank_texture = ae3d_vk_texture_create_float(ae3d_posebank_bones(m.pose_bank) * 4,
-                                                               ae3d_posebank_frames(m.pose_bank),
-                                                               ae3d_posebank_data(m.pose_bank))
+            m.pose_bank_texture = ae3d_vk_texture_create_float(posing.posebank_bones(m.pose_bank) * 4,
+                                                               posing.posebank_frames(m.pose_bank),
+                                                               posing.posebank_data(m.pose_bank))
         }
         ae3d_vk_set_pose_bank(m.pose_bank_texture)
         ae3d_vk_scene_set_int(vkscene.OFF_POSEBANKFRAMES, m.pose_bank_frames)
@@ -1650,7 +1647,7 @@ pose(m: *Model) {
         step = 0.0
         if m.crowd_walk > 0.0 {
             step = g_frame_seconds / m.crowd_walk
-            travel = ae3d_posebank_travel(m.pose_bank, m.pose_bank_frames) * step
+            travel = posing.posebank_travel(m.pose_bank, m.pose_bank_frames) * step
         }
         ae3d_vk_scene_set_float(vkscene.OFF_CROWDTRAVEL, travel)
         ae3d_vk_scene_set_float(vkscene.OFF_CROWDPHASESTEP, step)

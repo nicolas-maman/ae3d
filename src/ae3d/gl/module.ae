@@ -17,6 +17,7 @@ import ae3d.platform
 import ae3d.rendering
 import ae3d.shaders
 import ae3d.skin
+import ae3d.posing
 
 exports (
     GLRenderer, ProgramSlots, TextureEntry, Skybox,
@@ -75,7 +76,7 @@ extern ae3d_gl_setup_proxy_vao(vao: int, mesh_vbo: int, mesh_ebo: int, skin_vbo:
 extern ae3d_inst_is_points(inst: ptr) -> int
 extern ae3d_gl_setup_instance_phase(inst: ptr, phase_vbo: int)
 extern ae3d_gl_update_instance_phases(inst: ptr, phase_vbo: int)
-extern ae3d_gl_posebank_texture(bank: ptr) -> int
+extern ae3d_gl_posebank_texture(data: ptr, frames: int, bones: int) -> int
 extern ae3d_gl_update_instances(inst: ptr, matrix_vbo: int, capacity_bytes: int) -> int
 extern ae3d_gl_update_instance_colors(inst: ptr, color_vbo: int)
 extern ae3d_gl_draw_elements(count: int, byte_offset: int)
@@ -118,7 +119,6 @@ extern ae3d_gl_fbo_attach_velocity_multisample(fbo: int, width: int, height: int
 extern ae3d_gl_draw_buffers(count: int)
 extern ae3d_gl_clear_attachment(index: int, r: float, g: float, b: float, a: float)
 extern ae3d_gl_fbo_resolve_attachment(source: int, destination: int, width: int, height: int, index: int) -> int
-extern ae3d_posebank_travel(bank: ptr, frame: int) -> float
 extern ae3d_gl_fbo_attach_depth(fbo: int, width: int, height: int) -> int
 extern ae3d_gl_geometry_acquire(mesh: ptr) -> int
 extern ae3d_gl_geometry_instance_vbo(vao: int) -> int
@@ -775,7 +775,7 @@ apply_skeleton(r: *GLRenderer, slots: *ProgramSlots, m: *Model) {
 // into a frame.
 bind_pose_bank(r: *GLRenderer, slots: *ProgramSlots, m: *Model) {
     if m.pose_bank_texture == 0 {
-        m.pose_bank_texture = ae3d_gl_posebank_texture(m.pose_bank)
+        m.pose_bank_texture = ae3d_gl_posebank_texture(posing.posebank_data(m.pose_bank), posing.posebank_frames(m.pose_bank), posing.posebank_bones(m.pose_bank))
     }
     ae3d_gl_texture_bind(3, m.pose_bank_texture)
     ae3d_gl_uniform_int(slots.pose_bank, 3)
@@ -786,7 +786,7 @@ bind_pose_bank(r: *GLRenderer, slots: *ProgramSlots, m: *Model) {
     step = 0.0
     if m.crowd_walk > 0.0 {
         step = r.frame_seconds / m.crowd_walk
-        travel = ae3d_posebank_travel(m.pose_bank, m.pose_bank_frames) * step
+        travel = posing.posebank_travel(m.pose_bank, m.pose_bank_frames) * step
     }
     ae3d_gl_uniform_float(slots.crowd_travel, travel)
     ae3d_gl_uniform_float(slots.crowd_phase_step, step)
@@ -1599,7 +1599,7 @@ render_crowd_shadows(r: *GLRenderer) {
             m.instance_phases_updated = false
         }
         if m.pose_bank_texture == 0 {
-            m.pose_bank_texture = ae3d_gl_posebank_texture(m.pose_bank)
+            m.pose_bank_texture = ae3d_gl_posebank_texture(posing.posebank_data(m.pose_bank), posing.posebank_frames(m.pose_bank), posing.posebank_bones(m.pose_bank))
         }
         ae3d_gl_texture_bind(3, m.pose_bank_texture)
         ae3d_gl_uniform_int(bank_loc, 3)
