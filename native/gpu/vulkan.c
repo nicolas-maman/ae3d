@@ -5575,6 +5575,23 @@ int ae3d_vk_ray_reserve(int count, int statics) {
     if (vk.tlas_range_mapped[frame]) vk.tlas_range_mapped[frame][0] = vk.tlas_static;
     /* The crowds' room zeroed, so a slot no figure takes is inactive. */
     if (room > 0) {
+        /* After this slot's last use, two frames ago: the sorts wrote the
+           buffer from a compute shader and the build read it. The fill
+           writes it again, so it waits for both. The meter's barriers at the
+           end of every frame used to cover this by accident; with the meter
+           off, sync validation found 54 write-after-write hazards in
+           zombie_city. */
+        memset(&barrier, 0, sizeof(barrier));
+        barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.buffer = vk.tlas_instances[frame];
+        barrier.size = VK_WHOLE_SIZE;
+        ae3d_vkCmdPipelineBarrier(vk.command_buffers[frame],
+                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1, &barrier, 0, NULL);
         ae3d_vkCmdFillBuffer(vk.command_buffers[frame], vk.tlas_instances[frame],
                              (VkDeviceSize)vk.tlas_static * sizeof(VkAccelerationStructureInstanceKHR),
                              (VkDeviceSize)room * sizeof(VkAccelerationStructureInstanceKHR), 0);
