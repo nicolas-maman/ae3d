@@ -1,0 +1,67 @@
+// A program may make its scene before it runs the engine (#406): a model
+// added before engine_run waits for the backend and is drawn once it is up,
+// and one added and removed before then is never drawn at all -- on
+// OpenGL, where adding it straight to a renderer with no context was a
+// call through a null pointer, and on Vulkan.
+
+import ae3d.core
+import ae3d.engine
+import ae3d.loader
+import ae3d.platform
+
+var g_checks = 0
+var g_failures = 0
+var g_draws = 0
+
+check(name: string, ok: bool) {
+    g_checks = g_checks + 1
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        g_failures = g_failures + 1
+        println("  FAIL ${name}")
+    }
+}
+
+count_draws(state: ptr, e: *Engine, delta: float) {
+    if engine.engine_frame_count(e) == 3 { g_draws = engine.engine_draw_calls(e) }
+}
+
+run_on(api: int, name: string) {
+    e = engine.engine_new_with(api)
+    engine.engine_set_size(e, 160, 90)
+    engine.engine_set_title(e, "ae3d engine order test")
+    engine.engine_set_frame_limit(e, 5)
+    engine.engine_set_camera_input(e, false)
+    engine.engine_set_vsync(e, 0)
+    // Made and added before the engine runs.
+    kept = loader.cube(1.0)
+    engine.engine_add_model(e, kept)
+    dropped = loader.cube(1.0)
+    engine.engine_add_model(e, dropped)
+    engine.engine_remove_model(e, dropped)
+    program = engine.behaviour_new("order test", null)
+    program.late_update = count_draws
+    engine.engine_add_behaviour(e, program)
+    g_draws = 0
+    if !engine.engine_run(e) {
+        println("  ${name}: SKIP no window")
+        engine.engine_free(e)
+        core.model_free(dropped)
+        return
+    }
+    check("${name}: a model added before the run is drawn, the removed one not (${g_draws} draws)", g_draws == 1)
+    engine.engine_free(e)
+    core.model_free(dropped)
+}
+
+main() {
+    println("engine order: a scene made before the engine runs")
+    run_on(platform.API_GL, "opengl")
+    run_on(platform.API_VULKAN, "vulkan")
+    if g_failures == 0 {
+        println("engine order: all checks passed (${g_checks})")
+    } else {
+        println("engine order: ${g_failures} failure(s) of ${g_checks}")
+    }
+}
