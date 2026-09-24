@@ -187,7 +187,7 @@ AETHER_SOURCES="$(sed -n 's|^// aether-source: ||p' "$GEN" | tr '\\' '/')"
 # toolchain is built against zlib its --libs already carries -lz, Apple's ld
 # warns about a duplicate library, and ci.sh reads a warning in a build log as
 # a failure. GLFW is named: the program's own Aether calls it (ae3d.platform).
-"$CC" $CFLAGS "$GEN" $AETHER_SOURCES $(ae3d_native_link_flags) $GLFW_LIBS $AETHER_COMPILE_FLAGS $AETHER_LIBS $PLATFORM_LIBS -o "$OUT"
+"$CC" $CFLAGS $VULKAN_CFLAGS "$GEN" $AETHER_SOURCES $(ae3d_native_link_flags) $GLFW_LIBS $AETHER_COMPILE_FLAGS $AETHER_LIBS $PLATFORM_LIBS -o "$OUT"
 
 # MinGW gcc appends .exe to an output name that has no extension, so the file
 # is not at the path this asked for. Name the one that exists.

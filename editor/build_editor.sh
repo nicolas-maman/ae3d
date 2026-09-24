@@ -152,7 +152,7 @@ AETHER_SOURCES="$(sed -n 's|^// aether-source: ||p' "$GEN" | tr '\\' '/')"
 # zlib belongs to the engine, which is a library of its own and names it on its
 # own link line; GLFW is named, since the engine's Aether calls it
 # (ae3d.platform). PLATFORM_LIBS here is aether-ui's.
-"$CC" $CFLAGS $UI_FLAGS "$GEN" $UI_SOURCES $AETHER_SOURCES $(ae3d_native_link_flags) $GLFW_LIBS \
+"$CC" $CFLAGS $VULKAN_CFLAGS $UI_FLAGS "$GEN" $UI_SOURCES $AETHER_SOURCES $(ae3d_native_link_flags) $GLFW_LIBS \
     $AETHER_COMPILE_FLAGS $AETHER_LIBS $PLATFORM_LIBS \
     -o "$OUT"
 
