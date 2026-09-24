@@ -776,7 +776,7 @@ check_editor_run() {
          [ "$(sed -n 's/^lights //p' "$report")" != "2" ] || \
          [ "$(sed -n 's/^scripted //p' "$report")" != "1" ] || \
          [ "$(sed -n 's/^bodies //p' "$report")" != "1" ] || \
-         [ "$(sed -n 's/^figures //p' "$report")" != "1" ]; then
+         [ "$(sed -n 's/^figures //p' "$report")" != "2" ] ||          [ "$(sed -n 's/^motion_figures //p' "$report")" != "1" ]; then
         # The bodies count is the physics record on the cube: in the
         # roundtrip scene it has been through the file and back. The two
         # lights are a point and a spot, each standing for a light of its
@@ -790,6 +790,12 @@ check_editor_run() {
         # here is the file dropping it, which is what every program's scene
         # (five of the examples set a sky) lost on the way into the editor.
         fail "$name (the sky image did not survive the file: $(sed -n 's/^sky //p' "$report"))"
+        sed 's/^/        /' "$report"
+    elif [ "$(sed -n 's/^motion_stuck //p' "$report")" != "0" ]; then
+        # The humanoid on its muscles: it stands when the scene is simulated,
+        # a blow to the chest knocks it down, and stopped, its bones are back
+        # where they were.
+        fail "$name (natural motion: $(sed -n 's/^motion_stuck //p' "$report") of stand, fall, put back failed)"
         sed 's/^/        /' "$report"
     elif [ "$(sed -n 's/^figure_stuck //p' "$report")" != "0" ]; then
         # The figure plays its clip while the scene is simulated: in the

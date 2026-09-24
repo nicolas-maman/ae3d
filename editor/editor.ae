@@ -456,6 +456,7 @@ var g_motion_on_btn = 0
 var g_motion_mode_buttons: ptr = null   // int[3]: animated, powered, limp
 var g_protect_btn = 0
 var g_live_figures = 0             // figures on their muscles in the running simulation
+var g_floors: ptr = null           // list of *GameObject: the floors laid for them, gone when it stops
 var g_simulating = false
 var g_simulate_btn = 0
 var g_rest: ptr = null             // list of *Rest, the models' transforms before the simulation
@@ -3268,6 +3269,12 @@ struct FigureRow {
     motion: ptr                    // *MotionSpec: natural motion on it, as the scene file records it; null for none
     live: ptr                      // *Motion while the scene is simulated
     kept: ptr                      // its pose before the simulation took the rig
+    // And its group's place: a ragdoll carries the rig from the top of its
+    // parent chain, which for a figure is the group, so the object goes
+    // where the figure falls.
+    rest_position: Vec3
+    rest_rotation: Quat
+    rest_scale: Vec3
 }
 
 // The row a figure's group is, or null.
@@ -3382,7 +3389,12 @@ start_motions(e: *Engine) -> int {
         if r.motion != null && r.shown && at >= 0 {
             f = r.figure as *Figure
             spec = r.motion as *MotionSpec
+            floor_under(e, r.model as *Model)
             r.kept = figure.keep_pose(f)
+            group = r.model as *Model
+            r.rest_position = group.position
+            r.rest_rotation = group.rotation
+            r.rest_scale = group.scale
             m = motion.on_skeleton(e, row_object(at), figure.skeleton(f))
             if m == null {
                 figure.pose_free(r.kept)
@@ -3400,6 +3412,33 @@ start_motions(e: *Engine) -> int {
         i = i + 1
     }
     return made
+}
+
+// Ground under a figure about to stand on its muscles: what the scene's
+// static bodies give it, or -- where a ray from a metre over its feet meets
+// none within three -- a floor at its feet for the simulation, which goes
+// with the world. A figure placed on a terrain or a street with no body
+// on it would otherwise fall through it and on for ever.
+floor_under(e: *Engine, group: *Model) {
+    p = physics.of(e)
+    if p == null { return }
+    core.model_sync_transform(group)
+    feet = group.world_position
+    if physics.ray_hits(p, core.vec3(feet.x, feet.y + 1.0, feet.z), core.vec3(0.0, 0.0 - 1.0, 0.0), 3.0) { return }
+    floor = engine.object(e, "floor", loader.cube(1.0))
+    behaviour.object_set_position(floor, core.vec3(feet.x, feet.y - 0.5, feet.z))
+    physics.box_collider(floor, core.vec3(20.0, 0.5, 20.0), physics.material(0.8, 0.0))
+    if g_floors == null { g_floors = list.new() }
+    list.add_raw(g_floors, floor as ptr)
+}
+
+// The floors laid for the simulation, out of the editor's engine.
+remove_floors(e: *Engine) {
+    if g_floors == null { return }
+    while list.size(g_floors) > 0 {
+        engine.destroy(e, list.get_raw(g_floors, 0) as *GameObject)
+        list.remove(g_floors, 0)
+    }
 }
 
 // Natural motion let go of before the world goes, and every figure put back
@@ -3426,6 +3465,10 @@ restore_figure_poses() {
             figure.put_pose(r.figure as *Figure, r.kept)
             figure.pose_free(r.kept)
             r.kept = null
+            group = r.model as *Model
+            core.model_set_position(group, r.rest_position.x, r.rest_position.y, r.rest_position.z)
+            core.model_set_rotation(group, r.rest_rotation)
+            core.model_set_scale(group, r.rest_scale.x, r.rest_scale.y, r.rest_scale.z)
         }
         i = i + 1
     }
@@ -3790,6 +3833,7 @@ stop_simulation() {
     stop_motions()
     p = physics.of(e)
     if p != null { physics.physics_free(p) }
+    remove_floors(e)
     restore_figure_poses()
     g_live_figures = 0
     count = list.size(g_rest)
@@ -4531,6 +4575,11 @@ undone_gizmo_drags() -> int {
     m = selected_model()
     g_silent_drags = 0
     if m == null { return 0 }
+    // From an empty history, so an undo can only undo the drag before it:
+    // with the scene's own steps under it, a drag that recorded nothing had
+    // its undo take back the last thing the scene added, and the check
+    // passed with an object gone.
+    history.history_clear(g_history)
 
     wrong = 0
     modes = 0
@@ -6318,7 +6367,17 @@ build_scene() {
         apply_body_kind(row_object(0), BODY_DYNAMIC)
         // An animated figure, playing its first clip: what the figure check
         // plays, and what the roundtrip carries through the file.
-        load_figure_asset("tests/fixtures/gltf/arm.glb", "arm")
+        // Without framing either or moving the selection: the checks that
+        // drag the gizmo do it where the scene put the camera.
+        was_selected = g_selected
+        add_figure("tests/fixtures/gltf/arm.glb", "arm")
+        // A humanoid figure with natural motion on: what the motion check
+        // stands on its muscles, strikes and puts back, and what the
+        // roundtrip carries through the file with its motion record.
+        humanoid = add_figure("tests/fixtures/gltf/humanoid.glb", "humanoid")
+        humanoid_row = figure_row_of(humanoid)
+        if humanoid_row != null { apply_motion_on(humanoid_row, true) }
+        select_object(was_selected)
     }
 
     // Save the scene and open it again before the run starts, so the report
@@ -7237,19 +7296,25 @@ load_asset(index: int) {
     focus_selection()
 }
 
-// A figure from the browser: a group at the origin with the figure under
-// it, its first clip ready to play.
+// A figure from the browser, framed.
 load_figure_asset(path: string, label: string) {
+    if add_figure(path, label) != null { focus_selection() }
+}
+
+// A figure into the scene: a group at the origin with the figure under it,
+// its first clip ready to play. The group, or null when the file cannot be
+// read.
+add_figure(path: string, label: string) -> *Model {
     group = core.model_new()
     f = make_figure(group, path)
     if f == null {
         core.model_free(group)
         say("could not load ${label}")
-        return
+        return null
     }
     if figure.clip_count(f) > 0 { figure.play(f, figure.clip_name(f, 0), 1.0, true) }
     add_model(group, string.trim(label))
-    focus_selection()
+    return group
 }
 
 // The grid and the selection outlines belong to the editor, not the scene: the
