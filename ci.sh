@@ -775,7 +775,8 @@ check_editor_run() {
          [ "$(sed -n 's/^voxels //p' "$report")" != "1" ] || \
          [ "$(sed -n 's/^lights //p' "$report")" != "2" ] || \
          [ "$(sed -n 's/^scripted //p' "$report")" != "1" ] || \
-         [ "$(sed -n 's/^bodies //p' "$report")" != "1" ]; then
+         [ "$(sed -n 's/^bodies //p' "$report")" != "1" ] || \
+         [ "$(sed -n 's/^figures //p' "$report")" != "1" ]; then
         # The bodies count is the physics record on the cube: in the
         # roundtrip scene it has been through the file and back. The two
         # lights are a point and a spot, each standing for a light of its
@@ -789,6 +790,11 @@ check_editor_run() {
         # here is the file dropping it, which is what every program's scene
         # (five of the examples set a sky) lost on the way into the editor.
         fail "$name (the sky image did not survive the file: $(sed -n 's/^sky //p' "$report"))"
+        sed 's/^/        /' "$report"
+    elif [ "$(sed -n 's/^figure_stuck //p' "$report")" != "0" ]; then
+        # The figure plays its clip while the scene is simulated: in the
+        # roundtrip scene, the clip the file carried.
+        fail "$name (the figure did not play while simulated)"
         sed 's/^/        /' "$report"
     elif [ "$(sed -n 's/^simulation_stuck //p' "$report")" != "0" ]; then
         # Simulate runs the scene's bodies in the editor's engine and, stopped,

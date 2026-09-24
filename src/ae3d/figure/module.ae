@@ -35,7 +35,7 @@ import ae3d.skin
 exports (
     Figure,
     figure, attach, figure_of, play, stop, set_time, figures_free,
-    figure_new, figure_free, advance,
+    figure_new, figure_free, advance, set_speed, set_looping, clip_index,
     path, clip, speed, looping, time, clip_count, clip_name, duration, skeleton, primitive_count, primitive
 )
 
@@ -173,6 +173,34 @@ play(f: *Figure, name: string, rate: float, loops: bool) -> bool {
     f.time = 0.0
     f.duration = gltf.animation_duration(f.file as *GltfScene, name)
     return true
+}
+
+// The pace the clip plays at, from now on (0 holds it where it is).
+set_speed(f: *Figure, rate: float) {
+    if f != null { f.speed = rate }
+}
+
+// Whether the clip starts again at its end, from now on.
+set_looping(f: *Figure, loops: bool) {
+    if f == null { return }
+    f.looping = loops
+    r = f.players as *Registry
+    i = 0
+    while i < anim.registry_count(r) {
+        anim.player_set_looping(anim.binding_player(anim.registry_binding(r, i)), loops)
+        i = i + 1
+    }
+}
+
+// The playing clip's place in the file's list, or -1 when none plays.
+clip_index(f: *Figure) -> int {
+    if f == null || string.equals(f.clip, "") == 1 { return 0 - 1 }
+    i = 0
+    while i < clip_count(f) {
+        if string.equals(clip_name(f, i), f.clip) == 1 { return i }
+        i = i + 1
+    }
+    return 0 - 1
 }
 
 // Nothing plays: the pose stays where the clip left it.

@@ -37,6 +37,7 @@ import ae3d.rendering
 import ae3d.engine
 import ae3d.weather
 import ae3d.physics
+import ae3d.figure
 
 const PANEL_LEFT = 240
 const PANEL_RIGHT = 360
@@ -431,6 +432,18 @@ var g_collider_buttons: ptr = null
 var g_physics_bar = 0
 var g_physics_section = 0
 var g_physics_divider = 0
+// The FIGURE section: a button a clip, the loop switch, and the section's
+// widgets so it hides whole when the selection is not a figure.
+var g_figure_bar = 0
+var g_figure_section = 0
+var g_figure_divider = 0
+var g_clip_buttons: ptr = null     // int[MAX_CLIPS]
+var g_loop_btn = 0
+// The scene's figures: each a group row and the figure under it. A
+// figure's meshes are the viewport's to draw, not rows: they come and go
+// with their group, undone and redone with it.
+var g_figure_rows: ptr = null      // list of *FigureRow
+var g_figure_assets: ptr = null    // the figures resources/figures holds, for the browser
 var g_simulating = false
 var g_simulate_btn = 0
 var g_rest: ptr = null             // list of *Rest, the models' transforms before the simulation
@@ -1735,43 +1748,53 @@ const FOG_END_ROW = 42
 const LIGHT_RANGE_ROW = 43
 const LIGHT_INNER_ROW = 44
 const LIGHT_OUTER_ROW = 45
-const ROWS = 46
+// An animated figure on the selected group (ae3d.figure): the pace its clip
+// plays at, and how far into the clip it stands, as a share of the clip.
+const FIGURE_SPEED_ROW = 46
+const FIGURE_TIME_ROW = 47
+const ROWS = 48
 // Past every inspector row, because a turn of the gizmo is not a row: it is
 // recorded as the angle the drag has turned through so far, and undone by
 // turning back through it.
-const ROTATE_FIRST_SLOT = 46
-// Past the rotation axes, which take 43 through 45. A behaviour is a property
+const ROTATE_FIRST_SLOT = 48
+// Past the rotation axes, which take 48 through 50. A behaviour is a property
 // of a model like any other as far as undo is concerned, so it travels as a
 // property step in a slot no row uses.
-const SCRIPT_SLOT = 49
+const SCRIPT_SLOT = 51
 // A terrain's shape. A choice rather than a number, so it travels the way a
 // behaviour does rather than as a row.
-const TERRAIN_BIOME_SLOT = 50
+const TERRAIN_BIOME_SLOT = 52
 // A terrain's style. Blocks are voxels drawn one cube per cell; smooth meshes
 // the same field into one surface. Voxels are a kind of terrain rather than
 // what terrain is.
-const TERRAIN_STYLE_SLOT = 51
+const TERRAIN_STYLE_SLOT = 53
 // A stroke of the sculpting brush: one undo step from press to release,
 // whose before and after are the terrain's column heights, kept in a list
 // of strokes the step indexes.
-const SCULPT_SLOT = 52
+const SCULPT_SLOT = 54
 // The weather's kind: a choice, undone the way a terrain's style is.
-const WEATHER_KIND_SLOT = 53
+const WEATHER_KIND_SLOT = 55
 // The body's kind and its collider's, on the selected object.
-const BODY_KIND_SLOT = 54
-const COLLIDER_KIND_SLOT = 55
+const BODY_KIND_SLOT = 56
+const COLLIDER_KIND_SLOT = 57
 // Whether the object is drawn, and whether it casts a shadow: switches
 // on the object, undone as a property whose value is 0 or 1.
-const VISIBLE_SLOT = 56
-const SHADOW_SLOT = 57
+const VISIBLE_SLOT = 58
+const SHADOW_SLOT = 59
 // Which kind of light the selected one is: a choice, undone the way the
 // weather's kind is.
-const LIGHT_MODE_SLOT = 58
+const LIGHT_MODE_SLOT = 60
 // Which image the sky is drawn from, by its place in the list below:
 // the picker's choice, undone the way the weather's kind is. A scene that
 // arrives with a sky of its own that is not in the list keeps it and no
 // button is lit, so choosing never silently loses what a program set.
-const SKY_IMAGE_SLOT = 59
+const SKY_IMAGE_SLOT = 61
+// A figure's clip, by its place in the file's list (-1 for none), and
+// whether it loops: choices, undone the way the weather's kind is.
+const FIGURE_CLIP_SLOT = 62
+const FIGURE_LOOP_SLOT = 63
+// The clips the FIGURE section offers a button each, the first of a file's.
+const MAX_CLIPS = 8
 // The skies that ship with the engine, in the order the buttons draw
 // them. The first is no image at all: the colour above, or the sun's own
 // sky while the sun drives it.
@@ -2276,11 +2299,14 @@ sync_inspector() {
         show_water_section(false)
         show_terrain_section(false)
         show_physics_section(false)
+        show_figure_section(false)
         return
     }
     refresh_title()
     show_physics_section(true)
     refresh_physics_section()
+    show_figure_section(selected_figure() != null)
+    refresh_figure_section()
     // The chip and the hex beside it are the material too, and nothing was
     // refreshing them when the selection changed: the three sliders under them
     // moved to the new object and the colour above stayed on the old one, so
@@ -3205,6 +3231,208 @@ write_physics(spec: *PhysicsSpec, index: int, value: float) {
     if index == DENSITY_ROW { spec.density = value }
 }
 
+// --- figures ---------------------------------------------------------------------------------
+
+struct FigureRow {
+    model: ptr                     // *Model, the group
+    figure: ptr                    // *Figure
+    shown: bool                    // its meshes in the viewport
+}
+
+// The figure a model stands for, or null.
+figure_on(m: *Model) -> *Figure {
+    if g_figure_rows == null || m == null { return null }
+    i = 0
+    while i < list.size(g_figure_rows) {
+        r = list.get_raw(g_figure_rows, i) as *FigureRow
+        if r.model == m as ptr { return r.figure as *Figure }
+        i = i + 1
+    }
+    return null
+}
+
+selected_figure() -> *Figure { return figure_on(selected_model()) }
+
+// The first row that is a figure, or -1.
+index_of_figure() -> int {
+    i = 0
+    while i < row_count() {
+        if figure_on(model_at(i)) != null { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// A figure read from `path` under the group `m`, its meshes drawn; null
+// when the file cannot be read.
+make_figure(m: *Model, path: string) -> *Figure {
+    f = figure.figure_new(path, m)
+    if f == null { return null }
+    if g_figure_rows == null { g_figure_rows = list.new() }
+    r = heap.new(FigureRow)
+    r.model = m as ptr
+    r.figure = f as ptr
+    r.shown = false
+    list.add_raw(g_figure_rows, r as ptr)
+    show_figure(m, true)
+    return f
+}
+
+// A figure's meshes into the viewport or out of it, with its group.
+show_figure(m: *Model, on: bool) {
+    if g_figure_rows == null { return }
+    i = 0
+    while i < list.size(g_figure_rows) {
+        r = list.get_raw(g_figure_rows, i) as *FigureRow
+        if r.model == m as ptr && r.shown != on {
+            f = r.figure as *Figure
+            backend = viewport_backend()
+            k = 0
+            while k < figure.primitive_count(f) {
+                if on {
+                    core.backend_add_model(&backend, figure.primitive(f, k))
+                } else {
+                    core.backend_remove_model(&backend, figure.primitive(f, k))
+                }
+                k = k + 1
+            }
+            r.shown = on
+        }
+        i = i + 1
+    }
+}
+
+// Every figure gone from the viewport and freed, with its file: the scene
+// they were in is going.
+clear_figures() {
+    if g_figure_rows == null { return }
+    while list.size(g_figure_rows) > 0 {
+        r = list.get_raw(g_figure_rows, 0) as *FigureRow
+        show_figure(r.model as *Model, false)
+        figure.figure_free(r.figure as *Figure)
+        heap.free(r)
+        list.remove(g_figure_rows, 0)
+    }
+}
+
+// The scene's figures, for the report.
+figure_count() -> int {
+    if g_figure_rows == null { return 0 }
+    return list.size(g_figure_rows)
+}
+
+// Asks the first figure whether it plays while the scene is simulated:
+// its clip on by a quarter second of simulation. Nought when it does, or
+// when the scene has no figure with a clip.
+figure_stuck() -> int {
+    index = index_of_figure()
+    if index < 0 { return 0 }
+    f = figure_on(model_at(index))
+    if string.equals(figure.clip(f), "") == 1 { return 0 }
+    was = figure.time(f)
+    start_simulation()
+    if !g_simulating { return 1 }
+    update_figures(0.125)
+    update_figures(0.125)
+    moved = core.abs_of(figure.time(f) - was) > 0.001
+    stop_simulation()
+    figure.set_time(f, was)
+    if moved { return 0 }
+    return 1
+}
+
+// Every figure in the scene on by the frame's time, while the scene runs:
+// a figure stands in its pose while the scene is edited, and plays when
+// it is simulated.
+update_figures(delta: float) {
+    if g_figure_rows == null || !g_simulating { return }
+    i = 0
+    while i < list.size(g_figure_rows) {
+        r = list.get_raw(g_figure_rows, i) as *FigureRow
+        if r.shown { figure.advance(r.figure as *Figure, delta) }
+        i = i + 1
+    }
+}
+
+is_figure_row(index: int) -> bool { return index == FIGURE_SPEED_ROW || index == FIGURE_TIME_ROW }
+
+figure_value(index: int) -> float {
+    f = selected_figure()
+    if f == null { return 0.0 }
+    if index == FIGURE_SPEED_ROW { return figure.speed(f) }
+    if figure.duration(f) <= 0.0 { return 0.0 }
+    return figure.time(f) / figure.duration(f)
+}
+
+write_figure(f: *Figure, index: int, value: float) {
+    if f == null { return }
+    if index == FIGURE_SPEED_ROW { figure.set_speed(f, value) }
+    if index == FIGURE_TIME_ROW { figure.set_time(f, value * figure.duration(f)) }
+    paint_soon()
+}
+
+// The clip at `index` in the file's list playing on the selected figure,
+// from its start, at the speed and loop it had; -1 stops it.
+choose_clip(index: int) {
+    f = selected_figure()
+    if f == null { return }
+    if index >= figure.clip_count(f) { return }
+    history.history_record(g_history, history.STEP_PROPERTY, selected_model() as ptr, FIGURE_CLIP_SLOT,
+                           (figure.clip_index(f)) as float, index as float)
+    apply_clip(f, index)
+    refresh_figure_section()
+}
+
+apply_clip(f: *Figure, index: int) {
+    if index < 0 {
+        figure.stop(f)
+    } else {
+        figure.play(f, figure.clip_name(f, index), figure.speed(f), figure.looping(f))
+    }
+    paint_soon()
+}
+
+toggle_loop() {
+    f = selected_figure()
+    if f == null { return }
+    was = 0.0
+    if figure.looping(f) { was = 1.0 }
+    history.history_record(g_history, history.STEP_PROPERTY, selected_model() as ptr, FIGURE_LOOP_SLOT, was, 1.0 - was)
+    figure.set_looping(f, !figure.looping(f))
+    refresh_figure_section()
+}
+
+show_figure_section(on: bool) {
+    if g_figure_bar != 0 { ui.set_hidden(g_figure_bar, hidden_flag(on)) }
+    if g_figure_section != 0 { ui.set_hidden(g_figure_section, hidden_flag(on)) }
+    if g_figure_divider != 0 { ui.set_hidden(g_figure_divider, hidden_flag(on)) }
+}
+
+// The section as the selected figure has it: a button a clip, named for
+// it and lit when it plays, the loop switch, the speed and the time.
+refresh_figure_section() {
+    f = selected_figure()
+    if f == null || g_clip_buttons == null { return }
+    buttons = g_clip_buttons as int[]
+    playing = figure.clip_index(f)
+    i = 0
+    while i < MAX_CLIPS {
+        b = buttons[i]
+        if b != 0 {
+            there = i < figure.clip_count(f)
+            ui.set_hidden(b, hidden_flag(there))
+            if there {
+                ui.set_text(b, figure.clip_name(f, i))
+                paint_mode_button(b, i == playing)
+            }
+        }
+        i = i + 1
+    }
+    if g_loop_btn != 0 { paint_mode_button(g_loop_btn, figure.looping(f)) }
+    show_row(FIGURE_SPEED_ROW, figure_value(FIGURE_SPEED_ROW))
+    show_row(FIGURE_TIME_ROW, figure_value(FIGURE_TIME_ROW))
+}
+
 show_physics_section(on: bool) {
     if g_physics_bar != 0 { ui.set_hidden(g_physics_bar, hidden_flag(on)) }
     if g_physics_section != 0 { ui.set_hidden(g_physics_section, hidden_flag(on)) }
@@ -3567,6 +3795,7 @@ draw_frame_body() {
 
     if !held {
         update_water(delta)
+        update_figures(delta)
         run_scripts(delta)
         if g_engine != null { engine.engine_update(g_engine as *Engine, delta) }
     }
@@ -3749,6 +3978,15 @@ row_reaches_its_target(index: int) -> bool {
         before = water_value(index)
         apply_property(index, before + 0.5)
         moved = core.abs_of(water_value(index) - (before + 0.5)) < 0.001
+        apply_property(index, before)
+        return moved
+    }
+
+    if is_figure_row(index) {
+        if selected_figure() == null { return true }
+        before = figure_value(index)
+        apply_property(index, before * 0.5 + 0.25)
+        moved = core.abs_of(figure_value(index) - (before * 0.5 + 0.25)) < 0.001
         apply_property(index, before)
         return moved
     }
@@ -4053,6 +4291,7 @@ rows_that_do_nothing() -> int {
         wants = 0 - 1
         if is_water_row(index) { wants = water_index }
         if is_physics_row(index) { wants = body_index }
+        if is_figure_row(index) { wants = index_of_figure() }
         if index == TERRAIN_SEED_ROW { wants = ground_index }
         if wants >= 0 { select_object(wants) }
         if row_control(index) != 0 && !row_reaches_its_target(index) {
@@ -4152,6 +4391,12 @@ report_state() {
     lines = string.concat(lines, string.from_int(spec_count()))
     lines = string.concat(lines, "\nsimulation_stuck ")
     lines = string.concat(lines, string.from_int(simulation_stuck()))
+    // The figures, and whether the first plays while simulated: in the
+    // roundtrip scene it has been through the file and back.
+    lines = string.concat(lines, "\nfigures ")
+    lines = string.concat(lines, string.from_int(figure_count()))
+    lines = string.concat(lines, "\nfigure_stuck ")
+    lines = string.concat(lines, string.from_int(figure_stuck()))
     lines = string.concat(lines, "\ntriangles ")
     lines = string.concat(lines, string.from_int(scene_triangles()))
     lines = string.concat(lines, "\nselected ")
@@ -4329,6 +4574,20 @@ replay(step: *EditStep, backwards: bool) {
             select_model_pointer(step.subject)
             write_physics(selected_spec(), step.slot, target)
             show_row(step.slot, target)
+        } else if is_figure_row(step.slot) {
+            select_model_pointer(step.subject)
+            write_figure(figure_on(subject), step.slot, target)
+            show_row(step.slot, target)
+        } else if step.slot == FIGURE_CLIP_SLOT {
+            select_model_pointer(step.subject)
+            f = figure_on(subject)
+            if f != null { apply_clip(f, (target) as int) }
+            refresh_figure_section()
+        } else if step.slot == FIGURE_LOOP_SLOT {
+            select_model_pointer(step.subject)
+            f = figure_on(subject)
+            if f != null { figure.set_looping(f, target != 0.0) }
+            refresh_figure_section()
         } else if step.slot == TERRAIN_STYLE_SLOT {
             select_model_pointer(step.subject)
             regenerate_terrain(terrain_seed(), terrain_biome(), (target) as int)
@@ -4583,6 +4842,7 @@ attach_model(m: *Model) {
         backend = viewport_backend()
         core.backend_add_model(&backend, m)
     }
+    show_figure(m, true)
     if !reattach(m as ptr) {
         add_object(m, core.text(m.name), behaviour.KIND_MESH, null)
     }
@@ -4620,6 +4880,7 @@ detach_model(m: *Model) {
     if m == null { return }
     backend = viewport_backend()
     core.backend_remove_model(&backend, m)
+    show_figure(m, false)
     i = row_of_model(m as ptr)
     if i < 0 { return }
     detach_at(i)
@@ -5127,6 +5388,18 @@ apply_property(index: int, value: float) {
         if index == SKY_FIRST_ROW + 1 { g_sky_g = value }
         if index == SKY_LAST_ROW { g_sky_b = value }
         apply_sky_and_fog()
+        show_row(index, value)
+        return
+    }
+
+    if is_figure_row(index) {
+        f = selected_figure()
+        if f != null {
+            history.history_record(g_history, history.STEP_PROPERTY, selected_model() as ptr, index,
+                                   figure_value(index), value)
+            g_last_edit = seconds()
+            write_figure(f, index, value)
+        }
         show_row(index, value)
         return
     }
@@ -5698,6 +5971,9 @@ build_scene() {
         set_script(0, script_from_name("spin"))
         // The cube a dynamic body: what the simulation check drops.
         apply_body_kind(row_object(0), BODY_DYNAMIC)
+        // An animated figure, playing its first clip: what the figure check
+        // plays, and what the roundtrip carries through the file.
+        load_figure_asset("tests/fixtures/gltf/arm.glb", "arm")
     }
 
     // Save the scene and open it again before the run starts, so the report
@@ -5803,7 +6079,8 @@ current_attachments() -> ptr {
         script = script_name(script_at(i))
         if string.equals(script, "none") == 1 { script = "" }
         spec = spec_at(i)
-        if kind != behaviour.KIND_MESH || script != "" || sim != null || world != null || spec != null {
+        fig = figure_on(m)
+        if kind != behaviour.KIND_MESH || script != "" || sim != null || world != null || spec != null || fig != null {
             a = scene.attachment_new(m, kind_name(kind), script, sim, world)
             // The light a marker stands for goes with it, so a scene of
             // twenty lamps comes back as twenty lamps.
@@ -5815,6 +6092,12 @@ current_attachments() -> ptr {
             // object keeps its own.
             if spec != null {
                 scene.attachment_set_physics(a, scene.physics_spec_new(spec.body, spec.collider, spec.friction, spec.restitution, spec.density))
+            }
+            // A figure is its file and its clip; its meshes come from the
+            // file when the scene is read.
+            if fig != null {
+                scene.attachment_set_figure(a, scene.figure_spec_new(figure.path(fig), figure.clip(fig), figure.speed(fig),
+                                                                     figure.looping(fig), figure.time(fig)))
             }
             list.add_raw(attachments, a as ptr)
         }
@@ -5936,6 +6219,18 @@ load_scene() {
                     give_spec(row_object(row_count() - 1),
                               scene.physics_spec_new(spec.body, spec.collider, spec.friction, spec.restitution, spec.density))
                 }
+                // A figure, made again from its file on the group, at its
+                // clip, pace and time.
+                fig_spec = scene.attachment_figure(a)
+                if fig_spec != null {
+                    f = make_figure(m, fig_spec.gltf)
+                    if f == null {
+                        say("could not read the figure ${fig_spec.gltf}")
+                    } else if string.equals(fig_spec.clip, "") == 0 {
+                        figure.play(f, fig_spec.clip, fig_spec.speed, fig_spec.looping)
+                        figure.set_time(f, fig_spec.time)
+                    }
+                }
             }
         }
         i = i + 1
@@ -6043,8 +6338,10 @@ load_scene() {
 }
 
 clear_scene() {
-    // The bodies go before the objects they are on.
+    // The bodies go before the objects they are on, and the figures before
+    // the groups they hang from.
     if g_simulating { stop_simulation() }
+    clear_figures()
     backend = viewport_backend()
     while row_count() > 0 {
         o = row_object(0)
@@ -6522,9 +6819,12 @@ scan_assets() {
         return
     }
     g_assets = matches
+    // And the animated figures, after the meshes.
+    figures, figures_err = fs.glob("resources/figures/*.glb")
+    if figures_err == "" && figures != null { g_figure_assets = figures }
 
     if g_asset_rows == null { g_asset_rows = list.new() }
-    count = fs.dir_list_count(g_assets)
+    count = asset_count()
     i = 0
     while i < count {
         list.add_raw(g_asset_rows, index_handle(i))
@@ -6533,15 +6833,28 @@ scan_assets() {
     if g_asset_browser != null { ui.listbox_update(g_asset_browser, g_asset_rows) }
 }
 
-asset_count() -> int {
+mesh_asset_count() -> int {
     if g_assets == null { return 0 }
     return fs.dir_list_count(g_assets)
 }
 
+figure_asset_count() -> int {
+    if g_figure_assets == null { return 0 }
+    return fs.dir_list_count(g_figure_assets)
+}
+
+asset_count() -> int { return mesh_asset_count() + figure_asset_count() }
+
+// An asset's file: a mesh's, or past them, a figure's.
+asset_path(index: int) -> string {
+    if index < 0 || index >= asset_count() { return "" }
+    if index < mesh_asset_count() { return core.text(fs.dir_list_get(g_assets, index)) }
+    return core.text(fs.dir_list_get(g_figure_assets, index - mesh_asset_count()))
+}
+
 asset_label(index: int) -> string {
-    if g_assets == null { return "" }
-    if index < 0 || index >= fs.dir_list_count(g_assets) { return "" }
-    path = core.text(fs.dir_list_get(g_assets, index))
+    path = asset_path(index)
+    if path == "" { return "" }
     cut = 0
     i = 0
     while i < string.length(path) {
@@ -6552,9 +6865,12 @@ asset_label(index: int) -> string {
 }
 
 load_asset(index: int) {
-    if g_assets == null { return }
-    if index < 0 || index >= fs.dir_list_count(g_assets) { return }
-    path = core.text(fs.dir_list_get(g_assets, index))
+    path = asset_path(index)
+    if path == "" { return }
+    if index >= mesh_asset_count() {
+        load_figure_asset(path, asset_label(index))
+        return
+    }
 
     m = loader.load_obj(path, true)
     if m == null {
@@ -6563,6 +6879,21 @@ load_asset(index: int) {
     }
     core.model_set_position(m, 0.0, 30.0, 0.0)
     add_model(m, asset_label(index))
+    focus_selection()
+}
+
+// A figure from the browser: a group at the origin with the figure under
+// it, its first clip ready to play.
+load_figure_asset(path: string, label: string) {
+    group = core.model_new()
+    f = make_figure(group, path)
+    if f == null {
+        core.model_free(group)
+        say("could not load ${label}")
+        return
+    }
+    if figure.clip_count(f) > 0 { figure.play(f, figure.clip_name(f, 0), 1.0, true) }
+    add_model(group, string.trim(label))
     focus_selection()
 }
 
@@ -7585,6 +7916,36 @@ main() {
         inspector_row(g_physics_section, "bounce", 0.0, 1.0, 0.0, RESTITUTION_ROW)
         field_row(g_physics_section, "density", 1.0, DENSITY_ROW)
         refresh_physics_section()
+
+        // An animated figure (ae3d.figure): the clip it plays, a button a
+        // clip named for it, whether it loops, its pace, and how far into
+        // the clip it stands. It plays while the scene is simulated.
+        g_figure_divider = ui.divider(right)
+        g_figure_section = fold_section(right, "FIGURE")
+        g_figure_bar = section_bar(g_section_count - 1)
+        g_clip_buttons = calloc(MAX_CLIPS, 4)
+        clips = g_clip_buttons as int[]
+        clip_row = as_row(ui.hstack(g_figure_section, 6))
+        clips[0] = ui.btn(clip_row, "clip") callback { choose_clip(0) }
+        clips[1] = ui.btn(clip_row, "clip") callback { choose_clip(1) }
+        clips[2] = ui.btn(clip_row, "clip") callback { choose_clip(2) }
+        clips[3] = ui.btn(clip_row, "clip") callback { choose_clip(3) }
+        more_clips = as_row(ui.hstack(g_figure_section, 6))
+        clips[4] = ui.btn(more_clips, "clip") callback { choose_clip(4) }
+        clips[5] = ui.btn(more_clips, "clip") callback { choose_clip(5) }
+        clips[6] = ui.btn(more_clips, "clip") callback { choose_clip(6) }
+        clips[7] = ui.btn(more_clips, "clip") callback { choose_clip(7) }
+        k = 0
+        while k < MAX_CLIPS {
+            style_button(clips[k], "action")
+            k = k + 1
+        }
+        loop_row = as_row(ui.hstack(g_figure_section, 6))
+        g_loop_btn = ui.btn(loop_row, "Loop") callback { toggle_loop() }
+        style_button(g_loop_btn, "action")
+        inspector_row(g_figure_section, "speed", 0.0, 3.0, 1.0, FIGURE_SPEED_ROW)
+        inspector_row(g_figure_section, "time", 0.0, 1.0, 0.0, FIGURE_TIME_ROW)
+        show_figure_section(false)
 
         ui.divider(right)
         camera_body = fold_section(right, "CAMERA")
