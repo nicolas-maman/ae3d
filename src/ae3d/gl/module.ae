@@ -22,6 +22,7 @@ import ae3d.skin
 import ae3d.posing
 import ae3d.geometry
 import ae3d.glapi
+import ae3d.offscreen
 
 exports (
     GLRenderer, ProgramSlots, TextureEntry, Skybox,
@@ -52,14 +53,10 @@ extern pow(x: float, y: float) -> float
 extern ae3d_image_width(img: ptr) -> int
 extern ae3d_image_height(img: ptr) -> int
 extern free(p: ptr)
-extern ae3d_offscreen_resize(target: ptr, width: int, height: int) -> int
-extern ae3d_offscreen_read_pipelined(target: ptr) -> ptr
 extern ae3d_gl_load() -> int
 extern ae3d_gl_version() -> string
 extern ae3d_gl_renderer() -> string
 
-extern ae3d_offscreen_bind(target: ptr)
-extern ae3d_offscreen_unbind()
 extern ae3d_image_load(path: string) -> ptr
 extern ae3d_image_fit(img: ptr, limit: int) -> int
 extern ae3d_image_width(image: ptr) -> int
@@ -3068,7 +3065,7 @@ renderer_set_target(r: *GLRenderer, target: ptr) {
 
 bind_output(r: *GLRenderer) {
     if r.target != null {
-        ae3d_offscreen_bind(r.target)
+        offscreen.target_bind(r.target)
     } else {
         ae3d_gl_fbo_bind(0)
     }
@@ -3206,7 +3203,7 @@ renderer_update_viewport(r: *GLRenderer, width: int, height: int) {
     ae3d_gl_viewport(0, 0, width, height)
     r.viewport_width = width
     r.viewport_height = height
-    if r.target != null { ae3d_offscreen_resize(r.target, width, height) }
+    if r.target != null { offscreen.target_resize(r.target, width, height) }
 
     // The scene is drawn into the post buffers before an effect composites it,
     // and they are resized lazily by comparing the viewport against the size
@@ -3232,7 +3229,7 @@ vtable_set_shadows(r: *GLRenderer, on: int) {
 
 renderer_frame_pixels(r: *GLRenderer) -> ptr {
     if r.target == null { return null }
-    return ae3d_offscreen_read_pipelined(r.target)
+    return offscreen.target_pixels_pipelined(r.target)
 }
 
 renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {

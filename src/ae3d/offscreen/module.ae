@@ -7,6 +7,8 @@
 // (aether-lang-dev/aether-ui#92); everything before it is ordinary GPU work.
 
 import ae3d.core
+import ae3d.glapi
+import std.mem
 
 exports (
     Target,
@@ -18,17 +20,10 @@ exports (
 
 extern ae3d_offscreen_context(width: int, height: int) -> ptr
 extern ae3d_offscreen_context_destroy(context: ptr)
-extern ae3d_offscreen_create(width: int, height: int) -> ptr
-extern ae3d_offscreen_resize(target: ptr, width: int, height: int) -> int
-extern ae3d_offscreen_bind(target: ptr)
-extern ae3d_offscreen_unbind()
-extern ae3d_offscreen_width(target: ptr) -> int
-extern ae3d_offscreen_height(target: ptr) -> int
-extern ae3d_offscreen_byte_size(target: ptr) -> int
-extern ae3d_offscreen_read(target: ptr) -> ptr
-extern ae3d_offscreen_read_pipelined(target: ptr) -> ptr
+extern calloc(count: int, size: int) -> ptr
+extern realloc(p: ptr, size: long) -> ptr
+extern free(p: ptr)
 
-extern ae3d_offscreen_destroy(target: ptr)
 
 struct Target {
     handle: ptr
@@ -44,47 +39,332 @@ context_destroy(context: ptr) {
     ae3d_offscreen_context_destroy(context)
 }
 
+// --- targets, in Aether (#398) ---------------------------------------------------------------
+//
+// A framebuffer drawn into, with a colour texture and a depth renderbuffer;
+// a multisampled twin the scene is drawn into and resolved from, where the
+// driver gives one; and the pixels read back, into two buffers alternated.
+// Two, because a caller may still be reading the frame it was handed last
+// time while the next one is filled -- the compositor does exactly that,
+// painting from the pointer on its own thread -- and writing into the
+// buffer it reads tears the image and puts the two threads on the same
+// cache lines.
+
+struct OffscreenTarget {
+    framebuffer: int
+    color: int
+    depth: int
+    ms_framebuffer: int
+    ms_color: int
+    ms_depth: int
+    samples: int
+    resolved: bool
+    width: int
+    height: int
+    pixels: ptr                      // ptr[2], RGBA top row first
+    pixel_index: int
+    pixel_bytes: int
+    scratch: ptr                     // a row, for the synchronous read's flip
+    packs: ptr                       // int[2], pixel pack buffers
+    pack_index: int
+    pack_primed: bool
+}
+
+// A GL name, one: kind 0 a framebuffer, 1 a renderbuffer, 2 a texture.
+make_name(kind: int) -> int {
+    out = calloc(1, 4)
+    if kind == 0 { glapi.glGenFramebuffers(1, out) }
+    if kind == 1 { glapi.glGenRenderbuffers(1, out) }
+    if kind == 2 { glapi.glGenTextures(1, out) }
+    id = (out as int[])[0]
+    free(out)
+    return id
+}
+
+drop_name(kind: int, id: int) {
+    if id == 0 { return }
+    names = calloc(1, 4)
+    (names as int[])[0] = id
+    if kind == 0 { glapi.glDeleteFramebuffers(1, names) }
+    if kind == 1 { glapi.glDeleteRenderbuffers(1, names) }
+    if kind == 2 { glapi.glDeleteTextures(1, names) }
+    free(names)
+}
+
+// How many samples the driver gives a renderbuffer, capped at what the
+// Vulkan backend picks, so a scene drawn offscreen through either renderer
+// is antialiased the same way; 0 where it gives fewer than two.
+most_samples() -> int {
+    out = calloc(1, 4)
+    glapi.glGetIntegerv(glapi.MAX_SAMPLES as uint32, out)
+    most = (out as int[])[0]
+    free(out)
+    if most > 4 { most = 4 }
+    if most > 1 { return most }
+    return 0
+}
+
+renderbuffer(attachment: int, w: int, h: int, samples: int, internal: int) -> int {
+    rbo = make_name(1)
+    glapi.glBindRenderbuffer(glapi.RENDERBUFFER as uint32, rbo as uint32)
+    if samples > 0 {
+        glapi.glRenderbufferStorageMultisample(glapi.RENDERBUFFER as uint32, samples, internal as uint32, w, h)
+    } else {
+        glapi.glRenderbufferStorage(glapi.RENDERBUFFER as uint32, internal as uint32, w, h)
+    }
+    glapi.glFramebufferRenderbuffer(glapi.FRAMEBUFFER as uint32, attachment as uint32, glapi.RENDERBUFFER as uint32,
+                                    rbo as uint32)
+    return rbo
+}
+
+// The attachments for `width` x `height` (at least one each way), made
+// again; false when the driver will not complete the framebuffer.
+attach(t: *OffscreenTarget, width: int, height: int) -> bool {
+    w = width
+    h = height
+    if w < 1 { w = 1 }
+    if h < 1 { h = 1 }
+    drop_name(2, t.color)
+    drop_name(1, t.depth)
+    drop_name(1, t.ms_color)
+    drop_name(1, t.ms_depth)
+    t.color = 0
+    t.depth = 0
+    t.ms_color = 0
+    t.ms_depth = 0
+    glapi.glBindFramebuffer(glapi.FRAMEBUFFER as uint32, t.framebuffer as uint32)
+    t.color = make_name(2)
+    glapi.glBindTexture(glapi.TEXTURE_2D as uint32, t.color as uint32)
+    glapi.glTexImage2D(glapi.TEXTURE_2D as uint32, 0, glapi.RGBA, w, h, 0, glapi.RGBA as uint32,
+                       glapi.UNSIGNED_BYTE as uint32, null)
+    glapi.glTexParameteri(glapi.TEXTURE_2D as uint32, glapi.TEXTURE_MIN_FILTER as uint32, glapi.LINEAR)
+    glapi.glTexParameteri(glapi.TEXTURE_2D as uint32, glapi.TEXTURE_MAG_FILTER as uint32, glapi.LINEAR)
+    glapi.glTexParameteri(glapi.TEXTURE_2D as uint32, glapi.TEXTURE_WRAP_S as uint32, glapi.CLAMP_TO_EDGE)
+    glapi.glTexParameteri(glapi.TEXTURE_2D as uint32, glapi.TEXTURE_WRAP_T as uint32, glapi.CLAMP_TO_EDGE)
+    glapi.glFramebufferTexture2D(glapi.FRAMEBUFFER as uint32, glapi.COLOR_ATTACHMENT0 as uint32,
+                                 glapi.TEXTURE_2D as uint32, t.color as uint32, 0)
+    t.depth = renderbuffer(glapi.DEPTH_STENCIL_ATTACHMENT, w, h, 0, glapi.DEPTH24_STENCIL8)
+    status = (glapi.glCheckFramebufferStatus(glapi.FRAMEBUFFER as uint32)) as int
+    glapi.glBindFramebuffer(glapi.FRAMEBUFFER as uint32, 0)
+    if status != glapi.FRAMEBUFFER_COMPLETE { return false }
+    // The scene is drawn into a multisampled pair and resolved into the
+    // texture above before anything reads it. Without this the offscreen
+    // viewport is the one surface in the engine with no antialiasing, while
+    // the same scene through Vulkan is resolved from 4 samples.
+    t.samples = most_samples()
+    if t.samples > 0 {
+        if t.ms_framebuffer == 0 { t.ms_framebuffer = make_name(0) }
+        glapi.glBindFramebuffer(glapi.FRAMEBUFFER as uint32, t.ms_framebuffer as uint32)
+        t.ms_color = renderbuffer(glapi.COLOR_ATTACHMENT0, w, h, t.samples, glapi.RGBA8)
+        t.ms_depth = renderbuffer(glapi.DEPTH_STENCIL_ATTACHMENT, w, h, t.samples, glapi.DEPTH24_STENCIL8)
+        status = (glapi.glCheckFramebufferStatus(glapi.FRAMEBUFFER as uint32)) as int
+        glapi.glBindFramebuffer(glapi.FRAMEBUFFER as uint32, 0)
+        if status != glapi.FRAMEBUFFER_COMPLETE {
+            drop_name(1, t.ms_color)
+            drop_name(1, t.ms_depth)
+            t.ms_color = 0
+            t.ms_depth = 0
+            t.samples = 0
+        }
+    }
+    t.resolved = false
+    t.width = w
+    t.height = h
+    needed = w * h * 4
+    if needed > t.pixel_bytes {
+        buffers = t.pixels as ptr[]
+        i = 0
+        while i < 2 {
+            grown = realloc(buffers[i], needed as long)
+            if grown == null { return false }
+            buffers[i] = grown
+            i = i + 1
+        }
+        t.pixel_bytes = needed
+    }
+    return true
+}
+
 target_create(width: int, height: int) -> ptr {
-    return ae3d_offscreen_create(width, height)
+    t = calloc(1, sizeof(OffscreenTarget)) as *OffscreenTarget
+    t.pixels = calloc(2, 8)
+    t.packs = calloc(2, 4)
+    t.framebuffer = make_name(0)
+    if !attach(t, width, height) {
+        target_destroy(t as ptr)
+        return null
+    }
+    return t as ptr
 }
 
 target_destroy(target: ptr) {
-    ae3d_offscreen_destroy(target)
+    if target == null { return }
+    t = target as *OffscreenTarget
+    drop_name(2, t.color)
+    drop_name(1, t.depth)
+    drop_name(1, t.ms_color)
+    drop_name(1, t.ms_depth)
+    drop_name(0, t.framebuffer)
+    drop_name(0, t.ms_framebuffer)
+    if (t.packs as int[])[0] != 0 { glapi.glDeleteBuffers(2, t.packs) }
+    if t.scratch != null { free(t.scratch) }
+    buffers = t.pixels as ptr[]
+    if buffers[0] != null { free(buffers[0]) }
+    if buffers[1] != null { free(buffers[1]) }
+    free(t.pixels)
+    free(t.packs)
+    free(target)
 }
 
+// The attachments for a new size; the scratch row and the pixel pack
+// buffers were sized for the old one, so they go rather than be read at
+// the wrong width next frame.
 target_resize(target: ptr, width: int, height: int) -> bool {
-    return ae3d_offscreen_resize(target, width, height) == 1
+    if target == null { return false }
+    t = target as *OffscreenTarget
+    if t.width == width && t.height == height { return true }
+    if t.scratch != null {
+        free(t.scratch)
+        t.scratch = null
+    }
+    packs = t.packs as int[]
+    if packs[0] != 0 {
+        glapi.glDeleteBuffers(2, t.packs)
+        packs[0] = 0
+        packs[1] = 0
+        t.pack_primed = false
+    }
+    return attach(t, width, height)
 }
 
+// Draws go to the target (its multisampled twin, where it has one), at its
+// size. A null target is the window's framebuffer.
 target_bind(target: ptr) {
-    ae3d_offscreen_bind(target)
+    if target == null {
+        glapi.glBindFramebuffer(glapi.FRAMEBUFFER as uint32, 0)
+        return
+    }
+    t = target as *OffscreenTarget
+    fbo = t.framebuffer
+    if t.samples > 0 { fbo = t.ms_framebuffer }
+    glapi.glBindFramebuffer(glapi.FRAMEBUFFER as uint32, fbo as uint32)
+    glapi.glViewport(0, 0, t.width, t.height)
+    t.resolved = false
 }
 
 target_unbind() {
-    ae3d_offscreen_unbind()
+    glapi.glBindFramebuffer(glapi.FRAMEBUFFER as uint32, 0)
 }
 
 target_width(target: ptr) -> int {
-    return ae3d_offscreen_width(target)
+    if target == null { return 0 }
+    return (target as *OffscreenTarget).width
 }
 
 target_height(target: ptr) -> int {
-    return ae3d_offscreen_height(target)
+    if target == null { return 0 }
+    return (target as *OffscreenTarget).height
 }
 
 target_byte_size(target: ptr) -> int {
-    return ae3d_offscreen_byte_size(target)
+    if target == null { return 0 }
+    t = target as *OffscreenTarget
+    return t.width * t.height * 4
 }
 
-// Reads the frame back as top-down RGBA rows, the order every compositor wants.
-// The buffer belongs to the target and is overwritten by the next read.
+// Multisampled attachments cannot be read directly, so the frame is blitted
+// down into the single-sample texture the readback and picking read.
+resolve(t: *OffscreenTarget) {
+    if t.samples == 0 || t.resolved { return }
+    glapi.glBindFramebuffer(glapi.READ_FRAMEBUFFER as uint32, t.ms_framebuffer as uint32)
+    glapi.glBindFramebuffer(glapi.DRAW_FRAMEBUFFER as uint32, t.framebuffer as uint32)
+    glapi.glBlitFramebuffer(0, 0, t.width, t.height, 0, 0, t.width, t.height, glapi.COLOR_BUFFER_BIT as uint32,
+                            glapi.NEAREST as uint32)
+    glapi.glBindFramebuffer(glapi.FRAMEBUFFER as uint32, 0)
+    t.resolved = true
+}
+
+// The frame just drawn, top row first, stalling until the GPU has finished
+// it. Callers that compare what they rendered need this; a viewport does
+// not (target_pixels_pipelined).
+read_now(t: *OffscreenTarget) -> ptr {
+    row = t.width * 4
+    destination = (t.pixels as ptr[])[t.pixel_index]
+    resolve(t)
+    glapi.glBindFramebuffer(glapi.FRAMEBUFFER as uint32, t.framebuffer as uint32)
+    glapi.glPixelStorei(glapi.PACK_ALIGNMENT as uint32, 1)
+    glapi.glReadPixels(0, 0, t.width, t.height, glapi.RGBA as uint32, glapi.UNSIGNED_BYTE as uint32, destination)
+    glapi.glBindFramebuffer(glapi.FRAMEBUFFER as uint32, 0)
+    t.pixel_index = t.pixel_index ^ 1
+    if t.scratch == null { t.scratch = calloc(row, 1) }
+    y = 0
+    while y < t.height / 2 {
+        top = (y * row) as long
+        bottom = ((t.height - 1 - y) * row) as long
+        mem.copy_at(t.scratch, 0, destination, top, row as long)
+        mem.copy_at(destination, top, destination, bottom, row as long)
+        mem.copy_at(destination, bottom, t.scratch, 0, row as long)
+        y = y + 1
+    }
+    return destination
+}
+
 target_pixels(target: ptr) -> ptr {
-    return ae3d_offscreen_read(target)
+    if target == null { return null }
+    t = target as *OffscreenTarget
+    if (t.pixels as ptr[])[0] == null { return null }
+    return read_now(t)
 }
 
-// One frame behind, but never stalls waiting for the GPU: the read is issued
-// into one pixel buffer while the one filled last frame is mapped. A viewport
-// wants this; anything comparing what it just drew wants target_pixels.
+// Reading straight into client memory stalls until the GPU has finished
+// the frame. Two pixel buffers avoid that: the read is issued into one and
+// the one filled last frame is mapped, so the CPU never waits on work still
+// in flight. The viewport is one frame behind, which is what every editor
+// preview does. GL reports rows bottom-up while every compositor wants them
+// top-down, so the copy out of the mapped buffer walks the rows backwards,
+// folding the flip into a copy that had to happen anyway.
 target_pixels_pipelined(target: ptr) -> ptr {
-    return ae3d_offscreen_read_pipelined(target)
+    if target == null { return null }
+    t = target as *OffscreenTarget
+    if (t.pixels as ptr[])[0] == null { return null }
+    row = t.width * 4
+    packs = t.packs as int[]
+    if packs[0] == 0 {
+        glapi.glGenBuffers(2, t.packs)
+        if packs[0] == 0 || packs[1] == 0 { return read_now(t) }
+        i = 0
+        while i < 2 {
+            glapi.glBindBuffer(glapi.PIXEL_PACK_BUFFER as uint32, packs[i] as uint32)
+            glapi.glBufferData(glapi.PIXEL_PACK_BUFFER as uint32, t.pixel_bytes as long, null, glapi.STREAM_READ as uint32)
+            i = i + 1
+        }
+        glapi.glBindBuffer(glapi.PIXEL_PACK_BUFFER as uint32, 0)
+        t.pack_index = 0
+        t.pack_primed = false
+    }
+    destination = (t.pixels as ptr[])[t.pixel_index]
+    resolve(t)
+    glapi.glBindFramebuffer(glapi.FRAMEBUFFER as uint32, t.framebuffer as uint32)
+    glapi.glPixelStorei(glapi.PACK_ALIGNMENT as uint32, 1)
+    glapi.glBindBuffer(glapi.PIXEL_PACK_BUFFER as uint32, packs[t.pack_index] as uint32)
+    glapi.glReadPixels(0, 0, t.width, t.height, glapi.RGBA as uint32, glapi.UNSIGNED_BYTE as uint32, null)
+    ready = t.pack_index
+    if t.pack_primed { ready = t.pack_index ^ 1 } else { glapi.glFinish() }
+    glapi.glBindBuffer(glapi.PIXEL_PACK_BUFFER as uint32, packs[ready] as uint32)
+    mapped = glapi.glMapBuffer(glapi.PIXEL_PACK_BUFFER as uint32, glapi.READ_ONLY as uint32)
+    if mapped != null {
+        y = 0
+        while y < t.height {
+            mem.copy_at(destination, (y * row) as long, mapped, ((t.height - 1 - y) * row) as long, row as long)
+            y = y + 1
+        }
+        glapi.glUnmapBuffer(glapi.PIXEL_PACK_BUFFER as uint32)
+    }
+    glapi.glBindBuffer(glapi.PIXEL_PACK_BUFFER as uint32, 0)
+    glapi.glBindFramebuffer(glapi.FRAMEBUFFER as uint32, 0)
+    t.pack_index = t.pack_index ^ 1
+    t.pack_primed = true
+    t.pixel_index = t.pixel_index ^ 1
+    return destination
 }
+

@@ -54,17 +54,7 @@ int    ae3d_farr_count(void *arr);
 
 void  *ae3d_offscreen_context(int width, int height);
 void   ae3d_offscreen_context_destroy(void *context);
-void  *ae3d_offscreen_create(int width, int height);
-int    ae3d_offscreen_resize(void *target, int width, int height);
-void   ae3d_offscreen_bind(void *target);
-void   ae3d_offscreen_unbind(void);
-int    ae3d_offscreen_width(void *target);
-int    ae3d_offscreen_height(void *target);
-int    ae3d_offscreen_byte_size(void *target);
-void  *ae3d_offscreen_read(void *target);
-void  *ae3d_offscreen_read_pipelined(void *target);
 
-void   ae3d_offscreen_destroy(void *target);
 
 
 int    ae3d_vk_available(void);
