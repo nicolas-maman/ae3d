@@ -137,7 +137,7 @@ together: [docs/architecture.md](docs/architecture.md).
 
 | Example | What it shows |
 |---|---|
-| `street_drive.ae` | The street driven: mesh and hull colliders, a car on wheel joints, skinned figures worn by sprung ragdolls, hit events ([docs/physics.md](docs/physics.md)) |
+| `street_drive.ae` | The street driven, and walked: mesh and hull colliders, a car on wheel joints, skinned figures worn by sprung ragdolls, hit events; E gets out of the car and walks the street first-person on a character controller ([docs/physics.md](docs/physics.md)) |
 | `physics.ae` | `AE3D_PHYSICS_SCENE=pyramid\|pile\|ragdolls\|cloth`, the reference's scenes |
 | `zombie_city.ae` | The city and its horde; `AE3D_CROWD` sets the count, `AE3D_WEATHER` the weather, `AE3D_HUNT=1` the hunt |
 | `gltf_crowd.ae` | Any glTF figure as a horde: `AE3D_CROWD=100000 ./build/gltf_crowd figure.glb Walk` |

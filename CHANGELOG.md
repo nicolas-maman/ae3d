@@ -2,6 +2,25 @@
 
 ## [current]
 
+### A character that walks the world
+
+- `physics.character_controller` (#420): a capsule over Box3D's mover that
+  walks, climbs steps under 0.35 m, stands on slopes to 45 degrees and
+  slides down steeper ones, and jumps; gravity from the world. Driven in
+  Box3D's documented order (cast, then resolve overlap, then clip), with
+  steep planes laid flat for a character on the ground so a step's edge
+  cannot lift it. `tests/test_character.ae`: 3.00 m in a second at 3 m/s,
+  up a 0.3 m step, stopped by a 0.5 m one, still on 40 degrees, sliding on
+  50, a jump to v^2/2g within 2%, nothing left more than 4.3 mm into the
+  world. [docs/physics.md](docs/physics.md).
+- A character pushes what it walks into with a person's 400 N, no faster
+  than its own pace: a 20 kg crate slides ahead of it, an 800 kg one stops
+  it at its face.
+- Out of the car: in `street_drive`, E by the stopped car gets out and the
+  street is walked first-person on a character controller (W/S A/D where
+  the eyes look, the mouse to look, shift to run, space to jump), E by the
+  car gets back in. `AE3D_ON_FOOT=1` starts on foot, `=2` walks alone.
+
 ### Natural motion
 
 - `ae3d.motion` (#414, first slice): an active ragdoll on any ragdoll that
