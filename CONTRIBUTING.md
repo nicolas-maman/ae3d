@@ -10,9 +10,15 @@ It builds the native layer with `-Wall -Wextra -Werror`, type-checks every
 module, and runs every test suite and every example. It must pass with no
 warnings.
 
-This is the gate. Nothing runs it for you when a pull request opens: the
-workflow is started by hand, from the Actions tab, and is there for the one
-thing a local run cannot tell you, which is whether the other platform agrees.
+This is the gate, run on the machine the change was written on. The same
+script runs again on Linux, macOS and Windows for every pull request against
+main, for the one thing a local run cannot tell you: whether the other
+platforms agree. A pull request merges when both are green.
+
+Say what the pull request changed in a file of its own under `changes/`
+(see [changes/README.md](changes/README.md)), not at the top of
+`CHANGELOG.md`: there, every open pull request wrote to the same line and
+each merge left the next in conflict. `./build/fold_changes` folds them in.
 
 ## What the rules are
 

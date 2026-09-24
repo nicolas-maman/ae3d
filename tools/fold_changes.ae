@@ -1,0 +1,95 @@
+// Fold the changes/ entries into CHANGELOG.md.
+//
+// A pull request says what it changed in a file of its own under changes/
+// -- `changes/2026-09-24-net-events.md`, a `###` heading and its bullets,
+// as CHANGELOG.md's entries read -- rather than at the top of the
+// changelog, where every open pull request wrote to the same line and
+// each merge left the next one in conflict. This puts them where they
+// belong, the newest (the last by name, which starts with its date) first
+// at the top of `## [current]`, and deletes them.
+//
+//     ./build/fold_changes [--dry-run]
+//
+// Run it in a pull request of its own. Exits 0 having folded what there
+// was (nothing is fine), 1 when CHANGELOG.md has no `## [current]`.
+import std.os
+import std.fs
+import std.file
+import std.list
+import std.string
+
+const CHANGELOG = "CHANGELOG.md"
+const CURRENT = "## [current]\n"
+
+name_at(names: ptr, i: int) -> string { return list.get_raw(names, i) }
+
+// Insertion into byte order, newest (greatest) first.
+add_newest_first(names: ptr, name: string) {
+    list.add(names, name)
+    i = list.size(names) - 1
+    added = list.get_raw(names, i)
+    while i > 0 && string.compare(name_at(names, i - 1), name) < 0 {
+        list.list_set(names, i, list.get_raw(names, i - 1))
+        i = i - 1
+    }
+    list.list_set(names, i, added)
+}
+
+main() {
+    dry = os.args_count() > 1 && string.equals(os.args_get(1), "--dry-run") == 1
+    matches, err = fs.glob("changes/*.md")
+    names = list.new()
+    if err == "" && matches != null {
+        i = 0
+        while i < fs.dir_list_count(matches) {
+            path = fs.dir_list_get(matches, i)
+            if string.ends_with(path, "README.md") == 0 { add_newest_first(names, string.copy(path)) }
+            i = i + 1
+        }
+    }
+    if list.size(names) == 0 {
+        println("fold_changes: nothing under changes/")
+        return
+    }
+    log, log_err = file.read(CHANGELOG)
+    if log_err != "" {
+        println("fold_changes: cannot read ${CHANGELOG}: ${log_err}")
+        exit(1)
+    }
+    at = string.string_index_of(log, CURRENT)
+    if at < 0 {
+        println("fold_changes: ${CHANGELOG} has no ${string.trim(CURRENT)}")
+        exit(1)
+    }
+    cut = at + string.length(CURRENT)
+    folded = ""
+    i = 0
+    while i < list.size(names) {
+        entry, entry_err = file.read(name_at(names, i))
+        if entry_err != "" {
+            println("fold_changes: cannot read ${name_at(names, i)}: ${entry_err}")
+            exit(1)
+        }
+        folded = string.concat(folded, "\n")
+        folded = string.concat(folded, string.trim(entry))
+        folded = string.concat(folded, "\n")
+        println("fold_changes: ${name_at(names, i)}")
+        i = i + 1
+    }
+    text = string.concat(string.concat(string.substring(log, 0, cut), folded), string.substring(log, cut, string.length(log)))
+    if dry {
+        println("fold_changes: ${list.size(names)} entries, not written (--dry-run)")
+        return
+    }
+    write_err = fs.write(CHANGELOG, text)
+    if write_err != "" {
+        println("fold_changes: cannot write ${CHANGELOG}: ${write_err}")
+        exit(1)
+    }
+    i = 0
+    while i < list.size(names) {
+        file.delete(name_at(names, i))
+        i = i + 1
+    }
+    println("fold_changes: ${list.size(names)} entries folded into ${CHANGELOG}")
+}
