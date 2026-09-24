@@ -38,6 +38,15 @@
 
 ### Multiplayer in the engine
 
+- `ae3d.net` players (#413): a client's commands move its character
+  controller at once (prediction), go to the host with the three before them,
+  and are applied there to the authoritative player; every snapshot carries
+  the newest command applied, and the client puts its player where the host
+  says and replays the rest (reconciliation). `set_player_maker`,
+  `player_input`, `my_player`, `player_of`. `tests/test_players.ae`: a host
+  and two clients over 100 ms, 20 ms jitter and 2% loss; reconciliation moves
+  a player at most 0.0004 mm, a jump's peak agrees within 0.6 mm, commands
+  cost 2.95 KB a second.
 - `ae3d.net` (#413, first slice): a host and its clients, over TCP or an
   in-process loopback hub whose link can be given a latency, a jitter and a
   loss, deterministically. A hello and a welcome, then snapshots of every
