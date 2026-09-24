@@ -61,6 +61,7 @@ typedef ptrdiff_t     GLsizeiptr;
 #define GL_DEPTH_TEST   0x0B71
 #define GL_BLEND        0x0BE2
 #define GL_VIEWPORT     0x0BA2
+#define GL_MAX_TEXTURE_SIZE 0x0D33
 #define GL_MULTISAMPLE  0x809D
 #define GL_LINE_SMOOTH  0x0B20
 #define GL_PROGRAM_POINT_SIZE 0x8642

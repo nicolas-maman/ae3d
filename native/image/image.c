@@ -191,6 +191,46 @@ void *ae3d_image_solid(int width, int height, int r, int g, int b, int a) {
     return ae3d_image_wrap(pixels, width, height, 0);
 }
 
+/* Halve the image, a 2 x 2 box a texel, until neither side is past `limit`:
+   the largest texture the device creates. A 21,600-wide map is a valid file
+   and a texture no device under 32,768 can hold; it is drawn at the most the
+   device has instead of failing to be created. Returns how many halvings it
+   took, 0 when it already fit, -1 when memory ran out (left as it was). */
+int ae3d_image_fit(void *handle, int limit) {
+    ae3d_image *img = (ae3d_image *)handle;
+    int halvings = 0;
+    if (!img || !img->pixels || limit <= 0) return 0;
+    while (img->width > limit || img->height > limit) {
+        int w = img->width > 1 ? img->width / 2 : 1;
+        int h = img->height > 1 ? img->height / 2 : 1;
+        int x, y, c;
+        unsigned char *out = (unsigned char *)malloc((size_t)w * (size_t)h * 4);
+        if (!out) return -1;
+        for (y = 0; y < h; y++) {
+            int y0 = y * 2 < img->height ? y * 2 : img->height - 1;
+            int y1 = y0 + 1 < img->height ? y0 + 1 : y0;
+            const unsigned char *r0 = img->pixels + (size_t)y0 * (size_t)img->width * 4;
+            const unsigned char *r1 = img->pixels + (size_t)y1 * (size_t)img->width * 4;
+            unsigned char *o = out + (size_t)y * (size_t)w * 4;
+            for (x = 0; x < w; x++) {
+                int x0 = x * 2 < img->width ? x * 2 : img->width - 1;
+                int x1 = x0 + 1 < img->width ? x0 + 1 : x0;
+                for (c = 0; c < 4; c++) {
+                    int sum = r0[x0 * 4 + c] + r0[x1 * 4 + c] + r1[x0 * 4 + c] + r1[x1 * 4 + c];
+                    o[x * 4 + c] = (unsigned char)((sum + 2) / 4);
+                }
+            }
+        }
+        if (img->owns_stb) stbi_image_free(img->pixels); else free(img->pixels);
+        img->pixels = out;
+        img->owns_stb = 0;
+        img->width = w;
+        img->height = h;
+        halvings++;
+    }
+    return halvings;
+}
+
 void ae3d_image_free(void *handle) {
     ae3d_image *img = (ae3d_image *)handle;
     if (!img) return;

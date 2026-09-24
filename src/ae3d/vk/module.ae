@@ -97,6 +97,7 @@ extern ae3d_vk_ray_indirect() -> int
 extern ae3d_vk_ray_add(mesh: int, matrices: ptr, count: int)
 extern ae3d_vk_ray_add_one(mesh: int, matrix: *Mat4)
 extern ae3d_vk_ray_build() -> int
+extern ae3d_vk_ray_empty() -> int
 extern ae3d_vk_set_ray_shadows(on: int)
 extern ae3d_vk_set_ray_reach(metres: float)
 extern ae3d_vk_set_ray_budget(figures: int)
@@ -156,6 +157,8 @@ extern ae3d_vk_program_count() -> int
 extern ae3d_vk_offscreen_width() -> int
 extern ae3d_vk_offscreen_height() -> int
 extern ae3d_image_load(path: string) -> ptr
+extern ae3d_image_fit(img: ptr, limit: int) -> int
+extern ae3d_vk_max_texture_size() -> int
 extern ae3d_image_free(img: ptr)
 extern ae3d_image_width(img: ptr) -> int
 extern ae3d_image_height(img: ptr) -> int
@@ -696,7 +699,12 @@ reserve_ray_scene(r: *VKRenderer) {
 // its stream's -- after the sorts wrote the crowds', and the flag the
 // shader reads set for every program.
 build_ray_scene(r: *VKRenderer) {
-    if ae3d_vk_ray_shadows() != 1 { return }
+    // Not traced this frame: the slot still has a structure, empty if it
+    // never had another, for the pipelines' binding.
+    if ae3d_vk_ray_shadows() != 1 {
+        ae3d_vk_ray_empty()
+        return
+    }
     count = list.size(r.models)
     i = 0
     while i < count {
@@ -711,7 +719,8 @@ build_ray_scene(r: *VKRenderer) {
         }
         i = i + 1
     }
-    ae3d_vk_ray_build()
+    // Nothing traced in view this frame: an empty structure all the same.
+    if ae3d_vk_ray_build() != 1 { ae3d_vk_ray_empty() }
 }
 
 // The multisampling the frame takes, asked for before the backend starts:
@@ -1250,6 +1259,10 @@ renderer_load_texture(r: *VKRenderer, path: string) -> int {
         println("ae3d: texture load failed: ${ae3d_image_error()}")
         return 0
     }
+    // Larger than the device takes (a 21,600-wide map on a device whose
+    // textures stop at 16,384): drawn at the most it has, not refused.
+    halvings = ae3d_image_fit(image, ae3d_vk_max_texture_size())
+    if halvings > 0 { println("ae3d: ${path} is larger than this device's textures; halved ${halvings} time(s) to fit") }
     tex_w = ae3d_image_width(image)
     tex_h = ae3d_image_height(image)
     handle = ae3d_vk_texture_create(tex_w, tex_h, ae3d_image_pixels(image))

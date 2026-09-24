@@ -61,24 +61,7 @@ esac
 # disagreeing about how to find it is how one of them ends up unbuildable.
 . "$ROOT/scripts/native.sh"
 ae3d_glfw_flags
-
-
-VULKAN_CFLAGS=""
-if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists vulkan; then
-    VULKAN_CFLAGS="$(pkg-config --cflags vulkan)"
-elif [ -d /opt/homebrew/include/vulkan ]; then
-    VULKAN_CFLAGS="-I/opt/homebrew/include"
-elif [ -n "${VULKAN_SDK:-}" ]; then
-    # As build.sh does. GLFW is included with GLFW_INCLUDE_VULKAN, so
-    # vulkan.h has to be found even though nothing links against the loader,
-    # and the LunarG SDK on Windows spells the directory Include.
-    for ae3d_vk_inc in "${VULKAN_SDK}/include" "${VULKAN_SDK}/Include"; do
-        if [ -d "$ae3d_vk_inc" ]; then
-            VULKAN_CFLAGS="-I$ae3d_vk_inc"
-            break
-        fi
-    done
-fi
+ae3d_vulkan_flags
 
 . "$ROOT/scripts/platform.sh"
 PIC="$(ae3d_native_pic_flag)"

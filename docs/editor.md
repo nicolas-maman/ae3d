@@ -192,6 +192,15 @@ how much of the wet road's mirror a surface gets on Vulkan, under
 Reflections); water, light, camera, behaviour and rendering sections
 appear when they apply.
 
+The material's colour is a chip, a hex field and a picker under them: a
+saturation-value square over a hue strip, as wide as the panel. Dragging
+in either sets the colour of everything selected as it moves; letting go
+is one undo step, so an undo puts back the colour the drag began from. A
+colour typed or pasted into the hex field (`#3366CC` or `3366cc`) is
+another. The red, green and blue sliders under the picker follow it, and
+the picker follows them, an undo and the hex; it keeps its hue through
+grey and black, where the colour alone has none.
+
 The physics section is the body an object is, as the scene file records
 one and `ae3d.physics` reads it back: four buttons for the kind -- None,
 Static, Kinematic, Dynamic -- and five for the collider, which is made

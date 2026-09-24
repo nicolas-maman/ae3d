@@ -213,13 +213,14 @@ request. Done on that map: the crowd's sort on the device and its indirect
 draws, motion vectors, render scale, DLSS, ray-traced shadows with the
 crowd in them, weather, physics, navigation, input mapping, the engine's
 kernels in Aether. Next: active ragdolls
-([#365](https://github.com/nicolas-maman/ae3d/issues/365)), the skinned in
-the ray-traced scene ([#323](https://github.com/nicolas-maman/ae3d/issues/323)),
-clustered lighting, streaming tiles, audio, multiplayer; DirectX 12
+([#365](https://github.com/nicolas-maman/ae3d/issues/365)), multiplayer in
+the engine (on datagrams once Aether has them,
+[aether#2201](https://github.com/aether-lang-dev/aether/issues/2201)),
+clustered lighting, streaming tiles, audio; DirectX 12
 ([#311](https://github.com/nicolas-maman/ae3d/issues/311)) and Metal
 ([#312](https://github.com/nicolas-maman/ae3d/issues/312)) beside Vulkan;
-the last of the C once Aether has a 32-bit float
-([aether#2134](https://github.com/aether-lang-dev/aether/issues/2134)).
+the renderers in Aether once it can call a function pointer the driver
+hands back ([aether#2200](https://github.com/aether-lang-dev/aether/issues/2200)).
 
 ## Credits
 

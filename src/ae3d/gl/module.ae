@@ -142,6 +142,8 @@ extern ae3d_gl_read_frame(width: int, height: int) -> ptr
 extern ae3d_offscreen_bind(target: ptr)
 extern ae3d_offscreen_unbind()
 extern ae3d_image_load(path: string) -> ptr
+extern ae3d_image_fit(img: ptr, limit: int) -> int
+extern ae3d_gl_max_texture_size() -> int
 extern ae3d_image_width(image: ptr) -> int
 extern ae3d_image_height(image: ptr) -> int
 extern ae3d_image_solid(width: int, height: int, r: int, g: int, b: int, a: int) -> ptr
@@ -893,6 +895,10 @@ renderer_load_texture(r: *GLRenderer, path: string) -> int {
         println("ae3d: texture load failed: ${ae3d_image_error()}")
         return 0
     }
+    // Larger than the device takes (a 21,600-wide map on a device whose
+    // textures stop at 16,384): drawn at the most it has, not refused.
+    halvings = ae3d_image_fit(image, ae3d_gl_max_texture_size())
+    if halvings > 0 { println("ae3d: ${path} is larger than this device's textures; halved ${halvings} time(s) to fit") }
     id = ae3d_gl_texture_from_image(image, 0, 1)
     // Read before the image is released. How many pixels an image has is half
     // of what decides whether a surface carries enough detail to be looked at

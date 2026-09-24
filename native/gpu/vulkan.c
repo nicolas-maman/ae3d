@@ -521,6 +521,7 @@ static struct {
        AE3D_VK_FRAMES frames later and never a wait. */
     VkQueryPool timestamps;
     double timestamp_ms;          /* milliseconds per tick, from the device */
+    unsigned max_image_2d;        /* the widest 2D image the device creates */
     int timestamps_usable;        /* the graphics queue reports valid bits */
     int stamped[AE3D_VK_FRAMES];  /* this frame's four stamps were all written */
     int stamp_next;               /* how many of this frame's stamps are written */
@@ -999,6 +1000,7 @@ static int ae3d_vk_pick_device(void) {
             ae3d_vkGetPhysicalDeviceProperties(vk.physical, &properties);
             snprintf(vk.device_name, sizeof(vk.device_name), "%s", properties.deviceName);
             vk.timestamp_ms = (double)properties.limits.timestampPeriod / 1000000.0;
+            vk.max_image_2d = properties.limits.maxImageDimension2D;
             vk.timestamps_usable = timestamp_bits > 0;
             ae3d_vkGetPhysicalDeviceMemoryProperties(vk.physical, &vk.memory_properties);
             chosen = (int)i;
@@ -1085,6 +1087,22 @@ static int ae3d_vk_create_device(void) {
     info.pQueueCreateInfos = queues;
     info.enabledExtensionCount = extension_count;
     info.ppEnabledExtensionNames = extensions;
+    /* Independent blending: the scene's pipelines blend the colour and leave
+       the motion vectors as written, two attachments blended two ways, which
+       without this feature the device is not asked to honour (#405). Every
+       desktop device has it; where one does not, it stays off. */
+    {
+        static VkPhysicalDeviceFeatures enabled;
+        memset(&enabled, 0, sizeof(enabled));
+        if (ae3d_vkGetPhysicalDeviceFeatures2) {
+            VkPhysicalDeviceFeatures2 base;
+            memset(&base, 0, sizeof(base));
+            base.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            ae3d_vkGetPhysicalDeviceFeatures2(vk.physical, &base);
+            enabled.independentBlend = base.features.independentBlend;
+        }
+        info.pEnabledFeatures = &enabled;
+    }
     if (ray) {
         /* Only the three features the rays take; the rest stay off. */
         memset(&address_features, 0, sizeof(address_features));
@@ -2023,17 +2041,22 @@ static int ae3d_vk_build_render_pass(VkImageLayout present_layout, int part, VkR
                                    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
     dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
                                     VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    if (part == 2) {
-        /* After the resolve read the depth and the first half wrote both. */
-        dependencies[0].srcStageMask |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-                                        VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-        dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT |
-                                        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-                                        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-        dependencies[0].dstAccessMask |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
-                                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
-    }
-    /* The first half's depth, written here, is read by the resolve's shader. */
+    /* The same dependencies for all three passes, whole and halves: the
+       pipelines are made against the whole pass and draw in the halves too,
+       and passes that differ in their dependencies are not compatible (the
+       validation layer counted thousands of draws against it, #405). What
+       the second half needs -- after the resolve read the depth and the
+       first half wrote both -- is waited for in the whole pass as well,
+       which costs it nothing it would notice. */
+    dependencies[0].srcStageMask |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                    VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT |
+                                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    dependencies[0].dstAccessMask |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                                     VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+    /* The first half's depth, written here, is read by the resolve's shader
+       (and, the dependencies being the same in all three, the others'). */
     dependencies[1].srcSubpass = 0;
     dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
     dependencies[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
@@ -2049,7 +2072,7 @@ static int ae3d_vk_build_render_pass(VkImageLayout present_layout, int part, VkR
     info.pAttachments = attachments;
     info.subpassCount = 1;
     info.pSubpasses = &subpass;
-    info.dependencyCount = part == 1 ? 2 : 1;
+    info.dependencyCount = 2;
     info.pDependencies = dependencies;
 
     if (ae3d_vkCreateRenderPass(vk.device, &info, NULL, out) != VK_SUCCESS) {
@@ -2950,9 +2973,13 @@ int ae3d_vk_texture_create(int width, int height, const void *rgba) {
     }
 
     command = ae3d_vk_begin_once();
-    ae3d_vk_transition(command, texture->image, VK_IMAGE_LAYOUT_UNDEFINED,
-                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                       VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    /* Every level to transfer-destination, not only the one the copy writes:
+       the chain's blits write the rest, and a level still undefined when it
+       is blitted into was hundreds of the validation layer's errors (#405). */
+    ae3d_vk_transition_levels(command, texture->image, VK_IMAGE_LAYOUT_UNDEFINED,
+                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                              VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                              0, mip_levels);
 
     memset(&region, 0, sizeof(region));
     region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -3597,7 +3624,13 @@ static VkPipeline ae3d_vk_build_pipeline(VkShaderModule vertex_module,
     memset(&multisample, 0, sizeof(multisample));
     multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     multisample.rasterizationSamples = vk.samples;
-    if (render_pass == vk.post_pass || render_pass == vk.shadow_pass || render_pass == vk.camdepth_pass) {
+    /* Every pass but the scene's draws single-sampled: the post passes
+       (the composite, and the one the SSR and the temporal pass share), the
+       shadow map and the camera depth. The temporal pass's pipeline, made
+       against the SSR's pass with the scene's four samples, drew into a
+       one-sample target on every frame the validation layer watched (#405). */
+    if (render_pass == vk.post_pass || render_pass == vk.ssr_pass || render_pass == vk.shadow_pass ||
+        render_pass == vk.camdepth_pass) {
         multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
     }
 
@@ -5198,7 +5231,10 @@ static int ae3d_vk_tlas_reserve(int frame, unsigned count) {
        system memory where it cannot. */
     {
         VkDeviceSize bytes = (VkDeviceSize)capacity * sizeof(VkAccelerationStructureInstanceKHR);
+        /* A transfer's destination too: a frame clears the crowds' room
+           with a fill before the sorts write into it. */
         VkBufferUsageFlags usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                   VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                    VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
         VkMemoryPropertyFlags host = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
         if (!ae3d_vk_create_buffer(bytes, usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | host,
@@ -5382,7 +5418,33 @@ void ae3d_vk_ray_add_one(int mesh_handle, const double *matrix) {
 /* The frame's top-level structure built from its instances, recorded before
    any pass, and made readable by the fragment shaders that follow. With no
    instance there is nothing to trace: the rays are off this frame. */
-int ae3d_vk_ray_build(void) {
+static int ae3d_vk_tlas_build(int allow_empty);
+
+int ae3d_vk_ray_build(void) { return ae3d_vk_tlas_build(0); }
+
+/* The widest texture the device creates, a side; 0 before a device. */
+int ae3d_vk_max_texture_size(void) { return (int)vk.max_image_2d; }
+
+/* A frame slot that has never had a structure gets an empty one, built with
+   no instances. The scene's pipelines are the ray-query variant wherever the
+   device traces, and they declare the structure's binding whether or not a
+   frame traces: a frame with the rays off left it never written, an error
+   on every draw of every such scene (#405). Built once a slot; a slot that
+   has one, from a traced frame or from this, keeps it. */
+int ae3d_vk_ray_empty(void) {
+    int frame = (int)vk.frame;
+    if (!vk.ray_query || !vk.recording || vk.pass_open) return 0;
+    if (vk.tlas[frame] && vk.tlas_built[frame]) return 1;
+    if (!ae3d_vk_tlas_reserve(frame, 1)) return 0;
+    vk.tlas_static = 0;
+    vk.tlas_count = 0;
+    vk.tlas_appended = 0;
+    if (!ae3d_vk_tlas_build(1)) return 0;
+    vk.tlas_ready = 0;             /* built, but nothing in it to trace */
+    return 1;
+}
+
+static int ae3d_vk_tlas_build(int allow_empty) {
     VkAccelerationStructureGeometryKHR geometry;
     VkAccelerationStructureBuildGeometryInfoKHR build;
     VkAccelerationStructureBuildSizesInfoKHR sizes;
@@ -5394,7 +5456,7 @@ int ae3d_vk_ray_build(void) {
     int frame = (int)vk.frame;
     unsigned count = vk.tlas_count;
     if (!vk.ray_query || !vk.recording || vk.pass_open) return 0;
-    if (count == 0 && !vk.tlas_appended) return 0;
+    if (count == 0 && !vk.tlas_appended && !allow_empty) return 0;
     if (!vk.tlas_instances[frame]) return 0;
     /* The static slots not written this frame are inactive. */
     if (vk.tlas_static > count) {
@@ -6102,6 +6164,11 @@ int ae3d_vk_frame_end(void) {
             vk.pass_open = 1;
             ae3d_vkCmdSetViewport(vk.command_buffers[vk.frame], 0, 1, &viewport);
             ae3d_vkCmdSetScissor(vk.command_buffers[vk.frame], 0, 1, &scissor);
+            /* With no history yet (the first frame, or after a resize) the
+               pass weighs it at nothing, and the frame itself is bound in its
+               place: the history texture has never been written, and binding
+               it undefined was an error on every such frame (#405). */
+            if (!vk.taa_history_valid) history = src;
             ae3d_vk_draw_screen_with(vk.taa_pipeline, &vk.taa_set[cur][frame_slot],
                                      src->view, src->sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                      history->view, history->sampler);
@@ -7275,6 +7342,13 @@ void ae3d_vk_shutdown(void) {
     if (vk.water_pipeline_blend) ae3d_vkDestroyPipeline(vk.device, vk.water_pipeline_blend, NULL);
     if (vk.crowd_pipeline_blend) ae3d_vkDestroyPipeline(vk.device, vk.crowd_pipeline_blend, NULL);
     if (vk.crowd_shadow_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.crowd_shadow_pipeline, NULL);
+    /* The skinned pipelines too: left alive, the device went down with them
+       still made (#405). */
+    for (i = 0; i < 2; i++) {
+        if (vk.skinned_pipeline[i]) ae3d_vkDestroyPipeline(vk.device, vk.skinned_pipeline[i], NULL);
+    }
+    if (vk.skinned_pipeline_blend) ae3d_vkDestroyPipeline(vk.device, vk.skinned_pipeline_blend, NULL);
+    if (vk.skinned_shadow_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.skinned_shadow_pipeline, NULL);
     if (vk.sky_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.sky_pipeline, NULL);
     if (vk.ssao_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.ssao_pipeline, NULL);
     ae3d_vk_destroy_dlss_output();
@@ -7297,7 +7371,9 @@ void ae3d_vk_shutdown(void) {
     if (vk.point_pipeline[0]) ae3d_vkDestroyPipeline(vk.device, vk.point_pipeline[0], NULL);
     if (vk.point_pipeline[1]) ae3d_vkDestroyPipeline(vk.device, vk.point_pipeline[1], NULL);
     if (vk.point_shadow_pipeline) ae3d_vkDestroyPipeline(vk.device, vk.point_shadow_pipeline, NULL);
-    for (i = 0; i < 3; i++) {
+    /* All four: the composite's three and the SSR's, which a loop to three
+       left alive (#405). */
+    for (i = 0; i < (unsigned)(sizeof(vk.post_pipelines) / sizeof(vk.post_pipelines[0])); i++) {
         if (vk.post_pipelines[i]) ae3d_vkDestroyPipeline(vk.device, vk.post_pipelines[i], NULL);
     }
     if (vk.pipeline_layout) ae3d_vkDestroyPipelineLayout(vk.device, vk.pipeline_layout, NULL);

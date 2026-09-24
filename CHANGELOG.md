@@ -2,6 +2,69 @@
 
 ## [current]
 
+### Issues, five at a time
+
+- An exposure that follows the frame (#378): the renderer measures what it
+  drew (mean linear luminance and the share of the frame near white, read
+  back two frames late on both backends) and `ae3d.exposure` steers the
+  frame's exposure from it -- part of the way toward a mid-grey key, down
+  half a stop for every doubling of the near-white share past 0.2%, never
+  up while bright spots are in view, faster down than up, within two stops
+  under and one and a half over. `engine_set_eye_adaptation` /
+  `AE3D_EYE`; on in `street_drive` and `zombie_city`. The street's chase
+  frame on Vulkan: 1,076 clipped pixels to 10, at no frame cost.
+- The editor's panels are resizable (#221): the hierarchy against the rest
+  and the viewport against the inspector, each on a splitter with a 180 px
+  floor. The dividers are set from the frame timer, never from a frame
+  drawn inside the toolkit's layout pass (which undid them on Windows,
+  aether-ui#209), the viewport asks for 320 points of width rather than
+  900 (a hard minimum on GTK, aether-ui#210), and the editor reads the
+  viewport's allocation each tick. On Linux the divider moves but the view
+  keeps its old width until GTK reports the viewport's size (#412,
+  aether-ui#211). Console lines are cut at the pane's edge rather than
+  widening it.
+- `test_engine_shadows` judges the shadow within each frame (#394), so a
+  frame that comes out brighter overall on llvmpipe no longer reads as a
+  shadow going the wrong way.
+- The inspector has a colour picker (#407): a saturation-value square over
+  a hue strip under the material's chip, as wide as the panel, and the hex
+  beside the chip is a field a colour is typed or pasted into. Dragging
+  sets the colour of everything selected as it moves; letting go records
+  one step, so one Undo puts back the colour the drag began from. The
+  picker follows the sliders, the hex and an undo, and keeps its hue
+  through grey and black. The driver types a hex, clicks the strip and the
+  square through the canvas routes, reads the sliders, the hex and the
+  pixels the square painted, and undoes a drag in one step.
+- Vulkan runs clean under the Khronos validation layer (#405): every
+  example, 40 frames each, no errors where street_drive alone had about
+  3,000 in ten frames. The scene's render passes declare identical
+  dependencies, so their pipelines are compatible with each other; a
+  texture's mip levels are all in the layout the shader reads; the device
+  enables `independentBlend`, which the G-buffer's attachments ask for; the
+  reflection pass takes the scene's single-sample format; shutdown destroys
+  every pipeline it made; the temporal pass reads the frame itself as its
+  history on the first frame; every frame slot has an acceleration
+  structure (empty when nothing is traced) for the ray-query shader's
+  binding; the rays' instance buffer is a transfer destination, which the
+  fill clearing it needs. `scripts/validate.sh` runs the sweep.
+- Software Vulkan keeps the light through the temporal pass (#334): llvmpipe
+  lost a tenth of it while the multisampled pipelines were drawn in render
+  passes they were not compatible with, which a GPU forgave; with #405's
+  passes it matches a GPU, and `test_taa` and `test_ssr` hold it there
+  instead of noting or skipping it. The whole validation sweep is clean on
+  lavapipe too.
+- A texture larger than the device takes is halved until it fits
+  (`ae3d_image_fit`, both backends): the `models` example's 21,600-wide
+  Earth map was refused on devices whose textures stop at 16,384.
+- `engine_add_model` before `engine_run` no longer crashes OpenGL (#406):
+  the model waits for the backend, as one added from `start` does.
+- One platform probe (#408): `build.sh`, `ci.sh` and the editor's build
+  find GLFW and the Vulkan headers through the same two functions in
+  `scripts/native.sh`. Each had its own Vulkan probe, and they had drifted
+  (one missed the SDK's `Include`, one ignored `VULKAN_SDK`); the root
+  `platform.sh` that was meant to end that was sourced by nothing, and is
+  gone.
+
 ### The editor on a scene of a thousand objects
 
 - The sky is chosen in the editor: None, Desert, Dusk or Night, a button

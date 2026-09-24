@@ -1370,12 +1370,35 @@ engine_light(e: *Engine) -> *Light { return e.light as *Light }
 // and never frees it. Whoever built it frees it, after the engine is gone. The
 // renderer releases the list it kept them in and nothing else, which is what
 // lets the same model be handed to two backends.
+// A model to draw. Before the engine runs there is no context to upload it
+// into -- on OpenGL the entry points are not even loaded, and handing the
+// renderer a model then was a call through a null pointer (#406) -- so it
+// waits with the models engine.object queued, and goes in when the backend
+// is up.
 engine_add_model(e: *Engine, m: *Model) {
-    e.backend_add_model(e.backend_state, m)
+    if m == null { return }
+    if e.running {
+        e.backend_add_model(e.backend_state, m)
+    } else {
+        list.add_raw(e.pending_models, m as ptr)
+    }
 }
 
 engine_remove_model(e: *Engine, m: *Model) {
-    e.backend_remove_model(e.backend_state, m)
+    if m == null { return }
+    if e.running {
+        e.backend_remove_model(e.backend_state, m)
+        return
+    }
+    // Not uploaded yet: out of the queue.
+    i = 0
+    while i < list.size(e.pending_models) {
+        if list.get_raw(e.pending_models, i) == m as ptr {
+            list.remove(e.pending_models, i)
+            return
+        }
+        i = i + 1
+    }
 }
 
 engine_stop(e: *Engine) {
