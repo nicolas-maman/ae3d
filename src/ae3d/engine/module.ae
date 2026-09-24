@@ -22,9 +22,6 @@ import std.os
 import std.fs
 
 extern calloc(count: int, size: int) -> ptr
-extern ae3d_jobs_start(workers: int) -> int
-extern ae3d_jobs_stop()
-extern ae3d_jobs_workers() -> int
 extern free(block: ptr)
 
 exports (
@@ -546,11 +543,9 @@ engine_new_with(api: int) -> *Engine {
     // over: a worker for every hardware thread but this one. AE3D_JOBS=n
     // is the thread count, this one included; 1 is this thread alone,
     // which is the measure everything else is against. The renderer's
-    // own C loops (the instance packing, float32 work Aether cannot
-    // express yet, aether#2134) run on the native pool, sized the same.
+    // own C loops (the instance packing) run on it too.
     threads = core.env_int("AE3D_JOBS", 0)
     jobs.start(threads)
-    ae3d_jobs_start(jobs.workers())
 
     if api == platform.API_VULKAN {
         vulkan_state = vk.renderer_new()
@@ -831,7 +826,6 @@ engine_free(e: *Engine) {
     } else {
         gl.renderer_free(e.backend_state as *GLRenderer)
     }
-    ae3d_jobs_stop()
     jobs.stop()
     heap.free(e)
 }

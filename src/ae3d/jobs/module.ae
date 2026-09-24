@@ -23,6 +23,9 @@ import aephysics.native
 import aephysics.parallel
 
 extern calloc(count: int, size: int) -> ptr
+extern ae3d_jobs_set_runner(runner: ptr)
+extern ae3d_job_call(body: ptr, context: ptr, start: int, end: int)
+extern ae3d_jobs_native_runner(count: int, grain: int, body: ptr, context: ptr)
 
 exports (
     start, stop, scheduler, workers, threads, parallel_for, parallel_for_fixed, passes, blocks
@@ -44,12 +47,37 @@ start(count: int) {
     n = count
     if n <= 0 { n = native.processor_count() }
     g_scheduler = parallel.create_scheduler(n) as ptr
+    ae3d_jobs_set_runner((&ae3d_jobs_native_runner) as ptr)
 }
 
 stop() {
     if g_scheduler == null { return }
+    ae3d_jobs_set_runner(null)
     parallel.destroy_scheduler(g_scheduler as *Scheduler)
     g_scheduler = null
+}
+
+// --- the native layer's loops ------------------------------------------------------------------------------------
+
+// The C loops worth every core -- a crowd's instance matrices, the Vulkan
+// crowd's state, the packed instance stream -- run on this pool: the
+// native layer hands its range, its body and the body's context to this
+// runner (native/gpu/jobs.c), which is what start installs. They had a
+// pool of their own before, a second set of threads on the same cores.
+struct NativePass {
+    body: ptr                      // the C loop's ae3d_job_fn
+    context: ptr
+}
+
+native_block(start: int, end: int, worker: int, context: ptr) {
+    pass = context as *NativePass
+    ae3d_job_call(pass.body, pass.context, start, end)
+}
+
+@c_callback("ae3d_jobs_native_runner")
+native_runner(count: int, grain: int, body: ptr, context: ptr) {
+    pass = NativePass { body: body, context: context }
+    parallel_for(native_block, count, grain, (&pass) as ptr)
 }
 
 // The scheduler itself, for a subsystem that steps on it (the physics world).
