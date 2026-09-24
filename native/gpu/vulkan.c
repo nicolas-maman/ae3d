@@ -366,7 +366,15 @@ static struct {
        shadows are traced through it. */
     int ray_query;
     int ray_shadows;
-    double ray_reach;    /* how far from the camera a crowd figure is in the rays; 0 for all */
+    double ray_reach;    /* how far from the camera a crowd figure may be in the rays; 0 for all */
+    /* How many of a crowd's figures the rays take a frame, and the reach
+       that keeps them near that many (see ae3d_vk_ray_reserve). A figure in
+       the rays is an instance in the frame's structure and a surface every
+       shadow and occlusion ray is tested against; half a million in a dense
+       street put tens of thousands inside even a short reach, and the
+       structure and its traversal were 84 ms of the frame (#401). */
+    double ray_reach_now;
+    unsigned ray_seen;   /* figures the sorts put in the rays, as last read back */
     unsigned as_scratch_alignment;
     VkAccelerationStructureKHR tlas[AE3D_VK_FRAMES];
     VkBuffer tlas_buffer[AE3D_VK_FRAMES];
@@ -4510,7 +4518,7 @@ int ae3d_vk_crowd_sort(int handle, double cx, double cz, double near_dist, doubl
     params.near2 = (float)(near_dist * near_dist);
     params.mid2 = (float)(mid_dist * mid_dist);
     params.cull2 = (float)(cull_dist > 0.0 ? cull_dist * cull_dist : 0.0);
-    params.ray2 = (float)(vk.ray_reach > 0.0 ? vk.ray_reach * vk.ray_reach : 0.0);
+    params.ray2 = (float)(vk.ray_reach_now > 0.0 ? vk.ray_reach_now * vk.ray_reach_now : 0.0);
     memcpy(params.scale, c->scale, sizeof(params.scale));
     /* The rays' instances: a slot a figure in this frame's structure,
        reserved here, the pose structures' addresses at binding 6 and the
@@ -5009,6 +5017,35 @@ void ae3d_vk_ray_begin(void) {
     vk.tlas_locked = 0;
 }
 
+/* The reach that holds the figures in the rays near the budget. The
+   figures the sorts took when this frame's slot was last used -- two
+   frames ago, before the last two changes of reach took effect -- are the
+   measure, so the steps are small: over the budget the reach shrinks by the
+   fourth root of the ratio, under half of it it grows by the fourth root,
+   and between the two it is left alone, which is what keeps a count read
+   late from swinging the reach back and forth. Never past the reach the
+   renderer set (the shadow distance), never under half a metre. */
+/* Kept outside the renderer's state, which a start clears: a program sets
+   it before the renderer is up as often as after. 2048 figures by default,
+   the nearest, whose shadows and occlusion are the ones a camera sees. */
+static unsigned g_ray_budget = 2048;
+
+static void ae3d_vk_ray_reach_follow(unsigned seen) {
+    double ratio;
+    if (g_ray_budget == 0 || vk.ray_reach <= 0.0) { vk.ray_reach_now = vk.ray_reach; return; }
+    if (vk.ray_reach_now <= 0.0) vk.ray_reach_now = vk.ray_reach;
+    if (seen > g_ray_budget) {
+        ratio = (double)g_ray_budget / (double)seen;
+        vk.ray_reach_now *= sqrt(sqrt(ratio));
+    } else if (seen * 2u < g_ray_budget) {
+        ratio = seen > 0 ? (double)g_ray_budget / (double)seen : 4.0;
+        if (ratio > 4.0) ratio = 4.0;
+        vk.ray_reach_now *= sqrt(sqrt(ratio));
+    }
+    if (vk.ray_reach_now > vk.ray_reach) vk.ray_reach_now = vk.ray_reach;
+    if (vk.ray_reach_now < 0.5) vk.ray_reach_now = 0.5;
+}
+
 /* Room for `count` instances this frame, before any sort writes into the
    buffer: the crowds' figures and the static scene's instances together,
    of which the static scene's `statics` take the first slots. The count
@@ -5031,6 +5068,8 @@ int ae3d_vk_ray_reserve(int count, int statics) {
        as the most seen lately, so a horde walking into view grows it. */
     seen = vk.tlas_range_mapped[frame] ? vk.tlas_range_mapped[frame][0] : 0;
     if (seen > vk.tlas_static) seen -= vk.tlas_static; else seen = 0;
+    vk.ray_seen = seen;
+    ae3d_vk_ray_reach_follow(seen);
     if (seen > vk.tlas_dynamic_seen) vk.tlas_dynamic_seen = seen;
     else vk.tlas_dynamic_seen = vk.tlas_dynamic_seen - vk.tlas_dynamic_seen / 16 + seen / 16;
     room = vk.tlas_dynamic_seen + vk.tlas_dynamic_seen / 4 + 4096;
@@ -5234,7 +5273,17 @@ void ae3d_vk_set_ray_shadows(int on) { vk.ray_shadows = on ? 1 : 0; }
 
 /* How far from the camera a crowd's figures are in the rays: the shadow
    distance, what the map covered; 0 keeps every figure kept. */
-void ae3d_vk_set_ray_reach(double metres) { vk.ray_reach = metres > 0.0 ? metres : 0.0; }
+void ae3d_vk_set_ray_reach(double metres) {
+    vk.ray_reach = metres > 0.0 ? metres : 0.0;
+    if (vk.ray_reach_now <= 0.0 || (vk.ray_reach > 0.0 && vk.ray_reach_now > vk.ray_reach)) vk.ray_reach_now = vk.ray_reach;
+}
+
+/* How many of the crowds' figures the rays take a frame: the nearest that
+   many, however dense the crowd (0 for no limit but the reach). */
+void ae3d_vk_set_ray_budget(int figures) { g_ray_budget = figures > 0 ? (unsigned)figures : 0u; }
+int ae3d_vk_ray_budget(void) { return (int)g_ray_budget; }
+int ae3d_vk_ray_figures(void) { return (int)vk.ray_seen; }
+double ae3d_vk_ray_reach_now(void) { return vk.ray_reach_now; }
 int ae3d_vk_ray_shadows(void) { return vk.ray_query && vk.ray_shadows; }
 
 /* This frame traces: the flag the scene block carries, set by the

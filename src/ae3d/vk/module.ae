@@ -29,7 +29,7 @@ exports (
     renderer_set_normal_strength, renderer_set_occlusion_strength, renderer_set_capture_channel, renderer_set_wetness, renderer_material_texture_size,
     renderer_load_texture, renderer_release_texture, renderer_sample_count, renderer_set_post,
     renderer_set_bloom_intensity, renderer_bloom_intensity,
-    renderer_set_shadows, renderer_shadows, renderer_set_ssr, renderer_ssr, renderer_set_ssr_params, renderer_set_taa, renderer_taa, request_dlss, renderer_set_dlss, renderer_dlss, set_samples, renderer_ray_query, renderer_set_ray_shadows, renderer_ray_shadows, renderer_set_sun_size, renderer_sun_size, renderer_set_ray_occlusion, renderer_ray_occlusion, renderer_set_lamp_size, renderer_add_light, renderer_remove_light,
+    renderer_set_shadows, renderer_shadows, renderer_set_ssr, renderer_ssr, renderer_set_ssr_params, renderer_set_taa, renderer_taa, request_dlss, renderer_set_dlss, renderer_dlss, set_samples, renderer_ray_query, renderer_set_ray_shadows, renderer_ray_shadows, renderer_set_sun_size, renderer_sun_size, renderer_set_ray_occlusion, renderer_ray_occlusion, renderer_set_lamp_size, renderer_set_ray_budget, renderer_ray_budget, renderer_ray_figures, renderer_ray_reach, renderer_add_light, renderer_remove_light,
     renderer_set_fog, renderer_fog, renderer_set_clouds, renderer_set_sky_overcast, renderer_set_shadow_distance, renderer_shadow_distance,
     renderer_set_ssao, renderer_ssao,
     skybox_create, skybox_free,
@@ -99,6 +99,10 @@ extern ae3d_vk_ray_add_one(mesh: int, matrix: *Mat4)
 extern ae3d_vk_ray_build() -> int
 extern ae3d_vk_set_ray_shadows(on: int)
 extern ae3d_vk_set_ray_reach(metres: float)
+extern ae3d_vk_set_ray_budget(figures: int)
+extern ae3d_vk_ray_budget() -> int
+extern ae3d_vk_ray_figures() -> int
+extern ae3d_vk_ray_reach_now() -> float
 extern ae3d_vk_ray_shadows() -> int
 extern ae3d_vk_ray_shadows_now() -> int
 extern ae3d_vk_dlss_available() -> int
@@ -589,6 +593,15 @@ renderer_set_ray_shadows(r: *VKRenderer, on: bool) {
 }
 
 renderer_ray_shadows(r: *VKRenderer) -> bool { return ae3d_vk_ray_shadows() == 1 }
+
+// How many of a crowd's figures the rays take a frame: the nearest that
+// many, the reach following the crowd's density so they stay about that
+// many (0: no limit but the shadow distance). 2048 unless set. What the
+// rays last took, and the reach that took them, for a benchmark to report.
+renderer_set_ray_budget(r: *VKRenderer, figures: int) { ae3d_vk_set_ray_budget(figures) }
+renderer_ray_budget(r: *VKRenderer) -> int { return ae3d_vk_ray_budget() }
+renderer_ray_figures(r: *VKRenderer) -> int { return ae3d_vk_ray_figures() }
+renderer_ray_reach(r: *VKRenderer) -> float { return ae3d_vk_ray_reach_now() }
 
 // The sun's size for the rays' shadows, as the angle its disc subtends in
 // degrees: zero is a point sun and a hard edge, the real sun is about
@@ -1883,6 +1896,8 @@ renderer_render(r: *VKRenderer, cam: *Camera, light: *Light) {
         ae3d_vk_scene_set_float(vkscene.OFF_RAYOCCLUSION, reach)
         ae3d_vk_scene_set_float(vkscene.OFF_RAYOCCLUSIONSTRENGTH, ae3d_vk_ssao_intensity())
         ae3d_vk_scene_set_float(vkscene.OFF_RAYLAMPRADIUS, r.lamp_radius)
+        // The rays trace within the shadow distance, as the map covers.
+        ae3d_vk_scene_set_float(vkscene.OFF_RAYREACH, r.shadow_distance)
         ae3d_vk_scene_set_int(vkscene.OFF_RAYFRAME, r.sort_serial)
         // What a water surface needs to read the depth under it back into
         // a position: whether there is one, and the frame's size in pixels.
