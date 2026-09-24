@@ -120,6 +120,13 @@ int ae3d_gl_viewport_height(void) {
     return viewport[3];
 }
 
+/* The widest texture the context takes, a side. */
+int ae3d_gl_max_texture_size(void) {
+    GLint size = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &size);
+    return (int)size;
+}
+
 int ae3d_gl_vao_create(void) {
     GLuint vao = 0;
     glGenVertexArrays(1, &vao);

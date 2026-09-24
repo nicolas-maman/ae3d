@@ -521,6 +521,7 @@ static struct {
        AE3D_VK_FRAMES frames later and never a wait. */
     VkQueryPool timestamps;
     double timestamp_ms;          /* milliseconds per tick, from the device */
+    unsigned max_image_2d;        /* the widest 2D image the device creates */
     int timestamps_usable;        /* the graphics queue reports valid bits */
     int stamped[AE3D_VK_FRAMES];  /* this frame's four stamps were all written */
     int stamp_next;               /* how many of this frame's stamps are written */
@@ -999,6 +1000,7 @@ static int ae3d_vk_pick_device(void) {
             ae3d_vkGetPhysicalDeviceProperties(vk.physical, &properties);
             snprintf(vk.device_name, sizeof(vk.device_name), "%s", properties.deviceName);
             vk.timestamp_ms = (double)properties.limits.timestampPeriod / 1000000.0;
+            vk.max_image_2d = properties.limits.maxImageDimension2D;
             vk.timestamps_usable = timestamp_bits > 0;
             ae3d_vkGetPhysicalDeviceMemoryProperties(vk.physical, &vk.memory_properties);
             chosen = (int)i;
@@ -5419,6 +5421,9 @@ void ae3d_vk_ray_add_one(int mesh_handle, const double *matrix) {
 static int ae3d_vk_tlas_build(int allow_empty);
 
 int ae3d_vk_ray_build(void) { return ae3d_vk_tlas_build(0); }
+
+/* The widest texture the device creates, a side; 0 before a device. */
+int ae3d_vk_max_texture_size(void) { return (int)vk.max_image_2d; }
 
 /* A frame slot that has never had a structure gets an empty one, built with
    no instances. The scene's pipelines are the ray-query variant wherever the

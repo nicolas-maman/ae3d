@@ -51,7 +51,10 @@ distinct VUIDs of any that has one, and exits non-zero if any had one.
 Every example runs clean, so a new error is the change that made it. The
 hosted runners' software Vulkan traces no rays and has none of the
 DLSS, meter or crowd paths a GPU takes, so this runs on a GPU before a
-renderer change is pushed.
+renderer change is pushed -- and once more on Mesa's lavapipe
+(`VK_DRIVER_FILES=<its lvp_icd json> scripts/validate.sh`, `AE3D_VALIDATE_FRAMES=8`
+since it is slow), which takes the paths a device without ray queries
+takes and has the smaller limits many real devices have.
 
 A number in a document is quoted with its pair from the same run on the
 same machine, because two runs on a shared GPU differ by more than most

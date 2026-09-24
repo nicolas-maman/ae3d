@@ -39,6 +39,7 @@ void  *ae3d_image_solid(int width, int height, int r, int g, int b, int a);
 void   ae3d_image_free(void *img);
 int    ae3d_image_width(void *img);
 int    ae3d_image_height(void *img);
+int    ae3d_image_fit(void *img, int limit);
 const char *ae3d_image_error(void);
 
 int    ae3d_gl_load(void);
@@ -61,6 +62,7 @@ void   ae3d_gl_texture3d_bind(int unit, int texture);
 void   ae3d_gl_set_multisample(int on);
 void   ae3d_gl_set_wireframe(int on);
 int    ae3d_gl_viewport_width(void);
+int    ae3d_gl_max_texture_size(void);
 int    ae3d_gl_viewport_height(void);
 
 int    ae3d_gl_vao_create(void);
@@ -242,6 +244,7 @@ int    ae3d_vk_ray_build(void);
 void   ae3d_vk_set_ray_shadows(int on);
 void   ae3d_vk_set_ray_reach(double metres);
 int    ae3d_vk_ray_empty(void);
+int    ae3d_vk_max_texture_size(void);
 void   ae3d_vk_set_meter(int on);
 int    ae3d_vk_meter(double *out);
 void   ae3d_vk_set_ray_budget(int figures);

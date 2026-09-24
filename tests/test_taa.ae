@@ -12,7 +12,6 @@
 // history has filled. Off again, the plain picture comes back.
 
 import std.mem
-import std.string
 import ae3d.core
 import ae3d.gl
 import ae3d.vk
@@ -137,16 +136,11 @@ run_checks(backend: *Backend, name: string, gl_r: *GLRenderer, vk_r: *VKRenderer
     // The multisampling already grades the edge over a pixel; the eight
     // nudges within a pixel grade it finer, and a little wider.
     check("${name} the edge is graded finer: more in-between pixels", taa_between > plain_between * 11 / 10)
-    // On a software Vulkan (the runner's llvmpipe) the resolved depth the
-    // reprojection reads does not come back right and the history lands
-    // off the pixel: a tenth of the light goes to the clamp. Said, not
-    // failed, there (#334); the OpenGL half of this test and Vulkan on a
-    // real device hold the standard.
-    software = vk_r != null && string.contains(vk.device_name(), "llvmpipe") == 1
-    if software {
-        println("  ${name}: software Vulkan; the light and the pan are noted, not held (#334)")
-    }
-    check("${name} the same light overall: the pass averages, it does not move", software || (taa_total > plain_total * 9 / 10 && taa_total < plain_total * 11 / 10))
+    // Held on software Vulkan too. llvmpipe lost a tenth of the light here
+    // (#334) while its multisampled pipelines were drawn in render passes
+    // they were not compatible with, which a GPU forgave and it did not; with
+    // the passes made compatible (#405) it keeps the light as a GPU does.
+    check("${name} the same light overall: the pass averages, it does not move", taa_total > plain_total * 9 / 10 && taa_total < plain_total * 11 / 10)
     // Each frame folds a new nudge in, so the ramp breathes a little: under
     // a level a channel over the frame.
     check("${name} the picture holds still once the history has filled", drift < WIDTH * HEIGHT * 4)
@@ -168,7 +162,7 @@ run_checks(backend: *Backend, name: string, gl_r: *GLRenderer, vk_r: *VKRenderer
     core.backend_render(pass, cam, light)
     moved_plain = frame(pass, cam, light)
     println("  ${name}: on the move, in-between pixels ${between(settled)}; light ${total(moved_plain)} plain, ${total(settled)} temporal")
-    check("${name} a panning camera leaves no trail", software || (between(settled) < taa_between * 2 && total(settled) > total(moved_plain) * 9 / 10 && total(settled) < total(moved_plain) * 11 / 10))
+    check("${name} a panning camera leaves no trail", between(settled) < taa_between * 2 && total(settled) > total(moved_plain) * 9 / 10 && total(settled) < total(moved_plain) * 11 / 10)
     free(moved_plain)
 
     core.camera_set_position(cam, core.vec3(0.0, 0.0, 40.0))

@@ -43,6 +43,15 @@
   structure (empty when nothing is traced) for the ray-query shader's
   binding; the rays' instance buffer is a transfer destination, which the
   fill clearing it needs. `scripts/validate.sh` runs the sweep.
+- Software Vulkan keeps the light through the temporal pass (#334): llvmpipe
+  lost a tenth of it while the multisampled pipelines were drawn in render
+  passes they were not compatible with, which a GPU forgave; with #405's
+  passes it matches a GPU, and `test_taa` and `test_ssr` hold it there
+  instead of noting or skipping it. The whole validation sweep is clean on
+  lavapipe too.
+- A texture larger than the device takes is halved until it fits
+  (`ae3d_image_fit`, both backends): the `models` example's 21,600-wide
+  Earth map was refused on devices whose textures stop at 16,384.
 - `engine_add_model` before `engine_run` no longer crashes OpenGL (#406):
   the model waits for the backend, as one added from `start` does.
 - One platform probe (#408): `build.sh`, `ci.sh` and the editor's build
