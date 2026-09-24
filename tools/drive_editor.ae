@@ -871,17 +871,22 @@ want(pred: int) -> *Want {
 }
 
 // Wait for the scene list to hold `count` rows, then report what it holds.
-// The widest visible canvas: the viewport.
+// The viewport's pane: the inner splitter's first child, the stage the
+// viewport fills whatever it is drawn through (a canvas over a readback on
+// Windows and macOS, a GL area on GTK).
 viewport_width(t: *Tree) -> float {
-    best = 0.0
+    inner = inner_splitter(t)
+    if inner == null { return 0.0 }
+    first = null as *Widget
     n = list.size(t.widgets)
     i = 0
     while i < n {
         w = list.get_raw(t.widgets, i) as *Widget
-        if w.visible && w.kind == "canvas" && w.w > best { best = w.w }
+        if w.parent == inner.id && (first == null || w.id < first.id) { first = w }
         i = i + 1
     }
-    return best
+    if first == null { return 0.0 }
+    return first.w
 }
 
 // The splitter inside the other one: the viewport against the inspector.
@@ -911,9 +916,8 @@ widget_by_id(t: *Tree, id: int) -> *Widget {
 }
 
 // The panels are the user's to size: two splitters, the inner one dragged
-// a hundred and twenty pixels toward the viewport, and the viewport has to
-// come out that much narrower -- the render target following the pane, not
-// a canvas stretched over it -- and back when the divider goes back.
+// a hundred and twenty pixels toward the viewport, and the viewport's pane
+// has to come out that much narrower, and back when the divider goes back.
 check_splitters() {
     t = tree()
     inner = inner_splitter(t)
