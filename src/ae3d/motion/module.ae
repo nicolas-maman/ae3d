@@ -1,0 +1,215 @@
+// ae3d.motion -- natural motion: an active ragdoll (#414).
+//
+// The motion GTA IV and V get from NaturalMotion's Euphoria: a figure whose
+// animation is played by its muscles rather than pasted onto its bones. A
+// component on a ragdoll that wears a skinned figure (ae3d.physics's
+// ragdoll_dress), in one of three modes:
+//
+//   ANIMATED  the animation plays and the bodies follow it, position and
+//             all, colliding as they go: what is struck is pushed aside,
+//             the figure is not;
+//   POWERED   the animation is played by muscles: every joint's motor
+//             drives it toward the pose the animation gives it, within a
+//             torque budget, and nothing holds the figure up but its own
+//             feet and a balance the pelvis keeps within a budget of its
+//             own. Pushed within them it gives and comes back; past them,
+//             it falls, and keeps its shape as it goes;
+//   LIMP      a ragdoll, and the animation follows the bodies.
+//
+// `strength` scales the muscles: the torque every joint's motor may use to
+// hold the pose, and the torque the pelvis may use to keep the figure's
+// balance (0 is limp, 1 the figure's full strength).
+// A `hit` is a blow at a point on a bone: the impulse, and the bone struck
+// goes weak -- most of its budget gone, its neighbours' by half -- and
+// recovers over `recovery` seconds, so a shoulder shot drops the arm and
+// the arm comes back up.
+//
+// Balance that steps to catch a fall, protective arms, writhing and getting
+// up are the controllers the next slices of #414 put on top of this.
+
+import std.list
+import aephysics.human
+import ae3d.core
+import ae3d.behaviour
+import ae3d.engine
+import ae3d.physics
+
+exports (
+    Motion, ANIMATED, POWERED, LIMP,
+    active_ragdoll, motion_free, set_mode, mode, set_strength, strength, set_recovery,
+    hit, bone_weakness, motion_step, attach, tracking_error, tilt, muscle, full_assist
+)
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+const ANIMATED = 1
+const POWERED = 2
+const LIMP = 3
+
+// The torque the pelvis may use to keep the figure's balance at strength 1,
+// in newton metres; the joints' own are in `muscle`. Measured on the
+// engine's figure (tests/test_motion.ae): at this it stands on its capsule
+// feet, comes back from a 60 N s shove to the chest and falls from 400; at
+// 600 it could not hold itself upright, at 2500 not even 400 felled it.
+const FULL_ASSIST = 1200.0
+const WEAK_STRUCK = 0.95              // the budget a struck bone loses
+const WEAK_NEAR = 0.5                 // and the bones joined to it
+
+struct Motion {
+    ragdoll: *Ragdoll
+    mode: int
+    strength: float
+    recovery: float                    // seconds a struck bone takes to come back
+    weakness: ptr                      // float[BONE_COUNT]: the share of each bone's budget a hit took
+}
+
+full_assist() -> float { return FULL_ASSIST }
+
+// A bone's full muscle, the torque its joint may use at strength 1, in
+// newton metres: an adult's peak joint torques, round -- the legs and the
+// lower back carry the body, the neck and the arms carry themselves.
+muscle(index: int) -> float {
+    if index == human.BONE_SPINE_01 || index == human.BONE_SPINE_03 { return 250.0 }
+    if index == human.BONE_NECK { return 40.0 }
+    if index == human.BONE_THIGH_L || index == human.BONE_THIGH_R { return 300.0 }
+    if index == human.BONE_CALF_L || index == human.BONE_CALF_R { return 250.0 }
+    if index == human.BONE_UPPER_ARM_L || index == human.BONE_UPPER_ARM_R { return 80.0 }
+    if index == human.BONE_LOWER_ARM_L || index == human.BONE_LOWER_ARM_R { return 60.0 }
+    return 0.0
+}
+
+// An active ragdoll on a dressed ragdoll, ANIMATED to begin with. Null when
+// the ragdoll wears no figure: there is no animation to play.
+active_ragdoll(r: *Ragdoll) -> *Motion {
+    if r == null || !physics.ragdoll_is_dressed(r) { return null }
+    m = calloc(1, sizeof(Motion)) as *Motion
+    m.ragdoll = r
+    m.strength = 1.0
+    m.recovery = 0.8
+    m.weakness = calloc(human.BONE_COUNT, 8)
+    set_mode(m, ANIMATED)
+    return m
+}
+
+motion_free(m: *Motion) {
+    if m == null { return }
+    free(m.weakness)
+    free(m as ptr)
+}
+
+set_mode(m: *Motion, to: int) {
+    if to == ANIMATED {
+        physics.ragdoll_follow(m.ragdoll)
+    } else if to == POWERED {
+        physics.ragdoll_power(m.ragdoll, 0.0, FULL_ASSIST * m.strength)
+    } else if to == LIMP {
+        physics.ragdoll_release(m.ragdoll)
+    } else {
+        return
+    }
+    m.mode = to
+    // The muscles from the strength and the hits, once the mode is the
+    // one they apply to.
+    apply_budget(m)
+}
+
+mode(m: *Motion) -> int { return m.mode }
+
+// The share of the figure's full muscle it has, 0..1.
+set_strength(m: *Motion, s: float) {
+    m.strength = core.clampf(s, 0.0, 1.0)
+    apply_budget(m)
+}
+
+strength(m: *Motion) -> float { return m.strength }
+
+set_recovery(m: *Motion, seconds: float) {
+    if seconds > 0.0 { m.recovery = seconds }
+}
+
+// A blow: `impulse` (newton seconds) at `point` on bone `index` (the
+// ragdoll's bone order, physics.humanoid_bone names them). The bone is
+// pushed, and its muscle goes weak with its neighbours', to come back over
+// the recovery time.
+hit(m: *Motion, index: int, point: Vec3, impulse: Vec3) {
+    if index < 0 || index >= human.BONE_COUNT { return }
+    physics.ragdoll_apply_impulse(m.ragdoll, index, impulse, point)
+    weak = m.weakness as float[]
+    weaken(weak, index, WEAK_STRUCK)
+    h = physics.ragdoll_human(m.ragdoll)
+    parent = human.bone_at(h, index).parent_index
+    if parent >= 0 && parent < human.BONE_COUNT { weaken(weak, parent, WEAK_NEAR) }
+    i = 0
+    while i < human.BONE_COUNT {
+        if human.bone_at(h, i).parent_index == index { weaken(weak, i, WEAK_NEAR) }
+        i = i + 1
+    }
+    apply_budget(m)
+}
+
+weaken(weak: float[], index: int, by: float) {
+    if weak[index] < by { weak[index] = by }
+}
+
+// How much of a bone's budget a hit has taken, 0..1.
+bone_weakness(m: *Motion, index: int) -> float {
+    if index < 0 || index >= human.BONE_COUNT { return 0.0 }
+    weak = m.weakness as float[]
+    return weak[index]
+}
+
+// Every joint's torque from the strength and what hits have left of it,
+// and the balance the pelvis keeps. A weak limb sags under its own weight,
+// as a stunned one does, until its muscle comes back.
+apply_budget(m: *Motion) {
+    if m.mode != POWERED { return }
+    weak = m.weakness as float[]
+    i = 0
+    while i < human.BONE_COUNT {
+        physics.ragdoll_set_bone_drive(m.ragdoll, i, muscle(i) * m.strength * (1.0 - weak[i]))
+        i = i + 1
+    }
+    physics.ragdoll_set_balance_assist(m.ragdoll, FULL_ASSIST * m.strength * (1.0 - weak[human.BONE_PELVIS]))
+}
+
+// A fixed step's recovery: every weakened bone a step's share closer to
+// its full budget.
+motion_step(m: *Motion, step: float) {
+    weak = m.weakness as float[]
+    changed = false
+    i = 0
+    while i < human.BONE_COUNT {
+        if weak[i] > 0.0 {
+            weak[i] = weak[i] - step / m.recovery
+            if weak[i] < 0.0 { weak[i] = 0.0 }
+            changed = true
+        }
+        i = i + 1
+    }
+    if changed { apply_budget(m) }
+}
+
+// How far bone `index` is from the pose the animation gives it, relative to
+// its parent, in radians: what its muscle answers for. (A figure that has
+// been turned about the vertical is still on its pose; `tilt` is the lean.)
+tracking_error(m: *Motion, index: int) -> float {
+    return physics.ragdoll_joint_error(m.ragdoll, index)
+}
+
+// How far the figure leans from the upright its animation gives it, in
+// radians.
+tilt(m: *Motion) -> float {
+    return physics.ragdoll_tilt(m.ragdoll)
+}
+
+motion_fixed(state: ptr, e: *Engine, step: float) {
+    motion_step(state as *Motion, step)
+}
+
+// Stepped by the engine every fixed step.
+attach(e: *Engine, m: *Motion) {
+    b = engine.behaviour_new("motion", m as ptr)
+    b.fixed_update = motion_fixed
+    engine.engine_add_behaviour(e, b)
+}

@@ -2,6 +2,21 @@
 
 ## [current]
 
+### Natural motion
+
+- `ae3d.motion` (#414, first slice): an active ragdoll on any ragdoll that
+  wears a skinned figure -- ANIMATED (the animation, position and all),
+  POWERED (the animation played by every joint's motor within an adult's
+  torque budget, the pelvis's balance within one of its own) or LIMP. A
+  hit knocks it off its pose and takes most of the struck bone's muscle
+  and half its neighbours', recovering over 0.8 s. `tests/test_motion.ae`:
+  a bowing chest followed within 2.4 degrees, a 60 N s shove recovered to
+  within 0.1 degrees and upright, a 400 N s blow felling it, a struck arm
+  at 5% and back. [docs/motion.md](docs/motion.md).
+- A fixed step that stops the engine is the last of its frame: a run
+  stopped at its 240th step took 242 or 244 whenever the frames were slow
+  (`test_physics` failed at the default window size).
+
 ### Multiplayer in the engine
 
 - `ae3d.net` (#413, first slice): a host and its clients, over TCP or an
