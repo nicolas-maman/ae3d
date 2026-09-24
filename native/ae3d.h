@@ -201,21 +201,6 @@ int    ae3d_vk_capture_height(void);
 /* The asking end of the same channel, so a tool that measures a scene can be
    written against the engine rather than against a copy of the protocol. */
 
-int  ae3d_capture_frame(int width, int height);
-int  ae3d_capture_width(void);
-int  ae3d_capture_height(void);
-int  ae3d_capture_pixel(int x, int y, double *out);
-int  ae3d_capture_region(int x, int y, int width, int height,
-                         int background, int tolerance, double *out);
-int  ae3d_capture_grid(int left, int top, int width, int height,
-                       int columns, int rows, int background, int tolerance,
-                       double *out);
-int  ae3d_capture_hold_reference(void);
-int  ae3d_capture_diff(int tolerance, double *out);
-void ae3d_capture_release(void);
-int  ae3d_capture_adopt(const unsigned char *pixels, int width, int height);
-int  ae3d_capture_copy_keyed(unsigned char *atlas, int atlas_width, int atlas_height, int dst_x, int dst_y, int cell, int kr, int kg, int kb, int tolerance);
-int  ae3d_capture_bleed(unsigned char *atlas, int width, int height);
 
 /* A parallel for over the engine's job pool (native/gpu/jobs.c): the range
    [0, count) in blocks of at least `grain` elements, done when it returns.
@@ -228,8 +213,5 @@ void ae3d_job_call(ae3d_job_fn fn, void *ctx, int start, int end);
 void ae3d_jobs_for(int count, int grain, ae3d_job_fn fn, void *ctx);
 /* How many numbers the fixed-size answers -- a pixel, a region, a diff -- are
    written into. A grid is as long as it has cells and says so. */
-#define AE3D_CAPTURE_SLOTS 8
-double ae3d_capture_slot(const double *block, int index);
-double ae3d_capture_slot_of(const double *block, int index, int count);
 
 #endif

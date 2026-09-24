@@ -20,6 +20,7 @@ import ae3d.assets
 import ae3d.scene
 import ae3d.input
 import ae3d.channel
+import ae3d.capture
 
 exports (
     Context, context_new, context_free,
@@ -31,18 +32,6 @@ exports (
 )
 
 
-extern ae3d_capture_frame(width: int, height: int) -> int
-extern ae3d_capture_width() -> int
-extern ae3d_capture_height() -> int
-extern ae3d_capture_pixel(x: int, y: int, out: ptr) -> int
-extern ae3d_capture_region(x: int, y: int, width: int, height: int, background: int, tolerance: int, out: ptr) -> int
-extern ae3d_capture_hold_reference() -> int
-extern ae3d_capture_diff(tolerance: int, out: ptr) -> int
-extern ae3d_capture_grid(left: int, top: int, width: int, height: int, columns: int, rows: int, background: int, tolerance: int, out: ptr) -> int
-extern ae3d_capture_release()
-extern ae3d_capture_slot(block: ptr, index: int) -> float
-extern ae3d_capture_slot_of(block: ptr, index: int, count: int) -> float
-extern ae3d_capture_adopt(pixels: ptr, width: int, height: int) -> int
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 
@@ -219,7 +208,7 @@ answer_deferred(c: *Context) {
 answer_one_read(c: *Context, d: *Deferred) {
     if d.kind == READ_PIXEL {
         block = capture_doubles()
-        if ae3d_capture_pixel(d.x, d.y, block) == 0 {
+        if capture.pixel(d.x, d.y, block) == 0 {
             free(block)
             fail(d.id, "the point is outside the frame")
             return
@@ -247,7 +236,7 @@ answer_one_read(c: *Context, d: *Deferred) {
     if d.kind == READ_GRID {
         cells = d.columns * d.rows
         block = calloc(cells * 4, 8)
-        if ae3d_capture_grid(d.x, d.y, d.width, d.height, d.columns, d.rows,
+        if capture.grid(d.x, d.y, d.width, d.height, d.columns, d.rows,
                              d.background, d.tolerance, block) == 0 {
             free(block)
             fail(d.id, "there is no frame to read")
@@ -262,10 +251,10 @@ answer_one_read(c: *Context, d: *Deferred) {
                 at = (y * d.columns + x) * 4
                 cell = json.arr()
                 span = cells * 4
-                json.array_add_raw(cell, json.num(ae3d_capture_slot_of(block, at, span)))
-                json.array_add_raw(cell, json.num(ae3d_capture_slot_of(block, at + 1, span)))
-                json.array_add_raw(cell, json.num(ae3d_capture_slot_of(block, at + 2, span)))
-                json.array_add_raw(cell, json.num(ae3d_capture_slot_of(block, at + 3, span)))
+                json.array_add_raw(cell, json.num(capture.slot_of(block, at, span)))
+                json.array_add_raw(cell, json.num(capture.slot_of(block, at + 1, span)))
+                json.array_add_raw(cell, json.num(capture.slot_of(block, at + 2, span)))
+                json.array_add_raw(cell, json.num(capture.slot_of(block, at + 3, span)))
                 json.array_add_raw(row, cell)
                 x = x + 1
             }
@@ -292,7 +281,7 @@ answer_one_read(c: *Context, d: *Deferred) {
     }
 
     if d.kind == READ_HOLD {
-        if ae3d_capture_hold_reference() == 0 {
+        if capture.hold_reference() == 0 {
             fail(d.id, "the frame could not be read")
             return
         }
@@ -304,7 +293,7 @@ answer_one_read(c: *Context, d: *Deferred) {
     }
 
     block = capture_doubles()
-    if ae3d_capture_diff(d.tolerance, block) == 0 {
+    if capture.diff(d.tolerance, block) == 0 {
         free(block)
         fail(d.id, "no held reference, or the frame is a different size than it was")
         return
@@ -1048,7 +1037,7 @@ capture_doubles() -> ptr {
 }
 
 read_double(block: ptr, index: int) -> float {
-    return ae3d_capture_slot(block, index)
+    return capture.slot(block, index)
 }
 
 colour_json(block: ptr) -> ptr {
@@ -1068,7 +1057,7 @@ region_result(x: int, y: int, width: int, height: int,
               background: int, tolerance: int) -> ptr {
     block = capture_doubles()
     out = json.obj()
-    if ae3d_capture_region(x, y, width, height, background, tolerance, block) == 0 {
+    if capture.region(x, y, width, height, background, tolerance, block) == 0 {
         free(block)
         return null
     }
@@ -1585,7 +1574,7 @@ trace_result(c: *Context, m: *Model, p: *Provenance) -> ptr {
     pixels = json.obj()
     pixels_ok = false
     box = Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 0.0 }
-    if ae3d_capture_width() == 0 {
+    if capture.width() == 0 {
         json.object_set_raw(pixels, "note", json.str("the frame could not be read"))
         json.array_add_raw(stages, not_applicable("pixels", pixels))
     } else if !model_screen_box(c, m, &box) {
@@ -2234,8 +2223,8 @@ answer_step(c: *Context) {
 answer_capture(c: *Context, ok: bool) {
     if ok {
         out = json.obj()
-        json.object_set_raw(out, "width", json.from_int(ae3d_capture_width()))
-        json.object_set_raw(out, "height", json.from_int(ae3d_capture_height()))
+        json.object_set_raw(out, "width", json.from_int(capture.width()))
+        json.object_set_raw(out, "height", json.from_int(capture.height()))
         json.object_set_raw(out, "frame", json.from_int(c.frame_count))
         answer(c.pending_capture_id, out)
     } else {
@@ -2258,10 +2247,10 @@ answer_snapshot(c: *Context, path: string, written: bool) {
 
 is_paused(c: *Context) -> bool { return c.paused }
 
-capture_release() { ae3d_capture_release() }
+capture_release() { capture.release() }
 
 capture_frame(width: int, height: int) -> bool {
-    return ae3d_capture_frame(width, height) == 1
+    return capture.frame(width, height) == 1
 }
 
 answer_pending_trace(c: *Context) {
@@ -2273,7 +2262,7 @@ answer_pending_trace(c: *Context) {
 }
 
 capture_adopt(pixels: ptr, width: int, height: int) -> bool {
-    return ae3d_capture_adopt(pixels, width, height) == 1
+    return capture.adopt(pixels, width, height) == 1
 }
 
 answer_capture_unsupported(c: *Context, reason: string) {
