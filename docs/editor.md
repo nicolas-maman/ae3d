@@ -202,13 +202,19 @@ the picker follows them, an undo and the hex; it keeps its hue through
 grey and black, where the colour alone has none.
 
 The physics section is the body an object is, as the scene file records
-one and `ae3d.physics` reads it back: four buttons for the kind -- None,
-Static, Kinematic, Dynamic -- and five for the collider, which is made
+one and `ae3d.physics` reads it back: five buttons for the kind, on two
+rows -- No body, Static, Kinematic; Dynamic, Character -- and five for the
+collider, which is made
 from the object's own mesh: Box (its bounds), Sphere and Capsule (of them),
 Hull (the convex hull of its vertices, what a prop wants) and Mesh (its
 triangles, for the static world -- a building, a kerb). Under them, three
 rows: the surface's friction and bounce, and the density the collider
-weighs. A kind is one undo step, as the weather's is; the rows undo like
+weighs. A Character is a capsule that walks the world
+(`physics.character_controller`): as wide as the mesh's widest half and as
+tall as the mesh, its feet the mesh's lowest point, so a figure modelled
+standing on its origin or centred on it stands on the ground; its collider
+is always that capsule. Simulated, it stands under gravity until a script
+walks it. A kind is one undo step, as the weather's is; the rows undo like
 any row. The record is a component of the object (`mesh · dynamic body`
 under its name), so it is duplicated, deleted and undone with it, and the
 scene file carries it as the model's `physics` record -- the same record a

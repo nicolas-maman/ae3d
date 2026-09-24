@@ -36,6 +36,7 @@ import aephysics.human
 import aephysics.joint_solver
 import aephysics.mover
 import ae3d.core
+import ae3d.geometry
 import ae3d.jobs
 import ae3d.behaviour
 import ae3d.engine
@@ -60,7 +61,7 @@ exports (
     ragdoll_bone_drive_torque, ragdoll_set_balance_assist, ragdoll_aim, ragdoll_clear_aim, ragdoll_clear_aims, ragdoll_is_aimed, ragdoll_balance_assist,
     ragdoll_apply_impulse, ragdoll_bone_rotation, ragdoll_bone_target,
     ragdoll_center_of_mass, ragdoll_mass, ragdoll_joint_error, ragdoll_tilt,
-    CharacterController, character_controller, character_move, character_grounded, character_velocity,
+    CharacterController, character_controller, character_of, character_feet, character_move, character_grounded, character_velocity,
     character_ground_normal, character_free, character_set_slope_limit, character_set_step_height, character_overlap,
     spec_of, apply_spec, attachments
 )
@@ -93,6 +94,7 @@ struct Physics {
     ragdolls: ptr                  // list of *Ragdoll
     hulls: ptr                     // list of *HullData the world holds by reference; freed with it
     meshes: ptr                    // list of *MeshData, likewise
+    characters: ptr                // list of *CharacterController in this world
     sub_steps: int
     step_count: int
 }
@@ -176,6 +178,7 @@ attach(e: *Engine) -> *Physics {
     p.ragdolls = list.new()
     p.hulls = list.new()
     p.meshes = list.new()
+    p.characters = list.new()
     p.sub_steps = 4
     engine.engine_set_attachment_provider(e, physics_attachments, p as ptr)
     p.step_count = 0
@@ -230,6 +233,14 @@ on_fixed_update(state: ptr, e: *Engine, step: float) {
         } else if r.following {
             drive_anchors(r, step)
         }
+        k = k + 1
+    }
+    // A character nothing moves stands where it is, under gravity and on
+    // the ground: one from a scene record, say, before a script walks it.
+    k = 0
+    while k < list.size(p.characters) {
+        ch = list.get_raw(p.characters, k) as *CharacterController
+        if !ch.driven { character_step(ch, core.vec3(0.0, 0.0, 0.0), 0.0, step) }
         k = k + 1
     }
     physics_world.step(p.world_id, step, p.sub_steps)
@@ -299,6 +310,18 @@ physics_free(p: *Physics) {
         heap.free(r)
         i = i + 1
     }
+    count = list.size(p.characters)
+    i = 0
+    while i < count {
+        ch = list.get_raw(p.characters, i) as *CharacterController
+        if ch.owned {
+            character_release(ch)
+        } else {
+            ch.physics = null
+        }
+        i = i + 1
+    }
+    list.free(p.characters)
     dynamics.destroy_world(p.world_id)
     count = list.size(p.hulls)
     i = 0
@@ -511,6 +534,7 @@ mesh_collider(o: *GameObject, md: *MeshData, m: SurfaceMaterial, scale: Vec3 = m
 // to the caller.
 spec_of(o: *GameObject) -> *PhysicsSpec {
     rb = rigidbody_of(o)
+    if rb == null && character_of(o) != null { return scene.physics_spec_new("character", "capsule", 0.0, 0.0, 1.0) }
     if rb == null || rb.collider == 0 { return null }
     body = "dynamic"
     if rb.kind == KINEMATIC { body = "kinematic" }
@@ -526,6 +550,10 @@ apply_spec(o: *GameObject, spec: *PhysicsSpec) -> *Rigidbody {
     if o == null || spec == null { return null }
     model = behaviour.object_model(o)
     if model == null || model.mesh == null { return null }
+    if spec.body == "character" {
+        character_of_spec(o, model)
+        return null
+    }
     kind = DYNAMIC
     if spec.body == "kinematic" { kind = KINEMATIC }
     if spec.body == "static" { kind = STATIC }
@@ -555,6 +583,31 @@ apply_spec(o: *GameObject, spec: *PhysicsSpec) -> *Rigidbody {
     return rb
 }
 
+// A character from a scene record: a capsule as wide as the mesh's widest
+// half and as tall as it, its feet the mesh's lowest point -- where a
+// figure modelled standing on its origin, or centred on it, stands.
+// Answers null on an object with a character already.
+character_of_spec(o: *GameObject, model: *Model) -> *CharacterController {
+    if character_of(o) != null { return null }
+    size = core.mesh_size(model.mesh, model.scale)
+    radius = size.x * 0.5
+    if size.z * 0.5 > radius { radius = size.z * 0.5 }
+    if radius > size.y * 0.5 { radius = size.y * 0.5 }
+    low = 0.0
+    count = geometry.mesh_vertex_count(model.mesh)
+    i = 0
+    while i < count {
+        y = geometry.mesh_pos_y(model.mesh, i)
+        if i == 0 || y < low { low = y }
+        i = i + 1
+    }
+    c = character_controller(o, radius, size.y)
+    if c == null { return null }
+    c.lift = 0.0 - low * model.scale.y
+    c.owned = true
+    return c
+}
+
 // Every object with a body, as the scene's attachments (a model and its
 // physics record each): what a scene file records of this world. The
 // list is the caller's, freed with scene.attachments_free.
@@ -575,6 +628,19 @@ attachments(p: *Physics) -> ptr {
             heap.free(spec)
         }
         i = i + 1
+    }
+    // Characters, as a character record on their models.
+    k = 0
+    while k < list.size(p.characters) {
+        ch = list.get_raw(p.characters, k) as *CharacterController
+        o = ch.object as *GameObject
+        model = behaviour.object_model(o)
+        if model != null {
+            a = scene.attachment_new(model, "", "", null, null)
+            scene.attachment_set_physics(a, scene.physics_spec_new("character", "capsule", 0.0, 0.0, 1.0))
+            list.add_raw(out, a as ptr)
+        }
+        k = k + 1
     }
     // A ragdoll's bone capsules are this module's, made again with the
     // ragdoll: the scene file leaves them out.
@@ -1633,6 +1699,9 @@ struct CharacterController {
     step_seconds: float
     pushed: ptr                    // BodyId[CHARACTER_PLANES]: pushed already this move
     pushed_count: int
+    lift: float                    // the object's origin above its feet: 0 for a figure whose origin is its feet
+    driven: bool                   // something has moved it (character_move); until then the world stands it
+    owned: bool                    // made from a scene record: the world's to free
 }
 
 // A character controller on `o`, whose position is the feet: a capsule of
@@ -1653,14 +1722,48 @@ character_controller(o: *GameObject, radius: float, height: float) -> *Character
     c.planes = calloc(CHARACTER_PLANES, sizeof(CollisionPlane))
     c.pushed = calloc(CHARACTER_PLANES, sizeof(BodyId))
     c.push_force = 400.0
+    if p != null { list.add_raw(p.characters, c as ptr) }
     return c
 }
 
 character_free(c: *CharacterController) {
     if c == null { return }
+    p = c.physics as *Physics
+    if p != null {
+        i = 0
+        while i < list.size(p.characters) {
+            if list.get_raw(p.characters, i) == c as ptr { list.remove(p.characters, i); break }
+            i = i + 1
+        }
+    }
+    character_release(c)
+}
+
+character_release(c: *CharacterController) {
     free(c.planes)
     free(c.pushed)
     heap.free(c)
+}
+
+// The character on an object, or null.
+character_of(o: *GameObject) -> *CharacterController {
+    e = engine.of(o)
+    if e == null { return null }
+    p = of(e)
+    if p == null { return null }
+    i = 0
+    while i < list.size(p.characters) {
+        c = list.get_raw(p.characters, i) as *CharacterController
+        if c.object == o as ptr { return c }
+        i = i + 1
+    }
+    return null
+}
+
+// Where its feet are: the object's origin less the lift.
+character_feet(c: *CharacterController) -> Vec3 {
+    at = behaviour.object_position(c.object as *GameObject)
+    return core.vec3(at.x, at.y - c.lift, at.z)
 }
 
 character_set_slope_limit(c: *CharacterController, degrees: float) {
@@ -1766,7 +1869,7 @@ character_overlap(c: *CharacterController) -> float {
     c.grounded = false              // the planes as they are, none laid flat
     c.pushing = false
     c.plane_count = 0
-    physics_world.collide_mover(p.world_id, behaviour.object_position(c.object as *GameObject), character_capsule(c),
+    physics_world.collide_mover(p.world_id, character_feet(c), character_capsule(c),
                                 shape.default_query_filter(), character_plane_visitor, c as ptr)
     c.grounded = grounded
     planes = c.planes as CollisionPlane[]
@@ -1784,6 +1887,11 @@ character_overlap(c: *CharacterController) -> float {
 // ground at (0 for none, and only from the ground). Gravity pulls a
 // character off the ground; the world pushes back.
 character_move(c: *CharacterController, walk: Vec3, jump: float, delta: float) {
+    c.driven = true
+    character_step(c, walk, jump, delta)
+}
+
+character_step(c: *CharacterController, walk: Vec3, jump: float, delta: float) {
     p = c.physics as *Physics
     o = c.object as *GameObject
     gravity = physics_world.get_gravity(p.world_id)
@@ -1795,7 +1903,7 @@ character_move(c: *CharacterController, walk: Vec3, jump: float, delta: float) {
         vy = vy + gravity.y * delta
     }
     c.velocity = core.vec3(walk.x, vy, walk.z)
-    feet = behaviour.object_position(o)
+    feet = character_feet(c)
     capsule = character_capsule(c)
     filter = shape.default_query_filter()
     // Box3D's order: the capsule cast along what is left of the move and
@@ -1841,5 +1949,5 @@ character_move(c: *CharacterController, walk: Vec3, jump: float, delta: float) {
         c.ground_normal = hit.normal
         c.velocity = core.vec3(c.velocity.x, 0.0, c.velocity.z)
     }
-    behaviour.object_set_position(o, feet)
+    behaviour.object_set_position(o, core.vec3(feet.x, feet.y + c.lift, feet.z))
 }

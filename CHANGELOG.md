@@ -2,6 +2,15 @@
 
 ## [current]
 
+### A Character body in the editor
+
+- The physics section's fifth body kind, Character (#420): a scene record
+  with body `"character"` is a character controller made from the mesh's
+  bounds, its feet at the mesh's lowest point (`lift`), stood by the world
+  under gravity until a script walks it, and written back as one. The kinds
+  are on two rows now; on one, the fifth ran 69 px past the inspector at its
+  narrowest, which the driver now checks. `physics.character_of`.
+
 ### Natural motion: the protective fall
 
 - A `POWERED` figure leaning past 20 degrees is falling (`motion.falling`)

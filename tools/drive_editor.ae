@@ -1779,6 +1779,11 @@ scene_models_parented(root_out: ptr[]) -> int {
 
 // How many models of the scene file carry a dynamic body's record.
 scene_models_with_body(root_out: ptr[]) -> int {
+    return scene_models_with_body_kind(root_out, "dynamic")
+}
+
+// The models the scene file records with a body of `kind`.
+scene_models_with_body_kind(root_out: ptr[], kind: string) -> int {
     text, err = file.read(SCENE_FILE)
     if err != "" { return 0 }
     root, perr = json.parse(text)
@@ -1793,7 +1798,7 @@ scene_models_with_body(root_out: ptr[]) -> int {
     while i < count {
         entry = json.json_array_get_raw(models, i)
         body_record = json.json_object_get_raw(entry, "physics")
-        if body_record != null && field_text(body_record, "body") == "dynamic" { found = found + 1 }
+        if body_record != null && field_text(body_record, "body") == kind { found = found + 1 }
         i = i + 1
     }
     return found
@@ -3092,28 +3097,46 @@ run_checks() {
     // with it; No body takes it away.
     tree_free(t)
     t = tree()
+    // Two rows of them: none, static and kinematic; then the two that move.
     kinematic = find_widget(t, "button", "Kinematic")
+    moving = find_widget(t, "button", "Character")
     body_count = 0
     bodies_parent = 0 - 1
-    if kinematic != null {
+    moving_parent = 0 - 1
+    if kinematic != null && moving != null {
         bodies_parent = kinematic.parent
+        moving_parent = moving.parent
         i = 0
         while i < tree_count(t) {
             b = tree_at(t, i)
-            if b.kind == "button" && b.parent == bodies_parent && named_in(b.text, "No body,Static,Kinematic,Dynamic") { body_count = body_count + 1 }
+            if b.kind == "button" && (b.parent == bodies_parent || b.parent == moving_parent) &&
+               named_in(b.text, "No body,Static,Kinematic,Dynamic,Character") { body_count = body_count + 1 }
             i = i + 1
         }
     }
-    check_detail("the physics section offers every kind of body", body_count == 4, "${body_count} of four")
-    if body_count == 4 && save >= 0 {
-        dynamic_id = kind_button(t, bodies_parent, "Dynamic")
+    check_detail("the physics section offers every kind of body", body_count == 5, "${body_count} of five")
+    // And fits: the last of them inside the section, not cut off at its
+    // edge -- five buttons in a row of an inspector at its narrowest.
+    // (Where the toolkit reports boxes; GTK does not, see viewport_width.)
+    last_kind = moving
+    if last_kind != null && kinematic != null {
+        row = widget(t, moving_parent)
+        section = null as *Widget
+        if row != null { section = widget(t, row.parent) }
+        if section != null && section.w > 0.0 && last_kind.w > 0.0 {
+            check_detail("and they fit the section's width", last_kind.x + last_kind.w <= section.x + section.w + 1.0,
+                         "Character ends at ${last_kind.x + last_kind.w}, the section at ${section.x + section.w}")
+        }
+    }
+    if body_count == 5 && save >= 0 {
+        dynamic_id = kind_button(t, moving_parent, "Dynamic")
         no_body_id = kind_button(t, bodies_parent, "No body")
         click(dynamic_id)
         wt = want(WANT_KINDS_LIT)
-        wt.count = bodies_parent
+        wt.count = moving_parent
         wt.text = "Dynamic"
         lit_tree = wait_for(wt, 8.0, ok)
-        lit = kinds_lit(lit_tree, bodies_parent)
+        lit = kinds_lit(lit_tree, moving_parent)
         tree_free(lit_tree)
         check_detail("choosing a dynamic body lights Dynamic", ok[0] == 1, "lit: ${lit}")
         string.free(lit)
@@ -3124,8 +3147,24 @@ run_checks() {
         body_records = scene_models_with_body(root_slot)
         check_detail("and the file records a dynamic body on a model", body_records >= 1, "${body_records} recorded")
         if root_slot[0] != null { json.json_free(root_slot[0]) }
+        // A character: lit, and the file records it as one.
+        click(kind_button(t, moving_parent, "Character"))
+        wt.text = "Character"
+        character_tree = wait_for(wt, 8.0, ok)
+        lit = kinds_lit(character_tree, moving_parent)
+        tree_free(character_tree)
+        check_detail("choosing a character lights Character", ok[0] == 1, "lit: ${lit}")
+        string.free(lit)
+        written = file_stamp(SCENE_FILE)
+        click(save)
+        check("the scene is written with the character", wait_file(SCENE_FILE, written))
+        root_slot[0] = null
+        characters = scene_models_with_body_kind(root_slot, "character")
+        check_detail("and the file records a character on the model", characters >= 1, "${characters} recorded")
+        if root_slot[0] != null { json.json_free(root_slot[0]) }
         free(root_slot)
         click(no_body_id)
+        wt.count = bodies_parent
         wt.text = "No body"
         none_tree = wait_for(wt, 8.0, ok)
         lit = kinds_lit(none_tree, bodies_parent)

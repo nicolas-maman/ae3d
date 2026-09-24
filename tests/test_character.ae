@@ -10,15 +10,21 @@
 //   - the pusher: walks into a 20 kg crate, which slides ahead of it;
 //   - the blocked: walks into an 800 kg crate, which a person's 400 N
 //     against its friction does not move, and is stopped by it;
+//   - the recorded: a box centred on its origin, 1.8 m tall, given a
+//     character record as the editor gives it (scene.PhysicsSpec, body
+//     "character"): dropped from 2 m, it stands with its bottom on the
+//     ground, and records itself as a character;
 //   - and none is left inside what it walks on or into: every character's
 //     overlap with the world, measured at the end, under a millimetre past
 //     the solver's slop.
 
+import std.heap
 import ae3d.core
 import ae3d.engine
 import ae3d.behaviour
 import ae3d.loader
 import ae3d.physics
+import ae3d.scene
 
 extern sqrt(x: float) -> float
 
@@ -61,6 +67,7 @@ struct Lanes {
     heavy: ptr                       // and the 800 kg one
     light_start: float
     heavy_start: float
+    recorded: ptr                    // *GameObject, the box with a character record
 }
 
 character(e: *Engine, name: string, at: Vec3) -> *CharacterController {
@@ -106,6 +113,16 @@ start(state: ptr, e: *Engine) {
     s.heavy = crate(e, "Heavy crate", core.vec3(20.0, 0.5, 2.0), 800.0) as ptr
     s.light_start = behaviour.object_position(s.light as *GameObject).z
     s.heavy_start = behaviour.object_position(s.heavy as *GameObject).z
+    // The recorded: a unit cube stretched to 0.6 x 1.8 x 0.6, centred on its
+    // origin, 2 m up.
+    boxy = loader.cube(1.0)
+    core.model_set_scale(boxy, 0.6, 1.8, 0.6)
+    recorded = engine.object(e, "Recorded", boxy)
+    behaviour.object_set_position(recorded, core.vec3(24.0, 2.0, 0.0))
+    spec = scene.physics_spec_new("character", "capsule", 0.0, 0.0, 1.0)
+    physics.apply_spec(recorded, spec)
+    heap.free(spec)
+    s.recorded = recorded as ptr
     s.pusher = character(e, "Pusher", core.vec3(16.0, 0.0, 0.0)) as ptr
     s.blocked = character(e, "Blocked", core.vec3(20.0, 0.0, 0.0)) as ptr
 }
@@ -168,7 +185,8 @@ main() {
     lanes = Lanes { walker: null, climber: null, stopped: null, stander: null, slider: null, jumper: null, steps: 0,
                     walker_start: 0.0, walker_after_second: 0.0, stander_start: 0.0, slider_start: 0.0,
                     jump_ground: 0.0, jump_peak: 0.0, jumped: false, climber_high: 0.0,
-                    pusher: null, blocked: null, light: null, heavy: null, light_start: 0.0, heavy_start: 0.0 }
+                    pusher: null, blocked: null, light: null, heavy: null, light_start: 0.0, heavy_start: 0.0,
+                    recorded: null }
     b = engine.behaviour_new("lanes", (&lanes) as ptr)
     b.start = start
     b.fixed_update = fixed_update
@@ -216,6 +234,17 @@ main() {
     check("walked into, a 20 kg crate slides ahead of it", light_moved > 1.0)
     check("at the character's pace, no faster: its near face within 10 cm of the character's front", lanes.light_start + light_moved - 0.5 - (pusher_walked + 0.3) < 0.1)
     check("and an 800 kg one does not, and stops it at its face", heavy_moved < 0.05 && blocked_at < 1.25)
+
+    recorded = lanes.recorded as *GameObject
+    stood = behaviour.object_position(recorded)
+    record = physics.spec_of(recorded)
+    kind = ""
+    if record != null { kind = record.body }
+    println("  recorded: its middle at y ${stood.y} (its bottom 0.9 m below), grounded ${physics.character_grounded(physics.character_of(recorded))}, recorded as '${kind}'")
+    check("a box with a character record stands with its bottom on the ground", stood.y > 0.89 && stood.y < 0.91 &&
+          physics.character_grounded(physics.character_of(recorded)))
+    check("and records itself as a character", kind == "character")
+    if record != null { heap.free(record) }
 
     deepest = 0.0
     characters = [lanes.walker, lanes.climber, lanes.stopped, lanes.stander, lanes.slider, lanes.jumper, lanes.pusher, lanes.blocked]
