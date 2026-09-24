@@ -2,22 +2,6 @@
 
 ## [current]
 
-### A character wanders the street
-
-- `AE3D_ON_FOOT=3 street_drive` walks the character through 10,000 random
-  moves and measures each one: how deep it is into the street's static
-  geometry (`physics.character_overlap_world`), and whether it fell through
-  (#420). It found three bugs in the snap onto the ground, which was a ray
-  under the capsule's middle:
-  - the pavement at the foot of an alley narrower than the capsule put it
-    72 mm into the walls: the capsule is now cast down the drop first;
-  - a step under an awning put it 250 mm into the awning: it is cast up
-    before it steps up;
-  - two floors a centimetre apart left it 10 mm into the upper: every move
-    ends with the capsule solved out of what it touches.
-  Deepest after the fixes: 5 mm, the solver's slop; none past 6 mm, no
-  falls. `ci.sh` runs it.
-
 ### Multiplayer: events and objects created mid-game
 
 - Events (#413): a game registers a named event with a handler on both
