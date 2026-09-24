@@ -17,6 +17,8 @@ import ae3d.platform
 import ae3d.rendering
 import ae3d.shaders
 import ae3d.skin
+import ae3d.posing
+import ae3d.geometry
 
 exports (
     GLRenderer, ProgramSlots, TextureEntry, Skybox,
@@ -72,10 +74,9 @@ extern ae3d_gl_uniform_mat4v(loc: int, count: int, values: ptr)
 extern ae3d_gl_setup_instance_attribs(inst: ptr, matrix_vbo: int, color_vbo: int)
 extern ae3d_gl_setup_proxy_vao(vao: int, mesh_vbo: int, mesh_ebo: int, skin_vbo: int,
                                matrix_vbo: int, color_vbo: int, phase_vbo: int)
-extern ae3d_inst_is_points(inst: ptr) -> int
 extern ae3d_gl_setup_instance_phase(inst: ptr, phase_vbo: int)
 extern ae3d_gl_update_instance_phases(inst: ptr, phase_vbo: int)
-extern ae3d_gl_posebank_texture(bank: ptr) -> int
+extern ae3d_gl_posebank_texture(data: ptr, frames: int, bones: int) -> int
 extern ae3d_gl_update_instances(inst: ptr, matrix_vbo: int, capacity_bytes: int) -> int
 extern ae3d_gl_update_instance_colors(inst: ptr, color_vbo: int)
 extern ae3d_gl_draw_elements(count: int, byte_offset: int)
@@ -118,22 +119,15 @@ extern ae3d_gl_fbo_attach_velocity_multisample(fbo: int, width: int, height: int
 extern ae3d_gl_draw_buffers(count: int)
 extern ae3d_gl_clear_attachment(index: int, r: float, g: float, b: float, a: float)
 extern ae3d_gl_fbo_resolve_attachment(source: int, destination: int, width: int, height: int, index: int) -> int
-extern ae3d_posebank_travel(bank: ptr, frame: int) -> float
 extern ae3d_gl_fbo_attach_depth(fbo: int, width: int, height: int) -> int
 extern ae3d_gl_geometry_acquire(mesh: ptr) -> int
 extern ae3d_gl_geometry_instance_vbo(vao: int) -> int
 extern ae3d_gl_geometry_release(vao: int)
-extern ae3d_mesh_dirty(mesh: ptr) -> int
-extern ae3d_mesh_clear_dirty(mesh: ptr)
 extern ae3d_gl_geometry_shutdown()
 extern ae3d_gl_geometry_instance_capacity(vao: int) -> int
 extern ae3d_gl_geometry_set_instance_capacity(vao: int, capacity: int)
 extern ae3d_gl_batch_upload(vao: int, instance_vbo: int, inst: ptr, capacity_bytes: int) -> int
 extern ae3d_gl_set_default_instance_color()
-extern ae3d_inst_create() -> ptr
-extern ae3d_inst_destroy(inst: ptr)
-extern ae3d_inst_resize(inst: ptr, count: int) -> int
-extern ae3d_inst_set_matrix(inst: ptr, i: int, m: *Mat4)
 extern ae3d_gl_error() -> int
 extern ae3d_gl_max_samples() -> int
 extern ae3d_gl_fbo_attach_color_multisample(fbo: int, width: int, height: int, samples: int) -> int
@@ -732,7 +726,7 @@ apply_instancing(r: *GLRenderer, slots: *ProgramSlots, instanced: int) {
 // since it is not part of the instanced cache and a batch is never points.
 apply_points(slots: *ProgramSlots, m: *Model) {
     points = 0
-    if m.instances != null && ae3d_inst_is_points(m.instances) == 1 { points = 1 }
+    if m.instances != null && geometry.inst_is_points(m.instances) == 1 { points = 1 }
     ae3d_gl_uniform_int(slots.instance_points, points)
     billboard = 0
     if points == 1 { billboard = m.billboard }
@@ -775,7 +769,7 @@ apply_skeleton(r: *GLRenderer, slots: *ProgramSlots, m: *Model) {
 // into a frame.
 bind_pose_bank(r: *GLRenderer, slots: *ProgramSlots, m: *Model) {
     if m.pose_bank_texture == 0 {
-        m.pose_bank_texture = ae3d_gl_posebank_texture(m.pose_bank)
+        m.pose_bank_texture = ae3d_gl_posebank_texture(posing.posebank_data(m.pose_bank), posing.posebank_frames(m.pose_bank), posing.posebank_bones(m.pose_bank))
     }
     ae3d_gl_texture_bind(3, m.pose_bank_texture)
     ae3d_gl_uniform_int(slots.pose_bank, 3)
@@ -786,7 +780,7 @@ bind_pose_bank(r: *GLRenderer, slots: *ProgramSlots, m: *Model) {
     step = 0.0
     if m.crowd_walk > 0.0 {
         step = r.frame_seconds / m.crowd_walk
-        travel = ae3d_posebank_travel(m.pose_bank, m.pose_bank_frames) * step
+        travel = posing.posebank_travel(m.pose_bank, m.pose_bank_frames) * step
     }
     ae3d_gl_uniform_float(slots.crowd_travel, travel)
     ae3d_gl_uniform_float(slots.crowd_phase_step, step)
@@ -1048,7 +1042,7 @@ renderer_add_model(r: *GLRenderer, m: *Model) {
     // Building a mesh marks it dirty, and what was just uploaded is not an edit
     // waiting to be sent: leaving it set gives every model a private buffer on
     // its first frame and there is nothing left to merge.
-    ae3d_mesh_clear_dirty(m.mesh)
+    geometry.mesh_clear_dirty(m.mesh)
 
     core.model_update_matrix(m)
     load_model_textures(r, m)
@@ -1496,7 +1490,7 @@ render_shadow_pass(r: *GLRenderer, light: *Light, cam: *Camera) {
             if m.is_instanced && core.model_instance_count(m) > 0 { instanced = 1 }
             ae3d_gl_uniform_int(instanced_slot, instanced)
             points = 0
-            if instanced == 1 && ae3d_inst_is_points(m.instances) == 1 { points = 1 }
+            if instanced == 1 && geometry.inst_is_points(m.instances) == 1 { points = 1 }
             ae3d_gl_uniform_int(points_slot, points)
             ae3d_gl_uniform_int(billboard_slot, points * m.billboard)
             // The same rule as set_model_matrix: an instanced model's
@@ -1599,7 +1593,7 @@ render_crowd_shadows(r: *GLRenderer) {
             m.instance_phases_updated = false
         }
         if m.pose_bank_texture == 0 {
-            m.pose_bank_texture = ae3d_gl_posebank_texture(m.pose_bank)
+            m.pose_bank_texture = ae3d_gl_posebank_texture(posing.posebank_data(m.pose_bank), posing.posebank_frames(m.pose_bank), posing.posebank_bones(m.pose_bank))
         }
         ae3d_gl_texture_bind(3, m.pose_bank_texture)
         ae3d_gl_uniform_int(bank_loc, 3)
@@ -2119,7 +2113,7 @@ batch_for(r: *GLRenderer, m: *Model) -> *GLBatch {
 
     if r.batch_count >= list.size(r.batches) {
         fresh = heap.new(GLBatch)
-        fresh.instances = ae3d_inst_create()
+        fresh.instances = geometry.inst_create()
         fresh.members = list.new()
         fresh.capacity_bytes = 0
         fresh.count = 0
@@ -2172,7 +2166,7 @@ shadow_batch_for(r: *GLRenderer, m: *Model) -> *GLBatch {
 
     if r.shadow_batch_count >= list.size(r.shadow_batches) {
         fresh = heap.new(GLBatch)
-        fresh.instances = ae3d_inst_create()
+        fresh.instances = geometry.inst_create()
         fresh.members = list.new()
         fresh.capacity_bytes = 0
         fresh.count = 0
@@ -2252,11 +2246,11 @@ draw_opaque(r: *GLRenderer, view_projection: *Mat4, light: *Light, cam: *Camera)
 
 fill_batch(r: *GLRenderer, b: *GLBatch) {
     while list.size(b.members) > b.count { list.remove(b.members, list.size(b.members) - 1) }
-    ae3d_inst_resize(b.instances, b.count)
+    geometry.inst_resize(b.instances, b.count)
     i = 0
     while i < b.count {
         m = list.get_raw(b.members, i) as *Model
-        ae3d_inst_set_matrix(b.instances, i, &m.model_matrix)
+        geometry.inst_set_matrix(b.instances, i, &m.model_matrix)
         i = i + 1
     }
 }
@@ -2703,7 +2697,7 @@ set_model_matrix(slots: *ProgramSlots, m: *Model) {
         // Points carry a position and a scale only: the model's rotation
         // and scale reach the shader here, in the model matrix with its
         // translation taken out, and each point puts its own back.
-        if ae3d_inst_is_points(m.instances) == 1 {
+        if geometry.inst_is_points(m.instances) == 1 {
             sent = point_frame(m)
         } else {
             sent = core.mat4_ident()
@@ -2750,7 +2744,7 @@ set_material_uniforms(slots: *ProgramSlots, material: *Material) {
 // vertices have moved has to stop sharing before its new shape goes up, or it
 // rewrites the geometry under everything else drawing the old one.
 refresh_geometry(r: *GLRenderer, m: *Model) {
-    if m.vao == 0 || ae3d_mesh_dirty(m.mesh) != 1 { return }
+    if m.vao == 0 || geometry.mesh_dirty(m.mesh) != 1 { return }
 
     if m.shares_geometry {
         ae3d_gl_geometry_release(m.vao)
@@ -2765,7 +2759,7 @@ refresh_geometry(r: *GLRenderer, m: *Model) {
         ae3d_gl_vao_bind(m.vao)
         ae3d_gl_upload_mesh(m.mesh, m.vbo, m.ebo)
     }
-    ae3d_mesh_clear_dirty(m.mesh)
+    geometry.mesh_clear_dirty(m.mesh)
     core.model_recalculate_bounds(m)
 }
 
@@ -3125,7 +3119,7 @@ free_batches(batches: ptr) {
     while i < list.size(batches) {
         b = list.get_raw(batches, i) as *GLBatch
         if b != null {
-            if b.instances != null { ae3d_inst_destroy(b.instances) }
+            if b.instances != null { geometry.inst_destroy(b.instances) }
             if b.members != null { list.free(b.members) }
             heap.free(b)
         }

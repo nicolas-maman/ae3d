@@ -8,131 +8,24 @@
 #define AE3D_CURSOR_HIDDEN   1
 #define AE3D_CURSOR_DISABLED 2
 
-void  *ae3d_mesh_create(void);
-void  *ae3d_mesh_clone(void *mesh);
-void  *ae3d_mesh_decimate(void *mesh, double cell_size);
-void   ae3d_mesh_destroy(void *mesh);
-int    ae3d_mesh_reserve(void *mesh, int vertices, int indices);
-int    ae3d_mesh_push_vertex(void *mesh, double px, double py, double pz,
-                             double u, double v,
-                             double nx, double ny, double nz);
-int    ae3d_mesh_push_index(void *mesh, int index);
-void   ae3d_mesh_set_occlusion(void *mesh, int i, double value);
-double ae3d_mesh_occlusion(void *mesh, int i);
-int    ae3d_mesh_set_skin(void *mesh, int i, int j0, int j1, int j2, int j3,
-                          double w0, double w1, double w2, double w3);
-int    ae3d_mesh_is_skinned(void *mesh);
-void  *ae3d_palette_create(int bones);
-void   ae3d_palette_destroy(void *palette);
-int    ae3d_palette_bones(void *palette);
-void   ae3d_palette_set(void *palette, int bone, const double *m);
-double ae3d_palette_get(void *palette, int bone, int i);
-const float *ae3d_palette_data(void *palette);
-void  *ae3d_posebank_create(int frames, int bones);
-void   ae3d_posebank_destroy(void *bank);
-int    ae3d_posebank_frames(void *bank);
-int    ae3d_posebank_bones(void *bank);
-void   ae3d_posebank_capture(void *bank, int frame, void *palette);
-double ae3d_posebank_get(void *bank, int frame, int bone, int i);
-const float *ae3d_posebank_data(void *bank);
-void   ae3d_posebank_set_travel(void *bank, int frame, double distance);
-double ae3d_posebank_travel(void *bank, int frame);
-double ae3d_posebank_speed(void *bank, double phase, double duration);
-int    ae3d_gl_posebank_texture(void *bank);
+/* The mesh and instance stores are ae3d.geometry's; the renderers read them
+   through native/gpu/stores.h. These two read any field of one the way the
+   renderers do, for the test that holds the two layouts together. */
+int    ae3d_store_size(int which);
+double ae3d_store_field(void *store, int which, int field);
+
+int    ae3d_gl_posebank_texture(const float *data, int frames, int bones);
 void   ae3d_gl_setup_instance_phase(void *inst, int phase_vbo);
 void   ae3d_gl_update_instance_phases(void *inst, int phase_vbo);
 void   ae3d_gl_upload_skin(void *mesh, int vbo);
-void  *ae3d_skinrows_create(int count);
-void   ae3d_skinrows_destroy(void *rows);
-int    ae3d_skinrows_count(void *rows);
-void   ae3d_skinrows_set(void *rows, int i, int j0, int j1, int j2, int j3,
-                         double w0, double w1, double w2, double w3);
-void   ae3d_skinrows_apply(void *rows, void *mesh, int vertex, int position);
-void   ae3d_objbuild_set_skin(void *build, void *rows);
-void   ae3d_objbuild_set_occlusion(void *build, void *values);
 void   ae3d_gl_uniform_mat4v(int loc, int count, const void *values);
-const float *ae3d_mesh_skin_data(void *mesh);
-double ae3d_mesh_skin_joint(void *mesh, int i, int slot);
-double ae3d_mesh_skin_weight(void *mesh, int i, int slot);
-double ae3d_mesh_surface_area(void *mesh, double sx, double sy, double sz);
-double ae3d_mesh_uv_area(void *mesh);
-double ae3d_mesh_extent(void *mesh, int axis);
-int    ae3d_mesh_distinct_planes(void *mesh, double tolerance);
-int    ae3d_mesh_vertex_count(void *mesh);
-int    ae3d_mesh_index_count(void *mesh);
-double ae3d_mesh_pos_x(void *mesh, int i);
-double ae3d_mesh_pos_y(void *mesh, int i);
-double ae3d_mesh_pos_z(void *mesh, int i);
-void   ae3d_mesh_set_pos(void *mesh, int i, double x, double y, double z);
-void   ae3d_mesh_set_uv(void *mesh, int i, double u, double v);
-double ae3d_mesh_norm_x(void *mesh, int i);
-double ae3d_mesh_norm_y(void *mesh, int i);
-double ae3d_mesh_norm_z(void *mesh, int i);
-void   ae3d_mesh_set_normal(void *mesh, int i, double x, double y, double z);
-int    ae3d_mesh_index_at(void *mesh, int i);
-void   ae3d_mesh_recalc_normals(void *mesh);
-void   ae3d_mesh_compute_bounds(void *mesh,
-                                double px, double py, double pz,
-                                double sx, double sy, double sz,
-                                double qx, double qy, double qz, double qw);
-double ae3d_mesh_bound_x(void *mesh);
-double ae3d_mesh_bound_y(void *mesh);
-double ae3d_mesh_bound_z(void *mesh);
-double ae3d_mesh_bound_radius(void *mesh);
-int    ae3d_mesh_dirty(void *mesh);
 
 /* Scripts: a compiled Aether source opened as a shared library, with the
  * object it is attached to passed in on every call. */
-void   ae3d_mesh_clear_dirty(void *mesh);
 
-void  *ae3d_inst_create(void);
-void   ae3d_inst_destroy(void *inst);
-int    ae3d_inst_resize(void *inst, int count);
-int    ae3d_inst_count(void *inst);
-void   ae3d_inst_set_count(void *inst, int count);
-void  *ae3d_ptr_offset(void *p, long bytes);
-void   ae3d_inst_set_trs(void *inst, int i,
-                         double px, double py, double pz,
-                         double sx, double sy, double sz,
-                         double qx, double qy, double qz, double qw);
-void   ae3d_inst_set_positions(void *inst, const double *xyz, int count,
-                               double sx, double sy, double sz,
-                               double qx, double qy, double qz, double qw);
-void   ae3d_inst_set_positions_yaw(void *inst, const double *xyz, const double *yaw,
-                                   int count, double sx, double sy, double sz);
-void   ae3d_inst_set_colors(void *inst, const double *rgb, int count);
-int    ae3d_inst_enable_points(void *inst);
-int    ae3d_inst_is_points(void *inst);
-const float *ae3d_inst_point_data(void *inst);
-int    ae3d_inst_point_floats(void);
-void   ae3d_inst_set_point_scales(void *inst, const double *scales, int count);
-void   ae3d_inst_set_matrix(void *inst, int i, const double *m);
-void   ae3d_inst_remove(void *inst, int i);
-int    ae3d_inst_enable_colors(void *inst, int count);
-int    ae3d_inst_has_colors(void *inst);
-int    ae3d_inst_enable_phases(void *inst, int count);
-int    ae3d_inst_has_phases(void *inst);
-const float *ae3d_inst_phase_data(void *inst);
-void   ae3d_inst_set_phases(void *inst, const double *phases, int count);
-void   ae3d_inst_set_phase(void *inst, int i, double phase);
 void   ae3d_gl_update_instance_colors(void *inst, int color_vbo);
 int    ae3d_vk_update_instances(int handle, void *instances);
-void   ae3d_inst_set_color(void *inst, int i, double r, double g, double b);
-void   ae3d_inst_compute_bounds(void *inst);
-double ae3d_inst_bound_x(void *inst);
-double ae3d_inst_bound_y(void *inst);
-double ae3d_inst_bound_z(void *inst);
-double ae3d_inst_bound_radius(void *inst);
 
-void  *ae3d_objbuild_create(void);
-void   ae3d_objbuild_destroy(void *build);
-int    ae3d_objbuild_add_position(void *build, double x, double y, double z);
-int    ae3d_objbuild_add_uv(void *build, double u, double v);
-int    ae3d_objbuild_add_normal(void *build, double x, double y, double z);
-int    ae3d_objbuild_position_count(void *build);
-int    ae3d_objbuild_uv_count(void *build);
-int    ae3d_objbuild_normal_count(void *build);
-int    ae3d_objbuild_emit(void *build, void *mesh, int v, int vt, int vn);
 
 void  *ae3d_image_load(const char *path);
 int    ae3d_image_register(const char *name, const void *rgba, int width, int height);
@@ -259,12 +152,6 @@ void  *ae3d_offscreen_read_pipelined(void *target);
 void  *ae3d_gl_read_frame(int width, int height);
 void   ae3d_offscreen_destroy(void *target);
 
-int    ae3d_meshfile_save(const char *path, void *mesh, void *instances);
-void  *ae3d_meshfile_load(const char *path);
-void  *ae3d_meshfile_mesh(void *handle);
-void  *ae3d_meshfile_instances(void *handle);
-void   ae3d_meshfile_release(void *handle);
-const char *ae3d_meshfile_error(void);
 
 int    ae3d_vk_available(void);
 const char *ae3d_vk_device_name(void);

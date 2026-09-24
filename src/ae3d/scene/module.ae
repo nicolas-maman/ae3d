@@ -12,12 +12,16 @@ import std.fs
 import std.json
 import std.string
 import std.strarr
+import std.bytes
+import std.mem
+import std.zlib
 import ae3d.core
 import ae3d.loader
 import ae3d.shaders
 import ae3d.water
 import ae3d.voxel
 import ae3d.terrain
+import ae3d.geometry
 
 exports (
     scene_save, scene_load, scene_load_lights, scene_load_attachments,
@@ -185,21 +189,244 @@ struct View {
 
 extern calloc(count: int, size: int) -> ptr
 extern free(p: ptr)
-extern ae3d_meshfile_save(path: string, mesh: ptr, instances: ptr) -> int
-extern ae3d_meshfile_load(path: string) -> ptr
-extern ae3d_meshfile_mesh(handle: ptr) -> ptr
-extern ae3d_meshfile_instances(handle: ptr) -> ptr
-extern ae3d_meshfile_release(handle: ptr)
-extern ae3d_meshfile_error() -> string
-extern ae3d_mesh_destroy(mesh: ptr)
-extern ae3d_inst_destroy(instances: ptr)
-extern ae3d_inst_count(instances: ptr) -> int
+extern malloc(size: long) -> ptr
 extern ae3d_farr_count(arr: ptr) -> int
 extern ae3d_farr_get(arr: ptr, i: int) -> float
 extern ae3d_farr_set(arr: ptr, i: int, v: float)
 
 var g_error = ""
 var g_error_owned = false
+
+// --- mesh files ----------------------------------------------------------------------------------------------------
+//
+// Geometry a program generated (a terrain, a sea, a crowd's instances) has
+// no source file to reload from, so a scene keeps it beside itself: one file
+// a mesh, gzip-compressed, every number a little-endian 32-bit word so a file
+// written on one machine reads back the same on another. The words: a magic,
+// a version, flags (1: instanced), the vertex and index counts; nine float32
+// bit patterns a vertex and the indices; then, when instanced, the instance
+// count, whether there are colours, sixteen floats a matrix and three a
+// colour. It was C (native/geometry/meshfile.c, over zlib's gz* calls); the
+// format is unchanged, so files written before read the same.
+
+const MESH_MAGIC = 1296388936      // "MESH", 0x4D455348
+const MESH_VERSION = 1
+const MESH_INSTANCED = 1
+
+var g_mesh_error = ""
+
+struct LoadedMesh {
+    mesh: ptr
+    instances: ptr
+}
+
+// A float32's bit pattern, as a word.
+f32_bits(values: ptr, i: int) -> long {
+    return mem.get_uint32(values, i * 4)
+}
+
+meshfile_save(path: string, mesh: ptr, instances: ptr) -> bool {
+    vertex_count = geometry.mesh_vertex_count(mesh)
+    if vertex_count <= 0 {
+        g_mesh_error = "mesh has no vertices"
+        return false
+    }
+    index_count = geometry.mesh_index_count(mesh)
+    instance_count = 0
+    if instances != null { instance_count = geometry.inst_count(instances) }
+    has_colors = instance_count > 0 && geometry.inst_has_colors(instances) != 0
+    words = 5 + vertex_count * 9 + index_count
+    if instance_count > 0 {
+        words = words + 2 + instance_count * 16
+        if has_colors { words = words + instance_count * 3 }
+    }
+    raw = malloc((words * 4) as long)
+    at = 0
+    flags = 0
+    if instance_count > 0 { flags = MESH_INSTANCED }
+    mem.set_u32_le(raw, 0, MESH_MAGIC as long)
+    mem.set_u32_le(raw, 4, MESH_VERSION as long)
+    mem.set_u32_le(raw, 8, flags as long)
+    mem.set_u32_le(raw, 12, vertex_count as long)
+    mem.set_u32_le(raw, 16, index_count as long)
+    at = 20
+    vertices = geometry.mesh_vertex_data(mesh)
+    i = 0
+    while i < vertex_count * 9 {
+        mem.set_u32_le(raw, at, f32_bits(vertices, i))
+        at = at + 4
+        i = i + 1
+    }
+    indices = geometry.mesh_index_data(mesh)
+    i = 0
+    while i < index_count {
+        mem.set_u32_le(raw, at, mem.get_uint32(indices, i * 4))
+        at = at + 4
+        i = i + 1
+    }
+    if instance_count > 0 {
+        mem.set_u32_le(raw, at, instance_count as long)
+        colours_flag = 0
+        if has_colors { colours_flag = 1 }
+        mem.set_u32_le(raw, at + 4, colours_flag as long)
+        at = at + 8
+        matrices = geometry.inst_matrix_data(instances)
+        i = 0
+        while i < instance_count * 16 {
+            mem.set_u32_le(raw, at, f32_bits(matrices, i))
+            at = at + 4
+            i = i + 1
+        }
+        if has_colors {
+            colors = geometry.inst_color_data(instances)
+            i = 0
+            while i < instance_count * 3 {
+                mem.set_u32_le(raw, at, f32_bits(colors, i))
+                at = at + 4
+                i = i + 1
+            }
+        }
+    }
+    text = bytes.string_from_ptr(raw, words * 4)
+    free(raw)
+    packed, packed_size, err = zlib.gzip_deflate(text, words * 4, 6)
+    if err != "" {
+        g_mesh_error = err
+        return false
+    }
+    written = fs.write_binary(path, packed, packed_size)
+    if written != "" {
+        g_mesh_error = "cannot write the file"
+        return false
+    }
+    g_mesh_error = ""
+    return true
+}
+
+// The mesh (and instances) a mesh file holds, the caller's to keep; null
+// with g_mesh_error saying why.
+meshfile_load(path: string) -> *LoadedMesh {
+    content, length, read_error = fs.read_binary(path)
+    if read_error != "" {
+        g_mesh_error = "cannot open the file for reading"
+        return null
+    }
+    plain, plain_length, inflate_error = zlib.gzip_inflate(content, length)
+    if inflate_error != "" {
+        g_mesh_error = "not a gzip file"
+        return null
+    }
+    buffer = bytes.new(plain_length + 4)
+    bytes.copy_from_string(buffer, 0, plain, plain_length)
+    raw = bytes.data(buffer)
+    loaded = read_meshfile(raw, plain_length)
+    bytes.free(buffer)
+    return loaded
+}
+
+read_meshfile(raw: ptr, length: int) -> *LoadedMesh {
+    if length < 20 {
+        g_mesh_error = "truncated header"
+        return null
+    }
+    if mem.get_u32_le(raw, 0) != (MESH_MAGIC as long) {
+        g_mesh_error = "not an ae3d mesh file"
+        return null
+    }
+    if mem.get_u32_le(raw, 4) != (MESH_VERSION as long) {
+        g_mesh_error = "unsupported mesh file version"
+        return null
+    }
+    flags = mem.get_u32_le(raw, 8) as int
+    vertex_count = mem.get_u32_le(raw, 12) as int
+    index_count = mem.get_u32_le(raw, 16) as int
+    at = 20
+    if at + (vertex_count * 9 + index_count) * 4 > length {
+        g_mesh_error = "truncated vertex data"
+        return null
+    }
+    mesh = geometry.mesh_create()
+    geometry.mesh_reserve(mesh, vertex_count, index_count)
+    // Nine words a vertex into a float32 slot, then as doubles to push_vertex,
+    // which rounds them back to the same float32s.
+    slot_block = calloc(9, 4)
+    slot = slot_block as int[]
+    value = slot_block as f32[]
+    i = 0
+    while i < vertex_count {
+        k = 0
+        while k < 9 {
+            slot[k] = mem.get_u32_le(raw, at) as int
+            at = at + 4
+            k = k + 1
+        }
+        geometry.mesh_push_vertex(mesh, value[0] as float, value[1] as float, value[2] as float,
+                                  value[3] as float, value[4] as float,
+                                  value[5] as float, value[6] as float, value[7] as float)
+        i = i + 1
+    }
+    i = 0
+    while i < index_count {
+        geometry.mesh_push_index(mesh, mem.get_u32_le(raw, at) as int)
+        at = at + 4
+        i = i + 1
+    }
+    instances = null as ptr
+    if (flags & MESH_INSTANCED) != 0 {
+        if at + 8 > length {
+            free(slot_block)
+            geometry.mesh_destroy(mesh)
+            g_mesh_error = "truncated instance header"
+            return null
+        }
+        instance_count = mem.get_u32_le(raw, at) as int
+        has_colors = mem.get_u32_le(raw, at + 4) != (0 as long)
+        at = at + 8
+        wanted = instance_count * 16
+        if has_colors { wanted = wanted + instance_count * 3 }
+        if at + wanted * 4 > length {
+            free(slot_block)
+            geometry.mesh_destroy(mesh)
+            g_mesh_error = "truncated instance data"
+            return null
+        }
+        instances = geometry.inst_create()
+        geometry.inst_resize(instances, instance_count)
+        matrix_block = calloc(16, 8)
+        matrix = matrix_block as float[]
+        i = 0
+        while i < instance_count {
+            k = 0
+            while k < 16 {
+                slot[0] = mem.get_u32_le(raw, at) as int
+                matrix[k] = value[0] as float
+                at = at + 4
+                k = k + 1
+            }
+            geometry.inst_set_matrix(instances, i, matrix_block)
+            i = i + 1
+        }
+        free(matrix_block)
+        if has_colors {
+            geometry.inst_enable_colors(instances, instance_count)
+            i = 0
+            while i < instance_count {
+                slot[0] = mem.get_u32_le(raw, at) as int
+                slot[1] = mem.get_u32_le(raw, at + 4) as int
+                slot[2] = mem.get_u32_le(raw, at + 8) as int
+                geometry.inst_set_color(instances, i, value[0] as float, value[1] as float, value[2] as float)
+                at = at + 12
+                i = i + 1
+            }
+        }
+    }
+    free(slot_block)
+    loaded = calloc(1, sizeof(LoadedMesh)) as *LoadedMesh
+    loaded.mesh = mesh
+    loaded.instances = instances
+    g_mesh_error = ""
+    return loaded
+}
 
 // The sky image the last view read. `field_string` points into the parsed
 // file, which is freed before the view is returned, so a view that carried
@@ -1032,8 +1259,8 @@ scene_save(models: ptr, lights: ptr, attachments: ptr, view: *View,
                 json.object_set_raw(entry, "group", json.boolean(true))
             } else {
                 mesh_path = mesh_file_for(mesh_directory, i)
-                if ae3d_meshfile_save(mesh_path, m.mesh, m.instances) != 1 {
-                    set_error("cannot write the mesh: ", ae3d_meshfile_error())
+                if !meshfile_save(mesh_path, m.mesh, m.instances) {
+                    set_error("cannot write the mesh: ", g_mesh_error)
                     string.free(mesh_path)
                     json.free(root)
                     list.free(written)
@@ -1235,20 +1462,20 @@ load_entry(entry: ptr, sources: ptr) -> *Model {
         }
         m = core.model_clone(read)
     } else if mesh_file != "" {
-        handle = ae3d_meshfile_load(mesh_file)
-        if handle == null {
-            set_error("cannot read the mesh: ", ae3d_meshfile_error())
+        loaded = meshfile_load(mesh_file)
+        if loaded == null {
+            set_error("cannot read the mesh: ", g_mesh_error)
             return null
         }
         m = core.model_new()
-        ae3d_mesh_destroy(m.mesh)
-        m.mesh = ae3d_meshfile_mesh(handle)
-        m.instances = ae3d_meshfile_instances(handle)
-        if m.instances != null && ae3d_inst_count(m.instances) > 0 {
+        geometry.mesh_destroy(m.mesh)
+        m.mesh = loaded.mesh
+        m.instances = loaded.instances
+        if m.instances != null && geometry.inst_count(m.instances) > 0 {
             m.is_instanced = true
             m.instances_updated = true
         }
-        ae3d_meshfile_release(handle)
+        free(loaded as ptr)
     } else {
         set_error("entry has neither a source path nor a mesh file", "")
         return null

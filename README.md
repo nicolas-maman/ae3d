@@ -179,7 +179,7 @@ AE3D_SCENE_OUT=build/street.json ./build/street_drive && ./build/ae3d_editor bui
 src/ae3d/     the engine: core, engine, behaviour, input, jobs, vk, gl, shaders, physics,
               crowd, horde, nav, ecs, gltf, assets, weather, water, sky, voxel, terrain,
               agent, probe, script, scene, ... one module a directory
-native/       the C that remains, by role: gpu/, geometry/, image/, platform/, dlss/
+native/       the C that remains, by role: gpu/, image/, platform/, dlss/
 deps/         aephysics, the physics engine, as a submodule
 examples/     runnable scenes            tests/       one program a suite
 benchmarks/   per-frame cost, no window  tools/       the agent client, viewer, critique, bench, bakers

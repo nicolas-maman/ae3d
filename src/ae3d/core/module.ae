@@ -22,6 +22,8 @@ import std.os
 import std.string
 import ae3d.platform
 import ae3d.cloudnoise
+import ae3d.posing
+import ae3d.geometry
 
 exports (
     mesh_push_skybox_cube, skybox_solid, skybox_texture, SKY_PROCEDURAL, mesh_normal,
@@ -138,81 +140,6 @@ var g_depth_test = true
 
 var g_next_model_id = 1
 
-extern ae3d_mesh_create() -> ptr
-
-extern ae3d_mesh_clone(mesh: ptr) -> ptr
-extern ae3d_mesh_decimate(mesh: ptr, cell_size: float) -> ptr
-extern ae3d_mesh_destroy(mesh: ptr)
-
-extern ae3d_mesh_vertex_count(mesh: ptr) -> int
-extern ae3d_mesh_norm_x(mesh: ptr, i: int) -> float
-extern ae3d_mesh_norm_y(mesh: ptr, i: int) -> float
-extern ae3d_mesh_norm_z(mesh: ptr, i: int) -> float
-
-extern ae3d_mesh_index_count(mesh: ptr) -> int
-
-extern ae3d_mesh_set_skin(mesh: ptr, i: int, j0: int, j1: int, j2: int, j3: int,
-                          w0: float, w1: float, w2: float, w3: float) -> int
-extern ae3d_mesh_is_skinned(mesh: ptr) -> int
-extern ae3d_mesh_surface_area(mesh: ptr, sx: float, sy: float, sz: float) -> float
-extern ae3d_mesh_uv_area(mesh: ptr) -> float
-extern ae3d_mesh_extent(mesh: ptr, axis: int) -> float
-extern ae3d_mesh_distinct_planes(mesh: ptr, tolerance: float) -> int
-extern ae3d_mesh_skin_joint(mesh: ptr, i: int, slot: int) -> float
-extern ae3d_mesh_skin_weight(mesh: ptr, i: int, slot: int) -> float
-
-extern ae3d_palette_create(bones: int) -> ptr
-extern ae3d_palette_destroy(palette: ptr)
-extern ae3d_palette_bones(palette: ptr) -> int
-extern ae3d_palette_set(palette: ptr, bone: int, m: ptr)
-extern ae3d_palette_get(palette: ptr, bone: int, i: int) -> float
-extern ae3d_palette_data(palette: ptr) -> ptr
-
-extern ae3d_skinrows_create(count: int) -> ptr
-extern ae3d_skinrows_destroy(rows: ptr)
-extern ae3d_skinrows_count(rows: ptr) -> int
-extern ae3d_skinrows_set(rows: ptr, i: int, j0: int, j1: int, j2: int, j3: int,
-                         w0: float, w1: float, w2: float, w3: float)
-
-extern ae3d_mesh_compute_bounds(mesh: ptr, px: float, py: float, pz: float, sx: float, sy: float, sz: float, qx: float, qy: float, qz: float, qw: float)
-
-extern ae3d_mesh_bound_x(mesh: ptr) -> float
-
-extern ae3d_mesh_bound_y(mesh: ptr) -> float
-
-extern ae3d_mesh_bound_z(mesh: ptr) -> float
-
-extern ae3d_mesh_bound_radius(mesh: ptr) -> float
-
-extern ae3d_inst_create() -> ptr
-
-extern ae3d_inst_destroy(inst: ptr)
-
-extern ae3d_inst_resize(inst: ptr, count: int) -> int
-
-extern ae3d_inst_count(inst: ptr) -> int
-extern ae3d_inst_set_count(inst: ptr, count: int)
-
-extern ae3d_inst_set_trs(inst: ptr, i: int, px: float, py: float, pz: float, sx: float, sy: float, sz: float, qx: float, qy: float, qz: float, qw: float)
-
-extern ae3d_inst_remove(inst: ptr, i: int)
-
-extern ae3d_inst_enable_colors(inst: ptr, count: int) -> int
-extern ae3d_inst_enable_phases(inst: ptr, count: int) -> int
-extern ae3d_inst_set_phase(inst: ptr, i: int, phase: float)
-extern ae3d_inst_set_phases(inst: ptr, phases: ptr, count: int)
-
-extern ae3d_inst_set_color(inst: ptr, i: int, r: float, g: float, b: float)
-
-extern ae3d_inst_compute_bounds(inst: ptr)
-
-extern ae3d_inst_bound_x(inst: ptr) -> float
-
-extern ae3d_inst_bound_y(inst: ptr) -> float
-
-extern ae3d_inst_bound_z(inst: ptr) -> float
-
-extern ae3d_inst_bound_radius(inst: ptr) -> float
 
 extern ae3d_farr_create(count: int) -> ptr
 
@@ -222,24 +149,6 @@ extern ae3d_farr_set(arr: ptr, i: int, v: float)
 
 extern ae3d_farr_count(arr: ptr) -> int
 extern ae3d_farr_get(arr: ptr, i: int) -> float
-extern ae3d_mesh_reserve(mesh: ptr, vertices: int, indices: int) -> int
-extern ae3d_mesh_push_vertex(mesh: ptr, px: float, py: float, pz: float, u: float, v: float, nx: float, ny: float, nz: float) -> int
-extern ae3d_mesh_push_index(mesh: ptr, index: int) -> int
-extern ae3d_mesh_pos_x(mesh: ptr, i: int) -> float
-extern ae3d_mesh_pos_y(mesh: ptr, i: int) -> float
-extern ae3d_mesh_pos_z(mesh: ptr, i: int) -> float
-extern ae3d_mesh_set_pos(mesh: ptr, i: int, x: float, y: float, z: float)
-extern ae3d_mesh_set_uv(mesh: ptr, i: int, u: float, v: float)
-extern ae3d_mesh_set_normal(mesh: ptr, i: int, x: float, y: float, z: float)
-extern ae3d_mesh_index_at(mesh: ptr, i: int) -> int
-extern ae3d_mesh_recalc_normals(mesh: ptr)
-extern ae3d_inst_has_colors(inst: ptr) -> int
-extern ae3d_inst_set_positions(inst: ptr, xyz: ptr, count: int, sx: float, sy: float, sz: float, qx: float, qy: float, qz: float, qw: float)
-extern ae3d_inst_set_positions_yaw(inst: ptr, xyz: ptr, yaw: ptr, count: int, sx: float, sy: float, sz: float)
-extern ae3d_inst_set_colors(inst: ptr, rgb: ptr, count: int)
-extern ae3d_inst_enable_points(inst: ptr) -> int
-extern ae3d_inst_is_points(inst: ptr) -> int
-extern ae3d_inst_set_point_scales(inst: ptr, scales: ptr, count: int)
 
 
 struct Vec2 {
@@ -1444,7 +1353,7 @@ material_free(m: *Material) {
 
 model_new() -> *Model {
     m = heap.new(Model)
-    m.mesh = ae3d_mesh_create()
+    m.mesh = geometry.mesh_create()
     m.groups = list.new()
     m.uniforms = list.new()
     m.uniform_names = 0 as uint64
@@ -1472,8 +1381,8 @@ model_new() -> *Model {
 model_free(m: *Model) {
     if m == null { return }
 
-    if m.mesh != null { ae3d_mesh_destroy(m.mesh) }
-    if m.instances != null { ae3d_inst_destroy(m.instances) }
+    if m.mesh != null { geometry.mesh_destroy(m.mesh) }
+    if m.instances != null { geometry.inst_destroy(m.instances) }
 
     if m.groups != null {
         count = list.size(m.groups)
@@ -1609,7 +1518,7 @@ model_world_position(m: *Model) -> Vec3 {
 // to be removed from the backend and added again around this.
 model_disable_instancing(m: *Model) {
     if m == null || !m.is_instanced { return }
-    if m.instances != null { ae3d_inst_destroy(m.instances) }
+    if m.instances != null { geometry.inst_destroy(m.instances) }
     m.instances = null
     m.is_instanced = false
     m.instances_updated = true
@@ -1628,7 +1537,7 @@ model_disable_instancing(m: *Model) {
 // model. Callers do, and the sequence is remove, set, add.
 model_set_mesh(m: *Model, mesh: ptr) {
     if m == null || mesh == null || m.mesh == mesh { return }
-    if m.mesh != null { ae3d_mesh_destroy(m.mesh) }
+    if m.mesh != null { geometry.mesh_destroy(m.mesh) }
     m.mesh = mesh
     model_recalculate_bounds(m)
 }
@@ -1657,25 +1566,25 @@ model_skeleton(m: *Model) -> ptr {
 }
 
 model_recalculate_bounds(m: *Model) {
-    if m.is_instanced && m.instances != null && ae3d_inst_count(m.instances) > 0 {
-        ae3d_inst_compute_bounds(m.instances)
-        centre = vec3(ae3d_inst_bound_x(m.instances),
-                            ae3d_inst_bound_y(m.instances),
-                            ae3d_inst_bound_z(m.instances))
+    if m.is_instanced && m.instances != null && geometry.inst_count(m.instances) > 0 {
+        geometry.inst_compute_bounds(m.instances)
+        centre = vec3(geometry.inst_bound_x(m.instances),
+                            geometry.inst_bound_y(m.instances),
+                            geometry.inst_bound_z(m.instances))
         m.bounding_center = v3_add(centre, m.world_position)
-        m.bounding_radius = ae3d_inst_bound_radius(m.instances) + 10.0
+        m.bounding_radius = geometry.inst_bound_radius(m.instances) + 10.0
         return
     }
 
-    ae3d_mesh_compute_bounds(m.mesh,
+    geometry.mesh_compute_bounds(m.mesh,
                              m.world_position.x, m.world_position.y, m.world_position.z,
                              m.world_scale.x, m.world_scale.y, m.world_scale.z,
                              m.world_rotation.x, m.world_rotation.y,
                              m.world_rotation.z, m.world_rotation.w)
-    m.bounding_center = vec3(ae3d_mesh_bound_x(m.mesh),
-                                   ae3d_mesh_bound_y(m.mesh),
-                                   ae3d_mesh_bound_z(m.mesh))
-    m.bounding_radius = ae3d_mesh_bound_radius(m.mesh)
+    m.bounding_center = vec3(geometry.mesh_bound_x(m.mesh),
+                                   geometry.mesh_bound_y(m.mesh),
+                                   geometry.mesh_bound_z(m.mesh))
+    m.bounding_radius = geometry.mesh_bound_radius(m.mesh)
 }
 
 model_mark_dirty(m: *Model) {
@@ -1750,8 +1659,8 @@ model_clone(src: *Model) -> *Model {
     copy = model_new()
     // model_new already made an empty one, and it has to go before its place is
     // taken or nothing will ever free it.
-    if copy.mesh != null { ae3d_mesh_destroy(copy.mesh) }
-    copy.mesh = ae3d_mesh_clone(src.mesh)
+    if copy.mesh != null { geometry.mesh_destroy(copy.mesh) }
+    copy.mesh = geometry.mesh_clone(src.mesh)
     // Owned by the copy, or nothing will ever free it.
     if src.material != null {
         copy.material = model_own_material(copy, material_clone(src.material))
@@ -2047,10 +1956,10 @@ model_uniform(m: *Model, index: int) -> *Uniform {
 
 model_enable_instancing(m: *Model, count: int) -> bool {
     if m.instances == null {
-        m.instances = ae3d_inst_create()
+        m.instances = geometry.inst_create()
         if m.instances == null { return false }
     }
-    if ae3d_inst_resize(m.instances, count) != 1 { return false }
+    if geometry.inst_resize(m.instances, count) != 1 { return false }
     m.is_instanced = true
     m.instances_updated = true
     // Resizing adds or drops colours as well as matrices, and a backend that
@@ -2061,7 +1970,7 @@ model_enable_instancing(m: *Model, count: int) -> bool {
 
 model_set_instance_position(m: *Model, index: int, position: Vec3) {
     if m.instances == null { return }
-    ae3d_inst_set_trs(m.instances, index,
+    geometry.inst_set_trs(m.instances, index,
                       position.x, position.y, position.z,
                       m.scale.x, m.scale.y, m.scale.z,
                       m.rotation.x, m.rotation.y, m.rotation.z, m.rotation.w)
@@ -2073,7 +1982,7 @@ model_set_instance_position(m: *Model, index: int, position: Vec3) {
 // instance and turns filling a voxel world into quadratic work.
 model_enable_instance_colors(m: *Model) -> bool {
     if m.instances == null { return false }
-    return ae3d_inst_enable_colors(m.instances, ae3d_inst_count(m.instances)) == 1
+    return geometry.inst_enable_colors(m.instances, geometry.inst_count(m.instances)) == 1
 }
 
 // Instances as points: each is a position, a scale, a colour and a phase --
@@ -2084,26 +1993,26 @@ model_enable_instance_colors(m: *Model) -> bool {
 // of their own; a point always has them. Call after model_enable_instancing.
 model_enable_point_instancing(m: *Model) -> bool {
     if m.instances == null { return false }
-    if ae3d_inst_enable_points(m.instances) != 1 { return false }
+    if geometry.inst_enable_points(m.instances) != 1 { return false }
     m.instances_updated = true
     return true
 }
 
 model_instance_points(m: *Model) -> bool {
     if m.instances == null { return false }
-    return ae3d_inst_is_points(m.instances) == 1
+    return geometry.inst_is_points(m.instances) == 1
 }
 
 // A scale per point instance, multiplying the model's own.
 model_set_instance_scales(m: *Model, scales: ptr, count: int) {
     if m.instances == null { return }
-    ae3d_inst_set_point_scales(m.instances, scales, count)
+    geometry.inst_set_point_scales(m.instances, scales, count)
     m.instances_updated = true
 }
 
 model_set_instance_color(m: *Model, index: int, r: float, g: float, b: float) {
     if m.instances == null { return }
-    ae3d_inst_set_color(m.instances, index, r, g, b)
+    geometry.inst_set_color(m.instances, index, r, g, b)
     m.instance_colors_updated = true
 }
 
@@ -2126,12 +2035,12 @@ model_pose_bank(m: *Model) -> ptr { return m.pose_bank }
 // the model's current instance count.
 model_enable_instance_phases(m: *Model) -> bool {
     if m.instances == null { return false }
-    return ae3d_inst_enable_phases(m.instances, ae3d_inst_count(m.instances)) == 1
+    return geometry.inst_enable_phases(m.instances, geometry.inst_count(m.instances)) == 1
 }
 
 model_set_instance_phase(m: *Model, index: int, phase: float) {
     if m.instances == null { return }
-    ae3d_inst_set_phase(m.instances, index, phase)
+    geometry.inst_set_phase(m.instances, index, phase)
     m.instance_phases_updated = true
 }
 
@@ -2140,9 +2049,9 @@ model_set_instance_phase(m: *Model, index: int, phase: float) {
 // model_set_instance_positions.
 model_set_instance_phases(m: *Model, phases: ptr, count: int) {
     if m.instances == null { return }
-    ae3d_inst_set_phases(m.instances, phases, count)
+    geometry.inst_set_phases(m.instances, phases, count)
     m.instance_phases_updated = true
-    if ae3d_inst_is_points(m.instances) == 1 { m.instances_updated = true }
+    if geometry.inst_is_points(m.instances) == 1 { m.instances_updated = true }
 }
 
 // Bulk upload of every instance's position from a packed xyz array. One call
@@ -2156,7 +2065,7 @@ model_set_instance_phases(m: *Model, phases: ptr, count: int) {
 // drew.
 model_set_instance_positions(m: *Model, xyz: ptr, count: int) {
     if m.instances == null { return }
-    ae3d_inst_set_positions(m.instances, xyz, count,
+    geometry.inst_set_positions(m.instances, xyz, count,
                             m.scale.x, m.scale.y, m.scale.z,
                             m.rotation.x, m.rotation.y, m.rotation.z, m.rotation.w)
     m.instances_updated = true
@@ -2167,7 +2076,7 @@ model_set_instance_positions(m: *Model, xyz: ptr, count: int) {
 // turn about Y, so a crowd can shamble at its own angles rather than in rank.
 model_set_instance_positions_yaw(m: *Model, xyz: ptr, yaw: ptr, count: int) {
     if m.instances == null { return }
-    ae3d_inst_set_positions_yaw(m.instances, xyz, yaw, count,
+    geometry.inst_set_positions_yaw(m.instances, xyz, yaw, count,
                                 m.scale.x, m.scale.y, m.scale.z)
     m.instances_updated = true
     model_recalculate_bounds(m)
@@ -2175,16 +2084,16 @@ model_set_instance_positions_yaw(m: *Model, xyz: ptr, yaw: ptr, count: int) {
 
 model_set_instance_colors(m: *Model, rgb: ptr, count: int) {
     if m.instances == null { return }
-    ae3d_inst_set_colors(m.instances, rgb, count)
+    geometry.inst_set_colors(m.instances, rgb, count)
     m.instance_colors_updated = true
     // A point's colour rides in the one stream with its position, so the
     // stream is what goes back to the device.
-    if ae3d_inst_is_points(m.instances) == 1 { m.instances_updated = true }
+    if geometry.inst_is_points(m.instances) == 1 { m.instances_updated = true }
 }
 
 model_instance_count(m: *Model) -> int {
     if m.instances == null { return 0 }
-    return ae3d_inst_count(m.instances)
+    return geometry.inst_count(m.instances)
 }
 
 // Draw only the first `count` instances this frame, of however many the model
@@ -2193,7 +2102,7 @@ model_instance_count(m: *Model) -> int {
 // model draw a different number of them without being reallocated.
 model_set_instance_draw_count(m: *Model, count: int) {
     if m.instances == null { return }
-    ae3d_inst_set_count(m.instances, count)
+    geometry.inst_set_count(m.instances, count)
     m.instances_updated = true
 }
 
@@ -2203,7 +2112,7 @@ model_set_instance_draw_count(m: *Model, count: int) {
 // that uploads the two buffers separately, which OpenGL does.
 model_remove_instance(m: *Model, index: int) {
     if m.instances == null { return }
-    ae3d_inst_remove(m.instances, index)
+    geometry.inst_remove(m.instances, index)
     m.instances_updated = true
     m.instance_colors_updated = true
 }
@@ -2600,7 +2509,7 @@ camera_screen_to_world(c: *Camera, screen_x: float, screen_y: float,
 
 
 mesh_create() -> ptr {
-    return ae3d_mesh_create()
+    return geometry.mesh_create()
 }
 
 // A decimated copy of a mesh for a crowd LOD: vertices sharing a `cell_size`
@@ -2608,80 +2517,80 @@ mesh_create() -> ptr {
 // is carried so the coarse figure bends on the same skeleton. Larger cells,
 // fewer triangles. Returns a new mesh the caller owns, or null on failure.
 mesh_decimate(mesh: ptr, cell_size: float) -> ptr {
-    return ae3d_mesh_decimate(mesh, cell_size)
+    return geometry.mesh_decimate(mesh, cell_size)
 }
 
 mesh_destroy(mesh: ptr) {
-    ae3d_mesh_destroy(mesh)
+    geometry.mesh_destroy(mesh)
 }
 
 mesh_reserve(mesh: ptr, vertices: int, indices: int) -> bool {
-    return ae3d_mesh_reserve(mesh, vertices, indices) == 1
+    return geometry.mesh_reserve(mesh, vertices, indices) == 1
 }
 
 mesh_push_vertex(mesh: ptr, position: Vec3, u: float, v: float, normal: Vec3) -> int {
-    return ae3d_mesh_push_vertex(mesh, position.x, position.y, position.z,
+    return geometry.mesh_push_vertex(mesh, position.x, position.y, position.z,
                                  u, v, normal.x, normal.y, normal.z)
 }
 
 mesh_push_index(mesh: ptr, index: int) -> int {
-    return ae3d_mesh_push_index(mesh, index)
+    return geometry.mesh_push_index(mesh, index)
 }
 
 mesh_push_triangle(mesh: ptr, a: int, b: int, c: int) {
-    ae3d_mesh_push_index(mesh, a)
-    ae3d_mesh_push_index(mesh, b)
-    ae3d_mesh_push_index(mesh, c)
+    geometry.mesh_push_index(mesh, a)
+    geometry.mesh_push_index(mesh, b)
+    geometry.mesh_push_index(mesh, c)
 }
 
 // Four bones and four weights for one vertex. The weights are normalised on
 // the way in, so what a renderer reads always sums to one.
 mesh_set_skin(mesh: ptr, i: int, j0: int, j1: int, j2: int, j3: int,
               w0: float, w1: float, w2: float, w3: float) -> bool {
-    return ae3d_mesh_set_skin(mesh, i, j0, j1, j2, j3, w0, w1, w2, w3) != 0
+    return geometry.mesh_set_skin(mesh, i, j0, j1, j2, j3, w0, w1, w2, w3) != 0
 }
 
 // The world area a mesh covers, its area in texture space, and how many ways
 // its faces point. Together these say whether a surface carries enough texture
 // to be looked at closely and whether a shape has a silhouette or is a box.
 mesh_surface_area(mesh: ptr, scale: Vec3) -> float {
-    return ae3d_mesh_surface_area(mesh, scale.x, scale.y, scale.z)
+    return geometry.mesh_surface_area(mesh, scale.x, scale.y, scale.z)
 }
 
-mesh_uv_area(mesh: ptr) -> float { return ae3d_mesh_uv_area(mesh) }
+mesh_uv_area(mesh: ptr) -> float { return geometry.mesh_uv_area(mesh) }
 
 // How far a mesh reaches along each of its own axes, scaled the way the model
 // is. Proportion is a ratio of extents; a bounding radius cannot express one.
 mesh_size(mesh: ptr, scale: Vec3) -> Vec3 {
-    return vec3(ae3d_mesh_extent(mesh, 0) * scale.x,
-                ae3d_mesh_extent(mesh, 1) * scale.y,
-                ae3d_mesh_extent(mesh, 2) * scale.z)
+    return vec3(geometry.mesh_extent(mesh, 0) * scale.x,
+                geometry.mesh_extent(mesh, 1) * scale.y,
+                geometry.mesh_extent(mesh, 2) * scale.z)
 }
 
 mesh_distinct_planes(mesh: ptr, tolerance: float) -> int {
-    return ae3d_mesh_distinct_planes(mesh, tolerance)
+    return geometry.mesh_distinct_planes(mesh, tolerance)
 }
 
 mesh_is_skinned(mesh: ptr) -> bool {
-    return ae3d_mesh_is_skinned(mesh) != 0
+    return geometry.mesh_is_skinned(mesh) != 0
 }
 
 mesh_skin_joint(mesh: ptr, i: int, slot: int) -> int {
-    return ae3d_mesh_skin_joint(mesh, i, slot) as int
+    return geometry.mesh_skin_joint(mesh, i, slot) as int
 }
 
 mesh_skin_weight(mesh: ptr, i: int, slot: int) -> float {
-    return ae3d_mesh_skin_weight(mesh, i, slot)
+    return geometry.mesh_skin_weight(mesh, i, slot)
 }
 
-palette_create(bones: int) -> ptr { return ae3d_palette_create(bones) }
-palette_destroy(palette: ptr) { ae3d_palette_destroy(palette) }
-palette_bones(palette: ptr) -> int { return ae3d_palette_bones(palette) }
-palette_set(palette: ptr, bone: int, m: ptr) { ae3d_palette_set(palette, bone, m) }
+palette_create(bones: int) -> ptr { return posing.palette_create(bones) }
+palette_destroy(palette: ptr) { posing.palette_destroy(palette) }
+palette_bones(palette: ptr) -> int { return posing.palette_bones(palette) }
+palette_set(palette: ptr, bone: int, m: ptr) { posing.palette_set(palette, bone, m) }
 palette_get(palette: ptr, bone: int, i: int) -> float {
-    return ae3d_palette_get(palette, bone, i)
+    return posing.palette_get(palette, bone, i)
 }
-palette_data(palette: ptr) -> ptr { return ae3d_palette_data(palette) }
+palette_data(palette: ptr) -> ptr { return posing.palette_data(palette) }
 
 // Weights keyed by the position they were authored against, for a loader to
 // spread over the vertices that position becomes.
@@ -2691,31 +2600,31 @@ farr_destroy(values: ptr) { ae3d_farr_destroy(values) }
 farr_set(values: ptr, i: int, v: float) { ae3d_farr_set(values, i, v) }
 farr_get(values: ptr, i: int) -> float { return ae3d_farr_get(values, i) }
 
-skinrows_create(count: int) -> ptr { return ae3d_skinrows_create(count) }
-skinrows_destroy(rows: ptr) { ae3d_skinrows_destroy(rows) }
-skinrows_count(rows: ptr) -> int { return ae3d_skinrows_count(rows) }
+skinrows_create(count: int) -> ptr { return geometry.skinrows_create(count) }
+skinrows_destroy(rows: ptr) { geometry.skinrows_destroy(rows) }
+skinrows_count(rows: ptr) -> int { return geometry.skinrows_count(rows) }
 skinrows_set(rows: ptr, i: int, j0: int, j1: int, j2: int, j3: int,
              w0: float, w1: float, w2: float, w3: float) {
-    ae3d_skinrows_set(rows, i, j0, j1, j2, j3, w0, w1, w2, w3)
+    geometry.skinrows_set(rows, i, j0, j1, j2, j3, w0, w1, w2, w3)
 }
 
 mesh_vertex_count(mesh: ptr) -> int {
-    return ae3d_mesh_vertex_count(mesh)
+    return geometry.mesh_vertex_count(mesh)
 }
 
 mesh_index_count(mesh: ptr) -> int {
-    return ae3d_mesh_index_count(mesh)
+    return geometry.mesh_index_count(mesh)
 }
 
 mesh_index_at(mesh: ptr, i: int) -> int {
-    return ae3d_mesh_index_at(mesh, i)
+    return geometry.mesh_index_at(mesh, i)
 }
 
 mesh_position(mesh: ptr, i: int) -> Vec3 {
     return Vec3 {
-        x: ae3d_mesh_pos_x(mesh, i),
-        y: ae3d_mesh_pos_y(mesh, i),
-        z: ae3d_mesh_pos_z(mesh, i)
+        x: geometry.mesh_pos_x(mesh, i),
+        y: geometry.mesh_pos_y(mesh, i),
+        z: geometry.mesh_pos_z(mesh, i)
     }
 }
 
@@ -2724,39 +2633,39 @@ mesh_position(mesh: ptr, i: int) -> Vec3 {
 // what it wrote can be read back.
 mesh_normal(mesh: ptr, i: int) -> Vec3 {
     return Vec3 {
-        x: ae3d_mesh_norm_x(mesh, i),
-        y: ae3d_mesh_norm_y(mesh, i),
-        z: ae3d_mesh_norm_z(mesh, i)
+        x: geometry.mesh_norm_x(mesh, i),
+        y: geometry.mesh_norm_y(mesh, i),
+        z: geometry.mesh_norm_z(mesh, i)
     }
 }
 
 mesh_set_position(mesh: ptr, i: int, position: Vec3) {
-    ae3d_mesh_set_pos(mesh, i, position.x, position.y, position.z)
+    geometry.mesh_set_pos(mesh, i, position.x, position.y, position.z)
 }
 
 mesh_set_uv(mesh: ptr, i: int, u: float, v: float) {
-    ae3d_mesh_set_uv(mesh, i, u, v)
+    geometry.mesh_set_uv(mesh, i, u, v)
 }
 
 mesh_set_normal(mesh: ptr, i: int, normal: Vec3) {
-    ae3d_mesh_set_normal(mesh, i, normal.x, normal.y, normal.z)
+    geometry.mesh_set_normal(mesh, i, normal.x, normal.y, normal.z)
 }
 
 mesh_recalculate_normals(mesh: ptr) {
-    ae3d_mesh_recalc_normals(mesh)
+    geometry.mesh_recalc_normals(mesh)
 }
 
 // Fullscreen triangle pair in clip space. Position z and the normal stay zero so
 // the interleaved layout matches every other mesh and the shared attribute setup
 // works unchanged; the screen shaders read only vec2 position and vec2 uv.
 mesh_push_screen_quad(mesh: ptr) {
-    ae3d_mesh_reserve(mesh, 6, 0)
-    ae3d_mesh_push_vertex(mesh, 0.0 - 1.0,       1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
-    ae3d_mesh_push_vertex(mesh, 0.0 - 1.0, 0.0 - 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-    ae3d_mesh_push_vertex(mesh,       1.0, 0.0 - 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
-    ae3d_mesh_push_vertex(mesh, 0.0 - 1.0,       1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
-    ae3d_mesh_push_vertex(mesh,       1.0, 0.0 - 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
-    ae3d_mesh_push_vertex(mesh,       1.0,       1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0)
+    geometry.mesh_reserve(mesh, 6, 0)
+    geometry.mesh_push_vertex(mesh, 0.0 - 1.0,       1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+    geometry.mesh_push_vertex(mesh, 0.0 - 1.0, 0.0 - 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    geometry.mesh_push_vertex(mesh,       1.0, 0.0 - 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+    geometry.mesh_push_vertex(mesh, 0.0 - 1.0,       1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+    geometry.mesh_push_vertex(mesh,       1.0, 0.0 - 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+    geometry.mesh_push_vertex(mesh,       1.0,       1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0)
 }
 
 // The sky cube is shared by both backends: its winding faces inward, so the
@@ -2898,7 +2807,7 @@ model_is_impostor(m: *Model) -> bool {
 
 model_instance_has_colors(m: *Model) -> bool {
     if m.instances == null { return false }
-    return ae3d_inst_has_colors(m.instances) == 1
+    return geometry.inst_has_colors(m.instances) == 1
 }
 
 frustum_new() -> ptr {

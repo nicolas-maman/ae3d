@@ -101,27 +101,6 @@ esac
 . "$ROOT/scripts/native.sh"
 ae3d_glfw_flags
 
-# native/geometry/meshfile.c includes <zlib.h> and calls gzopen/gzread/gzclose, so
-# zlib is ours to link and always has been. It was never named here: on Linux
-# `ae cflags --libs` happens to carry -lz, because the Aether toolchain there is
-# built against zlib, and that transitive flag covered for us. A Windows Aether
-# built without zlib emits no -lz, and the link fails on every gz* call:
-#
-#   meshfile.o: undefined reference to `gzclose'
-#
-# Depending on another project's link line for a library we use directly is the
-# actual bug; the platform only decided when it surfaced.
-# Overridable from the environment for the same reason as GLFW above.
-if [ -n "${ZLIB_CFLAGS:-}" ] || [ -n "${ZLIB_LIBS:-}" ]; then
-    ZLIB_CFLAGS="${ZLIB_CFLAGS:-}"
-    ZLIB_LIBS="${ZLIB_LIBS:-}"
-elif command -v pkg-config >/dev/null 2>&1 && pkg-config --exists zlib; then
-    ZLIB_CFLAGS="$(pkg-config --cflags zlib)"
-    ZLIB_LIBS="$(pkg-config --libs zlib)"
-else
-    ZLIB_CFLAGS=""
-    ZLIB_LIBS="-lz"
-fi
 VULKAN_CFLAGS=""
 if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists vulkan; then
     VULKAN_CFLAGS="$(pkg-config --cflags vulkan)"
@@ -173,7 +152,7 @@ for src in $NATIVE_SOURCES; do
     extra="$(ae3d_native_extra_flags "$src")"
     compiler="$(ae3d_native_compiler "$CC" "$src")"
     if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ] || [ "$newest_header" -nt "$obj" ]; then
-        "$compiler" -c $CFLAGS $WARN $PIC $NATIVE_INCLUDE $extra $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o "$obj"
+        "$compiler" -c $CFLAGS $WARN $PIC $NATIVE_INCLUDE $extra $GLFW_CFLAGS $VULKAN_CFLAGS "$src" -o "$obj"
     fi
 done
 
@@ -190,7 +169,7 @@ for obj in "$OBJ_DIR"/*.o; do
     [ "$keep" = 1 ] || rm -f "$obj"
 done
 
-ae3d_native_build "$CC" "$OBJ_DIR" "$CFLAGS" "$GLFW_LIBS $ZLIB_LIBS"
+ae3d_native_build "$CC" "$OBJ_DIR" "$CFLAGS" "$GLFW_LIBS"
 
 if [ "$NATIVES_ONLY" = 1 ]; then
     echo "built: $(ae3d_native_library)"

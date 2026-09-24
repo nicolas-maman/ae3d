@@ -17,6 +17,7 @@ import ae3d.horde
 import ae3d.anim
 import ae3d.skin
 import ae3d.ecs
+import ae3d.posing
 
 exports (
     posebank_bake, posebank_bake_in_place, posebank_free,
@@ -37,16 +38,6 @@ extern ae3d_vk_pose_blas_destroy(handle: int)
 extern ae3d_vk_crowd_set_poses(handle: int, poses: int)
 extern ae3d_vk_ray_indirect() -> int
 
-extern ae3d_posebank_create(frames: int, bones: int) -> ptr
-extern ae3d_posebank_destroy(bank: ptr)
-extern ae3d_posebank_frames(bank: ptr) -> int
-extern ae3d_posebank_bones(bank: ptr) -> int
-extern ae3d_posebank_capture(bank: ptr, frame: int, palette: ptr)
-extern ae3d_posebank_get(bank: ptr, frame: int, bone: int, i: int) -> float
-extern ae3d_posebank_data(bank: ptr) -> ptr
-extern ae3d_posebank_set_travel(bank: ptr, frame: int, distance: float)
-extern ae3d_posebank_travel(bank: ptr, frame: int) -> float
-extern ae3d_posebank_speed(bank: ptr, phase: float, duration: float) -> float
 
 // Bake `frames` evenly spaced poses across `duration` seconds of the clip the
 // registry's players carry, into a bank the whole crowd will share. Each frame
@@ -82,7 +73,7 @@ posebank_bake_in_place(reg: *Registry, skel: *Skeleton, frames: int, start: floa
     bones = skin.skeleton_count(skel)
     if bones <= 0 { return null }
 
-    bank = ae3d_posebank_create(frames, bones)
+    bank = posing.posebank_create(frames, bones)
     if bank == null { return null }
 
     bound = core.vec3(0.0, 0.0, 0.0)
@@ -126,12 +117,12 @@ posebank_bake_in_place(reg: *Registry, skel: *Skeleton, frames: int, start: floa
             }
             last_x = travel.x
             last_z = travel.z
-            ae3d_posebank_set_travel(bank, k, walked)
+            posing.posebank_set_travel(bank, k, walked)
             if k < frames { skin.skeleton_update_shifted(skel, travel) }
         } else if k < frames {
             skin.skeleton_update(skel)
         }
-        if k < frames { ae3d_posebank_capture(bank, k, skin.skeleton_palette(skel)) }
+        if k < frames { posing.posebank_capture(bank, k, skin.skeleton_palette(skel)) }
         k = k + 1
     }
     return bank
@@ -139,18 +130,18 @@ posebank_bake_in_place(reg: *Registry, skel: *Skeleton, frames: int, start: floa
 
 // How far the clip's root had walked by frame k of an in-place bake, and how
 // fast it is walking at a phase of it. Zero for a bank baked as authored.
-posebank_travel(bank: ptr, frame: int) -> float { return ae3d_posebank_travel(bank, frame) }
+posebank_travel(bank: ptr, frame: int) -> float { return posing.posebank_travel(bank, frame) }
 posebank_speed(bank: ptr, phase: float, duration: float) -> float {
-    return ae3d_posebank_speed(bank, phase, duration)
+    return posing.posebank_speed(bank, phase, duration)
 }
 
-posebank_free(bank: ptr) { ae3d_posebank_destroy(bank) }
-posebank_frames(bank: ptr) -> int { return ae3d_posebank_frames(bank) }
-posebank_bones(bank: ptr) -> int { return ae3d_posebank_bones(bank) }
+posebank_free(bank: ptr) { posing.posebank_destroy(bank) }
+posebank_frames(bank: ptr) -> int { return posing.posebank_frames(bank) }
+posebank_bones(bank: ptr) -> int { return posing.posebank_bones(bank) }
 posebank_get(bank: ptr, frame: int, bone: int, i: int) -> float {
-    return ae3d_posebank_get(bank, frame, bone, i)
+    return posing.posebank_get(bank, frame, bone, i)
 }
-posebank_data(bank: ptr) -> ptr { return ae3d_posebank_data(bank) }
+posebank_data(bank: ptr) -> ptr { return posing.posebank_data(bank) }
 
 // A horde system: steer every live entity's velocity toward a target at a
 // common speed, so the crowd flows the same way rather than each wandering off
@@ -330,9 +321,9 @@ device_crowd_rays(dc: *DeviceCrowd, far: *Model, bank: ptr) -> bool {
     // The figures are counted on the device as the sort keeps them; a
     // device that cannot build from its own count keeps the crowd in the map.
     if ae3d_vk_ray_indirect() != 1 { return false }
-    frames = ae3d_posebank_frames(bank)
-    bones = ae3d_posebank_bones(bank)
-    dc.poses = ae3d_vk_pose_blas_create(core.model_mesh(far), ae3d_posebank_data(bank), frames, bones)
+    frames = posing.posebank_frames(bank)
+    bones = posing.posebank_bones(bank)
+    dc.poses = ae3d_vk_pose_blas_create(core.model_mesh(far), posing.posebank_data(bank), frames, bones)
     if dc.poses == 0 { return false }
     ae3d_vk_crowd_set_poses(dc.handle, dc.poses)
     return true

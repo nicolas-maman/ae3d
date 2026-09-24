@@ -62,16 +62,6 @@ esac
 . "$ROOT/scripts/native.sh"
 ae3d_glfw_flags
 
-if [ -n "${ZLIB_CFLAGS:-}" ] || [ -n "${ZLIB_LIBS:-}" ]; then
-    ZLIB_CFLAGS="${ZLIB_CFLAGS:-}"
-    ZLIB_LIBS="${ZLIB_LIBS:-}"
-elif command -v pkg-config >/dev/null 2>&1 && pkg-config --exists zlib; then
-    ZLIB_CFLAGS="$(pkg-config --cflags zlib)"
-    ZLIB_LIBS="$(pkg-config --libs zlib)"
-else
-    ZLIB_CFLAGS=""
-    ZLIB_LIBS="-lz"
-fi
 
 VULKAN_CFLAGS=""
 if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists vulkan; then
@@ -161,11 +151,11 @@ for src in $NATIVE_SOURCES; do
     extra="$(ae3d_native_extra_flags "$src")"
     compiler="$(ae3d_native_compiler "$CC" "$src")"
     if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ] || [ "$newest_header" -nt "$obj" ]; then
-        "$compiler" -c $CFLAGS $WARN $PIC -Inative $extra $GLFW_CFLAGS $ZLIB_CFLAGS $VULKAN_CFLAGS "$src" -o "$obj"
+        "$compiler" -c $CFLAGS $WARN $PIC -Inative $extra $GLFW_CFLAGS $VULKAN_CFLAGS "$src" -o "$obj"
     fi
 done
 
-ae3d_native_build "$CC" "$OBJ_DIR" "$CFLAGS" "$GLFW_LIBS $ZLIB_LIBS"
+ae3d_native_build "$CC" "$OBJ_DIR" "$CFLAGS" "$GLFW_LIBS"
 
 # Every module tree on the search path: ae3d.* out of src/, ui and vg.* out
 # of the aether-ui checkout, aephysics.* out of its submodule.
