@@ -61,6 +61,44 @@ The reach and tuck are **aims** (`physics.ragdoll_aim(ragdoll, bone, rotation)`)
 
 The settings were chosen by measurement. Each setting was tried on falls backward, forward and sideways, against a twin that does not protect itself, measuring the head's speed as it met the ground. The one chosen did better in all three directions, and so did its neighbours. Softening the knees in a fall, the obvious idea, made every direction worse.
 
+## On a figure
+
+`motion.on_figure(e, object)` gives an animated figure (`ae3d.figure`,
+#439) an active ragdoll:
+
+```aether
+zombie = figure.figure(e, "Zombie", "assets/zombie.glb")
+figure.play(figure.figure_of(zombie), "Walk", 1.0, true)
+body = motion.on_figure(e, zombie)           // ANIMATED: the clip plays, the bodies follow
+motion.set_mode(body, motion.POWERED)        // the muscles play the clip
+motion.set_get_up(body, 3.0)
+```
+
+The ragdoll is made where the object stands. It is turned to face the
+way the figure's feet point before it is dressed, so the figure keeps the
+turn the scene gave it. The figure's bones are found by name, in whichever
+humanoid naming they follow: the engine's pipeline's (`Hips`, `Spine`,
+`Chest`, `ThighL`...) or Mixamo's (`mixamorig:Hips`, and without the
+prefix, as most packs that follow it write them), whose top spine bone,
+`Spine2`, is the ragdoll's chest. A rig that is neither gets no ragdoll
+(`physics.humanoid_scheme` is -1). `motion.on_skeleton(e, object,
+skeleton)` does the same for a skeleton that is not a figure's.
+
+The scene file carries it as the `motion` record of the figure's group:
+`{"mode": "powered", "strength": 0.8, "protective": false, "get_up": 3}`.
+`motion.from_record(e, object, spec)` puts it back on a figure a scene
+read in. A figure getting up is written as the mode it gets up to.
+
+`tests/test_motion_figure.ae` checks two humanoid rigs, one in each
+naming, each turned a quarter turn by its object, and a two-bone rig:
+
+- both humanoids are known, and the two bones are not;
+- dressed, each faces within 3.7° of its object's turn;
+- `POWERED`, both stand on their muscles for two seconds, the pelvis at
+  1.0 m and leaning at most 1°;
+- the scene file brings back each one's mode, strength, protection and
+  get-up.
+
 ## Getting up
 
 `get_up(body)` gets a figure on the ground back on its feet, whatever mode it is in, and `set_get_up(body, seconds)` has it do so by itself once it has lain still that long (0, the default, never). On the ground is leaning past 1 rad, or the pelvis within 0.45 m of the figure's lowest point, which covers a figure that crumpled where it stood. Lain still is the pelvis moving less than 2 mm a step for ten steps. `down(body)` says it is.
