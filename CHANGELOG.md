@@ -17,8 +17,12 @@
   and the viewport against the inspector, each on a splitter with a 180 px
   floor. The dividers are set from the frame timer, never from a frame
   drawn inside the toolkit's layout pass (which undid them on Windows,
-  aether-ui#209), and the viewport asks for 320 points of width rather than
-  900 (a hard minimum on GTK, aether-ui#210).
+  aether-ui#209), the viewport asks for 320 points of width rather than
+  900 (a hard minimum on GTK, aether-ui#210), and the editor reads the
+  viewport's allocation each tick. On Linux the divider moves but the view
+  keeps its old width until GTK reports the viewport's size (#412,
+  aether-ui#211). Console lines are cut at the pane's edge rather than
+  widening it.
 - `test_engine_shadows` judges the shadow within each frame (#394), so a
   frame that comes out brighter overall on llvmpipe no longer reads as a
   shadow going the wrong way.
