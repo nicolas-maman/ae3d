@@ -14,8 +14,8 @@
 int    ae3d_store_size(int which);
 double ae3d_store_field(void *store, int which, int field);
 
-/* The finished frame's mean and brightest linear luminance, two frames late
-   (native/gpu/opengl.c); 1 when `out` holds them. */
+/* An OpenGL entry point by name, from the process or the window system:
+   what ae3d.glapi resolves every GL call it makes through (#398). */
 void  *ae3d_gl_proc(const char *name);
 
 /* Scripts: a compiled Aether source opened as a shared library, with the
@@ -35,18 +35,10 @@ int    ae3d_image_height(void *img);
 int    ae3d_image_fit(void *img, int limit);
 const char *ae3d_image_error(void);
 
-int    ae3d_gl_load(void);
-const char *ae3d_gl_version(void);
-const char *ae3d_gl_renderer(void);
 
 
 
 
-void  *ae3d_farr_create(int count);
-void   ae3d_farr_destroy(void *arr);
-void   ae3d_farr_set(void *arr, int i, double v);
-double ae3d_farr_get(void *arr, int i);
-int    ae3d_farr_count(void *arr);
 
 
 /* GPU time per pass, read three frames late so the read never waits. */

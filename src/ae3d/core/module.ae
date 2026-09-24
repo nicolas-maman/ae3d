@@ -31,7 +31,7 @@ exports (
     mesh_set_skin, mesh_is_skinned, mesh_skin_joint, mesh_skin_weight, mesh_decimate,
     mesh_surface_area, mesh_uv_area, mesh_distinct_planes, mesh_size,
     palette_create, palette_destroy, palette_bones, palette_set, palette_get,
-    palette_data, farr_create, farr_destroy, farr_set, farr_get, skinrows_create, skinrows_destroy, skinrows_count, skinrows_set,
+    palette_data, farr_create, farr_destroy, farr_set, farr_get, farr_count, skinrows_create, skinrows_destroy, skinrows_count, skinrows_set,
     Vec2, Vec3, Vec4, Quat, Mat4, vec2, vec3, vec4, quat, v3_add, v3_sub, v3_mul, v3_div,
     v3_neg, v3_dot, v3_cross, v3_len, v3_len_sq, v3_normalize, v3_distance, v3_lerp, v3_eq,
     v3_zero, v4_from_v3, v4_xyz, quat_ident, quat_rotate, quat_mul, quat_apply,
@@ -140,15 +140,6 @@ var g_depth_test = true
 
 var g_next_model_id = 1
 
-
-extern ae3d_farr_create(count: int) -> ptr
-
-extern ae3d_farr_destroy(arr: ptr)
-
-extern ae3d_farr_set(arr: ptr, i: int, v: float)
-
-extern ae3d_farr_count(arr: ptr) -> int
-extern ae3d_farr_get(arr: ptr, i: int) -> float
 
 
 struct Vec2 {
@@ -1401,7 +1392,7 @@ model_free(m: *Model) {
         while i < count {
             uniform = list.get_raw(m.uniforms, i) as *Uniform
             if uniform != null {
-                if uniform.array != null { ae3d_farr_destroy(uniform.array) }
+                if uniform.array != null { farr_destroy(uniform.array) }
                 heap.free(uniform)
             }
             i = i + 1
@@ -1735,12 +1726,12 @@ copy_uniforms(copy: *Model, src: *Model) {
             } else if u.kind == UNIFORM_VEC3 {
                 model_set_uniform_vec3(copy, u.name, u.vector)
             } else if u.array != null {
-                values = ae3d_farr_count(u.array)
+                values = farr_count(u.array)
                 into = model_set_uniform_array(copy, u.name, values,
                                                u.kind == UNIFORM_VEC3_ARRAY)
                 n = 0
                 while n < values {
-                    ae3d_farr_set(into, n, ae3d_farr_get(u.array, n))
+                    farr_set(into, n, farr_get(u.array, n))
                     n = n + 1
                 }
             }
@@ -1895,7 +1886,7 @@ upsert_uniform(m: *Model, name: string, kind: int) -> *Uniform {
     existing = find_uniform(m, name)
     if existing != null {
         if existing.array != null && kind != UNIFORM_FLOAT_ARRAY && kind != UNIFORM_VEC3_ARRAY {
-            ae3d_farr_destroy(existing.array)
+            farr_destroy(existing.array)
             existing.array = null
         }
         existing.kind = kind
@@ -1938,11 +1929,11 @@ model_set_uniform_array(m: *Model, name: string, count: int, vec3_array: bool) -
     kind = UNIFORM_FLOAT_ARRAY
     if vec3_array { kind = UNIFORM_VEC3_ARRAY }
     uniform = upsert_uniform(m, name, kind)
-    if uniform.array != null && ae3d_farr_count(uniform.array) != count {
-        ae3d_farr_destroy(uniform.array)
+    if uniform.array != null && farr_count(uniform.array) != count {
+        farr_destroy(uniform.array)
         uniform.array = null
     }
-    if uniform.array == null { uniform.array = ae3d_farr_create(count) }
+    if uniform.array == null { uniform.array = farr_create(count) }
     return uniform.array
 }
 
@@ -2595,10 +2586,47 @@ palette_data(palette: ptr) -> ptr { return posing.palette_data(palette) }
 // Weights keyed by the position they were authored against, for a loader to
 // spread over the vertices that position becomes.
 // A plain run of floats, for what is baked per position and handed to a load.
-farr_create(count: int) -> ptr { return ae3d_farr_create(count) }
-farr_destroy(values: ptr) { ae3d_farr_destroy(values) }
-farr_set(values: ptr, i: int, v: float) { ae3d_farr_set(values, i, v) }
-farr_get(values: ptr, i: int) -> float { return ae3d_farr_get(values, i) }
+// A float array: a uniform's values (a light's directions, a wave's
+// amplitudes), in 32-bit floats as a shader takes them, and their count.
+// It was native/gpu/opengl.c's; vulkan.c reads the count and the values
+// through this same layout (#398).
+struct FloatValues {
+    values: ptr                      // f32[count]
+    count: int
+}
+
+farr_create(count: int) -> ptr {
+    if count <= 0 { return null }
+    a = calloc(1, sizeof(FloatValues)) as *FloatValues
+    a.values = calloc(count, 4)
+    a.count = count
+    return a as ptr
+}
+
+farr_destroy(values: ptr) {
+    if values == null { return }
+    free((values as *FloatValues).values)
+    free(values)
+}
+
+farr_set(values: ptr, i: int, v: float) {
+    if values == null { return }
+    a = values as *FloatValues
+    if i < 0 || i >= a.count { return }
+    (a.values as f32[])[i] = v as f32
+}
+
+farr_get(values: ptr, i: int) -> float {
+    if values == null { return 0.0 }
+    a = values as *FloatValues
+    if i < 0 || i >= a.count { return 0.0 }
+    return (a.values as f32[])[i] as float
+}
+
+farr_count(values: ptr) -> int {
+    if values == null { return 0 }
+    return (values as *FloatValues).count
+}
 
 skinrows_create(count: int) -> ptr { return geometry.skinrows_create(count) }
 skinrows_destroy(rows: ptr) { geometry.skinrows_destroy(rows) }

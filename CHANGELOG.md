@@ -7,8 +7,11 @@
 - `native/gpu/opengl.c` moves into `ae3d.gl` (#398), in four slices: the GL
   state, the geometry cache and draws, programs, uniforms and textures, and
   the pass timers, framebuffers, readback and meter. It went from 1,464 lines
-  to 92: the entry-point load and the float arrays `vulkan.c` reads are all
-  that is left. `ae3d.glapi` is the GL entry points from Aether, each resolved
+  to nothing: the load, the float arrays (`ae3d.core`'s now, which
+  `vulkan.c` reads by their layout), the offscreen targets
+  (`ae3d.offscreen`) and the frame capture the agent reads
+  (`ae3d.capture`, which was `capture.c`) moved too. The resolver and the
+  contexts stay C: they are the platform's. `ae3d.glapi` is the GL entry points from Aether, each resolved
   once through the resolver the C used and called through its pointer.
   net_walk's OpenGL frame is the same to the byte after every slice, the GL
   meter reads the same numbers as the C one did, and the GL tests pass. On

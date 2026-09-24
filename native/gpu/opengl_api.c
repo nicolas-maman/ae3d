@@ -1,4 +1,4 @@
-#include "opengl_api.h"
+#include "ae3d.h"
 
 /* dlfcn.h is POSIX; Windows has no such header, so an unconditional include
  * ended the build before anything else could be tried:
@@ -19,11 +19,13 @@
 #  include <GLFW/glfw3.h>
 #endif
 
-// Entry points are resolved from the process first. That covers every context on
-// macOS, where the framework exports them all, and it means the offscreen path
-// needs no window toolkit to load GL. Elsewhere the driver hands out 3.x and
-// later entry points only through the windowing system's own resolver.
-static void *ae3d_gl_symbol(const char *name) {
+// An OpenGL entry point by name, for ae3d.glapi, which every GL call ae3d
+// makes goes through (#398). Resolved from the process first. That covers
+// every context on macOS, where the framework exports them all, and it means
+// the offscreen path needs no window toolkit to load GL. Elsewhere the driver
+// hands out 3.x and later entry points only through the windowing system's
+// own resolver.
+void *ae3d_gl_proc(const char *name) {
     void *symbol = NULL;
 #if !defined(_WIN32)
     symbol = dlsym(RTLD_DEFAULT, name);
@@ -32,22 +34,4 @@ static void *ae3d_gl_symbol(const char *name) {
     if (!symbol) symbol = (void *)glfwGetProcAddress(name);
 #endif
     return symbol;
-}
-
-/* The same resolver, for ae3d.glapi: the renderer's GL calls from Aether
-   resolve their entry points through it (#398). */
-void *ae3d_gl_proc(const char *name) { return ae3d_gl_symbol(name); }
-
-#define AE3D_GL_DEF(ret, name, args) ae3d_pfn_##name ae3d_##name;
-AE3D_GL_FUNCS(AE3D_GL_DEF)
-#undef AE3D_GL_DEF
-
-int ae3d_glapi_load(void) {
-    int missing = 0;
-#define AE3D_GL_LOAD(ret, name, args) \
-    ae3d_##name = (ae3d_pfn_##name)ae3d_gl_symbol(#name); \
-    if (!ae3d_##name) missing++;
-    AE3D_GL_FUNCS(AE3D_GL_LOAD)
-#undef AE3D_GL_LOAD
-    return missing;
 }

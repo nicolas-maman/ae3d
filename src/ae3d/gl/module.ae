@@ -49,13 +49,11 @@ exports (
 extern calloc(count: int, size: int) -> ptr
 extern ae3d_image_pixels(img: ptr) -> ptr
 extern glfwGetCurrentContext() -> ptr
+extern strlen(s: ptr) -> int
 extern pow(x: float, y: float) -> float
 extern ae3d_image_width(img: ptr) -> int
 extern ae3d_image_height(img: ptr) -> int
 extern free(p: ptr)
-extern ae3d_gl_load() -> int
-extern ae3d_gl_version() -> string
-extern ae3d_gl_renderer() -> string
 
 extern ae3d_image_load(path: string) -> ptr
 extern ae3d_image_fit(img: ptr, limit: int) -> int
@@ -1303,6 +1301,35 @@ ae3d_gl_draw_elements_instanced(count: int, byte_offset: int, instances: int) {
 ae3d_gl_draw_arrays(first: int, count: int) {
     glapi.glDrawArrays(glapi.TRIANGLES as uint32, first, count)
 }
+
+// --- the context's entry points, its version and its renderer (#398) -----------------------
+
+var g_loaded = false
+var g_version = ""
+var g_renderer = ""
+
+// One of GL's strings (glGetString), as an Aether string.
+gl_string(name: int) -> string {
+    p = glapi.glGetString(name as uint32)
+    if p == null { return "" }
+    return bytes.string_from_ptr(p, strlen(p))
+}
+
+// Whether the current context has every entry point ae3d calls: 0 when it
+// has, or how many it lacks. The version and the renderer are read once.
+ae3d_gl_load() -> int {
+    if g_loaded { return 0 }
+    missing = glapi.missing()
+    if missing == 0 {
+        g_version = gl_string(glapi.VERSION)
+        g_renderer = gl_string(glapi.RENDERER)
+        g_loaded = true
+    }
+    return missing
+}
+
+ae3d_gl_version() -> string { return g_version }
+ae3d_gl_renderer() -> string { return g_renderer }
 
 // --- the GL state, in Aether (#398) ----------------------------------------------------------
 //
