@@ -57,7 +57,7 @@ exports (
     ragdoll_stand, ragdoll_release, ragdoll_is_standing, ragdoll_turn, ragdoll_of_shape, hit_event_count, hit_event,
     ragdoll_dress, ragdoll_dress_named, ragdoll_is_dressed, humanoid_bone,
     ragdoll_follow, ragdoll_is_following, ragdoll_power, ragdoll_is_powered, ragdoll_set_bone_drive,
-    ragdoll_bone_drive_torque, ragdoll_set_balance_assist, ragdoll_balance_assist,
+    ragdoll_bone_drive_torque, ragdoll_set_balance_assist, ragdoll_aim, ragdoll_clear_aim, ragdoll_clear_aims, ragdoll_is_aimed, ragdoll_balance_assist,
     ragdoll_apply_impulse, ragdoll_bone_rotation, ragdoll_bone_target,
     ragdoll_center_of_mass, ragdoll_mass, ragdoll_joint_error, ragdoll_tilt,
     CharacterController, character_controller, character_move, character_grounded, character_velocity,
@@ -121,6 +121,7 @@ struct Ragdoll {
     following: bool                // the other way round: the rig drives the ragdoll, through its anchors
     powered: bool                  // following through its joints' motors within a torque budget, the root free
     friction: float                // newton metres: the joints' motors' friction when not powered
+    aims: ptr                      // float[BONE_COUNT * 5]: per bone, aimed (0/1) and a world rotation; null when none ever was
 }
 
 // A skinned figure worn by a ragdoll: a rig bone per ragdoll bone, each
@@ -1032,6 +1033,51 @@ ragdoll_balance_assist(r: *Ragdoll) -> float {
     return joint_solver.parallel_joint_get_max_torque(pelvis.anchor_joint_id)
 }
 
+// A bone aimed: its joint's motor drives its body to `rotation` in the
+// world, from wherever its parent is now, instead of to the pose the rig
+// gives it. What a controller reaching for something asks (arms out to a
+// fall, a head turned to a threat); the bones below it keep the rig's
+// pose relative to it. Within the joint's limits and its muscle, as any
+// target is.
+ragdoll_aim(r: *Ragdoll, index: int, rotation: Quat) {
+    if index < 0 || index >= human.BONE_COUNT { return }
+    if r.aims == null { r.aims = calloc(human.BONE_COUNT * 5, 8) }
+    aims = r.aims as float[]
+    q = core.quat_normalize(rotation)
+    aims[index * 5] = 1.0
+    aims[index * 5 + 1] = q.x
+    aims[index * 5 + 2] = q.y
+    aims[index * 5 + 3] = q.z
+    aims[index * 5 + 4] = q.w
+}
+
+// Back to the rig's pose: one bone, or all.
+ragdoll_clear_aim(r: *Ragdoll, index: int) {
+    if r.aims == null || index < 0 || index >= human.BONE_COUNT { return }
+    aims = r.aims as float[]
+    aims[index * 5] = 0.0
+}
+
+ragdoll_clear_aims(r: *Ragdoll) {
+    if r.aims == null { return }
+    i = 0
+    while i < human.BONE_COUNT {
+        ragdoll_clear_aim(r, i)
+        i = i + 1
+    }
+}
+
+ragdoll_is_aimed(r: *Ragdoll, index: int) -> bool {
+    if r.aims == null || index < 0 || index >= human.BONE_COUNT { return false }
+    aims = r.aims as float[]
+    return aims[index * 5] > 0.5
+}
+
+ragdoll_aim_rotation(r: *Ragdoll, index: int) -> Quat {
+    aims = r.aims as float[]
+    return core.quat(aims[index * 5 + 1], aims[index * 5 + 2], aims[index * 5 + 3], aims[index * 5 + 4])
+}
+
 // Every joint's motor toward the rig's pose, and the pelvis's anchor. The
 // relative rotation of the joint's frames the two bones' targets make is
 // compared with the one they have: the rotation between (in the parent
@@ -1050,6 +1096,12 @@ drive_joints(r: *Ragdoll, step: float) {
             parent_body = human.bone_at(&r.human, bone.parent_index).body_id
             wa = core.quat_mul(ragdoll_bone_target(r, bone.parent_index), bone.local_frame_a.q)
             wb = core.quat_mul(ragdoll_bone_target(r, i), bone.local_frame_b.q)
+            if ragdoll_is_aimed(r, i) {
+                // Aimed in the world: from the parent as it is, not as the
+                // rig would have it.
+                wa = core.quat_mul(dynamics.body_get_rotation(parent_body), bone.local_frame_a.q)
+                wb = core.quat_mul(ragdoll_aim_rotation(r, i), bone.local_frame_b.q)
+            }
             want = core.quat_normalize(core.quat_mul(core.quat_conjugate(wa), wb))
             ha = core.quat_mul(dynamics.body_get_rotation(parent_body), bone.local_frame_a.q)
             hb = core.quat_mul(dynamics.body_get_rotation(bone.body_id), bone.local_frame_b.q)
@@ -1251,6 +1303,7 @@ ragdoll_free(r: *Ragdoll) {
         i = i + 1
     }
     list.free(r.bones)
+    if r.aims != null { free(r.aims) }
     if r.rig != null {
         rig = r.rig as *Rig
         free(rig.bones)

@@ -42,9 +42,23 @@ The first version drove joint springs instead. A spring's stiffness is relative 
 
 **Strength and hits.** `set_strength(body, s)` scales every budget (0 is limp, 1 full strength). `hit(body, bone, point, impulse)` applies the blow and takes 95% of the struck bone's budget and half of its neighbours'. It comes back over `set_recovery` seconds (0.8 by default), so a shoulder shot drops the arm and the arm comes back up.
 
+## The protective fall
+
+A `POWERED` figure that leans more than 0.35 rad (20°) from its pose is falling (`falling(body)`), and it protects itself, as a person does (`set_protective(body, false)` turns this off):
+
+- it stops fighting for a balance that is lost: the pelvis's assist goes to 0;
+- its arms reach toward where it is falling, 0.7 down to 1 along the fall and a little out to each side so the hands land apart, and straight, since a straight arm takes the landing through its joints where a bent one folds on its elbow's muscle;
+- its head tucks 0.5 rad away from the fall, as far as the neck goes.
+
+If it catches itself (leans less than half the threshold again), the reach and the tuck let go and the balance comes back.
+
+The reach and tuck are **aims** (`physics.ragdoll_aim(ragdoll, bone, rotation)`): a bone's joint drives it to a rotation in the world, from wherever its parent is, instead of to the animation's pose. The bones below it keep the animation's pose relative to it. Any controller can aim a bone this way, for example to turn a head toward a threat. `ragdoll_clear_aim` and `ragdoll_clear_aims` hand the bones back to the animation.
+
+The settings were chosen by measurement. Each setting was tried on falls backward, forward and sideways, against a twin that does not protect itself, measuring the head's speed as it met the ground. The one chosen did better in all three directions, and so did its neighbours. Softening the knees in a fall, the obvious idea, made every direction worse.
+
 ## What it is held to
 
-`tests/test_motion.ae` runs five figures on one ground, each dressed in a humanoid rig:
+`tests/test_motion.ae` runs eleven figures on one ground, each dressed in a humanoid rig:
 
 | Figure | Measured |
 |---|---|
@@ -53,6 +67,10 @@ The first version drove joint springs instead. A spring's stiffness is relative 
 | the felled, 400 N·s to the chest | down |
 | the struck, 8 N·s to the right upper arm | its muscle at 5% (the forearm's at half), then back to full |
 | the limp | down |
+| three protected fallers, felled by 400 N·s from the front, from behind and from the side | the hands reach the ground first each time (6, 4 and 15 steps before the head); the head meets it at 1.82, 1.73 and 1.22 m/s |
+| their unprotected twins | the head meets it at 4.53, 3.68 and 2.01 m/s |
+
+The shoved never takes itself for falling. Hands and head are measured by their capsules' lowest points (the forearm's hand end, and the neck bone's capsule, which is the head).
 
 Pose error is measured per joint (a bone against its parent), which is what a muscle answers for. The lean is the pelvis's up against the animation's. A figure turned about the vertical is still on its pose.
 
@@ -60,7 +78,6 @@ Pose error is measured per joint (a bone against its parent), which is what a mu
 
 As #414 lays out:
 - balance by feedback on the hips and the stance foot, stepping when the centre of mass leaves the feet;
-- the protective fall: arms out toward the ground, head up;
 - stagger, writhe, and get up, blending back to the animation without a pop;
 - the inspector's section, with a Hit button in the viewport;
 - the street's bystanders reacting to the car instead of going limp.
