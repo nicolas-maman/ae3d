@@ -1236,18 +1236,35 @@ check_colour_picker() {
     width = picker_width(t)
     tree_free(t)
     check_detail("beside the channel sliders and a hex field", rows, "the material's red, green, blue or hex is missing")
-    check_detail("and laid out across the panel", width > 150.0, "${width} points wide")
-    if !rows || width <= 150.0 {
+    if !rows {
+        free(hex_block)
+        return
+    }
+    hex = hex_box[0]
+
+    // The hex, typed: the sliders follow. Nothing here needs the picker's
+    // size, so it holds everywhere.
+    set_text(hex, "#FF0000")
+    check("a colour typed into the hex field sets the material", wait_colour(1.0, 0.0, 0.0))
+
+    // The rest is clicked by position, and GTK reports a canvas as 0 x 0
+    // (#412, aether-ui#211): a note on Linux until it says the picker's
+    // width, a check everywhere else.
+    laid_out = width > 150.0
+    if os.platform() == "linux" && !laid_out {
+        check_note("and laid out across the panel", laid_out, "${width} points wide", 412)
+        free(hex_block)
+        return
+    }
+    check_detail("and laid out across the panel", laid_out, "${width} points wide")
+    if !laid_out {
         free(hex_block)
         return
     }
     span = width - 1.0
-    hex = hex_box[0]
 
-    // The hex, typed: the sliders follow, and the picker's hue with them --
-    // the top right of the square, full saturation and value, is then red.
-    set_text(hex, "#FF0000")
-    check("a colour typed into the hex field sets the material", wait_colour(1.0, 0.0, 0.0))
+    // The picker's hue followed the hex: the top right of the square, full
+    // saturation and value, is red.
     top_right = picker_pixel(handle, (span - 2.0) as int, 2, (width) as int)
     check_detail("and the picker's square is painted at its hue", pixel_near(top_right, 253, 0, 0, 12),
                  "top right pixel ${top_right}")
