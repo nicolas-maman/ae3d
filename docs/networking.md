@@ -84,6 +84,16 @@ net.player_input(session, walk, jump, now)        // walk in m/s, jump in m/s up
 
 Networked scene objects are marked before hosting or joining, so their ids come first and the players' after them.
 
+`examples/net_walk.ae` is players on a plaza: the host plays too, every client joins with a capsule of its own, W/A/S/D walk and space jumps, and the camera follows your own player.
+
+```bash
+./build.sh examples/net_walk.ae
+./build/net_walk                              # host and a player, on 127.0.0.1:7777
+AE3D_NET=join:127.0.0.1 ./build/net_walk      # a client
+```
+
+With `AE3D_NET_AUTOWALK=1` each walks five seconds round a circle by itself, and prints where every player is when it closes. A host and a client run side by side over TCP print the same positions for both players.
+
 ## What it is held to
 
 `tests/test_net.ae` runs a host and a client in one process. Sixteen objects go round a circle of 10 m at a radian a second, and the client is measured against where the host had each object at the client's `view_time`:

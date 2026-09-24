@@ -47,7 +47,8 @@
   `player_input`, `my_player`, `player_of`. `tests/test_players.ae`: a host
   and two clients over 100 ms, 20 ms jitter and 2% loss; reconciliation moves
   a player at most 0.0004 mm, a jump's peak agrees to the micron, commands
-  cost 2.95 KB a second.
+  cost 2.95 KB a second. `host_play`: the host plays too.
+  `examples/net_walk.ae`: players on a plaza, over TCP.
 - `ae3d.net` (#413, first slice): a host and its clients, over TCP or an
   in-process loopback hub whose link can be given a latency, a jitter and a
   loss, deterministically. A hello and a welcome, then snapshots of every

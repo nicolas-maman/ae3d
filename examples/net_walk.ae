@@ -1,0 +1,185 @@
+// Multiplayer walking (#413): every player a capsule on a plaza, walked by
+// its own keyboard, seen by everyone.
+//
+//   ./build.sh examples/net_walk.ae
+//   ./build/net_walk                                  # host, and a player, on 127.0.0.1:7777
+//   AE3D_NET=join:127.0.0.1 ./build/net_walk          # a client, in another terminal
+//   AE3D_NET_BIND=0.0.0.0 ./build/net_walk            # host for the whole network
+//
+// W/A/S/D walk, space jumps. Your own player moves the moment you press a
+// key (the session predicts it) and the host's world has the last word
+// (the session reconciles against it); everyone else's is drawn a tenth of
+// a second behind, between two snapshots. Both sides build the same plaza,
+// crates and all, so a player walks into the same crate everywhere.
+
+import ae3d.core
+import ae3d.platform
+import ae3d.engine
+import ae3d.behaviour
+import ae3d.input
+import ae3d.loader
+import ae3d.physics
+import ae3d.net
+import std.os
+import std.string
+
+const WALK = 4.0                     // metres a second
+const JUMP = 5.0                     // metres a second, up
+
+struct Plaza {
+    e: *Engine
+    session: *Net
+    jumped: bool
+    autowalk: bool                   // AE3D_NET_AUTOWALK=1: five seconds round a circle, for runs with no one at the keys
+    steps: int
+}
+
+// Every player, on either side: a capsule in its own colour, feet at its
+// origin, the host's (client 0) and each client's a couple of metres apart.
+make_player(context: ptr, client: int) -> *CharacterController {
+    p = context as *Plaza
+    body = loader.capsule(core.vec3(0.0, 0.3, 0.0), core.vec3(0.0, 1.5, 0.0), 0.3, 16, 6)
+    hue = ((client * 3) % 8) as float / 8.0
+    core.model_glossy(body, 0.25 + 0.7 * hue, 0.35, 0.95 - 0.7 * hue)
+    o = engine.object(p.e, "Player ${client}", body)
+    behaviour.object_set_position(o, core.vec3((client as float) * 2.0 - 4.0, 0.02, 4.0))
+    return physics.character_controller(o, 0.3, 1.8)
+}
+
+// A crate, the same on every side.
+crate(e: *Engine, x: float, z: float, size: float) {
+    box = loader.cube(size)
+    core.model_matte(box, 0.55, 0.42, 0.28)
+    o = engine.object(e, "Crate", box)
+    behaviour.object_set_position(o, core.vec3(x, size * 0.5, z))
+    physics.box_collider(o, core.vec3(size * 0.5, size * 0.5, size * 0.5), physics.material(0.7, 0.0))
+}
+
+// A fixed step's command: the keys as a walk along the plaza, a jump on
+// space from the ground.
+walk(state: ptr, e: *Engine, step: float) {
+    p = state as *Plaza
+    keys = engine.engine_input(e)
+    mine = net.my_player(p.session)
+    if mine == null { return }
+    ahead = input.axis(keys, "ahead")
+    left = input.axis(keys, "left")
+    wx = 0.0 - left
+    wz = 0.0 - ahead
+    p.steps = p.steps + 1
+    if p.autowalk && p.steps <= 300 {
+        // Five seconds round a circle of 4 m a lap at the walking pace, one
+        // way on the host, the other on a client; then still.
+        turn = (p.steps as float) * step * WALK / 4.0
+        if mine.client > 0 { turn = 0.0 - turn }
+        wx = core.cos_of(turn)
+        wz = core.sin_of(turn)
+    }
+    len = core.sqrt_of(wx * wx + wz * wz)
+    if len > 1.0 {
+        wx = wx / len
+        wz = wz / len
+    }
+    jump = 0.0
+    if input.held(keys, "jump") && !p.jumped && physics.character_grounded(mine.controller) {
+        jump = JUMP
+        p.jumped = true
+    }
+    if !input.held(keys, "jump") { p.jumped = false }
+    net.player_input(p.session, core.vec3(wx * WALK, 0.0, wz * WALK), jump, platform.time())
+}
+
+// The camera over your own player's shoulder, once there is one.
+follow(state: ptr, e: *Engine, delta: float) {
+    p = state as *Plaza
+    mine = net.my_player(p.session)
+    cam = engine.engine_camera(e)
+    if mine == null {
+        core.camera_set_position(cam, core.vec3(0.0, 14.0, 22.0))
+        core.camera_look_at(cam, core.vec3(0.0, 0.0, 0.0))
+        return
+    }
+    feet = behaviour.object_position(mine.controller.object as *GameObject)
+    core.camera_set_position(cam, core.vec3(feet.x, feet.y + 5.0, feet.z + 8.0))
+    core.camera_look_at(cam, core.vec3(feet.x, feet.y + 1.2, feet.z))
+}
+
+main() {
+    mode = core.text(os.getenv("AE3D_NET"))
+    session = null as *Net
+    hosting = string.starts_with(mode, "join:") != 1
+    if hosting {
+        bind = core.text(os.getenv("AE3D_NET_BIND"))
+        if bind == "" { bind = "127.0.0.1" }
+        session = net.host_tcp(bind, 7777)
+    } else {
+        address = string.substring(mode, 5, string.length(mode))
+        session = net.join_tcp(address, 7777)
+    }
+    if session == null {
+        println("net_walk: ${net.last_error()}")
+        return
+    }
+
+    e = engine.engine_new()
+    engine.engine_set_size(e, 1024, 640)
+    engine.engine_set_camera_input(e, false)
+    engine.engine_set_fixed_step(e, 1.0 / 60.0)
+    if hosting {
+        engine.engine_set_title(e, "ae3d - net walk (host)")
+    } else {
+        engine.engine_set_title(e, "ae3d - net walk (client)")
+    }
+    light = core.light_sun(core.vec3(0.4, 0.8, 0.5))
+    engine.engine_set_light(e, light)
+    engine.engine_set_time_of_day(e, 15.0)
+    keys = engine.engine_input(e)
+    input.bind_axis(keys, "ahead", platform.KEY_W, platform.KEY_S)
+    input.bind_axis(keys, "left", platform.KEY_A, platform.KEY_D)
+    input.bind_key(keys, "jump", platform.KEY_SPACE)
+
+    physics.attach(e)
+    ground = loader.plane(2, 60.0)
+    core.model_set_position(ground, 0.0 - 30.0, 0.0, 0.0 - 30.0)
+    core.model_matte(ground, 0.3, 0.31, 0.33)
+    engine.object(e, "Ground", ground)
+    // The plane is placed by its corner; the ground to stand on is a slab
+    // under it, centred.
+    floor = engine.object(e, "Floor", null)
+    behaviour.object_set_position(floor, core.vec3(0.0, 0.0 - 0.5, 0.0))
+    physics.box_collider(floor, core.vec3(30.0, 0.5, 30.0), physics.material(0.8, 0.0))
+    crate(e, 3.0, 0.0 - 2.0, 1.0)
+    crate(e, 0.0 - 5.0, 0.0 - 6.0, 1.5)
+    crate(e, 7.0, 3.0, 0.8)
+    crate(e, 0.0 - 1.0, 0.0 - 12.0, 2.0)
+
+    plaza = Plaza { e: e, session: session, jumped: false, autowalk: string.equals(core.text(os.getenv("AE3D_NET_AUTOWALK")), "1") == 1, steps: 0 }
+    net.set_player_maker(session, make_player, (&plaza) as ptr)
+    if hosting { net.host_play(session, platform.time()) }
+
+    b = engine.behaviour_new("plaza", (&plaza) as ptr)
+    b.fixed_update = walk
+    b.update = follow
+    engine.engine_add_behaviour(e, b)
+    net.attach(e, session)
+
+    engine.engine_run(e)
+
+    // Where every player is, as this side has it: a host and a client run
+    // side by side should agree to within what a tenth of a second walks.
+    println("net_walk: ${net.player_count(session)} players")
+    k = 0
+    while k < 8 {
+        pl = net.player_of(session, k)
+        if pl != null {
+            at = behaviour.object_position(pl.controller.object as *GameObject)
+            println("  player ${k} at (${at.x}, ${at.y}, ${at.z})")
+            physics.character_free(pl.controller)
+        }
+        k = k + 1
+    }
+
+    engine.engine_free(e)
+    net.net_free(session)
+    core.light_free(light)
+}
