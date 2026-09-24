@@ -23,7 +23,10 @@
 // A mesh or an instance store is a handle (ptr), as it was across the C
 // boundary.
 
-import ae3d.jobs
+// No imports: a script (a shared library of Aether that links no runtime of
+// its own) imports ae3d.core, and core imports this, so nothing here may
+// pull in a module that needs one. The heading loop reaches the engine's
+// job pool through the native door (ae3d_jobs_for), not through ae3d.jobs.
 
 exports (
     GeoMesh, GeoInstances, VERTEX_FLOATS, SKIN_FLOATS, POINT_FLOATS,
@@ -57,6 +60,8 @@ extern sqrt(x: float) -> float
 extern fabs(x: float) -> float
 extern sin(x: float) -> float
 extern cos(x: float) -> float
+extern ae3d_jobs_for(count: int, grain: int, body: ptr, context: ptr)
+extern ae3d_geometry_yaw_rows(context: ptr, start: int, end: int)
 
 const VERTEX_FLOATS = 9
 const SKIN_FLOATS = 8
@@ -1178,7 +1183,9 @@ inst_set_positions(handle: ptr, xyz: ptr, count: int, sx: float, sy: float, sz: 
 // (+x) maps to (cos a, 0, -sin a), the direction the caller moves the
 // instance in, so facing and travel agree and the feet do not skate. A
 // matrix, a sine and a cosine an instance: half a million are a few
-// milliseconds on one core, so the range goes over the job pool.
+// milliseconds on one core, so the range goes over the job pool, through
+// the door the native loops use: on the engine's pool when the engine has
+// one, on this thread when not.
 struct YawPass {
     matrices: ptr
     xyz: ptr
@@ -1188,7 +1195,8 @@ struct YawPass {
     sz: float
 }
 
-yaw_block(start: int, end: int, worker: int, context: ptr) {
+@c_callback("ae3d_geometry_yaw_rows")
+yaw_rows(context: ptr, start: int, end: int) {
     pass = context as *YawPass
     m = pass.matrices as f32[]
     xyz = pass.xyz as float[]
@@ -1228,7 +1236,7 @@ inst_set_positions_yaw(handle: ptr, xyz: ptr, yaw: ptr, count: int, sx: float, s
     limit = count
     if n.count < limit { limit = n.count }
     pass = YawPass { matrices: n.matrices, xyz: xyz, yaw: yaw, sx: sx, sy: sy, sz: sz }
-    jobs.parallel_for(yaw_block, limit, 8192, (&pass) as ptr)
+    ae3d_jobs_for(limit, 8192, (&ae3d_geometry_yaw_rows) as ptr, (&pass) as ptr)
 }
 
 inst_set_colors(handle: ptr, rgb: ptr, count: int) {
