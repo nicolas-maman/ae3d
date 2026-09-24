@@ -1,5 +1,6 @@
-// Write the glTF fixtures tests/test_gltf reads: a two-bone arm, once as
-// a .glb and once as a .gltf beside its .bin, from the same numbers.
+// Write the glTF fixtures the tests read: a two-bone arm, once as a .glb
+// and once as a .gltf beside its .bin, from the same numbers; and a
+// twenty-bone box man as a .glb.
 //
 // The arm is a box two units tall on the Y axis, its lower four vertices
 // bound to the root bone and its upper four to a child bone one unit up.
@@ -7,6 +8,19 @@
 // linearly, so at the end the upper half lies along -X; "Lift" steps the
 // root up by one unit at half a second. The material is red, metallic 0,
 // roughness 0.5.
+//
+// The box man is a figure in metres, Y up, standing on y = 0 about 1.84 m
+// tall and facing -Z, its toes pointing that way. Its bones are a Mixamo
+// rig's, named with the "mixamorig:" prefix, under an "Armature" node at
+// the origin, placed with the proportions of the engine's own test rigs:
+// the hips one metre up, the shoulders 0.17 m either side of Spine2, the
+// legs 0.1 m either side of the hips, left at +X. Every bone carries one
+// box, roughly its length and 0.1 to 0.3 m thick, every vertex of it
+// weighted wholly to that bone, so a vertex goes exactly where its bone
+// takes it. "Idle" bows Spine2 eight degrees forward and back over two
+// seconds and ends where it began; "Wave" raises the right arm a hundred
+// and fifty degrees out to the side and lowers it over one second. The
+// material is a matte clay.
 //
 //     ./build.sh tools/make_gltf_fixture.ae && ./build/make_gltf_fixture tests/fixtures/gltf
 import std.os
@@ -22,6 +36,7 @@ extern fopen(path: string, mode: string) -> ptr
 extern fwrite(buffer: ptr, size: long, count: long, f: ptr) -> long
 extern fclose(f: ptr) -> int
 extern sin(x: float) -> float
+extern cos(x: float) -> float
 
 const FLOAT = 5126
 const UNSIGNED_BYTE = 5121
@@ -29,6 +44,17 @@ const UNSIGNED_SHORT = 5123
 const ARRAY_BUFFER = 34962
 const ELEMENT_ARRAY_BUFFER = 34963
 const CAPACITY = 65536
+
+// The box man's bones, in the skin's order: a vertex's joint index is the
+// bone's place here, and its node is two further on, after the Armature
+// and the node that carries the mesh.
+const BONES = 20
+const FIRST_BONE_NODE = 2
+const SPINE2 = 3
+const RIGHT_ARM = 9
+// A box is six faces of four vertices and two triangles each.
+const BOX_VERTICES = 24
+const BOX_INDICES = 36
 
 // The one buffer every accessor reads, and the document's views and
 // accessors as they are added.
@@ -148,10 +174,63 @@ copy_string(dst: ptr, at: int, s: string, length: int) {
     bytes.free(b)
 }
 
+// The document as a .glb: header, JSON chunk (space padded to 4), BIN chunk
+// (zero padded), the one buffer carried in the binary chunk. The buffer's
+// length is written before the padding, the chunk's after.
+write_glb(path: string, doc: ptr, f: *Fixture) {
+    glb_buffers = json.arr()
+    glb_buffer = json.obj()
+    json.set(glb_buffer, "byteLength", json.from_int(f.size as long))
+    json.push(glb_buffers, glb_buffer)
+    json.set(doc, "buffers", glb_buffers)
+    glb_text, glb_err = json.encode(doc)
+    if glb_err != "" {
+        println("make_gltf_fixture: ${glb_err}")
+        os.exit(1)
+    }
+    json_size = string.length(glb_text)
+    json_padded = (json_size + 3) / 4 * 4
+    pad4(f)
+    total = 12 + 8 + json_padded + 8 + f.size
+    head = malloc((28 + json_padded) as long)
+    mem.set_uint32(head, 0, 1179937895 as long)         // "glTF"
+    mem.set_uint32(head, 4, 2 as long)
+    mem.set_uint32(head, 8, total as long)
+    mem.set_uint32(head, 12, json_padded as long)
+    mem.set_uint32(head, 16, 1313821514 as long)        // "JSON"
+    copy_string(head, 20, glb_text, json_size)
+    i = json_size
+    while i < json_padded { mem.set_uint8(head, 20 + i, 32); i = i + 1 }
+    mem.set_uint32(head, 20 + json_padded, f.size as long)
+    mem.set_uint32(head, 24 + json_padded, 5130562 as long)  // "BIN\0"
+    write_file(path, head, 28 + json_padded, f.blob, f.size)
+    free(head)
+}
+
+// What both fixtures open with: the asset, and one scene rooted at node 0.
+document() -> ptr {
+    doc = json.obj()
+    asset = json.obj()
+    json.set(asset, "version", json.str("2.0"))
+    json.set(asset, "generator", json.str("ae3d tools/make_gltf_fixture.ae"))
+    json.set(doc, "asset", asset)
+    json.set(doc, "scene", json.from_int(0 as long))
+    scenes = json.arr()
+    scene = json.obj()
+    json.set(scene, "nodes", ints_json(0, 0, 1))
+    json.push(scenes, scene)
+    json.set(doc, "scenes", scenes)
+    return doc
+}
+
 main() {
     out_dir = "tests/fixtures/gltf"
     if os.args_count() > 1 { out_dir = os.args_get(1) }
+    write_arm(out_dir)
+    write_box_man(out_dir)
+}
 
+write_arm(out_dir: string) {
     // Lower half (0..1) on bone 0, upper half (1..2) on bone 1; a quad per
     // face would be nicer, but twelve vertices and sixteen triangles are
     // enough for a loader to be checked against.
@@ -263,26 +342,16 @@ main() {
     a_lift_t = add(&f, lift_t, 3, 1, FLOAT, "SCALAR", 0, true)
     a_lift_v = add(&f, lift_v, 3, 3, FLOAT, "VEC3", 0, false)
 
-    doc = json.obj()
-    asset = json.obj()
-    json.set(asset, "version", json.str("2.0"))
-    json.set(asset, "generator", json.str("ae3d tools/make_gltf_fixture.ae"))
-    json.set(doc, "asset", asset)
-    json.set(doc, "scene", json.from_int(0 as long))
-    scenes = json.arr()
-    scene = json.obj()
-    json.set(scene, "nodes", ints_json(0, 0, 1))
-    json.push(scenes, scene)
-    json.set(doc, "scenes", scenes)
+    doc = document()
     nodes = json.arr()
     root = node("Root")
     json.set(root, "children", ints_json(1, 2, 2))
     json.set(root, "translation", vec3_json(0.0, 0.0, 0.0))
     json.push(nodes, root)
-    arm = node("Arm")
-    json.set(arm, "mesh", json.from_int(0 as long))
-    json.set(arm, "skin", json.from_int(0 as long))
-    json.push(nodes, arm)
+    arm_node = node("Arm")
+    json.set(arm_node, "mesh", json.from_int(0 as long))
+    json.set(arm_node, "skin", json.from_int(0 as long))
+    json.push(nodes, arm_node)
     lower = node("Lower")
     json.set(lower, "children", ints_json(3, 0, 1))
     json.set(lower, "translation", vec3_json(0.0, 0.0, 0.0))
@@ -318,21 +387,7 @@ main() {
     json.set(skin, "skeleton", json.from_int(2 as long))
     json.push(skins, skin)
     json.set(doc, "skins", skins)
-    materials = json.arr()
-    material = json.obj()
-    json.set(material, "name", json.str("Red"))
-    pbr = json.obj()
-    base = json.arr()
-    json.push(base, json.num(0.8))
-    json.push(base, json.num(0.1))
-    json.push(base, json.num(0.1))
-    json.push(base, json.num(1.0))
-    json.set(pbr, "baseColorFactor", base)
-    json.set(pbr, "metallicFactor", json.num(0.0))
-    json.set(pbr, "roughnessFactor", json.num(0.5))
-    json.set(material, "pbrMetallicRoughness", pbr)
-    json.push(materials, material)
-    json.set(doc, "materials", materials)
+    json.set(doc, "materials", material_json("Red", 0.8, 0.1, 0.1, 0.5))
     animations = json.arr()
     json.push(animations, animation("Bend", a_bend_t, a_bend_q, "LINEAR", 3, "rotation"))
     json.push(animations, animation("Lift", a_lift_t, a_lift_v, "STEP", 0, "translation"))
@@ -359,34 +414,27 @@ main() {
     write_file("${out_dir}/arm.gltf", text_bytes, text_size + 1, null, 0)
     write_file("${out_dir}/arm.bin", f.blob, f.size, null, 0)
 
-    // .glb: header, JSON chunk (space padded to 4), BIN chunk (zero padded).
-    glb_buffers = json.arr()
-    glb_buffer = json.obj()
-    json.set(glb_buffer, "byteLength", json.from_int(f.size as long))
-    json.push(glb_buffers, glb_buffer)
-    json.set(doc, "buffers", glb_buffers)
-    glb_text, glb_err = json.encode(doc)
-    if glb_err != "" {
-        println("make_gltf_fixture: ${glb_err}")
-        os.exit(1)
-    }
-    json_size = string.length(glb_text)
-    json_padded = (json_size + 3) / 4 * 4
-    pad4(&f)
-    total = 12 + 8 + json_padded + 8 + f.size
-    head = malloc((28 + json_padded) as long)
-    mem.set_uint32(head, 0, 1179937895 as long)         // "glTF"
-    mem.set_uint32(head, 4, 2 as long)
-    mem.set_uint32(head, 8, total as long)
-    mem.set_uint32(head, 12, json_padded as long)
-    mem.set_uint32(head, 16, 1313821514 as long)        // "JSON"
-    copy_string(head, 20, glb_text, json_size)
-    i = json_size
-    while i < json_padded { mem.set_uint8(head, 20 + i, 32); i = i + 1 }
-    mem.set_uint32(head, 20 + json_padded, f.size as long)
-    mem.set_uint32(head, 24 + json_padded, 5130562 as long)  // "BIN\0"
-    write_file("${out_dir}/arm.glb", head, 28 + json_padded, f.blob, f.size)
+    write_glb("${out_dir}/arm.glb", doc, &f)
     println("wrote ${out_dir} arm.gltf arm.bin arm.glb ${f.size} bytes of buffer")
+}
+
+// The one material a fixture carries: a base colour, metallic 0.
+material_json(name: string, r: float, g: float, b: float, roughness: float) -> ptr {
+    materials = json.arr()
+    material = json.obj()
+    json.set(material, "name", json.str(name))
+    pbr = json.obj()
+    base = json.arr()
+    json.push(base, json.num(r))
+    json.push(base, json.num(g))
+    json.push(base, json.num(b))
+    json.push(base, json.num(1.0))
+    json.set(pbr, "baseColorFactor", base)
+    json.set(pbr, "metallicFactor", json.num(0.0))
+    json.set(pbr, "roughnessFactor", json.num(roughness))
+    json.set(material, "pbrMetallicRoughness", pbr)
+    json.push(materials, material)
+    return materials
 }
 
 animation(name: string, input: int, output: int, interpolation: string, target_node: int, path: string) -> ptr {
@@ -409,4 +457,370 @@ animation(name: string, input: int, output: int, interpolation: string, target_n
     json.push(channels, channel)
     json.set(a, "channels", channels)
     return a
+}
+
+// ---------------------------------------------------------------------------
+// The box man.
+// ---------------------------------------------------------------------------
+
+bone_name(i: int) -> string {
+    if i == 0 { return "mixamorig:Hips" }
+    if i == 1 { return "mixamorig:Spine" }
+    if i == 2 { return "mixamorig:Spine1" }
+    if i == 3 { return "mixamorig:Spine2" }
+    if i == 4 { return "mixamorig:Neck" }
+    if i == 5 { return "mixamorig:Head" }
+    if i == 6 { return "mixamorig:LeftArm" }
+    if i == 7 { return "mixamorig:LeftForeArm" }
+    if i == 8 { return "mixamorig:LeftHand" }
+    if i == 9 { return "mixamorig:RightArm" }
+    if i == 10 { return "mixamorig:RightForeArm" }
+    if i == 11 { return "mixamorig:RightHand" }
+    if i == 12 { return "mixamorig:LeftUpLeg" }
+    if i == 13 { return "mixamorig:LeftLeg" }
+    if i == 14 { return "mixamorig:LeftFoot" }
+    if i == 15 { return "mixamorig:LeftToeBase" }
+    if i == 16 { return "mixamorig:RightUpLeg" }
+    if i == 17 { return "mixamorig:RightLeg" }
+    if i == 18 { return "mixamorig:RightFoot" }
+    return "mixamorig:RightToeBase"
+}
+
+// The bone each hangs from, -1 for the Hips, which hang from the Armature.
+// Every parent comes before its children, so the world positions add up in
+// one pass and the loader frees the nodes leaves first.
+bone_parent(i: int) -> int {
+    if i == 0 { return 0 - 1 }
+    if i == 6 || i == 9 { return SPINE2 }
+    if i == 12 || i == 16 { return 0 }
+    return i - 1
+}
+
+put3(a: float[], i: int, x: float, y: float, z: float) {
+    a[i * 3] = x
+    a[i * 3 + 1] = y
+    a[i * 3 + 2] = z
+}
+
+// Each bone's place relative to its parent, in metres: the test rigs'
+// proportions, the right side the left mirrored in X.
+bone_offsets() -> float[] {
+    o = floats(BONES * 3)
+    put3(o, 0, 0.0, 1.0, 0.0)
+    put3(o, 1, 0.0, 0.09, 0.0)
+    put3(o, 2, 0.0, 0.1, 0.0)
+    put3(o, 3, 0.0, 0.2, 0.0)
+    put3(o, 4, 0.0, 0.22, 0.0)
+    put3(o, 5, 0.0, 0.09, 0.0)
+    side = 0
+    while side < 2 {
+        sx = 1.0
+        if side == 1 { sx = 0.0 - 1.0 }
+        shoulder = 6 + side * 3
+        put3(o, shoulder, sx * 0.17, 0.14, 0.0)
+        put3(o, shoulder + 1, 0.0, 0.0 - 0.29, 0.0)
+        put3(o, shoulder + 2, 0.0, 0.0 - 0.26, 0.0)
+        leg = 12 + side * 4
+        put3(o, leg, sx * 0.1, 0.0 - 0.07, 0.0)
+        put3(o, leg + 1, 0.0, 0.0 - 0.44, 0.0)
+        put3(o, leg + 2, 0.0, 0.0 - 0.42, 0.0)
+        put3(o, leg + 3, 0.0, 0.0 - 0.05, 0.0 - 0.15)
+        side = side + 1
+    }
+    return o
+}
+
+// Each bone's box as its lowest and highest corner in the rest pose, six
+// floats a bone. The trunk's boxes run from one joint to the next, the
+// limbs' from a joint to the one below; the feet reach the ground and the
+// toes point to -Z.
+put_box(b: float[], i: int, x0: float, y0: float, z0: float, x1: float, y1: float, z1: float) {
+    b[i * 6] = x0
+    b[i * 6 + 1] = y0
+    b[i * 6 + 2] = z0
+    b[i * 6 + 3] = x1
+    b[i * 6 + 4] = y1
+    b[i * 6 + 5] = z1
+}
+
+bone_boxes() -> float[] {
+    b = floats(BONES * 6)
+    put_box(b, 0, 0.0 - 0.15, 0.88, 0.0 - 0.1, 0.15, 1.09, 0.1)          // hips
+    put_box(b, 1, 0.0 - 0.14, 1.09, 0.0 - 0.09, 0.14, 1.19, 0.09)        // waist
+    put_box(b, 2, 0.0 - 0.15, 1.19, 0.0 - 0.1, 0.15, 1.39, 0.1)          // belly
+    put_box(b, 3, 0.0 - 0.12, 1.39, 0.0 - 0.11, 0.12, 1.59, 0.11)        // chest
+    put_box(b, 4, 0.0 - 0.05, 1.59, 0.0 - 0.05, 0.05, 1.68, 0.05)        // neck
+    put_box(b, 5, 0.0 - 0.09, 1.68, 0.0 - 0.1, 0.09, 1.84, 0.1)          // head
+    put_box(b, 6, 0.12, 1.24, 0.0 - 0.05, 0.22, 1.58, 0.05)              // upper arm
+    put_box(b, 7, 0.12, 0.98, 0.0 - 0.05, 0.22, 1.24, 0.05)              // forearm
+    put_box(b, 8, 0.12, 0.8, 0.0 - 0.05, 0.22, 0.98, 0.05)               // hand
+    put_box(b, 12, 0.04, 0.49, 0.0 - 0.07, 0.16, 0.93, 0.07)             // thigh
+    put_box(b, 13, 0.05, 0.1, 0.0 - 0.05, 0.15, 0.49, 0.05)              // shin
+    put_box(b, 14, 0.05, 0.0, 0.0 - 0.15, 0.15, 0.1, 0.05)               // foot
+    put_box(b, 15, 0.05, 0.0, 0.0 - 0.23, 0.15, 0.05, 0.0 - 0.15)        // toes
+    // The right side, bones 9-11 and 16-19: the left's boxes mirrored in X.
+    i = 9
+    while i < BONES {
+        left = i - 3
+        if i >= 16 { left = i - 4 }
+        put_box(b, i, 0.0 - b[left * 6 + 3], b[left * 6 + 1], b[left * 6 + 2],
+                0.0 - b[left * 6], b[left * 6 + 4], b[left * 6 + 5])
+        i = i + 1
+        if i == 12 { i = 16 }
+    }
+    return b
+}
+
+// The mesh as it is built: flat arrays of floats the accessors are written
+// from, and how far each has been filled.
+struct BoxManMesh {
+    positions: ptr
+    normals: ptr
+    joints: ptr
+    weights: ptr
+    indices: ptr
+    vertices: int
+    index_count: int
+}
+
+// One bone's box: every face its own four vertices, so each carries the
+// face's normal, and two triangles counter-clockwise seen from outside.
+// For a face across `axis`, the other two axes follow it in turn, so the
+// corners (0,0) (1,0) (1,1) (0,1) of that plane go round counter-clockwise
+// seen from the + side; the - side takes them the other way round.
+emit_box(m: *BoxManMesh, boxes: float[], bone: int) {
+    positions = m.positions as float[]
+    normals = m.normals as float[]
+    joints = m.joints as float[]
+    weights = m.weights as float[]
+    indices = m.indices as float[]
+    axis = 0
+    while axis < 3 {
+        u = (axis + 1) % 3
+        w = (axis + 2) % 3
+        side = 0
+        while side < 2 {
+            first = m.vertices
+            k = 0
+            while k < 4 {
+                along_u = 0
+                if k == 1 || k == 2 { along_u = 1 }
+                along_w = 0
+                if k >= 2 { along_w = 1 }
+                if side == 0 {
+                    t = along_u
+                    along_u = along_w
+                    along_w = t
+                }
+                v = m.vertices
+                positions[v * 3 + axis] = boxes[bone * 6 + side * 3 + axis]
+                positions[v * 3 + u] = boxes[bone * 6 + along_u * 3 + u]
+                positions[v * 3 + w] = boxes[bone * 6 + along_w * 3 + w]
+                normals[v * 3 + axis] = 0.0 - 1.0
+                if side == 1 { normals[v * 3 + axis] = 1.0 }
+                normals[v * 3 + u] = 0.0
+                normals[v * 3 + w] = 0.0
+                joints[v * 4] = bone as float
+                joints[v * 4 + 1] = 0.0
+                joints[v * 4 + 2] = 0.0
+                joints[v * 4 + 3] = 0.0
+                weights[v * 4] = 1.0
+                weights[v * 4 + 1] = 0.0
+                weights[v * 4 + 2] = 0.0
+                weights[v * 4 + 3] = 0.0
+                m.vertices = m.vertices + 1
+                k = k + 1
+            }
+            n = m.index_count
+            indices[n] = first as float
+            indices[n + 1] = (first + 1) as float
+            indices[n + 2] = (first + 2) as float
+            indices[n + 3] = first as float
+            indices[n + 4] = (first + 2) as float
+            indices[n + 5] = (first + 3) as float
+            m.index_count = n + 6
+            side = side + 1
+        }
+        axis = axis + 1
+    }
+}
+
+// A rotation of `degrees` about the X or the Z axis as a quaternion
+// (x, y, z, w) into `q` at key `key`.
+put_turn(q: float[], key: int, about_z: bool, degrees: float) {
+    half = degrees * 3.14159265358979323846 / 360.0
+    q[key * 4] = 0.0
+    q[key * 4 + 1] = 0.0
+    q[key * 4 + 2] = 0.0
+    if about_z {
+        q[key * 4 + 2] = sin(half)
+    } else {
+        q[key * 4] = sin(half)
+    }
+    q[key * 4 + 3] = cos(half)
+}
+
+// The node indices of a bone's children, or null if it has none.
+children_json(bone: int) -> ptr {
+    count = 0
+    i = 0
+    while i < BONES {
+        if bone_parent(i) == bone { count = count + 1 }
+        i = i + 1
+    }
+    if count == 0 { return null }
+    found = json.arr()
+    i = 0
+    while i < BONES {
+        if bone_parent(i) == bone { json.push(found, json.from_int((i + FIRST_BONE_NODE) as long)) }
+        i = i + 1
+    }
+    return found
+}
+
+write_box_man(out_dir: string) {
+    offsets = bone_offsets()
+    boxes = bone_boxes()
+    // Where every bone stands in the rest pose: its offsets added up.
+    world = floats(BONES * 3)
+    i = 0
+    while i < BONES {
+        parent = bone_parent(i)
+        c = 0
+        while c < 3 {
+            world[i * 3 + c] = offsets[i * 3 + c]
+            if parent >= 0 { world[i * 3 + c] = world[parent * 3 + c] + offsets[i * 3 + c] }
+            c = c + 1
+        }
+        i = i + 1
+    }
+
+    vertex_count = BONES * BOX_VERTICES
+    index_count = BONES * BOX_INDICES
+    m = BoxManMesh {
+        positions: malloc((vertex_count * 3 * 8) as long),
+        normals: malloc((vertex_count * 3 * 8) as long),
+        joints: malloc((vertex_count * 4 * 8) as long),
+        weights: malloc((vertex_count * 4 * 8) as long),
+        indices: malloc((index_count * 8) as long),
+        vertices: 0,
+        index_count: 0
+    }
+    i = 0
+    while i < BONES {
+        emit_box(&m, boxes, i)
+        i = i + 1
+    }
+
+    f = Fixture { blob: malloc(CAPACITY as long), size: 0, views: json.arr(), accessors: json.arr() }
+    a_pos = add(&f, m.positions as float[], vertex_count, 3, FLOAT, "VEC3", ARRAY_BUFFER, true)
+    a_nrm = add(&f, m.normals as float[], vertex_count, 3, FLOAT, "VEC3", ARRAY_BUFFER, false)
+    a_jnt = add(&f, m.joints as float[], vertex_count, 4, UNSIGNED_BYTE, "VEC4", ARRAY_BUFFER, false)
+    a_wgt = add(&f, m.weights as float[], vertex_count, 4, FLOAT, "VEC4", ARRAY_BUFFER, false)
+    a_idx = add(&f, m.indices as float[], index_count, 1, UNSIGNED_SHORT, "SCALAR", ELEMENT_ARRAY_BUFFER, false)
+    // Inverse bind matrices: no bone is turned at rest, so each is the
+    // translation back from where the bone stands.
+    ibm = floats(BONES * 16)
+    i = 0
+    while i < BONES * 16 { ibm[i] = 0.0; i = i + 1 }
+    i = 0
+    while i < BONES {
+        ibm[i * 16] = 1.0
+        ibm[i * 16 + 5] = 1.0
+        ibm[i * 16 + 10] = 1.0
+        ibm[i * 16 + 12] = 0.0 - world[i * 3]
+        ibm[i * 16 + 13] = 0.0 - world[i * 3 + 1]
+        ibm[i * 16 + 14] = 0.0 - world[i * 3 + 2]
+        ibm[i * 16 + 15] = 1.0
+        i = i + 1
+    }
+    a_ibm = add(&f, ibm, BONES, 16, FLOAT, "MAT4", 0, false)
+    // Idle: Spine2 bows forward (a turn about X toward -Z) and back, two
+    // seconds, the last key the first so the loop has no seam.
+    idle_t = floats(5)
+    idle_q = floats(5 * 4)
+    i = 0
+    while i < 5 { idle_t[i] = (i as float) * 0.5; i = i + 1 }
+    put_turn(idle_q, 0, false, 0.0)
+    put_turn(idle_q, 1, false, 0.0 - 8.0)
+    put_turn(idle_q, 2, false, 0.0)
+    put_turn(idle_q, 3, false, 8.0)
+    put_turn(idle_q, 4, false, 0.0)
+    a_idle_t = add(&f, idle_t, 5, 1, FLOAT, "SCALAR", 0, true)
+    a_idle_q = add(&f, idle_q, 5, 4, FLOAT, "VEC4", 0, false)
+    // Wave: the right arm swings out to the side and up, a hundred and
+    // fifty degrees about Z (negative, since the right arm hangs at -X),
+    // at half a second and back down at one.
+    wave_t = floats(3)
+    wave_q = floats(3 * 4)
+    wave_t[0] = 0.0
+    wave_t[1] = 0.5
+    wave_t[2] = 1.0
+    put_turn(wave_q, 0, true, 0.0)
+    put_turn(wave_q, 1, true, 0.0 - 150.0)
+    put_turn(wave_q, 2, true, 0.0)
+    a_wave_t = add(&f, wave_t, 3, 1, FLOAT, "SCALAR", 0, true)
+    a_wave_q = add(&f, wave_q, 3, 4, FLOAT, "VEC4", 0, false)
+
+    doc = document()
+    nodes = json.arr()
+    armature = node("Armature")
+    json.set(armature, "children", ints_json(1, FIRST_BONE_NODE, 2))
+    json.push(nodes, armature)
+    body = node("BoxMan")
+    json.set(body, "mesh", json.from_int(0 as long))
+    json.set(body, "skin", json.from_int(0 as long))
+    json.push(nodes, body)
+    i = 0
+    while i < BONES {
+        bone = node(bone_name(i))
+        json.set(bone, "translation", vec3_json(offsets[i * 3], offsets[i * 3 + 1], offsets[i * 3 + 2]))
+        children = children_json(i)
+        if children != null { json.set(bone, "children", children) }
+        json.push(nodes, bone)
+        i = i + 1
+    }
+    json.set(doc, "nodes", nodes)
+    meshes = json.arr()
+    mesh = json.obj()
+    json.set(mesh, "name", json.str("BoxManMesh"))
+    primitives = json.arr()
+    primitive = json.obj()
+    attributes = json.obj()
+    json.set(attributes, "POSITION", json.from_int(a_pos as long))
+    json.set(attributes, "NORMAL", json.from_int(a_nrm as long))
+    json.set(attributes, "JOINTS_0", json.from_int(a_jnt as long))
+    json.set(attributes, "WEIGHTS_0", json.from_int(a_wgt as long))
+    json.set(primitive, "attributes", attributes)
+    json.set(primitive, "indices", json.from_int(a_idx as long))
+    json.set(primitive, "material", json.from_int(0 as long))
+    json.set(primitive, "mode", json.from_int(4 as long))
+    json.push(primitives, primitive)
+    json.set(mesh, "primitives", primitives)
+    json.push(meshes, mesh)
+    json.set(doc, "meshes", meshes)
+    skins = json.arr()
+    skin = json.obj()
+    json.set(skin, "name", json.str("BoxManSkin"))
+    joint_nodes = json.arr()
+    i = 0
+    while i < BONES {
+        json.push(joint_nodes, json.from_int((i + FIRST_BONE_NODE) as long))
+        i = i + 1
+    }
+    json.set(skin, "joints", joint_nodes)
+    json.set(skin, "inverseBindMatrices", json.from_int(a_ibm as long))
+    json.set(skin, "skeleton", json.from_int(FIRST_BONE_NODE as long))
+    json.push(skins, skin)
+    json.set(doc, "skins", skins)
+    json.set(doc, "materials", material_json("Clay", 0.62, 0.55, 0.48, 0.8))
+    animations = json.arr()
+    json.push(animations, animation("Idle", a_idle_t, a_idle_q, "LINEAR", SPINE2 + FIRST_BONE_NODE, "rotation"))
+    json.push(animations, animation("Wave", a_wave_t, a_wave_q, "LINEAR", RIGHT_ARM + FIRST_BONE_NODE, "rotation"))
+    json.set(doc, "animations", animations)
+    json.set(doc, "bufferViews", f.views)
+    json.set(doc, "accessors", f.accessors)
+
+    write_glb("${out_dir}/humanoid.glb", doc, &f)
+    println("wrote ${out_dir} humanoid.glb ${BONES} bones ${vertex_count} vertices ${f.size} bytes of buffer")
 }

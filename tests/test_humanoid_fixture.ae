@@ -1,0 +1,344 @@
+// The box man fixture loaded as a figure: its skeleton, its rest pose and
+// its two clips, checked against the numbers it was written from.
+//
+// tools/make_gltf_fixture.ae writes tests/fixtures/gltf/humanoid.glb: a
+// twenty-bone Mixamo rig (the "mixamorig:" names) under an Armature node, a
+// box on every bone with every vertex weighted wholly to it, standing on
+// y = 0 and facing -Z. The bones sit at the offsets the engine's test rigs
+// use, so where each stands at rest is those offsets added up, computed
+// here from the same table rather than read back from the file. "Idle"
+// bows Spine2 eight degrees forward and back over two seconds; "Wave"
+// raises the right arm a hundred and fifty degrees out to the side at half
+// a second. What is checked is where the palette puts a vertex, as the
+// arithmetic says it should be.
+
+import std.list
+import std.string
+import ae3d.core
+import ae3d.skin
+import ae3d.anim
+import ae3d.gltf
+
+const EPSILON = 0.001
+const BONES = 20
+const PATH = "tests/fixtures/gltf/humanoid.glb"
+
+extern cos(x: float) -> float
+extern sin(x: float) -> float
+extern malloc(size: long) -> ptr
+extern free(p: ptr)
+
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, condition: bool) {
+    g_checks = g_checks + 1
+    if condition {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        g_failures = g_failures + 1
+    }
+}
+
+near(a: float, b: float) -> bool {
+    d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    return d < EPSILON
+}
+
+near3(a: Vec3, b: Vec3) -> bool { return near(a.x, b.x) && near(a.y, b.y) && near(a.z, b.z) }
+
+show(v: Vec3) -> string { return "(${v.x}, ${v.y}, ${v.z})" }
+
+posed_by(s: *Skeleton, bone: int, p: Vec3) -> Vec3 {
+    palette = skin.skeleton_palette(s)
+    m = core.mat4_ident()
+    m.m0  = core.palette_get(palette, bone, 0)
+    m.m1  = core.palette_get(palette, bone, 1)
+    m.m2  = core.palette_get(palette, bone, 2)
+    m.m3  = core.palette_get(palette, bone, 3)
+    m.m4  = core.palette_get(palette, bone, 4)
+    m.m5  = core.palette_get(palette, bone, 5)
+    m.m6  = core.palette_get(palette, bone, 6)
+    m.m7  = core.palette_get(palette, bone, 7)
+    m.m8  = core.palette_get(palette, bone, 8)
+    m.m9  = core.palette_get(palette, bone, 9)
+    m.m10 = core.palette_get(palette, bone, 10)
+    m.m11 = core.palette_get(palette, bone, 11)
+    m.m12 = core.palette_get(palette, bone, 12)
+    m.m13 = core.palette_get(palette, bone, 13)
+    m.m14 = core.palette_get(palette, bone, 14)
+    m.m15 = core.palette_get(palette, bone, 15)
+    return core.mat4_transform_point(m, p)
+}
+
+// `p` turned `angle` radians about the X (or Z) axis through `pivot`.
+turned(p: Vec3, pivot: Vec3, about_z: bool, angle: float) -> Vec3 {
+    d = core.v3_sub(p, pivot)
+    c = cos(angle)
+    sn = sin(angle)
+    if about_z { return core.v3_add(pivot, core.vec3(d.x * c - d.y * sn, d.x * sn + d.y * c, d.z)) }
+    return core.v3_add(pivot, core.vec3(d.x, d.y * c - d.z * sn, d.y * sn + d.z * c))
+}
+
+bone_name(i: int) -> string {
+    if i == 0 { return "mixamorig:Hips" }
+    if i == 1 { return "mixamorig:Spine" }
+    if i == 2 { return "mixamorig:Spine1" }
+    if i == 3 { return "mixamorig:Spine2" }
+    if i == 4 { return "mixamorig:Neck" }
+    if i == 5 { return "mixamorig:Head" }
+    if i == 6 { return "mixamorig:LeftArm" }
+    if i == 7 { return "mixamorig:LeftForeArm" }
+    if i == 8 { return "mixamorig:LeftHand" }
+    if i == 9 { return "mixamorig:RightArm" }
+    if i == 10 { return "mixamorig:RightForeArm" }
+    if i == 11 { return "mixamorig:RightHand" }
+    if i == 12 { return "mixamorig:LeftUpLeg" }
+    if i == 13 { return "mixamorig:LeftLeg" }
+    if i == 14 { return "mixamorig:LeftFoot" }
+    if i == 15 { return "mixamorig:LeftToeBase" }
+    if i == 16 { return "mixamorig:RightUpLeg" }
+    if i == 17 { return "mixamorig:RightLeg" }
+    if i == 18 { return "mixamorig:RightFoot" }
+    return "mixamorig:RightToeBase"
+}
+
+bone_parent(i: int) -> int {
+    if i == 0 { return 0 - 1 }
+    if i == 6 || i == 9 { return 3 }
+    if i == 12 || i == 16 { return 0 }
+    return i - 1
+}
+
+put3(a: float[], i: int, x: float, y: float, z: float) {
+    a[i * 3] = x
+    a[i * 3 + 1] = y
+    a[i * 3 + 2] = z
+}
+
+// Where every bone stands at rest: the test rigs' offsets from the parent,
+// added up down the tree. `block` holds BONES * 3 floats.
+rest_world(block: ptr) {
+    o = block as float[]
+    put3(o, 0, 0.0, 1.0, 0.0)
+    put3(o, 1, 0.0, 0.09, 0.0)
+    put3(o, 2, 0.0, 0.1, 0.0)
+    put3(o, 3, 0.0, 0.2, 0.0)
+    put3(o, 4, 0.0, 0.22, 0.0)
+    put3(o, 5, 0.0, 0.09, 0.0)
+    put3(o, 6, 0.17, 0.14, 0.0)
+    put3(o, 7, 0.0, 0.0 - 0.29, 0.0)
+    put3(o, 8, 0.0, 0.0 - 0.26, 0.0)
+    put3(o, 9, 0.0 - 0.17, 0.14, 0.0)
+    put3(o, 10, 0.0, 0.0 - 0.29, 0.0)
+    put3(o, 11, 0.0, 0.0 - 0.26, 0.0)
+    put3(o, 12, 0.1, 0.0 - 0.07, 0.0)
+    put3(o, 13, 0.0, 0.0 - 0.44, 0.0)
+    put3(o, 14, 0.0, 0.0 - 0.42, 0.0)
+    put3(o, 15, 0.0, 0.0 - 0.05, 0.0 - 0.15)
+    put3(o, 16, 0.0 - 0.1, 0.0 - 0.07, 0.0)
+    put3(o, 17, 0.0, 0.0 - 0.44, 0.0)
+    put3(o, 18, 0.0, 0.0 - 0.42, 0.0)
+    put3(o, 19, 0.0, 0.0 - 0.05, 0.0 - 0.15)
+    // Parents come first, so one pass adds each bone to its parent's sum.
+    i = 1
+    while i < BONES {
+        p = bone_parent(i)
+        o[i * 3] = o[i * 3] + o[p * 3]
+        o[i * 3 + 1] = o[i * 3 + 1] + o[p * 3 + 1]
+        o[i * 3 + 2] = o[i * 3 + 2] + o[p * 3 + 2]
+        i = i + 1
+    }
+}
+
+world_of(block: ptr, i: int) -> Vec3 {
+    o = block as float[]
+    return core.vec3(o[i * 3], o[i * 3 + 1], o[i * 3 + 2])
+}
+
+// The highest vertex weighted to `bone` (the lowest, with `lowest`), or -1:
+// the one furthest from the joint, which a turn carries furthest.
+vertex_on(mesh: ptr, bone: int, lowest: bool) -> int {
+    found = 0 - 1
+    best = 0.0
+    i = 0
+    while i < core.mesh_vertex_count(mesh) {
+        if core.mesh_skin_joint(mesh, i, 0) == bone {
+            y = core.mesh_position(mesh, i).y
+            if lowest { y = 0.0 - y }
+            if found < 0 || y > best {
+                found = i
+                best = y
+            }
+        }
+        i = i + 1
+    }
+    return found
+}
+
+// Sample a clip `seconds` in and bring the palette up to it.
+advance(registry: *Registry, s: *Skeleton, seconds: float) {
+    anim.registry_advance(registry, seconds)
+    anim.registry_apply(registry)
+    skin.skeleton_update(s)
+}
+
+main() {
+    scene = gltf.load(PATH)
+    check("the file loads (${gltf.last_error()})", scene != null)
+    if scene == null {
+        println("humanoid_fixture: ${g_failures} failure(s) of ${g_checks}")
+        return
+    }
+    check("no warnings", gltf.warning_count(scene) == 0)
+    i = 0
+    while i < gltf.warning_count(scene) {
+        println("       warning: ${gltf.warning(scene, i)}")
+        i = i + 1
+    }
+
+    // The skeleton: twenty bones, Mixamo names, in the skin's order.
+    check("one skeleton", gltf.skeleton_count(scene) == 1)
+    s = gltf.skeleton(scene, 0)
+    count = skin.skeleton_count(s)
+    check("twenty bones (${count})", count == BONES)
+    named = 0
+    i = 0
+    while i < count && i < BONES {
+        bone = skin.skeleton_bone(s, i)
+        if bone != null && core.text(bone.name) == bone_name(i) {
+            named = named + 1
+        } else {
+            println("       bone ${i} is not ${bone_name(i)}")
+        }
+        i = i + 1
+    }
+    check("every bone named the Mixamo way, prefix and all (${named} of ${BONES})", named == BONES)
+    armature = gltf.find(scene, "Armature")
+    origin = core.vec3(0.0, 0.0, 0.0)
+    check("the bones hang from an Armature at the origin",
+          armature != null && core.model_parent(skin.skeleton_bone(s, 0)) == armature && near3(core.model_world_position(armature), origin))
+
+    // The rest pose: every bone where the offsets put it, both as the node
+    // stands and as the inverse bind matrix says it was bound.
+    world = malloc((BONES * 3 * 8) as long)
+    rest_world(world)
+    placed = 0
+    bound = 0
+    i = 0
+    while i < BONES {
+        want = world_of(world, i)
+        node_at = core.model_world_position(skin.skeleton_bone(s, i))
+        bind_at = skin.skeleton_bind_position(s, i)
+        if near3(node_at, want) { placed = placed + 1 } else { println("       ${bone_name(i)} stands at ${show(node_at)}, not ${show(want)}") }
+        if near3(bind_at, want) { bound = bound + 1 } else { println("       ${bone_name(i)} was bound at ${show(bind_at)}, not ${show(want)}") }
+        i = i + 1
+    }
+    check("every bone's node stands where the offsets add up to (${placed} of ${BONES})", placed == BONES)
+    check("every bone's inverse bind agrees (${bound} of ${BONES})", bound == BONES)
+    hips = skin.skeleton_bind_position(s, skin.skeleton_find(s, "mixamorig:Hips"))
+    check("the hips are one metre up: ${show(hips)}", near3(hips, core.vec3(0.0, 1.0, 0.0)))
+    left_foot = skin.skeleton_bind_position(s, skin.skeleton_find(s, "mixamorig:LeftFoot"))
+    check("the left ankle is at (0.1, 0.07, 0): ${show(left_foot)}", near3(left_foot, core.vec3(0.1, 0.07, 0.0)))
+    right_toe = skin.skeleton_bind_position(s, skin.skeleton_find(s, "mixamorig:RightToeBase"))
+    check("the right toes are at (-0.1, 0.02, -0.15): ${show(right_toe)}", near3(right_toe, core.vec3(0.0 - 0.1, 0.02, 0.0 - 0.15)))
+
+    // The mesh: a box a bone, every vertex wholly on one bone, standing on
+    // the ground about 1.8 m tall with its toes to -Z.
+    check("one primitive", gltf.primitive_count(scene) == 1)
+    part = gltf.primitive(scene, 0)
+    mesh = part.mesh
+    vertices = core.mesh_vertex_count(mesh)
+    check("twenty boxes of twenty-four vertices (${vertices})", vertices == BONES * 24)
+    check("twelve triangles a box (${core.mesh_index_count(mesh)} indices)", core.mesh_index_count(mesh) == BONES * 36)
+    check("the mesh is skinned and posed by the skeleton", core.mesh_is_skinned(mesh) && part.skeleton == s as ptr)
+    rigid = 0
+    low = 100.0
+    high = 0.0 - 100.0
+    front = 100.0
+    i = 0
+    while i < vertices {
+        if near(core.mesh_skin_weight(mesh, i, 0), 1.0) && core.mesh_skin_joint(mesh, i, 0) < BONES { rigid = rigid + 1 }
+        p = core.mesh_position(mesh, i)
+        if p.y < low { low = p.y }
+        if p.y > high { high = p.y }
+        if p.z < front { front = p.z }
+        i = i + 1
+    }
+    check("every vertex weighted wholly to one bone (${rigid} of ${vertices})", rigid == vertices)
+    check("it stands on y = 0 (lowest ${low}) and is about 1.8 m tall (${high})", near(low, 0.0) && high > 1.75 && high < 1.9)
+    check("its toes reach furthest to -Z (${front})", front < 0.0 - 0.2)
+    // Every triangle wound counter-clockwise seen from outside: its face
+    // normal points the way its vertices' normals do.
+    outward = 0
+    triangles = core.mesh_index_count(mesh) / 3
+    i = 0
+    while i < triangles {
+        a = core.mesh_index_at(mesh, i * 3)
+        pa = core.mesh_position(mesh, a)
+        pb = core.mesh_position(mesh, core.mesh_index_at(mesh, i * 3 + 1))
+        pc = core.mesh_position(mesh, core.mesh_index_at(mesh, i * 3 + 2))
+        face = core.v3_cross(core.v3_sub(pb, pa), core.v3_sub(pc, pa))
+        if core.v3_dot(face, core.mesh_normal(mesh, a)) > 0.0 { outward = outward + 1 }
+        i = i + 1
+    }
+    check("every triangle faces out (${outward} of ${triangles})", outward == triangles)
+
+    // The clips.
+    check("two animations", gltf.animation_count(scene) == 2)
+    check("named Idle and Wave", gltf.animation_count(scene) == 2 && gltf.animation_name(scene, 0) == "Idle" && gltf.animation_name(scene, 1) == "Wave")
+    idle_length = gltf.animation_duration(scene, "Idle")
+    wave_length = gltf.animation_duration(scene, "Wave")
+    check("Idle lasts two seconds (${idle_length}), Wave one (${wave_length})", near(idle_length, 2.0) && near(wave_length, 1.0))
+
+    // Idle at half a second: Spine2 bowed eight degrees forward, turned about
+    // X toward -Z around its own joint, and the top of the chest with it.
+    spine2 = skin.skeleton_find(s, "mixamorig:Spine2")
+    chest = vertex_on(mesh, spine2, false)
+    check("a vertex is on Spine2 (${chest})", chest >= 0)
+    rest = core.mesh_position(mesh, chest)
+    skin.skeleton_update(s)
+    at_rest = posed_by(s, spine2, rest)
+    check("at rest it stays where it is modelled: ${show(at_rest)}", near3(at_rest, rest))
+    idle = anim.registry_new()
+    made = gltf.play(scene, "Idle", idle, true)
+    check("Idle drives one bone (${made})", made == 1)
+    advance(idle, s, 0.5)
+    bowed = posed_by(s, spine2, rest)
+    want = turned(rest, world_of(world, spine2), false, 0.0 - 8.0 * 3.14159265358979 / 180.0)
+    moved = core.v3_distance(bowed, rest)
+    check("at 0.5 s it has bowed eight degrees forward: ${show(bowed)}, want ${show(want)}, moved ${moved} m", near3(bowed, want) && moved > 0.01 && bowed.z < rest.z)
+    advance(idle, s, 1.5)
+    back = posed_by(s, spine2, rest)
+    check("at 2 s it is back where it began: ${show(back)}", near3(back, rest))
+    anim.registry_free(idle)
+
+    // Wave at half a second: the right arm a hundred and fifty degrees out
+    // and up about Z around the shoulder, the hand above the head.
+    right_arm = skin.skeleton_find(s, "mixamorig:RightArm")
+    right_hand = skin.skeleton_find(s, "mixamorig:RightHand")
+    palm = vertex_on(mesh, right_hand, true)
+    rest = core.mesh_position(mesh, palm)
+    wave = anim.registry_new()
+    made = gltf.play(scene, "Wave", wave, false)
+    check("Wave drives one bone (${made})", made == 1)
+    advance(wave, s, 0.5)
+    raised = posed_by(s, right_hand, rest)
+    want = turned(rest, world_of(world, right_arm), true, 0.0 - 150.0 * 3.14159265358979 / 180.0)
+    check("at 0.5 s the right hand is raised: ${show(raised)}, want ${show(want)}", near3(raised, want) && raised.y > 1.9 && raised.x < 0.0 - 0.17)
+    advance(wave, s, 0.5)
+    lowered = posed_by(s, right_hand, rest)
+    check("at 1 s it is down again: ${show(lowered)}", near3(lowered, rest))
+    anim.registry_free(wave)
+
+    free(world)
+    gltf.scene_destroy(scene)
+
+    if g_failures == 0 {
+        println("humanoid_fixture: all checks passed (${g_checks})")
+        return
+    }
+    println("humanoid_fixture: ${g_failures} failure(s) of ${g_checks}")
+}
