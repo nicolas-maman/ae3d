@@ -214,18 +214,35 @@ the real animated zombie, extreme weather, the best picture the hardware
 gives, multiplayer -- and the map of what that still needs is
 [#326](https://github.com/nicolas-maman/ae3d/issues/326): every line
 becomes an issue when it is next and lands as a measured, tested pull
-request. Done on that map: the crowd's sort on the device and its indirect
-draws, motion vectors, render scale, DLSS, ray-traced shadows with the
-crowd in them, weather, physics, navigation, input mapping, the engine's
-kernels in Aether. Next: active ragdolls
-([#365](https://github.com/nicolas-maman/ae3d/issues/365)), multiplayer in
-the engine (on datagrams once Aether has them,
-[aether#2201](https://github.com/aether-lang-dev/aether/issues/2201)),
-clustered lighting, streaming tiles, audio; DirectX 12
-([#311](https://github.com/nicolas-maman/ae3d/issues/311)) and Metal
-([#312](https://github.com/nicolas-maman/ae3d/issues/312)) beside Vulkan;
-the renderers in Aether once it can call a function pointer the driver
-hands back ([aether#2200](https://github.com/aether-lang-dev/aether/issues/2200)).
+request. Done on that map:
+- the crowd's sort on the device and its indirect draws;
+- motion vectors, render scale, DLSS, and ray-traced shadows with the
+  crowd in them;
+- weather, physics and navigation;
+- a character controller;
+- natural motion: active ragdolls that fall the way a person does and get
+  up ([#414](https://github.com/nicolas-maman/ae3d/issues/414));
+- multiplayer in the engine: snapshots as deltas, relevance, predicted
+  players, events and objects made mid-game
+  ([#413](https://github.com/nicolas-maman/ae3d/issues/413));
+- animated figures in scenes and the editor
+  ([#439](https://github.com/nicolas-maman/ae3d/issues/439));
+- input mapping;
+- the OpenGL renderer in Aether.
+
+Next:
+- the rest of the Vulkan renderer in Aether, a part at a time on Aether's
+  own bindings ([#402](https://github.com/nicolas-maman/ae3d/issues/402));
+- multiplayer on datagrams once Aether has them
+  ([aether#2201](https://github.com/aether-lang-dev/aether/issues/2201)),
+  and a horde simulated on every peer;
+- the prompt-to-scene pipeline through the engine
+  ([#416](https://github.com/nicolas-maman/ae3d/issues/416));
+- audio ([#415](https://github.com/nicolas-maman/ae3d/issues/415)),
+  clustered lighting and streaming tiles;
+- DirectX 12 ([#311](https://github.com/nicolas-maman/ae3d/issues/311))
+  and Metal ([#312](https://github.com/nicolas-maman/ae3d/issues/312))
+  beside Vulkan.
 
 ## Credits
 
