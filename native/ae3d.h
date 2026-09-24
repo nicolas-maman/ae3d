@@ -241,6 +241,7 @@ void   ae3d_vk_ray_add_one(int mesh_handle, const double *matrix);
 int    ae3d_vk_ray_build(void);
 void   ae3d_vk_set_ray_shadows(int on);
 void   ae3d_vk_set_ray_reach(double metres);
+int    ae3d_vk_ray_empty(void);
 void   ae3d_vk_set_meter(int on);
 int    ae3d_vk_meter(double *out);
 void   ae3d_vk_set_ray_budget(int figures);

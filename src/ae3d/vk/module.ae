@@ -97,6 +97,7 @@ extern ae3d_vk_ray_indirect() -> int
 extern ae3d_vk_ray_add(mesh: int, matrices: ptr, count: int)
 extern ae3d_vk_ray_add_one(mesh: int, matrix: *Mat4)
 extern ae3d_vk_ray_build() -> int
+extern ae3d_vk_ray_empty() -> int
 extern ae3d_vk_set_ray_shadows(on: int)
 extern ae3d_vk_set_ray_reach(metres: float)
 extern ae3d_vk_set_ray_budget(figures: int)
@@ -696,7 +697,12 @@ reserve_ray_scene(r: *VKRenderer) {
 // its stream's -- after the sorts wrote the crowds', and the flag the
 // shader reads set for every program.
 build_ray_scene(r: *VKRenderer) {
-    if ae3d_vk_ray_shadows() != 1 { return }
+    // Not traced this frame: the slot still has a structure, empty if it
+    // never had another, for the pipelines' binding.
+    if ae3d_vk_ray_shadows() != 1 {
+        ae3d_vk_ray_empty()
+        return
+    }
     count = list.size(r.models)
     i = 0
     while i < count {
@@ -711,7 +717,8 @@ build_ray_scene(r: *VKRenderer) {
         }
         i = i + 1
     }
-    ae3d_vk_ray_build()
+    // Nothing traced in view this frame: an empty structure all the same.
+    if ae3d_vk_ray_build() != 1 { ae3d_vk_ray_empty() }
 }
 
 // The multisampling the frame takes, asked for before the backend starts:
