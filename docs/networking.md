@@ -77,7 +77,7 @@ net.player_input(session, walk, jump, now)        // walk in m/s, jump in m/s up
 ```
 
 - **Prediction.** The command moves the client's own player at once, in the client's world, the way `physics.character_move` would on the host: no round trip before the player walks.
-- **Commands to the host.** Each input message carries the newest four commands the host has not acknowledged, so a lost message costs nothing, and four lost in a row cost one correction. The host applies each command once, in order, a fixed step each, to its player for that client.
+- **Commands to the host.** Each input message carries the newest four commands the host has not acknowledged, so a lost message costs nothing, and four lost in a row cost one correction. The host queues them and applies one a host step, in order, to its player for that client, so the player moves in the host's world at the pace it walked, whatever the link's jitter did to when the commands arrived; a queue grown past three commands catches up a command a step.
 - **Reconciliation.** Every snapshot tells the client the newest of its commands the host has applied, and where that left its player (with its vertical speed and whether it stands). The client puts its player there and replays the commands the host has not applied yet. When both worlds agree, as they should, that moves nothing; `prediction_error(session)` is the most it ever moved.
 - **Everyone else's.** The other players are drawn interpolated, like any networked object.
 
@@ -103,12 +103,12 @@ Sixteen objects cost a client 15.6 KB a second (33 bytes an object a snapshot, b
 | the most a reconciliation moved a player | 0.0004 mm | 1 cm |
 | a client's own player at rest against the host's | 10⁻¹¹ mm | 1 mm |
 | the other client's player at rest | 10⁻¹¹ mm | 1 cm |
-| the other client's player while walking, against the host at view time | 52.7 mm | 10 cm |
-| a jump's peak, client against host | 0.917 m and 0.917 m | 1 cm |
+| the other client's player while walking, against the host at view time | 25 mm | 3 cm |
+| a jump's peak, client against host | 0.9172 m and 0.9172 m | 1 cm |
 | a client's commands | 2.95 KB a second | 4 KB |
 
-The walking error is the host applying commands as they arrive, jitter and all: a remote player moves in the host's world in steps a link's jitter apart. Stamping commands with the client's tick and applying them on the host's is the next refinement.
+The walking error is under a centimetre but at two steps, where the host caught up a queue the link had let grow: half a step at 3 m/s. Applying commands as they arrived instead of a host step each made it 52.7 mm.
 
 ## Next
 
-As #413 lays out: commands applied on the host's tick, relevance and a per-client budget, delta compression against the acknowledged snapshot, spawning and despawning, reliable events and RPCs, UDP, the editor's host-and-clients play, and a horde that is simulated on every client instead of sent.
+As #413 lays out: relevance and a per-client budget, delta compression against the acknowledged snapshot, spawning and despawning, reliable events and RPCs, UDP, the editor's host-and-clients play, and a horde that is simulated on every client instead of sent.

@@ -80,6 +80,7 @@ const COMMANDS = 128                 // a client's commands kept until the host 
 const COMMAND = 4                    // floats a command: seq, walk x, walk z, jump
 const RESENT = 4                     // the unacknowledged commands every input message carries: four lost in a row costs a correction
 const PLAYER_STEP = 0.016666666666666666   // a command's step, seconds: the fixed step's
+const QUEUE_DEPTH = 3                // host: the commands a client's queue holds before it catches up
 
 var g_error = ""
 
@@ -278,6 +279,14 @@ struct Peer {
     open: bool
     last_input: int                  // host: the newest command of this client's it has applied
     player: ptr                      // host: this client's *NetPlayer
+    // Host: the client's commands received and not yet applied, a ring of
+    // float[COMMANDS * COMMAND]. One is applied a host step, so a player
+    // moves in the host's world at the pace it walked, whatever the link's
+    // jitter did to when the commands arrived.
+    queued: ptr
+    queued_first: int
+    queued_count: int
+    last_queued: int
 }
 
 struct NetEvent {
@@ -341,6 +350,8 @@ struct Net {
     acked: int                       // client: the host's newest applied command
     worst_correction: float          // client: the most a reconciliation moved its player, metres
     inputs_sent: int
+    player_clock: float              // host: time since the first step, less the player steps taken
+    player_started: bool
 }
 
 net_new(role: int, kind: int) -> *Net {
@@ -911,6 +922,7 @@ step(n: *Net, now: float) {
     }
     clear_events(n)
     if n.role == ROLE_HOST {
+        step_players(n, delta)
         // A tick is due a whole interval after the last, to within a
         // thousandth of one: steps of 1/60 add up to a hair under 1/30
         // often enough that a strict comparison skipped every few ticks,
@@ -1107,7 +1119,8 @@ client_spawn(n: *Net, id: int, owner: int) {
 // The host applies a client's commands it has not applied yet, oldest
 // first, a fixed step each: the same moves the client made ahead of it.
 apply_inputs(n: *Net, p: *Peer, r: *NetReader) {
-    pl = p.player as *NetPlayer
+    if p.queued == null { p.queued = calloc(COMMANDS * COMMAND, 8) }
+    q = p.queued as float[]
     first = get_u32(r)
     count = get_u8(r)
     i = 0
@@ -1117,13 +1130,52 @@ apply_inputs(n: *Net, p: *Peer, r: *NetReader) {
         wz = get_f32(r)
         jump = get_f32(r)
         if !r.ok { return }
-        // Newer than the last applied: in order, and past a gap only when
+        // Newer than the last queued: in order, and past a gap only when
         // RESENT messages in a row were lost (the client reconciles then).
-        if seq > p.last_input {
-            physics.character_move(pl.controller, core.vec3(wx, 0.0, wz), jump, PLAYER_STEP)
-            p.last_input = seq
+        if seq > p.last_queued && p.queued_count < COMMANDS {
+            slot = ((p.queued_first + p.queued_count) % COMMANDS) * COMMAND
+            q[slot] = (seq) as float
+            q[slot + 1] = wx
+            q[slot + 2] = wz
+            q[slot + 3] = jump
+            p.queued_count = p.queued_count + 1
+            p.last_queued = seq
         }
         i = i + 1
+    }
+}
+
+// The oldest of a client's queued commands, applied to its player.
+apply_queued(p: *Peer) {
+    pl = p.player as *NetPlayer
+    q = p.queued as float[]
+    slot = p.queued_first * COMMAND
+    physics.character_move(pl.controller, core.vec3(q[slot + 1], 0.0, q[slot + 2]), q[slot + 3], PLAYER_STEP)
+    p.last_input = (q[slot]) as int
+    p.queued_first = (p.queued_first + 1) % COMMANDS
+    p.queued_count = p.queued_count - 1
+}
+
+// The host's player steps due by `now`: a command a client each, and a
+// second where a client's queue has grown past QUEUE_DEPTH (it fell behind
+// while the link held its commands back).
+step_players(n: *Net, delta: float) {
+    if !n.player_started {
+        n.player_started = true
+        return
+    }
+    n.player_clock = n.player_clock + delta
+    while n.player_clock >= PLAYER_STEP * 0.999 {
+        n.player_clock = n.player_clock - PLAYER_STEP
+        i = 0
+        while i < list.size(n.peers) {
+            p = list.get_raw(n.peers, i) as *Peer
+            if p.player != null && p.queued_count > 0 {
+                apply_queued(p)
+                if p.queued_count > QUEUE_DEPTH { apply_queued(p) }
+            }
+            i = i + 1
+        }
     }
 }
 
@@ -1221,6 +1273,7 @@ net_free(n: *Net) {
         p = list.get_raw(n.peers, i) as *Peer
         if p.socket != null { tcp.tcp_close(p.socket) }
         if p.pending != null { free(p.pending) }
+        if p.queued != null { free(p.queued) }
         free(p as ptr)
         i = i + 1
     }
