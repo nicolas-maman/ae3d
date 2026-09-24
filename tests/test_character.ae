@@ -1,0 +1,205 @@
+// The character controller (#420): a capsule that walks the world, held to
+// numbers. Each character walks its own lane of one ground:
+//
+//   - the walker: on the flat, at the speed asked, within 1%;
+//   - the climber: up a 0.3 m step (under its 0.35 m step height);
+//   - the stopped: at a 0.5 m step, which it cannot walk up;
+//   - the stander: on a 40 degree ramp with no input, it stays put;
+//   - the slider: on a 50 degree ramp, past its 45 degree limit, it slides;
+//   - the jumper: leaves the ground at 5 m/s and peaks at v^2 / 2g, within 2%;
+//   - and none is left inside what it walks on or into: every character's
+//     overlap with the world, measured at the end, under a millimetre past
+//     the solver's slop.
+
+import ae3d.core
+import ae3d.engine
+import ae3d.behaviour
+import ae3d.loader
+import ae3d.physics
+
+extern sqrt(x: float) -> float
+
+const STEPS = 180                    // three seconds at 60
+const WALK = 3.0                     // metres a second
+const JUMP = 5.0                     // metres a second, up
+
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, ok: bool) {
+    g_checks = g_checks + 1
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        g_failures = g_failures + 1
+        println("  FAIL ${name}")
+    }
+}
+
+struct Lanes {
+    walker: ptr                      // *CharacterController
+    climber: ptr
+    stopped: ptr
+    stander: ptr
+    slider: ptr
+    jumper: ptr
+    steps: int
+    walker_start: float
+    walker_after_second: float       // x one second into walking
+    stander_start: float             // y where the stander was put down
+    slider_start: float
+    jump_ground: float
+    jump_peak: float
+    jumped: bool
+    climber_high: float              // the climber's feet, their highest
+}
+
+character(e: *Engine, name: string, at: Vec3) -> *CharacterController {
+    o = engine.object(e, name, null)
+    behaviour.object_set_position(o, at)
+    return physics.character_controller(o, 0.3, 1.8)
+}
+
+feet(c: *CharacterController) -> Vec3 {
+    return behaviour.object_position(c.object as *GameObject)
+}
+
+// A static box, centred at `at`, `half` its half extents, turned `pitch`
+// radians about x (a ramp).
+block(e: *Engine, name: string, at: Vec3, half: Vec3, pitch: float) {
+    o = engine.object(e, name, loader.cube(1.0))
+    behaviour.object_set_position(o, at)
+    if pitch != 0.0 { behaviour.object_set_rotation(o, core.quat_rotate(pitch, core.vec3(1.0, 0.0, 0.0))) }
+    physics.box_collider(o, half, physics.material(0.8, 0.0))
+}
+
+start(state: ptr, e: *Engine) {
+    s = state as *Lanes
+    physics.attach(e)
+    block(e, "Ground", core.vec3(0.0, 0.0 - 0.5, 0.0), core.vec3(60.0, 0.5, 60.0), 0.0)
+    // The steps, across the climber's and the stopped's lanes, 3 m ahead.
+    block(e, "Low step", core.vec3(0.0 - 4.0, 0.15, 5.0), core.vec3(1.0, 0.15, 2.0), 0.0)
+    block(e, "High step", core.vec3(0.0 - 8.0, 0.25, 5.0), core.vec3(1.0, 0.25, 2.0), 0.0)
+    // The ramps: 40 and 50 degrees, rising toward +z.
+    block(e, "Ramp 40", core.vec3(4.0, 0.0, 6.0), core.vec3(1.0, 0.1, 6.0), 0.0 - 0.6981)
+    block(e, "Ramp 50", core.vec3(8.0, 0.0, 6.0), core.vec3(1.0, 0.1, 6.0), 0.0 - 0.8727)
+    s.walker = character(e, "Walker", core.vec3(0.0, 0.0, 0.0 - 10.0)) as ptr
+    s.climber = character(e, "Climber", core.vec3(0.0 - 4.0, 0.0, 1.0)) as ptr
+    s.stopped = character(e, "Stopped", core.vec3(0.0 - 8.0, 0.0, 1.0)) as ptr
+    // On the ramps, four metres along them from their middles, just above
+    // their surfaces (d tan(pitch) + 0.1 / cos(pitch)).
+    s.stander = character(e, "Stander", core.vec3(4.0, 3.52, 10.0)) as ptr
+    s.slider = character(e, "Slider", core.vec3(8.0, 4.95, 10.0)) as ptr
+    s.jumper = character(e, "Jumper", core.vec3(12.0, 0.0, 0.0)) as ptr
+}
+
+fixed_update(state: ptr, e: *Engine, step: float) {
+    s = state as *Lanes
+    s.steps = s.steps + 1
+    still = core.vec3(0.0, 0.0, 0.0)
+    ahead = core.vec3(0.0, 0.0, WALK)
+    walker = s.walker as *CharacterController
+    if s.steps == 30 { s.walker_start = feet(walker).z }
+    if s.steps >= 30 && s.steps < 90 {
+        physics.character_move(walker, ahead, 0.0, step)
+    } else {
+        physics.character_move(walker, still, 0.0, step)
+    }
+    if s.steps == 90 { s.walker_after_second = feet(walker).z }
+    physics.character_move(s.climber as *CharacterController, ahead, 0.0, step)
+    climbed = feet(s.climber as *CharacterController).y
+    if climbed > s.climber_high { s.climber_high = climbed }
+    physics.character_move(s.stopped as *CharacterController, ahead, 0.0, step)
+    stander = s.stander as *CharacterController
+    slider = s.slider as *CharacterController
+    physics.character_move(stander, still, 0.0, step)
+    physics.character_move(slider, still, 0.0, step)
+    // Settled on their ramps after a quarter second, then watched.
+    if s.steps == 15 {
+        s.stander_start = feet(stander).y
+        s.slider_start = feet(slider).y
+    }
+    jumper = s.jumper as *CharacterController
+    jump = 0.0
+    if s.steps == 60 && physics.character_grounded(jumper) {
+        s.jump_ground = feet(jumper).y
+        jump = JUMP
+        s.jumped = true
+    }
+    physics.character_move(jumper, still, jump, step)
+    if s.jumped && feet(jumper).y > s.jump_peak { s.jump_peak = feet(jumper).y }
+    if s.steps >= STEPS { engine.engine_stop(e) }
+}
+
+main() {
+    e = engine.engine_new()
+    engine.engine_set_size(e, 320, 240)
+    engine.engine_set_title(e, "ae3d character test")
+    engine.engine_set_camera_input(e, false)
+    engine.engine_set_fixed_step(e, 1.0 / 60.0)
+    engine.engine_set_frame_limit(e, 100000)
+    lanes = Lanes { walker: null, climber: null, stopped: null, stander: null, slider: null, jumper: null, steps: 0,
+                    walker_start: 0.0, walker_after_second: 0.0, stander_start: 0.0, slider_start: 0.0,
+                    jump_ground: 0.0, jump_peak: 0.0, jumped: false, climber_high: 0.0 }
+    b = engine.behaviour_new("lanes", (&lanes) as ptr)
+    b.start = start
+    b.fixed_update = fixed_update
+    engine.engine_add_behaviour(e, b)
+    if !engine.engine_run(e) {
+        println("character: SKIP no window available")
+        engine.engine_free(e)
+        return
+    }
+    println("character: a capsule that walks the world, ${lanes.steps} fixed steps")
+
+    walked = lanes.walker_after_second - lanes.walker_start
+    println("  walker: ${walked} m in a second at ${WALK} m/s")
+    check("on the flat it walks at the speed asked, within 1%", walked > WALK * 0.99 && walked < WALK * 1.01)
+
+    climber = feet(lanes.climber as *CharacterController)
+    println("  climber: its feet up to ${lanes.climber_high} m, and at z ${climber.z} at the end")
+    check("it walks up a 0.3 m step and over it", lanes.climber_high > 0.29 && lanes.climber_high < 0.31 && climber.z > 7.0)
+
+    stopped = feet(lanes.stopped as *CharacterController)
+    println("  stopped: at z ${stopped.z}, y ${stopped.y}")
+    check("and stops at a 0.5 m one", stopped.y < 0.01 && stopped.z < 3.0)
+
+    stander = feet(lanes.stander as *CharacterController)
+    moved = stander.y - lanes.stander_start
+    println("  stander: ${moved} m in two and three quarter seconds on 40 degrees; grounded ${physics.character_grounded(lanes.stander as *CharacterController)}")
+    check("on a 40 degree ramp it stays put", moved > 0.0 - 0.01 && moved < 0.01 && physics.character_grounded(lanes.stander as *CharacterController))
+
+    slider = feet(lanes.slider as *CharacterController)
+    slid = slider.y - lanes.slider_start
+    println("  slider: ${slid} m on 50 degrees")
+    check("on a 50 degree ramp it slides down", slid < 0.0 - 0.5)
+
+    rose = lanes.jump_peak - lanes.jump_ground
+    wanted = JUMP * JUMP / (2.0 * 9.81)
+    println("  jumper: rose ${rose} m, v^2/2g = ${wanted} m")
+    check("a jump peaks at v^2/2g, within 2%", lanes.jumped && rose > wanted * 0.98 && rose < wanted * 1.02)
+
+    deepest = 0.0
+    characters = [lanes.walker, lanes.climber, lanes.stopped, lanes.stander, lanes.slider, lanes.jumper]
+    k = 0
+    while k < 6 {
+        d = physics.character_overlap(characters[k] as *CharacterController)
+        if d > deepest { deepest = d }
+        k = k + 1
+    }
+    println("  the deepest any is into the world: ${deepest * 1000.0} mm")
+    check("none is left inside what it walks on or into (under 6 mm, the slop and one more)", deepest < 0.006)
+
+    physics.character_free(lanes.walker as *CharacterController)
+    physics.character_free(lanes.climber as *CharacterController)
+    physics.character_free(lanes.stopped as *CharacterController)
+    physics.character_free(lanes.stander as *CharacterController)
+    physics.character_free(lanes.slider as *CharacterController)
+    physics.character_free(lanes.jumper as *CharacterController)
+    engine.engine_free(e)
+    if g_failures == 0 {
+        println("character: all checks passed (${g_checks})")
+    } else {
+        println("character: ${g_failures} failure(s) of ${g_checks}")
+    }
+}

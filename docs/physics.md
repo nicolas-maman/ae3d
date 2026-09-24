@@ -152,6 +152,34 @@ wheel body unrotated, so the wheel rests where the joint has nothing to
 undo. A first car crawled because its free wheels had motors at speed zero
 -- a motor holding a wheel still is a brake.
 
+## Characters
+
+`physics.character_controller(object, radius, height)` gives a game object a
+player's body (#420). It's a capsule that walks the world rather than a rigid
+body that tumbles through it, and the object's position is its feet.
+`character_move(controller, walk, jump, delta)` takes the horizontal velocity
+asked for and a vertical speed to jump at (only from the ground). Gravity
+comes from the world.
+
+The mover is Box3D's, driven the way its documentation lays out (`reference/box3d/docs/character.md` in aephysics):
+- cast the capsule along what is left of the move and move as far as the world allows;
+- gather the planes it then touches and solve them for no move at all, only out of any overlap;
+- clip what is left of the move, and the velocity, against those planes, so a wall is slid along.
+
+The first version solved the whole move against the planes before casting. The solver's slop then took the capsule a few millimetres into a wall each step, and through a half-metre step in a second.
+
+The capsule rides a step height (0.35 m) above the feet, so a kerb or a stair lower than that passes under it. A ray from there down finds the ground, and walkable ground (flatter than the slope limit, 45°) puts the feet on it. To a character on the ground, a plane too steep to walk on is a wall. Its normal is laid flat, keeping the separation it measures, so the round bottom of the capsule against a step's edge doesn't lift it over. In the air a steep slope is what it is, and is slid down.
+
+`tests/test_character.ae` holds it to numbers:
+- 3.00 m walked in a second at 3 m/s;
+- up a 0.3 m step, feet at 0.30 m;
+- stopped by a 0.5 m step at 2.745 m (the face at 3 m, less the radius);
+- no drift in 2.75 s on a 40° ramp, and 4.6 m slid down a 50° one;
+- a 5 m/s jump rising 1.29 m against v²/2g = 1.27 (within 2%);
+- no character more than 4.3 mm into the world at the end, within the solver's 5 mm slop.
+
+Pushing dynamic bodies, a Character body kind in the editor, and a first-person walk down the street on `ae3d.input` come next in #420.
+
 ## The scenes
 
 **`examples/physics.ae`** runs four of the reference's own scenes rather
