@@ -2,6 +2,28 @@
 
 ## [current]
 
+### Multiplayer: events and objects created mid-game
+
+- Events (#413): a game registers a named event with a handler on both
+  sides (`net.on_event`) and sends it (`net.send_event`) from a client to
+  the host, or from the host to one client or to `net.EVERYONE`. An event
+  is reliable, once and in order with everything else reliable, carries up
+  to four numbers, and goes on the wire as its order among the registered:
+  a honk with one number is 8 bytes.
+- Objects created and destroyed while the game runs: both sides register a
+  kind with a maker and an unmaker (`net.object_kind`); the host
+  `create_object`s one (a rocket, a car) and every client makes its own,
+  placed the same, and `destroy_object` lets it go on every client when
+  that client's view reaches the moment. A client that joins late is told
+  every object alive and none gone. Ids are never given again, so no delta
+  against an older baseline mistakes a new object for a destroyed one.
+- `tests/test_net_events.ae`, over 100 ms / 20 ms jitter / 2% loss with a
+  third client joining late: 296 events, each once and in order wherever
+  it was sent; an object made on a client within 133 ms, drawn within 6 mm
+  of the host on 1,539 of 1,546 object-steps (12.5 mm at worst, two
+  snapshots lost in a row), and gone 217 ms after the host destroyed it,
+  never drawn past its moment. Protocol 3.
+
 ### Getting up
 
 - A figure on the ground gets up (#414): `motion.get_up`, or by itself
