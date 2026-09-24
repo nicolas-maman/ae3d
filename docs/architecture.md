@@ -107,9 +107,10 @@ says what it is for and why it is shaped as it is.
 | Area | Modules |
 |---|---|
 | Foundation | `core` (linear algebra, scene types, camera, the backend vtable), `platform` (the window, input and timing, over GLFW called directly), `engine` (the loop, behaviours, the window), `behaviour` (game objects and components), `input` (actions and axes), `jobs` (the pool) |
-| Rendering | `vulkan`, `gl`, `vkmeter` (the frame's light, on contrib.vulkan.vk), `shaders` (the GLSL), `vkscene` (generated), `rendering` (shading presets), `offscreen` (a frame to a buffer), `sky` (the sun by the hour), `cloudnoise` (the clouds' textures), `water` (a Gerstner sea), `weather` (rain, snow, dust, storm) |
-| Geometry and assets | `geometry` (the mesh and instance stores the renderers read), `posing` (bone palettes, pose banks), `loader` (OBJ, primitives), `gltf`, `assets` (the Blender export), `blob` (a file as bytes), `png` (a frame as a file), `noise`, `voxel`, `terrain`, `raycast`, `skin`, `anim`, `ik` |
-| Simulation | `physics` (aephysics in the loop), `crowd` (pose banks, the device crowd), `horde` (the crowd's kernels), `nav` (the flow field), `ecs` (dense columns for crowds too large to be objects) |
+| Rendering | `vulkan`, `gl`, `glapi` (the GL entry points), `capture` (a GL frame read back), `vkmeter` (the frame's light, on contrib.vulkan.vk), `shaders` (the GLSL), `vkscene` (generated), `rendering` (shading presets), `offscreen` (a frame to a buffer), `sky` (the sun by the hour), `cloudnoise` (the clouds' textures), `water` (a Gerstner sea), `weather` (rain, snow, dust, storm) |
+| Geometry and assets | `geometry` (the mesh and instance stores the renderers read), `posing` (bone palettes, pose banks), `loader` (OBJ, primitives), `gltf`, `figure` (an animated glTF figure as one game object, and its scene record), `assets` (the Blender export), `blob` (a file as bytes), `png` (a frame as a file), `noise`, `voxel`, `terrain`, `raycast`, `skin`, `anim`, `ik` |
+| Simulation | `physics` (aephysics in the loop: bodies, ragdolls, vehicles, the character controller), `motion` (the active ragdoll: muscles, balance, the protective fall, getting up), `crowd` (pose banks, the device crowd), `horde` (the crowd's kernels), `nav` (the flow field), `ecs` (dense columns for crowds too large to be objects) |
+| Multiplayer | `net` (transports, snapshots as deltas, relevance, prediction and reconciliation, events, objects created mid-game) |
 | Tooling | `agent` (the channel's requests), `channel` (its socket and thread), `probe` (the channel, asking side), `script` (a script as a shared library), `scene` (scene files), `history` (undo) |
 
 ## What is still C, and why
@@ -120,7 +121,7 @@ role, and each folder is there for one reason, stated in
 
 | Folder | Why |
 |---|---|
-| `gpu/` | the two renderers, their offscreen targets and frame readback, still C while they move to Aether in slices (#398). The stores they draw from are already Aether's (`ae3d.geometry`), read in place through `gpu/stores.h`, whose layout `tests/test_geometry` holds to the Aether structs. Aether's 32-bit float ([aether#2134](https://github.com/aether-lang-dev/aether/issues/2134)) is what made that possible. |
+| `gpu/` | the Vulkan renderer, moving to Aether a part at a time (#402), and the OpenGL resolver and contexts, which are the platform's; the OpenGL renderer itself is Aether (#398). The stores they draw from are already Aether's (`ae3d.geometry`), read in place through `gpu/stores.h`, whose layout `tests/test_geometry` holds to the Aether structs. Aether's 32-bit float ([aether#2134](https://github.com/aether-lang-dev/aether/issues/2134)) is what made that possible. |
 | `image/` | a third-party decoder (stb_image); a decoder of our own is a project of its own |
 | `platform/` | the crash handler (a signal handler may call only what is async-signal-safe, and it is installed when the library loads), and the Objective-C surface MoltenVK draws into on macOS |
 | `dlss/` | the Streamline SDK's interface is C++ |

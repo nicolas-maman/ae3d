@@ -25,6 +25,7 @@ import ae3d.geometry
 
 exports (
     scene_save, scene_load, scene_load_lights, scene_load_attachments,
+    FigureSpec, figure_spec_new, attachment_figure, attachment_set_figure,
     scene_load_view, view_defaults, View, Attachment, attachment_new,
     attachment_model, attachment_component, attachment_script, attachment_water,
     attachment_world, attachment_physics, attachment_set_physics, attachment_light, attachment_set_light,
@@ -49,6 +50,7 @@ struct Attachment {
     water: ptr
     world: ptr
     physics: ptr                   // *PhysicsSpec, or null
+    figure: ptr                    // *FigureSpec, or null
     // The light a light marker stands for, or null. A scene's lights used
     // to be one array at the root, so every marker in a loaded scene stood
     // for the same light and only the first of a program's lights survived
@@ -114,6 +116,40 @@ attachment_set_physics(a: *Attachment, spec: *PhysicsSpec) {
     if a == null { return }
     if a.physics != null { heap.free(a.physics as *PhysicsSpec) }
     a.physics = spec as ptr
+}
+
+// An animated figure (ae3d.figure): the glTF it is read from and the clip
+// it plays -- by name, at a speed, looping or not, how far in. The scene
+// file carries it as the "figure" record of a group's entry: the group is
+// where the figure stands, and the figure's own meshes and bones are made
+// again from the file when the scene is read, so they are not written.
+struct FigureSpec {
+    gltf: string
+    clip: string                   // "" for none playing
+    speed: float
+    looping: bool
+    time: float                    // seconds into the clip
+}
+
+figure_spec_new(gltf: string, clip: string, speed: float, looping: bool, time: float) -> *FigureSpec {
+    f = heap.new(FigureSpec)
+    f.gltf = string.copy(gltf)
+    f.clip = string.copy(clip)
+    f.speed = speed
+    f.looping = looping
+    f.time = time
+    return f
+}
+
+attachment_figure(a: *Attachment) -> *FigureSpec {
+    if a == null { return null }
+    return a.figure as *FigureSpec
+}
+
+attachment_set_figure(a: *Attachment, spec: *FigureSpec) {
+    if a == null { return }
+    if a.figure != null { heap.free(a.figure as *FigureSpec) }
+    a.figure = spec as ptr
 }
 
 // What a scene records besides its models and lights: where the camera stood,
@@ -622,13 +658,23 @@ scene_load_attachments(path: string, models: ptr) -> ptr {
                                     field_number(spec_json, "density", 1.0))
         }
 
+        // The figure record, on a group that stands for one.
+        fig = null as *FigureSpec
+        fig_json = json.object_get_raw(entry, "figure")
+        if fig_json != null {
+            fig = figure_spec_new(field_string(fig_json, "gltf"), field_string(fig_json, "clip"),
+                                  field_number(fig_json, "speed", 1.0), field_bool(fig_json, "loop", true),
+                                  field_number(fig_json, "time", 0.0))
+        }
+
         // The light of a marker, its own. Belongs to the caller, like the
         // simulation and the voxel world above it.
         beam = load_light(json.object_get_raw(entry, "light"))
 
-        if component != "" || script != "" || sim != null || world != null || spec != null || beam != null {
+        if component != "" || script != "" || sim != null || world != null || spec != null || fig != null || beam != null {
             a = attachment_new(m, component, script, sim, world)
             a.physics = spec as ptr
+            a.figure = fig as ptr
             a.light = beam as ptr
             list.add_raw(attachments, a as ptr)
         }
@@ -860,6 +906,7 @@ attachment_new(m: *Model, component: string, script: string,
     a.water = w as ptr
     a.world = world as ptr
     a.physics = null
+    a.figure = null
     a.light = null
     a.internal = false
     return a
@@ -880,6 +927,7 @@ attachments_free(attachments: ptr) {
     while i < count {
         a = list.get_raw(attachments, i) as *Attachment
         if a != null && a.physics != null { heap.free(a.physics as *PhysicsSpec) }
+        if a != null && a.figure != null { heap.free(a.figure as *FigureSpec) }
         i = i + 1
     }
     i = 0
@@ -1220,6 +1268,16 @@ scene_save(models: ptr, lights: ptr, attachments: ptr, view: *View,
                     json.object_set_raw(spec_json, "restitution", json.num(spec.restitution))
                     json.object_set_raw(spec_json, "density", json.num(spec.density))
                     json.object_set_raw(entry, "physics", spec_json)
+                }
+                if attached.figure != null {
+                    fig = attached.figure as *FigureSpec
+                    fig_json = json.obj()
+                    json.object_set_raw(fig_json, "gltf", json.str(fig.gltf))
+                    json.object_set_raw(fig_json, "clip", json.str(fig.clip))
+                    json.object_set_raw(fig_json, "speed", json.num(fig.speed))
+                    json.object_set_raw(fig_json, "loop", json.boolean(fig.looping))
+                    json.object_set_raw(fig_json, "time", json.num(fig.time))
+                    json.object_set_raw(entry, "figure", fig_json)
                 }
                 if attached.script != "" {
                     json.object_set_raw(entry, "script", json.str(attached.script))

@@ -1,0 +1,303 @@
+// Animated figures as game objects (#439), held to numbers. Two figures in
+// one scene: a fox walking at its own pace, and an arm bending at half its
+// pace, not looping, moved and turned by its object. Then the scene is
+// saved, read back, and each figure made again on the group the file gave
+// back:
+//
+//   - a figure plays: its bones move with the clip, the arm's elbow turns
+//     the angle the clip gives it at the time it has reached;
+//   - the object carries it: the fox's bones stand where the object stands;
+//   - the file holds one entry a figure (its group, with the file, the
+//     clip, the speed, whether it loops and how far in) and none of the
+//     figures' own meshes;
+//   - read back and made again, each figure is at the same clip, speed and
+//     time, and its bones in the same pose to a micrometre.
+
+import std.list
+import std.string
+import ae3d.core
+import ae3d.engine
+import ae3d.behaviour
+import ae3d.loader
+import ae3d.skin
+import ae3d.scene
+import ae3d.figure
+
+extern atan2(y: float, x: float) -> float
+extern sqrt(x: float) -> float
+extern fabs(x: float) -> float
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+const SCENE = "build/test_figure_scene.json"
+const MESHES = "build/test_figure_meshes"
+const FOX = "tests/fixtures/gltf/Fox.glb"
+const ARM = "tests/fixtures/gltf/arm.glb"
+
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, ok: bool) {
+    g_checks = g_checks + 1
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        g_failures = g_failures + 1
+        println("  FAIL ${name}")
+    }
+}
+
+struct Stage {
+    fox: ptr                         // *GameObject
+    arm: ptr
+    frames: int
+    fox_start: ptr                   // float[bones * 3]: the fox's bones, its second frame
+    fox_moved: float                 // metres: the furthest a fox bone went, second frame to fortieth
+    saved: bool
+}
+
+start(state: ptr, e: *Engine) {
+    s = state as *Stage
+    ground = engine.object(e, "Ground", loader.cube(1.0))
+    behaviour.object_set_position(ground, core.vec3(0.0, 0.0 - 0.5, 0.0))
+    fox = figure.figure(e, "Fox", FOX)
+    arm = figure.figure(e, "Arm", ARM)
+    check("two figures from their files", fox != null && arm != null)
+    if fox == null || arm == null {
+        engine.engine_stop(e)
+        return
+    }
+    s.fox = fox as ptr
+    s.arm = arm as ptr
+    behaviour.object_set_position(fox, core.vec3(3.0, 0.0, 0.0 - 2.0))
+    behaviour.object_set_position(arm, core.vec3(0.0 - 2.0, 0.0, 0.0))
+    behaviour.object_set_rotation(arm, core.quat_rotate(0.5, core.vec3(0.0, 1.0, 0.0)))
+    check("the fox walks", figure.play(figure.figure_of(fox), "Walk", 1.0, true))
+    check("the arm bends, at half its pace, once", figure.play(figure.figure_of(arm), "Bend", 0.5, false))
+    check("a clip the file does not have plays nothing", !figure.play(figure.figure_of(fox), "Dance", 1.0, true) &&
+          string.equals(figure.clip(figure.figure_of(fox)), "") == 1)
+    figure.play(figure.figure_of(fox), "Walk", 1.0, true)
+}
+
+// Every bone of a figure where it is, into `out` (three floats a bone), or
+// the furthest any is from where `out` has it.
+bones_at(o: *GameObject, out: ptr) {
+    sk = figure.skeleton(figure.figure_of(o))
+    p = out as float[]
+    i = 0
+    while i < skin.skeleton_count(sk) {
+        bone = skin.skeleton_bone(sk, i)
+        core.model_sync_transform(bone)
+        p[i * 3] = bone.world_position.x
+        p[i * 3 + 1] = bone.world_position.y
+        p[i * 3 + 2] = bone.world_position.z
+        i = i + 1
+    }
+}
+
+furthest(o: *GameObject, from: ptr) -> float {
+    sk = figure.skeleton(figure.figure_of(o))
+    p = from as float[]
+    worst = 0.0
+    i = 0
+    while i < skin.skeleton_count(sk) {
+        bone = skin.skeleton_bone(sk, i)
+        core.model_sync_transform(bone)
+        d = core.v3_len(core.v3_sub(bone.world_position, core.vec3(p[i * 3], p[i * 3 + 1], p[i * 3 + 2])))
+        if d > worst { worst = d }
+        i = i + 1
+    }
+    return worst
+}
+
+first_bone(o: *GameObject) -> Vec3 {
+    sk = figure.skeleton(figure.figure_of(o))
+    bone = skin.skeleton_bone(sk, 0)
+    core.model_sync_transform(bone)
+    return bone.world_position
+}
+
+update(state: ptr, e: *Engine, delta: float) {
+    s = state as *Stage
+    if s.fox == null { return }
+    s.frames = s.frames + 1
+    if s.frames == 2 {
+        s.fox_start = calloc(skin.skeleton_count(figure.skeleton(figure.figure_of(s.fox as *GameObject))) * 3, 8)
+        bones_at(s.fox as *GameObject, s.fox_start)
+    }
+    if s.frames == 40 {
+        s.fox_moved = furthest(s.fox as *GameObject, s.fox_start)
+        s.saved = engine.engine_save_scene(e, SCENE, MESHES)
+        engine.engine_stop(e)
+    }
+}
+
+// The worst a skeleton's bones are from another's: turned (radians), or
+// placed (metres), in the world.
+worst_turn(a: *Skeleton, b: *Skeleton) -> float {
+    worst = 0.0
+    i = 0
+    while i < skin.skeleton_count(a) && i < skin.skeleton_count(b) {
+        ma = skin.skeleton_bone(a, i)
+        mb = skin.skeleton_bone(b, i)
+        core.model_sync_transform(ma)
+        core.model_sync_transform(mb)
+        // The turn from one to the other, as the relative rotation's
+        // angle: 2 atan2(|v|, |w|), which is exact for small angles where
+        // 2 acos(dot) loses them to the dot product's last digit.
+        r = core.quat_mul(core.quat_conjugate(ma.world_rotation), mb.world_rotation)
+        angle = 2.0 * atan2(sqrt(r.x * r.x + r.y * r.y + r.z * r.z), fabs(r.w))
+        if angle > worst { worst = angle }
+        i = i + 1
+    }
+    return worst
+}
+
+// How far a skeleton's bones spread: the furthest any is from the first.
+extent(a: *Skeleton) -> float {
+    first = skin.skeleton_bone(a, 0)
+    core.model_sync_transform(first)
+    widest = 0.0
+    i = 1
+    while i < skin.skeleton_count(a) {
+        m = skin.skeleton_bone(a, i)
+        core.model_sync_transform(m)
+        d = core.v3_len(core.v3_sub(m.world_position, first.world_position))
+        if d > widest { widest = d }
+        i = i + 1
+    }
+    return widest
+}
+
+worst_place(a: *Skeleton, b: *Skeleton) -> float {
+    worst = 0.0
+    i = 0
+    while i < skin.skeleton_count(a) && i < skin.skeleton_count(b) {
+        ma = skin.skeleton_bone(a, i)
+        mb = skin.skeleton_bone(b, i)
+        core.model_sync_transform(ma)
+        core.model_sync_transform(mb)
+        d = core.v3_len(core.v3_sub(ma.world_position, mb.world_position))
+        if d > worst { worst = d }
+        i = i + 1
+    }
+    return worst
+}
+
+main() {
+    e = engine.engine_new()
+    engine.engine_set_size(e, 320, 240)
+    engine.engine_set_title(e, "ae3d figure test")
+    engine.engine_set_camera_input(e, false)
+    engine.engine_set_frame_limit(e, 100000)
+    light = core.light_sun(core.vec3(0.3, 0.8, 0.5))
+    engine.engine_set_light(e, light)
+    stage = Stage { fox: null, arm: null, frames: 0, fox_start: null, fox_moved: 0.0, saved: false }
+    b = engine.behaviour_new("stage", (&stage) as ptr)
+    b.start = start
+    b.update = update
+    engine.engine_add_behaviour(e, b)
+    if !engine.engine_run(e) {
+        println("figure: SKIP no window available")
+        core.light_free(light)
+        engine.engine_free(e)
+        figure.figures_free(e)
+        return
+    }
+    println("figure: two figures, ${stage.frames} frames")
+    fox = stage.fox as *GameObject
+    arm = stage.arm as *GameObject
+    ff = figure.figure_of(fox)
+    af = figure.figure_of(arm)
+    println("  fox: '${figure.clip(ff)}' at ${figure.time(ff)} s of ${figure.duration(ff)}, its bones moved up to ${stage.fox_moved} units")
+    println("  arm: '${figure.clip(af)}' at ${figure.time(af)} s of ${figure.duration(af)}, speed ${figure.speed(af)}")
+    check("a playing figure's bones move", stage.fox_moved > 0.001)
+    check("the arm is half as far in as the frames' time", figure.time(af) > 0.0 && figure.time(af) < figure.time(ff) * 0.6)
+    bone = first_bone(fox)
+    check("the object carries the figure: the fox's bones stand by (3, 0, -2)",
+          core.v3_len(core.vec3(bone.x - 3.0, 0.0, bone.z + 2.0)) < 3.0)
+    check("the scene saves", stage.saved)
+
+    // The file: one entry a figure, the figures' meshes not written.
+    models = scene.scene_load(SCENE)
+    attached = scene.scene_load_attachments(SCENE, models)
+    figures = 0
+    fox_group = null as *Model
+    arm_group = null as *Model
+    fox_spec = null as *FigureSpec
+    arm_spec = null as *FigureSpec
+    i = 0
+    while attached != null && i < list.size(attached) {
+        a = list.get_raw(attached, i) as *Attachment
+        spec = scene.attachment_figure(a)
+        if spec != null {
+            figures = figures + 1
+            m = scene.attachment_model(a)
+            if string.equals(spec.gltf, FOX) == 1 { fox_group = m; fox_spec = spec }
+            if string.equals(spec.gltf, ARM) == 1 { arm_group = m; arm_spec = spec }
+        }
+        i = i + 1
+    }
+    written = 0
+    if models != null { written = list.size(models) }
+    println("  the file: ${written} models, ${figures} figure records")
+    check("two figure records, on the figures' groups", figures == 2 && fox_group != null && arm_group != null)
+    check("and none of their meshes: the ground and the two groups are all", written == 3)
+    if fox_spec != null && arm_spec != null {
+        check("the fox's record: Walk, at 1, looping, at its time",
+              string.equals(fox_spec.clip, "Walk") == 1 && fox_spec.speed == 1.0 && fox_spec.looping &&
+              fabs(fox_spec.time - figure.time(ff)) < 0.000001)
+        check("the arm's record: Bend, at 0.5, once, at its time",
+              string.equals(arm_spec.clip, "Bend") == 1 && arm_spec.speed == 0.5 && !arm_spec.looping &&
+              fabs(arm_spec.time - figure.time(af)) < 0.000001)
+        where = fox_group.position
+        check("the fox's group where its object stood", fabs(where.x - 3.0) < 0.000001 && fabs(where.z + 2.0) < 0.000001)
+
+        // Made again on the groups the file gave back, in a second engine
+        // (not run: the figures pose without drawing).
+        e2 = engine.engine_new()
+        fox2 = engine.object(e2, "Fox", fox_group)
+        arm2 = engine.object(e2, "Arm", arm_group)
+        f2 = figure.attach(e2, fox2, fox_spec.gltf)
+        a2 = figure.attach(e2, arm2, arm_spec.gltf)
+        figure.play(f2, fox_spec.clip, fox_spec.speed, fox_spec.looping)
+        figure.play(a2, arm_spec.clip, arm_spec.speed, arm_spec.looping)
+        figure.set_time(f2, fox_spec.time)
+        figure.set_time(a2, arm_spec.time)
+        turned = worst_turn(figure.skeleton(ff), figure.skeleton(f2))
+        placed = worst_place(figure.skeleton(ff), figure.skeleton(f2))
+        arm_turned = worst_turn(figure.skeleton(af), figure.skeleton(a2))
+        arm_placed = worst_place(figure.skeleton(af), figure.skeleton(a2))
+        fox_size = extent(figure.skeleton(ff))
+        arm_size = extent(figure.skeleton(af))
+        println("  read back: the fox's bones at most ${turned} rad and ${placed / fox_size} of its size off, the arm's ${arm_turned} rad and ${arm_placed / arm_size}")
+        // The file writes the time to six places or so: a microsecond of a
+        // walk is a micro-radian of a bone, and a millionth of the figure.
+        // (The fox is the Khronos sample's, a hundred units long.)
+        check("read back and made again, both in the same pose (under 10 micro-radians and 10 millionths of the figure)",
+              turned < 0.00001 && placed < fox_size * 0.00001 && arm_turned < 0.00001 && arm_placed < arm_size * 0.00001)
+        engine.engine_free(e2)
+        figure.figures_free(e2)
+    } else {
+        check("the records read back", false)
+    }
+    scene.attachments_free(attached)
+    // The loaded models but the two groups, which the second engine's
+    // objects owned and freed.
+    i = 0
+    while models != null && i < list.size(models) {
+        m = list.get_raw(models, i) as *Model
+        if m != fox_group && m != arm_group { core.model_free(m) }
+        i = i + 1
+    }
+    if models != null { list.free(models) }
+    if stage.fox_start != null { free(stage.fox_start) }
+    core.light_free(light)
+    engine.engine_free(e)
+    figure.figures_free(e)
+    if g_failures == 0 {
+        println("figure: all checks passed (${g_checks})")
+    } else {
+        println("figure: ${g_failures} failure(s) of ${g_checks}")
+    }
+}
