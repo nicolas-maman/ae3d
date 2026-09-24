@@ -1,0 +1,265 @@
+// ae3d.figure -- an animated figure as one game object (#439).
+//
+// A figure is a glTF read from a file -- its meshes, the skeleton they are
+// skinned to, its animations -- standing where a game object stands and
+// playing a clip. The object's model is an empty group; the file's roots
+// hang under it, so moving, turning or scaling the object carries the
+// whole figure, and the file's meshes are drawn as any model is. A clip
+// plays by name, at a speed, looping or not, advanced by the engine's
+// update like any script; `set_time` scrubs it.
+//
+// A scene file records a figure as the group's "figure" record (the file,
+// the clip, the speed, whether it loops, how far in: ae3d.scene's
+// FigureSpec), and its own meshes as internal, so they are not written: a
+// scene read back makes the figure again from its file (`attach` on the
+// group the scene made). The editor and every program that saves its
+// scene write the same record.
+//
+// A figure's models belong to its file, freed with it: `figures_free`
+// after the engine that drew them is gone, as with any glTF.
+
+import std.list
+import std.string
+import ae3d.core
+import ae3d.behaviour
+import ae3d.engine
+import ae3d.gltf
+import ae3d.anim
+import ae3d.scene
+import ae3d.skin
+
+exports (
+    Figure,
+    figure, attach, figure_of, play, stop, set_time, figures_free,
+    path, clip, speed, looping, time, clip_count, clip_name, duration, skeleton, primitive_count, primitive
+)
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+struct Figure {
+    engine: ptr                      // *Engine
+    object: ptr                      // *GameObject
+    path: string
+    file: ptr                        // *GltfScene
+    players: ptr                     // *Registry: the clip's players, one a node
+    clip: string                     // "" when none plays
+    speed: float
+    looping: bool
+    time: float                      // seconds into the clip
+    duration: float
+}
+
+// Every figure an engine has, for the scene file's records.
+struct Figures {
+    engine: ptr
+    list: ptr                        // list of *Figure
+}
+
+var g_figures: ptr = null            // list of *Figures, one an engine
+
+figures_for(e: *Engine) -> *Figures {
+    if g_figures == null { g_figures = list.new() }
+    i = 0
+    while i < list.size(g_figures) {
+        fs = list.get_raw(g_figures, i) as *Figures
+        if fs.engine == e as ptr { return fs }
+        i = i + 1
+    }
+    fs = calloc(1, sizeof(Figures)) as *Figures
+    fs.engine = e as ptr
+    fs.list = list.new()
+    list.add_raw(g_figures, fs as ptr)
+    engine.engine_set_attachment_provider(e, figure_attachments, fs as ptr)
+    return fs
+}
+
+// A figure from `path`, as a new game object named `name`, at the origin.
+// Null when the file cannot be read (gltf.last_error says why).
+figure(e: *Engine, name: string, path: string) -> *GameObject {
+    group = core.model_new()
+    o = engine.object(e, name, group)
+    if attach(e, o, path) == null { return null }
+    return o
+}
+
+// A figure from `path` on an object that has a group for a model -- one the
+// game made, or one a scene file read back. Null when the file cannot be
+// read or the object has no model.
+attach(e: *Engine, o: *GameObject, path: string) -> *Figure {
+    group = behaviour.object_model(o)
+    if group == null { return null }
+    file = gltf.load(path)
+    if file == null { return null }
+    f = calloc(1, sizeof(Figure)) as *Figure
+    f.engine = e as ptr
+    f.object = o as ptr
+    f.path = string.copy(path)
+    f.file = file as ptr
+    f.clip = string.copy("")
+    f.speed = 1.0
+    f.looping = true
+    f.players = anim.registry_new() as ptr
+    i = 0
+    while i < gltf.root_count(file) {
+        core.model_set_parent(gltf.root(file, i), group)
+        i = i + 1
+    }
+    i = 0
+    while i < gltf.primitive_count(file) {
+        engine.engine_add_model(e, gltf.primitive(file, i))
+        i = i + 1
+    }
+    engine.script(o, "Figure", f as ptr, null, figure_update)
+    list.add_raw(figures_for(e).list, f as ptr)
+    return f
+}
+
+// The figure on an object, or null.
+figure_of(o: *GameObject) -> *Figure {
+    if o == null { return null }
+    i = 0
+    while i < behaviour.object_component_count(o) {
+        c = behaviour.object_component(o, i)
+        if c != null && string.equals(c.name, "Figure") == 1 { return behaviour.component_state(c) as *Figure }
+        i = i + 1
+    }
+    return null
+}
+
+// Play `clip` from its start at `speed` (1 its own pace), looping or not.
+// False, and nothing playing, when the file has no animation by that name.
+play(f: *Figure, name: string, rate: float, loops: bool) -> bool {
+    if f == null { return false }
+    stop(f)
+    made = gltf.play(f.file as *GltfScene, name, f.players as *Registry, loops)
+    if made == 0 { return false }
+    string.free(f.clip)
+    f.clip = string.copy(name)
+    f.speed = rate
+    f.looping = loops
+    f.time = 0.0
+    f.duration = gltf.animation_duration(f.file as *GltfScene, name)
+    return true
+}
+
+// Nothing plays: the pose stays where the clip left it.
+stop(f: *Figure) {
+    if f == null { return }
+    anim.registry_free(f.players as *Registry)
+    f.players = anim.registry_new() as ptr
+    string.free(f.clip)
+    f.clip = string.copy("")
+    f.time = 0.0
+    f.duration = 0.0
+}
+
+// The clip at `seconds` in (wrapped when it loops, held at its end when not),
+// posed now.
+set_time(f: *Figure, seconds: float) {
+    if f == null || string.equals(f.clip, "") == 1 { return }
+    f.time = wrapped(f, seconds)
+    r = f.players as *Registry
+    i = 0
+    while i < anim.registry_count(r) {
+        anim.player_set_time(anim.binding_player(anim.registry_binding(r, i)), f.time)
+        i = i + 1
+    }
+    anim.registry_apply(r)
+}
+
+wrapped(f: *Figure, seconds: float) -> float {
+    if f.duration <= 0.0 { return 0.0 }
+    t = seconds
+    if f.looping {
+        while t >= f.duration { t = t - f.duration }
+        while t < 0.0 { t = t + f.duration }
+    } else {
+        if t > f.duration { t = f.duration }
+        if t < 0.0 { t = 0.0 }
+    }
+    return t
+}
+
+// A frame's update: the clip on by the frame's time, at the figure's speed.
+figure_update(state: ptr, o: *GameObject, delta: float) {
+    f = state as *Figure
+    if string.equals(f.clip, "") == 1 { return }
+    set_time(f, f.time + delta * f.speed)
+}
+
+path(f: *Figure) -> string { return f.path }
+clip(f: *Figure) -> string { return f.clip }
+speed(f: *Figure) -> float { return f.speed }
+looping(f: *Figure) -> bool { return f.looping }
+time(f: *Figure) -> float { return f.time }
+duration(f: *Figure) -> float { return f.duration }
+clip_count(f: *Figure) -> int { return gltf.animation_count(f.file as *GltfScene) }
+clip_name(f: *Figure, index: int) -> string { return gltf.animation_name(f.file as *GltfScene, index) }
+primitive_count(f: *Figure) -> int { return gltf.primitive_count(f.file as *GltfScene) }
+primitive(f: *Figure, index: int) -> *Model { return gltf.primitive(f.file as *GltfScene, index) }
+
+// The skeleton its meshes are skinned to (the file's first), or null for a
+// figure with none.
+skeleton(f: *Figure) -> *Skeleton {
+    file = f.file as *GltfScene
+    if gltf.skeleton_count(file) == 0 { return null }
+    return gltf.skeleton(file, 0)
+}
+
+// The scene file's records: each figure's group with its figure record,
+// and its meshes as internal.
+figure_attachments(state: ptr) -> ptr {
+    fs = state as *Figures
+    out = list.new()
+    i = 0
+    while i < list.size(fs.list) {
+        f = list.get_raw(fs.list, i) as *Figure
+        group = behaviour.object_model(f.object as *GameObject)
+        if group != null {
+            a = scene.attachment_new(group, "", "", null, null)
+            scene.attachment_set_figure(a, scene.figure_spec_new(f.path, f.clip, f.speed, f.looping, f.time))
+            list.add_raw(out, a as ptr)
+        }
+        k = 0
+        while k < primitive_count(f) {
+            inner = scene.attachment_new(primitive(f, k), "", "", null, null)
+            scene.attachment_set_internal(inner, true)
+            list.add_raw(out, inner as ptr)
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// Every figure the engine had, and its file's models, freed: after the
+// engine is, since the engine drew them.
+figures_free(e: *Engine) {
+    if g_figures == null { return }
+    i = 0
+    while i < list.size(g_figures) {
+        fs = list.get_raw(g_figures, i) as *Figures
+        if fs.engine == e as ptr {
+            k = 0
+            while k < list.size(fs.list) {
+                f = list.get_raw(fs.list, k) as *Figure
+                anim.registry_free(f.players as *Registry)
+                gltf.scene_destroy(f.file as *GltfScene)
+                string.free(f.path)
+                string.free(f.clip)
+                free(f as ptr)
+                k = k + 1
+            }
+            list.free(fs.list)
+            free(fs as ptr)
+            list.remove(g_figures, i)
+        } else {
+            i = i + 1
+        }
+    }
+    if list.size(g_figures) == 0 {
+        list.free(g_figures)
+        g_figures = null
+    }
+}

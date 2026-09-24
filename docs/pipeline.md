@@ -182,6 +182,38 @@ of a fifteen-part Quaternius figure run at 130 fps hidden, sorted on the
 device, every part with its own indirect command. `tests/test_gltf_crowd`
 bakes the Fox's walk and draws thirty of it as one instanced draw.
 
+## A figure in a scene
+
+`ae3d.figure` makes a glTF figure one game object. Its meshes and bones hang
+under the object's model, an empty group, so moving, turning or scaling the
+object carries the whole figure. A clip plays by name, at a speed, looping or
+not, advanced by the engine's update like any script:
+
+```aether
+fox = figure.figure(e, "Fox", "assets/fox.glb")
+behaviour.object_set_position(fox, core.vec3(3.0, 0.0, 0.0 - 2.0))
+figure.play(figure.figure_of(fox), "Walk", 1.0, true)     // clip, speed, loop
+figure.set_time(figure.figure_of(fox), 0.25)              // scrub
+```
+
+A scene file records a figure as its group's `"figure"` record:
+
+```json
+"figure": { "gltf": "assets/fox.glb", "clip": "Walk", "speed": 1, "loop": true, "time": 0.28 }
+```
+
+The figure's own meshes are left out, since they come from the file. A scene
+read back makes the figure again with `figure.attach(e, object, path)` on the
+group it gave back. `figures_free(e)` frees the files after the engine that
+drew them.
+
+`tests/test_figure.ae` checks the round trip. It saves a walking fox and an
+arm bending at half its pace, reads the scene back, and makes both again.
+The file holds three models, the ground and the two groups, and none of the
+figures' meshes. The records keep the clip, speed, loop and time. Made
+again, every bone's pose is within 4.5 µrad and 1.3 millionths of the
+figure's size, the time's six printed digits, on Vulkan and on OpenGL.
+
 ## Driving it from a program
 
 An engine started with `AE3D_AGENT` answers questions about itself over a
