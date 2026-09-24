@@ -522,6 +522,19 @@ static struct {
     VkQueryPool timestamps;
     double timestamp_ms;          /* milliseconds per tick, from the device */
     unsigned max_image_2d;        /* the widest 2D image the device creates */
+    /* Meshes' uploads and structures recorded together and submitted once
+       (ae3d_vk_flush_uploads) rather than a submit and a wait each: a
+       scene of 250 distinct meshes waited on the queue 750 times. */
+    int batching;                 /* inside ae3d_vk_upload_mesh */
+    VkCommandBuffer batch;        /* the recording batch, or null */
+    VkBuffer batch_staging[64];   /* its staging chunks, freed at the flush */
+    VkDeviceMemory batch_staging_memory[64];
+    unsigned char *batch_staging_mapped;
+    VkDeviceSize batch_staging_size, batch_staging_used;
+    int batch_chunks;
+    VkBuffer *batch_scratch;      /* the structures' scratch buffers, freed at the flush */
+    VkDeviceMemory *batch_scratch_memory;
+    int batch_scratch_count, batch_scratch_capacity;
     int timestamps_usable;        /* the graphics queue reports valid bits */
     int stamped[AE3D_VK_FRAMES];  /* this frame's four stamps were all written */
     int stamp_next;               /* how many of this frame's stamps are written */
@@ -1188,9 +1201,121 @@ static int ae3d_vk_create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
     return 1;
 }
 
+/* The batch's command buffer, begun the first time something is recorded
+   into it. */
+static VkCommandBuffer ae3d_vk_batch_command(void) {
+    VkCommandBufferAllocateInfo allocation;
+    VkCommandBufferBeginInfo begin;
+    if (vk.batch) return vk.batch;
+    memset(&allocation, 0, sizeof(allocation));
+    allocation.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocation.commandPool = vk.command_pool;
+    allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocation.commandBufferCount = 1;
+    if (ae3d_vkAllocateCommandBuffers(vk.device, &allocation, &vk.batch) != VK_SUCCESS) {
+        vk.batch = VK_NULL_HANDLE;
+        return VK_NULL_HANDLE;
+    }
+    memset(&begin, 0, sizeof(begin));
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    ae3d_vkBeginCommandBuffer(vk.batch, &begin);
+    return vk.batch;
+}
+
+/* `size` bytes of host-visible staging for the batch, from the current chunk
+   or a new one (16 MB, or the size when larger); null when none can be had,
+   and the caller uploads on its own instead. */
+static VkBuffer ae3d_vk_batch_stage(VkDeviceSize size, VkDeviceSize *offset, unsigned char **at) {
+    VkDeviceSize aligned = (vk.batch_staging_used + 15) & ~(VkDeviceSize)15;
+    if (!vk.batch_chunks || aligned + size > vk.batch_staging_size) {
+        VkDeviceSize chunk = size > (16u << 20) ? size : (16u << 20);
+        int n = vk.batch_chunks;
+        void *mapped = NULL;
+        if (n >= 64) return VK_NULL_HANDLE;
+        if (vk.batch_staging_mapped) ae3d_vkUnmapMemory(vk.device, vk.batch_staging_memory[n - 1]);
+        vk.batch_staging_mapped = NULL;
+        if (!ae3d_vk_create_buffer(chunk, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                   &vk.batch_staging[n], &vk.batch_staging_memory[n])) {
+            g_vk_error[0] = 0;
+            return VK_NULL_HANDLE;
+        }
+        if (ae3d_vkMapMemory(vk.device, vk.batch_staging_memory[n], 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {
+            ae3d_vkDestroyBuffer(vk.device, vk.batch_staging[n], NULL);
+            ae3d_vkFreeMemory(vk.device, vk.batch_staging_memory[n], NULL);
+            return VK_NULL_HANDLE;
+        }
+        vk.batch_chunks = n + 1;
+        vk.batch_staging_mapped = (unsigned char *)mapped;
+        vk.batch_staging_size = chunk;
+        aligned = 0;
+    }
+    *offset = aligned;
+    *at = vk.batch_staging_mapped + aligned;
+    vk.batch_staging_used = aligned + size;
+    return vk.batch_staging[vk.batch_chunks - 1];
+}
+
+/* A structure's scratch, kept until the batch that builds it has run. */
+static void ae3d_vk_batch_keep_scratch(VkBuffer buffer, VkDeviceMemory memory) {
+    if (vk.batch_scratch_count == vk.batch_scratch_capacity) {
+        int grown = vk.batch_scratch_capacity ? vk.batch_scratch_capacity * 2 : 64;
+        VkBuffer *buffers = (VkBuffer *)realloc(vk.batch_scratch, (size_t)grown * sizeof(VkBuffer));
+        VkDeviceMemory *memories;
+        if (!buffers) return;
+        vk.batch_scratch = buffers;
+        memories = (VkDeviceMemory *)realloc(vk.batch_scratch_memory, (size_t)grown * sizeof(VkDeviceMemory));
+        if (!memories) return;
+        vk.batch_scratch_memory = memories;
+        vk.batch_scratch_capacity = grown;
+    }
+    vk.batch_scratch[vk.batch_scratch_count] = buffer;
+    vk.batch_scratch_memory[vk.batch_scratch_count] = memory;
+    vk.batch_scratch_count++;
+}
+
+/* Submit what the batch recorded and wait for it once, then free its
+   staging and scratch. Called before a frame is begun and before one is
+   submitted (the frame reads what the batch wrote), before a mesh is freed
+   (the batch may name its buffers) and at shutdown. Nothing to do when
+   nothing was recorded. */
+void ae3d_vk_flush_uploads(void) {
+    int i;
+    if (vk.batch) {
+        VkSubmitInfo submit;
+        ae3d_vkEndCommandBuffer(vk.batch);
+        memset(&submit, 0, sizeof(submit));
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &vk.batch;
+        ae3d_vkQueueSubmit(vk.graphics_queue, 1, &submit, VK_NULL_HANDLE);
+        ae3d_vkQueueWaitIdle(vk.graphics_queue);
+        ae3d_vkFreeCommandBuffers(vk.device, vk.command_pool, 1, &vk.batch);
+        vk.batch = VK_NULL_HANDLE;
+    }
+    if (vk.batch_staging_mapped && vk.batch_chunks > 0) {
+        ae3d_vkUnmapMemory(vk.device, vk.batch_staging_memory[vk.batch_chunks - 1]);
+    }
+    vk.batch_staging_mapped = NULL;
+    for (i = 0; i < vk.batch_chunks; i++) {
+        ae3d_vkDestroyBuffer(vk.device, vk.batch_staging[i], NULL);
+        ae3d_vkFreeMemory(vk.device, vk.batch_staging_memory[i], NULL);
+    }
+    vk.batch_chunks = 0;
+    vk.batch_staging_size = 0;
+    vk.batch_staging_used = 0;
+    for (i = 0; i < vk.batch_scratch_count; i++) {
+        ae3d_vkDestroyBuffer(vk.device, vk.batch_scratch[i], NULL);
+        ae3d_vkFreeMemory(vk.device, vk.batch_scratch_memory[i], NULL);
+    }
+    vk.batch_scratch_count = 0;
+}
+
 // Uploads through a host-visible staging buffer so the resident copy stays
 // device-local: on a discrete GPU that is the difference between reading vertices
-// over PCIe every frame and reading them from VRAM.
+// over PCIe every frame and reading them from VRAM. Inside a mesh's upload the
+// copy is recorded into the batch instead of submitted and waited on.
 static int ae3d_vk_upload_buffer(const void *data, VkDeviceSize size,
                                  VkBufferUsageFlags usage,
                                  VkBuffer *buffer, VkDeviceMemory *memory) {
@@ -1202,6 +1327,25 @@ static int ae3d_vk_upload_buffer(const void *data, VkDeviceSize size,
     VkSubmitInfo submit;
     VkBufferCopy region;
     void *mapped = NULL;
+
+    if (vk.batching) {
+        VkDeviceSize offset = 0;
+        unsigned char *at = NULL;
+        VkBuffer source = ae3d_vk_batch_stage(size, &offset, &at);
+        VkCommandBuffer batch = source ? ae3d_vk_batch_command() : VK_NULL_HANDLE;
+        if (batch) {
+            if (!ae3d_vk_create_buffer(size, usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, buffer, memory)) {
+                return 0;
+            }
+            memcpy(at, data, (size_t)size);
+            memset(&region, 0, sizeof(region));
+            region.srcOffset = offset;
+            region.size = size;
+            ae3d_vkCmdCopyBuffer(batch, source, *buffer, 1, &region);
+            return 1;
+        }
+    }
 
     if (!ae3d_vk_create_buffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -1510,8 +1654,10 @@ static void ae3d_vk_meter_record(void) {
         ae3d_vk_meter_barrier(source, 0, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                               0, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
     }
+    /* After the last frame's blits read the levels this one writes, not
+       merely after nothing (#410). */
     ae3d_vk_meter_barrier(vk.meter_image, -1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                          0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
+                          0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     ae3d_vk_meter_blit(source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0, (int)vk.extent.width, (int)vk.extent.height,
                        0, vk.meter_width, vk.meter_height);
     w = vk.meter_width;
@@ -1536,8 +1682,30 @@ static void ae3d_vk_meter_record(void) {
     region.imageExtent.width = (unsigned)vk.meter_small_width;
     region.imageExtent.height = (unsigned)vk.meter_small_height;
     region.imageExtent.depth = 1;
+    /* This frame slot's buffer was written by the copy two frames ago and
+       read by the host since: the copy waits for both, and what it writes is
+       made visible to the host, which reads it after the fence (#410). */
+    {
+        VkMemoryBarrier before;
+        memset(&before, 0, sizeof(before));
+        before.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        before.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_READ_BIT;
+        before.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        ae3d_vkCmdPipelineBarrier(vk.command_buffers[vk.frame],
+                                  VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+                                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, NULL, 0, NULL);
+    }
     ae3d_vkCmdCopyImageToBuffer(vk.command_buffers[vk.frame], vk.meter_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                 vk.meter_buffer[vk.frame], 1, &region);
+    {
+        VkMemoryBarrier after;
+        memset(&after, 0, sizeof(after));
+        after.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        after.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        ae3d_vkCmdPipelineBarrier(vk.command_buffers[vk.frame], VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                  VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &after, 0, NULL, 0, NULL);
+    }
     if (!vk.offscreen) {
         VkImageMemoryBarrier back;
         memset(&back, 0, sizeof(back));
@@ -2084,11 +2252,34 @@ static int ae3d_vk_build_render_pass(VkImageLayout present_layout, int part, VkR
 // Depth written as colour, so the main pass samples it like any other texture.
 // The attachment ends in shader-read layout, which is what lets the very next
 // pass in the same submission read it without a barrier of its own.
+/* A depth-only pass's dependencies. In: its clear and the layout transition
+   from UNDEFINED wait for the previous frame's sampling of the image and its
+   last depth write, which on one queue are otherwise unordered against them
+   (#410). Out: the depth written here is read by a fragment shader after. */
+static void ae3d_vk_depth_pass_dependencies(VkSubpassDependency *dependencies) {
+    memset(dependencies, 0, 2 * sizeof(VkSubpassDependency));
+    dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[0].dstSubpass = 0;
+    dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                   VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    dependencies[0].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    dependencies[0].dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                                   VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    dependencies[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    dependencies[1].srcSubpass = 0;
+    dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    dependencies[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+}
+
 static int ae3d_vk_build_shadow_pass(void) {
     VkAttachmentDescription attachments[2];
     VkAttachmentReference colour_ref, depth_ref;
     VkSubpassDescription subpass;
-    VkSubpassDependency dependency;
+    VkSubpassDependency dependencies[2];
     VkRenderPassCreateInfo info;
 
     // Depth, and nothing else. The pass used to write gl_FragCoord.z into an
@@ -2120,13 +2311,7 @@ static int ae3d_vk_build_shadow_pass(void) {
     subpass.pDepthStencilAttachment = &depth_ref;
 
     // The write to wait on is the depth store, not a colour one.
-    memset(&dependency, 0, sizeof(dependency));
-    dependency.srcSubpass = 0;
-    dependency.dstSubpass = VK_SUBPASS_EXTERNAL;
-    dependency.srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-    dependency.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    dependency.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    dependency.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    ae3d_vk_depth_pass_dependencies(dependencies);
 
     memset(&info, 0, sizeof(info));
     info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -2134,8 +2319,8 @@ static int ae3d_vk_build_shadow_pass(void) {
     info.pAttachments = attachments;
     info.subpassCount = 1;
     info.pSubpasses = &subpass;
-    info.dependencyCount = 1;
-    info.pDependencies = &dependency;
+    info.dependencyCount = 2;
+    info.pDependencies = dependencies;
 
     if (ae3d_vkCreateRenderPass(vk.device, &info, NULL, &vk.shadow_pass) != VK_SUCCESS) {
         return ae3d_vk_fail("shadow vkCreateRenderPass failed");
@@ -2151,7 +2336,7 @@ static int ae3d_vk_build_camdepth_pass(void) {
     VkAttachmentDescription attachment;
     VkAttachmentReference depth_ref;
     VkSubpassDescription subpass;
-    VkSubpassDependency dependency;
+    VkSubpassDependency dependencies[2];
     VkRenderPassCreateInfo info;
 
     memset(&attachment, 0, sizeof(attachment));
@@ -2173,13 +2358,7 @@ static int ae3d_vk_build_camdepth_pass(void) {
     subpass.colorAttachmentCount = 0;
     subpass.pDepthStencilAttachment = &depth_ref;
 
-    memset(&dependency, 0, sizeof(dependency));
-    dependency.srcSubpass = 0;
-    dependency.dstSubpass = VK_SUBPASS_EXTERNAL;
-    dependency.srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-    dependency.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    dependency.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    dependency.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    ae3d_vk_depth_pass_dependencies(dependencies);
 
     memset(&info, 0, sizeof(info));
     info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -2187,8 +2366,8 @@ static int ae3d_vk_build_camdepth_pass(void) {
     info.pAttachments = &attachment;
     info.subpassCount = 1;
     info.pSubpasses = &subpass;
-    info.dependencyCount = 1;
-    info.pDependencies = &dependency;
+    info.dependencyCount = 2;
+    info.pDependencies = dependencies;
 
     if (ae3d_vkCreateRenderPass(vk.device, &info, NULL, &vk.camdepth_pass) != VK_SUCCESS) {
         return ae3d_vk_fail("camera-depth vkCreateRenderPass failed");
@@ -2442,6 +2621,7 @@ static int ae3d_vk_build_post_pass(VkImageLayout present_layout, VkRenderPass *o
     VkAttachmentReference colour_ref;
     VkSubpassDescription subpass;
     VkSubpassDependency dependency;
+    VkSubpassDependency handed[2];
     VkRenderPassCreateInfo info;
 
     memset(&attachment, 0, sizeof(attachment));
@@ -2463,13 +2643,30 @@ static int ae3d_vk_build_post_pass(VkImageLayout present_layout, VkRenderPass *o
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &colour_ref;
 
+    /* What it samples was written as an attachment before it, and what it
+       writes -- cleared of nothing, from UNDEFINED -- was written and read
+       by the passes of the frame before: both orders, or the layout
+       transition races the last frame's reads (#410). */
     memset(&dependency, 0, sizeof(dependency));
     dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
     dependency.dstSubpass = 0;
-    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     dependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    dependency.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    dependency.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                              VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
+                               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    /* And out: what it wrote is sampled by the next pass or blitted and
+       copied by the meter and the capture, after its final transition. */
+    handed[0] = dependency;
+    memset(&handed[1], 0, sizeof(handed[1]));
+    handed[1].srcSubpass = 0;
+    handed[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+    handed[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    handed[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    handed[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+    handed[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
 
     memset(&info, 0, sizeof(info));
     info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -2477,8 +2674,8 @@ static int ae3d_vk_build_post_pass(VkImageLayout present_layout, VkRenderPass *o
     info.pAttachments = &attachment;
     info.subpassCount = 1;
     info.pSubpasses = &subpass;
-    info.dependencyCount = 1;
-    info.pDependencies = &dependency;
+    info.dependencyCount = 2;
+    info.pDependencies = handed;
 
     if (ae3d_vkCreateRenderPass(vk.device, &info, NULL, out) != VK_SUCCESS) {
         return ae3d_vk_fail("post vkCreateRenderPass failed");
@@ -4189,6 +4386,7 @@ int ae3d_vk_frame_begin(double r, double g, double b, double a) {
     VkResult result;
 
     if (!vk.ready || vk.recording) return 0;
+    ae3d_vk_flush_uploads();
 
     if (vk.needs_resize) {
         if (!ae3d_vk_rebuild_swapchain(vk.pending_width, vk.pending_height)) return 0;
@@ -4750,10 +4948,20 @@ int ae3d_vk_crowd_sort(int handle, double cx, double cz, double near_dist, doubl
     before.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     before.buffer = c->draws;
     before.size = VK_WHOLE_SIZE;
-    ae3d_vkCmdPipelineBarrier(command,
-                              VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
-                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
-                              0, 0, NULL, 1, &before, 0, NULL);
+    /* And the frame before's sort wrote the same streams: this one's writes
+       come after those, not merely after their reads (#410). */
+    {
+        VkMemoryBarrier sorted;
+        memset(&sorted, 0, sizeof(sorted));
+        sorted.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        sorted.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        sorted.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        ae3d_vkCmdPipelineBarrier(command,
+                                  VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT |
+                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                  0, 1, &sorted, 1, &before, 0, NULL);
+    }
 
     memset(commands, 0, sizeof(commands));
     for (t = 0; t < AE3D_VK_CROWD_TIERS; t++) {
@@ -5169,13 +5377,30 @@ static void ae3d_vk_build_blas_with(ae3d_vk_mesh *slot, VkDeviceSize stride) {
     range.primitiveCount = triangles;
     ranges[0] = &range;
 
-    command = ae3d_vk_begin_once();
+    /* In a mesh's upload the build goes into the batch after the copies it
+       reads, behind a barrier from the copies' writes to the build's reads,
+       and its scratch is kept until the batch has run. */
+    command = vk.batching ? ae3d_vk_batch_command() : VK_NULL_HANDLE;
     if (command) {
+        VkMemoryBarrier written;
+        memset(&written, 0, sizeof(written));
+        written.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        written.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        written.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+        ae3d_vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                  VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &written,
+                                  0, NULL, 0, NULL);
         ae3d_vkCmdBuildAccelerationStructuresKHR(command, 1, &build, ranges);
-        ae3d_vk_end_once(command);
+        ae3d_vk_batch_keep_scratch(scratch, scratch_memory);
+    } else {
+        command = ae3d_vk_begin_once();
+        if (command) {
+            ae3d_vkCmdBuildAccelerationStructuresKHR(command, 1, &build, ranges);
+            ae3d_vk_end_once(command);
+        }
+        ae3d_vkDestroyBuffer(vk.device, scratch, NULL);
+        ae3d_vkFreeMemory(vk.device, scratch_memory, NULL);
     }
-    ae3d_vkDestroyBuffer(vk.device, scratch, NULL);
-    ae3d_vkFreeMemory(vk.device, scratch_memory, NULL);
 
     memset(&address, 0, sizeof(address));
     address.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
@@ -6088,6 +6313,9 @@ int ae3d_vk_frame_end(void) {
     int frame_slot = (int)vk.frame;
 
     if (!vk.recording) return 0;
+    /* A model added while the frame was recorded is drawn by it: its
+       buffers are written before the frame is submitted. */
+    ae3d_vk_flush_uploads();
 
     ae3d_vk_open_scene_pass();
     ae3d_vkCmdEndRenderPass(vk.command_buffers[vk.frame]);
@@ -6963,9 +7191,14 @@ int ae3d_vk_upload_mesh(void *mesh) {
         vk.mesh_capacity = grown;
     }
 
+    /* The copies and the structure recorded into the batch, which is
+       submitted before the next frame begins, or before this one is
+       submitted when a frame is being recorded. */
+    vk.batching = 1;
     if (!ae3d_vk_upload_buffer(vertices, (VkDeviceSize)vertex_count * AE3D_VK_STRIDE,
                                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | ae3d_vk_ray_input_usage(),
                                &slot->vertex_buffer, &slot->vertex_memory)) {
+        vk.batching = 0;
         free(sequential);
         return 0;
     }
@@ -6975,6 +7208,7 @@ int ae3d_vk_upload_mesh(void *mesh) {
                                    (VkDeviceSize)vertex_count * AE3D_VK_SKIN_STRIDE,
                                    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                                    &slot->skin_buffer, &slot->skin_memory)) {
+            vk.batching = 0;
             free(sequential);
             return 0;
         }
@@ -6983,6 +7217,8 @@ int ae3d_vk_upload_mesh(void *mesh) {
     if (!ae3d_vk_upload_buffer(indices, (VkDeviceSize)index_count * sizeof(unsigned),
                                VK_BUFFER_USAGE_INDEX_BUFFER_BIT | ae3d_vk_ray_input_usage(),
                                &slot->index_buffer, &slot->index_memory)) {
+        vk.batching = 0;
+        ae3d_vk_flush_uploads();
         ae3d_vkDestroyBuffer(vk.device, slot->vertex_buffer, NULL);
         ae3d_vkFreeMemory(vk.device, slot->vertex_memory, NULL);
         memset(slot, 0, sizeof(*slot));
@@ -6997,6 +7233,7 @@ int ae3d_vk_upload_mesh(void *mesh) {
     /* Its bottom-level structure, for the rays: a skinned mesh's pose is
        not in its buffers, so it has none and stays in the shadow map. */
     if (vk.ray_query && !slot->skinned) ae3d_vk_build_blas(slot);
+    vk.batching = 0;
     slot->vertices = (float *)malloc((size_t)vertex_count * AE3D_VK_STRIDE);
     slot->indices = (unsigned *)malloc((size_t)index_count * sizeof(unsigned));
     if (slot->vertices && slot->indices) {
@@ -7240,6 +7477,7 @@ void ae3d_vk_free_mesh(int handle) {
     if (!mesh->in_use) return;
     if (mesh->shared && --mesh->refs > 0) return;
 
+    ae3d_vk_flush_uploads();
     ae3d_vkDeviceWaitIdle(vk.device);
     free(mesh->vertices);
     free(mesh->indices);
@@ -7269,6 +7507,12 @@ void ae3d_vk_shutdown(void) {
     g_readback_copy_size = 0;
 
     if (!vk.ready) return;
+    ae3d_vk_flush_uploads();
+    free(vk.batch_scratch);
+    free(vk.batch_scratch_memory);
+    vk.batch_scratch = NULL;
+    vk.batch_scratch_memory = NULL;
+    vk.batch_scratch_capacity = 0;
     ae3d_vkDeviceWaitIdle(vk.device);
     ae3d_vk_meter_free();
 

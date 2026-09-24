@@ -4,6 +4,24 @@
 
 ### Issues, five at a time
 
+- Vulkan is clean under synchronization validation (#410): every example,
+  where the street alone had 316 hazards in 20 frames. The depth-only passes
+  (shadow map, camera depth) and the post pass order their clears and layout
+  transitions after the previous frame's use of the same image, the post
+  pass hands its image on to the next pass and the meter, the meter's first
+  transition waits on the last frame's blits and its readback waits on the
+  host's last read and is made visible to it, and the crowd's sort orders its
+  writes after the previous frame's. No frame cost (the street 142 fps,
+  the city 144). `AE3D_VALIDATE_SYNC=1 scripts/validate.sh`.
+- Opening a scene in the editor (#388): `AE3D_EDITOR_PROFILE=1` prints each
+  stage on the way to the scene's first frame, and Vulkan records a mesh's
+  uploads and ray structure into one batch submitted once, where each buffer
+  had waited on the queue alone. Placing the street's 1,221 models: 182 ms
+  to 80; the street on screen at ~0.9 s from launch.
+- The driver strokes the terrain at the view's centre on Linux (#353): GTK
+  reports the viewport's canvas as 0 x 0, so the stroke aimed at its centre
+  landed in the corner; the stroke is a check on every platform again.
+
 - An exposure that follows the frame (#378): the renderer measures what it
   drew (mean linear luminance and the share of the frame near white, read
   back two frames late on both backends) and `ae3d.exposure` steers the
