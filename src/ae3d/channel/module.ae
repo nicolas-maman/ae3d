@@ -1,0 +1,216 @@
+// The agent channel's transport: a loopback socket, newline-delimited JSON
+// both ways, and nothing at all in a frame when AE3D_AGENT is unset.
+//
+// ae3d.agent is what a request means; this is how it arrives and how the
+// answer leaves. The engine asks for requests at one point in its frame
+// (agent.pump), and that is where this reads: whatever the socket holds is
+// taken without waiting -- a client that connected is accepted, the bytes
+// it sent are appended to the pending ones, and every complete line is a
+// request. There is no thread and no lock, because nothing is done with a
+// request anywhere but that one point in the frame: a thread that read
+// ahead only filled a queue the frame emptied. It was C once
+// (native/agent/channel.c), for want of a std.tcp that could listen on
+// loopback only, poll a listener and set TCP_NODELAY (aether#2136).
+//
+// Loopback only. The channel is a debugging surface with no authentication
+// of any kind; ae3d.probe, the asking side, connects to 127.0.0.1 too.
+
+import std.bytes
+import std.fs
+import std.mem
+import std.os
+import std.string
+import std.tcp
+
+exports (
+    start, active, port, next_request, respond, stop, last_error
+)
+
+extern malloc(size: long) -> ptr
+extern realloc(p: ptr, size: long) -> ptr
+extern free(p: ptr)
+extern memcpy(dst: ptr, src: ptr, n: long) -> ptr
+
+const CHUNK = 4096
+const MOST = 4194304               // a request longer than this is a protocol fault, and the client goes
+
+var g_server: ptr = null           // the listening socket, while the channel is open
+var g_client: ptr = null           // the one client attached, or null
+var g_port = 0
+var g_error = ""
+var g_pending: ptr = null          // bytes received past the last complete line
+var g_used = 0
+var g_capacity = 0
+var g_chunk: ptr = null            // a std.bytes buffer: a received chunk's bytes, a string's not being addressable
+
+active() -> bool { return g_server != null }
+
+port() -> int { return g_port }
+
+last_error() -> string { return g_error }
+
+// Opens the channel if AE3D_AGENT asks for it: a port number, or "auto"
+// for one the system picks. False with no error when it is unset; false
+// with the reason when it cannot open. The port is printed, and written
+// to AE3D_AGENT_PORT_FILE when that is set, for a tool that started the
+// program to find it.
+start() -> bool {
+    g_error = ""
+    if g_server != null { return true }
+    spec = os.getenv("AE3D_AGENT")
+    if spec == "" { return false }
+    requested = 0
+    if spec != "auto" {
+        parsed, parse_error = string.to_int(spec)
+        requested = parsed
+        if parse_error != "" || requested <= 0 || requested > 65535 {
+            g_error = "AE3D_AGENT must be a port number or \"auto\""
+            return false
+        }
+    }
+    server = tcp.tcp_listen_on_raw("127.0.0.1", requested)
+    if server == null {
+        g_error = "cannot listen on 127.0.0.1:${requested}"
+        return false
+    }
+    g_server = server
+    g_port = tcp.tcp_server_port_raw(server)
+    g_capacity = 8192
+    g_pending = malloc(g_capacity as long)
+    g_used = 0
+    println("ae3d: agent channel on 127.0.0.1:${g_port}")
+    port_file = os.getenv("AE3D_AGENT_PORT_FILE")
+    if port_file != "" { fs.write(port_file, "${g_port}\n") }
+    return true
+}
+
+// The next request, or "" when none has arrived whole. Reads what the
+// socket holds first, without waiting.
+next_request() -> string {
+    if g_server == null { return "" }
+    take_waiting()
+    while true {
+        length = line_length()
+        if length < 0 { return "" }
+        line = bytes.string_from_ptr(g_pending, length)
+        consume_line(length)
+        if string.length(line) > 0 { return line }
+    }
+    return ""
+}
+
+// One answer, and its terminator in the same write: a terminator sent on
+// its own would wait on the acknowledgement of the line before it.
+respond(line: string) {
+    if g_client == null { return }
+    whole = string.concat(line, "\n")
+    total = string.length(whole)
+    sent, err = tcp.write_n(g_client, whole, total)
+    // A short write is the kernel's buffer full: the rest, until it is all
+    // gone or the client is.
+    offset = sent
+    while err == "" && offset < total && sent > 0 {
+        rest = string.substring(whole, offset, total)
+        sent, err = tcp.write_n(g_client, rest, total - offset)
+        offset = offset + sent
+        string.free(rest)
+    }
+    string.free(whole)
+    if err != "" { drop_client() }
+}
+
+stop() {
+    if g_server == null { return }
+    drop_client()
+    tcp.tcp_server_close(g_server)
+    g_server = null
+    g_port = 0
+    if g_pending != null { free(g_pending) }
+    g_pending = null
+    g_used = 0
+    g_capacity = 0
+    if g_chunk != null { bytes.free(g_chunk) }
+    g_chunk = null
+}
+
+// --- the socket, read without waiting -------------------------------------------------------------------------------
+
+// A client that connected is attached, a second one told there is one
+// already, and the attached one's bytes appended to the pending ones.
+take_waiting() {
+    while tcp.tcp_server_poll_raw(g_server, 0) > 0 {
+        client = tcp.tcp_accept_raw(g_server)
+        if client == null { break }
+        if g_client != null {
+            refusal = "{\"ok\":false,\"error\":\"another client is attached\"}\n"
+            tcp.write_n(client, refusal, string.length(refusal))
+            tcp.tcp_close(client)
+            continue
+        }
+        tcp.tcp_set_nodelay_raw(client, 1)
+        g_client = client
+    }
+    if g_client == null { return }
+    while tcp.tcp_poll_raw(g_client, 0) > 0 {
+        if g_used + CHUNK > g_capacity {
+            wanted = g_capacity * 2
+            while wanted < g_used + CHUNK { wanted = wanted * 2 }
+            if wanted > MOST {
+                drop_client()
+                return
+            }
+            g_pending = realloc(g_pending, wanted as long)
+            g_capacity = wanted
+        }
+        chunk, got, err = tcp.read_n(g_client, CHUNK)
+        if err == "timeout" { return }
+        if err != "" || got <= 0 {
+            // Closed. What it sent before closing is still requests.
+            drop_client()
+            return
+        }
+        if g_chunk == null { g_chunk = bytes.new(CHUNK) }
+        bytes.copy_from_string(g_chunk, 0, chunk, got)
+        memcpy(g_pending + g_used, bytes.data(g_chunk), got as long)
+        g_used = g_used + got
+    }
+}
+
+// The length of the first complete line in the pending bytes, a carriage
+// return before its terminator excluded; -1 when there is none.
+line_length() -> int {
+    i = 0
+    while i < g_used {
+        if mem.get_uint8(g_pending, i) == 10 {
+            length = i
+            if length > 0 && mem.get_uint8(g_pending, length - 1) == 13 { length = length - 1 }
+            return length
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// The first line and its terminator off the front of the pending bytes.
+consume_line(length: int) {
+    end = length
+    while end < g_used && mem.get_uint8(g_pending, end) != 10 { end = end + 1 }
+    if end < g_used { end = end + 1 }
+    mem.copy(g_pending, g_pending + end, (g_used - end) as long)
+    g_used = g_used - end
+}
+
+// The client goes. What it left unread is read first: a socket closed with
+// bytes still in its receive queue sends a reset, and the client would lose
+// the last answer it was sent.
+drop_client() {
+    if g_client == null { return }
+    drained = 0
+    while drained < 64 && tcp.tcp_poll_raw(g_client, 0) > 0 {
+        _chunk, got, err = tcp.read_n(g_client, CHUNK)
+        if err != "" || got <= 0 { break }
+        drained = drained + 1
+    }
+    tcp.tcp_close(g_client)
+    g_client = null
+}

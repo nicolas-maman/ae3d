@@ -135,7 +135,7 @@ fi
 PLATFORM_LIBS="$(ae3d_platform_libs "$(uname -s)")"
 PIC="$(ae3d_native_pic_flag)"
 
-NATIVE_SOURCES="native/agent/channel.c native/gpu/capture.c native/platform/crash.c native/geometry/mesh.c native/geometry/skin.c native/geometry/meshfile.c native/image/image.c native/gpu/opengl_api.c native/gpu/opengl.c native/gpu/offscreen.c native/gpu/vulkan.c native/gpu/jobs.c $(ae3d_dlss_source "$OBJ_DIR")"
+NATIVE_SOURCES="native/gpu/capture.c native/platform/crash.c native/geometry/mesh.c native/geometry/skin.c native/geometry/meshfile.c native/image/image.c native/gpu/opengl_api.c native/gpu/opengl.c native/gpu/offscreen.c native/gpu/vulkan.c native/gpu/jobs.c $(ae3d_dlss_source "$OBJ_DIR")"
 
 # The physics engine, aephysics, is a git submodule under deps/: Aether
 # modules the compiler finds through AETHER_LIB_DIR below, plus its one C

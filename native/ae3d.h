@@ -387,16 +387,6 @@ void  *ae3d_vk_capture_pixels(void);
 int    ae3d_vk_capture_width(void);
 int    ae3d_vk_capture_height(void);
 
-// The agent channel: a localhost NDJSON socket an agent drives the engine
-// through. ae3d_agent_active() is what every hot path tests, and it is zero
-// until AE3D_AGENT asks for the channel. See native/ae3d_agent.c.
-int         ae3d_agent_start(void);
-int         ae3d_agent_active(void);
-int         ae3d_agent_port(void);
-const char *ae3d_agent_next_request(void);
-void        ae3d_agent_respond(const char *line);
-void        ae3d_agent_stop(void);
-const char *ae3d_agent_error(void);
 
 /* The asking end of the same channel, so a tool that measures a scene can be
    written against the engine rather than against a copy of the protocol. */
