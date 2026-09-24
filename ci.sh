@@ -465,7 +465,12 @@ step "a character wanders the street"
 if built_ok street_drive && have_display; then
     AE3D_ON_FOOT=3 bounded "$RUN_LIMIT" ./build/street_drive >/tmp/ae3d_wander.log 2>&1
     wander_line="$(grep "street_drive: wandered" /tmp/ae3d_wander.log)"
-    if [ -z "$wander_line" ]; then
+    if [ -z "$wander_line" ] && grep -q "could not create window\|failed to initialise\| 0 steps, 0 frames" /tmp/ae3d_wander.log; then
+        # A runner with a display but no GL or Vulkan it can open (the macOS
+        # and Windows hosted ones) runs the examples to an empty window and
+        # this to nothing.
+        skip "street_drive wander" "the scene could not open a window here"
+    elif [ -z "$wander_line" ]; then
         fail "street_drive wander (no report)"
         sed 's/^/        /' /tmp/ae3d_wander.log | tail -10
     elif echo "$wander_line" | grep -q " 0 over 6 mm; 0 falls through"; then
