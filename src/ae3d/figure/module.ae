@@ -35,7 +35,7 @@ import ae3d.skin
 exports (
     Figure,
     figure, attach, figure_of, play, stop, set_time, figures_free,
-    figure_new, figure_free, advance, set_speed, set_looping, clip_index,
+    figure_new, figure_free, advance, set_speed, set_looping, clip_index, keep_pose, put_pose, pose_free,
     path, clip, speed, looping, time, clip_count, clip_name, duration, skeleton, primitive_count, primitive
 )
 
@@ -256,6 +256,55 @@ clip_count(f: *Figure) -> int { return gltf.animation_count(f.file as *GltfScene
 clip_name(f: *Figure, index: int) -> string { return gltf.animation_name(f.file as *GltfScene, index) }
 primitive_count(f: *Figure) -> int { return gltf.primitive_count(f.file as *GltfScene) }
 primitive(f: *Figure, index: int) -> *Model { return gltf.primitive(f.file as *GltfScene, index) }
+
+// Every node of the figure's file as it stands now -- position, rotation,
+// scale -- to put back with `put_pose`: what the editor keeps before a
+// ragdoll takes the rig and restores when the simulation stops. Freed with
+// `pose_free`.
+keep_pose(f: *Figure) -> ptr {
+    file = f.file as *GltfScene
+    count = gltf.model_count(file)
+    kept = calloc(count * 10 + 1, 8)
+    k = kept as float[]
+    k[0] = count as float
+    i = 0
+    while i < count {
+        m = gltf.model(file, i)
+        at = 1 + i * 10
+        k[at] = m.position.x
+        k[at + 1] = m.position.y
+        k[at + 2] = m.position.z
+        k[at + 3] = m.rotation.x
+        k[at + 4] = m.rotation.y
+        k[at + 5] = m.rotation.z
+        k[at + 6] = m.rotation.w
+        k[at + 7] = m.scale.x
+        k[at + 8] = m.scale.y
+        k[at + 9] = m.scale.z
+        i = i + 1
+    }
+    return kept
+}
+
+put_pose(f: *Figure, kept: ptr) {
+    if f == null || kept == null { return }
+    file = f.file as *GltfScene
+    k = kept as float[]
+    count = k[0] as int
+    i = 0
+    while i < count && i < gltf.model_count(file) {
+        m = gltf.model(file, i)
+        at = 1 + i * 10
+        core.model_set_position(m, k[at], k[at + 1], k[at + 2])
+        core.model_set_rotation(m, core.quat(k[at + 3], k[at + 4], k[at + 5], k[at + 6]))
+        core.model_set_scale(m, k[at + 7], k[at + 8], k[at + 9])
+        i = i + 1
+    }
+}
+
+pose_free(kept: ptr) {
+    if kept != null { free(kept) }
+}
 
 // The skeleton its meshes are skinned to (the file's first), or null for a
 // figure with none.

@@ -56,6 +56,7 @@
 
 import std.list
 import std.string
+import std.heap
 import aephysics.human
 import ae3d.core
 import ae3d.behaviour
@@ -71,7 +72,8 @@ exports (
     hit, bone_weakness, motion_step, attach, tracking_error, tilt, muscle, full_assist,
     set_protective, protective, falling, lying,
     get_up, set_get_up, getting_up, down, face_up, blending, rise_seconds,
-    on_skeleton, on_figure, from_record, motions_free, mode_name, mode_of_name, get_up_after
+    on_skeleton, on_figure, from_record, motions_free, mode_name, mode_of_name, get_up_after,
+    release, motions_release
 )
 
 extern calloc(count: int, size: int) -> ptr
@@ -191,6 +193,8 @@ struct Motion {
     now: ptr                           // float[BONE_COUNT * POSE_STRIDE]
     rise_seconds: float                // how long the last get-up took
     object: ptr                        // *GameObject whose figure it wears, or null
+    engine: ptr                        // *Engine that steps it (attach), or null
+    stepper: ptr                       // *Behaviour it is stepped by, or null
 }
 
 // Every active ragdoll an engine has put on a figure, for the scene file's
@@ -904,4 +908,40 @@ attach(e: *Engine, m: *Motion) {
     b = engine.behaviour_new("motion", m as ptr)
     b.fixed_update = motion_fixed
     engine.engine_add_behaviour(e, b)
+    m.engine = e as ptr
+    m.stepper = b as ptr
+}
+
+// An active ragdoll let go of while its engine runs on: no longer stepped,
+// out of the scene file's records, freed. (The ragdoll is physics's.) What
+// the editor does when a simulation stops; a program that ends frees its
+// motions after the engine, which frees their steps.
+release(m: *Motion) {
+    if m == null { return }
+    if m.engine != null && m.stepper != null {
+        engine.engine_remove_behaviour(m.engine as *Engine, m.stepper as *Behaviour)
+        heap.free(m.stepper as *Behaviour)
+        forget(m.engine as *Engine, m)
+    }
+    motion_free(m)
+}
+
+// Every active ragdoll put on a figure of the engine's, released.
+motions_release(e: *Engine) {
+    ms = motions_for(e)
+    while list.size(ms.list) > 0 {
+        release(list.get_raw(ms.list, 0) as *Motion)
+    }
+}
+
+forget(e: *Engine, m: *Motion) {
+    ms = motions_for(e)
+    i = 0
+    while i < list.size(ms.list) {
+        if list.get_raw(ms.list, i) == m as ptr {
+            list.remove(ms.list, i)
+            return
+        }
+        i = i + 1
+    }
 }

@@ -60,7 +60,7 @@ exports (
     HUMANOID_ENGINE, HUMANOID_MIXAMO, HUMANOID_MIXAMO_BARE, humanoid_scheme, humanoid_scheme_bone, ragdoll_dress_humanoid,
     ragdoll_follow, ragdoll_is_following, ragdoll_power, ragdoll_is_powered, ragdoll_set_bone_drive,
     ragdoll_bone_drive_torque, ragdoll_set_balance_assist, ragdoll_aim, ragdoll_clear_aim, ragdoll_clear_aims, ragdoll_is_aimed, ragdoll_balance_assist,
-    ragdoll_apply_impulse, ragdoll_bone_rotation, ragdoll_bone_target,
+    ragdoll_apply_impulse, ragdoll_bone_rotation, ragdoll_bone_target, RagdollHit, ragdoll_at,
     ragdoll_center_of_mass, ragdoll_mass, ragdoll_joint_error, ragdoll_tilt,
     POSE_STRIDE, ragdoll_body_pose, ragdoll_animation_pose, ragdoll_move_animation, ragdoll_show_pose,
     ragdoll_restore_animation, ragdoll_pose_lowest, ragdoll_pose_end, ragdoll_rig_bone_rotation, ragdoll_rest_forward,
@@ -1709,6 +1709,38 @@ ragdoll_of_shape(p: *Physics, id: ShapeId) -> *Ragdoll {
     return null
 }
 ragdoll_human(r: *Ragdoll) -> *Human { return &r.human }
+
+// What a ray met first, when it was a ragdoll: which, which bone (the
+// human's order), and where.
+struct RagdollHit {
+    ragdoll: ptr                   // *Ragdoll, or null when the ray met none first
+    bone: int
+    point: Vec3
+}
+
+// The ragdoll bone the ray from `origin` along `direction` (a unit vector)
+// meets first within `reach` metres -- what a click on a figure strikes.
+// A ragdoll of null when what it meets first is not a ragdoll, or nothing.
+ragdoll_at(p: *Physics, origin: Vec3, direction: Vec3, reach: float) -> RagdollHit {
+    out = RagdollHit { ragdoll: null, bone: 0 - 1, point: origin }
+    if p == null { return out }
+    hit = physics_world.cast_ray_closest(p.world_id, origin, core.v3_mul(direction, reach), shape.default_query_filter())
+    if !hit.hit { return out }
+    r = ragdoll_of_shape(p, hit.shape_id)
+    if r == null { return out }
+    body = dynamics.shape_get_body(hit.shape_id)
+    i = 0
+    while i < human.BONE_COUNT {
+        id = human.bone_at(&r.human, i).body_id
+        if id.index1 == body.index1 && id.world0 == body.world0 && id.generation == body.generation {
+            out.ragdoll = r as ptr
+            out.bone = i
+            out.point = hit.point
+        }
+        i = i + 1
+    }
+    return out
+}
 ragdoll_set_velocity(r: *Ragdoll, v: Vec3) { human.human_set_velocity(&r.human, v) }
 ragdoll_kick(r: *Ragdoll, angular_impulse: Vec3) { human.human_apply_angular_impulse(&r.human, angular_impulse) }
 

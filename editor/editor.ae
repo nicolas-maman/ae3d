@@ -38,6 +38,9 @@ import ae3d.engine
 import ae3d.weather
 import ae3d.physics
 import ae3d.figure
+import ae3d.motion
+import ae3d.skin
+import aephysics.human
 
 const PANEL_LEFT = 240
 const PANEL_RIGHT = 360
@@ -444,6 +447,15 @@ var g_loop_btn = 0
 // with their group, undone and redone with it.
 var g_figure_rows: ptr = null      // list of *FigureRow
 var g_figure_assets: ptr = null    // the figures resources/figures holds, for the browser
+// The MOTION section: natural motion's switch, a button a mode, the
+// protective switch, and the section's widgets.
+var g_motion_bar = 0
+var g_motion_section = 0
+var g_motion_divider = 0
+var g_motion_on_btn = 0
+var g_motion_mode_buttons: ptr = null   // int[3]: animated, powered, limp
+var g_protect_btn = 0
+var g_live_figures = 0             // figures on their muscles in the running simulation
 var g_simulating = false
 var g_simulate_btn = 0
 var g_rest: ptr = null             // list of *Rest, the models' transforms before the simulation
@@ -1752,47 +1764,60 @@ const LIGHT_OUTER_ROW = 45
 // plays at, and how far into the clip it stands, as a share of the clip.
 const FIGURE_SPEED_ROW = 46
 const FIGURE_TIME_ROW = 47
-const ROWS = 48
+// Natural motion on the selected figure (ae3d.motion): the share of its
+// full strength, and the seconds it lies before it gets up (0 never).
+const MOTION_STRENGTH_ROW = 48
+const MOTION_GET_UP_ROW = 49
+const ROWS = 50
 // Past every inspector row, because a turn of the gizmo is not a row: it is
 // recorded as the angle the drag has turned through so far, and undone by
 // turning back through it.
-const ROTATE_FIRST_SLOT = 48
-// Past the rotation axes, which take 48 through 50. A behaviour is a property
+const ROTATE_FIRST_SLOT = 50
+// Past the rotation axes, which take 50 through 52. A behaviour is a property
 // of a model like any other as far as undo is concerned, so it travels as a
 // property step in a slot no row uses.
-const SCRIPT_SLOT = 51
+const SCRIPT_SLOT = 53
 // A terrain's shape. A choice rather than a number, so it travels the way a
 // behaviour does rather than as a row.
-const TERRAIN_BIOME_SLOT = 52
+const TERRAIN_BIOME_SLOT = 54
 // A terrain's style. Blocks are voxels drawn one cube per cell; smooth meshes
 // the same field into one surface. Voxels are a kind of terrain rather than
 // what terrain is.
-const TERRAIN_STYLE_SLOT = 53
+const TERRAIN_STYLE_SLOT = 55
 // A stroke of the sculpting brush: one undo step from press to release,
 // whose before and after are the terrain's column heights, kept in a list
 // of strokes the step indexes.
-const SCULPT_SLOT = 54
+const SCULPT_SLOT = 56
 // The weather's kind: a choice, undone the way a terrain's style is.
-const WEATHER_KIND_SLOT = 55
+const WEATHER_KIND_SLOT = 57
 // The body's kind and its collider's, on the selected object.
-const BODY_KIND_SLOT = 56
-const COLLIDER_KIND_SLOT = 57
+const BODY_KIND_SLOT = 58
+const COLLIDER_KIND_SLOT = 59
 // Whether the object is drawn, and whether it casts a shadow: switches
 // on the object, undone as a property whose value is 0 or 1.
-const VISIBLE_SLOT = 58
-const SHADOW_SLOT = 59
+const VISIBLE_SLOT = 60
+const SHADOW_SLOT = 61
 // Which kind of light the selected one is: a choice, undone the way the
 // weather's kind is.
-const LIGHT_MODE_SLOT = 60
+const LIGHT_MODE_SLOT = 62
 // Which image the sky is drawn from, by its place in the list below:
 // the picker's choice, undone the way the weather's kind is. A scene that
 // arrives with a sky of its own that is not in the list keeps it and no
 // button is lit, so choosing never silently loses what a program set.
-const SKY_IMAGE_SLOT = 61
+const SKY_IMAGE_SLOT = 63
 // A figure's clip, by its place in the file's list (-1 for none), and
 // whether it loops: choices, undone the way the weather's kind is.
-const FIGURE_CLIP_SLOT = 62
-const FIGURE_LOOP_SLOT = 63
+const FIGURE_CLIP_SLOT = 64
+const FIGURE_LOOP_SLOT = 65
+// Natural motion on a figure: on or off, its mode, and whether it protects
+// itself falling -- choices, undone the way a body's kind is.
+const MOTION_ON_SLOT = 66
+const MOTION_MODE_SLOT = 67
+const MOTION_PROTECT_SLOT = 68
+// The blow a click on a figure deals while the scene is simulated, newton
+// seconds: past a standing figure's balance (400 fells one), so a click
+// knocks it down and it falls the way a person does.
+const HIT_IMPULSE = 450.0
 // The clips the FIGURE section offers a button each, the first of a file's.
 const MAX_CLIPS = 8
 // The skies that ship with the engine, in the order the buttons draw
@@ -2300,6 +2325,7 @@ sync_inspector() {
         show_terrain_section(false)
         show_physics_section(false)
         show_figure_section(false)
+        show_motion_section(false)
         return
     }
     refresh_title()
@@ -2307,6 +2333,8 @@ sync_inspector() {
     refresh_physics_section()
     show_figure_section(selected_figure() != null)
     refresh_figure_section()
+    show_motion_section(selected_figure() != null)
+    refresh_motion_section()
     // The chip and the hex beside it are the material too, and nothing was
     // refreshing them when the selection changed: the three sliders under them
     // moved to the new object and the colour above stayed on the old one, so
@@ -3237,6 +3265,195 @@ struct FigureRow {
     model: ptr                     // *Model, the group
     figure: ptr                    // *Figure
     shown: bool                    // its meshes in the viewport
+    motion: ptr                    // *MotionSpec: natural motion on it, as the scene file records it; null for none
+    live: ptr                      // *Motion while the scene is simulated
+    kept: ptr                      // its pose before the simulation took the rig
+}
+
+// The row a figure's group is, or null.
+figure_row_of(m: *Model) -> *FigureRow {
+    if g_figure_rows == null || m == null { return null }
+    i = 0
+    while i < list.size(g_figure_rows) {
+        r = list.get_raw(g_figure_rows, i) as *FigureRow
+        if r.model == m as ptr { return r }
+        i = i + 1
+    }
+    return null
+}
+
+// Natural motion on the selected figure, as it is recorded, or null.
+selected_motion() -> *MotionSpec {
+    r = figure_row_of(selected_model())
+    if r == null { return null }
+    return r.motion as *MotionSpec
+}
+
+// Natural motion on or off on the selected figure: on, as a figure stands
+// on its own muscles and gets up three seconds after it falls.
+set_motion_on(on: bool) {
+    r = figure_row_of(selected_model())
+    if r == null { return }
+    was = 0.0
+    if r.motion != null { was = 1.0 }
+    now = 0.0
+    if on { now = 1.0 }
+    if was == now { return }
+    history.history_record(g_history, history.STEP_PROPERTY, selected_model() as ptr, MOTION_ON_SLOT, was, now)
+    apply_motion_on(r, on)
+    refresh_motion_section()
+}
+
+apply_motion_on(r: *FigureRow, on: bool) {
+    if on && r.motion == null { r.motion = scene.motion_spec_new("powered", 1.0, true, 3.0) as ptr }
+    if !on && r.motion != null {
+        heap.free(r.motion as *MotionSpec)
+        r.motion = null
+    }
+}
+
+set_motion_mode(which: int) {
+    spec = selected_motion()
+    if spec == null { return }
+    was = motion.mode_of_name(spec.mode)
+    history.history_record(g_history, history.STEP_PROPERTY, selected_model() as ptr, MOTION_MODE_SLOT, was as float, which as float)
+    apply_motion_mode(spec, which)
+    refresh_motion_section()
+}
+
+apply_motion_mode(spec: *MotionSpec, which: int) {
+    string.free(spec.mode)
+    spec.mode = string.copy(motion.mode_name(which))
+}
+
+toggle_protective() {
+    spec = selected_motion()
+    if spec == null { return }
+    was = 0.0
+    if spec.protective { was = 1.0 }
+    history.history_record(g_history, history.STEP_PROPERTY, selected_model() as ptr, MOTION_PROTECT_SLOT, was, 1.0 - was)
+    spec.protective = !spec.protective
+    refresh_motion_section()
+}
+
+is_motion_row(index: int) -> bool { return index == MOTION_STRENGTH_ROW || index == MOTION_GET_UP_ROW }
+
+motion_value(index: int) -> float {
+    spec = selected_motion()
+    if spec == null { return 0.0 }
+    if index == MOTION_STRENGTH_ROW { return spec.strength }
+    return spec.get_up
+}
+
+write_motion(spec: *MotionSpec, index: int, value: float) {
+    if spec == null { return }
+    if index == MOTION_STRENGTH_ROW { spec.strength = value }
+    if index == MOTION_GET_UP_ROW { spec.get_up = value }
+}
+
+show_motion_section(on: bool) {
+    if g_motion_bar != 0 { ui.set_hidden(g_motion_bar, hidden_flag(on)) }
+    if g_motion_section != 0 { ui.set_hidden(g_motion_section, hidden_flag(on)) }
+    if g_motion_divider != 0 { ui.set_hidden(g_motion_divider, hidden_flag(on)) }
+}
+
+// The section as the selected figure has it: natural motion lit when on,
+// its mode lit, the protective switch, the strength and the get-up.
+refresh_motion_section() {
+    spec = selected_motion()
+    if g_motion_on_btn != 0 { paint_mode_button(g_motion_on_btn, spec != null) }
+    which = 0 - 1
+    if spec != null { which = motion.mode_of_name(spec.mode) - motion.ANIMATED }
+    paint_segments(g_motion_mode_buttons, 3, which)
+    if g_protect_btn != 0 { paint_mode_button(g_protect_btn, spec != null && spec.protective) }
+    show_row(MOTION_STRENGTH_ROW, motion_value(MOTION_STRENGTH_ROW))
+    show_row(MOTION_GET_UP_ROW, motion_value(MOTION_GET_UP_ROW))
+}
+
+// The simulation's natural motion: every figure with it on, on its own
+// muscles in the editor's engine, its pose kept first. Returns how many.
+start_motions(e: *Engine) -> int {
+    if g_figure_rows == null { return 0 }
+    made = 0
+    i = 0
+    while i < list.size(g_figure_rows) {
+        r = list.get_raw(g_figure_rows, i) as *FigureRow
+        at = row_of_model(r.model)
+        if r.motion != null && r.shown && at >= 0 {
+            f = r.figure as *Figure
+            spec = r.motion as *MotionSpec
+            r.kept = figure.keep_pose(f)
+            m = motion.on_skeleton(e, row_object(at), figure.skeleton(f))
+            if m == null {
+                figure.pose_free(r.kept)
+                r.kept = null
+                say("${core.text(model_at(at).name)} is no humanoid the engine knows: no natural motion")
+            } else {
+                motion.set_strength(m, spec.strength)
+                motion.set_protective(m, spec.protective)
+                motion.set_get_up(m, spec.get_up)
+                motion.set_mode(m, motion.mode_of_name(spec.mode))
+                r.live = m as ptr
+                made = made + 1
+            }
+        }
+        i = i + 1
+    }
+    return made
+}
+
+// Natural motion let go of before the world goes, and every figure put back
+// in the pose it had.
+stop_motions() {
+    if g_figure_rows == null { return }
+    i = 0
+    while i < list.size(g_figure_rows) {
+        r = list.get_raw(g_figure_rows, i) as *FigureRow
+        if r.live != null {
+            motion.release(r.live as *Motion)
+            r.live = null
+        }
+        i = i + 1
+    }
+}
+
+restore_figure_poses() {
+    if g_figure_rows == null { return }
+    i = 0
+    while i < list.size(g_figure_rows) {
+        r = list.get_raw(g_figure_rows, i) as *FigureRow
+        if r.kept != null {
+            figure.put_pose(r.figure as *Figure, r.kept)
+            figure.pose_free(r.kept)
+            r.kept = null
+        }
+        i = i + 1
+    }
+}
+
+// A click on a figure while the scene is simulated: the blow lands where the
+// click met its body, along the click. True when a figure was struck.
+strike_at(x: float, y: float) -> bool {
+    if !g_simulating || g_engine == null { return false }
+    cam = g_camera as *Camera
+    p = physics.of(g_engine as *Engine)
+    if cam == null || p == null { return false }
+    direction = raycast.screen_direction(cam, x, y, g_canvas_w, g_canvas_h)
+    hit = physics.ragdoll_at(p, cam.position, direction, 10000.0)
+    if hit.ragdoll == null { return false }
+    i = 0
+    while i < list.size(g_figure_rows) {
+        r = list.get_raw(g_figure_rows, i) as *FigureRow
+        live = r.live as *Motion
+        if live != null && live.ragdoll as ptr == hit.ragdoll {
+            motion.hit(live, hit.bone, hit.point, core.v3_mul(core.v3_normalize(direction), HIT_IMPULSE))
+            say("struck ${core.text((r.model as *Model).name)}")
+            mark_dirty()
+            return true
+        }
+        i = i + 1
+    }
+    return false
 }
 
 // The figure a model stands for, or null.
@@ -3252,6 +3469,17 @@ figure_on(m: *Model) -> *Figure {
 }
 
 selected_figure() -> *Figure { return figure_on(selected_model()) }
+
+// The first row that is a figure with natural motion on, or -1.
+index_of_motion() -> int {
+    i = 0
+    while i < row_count() {
+        r = figure_row_of(model_at(i))
+        if r != null && r.motion != null { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
 
 // The first row that is a figure, or -1.
 index_of_figure() -> int {
@@ -3310,6 +3538,8 @@ clear_figures() {
         r = list.get_raw(g_figure_rows, 0) as *FigureRow
         show_figure(r.model as *Model, false)
         figure.figure_free(r.figure as *Figure)
+        if r.motion != null { heap.free(r.motion as *MotionSpec) }
+        if r.kept != null { figure.pose_free(r.kept) }
         heap.free(r)
         list.remove(g_figure_rows, 0)
     }
@@ -3339,6 +3569,64 @@ figure_stuck() -> int {
     figure.set_time(f, was)
     if moved { return 0 }
     return 1
+}
+
+// The figures with natural motion on, for the report.
+motion_count() -> int {
+    count = 0
+    if g_figure_rows == null { return 0 }
+    i = 0
+    while i < list.size(g_figure_rows) {
+        r = list.get_raw(g_figure_rows, i) as *FigureRow
+        if r.motion != null { count = count + 1 }
+        i = i + 1
+    }
+    return count
+}
+
+// Asks the first figure with natural motion on what the simulation does
+// with it: on its muscles it still stands a second in (its pelvis within a
+// fifth of where it stood), struck at the chest with the click's blow it
+// is down a second and a half later, and stopped, its bones are back where
+// they were. Nought when all three hold, or when no figure has it on; one
+// for each that does not.
+motion_stuck() -> int {
+    index = index_of_motion()
+    if index < 0 { return 0 }
+    r = figure_row_of(model_at(index))
+    f = r.figure as *Figure
+    sk = figure.skeleton(f)
+    if sk == null { return 1 }
+    first = skin.skeleton_bone(sk, 0)
+    core.model_sync_transform(first)
+    was = first.world_position
+    wrong = 0
+    start_simulation()
+    live = r.live as *Motion
+    if !g_simulating || live == null { return 3 }
+    e = g_engine as *Engine
+    pelvis = physics.ragdoll_bone(live.ragdoll, human.BONE_PELVIS)
+    stood = behaviour.object_position(pelvis).y
+    steps = 0
+    while steps < 60 {
+        engine.engine_update(e, 1.0 / 60.0)
+        steps = steps + 1
+    }
+    standing = behaviour.object_position(pelvis).y
+    if core.abs_of(standing - stood) > core.abs_of(stood) * 0.2 { wrong = wrong + 1 }
+    chest = behaviour.object_position(physics.ragdoll_bone(live.ragdoll, human.BONE_SPINE_03))
+    ahead = core.quat_apply(physics.ragdoll_bone_rotation(live.ragdoll, human.BONE_PELVIS), core.vec3(0.0, 0.0, 1.0))
+    motion.hit(live, human.BONE_SPINE_03, chest, core.v3_mul(core.v3_normalize(core.vec3(ahead.x, 0.0, ahead.z)), HIT_IMPULSE))
+    steps = 0
+    while steps < 90 {
+        engine.engine_update(e, 1.0 / 60.0)
+        steps = steps + 1
+    }
+    if behaviour.object_position(pelvis).y > standing * 0.5 { wrong = wrong + 1 }
+    stop_simulation()
+    core.model_sync_transform(first)
+    if core.v3_len(core.v3_sub(first.world_position, was)) > 0.0001 { wrong = wrong + 1 }
+    return wrong
 }
 
 // Every figure in the scene on by the frame's time, while the scene runs:
@@ -3482,10 +3770,15 @@ start_simulation() {
         }
         i = i + 1
     }
+    g_live_figures = start_motions(e)
     g_simulating = true
     if g_simulate_btn != 0 { ui.set_text(g_simulate_btn, "Stop") }
     mark_dirty()
-    say("simulating ${bodies} bodies")
+    if g_live_figures > 0 {
+        say("simulating ${bodies} bodies and ${g_live_figures} figures on their muscles: click one to strike it")
+    } else {
+        say("simulating ${bodies} bodies")
+    }
 }
 
 // The world gone, and every model back where it stood: the simulation is
@@ -3494,8 +3787,11 @@ start_simulation() {
 stop_simulation() {
     if !g_simulating { return }
     e = g_engine as *Engine
+    stop_motions()
     p = physics.of(e)
     if p != null { physics.physics_free(p) }
+    restore_figure_poses()
+    g_live_figures = 0
     count = list.size(g_rest)
     i = 0
     while i < count {
@@ -3591,6 +3887,7 @@ selection_count() -> int {
 pick_at(x: float, y: float) {
     cam = g_camera as *Camera
     if cam == null || g_scene == null { return }
+    if strike_at(x, y) { return }
 
     direction = raycast.screen_direction(cam, x, y, g_canvas_w, g_canvas_h)
     nearest = raycast.miss()
@@ -3982,6 +4279,15 @@ row_reaches_its_target(index: int) -> bool {
         return moved
     }
 
+    if is_motion_row(index) {
+        if selected_motion() == null { return true }
+        before = motion_value(index)
+        apply_property(index, before * 0.5 + 0.25)
+        moved = core.abs_of(motion_value(index) - (before * 0.5 + 0.25)) < 0.001
+        apply_property(index, before)
+        return moved
+    }
+
     if is_figure_row(index) {
         if selected_figure() == null { return true }
         before = figure_value(index)
@@ -4292,6 +4598,7 @@ rows_that_do_nothing() -> int {
         if is_water_row(index) { wants = water_index }
         if is_physics_row(index) { wants = body_index }
         if is_figure_row(index) { wants = index_of_figure() }
+        if is_motion_row(index) { wants = index_of_motion() }
         if index == TERRAIN_SEED_ROW { wants = ground_index }
         if wants >= 0 { select_object(wants) }
         if row_control(index) != 0 && !row_reaches_its_target(index) {
@@ -4397,6 +4704,12 @@ report_state() {
     lines = string.concat(lines, string.from_int(figure_count()))
     lines = string.concat(lines, "\nfigure_stuck ")
     lines = string.concat(lines, string.from_int(figure_stuck()))
+    // Natural motion: the figures with it on, and whether the first stands
+    // on its muscles, falls when struck and is put back when stopped.
+    lines = string.concat(lines, "\nmotion_figures ")
+    lines = string.concat(lines, string.from_int(motion_count()))
+    lines = string.concat(lines, "\nmotion_stuck ")
+    lines = string.concat(lines, string.from_int(motion_stuck()))
     lines = string.concat(lines, "\ntriangles ")
     lines = string.concat(lines, string.from_int(scene_triangles()))
     lines = string.concat(lines, "\nselected ")
@@ -4583,6 +4896,26 @@ replay(step: *EditStep, backwards: bool) {
             f = figure_on(subject)
             if f != null { apply_clip(f, (target) as int) }
             refresh_figure_section()
+        } else if is_motion_row(step.slot) {
+            select_model_pointer(step.subject)
+            r = figure_row_of(subject)
+            if r != null { write_motion(r.motion as *MotionSpec, step.slot, target) }
+            show_row(step.slot, target)
+        } else if step.slot == MOTION_ON_SLOT {
+            select_model_pointer(step.subject)
+            r = figure_row_of(subject)
+            if r != null { apply_motion_on(r, target != 0.0) }
+            refresh_motion_section()
+        } else if step.slot == MOTION_MODE_SLOT {
+            select_model_pointer(step.subject)
+            r = figure_row_of(subject)
+            if r != null && r.motion != null { apply_motion_mode(r.motion as *MotionSpec, (target) as int) }
+            refresh_motion_section()
+        } else if step.slot == MOTION_PROTECT_SLOT {
+            select_model_pointer(step.subject)
+            r = figure_row_of(subject)
+            if r != null && r.motion != null { (r.motion as *MotionSpec).protective = target != 0.0 }
+            refresh_motion_section()
         } else if step.slot == FIGURE_LOOP_SLOT {
             select_model_pointer(step.subject)
             f = figure_on(subject)
@@ -5392,6 +5725,18 @@ apply_property(index: int, value: float) {
         return
     }
 
+    if is_motion_row(index) {
+        spec = selected_motion()
+        if spec != null {
+            history.history_record(g_history, history.STEP_PROPERTY, selected_model() as ptr, index,
+                                   motion_value(index), value)
+            g_last_edit = seconds()
+            write_motion(spec, index, value)
+        }
+        show_row(index, value)
+        return
+    }
+
     if is_figure_row(index) {
         f = selected_figure()
         if f != null {
@@ -6098,6 +6443,11 @@ current_attachments() -> ptr {
             if fig != null {
                 scene.attachment_set_figure(a, scene.figure_spec_new(figure.path(fig), figure.clip(fig), figure.speed(fig),
                                                                      figure.looping(fig), figure.time(fig)))
+                row = figure_row_of(m)
+                if row != null && row.motion != null {
+                    mot = row.motion as *MotionSpec
+                    scene.attachment_set_motion(a, scene.motion_spec_new(mot.mode, mot.strength, mot.protective, mot.get_up))
+                }
             }
             list.add_raw(attachments, a as ptr)
         }
@@ -6229,6 +6579,11 @@ load_scene() {
                     } else if string.equals(fig_spec.clip, "") == 0 {
                         figure.play(f, fig_spec.clip, fig_spec.speed, fig_spec.looping)
                         figure.set_time(f, fig_spec.time)
+                    }
+                    mot_spec = scene.attachment_motion(a)
+                    row = figure_row_of(m)
+                    if f != null && mot_spec != null && row != null {
+                        row.motion = scene.motion_spec_new(mot_spec.mode, mot_spec.strength, mot_spec.protective, mot_spec.get_up) as ptr
                     }
                 }
             }
@@ -7946,6 +8301,31 @@ main() {
         inspector_row(g_figure_section, "speed", 0.0, 3.0, 1.0, FIGURE_SPEED_ROW)
         inspector_row(g_figure_section, "time", 0.0, 1.0, 0.0, FIGURE_TIME_ROW)
         show_figure_section(false)
+
+        // Natural motion (ae3d.motion): the figure's animation played by its
+        // muscles while the scene is simulated -- it stands on them, gives
+        // when struck (a click on it strikes it), falls the way a person
+        // does, and gets up.
+        g_motion_divider = ui.divider(right)
+        g_motion_section = fold_section(right, "MOTION")
+        g_motion_bar = section_bar(g_section_count - 1)
+        on_row = as_row(ui.hstack(g_motion_section, 6))
+        g_motion_on_btn = ui.btn(on_row, "Natural motion") callback { set_motion_on(selected_motion() == null) }
+        style_button(g_motion_on_btn, "action")
+        g_protect_btn = ui.btn(on_row, "Protective") callback { toggle_protective() }
+        style_button(g_protect_btn, "action")
+        mode_row = as_row(ui.hstack(g_motion_section, 6))
+        g_motion_mode_buttons = calloc(3, 4)
+        modes = g_motion_mode_buttons as int[]
+        modes[0] = ui.btn(mode_row, "Animated") callback { set_motion_mode(motion.ANIMATED) }
+        modes[1] = ui.btn(mode_row, "Powered") callback { set_motion_mode(motion.POWERED) }
+        modes[2] = ui.btn(mode_row, "Limp") callback { set_motion_mode(motion.LIMP) }
+        style_button(modes[0], "action")
+        style_button(modes[1], "action")
+        style_button(modes[2], "action")
+        inspector_row(g_motion_section, "strength", 0.0, 1.0, 1.0, MOTION_STRENGTH_ROW)
+        inspector_row(g_motion_section, "get up after", 0.0, 10.0, 3.0, MOTION_GET_UP_ROW)
+        show_motion_section(false)
 
         ui.divider(right)
         camera_body = fold_section(right, "CAMERA")
