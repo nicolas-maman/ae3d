@@ -1,0 +1,915 @@
+// ae3d.net -- multiplayer in the engine (#413).
+//
+// A game marks what is networked and the engine keeps it in step. One side
+// hosts, the others join; the host owns the objects it marks and sends
+// their state a network tick at a time (30 a second by default), and a
+// client draws them from what arrived, a little in the past, interpolated
+// between two snapshots so a late or lost one is not a jump.
+//
+// The layers, bottom up:
+//
+//   - a transport moves messages between the host and each peer: loopback
+//     (in-process, with a conditions simulator -- latency, jitter, loss --
+//     for tests and the editor's host-and-clients play), and TCP over
+//     std.tcp. UDP joins them when Aether has datagrams (aether#2201) and
+//     Steam's sockets behind the same calls when a game wants them. A
+//     message is reliable (never lost, in order: the handshake, events) or
+//     not (a snapshot: the next one supersedes it, so waiting for a lost one
+//     would only make it later);
+//   - the protocol: a hello, a welcome with the client's id, snapshots;
+//   - replication: net ids by the order objects are marked networked, the
+//     same on both sides for a scene both build, and a history of samples a
+//     client interpolates from.
+//
+// Time is passed in (seconds, any origin): the engine passes its clock, a
+// test a clock of its own, so a run under simulated conditions is the same
+// every time.
+
+import std.bytes
+import std.list
+import std.mem
+import std.string
+import std.tcp
+import ae3d.core
+import ae3d.behaviour
+import ae3d.engine
+import ae3d.platform
+
+exports (
+    Net, NetObject, LoopHub,
+    ROLE_HOST, ROLE_CLIENT,
+    hub_new, hub_free, hub_set_conditions,
+    host_loopback, join_loopback, host_tcp, join_tcp, tcp_port,
+    networked, networked_count, step, attach, connected, client_id, peer_count, view_time,
+    set_tick_rate, set_interpolation_delay, bytes_sent, bytes_received, snapshots_received,
+    net_free, last_error
+)
+
+extern calloc(count: int, size: int) -> ptr
+extern malloc(size: long) -> ptr
+extern realloc(p: ptr, size: long) -> ptr
+extern free(p: ptr)
+extern memcpy(dst: ptr, src: ptr, n: long) -> ptr
+extern memmove(dst: ptr, src: ptr, n: long) -> ptr
+extern sqrt(x: float) -> float
+
+const ROLE_HOST = 1
+const ROLE_CLIENT = 2
+
+const PROTOCOL = 1
+const MSG_HELLO = 1                  // client -> host: [u8][u32 protocol]
+const MSG_WELCOME = 2                // host -> client: [u8][u32 client id][u32 tick rate]
+const MSG_SNAPSHOT = 3               // host -> client: [u8][u32 tick][f32 time][u16 count], then an object each: [u32 id][f32 x y z][f32 qx qy qz qw]
+
+const KIND_LOOP = 1
+const KIND_TCP = 2
+
+const EVENT_CONNECTED = 1
+const EVENT_DISCONNECTED = 2
+const EVENT_MESSAGE = 3
+
+const HISTORY = 32                   // samples an object keeps: a second at 30 a second
+const SAMPLE = 8                     // floats a sample: the host's time, x y z, qx qy qz qw
+const TCP_CHUNK = 65536
+const HUB_ENDPOINTS = 64
+
+var g_error = ""
+
+last_error() -> string { return g_error }
+
+// --- bytes ---------------------------------------------------------------------------------
+
+// A growable byte buffer a message is written into.
+struct NetBuf {
+    data: ptr
+    length: int
+    capacity: int
+}
+
+buf_new(capacity: int) -> *NetBuf {
+    b = calloc(1, sizeof(NetBuf)) as *NetBuf
+    b.data = malloc(capacity as long)
+    b.capacity = capacity
+    return b
+}
+
+buf_free(b: *NetBuf) {
+    if b == null { return }
+    free(b.data)
+    free(b as ptr)
+}
+
+buf_reserve(b: *NetBuf, more: int) {
+    if b.length + more <= b.capacity { return }
+    wanted = b.capacity * 2
+    while wanted < b.length + more { wanted = wanted * 2 }
+    b.data = realloc(b.data, wanted as long)
+    b.capacity = wanted
+}
+
+put_u8(b: *NetBuf, value: int) {
+    buf_reserve(b, 1)
+    mem.set_byte(b.data, b.length, value)
+    b.length = b.length + 1
+}
+
+put_u16(b: *NetBuf, value: int) {
+    buf_reserve(b, 2)
+    mem.set_u16_le(b.data, b.length, value)
+    b.length = b.length + 2
+}
+
+put_u32(b: *NetBuf, value: int) {
+    buf_reserve(b, 4)
+    mem.set_u32_le(b.data, b.length, value as long)
+    b.length = b.length + 4
+}
+
+put_f32(b: *NetBuf, value: float) {
+    buf_reserve(b, 4)
+    mem.set_float32(b.data, b.length, value)
+    b.length = b.length + 4
+}
+
+// A message read from the front: `at` moves on, and a read past the end
+// leaves `ok` false rather than reading what is not there.
+struct NetReader {
+    data: ptr
+    length: int
+    at: int
+    ok: bool
+}
+
+get_u8(r: *NetReader) -> int {
+    if r.at + 1 > r.length { r.ok = false ; return 0 }
+    v = mem.get_byte(r.data, r.at)
+    r.at = r.at + 1
+    return v
+}
+
+get_u16(r: *NetReader) -> int {
+    if r.at + 2 > r.length { r.ok = false ; return 0 }
+    v = mem.get_u16_le(r.data, r.at)
+    r.at = r.at + 2
+    return v
+}
+
+get_u32(r: *NetReader) -> int {
+    if r.at + 4 > r.length { r.ok = false ; return 0 }
+    v = (mem.get_u32_le(r.data, r.at)) as int
+    r.at = r.at + 4
+    return v
+}
+
+get_f32(r: *NetReader) -> float {
+    if r.at + 4 > r.length { r.ok = false ; return 0.0 }
+    v = mem.get_float32(r.data, r.at)
+    r.at = r.at + 4
+    return v
+}
+
+// --- the loopback transport ------------------------------------------------------------------
+//
+// Every loopback endpoint of a session shares a hub, and a message is a
+// parcel on the hub until the clock passes the time it lands. The hub's
+// conditions are a link's: a latency, a jitter on top of it, and a share
+// of unreliable parcels lost. A reliable parcel is never lost and never
+// lands before one sent ahead of it to the same endpoint.
+
+struct Parcel {
+    lands: float
+    from: int                        // endpoint ids
+    to: int
+    data: ptr
+    length: int
+}
+
+struct LoopHub {
+    parcels: ptr                     // list of *Parcel
+    endpoints: int                   // ids handed out; the host is 1
+    host_open: bool
+    latency: float                   // seconds, one way
+    jitter: float                    // up to this much more, uniformly
+    loss: float                      // the share of unreliable parcels dropped
+    seed: long
+    last_reliable: ptr               // float[HUB_ENDPOINTS]: when the last reliable parcel to each lands
+    joining: ptr                     // int[HUB_ENDPOINTS]: endpoints the host has not seen yet
+    joining_count: int
+}
+
+hub_new() -> *LoopHub {
+    h = calloc(1, sizeof(LoopHub)) as *LoopHub
+    h.parcels = list.new()
+    h.joining = calloc(HUB_ENDPOINTS, 4)
+    h.last_reliable = calloc(HUB_ENDPOINTS, 8)
+    h.seed = 12345
+    return h
+}
+
+hub_free(h: *LoopHub) {
+    if h == null { return }
+    i = 0
+    while i < list.size(h.parcels) {
+        p = list.get_raw(h.parcels, i) as *Parcel
+        free(p.data)
+        free(p as ptr)
+        i = i + 1
+    }
+    list.free(h.parcels)
+    free(h.joining)
+    free(h.last_reliable)
+    free(h as ptr)
+}
+
+// The link every parcel crosses: `latency` and up to `jitter` more seconds
+// one way, and `loss` of the unreliable ones (0..1) never arriving.
+hub_set_conditions(h: *LoopHub, latency: float, jitter: float, loss: float) {
+    h.latency = latency
+    h.jitter = jitter
+    h.loss = loss
+}
+
+// A uniform number in [0, 1) from the hub's own generator: the same
+// conditions give the same run.
+hub_random(h: *LoopHub) -> float {
+    h.seed = h.seed * 6364136223846793005 + 1442695040888963407
+    bits = (h.seed / 4294967296) % 16777216
+    if bits < 0 { bits = 0 - bits }
+    return (bits as float) / 16777216.0
+}
+
+hub_post(h: *LoopHub, from: int, to: int, reliable: bool, data: ptr, length: int, now: float) {
+    if !reliable && h.loss > 0.0 && hub_random(h) < h.loss { return }
+    lands = now + h.latency
+    if h.jitter > 0.0 { lands = lands + h.jitter * hub_random(h) }
+    ends = h.last_reliable as float[]
+    if reliable && to >= 0 && to < HUB_ENDPOINTS {
+        if lands < ends[to] { lands = ends[to] }
+        ends[to] = lands
+    }
+    p = calloc(1, sizeof(Parcel)) as *Parcel
+    p.lands = lands
+    p.from = from
+    p.to = to
+    p.data = malloc(length as long)
+    memcpy(p.data, data, length as long)
+    p.length = length
+    list.add_raw(h.parcels, p as ptr)
+}
+
+// --- a session -------------------------------------------------------------------------------
+
+struct Peer {
+    id: int                          // the session's id for it: 1, 2, ... on the host; 0 is the host on a client
+    endpoint: int                    // loopback: its hub endpoint
+    socket: ptr                      // tcp: the connection
+    pending: ptr                     // tcp: bytes read and not yet a whole message
+    pending_length: int
+    pending_capacity: int
+    welcomed: bool
+    open: bool
+}
+
+struct NetEvent {
+    kind: int
+    peer: int
+    data: ptr
+    length: int
+}
+
+struct NetObject {
+    id: int
+    object: *GameObject
+    history: ptr                     // float[HISTORY * SAMPLE], a ring
+    count: int                       // samples held
+    newest: int                      // the newest one's slot
+}
+
+struct Net {
+    role: int
+    kind: int
+    hub: *LoopHub
+    endpoint: int                    // loopback: this side's
+    server: ptr                      // tcp host: the listener
+    port: int
+    peers: ptr                       // list of *Peer
+    events: ptr                      // list of *NetEvent, this step's
+    objects: ptr                     // list of *NetObject, by id - 1
+    tick_rate: float
+    since_tick: float
+    tick: int
+    last_step: float
+    interpolation_delay: float
+    offset: float                    // client: the host's time minus ours, from the least-delayed snapshot
+    offset_known: bool
+    my_id: int                       // client: the id the host gave it, 0 before
+    out: *NetBuf
+    sent: long
+    got: long
+    snapshots: int
+}
+
+net_new(role: int, kind: int) -> *Net {
+    n = calloc(1, sizeof(Net)) as *Net
+    n.role = role
+    n.kind = kind
+    n.peers = list.new()
+    n.events = list.new()
+    n.objects = list.new()
+    n.tick_rate = 30.0
+    n.interpolation_delay = 0.1
+    n.last_step = 0.0 - 1.0
+    n.out = buf_new(2048)
+    return n
+}
+
+peer_new(id: int) -> *Peer {
+    p = calloc(1, sizeof(Peer)) as *Peer
+    p.id = id
+    p.open = true
+    return p
+}
+
+peer_by_id(n: *Net, id: int) -> *Peer {
+    i = 0
+    while i < list.size(n.peers) {
+        p = list.get_raw(n.peers, i) as *Peer
+        if p.id == id { return p }
+        i = i + 1
+    }
+    return null
+}
+
+// Host a session on a loopback hub: clients join the same hub.
+host_loopback(h: *LoopHub) -> *Net {
+    n = net_new(ROLE_HOST, KIND_LOOP)
+    n.hub = h
+    h.endpoints = 1
+    h.host_open = true
+    n.endpoint = 1
+    return n
+}
+
+// Join a session hosted on a loopback hub. The host sees the client on its
+// next step, and welcomes it once the client's hello crosses the link.
+join_loopback(h: *LoopHub) -> *Net {
+    if !h.host_open {
+        g_error = "no host on the hub"
+        return null
+    }
+    if h.joining_count >= HUB_ENDPOINTS || h.endpoints >= HUB_ENDPOINTS - 1 {
+        g_error = "the hub is full"
+        return null
+    }
+    n = net_new(ROLE_CLIENT, KIND_LOOP)
+    n.hub = h
+    h.endpoints = h.endpoints + 1
+    n.endpoint = h.endpoints
+    host = peer_new(0)
+    host.endpoint = 1
+    list.add_raw(n.peers, host as ptr)
+    waiting = h.joining as int[]
+    waiting[h.joining_count] = n.endpoint
+    h.joining_count = h.joining_count + 1
+    push_event(n, EVENT_CONNECTED, 0, null, 0)
+    return n
+}
+
+// Host a session over TCP on `address` ("0.0.0.0" for every interface, as
+// a game does; "127.0.0.1" for this machine only, as a test does) and
+// `port` (0 for one the system picks; tcp_port says which).
+host_tcp(address: string, port: int) -> *Net {
+    server, err = tcp.listen_on(address, port)
+    if err != "" {
+        g_error = "cannot listen on ${port}: ${err}"
+        return null
+    }
+    n = net_new(ROLE_HOST, KIND_TCP)
+    n.server = server
+    n.port = tcp.server_port(server)
+    return n
+}
+
+tcp_port(n: *Net) -> int { return n.port }
+
+// Join a session hosted over TCP.
+join_tcp(host: string, port: int) -> *Net {
+    socket, err = tcp.connect(host, port)
+    if err != "" {
+        g_error = "cannot connect to ${host}:${port}: ${err}"
+        return null
+    }
+    tcp.set_nodelay(socket, true)
+    n = net_new(ROLE_CLIENT, KIND_TCP)
+    link = peer_new(0)
+    link.socket = socket
+    list.add_raw(n.peers, link as ptr)
+    push_event(n, EVENT_CONNECTED, 0, null, 0)
+    return n
+}
+
+push_event(n: *Net, kind: int, peer: int, data: ptr, length: int) {
+    ev = calloc(1, sizeof(NetEvent)) as *NetEvent
+    ev.kind = kind
+    ev.peer = peer
+    if length > 0 {
+        ev.data = malloc(length as long)
+        memcpy(ev.data, data, length as long)
+    }
+    ev.length = length
+    list.add_raw(n.events, ev as ptr)
+}
+
+clear_events(n: *Net) {
+    i = 0
+    while i < list.size(n.events) {
+        ev = list.get_raw(n.events, i) as *NetEvent
+        if ev.data != null { free(ev.data) }
+        free(ev as ptr)
+        i = i + 1
+    }
+    list.clear(n.events)
+}
+
+// A message to one peer.
+deliver(n: *Net, p: *Peer, reliable: bool, data: ptr, length: int, now: float) {
+    if p == null || !p.open { return }
+    n.sent = n.sent + (length as long)
+    if n.kind == KIND_LOOP {
+        hub_post(n.hub, n.endpoint, p.endpoint, reliable, data, length, now)
+        return
+    }
+    // TCP: the length, then the message, in one write. The stream keeps the
+    // order and loses nothing, so reliable or not is the same here.
+    total = length + 4
+    frame = malloc(total as long)
+    mem.set_u32_le(frame, 0, length as long)
+    memcpy(frame + 4, data, length as long)
+    written = 0
+    while written < total {
+        part = bytes.string_from_ptr(frame + written, total - written)
+        count, err = tcp.write_n(p.socket, part, total - written)
+        string.free(part)
+        if err != "" || count <= 0 {
+            close_peer(n, p)
+            break
+        }
+        written = written + count
+    }
+    free(frame)
+}
+
+// This step's arrivals, into n.events.
+pump(n: *Net, now: float) {
+    if n.kind == KIND_LOOP {
+        pump_loop(n, now)
+    } else {
+        pump_tcp(n)
+    }
+}
+
+pump_loop(n: *Net, now: float) {
+    h = n.hub
+    if n.role == ROLE_HOST {
+        waiting = h.joining as int[]
+        k = 0
+        while k < h.joining_count {
+            p = peer_new(list.size(n.peers) + 1)
+            p.endpoint = waiting[k]
+            list.add_raw(n.peers, p as ptr)
+            push_event(n, EVENT_CONNECTED, p.id, null, 0)
+            k = k + 1
+        }
+        h.joining_count = 0
+    }
+    // What has landed for this endpoint, the earliest landing first.
+    while true {
+        best = 0 - 1
+        best_lands = now
+        i = 0
+        while i < list.size(h.parcels) {
+            parcel = list.get_raw(h.parcels, i) as *Parcel
+            if parcel.to == n.endpoint && parcel.lands <= now && (best < 0 || parcel.lands < best_lands) {
+                best = i
+                best_lands = parcel.lands
+            }
+            i = i + 1
+        }
+        if best < 0 { break }
+        landed = list.get_raw(h.parcels, best) as *Parcel
+        list.remove(h.parcels, best)
+        peer = peer_from_endpoint(n, landed.from)
+        if peer != null {
+            n.got = n.got + (landed.length as long)
+            push_event(n, EVENT_MESSAGE, peer.id, landed.data, landed.length)
+        }
+        free(landed.data)
+        free(landed as ptr)
+    }
+}
+
+peer_from_endpoint(n: *Net, endpoint: int) -> *Peer {
+    i = 0
+    while i < list.size(n.peers) {
+        p = list.get_raw(n.peers, i) as *Peer
+        if p.endpoint == endpoint { return p }
+        i = i + 1
+    }
+    return null
+}
+
+pump_tcp(n: *Net) {
+    if n.role == ROLE_HOST && n.server != null {
+        while tcp.server_poll(n.server, 0) > 0 {
+            socket, err = tcp.accept(n.server)
+            if err != "" { break }
+            tcp.set_nodelay(socket, true)
+            p = peer_new(list.size(n.peers) + 1)
+            p.socket = socket
+            list.add_raw(n.peers, p as ptr)
+            push_event(n, EVENT_CONNECTED, p.id, null, 0)
+        }
+    }
+    i = 0
+    while i < list.size(n.peers) {
+        p = list.get_raw(n.peers, i) as *Peer
+        if p.open { read_peer(n, p) }
+        i = i + 1
+    }
+}
+
+// Whatever the socket holds now, without waiting, cut into whole messages.
+read_peer(n: *Net, p: *Peer) {
+    while true {
+        ready, perr = tcp.poll(p.socket, 0)
+        if perr != "" {
+            close_peer(n, p)
+            return
+        }
+        if !ready { break }
+        chunk, got, err = tcp.read_n(p.socket, TCP_CHUNK)
+        if err == "timeout" { break }
+        if err != "" || got <= 0 {
+            close_peer(n, p)
+            return
+        }
+        if p.pending_length + got > p.pending_capacity {
+            wanted = p.pending_capacity * 2
+            if wanted < 4096 { wanted = 4096 }
+            while wanted < p.pending_length + got { wanted = wanted * 2 }
+            p.pending = realloc(p.pending, wanted as long)
+            p.pending_capacity = wanted
+        }
+        block = bytes.new(got)
+        bytes.copy_from_string(block, 0, chunk, got)
+        memcpy(p.pending + p.pending_length, bytes.data(block), got as long)
+        bytes.free(block)
+        p.pending_length = p.pending_length + got
+        n.got = n.got + (got as long)
+    }
+    // Whole messages off the front.
+    at = 0
+    while p.pending_length - at >= 4 {
+        length = (mem.get_u32_le(p.pending, at)) as int
+        if p.pending_length - at - 4 < length { break }
+        push_event(n, EVENT_MESSAGE, p.id, p.pending + at + 4, length)
+        at = at + 4 + length
+    }
+    if at > 0 {
+        memmove(p.pending, p.pending + at, (p.pending_length - at) as long)
+        p.pending_length = p.pending_length - at
+    }
+}
+
+close_peer(n: *Net, p: *Peer) {
+    if !p.open { return }
+    p.open = false
+    if p.socket != null {
+        tcp.tcp_close(p.socket)
+        p.socket = null
+    }
+    push_event(n, EVENT_DISCONNECTED, p.id, null, 0)
+}
+
+// --- replication ---------------------------------------------------------------------------
+
+// Mark a game object networked: the host sends its transform, a client
+// draws it from what arrived. Its id is its order among the networked, so a
+// scene both sides build the same way has the same ids on both.
+networked(n: *Net, o: *GameObject) -> int {
+    no = calloc(1, sizeof(NetObject)) as *NetObject
+    no.id = list.size(n.objects) + 1
+    no.object = o
+    no.history = calloc(HISTORY * SAMPLE, 8)
+    list.add_raw(n.objects, no as ptr)
+    return no.id
+}
+
+networked_count(n: *Net) -> int { return list.size(n.objects) }
+
+object_by_id(n: *Net, id: int) -> *NetObject {
+    if id < 1 || id > list.size(n.objects) { return null }
+    return list.get_raw(n.objects, id - 1) as *NetObject
+}
+
+// The host's snapshot of every networked object, to every welcomed client.
+send_snapshot(n: *Net, now: float) {
+    b = n.out
+    b.length = 0
+    put_u8(b, MSG_SNAPSHOT)
+    put_u32(b, n.tick)
+    put_f32(b, now)
+    count = list.size(n.objects)
+    put_u16(b, count)
+    i = 0
+    while i < count {
+        no = list.get_raw(n.objects, i) as *NetObject
+        m = behaviour.object_model(no.object)
+        put_u32(b, no.id)
+        if m != null {
+            put_f32(b, m.position.x)
+            put_f32(b, m.position.y)
+            put_f32(b, m.position.z)
+            put_f32(b, m.rotation.x)
+            put_f32(b, m.rotation.y)
+            put_f32(b, m.rotation.z)
+            put_f32(b, m.rotation.w)
+        } else {
+            j = 0
+            while j < 6 {
+                put_f32(b, 0.0)
+                j = j + 1
+            }
+            put_f32(b, 1.0)
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < list.size(n.peers) {
+        p = list.get_raw(n.peers, i) as *Peer
+        if p.welcomed { deliver(n, p, false, b.data, b.length, now) }
+        i = i + 1
+    }
+}
+
+// A snapshot into each object's history. One no newer than the newest held
+// came late and is already superseded: it is dropped.
+take_snapshot(n: *Net, r: *NetReader, now: float) {
+    get_u32(r)
+    host_time = get_f32(r)
+    count = get_u16(r)
+    if !r.ok { return }
+    n.snapshots = n.snapshots + 1
+    // The host's clock against ours, from the least-delayed snapshot seen: a
+    // snapshot can arrive later than its time, never earlier.
+    offset = host_time - now
+    if !n.offset_known || offset > n.offset {
+        n.offset = offset
+        n.offset_known = true
+    }
+    i = 0
+    while i < count {
+        id = get_u32(r)
+        x = get_f32(r)
+        y = get_f32(r)
+        z = get_f32(r)
+        qx = get_f32(r)
+        qy = get_f32(r)
+        qz = get_f32(r)
+        qw = get_f32(r)
+        if !r.ok { return }
+        no = object_by_id(n, id)
+        if no != null {
+            h = no.history as float[]
+            if no.count == 0 || host_time > h[no.newest * SAMPLE] {
+                slot = (no.newest + 1) % HISTORY
+                if no.count == 0 { slot = 0 }
+                at = slot * SAMPLE
+                h[at] = host_time
+                h[at + 1] = x
+                h[at + 2] = y
+                h[at + 3] = z
+                h[at + 4] = qx
+                h[at + 5] = qy
+                h[at + 6] = qz
+                h[at + 7] = qw
+                no.newest = slot
+                if no.count < HISTORY { no.count = no.count + 1 }
+            }
+        }
+        i = i + 1
+    }
+}
+
+// The moment in the host's time a client draws its objects at: now in the
+// host's clock, less the interpolation delay. -1 before the first snapshot.
+// A host draws the present.
+view_time(n: *Net, now: float) -> float {
+    if n.role == ROLE_HOST { return now }
+    if !n.offset_known { return 0.0 - 1.0 }
+    return now + n.offset - n.interpolation_delay
+}
+
+// Each networked object drawn where the host had it `interpolation_delay`
+// ago in the host's time: between the two samples around that moment, or
+// held at the newest when the snapshots have stopped coming.
+interpolate(n: *Net, now: float) {
+    if !n.offset_known { return }
+    at = view_time(n, now)
+    i = 0
+    while i < list.size(n.objects) {
+        no = list.get_raw(n.objects, i) as *NetObject
+        m = behaviour.object_model(no.object)
+        if m != null && no.count > 0 {
+            h = no.history as float[]
+            after = 0 - 1
+            before = 0 - 1
+            k = 0
+            while k < no.count {
+                slot = (no.newest - k + HISTORY) % HISTORY
+                if h[slot * SAMPLE] > at {
+                    after = slot
+                } else {
+                    before = slot
+                    break
+                }
+                k = k + 1
+            }
+            if before < 0 { before = after }
+            if after < 0 { after = before }
+            a = before * SAMPLE
+            c = after * SAMPLE
+            t = 0.0
+            if h[c] > h[a] { t = (at - h[a]) / (h[c] - h[a]) }
+            if t < 0.0 { t = 0.0 }
+            if t > 1.0 { t = 1.0 }
+            core.model_set_position(m, h[a + 1] + (h[c + 1] - h[a + 1]) * t,
+                                       h[a + 2] + (h[c + 2] - h[a + 2]) * t,
+                                       h[a + 3] + (h[c + 3] - h[a + 3]) * t)
+            core.model_set_rotation(m, nlerp(h, a + 4, c + 4, t))
+        }
+        i = i + 1
+    }
+}
+
+// Between two rotations (four floats of `h` at `a` and at `c`) the short way
+// round, normalized: over a tick's arc this is slerp to a fraction of a
+// degree.
+nlerp(h: float[], a: int, c: int, t: float) -> Quat {
+    sign = 1.0
+    if h[a] * h[c] + h[a + 1] * h[c + 1] + h[a + 2] * h[c + 2] + h[a + 3] * h[c + 3] < 0.0 { sign = 0.0 - 1.0 }
+    x = h[a] + (h[c] * sign - h[a]) * t
+    y = h[a + 1] + (h[c + 1] * sign - h[a + 1]) * t
+    z = h[a + 2] + (h[c + 2] * sign - h[a + 2]) * t
+    w = h[a + 3] + (h[c + 3] * sign - h[a + 3]) * t
+    length = sqrt(x * x + y * y + z * z + w * w)
+    if length < 0.000001 { return core.quat(0.0, 0.0, 0.0, 1.0) }
+    return core.quat(x / length, y / length, z / length, w / length)
+}
+
+// --- the step ------------------------------------------------------------------------------
+
+// One step of the session at `now` (seconds): what arrived is handled, the
+// host sends a snapshot when a network tick is due, a client moves what it
+// draws. The engine calls it every frame (attach); a test calls it itself.
+step(n: *Net, now: float) {
+    if n == null { return }
+    delta = 0.0
+    if n.last_step >= 0.0 { delta = now - n.last_step }
+    n.last_step = now
+    // Events queued outside a step (a client's connection) are handled in
+    // this one, with what arrives.
+    pump(n, now)
+    i = 0
+    while i < list.size(n.events) {
+        ev = list.get_raw(n.events, i) as *NetEvent
+        handle(n, ev, now)
+        i = i + 1
+    }
+    clear_events(n)
+    if n.role == ROLE_HOST {
+        // A tick is due a whole interval after the last, to within a
+        // thousandth of one: steps of 1/60 add up to a hair under 1/30
+        // often enough that a strict comparison skipped every few ticks,
+        // and a skipped snapshot doubles the gap a client interpolates.
+        n.since_tick = n.since_tick + delta
+        interval = 1.0 / n.tick_rate
+        if n.since_tick >= interval * 0.999 || n.tick == 0 {
+            n.since_tick = n.since_tick - interval
+            if n.since_tick > interval || n.since_tick < 0.0 { n.since_tick = 0.0 }
+            n.tick = n.tick + 1
+            send_snapshot(n, now)
+        }
+    } else {
+        interpolate(n, now)
+    }
+}
+
+handle(n: *Net, ev: *NetEvent, now: float) {
+    if n.role == ROLE_CLIENT && ev.kind == EVENT_CONNECTED {
+        b = n.out
+        b.length = 0
+        put_u8(b, MSG_HELLO)
+        put_u32(b, PROTOCOL)
+        deliver(n, peer_by_id(n, 0), true, b.data, b.length, now)
+        return
+    }
+    if ev.kind != EVENT_MESSAGE { return }
+    r = NetReader { data: ev.data, length: ev.length, at: 0, ok: true }
+    kind = get_u8(&r)
+    if !r.ok { return }
+    if n.role == ROLE_HOST && kind == MSG_HELLO {
+        if get_u32(&r) != PROTOCOL { return }
+        p = peer_by_id(n, ev.peer)
+        if p == null { return }
+        p.welcomed = true
+        b = n.out
+        b.length = 0
+        put_u8(b, MSG_WELCOME)
+        put_u32(b, p.id)
+        put_u32(b, (n.tick_rate) as int)
+        deliver(n, p, true, b.data, b.length, now)
+        return
+    }
+    if n.role == ROLE_CLIENT && kind == MSG_WELCOME {
+        n.my_id = get_u32(&r)
+        return
+    }
+    if n.role == ROLE_CLIENT && kind == MSG_SNAPSHOT {
+        take_snapshot(n, &r, now)
+    }
+}
+
+// Whether a client has been welcomed; a host always is.
+connected(n: *Net) -> bool {
+    if n.role == ROLE_HOST { return true }
+    return n.my_id > 0
+}
+
+client_id(n: *Net) -> int { return n.my_id }
+
+// The clients a host has welcomed and still hears.
+peer_count(n: *Net) -> int {
+    count = 0
+    i = 0
+    while i < list.size(n.peers) {
+        p = list.get_raw(n.peers, i) as *Peer
+        if p.welcomed && p.open { count = count + 1 }
+        i = i + 1
+    }
+    return count
+}
+
+set_tick_rate(n: *Net, per_second: float) {
+    if per_second > 0.0 { n.tick_rate = per_second }
+}
+
+// How far behind the host's time a client draws: at least a snapshot
+// interval and the link's jitter, or it runs out of snapshots to draw from.
+set_interpolation_delay(n: *Net, seconds: float) {
+    if seconds >= 0.0 { n.interpolation_delay = seconds }
+}
+
+bytes_sent(n: *Net) -> long { return n.sent }
+bytes_received(n: *Net) -> long { return n.got }
+snapshots_received(n: *Net) -> int { return n.snapshots }
+
+// --- in the engine ---------------------------------------------------------------------------
+
+net_update(state: ptr, e: *Engine, delta: float) {
+    step(state as *Net, platform.time())
+}
+
+// The session stepped by the engine every frame, on the engine's clock.
+attach(e: *Engine, n: *Net) {
+    b = engine.behaviour_new("net", n as ptr)
+    b.update = net_update
+    engine.engine_add_behaviour(e, b)
+}
+
+net_free(n: *Net) {
+    if n == null { return }
+    clear_events(n)
+    list.free(n.events)
+    i = 0
+    while i < list.size(n.peers) {
+        p = list.get_raw(n.peers, i) as *Peer
+        if p.socket != null { tcp.tcp_close(p.socket) }
+        if p.pending != null { free(p.pending) }
+        free(p as ptr)
+        i = i + 1
+    }
+    list.free(n.peers)
+    i = 0
+    while i < list.size(n.objects) {
+        no = list.get_raw(n.objects, i) as *NetObject
+        free(no.history)
+        free(no as ptr)
+        i = i + 1
+    }
+    list.free(n.objects)
+    if n.server != null { tcp.tcp_server_close(n.server) }
+    if n.kind == KIND_LOOP && n.role == ROLE_HOST && n.hub != null { n.hub.host_open = false }
+    buf_free(n.out)
+    free(n as ptr)
+}

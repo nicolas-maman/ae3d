@@ -2,6 +2,20 @@
 
 ## [current]
 
+### Multiplayer in the engine
+
+- `ae3d.net` (#413, first slice): a host and its clients, over TCP or an
+  in-process loopback hub whose link can be given a latency, a jitter and a
+  loss, deterministically. A hello and a welcome, then snapshots of every
+  networked object at the tick rate, and each client drawing them a tenth
+  of a second in the host's past, interpolated between the two snapshots
+  around that moment. `tests/test_net.ae`: sixteen objects round a circle,
+  the client within 1.389 mm of the host over a perfect link and 5.555 mm
+  over 100 ms with 20 ms of jitter and 2% loss -- each the chord the
+  geometry predicts -- and 2.8 mm over TCP; 15.1 KB a second a client.
+  `examples/net_cars.ae`: host in one process, join from another.
+  [docs/networking.md](docs/networking.md).
+
 ### Issues, five at a time
 
 - Vulkan is clean under synchronization validation (#410): every example,
