@@ -17,6 +17,10 @@
 //
 // A figure's models belong to its file, freed with it: `figures_free`
 // after the engine that drew them is gone, as with any glTF.
+//
+// Underneath, a figure needs no engine: `figure_new` reads one under a
+// group, `advance` plays it on, `figure_free` lets it go, and whatever
+// draws it (the editor's viewport, a tool) adds its meshes itself.
 
 import std.list
 import std.string
@@ -31,6 +35,7 @@ import ae3d.skin
 exports (
     Figure,
     figure, attach, figure_of, play, stop, set_time, figures_free,
+    figure_new, figure_free, advance,
     path, clip, speed, looping, time, clip_count, clip_name, duration, skeleton, primitive_count, primitive
 )
 
@@ -84,16 +89,33 @@ figure(e: *Engine, name: string, path: string) -> *GameObject {
 }
 
 // A figure from `path` on an object that has a group for a model -- one the
-// game made, or one a scene file read back. Null when the file cannot be
-// read or the object has no model.
+// game made, or one a scene file read back: its meshes drawn by the engine,
+// its clip played on by the engine's update, its record in the scene file
+// the engine saves. Null when the file cannot be read or the object has no
+// model.
 attach(e: *Engine, o: *GameObject, path: string) -> *Figure {
     group = behaviour.object_model(o)
     if group == null { return null }
+    f = figure_new(path, group)
+    if f == null { return null }
+    f.engine = e as ptr
+    f.object = o as ptr
+    i = 0
+    while i < primitive_count(f) {
+        engine.engine_add_model(e, primitive(f, i))
+        i = i + 1
+    }
+    engine.script(o, "Figure", f as ptr, null, figure_update)
+    list.add_raw(figures_for(e).list, f as ptr)
+    return f
+}
+
+// A figure from `path` under `group`, nothing playing, drawn by no one yet.
+// Null when the file cannot be read.
+figure_new(path: string, group: *Model) -> *Figure {
     file = gltf.load(path)
     if file == null { return null }
     f = calloc(1, sizeof(Figure)) as *Figure
-    f.engine = e as ptr
-    f.object = o as ptr
     f.path = string.copy(path)
     f.file = file as ptr
     f.clip = string.copy("")
@@ -105,14 +127,24 @@ attach(e: *Engine, o: *GameObject, path: string) -> *Figure {
         core.model_set_parent(gltf.root(file, i), group)
         i = i + 1
     }
-    i = 0
-    while i < gltf.primitive_count(file) {
-        engine.engine_add_model(e, gltf.primitive(file, i))
-        i = i + 1
-    }
-    engine.script(o, "Figure", f as ptr, null, figure_update)
-    list.add_raw(figures_for(e).list, f as ptr)
     return f
+}
+
+// A figure and its file's models, gone. Whatever drew them lets them go
+// first.
+figure_free(f: *Figure) {
+    if f == null { return }
+    anim.registry_free(f.players as *Registry)
+    gltf.scene_destroy(f.file as *GltfScene)
+    string.free(f.path)
+    string.free(f.clip)
+    free(f as ptr)
+}
+
+// The clip on by `delta` seconds, at the figure's speed.
+advance(f: *Figure, delta: float) {
+    if f == null || string.equals(f.clip, "") == 1 { return }
+    set_time(f, f.time + delta * f.speed)
 }
 
 // The figure on an object, or null.
@@ -183,9 +215,7 @@ wrapped(f: *Figure, seconds: float) -> float {
 
 // A frame's update: the clip on by the frame's time, at the figure's speed.
 figure_update(state: ptr, o: *GameObject, delta: float) {
-    f = state as *Figure
-    if string.equals(f.clip, "") == 1 { return }
-    set_time(f, f.time + delta * f.speed)
+    advance(state as *Figure, delta)
 }
 
 path(f: *Figure) -> string { return f.path }
@@ -243,12 +273,7 @@ figures_free(e: *Engine) {
         if fs.engine == e as ptr {
             k = 0
             while k < list.size(fs.list) {
-                f = list.get_raw(fs.list, k) as *Figure
-                anim.registry_free(f.players as *Registry)
-                gltf.scene_destroy(f.file as *GltfScene)
-                string.free(f.path)
-                string.free(f.clip)
-                free(f as ptr)
+                figure_free(list.get_raw(fs.list, k) as *Figure)
                 k = k + 1
             }
             list.free(fs.list)
