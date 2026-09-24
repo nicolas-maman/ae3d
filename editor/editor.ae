@@ -325,6 +325,11 @@ var g_hier_rows: ptr = null
 var g_visible: ptr = null          // int[g_visible_count]: the object of each row
 var g_visible_count = 0
 var g_visible_room = 0
+// While the rows are rebuilt: each object's parent (int[], -1 for a root)
+// and how many children it has, or null outside a rebuild.
+var g_parent_rows: ptr = null
+var g_child_counts: ptr = null
+var g_table_count = 0
 var g_expanded: ptr = null         // list of *Model: the parents shown open
 var g_filter = ""
 var g_filter_field = 0
@@ -1637,13 +1642,16 @@ rebuild_rows() {
     if g_rows == null { g_rows = list.new() }
     release_rows()
     release_hier_rows()
+    build_parent_table()
     build_visible()
     k = 0
     while k < g_visible_count {
         list.add_raw(g_rows, index_handle(object_of_row(k)))
         k = k + 1
     }
+    // The rows are built here, each asking the table for its caret and indent.
     if g_hierarchy != null { ui.listbox_update(g_hierarchy, g_rows) }
+    drop_parent_table()
     paint_selection()
 }
 
@@ -1652,6 +1660,13 @@ rebuild_rows() {
 // The object whose model is this one's parent, or -1: a parent outside the
 // scene (a program's own) makes the object a root here.
 parent_index_of(index: int) -> int {
+    if g_parent_rows != null && index >= 0 && index < g_table_count {
+        return (g_parent_rows as int[])[index]
+    }
+    return scan_parent_of(index)
+}
+
+scan_parent_of(index: int) -> int {
     m = model_at(index)
     if m == null { return 0 - 1 }
     parent = core.model_parent(m)
@@ -1660,6 +1675,9 @@ parent_index_of(index: int) -> int {
 }
 
 has_children(index: int) -> bool {
+    if g_child_counts != null && index >= 0 && index < g_table_count {
+        return (g_child_counts as int[])[index] > 0
+    }
     count = row_count()
     i = 0
     while i < count {
@@ -1667,6 +1685,38 @@ has_children(index: int) -> bool {
         i = i + 1
     }
     return false
+}
+
+// Every object's parent and child count, for one rebuild of the rows.
+// Finding a parent is a scan of the scene, and a row asked it of every
+// object -- has_children for its caret, depth_of for its indent, the tree
+// walk for what is under it -- so 29 rows of the street's 1,240 objects cost
+// 70 ms, 84 rows 180 ms. Found once, it costs what one row's question did.
+// Only for the rebuild: the scene can change between rebuilds, and outside
+// one the questions are asked by the scan.
+build_parent_table() {
+    drop_parent_table()
+    count = row_count()
+    g_table_count = count
+    g_parent_rows = calloc(count + 1, 4)
+    g_child_counts = calloc(count + 1, 4)
+    parents = g_parent_rows as int[]
+    children = g_child_counts as int[]
+    i = 0
+    while i < count {
+        up = scan_parent_of(i)
+        parents[i] = up
+        if up >= 0 && up != i { children[up] = children[up] + 1 }
+        i = i + 1
+    }
+}
+
+drop_parent_table() {
+    if g_parent_rows != null { free(g_parent_rows) }
+    if g_child_counts != null { free(g_child_counts) }
+    g_parent_rows = null
+    g_child_counts = null
+    g_table_count = 0
 }
 
 is_expanded(index: int) -> bool {
@@ -1735,7 +1785,7 @@ push_visible(index: int) {
 // An object and, when it is shown open, what is under it, depth first.
 push_subtree(index: int) {
     push_visible(index)
-    if !is_expanded(index) { return }
+    if !is_expanded(index) || !has_children(index) { return }
     count = row_count()
     i = 0
     while i < count {

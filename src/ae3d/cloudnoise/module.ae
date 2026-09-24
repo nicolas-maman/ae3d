@@ -24,16 +24,11 @@
 // shaders' is in floats, which moves a texel by a count in a few
 // thousand and nothing a cloud shows.
 import std.mem
-import std.math
 
 exports (
     shape, weather
 )
 
-// floor is std.math's, called through the module: a bare `extern floor`
-// was resolved against a program's own locals, so a test that kept its
-// ground plane in a local named `floor` stopped this file compiling
-// ("cannot cast ptr to int" at the noise's lattice lookups; aether#2173).
 extern sqrt(x: float) -> float
 
 const MASK32 = 4294967295
@@ -84,11 +79,24 @@ gradient_z(h: int) -> float {
 
 fade(t: float) -> float { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0) }
 
+// The lattice cell a coordinate falls in: the largest integer not above it.
+// Truncation goes toward zero, so a negative coordinate between cells is
+// stepped down one. Its own rather than libm's: a bare `extern floor`
+// was resolved against a program's own locals (a test's ground plane in a
+// local named floor, aether#2173), and std.math's math.floor against
+// aephysics' module called math in any program that imports both
+// (aether#2190).
+floor_int(x: float) -> int {
+    i = x as int
+    if (i as float) > x { i = i - 1 }
+    return i
+}
+
 // Perlin noise on a lattice of `period` cells, tileable, in -1..1.
 perlin(x: float, y: float, z: float, period: int, seed: int) -> float {
-    ix = math.floor(x) as int
-    iy = math.floor(y) as int
-    iz = math.floor(z) as int
+    ix = floor_int(x)
+    iy = floor_int(y)
+    iz = floor_int(z)
     fx = x - (ix as float)
     fy = y - (iy as float)
     fz = z - (iz as float)
@@ -133,9 +141,9 @@ extern calloc(count: int, size: int) -> ptr
 // feature point a cell, inverted so a cell's centre is 1 and its edge 0,
 // which is the shape a cloud puff has.
 worley(x: float, y: float, z: float, period: int, seed: int) -> float {
-    ix = math.floor(x) as int
-    iy = math.floor(y) as int
-    iz = math.floor(z) as int
+    ix = floor_int(x)
+    iy = floor_int(y)
+    iz = floor_int(z)
     best = 1000000000.0
     dz = 0 - 1
     while dz <= 1 {
@@ -221,8 +229,8 @@ shape(size: int, out: ptr) -> bool {
 // cloudNoise is on its 3D one with z fixed -- the weather map has to be
 // the field the ground shader computes for its cloud shadow.
 value2(x: float, y: float, zslice: float, period: int, seed: int) -> float {
-    ix = math.floor(x) as int
-    iy = math.floor(y) as int
+    ix = floor_int(x)
+    iy = floor_int(y)
     fx = x - (ix as float)
     fy = y - (iy as float)
     ux = fx * fx * (3.0 - 2.0 * fx)
