@@ -24,8 +24,14 @@
 // recovers over `recovery` seconds, so a shoulder shot drops the arm and
 // the arm comes back up.
 //
-// Balance that steps to catch a fall, protective arms, writhing and getting
-// up are the controllers the next slices of #414 put on top of this.
+// Falling, a POWERED figure protects itself (`set_protective`, on by
+// default): when it leans past FALL_TILT it stops fighting for its
+// balance, its arms reach down, straight, toward where it is falling and
+// its head tucks away from it -- so its hands meet the ground before its
+// head does, and its head meets it slower, as a person's does.
+//
+// Balance that steps to catch a fall, writhing and getting up are the
+// controllers the next slices of #414 put on top of this.
 
 import std.list
 import aephysics.human
@@ -37,7 +43,8 @@ import ae3d.physics
 exports (
     Motion, ANIMATED, POWERED, LIMP,
     active_ragdoll, motion_free, set_mode, mode, set_strength, strength, set_recovery,
-    hit, bone_weakness, motion_step, attach, tracking_error, tilt, muscle, full_assist
+    hit, bone_weakness, motion_step, attach, tracking_error, tilt, muscle, full_assist,
+    set_protective, protective, falling
 )
 
 extern calloc(count: int, size: int) -> ptr
@@ -55,6 +62,17 @@ const LIMP = 3
 const FULL_ASSIST = 1200.0
 const WEAK_STRUCK = 0.95              // the budget a struck bone loses
 const WEAK_NEAR = 0.5                 // and the bones joined to it
+// The protective fall's settings, chosen by measuring the head's speed
+// when it meets the ground (tests/test_motion.ae) for falls backward,
+// forward and sideways against a figure that does not protect itself:
+// the best that did better in all three, and whose neighbours did too.
+// Leaning 0.35 rad (20 degrees) from its pose, a figure is falling (a
+// 60 N s shove leans it less); the arms reach 0.7 down to 1 toward the
+// fall; the head tucks 0.5 rad, the neck's reach. Softening the knees
+// in a fall, tried, made every direction worse.
+const FALL_TILT = 0.35
+const REACH_DOWN = 0.7
+const TUCK = 0.5
 
 struct Motion {
     ragdoll: *Ragdoll
@@ -62,6 +80,8 @@ struct Motion {
     strength: float
     recovery: float                    // seconds a struck bone takes to come back
     weakness: ptr                      // float[BONE_COUNT]: the share of each bone's budget a hit took
+    protective: bool                   // reaches for the ground when it falls
+    falling: bool
 }
 
 full_assist() -> float { return FULL_ASSIST }
@@ -87,6 +107,7 @@ active_ragdoll(r: *Ragdoll) -> *Motion {
     m.ragdoll = r
     m.strength = 1.0
     m.recovery = 0.8
+    m.protective = true
     m.weakness = calloc(human.BONE_COUNT, 8)
     set_mode(m, ANIMATED)
     return m
@@ -99,6 +120,8 @@ motion_free(m: *Motion) {
 }
 
 set_mode(m: *Motion, to: int) {
+    m.falling = false
+    physics.ragdoll_clear_aims(m.ragdoll)
     if to == ANIMATED {
         physics.ragdoll_follow(m.ragdoll)
     } else if to == POWERED {
@@ -170,12 +193,92 @@ apply_budget(m: *Motion) {
         physics.ragdoll_set_bone_drive(m.ragdoll, i, muscle(i) * m.strength * (1.0 - weak[i]))
         i = i + 1
     }
-    physics.ragdoll_set_balance_assist(m.ragdoll, FULL_ASSIST * m.strength * (1.0 - weak[human.BONE_PELVIS]))
+    assist = FULL_ASSIST * m.strength * (1.0 - weak[human.BONE_PELVIS])
+    // Falling: no fight for a balance that is lost.
+    if m.falling { assist = 0.0 }
+    physics.ragdoll_set_balance_assist(m.ragdoll, assist)
+}
+
+set_protective(m: *Motion, on: bool) {
+    m.protective = on
+    if !on && m.falling {
+        m.falling = false
+        physics.ragdoll_clear_aims(m.ragdoll)
+        apply_budget(m)
+    }
+}
+
+protective(m: *Motion) -> bool { return m.protective }
+
+// Whether it is falling and protecting itself.
+falling(m: *Motion) -> bool { return m.falling }
+
+// The way the figure is falling, level: where its pelvis's up leans to, or
+// failing a lean, where its centre of mass is going.
+fall_way(m: *Motion) -> Vec3 {
+    up = core.quat_apply(physics.ragdoll_bone_rotation(m.ragdoll, human.BONE_PELVIS), core.vec3(0.0, 1.0, 0.0))
+    way = core.vec3(up.x, 0.0, up.z)
+    if core.v3_len(way) < 0.05 { return core.vec3(0.0, 0.0, 0.0) }
+    return core.v3_normalize(way)
+}
+
+// An arm reaching down toward the fall, a little out to its own side, so
+// the hands land apart, and straight: a straight arm takes the landing
+// through its joints, where a bent one folds on its elbow's muscle. Each
+// of its two bodies turned from where its length points now (aephysics's
+// arm capsules lie along their bodies' -x) to there.
+reach(m: *Motion, arm: int, forearm: int, way: Vec3) {
+    r = m.ragdoll
+    shoulder = behaviour.object_position(physics.ragdoll_bone(r, arm))
+    chest = behaviour.object_position(physics.ragdoll_bone(r, human.BONE_SPINE_03))
+    side = core.v3_sub(shoulder, chest)
+    side = core.vec3(side.x, 0.0, side.z)
+    if core.v3_len(side) > 0.001 { side = core.v3_normalize(side) }
+    want = core.v3_normalize(core.vec3(way.x + side.x * 0.3, 0.0 - REACH_DOWN, way.z + side.z * 0.3))
+    aim_along(r, arm, want)
+    aim_along(r, forearm, want)
+}
+
+aim_along(r: *Ragdoll, index: int, want: Vec3) {
+    now = physics.ragdoll_bone_rotation(r, index)
+    points = core.quat_apply(now, core.vec3(0.0 - 1.0, 0.0, 0.0))
+    physics.ragdoll_aim(r, index, core.quat_mul(core.quat_from_to(points, want), now))
+}
+
+// A fixed step of the protective fall: into it past FALL_TILT, the arms'
+// reach and the head's tuck renewed as the figure turns, and out of it
+// again should the figure find its feet.
+protect(m: *Motion) {
+    if m.mode != POWERED || !m.protective { return }
+    lean = physics.ragdoll_tilt(m.ragdoll)
+    if !m.falling {
+        if lean < FALL_TILT { return }
+        m.falling = true
+        apply_budget(m)
+    } else if lean < FALL_TILT * 0.5 {
+        m.falling = false
+        physics.ragdoll_clear_aims(m.ragdoll)
+        apply_budget(m)
+        return
+    }
+    way = fall_way(m)
+    if core.v3_len(way) < 0.5 { return }
+    reach(m, human.BONE_UPPER_ARM_L, human.BONE_LOWER_ARM_L, way)
+    reach(m, human.BONE_UPPER_ARM_R, human.BONE_LOWER_ARM_R, way)
+    // The head away from the fall: about the axis across it, from the
+    // chest as it is.
+    across = core.v3_cross(core.vec3(0.0, 1.0, 0.0), way)
+    if core.v3_len(across) > 0.001 {
+        chest = physics.ragdoll_bone_rotation(m.ragdoll, human.BONE_SPINE_03)
+        physics.ragdoll_aim(m.ragdoll, human.BONE_NECK,
+                            core.quat_mul(core.quat_rotate(0.0 - TUCK, core.v3_normalize(across)), chest))
+    }
 }
 
 // A fixed step's recovery: every weakened bone a step's share closer to
 // its full budget.
 motion_step(m: *Motion, step: float) {
+    protect(m)
     weak = m.weakness as float[]
     changed = false
     i = 0

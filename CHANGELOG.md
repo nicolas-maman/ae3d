@@ -2,6 +2,18 @@
 
 ## [current]
 
+### Natural motion: the protective fall
+
+- A `POWERED` figure leaning past 20 degrees is falling (`motion.falling`)
+  and protects itself (#414): it stops fighting for its balance, reaches
+  down toward the fall with straight arms, and tucks its head.
+  `motion.set_protective` turns it off. Built on `physics.ragdoll_aim`, a
+  bone driven to a rotation in the world from wherever its parent is.
+  `tests/test_motion.ae`: felled from the front, from behind and from the
+  side, the hands reach the ground first every time, and the head meets it
+  at 1.82, 1.73 and 1.22 m/s against its unprotected twin's 4.53, 3.68 and
+  2.01. [docs/motion.md](docs/motion.md#the-protective-fall).
+
 ### Loading
 
 - The OBJ parse cache (#411): a parse's vertices, indices, groups and

@@ -11,7 +11,12 @@
 //   - the felled, POWERED, the same blow past its budget: down;
 //   - the struck, POWERED, a blow to the right upper arm: the arm's muscle
 //     goes weak with its neighbours' and comes back over the recovery time;
-//   - the limp, LIMP from the start: down.
+//   - the limp, LIMP from the start: down;
+//   - three pairs, a protected and an unprotected figure, felled by the
+//     felled's blow from the front (over backwards), from behind and from
+//     the side: all fall; each protected one's hands reach the ground
+//     before its head does, and its head meets the ground slower than its
+//     unprotected twin's.
 
 import ae3d.core
 import ae3d.engine
@@ -95,7 +100,22 @@ struct Stage {
     struck_weak: float               // the struck arm's weakness just after the blow
     struck_near: float               // and its parent's
     struck_torque: float             // the arm's muscle just after the blow, N m
+    fallers: ptr                     // *Motion[FALLERS]: a protected (the default) and an unprotected one each way
+    falls: ptr                       // float[FALLERS * FALL_FIELDS]: per faller, what its fall measured
+    shoved_fell: bool                // whether the shoved ever thought it was falling
 }
+
+const WAYS = 3                       // over backwards, forwards, sideways
+const FALLERS = 6
+
+// A faller's record: the step its hands met the ground, the step its head
+// did and how fast it was coming down, its head's last height.
+const FALL_FIELDS = 5
+const HAND_STEP = 0
+const HEAD_STEP = 1
+const HEAD_SPEED = 2
+const HEAD_LAST = 3
+const WAS_FALLING = 4
 
 figure(e: *Engine, name: string, x: float, s: *Stage, slot: int) -> *Motion {
     r = physics.ragdoll(e, name, core.vec3(x, 0.02, 0.0), 8.0, 8.0, 1.0)
@@ -123,6 +143,20 @@ start(state: ptr, e: *Engine) {
     s.felled = figure(e, "Felled", 0.0, s, 2) as ptr
     s.struck = figure(e, "Struck", 4.0, s, 3) as ptr
     s.limp = figure(e, "Limp", 8.0, s, 4) as ptr
+    fallers = s.fallers as ptr[]
+    record = s.falls as float[]
+    k = 0
+    while k < FALLERS {
+        // Protected at even k, unprotected at odd; a pair a way, 4 m apart.
+        m = figure(e, "Faller", 12.0 + (k as float) * 4.0, s, 5 + k)
+        motion.set_mode(m, motion.POWERED)
+        if k % 2 == 1 { motion.set_protective(m, false) }
+        fallers[k] = m as ptr
+        record[k * FALL_FIELDS + HAND_STEP] = 0.0 - 1.0
+        record[k * FALL_FIELDS + HEAD_STEP] = 0.0 - 1.0
+        record[k * FALL_FIELDS + HEAD_LAST] = 0.0 - 1.0
+        k = k + 1
+    }
     check("an active ragdoll on a dressed ragdoll", s.tracker != null && s.limp != null)
     rigs = s.rigs as ptr[]
     s.tracker_rig = rigs[0]
@@ -133,6 +167,61 @@ start(state: ptr, e: *Engine) {
     motion.set_mode(s.limp as *Motion, motion.LIMP)
     check("the powered ones are powered", physics.ragdoll_is_powered((s.tracker as *Motion).ragdoll))
     s.tracker_low = 10.0
+}
+
+// The felled's blow, to the chest: way 0 from the front (over
+// backwards), 1 from behind, 2 from the side.
+fell(m: *Motion, way: int) {
+    chest = behaviour.object_position(physics.ragdoll_bone(m.ragdoll, human.BONE_SPINE_03))
+    blow = core.vec3(0.0, 0.0, 0.0 - FELL)
+    if way == 1 { blow = core.vec3(0.0, 0.0, FELL) }
+    if way == 2 { blow = core.vec3(FELL, 0.0, 0.0) }
+    motion.hit(m, human.BONE_SPINE_03, chest, blow)
+}
+
+bone_height(m: *Motion, index: int) -> float {
+    return behaviour.object_position(physics.ragdoll_bone(m.ragdoll, index)).y
+}
+
+// The lowest of a capsule on a bone's body: its two ends' (in the body's
+// frame) in the world, less its radius.
+capsule_low(m: *Motion, index: int, a: Vec3, b: Vec3, radius: float) -> float {
+    q = physics.ragdoll_bone_rotation(m.ragdoll, index)
+    p = behaviour.object_position(physics.ragdoll_bone(m.ragdoll, index))
+    ya = p.y + core.quat_apply(q, a).y
+    yb = p.y + core.quat_apply(q, b).y
+    if yb < ya { ya = yb }
+    return ya - radius
+}
+
+// A forearm's lowest point: its capsule, the hand's end at 0.31 m from the
+// elbow (aephysics.human's).
+hand_low(m: *Motion, index: int) -> float {
+    return capsule_low(m, index, core.vec3(0.0 - 0.312649, 0.0, 0.016471), core.vec3(0.0 - 0.032986, 0.0, 0.002732), 0.06)
+}
+
+// The head's lowest point: the neck bone's capsule, which is the head.
+head_low(m: *Motion) -> float {
+    return capsule_low(m, human.BONE_NECK, core.vec3(0.0, 0.0 - 0.21234, 0.0), core.vec3(0.0, 0.0 - 0.08734, 0.0), 0.11)
+}
+
+// A step of a fall watched: the first step a hand is on the ground (its
+// capsule within 2 cm of it), the first the head is, and how fast the head
+// was coming down then.
+watch_fall(m: *Motion, falls: ptr, k: int, steps: int, step: float) {
+    record = falls as float[]
+    at = k * FALL_FIELDS
+    if motion.falling(m) { record[at + WAS_FALLING] = 1.0 }
+    hand = hand_low(m, human.BONE_LOWER_ARM_L)
+    other = hand_low(m, human.BONE_LOWER_ARM_R)
+    if other < hand { hand = other }
+    head = head_low(m)
+    if record[at + HAND_STEP] < 0.0 && hand < 0.02 { record[at + HAND_STEP] = steps as float }
+    if record[at + HEAD_STEP] < 0.0 && head < 0.02 {
+        record[at + HEAD_STEP] = steps as float
+        record[at + HEAD_SPEED] = (record[at + HEAD_LAST] - head) / step
+    }
+    record[at + HEAD_LAST] = head
 }
 
 fixed_update(state: ptr, e: *Engine, step: float) {
@@ -169,6 +258,22 @@ fixed_update(state: ptr, e: *Engine, step: float) {
         s.struck_near = motion.bone_weakness(struck, human.BONE_LOWER_ARM_R)
         s.struck_torque = physics.ragdoll_bone_drive_torque(struck.ragdoll, human.BONE_UPPER_ARM_R)
     }
+    fallers = s.fallers as ptr[]
+    if s.steps == 60 {
+        k = 0
+        while k < FALLERS {
+            fell(fallers[k] as *Motion, k / 2)
+            k = k + 1
+        }
+    }
+    if s.steps > 60 {
+        k = 0
+        while k < FALLERS {
+            watch_fall(fallers[k] as *Motion, s.falls, k, s.steps, step)
+            k = k + 1
+        }
+        if motion.falling(s.shoved as *Motion) { s.shoved_fell = true }
+    }
     if s.steps > 60 {
         off = motion.tracking_error(s.shoved as *Motion, human.BONE_SPINE_03)
         if off > s.shoved_off { s.shoved_off = off }
@@ -185,10 +290,13 @@ main() {
     engine.engine_set_frame_limit(e, 100000)
     light = core.light_sun(core.vec3(0.3, 0.8, 0.5))
     engine.engine_set_light(e, light)
-    rigs_block = calloc(5, 8)
+    rigs_block = calloc(5 + FALLERS, 8)
+    fallers_block = calloc(FALLERS, 8)
+    falls_block = calloc(FALLERS * FALL_FIELDS, 8)
     stage = Stage { tracker: null, tracker_rig: null, shoved: null, felled: null, struck: null, limp: null,
                     rigs: rigs_block, steps: 0, worst_track: 0.0, worst_tilt: 0.0, tracker_low: 0.0, shoved_off: 0.0,
-                    struck_weak: 0.0, struck_near: 0.0, struck_torque: 0.0 }
+                    struck_weak: 0.0, struck_near: 0.0, struck_torque: 0.0,
+                    fallers: fallers_block, falls: falls_block, shoved_fell: false }
     b = engine.behaviour_new("stage", (&stage) as ptr)
     b.start = start
     b.fixed_update = fixed_update
@@ -198,6 +306,8 @@ main() {
         core.light_free(light)
         engine.engine_free(e)
         free(rigs_block)
+        free(fallers_block)
+        free(falls_block)
         return
     }
 
@@ -228,6 +338,32 @@ main() {
     println("  limp: pelvis ${pelvis_height(limp)} m")
     check("LIMP, it falls", pelvis_height(limp) < 0.5)
 
+    check("the shoved never took itself for falling", !stage.shoved_fell)
+    record = stage.falls as float[]
+    fallers = stage.fallers as ptr[]
+    way = 0
+    while way < WAYS {
+        name = "over backwards"
+        if way == 1 { name = "forwards" }
+        if way == 2 { name = "sideways" }
+        at = way * 2 * FALL_FIELDS
+        twin = at + FALL_FIELDS
+        guarded = fallers[way * 2] as *Motion
+        unguarded = fallers[way * 2 + 1] as *Motion
+        println("  ${name}, protected: hands down at step ${record[at + HAND_STEP]}, head at ${record[at + HEAD_STEP]} at ${record[at + HEAD_SPEED]} m/s; unprotected: hands at ${record[twin + HAND_STEP]}, head at ${record[twin + HEAD_STEP]} at ${record[twin + HEAD_SPEED]} m/s")
+        check("${name}: both fall, only the protected one knowing it", pelvis_height(guarded) < 0.5 && pelvis_height(unguarded) < 0.5 &&
+              record[at + WAS_FALLING] > 0.5 && record[twin + WAS_FALLING] < 0.5)
+        check("${name}: the protected one's hands reach the ground before its head", record[at + HAND_STEP] > 0.0 &&
+              (record[at + HEAD_STEP] < 0.0 || record[at + HAND_STEP] < record[at + HEAD_STEP]))
+        check("${name}: and its head meets the ground slower than its twin's", record[at + HEAD_SPEED] < record[twin + HEAD_SPEED])
+        way = way + 1
+    }
+
+    k = 0
+    while k < FALLERS {
+        motion.motion_free(fallers[k] as *Motion)
+        k = k + 1
+    }
     motion.motion_free(stage.tracker as *Motion)
     motion.motion_free(stage.shoved as *Motion)
     motion.motion_free(stage.felled as *Motion)
@@ -236,6 +372,8 @@ main() {
     core.light_free(light)
     engine.engine_free(e)
     free(rigs_block)
+    free(fallers_block)
+    free(falls_block)
     if g_failures == 0 {
         println("motion: all checks passed (${g_checks})")
     } else {
