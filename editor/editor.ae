@@ -451,6 +451,14 @@ var g_first_fps = 0 - 1
 // What someone opening a scene waits for, which no other figure said --
 // first_fps is a rate, and a bounded run's wall time includes its report.
 var g_started = 0.0
+// AE3D_EDITOR_PROFILE=1: a line for each stage of the way to a scene on
+// screen, what it took and when it ended, so the next loading work goes
+// where the time is (#388) rather than where it is guessed to be.
+var g_profile = false
+var g_profile_last = 0.0
+var g_profile_upload = 0.0             // placing models: the renderer's share, seconds
+var g_profile_objects = 0.0            // the scene's objects and rows
+var g_profile_shading = 0.0            // the shading switches on each
 var g_scene_ready = false
 var g_ready_ms = 0.0 - 1.0
 // What the frame costs after the renderer is done with it: reading the
@@ -2523,13 +2531,19 @@ place_model(m: *Model, name: string, kind: int, state: ptr) {
     // first model of every scene it opened.
     // A group -- a transform and nothing to draw -- is the scene's, not
     // the renderer's.
+    t0 = seconds()
     if core.mesh_vertex_count(m.mesh) > 0 {
         backend = viewport_backend()
         core.backend_add_model(&backend, m)
     }
+    t1 = seconds()
     add_object(m, core.text(m.name), kind, state)
     history.history_record(g_history, history.STEP_ADD, m as ptr, 0, 0.0, 0.0)
+    t2 = seconds()
     apply_shading_to(m)
+    g_profile_upload = g_profile_upload + (t1 - t0)
+    g_profile_objects = g_profile_objects + (t2 - t1)
+    g_profile_shading = g_profile_shading + (seconds() - t2)
 }
 
 // The object and everything under it: a group goes with its contents,
@@ -3615,7 +3629,10 @@ render_viewport() {
 // bounded run.
 frame_finished(backend: *Backend) {
     if !g_held { g_frames = g_frames + 1 }
-    if g_scene_ready && g_ready_ms < 0.0 { g_ready_ms = (seconds() - g_started) * 1000.0 }
+    if g_scene_ready && g_ready_ms < 0.0 {
+        g_ready_ms = (seconds() - g_started) * 1000.0
+        profile_mark("first frame of the scene")
+    }
 
     update_stats(backend)
 
@@ -4204,6 +4221,13 @@ env(name: string) -> string {
 // For a read that is only compared and then thrown away. The value comes back
 // on the heap, and env() hands back a literal for an unset one, which must not
 // be freed: this keeps the two apart so neither leaks nor is freed twice.
+profile_mark(stage: string) {
+    if !g_profile { return }
+    now = seconds()
+    println("editor[profile] ${stage} ${number((now - g_profile_last) * 1000.0)} ms (at ${number((now - g_started) * 1000.0)} ms)")
+    g_profile_last = now
+}
+
 env_is(name: string, expected: string) -> bool {
     raw = os.getenv(name)
     if raw == null { return string.equals(expected, "") == 1 }
@@ -5820,11 +5844,13 @@ save_scene() {
 // Loading replaces the scene rather than merging into it, which is what a
 // scene file means, so everything currently in it goes first.
 load_scene() {
+    profile_mark("before the scene")
     loaded = scene.scene_load(g_scene_path)
     if loaded == null {
         say("load failed: ${scene.last_error()}")
         return
     }
+    profile_mark("scene file and its meshes read")
 
     clear_scene()
 
@@ -5857,6 +5883,7 @@ load_scene() {
     // is rather than as a plain mesh: a KIND_MESH row has no water section and
     // nothing drives its waves.
     attachments = scene.scene_load_attachments(g_scene_path, loaded)
+    profile_mark("lights and attachments read")
 
     count = list.size(loaded)
     i = 0
@@ -5906,6 +5933,10 @@ load_scene() {
     }
     scene.attachments_free(attachments)
     list.free(loaded)
+    profile_mark("models placed")
+    if g_profile {
+        println("editor[profile]   of which the renderer ${number(g_profile_upload * 1000.0)} ms, objects ${number(g_profile_objects * 1000.0)} ms, shading ${number(g_profile_shading * 1000.0)} ms")
+    }
 
     // A program writes its lights at the root, with no marker for any of
     // them: each gets one here, so the scene is lit the way the program lit
@@ -5917,11 +5948,14 @@ load_scene() {
         extra = extra + 1
     }
     list.free(spare_beams)
+    profile_mark("light markers placed")
     // The hierarchy once, for every model, and its first root selected:
     // the tree opens closed.
     rebuild_rows()
+    profile_mark("hierarchy rows built")
     if g_visible_count > 0 { select_object(object_of_row(0)) }
     refresh_script_buttons()
+    profile_mark("first selection")
 
     view = scene.scene_load_view(g_scene_path)
     cam = g_camera as *Camera
@@ -5996,6 +6030,7 @@ load_scene() {
 
     history.history_clear(g_history)
     say("loaded ${count} models from ${g_scene_path}")
+    profile_mark("view, sky and settings applied")
 }
 
 clear_scene() {
@@ -6875,6 +6910,8 @@ set_gizmo_mode(mode: int) {
 
 main() {
     g_started = seconds()
+    g_profile_last = g_started
+    g_profile = !env_is("AE3D_EDITOR_PROFILE", "")
     g_frame_limit = limit_from_env()
     // Same switch as the engine, same cost when it is not set.
     g_agent_on = agent.start()
@@ -6936,6 +6973,7 @@ main() {
     // The GPU path's context arrives with the view, so it is built at realize.
     if !g_gpu_path {
         if !start_renderer() { return }
+        profile_mark("renderer started")
         configure_renderer()
     }
 
@@ -7740,7 +7778,9 @@ main() {
             ui.enable_test_server(9222)
         }
 
+        profile_mark("window and widgets built")
         ui.apply_styles(0, sheet)
+        profile_mark("style sheet applied")
         // On the GPU path this happens at realize instead: the models go into
         // a renderer that does not exist until aether-ui hands over a context.
         if g_gpu == 0 {
