@@ -1,5 +1,7 @@
 #include "ae3d.h"
 
+#include <stddef.h>
+
 /* dlfcn.h is POSIX; Windows has no such header, so an unconditional include
  * ended the build before anything else could be tried:
  *
