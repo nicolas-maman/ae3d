@@ -51,7 +51,10 @@ behaviours on the engine, added and removed like any other.
    inverse kinematics and whatever else puts a bone where the frame needs
    it rather than where the clip left it. Both run on a held frame too,
    so an agent looking at a pose looks at a solved one.
-5. **The draw.** The backend renders the scene (below).
+5. **The draw.** The backend renders the scene (below), and over it,
+   after the post chain, the engine's overlay: the text and rectangles
+   the frame's scripts asked for (`ae3d.hud`, [ui.md](ui.md)), which
+   are then cleared for the next frame.
 6. **`late_update`** after the draw, for anything that wants the picture:
    reading the frame back, recording, the agent channel's snapshot.
 
@@ -107,8 +110,9 @@ says what it is for and why it is shaped as it is.
 | Area | Modules |
 |---|---|
 | Foundation | `core` (linear algebra, scene types, camera, the backend vtable), `platform` (the window, input and timing, over GLFW called directly), `engine` (the loop, behaviours, the window), `behaviour` (game objects and components), `input` (actions and axes), `jobs` (the pool) |
-| Rendering | `vulkan`, `gl`, `glapi` (the GL entry points), `capture` (a GL frame read back), `vkmeter` (the frame's light), `vkreadback` (a frame read back, offscreen or captured), `vktexture` (textures made and uploaded), `vkhost` (their buffers and memory; the four on contrib.vulkan.vk), `shaders` (the GLSL), `vkscene` (generated), `rendering` (shading presets), `offscreen` (a frame to a buffer), `sky` (the sun by the hour), `cloudnoise` (the clouds' textures), `water` (a Gerstner sea), `weather` (rain, snow, dust, storm) |
+| Rendering | `vulkan`, `gl`, `glapi` (the GL entry points), `capture` (a GL frame read back), `vkmeter` (the frame's light), `vkreadback` (a frame read back, offscreen or captured), `vktexture` (textures made and uploaded), `vkoverlay` (the HUD recorded into the frame), `vkhost` (their buffers and memory; the five on contrib.vulkan.vk), `shaders` (the GLSL), `vkscene` (generated), `rendering` (shading presets), `offscreen` (a frame to a buffer), `sky` (the sun by the hour), `cloudnoise` (the clouds' textures), `water` (a Gerstner sea), `weather` (rain, snow, dust, storm) |
 | Geometry and assets | `geometry` (the mesh and instance stores the renderers read), `posing` (bone palettes, pose banks), `loader` (OBJ, primitives), `gltf`, `figure` (an animated glTF figure as one game object, and its scene record), `assets` (the Blender export), `blob` (a file as bytes), `picture` (an image file as RGBA: PNG, JPEG, TGA, BMP, and images registered by name), `jpeg` (its JPEG decoder), `inflate` (its PNG's deflate), `png` (a frame as a file), `noise`, `voxel`, `terrain`, `raycast`, `skin`, `anim`, `ik`, `glyphs` (a TrueType font, and its glyphs as a distance-field atlas; [ui.md](ui.md)) |
+| Game UI | `hud` (text and rectangles over the frame in the window's pixels, drawn by both renderers; [ui.md](ui.md)) |
 | Simulation | `physics` (aephysics in the loop: bodies, ragdolls, vehicles, the character controller), `motion` (the active ragdoll: muscles, balance, the protective fall, getting up), `handover` (a horde's struck zombies handed to a pool of active ragdolls and taken back), `crowd` (pose banks, the device crowd), `horde` (the crowd's kernels), `nav` (the flow field), `ecs` (dense columns for crowds too large to be objects) |
 | Multiplayer | `net` (transports, snapshots as deltas, relevance, prediction and reconciliation, events, objects created mid-game), `nethorde` (the horde simulated on every peer, not sent) |
 | Tooling | `agent` (the channel's requests), `channel` (its socket and thread), `probe` (the channel, asking side), `replay` (a recorded session asked again), `script` (a script as a shared library), `scene` (scene files), `history` (undo) |

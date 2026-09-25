@@ -1,7 +1,8 @@
 // ae3d.vkhost -- what the Vulkan backend's Aether modules make on the
-// frame's device (#402): memory of a kind, and buffers the host reads,
-// mapped for good. ae3d.vkmeter's readings and ae3d.vkreadback's frames are
-// both copied into these.
+// frame's device (#402): memory of a kind, and buffers the host reads or
+// writes, mapped for good. ae3d.vkmeter's readings and ae3d.vkreadback's
+// frames are copied into the first kind; ae3d.vkoverlay's vertices, and its
+// atlas on the way to the device, are written into the second.
 //
 // The device is the C backend's (native/gpu/vulkan.c); `device()` is it,
 // with contrib.vulkan.vk's commands loaded through its own entry points the
@@ -10,7 +11,7 @@
 import contrib.vulkan.vk
 
 exports (
-    HostBuffer, device, memory_type, allocate, host_buffer, upload_buffer, host_buffer_free
+    HostBuffer, device, memory_type, allocate, host_buffer, upload_buffer, mapped_buffer, host_buffer_free
 )
 
 extern ae3d_vk_physical_device_handle() -> ptr
@@ -77,16 +78,24 @@ allocate(requirements: *VkMemoryRequirements, wanted: int) -> ptr {
 // halved the frame rate), or plain coherent where a device has no cached
 // kind. Null when the device could not make one.
 host_buffer(bytes: int) -> *HostBuffer {
-    return mapped_buffer(bytes, vk.BUFFER_USAGE_TRANSFER_DST_BIT)
+    return make_buffer(bytes, vk.BUFFER_USAGE_TRANSFER_DST_BIT, true)
 }
 
 // A buffer `bytes` long the host writes and a copy reads from: what an
 // upload is staged in.
 upload_buffer(bytes: int) -> *HostBuffer {
-    return mapped_buffer(bytes, vk.BUFFER_USAGE_TRANSFER_SRC_BIT)
+    return make_buffer(bytes, vk.BUFFER_USAGE_TRANSFER_SRC_BIT, false)
 }
 
+// A buffer `bytes` long the host writes and the device reads, for `usage`
+// (vertices, or a copy's source): coherent memory, not cached, since the
+// CPU only ever writes it front to back. Null when the device could not
+// make one.
 mapped_buffer(bytes: int, usage: int) -> *HostBuffer {
+    return make_buffer(bytes, usage, false)
+}
+
+make_buffer(bytes: int, usage: int, cached: bool) -> *HostBuffer {
     d = device()
     ci = calloc(1, sizeof(VkBufferCreateInfo)) as *VkBufferCreateInfo
     ci.sType = vk.STRUCTURE_TYPE_BUFFER_CREATE_INFO
@@ -106,7 +115,7 @@ mapped_buffer(bytes: int, usage: int) -> *HostBuffer {
     needs = calloc(1, sizeof(VkMemoryRequirements)) as *VkMemoryRequirements
     vk.vkGetBufferMemoryRequirements(d, b.buffer, needs as ptr)
     visible = vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT
-    b.memory = allocate(needs, visible | vk.MEMORY_PROPERTY_HOST_CACHED_BIT)
+    if cached { b.memory = allocate(needs, visible | vk.MEMORY_PROPERTY_HOST_CACHED_BIT) }
     if b.memory == null { b.memory = allocate(needs, visible) }
     free(needs as ptr)
     if b.memory == null {

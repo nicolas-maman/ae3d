@@ -24,6 +24,8 @@ import ae3d.geometry
 import ae3d.glapi
 import ae3d.offscreen
 import ae3d.picture
+import ae3d.hud
+import ae3d.glyphs
 
 exports (
     GLRenderer, ProgramSlots, TextureEntry, Skybox,
@@ -33,7 +35,7 @@ exports (
     renderer_draw_calls, renderer_instance_count,
     renderer_set_clear_color, renderer_set_fxaa, renderer_set_bloom, renderer_set_msaa, renderer_set_taa, renderer_taa,
     renderer_set_render_scale, renderer_render_scale,
-    renderer_set_target,
+    renderer_set_target, renderer_set_overlay,
     renderer_set_bloom_params, renderer_set_bloom_intensity, renderer_bloom_intensity,
     renderer_set_post, renderer_set_fog, renderer_fog, renderer_set_clouds, renderer_set_sky_overcast,
     renderer_set_ssao, renderer_ssao,
@@ -1695,6 +1697,20 @@ struct GLRenderer {
     screen_vao: int
     screen_vbo: int
     screen_mesh: ptr
+    // The overlay drawn over each frame (an ae3d.hud, null for none),
+    // and what drawing it takes, made the first frame it has something:
+    // the program and its two uniforms, a vertex array over one buffer
+    // refilled each frame, the atlas as a one-channel texture and which of
+    // the overlay's atlases that is.
+    overlay: ptr
+    overlay_program: int
+    overlay_screen: int
+    overlay_style: int
+    overlay_vao: int
+    overlay_vbo: int
+    overlay_texture: int
+    overlay_serial: int
+    overlay_failed: bool
 
     screen_width: int
     screen_height: int
@@ -1808,6 +1824,7 @@ backend(r: *GLRenderer) -> Backend {
         remove_light: renderer_remove_light as fn(ptr, ptr),
         draw_calls: renderer_draw_calls as fn(ptr) -> int,
         frame_pixels: renderer_frame_pixels as fn(ptr) -> ptr,
+        set_overlay: renderer_set_overlay as fn(ptr, ptr),
         cleanup: renderer_cleanup as fn(ptr)
     }
 }
@@ -3081,6 +3098,106 @@ renderer_set_target(r: *GLRenderer, target: ptr) {
     r.target = target
 }
 
+// --- the overlay (ae3d.hud, #449) ---------------------------------------------------------
+
+// What is drawn over every frame from now on: an ae3d.hud, or null.
+renderer_set_overlay(r: *GLRenderer, o: ptr) {
+    r.overlay = o
+}
+
+// The program and the vertex array, the first time there is something to
+// draw; false for good when the program would not build (said once, by
+// compile_program).
+overlay_ready(r: *GLRenderer) -> bool {
+    if r.overlay_failed { return false }
+    if r.overlay_program != 0 { return true }
+    r.overlay_program = compile_program(shaders.VERTEX_OVERLAY, shaders.FRAGMENT_OVERLAY, "overlay")
+    if r.overlay_program == 0 {
+        r.overlay_failed = true
+        return false
+    }
+    r.overlay_screen = gl_uniform_location(r.overlay_program, "overlayScreen")
+    r.overlay_style = gl_uniform_location(r.overlay_program, "overlayStyle")
+    use_program(r, r.overlay_program)
+    gl_uniform_int(gl_uniform_location(r.overlay_program, "glyphAtlas"), 0)
+    r.overlay_vao = gl_vao_create()
+    r.overlay_vbo = gl_buffer_create()
+    gl_vao_bind(r.overlay_vao)
+    glapi.glBindBuffer(glapi.ARRAY_BUFFER as uint32, r.overlay_vbo as uint32)
+    // Pixel, atlas place, colour, threshold: hud.VERTEX_FLOATS floats.
+    attrib(0, 2, hud.VERTEX_BYTES, 0)
+    attrib(1, 2, hud.VERTEX_BYTES, 8)
+    attrib(2, 4, hud.VERTEX_BYTES, 16)
+    attrib(3, 1, hud.VERTEX_BYTES, 32)
+    gl_vao_bind(0)
+    return true
+}
+
+// The overlay's atlas as a texture: one byte a texel, the field, filtered
+// and clamped. Uploaded again only when the overlay has a new one; an
+// overlay of rectangles alone has none, and the default texture stands in
+// for the sampler it never reads from.
+overlay_texture_for(r: *GLRenderer, o: *Hud) -> int {
+    a = hud.atlas(o)
+    if a == null { return r.default_texture }
+    serial = hud.atlas_serial(o)
+    if r.overlay_texture != 0 && r.overlay_serial == serial { return r.overlay_texture }
+    gl_texture_delete(r.overlay_texture)
+    texture = new_texture(glapi.TEXTURE_2D)
+    glapi.glTexImage2D(glapi.TEXTURE_2D as uint32, 0, glapi.R8, a.width, a.height, 0, glapi.RED as uint32,
+                       glapi.UNSIGNED_BYTE as uint32, a.pixels)
+    texture_params(glapi.TEXTURE_2D, glapi.CLAMP_TO_EDGE, false, glapi.LINEAR, glapi.LINEAR)
+    glapi.glBindTexture(glapi.TEXTURE_2D as uint32, 0)
+    r.overlay_texture = texture
+    r.overlay_serial = serial
+    return texture
+}
+
+// Everything the overlay holds this frame, in one draw over the output at
+// the window's size: blended, no depth, no culling. The destination's
+// alpha is kept (one, over a frame) rather than scaled by what is drawn
+// over it, so a read of the frame sees the picture opaque.
+draw_overlay(r: *GLRenderer) {
+    o = r.overlay as *Hud
+    count = hud.vertex_count(o)
+    if count == 0 || !overlay_ready(r) { return }
+    if r.viewport_width <= 0 || r.viewport_height <= 0 { return }
+    texture = overlay_texture_for(r, o)
+    bind_output(r)
+    gl_viewport(0, 0, r.viewport_width, r.viewport_height)
+    set_depth_test(r, false)
+    gl_set_depth_mask(0)
+    set_face_culling(r, false)
+    set_wireframe(r, false)
+    set_blend(r, true)
+    glapi.glBlendFuncSeparate(glapi.SRC_ALPHA as uint32, glapi.ONE_MINUS_SRC_ALPHA as uint32,
+                              glapi.ONE as uint32, glapi.ONE_MINUS_SRC_ALPHA as uint32)
+    use_program(r, r.overlay_program)
+    // Pixels, y down, to GL's clip space, whose y is up.
+    glapi.glUniform4f(r.overlay_screen, (2.0 / (r.viewport_width as float)) as f32,
+                      (0.0 - 2.0 / (r.viewport_height as float)) as f32, (0.0 - 1.0) as f32, 1.0 as f32)
+    glapi.glUniform4f(r.overlay_style, 0.0 as f32, 0.0 as f32, 0.0 as f32, 0.0 as f32)
+    gl_texture_bind(0, texture)
+    gl_vao_bind(r.overlay_vao)
+    buffer_data(glapi.ARRAY_BUFFER, r.overlay_vbo, count * hud.VERTEX_BYTES, hud.vertex_data(o), glapi.STREAM_DRAW)
+    gl_draw_arrays(0, count)
+    gl_vao_bind(0)
+    r.last_draw_calls = r.last_draw_calls + 1
+    glapi.glBlendFunc(glapi.SRC_ALPHA as uint32, glapi.ONE_MINUS_SRC_ALPHA as uint32)
+    set_depth_test(r, true)
+    gl_set_depth_mask(1)
+}
+
+// The overlay's GL objects, with the context that made them.
+overlay_cleanup(r: *GLRenderer) {
+    if r.overlay_program != 0 { gl_program_delete(r.overlay_program) ; r.overlay_program = 0 }
+    if r.overlay_vao != 0 { gl_vao_delete(r.overlay_vao) ; r.overlay_vao = 0 }
+    if r.overlay_vbo != 0 { gl_buffer_delete(r.overlay_vbo) ; r.overlay_vbo = 0 }
+    if r.overlay_texture != 0 { gl_texture_delete(r.overlay_texture) ; r.overlay_texture = 0 }
+    r.overlay_serial = 0
+    r.overlay_failed = false
+}
+
 bind_output(r: *GLRenderer) {
     if r.target != null {
         offscreen.target_bind(r.target)
@@ -3347,6 +3464,8 @@ renderer_render(r: *GLRenderer, cam: *Camera, light: *Light) {
 
     gl_passtimer_begin(r.pass_timer, PASS_POST)
     if post_active { resolve_post_processing(r, cam, view_projection, unjittered) }
+    // Over the finished picture: after the composite, into what is shown.
+    draw_overlay(r)
     r.prev_vp = unjittered
     r.prev_vp_valid = true
     // Every model's matrix of this frame is last frame's now.
@@ -4547,6 +4666,7 @@ renderer_cleanup(r: *GLRenderer) {
         gl_program_delete(r.passthrough_program)
         r.passthrough_program = 0
     }
+    overlay_cleanup(r)
 
     r.initialized = false
 }

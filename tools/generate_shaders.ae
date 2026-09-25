@@ -1204,6 +1204,14 @@ output(l: ptr, path: string, text: string) {
     list.add_raw(l, output_ptr(o))
 }
 
+// An OpenGL source written for both renderers, as Vulkan compiles it: the
+// version line alone changes.
+at_450(text: string) -> string {
+    vulkan = string.replace(text, "#version 330 core", "#version 450")
+    string.free(text)
+    return vulkan
+}
+
 // `scene_vk.vert` -> `ae3d_vk_scene_vert_spv`.
 array_name(name: string) -> string {
     a = string.replace_all(name, "_vk.", "_")
@@ -1305,6 +1313,12 @@ main() {
         output(written, d.name, code)
         i = i + 1
     }
+    // The overlay carries its own layout as well -- two vec4s of push
+    // constants and its atlas at binding 0, nothing from the scene block --
+    // and its one source is written for both renderers: the same text at
+    // #version 450, where VULKAN is defined and picks the Vulkan half.
+    output(written, "overlay_vk.vert", at_450(block(source, "VERTEX_OVERLAY")))
+    output(written, "overlay_vk.frag", at_450(block(source, "FRAGMENT_OVERLAY")))
 
     light_placed = list.new()
     light_stride = 0

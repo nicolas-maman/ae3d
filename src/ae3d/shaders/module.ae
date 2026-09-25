@@ -14,7 +14,7 @@ exports (
     VERTEX_DEPTH, FRAGMENT_DEPTH,
     VERTEX_SKYBOX, FRAGMENT_SKYBOX,
     VERTEX_SCREEN, FRAGMENT_FXAA, FRAGMENT_BLOOM, FRAGMENT_PASSTHROUGH, FRAGMENT_SSR,
-    FRAGMENT_TAA, FRAGMENT_SSAO, default_shader, water_shader
+    FRAGMENT_TAA, FRAGMENT_SSAO, VERTEX_OVERLAY, FRAGMENT_OVERLAY, default_shader, water_shader
 )
 
 const VERTEX_DEFAULT = <<GLSL_END
@@ -3525,7 +3525,91 @@ void main() {
 }
 GLSL_END
 
+// The overlay: text and rectangles drawn over the finished frame in the
+// window's pixels (ae3d.hud, #449). One source for both renderers:
+// OpenGL compiles it as it is, and tools/generate_shaders.ae compiles it
+// for Vulkan at #version 450, where glslang defines VULKAN -- which picks
+// the push constants the frame's two numbers arrive in there, and the
+// explicit varying locations Vulkan needs and a 330 context refuses.
+//
+// A vertex is its pixel, its place in the glyph atlas, its colour and the
+// distance field's threshold: 0.5 the glyph's own outline, lower a glyph
+// grown outward (an outline drawn under the text), below zero a solid
+// rectangle, which takes no ink from the atlas.
+const VERTEX_OVERLAY = <<GLSL_END
+#version 330 core
 
+#ifdef VULKAN
+#define VARYING(n) layout(location = n)
+layout(push_constant) uniform OverlayFrame {
+    vec4 overlayScreen;
+    vec4 overlayStyle;
+};
+#else
+#define VARYING(n)
+uniform vec4 overlayScreen;
+uniform vec4 overlayStyle;
+#endif
+
+layout(location = 0) in vec2 inPixel;
+layout(location = 1) in vec2 inAtlas;
+layout(location = 2) in vec4 inColour;
+layout(location = 3) in float inEdge;
+
+VARYING(0) out vec2 atlasCoord;
+VARYING(1) out vec4 colour;
+VARYING(2) out float edge;
+
+void main() {
+    // Pixels, y down from the top-left, to clip space: overlayScreen is
+    // (2/width, -2/height, -1, 1) on OpenGL, whose clip y is up, and
+    // (2/width, 2/height, -1, -1) on Vulkan, whose clip y is down.
+    gl_Position = vec4(inPixel * overlayScreen.xy + overlayScreen.zw, 0.0, 1.0);
+    atlasCoord = inAtlas;
+    colour = inColour;
+    edge = inEdge;
+}
+GLSL_END
+
+const FRAGMENT_OVERLAY = <<GLSL_END
+#version 330 core
+
+#ifdef VULKAN
+#define VARYING(n) layout(location = n)
+layout(push_constant) uniform OverlayFrame {
+    vec4 overlayScreen;
+    vec4 overlayStyle;
+};
+layout(set = 0, binding = 0) uniform sampler2D glyphAtlas;
+#else
+#define VARYING(n)
+uniform vec4 overlayScreen;
+uniform vec4 overlayStyle;
+uniform sampler2D glyphAtlas;
+#endif
+
+VARYING(0) in vec2 atlasCoord;
+VARYING(1) in vec4 colour;
+VARYING(2) in float edge;
+
+layout(location = 0) out vec4 FragColor;
+
+void main() {
+    // The field's value, and how much it changes across one screen pixel:
+    // the edge is blended over that pixel whatever size the glyph is drawn
+    // at, which is what keeps text sharp at 12 px and at 120 from the one
+    // atlas. Read for a rectangle too, outside any branch, so the
+    // derivative is taken where every pixel of the quad takes it.
+    float d = texture(glyphAtlas, atlasCoord).r;
+    float w = max(fwidth(d) * 0.5, 1.0 / 255.0);
+    float ink = edge < 0.0 ? 1.0 : smoothstep(edge - w, edge + w, d);
+    vec3 rgb = colour.rgb;
+    // A target that encodes what it is given (an _SRGB swapchain) gets the
+    // colour decoded first, so it shows as the display value asked for.
+    if (overlayStyle.x > 0.5) rgb = pow(rgb, vec3(2.2));
+    FragColor = vec4(rgb, colour.a * ink);
+}
+GLSL_END
 
 default_shader() -> Shader {
     return core.shader_new(VERTEX_DEFAULT, FRAGMENT_DEFAULT)

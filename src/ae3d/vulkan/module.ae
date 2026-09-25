@@ -19,6 +19,7 @@ import ae3d.skin
 import ae3d.shaders
 import ae3d.vkmeter
 import ae3d.vkreadback
+import ae3d.vkoverlay
 import ae3d.vktexture
 import ae3d.posing
 import ae3d.geometry
@@ -39,7 +40,7 @@ exports (
     skybox_create, skybox_free,
     offscreen_pixels, offscreen_width, offscreen_height,
     request_capture, capture_ready, capture_pixels, capture_width, capture_height, snapshot,
-    live_shadow_targets, renderer_add_model, renderer_remove_model
+    live_shadow_targets, renderer_add_model, renderer_remove_model, renderer_set_overlay
 )
 
 extern ae3d_vk_available() -> int
@@ -417,6 +418,7 @@ backend(r: *VKRenderer) -> Backend {
         remove_light: renderer_remove_light as fn(ptr, ptr),
         draw_calls: renderer_draw_calls as fn(ptr) -> int,
         frame_pixels: vtable_frame_pixels as fn(ptr) -> ptr,
+        set_overlay: renderer_set_overlay as fn(ptr, ptr),
         cleanup: renderer_cleanup as fn(ptr)
     }
 }
@@ -482,6 +484,13 @@ vtable_set_shadows(r: *VKRenderer, on: int) {
 
 vtable_frame_pixels(r: *VKRenderer) -> ptr {
     return vkreadback.offscreen_pixels()
+}
+
+// What is drawn over every frame from now on (an ae3d.hud, or null):
+// recorded by ae3d.vkoverlay after the post chain, from the device's one
+// frame, so it is the process's rather than this renderer's.
+renderer_set_overlay(r: *VKRenderer, o: ptr) {
+    vkoverlay.set_overlay(o)
 }
 
 renderer_set_shadows(r: *VKRenderer, on: bool) {

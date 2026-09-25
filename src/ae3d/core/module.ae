@@ -78,7 +78,7 @@ exports (
     backend_add_model, backend_remove_model, backend_load_texture, backend_set_skybox,
     backend_update_viewport, backend_set_post, backend_set_clear_color, backend_set_shadows,
     backend_set_fog, backend_set_shadow_distance, Fog, fog_none, fog_distance,
-    backend_set_render_scale,
+    backend_set_render_scale, backend_set_overlay,
     backend_shadows,
     backend_add_light, backend_remove_light, backend_draw_calls, backend_frame_pixels,
     backend_cleanup, Camera, FrustumPlane, Frustum, camera_new,
@@ -627,6 +627,11 @@ struct Backend {
     remove_light:    fn(ptr, ptr)
     draw_calls:      fn(ptr) -> int
     frame_pixels:    fn(ptr) -> ptr
+    // The text and rectangles drawn over each frame after its post chain
+    // (an ae3d.hud, as a pointer: core cannot name the module's type),
+    // null for none. The renderer draws what it holds and leaves clearing
+    // it to whoever fills it.
+    set_overlay:     fn(ptr, ptr)
     cleanup:         fn(ptr)
 }
 
@@ -1194,6 +1199,12 @@ backend_set_post(b: *Backend, fxaa: bool, bloom: bool, threshold: float, intensi
     bl = 0
     if bloom { bl = 1 }
     b.set_post(b.state, fx, bl, threshold, intensity)
+}
+
+// What the backend draws over every frame from now on: an ae3d.hud,
+// or null for nothing.
+backend_set_overlay(b: *Backend, overlay: ptr) {
+    b.set_overlay(b.state, overlay)
 }
 
 backend_cleanup(b: *Backend) {

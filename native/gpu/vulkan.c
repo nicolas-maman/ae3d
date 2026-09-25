@@ -66,13 +66,19 @@
     X(vkCreateInstance) \
     X(vkEnumerateInstanceExtensionProperties)
 
-/* An Aether module's part of the frame (#402). */
-#define AE3D_VK_HOOKS 4
+/* An Aether module's part of the frame (#402), and when in the frame's
+   end it records: what measures the scene, then what draws over it, then
+   what reads the finished picture (AE3D_VK_STAGE_*). */
+#define AE3D_VK_HOOKS 8
+#define AE3D_VK_STAGE_MEASURE 0
+#define AE3D_VK_STAGE_DRAW 1
+#define AE3D_VK_STAGE_READ 2
 typedef struct {
     void (*record)(void *);
     void (*collect)(void *);
     void (*release)(void *);
     void *context;
+    int stage;
 } ae3d_vk_hooks;
 
 /* Ray queries (VK_KHR_ray_query, VK_KHR_acceleration_structure): loaded
@@ -1488,16 +1494,31 @@ static void ae3d_vk_destroy_swapchain(void) {
    Aether module registers what it records into the frame and when, and
    reads the handles it records with. Everything here is the C state's; the
    module owns what it makes with them and frees it in its release. Hooks
-   run in the order they were added; 0 when there is no room for another. */
-int ae3d_vk_add_frame_hooks(void *record, void *collect, void *release, void *context) {
+   run by their stage -- the meter's reading of the scene (MEASURE), then
+   the overlay drawn over it (DRAW), then the readback of what is shown
+   (READ) -- and in the order they were added within one; 0 when there is
+   no room for another. A hook added without a stage reads. */
+int ae3d_vk_add_frame_hooks_at(int stage, void *record, void *collect, void *release, void *context) {
     ae3d_vk_hooks *h;
+    int at;
     if (vk.hook_count >= AE3D_VK_HOOKS) return 0;
-    h = &vk.hooks[vk.hook_count++];
+    at = vk.hook_count;
+    while (at > 0 && vk.hooks[at - 1].stage > stage) {
+        vk.hooks[at] = vk.hooks[at - 1];
+        at--;
+    }
+    vk.hook_count++;
+    h = &vk.hooks[at];
     h->record = (void (*)(void *))record;
     h->collect = (void (*)(void *))collect;
     h->release = (void (*)(void *))release;
     h->context = context;
+    h->stage = stage;
     return 1;
+}
+
+int ae3d_vk_add_frame_hooks(void *record, void *collect, void *release, void *context) {
+    return ae3d_vk_add_frame_hooks_at(AE3D_VK_STAGE_READ, record, collect, release, context);
 }
 
 /* Whether the backend is up, and a frame slot's last submission waited
@@ -1524,6 +1545,23 @@ int ae3d_vk_frames_in_flight(void) { return AE3D_VK_FRAMES; }
 void *ae3d_vk_frame_image(void) {
     if (!vk.images) return NULL;
     return (void *)(vk.offscreen ? vk.images[0] : vk.images[vk.image_index]);
+}
+/* Its view and format, for a hook that draws into it (ae3d.vkoverlay):
+   the image is in the layout the last pass left it -- presenting, or
+   transfer-source offscreen -- and a pass of the hook's own loads it. */
+void *ae3d_vk_frame_view(void) {
+    if (!vk.image_views) return NULL;
+    return (void *)(vk.offscreen ? vk.image_views[0] : vk.image_views[vk.image_index]);
+}
+int ae3d_vk_frame_format(void) { return (int)vk.color_format; }
+/* The overlay's shaders, compiled from ae3d.shaders by
+   tools/generate_shaders.ae into vulkan_shaders.h with the rest: the
+   vertex stage for 0, the fragment for 1, and their sizes in bytes. */
+const void *ae3d_vk_overlay_code(int stage) {
+    return stage == 0 ? (const void *)ae3d_vk_overlay_vert_spv : (const void *)ae3d_vk_overlay_frag_spv;
+}
+int ae3d_vk_overlay_code_size(int stage) {
+    return stage == 0 ? (int)sizeof(ae3d_vk_overlay_vert_spv) : (int)sizeof(ae3d_vk_overlay_frag_spv);
 }
 /* (Its size: ae3d_vk_frame_width and _height, below.) Whether the frame's
    image can be copied from: an offscreen target always
@@ -6124,8 +6162,9 @@ int ae3d_vk_frame_end(void) {
         vk.pass_open = 0;
     }
 
-    // The Aether modules' parts: the frame read back (ae3d.vkreadback), its
-    // light measured (ae3d.vkmeter). An offscreen frame's image is left in
+    // The Aether modules' parts, by stage: its light measured (ae3d.vkmeter),
+    // the overlay drawn over it (ae3d.vkoverlay), the frame read back
+    // (ae3d.vkreadback). An offscreen frame's image is left in
     // transfer-source layout by its pass; a windowed one's each moves from
     // presenting and back.
     {

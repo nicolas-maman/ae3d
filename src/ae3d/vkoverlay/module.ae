@@ -1,0 +1,721 @@
+// ae3d.vkoverlay -- the overlay (ae3d.hud: text and rectangles in the
+// window's pixels, #449) drawn into the Vulkan frame, from Aether on
+// contrib.vulkan.vk (#402).
+//
+// The C backend owns the device, the frame's command buffer and the image
+// the frame ends in; this module owns what drawing over that image takes --
+// a render pass that loads it and leaves it in the layout it found it in,
+// a framebuffer per swapchain image, the pipeline (ae3d.shaders'
+// VERTEX_OVERLAY and FRAGMENT_OVERLAY, compiled into vulkan_shaders.h by
+// tools/generate_shaders.ae), the glyph atlas as a one-channel image, and a
+// buffer of vertices per frame in flight -- and frees it all when the
+// swapchain goes, remaking it at the next frame that has something to draw.
+//
+// It reaches the frame through the hooks vulkan.c calls, at the draw stage:
+// after the meter has read the scene's light (a menu does not set the
+// scene's exposure) and before the readback copies the frame out (a capture
+// is of what is shown). The pass is one draw: the overlay's vertices, in
+// the order they were asked for, blended over the frame with no depth.
+//
+// The atlas goes up through a staging buffer copied in the same command
+// buffer, ahead of the pass; the staging buffer is freed when that frame's
+// fence has passed. A new atlas (hud.set_font) waits for the device to
+// be idle before the old one goes, since frames in flight still sample it:
+// a font is changed once, not every frame.
+
+import contrib.vulkan.vk
+import ae3d.vkhost
+import ae3d.hud
+import ae3d.glyphs
+
+exports (
+    set_overlay
+)
+
+extern ae3d_vk_add_frame_hooks_at(stage: int, record: ptr, collect: ptr, release: ptr, context: ptr) -> int
+extern ae3d_vk_device_handle() -> ptr
+extern ae3d_vk_frame_commands() -> ptr
+extern ae3d_vk_frame_slot() -> int
+extern ae3d_vk_frame_view() -> ptr
+extern ae3d_vk_frame_format() -> int
+extern ae3d_vk_frame_width() -> int
+extern ae3d_vk_frame_height() -> int
+extern ae3d_vk_frame_offscreen() -> int
+extern ae3d_vk_overlay_code(stage: int) -> ptr
+extern ae3d_vk_overlay_code_size(stage: int) -> int
+// This module's own hooks, by their C names, for their addresses.
+extern ae3d_vkoverlay_record(context: ptr)
+extern ae3d_vkoverlay_collect(context: ptr)
+extern ae3d_vkoverlay_release(context: ptr)
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern memcpy(dst: ptr, src: ptr, n: long) -> ptr
+
+const MAX_FRAMES = 4                 // at least vulkan.c's AE3D_VK_FRAMES
+const MAX_VIEWS = 8                  // swapchain images, a framebuffer each
+const STAGE_DRAW = 1                 // vulkan.c's AE3D_VK_STAGE_DRAW
+const PUSH_BYTES = 32                // overlayScreen and overlayStyle, two vec4s
+
+struct Painter {
+    hooked: bool
+    overlay: ptr                     // *Hud, what is drawn; null for nothing
+    device: ptr                      // the device what follows was made on; null for none
+    format: int                      // the frame's format, and its layout, the pass was made for
+    offscreen: int
+    pass: ptr                        // VkRenderPass
+    set_layout: ptr                  // VkDescriptorSetLayout
+    pipeline_layout: ptr
+    pipeline: ptr
+    pool: ptr                        // VkDescriptorPool
+    set: ptr                         // VkDescriptorSet: the atlas at binding 0
+    sampler: ptr
+    atlas_image: ptr
+    atlas_memory: ptr
+    atlas_view: ptr
+    atlas_serial: int                // the overlay's atlas on the device; -1 for none yet
+    staging: ptr                     // *HostBuffer, an atlas on its way
+    staging_slot: int
+    views: ptr                       // ptr[MAX_VIEWS]: the frame views with a framebuffer
+    framebuffers: ptr                // ptr[MAX_VIEWS]
+    buffers: ptr                     // *HostBuffer[MAX_FRAMES], the vertices
+}
+
+var g_painter: ptr = null
+
+painter() -> *Painter {
+    if g_painter == null {
+        p = calloc(1, sizeof(Painter)) as *Painter
+        p.views = calloc(MAX_VIEWS, 8)
+        p.framebuffers = calloc(MAX_VIEWS, 8)
+        p.buffers = calloc(MAX_FRAMES, 8)
+        p.atlas_serial = 0 - 1
+        p.staging_slot = 0 - 1
+        g_painter = p as ptr
+    }
+    return g_painter as *Painter
+}
+
+// What is drawn over every frame from now on (an ae3d.hud), or null
+// for nothing. The hooks go in the first time there is one.
+set_overlay(o: ptr) {
+    p = painter()
+    p.overlay = o
+    if o != null && !p.hooked {
+        p.hooked = true
+        ae3d_vk_add_frame_hooks_at(STAGE_DRAW, (&ae3d_vkoverlay_record) as ptr, (&ae3d_vkoverlay_collect) as ptr,
+                                   (&ae3d_vkoverlay_release) as ptr, null)
+    }
+}
+
+// One handle out of a create call's out-parameter.
+handle_of(out: ptr) -> ptr {
+    h = (out as ptr[])[0]
+    free(out)
+    return h
+}
+
+// --- what lasts with the device: the pass, the pipeline, the atlas' sampler and set ----------------
+
+make_pass(p: *Painter, d: ptr) -> bool {
+    layout = vk.IMAGE_LAYOUT_PRESENT_SRC_KHR
+    if p.offscreen == 1 { layout = vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL }
+    attachment = calloc(1, sizeof(VkAttachmentDescription)) as *VkAttachmentDescription
+    attachment.format = p.format
+    attachment.samples = vk.SAMPLE_COUNT_1_BIT
+    attachment.loadOp = vk.ATTACHMENT_LOAD_OP_LOAD
+    attachment.storeOp = vk.ATTACHMENT_STORE_OP_STORE
+    attachment.stencilLoadOp = vk.ATTACHMENT_LOAD_OP_DONT_CARE
+    attachment.stencilStoreOp = vk.ATTACHMENT_STORE_OP_DONT_CARE
+    attachment.initialLayout = layout
+    attachment.finalLayout = layout
+    colour = calloc(1, sizeof(VkAttachmentReference)) as *VkAttachmentReference
+    colour.attachment = 0
+    colour.layout = vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+    subpass = calloc(1, sizeof(VkSubpassDescription)) as *VkSubpassDescription
+    subpass.pipelineBindPoint = vk.PIPELINE_BIND_POINT_GRAPHICS
+    subpass.colorAttachmentCount = 1
+    subpass.pColorAttachments = colour as ptr
+    // In: after everything before it -- the last pass's writes, and the
+    // meter's blits reading the image and putting it back to presenting.
+    // Out: what it wrote is copied by the readback after it, and presented.
+    deps = calloc(2, sizeof(VkSubpassDependency))
+    into = deps as *VkSubpassDependency
+    into.srcSubpass = vk.SUBPASS_EXTERNAL
+    into.dstSubpass = 0
+    into.srcStageMask = vk.PIPELINE_STAGE_ALL_COMMANDS_BIT
+    into.srcAccessMask = vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+    into.dstStageMask = vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+    into.dstAccessMask = vk.ACCESS_COLOR_ATTACHMENT_READ_BIT | vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+    out_of = (deps + sizeof(VkSubpassDependency)) as *VkSubpassDependency
+    out_of.srcSubpass = 0
+    out_of.dstSubpass = vk.SUBPASS_EXTERNAL
+    out_of.srcStageMask = vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+    out_of.srcAccessMask = vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+    out_of.dstStageMask = vk.PIPELINE_STAGE_TRANSFER_BIT | vk.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT
+    out_of.dstAccessMask = vk.ACCESS_TRANSFER_READ_BIT
+    info = calloc(1, sizeof(VkRenderPassCreateInfo)) as *VkRenderPassCreateInfo
+    info.sType = vk.STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO
+    info.attachmentCount = 1
+    info.pAttachments = attachment as ptr
+    info.subpassCount = 1
+    info.pSubpasses = subpass as ptr
+    info.dependencyCount = 2
+    info.pDependencies = deps
+    out = calloc(1, 8)
+    r = vk.vkCreateRenderPass(d, info as ptr, null, out)
+    p.pass = handle_of(out)
+    free(info as ptr)
+    free(deps)
+    free(subpass as ptr)
+    free(colour as ptr)
+    free(attachment as ptr)
+    return r == vk.SUCCESS
+}
+
+shader_module(d: ptr, stage: int) -> ptr {
+    info = calloc(1, sizeof(VkShaderModuleCreateInfo)) as *VkShaderModuleCreateInfo
+    info.sType = vk.STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO
+    info.codeSize = ae3d_vk_overlay_code_size(stage)
+    info.pCode = ae3d_vk_overlay_code(stage)
+    out = calloc(1, 8)
+    r = vk.vkCreateShaderModule(d, info as ptr, null, out)
+    free(info as ptr)
+    m = handle_of(out)
+    if r != vk.SUCCESS { return null }
+    return m
+}
+
+// The atlas's sampler, the set that names it and their layouts.
+make_layouts(p: *Painter, d: ptr) -> bool {
+    binding = calloc(1, sizeof(VkDescriptorSetLayoutBinding)) as *VkDescriptorSetLayoutBinding
+    binding.binding = 0
+    binding.descriptorType = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+    binding.descriptorCount = 1
+    binding.stageFlags = vk.SHADER_STAGE_FRAGMENT_BIT
+    set_info = calloc(1, sizeof(VkDescriptorSetLayoutCreateInfo)) as *VkDescriptorSetLayoutCreateInfo
+    set_info.sType = vk.STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO
+    set_info.bindingCount = 1
+    set_info.pBindings = binding as ptr
+    out = calloc(1, 8)
+    r = vk.vkCreateDescriptorSetLayout(d, set_info as ptr, null, out)
+    p.set_layout = handle_of(out)
+    free(set_info as ptr)
+    free(binding as ptr)
+    if r != vk.SUCCESS { return false }
+
+    push = calloc(1, sizeof(VkPushConstantRange)) as *VkPushConstantRange
+    push.stageFlags = vk.SHADER_STAGE_VERTEX_BIT | vk.SHADER_STAGE_FRAGMENT_BIT
+    push.offset = 0
+    push.size = PUSH_BYTES
+    layouts = calloc(1, 8)
+    (layouts as ptr[])[0] = p.set_layout
+    layout_info = calloc(1, sizeof(VkPipelineLayoutCreateInfo)) as *VkPipelineLayoutCreateInfo
+    layout_info.sType = vk.STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO
+    layout_info.setLayoutCount = 1
+    layout_info.pSetLayouts = layouts
+    layout_info.pushConstantRangeCount = 1
+    layout_info.pPushConstantRanges = push as ptr
+    out = calloc(1, 8)
+    r = vk.vkCreatePipelineLayout(d, layout_info as ptr, null, out)
+    p.pipeline_layout = handle_of(out)
+    free(layout_info as ptr)
+    free(push as ptr)
+    if r != vk.SUCCESS {
+        free(layouts)
+        return false
+    }
+
+    size = calloc(1, sizeof(VkDescriptorPoolSize)) as *VkDescriptorPoolSize
+    size.type = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+    size.descriptorCount = 1
+    pool_info = calloc(1, sizeof(VkDescriptorPoolCreateInfo)) as *VkDescriptorPoolCreateInfo
+    pool_info.sType = vk.STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO
+    pool_info.maxSets = 1
+    pool_info.poolSizeCount = 1
+    pool_info.pPoolSizes = size as ptr
+    out = calloc(1, 8)
+    r = vk.vkCreateDescriptorPool(d, pool_info as ptr, null, out)
+    p.pool = handle_of(out)
+    free(pool_info as ptr)
+    free(size as ptr)
+    if r != vk.SUCCESS {
+        free(layouts)
+        return false
+    }
+    alloc = calloc(1, sizeof(VkDescriptorSetAllocateInfo)) as *VkDescriptorSetAllocateInfo
+    alloc.sType = vk.STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO
+    alloc.descriptorPool = p.pool
+    alloc.descriptorSetCount = 1
+    alloc.pSetLayouts = layouts
+    out = calloc(1, 8)
+    r = vk.vkAllocateDescriptorSets(d, alloc as ptr, out)
+    p.set = handle_of(out)
+    free(alloc as ptr)
+    free(layouts)
+    if r != vk.SUCCESS { return false }
+
+    sampler_info = calloc(1, sizeof(VkSamplerCreateInfo)) as *VkSamplerCreateInfo
+    sampler_info.sType = vk.STRUCTURE_TYPE_SAMPLER_CREATE_INFO
+    sampler_info.magFilter = vk.FILTER_LINEAR
+    sampler_info.minFilter = vk.FILTER_LINEAR
+    sampler_info.mipmapMode = vk.SAMPLER_MIPMAP_MODE_NEAREST
+    sampler_info.addressModeU = vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE
+    sampler_info.addressModeV = vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE
+    sampler_info.addressModeW = vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE
+    sampler_info.borderColor = vk.BORDER_COLOR_FLOAT_TRANSPARENT_BLACK
+    out = calloc(1, 8)
+    r = vk.vkCreateSampler(d, sampler_info as ptr, null, out)
+    p.sampler = handle_of(out)
+    free(sampler_info as ptr)
+    return r == vk.SUCCESS
+}
+
+// One attribute of the vertex (hud.VERTEX_FLOATS floats), into slot `i`.
+attribute(attributes: ptr, i: int, format: int, offset: int) {
+    a = (attributes + i * sizeof(VkVertexInputAttributeDescription)) as *VkVertexInputAttributeDescription
+    a.location = i
+    a.binding = 0
+    a.format = format
+    a.offset = offset
+}
+
+// The pipeline: the overlay's two stages over its vertex, triangles, no
+// culling and no depth, blended over what is there -- the colour by its
+// alpha, the frame's alpha kept at one -- with the viewport and scissor
+// set per frame.
+make_pipeline(p: *Painter, d: ptr) -> bool {
+    vertex_module = shader_module(d, 0)
+    fragment_module = shader_module(d, 1)
+    if vertex_module == null || fragment_module == null {
+        if vertex_module != null { vk.vkDestroyShaderModule(d, vertex_module, null) }
+        if fragment_module != null { vk.vkDestroyShaderModule(d, fragment_module, null) }
+        return false
+    }
+    stages = calloc(2, sizeof(VkPipelineShaderStageCreateInfo))
+    vs = stages as *VkPipelineShaderStageCreateInfo
+    vs.sType = vk.STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO
+    vs.stage = vk.SHADER_STAGE_VERTEX_BIT
+    vs.`module` = vertex_module
+    vs.pName = "main"
+    fs = (stages + sizeof(VkPipelineShaderStageCreateInfo)) as *VkPipelineShaderStageCreateInfo
+    fs.sType = vk.STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO
+    fs.stage = vk.SHADER_STAGE_FRAGMENT_BIT
+    fs.`module` = fragment_module
+    fs.pName = "main"
+
+    binding = calloc(1, sizeof(VkVertexInputBindingDescription)) as *VkVertexInputBindingDescription
+    binding.binding = 0
+    binding.stride = hud.VERTEX_BYTES
+    binding.inputRate = vk.VERTEX_INPUT_RATE_VERTEX
+    attributes = calloc(4, sizeof(VkVertexInputAttributeDescription))
+    attribute(attributes, 0, vk.FORMAT_R32G32_SFLOAT, 0)
+    attribute(attributes, 1, vk.FORMAT_R32G32_SFLOAT, 8)
+    attribute(attributes, 2, vk.FORMAT_R32G32B32A32_SFLOAT, 16)
+    attribute(attributes, 3, vk.FORMAT_R32_SFLOAT, 32)
+    input = calloc(1, sizeof(VkPipelineVertexInputStateCreateInfo)) as *VkPipelineVertexInputStateCreateInfo
+    input.sType = vk.STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO
+    input.vertexBindingDescriptionCount = 1
+    input.pVertexBindingDescriptions = binding as ptr
+    input.vertexAttributeDescriptionCount = 4
+    input.pVertexAttributeDescriptions = attributes
+
+    assembly = calloc(1, sizeof(VkPipelineInputAssemblyStateCreateInfo)) as *VkPipelineInputAssemblyStateCreateInfo
+    assembly.sType = vk.STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO
+    assembly.topology = vk.PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
+    viewport = calloc(1, sizeof(VkPipelineViewportStateCreateInfo)) as *VkPipelineViewportStateCreateInfo
+    viewport.sType = vk.STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO
+    viewport.viewportCount = 1
+    viewport.scissorCount = 1
+    raster = calloc(1, sizeof(VkPipelineRasterizationStateCreateInfo)) as *VkPipelineRasterizationStateCreateInfo
+    raster.sType = vk.STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO
+    raster.polygonMode = vk.POLYGON_MODE_FILL
+    raster.cullMode = vk.CULL_MODE_NONE
+    raster.frontFace = vk.FRONT_FACE_COUNTER_CLOCKWISE
+    raster.lineWidth = 1.0 as f32
+    samples = calloc(1, sizeof(VkPipelineMultisampleStateCreateInfo)) as *VkPipelineMultisampleStateCreateInfo
+    samples.sType = vk.STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO
+    samples.rasterizationSamples = vk.SAMPLE_COUNT_1_BIT
+    blend_attachment = calloc(1, sizeof(VkPipelineColorBlendAttachmentState)) as *VkPipelineColorBlendAttachmentState
+    blend_attachment.blendEnable = 1
+    blend_attachment.srcColorBlendFactor = vk.BLEND_FACTOR_SRC_ALPHA
+    blend_attachment.dstColorBlendFactor = vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
+    blend_attachment.colorBlendOp = vk.BLEND_OP_ADD
+    blend_attachment.srcAlphaBlendFactor = vk.BLEND_FACTOR_ONE
+    blend_attachment.dstAlphaBlendFactor = vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
+    blend_attachment.alphaBlendOp = vk.BLEND_OP_ADD
+    blend_attachment.colorWriteMask = vk.COLOR_COMPONENT_R_BIT | vk.COLOR_COMPONENT_G_BIT |
+                                      vk.COLOR_COMPONENT_B_BIT | vk.COLOR_COMPONENT_A_BIT
+    blend = calloc(1, sizeof(VkPipelineColorBlendStateCreateInfo)) as *VkPipelineColorBlendStateCreateInfo
+    blend.sType = vk.STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO
+    blend.attachmentCount = 1
+    blend.pAttachments = blend_attachment as ptr
+    states = calloc(2, 4)
+    (states as int[])[0] = vk.DYNAMIC_STATE_VIEWPORT
+    (states as int[])[1] = vk.DYNAMIC_STATE_SCISSOR
+    dynamic = calloc(1, sizeof(VkPipelineDynamicStateCreateInfo)) as *VkPipelineDynamicStateCreateInfo
+    dynamic.sType = vk.STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO
+    dynamic.dynamicStateCount = 2
+    dynamic.pDynamicStates = states
+
+    info = calloc(1, sizeof(VkGraphicsPipelineCreateInfo)) as *VkGraphicsPipelineCreateInfo
+    info.sType = vk.STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO
+    info.stageCount = 2
+    info.pStages = stages
+    info.pVertexInputState = input as ptr
+    info.pInputAssemblyState = assembly as ptr
+    info.pViewportState = viewport as ptr
+    info.pRasterizationState = raster as ptr
+    info.pMultisampleState = samples as ptr
+    info.pColorBlendState = blend as ptr
+    info.pDynamicState = dynamic as ptr
+    info.layout = p.pipeline_layout
+    info.renderPass = p.pass
+    info.subpass = 0
+    out = calloc(1, 8)
+    r = vk.vkCreateGraphicsPipelines(d, null, 1, info as ptr, null, out)
+    p.pipeline = handle_of(out)
+
+    free(info as ptr)
+    free(dynamic as ptr)
+    free(states)
+    free(blend as ptr)
+    free(blend_attachment as ptr)
+    free(samples as ptr)
+    free(raster as ptr)
+    free(viewport as ptr)
+    free(assembly as ptr)
+    free(input as ptr)
+    free(attributes)
+    free(binding as ptr)
+    free(stages)
+    vk.vkDestroyShaderModule(d, vertex_module, null)
+    vk.vkDestroyShaderModule(d, fragment_module, null)
+    return r == vk.SUCCESS
+}
+
+// Everything the painter made, gone; made again at the next frame with
+// something to draw.
+release(p: *Painter) {
+    d = p.device
+    if d == null { return }
+    i = 0
+    while i < MAX_VIEWS {
+        fb = (p.framebuffers as ptr[])[i]
+        if fb != null { vk.vkDestroyFramebuffer(d, fb, null) }
+        (p.framebuffers as ptr[])[i] = null
+        (p.views as ptr[])[i] = null
+        i = i + 1
+    }
+    i = 0
+    while i < MAX_FRAMES {
+        vkhost.host_buffer_free((p.buffers as ptr[])[i] as *HostBuffer)
+        (p.buffers as ptr[])[i] = null
+        i = i + 1
+    }
+    drop_atlas(p, d)
+    if p.pipeline != null { vk.vkDestroyPipeline(d, p.pipeline, null) }
+    if p.pipeline_layout != null { vk.vkDestroyPipelineLayout(d, p.pipeline_layout, null) }
+    if p.pool != null { vk.vkDestroyDescriptorPool(d, p.pool, null) }
+    if p.set_layout != null { vk.vkDestroyDescriptorSetLayout(d, p.set_layout, null) }
+    if p.sampler != null { vk.vkDestroySampler(d, p.sampler, null) }
+    if p.pass != null { vk.vkDestroyRenderPass(d, p.pass, null) }
+    p.pipeline = null
+    p.pipeline_layout = null
+    p.pool = null
+    p.set = null
+    p.set_layout = null
+    p.sampler = null
+    p.pass = null
+    p.device = null
+}
+
+// The atlas's image and its staging, gone; the set names nothing until
+// the next is uploaded.
+drop_atlas(p: *Painter, d: ptr) {
+    if p.atlas_view != null { vk.vkDestroyImageView(d, p.atlas_view, null) }
+    if p.atlas_image != null { vk.vkDestroyImage(d, p.atlas_image, null) }
+    if p.atlas_memory != null { vk.vkFreeMemory(d, p.atlas_memory, null) }
+    p.atlas_view = null
+    p.atlas_image = null
+    p.atlas_memory = null
+    p.atlas_serial = 0 - 1
+    vkhost.host_buffer_free(p.staging as *HostBuffer)
+    p.staging = null
+    p.staging_slot = 0 - 1
+}
+
+// The pass, the pipeline and the set for this frame's format and layout.
+ready(p: *Painter) -> bool {
+    d = ae3d_vk_device_handle()
+    format = ae3d_vk_frame_format()
+    offscreen = ae3d_vk_frame_offscreen()
+    if p.device == d && p.pipeline != null && p.format == format && p.offscreen == offscreen { return true }
+    release(p)
+    p.device = vkhost.device()
+    p.format = format
+    p.offscreen = offscreen
+    if !make_pass(p, d) || !make_layouts(p, d) || !make_pipeline(p, d) {
+        release(p)
+        return false
+    }
+    return true
+}
+
+// --- the frame -------------------------------------------------------------------------------------
+
+// A layout change of the atlas image, around its copy.
+atlas_barrier(commands: ptr, image: ptr, from: int, to: int, src_access: int, dst_access: int, src_stage: int, dst_stage: int) {
+    b = calloc(1, sizeof(VkImageMemoryBarrier)) as *VkImageMemoryBarrier
+    b.sType = vk.STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER
+    b.oldLayout = from
+    b.newLayout = to
+    b.srcQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED
+    b.dstQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED
+    b.image = image
+    b.subresourceRange.aspectMask = vk.IMAGE_ASPECT_COLOR_BIT
+    b.subresourceRange.levelCount = 1
+    b.subresourceRange.layerCount = 1
+    b.srcAccessMask = src_access
+    b.dstAccessMask = dst_access
+    vk.vkCmdPipelineBarrier(commands, src_stage, dst_stage, 0, 0, null, 0, null, 1, b as ptr)
+    free(b as ptr)
+}
+
+// The overlay's atlas on the device, `serial` its number (0 for an overlay
+// of rectangles alone, which has none: a blank texel stands in for the
+// sampler it never reads). Copied from a staging buffer in this frame's
+// command buffer, ahead of the pass that samples it.
+upload_atlas(p: *Painter, commands: ptr, slot: int, a: *GlyphAtlas, serial: int) -> bool {
+    d = p.device
+    // Frames in flight sample the atlas being replaced.
+    if p.atlas_image != null { vk.vkDeviceWaitIdle(d) }
+    drop_atlas(p, d)
+    w = 1
+    h = 1
+    pixels = null as ptr
+    if a != null {
+        w = a.width
+        h = a.height
+        pixels = a.pixels
+    }
+    image_info = calloc(1, sizeof(VkImageCreateInfo)) as *VkImageCreateInfo
+    image_info.sType = vk.STRUCTURE_TYPE_IMAGE_CREATE_INFO
+    image_info.imageType = vk.IMAGE_TYPE_2D
+    image_info.format = vk.FORMAT_R8_UNORM
+    image_info.extent.width = w
+    image_info.extent.height = h
+    image_info.extent.depth = 1
+    image_info.mipLevels = 1
+    image_info.arrayLayers = 1
+    image_info.samples = vk.SAMPLE_COUNT_1_BIT
+    image_info.tiling = vk.IMAGE_TILING_OPTIMAL
+    image_info.usage = vk.IMAGE_USAGE_TRANSFER_DST_BIT | vk.IMAGE_USAGE_SAMPLED_BIT
+    image_info.sharingMode = vk.SHARING_MODE_EXCLUSIVE
+    image_info.initialLayout = vk.IMAGE_LAYOUT_UNDEFINED
+    out = calloc(1, 8)
+    r = vk.vkCreateImage(d, image_info as ptr, null, out)
+    p.atlas_image = handle_of(out)
+    free(image_info as ptr)
+    if r != vk.SUCCESS {
+        p.atlas_image = null
+        return false
+    }
+    needs = calloc(1, sizeof(VkMemoryRequirements)) as *VkMemoryRequirements
+    vk.vkGetImageMemoryRequirements(d, p.atlas_image, needs as ptr)
+    p.atlas_memory = vkhost.allocate(needs, vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+    free(needs as ptr)
+    if p.atlas_memory == null || vk.vkBindImageMemory(d, p.atlas_image, p.atlas_memory, 0) != vk.SUCCESS { return false }
+
+    view_info = calloc(1, sizeof(VkImageViewCreateInfo)) as *VkImageViewCreateInfo
+    view_info.sType = vk.STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO
+    view_info.image = p.atlas_image
+    view_info.viewType = vk.IMAGE_VIEW_TYPE_2D
+    view_info.format = vk.FORMAT_R8_UNORM
+    view_info.subresourceRange.aspectMask = vk.IMAGE_ASPECT_COLOR_BIT
+    view_info.subresourceRange.levelCount = 1
+    view_info.subresourceRange.layerCount = 1
+    out = calloc(1, 8)
+    r = vk.vkCreateImageView(d, view_info as ptr, null, out)
+    p.atlas_view = handle_of(out)
+    free(view_info as ptr)
+    if r != vk.SUCCESS { return false }
+
+    staging = vkhost.mapped_buffer(w * h, vk.BUFFER_USAGE_TRANSFER_SRC_BIT)
+    if staging == null { return false }
+    if pixels != null { memcpy(staging.mapped, pixels, (w * h) as long) }
+    p.staging = staging as ptr
+    p.staging_slot = slot
+
+    atlas_barrier(commands, p.atlas_image, vk.IMAGE_LAYOUT_UNDEFINED, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                  0, vk.ACCESS_TRANSFER_WRITE_BIT, vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT, vk.PIPELINE_STAGE_TRANSFER_BIT)
+    region = calloc(1, sizeof(VkBufferImageCopy)) as *VkBufferImageCopy
+    region.imageSubresource.aspectMask = vk.IMAGE_ASPECT_COLOR_BIT
+    region.imageSubresource.layerCount = 1
+    region.imageExtent.width = w
+    region.imageExtent.height = h
+    region.imageExtent.depth = 1
+    vk.vkCmdCopyBufferToImage(commands, staging.buffer, p.atlas_image, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, region as ptr)
+    free(region as ptr)
+    atlas_barrier(commands, p.atlas_image, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                  vk.ACCESS_TRANSFER_WRITE_BIT, vk.ACCESS_SHADER_READ_BIT, vk.PIPELINE_STAGE_TRANSFER_BIT,
+                  vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT)
+
+    // No frame in flight reads the set: it was waited for above, or there
+    // was no atlas before.
+    image = calloc(1, sizeof(VkDescriptorImageInfo)) as *VkDescriptorImageInfo
+    image.sampler = p.sampler
+    image.imageView = p.atlas_view
+    image.imageLayout = vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+    write = calloc(1, sizeof(VkWriteDescriptorSet)) as *VkWriteDescriptorSet
+    write.sType = vk.STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET
+    write.dstSet = p.set
+    write.dstBinding = 0
+    write.descriptorCount = 1
+    write.descriptorType = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+    write.pImageInfo = image as ptr
+    vk.vkUpdateDescriptorSets(d, 1, write as ptr, 0, null)
+    free(write as ptr)
+    free(image as ptr)
+    p.atlas_serial = serial
+    return true
+}
+
+// The framebuffer over this frame's view, made the first time it is seen.
+framebuffer_for(p: *Painter, view: ptr, w: int, h: int) -> ptr {
+    views = p.views as ptr[]
+    framebuffers = p.framebuffers as ptr[]
+    free_slot = 0 - 1
+    i = 0
+    while i < MAX_VIEWS {
+        if views[i] == view && framebuffers[i] != null { return framebuffers[i] }
+        if free_slot < 0 && framebuffers[i] == null { free_slot = i }
+        i = i + 1
+    }
+    if free_slot < 0 { return null }
+    attachments = calloc(1, 8)
+    (attachments as ptr[])[0] = view
+    info = calloc(1, sizeof(VkFramebufferCreateInfo)) as *VkFramebufferCreateInfo
+    info.sType = vk.STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO
+    info.renderPass = p.pass
+    info.attachmentCount = 1
+    info.pAttachments = attachments
+    info.width = w
+    info.height = h
+    info.layers = 1
+    out = calloc(1, 8)
+    r = vk.vkCreateFramebuffer(p.device, info as ptr, null, out)
+    fb = handle_of(out)
+    free(info as ptr)
+    free(attachments)
+    if r != vk.SUCCESS { return null }
+    views[free_slot] = view
+    framebuffers[free_slot] = fb
+    return fb
+}
+
+// This slot's vertex buffer, holding `bytes`: grown when it does not. The
+// slot's last frame is done with it (its fence was waited on before this
+// frame was recorded).
+vertices_for(p: *Painter, slot: int, bytes: int) -> *HostBuffer {
+    buffers = p.buffers as ptr[]
+    b = buffers[slot] as *HostBuffer
+    if b != null && b.bytes >= bytes { return b }
+    vkhost.host_buffer_free(b)
+    buffers[slot] = null
+    room = 65536
+    while room < bytes { room = room * 2 }
+    b = vkhost.mapped_buffer(room, vk.BUFFER_USAGE_VERTEX_BUFFER_BIT)
+    buffers[slot] = b as ptr
+    return b
+}
+
+// Recorded after the frame's last pass and the meter, before the readback:
+// the overlay's vertices over the frame's image, in one draw.
+@c_callback("ae3d_vkoverlay_record")
+record_hook(context: ptr) {
+    p = painter()
+    o = p.overlay as *Hud
+    count = hud.vertex_count(o)
+    if count == 0 { return }
+    slot = ae3d_vk_frame_slot()
+    view = ae3d_vk_frame_view()
+    w = ae3d_vk_frame_width()
+    h = ae3d_vk_frame_height()
+    if slot < 0 || slot >= MAX_FRAMES || view == null || w <= 0 || h <= 0 { return }
+    if !ready(p) { return }
+    commands = ae3d_vk_frame_commands()
+    serial = hud.atlas_serial(o)
+    if p.atlas_serial != serial {
+        if !upload_atlas(p, commands, slot, hud.atlas(o), serial) {
+            drop_atlas(p, p.device)
+            return
+        }
+    }
+    fb = framebuffer_for(p, view, w, h)
+    bytes = count * hud.VERTEX_BYTES
+    vertices = vertices_for(p, slot, bytes)
+    if fb == null || vertices == null { return }
+    memcpy(vertices.mapped, hud.vertex_data(o), bytes as long)
+
+    begin = calloc(1, sizeof(VkRenderPassBeginInfo)) as *VkRenderPassBeginInfo
+    begin.sType = vk.STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO
+    begin.renderPass = p.pass
+    begin.framebuffer = fb
+    begin.renderArea.extent.width = w
+    begin.renderArea.extent.height = h
+    vk.vkCmdBeginRenderPass(commands, begin as ptr, vk.SUBPASS_CONTENTS_INLINE)
+    free(begin as ptr)
+    vk.vkCmdBindPipeline(commands, vk.PIPELINE_BIND_POINT_GRAPHICS, p.pipeline)
+    sets = calloc(1, 8)
+    (sets as ptr[])[0] = p.set
+    vk.vkCmdBindDescriptorSets(commands, vk.PIPELINE_BIND_POINT_GRAPHICS, p.pipeline_layout, 0, 1, sets, 0, null)
+    free(sets)
+    viewport = calloc(1, sizeof(VkViewport)) as *VkViewport
+    viewport.width = (w as float) as f32
+    viewport.height = (h as float) as f32
+    viewport.maxDepth = 1.0 as f32
+    vk.vkCmdSetViewport(commands, 0, 1, viewport as ptr)
+    free(viewport as ptr)
+    scissor = calloc(1, sizeof(VkRect2D)) as *VkRect2D
+    scissor.extent.width = w
+    scissor.extent.height = h
+    vk.vkCmdSetScissor(commands, 0, 1, scissor as ptr)
+    free(scissor as ptr)
+    // Pixels, y down, to Vulkan's clip space, whose y is down too; and
+    // whether the frame's format encodes what is written as sRGB.
+    push = calloc(8, 4)
+    values = push as f32[]
+    values[0] = (2.0 / (w as float)) as f32
+    values[1] = (2.0 / (h as float)) as f32
+    values[2] = (0.0 - 1.0) as f32
+    values[3] = (0.0 - 1.0) as f32
+    format = ae3d_vk_frame_format()
+    if format == vk.FORMAT_B8G8R8A8_SRGB || format == vk.FORMAT_R8G8B8A8_SRGB { values[4] = 1.0 as f32 }
+    vk.vkCmdPushConstants(commands, p.pipeline_layout, vk.SHADER_STAGE_VERTEX_BIT | vk.SHADER_STAGE_FRAGMENT_BIT,
+                          0, PUSH_BYTES, push)
+    free(push)
+    buffers = calloc(1, 8)
+    (buffers as ptr[])[0] = vertices.buffer
+    offsets = calloc(1, 8)
+    vk.vkCmdBindVertexBuffers(commands, 0, 1, buffers, offsets)
+    free(buffers)
+    free(offsets)
+    vk.vkCmdDraw(commands, count, 1, 0, 0)
+    vk.vkCmdEndRenderPass(commands)
+}
+
+// A frame slot's fence has passed: the staging buffer it copied the atlas
+// from can go.
+@c_callback("ae3d_vkoverlay_collect")
+collect_hook(context: ptr) {
+    p = painter()
+    if p.staging == null || ae3d_vk_frame_slot() != p.staging_slot { return }
+    vkhost.host_buffer_free(p.staging as *HostBuffer)
+    p.staging = null
+    p.staging_slot = 0 - 1
+}
+
+@c_callback("ae3d_vkoverlay_release")
+release_hook(context: ptr) {
+    release(painter())
+}

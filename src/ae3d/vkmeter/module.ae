@@ -25,7 +25,7 @@ exports (
     set_on, is_on, measured
 )
 
-extern ae3d_vk_add_frame_hooks(record: ptr, collect: ptr, release: ptr, context: ptr) -> int
+extern ae3d_vk_add_frame_hooks_at(stage: int, record: ptr, collect: ptr, release: ptr, context: ptr) -> int
 extern ae3d_vk_device_handle() -> ptr
 extern ae3d_vk_frame_commands() -> ptr
 extern ae3d_vk_frame_slot() -> int
@@ -46,6 +46,9 @@ extern pow(x: float, y: float) -> float
 const SMALLEST = 320                 // texels: the widest the last level may be
 const MAX_FRAMES = 4                 // at least vulkan.c's AE3D_VK_FRAMES
 const NEAR_WHITE = 0.8               // linear luminance counted as near white
+// vulkan.c's AE3D_VK_STAGE_MEASURE: recorded before the overlay is drawn,
+// so a menu over the scene does not set the scene's exposure.
+const STAGE_MEASURE = 0
 
 struct Meter {
     on: bool
@@ -387,8 +390,8 @@ set_on(on: bool) {
     m.on = on
     if on && !m.hooked {
         m.hooked = true
-        ae3d_vk_add_frame_hooks((&ae3d_vkmeter_record) as ptr, (&ae3d_vkmeter_collect) as ptr,
-                                (&ae3d_vkmeter_release) as ptr, null)
+        ae3d_vk_add_frame_hooks_at(STAGE_MEASURE, (&ae3d_vkmeter_record) as ptr, (&ae3d_vkmeter_collect) as ptr,
+                                   (&ae3d_vkmeter_release) as ptr, null)
     }
 }
 

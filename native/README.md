@@ -14,7 +14,8 @@ and draw every frame the same to the byte; `native/gpu/opengl.c` and
 `capture.c` are gone. The Vulkan renderer is moving now, a part at a time,
 through the frame hooks `vulkan.c` calls (`ae3d_vk_add_frame_hooks`) and on
 Aether's own Vulkan bindings (`contrib.vulkan.vk`): the frame's light meter
-(`ae3d.vkmeter`), reading a frame back, offscreen or captured
+(`ae3d.vkmeter`), the text and rectangles drawn over the frame
+(`ae3d.vkoverlay`), reading a frame back, offscreen or captured
 (`ae3d.vkreadback`), and making textures -- a model's image with its mip
 chain, the clouds' volumes, the pose banks (`ae3d.vktexture`) -- are
 Aether, their buffers and memory `ae3d.vkhost`'s.
