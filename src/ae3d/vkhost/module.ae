@@ -1,0 +1,125 @@
+// ae3d.vkhost -- what the Vulkan backend's Aether modules make on the
+// frame's device (#402): memory of a kind, and buffers the host reads,
+// mapped for good. ae3d.vkmeter's readings and ae3d.vkreadback's frames are
+// both copied into these.
+//
+// The device is the C backend's (native/gpu/vulkan.c); `device()` is it,
+// with contrib.vulkan.vk's commands loaded through its own entry points the
+// first time a module asks after it was made.
+
+import contrib.vulkan.vk
+
+exports (
+    HostBuffer, device, memory_type, allocate, host_buffer, host_buffer_free
+)
+
+extern ae3d_vk_physical_device_handle() -> ptr
+extern ae3d_vk_device_handle() -> ptr
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+var g_loaded: ptr = null            // the device whose entry points contrib.vulkan.vk calls through
+
+// A buffer the host reads: the buffer, its memory, where it is mapped, and
+// how long it is.
+struct HostBuffer {
+    buffer: ptr                      // VkBuffer
+    memory: ptr                      // VkDeviceMemory
+    mapped: ptr
+    bytes: int
+}
+
+// The frame's device, its commands loaded.
+device() -> ptr {
+    d = ae3d_vk_device_handle()
+    if d != null && g_loaded != d {
+        vk.load_device(d)
+        g_loaded = d
+    }
+    return d
+}
+
+// The index of a memory type `bits` allows with all of `wanted`, or -1.
+memory_type(bits: int, wanted: int) -> int {
+    props = calloc(1, sizeof(VkPhysicalDeviceMemoryProperties)) as *VkPhysicalDeviceMemoryProperties
+    vk.vkGetPhysicalDeviceMemoryProperties(ae3d_vk_physical_device_handle(), props as ptr)
+    found = 0 - 1
+    i = 0
+    while i < (props.memoryTypeCount) as int && found < 0 {
+        kind = (props as ptr + 4 + i * sizeof(VkMemoryType)) as *VkMemoryType
+        if (bits & (1 << i)) != 0 && ((kind.propertyFlags) as int & wanted) == wanted { found = i }
+        i = i + 1
+    }
+    free(props as ptr)
+    return found
+}
+
+// Memory of a kind `wanted` for what `requirements` asks; null when there
+// is none.
+allocate(requirements: *VkMemoryRequirements, wanted: int) -> ptr {
+    kind = memory_type((requirements.memoryTypeBits) as int, wanted)
+    if kind < 0 { return null }
+    info = calloc(1, sizeof(VkMemoryAllocateInfo)) as *VkMemoryAllocateInfo
+    info.sType = vk.STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO
+    info.allocationSize = requirements.size
+    info.memoryTypeIndex = kind
+    out = calloc(1, 8)
+    r = vk.vkAllocateMemory(device(), info as ptr, null, out)
+    got = (out as ptr[])[0]
+    free(out)
+    free(info as ptr)
+    if r != vk.SUCCESS { return null }
+    return got
+}
+
+// A buffer `bytes` long that copies land in and the host reads: cached
+// memory, the CPU reading every byte (from write-combined memory that read
+// halved the frame rate), or plain coherent where a device has no cached
+// kind. Null when the device could not make one.
+host_buffer(bytes: int) -> *HostBuffer {
+    d = device()
+    ci = calloc(1, sizeof(VkBufferCreateInfo)) as *VkBufferCreateInfo
+    ci.sType = vk.STRUCTURE_TYPE_BUFFER_CREATE_INFO
+    ci.size = bytes
+    ci.usage = vk.BUFFER_USAGE_TRANSFER_DST_BIT
+    ci.sharingMode = vk.SHARING_MODE_EXCLUSIVE
+    out = calloc(1, 8)
+    r = vk.vkCreateBuffer(d, ci as ptr, null, out)
+    free(ci as ptr)
+    if r != vk.SUCCESS {
+        free(out)
+        return null
+    }
+    b = calloc(1, sizeof(HostBuffer)) as *HostBuffer
+    b.buffer = (out as ptr[])[0]
+    b.bytes = bytes
+    needs = calloc(1, sizeof(VkMemoryRequirements)) as *VkMemoryRequirements
+    vk.vkGetBufferMemoryRequirements(d, b.buffer, needs as ptr)
+    visible = vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT
+    b.memory = allocate(needs, visible | vk.MEMORY_PROPERTY_HOST_CACHED_BIT)
+    if b.memory == null { b.memory = allocate(needs, visible) }
+    free(needs as ptr)
+    if b.memory == null {
+        free(out)
+        host_buffer_free(b)
+        return null
+    }
+    vk.vkBindBufferMemory(d, b.buffer, b.memory, 0)
+    (out as ptr[])[0] = null
+    vk.vkMapMemory(d, b.memory, 0, bytes, 0, out)
+    b.mapped = (out as ptr[])[0]
+    free(out)
+    return b
+}
+
+// A host buffer gone, on the device it was made on. Nothing for null.
+host_buffer_free(b: *HostBuffer) {
+    if b == null { return }
+    d = ae3d_vk_device_handle()
+    if d != null {
+        if b.mapped != null { vk.vkUnmapMemory(d, b.memory) }
+        if b.buffer != null { vk.vkDestroyBuffer(d, b.buffer, null) }
+        if b.memory != null { vk.vkFreeMemory(d, b.memory, null) }
+    }
+    free(b as ptr)
+}

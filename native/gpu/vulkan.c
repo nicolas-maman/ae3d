@@ -66,6 +66,15 @@
     X(vkCreateInstance) \
     X(vkEnumerateInstanceExtensionProperties)
 
+/* An Aether module's part of the frame (#402). */
+#define AE3D_VK_HOOKS 4
+typedef struct {
+    void (*record)(void *);
+    void (*collect)(void *);
+    void (*release)(void *);
+    void *context;
+} ae3d_vk_hooks;
+
 /* Ray queries (VK_KHR_ray_query, VK_KHR_acceleration_structure): loaded
    where the device has them, and the renderer says so; never required. */
 #define AE3D_VK_RAY_FUNCS(X) \
@@ -620,32 +629,17 @@ static struct {
     ae3d_vk_mesh *meshes;
     int mesh_capacity;
 
-    VkImage readback_image;
-    VkDeviceMemory readback_memory;
-    // One staging buffer per frame in flight, so a frame can be copied out
-    // while the one before it is still being read.
-    VkBuffer readback_buffer[AE3D_VK_FRAMES];
-    VkDeviceMemory readback_buffer_memory[AE3D_VK_FRAMES];
-    unsigned char *readback_mapped[AE3D_VK_FRAMES];
-    int readback_frame;
-    int readback_width;
-    int readback_height;
+    VkDeviceMemory offscreen_memory;   /* the offscreen target's image's */
     int offscreen;
 
-    // Reading a windowed frame back. The swapchain image is copied to the
-    // per-frame staging buffers above, but only when a capture is asked for --
-    // a readback stalls the frame it reads, so it is off by default and armed
-    // for the one frame a snapshot or an agent grid needs.
+    // Whether a windowed frame can be read back (ae3d.vkreadback copies it
+    // when a capture is asked for).
     int can_capture;      /* the surface allows a transfer-source swapchain */
-    /* An Aether module's part of the frame (ae3d_vk_set_frame_hooks, #402):
-       recorded after the frame's last pass, collected once its fence has
-       passed, released with the swapchain it was sized to. */
-    void (*hook_record)(void *);
-    void (*hook_collect)(void *);
-    void (*hook_release)(void *);
-    void *hook_context;
-    int capture_request;  /* copy the next frame that is submitted */
-    int capture_slot;     /* which staging buffer holds the last capture, or -1 */
+    /* The Aether modules' parts of the frame (ae3d_vk_add_frame_hooks,
+       #402): each recorded after the frame's last pass, collected once its
+       fence has passed, released with the swapchain it was sized to. */
+    ae3d_vk_hooks hooks[AE3D_VK_HOOKS];
+    int hook_count;
 
     int ready;
 } vk;
@@ -1421,7 +1415,9 @@ static int ae3d_vk_instances_are_points(int instance_handle, int instance_count)
 static void ae3d_vk_destroy_swapchain(void) {
     unsigned i;
 
-    if (vk.hook_release) vk.hook_release(vk.hook_context);
+    for (i = 0; i < (unsigned)vk.hook_count; i++) {
+        if (vk.hooks[i].release) vk.hooks[i].release(vk.hooks[i].context);
+    }
 
     if (vk.framebuffers) {
         for (i = 0; i < vk.image_count; i++) {
@@ -1438,37 +1434,14 @@ static void ae3d_vk_destroy_swapchain(void) {
         vk.image_views = NULL;
     }
     // An offscreen target's image is owned here, unlike a swapchain's, which
-    // the swapchain owns and destroys with itself.
-    // The staging buffers are sized to the extent, so they go with the target
-    // they copy from -- the offscreen image here, or the swapchain, whose
-    // windowed capture buffers are the same array. Buffers never created are
-    // VK_NULL_HANDLE and skipped, so this is safe on both paths.
-    {
-        unsigned slot;
-        for (slot = 0; slot < AE3D_VK_FRAMES; slot++) {
-            if (vk.readback_mapped[slot]) {
-                ae3d_vkUnmapMemory(vk.device, vk.readback_buffer_memory[slot]);
-                vk.readback_mapped[slot] = NULL;
-            }
-            if (vk.readback_buffer[slot]) {
-                ae3d_vkDestroyBuffer(vk.device, vk.readback_buffer[slot], NULL);
-                vk.readback_buffer[slot] = VK_NULL_HANDLE;
-            }
-            if (vk.readback_buffer_memory[slot]) {
-                ae3d_vkFreeMemory(vk.device, vk.readback_buffer_memory[slot], NULL);
-                vk.readback_buffer_memory[slot] = VK_NULL_HANDLE;
-            }
-        }
-    }
-    vk.capture_slot = -1;
+    // the swapchain owns and destroys with itself. (The buffers a frame is
+    // read back into are ae3d.vkreadback's, released by its hook above.)
     if (vk.offscreen && vk.images && vk.images[0]) {
         ae3d_vkDestroyImage(vk.device, vk.images[0], NULL);
-        if (vk.readback_memory) {
-            ae3d_vkFreeMemory(vk.device, vk.readback_memory, NULL);
-            vk.readback_memory = VK_NULL_HANDLE;
+        if (vk.offscreen_memory) {
+            ae3d_vkFreeMemory(vk.device, vk.offscreen_memory, NULL);
+            vk.offscreen_memory = VK_NULL_HANDLE;
         }
-        vk.readback_width = 0;
-        vk.readback_height = 0;
     }
     free(vk.images);
     vk.images = NULL;
@@ -1514,12 +1487,29 @@ static void ae3d_vk_destroy_swapchain(void) {
 /* The seam the Vulkan backend's move into Aether goes through (#402): an
    Aether module registers what it records into the frame and when, and
    reads the handles it records with. Everything here is the C state's; the
-   module owns what it makes with them and frees it in its release. */
-void ae3d_vk_set_frame_hooks(void *record, void *collect, void *release, void *context) {
-    vk.hook_record = (void (*)(void *))record;
-    vk.hook_collect = (void (*)(void *))collect;
-    vk.hook_release = (void (*)(void *))release;
-    vk.hook_context = context;
+   module owns what it makes with them and frees it in its release. Hooks
+   run in the order they were added; 0 when there is no room for another. */
+int ae3d_vk_add_frame_hooks(void *record, void *collect, void *release, void *context) {
+    ae3d_vk_hooks *h;
+    if (vk.hook_count >= AE3D_VK_HOOKS) return 0;
+    h = &vk.hooks[vk.hook_count++];
+    h->record = (void (*)(void *))record;
+    h->collect = (void (*)(void *))collect;
+    h->release = (void (*)(void *))release;
+    h->context = context;
+    return 1;
+}
+
+/* Whether the backend is up, and a frame slot's last submission waited
+   for: what a module that reads a frame back waits on before it reads. */
+int ae3d_vk_ready(void) { return vk.ready ? 1 : 0; }
+void ae3d_vk_frame_wait(int slot) {
+    if (!vk.ready || slot < 0 || slot >= AE3D_VK_FRAMES) return;
+    ae3d_vkWaitForFences(vk.device, 1, &vk.in_flight[slot], VK_TRUE, UINT64_MAX);
+}
+/* Whether the frame's image holds blue before red (a BGRA swapchain). */
+int ae3d_vk_frame_bgr(void) {
+    return (vk.color_format == VK_FORMAT_B8G8R8A8_UNORM || vk.color_format == VK_FORMAT_B8G8R8A8_SRGB) ? 1 : 0;
 }
 
 void *ae3d_vk_instance_handle(void) { return (void *)vk.instance; }
@@ -1714,8 +1704,6 @@ static int ae3d_vk_scaled(void) {
 }
 
 static int ae3d_vk_create_offscreen_target(int width, int height) {
-    VkDeviceSize size;
-
     if (width < 1) width = 1;
     if (height < 1) height = 1;
     vk.extent.width = (unsigned)width;
@@ -1731,31 +1719,9 @@ static int ae3d_vk_create_offscreen_target(int width, int height) {
                               VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                               VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_TILING_OPTIMAL,
                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                              &vk.images[0], &vk.readback_memory, &vk.image_views[0])) {
+                              &vk.images[0], &vk.offscreen_memory, &vk.image_views[0])) {
         return 0;
     }
-
-    size = (VkDeviceSize)width * height * 4;
-    {
-        unsigned slot;
-        for (slot = 0; slot < AE3D_VK_FRAMES; slot++) {
-            void *mapped = NULL;
-            if (!ae3d_vk_create_buffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                           | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                       &vk.readback_buffer[slot],
-                                       &vk.readback_buffer_memory[slot])) {
-                return 0;
-            }
-            if (ae3d_vkMapMemory(vk.device, vk.readback_buffer_memory[slot], 0, size, 0,
-                                 &mapped) != VK_SUCCESS) {
-                return ae3d_vk_fail("readback vkMapMemory failed");
-            }
-            vk.readback_mapped[slot] = (unsigned char *)mapped;
-        }
-    }
-    vk.readback_width = width;
-    vk.readback_height = height;
 
     if (vk.samples != VK_SAMPLE_COUNT_1_BIT) {
         if (!ae3d_vk_create_image((int)vk.render_extent.width, (int)vk.render_extent.height, 1,
@@ -4034,22 +4000,19 @@ int ae3d_vk_init(void *win, int width, int height) {
     float bloom_threshold = vk.bloom_threshold, bloom_intensity = vk.bloom_intensity;
     int dlss_loaded = vk.dlss_loaded;
     double render_scale = vk.render_scale;
-    /* The frame hooks an Aether module installed (ae3d.vkmeter switches
+    /* The frame hooks the Aether modules installed (ae3d.vkmeter switches
        itself on when the engine asks, which can be before the device is
        made): kept, as the settings above are. */
-    void (*hook_record)(void *) = vk.hook_record;
-    void (*hook_collect)(void *) = vk.hook_collect;
-    void (*hook_release)(void *) = vk.hook_release;
-    void *hook_context = vk.hook_context;
+    ae3d_vk_hooks hooks[AE3D_VK_HOOKS];
+    int hook_count = vk.hook_count;
+    memcpy(hooks, vk.hooks, sizeof(hooks));
 
     if (vk.ready) return 1;
     if (!ae3d_vk_available()) return 0;
 
     memset(&vk, 0, sizeof(vk));
-    vk.hook_record = hook_record;
-    vk.hook_collect = hook_collect;
-    vk.hook_release = hook_release;
-    vk.hook_context = hook_context;
+    memcpy(vk.hooks, hooks, sizeof(hooks));
+    vk.hook_count = hook_count;
     vk.shadow_enabled = shadows;
     vk.dlss_loaded = dlss_loaded;
     vk.render_scale = render_scale;
@@ -4058,8 +4021,6 @@ int ae3d_vk_init(void *win, int width, int height) {
     vk.bloom_threshold = bloom_threshold;
     vk.bloom_intensity = bloom_intensity;
     vk.offscreen = win == NULL;
-    vk.readback_frame = -1;
-    vk.capture_slot = -1;
 
     if (!ae3d_vk_create_instance()) return 0;
 
@@ -4203,7 +4164,12 @@ int ae3d_vk_frame_begin(double r, double g, double b, double a) {
 
     ae3d_vkWaitForFences(vk.device, 1, &vk.in_flight[vk.frame], VK_TRUE, UINT64_MAX);
     ae3d_vk_collect_stamps();
-    if (vk.hook_collect) vk.hook_collect(vk.hook_context);
+    {
+        int h;
+        for (h = 0; h < vk.hook_count; h++) {
+            if (vk.hooks[h].collect) vk.hooks[h].collect(vk.hooks[h].context);
+        }
+    }
 
     if (vk.offscreen) {
         vk.image_index = 0;
@@ -6252,80 +6218,16 @@ int ae3d_vk_frame_end(void) {
         vk.pass_open = 0;
     }
 
-    // Offscreen resolves into an image the pass leaves in transfer-source
-    // layout, so the copy to host memory is recorded into the same submission
-    // rather than costing a second one.
-    if (vk.offscreen) {
-        VkBufferImageCopy region;
-        memset(&region, 0, sizeof(region));
-        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        region.imageSubresource.layerCount = 1;
-        region.imageExtent.width = vk.extent.width;
-        region.imageExtent.height = vk.extent.height;
-        region.imageExtent.depth = 1;
-        ae3d_vkCmdCopyImageToBuffer(vk.command_buffers[vk.frame], vk.images[0],
-                                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                    vk.readback_buffer[vk.frame], 1, &region);
+    // The Aether modules' parts: the frame read back (ae3d.vkreadback), its
+    // light measured (ae3d.vkmeter). An offscreen frame's image is left in
+    // transfer-source layout by its pass; a windowed one's each moves from
+    // presenting and back.
+    {
+        int h;
+        for (h = 0; h < vk.hook_count; h++) {
+            if (vk.hooks[h].record) vk.hooks[h].record(vk.hooks[h].context);
+        }
     }
-
-    // A windowed frame is copied only when a capture was asked for. The
-    // swapchain image is in present layout after the render pass, so it is
-    // moved to transfer-source, copied to this frame's staging buffer, and put
-    // back before it is handed to the presenter.
-    if (!vk.offscreen && vk.capture_request && vk.can_capture
-        && vk.readback_buffer[vk.frame]) {
-        VkImageMemoryBarrier to_src, to_present;
-        VkBufferImageCopy region;
-
-        memset(&to_src, 0, sizeof(to_src));
-        to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        to_src.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        to_src.image = vk.images[vk.image_index];
-        to_src.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        to_src.subresourceRange.levelCount = 1;
-        to_src.subresourceRange.layerCount = 1;
-        to_src.srcAccessMask = 0;
-        to_src.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        ae3d_vkCmdPipelineBarrier(vk.command_buffers[vk.frame],
-                                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL,
-                                  1, &to_src);
-
-        memset(&region, 0, sizeof(region));
-        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        region.imageSubresource.layerCount = 1;
-        region.imageExtent.width = vk.extent.width;
-        region.imageExtent.height = vk.extent.height;
-        region.imageExtent.depth = 1;
-        ae3d_vkCmdCopyImageToBuffer(vk.command_buffers[vk.frame], vk.images[vk.image_index],
-                                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                    vk.readback_buffer[vk.frame], 1, &region);
-
-        memset(&to_present, 0, sizeof(to_present));
-        to_present.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        to_present.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        to_present.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        to_present.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        to_present.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        to_present.image = vk.images[vk.image_index];
-        to_present.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        to_present.subresourceRange.levelCount = 1;
-        to_present.subresourceRange.layerCount = 1;
-        to_present.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        to_present.dstAccessMask = 0;
-        ae3d_vkCmdPipelineBarrier(vk.command_buffers[vk.frame],
-                                  VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                  VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL,
-                                  1, &to_present);
-
-        vk.capture_slot = (int)vk.frame;
-        vk.capture_request = 0;
-    }
-
-    if (vk.hook_record) vk.hook_record(vk.hook_context);
 
     ae3d_vk_stamp_through(7);
     vk.stamped[vk.frame] = vk.stamp_next == AE3D_VK_STAMPS;
@@ -6349,12 +6251,12 @@ int ae3d_vk_frame_end(void) {
         return ae3d_vk_fail_code("vkQueueSubmit failed", result);
     }
 
-    // Nothing waits here. The copy lands in this frame's own staging buffer, and
-    // whoever asks for the pixels waits for it then; a program that renders
-    // without reading never stalls at all. Reusing this frame's command buffer
-    // is already gated on its fence in ae3d_vk_frame_begin.
+    // Nothing waits here. A frame read back lands in its own slot's buffer,
+    // and whoever asks for the pixels waits for it then (ae3d_vk_frame_wait);
+    // a program that renders without reading never stalls at all. Reusing
+    // this frame's command buffer is already gated on its fence in
+    // ae3d_vk_frame_begin.
     if (vk.offscreen) {
-        vk.readback_frame = (int)vk.frame;
         vk.frame = (vk.frame + 1) % AE3D_VK_FRAMES;
         vk.recording = 0;
         return 1;
@@ -6392,28 +6294,6 @@ int ae3d_vk_frame_end(void) {
    drawing, say -- then redoes that work on every frame and on every buffer,
    and never hits what it cached. Copying two megabytes costs a fifth of a
    millisecond; in ae3d's own editor, not copying cost a hundred and fifty. */
-static unsigned char *g_readback_copy = NULL;
-static size_t g_readback_copy_size = 0;
-
-void *ae3d_vk_offscreen_pixels(void) {
-    size_t needed;
-
-    if (!vk.offscreen) return NULL;
-    if (vk.readback_frame < 0) return NULL;
-    ae3d_vkWaitForFences(vk.device, 1, &vk.in_flight[vk.readback_frame], VK_TRUE, UINT64_MAX);
-
-    needed = (size_t)vk.readback_width * (size_t)vk.readback_height * 4u;
-    if (needed > g_readback_copy_size) {
-        free(g_readback_copy);
-        g_readback_copy = (unsigned char *)malloc(needed);
-        g_readback_copy_size = g_readback_copy ? needed : 0;
-    }
-    if (!g_readback_copy) return vk.readback_mapped[vk.readback_frame];
-
-    memcpy(g_readback_copy, vk.readback_mapped[vk.readback_frame], needed);
-    return g_readback_copy;
-}
-
 /* The size of the frame being drawn, in pixels: the swapchain's extent. */
 int ae3d_vk_frame_width(void) { return (int)vk.extent.width; }
 int ae3d_vk_frame_height(void) { return (int)vk.extent.height; }
@@ -6672,48 +6552,12 @@ static int ae3d_vk_run_dlss(int source) {
     return vk.dlss_output;
 }
 
-int ae3d_vk_offscreen_width(void) { return vk.readback_width; }
-int ae3d_vk_offscreen_height(void) { return vk.readback_height; }
+int ae3d_vk_offscreen_width(void) { return vk.offscreen ? (int)vk.extent.width : 0; }
+int ae3d_vk_offscreen_height(void) { return vk.offscreen ? (int)vk.extent.height : 0; }
 
 /* Windowed capture: read a presented frame back the way the offscreen path
    reads its target. The staging buffers are made on first use, sized to the
    swapchain extent, and freed with the swapchain. */
-static int ae3d_vk_ensure_capture_buffers(void) {
-    VkDeviceSize size;
-    unsigned slot;
-    if (vk.readback_buffer[0]) return 1;   /* already made for this extent */
-    size = (VkDeviceSize)vk.extent.width * vk.extent.height * 4;
-    for (slot = 0; slot < AE3D_VK_FRAMES; slot++) {
-        void *mapped = NULL;
-        if (!ae3d_vk_create_buffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                       | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                   &vk.readback_buffer[slot],
-                                   &vk.readback_buffer_memory[slot])) {
-            return 0;
-        }
-        if (ae3d_vkMapMemory(vk.device, vk.readback_buffer_memory[slot], 0, size, 0,
-                             &mapped) != VK_SUCCESS) {
-            return 0;
-        }
-        vk.readback_mapped[slot] = (unsigned char *)mapped;
-    }
-    vk.readback_width = (int)vk.extent.width;
-    vk.readback_height = (int)vk.extent.height;
-    return 1;
-}
-
-/* Arm a capture: the next frame submitted copies the presented image out.
-   Returns 0 when the surface does not allow reading a frame back. */
-int ae3d_vk_request_capture(void) {
-    if (vk.offscreen || !vk.can_capture || !vk.ready) return 0;
-    if (!ae3d_vk_ensure_capture_buffers()) return 0;
-    vk.capture_slot = -1;
-    vk.capture_request = 1;
-    return 1;
-}
-
-int ae3d_vk_capture_ready(void) { return vk.capture_slot >= 0; }
 
 /* The pose bank the draws after this are posed from, as the handle of a
    float texture made by ae3d_vk_texture_create_float, or zero for none.
@@ -6921,43 +6765,6 @@ int ae3d_vk_texture_create_float(int width, int height, const float *rgba) {
     texture->in_use = 1;
     return handle;
 }
-
-/* The captured frame as RGBA, top row first -- the orientation a PNG and the
-   capture buffer both use, so no flip like the OpenGL readback needs. The
-   swapchain is usually BGRA, so the red and blue channels are swapped on the
-   way out. */
-void *ae3d_vk_capture_pixels(void) {
-    size_t needed, i;
-    int swap;
-    unsigned char *src;
-
-    if (vk.capture_slot < 0) return NULL;
-    ae3d_vkWaitForFences(vk.device, 1, &vk.in_flight[vk.capture_slot], VK_TRUE, UINT64_MAX);
-
-    needed = (size_t)vk.readback_width * (size_t)vk.readback_height * 4u;
-    if (needed > g_readback_copy_size) {
-        free(g_readback_copy);
-        g_readback_copy = (unsigned char *)malloc(needed);
-        g_readback_copy_size = g_readback_copy ? needed : 0;
-    }
-    if (!g_readback_copy) return NULL;
-    src = vk.readback_mapped[vk.capture_slot];
-    memcpy(g_readback_copy, src, needed);
-
-    swap = (vk.color_format == VK_FORMAT_B8G8R8A8_UNORM
-            || vk.color_format == VK_FORMAT_B8G8R8A8_SRGB);
-    if (swap) {
-        for (i = 0; i + 3 < needed; i += 4) {
-            unsigned char b = g_readback_copy[i];
-            g_readback_copy[i] = g_readback_copy[i + 2];
-            g_readback_copy[i + 2] = b;
-        }
-    }
-    return g_readback_copy;
-}
-
-int ae3d_vk_capture_width(void) { return vk.readback_width; }
-int ae3d_vk_capture_height(void) { return vk.readback_height; }
 
 int ae3d_vk_upload_mesh(void *mesh) {
     const float *vertices = ae3d_mesh_vertex_data(mesh);
@@ -7328,10 +7135,6 @@ void ae3d_vk_free_mesh(int handle) {
 void ae3d_vk_shutdown(void) {
     unsigned i;
 
-    free(g_readback_copy);
-    g_readback_copy = NULL;
-    g_readback_copy_size = 0;
-
     if (!vk.ready) return;
     ae3d_vk_flush_uploads();
     free(vk.batch_scratch);
@@ -7469,14 +7272,11 @@ void ae3d_vk_shutdown(void) {
     {
         /* The hooks outlive the device: installed once a process, they are
            the next device's too. */
-        void (*hook_record)(void *) = vk.hook_record;
-        void (*hook_collect)(void *) = vk.hook_collect;
-        void (*hook_release)(void *) = vk.hook_release;
-        void *hook_context = vk.hook_context;
+        ae3d_vk_hooks hooks[AE3D_VK_HOOKS];
+        int hook_count = vk.hook_count;
+        memcpy(hooks, vk.hooks, sizeof(hooks));
         memset(&vk, 0, sizeof(vk));
-        vk.hook_record = hook_record;
-        vk.hook_collect = hook_collect;
-        vk.hook_release = hook_release;
-        vk.hook_context = hook_context;
+        memcpy(vk.hooks, hooks, sizeof(hooks));
+        vk.hook_count = hook_count;
     }
 }
