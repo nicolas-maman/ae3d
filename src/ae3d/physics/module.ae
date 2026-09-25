@@ -341,10 +341,7 @@ physics_free(p: *Physics) {
     count = list.size(p.ragdolls)
     i = 0
     while i < count {
-        r = list.get_raw(p.ragdolls, i) as *Ragdoll
-        human.destroy_human(&r.human)
-        list.free(r.bones)
-        heap.free(r)
+        ragdoll_let_go(list.get_raw(p.ragdolls, i) as *Ragdoll)
         i = i + 1
     }
     count = list.size(p.characters)
@@ -1768,13 +1765,21 @@ ragdoll_kick(r: *Ragdoll, angular_impulse: Vec3) { human.human_apply_angular_imp
 // The ragdoll out of the world; its bone objects stay the scene's to remove.
 ragdoll_free(r: *Ragdoll) {
     p = r.physics as *Physics
-    human.destroy_human(&r.human)
     n = list.size(p.ragdolls)
     i = 0
     while i < n {
         if list.get_raw(p.ragdolls, i) == r as ptr { list.remove(p.ragdolls, i); break }
         i = i + 1
     }
+    ragdoll_let_go(r)
+}
+
+// A ragdoll's own: its bodies and joints, and everything a controller or a
+// figure hung on it -- aims, poses, the rig it wears. Whether freed alone or
+// with the world: freed with the world, only the humanoid and the bone list
+// went, and a dressed ragdoll lost its rig's bone table with every engine.
+ragdoll_let_go(r: *Ragdoll) {
+    human.destroy_human(&r.human)
     list.free(r.bones)
     if r.aims != null { free(r.aims) }
     if r.anim != null { free(r.anim) }
