@@ -23,6 +23,7 @@ import ae3d.posing
 import ae3d.geometry
 import ae3d.glapi
 import ae3d.offscreen
+import ae3d.picture
 
 exports (
     GLRenderer, ProgramSlots, TextureEntry, Skybox,
@@ -47,21 +48,10 @@ exports (
 )
 
 extern calloc(count: int, size: int) -> ptr
-extern ae3d_image_pixels(img: ptr) -> ptr
 extern glfwGetCurrentContext() -> ptr
 extern strlen(s: ptr) -> int
 extern pow(x: float, y: float) -> float
-extern ae3d_image_width(img: ptr) -> int
-extern ae3d_image_height(img: ptr) -> int
 extern free(p: ptr)
-
-extern ae3d_image_load(path: string) -> ptr
-extern ae3d_image_fit(img: ptr, limit: int) -> int
-extern ae3d_image_width(image: ptr) -> int
-extern ae3d_image_height(image: ptr) -> int
-extern ae3d_image_solid(width: int, height: int, r: int, g: int, b: int, a: int) -> ptr
-extern ae3d_image_free(img: ptr)
-extern ae3d_image_error() -> string
 
 // --- pass timers, framebuffers, readback and the meter, in Aether (#398) ---------------------
 
@@ -836,9 +826,9 @@ texture_params(target: int, wrap: int, three: bool, mag: int, min: int) {
 }
 
 gl_texture_from_image(img: ptr, srgb: int, mipmap: int) -> int {
-    pixels = ae3d_image_pixels(img)
-    width = ae3d_image_width(img)
-    height = ae3d_image_height(img)
+    pixels = picture.pixels(img)
+    width = picture.width(img)
+    height = picture.height(img)
     if pixels == null || width <= 0 || height <= 0 { return 0 }
     texture = new_texture(glapi.TEXTURE_2D)
     internal = glapi.RGBA
@@ -2176,13 +2166,13 @@ renderer_init(r: *GLRenderer, window: ptr, width: int, height: int) -> int {
 }
 
 create_default_texture(r: *GLRenderer) -> int {
-    image = ae3d_image_solid(2, 2, 255, 255, 255, 255)
+    image = picture.solid(2, 2, 255, 255, 255, 255)
     if image == null {
-        println("ae3d: default texture unavailable: ${ae3d_image_error()}")
+        println("ae3d: default texture unavailable: ${picture.error()}")
         return 0
     }
     id = gl_texture_from_image(image, 0, 0)
-    ae3d_image_free(image)
+    picture.dispose(image)
     return id
 }
 
@@ -2201,23 +2191,23 @@ renderer_load_texture(r: *GLRenderer, path: string) -> int {
     }
 
     image = core.take_preloaded_image(path)
-    if image == null { image = ae3d_image_load(path) }
+    if image == null { image = picture.load(path) }
     if image == null {
-        println("ae3d: texture load failed: ${ae3d_image_error()}")
+        println("ae3d: texture load failed: ${picture.error()}")
         return 0
     }
     // Larger than the device takes (a 21,600-wide map on a device whose
     // textures stop at 16,384): drawn at the most it has, not refused.
-    halvings = ae3d_image_fit(image, gl_max_texture_size())
+    halvings = picture.fit(image, gl_max_texture_size())
     if halvings > 0 { println("ae3d: ${path} is larger than this device's textures; halved ${halvings} time(s) to fit") }
     id = gl_texture_from_image(image, 0, 1)
     // Read before the image is released. How many pixels an image has is half
     // of what decides whether a surface carries enough detail to be looked at
     // closely; the other half is how far its UVs stretch, and neither is
     // recoverable from a texture handle afterwards.
-    width = ae3d_image_width(image)
-    height = ae3d_image_height(image)
-    ae3d_image_free(image)
+    width = picture.width(image)
+    height = picture.height(image)
+    picture.dispose(image)
     if id == 0 { return 0 }
 
     entry = heap.new(TextureEntry)

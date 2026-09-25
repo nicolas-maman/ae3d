@@ -1,0 +1,1688 @@
+// Image files to RGBA: what a texture is made from.
+//
+// PNG, JPEG, TGA and BMP, decoded here in Aether (the JPEG in ae3d.jpeg,
+// the PNG's deflate in ae3d.inflate) where they were decoded by the
+// vendored stb_image. Each decoder is stb's, followed step for step, and
+// each is held to it byte for byte (tests/test_image_decode): an image
+// the engine drew before draws the same now. Whatever the file, a
+// picture is 8-bit RGBA with its bottom row first, the order both
+// renderers upload in.
+//
+//   img = picture.load("brick.png")            // null on failure: picture.error()
+//   picture.fit(img, device_limit)             // halved until it fits
+//   upload(picture.pixels(img), picture.width(img), picture.height(img))
+//   picture.dispose(img)
+//
+// Covered: PNG in every colour type and bit depth (1, 2, 4, 8, 16), with
+// palettes, tRNS transparency and Adam7 interlacing; JPEG baseline and
+// progressive, any subsampling, restart markers, greyscale, CMYK;
+// TGA uncompressed and RLE, 8/15/16/24/32 bits, palettes, either origin;
+// BMP 1/4/8-bit palettes and 16/24/32 bits with or without bitfields,
+// bottom-up or top-down. Every read is bounds-checked; a file that is not
+// what it says fails with a reason, and never reads past its end.
+//
+// Images the program made rather than read (a palette a mesher wrote, a
+// map a tool painted) are registered under a name, and load() answers
+// that name as it would a file, so a model textured from memory is set
+// up like any other. Their rows are stored bottom first too.
+//
+// A decode keeps everything it touches to itself: the engine decodes a
+// scene's textures across its worker threads at once. The last failure's
+// reason is kept in one fixed buffer, the one thing the threads share.
+
+import std.string
+import std.list
+import ae3d.inflate
+import ae3d.jpeg
+
+exports (
+    load, from_memory, solid, register_rgba, unregister, fit, dispose,
+    width, height, pixels, error
+)
+
+extern fopen(path: string, mode: string) -> ptr
+extern fclose(f: ptr) -> int
+extern fread(buffer: ptr, size: long, count: long, f: ptr) -> long
+extern fseek(f: ptr, offset: long, whence: int) -> int
+extern ftell(f: ptr) -> long
+extern malloc(size: long) -> ptr
+extern calloc(count: long, size: long) -> ptr
+extern realloc(p: ptr, size: long) -> ptr
+extern free(p: ptr)
+extern memcpy(dst: ptr, src: ptr, n: long) -> ptr
+
+const SEEK_SET = 0
+const SEEK_END = 2
+const MAX_DIMENSION = 16777216
+const INT_MAX = 2147483647
+
+// Why a decode failed. JPEG's own reasons are offset by F_JPEG, the
+// deflate stream's by F_INFLATE.
+const F_NONE = 0
+const F_UNKNOWN = 1
+const F_MEMORY = 2
+const F_LARGE = 3
+const F_PNG_MULTIPLE_IHDR = 11
+const F_PNG_IHDR_LENGTH = 12
+const F_PNG_DEPTH = 13
+const F_PNG_COLOUR = 14
+const F_PNG_COMPRESSION = 15
+const F_PNG_FILTER_METHOD = 16
+const F_PNG_INTERLACE = 17
+const F_PNG_EMPTY = 18
+const F_PNG_FIRST = 19
+const F_PNG_PLTE = 20
+const F_PNG_TRNS_AFTER_IDAT = 21
+const F_PNG_TRNS_BEFORE_PLTE = 22
+const F_PNG_TRNS_LENGTH = 23
+const F_PNG_TRNS_ALPHA = 24
+const F_PNG_NO_PLTE = 25
+const F_PNG_IDAT_SIZE = 26
+const F_PNG_OUT_OF_DATA = 27
+const F_PNG_NO_IDAT = 28
+const F_PNG_CHUNK = 29
+const F_PNG_NOT_ENOUGH = 30
+const F_PNG_BAD_FILTER = 31
+const F_TGA_FORMAT = 40
+const F_TGA_PALETTE = 41
+const F_TGA_SHORT = 42
+const F_BMP_TYPE = 50
+const F_BMP_RLE = 51
+const F_BMP_COMPRESSION = 52
+const F_BMP_BAD = 53
+const F_BMP_HEADER = 54
+const F_BMP_OFFSET = 55
+const F_BMP_PALETTE = 56
+const F_BMP_BPP = 57
+const F_BMP_MASKS = 58
+const F_BMP_SHORT = 59
+const F_JPEG = 1000
+const F_INFLATE = 2000
+
+// The first row of a PNG has no row above it: each filter becomes the one
+// that reads no row above (average of nothing above is its own filter, 5;
+// Paeth with nothing above is Sub).
+const FIRST_ROW_FILTER: int[5] = [0, 1, 0, 5, 1]
+const DEPTH_SCALE: int[9] = [0, 255, 85, 0, 17, 0, 0, 0, 1]
+
+// Adam7: where each pass starts and how far apart its pixels are.
+const ADAM7_X0: int[7] = [0, 4, 0, 2, 0, 1, 0]
+const ADAM7_Y0: int[7] = [0, 0, 4, 0, 2, 0, 1]
+const ADAM7_DX: int[7] = [8, 8, 4, 4, 2, 2, 1]
+const ADAM7_DY: int[7] = [8, 8, 8, 4, 4, 2, 2]
+
+struct Picture {
+    pixels: ptr                    // width * height * 4 bytes, RGBA, bottom row first
+    width: int
+    height: int
+}
+
+struct PictureNamed {
+    name: string
+    pixels: ptr
+    width: int
+    height: int
+}
+
+// A file's bytes and the place a decoder has read to. Reading past the
+// end gives zeros, as stb's reader did, so a truncated file decodes to
+// what it has or fails a check -- it never reads memory it does not own.
+struct PictureReader {
+    data: ptr
+    at: int
+    end: int
+    failure: int
+}
+
+// A PNG's header and what its ancillary chunks said, for the passes.
+struct PicturePng {
+    width: int
+    height: int
+    depth: int
+    colour: int
+    img_n: int                     // samples a pixel before the palette
+    has_trans: int
+    tc0: int                       // the tRNS colour: 8-bit (scaled) or 16-bit
+    tc1: int
+    tc2: int
+    palette: ptr                   // byte[1024], RGBA a palette entry
+    paletted: int
+    out: ptr                       // the RGBA being written
+}
+
+var g_named: ptr = null            // list of *PictureNamed
+var g_error: ptr = null            // byte[512], the last failure's reason
+
+// --- the last failure -------------------------------------------------------------
+
+// Written as bytes into a buffer allocated once and never freed or moved:
+// threads that fail together interleave their words at worst, and the
+// buffer's last byte is never written, so a reader always meets an end.
+set_error(prefix: string, text: string) {
+    if g_error == null { g_error = calloc(512 as long, 1 as long) }
+    if g_error == null { return }
+    b = g_error as uint8[]
+    n = 0
+    if prefix != "" {
+        i = 0
+        plen = string.length(prefix)
+        while i < plen && n < 400 {
+            b[n] = string.char_at(prefix, i)
+            n = n + 1
+            i = i + 1
+        }
+        b[n] = 58
+        b[n + 1] = 32
+        n = n + 2
+    }
+    i = 0
+    tlen = string.length(text)
+    while i < tlen && n < 510 {
+        b[n] = string.char_at(text, i)
+        n = n + 1
+        i = i + 1
+    }
+    b[n] = 0
+}
+
+// Why the last load, decode or registration failed.
+error() -> string {
+    if g_error == null { return "" }
+    return g_error
+}
+
+reason(code: int) -> string {
+    if code >= F_INFLATE { return inflate.reason(code - F_INFLATE) }
+    if code >= F_JPEG { return jpeg.reason(code - F_JPEG) }
+    if code == F_UNKNOWN { return "unknown image type, or corrupt" }
+    if code == F_MEMORY { return "out of memory" }
+    if code == F_LARGE { return "image too large" }
+    if code == F_PNG_MULTIPLE_IHDR { return "multiple IHDR (corrupt PNG)" }
+    if code == F_PNG_IHDR_LENGTH { return "bad IHDR length (corrupt PNG)" }
+    if code == F_PNG_DEPTH { return "PNG not supported: 1/2/4/8/16-bit only" }
+    if code == F_PNG_COLOUR { return "bad colour type (corrupt PNG)" }
+    if code == F_PNG_COMPRESSION { return "bad compression method (corrupt PNG)" }
+    if code == F_PNG_FILTER_METHOD { return "bad filter method (corrupt PNG)" }
+    if code == F_PNG_INTERLACE { return "bad interlace method (corrupt PNG)" }
+    if code == F_PNG_EMPTY { return "0-pixel image (corrupt PNG)" }
+    if code == F_PNG_FIRST { return "first chunk not IHDR (corrupt PNG)" }
+    if code == F_PNG_PLTE { return "invalid PLTE (corrupt PNG)" }
+    if code == F_PNG_TRNS_AFTER_IDAT { return "tRNS after IDAT (corrupt PNG)" }
+    if code == F_PNG_TRNS_BEFORE_PLTE { return "tRNS before PLTE (corrupt PNG)" }
+    if code == F_PNG_TRNS_LENGTH { return "bad tRNS length (corrupt PNG)" }
+    if code == F_PNG_TRNS_ALPHA { return "tRNS with alpha (corrupt PNG)" }
+    if code == F_PNG_NO_PLTE { return "no PLTE (corrupt PNG)" }
+    if code == F_PNG_IDAT_SIZE { return "IDAT section larger than 2^30 bytes" }
+    if code == F_PNG_OUT_OF_DATA { return "file ends inside a chunk (corrupt PNG)" }
+    if code == F_PNG_NO_IDAT { return "no IDAT (corrupt PNG)" }
+    if code == F_PNG_CHUNK { return "PNG not supported: unknown critical chunk" }
+    if code == F_PNG_NOT_ENOUGH { return "not enough pixels (corrupt PNG)" }
+    if code == F_PNG_BAD_FILTER { return "invalid filter (corrupt PNG)" }
+    if code == F_TGA_FORMAT { return "unsupported TGA pixel format" }
+    if code == F_TGA_PALETTE { return "bad palette (corrupt TGA)" }
+    if code == F_TGA_SHORT { return "file ends before its pixels do (truncated TGA)" }
+    if code == F_BMP_TYPE { return "BMP type not supported: unknown header" }
+    if code == F_BMP_RLE { return "BMP type not supported: RLE" }
+    if code == F_BMP_COMPRESSION { return "BMP type not supported: unsupported compression" }
+    if code == F_BMP_BAD { return "bad BMP" }
+    if code == F_BMP_HEADER { return "bad header (corrupt BMP)" }
+    if code == F_BMP_OFFSET { return "bad pixel offset (corrupt BMP)" }
+    if code == F_BMP_PALETTE { return "bad palette (corrupt BMP)" }
+    if code == F_BMP_BPP { return "bad bits per pixel (corrupt BMP)" }
+    if code == F_BMP_MASKS { return "bad bitfield masks (corrupt BMP)" }
+    if code == F_BMP_SHORT { return "file ends before its pixels do (truncated BMP)" }
+    return "decode failed"
+}
+
+// --- the handle ---------------------------------------------------------------------
+
+wrap(rgba: ptr, w: int, h: int) -> ptr {
+    img = heap.new(Picture)
+    img.pixels = rgba
+    img.width = w
+    img.height = h
+    return img as ptr
+}
+
+width(handle: ptr) -> int {
+    if handle == null { return 0 }
+    img = handle as *Picture
+    return img.width
+}
+
+height(handle: ptr) -> int {
+    if handle == null { return 0 }
+    img = handle as *Picture
+    return img.height
+}
+
+pixels(handle: ptr) -> ptr {
+    if handle == null { return null }
+    img = handle as *Picture
+    return img.pixels
+}
+
+dispose(handle: ptr) {
+    if handle == null { return }
+    img = handle as *Picture
+    if img.pixels != null { free(img.pixels) }
+    heap.free(img)
+}
+
+// A width x height picture of one colour.
+solid(w: int, h: int, r: int, g: int, b: int, a: int) -> ptr {
+    if w <= 0 || h <= 0 {
+        set_error("", "bad dimensions")
+        return null
+    }
+    if (w as long) * (h as long) * (4 as long) > (INT_MAX as long) {
+        set_error("", "image too large")
+        return null
+    }
+    count = w * h
+    rgba = malloc((count as long) * (4 as long))
+    if rgba == null {
+        set_error("", "out of memory")
+        return null
+    }
+    o = rgba as uint8[]
+    i = 0
+    p = 0
+    while i < count {
+        o[p] = r
+        o[p + 1] = g
+        o[p + 2] = b
+        o[p + 3] = a
+        p = p + 4
+        i = i + 1
+    }
+    return wrap(rgba, w, h)
+}
+
+// Halve the picture, a 2 x 2 box a texel, until neither side is past
+// `limit`: the largest texture the device creates. A 21,600-wide map is a
+// valid file and a texture no device under 32,768 can hold; it is drawn
+// at the most the device has instead of failing to be created. Answers
+// how many halvings it took, 0 when it already fit, -1 when memory ran
+// out (left as it was).
+fit(handle: ptr, limit: int) -> int {
+    if handle == null || limit <= 0 { return 0 }
+    img = handle as *Picture
+    if img.pixels == null { return 0 }
+    halvings = 0
+    while img.width > limit || img.height > limit {
+        w = 1
+        h = 1
+        if img.width > 1 { w = img.width / 2 }
+        if img.height > 1 { h = img.height / 2 }
+        out = malloc((w as long) * (h as long) * (4 as long))
+        if out == null { return -1 }
+        src = img.pixels as uint8[]
+        o = out as uint8[]
+        stride = img.width * 4
+        y = 0
+        while y < h {
+            y0 = img.height - 1
+            if y * 2 < img.height { y0 = y * 2 }
+            y1 = y0
+            if y0 + 1 < img.height { y1 = y0 + 1 }
+            r0 = y0 * stride
+            r1 = y1 * stride
+            p = y * w * 4
+            x = 0
+            while x < w {
+                x0 = img.width - 1
+                if x * 2 < img.width { x0 = x * 2 }
+                x1 = x0
+                if x0 + 1 < img.width { x1 = x0 + 1 }
+                a = x0 * 4
+                b = x1 * 4
+                c = 0
+                while c < 4 {
+                    sum = (src[r0 + a + c] as int) + (src[r0 + b + c] as int) + (src[r1 + a + c] as int) + (src[r1 + b + c] as int)
+                    o[p + c] = (sum + 2) / 4
+                    c = c + 1
+                }
+                p = p + 4
+                x = x + 1
+            }
+            y = y + 1
+        }
+        free(img.pixels)
+        img.pixels = out
+        img.width = w
+        img.height = h
+        halvings = halvings + 1
+    }
+    return halvings
+}
+
+// --- images registered by name -------------------------------------------------------
+
+find_named(name: string) -> ptr {
+    if g_named == null { return null }
+    i = 0
+    n = list.size(g_named)
+    while i < n {
+        entry = list.get_raw(g_named, i) as *PictureNamed
+        if string.equals(entry.name, name) == 1 { return entry as ptr }
+        i = i + 1
+    }
+    return null
+}
+
+// Keep a copy of `rgba` (width * height * 4 bytes, bottom row first) under
+// `name`, replacing what was there. 1 on success.
+register_rgba(name: string, rgba: ptr, w: int, h: int) -> int {
+    if name == "" || rgba == null || w <= 0 || h <= 0 {
+        set_error("", "bad registered image")
+        return 0
+    }
+    bytes = (w as long) * (h as long) * (4 as long)
+    copy = malloc(bytes)
+    if copy == null {
+        set_error("", "out of memory")
+        return 0
+    }
+    memcpy(copy, rgba, bytes)
+    found = find_named(name)
+    if found != null {
+        entry = found as *PictureNamed
+        free(entry.pixels)
+        entry.pixels = copy
+        entry.width = w
+        entry.height = h
+        return 1
+    }
+    if g_named == null { g_named = list.new() }
+    entry = heap.new(PictureNamed)
+    entry.name = string.copy(name)
+    entry.pixels = copy
+    entry.width = w
+    entry.height = h
+    list.add_raw(g_named, entry as ptr)
+    return 1
+}
+
+unregister(name: string) {
+    if g_named == null || name == "" { return }
+    i = 0
+    n = list.size(g_named)
+    while i < n {
+        entry = list.get_raw(g_named, i) as *PictureNamed
+        if string.equals(entry.name, name) == 1 {
+            free(entry.pixels)
+            heap.free(entry)
+            list.remove(g_named, i)
+            return
+        }
+        i = i + 1
+    }
+}
+
+// --- reading bytes -----------------------------------------------------------------
+
+get8(r: *PictureReader) -> int {
+    if r.at >= r.end { return 0 }
+    b = r.data as uint8[]
+    v = b[r.at] as int
+    r.at = r.at + 1
+    return v
+}
+
+get16be(r: *PictureReader) -> int {
+    hi = get8(r)
+    return (hi << 8) | get8(r)
+}
+
+get16le(r: *PictureReader) -> int {
+    lo = get8(r)
+    return lo | (get8(r) << 8)
+}
+
+get32be(r: *PictureReader) -> long {
+    hi = get16be(r) as long
+    return (hi << 16) | (get16be(r) as long)
+}
+
+get32le(r: *PictureReader) -> long {
+    lo = get16le(r) as long
+    return lo | ((get16le(r) as long) << 16)
+}
+
+// Past the end, or backwards (a negative count), leaves the reader at the
+// end: everything after reads as zero.
+skip(r: *PictureReader, n: long) {
+    if n == (0 as long) { return }
+    if n < (0 as long) || n > ((r.end - r.at) as long) {
+        r.at = r.end
+        return
+    }
+    r.at = r.at + (n as int)
+}
+
+fail(r: *PictureReader, code: int) -> ptr {
+    if r.failure == F_NONE { r.failure = code }
+    return null
+}
+
+// RGBA as the caller wants it, width * height * 4 bytes, or null when an
+// int cannot address it.
+new_rgba(r: *PictureReader, w: int, h: int) -> ptr {
+    if (w as long) * (h as long) * (4 as long) > (INT_MAX as long) {
+        fail(r, F_LARGE)
+        return null
+    }
+    out = calloc((w as long) * (h as long) * (4 as long), 1 as long)
+    if out == null { fail(r, F_MEMORY) }
+    return out
+}
+
+// --- PNG -----------------------------------------------------------------------------
+
+paeth(a: int, b: int, c: int) -> int {
+    thresh = c * 3 - (a + b)
+    lo = a
+    hi = b
+    if b < a {
+        lo = b
+        hi = a
+    }
+    t0 = c
+    if hi <= thresh { t0 = lo }
+    if thresh <= lo { return hi }
+    return t0
+}
+
+// One row's samples, unfiltered in `cur`, into RGBA: pixel i of the row
+// goes to (x0 + i * dx) of output row `row` (counted from the top).
+png_row(p: *PicturePng, cur: ptr, pw: int, row: int, x0: int, dx: int) {
+    c = cur as uint8[]
+    o = p.out as uint8[]
+    at = (p.height - 1 - row) * p.width * 4 + x0 * 4
+    step = dx * 4
+    depth = p.depth
+    i = 0
+    if depth == 8 {
+        if p.colour == 6 {
+            if dx == 1 {
+                memcpy(p.out + at, cur, (pw * 4) as long)
+                return
+            }
+            s = 0
+            while i < pw {
+                o[at] = c[s]
+                o[at + 1] = c[s + 1]
+                o[at + 2] = c[s + 2]
+                o[at + 3] = c[s + 3]
+                s = s + 4
+                at = at + step
+                i = i + 1
+            }
+            return
+        }
+        if p.colour == 2 {
+            s = 0
+            while i < pw {
+                r = c[s] as int
+                g = c[s + 1] as int
+                b = c[s + 2] as int
+                o[at] = r
+                o[at + 1] = g
+                o[at + 2] = b
+                a = 255
+                if p.has_trans != 0 && r == p.tc0 && g == p.tc1 && b == p.tc2 { a = 0 }
+                o[at + 3] = a
+                s = s + 3
+                at = at + step
+                i = i + 1
+            }
+            return
+        }
+        if p.colour == 4 {
+            s = 0
+            while i < pw {
+                v = c[s]
+                o[at] = v
+                o[at + 1] = v
+                o[at + 2] = v
+                o[at + 3] = c[s + 1]
+                s = s + 2
+                at = at + step
+                i = i + 1
+            }
+            return
+        }
+    }
+    if depth == 16 {
+        // The top byte of each sample, as stb reduced sixteen bits to
+        // eight; transparency compares all sixteen.
+        n = p.img_n
+        s = 0
+        while i < pw {
+            v0 = ((c[s] as int) << 8) | (c[s + 1] as int)
+            if n == 1 || n == 2 {
+                o[at] = c[s]
+                o[at + 1] = c[s]
+                o[at + 2] = c[s]
+                if n == 2 {
+                    o[at + 3] = c[s + 2]
+                } else if p.has_trans != 0 && v0 == p.tc0 {
+                    o[at + 3] = 0
+                } else {
+                    o[at + 3] = 255
+                }
+            } else {
+                o[at] = c[s]
+                o[at + 1] = c[s + 2]
+                o[at + 2] = c[s + 4]
+                if n == 4 {
+                    o[at + 3] = c[s + 6]
+                } else {
+                    v1 = ((c[s + 2] as int) << 8) | (c[s + 3] as int)
+                    v2 = ((c[s + 4] as int) << 8) | (c[s + 5] as int)
+                    if p.has_trans != 0 && v0 == p.tc0 && v1 == p.tc1 && v2 == p.tc2 {
+                        o[at + 3] = 0
+                    } else {
+                        o[at + 3] = 255
+                    }
+                }
+            }
+            s = s + n * 2
+            at = at + step
+            i = i + 1
+        }
+        return
+    }
+    // One sample a pixel: a grey level or a palette index, at 1, 2, 4 or
+    // 8 bits; grey is scaled to 0..255 as stb scaled it.
+    scale = 1
+    if p.colour == 0 { scale = DEPTH_SCALE[depth] }
+    pal = p.palette as uint8[]
+    while i < pw {
+        v = 0
+        if depth == 8 {
+            v = c[i] as int
+        } else if depth == 4 {
+            v = ((c[i >> 1] as int) >> (4 - ((i & 1) << 2))) & 15
+        } else if depth == 2 {
+            v = ((c[i >> 2] as int) >> (6 - ((i & 3) << 1))) & 3
+        } else {
+            v = ((c[i >> 3] as int) >> (7 - (i & 7))) & 1
+        }
+        v = (v * scale) & 255
+        if p.paletted != 0 {
+            q = v * 4
+            o[at] = pal[q]
+            o[at + 1] = pal[q + 1]
+            o[at + 2] = pal[q + 2]
+            o[at + 3] = pal[q + 3]
+        } else {
+            o[at] = v
+            o[at + 1] = v
+            o[at + 2] = v
+            a = 255
+            if p.has_trans != 0 && v == p.tc0 { a = 0 }
+            o[at + 3] = a
+        }
+        at = at + step
+        i = i + 1
+    }
+}
+
+// One pass (or the whole of a plain image): pw x ph pixels whose filtered
+// rows start at `raw`, `avail` bytes of them. Answers how many bytes it
+// used, or -1 with the reason in the reader.
+png_pass(r: *PictureReader, p: *PicturePng, raw: ptr, avail: long, pw: int, ph: int, x0: int, y0: int, dx: int, dy: int) -> long {
+    bytes = 1
+    if p.depth == 16 { bytes = 2 }
+    wb = ((p.img_n as long) * (pw as long) * (p.depth as long) + (7 as long)) >> 3
+    need = (wb + (1 as long)) * (ph as long)
+    if avail < need {
+        fail(r, F_PNG_NOT_ENOUGH)
+        return -1 as long
+    }
+    nk = wb as int
+    fb = p.img_n * bytes
+    if p.depth < 8 { fb = 1 }
+    buf = malloc((nk * 2 + 2) as long)
+    if buf == null {
+        fail(r, F_MEMORY)
+        return -1 as long
+    }
+    src = raw as uint8[]
+    off = 0
+    j = 0
+    while j < ph {
+        cur_at = (j & 1) * nk
+        prior_at = ((j + 1) & 1) * nk
+        cur = (buf + cur_at) as uint8[]
+        prior = (buf + prior_at) as uint8[]
+        filter = src[off] as int
+        off = off + 1
+        if filter > 4 {
+            free(buf)
+            fail(r, F_PNG_BAD_FILTER)
+            return -1 as long
+        }
+        if j == 0 { filter = FIRST_ROW_FILTER[filter] }
+        k = 0
+        if filter == 0 {
+            memcpy(buf + cur_at, raw + off, nk as long)
+        } else if filter == 1 {
+            while k < fb && k < nk {
+                cur[k] = src[off + k]
+                k = k + 1
+            }
+            while k < nk {
+                cur[k] = ((src[off + k] as int) + (cur[k - fb] as int)) & 255
+                k = k + 1
+            }
+        } else if filter == 2 {
+            while k < nk {
+                cur[k] = ((src[off + k] as int) + (prior[k] as int)) & 255
+                k = k + 1
+            }
+        } else if filter == 3 {
+            while k < fb && k < nk {
+                cur[k] = ((src[off + k] as int) + ((prior[k] as int) >> 1)) & 255
+                k = k + 1
+            }
+            while k < nk {
+                cur[k] = ((src[off + k] as int) + (((prior[k] as int) + (cur[k - fb] as int)) >> 1)) & 255
+                k = k + 1
+            }
+        } else if filter == 4 {
+            while k < fb && k < nk {
+                cur[k] = ((src[off + k] as int) + (prior[k] as int)) & 255
+                k = k + 1
+            }
+            while k < nk {
+                cur[k] = ((src[off + k] as int) + paeth(cur[k - fb] as int, prior[k] as int, prior[k - fb] as int)) & 255
+                k = k + 1
+            }
+        } else {
+            // Average on the first row: half the byte to the left.
+            while k < fb && k < nk {
+                cur[k] = src[off + k]
+                k = k + 1
+            }
+            while k < nk {
+                cur[k] = ((src[off + k] as int) + ((cur[k - fb] as int) >> 1)) & 255
+                k = k + 1
+            }
+        }
+        off = off + nk
+        png_row(p, buf + cur_at, pw, y0 + j * dy, x0, dx)
+        j = j + 1
+    }
+    free(buf)
+    return need
+}
+
+// How many bytes of filtered rows the image is made of: a filter byte and
+// the packed samples a row, every row of every pass.
+png_need(p: *PicturePng, interlace: int) -> long {
+    if interlace == 0 {
+        wb = ((p.img_n as long) * (p.width as long) * (p.depth as long) + (7 as long)) >> 3
+        return (wb + (1 as long)) * (p.height as long)
+    }
+    total = 0 as long
+    pass = 0
+    while pass < 7 {
+        pw = (p.width - ADAM7_X0[pass] + ADAM7_DX[pass] - 1) / ADAM7_DX[pass]
+        ph = (p.height - ADAM7_Y0[pass] + ADAM7_DY[pass] - 1) / ADAM7_DY[pass]
+        if pw > 0 && ph > 0 {
+            wb = ((p.img_n as long) * (pw as long) * (p.depth as long) + (7 as long)) >> 3
+            total = total + (wb + (1 as long)) * (ph as long)
+        }
+        pass = pass + 1
+    }
+    return total
+}
+
+png_build(r: *PictureReader, p: *PicturePng, raw: ptr, raw_len: long, interlace: int) -> bool {
+    p.out = new_rgba(r, p.width, p.height)
+    if p.out == null { return false }
+    if interlace == 0 {
+        return png_pass(r, p, raw, raw_len, p.width, p.height, 0, 0, 1, 1) >= (0 as long)
+    }
+    at = 0 as long
+    pass = 0
+    while pass < 7 {
+        pw = (p.width - ADAM7_X0[pass] + ADAM7_DX[pass] - 1) / ADAM7_DX[pass]
+        ph = (p.height - ADAM7_Y0[pass] + ADAM7_DY[pass] - 1) / ADAM7_DY[pass]
+        if pw > 0 && ph > 0 {
+            used = png_pass(r, p, raw + (at as int), raw_len - at, pw, ph, ADAM7_X0[pass], ADAM7_Y0[pass], ADAM7_DX[pass], ADAM7_DY[pass])
+            if used < (0 as long) { return false }
+            at = at + used
+        }
+        pass = pass + 1
+    }
+    return true
+}
+
+const T_IHDR = 1229472850
+const T_PLTE = 1347179589
+const T_TRNS = 1951551059
+const T_IDAT = 1229209940
+const T_IEND = 1229278788
+const T_CGBI = 1130840649
+
+is_png(r: *PictureReader) -> bool {
+    if r.end < 8 { return false }
+    b = r.data as uint8[]
+    return (b[0] as int) == 137 && (b[1] as int) == 80 && (b[2] as int) == 78 && (b[3] as int) == 71 &&
+           (b[4] as int) == 13 && (b[5] as int) == 10 && (b[6] as int) == 26 && (b[7] as int) == 10
+}
+
+png_decode(r: *PictureReader, dims_block: ptr) -> ptr {
+    dims = dims_block as int[]
+    r.at = 8
+    p = heap.new(PicturePng)
+    p.palette = calloc(1024 as long, 1 as long)
+    tc_block = calloc(3 as long, 4 as long)
+    tc16 = tc_block as int[]
+    pal = p.palette as uint8[]
+    first = true
+    idata = null
+    ioff = 0 as long
+    limit = 0 as long
+    pal_len = 0
+    pal_img_n = 0
+    interlace = 0
+    is_iphone = false
+    result = null
+    done = false
+    while !done {
+        length = get32be(r)
+        kind = get32be(r)
+        if kind == (T_CGBI as long) {
+            is_iphone = true
+            skip(r, length)
+        } else if kind == (T_IHDR as long) {
+            if !first { done = true; fail(r, F_PNG_MULTIPLE_IHDR) }
+            first = false
+            if !done && length != (13 as long) { done = true; fail(r, F_PNG_IHDR_LENGTH) }
+            if !done {
+                w = get32be(r)
+                h = get32be(r)
+                if w > (MAX_DIMENSION as long) || h > (MAX_DIMENSION as long) { done = true; fail(r, F_LARGE) }
+                p.width = w as int
+                p.height = h as int
+            }
+            if !done {
+                p.depth = get8(r)
+                d = p.depth
+                if d != 1 && d != 2 && d != 4 && d != 8 && d != 16 { done = true; fail(r, F_PNG_DEPTH) }
+            }
+            if !done {
+                p.colour = get8(r)
+                if p.colour > 6 { done = true; fail(r, F_PNG_COLOUR) }
+                if !done && p.colour == 3 && p.depth == 16 { done = true; fail(r, F_PNG_COLOUR) }
+                if !done && p.colour == 3 {
+                    pal_img_n = 3
+                } else if !done && (p.colour & 1) != 0 {
+                    done = true
+                    fail(r, F_PNG_COLOUR)
+                }
+            }
+            if !done && get8(r) != 0 { done = true; fail(r, F_PNG_COMPRESSION) }
+            if !done && get8(r) != 0 { done = true; fail(r, F_PNG_FILTER_METHOD) }
+            if !done {
+                interlace = get8(r)
+                if interlace > 1 { done = true; fail(r, F_PNG_INTERLACE) }
+            }
+            if !done && (p.width == 0 || p.height == 0) { done = true; fail(r, F_PNG_EMPTY) }
+            if !done {
+                if pal_img_n == 0 {
+                    n = 1
+                    if (p.colour & 2) != 0 { n = 3 }
+                    if (p.colour & 4) != 0 { n = n + 1 }
+                    p.img_n = n
+                    if (1073741824 / p.width) / n < p.height { done = true; fail(r, F_LARGE) }
+                } else {
+                    p.img_n = 1
+                    if (1073741824 / p.width) / 4 < p.height { done = true; fail(r, F_LARGE) }
+                }
+            }
+        } else if kind == (T_PLTE as long) {
+            if first { done = true; fail(r, F_PNG_FIRST) }
+            if !done && length > (768 as long) { done = true; fail(r, F_PNG_PLTE) }
+            if !done {
+                pal_len = (length / (3 as long)) as int
+                if (pal_len as long) * (3 as long) != length { done = true; fail(r, F_PNG_PLTE) }
+            }
+            if !done {
+                i = 0
+                while i < pal_len {
+                    pal[i * 4] = get8(r)
+                    pal[i * 4 + 1] = get8(r)
+                    pal[i * 4 + 2] = get8(r)
+                    pal[i * 4 + 3] = 255
+                    i = i + 1
+                }
+            }
+        } else if kind == (T_TRNS as long) {
+            if first { done = true; fail(r, F_PNG_FIRST) }
+            if !done && idata != null { done = true; fail(r, F_PNG_TRNS_AFTER_IDAT) }
+            if !done && pal_img_n != 0 {
+                if pal_len == 0 { done = true; fail(r, F_PNG_TRNS_BEFORE_PLTE) }
+                if !done && length > (pal_len as long) { done = true; fail(r, F_PNG_TRNS_LENGTH) }
+                if !done {
+                    pal_img_n = 4
+                    i = 0
+                    while i < (length as int) {
+                        pal[i * 4 + 3] = get8(r)
+                        i = i + 1
+                    }
+                }
+            } else if !done {
+                if (p.img_n & 1) == 0 { done = true; fail(r, F_PNG_TRNS_ALPHA) }
+                if !done && length != ((p.img_n * 2) as long) { done = true; fail(r, F_PNG_TRNS_LENGTH) }
+                if !done {
+                    p.has_trans = 1
+                    k = 0
+                    while k < p.img_n && k < 3 {
+                        v = get16be(r)
+                        if p.depth != 16 { v = ((v & 255) * DEPTH_SCALE[p.depth]) & 255 }
+                        tc16[k] = v
+                        k = k + 1
+                    }
+                    p.tc0 = tc16[0]
+                    p.tc1 = tc16[1]
+                    p.tc2 = tc16[2]
+                }
+            }
+        } else if kind == (T_IDAT as long) {
+            if first { done = true; fail(r, F_PNG_FIRST) }
+            if !done && pal_img_n != 0 && pal_len == 0 { done = true; fail(r, F_PNG_NO_PLTE) }
+            if !done && length > (1073741824 as long) { done = true; fail(r, F_PNG_IDAT_SIZE) }
+            if !done && ioff + length > (INT_MAX as long) { done = true; fail(r, F_PNG_IDAT_SIZE) }
+            if !done && ioff + length > limit {
+                if limit == (0 as long) {
+                    limit = 4096 as long
+                    if length > limit { limit = length }
+                }
+                while ioff + length > limit { limit = limit * (2 as long) }
+                grown = realloc(idata, limit)
+                if grown == null {
+                    done = true
+                    fail(r, F_MEMORY)
+                } else {
+                    idata = grown
+                }
+            }
+            if !done {
+                if length > ((r.end - r.at) as long) {
+                    done = true
+                    fail(r, F_PNG_OUT_OF_DATA)
+                } else {
+                    memcpy(idata + (ioff as int), r.data + r.at, length)
+                    r.at = r.at + (length as int)
+                    ioff = ioff + length
+                }
+            }
+        } else if kind == (T_IEND as long) {
+            done = true
+            need = 0 as long
+            if first { fail(r, F_PNG_FIRST) }
+            if r.failure == F_NONE && idata == null { fail(r, F_PNG_NO_IDAT) }
+            if r.failure == F_NONE {
+                // Deflate makes at most 1032 bytes of each one it is given (a
+                // 258-byte match in two bits): a header asking for more rows
+                // than that is corrupt, and is refused before anything is
+                // allocated for them.
+                need = png_need(p, interlace)
+                if need > ioff * (1032 as long) + (4096 as long) || need > (INT_MAX as long) { fail(r, F_PNG_NOT_ENOUGH) }
+            }
+            if r.failure == F_NONE {
+                bpl = ((p.width as long) * (p.depth as long) + (7 as long)) / (8 as long)
+                guess = bpl * (p.height as long) * (p.img_n as long) + (p.height as long)
+                if guess > need { guess = need }
+                header = 1
+                if is_iphone { header = 0 }
+                // Inflated as far as the rows go: stb went on to the stream's
+                // end, and anything past the rows was never read.
+                z = inflate.zlib(idata, ioff as int, guess as int, need as int, header)
+                if inflate.failed(z) {
+                    fail(r, F_INFLATE + inflate.error_code(z))
+                } else if (inflate.size(z) as long) < need {
+                    fail(r, F_PNG_NOT_ENOUGH)
+                } else {
+                    raw_len = inflate.size(z) as long
+                    raw = inflate.take(z)
+                    if pal_img_n != 0 { p.paletted = 1 }
+                    if png_build(r, p, raw, raw_len, interlace) {
+                        result = p.out
+                        p.out = null
+                        dims[0] = p.width
+                        dims[1] = p.height
+                    }
+                    free(raw)
+                }
+                inflate.done(z)
+            }
+        } else {
+            if first { done = true; fail(r, F_PNG_FIRST) }
+            // An ancillary chunk (bit 29 of its type set) is skipped; a
+            // critical one this does not know cannot be.
+            if !done && (kind & (536870912 as long)) == (0 as long) { done = true; fail(r, F_PNG_CHUNK) }
+            if !done { skip(r, length) }
+        }
+        if !done { get32be(r) }
+    }
+    if idata != null { free(idata) }
+    if p.out != null { free(p.out) }
+    free(p.palette)
+    free(tc_block)
+    heap.free(p)
+    return result
+}
+
+// --- BMP -----------------------------------------------------------------------------
+
+is_bmp(r: *PictureReader) -> bool {
+    r.at = 0
+    ok = get8(r) == 66 && get8(r) == 77
+    if ok {
+        skip(r, 12 as long)
+        sz = get32le(r)
+        ok = sz == (12 as long) || sz == (40 as long) || sz == (56 as long) || sz == (108 as long) || sz == (124 as long)
+    }
+    r.at = 0
+    return ok
+}
+
+high_bit(value: long) -> int {
+    z = value
+    if z == (0 as long) { return -1 }
+    n = 0
+    if z >= (65536 as long) { n = n + 16; z = z >> 16 }
+    if z >= (256 as long) { n = n + 8; z = z >> 8 }
+    if z >= (16 as long) { n = n + 4; z = z >> 4 }
+    if z >= (4 as long) { n = n + 2; z = z >> 2 }
+    if z >= (2 as long) { n = n + 1 }
+    return n
+}
+
+bit_count(value: long) -> int {
+    n = 0
+    z = value
+    while z != (0 as long) {
+        n = n + ((z & (1 as long)) as int)
+        z = z >> 1
+    }
+    return n
+}
+
+const SHIFT_MUL: int[9] = [0, 255, 85, 73, 17, 33, 65, 129, 1]
+const SHIFT_DOWN: int[9] = [0, 0, 0, 1, 0, 2, 4, 6, 0]
+
+// A field of `bits` bits whose top bit `shift` + 7 is, widened to eight
+// bits by repeating its pattern.
+shift_signed(value: long, shift: int, bits: int) -> int {
+    v = value
+    if shift < 0 { v = v << (0 - shift) } else { v = v >> shift }
+    v = (v & (4294967295 as long)) >> (8 - bits)
+    return ((v * (SHIFT_MUL[bits] as long)) & (4294967295 as long)) as int >> SHIFT_DOWN[bits]
+}
+
+bmp_decode(r: *PictureReader, dims_block: ptr) -> ptr {
+    dims = dims_block as int[]
+    r.at = 2
+    get32le(r)
+    get16le(r)
+    get16le(r)
+    offset = get32le(r) as int
+    hsz = get32le(r) as int
+    extra_read = 14
+    mr = 0 as long
+    mg = 0 as long
+    mb = 0 as long
+    ma = 0 as long
+    all_a = 255
+    if offset < 0 { return fail(r, F_BMP_BAD) }
+    if hsz != 12 && hsz != 40 && hsz != 56 && hsz != 108 && hsz != 124 { return fail(r, F_BMP_TYPE) }
+    img_x = 0 as long
+    img_y = 0 as long
+    if hsz == 12 {
+        img_x = get16le(r) as long
+        img_y = get16le(r) as long
+    } else {
+        img_x = get32le(r)
+        img_y = get32le(r)
+    }
+    if get16le(r) != 1 { return fail(r, F_BMP_BAD) }
+    bpp = get16le(r)
+    if hsz != 12 {
+        compress = get32le(r) as int
+        if compress == 1 || compress == 2 { return fail(r, F_BMP_RLE) }
+        if compress >= 4 || compress < 0 { return fail(r, F_BMP_COMPRESSION) }
+        if compress == 3 && bpp != 16 && bpp != 32 { return fail(r, F_BMP_BAD) }
+        skip(r, 20 as long)
+        if hsz == 40 || hsz == 56 {
+            if hsz == 56 { skip(r, 16 as long) }
+            if bpp == 16 || bpp == 32 {
+                if compress == 0 {
+                    if bpp == 16 {
+                        mr = 31744 as long
+                        mg = 992 as long
+                        mb = 31 as long
+                    } else {
+                        mr = 16711680 as long
+                        mg = 65280 as long
+                        mb = 255 as long
+                        ma = 4278190080 as long
+                        // All zero at the end means the alpha was never used.
+                        all_a = 0
+                    }
+                } else {
+                    mr = get32le(r)
+                    mg = get32le(r)
+                    mb = get32le(r)
+                    extra_read = extra_read + 12
+                    if mr == mg && mg == mb { return fail(r, F_BMP_BAD) }
+                }
+            }
+        } else {
+            mr = get32le(r)
+            mg = get32le(r)
+            mb = get32le(r)
+            ma = get32le(r)
+            if compress != 3 {
+                if compress == 0 && bpp == 16 {
+                    mr = 31744 as long
+                    mg = 992 as long
+                    mb = 31 as long
+                } else if compress == 0 && bpp == 32 {
+                    mr = 16711680 as long
+                    mg = 65280 as long
+                    mb = 255 as long
+                    ma = 4278190080 as long
+                    all_a = 0
+                } else {
+                    mr = 0 as long
+                    mg = 0 as long
+                    mb = 0 as long
+                    ma = 0 as long
+                }
+            }
+            skip(r, 52 as long)
+            if hsz == 124 { skip(r, 16 as long) }
+        }
+    }
+    // The height's sign says which way the rows run: up from the bottom
+    // when positive.
+    signed_y = (img_y & (4294967295 as long)) as int
+    if img_y >= (2147483648 as long) { signed_y = (img_y - (4294967296 as long)) as int }
+    flip = signed_y > 0
+    if signed_y < 0 { signed_y = 0 - signed_y }
+    if img_x > (MAX_DIMENSION as long) || (signed_y as long) > (MAX_DIMENSION as long) || signed_y < 0 { return fail(r, F_LARGE) }
+    w = img_x as int
+    h = signed_y
+    psize = 0
+    if hsz == 12 {
+        if bpp < 24 { psize = (offset - extra_read - 24) / 3 }
+    } else {
+        if bpp < 16 { psize = (offset - extra_read - hsz) >> 2 }
+    }
+    if psize == 0 {
+        // A few extra bytes after the header are accepted; an offset before
+        // its end, or far past it, is not.
+        so_far = r.at
+        if so_far <= 0 || so_far > 1024 { return fail(r, F_BMP_HEADER) }
+        if offset < so_far || offset - so_far > 1024 { return fail(r, F_BMP_OFFSET) }
+        skip(r, (offset - so_far) as long)
+    }
+    if (w as long) * (h as long) * (4 as long) > (INT_MAX as long) { return fail(r, F_LARGE) }
+    // The rows cannot be larger than the file: a header that says they are
+    // is refused before anything is allocated for them.
+    if (((w as long) * (bpp as long) + (7 as long)) / (8 as long)) * ((h - 1) as long) > (r.end as long) { return fail(r, F_BMP_SHORT) }
+    if w == 0 || h == 0 {
+        out = malloc(4 as long)
+        dims[0] = w
+        dims[1] = h
+        return out
+    }
+    out = new_rgba(r, w, h)
+    if out == null { return null }
+    o = out as uint8[]
+    stride = w * 4
+    z = 0
+    j = 0
+    if bpp < 16 {
+        if psize == 0 || psize > 256 {
+            free(out)
+            return fail(r, F_BMP_PALETTE)
+        }
+        pal_block = calloc(1024 as long, 1 as long)
+        pal = pal_block as uint8[]
+        i = 0
+        while i < psize {
+            pal[i * 4 + 2] = get8(r)
+            pal[i * 4 + 1] = get8(r)
+            pal[i * 4] = get8(r)
+            if hsz != 12 { get8(r) }
+            pal[i * 4 + 3] = 255
+            i = i + 1
+        }
+        entry = 4
+        if hsz == 12 { entry = 3 }
+        skip(r, (offset - extra_read - hsz - psize * entry) as long)
+        row_bytes = 0
+        if bpp == 1 {
+            row_bytes = (w + 7) >> 3
+        } else if bpp == 4 {
+            row_bytes = (w + 1) >> 1
+        } else if bpp == 8 {
+            row_bytes = w
+        } else {
+            free(pal_block)
+            free(out)
+            return fail(r, F_BMP_BPP)
+        }
+        pad = (0 - row_bytes) & 3
+        if !bmp_rows_present(r, row_bytes, pad, h) {
+            free(out)
+            free(pal_block)
+            return fail(r, F_BMP_SHORT)
+        }
+        while j < h {
+            z = row_at(j, h, flip) * stride
+            if bpp == 1 {
+                bit = 7
+                v = get8(r)
+                i = 0
+                while i < w {
+                    c = ((v >> bit) & 1) * 4
+                    o[z] = pal[c]
+                    o[z + 1] = pal[c + 1]
+                    o[z + 2] = pal[c + 2]
+                    o[z + 3] = 255
+                    z = z + 4
+                    if i + 1 == w { break }
+                    bit = bit - 1
+                    if bit < 0 {
+                        bit = 7
+                        v = get8(r)
+                    }
+                    i = i + 1
+                }
+            } else {
+                i = 0
+                while i < w {
+                    v = get8(r)
+                    v2 = 0
+                    if bpp == 4 {
+                        v2 = v & 15
+                        v = v >> 4
+                    }
+                    c = v * 4
+                    o[z] = pal[c]
+                    o[z + 1] = pal[c + 1]
+                    o[z + 2] = pal[c + 2]
+                    o[z + 3] = 255
+                    z = z + 4
+                    if i + 1 == w { break }
+                    if bpp == 8 { v = get8(r) } else { v = v2 }
+                    c = v * 4
+                    o[z] = pal[c]
+                    o[z + 1] = pal[c + 1]
+                    o[z + 2] = pal[c + 2]
+                    o[z + 3] = 255
+                    z = z + 4
+                    i = i + 2
+                }
+            }
+            skip(r, pad as long)
+            j = j + 1
+        }
+        free(pal_block)
+    } else {
+        skip(r, (offset - extra_read - hsz) as long)
+        row_bytes = 0
+        if bpp == 24 { row_bytes = 3 * w } else if bpp == 16 { row_bytes = 2 * w }
+        pad = (0 - row_bytes) & 3
+        if !bmp_rows_present(r, row_bytes, pad, h) {
+            free(out)
+            return fail(r, F_BMP_SHORT)
+        }
+        easy = 0
+        if bpp == 24 {
+            easy = 1
+        } else if bpp == 32 {
+            if mb == (255 as long) && mg == (65280 as long) && mr == (16711680 as long) && ma == (4278190080 as long) { easy = 2 }
+        }
+        rshift = 0
+        gshift = 0
+        bshift = 0
+        ashift = 0
+        rcount = 0
+        gcount = 0
+        bcount = 0
+        acount = 0
+        if easy == 0 {
+            if mr == (0 as long) || mg == (0 as long) || mb == (0 as long) {
+                free(out)
+                return fail(r, F_BMP_MASKS)
+            }
+            rshift = high_bit(mr) - 7
+            rcount = bit_count(mr)
+            gshift = high_bit(mg) - 7
+            gcount = bit_count(mg)
+            bshift = high_bit(mb) - 7
+            bcount = bit_count(mb)
+            ashift = high_bit(ma) - 7
+            acount = bit_count(ma)
+            if rcount > 8 || gcount > 8 || bcount > 8 || acount > 8 {
+                free(out)
+                return fail(r, F_BMP_MASKS)
+            }
+        }
+        while j < h {
+            z = row_at(j, h, flip) * stride
+            i = 0
+            if easy != 0 {
+                while i < w {
+                    o[z + 2] = get8(r)
+                    o[z + 1] = get8(r)
+                    o[z] = get8(r)
+                    a = 255
+                    if easy == 2 { a = get8(r) }
+                    all_a = all_a | a
+                    o[z + 3] = a
+                    z = z + 4
+                    i = i + 1
+                }
+            } else {
+                while i < w {
+                    v = 0 as long
+                    if bpp == 16 { v = get16le(r) as long } else { v = get32le(r) }
+                    o[z] = shift_signed(v & mr, rshift, rcount) & 255
+                    o[z + 1] = shift_signed(v & mg, gshift, gcount) & 255
+                    o[z + 2] = shift_signed(v & mb, bshift, bcount) & 255
+                    a = 255
+                    if ma != (0 as long) { a = shift_signed(v & ma, ashift, acount) }
+                    all_a = all_a | a
+                    o[z + 3] = a & 255
+                    z = z + 4
+                    i = i + 1
+                }
+            }
+            skip(r, pad as long)
+            j = j + 1
+        }
+    }
+    // An alpha channel that is zero throughout was never meant: opaque.
+    if all_a == 0 {
+        i = w * h * 4 - 1
+        while i >= 0 {
+            o[i] = 255
+            i = i - 4
+        }
+    }
+    dims[0] = w
+    dims[1] = h
+    return out
+}
+
+// Which output row (counted from the bottom) the file's row j lands on:
+// a bottom-up file's rows are already in that order.
+row_at(j: int, h: int, bottom_up: bool) -> int {
+    if bottom_up { return j }
+    return h - 1 - j
+}
+
+// Whether `h` rows of `row_bytes`, each padded by `pad` but the last (a
+// file whose last row stops at its pixels is common and was read), are
+// all still to come.
+bmp_rows_present(r: *PictureReader, row_bytes: int, pad: int, h: int) -> bool {
+    wanted = ((row_bytes + pad) as long) * (h as long) - (pad as long)
+    return ((r.end - r.at) as long) >= wanted
+}
+
+// --- TGA -----------------------------------------------------------------------------
+
+// A palette entry's size in the file.
+tga_entry_bytes(bits: int) -> int {
+    if bits == 15 { return 2 }
+    return bits / 8
+}
+
+// Samples a pixel for a TGA's bits, 0 when it has none that stb read; 15
+// and 16-bit colour is expanded to three.
+tga_comp(bits: int, grey: bool) -> int {
+    if bits == 8 { return 1 }
+    if bits == 16 && grey { return 2 }
+    if bits == 15 || bits == 16 { return 3 }
+    if bits == 24 || bits == 32 { return bits / 8 }
+    return 0
+}
+
+tga_rgb16(bits: int) -> bool { return bits == 15 || bits == 16 }
+
+is_tga(r: *PictureReader) -> bool {
+    r.at = 0
+    get8(r)
+    colour_type = get8(r)
+    ok = colour_type <= 1
+    if ok {
+        sz = get8(r)
+        if colour_type == 1 {
+            ok = sz == 1 || sz == 9
+            if ok {
+                skip(r, 4 as long)
+                sz = get8(r)
+                ok = sz == 8 || sz == 15 || sz == 16 || sz == 24 || sz == 32
+                skip(r, 4 as long)
+            }
+        } else {
+            ok = sz == 2 || sz == 3 || sz == 10 || sz == 11
+            skip(r, 9 as long)
+        }
+    }
+    if ok && get16le(r) < 1 { ok = false }
+    if ok && get16le(r) < 1 { ok = false }
+    if ok {
+        sz = get8(r)
+        if colour_type == 1 && sz != 8 && sz != 16 { ok = false }
+        if sz != 8 && sz != 15 && sz != 16 && sz != 24 && sz != 32 { ok = false }
+    }
+    r.at = 0
+    return ok
+}
+
+// A 15/16-bit pixel as three bytes, five bits a channel, R first.
+tga_read_rgb16(r: *PictureReader, dest: ptr) {
+    into = dest as uint8[]
+    px = get16le(r)
+    into[0] = (((px >> 10) & 31) * 255) / 31
+    into[1] = (((px >> 5) & 31) * 255) / 31
+    into[2] = ((px & 31) * 255) / 31
+}
+
+tga_decode(r: *PictureReader, dims_block: ptr) -> ptr {
+    dims = dims_block as int[]
+    r.at = 0
+    id_length = get8(r)
+    indexed = get8(r)
+    image_type = get8(r)
+    palette_start = get16le(r)
+    palette_len = get16le(r)
+    palette_bits = get8(r)
+    get16le(r)
+    get16le(r)
+    w = get16le(r)
+    h = get16le(r)
+    bits = get8(r)
+    descriptor = get8(r)
+    rle = false
+    if image_type >= 8 {
+        image_type = image_type - 8
+        rle = true
+    }
+    // Bit 5 of the descriptor set: the rows run from the top.
+    top_first = ((descriptor >> 5) & 1) != 0
+    comp = 0
+    rgb16 = false
+    if indexed != 0 {
+        comp = tga_comp(palette_bits, false)
+        rgb16 = comp == 3 && tga_rgb16(palette_bits)
+    } else {
+        comp = tga_comp(bits, image_type == 3)
+        rgb16 = comp == 3 && tga_rgb16(bits)
+    }
+    if comp == 0 { return fail(r, F_TGA_FORMAT) }
+    if (w as long) * (h as long) * (4 as long) > (INT_MAX as long) { return fail(r, F_LARGE) }
+    count = w * h
+    skip(r, id_length as long)
+    // Every pixel's bytes are there, or -- run-length encoded, where a
+    // packet covers at most 128 pixels -- at least a packet's worth for
+    // every 128. stb decoded a short file into whatever memory held; it is
+    // refused here, before a header's claim is spent on reading nothing.
+    pixel_bytes = (bits + 7) / 8
+    present = (r.end - r.at) as long
+    if indexed != 0 { present = present - (palette_start as long) - (palette_len as long) * (tga_entry_bytes(palette_bits) as long) }
+    wanted = (count as long) * (pixel_bytes as long)
+    if rle { wanted = (((count as long) + (127 as long)) / (128 as long)) * ((1 + pixel_bytes) as long) }
+    if present < wanted { return fail(r, F_TGA_SHORT) }
+    data = calloc(((count * comp) + 4) as long, 1 as long)
+    if data == null { return fail(r, F_MEMORY) }
+    t = data as uint8[]
+    raw_block = calloc(4 as long, 1 as long)
+    raw = raw_block as uint8[]
+    if indexed == 0 && !rle && !rgb16 {
+        // The rows as they lie; a short file leaves the rest zero.
+        i = 0
+        row_bytes = w * comp
+        while i < h {
+            n = row_bytes
+            if n > r.end - r.at { n = r.end - r.at }
+            if n > 0 { memcpy(data + i * row_bytes, r.data + r.at, n as long) }
+            if n < row_bytes { r.at = r.end } else { r.at = r.at + n }
+            i = i + 1
+        }
+    } else {
+        palette = null
+        if indexed != 0 {
+            if palette_len == 0 {
+                free(raw_block)
+                free(data)
+                return fail(r, F_TGA_PALETTE)
+            }
+            // stb skipped the first entry's index in bytes before the
+            // palette; kept, so a file decodes as it did.
+            skip(r, palette_start as long)
+            palette = calloc((palette_len * comp) as long, 1 as long)
+            if rgb16 {
+                i = 0
+                while i < palette_len {
+                    tga_read_rgb16(r, palette + i * comp)
+                    i = i + 1
+                }
+            } else {
+                n = palette_len * comp
+                if n > r.end - r.at {
+                    free(palette)
+                    free(raw_block)
+                    free(data)
+                    return fail(r, F_TGA_PALETTE)
+                }
+                memcpy(palette, r.data + r.at, n as long)
+                r.at = r.at + n
+            }
+        }
+        rle_count = 0
+        repeating = false
+        read_next = true
+        i = 0
+        while i < count {
+            if rle {
+                if rle_count == 0 {
+                    cmd = get8(r)
+                    rle_count = 1 + (cmd & 127)
+                    repeating = (cmd >> 7) != 0
+                    read_next = true
+                } else if !repeating {
+                    read_next = true
+                }
+            } else {
+                read_next = true
+            }
+            if read_next {
+                if indexed != 0 {
+                    idx = 0
+                    if bits == 8 { idx = get8(r) } else { idx = get16le(r) }
+                    if idx >= palette_len { idx = 0 }
+                    pv = palette as uint8[]
+                    k = 0
+                    while k < comp {
+                        raw[k] = pv[idx * comp + k]
+                        k = k + 1
+                    }
+                } else if rgb16 {
+                    tga_read_rgb16(r, raw_block)
+                } else {
+                    k = 0
+                    while k < comp {
+                        raw[k] = get8(r)
+                        k = k + 1
+                    }
+                }
+                read_next = false
+            }
+            k = 0
+            while k < comp {
+                t[i * comp + k] = raw[k]
+                k = k + 1
+            }
+            rle_count = rle_count - 1
+            i = i + 1
+        }
+        if palette != null { free(palette) }
+    }
+    free(raw_block)
+    out = new_rgba(r, w, h)
+    if out == null {
+        free(data)
+        return null
+    }
+    // Colour is stored BGR(A); 15/16-bit was expanded as RGB already. A
+    // bottom-first file's rows are already in the order the caller wants.
+    o = out as uint8[]
+    swap = comp >= 3 && !rgb16
+    j = 0
+    while j < h {
+        dest = j
+        if top_first { dest = h - 1 - j }
+        s = j * w * comp
+        p = dest * w * 4
+        i = 0
+        while i < w {
+            if comp == 1 {
+                o[p] = t[s]
+                o[p + 1] = t[s]
+                o[p + 2] = t[s]
+                o[p + 3] = 255
+            } else if comp == 2 {
+                o[p] = t[s]
+                o[p + 1] = t[s]
+                o[p + 2] = t[s]
+                o[p + 3] = t[s + 1]
+            } else {
+                if swap {
+                    o[p] = t[s + 2]
+                    o[p + 2] = t[s]
+                } else {
+                    o[p] = t[s]
+                    o[p + 2] = t[s + 2]
+                }
+                o[p + 1] = t[s + 1]
+                if comp == 4 { o[p + 3] = t[s + 3] } else { o[p + 3] = 255 }
+            }
+            s = s + comp
+            p = p + 4
+            i = i + 1
+        }
+        j = j + 1
+    }
+    free(data)
+    dims[0] = w
+    dims[1] = h
+    return out
+}
+
+// --- dispatch ---------------------------------------------------------------------
+
+// The formats with a signature first, then the ones prone to false
+// positives, TGA last: its test is the weakest (stb's order).
+decode(r: *PictureReader, dims_block: ptr) -> ptr {
+    dims = dims_block as int[]
+    if is_png(r) { return png_decode(r, dims_block) }
+    if is_bmp(r) { return bmp_decode(r, dims_block) }
+    if jpeg.is_jpeg(r.data, r.end) {
+        rgba = jpeg.decode(r.data, r.end, dims_block)
+        if rgba == null { fail(r, F_JPEG + dims[2]) }
+        return rgba
+    }
+    if is_tga(r) { return tga_decode(r, dims_block) }
+    return fail(r, F_UNKNOWN)
+}
+
+// Decode `length` bytes at `data`. `name` prefixes a failure's reason.
+decode_bytes(data: ptr, length: int, name: string) -> ptr {
+    r = heap.new(PictureReader)
+    r.data = data
+    r.at = 0
+    r.end = length
+    r.failure = F_NONE
+    dims_block = calloc(3 as long, 4 as long)
+    dims = dims_block as int[]
+    rgba = decode(r, dims_block)
+    result = null
+    if rgba != null {
+        result = wrap(rgba, dims[0], dims[1])
+    } else {
+        failure = r.failure
+        if failure == F_NONE { failure = F_UNKNOWN }
+        set_error(name, reason(failure))
+    }
+    free(dims_block)
+    heap.free(r)
+    return result
+}
+
+// A picture decoded from `length` bytes in memory: an image a glTF
+// buffer carries.
+from_memory(data: ptr, length: int) -> ptr {
+    if data == null || length <= 0 {
+        set_error("", "empty buffer")
+        return null
+    }
+    return decode_bytes(data, length, "")
+}
+
+// A registered image by its name, else the file at `path`, decoded.
+load(path: string) -> ptr {
+    if path == "" {
+        set_error("", "empty path")
+        return null
+    }
+    found = find_named(path)
+    if found != null {
+        entry = found as *PictureNamed
+        bytes = (entry.width as long) * (entry.height as long) * (4 as long)
+        copy = malloc(bytes)
+        if copy == null {
+            set_error("", "out of memory")
+            return null
+        }
+        memcpy(copy, entry.pixels, bytes)
+        return wrap(copy, entry.width, entry.height)
+    }
+    f = fopen(path, "rb")
+    if f == null {
+        set_error(path, "can't fopen")
+        return null
+    }
+    size = 0 as long
+    if fseek(f, 0 as long, SEEK_END) == 0 { size = ftell(f) }
+    fseek(f, 0 as long, SEEK_SET)
+    if size < (0 as long) || size > (INT_MAX as long) {
+        fclose(f)
+        set_error(path, "file too large")
+        return null
+    }
+    data = malloc(size + (1 as long))
+    if data == null {
+        fclose(f)
+        set_error(path, "out of memory")
+        return null
+    }
+    got = fread(data, 1 as long, size, f)
+    fclose(f)
+    result = decode_bytes(data, got as int, path)
+    free(data)
+    return result
+}
