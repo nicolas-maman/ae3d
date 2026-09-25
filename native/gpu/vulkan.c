@@ -2823,172 +2823,6 @@ static void ae3d_vk_end_once(VkCommandBuffer command) {
     ae3d_vkFreeCommandBuffers(vk.device, vk.command_pool, 1, &command);
 }
 
-static void ae3d_vk_transition_levels(VkCommandBuffer command, VkImage image,
-                                      VkImageLayout from, VkImageLayout to,
-                                      VkAccessFlags src_access, VkAccessFlags dst_access,
-                                      VkPipelineStageFlags src_stage, VkPipelineStageFlags dst_stage,
-                                      int base_level, int level_count) {
-    VkImageMemoryBarrier barrier;
-    memset(&barrier, 0, sizeof(barrier));
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.oldLayout = from;
-    barrier.newLayout = to;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = image;
-    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.baseMipLevel = (unsigned)base_level;
-    barrier.subresourceRange.levelCount = (unsigned)level_count;
-    barrier.subresourceRange.layerCount = 1;
-    barrier.srcAccessMask = src_access;
-    barrier.dstAccessMask = dst_access;
-    ae3d_vkCmdPipelineBarrier(command, src_stage, dst_stage, 0, 0, NULL, 0, NULL, 1, &barrier);
-}
-
-static void ae3d_vk_transition(VkCommandBuffer command, VkImage image,
-                               VkImageLayout from, VkImageLayout to,
-                               VkAccessFlags src_access, VkAccessFlags dst_access,
-                               VkPipelineStageFlags src_stage, VkPipelineStageFlags dst_stage) {
-    ae3d_vk_transition_levels(command, image, from, to, src_access, dst_access,
-                              src_stage, dst_stage, 0, 1);
-}
-
-// Each level is a filtered halving of the one above, the same chain
-// glGenerateMipmap builds, and every level ends readable by the shader.
-static void ae3d_vk_generate_mipmaps(VkCommandBuffer command, VkImage image,
-                                     int width, int height, int mip_levels) {
-    int level;
-    int w = width;
-    int h = height;
-
-    for (level = 1; level < mip_levels; level++) {
-        VkImageBlit blit;
-        int next_w = w > 1 ? w / 2 : 1;
-        int next_h = h > 1 ? h / 2 : 1;
-
-        ae3d_vk_transition_levels(command, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                  VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-                                  VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                  level - 1, 1);
-
-        memset(&blit, 0, sizeof(blit));
-        blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        blit.srcSubresource.mipLevel = (unsigned)(level - 1);
-        blit.srcSubresource.layerCount = 1;
-        blit.srcOffsets[1].x = w;
-        blit.srcOffsets[1].y = h;
-        blit.srcOffsets[1].z = 1;
-        blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        blit.dstSubresource.mipLevel = (unsigned)level;
-        blit.dstSubresource.layerCount = 1;
-        blit.dstOffsets[1].x = next_w;
-        blit.dstOffsets[1].y = next_h;
-        blit.dstOffsets[1].z = 1;
-        ae3d_vkCmdBlitImage(command, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                            image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
-                            VK_FILTER_LINEAR);
-
-        ae3d_vk_transition_levels(command, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                  VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
-                                  VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, level - 1, 1);
-        w = next_w;
-        h = next_h;
-    }
-
-    ae3d_vk_transition_levels(command, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                              VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-                              VK_PIPELINE_STAGE_TRANSFER_BIT,
-                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, mip_levels - 1, 1);
-}
-
-int ae3d_vk_texture_create(int width, int height, const void *rgba) {
-    VkBuffer staging = VK_NULL_HANDLE;
-    VkDeviceMemory staging_memory = VK_NULL_HANDLE;
-    VkCommandBuffer command;
-    VkBufferImageCopy region;
-    VkFormatProperties format_properties;
-    ae3d_vk_texture *texture = NULL;
-    void *mapped = NULL;
-    VkDeviceSize size;
-    int slot, handle = 0;
-    int mip_levels = 1;
-    int extent = width > height ? width : height;
-
-    if (!vk.device || width <= 0 || height <= 0 || !rgba) return 0;
-    size = (VkDeviceSize)width * height * 4;
-
-    // Minification without mipmaps is what separates a sharp distant surface
-    // from an aliased one, and the OpenGL backend generates them, so a texture
-    // has to look the same here. Blitting needs the format to be filterable.
-    ae3d_vkGetPhysicalDeviceFormatProperties(vk.physical, VK_FORMAT_R8G8B8A8_UNORM,
-                                             &format_properties);
-    if (format_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) {
-        while (extent > 1) { extent /= 2; mip_levels++; }
-    }
-
-    for (slot = 0; slot < AE3D_VK_MAX_TEXTURES; slot++) {
-        if (!vk.textures[slot].in_use) { texture = &vk.textures[slot]; handle = slot + 1; break; }
-    }
-    if (!texture) { ae3d_vk_fail("texture table full"); return 0; }
-
-    if (!ae3d_vk_create_buffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                               &staging, &staging_memory)) {
-        return 0;
-    }
-    ae3d_vkMapMemory(vk.device, staging_memory, 0, size, 0, &mapped);
-    memcpy(mapped, rgba, (size_t)size);
-    ae3d_vkUnmapMemory(vk.device, staging_memory);
-
-    if (!ae3d_vk_create_image(width, height, mip_levels, VK_FORMAT_R8G8B8A8_UNORM,
-                              VK_SAMPLE_COUNT_1_BIT,
-                              VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                              VK_IMAGE_USAGE_SAMPLED_BIT,
-                              VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_TILING_OPTIMAL,
-                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                              &texture->image, &texture->memory, &texture->view)) {
-        ae3d_vkDestroyBuffer(vk.device, staging, NULL);
-        ae3d_vkFreeMemory(vk.device, staging_memory, NULL);
-        return 0;
-    }
-
-    command = ae3d_vk_begin_once();
-    /* Every level to transfer-destination, not only the one the copy writes:
-       the chain's blits write the rest, and a level still undefined when it
-       is blitted into was hundreds of the validation layer's errors (#405). */
-    ae3d_vk_transition_levels(command, texture->image, VK_IMAGE_LAYOUT_UNDEFINED,
-                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                              VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                              0, mip_levels);
-
-    memset(&region, 0, sizeof(region));
-    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    region.imageSubresource.layerCount = 1;
-    region.imageExtent.width = (unsigned)width;
-    region.imageExtent.height = (unsigned)height;
-    region.imageExtent.depth = 1;
-    ae3d_vkCmdCopyBufferToImage(command, staging, texture->image,
-                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-
-    ae3d_vk_generate_mipmaps(command, texture->image, width, height, mip_levels);
-    ae3d_vk_end_once(command);
-
-    ae3d_vkDestroyBuffer(vk.device, staging, NULL);
-    ae3d_vkFreeMemory(vk.device, staging_memory, NULL);
-
-    texture->mip_levels = mip_levels;
-    if (!ae3d_vk_texture_sampler(texture)) return 0;
-
-    texture->width = width;
-    texture->height = height;
-    texture->in_use = 1;
-    return handle;
-}
-
 /* A scene texture's sampler, with the mip chain and the LOD bias of the
    moment: the scene drawn smaller than the frame for an upscaler picks a
    coarser mip than the frame's pixels deserve, and the detail lost there
@@ -3035,6 +2869,68 @@ static void ae3d_vk_rebias_samplers(void) {
         for (index = 0; index < vk.set_count[frame]; index++) vk.set_texture[frame][index] = AE3D_VK_SET_FREE;
     }
 }
+
+/* A texture ae3d.vktexture made -- its image, memory and view, uploaded
+   and left readable by the shaders -- into the table, with the sampler its
+   kind is drawn with: a scene texture's linear, repeating, over its mip
+   chain at the frame's LOD bias (0); an RGBA one's linear and repeating
+   with no mips (1); a float one's nearest and clamped, fetched by exact
+   texel (2). The handle, or 0 when the table is full or the sampler would
+   not make, the image then destroyed. */
+int ae3d_vk_texture_adopt(void *image, void *memory, void *view, int width, int height, int mip_levels, int kind) {
+    ae3d_vk_texture *texture = NULL;
+    VkSamplerCreateInfo sampler;
+    int slot, handle = 0;
+
+    if (!vk.device || !image) return 0;
+    for (slot = 0; slot < AE3D_VK_MAX_TEXTURES; slot++) {
+        if (!vk.textures[slot].in_use) { texture = &vk.textures[slot]; handle = slot + 1; break; }
+    }
+    if (!texture) {
+        ae3d_vk_fail("texture table full");
+        ae3d_vkDestroyImageView(vk.device, (VkImageView)view, NULL);
+        ae3d_vkDestroyImage(vk.device, (VkImage)image, NULL);
+        ae3d_vkFreeMemory(vk.device, (VkDeviceMemory)memory, NULL);
+        return 0;
+    }
+    memset(texture, 0, sizeof(*texture));
+    texture->image = (VkImage)image;
+    texture->memory = (VkDeviceMemory)memory;
+    texture->view = (VkImageView)view;
+    texture->width = width;
+    texture->height = height;
+    if (kind == 0) {
+        texture->mip_levels = mip_levels;
+        if (!ae3d_vk_texture_sampler(texture)) goto fail;
+    } else {
+        memset(&sampler, 0, sizeof(sampler));
+        sampler.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        sampler.magFilter = kind == 2 ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+        sampler.minFilter = kind == 2 ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+        sampler.addressModeU = kind == 2 ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE : VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        sampler.addressModeV = sampler.addressModeU;
+        sampler.addressModeW = sampler.addressModeU;
+        sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        sampler.maxLod = 0.0f;
+        if (ae3d_vkCreateSampler(vk.device, &sampler, NULL, &texture->sampler) != VK_SUCCESS) {
+            ae3d_vk_fail("vkCreateSampler failed");
+            goto fail;
+        }
+    }
+    texture->in_use = 1;
+    return handle;
+fail:
+    ae3d_vkDestroyImageView(vk.device, texture->view, NULL);
+    ae3d_vkDestroyImage(vk.device, texture->image, NULL);
+    ae3d_vkFreeMemory(vk.device, texture->memory, NULL);
+    memset(texture, 0, sizeof(*texture));
+    return 0;
+}
+
+/* The one-off command buffer uploads are recorded into, for an Aether
+   module (ae3d.vktexture): begun, and submitted and waited on. */
+void *ae3d_vk_once_begin(void) { return (void *)ae3d_vk_begin_once(); }
+void ae3d_vk_once_end(void *commands) { ae3d_vk_end_once((VkCommandBuffer)commands); }
 
 void ae3d_vk_texture_destroy(int handle) {
     ae3d_vk_texture *texture;
@@ -3881,6 +3777,15 @@ static int ae3d_vk_create_pipeline(void) {
     return ae3d_vk_create_pass_pipelines();
 }
 
+/* What makes a scene texture from RGBA bytes: ae3d.vktexture's, installed by
+   the renderer before the backend starts (textures are made in Aether, #402)
+   and kept across it, since the default texture is made while it starts. */
+static int (*g_texture_maker)(int, int, const void *) = NULL;
+
+void ae3d_vk_set_texture_maker(void *maker) {
+    g_texture_maker = (int (*)(int, int, const void *))maker;
+}
+
 // A white pixel and one identity instance, so a draw with no texture and no
 // instance buffer still has something to bind: the shader always samples and
 // always reads an instance matrix.
@@ -3890,7 +3795,8 @@ static int ae3d_vk_create_defaults(void) {
     int i;
 
     white[0] = 255; white[1] = 255; white[2] = 255; white[3] = 255;
-    vk.default_texture = ae3d_vk_texture_create(1, 1, white);
+    if (!g_texture_maker) return ae3d_vk_fail("no texture maker (ae3d.vktexture installs one)");
+    vk.default_texture = g_texture_maker(1, 1, white);
     if (!vk.default_texture) return ae3d_vk_fail("could not create the default texture");
 
     memset(identity, 0, sizeof(identity));
@@ -6602,208 +6508,6 @@ int ae3d_vk_offscreen_height(void) { return vk.offscreen ? (int)vk.extent.height
    float texture made by ae3d_vk_texture_create_float, or zero for none.
    A crowd draw is a skinned draw with a bank bound. */
 void ae3d_vk_set_pose_bank(int texture_handle) { vk.pose_bank = texture_handle; }
-
-/* A texture from RGBA bytes, of two dimensions or, with `depth` past one,
-   three: linear, repeating on every axis, no mipmaps. What a baked map is
-   uploaded as -- the clouds' weather over the world, and the tileable 3D
-   noise their shape is read from. A 3D image binds where a 2D one does;
-   the descriptor is the same kind, and the shader says which it reads. */
-int ae3d_vk_texture_create_rgba(int width, int height, int depth, const unsigned char *rgba) {
-    VkBuffer staging = VK_NULL_HANDLE;
-    VkDeviceMemory staging_memory = VK_NULL_HANDLE;
-    VkCommandBuffer command;
-    VkBufferImageCopy region;
-    VkSamplerCreateInfo sampler;
-    VkImageCreateInfo info;
-    VkImageViewCreateInfo view_info;
-    VkMemoryRequirements requirements;
-    VkMemoryAllocateInfo allocation;
-    ae3d_vk_texture *texture = NULL;
-    void *mapped = NULL;
-    VkDeviceSize size;
-    int slot, handle = 0, type;
-
-    if (!vk.device || width <= 0 || height <= 0 || depth <= 0 || !rgba) return 0;
-    size = (VkDeviceSize)width * height * depth * 4;
-
-    for (slot = 0; slot < AE3D_VK_MAX_TEXTURES; slot++) {
-        if (!vk.textures[slot].in_use) { texture = &vk.textures[slot]; handle = slot + 1; break; }
-    }
-    if (!texture) { ae3d_vk_fail("texture table full"); return 0; }
-
-    if (!ae3d_vk_create_buffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                               &staging, &staging_memory)) {
-        return 0;
-    }
-    ae3d_vkMapMemory(vk.device, staging_memory, 0, size, 0, &mapped);
-    memcpy(mapped, rgba, (size_t)size);
-    ae3d_vkUnmapMemory(vk.device, staging_memory);
-
-    memset(&info, 0, sizeof(info));
-    info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    info.imageType = depth > 1 ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
-    info.format = VK_FORMAT_R8G8B8A8_UNORM;
-    info.extent.width = (unsigned)width;
-    info.extent.height = (unsigned)height;
-    info.extent.depth = (unsigned)depth;
-    info.mipLevels = 1;
-    info.arrayLayers = 1;
-    info.samples = VK_SAMPLE_COUNT_1_BIT;
-    info.tiling = VK_IMAGE_TILING_OPTIMAL;
-    info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    if (ae3d_vkCreateImage(vk.device, &info, NULL, &texture->image) != VK_SUCCESS) {
-        ae3d_vkDestroyBuffer(vk.device, staging, NULL);
-        ae3d_vkFreeMemory(vk.device, staging_memory, NULL);
-        return ae3d_vk_fail("rgba vkCreateImage failed");
-    }
-    ae3d_vkGetImageMemoryRequirements(vk.device, texture->image, &requirements);
-    type = ae3d_vk_memory_type(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (type < 0) return ae3d_vk_fail("no memory type for an rgba image");
-    memset(&allocation, 0, sizeof(allocation));
-    allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocation.allocationSize = requirements.size;
-    allocation.memoryTypeIndex = (unsigned)type;
-    if (ae3d_vkAllocateMemory(vk.device, &allocation, NULL, &texture->memory) != VK_SUCCESS) {
-        return ae3d_vk_fail("rgba vkAllocateMemory failed");
-    }
-    ae3d_vkBindImageMemory(vk.device, texture->image, texture->memory, 0);
-    memset(&view_info, 0, sizeof(view_info));
-    view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    view_info.image = texture->image;
-    view_info.viewType = depth > 1 ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
-    view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
-    view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    view_info.subresourceRange.levelCount = 1;
-    view_info.subresourceRange.layerCount = 1;
-    if (ae3d_vkCreateImageView(vk.device, &view_info, NULL, &texture->view) != VK_SUCCESS) {
-        return ae3d_vk_fail("rgba vkCreateImageView failed");
-    }
-
-    command = ae3d_vk_begin_once();
-    ae3d_vk_transition(command, texture->image, VK_IMAGE_LAYOUT_UNDEFINED,
-                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                       VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-    memset(&region, 0, sizeof(region));
-    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    region.imageSubresource.layerCount = 1;
-    region.imageExtent.width = (unsigned)width;
-    region.imageExtent.height = (unsigned)height;
-    region.imageExtent.depth = (unsigned)depth;
-    ae3d_vkCmdCopyBufferToImage(command, staging, texture->image,
-                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-    ae3d_vk_transition(command, texture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
-                       VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                       VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-    ae3d_vk_end_once(command);
-
-    ae3d_vkDestroyBuffer(vk.device, staging, NULL);
-    ae3d_vkFreeMemory(vk.device, staging_memory, NULL);
-
-    memset(&sampler, 0, sizeof(sampler));
-    sampler.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    sampler.magFilter = VK_FILTER_LINEAR;
-    sampler.minFilter = VK_FILTER_LINEAR;
-    sampler.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    sampler.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    sampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    sampler.maxLod = 0.0f;
-    if (ae3d_vkCreateSampler(vk.device, &sampler, NULL, &texture->sampler) != VK_SUCCESS) {
-        ae3d_vk_fail("vkCreateSampler failed");
-        return 0;
-    }
-
-    texture->width = width;
-    texture->height = height;
-    texture->in_use = 1;
-    return handle;
-}
-
-/* A texture of floats, four a texel, with no filtering and no mipmaps:
-   what a pose bank is, fetched by exact texel. */
-int ae3d_vk_texture_create_float(int width, int height, const float *rgba) {
-    VkBuffer staging = VK_NULL_HANDLE;
-    VkDeviceMemory staging_memory = VK_NULL_HANDLE;
-    VkCommandBuffer command;
-    VkBufferImageCopy region;
-    VkSamplerCreateInfo sampler;
-    ae3d_vk_texture *texture = NULL;
-    void *mapped = NULL;
-    VkDeviceSize size;
-    int slot, handle = 0;
-
-    if (!vk.device || width <= 0 || height <= 0 || !rgba) return 0;
-    size = (VkDeviceSize)width * height * 4 * sizeof(float);
-
-    for (slot = 0; slot < AE3D_VK_MAX_TEXTURES; slot++) {
-        if (!vk.textures[slot].in_use) { texture = &vk.textures[slot]; handle = slot + 1; break; }
-    }
-    if (!texture) { ae3d_vk_fail("texture table full"); return 0; }
-
-    if (!ae3d_vk_create_buffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                               &staging, &staging_memory)) {
-        return 0;
-    }
-    ae3d_vkMapMemory(vk.device, staging_memory, 0, size, 0, &mapped);
-    memcpy(mapped, rgba, (size_t)size);
-    ae3d_vkUnmapMemory(vk.device, staging_memory);
-
-    if (!ae3d_vk_create_image(width, height, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
-                              VK_SAMPLE_COUNT_1_BIT,
-                              VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                              VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_TILING_OPTIMAL,
-                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                              &texture->image, &texture->memory, &texture->view)) {
-        ae3d_vkDestroyBuffer(vk.device, staging, NULL);
-        ae3d_vkFreeMemory(vk.device, staging_memory, NULL);
-        return 0;
-    }
-
-    command = ae3d_vk_begin_once();
-    ae3d_vk_transition(command, texture->image, VK_IMAGE_LAYOUT_UNDEFINED,
-                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                       VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-    memset(&region, 0, sizeof(region));
-    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    region.imageSubresource.layerCount = 1;
-    region.imageExtent.width = (unsigned)width;
-    region.imageExtent.height = (unsigned)height;
-    region.imageExtent.depth = 1;
-    ae3d_vkCmdCopyBufferToImage(command, staging, texture->image,
-                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-    ae3d_vk_transition(command, texture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
-                       VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                       VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-    ae3d_vk_end_once(command);
-
-    ae3d_vkDestroyBuffer(vk.device, staging, NULL);
-    ae3d_vkFreeMemory(vk.device, staging_memory, NULL);
-
-    memset(&sampler, 0, sizeof(sampler));
-    sampler.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    sampler.magFilter = VK_FILTER_NEAREST;
-    sampler.minFilter = VK_FILTER_NEAREST;
-    sampler.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    sampler.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    sampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    sampler.maxLod = 0.0f;
-    if (ae3d_vkCreateSampler(vk.device, &sampler, NULL, &texture->sampler) != VK_SUCCESS) {
-        ae3d_vk_fail("vkCreateSampler failed");
-        return 0;
-    }
-
-    texture->width = width;
-    texture->height = height;
-    texture->in_use = 1;
-    return handle;
-}
 
 int ae3d_vk_upload_mesh(void *mesh) {
     const float *vertices = ae3d_mesh_vertex_data(mesh);

@@ -1,0 +1,278 @@
+// ae3d.vktexture -- textures made on the Vulkan backend (#402): the third
+// of native/gpu/vulkan.c to move into Aether, on contrib.vulkan.vk.
+//
+// Three kinds, as the renderer asks for them:
+//
+//   - a scene texture (a model's image): RGBA bytes, with a mip chain --
+//     each level a filtered halving of the one above, as glGenerateMipmap
+//     builds, since minification without mips is what separates a sharp
+//     distant surface from an aliased one -- where the format can be
+//     filtered, and sampled with the frame's LOD bias;
+//   - an RGBA texture of two dimensions or three (the clouds' weather and
+//     their tileable noise): linear, repeating, no mips;
+//   - a float texture, four floats a texel (a pose bank): fetched by exact
+//     texel, so nearest and clamped.
+//
+// This module makes the image, its memory and its view, stages the texels
+// through a host buffer (ae3d.vkhost's) and records the upload, the mip
+// chain and the layout changes into a one-off command buffer the backend
+// submits and waits on. The backend adopts what it made into its texture
+// table (ae3d_vk_texture_adopt), which gives it its sampler and a handle,
+// and destroys it with the texture.
+
+import contrib.vulkan.vk
+import ae3d.vkhost
+
+exports (
+    SCENE, RGBA, FLOATS,
+    texture_create, texture_create_rgba, texture_create_float, install
+)
+
+extern ae3d_vk_physical_device_handle() -> ptr
+extern ae3d_vk_once_begin() -> ptr
+extern ae3d_vk_once_end(commands: ptr)
+extern ae3d_vk_texture_adopt(image: ptr, memory: ptr, view: ptr, width: int, height: int, mip_levels: int, kind: int) -> int
+extern ae3d_vk_set_texture_maker(maker: ptr)
+// This module's scene-texture maker, by its C name, for its address.
+extern ae3d_vktexture_create(width: int, height: int, rgba: ptr) -> int
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern memcpy(dst: ptr, src: ptr, n: long) -> ptr
+
+// The kinds, as ae3d_vk_texture_adopt takes them: which sampler it gets.
+const SCENE = 0
+const RGBA = 1
+const FLOATS = 2
+
+// What an image was made into: its handles, or nulls when it could not be.
+struct Made {
+    image: ptr                       // VkImage
+    memory: ptr                      // VkDeviceMemory
+    view: ptr                        // VkImageView
+}
+
+// A device-local image, sampled and written to by copies (and read from by
+// blits, for a mip chain), of `depth` layers of depth -- three dimensions
+// past one -- and `levels` mip levels, with a view of all of it. Nulls
+// when the device would not make it; nothing is left behind then.
+make_image(width: int, height: int, depth: int, levels: int, format: int, readable: bool) -> Made {
+    d = vkhost.device()
+    out = Made { image: null, memory: null, view: null }
+    ci = calloc(1, sizeof(VkImageCreateInfo)) as *VkImageCreateInfo
+    ci.sType = vk.STRUCTURE_TYPE_IMAGE_CREATE_INFO
+    ci.imageType = vk.IMAGE_TYPE_2D
+    if depth > 1 { ci.imageType = vk.IMAGE_TYPE_3D }
+    ci.format = format
+    ci.extent.width = width
+    ci.extent.height = height
+    ci.extent.depth = depth
+    ci.mipLevels = levels
+    ci.arrayLayers = 1
+    ci.samples = vk.SAMPLE_COUNT_1_BIT
+    ci.tiling = vk.IMAGE_TILING_OPTIMAL
+    ci.usage = vk.IMAGE_USAGE_TRANSFER_DST_BIT | vk.IMAGE_USAGE_SAMPLED_BIT
+    if readable { ci.usage = ci.usage | vk.IMAGE_USAGE_TRANSFER_SRC_BIT }
+    ci.sharingMode = vk.SHARING_MODE_EXCLUSIVE
+    ci.initialLayout = vk.IMAGE_LAYOUT_UNDEFINED
+    handle = calloc(1, 8)
+    r = vk.vkCreateImage(d, ci as ptr, null, handle)
+    free(ci as ptr)
+    if r != vk.SUCCESS {
+        free(handle)
+        return out
+    }
+    out.image = (handle as ptr[])[0]
+    needs = calloc(1, sizeof(VkMemoryRequirements)) as *VkMemoryRequirements
+    vk.vkGetImageMemoryRequirements(d, out.image, needs as ptr)
+    out.memory = vkhost.allocate(needs, vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+    free(needs as ptr)
+    if out.memory == null {
+        vk.vkDestroyImage(d, out.image, null)
+        free(handle)
+        return Made { image: null, memory: null, view: null }
+    }
+    vk.vkBindImageMemory(d, out.image, out.memory, 0)
+    vi = calloc(1, sizeof(VkImageViewCreateInfo)) as *VkImageViewCreateInfo
+    vi.sType = vk.STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO
+    vi.image = out.image
+    vi.viewType = vk.IMAGE_VIEW_TYPE_2D
+    if depth > 1 { vi.viewType = vk.IMAGE_VIEW_TYPE_3D }
+    vi.format = format
+    vi.subresourceRange.aspectMask = vk.IMAGE_ASPECT_COLOR_BIT
+    vi.subresourceRange.levelCount = levels
+    vi.subresourceRange.layerCount = 1
+    (handle as ptr[])[0] = null
+    r = vk.vkCreateImageView(d, vi as ptr, null, handle)
+    free(vi as ptr)
+    if r != vk.SUCCESS {
+        vk.vkDestroyImage(d, out.image, null)
+        vk.vkFreeMemory(d, out.memory, null)
+        free(handle)
+        return Made { image: null, memory: null, view: null }
+    }
+    out.view = (handle as ptr[])[0]
+    free(handle)
+    return out
+}
+
+// A layout change of `count` levels of `image` from `base`.
+turn(commands: ptr, image: ptr, from: int, to: int, src_access: int, dst_access: int, src_stage: int, dst_stage: int,
+     base: int, count: int) {
+    b = calloc(1, sizeof(VkImageMemoryBarrier)) as *VkImageMemoryBarrier
+    b.sType = vk.STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER
+    b.oldLayout = from
+    b.newLayout = to
+    b.srcQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED
+    b.dstQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED
+    b.image = image
+    b.subresourceRange.aspectMask = vk.IMAGE_ASPECT_COLOR_BIT
+    b.subresourceRange.baseMipLevel = base
+    b.subresourceRange.levelCount = count
+    b.subresourceRange.layerCount = 1
+    b.srcAccessMask = src_access
+    b.dstAccessMask = dst_access
+    vk.vkCmdPipelineBarrier(commands, src_stage, dst_stage, 0, 0, null, 0, null, 1, b as ptr)
+    free(b as ptr)
+}
+
+// The staged texels into level 0 of the image.
+copy_in(commands: ptr, staging: *HostBuffer, image: ptr, width: int, height: int, depth: int) {
+    region = calloc(1, sizeof(VkBufferImageCopy)) as *VkBufferImageCopy
+    region.imageSubresource.aspectMask = vk.IMAGE_ASPECT_COLOR_BIT
+    region.imageSubresource.layerCount = 1
+    region.imageExtent.width = width
+    region.imageExtent.height = height
+    region.imageExtent.depth = depth
+    vk.vkCmdCopyBufferToImage(commands, staging.buffer, image, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, region as ptr)
+    free(region as ptr)
+}
+
+// VkImageBlit's layout: a subresource, two offsets, a subresource, two
+// offsets; the far corner of each pair is its second offset.
+offset_of_src_far() -> int { return sizeof(VkImageSubresourceLayers) + sizeof(VkOffset3D) }
+offset_of_dst_far() -> int { return 2 * sizeof(VkImageSubresourceLayers) + 3 * sizeof(VkOffset3D) }
+
+// Each level a filtered halving of the one above, and every level left
+// readable by the shaders: level 0 arrives written by the copy, every
+// level in transfer-destination layout.
+mip_chain(commands: ptr, image: ptr, width: int, height: int, levels: int) {
+    w = width
+    h = height
+    level = 1
+    while level < levels {
+        nw = w
+        if w > 1 { nw = w / 2 }
+        nh = h
+        if h > 1 { nh = h / 2 }
+        turn(commands, image, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+             vk.ACCESS_TRANSFER_WRITE_BIT, vk.ACCESS_TRANSFER_READ_BIT,
+             vk.PIPELINE_STAGE_TRANSFER_BIT, vk.PIPELINE_STAGE_TRANSFER_BIT, level - 1, 1)
+        blit = calloc(1, sizeof(VkImageBlit)) as *VkImageBlit
+        blit.srcSubresource.aspectMask = vk.IMAGE_ASPECT_COLOR_BIT
+        blit.srcSubresource.mipLevel = level - 1
+        blit.srcSubresource.layerCount = 1
+        blit.dstSubresource.aspectMask = vk.IMAGE_ASPECT_COLOR_BIT
+        blit.dstSubresource.mipLevel = level
+        blit.dstSubresource.layerCount = 1
+        far_src = (blit as ptr + offset_of_src_far()) as *VkOffset3D
+        far_src.x = w
+        far_src.y = h
+        far_src.z = 1
+        far_dst = (blit as ptr + offset_of_dst_far()) as *VkOffset3D
+        far_dst.x = nw
+        far_dst.y = nh
+        far_dst.z = 1
+        vk.vkCmdBlitImage(commands, image, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image,
+                          vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, blit as ptr, vk.FILTER_LINEAR)
+        free(blit as ptr)
+        turn(commands, image, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+             vk.ACCESS_TRANSFER_READ_BIT, vk.ACCESS_SHADER_READ_BIT,
+             vk.PIPELINE_STAGE_TRANSFER_BIT, vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT, level - 1, 1)
+        w = nw
+        h = nh
+        level = level + 1
+    }
+    turn(commands, image, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+         vk.ACCESS_TRANSFER_WRITE_BIT, vk.ACCESS_SHADER_READ_BIT,
+         vk.PIPELINE_STAGE_TRANSFER_BIT, vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT, levels - 1, 1)
+}
+
+// Whether RGBA bytes can be filtered in the device's optimal tiling: what a
+// blitted mip chain needs.
+filterable() -> bool {
+    props = calloc(1, sizeof(VkFormatProperties)) as *VkFormatProperties
+    vk.vkGetPhysicalDeviceFormatProperties(ae3d_vk_physical_device_handle(), vk.FORMAT_R8G8B8A8_UNORM, props as ptr)
+    ok = ((props.optimalTilingFeatures) as int & vk.FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0
+    free(props as ptr)
+    return ok
+}
+
+// A texture from `bytes` bytes of texels at `texels`, of a format and a
+// kind, made, uploaded and adopted: its handle, or 0.
+upload(width: int, height: int, depth: int, texels: ptr, bytes: int, format: int, levels: int, kind: int) -> int {
+    if width <= 0 || height <= 0 || depth <= 0 || texels == null { return 0 }
+    vkhost.device()
+    staging = vkhost.upload_buffer(bytes)
+    if staging == null { return 0 }
+    memcpy(staging.mapped, texels, bytes as long)
+    made = make_image(width, height, depth, levels, format, levels > 1)
+    if made.image == null {
+        vkhost.host_buffer_free(staging)
+        return 0
+    }
+    commands = ae3d_vk_once_begin()
+    // Every level to transfer-destination, not only the one the copy
+    // writes: the chain's blits write the rest, and a level still undefined
+    // when it was blitted into was hundreds of the validation layer's
+    // errors (#405).
+    turn(commands, made.image, vk.IMAGE_LAYOUT_UNDEFINED, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+         0, vk.ACCESS_TRANSFER_WRITE_BIT, vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT, vk.PIPELINE_STAGE_TRANSFER_BIT, 0, levels)
+    copy_in(commands, staging, made.image, width, height, depth)
+    if kind == SCENE {
+        mip_chain(commands, made.image, width, height, levels)
+    } else {
+        turn(commands, made.image, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+             vk.ACCESS_TRANSFER_WRITE_BIT, vk.ACCESS_SHADER_READ_BIT, vk.PIPELINE_STAGE_TRANSFER_BIT,
+             vk.PIPELINE_STAGE_VERTEX_SHADER_BIT | vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1)
+    }
+    ae3d_vk_once_end(commands)
+    vkhost.host_buffer_free(staging)
+    return ae3d_vk_texture_adopt(made.image, made.memory, made.view, width, height, levels, kind)
+}
+
+// The backend's texture maker, before it starts: the default texture it
+// binds where a draw has none is made while it starts.
+install() {
+    ae3d_vk_set_texture_maker((&ae3d_vktexture_create) as ptr)
+}
+
+@c_callback("ae3d_vktexture_create")
+create_hook(width: int, height: int, rgba: ptr) -> int {
+    return texture_create(width, height, rgba)
+}
+
+// A scene texture from RGBA bytes, with its mip chain where the format can
+// be filtered.
+texture_create(width: int, height: int, rgba: ptr) -> int {
+    levels = 1
+    if filterable() {
+        extent = width
+        if height > extent { extent = height }
+        while extent > 1 {
+            extent = extent / 2
+            levels = levels + 1
+        }
+    }
+    return upload(width, height, 1, rgba, width * height * 4, vk.FORMAT_R8G8B8A8_UNORM, levels, SCENE)
+}
+
+// RGBA bytes of two dimensions or, with `depth` past one, three: linear,
+// repeating, no mips.
+texture_create_rgba(width: int, height: int, depth: int, rgba: ptr) -> int {
+    return upload(width, height, depth, rgba, width * height * depth * 4, vk.FORMAT_R8G8B8A8_UNORM, 1, RGBA)
+}
+
+// Four floats a texel, fetched by exact texel.
+texture_create_float(width: int, height: int, rgba: ptr) -> int {
+    return upload(width, height, 1, rgba, width * height * 16, vk.FORMAT_R32G32B32A32_SFLOAT, 1, FLOATS)
+}

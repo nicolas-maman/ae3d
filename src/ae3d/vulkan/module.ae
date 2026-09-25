@@ -20,6 +20,7 @@ import ae3d.shaders
 import ae3d.vkmeter
 import ae3d.vkreadback
 import ae3d.vkoverlay
+import ae3d.vktexture
 import ae3d.posing
 import ae3d.geometry
 
@@ -53,7 +54,6 @@ extern ae3d_vk_upload_mesh(mesh: ptr) -> int
 extern ae3d_vk_upload_instances(instances: ptr) -> int
 extern ae3d_vk_update_instances(handle: int, instances: ptr) -> int
 extern ae3d_vk_free_mesh(handle: int)
-extern ae3d_vk_texture_create(width: int, height: int, rgba: ptr) -> int
 extern ae3d_vk_texture_destroy(handle: int)
 extern ae3d_vk_scene_set_float(offset: int, value: float)
 extern ae3d_vk_scene_set_int(offset: int, value: int)
@@ -81,8 +81,6 @@ extern ae3d_vk_crowd_fill(handle: int, pos: ptr, yaw: ptr, phase: ptr, col: ptr,
 extern ae3d_vk_crowd_sort(handle: int, cx: float, cz: float, near_dist: float, mid_dist: float, cull_dist: float) -> int
 extern ae3d_vk_draw_crowd_tier(mesh: int, texture: int, handle: int, tier: int, part: int)
 extern ae3d_vk_shadow_draw_crowd_tier(mesh: int, handle: int, tier: int, part: int)
-extern ae3d_vk_texture_create_float(width: int, height: int, rgba: ptr) -> int
-extern ae3d_vk_texture_create_rgba(width: int, height: int, depth: int, rgba: ptr) -> int
 extern ae3d_vk_set_pose_bank(texture: int)
 extern ae3d_vk_set_scene_depth(on: int)
 extern ae3d_vk_scene_depth_ready() -> int
@@ -435,6 +433,9 @@ renderer_init(r: *VKRenderer, window: ptr, width: int, height: int) -> int {
     // The frame read back from the first frame on (ae3d.vkreadback): an
     // offscreen one is copied out every frame, a windowed one when asked.
     vkreadback.attach()
+    // Textures are made in Aether; the backend makes its default one while
+    // it starts.
+    vktexture.install()
     if ae3d_vk_init(window, width, height) != 1 {
         println("ae3d: Vulkan init failed (${ae3d_vk_last_error()})")
         return 0
@@ -532,8 +533,8 @@ ensure_cloud_textures(r: *VKRenderer, real: bool) {
         if r.cloud_shape_texture == 0 || r.cloud_weather_texture == 0 {
             blank = calloc(2 * 2 * 2 * 4, 1)
             // depth 2, not 1: the native side makes a volume only past one layer.
-            if r.cloud_shape_texture == 0 { r.cloud_shape_texture = ae3d_vk_texture_create_rgba(2, 2, 2, blank) }
-            if r.cloud_weather_texture == 0 { r.cloud_weather_texture = ae3d_vk_texture_create_rgba(1, 1, 1, blank) }
+            if r.cloud_shape_texture == 0 { r.cloud_shape_texture = vktexture.texture_create_rgba(2, 2, 2, blank) }
+            if r.cloud_weather_texture == 0 { r.cloud_weather_texture = vktexture.texture_create_rgba(1, 1, 1, blank) }
             free(blank)
         }
         return
@@ -543,8 +544,8 @@ ensure_cloud_textures(r: *VKRenderer, real: bool) {
     if shape == null || weather == null { return }
     if r.cloud_shape_texture != 0 { ae3d_vk_texture_destroy(r.cloud_shape_texture) }
     if r.cloud_weather_texture != 0 { ae3d_vk_texture_destroy(r.cloud_weather_texture) }
-    r.cloud_shape_texture = ae3d_vk_texture_create_rgba(core.CLOUD_SHAPE_SIZE, core.CLOUD_SHAPE_SIZE, core.CLOUD_SHAPE_SIZE, shape)
-    r.cloud_weather_texture = ae3d_vk_texture_create_rgba(core.CLOUD_WEATHER_SIZE, core.CLOUD_WEATHER_SIZE, 1, weather)
+    r.cloud_shape_texture = vktexture.texture_create_rgba(core.CLOUD_SHAPE_SIZE, core.CLOUD_SHAPE_SIZE, core.CLOUD_SHAPE_SIZE, shape)
+    r.cloud_weather_texture = vktexture.texture_create_rgba(core.CLOUD_WEATHER_SIZE, core.CLOUD_WEATHER_SIZE, 1, weather)
     r.cloud_textures_real = true
 }
 
@@ -1271,7 +1272,7 @@ renderer_load_texture(r: *VKRenderer, path: string) -> int {
     if halvings > 0 { println("ae3d: ${path} is larger than this device's textures; halved ${halvings} time(s) to fit") }
     tex_w = ae3d_image_width(image)
     tex_h = ae3d_image_height(image)
-    handle = ae3d_vk_texture_create(tex_w, tex_h, ae3d_image_pixels(image))
+    handle = vktexture.texture_create(tex_w, tex_h, ae3d_image_pixels(image))
     ae3d_image_free(image)
     if handle == 0 { return 0 }
 
@@ -1683,7 +1684,7 @@ pose(m: *Model) {
     // draws through its own pipeline.
     if m.pose_bank != null {
         if m.pose_bank_texture == 0 {
-            m.pose_bank_texture = ae3d_vk_texture_create_float(posing.posebank_bones(m.pose_bank) * 4,
+            m.pose_bank_texture = vktexture.texture_create_float(posing.posebank_bones(m.pose_bank) * 4,
                                                                posing.posebank_frames(m.pose_bank),
                                                                posing.posebank_data(m.pose_bank))
         }
