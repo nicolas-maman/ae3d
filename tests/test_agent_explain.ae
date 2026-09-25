@@ -294,17 +294,16 @@ on_render(state: ptr, e: *Engine, delta: float) {
         if doc == null { return }
         r = result_of(doc)
         report("shaded", r)
-        // The roof is between the cube and the sun whatever draws it. Vulkan
-        // draws its shadow and the verdict blames it; OpenGL draws the cube
-        // as lit, and the verdict says the pixels do not show the shadow
-        // rather than blaming one that is not there.
+        // The roof is between the cube and the sun, and both renderers draw
+        // its shadow the same (0.297 of a fully lit 0.621). OpenGL once drew
+        // the cube as lit -- a batch drawing another's matrices, then a
+        // shadow letting four times the sun through (#453) -- and this
+        // verdict is what found it.
         check("its centre is blocked by the roof", string.equals(text_at(detail_of(r, "shadow"), "centre_blocked_by"), "roof") == 1)
         verdict = text_at(r, "verdict")
-        shown = string.equals(text_at(r, "blamed"), "shadow") == 1 &&
-                string.string_starts_with(verdict, "dark: in the shadow of roof") == 1
-        unshown = string.equals(text_at(r, "look"), "as lit") == 1 &&
-                  string.string_contains(verdict, "not shown in the pixels: in the shadow of roof") == 1
-        check("a model under the roof is blamed on its shadow, or the shadow is said not to show", shown || unshown)
+        check("a model under the roof is dark, and blamed on its shadow",
+              string.equals(text_at(r, "blamed"), "shadow") == 1 &&
+              string.string_starts_with(verdict, "dark: in the shadow of roof") == 1)
         if doc != null { json.free(doc) }
         ask_send("{\"id\":4,\"op\":\"explain.model\",\"index\":4}")
         g_stage = 5
