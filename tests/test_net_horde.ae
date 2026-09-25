@@ -17,11 +17,20 @@
 //     every side has reached the host's last tick;
 //   - a client whose horde is disturbed finds it at the next tick, asks for
 //     the state, and holds the host's again;
-//   - the client that joins late holds the host's horde within a trip;
+//   - the client that joins late holds the host's horde within a trip,
+//     from a state quantised to 10 bytes a zombie: every peer snaps its
+//     own horde to that state at the join tick;
+//   - that choice measured against the other one: the joiner takes the
+//     quantised state as it is and the next hash check puts it back;
 //   - what it costs a client a second, the hits' share of it, against what
 //     snapshots of every zombie would;
 //   - over TCP, a client that joins late takes the state framed on the
 //     stream and holds the host's horde.
+//
+// A side is compared with the host from the first tick it steps from a
+// state it took: the state puts it at tick T with the inputs for T + 1
+// already in it (a snap among them), which the others hold only as they
+// step T + 1.
 //
 // The loopback run is on a clock of the test's own, 60 steps a second, so
 // it is the same every time; the TCP one is on the real clock. Headless:
@@ -235,6 +244,10 @@ struct Side {
     ticks_seen: int                  // the ticks it was compared at, counted once each
     last_tick: int
     state_bytes: long                // the late one: the start with the state
+    from_tick: int                   // the tick its last state put it at: compared after it
+    states: int                      // states it has taken: its start and its resyncs
+    exact_from: float                // from when every frame compared was the host's (from its start with none wrong)
+    exact_bytes: long                // the horde's bytes it had received by then
 }
 
 side_new(session: *Net, joined: float) -> *Side {
@@ -246,6 +259,7 @@ side_new(session: *Net, joined: float) -> *Side {
     s.joined = joined
     s.started_at = 0.0 - 1.0
     s.first_check = 0.0 - 1.0
+    s.exact_from = 0.0 - 1.0
     return s
 }
 
@@ -269,18 +283,41 @@ compare(s: *Side, now: float) {
     if s.started_at < 0.0 && nethorde.started(h) {
         s.started_at = now
         s.state_bytes = nethorde.horde_bytes(h)
+        s.exact_from = now
+        s.exact_bytes = s.state_bytes
     }
     if s.first_check < 0.0 && nethorde.checks(h) > 0 { s.first_check = now }
     if !nethorde.started(h) { return }
     tick = nethorde.horde_tick(h)
+    if nethorde.resyncs(h) + 1 != s.states {
+        s.states = nethorde.resyncs(h) + 1
+        s.from_tick = tick
+    }
     hashes = g_hashes as long[]
     known = g_known as int[]
-    if tick < 1 || tick >= STEPS || known[tick] == 0 { return }
+    if tick <= s.from_tick || tick < 1 || tick >= STEPS || known[tick] == 0 { return }
     s.frames = s.frames + 1
-    if nethorde.checksum(h) != hashes[tick] { s.wrong = s.wrong + 1 }
+    if nethorde.checksum(h) != hashes[tick] {
+        s.wrong = s.wrong + 1
+        s.exact_from = 0.0 - 1.0
+    } else if s.exact_from < 0.0 {
+        s.exact_from = now
+        s.exact_bytes = nethorde.horde_bytes(h)
+    }
     if tick != s.last_tick {
         s.ticks_seen = s.ticks_seen + 1
         s.last_tick = tick
+    }
+}
+
+// The host's hash at the tick it has reached, the first time it reaches it.
+record(host: *Side) {
+    hashes = g_hashes as long[]
+    known = g_known as int[]
+    tick = nethorde.horde_tick(host.horde)
+    if tick > 0 && tick < STEPS && known[tick] == 0 {
+        hashes[tick] = nethorde.checksum(host.horde)
+        known[tick] = 1
     }
 }
 
@@ -296,8 +333,6 @@ same_bits(a: *NetHorde, b: *NetHorde) -> bool {
 loopback_run() {
     g_hashes = calloc(STEPS, 8)
     g_known = calloc(STEPS, 4)
-    hashes = g_hashes as long[]
-    known = g_known as int[]
     hub = net.hub_new()
     net.hub_set_conditions(hub, 0.1, 0.02, 0.02)
     host = side_new(net.host_loopback(hub), 0.0)
@@ -367,11 +402,7 @@ loopback_run() {
             nethorde.step(host.horde, now)
             host_seconds = host_seconds + (platform.time() - mark)
             host_ticks = host_ticks + (nethorde.horde_tick(host.horde) - before)
-            tick = nethorde.horde_tick(host.horde)
-            if tick > 0 && tick < STEPS && known[tick] == 0 {
-                hashes[tick] = nethorde.checksum(host.horde)
-                known[tick] = 1
-            }
+            record(host)
         }
         net.step(one.session, now)
         net.step(two.session, now)
@@ -415,13 +446,15 @@ loopback_run() {
     joined = (LATE as float) * STEP
     state_ms = (three.started_at - joined) * 1000.0
     check_ms = (three.first_check - joined) * 1000.0
-    println("  the late client: the state (${three.state_bytes} bytes, ${late_count} zombies and ${late_shoves} shoves at tick ${late_ticks}) ${state_ms} ms after it joined, its first tick checked ${check_ms} ms after")
+    packed = ((three.state_bytes - 207 - late_shoves * 32) as float) / (late_count as float)
+    println("  the late client: the state (${three.state_bytes} bytes, ${late_count} zombies and ${late_shoves} shoves at tick ${late_ticks}, ${packed} bytes a zombie with the seals it held) ${state_ms} ms after it joined, its first tick checked ${check_ms} ms after")
+    check("the late client's state is quantised: under 10.1 bytes a zombie, where the doubles were 32", packed < 10.1)
     // The hello's trip, the welcome's and the state's with it: two one-way
     // trips and their jitter, and the step each waits for.
     check("the late client has the host's horde within two trips (275 ms), its first seal checked within the view's lag after (500 ms)",
           three.started_at > 0.0 && state_ms <= 275.0 && three.first_check > 0.0 && check_ms <= 500.0)
     replay_ms = (late_ticks as float) * host_seconds / (host_ticks as float) * 1000.0
-    println("  replaying the inputs instead: ${late_inputs} bytes, and ${late_ticks} ticks of simulation, ${replay_ms} ms on this machine now and growing with the game; the state stays ${late_count * 32} bytes and 207 of rules")
+    println("  replaying the inputs instead: ${late_inputs} bytes, and ${late_ticks} ticks of simulation, ${replay_ms} ms on this machine now and growing with the game; the state stays ${late_count * 10 + late_shoves * 32} bytes and 207 of rules")
 
     // What a client costs: everything it received (the session's own empty
     // snapshots among it), the horde's share, and what a snapshot of every
@@ -443,9 +476,115 @@ loopback_run() {
     free(g_known)
 }
 
+// --- a late joiner's state, two ways -------------------------------------------------------------
+
+const JOIN_STEPS = 330               // 5.5 s
+const JOIN_AT = 120                  // the step the late client joins: 2 s
+
+// What a late joiner cost and when it held the host's horde, one way.
+struct HordeJoinRun {
+    state_bytes: long                // the first state it took
+    exact_ms: float                  // joined to holding the host's horde from then on
+    exact_bytes: long                // the horde's bytes it had received by then
+    wrong: int                       // frames its horde was not the host's
+    divergences: int
+    resyncs: int
+    other_divergences: int           // the client that was there before it
+    same: bool                       // every side the host's to the bit at the end
+}
+
+// A host, a client and one that joins 2 s in, over the lossy link, the
+// seals hashed once a second (the default), the target moving and zombies
+// hit: `snap` true, every peer snaps to the quantised state at the join
+// tick; false, the joiner takes it as it is and the next hash check puts it
+// back with the doubles.
+join_run(snap: bool) -> *HordeJoinRun {
+    g_hashes = calloc(STEPS, 8)
+    g_known = calloc(STEPS, 4)
+    hub = net.hub_new()
+    net.hub_set_conditions(hub, 0.1, 0.02, 0.02)
+    host = side_new(net.host_loopback(hub), 0.0)
+    nethorde.set_checks(host.horde, 30)
+    nethorde.set_join_snap(host.horde, snap)
+    one = side_new(net.join_loopback(hub), 0.0)
+    late = null as *Side
+    step = 0
+    while step < JOIN_STEPS + SETTLE {
+        now = (step as float) * STEP
+        running = step < JOIN_STEPS
+        if step == BEGIN {
+            nethorde.set_target(host.horde, 50.0, 10.0, now)
+            nethorde.start(host.horde, SEED, COUNT, X0, Z0, X1, Z1, now)
+        }
+        if step == JOIN_AT { late = side_new(net.join_loopback(hub), now) }
+        if running && step > BEGIN && step % 90 == 0 {
+            if (step / 90) % 2 == 1 {
+                nethorde.set_target(host.horde, 0.0 - 50.0, 0.0 - 15.0, now)
+            } else {
+                nethorde.set_target(host.horde, 50.0, 10.0, now)
+            }
+        }
+        if running && step > BEGIN && step % 10 == 5 {
+            nethorde.hit(host.horde, (step * 29) % nethorde.horde_count(host.horde), 3.0, 0.0 - 2.0, 0.5, now)
+        }
+        net.step(host.session, now)
+        if running {
+            nethorde.step(host.horde, now)
+            record(host)
+        }
+        net.step(one.session, now)
+        nethorde.step(one.horde, now)
+        if late != null {
+            net.step(late.session, now)
+            nethorde.step(late.horde, now)
+        }
+        compare(one, now)
+        compare(late, now)
+        step = step + 1
+    }
+    r = calloc(1, sizeof(HordeJoinRun)) as *HordeJoinRun
+    r.state_bytes = late.state_bytes
+    r.exact_ms = 0.0 - 1.0
+    if late.exact_from >= 0.0 { r.exact_ms = (late.exact_from - (JOIN_AT as float) * STEP) * 1000.0 }
+    r.exact_bytes = late.exact_bytes
+    r.wrong = late.wrong
+    r.divergences = nethorde.divergences(late.horde)
+    r.resyncs = nethorde.resyncs(late.horde)
+    r.other_divergences = nethorde.divergences(one.horde)
+    r.same = same_bits(host.horde, one.horde) && same_bits(host.horde, late.horde)
+    side_free(one)
+    side_free(late)
+    side_free(host)
+    net.hub_free(hub)
+    free(g_hashes)
+    free(g_known)
+    return r
+}
+
+join_print(name: string, r: *HordeJoinRun) {
+    println("  ${name}: the state ${r.state_bytes} bytes; the host's horde from ${r.exact_ms} ms after it joined, ${r.exact_bytes} bytes received by then; ${r.wrong} frames off, ${r.divergences} diverged, ${r.resyncs} resync; the other client ${r.other_divergences} diverged; the same to the bit at the end: ${r.same}")
+}
+
+join_runs() {
+    snapped = join_run(true)
+    resynced = join_run(false)
+    println("late join: ${COUNT} zombies, a client joins 2 s in, the seals hashed once a second")
+    join_print("(a) every peer snaps to the quantised state at the join tick", snapped)
+    join_print("(b) the joiner takes it, and the next hash check puts it back", resynced)
+    check("(a) the joiner holds the host's horde from its state on: no frame off, no divergence, no resync, the other client untouched",
+          snapped.wrong == 0 && snapped.divergences == 0 && snapped.resyncs == 0 && snapped.other_divergences == 0 && snapped.same &&
+          snapped.exact_ms >= 0.0 && snapped.exact_ms <= 275.0)
+    check("(b) the joiner is off until a hash check finds it, and is put back with the doubles",
+          resynced.divergences == 1 && resynced.resyncs == 1 && resynced.wrong > 0 && resynced.same)
+    check("so (a): fewer bytes and sooner than (b)",
+          snapped.exact_bytes * 3 < resynced.exact_bytes && snapped.exact_ms + 500.0 < resynced.exact_ms)
+    free(snapped as ptr)
+    free(resynced as ptr)
+}
+
 // The same over TCP on this machine, on the real clock: the host starts
 // the horde, a client joins at once and another half a second later (the
-// state, 95 KB, framed on the stream), the target moves, and once the host
+// state, 30 KB, framed on the stream), the target moves, and once the host
 // stops every side is at its last tick with the same horde.
 tcp_run() {
     host_session = net.host_tcp("127.0.0.1", 0)
@@ -506,6 +645,7 @@ main() {
     threads_run()
     hit_run()
     loopback_run()
+    join_runs()
     tcp_run()
     jobs.stop()
     if g_failures == 0 {
