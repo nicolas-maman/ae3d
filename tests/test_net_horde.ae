@@ -2,20 +2,24 @@
 // process, and a third that joins late, each with a horde and a flow field
 // of its own, over a link with 100 ms latency, 20 ms jitter and 2% loss.
 // Nothing of the horde is sent a zombie at a time; the host sends the start,
-// the target changes, the kills and a seal a tick. Held to numbers:
+// the target changes, the kills, the hits and a seal a tick. Held to
+// numbers:
 //
 //   - the same horde stepped with no pool and over four threads is the
 //     same to the bit (separate_exact), and the half scan of
 //     horde.separate is shown not to be;
+//   - a hit carries its zombie as far as its shove says, with its heading
+//     and its walk held for the stun, and two hits on one zombie add;
 //   - every client's horde is the host's to the bit at every tick it
-//     reaches: its hash against the host's at that tick every frame, the
+//     reaches, with zombies hit several times a second (one of them over
+//     and over): its hash against the host's at that tick every frame, the
 //     seals' own hashes every tick, and the columns compared whole once
 //     every side has reached the host's last tick;
 //   - a client whose horde is disturbed finds it at the next tick, asks for
 //     the state, and holds the host's again;
 //   - the client that joins late holds the host's horde within a trip;
-//   - what it costs a client a second, against what snapshots of every
-//     zombie would;
+//   - what it costs a client a second, the hits' share of it, against what
+//     snapshots of every zombie would;
 //   - over TCP, a client that joins late takes the state framed on the
 //     stream and holds the host's horde.
 //
@@ -168,6 +172,54 @@ threads_run() {
     free(exact_pooled)
 }
 
+// --- a hit ----------------------------------------------------------------------------------------
+
+// A horde alone on a host, wandering: a zombie hit at 4 m/s along x for half
+// a second, another hit twice in one tick. The shove fades in a straight
+// line over the stun's 15 ticks, so it carries its zombie 4 dt (15 + 1) / 2
+// = 1.0667 m, and the stunned zombie neither turns nor walks nor advances
+// its walk until the stun is over.
+hit_run() {
+    hub = net.hub_new()
+    session = net.host_loopback(hub)
+    h = nethorde.horde_new(session, null)
+    nethorde.start(h, SEED, COUNT, X0, Z0, X1, Z1, 0.0)
+    nethorde.step(h, 1.0)
+    // A zombie well inside the ground, so the edge does not stop its shove.
+    pos = nethorde.positions(h) as float[]
+    victim = 0
+    while pos[victim * 3] > X1 - 5.0 || pos[victim * 3] < X0 + 5.0 { victim = victim + 1 }
+    other = victim + 1
+    x = pos[victim * 3]
+    z = pos[victim * 3 + 2]
+    yaws = nethorde.yaws(h) as float[]
+    phases = nethorde.phases(h) as float[]
+    yaw = yaws[victim]
+    phase = phases[victim]
+    nethorde.hit(h, victim, 4.0, 0.0, 0.5, 1.0)
+    nethorde.hit(h, other, 2.0, 0.0, 0.3, 1.0)
+    nethorde.hit(h, other, 0.0, 2.0, 0.5, 1.0)
+    both = nethorde.shoved(h) == 2 && nethorde.stunned(h, other) > 0.49 && nethorde.stunned(h, other) < 0.51
+    // Fifteen ticks: the stun's.
+    nethorde.step(h, 1.5)
+    pos = nethorde.positions(h) as float[]
+    moved_x = pos[victim * 3] - x
+    moved_z = pos[victim * 3 + 2] - z
+    yaws = nethorde.yaws(h) as float[]
+    phases = nethorde.phases(h) as float[]
+    held = yaws[victim] == yaw && phases[victim] == phase
+    over = nethorde.shoved(h) == 0 && nethorde.stunned(h, victim) == 0.0
+    println("hits: a zombie hit at 4 m/s for 0.5 s moved ${moved_x} m along x and ${moved_z} m across it; heading and walk held: ${held}")
+    wanted = 4.0 / 30.0 * 8.0
+    check("a hit carries its zombie 4 dt (n + 1) / 2 = 1.0667 m along the hit, and nowhere across it",
+          moved_x > wanted - 0.000000001 && moved_x < wanted + 0.000000001 && moved_z > 0.0 - 0.000000001 && moved_z < 0.000000001)
+    check("the stunned zombie keeps its heading and its walk, and the stun ends on time", held && over)
+    check("two hits on one zombie in a tick are one shove, stunned for the longer", both)
+    nethorde.horde_free(h)
+    net.net_free(session)
+    net.hub_free(hub)
+}
+
 // --- over the network ---------------------------------------------------------------------------
 
 // One side: its session, its field and its horde.
@@ -255,6 +307,9 @@ loopback_run() {
 
     targets = 0
     kills = 0
+    hits = 0
+    shoved_most = 0
+    late_shoves = 0
     host_seconds = 0.0
     host_ticks = 0
     late_ticks = 0
@@ -267,8 +322,9 @@ loopback_run() {
             three = side_new(net.join_loopback(hub), now)
             late_ticks = nethorde.horde_tick(host.horde)
             late_count = nethorde.horde_count(host.horde)
-            // A target is 16 bytes on the wire (three numbers), a kill 12.
-            late_inputs = targets * 16 + kills * 12
+            late_shoves = nethorde.shoved(host.horde)
+            // A target is 16 bytes on the wire (three numbers), a kill 12, a hit 25.
+            late_inputs = targets * 16 + kills * 12 + hits * 25
         }
         running = step < STEPS
         if step == BEGIN {
@@ -291,6 +347,18 @@ loopback_run() {
         if running && step > BEGIN + 30 && step % 20 == 0 {
             if nethorde.kill(host.horde, (step * 7) % nethorde.horde_count(host.horde), now) { kills = kills + 1 }
             if nethorde.kill(host.horde, (step * 13) % nethorde.horde_count(host.horde), now) { kills = kills + 1 }
+        }
+        // Zombies hit six times a second, each shoved 0 to 6 m/s and stunned
+        // half a second; and twice a second zombie 100 again, stunned a
+        // second, so every hit on it lands while the last still holds it.
+        if running && step > BEGIN && step % 10 == 5 {
+            dx = ((((step * 37) % 11) - 5) as float) * 0.8
+            dz = ((((step * 53) % 11) - 5) as float) * 0.8 + 0.4
+            if nethorde.hit(host.horde, (step * 29) % nethorde.horde_count(host.horde), dx, dz, 0.5, now) { hits = hits + 1 }
+        }
+        if running && step > BEGIN && step % 30 == 15 {
+            dx = ((((step * 17) % 7) - 3) as float) * 1.5 + 0.5
+            if nethorde.hit(host.horde, 100, dx, 0.0 - 1.5, 1.0, now) { hits = hits + 1 }
         }
         net.step(host.session, now)
         if running {
@@ -319,6 +387,7 @@ loopback_run() {
         compare(one, now)
         compare(two, now)
         compare(three, now)
+        if nethorde.started(two.horde) && nethorde.shoved(two.horde) > shoved_most { shoved_most = nethorde.shoved(two.horde) }
         step = step + 1
     }
 
@@ -326,13 +395,14 @@ loopback_run() {
     last = nethorde.horde_tick(host.horde)
     alive = nethorde.horde_count(host.horde)
     println("horde: ${COUNT} zombies on a host and two clients, a third from ${(LATE as float) * STEP} s; 100 ms latency, 20 ms jitter, 2% loss")
-    println("  the host stepped ${last} ticks at 30 a second, ${targets} targets and ${kills} kills; ${alive} zombies left")
+    println("  the host stepped ${last} ticks at 30 a second, ${targets} targets, ${kills} kills and ${hits} hits; ${alive} zombies left")
     println("  a tick of ${COUNT} on the host took ${host_seconds / (host_ticks as float) * 1000.0} ms on this machine")
     println("  client 1: ${one.frames} frames at ${one.ticks_seen} ticks against the host's hash, ${one.wrong} different; its seals checked ${nethorde.checks(one.horde)} ticks, ${nethorde.divergences(one.horde)} diverged, ${nethorde.resyncs(one.horde)} resync")
     println("  client 2: ${two.frames} frames at ${two.ticks_seen} ticks, ${two.wrong} different; seals checked ${nethorde.checks(two.horde)} ticks, ${nethorde.divergences(two.horde)} diverged")
     println("  client 3: ${three.frames} frames at ${three.ticks_seen} ticks, ${three.wrong} different; seals checked ${nethorde.checks(three.horde)} ticks, ${nethorde.divergences(three.horde)} diverged")
-    check("client 2 holds the host's horde at every tick it reaches, by hash and by seal",
-          two.ticks_seen > 200 && two.wrong == 0 && nethorde.checks(two.horde) > 200 && nethorde.divergences(two.horde) == 0)
+    println("  client 2 had up to ${shoved_most} zombies under a shove at once")
+    check("client 2 holds the host's horde at every tick it reaches, by hash and by seal, the hit zombies among it",
+          two.ticks_seen > 200 && two.wrong == 0 && nethorde.checks(two.horde) > 200 && nethorde.divergences(two.horde) == 0 && shoved_most >= 4)
     // Client 1 is a millimetre off from the nudge until the state it asks
     // for comes back: the frames in that trip are the only ones that differ.
     check("client 1, disturbed, finds it at the next tick, asks once, and is put back",
@@ -345,13 +415,13 @@ loopback_run() {
     joined = (LATE as float) * STEP
     state_ms = (three.started_at - joined) * 1000.0
     check_ms = (three.first_check - joined) * 1000.0
-    println("  the late client: the state (${three.state_bytes} bytes, ${late_count} zombies at tick ${late_ticks}) ${state_ms} ms after it joined, its first tick checked ${check_ms} ms after")
+    println("  the late client: the state (${three.state_bytes} bytes, ${late_count} zombies and ${late_shoves} shoves at tick ${late_ticks}) ${state_ms} ms after it joined, its first tick checked ${check_ms} ms after")
     // The hello's trip, the welcome's and the state's with it: two one-way
     // trips and their jitter, and the step each waits for.
     check("the late client has the host's horde within two trips (275 ms), its first seal checked within the view's lag after (500 ms)",
           three.started_at > 0.0 && state_ms <= 275.0 && three.first_check > 0.0 && check_ms <= 500.0)
     replay_ms = (late_ticks as float) * host_seconds / (host_ticks as float) * 1000.0
-    println("  replaying the inputs instead: ${late_inputs} bytes, and ${late_ticks} ticks of simulation, ${replay_ms} ms on this machine now and growing with the game; the state stays ${late_count * 32} bytes and 199 of rules")
+    println("  replaying the inputs instead: ${late_inputs} bytes, and ${late_ticks} ticks of simulation, ${replay_ms} ms on this machine now and growing with the game; the state stays ${late_count * 32} bytes and 207 of rules")
 
     // What a client costs: everything it received (the session's own empty
     // snapshots among it), the horde's share, and what a snapshot of every
@@ -359,8 +429,9 @@ loopback_run() {
     received = (net.bytes_received(two.session) as float) / (((STEPS + SETTLE) as float) * STEP)
     horde_rate = (nethorde.horde_bytes(two.horde) as float) / seconds
     snapshots = ((alive * 31 + 21) as float) * 30.0
-    println("  client 2 received ${received / 1024.0} KB a second, the horde's ${horde_rate} bytes a second of it; snapshots of every zombie would be ${snapshots / 1024.0} KB a second")
-    check("a client's horde costs under 1 KB a second, where snapshots of it would be 2.6 MB", horde_rate < 1024.0 && snapshots > 2.5 * 1024.0 * 1024.0)
+    hit_rate = ((hits * 25) as float) / seconds
+    println("  client 2 received ${received / 1024.0} KB a second, the horde's ${horde_rate} bytes a second of it, the hits' ${hit_rate} (${hits} of 25 bytes in ${seconds} s); snapshots of every zombie would be ${snapshots / 1024.0} KB a second")
+    check("a client's horde, hits and all, costs under 1 KB a second, where snapshots of it would be 2.6 MB", horde_rate < 1024.0 && snapshots > 2.5 * 1024.0 * 1024.0)
     println("  the host sent ${(net.bytes_sent(host.session) as float) / (((STEPS + SETTLE) as float) * STEP) / 1024.0} KB a second to three clients, the late one's state among it")
 
     side_free(one)
@@ -433,6 +504,7 @@ tcp_run() {
 
 main() {
     threads_run()
+    hit_run()
     loopback_run()
     tcp_run()
     jobs.stop()
