@@ -9,7 +9,7 @@ built.
 | Slice | What | State |
 |---|---|---|
 | 1. Glyphs | A TrueType reader and a signed-distance-field atlas baked from it | `ae3d.glyphs`, this page |
-| 2. The overlay pass | Screen-space quads batched into one draw after post, on both renderers | not built |
+| 2. The overlay pass | Text and rectangles in the window's pixels, one draw after post, on both renderers | `ae3d.overlay`, this page |
 | 3. Layout | Anchors, DPI-scaled offsets, alignment, wrapping, clipping panels | not built |
 | 4. Input | Focus and click through `ae3d.input`, a menu stack | not built |
 
@@ -144,3 +144,103 @@ The worst of the 0.5 contour is at corners and joins (where the bar of
 'H' meets its stems, the join of '4'): the field bends between two texels
 there, and a line between their values cuts across the bend. Of the
 23,662 horizontal crossings, 287 (1.2%) are more than 0.1 px off.
+
+## The overlay
+
+```aether
+import ae3d.overlay
+
+// in a script's update, every frame
+hud = engine.engine_overlay(e)
+overlay.rect(hud, 20.0, 660.0, 280.0 * health, 22.0, overlay.rgba(0.2, 0.8, 0.15, 0.95))
+overlay.text(hud, 20.0, 16.0, 26.0, "${fps} fps", overlay.rgba(1.0, 1.0, 1.0, 1.0))
+overlay.text_outlined(hud, 312.0, 654.0, 26.0, "${points}", white, black, 1.5)
+width, height = overlay.measure(hud, "Press E to open", 22.0)   // to centre it
+```
+
+The overlay is immediate: each frame a program says what is on the
+screen this frame -- the bar at its length now, the count as it is now --
+and the overlay draws that over the finished picture and forgets it.
+Nothing is created for a label or kept for a bar, so nothing has to be
+updated or taken away. `examples/hud.ae` is a frame counter, a health bar,
+a crosshair and a centred prompt over a scene, as one script's update.
+
+| Call | Draws |
+|---|---|
+| `rect(o, x, y, w, h, colour)` | a filled rectangle |
+| `rect_outline(o, x, y, w, h, thickness, colour)` | its border, inside its edge, as four rectangles that do not overlap |
+| `text(o, x, y, size_px, text, colour)` | UTF-8 text, its first line's top-left at x, y, `size_px` to the em; its width back |
+| `text_outlined(..., outline, outline_px)` | the same over its glyphs grown by `outline_px` in another colour |
+| `text_shadowed(..., shadow, offset_px)` | the same over a copy of itself offset down and right |
+| `measure(o, text, size_px)` | nothing: the width of the widest line and the lines' height |
+| `set_font(o, path)` | nothing: the font text is drawn in from now on, baked now |
+
+Coordinates are the window's framebuffer pixels, y down from its
+top-left, the way a screen is addressed. Colours are display values -- the
+sRGB a colour picker gives -- with alpha, `overlay.rgba(r, g, b, a)`. What
+is asked for later is drawn over what was asked for earlier.
+
+### A frame
+
+The engine makes one overlay, hands it to its backend
+(`Backend.set_overlay`), and clears it after each frame is drawn, so what
+`update`, `pose` and a script's `late_update` ask for is that frame's.
+An engine behaviour's `late_update` runs after the draw, and what it asks
+for is the next frame's. `engine_over` -- the editor's engine over its own
+renderer -- has none; every call takes a null overlay as nothing to do.
+
+What is asked for becomes vertices at once: two triangles a quad, each
+vertex its pixel, its place in the atlas, its colour and the distance
+field's threshold (0.5 for a glyph as it is, lower for one grown outward,
+below zero for a solid rectangle), nine floats. The renderer draws them
+all in one call over the output after its post chain: blended by their
+alpha, no depth, no culling, the frame's own alpha kept at one. One shader
+does both, `VERTEX_OVERLAY` and `FRAGMENT_OVERLAY` in `ae3d.shaders`: the
+field sampled, and blended across one screen pixel of it at the outline
+(`fwidth`), whatever size the glyph is drawn at.
+
+- **OpenGL.** `ae3d.gl` draws it at the end of the post pass, into the
+  window or the offscreen target: the atlas as an `R8` texture, the
+  vertices into one buffer each frame.
+- **Vulkan.** `ae3d.vkoverlay` records it from Aether on contrib.vulkan.vk
+  through `vulkan.c`'s frame hooks, at their draw stage: after the meter
+  reads the scene's light (a menu does not set the scene's exposure) and
+  before the readback copies the frame (a capture is of what is shown).
+  Its render pass loads the frame's image and leaves it in the layout it
+  found it in; the atlas goes up through a staging buffer copied in the
+  frame's own command buffer; the vertices are in a buffer for each frame
+  in flight. `tools/generate_shaders.ae` compiles the same shader source
+  for it at `#version 450`, where `VULKAN` is defined and picks push
+  constants for the two numbers OpenGL takes as uniforms.
+
+### Its font
+
+The default font is PT Sans, baked the first time text is asked for, at
+64 px to the em with a spread of 6 px (`overlay.FONT_SPREAD`): the spread
+is what an outline can grow into, 1.9 px at 24 px text and 3.8 at 48,
+where the glyphs' own default of 2.5 stops under a pixel at 24. That atlas
+is 1024 x 1024, 1 MB, baked in 13-15 ms and read back from the bake cache
+in 1.6 ms. A program run from where `resources/fonts` is not says so once
+and draws its rectangles without its text.
+
+### Measured on screen
+
+`tests/test_overlay.ae` draws a white rectangle, a half-transparent red
+one, HELLO at 48 px and HUD at 24 px plain and outlined over a dark frame,
+through each renderer's backend offscreen and through the engine on
+OpenGL, reads the frame back, and asks about it in numbers. On the
+Windows machine of [performance.md](performance.md):
+
+| What | Number |
+|---|---|
+| The white rectangle | 255 in every channel of every pixel, ending at its edges to the pixel (y down) |
+| Half-transparent red over the frame | red 137, the frame's 20 and 255 half and half, exactly |
+| HELLO at 48 px | measured 137 x 62 px; 1509 pixels inked inside that box (17.8%), none beside or below it |
+| HUD at 24 px | 295 pixels inked; 776 with an outline asked 2 px wide (1.9, what the spread gives) |
+| The next frame, nothing asked for | none of it, every renderer |
+| Vulkan against OpenGL | not a channel different, the frame over |
+| 60 labels and 20 bars a frame (800 quads) | 0.02 ms of CPU to lay out |
+| Draws | one, whatever is asked for |
+
+Under the Khronos validation layer with synchronisation validation,
+`examples/hud.ae` on Vulkan (windowed, captured) reports no error.

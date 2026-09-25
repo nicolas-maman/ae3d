@@ -1,0 +1,288 @@
+// ae3d.overlay -- text and rectangles drawn over the frame, in the window's
+// pixels (#449, slice 2): what a HUD and a menu are made of.
+//
+// It is immediate: every frame a program says what is on the screen this
+// frame -- the health bar at its length now, the frame rate as it is now --
+// and the overlay draws that over the finished picture and forgets it.
+// Nothing is kept from one frame to the next, so nothing has to be updated
+// or taken away: what was not asked for this frame is not drawn.
+//
+//   hud = engine.engine_overlay(e)
+//   overlay.rect(hud, 20.0, 20.0, 200.0 * health, 16.0, overlay.rgba(0.8, 0.1, 0.1, 1.0))
+//   overlay.text(hud, 20.0, 44.0, 24.0, "58 fps", overlay.rgba(1.0, 1.0, 1.0, 1.0))
+//
+// Coordinates are the window's framebuffer pixels, y down from its top-left,
+// the way a screen is addressed; a text's size is its em in pixels, and its
+// position the top-left of its first line. Colours are display values (the
+// sRGB a colour picker gives), with alpha. Later is drawn over earlier.
+//
+// What is asked for is kept as vertices, two triangles a quad, each vertex
+// its pixel, its place in the glyph atlas, its colour and the distance
+// field's threshold (0.5 for a glyph as it is, lower for one grown outward,
+// below zero for a solid rectangle): VERTEX_FLOATS floats, in the order they
+// were asked for. A renderer draws the lot in one call after its post chain,
+// blended, with no depth -- ae3d.gl itself, ae3d.vkoverlay into the Vulkan
+// frame -- from the one shader both compile (ae3d.shaders' VERTEX_OVERLAY).
+//
+// The engine makes one and hands it to its backend, and clears it after each
+// frame is drawn: what `update`, a script's `late_update` and `pose` ask for
+// is that frame's; what an engine behaviour's `late_update` asks for (it runs
+// after the draw) is the next frame's.
+//
+// Text comes from a signed-distance-field atlas (ae3d.glyphs), one texture
+// for every size. The default font, PT Sans, is baked the first time text is
+// asked for (and read from the bake cache on every run after the first);
+// set_font names another. An outline is the text's glyphs drawn first under
+// it with the field's threshold lowered, the glyph grown outward: how far it
+// can grow is the spread the atlas was baked with, which is why the overlay
+// bakes wider than the glyphs' default (FONT_SPREAD).
+
+import std.heap
+import ae3d.core
+import ae3d.glyphs
+
+exports (
+    Overlay, overlay_new, overlay_free, clear, rgba,
+    rect, rect_outline, text, text_outlined, text_shadowed, measure,
+    set_font, font_ready, atlas, atlas_serial, vertex_count, vertex_data, quad_count,
+    VERTEX_FLOATS, VERTEX_BYTES, DEFAULT_FONT, FONT_SPREAD
+)
+
+extern calloc(count: int, size: int) -> ptr
+extern realloc(p: ptr, size: long) -> ptr
+extern free(p: ptr)
+
+// A vertex: x y (pixels), u v (atlas), r g b a, the field's threshold.
+const VERTEX_FLOATS = 9
+const VERTEX_BYTES = 36
+
+const DEFAULT_FONT = "resources/fonts/PT_Sans-Web-Regular.ttf"
+// The atlas's spread, in its pixels either side of an outline: 6 at 64 to
+// the em lets an outline grow a glyph by up to 1.9 px at 24 px text and
+// 3.8 at 48 (to LOWEST_EDGE), where the glyphs' own 2.5 stopped under one
+// pixel at 24. It costs a 1024 x 1024 atlas rather than 1024 x 512, 1 MB,
+// baked in 13-15 ms and read back from the cache in 1.6. The middle of a
+// regular stem then reads 0.71 rather than 0.9, which a threshold at 0.5
+// does not see.
+const FONT_SPREAD = 6.0
+// The lowest threshold an outline is drawn at: at 0 the field is the
+// spread's edge all round the glyph's box, and the box itself would fill.
+const LOWEST_EDGE = 0.08
+const SOLID = 0.0 - 1.0
+
+struct Overlay {
+    vertices: ptr                // float[capacity * VERTEX_FLOATS]
+    count: int                   // vertices this frame
+    capacity: int                // vertices there is room for
+    quads: int                   // quads this frame, text and rectangles
+    atlas: ptr                   // *GlyphAtlas, the font's; null until text is asked for
+    font_tried: bool             // a font was looked for (and not found, while atlas is null)
+    serial: int                  // counts the atlases, so a renderer knows to upload anew
+}
+
+overlay_new() -> *Overlay {
+    o = heap.new(Overlay)
+    o.capacity = 6 * 256
+    o.vertices = calloc(o.capacity * VERTEX_FLOATS, 4)
+    return o
+}
+
+overlay_free(o: *Overlay) {
+    if o == null { return }
+    if o.atlas != null { glyphs.atlas_free(o.atlas as *GlyphAtlas) }
+    if o.vertices != null { free(o.vertices) }
+    heap.free(o)
+}
+
+// What was asked for, gone: the engine calls this after each frame's draw.
+clear(o: *Overlay) {
+    if o == null { return }
+    o.count = 0
+    o.quads = 0
+}
+
+// A colour, 0..1 a channel, as the display shows it.
+rgba(r: float, g: float, b: float, a: float) -> Vec4 { return core.vec4(r, g, b, a) }
+
+vertex_count(o: *Overlay) -> int {
+    if o == null { return 0 }
+    return o.count
+}
+
+// The vertices, VERTEX_FLOATS 32-bit floats each, vertex_count of them.
+vertex_data(o: *Overlay) -> ptr {
+    if o == null { return null }
+    return o.vertices
+}
+
+quad_count(o: *Overlay) -> int {
+    if o == null { return 0 }
+    return o.quads
+}
+
+// The atlas the text is drawn from (null before any text was), and how many
+// atlases there have been: a renderer uploads again when that changes.
+atlas(o: *Overlay) -> *GlyphAtlas {
+    if o == null { return null }
+    return o.atlas as *GlyphAtlas
+}
+
+atlas_serial(o: *Overlay) -> int {
+    if o == null { return 0 }
+    return o.serial
+}
+
+// The font text is drawn in from now on, baked now: false (and the font in
+// use kept) when it cannot be read, glyphs.last_error() saying why.
+set_font(o: *Overlay, path: string) -> bool {
+    if o == null { return false }
+    face = glyphs.load(path)
+    if face == null { return false }
+    baked = glyphs.bake(face, glyphs.DEFAULT_SIZE, FONT_SPREAD)
+    glyphs.typeface_free(face)
+    if baked == null { return false }
+    if o.atlas != null { glyphs.atlas_free(o.atlas as *GlyphAtlas) }
+    o.atlas = baked as ptr
+    o.font_tried = true
+    o.serial = o.serial + 1
+    return true
+}
+
+// Whether there is a font to draw text in, the default baked if none was
+// set. Looked for once: a program run from where the font is not finds out
+// from one line, not one a frame.
+font_ready(o: *Overlay) -> bool {
+    if o == null { return false }
+    if o.atlas != null { return true }
+    if o.font_tried { return false }
+    o.font_tried = true
+    if !set_font(o, DEFAULT_FONT) {
+        println("ae3d: overlay: no font (${DEFAULT_FONT}: ${glyphs.last_error()}); text is not drawn")
+        return false
+    }
+    return true
+}
+
+// Room for `more` vertices.
+reserve(o: *Overlay, more: int) -> bool {
+    if o.count + more <= o.capacity { return true }
+    wanted = o.capacity * 2
+    while wanted < o.count + more { wanted = wanted * 2 }
+    grown = realloc(o.vertices, (wanted * VERTEX_FLOATS * 4) as long)
+    if grown == null { return false }
+    o.vertices = grown
+    o.capacity = wanted
+    return true
+}
+
+vertex(o: *Overlay, x: float, y: float, u: float, v: float, c: Vec4, edge: float) {
+    out = o.vertices as f32[]
+    at = o.count * VERTEX_FLOATS
+    out[at] = x as f32
+    out[at + 1] = y as f32
+    out[at + 2] = u as f32
+    out[at + 3] = v as f32
+    out[at + 4] = c.x as f32
+    out[at + 5] = c.y as f32
+    out[at + 6] = c.z as f32
+    out[at + 7] = c.w as f32
+    out[at + 8] = edge as f32
+    o.count = o.count + 1
+}
+
+// One quad, corner to corner, as two triangles.
+quad(o: *Overlay, x0: float, y0: float, x1: float, y1: float, u0: float, v0: float, u1: float, v1: float,
+     c: Vec4, edge: float) {
+    if !reserve(o, 6) { return }
+    vertex(o, x0, y0, u0, v0, c, edge)
+    vertex(o, x1, y0, u1, v0, c, edge)
+    vertex(o, x1, y1, u1, v1, c, edge)
+    vertex(o, x0, y0, u0, v0, c, edge)
+    vertex(o, x1, y1, u1, v1, c, edge)
+    vertex(o, x0, y1, u0, v1, c, edge)
+    o.quads = o.quads + 1
+}
+
+// A filled rectangle, its top-left at x, y.
+rect(o: *Overlay, x: float, y: float, w: float, h: float, colour: Vec4) {
+    if o == null || w <= 0.0 || h <= 0.0 { return }
+    quad(o, x, y, x + w, y + h, 0.0, 0.0, 0.0, 0.0, colour, SOLID)
+}
+
+// A rectangle's border, `thickness` pixels inside its edge: four
+// rectangles, which do not overlap, so a translucent border is even.
+rect_outline(o: *Overlay, x: float, y: float, w: float, h: float, thickness: float, colour: Vec4) {
+    if o == null || w <= 0.0 || h <= 0.0 || thickness <= 0.0 { return }
+    t = thickness
+    if t * 2.0 >= w || t * 2.0 >= h {
+        rect(o, x, y, w, h, colour)
+        return
+    }
+    rect(o, x, y, w, t, colour)
+    rect(o, x, y + h - t, w, t, colour)
+    rect(o, x, y + t, t, h - 2.0 * t, colour)
+    rect(o, x + w - t, y + t, t, h - 2.0 * t, colour)
+}
+
+// The text's glyphs as quads at x, y, with the field's threshold at `edge`;
+// its width in pixels.
+glyph_run(o: *Overlay, x: float, y: float, size_px: float, s: string, colour: Vec4, edge: float) -> float {
+    a = o.atlas as *GlyphAtlas
+    q = glyphs.layout(a, s, size_px)
+    if q == null { return 0.0 }
+    data = q.data as float[]
+    i = 0
+    while i < q.count {
+        at = i * 8
+        quad(o, x + data[at], y + data[at + 1], x + data[at + 2], y + data[at + 3],
+             data[at + 4], data[at + 5], data[at + 6], data[at + 7], colour, edge)
+        i = i + 1
+    }
+    width = q.width
+    glyphs.quads_free(q)
+    return width
+}
+
+// The threshold that grows a glyph drawn at `size_px` outward by `px`
+// screen pixels: the field runs 0..1 over twice the spread, in the atlas's
+// pixels, and an atlas pixel is size_px / its size on the screen.
+grown_edge(o: *Overlay, size_px: float, px: float) -> float {
+    a = o.atlas as *GlyphAtlas
+    edge = 0.5 - px * a.size_px / (size_px * 2.0 * a.spread_px)
+    if edge < LOWEST_EDGE { return LOWEST_EDGE }
+    if edge > 0.5 { return 0.5 }
+    return edge
+}
+
+// Text, UTF-8, its first line's top-left at x, y, `size_px` to the em; a
+// newline starts a line below. Its width in pixels (its widest line's).
+text(o: *Overlay, x: float, y: float, size_px: float, s: string, colour: Vec4) -> float {
+    if o == null || size_px <= 0.0 || !font_ready(o) { return 0.0 }
+    return glyph_run(o, x, y, size_px, s, colour, 0.5)
+}
+
+// Text with an outline `outline_px` wide around every glyph, in its own
+// colour: legible over anything the scene puts behind it. The outline can
+// be as wide as the atlas's spread allows (FONT_SPREAD's comment).
+text_outlined(o: *Overlay, x: float, y: float, size_px: float, s: string, colour: Vec4,
+              outline: Vec4, outline_px: float) -> float {
+    if o == null || size_px <= 0.0 || !font_ready(o) { return 0.0 }
+    if outline_px > 0.0 { glyph_run(o, x, y, size_px, s, outline, grown_edge(o, size_px, outline_px)) }
+    return glyph_run(o, x, y, size_px, s, colour, 0.5)
+}
+
+// Text over a copy of itself `offset_px` down and right, in the shadow's
+// colour.
+text_shadowed(o: *Overlay, x: float, y: float, size_px: float, s: string, colour: Vec4,
+              shadow: Vec4, offset_px: float) -> float {
+    if o == null || size_px <= 0.0 || !font_ready(o) { return 0.0 }
+    glyph_run(o, x + offset_px, y + offset_px, size_px, s, shadow, 0.5)
+    return glyph_run(o, x, y, size_px, s, colour, 0.5)
+}
+
+// How wide and tall the text would be at `size_px`: its widest line, and
+// its lines' height. What centring and right-aligning are done with.
+measure(o: *Overlay, s: string, size_px: float) -> (float, float) {
+    if o == null || !font_ready(o) { return 0.0, 0.0 }
+    return glyphs.measure(o.atlas as *GlyphAtlas, s, size_px)
+}

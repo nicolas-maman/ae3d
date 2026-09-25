@@ -1,0 +1,420 @@
+// The overlay has to put text and rectangles on the frame where it was
+// asked to, on both renderers, and only on the frame it was asked for.
+//
+// #449, slice 2. A white rectangle, a half-transparent red one and the
+// word HELLO are drawn over a dark frame; the frame is read back and asked
+// about in numbers. The white rectangle is white to the pixel and ends
+// exactly at its edges -- which also says y runs down from the top, since
+// a flipped frame puts it elsewhere; the red one is the frame and the red
+// half and half, which is the blend; the text puts ink inside the box
+// ae3d.glyphs measures for it and none beside or below it; the same word
+// small with an outline inks more than without. Then a frame with nothing
+// asked for, which must be the bare frame again. The two renderers are held
+// to each other over all of it.
+//
+// Three ways in: OpenGL and Vulkan drawing offscreen through their backends
+// (the overlay handed to them, rendered, read back), and the engine on
+// OpenGL, where the overlay is the engine's and is cleared by the loop,
+// read through ae3d.capture the way the agent reads a frame.
+
+import std.mem
+import ae3d.core
+import ae3d.platform
+import ae3d.engine
+import ae3d.gl
+import ae3d.vulkan
+import ae3d.offscreen
+import ae3d.capture
+import ae3d.overlay
+import ae3d.png
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+// The size ci.sh gives every window (AE3D_WIDTH, AE3D_HEIGHT), so the
+// engine's frame is this size there as well as here.
+const WIDTH = 320
+const HEIGHT = 180
+// The white rectangle, the translucent red one, and where the text starts.
+const RECT_X = 40
+const RECT_Y = 20
+const RECT_W = 100
+const RECT_H = 40
+const TINT_X = 180
+const TINT_Y = 20
+const TINT_W = 80
+const TINT_H = 40
+const TEXT_X = 40
+const TEXT_Y = 70
+const TEXT_SIZE = 48.0
+// The small word, plain and outlined.
+const SMALL_Y = 140
+const PLAIN_X = 200
+const OUTLINED_X = 260
+const SMALL_SIZE = 24.0
+// A pixel differs from the frame when its luma is this far off, of 255.
+const INK = 24
+
+var g_checks = 0
+var g_failures = 0
+
+// The engine's run: the frames read with the overlay and without.
+var g_with: ptr = null
+var g_without: ptr = null
+var g_frame_width = 0
+var g_frame_height = 0
+// OpenGL's offscreen frame, for Vulkan's to be held to.
+var g_opengl: ptr = null
+
+check(name: string, condition: bool) {
+    g_checks = g_checks + 1
+    if condition {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        g_failures = g_failures + 1
+    }
+}
+
+channel(pixels: ptr, x: int, y: int, c: int) -> int {
+    return mem.get_uint8(pixels, (y * WIDTH + x) * 4 + c)
+}
+
+luma(pixels: ptr, x: int, y: int) -> int {
+    return (299 * channel(pixels, x, y, 0) + 587 * channel(pixels, x, y, 1) + 114 * channel(pixels, x, y, 2)) / 1000
+}
+
+// The darkest channel of any pixel in a box: 255 when the box is white.
+darkest(pixels: ptr, x: int, y: int, w: int, h: int) -> int {
+    least = 255
+    row = y
+    while row < y + h {
+        column = x
+        while column < x + w {
+            c = 0
+            while c < 3 {
+                v = channel(pixels, column, row, c)
+                if v < least { least = v }
+                c = c + 1
+            }
+            column = column + 1
+        }
+        row = row + 1
+    }
+    return least
+}
+
+// How many pixels of a box are not the frame's own colour: ink.
+ink(pixels: ptr, x: int, y: int, w: int, h: int, ground: int) -> int {
+    count = 0
+    row = y
+    while row < y + h {
+        column = x
+        while column < x + w {
+            if row >= 0 && row < HEIGHT && column >= 0 && column < WIDTH {
+                d = luma(pixels, column, row) - ground
+                if d > INK || d < 0 - INK { count = count + 1 }
+            }
+            column = column + 1
+        }
+        row = row + 1
+    }
+    return count
+}
+
+absolute(v: int) -> int {
+    if v < 0 { return 0 - v }
+    return v
+}
+
+// What every frame here asks for.
+draw(o: *Overlay) {
+    white = overlay.rgba(1.0, 1.0, 1.0, 1.0)
+    overlay.rect(o, RECT_X as float, RECT_Y as float, RECT_W as float, RECT_H as float, white)
+    overlay.rect(o, TINT_X as float, TINT_Y as float, TINT_W as float, TINT_H as float, overlay.rgba(1.0, 0.0, 0.0, 0.5))
+    overlay.text(o, TEXT_X as float, TEXT_Y as float, TEXT_SIZE, "HELLO", white)
+    overlay.text(o, PLAIN_X as float, SMALL_Y as float, SMALL_SIZE, "HUD", white)
+    overlay.text_outlined(o, OUTLINED_X as float, SMALL_Y as float, SMALL_SIZE, "HUD", white,
+                          overlay.rgba(0.9, 0.2, 0.1, 1.0), 2.0)
+}
+
+// A frame drawn with the overlay (`drawn`) and the next without (`bare`),
+// both top row first.
+check_frames(name: string, o: *Overlay, drawn: ptr, bare: ptr) {
+    // The frame's own colour, from a corner nothing is drawn over.
+    ground = luma(drawn, WIDTH - 4, HEIGHT - 4)
+    ground_red = channel(drawn, WIDTH - 4, HEIGHT - 4, 0)
+
+    inside = darkest(drawn, RECT_X, RECT_Y, RECT_W, RECT_H)
+    check("${name}: the rectangle is white to its every pixel (darkest channel ${inside})", inside >= 250)
+    // Its edges, a pixel either side: in at x 40 and 139, out at 39 and 140.
+    edges_in = luma(drawn, RECT_X, RECT_Y + 10) >= 250 && luma(drawn, RECT_X + RECT_W - 1, RECT_Y + 10) >= 250 &&
+               luma(drawn, RECT_X + 10, RECT_Y) >= 250 && luma(drawn, RECT_X + 10, RECT_Y + RECT_H - 1) >= 250
+    edges_out = absolute(luma(drawn, RECT_X - 1, RECT_Y + 10) - ground) <= 2 &&
+                absolute(luma(drawn, RECT_X + RECT_W, RECT_Y + 10) - ground) <= 2 &&
+                absolute(luma(drawn, RECT_X + 10, RECT_Y - 1) - ground) <= 2 &&
+                absolute(luma(drawn, RECT_X + 10, RECT_Y + RECT_H) - ground) <= 2
+    check("${name}: it ends at its edges to the pixel, y down from the top", edges_in && edges_out)
+
+    tint_red = channel(drawn, TINT_X + TINT_W / 2, TINT_Y + TINT_H / 2, 0)
+    tint_green = channel(drawn, TINT_X + TINT_W / 2, TINT_Y + TINT_H / 2, 1)
+    expected = (255 + ground_red) / 2
+    println("  ${name}: frame luma ${ground}, half-red over it ${tint_red} (${expected} expected), green ${tint_green}")
+    check("${name}: half-transparent red is half the frame, half red", absolute(tint_red - expected) <= 3)
+
+    width, height = overlay.measure(o, "HELLO", TEXT_SIZE)
+    w = (width + 0.5) as int
+    h = (height + 0.5) as int
+    inked = ink(drawn, TEXT_X, TEXT_Y, w, h, ground)
+    beside = ink(drawn, TEXT_X + w + 3, TEXT_Y, 60, h, ground)
+    below = ink(drawn, TEXT_X, TEXT_Y + h + 2, w, 30, ground)
+    share = (inked as float) / ((w * h) as float)
+    println("  ${name}: HELLO measures ${w} x ${h} px; ${inked} pixels inked inside (${share}), ${beside} beside, ${below} below")
+    check("${name}: the text is inked inside its box", share > 0.12 && share < 0.6)
+    check("${name}: and nowhere beside or below it", beside == 0 && below == 0)
+
+    small_w, small_h = overlay.measure(o, "HUD", SMALL_SIZE)
+    sw = (small_w + 0.5) as int
+    sh = (small_h + 0.5) as int
+    plain = ink(drawn, PLAIN_X - 3, SMALL_Y - 3, sw + 6, sh + 6, ground)
+    outlined = ink(drawn, OUTLINED_X - 3, SMALL_Y - 3, sw + 6, sh + 6, ground)
+    println("  ${name}: HUD at 24 px inks ${plain} pixels, ${outlined} with a 2 px outline")
+    check("${name}: an outline grows the glyphs", outlined * 10 > plain * 14)
+
+    left = darkest(bare, RECT_X, RECT_Y, RECT_W, RECT_H)
+    gone = ink(bare, RECT_X, RECT_Y, RECT_W, RECT_H, ground) + ink(bare, TINT_X, TINT_Y, TINT_W, TINT_H, ground) +
+           ink(bare, TEXT_X, TEXT_Y, w, h, ground) + ink(bare, PLAIN_X - 3, SMALL_Y - 3, OUTLINED_X - PLAIN_X + sw + 6, sh + 6, ground)
+    check("${name}: the next frame, asked for nothing, has none of it (${gone} pixels)", gone == 0 && left < 128)
+}
+
+// Vulkan's frame against OpenGL's: the same vertices through the same
+// shader, blended the same way, can differ only by what two drivers
+// filter and round differently, at a glyph's edge. A frame drawn upside
+// down, or text missing from one, is tens of thousands of channels; the
+// bound is a hundredth of the frame's, which a glyph's edges come nowhere
+// near.
+same(opengl: ptr, vulkan: ptr) {
+    worst = 0
+    differing = 0
+    i = 0
+    while i < WIDTH * HEIGHT * 4 {
+        if i % 4 != 3 {
+            d = absolute(mem.get_uint8(opengl, i) - mem.get_uint8(vulkan, i))
+            if d > worst { worst = d }
+            if d > 16 { differing = differing + 1 }
+        }
+        i = i + 1
+    }
+    println("  vulkan against opengl: ${differing} channels differ by more than 16 of 255, the most by ${worst}")
+    check("vulkan draws what opengl draws", differing < WIDTH * HEIGHT * 3 / 100)
+}
+
+// A frame the backend has read back: the pipelined read hands back the one
+// before the latest, so it is asked twice.
+frame_of(backend: *Backend) -> ptr {
+    core.backend_frame_pixels(backend)
+    return core.backend_frame_pixels(backend)
+}
+
+copy_frame(pixels: ptr) -> ptr {
+    if pixels == null { return null }
+    copy = calloc(WIDTH * HEIGHT, 4)
+    mem.copy(copy, pixels, (WIDTH * HEIGHT * 4) as long)
+    return copy
+}
+
+// Through one backend, offscreen: the overlay handed to it, a frame with it
+// drawn and one with it cleared.
+run_backend(backend: *Backend, name: string) {
+    core.backend_set_clear_color(backend, 0.08, 0.1, 0.14)
+    o = overlay.overlay_new()
+    core.backend_set_overlay(backend, o as ptr)
+    cam = core.camera_new(WIDTH, HEIGHT)
+    light = core.light_sun(core.vec3(0.2, 1.0, 0.4))
+
+    draw(o)
+    vertices = overlay.vertex_count(o)
+    quads = overlay.quad_count(o)
+    core.backend_render(backend, cam, light)
+    drawn = copy_frame(frame_of(backend))
+    overlay.clear(o)
+    core.backend_render(backend, cam, light)
+    bare = copy_frame(frame_of(backend))
+    if drawn == null || bare == null {
+        println("overlay: SKIP ${name} gave no pixels")
+    } else {
+        a = overlay.atlas(o)
+        println("  ${name}: ${quads} quads, ${vertices} vertices, one draw; the atlas ${a.width} x ${a.height}")
+        check_frames(name, o, drawn, bare)
+        // AE3D_OVERLAY_PNG=1 writes the frames, to be looked at.
+        if core.env_int("AE3D_OVERLAY_PNG", 0) == 1 { png.write("build/overlay_${name}.png", drawn, WIDTH, HEIGHT) }
+        if g_opengl == null {
+            g_opengl = drawn
+            drawn = null
+        } else {
+            same(g_opengl, drawn)
+        }
+        // The frame's targets remade, as a resize remakes them: on Vulkan
+        // everything the overlay made goes with the swapchain and is made
+        // again at the next frame that has something to draw.
+        core.backend_update_viewport(backend, WIDTH, HEIGHT)
+        core.backend_render(backend, cam, light)
+        draw(o)
+        core.backend_render(backend, cam, light)
+        again = frame_of(backend)
+        overlay.clear(o)
+        whiter = 0
+        if again != null { whiter = darkest(again, RECT_X, RECT_Y, RECT_W, RECT_H) }
+        check("${name}: drawn again after the frame's targets are remade (darkest ${whiter})", whiter >= 250)
+    }
+    if drawn != null { free(drawn) }
+    if bare != null { free(bare) }
+    core.backend_set_overlay(backend, null)
+    overlay.overlay_free(o)
+    core.camera_free(cam)
+    core.light_free(light)
+}
+
+// What a busy HUD costs the CPU a frame: 60 labels and 20 bars, laid out
+// and written as vertices, then cleared, 200 times.
+measure_cost() {
+    o = overlay.overlay_new()
+    if !overlay.font_ready(o) {
+        overlay.overlay_free(o)
+        return
+    }
+    white = overlay.rgba(1.0, 1.0, 1.0, 1.0)
+    started = platform.time()
+    frames = 200
+    quads = 0
+    f = 0
+    while f < frames {
+        i = 0
+        while i < 60 {
+            overlay.text(o, 10.0, (i * 12) as float, 16.0, "Health 100/100", white)
+            i = i + 1
+        }
+        i = 0
+        while i < 20 {
+            overlay.rect(o, 200.0, (i * 30) as float, 120.0, 12.0, white)
+            i = i + 1
+        }
+        quads = overlay.quad_count(o)
+        overlay.clear(o)
+        f = f + 1
+    }
+    ms = (platform.time() - started) * 1000.0 / (frames as float)
+    println("  a HUD of 60 labels and 20 bars: ${quads} quads, ${ms} ms a frame to lay out")
+    check("the overlay's frame costs the CPU under a millisecond", ms < 1.0)
+    overlay.overlay_free(o)
+}
+
+// The engine's run: its overlay asked for on frame 3 and read after the
+// draw; on frame 5 asked for nothing and read again.
+on_update(state: ptr, e: *Engine, delta: float) {
+    if engine.engine_frame_count(e) == 3 { draw(engine.engine_overlay(e)) }
+}
+
+on_read(state: ptr, e: *Engine, delta: float) {
+    frame = engine.engine_frame_count(e)
+    if frame != 3 && frame != 5 { return }
+    // A window the system made another size (a scaled display) is a frame
+    // the positions here do not describe.
+    g_frame_width = platform.window_fb_width(engine.engine_window(e))
+    g_frame_height = platform.window_fb_height(engine.engine_window(e))
+    if g_frame_width != WIDTH || g_frame_height != HEIGHT { return }
+    if capture.frame(WIDTH, HEIGHT) == 0 { return }
+    pixels = calloc(WIDTH * HEIGHT, 4)
+    out = calloc(4, 8)
+    y = 0
+    while y < HEIGHT {
+        x = 0
+        while x < WIDTH {
+            capture.pixel(x, y, out)
+            c = 0
+            while c < 4 {
+                mem.set_byte(pixels, (y * WIDTH + x) * 4 + c, ((out as float[])[c]) as int)
+                c = c + 1
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    free(out)
+    if frame == 3 { g_with = pixels } else { g_without = pixels }
+}
+
+main() {
+    // OpenGL, offscreen, through its backend.
+    context = offscreen.context_create(WIDTH, HEIGHT)
+    if context == null {
+        println("overlay: SKIP no OpenGL context")
+        return
+    }
+    renderer = gl.renderer_new()
+    pass = gl.backend(renderer)
+    if !core.backend_init(&pass, context, WIDTH, HEIGHT) {
+        println("overlay: SKIP the OpenGL backend would not initialise")
+        return
+    }
+    target = offscreen.target_create(WIDTH, HEIGHT)
+    gl.renderer_set_target(renderer, target)
+    run_backend(&pass, "opengl")
+    core.backend_cleanup(&pass)
+    offscreen.target_destroy(target)
+    gl.renderer_free(renderer)
+    offscreen.context_destroy(context)
+
+    // Vulkan, offscreen: the overlay recorded into the frame by
+    // ae3d.vkoverlay, ahead of the readback's copy.
+    if !vulkan.available() {
+        println("overlay: no Vulkan driver (${vulkan.last_error()}), checked OpenGL only")
+    } else {
+        vk_renderer = vulkan.renderer_new()
+        vk_pass = vulkan.backend(vk_renderer)
+        if !core.backend_init(&vk_pass, null, WIDTH, HEIGHT) {
+            println("overlay: SKIP Vulkan would not start (${vulkan.last_error()})")
+        } else {
+            run_backend(&vk_pass, "vulkan")
+            core.backend_cleanup(&vk_pass)
+        }
+        vulkan.renderer_free(vk_renderer)
+    }
+
+    measure_cost()
+
+    // The engine on OpenGL: its own overlay, cleared by its loop.
+    e = engine.engine_new_with(platform.API_GL)
+    engine.engine_set_size(e, WIDTH, HEIGHT)
+    engine.engine_set_title(e, "ae3d overlay test")
+    engine.engine_set_frame_limit(e, 7)
+    engine.engine_set_camera_input(e, false)
+    engine.engine_set_vsync(e, 0)
+    engine.engine_set_clear_color(e, 0.08, 0.1, 0.14)
+    light = core.light_sun(core.vec3(0.2, 1.0, 0.4))
+    engine.engine_set_light(e, light)
+    hud = engine.behaviour_new("overlay test", null)
+    hud.update = on_update
+    hud.late_update = on_read
+    engine.engine_add_behaviour(e, hud)
+    if !engine.engine_run(e) {
+        println("overlay: SKIP no window")
+    } else if g_frame_width != WIDTH || g_frame_height != HEIGHT {
+        println("overlay: the engine's window is ${g_frame_width} x ${g_frame_height}, not ${WIDTH} x ${HEIGHT}; its frame not checked")
+    } else if g_with == null || g_without == null {
+        println("overlay: SKIP no readable frames from the engine")
+    } else {
+        check_frames("engine", engine.engine_overlay(e), g_with, g_without)
+    }
+    if g_opengl != null { free(g_opengl) }
+    if g_with != null { free(g_with) }
+    if g_without != null { free(g_without) }
+    core.light_free(light)
+    engine.engine_free(e)
+
+    if g_failures == 0 {
+        println("overlay: all checks passed (${g_checks})")
+    } else {
+        println("overlay: ${g_failures} of ${g_checks} checks failed")
+    }
+}
