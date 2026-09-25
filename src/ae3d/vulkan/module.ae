@@ -360,6 +360,10 @@ renderer_new() -> *VKRenderer {
 renderer_free(r: *VKRenderer) {
     if r == null { return }
     if r.initialized { renderer_cleanup(r) }
+    // Made with the renderer, not with its device: one never initialized,
+    // an engine that opened no window, still has both.
+    free_batches(r.batches)
+    free_batches(r.shadow_batches)
     if r.models != null { list.free(r.models) }
     if r.lights != null { list.free(r.lights) }
     if r.textures != null {
@@ -2250,7 +2254,9 @@ renderer_cleanup(r: *VKRenderer) {
     free_batches(r.batches)
     free_batches(r.shadow_batches)
     r.batches = null
+    r.shadow_batches = null
     r.batch_count = 0
+    r.shadow_batch_count = 0
 
     if r == null || !r.initialized { return }
     if r.skybox != null { skybox_free(r, r.skybox as *Skybox) ; r.skybox = null }
