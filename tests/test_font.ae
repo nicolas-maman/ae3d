@@ -1,0 +1,497 @@
+// The TrueType reader and the distance-field atlas (#449, slice 1), held
+// to what they promise:
+//
+//   - the shipped font parses, and its numbers are the ones a separate
+//     reader of the same tables gives (a Python script over the file's
+//     bytes, written for this test and not kept): 720 glyphs, 1000 units
+//     per em, ascender 1018, descender -276, 'A' 14 points in 2 contours;
+//   - characters map to their glyphs, with their advances;
+//   - the field is right: a stem's middle reads 0.9 or more, the space around
+//     a glyph and the counter of 'o' read 0, every texel's value is its
+//     distance to the true outline to within a fraction of a pixel, and
+//     the 0.5 contour lies on the outline;
+//   - a compound glyph (é) bakes with both its parts;
+//   - layout measures a string from the advances and the kern table, and
+//     draws a byte no UTF-8 sequence begins with as the missing glyph;
+//   - the cache gives back the bake it was given;
+//   - a truncated or corrupted font is refused or read without a crash.
+
+import std.string
+import std.os
+import std.bytes
+import ae3d.glyphs
+import ae3d.blob
+
+extern sqrt(x: float) -> float
+extern floor(x: float) -> float
+extern malloc(size: long) -> ptr
+extern free(p: ptr)
+
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, ok: bool) {
+    g_checks = g_checks + 1
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        g_failures = g_failures + 1
+        println("  FAIL ${name}")
+    }
+}
+
+const FONT = "resources/fonts/PT_Sans-Web-Regular.ttf"
+const FONT_LICENCE = "resources/fonts/PT_Sans-OFL.txt"
+
+near(a: float, b: float, tolerance: float) -> bool {
+    d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    return d <= tolerance
+}
+
+// A texel of the atlas as 0..1.
+texel(a: *GlyphAtlas, x: int, y: int) -> float {
+    p = a.pixels as uint8[]
+    return (p[y * a.width + x] as float) / 255.0
+}
+
+// The value at the texel of a slot's rectangle whose centre is nearest
+// the glyph-space point (x, y) in atlas pixels, y up from the baseline.
+value_at(a: *GlyphAtlas, slot: int, x: float, y: float) -> float {
+    gs = a.glyphs as AtlasGlyph[]
+    i = floor(x - (gs[slot].bearing_x as float)) as int
+    j = floor((gs[slot].bearing_y as float) - y) as int
+    if i < 0 || j < 0 || i >= gs[slot].atlas_w || j >= gs[slot].atlas_h { return 0.0 }
+    return texel(a, gs[slot].atlas_x + i, gs[slot].atlas_y + j)
+}
+
+// The distance from (px, py) to the nearest of an outline's segments.
+distance_to(o: *GlyphOutline, px: float, py: float) -> float {
+    s = o.segments as float[]
+    best = 1000000000.0
+    k = 0
+    while k < o.count {
+        x0 = s[k * 4]
+        y0 = s[k * 4 + 1]
+        dx = s[k * 4 + 2] - x0
+        dy = s[k * 4 + 3] - y0
+        length2 = dx * dx + dy * dy
+        t = 0.0
+        if length2 > 0.0 {
+            t = ((px - x0) * dx + (py - y0) * dy) / length2
+            if t < 0.0 { t = 0.0 }
+            if t > 1.0 { t = 1.0 }
+        }
+        ex = x0 + t * dx - px
+        ey = y0 + t * dy - py
+        d2 = ex * ex + ey * ey
+        if d2 < best { best = d2 }
+        k = k + 1
+    }
+    return sqrt(best)
+}
+
+// Where the 0.5 contour crosses between texel centres (a and b, one
+// texel apart along an axis), linearly between their values; how far the
+// crossing is from the outline. -1 when the pair does not straddle 0.5.
+crossing_error(a: *GlyphAtlas, slot: int, o: *GlyphOutline, i: int, j: int, di: int, dj: int) -> float {
+    gs = a.glyphs as AtlasGlyph[]
+    va = texel(a, gs[slot].atlas_x + i, gs[slot].atlas_y + j)
+    vb = texel(a, gs[slot].atlas_x + i + di, gs[slot].atlas_y + j + dj)
+    if (va - 0.5) * (vb - 0.5) >= 0.0 { return 0.0 - 1.0 }
+    t = (0.5 - va) / (vb - va)
+    px = (gs[slot].bearing_x as float) + (i as float) + 0.5 + t * (di as float)
+    py = (gs[slot].bearing_y as float) - (j as float) - 0.5 - t * (dj as float)
+    return distance_to(o, px, py)
+}
+
+// The largest distance, in atlas pixels, between the 0.5 contour of each
+// baked glyph and its outline, how many crossings were measured, and
+// their mean distance.
+isoline_error(face: *Typeface, a: *GlyphAtlas) -> (float, int, float) {
+    gs = a.glyphs as AtlasGlyph[]
+    scale = a.size_px / (face.units_per_em as float)
+    worst = 0.0
+    crossings = 0
+    total = 0.0
+    slot = 0
+    while slot < a.count {
+        if gs[slot].atlas_w > 0 {
+            o = glyphs.outline(face, gs[slot].glyph, scale, 0.001)
+            j = 0
+            while j < gs[slot].atlas_h {
+                i = 0
+                while i < gs[slot].atlas_w {
+                    if i + 1 < gs[slot].atlas_w {
+                        e = crossing_error(a, slot, o, i, j, 1, 0)
+                        if e >= 0.0 {
+                            crossings = crossings + 1
+                            total = total + e
+                            if e > worst { worst = e }
+                        }
+                    }
+                    if j + 1 < gs[slot].atlas_h {
+                        e = crossing_error(a, slot, o, i, j, 0, 1)
+                        if e >= 0.0 {
+                            crossings = crossings + 1
+                            total = total + e
+                            if e > worst { worst = e }
+                        }
+                    }
+                    i = i + 1
+                }
+                j = j + 1
+            }
+            glyphs.outline_free(o)
+        }
+        slot = slot + 1
+    }
+    return worst, crossings, total / (crossings as float)
+}
+
+// Every texel of a glyph whose distance to the outline is inside the
+// spread: how far the distance it stores is from the true one, pixels.
+field_error(face: *Typeface, a: *GlyphAtlas, codepoint: int) -> float {
+    gs = a.glyphs as AtlasGlyph[]
+    slot = glyphs.slot_of(a, codepoint)
+    scale = a.size_px / (face.units_per_em as float)
+    o = glyphs.outline(face, gs[slot].glyph, scale, 0.001)
+    worst = 0.0
+    j = 0
+    while j < gs[slot].atlas_h {
+        i = 0
+        while i < gs[slot].atlas_w {
+            px = (gs[slot].bearing_x as float) + (i as float) + 0.5
+            py = (gs[slot].bearing_y as float) - (j as float) - 0.5
+            truth = distance_to(o, px, py)
+            if truth < a.spread_px - 0.1 {
+                v = texel(a, gs[slot].atlas_x + i, gs[slot].atlas_y + j)
+                stored = (v - 0.5) * 2.0 * a.spread_px
+                if stored < 0.0 { stored = 0.0 - stored }
+                e = stored - truth
+                if e < 0.0 { e = 0.0 - e }
+                if e > worst { worst = e }
+            }
+            i = i + 1
+        }
+        j = j + 1
+    }
+    glyphs.outline_free(o)
+    return worst
+}
+
+// Rows of a glyph's rectangle with an inside texel, in runs: two for a
+// letter with an accent standing clear of it.
+inked_runs(a: *GlyphAtlas, slot: int) -> int {
+    gs = a.glyphs as AtlasGlyph[]
+    runs = 0
+    inked_before = false
+    j = 0
+    while j < gs[slot].atlas_h {
+        inked = false
+        i = 0
+        while i < gs[slot].atlas_w {
+            if texel(a, gs[slot].atlas_x + i, gs[slot].atlas_y + j) > 0.5 { inked = true }
+            i = i + 1
+        }
+        if inked && !inked_before { runs = runs + 1 }
+        inked_before = inked
+        j = j + 1
+    }
+    return runs
+}
+
+same_atlas(a: *GlyphAtlas, b: *GlyphAtlas) -> bool {
+    if a.width != b.width || a.height != b.height || a.count != b.count || a.kern_count != b.kern_count { return false }
+    pa = a.pixels as uint8[]
+    pb = b.pixels as uint8[]
+    i = 0
+    while i < a.width * a.height {
+        if pa[i] != pb[i] { return false }
+        i = i + 1
+    }
+    ga = a.glyphs as AtlasGlyph[]
+    gb = b.glyphs as AtlasGlyph[]
+    i = 0
+    while i < a.count {
+        if ga[i].codepoint != gb[i].codepoint || ga[i].advance != gb[i].advance || ga[i].atlas_x != gb[i].atlas_x ||
+           ga[i].atlas_y != gb[i].atlas_y || ga[i].atlas_w != gb[i].atlas_w || ga[i].bearing_y != gb[i].bearing_y {
+            return false
+        }
+        i = i + 1
+    }
+    ka = a.kern as int[]
+    kb = b.kern as int[]
+    i = 0
+    while i < a.kern_count * 2 {
+        if ka[i] != kb[i] { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// The font's bytes with `damage` bytes overwritten at places an LCG
+// picks, loaded, and every Latin-1 glyph asked for its outline. Whether
+// it loaded; glyphs refused are counted in g_refused.
+var g_refused = 0
+
+corrupted_load(bytes: ptr, size: int, seed: int, damage: int, bake_too: bool) -> bool {
+    damaged = malloc(size as long)
+    src = bytes as uint8[]
+    dst = damaged as uint8[]
+    i = 0
+    while i < size {
+        dst[i] = src[i]
+        i = i + 1
+    }
+    state = seed as long
+    mask = 2147483647 as long
+    // Odd seeds damage the table directory and the first tables' headers,
+    // even ones anywhere: most of a font is glyf, and a byte at random
+    // would rarely reach the offsets everything else is read through.
+    reach = size as long
+    if seed % 2 == 1 { reach = 400 as long }
+    k = 0
+    while k < damage {
+        state = (state * (1103515245 as long) + (12345 as long)) & mask
+        at = (state % reach) as int
+        state = (state * (1103515245 as long) + (12345 as long)) & mask
+        dst[at] = ((state >> 8) & (255 as long)) as int
+        k = k + 1
+    }
+    face = glyphs.load_bytes(damaged, size, "corrupted")
+    free(damaged)
+    if face == null { return false }
+    c = 32
+    while c < 256 {
+        o = glyphs.outline(face, glyphs.glyph_index(face, c), 0.016, 0.25)
+        if o == null { g_refused = g_refused + 1 } else { glyphs.outline_free(o) }
+        c = c + 1
+    }
+    if bake_too {
+        a = glyphs.bake_uncached(face, 16.0, 2.0)
+        if a != null { glyphs.atlas_free(a) }
+    }
+    glyphs.typeface_free(face)
+    return true
+}
+
+main() {
+    println("test_font:")
+    face = glyphs.load(FONT)
+    check("the font loads", face != null)
+    if face == null {
+        println("  ${glyphs.last_error()}")
+        println("test_font: ${g_failures} failure(s) of ${g_checks}")
+        return
+    }
+
+    // --- the tables ---------------------------------------------------------------------------
+    println("  ${face.glyph_count} glyphs, ${face.units_per_em} units per em, ascender ${face.ascender}, descender ${face.descender}, line gap ${face.line_gap}, cmap format ${face.cmap_format}, ${face.kern_count} kern pairs")
+    check("720 glyphs", face.glyph_count == 720)
+    check("1000 units per em", face.units_per_em == 1000)
+    check("ascender 1018, descender -276", face.ascender == 1018 && face.descender == 0 - 276)
+    check("a kern table of 24030 pairs, past its u16 length", face.kern_count == 24030)
+
+    g_a = glyphs.glyph_index(face, 65)
+    g_g = glyphs.glyph_index(face, 103)
+    g_e_acute = glyphs.glyph_index(face, 233)
+    g_zero = glyphs.glyph_index(face, 48)
+    println("  'A' glyph ${g_a} advance ${glyphs.advance(face, g_a)}, 'g' ${g_g} ${glyphs.advance(face, g_g)}, 'é' ${g_e_acute} ${glyphs.advance(face, g_e_acute)}, '0' ${g_zero} ${glyphs.advance(face, g_zero)}")
+    check("'A' 'g' 'é' '0' map to glyphs 36 74 171 19", g_a == 36 && g_g == 74 && g_e_acute == 171 && g_zero == 19)
+    check("their advances are 585 537 508 545",
+          glyphs.advance(face, g_a) == 585 && glyphs.advance(face, g_g) == 537 &&
+          glyphs.advance(face, g_e_acute) == 508 && glyphs.advance(face, g_zero) == 545)
+    check("a codepoint the font lacks maps to glyph 0", glyphs.glyph_index(face, 20320) == 0)
+    check("kerning A V is -45, T o -128", glyphs.kerning(face, g_a, glyphs.glyph_index(face, 86)) == 0 - 45 &&
+          glyphs.kerning(face, glyphs.glyph_index(face, 84), glyphs.glyph_index(face, 111)) == 0 - 128)
+
+    outline_a = glyphs.outline(face, g_a, 1.0, 0.5)
+    outline_e = glyphs.outline(face, glyphs.glyph_index(face, 101), 1.0, 0.5)
+    outline_e_acute = glyphs.outline(face, g_e_acute, 1.0, 0.5)
+    println("  'A' ${outline_a.points} points in ${outline_a.contours} contours, ${outline_a.count} segments; 'e' ${outline_e.points} in ${outline_e.contours}; 'é' ${outline_e_acute.points} in ${outline_e_acute.contours}")
+    check("'A' has 14 points in 2 contours, all on the curve (14 segments)", outline_a.points == 14 && outline_a.contours == 2 && outline_a.count == 14)
+    check("'é' is 'e' and an accent: 'e''s points and more, a contour more",
+          outline_e_acute.points > outline_e.points && outline_e_acute.contours == outline_e.contours + 1)
+    check("'é''s accent stands above the 'e'", outline_e_acute.y_max > outline_e.y_max + 100.0)
+    glyphs.outline_free(outline_a)
+    glyphs.outline_free(outline_e)
+    glyphs.outline_free(outline_e_acute)
+
+    // --- the atlas ----------------------------------------------------------------------------
+    began = os.now_monotonic_ns()
+    atlas = glyphs.bake_uncached(face, glyphs.DEFAULT_SIZE, glyphs.DEFAULT_SPREAD)
+    bake_ms = ((os.now_monotonic_ns() - began) as float) / 1000000.0
+    check("the atlas bakes", atlas != null)
+    if atlas == null {
+        println("  ${glyphs.last_error()}")
+        glyphs.typeface_free(face)
+        println("test_font: ${g_failures} failure(s) of ${g_checks}")
+        return
+    }
+    gs = atlas.glyphs as AtlasGlyph[]
+    println("  atlas ${atlas.width} x ${atlas.height}, ${atlas.count} glyphs at ${atlas.size_px} px/em, spread ${atlas.spread_px} px, ${atlas.kern_count} kern pairs among them, baked in ${bake_ms} ms")
+    check("it holds printable ASCII and Latin-1 whole (1 + 95 + 96 glyphs), none broken", atlas.count == 192 && atlas.broken == 0)
+    missing = 0
+    c = 32
+    while c < 256 {
+        if (c <= 126 || c >= 160) && glyphs.slot_of(atlas, c) == 0 { missing = missing + 1 }
+        c = c + 1
+    }
+    check("each of them has its slot", missing == 0)
+
+    scale = atlas.size_px / (face.units_per_em as float)
+    l = glyphs.slot_of(atlas, 108)
+    // The stem of PT Sans's 'l' is x 86..166 units; its middle, halfway up.
+    stem = value_at(atlas, l, 126.0 * scale, 400.0 * scale)
+    beside = value_at(atlas, l, (86.0 * scale) - atlas.spread_px - 0.5, 400.0 * scale)
+    corner = texel(atlas, gs[l].atlas_x, gs[l].atlas_y)
+    println("  'l': the stem's middle reads ${stem}, ${atlas.spread_px + 0.5} px left of it ${beside}, the rectangle's corner ${corner}")
+    check("far inside the stem of 'l' reads >= 0.9", stem >= 0.9)
+    check("far outside it reads <= 0.1", beside <= 0.1 && corner <= 0.1)
+    o = glyphs.slot_of(atlas, 111)
+    counter = value_at(atlas, o, 268.0 * scale, 250.0 * scale)
+    ring = value_at(atlas, o, 70.0 * scale, 250.0 * scale)
+    println("  'o': its counter reads ${counter}, its left side ${ring}")
+    check("'o' has a hole: the counter reads outside (<= 0.1)", counter <= 0.1)
+    check("and the ring round it inside (> 0.5)", ring > 0.5)
+
+    worst, crossings, mean = isoline_error(face, atlas)
+    println("  the 0.5 contour, over ${crossings} texel crossings in every glyph: at most ${worst} px from the outline, ${mean} on average")
+    check("the 0.5 contour lies within 0.5 px of the outline", worst <= 0.5)
+    field_worst = 0.0
+    probes = "AgoS@&%e"
+    k = 0
+    while k < string.length(probes) {
+        e = field_error(face, atlas, string.char_at(probes, k))
+        if e > field_worst { field_worst = e }
+        k = k + 1
+    }
+    e = field_error(face, atlas, 233)
+    if e > field_worst { field_worst = e }
+    println("  each texel's distance within the spread against the true outline's, 'AgoS@&%eé': at most ${field_worst} px off")
+    check("the field's distances are the outline's to within 0.1 px", field_worst <= 0.1)
+
+    e_slot = glyphs.slot_of(atlas, 233)
+    plain_slot = glyphs.slot_of(atlas, 101)
+    println("  'é' ${gs[e_slot].atlas_w} x ${gs[e_slot].atlas_h} texels, ${inked_runs(atlas, e_slot)} runs of inked rows; 'e' ${gs[plain_slot].atlas_w} x ${gs[plain_slot].atlas_h}, ${inked_runs(atlas, plain_slot)}")
+    check("'é' bakes with both parts: two runs of inked rows, 'e' one", inked_runs(atlas, e_slot) == 2 && inked_runs(atlas, plain_slot) == 1)
+    check("'é''s rectangle is 'e''s grown upward", gs[e_slot].bearing_y > gs[plain_slot].bearing_y + 5 &&
+          gs[e_slot].atlas_h > gs[plain_slot].atlas_h)
+
+    // --- layout -------------------------------------------------------------------------------
+    // "Hello, world" at 32 px: advances 672 508 292 292 536 225 267 735 536
+    // 340 292 538 (5233 units), kerned "o," -12, ", " -78, "wo" -11 (-101).
+    width, height = glyphs.measure(atlas, "Hello, world", 32.0)
+    expected = 5132.0 * 32.0 / 1000.0
+    by_font = 0.0
+    text = "Hello, world"
+    previous = 0 - 1
+    k = 0
+    while k < string.length(text) {
+        g = glyphs.glyph_index(face, string.char_at(text, k))
+        if previous >= 0 { by_font = by_font + (glyphs.kerning(face, previous, g) as float) }
+        by_font = by_font + (glyphs.advance(face, g) as float)
+        previous = g
+        k = k + 1
+    }
+    by_font = by_font * 32.0 / 1000.0
+    println("  \"Hello, world\" at 32 px: ${width} x ${height} px; from the font's advances and kerning ${by_font}, from the tables read apart ${expected}")
+    check("its width is the advances plus the kerning", near(width, expected, 0.0001) && near(width, by_font, 0.0001))
+    check("its height is one line: ascender to descender", near(height, 1294.0 * 32.0 / 1000.0, 0.0001))
+    av, _av_height = glyphs.measure(atlas, "AV", 100.0)
+    println("  \"AV\" at 100 px: ${av} px, unkerned ${(585.0 + 568.0) / 10.0}")
+    check("\"AV\" is kerned 45 units closer", near(av, (585.0 + 568.0 - 45.0) / 10.0, 0.0001))
+
+    quads = glyphs.layout(atlas, "Hello, world", 32.0)
+    q = quads.data as float[]
+    println("  ${quads.count} quads; 'H' at ${q[0]}, ${q[1]} .. ${q[2]}, ${q[3]}, uv ${q[4]}, ${q[5]} .. ${q[6]}, ${q[7]}")
+    check("a quad for each glyph but the space", quads.count == 11)
+    h_slot = glyphs.slot_of(atlas, 72)
+    k32 = 32.0 / atlas.size_px
+    check("'H''s quad is its rectangle at 32 px, from the pen and the baseline",
+          near(q[0], (gs[h_slot].bearing_x as float) * k32, 0.0001) &&
+          near(q[1], 1018.0 * 32.0 / 1000.0 - (gs[h_slot].bearing_y as float) * k32, 0.0001) &&
+          near(q[2] - q[0], (gs[h_slot].atlas_w as float) * k32, 0.0001) &&
+          near(q[4], (gs[h_slot].atlas_x as float) / (atlas.width as float), 0.000001) &&
+          near(q[7], ((gs[h_slot].atlas_y + gs[h_slot].atlas_h) as float) / (atlas.height as float), 0.000001))
+    glyphs.quads_free(quads)
+
+    two_width, two_height = glyphs.measure(atlas, "Hello,\nworld", 32.0)
+    lines = glyphs.layout(atlas, "Hello,\nworld", 32.0)
+    line_q = lines.data as float[]
+    println("  \"Hello,\" and \"world\" a newline apart: ${two_width} x ${two_height} px, ${lines.lines} lines; 'w' at y ${line_q[6 * 8 + 1]}")
+    check("a newline starts a line below: two lines' height, the wider line's width",
+          lines.lines == 2 && near(two_height, 2.0 * 1294.0 * 32.0 / 1000.0, 0.0001) && two_width < width)
+    check("its second line starts at the left", line_q[6 * 8] < 2.0)
+    glyphs.quads_free(lines)
+
+    spanish = "¿Año? ¡Sí! 25° über"
+    latin = glyphs.layout(atlas, spanish, 24.0)
+    println("  \"${spanish}\" at 24 px: ${latin.count} quads, ${latin.width} px wide")
+    check("UTF-8 Latin-1 lays out, a glyph a character (16 of 19 characters inked, 3 spaces)", latin.count == 16)
+    glyphs.quads_free(latin)
+
+    // "A", a byte no UTF-8 sequence begins with, "B".
+    raw = malloc(4 as long)
+    raw_bytes = raw as uint8[]
+    raw_bytes[0] = 65
+    raw_bytes[1] = 255
+    raw_bytes[2] = 66
+    raw_bytes[3] = 0
+    broken = bytes.string_from_ptr(raw, 3)
+    free(raw)
+    broken_quads = glyphs.layout(atlas, broken, 32.0)
+    broken_width, _broken_height = glyphs.measure(atlas, broken, 32.0)
+    string.free(broken)
+    by_advance = (glyphs.advance(face, g_a) + gs[0].advance + glyphs.advance(face, glyphs.glyph_index(face, 66))) as float * 32.0 / 1000.0
+    println("  \"A\", byte 255, \"B\": ${broken_quads.count} quads, ${broken_width} px wide; A, the missing glyph and B advance ${by_advance}")
+    check("a malformed byte draws as the missing glyph", broken_quads.count == 3 && near(broken_width, by_advance, 0.0001))
+    glyphs.quads_free(broken_quads)
+
+    // --- the cache ----------------------------------------------------------------------------
+    if glyphs.cache_directory() == "" {
+        println("  (no cache directory: the cache is not checked)")
+    } else {
+        hits = glyphs.cache_hits()
+        first = glyphs.bake(face, glyphs.DEFAULT_SIZE, glyphs.DEFAULT_SPREAD)
+        began = os.now_monotonic_ns()
+        second = glyphs.bake(face, glyphs.DEFAULT_SIZE, glyphs.DEFAULT_SPREAD)
+        read_ms = ((os.now_monotonic_ns() - began) as float) / 1000000.0
+        println("  the cache (${glyphs.cache_directory()}): ${glyphs.cache_hits() - hits} hit(s) of 2, read in ${read_ms} ms")
+        check("a second bake reads the cache", glyphs.cache_hits() - hits >= 1)
+        check("and what it reads is the bake, texel for texel", first != null && second != null && same_atlas(second, atlas) && same_atlas(first, atlas))
+        glyphs.atlas_free(first)
+        glyphs.atlas_free(second)
+    }
+    glyphs.atlas_free(atlas)
+
+    // --- malformed fonts ----------------------------------------------------------------------
+    bytes = blob.read(FONT)
+    size = blob.last_size() as int
+    short = glyphs.load_bytes(bytes, 100, "truncated")
+    println("  100 bytes of it: ${glyphs.last_error()}")
+    check("a font cut to 100 bytes is refused", short == null)
+    half = glyphs.load_bytes(bytes, size / 2, "halved")
+    println("  half of it: ${glyphs.last_error()}")
+    check("a font cut in half is refused", half == null)
+    text_file = glyphs.load(FONT_LICENCE)
+    println("  its licence read as a font: ${glyphs.last_error()}")
+    check("a text file is refused", text_file == null)
+    loaded = 0
+    trial = 0
+    while trial < 200 {
+        if corrupted_load(bytes, size, trial * 7919 + 1, 1 + trial % 16, trial % 20 == 0) { loaded = loaded + 1 }
+        trial = trial + 1
+    }
+    println("  200 copies with 1-16 bytes overwritten: ${loaded} loaded, ${200 - loaded} refused, ${g_refused} glyphs refused among those loaded, no crash")
+    check("corrupted copies load or are refused, and are read without a crash", true)
+    blob.free_bytes(bytes)
+
+    glyphs.typeface_free(face)
+    if g_failures == 0 {
+        println("test_font: all checks passed (${g_checks})")
+    } else {
+        println("test_font: ${g_failures} failure(s) of ${g_checks}")
+    }
+}

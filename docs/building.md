@@ -151,6 +151,7 @@ to read them.
 | `AE3D_PHYSICS_SCENE=pyramid\|pile\|ragdolls\|cloth` | the reference scene `examples/physics` runs |
 | `AE3D_VIEW=3`, `AE3D_CAMX/Y/Z`, `AE3D_AIMX/Y/Z` | a camera placed by number, for sweeps ([testing.md](testing.md)) |
 | `AE3D_DIAG=1` | a scene's own diagnostics on the console |
+| `AE3D_FONT_CACHE=dir` | where baked glyph atlases are kept, `build/cache/fonts` by default; `off` bakes every time ([ui.md](ui.md)) |
 
 The scene-specific ones (`AE3D_LAMP`, `AE3D_MOON`, `AE3D_NOPROPS`, ...) are
 documented in the example that reads them.

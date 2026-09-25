@@ -202,6 +202,7 @@ docs/         the documentation, docs/images/ its pictures
 [Networking](docs/networking.md) ·
 [Natural motion](docs/motion.md) ·
 [Editor](docs/editor.md) ·
+[Game UI](docs/ui.md) ·
 [Performance](docs/performance.md) ·
 [Testing](docs/testing.md) ·
 [Writing Aether](docs/writing-aether.md) ·
