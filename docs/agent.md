@@ -211,9 +211,12 @@ under 0.6 of the prediction, `wrong colour` when the mean leans to a colour the
 material does not, `missing` when nothing was drawn (and `trace.model` is the
 next question), otherwise `as lit`. The verdict is the first flagged stage
 that accounts for that look. A look no stage accounts for says so with the
-two luminances; a finding the pixels do not show is named after `as lit` --
-on OpenGL the same cube reads `as lit; not shown in the pixels: in the shadow
-of roof`, because that renderer drew no shadow on it.
+two luminances; a finding the pixels do not show is named after `as lit`, as
+in `as lit; not shown in the pixels: in the shadow of roof`. That is what
+OpenGL once answered for the cube above, and it found two bugs (#453): a
+shadow batch drawing another batch's matrices, then a shadow letting four
+times the sun through that Vulkan's did. Both renderers now read the cube at
+0.297.
 
 ## The whole scene at once
 
