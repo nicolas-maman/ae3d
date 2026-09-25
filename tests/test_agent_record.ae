@@ -1,0 +1,222 @@
+// A recorded agent session, replayed (#416). Three runs of one small scene,
+// each asked its questions from a thread of its own through ae3d.probe,
+// which waits for each answer while the engine's frames go on answering:
+//
+//   1. recorded: AE3D_AGENT_RECORD writes the session -- the scene's tree,
+//      the cube, the cube moved, the cube again -- and the file holds every
+//      request and every answer, in pairs;
+//   2. replayed on the same scene: every answer the same as recorded;
+//   3. replayed on the scene with the cube somewhere else: the answers that
+//      carry its position differ, and the report says where in them.
+//
+// Comparison alone: numbers within the tolerance and past it, a key left
+// out, a key missing.
+import std.os
+import std.json
+import std.string
+import std.worker
+import aephysics.native
+import ae3d.core
+import ae3d.engine
+import ae3d.loader
+import ae3d.agent
+import ae3d.probe
+import ae3d.replay
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+const RECORD = "build/test_agent_record.log"
+const FRAMES = 600                 // a stop, should a run never finish
+
+var g_checks = 0
+var g_failures = 0
+
+// What the asking thread shares with the frame: `done`, an atomic it raises
+// once it has finished, and what it found.
+var g_done: ptr = null
+var g_run = 0                      // 1 recording, 2 and 3 replaying
+var g_port = 0
+var g_asked = 0
+var g_session: ptr = null          // *Session being replayed
+var g_report: ptr = null           // *Report of the last replay
+var g_cube_x = 0.0                 // where the cube starts, this run
+var g_cube: ptr = null
+
+check(name: string, ok: bool) {
+    g_checks = g_checks + 1
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        g_failures = g_failures + 1
+        println("  FAIL ${name}")
+    }
+}
+
+// The questions of the recorded session, asked in order.
+record_session() {
+    p = probe.open(g_port)
+    if p == null { return }
+    asks = 0
+    a = probe.op(p, "scene.tree")
+    if a != null { asks = asks + 1 ; json.free(a) }
+    q = json.parse_raw("{\"op\":\"model.get\",\"index\":0}")
+    a = probe.ask(p, q)
+    json.free(q)
+    if a != null { asks = asks + 1 ; json.free(a) }
+    q = json.parse_raw("{\"op\":\"model.set\",\"index\":0,\"position\":[1.0,2.0,3.0]}")
+    a = probe.ask(p, q)
+    json.free(q)
+    if a != null { asks = asks + 1 ; json.free(a) }
+    q = json.parse_raw("{\"op\":\"model.get\",\"index\":0}")
+    a = probe.ask(p, q)
+    json.free(q)
+    if a != null { asks = asks + 1 ; json.free(a) }
+    probe.close(p)
+    g_asked = asks
+}
+
+replay_session() {
+    p = probe.open(g_port)
+    if p == null { return }
+    g_report = replay.replay(g_session as *Session, p) as ptr
+    probe.close(p)
+}
+
+on_start(state: ptr, e: *Engine) {
+    cube = loader.cube(1.0)
+    core.model_set_name(cube, "probe")
+    core.model_set_position(cube, g_cube_x, 0.0, 0.0)
+    g_cube = cube as ptr
+    engine.engine_add_model(e, cube)
+    core.camera_set_position(engine.engine_camera(e), core.vec3(0.0, 0.0, 12.0))
+    g_port = agent.port()
+    if g_run == 1 {
+        worker.run_detached(| _c: ptr | {
+            record_session()
+            native.atomic_store(g_done, 1)
+        })
+    } else {
+        worker.run_detached(| _c: ptr | {
+            replay_session()
+            native.atomic_store(g_done, 1)
+        })
+    }
+}
+
+on_render(state: ptr, e: *Engine, delta: float) {
+    if native.atomic_load(g_done) != 0 { engine.engine_stop(e) }
+}
+
+// One run of the scene, the cube starting at `x`; false with no window.
+run(which: int, x: float) -> bool {
+    g_run = which
+    g_cube_x = x
+    native.atomic_store(g_done, 0)
+    e = engine.engine_new()
+    engine.engine_set_size(e, 320, 180)
+    engine.engine_set_title(e, "ae3d agent record test")
+    engine.engine_set_camera_input(e, false)
+    engine.engine_set_frame_limit(e, FRAMES)
+    program = engine.behaviour_new("agent record test", null)
+    program.start = on_start
+    program.late_update = on_render
+    engine.engine_add_behaviour(e, program)
+    ran = engine.engine_run(e)
+    engine.engine_free(e)
+    core.model_free(g_cube as *Model)
+    g_cube = null
+    return ran && native.atomic_load(g_done) != 0
+}
+
+// Two answers compared on their own, without a program: the rules.
+comparisons() {
+    s = replay.read(RECORD)
+    if s == null { return }
+    r = replay.report_new()
+    then = json.parse_raw("{\"id\":4,\"ms\":3.5,\"result\":{\"position\":[1.0,2.0,3.0],\"name\":\"probe\"}}")
+    close_by = json.parse_raw("{\"id\":9,\"ms\":7.0,\"result\":{\"position\":[1.0000001,2.0,3.0],\"name\":\"probe\"}}")
+    moved = json.parse_raw("{\"id\":4,\"ms\":3.5,\"result\":{\"position\":[1.001,2.0,3.0],\"name\":\"probe\"}}")
+    renamed = json.parse_raw("{\"id\":4,\"ms\":3.5,\"result\":{\"position\":[1.0,2.0,3.0]}}")
+    check("within the tolerance, and the id and clock changed: the same", replay.compare(s, then, close_by, "a", r) == 0)
+    check("a millimetre along x: one difference", replay.compare(s, then, moved, "a", r) == 1)
+    check("named where it is", string.string_contains(replay.note_at(r, 0), "a.result.position[0]") == 1)
+    check("a key gone: one difference", replay.compare(s, then, renamed, "a", r) == 1)
+    replay.set_tolerance(s, 0.01)
+    check("the millimetre, under a looser tolerance: the same", replay.compare(s, then, moved, "a", r) == 0)
+    json.free(then)
+    json.free(close_by)
+    json.free(moved)
+    json.free(renamed)
+    replay.report_free(r)
+    replay.session_free(s)
+}
+
+main() {
+    g_done = calloc(1, 8)
+    os.setenv("AE3D_AGENT", "auto")
+    os.setenv("AE3D_AGENT_RECORD", RECORD)
+    if !run(1, 0.0) {
+        println("SKIP no window")
+        free(g_done)
+        return
+    }
+    os.setenv("AE3D_AGENT_RECORD", "")
+    check("the session is asked its four questions", g_asked == 4)
+
+    s = replay.read(RECORD)
+    check("the record reads back", s != null)
+    if s == null {
+        println("test_agent_record: ${g_failures} failure(s) of ${g_checks}")
+        free(g_done)
+        return
+    }
+    check("four requests in it", replay.count(s) == 4)
+    answered = 0
+    i = 0
+    while i < replay.count(s) {
+        if string.length(replay.answer_at(s, i)) > 0 { answered = answered + 1 }
+        i = i + 1
+    }
+    check("each with its answer", answered == 4)
+    check("in the order asked", string.equals(replay.op_at(s, 0), "scene.tree") == 1 &&
+                                string.equals(replay.op_at(s, 2), "model.set") == 1)
+
+    g_session = s as ptr
+    run(2, 0.0)
+    r = g_report as *Report
+    check("replayed on the same scene", r != null)
+    if r != null {
+        println("  same scene: ${r.asked} asked, ${r.same} the same, ${r.differing} different, ${r.unanswered} unanswered")
+        check("every answer the same", r.asked == 4 && r.same == 4)
+        replay.report_free(r)
+    }
+
+    g_report = null
+    run(3, 5.0)
+    r = g_report as *Report
+    check("replayed on the scene with the cube moved", r != null)
+    if r != null {
+        println("  cube moved: ${r.asked} asked, ${r.same} the same, ${r.differing} different; first: ${first_note(r)}")
+        // The tree and the first read carry where the cube starts; the write
+        // puts it where it was put before, so the answers after agree.
+        check("the answers that say where it started differ", r.differing >= 1 && r.same >= 2)
+        check("and the report says where in them", string.string_contains(first_note(r), "position") == 1)
+        replay.report_free(r)
+    }
+    replay.session_free(s)
+
+    comparisons()
+    free(g_done)
+
+    if g_failures == 0 {
+        println("test_agent_record: all checks passed (${g_checks})")
+        return
+    }
+    println("test_agent_record: ${g_failures} failure(s) of ${g_checks}")
+}
+
+first_note(r: *Report) -> string {
+    if replay.note_count(r) == 0 { return "" }
+    return replay.note_at(r, 0)
+}
