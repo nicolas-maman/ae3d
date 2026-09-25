@@ -78,6 +78,16 @@ humanoid_rig() -> *Skeleton {
     return rig
 }
 
+// A rig and its bones' models, which the ragdoll wore but does not own.
+rig_free(rig: *Skeleton) {
+    i = 0
+    while i < skin.skeleton_count(rig) {
+        core.model_free(skin.skeleton_bone(rig, i))
+        i = i + 1
+    }
+    skin.skeleton_free(rig)
+}
+
 // The pushes, in order: a nudge from behind, a hard push from behind
 // (forward), a push from the side, a push from in front (onto the heels).
 push_of(k: int) -> Vec3 {
@@ -106,10 +116,14 @@ trial(stepping: bool, stood: ptr, steps: ptr) {
     physics.box_collider(ground, core.vec3(40.0, 0.5, 40.0), physics.material(0.8, 0.0))
     motions_block = calloc(PUSHES, 8)
     motions = motions_block as ptr[]
+    rigs_block = calloc(PUSHES, 8)
+    rigs = rigs_block as ptr[]
     k = 0
     while k < PUSHES {
         r = physics.ragdoll(e, "Figure", core.vec3((k as float) * 4.0, 0.02, 0.0), 8.0, 8.0, 1.0)
-        physics.ragdoll_dress(r, humanoid_rig())
+        rig = humanoid_rig()
+        physics.ragdoll_dress(r, rig)
+        rigs[k] = rig as ptr
         m = motion.active_ragdoll(r)
         motion.attach(e, m)
         motion.set_mode(m, motion.POWERED)
@@ -147,9 +161,11 @@ trial(stepping: bool, stood: ptr, steps: ptr) {
     k = 0
     while k < PUSHES {
         motion.motion_free(motions[k] as *Motion)
+        rig_free(rigs[k] as *Skeleton)
         k = k + 1
     }
     free(motions_block)
+    free(rigs_block)
 }
 
 main() {
