@@ -2,7 +2,8 @@
 
 An ae3d program started with `AE3D_AGENT` opens a line-oriented JSON channel on
 loopback. Through it an agent reads the scene, changes it, holds a frame still,
-reads the pixels that frame produced, and asks why a model is not on screen.
+reads the pixels that frame produced, and asks why a model is not on screen
+or why it is dark or the wrong colour there.
 
     AE3D_AGENT=7911 ./build/spinning_cube          # a fixed port
     AE3D_AGENT=auto ./build/spinning_cube          # one the system picks
@@ -108,6 +109,77 @@ be seen was exported empty, or loaded and never added, or added and hidden, or
 bound to a clip with no channels, or behind the camera, or drawn at a third of
 a pixel. Those are six different repairs.
 
+## Why a model is dark or the wrong colour
+
+`explain.model` takes the same arguments and answers the question after that
+one: the model is on screen, so why does it look the way it does. It walks six
+stages, each with its numbers, and the verdict names the first stage whose
+finding accounts for what the pixels show. This is the cube under the roof in
+`tests/test_agent_explain.ae`, on Vulkan:
+
+    $ ./build/ae3d_agent --port 7911 explain.model index=2
+    {"name": "shaded", "look": "dark", "verdict": "dark: in the shadow of roof", "blamed": "shadow",
+     "stages": [
+      {"stage": "material", "flagged": false, "detail": {"name": "default", "diffuse": [0.7, 0.7, 0.7],
+         "luminance": 0.7, "metallic": 0, "roughness": 0.9, "alpha": 1, "reflectivity": 0, "emissive": false}},
+      {"stage": "texture", "flagged": false, "detail": {"path": "", "bound": false,
+         "note": "no texture: the material's colour is drawn over the default white"}},
+      {"stage": "light", "flagged": false, "detail": {"side_normal": [0, 0, 1],
+         "lights": [
+           {"index": 0, "name": "sun", "mode": "directional", "radiance": 1.386, "onto_top": 0.346, "onto_side": 0.26},
+           {"index": 1, "name": "lamp", "mode": "point", "distance": 23.324, "reach": 16, "onto_top": 0, "onto_side": 0,
+            "note": "out of reach: 23.324 m away, its light stops at 16 m"}],
+         "direct_top": [0.375, 0.342, 0.3], "direct_side": [0.281, 0.257, 0.225], "ambient": [0.08, 0.073, 0.064],
+         "direct_top_luminance": 0.346, "direct_side_luminance": 0.26, "ambient_luminance": 0.074}},
+      {"stage": "shadow", "flagged": true, "finding": "in the shadow of roof", "detail": {"shadows": true,
+         "key_light": "sun", "centre_blocked_by": "roof", "top_blocked_by": "roof"}},
+      {"stage": "exposure", "flagged": false, "detail": {"material": 1, "frame": 1, "eye_adaptation": false, "total": 1}},
+      {"stage": "pixels", "flagged": false, "detail": {"region": {"x": 134, "y": 94, "width": 50, "height": 50},
+         "coverage": 1, "centre": {"x": 151, "y": 111, "width": 17, "height": 17},
+         "mean": [0.314, 0.294, 0.271], "luminance": 0.297,
+         "predicted": [0.642, 0.618, 0.581], "predicted_luminance": 0.621}}]}
+
+The stages:
+
+- `material`: the linear albedo, metallic, roughness, alpha and reflectivity.
+  Flagged when the albedo's luminance is under 0.03, the alpha under 0.1, or
+  the metallic 0.9 or more (a metal has no diffuse colour and shows only what
+  it reflects).
+- `texture`: whether one is bound and whether it loaded (one that did not is
+  drawn as the default white, and says so), and its mean colour as the shader
+  reads it, from up to 64 by 64 of its texels read again from its file; `mean`
+  is `unknown` when the file does not decode. Flagged when the mean is near
+  black, or leans to a colour the material does not.
+- `light`: every light at the model's centre, onto its top and onto the
+  surface the camera sees there (`side_normal`, the face a ray from the eye
+  through the centre meets first), as it multiplies the albedo: a light's
+  colour by its temperature, a point light's fall-off, the reach past which
+  the shader skips it, a spot light's cone, and the ambient the key light
+  brings. A light that gives nothing says why: out of reach, outside its
+  cone, behind the model, below the horizon. Flagged when no direct light
+  reaches the side the camera sees.
+- `shadow`: whether the model's centre and top can see the key light, by a
+  ray toward it against every other model's triangles; `centre_blocked_by`
+  names the model in the way. Flagged when the centre is blocked and there
+  was direct light for the shadow to take.
+- `exposure`: the material's, the frame's (the eye adaptation's), and their
+  product. Flagged under 0.6.
+- `pixels`: the coverage where the model projects, the mean display colour
+  about its centre, and `predicted`, what that side would show with every
+  light reaching it and no shadow: the lit colour through the tone curve.
+
+The look is read from the pixels: `dark` under a display luminance of 0.15 or
+under 0.6 of the prediction, `wrong colour` when the mean leans to a colour the
+material does not, `missing` when nothing was drawn (and `trace.model` is the
+next question), otherwise `as lit`. The verdict is the first flagged stage
+that accounts for that look. A look no stage accounts for says so with the
+two luminances; a finding the pixels do not show is named after `as lit`, as
+in `as lit; not shown in the pixels: in the shadow of roof`. That is what
+OpenGL once answered for the cube above, and it found two bugs (#453): a
+shadow batch drawing another batch's matrices, then a shadow letting four
+times the sun through that Vulkan's did. Both renderers now read the cube at
+0.297.
+
 ## The whole scene at once
 
 `world` returns every entity and the relations between them, so an agent does
@@ -118,6 +190,49 @@ not join `scene.tree`, `anim.list` and `trace.model` by hand:
     model:0         --has_mesh-->    mesh:0
     clip:spin       --drives-->      model:0
     camera          --sees-->        model:0
+
+## Recording a session and replaying it
+
+`AE3D_AGENT_RECORD=path` writes the whole session to a file as it happens:
+every request as the frame takes it and every answer as it goes, one line
+each. A line is `in` or `out`, the milliseconds since the channel opened, and
+the line itself. Each is flushed as it is written, so a session the program
+died in is on disk up to its last word:
+
+    in 1438 {"op":"scene.tree","id":1}
+    out 1439 {"id":1,"ok":true,"result":{"count":1,"models":[{"index":0,"name":"probe","position":[0,0,0],"visible":true}]}}
+
+`tools/agent_replay.ae` asks a running program the same questions in order
+and compares every answer with the recorded one (`ae3d.replay`). A change
+that alters what the pipeline sees is found by replaying a session that went
+right:
+
+    AE3D_AGENT_RECORD=build/scratch/good.log AE3D_AGENT=7920 ./build/zombie_street
+    AE3D_AGENT=7921 ./build/zombie_street &        # after the change
+    ./build/agent_replay build/scratch/good.log --port 7921
+
+How answers are compared:
+- **Numbers** match within a tolerance: relative, a part in a million by
+  default (`--tolerance`).
+- **Everything else** must match exactly: strings, flags, nulls, array
+  lengths and the set of keys.
+- **Keys left out:** the request id and the clocks (`ms`, `fps`,
+  `frame_ms`, `elapsed_ms`), plus any key given with `--ignore`.
+- **Requests and answers are paired by id**, because an answer read from a
+  later frame comes out after requests that arrived behind it.
+
+Every difference is printed with its place in the answer, up to the first 64:
+
+    #0 scene.tree.result.models[0].position[0]: 0 then, 5 now
+
+The tool exits 0 when every answer is the same, 1 when one differs or goes
+unanswered, and 2 when it cannot start.
+
+`tests/test_agent_record.ae` records a session against one scene and replays
+it twice:
+- **On the same scene:** 4 of 4 answers are the same.
+- **With the cube started 5 m along x:** the two answers that say where it
+  started differ, and the two after the write that moves it agree.
 
 ## Blender
 

@@ -30,9 +30,12 @@ SOFTWARE.
 
 ## stb_image
 
-`native/image/stb_image.h` is vendored verbatim from https://github.com/nothings/stb.
-It is dual licensed as MIT and public domain; ae3d uses it under the MIT
-terms.
+Nothing of https://github.com/nothings/stb is vendored any longer; the
+image decoders in `src/ae3d/picture`, `src/ae3d/jpeg` and
+`src/ae3d/inflate` are Aether ports of stb_image 2.30's PNG, JPEG, TGA,
+BMP and zlib decoders, made to give its output byte for byte. stb_image is
+dual licensed as MIT and public domain; the ports are made under the MIT
+terms, whose notice follows.
 
 ```
 MIT License
@@ -62,6 +65,16 @@ SOFTWARE.
 
 `resources/obj/` carries the demo models from Gopher3D's `examples/resources`,
 under the Gopher3D licence above.
+
+## PT Sans (resources/fonts/PT_Sans-Web-Regular.ttf)
+
+The font the game UI draws text in: PT Sans Regular by ParaType, as
+[Google Fonts](https://github.com/google/fonts/tree/main/ofl/ptsans)
+publishes it, unchanged. Its licence is beside it in
+`resources/fonts/PT_Sans-OFL.txt`.
+
+- © 2010 ParaType Ltd., with Reserved Font Names "PT Sans" and "ParaType",
+  [SIL Open Font License 1.1](https://openfontlicense.org).
 
 ## GLFW and Vulkan
 

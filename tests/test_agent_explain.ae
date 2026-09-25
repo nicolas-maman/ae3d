@@ -1,0 +1,405 @@
+// explain.model, checked by making models look wrong on purpose.
+//
+// An explanation that calls a well-lit model well lit proves little. What it
+// has to do is name the stage that made a model look wrong, so this lays out a
+// row of cubes that each look wrong for exactly one reason and checks the
+// verdict names it:
+//
+//   grey, in the sun                  -> as lit
+//   black albedo                      -> material
+//   under a roof, in its shadow       -> shadow, naming the roof
+//   white, with a red texture         -> texture, with the texture's mean
+//   lit only by a lamp out of reach   -> light
+//
+// The last needs the sun gone, so it is asked after the others with the key
+// light's intensity at zero and its ambient low. The numbers each answer
+// measured are printed beside the verdict.
+//
+// Driven over the channel rather than by calling the explanation directly: the
+// thing under test is what an agent receives, not what the function returns.
+
+import std.os
+import std.tcp
+import std.json
+import std.string
+import ae3d.core
+import ae3d.platform
+import ae3d.engine
+import ae3d.agent
+import ae3d.loader
+import ae3d.png
+
+extern calloc(count: int, size: int) -> ptr
+extern free(block: ptr)
+
+const RED_TEXTURE = "build/test_agent_explain_red.png"
+
+var g_sock: ptr = null
+var g_stage = 0
+var g_frame = 0
+var g_checks = 0
+var g_failures = 0
+var g_wait_until = 0
+// The models, lights and texture this suite hands the engine, which borrows
+// them all; main frees them after it.
+var g_models: ptr = null
+var g_sun: ptr = null
+var g_lamp: ptr = null
+
+check(name: string, condition: bool) {
+    g_checks = g_checks + 1
+    if !condition {
+        g_failures = g_failures + 1
+        println("FAIL ${name}")
+    }
+}
+
+ask_send(line: string) {
+    if g_sock == null { return }
+    tcp.tcp_send_raw(g_sock, string.concat(line, "\n"))
+}
+
+ask_receive() -> ptr {
+    if g_sock == null { return null }
+    if tcp.tcp_poll_raw(g_sock, 0) <= 0 { return null }
+    // tcp_receive_n_raw, not tcp_receive_raw: the buffer is the caller's.
+    text, _length, err = tcp.tcp_receive_n_raw(g_sock, 65536)
+    if err != "" || text == null { return null }
+    return json.parse_raw(text)
+}
+
+result_of(doc: ptr) -> ptr {
+    if doc == null { return null }
+    return json.object_get_raw(doc, "result")
+}
+
+text_at(node: ptr, name: string) -> string {
+    if node == null { return "" }
+    found = json.object_get_raw(node, name)
+    if found == null { return "" }
+    return json.get_string_raw(found)
+}
+
+number_at(node: ptr, name: string) -> float {
+    if node == null { return 0.0 - 1.0 }
+    found = json.object_get_raw(node, name)
+    if found == null { return 0.0 - 1.0 }
+    return json.get_number(found)
+}
+
+// The detail of the stage named `name`, or null.
+detail_of(r: ptr, name: string) -> ptr {
+    if r == null { return null }
+    stages = json.object_get_raw(r, "stages")
+    if stages == null { return null }
+    i = 0
+    while i < json.array_size(stages) {
+        entry = json.array_get_raw(stages, i)
+        if string.equals(text_at(entry, "stage"), name) == 1 { return json.object_get_raw(entry, "detail") }
+        i = i + 1
+    }
+    return null
+}
+
+// What an answer measured, on one line.
+report(label: string, r: ptr) {
+    pixels = detail_of(r, "pixels")
+    light = detail_of(r, "light")
+    println("  ${label}: look '${text_at(r, "look")}', blamed '${text_at(r, "blamed")}', verdict '${text_at(r, "verdict")}'")
+    println("      pixels luminance ${number_at(pixels, "luminance")} (fully lit ${number_at(pixels, "predicted_luminance")}), coverage ${number_at(pixels, "coverage")}; direct onto the side ${number_at(light, "direct_side_luminance")}, onto the top ${number_at(light, "direct_top_luminance")}, ambient ${number_at(light, "ambient_luminance")}")
+}
+
+check_blame(name: string, r: ptr, want: string) {
+    got = text_at(r, "blamed")
+    g_checks = g_checks + 1
+    if string.equals(got, want) != 1 {
+        g_failures = g_failures + 1
+        println("FAIL ${name}: blamed '${got}', expected '${want}' (${text_at(r, "verdict")})")
+    }
+}
+
+add_cube(e: *Engine, name: string, x: float, y: float, z: float) -> *Model {
+    cube = loader.cube(1.0)
+    core.model_set_name(cube, name)
+    core.model_set_position(cube, x, y, z)
+    core.model_set_scale(cube, 3.0, 3.0, 3.0)
+    core.model_matte(cube, 0.7, 0.7, 0.7)
+    keep_model(cube)
+    engine.engine_add_model(e, cube)
+    return cube
+}
+
+var g_count = 0
+
+keep_model(m: *Model) {
+    slots = g_models as ptr[]
+    slots[g_count] = m as ptr
+    g_count = g_count + 1
+}
+
+// An 8 by 8 texture of one red, written where the test can load it back.
+write_red_texture() -> bool {
+    pixels = calloc(64, 4)
+    i = 0
+    while i < 64 {
+        png.rgba_set(pixels, i, 0.8, 0.1, 0.1, 1.0)
+        i = i + 1
+    }
+    written = png.write(RED_TEXTURE, pixels, 8, 8)
+    free(pixels)
+    return written
+}
+
+main() {
+    os.setenv("AE3D_AGENT", "auto")
+    check("the red texture is written", write_red_texture())
+    g_models = calloc(8, 8)
+
+    e = engine.engine_new()
+    engine.engine_set_size(e, 320, 240)
+    engine.engine_set_title(e, "ae3d explain test")
+    engine.engine_set_camera_input(e, false)
+    engine.engine_set_frame_limit(e, 300)
+    engine.engine_set_clear_color(e, 0.35, 0.4, 0.45)
+
+    // High and in front, so the side of each cube facing the camera is lit
+    // and what the roof casts falls on the cube under it.
+    sun = core.light_directional(core.vec3(0.2, 0.8, 0.6), core.vec3(1.0, 1.0, 1.0), 1.5)
+    sun.ambient_strength = 0.1
+    core.light_set_name(sun, "sun")
+    engine.engine_set_light(e, sun)
+    g_sun = sun as ptr
+
+    program = engine.behaviour_new("explain test", null)
+    program.start = on_start
+    program.late_update = on_render
+    engine.engine_add_behaviour(e, program)
+
+    if !engine.engine_run(e) {
+        println("SKIP no window")
+        engine.engine_free(e)
+        release()
+        return
+    }
+    engine.engine_free(e)
+    release()
+
+    if g_stage < 12 {
+        println("FAIL the exchange did not finish (stopped at stage ${g_stage})")
+        g_failures = g_failures + 1
+    }
+    if g_failures == 0 {
+        println("test_agent_explain: all checks passed (${g_checks})")
+        return
+    }
+    println("test_agent_explain: ${g_failures} failure(s) of ${g_checks}")
+}
+
+// After the engine, because freeing the renderer is what releases the GPU
+// handles the models were given.
+release() {
+    slots = g_models as ptr[]
+    i = 0
+    while i < g_count {
+        core.model_free(slots[i] as *Model)
+        i = i + 1
+    }
+    free(g_models)
+    if g_lamp != null { core.light_free(g_lamp as *Light) }
+    if g_sun != null { core.light_free(g_sun as *Light) }
+}
+
+on_start(state: ptr, e: *Engine) {
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(0.0, 0.0, 30.0))
+
+    // 0: nothing wrong with it.
+    add_cube(e, "lit", 0.0 - 12.0, 0.0, 0.0)
+
+    // 1: as good as black.
+    black = add_cube(e, "black", 0.0 - 6.0, 0.0, 0.0)
+    core.model_matte(black, 0.01, 0.01, 0.01)
+
+    // 2 and 3: a cube under a roof that stands between it and the sun, high
+    // enough that the camera sees the cube under it.
+    add_cube(e, "shaded", 0.0, 0.0, 0.0)
+    roof = loader.cube(1.0)
+    core.model_set_name(roof, "roof")
+    core.model_set_position(roof, 0.5, 5.0, 1.5)
+    core.model_set_scale(roof, 6.0, 0.5, 10.0)
+    core.model_matte(roof, 0.6, 0.6, 0.6)
+    keep_model(roof)
+    engine.engine_add_model(e, roof)
+
+    // 4: a white material under a red texture.
+    red = add_cube(e, "red", 6.0, 0.0, 0.0)
+    core.model_matte(red, 1.0, 1.0, 1.0)
+    core.model_set_texture(red, RED_TEXTURE)
+
+    // 5: lit, while the sun is up; later its only light is a lamp twenty
+    // metres behind it whose light stops at sixteen.
+    add_cube(e, "dim", 12.0, 0.0, 0.0)
+    lamp = core.light_point(core.vec3(12.0, 0.0, 0.0 - 20.0), core.vec3(1.0, 0.8, 0.6), 3.0, 2.0)
+    core.light_set_name(lamp, "lamp")
+    engine.engine_add_light(e, lamp)
+    g_lamp = lamp as ptr
+}
+
+on_render(state: ptr, e: *Engine, delta: float) {
+    g_frame = g_frame + 1
+    // Past the first frames, whose picture is still settling.
+    if g_frame < 6 { return }
+
+    if g_stage == 0 {
+        sock, _err = tcp.connect("127.0.0.1", agent.port())
+        check("client connects", sock != null)
+        g_sock = sock
+        g_stage = 1
+        return
+    }
+    if g_sock == null { return }
+
+    if g_stage == 1 {
+        ask_send("{\"id\":1,\"op\":\"explain.model\",\"index\":0}")
+        g_stage = 2
+        return
+    }
+    if g_stage == 2 {
+        doc = ask_receive()
+        if doc == null { return }
+        r = result_of(doc)
+        report("lit", r)
+        check("a lit model is as lit", string.equals(text_at(r, "verdict"), "as lit") == 1)
+        check_blame("and nothing is blamed", r, "")
+        check("with six stages", json.array_size(json.object_get_raw(r, "stages")) == 6)
+        if doc != null { json.free(doc) }
+        ask_send("{\"id\":2,\"op\":\"explain.model\",\"index\":1}")
+        g_stage = 3
+        return
+    }
+    if g_stage == 3 {
+        doc = ask_receive()
+        if doc == null { return }
+        r = result_of(doc)
+        report("black", r)
+        check_blame("a black albedo is blamed on the material", r, "material")
+        check("and the model reads as dark", string.equals(text_at(r, "look"), "dark") == 1)
+        if doc != null { json.free(doc) }
+        ask_send("{\"id\":3,\"op\":\"explain.model\",\"index\":2}")
+        g_stage = 4
+        return
+    }
+    if g_stage == 4 {
+        doc = ask_receive()
+        if doc == null { return }
+        r = result_of(doc)
+        report("shaded", r)
+        // The roof is between the cube and the sun, and both renderers draw
+        // its shadow the same (0.297 of a fully lit 0.621). OpenGL once drew
+        // the cube as lit -- a batch drawing another's matrices, then a
+        // shadow letting four times the sun through (#453) -- and this
+        // verdict is what found it.
+        check("its centre is blocked by the roof", string.equals(text_at(detail_of(r, "shadow"), "centre_blocked_by"), "roof") == 1)
+        verdict = text_at(r, "verdict")
+        check("a model under the roof is dark, and blamed on its shadow",
+              string.equals(text_at(r, "blamed"), "shadow") == 1 &&
+              string.string_starts_with(verdict, "dark: in the shadow of roof") == 1)
+        if doc != null { json.free(doc) }
+        ask_send("{\"id\":4,\"op\":\"explain.model\",\"index\":4}")
+        g_stage = 5
+        return
+    }
+    if g_stage == 5 {
+        doc = ask_receive()
+        if doc == null { return }
+        r = result_of(doc)
+        report("red", r)
+        check_blame("a red texture on a white material is blamed on the texture", r, "texture")
+        check("as a wrong colour", string.string_starts_with(text_at(r, "verdict"), "wrong colour") == 1)
+        texture = detail_of(r, "texture")
+        mean = null as ptr
+        if texture != null { mean = json.object_get_raw(texture, "mean") }
+        red = 0.0
+        green = 1.0
+        if mean != null && json.array_size(mean) == 3 {
+            red = json.get_number(json.array_get_raw(mean, 0))
+            green = json.get_number(json.array_get_raw(mean, 1))
+        }
+        println("      texture mean red ${red}, green ${green}")
+        check("the texture's mean is the red it was written with", red > 0.79 && red < 0.81 && green < 0.11)
+        if doc != null { json.free(doc) }
+        ask_send("{\"id\":5,\"op\":\"explain.model\",\"index\":99}")
+        g_stage = 6
+        return
+    }
+    if g_stage == 6 {
+        doc = ask_receive()
+        if doc == null { return }
+        ok = json.object_get_raw(doc, "ok")
+        check("explaining a model that is not there fails", ok != null && json.get_bool(ok) == 0)
+        if doc != null { json.free(doc) }
+        // Night: the sun gives nothing and the sky little, so the lamp is
+        // the cube's only light, and it stops short.
+        sun = g_sun as *Light
+        sun.intensity = 0.0
+        sun.ambient_strength = 0.02
+        g_wait_until = g_frame + 4
+        g_stage = 7
+        return
+    }
+    if g_stage == 7 {
+        if g_frame < g_wait_until { return }
+        ask_send("{\"id\":6,\"op\":\"explain.model\",\"index\":5}")
+        g_stage = 8
+        return
+    }
+    if g_stage == 8 {
+        doc = ask_receive()
+        if doc == null { return }
+        r = result_of(doc)
+        report("dim", r)
+        check_blame("a model only a lamp out of reach lights is blamed on the light", r, "light")
+        check("as no direct light reaching it",
+              string.string_starts_with(text_at(r, "verdict"), "dark: no direct light reaches it") == 1)
+        lamp_note = ""
+        light = detail_of(r, "light")
+        lights = null as ptr
+        if light != null { lights = json.object_get_raw(light, "lights") }
+        if lights != null && json.array_size(lights) == 2 {
+            lamp_note = text_at(json.array_get_raw(lights, 1), "note")
+        }
+        println("      lamp: ${lamp_note}")
+        check("the lamp is out of reach", string.string_starts_with(lamp_note, "out of reach") == 1)
+        if doc != null { json.free(doc) }
+        g_stage = 9
+        return
+    }
+    if g_stage == 9 {
+        // The op is in the table an agent reads.
+        ask_send("{\"id\":7,\"op\":\"help\"}")
+        g_stage = 10
+        return
+    }
+    if g_stage == 10 {
+        doc = ask_receive()
+        if doc == null { return }
+        listed = false
+        ops = json.object_get_raw(result_of(doc), "ops")
+        i = 0
+        while ops != null && i < json.array_size(ops) {
+            if string.equals(text_at(json.array_get_raw(ops, i), "op"), "explain.model") == 1 { listed = true }
+            i = i + 1
+        }
+        check("help lists explain.model", listed)
+        if doc != null { json.free(doc) }
+        g_stage = 11
+        return
+    }
+    if g_stage == 11 {
+        tcp.tcp_close(g_sock)
+        g_sock = null
+        g_stage = 12
+        engine.engine_stop(e)
+        return
+    }
+}

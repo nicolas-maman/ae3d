@@ -1,0 +1,377 @@
+// Image decoding in Aether (ae3d.picture), held to stb_image byte for byte.
+//
+// tests/fixtures/images/reference.txt is what stb_image 2.30 decoded every
+// PNG and JPEG in the repository to, and every fixture beside it (PNG in
+// each colour type, bit depth and filter, interlaced or not, with tRNS;
+// JPEG baseline and progressive at 4:4:4, 4:2:2, 4:2:0, 4:4:0, 4:1:1,
+// greyscale, CMYK, RGB, with restart markers; TGA and BMP in their
+// variants), taken before stb was removed: width, height and a hash of the
+// RGBA. Each has to come back the same, to the byte. Then the rest of the
+// API (a solid picture, registered names, fitting to a device's limit), and
+// every fixture broken 200 ways -- cut short, bytes overwritten -- which has
+// to fail cleanly or decode, never crash.
+
+import std.string
+import std.fs
+import ae3d.blob
+import ae3d.picture
+
+extern malloc(size: long) -> ptr
+extern free(p: ptr)
+extern memcpy(dst: ptr, src: ptr, n: long) -> ptr
+
+const REFERENCE = "tests/fixtures/images/reference.txt"
+const MUTATIONS = 200
+
+var failures = 0
+var g_seed: long = 88172645463325252
+
+record_failure(reason: string) {
+    println("FAIL ${reason}")
+    failures = failures + 1
+}
+
+// FNV-1a, 64 bits, over `n` bytes.
+fnv(p: ptr, n: int) -> long {
+    b = p as uint8[]
+    h = 1469598103934665603 as long
+    i = 0
+    while i < n {
+        h = (h ^ (b[i] as long)) * (1099511628211 as long)
+        i = i + 1
+    }
+    return h
+}
+
+hex_digit(d: int) -> string {
+    return string.substring("0123456789abcdef", d, d + 1)
+}
+
+hex16(v: long) -> string {
+    out = ""
+    i = 15
+    while i >= 0 {
+        digit = hex_digit(((v >> (i * 4)) & (15 as long)) as int)
+        out = string.concat(out, digit)
+        i = i - 1
+    }
+    return out
+}
+
+// A deterministic stream for the mutations (xorshift64).
+next_random() -> int {
+    x = g_seed
+    x = x ^ (x << 13)
+    x = x ^ ((x >> 7) & (144115188075855871 as long))
+    x = x ^ (x << 17)
+    g_seed = x
+    return ((x >> 33) & (2147483647 as long)) as int
+}
+
+kind_of(path: string) -> string {
+    if string.contains(path, "@") == 1 { return "embedded" }
+    if string.ends_with(path, ".png") == 1 { return "png" }
+    if string.ends_with(path, ".jpg") == 1 { return "jpeg" }
+    if string.ends_with(path, ".tga") == 1 { return "tga" }
+    if string.ends_with(path, ".bmp") == 1 { return "bmp" }
+    return "other"
+}
+
+// A picture for a reference line's path: a file, or bytes inside one
+// (path@offset+length) decoded from memory as a glTF's image is.
+decode_path(path: string) -> ptr {
+    at = string.index_of(path, "@")
+    if at < 0 { return picture.load(path) }
+    file = string.substring(path, 0, at)
+    plus = string.index_of(path, "+")
+    offset_text = string.substring(path, at + 1, plus)
+    length_text = string.substring(path, plus + 1, string.length(path))
+    offset = string.get_int(offset_text)
+    length = string.get_int(length_text)
+    bytes = blob.read(file)
+    if bytes == null { return null }
+    img = picture.from_memory(bytes + offset, length)
+    blob.free_bytes(bytes)
+    return img
+}
+
+// --- every file against stb -------------------------------------------------------
+
+var png_total = 0
+var png_exact = 0
+var jpeg_total = 0
+var jpeg_exact = 0
+var tga_total = 0
+var tga_exact = 0
+var bmp_total = 0
+var bmp_exact = 0
+var embedded_total = 0
+var embedded_exact = 0
+
+count_result(kind: string, exact: bool) {
+    e = 0
+    if exact { e = 1 }
+    if kind == "png" { png_total = png_total + 1; png_exact = png_exact + e }
+    if kind == "jpeg" { jpeg_total = jpeg_total + 1; jpeg_exact = jpeg_exact + e }
+    if kind == "tga" { tga_total = tga_total + 1; tga_exact = tga_exact + e }
+    if kind == "bmp" { bmp_total = bmp_total + 1; bmp_exact = bmp_exact + e }
+    if kind == "embedded" { embedded_total = embedded_total + 1; embedded_exact = embedded_exact + e }
+}
+
+check_reference() {
+    text, err = fs.read(REFERENCE)
+    if err != "" {
+        record_failure("cannot read ${REFERENCE}")
+        return
+    }
+    lines = string.split(text, "\n")
+    n = string.array_size(lines)
+    i = 0
+    while i < n {
+        line = string.array_get(lines, i)
+        if string.length(line) > 0 && string.starts_with(line, "#") == 0 {
+            fields = string.split(line, " ")
+            if string.array_size(fields) == 4 {
+                path = string.array_get(fields, 0)
+                want_w = string.get_int(string.array_get(fields, 1))
+                want_h = string.get_int(string.array_get(fields, 2))
+                // Trimmed: a checkout that turned the file's line ends into
+                // CRLF left a "" on every hash, and 147 matching hashes
+                // compared unequal on Windows.
+                want = string.trim(string.array_get(fields, 3))
+                kind = kind_of(path)
+                img = decode_path(path)
+                exact = false
+                if img == null {
+                    record_failure("${path}: ${picture.error()}")
+                } else {
+                    w = picture.width(img)
+                    h = picture.height(img)
+                    if w != want_w || h != want_h {
+                        record_failure("${path}: ${w}x${h}, stb decoded ${want_w}x${want_h}")
+                    } else {
+                        got = hex16(fnv(picture.pixels(img), w * h * 4))
+                        if string.equals(got, want) == 1 {
+                            exact = true
+                        } else {
+                            record_failure("${path}: RGBA hash ${got}, stb's ${want}")
+                        }
+                    }
+                    picture.dispose(img)
+                }
+                count_result(kind, exact)
+            } else {
+                record_failure("reference line ${i + 1} malformed")
+            }
+            string.array_free(fields)
+        }
+        i = i + 1
+    }
+    string.array_free(lines)
+    string.free(text)
+    println("image decode: png ${png_exact}/${png_total}, jpeg ${jpeg_exact}/${jpeg_total}, tga ${tga_exact}/${tga_total}, bmp ${bmp_exact}/${bmp_total}, embedded ${embedded_exact}/${embedded_total} identical to stb_image")
+    if png_total < 101 || jpeg_total < 19 || tga_total < 12 || bmp_total < 14 || embedded_total < 1 {
+        record_failure("the reference covers too little: ${png_total} png, ${jpeg_total} jpeg, ${tga_total} tga, ${bmp_total} bmp")
+    }
+}
+
+// --- the rest of the API ------------------------------------------------------------
+
+pixel_at(img: ptr, x: int, y: int, c: int) -> int {
+    p = picture.pixels(img) as uint8[]
+    return p[(y * picture.width(img) + x) * 4 + c] as int
+}
+
+check_api() {
+    // A solid picture is its colour everywhere.
+    img = picture.solid(3, 2, 10, 20, 30, 40)
+    if img == null {
+        record_failure("solid: ${picture.error()}")
+    } else {
+        if picture.width(img) != 3 || picture.height(img) != 2 { record_failure("solid: wrong size") }
+        if pixel_at(img, 2, 1, 0) != 10 || pixel_at(img, 2, 1, 1) != 20 || pixel_at(img, 0, 0, 2) != 30 || pixel_at(img, 1, 0, 3) != 40 {
+            record_failure("solid: wrong colour")
+        }
+        picture.dispose(img)
+    }
+    if picture.solid(0, 4, 0, 0, 0, 0) != null { record_failure("solid: a 0-wide picture was made") }
+    if string.contains(picture.error(), "bad dimensions") == 0 { record_failure("solid: error was '${picture.error()}'") }
+
+    // A registered image loads by its name as a file would, a copy each time;
+    // registering again replaces it; unregistering forgets it.
+    rgba = malloc(16 as long)
+    px = rgba as uint8[]
+    i = 0
+    while i < 16 {
+        px[i] = i * 10
+        i = i + 1
+    }
+    if picture.register_rgba("test:checker", rgba, 2, 2) != 1 { record_failure("register: refused") }
+    px[0] = 99
+    named = picture.load("test:checker")
+    if named == null {
+        record_failure("register: load by name: ${picture.error()}")
+    } else {
+        if picture.width(named) != 2 || pixel_at(named, 0, 0, 0) != 0 || pixel_at(named, 1, 1, 3) != 150 {
+            record_failure("register: the registered pixels did not come back")
+        }
+        picture.dispose(named)
+    }
+    if picture.register_rgba("test:checker", rgba, 1, 1) != 1 { record_failure("register: replacing refused") }
+    named = picture.load("test:checker")
+    if named == null || picture.width(named) != 1 || pixel_at(named, 0, 0, 0) != 99 { record_failure("register: not replaced") }
+    picture.dispose(named)
+    picture.unregister("test:checker")
+    if picture.load("test:checker") != null { record_failure("unregister: still loads") }
+    if picture.register_rgba("", rgba, 1, 1) != 0 { record_failure("register: an empty name was taken") }
+    free(rgba)
+
+    // fit halves with a 2x2 box, rounding, the edge repeated on odd sides,
+    // until both sides are within the limit.
+    grid = malloc((5 * 3 * 4) as long)
+    g = grid as uint8[]
+    i = 0
+    while i < 5 * 3 * 4 {
+        g[i] = (i * 7) & 255
+        i = i + 1
+    }
+    picture.register_rgba("test:grid", grid, 5, 3)
+    fitted = picture.load("test:grid")
+    halvings = picture.fit(fitted, 2)
+    if halvings != 1 || picture.width(fitted) != 2 || picture.height(fitted) != 1 {
+        record_failure("fit: ${halvings} halvings to ${picture.width(fitted)}x${picture.height(fitted)}, wanted 1 to 2x1")
+    } else {
+        // Texel (1, 0) is the box of source (2..3, 0..1).
+        c = 0
+        while c < 4 {
+            sum = (g[(0 * 5 + 2) * 4 + c] as int) + (g[(0 * 5 + 3) * 4 + c] as int) + (g[(1 * 5 + 2) * 4 + c] as int) + (g[(1 * 5 + 3) * 4 + c] as int)
+            if pixel_at(fitted, 1, 0, c) != (sum + 2) / 4 { record_failure("fit: channel ${c} is ${pixel_at(fitted, 1, 0, c)}, wanted ${(sum + 2) / 4}") }
+            c = c + 1
+        }
+    }
+    if picture.fit(fitted, 8) != 0 { record_failure("fit: a picture already within the limit was halved") }
+    picture.dispose(fitted)
+    picture.unregister("test:grid")
+    free(grid)
+
+    // Failures say why, with the path.
+    if picture.load("tests/fixtures/images/no_such_file.png") != null { record_failure("a missing file loaded") }
+    if string.contains(picture.error(), "no_such_file.png") == 0 { record_failure("missing file: error was '${picture.error()}'") }
+    if picture.load("") != null { record_failure("an empty path loaded") }
+    if picture.from_memory(null, 0) != null { record_failure("an empty buffer decoded") }
+    junk = malloc(64 as long)
+    j = junk as uint8[]
+    i = 0
+    while i < 64 {
+        j[i] = 7
+        i = i + 1
+    }
+    if picture.from_memory(junk, 64) != null { record_failure("64 bytes of junk decoded") }
+    if string.contains(picture.error(), "unknown image type") == 0 { record_failure("junk: error was '${picture.error()}'") }
+    free(junk)
+}
+
+// --- broken files ---------------------------------------------------------------------
+
+var fuzz_runs = 0
+var fuzz_decoded = 0
+
+// Decode `length` bytes copied into a buffer of exactly that size, so a
+// read past the end is a read outside the allocation.
+try_decode(source: ptr, length: int) {
+    copy = malloc((length + 1) as long)
+    if length > 0 { memcpy(copy, source, length as long) }
+    img = picture.from_memory(copy, length)
+    fuzz_runs = fuzz_runs + 1
+    if img != null {
+        fuzz_decoded = fuzz_decoded + 1
+        w = picture.width(img)
+        h = picture.height(img)
+        p = picture.pixels(img) as uint8[]
+        if w < 0 || h < 0 || (w * h > 0 && picture.pixels(img) == null) {
+            record_failure("a broken file decoded to a ${w}x${h} picture without pixels")
+        } else {
+            // Every byte of what came back is readable.
+            touched = 0
+            i = 0
+            while i < w * h * 4 {
+                touched = touched + (p[i] as int)
+                i = i + 1
+            }
+            if touched < 0 { record_failure("impossible") }
+        }
+        picture.dispose(img)
+    } else if picture.error() == "" {
+        record_failure("a broken file failed without a reason")
+    }
+    free(copy)
+}
+
+fuzz_file(path: string) {
+    original = blob.read(path)
+    size = blob.last_size() as int
+    if original == null || size <= 0 {
+        record_failure("fuzz: cannot read ${path}")
+        return
+    }
+    work = malloc(size as long)
+    w = work as uint8[]
+    m = 0
+    while m < MUTATIONS {
+        memcpy(work, original, size as long)
+        length = size
+        if m < 40 {
+            // Cut short, from nothing to all but the last byte.
+            length = (size * m) / 40
+        } else {
+            // Bytes overwritten: a third of the time in the first 64, where
+            // the headers and tables are.
+            flips = 1 + next_random() % 8
+            f = 0
+            while f < flips {
+                at = next_random() % size
+                if m % 3 == 0 && size > 64 { at = next_random() % 64 }
+                w[at] = next_random() & 255
+                f = f + 1
+            }
+            if m % 5 == 0 { length = size - next_random() % (size / 2 + 1) }
+        }
+        try_decode(work, length)
+        m = m + 1
+    }
+    free(work)
+    blob.free_bytes(original)
+}
+
+check_fuzz() {
+    text, err = fs.read(REFERENCE)
+    if err != "" { return }
+    lines = string.split(text, "\n")
+    n = string.array_size(lines)
+    files = 0
+    i = 0
+    while i < n {
+        line = string.array_get(lines, i)
+        if string.starts_with(line, "tests/fixtures/images/") == 1 {
+            fields = string.split(line, " ")
+            fuzz_file(string.array_get(fields, 0))
+            files = files + 1
+            string.array_free(fields)
+        }
+        i = i + 1
+    }
+    string.array_free(lines)
+    string.free(text)
+    println("image decode: ${files} fixtures broken ${MUTATIONS} ways each, ${fuzz_runs} decodes, ${fuzz_decoded} decoded, the rest refused, none crashed")
+}
+
+main() {
+    check_reference()
+    check_api()
+    check_fuzz()
+    if failures == 0 {
+        println("image decode: all checks passed")
+    } else {
+        println("image decode: ${failures} failure(s)")
+    }
+}

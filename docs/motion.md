@@ -61,6 +61,47 @@ The reach and tuck are **aims** (`physics.ragdoll_aim(ragdoll, bone, rotation)`)
 
 The settings were chosen by measurement. Each setting was tried on falls backward, forward and sideways, against a twin that does not protect itself, measuring the head's speed as it met the ground. The one chosen did better in all three directions, and so did its neighbours. Softening the knees in a fall, the obvious idea, made every direction worse.
 
+## Stepping to catch itself
+
+Pushed, a `POWERED` figure steps to catch itself (`set_stepping`, on by
+default; `steps_taken` counts them). Every fixed step it watches its
+capture point: the centre of mass carried on by its velocity times
+√(height / g), where it would come to rest over a foot. When that point
+leaves the ground the two feet cover (heel to toe) by more than 8 cm, and
+the figure is moving over the ground at 0.25 m/s or more, a foot swings to
+put itself under it. The thigh reaches toward the spot with the knee let
+bend for 0.12 s, so the foot clears the ground, then the leg straightens
+onto it; the whole step takes 0.3 s. It lands 5 cm past the capture point,
+and at most half a metre from under the hip.
+
+Which foot moves:
+- **Pushed forward:** the foot further behind swings through.
+- **Pushed sideways:** the foot on that side steps out. Swinging the other
+  across it only tangled the legs.
+- **Pushed back:** it doesn't step. The reference ragdoll's hips hardly
+  extend (their cone sits forward of the leg), so a step back was too short
+  to catch anything and took a foot from under a figure its balance would
+  have held.
+- **A push past a stride and a half:** that's a fall, and the protective
+  fall has it. A leg swinging as the figure goes over only took the fall
+  from the arms: the head met the ground at 5.3 m/s instead of 1.8.
+
+`tests/test_balance.ae` pushes figures at the chest, each push with and
+without stepping:
+
+| push | without stepping | stepping |
+|---|---|---|
+| 60 N·s from behind | stands | stands, no step |
+| 270 N·s from behind | falls | stands, 4 steps |
+| 180 N·s from the side | stands | stands, 1 step |
+| 150 N·s from in front | stands | stands, no step |
+
+A sweep from 60 to 270 N·s found how far each way holds:
+- **Forward:** 240 N·s without stepping, 270 or more with it.
+- **Sideways:** 210 N·s either way; stepping moves the feet rather than
+  holding the pose.
+- **Backward:** 150 N·s either way.
+
 ## On a figure
 
 `motion.on_figure(e, object)` gives an animated figure (`ae3d.figure`,
@@ -137,6 +178,27 @@ A figure that was `POWERED` is `POWERED` again once up; any other ends `ANIMATED
 | facing, against where its feet (head) lay | 16° | 12° | |
 
 The blended figure takes 15 steps, a quarter second, and no drawn bone turns more than 1.3° in a step. The limits the test holds are 6° a step, 40 mm a step for the hips, 1° and 5 mm at the hand-over, 3 cm into the ground, 10° of lean afterwards and 30° of facing.
+
+## What it costs
+
+An active ragdoll is for the figures a player is close to, not the horde:
+the horde hands the dozen nearest over when they are struck.
+`tests/test_motion_cost.ae` measures what that costs. It steps 0, 4, 16
+and 32 `POWERED` figures standing on one ground, each figure's chest
+bowing so it stays awake, for 120 fixed steps once they have settled:
+
+| figures | the step | a figure | in a millisecond |
+|---|---|---|---|
+| 0 | 0.2 µs | | |
+| 4 | 142 µs | 35 µs | 28 |
+| 16 | 330 µs | 21 µs | 49 |
+| 32 | 636 µs | 20 µs | 50 |
+
+A figure standing still falls asleep and costs nothing, which is why the
+figures bow: an awake figure is what the step pays for. A dozen awake
+figures cost about a quarter of a millisecond a step. The test holds a
+figure under 80 µs, a dozen within a millisecond, and every figure still
+standing at the end.
 
 ## Handing over from the horde
 

@@ -32,6 +32,7 @@ import ae3d.blob
 import ae3d.skin
 import ae3d.anim
 import ae3d.crowd
+import ae3d.picture
 
 exports (
     GltfScene, load, scene_free, scene_destroy, last_error,
@@ -42,12 +43,6 @@ exports (
     animation_duration, bake_bank, bake_root
 )
 
-extern ae3d_image_from_memory(data: ptr, length: int) -> ptr
-extern ae3d_image_pixels(handle: ptr) -> ptr
-extern ae3d_image_width(handle: ptr) -> int
-extern ae3d_image_height(handle: ptr) -> int
-extern ae3d_image_free(handle: ptr)
-extern ae3d_image_register(name: string, rgba: ptr, width: int, height: int) -> int
 extern sqrt(x: float) -> float
 
 const COMPONENT_BYTE = 5120
@@ -496,13 +491,13 @@ image_path(r: *Reader, texture_index: int) -> string {
     if b.bytes == null { return string.copy("") }
     offset = int_field(view, "byteOffset", 0)
     length = int_field(view, "byteLength", 0)
-    decoded = ae3d_image_from_memory(blob.slice(b.bytes, offset as long), length)
+    decoded = picture.from_memory(blob.slice(b.bytes, offset as long), length)
     if decoded == null {
         warn(r, string.concat("an image that would not decode: ", name))
         return string.copy("")
     }
-    ok = ae3d_image_register(name, ae3d_image_pixels(decoded), ae3d_image_width(decoded), ae3d_image_height(decoded)) == 1
-    ae3d_image_free(decoded)
+    ok = picture.register_rgba(name, picture.pixels(decoded), picture.width(decoded), picture.height(decoded)) == 1
+    picture.dispose(decoded)
     if !ok {
         warn(r, string.concat("an image that would not register: ", name))
         return string.copy("")

@@ -108,10 +108,10 @@ says what it is for and why it is shaped as it is.
 |---|---|
 | Foundation | `core` (linear algebra, scene types, camera, the backend vtable), `platform` (the window, input and timing, over GLFW called directly), `engine` (the loop, behaviours, the window), `behaviour` (game objects and components), `input` (actions and axes), `jobs` (the pool) |
 | Rendering | `vulkan`, `gl`, `glapi` (the GL entry points), `capture` (a GL frame read back), `vkmeter` (the frame's light), `vkreadback` (a frame read back, offscreen or captured), `vktexture` (textures made and uploaded), `vkhost` (their buffers and memory; the four on contrib.vulkan.vk), `shaders` (the GLSL), `vkscene` (generated), `rendering` (shading presets), `offscreen` (a frame to a buffer), `sky` (the sun by the hour), `cloudnoise` (the clouds' textures), `water` (a Gerstner sea), `weather` (rain, snow, dust, storm) |
-| Geometry and assets | `geometry` (the mesh and instance stores the renderers read), `posing` (bone palettes, pose banks), `loader` (OBJ, primitives), `gltf`, `figure` (an animated glTF figure as one game object, and its scene record), `assets` (the Blender export), `blob` (a file as bytes), `png` (a frame as a file), `noise`, `voxel`, `terrain`, `raycast`, `skin`, `anim`, `ik` |
+| Geometry and assets | `geometry` (the mesh and instance stores the renderers read), `posing` (bone palettes, pose banks), `loader` (OBJ, primitives), `gltf`, `figure` (an animated glTF figure as one game object, and its scene record), `assets` (the Blender export), `blob` (a file as bytes), `picture` (an image file as RGBA: PNG, JPEG, TGA, BMP, and images registered by name), `jpeg` (its JPEG decoder), `inflate` (its PNG's deflate), `png` (a frame as a file), `noise`, `voxel`, `terrain`, `raycast`, `skin`, `anim`, `ik`, `glyphs` (a TrueType font, and its glyphs as a distance-field atlas; [ui.md](ui.md)) |
 | Simulation | `physics` (aephysics in the loop: bodies, ragdolls, vehicles, the character controller), `motion` (the active ragdoll: muscles, balance, the protective fall, getting up), `handover` (a horde's struck zombies handed to a pool of active ragdolls and taken back), `crowd` (pose banks, the device crowd), `horde` (the crowd's kernels), `nav` (the flow field), `ecs` (dense columns for crowds too large to be objects) |
 | Multiplayer | `net` (transports, snapshots as deltas, relevance, prediction and reconciliation, events, objects created mid-game), `nethorde` (the horde simulated on every peer, not sent) |
-| Tooling | `agent` (the channel's requests), `channel` (its socket and thread), `probe` (the channel, asking side), `script` (a script as a shared library), `scene` (scene files), `history` (undo) |
+| Tooling | `agent` (the channel's requests), `channel` (its socket and thread), `probe` (the channel, asking side), `replay` (a recorded session asked again), `script` (a script as a shared library), `scene` (scene files), `history` (undo) |
 
 ## What is still C, and why
 
@@ -122,7 +122,6 @@ role, and each folder is there for one reason, stated in
 | Folder | Why |
 |---|---|
 | `gpu/` | the Vulkan renderer, moving to Aether a part at a time (#402), and the OpenGL resolver and contexts, which are the platform's; the OpenGL renderer itself is Aether (#398). The stores they draw from are already Aether's (`ae3d.geometry`), read in place through `gpu/stores.h`, whose layout `tests/test_geometry` holds to the Aether structs. Aether's 32-bit float ([aether#2134](https://github.com/aether-lang-dev/aether/issues/2134)) is what made that possible. |
-| `image/` | a third-party decoder (stb_image); a decoder of our own is a project of its own |
 | `platform/` | the crash handler (a signal handler may call only what is async-signal-safe, and it is installed when the library loads), and the Objective-C surface MoltenVK draws into on macOS |
 | `dlss/` | the Streamline SDK's interface is C++ |
 
@@ -133,8 +132,12 @@ machine: the crowd's kernels (`ae3d.horde`: half a million separated in
 against 8.3), the weather's particles, the clouds' noise (the weather map
 byte for byte the same, the shape within one count in 22 texels of a
 million), the PNG writer, the file reader, the script loader, the
-channel's asking side (a request and its answer 359 ms against 356) and
-the window, input and timing layer, which calls GLFW itself.
+channel's asking side (a request and its answer 359 ms against 356), the
+window, input and timing layer, which calls GLFW itself, and the image
+decoders (`ae3d.picture`, `ae3d.jpeg`, `ae3d.inflate`: every image in the
+repository and 87 fixtures the same bytes stb_image gave; a 2048 x 2048
+PNG in 62 ms against 63, a 2048 x 2048 JPEG in 34 ms against stb's SSE2
+path's 20, as fast as its scalar one's 37).
 
 `native/ae3d.h` is the C API the Aether modules bind through `extern`;
 `native/internal.h` is what the C files share with each other. Every C
@@ -150,8 +153,8 @@ file compiles under `-Wall -Wextra -Werror` on all three platforms, and
   engine, as the submodule `deps/aephysics`; its scheduler is the engine's
   pool.
 - GLFW for the window, the Vulkan loader at run time, zlib through
-  `std.zlib`, stb_image vendored in `native/image/`; Streamline when DLSS
-  is built in. The editor adds [aether-ui](https://github.com/aether-lang-dev/aether-ui).
+  `std.zlib` (for writing PNGs; reading them is `ae3d.inflate`);
+  Streamline when DLSS is built in. The editor adds [aether-ui](https://github.com/aether-lang-dev/aether-ui).
 
 ## Where a design decision lives
 

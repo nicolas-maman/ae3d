@@ -24,6 +24,7 @@ import ae3d.platform
 import ae3d.cloudnoise
 import ae3d.posing
 import ae3d.geometry
+import ae3d.picture
 
 exports (
     mesh_push_skybox_cube, skybox_solid, skybox_texture, SKY_PROCEDURAL, mesh_normal,
@@ -205,9 +206,6 @@ struct Material {
     normal_path: string
 }
 
-extern ae3d_image_load(path: string) -> ptr
-extern ae3d_image_free(img: ptr)
-
 struct MaterialGroup {
     material: *Material
     index_start: int
@@ -218,7 +216,7 @@ struct MaterialGroup {
 //
 // A scene's textures were decoded one after another, on the thread that
 // opens the scene, each the moment its first model reached the renderer:
-// the street's thirty in 175 ms of stb_image on one core, most of what
+// the street's thirty in 175 ms of decoding on one core, most of what
 // placing its models cost. Decoding a file needs nothing from any other,
 // so a scene's are decoded together across the worker pool (std.worker)
 // once its models are read, and a renderer takes the decoded pixels here
@@ -226,7 +224,7 @@ struct MaterialGroup {
 // uploaded where the renderer's context is, as before.
 struct PreloadedImage {
     path: string
-    image: ptr                     // ae3d_image, or null when it did not decode
+    image: ptr                     // an ae3d.picture, or null when it did not decode
 }
 
 var g_preloaded: ptr = null        // list of *PreloadedImage
@@ -244,7 +242,7 @@ preload_images(paths: ptr) {
     while i < n {
         path = strarr.get(paths, i)
         at = i
-        launched = worker.run(|| { return ae3d_image_load(path) }, |image: ptr| { slots[at] = image })
+        launched = worker.run(|| { return picture.load(path) }, |image: ptr| { slots[at] = image })
         // No thread to run it on: the renderer decodes this one itself.
         if !launched { slots[at] = null }
         i = i + 1
@@ -289,7 +287,7 @@ release_preloaded_images() {
     i = 0
     while i < list.size(g_preloaded) {
         entry = list.get_raw(g_preloaded, i) as *PreloadedImage
-        if entry.image != null { ae3d_image_free(entry.image) }
+        if entry.image != null { picture.dispose(entry.image) }
         heap.free(entry)
         i = i + 1
     }

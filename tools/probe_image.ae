@@ -12,14 +12,9 @@
 // printed top first to read like the picture.
 import ae3d.core
 import ae3d.png
+import ae3d.picture
 import std.os
 
-extern ae3d_image_load(path: string) -> ptr
-extern ae3d_image_free(img: ptr)
-extern ae3d_image_width(img: ptr) -> int
-extern ae3d_image_height(img: ptr) -> int
-extern ae3d_image_pixels(img: ptr) -> ptr
-extern ae3d_image_error() -> string
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 
@@ -120,23 +115,23 @@ main() {
         println("usage: probe_image frame.png [next.png]")
         return
     }
-    img = ae3d_image_load(os.args_get(1))
-    if img == null { println("probe_image: ${ae3d_image_error()}"); return }
-    width = ae3d_image_width(img)
-    height = ae3d_image_height(img)
+    img = picture.load(os.args_get(1))
+    if img == null { println("probe_image: ${picture.error()}"); return }
+    width = picture.width(img)
+    height = picture.height(img)
     println("${os.args_get(1)}: ${width}x${height}")
-    band_report(ae3d_image_pixels(img), width, height)
+    band_report(picture.pixels(img), width, height)
     if os.args_count() > 2 {
-        next = ae3d_image_load(os.args_get(2))
-        if next == null { println("probe_image: ${ae3d_image_error()}"); ae3d_image_free(img); return }
-        if ae3d_image_width(next) == width && ae3d_image_height(next) == height {
+        next = picture.load(os.args_get(2))
+        if next == null { println("probe_image: ${picture.error()}"); picture.dispose(img); return }
+        if picture.width(next) == width && picture.height(next) == height {
             diff_path = ""
             if os.args_count() > 3 { diff_path = os.args_get(3) }
-            motion_report(ae3d_image_pixels(img), ae3d_image_pixels(next), width, height, diff_path)
+            motion_report(picture.pixels(img), picture.pixels(next), width, height, diff_path)
         } else {
             println("motion: frames differ in size")
         }
-        ae3d_image_free(next)
+        picture.dispose(next)
     }
-    ae3d_image_free(img)
+    picture.dispose(img)
 }

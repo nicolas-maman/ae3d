@@ -24,23 +24,6 @@ void  *ae3d_gl_proc(const char *name);
 int    ae3d_vk_update_instances(int handle, void *instances);
 
 
-void  *ae3d_image_load(const char *path);
-int    ae3d_image_register(const char *name, const void *rgba, int width, int height);
-void   ae3d_image_unregister(const char *name);
-void  *ae3d_image_from_memory(const void *data, int len);
-void  *ae3d_image_solid(int width, int height, int r, int g, int b, int a);
-void   ae3d_image_free(void *img);
-int    ae3d_image_width(void *img);
-int    ae3d_image_height(void *img);
-int    ae3d_image_fit(void *img, int limit);
-const char *ae3d_image_error(void);
-
-
-
-
-
-
-
 /* GPU time per pass, read three frames late so the read never waits. */
 
 

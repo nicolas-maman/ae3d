@@ -9,15 +9,10 @@
 // cropping each and laying them out with tools/montage.
 import ae3d.core
 import ae3d.png
+import ae3d.picture
 import std.os
 import std.string
 
-extern ae3d_image_load(path: string) -> ptr
-extern ae3d_image_free(img: ptr)
-extern ae3d_image_width(img: ptr) -> int
-extern ae3d_image_height(img: ptr) -> int
-extern ae3d_image_pixels(img: ptr) -> ptr
-extern ae3d_image_error() -> string
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 
@@ -31,10 +26,10 @@ main() {
         println("usage: crop out.png frame.png x y width height")
         return
     }
-    img = ae3d_image_load(os.args_get(2))
-    if img == null { println("crop: ${ae3d_image_error()}"); return }
-    w = ae3d_image_width(img)
-    h = ae3d_image_height(img)
+    img = picture.load(os.args_get(2))
+    if img == null { println("crop: ${picture.error()}"); return }
+    w = picture.width(img)
+    h = picture.height(img)
     x0 = string.get_int(os.args_get(3))
     y0 = string.get_int(os.args_get(4))
     cw = string.get_int(os.args_get(5))
@@ -45,12 +40,12 @@ main() {
     if y0 + ch > h { ch = h - y0 }
     if cw <= 0 || ch <= 0 {
         println("crop: nothing of ${w}x${h} inside that region")
-        ae3d_image_free(img)
+        picture.dispose(img)
         return
     }
     pixels = calloc(cw * ch * 4, 1)
-    if pixels == null { ae3d_image_free(img); return }
-    src = ae3d_image_pixels(img)
+    if pixels == null { picture.dispose(img); return }
+    src = picture.pixels(img)
     y = 0
     while y < ch {
         x = 0
@@ -66,7 +61,7 @@ main() {
         }
         y = y + 1
     }
-    ae3d_image_free(img)
+    picture.dispose(img)
     if png.write(os.args_get(1), pixels, cw, ch) {
         println("crop: wrote ${os.args_get(1)} (${cw}x${ch} at ${x0},${y0} of ${w}x${h})")
     } else {
