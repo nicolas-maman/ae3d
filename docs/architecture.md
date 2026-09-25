@@ -111,7 +111,7 @@ says what it is for and why it is shaped as it is.
 | Geometry and assets | `geometry` (the mesh and instance stores the renderers read), `posing` (bone palettes, pose banks), `loader` (OBJ, primitives), `gltf`, `figure` (an animated glTF figure as one game object, and its scene record), `assets` (the Blender export), `blob` (a file as bytes), `png` (a frame as a file), `noise`, `voxel`, `terrain`, `raycast`, `skin`, `anim`, `ik` |
 | Simulation | `physics` (aephysics in the loop: bodies, ragdolls, vehicles, the character controller), `motion` (the active ragdoll: muscles, balance, the protective fall, getting up), `crowd` (pose banks, the device crowd), `horde` (the crowd's kernels), `nav` (the flow field), `ecs` (dense columns for crowds too large to be objects) |
 | Multiplayer | `net` (transports, snapshots as deltas, relevance, prediction and reconciliation, events, objects created mid-game), `nethorde` (the horde simulated on every peer, not sent) |
-| Tooling | `agent` (the channel's requests), `channel` (its socket and thread), `probe` (the channel, asking side), `script` (a script as a shared library), `scene` (scene files), `history` (undo) |
+| Tooling | `agent` (the channel's requests), `channel` (its socket and thread), `probe` (the channel, asking side), `replay` (a recorded session asked again), `script` (a script as a shared library), `scene` (scene files), `history` (undo) |
 
 ## What is still C, and why
 

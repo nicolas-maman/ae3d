@@ -1,0 +1,339 @@
+// A recorded agent session, read back and asked again (#416).
+//
+// A program run with AE3D_AGENT_RECORD writes its whole agent session to a
+// file (ae3d.channel): every request as it was taken and every answer as it
+// went, a line each. This reads one back, pairs each request with its answer
+// by id -- an answer read from a later frame (a pixel, a snapshot) comes out
+// after requests that arrived behind it, so order alone does not pair them --
+// and asks a running program the same questions through ae3d.probe,
+// comparing what it answers now with what it answered then.
+//
+// Two answers are the same when they have the same shape and the same
+// values: strings, flags and nulls exactly, numbers within the tolerance
+// (relative, with the tolerance itself as the floor near zero), arrays of the
+// same length, objects with the same keys. Keys that change from run to run
+// whatever the scene -- the id, and the clocks: milliseconds, frames a
+// second -- are left out, and a caller can leave out more. Each difference
+// is noted with where in the answer it is ("result.models[2].position[1]:
+// 1.5 then, 1.75 now"), so a replay says what moved and not only that
+// something did.
+//
+//   s = replay.read("build/scratch/session.log")
+//   p = probe.open(port)
+//   r = replay.replay(s, p)
+//   println("${r.same} of ${r.asked} the same")
+//   replay.report_free(r)
+//   replay.session_free(s)
+
+import std.heap
+import std.json
+import std.list
+import std.strarr
+import std.string
+import std.fs
+import ae3d.probe
+
+exports (
+    Session, Report,
+    read, session_free, count, request_at, answer_at, op_at,
+    set_tolerance, ignore, compare, replay, replay_one, report_new, report_free, note_count, note_at,
+    last_error, TOLERANCE, MOST_NOTES
+)
+
+extern fabs(x: float) -> float
+
+// Numbers within a part in a million of each other are the same number: a
+// value computed twice on one machine is equal, and one read back through
+// text is within a rounding of the last printed digit.
+const TOLERANCE = 0.000001
+// A replay that has gone wrong can differ at every number of every answer;
+// the first MOST_NOTES differences say what went wrong, and the counts say
+// how much.
+const MOST_NOTES = 64
+
+struct Exchange {
+    id: int
+    op: string
+    request: string                    // the request line, as it was sent
+    answer: string                     // the answer line, or "" if none came
+}
+
+struct Session {
+    exchanges: ptr                     // list of *Exchange, in the order they were asked
+    tolerance: float
+    ignored: ptr                       // strarr of the keys left out of comparisons
+}
+
+struct Report {
+    asked: int                         // requests sent again
+    same: int                          // answered as they were
+    differing: int                     // answered otherwise
+    unanswered: int                    // not answered now, or never answered then
+    differences: int                   // every difference found, over all answers
+    notes: ptr                         // strarr: the first MOST_NOTES differences
+}
+
+var g_error = ""
+
+last_error() -> string { return g_error }
+
+// A session from its file: every request paired with its answer. Null, and
+// the reason in last_error, when the file cannot be read.
+read(path: string) -> *Session {
+    g_error = ""
+    content, err = fs.read(path)
+    if err != "" {
+        g_error = err
+        return null
+    }
+    s = heap.new(Session)
+    s.exchanges = list.new()
+    s.tolerance = TOLERANCE
+    s.ignored = strarr.new()
+    ignore(s, "id")
+    ignore(s, "ms")
+    ignore(s, "fps")
+    ignore(s, "frame_ms")
+    ignore(s, "elapsed_ms")
+    total = string.length(content)
+    start = 0
+    while start < total {
+        end = string.index_of_from(content, "\n", start)
+        if end < 0 { end = total }
+        if end > start {
+            line = string.substring(content, start, end)
+            take_line(s, line)
+            string.free(line)
+        }
+        start = end + 1
+    }
+    return s
+}
+
+// One line of the record: "in <ms> <json>" or "out <ms> <json>".
+take_line(s: *Session, line: string) {
+    first = string.index_of(line, " ")
+    if first < 0 { return }
+    second = string.index_of_from(line, " ", first + 1)
+    if second < 0 { return }
+    way = string.substring(line, 0, first)
+    body = string.substring(line, second + 1, string.length(line))
+    doc = json.parse_raw(body)
+    if doc != null {
+        id = 0
+        id_node = json.object_get_raw(doc, "id")
+        if id_node != null { id = json.get_int(id_node) }
+        if string.equals(way, "in") == 1 {
+            x = heap.new(Exchange)
+            x.id = id
+            x.op = ""
+            op_node = json.object_get_raw(doc, "op")
+            if op_node != null { x.op = string.copy(json.get_string_raw(op_node)) }
+            x.request = string.copy(body)
+            x.answer = ""
+            list.add_raw(s.exchanges, x as ptr)
+        } else if string.equals(way, "out") == 1 {
+            answered(s, id, body)
+        }
+        json.free(doc)
+    }
+    string.free(way)
+    string.free(body)
+}
+
+// An answer to the earliest request with its id that has none yet.
+answered(s: *Session, id: int, body: string) {
+    i = 0
+    n = list.size(s.exchanges)
+    while i < n {
+        x = list.get_raw(s.exchanges, i) as *Exchange
+        if x.id == id && string.length(x.answer) == 0 {
+            x.answer = string.copy(body)
+            return
+        }
+        i = i + 1
+    }
+}
+
+session_free(s: *Session) {
+    if s == null { return }
+    i = 0
+    while i < list.size(s.exchanges) {
+        x = list.get_raw(s.exchanges, i) as *Exchange
+        heap.free(x)
+        i = i + 1
+    }
+    list.free(s.exchanges)
+    strarr.free(s.ignored)
+    heap.free(s)
+}
+
+count(s: *Session) -> int { return list.size(s.exchanges) }
+
+exchange(s: *Session, index: int) -> *Exchange {
+    return list.get_raw(s.exchanges, index) as *Exchange
+}
+
+request_at(s: *Session, index: int) -> string { return exchange(s, index).request }
+
+answer_at(s: *Session, index: int) -> string { return exchange(s, index).answer }
+
+op_at(s: *Session, index: int) -> string { return exchange(s, index).op }
+
+set_tolerance(s: *Session, tolerance: float) {
+    if tolerance >= 0.0 { s.tolerance = tolerance }
+}
+
+// A key left out of every comparison, wherever it is in an answer.
+ignore(s: *Session, key: string) { strarr.push_copy(s.ignored, key) }
+
+ignored(s: *Session, key: string) -> bool {
+    i = 0
+    while i < strarr.size(s.ignored) {
+        if string.equals(strarr.get(s.ignored, i), key) == 1 { return true }
+        i = i + 1
+    }
+    return false
+}
+
+report_new() -> *Report {
+    r = heap.new(Report)
+    r.notes = strarr.new()
+    return r
+}
+
+report_free(r: *Report) {
+    if r == null { return }
+    strarr.free(r.notes)
+    heap.free(r)
+}
+
+note_count(r: *Report) -> int { return strarr.size(r.notes) }
+
+note_at(r: *Report, index: int) -> string { return strarr.get(r.notes, index) }
+
+note(r: *Report, text: string) {
+    r.differences = r.differences + 1
+    if strarr.size(r.notes) < MOST_NOTES { strarr.push_copy(r.notes, text) }
+}
+
+// The differences between an answer then and one now, noted in `r` under
+// `path`; how many there were.
+compare(s: *Session, then: ptr, now: ptr, path: string, r: *Report) -> int {
+    before = r.differences
+    walk(s, then, now, path, r)
+    return r.differences - before
+}
+
+walk(s: *Session, then: ptr, now: ptr, path: string, r: *Report) {
+    if then == null && now == null { return }
+    if then == null || now == null {
+        note(r, "${path}: present only ${presence(then)}")
+        return
+    }
+    kind = json.type(then)
+    if kind != json.type(now) {
+        note(r, "${path}: ${shown(then)} then, ${shown(now)} now")
+        return
+    }
+    if kind == 2 {
+        a = json.get_number(then)
+        b = json.get_number(now)
+        scale = fabs(a)
+        if fabs(b) > scale { scale = fabs(b) }
+        if scale < 1.0 { scale = 1.0 }
+        if fabs(a - b) > s.tolerance * scale { note(r, "${path}: ${a} then, ${b} now") }
+        return
+    }
+    if kind == 1 || kind == 3 {
+        if string.equals(shown(then), shown(now)) != 1 { note(r, "${path}: ${shown(then)} then, ${shown(now)} now") }
+        return
+    }
+    if kind == 4 {
+        n = json.array_size(then)
+        m = json.array_size(now)
+        if n != m {
+            note(r, "${path}: ${n} items then, ${m} now")
+            return
+        }
+        i = 0
+        while i < n {
+            walk(s, json.array_get_raw(then, i), json.array_get_raw(now, i), "${path}[${i}]", r)
+            i = i + 1
+        }
+        return
+    }
+    if kind == 5 {
+        i = 0
+        while i < json.object_size_raw(then) {
+            key = json.object_key_at(then, i)
+            if !ignored(s, key) {
+                walk(s, json.object_value_at(then, i), json.object_get_raw(now, key), "${path}.${key}", r)
+            }
+            i = i + 1
+        }
+        i = 0
+        while i < json.object_size_raw(now) {
+            key = json.object_key_at(now, i)
+            if !ignored(s, key) && json.object_get_raw(then, key) == null {
+                note(r, "${path}.${key}: present only now")
+            }
+            i = i + 1
+        }
+    }
+}
+
+presence(then: ptr) -> string {
+    if then == null { return "now" }
+    return "then"
+}
+
+// A value as it reads: a string quoted, the rest as JSON.
+shown(v: ptr) -> string {
+    if v == null { return "nothing" }
+    return json.stringify_raw(v)
+}
+
+// One request asked again, its answer compared with the recorded one into
+// `r`: whether it was the same.
+replay_one(s: *Session, p: *Probe, index: int, r: *Report) -> bool {
+    x = exchange(s, index)
+    r.asked = r.asked + 1
+    request = json.parse_raw(x.request)
+    if request == null {
+        r.unanswered = r.unanswered + 1
+        note(r, "#${index} ${x.op}: the recorded request is not JSON")
+        return false
+    }
+    now = probe.ask(p, request)
+    json.free(request)
+    if now == null || string.length(x.answer) == 0 {
+        r.unanswered = r.unanswered + 1
+        if now == null { note(r, "#${index} ${x.op}: no answer now (${probe.last_error()})") }
+        else { note(r, "#${index} ${x.op}: never answered then") }
+        if now != null { json.free(now) }
+        return false
+    }
+    then = json.parse_raw(x.answer)
+    found = compare(s, then, now, "#${index} ${x.op}", r)
+    if then != null { json.free(then) }
+    json.free(now)
+    if found == 0 {
+        r.same = r.same + 1
+        return true
+    }
+    r.differing = r.differing + 1
+    return false
+}
+
+// Every request of the session asked again, in order, of the program at
+// the other end of `p`.
+replay(s: *Session, p: *Probe) -> *Report {
+    r = report_new()
+    i = 0
+    while i < count(s) {
+        replay_one(s, p, i, r)
+        i = i + 1
+    }
+    return r
+}

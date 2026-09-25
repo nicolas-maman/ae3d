@@ -27,6 +27,15 @@
 //
 // Loopback only. The channel is a debugging surface with no authentication
 // of any kind; ae3d.probe, the asking side, connects to 127.0.0.1 too.
+//
+// AE3D_AGENT_RECORD names a file the whole session is written to as it
+// happens: every request as it is taken and every answer as it goes, a
+// line each -- "in", or "out", the milliseconds since the channel opened,
+// and the line itself -- flushed as it is written, so a session a program
+// died in is on disk up to its last word. ae3d.replay reads it back and
+// asks a running program the same questions (tools/agent_replay.ae), so a
+// change that alters what the pipeline sees is found by replaying a
+// session that went right.
 
 import std.bytes
 import std.fs
@@ -46,6 +55,10 @@ extern realloc(p: ptr, size: long) -> ptr
 extern calloc(count: int, size: int) -> ptr
 extern free(p: ptr)
 extern memcpy(dst: ptr, src: ptr, n: long) -> ptr
+extern fopen(path: string, mode: string) -> ptr
+extern fputs(text: string, f: ptr) -> int
+extern fflush(f: ptr) -> int
+extern fclose(f: ptr) -> int
 
 const CHUNK = 4096
 const MOST = 4194304               // a request longer than this is a protocol fault, and the client goes
@@ -69,6 +82,8 @@ var g_server: ptr = null           // the listening socket, while the channel is
 var g_client: ptr = null           // the attached client; set by the thread before `attached`
 var g_port = 0
 var g_error = ""
+var g_record: ptr = null           // the session's file (AE3D_AGENT_RECORD), or null
+var g_opened_ns: long = 0          // when the channel opened, for the record's times
 
 // The thread's own: bytes received past the last complete line.
 var g_pending: ptr = null
@@ -126,6 +141,12 @@ start() -> bool {
         return false
     }
     println("ae3d: agent channel on 127.0.0.1:${g_port}")
+    g_opened_ns = os.now_monotonic_ns()
+    record_path = os.getenv("AE3D_AGENT_RECORD")
+    if record_path != null && record_path != "" {
+        g_record = fopen(record_path, "w")
+        if g_record == null { println("ae3d: cannot write the session to ${record_path}") }
+    }
     port_file = os.getenv("AE3D_AGENT_PORT_FILE")
     if port_file != null && port_file != "" { fs.write(port_file, "${g_port}\n") }
     return true
@@ -144,13 +165,26 @@ next_request() -> string {
     line = bytes.string_from_ptr(block + 8, length)
     free(block)
     native.atomic_store((&s.head) as ptr, head + 1)
+    record("in", line)
     return line
+}
+
+// A line of the session, when one is being recorded: which way it went,
+// when, and what it said.
+record(way: string, line: string) {
+    if g_record == null { return }
+    elapsed = (os.now_monotonic_ns() - g_opened_ns) / 1000000
+    fputs("${way} ${elapsed} ", g_record)
+    fputs(line, g_record)
+    fputs("\n", g_record)
+    fflush(g_record)
 }
 
 // One answer, and its terminator in the same write: a terminator sent on
 // its own would wait on the acknowledgement of the line before it.
 respond(line: string) {
     if g_server == null { return }
+    record("out", line)
     s = shared()
     native.atomic_store((&s.writing) as ptr, 1)
     if native.atomic_load((&s.attached) as ptr) == 0 {
@@ -181,6 +215,8 @@ stop() {
     tcp.tcp_server_close(g_server)
     g_server = null
     g_port = 0
+    if g_record != null { fclose(g_record) }
+    g_record = null
     release()
 }
 

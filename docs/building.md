@@ -139,6 +139,7 @@ to read them.
 | `AE3D_PERF=1` | print the frame's cost by stage at exit ([performance.md](performance.md)) |
 | `AE3D_JOBS=n` | the job pool's thread count, the machine's by default |
 | `AE3D_AGENT=port` | open the control channel on loopback; `auto` for a port the system picks, written to `AE3D_AGENT_PORT_FILE` ([agent.md](agent.md)) |
+| `AE3D_AGENT_RECORD=path` | write the channel's whole session to `path`, every request and answer, for `tools/agent_replay.ae` ([agent.md](agent.md#recording-a-session-and-replaying-it)) |
 | `AE3D_MSAA=n`, `AE3D_TAA=1`, `AE3D_SSAO=1`, `AE3D_SSR=1` | the anti-aliasing and screen-space passes |
 | `AE3D_RAYS=1` | shadows by ray through the scene's acceleration structure, where the device has ray queries |
 | `AE3D_SUN_SIZE=n` | the sun's size for the rays' penumbra, in tenths of a degree (5 is the sun; 0, the default, a point) |
