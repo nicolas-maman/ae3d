@@ -9,7 +9,7 @@ built.
 | Slice | What | State |
 |---|---|---|
 | 1. Glyphs | A TrueType reader and a signed-distance-field atlas baked from it | `ae3d.glyphs`, this page |
-| 2. The overlay pass | Text and rectangles in the window's pixels, one draw after post, on both renderers | `ae3d.overlay`, this page |
+| 2. The overlay pass | Text and rectangles in the window's pixels, one draw after post, on both renderers | `ae3d.hud`, this page |
 | 3. Layout | Anchors, DPI-scaled offsets, alignment, wrapping, clipping panels | not built |
 | 4. Input | Focus and click through `ae3d.input`, a menu stack | not built |
 
@@ -148,21 +148,21 @@ there, and a line between their values cuts across the bend. Of the
 ## The overlay
 
 ```aether
-import ae3d.overlay
+import ae3d.hud
 
 // in a script's update, every frame
-hud = engine.engine_overlay(e)
-overlay.rect(hud, 20.0, 660.0, 280.0 * health, 22.0, overlay.rgba(0.2, 0.8, 0.15, 0.95))
-overlay.text(hud, 20.0, 16.0, 26.0, "${fps} fps", overlay.rgba(1.0, 1.0, 1.0, 1.0))
-overlay.text_outlined(hud, 312.0, 654.0, 26.0, "${points}", white, black, 1.5)
-width, height = overlay.measure(hud, "Press E to open", 22.0)   // to centre it
+hud = engine.engine_hud(e)
+hud.rect(hud, 20.0, 660.0, 280.0 * health, 22.0, hud.rgba(0.2, 0.8, 0.15, 0.95))
+hud.text(hud, 20.0, 16.0, 26.0, "${fps} fps", hud.rgba(1.0, 1.0, 1.0, 1.0))
+hud.text_outlined(hud, 312.0, 654.0, 26.0, "${points}", white, black, 1.5)
+width, height = hud.measure(hud, "Press E to open", 22.0)   // to centre it
 ```
 
 The overlay is immediate: each frame a program says what is on the
 screen this frame -- the bar at its length now, the count as it is now --
 and the overlay draws that over the finished picture and forgets it.
 Nothing is created for a label or kept for a bar, so nothing has to be
-updated or taken away. `examples/hud.ae` is a frame counter, a health bar,
+updated or taken away. `examples/game_hud.ae` is a frame counter, a health bar,
 a crosshair and a centred prompt over a scene, as one script's update.
 
 | Call | Draws |
@@ -177,7 +177,7 @@ a crosshair and a centred prompt over a scene, as one script's update.
 
 Coordinates are the window's framebuffer pixels, y down from its
 top-left, the way a screen is addressed. Colours are display values -- the
-sRGB a colour picker gives -- with alpha, `overlay.rgba(r, g, b, a)`. What
+sRGB a colour picker gives -- with alpha, `hud.rgba(r, g, b, a)`. What
 is asked for later is drawn over what was asked for earlier.
 
 ### A frame
@@ -216,7 +216,7 @@ field sampled, and blended across one screen pixel of it at the outline
 ### Its font
 
 The default font is PT Sans, baked the first time text is asked for, at
-64 px to the em with a spread of 6 px (`overlay.FONT_SPREAD`): the spread
+64 px to the em with a spread of 6 px (`hud.FONT_SPREAD`): the spread
 is what an outline can grow into, 1.9 px at 24 px text and 3.8 at 48,
 where the glyphs' own default of 2.5 stops under a pixel at 24. That atlas
 is 1024 x 1024, 1 MB, baked in 13-15 ms and read back from the bake cache
@@ -243,4 +243,4 @@ Windows machine of [performance.md](performance.md):
 | Draws | one, whatever is asked for |
 
 Under the Khronos validation layer with synchronisation validation,
-`examples/hud.ae` on Vulkan (windowed, captured) reports no error.
+`examples/game_hud.ae` on Vulkan (windowed, captured) reports no error.

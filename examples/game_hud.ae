@@ -1,9 +1,9 @@
 // A HUD over a scene: the frame rate in a corner, a health bar that drains
 // and fills, a crosshair and a prompt, drawn by the engine's overlay
-// (ae3d.overlay, docs/ui.md) over the finished frame on either renderer.
+// (ae3d.hud, docs/ui.md) over the finished frame on either renderer.
 //
-//   ./build.sh examples/hud.ae && ./build/hud
-//   AE3D_API=opengl ./build/hud
+//   ./build.sh examples/game_hud.ae && ./build/game_hud
+//   AE3D_API=opengl ./build/game_hud
 //
 // The HUD is a script on a game object like any other: every frame its
 // update says what is on the screen now -- the numbers as they are this
@@ -15,7 +15,7 @@ import ae3d.platform
 import ae3d.engine
 import ae3d.behaviour
 import ae3d.loader
-import ae3d.overlay
+import ae3d.hud
 import std.string
 
 // Spinner: turns whatever it is on about the up axis, degrees a second.
@@ -28,7 +28,7 @@ spin(state: ptr, go: *GameObject, delta: float) {
 
 // The HUD's own state: the health it shows, which way it is going, and
 // how long the frame took, smoothed so the number can be read.
-struct Hud {
+struct HudState {
     health: float
     draining: bool
     frame_ms: float
@@ -49,35 +49,35 @@ tenths(value: float) -> string {
 }
 
 hud_update(state: ptr, go: *GameObject, delta: float) {
-    hud = state as *Hud
+    play = state as *HudState
     e = engine.of(go)
-    ui = engine.engine_overlay(e)
+    ui = engine.engine_hud(e)
     width = platform.window_fb_width(engine.engine_window(e)) as float
     height = platform.window_fb_height(engine.engine_window(e)) as float
 
     // The simulation of a fight: health drains to a fifth, then comes back.
-    if hud.draining {
-        hud.health = hud.health - 0.12 * delta
-        if hud.health <= 0.2 { hud.draining = false }
+    if play.draining {
+        play.health = play.health - 0.12 * delta
+        if play.health <= 0.2 { play.draining = false }
     } else {
-        hud.health = hud.health + 0.25 * delta
-        if hud.health >= 1.0 {
-            hud.health = 1.0
-            hud.draining = true
+        play.health = play.health + 0.25 * delta
+        if play.health >= 1.0 {
+            play.health = 1.0
+            play.draining = true
         }
     }
-    if delta > 0.0 { hud.frame_ms = hud.frame_ms * 0.9 + delta * 100.0 }
+    if delta > 0.0 { play.frame_ms = play.frame_ms * 0.9 + delta * 100.0 }
 
-    white = overlay.rgba(1.0, 1.0, 1.0, 1.0)
-    shadow = overlay.rgba(0.0, 0.0, 0.0, 0.7)
+    white = hud.rgba(1.0, 1.0, 1.0, 1.0)
+    shadow = hud.rgba(0.0, 0.0, 0.0, 0.7)
 
     // Top left: the frame rate, over a copy of itself a pixel down and right
     // so it reads over the sky and over the ground alike.
     fps = (engine.engine_fps(e) + 0.5) as int
-    overlay.text_shadowed(ui, 20.0, 16.0, 26.0, "${fps} fps", white, shadow, 2.0)
-    ms = tenths(hud.frame_ms)
-    overlay.text_shadowed(ui, 20.0, 46.0, 16.0, "${ms} ms a frame, ${engine.engine_backend_name(e)}",
-                          overlay.rgba(0.8, 0.85, 0.9, 1.0), shadow, 1.0)
+    hud.text_shadowed(ui, 20.0, 16.0, 26.0, "${fps} fps", white, shadow, 2.0)
+    ms = tenths(play.frame_ms)
+    hud.text_shadowed(ui, 20.0, 46.0, 16.0, "${ms} ms a frame, ${engine.engine_backend_name(e)}",
+                          hud.rgba(0.8, 0.85, 0.9, 1.0), shadow, 1.0)
     string.free(ms)
 
     // Bottom left: the health bar -- a dark well, the fill from green to
@@ -86,30 +86,30 @@ hud_update(state: ptr, go: *GameObject, delta: float) {
     bar_y = height - 52.0
     bar_w = 280.0
     bar_h = 22.0
-    overlay.rect(ui, bar_x, bar_y, bar_w, bar_h, overlay.rgba(0.05, 0.05, 0.07, 0.65))
-    fill = overlay.rgba(0.9 - 0.75 * hud.health, 0.2 + 0.6 * hud.health, 0.15, 0.95)
-    overlay.rect(ui, bar_x + 3.0, bar_y + 3.0, (bar_w - 6.0) * hud.health, bar_h - 6.0, fill)
-    overlay.rect_outline(ui, bar_x, bar_y, bar_w, bar_h, 1.0, overlay.rgba(1.0, 1.0, 1.0, 0.8))
-    points = (hud.health * 100.0 + 0.5) as int
-    overlay.text_outlined(ui, bar_x + bar_w + 12.0, bar_y - 6.0, 26.0, "${points}", white,
-                          overlay.rgba(0.0, 0.0, 0.0, 0.9), 1.5)
+    hud.rect(ui, bar_x, bar_y, bar_w, bar_h, hud.rgba(0.05, 0.05, 0.07, 0.65))
+    fill = hud.rgba(0.9 - 0.75 * play.health, 0.2 + 0.6 * play.health, 0.15, 0.95)
+    hud.rect(ui, bar_x + 3.0, bar_y + 3.0, (bar_w - 6.0) * play.health, bar_h - 6.0, fill)
+    hud.rect_outline(ui, bar_x, bar_y, bar_w, bar_h, 1.0, hud.rgba(1.0, 1.0, 1.0, 0.8))
+    points = (play.health * 100.0 + 0.5) as int
+    hud.text_outlined(ui, bar_x + bar_w + 12.0, bar_y - 6.0, 26.0, "${points}", white,
+                          hud.rgba(0.0, 0.0, 0.0, 0.9), 1.5)
 
     // The crosshair: four short strokes around the middle of the screen.
     cx = width / 2.0
     cy = height / 2.0
-    hair = overlay.rgba(1.0, 1.0, 1.0, 0.85)
-    overlay.rect(ui, cx - 12.0, cy - 1.0, 8.0, 2.0, hair)
-    overlay.rect(ui, cx + 4.0, cy - 1.0, 8.0, 2.0, hair)
-    overlay.rect(ui, cx - 1.0, cy - 12.0, 2.0, 8.0, hair)
-    overlay.rect(ui, cx - 1.0, cy + 4.0, 2.0, 8.0, hair)
+    hair = hud.rgba(1.0, 1.0, 1.0, 0.85)
+    hud.rect(ui, cx - 12.0, cy - 1.0, 8.0, 2.0, hair)
+    hud.rect(ui, cx + 4.0, cy - 1.0, 8.0, 2.0, hair)
+    hud.rect(ui, cx - 1.0, cy - 12.0, 2.0, 8.0, hair)
+    hud.rect(ui, cx - 1.0, cy + 4.0, 2.0, 8.0, hair)
 
     // A prompt centred under the middle, on a panel sized to it.
     prompt = "Press E to open"
-    prompt_w, prompt_h = overlay.measure(ui, prompt, 22.0)
+    prompt_w, prompt_h = hud.measure(ui, prompt, 22.0)
     px = cx - prompt_w / 2.0
     py = height * 0.68
-    overlay.rect(ui, px - 14.0, py - 6.0, prompt_w + 28.0, prompt_h + 12.0, overlay.rgba(0.0, 0.0, 0.0, 0.45))
-    overlay.text(ui, px, py, 22.0, prompt, overlay.rgba(1.0, 0.92, 0.6, 1.0))
+    hud.rect(ui, px - 14.0, py - 6.0, prompt_w + 28.0, prompt_h + 12.0, hud.rgba(0.0, 0.0, 0.0, 0.45))
+    hud.text(ui, px, py, 22.0, prompt, hud.rgba(1.0, 0.92, 0.6, 1.0))
 }
 
 main() {
@@ -139,9 +139,9 @@ main() {
         i = i + 1
     }
 
-    hud = Hud { health: 1.0, draining: true, frame_ms: 16.0 }
+    play = HudState { health: 1.0, draining: true, frame_ms: 16.0 }
     manager = engine.object(e, "HUD", null)
-    engine.script(manager, "Hud", &hud, hud_start, hud_update)
+    engine.script(manager, "HUD", &play, hud_start, hud_update)
 
     engine.engine_run(e)
 

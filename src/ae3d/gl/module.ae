@@ -23,7 +23,7 @@ import ae3d.posing
 import ae3d.geometry
 import ae3d.glapi
 import ae3d.offscreen
-import ae3d.overlay
+import ae3d.hud
 import ae3d.glyphs
 
 exports (
@@ -1707,7 +1707,7 @@ struct GLRenderer {
     screen_vao: int
     screen_vbo: int
     screen_mesh: ptr
-    // The overlay drawn over each frame (an ae3d.overlay, null for none),
+    // The overlay drawn over each frame (an ae3d.hud, null for none),
     // and what drawing it takes, made the first frame it has something:
     // the program and its two uniforms, a vertex array over one buffer
     // refilled each frame, the atlas as a one-channel texture and which of
@@ -3108,9 +3108,9 @@ renderer_set_target(r: *GLRenderer, target: ptr) {
     r.target = target
 }
 
-// --- the overlay (ae3d.overlay, #449) ---------------------------------------------------------
+// --- the overlay (ae3d.hud, #449) ---------------------------------------------------------
 
-// What is drawn over every frame from now on: an ae3d.overlay, or null.
+// What is drawn over every frame from now on: an ae3d.hud, or null.
 renderer_set_overlay(r: *GLRenderer, o: ptr) {
     r.overlay = o
 }
@@ -3134,11 +3134,11 @@ overlay_ready(r: *GLRenderer) -> bool {
     r.overlay_vbo = gl_buffer_create()
     gl_vao_bind(r.overlay_vao)
     glapi.glBindBuffer(glapi.ARRAY_BUFFER as uint32, r.overlay_vbo as uint32)
-    // Pixel, atlas place, colour, threshold: overlay.VERTEX_FLOATS floats.
-    attrib(0, 2, overlay.VERTEX_BYTES, 0)
-    attrib(1, 2, overlay.VERTEX_BYTES, 8)
-    attrib(2, 4, overlay.VERTEX_BYTES, 16)
-    attrib(3, 1, overlay.VERTEX_BYTES, 32)
+    // Pixel, atlas place, colour, threshold: hud.VERTEX_FLOATS floats.
+    attrib(0, 2, hud.VERTEX_BYTES, 0)
+    attrib(1, 2, hud.VERTEX_BYTES, 8)
+    attrib(2, 4, hud.VERTEX_BYTES, 16)
+    attrib(3, 1, hud.VERTEX_BYTES, 32)
     gl_vao_bind(0)
     return true
 }
@@ -3147,10 +3147,10 @@ overlay_ready(r: *GLRenderer) -> bool {
 // and clamped. Uploaded again only when the overlay has a new one; an
 // overlay of rectangles alone has none, and the default texture stands in
 // for the sampler it never reads from.
-overlay_texture_for(r: *GLRenderer, o: *Overlay) -> int {
-    a = overlay.atlas(o)
+overlay_texture_for(r: *GLRenderer, o: *Hud) -> int {
+    a = hud.atlas(o)
     if a == null { return r.default_texture }
-    serial = overlay.atlas_serial(o)
+    serial = hud.atlas_serial(o)
     if r.overlay_texture != 0 && r.overlay_serial == serial { return r.overlay_texture }
     gl_texture_delete(r.overlay_texture)
     texture = new_texture(glapi.TEXTURE_2D)
@@ -3168,8 +3168,8 @@ overlay_texture_for(r: *GLRenderer, o: *Overlay) -> int {
 // alpha is kept (one, over a frame) rather than scaled by what is drawn
 // over it, so a read of the frame sees the picture opaque.
 draw_overlay(r: *GLRenderer) {
-    o = r.overlay as *Overlay
-    count = overlay.vertex_count(o)
+    o = r.overlay as *Hud
+    count = hud.vertex_count(o)
     if count == 0 || !overlay_ready(r) { return }
     if r.viewport_width <= 0 || r.viewport_height <= 0 { return }
     texture = overlay_texture_for(r, o)
@@ -3189,7 +3189,7 @@ draw_overlay(r: *GLRenderer) {
     glapi.glUniform4f(r.overlay_style, 0.0 as f32, 0.0 as f32, 0.0 as f32, 0.0 as f32)
     gl_texture_bind(0, texture)
     gl_vao_bind(r.overlay_vao)
-    buffer_data(glapi.ARRAY_BUFFER, r.overlay_vbo, count * overlay.VERTEX_BYTES, overlay.vertex_data(o), glapi.STREAM_DRAW)
+    buffer_data(glapi.ARRAY_BUFFER, r.overlay_vbo, count * hud.VERTEX_BYTES, hud.vertex_data(o), glapi.STREAM_DRAW)
     gl_draw_arrays(0, count)
     gl_vao_bind(0)
     r.last_draw_calls = r.last_draw_calls + 1

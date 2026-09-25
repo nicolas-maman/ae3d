@@ -25,11 +25,12 @@ import ae3d.gl
 import ae3d.vulkan
 import ae3d.offscreen
 import ae3d.capture
-import ae3d.overlay
+import ae3d.hud
 import ae3d.png
 
 extern calloc(count: int, size: int) -> ptr
 extern free(p: ptr)
+extern fflush(stream: ptr) -> int
 
 // The size ci.sh gives every window (AE3D_WIDTH, AE3D_HEIGHT), so the
 // engine's frame is this size there as well as here.
@@ -74,6 +75,14 @@ check(name: string, condition: bool) {
         println("  FAIL ${name}")
         g_failures = g_failures + 1
     }
+    // Flushed as it goes: a run that dies says how far it got.
+    fflush(null)
+}
+
+// Where the run is, flushed, for the same reason.
+phase(name: string) {
+    println("  -- ${name}")
+    fflush(null)
 }
 
 channel(pixels: ptr, x: int, y: int, c: int) -> int {
@@ -128,19 +137,19 @@ absolute(v: int) -> int {
 }
 
 // What every frame here asks for.
-draw(o: *Overlay) {
-    white = overlay.rgba(1.0, 1.0, 1.0, 1.0)
-    overlay.rect(o, RECT_X as float, RECT_Y as float, RECT_W as float, RECT_H as float, white)
-    overlay.rect(o, TINT_X as float, TINT_Y as float, TINT_W as float, TINT_H as float, overlay.rgba(1.0, 0.0, 0.0, 0.5))
-    overlay.text(o, TEXT_X as float, TEXT_Y as float, TEXT_SIZE, "HELLO", white)
-    overlay.text(o, PLAIN_X as float, SMALL_Y as float, SMALL_SIZE, "HUD", white)
-    overlay.text_outlined(o, OUTLINED_X as float, SMALL_Y as float, SMALL_SIZE, "HUD", white,
-                          overlay.rgba(0.9, 0.2, 0.1, 1.0), 2.0)
+draw(o: *Hud) {
+    white = hud.rgba(1.0, 1.0, 1.0, 1.0)
+    hud.rect(o, RECT_X as float, RECT_Y as float, RECT_W as float, RECT_H as float, white)
+    hud.rect(o, TINT_X as float, TINT_Y as float, TINT_W as float, TINT_H as float, hud.rgba(1.0, 0.0, 0.0, 0.5))
+    hud.text(o, TEXT_X as float, TEXT_Y as float, TEXT_SIZE, "HELLO", white)
+    hud.text(o, PLAIN_X as float, SMALL_Y as float, SMALL_SIZE, "HUD", white)
+    hud.text_outlined(o, OUTLINED_X as float, SMALL_Y as float, SMALL_SIZE, "HUD", white,
+                          hud.rgba(0.9, 0.2, 0.1, 1.0), 2.0)
 }
 
 // A frame drawn with the overlay (`drawn`) and the next without (`bare`),
 // both top row first.
-check_frames(name: string, o: *Overlay, drawn: ptr, bare: ptr) {
+check_frames(name: string, o: *Hud, drawn: ptr, bare: ptr) {
     // The frame's own colour, from a corner nothing is drawn over.
     ground = luma(drawn, WIDTH - 4, HEIGHT - 4)
     ground_red = channel(drawn, WIDTH - 4, HEIGHT - 4, 0)
@@ -162,7 +171,7 @@ check_frames(name: string, o: *Overlay, drawn: ptr, bare: ptr) {
     println("  ${name}: frame luma ${ground}, half-red over it ${tint_red} (${expected} expected), green ${tint_green}")
     check("${name}: half-transparent red is half the frame, half red", absolute(tint_red - expected) <= 3)
 
-    width, height = overlay.measure(o, "HELLO", TEXT_SIZE)
+    width, height = hud.measure(o, "HELLO", TEXT_SIZE)
     w = (width + 0.5) as int
     h = (height + 0.5) as int
     inked = ink(drawn, TEXT_X, TEXT_Y, w, h, ground)
@@ -173,7 +182,7 @@ check_frames(name: string, o: *Overlay, drawn: ptr, bare: ptr) {
     check("${name}: the text is inked inside its box", share > 0.12 && share < 0.6)
     check("${name}: and nowhere beside or below it", beside == 0 && below == 0)
 
-    small_w, small_h = overlay.measure(o, "HUD", SMALL_SIZE)
+    small_w, small_h = hud.measure(o, "HUD", SMALL_SIZE)
     sw = (small_w + 0.5) as int
     sh = (small_h + 0.5) as int
     plain = ink(drawn, PLAIN_X - 3, SMALL_Y - 3, sw + 6, sh + 6, ground)
@@ -227,23 +236,23 @@ copy_frame(pixels: ptr) -> ptr {
 // drawn and one with it cleared.
 run_backend(backend: *Backend, name: string) {
     core.backend_set_clear_color(backend, 0.08, 0.1, 0.14)
-    o = overlay.overlay_new()
+    o = hud.hud_new()
     core.backend_set_overlay(backend, o as ptr)
     cam = core.camera_new(WIDTH, HEIGHT)
     light = core.light_sun(core.vec3(0.2, 1.0, 0.4))
 
     draw(o)
-    vertices = overlay.vertex_count(o)
-    quads = overlay.quad_count(o)
+    vertices = hud.vertex_count(o)
+    quads = hud.quad_count(o)
     core.backend_render(backend, cam, light)
     drawn = copy_frame(frame_of(backend))
-    overlay.clear(o)
+    hud.clear(o)
     core.backend_render(backend, cam, light)
     bare = copy_frame(frame_of(backend))
     if drawn == null || bare == null {
         println("overlay: SKIP ${name} gave no pixels")
     } else {
-        a = overlay.atlas(o)
+        a = hud.atlas(o)
         println("  ${name}: ${quads} quads, ${vertices} vertices, one draw; the atlas ${a.width} x ${a.height}")
         check_frames(name, o, drawn, bare)
         // AE3D_OVERLAY_PNG=1 writes the frames, to be looked at.
@@ -262,7 +271,7 @@ run_backend(backend: *Backend, name: string) {
         draw(o)
         core.backend_render(backend, cam, light)
         again = frame_of(backend)
-        overlay.clear(o)
+        hud.clear(o)
         whiter = 0
         if again != null { whiter = darkest(again, RECT_X, RECT_Y, RECT_W, RECT_H) }
         check("${name}: drawn again after the frame's targets are remade (darkest ${whiter})", whiter >= 250)
@@ -270,7 +279,7 @@ run_backend(backend: *Backend, name: string) {
     if drawn != null { free(drawn) }
     if bare != null { free(bare) }
     core.backend_set_overlay(backend, null)
-    overlay.overlay_free(o)
+    hud.hud_free(o)
     core.camera_free(cam)
     core.light_free(light)
 }
@@ -278,12 +287,12 @@ run_backend(backend: *Backend, name: string) {
 // What a busy HUD costs the CPU a frame: 60 labels and 20 bars, laid out
 // and written as vertices, then cleared, 200 times.
 measure_cost() {
-    o = overlay.overlay_new()
-    if !overlay.font_ready(o) {
-        overlay.overlay_free(o)
+    o = hud.hud_new()
+    if !hud.font_ready(o) {
+        hud.hud_free(o)
         return
     }
-    white = overlay.rgba(1.0, 1.0, 1.0, 1.0)
+    white = hud.rgba(1.0, 1.0, 1.0, 1.0)
     started = platform.time()
     frames = 200
     quads = 0
@@ -291,28 +300,28 @@ measure_cost() {
     while f < frames {
         i = 0
         while i < 60 {
-            overlay.text(o, 10.0, (i * 12) as float, 16.0, "Health 100/100", white)
+            hud.text(o, 10.0, (i * 12) as float, 16.0, "Health 100/100", white)
             i = i + 1
         }
         i = 0
         while i < 20 {
-            overlay.rect(o, 200.0, (i * 30) as float, 120.0, 12.0, white)
+            hud.rect(o, 200.0, (i * 30) as float, 120.0, 12.0, white)
             i = i + 1
         }
-        quads = overlay.quad_count(o)
-        overlay.clear(o)
+        quads = hud.quad_count(o)
+        hud.clear(o)
         f = f + 1
     }
     ms = (platform.time() - started) * 1000.0 / (frames as float)
     println("  a HUD of 60 labels and 20 bars: ${quads} quads, ${ms} ms a frame to lay out")
     check("the overlay's frame costs the CPU under a millisecond", ms < 1.0)
-    overlay.overlay_free(o)
+    hud.hud_free(o)
 }
 
 // The engine's run: its overlay asked for on frame 3 and read after the
 // draw; on frame 5 asked for nothing and read again.
 on_update(state: ptr, e: *Engine, delta: float) {
-    if engine.engine_frame_count(e) == 3 { draw(engine.engine_overlay(e)) }
+    if engine.engine_frame_count(e) == 3 { draw(engine.engine_hud(e)) }
 }
 
 on_read(state: ptr, e: *Engine, delta: float) {
@@ -346,6 +355,7 @@ on_read(state: ptr, e: *Engine, delta: float) {
 
 main() {
     // OpenGL, offscreen, through its backend.
+    phase("OpenGL, offscreen")
     context = offscreen.context_create(WIDTH, HEIGHT)
     if context == null {
         println("overlay: SKIP no OpenGL context")
@@ -370,6 +380,7 @@ main() {
     if !vulkan.available() {
         println("overlay: no Vulkan driver (${vulkan.last_error()}), checked OpenGL only")
     } else {
+        phase("Vulkan, offscreen")
         vk_renderer = vulkan.renderer_new()
         vk_pass = vulkan.backend(vk_renderer)
         if !core.backend_init(&vk_pass, null, WIDTH, HEIGHT) {
@@ -381,7 +392,9 @@ main() {
         vulkan.renderer_free(vk_renderer)
     }
 
+    phase("cost")
     measure_cost()
+    phase("the engine, on OpenGL")
 
     // The engine on OpenGL: its own overlay, cleared by its loop.
     e = engine.engine_new_with(platform.API_GL)
@@ -393,10 +406,10 @@ main() {
     engine.engine_set_clear_color(e, 0.08, 0.1, 0.14)
     light = core.light_sun(core.vec3(0.2, 1.0, 0.4))
     engine.engine_set_light(e, light)
-    hud = engine.behaviour_new("overlay test", null)
-    hud.update = on_update
-    hud.late_update = on_read
-    engine.engine_add_behaviour(e, hud)
+    program = engine.behaviour_new("overlay test", null)
+    program.update = on_update
+    program.late_update = on_read
+    engine.engine_add_behaviour(e, program)
     if !engine.engine_run(e) {
         println("overlay: SKIP no window")
     } else if g_frame_width != WIDTH || g_frame_height != HEIGHT {
@@ -404,7 +417,7 @@ main() {
     } else if g_with == null || g_without == null {
         println("overlay: SKIP no readable frames from the engine")
     } else {
-        check_frames("engine", engine.engine_overlay(e), g_with, g_without)
+        check_frames("engine", engine.engine_hud(e), g_with, g_without)
     }
     if g_opengl != null { free(g_opengl) }
     if g_with != null { free(g_with) }

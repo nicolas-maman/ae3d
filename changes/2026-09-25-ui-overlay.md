@@ -1,9 +1,9 @@
 ### The overlay: text and rectangles over the frame, on both renderers
 
-- `ae3d.overlay` (#449, slice 2): a HUD's text and rectangles in the
+- `ae3d.hud` (#449, slice 2): a HUD's text and rectangles in the
   window's pixels, y down, asked for every frame and forgotten after it --
   `rect`, `rect_outline`, `text`, `text_outlined`, `text_shadowed`,
-  `measure`, `set_font` -- as the engine's (`engine.engine_overlay(e)`),
+  `measure`, `set_font` -- as the engine's (`engine.engine_hud(e)`),
   cleared by the loop after each frame is drawn. Text is drawn from the
   glyphs' distance-field atlas, PT Sans by default, baked at a 6 px spread
   so an outline can grow a glyph by 1.9 px at 24 px text.
@@ -23,7 +23,7 @@
   137 x 62 box and none beside or below it, an outline grows HUD at 24 px
   from 295 inked pixels to 776, and the next frame, asked for nothing, has
   none of it; Vulkan's frame and OpenGL's differ in no channel. 800 quads
-  a frame cost 0.02 ms of CPU. `examples/hud.ae` is a frame counter, a
+  a frame cost 0.02 ms of CPU. `examples/game_hud.ae` is a frame counter, a
   health bar, a crosshair and a centred prompt over a scene; on Vulkan
   under the validation layer, synchronisation included, no error.
   [docs/ui.md](docs/ui.md).

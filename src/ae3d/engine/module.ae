@@ -20,7 +20,7 @@ import ae3d.input
 import ae3d.scene
 import ae3d.loader
 import ae3d.exposure
-import ae3d.overlay
+import ae3d.hud
 import std.os
 import std.fs
 
@@ -31,7 +31,7 @@ exports (
     Engine, Behaviour,
     behaviour_new, engine_add_behaviour, engine_remove_behaviour, engine_behaviour_count, engine_behaviour,
     engine_add_scene, engine_remove_scene,
-    object, script, destroy, running, of, engine_scene, engine_input, engine_overlay,
+    object, script, destroy, running, of, engine_scene, engine_input, engine_hud,
     engine_new, engine_new_with, engine_over, engine_update, engine_free, engine_run, engine_run_at, engine_start, engine_loop, engine_shutdown, engine_jobs,
     engine_stop,
     engine_add_model, engine_remove_model, engine_set_light, engine_light,
@@ -138,7 +138,7 @@ struct Engine {
     // and the models made before the backend was up, added at start.
     scene: ptr
     pending_models: ptr
-    // What is drawn over the frame (an ae3d.overlay): filled by the
+    // What is drawn over the frame (an ae3d.hud): filled by the
     // behaviours and scripts each frame, drawn by the backend after its post
     // chain, cleared after the draw. Null on an engine over somebody else's
     // renderer (engine_over), whose frames the engine does not end.
@@ -319,10 +319,10 @@ engine_scene(e: *Engine) -> *Scene { return e.scene as *Scene }
 engine_input(e: *Engine) -> *Input { return e.input as *Input }
 
 // What is drawn over this frame, in the window's pixels: the HUD and the
-// menus (ae3d.overlay). Ask it for text and rectangles in update; they are
+// menus (ae3d.hud). Ask it for text and rectangles in update; they are
 // drawn over the frame and gone by the next. Null on an engine over
 // another's renderer, and every overlay call takes null as nothing to do.
-engine_overlay(e: *Engine) -> *Overlay { return e.overlay as *Overlay }
+engine_hud(e: *Engine) -> *Hud { return e.overlay as *Hud }
 
 // The camera's controls as actions, the way every example has flown: WASD
 // and the sticks, space and control for up and down, shift to sprint, the
@@ -577,7 +577,7 @@ engine_new_with(api: int) -> *Engine {
         e.gl_renderer = opengl_state as ptr
         bind_backend(e, gl.backend(opengl_state))
     }
-    e.overlay = overlay.overlay_new() as ptr
+    e.overlay = hud.hud_new() as ptr
     e.backend_set_overlay(e.backend_state, e.overlay)
     return e
 }
@@ -834,7 +834,7 @@ engine_free(e: *Engine) {
     // Out of the renderer before it goes: the Vulkan one's is the process's.
     if e.overlay != null {
         if e.backend_state != null { e.backend_set_overlay(e.backend_state, null) }
-        overlay.overlay_free(e.overlay as *Overlay)
+        hud.hud_free(e.overlay as *Hud)
         e.overlay = null
     }
     if e.animations != null {
@@ -2167,7 +2167,7 @@ engine_loop(e: *Engine) {
         render_started = platform.time()
         e.backend_render(e.backend_state, cam, e.light)
         // Drawn: what the next frame shows over it is what it asks for.
-        overlay.clear(e.overlay as *Overlay)
+        hud.clear(e.overlay as *Hud)
         e.render_seconds = e.render_seconds + (platform.time() - render_started)
         e.render_frames = e.render_frames + 1
         adapt_eye(e, delta)

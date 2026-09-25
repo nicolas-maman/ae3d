@@ -1,4 +1,4 @@
-// ae3d.vkoverlay -- the overlay (ae3d.overlay: text and rectangles in the
+// ae3d.vkoverlay -- the overlay (ae3d.hud: text and rectangles in the
 // window's pixels, #449) drawn into the Vulkan frame, from Aether on
 // contrib.vulkan.vk (#402).
 //
@@ -19,13 +19,13 @@
 //
 // The atlas goes up through a staging buffer copied in the same command
 // buffer, ahead of the pass; the staging buffer is freed when that frame's
-// fence has passed. A new atlas (overlay.set_font) waits for the device to
+// fence has passed. A new atlas (hud.set_font) waits for the device to
 // be idle before the old one goes, since frames in flight still sample it:
 // a font is changed once, not every frame.
 
 import contrib.vulkan.vk
 import ae3d.vkhost
-import ae3d.overlay
+import ae3d.hud
 import ae3d.glyphs
 
 exports (
@@ -58,7 +58,7 @@ const PUSH_BYTES = 32                // overlayScreen and overlayStyle, two vec4
 
 struct Painter {
     hooked: bool
-    overlay: ptr                     // *Overlay, what is drawn; null for nothing
+    overlay: ptr                     // *Hud, what is drawn; null for nothing
     device: ptr                      // the device what follows was made on; null for none
     format: int                      // the frame's format, and its layout, the pass was made for
     offscreen: int
@@ -95,7 +95,7 @@ painter() -> *Painter {
     return g_painter as *Painter
 }
 
-// What is drawn over every frame from now on (an ae3d.overlay), or null
+// What is drawn over every frame from now on (an ae3d.hud), or null
 // for nothing. The hooks go in the first time there is one.
 set_overlay(o: ptr) {
     p = painter()
@@ -270,7 +270,7 @@ make_layouts(p: *Painter, d: ptr) -> bool {
     return r == vk.SUCCESS
 }
 
-// One attribute of the vertex (overlay.VERTEX_FLOATS floats), into slot `i`.
+// One attribute of the vertex (hud.VERTEX_FLOATS floats), into slot `i`.
 attribute(attributes: ptr, i: int, format: int, offset: int) {
     a = (attributes + i * sizeof(VkVertexInputAttributeDescription)) as *VkVertexInputAttributeDescription
     a.location = i
@@ -305,7 +305,7 @@ make_pipeline(p: *Painter, d: ptr) -> bool {
 
     binding = calloc(1, sizeof(VkVertexInputBindingDescription)) as *VkVertexInputBindingDescription
     binding.binding = 0
-    binding.stride = overlay.VERTEX_BYTES
+    binding.stride = hud.VERTEX_BYTES
     binding.inputRate = vk.VERTEX_INPUT_RATE_VERTEX
     attributes = calloc(4, sizeof(VkVertexInputAttributeDescription))
     attribute(attributes, 0, vk.FORMAT_R32G32_SFLOAT, 0)
@@ -634,8 +634,8 @@ vertices_for(p: *Painter, slot: int, bytes: int) -> *HostBuffer {
 @c_callback("ae3d_vkoverlay_record")
 record_hook(context: ptr) {
     p = painter()
-    o = p.overlay as *Overlay
-    count = overlay.vertex_count(o)
+    o = p.overlay as *Hud
+    count = hud.vertex_count(o)
     if count == 0 { return }
     slot = ae3d_vk_frame_slot()
     view = ae3d_vk_frame_view()
@@ -644,18 +644,18 @@ record_hook(context: ptr) {
     if slot < 0 || slot >= MAX_FRAMES || view == null || w <= 0 || h <= 0 { return }
     if !ready(p) { return }
     commands = ae3d_vk_frame_commands()
-    serial = overlay.atlas_serial(o)
+    serial = hud.atlas_serial(o)
     if p.atlas_serial != serial {
-        if !upload_atlas(p, commands, slot, overlay.atlas(o), serial) {
+        if !upload_atlas(p, commands, slot, hud.atlas(o), serial) {
             drop_atlas(p, p.device)
             return
         }
     }
     fb = framebuffer_for(p, view, w, h)
-    bytes = count * overlay.VERTEX_BYTES
+    bytes = count * hud.VERTEX_BYTES
     vertices = vertices_for(p, slot, bytes)
     if fb == null || vertices == null { return }
-    memcpy(vertices.mapped, overlay.vertex_data(o), bytes as long)
+    memcpy(vertices.mapped, hud.vertex_data(o), bytes as long)
 
     begin = calloc(1, sizeof(VkRenderPassBeginInfo)) as *VkRenderPassBeginInfo
     begin.sType = vk.STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO

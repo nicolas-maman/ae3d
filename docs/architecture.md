@@ -53,7 +53,7 @@ behaviours on the engine, added and removed like any other.
    so an agent looking at a pose looks at a solved one.
 5. **The draw.** The backend renders the scene (below), and over it,
    after the post chain, the engine's overlay: the text and rectangles
-   the frame's scripts asked for (`ae3d.overlay`, [ui.md](ui.md)), which
+   the frame's scripts asked for (`ae3d.hud`, [ui.md](ui.md)), which
    are then cleared for the next frame.
 6. **`late_update`** after the draw, for anything that wants the picture:
    reading the frame back, recording, the agent channel's snapshot.
