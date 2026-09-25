@@ -138,6 +138,56 @@ A figure that was `POWERED` is `POWERED` again once up; any other ends `ANIMATED
 
 The blended figure takes 15 steps, a quarter second, and no drawn bone turns more than 1.3° in a step. The limits the test holds are 6° a step, 40 mm a step for the hips, 1° and 5 mm at the hand-over, 3 cm into the ground, 10° of lean afterwards and 30° of facing.
 
+## Handing over from the horde
+
+A horde can't be active ragdolls. Its thousands of zombies are instances posed from a pose bank: a position, a heading and a phase each, and no bodies. An active ragdoll costs 20 to 40 µs a fixed step. So `ae3d.handover` keeps a pool of a dozen figures and hands the few zombies that are struck to them, and takes them back when they recover.
+
+```aether
+import ae3d.handover
+
+pool = handover.pool_new(e, "zombie.glb", "Walk", 12)   // the horde's file and the clip its bank was baked from
+handover.set_horde(pool, pos, yaw, phase, count)       // the horde's columns
+handover.set_facing(pool, facing)                      // the turn the horde's draw adds to a heading
+handover.set_colors(pool, tint)                        // optional: each figure wears its zombie's tint
+
+// every frame, the horde's step passes by the zombies handed over
+crowd.crowd_step_out(pos, vel, yaw, phase, handover.outs(pool), 0, count, delta, ...)
+
+handover.strike(pool, zombie, point, impulse)          // POWERED, hit: falls, gets up, goes back
+handover.kill(pool, zombie, point, impulse)            // LIMP: lies, and is despawned
+```
+
+- **The pool.** Each figure is made from the horde's own file with `figure.figure`, and given an active ragdoll with `motion.on_figure`. Then it is parked: hidden, its clip stopped, and every body and anchor taken out of the physics world (`physics.ragdoll_park`). Twelve parked figures cost under 2 µs a frame.
+- **Handing over.** `strike` sets the zombie's `out` flag, which the horde's step (`crowd.crowd_step_out`, `horde.step_out`) passes by. It parks the instance a million metres off, past every cull and the far plane, so both the CPU sort and the device's drop it without a change to either. A free figure is stood where the instance was drawn, turned as it was turned, its clip at the time the phase is at. Its bodies are put where its rig is (`physics.ragdoll_to_rig`), rather than dragged there by their anchors. Then it is `POWERED` and hit at the bone nearest the point. `kill` sets it `LIMP` instead.
+- **Taking back.** Every fixed step the pool looks at its figures. One that is back on its feet stands `POWERED`, not falling, lying or getting up, leaning under 0.2 rad, with every muscle back from its blow. After `set_settle` seconds of that (0.5 by default), its animation is moved to where its bodies stand and it is set `ANIMATED`, which blends it into its clip over a quarter second. Blended, its zombie goes back to the horde where the figure stands, facing as it faces, at the phase its clip is at. The figure is then parked. `set_on_return` is told just before.
+- **The dead.** A killed figure lies `LIMP` and is never given back. It is parked after `set_despawn` seconds (10 by default; 0 leaves it lying). Its zombie stays out of the horde (`is_dead`).
+- **A full pool.** A strike takes the figure farthest from it that is not mid-fall: a killed one lying, or one standing over its blow. That figure is given back, or despawned, first. When every figure is falling, lying or getting up, the strike is refused (-1) and the zombie stays in the horde.
+
+**No pop.** The pose bank is the clip struck in place: the root's travel over the ground is taken out of every bone (`crowd.posebank_bake_in_place`). So a figure playing the clip at time t, turned as the instance is, with its hips over the instance's position plus their bind offset, is the instance's pose at phase t / duration. Read backwards, the same relation puts a figure's pose back into the horde. Before each hand-over, the figure's nodes are put back as the file has them. Dressing a ragdoll poses the rig as the ragdoll stands, and a figure that lay limp last time would otherwise be stood in the pose it lay in.
+
+`tests/test_handover.ae` holds it to numbers. The horde is 48 of the box man fixture, baked from its Idle. The pool is four of the same figure. No window is needed.
+
+| | Measured |
+|---|---|
+| handing over: every bone against the pose bank's pose on the instance | 0.007 mm |
+| handed over: the instance out of every tier of the sort, and not moved by the step | yes |
+| four struck at 400 N·s: the lowest pelvis | 0.15 m |
+| each gets up by itself and is back in the horde | all four, 7.3 s after the blow |
+| giving back: every bone against the instance's pose | 5.2 mm: the figure stands 5 mm lower than the horde's road, the rest 0.007 mm |
+| the zombie given back, from its figure's pelvis | 14 mm |
+| a fifth strike while all four fall | refused |
+| a killed one | down and kept for 2 s, despawned at 3 s, its zombie out of the horde |
+| four shoved at 40 N·s and standing: a fifth strike | reuses the farthest, given back first |
+| the whole run twice | the same to the bit |
+| a frame of 400 zombies: no pool, twelve parked, twelve handed over | 2.7 µs, 4.3 µs, 290 to 400 µs |
+| so a figure handed over, a frame | 24 to 33 µs: its motion, its physics, the pool |
+
+The limits it holds are 2 mm at the hand-over, 10 mm at the giving back, 12 s to come back, 0.3 ms a frame for twelve parked and 3 ms for twelve handed over.
+
+`examples/horde_strike.ae` is a field of 300 of any humanoid glTF (the box man by default), with a pool of twelve. A left click strikes the zombie under the cursor, and a right click kills it. With no one clicking, a timer strikes the zombie in the middle of the view every second and a half, and every third blow kills.
+
+The networked horde (`ae3d.nethorde`) keeps its own columns and hands nothing over yet.
+
 ## What it is held to
 
 `tests/test_motion.ae` runs eleven figures on one ground, each dressed in a humanoid rig:
@@ -165,4 +215,5 @@ As #414 lays out:
 - stagger and writhe;
 - get-up clips from the pipeline in place of the keyed ways up, once a figure has them;
 - the inspector's section, with a Hit button in the viewport;
+- handing over from the networked horde: the strike and the giving back as horde inputs, so every peer takes the same zombie out at the same tick;
 - drawing a powered figure's bodies each frame rather than each step, for an animation that plays on while its muscles track it.

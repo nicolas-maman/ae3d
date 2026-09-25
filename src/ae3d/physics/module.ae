@@ -64,6 +64,7 @@ exports (
     ragdoll_center_of_mass, ragdoll_mass, ragdoll_joint_error, ragdoll_tilt,
     POSE_STRIDE, ragdoll_body_pose, ragdoll_animation_pose, ragdoll_move_animation, ragdoll_show_pose,
     ragdoll_restore_animation, ragdoll_pose_lowest, ragdoll_pose_end, ragdoll_rig_bone_rotation, ragdoll_rest_forward,
+    ragdoll_park, ragdoll_unpark, ragdoll_is_parked, ragdoll_to_rig,
     CharacterController, character_controller, character_of, character_feet, character_move, character_grounded, character_velocity,
     character_ground_normal, character_free, character_set_slope_limit, character_set_step_height, character_overlap, character_overlap_world,
     spec_of, apply_spec, attachments
@@ -146,6 +147,9 @@ struct Ragdoll {
     // would jump. The rig's pose it goes from, and the seconds left.
     shown_from: ptr                // float[(BONE_COUNT + 1) * 7], the rig's locals
     shown_left: float
+    // Out of the world: every body and anchor disabled, and the step
+    // passes it by (ragdoll_park).
+    parked: bool
 }
 
 // A skinned figure worn by a ragdoll: a rig bone per ragdoll bone, each
@@ -250,7 +254,9 @@ on_fixed_update(state: ptr, e: *Engine, step: float) {
     k = 0
     while k < ragdoll_count {
         r = list.get_raw(p.ragdolls, k) as *Ragdoll
-        if r.powered && r.following {
+        if r.parked {
+            // out of the world: nothing to drive
+        } else if r.powered && r.following {
             if r.rig != null { refresh_targets(r) }
             drive_joints(r, step)
         } else if r.following {
@@ -284,9 +290,11 @@ on_fixed_update(state: ptr, e: *Engine, step: float) {
     i = 0
     while i < count {
         r = list.get_raw(p.ragdolls, i) as *Ragdoll
-        pull_ragdoll(r)
-        if r.rig != null && r.following == false { show_bodies(r, step) }
-        if r.rig != null && r.powered && r.following { show_bodies(r, step) }
+        if !r.parked {
+            pull_ragdoll(r)
+            if r.rig != null && r.following == false { show_bodies(r, step) }
+            if r.rig != null && r.powered && r.following { show_bodies(r, step) }
+        }
         i = i + 1
     }
 }
@@ -314,7 +322,13 @@ push_transform(rb: *Rigidbody, step: float) {
 physics_free(p: *Physics) {
     if p == null { return }
     e = p.engine as *Engine
-    if p.behaviour != null { engine.engine_remove_behaviour(e, p.behaviour as *Behaviour) }
+    if p.behaviour != null {
+        // Out of the loop and freed: the engine frees only the behaviours it
+        // still has.
+        engine.engine_remove_behaviour(e, p.behaviour as *Behaviour)
+        heap.free(p.behaviour as *Behaviour)
+        p.behaviour = null
+    }
     engine.engine_remove_attachment_provider(e, p as ptr)
     count = list.size(p.rigidbodies)
     i = 0
@@ -331,6 +345,18 @@ physics_free(p: *Physics) {
         r = list.get_raw(p.ragdolls, i) as *Ragdoll
         human.destroy_human(&r.human)
         list.free(r.bones)
+        // What ragdoll_free lets go of too: a dressed ragdoll's poses and
+        // the rig it wore (the skeleton itself is the figure's).
+        if r.aims != null { free(r.aims) }
+        if r.anim != null { free(r.anim) }
+        if r.written != null { free(r.written) }
+        if r.targets != null { free(r.targets) }
+        if r.shown_from != null { free(r.shown_from) }
+        if r.rig != null {
+            rig = r.rig as *Rig
+            free(rig.bones)
+            heap.free(rig)
+        }
         heap.free(r)
         i = i + 1
     }
@@ -1691,6 +1717,69 @@ ragdoll_turn(r: *Ragdoll, yaw: float) {
         t = dynamics.body_get_transform(bone.body_id)
         p = core.v3_add(pivot, core.quat_apply(turn, core.v3_sub(t.p, pivot)))
         dynamics.body_set_transform(bone.body_id, p, core.quat_normalize(core.quat_mul(turn, t.q)))
+        i = i + 1
+    }
+    pull_ragdoll(r)
+}
+
+// The ragdoll out of the world: every bone's body and every anchor
+// disabled, so it has no contacts, costs the solver nothing and is
+// passed by the step, where it is, until `ragdoll_unpark`. What a pool
+// of figures kept for later does with the ones not in use (ae3d.handover):
+// a dozen ragdolls stood waiting would be a dozen stepped for nothing.
+ragdoll_park(r: *Ragdoll) {
+    if r == null || r.parked { return }
+    i = 0
+    while i < human.BONE_COUNT {
+        bone = human.bone_at(&r.human, i)
+        if dynamics.body_is_valid(bone.anchor_id) { dynamics.body_disable(bone.anchor_id) }
+        dynamics.body_disable(bone.body_id)
+        i = i + 1
+    }
+    r.parked = true
+}
+
+// Back in the world, where it was parked: every body enabled, the
+// joints between them linked again once both ends are.
+ragdoll_unpark(r: *Ragdoll) {
+    if r == null || !r.parked { return }
+    i = 0
+    while i < human.BONE_COUNT {
+        bone = human.bone_at(&r.human, i)
+        dynamics.body_enable(bone.body_id)
+        if dynamics.body_is_valid(bone.anchor_id) { dynamics.body_enable(bone.anchor_id) }
+        i = i + 1
+    }
+    r.parked = false
+}
+
+ragdoll_is_parked(r: *Ragdoll) -> bool { return r.parked }
+
+// Every body, and its anchor, put where the rig it wears puts it now,
+// still: a figure moved by hand -- taken from a pool and stood where a
+// crowd's figure was drawn -- rather than dragged there by its anchors
+// over a step, which from metres away is a blow that throws it. The
+// transforms are the ones the anchors are driven to (drive_anchors).
+ragdoll_to_rig(r: *Ragdoll) {
+    if r == null || r.rig == null { return }
+    rig = r.rig as *Rig
+    bones = rig.bones as RigBone[]
+    still = core.vec3(0.0, 0.0, 0.0)
+    i = 0
+    while i < human.BONE_COUNT {
+        bone = bones[i].model as *Model
+        core.model_sync_transform(bone)
+        q = core.quat_normalize(core.quat_mul(bone.world_rotation, core.quat_conjugate(bones[i].offset)))
+        at = core.v3_sub(bone.world_position, core.quat_apply(q, bones[i].offset_p))
+        body = human.bone_at(&r.human, i)
+        dynamics.body_set_transform(body.body_id, at, q)
+        dynamics.body_set_linear_velocity(body.body_id, still)
+        dynamics.body_set_angular_velocity(body.body_id, still)
+        if dynamics.body_is_valid(body.anchor_id) {
+            dynamics.body_set_transform(body.anchor_id, at, q)
+            dynamics.body_set_linear_velocity(body.anchor_id, still)
+            dynamics.body_set_angular_velocity(body.anchor_id, still)
+        }
         i = i + 1
     }
     pull_ragdoll(r)

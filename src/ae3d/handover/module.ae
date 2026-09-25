@@ -1,0 +1,741 @@
+// ae3d.handover -- a horde's struck zombies handed to active ragdolls, and
+// taken back (#414).
+//
+// A horde is thousands of instances posed from a pose bank: a position, a
+// heading and a phase a zombie, and no bodies. Natural motion (ae3d.motion)
+// is an active ragdoll a figure, twenty to forty microseconds a fixed step
+// each: a dozen, not a horde. So the few zombies that are struck are handed
+// over, and handed back when they recover:
+//
+//   - a pool of `size` figures from the horde's own file, each an active
+//     ragdoll (motion.on_figure), built once and parked: hidden, the clip
+//     stopped, every body out of the physics world (physics.ragdoll_park),
+//     so a figure waiting costs nothing;
+//   - `strike` takes a zombie out of the horde (its `out` flag, which the
+//     horde's step passes by: crowd.crowd_step_out) and parks its instance
+//     past any cull; a free figure is stood where the instance was drawn,
+//     facing as it faced, its clip at the time the instance's phase is
+//     at, and its bodies put where its rig is (physics.ragdoll_to_rig);
+//     then it is POWERED and struck (motion.hit) at the bone nearest the
+//     point. `kill` does the same with the figure LIMP;
+//   - every fixed step the pool looks at its figures. One back on its feet,
+//     upright and at full strength for `settle` seconds, has its
+//     animation moved to where its bodies stand and is set ANIMATED, which
+//     blends it into the clip; blended, it goes back to the horde where its
+//     figure stands, facing as it faces, at the phase its clip is at, and
+//     the figure is parked. A killed one lies, and is parked after
+//     `despawn` seconds (0 leaves it lying); its zombie stays out.
+//
+// No pop either way. The pose bank is the clip struck in place: the root's
+// travel over the ground taken out of every bone (crowd.posebank_bake_in_
+// place). So a figure playing the clip at time t, whose group stands so
+// that its hips are over the instance's position plus its bind offset,
+// turned as the instance is, is the instance's pose at phase t / duration;
+// and the same relation read backwards puts a figure's pose back into the
+// horde. tests/test_handover.ae holds both ends to millimetres.
+//
+// With every figure in use, a strike reuses the one farthest from it that
+// is not mid-fall (a killed one lying, or one standing): given back to the
+// horde, or despawned, first. When every one is falling, lying or getting
+// up, the strike is refused (-1) and the zombie stays in the horde.
+//
+// The pool is a behaviour on the engine (its fixed_update), so a program
+// strikes and the engine does the rest. It is freed after the engine
+// (`pool_free`), as the figures (figure.figures_free) and their active
+// ragdolls (motion.motions_free) are.
+//
+// Single-player: the networked horde (ae3d.nethorde) keeps its own columns
+// and hands nothing over yet.
+
+import std.list
+import std.heap
+import std.string
+import aephysics.human
+import ae3d.core
+import ae3d.behaviour
+import ae3d.engine
+import ae3d.figure
+import ae3d.gltf
+import ae3d.motion
+import ae3d.physics
+import ae3d.skin
+
+exports (
+    Handover, FREE, STRUCK, RETURNING, DEAD, PARK,
+    pool_new, pool_free, set_horde, set_facing, set_get_up, set_settle, set_despawn,
+    set_on_return, set_colors, outs, strike, kill, give_back, despawn, handed, is_dead,
+    size, active, slot_state, slot_zombie, slot_object, slot_motion,
+    returned, despawned, refused, reused, place_at, horde_pose_of
+)
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern atan2(y: float, x: float) -> float
+
+// A slot's state.
+const FREE = 0                         // parked, waiting
+const STRUCK = 1                       // handed over: POWERED, struck, maybe down and getting up
+const RETURNING = 2                    // back on its feet, blending into its clip before it goes back
+const DEAD = 3                         // killed: LIMP, lying until despawned
+
+// An instance handed over is parked this far along x and z: past any
+// cull, the camera's far plane and the sort's tiers, on the device and the
+// CPU alike, with no change to either.
+const PARK = 1000000.0
+
+// Back on its feet: POWERED, not falling, lying or getting up, leaning
+// under UPRIGHT from its pose, and no bone weaker than WEAK_LEFT, for the
+// pool's `settle` seconds.
+const UPRIGHT = 0.2
+const WEAK_LEFT = 0.05
+const PI = 3.141592653589793
+
+// One figure of the pool.
+struct HandoverSlot {
+    object: ptr                        // *GameObject, the figure's
+    fig: ptr                           // *Figure
+    body: ptr                          // *Motion
+    rest: ptr                          // the figure's nodes at rest (figure.keep_pose)
+    diffuse: ptr                       // float[3 a part]: each part's own colour, before a zombie's tint
+    state: int
+    zombie: int                        // the horde's figure it stands for; -1 when free
+    seconds: float                     // upright (STRUCK) or lying (DEAD) this long
+    ground_y: float                    // the zombie's height in the horde when it was struck
+}
+
+struct Handover {
+    engine: ptr                        // *Engine
+    clip: string                       // the clip the horde's bank was baked from
+    slots: ptr                         // list of *HandoverSlot
+    hips: int                          // the skeleton's bone the bake takes travel from
+    bind: Vec3                         // where that bone stood when the mesh was bound
+    duration: float                    // the clip's seconds: phase 1 is this far in
+    // The horde: its columns (doubles; xyz, a heading, a phase a zombie),
+    // the compact range [0, count), and the pool's own out column.
+    pos: ptr
+    yaw: ptr
+    phase: ptr
+    color: ptr                         // rgb a zombie, the tint the horde draws it in; or null
+    count: int
+    out: ptr                           // float[capacity]: 0 in the horde, 1 handed over, 2 dead
+    capacity: int
+    facing: float                      // radians added to a heading to draw the figure along it
+    get_up: float                      // seconds a struck figure lies before it gets up
+    settle: float                      // seconds on its feet before it goes back
+    despawn: float                     // seconds a killed one lies before it is parked; 0 never
+    on_return: fn(ptr, *Handover, int, int)
+    on_return_context: ptr
+    stepper: ptr                       // *Behaviour
+    returned: int
+    despawned: int
+    refused: int
+    reused: int
+    scratch: ptr                       // float[2 * BONE_COUNT * POSE_STRIDE]
+}
+
+// A pool of `count` figures from `path` (the glTF the horde draws), each an
+// active ragdoll that will play `clip` (the one the horde's bank was baked
+// from), parked. Null when the file cannot be read or its rig is no
+// humanoid the engine knows. The engine's physics is attached if it was
+// not; the program gives it a ground.
+pool_new(e: *Engine, path: string, clip: string, count: int) -> *Handover {
+    if count <= 0 { return null }
+    if physics.of(e) == null { physics.attach(e) }
+    h = heap.new(Handover)
+    h.engine = e as ptr
+    h.clip = string.copy(clip)
+    h.slots = list.new()
+    h.hips = 0 - 1
+    h.get_up = 1.0
+    h.settle = 0.5
+    h.despawn = 10.0
+    h.scratch = calloc(2 * human.BONE_COUNT * physics.POSE_STRIDE, 8)
+    i = 0
+    while i < count {
+        o = figure.figure(e, "Handover/${i}", path)
+        if o == null {
+            pool_discard(h)
+            return null
+        }
+        f = figure.figure_of(o)
+        // Its nodes as the file has them, before the ragdoll is dressed in
+        // it (dressing poses the rig as the ragdoll stands): what every
+        // hand-over puts back before its clip is set, so a figure that lay
+        // limp last time is not stood in the pose it lay in.
+        rest = figure.keep_pose(f)
+        // Made apart, below the world, and parked before any step: never
+        // touching each other or anything else.
+        behaviour.object_set_position(o, core.vec3((i as float) * 3.0, 0.0 - 1000.0, 0.0))
+        body = null as *Motion
+        if figure.play(f, clip, 1.0, true) { body = motion.on_figure(e, o) }
+        if body == null {
+            figure.pose_free(rest)
+            pool_discard(h)
+            return null
+        }
+        if h.hips < 0 {
+            sk = figure.skeleton(f)
+            h.hips = gltf.bake_root(f.file as *GltfScene)
+            h.bind = skin.skeleton_bind_position(sk, h.hips)
+            h.duration = figure.duration(f)
+        }
+        s = heap.new(HandoverSlot)
+        s.object = o as ptr
+        s.fig = f as ptr
+        s.body = body as ptr
+        s.rest = rest
+        s.diffuse = calloc(figure.primitive_count(f) * 3 + 1, 8)
+        tone = s.diffuse as float[]
+        k = 0
+        while k < figure.primitive_count(f) {
+            part = figure.primitive(f, k)
+            core.model_ensure_material(part)
+            tone[k * 3] = part.material.diffuse.x
+            tone[k * 3 + 1] = part.material.diffuse.y
+            tone[k * 3 + 2] = part.material.diffuse.z
+            k = k + 1
+        }
+        s.zombie = 0 - 1
+        list.add_raw(h.slots, s as ptr)
+        park(s)
+        i = i + 1
+    }
+    b = engine.behaviour_new("handover", h as ptr)
+    b.fixed_update = pool_fixed
+    engine.engine_add_behaviour(e, b)
+    h.stepper = b as ptr
+    return h
+}
+
+// A pool that could not be made: what it made so far is the engine's
+// (its figures and their ragdolls go with the engine); its own memory goes.
+pool_discard(h: *Handover) {
+    k = 0
+    while k < list.size(h.slots) {
+        s = list.get_raw(h.slots, k) as *HandoverSlot
+        figure.pose_free(s.rest)
+        free(s.diffuse)
+        heap.free(s)
+        k = k + 1
+    }
+    list.free(h.slots)
+    // The clip, a string field of a heap struct, goes with heap.free.
+    free(h.scratch)
+    if h.out != null { free(h.out) }
+    heap.free(h)
+}
+
+// The pool's own memory, after the engine is freed (which frees its step);
+// the figures and their ragdolls are freed with the engine's
+// (figure.figures_free, motion.motions_free).
+pool_free(h: *Handover) {
+    if h == null { return }
+    pool_discard(h)
+}
+
+// The horde the pool hands over from: its columns of doubles -- xyz, the
+// heading and the phase (0..1 through the clip) a zombie -- over the
+// compact range [0, count). The pool's out column grows to it; pass it to
+// the horde's step (`outs`). Call again when the horde grows.
+set_horde(h: *Handover, pos: ptr, yaw: ptr, phase: ptr, count: int) {
+    h.pos = pos
+    h.yaw = yaw
+    h.phase = phase
+    if count > h.capacity {
+        grown = calloc(count, 8)
+        if h.out != null {
+            source = h.out as float[]
+            target = grown as float[]
+            i = 0
+            while i < h.count {
+                target[i] = source[i]
+                i = i + 1
+            }
+            free(h.out)
+        }
+        h.out = grown
+        h.capacity = count
+    }
+    h.count = count
+}
+
+// The tint the horde draws each zombie in (rgb doubles a zombie, as the
+// instances' colours), so a figure handed over wears its zombie's: its
+// parts' own colours times it. Null (the default) leaves them their own.
+set_colors(h: *Handover, rgb: ptr) { h.color = rgb }
+
+// The out column (a float a zombie, nonzero for one not in the horde):
+// what crowd.crowd_step_out passes by.
+outs(h: *Handover) -> ptr { return h.out }
+
+// The turn from a zombie's heading to the way its figure is drawn: what
+// the horde's own draw adds (a glTF figure faces +z at rest, which is
+// pi / 2 from the heading's +x; the box man fixture faces -z, -pi / 2).
+set_facing(h: *Handover, radians: float) { h.facing = radians }
+
+// Seconds a struck figure lies still before it gets up (1 by default).
+set_get_up(h: *Handover, seconds: float) {
+    if seconds > 0.0 { h.get_up = seconds }
+}
+
+// Seconds a figure stands on its feet, upright and at full strength,
+// before it goes back to the horde (0.5 by default).
+set_settle(h: *Handover, seconds: float) {
+    if seconds >= 0.0 { h.settle = seconds }
+}
+
+// Seconds a killed figure lies before it is parked (10 by default); 0
+// leaves it lying for as long as its figure is not wanted for a strike.
+set_despawn(h: *Handover, seconds: float) {
+    if seconds >= 0.0 { h.despawn = seconds }
+}
+
+// Told when a figure is given back: (context, pool, slot, zombie), after
+// the zombie's columns are written and before the figure is parked, so
+// the figure still stands as it was drawn.
+set_on_return(h: *Handover, told: fn(ptr, *Handover, int, int), context: ptr) {
+    h.on_return = told
+    h.on_return_context = context
+}
+
+size(h: *Handover) -> int { return list.size(h.slots) }
+
+slot_at(h: *Handover, index: int) -> *HandoverSlot {
+    if h == null || index < 0 || index >= list.size(h.slots) { return null }
+    return list.get_raw(h.slots, index) as *HandoverSlot
+}
+
+slot_state(h: *Handover, index: int) -> int {
+    s = slot_at(h, index)
+    if s == null { return FREE }
+    return s.state
+}
+
+slot_zombie(h: *Handover, index: int) -> int {
+    s = slot_at(h, index)
+    if s == null { return 0 - 1 }
+    return s.zombie
+}
+
+slot_object(h: *Handover, index: int) -> *GameObject {
+    s = slot_at(h, index)
+    if s == null { return null }
+    return s.object as *GameObject
+}
+
+slot_motion(h: *Handover, index: int) -> *Motion {
+    s = slot_at(h, index)
+    if s == null { return null }
+    return s.body as *Motion
+}
+
+// Figures in use.
+active(h: *Handover) -> int {
+    n = 0
+    k = 0
+    while k < list.size(h.slots) {
+        if (list.get_raw(h.slots, k) as *HandoverSlot).state != FREE { n = n + 1 }
+        k = k + 1
+    }
+    return n
+}
+
+returned(h: *Handover) -> int { return h.returned }
+despawned(h: *Handover) -> int { return h.despawned }
+refused(h: *Handover) -> int { return h.refused }
+reused(h: *Handover) -> int { return h.reused }
+
+// The slot a zombie is handed to, or -1.
+handed(h: *Handover, zombie: int) -> int {
+    k = 0
+    while k < list.size(h.slots) {
+        s = list.get_raw(h.slots, k) as *HandoverSlot
+        if s.state != FREE && s.zombie == zombie { return k }
+        k = k + 1
+    }
+    return 0 - 1
+}
+
+// Whether a zombie was killed: out of the horde for good.
+is_dead(h: *Handover, zombie: int) -> bool {
+    if zombie < 0 || zombie >= h.count || h.out == null { return false }
+    return (h.out as float[])[zombie] == 2.0
+}
+
+// --- handing over ---------------------------------------------------------------------------------------
+
+// A struck zombie: handed to a figure, POWERED, hit at the bone nearest
+// `point` with `impulse` (newton seconds). A zombie already handed over is
+// hit again where it stands. The slot, or -1 when the zombie is not one of
+// the horde's, is dead, or no figure could be had.
+strike(h: *Handover, zombie: int, point: Vec3, impulse: Vec3) -> int {
+    return hand_over(h, zombie, point, impulse, false)
+}
+
+// The same, killed: the figure LIMP, and it stays down.
+kill(h: *Handover, zombie: int, point: Vec3, impulse: Vec3) -> int {
+    return hand_over(h, zombie, point, impulse, true)
+}
+
+hand_over(h: *Handover, zombie: int, point: Vec3, impulse: Vec3, killed: bool) -> int {
+    if h == null || h.pos == null || zombie < 0 || zombie >= h.count { return 0 - 1 }
+    out = h.out as float[]
+    if out[zombie] == 2.0 { return 0 - 1 }
+    index = handed(h, zombie)
+    if index >= 0 {
+        hit_slot(h, list.get_raw(h.slots, index) as *HandoverSlot, point, impulse, killed)
+        if killed { out[zombie] = 2.0 }
+        return index
+    }
+    index = free_slot(h)
+    if index < 0 {
+        index = reuse(h, point)
+        if index < 0 {
+            h.refused = h.refused + 1
+            return 0 - 1
+        }
+        h.reused = h.reused + 1
+    }
+    s = list.get_raw(h.slots, index) as *HandoverSlot
+    pos = h.pos as float[]
+    yaw = h.yaw as float[]
+    phase = h.phase as float[]
+    at = core.vec3(pos[zombie * 3], pos[zombie * 3 + 1], pos[zombie * 3 + 2])
+    stand(h, s, zombie, at, yaw[zombie] + h.facing, phase[zombie])
+    s.zombie = zombie
+    s.ground_y = at.y
+    s.seconds = 0.0
+    out[zombie] = 1.0
+    pos[zombie * 3] = PARK
+    pos[zombie * 3 + 2] = PARK
+    hit_slot(h, s, point, impulse, killed)
+    if killed { out[zombie] = 2.0 }
+    return index
+}
+
+// A parked figure stood where the horde drew a zombie: at `at`, turned
+// `draw_yaw` about y, its clip at `phase` of the way through, drawn, and
+// its bodies in the world where its rig is.
+stand(h: *Handover, s: *HandoverSlot, zombie: int, at: Vec3, draw_yaw: float, phase: float) {
+    o = s.object as *GameObject
+    f = s.fig as *Figure
+    body = s.body as *Motion
+    figure.put_pose(f, s.rest)
+    figure.play(f, h.clip, 1.0, true)
+    place_at(h, o, at, draw_yaw, phase)
+    tint(h, s, zombie)
+    show(f, true)
+    physics.ragdoll_unpark(body.ragdoll)
+    physics.ragdoll_to_rig(body.ragdoll)
+}
+
+// Each part's own colour, times the zombie's tint when the horde has one.
+tint(h: *Handover, s: *HandoverSlot, zombie: int) {
+    f = s.fig as *Figure
+    tone = s.diffuse as float[]
+    r = 1.0
+    g = 1.0
+    b = 1.0
+    if h.color != null {
+        rgb = h.color as float[]
+        r = rgb[zombie * 3]
+        g = rgb[zombie * 3 + 1]
+        b = rgb[zombie * 3 + 2]
+    }
+    k = 0
+    while k < figure.primitive_count(f) {
+        core.model_set_diffuse(figure.primitive(f, k), tone[k * 3] * r, tone[k * 3 + 1] * g, tone[k * 3 + 2] * b)
+        k = k + 1
+    }
+}
+
+// A figure's object stood where the horde draws a zombie at `at`, turned
+// `draw_yaw`, posed at `phase`: its clip set to that time, and its group
+// moved so the bone the bake took the travel from is over `at` plus its
+// bind offset, turned -- which is where the bank's in-place pose has it.
+place_at(h: *Handover, o: *GameObject, at: Vec3, draw_yaw: float, phase: float) {
+    f = figure.figure_of(o)
+    turn = core.quat_rotate(draw_yaw, core.vec3(0.0, 1.0, 0.0))
+    behaviour.object_set_position(o, at)
+    behaviour.object_set_rotation(o, turn)
+    figure.set_time(f, wrap_phase(phase) * h.duration)
+    hips = skin.skeleton_bone(figure.skeleton(f), h.hips)
+    core.model_sync_transform(hips)
+    want = core.v3_add(at, core.quat_apply(turn, core.vec3(h.bind.x, 0.0, h.bind.z)))
+    behaviour.object_set_position(o, core.vec3(at.x + want.x - hips.world_position.x, at.y,
+                                               at.z + want.z - hips.world_position.z))
+    core.model_sync_transform(hips)
+}
+
+// Where the horde would draw the zombie a figure stands for: the inverse
+// of place_at, from the figure's group, its hips and its clip's time.
+// Into out: x, y, z, the drawn yaw, the phase.
+horde_pose_of(h: *Handover, o: *GameObject, ground_y: float, out: ptr) {
+    f = figure.figure_of(o)
+    group = behaviour.object_model(o)
+    core.model_sync_transform(group)
+    ahead = core.quat_apply(group.world_rotation, core.vec3(1.0, 0.0, 0.0))
+    draw_yaw = atan2(0.0 - ahead.z, ahead.x)
+    turn = core.quat_rotate(draw_yaw, core.vec3(0.0, 1.0, 0.0))
+    hips = skin.skeleton_bone(figure.skeleton(f), h.hips)
+    core.model_sync_transform(hips)
+    offset = core.quat_apply(turn, core.vec3(h.bind.x, 0.0, h.bind.z))
+    r = out as float[]
+    r[0] = hips.world_position.x - offset.x
+    r[1] = ground_y
+    r[2] = hips.world_position.z - offset.z
+    r[3] = draw_yaw
+    phase = 0.0
+    if h.duration > 0.0 { phase = figure.time(f) / h.duration }
+    r[4] = wrap_phase(phase)
+}
+
+wrap_phase(p: float) -> float {
+    q = p
+    while q >= 1.0 { q = q - 1.0 }
+    while q < 0.0 { q = q + 1.0 }
+    return q
+}
+
+wrap_angle(a: float) -> float {
+    b = a
+    while b > PI { b = b - 2.0 * PI }
+    while b < 0.0 - PI { b = b + 2.0 * PI }
+    return b
+}
+
+// The blow: POWERED and protecting itself, getting up by itself, or LIMP
+// and staying down; hit at the bone nearest the point.
+hit_slot(h: *Handover, s: *HandoverSlot, point: Vec3, impulse: Vec3, killed: bool) {
+    body = s.body as *Motion
+    if killed {
+        motion.set_get_up(body, 0.0)
+        motion.set_mode(body, motion.LIMP)
+        s.state = DEAD
+    } else if s.state != DEAD {
+        motion.set_get_up(body, h.get_up)
+        if motion.mode(body) != motion.POWERED && !motion.getting_up(body) { motion.set_mode(body, motion.POWERED) }
+        s.state = STRUCK
+    }
+    s.seconds = 0.0
+    motion.hit(body, nearest_bone(body, point), point, impulse)
+}
+
+nearest_bone(body: *Motion, point: Vec3) -> int {
+    best = human.BONE_PELVIS
+    best_d = 1000000000.0
+    i = 0
+    while i < human.BONE_COUNT {
+        d = core.v3_len(core.v3_sub(behaviour.object_position(physics.ragdoll_bone(body.ragdoll, i)), point))
+        if d < best_d {
+            best_d = d
+            best = i
+        }
+        i = i + 1
+    }
+    return best
+}
+
+free_slot(h: *Handover) -> int {
+    k = 0
+    while k < list.size(h.slots) {
+        if (list.get_raw(h.slots, k) as *HandoverSlot).state == FREE { return k }
+        k = k + 1
+    }
+    return 0 - 1
+}
+
+// Every figure in use: the one farthest from `point` that is not mid-fall
+// -- a killed one lying, or one on its feet -- given back or despawned,
+// its slot free. -1 when every one is falling, lying or getting up.
+reuse(h: *Handover, point: Vec3) -> int {
+    best = 0 - 1
+    best_d = 0.0 - 1.0
+    k = 0
+    while k < list.size(h.slots) {
+        s = list.get_raw(h.slots, k) as *HandoverSlot
+        if s.state == DEAD || steady(s) || s.state == RETURNING {
+            body = s.body as *Motion
+            d = core.v3_len(core.v3_sub(behaviour.object_position(physics.ragdoll_bone(body.ragdoll, human.BONE_PELVIS)), point))
+            if d > best_d {
+                best_d = d
+                best = k
+            }
+        }
+        k = k + 1
+    }
+    if best < 0 { return best }
+    s = list.get_raw(h.slots, best) as *HandoverSlot
+    if s.state == DEAD {
+        despawn(h, best)
+    } else {
+        give_back(h, best)
+    }
+    return best
+}
+
+// Standing on its muscles, not falling, lying or getting up, and over its
+// blow: what a strike may take back to the horde to have the figure.
+steady(s: *HandoverSlot) -> bool {
+    return on_feet(s) && strong(s.body as *Motion)
+}
+
+// Standing on its muscles, not falling, lying or getting up.
+on_feet(s: *HandoverSlot) -> bool {
+    if s.state != STRUCK { return false }
+    body = s.body as *Motion
+    return motion.mode(body) == motion.POWERED && !motion.falling(body) && !motion.lying(body) &&
+           !motion.down(body) && motion.tilt(body) < UPRIGHT
+}
+
+// --- taking back ------------------------------------------------------------------------------------------
+
+// A figure given back to the horde now, from wherever it stands: its
+// animation moved to where its bodies are, and its zombie put back as the
+// figure is drawn. For one on its feet; the pool gives each back by
+// itself once it has stood `settle` seconds, blended into its clip first.
+give_back(h: *Handover, index: int) {
+    s = slot_at(h, index)
+    if s == null || s.state == FREE || s.state == DEAD { return }
+    body = s.body as *Motion
+    if s.state == STRUCK { to_bodies(h, body) }
+    physics.ragdoll_restore_animation(body.ragdoll)
+    finish(h, s, index)
+}
+
+// A killed figure parked now; its zombie stays out of the horde.
+despawn(h: *Handover, index: int) {
+    s = slot_at(h, index)
+    if s == null || s.state != DEAD { return }
+    h.despawned = h.despawned + 1
+    park(s)
+}
+
+// The animation moved, as one piece, to where the bodies stand and the way
+// they face: the pelvis's place over the ground and its turn about y. What
+// a figure that has got up to its feet has already had done (the get-up
+// ends there); a figure that only staggered was shoved off where it was
+// struck, and would slide back to it.
+to_bodies(h: *Handover, body: *Motion) {
+    r = body.ragdoll
+    stride = human.BONE_COUNT * physics.POSE_STRIDE
+    bodies = h.scratch
+    animated = h.scratch + stride * 8
+    physics.ragdoll_body_pose(r, bodies)
+    physics.ragdoll_animation_pose(r, animated)
+    b = bodies as float[]
+    a = animated as float[]
+    at = human.BONE_PELVIS * physics.POSE_STRIDE
+    rest = human.bone_at(physics.ragdoll_human(r), human.BONE_PELVIS).reference_frame.q
+    forward = physics.ragdoll_rest_forward(r)
+    body_front = level(core.quat_apply(core.quat_mul(core.quat(b[at], b[at + 1], b[at + 2], b[at + 3]), core.quat_conjugate(rest)), forward))
+    anim_front = level(core.quat_apply(core.quat_mul(core.quat(a[at], a[at + 1], a[at + 2], a[at + 3]), core.quat_conjugate(rest)), forward))
+    turn = core.quat_ident()
+    if core.v3_len(body_front) > 0.5 && core.v3_len(anim_front) > 0.5 {
+        // About y alone, whatever the two fronts' small tilts: the angle
+        // between them over the ground.
+        angle = wrap_angle(atan2(0.0 - body_front.z, body_front.x) - atan2(0.0 - anim_front.z, anim_front.x))
+        turn = core.quat_rotate(angle, core.vec3(0.0, 1.0, 0.0))
+    }
+    pivot = core.vec3(a[at + 4], a[at + 5], a[at + 6])
+    shift = core.vec3(b[at + 4] - a[at + 4], 0.0, b[at + 6] - a[at + 6])
+    physics.ragdoll_move_animation(r, pivot, turn, shift)
+}
+
+level(v: Vec3) -> Vec3 {
+    flat = core.vec3(v.x, 0.0, v.z)
+    if core.v3_len(flat) < 0.000001 { return core.vec3(0.0, 0.0, 0.0) }
+    return core.v3_normalize(flat)
+}
+
+// The zombie back in the horde where the figure is drawn, told, and the
+// figure parked.
+finish(h: *Handover, s: *HandoverSlot, index: int) {
+    zombie = s.zombie
+    o = s.object as *GameObject
+    // The clip where its time is: the blend back ends on the animation's
+    // pose as it was when the blend began, and the clip has played on.
+    f = s.fig as *Figure
+    figure.set_time(f, figure.time(f))
+    block = calloc(5, 8)
+    horde_pose_of(h, o, s.ground_y, block)
+    r = block as float[]
+    pos = h.pos as float[]
+    yaw = h.yaw as float[]
+    phase = h.phase as float[]
+    pos[zombie * 3] = r[0]
+    pos[zombie * 3 + 1] = r[1]
+    pos[zombie * 3 + 2] = r[2]
+    yaw[zombie] = wrap_angle(r[3] - h.facing)
+    phase[zombie] = r[4]
+    free(block)
+    (h.out as float[])[zombie] = 0.0
+    h.returned = h.returned + 1
+    if h.on_return != null { h.on_return(h.on_return_context, h, index, zombie) }
+    park(s)
+}
+
+// Out of sight and out of the world: ANIMATED (so it takes its clip up
+// again from the rig when it is next stood), its bodies parked, its clip
+// stopped, its meshes hidden.
+park(s: *HandoverSlot) {
+    body = s.body as *Motion
+    if motion.mode(body) != motion.ANIMATED || motion.blending(body) {
+        motion.set_mode(body, motion.ANIMATED)
+    }
+    physics.ragdoll_park(body.ragdoll)
+    f = s.fig as *Figure
+    figure.stop(f)
+    show(f, false)
+    s.state = FREE
+    s.zombie = 0 - 1
+    s.seconds = 0.0
+}
+
+show(f: *Figure, visible: bool) {
+    i = 0
+    while i < figure.primitive_count(f) {
+        m = figure.primitive(f, i)
+        m.visible = visible
+        i = i + 1
+    }
+}
+
+// --- the pool's step --------------------------------------------------------------------------------------
+
+// Each fixed step, after the physics and the motions have stepped: a
+// figure on its feet long enough starts back, one blended into its clip
+// goes back, a killed one lain long enough is parked. On the fixed step,
+// so the same strikes give the same horde to the bit.
+pool_fixed(state: ptr, e: *Engine, step: float) {
+    h = state as *Handover
+    k = 0
+    while k < list.size(h.slots) {
+        s = list.get_raw(h.slots, k) as *HandoverSlot
+        body = s.body as *Motion
+        if s.state == STRUCK {
+            if on_feet(s) && strong(body) { s.seconds = s.seconds + step } else { s.seconds = 0.0 }
+            if s.seconds >= h.settle {
+                to_bodies(h, body)
+                motion.set_mode(body, motion.ANIMATED)
+                s.state = RETURNING
+            }
+        } else if s.state == RETURNING {
+            if !motion.blending(body) { finish(h, s, k) }
+        } else if s.state == DEAD {
+            s.seconds = s.seconds + step
+            if h.despawn > 0.0 && s.seconds >= h.despawn { despawn(h, k) }
+        }
+        k = k + 1
+    }
+}
+
+// Every bone's muscle back from its blow.
+strong(body: *Motion) -> bool {
+    i = 0
+    while i < human.BONE_COUNT {
+        if motion.bone_weakness(body, i) > WEAK_LEFT { return false }
+        i = i + 1
+    }
+    return true
+}
