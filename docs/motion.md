@@ -138,6 +138,27 @@ A figure that was `POWERED` is `POWERED` again once up; any other ends `ANIMATED
 
 The blended figure takes 15 steps, a quarter second, and no drawn bone turns more than 1.3° in a step. The limits the test holds are 6° a step, 40 mm a step for the hips, 1° and 5 mm at the hand-over, 3 cm into the ground, 10° of lean afterwards and 30° of facing.
 
+## What it costs
+
+An active ragdoll is for the figures a player is close to, not the horde:
+the horde hands the dozen nearest over when they are struck.
+`tests/test_motion_cost.ae` measures what that costs. It steps 0, 4, 16
+and 32 `POWERED` figures standing on one ground, each figure's chest
+bowing so it stays awake, for 120 fixed steps once they have settled:
+
+| figures | the step | a figure | in a millisecond |
+|---|---|---|---|
+| 0 | 0.2 µs | | |
+| 4 | 142 µs | 35 µs | 28 |
+| 16 | 330 µs | 21 µs | 49 |
+| 32 | 636 µs | 20 µs | 50 |
+
+A figure standing still falls asleep and costs nothing, which is why the
+figures bow: an awake figure is what the step pays for. A dozen awake
+figures cost about a quarter of a millisecond a step. The test holds a
+figure under 80 µs, a dozen within a millisecond, and every figure still
+standing at the end.
+
 ## What it is held to
 
 `tests/test_motion.ae` runs eleven figures on one ground, each dressed in a humanoid rig:

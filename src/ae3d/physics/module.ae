@@ -203,6 +203,8 @@ attach(e: *Engine) -> *Physics {
     p.characters = list.new()
     p.sub_steps = 4
     engine.engine_set_attachment_provider(e, physics_attachments, p as ptr)
+    // Freed with the engine unless freed first.
+    engine.engine_on_free(e, physics_released, p as ptr)
     p.step_count = 0
     b = engine.behaviour_new("physics", p as ptr)
     b.fixed_update = on_fixed_update
@@ -311,10 +313,21 @@ push_transform(rb: *Rigidbody, step: float) {
 // while its objects are still the scene's (before the scene), so that
 // the components can be taken off them -- and so that the same objects
 // can be given bodies again, as the editor's simulation does.
+physics_released(state: ptr) {
+    physics_free(state as *Physics)
+}
+
 physics_free(p: *Physics) {
     if p == null { return }
     e = p.engine as *Engine
-    if p.behaviour != null { engine.engine_remove_behaviour(e, p.behaviour as *Behaviour) }
+    engine.engine_remove_on_free(e, p as ptr)
+    // Out of the engine's list, the step is the physics's to free: the
+    // engine frees only the behaviours it still holds.
+    if p.behaviour != null {
+        engine.engine_remove_behaviour(e, p.behaviour as *Behaviour)
+        heap.free(p.behaviour as *Behaviour)
+        p.behaviour = null
+    }
     engine.engine_remove_attachment_provider(e, p as ptr)
     count = list.size(p.rigidbodies)
     i = 0

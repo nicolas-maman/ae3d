@@ -1,0 +1,194 @@
+// What natural motion costs (#414): the fixed step of 0, 4, 16 and 32
+// POWERED figures standing on one ground, in engines of their own, timed
+// over 120 steps once they have settled. No window: the engine is stepped
+// by hand, as the editor's simulation steps it.
+//
+//   - the step's cost a figure, in microseconds: the step with N figures,
+//     less the step with none, over N;
+//   - so how many figures fit in a millisecond of the frame -- the "dozen
+//     nearest" the component is meant for, which the horde hands over when
+//     they are struck;
+//   - and that every figure is still standing at the end, since a cost
+//     measured on figures lying still is not the cost of standing.
+
+import std.os
+import ae3d.core
+import ae3d.engine
+import ae3d.behaviour
+import ae3d.loader
+import ae3d.physics
+import ae3d.skin
+import ae3d.motion
+import aephysics.human
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern sin(x: float) -> float
+
+const SETTLE = 60
+const TIMED = 120
+
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, ok: bool) {
+    g_checks = g_checks + 1
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        g_failures = g_failures + 1
+        println("  FAIL ${name}")
+    }
+}
+
+rig_bone(rig: *Skeleton, name: string, parent: *Model, x: float, y: float, z: float) -> *Model {
+    m = core.model_new()
+    core.model_set_name(m, name)
+    core.model_set_position(m, x, y, z)
+    if parent != null { core.model_set_parent(m, parent) }
+    skin.skeleton_add(rig, m)
+    return m
+}
+
+// A skeleton named and proportioned as the pipeline's figure is.
+humanoid_rig() -> *Skeleton {
+    rig = skin.skeleton_new()
+    root = rig_bone(rig, "Root", null, 0.0, 0.0, 0.0)
+    hips = rig_bone(rig, "Hips", root, 0.0, 1.0, 0.0)
+    spine = rig_bone(rig, "Spine", hips, 0.0, 0.13, 0.0)
+    chest = rig_bone(rig, "Chest", spine, 0.0, 0.26, 0.0)
+    neck = rig_bone(rig, "Neck", chest, 0.0, 0.22, 0.0)
+    rig_bone(rig, "Head", neck, 0.0, 0.09, 0.0)
+    shoulder_l = rig_bone(rig, "ShoulderL", chest, 0.17, 0.14, 0.0)
+    elbow_l = rig_bone(rig, "ElbowL", shoulder_l, 0.0, 0.0 - 0.29, 0.0)
+    rig_bone(rig, "WristL", elbow_l, 0.0, 0.0 - 0.26, 0.0)
+    shoulder_r = rig_bone(rig, "ShoulderR", chest, 0.0 - 0.17, 0.14, 0.0)
+    elbow_r = rig_bone(rig, "ElbowR", shoulder_r, 0.0, 0.0 - 0.29, 0.0)
+    rig_bone(rig, "WristR", elbow_r, 0.0, 0.0 - 0.26, 0.0)
+    thigh_l = rig_bone(rig, "ThighL", hips, 0.1, 0.0 - 0.07, 0.0)
+    knee_l = rig_bone(rig, "KneeL", thigh_l, 0.0, 0.0 - 0.44, 0.0)
+    ankle_l = rig_bone(rig, "AnkleL", knee_l, 0.0, 0.0 - 0.42, 0.0)
+    rig_bone(rig, "ToeL", ankle_l, 0.0, 0.0 - 0.05, 0.0 - 0.15)
+    thigh_r = rig_bone(rig, "ThighR", hips, 0.0 - 0.1, 0.0 - 0.07, 0.0)
+    knee_r = rig_bone(rig, "KneeR", thigh_r, 0.0, 0.0 - 0.44, 0.0)
+    ankle_r = rig_bone(rig, "AnkleR", knee_r, 0.0, 0.0 - 0.42, 0.0)
+    rig_bone(rig, "ToeR", ankle_r, 0.0, 0.0 - 0.05, 0.0 - 0.15)
+    skin.skeleton_bind(rig)
+    return rig
+}
+
+// The timed step of `count` powered figures, in microseconds a step, how
+// many of them still stand (pelvis at or over 0.8 m) at the end, and how
+// many fixed steps the world took while timed.
+struct Run {
+    micros: float
+    standing: int
+    steps: int
+}
+
+// Every figure's chest bowed forward and back, 0.26 rad at half a turn a
+// second, as test_motion's tracker is: a figure whose animation moves
+// stays awake, and an awake figure is what the step pays for (one standing
+// still falls asleep and costs nothing).
+bow(rigs: ptr, count: int, t: float) {
+    i = 0
+    while i < count {
+        rig = (rigs as ptr[])[i] as *Skeleton
+        chest = skin.skeleton_bone(rig, skin.skeleton_find(rig, "Chest"))
+        core.model_set_rotation(chest, core.quat_rotate(0.26 * sin(t * 3.1416), core.vec3(1.0, 0.0, 0.0)))
+        i = i + 1
+    }
+}
+
+run(count: int) -> Run {
+    e = engine.engine_new()
+    engine.engine_set_fixed_step(e, 1.0 / 60.0)
+    physics.attach(e)
+    ground = engine.object(e, "Ground", loader.cube(1.0))
+    behaviour.object_set_position(ground, core.vec3(0.0, 0.0 - 0.5, 0.0))
+    physics.box_collider(ground, core.vec3(80.0, 0.5, 80.0), physics.material(0.8, 0.0))
+    motions = calloc(count + 1, 8)
+    rigs = calloc(count + 1, 8)
+    i = 0
+    while i < count {
+        // A grid 3 m apart, so no two touch.
+        x = ((i % 8) as float) * 3.0 - 10.5
+        z = ((i / 8) as float) * 3.0
+        r = physics.ragdoll(e, "Figure", core.vec3(x, 0.02, z), 8.0, 8.0, 1.0)
+        rig = humanoid_rig()
+        physics.ragdoll_dress(r, rig)
+        (rigs as ptr[])[i] = rig as ptr
+        m = motion.active_ragdoll(r)
+        motion.attach(e, m)
+        motion.set_mode(m, motion.POWERED)
+        (motions as ptr[])[i] = m as ptr
+        i = i + 1
+    }
+    step = 0
+    while step < SETTLE {
+        bow(rigs, count, (step as float) / 60.0)
+        engine.engine_update(e, 1.0 / 60.0)
+        step = step + 1
+    }
+    stepped = physics.physics_step_count(physics.of(e))
+    started = os.now_monotonic_ns()
+    step = 0
+    while step < TIMED {
+        bow(rigs, count, ((SETTLE + step) as float) / 60.0)
+        engine.engine_update(e, 1.0 / 60.0)
+        step = step + 1
+    }
+    elapsed = (os.now_monotonic_ns() - started) as float
+    out = Run { micros: elapsed / 1000.0 / (TIMED as float), standing: 0,
+                steps: physics.physics_step_count(physics.of(e)) - stepped }
+    i = 0
+    while i < count {
+        m = (motions as ptr[])[i] as *Motion
+        pelvis = behaviour.object_position(physics.ragdoll_bone(m.ragdoll, human.BONE_PELVIS))
+        if pelvis.y >= 0.8 { out.standing = out.standing + 1 }
+        i = i + 1
+    }
+    engine.engine_free(e)
+    i = 0
+    while i < count {
+        motion.motion_free((motions as ptr[])[i] as *Motion)
+        i = i + 1
+    }
+    free(motions)
+    free(rigs)
+    return out
+}
+
+main() {
+    println("motion_cost: the fixed step of POWERED figures, ${TIMED} steps after ${SETTLE}")
+    empty = run(0)
+    println("  none: ${empty.micros} us a step")
+    counts_block = calloc(3, 8)
+    counts = counts_block as int[]
+    counts[0] = 4
+    counts[1] = 16
+    counts[2] = 32
+    worst = 0.0
+    all_standing = true
+    k = 0
+    while k < 3 {
+        n = counts[k]
+        r = run(n)
+        each = (r.micros - empty.micros) / (n as float)
+        if each > worst { worst = each }
+        if r.standing != n { all_standing = false }
+        println("  ${n} figures: ${r.micros} us a step (${r.steps} steps), ${each} us a figure, ${r.standing} of ${n} standing; ${1000.0 / each} fit in a millisecond")
+        if r.steps != TIMED { all_standing = false }
+        k = k + 1
+    }
+    free(counts_block)
+    check("every figure still stands at the end of its run", all_standing)
+    // The component is for the dozen nearest figures: a dozen has to fit in
+    // a millisecond of a 16 ms frame with room to spare.
+    check("a figure costs under 80 us a step, so a dozen fit in a millisecond (worst ${worst} us)", worst < 80.0)
+    if g_failures == 0 {
+        println("motion_cost: all checks passed (${g_checks})")
+    } else {
+        println("motion_cost: ${g_failures} failure(s) of ${g_checks}")
+    }
+}
