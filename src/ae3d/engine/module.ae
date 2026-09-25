@@ -47,7 +47,7 @@ exports (
     engine_set_debug, engine_set_frustum_culling, engine_set_face_culling,
     engine_add_animation, engine_animations,
     engine_gl_renderer, engine_vk_renderer, engine_mouse_x, engine_mouse_y, engine_mouse_down, engine_key_down,
-    engine_set_attachment_provider, engine_remove_attachment_provider, engine_attachments, engine_models, engine_lights, engine_save_scene
+    engine_set_attachment_provider, engine_remove_attachment_provider, engine_on_free, engine_remove_on_free, engine_attachments, engine_models, engine_lights, engine_save_scene
 )
 
 // A program is written the way a Unity or gopher3D game is: game objects
@@ -211,6 +211,11 @@ struct Engine {
     // physics, its bodies -- each answer, when the scene is written, the
     // attachments the file carries beside the models (see engine_save_scene).
     attachment_providers: ptr      // list of *AttachmentProvider, or null
+    // What the systems attached to it (physics) let go of when it is freed
+    // and they were not freed first: an engine freed with its world still
+    // attached left the world behind, and the next engine made at the same
+    // address was handed it by physics.of.
+    on_free: ptr                   // list of *FreeHook, or null
     scene_written: bool            // AE3D_SCENE_OUT was answered, on the first frame
     // The input service (ae3d.input): the actions a game binds, polled
     // once a frame before the updates. The camera's own controls are
@@ -796,6 +801,23 @@ bind_backend(e: *Engine, b: Backend) {
 engine_free(e: *Engine) {
     if e == null { return }
     if g_running == e as ptr { g_running = null }
+    // The systems that were not freed first, while the scene they act on
+    // still stands. Each takes its hook back as it goes.
+    if e.on_free != null {
+        while list.size(e.on_free) > 0 {
+            h = list.get_raw(e.on_free, 0) as *FreeHook
+            let_go = h.let_go
+            state = h.state
+            let_go(state)
+            // A release that did not take its hook back is done with too.
+            if list.size(e.on_free) > 0 && list.get_raw(e.on_free, 0) == h as ptr {
+                list.remove(e.on_free, 0)
+                heap.free(h)
+            }
+        }
+        list.free(e.on_free)
+        e.on_free = null
+    }
     // The scene's objects, and the models they own, before the behaviours
     // (the scene's runner is one of them). An owned model leaves the
     // renderer the way engine_remove_model takes one out, so its buffers go
@@ -1446,6 +1468,38 @@ engine_stop(e: *Engine) {
 // the scene is written, for the attachments (ae3d.scene) it records of the
 // models it holds. Physics registers one when it is attached, so a scene
 // a program built with bodies opens in the editor with the same bodies.
+// A system's own release, run when the engine is freed (engine_on_free).
+struct FreeHook {
+    let_go: fn(ptr)
+    state: ptr
+}
+
+// `let_go(state)` when the engine is freed, first, while its scene and
+// renderer still stand: a system attached to the engine (ae3d.physics)
+// goes with it unless it was freed first, in which case it takes the hook
+// back (engine_remove_on_free).
+engine_on_free(e: *Engine, let_go: fn(ptr), state: ptr) {
+    if e.on_free == null { e.on_free = list.new() }
+    h = heap.new(FreeHook)
+    h.let_go = let_go
+    h.state = state
+    list.add_raw(e.on_free, h as ptr)
+}
+
+engine_remove_on_free(e: *Engine, state: ptr) {
+    if e.on_free == null { return }
+    i = 0
+    while i < list.size(e.on_free) {
+        h = list.get_raw(e.on_free, i) as *FreeHook
+        if h.state == state {
+            list.remove(e.on_free, i)
+            heap.free(h)
+            return
+        }
+        i = i + 1
+    }
+}
+
 struct AttachmentProvider {
     answer: fn(ptr) -> ptr         // state -> list of *Attachment, the engine's to free
     state: ptr

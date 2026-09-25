@@ -391,9 +391,9 @@ for suite in tests/test_*.ae; do
         sed 's/^/        /' "$BUILD_DIR/$name.log" | head -20
         continue
     fi
-    if grep -q "warning" "$BUILD_DIR/$name.log"; then
-        fail "$name (build warnings)"
-        grep "warning" "$BUILD_DIR/$name.log" | sed 's/^/        /' | head -10
+    if grep -qE "warning|^error" "$BUILD_DIR/$name.log"; then
+        fail "$name (build warnings or errors)"
+        grep -E "warning|^error" "$BUILD_DIR/$name.log" | sed 's/^/        /' | head -10
         continue
     fi
     needs_window=0
@@ -434,9 +434,9 @@ for example in examples/*.ae; do
         sed 's/^/        /' "$BUILD_DIR/$name.log" | head -20
         continue
     fi
-    if grep -q "warning" "$BUILD_DIR/$name.log"; then
-        fail "$name (build warnings)"
-        grep "warning" "$BUILD_DIR/$name.log" | sed 's/^/        /' | head -10
+    if grep -qE "warning|^error" "$BUILD_DIR/$name.log"; then
+        fail "$name (build warnings or errors)"
+        grep -E "warning|^error" "$BUILD_DIR/$name.log" | sed 's/^/        /' | head -10
         continue
     fi
     if ! have_display; then
@@ -947,12 +947,12 @@ else
     if ! ./editor/build_editor.sh >/tmp/ae3d_build.log 2>&1; then
         fail "ae3d_editor (build)"
         sed 's/^/        /' /tmp/ae3d_build.log | head -20
-    elif grep -q "warning" /tmp/ae3d_build.log; then
+    elif grep -qE "warning|^error" /tmp/ae3d_build.log; then
         # Every other build in this file is gated on warnings and this one was
         # not, so an unused variable in the largest Aether source in the repo
         # went through ci without a word.
-        fail "ae3d_editor (build warnings)"
-        grep "warning" /tmp/ae3d_build.log | sed 's/^/        /' | head -10
+        fail "ae3d_editor (build warnings or errors)"
+        grep -E "warning|^error" /tmp/ae3d_build.log | sed 's/^/        /' | head -10
     else
         for editor_backend in opengl vulkan; do
             check_editor_run "$editor_backend"
@@ -1051,8 +1051,8 @@ for bench in benchmarks/bench_*.ae; do
         sed 's/^/        /' "$BUILD_DIR/$name.log" | head -20
         continue
     fi
-    if grep -q "warning" "$BUILD_DIR/$name.log"; then
-        fail "$name (build warnings)"
+    if grep -qE "warning|^error" "$BUILD_DIR/$name.log"; then
+        fail "$name (build warnings or errors)"
         continue
     fi
     if output="$(AE3D_WIDTH= AE3D_HEIGHT= bounded "$RUN_LIMIT" ./build/"$name" 2>&1)"; then

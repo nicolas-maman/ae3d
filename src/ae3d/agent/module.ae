@@ -22,6 +22,7 @@ import ae3d.input
 import ae3d.channel
 import ae3d.capture
 import ae3d.raycast
+import ae3d.picture
 
 exports (
     Context, context_new, context_free,
@@ -36,14 +37,6 @@ exports (
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 extern pow(x: float, y: float) -> float
-// A texture's texels, read again from its file: a renderer uploads them and
-// keeps only the handle, so what an image looks like on average is asked of
-// the file the material names.
-extern ae3d_image_load(path: string) -> ptr
-extern ae3d_image_pixels(img: ptr) -> ptr
-extern ae3d_image_width(img: ptr) -> int
-extern ae3d_image_height(img: ptr) -> int
-extern ae3d_image_free(img: ptr)
 
 // A frame can only be read between the last draw and the buffer swap, and
 // requests are drained after it. Everything that reads pixels is therefore
@@ -1887,8 +1880,11 @@ explain_texture(m: *Model, ex: *Explanation) -> ptr {
     return detail
 }
 
+// A texture's texels, read again from its file: a renderer uploads them and
+// keeps only the handle, so what an image looks like on average is asked of
+// the file the material names.
 texture_mean(path: string, ex: *Explanation, detail: ptr) {
-    image = ae3d_image_load(path)
+    image = picture.load(path)
     if image == null {
         ex.texture_known = false
         json.object_set_raw(detail, "mean", json.str("unknown"))
@@ -1896,13 +1892,13 @@ texture_mean(path: string, ex: *Explanation, detail: ptr) {
             json.str("the file does not decode here, so its texels are not known"))
         return
     }
-    width = ae3d_image_width(image)
-    height = ae3d_image_height(image)
-    texels = ae3d_image_pixels(image)
+    width = picture.width(image)
+    height = picture.height(image)
+    texels = picture.pixels(image)
     json.object_set_raw(detail, "width", json.from_int(width))
     json.object_set_raw(detail, "height", json.from_int(height))
     if texels == null || width <= 0 || height <= 0 {
-        ae3d_image_free(image)
+        picture.dispose(image)
         ex.texture_known = false
         json.object_set_raw(detail, "mean", json.str("unknown"))
         return
@@ -1929,7 +1925,7 @@ texture_mean(path: string, ex: *Explanation, detail: ptr) {
         }
         y = y + 1
     }
-    ae3d_image_free(image)
+    picture.dispose(image)
     samples = (across * down) as float
     ex.texture = core.vec3(red / samples / 255.0, green / samples / 255.0, blue / samples / 255.0)
     json.object_set_raw(detail, "mean", vec3_json3(ex.texture))

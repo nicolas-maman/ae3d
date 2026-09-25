@@ -211,9 +211,12 @@ under 0.6 of the prediction, `wrong colour` when the mean leans to a colour the
 material does not, `missing` when nothing was drawn (and `trace.model` is the
 next question), otherwise `as lit`. The verdict is the first flagged stage
 that accounts for that look. A look no stage accounts for says so with the
-two luminances; a finding the pixels do not show is named after `as lit` --
-on OpenGL the same cube reads `as lit; not shown in the pixels: in the shadow
-of roof`, because that renderer drew no shadow on it.
+two luminances; a finding the pixels do not show is named after `as lit`, as
+in `as lit; not shown in the pixels: in the shadow of roof`. That is what
+OpenGL once answered for the cube above, and it found two bugs (#453): a
+shadow batch drawing another batch's matrices, then a shadow letting four
+times the sun through that Vulkan's did. Both renderers now read the cube at
+0.297.
 
 ## The whole scene at once
 
@@ -225,6 +228,49 @@ not join `scene.tree`, `anim.list` and `trace.model` by hand:
     model:0         --has_mesh-->    mesh:0
     clip:spin       --drives-->      model:0
     camera          --sees-->        model:0
+
+## Recording a session and replaying it
+
+`AE3D_AGENT_RECORD=path` writes the whole session to a file as it happens:
+every request as the frame takes it and every answer as it goes, one line
+each. A line is `in` or `out`, the milliseconds since the channel opened, and
+the line itself. Each is flushed as it is written, so a session the program
+died in is on disk up to its last word:
+
+    in 1438 {"op":"scene.tree","id":1}
+    out 1439 {"id":1,"ok":true,"result":{"count":1,"models":[{"index":0,"name":"probe","position":[0,0,0],"visible":true}]}}
+
+`tools/agent_replay.ae` asks a running program the same questions in order
+and compares every answer with the recorded one (`ae3d.replay`). A change
+that alters what the pipeline sees is found by replaying a session that went
+right:
+
+    AE3D_AGENT_RECORD=build/scratch/good.log AE3D_AGENT=7920 ./build/zombie_street
+    AE3D_AGENT=7921 ./build/zombie_street &        # after the change
+    ./build/agent_replay build/scratch/good.log --port 7921
+
+How answers are compared:
+- **Numbers** match within a tolerance: relative, a part in a million by
+  default (`--tolerance`).
+- **Everything else** must match exactly: strings, flags, nulls, array
+  lengths and the set of keys.
+- **Keys left out:** the request id and the clocks (`ms`, `fps`,
+  `frame_ms`, `elapsed_ms`), plus any key given with `--ignore`.
+- **Requests and answers are paired by id**, because an answer read from a
+  later frame comes out after requests that arrived behind it.
+
+Every difference is printed with its place in the answer, up to the first 64:
+
+    #0 scene.tree.result.models[0].position[0]: 0 then, 5 now
+
+The tool exits 0 when every answer is the same, 1 when one differs or goes
+unanswered, and 2 when it cannot start.
+
+`tests/test_agent_record.ae` records a session against one scene and replays
+it twice:
+- **On the same scene:** 4 of 4 answers are the same.
+- **With the cube started 5 m along x:** the two answers that say where it
+  started differ, and the two after the write that moves it agree.
 
 ## Blender
 

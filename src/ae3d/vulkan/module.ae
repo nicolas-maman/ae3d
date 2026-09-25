@@ -23,6 +23,7 @@ import ae3d.vkoverlay
 import ae3d.vktexture
 import ae3d.posing
 import ae3d.geometry
+import ae3d.picture
 
 exports (
     VKRenderer,
@@ -149,14 +150,7 @@ extern ae3d_vk_set_face_culling(on: int)
 extern ae3d_vk_program_count() -> int
 extern ae3d_vk_offscreen_width() -> int
 extern ae3d_vk_offscreen_height() -> int
-extern ae3d_image_load(path: string) -> ptr
-extern ae3d_image_fit(img: ptr, limit: int) -> int
 extern ae3d_vk_max_texture_size() -> int
-extern ae3d_image_free(img: ptr)
-extern ae3d_image_width(img: ptr) -> int
-extern ae3d_image_height(img: ptr) -> int
-extern ae3d_image_pixels(img: ptr) -> ptr
-extern ae3d_image_error() -> string
 
 // Named apart from the OpenGL backend's equivalent: struct names are global
 // across every imported module, so two backends cannot both call it the same
@@ -1261,19 +1255,19 @@ renderer_load_texture(r: *VKRenderer, path: string) -> int {
     }
 
     image = core.take_preloaded_image(path)
-    if image == null { image = ae3d_image_load(path) }
+    if image == null { image = picture.load(path) }
     if image == null {
-        println("ae3d: texture load failed: ${ae3d_image_error()}")
+        println("ae3d: texture load failed: ${picture.error()}")
         return 0
     }
     // Larger than the device takes (a 21,600-wide map on a device whose
     // textures stop at 16,384): drawn at the most it has, not refused.
-    halvings = ae3d_image_fit(image, ae3d_vk_max_texture_size())
+    halvings = picture.fit(image, ae3d_vk_max_texture_size())
     if halvings > 0 { println("ae3d: ${path} is larger than this device's textures; halved ${halvings} time(s) to fit") }
-    tex_w = ae3d_image_width(image)
-    tex_h = ae3d_image_height(image)
-    handle = vktexture.texture_create(tex_w, tex_h, ae3d_image_pixels(image))
-    ae3d_image_free(image)
+    tex_w = picture.width(image)
+    tex_h = picture.height(image)
+    handle = vktexture.texture_create(tex_w, tex_h, picture.pixels(image))
+    picture.dispose(image)
     if handle == 0 { return 0 }
 
     entry = heap.new(VulkanTexture)
