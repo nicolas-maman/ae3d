@@ -1,0 +1,243 @@
+// ae3d.vkreadback -- the frame read back to the host on the Vulkan backend
+// (#402): the second of native/gpu/vulkan.c to move into Aether, on
+// contrib.vulkan.vk.
+//
+// Two readers. An offscreen frame (a test's, the backend-parity check's) is
+// copied out every frame: its image is left in transfer-source layout by its
+// last pass, so the copy costs no layout change. A windowed frame is copied
+// only when a capture is asked for -- the agent's grid and pixel reads, a
+// snapshot -- since a readback stalls the frame it reads: its swapchain
+// image is moved from presenting to transfer-source, copied, and put back.
+//
+// Each frame in flight has a buffer of its own (ae3d.vkhost's), so a frame
+// can be copied while the one before it is still being read, and nothing
+// waits when a frame is recorded: whoever asks for the pixels waits for that
+// frame's fence then, and a program that never reads never stalls. The
+// pixels come back as RGBA, top row first -- a PNG's order and the image's,
+// so no flip as the OpenGL readback needs -- with red and blue swapped from a
+// BGRA swapchain.
+
+import contrib.vulkan.vk
+import ae3d.vkhost
+
+exports (
+    attach, offscreen_pixels, request_capture, capture_ready, capture_pixels, capture_width, capture_height
+)
+
+extern ae3d_vk_add_frame_hooks(record: ptr, collect: ptr, release: ptr, context: ptr) -> int
+extern ae3d_vk_ready() -> int
+extern ae3d_vk_frame_wait(slot: int)
+extern ae3d_vk_frame_bgr() -> int
+extern ae3d_vk_frame_commands() -> ptr
+extern ae3d_vk_frame_slot() -> int
+extern ae3d_vk_frames_in_flight() -> int
+extern ae3d_vk_frame_image() -> ptr
+extern ae3d_vk_frame_width() -> int
+extern ae3d_vk_frame_height() -> int
+extern ae3d_vk_frame_offscreen() -> int
+extern ae3d_vk_frame_copyable() -> int
+// This module's own hooks, by their C names, for their addresses.
+extern ae3d_vkreadback_record(context: ptr)
+extern ae3d_vkreadback_release(context: ptr)
+extern calloc(count: int, size: int) -> ptr
+extern malloc(size: long) -> ptr
+extern free(p: ptr)
+extern memcpy(dst: ptr, src: ptr, n: long) -> ptr
+
+const MAX_FRAMES = 4                 // at least vulkan.c's AE3D_VK_FRAMES
+
+struct Readback {
+    hooked: bool
+    width: int                       // the frames the buffers are sized to
+    height: int
+    buffers: ptr                     // *HostBuffer[MAX_FRAMES]
+    asked: bool                      // copy the next windowed frame recorded
+    captured: int                    // the slot holding the last capture, or -1
+    offscreen: int                   // the slot holding the last offscreen frame, or -1
+    copy: ptr                        // the pixels handed out: RGBA, the renderer's
+    copy_bytes: int
+}
+
+var g_readback: ptr = null
+
+readback() -> *Readback {
+    if g_readback == null {
+        r = calloc(1, sizeof(Readback)) as *Readback
+        r.buffers = calloc(MAX_FRAMES, 8)
+        r.captured = 0 - 1
+        r.offscreen = 0 - 1
+        g_readback = r as ptr
+    }
+    return g_readback as *Readback
+}
+
+// Read frames back from now on (the renderer's init asks, so an offscreen
+// frame is copied from the first one).
+attach() { hook(readback()) }
+
+// The hooks, once.
+hook(r: *Readback) {
+    if r.hooked { return }
+    r.hooked = true
+    ae3d_vk_add_frame_hooks((&ae3d_vkreadback_record) as ptr, null, (&ae3d_vkreadback_release) as ptr, null)
+}
+
+// Every buffer gone; they are made again at the next frame's size.
+release(r: *Readback) {
+    f = 0
+    while f < MAX_FRAMES {
+        vkhost.host_buffer_free((r.buffers as ptr[])[f] as *HostBuffer)
+        (r.buffers as ptr[])[f] = null
+        f = f + 1
+    }
+    r.width = 0
+    r.height = 0
+    r.captured = 0 - 1
+    r.offscreen = 0 - 1
+}
+
+// A buffer a frame for this frame's size; false when the device could not
+// make them.
+sized(r: *Readback) -> bool {
+    w = ae3d_vk_frame_width()
+    h = ae3d_vk_frame_height()
+    if r.width == w && r.height == h && (r.buffers as ptr[])[0] != null { return true }
+    release(r)
+    vkhost.device()
+    frames = ae3d_vk_frames_in_flight()
+    f = 0
+    while f < frames && f < MAX_FRAMES {
+        b = vkhost.host_buffer(w * h * 4)
+        if b == null {
+            release(r)
+            return false
+        }
+        (r.buffers as ptr[])[f] = b as ptr
+        f = f + 1
+    }
+    r.width = w
+    r.height = h
+    return true
+}
+
+// A layout change of the frame's image, ahead of or after the copy.
+turn(commands: ptr, image: ptr, from: int, to: int, src_access: int, dst_access: int, src_stage: int, dst_stage: int) {
+    b = calloc(1, sizeof(VkImageMemoryBarrier)) as *VkImageMemoryBarrier
+    b.sType = vk.STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER
+    b.oldLayout = from
+    b.newLayout = to
+    b.srcQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED
+    b.dstQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED
+    b.image = image
+    b.subresourceRange.aspectMask = vk.IMAGE_ASPECT_COLOR_BIT
+    b.subresourceRange.levelCount = 1
+    b.subresourceRange.layerCount = 1
+    b.srcAccessMask = src_access
+    b.dstAccessMask = dst_access
+    vk.vkCmdPipelineBarrier(commands, src_stage, dst_stage, 0, 0, null, 0, null, 1, b as ptr)
+    free(b as ptr)
+}
+
+// The frame's image into this slot's buffer.
+copy_out(r: *Readback, commands: ptr, image: ptr, slot: int) {
+    region = calloc(1, sizeof(VkBufferImageCopy)) as *VkBufferImageCopy
+    region.imageSubresource.aspectMask = vk.IMAGE_ASPECT_COLOR_BIT
+    region.imageSubresource.layerCount = 1
+    region.imageExtent.width = r.width
+    region.imageExtent.height = r.height
+    region.imageExtent.depth = 1
+    vk.vkCmdCopyImageToBuffer(commands, image, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                              ((r.buffers as ptr[])[slot] as *HostBuffer).buffer, 1, region as ptr)
+    free(region as ptr)
+}
+
+// Recorded after the frame's last pass: an offscreen frame always, a
+// windowed one when a capture was asked for.
+@c_callback("ae3d_vkreadback_record")
+record_hook(context: ptr) {
+    r = readback()
+    offscreen = ae3d_vk_frame_offscreen() == 1
+    if !offscreen && !r.asked { return }
+    if ae3d_vk_frame_copyable() != 1 || !sized(r) { return }
+    commands = ae3d_vk_frame_commands()
+    slot = ae3d_vk_frame_slot()
+    if slot < 0 || slot >= MAX_FRAMES { return }
+    image = ae3d_vk_frame_image()
+    if offscreen {
+        copy_out(r, commands, image, slot)
+        r.offscreen = slot
+        return
+    }
+    turn(commands, image, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+         0, vk.ACCESS_TRANSFER_READ_BIT, vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, vk.PIPELINE_STAGE_TRANSFER_BIT)
+    copy_out(r, commands, image, slot)
+    turn(commands, image, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR,
+         vk.ACCESS_TRANSFER_READ_BIT, 0, vk.PIPELINE_STAGE_TRANSFER_BIT, vk.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT)
+    r.captured = slot
+    r.asked = false
+}
+
+@c_callback("ae3d_vkreadback_release")
+release_hook(context: ptr) {
+    release(readback())
+}
+
+// A slot's frame, once its fence has passed, copied into the pixels handed
+// out, red and blue swapped from a BGRA image. Null when there is none.
+read(r: *Readback, slot: int, swap: bool) -> ptr {
+    if slot < 0 { return null }
+    b = (r.buffers as ptr[])[slot] as *HostBuffer
+    if b == null { return null }
+    ae3d_vk_frame_wait(slot)
+    bytes = r.width * r.height * 4
+    if bytes > r.copy_bytes {
+        if r.copy != null { free(r.copy) }
+        r.copy = malloc(bytes as long)
+        r.copy_bytes = bytes
+        if r.copy == null { r.copy_bytes = 0 }
+    }
+    if r.copy == null { return null }
+    memcpy(r.copy, b.mapped, bytes as long)
+    if swap {
+        px = r.copy as uint8[]
+        i = 0
+        while i + 3 < bytes {
+            blue = px[i]
+            px[i] = px[i + 2]
+            px[i + 2] = blue
+            i = i + 4
+        }
+    }
+    return r.copy
+}
+
+// The last offscreen frame drawn, RGBA as the image holds it; null before
+// one was. The pixels are the module's, and the next read overwrites them.
+offscreen_pixels() -> ptr {
+    r = readback()
+    hook(r)
+    if ae3d_vk_frame_offscreen() != 1 { return null }
+    return read(r, r.offscreen, false)
+}
+
+// Arm a capture: the next windowed frame recorded is copied out. False
+// when the surface will not give a frame back.
+request_capture() -> bool {
+    if ae3d_vk_ready() != 1 || ae3d_vk_frame_offscreen() == 1 || ae3d_vk_frame_copyable() != 1 { return false }
+    r = readback()
+    hook(r)
+    r.captured = 0 - 1
+    r.asked = true
+    return true
+}
+
+capture_ready() -> bool { return readback().captured >= 0 }
+
+// The captured frame as RGBA, top row first; null before one is ready.
+capture_pixels() -> ptr {
+    r = readback()
+    return read(r, r.captured, ae3d_vk_frame_bgr() == 1)
+}
+
+capture_width() -> int { return readback().width }
+capture_height() -> int { return readback().height }

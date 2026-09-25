@@ -105,8 +105,10 @@ buffers when it is added, so the model leaves the backend and comes back around
 the change; `core.model_set_mesh` and `core.model_disable_instancing` say so
 where they are defined.
 
-**Assets** lists the meshes under `resources/obj`. Clicking one loads it into the
-scene and frames it.
+**Assets** lists the meshes under `resources/obj`, then the animated figures
+under `resources/figures` (glTF, `.glb`). Clicking one loads it into the scene
+and frames it. A figure comes in as a group at the origin with the figure
+under it (`ae3d.figure`), playing its first clip.
 
 **Behaviour** attaches a script to the selected object. A script is an ordinary
 Aether source file in `resources/scripts`, with Unity's phases by Unity's
@@ -220,7 +222,24 @@ under its name), so it is duplicated, deleted and undone with it, and the
 scene file carries it as the model's `physics` record -- the same record a
 program's scene writes (`AE3D_SCENE_OUT`), so a scene built by a program
 opens here with its bodies and one built here loads into a program with
-them. A section is the rows that belong to it rather than a run of them: the
+them.
+
+The figure section is an animated figure's (#439), shown when the
+selection is one:
+- a button for each of its file's clips, the first eight, named for them,
+  with the playing one lit;
+- Loop, lit while the clip starts again at its end;
+- the speed it plays at;
+- how far into the clip it stands, as a share of the clip, which scrubs it.
+
+A figure stands in its pose while the scene is edited, and plays while it
+is simulated. A clip and Loop are one undo step each, as a body's kind is;
+the rows undo like any row. Its meshes come and go with its group (delete,
+undo, redo), and are not rows: the scene file carries the group with its
+`figure` record, the file and the clip at its speed and time, and a scene
+read back makes the figure again from its file.
+
+A section is the rows that belong to it rather than a run of them: the
 water rows are not contiguous, because the foam, wave scale and shore rows
 were added after the row indices below them were spoken for, so which section
 a row is in is a question asked of the row and not of its number. The water

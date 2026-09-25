@@ -95,13 +95,8 @@ double ae3d_vk_pass_ms(int pass);
 int    ae3d_vk_pipeline_binds(void);
 int    ae3d_vk_set_binds(void);
 int    ae3d_vk_sample_count(void);
-void  *ae3d_vk_offscreen_pixels(void);
 int    ae3d_vk_offscreen_width(void);
 int    ae3d_vk_offscreen_height(void);
-/* Windowed frame capture: arm it, then after a frame is submitted read the
-   presented image back as RGBA (top row first). request returns 0 when the
-   surface cannot be a transfer source. */
-int    ae3d_vk_request_capture(void);
 int    ae3d_vk_texture_create_float(int width, int height, const float *rgba);
 int    ae3d_vk_texture_create_rgba(int width, int height, int depth, const unsigned char *rgba);
 void   ae3d_vk_set_pose_bank(int texture_handle);
@@ -136,7 +131,10 @@ void   ae3d_vk_set_ray_reach(double metres);
 int    ae3d_vk_ray_empty(void);
 int    ae3d_vk_max_texture_size(void);
 void   ae3d_vk_flush_uploads(void);
-void   ae3d_vk_set_frame_hooks(void *record, void *collect, void *release, void *context);
+int    ae3d_vk_add_frame_hooks(void *record, void *collect, void *release, void *context);
+int    ae3d_vk_ready(void);
+void   ae3d_vk_frame_wait(int slot);
+int    ae3d_vk_frame_bgr(void);
 void  *ae3d_vk_instance_handle(void);
 void  *ae3d_vk_physical_device_handle(void);
 void  *ae3d_vk_device_handle(void);
@@ -182,10 +180,6 @@ int    ae3d_vk_taa(void);
 int    ae3d_vk_taa_history(void);
 int    ae3d_vk_frame_width(void);
 int    ae3d_vk_frame_height(void);
-int    ae3d_vk_capture_ready(void);
-void  *ae3d_vk_capture_pixels(void);
-int    ae3d_vk_capture_width(void);
-int    ae3d_vk_capture_height(void);
 
 
 /* The asking end of the same channel, so a tool that measures a scene can be

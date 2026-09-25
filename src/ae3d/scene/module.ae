@@ -26,6 +26,7 @@ import ae3d.geometry
 exports (
     scene_save, scene_load, scene_load_lights, scene_load_attachments,
     FigureSpec, figure_spec_new, attachment_figure, attachment_set_figure,
+    MotionSpec, motion_spec_new, attachment_motion, attachment_set_motion,
     scene_load_view, view_defaults, View, Attachment, attachment_new,
     attachment_model, attachment_component, attachment_script, attachment_water,
     attachment_world, attachment_physics, attachment_set_physics, attachment_light, attachment_set_light,
@@ -51,6 +52,7 @@ struct Attachment {
     world: ptr
     physics: ptr                   // *PhysicsSpec, or null
     figure: ptr                    // *FigureSpec, or null
+    motion: ptr                    // *MotionSpec, or null
     // The light a light marker stands for, or null. A scene's lights used
     // to be one array at the root, so every marker in a loaded scene stood
     // for the same light and only the first of a program's lights survived
@@ -139,6 +141,37 @@ figure_spec_new(gltf: string, clip: string, speed: float, looping: bool, time: f
     f.looping = looping
     f.time = time
     return f
+}
+
+// An active ragdoll on a figure (ae3d.motion): the mode it is in, the share
+// of its full strength, whether it protects itself falling, and how long it
+// lies before it gets up by itself (0 never). The scene file carries it as
+// the "motion" record of the figure's group.
+struct MotionSpec {
+    mode: string                   // "animated", "powered" or "limp"
+    strength: float
+    protective: bool
+    get_up: float
+}
+
+motion_spec_new(mode: string, strength: float, protective: bool, get_up: float) -> *MotionSpec {
+    m = heap.new(MotionSpec)
+    m.mode = string.copy(mode)
+    m.strength = strength
+    m.protective = protective
+    m.get_up = get_up
+    return m
+}
+
+attachment_motion(a: *Attachment) -> *MotionSpec {
+    if a == null { return null }
+    return a.motion as *MotionSpec
+}
+
+attachment_set_motion(a: *Attachment, spec: *MotionSpec) {
+    if a == null { return }
+    if a.motion != null { heap.free(a.motion as *MotionSpec) }
+    a.motion = spec as ptr
 }
 
 attachment_figure(a: *Attachment) -> *FigureSpec {
@@ -667,14 +700,23 @@ scene_load_attachments(path: string, models: ptr) -> ptr {
                                   field_number(fig_json, "time", 0.0))
         }
 
+        // The motion record, on a figure's group.
+        mot = null as *MotionSpec
+        mot_json = json.object_get_raw(entry, "motion")
+        if mot_json != null {
+            mot = motion_spec_new(field_string(mot_json, "mode"), field_number(mot_json, "strength", 1.0),
+                                  field_bool(mot_json, "protective", true), field_number(mot_json, "get_up", 0.0))
+        }
+
         // The light of a marker, its own. Belongs to the caller, like the
         // simulation and the voxel world above it.
         beam = load_light(json.object_get_raw(entry, "light"))
 
-        if component != "" || script != "" || sim != null || world != null || spec != null || fig != null || beam != null {
+        if component != "" || script != "" || sim != null || world != null || spec != null || fig != null || mot != null || beam != null {
             a = attachment_new(m, component, script, sim, world)
             a.physics = spec as ptr
             a.figure = fig as ptr
+            a.motion = mot as ptr
             a.light = beam as ptr
             list.add_raw(attachments, a as ptr)
         }
@@ -907,6 +949,7 @@ attachment_new(m: *Model, component: string, script: string,
     a.world = world as ptr
     a.physics = null
     a.figure = null
+    a.motion = null
     a.light = null
     a.internal = false
     return a
@@ -928,6 +971,7 @@ attachments_free(attachments: ptr) {
         a = list.get_raw(attachments, i) as *Attachment
         if a != null && a.physics != null { heap.free(a.physics as *PhysicsSpec) }
         if a != null && a.figure != null { heap.free(a.figure as *FigureSpec) }
+        if a != null && a.motion != null { heap.free(a.motion as *MotionSpec) }
         i = i + 1
     }
     i = 0
@@ -938,6 +982,29 @@ attachments_free(attachments: ptr) {
         i = i + 1
     }
     list.free(attachments)
+}
+
+// The attachment of the model's that carries a record of a kind, or null.
+// A model can have more than one: the figure on a group is ae3d.figure's
+// and the active ragdoll on it ae3d.motion's, each module saying what it
+// knows.
+const RECORD_PHYSICS = 1
+const RECORD_FIGURE = 2
+const RECORD_MOTION = 3
+
+record_for(attachments: ptr, m: *Model, kind: int) -> *Attachment {
+    if attachments == null { return null }
+    i = 0
+    while i < list.size(attachments) {
+        a = list.get_raw(attachments, i) as *Attachment
+        if a != null && a.model == m as ptr {
+            if kind == RECORD_PHYSICS && a.physics != null { return a }
+            if kind == RECORD_FIGURE && a.figure != null { return a }
+            if kind == RECORD_MOTION && a.motion != null { return a }
+        }
+        i = i + 1
+    }
+    return null
 }
 
 // What is attached to this model, or null. Matched by the model itself rather
@@ -1259,8 +1326,9 @@ scene_save(models: ptr, lights: ptr, attachments: ptr, view: *View,
                 if attached.component != "" {
                     json.object_set_raw(entry, "component", json.str(attached.component))
                 }
-                if attached.physics != null {
-                    spec = attached.physics as *PhysicsSpec
+                bodied = record_for(attachments, m, RECORD_PHYSICS)
+                if bodied != null {
+                    spec = bodied.physics as *PhysicsSpec
                     spec_json = json.obj()
                     json.object_set_raw(spec_json, "body", json.str(spec.body))
                     json.object_set_raw(spec_json, "collider", json.str(spec.collider))
@@ -1269,8 +1337,9 @@ scene_save(models: ptr, lights: ptr, attachments: ptr, view: *View,
                     json.object_set_raw(spec_json, "density", json.num(spec.density))
                     json.object_set_raw(entry, "physics", spec_json)
                 }
-                if attached.figure != null {
-                    fig = attached.figure as *FigureSpec
+                figured = record_for(attachments, m, RECORD_FIGURE)
+                if figured != null {
+                    fig = figured.figure as *FigureSpec
                     fig_json = json.obj()
                     json.object_set_raw(fig_json, "gltf", json.str(fig.gltf))
                     json.object_set_raw(fig_json, "clip", json.str(fig.clip))
@@ -1278,6 +1347,16 @@ scene_save(models: ptr, lights: ptr, attachments: ptr, view: *View,
                     json.object_set_raw(fig_json, "loop", json.boolean(fig.looping))
                     json.object_set_raw(fig_json, "time", json.num(fig.time))
                     json.object_set_raw(entry, "figure", fig_json)
+                }
+                moved = record_for(attachments, m, RECORD_MOTION)
+                if moved != null {
+                    mot = moved.motion as *MotionSpec
+                    mot_json = json.obj()
+                    json.object_set_raw(mot_json, "mode", json.str(mot.mode))
+                    json.object_set_raw(mot_json, "strength", json.num(mot.strength))
+                    json.object_set_raw(mot_json, "protective", json.boolean(mot.protective))
+                    json.object_set_raw(mot_json, "get_up", json.num(mot.get_up))
+                    json.object_set_raw(entry, "motion", mot_json)
                 }
                 if attached.script != "" {
                     json.object_set_raw(entry, "script", json.str(attached.script))

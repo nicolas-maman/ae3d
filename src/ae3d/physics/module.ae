@@ -57,9 +57,10 @@ exports (
     ragdoll, ragdoll_free, ragdoll_bone, ragdoll_human, ragdoll_set_velocity, ragdoll_kick,
     ragdoll_stand, ragdoll_release, ragdoll_is_standing, ragdoll_turn, ragdoll_of_shape, hit_event_count, hit_event,
     ragdoll_dress, ragdoll_dress_named, ragdoll_is_dressed, humanoid_bone,
+    HUMANOID_ENGINE, HUMANOID_MIXAMO, HUMANOID_MIXAMO_BARE, humanoid_scheme, humanoid_scheme_bone, ragdoll_dress_humanoid,
     ragdoll_follow, ragdoll_is_following, ragdoll_power, ragdoll_is_powered, ragdoll_set_bone_drive,
     ragdoll_bone_drive_torque, ragdoll_set_balance_assist, ragdoll_aim, ragdoll_clear_aim, ragdoll_clear_aims, ragdoll_is_aimed, ragdoll_balance_assist,
-    ragdoll_apply_impulse, ragdoll_bone_rotation, ragdoll_bone_target,
+    ragdoll_apply_impulse, ragdoll_bone_rotation, ragdoll_bone_target, RagdollHit, ragdoll_at, ray_hits,
     ragdoll_center_of_mass, ragdoll_mass, ragdoll_joint_error, ragdoll_tilt,
     POSE_STRIDE, ragdoll_body_pose, ragdoll_animation_pose, ragdoll_move_animation, ragdoll_show_pose,
     ragdoll_restore_animation, ragdoll_pose_lowest, ragdoll_pose_end, ragdoll_rig_bone_rotation, ragdoll_rest_forward,
@@ -1708,6 +1709,46 @@ ragdoll_of_shape(p: *Physics, id: ShapeId) -> *Ragdoll {
     return null
 }
 ragdoll_human(r: *Ragdoll) -> *Human { return &r.human }
+
+// Whether the ray from `origin` along `direction` (a unit vector) meets any
+// shape within `reach` metres.
+ray_hits(p: *Physics, origin: Vec3, direction: Vec3, reach: float) -> bool {
+    if p == null { return false }
+    hit = physics_world.cast_ray_closest(p.world_id, origin, core.v3_mul(direction, reach), shape.default_query_filter())
+    return hit.hit
+}
+
+// What a ray met first, when it was a ragdoll: which, which bone (the
+// human's order), and where.
+struct RagdollHit {
+    ragdoll: ptr                   // *Ragdoll, or null when the ray met none first
+    bone: int
+    point: Vec3
+}
+
+// The ragdoll bone the ray from `origin` along `direction` (a unit vector)
+// meets first within `reach` metres -- what a click on a figure strikes.
+// A ragdoll of null when what it meets first is not a ragdoll, or nothing.
+ragdoll_at(p: *Physics, origin: Vec3, direction: Vec3, reach: float) -> RagdollHit {
+    out = RagdollHit { ragdoll: null, bone: 0 - 1, point: origin }
+    if p == null { return out }
+    hit = physics_world.cast_ray_closest(p.world_id, origin, core.v3_mul(direction, reach), shape.default_query_filter())
+    if !hit.hit { return out }
+    r = ragdoll_of_shape(p, hit.shape_id)
+    if r == null { return out }
+    body = dynamics.shape_get_body(hit.shape_id)
+    i = 0
+    while i < human.BONE_COUNT {
+        id = human.bone_at(&r.human, i).body_id
+        if id.index1 == body.index1 && id.world0 == body.world0 && id.generation == body.generation {
+            out.ragdoll = r as ptr
+            out.bone = i
+            out.point = hit.point
+        }
+        i = i + 1
+    }
+    return out
+}
 ragdoll_set_velocity(r: *Ragdoll, v: Vec3) { human.human_set_velocity(&r.human, v) }
 ragdoll_kick(r: *Ragdoll, angular_impulse: Vec3) { human.human_apply_angular_impulse(&r.human, angular_impulse) }
 
@@ -1752,6 +1793,100 @@ humanoid_bone(index: int) -> string {
     if index == human.BONE_LOWER_ARM_L { return "ElbowL" }
     if index == human.BONE_UPPER_ARM_R { return "ShoulderR" }
     return "ElbowR"
+}
+
+// The ways a humanoid rig's twelve bones are named: the engine's Blender
+// pipeline's, and Mixamo's -- with its "mixamorig:" prefix, and without it
+// as most packs that follow it write them. Its three spine bones are Spine,
+// Spine1 and Spine2; the ragdoll's chest is the top one. Its neck is the
+// neck: the ragdoll's neck capsule is the head, and turns with it.
+const HUMANOID_ENGINE = 0
+const HUMANOID_MIXAMO = 1
+const HUMANOID_MIXAMO_BARE = 2
+const HUMANOID_SCHEMES = 3
+
+// Bone `index` of the ragdoll, in the naming `scheme`.
+humanoid_scheme_bone(scheme: int, index: int) -> string {
+    if scheme == HUMANOID_ENGINE { return humanoid_bone(index) }
+    if scheme == HUMANOID_MIXAMO { return mixamo_rig_bone(index) }
+    return mixamo_bone(index)
+}
+
+// Mixamo's names as its own exports write them.
+mixamo_rig_bone(index: int) -> string {
+    if index == human.BONE_PELVIS { return "mixamorig:Hips" }
+    if index == human.BONE_SPINE_01 { return "mixamorig:Spine" }
+    if index == human.BONE_SPINE_03 { return "mixamorig:Spine2" }
+    if index == human.BONE_NECK { return "mixamorig:Neck" }
+    if index == human.BONE_THIGH_L { return "mixamorig:LeftUpLeg" }
+    if index == human.BONE_CALF_L { return "mixamorig:LeftLeg" }
+    if index == human.BONE_THIGH_R { return "mixamorig:RightUpLeg" }
+    if index == human.BONE_CALF_R { return "mixamorig:RightLeg" }
+    if index == human.BONE_UPPER_ARM_L { return "mixamorig:LeftArm" }
+    if index == human.BONE_LOWER_ARM_L { return "mixamorig:LeftForeArm" }
+    if index == human.BONE_UPPER_ARM_R { return "mixamorig:RightArm" }
+    return "mixamorig:RightForeArm"
+}
+
+mixamo_bone(index: int) -> string {
+    if index == human.BONE_PELVIS { return "Hips" }
+    if index == human.BONE_SPINE_01 { return "Spine" }
+    if index == human.BONE_SPINE_03 { return "Spine2" }
+    if index == human.BONE_NECK { return "Neck" }
+    if index == human.BONE_THIGH_L { return "LeftUpLeg" }
+    if index == human.BONE_CALF_L { return "LeftLeg" }
+    if index == human.BONE_THIGH_R { return "RightUpLeg" }
+    if index == human.BONE_CALF_R { return "RightLeg" }
+    if index == human.BONE_UPPER_ARM_L { return "LeftArm" }
+    if index == human.BONE_LOWER_ARM_L { return "LeftForeArm" }
+    if index == human.BONE_UPPER_ARM_R { return "RightArm" }
+    return "RightForeArm"
+}
+
+// The first naming whose twelve bones the skeleton has every one of, or -1
+// for a rig that is not a humanoid the engine knows.
+humanoid_scheme(skeleton: *Skeleton) -> int {
+    if skeleton == null { return 0 - 1 }
+    scheme = 0
+    while scheme < HUMANOID_SCHEMES {
+        all = true
+        i = 0
+        while i < human.BONE_COUNT && all {
+            if skin.skeleton_find(skeleton, humanoid_scheme_bone(scheme, i)) < 0 { all = false }
+            i = i + 1
+        }
+        if all { return scheme }
+        scheme = scheme + 1
+    }
+    return 0 - 1
+}
+
+// A figure put on the ragdoll where the figure stands and the way it faces:
+// the ragdoll turned first to face as the rig's feet do, so dressing it
+// leaves the figure turned as the scene had it, then dressed by whichever
+// naming the rig's bones follow. False when the rig is no humanoid the
+// engine knows.
+ragdoll_dress_humanoid(r: *Ragdoll, skeleton: *Skeleton) -> bool {
+    scheme = humanoid_scheme(skeleton)
+    if r == null || scheme < 0 { return false }
+    left = skin.skeleton_find(skeleton, humanoid_scheme_bone(scheme, human.BONE_CALF_L))
+    right = skin.skeleton_find(skeleton, humanoid_scheme_bone(scheme, human.BONE_CALF_R))
+    rig_facing = core.v3_add(rig_foot_direction(skeleton, left), rig_foot_direction(skeleton, right))
+    body_facing = core.v3_add(body_foot_direction(r, human.BONE_CALF_L), body_foot_direction(r, human.BONE_CALF_R))
+    if core.v3_len(rig_facing) > 0.0001 && core.v3_len(body_facing) > 0.0001 {
+        want = atan2(0.0 - rig_facing.z, rig_facing.x)
+        have = atan2(0.0 - body_facing.z, body_facing.x)
+        ragdoll_turn(r, want - have)
+    }
+    names = strarr.new()
+    i = 0
+    while i < human.BONE_COUNT {
+        strarr.push(names, humanoid_scheme_bone(scheme, i))
+        i = i + 1
+    }
+    ok = ragdoll_dress_named(r, skeleton, strarr.array(names))
+    strarr.free(names)
+    return ok
 }
 
 // The skinned figure worn by the ragdoll, its rig named as the pipeline

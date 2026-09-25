@@ -13,18 +13,19 @@
 // The C backend owns the device, the frame's command buffer and its image;
 // this module owns the meter's image, its memory, and its buffers, and
 // frees them when the swapchain they were sized to goes. It reaches the
-// frame through the hooks vulkan.c calls (ae3d_vk_set_frame_hooks): record
+// frame through the hooks vulkan.c calls (ae3d_vk_add_frame_hooks): record
 // after the last pass, collect after the fence, release with the swapchain.
+// Its buffers are ae3d.vkhost's.
 
 import contrib.vulkan.vk
 import std.mem
+import ae3d.vkhost
 
 exports (
     set_on, is_on, measured
 )
 
-extern ae3d_vk_set_frame_hooks(record: ptr, collect: ptr, release: ptr, context: ptr)
-extern ae3d_vk_physical_device_handle() -> ptr
+extern ae3d_vk_add_frame_hooks(record: ptr, collect: ptr, release: ptr, context: ptr) -> int
 extern ae3d_vk_device_handle() -> ptr
 extern ae3d_vk_frame_commands() -> ptr
 extern ae3d_vk_frame_slot() -> int
@@ -57,9 +58,7 @@ struct Meter {
     height: int
     small_width: int                 // the last level
     small_height: int
-    buffers: ptr                     // VkBuffer[MAX_FRAMES]
-    buffer_memory: ptr               // VkDeviceMemory[MAX_FRAMES]
-    mapped: ptr                      // ptr[MAX_FRAMES]
+    buffers: ptr                     // *HostBuffer[MAX_FRAMES]
     written: ptr                     // int[MAX_FRAMES]
     have: bool
     mean: float
@@ -68,14 +67,11 @@ struct Meter {
 }
 
 var g_meter: ptr = null
-var g_loaded: ptr = null            // the device whose entry points contrib.vulkan.vk calls through
 
 meter() -> *Meter {
     if g_meter == null {
         m = calloc(1, sizeof(Meter)) as *Meter
         m.buffers = calloc(MAX_FRAMES, 8)
-        m.buffer_memory = calloc(MAX_FRAMES, 8)
-        m.mapped = calloc(MAX_FRAMES, 8)
         m.written = calloc(MAX_FRAMES, 8)
         m.linear = calloc(256, 8)
         table = m.linear as float[]
@@ -107,39 +103,6 @@ measured(out: ptr) -> bool {
 
 // --- device objects --------------------------------------------------------------------------------
 
-// The index of a memory type `bits` allows with all of `wanted`, or -1.
-memory_type(bits: int, wanted: int) -> int {
-    props = calloc(1, sizeof(VkPhysicalDeviceMemoryProperties)) as *VkPhysicalDeviceMemoryProperties
-    vk.vkGetPhysicalDeviceMemoryProperties(ae3d_vk_physical_device_handle(), props as ptr)
-    found = 0 - 1
-    i = 0
-    while i < (props.memoryTypeCount) as int && found < 0 {
-        kind = (props as ptr + 4 + i * sizeof(VkMemoryType)) as *VkMemoryType
-        if (bits & (1 << i)) != 0 && ((kind.propertyFlags) as int & wanted) == wanted { found = i }
-        i = i + 1
-    }
-    free(props as ptr)
-    return found
-}
-
-// Memory of a kind `wanted` for what `requirements` asks; null when there
-// is none.
-allocate(requirements: *VkMemoryRequirements, wanted: int) -> ptr {
-    kind = memory_type((requirements.memoryTypeBits) as int, wanted)
-    if kind < 0 { return null }
-    info = calloc(1, sizeof(VkMemoryAllocateInfo)) as *VkMemoryAllocateInfo
-    info.sType = vk.STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO
-    info.allocationSize = requirements.size
-    info.memoryTypeIndex = kind
-    out = calloc(1, 8)
-    r = vk.vkAllocateMemory(ae3d_vk_device_handle(), info as ptr, null, out)
-    got = (out as ptr[])[0]
-    free(out)
-    free(info as ptr)
-    if r != vk.SUCCESS { return null }
-    return got
-}
-
 // The halving chain: `levels` levels from w x h, device-local, blitted to
 // and from.
 make_image(m: *Meter, w: int, h: int, levels: int) -> bool {
@@ -169,49 +132,10 @@ make_image(m: *Meter, w: int, h: int, levels: int) -> bool {
     }
     needs = calloc(1, sizeof(VkMemoryRequirements)) as *VkMemoryRequirements
     vk.vkGetImageMemoryRequirements(device, m.image, needs as ptr)
-    m.memory = allocate(needs, vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+    m.memory = vkhost.allocate(needs, vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
     free(needs as ptr)
     if m.memory == null { return false }
     return vk.vkBindImageMemory(device, m.image, m.memory, 0) == vk.SUCCESS
-}
-
-// A buffer the host reads, `bytes` long, into slot `f`: cached memory, the
-// CPU reading every byte every frame (from write-combined memory that read
-// halved the frame rate), or plain coherent where a device has no cached
-// kind. Mapped for good.
-make_buffer(m: *Meter, f: int, bytes: int) -> bool {
-    device = ae3d_vk_device_handle()
-    ci = calloc(1, sizeof(VkBufferCreateInfo)) as *VkBufferCreateInfo
-    ci.sType = vk.STRUCTURE_TYPE_BUFFER_CREATE_INFO
-    ci.size = bytes
-    ci.usage = vk.BUFFER_USAGE_TRANSFER_DST_BIT
-    ci.sharingMode = vk.SHARING_MODE_EXCLUSIVE
-    out = calloc(1, 8)
-    r = vk.vkCreateBuffer(device, ci as ptr, null, out)
-    buffer = (out as ptr[])[0]
-    free(ci as ptr)
-    if r != vk.SUCCESS {
-        free(out)
-        return false
-    }
-    (m.buffers as ptr[])[f] = buffer
-    needs = calloc(1, sizeof(VkMemoryRequirements)) as *VkMemoryRequirements
-    vk.vkGetBufferMemoryRequirements(device, buffer, needs as ptr)
-    visible = vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT
-    memory = allocate(needs, visible | vk.MEMORY_PROPERTY_HOST_CACHED_BIT)
-    if memory == null { memory = allocate(needs, visible) }
-    free(needs as ptr)
-    if memory == null {
-        free(out)
-        return false
-    }
-    (m.buffer_memory as ptr[])[f] = memory
-    vk.vkBindBufferMemory(device, buffer, memory, 0)
-    (out as ptr[])[0] = null
-    vk.vkMapMemory(device, memory, 0, bytes, 0, out)
-    (m.mapped as ptr[])[f] = (out as ptr[])[0]
-    free(out)
-    return true
 }
 
 // Everything the meter made, gone; it is made again at the next frame's
@@ -225,13 +149,8 @@ release(m: *Meter) {
     m.memory = null
     f = 0
     while f < MAX_FRAMES {
-        memory = (m.buffer_memory as ptr[])[f]
-        if (m.mapped as ptr[])[f] != null { vk.vkUnmapMemory(device, memory) }
-        if (m.buffers as ptr[])[f] != null { vk.vkDestroyBuffer(device, (m.buffers as ptr[])[f], null) }
-        if memory != null { vk.vkFreeMemory(device, memory, null) }
-        (m.mapped as ptr[])[f] = null
+        vkhost.host_buffer_free((m.buffers as ptr[])[f] as *HostBuffer)
         (m.buffers as ptr[])[f] = null
-        (m.buffer_memory as ptr[])[f] = null
         (m.written as int[])[f] = 0
         f = f + 1
     }
@@ -243,13 +162,7 @@ release(m: *Meter) {
 // The chain and the buffers for this frame's size.
 make_meter(m: *Meter) -> bool {
     release(m)
-    device = ae3d_vk_device_handle()
-    if g_loaded != device {
-        // The device's commands through its own entry points, once a device.
-        vk.load_device(device)
-        g_loaded = device
-    }
-    m.device = device
+    m.device = vkhost.device()
     w = half(ae3d_vk_frame_width())
     h = half(ae3d_vk_frame_height())
     levels = 1
@@ -273,10 +186,12 @@ make_meter(m: *Meter) -> bool {
     frames = ae3d_vk_frames_in_flight()
     f = 0
     while f < frames && f < MAX_FRAMES {
-        if !make_buffer(m, f, sw * sh * 4) {
+        b = vkhost.host_buffer(sw * sh * 4)
+        if b == null {
             release(m)
             return false
         }
+        (m.buffers as ptr[])[f] = b as ptr
         f = f + 1
     }
     return true
@@ -407,7 +322,7 @@ record_hook(context: ptr) {
     region.imageExtent.width = m.small_width
     region.imageExtent.height = m.small_height
     region.imageExtent.depth = 1
-    vk.vkCmdCopyImageToBuffer(commands, m.image, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, (m.buffers as ptr[])[slot], 1, region as ptr)
+    vk.vkCmdCopyImageToBuffer(commands, m.image, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, ((m.buffers as ptr[])[slot] as *HostBuffer).buffer, 1, region as ptr)
     free(region as ptr)
     memory_barrier(commands, vk.PIPELINE_STAGE_TRANSFER_BIT, vk.PIPELINE_STAGE_HOST_BIT,
                    vk.ACCESS_TRANSFER_WRITE_BIT, vk.ACCESS_HOST_READ_BIT)
@@ -438,8 +353,9 @@ collect_hook(context: ptr) {
     slot = ae3d_vk_frame_slot()
     if slot < 0 || slot >= MAX_FRAMES { return }
     written = m.written as int[]
-    texels = (m.mapped as ptr[])[slot]
-    if written[slot] == 0 || texels == null { return }
+    b = (m.buffers as ptr[])[slot] as *HostBuffer
+    if written[slot] == 0 || b == null { return }
+    texels = b.mapped
     written[slot] = 0
     count = m.small_width * m.small_height
     if count <= 0 { return }
@@ -471,7 +387,7 @@ set_on(on: bool) {
     m.on = on
     if on && !m.hooked {
         m.hooked = true
-        ae3d_vk_set_frame_hooks((&ae3d_vkmeter_record) as ptr, (&ae3d_vkmeter_collect) as ptr,
+        ae3d_vk_add_frame_hooks((&ae3d_vkmeter_record) as ptr, (&ae3d_vkmeter_collect) as ptr,
                                 (&ae3d_vkmeter_release) as ptr, null)
     }
 }
