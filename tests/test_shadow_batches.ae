@@ -61,13 +61,17 @@ release_models() {
 }
 
 // The mean of an 8 x 8 block at the middle of the frame, where the cube is.
-// The frame is the size ci.sh gives every window (AE3D_WIDTH, AE3D_HEIGHT),
-// so the size asked for and the size made are the same.
-middle() -> float {
-    if capture.frame(WIDTH, HEIGHT) == 0 { return 0.0 - 1.0 }
+// The frame is read at the size it was drawn, the window's framebuffer: the
+// size asked for is overridden by AE3D_WIDTH and AE3D_HEIGHT and doubled on a
+// HiDPI screen, and the middle of any other size is the background.
+middle(e: *Engine) -> float {
+    win = engine.engine_window(e)
+    w = platform.window_fb_width(win)
+    h = platform.window_fb_height(win)
+    if capture.frame(w, h) == 0 { return 0.0 - 1.0 }
     block = calloc(8, 8)
     value = 0.0 - 1.0
-    if capture.region(WIDTH / 2 - 4, HEIGHT / 2 - 4, 8, 8, 0, 0, block) != 0 {
+    if capture.region(w / 2 - 4, h / 2 - 4, 8, 8, 0, 0, block) != 0 {
         value = (capture.slot(block, 0) + capture.slot(block, 1) + capture.slot(block, 2)) / 3.0
     }
     free(block)
@@ -90,12 +94,12 @@ on_render(state: ptr, e: *Engine, delta: float) {
     frame = engine.engine_frame_count(e)
     // Past the first frames, whose picture is still settling (#394).
     if frame == 6 {
-        g_shadowed = middle()
+        g_shadowed = middle(e)
         if g_shadowed >= 0.0 { g_measured = g_measured + 1 }
         engine.engine_set_shadows(e, false)
     }
     if frame == 10 {
-        g_unshadowed = middle()
+        g_unshadowed = middle(e)
         if g_unshadowed >= 0.0 { g_measured = g_measured + 1 }
     }
 }

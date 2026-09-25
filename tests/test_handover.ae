@@ -1,0 +1,591 @@
+// A horde's struck zombies handed to active ragdolls and taken back
+// (ae3d.handover, #414), held to numbers. The horde is the box man fixture
+// baked into a pose bank from its Idle, forty-eight of it on a ground; the
+// pool is four of the same figure. No window: the engine is stepped by
+// hand, as the editor's simulation steps it.
+//
+//   - handing over does not pop: every bone of the figure, as it stands
+//     the moment it is handed over, against where the pose bank puts it on
+//     the instance at that phase;
+//   - the instance is out of the horde while handed over (out of every
+//     tier of the sort, and not moved by the step) and in it again after;
+//   - four struck hard fall, get up and go back to the horde, each where
+//     its figure stood and in the pose it stood in;
+//   - a fifth strike while all four are falling is refused;
+//   - a killed one stays down, is not given back, and is despawned;
+//   - with four standing, a strike takes the farthest of them back first;
+//   - the whole run twice, bit for bit the same;
+//   - what the pool costs a frame: none handed over, and twelve.
+
+import std.list
+import ae3d.core
+import ae3d.engine
+import ae3d.behaviour
+import ae3d.loader
+import ae3d.physics
+import ae3d.skin
+import ae3d.gltf
+import ae3d.crowd
+import ae3d.figure
+import ae3d.motion
+import ae3d.handover
+import aephysics.human
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+extern clock_ns() -> long
+extern cos(x: float) -> float
+extern sin(x: float) -> float
+
+const PATH = "tests/fixtures/gltf/humanoid.glb"
+const CLIP = "Idle"
+const FRAMES = 48
+const ZOMBIES = 48
+const POOL = 4
+const STEP = 0.016666666666666666
+const FACING = 0.0 - 1.5707963267948966
+const EDGE = 20.0
+
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, ok: bool) {
+    g_checks = g_checks + 1
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        g_failures = g_failures + 1
+        println("  FAIL ${name}")
+    }
+}
+
+// The horde: its columns, stepped every frame by a behaviour of its own,
+// passing by the zombies the pool has out.
+struct Shamblers {
+    pos: ptr
+    vel: ptr
+    yaw: ptr
+    phase: ptr
+    count: int
+    walk: float
+    pool: ptr                        // *Handover, or null
+}
+
+horde_new(count: int, walk: float) -> *Shamblers {
+    h = calloc(1, sizeof(Shamblers)) as *Shamblers
+    h.pos = calloc(count * 3, 8)
+    h.vel = calloc(count * 3, 8)
+    h.yaw = calloc(count, 8)
+    h.phase = calloc(count, 8)
+    h.count = count
+    h.walk = walk
+    pos = h.pos as float[]
+    yaw = h.yaw as float[]
+    phase = h.phase as float[]
+    i = 0
+    while i < count {
+        pos[i * 3] = ((i % 8) as float) * 3.0 - 10.5
+        pos[i * 3 + 1] = 0.02
+        pos[i * 3 + 2] = ((i / 8) as float) * 3.0 - 7.5
+        yaw[i] = (i as float) * 0.7
+        p = (i as float) * 0.37
+        phase[i] = p - ((p as int) as float)
+        i = i + 1
+    }
+    return h
+}
+
+horde_free(h: *Shamblers) {
+    free(h.pos)
+    free(h.vel)
+    free(h.yaw)
+    free(h.phase)
+    free(h as ptr)
+}
+
+horde_update(state: ptr, e: *Engine, delta: float) {
+    h = state as *Shamblers
+    out = null as ptr
+    if h.pool != null { out = handover.outs(h.pool as *Handover) }
+    crowd.crowd_wander(h.vel, h.yaw, h.count, 0.6)
+    crowd.crowd_step_out(h.pos, h.vel, h.yaw, h.phase, out, 0, h.count, delta, 2.0,
+                         0.0 - EDGE, EDGE, 0.0 - EDGE, EDGE, 0.02, h.walk, null)
+}
+
+// A world: a ground, the horde stepped by the engine, and a pool.
+struct Street {
+    engine: ptr
+    horde: ptr
+    pool: ptr
+    stepper: ptr
+}
+
+world_new(zombies: int, pool_size: int, walk: float) -> Street {
+    e = engine.engine_new()
+    engine.engine_set_fixed_step(e, STEP)
+    physics.attach(e)
+    ground = engine.object(e, "Ground", loader.cube(1.0))
+    behaviour.object_set_position(ground, core.vec3(0.0, 0.0 - 0.5, 0.0))
+    physics.box_collider(ground, core.vec3(40.0, 0.5, 40.0), physics.material(0.8, 0.0))
+    hd = horde_new(zombies, walk)
+    pool = null as *Handover
+    if pool_size > 0 {
+        pool = handover.pool_new(e, PATH, CLIP, pool_size)
+        if pool != null {
+            handover.set_horde(pool, hd.pos, hd.yaw, hd.phase, zombies)
+            handover.set_facing(pool, FACING)
+        }
+    }
+    hd.pool = pool as ptr
+    b = engine.behaviour_new("horde", hd as ptr)
+    b.update = horde_update
+    engine.engine_add_behaviour(e, b)
+    return Street { engine: e as ptr, horde: hd as ptr, pool: pool as ptr, stepper: b as ptr }
+}
+
+world_free(w: Street) {
+    e = w.engine as *Engine
+    // The world before the engine, so the next engine made (which may
+    // come back at the same address) does not find this one's physics.
+    physics.physics_free(physics.of(e))
+    engine.engine_free(e)
+    motion.motions_free(e)
+    figure.figures_free(e)
+    if w.pool != null { handover.pool_free(w.pool as *Handover) }
+    horde_free(w.horde as *Shamblers)
+}
+
+// --- the pose bank's pose on an instance -------------------------------------------------------------
+
+// Where the bank puts bone `bone` on an instance at (x, y, z), drawn
+// turned `draw_yaw`, at `phase`: the instance's matrix (as the renderer
+// builds it) times the palette blended between the two frames the phase
+// falls between (as the crowd's vertex shader blends it), times where
+// the bone stood at bind.
+bank_bone(bank: ptr, skel: *Skeleton, bone: int, x: float, y: float, z: float, draw_yaw: float, phase: float) -> Vec3 {
+    frames = crowd.posebank_frames(bank)
+    at = phase - ((phase as int) as float)
+    if at < 0.0 { at = at + 1.0 }
+    fpos = at * (frames as float)
+    f0 = fpos as int
+    if f0 >= frames { f0 = frames - 1 }
+    blend = fpos - (f0 as float)
+    f1 = f0 + 1
+    if f1 >= frames { f1 = 0 }
+    b = skin.skeleton_bind_position(skel, bone)
+    // The palette's matrix, column-major, applied to the bind point.
+    px = 0.0
+    py = 0.0
+    pz = 0.0
+    k = 0
+    while k < 2 {
+        f = f0
+        w = 1.0 - blend
+        if k == 1 { f = f1 ; w = blend }
+        mx = crowd.posebank_get(bank, f, bone, 0) * b.x + crowd.posebank_get(bank, f, bone, 4) * b.y + crowd.posebank_get(bank, f, bone, 8) * b.z + crowd.posebank_get(bank, f, bone, 12)
+        my = crowd.posebank_get(bank, f, bone, 1) * b.x + crowd.posebank_get(bank, f, bone, 5) * b.y + crowd.posebank_get(bank, f, bone, 9) * b.z + crowd.posebank_get(bank, f, bone, 13)
+        mz = crowd.posebank_get(bank, f, bone, 2) * b.x + crowd.posebank_get(bank, f, bone, 6) * b.y + crowd.posebank_get(bank, f, bone, 10) * b.z + crowd.posebank_get(bank, f, bone, 14)
+        px = px + mx * w
+        py = py + my * w
+        pz = pz + mz * w
+        k = k + 1
+    }
+    c = cos(draw_yaw)
+    s = sin(draw_yaw)
+    return core.vec3(x + c * px + s * pz, y + py, z - s * px + c * pz)
+}
+
+// The farthest any bone of the figure on `o` stands from where the bank
+// puts it on the instance at (x, y, z), `draw_yaw`, `phase`: the pop a
+// hand-over from one to the other would show. Metres.
+pose_gap(bank: ptr, skel: *Skeleton, o: *GameObject, x: float, y: float, z: float, draw_yaw: float, phase: float) -> float {
+    rig = figure.skeleton(figure.figure_of(o))
+    worst = 0.0
+    i = 0
+    while i < skin.skeleton_count(rig) {
+        bone = skin.skeleton_bone(rig, i)
+        core.model_sync_transform(bone)
+        d = core.v3_len(core.v3_sub(bone.world_position, bank_bone(bank, skel, i, x, y, z, draw_yaw, phase)))
+        if d > worst { worst = d }
+        i = i + 1
+    }
+    return worst
+}
+
+pelvis_of(pool: *Handover, slot: int) -> Vec3 {
+    m = handover.slot_motion(pool, slot)
+    return behaviour.object_position(physics.ragdoll_bone(m.ragdoll, human.BONE_PELVIS))
+}
+
+// How many of the horde the sort would draw, from the origin, culling
+// past 500 m: every tier counted.
+drawn(hd: *Shamblers) -> int {
+    counts_block = calloc(3, 8)
+    crowd.crowd_tiers(hd.pos, hd.yaw, hd.phase, null, 0, hd.count, 0.0, 0.0, 30.0, 100.0, 500.0,
+                      null, null, null, null, null, null, null, null, null, null, null, null, counts_block)
+    counts = counts_block as float[]
+    n = (counts[0] + counts[1] + counts[2]) as int
+    free(counts_block)
+    return n
+}
+
+// --- the run ------------------------------------------------------------------------------------------
+
+struct Trial {
+    bank: ptr
+    skel: ptr                        // *Skeleton, the bank's
+    horde: ptr                       // *Shamblers, while it runs
+    made: bool
+    pop_in: float                    // metres, the worst over the hand-overs
+    pop_out: float                   // metres, the worst over the givings back
+    off_figure: float                // metres, the worst: a returned zombie from its figure's pelvis
+    back: int                        // givings back seen
+    hidden: bool                     // out, parked, and out of the sort while handed over
+    still: bool                      // the step did not move them while out
+    shown: bool                      // back in the sort after
+    lowest: float                    // the struck four's pelvises, the lowest
+    rose: int                        // of them, the ones seen getting up
+    back_seconds: float              // until all four were back
+    refused: bool
+    refused_out: bool
+    dead_down: bool
+    dead_kept: bool
+    dead_gone: bool
+    reuse_right: bool
+    reuse_took: bool
+    all_back: bool
+    trail: float                     // every handed pelvis, every frame, summed
+    checksum: ptr                    // the horde's columns at the end: ZOMBIES * 5 doubles
+}
+
+// Given back: the zombie's columns against the figure as it stands.
+on_back(context: ptr, pool: *Handover, slot: int, zombie: int) {
+    r = context as *Trial
+    hd = r.horde as *Shamblers
+    pos = hd.pos as float[]
+    yaw = hd.yaw as float[]
+    phase = hd.phase as float[]
+    o = handover.slot_object(pool, slot)
+    gap = pose_gap(r.bank, r.skel as *Skeleton, o, pos[zombie * 3], pos[zombie * 3 + 1], pos[zombie * 3 + 2],
+                   yaw[zombie] + FACING, phase[zombie])
+    if gap > r.pop_out { r.pop_out = gap }
+    pelvis = pelvis_of(pool, slot)
+    dx = pelvis.x - pos[zombie * 3]
+    dz = pelvis.z - pos[zombie * 3 + 2]
+    off = core.sqrt_of(dx * dx + dz * dz)
+    if off > r.off_figure { r.off_figure = off }
+    r.back = r.back + 1
+}
+
+advance(w: Street, r: *Trial, frames: int) {
+    e = w.engine as *Engine
+    pool = w.pool as *Handover
+    k = 0
+    while k < frames {
+        engine.engine_update(e, STEP)
+        s = 0
+        while s < handover.size(pool) {
+            if handover.slot_state(pool, s) != handover.FREE {
+                p = pelvis_of(pool, s)
+                r.trail = r.trail + p.x + p.y * 3.0 + p.z * 7.0
+            }
+            s = s + 1
+        }
+        k = k + 1
+    }
+}
+
+// A zombie struck: at its chest as the horde draws it, `impulse` along
+// `heading` over the ground. Returns the slot, and measures the pop.
+strike_at(w: Street, r: *Trial, zombie: int, impulse: float, heading: float, killed: bool) -> int {
+    pool = w.pool as *Handover
+    hd = w.horde as *Shamblers
+    pos = hd.pos as float[]
+    yaw = hd.yaw as float[]
+    phase = hd.phase as float[]
+    x = pos[zombie * 3]
+    y = pos[zombie * 3 + 1]
+    z = pos[zombie * 3 + 2]
+    draw_yaw = yaw[zombie] + FACING
+    ph = phase[zombie]
+    point = core.vec3(x, y + 1.35, z)
+    blow = core.vec3(cos(heading) * impulse, 0.0, 0.0 - sin(heading) * impulse)
+    slot = 0 - 1
+    if killed { slot = handover.kill(pool, zombie, point, blow) } else { slot = handover.strike(pool, zombie, point, blow) }
+    if slot >= 0 {
+        gap = pose_gap(r.bank, r.skel as *Skeleton, handover.slot_object(pool, slot), x, y, z, draw_yaw, ph)
+        if gap > r.pop_in { r.pop_in = gap }
+    }
+    return slot
+}
+
+scenario(r: *Trial) {
+    w = world_new(ZOMBIES, POOL, 2.0)
+    pool = w.pool as *Handover
+    hd = w.horde as *Shamblers
+    r.horde = hd as ptr
+    r.made = pool != null
+    if pool == null {
+        world_free(w)
+        return
+    }
+    handover.set_get_up(pool, 0.8)
+    handover.set_settle(pool, 0.5)
+    handover.set_despawn(pool, 3.0)
+    handover.set_on_return(pool, on_back, r as ptr)
+    pos = hd.pos as float[]
+    out = handover.outs(pool) as float[]
+    advance(w, r, 10)
+
+    // Four struck hard at the chest: each handed over without a pop, and
+    // out of the horde.
+    struck_block = calloc(4, 8)
+    struck = struck_block as int[]
+    struck[0] = 3
+    struck[1] = 12
+    struck[2] = 21
+    struck[3] = 30
+    k = 0
+    while k < 4 {
+        strike_at(w, r, struck[k], 400.0, (k as float) * 1.6, false)
+        k = k + 1
+    }
+    r.hidden = drawn(hd) == ZOMBIES - 4
+    k = 0
+    while k < 4 {
+        z = struck[k]
+        if out[z] != 1.0 || pos[z * 3] != handover.PARK || handover.handed(pool, z) < 0 { r.hidden = false }
+        k = k + 1
+    }
+    advance(w, r, 10)
+    r.still = true
+    k = 0
+    while k < 4 {
+        if pos[struck[k] * 3] != handover.PARK || pos[struck[k] * 3 + 2] != handover.PARK { r.still = false }
+        k = k + 1
+    }
+
+    // A fifth while all four are falling: refused, and still in the horde.
+    r.refused = strike_at(w, r, 40, 400.0, 0.0, false) < 0 && handover.refused(pool) == 1
+    r.refused_out = out[40] == 0.0 && pos[40 * 3] != handover.PARK
+
+    // Down, up, and back.
+    r.lowest = 10.0
+    risen_block = calloc(4, 8)
+    risen = risen_block as int[]
+    frames = 0
+    while handover.returned(pool) < 4 && frames < 60 * 15 {
+        advance(w, r, 1)
+        frames = frames + 1
+        s = 0
+        while s < handover.size(pool) {
+            if handover.slot_state(pool, s) != handover.FREE {
+                m = handover.slot_motion(pool, s)
+                h = pelvis_of(pool, s).y
+                if h < r.lowest { r.lowest = h }
+                if motion.getting_up(m) { risen[s] = 1 }
+            }
+            s = s + 1
+        }
+    }
+    r.back_seconds = (frames as float) * STEP
+    r.rose = risen[0] + risen[1] + risen[2] + risen[3]
+    free(risen_block)
+    r.shown = drawn(hd) == ZOMBIES
+    k = 0
+    while k < 4 {
+        if out[struck[k]] != 0.0 || pos[struck[k] * 3] == handover.PARK { r.shown = false }
+        k = k + 1
+    }
+    free(struck_block)
+
+    // Killed: down, kept, and despawned after three seconds.
+    dead = strike_at(w, r, 7, 300.0, 2.0, true)
+    advance(w, r, 120)
+    r.dead_down = dead >= 0 && handover.slot_state(pool, dead) == handover.DEAD && pelvis_of(pool, dead).y < 0.5
+    r.dead_kept = handover.handed(pool, 7) == dead && handover.returned(pool) == 4 && out[7] == 2.0
+    advance(w, r, 90)
+    r.dead_gone = handover.despawned(pool) == 1 && handover.is_dead(pool, 7) && handover.handed(pool, 7) < 0 &&
+                  drawn(hd) == ZOMBIES - 1 && handover.returned(pool) == 4
+
+    // Four shoved, standing, and kept (a long settle); a strike beside the
+    // first takes the farthest of them back to the horde first.
+    handover.set_settle(pool, 60.0)
+    shoved_block = calloc(4, 8)
+    shoved = shoved_block as int[]
+    shoved[0] = 9
+    shoved[1] = 14
+    shoved[2] = 33
+    shoved[3] = 46
+    k = 0
+    while k < 4 {
+        strike_at(w, r, shoved[k], 40.0, 0.5, false)
+        k = k + 1
+    }
+    advance(w, r, 90)
+    at = core.vec3(pos[10 * 3], 1.35, pos[10 * 3 + 2])
+    farthest = 0 - 1
+    far_d = 0.0 - 1.0
+    standing = 0
+    s = 0
+    while s < handover.size(pool) {
+        if handover.slot_state(pool, s) == handover.STRUCK {
+            m = handover.slot_motion(pool, s)
+            if !motion.falling(m) && !motion.lying(m) && motion.tilt(m) < 0.2 { standing = standing + 1 }
+            d = core.v3_len(core.v3_sub(pelvis_of(pool, s), at))
+            if d > far_d {
+                far_d = d
+                farthest = handover.slot_zombie(pool, s)
+            }
+        }
+        s = s + 1
+    }
+    before = handover.returned(pool)
+    taken = strike_at(w, r, 10, 40.0, 0.5, false)
+    r.reuse_took = standing == 4 && taken >= 0 && handover.reused(pool) == 1 && handover.handed(pool, 10) == taken
+    r.reuse_right = farthest >= 0 && handover.returned(pool) == before + 1 && out[farthest] == 0.0 && handover.handed(pool, farthest) < 0
+    free(shoved_block)
+    handover.set_settle(pool, 0.5)
+    advance(w, r, 240)
+    r.all_back = handover.active(pool) == 0 && handover.returned(pool) == 9
+
+    r.checksum = calloc(ZOMBIES * 5, 8)
+    sum = r.checksum as float[]
+    yaw = hd.yaw as float[]
+    phase = hd.phase as float[]
+    i = 0
+    while i < ZOMBIES {
+        sum[i * 5] = pos[i * 3]
+        sum[i * 5 + 1] = pos[i * 3 + 1]
+        sum[i * 5 + 2] = pos[i * 3 + 2]
+        sum[i * 5 + 3] = yaw[i]
+        sum[i * 5 + 4] = phase[i]
+        i = i + 1
+    }
+    r.horde = null
+    world_free(w)
+}
+
+// --- what it costs --------------------------------------------------------------------------------------
+
+// Microseconds a frame of a horde of `zombies` with a pool of `pool_size`
+// (0 for none), `active` of it handed over and standing, over 120 frames
+// once they have stood a second.
+cost(zombies: int, pool_size: int, active: int) -> float {
+    w = world_new(zombies, pool_size, 2.0)
+    pool = w.pool as *Handover
+    e = w.engine as *Engine
+    if pool_size > 0 && pool == null {
+        world_free(w)
+        return 0.0 - 1.0
+    }
+    hd = w.horde as *Shamblers
+    if pool != null { handover.set_settle(pool, 1000.0) }
+    pos = hd.pos as float[]
+    k = 0
+    while k < active {
+        z = k * 3
+        handover.strike(pool, z, core.vec3(pos[z * 3], 1.35, pos[z * 3 + 2]), core.vec3(5.0, 0.0, 0.0))
+        k = k + 1
+    }
+    k = 0
+    while k < 60 {
+        engine.engine_update(e, STEP)
+        k = k + 1
+    }
+    began = clock_ns()
+    k = 0
+    while k < 120 {
+        engine.engine_update(e, STEP)
+        k = k + 1
+    }
+    took = ((clock_ns() - began) as float) / 1000.0 / 120.0
+    standing = true
+    if pool != null {
+        k = 0
+        while k < active {
+            if pelvis_of(pool, k).y < 0.7 { standing = false }
+            k = k + 1
+        }
+    }
+    world_free(w)
+    if !standing { return 0.0 - took }
+    return took
+}
+
+main() {
+    scene = gltf.load(PATH)
+    if scene == null {
+        println("handover: FAIL cannot read ${PATH}: ${gltf.last_error()}")
+        return
+    }
+    bank = gltf.bake_bank(scene, CLIP, FRAMES)
+    skel = gltf.skeleton(scene, 0)
+    walk = gltf.animation_duration(scene, CLIP)
+    println("handover: ${ZOMBIES} of the box man from its ${CLIP} (${walk} s, ${FRAMES} poses), a pool of ${POOL}")
+
+    first = Trial { bank: bank, skel: skel as ptr, horde: null, made: false, pop_in: 0.0, pop_out: 0.0, off_figure: 0.0, back: 0,
+                  hidden: false, still: false, shown: false, lowest: 0.0, rose: 0, back_seconds: 0.0, refused: false,
+                  refused_out: false, dead_down: false, dead_kept: false, dead_gone: false, reuse_right: false,
+                  reuse_took: false, all_back: false, trail: 0.0, checksum: null }
+    second = Trial { bank: bank, skel: skel as ptr, horde: null, made: false, pop_in: 0.0, pop_out: 0.0, off_figure: 0.0, back: 0,
+                   hidden: false, still: false, shown: false, lowest: 0.0, rose: 0, back_seconds: 0.0, refused: false,
+                   refused_out: false, dead_down: false, dead_kept: false, dead_gone: false, reuse_right: false,
+                   reuse_took: false, all_back: false, trail: 0.0, checksum: null }
+    scenario(&first)
+    check("a pool of the box man is made (its rig a humanoid, its clip there)", first.made)
+    if first.made {
+        scenario(&second)
+        println("  handed over: the worst bone ${first.pop_in * 1000.0} mm from where the bank drew it")
+        check("handing over does not pop: every bone within 2 mm of the instance's pose", first.pop_in < 0.002)
+        check("handed over, the instance is out of the horde: flagged, parked, in no tier of the sort", first.hidden)
+        check("while out, the horde's step does not move it", first.still)
+        check("a fifth strike while all four fall is refused (-1)", first.refused)
+        check("and the refused zombie stays in the horde", first.refused_out)
+        println("  the struck four: pelvises down to ${first.lowest} m, ${first.rose} seen getting up, all back after ${first.back_seconds} s")
+        check("struck hard, they fall (a pelvis under 0.5 m)", first.lowest < 0.5)
+        check("each gets up by itself", first.rose == 4)
+        check("and goes back to the horde within 12 s", first.back_seconds < 12.0)
+        check("back, every one is in the sort again and walks on", first.shown)
+        println("  given back: the worst bone ${first.pop_out * 1000.0} mm from the instance's pose; the zombie ${first.off_figure} m from its figure's pelvis")
+        check("giving back does not pop: every bone within 10 mm of the instance's pose", first.pop_out < 0.01)
+        check("each goes back where its figure stood (within 0.25 m of its pelvis)", first.off_figure < 0.25)
+        check("a killed one lies (LIMP, pelvis under 0.5 m) two seconds on", first.dead_down)
+        check("and is not given back: still handed over, out of the horde as dead", first.dead_kept)
+        check("despawned after three seconds, its zombie stays out of the horde", first.dead_gone)
+        check("four shoved stand, and a fifth strike reuses a figure", first.reuse_took)
+        check("the one it reused was the farthest standing, given back first", first.reuse_right)
+        check("all given back at the end, none left handed over (nine returns)", first.all_back)
+        same = first.checksum != null && second.checksum != null && first.trail == second.trail
+        if same {
+            a = first.checksum as float[]
+            b = second.checksum as float[]
+            i = 0
+            while i < ZOMBIES * 5 {
+                if a[i] != b[i] { same = false }
+                i = i + 1
+            }
+        }
+        println("  twice: the handed pelvises' trail ${first.trail} and ${second.trail}")
+        check("the run twice is the same to the bit: the horde's columns and every handed pelvis every frame", same)
+
+        bare = cost(400, 0, 0)
+        parked = cost(400, 12, 0)
+        busy = cost(400, 12, 12)
+        println("  a frame of 400 zombies: ${bare} us without a pool, ${parked} us with twelve parked, ${busy} us with twelve handed over")
+        each = (busy - parked) / 12.0
+        println("  handed over, a figure costs ${each} us a frame (its motion, its physics, the pool)")
+        check("twelve handed over stand (the cost is of standing figures)", busy > 0.0 && parked > 0.0)
+        check("twelve parked cost under 0.3 ms a frame", parked - bare < 300.0)
+        check("twelve handed over cost under 3 ms a frame", busy - parked < 3000.0)
+    }
+    if first.checksum != null { free(first.checksum) }
+    if second.checksum != null { free(second.checksum) }
+    crowd.posebank_free(bank)
+    gltf.scene_destroy(scene)
+    if g_failures == 0 {
+        println("handover: all checks passed (${g_checks})")
+    } else {
+        println("handover: ${g_failures} failure(s) of ${g_checks}")
+    }
+}
