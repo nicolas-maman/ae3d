@@ -12,10 +12,13 @@
 //     it walks, its rules (speed, separation, turn), the tick rate, and the
 //     host's time at tick 0. Each peer spawns the same horde from the seed.
 //   - Inputs, each stamped with the tick it takes effect at: the target the
-//     flow field floods from (the player the horde hunts), and a zombie
-//     killed, which leaves the horde on every peer at that tick. What the
-//     game makes of a dead zombie (a body, a ragdoll) is a created object
-//     (net.create_object), sent as objects are.
+//     flow field floods from (the player the horde hunts), a zombie
+//     killed, which leaves the horde on every peer at that tick, and a
+//     zombie hit, a velocity change and a stun: for the stun it neither
+//     turns nor walks nor advances its walk, and the shove carries it,
+//     fading to nothing by the stun's end. What the game makes of a dead
+//     zombie (a body, a ragdoll) is a created object (net.create_object),
+//     sent as objects are.
 //   - A seal every tick: "tick T is done". Reliable messages arrive in the
 //     order they were sent, so a client holding the seal for T holds every
 //     input for T, and steps T only then. A client draws the horde at its
@@ -23,8 +26,12 @@
 //     the newest seal. Every `check_every` ticks the seal carries a
 //     48-bit hash of the host's horde at that tick, and a client whose
 //     hash differs asks for the state and is put back.
-//   - A client that joins late is sent the horde's state once: 32 bytes a
-//     zombie, x, z, heading and phase as the doubles they are. Replaying
+//   - A client that joins late is sent the horde's state once, quantised:
+//     10 bytes a zombie (x and z on a 24-bit grid over the ground, heading
+//     and phase in 16 bits each) where the doubles were 32, and every
+//     shove under way as it is. The joiner has to hold exactly what every
+//     other peer holds, so at that tick every peer, the host first, snaps
+//     its own horde to the values sent: an input like the others. Replaying
 //     the inputs from tick 0 would be a few hundred bytes, but the
 //     simulation of every tick since the game began, which grows with the
 //     game; the state is the same size an hour in as a second in.
@@ -32,12 +39,13 @@
 // A tick is the passes of ae3d.horde and ae3d.nav in a fixed order: the
 // heading turned toward the flow field, the velocity along it, the
 // separation (separate_exact: the same bits at any thread count), and the
-// step. Each pass works a figure at a time over the pool, writing only
-// that figure, so the pool's size and its timing change nothing; the
-// step's dt is 1 / the tick rate, never a frame's delta.
+// step, then the shoves carried. Each pass works a figure at a time over
+// the pool, writing only that figure, so the pool's size and its timing
+// change nothing; the step's dt is 1 / the tick rate, never a frame's
+// delta.
 //
 // Both sides make the horde at the same point among their registrations
-// (horde_new registers five events), and build the same flow field: the
+// (horde_new registers seven events), and build the same flow field: the
 // same ground, the same footprints blocked.
 import std.heap
 import std.mem
@@ -51,23 +59,35 @@ import ae3d.platform
 exports (
     NetHorde,
     horde_new, horde_free, attach,
-    set_tick_rate, set_motion, set_separation, set_height, set_checks, set_figure,
-    start, set_target, kill, step,
-    started, horde_tick, horde_count, positions, yaws, phases, checksum,
+    set_tick_rate, set_motion, set_separation, set_height, set_checks, set_figure, set_join_snap,
+    start, set_target, kill, hit, step,
+    started, horde_tick, horde_count, positions, yaws, phases, stunned, shoved, checksum,
     checks, divergences, resyncs, horde_bytes
 )
 
 extern calloc(count: int, size: int) -> ptr
 extern realloc(p: ptr, size: long) -> ptr
 extern free(p: ptr)
+extern floor(x: float) -> float
 
 const PI = 3.141592653589793
-const VERSION = 1                    // the start's layout
-const HEADER = 24                    // doubles in the start before the state
-const FIGURE = 4                     // doubles a zombie in the state: x, z, heading, phase
-const INPUT = 4                      // floats an input: tick, what, a, b
+const VERSION = 3                    // the start's layout: 2, the shoves under way after the zombies; 3, the zombies quantised
+const HEADER = 25                    // doubles in the start before the state
+const FIGURE = 4                     // doubles a zombie in the exact state: x, z, heading, phase
+const PACKED = 10                    // bytes a zombie in the quantised state: u24 x, u24 z, u16 heading, u16 phase
+const STATE_NONE = 0                 // the start's state: none, spawn from the seed
+const STATE_EXACT = 1                // the doubles as they are
+const STATE_PACKED = 2               // quantised
+const GRID = 16777215                // the 24-bit grid's last step across the ground
+const TURN = 65536                   // the steps of a heading's turn, and of the walk's phase
+const SHOVE = 6                      // floats a shove: the zombie, velocity x and z, ticks left; the held heading and phase
+const SHOVE_STATE = 4                // of those, the doubles the state carries (the held two are a tick's scratch)
+const HIT_BYTES = 18                 // a hit's block: u32 tick, u32 zombie, f32 dx, f32 dz, u16 stun ticks
+const INPUT = 6                      // floats an input: tick, what, a, b, c, d
 const INPUT_TARGET = 1
 const INPUT_KILL = 2
+const INPUT_HIT = 3
+const INPUT_SNAP = 4
 const SUMS = 128                     // the host's hashes a client keeps until it reaches their ticks
 
 struct NetHorde {
@@ -96,6 +116,7 @@ struct NetHorde {
     strength: float
     per_cell: int
     check_every: int                 // ticks between the hashes the seals carry
+    join_snap: bool                  // host: every peer snaps to the quantised state it sends (the default)
     has_target: bool
     target_x: float
     target_z: float
@@ -105,6 +126,12 @@ struct NetHorde {
     vel: ptr
     yaw: ptr
     phase: ptr
+    // The zombies under a shove, float[SHOVE] each, in the order they were
+    // hit (a kill's swap moves the last one's): the same list on every
+    // peer, so the same bits.
+    shoves: ptr
+    shove_count: int
+    shove_capacity: int
     started: bool
     tick: int                        // the tick the horde is at
     sealed: int                      // client: the newest tick the host has sealed
@@ -123,6 +150,7 @@ struct NetHorde {
     resyncs: int                     // client: states taken after the first
     got: long                        // client: the horde's bytes it received
     scratch: ptr                     // 8 bytes: a double rounded through f32
+    packet: ptr                      // HIT_BYTES: a hit as it goes on the wire
 }
 
 // A horde on a session, both sides alike: `field` the flow field it hunts
@@ -141,15 +169,21 @@ horde_new(session: *Net, field: *FlowField) -> *NetHorde {
     h.strength = 2.0
     h.per_cell = 16
     h.check_every = 30
+    h.join_snap = true
     h.inputs = calloc(64 * INPUT, 8)
     h.input_capacity = 64
     h.sums = calloc(SUMS * 3, 8)
     h.scratch = calloc(1, 8)
+    h.packet = calloc(HIT_BYTES, 1)
+    h.shoves = calloc(16 * SHOVE, 8)
+    h.shove_capacity = 16
     net.on_event(session, "horde.start", on_start, h as ptr)
     net.on_event(session, "horde.target", on_target, h as ptr)
     net.on_event(session, "horde.kill", on_kill, h as ptr)
+    net.on_event(session, "horde.hit", on_hit, h as ptr)
     net.on_event(session, "horde.tick", on_seal, h as ptr)
     net.on_event(session, "horde.resync", on_resync, h as ptr)
+    net.on_event(session, "horde.snap", on_snap, h as ptr)
     net.on_join(session, on_joined, h as ptr)
     return h
 }
@@ -161,6 +195,8 @@ horde_free(h: *NetHorde) {
     free(h.inputs)
     free(h.sums)
     free(h.scratch)
+    free(h.packet)
+    free(h.shoves)
     heap.free(h)
 }
 
@@ -210,6 +246,20 @@ set_checks(h: *NetHorde, every: int) {
     if !h.started && every > 0 { h.check_every = every }
 }
 
+// How a client that joins late is given the horde. True (the default): the
+// state it is sent is quantised, and every peer, the host first, snaps its
+// own horde to those values at that tick, so the joiner holds what every
+// other peer holds from its first tick. False: the joiner takes the
+// quantised state as it is, the first hash check that finds it off (the
+// next seal with a hash) asks for the state again, and that one is the
+// doubles. The second is measured in tests/test_net_horde.ae against the
+// first, and costs more bytes and a second more before the joiner holds
+// the host's horde; it is there for that measurement, and for a game that
+// wants its horde never moved.
+set_join_snap(h: *NetHorde, snap: bool) {
+    h.join_snap = snap
+}
+
 // The figure whose walk drives the step (ae3d.horde.step): its pose bank
 // and the walk's length in seconds. On every side, the same bank.
 set_figure(h: *NetHorde, bank: ptr, walk: float) {
@@ -230,8 +280,21 @@ divergences(h: *NetHorde) -> int { return h.divergences }
 resyncs(h: *NetHorde) -> int { return h.resyncs }
 horde_bytes(h: *NetHorde) -> long { return h.got }
 
+// The seconds a hit zombie has left of its stun, 0 for one not stunned:
+// what a game draws a stagger by.
+stunned(h: *NetHorde, index: int) -> float {
+    k = shove_of(h, index)
+    if k < 0 { return 0.0 }
+    s = h.shoves as float[]
+    return s[k * SHOVE + 3] / (h.rate as float)
+}
+
+// How many zombies are under a shove now.
+shoved(h: *NetHorde) -> int { return h.shove_count }
+
 // A hash of the horde as it is: every zombie's position, heading and
-// phase, their bits, and how many. FNV-1a over the doubles' words.
+// phase, their bits, how many, and the shoves under way. FNV-1a over the
+// doubles' words.
 checksum(h: *NetHorde) -> long {
     hash = 1469598103934665603 as long
     prime = 1099511628211 as long
@@ -254,6 +317,16 @@ checksum(h: *NetHorde) -> long {
             hash = (hash ^ words[k]) * prime
             k = k + 1
         }
+    }
+    words = h.shoves as long[]
+    k = 0
+    while k < h.shove_count {
+        j = 0
+        while j < SHOVE_STATE {
+            hash = (hash ^ words[k * SHOVE + j]) * prime
+            j = j + 1
+        }
+        k = k + 1
     }
     return (hash ^ (h.count as long)) * prime
 }
@@ -314,19 +387,164 @@ seed_horde(h: *NetHorde) {
 }
 
 // One tick of the whole horde: the headings turned toward the field, the
-// velocities along them, pushed apart, and the step.
+// velocities along them, pushed apart, and the step; a zombie under a
+// shove keeps its heading and its walk, stands in the step, and is
+// carried by its shove after it.
 simulate(h: *NetHorde) {
     dt = 1.0 / (h.rate as float)
-    if h.field != null && h.has_target { nav.flow_steer(h.field, h.pos, h.yaw, h.count, h.turn * dt) }
+    hold(h)
+    if h.field != null && h.has_target {
+        nav.flow_steer(h.field, h.pos, h.yaw, h.count, h.turn * dt)
+        keep_headings(h)
+    }
     horde.wander(h.vel, h.yaw, h.count, h.speed)
     horde.separate_exact(h.grid, h.pos, h.vel, h.count, h.x0, h.z0, h.radius, h.radius, h.strength)
+    stand(h)
     horde.step(h.pos, h.vel, h.yaw, h.phase, 0, h.count, dt, h.max_speed,
                h.x0, h.x1, h.z0, h.z1, h.road_y, h.walk, h.bank)
+    carry(h, dt)
+}
+
+// --- the shoves -----------------------------------------------------------------------------
+//
+// A hit is a velocity change and a stun. The horde's own velocity is each
+// tick's scratch (the wander writes it whole, and with a figure the step
+// scales it to the walk's speed), so a shove cannot live in it: it is a
+// velocity of its own, beside the pool, on the few zombies hit. For the
+// stun a zombie keeps its heading and its phase, is left out of the step
+// (its velocity zeroed after the separation, so the others are still
+// pushed away from it), and is moved by its shove after the step, fading
+// in a straight line to nothing at the stun's last tick: a shove of v over
+// n ticks carries it v dt (n + 1) / 2. A zombie hit again while stunned
+// adds the new change to what is left of the shove and is stunned for the
+// longer of the two.
+
+// The shove on zombie `index`, or -1.
+shove_of(h: *NetHorde, index: int) -> int {
+    s = h.shoves as float[]
+    k = 0
+    while k < h.shove_count {
+        if (s[k * SHOVE]) as int == index { return k }
+        k = k + 1
+    }
+    return 0 - 1
+}
+
+// A hit, on every peer the same: (dx, dz) m/s added to the zombie's shove,
+// and its stun `ticks` long at least.
+shove(h: *NetHorde, index: int, dx: float, dz: float, ticks: int) {
+    if index < 0 || index >= h.count || ticks < 1 { return }
+    k = shove_of(h, index)
+    if k < 0 { k = new_shove(h, index) }
+    s = h.shoves as float[]
+    at = k * SHOVE
+    s[at + 1] = s[at + 1] + dx
+    s[at + 2] = s[at + 2] + dz
+    if (ticks as float) > s[at + 3] { s[at + 3] = ticks as float }
+}
+
+// A shove at the end of the list, still: its slot.
+new_shove(h: *NetHorde, index: int) -> int {
+    if h.shove_count >= h.shove_capacity {
+        h.shove_capacity = h.shove_capacity * 2
+        h.shoves = realloc(h.shoves, (h.shove_capacity * SHOVE * 8) as long)
+    }
+    k = h.shove_count
+    s = h.shoves as float[]
+    s[k * SHOVE] = index as float
+    s[k * SHOVE + 1] = 0.0
+    s[k * SHOVE + 2] = 0.0
+    s[k * SHOVE + 3] = 0.0
+    h.shove_count = k + 1
+    return k
+}
+
+// A shove off the list: the last takes its place.
+drop_shove(h: *NetHorde, k: int) {
+    s = h.shoves as float[]
+    last = h.shove_count - 1
+    j = 0
+    while j < SHOVE {
+        s[k * SHOVE + j] = s[last * SHOVE + j]
+        j = j + 1
+    }
+    h.shove_count = last
+}
+
+// The stunned zombies' headings and phases, before the passes that turn
+// and advance them.
+hold(h: *NetHorde) {
+    s = h.shoves as float[]
+    yaw = h.yaw as float[]
+    phase = h.phase as float[]
+    k = 0
+    while k < h.shove_count {
+        i = (s[k * SHOVE]) as int
+        s[k * SHOVE + 4] = yaw[i]
+        s[k * SHOVE + 5] = phase[i]
+        k = k + 1
+    }
+}
+
+keep_headings(h: *NetHorde) {
+    s = h.shoves as float[]
+    yaw = h.yaw as float[]
+    k = 0
+    while k < h.shove_count {
+        yaw[(s[k * SHOVE]) as int] = s[k * SHOVE + 4]
+        k = k + 1
+    }
+}
+
+// The stunned stand in the step: no walk and no push of their own.
+stand(h: *NetHorde) {
+    s = h.shoves as float[]
+    vel = h.vel as float[]
+    k = 0
+    while k < h.shove_count {
+        i = (s[k * SHOVE]) as int
+        vel[i * 3] = 0.0
+        vel[i * 3 + 1] = 0.0
+        vel[i * 3 + 2] = 0.0
+        k = k + 1
+    }
+}
+
+// Each shove carries its zombie a tick, kept on the ground, and fades; the
+// walk is put back where it was held; a shove whose stun is over goes.
+carry(h: *NetHorde, dt: float) {
+    s = h.shoves as float[]
+    pos = h.pos as float[]
+    phase = h.phase as float[]
+    k = 0
+    while k < h.shove_count {
+        at = k * SHOVE
+        i = (s[at]) as int
+        x = pos[i * 3] + s[at + 1] * dt
+        z = pos[i * 3 + 2] + s[at + 2] * dt
+        if x < h.x0 { x = h.x0 }
+        if x > h.x1 { x = h.x1 }
+        if z < h.z0 { z = h.z0 }
+        if z > h.z1 { z = h.z1 }
+        pos[i * 3] = x
+        pos[i * 3 + 2] = z
+        phase[i] = s[at + 5]
+        left = s[at + 3]
+        s[at + 1] = s[at + 1] * (left - 1.0) / left
+        s[at + 2] = s[at + 2] * (left - 1.0) / left
+        s[at + 3] = left - 1.0
+        if left <= 1.0 {
+            drop_shove(h, k)
+            s = h.shoves as float[]
+        } else {
+            k = k + 1
+        }
+    }
 }
 
 // A zombie out of the horde: the last takes its place, so the horde stays
-// one compact range. Every peer does it at the same tick, so the same
-// zombie lands in the same place on every one.
+// one compact range, and its shove with it. Every peer does it at the same
+// tick, so the same zombie lands in the same place on every one.
 remove(h: *NetHorde, index: int) {
     if index < 0 || index >= h.count { return }
     last = h.count - 1
@@ -339,6 +557,13 @@ remove(h: *NetHorde, index: int) {
     yaw[index] = yaw[last]
     phase[index] = phase[last]
     h.count = last
+    k = shove_of(h, index)
+    if k >= 0 { drop_shove(h, k) }
+    k = shove_of(h, last)
+    if k >= 0 {
+        s = h.shoves as float[]
+        s[k * SHOVE] = index as float
+    }
 }
 
 aim(h: *NetHorde, x: float, z: float) {
@@ -346,6 +571,66 @@ aim(h: *NetHorde, x: float, z: float) {
     h.target_x = x
     h.target_z = z
     if h.field != null { nav.flow_build(h.field, core.vec3(x, 0.0, z)) }
+}
+
+// --- the state, quantised --------------------------------------------------------------------
+//
+// A zombie's state is its x and z (its y is the road's), its heading and
+// its walk's phase; the velocity is a tick's scratch and is not state.
+// Quantised: x and z on a 24-bit grid over the ground (7 um across a
+// 120 m street, a millimetre across 16 km), the heading in 16 bits of a
+// turn (a hundredth of a degree), the phase in 16 bits of the walk.
+// Unpacking a packed value and packing it again gives the same steps, so
+// a horde snapped twice is the horde snapped once. The shoves are few and
+// go as their doubles.
+
+pack_x(h: *NetHorde, x: float) -> int { return pack_span(x, h.x0, h.x1) }
+pack_z(h: *NetHorde, z: float) -> int { return pack_span(z, h.z0, h.z1) }
+unpack_x(h: *NetHorde, q: int) -> float { return h.x0 + (q as float) * ((h.x1 - h.x0) / 16777215.0) }
+unpack_z(h: *NetHorde, q: int) -> float { return h.z0 + (q as float) * ((h.z1 - h.z0) / 16777215.0) }
+
+pack_span(v: float, lo: float, hi: float) -> int {
+    if hi <= lo { return 0 }
+    t = (v - lo) / (hi - lo) * 16777215.0
+    if t <= 0.0 { return 0 }
+    q = (t + 0.5) as int
+    if q > GRID { q = GRID }
+    return q
+}
+
+// A heading, any number of turns round, as its step from -pi.
+pack_heading(a: float) -> int {
+    t = floor((a + PI) / (2.0 * PI) * 65536.0 + 0.5)
+    q = ((t as long) % (TURN as long)) as int
+    if q < 0 { q = q + TURN }
+    return q
+}
+
+unpack_heading(q: int) -> float { return (q as float) * (2.0 * PI / 65536.0) - PI }
+
+pack_phase(ph: float) -> int {
+    q = (ph * 65536.0 + 0.5) as int
+    if q < 0 { q = 0 }
+    if q >= TURN { q = q - TURN }
+    return q
+}
+
+unpack_phase(q: int) -> float { return (q as float) / 65536.0 }
+
+// Every zombie put on the values the quantised state carries: on every
+// peer at the same tick, so every peer holds what a joiner is sent.
+snap(h: *NetHorde) {
+    pos = h.pos as float[]
+    yaw = h.yaw as float[]
+    phase = h.phase as float[]
+    i = 0
+    while i < h.count {
+        pos[i * 3] = unpack_x(h, pack_x(h, pos[i * 3]))
+        pos[i * 3 + 2] = unpack_z(h, pack_z(h, pos[i * 3 + 2]))
+        yaw[i] = unpack_heading(pack_heading(yaw[i]))
+        phase[i] = unpack_phase(pack_phase(phase[i]))
+        i = i + 1
+    }
 }
 
 // --- the host ---------------------------------------------------------------------------------
@@ -369,7 +654,7 @@ start(h: *NetHorde, seed: int, count: int, x0: float, z0: float, x1: float, z1: 
     seed_horde(h)
     h.seed = seed as long
     h.started = true
-    send_start(h, net.EVERYONE, now)
+    send_start(h, net.EVERYONE, now, STATE_NONE)
     return true
 }
 
@@ -398,12 +683,44 @@ kill(h: *NetHorde, index: int, now: float) -> bool {
     return true
 }
 
-// The start, to one client or to EVERYONE: the rules as doubles, and once
-// the horde has moved (a tick stepped, a zombie killed) the horde as it is.
-send_start(h: *NetHorde, to: int, now: float) {
-    with_state = h.tick > 0 || h.count != h.spawned
+// A zombie hit: its velocity changed by (dx, dz) m/s, and stunned for
+// `stun` seconds (whole ticks, one at least), on the host now and on every
+// client at the next tick. For the stun it keeps its heading and its walk
+// and the shove carries it; hit again while stunned, the shoves add. The
+// change is kept as a 32-bit float carries it. 25 bytes on the wire. False
+// for no such zombie.
+hit(h: *NetHorde, index: int, dx: float, dz: float, stun: float, now: float) -> bool {
+    if !is_host(h) || !h.started || index < 0 || index >= h.count { return false }
+    vx = as_f32(h, dx)
+    vz = as_f32(h, dz)
+    ticks = (stun * (h.rate as float) + 0.5) as int
+    if ticks < 1 { ticks = 1 }
+    if ticks > 65535 { ticks = 65535 }
+    shove(h, index, vx, vz, ticks)
+    p = h.packet
+    mem.set_u32_le(p, 0, (h.tick + 1) as long)
+    mem.set_u32_le(p, 4, index as long)
+    mem.set_float32(p, 8, vx)
+    mem.set_float32(p, 12, vz)
+    mem.set_u16_le(p, 16, ticks)
+    net.send_event_bytes(h.session, "horde.hit", net.EVERYONE, now, p, HIT_BYTES)
+    return true
+}
+
+// Whether the horde has moved from its start: a tick stepped, a zombie
+// killed or hit. A client sent the start before that spawns it from the
+// seed; after, it is sent the state.
+moved(h: *NetHorde) -> bool { return h.tick > 0 || h.count != h.spawned || h.shove_count > 0 }
+
+// The start, to one client or to EVERYONE: the rules as doubles, and with
+// a state (STATE_EXACT, STATE_PACKED) the horde as it is, its shoves after
+// the zombies.
+send_start(h: *NetHorde, to: int, now: float, state: int) {
+    figure = 0
+    if state == STATE_EXACT { figure = FIGURE * 8 }
+    if state == STATE_PACKED { figure = PACKED }
     length = HEADER * 8
-    if with_state { length = length + h.count * FIGURE * 8 }
+    if state != STATE_NONE { length = length + h.count * figure + h.shove_count * SHOVE_STATE * 8 }
     block = calloc(length, 1)
     head = block as float[]
     head[0] = VERSION as float
@@ -429,25 +746,68 @@ send_start(h: *NetHorde, to: int, now: float) {
     if h.has_target { head[19] = 1.0 }
     head[20] = h.target_x
     head[21] = h.target_z
-    head[22] = 0.0
-    if with_state { head[22] = 1.0 }
+    head[22] = state as float
     head[23] = h.walk
-    if with_state {
+    head[24] = 0.0
+    if state != STATE_NONE {
+        head[24] = h.shove_count as float
         pos = h.pos as float[]
         yaw = h.yaw as float[]
         phase = h.phase as float[]
         i = 0
         while i < h.count {
-            at = HEADER + i * FIGURE
-            head[at] = pos[i * 3]
-            head[at + 1] = pos[i * 3 + 2]
-            head[at + 2] = yaw[i]
-            head[at + 3] = phase[i]
+            at = HEADER * 8 + i * figure
+            if state == STATE_PACKED {
+                x = pack_x(h, pos[i * 3])
+                z = pack_z(h, pos[i * 3 + 2])
+                mem.set_u16_le(block, at, x & 65535)
+                mem.set_byte(block, at + 2, x >> 16)
+                mem.set_u16_le(block, at + 3, z & 65535)
+                mem.set_byte(block, at + 5, z >> 16)
+                mem.set_u16_le(block, at + 6, pack_heading(yaw[i]))
+                mem.set_u16_le(block, at + 8, pack_phase(phase[i]))
+            } else {
+                mem.set_float64(block, at, pos[i * 3])
+                mem.set_float64(block, at + 8, pos[i * 3 + 2])
+                mem.set_float64(block, at + 16, yaw[i])
+                mem.set_float64(block, at + 24, phase[i])
+            }
             i = i + 1
+        }
+        sh = h.shoves as float[]
+        k = 0
+        while k < h.shove_count {
+            at = HEADER * 8 + h.count * figure + k * SHOVE_STATE * 8
+            j = 0
+            while j < SHOVE_STATE {
+                mem.set_float64(block, at + j * 8, sh[k * SHOVE + j])
+                j = j + 1
+            }
+            k = k + 1
         }
     }
     net.send_event_bytes(h.session, "horde.start", to, now, block, length)
     free(block)
+}
+
+// The horde's state to one client: quantised, every peer snapped to it at
+// the next tick (the host now, the clients by an input, 8 bytes each)
+// before it goes; or, not snapping, quantised to a client that joins and
+// the doubles to one that asks again.
+send_state(h: *NetHorde, to: int, now: float, again: bool) {
+    if !moved(h) {
+        send_start(h, to, now, STATE_NONE)
+        return
+    }
+    if h.join_snap {
+        snap(h)
+        net.send_event(h.session, "horde.snap", net.EVERYONE, now, (h.tick + 1) as float)
+        send_start(h, to, now, STATE_PACKED)
+    } else if again {
+        send_start(h, to, now, STATE_EXACT)
+    } else {
+        send_start(h, to, now, STATE_PACKED)
+    }
 }
 
 // The host's ticks due by `now`, each sealed to every client.
@@ -469,14 +829,14 @@ host_step(h: *NetHorde, now: float) {
 // A client welcomed after the start is sent the horde as it is.
 on_joined(context: ptr, client: int, now: float) {
     h = context as *NetHorde
-    if h.started { send_start(h, client, now) }
+    if h.started { send_state(h, client, now, false) }
 }
 
 // A client that found its horde differs asks for it again.
 on_resync(context: ptr, call: *NetCall) {
     h = context as *NetHorde
     if !is_host(h) || !h.started || call.sender < 1 { return }
-    send_start(h, call.sender, call.now)
+    send_state(h, call.sender, call.now, true)
 }
 
 // --- a client -------------------------------------------------------------------------------
@@ -502,9 +862,14 @@ on_start(context: ptr, call: *NetCall) {
     h.got = h.got + ((7 + call.length) as long)
     data = call.data
     if (mem.get_float64(data, 0)) as int != VERSION { return }
-    with_state = mem.get_float64(data, 22 * 8) > 0.5
+    state = (mem.get_float64(data, 22 * 8)) as int
+    figure = 0
+    if state == STATE_EXACT { figure = FIGURE * 8 }
+    if state == STATE_PACKED { figure = PACKED }
+    if state != STATE_NONE && figure == 0 { return }
     count = (mem.get_float64(data, 3 * 8)) as int
-    if with_state && call.length < (HEADER + count * FIGURE) * 8 { return }
+    shoves = (mem.get_float64(data, 24 * 8)) as int
+    if state != STATE_NONE && call.length < HEADER * 8 + count * figure + shoves * SHOVE_STATE * 8 { return }
     first = !h.started
     h.seed = (mem.get_float64(data, 8)) as long
     h.spawned = (mem.get_float64(data, 2 * 8)) as int
@@ -526,21 +891,41 @@ on_start(context: ptr, call: *NetCall) {
     h.check_every = (mem.get_float64(data, 18 * 8)) as int
     h.walk = mem.get_float64(data, 23 * 8)
     if h.pos == null || h.grid == null { columns(h, h.spawned) }
-    if with_state {
+    if state != STATE_NONE {
         pos = h.pos as float[]
         yaw = h.yaw as float[]
         phase = h.phase as float[]
         i = 0
         while i < count {
-            at = (HEADER + i * FIGURE) * 8
-            pos[i * 3] = mem.get_float64(data, at)
+            at = HEADER * 8 + i * figure
             pos[i * 3 + 1] = h.road_y
-            pos[i * 3 + 2] = mem.get_float64(data, at + 8)
-            yaw[i] = mem.get_float64(data, at + 16)
-            phase[i] = mem.get_float64(data, at + 24)
+            if state == STATE_PACKED {
+                pos[i * 3] = unpack_x(h, mem.get_u16_le(data, at) + (mem.get_byte(data, at + 2) << 16))
+                pos[i * 3 + 2] = unpack_z(h, mem.get_u16_le(data, at + 3) + (mem.get_byte(data, at + 5) << 16))
+                yaw[i] = unpack_heading(mem.get_u16_le(data, at + 6))
+                phase[i] = unpack_phase(mem.get_u16_le(data, at + 8))
+            } else {
+                pos[i * 3] = mem.get_float64(data, at)
+                pos[i * 3 + 2] = mem.get_float64(data, at + 8)
+                yaw[i] = mem.get_float64(data, at + 16)
+                phase[i] = mem.get_float64(data, at + 24)
+            }
             i = i + 1
         }
+        // The shoves as the host has them, in its order, to the bit.
+        h.shove_count = 0
+        k = 0
+        while k < shoves {
+            at = HEADER * 8 + count * figure + k * SHOVE_STATE * 8
+            slot = new_shove(h, (mem.get_float64(data, at)) as int)
+            s = h.shoves as float[]
+            s[slot * SHOVE + 1] = mem.get_float64(data, at + 8)
+            s[slot * SHOVE + 2] = mem.get_float64(data, at + 16)
+            s[slot * SHOVE + 3] = mem.get_float64(data, at + 24)
+            k = k + 1
+        }
     } else {
+        h.shove_count = 0
         h.count = h.spawned
         seed_horde(h)
         h.count = count
@@ -557,7 +942,7 @@ on_start(context: ptr, call: *NetCall) {
 }
 
 // An input, kept until the tick it takes effect at.
-queue_input(h: *NetHorde, tick: float, what: int, a: float, b: float) {
+queue_input(h: *NetHorde, tick: float, what: int, a: float, b: float, c: float = 0.0, d: float = 0.0) {
     if h.input_first + h.input_count >= h.input_capacity {
         if h.input_first > 0 {
             // The applied ones off the front, before growing.
@@ -580,6 +965,8 @@ queue_input(h: *NetHorde, tick: float, what: int, a: float, b: float) {
     q[at + 1] = what as float
     q[at + 2] = a
     q[at + 3] = b
+    q[at + 4] = c
+    q[at + 5] = d
     h.input_count = h.input_count + 1
 }
 
@@ -595,6 +982,26 @@ on_kill(context: ptr, call: *NetCall) {
     if is_host(h) { return }
     h.got = h.got + wire(call)
     if h.started { queue_input(h, call.a, INPUT_KILL, call.b, 0.0) }
+}
+
+// Every peer snaps its horde to the quantised state at the tick a client
+// was sent it.
+on_snap(context: ptr, call: *NetCall) {
+    h = context as *NetHorde
+    if is_host(h) { return }
+    h.got = h.got + wire(call)
+    if h.started { queue_input(h, call.a, INPUT_SNAP, 0.0, 0.0) }
+}
+
+// A hit: its block, as hit wrote it.
+on_hit(context: ptr, call: *NetCall) {
+    h = context as *NetHorde
+    if is_host(h) { return }
+    h.got = h.got + ((7 + call.length) as long)
+    if !h.started || call.length < HIT_BYTES { return }
+    data = call.data
+    queue_input(h, (mem.get_u32_le(data, 0)) as float, INPUT_HIT, (mem.get_u32_le(data, 4)) as float,
+                mem.get_float32(data, 8), mem.get_float32(data, 12), mem.get_u16_le(data, 16) as float)
 }
 
 // A seal: the host has done tick `a`, and every input for it is here. With
@@ -637,6 +1044,8 @@ apply_inputs(h: *NetHorde, tick: int) {
         what = (q[at + 1]) as int
         if what == INPUT_TARGET { aim(h, q[at + 2], q[at + 3]) }
         if what == INPUT_KILL { remove(h, (q[at + 2]) as int) }
+        if what == INPUT_HIT { shove(h, (q[at + 2]) as int, q[at + 3], q[at + 4], (q[at + 5]) as int) }
+        if what == INPUT_SNAP { snap(h) }
         h.input_first = h.input_first + 1
         h.input_count = h.input_count - 1
     }

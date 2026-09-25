@@ -963,6 +963,7 @@ struct GLGeometry {
     ebo: int
     instance_vbo: int
     instance_capacity: int
+    instance_owner: ptr               // the batch whose matrices it holds
     refs: int
 }
 
@@ -1024,12 +1025,6 @@ gl_geometry_acquire(mesh: ptr) -> int {
     gl_setup_vertex_attribs()
     glapi.glBindVertexArray(0)
     return e.vao
-}
-
-gl_geometry_instance_vbo(vao: int) -> int {
-    e = geometry_of(vao)
-    if e == null { return 0 }
-    return e.instance_vbo
 }
 
 gl_geometry_release(vao: int) {
@@ -1214,26 +1209,37 @@ gl_setup_instance_attribs(inst: ptr, matrix_vbo: int, color_vbo: int) {
 // A batch draws through the shared VAO with the matrices of the models it
 // merged. The colour attribute stays disabled, so the generic value set at
 // startup supplies white and the shader's per-instance tint is a no-op.
-gl_batch_upload(vao: int, instance_vbo: int, inst: ptr, capacity_bytes: int) -> int {
+//
+// The VAO has one instance buffer, and every batch drawn through it -- the
+// shadow pass's, and one per material in the lit pass -- fills that same
+// buffer. So the geometry remembers which batch filled it last and how big
+// it is, and a batch uploads when its matrices changed or when another
+// batch's are in the buffer. Kept on the batch, both went wrong: a shadow
+// batch that had not moved drew the lit pass's matrices, so a roof over a
+// row of cubes cast no shadow (#453), and a batch that remembered a larger
+// buffer than the one another batch had left wrote past its end.
+gl_batch_upload(vao: int, owner: ptr, inst: ptr, stale: bool) {
+    e = geometry_of(vao)
+    if e == null || e.instance_vbo == 0 { return }
+    if !stale && e.instance_owner == owner { return }
     matrices = geometry.inst_matrix_data(inst)
     count = geometry.inst_count(inst)
-    if vao == 0 || instance_vbo == 0 || count <= 0 || matrices == null { return capacity_bytes }
+    if count <= 0 || matrices == null { return }
     glapi.glBindVertexArray(vao as uint32)
-    glapi.glBindBuffer(glapi.ARRAY_BUFFER as uint32, instance_vbo as uint32)
+    glapi.glBindBuffer(glapi.ARRAY_BUFFER as uint32, e.instance_vbo as uint32)
     wanted = count * MATRIX_BYTES
-    capacity = capacity_bytes
-    if capacity < wanted {
+    if e.instance_capacity < wanted {
         glapi.glBufferData(glapi.ARRAY_BUFFER as uint32, wanted as long, matrices, glapi.DYNAMIC_DRAW as uint32)
-        capacity = wanted
+        e.instance_capacity = wanted
     } else {
         glapi.glBufferSubData(glapi.ARRAY_BUFFER as uint32, 0, wanted as long, matrices)
     }
+    e.instance_owner = owner
     matrix_columns()
     // Set with the batch's own vertex array bound, so it holds whether the
     // driver treats a generic attribute value as context or per-array state.
     glapi.glDisableVertexAttribArray(7)
     glapi.glVertexAttrib3f(7, 1.0 as f32, 1.0 as f32, 1.0 as f32)
-    return capacity
 }
 
 // Generic attribute values are context state, so one call covers every VAO
@@ -1555,7 +1561,6 @@ struct GLBatch {
     first: ptr
     instances: ptr
     members: ptr
-    capacity_bytes: int
     count: int
     stale: bool
 }
@@ -2863,12 +2868,8 @@ render_shadow_pass(r: *GLRenderer, light: *Light, cam: *Camera) {
             gl_uniform_int(skinned_slot, 0)
             gl_uniform_mat4(model_slot, &identity)
             gl_vao_bind(b.vao)
-            if b.stale {
-                b.capacity_bytes = gl_batch_upload(b.vao,
-                                                        gl_geometry_instance_vbo(b.vao),
-                                                        b.instances, b.capacity_bytes)
-                b.stale = false
-            }
+            gl_batch_upload(b.vao, b as ptr, b.instances, b.stale)
+            b.stale = false
             gl_draw_elements_instanced(core.mesh_index_count(first.mesh), 0, b.count)
             r.last_draw_calls = r.last_draw_calls + 1
         }
@@ -3412,7 +3413,6 @@ forget_batches(r: *GLRenderer, vao: int) {
             b.vao = 0
             b.material = null
             b.count = 0
-            b.capacity_bytes = 0
             b.stale = true
         }
         i = i + 1
@@ -3424,7 +3424,6 @@ forget_batches(r: *GLRenderer, vao: int) {
         if b != null && b.vao == vao {
             b.vao = 0
             b.count = 0
-            b.capacity_bytes = 0
             b.stale = true
         }
         i = i + 1
@@ -3445,7 +3444,6 @@ batch_for(r: *GLRenderer, m: *Model) -> *GLBatch {
         fresh = heap.new(GLBatch)
         fresh.instances = geometry.inst_create()
         fresh.members = list.new()
-        fresh.capacity_bytes = 0
         fresh.count = 0
         fresh.vao = 0
         fresh.material = null
@@ -3498,7 +3496,6 @@ shadow_batch_for(r: *GLRenderer, m: *Model) -> *GLBatch {
         fresh = heap.new(GLBatch)
         fresh.instances = geometry.inst_create()
         fresh.members = list.new()
-        fresh.capacity_bytes = 0
         fresh.count = 0
         fresh.vao = 0
         fresh.first = null
@@ -3617,11 +3614,8 @@ draw_batch(r: *GLRenderer, b: *GLBatch, view_projection: *Mat4, light: *Light, c
     apply_shading(r, slots, null, r.default_program)
 
     gl_vao_bind(b.vao)
-    if b.stale {
-        b.capacity_bytes = gl_batch_upload(b.vao, gl_geometry_instance_vbo(b.vao),
-                                                b.instances, b.capacity_bytes)
-        b.stale = false
-    }
+    gl_batch_upload(b.vao, b as ptr, b.instances, b.stale)
+    b.stale = false
     gl_draw_elements_instanced(core.mesh_index_count((b.first as *Model).mesh), 0, b.count)
     gl_vao_bind(0)
     r.last_draw_calls = r.last_draw_calls + 1

@@ -18,6 +18,8 @@ import ae3d.vkscene
 import ae3d.skin
 import ae3d.shaders
 import ae3d.vkmeter
+import ae3d.vkreadback
+import ae3d.vktexture
 import ae3d.posing
 import ae3d.geometry
 
@@ -51,7 +53,6 @@ extern ae3d_vk_upload_mesh(mesh: ptr) -> int
 extern ae3d_vk_upload_instances(instances: ptr) -> int
 extern ae3d_vk_update_instances(handle: int, instances: ptr) -> int
 extern ae3d_vk_free_mesh(handle: int)
-extern ae3d_vk_texture_create(width: int, height: int, rgba: ptr) -> int
 extern ae3d_vk_texture_destroy(handle: int)
 extern ae3d_vk_scene_set_float(offset: int, value: float)
 extern ae3d_vk_scene_set_int(offset: int, value: int)
@@ -79,8 +80,6 @@ extern ae3d_vk_crowd_fill(handle: int, pos: ptr, yaw: ptr, phase: ptr, col: ptr,
 extern ae3d_vk_crowd_sort(handle: int, cx: float, cz: float, near_dist: float, mid_dist: float, cull_dist: float) -> int
 extern ae3d_vk_draw_crowd_tier(mesh: int, texture: int, handle: int, tier: int, part: int)
 extern ae3d_vk_shadow_draw_crowd_tier(mesh: int, handle: int, tier: int, part: int)
-extern ae3d_vk_texture_create_float(width: int, height: int, rgba: ptr) -> int
-extern ae3d_vk_texture_create_rgba(width: int, height: int, depth: int, rgba: ptr) -> int
 extern ae3d_vk_set_pose_bank(texture: int)
 extern ae3d_vk_set_scene_depth(on: int)
 extern ae3d_vk_scene_depth_ready() -> int
@@ -141,12 +140,6 @@ extern ae3d_vk_pass_ms(pass: int) -> float
 extern ae3d_vk_pipeline_binds() -> int
 extern ae3d_vk_set_binds() -> int
 extern ae3d_vk_sample_count() -> int
-extern ae3d_vk_offscreen_pixels() -> ptr
-extern ae3d_vk_request_capture() -> int
-extern ae3d_vk_capture_ready() -> int
-extern ae3d_vk_capture_pixels() -> ptr
-extern ae3d_vk_capture_width() -> int
-extern ae3d_vk_capture_height() -> int
 extern ae3d_vk_scene_offset(name: string) -> int
 extern ae3d_vk_scene_set_float_array(offset: int, handle: ptr)
 extern ae3d_vk_scene_set_vec3_array(offset: int, handle: ptr)
@@ -291,42 +284,42 @@ renderer_sample_count() -> int {
 // Valid after a frame has been rendered offscreen; the buffer belongs to the
 // renderer and the next frame overwrites it.
 offscreen_pixels() -> ptr {
-    return ae3d_vk_offscreen_pixels()
+    return vkreadback.offscreen_pixels()
 }
 
 // Arm a capture of the next presented frame. False when the surface will not
 // give a frame back, so a caller can say so rather than write nothing.
 request_capture() -> bool {
-    return ae3d_vk_request_capture() == 1
+    return vkreadback.request_capture()
 }
 
 capture_ready() -> bool {
-    return ae3d_vk_capture_ready() == 1
+    return vkreadback.capture_ready()
 }
 
 // The captured frame as RGBA for the agent to read numerically -- the same
 // pixels a grid or a pixel read is answered from, so the agent sees the Vulkan
 // frame the way it already sees the OpenGL one.
 capture_pixels() -> ptr {
-    return ae3d_vk_capture_pixels()
+    return vkreadback.capture_pixels()
 }
 
-capture_width() -> int { return ae3d_vk_capture_width() }
-capture_height() -> int { return ae3d_vk_capture_height() }
+capture_width() -> int { return vkreadback.capture_width() }
+capture_height() -> int { return vkreadback.capture_height() }
 
 // Write the captured frame to a PNG. The frame has to have been asked for and
 // drawn first, so request_capture one frame ahead of this.
 snapshot(path: string) -> bool {
-    if ae3d_vk_capture_ready() != 1 {
+    if !vkreadback.capture_ready() {
         println("ae3d: no Vulkan frame was captured (the capture was not armed, or the surface cannot be read back)")
         return false
     }
-    pixels = ae3d_vk_capture_pixels()
+    pixels = vkreadback.capture_pixels()
     if pixels == null {
         println("ae3d: the captured Vulkan frame could not be read")
         return false
     }
-    return png.write(path, pixels, ae3d_vk_capture_width(), ae3d_vk_capture_height())
+    return png.write(path, pixels, vkreadback.capture_width(), vkreadback.capture_height())
 }
 
 offscreen_width() -> int {
@@ -435,6 +428,12 @@ renderer_init(r: *VKRenderer, window: ptr, width: int, height: int) -> int {
         println("ae3d: no Vulkan driver (${ae3d_vk_last_error()})")
         return 0
     }
+    // The frame read back from the first frame on (ae3d.vkreadback): an
+    // offscreen one is copied out every frame, a windowed one when asked.
+    vkreadback.attach()
+    // Textures are made in Aether; the backend makes its default one while
+    // it starts.
+    vktexture.install()
     if ae3d_vk_init(window, width, height) != 1 {
         println("ae3d: Vulkan init failed (${ae3d_vk_last_error()})")
         return 0
@@ -484,7 +483,7 @@ vtable_set_shadows(r: *VKRenderer, on: int) {
 }
 
 vtable_frame_pixels(r: *VKRenderer) -> ptr {
-    return ae3d_vk_offscreen_pixels()
+    return vkreadback.offscreen_pixels()
 }
 
 renderer_set_shadows(r: *VKRenderer, on: bool) {
@@ -525,8 +524,8 @@ ensure_cloud_textures(r: *VKRenderer, real: bool) {
         if r.cloud_shape_texture == 0 || r.cloud_weather_texture == 0 {
             blank = calloc(2 * 2 * 2 * 4, 1)
             // depth 2, not 1: the native side makes a volume only past one layer.
-            if r.cloud_shape_texture == 0 { r.cloud_shape_texture = ae3d_vk_texture_create_rgba(2, 2, 2, blank) }
-            if r.cloud_weather_texture == 0 { r.cloud_weather_texture = ae3d_vk_texture_create_rgba(1, 1, 1, blank) }
+            if r.cloud_shape_texture == 0 { r.cloud_shape_texture = vktexture.texture_create_rgba(2, 2, 2, blank) }
+            if r.cloud_weather_texture == 0 { r.cloud_weather_texture = vktexture.texture_create_rgba(1, 1, 1, blank) }
             free(blank)
         }
         return
@@ -536,8 +535,8 @@ ensure_cloud_textures(r: *VKRenderer, real: bool) {
     if shape == null || weather == null { return }
     if r.cloud_shape_texture != 0 { ae3d_vk_texture_destroy(r.cloud_shape_texture) }
     if r.cloud_weather_texture != 0 { ae3d_vk_texture_destroy(r.cloud_weather_texture) }
-    r.cloud_shape_texture = ae3d_vk_texture_create_rgba(core.CLOUD_SHAPE_SIZE, core.CLOUD_SHAPE_SIZE, core.CLOUD_SHAPE_SIZE, shape)
-    r.cloud_weather_texture = ae3d_vk_texture_create_rgba(core.CLOUD_WEATHER_SIZE, core.CLOUD_WEATHER_SIZE, 1, weather)
+    r.cloud_shape_texture = vktexture.texture_create_rgba(core.CLOUD_SHAPE_SIZE, core.CLOUD_SHAPE_SIZE, core.CLOUD_SHAPE_SIZE, shape)
+    r.cloud_weather_texture = vktexture.texture_create_rgba(core.CLOUD_WEATHER_SIZE, core.CLOUD_WEATHER_SIZE, 1, weather)
     r.cloud_textures_real = true
 }
 
@@ -1264,7 +1263,7 @@ renderer_load_texture(r: *VKRenderer, path: string) -> int {
     if halvings > 0 { println("ae3d: ${path} is larger than this device's textures; halved ${halvings} time(s) to fit") }
     tex_w = ae3d_image_width(image)
     tex_h = ae3d_image_height(image)
-    handle = ae3d_vk_texture_create(tex_w, tex_h, ae3d_image_pixels(image))
+    handle = vktexture.texture_create(tex_w, tex_h, ae3d_image_pixels(image))
     ae3d_image_free(image)
     if handle == 0 { return 0 }
 
@@ -1676,7 +1675,7 @@ pose(m: *Model) {
     // draws through its own pipeline.
     if m.pose_bank != null {
         if m.pose_bank_texture == 0 {
-            m.pose_bank_texture = ae3d_vk_texture_create_float(posing.posebank_bones(m.pose_bank) * 4,
+            m.pose_bank_texture = vktexture.texture_create_float(posing.posebank_bones(m.pose_bank) * 4,
                                                                posing.posebank_frames(m.pose_bank),
                                                                posing.posebank_data(m.pose_bank))
         }

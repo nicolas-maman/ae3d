@@ -44,22 +44,36 @@
 // A POWERED figure set ANIMATED blends into the animation over a quarter
 // second from where its bodies are, instead of jumping there.
 //
+// On a figure (ae3d.figure, #439): `on_figure` gives a figure an active
+// ragdoll where it stands and the way it faces, dressed from its skeleton
+// by whichever humanoid naming its bones follow (the engine's, or
+// Mixamo's). Its clip is the animation the muscles play. The scene file
+// carries it as the "motion" record of the figure's group (mode,
+// strength, protective, get-up), and `from_record` puts it back.
+//
 // Balance that steps to catch a fall and writhing are the controllers the
 // next slices of #414 put on top of this.
 
 import std.list
+import std.string
+import std.heap
 import aephysics.human
 import ae3d.core
 import ae3d.behaviour
 import ae3d.engine
 import ae3d.physics
+import ae3d.figure
+import ae3d.scene
+import ae3d.skin
 
 exports (
     Motion, ANIMATED, POWERED, LIMP, GETTING_UP,
     active_ragdoll, motion_free, set_mode, mode, set_strength, strength, set_recovery,
     hit, bone_weakness, motion_step, attach, tracking_error, tilt, muscle, full_assist,
     set_protective, protective, falling, lying,
-    get_up, set_get_up, getting_up, down, face_up, blending, rise_seconds
+    get_up, set_get_up, getting_up, down, face_up, blending, rise_seconds,
+    on_skeleton, on_figure, from_record, motions_free, mode_name, mode_of_name, get_up_after,
+    release, motions_release
 )
 
 extern calloc(count: int, size: int) -> ptr
@@ -178,7 +192,19 @@ struct Motion {
     blending: bool                     // a blend back, not a get-up
     now: ptr                           // float[BONE_COUNT * POSE_STRIDE]
     rise_seconds: float                // how long the last get-up took
+    object: ptr                        // *GameObject whose figure it wears, or null
+    engine: ptr                        // *Engine that steps it (attach), or null
+    stepper: ptr                       // *Behaviour it is stepped by, or null
 }
+
+// Every active ragdoll an engine has put on a figure, for the scene file's
+// records.
+struct Motions {
+    engine: ptr
+    list: ptr                          // list of *Motion
+}
+
+var g_motions: ptr = null              // list of *Motions, one an engine
 
 full_assist() -> float { return FULL_ASSIST }
 
@@ -258,6 +284,131 @@ set_mode(m: *Motion, to: int) {
 mode(m: *Motion) -> int { return m.mode }
 
 // --- getting up --------------------------------------------------------------------------------------
+
+// --- on a figure -----------------------------------------------------------------------------------
+
+// An active ragdoll on the skeleton of the figure `o` stands for: a ragdoll
+// where the object stands, turned the way the rig faces, dressed by the
+// rig's humanoid naming, stepped by the engine; ANIMATED to begin with.
+// Null when the rig is no humanoid the engine knows.
+on_skeleton(e: *Engine, o: *GameObject, sk: *Skeleton) -> *Motion {
+    if o == null || sk == null || physics.humanoid_scheme(sk) < 0 { return null }
+    if physics.of(e) == null { physics.attach(e) }
+    group = behaviour.object_model(o)
+    at = behaviour.object_position(o)
+    if group != null {
+        core.model_sync_transform(group)
+        at = group.world_position
+    }
+    r = physics.ragdoll(e, core.text(o.name), at, 8.0, 8.0, 1.0)
+    if !physics.ragdoll_dress_humanoid(r, sk) { return null }
+    m = active_ragdoll(r)
+    if m == null { return null }
+    m.object = o as ptr
+    attach(e, m)
+    list.add_raw(motions_for(e).list, m as ptr)
+    return m
+}
+
+// An active ragdoll on the figure an object is (ae3d.figure). Null when the
+// object is no figure, or its figure no humanoid.
+on_figure(e: *Engine, o: *GameObject) -> *Motion {
+    f = figure.figure_of(o)
+    if f == null { return null }
+    return on_skeleton(e, o, figure.skeleton(f))
+}
+
+// The scene file's motion record put back on the figure a scene read in:
+// the ragdoll, its mode, strength, protection and get-up.
+from_record(e: *Engine, o: *GameObject, spec: *MotionSpec) -> *Motion {
+    if spec == null { return null }
+    m = on_figure(e, o)
+    if m == null { return null }
+    set_strength(m, spec.strength)
+    set_protective(m, spec.protective)
+    set_get_up(m, spec.get_up)
+    set_mode(m, mode_of_name(spec.mode))
+    return m
+}
+
+mode_name(which: int) -> string {
+    if which == POWERED { return "powered" }
+    if which == LIMP { return "limp" }
+    return "animated"
+}
+
+// A mode by the scene file's name for it; ANIMATED for any other.
+mode_of_name(name: string) -> int {
+    if string.equals(name, "powered") == 1 { return POWERED }
+    if string.equals(name, "limp") == 1 { return LIMP }
+    return ANIMATED
+}
+
+get_up_after(m: *Motion) -> float { return m.get_up_after }
+
+motions_for(e: *Engine) -> *Motions {
+    if g_motions == null { g_motions = list.new() }
+    i = 0
+    while i < list.size(g_motions) {
+        ms = list.get_raw(g_motions, i) as *Motions
+        if ms.engine == e as ptr { return ms }
+        i = i + 1
+    }
+    ms = calloc(1, sizeof(Motions)) as *Motions
+    ms.engine = e as ptr
+    ms.list = list.new()
+    list.add_raw(g_motions, ms as ptr)
+    engine.engine_set_attachment_provider(e, motion_attachments, ms as ptr)
+    return ms
+}
+
+// The scene file's records: each figure's active ragdoll on its group. A
+// figure getting up is written as the mode it gets up to.
+motion_attachments(state: ptr) -> ptr {
+    ms = state as *Motions
+    out = list.new()
+    i = 0
+    while i < list.size(ms.list) {
+        m = list.get_raw(ms.list, i) as *Motion
+        group = null as *Model
+        if m.object != null { group = behaviour.object_model(m.object as *GameObject) }
+        if group != null {
+            which = m.mode
+            if which == GETTING_UP { which = m.ends_in }
+            a = scene.attachment_new(group, "", "", null, null)
+            scene.attachment_set_motion(a, scene.motion_spec_new(mode_name(which), m.strength, m.protective, m.get_up_after))
+            list.add_raw(out, a as ptr)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// Every active ragdoll put on a figure of the engine's, freed: after the
+// engine is.
+motions_free(e: *Engine) {
+    if g_motions == null { return }
+    i = 0
+    while i < list.size(g_motions) {
+        ms = list.get_raw(g_motions, i) as *Motions
+        if ms.engine == e as ptr {
+            k = 0
+            while k < list.size(ms.list) {
+                motion_free(list.get_raw(ms.list, k) as *Motion)
+                k = k + 1
+            }
+            list.free(ms.list)
+            free(ms as ptr)
+            list.remove(g_motions, i)
+        } else {
+            i = i + 1
+        }
+    }
+    if list.size(g_motions) == 0 {
+        list.free(g_motions)
+        g_motions = null
+    }
+}
 
 // Seconds settled on the ground before it gets up by itself; 0, the
 // default, leaves it down until get_up.
@@ -757,4 +908,40 @@ attach(e: *Engine, m: *Motion) {
     b = engine.behaviour_new("motion", m as ptr)
     b.fixed_update = motion_fixed
     engine.engine_add_behaviour(e, b)
+    m.engine = e as ptr
+    m.stepper = b as ptr
+}
+
+// An active ragdoll let go of while its engine runs on: no longer stepped,
+// out of the scene file's records, freed. (The ragdoll is physics's.) What
+// the editor does when a simulation stops; a program that ends frees its
+// motions after the engine, which frees their steps.
+release(m: *Motion) {
+    if m == null { return }
+    if m.engine != null && m.stepper != null {
+        engine.engine_remove_behaviour(m.engine as *Engine, m.stepper as *Behaviour)
+        heap.free(m.stepper as *Behaviour)
+        forget(m.engine as *Engine, m)
+    }
+    motion_free(m)
+}
+
+// Every active ragdoll put on a figure of the engine's, released.
+motions_release(e: *Engine) {
+    ms = motions_for(e)
+    while list.size(ms.list) > 0 {
+        release(list.get_raw(ms.list, 0) as *Motion)
+    }
+}
+
+forget(e: *Engine, m: *Motion) {
+    ms = motions_for(e)
+    i = 0
+    while i < list.size(ms.list) {
+        if list.get_raw(ms.list, i) == m as ptr {
+            list.remove(ms.list, i)
+            return
+        }
+        i = i + 1
+    }
 }

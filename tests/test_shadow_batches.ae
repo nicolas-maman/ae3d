@@ -1,0 +1,148 @@
+// ae3d#453: a roof over a cube cast no shadow on OpenGL once a row of other
+// cubes stood beside them. Every cube and the roof share one mesh, so the
+// shadow pass draws them as one instanced batch and the lit pass as one batch
+// per material -- all through the same vertex array and so the same instance
+// buffer. Each batch uploaded only when its own models moved, so the shadow
+// batch, standing still, drew the matrices the lit pass had left in the buffer:
+// the cubes, and no roof.
+//
+// The cube's middle is read with shadows on and then off, with the row of
+// cubes there: the roof's shadow has to darken it.
+import std.os
+import ae3d.core
+import ae3d.engine
+import ae3d.loader
+import ae3d.capture
+import ae3d.platform
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+const WIDTH = 320
+const HEIGHT = 180
+
+var g_checks = 0
+var g_failures = 0
+var g_shadowed = 0.0
+var g_unshadowed = 0.0
+var g_measured = 0
+var g_models: ptr = null        // the six cubes, freed after the engine
+var g_count = 0
+
+check(name: string, ok: bool) {
+    g_checks = g_checks + 1
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        g_failures = g_failures + 1
+    }
+}
+
+cube(e: *Engine, x: float, y: float, z: float, sx: float, sy: float, sz: float, shade: float) {
+    m = loader.cube(1.0)
+    core.model_set_position(m, x, y, z)
+    core.model_set_scale(m, sx, sy, sz)
+    core.model_matte(m, shade, shade, shade)
+    engine.engine_add_model(e, m)
+    (g_models as ptr[])[g_count] = m as ptr
+    g_count = g_count + 1
+}
+
+// After the engine, because freeing the renderer is what releases the GPU
+// handles the models were given.
+release_models() {
+    i = 0
+    while i < g_count {
+        core.model_free((g_models as ptr[])[i] as *Model)
+        i = i + 1
+    }
+    free(g_models)
+}
+
+// The mean of an 8 x 8 block at the middle of the frame, where the cube is.
+// The frame is the size ci.sh gives every window (AE3D_WIDTH, AE3D_HEIGHT),
+// so the size asked for and the size made are the same.
+middle() -> float {
+    if capture.frame(WIDTH, HEIGHT) == 0 { return 0.0 - 1.0 }
+    block = calloc(8, 8)
+    value = 0.0 - 1.0
+    if capture.region(WIDTH / 2 - 4, HEIGHT / 2 - 4, 8, 8, 0, 0, block) != 0 {
+        value = (capture.slot(block, 0) + capture.slot(block, 1) + capture.slot(block, 2)) / 3.0
+    }
+    free(block)
+    return value
+}
+
+on_start(state: ptr, e: *Engine) {
+    core.camera_set_position(engine.engine_camera(e), core.vec3(0.0, 0.0, 30.0))
+    // The cube, and the roof between it and the sun.
+    cube(e, 0.0, 0.0, 0.0, 3.0, 3.0, 3.0, 0.8)
+    cube(e, 0.5, 5.0, 1.5, 6.0, 0.5, 10.0, 0.6)
+    // The row beside them, in a third material: the lit pass's last batch.
+    cube(e, 0.0 - 12.0, 0.0, 0.0, 3.0, 3.0, 3.0, 0.7)
+    cube(e, 0.0 - 6.0, 0.0, 0.0, 3.0, 3.0, 3.0, 0.7)
+    cube(e, 6.0, 0.0, 0.0, 3.0, 3.0, 3.0, 0.7)
+    cube(e, 12.0, 0.0, 0.0, 3.0, 3.0, 3.0, 0.7)
+}
+
+on_render(state: ptr, e: *Engine, delta: float) {
+    frame = engine.engine_frame_count(e)
+    // Past the first frames, whose picture is still settling (#394).
+    if frame == 6 {
+        g_shadowed = middle()
+        if g_shadowed >= 0.0 { g_measured = g_measured + 1 }
+        engine.engine_set_shadows(e, false)
+    }
+    if frame == 10 {
+        g_unshadowed = middle()
+        if g_unshadowed >= 0.0 { g_measured = g_measured + 1 }
+    }
+}
+
+main() {
+    // An OpenGL test by design: the batches it is about are the OpenGL
+    // renderer's, and it reads the frame through capture.frame.
+    g_models = calloc(6, 8)
+    e = engine.engine_new_with(platform.API_GL)
+    engine.engine_set_size(e, WIDTH, HEIGHT)
+    engine.engine_set_title(e, "ae3d shadow batches test")
+    engine.engine_set_frame_limit(e, 12)
+    engine.engine_set_camera_input(e, false)
+    engine.engine_set_vsync(e, 0)
+
+    // High and in front, so the roof's shadow falls on the face the camera sees.
+    sun = core.light_directional(core.vec3(0.2, 0.8, 0.6), core.vec3(1.0, 1.0, 1.0), 1.5)
+    sun.ambient_strength = 0.1
+    engine.engine_set_light(e, sun)
+
+    program = engine.behaviour_new("shadow batches test", null)
+    program.start = on_start
+    program.late_update = on_render
+    engine.engine_add_behaviour(e, program)
+
+    if !engine.engine_run(e) {
+        println("shadow batches: SKIP no window")
+        engine.engine_free(e)
+        core.light_free(sun)
+        release_models()
+        return
+    }
+    engine.engine_free(e)
+    core.light_free(sun)
+    release_models()
+    if g_measured < 2 {
+        println("shadow batches: SKIP no readable frames")
+        return
+    }
+
+    println("  the cube's middle: ${g_shadowed} under the roof's shadow, ${g_unshadowed} without shadows")
+    // Measured: 0.44 against 0.64. Before the fix the two were equal.
+    check("the roof's shadow darkens the cube beside a row of the same mesh", g_unshadowed - g_shadowed > 0.1)
+
+    if g_failures == 0 {
+        println("shadow batches: all checks passed (${g_checks})")
+        return
+    }
+    println("shadow batches: ${g_failures} failure(s) of ${g_checks}")
+}
