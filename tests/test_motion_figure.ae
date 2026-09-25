@@ -1,0 +1,305 @@
+// An active ragdoll on a figure's skeleton (#439, #414), held to numbers.
+// Three rigs under objects of their own: one named as the engine's
+// pipeline names a humanoid, one as Mixamo does ("mixamorig:Hips", its
+// spine in three), both turned a quarter turn to face -x, and one
+// that is no humanoid (two bones):
+//
+//   - the two humanoids are known by their names, and the two bones not;
+//   - dressed, each still faces the way its object turned it -- the ragdoll
+//     turned to the figure, not the figure to the ragdoll;
+//   - POWERED, each stands on its own muscles for two seconds;
+//   - the scene file carries each one's motion record on its group: the
+//     mode, the strength, whether it protects itself, the get-up;
+//   - and a figure from a file (ae3d.figure: the box man fixture, Mixamo's
+//     names, its Idle playing), turned and given natural motion with
+//     motion.on_figure, stands on its muscles and faces as it was turned.
+
+import std.list
+import std.string
+import ae3d.core
+import ae3d.engine
+import ae3d.behaviour
+import ae3d.loader
+import ae3d.physics
+import ae3d.skin
+import ae3d.scene
+import ae3d.motion
+import ae3d.figure
+import aephysics.human
+
+extern atan2(y: float, x: float) -> float
+extern fabs(x: float) -> float
+
+const STEPS = 120
+const SCENE = "build/test_motion_figure_scene.json"
+const MESHES = "build/test_motion_figure_meshes"
+const ENGINE_NAMES = 0
+const MIXAMO_NAMES = 1
+
+var g_checks = 0
+var g_failures = 0
+
+check(name: string, ok: bool) {
+    g_checks = g_checks + 1
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        g_failures = g_failures + 1
+        println("  FAIL ${name}")
+    }
+}
+
+bone(rig: *Skeleton, name: string, parent: *Model, x: float, y: float, z: float) -> *Model {
+    m = core.model_new()
+    core.model_set_name(m, name)
+    core.model_set_position(m, x, y, z)
+    if parent != null { core.model_set_parent(m, parent) }
+    skin.skeleton_add(rig, m)
+    return m
+}
+
+// A humanoid rig proportioned as the pipeline's figure, its bones named one
+// way or the other, under `group`. It faces -z: its toes point there.
+humanoid(group: *Model, names: int) -> *Skeleton {
+    rig = skin.skeleton_new()
+    root = bone(rig, "Root", group, 0.0, 0.0, 0.0)
+    if names == ENGINE_NAMES {
+        hips = bone(rig, "Hips", root, 0.0, 1.0, 0.0)
+        spine = bone(rig, "Spine", hips, 0.0, 0.13, 0.0)
+        chest = bone(rig, "Chest", spine, 0.0, 0.26, 0.0)
+        neck = bone(rig, "Neck", chest, 0.0, 0.22, 0.0)
+        bone(rig, "Head", neck, 0.0, 0.09, 0.0)
+        limbs(rig, hips, chest, "ShoulderL", "ElbowL", "WristL", "ShoulderR", "ElbowR", "WristR",
+              "ThighL", "KneeL", "AnkleL", "ToeL", "ThighR", "KneeR", "AnkleR", "ToeR")
+    } else {
+        hips = bone(rig, "mixamorig:Hips", root, 0.0, 1.0, 0.0)
+        spine = bone(rig, "mixamorig:Spine", hips, 0.0, 0.09, 0.0)
+        spine1 = bone(rig, "mixamorig:Spine1", spine, 0.0, 0.1, 0.0)
+        chest = bone(rig, "mixamorig:Spine2", spine1, 0.0, 0.2, 0.0)
+        neck = bone(rig, "mixamorig:Neck", chest, 0.0, 0.22, 0.0)
+        bone(rig, "mixamorig:Head", neck, 0.0, 0.09, 0.0)
+        limbs(rig, hips, chest, "mixamorig:LeftArm", "mixamorig:LeftForeArm", "mixamorig:LeftHand",
+              "mixamorig:RightArm", "mixamorig:RightForeArm", "mixamorig:RightHand",
+              "mixamorig:LeftUpLeg", "mixamorig:LeftLeg", "mixamorig:LeftFoot", "mixamorig:LeftToeBase",
+              "mixamorig:RightUpLeg", "mixamorig:RightLeg", "mixamorig:RightFoot", "mixamorig:RightToeBase")
+    }
+    skin.skeleton_bind(rig)
+    return rig
+}
+
+limbs(rig: *Skeleton, hips: *Model, chest: *Model, sl: string, el: string, wl: string, sr: string, er: string, wr: string,
+      tl: string, kl: string, al: string, fl: string, tr: string, kr: string, ar: string, fr: string) {
+    shoulder_l = bone(rig, sl, chest, 0.17, 0.14, 0.0)
+    elbow_l = bone(rig, el, shoulder_l, 0.0, 0.0 - 0.29, 0.0)
+    bone(rig, wl, elbow_l, 0.0, 0.0 - 0.26, 0.0)
+    shoulder_r = bone(rig, sr, chest, 0.0 - 0.17, 0.14, 0.0)
+    elbow_r = bone(rig, er, shoulder_r, 0.0, 0.0 - 0.29, 0.0)
+    bone(rig, wr, elbow_r, 0.0, 0.0 - 0.26, 0.0)
+    thigh_l = bone(rig, tl, hips, 0.1, 0.0 - 0.07, 0.0)
+    knee_l = bone(rig, kl, thigh_l, 0.0, 0.0 - 0.44, 0.0)
+    ankle_l = bone(rig, al, knee_l, 0.0, 0.0 - 0.42, 0.0)
+    bone(rig, fl, ankle_l, 0.0, 0.0 - 0.05, 0.0 - 0.15)
+    thigh_r = bone(rig, tr, hips, 0.0 - 0.1, 0.0 - 0.07, 0.0)
+    knee_r = bone(rig, kr, thigh_r, 0.0, 0.0 - 0.44, 0.0)
+    ankle_r = bone(rig, ar, knee_r, 0.0, 0.0 - 0.42, 0.0)
+    bone(rig, fr, ankle_r, 0.0, 0.0 - 0.05, 0.0 - 0.15)
+}
+
+struct Stage {
+    plain: ptr                       // *Motion, the engine's names
+    mixamo: ptr                      // *Motion, Mixamo's
+    plain_rig: ptr                   // *Skeleton
+    mixamo_rig: ptr
+    arm_rig: ptr
+    steps: int
+    lowest: float                    // the lower of the two pelvises, its lowest over the run
+    worst_lean: float                // radians, the more either leaned
+    saved: bool
+    schemes: int                     // the two humanoids' namings, 10 * engine's + Mixamo's
+    arm_scheme: int
+    arm_made: bool                   // whether the two-bone rig got a ragdoll (it must not)
+    boxman: ptr                      // *Motion on the box man, a figure from a file
+    boxman_object: ptr               // *GameObject
+}
+
+// A figure-like object: a group turned a quarter turn about y, at x.
+turned_group(e: *Engine, name: string, x: float) -> *GameObject {
+    group = core.model_new()
+    o = engine.object(e, name, group)
+    behaviour.object_set_position(o, core.vec3(x, 0.02, 0.0))
+    behaviour.object_set_rotation(o, core.quat_rotate(1.5707963, core.vec3(0.0, 1.0, 0.0)))
+    return o
+}
+
+start(state: ptr, e: *Engine) {
+    s = state as *Stage
+    physics.attach(e)
+    ground = engine.object(e, "Ground", loader.cube(1.0))
+    behaviour.object_set_position(ground, core.vec3(0.0, 0.0 - 0.5, 0.0))
+    physics.box_collider(ground, core.vec3(40.0, 0.5, 40.0), physics.material(0.8, 0.0))
+
+    plain = turned_group(e, "Plain", 0.0 - 3.0)
+    mixamo = turned_group(e, "Mixamo", 3.0)
+    s.plain_rig = humanoid(behaviour.object_model(plain), ENGINE_NAMES) as ptr
+    s.mixamo_rig = humanoid(behaviour.object_model(mixamo), MIXAMO_NAMES) as ptr
+    s.schemes = physics.humanoid_scheme(s.plain_rig as *Skeleton) * 10 + physics.humanoid_scheme(s.mixamo_rig as *Skeleton)
+
+    arm = turned_group(e, "Arm", 8.0)
+    arm_rig = skin.skeleton_new()
+    upper = bone(arm_rig, "Upper", behaviour.object_model(arm), 0.0, 0.0, 0.0)
+    bone(arm_rig, "Lower", upper, 0.0, 1.0, 0.0)
+    skin.skeleton_bind(arm_rig)
+    s.arm_rig = arm_rig as ptr
+    s.arm_scheme = physics.humanoid_scheme(arm_rig)
+    s.arm_made = motion.on_skeleton(e, arm, arm_rig) != null
+
+    // A figure from a file, its idle playing, turned the same quarter turn.
+    boxman = figure.figure(e, "BoxMan", "tests/fixtures/gltf/humanoid.glb")
+    if boxman != null {
+        behaviour.object_set_position(boxman, core.vec3(0.0, 0.02, 6.0))
+        behaviour.object_set_rotation(boxman, core.quat_rotate(1.5707963, core.vec3(0.0, 1.0, 0.0)))
+        figure.play(figure.figure_of(boxman), "Idle", 1.0, true)
+        bm = motion.on_figure(e, boxman)
+        s.boxman = bm as ptr
+        s.boxman_object = boxman as ptr
+        if bm != null { motion.set_mode(bm, motion.POWERED) }
+    }
+
+    pm = motion.on_skeleton(e, plain, s.plain_rig as *Skeleton)
+    mm = motion.on_skeleton(e, mixamo, s.mixamo_rig as *Skeleton)
+    s.plain = pm as ptr
+    s.mixamo = mm as ptr
+    if pm != null {
+        motion.set_mode(pm, motion.POWERED)
+        motion.set_get_up(pm, 3.0)
+    }
+    if mm != null {
+        motion.set_mode(mm, motion.POWERED)
+        motion.set_strength(mm, 0.8)
+        motion.set_protective(mm, false)
+    }
+    s.lowest = 10.0
+}
+
+pelvis_height(m: *Motion) -> float {
+    return behaviour.object_position(physics.ragdoll_bone(m.ragdoll, human.BONE_PELVIS)).y
+}
+
+fixed_update(state: ptr, e: *Engine, step: float) {
+    s = state as *Stage
+    s.steps = s.steps + 1
+    if s.plain != null && s.mixamo != null && s.boxman != null && s.steps > 30 {
+        k = 0
+        while k < 3 {
+            m = s.plain as *Motion
+            if k == 1 { m = s.mixamo as *Motion }
+            if k == 2 { m = s.boxman as *Motion }
+            h = pelvis_height(m)
+            if h < s.lowest { s.lowest = h }
+            lean = motion.tilt(m)
+            if lean > s.worst_lean { s.worst_lean = lean }
+            k = k + 1
+        }
+    }
+    if s.steps == STEPS {
+        s.saved = engine.engine_save_scene(e, SCENE, MESHES)
+        engine.engine_stop(e)
+    }
+}
+
+// Where a drawn rig's toes point, level: the way the figure faces.
+facing(rig: *Skeleton, toe: string, ankle: string) -> Vec3 {
+    t = skin.skeleton_bone(rig, skin.skeleton_find(rig, toe))
+    a = skin.skeleton_bone(rig, skin.skeleton_find(rig, ankle))
+    core.model_sync_transform(t)
+    core.model_sync_transform(a)
+    d = core.v3_sub(t.world_position, a.world_position)
+    flat = core.vec3(d.x, 0.0, d.z)
+    if core.v3_len(flat) < 0.000001 { return flat }
+    return core.v3_normalize(flat)
+}
+
+main() {
+    e = engine.engine_new()
+    engine.engine_set_size(e, 320, 240)
+    engine.engine_set_title(e, "ae3d motion on a figure test")
+    engine.engine_set_camera_input(e, false)
+    engine.engine_set_fixed_step(e, 1.0 / 60.0)
+    engine.engine_set_frame_limit(e, 100000)
+    light = core.light_sun(core.vec3(0.3, 0.8, 0.5))
+    engine.engine_set_light(e, light)
+    stage = Stage { plain: null, mixamo: null, plain_rig: null, mixamo_rig: null, arm_rig: null, steps: 0,
+                    lowest: 0.0, worst_lean: 0.0, saved: false, schemes: 0, arm_scheme: 0, arm_made: false,
+                    boxman: null, boxman_object: null }
+    b = engine.behaviour_new("stage", (&stage) as ptr)
+    b.start = start
+    b.fixed_update = fixed_update
+    engine.engine_add_behaviour(e, b)
+    if !engine.engine_run(e) {
+        println("motion_figure: SKIP no window available")
+    } else {
+        println("motion_figure: ${stage.steps} fixed steps")
+        println("  namings: the engine's rig ${stage.schemes / 10}, Mixamo's ${stage.schemes % 10}, the arm ${stage.arm_scheme}")
+        check("the engine's names and Mixamo's are known, two bones are not", stage.schemes == physics.HUMANOID_ENGINE * 10 + physics.HUMANOID_MIXAMO && stage.arm_scheme < 0)
+        check("an active ragdoll on each humanoid, none on the arm", stage.plain != null && stage.mixamo != null && !stage.arm_made)
+        check("motion.on_figure gives the box man, a figure from a file, an active ragdoll", stage.boxman != null)
+        // A quarter turn about y takes -z to -x.
+        want = core.vec3(0.0 - 1.0, 0.0, 0.0)
+        plain_face = facing(stage.plain_rig as *Skeleton, "ToeL", "AnkleL")
+        mixamo_face = facing(stage.mixamo_rig as *Skeleton, "mixamorig:LeftToeBase", "mixamorig:LeftFoot")
+        plain_off = fabs(atan2(plain_face.z, plain_face.x) - atan2(want.z, want.x)) * 57.2958
+        mixamo_off = fabs(atan2(mixamo_face.z, mixamo_face.x) - atan2(want.z, want.x)) * 57.2958
+        boxman_off = 180.0
+        if stage.boxman_object != null {
+            rig = figure.skeleton(figure.figure_of(stage.boxman_object as *GameObject))
+            boxman_face = facing(rig, "mixamorig:LeftToeBase", "mixamorig:LeftFoot")
+            boxman_off = fabs(atan2(boxman_face.z, boxman_face.x) - atan2(want.z, want.x)) * 57.2958
+            if boxman_off > 180.0 { boxman_off = 360.0 - boxman_off }
+        }
+        println("  facing: the box man ${boxman_off} deg from its object's turn")
+        check("the box man, dressed, still faces the way its object turned it (within 10 degrees)", boxman_off < 10.0)
+        if plain_off > 180.0 { plain_off = 360.0 - plain_off }
+        if mixamo_off > 180.0 { mixamo_off = 360.0 - mixamo_off }
+        println("  facing: the engine's rig ${plain_off} deg from its object's turn, Mixamo's ${mixamo_off} deg")
+        check("dressed, each still faces the way its object turned it (within 10 degrees)", plain_off < 10.0 && mixamo_off < 10.0)
+        println("  standing: the pelvises' lowest ${stage.lowest} m, the most any leaned ${stage.worst_lean * 57.2958} deg")
+        check("POWERED, all three stand on their muscles (pelvis >= 0.8 m, leaning under 10 degrees)", stage.lowest >= 0.8 && stage.worst_lean < 0.175)
+        check("the scene saves", stage.saved)
+
+        models = scene.scene_load(SCENE)
+        attached = scene.scene_load_attachments(SCENE, models)
+        plain_spec = null as *MotionSpec
+        mixamo_spec = null as *MotionSpec
+        i = 0
+        while attached != null && i < list.size(attached) {
+            a = list.get_raw(attached, i) as *Attachment
+            spec = scene.attachment_motion(a)
+            if spec != null {
+                name = core.text(scene.attachment_model(a).name)
+                if string.equals(name, "Plain") == 1 { plain_spec = spec }
+                if string.equals(name, "Mixamo") == 1 { mixamo_spec = spec }
+            }
+            i = i + 1
+        }
+        check("each group carries its motion record", plain_spec != null && mixamo_spec != null)
+        if plain_spec != null && mixamo_spec != null {
+            println("  records: '${plain_spec.mode}' ${plain_spec.strength} ${plain_spec.protective} ${plain_spec.get_up}; '${mixamo_spec.mode}' ${mixamo_spec.strength} ${mixamo_spec.protective} ${mixamo_spec.get_up}")
+            check("the engine's: powered, full strength, protective, up after 3 s",
+                  string.equals(plain_spec.mode, "powered") == 1 && plain_spec.strength == 1.0 && plain_spec.protective && plain_spec.get_up == 3.0)
+            check("Mixamo's: powered, 0.8, not protective, never up by itself",
+                  string.equals(mixamo_spec.mode, "powered") == 1 && fabs(mixamo_spec.strength - 0.8) < 0.000001 && !mixamo_spec.protective && mixamo_spec.get_up == 0.0)
+        }
+        scene.attachments_free(attached)
+        scene.scene_free(models)
+    }
+    core.light_free(light)
+    engine.engine_free(e)
+    motion.motions_free(e)
+    figure.figures_free(e)
+    if stage.arm_rig != null { skin.skeleton_free(stage.arm_rig as *Skeleton) }
+    if g_failures == 0 {
+        println("motion_figure: all checks passed (${g_checks})")
+    } else {
+        println("motion_figure: ${g_failures} failure(s) of ${g_checks}")
+    }
+}
