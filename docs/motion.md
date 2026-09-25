@@ -61,6 +61,47 @@ The reach and tuck are **aims** (`physics.ragdoll_aim(ragdoll, bone, rotation)`)
 
 The settings were chosen by measurement. Each setting was tried on falls backward, forward and sideways, against a twin that does not protect itself, measuring the head's speed as it met the ground. The one chosen did better in all three directions, and so did its neighbours. Softening the knees in a fall, the obvious idea, made every direction worse.
 
+## Stepping to catch itself
+
+Pushed, a `POWERED` figure steps to catch itself (`set_stepping`, on by
+default; `steps_taken` counts them). Every fixed step it watches its
+capture point: the centre of mass carried on by its velocity times
+√(height / g), where it would come to rest over a foot. When that point
+leaves the ground the two feet cover (heel to toe) by more than 8 cm, and
+the figure is moving over the ground at 0.25 m/s or more, a foot swings to
+put itself under it. The thigh reaches toward the spot with the knee let
+bend for 0.12 s, so the foot clears the ground, then the leg straightens
+onto it; the whole step takes 0.3 s. It lands 5 cm past the capture point,
+and at most half a metre from under the hip.
+
+Which foot moves:
+- **Pushed forward:** the foot further behind swings through.
+- **Pushed sideways:** the foot on that side steps out. Swinging the other
+  across it only tangled the legs.
+- **Pushed back:** it doesn't step. The reference ragdoll's hips hardly
+  extend (their cone sits forward of the leg), so a step back was too short
+  to catch anything and took a foot from under a figure its balance would
+  have held.
+- **A push past a stride and a half:** that's a fall, and the protective
+  fall has it. A leg swinging as the figure goes over only took the fall
+  from the arms: the head met the ground at 5.3 m/s instead of 1.8.
+
+`tests/test_balance.ae` pushes figures at the chest, each push with and
+without stepping:
+
+| push | without stepping | stepping |
+|---|---|---|
+| 60 N·s from behind | stands | stands, no step |
+| 270 N·s from behind | falls | stands, 4 steps |
+| 180 N·s from the side | stands | stands, 1 step |
+| 150 N·s from in front | stands | stands, no step |
+
+A sweep from 60 to 270 N·s found how far each way holds:
+- **Forward:** 240 N·s without stepping, 270 or more with it.
+- **Sideways:** 210 N·s either way; stepping moves the feet rather than
+  holding the pose.
+- **Backward:** 150 N·s either way.
+
 ## On a figure
 
 `motion.on_figure(e, object)` gives an animated figure (`ae3d.figure`,

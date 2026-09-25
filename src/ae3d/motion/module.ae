@@ -44,6 +44,17 @@
 // A POWERED figure set ANIMATED blends into the animation over a quarter
 // second from where its bodies are, instead of jumping there.
 //
+// Pushed, a POWERED figure steps to catch itself (`set_stepping`, on by
+// default). Its capture point -- where its centre of mass would come to
+// rest over a foot, the centre of mass carried on by its velocity times
+// sqrt(height / g) -- is watched every step; when it leaves the ground
+// between the feet by more than STEP_MARGIN, the foot further from it
+// swings to put itself under it: the thigh reaches toward the spot with
+// the knee let bend, then the leg straightens onto it, over STEP_SECONDS.
+// A shove the balance could hold anyway it now holds by moving its feet,
+// as a person does, and one past it is caught a step later rather than
+// fallen from.
+//
 // On a figure (ae3d.figure, #439): `on_figure` gives a figure an active
 // ragdoll where it stands and the way it faces, dressed from its skeleton
 // by whichever humanoid naming its bones follow (the engine's, or
@@ -51,8 +62,7 @@
 // carries it as the "motion" record of the figure's group (mode,
 // strength, protective, get-up), and `from_record` puts it back.
 //
-// Balance that steps to catch a fall and writhing are the controllers the
-// next slices of #414 put on top of this.
+// Writhing is the controller the next slice of #414 puts on top of this.
 
 import std.list
 import std.string
@@ -70,7 +80,7 @@ exports (
     Motion, ANIMATED, POWERED, LIMP, GETTING_UP,
     active_ragdoll, motion_free, set_mode, mode, set_strength, strength, set_recovery,
     hit, bone_weakness, motion_step, attach, tracking_error, tilt, muscle, full_assist,
-    set_protective, protective, falling, lying,
+    set_protective, protective, falling, lying, set_stepping, stepping, steps_taken,
     get_up, set_get_up, getting_up, down, face_up, blending, rise_seconds,
     on_skeleton, on_figure, from_record, motions_free, mode_name, mode_of_name, get_up_after,
     release, motions_release
@@ -78,6 +88,7 @@ exports (
 
 extern calloc(count: int, size: int) -> ptr
 extern free(p: ptr)
+extern sqrt(x: float) -> float
 
 const ANIMATED = 1
 const POWERED = 2
@@ -111,6 +122,24 @@ const LYING_TILT = 1.2
 const SETTLED = 0.005
 const SETTLE_STEPS = 10
 const LYING_MUSCLE = 0.15
+// Stepping: the capture point may leave the ground between the feet by
+// STEP_MARGIN metres before a foot moves; a step takes STEP_SECONDS, the
+// first STEP_LIFT of them with the knee let bend so the foot clears the
+// ground; a step reaches at most STEP_REACH metres from under the hip and
+// lands STEP_BEYOND past the capture point, so the figure stops over its
+// new support rather than at its edge; another waits STEP_REST.
+const STEP_MARGIN = 0.08
+const STEP_SECONDS = 0.3
+const STEP_LIFT = 0.12
+const STEP_REACH = 0.5
+const STEP_BEYOND = 0.05
+const STEP_REST = 0.1
+// A figure standing still sways; only one moving over the ground at
+// STEP_SPEED or faster is falling off its feet. A foot is FOOT_LENGTH long,
+// heel under the ankle, toe forward.
+const STEP_SPEED = 0.25
+const FOOT_LENGTH = 0.2
+const GRAVITY = 9.81
 
 // Getting up: three stages from the pose it lies in, each RISE_STAGE
 // seconds, eased in and out; a blend back into the animation, BLEND. On
@@ -195,6 +224,13 @@ struct Motion {
     object: ptr                        // *GameObject whose figure it wears, or null
     engine: ptr                        // *Engine that steps it (attach), or null
     stepper: ptr                       // *Behaviour it is stepped by, or null
+    stepping: bool                     // steps to catch itself when pushed
+    step_leg: int                      // the thigh stepping (human's order), or -1
+    step_time: float                   // seconds into the step, or since the last
+    step_target: Vec3                  // where the swing foot lands
+    steps: int                         // steps taken
+    last_com: Vec3
+    com_known: bool
 }
 
 // Every active ragdoll an engine has put on a figure, for the scene file's
@@ -230,6 +266,9 @@ active_ragdoll(r: *Ragdoll) -> *Motion {
     m.strength = 1.0
     m.recovery = 0.8
     m.protective = true
+    m.stepping = true
+    m.step_leg = 0 - 1
+    m.step_time = STEP_REST
     m.weakness = calloc(human.BONE_COUNT, 8)
     m.keys = calloc(RISE_KEYS * human.BONE_COUNT * physics.POSE_STRIDE, 8)
     m.now = calloc(human.BONE_COUNT * physics.POSE_STRIDE, 8)
@@ -255,6 +294,9 @@ set_mode(m: *Motion, to: int) {
     m.settled = false
     m.key_count = 0
     m.blending = false
+    m.step_leg = 0 - 1
+    m.step_time = STEP_REST
+    m.com_known = false
     physics.ragdoll_clear_aims(m.ragdoll)
     if to == ANIMATED {
         if was == POWERED {
@@ -765,6 +807,194 @@ set_protective(m: *Motion, on: bool) {
 
 protective(m: *Motion) -> bool { return m.protective }
 
+// Whether a push is caught by a step.
+set_stepping(m: *Motion, on: bool) {
+    m.stepping = on
+    if !on && m.step_leg >= 0 { end_step(m) }
+}
+
+stepping(m: *Motion) -> bool { return m.step_leg >= 0 }
+
+// How many steps it has taken to catch itself.
+steps_taken(m: *Motion) -> int { return m.steps }
+
+// Where a foot is: its calf's far end, the ankle, in the world.
+ankle(m: *Motion, calf: int) -> Vec3 {
+    physics.ragdoll_body_pose(m.ragdoll, m.now)
+    return physics.ragdoll_pose_end(m.ragdoll, m.now, calf)
+}
+
+// How far, along the ground, `p` is outside the four corners of the feet
+// (each heel and toe): 0 inside the ground they span, else the distance to
+// its nearest edge. The corners are joined all ways, and a point is inside
+// when it is on the inner side of every edge of their hull.
+off_feet(p: Vec3, heel_l: Vec3, toe_l: Vec3, heel_r: Vec3, toe_r: Vec3) -> float {
+    if inside_hull(p, heel_l, toe_l, heel_r, toe_r) { return 0.0 }
+    d = off_segment(p, heel_l, toe_l)
+    d = min_of(d, off_segment(p, heel_r, toe_r))
+    d = min_of(d, off_segment(p, heel_l, heel_r))
+    d = min_of(d, off_segment(p, toe_l, toe_r))
+    d = min_of(d, off_segment(p, heel_l, toe_r))
+    d = min_of(d, off_segment(p, toe_l, heel_r))
+    return d
+}
+
+min_of(a: float, b: float) -> float {
+    if b < a { return b }
+    return a
+}
+
+// Whether `p` is inside the hull of four points on the ground: some edge
+// among the six pairs is a hull edge exactly when the other two points are
+// on one side of it; `p` is inside when it is on their side of every hull
+// edge.
+inside_hull(p: Vec3, a: Vec3, b: Vec3, c: Vec3, d: Vec3) -> bool {
+    return edge_ok(p, a, b, c, d) && edge_ok(p, a, c, b, d) && edge_ok(p, a, d, b, c) &&
+           edge_ok(p, b, c, a, d) && edge_ok(p, b, d, a, c) && edge_ok(p, c, d, a, b)
+}
+
+// For the edge u-v with the other two points o1, o2: when it is a hull
+// edge, whether p is on their side of it; true when it is not a hull edge.
+edge_ok(p: Vec3, u: Vec3, v: Vec3, o1: Vec3, o2: Vec3) -> bool {
+    s1 = side(u, v, o1)
+    s2 = side(u, v, o2)
+    if s1 * s2 < 0.0 { return true }
+    reference = s1
+    if core.abs_of(s2) > core.abs_of(s1) { reference = s2 }
+    if core.abs_of(reference) < 0.000001 { return true }
+    return side(u, v, p) * reference >= 0.0
+}
+
+side(u: Vec3, v: Vec3, p: Vec3) -> float {
+    return (v.x - u.x) * (p.z - u.z) - (v.z - u.z) * (p.x - u.x)
+}
+
+// The distance, along the ground, from `p` to the segment between `a` and
+// `b`.
+off_segment(p: Vec3, a: Vec3, b: Vec3) -> float {
+    ax = b.x - a.x
+    az = b.z - a.z
+    length2 = ax * ax + az * az
+    t = 0.0
+    if length2 > 0.000001 { t = ((p.x - a.x) * ax + (p.z - a.z) * az) / length2 }
+    if t < 0.0 { t = 0.0 }
+    if t > 1.0 { t = 1.0 }
+    dx = p.x - (a.x + ax * t)
+    dz = p.z - (a.z + az * t)
+    return sqrt(dx * dx + dz * dz)
+}
+
+// A fixed step of balance by stepping: the capture point watched, a step
+// started when it leaves the feet, a step in progress carried on.
+balance(m: *Motion, step: float) {
+    r = m.ragdoll
+    com = physics.ragdoll_center_of_mass(r)
+    if !m.com_known {
+        m.last_com = com
+        m.com_known = true
+        return
+    }
+    vx = (com.x - m.last_com.x) / step
+    vz = (com.z - m.last_com.z) / step
+    m.last_com = com
+    m.step_time = m.step_time + step
+    if m.step_leg >= 0 {
+        swing(m)
+        if m.step_time >= STEP_SECONDS { end_step(m) }
+        return
+    }
+    if m.step_time < STEP_REST { return }
+    if sqrt(vx * vx + vz * vz) < STEP_SPEED { return }
+    left = ankle(m, human.BONE_CALF_L)
+    right = ankle(m, human.BONE_CALF_R)
+    ground = left.y
+    if right.y < ground { ground = right.y }
+    height = com.y - ground
+    if height <= 0.1 { return }
+    reach = sqrt(height / GRAVITY)
+    capture = core.vec3(com.x + vx * reach, ground, com.z + vz * reach)
+    // The feet as the ground they cover: heel at the ankle, toe forward
+    // the way the figure faces.
+    ahead = core.v3_mul(level(lying_front(m, m.now)), FOOT_LENGTH)
+    toe_l = core.v3_add(left, ahead)
+    toe_r = core.v3_add(right, ahead)
+    if off_feet(capture, left, toe_l, right, toe_r) <= STEP_MARGIN { return }
+    // Not backwards: the reference's hips hardly extend (their cone sits
+    // forward of the leg), so a step back is too short to catch anything
+    // and only takes a foot from under a figure its balance would have
+    // held. A push onto the heels is the pelvis's to hold, as before.
+    going = core.vec3(capture.x - (left.x + right.x) * 0.5, 0.0, capture.z - (left.z + right.z) * 0.5)
+    if core.v3_len(going) > 0.0001 && core.v3_dot(core.v3_normalize(going), level(lying_front(m, m.now))) < 0.0 - 0.3 { return }
+    // Which foot moves. Going mostly sideways, the foot on that side steps
+    // out, as a person catches a push from the side; swinging the other
+    // across it only tangled the legs. Going mostly forward, the foot
+    // further behind swings through: it is the one the other can stand on.
+    across = core.vec3(left.x - right.x, 0.0, left.z - right.z)
+    if core.v3_len(across) > 0.0001 { across = core.v3_normalize(across) }
+    lateral = core.v3_dot(going, across)
+    onward = core.v3_dot(going, level(lying_front(m, m.now)))
+    thigh = human.BONE_THIGH_L
+    stance = right
+    if core.abs_of(lateral) > core.abs_of(onward) {
+        if lateral < 0.0 {
+            thigh = human.BONE_THIGH_R
+            stance = left
+        }
+    } else if core.v3_len(core.vec3(right.x - capture.x, 0.0, right.z - capture.z)) >
+              core.v3_len(core.vec3(left.x - capture.x, 0.0, left.z - capture.z)) {
+        thigh = human.BONE_THIGH_R
+        stance = left
+    }
+    // A push that carries the capture point further than a stride and a
+    // half from under the hip is a fall, not a stumble: no step would reach
+    // it, and a leg swinging as the figure goes over only takes the fall
+    // from the arms. The protective fall has it.
+    hip_now = behaviour.object_position(physics.ragdoll_bone(r, thigh))
+    if core.v3_len(core.vec3(capture.x - hip_now.x, 0.0, capture.z - hip_now.z)) > STEP_REACH * 1.5 { return }
+    // A little past the capture point, from the stance foot's side, and
+    // within a stride of under the hip.
+    away = core.vec3(capture.x - stance.x, 0.0, capture.z - stance.z)
+    if core.v3_len(away) > 0.0001 { away = core.v3_normalize(away) }
+    target = core.vec3(capture.x + away.x * STEP_BEYOND, ground, capture.z + away.z * STEP_BEYOND)
+    hip = behaviour.object_position(physics.ragdoll_bone(r, thigh))
+    stride = core.vec3(target.x - hip.x, 0.0, target.z - hip.z)
+    if core.v3_len(stride) > STEP_REACH {
+        stride = core.v3_mul(core.v3_normalize(stride), STEP_REACH)
+        target = core.vec3(hip.x + stride.x, ground, hip.z + stride.z)
+    }
+    m.step_leg = thigh
+    m.step_target = target
+    m.step_time = 0.0
+    m.steps = m.steps + 1
+    swing(m)
+}
+
+// The swinging leg aimed: the thigh toward the landing from the hip, the
+// shin hanging while the foot lifts, then along the thigh as it lands.
+swing(m: *Motion) {
+    r = m.ragdoll
+    calf = m.step_leg + 1
+    hip = behaviour.object_position(physics.ragdoll_bone(r, m.step_leg))
+    toward = core.v3_sub(core.vec3(m.step_target.x, m.step_target.y + 0.08, m.step_target.z), hip)
+    if core.v3_len(toward) < 0.0001 { return }
+    toward = core.v3_normalize(toward)
+    aim_along(r, m.step_leg, toward)
+    if m.step_time < STEP_LIFT {
+        aim_along(r, calf, core.vec3(0.0, 0.0 - 1.0, 0.0))
+    } else {
+        aim_along(r, calf, toward)
+    }
+}
+
+end_step(m: *Motion) {
+    if m.step_leg >= 0 {
+        physics.ragdoll_clear_aim(m.ragdoll, m.step_leg)
+        physics.ragdoll_clear_aim(m.ragdoll, m.step_leg + 1)
+    }
+    m.step_leg = 0 - 1
+    m.step_time = 0.0
+}
+
 // Whether it is falling and protecting itself.
 falling(m: *Motion) -> bool { return m.falling }
 
@@ -853,6 +1083,8 @@ motion_step(m: *Motion, step: float) {
         return
     }
     protect(m)
+    if m.mode == POWERED && m.stepping && !m.falling && !m.lying { balance(m, step) }
+    if m.falling && m.step_leg >= 0 { end_step(m) }
     if m.mode != ANIMATED { settle(m) }
     if down(m) { m.down_seconds = m.down_seconds + step } else { m.down_seconds = 0.0 }
     if m.get_up_after > 0.0 && m.down_seconds >= m.get_up_after && m.mode != ANIMATED {
