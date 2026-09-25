@@ -37,7 +37,7 @@ import ae3d.posing
 exports (
     HordeGrid,
     grid_new, grid_free, separate, separate_exact,
-    wander, step, tiers, bucket, audit,
+    wander, step, step_out, tiers, bucket, audit,
     fast_sin, fast_cos, fast_atan2, GRAIN
 )
 
@@ -515,6 +515,7 @@ struct HordeStepJob {
     walk: float
     step_scale: float
     bank: ptr
+    out: ptr                       // float a figure, nonzero for one out of the horde; or null
 }
 
 step_run(start: int, end: int, worker: int, context: ptr) {
@@ -526,9 +527,15 @@ step_run(start: int, end: int, worker: int, context: ptr) {
     dt = job.dt
     max_speed = job.max_speed
     bank = job.bank
+    out = job.out as float[]
+    has_out = job.out != null
     i = job.first + start
     last = job.first + end
     while i < last {
+        if has_out && out[i] != 0.0 {
+            i = i + 1
+            continue
+        }
         vx = vel[i * 3]
         vz = vel[i * 3 + 2]
         sp = sqrt(vx * vx + vz * vz)
@@ -576,11 +583,23 @@ step_run(start: int, end: int, worker: int, context: ptr) {
 // figure's run at its own bank's pace.
 step(pos: ptr, vel: ptr, yaw: ptr, phase: ptr, start: int, n: int, dt: float, max_speed: float,
      x0: float, x1: float, z0: float, z1: float, road_y: float, walk: float, bank: ptr) {
+    step_out(pos, vel, yaw, phase, null, start, n, dt, max_speed, x0, x1, z0, z1, road_y, walk, bank)
+}
+
+// The same step passing by every figure whose `out` is nonzero (a float
+// a figure, indexed as the columns are; null for none): one taken out of
+// the horde and simulated elsewhere for a while -- a zombie struck and
+// handed to an active ragdoll (ae3d.handover) -- keeps its slot, and
+// the step neither moves it, turns it, nor walks it on, nor puts it
+// back inside the street's edges from wherever it was parked.
+step_out(pos: ptr, vel: ptr, yaw: ptr, phase: ptr, out: ptr, start: int, n: int, dt: float, max_speed: float,
+         x0: float, x1: float, z0: float, z1: float, road_y: float, walk: float, bank: ptr) {
     if pos == null || vel == null || yaw == null || phase == null { return }
     step_scale = dt
     if walk > 0.0 { step_scale = dt / walk }
     job = HordeStepJob { pos: pos, vel: vel, yaw: yaw, phase: phase, first: start, dt: dt, max_speed: max_speed,
-                    x0: x0, x1: x1, z0: z0, z1: z1, road_y: road_y, walk: walk, step_scale: step_scale, bank: bank }
+                    x0: x0, x1: x1, z0: z0, z1: z1, road_y: road_y, walk: walk, step_scale: step_scale, bank: bank,
+                    out: out }
     jobs.parallel_for(step_run, n, GRAIN, (&job) as ptr)
 }
 

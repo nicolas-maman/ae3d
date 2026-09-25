@@ -1,0 +1,330 @@
+// A horde whose struck zombies fall as active ragdolls, get up and walk
+// back into it (ae3d.handover, #414).
+//
+//   ./build/horde_strike [figure.glb [Clip]]
+//   AE3D_CROWD=2000 AE3D_FACING=90 ./build/horde_strike walker.glb Walk
+//
+// The horde is the file's figure instanced over a pose bank, as
+// examples/gltf_crowd draws one: hundreds wandering a field, each at its
+// own phase, and no bodies. A pool of twelve of the same figure, each an
+// active ragdoll (ae3d.motion), waits parked. A left click strikes the
+// zombie under the cursor, a right click kills it; with no one clicking,
+// the zombie nearest the middle of the view is struck every second and a
+// half, and every third blow kills. A struck zombie is handed to a figure
+// of the pool where it was drawn, in the pose it was drawn in, falls, gets
+// up and walks back into the horde; a killed one lies, and is gone eight
+// seconds later.
+//
+// The default figure is the box man fixture (tests/fixtures/gltf/
+// humanoid.glb), whose Idle bows its chest: it stands in the crowd rather
+// than walks. A humanoid glTF with a walk (Mixamo's names or the
+// pipeline's) walks. AE3D_FACING=degrees is the way the file's figure
+// faces at rest, from +x toward -z: -90 for the box man (it faces -z), 90
+// for a glTF figure facing +z.
+
+import std.os
+import std.list
+import ae3d.core
+import ae3d.engine
+import ae3d.behaviour
+import ae3d.gltf
+import ae3d.crowd
+import ae3d.loader
+import ae3d.physics
+import ae3d.handover
+import ae3d.input
+import ae3d.platform
+import ae3d.raycast
+import ae3d.figure
+import ae3d.motion
+
+extern calloc(count: int, size: int) -> ptr
+extern free(p: ptr)
+
+const FRAMES = 48
+const POOL = 12
+const SPEED = 0.7
+const EVERY = 1.5                    // seconds between the timer's blows
+const BLOW = 380.0                   // newton seconds: enough to fell a figure
+const REACH = 0.8                    // metres from the cursor's ray a zombie is under it
+const CULL = 300.0                   // the sort's cull: a handed-over zombie's instance is parked past it
+
+var g_path = "tests/fixtures/gltf/humanoid.glb"
+var g_clip = "Idle"
+var g_scene: ptr = null
+var g_bank: ptr = null
+var g_models: ptr = null             // list of *Model, the file's parts instanced as the crowd
+var g_pool: ptr = null               // *Handover
+var g_floor: ptr = null
+var g_light: ptr = null
+var g_count = 0
+var g_field = 16.0
+var g_walk = 1.0
+var g_facing = 0.0
+var g_pos: ptr = null
+var g_vel: ptr = null
+var g_yaw: ptr = null
+var g_draw_yaw: ptr = null
+var g_phase: ptr = null
+var g_color: ptr = null
+var g_tier_pos: ptr = null
+var g_tier_yaw: ptr = null
+var g_tier_phase: ptr = null
+var g_tier_col: ptr = null
+var g_counts: ptr = null
+var g_clock = 0.0
+var g_blows = 0
+var g_seed = 0x51ab3d07
+
+next_random() -> float {
+    g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
+    return (g_seed as float) / 2147483647.0
+}
+
+// A part of the file as the crowd: instanced over the bank for the whole
+// count, posed by phase, coloured by instance.
+as_crowd(m: *Model) {
+    core.model_set_parent(m, null)
+    core.model_set_position(m, 0.0, 0.0, 0.0)
+    core.model_set_scale(m, 1.0, 1.0, 1.0)
+    core.model_set_rotation(m, core.quat_ident())
+    core.model_update_matrix(m)
+    core.model_enable_instancing(m, g_count)
+    core.model_set_pose_bank(m, g_bank, FRAMES)
+    core.model_set_crowd_walk(m, g_walk)
+    core.model_enable_instance_phases(m)
+    core.model_enable_instance_colors(m)
+}
+
+start(state: ptr, go: *GameObject) {
+    e = engine.of(go)
+    scene = gltf.load(g_path)
+    if scene == null {
+        println("horde_strike: ${gltf.last_error()}")
+        engine.engine_stop(e)
+        return
+    }
+    g_scene = scene as ptr
+    bank = gltf.bake_bank(scene, g_clip, FRAMES)
+    if bank == null {
+        println("horde_strike: ${gltf.last_error()}")
+        engine.engine_stop(e)
+        return
+    }
+    g_bank = bank
+    g_walk = gltf.animation_duration(scene, g_clip)
+    if g_walk <= 0.0 { g_walk = 1.0 }
+
+    // The ground the struck fall on: a slab under the field.
+    physics.attach(e)
+    slab = core.model_new()
+    ground = engine.object(e, "Ground", slab)
+    behaviour.object_set_position(ground, core.vec3(0.0, 0.0 - 0.5, 0.0))
+    physics.box_collider(ground, core.vec3(g_field * 3.0, 0.5, g_field * 3.0), physics.material(0.8, 0.0))
+    floor_model = loader.plane(4, g_field * 1.5)
+    core.model_set_position(floor_model, 0.0 - g_field * 3.0, 0.0, 0.0 - g_field * 3.0)
+    core.model_matte(floor_model, 0.34, 0.37, 0.30)
+    core.model_set_pbr(floor_model, 0.0, 0.9)
+    engine.engine_add_model(e, floor_model)
+    g_floor = floor_model as ptr
+
+    // The crowd: the file's skinned parts, instanced.
+    g_models = list.new()
+    i = 0
+    while i < gltf.primitive_count(scene) {
+        m = gltf.primitive(scene, i)
+        if m.skeleton != null {
+            as_crowd(m)
+            engine.engine_add_model(e, m)
+            list.add_raw(g_models, m as ptr)
+        }
+        i = i + 1
+    }
+    g_pos = calloc(g_count * 3, 8)
+    g_vel = calloc(g_count * 3, 8)
+    g_yaw = calloc(g_count, 8)
+    g_draw_yaw = calloc(g_count, 8)
+    g_phase = calloc(g_count, 8)
+    g_color = calloc(g_count * 3, 8)
+    g_tier_pos = calloc(g_count * 3, 8)
+    g_tier_yaw = calloc(g_count, 8)
+    g_tier_phase = calloc(g_count, 8)
+    g_tier_col = calloc(g_count * 3, 8)
+    g_counts = calloc(3, 8)
+    pos = g_pos as float[]
+    yaw = g_yaw as float[]
+    phase = g_phase as float[]
+    col = g_color as float[]
+    i = 0
+    while i < g_count {
+        pos[i * 3] = (next_random() - 0.5) * g_field * 1.8
+        pos[i * 3 + 2] = (next_random() - 0.5) * g_field * 1.8
+        yaw[i] = next_random() * core.TWO_PI
+        phase[i] = next_random()
+        shade = next_random()
+        col[i * 3] = 0.72 + 0.2 * shade
+        col[i * 3 + 1] = 0.78 + 0.1 * (1.0 - shade)
+        col[i * 3 + 2] = 0.7
+        i = i + 1
+    }
+
+    // The pool: twelve of the same figure, parked until a blow.
+    pool = handover.pool_new(e, g_path, g_clip, POOL)
+    if pool == null {
+        println("horde_strike: ${g_path} makes no active ragdoll (its rig is no humanoid the engine knows)")
+    } else {
+        handover.set_horde(pool, g_pos, g_yaw, g_phase, g_count)
+        handover.set_facing(pool, g_facing)
+        handover.set_colors(pool, g_color)
+        handover.set_get_up(pool, 1.0)
+        handover.set_despawn(pool, 8.0)
+        g_pool = pool as ptr
+    }
+
+    keys = engine.engine_input(e)
+    input.bind_mouse(keys, "strike", platform.MOUSE_LEFT)
+    input.bind_mouse(keys, "kill", platform.MOUSE_RIGHT)
+
+    light = core.light_directional(core.vec3(0.0 - 0.45, 0.0 - 1.0, 0.0 - 0.3), core.vec3(1.0, 0.96, 0.9), 2.4)
+    engine.engine_set_light(e, light)
+    g_light = light as ptr
+    engine.engine_set_shadows(e, true)
+    engine.engine_set_shadow_distance(e, 60.0)
+    engine.engine_set_time_of_day(e, 16.0)
+    cam = engine.engine_camera(e)
+    core.camera_set_position(cam, core.vec3(0.0, 5.5, g_field + 4.0))
+    core.camera_look_at(cam, core.vec3(0.0, 0.8, 2.0))
+    core.camera_set_far(cam, 500.0)
+    println("horde_strike: ${g_count} of ${g_path} from its ${g_clip} (${g_walk} s), a pool of ${POOL}")
+}
+
+// The zombie nearest a ray within REACH of it (measured at its hips), or -1.
+zombie_on_ray(origin: Vec3, direction: Vec3) -> int {
+    pos = g_pos as float[]
+    best = 0 - 1
+    best_d = REACH
+    i = 0
+    while i < g_count {
+        at = core.vec3(pos[i * 3], pos[i * 3 + 1] + 1.0, pos[i * 3 + 2])
+        along = core.v3_dot(core.v3_sub(at, origin), direction)
+        if along > 0.0 {
+            d = core.v3_len(core.v3_sub(at, core.v3_add(origin, core.v3_mul(direction, along))))
+            if d < best_d {
+                best_d = d
+                best = i
+            }
+        }
+        i = i + 1
+    }
+    return best
+}
+
+// A blow at a zombie's chest, along `direction` over the ground.
+blow(zombie: int, direction: Vec3, killed: bool) {
+    if g_pool == null || zombie < 0 { return }
+    pool = g_pool as *Handover
+    pos = g_pos as float[]
+    point = core.vec3(pos[zombie * 3], pos[zombie * 3 + 1] + 1.3, pos[zombie * 3 + 2])
+    flat = core.vec3(direction.x, 0.0, direction.z)
+    if core.v3_len(flat) < 0.001 { flat = core.vec3(1.0, 0.0, 0.0) }
+    impulse = core.v3_mul(core.v3_normalize(flat), BLOW)
+    slot = 0 - 1
+    if killed { slot = handover.kill(pool, zombie, point, impulse) } else { slot = handover.strike(pool, zombie, point, impulse) }
+    if slot >= 0 { g_blows = g_blows + 1 }
+}
+
+update(state: ptr, go: *GameObject, delta: float) {
+    e = engine.of(go)
+    if g_bank == null || g_count == 0 { return }
+    cam = engine.engine_camera(e)
+    out = null as ptr
+    if g_pool != null { out = handover.outs(g_pool as *Handover) }
+    crowd.crowd_wander(g_vel, g_yaw, g_count, SPEED)
+    crowd.crowd_step_out(g_pos, g_vel, g_yaw, g_phase, out, 0, g_count, delta, 2.0,
+                         0.0 - g_field, g_field, 0.0 - g_field, g_field, 0.0, g_walk, null)
+
+    // Blows: a click on a zombie, or the timer on the one mid-view.
+    keys = engine.engine_input(e)
+    clicked = input.pressed(keys, "strike")
+    killing = input.pressed(keys, "kill")
+    if clicked || killing {
+        window = engine.engine_window(e)
+        direction = raycast.screen_direction(cam, engine.engine_mouse_x(e), engine.engine_mouse_y(e),
+                                             platform.window_width(window), platform.window_height(window))
+        blow(zombie_on_ray(cam.position, direction), direction, killing)
+    }
+    g_clock = g_clock + delta
+    if g_clock >= EVERY {
+        g_clock = g_clock - EVERY
+        blow(zombie_on_ray(cam.position, cam.front), cam.front, g_blows % 3 == 2)
+    }
+
+    // The draw: headings turned by the file's facing, the handed-over
+    // (parked past the cull) sorted out, the rest uploaded.
+    yaw = g_yaw as float[]
+    turned = g_draw_yaw as float[]
+    i = 0
+    while i < g_count {
+        turned[i] = yaw[i] + g_facing
+        i = i + 1
+    }
+    crowd.crowd_tiers(g_pos, g_draw_yaw, g_phase, g_color, 0, g_count, cam.position.x, cam.position.z,
+                      CULL, 0.0, CULL, g_tier_pos, g_tier_yaw, g_tier_phase, g_tier_col,
+                      null, null, null, null, null, null, null, null, g_counts)
+    drawn = (g_counts as float[])[0] as int
+    k = 0
+    while k < list.size(g_models) {
+        m = list.get_raw(g_models, k) as *Model
+        core.model_set_instance_draw_count(m, drawn)
+        core.model_set_instance_positions_yaw(m, g_tier_pos, g_tier_yaw, drawn)
+        core.model_set_instance_phases(m, g_tier_phase, drawn)
+        core.model_set_instance_colors(m, g_tier_col, drawn)
+        k = k + 1
+    }
+}
+
+main() {
+    if os.aether_args_count() > 1 { g_path = os.aether_args_get(1) }
+    if os.aether_args_count() > 2 { g_clip = os.aether_args_get(2) }
+    g_count = core.env_int("AE3D_CROWD", 300)
+    if g_count < POOL + 1 { g_count = POOL + 1 }
+    g_facing = core.deg_to_rad(core.env_int("AE3D_FACING", 0 - 90) as float)
+
+    e = engine.engine_new()
+    engine.engine_set_size(e, 1280, 720)
+    engine.engine_set_title(e, "ae3d: a horde, struck")
+    engine.engine_set_camera_input(e, false)
+    engine.engine_set_post(e, true, true, 1.0, 0.5)
+    game = engine.object(e, "Game", null)
+    engine.script(game, "horde strike", null, start, update)
+    if !engine.engine_run(e) { println("horde_strike: no window") }
+    if g_pool != null {
+        pool = g_pool as *Handover
+        println("horde_strike: ${g_blows} blows, ${handover.active(pool)} handed over now, ${handover.returned(pool)} back in the horde, ${handover.despawned(pool)} dead and gone, ${handover.reused(pool)} figures reused, ${handover.refused(pool)} refused")
+    }
+    println("horde_strike: ${engine.engine_frame_count(e)} frames at ${engine.engine_fps(e)} fps")
+    p = physics.of(e)
+    if p != null { physics.physics_free(p) }
+    engine.engine_free(e)
+    motion.motions_free(e)
+    figure.figures_free(e)
+    if g_pool != null { handover.pool_free(g_pool as *Handover) }
+    if g_models != null { list.free(g_models) }
+    if g_bank != null { crowd.posebank_free(g_bank) }
+    if g_scene != null { gltf.scene_destroy(g_scene as *GltfScene) }
+    if g_floor != null { core.model_free(g_floor as *Model) }
+    if g_light != null { core.light_free(g_light as *Light) }
+    if g_pos != null {
+        free(g_pos)
+        free(g_vel)
+        free(g_yaw)
+        free(g_draw_yaw)
+        free(g_phase)
+        free(g_color)
+        free(g_tier_pos)
+        free(g_tier_yaw)
+        free(g_tier_phase)
+        free(g_tier_col)
+        free(g_counts)
+    }
+}

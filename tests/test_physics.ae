@@ -109,6 +109,17 @@ humanoid_rig() -> *Skeleton {
     return rig
 }
 
+// A rig and its bones' models, which the ragdoll wore but does not own.
+rig_free(rig: *Skeleton) {
+    if rig == null { return }
+    i = 0
+    while i < skin.skeleton_count(rig) {
+        core.model_free(skin.skeleton_bone(rig, i))
+        i = i + 1
+    }
+    skin.skeleton_free(rig)
+}
+
 ball_hull_verts(h: *HullData) -> int {
     if h == null { return 0 }
     return h.vertex_count
@@ -205,9 +216,12 @@ start(state: ptr, e: *Engine) {
     // by 24, seven hundred vertices, far past the hull's 128 edges -- still
     // gives a hull: the tightest one of a vertex budget the builder takes.
     // The street's bevelled crates were such meshes, and had no collider.
-    ball_mesh = core.model_mesh(loader.sphere(1.0, 32, 24))
-    ball_hull = physics.hull_of_mesh(ball_mesh, core.vec3(1.0, 1.0, 1.0))
+    ball_model = loader.sphere(1.0, 32, 24)
+    ball_hull = physics.hull_of_mesh(core.model_mesh(ball_model), core.vec3(1.0, 1.0, 1.0))
     check_true("a mesh past the hull's limits still gives a hull (${ball_hull_verts(ball_hull)} vertices)", ball_hull != null && ball_hull.vertex_count >= 8 && ball_hull.vertex_count <= 128)
+    // Both the caller's: the hull was never given to a collider.
+    if ball_hull != null { hull.destroy_hull(ball_hull) }
+    core.model_free(ball_model)
 
     // A car: a chassis box on four sphere wheels, driven forward from a standstill.
     car = engine.object(e, "Car", loader.cube(1.0))
@@ -394,6 +408,7 @@ main() {
         println("physics: SKIP no window available")
         core.light_free(light)
         engine.engine_free(e)
+        rig_free(scene.rig as *Skeleton)
         return
     }
 
@@ -467,6 +482,7 @@ main() {
 
     core.light_free(light)
     engine.engine_free(e)
+    rig_free(scene.rig as *Skeleton)
     if failures == 0 {
         println("physics: all checks passed (${scene.steps} fixed steps)")
     } else {

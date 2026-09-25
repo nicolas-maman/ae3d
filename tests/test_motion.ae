@@ -84,6 +84,26 @@ humanoid_rig() -> *Skeleton {
     return rig
 }
 
+// The rigs the figures wore, and their bones' models: a ragdoll wears a
+// rig but does not own it. Slots no figure took are null.
+rigs_free(block: ptr, count: int) {
+    rigs = block as ptr[]
+    k = 0
+    while k < count {
+        rig = rigs[k] as *Skeleton
+        if rig != null {
+            i = 0
+            while i < skin.skeleton_count(rig) {
+                core.model_free(skin.skeleton_bone(rig, i))
+                i = i + 1
+            }
+            skin.skeleton_free(rig)
+        }
+        k = k + 1
+    }
+    free(block)
+}
+
 struct Stage {
     tracker: ptr                     // *Motion
     tracker_rig: ptr                 // *Skeleton
@@ -305,7 +325,7 @@ main() {
         println("motion: SKIP no window available")
         core.light_free(light)
         engine.engine_free(e)
-        free(rigs_block)
+        rigs_free(rigs_block, 5 + FALLERS)
         free(fallers_block)
         free(falls_block)
         return
@@ -385,7 +405,7 @@ main() {
     motion.motion_free(stage.limp as *Motion)
     core.light_free(light)
     engine.engine_free(e)
-    free(rigs_block)
+    rigs_free(rigs_block, 5 + FALLERS)
     free(fallers_block)
     free(falls_block)
     if g_failures == 0 {

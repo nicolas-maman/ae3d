@@ -1,0 +1,21 @@
+### Handing over from the horde
+
+- `ae3d.handover` hands a horde's struck zombies to active ragdolls and takes them back (#414). A pool of a dozen figures is made from the horde's own glTF, each an active ragdoll (`motion.on_figure`), and parked: hidden, its clip stopped, its bodies out of the physics world.
+  - `strike(pool, zombie, point, impulse)` takes the zombie out of the horde and stands a figure where it was drawn, in the pose it was drawn in. The figure is `POWERED` and hit at the bone nearest the point.
+  - Back on its feet and over its blow for half a second, the figure blends into its clip and goes back to the horde where it stands, at the phase its clip is at. Its figure is parked.
+  - `kill` leaves the figure `LIMP`, and it is despawned after `set_despawn` seconds. Its zombie stays out of the horde.
+  - With the pool full, a strike takes back the farthest figure not mid-fall, or is refused.
+  - The pool is a behaviour on the engine's fixed step; a program only strikes.
+- `horde.step_out` and `crowd.crowd_step_out` pass by the zombies whose `out` flag is set. The step neither moves nor turns them, and doesn't walk them on. `step` is `step_out` with no flags.
+- `physics.ragdoll_park` and `ragdoll_unpark` take a ragdoll's bodies and anchors out of the world and put them back. `ragdoll_to_rig` puts every body where the rig it wears puts it, still, for a figure moved by hand.
+- `physics_free` also frees what `ragdoll_free` frees (a dressed ragdoll's poses and its rig), and the behaviour it steps by. An engine made after another is freed can come back at the same address, and `physics.of` found the old engine's world there.
+- `tests/test_handover.ae`, 22 checks, headless: 48 of the box man in the horde and a pool of four.
+  - Handing over is within 0.007 mm of the instance's pose. Giving back is within 5.2 mm, all of it the 5 mm the figure stands below the horde's road.
+  - Four struck at 400 N·s fall to 0.15 m, get up by themselves and are back in the horde 7.3 s after the blow, 14 mm from their figures' pelvises.
+  - A fifth strike while all four fall is refused.
+  - A killed one stays down, isn't given back, and is despawned.
+  - With four standing, a strike takes back the farthest.
+  - The run twice is the same to the bit.
+  - A figure handed over costs 24 to 33 µs a frame; twelve parked cost under 2 µs.
+- `examples/horde_strike.ae`: 300 of any humanoid glTF with a pool of twelve. A click strikes, a right click kills, and a timer strikes the zombie mid-view every 1.5 s.
+- docs/motion.md: "Handing over from the horde".
