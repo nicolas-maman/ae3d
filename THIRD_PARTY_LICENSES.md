@@ -63,6 +63,16 @@ SOFTWARE.
 `resources/obj/` carries the demo models from Gopher3D's `examples/resources`,
 under the Gopher3D licence above.
 
+## PT Sans (resources/fonts/PT_Sans-Web-Regular.ttf)
+
+The font the game UI draws text in: PT Sans Regular by ParaType, as
+[Google Fonts](https://github.com/google/fonts/tree/main/ofl/ptsans)
+publishes it, unchanged. Its licence is beside it in
+`resources/fonts/PT_Sans-OFL.txt`.
+
+- © 2010 ParaType Ltd., with Reserved Font Names "PT Sans" and "ParaType",
+  [SIL Open Font License 1.1](https://openfontlicense.org).
+
 ## GLFW and Vulkan
 
 GLFW (zlib/libpng) and the Vulkan loader and MoltenVK (Apache 2.0) are system
