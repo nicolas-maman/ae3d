@@ -21,6 +21,7 @@ import ae3d.scene
 import ae3d.input
 import ae3d.channel
 import ae3d.capture
+import ae3d.raycast
 
 exports (
     Context, context_new, context_free,
@@ -34,6 +35,15 @@ exports (
 
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
+extern pow(x: float, y: float) -> float
+// A texture's texels, read again from its file: a renderer uploads them and
+// keeps only the handle, so what an image looks like on average is asked of
+// the file the material names.
+extern ae3d_image_load(path: string) -> ptr
+extern ae3d_image_pixels(img: ptr) -> ptr
+extern ae3d_image_width(img: ptr) -> int
+extern ae3d_image_height(img: ptr) -> int
+extern ae3d_image_free(img: ptr)
 
 // A frame can only be read between the last draw and the buffer swap, and
 // requests are drained after it. Everything that reads pixels is therefore
@@ -119,6 +129,8 @@ struct Context {
     pending_capture_id: int
     pending_trace_id: int
     pending_trace_model: ptr
+    pending_explain_id: int
+    pending_explain_model: ptr
     want_capture: bool
     want_deferred: bool
     step_from: int
@@ -127,6 +139,10 @@ struct Context {
     shadow_map: int
     light_count: int
     fog_enabled: bool
+    // The exposure the frame was drawn at over every material's: 1, or
+    // what the eye adaptation has steered it to (engine_frame_exposure).
+    frame_exposure: float
+    eye_adaptation: bool
 
     deferred: ptr
     reference_frame: int
@@ -144,6 +160,8 @@ context_new() -> *Context {
     c.pending_snapshot_id = -1
     c.pending_capture_id = -1
     c.pending_trace_id = -1
+    c.pending_explain_id = -1
+    c.frame_exposure = 1.0
     c.want_deferred = false
     c.deferred = list.new()
     c.reference_frame = -1
@@ -450,6 +468,8 @@ help_result() -> ptr {
         "Every entity and the relations between them: blend object, asset, model, mesh, clip, light, camera. One query instead of joining four."))
     json.array_add_raw(ops, describe("trace.model", "id | object | index",
         "Follow one model from its Blender object to the pixels: source, asset, mesh, node, animation, visibility. Names the stage it stopped being right at."))
+    json.array_add_raw(ops, describe("explain.model", "id | object | index",
+        "Why a model looks the way it does on screen: its material, its texture's mean colour, the light each light and the ambient bring to its top and to the side facing the camera, whether its centre can see the key light or which model is in the way, the exposure, and the pixels it produced beside what it would show fully lit. The verdict names the first stage that accounts for a dark or wrong-coloured look, or says it is as lit."))
     json.array_add_raw(ops, describe("anim.list", "",
         "Every animation bound to a model: clip, playhead, duration, speed and the pose it produced."))
     json.array_add_raw(ops, describe("anim.get", "name | index",
@@ -1615,6 +1635,823 @@ trace_result(c: *Context, m: *Model, p: *Provenance) -> ptr {
     return out
 }
 
+// The model a request names: by manifest id, by Blender object, or by the
+// renderer's index -- the arguments trace.model and explain.model share.
+model_from(c: *Context, request: ptr) -> *Model {
+    m = null as *Model
+    p = null
+    named = json.object_get_raw(request, "id")
+    if named != null { p = assets.provenance_by_id(json.get_string_raw(named)) }
+    if p == null {
+        named = json.object_get_raw(request, "object")
+        if named != null { p = assets.provenance_by_object(json.get_string_raw(named)) }
+    }
+    if p != null { m = assets.provenance_model(p) }
+    if m == null {
+        indexed = json.object_get_raw(request, "index")
+        if indexed != null { m = model_at(c, json.get_int(indexed)) }
+    }
+    return m
+}
+
+// --- explain.model -----------------------------------------------------------
+//
+// Why a model on screen looks the way it does. trace.model answers whether it
+// reached the screen; this answers, once it has, why it is dark or the wrong
+// colour there. Each stage carries its numbers -- the material, the texture's
+// mean, the light each light brings, whether the key light is blocked, the
+// exposure -- and the pixels it produced, and the verdict names the first stage
+// whose numbers account for what the pixels show.
+//
+// The light is worked out as the default shader works it (direct_light and the
+// ambient in shaders/module.ae): a light's colour by its temperature, a point
+// light's fall-off and the reach past which the shader skips it, a spot light's
+// cone, the diffuse over pi and the back fill. Specular, reflections and the
+// scene's other effects only add to that, so a model darker than this predicts
+// is darker than its lights alone would make it.
+
+// What a stage being off would explain about the look.
+const EXPLAINS_DARK = 1
+const EXPLAINS_COLOUR = 2
+// A texture that never loaded is drawn in white, which can read as right: it
+// explains a wrong colour, and a look that only seems fine.
+const EXPLAINS_UNSEEN = 3
+// A surface that is nearly see-through reads as dark or as not there at all.
+const EXPLAINS_CLEAR = 4
+
+// What the pixels show.
+const LOOK_AS_LIT = 0
+const LOOK_DARK = 1
+const LOOK_COLOUR = 2
+const LOOK_MISSING = 3
+// No frame to read: the stages still say what is off, the pixels cannot say
+// whether it shows.
+const LOOK_UNMEASURED = 4
+
+// Display luminance, 0..1, under which a model reads as dark whatever it was
+// lit to be, and the share of what it would show fully lit under which it
+// reads as darker than its lights make it.
+const DARK_LUMA = 0.15
+const DARK_SHARE = 0.6
+// A mean colour whose channels are this far apart reads as coloured.
+const TINT = 0.2
+// Linear albedo luminance under which a surface is as good as black.
+const BLACK_ALBEDO = 0.03
+// Direct light, as it multiplies the albedo, under which none reaches.
+const DIRECT_MIN = 0.01
+const LOW_EXPOSURE = 0.6
+// Texels a side read for a texture's mean: 4096 of them is the colour of any
+// image to three places, and a 4K map is not read whole to say so.
+const TEXTURE_SAMPLES = 64
+// The share of a model's projected size read for its colour, about its
+// centre: the whole box around it is mostly what is behind it.
+const CENTRE_SHARE = 0.35
+
+struct Explanation {
+    diffuse: Vec3
+    // The diffuse over the texture's mean: what the light multiplies.
+    albedo: Vec3
+    alpha: float
+    metallic: float
+    emissive: bool
+    has_material: bool
+    texture_failed: bool
+    texture_known: bool
+    texture: Vec3                  // mean texel as the shader reads it; white with none
+    // The light arriving, as it multiplies the albedo: onto an upward normal,
+    // onto the side facing the camera, and from every direction.
+    direct_top: Vec3
+    direct_side: Vec3
+    ambient: Vec3
+    sun_below: bool
+    blocker: ptr                   // the model between its centre and the key light
+    exposure: float
+    measured_ok: bool
+    projects: bool
+    coverage: float
+    measured: Vec3                 // mean display colour about its centre, 0..1
+    predicted: Vec3                // what that side would show fully lit, 0..1
+    kind: int                      // what the note a stage last gave explains
+}
+
+round3(x: float) -> float {
+    if x < 0.0 { return 0.0 - round3(0.0 - x) }
+    return ((x * 1000.0 + 0.5) as long) as float / 1000.0
+}
+
+num3(x: float) -> ptr { return json.num(round3(x)) }
+
+vec3_json3(v: Vec3) -> ptr { return vec3_json(round3(v.x), round3(v.y), round3(v.z)) }
+
+colour_text(v: Vec3) -> string {
+    return "(${round3(v.x)}, ${round3(v.y)}, ${round3(v.z)})"
+}
+
+luminance(v: Vec3) -> float { return 0.2126 * v.x + 0.7152 * v.y + 0.0722 * v.z }
+
+// How far apart a colour's channels are: zero for a grey.
+channel_spread(v: Vec3) -> float {
+    high = v.x
+    low = v.x
+    if v.y > high { high = v.y }
+    if v.z > high { high = v.z }
+    if v.y < low { low = v.y }
+    if v.z < low { low = v.z }
+    return high - low
+}
+
+strongest_channel(v: Vec3) -> int {
+    if v.x >= v.y && v.x >= v.z { return 0 }
+    if v.y >= v.z { return 1 }
+    return 2
+}
+
+// Whether `v` leans the way the material's own colour does: a red material
+// drawn red is as authored, not the wrong colour.
+leans_like(v: Vec3, material: Vec3) -> bool {
+    return channel_spread(material) > 0.1 && strongest_channel(v) == strongest_channel(material)
+}
+
+tinted(a: Vec3, b: Vec3) -> Vec3 { return core.vec3(a.x * b.x, a.y * b.y, a.z * b.z) }
+
+// The shader's kelvinToRGB.
+kelvin_rgb(kelvin: float) -> Vec3 {
+    k = kelvin
+    if k < 1000.0 { k = 1000.0 }
+    if k > 12000.0 { k = 12000.0 }
+    if k < 3000.0 {
+        return core.v3_lerp(core.vec3(1.0, 0.4, 0.0), core.vec3(1.0, 0.7, 0.3), (k - 1000.0) / 2000.0)
+    }
+    if k < 6500.0 {
+        return core.v3_lerp(core.vec3(1.0, 0.7, 0.3), core.vec3(1.0, 1.0, 1.0), (k - 3000.0) / 3500.0)
+    }
+    return core.v3_lerp(core.vec3(1.0, 1.0, 1.0), core.vec3(0.7, 0.8, 1.0), (k - 6500.0) / 5500.0)
+}
+
+smooth_step(edge0: float, edge1: float, x: float) -> float {
+    if edge1 <= edge0 {
+        if x < edge0 { return 0.0 }
+        return 1.0
+    }
+    t = (x - edge0) / (edge1 - edge0)
+    if t < 0.0 { t = 0.0 }
+    if t > 1.0 { t = 1.0 }
+    return t * t * (3.0 - 2.0 * t)
+}
+
+// One channel through the shader's tone curve and gamma: linear light to
+// what the frame holds, 0..1.
+displayed(x: float) -> float {
+    if x <= 0.0 { return 0.0 }
+    mapped = (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14)
+    if mapped > 1.0 { mapped = 1.0 }
+    return pow(mapped, 1.0 / 2.2)
+}
+
+explain_material(m: *Model, ex: *Explanation) -> ptr {
+    detail = json.obj()
+    ex.diffuse = core.vec3(1.0, 1.0, 1.0)
+    ex.alpha = 1.0
+    ex.exposure = 1.0
+    surface = model_surface(m)
+    if surface == null {
+        json.object_set_raw(detail, "note", json.str("no material: drawn in the default white"))
+        return detail
+    }
+    ex.has_material = true
+    ex.diffuse = surface.diffuse
+    ex.alpha = surface.alpha
+    ex.metallic = surface.metallic
+    ex.exposure = surface.exposure
+    // The shader's own switch: past 10 the material is its own light.
+    ex.emissive = surface.exposure > 10.0
+    json.object_set_raw(detail, "name", json.str(core.text(surface.name)))
+    json.object_set_raw(detail, "diffuse", vec3_json3(surface.diffuse))
+    json.object_set_raw(detail, "luminance", num3(luminance(surface.diffuse)))
+    json.object_set_raw(detail, "metallic", num3(surface.metallic))
+    json.object_set_raw(detail, "roughness", num3(surface.roughness))
+    json.object_set_raw(detail, "alpha", num3(surface.alpha))
+    json.object_set_raw(detail, "reflectivity", num3(surface.reflectivity))
+    json.object_set_raw(detail, "emissive", json.boolean(ex.emissive))
+    if core.model_group_count(m) > 1 {
+        json.object_set_raw(detail, "groups", json.from_int(core.model_group_count(m)))
+    }
+    return detail
+}
+
+material_note(ex: *Explanation) -> string {
+    if !ex.has_material { return "" }
+    if ex.alpha < 0.1 {
+        ex.kind = EXPLAINS_CLEAR
+        return "its alpha is ${round3(ex.alpha)}: it is nearly see-through"
+    }
+    if luminance(ex.diffuse) < BLACK_ALBEDO {
+        ex.kind = EXPLAINS_DARK
+        return "its albedo is ${colour_text(ex.diffuse)}, luminance ${round3(luminance(ex.diffuse))}"
+    }
+    if ex.metallic >= 0.9 {
+        ex.kind = EXPLAINS_DARK
+        return "it is a metal (metallic ${round3(ex.metallic)}): it has no diffuse colour and shows only what it reflects"
+    }
+    return ""
+}
+
+// What the texture adds: whether one is bound, whether it loaded, and its mean
+// colour as the shader reads it. Both renderers upload a texture's bytes as they
+// are, so the mean the shader multiplies the albedo by is the bytes over 255.
+explain_texture(m: *Model, ex: *Explanation) -> ptr {
+    detail = json.obj()
+    ex.texture = core.vec3(1.0, 1.0, 1.0)
+    ex.texture_known = true
+    surface = model_surface(m)
+    path = ""
+    if surface != null { path = core.text(surface.texture_path) }
+    json.object_set_raw(detail, "path", json.str(path))
+    if path == "" {
+        json.object_set_raw(detail, "bound", json.boolean(false))
+        json.object_set_raw(detail, "note",
+            json.str("no texture: the material's colour is drawn over the default white"))
+        return detail
+    }
+    json.object_set_raw(detail, "bound", json.boolean(true))
+    loaded = surface.texture_id != 0
+    json.object_set_raw(detail, "loaded", json.boolean(loaded))
+    if !loaded {
+        ex.texture_failed = true
+        json.object_set_raw(detail, "drawn", json.str("the default white"))
+    }
+    texture_mean(path, ex, detail)
+    // What is drawn is the white the renderer fell back to, whatever the
+    // file holds.
+    if !loaded { ex.texture = core.vec3(1.0, 1.0, 1.0) }
+    return detail
+}
+
+texture_mean(path: string, ex: *Explanation, detail: ptr) {
+    image = ae3d_image_load(path)
+    if image == null {
+        ex.texture_known = false
+        json.object_set_raw(detail, "mean", json.str("unknown"))
+        json.object_set_raw(detail, "note",
+            json.str("the file does not decode here, so its texels are not known"))
+        return
+    }
+    width = ae3d_image_width(image)
+    height = ae3d_image_height(image)
+    texels = ae3d_image_pixels(image)
+    json.object_set_raw(detail, "width", json.from_int(width))
+    json.object_set_raw(detail, "height", json.from_int(height))
+    if texels == null || width <= 0 || height <= 0 {
+        ae3d_image_free(image)
+        ex.texture_known = false
+        json.object_set_raw(detail, "mean", json.str("unknown"))
+        return
+    }
+    texel = texels as uint8[]
+    across = TEXTURE_SAMPLES
+    if width < across { across = width }
+    down = TEXTURE_SAMPLES
+    if height < down { down = height }
+    red = 0.0
+    green = 0.0
+    blue = 0.0
+    y = 0
+    while y < down {
+        row = (y * height + height / 2) / down
+        x = 0
+        while x < across {
+            column = (x * width + width / 2) / across
+            at = (row * width + column) * 4
+            red = red + (texel[at] as float)
+            green = green + (texel[at + 1] as float)
+            blue = blue + (texel[at + 2] as float)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    ae3d_image_free(image)
+    samples = (across * down) as float
+    ex.texture = core.vec3(red / samples / 255.0, green / samples / 255.0, blue / samples / 255.0)
+    json.object_set_raw(detail, "mean", vec3_json3(ex.texture))
+    json.object_set_raw(detail, "luminance", num3(luminance(ex.texture)))
+}
+
+texture_note(ex: *Explanation, m: *Model) -> string {
+    if ex.texture_failed {
+        ex.kind = EXPLAINS_UNSEEN
+        surface = model_surface(m)
+        return "its texture ${core.text(surface.texture_path)} never loaded; the default white is drawn in its place"
+    }
+    if !ex.texture_known { return "" }
+    if luminance(ex.texture) < BLACK_ALBEDO {
+        ex.kind = EXPLAINS_DARK
+        return "its texture's mean is ${colour_text(ex.texture)}, luminance ${round3(luminance(ex.texture))}"
+    }
+    if channel_spread(ex.texture) > TINT && !leans_like(ex.texture, ex.diffuse) {
+        ex.kind = EXPLAINS_COLOUR
+        return "its texture's mean is ${colour_text(ex.texture)}"
+    }
+    return ""
+}
+
+// Every light at the model's centre, onto its top and onto the side facing the
+// camera, and the ambient the key light brings.
+explain_light(c: *Context, m: *Model, ex: *Explanation) -> ptr {
+    detail = json.obj()
+    centre = m.bounding_center
+    up = core.vec3(0.0, 1.0, 0.0)
+    side = up
+    if c.camera != null {
+        cam = c.camera as *Camera
+        toward = core.v3_sub(cam.position, centre)
+        if core.v3_len(toward) > 0.0001 { side = core.v3_normalize(toward) }
+    }
+    side = facing_normal(c, m, side)
+    json.object_set_raw(detail, "side_normal", vec3_json3(side))
+    ex.direct_top = core.vec3(0.0, 0.0, 0.0)
+    ex.direct_side = core.vec3(0.0, 0.0, 0.0)
+    ex.ambient = core.vec3(0.0, 0.0, 0.0)
+    lights = json.arr()
+    count = light_count(c)
+    i = 0
+    while i < count {
+        l = light_at(c, i)
+        if l != null { json.array_add_raw(lights, light_reaching(l, i, centre, up, side, ex)) }
+        i = i + 1
+    }
+    // The ambient is the key light's alone, as the shader has it: lights[0].
+    key = light_at(c, 0)
+    if key != null {
+        ex.ambient = core.v3_mul(tinted(key.color, kelvin_rgb(key.temperature)),
+                                 key.ambient_strength * 0.8)
+        ex.sun_below = key.mode == core.MODE_DIRECTIONAL && key.direction.y < 0.0
+    }
+    json.object_set_raw(detail, "lights", lights)
+    json.object_set_raw(detail, "direct_top", vec3_json3(ex.direct_top))
+    json.object_set_raw(detail, "direct_side", vec3_json3(ex.direct_side))
+    json.object_set_raw(detail, "ambient", vec3_json3(ex.ambient))
+    json.object_set_raw(detail, "direct_top_luminance", num3(luminance(ex.direct_top)))
+    json.object_set_raw(detail, "direct_side_luminance", num3(luminance(ex.direct_side)))
+    json.object_set_raw(detail, "ambient_luminance", num3(luminance(ex.ambient)))
+    if ex.sun_below { json.object_set_raw(detail, "sun_below_horizon", json.boolean(true)) }
+    if ex.emissive {
+        json.object_set_raw(detail, "note", json.str("emissive: drawn at its own colour, not shaded by these"))
+    }
+    return detail
+}
+
+// The surface the camera sees at the model's centre: the first of its
+// triangles a ray from the eye through the centre meets, its normal turned to
+// the eye. A face is lit by the way the face points, not by the direction to
+// the camera, and for a cube seen off its axis the two differ by most of the
+// sun. The direction to the eye stands in where the ray meets none of them:
+// a crowd's instances, a skinned figure away from its bind pose.
+facing_normal(c: *Context, m: *Model, fallback: Vec3) -> Vec3 {
+    if c.camera == null || m.mesh == null || m.is_instanced { return fallback }
+    cam = c.camera as *Camera
+    gap = core.v3_sub(m.bounding_center, cam.position)
+    length = core.v3_len(gap)
+    if length < 0.0001 { return fallback }
+    heading = core.v3_mul(gap, 1.0 / length)
+    normal = fallback
+    nearest = 0.0 - 1.0
+    indices = core.mesh_index_count(m.mesh)
+    i = 0
+    while i + 2 < indices {
+        a = core.mat4_transform_point(m.model_matrix, core.mesh_position(m.mesh, core.mesh_index_at(m.mesh, i)))
+        b = core.mat4_transform_point(m.model_matrix, core.mesh_position(m.mesh, core.mesh_index_at(m.mesh, i + 1)))
+        d = core.mat4_transform_point(m.model_matrix, core.mesh_position(m.mesh, core.mesh_index_at(m.mesh, i + 2)))
+        at = raycast.triangle(cam.position, heading, a, b, d)
+        if raycast.hit(at) && (nearest < 0.0 || at < nearest) {
+            face = core.v3_cross(core.v3_sub(b, a), core.v3_sub(d, a))
+            if core.v3_len(face) > 0.0 {
+                face = core.v3_normalize(face)
+                if core.v3_dot(face, heading) > 0.0 { face = core.v3_neg(face) }
+                normal = face
+                nearest = at
+            }
+        }
+        i = i + 3
+    }
+    return normal
+}
+
+// One light's part: what arrives onto the top and onto the side facing the
+// camera, as it multiplies the albedo, and why it is nothing when it is.
+light_reaching(l: *Light, index: int, centre: Vec3, up: Vec3, side: Vec3, ex: *Explanation) -> ptr {
+    out = json.obj()
+    json.object_set_raw(out, "index", json.from_int(index))
+    json.object_set_raw(out, "name", json.str(core.text(l.name)))
+    colour = tinted(l.color, kelvin_rgb(l.temperature))
+    toward = up
+    strength = 1.0
+    reaches = true
+    note = ""
+    if l.mode == core.MODE_DIRECTIONAL {
+        json.object_set_raw(out, "mode", json.str("directional"))
+        toward = core.v3_normalize(l.direction)
+        if toward.y < 0.0 { note = "below the horizon" }
+    } else {
+        if l.mode == core.MODE_SPOT {
+            json.object_set_raw(out, "mode", json.str("spot"))
+        } else {
+            json.object_set_raw(out, "mode", json.str("point"))
+        }
+        gap = core.v3_sub(l.position, centre)
+        distance = core.v3_len(gap)
+        if distance > 0.0001 { toward = core.v3_mul(gap, 1.0 / distance) }
+        json.object_set_raw(out, "distance", num3(distance))
+        strength = 1.0 / (l.constant_atten + l.linear_atten * distance +
+                          l.quadratic_atten * distance * distance)
+        // Where the shader stops shading it: the fall-off has left under a
+        // sixty-fourth of the light by then.
+        if l.quadratic_atten > 0.0 {
+            reach = 8.0 / core.sqrt_of(l.quadratic_atten)
+            json.object_set_raw(out, "reach", num3(reach))
+            if distance > reach {
+                reaches = false
+                note = "out of reach: ${round3(distance)} m away, its light stops at ${round3(reach)} m"
+            }
+        }
+        if reaches && l.mode == core.MODE_SPOT {
+            on_axis = core.v3_dot(core.v3_neg(toward), core.v3_normalize(l.direction))
+            if on_axis < l.spot_cos_outer {
+                reaches = false
+                note = "outside its cone"
+            } else {
+                strength = strength * smooth_step(l.spot_cos_outer, l.spot_cos_inner, on_axis)
+            }
+        }
+    }
+    onto_top = core.vec3(0.0, 0.0, 0.0)
+    onto_side = core.vec3(0.0, 0.0, 0.0)
+    if reaches {
+        radiance = core.v3_mul(colour, l.intensity * strength)
+        onto_top = light_onto(radiance, colour, up, toward)
+        onto_side = light_onto(radiance, colour, side, toward)
+        json.object_set_raw(out, "radiance", num3(luminance(radiance)))
+        if note == "" && luminance(radiance) > DIRECT_MIN &&
+           core.v3_dot(up, toward) <= 0.0 && core.v3_dot(side, toward) <= 0.0 {
+            note = "behind it: it lights neither its top nor the side facing the camera"
+        }
+    }
+    ex.direct_top = core.v3_add(ex.direct_top, onto_top)
+    ex.direct_side = core.v3_add(ex.direct_side, onto_side)
+    json.object_set_raw(out, "onto_top", num3(luminance(onto_top)))
+    json.object_set_raw(out, "onto_side", num3(luminance(onto_side)))
+    if note != "" { json.object_set_raw(out, "note", json.str(note)) }
+    return out
+}
+
+// A light onto one normal: the diffuse over pi where it faces the light, and
+// the shader's fill from behind (a fifth of the light's colour, by how far it
+// faces away, and not by its strength) where it does not.
+light_onto(radiance: Vec3, colour: Vec3, normal: Vec3, toward: Vec3) -> Vec3 {
+    facing = core.v3_dot(normal, toward)
+    if facing >= 0.0 { return core.v3_mul(radiance, facing / 3.14159265359) }
+    return core.v3_mul(colour, (0.0 - facing) * 0.3 * 0.2)
+}
+
+light_note(ex: *Explanation) -> string {
+    if ex.emissive { return "" }
+    ambient = round3(luminance(ex.ambient))
+    if luminance(ex.direct_side) < DIRECT_MIN {
+        ex.kind = EXPLAINS_DARK
+        if luminance(ex.direct_top) >= DIRECT_MIN {
+            return "no direct light reaches the side facing the camera (its top takes ${round3(luminance(ex.direct_top))}) and the ambient is ${ambient}"
+        }
+        if ex.sun_below {
+            return "no direct light reaches it, the sun is below the horizon, and the ambient is ${ambient}"
+        }
+        return "no direct light reaches it and the ambient is ${ambient}"
+    }
+    // The light's own colour, when it leans away from grey more than the
+    // material asks for.
+    arriving = core.v3_add(ex.direct_side, ex.ambient)
+    brightest = arriving.x
+    if arriving.y > brightest { brightest = arriving.y }
+    if arriving.z > brightest { brightest = arriving.z }
+    if brightest > 0.0 {
+        hue = core.v3_mul(arriving, 1.0 / brightest)
+        if channel_spread(hue) > TINT * 2.0 && !leans_like(hue, ex.diffuse) {
+            ex.kind = EXPLAINS_COLOUR
+            return "the light reaching it is ${colour_text(hue)}"
+        }
+    }
+    return ""
+}
+
+// Whether the model's centre, and its top, can see the key light: the one
+// light the shadow map is drawn for, and the one whose shadow takes every
+// light's direct share in the shader. A ray toward it against every other
+// model's triangles names what is in the way.
+explain_shadow(c: *Context, m: *Model, ex: *Explanation) -> ptr {
+    detail = json.obj()
+    json.object_set_raw(detail, "shadows", json.boolean(c.shadows))
+    key = light_at(c, 0)
+    if !c.shadows {
+        json.object_set_raw(detail, "note", json.str("shadows are off"))
+        return detail
+    }
+    if key == null {
+        json.object_set_raw(detail, "note", json.str("there is no key light to cast one"))
+        return detail
+    }
+    json.object_set_raw(detail, "key_light", json.str(core.text(key.name)))
+    centre = m.bounding_center
+    top = centre
+    if m.mesh != null {
+        size = core.mesh_size(m.mesh, m.scale)
+        top = core.v3_add(centre, core.vec3(0.0, size.y * 0.49, 0.0))
+    }
+    through_centre = shadow_blocker(c, m, centre, key)
+    through_top = shadow_blocker(c, m, top, key)
+    if through_centre != null {
+        json.object_set_raw(detail, "centre_blocked_by", json.str(core.text(through_centre.name)))
+    } else {
+        json.object_set_raw(detail, "centre_blocked_by", json.null_value())
+    }
+    if through_top != null {
+        json.object_set_raw(detail, "top_blocked_by", json.str(core.text(through_top.name)))
+    } else {
+        json.object_set_raw(detail, "top_blocked_by", json.null_value())
+    }
+    ex.blocker = through_centre as ptr
+    return detail
+}
+
+// The nearest model a ray from `origin` toward `key` meets before the light,
+// or null. Crowds are left out: their figures are instances the model's own
+// matrix does not place.
+shadow_blocker(c: *Context, m: *Model, origin: Vec3, key: *Light) -> *Model {
+    heading = core.v3_normalize(key.direction)
+    far = 0.0 - 1.0
+    if key.mode != core.MODE_DIRECTIONAL {
+        gap = core.v3_sub(key.position, origin)
+        far = core.v3_len(gap)
+        if far < 0.0001 { return null }
+        heading = core.v3_mul(gap, 1.0 / far)
+    }
+    nearest = null as *Model
+    nearest_at = 0.0
+    count = model_count(c)
+    i = 0
+    while i < count {
+        other = model_at(c, i)
+        if other != null && other != m && other.visible && other.casts_shadow &&
+           other.mesh != null && !other.is_instanced {
+            at = raycast.model_mesh(origin, heading, other)
+            if raycast.hit(at) && (far < 0.0 || at < far) {
+                if nearest == null || at < nearest_at {
+                    nearest = other
+                    nearest_at = at
+                }
+            }
+        }
+        i = i + 1
+    }
+    return nearest
+}
+
+shadow_note(ex: *Explanation) -> string {
+    if ex.emissive || ex.blocker == null { return "" }
+    // A shadow takes only the direct light; with none arriving there is
+    // nothing for it to take.
+    if luminance(ex.direct_side) < DIRECT_MIN && luminance(ex.direct_top) < DIRECT_MIN { return "" }
+    ex.kind = EXPLAINS_DARK
+    blocker = ex.blocker as *Model
+    return "in the shadow of ${core.text(blocker.name)}"
+}
+
+explain_exposure(c: *Context, ex: *Explanation) -> ptr {
+    detail = json.obj()
+    json.object_set_raw(detail, "material", num3(ex.exposure))
+    json.object_set_raw(detail, "frame", num3(c.frame_exposure))
+    json.object_set_raw(detail, "eye_adaptation", json.boolean(c.eye_adaptation))
+    json.object_set_raw(detail, "total", num3(exposure_total(c, ex)))
+    return detail
+}
+
+// The factor the lit colour is scaled by before the tone curve. An emissive
+// material's exposure is its strength, a tenth of it being 1.
+exposure_total(c: *Context, ex: *Explanation) -> float {
+    if ex.emissive { return ex.exposure * 0.1 * c.frame_exposure }
+    return ex.exposure * c.frame_exposure
+}
+
+exposure_note(c: *Context, ex: *Explanation) -> string {
+    total = exposure_total(c, ex)
+    if total >= LOW_EXPOSURE { return "" }
+    ex.kind = EXPLAINS_DARK
+    if c.eye_adaptation && c.frame_exposure < LOW_EXPOSURE {
+        return "the eye adaptation has the exposure at ${round3(c.frame_exposure)}"
+    }
+    return "the exposure is ${round3(total)}"
+}
+
+// What the side facing the camera would show with every light reaching it and
+// no shadow: the prediction the measured pixels are held against.
+predict(c: *Context, ex: *Explanation) {
+    arriving = core.v3_add(core.v3_mul(ex.direct_side, 1.0 - ex.metallic), ex.ambient)
+    if ex.emissive { arriving = core.vec3(1.0, 1.0, 1.0) }
+    linear = core.v3_mul(tinted(ex.albedo, arriving), exposure_total(c, ex))
+    ex.predicted = core.vec3(displayed(linear.x), displayed(linear.y), displayed(linear.z))
+}
+
+// The pixels: how much of where it projects was drawn, and the mean colour
+// about its centre.
+explain_pixels(c: *Context, m: *Model, ex: *Explanation) -> ptr {
+    detail = json.obj()
+    if capture.width() == 0 {
+        json.object_set_raw(detail, "note", json.str("the frame could not be read"))
+        return detail
+    }
+    ex.measured_ok = true
+    box = Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 0.0 }
+    if !model_screen_box(c, m, &box) {
+        json.object_set_raw(detail, "note",
+            json.str("the model does not project to the screen, so it covers no pixels"))
+        return detail
+    }
+    ex.projects = true
+    block = capture_doubles()
+    if capture.region(box.x as int, box.y as int, box.z as int, box.w as int, 0, 8, block) == 1 {
+        ex.coverage = read_double(block, 4)
+    }
+    json.object_set_raw(detail, "region", region_json(box.x, box.y, box.z, box.w))
+    json.object_set_raw(detail, "coverage", num3(ex.coverage))
+
+    across = box.z
+    if box.w < across { across = box.w }
+    half = across * CENTRE_SHARE * 0.5
+    if half < 0.5 { half = 0.5 }
+    middle_x = box.x + box.z * 0.5
+    middle_y = box.y + box.w * 0.5
+    cam = c.camera as *Camera
+    centre = core.camera_world_to_screen(cam, m.bounding_center, c.width, c.height)
+    if centre.w > 0.0001 {
+        middle_x = centre.x
+        middle_y = centre.y
+    }
+    left = (middle_x - half) as int
+    top = (middle_y - half) as int
+    size = (half * 2.0) as int
+    if size < 1 { size = 1 }
+    if capture.region(left, top, size, size, 0, 8, block) == 1 {
+        ex.measured = core.vec3(read_double(block, 0), read_double(block, 1), read_double(block, 2))
+        json.object_set_raw(detail, "centre", region_json(left as float, top as float,
+                                                          size as float, size as float))
+    }
+    free(block)
+    json.object_set_raw(detail, "mean", vec3_json3(ex.measured))
+    json.object_set_raw(detail, "luminance", num3(luminance(ex.measured)))
+    json.object_set_raw(detail, "predicted", vec3_json3(ex.predicted))
+    json.object_set_raw(detail, "predicted_luminance", num3(luminance(ex.predicted)))
+    return detail
+}
+
+look_of(ex: *Explanation) -> int {
+    if !ex.measured_ok { return LOOK_UNMEASURED }
+    if !ex.projects || ex.coverage <= 0.0 { return LOOK_MISSING }
+    seen = luminance(ex.measured)
+    if seen < DARK_LUMA || seen < luminance(ex.predicted) * DARK_SHARE { return LOOK_DARK }
+    if channel_spread(ex.measured) > TINT && !leans_like(ex.measured, ex.diffuse) { return LOOK_COLOUR }
+    return LOOK_AS_LIT
+}
+
+look_name(look: int) -> string {
+    if look == LOOK_DARK { return "dark" }
+    if look == LOOK_COLOUR { return "wrong colour" }
+    if look == LOOK_MISSING { return "missing" }
+    if look == LOOK_UNMEASURED { return "unmeasured" }
+    return "as lit"
+}
+
+// Whether a stage's finding accounts for the look, and the word the verdict
+// opens with when it does.
+accounts_for(kind: int, look: int) -> bool {
+    if kind == EXPLAINS_DARK { return look == LOOK_DARK || look == LOOK_UNMEASURED }
+    if kind == EXPLAINS_COLOUR { return look == LOOK_COLOUR || look == LOOK_UNMEASURED }
+    if kind == EXPLAINS_UNSEEN {
+        return look == LOOK_COLOUR || look == LOOK_AS_LIT || look == LOOK_UNMEASURED
+    }
+    if kind == EXPLAINS_CLEAR {
+        return look == LOOK_DARK || look == LOOK_MISSING || look == LOOK_UNMEASURED
+    }
+    return false
+}
+
+verdict_word(kind: int, look: int) -> string {
+    if look == LOOK_MISSING { return "missing" }
+    if kind == EXPLAINS_DARK || kind == EXPLAINS_CLEAR { return "dark" }
+    return "wrong colour"
+}
+
+finding(name: string, flagged: bool, note: string, detail: ptr) -> ptr {
+    out = json.obj()
+    json.object_set_raw(out, "stage", json.str(name))
+    json.object_set_raw(out, "flagged", json.boolean(flagged))
+    if flagged { json.object_set_raw(out, "finding", json.str(note)) }
+    json.object_set_raw(out, "detail", detail)
+    return out
+}
+
+explain_result(c: *Context, m: *Model) -> ptr {
+    ex = heap.new(Explanation)
+    stages = json.arr()
+    verdict = ""
+    blamed = ""
+
+    // The stages first, then the pixels: the prediction the pixels are held
+    // against needs every number above them.
+    material = explain_material(m, ex)
+    ex.kind = 0
+    material_says = material_note(ex)
+    material_kind = ex.kind
+
+    texturing = explain_texture(m, ex)
+    ex.albedo = tinted(ex.diffuse, ex.texture)
+    ex.kind = 0
+    texture_says = texture_note(ex, m)
+    texture_kind = ex.kind
+
+    lighting = explain_light(c, m, ex)
+    ex.kind = 0
+    light_says = light_note(ex)
+    light_kind = ex.kind
+
+    shadow = explain_shadow(c, m, ex)
+    ex.kind = 0
+    shadow_says = shadow_note(ex)
+    shadow_kind = ex.kind
+
+    exposing = explain_exposure(c, ex)
+    ex.kind = 0
+    exposure_says = exposure_note(c, ex)
+    exposure_kind = ex.kind
+
+    predict(c, ex)
+    pixels = explain_pixels(c, m, ex)
+    look = look_of(ex)
+
+    // The first stage whose finding accounts for what the pixels show.
+    if accounts_for(material_kind, look) {
+        verdict = "${verdict_word(material_kind, look)}: ${material_says}"
+        blamed = "material"
+    } else if accounts_for(texture_kind, look) {
+        verdict = "${verdict_word(texture_kind, look)}: ${texture_says}"
+        blamed = "texture"
+    } else if accounts_for(light_kind, look) {
+        verdict = "${verdict_word(light_kind, look)}: ${light_says}"
+        blamed = "light"
+    } else if accounts_for(shadow_kind, look) {
+        verdict = "${verdict_word(shadow_kind, look)}: ${shadow_says}"
+        blamed = "shadow"
+    } else if accounts_for(exposure_kind, look) {
+        verdict = "${verdict_word(exposure_kind, look)}: ${exposure_says}"
+        blamed = "exposure"
+    } else if look == LOOK_MISSING {
+        verdict = "missing: nothing was drawn where it projects; see trace.model"
+        blamed = "pixels"
+    } else if look == LOOK_DARK || look == LOOK_COLOUR {
+        // Honest about it: the look is off and no stage here says why.
+        verdict = "${look_name(look)}: no stage accounts for it (luminance ${round3(luminance(ex.measured))}, ${round3(luminance(ex.predicted))} fully lit)"
+    } else if look == LOOK_UNMEASURED {
+        verdict = "unmeasured: the frame could not be read, and no stage finds anything off"
+    } else if material_kind != 0 {
+        // A finding the pixels do not bear out is still worth saying: a shadow
+        // the geometry says is there and the frame does not show is the
+        // renderer's to answer for.
+        verdict = "as lit; not shown in the pixels: ${material_says}"
+    } else if texture_kind != 0 {
+        verdict = "as lit; not shown in the pixels: ${texture_says}"
+    } else if light_kind != 0 {
+        verdict = "as lit; not shown in the pixels: ${light_says}"
+    } else if shadow_kind != 0 {
+        verdict = "as lit; not shown in the pixels: ${shadow_says}"
+    } else if exposure_kind != 0 {
+        verdict = "as lit; not shown in the pixels: ${exposure_says}"
+    } else {
+        verdict = "as lit"
+    }
+
+    json.array_add_raw(stages, finding("material", material_kind != 0, material_says, material))
+    json.array_add_raw(stages, finding("texture", texture_kind != 0, texture_says, texturing))
+    json.array_add_raw(stages, finding("light", light_kind != 0, light_says, lighting))
+    json.array_add_raw(stages, finding("shadow", shadow_kind != 0, shadow_says, shadow))
+    json.array_add_raw(stages, finding("exposure", exposure_kind != 0, exposure_says, exposing))
+    json.array_add_raw(stages, finding("pixels", false, "", pixels))
+
+    out = json.obj()
+    json.object_set_raw(out, "name", json.str(core.text(m.name)))
+    json.object_set_raw(out, "stages", stages)
+    json.object_set_raw(out, "look", json.str(look_name(look)))
+    json.object_set_raw(out, "verdict", json.str(verdict))
+    if blamed != "" { json.object_set_raw(out, "blamed", json.str(blamed)) }
+    heap.free(ex)
+    return out
+}
+
 handle(c: *Context, op: string, id: int, request: ptr) -> bool {
     if op == "help"        { answer(id, help_result()) return false }
     if op == "ping"        { answer(id, json.obj()) return false }
@@ -2079,22 +2916,7 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
     if op == "world" { answer(id, world_result(c)) return false }
 
     if op == "trace.model" {
-        m = null
-        p = null
-        named = json.object_get_raw(request, "id")
-        if named != null { p = assets.provenance_by_id(json.get_string_raw(named)) }
-        if p == null {
-            named = json.object_get_raw(request, "object")
-            if named != null { p = assets.provenance_by_object(json.get_string_raw(named)) }
-        }
-        if p != null { m = assets.provenance_model(p) }
-        if m == null {
-            indexed = json.object_get_raw(request, "index")
-            if indexed != null {
-                m = model_at(c, json.get_int(indexed))
-                if m != null { p = assets.provenance_for(m) }
-            }
-        }
+        m = model_from(c, request)
         if m == null {
             fail(id, "no model by that id, object or index")
             return false
@@ -2103,6 +2925,21 @@ handle(c: *Context, op: string, id: int, request: ptr) -> bool {
         c.want_deferred = true
         c.pending_trace_id = id
         c.pending_trace_model = m as ptr
+        return true
+    }
+
+    // Why a model on screen looks the way it does. Answered from the frame
+    // that was on screen, as the trace is: its pixels are half the answer.
+    if op == "explain.model" {
+        m = model_from(c, request)
+        if m == null {
+            fail(id, "no model by that id, object or index")
+            return false
+        }
+        c.want_capture = true
+        c.want_deferred = true
+        c.pending_explain_id = id
+        c.pending_explain_model = m as ptr
         return true
     }
 
@@ -2253,12 +3090,19 @@ capture_frame(width: int, height: int) -> bool {
     return capture.frame(width, height) == 1
 }
 
+// The trace and the explanation waiting on this frame's pixels.
 answer_pending_trace(c: *Context) {
-    if c.pending_trace_id < 0 { return }
-    m = c.pending_trace_model as *Model
-    answer(c.pending_trace_id, trace_result(c, m, assets.provenance_for(m)))
-    c.pending_trace_id = -1
-    c.pending_trace_model = null
+    if c.pending_trace_id >= 0 {
+        m = c.pending_trace_model as *Model
+        answer(c.pending_trace_id, trace_result(c, m, assets.provenance_for(m)))
+        c.pending_trace_id = -1
+        c.pending_trace_model = null
+    }
+    if c.pending_explain_id >= 0 {
+        answer(c.pending_explain_id, explain_result(c, c.pending_explain_model as *Model))
+        c.pending_explain_id = -1
+        c.pending_explain_model = null
+    }
 }
 
 capture_adopt(pixels: ptr, width: int, height: int) -> bool {
@@ -2285,5 +3129,11 @@ answer_capture_unsupported(c: *Context, reason: string) {
         answer(c.pending_trace_id, trace_result(c, m, assets.provenance_for(m)))
         c.pending_trace_id = -1
         c.pending_trace_model = null
+    }
+    // Everything but the pixels, which the explanation says it could not read.
+    if c.pending_explain_id >= 0 {
+        answer(c.pending_explain_id, explain_result(c, c.pending_explain_model as *Model))
+        c.pending_explain_id = -1
+        c.pending_explain_model = null
     }
 }
