@@ -30,9 +30,12 @@ SOFTWARE.
 
 ## stb_image
 
-`native/image/stb_image.h` is vendored verbatim from https://github.com/nothings/stb.
-It is dual licensed as MIT and public domain; ae3d uses it under the MIT
-terms.
+Nothing of https://github.com/nothings/stb is vendored any longer; the
+image decoders in `src/ae3d/picture`, `src/ae3d/jpeg` and
+`src/ae3d/inflate` are Aether ports of stb_image 2.30's PNG, JPEG, TGA,
+BMP and zlib decoders, made to give its output byte for byte. stb_image is
+dual licensed as MIT and public domain; the ports are made under the MIT
+terms, whose notice follows.
 
 ```
 MIT License

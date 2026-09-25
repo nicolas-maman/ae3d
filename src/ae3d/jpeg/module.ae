@@ -1,0 +1,1565 @@
+// JPEG to RGBA, baseline and progressive.
+//
+// The decoder stb_image carried, in Aether, step for step: the same
+// Huffman fast tables (nine bits, and small AC coefficients decoded with
+// their magnitude in one lookup), the same integer IDCT (IJG's islow,
+// scaled by 4096 and kept two bits wide between the passes), the same
+// "fancy" upsampling (a 3:1 triangle filter across block edges, both ways
+// for 4:2:0) and the same reduced-precision YCbCr conversion. stb's SSE2
+// kernels were written to give the scalar ones' answer exactly, so
+// following the scalar code gives the pixels the engine drew before, to
+// the byte, rather than an approximation of them: a texture does not
+// change because the decoder under it did.
+//
+// Covered: baseline and extended Huffman (SOF0/SOF1), progressive (SOF2)
+// with spectral selection and successive approximation, one, three or
+// four components, any integer subsampling (4:4:4, 4:2:2, 4:2:0, 4:4:0,
+// 4:1:1, ...), restart intervals, JFIF, Adobe's colour transform flag
+// (RGB, CMYK and YCCK), DNL. Not covered, as stb did not: arithmetic
+// coding, lossless and hierarchical JPEG, 12-bit samples.
+//
+//   dims = calloc(3, 4)                        // int[3]: width, height, why
+//   rgba = jpeg.decode(bytes, length, dims)    // null on failure
+//   why = jpeg.reason((dims as int[])[2])
+//
+// The rows come out bottom first, as the renderers upload them. Every
+// read is bounds-checked (past the end reads as zero, as stb's did), and
+// a decode's state is its own, so decodes run on any number of threads.
+
+exports (
+    is_jpeg, decode, reason
+)
+
+extern malloc(size: long) -> ptr
+extern calloc(count: long, size: long) -> ptr
+extern free(p: ptr)
+extern memset(dst: ptr, value: int, n: long) -> ptr
+
+const FAST_BITS = 9
+const NONE = 255
+
+// A Huffman table as ints in one block: the fast table (the symbol index
+// for the next nine bits, 255 when the code is longer), the codes, the
+// symbols, each symbol's code length, the preshifted limit a length and
+// the offset from code to symbol index a length.
+const H_FAST = 0
+const H_CODE = 512
+const H_VALUES = 768
+const H_SIZE = 1024
+const H_MAXCODE = 1281
+const H_DELTA = 1299
+const HUFF_INTS = 1316
+
+// A component's integers, sixteen to a component.
+const C_ID = 0
+const C_H = 1
+const C_V = 2
+const C_TQ = 3
+const C_HD = 4
+const C_HA = 5
+const C_DCPRED = 6
+const C_X = 7
+const C_Y = 8
+const C_W2 = 9
+const C_H2 = 10
+const C_COEFFW = 11
+const COMP_INTS = 16
+
+// Where a coefficient at position k of the zigzag lands in the 8x8 block;
+// the fifteen past the end let a corrupt run land somewhere harmless.
+const DEZIGZAG: uint8[79] = [
+    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5,
+    12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28,
+    35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
+    58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+    63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63
+]
+// (1 << n) - 1, and (-1 << n) + 1.
+const BMASK: int[17] = [0, 1, 3, 7, 15, 31, 63, 127, 255, 511, 1023, 2047, 4095, 8191, 16383, 32767, 65535]
+const JBIAS: int[16] = [0, -1, -3, -7, -15, -31, -63, -127, -255, -511, -1023, -2047, -4095, -8191, -16383, -32767]
+
+// Why a decode failed, as reason() says it.
+const E_NONE = 0
+const E_MARKER = 1
+const E_DRI = 2
+const E_DQT = 3
+const E_DHT = 4
+const E_APP = 5
+const E_UNKNOWN_MARKER = 6
+const E_SOS = 7
+const E_SOF = 8
+const E_PRECISION = 9
+const E_HEIGHT = 10
+const E_WIDTH = 11
+const E_LARGE = 12
+const E_COMPONENTS = 13
+const E_SAMPLING = 14
+const E_TABLE = 15
+const E_MEMORY = 16
+const E_SOI = 17
+const E_NO_SOF = 18
+const E_HUFFMAN = 19
+const E_DELTA = 20
+const E_MERGE = 21
+const E_DNL = 22
+const E_CODE_LENGTHS = 23
+const E_SCAN_COMPONENT = 24
+
+struct JpegDecoder {
+    src: ptr                       // the file's bytes, not owned
+    at: int
+    end: int
+    huff: ptr                      // int[8 * HUFF_INTS]: DC tables 0..3, AC tables 0..3
+    dequant: ptr                   // int[4 * 64], in natural order
+    fast_ac: ptr                   // int[4 * 512]
+    comp: ptr                      // int[4 * COMP_INTS]
+    planes: ptr                    // ptr[4]: each component's samples, w2 x h2
+    coeffs: ptr                    // ptr[4]: a progressive image's coefficients, 64 shorts a block
+    block: ptr                     // 64 shorts, the block being decoded
+    idct: ptr                      // int[64], the IDCT's columns
+    order: ptr                     // int[4], the components of the scan in order
+    img_x: int
+    img_y: int
+    img_n: int
+    h_max: int
+    v_max: int
+    mcu_x: int
+    mcu_y: int
+    code_buffer: uint32            // entropy-coded bits, first at the top
+    code_bits: int
+    marker: int                    // a marker met while filling code_buffer
+    nomore: int
+    progressive: int
+    spec_start: int
+    spec_end: int
+    succ_high: int
+    succ_low: int
+    eob_run: int
+    jfif: int
+    app14: int                     // Adobe's colour transform, -1 when there is none
+    rgb: int
+    scan_n: int
+    restart_interval: int
+    todo: int
+    error: int
+}
+
+reason(code: int) -> string {
+    if code == E_MARKER { return "expected a marker (corrupt JPEG)" }
+    if code == E_DRI { return "bad DRI length (corrupt JPEG)" }
+    if code == E_DQT { return "bad quantization table (corrupt JPEG)" }
+    if code == E_DHT { return "bad Huffman table (corrupt JPEG)" }
+    if code == E_APP { return "bad APP or COM length (corrupt JPEG)" }
+    if code == E_UNKNOWN_MARKER { return "unknown marker (corrupt JPEG)" }
+    if code == E_SOS { return "bad SOS (corrupt JPEG)" }
+    if code == E_SOF { return "bad SOF (corrupt JPEG)" }
+    if code == E_PRECISION { return "JPEG not supported: 8-bit samples only" }
+    if code == E_HEIGHT { return "JPEG not supported: height given after the frame (DNL)" }
+    if code == E_WIDTH { return "zero width (corrupt JPEG)" }
+    if code == E_LARGE { return "image too large" }
+    if code == E_COMPONENTS { return "bad component count (corrupt JPEG)" }
+    if code == E_SAMPLING { return "bad sampling factors (corrupt JPEG)" }
+    if code == E_TABLE { return "bad table index (corrupt JPEG)" }
+    if code == E_MEMORY { return "out of memory" }
+    if code == E_SOI { return "no SOI (not a JPEG)" }
+    if code == E_NO_SOF { return "no SOF (corrupt JPEG)" }
+    if code == E_HUFFMAN { return "bad Huffman code (corrupt JPEG)" }
+    if code == E_DELTA { return "bad DC delta (corrupt JPEG)" }
+    if code == E_MERGE { return "coefficient out of range (corrupt JPEG)" }
+    if code == E_DNL { return "bad DNL (corrupt JPEG)" }
+    if code == E_CODE_LENGTHS { return "bad Huffman code lengths (corrupt JPEG)" }
+    if code == E_SCAN_COMPONENT { return "scan names an unknown component (corrupt JPEG)" }
+    return ""
+}
+
+fail(d: *JpegDecoder, code: int) -> bool {
+    if d.error == E_NONE { d.error = code }
+    return false
+}
+
+// --- reading --------------------------------------------------------------------
+
+get8(d: *JpegDecoder) -> int {
+    if d.at >= d.end { return 0 }
+    b = d.src as uint8[]
+    v = b[d.at] as int
+    d.at = d.at + 1
+    return v
+}
+
+get16(d: *JpegDecoder) -> int {
+    hi = get8(d)
+    return (hi << 8) | get8(d)
+}
+
+skip(d: *JpegDecoder, n: int) {
+    if n < 0 {
+        d.at = d.end
+        return
+    }
+    if n > d.end - d.at {
+        d.at = d.end
+        return
+    }
+    d.at = d.at + n
+}
+
+at_eof(d: *JpegDecoder) -> bool { return d.at >= d.end }
+
+// The next marker: one met in the entropy-coded data first, else the next
+// 0xff in the stream and what follows its fill bytes. NONE when the next
+// byte is not 0xff.
+get_marker(d: *JpegDecoder) -> int {
+    if d.marker != NONE {
+        x = d.marker
+        d.marker = NONE
+        return x
+    }
+    x = get8(d)
+    if x != 255 { return NONE }
+    while x == 255 { x = get8(d) }
+    return x
+}
+
+is_restart(m: int) -> bool { return m >= 208 && m <= 215 }
+
+// --- entropy-coded bits ---------------------------------------------------------
+
+grow_buffer(d: *JpegDecoder) {
+    src = d.src as uint8[]
+    while true {
+        b = 0
+        if d.nomore == 0 && d.at < d.end {
+            b = src[d.at] as int
+            d.at = d.at + 1
+        }
+        if b == 255 {
+            c = get8(d)
+            while c == 255 { c = get8(d) }
+            if c != 0 {
+                d.marker = c
+                d.nomore = 1
+                return
+            }
+        }
+        d.code_buffer = d.code_buffer | ((b as uint32) << (24 - d.code_bits))
+        d.code_bits = d.code_bits + 8
+        if d.code_bits > 24 { return }
+    }
+}
+
+huff_decode(d: *JpegDecoder, table: int) -> int {
+    h = d.huff as int[]
+    if d.code_bits < 16 { grow_buffer(d) }
+    c = ((d.code_buffer >> (32 - FAST_BITS)) as int) & 511
+    k = h[table + H_FAST + c]
+    if k < 255 {
+        s = h[table + H_SIZE + k]
+        if s > d.code_bits { return -1 }
+        d.code_buffer = d.code_buffer << s
+        d.code_bits = d.code_bits - s
+        return h[table + H_VALUES + k]
+    }
+    temp = (d.code_buffer >> 16) as int
+    k = FAST_BITS + 1
+    while temp >= h[table + H_MAXCODE + k] { k = k + 1 }
+    if k == 17 {
+        d.code_bits = d.code_bits - 16
+        return -1
+    }
+    if k > d.code_bits { return -1 }
+    c = (((d.code_buffer >> (32 - k)) as int) & BMASK[k]) + h[table + H_DELTA + k]
+    if c < 0 || c >= 256 { return -1 }
+    d.code_bits = d.code_bits - k
+    d.code_buffer = d.code_buffer << k
+    return h[table + H_VALUES + c]
+}
+
+// JPEG's receive and extend together: n bits, as a signed magnitude.
+extend_receive(d: *JpegDecoder, n: int) -> int {
+    if d.code_bits < n { grow_buffer(d) }
+    if d.code_bits < n { return 0 }
+    sgn = (d.code_buffer >> 31) as int
+    k = (d.code_buffer << n) | (d.code_buffer >> (32 - n))
+    mask = ((1 as uint32) << n) - (1 as uint32)
+    d.code_buffer = k & (mask ^ (4294967295 as uint32))
+    v = (k & mask) as int
+    d.code_bits = d.code_bits - n
+    return v + (JBIAS[n] & (sgn - 1))
+}
+
+get_bits(d: *JpegDecoder, n: int) -> int {
+    if d.code_bits < n { grow_buffer(d) }
+    if d.code_bits < n { return 0 }
+    k = (d.code_buffer << n) | (d.code_buffer >> (32 - n))
+    mask = ((1 as uint32) << n) - (1 as uint32)
+    d.code_buffer = k & (mask ^ (4294967295 as uint32))
+    d.code_bits = d.code_bits - n
+    return (k & mask) as int
+}
+
+get_bit(d: *JpegDecoder) -> bool {
+    if d.code_bits < 1 { grow_buffer(d) }
+    if d.code_bits < 1 { return false }
+    k = d.code_buffer
+    d.code_buffer = d.code_buffer << 1
+    d.code_bits = d.code_bits - 1
+    return (k & (2147483648 as uint32)) != (0 as uint32)
+}
+
+// A coefficient as the signed 16-bit number it is stored as. They are
+// kept in uint16 views, as stb kept them in shorts: half the memory of
+// ints, and a store to one cannot be a store to the decoder's own fields,
+// so the bit buffer stays in registers through a block.
+short16(v: int) -> int { return (v << 16) >> 16 }
+
+// --- Huffman tables -----------------------------------------------------------
+
+build_huffman(d: *JpegDecoder, table: int, counts: int[]) -> bool {
+    h = d.huff as int[]
+    k = 0
+    i = 0
+    while i < 16 {
+        j = 0
+        while j < counts[i] {
+            h[table + H_SIZE + k] = i + 1
+            k = k + 1
+            if k >= 257 { return fail(d, E_CODE_LENGTHS) }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    h[table + H_SIZE + k] = 0
+    code = 0
+    k = 0
+    j = 1
+    while j <= 16 {
+        h[table + H_DELTA + j] = k - code
+        if h[table + H_SIZE + k] == j {
+            while h[table + H_SIZE + k] == j {
+                h[table + H_CODE + k] = code & 65535
+                code = code + 1
+                k = k + 1
+            }
+            if code - 1 >= (1 << j) { return fail(d, E_CODE_LENGTHS) }
+        }
+        h[table + H_MAXCODE + j] = code << (16 - j)
+        code = code << 1
+        j = j + 1
+    }
+    // The sentinel: every sixteen-bit window is below it.
+    h[table + H_MAXCODE + 17] = 2147483647
+    i = 0
+    while i < 512 {
+        h[table + H_FAST + i] = 255
+        i = i + 1
+    }
+    i = 0
+    while i < k {
+        s = h[table + H_SIZE + i]
+        if s <= FAST_BITS {
+            c = h[table + H_CODE + i] << (FAST_BITS - s)
+            m = 1 << (FAST_BITS - s)
+            j = 0
+            while j < m {
+                h[table + H_FAST + c + j] = i
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Small AC coefficients whose code and magnitude bits both fit the nine
+// bits: run, value and total length in one entry.
+build_fast_ac(d: *JpegDecoder, which: int) {
+    h = d.huff as int[]
+    fac = d.fast_ac as int[]
+    table = (4 + which) * HUFF_INTS
+    i = 0
+    while i < 512 {
+        fast = h[table + H_FAST + i]
+        fac[which * 512 + i] = 0
+        if fast < 255 {
+            rs = h[table + H_VALUES + fast]
+            run = (rs >> 4) & 15
+            magbits = rs & 15
+            len = h[table + H_SIZE + fast]
+            if magbits != 0 && len + magbits <= FAST_BITS {
+                k = ((i << len) & 511) >> (FAST_BITS - magbits)
+                m = 1 << (magbits - 1)
+                if k < m { k = k - (1 << magbits) + 1 }
+                if k >= -128 && k <= 127 {
+                    fac[which * 512 + i] = k * 256 + run * 16 + len + magbits
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+// --- blocks ----------------------------------------------------------------------
+
+adds_valid(a: int, b: int) -> bool {
+    if (a >= 0) != (b >= 0) { return true }
+    if a < 0 && b < 0 { return a >= -2147483647 - 1 - b }
+    return a <= 2147483647 - b
+}
+
+muls_valid(a: int, b: int) -> bool {
+    if b == 0 || b == -1 { return true }
+    if (a >= 0) == (b >= 0) { return a <= 32767 / b }
+    if b < 0 { return a <= -32768 / b }
+    return a >= -32768 / b
+}
+
+// One baseline block into d.block, dequantized. 0 on an error, 1 when
+// only its DC coefficient is set (the IDCT of that is one flat value), 2
+// otherwise.
+decode_block(d: *JpegDecoder, n: int) -> int {
+    ci = d.comp as int[]
+    base = n * COMP_INTS
+    hdc = ci[base + C_HD] * HUFF_INTS
+    ha = ci[base + C_HA]
+    fac = d.fast_ac as int[]
+    fbase = ha * 512
+    dq = d.dequant as int[]
+    qbase = ci[base + C_TQ] * 64
+    data = d.block as uint16[]
+    if d.code_bits < 16 { grow_buffer(d) }
+    t = huff_decode(d, hdc)
+    if t < 0 || t > 15 { return failed(d, E_HUFFMAN) }
+    memset(d.block, 0, 128 as long)
+    diff = 0
+    if t != 0 { diff = extend_receive(d, t) }
+    if !adds_valid(ci[base + C_DCPRED], diff) { return failed(d, E_DELTA) }
+    dc = ci[base + C_DCPRED] + diff
+    ci[base + C_DCPRED] = dc
+    if !muls_valid(dc, dq[qbase]) { return failed(d, E_MERGE) }
+    data[0] = dc * dq[qbase]
+    hac = (4 + ha) * HUFF_INTS
+    shape = 1
+    k = 1
+    while k < 64 {
+        if d.code_bits < 16 { grow_buffer(d) }
+        c = ((d.code_buffer >> (32 - FAST_BITS)) as int) & 511
+        r = fac[fbase + c]
+        if r != 0 {
+            k = k + ((r >> 4) & 15)
+            s = r & 15
+            if s > d.code_bits { return failed(d, E_HUFFMAN) }
+            d.code_buffer = d.code_buffer << s
+            d.code_bits = d.code_bits - s
+            zig = DEZIGZAG[k] as int
+            k = k + 1
+            data[zig] = (r >> 8) * dq[qbase + zig]
+            shape = 2
+        } else {
+            rs = huff_decode(d, hac)
+            if rs < 0 { return failed(d, E_HUFFMAN) }
+            s = rs & 15
+            r = rs >> 4
+            if s == 0 {
+                if rs != 240 { break }
+                k = k + 16
+            } else {
+                k = k + r
+                zig = DEZIGZAG[k] as int
+                k = k + 1
+                data[zig] = extend_receive(d, s) * dq[qbase + zig]
+                shape = 2
+            }
+        }
+    }
+    return shape
+}
+
+failed(d: *JpegDecoder, code: int) -> int {
+    fail(d, code)
+    return 0
+}
+
+// A block whose AC coefficients are all zero: idct_block would give every
+// sample the same value, (dc * 16384 + 65536 + (128 << 17)) >> 17 clamped
+// (the columns pass 4 * dc down the first, the rows add nothing to it), so
+// it is written as that, eight bytes a row -- most of a smooth image's
+// chroma blocks. `at` and `stride` are multiples of eight and the plane
+// came from calloc, so each row is one aligned 64-bit store.
+flat_block(dc: int, plane: ptr, at: int, stride: int) {
+    v = clamp8((dc * 16384 + 16842752) >> 17) as long
+    pattern = v * (72340172838076673 as long)
+    rows = plane as long[]
+    p = at >> 3
+    step = stride >> 3
+    i = 0
+    while i < 8 {
+        rows[p] = pattern
+        p = p + step
+        i = i + 1
+    }
+}
+
+decode_block_prog_dc(d: *JpegDecoder, coeff: ptr, at: int, n: int) -> bool {
+    if d.spec_end != 0 { return fail(d, E_MERGE) }
+    data = coeff as uint16[]
+    ci = d.comp as int[]
+    base = n * COMP_INTS
+    if d.code_bits < 16 { grow_buffer(d) }
+    if d.succ_high == 0 {
+        memset(coeff + at * 2, 0, 128 as long)
+        t = huff_decode(d, ci[base + C_HD] * HUFF_INTS)
+        if t < 0 || t > 15 { return fail(d, E_MERGE) }
+        diff = 0
+        if t != 0 { diff = extend_receive(d, t) }
+        if !adds_valid(ci[base + C_DCPRED], diff) { return fail(d, E_DELTA) }
+        dc = ci[base + C_DCPRED] + diff
+        ci[base + C_DCPRED] = dc
+        if !muls_valid(dc, 1 << d.succ_low) { return fail(d, E_MERGE) }
+        data[at] = dc * (1 << d.succ_low)
+    } else {
+        if get_bit(d) { data[at] = short16(data[at]) + (1 << d.succ_low) }
+    }
+    return true
+}
+
+decode_block_prog_ac(d: *JpegDecoder, coeff: ptr, at: int, ha: int) -> bool {
+    if d.spec_start == 0 { return fail(d, E_MERGE) }
+    data = coeff as uint16[]
+    fac = d.fast_ac as int[]
+    fbase = ha * 512
+    hac = (4 + ha) * HUFF_INTS
+    if d.succ_high == 0 {
+        shift = d.succ_low
+        if d.eob_run != 0 {
+            d.eob_run = d.eob_run - 1
+            return true
+        }
+        k = d.spec_start
+        while k <= d.spec_end {
+            if d.code_bits < 16 { grow_buffer(d) }
+            c = ((d.code_buffer >> (32 - FAST_BITS)) as int) & 511
+            r = fac[fbase + c]
+            if r != 0 {
+                k = k + ((r >> 4) & 15)
+                s = r & 15
+                if s > d.code_bits { return fail(d, E_HUFFMAN) }
+                d.code_buffer = d.code_buffer << s
+                d.code_bits = d.code_bits - s
+                zig = DEZIGZAG[k] as int
+                k = k + 1
+                data[at + zig] = (r >> 8) * (1 << shift)
+            } else {
+                rs = huff_decode(d, hac)
+                if rs < 0 { return fail(d, E_HUFFMAN) }
+                s = rs & 15
+                r = rs >> 4
+                if s == 0 {
+                    if r < 15 {
+                        d.eob_run = 1 << r
+                        if r != 0 { d.eob_run = d.eob_run + get_bits(d, r) }
+                        d.eob_run = d.eob_run - 1
+                        break
+                    }
+                    k = k + 16
+                } else {
+                    k = k + r
+                    zig = DEZIGZAG[k] as int
+                    k = k + 1
+                    data[at + zig] = extend_receive(d, s) * (1 << shift)
+                }
+            }
+        }
+    } else {
+        // A refinement scan: one more bit of every coefficient already
+        // nonzero, and the newly nonzero ones.
+        bit = short16(1 << d.succ_low)
+        if d.eob_run != 0 {
+            d.eob_run = d.eob_run - 1
+            k = d.spec_start
+            while k <= d.spec_end {
+                p = at + (DEZIGZAG[k] as int)
+                cur = short16(data[p])
+                if cur != 0 {
+                    if get_bit(d) {
+                        if (cur & bit) == 0 {
+                            if cur > 0 { data[p] = cur + bit } else { data[p] = cur - bit }
+                        }
+                    }
+                }
+                k = k + 1
+            }
+        } else {
+            k = d.spec_start
+            while k <= d.spec_end {
+                rs = huff_decode(d, hac)
+                if rs < 0 { return fail(d, E_HUFFMAN) }
+                s = rs & 15
+                r = rs >> 4
+                if s == 0 {
+                    if r < 15 {
+                        d.eob_run = (1 << r) - 1
+                        if r != 0 { d.eob_run = d.eob_run + get_bits(d, r) }
+                        r = 64
+                    }
+                } else {
+                    if s != 1 { return fail(d, E_HUFFMAN) }
+                    if get_bit(d) { s = bit } else { s = 0 - bit }
+                }
+                while k <= d.spec_end {
+                    p = at + (DEZIGZAG[k] as int)
+                    k = k + 1
+                    cur = short16(data[p])
+                    if cur != 0 {
+                        if get_bit(d) {
+                            if (cur & bit) == 0 {
+                                if cur > 0 { data[p] = cur + bit } else { data[p] = cur - bit }
+                            }
+                        }
+                    } else {
+                        if r == 0 {
+                            data[p] = s
+                            break
+                        }
+                        r = r - 1
+                    }
+                }
+            }
+        }
+    }
+    return true
+}
+
+clamp8(x: int) -> int {
+    if x < 0 { return 0 }
+    if x > 255 { return 255 }
+    return x
+}
+
+// The integer IDCT (IJG's jidctint), columns into `idct` then rows into
+// the component's samples at `at` with `stride`. The constants are
+// round(c * 4096); the first pass keeps two extra bits, the second takes
+// them off with the 1 << 17 of both passes' scaling and adds the 128 back.
+idct_block(d: *JpegDecoder, coeff: ptr, cat: int, plane: ptr, at: int, stride: int) {
+    s = coeff as uint16[]
+    v = d.idct as int[]
+    o = plane as uint8[]
+    i = 0
+    while i < 8 {
+        c = cat + i
+        if s[c + 8] == 0 && s[c + 16] == 0 && s[c + 24] == 0 && s[c + 32] == 0 &&
+           s[c + 40] == 0 && s[c + 48] == 0 && s[c + 56] == 0 {
+            dcterm = short16(s[c]) * 4
+            v[i] = dcterm
+            v[i + 8] = dcterm
+            v[i + 16] = dcterm
+            v[i + 24] = dcterm
+            v[i + 32] = dcterm
+            v[i + 40] = dcterm
+            v[i + 48] = dcterm
+            v[i + 56] = dcterm
+        } else {
+            p2 = short16(s[c + 16])
+            p3 = short16(s[c + 48])
+            p1 = (p2 + p3) * 2217
+            t2 = p1 + p3 * -7567
+            t3 = p1 + p2 * 3135
+            p2 = short16(s[c])
+            p3 = short16(s[c + 32])
+            t0 = (p2 + p3) * 4096
+            t1 = (p2 - p3) * 4096
+            x0 = t0 + t3
+            x3 = t0 - t3
+            x1 = t1 + t2
+            x2 = t1 - t2
+            t0 = short16(s[c + 56])
+            t1 = short16(s[c + 40])
+            t2 = short16(s[c + 24])
+            t3 = short16(s[c + 8])
+            p3 = t0 + t2
+            p4 = t1 + t3
+            p1 = t0 + t3
+            p2 = t1 + t2
+            p5 = (p3 + p4) * 4816
+            t0 = t0 * 1223
+            t1 = t1 * 8410
+            t2 = t2 * 12586
+            t3 = t3 * 6149
+            p1 = p5 + p1 * -3685
+            p2 = p5 + p2 * -10497
+            p3 = p3 * -8034
+            p4 = p4 * -1597
+            t3 = t3 + p1 + p4
+            t2 = t2 + p2 + p3
+            t1 = t1 + p2 + p4
+            t0 = t0 + p1 + p3
+            x0 = x0 + 512
+            x1 = x1 + 512
+            x2 = x2 + 512
+            x3 = x3 + 512
+            v[i] = (x0 + t3) >> 10
+            v[i + 56] = (x0 - t3) >> 10
+            v[i + 8] = (x1 + t2) >> 10
+            v[i + 48] = (x1 - t2) >> 10
+            v[i + 16] = (x2 + t1) >> 10
+            v[i + 40] = (x2 - t1) >> 10
+            v[i + 24] = (x3 + t0) >> 10
+            v[i + 32] = (x3 - t0) >> 10
+        }
+        i = i + 1
+    }
+    i = 0
+    out = at
+    while i < 8 {
+        r = i * 8
+        p2 = v[r + 2]
+        p3 = v[r + 6]
+        p1 = (p2 + p3) * 2217
+        t2 = p1 + p3 * -7567
+        t3 = p1 + p2 * 3135
+        p2 = v[r]
+        p3 = v[r + 4]
+        t0 = (p2 + p3) * 4096
+        t1 = (p2 - p3) * 4096
+        x0 = t0 + t3
+        x3 = t0 - t3
+        x1 = t1 + t2
+        x2 = t1 - t2
+        t0 = v[r + 7]
+        t1 = v[r + 5]
+        t2 = v[r + 3]
+        t3 = v[r + 1]
+        p3 = t0 + t2
+        p4 = t1 + t3
+        p1 = t0 + t3
+        p2 = t1 + t2
+        p5 = (p3 + p4) * 4816
+        t0 = t0 * 1223
+        t1 = t1 * 8410
+        t2 = t2 * 12586
+        t3 = t3 * 6149
+        p1 = p5 + p1 * -3685
+        p2 = p5 + p2 * -10497
+        p3 = p3 * -8034
+        p4 = p4 * -1597
+        t3 = t3 + p1 + p4
+        t2 = t2 + p2 + p3
+        t1 = t1 + p2 + p4
+        t0 = t0 + p1 + p3
+        // 65536 rounds the 1 << 17 away; 128 << 17 is the level shift.
+        x0 = x0 + 16842752
+        x1 = x1 + 16842752
+        x2 = x2 + 16842752
+        x3 = x3 + 16842752
+        o[out] = clamp8((x0 + t3) >> 17)
+        o[out + 7] = clamp8((x0 - t3) >> 17)
+        o[out + 1] = clamp8((x1 + t2) >> 17)
+        o[out + 6] = clamp8((x1 - t2) >> 17)
+        o[out + 2] = clamp8((x2 + t1) >> 17)
+        o[out + 5] = clamp8((x2 - t1) >> 17)
+        o[out + 3] = clamp8((x3 + t0) >> 17)
+        o[out + 4] = clamp8((x3 - t0) >> 17)
+        out = out + stride
+        i = i + 1
+    }
+}
+
+// --- scans -----------------------------------------------------------------------
+
+reset(d: *JpegDecoder) {
+    d.code_bits = 0
+    d.code_buffer = 0 as uint32
+    d.nomore = 0
+    ci = d.comp as int[]
+    ci[C_DCPRED] = 0
+    ci[COMP_INTS + C_DCPRED] = 0
+    ci[2 * COMP_INTS + C_DCPRED] = 0
+    ci[3 * COMP_INTS + C_DCPRED] = 0
+    d.marker = NONE
+    d.todo = 2147483647
+    if d.restart_interval != 0 { d.todo = d.restart_interval }
+    d.eob_run = 0
+}
+
+// After an MCU: count the restart interval down, and at zero expect a
+// restart marker. Anything else ends the scan early (false), leaving the
+// data decoded so far, as stb did rather than failing the image.
+restart_due(d: *JpegDecoder) -> int {
+    d.todo = d.todo - 1
+    if d.todo <= 0 {
+        if d.code_bits < 24 { grow_buffer(d) }
+        if !is_restart(d.marker) { return 0 }
+        reset(d)
+    }
+    return 1
+}
+
+// 1 when the scan decoded (or ended early), 0 on an error.
+entropy_coded_data(d: *JpegDecoder) -> int {
+    reset(d)
+    ci = d.comp as int[]
+    order = d.order as int[]
+    planes = d.planes as ptr[]
+    coeffs = d.coeffs as ptr[]
+    block = d.block as uint16[]
+    if d.progressive == 0 {
+        if d.scan_n == 1 {
+            n = order[0]
+            base = n * COMP_INTS
+            w = (ci[base + C_X] + 7) >> 3
+            h = (ci[base + C_Y] + 7) >> 3
+            w2 = ci[base + C_W2]
+            j = 0
+            while j < h {
+                i = 0
+                while i < w {
+                    shape = decode_block(d, n)
+                    if shape == 0 { return 0 }
+                    if shape == 1 {
+                        flat_block(short16(block[0]), planes[n], w2 * j * 8 + i * 8, w2)
+                    } else {
+                        idct_block(d, d.block, 0, planes[n], w2 * j * 8 + i * 8, w2)
+                    }
+                    if restart_due(d) == 0 { return 1 }
+                    i = i + 1
+                }
+                j = j + 1
+            }
+            return 1
+        }
+        j = 0
+        while j < d.mcu_y {
+            i = 0
+            while i < d.mcu_x {
+                k = 0
+                while k < d.scan_n {
+                    n = order[k]
+                    base = n * COMP_INTS
+                    w2 = ci[base + C_W2]
+                    y = 0
+                    while y < ci[base + C_V] {
+                        x = 0
+                        while x < ci[base + C_H] {
+                            x2 = (i * ci[base + C_H] + x) * 8
+                            y2 = (j * ci[base + C_V] + y) * 8
+                            shape = decode_block(d, n)
+                            if shape == 0 { return 0 }
+                            if shape == 1 {
+                                flat_block(short16(block[0]), planes[n], w2 * y2 + x2, w2)
+                            } else {
+                                idct_block(d, d.block, 0, planes[n], w2 * y2 + x2, w2)
+                            }
+                            x = x + 1
+                        }
+                        y = y + 1
+                    }
+                    k = k + 1
+                }
+                if restart_due(d) == 0 { return 1 }
+                i = i + 1
+            }
+            j = j + 1
+        }
+        return 1
+    }
+    if d.scan_n == 1 {
+        n = order[0]
+        base = n * COMP_INTS
+        w = (ci[base + C_X] + 7) >> 3
+        h = (ci[base + C_Y] + 7) >> 3
+        j = 0
+        while j < h {
+            i = 0
+            while i < w {
+                at = 64 * (i + j * ci[base + C_COEFFW])
+                if d.spec_start == 0 {
+                    if !decode_block_prog_dc(d, coeffs[n], at, n) { return 0 }
+                } else {
+                    if !decode_block_prog_ac(d, coeffs[n], at, ci[base + C_HA]) { return 0 }
+                }
+                if restart_due(d) == 0 { return 1 }
+                i = i + 1
+            }
+            j = j + 1
+        }
+        return 1
+    }
+    j = 0
+    while j < d.mcu_y {
+        i = 0
+        while i < d.mcu_x {
+            k = 0
+            while k < d.scan_n {
+                n = order[k]
+                base = n * COMP_INTS
+                y = 0
+                while y < ci[base + C_V] {
+                    x = 0
+                    while x < ci[base + C_H] {
+                        x2 = i * ci[base + C_H] + x
+                        y2 = j * ci[base + C_V] + y
+                        at = 64 * (x2 + y2 * ci[base + C_COEFFW])
+                        if !decode_block_prog_dc(d, coeffs[n], at, n) { return 0 }
+                        x = x + 1
+                    }
+                    y = y + 1
+                }
+                k = k + 1
+            }
+            if restart_due(d) == 0 { return 1 }
+            i = i + 1
+        }
+        j = j + 1
+    }
+    return 1
+}
+
+// A progressive image's coefficients, dequantized and transformed once
+// every scan is in.
+finish(d: *JpegDecoder) {
+    if d.progressive == 0 { return }
+    ci = d.comp as int[]
+    dq = d.dequant as int[]
+    planes = d.planes as ptr[]
+    coeffs = d.coeffs as ptr[]
+    n = 0
+    while n < d.img_n {
+        base = n * COMP_INTS
+        w = (ci[base + C_X] + 7) >> 3
+        h = (ci[base + C_Y] + 7) >> 3
+        w2 = ci[base + C_W2]
+        qbase = ci[base + C_TQ] * 64
+        data = coeffs[n] as uint16[]
+        j = 0
+        while j < h {
+            i = 0
+            while i < w {
+                at = 64 * (i + j * ci[base + C_COEFFW])
+                q = 0
+                while q < 64 {
+                    data[at + q] = short16(data[at + q]) * dq[qbase + q]
+                    q = q + 1
+                }
+                idct_block(d, coeffs[n], at, planes[n], w2 * j * 8 + i * 8, w2)
+                i = i + 1
+            }
+            j = j + 1
+        }
+        n = n + 1
+    }
+}
+
+// --- markers ---------------------------------------------------------------------
+
+process_marker(d: *JpegDecoder, m: int) -> bool {
+    if m == NONE { return fail(d, E_MARKER) }
+    if m == 221 {
+        // DRI
+        if get16(d) != 4 { return fail(d, E_DRI) }
+        d.restart_interval = get16(d)
+        return true
+    }
+    if m == 219 {
+        // DQT
+        dq = d.dequant as int[]
+        length = get16(d) - 2
+        while length > 0 {
+            q = get8(d)
+            p = q >> 4
+            t = q & 15
+            if p != 0 && p != 1 { return fail(d, E_DQT) }
+            if t > 3 { return fail(d, E_DQT) }
+            i = 0
+            while i < 64 {
+                value = 0
+                if p != 0 { value = get16(d) } else { value = get8(d) }
+                dq[t * 64 + (DEZIGZAG[i] as int)] = value
+                i = i + 1
+            }
+            if p != 0 { length = length - 129 } else { length = length - 65 }
+        }
+        if length != 0 { return fail(d, E_DQT) }
+        return true
+    }
+    if m == 196 {
+        // DHT
+        length = get16(d) - 2
+        counts_block = calloc(16 as long, 4 as long)
+        counts = counts_block as int[]
+        ok = true
+        while ok && length > 0 {
+            q = get8(d)
+            tc = q >> 4
+            th = q & 15
+            if tc > 1 || th > 3 {
+                ok = fail(d, E_DHT)
+            } else {
+                n = 0
+                i = 0
+                while i < 16 {
+                    counts[i] = get8(d)
+                    n = n + counts[i]
+                    i = i + 1
+                }
+                if n > 256 {
+                    ok = fail(d, E_DHT)
+                } else {
+                    length = length - 17
+                    table = (tc * 4 + th) * HUFF_INTS
+                    if !build_huffman(d, table, counts) {
+                        ok = false
+                    } else {
+                        h = d.huff as int[]
+                        i = 0
+                        while i < n {
+                            h[table + H_VALUES + i] = get8(d)
+                            i = i + 1
+                        }
+                        if tc != 0 { build_fast_ac(d, th) }
+                        length = length - n
+                    }
+                }
+            }
+        }
+        free(counts_block)
+        if !ok { return false }
+        if length != 0 { return fail(d, E_DHT) }
+        return true
+    }
+    if (m >= 224 && m <= 239) || m == 254 {
+        // APPn and COM: JFIF and Adobe are read, the rest skipped.
+        length = get16(d)
+        if length < 2 { return fail(d, E_APP) }
+        length = length - 2
+        if m == 224 && length >= 5 {
+            ok = get8(d) == 74
+            ok = get8(d) == 70 && ok
+            ok = get8(d) == 73 && ok
+            ok = get8(d) == 70 && ok
+            ok = get8(d) == 0 && ok
+            length = length - 5
+            if ok { d.jfif = 1 }
+        } else if m == 238 && length >= 12 {
+            ok = get8(d) == 65
+            ok = get8(d) == 100 && ok
+            ok = get8(d) == 111 && ok
+            ok = get8(d) == 98 && ok
+            ok = get8(d) == 101 && ok
+            ok = get8(d) == 0 && ok
+            length = length - 6
+            if ok {
+                get8(d)
+                get16(d)
+                get16(d)
+                d.app14 = get8(d)
+                length = length - 6
+            }
+        }
+        skip(d, length)
+        return true
+    }
+    return fail(d, E_UNKNOWN_MARKER)
+}
+
+scan_header(d: *JpegDecoder) -> bool {
+    ci = d.comp as int[]
+    order = d.order as int[]
+    ls = get16(d)
+    d.scan_n = get8(d)
+    if d.scan_n < 1 || d.scan_n > 4 || d.scan_n > d.img_n { return fail(d, E_SOS) }
+    if ls != 6 + 2 * d.scan_n { return fail(d, E_SOS) }
+    i = 0
+    while i < d.scan_n {
+        id = get8(d)
+        q = get8(d)
+        which = 0
+        while which < d.img_n && ci[which * COMP_INTS + C_ID] != id { which = which + 1 }
+        if which == d.img_n { return fail(d, E_SCAN_COMPONENT) }
+        ci[which * COMP_INTS + C_HD] = q >> 4
+        if (q >> 4) > 3 { return fail(d, E_TABLE) }
+        ci[which * COMP_INTS + C_HA] = q & 15
+        if (q & 15) > 3 { return fail(d, E_TABLE) }
+        order[i] = which
+        i = i + 1
+    }
+    d.spec_start = get8(d)
+    d.spec_end = get8(d)
+    aa = get8(d)
+    d.succ_high = aa >> 4
+    d.succ_low = aa & 15
+    if d.progressive != 0 {
+        if d.spec_start > 63 || d.spec_end > 63 || d.spec_start > d.spec_end || d.succ_high > 13 || d.succ_low > 13 {
+            return fail(d, E_SOS)
+        }
+    } else {
+        if d.spec_start != 0 { return fail(d, E_SOS) }
+        if d.succ_high != 0 || d.succ_low != 0 { return fail(d, E_SOS) }
+        d.spec_end = 63
+    }
+    return true
+}
+
+frame_header(d: *JpegDecoder) -> bool {
+    ci = d.comp as int[]
+    lf = get16(d)
+    if lf < 11 { return fail(d, E_SOF) }
+    if get8(d) != 8 { return fail(d, E_PRECISION) }
+    d.img_y = get16(d)
+    if d.img_y == 0 { return fail(d, E_HEIGHT) }
+    d.img_x = get16(d)
+    if d.img_x == 0 { return fail(d, E_WIDTH) }
+    c = get8(d)
+    if c != 3 && c != 1 && c != 4 { return fail(d, E_COMPONENTS) }
+    d.img_n = c
+    if lf != 8 + 3 * c { return fail(d, E_SOF) }
+    d.rgb = 0
+    i = 0
+    while i < c {
+        base = i * COMP_INTS
+        ci[base + C_ID] = get8(d)
+        // Components named R, G and B are RGB, not YCbCr.
+        named = 82
+        if i == 1 { named = 71 }
+        if i == 2 { named = 66 }
+        if c == 3 && ci[base + C_ID] == named { d.rgb = d.rgb + 1 }
+        q = get8(d)
+        ci[base + C_H] = q >> 4
+        if ci[base + C_H] == 0 || ci[base + C_H] > 4 { return fail(d, E_SAMPLING) }
+        ci[base + C_V] = q & 15
+        if ci[base + C_V] == 0 || ci[base + C_V] > 4 { return fail(d, E_SAMPLING) }
+        ci[base + C_TQ] = get8(d)
+        if ci[base + C_TQ] > 3 { return fail(d, E_TABLE) }
+        i = i + 1
+    }
+    // The RGBA the caller is handed has to be addressable by an int.
+    if (d.img_x as long) * (d.img_y as long) * (4 as long) > (2147483647 as long) { return fail(d, E_LARGE) }
+    h_max = 1
+    v_max = 1
+    i = 0
+    while i < c {
+        if ci[i * COMP_INTS + C_H] > h_max { h_max = ci[i * COMP_INTS + C_H] }
+        if ci[i * COMP_INTS + C_V] > v_max { v_max = ci[i * COMP_INTS + C_V] }
+        i = i + 1
+    }
+    // The resamplers take whole-number ratios only; no uncorrupted file
+    // has been seen with any other.
+    i = 0
+    while i < c {
+        if h_max % ci[i * COMP_INTS + C_H] != 0 { return fail(d, E_SAMPLING) }
+        if v_max % ci[i * COMP_INTS + C_V] != 0 { return fail(d, E_SAMPLING) }
+        i = i + 1
+    }
+    d.h_max = h_max
+    d.v_max = v_max
+    d.mcu_x = (d.img_x + h_max * 8 - 1) / (h_max * 8)
+    d.mcu_y = (d.img_y + v_max * 8 - 1) / (v_max * 8)
+    planes = d.planes as ptr[]
+    coeffs = d.coeffs as ptr[]
+    i = 0
+    while i < c {
+        base = i * COMP_INTS
+        ci[base + C_X] = (d.img_x * ci[base + C_H] + h_max - 1) / h_max
+        ci[base + C_Y] = (d.img_y * ci[base + C_V] + v_max - 1) / v_max
+        // Room for whole MCUs: an interleaved scan decodes blocks past the
+        // image's edge, and they are dropped at the colour conversion.
+        ci[base + C_W2] = d.mcu_x * ci[base + C_H] * 8
+        ci[base + C_H2] = d.mcu_y * ci[base + C_V] * 8
+        samples = (ci[base + C_W2] as long) * (ci[base + C_H2] as long)
+        planes[i] = calloc(samples, 1 as long)
+        if planes[i] == null { return fail(d, E_MEMORY) }
+        if d.progressive != 0 {
+            ci[base + C_COEFFW] = ci[base + C_W2] / 8
+            coeffs[i] = calloc(samples, 2 as long)
+            if coeffs[i] == null { return fail(d, E_MEMORY) }
+        }
+        i = i + 1
+    }
+    return true
+}
+
+is_sof(m: int) -> bool { return m == 192 || m == 193 || m == 194 }
+
+header(d: *JpegDecoder) -> bool {
+    d.jfif = 0
+    d.app14 = -1
+    d.marker = NONE
+    m = get_marker(d)
+    if m != 216 { return fail(d, E_SOI) }
+    m = get_marker(d)
+    while !is_sof(m) {
+        if !process_marker(d, m) { return false }
+        m = get_marker(d)
+        while m == NONE {
+            // Padding after a segment: scan on for the next marker.
+            if at_eof(d) { return fail(d, E_NO_SOF) }
+            m = get_marker(d)
+        }
+    }
+    if m == 194 { d.progressive = 1 } else { d.progressive = 0 }
+    return frame_header(d)
+}
+
+// Junk after a scan: skipped, unless it holds what looks like a marker.
+skip_junk(d: *JpegDecoder) -> int {
+    while !at_eof(d) {
+        x = get8(d)
+        while x == 255 {
+            if at_eof(d) { return NONE }
+            x = get8(d)
+            if x != 0 && x != 255 { return x }
+        }
+    }
+    return NONE
+}
+
+decode_image(d: *JpegDecoder) -> bool {
+    d.restart_interval = 0
+    if !header(d) { return false }
+    m = get_marker(d)
+    while m != 217 {
+        if m == 218 {
+            if !scan_header(d) { return false }
+            if entropy_coded_data(d) == 0 { return false }
+            if d.marker == NONE { d.marker = skip_junk(d) }
+            m = get_marker(d)
+            if is_restart(m) { m = get_marker(d) }
+        } else if m == 220 {
+            ld = get16(d)
+            nl = get16(d)
+            if ld != 4 { return fail(d, E_DNL) }
+            if nl != d.img_y { return fail(d, E_DNL) }
+            m = get_marker(d)
+        } else {
+            // A marker that will not parse after the frame ends the image
+            // with what it has, as stb did: a truncated file shows what
+            // arrived.
+            if !process_marker(d, m) {
+                d.error = E_NONE
+                return true
+            }
+            m = get_marker(d)
+        }
+    }
+    finish(d)
+    return true
+}
+
+// --- upsampling and colour ---------------------------------------------------------
+
+// The four ways a row of a subsampled component is brought to full width:
+// 0 as it is, 1 twice as tall, 2 twice as wide, 3 both, 4 any other ratio
+// (nearest neighbour). Writes `out` (or answers `near` itself for 0).
+resample(kind: int, out: ptr, near: ptr, far: ptr, w: int, hs: int) -> ptr {
+    o = out as uint8[]
+    a = near as uint8[]
+    b = far as uint8[]
+    if kind == 0 { return near }
+    if kind == 1 {
+        i = 0
+        while i < w {
+            o[i] = (3 * (a[i] as int) + (b[i] as int) + 2) >> 2
+            i = i + 1
+        }
+        return out
+    }
+    if kind == 2 {
+        if w == 1 {
+            o[0] = a[0]
+            o[1] = a[0]
+            return out
+        }
+        o[0] = a[0]
+        o[1] = ((a[0] as int) * 3 + (a[1] as int) + 2) >> 2
+        i = 1
+        while i < w - 1 {
+            n = 3 * (a[i] as int) + 2
+            o[i * 2] = (n + (a[i - 1] as int)) >> 2
+            o[i * 2 + 1] = (n + (a[i + 1] as int)) >> 2
+            i = i + 1
+        }
+        o[i * 2] = ((a[w - 2] as int) * 3 + (a[w - 1] as int) + 2) >> 2
+        o[i * 2 + 1] = a[w - 1]
+        return out
+    }
+    if kind == 3 {
+        if w == 1 {
+            v = (3 * (a[0] as int) + (b[0] as int) + 2) >> 2
+            o[0] = v
+            o[1] = v
+            return out
+        }
+        t1 = 3 * (a[0] as int) + (b[0] as int)
+        o[0] = (t1 + 2) >> 2
+        i = 1
+        while i < w {
+            t0 = t1
+            t1 = 3 * (a[i] as int) + (b[i] as int)
+            o[i * 2 - 1] = (3 * t0 + t1 + 8) >> 4
+            o[i * 2] = (3 * t1 + t0 + 8) >> 4
+            i = i + 1
+        }
+        o[w * 2 - 1] = (t1 + 2) >> 2
+        return out
+    }
+    i = 0
+    while i < w {
+        j = 0
+        while j < hs {
+            o[i * hs + j] = a[i]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// stb's reduced-precision YCbCr to RGB: 1.402, 0.71414, 0.34414 and 1.772
+// as twelve-bit fixed point shifted up by eight, the Cb term of green
+// floored to sixteen bits so the SSE2 path's answer and this one agree.
+ycbcr_row(out: ptr, at: int, y: ptr, cb: ptr, cr: ptr, count: int) {
+    o = out as uint32[]
+    ys = y as uint8[]
+    bs = cb as uint8[]
+    rs = cr as uint8[]
+    i = 0
+    p = at >> 2
+    while i < count {
+        yf = ((ys[i] as int) << 20) + 524288
+        vr = (rs[i] as int) - 128
+        vb = (bs[i] as int) - 128
+        r = (yf + vr * 1470208) >> 20
+        g = (yf + vr * -748800 + ((vb * -360960) & -65536)) >> 20
+        b = (yf + vb * 1858048) >> 20
+        if r < 0 { r = 0 } else if r > 255 { r = 255 }
+        if g < 0 { g = 0 } else if g > 255 { g = 255 }
+        if b < 0 { b = 0 } else if b > 255 { b = 255 }
+        // R, G, B and an opaque A in one little-endian word.
+        o[p] = (r | (g << 8) | (b << 16) | -16777216) as uint32
+        p = p + 1
+        i = i + 1
+    }
+}
+
+// x * y / 255, rounded, as stb multiplied a CMYK channel by K.
+blinn(x: int, y: int) -> int {
+    t = x * y + 128
+    return ((t + (t >> 8)) >> 8) & 255
+}
+
+// Upsample and colour-convert every row into RGBA, bottom row first.
+convert(d: *JpegDecoder, rgba: ptr) -> bool {
+    ci = d.comp as int[]
+    planes = d.planes as ptr[]
+    n = d.img_n
+    is_rgb = n == 3 && (d.rgb == 3 || (d.app14 == 0 && d.jfif == 0))
+    // A component's line buffer, its two source rows, the row resampled,
+    // and hs, vs, ystep, w_lores, ypos and the resampler's kind.
+    scratch = calloc(4 * 8 * 4 + 24 * 4, 1 as long)
+    lines = scratch as ptr[]
+    line0 = (scratch + 32) as ptr[]
+    line1 = (scratch + 64) as ptr[]
+    rows = (scratch + 96) as ptr[]
+    state = (scratch + 128) as int[]
+    ok = true
+    k = 0
+    while k < n {
+        lines[k] = malloc((d.img_x + 3) as long)
+        if lines[k] == null { ok = false }
+        base = k * COMP_INTS
+        hs = d.h_max / ci[base + C_H]
+        vs = d.v_max / ci[base + C_V]
+        state[k * 6] = hs
+        state[k * 6 + 1] = vs
+        state[k * 6 + 2] = vs >> 1
+        state[k * 6 + 3] = (d.img_x + hs - 1) / hs
+        state[k * 6 + 4] = 0
+        kind = 4
+        if hs == 1 && vs == 1 { kind = 0 }
+        if hs == 1 && vs == 2 { kind = 1 }
+        if hs == 2 && vs == 1 { kind = 2 }
+        if hs == 2 && vs == 2 { kind = 3 }
+        state[k * 6 + 5] = kind
+        line0[k] = planes[k]
+        line1[k] = planes[k]
+        k = k + 1
+    }
+    o = rgba as uint8[]
+    width = d.img_x
+    j = 0
+    while ok && j < d.img_y {
+        at = (d.img_y - 1 - j) * width * 4
+        k = 0
+        while k < n {
+            s = k * 6
+            vs = state[s + 1]
+            y_bot = state[s + 2] >= (vs >> 1)
+            near = line0[k]
+            far = line1[k]
+            if y_bot {
+                near = line1[k]
+                far = line0[k]
+            }
+            rows[k] = resample(state[s + 5], lines[k], near, far, state[s + 3], state[s])
+            state[s + 2] = state[s + 2] + 1
+            if state[s + 2] >= vs {
+                state[s + 2] = 0
+                line0[k] = line1[k]
+                state[s + 4] = state[s + 4] + 1
+                if state[s + 4] < ci[k * COMP_INTS + C_Y] { line1[k] = line1[k] + ci[k * COMP_INTS + C_W2] }
+            }
+            k = k + 1
+        }
+        y = rows[0] as uint8[]
+        if n == 3 {
+            if is_rgb {
+                g = rows[1] as uint8[]
+                b = rows[2] as uint8[]
+                i = 0
+                p = at
+                while i < width {
+                    o[p] = y[i]
+                    o[p + 1] = g[i]
+                    o[p + 2] = b[i]
+                    o[p + 3] = 255
+                    p = p + 4
+                    i = i + 1
+                }
+            } else {
+                ycbcr_row(rgba, at, rows[0], rows[1], rows[2], width)
+            }
+        } else if n == 4 {
+            m = rows[3] as uint8[]
+            if d.app14 == 0 {
+                // CMYK, as Adobe writes it: each channel times K.
+                c1 = rows[1] as uint8[]
+                c2 = rows[2] as uint8[]
+                i = 0
+                p = at
+                while i < width {
+                    o[p] = blinn(y[i] as int, m[i] as int)
+                    o[p + 1] = blinn(c1[i] as int, m[i] as int)
+                    o[p + 2] = blinn(c2[i] as int, m[i] as int)
+                    o[p + 3] = 255
+                    p = p + 4
+                    i = i + 1
+                }
+            } else if d.app14 == 2 {
+                // YCCK: YCbCr to RGB, inverted, times K.
+                ycbcr_row(rgba, at, rows[0], rows[1], rows[2], width)
+                i = 0
+                p = at
+                while i < width {
+                    o[p] = blinn(255 - (o[p] as int), m[i] as int)
+                    o[p + 1] = blinn(255 - (o[p + 1] as int), m[i] as int)
+                    o[p + 2] = blinn(255 - (o[p + 2] as int), m[i] as int)
+                    p = p + 4
+                    i = i + 1
+                }
+            } else {
+                ycbcr_row(rgba, at, rows[0], rows[1], rows[2], width)
+            }
+        } else {
+            i = 0
+            p = at
+            while i < width {
+                v = y[i]
+                o[p] = v
+                o[p + 1] = v
+                o[p + 2] = v
+                o[p + 3] = 255
+                p = p + 4
+                i = i + 1
+            }
+        }
+        j = j + 1
+    }
+    k = 0
+    while k < n {
+        if lines[k] != null { free(lines[k]) }
+        k = k + 1
+    }
+    free(scratch)
+    if !ok { return fail(d, E_MEMORY) }
+    return true
+}
+
+// --- the entry points ----------------------------------------------------------------
+
+// Whether `length` bytes at `data` start the way a JPEG does (an SOI
+// marker, after any fill bytes).
+is_jpeg(data: ptr, length: int) -> bool {
+    if data == null || length < 2 { return false }
+    b = data as uint8[]
+    if (b[0] as int) != 255 { return false }
+    i = 1
+    while i < length && (b[i] as int) == 255 { i = i + 1 }
+    return i < length && (b[i] as int) == 216
+}
+
+release_decoder(d: *JpegDecoder) {
+    planes = d.planes as ptr[]
+    coeffs = d.coeffs as ptr[]
+    i = 0
+    while i < 4 {
+        if planes[i] != null { free(planes[i]) }
+        if coeffs[i] != null { free(coeffs[i]) }
+        i = i + 1
+    }
+    free(d.planes)
+    free(d.coeffs)
+    free(d.huff)
+    free(d.dequant)
+    free(d.fast_ac)
+    free(d.comp)
+    free(d.block)
+    free(d.idct)
+    free(d.order)
+    heap.free(d)
+}
+
+// Decode `length` bytes at `data` to RGBA, width * height * 4 bytes,
+// bottom row first; the caller frees it. `dims` (int[3]) is given the
+// width, the height and, on failure (null), the reason's code.
+decode(data: ptr, length: int, dims: ptr) -> ptr {
+    out = dims as int[]
+    out[0] = 0
+    out[1] = 0
+    out[2] = E_NONE
+    d = heap.new(JpegDecoder)
+    d.src = data
+    d.at = 0
+    d.end = length
+    if data == null || length < 0 { d.end = 0 }
+    d.huff = calloc((8 * HUFF_INTS) as long, 4 as long)
+    d.dequant = calloc(256 as long, 4 as long)
+    d.fast_ac = calloc(2048 as long, 4 as long)
+    d.comp = calloc((4 * COMP_INTS) as long, 4 as long)
+    d.planes = calloc(4 as long, 8 as long)
+    d.coeffs = calloc(4 as long, 8 as long)
+    d.block = calloc(64 as long, 2 as long)
+    d.idct = calloc(64 as long, 4 as long)
+    d.order = calloc(4 as long, 4 as long)
+    d.marker = NONE
+    rgba = null
+    if d.huff == null || d.dequant == null || d.fast_ac == null || d.comp == null || d.planes == null ||
+       d.coeffs == null || d.block == null || d.idct == null || d.order == null {
+        fail(d, E_MEMORY)
+    } else if decode_image(d) {
+        rgba = malloc((d.img_x as long) * (d.img_y as long) * (4 as long))
+        if rgba == null {
+            fail(d, E_MEMORY)
+        } else if !convert(d, rgba) {
+            free(rgba)
+            rgba = null
+        }
+    }
+    if rgba != null {
+        out[0] = d.img_x
+        out[1] = d.img_y
+    } else {
+        out[2] = d.error
+        if out[2] == E_NONE { out[2] = E_MARKER }
+    }
+    release_decoder(d)
+    return rgba
+}

@@ -4,6 +4,7 @@ import ae3d.core
 import ae3d.voxel
 import ae3d.loader
 import ae3d.geometry
+import ae3d.picture
 
 var failures = 0
 
@@ -251,11 +252,6 @@ test_surface_from_voxels() {
     voxel.world_free(w)
 }
 
-extern ae3d_image_load(path: string) -> ptr
-extern ae3d_image_free(img: ptr)
-extern ae3d_image_pixels(img: ptr) -> ptr
-extern ae3d_image_width(img: ptr) -> int
-
 channel(pixels: ptr, index: int) -> int {
     bytes = pixels as byte[]
     return (bytes[index] as int) & 255
@@ -335,19 +331,19 @@ test_face_mesh() {
     // and reads back as the world's colours.
     name = voxel.world_palette_texture(w)
     check_true("palette image registered", name != "")
-    img = ae3d_image_load(name)
+    img = picture.load(name)
     if img == null {
         record_failure("palette image loads")
     } else {
-        width = ae3d_image_width(img)
+        width = picture.width(img)
         cell = width / voxel.PALETTE_KINDS
         sand = voxel.palette_color(w, voxel.SAND)
         at = (voxel.SAND * cell + cell / 2) * 4
-        px = ae3d_image_pixels(img)
+        px = picture.pixels(img)
         red_ok = channel(px, at) == ((sand.x * 255.0 + 0.5) as int)
         blue_ok = channel(px, at + 2) == ((sand.z * 255.0 + 0.5) as int)
         check_true("sand column is the sand colour", red_ok && blue_ok)
-        ae3d_image_free(img)
+        picture.dispose(img)
     }
     core.model_free(m)
     voxel.world_free(w)

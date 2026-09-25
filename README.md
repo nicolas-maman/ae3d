@@ -250,8 +250,9 @@ ae3d continues [Gopher3D](https://github.com/nicolas-maman/gopher3D) (MIT),
 the same author's earlier Go engine: the architecture, the GLSL programs,
 the material and lighting model and the OBJ loader's behaviour carry over;
 the Go served as the reference and none of it was copied. Built with
-[GLFW](https://www.glfw.org/), [Vulkan](https://www.vulkan.org/) (MoltenVK
-on macOS) and [stb_image](https://github.com/nothings/stb); see [NOTICE](NOTICE)
+[GLFW](https://www.glfw.org/) and [Vulkan](https://www.vulkan.org/) (MoltenVK
+on macOS); the image decoders are Aether ports of
+[stb_image](https://github.com/nothings/stb)'s. See [NOTICE](NOTICE)
 and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 
 ## License

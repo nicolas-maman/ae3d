@@ -11,14 +11,9 @@
 // views on both backends.
 import ae3d.core
 import ae3d.png
+import ae3d.picture
 import std.os
 
-extern ae3d_image_load(path: string) -> ptr
-extern ae3d_image_free(img: ptr)
-extern ae3d_image_width(img: ptr) -> int
-extern ae3d_image_height(img: ptr) -> int
-extern ae3d_image_pixels(img: ptr) -> ptr
-extern ae3d_image_error() -> string
 extern calloc(count: int, size: int) -> ptr
 extern free(block: ptr)
 
@@ -39,11 +34,11 @@ main() {
     if count > 3 { columns = (count + 1) / 2 }
     rows = (count + columns - 1) / columns
 
-    first = ae3d_image_load(os.args_get(2))
-    if first == null { println("montage: ${ae3d_image_error()}"); return }
-    cell_w = ae3d_image_width(first) / 2
-    cell_h = ae3d_image_height(first) / 2
-    ae3d_image_free(first)
+    first = picture.load(os.args_get(2))
+    if first == null { println("montage: ${picture.error()}"); return }
+    cell_w = picture.width(first) / 2
+    cell_h = picture.height(first) / 2
+    picture.dispose(first)
     total_w = columns * cell_w + (columns - 1) * GAP
     total_h = rows * cell_h + (rows - 1) * GAP
     pixels = calloc(total_w * total_h * 4, 1)
@@ -57,14 +52,14 @@ main() {
 
     i = 0
     while i < count {
-        img = ae3d_image_load(os.args_get(i + 2))
+        img = picture.load(os.args_get(i + 2))
         if img == null {
-            println("montage: ${ae3d_image_error()}")
+            println("montage: ${picture.error()}")
             return
         }
-        w = ae3d_image_width(img)
-        h = ae3d_image_height(img)
-        src = ae3d_image_pixels(img)
+        w = picture.width(img)
+        h = picture.height(img)
+        src = picture.pixels(img)
         left = (i % columns) * (cell_w + GAP)
         top = (i / columns) * (cell_h + GAP)
         y = 0
@@ -82,7 +77,7 @@ main() {
             }
             y = y + 1
         }
-        ae3d_image_free(img)
+        picture.dispose(img)
         i = i + 1
     }
     if png.write(os.args_get(1), pixels, total_w, total_h) {

@@ -158,7 +158,9 @@ for obj in "$OBJ_DIR"/*.o; do
         base="$(basename "$src")"
         [ "$obj" = "$OBJ_DIR/${base%.*}.o" ] && keep=1
     done
-    [ "$keep" = 1 ] || rm -f "$obj"
+    # The library is linked again without it: no object being newer than the
+    # library would otherwise leave the one it was in.
+    [ "$keep" = 1 ] || rm -f "$obj" "$(ae3d_native_library)"
 done
 
 ae3d_native_build "$CC" "$OBJ_DIR" "$CFLAGS" "$GLFW_LIBS"
